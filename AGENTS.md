@@ -54,7 +54,7 @@ Everyday commands, from the repository root:
 | `npm run typecheck` | `tsc --noEmit` — must pass before a change is considered done |
 | `npm test` | vitest (jsdom, scripted Tauri backend); runs `scripts/check-seams.mjs` as global setup |
 | `npx vitest run tests/<module>.test.ts` | One module's suite |
-| `cargo test --all-features` (in `src-tauri/`) | Backend unit and integration tests |
+| `cargo test --all-features` (in `src-tauri/`) | Backend unit and integration tests — needs `node scripts/prepare.mjs` run once first (`generate_context!()` embeds the icons it derives into `target/studio/icons/`) |
 | `cargo clippy --all-targets --all-features -- -D warnings` (in `src-tauri/`) | Backend lint, warnings are errors in CI |
 | `npx tauri build` | Installers into `target/studio/cargo/release/bundle/` |
 | `npm run dev:vite` | Frontend only, against the scripted fake backend; open `dev/dev-harness.html` |

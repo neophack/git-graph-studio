@@ -1329,7 +1329,7 @@ fn walk_asc_line(line: &str, state: &mut AscState, sink: &mut dyn FrameSink) {
 			let mut weak: Option<(usize, usize, u8, usize)> = None;
 			for &(flags, kind) in &[(2usize, 1usize), (0, 1), (0, 0), (2, 0)] {
 				let is_marker = |t: &str| t.eq_ignore_ascii_case("d") || t.eq_ignore_ascii_case("r");
-				if kind == 1 && !rest.get(flags).copied().map_or(false, is_marker) {
+				if kind == 1 && !rest.get(flags).copied().is_some_and(is_marker) {
 					continue;
 				}
 				if let (Some(d), Some(c)) = (rest.get(flags + kind), rest.get(flags + kind + 1)) {
