@@ -4,12 +4,11 @@
 // cost the same whether the file is 9 MB or 200 MB — the whole-document round trips that
 // froze the full editor never happen; only the changed lines cross the IPC.
 
-import { EditorState } from '@codemirror/state';
-import { EditorView, drawSelection, highlightActiveLine, highlightSpecialChars, keymap, lineNumbers } from '@codemirror/view';
+import { EditorState, StateEffect, StateField } from '@codemirror/state';
+import { Decoration, type DecorationSet, EditorView, drawSelection, highlightActiveLine, highlightSpecialChars, keymap, lineNumbers } from '@codemirror/view';
 import { defaultKeymap } from '@codemirror/commands';
-import { openSearchPanel, search } from '@codemirror/search';
 
-import { createFindPanel } from './findWidget';
+import { DocFindController, type DocFindHost, type DocFindMatch, type DocFindSpec } from './docFind';
 import { vscodeHighlighting } from './cmTheme';
 import { el, notify } from './ui';
 import { invoke } from '@tauri-apps/api/core';
@@ -38,6 +37,53 @@ const SYNC_DELAY_MS = 150;
 const BACKUP_DELAY_MS = 3000;
 /** Two window slides must be at least this far apart, or typing at a window edge thrashes. */
 const SWAP_COOLDOWN_MS = 250;
+
+/* ---------- The whole-file find's window decorations ---------- */
+
+/** One match inside the loaded window, in CodeMirror's UTF-16 positions. */
+interface WindowMatch {
+	from: number;
+	to: number;
+	current: boolean;
+}
+
+const setWindowMatches = StateEffect.define<WindowMatch[]>();
+
+/** The match highlighting of the whole-file find: every match inside the loaded window,
+ *  with the current one stronger — the same classes CodeMirror's own search paints, so
+ *  both editors look alike under every theme. */
+const windowMatchField = StateField.define<DecorationSet>({
+	create: () => Decoration.none,
+	update(value, transaction) {
+		value = value.map(transaction.changes);
+		for (const effect of transaction.effects) {
+			if (effect.is(setWindowMatches)) {
+				value = Decoration.set(
+					effect.value.map((match) =>
+						Decoration
+							.mark({ class: match.current ? 'cm-searchMatch-selected' : 'cm-searchMatch' })
+							.range(match.from, match.to)
+					)
+				);
+			}
+		}
+		return value;
+	},
+	provide: (field) => EditorView.decorations.from(field)
+});
+
+/** A code-point column on a line to the UTF-16 offset CodeMirror addresses it by. */
+function utf16Col(lineText: string, cp: number): number {
+	if (cp <= 0) return 0;
+	let units = 0;
+	for (const char of Array.from(lineText).slice(0, cp)) units += char.length;
+	return units;
+}
+
+/** A UTF-16 offset on a line to its code-point column — the unit `viewer_find` reports. */
+function codePointCol(lineText: string, utf16: number): number {
+	return Array.from(lineText.slice(0, utf16)).length;
+}
 
 export class EditableDocView {
 	readonly root: HTMLElement;
@@ -83,6 +129,8 @@ export class EditableDocView {
 	 *  that window (usually our own watcher echo) must not reload the document out from
 	 *  under unsynced or just-typed edits. */
 	private touched = false;
+	/** The whole-file find/replace bar, mounted on first open (docFind.ts). */
+	private findBar: DocFindController | null = null;
 
 	/** The buffer became dirty (the editor group marks the tab). */
 	onChanged: (() => void) | null = null;
@@ -145,8 +193,14 @@ export class EditableDocView {
 					drawSelection(),
 					EditorState.allowMultipleSelections.of(true),
 					highlightActiveLine(),
-					search({ top: true, createPanel: createFindPanel }),
+					// The whole-file find's match highlighting (the bar itself is docFind.ts,
+					// driven by `viewer_find` — CodeMirror's own search sees only the window).
+					windowMatchField,
 					keymap.of([
+						{ key: 'Mod-f', preventDefault: true, run: () => (this.openFind(), true) },
+						{ key: 'Mod-h', preventDefault: true, run: () => (this.openReplace(), true) },
+						{ key: 'F3', preventDefault: true, run: () => (this.findStep(1), true) },
+						{ key: 'Shift-F3', preventDefault: true, run: () => (this.findStep(-1), true) },
 						{ key: 'Mod-s', preventDefault: true, run: () => (this.onSaveRequest?.(), true) },
 						{ key: 'Mod-z', preventDefault: true, run: () => (void this.undo(), true) },
 						{ key: 'Mod-Z', preventDefault: true, run: () => (void this.redo(), true) },
@@ -215,6 +269,9 @@ export class EditableDocView {
 			this.replacing = false;
 		}
 		this.relayout(anchor);
+		// The swap moved the window under matches whose absolute lines did not change:
+		// repaint the decorations for the lines now loaded.
+		this.findBar?.repaint();
 		// `swapping` normally clears inside relayout's write callback, which rides on
 		// CodeMirror's next measure pass. If that pass is long delayed, the flag must not
 		// wedge the scroller's event handling — but this is only an unwedge: until the
@@ -450,6 +507,8 @@ export class EditableDocView {
 			this.relayout();
 			this.onChanged?.();
 			this.scheduleBackup();
+			// An edit moved every match below it: recount (debounced by the bar itself).
+			this.findBar?.refresh();
 			return true;
 		} catch (error) {
 			notify('error', String(error));
@@ -603,8 +662,134 @@ export class EditableDocView {
 		};
 	}
 
+	/* ---------- The whole-file find/replace bar (docFind.ts) ---------- */
+
+	/** The find bar, mounted into the view on first use: the same VS Code-shaped widget the
+	 *  full editor serves, over `viewer_find`/`viewer_replace` instead of the window. */
+	private ensureFindBar(): DocFindController {
+		if (!this.findBar) {
+			const host: DocFindHost = {
+				docId: () => this.docId,
+				position: () => {
+					if (!this.cm) return { line: this.first, col: 0 };
+					const head = this.cm.state.selection.main.head;
+					const line = this.cm.state.doc.lineAt(head);
+					return { line: this.first + line.number - 1, col: codePointCol(line.text, head - line.from) };
+				},
+				seedText: () => {
+					if (!this.cm) return null;
+					const selection = this.cm.state.selection.main;
+					if (selection.empty) return null;
+					const from = this.cm.state.doc.lineAt(selection.from);
+					const to = this.cm.state.doc.lineAt(selection.to);
+					if (from.number !== to.number) return null;
+					return this.cm.state.sliceDoc(selection.from, selection.to);
+				},
+				revealMatch: (match) => {
+					void this.ensureAround(match.line, true, match.startCol).then(() => this.selectMatch(match));
+				},
+				paintMatches: (matches, current) => this.paintMatches(matches, current),
+				replace: (spec, from, replacement, all) => this.replaceMatches(spec, from, replacement, all),
+				focusEditor: () => this.cm?.focus()
+			};
+			this.findBar = new DocFindController(host, this.root, true);
+		}
+		return this.findBar;
+	}
+
+	/** Select a match that must be inside the loaded window (revealMatch slid it there). */
+	private selectMatch(match: DocFindMatch): void {
+		const cm = this.cm;
+		if (!cm) return;
+		const relative = match.line - this.first;
+		if (relative < 0 || relative >= cm.state.doc.lines) return;
+		const line = cm.state.doc.line(relative + 1);
+		cm.dispatch({
+			selection: {
+				anchor: line.from + utf16Col(line.text, match.startCol),
+				head: line.from + utf16Col(line.text, match.endCol)
+			},
+			scrollIntoView: true
+		});
+	}
+
+	/** Repaint the window's match decorations from whole-document matches. */
+	private paintMatches(matches: DocFindMatch[], current: DocFindMatch | null): void {
+		const cm = this.cm;
+		if (!cm) return;
+		const inWindow: WindowMatch[] = [];
+		for (const match of matches) {
+			const relative = match.line - this.first;
+			if (relative < 0 || relative >= cm.state.doc.lines) continue;
+			const line = cm.state.doc.line(relative + 1);
+			inWindow.push({
+				from: line.from + utf16Col(line.text, match.startCol),
+				to: line.from + utf16Col(line.text, match.endCol),
+				current: current !== null && current.line === match.line && current.startCol === match.startCol
+			});
+		}
+		cm.dispatch({ effects: setWindowMatches.of(inWindow) });
+	}
+
+	/** Apply a find/replace through the backend — the queued flush → replace → re-window
+	 *  pattern undo and redo use, so a replacement never interleaves with a pending edit. */
+	private replaceMatches(spec: DocFindSpec, from: DocFindMatch | null, replacement: string, all: boolean): Promise<void> {
+		if (this.docId === null) return Promise.resolve();
+		if (this.syncTimer !== undefined) {
+			window.clearTimeout(this.syncTimer);
+			this.syncTimer = undefined;
+		}
+		return this.enqueue(async () => {
+			if (this.disposed || this.docId === null || !this.cm) return;
+			if (!(await this.sendDiff()) || this.disposed || this.docId === null) return;
+			try {
+				const result = await invoke<{ replacements: number; firstLine: number; lineCount: number }>('viewer_replace', {
+					docId: this.docId,
+					query: spec.query,
+					replacement,
+					caseSensitive: spec.caseSensitive,
+					wholeWord: spec.wholeWord,
+					regexp: spec.useRegex,
+					// Replace All covers the whole document from the top; Replace covers the
+					// current match, addressed by its whole-document position.
+					fromLine: from ? from.line : 0,
+					fromCol: from ? from.startCol : 0,
+					max: all ? Number.MAX_SAFE_INTEGER : 1
+				});
+				if (this.disposed || this.docId === null || result.replacements === 0) return;
+				this.lineCount = result.lineCount;
+				// A replaced buffer is dirty however the watch reports it, and the tab must say so.
+				this.touched = true;
+				const visible = Math.max(1, Math.floor(this.scroller.clientHeight / this.lineHeight));
+				this.lastSwapAt = Date.now();
+				this.pendingScrollLine = Math.max(0, result.firstLine - Math.floor(visible / 2));
+				const target = Math.max(0, Math.min(result.firstLine - Math.floor(WINDOW / 2), Math.max(0, this.lineCount - WINDOW)));
+				await this.showWindow(target, result.firstLine, from ? from.startCol : 0);
+				this.cm?.focus();
+				this.onChanged?.();
+				this.scheduleBackup();
+			} catch (error) {
+				notify('error', String(error));
+			}
+		}) as Promise<void>;
+	}
+
 	openFind(): void {
-		if (this.cm) openSearchPanel(this.cm);
+		this.ensureFindBar().open(false);
+	}
+
+	openReplace(): void {
+		this.ensureFindBar().open(true);
+	}
+
+	/** F3 / Shift+F3: step through matches, opening the bar when it is closed (VS Code's F3). */
+	findStep(direction: 1 | -1): void {
+		const bar = this.findBar;
+		if (!bar || !bar.isOpen) {
+			this.openFind();
+			return;
+		}
+		bar.step(direction);
 	}
 
 	selectAll(): void {
@@ -626,6 +811,8 @@ export class EditableDocView {
 		// `disposed` when it lands and drops its edit.
 		const docId = this.docId;
 		if (docId !== null) void invoke('viewer_close', { docId }).catch(() => undefined);
+		this.findBar?.destroy();
+		this.findBar = null;
 		this.cm?.destroy();
 		this.cm = null;
 		this.root.remove();

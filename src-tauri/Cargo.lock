@@ -1667,6 +1667,7 @@ version = "0.1.2"
 dependencies = [
  "base64 0.22.1",
  "encoding_rs",
+ "fancy-regex",
  "flate2",
  "git-graph-core",
  "hex",

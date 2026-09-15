@@ -1018,6 +1018,8 @@ mod desktop {
             viewer::viewer_lines,
             viewer::viewer_text,
             viewer::viewer_edit,
+            viewer::viewer_find,
+            viewer::viewer_replace,
             viewer::viewer_save,
             viewer::viewer_reload,
             viewer::viewer_undo,

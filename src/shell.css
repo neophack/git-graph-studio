@@ -944,8 +944,11 @@ body.resizing iframe { pointer-events: none; }
 .cm-editor { font-size: var(--editor-font-size, 14px); }
 .settings-input { width: 90px; }
 
-/* ---------- The find/replace widget (M3 3.4), VS Code's find bar over the code ---------- */
-.cm-panel.cm-find-widget {
+/* ---------- The find/replace widget (M3 3.4), VS Code's find bar over the code ----------
+   The rules key on `.cm-find-widget` alone so the standalone whole-file bar (docFind.ts,
+   over the windowed editor and the fast viewer) shares the exact look with CodeMirror's
+   panel; the panel-specific rules keep their `.cm-panel` / `.cm-editor` context. */
+.cm-find-widget {
 	padding: 4px 8px; background: var(--vscode-editorWidget-background, #252526);
 	border: 1px solid var(--vscode-editorWidget-border, #454545); border-top: none;
 	border-radius: 0 0 4px 4px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
@@ -972,7 +975,12 @@ body.resizing iframe { pointer-events: none; }
 .cm-replace-row.open { display: flex; }
 
 /* The find widget must not sit over the minimap (M3 3.4 + 3.2 overlap). */
-.cm-editor.has-minimap .cm-panel.cm-find-widget { right: 98px; }
+.cm-editor.has-minimap .cm-find-widget { right: 98px; }
+
+/* The fast viewer's in-row find marks (docFind.ts over fastView.ts): the same two
+   highlights CodeMirror's search paints, on rows that are plain DOM. */
+.fast-code mark { color: inherit; background: var(--vscode-editor-findMatchHighlightBackground, rgba(234, 92, 0, 0.33)); }
+.fast-code mark.current { background: var(--vscode-editor-findMatchBackground, rgba(234, 92, 0, 0.62)); border: 1px solid var(--vscode-editor-findMatchBorder, transparent); }
 
 /* ---------- The notification centre (M3 3.12) and the status bar's bell / indent ---------- */
 .status-item .bell-badge { margin-left: 2px; font-size: 11px; }

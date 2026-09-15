@@ -20,7 +20,7 @@ import { vscodeHighlighting } from './cmTheme';
 import { settings } from './settings';
 import { icon } from './ui';
 
-export { EditorState, EditorView, keymap, openSearchPanel, redo, selectAll, undo, completionExtension };
+export { EditorState, EditorView, keymap, openSearchPanel, openReplacePanel, redo, selectAll, undo, completionExtension };
 export type { Extension };
 
 /** The extensions every text surface shares: VS Code-like gutters, selection, search,

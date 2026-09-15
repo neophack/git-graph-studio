@@ -20,6 +20,7 @@ import {
 import type { EditorView, Panel, ViewUpdate } from '@codemirror/view';
 
 import { findOptions, updateFindOption } from './findOptions';
+import { t, tf } from './i18n';
 import { el, icon } from './ui';
 
 /** How many matches are counted before the counter gives up. One past the cap is still
@@ -97,12 +98,12 @@ export function createFindPanel(view: EditorView): Panel {
 
 	const dom = el('div', 'cm-find-widget');
 	const input = el('input', 'cm-find-input') as HTMLInputElement;
-	input.placeholder = 'Find';
+	input.placeholder = t('find.placeholder');
 	input.setAttribute('main-field', 'true');
 	input.spellcheck = false;
 	const count = el('span', 'cm-find-count');
 	const replaceInput = el('input', 'cm-find-input') as HTMLInputElement;
-	replaceInput.placeholder = 'Replace';
+	replaceInput.placeholder = t('find.replacePlaceholder');
 	replaceInput.spellcheck = false;
 
 	const iconButton = (name: string, title: string, run: () => void, toggle = false) => {
@@ -130,7 +131,7 @@ export function createFindPanel(view: EditorView): Panel {
 		if (state.invalid) {
 			count.textContent = '';
 			input.classList.add('invalid');
-			input.title = 'The regular expression is not valid';
+			input.title = t('find.invalidRegex');
 			return;
 		}
 		input.classList.remove('invalid');
@@ -140,10 +141,10 @@ export function createFindPanel(view: EditorView): Panel {
 			return;
 		}
 		count.textContent = state.count === 0
-			? 'No results'
+			? t('find.noResults')
 			: state.count > COUNT_CAP
 				? '10,000+'
-				: state.index !== null ? `${state.index} of ${state.count}` : `${state.count}`;
+				: state.index !== null ? tf('find.resultCount', state.index, state.count) : `${state.count}`;
 	};
 
 	const apply = (): void => {
@@ -162,10 +163,10 @@ export function createFindPanel(view: EditorView): Panel {
 		button.classList.toggle('active', options[key]);
 		return button;
 	};
-	const caseButton = optionButton('case-sensitive', 'Match Case (Alt+C)', 'caseSensitive');
-	const wordButton = optionButton('whole-word', 'Match Whole Word (Alt+W)', 'wholeWord');
-	const regexButton = optionButton('regex', 'Use Regular Expression (Alt+R)', 'useRegex');
-	const selectionButton = iconButton('selection', 'Find in Selection (Alt+L)', () => {
+	const caseButton = optionButton('case-sensitive', t('find.matchCase'), 'caseSensitive');
+	const wordButton = optionButton('whole-word', t('find.wholeWord'), 'wholeWord');
+	const regexButton = optionButton('regex', t('find.useRegex'), 'useRegex');
+	const selectionButton = iconButton('selection', t('find.inSelection'), () => {
 		inSelection = !inSelection;
 		selectionButton.classList.toggle('active', inSelection);
 		apply();
@@ -179,17 +180,17 @@ export function createFindPanel(view: EditorView): Panel {
 		replaceRow.classList.toggle('open', showReplace);
 		if (focus && showReplace) replaceInput.focus();
 	};
-	const expand = iconButton(showReplace ? 'chevron-down' : 'chevron-right', 'Toggle Replace (Ctrl+H)', () => setReplace(!showReplace));
+	const expand = iconButton(showReplace ? 'chevron-down' : 'chevron-right', t('find.toggleReplace'), () => setReplace(!showReplace));
 	if (showReplace) replaceRow.classList.add('open');
 	replaceToggles.set(view, (focus) => setReplace(true, focus));
-	const prev = iconButton('arrow-up', 'Previous Match (Shift+Enter)', () => void findPrevious(view));
-	const next = iconButton('arrow-down', 'Next Match (Enter)', () => void findNext(view));
-	const close = iconButton('close', 'Close (Escape)', () => closeSearchPanel(view));
+	const prev = iconButton('arrow-up', t('find.previous'), () => void findPrevious(view));
+	const next = iconButton('arrow-down', t('find.next'), () => void findNext(view));
+	const close = iconButton('close', t('find.close'), () => closeSearchPanel(view));
 
 	findRow.append(expand, input, count, prev, next, caseButton, wordButton, regexButton, selectionButton, close);
 	replaceRow.append(el('span', 'cm-find-spacer'), replaceInput,
-		iconButton('replace', 'Replace (Ctrl+Shift+1)', () => void replaceNext(view)),
-		iconButton('replace-all', 'Replace All (Ctrl+Alt+Enter)', () => void replaceAll(view)));
+		iconButton('replace', t('find.replace'), () => void replaceNext(view)),
+		iconButton('replace-all', t('find.replaceAll'), () => void replaceAll(view)));
 	dom.append(findRow, replaceRow);
 
 	// A single-line selection seeds the field, as VS Code's widget does.

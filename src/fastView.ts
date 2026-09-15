@@ -4,6 +4,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 
+import { DocFindController, type DocFindHost, type DocFindMatch } from './docFind';
 import { el, icon, notify } from './ui';
 
 interface Symbol {
@@ -111,6 +112,12 @@ export class FastView {
 	 *  viewport and fetches too few lines; this fires again once layout gives the scroller its
 	 *  real size, and on every later resize. (Absent under jsdom, where nothing lays out.) */
 	private readonly sizer: ResizeObserver | null;
+	/** The whole-file find bar (docFind.ts) — read-only surface, find without replace. */
+	private findBar: DocFindController | null = null;
+	/** The find's matches per rendered line, in the code-point columns `viewer_find` reports. */
+	private matchMarks = new Map<number, [number, number][]>();
+	/** The match the find bar names current, for the stronger mark. */
+	private currentMatch: DocFindMatch | null = null;
 
 	constructor(parent: HTMLElement, options: FastViewOptions = {}) {
 		this.root = el('div', 'fast-view');
@@ -264,16 +271,41 @@ export class FastView {
 		const chars = Array.from(text); // token offsets are code points, not UTF-16 units
 		let at = 0;
 		for (const [start, end, scope] of tokens) {
-			if (start > at) code.appendChild(document.createTextNode(chars.slice(at, start).join('')));
+			if (start > at) this.appendRun(code, chars, at, start, line);
 			const span = el('span');
 			span.style.color = scopeColor(scope);
-			span.textContent = chars.slice(start, end).join('');
+			this.appendRun(span, chars, start, end, line);
 			code.appendChild(span);
 			at = end;
 		}
-		if (at < chars.length) code.appendChild(document.createTextNode(chars.slice(at).join('')));
+		if (at < chars.length) this.appendRun(code, chars, at, chars.length, line);
 		row.append(gutter, code);
 		return row;
+	}
+
+	/** Append `chars[from..to)` to `parent`, wrapping the find-marked sub-ranges in `<mark>`
+	 *  elements — nested inside a token span so the syntax colour shows through the mark. */
+	private appendRun(parent: HTMLElement, chars: string[], from: number, to: number, line: number): void {
+		const marks = this.matchMarks.get(line) ?? [];
+		let at = from;
+		while (at < to) {
+			const hit = marks.find(([start, end]) => start <= at && at < end);
+			const stop = hit
+				? Math.min(hit[1], to)
+				: marks.reduce((next, [start]) => (start > at ? Math.min(next, start) : next), to);
+			const text = chars.slice(at, stop).join('');
+			if (hit) {
+				const current = this.currentMatch !== null
+					&& this.currentMatch.line === line
+					&& this.currentMatch.startCol === hit[0];
+				const mark = el('mark', current ? 'fast-match current' : 'fast-match');
+				mark.textContent = text;
+				parent.appendChild(mark);
+			} else {
+				parent.appendChild(document.createTextNode(text));
+			}
+			at = stop;
+		}
 	}
 
 	/** The outline pane is virtual like the rows: a big source file carries thousands of
@@ -340,9 +372,41 @@ export class FastView {
 		this.refresh();
 	}
 
+	/* ---------- The whole-file find bar (docFind.ts), find without replace ---------- */
+
+	/** Open the find bar: Ctrl+F for a file too large for an editable document at all. */
+	openFind(): void {
+		if (!this.findBar) {
+			const host: DocFindHost = {
+				docId: () => this.open?.docId ?? null,
+				position: () => ({ line: Math.max(0, Math.floor(this.scroller.scrollTop / this.lineHeight)), col: 0 }),
+				revealMatch: (match) => {
+					this.currentMatch = match;
+					this.revealLine(match.line);
+				},
+				paintMatches: (matches, current) => {
+					this.matchMarks = new Map();
+					for (const match of matches) {
+						const list = this.matchMarks.get(match.line) ?? [];
+						list.push([match.startCol, match.endCol]);
+						this.matchMarks.set(match.line, list);
+					}
+					this.currentMatch = current;
+					// Rows are cached DOM: drop them so the next refresh renders the marks.
+					this.invalidate(0);
+				},
+				focusEditor: () => this.scroller.focus()
+			};
+			this.findBar = new DocFindController(host, this.root, false);
+		}
+		this.findBar.open(false);
+	}
+
 	dispose(): void {
 		this.disposed = true;
 		this.sizer?.disconnect();
+		this.findBar?.destroy();
+		this.findBar = null;
 		if (this.open) void invoke('viewer_close', { docId: this.open.docId });
 		this.root.remove();
 	}

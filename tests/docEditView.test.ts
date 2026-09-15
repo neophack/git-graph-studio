@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { EditorGroup } from '../src/editor';
 import type { EditableDocView } from '../src/docEditView';
 import { backend } from './tauriMock';
-import { flush, notifications } from './helpers';
+import { flush, key, notifications, type } from './helpers';
 import { RopeDocMock } from './ropeDocMock';
 
 /** Wait out the 150 ms edit-sync debounce with real time, then let the queue drain. */
@@ -247,6 +247,103 @@ describe('windowed editor keeps the backend document in step', () => {
 		expect(backend.callsTo('viewer_reload')).toHaveLength(2);
 		expect(shown(doc).startsWith('xline 0')).toBe(true);
 		await group.save(group.open[0]!);
+		await group.closeAll();
+	});
+});
+
+describe('the whole-file find and replace (docFind.ts over viewer_find / viewer_replace)', () => {
+	/** The widget's DOM, once opened. */
+	function bar(doc: EditableDocView): HTMLElement {
+		const node = doc.root.querySelector('.cm-find-widget') as HTMLElement | null;
+		expect(node, 'the find bar is mounted').not.toBeNull();
+		return node!;
+	}
+
+	const field = (root: HTMLElement, selector: string): HTMLInputElement => root.querySelector(selector) as HTMLInputElement;
+	const buttonByTitle = (root: HTMLElement, needle: string): HTMLElement => {
+		const node = [...root.querySelectorAll('.cm-find-btn')].find((b) => (b as HTMLElement).title.startsWith(needle));
+		expect(node, `the ${needle} button`).toBeDefined();
+		return node as HTMLElement;
+	};
+
+	it('finds across the whole document — beyond the loaded window — and navigates there', async () => {
+		// 1200 lines with a match every 300th: matches 2 and 3 sit past the first window.
+		const text = Array.from({ length: 1200 }, (_, i) => (i % 300 === 0 ? `NEEDLE line ${i}` : `line ${i}`)).join('\n') + '\n';
+		const { group, doc } = await openWindowed(text);
+		doc.openFind();
+		await flush();
+		const widget = bar(doc);
+		expect(widget.hidden).toBe(false);
+		type(field(widget, '.cm-find-input'), 'NEEDLE');
+		await settle();
+		expect(widget.querySelector('.cm-find-count')!.textContent).toBe('1 of 4');
+		// The nearest match is already in the window; stepping twice lands on line 600,
+		// far outside the first 500-line window — the window must slide there and select it.
+		buttonByTitle(widget, 'Next Match').click();
+		buttonByTitle(widget, 'Next Match').click();
+		await flush();
+		expect(shown(doc)).toContain('NEEDLE line 600');
+		const selection = doc.editorView!.state.selection.main;
+		expect(doc.editorView!.state.sliceDoc(selection.from, selection.to)).toBe('NEEDLE');
+		expect(doc.status().line).toBe(601);
+		await group.closeAll();
+	});
+
+	it('replaces every match in one backend call, refreshes the count, and is one undo step', async () => {
+		const { group, doc, rope } = await openWindowed('alpha beta alpha\nbeta\n');
+		doc.openFind();
+		await flush();
+		const widget = bar(doc);
+		type(field(widget, '.cm-find-input'), 'beta');
+		await settle();
+		expect(widget.querySelector('.cm-find-count')!.textContent).toBe('1 of 2');
+		buttonByTitle(widget, 'Toggle Replace').click();
+		type(field(widget, '.cm-replace-row .cm-find-input'), 'X');
+		buttonByTitle(widget, 'Replace All').click();
+		await settle();
+		expect(rope.text).toBe('alpha X alpha\nX\n');
+		expect(backend.callsTo('viewer_replace')).toHaveLength(1);
+		expect(backend.callsTo('viewer_replace')[0]!.max).toBe(Number.MAX_SAFE_INTEGER);
+		// The count follows the replaced document.
+		expect(widget.querySelector('.cm-find-count')!.textContent).toBe('No results');
+		// One Ctrl+Z (the backend's one undo step) restores every site.
+		await doc.undo();
+		await flush();
+		expect(rope.text).toBe('alpha beta alpha\nbeta\n');
+		await group.save(group.open[0]!);
+		await group.closeAll();
+	});
+
+	it('replaces the current match only, then steps to the next one', async () => {
+		const { group, doc, rope } = await openWindowed('one two one two\n');
+		doc.openFind();
+		await flush();
+		const widget = bar(doc);
+		type(field(widget, '.cm-find-input'), 'two');
+		await settle();
+		buttonByTitle(widget, 'Toggle Replace').click();
+		type(field(widget, '.cm-replace-row .cm-find-input'), '2');
+		buttonByTitle(widget, 'Replace').click();
+		await settle();
+		expect(rope.text).toBe('one 2 one two\n');
+		const call = backend.callsTo('viewer_replace')[0]!;
+		expect(call.max).toBe(1);
+		// After the replacement the current match is the remaining one.
+		expect(widget.querySelector('.cm-find-count')!.textContent).toBe('1 of 1');
+		await group.save(group.open[0]!);
+		await group.closeAll();
+	});
+
+	it('opens on Ctrl+F typed inside the editor, and Escape closes it', async () => {
+		const { group, doc } = await openWindowed('find me\n');
+		const view = doc.editorView!;
+		key(view.contentDOM, 'f', { ctrlKey: true });
+		await flush();
+		const widget = bar(doc);
+		expect(widget.hidden).toBe(false);
+		key(field(widget, '.cm-find-input'), 'Escape');
+		await flush();
+		expect(widget.hidden).toBe(true);
 		await group.closeAll();
 	});
 });

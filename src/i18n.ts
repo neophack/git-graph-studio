@@ -98,7 +98,23 @@ const en = {
 	'settings.density': 'Workbench Density',
 	'settings.density.description': 'How tightly the rows, tabs and bars of the workbench are packed. Compact fits more on screen; Comfortable is the default.',
 	'settings.density.compact': 'Compact',
-	'settings.density.comfortable': 'Comfortable'
+	'settings.density.comfortable': 'Comfortable',
+	'find.placeholder': 'Find',
+	'find.replacePlaceholder': 'Replace',
+	'find.noResults': 'No results',
+	'find.resultCount': '{0} of {1}',
+	'find.cappedResultCount': '{0} of 50,000+',
+	'find.invalidRegex': 'The regular expression is not valid',
+	'find.matchCase': 'Match Case (Alt+C)',
+	'find.wholeWord': 'Match Whole Word (Alt+W)',
+	'find.useRegex': 'Use Regular Expression (Alt+R)',
+	'find.inSelection': 'Find in Selection (Alt+L)',
+	'find.previous': 'Previous Match (Shift+Enter)',
+	'find.next': 'Next Match (Enter)',
+	'find.close': 'Close (Escape)',
+	'find.toggleReplace': 'Toggle Replace (Ctrl+H)',
+	'find.replace': 'Replace (Ctrl+Shift+1)',
+	'find.replaceAll': 'Replace All (Ctrl+Alt+Enter)'
 };
 
 const zhCn: typeof en = {
@@ -194,7 +210,23 @@ const zhCn: typeof en = {
 	'settings.density': '工作台密度',
 	'settings.density.description': '工作台的行、标签页和栏的紧凑程度。紧凑可在屏幕上容纳更多内容；舒适为默认。',
 	'settings.density.compact': '紧凑',
-	'settings.density.comfortable': '舒适'
+	'settings.density.comfortable': '舒适',
+	'find.placeholder': '查找',
+	'find.replacePlaceholder': '替换',
+	'find.noResults': '无结果',
+	'find.resultCount': '第 {0} 个，共 {1} 个',
+	'find.cappedResultCount': '第 {0} 个，共 50,000+ 个',
+	'find.invalidRegex': '正则表达式无效',
+	'find.matchCase': '区分大小写 (Alt+C)',
+	'find.wholeWord': '全字匹配 (Alt+W)',
+	'find.useRegex': '使用正则表达式 (Alt+R)',
+	'find.inSelection': '在选定内容中查找 (Alt+L)',
+	'find.previous': '上一个匹配 (Shift+Enter)',
+	'find.next': '下一个匹配 (Enter)',
+	'find.close': '关闭 (Escape)',
+	'find.toggleReplace': '切换替换 (Ctrl+H)',
+	'find.replace': '替换 (Ctrl+Shift+1)',
+	'find.replaceAll': '全部替换 (Ctrl+Alt+Enter)'
 };
 
 const TABLES: Record<Locale, typeof en> = { en, 'zh-cn': zhCn };
@@ -255,6 +287,7 @@ const zhCnText: Record<string, string> = {
 	Copy: '复制',
 	Paste: '粘贴',
 	Find: '查找',
+	Replace: '替换',
 	'Replace in Files': '在文件中替换',
 	'Select All': '全选',
 	'Change All Occurrences': '更改所有出现',
@@ -403,6 +436,11 @@ export function setLocale(id: string): void {
 /** Resolve a key against the current locale, falling back to English and then the key. */
 export function t(key: keyof typeof en): string {
 	return TABLES[current][key] ?? en[key] ?? key;
+}
+
+/** Resolve a key with `{0}`-style placeholders filled from `args` (same fallbacks as `t`). */
+export function tf(key: keyof typeof en, ...args: (string | number)[]): string {
+	return t(key).replace(/\{(\d+)\}/g, (_all, index: string) => String(args[Number(index)] ?? ''));
 }
 
 /** Translate a registered English command label (title or category) for the current locale;

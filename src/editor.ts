@@ -1196,19 +1196,26 @@ export class EditorGroup {
 	}
 
 	/** Run one of the editing commands the Edit menu offers on the active text view. */
-	runEditorCommand(command: 'undo' | 'redo' | 'selectAll' | 'find'): void {
+	runEditorCommand(command: 'undo' | 'redo' | 'selectAll' | 'find' | 'replace'): void {
 		// A windowed editor keeps its undo stack in the backend's document; the rest run on
 		// its small window view.
 		if (this.active?.doc) {
 			if (command === 'undo') void this.active.doc.undo();
 			else if (command === 'redo') void this.active.doc.redo();
 			else if (command === 'find') this.active.doc.openFind();
+			else if (command === 'replace') this.active.doc.openReplace();
 			else this.active.doc.selectAll();
+			return;
+		}
+		// A fast-view tab has no editor at all — find still serves its read-only rope.
+		if (this.active?.fast) {
+			if (command === 'find') this.active.fast.openFind();
 			return;
 		}
 		const view = this.activeView;
 		if (!view || !cm) return;
 		if (command === 'find') cm.openSearchPanel(view);
+		else if (command === 'replace') cm.openReplacePanel(view);
 		else cm[command](view);
 	}
 
@@ -2324,7 +2331,7 @@ export class EditorGroup {
 			{ label: 'Copy', keybinding: 'Ctrl+C', disabled: !hasSelection, run: () => copy() },
 			{ label: 'Paste', keybinding: 'Ctrl+V', disabled: readOnly, run: () => void paste() },
 			'separator',
-			{ label: 'Find', keybinding: 'Ctrl+F', disabled: !view, run: () => { if (view) cm?.openSearchPanel(view); } },
+			{ label: 'Find', keybinding: 'Ctrl+F', run: () => this.runEditorCommand('find') },
 			{ label: 'Command Palette...', keybinding: 'Ctrl+Shift+P', run: () => void commands.execute('workbench.commandPalette') },
 			// Extensions' `contributes.menus["editor/context"]` entries.
 			...menuSection('editor/context')

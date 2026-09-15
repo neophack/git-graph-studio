@@ -16,13 +16,18 @@ pub const BLOCK: usize = 256;
 pub type Token = (usize, usize, String);
 pub type HighlightedLine = (String, Vec<Token>);
 
-/// One undo step: what a single `edit` removed and inserted at `start_char`, so undo can
-/// swap them back. Line granularity is what the frontend needs to re-window afterwards.
+/// One undo step. A single `edit` is one contiguous replacement; a find/replace "Replace
+/// All" is several non-overlapping sites that undo and redo as one step (VS Code treats
+/// them the same way). Line granularity is what the frontend needs to re-window afterwards.
 #[derive(Clone)]
-struct UndoEntry {
-    start_char: usize,
-    removed: String,
-    inserted: String,
+enum UndoEntry {
+    Single {
+        start_char: usize,
+        removed: String,
+        inserted: String,
+    },
+    /// `(start_char, removed, inserted)` per site, in document order.
+    Multi(Vec<(usize, String, String)>),
 }
 
 /// Undo steps kept per document — enough for a long editing session, bounded so a huge
@@ -125,18 +130,62 @@ impl ViewerDoc {
     /// Returns the 0-based line the edit starts on.
     pub fn edit(&mut self, start_char: usize, end_char: usize, text: &str) -> usize {
         let (lo, hi) = (start_char.min(end_char), end_char.max(start_char));
-        let removed = self.rope.get_slice(lo..hi).map(|s| s.to_string()).unwrap_or_default();
+        let removed = self
+            .rope
+            .get_slice(lo..hi)
+            .map(|s| s.to_string())
+            .unwrap_or_default();
         let first_line = self.apply_edit(lo, hi, text);
-        self.undo_stack.push(UndoEntry {
+        self.push_undo(UndoEntry::Single {
             start_char: lo,
             removed,
             inserted: text.to_owned(),
         });
+        first_line
+    }
+
+    /// Apply several non-overlapping replacements as one undo step — find/replace's "Replace
+    /// All". Sites are `(start_char, end_char, replacement)` in document order, absolute rope
+    /// char offsets into the *current* rope; they land bottom-up so the earlier sites'
+    /// offsets stay valid. Returns the first changed line.
+    pub fn replace_sites(&mut self, sites: Vec<(usize, usize, String)>) -> usize {
+        let mut first_line = usize::MAX;
+        // The undo entry records each site at its position in the *final* rope: its start
+        // plus the length deltas of the sites before it. Undo rewinds bottom-up and redo
+        // replays top-down, and both find every site exactly there — the sites after it do
+        // not move it, and by redo time the ones before it have shifted it already.
+        let mut shift: isize = 0;
+        let mut undo: Vec<(usize, String, String)> = Vec::with_capacity(sites.len());
+        for (start, end, replacement) in &sites {
+            let at = (*start as isize + shift).max(0) as usize;
+            let removed = self
+                .rope
+                .get_slice(*start..*end)
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            undo.push((at, removed, replacement.clone()));
+            shift += replacement.chars().count() as isize - (*end - *start) as isize;
+        }
+        for (start, end, replacement) in sites.iter().rev() {
+            first_line = first_line.min(self.apply_edit(*start, *end, replacement));
+        }
+        let first_line = if first_line == usize::MAX {
+            0
+        } else {
+            first_line
+        };
+        if !undo.is_empty() {
+            self.push_undo(UndoEntry::Multi(undo));
+        }
+        first_line
+    }
+
+    fn push_undo(&mut self, entry: UndoEntry) {
+        self.undo_stack.push(entry);
         if self.undo_stack.len() > UNDO_LIMIT {
             self.undo_stack.remove(0);
         }
         self.redo_stack.clear();
-        first_line
     }
 
     /// The rope/checkpoint half of an edit, without touching the undo stacks — the path
@@ -153,8 +202,26 @@ impl ViewerDoc {
     /// the new line count, so the caller can re-window around it.
     pub fn undo(&mut self) -> Option<(usize, usize)> {
         let entry = self.undo_stack.pop()?;
-        let end = entry.start_char + entry.inserted.chars().count();
-        let first_line = self.apply_edit(entry.start_char, end, &entry.removed);
+        let first_line = match &entry {
+            UndoEntry::Single {
+                start_char,
+                removed,
+                inserted,
+            } => {
+                let end = start_char + inserted.chars().count();
+                self.apply_edit(*start_char, end, removed)
+            }
+            // Rewind bottom-up: a site's recorded position is unaffected by the sites
+            // after it.
+            UndoEntry::Multi(sites) => {
+                let mut first = usize::MAX;
+                for (at, removed, inserted) in sites.iter().rev() {
+                    let end = at + inserted.chars().count();
+                    first = first.min(self.apply_edit(*at, end, removed));
+                }
+                first.min(self.line_count().saturating_sub(1))
+            }
+        };
         self.redo_stack.push(entry);
         Some((first_line, self.line_count()))
     }
@@ -162,8 +229,26 @@ impl ViewerDoc {
     /// Re-apply the most recently undone edit, mirroring `undo`.
     pub fn redo(&mut self) -> Option<(usize, usize)> {
         let entry = self.redo_stack.pop()?;
-        let end = entry.start_char + entry.removed.chars().count();
-        let first_line = self.apply_edit(entry.start_char, end, &entry.inserted);
+        let first_line = match &entry {
+            UndoEntry::Single {
+                start_char,
+                removed,
+                inserted,
+            } => {
+                let end = start_char + removed.chars().count();
+                self.apply_edit(*start_char, end, inserted)
+            }
+            // Replay top-down: each site's recorded position already carries the deltas of
+            // the sites before it — exactly the ones already replayed when its turn comes.
+            UndoEntry::Multi(sites) => {
+                let mut first = usize::MAX;
+                for (at, removed, inserted) in sites {
+                    let end = at + removed.chars().count();
+                    first = first.min(self.apply_edit(*at, end, inserted));
+                }
+                first.min(self.line_count().saturating_sub(1))
+            }
+        };
         self.undo_stack.push(entry);
         Some((first_line, self.line_count()))
     }
@@ -302,6 +387,37 @@ mod tests {
     }
 
     #[test]
+    fn replace_sites_is_one_undo_step() {
+        // "one\nTWO\nthree\nTWO\n" — replace both "TWO" sites at absolute char offsets.
+        let mut d = doc("one\nTWO\nthree\nTWO\n", "txt");
+        let first = d.replace_sites(vec![(4, 7, "2".to_owned()), (14, 17, "deux".to_owned())]);
+        assert_eq!(first, 1);
+        assert_eq!(d.full_text(), "one\n2\nthree\ndeux\n");
+        // One undo rewinds the whole replace-all, wherever its sites were.
+        let (line, count) = d.undo().unwrap();
+        assert_eq!(line, 1);
+        assert_eq!(count, 5);
+        assert_eq!(d.full_text(), "one\nTWO\nthree\nTWO\n");
+        assert!(d.undo().is_none(), "the replace-all is a single undo step");
+        // Redo replays every site with the length shifts of the ones before it (the second
+        // site's text is longer than its match, so its offset must not drift).
+        let (line, _) = d.redo().unwrap();
+        assert_eq!(line, 1);
+        assert_eq!(d.full_text(), "one\n2\nthree\ndeux\n");
+    }
+
+    #[test]
+    fn replace_sites_with_no_sites_touches_nothing() {
+        let mut d = doc("a\nb\n", "txt");
+        assert_eq!(d.replace_sites(Vec::new()), 0);
+        assert_eq!(d.full_text(), "a\nb\n");
+        assert!(
+            d.undo().is_none(),
+            "an empty replace-all pushes no undo step"
+        );
+    }
+
+    #[test]
     fn highlights_rust_scopes() {
         let mut d = doc("fn main() {\n    let x = 1;\n}\n", "rs");
         assert_eq!(d.syntax_name, "Rust");
@@ -390,7 +506,11 @@ mod tests {
         let mut d = doc("a\nb\nc", "txt");
         assert_eq!(d.line_count(), 3);
         assert_eq!(d.offset_of(3, 0), d.rope.len_chars());
-        assert_eq!(d.offset_of(2, 0), 4, "the last line's start is still its start");
+        assert_eq!(
+            d.offset_of(2, 0),
+            4,
+            "the last line's start is still its start"
+        );
         // Retype the last line: (2,0)..(3,0) is exactly "c".
         d.edit(d.offset_of(2, 0), d.offset_of(3, 0), "C");
         assert_eq!(d.full_text(), "a\nb\nC");

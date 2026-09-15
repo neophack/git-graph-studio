@@ -3,6 +3,7 @@
 //! read) and every scroll window highlights only what is visible.
 
 pub mod doc;
+mod find;
 mod outline;
 
 use serde::Serialize;
@@ -11,11 +12,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use doc::ViewerDoc;
+pub use find::MatchLoc;
 pub use outline::Symbol;
 
 /// The largest window `viewer_lines` will highlight in one call — enough for a viewport plus
 /// overscan, small enough that a bug in the frontend cannot ask for the whole file.
 const MAX_WINDOW: usize = 500;
+
+/// One open document: the rope behind a lock, plus the find-scan generation. The
+/// generation lives outside the lock so a new `viewer_find` can supersede a scan that is
+/// still running (and still holding the lock) without waiting for it to finish.
+struct DocHandle {
+    doc: Mutex<ViewerDoc>,
+    find_gen: AtomicU64,
+}
 
 #[derive(Default)]
 pub struct ViewerState {
@@ -24,12 +34,12 @@ pub struct ViewerState {
     /// document it needs, so `spawn_blocking` can highlight off the main thread (a cold
     /// window deep in a huge file parses back to its last checkpoint — hundreds of
     /// thousands of lines — and doing that on the main thread froze the whole window).
-    docs: Mutex<HashMap<u64, Arc<Mutex<ViewerDoc>>>>,
+    docs: Mutex<HashMap<u64, Arc<DocHandle>>>,
 }
 
 impl ViewerState {
     /// The document's own handle, cloned out of the map for a blocking task to lock.
-    fn doc_handle(&self, doc_id: u64) -> Option<Arc<Mutex<ViewerDoc>>> {
+    fn doc_handle(&self, doc_id: u64) -> Option<Arc<DocHandle>> {
         self.docs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -41,14 +51,23 @@ impl ViewerState {
         self.docs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(doc_id, Arc::new(Mutex::new(doc)));
+            .insert(
+                doc_id,
+                Arc::new(DocHandle {
+                    doc: Mutex::new(doc),
+                    find_gen: AtomicU64::new(0),
+                }),
+            );
     }
 
     fn with_doc<T>(&self, doc_id: u64, f: impl FnOnce(&mut ViewerDoc) -> T) -> Result<T, String> {
         let handle = self
             .doc_handle(doc_id)
             .ok_or_else(|| format!("No open document {doc_id}"))?;
-        let mut doc = handle.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut doc = handle
+            .doc
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         Ok(f(&mut doc))
     }
 }
@@ -57,7 +76,9 @@ impl ViewerState {
 /// able to ask for the whole file in one call.
 fn check_window(start: usize, end: usize) -> Result<(), String> {
     if end.saturating_sub(start) + 1 > MAX_WINDOW {
-        return Err(format!("window too large: {start}..{end} (max {MAX_WINDOW} lines)"));
+        return Err(format!(
+            "window too large: {start}..{end} (max {MAX_WINDOW} lines)"
+        ));
     }
     Ok(())
 }
@@ -156,7 +177,11 @@ pub struct OutlineSymbol {
 pub fn outline_symbols_for(text: &str, language: &str) -> Vec<OutlineSymbol> {
     outline::outline_text(text, language)
         .into_iter()
-        .map(|s| OutlineSymbol { kind: format!("{:?}", s.kind).to_lowercase(), name: s.name, line: s.line })
+        .map(|s| OutlineSymbol {
+            kind: format!("{:?}", s.kind).to_lowercase(),
+            name: s.name,
+            line: s.line,
+        })
         .collect()
 }
 
@@ -216,7 +241,12 @@ fn take_prewarmed(path: &str) -> Option<Result<(ViewerDoc, Vec<Symbol>), String>
     }
     let prewarmed = slot.take()?;
     drop(slot);
-    Some(prewarmed.handle.join().unwrap_or_else(|_| Err(format!("{path}: the prewarm thread failed"))))
+    Some(
+        prewarmed
+            .handle
+            .join()
+            .unwrap_or_else(|_| Err(format!("{path}: the prewarm thread failed"))),
+    )
 }
 
 fn open_result(doc_id: u64, doc: &ViewerDoc, symbols: Vec<Symbol>) -> OpenResult {
@@ -243,7 +273,11 @@ fn open_impl(state: &ViewerState, path: &str) -> Result<OpenResult, String> {
 fn lines_of(doc: &mut ViewerDoc, start: usize, end: usize) -> LinesResult {
     let start = start.min(doc.line_count().saturating_sub(1));
     let lines = doc.highlight_lines(start, end);
-    LinesResult { start_line: start, line_count: doc.line_count(), lines }
+    LinesResult {
+        start_line: start,
+        line_count: doc.line_count(),
+        lines,
+    }
 }
 
 /// The test-side entry: the command itself locks through `spawn_blocking`.
@@ -304,7 +338,11 @@ fn text_of(doc: &mut ViewerDoc, start: usize, end: usize) -> TextResult {
                 .to_owned()
         })
         .collect();
-    TextResult { start_line: start, line_count: total, lines }
+    TextResult {
+        start_line: start,
+        line_count: total,
+        lines,
+    }
 }
 
 /// Open a file in the viewer. Reads, decodes and ropes the file, and extracts the outline —
@@ -341,11 +379,34 @@ pub async fn viewer_lines(
         .doc_handle(doc_id)
         .ok_or_else(|| format!("No open document {doc_id}"))?;
     tauri::async_runtime::spawn_blocking(move || {
-        let mut doc = doc.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut doc = doc
+            .doc
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         lines_of(&mut doc, start, end)
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+/// The result types of the find/replace commands over a whole document — the windowed
+/// editor and the fast viewer hold only a slice of the rope, so their find widgets search
+/// here instead of in the webview.
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FindResult {
+    pub matches: Vec<MatchLoc>,
+    /// More matches existed than [`find::MAX_FIND_MATCHES`]; the count displays the cap.
+    pub capped: bool,
+    pub line_count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceResult {
+    pub replacements: usize,
+    pub first_line: usize,
+    pub line_count: usize,
 }
 
 /// Apply one replacement to the document's rope. Positions are 0-based line + code-point
@@ -392,7 +453,8 @@ pub async fn viewer_save(
     .map_err(|e| e.to_string())??;
     let _ = state.with_doc(doc_id, |doc| doc.fingerprint = stamp.clone());
     // Match write_file: a saved (possibly new) file must show up in Quick Open and search.
-    use tauri::Manager; app.state::<crate::AppState>().file_list_cache.invalidate();
+    use tauri::Manager;
+    app.state::<crate::AppState>().file_list_cache.invalidate();
     Ok(())
 }
 
@@ -404,25 +466,39 @@ pub async fn viewer_reload(
     state: tauri::State<'_, ViewerState>,
     doc_id: u64,
 ) -> Result<ReloadResult, String> {
-    let (path, stamp) = state.with_doc(doc_id, |doc| (doc.path.clone(), doc.fingerprint.clone()))?;
+    let (path, stamp) =
+        state.with_doc(doc_id, |doc| (doc.path.clone(), doc.fingerprint.clone()))?;
     if fingerprint(&path) == stamp {
-        return Ok(ReloadResult { changed: false, line_count: 0 });
+        return Ok(ReloadResult {
+            changed: false,
+            line_count: 0,
+        });
     }
     let load = path.clone();
-    let (doc, _symbols) = tauri::async_runtime::spawn_blocking(move || {
-        open_doc(&load.display().to_string())
-    })
-        .await
-        .map_err(|e| e.to_string())??;
+    let (doc, _symbols) =
+        tauri::async_runtime::spawn_blocking(move || open_doc(&load.display().to_string()))
+            .await
+            .map_err(|e| e.to_string())??;
     let line_count = doc.line_count();
     // The tab may have closed while the file was being read: a closed id must not come
     // back as a document nobody will ever close again.
-    let mut docs = state.docs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut docs = state
+        .docs
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     match docs.get_mut(&doc_id) {
-        Some(slot) => *slot = Arc::new(Mutex::new(doc)),
+        Some(slot) => {
+            *slot = Arc::new(DocHandle {
+                doc: Mutex::new(doc),
+                find_gen: AtomicU64::new(0),
+            })
+        }
         None => return Err(format!("No open document {doc_id}")),
     }
-    Ok(ReloadResult { changed: true, line_count })
+    Ok(ReloadResult {
+        changed: true,
+        line_count,
+    })
 }
 
 /// A window of lines as plain text (0-based, inclusive), for the editable windowed editor.
@@ -439,11 +515,154 @@ pub async fn viewer_text(
         .doc_handle(doc_id)
         .ok_or_else(|| format!("No open document {doc_id}"))?;
     tauri::async_runtime::spawn_blocking(move || {
-        let mut doc = doc.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut doc = doc
+            .doc
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         text_of(&mut doc, start, end)
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+/// Find every (single-line) match of a query over a whole document. The scan runs on the
+/// blocking pool — a 200 MB rope takes a moment — and aborts as soon as a newer find on
+/// the same document supersedes it, so typing in the widget never queues stale scans.
+#[tauri::command]
+pub async fn viewer_find(
+    state: tauri::State<'_, ViewerState>,
+    doc_id: u64,
+    query: String,
+    case_sensitive: bool,
+    whole_word: bool,
+    regexp: bool,
+) -> Result<FindResult, String> {
+    let handle = state
+        .doc_handle(doc_id)
+        .ok_or_else(|| format!("No open document {doc_id}"))?;
+    // The bump is what cancels an in-flight scan, and it must not need the lock that scan
+    // still holds.
+    let generation = handle.find_gen.fetch_add(1, Ordering::Relaxed) + 1;
+    tauri::async_runtime::spawn_blocking(move || {
+        let doc = handle
+            .doc
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let options = find::FindOptions {
+            case_sensitive,
+            whole_word,
+            regexp,
+        };
+        let matcher = find::Matcher::compile(&query, &options)?;
+        let (matches, capped) = find::scan_rope(
+            &doc.rope,
+            &matcher,
+            whole_word,
+            find::MAX_FIND_MATCHES,
+            || handle.find_gen.load(Ordering::Relaxed) == generation,
+        )?;
+        Ok(FindResult {
+            matches,
+            capped,
+            line_count: doc.line_count(),
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Replace the next `max` matches of a query from a 0-based line/column position — `1` is
+/// the widget's Replace (the position is its current match), `usize::MAX` its Replace All.
+/// Every replacement lands in the rope as one undo step, so a Replace All is a single Ctrl+Z.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // the find options mirror viewer_find's, plus the replace spec
+pub fn viewer_replace(
+    state: tauri::State<ViewerState>,
+    doc_id: u64,
+    query: String,
+    replacement: String,
+    case_sensitive: bool,
+    whole_word: bool,
+    regexp: bool,
+    from_line: usize,
+    from_col: usize,
+    max: usize,
+) -> Result<ReplaceResult, String> {
+    let options = find::FindOptions {
+        case_sensitive,
+        whole_word,
+        regexp,
+    };
+    replace_impl(
+        &state,
+        doc_id,
+        &query,
+        &replacement,
+        &options,
+        from_line,
+        from_col,
+        max,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replace_impl(
+    state: &ViewerState,
+    doc_id: u64,
+    query: &str,
+    replacement: &str,
+    options: &find::FindOptions,
+    from_line: usize,
+    from_col: usize,
+    max: usize,
+) -> Result<ReplaceResult, String> {
+    let matcher = find::Matcher::compile(query, options)?;
+    state.with_doc(doc_id, |doc| {
+        let sites = find::replacement_sites(
+            &doc.rope,
+            &matcher,
+            options.whole_word,
+            replacement,
+            from_line,
+            from_col,
+            max,
+        );
+        let replacements = sites.len();
+        let first_line = doc.replace_sites(sites);
+        ReplaceResult {
+            replacements,
+            first_line,
+            line_count: doc.line_count(),
+        }
+    })
+}
+
+/// The test-side entry for `viewer_find`: the command itself locks through
+/// `spawn_blocking`.
+#[cfg(test)]
+fn find_impl(
+    state: &ViewerState,
+    doc_id: u64,
+    query: &str,
+    options: &find::FindOptions,
+) -> Result<FindResult, String> {
+    let matcher = find::Matcher::compile(query, options)?;
+    state
+        .with_doc(doc_id, |doc| {
+            find::scan_rope(
+                &doc.rope,
+                &matcher,
+                options.whole_word,
+                find::MAX_FIND_MATCHES,
+                || true,
+            )
+            .map(|(matches, capped)| FindResult {
+                matches,
+                capped,
+                line_count: doc.line_count(),
+            })
+        })
+        .and_then(|inner| inner)
 }
 
 /// Undo the most recent edit. `None` when there is nothing to undo.
@@ -453,7 +672,10 @@ pub fn viewer_undo(
     doc_id: u64,
 ) -> Result<Option<UndoResult>, String> {
     state.with_doc(doc_id, |doc| {
-        doc.undo().map(|(first_line, line_count)| UndoResult { first_line, line_count })
+        doc.undo().map(|(first_line, line_count)| UndoResult {
+            first_line,
+            line_count,
+        })
     })
 }
 
@@ -464,7 +686,10 @@ pub fn viewer_redo(
     doc_id: u64,
 ) -> Result<Option<UndoResult>, String> {
     state.with_doc(doc_id, |doc| {
-        doc.redo().map(|(first_line, line_count)| UndoResult { first_line, line_count })
+        doc.redo().map(|(first_line, line_count)| UndoResult {
+            first_line,
+            line_count,
+        })
     })
 }
 
@@ -472,7 +697,10 @@ pub fn viewer_redo(
 /// itself, so a hundred-megabyte draft never crosses the IPC — the JSON path the full
 /// editor takes would freeze the webview on documents this large.
 #[tauri::command]
-pub async fn viewer_backup(state: tauri::State<'_, ViewerState>, doc_id: u64) -> Result<(), String> {
+pub async fn viewer_backup(
+    state: tauri::State<'_, ViewerState>,
+    doc_id: u64,
+) -> Result<(), String> {
     let (path, text) = state.with_doc(doc_id, |doc| {
         (doc.path.display().to_string(), doc.full_text())
     })?;
@@ -506,7 +734,9 @@ mod tests {
     /// the variable, so the normal test run never touches it.
     #[test]
     fn open_bench_real_file() {
-        let Ok(path) = std::env::var("GGS_BENCH_FILE") else { return };
+        let Ok(path) = std::env::var("GGS_BENCH_FILE") else {
+            return;
+        };
         let t = std::time::Instant::now();
         let (mut doc, symbols) = open_doc(&path).expect("open");
         let open_ms = t.elapsed().as_millis();
@@ -598,7 +828,11 @@ mod tests {
         let (path_of, stamp) = state
             .with_doc(doc_id, |doc| (doc.path.clone(), doc.fingerprint.clone()))
             .unwrap();
-        assert_eq!(fingerprint(&path_of), stamp, "the open stamp matches the file");
+        assert_eq!(
+            fingerprint(&path_of),
+            stamp,
+            "the open stamp matches the file"
+        );
         // An external edit (write + a distinguishable mtime) reports a change and reloads.
         std::thread::sleep(std::time::Duration::from_millis(10));
         s.file("watched.txt", "one\nTWO\nthree\n");
@@ -654,5 +888,136 @@ mod tests {
         let state = ViewerState::default();
         let opened = open_impl(&state, &path).unwrap();
         assert!(lines_impl(&state, opened.doc_id, 0, 600).is_err());
+    }
+
+    #[test]
+    fn find_reports_whole_document_matches_with_the_options() {
+        let s = scratch();
+        let path = s.file("find.txt", "Alpha beta\nalpha ALPHA\nalphabet\n");
+        let state = ViewerState::default();
+        let opened = open_impl(&state, &path).unwrap();
+        let find = |query: &str, case: bool, word: bool, regex: bool| {
+            find_impl(
+                &state,
+                opened.doc_id,
+                query,
+                &find::FindOptions {
+                    case_sensitive: case,
+                    whole_word: word,
+                    regexp: regex,
+                },
+            )
+        };
+        let locate = |result: &FindResult| {
+            result
+                .matches
+                .iter()
+                .map(|m| (m.line, m.start_col, m.end_col))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            locate(&find("alpha", false, false, false).unwrap()),
+            [(0, 0, 5), (1, 0, 5), (1, 6, 11), (2, 0, 5)]
+        );
+        assert_eq!(
+            locate(&find("ALPHA", true, false, false).unwrap()),
+            [(1, 6, 11)]
+        );
+        assert_eq!(
+            locate(&find("alpha", false, true, false).unwrap()),
+            [(0, 0, 5), (1, 0, 5), (1, 6, 11)]
+        );
+        assert_eq!(
+            locate(&find("l+", false, false, true).unwrap()),
+            [(0, 1, 2), (1, 1, 2), (1, 7, 8), (2, 1, 2)]
+        );
+        // An invalid regex is a user-readable error, not a panic.
+        assert!(find("([open", false, false, true)
+            .unwrap_err()
+            .contains("Invalid regular expression"));
+        // A find on a closed document says so.
+        assert!(find_impl(
+            &ViewerState::default(),
+            99,
+            "x",
+            &find::FindOptions::default()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn replace_next_and_replace_all_are_one_undo_step_each() {
+        let s = scratch();
+        let path = s.file("rep.txt", "a=1 b=22\n");
+        let state = ViewerState::default();
+        let opened = open_impl(&state, &path).unwrap();
+        let opts = find::FindOptions {
+            case_sensitive: false,
+            whole_word: false,
+            regexp: true,
+        };
+        // Replace All with group references, from the top.
+        let result = replace_impl(
+            &state,
+            opened.doc_id,
+            r"(\w+)=(\w+)",
+            "$2=$1",
+            &opts,
+            0,
+            0,
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(result.replacements, 2);
+        assert_eq!(result.first_line, 0);
+        assert_eq!(result.line_count, 2);
+        assert_eq!(
+            text_impl(&state, opened.doc_id, 0, 0).unwrap().lines,
+            ["1=a 22=b"]
+        );
+        // One undo rewinds the whole replace-all.
+        state
+            .with_doc(opened.doc_id, |doc| doc.undo().unwrap())
+            .unwrap();
+        assert_eq!(
+            text_impl(&state, opened.doc_id, 0, 0).unwrap().lines,
+            ["a=1 b=22"]
+        );
+        // Replace (max 1) from a mid-line position touches only the next match.
+        let literal = find::FindOptions {
+            case_sensitive: false,
+            whole_word: false,
+            regexp: false,
+        };
+        let result = replace_impl(&state, opened.doc_id, "b", "B", &literal, 0, 4, 1).unwrap();
+        assert_eq!(result.replacements, 1);
+        assert_eq!(
+            text_impl(&state, opened.doc_id, 0, 0).unwrap().lines,
+            ["a=1 B=22"]
+        );
+        // The find after the replace sees the new text.
+        let found = find_impl(&state, opened.doc_id, "B=", &find::FindOptions::default()).unwrap();
+        assert_eq!(found.matches.len(), 1);
+        assert_eq!(found.matches[0].line, 0);
+    }
+
+    #[test]
+    fn a_newer_find_generation_supersedes_a_scan() {
+        // The DocHandle generation is what `viewer_find` checks mid-scan: once a newer find
+        // has bumped it, the older scan's liveness check turns false and the scan aborts.
+        let s = scratch();
+        let path = s.file("cancel.txt", &"needle\n".repeat(1200));
+        let state = ViewerState::default();
+        let opened = open_impl(&state, &path).unwrap();
+        let handle = state.doc_handle(opened.doc_id).unwrap();
+        let rope = state
+            .with_doc(opened.doc_id, |doc| doc.rope.clone())
+            .unwrap();
+        let matcher = find::Matcher::compile("needle", &find::FindOptions::default()).unwrap();
+        let generation = handle.find_gen.fetch_add(1, Ordering::Relaxed) + 1;
+        // A second find on the same document starts here.
+        handle.find_gen.fetch_add(1, Ordering::Relaxed);
+        let alive = || handle.find_gen.load(Ordering::Relaxed) == generation;
+        assert!(find::scan_rope(&rope, &matcher, false, find::MAX_FIND_MATCHES, alive).is_err());
     }
 }

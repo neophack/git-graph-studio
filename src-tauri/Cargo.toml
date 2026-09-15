@@ -40,6 +40,7 @@ desktop = [
     "dep:regex",
     "dep:zip",
     "dep:syntect",
+    "dep:fancy-regex",
     "dep:base64",
     "dep:ignore",
     "dep:notify",
@@ -74,6 +75,9 @@ zip = { version = "2", optional = true }
 # `default-fancy` swaps syntect's default Oniguruma (C) engine for the pure-Rust fancy-regex
 # engine — the whole viewer stack stays free of C bindings.
 syntect = { version = "5", default-features = false, features = ["default-fancy"], optional = true }
+# The viewer's whole-file find/replace (viewer/find.rs): the same engine syntect's
+# `default-fancy` already pulls in, pinned to the tree's version so it costs nothing extra.
+fancy-regex = { version = "0.16", optional = true }
 # Extension icons and README images cross the IPC bridge as base64 data URLs (cmd_ext).
 base64 = { version = "0.22", optional = true }
 # The `.gitignore`-aware parallel tree walk (ripgrep's) behind Quick Open, the Search view
