@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="zh-cn">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Git Graph Studio × vscode-git-graph-rs — 调用关系</title>
+<!--
+	一张说明页：Git Graph Studio（GGS，本仓库）与 vscode-git-graph-rs 子模块之间的构建期装配与
+	运行期调用链。内容对应 docs/ggs-development-plan.md 的架构原则与 AGENTS.md 的接缝规则；
+	纯静态、零依赖，直接用浏览器打开即可。不随应用打包。
+-->
+<style>
+	:root {
+		--bg: #1e2227;
+		--card: #252a31;
+		--card2: #2b313a;
+		--border: #363e49;
+		--text: #d5dae0;
+		--muted: #9aa4b2;
+		--blue: #4da3ff;
+		--cyan: #56d4dd;
+		--green: #7ee787;
+		--orange: #ffb86c;
+		--purple: #c8a2ff;
+		--mono: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
+	}
+	* { box-sizing: border-box; }
+	body {
+		margin: 0;
+		background: var(--bg);
+		color: var(--text);
+		font: 14px/1.65 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+	}
+	.page { max-width: 1120px; margin: 0 auto; padding: 36px 24px 64px; }
+	h1 { font-size: 24px; margin: 0 0 4px; }
+	h1 .x { color: var(--blue); margin: 0 8px; }
+	.subtitle { color: var(--muted); margin: 0 0 28px; }
+	h2 {
+		font-size: 17px;
+		margin: 44px 0 14px;
+		padding-left: 10px;
+		border-left: 3px solid var(--blue);
+	}
+	h2 .en { color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 8px; }
+	code, .mono { font-family: var(--mono); font-size: 12.5px; }
+	code { background: #303844; padding: 1px 5px; border-radius: 4px; }
+
+	.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+	.card {
+		background: var(--card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		padding: 14px 18px;
+	}
+	.card h3 { margin: 0 0 8px; font-size: 14.5px; }
+	.card ul { margin: 8px 0 0; padding-left: 18px; }
+	.card li { margin: 3px 0; }
+	.tag {
+		display: inline-block;
+		font-size: 11px;
+		border-radius: 4px;
+		padding: 1px 7px;
+		margin-left: 8px;
+		vertical-align: 2px;
+	}
+	.tag.sub { background: rgba(200, 162, 255, .14); color: var(--purple); }
+	.tag.host { background: rgba(77, 163, 255, .14); color: var(--blue); }
+
+	.summary {
+		background: linear-gradient(90deg, rgba(77, 163, 255, .10), rgba(86, 212, 221, .06));
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		padding: 14px 18px;
+		margin-top: 14px;
+	}
+
+	/* ---------- 构建期装配图 ---------- */
+	.build { display: grid; grid-template-columns: 320px 130px 1fr; gap: 0; align-items: stretch; }
+	.build .src { grid-row: span 3; }
+	.build .mid {
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+		align-items: center;
+		gap: 4px;
+		color: var(--muted);
+		font-size: 12px;
+	}
+	.build .mid .arrow { font-size: 20px; color: var(--blue); }
+	.build .mid code { font-size: 11px; }
+	.build .dst { margin: 0 0 12px; }
+	.build .dst:last-child { margin-bottom: 0; }
+	.build .dst h3 { color: var(--cyan); }
+	.artifact { color: var(--muted); font-size: 12.5px; }
+	.artifact b { color: var(--text); font-weight: 600; }
+
+	/* ---------- 请求路由 ---------- */
+	.route { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+	.route .card h3 .dot { margin-right: 7px; }
+	.route .via { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
+	.chips { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 5px; }
+	.chip {
+		font-family: var(--mono);
+		font-size: 11px;
+		background: #303844;
+		border: 1px solid #3d4653;
+		border-radius: 4px;
+		padding: 1px 6px;
+		color: var(--text);
+	}
+	.more { color: var(--muted); font-size: 12px; margin-top: 8px; }
+
+	/* ---------- 接缝规则 ---------- */
+	.rules { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+	.rule b { color: var(--orange); }
+	.enforce {
+		margin-top: 14px;
+		border-left: 3px solid var(--orange);
+		background: rgba(255, 184, 108, .07);
+		border-radius: 0 8px 8px 0;
+		padding: 10px 16px;
+	}
+
+	/* ---------- 最少调用模式 ---------- */
+	.touch { display: flex; gap: 12px; margin: 0 0 14px; flex-wrap: wrap; }
+	.touch .t {
+		flex: 1; min-width: 168px;
+		background: var(--card2); border: 1px solid var(--border);
+		border-radius: 8px; padding: 10px 12px 8px; text-align: center;
+	}
+	.touch .t b { font-size: 22px; display: block; color: var(--cyan); line-height: 1.2; }
+	.touch .t span { color: var(--muted); font-size: 12px; }
+	pre.codeblock {
+		background: #1a1e23;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 12px 16px;
+		overflow-x: auto;
+		font-family: var(--mono);
+		font-size: 12.5px;
+		line-height: 1.75;
+		margin: 8px 0 0;
+		color: var(--text);
+	}
+	pre.codeblock .cm { color: #7e8a99; }
+	pre.codeblock .kw { color: var(--purple); }
+	pre.codeblock .st { color: var(--green); }
+	pre.codeblock .fn { color: var(--cyan); }
+	table.imp { width: 100%; border-collapse: collapse; margin-top: 8px; }
+	table.imp td { padding: 5px 8px 5px 0; border-bottom: 1px solid #303844; vertical-align: top; }
+	table.imp tr:last-child td { border-bottom: none; }
+	table.imp td:first-child { font-family: var(--mono); font-size: 12px; color: var(--cyan); white-space: nowrap; }
+	table.imp td:nth-child(2) { font-family: var(--mono); font-size: 12px; color: var(--text); white-space: nowrap; }
+	table.imp td:last-child { color: var(--muted); font-size: 12.5px; }
+
+	svg text { font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+	.seq { width: 100%; height: auto; display: block; background: var(--card); border: 1px solid var(--border); border-radius: 10px; }
+	.legend { display: flex; gap: 22px; color: var(--muted); font-size: 12.5px; margin: 10px 2px 0; }
+	.legend i { display: inline-block; width: 22px; height: 0; border-top: 2px solid; margin-right: 6px; vertical-align: 3px; }
+
+	.files { color: var(--muted); font-size: 13px; }
+	.files p { margin: 4px 0; }
+	@media (max-width: 900px) {
+		.grid2, .route, .rules { grid-template-columns: 1fr; }
+		.build { grid-template-columns: 1fr; }
+		.build .mid { flex-direction: row; padding: 6px 0; }
+	}
+</style>
+</head>
+<body>
+<div class="page">
+
+	<h1>Git Graph Studio <span class="x">×</span> vscode-git-graph-rs</h1>
+	<p class="subtitle">子模块与宿主之间的构建期装配与运行期调用链 · 对照 <code>AGENTS.md</code> 接缝规则整理</p>
+
+	<!-- ============ 两个仓库 ============ -->
+	<h2>两个仓库各自是什么<span class="en">What each repo is</span></h2>
+	<div class="grid2">
+		<div class="card">
+			<h3>vscode-git-graph-rs/<span class="tag sub">git 子模块 · 独立仓库</span></h3>
+			VS Code 扩展 <b>git-graph-rs</b> 本体，GGS 对它<b>只消费、不修改</b>：
+			<ul>
+				<li><b>webview 前端</b> — <code>media/out.min.js</code> / <code>out.min.css</code>、<code>web/</code> 样式（编译产物，原样使用）</li>
+				<li><b>扩展宿主代码</b> — <code>src/config.ts</code>（配置组合）、<code>src/comparisonView.ts</code>（比对页生成器）等</li>
+				<li><b>Rust 引擎</b> — <code>native/core</code> 即 <code>git-graph-core</code>：基于 gix 的提交图 / 状态 / diff / 统计读引擎</li>
+			</ul>
+		</div>
+		<div class="card">
+			<h3>git-graph-studio（GGS）<span class="tag host">宿主 · 本仓库</span></h3>
+			Tauri 2 桌面应用（VS Code 级壳：资源管理器、源代码管理、编辑器、终端…），在 Git Graph 模块里<b>扮演 VS Code 的两个角色</b>：
+			<ul>
+				<li><b>扩展宿主</b> — <code>src/graphHost.ts</code> 组装 <code>initialState</code>、提供 <code>acquireVsCodeApi</code> shim、应答视图请求</li>
+				<li><b>数据源</b> — <code>src-tauri/src/cmd_graph.rs</code> 把视图协议转给进程内引擎（读）和 git CLI（写）</li>
+			</ul>
+		</div>
+	</div>
+	<div class="summary">
+		<b>一句话关系</b>：构建期，GGS 把子模块的前端资产拷进应用、把它的 Rust 引擎链接进进程；运行期，用
+		<code>view.html</code> + shim 原样驱动它的 webview，读写分别走进程内 <code>git-graph-core</code> 与 <code>git</code> CLI ——
+		扩展一行不改，却在独立桌面应用里完整运行。
+	</div>
+
+	<!-- ============ 构建期 ============ -->
+	<h2>构建期：资产从哪来<span class="en">Build-time assembly (scripts/prepare.mjs · Cargo · build-ggx.mjs)</span></h2>
+	<div class="build">
+		<div class="card src">
+			<h3>vscode-git-graph-rs/</h3>
+			<div class="artifact"><b>media/</b> — out.min.js、out.min.css（webview 打包产物）</div>
+			<div class="artifact"><b>out/config.js</b> — src/config.ts 的编译产物</div>
+			<div class="artifact"><b>out/comparisonView.js</b> — 比对页生成器</div>
+			<div class="artifact"><b>native/core</b> — git-graph-core（Rust 引擎 crate）</div>
+			<div class="artifact"><b>resources/icon.png</b> — 应用图标之源</div>
+		</div>
+		<div class="mid"><span class="arrow">⟶</span><code>prepare.mjs</code></div>
+		<div class="card dst">
+			<h3>target/studio/public/gitgraph/</h3>
+			<div class="artifact">out.min.js / out.min.css / markdown-it / highlight 原样拷贝；<b>config.js</b> 再打包为
+			<code>window.GitGraphStudioConfig</code>，<b>compare.js</b> 打包为 <code>window.GitGraphCompare</code>。前端仅经
+			<code>/gitgraph/</code> 路由访问 —— 源码树里不落任何生成物。</div>
+		</div>
+		<div class="mid"><span class="arrow">⟶</span><code>Cargo.toml</code></div>
+		<div class="card dst">
+			<h3>src-tauri 进程内链接</h3>
+			<div class="artifact"><code class="mono">git-graph-core = { path = "../vscode-git-graph-rs/native/core" }</code><br>
+			引擎直接编进应用二进制；图标由 <code>resources/icon.png</code> 经 <code>tauri icon</code> 派生。</div>
+		</div>
+		<div class="mid"><span class="arrow">⟶</span><code>build-ggx.mjs</code></div>
+		<div class="card dst">
+			<h3>git-graph-rs-&lt;version&gt;.ggx</h3>
+			<div class="artifact">扩展平台路径（<code>ggx/1</code> 格式）：manifest + <code>web/</code> 前端 + 可选
+			<code>git-graph-backend</code> 进程（<code>ggx-rpc/2</code>）。安装进 <code>~/.ggs/extensions/</code>，
+			<b>可独立于应用升级</b>（前端-only 包时由进程内引擎应答）。</div>
+		</div>
+	</div>
+
+	<!-- ============ 运行期 ============ -->
+	<h2>运行期：一条请求的完整链路<span class="en">Runtime call chain — the single graph_request channel</span></h2>
+	<svg class="seq" viewBox="0 0 1060 760" role="img" aria-label="GGS 与 vscode-git-graph-rs 的运行期调用序列图">
+		<defs>
+			<marker id="ah-p" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 z" fill="#c8a2ff"/></marker>
+			<marker id="ah-b" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 z" fill="#4da3ff"/></marker>
+			<marker id="ah-g" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 z" fill="#7ee787"/></marker>
+			<marker id="ah-o" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 z" fill="#ffb86c"/></marker>
+			<marker id="ah-r" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 z" fill="#8b949e"/></marker>
+		</defs>
+
+		<!-- 参与者 -->
+		<g font-size="13" font-weight="700" text-anchor="middle">
+			<rect x="35"  y="18" width="190" height="46" rx="8" fill="#2f3640" stroke="#46505e"/>
+			<text x="130" y="37" fill="#e6edf3">Git Graph Webview</text>
+			<text x="130" y="54" font-size="10.5" font-weight="400" fill="#9aa4b2">out.min.js · iframe 内，未修改</text>
+
+			<rect x="255" y="18" width="190" height="46" rx="8" fill="#243b53" stroke="#3f6ea1"/>
+			<text x="350" y="37" fill="#bcdcff">GraphHost</text>
+			<text x="350" y="54" font-size="10.5" font-weight="400" fill="#9aa4b2">src/graphHost.ts（TS 接缝）</text>
+
+			<rect x="475" y="18" width="190" height="46" rx="8" fill="#2f3640" stroke="#46505e"/>
+			<text x="570" y="37" fill="#e6edf3">Rust 后端</text>
+			<text x="570" y="54" font-size="10.5" font-weight="400" fill="#9aa4b2">cmd_graph.rs（Rust 接缝）</text>
+
+			<rect x="680" y="18" width="180" height="46" rx="8" fill="#2c3b2f" stroke="#476b4c"/>
+			<text x="770" y="37" fill="#c8f0cf">git-graph-core</text>
+			<text x="770" y="54" font-size="10.5" font-weight="400" fill="#9aa4b2">引擎 · 进程内（gix）</text>
+
+			<rect x="870" y="18" width="180" height="46" rx="8" fill="#3b322a" stroke="#6b5a47"/>
+			<text x="960" y="37" fill="#ffd9b0">git CLI</text>
+			<text x="960" y="54" font-size="10.5" font-weight="400" fill="#9aa4b2">写路径子进程（git.rs）</text>
+		</g>
+
+		<!-- 生命线 -->
+		<g stroke="#3d4653" stroke-dasharray="4 5">
+			<line x1="130" y1="64" x2="130" y2="744"/>
+			<line x1="350" y1="64" x2="350" y2="744"/>
+			<line x1="570" y1="64" x2="570" y2="744"/>
+			<line x1="770" y1="64" x2="770" y2="744"/>
+			<line x1="960" y1="64" x2="960" y2="744"/>
+		</g>
+
+		<!-- 阶段底色 -->
+		<rect x="8" y="78"  width="1044" height="122" fill="rgba(200,162,255,.055)"/>
+		<rect x="8" y="210" width="1044" height="200" fill="rgba(77,163,255,.055)"/>
+		<rect x="8" y="420" width="1044" height="84"  fill="rgba(126,231,135,.055)"/>
+		<rect x="8" y="514" width="1044" height="186" fill="rgba(255,184,108,.055)"/>
+		<g font-size="12.5" font-weight="700">
+			<text x="18" y="98"  fill="#c8a2ff">启动 / 挂载</text>
+			<text x="18" y="230" fill="#4da3ff">读路径（并发：开库首屏的 repoInfo / config / loadCommits 一次往返）</text>
+			<text x="18" y="440" fill="#7ee787">壳自答（不进后端）</text>
+			<text x="18" y="534" fill="#ffb86c">写路径（WRITE_COMMANDS 排队串行，防止刷新越过操作）</text>
+		</g>
+
+		<!-- ① 启动 -->
+		<g font-size="12" fill="#c9d2dc" text-anchor="middle">
+			<text x="240" y="114">① sessionStorage['ggstudio.initial']：initialState（config + repos）+ 视图状态 + 主题</text>
+			<text x="240" y="130" font-size="11" fill="#9aa4b2">iframe.src = /gitgraph/view.html</text>
+		</g>
+		<line x1="350" y1="138" x2="134" y2="138" stroke="#c8a2ff" stroke-width="1.6" marker-end="url(#ah-p)"/>
+		<rect x="24" y="152" width="232" height="44" rx="6" fill="#2b313a" stroke="#3a424e"/>
+		<text x="140" y="170" font-size="11" text-anchor="middle" fill="#c9d2dc">view.html 提供 acquireVsCodeApi shim、错误上报；</text>
+		<text x="140" y="186" font-size="11" text-anchor="middle" fill="#c9d2dc">宿主注入 --vscode-* 主题 token（vscode-dark/light）</text>
+
+		<!-- ② 读路径 -->
+		<text x="240" y="252" font-size="12" text-anchor="middle" fill="#c9d2dc">② postMessage：__studioGraphRequest { command:'loadCommits' … }</text>
+		<line x1="130" y1="260" x2="346" y2="260" stroke="#4da3ff" stroke-width="1.6" marker-end="url(#ah-b)"/>
+
+		<text x="460" y="282" font-size="12" text-anchor="middle" fill="#c9d2dc">③ invoke('graph_request') —— 全应用唯一一处（构建期强制）</text>
+		<line x1="350" y1="290" x2="566" y2="290" stroke="#4da3ff" stroke-width="1.6" marker-end="url(#ah-b)"/>
+
+		<text x="670" y="312" font-size="12" text-anchor="middle" fill="#c9d2dc">④ log() / graph() / details() / stats()（gix 进程内读）</text>
+		<line x1="570" y1="320" x2="766" y2="320" stroke="#4da3ff" stroke-width="1.6" marker-end="url(#ah-b)"/>
+
+		<text x="670" y="344" font-size="11" text-anchor="middle" fill="#9aa4b2">⑤ 提交 / 引用 / diff 数据</text>
+		<line x1="770" y1="350" x2="574" y2="350" stroke="#8b949e" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#ah-r)"/>
+
+		<text x="460" y="372" font-size="11" text-anchor="middle" fill="#9aa4b2">⑥ ResponseMessage（codeReview 等宿主字段在此补挂）</text>
+		<line x1="570" y1="378" x2="354" y2="378" stroke="#8b949e" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#ah-r)"/>
+
+		<text x="240" y="396" font-size="11" text-anchor="middle" fill="#9aa4b2">⑦ __studioGraphResponse</text>
+		<line x1="350" y1="402" x2="134" y2="402" stroke="#8b949e" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#ah-r)"/>
+
+		<!-- 壳自答 -->
+		<text x="240" y="460" font-size="12" text-anchor="middle" fill="#c9d2dc">⑧ { command:'viewDiff' / 'openFile' / 'openTerminal' / 'setGlobalSetting' … }</text>
+		<text x="240" y="476" font-size="11" text-anchor="middle" fill="#7ee787">handleLocally 直接委托 Editor Suite / Terminal / state —— 零后端往返</text>
+		<line x1="130" y1="486" x2="346" y2="486" stroke="#7ee787" stroke-width="1.6" marker-end="url(#ah-g)"/>
+
+		<!-- 写路径 -->
+		<text x="240" y="552" font-size="12" text-anchor="middle" fill="#c9d2dc">⑨ { command:'pushBranch' / 'fetch' / 'createBranch' / 'popStash' … }</text>
+		<line x1="130" y1="560" x2="346" y2="560" stroke="#ffb86c" stroke-width="1.6" marker-end="url(#ah-o)"/>
+
+		<text x="460" y="582" font-size="12" text-anchor="middle" fill="#c9d2dc">⑩ invoke('graph_request', { message, settings })（含签名等写设置）</text>
+		<line x1="350" y1="590" x2="566" y2="590" stroke="#ffb86c" stroke-width="1.6" marker-end="url(#ah-o)"/>
+
+		<text x="765" y="608" font-size="12" text-anchor="middle" fill="#c9d2dc">⑪ git push —— 经 git.rs 起 git 子进程（唯一写通道）</text>
+		<text x="765" y="624" font-size="11" text-anchor="middle" fill="#9aa4b2">有数据丢失风险时先回 lossWarning，用户确认后以 confirmed:true 重试</text>
+		<line x1="570" y1="632" x2="956" y2="632" stroke="#ffb86c" stroke-width="1.6" marker-end="url(#ah-o)"/>
+
+		<text x="765" y="650" font-size="11" text-anchor="middle" fill="#9aa4b2">⑫ 结果</text>
+		<line x1="960" y1="656" x2="574" y2="656" stroke="#8b949e" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#ah-r)"/>
+
+		<text x="460" y="670" font-size="11" text-anchor="middle" fill="#9aa4b2">ResponseMessage</text>
+		<line x1="570" y1="676" x2="354" y2="676" stroke="#8b949e" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#ah-r)"/>
+
+		<text x="240" y="690" font-size="11" text-anchor="middle" fill="#9aa4b2">__studioGraphResponse</text>
+		<line x1="350" y1="696" x2="134" y2="696" stroke="#8b949e" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#ah-r)"/>
+
+		<!-- 收尾说明 -->
+		<rect x="180" y="712" width="700" height="36" rx="6" fill="#2b313a" stroke="#3a424e"/>
+		<text x="530" y="734" font-size="11.5" text-anchor="middle" fill="#c9d2dc">写命令完成后 delegate.repoChanged() → Source Control / File Explorer / 状态栏自动刷新；外部文件变更由 watcher 推送 refresh</text>
+	</svg>
+	<div class="legend">
+		<span><i style="border-color:#c8a2ff"></i>启动</span>
+		<span><i style="border-color:#4da3ff"></i>请求（前向）</span>
+		<span><i style="border-color:#7ee787"></i>壳自答</span>
+		<span><i style="border-color:#ffb86c"></i>写请求</span>
+		<span><i style="border-color:#8b949e; border-top-style:dashed"></i>返回</span>
+	</div>
+
+	<!-- ============ 请求路由 ============ -->
+	<h2>请求由谁应答<span class="en">Request routing (graphHost.handleLocally → graph_request)</span></h2>
+	<div class="route">
+		<div class="card">
+			<h3><span class="dot" style="color:var(--green)">●</span>壳自答 · graphHost</h3>
+			<div class="via">graphHost.ts <code>handleLocally()</code> —— 扮演扩展宿主，直接调 shell 能力</div>
+			<div class="chips">
+				<span class="chip">loadRepos</span><span class="chip">setRepoState</span><span class="chip">setGlobalSetting</span>
+				<span class="chip">openFile</span><span class="chip">viewDiff</span><span class="chip">viewFileAtRevision</span>
+				<span class="chip">openCompareTab</span><span class="chip">viewScm</span><span class="chip">openTerminal</span>
+				<span class="chip">exportRepoConfig</span><span class="chip">openLogFile</span><span class="chip">startCodeReview</span>
+			</div>
+			<div class="more">viewDiff 落到 GGS 自己的 diff 编辑器；openCompareTab 走 CompareHost（compare.js）。</div>
+		</div>
+		<div class="card">
+			<h3><span class="dot" style="color:var(--blue)">●</span>引擎读 · 进程内</h3>
+			<div class="via">cmd_graph.rs → <code>git-graph-core</code>（gix，绝不 spawn git）</div>
+			<div class="chips">
+				<span class="chip">loadRepoInfo</span><span class="chip">loadCommits</span><span class="chip">commitDetails</span>
+				<span class="chip">compareCommits</span><span class="chip">getCommitComparison</span><span class="chip">getCommitFileDiff</span>
+				<span class="chip">countCommitsBefore</span><span class="chip">commitFileCounts</span><span class="chip">getConfig</span>
+			</div>
+			<div class="more">Source Control 的状态（scm_changes）、任意 revision 文件读取也走同一条引擎缝。</div>
+		</div>
+		<div class="card">
+			<h3><span class="dot" style="color:var(--orange)">●</span>git 写 · 子进程</h3>
+			<div class="via">cmd_graph.rs → <code>git.rs</code> → git CLI（读引擎、写 CLI，与扩展数据源一致）</div>
+			<div class="chips">
+				<span class="chip">fetch</span><span class="chip">pushBranch</span><span class="chip">pullBranch</span>
+				<span class="chip">merge</span><span class="chip">rebase</span><span class="chip">createBranch</span>
+				<span class="chip">deleteTag</span><span class="chip">pushStash</span><span class="chip">resetToCommit</span>
+				<span class="chip">cherrypickCommit</span><span class="chip">revertCommit</span><span class="chip">dropCommit</span>
+			</div>
+			<div class="more">即 WRITE_COMMANDS 集合；Git Commands 菜单复用同一通道（runGraphAction）。</div>
+		</div>
+	</div>
+
+	<!-- ============ 接缝规则 ============ -->
+	<h2>接缝规则：为什么乱不了<span class="en">Seam rules (build-enforced)</span></h2>
+	<div class="rules">
+		<div class="card">
+			<h3>一种语言，一个文件</h3>
+			<ul>
+				<li><b>TypeScript 侧</b> — 只有 <code>src/graphHost.ts</code> 可能调用 <code>graph_request</code>、命名 <code>gitgraph/</code> 资产路径</li>
+				<li><b>CSS 侧</b> — 只有 <code>static/gitgraph/view.html</code> 引用扩展样式（<code>out.min</code>、<code>web/styles</code>）</li>
+				<li><b>Rust 侧</b> — 只有 <code>cmd_graph.rs</code> 调 <code>git-graph-core</code></li>
+			</ul>
+		</div>
+		<div class="card">
+			<h3>读写分离</h3>
+			<ul>
+				<li><b>读</b>（提交 / 引用 / 详情 / 配置）— 一律进程内 gix 引擎，不起子进程</li>
+				<li><b>写</b>（stage / commit / fetch / push…）— 一律 git CLI，且只经 <code>git.rs</code> 一个出口</li>
+				<li>子模块自身的提交、修改永远留在 <code>vscode-git-graph-rs/</code> 里，不进本仓库</li>
+			</ul>
+		</div>
+	</div>
+	<div class="enforce">
+		<b>构建期强制：</b><code>scripts/check-seams.mjs</code>（每次 build / test 运行）与 <code>src-tauri/build.rs</code>（Rust 对应检查）扫描全仓库 ——
+		在 <code>graphHost.ts</code> / <code>view.html</code> / <code>cmd_graph.rs</code> 之外出现 <code>graph_request</code>、<code>gitgraph/</code>、<code>out.min</code> 等引用即 <b>编译失败</b>。
+		接缝是合同，不是习惯。
+	</div>
+
+	<!-- ============ 最少调用模式 ============ -->
+	<h2>低耦合调用：最少调用怎么写<span class="en">Minimal-caller pattern — how new code reaches the plugin</span></h2>
+	<div class="touch">
+		<div class="t"><b>1</b><span>处 <code>invoke('graph_request')</code>，在 graphHost.ts，全应用唯一</span></div>
+		<div class="t"><b>1</b><span>个 Rust 文件消费引擎（cmd_graph.rs；lib.rs 仅注册命令）</span></div>
+		<div class="t"><b>2</b><span>个对外函数：<code>graphRequest</code>（读）/ <code>runGraphAction</code>（写）</span></div>
+		<div class="t"><b>4</b><span>个窄接口导入方（见下表）</span></div>
+		<div class="t"><b>0</b><span>处资产路径 / 协议细节泄漏到接缝之外</span></div>
+	</div>
+	<div class="grid2">
+		<div class="card">
+			<h3>最少调用：读、写各一个函数</h3>
+			<pre class="codeblock"><span class="cm">// 写命令（fetch / push / merge…）：一个函数 = 一整轮协议</span>
+<span class="kw">import</span> &#123; runGraphAction &#125; <span class="kw">from</span> <span class="st">'./graphHost'</span>;
+
+<span class="kw">await</span> <span class="fn">runGraphAction</span>(
+	&#123; command: <span class="st">'fetch'</span>, repo &#125;,         <span class="cm">// 调用方只需命令名 + 参数</span>
+	&#123; settings, confirm: askUser &#125;    <span class="cm">// lossWarning 确认环在内部处理</span>
+);
+
+<span class="cm">// 读命令（commitDetails / compareCommits…）：单次往返</span>
+<span class="kw">const</span> resp = <span class="kw">await</span> <span class="fn">graphRequest</span>(
+	&#123; command: <span class="st">'commitDetails'</span>, repo, commitHash &#125;
+);</pre>
+			<div class="more">iframe、postMessage、Tauri IPC、写命令串行排队、错误规约 —— 全部在 <code>graphHost.ts</code> 内侧；调用方一个 import 一个函数，不含任何协议知识。</div>
+		</div>
+		<div class="card">
+			<h3>现有调用方的依赖面（实测就是这么窄）</h3>
+			<table class="imp">
+				<tr><td>workbench.ts</td><td>GraphHost</td><td>组合根：挂载视图、实现 GraphHostDelegate</td></tr>
+				<tr><td>editor.ts</td><td>CompareHost</td><td>Commit Comparison 标签页</td></tr>
+				<tr><td>gitCommands.ts</td><td>runGraphAction</td><td>Git 菜单的全部写命令复用同一通道</td></tr>
+				<tr><td>fileHistory.ts</td><td>graphRequest</td><td>Timeline 视图的提交读取</td></tr>
+			</table>
+			<div class="more">反向同样解耦：插件调 shell 走 <code>GraphHostDelegate</code>（openFile / openDiff / runInTerminal / repoChanged…），插件也不知道编辑器与终端的存在 —— 双方只认识消息。</div>
+		</div>
+	</div>
+	<div class="enforce">
+		<b>为什么这就是“最少”：</b>协议的「命令名 + 参数对象」是调用方唯一必须共享的知识，再往下没有可删的依赖了 —— 更低只能改成经 <code>commands.ts</code> 命令注册表间接寻址，多一层抽象却不减少任何真实调用。
+		新代码直接 <code>invoke('graph_request')</code> 会被 <code>check-seams.mjs</code> 构建期拦下；正确姿势永远是经 <code>graphHost.ts</code> 的导出。要新增能力：请求在 <code>handleLocally</code> 加 case，动作走命令注册表。
+	</div>
+
+	<!-- ============ 相关文件 ============ -->
+	<h2>相关文件速查<span class="en">File index</span></h2>
+	<div class="card files">
+		<p><code>src/graphHost.ts</code> — TS 接缝：GraphHost（视图宿主）、CompareHost（比对页）、graphRequest / runGraphAction（唯一通道）</p>
+		<p><code>static/gitgraph/view.html</code> — CSS 接缝：webview 页 + acquireVsCodeApi shim + 主题 token 镜像</p>
+		<p><code>src-tauri/src/cmd_graph.rs</code> — Rust 接缝：graph_request 协议分发，engine 读 / git 写</p>
+		<p><code>scripts/prepare.mjs</code> — 装配 <code>target/studio/</code>：拷贝 webview 资产、打包 config.js / compare.js</p>
+		<p><code>scripts/build-ggx.mjs</code> — 打包内置 <code>.ggx</code>（web/ + 可选 git-graph-backend，ggx-rpc/2）</p>
+		<p><code>scripts/check-seams.mjs</code> + <code>src-tauri/build.rs</code> — 两种语言的接缝强制检查</p>
+		<p><code>src-tauri/Cargo.toml</code> — <code>git-graph-core = &#123; path = "../vscode-git-graph-rs/native/core" &#125;</code></p>
+	</div>
+
+</div>
+</body>
+</html>

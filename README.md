@@ -24,8 +24,8 @@ git-graph-studio/
 │                            host page) and theme/*.css (the colour themes)
 ├── src-tauri/               the Rust backend — its own Cargo workspace
 │   ├── src/                 the command modules (fs / scm / graph / search / extensions),
-│   │                        the PTY, the plugin host, the ggx machinery
-│   ├── src/bin/             git-graph-backend: the headless backend binary of the .ggx package
+│   │                        the PTY, the file watcher, the large-file viewer, the CAN parser
+│   ├── build.rs             Tauri codegen + the Rust seam check (only cmd_graph.rs names the engine)
 │   └── .cargo/config.toml   points the Cargo target at target/studio/cargo
 │
 ├── tests/                   the vitest suite — jsdom with a scripted Tauri backend
@@ -65,21 +65,27 @@ tree; `node_modules/` and the submodule's own build products stay where npm/carg
 
 ## Extensions (.ggx and VSIX)
 
-Studio ships git-graph-rs as a **built-in `.ggx` package** — its own plugin format, frontend
-and backend together (`docs/ggs-development-plan.md` §8.2): `scripts/build-ggx.mjs` packs the
-webview assets (`web/`), the extension's manifest and resources, and **`git-graph-backend`**,
-the engine and git runner as a separate process (`src-tauri/src/bin/git-graph-backend.rs`,
-no Tauri, speaking the newline-JSON `ggx-rpc/1` protocol of `backend_rpc.rs`). `prepare.mjs`
-drops it into `target/studio/bundled/`, `tauri.conf.json` bundles it as a resource, and on
-first launch `cmd_ext.rs` unpacks it into `~/.ggs/extensions/` and `plugin_host.rs` starts the
-backend; every request of the graph view then crosses to that process (git's command echo
-streams back into the panel's Git channel), and the view page itself is loaded out of the
-installed package. The built-in cannot be uninstalled, but installing a `.ggx` (or a VSIX)
-with a **higher version upgrades it independently** of the app (a downgrade is refused) — the
-backend restarts on the new binary at once. The same store serves any VSIX the user installs
-by hand (Extensions view → "Install from VSIX or GGX...", or the Command Palette); the
-Extensions page shows each package's format and, for a `.ggx`, its backend's pid, protocol
-and last error with a Restart button.
+git-graph-rs is **built in**: its engine (`git-graph-core`) is linked into the app and answers
+the graph in-process through the single seam `src/graphHost.ts` ↔ `src-tauri/src/cmd_graph.rs`
+(git's command echo for the write path streams into the panel's Git channel), and its webview
+assets are assembled by `scripts/prepare.mjs` into the app's own public dir. The Extensions
+view lists it as a built-in whose version follows the application; it cannot be uninstalled,
+and an install of its id (from a `.vsix` or a `.ggx`) is refused — upgrading the graph means
+upgrading the app (or the submodule it is built from).
+
+Studio's extension store (`~/.ggs/extensions/<id>-<version>/`, a user-level directory like
+`.vscode/extensions`) serves two package formats, installed by hand from local files
+(Extensions view → "Install from VSIX or GGX...", or the Command Palette):
+
+- **VSIX** — VS Code extensions whose `main` is a self-contained bundle (see the extension
+  host below).
+- **`.ggx`** — Studio's own format (`docs/ggs-development-plan.md` §8.2; the packer is
+  `scripts/build-ggx.mjs`): a zip with a `manifest.json` header (`format: "ggx/1"`, id,
+  version, the frontend page under `web/`) next to the VS Code-style `package.json` the
+  Extensions view and the contribution points read.
+
+A `.ggx` and a `.vsix` of the same id are the same extension; whichever has the higher version
+wins, and a downgrade is refused. The Extensions page shows each package's format.
 
 The Extensions view also parses each install's richer metadata — `displayName`, icon,
 categories, repository, license, `engines.vscode`, `extensionDependencies` / `extensionPack` —

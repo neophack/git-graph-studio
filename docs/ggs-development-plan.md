@@ -203,7 +203,7 @@ Release numbers on 20,000 files (Windows, NVMe): walk 30 ms, raw read 938 ms, se
 | Task | What landed |
 |---|---|
 | M1.6 frontend splitting | The text editor widget is `textEditor.ts`, loaded on the first file / diff open (`lazy.ts`); xterm and `@codemirror/merge` are async chunks too; Vite emits `dist/first-paint.json` (the static closure of the boot entry + workbench) and `measure.mjs` gates it: **902 KB → 200 KB** first paint (workbench 173 KB + Tauri API 16 KB + boot 9 KB); `tests/lazy.test.ts` guards the module graph |
-| **git-graph-rs as a `.ggx` plugin** (§8.2) | `app/src-tauri` is a library + two binaries: the app (`desktop` feature) and **`git-graph-backend`** (no Tauri: the engine seam + git runner behind `ggx-rpc/1`, `src/bin/git-graph-backend.rs`, 3.9 MB release). `plugin_host.rs` spawns the installed package's binary, pairs answers by id, streams its `log` events and stderr into the panel's Git channel, restarts it after a crash, and `graph_request` forwards to it (falling back in-process when it is unhealthy). `cmd_ext` installs `.ggx` next to VSIX (same upgrade rules, platform binary resolved, `format` / `backend` on `ExtInfo`); `install_bundled` prefers the `.ggx`. `scripts/build-ggx.mjs` packs `web/` + `backend/<platform>/` + manifests (2.2 MB, replaces the slim VSIX); `prepare.mjs` bundles it (`--with-backend` on release builds). `graphHost.ts` loads the view page, `config.js` and `compare.js` **from the installed package** (same-origin `srcdoc` + blob URLs, `/gitgraph/` as the fallback). The Extensions page shows the format and the backend's pid / protocol / last error with a Restart button. Tests: `backend_rpc.rs` (protocol), `tests/backend_rpc.rs` (the real process: reads, a write with its log event, a 6-way burst, stop / restart), `cmd_ext::ggx_tests`, `graphAssets.test.ts`, `extensions.test.ts` |
+| **git-graph-rs as a `.ggx` plugin** (§8.2) — *monorepo only; not carried into this repository, see the status note in §8.2* | `app/src-tauri` is a library + two binaries: the app (`desktop` feature) and **`git-graph-backend`** (no Tauri: the engine seam + git runner behind `ggx-rpc/1`, `src/bin/git-graph-backend.rs`, 3.9 MB release). `plugin_host.rs` spawns the installed package's binary, pairs answers by id, streams its `log` events and stderr into the panel's Git channel, restarts it after a crash, and `graph_request` forwards to it (falling back in-process when it is unhealthy). `cmd_ext` installs `.ggx` next to VSIX (same upgrade rules, platform binary resolved, `format` / `backend` on `ExtInfo`); `install_bundled` prefers the `.ggx`. `scripts/build-ggx.mjs` packs `web/` + `backend/<platform>/` + manifests (2.2 MB, replaces the slim VSIX); `prepare.mjs` bundles it (`--with-backend` on release builds). `graphHost.ts` loads the view page, `config.js` and `compare.js` **from the installed package** (same-origin `srcdoc` + blob URLs, `/gitgraph/` as the fallback). The Extensions page shows the format and the backend's pid / protocol / last error with a Restart button. Tests: `backend_rpc.rs` (protocol), `tests/backend_rpc.rs` (the real process: reads, a write with its log event, a 6-way burst, stop / restart), `cmd_ext::ggx_tests`, `graphAssets.test.ts`, `extensions.test.ts` |
 
 ### 1.4 The headline gaps (after 2026-09-13)
 
@@ -577,6 +577,16 @@ VSIX compatibility (above) is for the existing ecosystem. GGS's *own* plugin for
 **Delivery**: the `web` kind is M6.1 (the Worker host is shared with VSIX support); `process` **shipped 2026-09-13 for git-graph-rs** (§8.2). Native code that a plugin needs (a tree-sitter grammar pack, §M4) ships as a `process` too.
 
 ### 8.2 The `.ggx` package, as shipped (ggx/1)
+
+> **Status in this repository (2026-09-15).** The design below was landed in the monorepo's
+> `app/` tree, but the process backend did not come across in the split into this repository:
+> there is no `src/bin/git-graph-backend.rs`, `backend_rpc.rs` or `plugin_host.rs`, and
+> `Cargo.toml` builds one binary (`git-graph-studio`). What ships today is the **in-process**
+> engine behind the single seam (`cmd_graph.rs` / `graphHost.ts`); `cmd_ext.rs` installs
+> frontend-only `ggx/1` packages (`manifest.json` header + `web/`) and lists git-graph-rs as a
+> built-in whose version follows the app. The process backend (`backend` header, `ggx-rpc`,
+> host restart) is the M6 target, not the current state — `README.md` → *Extensions*
+> describes the shipped behaviour.
 
 git-graph-rs is the first `.ggx`: **frontend and backend in one package**, installed and upgraded like any extension, the backend running as its own process.
 
