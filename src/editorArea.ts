@@ -208,6 +208,11 @@ export class EditorArea {
 		return fresh;
 	}
 
+	/** Focus the active group's active editor view (F6's cycle stops here). */
+	focusActiveEditor(): void {
+		this.activeGroup.activeView?.focus();
+	}
+
 	/** Focus the nth group (Ctrl+1/2/3, 0-based). */
 	focusIndex(index: number): void {
 		const leaves = this.leaves();
@@ -640,6 +645,7 @@ export class EditorArea {
 	goToDefinition = () => this.activeGroup.goToDefinition();
 	findReferences = () => this.activeGroup.findReferences();
 	openCallTreeAtCursor = () => this.activeGroup.openCallTreeAtCursor();
+	openSymbolDatabase = () => this.activeGroup.openSymbolDatabase();
 	gotoSymbolInFile = () => this.activeGroup.gotoSymbolInFile();
 	lineInfo = () => this.activeGroup.lineInfo();
 	gotoLine = (line: number, column = 1) => this.activeGroup.gotoLine(line, column);

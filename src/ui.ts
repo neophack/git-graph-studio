@@ -38,6 +38,56 @@ export function escapeHtml(text: string): string {
 	return text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string);
 }
 
+/* ---------- Delayed tooltips and the busy cursor (M7 7.8) ---------- */
+
+/** How long the pointer must rest on an element before its tooltip appears - long enough
+ *  that a pass across the bar shows nothing (VS Code's own delay). */
+const TOOLTIP_DELAY = 500;
+let tooltipTimer: number | null = null;
+let tooltipElement: HTMLElement | null = null;
+
+function hideTooltip(): void {
+	if (tooltipTimer !== null) {
+		clearTimeout(tooltipTimer);
+		tooltipTimer = null;
+	}
+	tooltipElement?.remove();
+	tooltipElement = null;
+}
+
+/** A delayed custom tooltip in place of the native `title` popup (M7 7.8): VS Code-style
+ *  hover-after-a-rest, keyboard-reachable, and gone on any pointer or focus move. The text
+ *  is a callback so a label that changes (a status item's counts) stays fresh. */
+export function tooltip(element: HTMLElement, text: () => string): void {
+	// The native title would race this tooltip with its own popup; the accessible name stays
+	// for screen readers either way.
+	element.removeAttribute('title');
+	element.setAttribute('aria-label', text());
+	const show = () => {
+		hideTooltip();
+		tooltipTimer = window.setTimeout(() => {
+			tooltipTimer = null;
+			const tip = el('div', 'tooltip', [text()]);
+			tooltipElement = tip;
+			(document.getElementById('overlays') ?? document.body).appendChild(tip);
+			const bounds = element.getBoundingClientRect();
+			tip.style.left = `${Math.max(4, Math.min(bounds.left, window.innerWidth - 260))}px`;
+			tip.style.top = `${bounds.bottom + 4}px`;
+		}, TOOLTIP_DELAY);
+	};
+	element.addEventListener('mouseenter', show);
+	element.addEventListener('focusin', show);
+	element.addEventListener('mouseleave', hideTooltip);
+	element.addEventListener('blur', hideTooltip);
+	element.addEventListener('mousedown', hideTooltip);
+}
+
+/** The workbench's busy state (M7 7.8): a progress cursor over everything while a long,
+ *  user-initiated task runs, without blocking a single interaction. */
+export function busy(on: boolean): void {
+	document.body.classList.toggle('busy', on);
+}
+
 export function basename(path: string): string {
 	const normalised = path.replace(/[\\/]+$/, '');
 	const index = Math.max(normalised.lastIndexOf('/'), normalised.lastIndexOf('\\'));

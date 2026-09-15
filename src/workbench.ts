@@ -30,7 +30,7 @@ import { SETTINGS_EVENT, settings, updateSetting } from './settings';
 import * as state from './state';
 import { StatusBar } from './statusbar';
 import { TitleBar } from './titlebar';
-import { basename, el, icon, notify, quickInput, quickPick, relativeTo, toPosix, type MenuEntry, type QuickPickItem, type QuickPickSource } from './ui';
+import { basename, busy, el, icon, notify, quickInput, quickPick, relativeTo, toPosix, tooltip, type MenuEntry, type QuickPickItem, type QuickPickSource } from './ui';
 import { FilePickSource } from './filePicker';
 
 type ViewId = 'explorer' | 'search' | 'scm' | 'extensions';
@@ -466,6 +466,9 @@ export class Workbench {
 			const item = el('div', 'activity-item', [content]);
 			item.title = title;
 			item.setAttribute('role', 'button');
+			// Focusable for F6's cycle, with the workbench's delayed tooltip (M7).
+			item.tabIndex = 0;
+			tooltip(item, () => title);
 			item.addEventListener('click', onClick);
 			this.activityItems[id] = item;
 			this.activityBar.appendChild(item);

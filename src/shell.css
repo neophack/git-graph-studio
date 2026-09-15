@@ -7,6 +7,35 @@
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
+
+/*
+ * Motion and density tokens (M7 7.2 / 7.3): every transition this sheet declares reads the
+ * durations, every strip that hardcoded its height reads the density variables, and
+ * prefers-reduced-motion collapses it all below the threshold of perception.
+ */
+:root {
+	--motion-fast: 80ms;
+	--motion-normal: 150ms;
+	--ease-out: cubic-bezier(0, 0, 0.2, 1);
+	--ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+	/* The comfortable density is exactly the VS Code sizes the sheet always used; the
+	 * Compact setting (settings.ts applyDensity) overrides all five at once. */
+	--row-height: 22px;
+	--tab-height: 35px;
+	--status-height: 22px;
+	--activity-size: 48px;
+	--panel-tab-height: 30px;
+}
+@media (prefers-reduced-motion: reduce) {
+	*, *::before, *::after {
+		transition-duration: 0.01ms !important;
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+	}
+}
+
+/* The busy cursor (M7 7.8): a user-initiated long task runs, the pointer says so. */
+body.busy, body.busy .cm-editor, body.busy .tabs-container { cursor: progress; }
 html, body { height: 100%; margin: 0; overflow: hidden; }
 body {
 	display: flex; flex-direction: column;
@@ -23,10 +52,19 @@ button { cursor: pointer; }
 .codicon { display: inline-block; text-align: center; flex: none; }
 .codicon-sized-14 { font-size: 14px; }
 
+.row, .tab, .action-btn, .status-item, .activity-item, .panel-title, .context-menu .item, .quick-input .row {
+	transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+/* macOS (M7 7.1): the Overlay title bar keeps the native traffic lights, so the bar
+   reserves their width on the left and our own window controls stand down. */
+body.mac #titlebar { padding-left: 76px; }
+body.mac .window-controls { display: none; }
+
 /* ---------- Frame ---------- */
 #workbench { display: flex; flex: 1; min-height: 0; }
 #statusbar {
-	display: flex; align-items: center; height: 22px; flex: none;
+	display: flex; align-items: center; height: var(--status-height); flex: none;
 	background: var(--vscode-statusBar-background); color: var(--vscode-statusBar-foreground);
 	border-top: 1px solid var(--vscode-statusBar-border); font-size: 12px;
 }
@@ -34,12 +72,12 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 
 /* ---------- Activity bar ---------- */
 #activitybar {
-	width: 48px; flex: none; display: flex; flex-direction: column;
+	width: var(--activity-size); flex: none; display: flex; flex-direction: column;
 	background: var(--vscode-activityBar-background);
 	border-right: 1px solid var(--vscode-activityBar-border);
 }
 .activity-item {
-	position: relative; width: 48px; height: 48px; display: flex; align-items: center; justify-content: center;
+	position: relative; width: var(--activity-size); height: var(--activity-size); display: flex; align-items: center; justify-content: center;
 	color: var(--vscode-activityBar-inactiveForeground); cursor: pointer;
 }
 .activity-item .codicon { font-size: 24px; }
@@ -98,7 +136,7 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 
 /* Lists & trees (22px rows) */
 .row {
-	display: flex; align-items: center; height: 22px; padding-right: 6px; white-space: nowrap;
+	display: flex; align-items: center; height: var(--row-height); padding-right: 6px; white-space: nowrap;
 	cursor: pointer; color: var(--vscode-sideBar-foreground); position: relative;
 }
 .row:hover { background: var(--vscode-list-hoverBackground); }
@@ -107,7 +145,7 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 	background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground);
 	outline: 1px solid var(--vscode-list-focusOutline); outline-offset: -1px;
 }
-.row .twistie { width: 16px; height: 22px; display: flex; align-items: center; justify-content: center; font-size: 16px; flex: none; }
+.row .twistie { width: 16px; height: var(--row-height); display: flex; align-items: center; justify-content: center; font-size: 16px; flex: none; }
 .row .icon { width: 16px; height: 16px; font-size: 16px; margin-right: 6px; flex: none; display: inline-flex; align-items: center; justify-content: center; }
 .row .icon img { width: 16px; height: 16px; }
 /* Label + description joined into one truncating run: the trailing path ellipsizes first. */
@@ -174,7 +212,7 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
    spacer, rows positioned absolutely at their index. */
 .scm-list { flex: 1; min-height: 0; overflow: auto; position: relative; }
 .scm-rows { position: relative; }
-.scm-rows > .row, .scm-rows > .pane-header, .scm-rows > .scm-empty { position: absolute; left: 0; right: 0; height: 22px; box-sizing: border-box; }
+.scm-rows > .row, .scm-rows > .pane-header, .scm-rows > .scm-empty { position: absolute; left: 0; right: 0; height: var(--row-height); box-sizing: border-box; }
 .scm-rows > .scm-empty { padding: 0 20px; line-height: 22px; }
 
 /* ---------- Source control ---------- */
@@ -206,12 +244,12 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 #editorPart { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 #editorGroup { flex: 1; display: flex; flex-direction: column; min-height: 0; background: var(--vscode-editor-background); }
 .tabs-container {
-	display: flex; height: 35px; flex: none; overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+	display: flex; height: var(--tab-height); flex: none; overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
 	background: var(--vscode-editorGroupHeader-tabsBackground); border-bottom: 1px solid var(--vscode-editorGroupHeader-tabsBorder);
 }
 .tabs-container::-webkit-scrollbar { display: none; }
 .tab {
-	position: relative; display: flex; align-items: center; gap: 6px; height: 35px; padding: 0 6px 0 10px; min-width: 120px;
+	position: relative; display: flex; align-items: center; gap: 6px; height: var(--tab-height); padding: 0 6px 0 10px; min-width: 120px;
 	border-right: 1px solid var(--vscode-tab-border); background: var(--vscode-tab-inactiveBackground);
 	color: var(--vscode-tab-inactiveForeground); font-size: 13px; white-space: nowrap; cursor: pointer; flex: none;
 }
@@ -318,9 +356,9 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 }
 #panel.maximized { flex: 1; }
 #editorPart.panel-maximized #editorGroup { display: none; }
-.panel-header { display: flex; align-items: center; height: 35px; flex: none; padding: 0 8px 0 20px; }
+.panel-header { display: flex; align-items: center; height: var(--panel-tab-height); flex: none; padding: 0 8px 0 20px; }
 .panel-title {
-	position: relative; font-size: 11px; text-transform: uppercase; padding: 0 2px; line-height: 35px;
+	position: relative; font-size: 11px; text-transform: uppercase; padding: 0 2px; line-height: var(--panel-tab-height);
 	color: var(--vscode-panelTitle-activeForeground);
 }
 .panel-title::after { content: ''; position: absolute; left: 0; right: 0; bottom: 6px; height: 1px; background: var(--vscode-panelTitle-activeBorder); }
@@ -332,13 +370,78 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 .terminal-instance .xterm { height: 100%; }
 .terminal-tabs { width: 160px; flex: none; border-left: 1px solid var(--vscode-panel-border); overflow: auto; padding: 4px 0; }
 .terminal-tabs[hidden] { display: none; }
-.terminal-tabs .row { padding-left: 8px; height: 22px; }
+.terminal-tabs .row { padding-left: 8px; height: var(--row-height); }
 .terminal-tabs .row.active { border-left: 2px solid var(--vscode-terminal-tab-activeBorder); padding-left: 6px; }
 .terminal-tabs .row .actions { display: none; }
 .terminal-tabs .row:hover .actions { display: flex; }
 
+/* The saved tab flashes once (M7 7.8): renderTabs marks it, the animation retires it. */
+.tab.just-saved { animation: tab-saved var(--motion-normal) var(--ease-out); }
+@keyframes tab-saved {
+	from { background: var(--vscode-list-activeSelectionBackground); }
+	to { background: transparent; }
+}
+
+/* The delayed tooltip (ui.ts): a hover card anchored under its element. */
+.tooltip {
+	position: fixed; z-index: 100; max-width: 260px; padding: 4px 8px;
+	background: var(--vscode-editorHoverWidget-background);
+	border: 1px solid var(--vscode-editorHoverWidget-border);
+	border-radius: 3px; color: var(--vscode-editorHoverWidget-foreground);
+	font-size: 12px; line-height: 1.3; pointer-events: none;
+	box-shadow: 0 2px 8px var(--vscode-widget-shadow);
+}
+
+/* ---------- Symbol Database page (M4) ---------- */
+
+.symbol-db { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.sd-header {
+	display: flex; align-items: center; gap: 8px; padding: 6px 12px; flex: none;
+	border-bottom: 1px solid var(--vscode-panel-border);
+}
+.sd-title { font-size: 12px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
+.sd-filter {
+	flex: 1; max-width: 260px; height: 24px; padding: 0 8px; border-radius: 4px;
+	background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, transparent); font-size: 12px;
+}
+.sd-list { flex: 1; min-height: 0; overflow: auto; padding: 4px 0 12px; }
+.sd-empty { color: var(--vscode-descriptionForeground); padding: 12px 20px; }
+.sd-row {
+	display: flex; align-items: center; gap: 6px; height: var(--row-height);
+	padding-right: 12px; white-space: nowrap; cursor: pointer; position: relative;
+	padding-left: calc(8px + var(--depth, 0) * 14px);
+	color: var(--vscode-sideBar-foreground);
+}
+.sd-row:hover { background: var(--vscode-list-hoverBackground); }
+.sd-row .twistie { width: 16px; flex: none; font-size: 14px; display: inline-flex; justify-content: center; }
+.sd-row .description { color: var(--vscode-descriptionForeground); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+.sd-row .tail { margin-left: auto; color: var(--vscode-descriptionForeground); font-size: 11px; }
+.sd-row:not(.container):hover .label { color: var(--vscode-textLink-foreground); }
+
+/* ---------- Context window (M4 4.7) ---------- */
+
+.context-panel { display: flex; flex-direction: column; min-height: 0; }
+.context-body { flex: 1; min-height: 0; overflow: auto; padding: 6px 10px; }
+.context-empty { color: var(--vscode-descriptionForeground); padding: 10px 0; }
+.context-header { display: flex; align-items: center; gap: 8px; padding: 2px 0 6px; }
+.context-name { font-weight: 600; }
+.context-kind { color: var(--vscode-descriptionForeground); font-size: 11px; text-transform: uppercase; }
+.context-location {
+	margin-left: auto; background: none; border: none; padding: 1px 6px; border-radius: 3px;
+	color: var(--vscode-textLink-foreground); font-size: 12px;
+}
+.context-location:hover { background: var(--vscode-toolbar-hoverBackground); }
+.context-code {
+	margin: 0; padding: 6px 8px; border-radius: 4px; overflow: auto;
+	background: var(--vscode-editor-background);
+	border: 1px solid var(--vscode-panel-border);
+	font-family: var(--monaco-monospace-font); font-size: var(--editor-font-size, 13px);
+	line-height: 1.45; white-space: pre; user-select: text;
+}
+
 /* ---------- Sashes ---------- */
-.sash { flex: none; z-index: 30; background: transparent; transition: background 0.1s 0.2s; }
+.sash { flex: none; z-index: 30; background: transparent; transition: background var(--motion-fast) ease 0.2s; }
 .sash-vertical { width: 4px; margin: 0 -2px; cursor: ew-resize; }
 .sash-horizontal { height: 4px; margin: -2px 0; cursor: ns-resize; }
 .sash:hover, .sash.active { background: var(--vscode-sash-hoverBorder); }
@@ -347,7 +450,7 @@ body.resizing iframe { pointer-events: none; }
 
 /* ---------- Status bar ---------- */
 .status-item {
-	display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 5px; margin: 0 3px; white-space: nowrap;
+	display: inline-flex; align-items: center; gap: 4px; height: var(--status-height); padding: 0 5px; margin: 0 3px; white-space: nowrap;
 	color: inherit; cursor: pointer; border-radius: 3px;
 }
 .status-item .codicon { font-size: 14px; }
@@ -361,6 +464,13 @@ body.resizing iframe { pointer-events: none; }
 .status-item.static:hover { background: transparent; }
 .status-left { display: flex; align-items: center; padding-left: 4px; overflow: hidden; }
 .status-right { display: flex; align-items: center; margin-left: auto; padding-right: 4px; }
+
+/* The palette rises in place (M7 7.2) - colourless motion, under the 150 ms line. */
+.quick-input { animation: quick-in var(--motion-normal) var(--ease-out); }
+@keyframes quick-in {
+	from { opacity: 0; transform: translateY(2px); }
+	to { opacity: 1; transform: translateY(0); }
+}
 
 /* ---------- Notifications ---------- */
 #notifications { position: fixed; right: 12px; bottom: 30px; width: 450px; max-width: calc(100vw - 24px); display: flex; flex-direction: column; gap: 8px; z-index: 100; }
@@ -422,7 +532,7 @@ body.resizing iframe { pointer-events: none; }
 .fast-outline { display: flex; flex-direction: column; width: 220px; flex: none; overflow-y: auto; border-right: 1px solid var(--vscode-sideBarSectionHeader-border); background: var(--vscode-sideBar-background); font-size: 12px; }
 .fast-outline-title { padding: 6px 10px 4px; color: var(--vscode-sideBarSectionHeader-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
 .fast-outline-list { position: relative; flex: none; }
-.fast-outline-item { position: absolute; left: 0; right: 0; height: 22px; box-sizing: border-box; display: flex; align-items: center; gap: 6px; padding: 3px 10px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fast-outline-item { position: absolute; left: 0; right: 0; height: var(--row-height); box-sizing: border-box; display: flex; align-items: center; gap: 6px; padding: 3px 10px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fast-outline-item:hover { background: var(--vscode-list-hoverBackground); }
 .fast-scroll { position: relative; flex: 1; min-width: 0; overflow: auto; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); font-weight: var(--vscode-editor-font-weight); color: var(--vscode-editor-foreground); }
 .fast-spacer { width: 1px; min-width: 100%; }
@@ -537,7 +647,7 @@ body.resizing iframe { pointer-events: none; }
 #titlebar.maximized .titlebar-logo { margin-left: 10px; }
 
 /* ---------- Panel tabs & output ---------- */
-.panel-tabs { display: flex; align-items: center; gap: 12px; height: 35px; }
+.panel-tabs { display: flex; align-items: center; gap: 12px; height: var(--panel-tab-height); }
 .panel-title { position: relative; font-size: 11px; text-transform: uppercase; padding: 0 2px; line-height: 35px; cursor: pointer; color: var(--vscode-panelTitle-inactiveForeground); }
 .panel-title:hover, .panel-title.active { color: var(--vscode-panelTitle-activeForeground); }
 .panel-title::after { content: ''; position: absolute; left: 0; right: 0; bottom: 6px; height: 1px; background: transparent; }

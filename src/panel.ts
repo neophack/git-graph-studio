@@ -154,11 +154,17 @@ export class Panel {
 
 	private render(): void {
 		this.renderTabLabels();
-		for (const tab of this.tabs.children) tab.classList.toggle('active', (tab as HTMLElement).dataset['view'] === this.active);
+		for (const tab of this.tabs.children) {
+			const selected = (tab as HTMLElement).dataset['view'] === this.active;
+			tab.classList.toggle('active', selected);
+			// The tablist contract: the selected tab is labelled as such (M7 7.6).
+			tab.setAttribute('aria-selected', selected ? 'true' : 'false');
+		}
 		this.terminal.element.hidden = this.active !== 'terminal';
 		this.output.element.hidden = this.active !== 'output';
+		this.context.element.hidden = this.active !== 'context';
 		this.actionsHost.innerHTML = '';
-		this.actionsHost.appendChild(this.active === 'terminal' ? this.terminal.actions : this.output.actions);
+		this.actionsHost.appendChild(this.active === 'terminal' ? this.terminal.actions : this.active === 'output' ? this.output.actions : this.context.actions);
 	}
 
 	private renderTabLabels(): void {

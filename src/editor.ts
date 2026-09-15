@@ -2051,8 +2051,20 @@ export class EditorGroup {
 		}
 		editor.dirty = false;
 		this.renderTabs();
+		this.flashSavedTab(editor);
 		this.forgetBackup(editor);
 		this.onFileSaved?.(editor.input.path);
+	}
+
+	/** Xcode's save acknowledgement (M7 7.8): the saved tab flashes once. renderTabs rebuilt
+	 *  the strip, so the tab is re-found by position among the group's tabs. */
+	private flashSavedTab(editor: Editor): void {
+		const at = this.open.indexOf(editor);
+		if (at < 0) return;
+		const tab = this.tabs.children[at] as HTMLElement | undefined;
+		if (!tab) return;
+		tab.classList.add('just-saved');
+		window.setTimeout(() => tab.classList.remove('just-saved'), 200);
 	}
 
 	/** A saved or discarded buffer has nothing left to recover. */
@@ -2560,6 +2572,7 @@ export class EditorGroup {
 		for (const editor of this.open) {
 			const tab = el('div', 'tab' + (editor === this.active ? ' active' : '') + (editor.dirty ? ' dirty' : ''));
 			tab.setAttribute('role', 'tab');
+			tab.setAttribute('aria-selected', editor === this.active ? 'true' : 'false');
 			tab.title = editor.input.kind === 'file' ? editor.input.path : editor.label;
 			const iconElement = el('span', 'icon');
 			if (editor.iconSrc) {

@@ -89,6 +89,10 @@ export const SETTING_DEFS: SettingDef[] = [
 		{ value: 'keep', label: 'settings.linuxDmabuf.keep' }
 	] },
 	{ key: 'theme', category: 'appearance', kind: 'theme' },
+	{ key: 'density', category: 'appearance', kind: 'enum', options: [
+		{ value: 'comfortable', label: 'settings.density.comfortable' },
+		{ value: 'compact', label: 'settings.density.compact' }
+	] },
 	{ key: 'autoSave', category: 'editor', kind: 'enum', options: [
 		{ value: 'off', label: 'settings.autoSave.off' },
 		{ value: 'afterDelay', label: 'settings.autoSave.afterDelay' },
@@ -126,7 +130,14 @@ export interface ThemeDef {
 	css: string;
 }
 
+/** The theme the system's colour scheme picks for `auto` (dark first, VS Code's tie-break). */
+function systemTheme(): ThemeDef {
+	const dark = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches;
+	return themeById(dark ? 'dark-modern' : 'light-modern');
+}
+
 export const THEMES: ThemeDef[] = [
+	{ id: 'auto', label: 'Auto (System)', kind: 'vscode-dark', css: '/theme/dark-modern.css' },
 	{ id: 'dark-modern', label: 'Dark Modern', kind: 'vscode-dark', css: '/theme/dark-modern.css' },
 	{ id: 'light-modern', label: 'Light Modern', kind: 'vscode-light', css: '/theme/light-modern.css' },
 	{ id: 'dark-plus', label: 'Default Dark+', kind: 'vscode-dark', css: '/theme/dark-plus.css' },
@@ -137,7 +148,9 @@ export const THEMES: ThemeDef[] = [
 ];
 
 export function themeById(id: string = settings.theme): ThemeDef {
-	return THEMES.find((theme) => theme.id === id) ?? THEMES[0]!;
+	if (id === 'auto') return systemTheme();
+	// The fallback is the shipped default, not THEMES[0] - that is the `auto` placeholder.
+	return THEMES.find((theme) => theme.id === id) ?? THEMES.find((theme) => theme.id === 'dark-modern')!;
 }
 
 function dispatch(name: string, detail?: unknown): void {
@@ -148,6 +161,11 @@ function dispatch(name: string, detail?: unknown): void {
  *  new stylesheet has loaded, so anything that read computed colors can re-read them. */
 export function applyTheme(id: string = settings.theme): void {
 	const theme = themeById(id);
+	if (id === 'auto') {
+		// The pick is re-evaluated on every system switch (the listener below), so the
+		// placeholder entry in the select never names a stylesheet itself.
+		installSystemThemeListener();
+	}
 	const link = document.querySelector<HTMLLinkElement>('link#theme-css');
 	for (const element of [document.documentElement, document.body]) {
 		if (!element) continue;
@@ -172,6 +190,8 @@ export function updateSetting<K extends keyof AppSettings>(key: K, value: AppSet
 	if (key === 'theme') applyTheme();
 	if (key === 'locale') setLocale(String(value));
 	if (key === 'fontSize') applyFontSize();
+	if (key === 'density') applyDensity();
+	if (key === 'fileAssociations') applyFileAssociations();
 	persistSettingsFile();
 	dispatch(SETTINGS_EVENT, key);
 }
@@ -214,9 +234,35 @@ export function applyFontSize(size: number = settings.fontSize): void {
 	document.documentElement.style.setProperty('--editor-font-size', `${size}px`);
 }
 
+/** The workbench density travels as the row/tab/bar height variables (M7 7.3): every strip
+ *  that hardcoded its height reads one of these, so one setting re-packs the whole shell. */
+export function applyDensity(density: WorkbenchDensity = settings.density): void {
+	const values = density === 'compact'
+		? { row: '20px', tab: '30px', status: '20px', activity: '44px', panelTab: '26px' }
+		: { row: '22px', tab: '35px', status: '22px', activity: '48px', panelTab: '30px' };
+	const root = document.documentElement.style;
+	root.setProperty('--row-height', values.row);
+	root.setProperty('--tab-height', values.tab);
+	root.setProperty('--status-height', values.status);
+	root.setProperty('--activity-size', values.activity);
+	root.setProperty('--panel-tab-height', values.panelTab);
+}
+
+/** `prefers-color-scheme` listener for the `auto` theme: a system switch re-applies while the
+ *  setting says auto. Installed at most once, and only when auto is in play at all. */
+let systemThemeListenerInstalled = false;
+function installSystemThemeListener(): void {
+	if (systemThemeListenerInstalled || typeof matchMedia !== 'function') return;
+	systemThemeListenerInstalled = true;
+	matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+		if (settings.theme === 'auto') applyTheme('auto');
+	});
+}
+
 /** Boot-time initialisation: the persisted theme and locale take effect before the shell. */
 export function initSettings(): void {
 	setLocale(settings.locale);
 	applyTheme();
 	applyFontSize();
+	applyDensity();
 }
