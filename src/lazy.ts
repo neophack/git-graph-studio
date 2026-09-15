@@ -34,3 +34,18 @@ export const loadCanViews = once(async () => {
 /** The hex viewer, loaded with the first binary file; the hex comparison shares its helpers. */
 export const loadHexView = once(() => import('./hexView'));
 export const loadHexCompare = once(() => import('./hexCompare'));
+
+/** The shipped extensions' settings schemas (`virtual:builtin-settings`, baked at build time):
+ *  ~100 KB of configuration and localised descriptions that only the Settings dialog renders,
+ *  so the first-paint bundle carries just the command/menu slice. */
+export const loadBuiltinSettings = once(() => import('virtual:builtin-settings'));
+
+/** The Fast Viewer (a read-only large file), the folder-compare and merge-conflict views, the
+ *  file-history timeline, the call tree and the workspace snippets - each opens with its first
+ *  use, and together they keep the first-paint bundle to what the workbench paints with. */
+export const loadFastView = once(() => import('./fastView'));
+export const loadFolderCompare = once(() => import('./folderCompare'));
+export const loadMergeEditor = once(() => import('./mergeEditor'));
+export const loadFileHistory = once(() => import('./fileHistory'));
+export const loadCallTree = once(() => import('./callTree'));
+export const loadSnippetRegistry = once(() => import('./snippetRegistry'));

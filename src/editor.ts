@@ -9,25 +9,26 @@ import type { MergeView } from '@codemirror/merge';
 import { invoke } from '@tauri-apps/api/core';
 
 import { hasBookmark, toggleBookmark } from './bookmarks';
-import { loadCanViews, loadHexCompare, loadHexView, loadMerge, loadTextEditor } from './lazy';
-import { FastView } from './fastView';
+import { loadCanViews, loadCallTree, loadFastView, loadFileHistory, loadFolderCompare, loadHexCompare, loadHexView, loadMerge, loadMergeEditor, loadSnippetRegistry, loadTextEditor } from './lazy';
 // The hex and CAN views are async chunks (lazy.ts): a binary or a CAN trace is the exception
-// among opens, and their code would otherwise ride in the first-paint bundle.
+// among opens, and their code would otherwise ride in the first-paint bundle. The fast
+// viewer, the folder-compare, merge-conflict, file-history and call-tree views and the
+// workspace snippets are the same - each opens with its first use.
+import type { FastView } from './fastView';
 import type { HexView } from './hexView';
 import type { HexCompareView } from './hexCompare';
 import type { CanLogView } from './canLogView';
 import type { CanRawView } from './canRawView';
 import type { EditableDocView } from './docEditView';
 import { imageMime, renderMarkdown } from './markdown';
-import { blameLabel, FileHistoryView, type BlameLine } from './fileHistory';
-import { loadWorkspaceSnippets } from './snippetRegistry';
+import type { BlameLine, FileHistoryView } from './fileHistory';
 import type * as TextEditor from './textEditor';
-import { CallTreeView, type WsSymbol } from './callTree';
+import type { CallTreeView, WsSymbol } from './callTree';
 import { commands } from './commands';
 import { menuSection } from './contributions';
 import { CompareHost } from './graphHost';
-import { FolderCompareView } from './folderCompare';
-import { MergeToolbar } from './mergeEditor';
+import type { FolderCompareView } from './folderCompare';
+import type { MergeToolbar } from './mergeEditor';
 import { t } from './i18n';
 import { SETTINGS_EVENT, settings } from './settings';
 import { basename, dirname, el, icon, joinPath, notify, quickPick, relativeTo, showContextMenu, toPosix, type MenuEntry } from './ui';
@@ -403,7 +404,7 @@ export class EditorGroup {
 		this.navIndex = -1;
 		workspaceFileCache.clear();
 		// The workspace's `*.code-snippets` join the completion's snippet set.
-		void loadWorkspaceSnippets(rootPath);
+		void loadSnippetRegistry().then((snippets) => snippets.loadWorkspaceSnippets(rootPath));
 		this.onNavigationChange?.();
 		this.update();
 	}
@@ -576,6 +577,7 @@ export class EditorGroup {
 	 *  Frames bar stays above the viewer. */
 	private async tryMountFastView(editor: Editor, parent: HTMLElement = editor.pane): Promise<boolean> {
 		if (editor.input.kind !== 'file') return false;
+		const { FastView } = await loadFastView();
 		const view = new FastView(parent);
 		if (!(await view.openFile(editor.input.path))) {
 			view.dispose();
@@ -954,7 +956,7 @@ export class EditorGroup {
 	}
 
 	/** The file history tab of a file (Git: Open File History). */
-	openFileHistory(path: string = this.activeInput?.kind === 'file' ? this.activeInput.path : ''): void {
+	async openFileHistory(path: string = this.activeInput?.kind === 'file' ? this.activeInput.path : ''): Promise<void> {
 		if (!path || !this.rootPath) return;
 		const id = 'history:' + path;
 		const existing = this.open.find((e) => e.id === id);
@@ -962,6 +964,7 @@ export class EditorGroup {
 			this.activate(existing);
 			return;
 		}
+		const { FileHistoryView } = await loadFileHistory();
 		const editor: Editor = {
 			input: { kind: 'history', path },
 			id,
@@ -993,6 +996,7 @@ export class EditorGroup {
 			return;
 		}
 		if (!editor.view || !Array.isArray(lines)) return;
+		const { blameLabel } = await loadFileHistory();
 		const now = Date.now();
 		editor.view.dispatch({ effects: cm.blameSlot.reconfigure(cm.blameGutter(lines.map((line) => ({ label: blameLabel(line, now), title: `${line.hash.slice(0, 8)} ${line.summary}` })))) });
 		editor.blame = true;
@@ -1687,8 +1691,9 @@ export class EditorGroup {
 
 	/** The conflict-resolution toolbar of a file that carries git conflict markers. A clean
 	 *  file's toolbar stays hidden (it only exists once markers are found). */
-	private attachMergeSupport(editor: Editor): void {
+	private async attachMergeSupport(editor: Editor): Promise<void> {
 		if (editor.input.kind !== 'file' || !editor.view) return;
+		const { MergeToolbar } = await loadMergeEditor();
 		const bar = el('div');
 		editor.pane.prepend(bar);
 		const toolbar = new MergeToolbar(bar);
@@ -1698,12 +1703,13 @@ export class EditorGroup {
 	}
 
 	/** A Folder Compare tab: two folders' side-by-side comparison. */
-	openFolderCompare(input: Extract<EditorInput, { kind: 'folders' }>): void {
+	async openFolderCompare(input: Extract<EditorInput, { kind: 'folders' }>): Promise<void> {
 		const existing = this.open.find((e) => e.input.kind === 'folders' && e.input.id === input.id);
 		if (existing) {
 			this.activate(existing);
 			return;
 		}
+		const { FolderCompareView } = await loadFolderCompare();
 		const editor: Editor = {
 			input,
 			id: 'folders:' + input.id,
@@ -1718,13 +1724,14 @@ export class EditorGroup {
 	}
 
 	/** A Call Tree tab for the symbol under the cursor (or given). */
-	openCallTree(symbol: WsSymbol): void {
+	async openCallTree(symbol: WsSymbol): Promise<void> {
 		const id = `calltree:${symbol.path}:${symbol.line}`;
 		const existing = this.open.find((e) => e.input.kind === 'calltree' && e.input.id === id);
 		if (existing) {
 			this.activate(existing);
 			return;
 		}
+		const { CallTreeView } = await loadCallTree();
 		const editor: Editor = {
 			input: { kind: 'calltree', id, symbol },
 			id,
@@ -2419,7 +2426,7 @@ export class EditorGroup {
 			notify('info', `No function named '${name}' was found in the workspace index.`);
 			return;
 		}
-		this.openCallTree(symbol);
+		await this.openCallTree(symbol);
 	}
 
 	/** Go to Symbol in File (Ctrl+Shift+O): the active file's outline as a pick list. */

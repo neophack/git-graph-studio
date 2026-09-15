@@ -2,7 +2,7 @@
 // which size budgets a measurement violates.
 
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 // @ts-expect-error - plain ESM scripts without type declarations
 import { ggxManifest } from '../scripts/build-ggx.mjs';
 // @ts-expect-error - plain ESM scripts without type declarations
-import { buildBuiltinContributions } from '../scripts/builtin-contributions.mjs';
+import { buildBuiltinContributions, buildBuiltinSettings } from '../scripts/builtin-contributions.mjs';
 // @ts-expect-error - plain ESM scripts without type declarations
 import { BUDGETS, GATED, violations } from '../scripts/measure.mjs';
 
@@ -56,7 +56,29 @@ describe('the baked-in contributions', () => {
 		const [baked] = buildBuiltinContributions(join(dirname(fileURLToPath(import.meta.url)), '..', 'vscode-git-graph-rs'));
 		expect(baked.extId).toBe('neophack.git-graph-rs');
 		// The menu locations the workbench surfaces are all declared there.
-		expect(Object.keys(baked.contributes.menus)).toContain('scm/title');
+		expect(Object.keys(baked.contributes!.menus!)).toContain('scm/title');
+	});
+
+	it('keeps the first-paint slice free of the settings schema and its descriptions', () => {
+		// The baked module rides the first-paint bundle (plan §4: first-paint JS ≤ 300 KB), so
+		// it carries commands, menus and the `when`-referenced settings' defaults - never the
+		// whole configuration schema or the localised descriptions, which dwarf the commands.
+		const root = join(dirname(fileURLToPath(import.meta.url)), '..', 'vscode-git-graph-rs');
+		const [baked] = buildBuiltinContributions(root);
+		const full = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+		const declared = Object.keys(full.contributes.configuration.properties);
+		const kept = Object.keys(baked.contributes!.configuration?.properties ?? {});
+		expect(kept).toEqual(['git-graph-rs.sourceCodeProviderIntegrationLocation']);
+		expect(kept.length).toBeLessThan(declared.length);
+		for (const key of Object.keys(baked.nls)) expect(key.startsWith('config.')).toBe(false);
+		expect(Object.keys(baked.nlsTranslations['zh-cn'])).toEqual(Object.keys(baked.nls));
+
+		// The async settings chunk carries the whole schema, with its descriptions resolved by
+		// the default NLS table once the Settings dialog loads it.
+		const [settings] = buildBuiltinSettings(root);
+		expect(settings.extId).toBe('neophack.git-graph-rs');
+		expect(Object.keys(settings.configuration!.properties!)).toEqual(expect.arrayContaining(declared));
+		expect(Object.keys(settings.nls).length).toBeGreaterThan(Object.keys(baked.nls).length);
 	});
 });
 

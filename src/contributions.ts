@@ -154,6 +154,19 @@ export function extensionSettingDefs(): ExtensionSettingDef[] {
 	return [...extensionSettings.values()].flat();
 }
 
+/** Register one extension's declared settings only - the slice the async builtin-settings
+ *  pass (extHost.ts) applies: the first-paint baked data carries commands and menus, the
+ *  schema and its localised descriptions arrive with the Settings dialog's chunk. */
+export function applyExtensionSettings(extId: string, configuration: ManifestContributes['configuration'], nls: Record<string, string>): void {
+	const defs: ExtensionSettingDef[] = [];
+	for (const [id, property] of Object.entries(configuration?.properties ?? {})) {
+		const type = property.type === 'boolean' || property.type === 'number' ? property.type : 'string';
+		defs.push({ extId, id, type, default: property.default ?? (type === 'boolean' ? false : type === 'number' ? 0 : ''), description: localize(property.description, nls) });
+	}
+	if (defs.length > 0) extensionSettings.set(extId, defs);
+	else extensionSettings.delete(extId);
+}
+
 /**
  * Register one extension's contributions. `dispatch` runs a contributed command (into the
  * extension's frame, or the workbench's native handling for the built-in); `canRun` gates
@@ -161,14 +174,7 @@ export function extensionSettingDefs(): ExtensionSettingDef[] {
  */
 export function applyContributions(extId: string, contributes: ManifestContributes | undefined, nls: Record<string, string>, dispatch: (command: string) => void, canRun: (command: string) => boolean): void {
 	// The declared settings join the registry the Settings dialog generates its rows from.
-	const properties = contributes?.configuration?.properties ?? {};
-	const defs: ExtensionSettingDef[] = [];
-	for (const [id, property] of Object.entries(properties)) {
-		const type = property.type === 'boolean' || property.type === 'number' ? property.type : 'string';
-		defs.push({ extId, id, type, default: property.default ?? (type === 'boolean' ? false : type === 'number' ? 0 : ''), description: localize(property.description, nls) });
-	}
-	if (defs.length > 0) extensionSettings.set(extId, defs);
-	else extensionSettings.delete(extId);
+	applyExtensionSettings(extId, contributes?.configuration, nls);
 	if (!contributes) return;
 	const registered: ExtensionContributions = { commands: new Map(), menus: {} };
 	byExtension.set(extId, registered);

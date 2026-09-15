@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { ExtensionHost, type ExtInfo } from '../src/extHost';
+import { ensureBuiltinSettings, ExtensionHost, type ExtInfo } from '../src/extHost';
 import { extensionSettingDefs, resolvedMenuEntries } from '../src/contributions';
 import { ExtensionsPanel } from '../src/extensionsPanel';
 import { commandForBinding, commands } from '../src/commands';
@@ -194,6 +194,9 @@ describe('the extension host command wiring', () => {
 		const host = new ExtensionHost();
 		host.applyBuiltinContributions();
 		expect(resolvedMenuEntries('scm/title').some((entry) => entry.command === 'git-graph-rs.view')).toBe(true);
+		// The settings schemas ride the async builtin-settings chunk - build-time data too, so
+		// still no backend round-trip, one microtask behind the menus.
+		await ensureBuiltinSettings();
 		expect(extensionSettingDefs().some((def) => def.extId === 'neophack.git-graph-rs')).toBe(true);
 		// The activation pass lists the built-in but must not re-read its manifest: the baked
 		// data already registered it, and the on-disk copy could even lag mid-upgrade.

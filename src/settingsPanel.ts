@@ -8,6 +8,7 @@
 import { LOCALES, t } from './i18n';
 import { SETTINGS_EVENT, SETTING_DEFS, THEMES, isSettingModified, settings, updateSetting, type SettingDef } from './settings';
 import { extensionSettingDefs } from './contributions';
+import { ensureBuiltinSettings } from './extHost';
 import { saveExtSetting, extSettings } from './state';
 import { el, icon } from './ui';
 
@@ -175,6 +176,9 @@ export function openSettingsPanel(): void {
 	};
 	search.addEventListener('input', render);
 	render();
+	// The extensions' settings schemas arrive on the async builtin-settings chunk: if it had
+	// not landed by the time the dialog opened, its rows appear with this re-render.
+	void ensureBuiltinSettings().then(() => render());
 
 	const closeDialog = () => {
 		document.removeEventListener('keydown', onKeyDown);

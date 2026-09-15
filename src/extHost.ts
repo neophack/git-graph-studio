@@ -14,8 +14,9 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { builtinContributions } from 'virtual:builtin-contributions';
 
 import { commands } from './commands';
-import { applyContributions, declaredCommand, localize, removeContributions, type ManifestContributes } from './contributions';
+import { applyContributions, applyExtensionSettings, declaredCommand, localize, removeContributions, type ManifestContributes } from './contributions';
 import { locale, registerZhCnText } from './i18n';
+import { loadBuiltinSettings } from './lazy';
 import * as state from './state';
 import { notify, quickInput } from './ui';
 
@@ -90,6 +91,20 @@ export function extFileDataUrl(extId: string, relPath: string): Promise<string |
  *  of this string. */
 export const GIT_GRAPH_RS_EXT_ID = 'neophack.git-graph-rs';
 
+/** Apply the baked-in extensions' settings schemas once their async chunk loads (the second
+ *  half of the baked contributions - the first-paint slice carries commands and menus only).
+ *  The Settings dialog awaits this, so its extension rows cannot render without the schema
+ *  unless the chunk itself failed - which leaves the rows absent, not the dialog broken. */
+let builtinSettingsLoaded: Promise<void> | null = null;
+
+export function ensureBuiltinSettings(): Promise<void> {
+	return (builtinSettingsLoaded ??= loadBuiltinSettings()
+		.then((module) => {
+			for (const ext of module.builtinSettings) applyExtensionSettings(ext.extId, ext.configuration, ext.nls);
+		})
+		.catch(() => undefined));
+}
+
 /** The extension whose webview and backend the workbench hosts natively (via GraphHost). */
 const NATIVELY_HOSTED = new Set([GIT_GRAPH_RS_EXT_ID]);
 
@@ -124,9 +139,12 @@ export class ExtensionHost {
 
 	/** Synchronously register the baked-in extensions' contributions (menus, commands,
 	 *  keybindings). The data comes from the build-time virtual module, so the workbench's
-	 *  first render already sees these menus - the async activateInstalled() pass skips them. */
+	 *  first render already sees these menus - the async activateInstalled() pass skips them.
+	 *  The settings schemas ride their own async chunk (most of the manifest's bytes, needed
+	 *  only by the Settings dialog): their pass starts loading right away. */
 	applyBuiltinContributions(): void {
 		for (const baked of builtinContributions) this.registerContributions(baked.extId, baked.contributes, baked.nls, baked.nlsTranslations['zh-cn'] ?? {});
+		void ensureBuiltinSettings();
 	}
 
 	constructor() {

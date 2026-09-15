@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { checkSeams } from './scripts/check-seams.mjs';
-import { buildBuiltinContributions } from './scripts/builtin-contributions.mjs';
+import { buildBuiltinContributions, buildBuiltinSettings } from './scripts/builtin-contributions.mjs';
 
 // The seam rules (scripts/check-seams.mjs) gate every compile: a module that reaches around
 // the designated interface files fails the dev-server start and the production build alike.
@@ -49,16 +49,21 @@ const firstPaintPlugin = (): Plugin => ({
 // The baked-in extension contributions: read at build/dev-server start from the shipped
 // extensions' manifests, so the workbench can register their menus before its first render
 // instead of racing the async activation pass (see extHost.ts's applyBuiltinContributions).
+// The settings slice (`virtual:builtin-settings`) is the same manifests' configuration schemas
+// with their full NLS tables - loaded through lazy.ts, so its ~100 KB rides an async chunk the
+// Settings dialog's rows need, not the first-paint bundle.
 const VIRTUAL_BUILTIN_CONTRIBUTIONS = 'virtual:builtin-contributions';
+const VIRTUAL_BUILTIN_SETTINGS = 'virtual:builtin-settings';
 const builtinContributionsPlugin = (): Plugin => ({
 	name: 'builtin-contributions',
 	resolveId(id) {
-		return id === VIRTUAL_BUILTIN_CONTRIBUTIONS ? '\0' + VIRTUAL_BUILTIN_CONTRIBUTIONS : undefined;
+		return id === VIRTUAL_BUILTIN_CONTRIBUTIONS || id === VIRTUAL_BUILTIN_SETTINGS ? '\0' + id : undefined;
 	},
 	load(id) {
-		if (id !== '\0' + VIRTUAL_BUILTIN_CONTRIBUTIONS) return undefined;
-		const data = buildBuiltinContributions(resolve(__dirname, 'vscode-git-graph-rs'));
-		return `export const builtinContributions = ${JSON.stringify(data)};`;
+		const root = resolve(__dirname, 'vscode-git-graph-rs');
+		if (id === '\0' + VIRTUAL_BUILTIN_CONTRIBUTIONS) return `export const builtinContributions = ${JSON.stringify(buildBuiltinContributions(root))};`;
+		if (id === '\0' + VIRTUAL_BUILTIN_SETTINGS) return `export const builtinSettings = ${JSON.stringify(buildBuiltinSettings(root))};`;
+		return undefined;
 	}
 });
 
