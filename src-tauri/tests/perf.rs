@@ -146,7 +146,7 @@ fn opening_a_large_repository_stays_within_the_budgets() {
     });
     let text = serde_json::to_string_pretty(&report).unwrap();
     eprintln!("[perf] {text}");
-    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/studio");
+    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/studio");
     if std::fs::create_dir_all(&out).is_ok() {
         let _ = std::fs::write(out.join("perf.json"), &text);
     }
