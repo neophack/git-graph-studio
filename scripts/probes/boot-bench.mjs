@@ -4,7 +4,7 @@
 // milliseconds from the moment the script spawned the process (so exe loading counts too),
 // with the process's own "since process start" stamp beside them.
 //
-//   node scripts/boot-bench.mjs <path> [--runs N] [--until "<stage>"] [--json out.json]
+//   node scripts/probes/boot-bench.mjs <path> [--runs N] [--until "<stage>"] [--json out.json]
 //                               [--exe <build.exe>] [--ab <a.exe>,<b.exe>]
 //
 // The terminal stage defaults to "single file shown" for a file and "folder shown" for a
@@ -19,7 +19,7 @@ import { existsSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const appDir = join(dirname(fileURLToPath(import.meta.url)), '..');
+const appDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const release = join(appDir, 'target', 'studio', 'cargo', 'release');
 const defaultExe = process.platform === 'win32' ? join(release, 'git-graph-studio.exe') : join(release, 'git-graph-studio');
 
@@ -32,7 +32,7 @@ const flag = (name, fallback) => {
 const runs = Number(flag('--runs', '5'));
 const jsonOut = flag('--json', null);
 if (!target || !existsSync(target)) {
-	console.error('usage: node scripts/boot-bench.mjs <file-or-folder> [--runs N] [--until stage] [--json out] [--exe build.exe] [--ab a.exe,b.exe]');
+	console.error('usage: node scripts/probes/boot-bench.mjs <file-or-folder> [--runs N] [--until stage] [--json out] [--exe build.exe] [--ab a.exe,b.exe]');
 	process.exit(2);
 }
 /** The builds under test: one, or the A/B pair. */

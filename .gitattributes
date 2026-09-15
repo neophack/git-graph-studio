@@ -3,4 +3,4 @@
 * text=auto
 *.bat text eol=crlf
 *.sh text eol=lf
-scripts/Dockerfile.studio-linux text eol=lf
+Dockerfile* text eol=lf

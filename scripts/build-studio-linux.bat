@@ -9,7 +9,7 @@ rem  extension's .node engines: those are dependency-free C-ABI libraries that
 rem  cargo-zigbuild can cross-link with zig's bundled glibc. The Tauri app
 rem  links against webkit2gtk/GTK3 at build time and its deb/rpm bundling must
 rem  run in a real Linux userland - the same reason CI builds the Linux
-rem  installers in containers (studio.yml). See scripts/Dockerfile.studio-linux.
+rem  installers in containers (studio.yml). See scripts\docker\Dockerfile.studio-linux.
 rem
 rem  The container's base image IS the compatibility floor - the oldest distro
 rem  that still has WebKitGTK 4.1, which Tauri 2 hard-requires (Ubuntu 20.04
@@ -27,11 +27,12 @@ rem
 rem  Output: target\studio\bundle-linux\ (deb) or target\studio\bundle-rpm\ (rpm)
 rem ============================================================================
 rem Usage:
-rem   build-studio-linux.bat          deb installers (ubuntu:22.04 container)
-rem   build-studio-linux.bat rpm      rpm installers (fedora:38 container)
-rem   build-studio-linux.bat shell    drop into a shell in the default container
+rem   scripts\build-studio-linux.bat          deb installers (ubuntu:22.04 container)
+rem   scripts\build-studio-linux.bat rpm      rpm installers (fedora:38 container)
+rem   scripts\build-studio-linux.bat shell    drop into a shell in the default container
 
-cd /d "%~dp0"
+rem The script lives in scripts\; everything else expects the repository root.
+cd /d "%~dp0.."
 
 set "BASE=ubuntu:22.04"
 set "TAG=ggs-linux-builder-deb"
@@ -64,7 +65,7 @@ if errorlevel 1 goto :fail
 cd ..
 
 echo [2/3] Building the Linux builder image (cached after the first run)
-docker build --build-arg BASE_IMAGE=%BASE% -t %TAG% -f scripts\Dockerfile.studio-linux scripts
+docker build --build-arg BASE_IMAGE=%BASE% -t %TAG% -f scripts\docker\Dockerfile.studio-linux scripts\docker
 if errorlevel 1 goto :fail
 
 if "%~1"=="shell" (
@@ -73,7 +74,7 @@ if "%~1"=="shell" (
 )
 
 echo [3/3] Building the %BUNDLES% installers in the %BASE% container
-docker run --rm -v "%cd%:/repo" -v ggs-studio-linux-cache:/cache -e BUNDLES=%BUNDLES% -e OUT_DIR=%OUT_DIR% %TAG% bash /repo/scripts/studio-linux-build.sh
+docker run --rm -v "%cd%:/repo" -v ggs-studio-linux-cache:/cache -e BUNDLES=%BUNDLES% -e OUT_DIR=%OUT_DIR% %TAG% bash /repo/scripts/docker/studio-linux-build.sh
 if errorlevel 1 goto :fail
 
 echo.

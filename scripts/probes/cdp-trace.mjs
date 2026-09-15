@@ -4,14 +4,14 @@
 // prints the trace's events summed by kind and, for script evaluation and function calls, by
 // script - so a slow boot can be attributed to parsing, layout, or one module's work.
 //
-//   node scripts/cdp-trace.mjs <file-or-folder> [--exe build.exe] [--port 9223] [--settle 3000]
+//   node scripts/probes/cdp-trace.mjs <file-or-folder> [--exe build.exe] [--port 9223] [--settle 3000]
 
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const appDir = join(dirname(fileURLToPath(import.meta.url)), '..');
+const appDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const args = process.argv.slice(2);
 const target = args.find((a) => !a.startsWith('--'));
 const flag = (name, fallback) => {
@@ -22,7 +22,7 @@ const exe = flag('--exe', join(appDir, 'target', 'studio', 'cargo', 'release', '
 const port = flag('--port', '9223');
 const settle = Number(flag('--settle', '3000'));
 if (!target || !existsSync(target) || !existsSync(exe)) {
-	console.error('usage: node scripts/cdp-trace.mjs <file-or-folder> [--exe build.exe] [--port 9223]');
+	console.error('usage: node scripts/probes/cdp-trace.mjs <file-or-folder> [--exe build.exe] [--port 9223]');
 	process.exit(2);
 }
 

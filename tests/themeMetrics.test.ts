@@ -1,7 +1,7 @@
 // The theme contrast pass's maths and shape: the WCAG ratio itself, the surface verdicts
 // (pass/fail thresholds, alpha compositing), and the module's behaviour in a DOM without
 // stylesheets (every theme skipped, never a false failure). The real multi-theme pass runs
-// in the browser against dev-harness.html?metrics=1.
+// in the browser against /dev/dev-harness.html?metrics=1.
 
 import { describe, expect, it } from 'vitest';
 

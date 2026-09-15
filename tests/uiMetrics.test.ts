@@ -1,5 +1,5 @@
 // The UI metrics module (the dev harness's measurement pass) - a smoke test here: jsdom has
-// no layout, so the real pass runs in the browser against dev-harness.html?metrics=1 (the
+// no layout, so the real pass runs in the browser against /dev/dev-harness.html?metrics=1 (the
 // report lands in window.__uiMetrics). What CI pins: the module runs against any DOM, every
 // result is well-formed, and the headline checks are always present.
 

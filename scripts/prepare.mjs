@@ -1,7 +1,7 @@
 // Assembles everything the app build consumes under <project>/target/studio/, so no generated
 // file ever lands in the source tree:
 //
-//   target/studio/public/   the Vite public dir: app/static/** plus the extension's webview
+//   target/studio/public/   the Vite public dir: static/** plus the extension's webview
 //                           build (media/out.min.js, out.min.css, markdown-it), the extension's
 //                           icons (resources/), and the runtime config bundle (see below) — the
 //                           integrated git-graph-rs serves its webview from here

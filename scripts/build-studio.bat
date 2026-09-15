@@ -2,11 +2,12 @@
 setlocal
 rem Build Git Graph Studio (the Tauri app this repository is)
 rem Usage:
-rem   build-studio.bat          release build, installers in target\studio\cargo\release\bundle
-rem   build-studio.bat dev      run the app in dev mode
-rem   build-studio.bat debug    cargo debug build of the Tauri backend
+rem   scripts\build-studio.bat          release build, installers in target\studio\cargo\release\bundle
+rem   scripts\build-studio.bat dev      run the app in dev mode
+rem   scripts\build-studio.bat debug    cargo debug build of the Tauri backend
 
-cd /d "%~dp0"
+rem The script lives in scripts\; everything else expects the repository root.
+cd /d "%~dp0.."
 
 where cargo >nul 2>nul
 if errorlevel 1 goto :nocargo

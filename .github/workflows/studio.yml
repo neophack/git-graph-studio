@@ -240,7 +240,7 @@ jobs:
           GGS_PERF_FILES: '20000'
 
       # The container's cargo target and registries, cached across runs via the /cache
-      # volume scripts/studio-linux-build.sh redirects everything into.
+      # volume scripts/docker/studio-linux-build.sh redirects everything into.
       - name: Cache the container build
         uses: actions/cache@v4
         with:
@@ -250,14 +250,14 @@ jobs:
 
       - name: Build the ${{ matrix.bundles }} installers in a ${{ matrix.base }} container
         run: |
-          docker build --build-arg BASE_IMAGE=${{ matrix.base }} -t ggs-linux-builder-${{ matrix.cache }} -f scripts/Dockerfile.studio-linux scripts
+          docker build --build-arg BASE_IMAGE=${{ matrix.base }} -t ggs-linux-builder-${{ matrix.cache }} -f scripts/docker/Dockerfile.studio-linux scripts/docker
           docker run --rm \
             -v "$PWD:/repo" \
             -v "$HOME/.ggs-linux-cache:/cache" \
             -e BUNDLES=${{ matrix.bundles }} \
             -e OUT_DIR=${{ matrix.out }} \
             ggs-linux-builder-${{ matrix.cache }} \
-            bash /repo/scripts/studio-linux-build.sh
+            bash /repo/scripts/docker/studio-linux-build.sh
 
       # The size gate + backend probes (deb pass only - the rpm carries the same binaries).
       # measure.mjs expects the bundles under target/studio/cargo/release/bundle/, so the

@@ -8,14 +8,60 @@ extension serves, hosted unchanged behind an `acquireVsCodeApi` shim.
 
 ## Layout
 
-- `src/` — the shell frontend (Vite + TypeScript)
-- `static/gitgraph/view.html` — the webview host page (loads `out.min.js` prepared from `vscode-git-graph-rs/media/`)
-- `src-tauri/` — the Tauri 2 backend: filesystem commands, the graph message protocol
-  (`cmd_graph.rs`, served by `git-graph-core` from `vscode-git-graph-rs/native/core` in-process), the SCM
-  git-CLI write path, and the PTY
-- `vscode-git-graph-rs/` — the `git-graph-rs` extension, a git submodule tracking its
-  repository's `main` branch: the engine crate the app links, the webview assets it compiles
-  (`npm run compile` there → `out/`, `media/`), and the manifest the baked-in contributions read
+```text
+git-graph-studio/
+├── index.html               the workbench window (Vite entry, loads src/main.ts)
+├── ext-host.html            the sandboxed extension-host frame (second Vite entry, loaded by src/extHost.ts)
+├── package.json             npm scripts: dev / build / test / typecheck / prepare:assets / measure
+├── vite.config.ts           the workbench build: entries, chunking, the first-paint closure
+├── vitest.config.ts         the test suite (jsdom + the baked contributions module)
+├── tsconfig.json
+│
+├── src/                     the shell frontend, one module per workbench part
+│                            (explorer, editor, scm, search, settings, terminal, the git
+│                            graph host, the extension host, …)
+├── static/                  static assets served as-is: gitgraph/view.html (the webview
+│                            host page) and theme/*.css (the colour themes)
+├── src-tauri/               the Rust backend — its own Cargo workspace
+│   ├── src/                 the command modules (fs / scm / graph / search / extensions),
+│   │                        the PTY, the plugin host, the ggx machinery
+│   ├── src/bin/             git-graph-backend: the headless backend binary of the .ggx package
+│   └── .cargo/config.toml   points the Cargo target at target/studio/cargo
+│
+├── tests/                   the vitest suite — jsdom with a scripted Tauri backend
+│                            (tests/tauriMock.ts), no Rust and no compiled assets needed
+├── dev/                     dev-only probe pages, never built and never shipped:
+│   ├── dev-harness.html     the real workbench under the dev server (plain browser or tauri dev)
+│   └── hex-probe.html       the hex view in isolation, against any theme
+│
+├── scripts/                 the build pipeline — every generated file lands in target/studio/
+│   ├── prepare.mjs          assembles the public dir the app serves (webview bundle, config,
+│   │                        compare page, icons; see the file header for the full layout)
+│   ├── build-ggx.mjs        packs the built-in .ggx extension package
+│   ├── builtin-contributions.mjs  bakes the extension manifest's menus/commands into the bundle
+│   ├── check-seams.mjs      the compile-time seam rules (graphHost.ts / view.html / cmd_graph.rs)
+│   ├── measure.mjs          exe/installer/first-paint size budgets + the backend probes
+│   ├── *-stub.cjs           the vscode/Node stubs the config and compare bundles build against
+│   ├── build-studio.bat     one-command Windows build (submodule → assets → tauri build)
+│   ├── build-studio-linux.bat   the Linux installers through Docker (deb | rpm | shell)
+│   ├── docker/              the Linux build containers
+│   │   ├── Dockerfile.studio-linux    base image = the compatibility floor (see its header)
+│   │   └── studio-linux-build.sh      the in-container half of the Linux build
+│   └── probes/              benchmark and debugging probes against the packaged app
+│       ├── boot-bench.mjs       end-to-end startup latency of the release exe
+│       └── cdp-*.mjs            live inspection over WebView2's CDP port
+│
+├── docs/                    ggs-development-plan.md — the development plan
+├── .github/workflows/       studio.yml (CI) · release.yml (tag → GitHub Release)
+└── vscode-git-graph-rs/     the git-graph-rs VS Code extension, a git submodule tracking its
+                             repository's main branch: the engine crate the app links
+                             (native/core), the webview assets it compiles (npm run compile
+                             → out/, media/), and the manifest the baked contributions read
+```
+
+Everything generated — the Vite public dir and dist, the Cargo target, the installers, the
+coverage and the metrics — lives under `target/studio/` (gitignored), never in the source
+tree; `node_modules/` and the submodule's own build products stay where npm/cargo put them.
 
 ## Extensions (.ggx and VSIX)
 
@@ -73,7 +119,7 @@ npx tauri dev           # run the app
 npx tauri build         # produce the installers for THIS platform
 ```
 
-`build-studio.bat` (Windows) runs all of the above in one go. The installers land in
+`scripts\build-studio.bat` (Windows) runs all of the above in one go. The installers land in
 `target/studio/cargo/release/bundle/` — NSIS exe + MSI on Windows, dmg on macOS, deb/rpm on
 Linux. Icons, the webview assets and the default view config are generated by
 `beforeBuildCommand`, so no separate step is needed.
@@ -97,8 +143,8 @@ on every still-supported release above. Building on the runners directly would p
 the runner's newer glibc and break older distros. Linux arm64 is not built (no arm64
 WebKitGTK on the hosted runners).
 
-To build the Linux installers from Windows, `build-studio-linux.bat` runs the same
-containers through Docker Desktop (`build-studio-linux.bat rpm` for the rpm pass).
+To build the Linux installers from Windows, `scripts\build-studio-linux.bat` runs the same
+containers through Docker Desktop (`scripts\build-studio-linux.bat rpm` for the rpm pass).
 
 To bump the app's own version between releases, change it in `package.json`,
 `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml` together.
@@ -118,8 +164,8 @@ version; the tag is then created at that commit.
 
 ## Notes
 
-- `dev-harness.html` — a dev-only page that runs the real workbench, in two modes: under
-  `npm run dev` (tauri dev) at `http://localhost:5173/dev-harness.html` it uses the real
+- `dev/dev-harness.html` — a dev-only page that runs the real workbench, in two modes: under
+  `npm run dev` (tauri dev) at `http://localhost:5173/dev/dev-harness.html` it uses the real
   Tauri IPC bridge and Rust backend — the exact pipeline the packaged app runs, which is the
   only mode that can catch packaged-only regressions; opened in a plain browser
   (`npm run dev:vite`) it falls back to a scripted fake Tauri backend, good only for

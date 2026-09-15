@@ -13,7 +13,7 @@
 # Artifacts per release: windows NSIS setup exe + MSI, deb (Ubuntu 22.04-26.04 / Debian
 # 12+), rpm (Fedora 38+ / openSUSE Leap 15.6+), macOS arm64 dmg (+ x64 on `full`), each
 # with its SHA256 in SHA256SUMS. The Linux compatibility floors and why Ubuntu 20.04
-# cannot work are documented in studio.yml and scripts/Dockerfile.studio-linux.
+# cannot work are documented in studio.yml and scripts/docker/Dockerfile.studio-linux.
 
 name: Release
 

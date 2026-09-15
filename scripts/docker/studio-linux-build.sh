@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# The in-container half of build-studio-linux.bat. Runs inside the ggs-linux-builder image
-# (scripts/Dockerfile.studio-linux) with the repository mounted at /repo and a persistent
-# cache volume at /cache. Keep this file LF-only: the container's bash cannot read CRLF
-# (enforced by .gitattributes).
+# The in-container half of scripts/build-studio-linux.bat. Runs inside the ggs-linux-builder
+# image (scripts/docker/Dockerfile.studio-linux) with the repository mounted at /repo and a
+# persistent cache volume at /cache. Keep this file LF-only: the container's bash cannot read
+# CRLF (enforced by .gitattributes).
 set -euo pipefail
 
 : "${REPO:=/repo}"

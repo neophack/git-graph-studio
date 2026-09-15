@@ -1,8 +1,9 @@
-# The Linux build environment for Git Graph Studio, used by build-studio-linux.bat and CI.
+# The Linux build environment for Git Graph Studio, used by scripts/build-studio-linux.bat
+# and CI.
 #
 # A Tauri app cannot be cross-compiled from Windows the way the extension's .node engines can
 # (build-rust.bat / cargo-zigbuild): it links against webkit2gtk, GTK3 and friends at build
-# time, and its deb/AppImage/rpm bundling steps must run in a real Linux userland. So the
+# time, and its deb/rpm bundling steps must run in a real Linux userland. So the
 # Linux installers are built in a container instead - the same approach CI takes.
 #
 # The base image is the compatibility floor: the binaries it produces need the build
@@ -14,10 +15,10 @@
 #                 Debian 12/13, Mint 21+, Pop!_OS 22.04+
 #   fedora:38     rpm: glibc 2.37 -> runs on Fedora 38+, openSUSE Leap 15.6+/Tumbleweed
 #
-# The build context is the scripts/ directory (the image needs nothing from the repository),
+# The build context is this directory (the image needs nothing else from the repository),
 # which keeps node_modules and target/ out of the context transfer:
 #
-#   docker build --build-arg BASE_IMAGE=ubuntu:22.04 -t ggs-linux-builder -f scripts/Dockerfile.studio-linux scripts
+#   docker build --build-arg BASE_IMAGE=ubuntu:22.04 -t ggs-linux-builder -f scripts/docker/Dockerfile.studio-linux scripts/docker
 
 ARG BASE_IMAGE=ubuntu:22.04
 FROM ${BASE_IMAGE}
