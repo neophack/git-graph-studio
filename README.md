@@ -138,19 +138,18 @@ only; pushes to main and release runs build everything:
 | Artifact | Built in/on | Compatibility |
 | --- | --- | --- |
 | `*_x64-setup.exe` (NSIS) + `*.msi` | windows-latest | Windows 10/11 x64 |
-| `*_amd64.deb` | `ubuntu:22.04` container | Ubuntu 22.04–26.04, Debian 12/13, Mint 21+, Pop!_OS 22.04+ |
-| `*.x86_64.rpm` | `fedora:38` container | Fedora 38+, openSUSE Leap 15.6+/Tumbleweed |
+| `*_amd64.deb` | ubuntu-24.04 runner | Ubuntu 24.04–26.04, Debian 13+, Mint 22+, Pop!_OS 24.04+ |
+| `*.x86_64.rpm` | ubuntu-24.04 runner | Fedora 40+, openSUSE Leap 16+/Tumbleweed |
 | `*_aarch64.dmg` | macos-latest (arm64) | macOS 14+ arm64 (`full` adds the x64 dmg) |
 
-The Linux containers' base images ARE the compatibility floor: each is the oldest distro
-that still has WebKitGTK 4.1 — **Tauri 2's hard requirement, which Ubuntu 20.04 (WebKitGTK
-4.0 only) can never satisfy** — so the binaries' glibc baseline (2.35 deb / 2.37 rpm) loads
-on every still-supported release above. Building on the runners directly would pin them to
-the runner's newer glibc and break older distros. Linux arm64 is not built (no arm64
-WebKitGTK on the hosted runners).
-
-To build the Linux installers from Windows, `scripts\build-studio-linux.bat` runs the same
-containers through Docker Desktop (`scripts\build-studio-linux.bat rpm` for the rpm pass).
+The Linux installers are built natively on the pinned ubuntu-24.04 runner — the backend
+tests gate the build, and both package formats bundle the one release compile — so the
+binaries' floor is the runner's glibc 2.39; every distro above loads it. For the older floors (Ubuntu 22.04 /
+Debian 12, Fedora 38 / openSUSE Leap 15.6) build locally in the pinned containers:
+`scripts\build-studio-linux.bat` (deb) or `scripts\build-studio-linux.bat rpm` through
+Docker Desktop — their base images are the oldest distros with WebKitGTK 4.1, **Tauri 2's
+hard requirement, which Ubuntu 20.04 (WebKitGTK 4.0 only) can never satisfy**. Linux arm64
+is not built (no arm64 WebKitGTK on the hosted runners).
 
 To bump the app's own version between releases, change it in `package.json`,
 `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml` together.

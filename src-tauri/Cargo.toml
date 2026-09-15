@@ -105,6 +105,12 @@ opt-level = 1
 # The size diet (docs/ggs-development-plan.md M1.2): the app is its own workspace, so it does
 # not inherit the plugin workspace's release profile. Size-optimised, fat LTO, one codegen
 # unit, aborting panics, stripped - about 40% smaller than the default release profile.
+#
+# `panic = "abort"` is deliberate and stays: test targets are always built with unwinding,
+# so CI runs its tests in the dev profile and the dependency graph is compiled twice there
+# (dev for the tests, release for the installers). Sharing one compile is impossible while
+# this setting exists - dropping it to enable that was rejected (verified experimentally,
+# 2026-09-15; see .github/workflows/studio.yml).
 [profile.release]
 opt-level = "z"
 lto = "fat"

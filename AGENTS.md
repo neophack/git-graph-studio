@@ -297,16 +297,19 @@ performance gate lives in `src-tauri/tests/perf.rs`.
 ### 15. Build & Release Pipeline
 
 Everything that turns the source tree into installers: asset assembly into
-`target/studio/`, the seam checks, the distro-floor Linux containers, and CI.
+`target/studio/`, the seam checks, CI, and the local Linux build containers.
 
 - Assets: `scripts/prepare.mjs` (assembles `target/studio/`), `scripts/*-stub.cjs` (the
   `vscode` / Node stubs the config and compare bundles build against), `vite.config.ts`
 - Seam checks: `scripts/check-seams.mjs` (TypeScript / CSS) and `src-tauri/build.rs` (Rust)
-- Packaging: `scripts/build-studio.bat` (Windows, one command), `scripts/build-studio-linux.bat`
-  + `scripts/docker/Dockerfile.studio-linux` + `scripts/docker/studio-linux-build.sh` (Linux
-  installers in containers pinned to the Ubuntu 22.04 / Fedora 38 compatibility floors)
+- Packaging: `scripts/build-studio.bat` (Windows, one command). Linux installers: CI builds
+  them natively on the pinned ubuntu-24.04 runner (glibc 2.39 floor — see `studio.yml`);
+  `scripts/build-studio-linux.bat` + `scripts/docker/Dockerfile.studio-linux` +
+  `scripts/docker/studio-linux-build.sh` build them locally in containers pinned to the
+  older Ubuntu 22.04 / Fedora 38 floors
 - CI: `.github/workflows/studio.yml` (PRs: typecheck + vitest; `main`: also `cargo clippy
-  -D warnings`, `cargo test`, installers for Windows and Linux, the perf gate);
+  -D warnings`, `cargo test`, installers for Windows and Linux, the perf gate — the tests
+  gate the installer build, and the two Linux package formats share one release compile);
   `.github/workflows/release.yml` (a pushed `v*` tag publishes installers with `SHA256SUMS`)
 
 ## Development workflow

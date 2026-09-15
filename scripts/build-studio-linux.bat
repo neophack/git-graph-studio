@@ -8,8 +8,10 @@ rem  Why a container and not the cross-compile build-rust.bat uses for the
 rem  extension's .node engines: those are dependency-free C-ABI libraries that
 rem  cargo-zigbuild can cross-link with zig's bundled glibc. The Tauri app
 rem  links against webkit2gtk/GTK3 at build time and its deb/rpm bundling must
-rem  run in a real Linux userland - the same reason CI builds the Linux
-rem  installers in containers (studio.yml). See scripts\docker\Dockerfile.studio-linux.
+rem  run in a real Linux userland. CI builds natively on the ubuntu-24.04
+rem  runner (glibc 2.39 floor, studio.yml); this container path keeps the
+rem  older, wider floors for local builds from Windows. See
+rem  scripts\docker\Dockerfile.studio-linux.
 rem
 rem  The container's base image IS the compatibility floor - the oldest distro
 rem  that still has WebKitGTK 4.1, which Tauri 2 hard-requires (Ubuntu 20.04
