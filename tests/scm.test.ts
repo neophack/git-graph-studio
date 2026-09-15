@@ -407,7 +407,37 @@ describe('submodule sections', () => {
 		expect(texts('.scm-repo .pane-header .label')).toEqual(['dep', 'Staged Changes', 'Changes']);
 		expect(subSection.querySelector('.row .label')!.textContent).toBe('lib.rs');
 		// The main repository's own list is untouched: only the submodule's change shows there.
-		expect(texts('.scm-list .row .label')).toEqual(['README.md']);
+		expect(texts('.scm-rows .row .label')).toEqual(['README.md']);
+	});
+
+	it('stacks the submodule sections inside the change list, compactly below the main repository\'s rows', async () => {
+		const { view } = setup();
+		view.setRepo(REPO);
+		await view.refresh();
+
+		// VS Code's multi-repo Source Control view: the sections follow the content above them
+		// in the one scrolling list (never pinned to the bottom of the view by a stretched
+		// main section), and the virtualised main list keeps its own spacer.
+		const list = document.querySelector('.scm-list')!;
+		expect(list.querySelector('.scm-repo')).not.toBeNull();
+		expect(document.querySelector('.view-pane > .scm-repo')).toBeNull();
+		expect(document.querySelector('.scm-rows')!.nextElementSibling).toBe(document.querySelector('.scm-repo'));
+	});
+
+	it('opens the Git Graph view on the submodule whose header graph icon was clicked', async () => {
+		const { view } = setup();
+		const opened: (string | undefined)[] = [];
+		view.onOpenGraph = (repo) => opened.push(repo);
+		view.setRepo(REPO);
+		await view.refresh();
+
+		const subIcon = document.querySelector<HTMLButtonElement>('.scm-repo-header .action-btn img[src="/icons/git-graph-16.svg"]')!.closest('button')!;
+		click(subIcon);
+		expect(opened).toEqual([SUB]);
+		// The main repository's own graph icon opens the view without switching repositories.
+		const mainIcon = document.querySelector<HTMLButtonElement>('.sidebar-title .action-btn img[src="/icons/git-graph-16.svg"]')!.closest('button')!;
+		click(mainIcon);
+		expect(opened).toEqual([SUB, undefined]);
 	});
 
 	it('stages a change within a submodule, passing its own repo path', async () => {

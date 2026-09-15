@@ -443,9 +443,11 @@ export class SourceControlView {
 		this.content.appendChild(body);
 		this.list.scrollTop = previousScroll;
 		this.renderWindow();
-		// Every initialised submodule gets its own repository section below the main one -
-		// VS Code's Source Control view when several repositories are open.
-		for (const sub of this.subRepos) this.content.appendChild(this.renderSubRepo(sub));
+		// Every initialised submodule stacks as its own repository section directly below the
+		// main repository's rows, inside the one scrolling list - VS Code's Source Control view
+		// with several repositories open: the sections follow the content above them compactly
+		// (never pushed to the bottom of the view) and one scrollbar covers everything.
+		for (const sub of this.subRepos) this.list.appendChild(this.renderSubRepo(sub));
 		if (hadFocus) {
 			const input = body.querySelector<HTMLTextAreaElement>('textarea');
 			if (input) {
@@ -889,7 +891,9 @@ export class SourceControlView {
 	 * Git extension lists every open repository in the Source Control view: a header (branch,
 	 * sync/publish, refresh, "..."), a commit box, the Publish Branch / Sync Changes button,
 	 * and its own Merge/Staged/Changes groups - the same actions as the main repository's,
-	 * scoped to this one by always passing its `repo` path to the backend. */
+	 * scoped to this one by always passing its `repo` path to the backend. The sections live
+	 * inside the change list's scroll flow (see render), stacked below the main repository's
+	 * rows as compactly as VS Code stacks its repository sections. */
 
 	private subGroups(sub: SubRepoState): { key: ScmGroup; label: string; files: ScmChange[]; always: boolean }[] {
 		const merge = sub.changes.filter((c) => c.conflicted);

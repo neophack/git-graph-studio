@@ -489,12 +489,15 @@ export class Workbench {
 		state.saveLayout();
 	}
 
-	openGraph(): void {
+	/** Open the Git Graph view - on `repo` (a submodule's own graph icon in the Source Control
+	 *  view) with its repository dropdown switched to that repository. */
+	openGraph(repo?: string): void {
 		if (!this.repoPath) {
 			notify('info', 'Open a folder containing a Git repository to view its Git Graph.', [{ label: 'Open Folder', run: () => void this.pickFolder() }]);
 			return;
 		}
 		this.editors.openGraph();
+		if (repo) this.graph.switchRepo(repo);
 	}
 
 	/** Git Graph RS: Show File History in Git Graph - the view filtered to `explicitPath` (the
@@ -641,7 +644,7 @@ export class Workbench {
 		this.extensions.onChanged = () => this.scheduleRefresh(0);
 		this.scm.onOpenFile = (path) => void this.editors.openFile(path);
 		this.scm.onOpenDiff = (diff) => void this.editors.openDiff({ kind: 'diff', ...diff });
-		this.scm.onOpenGraph = () => this.openGraph();
+		this.scm.onOpenGraph = (repo) => this.openGraph(repo);
 		this.scm.onShowFileHistory = (path) => this.showFileHistoryInGraph(path);
 		this.scm.onCount = (count) => this.setScmBadge(count);
 		this.scm.onConflicts = (count) => this.statusBar.setConflicts(count);

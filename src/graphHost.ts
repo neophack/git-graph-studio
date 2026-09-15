@@ -509,11 +509,17 @@ export class GraphHost {
 	private async mount(repoPath: string, generation: number): Promise<void> {
 		await this.refreshRepos();
 		if (generation !== this.loadGeneration) return; // superseded by a newer load / unload
+		// A repository switch asked for while the load was still running (a submodule's graph
+		// icon in the Source Control view clicked right after the folder opened) lands directly
+		// on the freshly loaded view.
+		const pendingRepo = this.pendingRepo;
+		this.pendingRepo = null;
+		if (pendingRepo !== null && this.repos.includes(pendingRepo)) this.currentRepo = pendingRepo;
 		this.currentRepo ??= repoPath;
 		this.config = this.buildConfig();
 		const initialState = {
 			config: this.config,
-			lastActiveRepo: repoPath,
+			lastActiveRepo: this.currentRepo,
 			loadViewTo: this.pendingFilterPath !== null ? { repo: repoPath, filterPath: this.pendingFilterPath } : null,
 			loadRepoInfoRefreshId: 0,
 			loadCommitsRefreshId: 0,
@@ -588,6 +594,30 @@ export class GraphHost {
 
 	/** A path filter asked for before the view finished a load; applied by `mount`. */
 	private pendingFilterPath: string | null = null;
+	/** A repository switch asked for before the view finished a load; applied by `mount`. */
+	private pendingRepo: string | null = null;
+
+	/** Switch the view to another repository of its dropdown's set (the open repository or one
+	 *  of its submodules) - the Source Control view's per-repository graph icon. The view
+	 *  re-renders its repository dropdown and loads that repository, exactly what its own
+	 *  dropdown switch produces; a switch asked for before the load settles is applied by
+	 *  `mount` instead. */
+	switchRepo(repo: string): void {
+		if (!this.loaded || !this.currentRepo) {
+			this.pendingRepo = repo;
+			return;
+		}
+		if (this.currentRepo === repo) return;
+		const postSwitch = () => {
+			if (this.currentRepo === repo || !this.repos.includes(repo)) return;
+			this.currentRepo = repo;
+			this.post({ command: 'loadRepos', repos: this.repoStates(), lastActiveRepo: repo, loadViewTo: { repo } });
+		};
+		// The Source Control view may know a submodule this host has not re-read since its load
+		// (it was initialised in between): refresh the repository set before switching.
+		if (this.repos.includes(repo)) postSwitch();
+		else void this.refreshRepos().then(postSwitch);
+	}
 
 	/** Filter the view's commits to one or more files (Git Graph RS: Show File History in Git
 	 *  Graph, `git-graph-rs.filterByFile`). `relativePath` is repo-relative, posix; multiple

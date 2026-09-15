@@ -192,8 +192,10 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 
 /* A submodule's own repository section (VS Code's multi-repo Source Control view): a header
    (branch, sync/publish, refresh, "..."), then its commit box, Publish/Sync button and groups -
-   the same layout as the main repository's, repeated once per initialised submodule. */
-.scm-repo { flex: none; border-top: 1px solid var(--vscode-sideBarSectionHeader-border); }
+   the same layout as the main repository's, repeated once per initialised submodule. The
+   sections flow inside .scm-list below the virtualised rows, so the stack stays compact from
+   the top and one scrollbar covers every repository. */
+.scm-repo { border-top: 1px solid var(--vscode-sideBarSectionHeader-border); }
 .scm-repo-header .icon { width: 16px; height: 16px; font-size: 16px; margin: 0 6px 0 2px; flex: none; display: inline-flex; align-items: center; justify-content: center; }
 .scm-repo-branch { flex: none; display: inline-flex; align-items: center; gap: 2px; margin-right: 6px; font-weight: 400; text-transform: none; color: var(--vscode-sideBarSectionHeader-foreground); opacity: 0.85; }
 .scm-repo-branch .codicon { font-size: 14px; }

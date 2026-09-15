@@ -63,6 +63,51 @@ describe('graph assets', () => {
 		expect(sent['lastActiveRepo']).toBe('C:\\repo');
 	});
 
+	it('switches the view to a submodule - the Source Control view\'s per-repository graph icon', async () => {
+		backend.on('repo_submodules', () => ['C:\\repo\\sub\\dep']);
+		const host = new GraphHost(delegate);
+		document.body.appendChild(host.element);
+		host.load('C:\\repo');
+		await flush(10);
+		const frameWindow = host.frame.contentWindow!;
+		const postSpy = vi.spyOn(frameWindow, 'postMessage').mockImplementation(() => undefined);
+		host.switchRepo('C:\\repo\\sub\\dep');
+		await flush(10);
+		const sent = postSpy.mock.calls
+			.map((call) => (call[0] as { __studioGraphResponse: Record<string, unknown> }).__studioGraphResponse)
+			.filter((message) => message['command'] === 'loadRepos')[0];
+		// The loadRepos response the view's own dropdown switch produces: the repository set,
+		// the new repository as the active one, and a loadViewTo that names it.
+		expect(Object.keys(sent['repos'] as Record<string, unknown>)).toContain('C:\\repo\\sub\\dep');
+		expect(sent['lastActiveRepo']).toBe('C:\\repo\\sub\\dep');
+		expect(sent['loadViewTo']).toEqual({ repo: 'C:\\repo\\sub\\dep' });
+		// The host stays in step: a later loadRepos request from the view is answered with the
+		// switched repository as the active one.
+		window.dispatchEvent(new MessageEvent('message', { source: frameWindow, data: { __studioGraphRequest: { command: 'loadRepos' } } }));
+		await flush(10);
+		const followUp = postSpy.mock.calls
+			.map((call) => (call[0] as { __studioGraphResponse: Record<string, unknown> }).__studioGraphResponse)
+			.filter((message) => message['command'] === 'loadRepos')
+			.at(-1)!;
+		expect(followUp['lastActiveRepo']).toBe('C:\\repo\\sub\\dep');
+
+		// A repository outside the set is not switched to, and a repeat switch posts nothing.
+		host.switchRepo('C:\\elsewhere');
+		await flush(10);
+		expect(postSpy.mock.calls.filter((call) => (call[0] as { __studioGraphResponse: Record<string, unknown> }).__studioGraphResponse['command'] === 'loadRepos').length).toBe(2);
+	});
+
+	it('lands a repository switch that raced the load on the freshly mounted view', async () => {
+		backend.on('repo_submodules', () => ['C:\\repo\\sub\\dep']);
+		const host = new GraphHost(delegate);
+		document.body.appendChild(host.element);
+		host.load('C:\\repo');
+		host.switchRepo('C:\\repo\\sub\\dep'); // before the mount's repository read settles
+		await flush(10);
+		const initial = JSON.parse(sessionStorage.getItem('ggstudio.initial')!) as { initialState: { lastActiveRepo: string } };
+		expect(initial.initialState.lastActiveRepo).toBe('C:\\repo\\sub\\dep');
+	});
+
 	it('opens a diff from a submodule against that submodule, not the open repository', async () => {
 		const openDiff = vi.fn();
 		const host = new GraphHost({ ...delegate, openDiff });
