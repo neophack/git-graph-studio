@@ -5,7 +5,7 @@
 //                           build (media/out.min.js, out.min.css, markdown-it), the extension's
 //                           icons (resources/), and the runtime config bundle (see below) — the
 //                           integrated git-graph-rs serves its webview from here
-//   target/studio/icons/    the app icons `tauri icon` derives from plugin/resources/icon.png
+//   target/studio/icons/    the app icons `tauri icon` derives from vscode-git-graph-rs/resources/icon.png
 //   target/studio/cargo/    the Cargo target dir (src-tauri/.cargo/config.toml)
 //   target/studio/dist/     the Vite build output (vite.config.ts)
 //
@@ -17,7 +17,7 @@
 // extension, without a hand-maintained copy.
 //
 // Requires the plugin submodule checked out and compiled: `npm install && npm run compile`
-// in plugin/ (its out/config.js and media/).
+// in vscode-git-graph-rs/ (its out/config.js and media/).
 import { build } from 'esbuild';
 import { checkSeams } from './check-seams.mjs';
 import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -32,8 +32,8 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const appDir = join(dirname(fileURLToPath(import.meta.url)), '..');
-// The git-graph-rs extension lives in its own repository, checked out as the plugin/ submodule.
-const root = join(appDir, 'plugin');
+// The git-graph-rs extension lives in its own repository, checked out as the vscode-git-graph-rs/ submodule.
+const root = join(appDir, 'vscode-git-graph-rs');
 const out = join(appDir, 'target', 'studio');
 const publicDir = join(out, 'public');
 
@@ -59,7 +59,7 @@ for (const [from, to] of [
 	['media/out.min.css', 'out.min.css'],
 	['media/vendor/markdown-it.min.js', 'markdown-it.min.js']
 ]) {
-	requireArtifact(join(root, from), 'run `npm run compile` in plugin/ first');
+	requireArtifact(join(root, from), 'run `npm run compile` in vscode-git-graph-rs/ first');
 	copyFileSync(join(root, from), join(gitgraphDir, to));
 }
 
@@ -84,7 +84,7 @@ for (const [from, to] of [
 
 /* 2. The config bundle. */
 const configPath = join(root, 'out', 'config.js');
-requireArtifact(configPath, 'run `npm run compile` in plugin/ first');
+requireArtifact(configPath, 'run `npm run compile` in vscode-git-graph-rs/ first');
 await build({
 	stdin: {
 		contents: `
@@ -257,7 +257,7 @@ var global = globalThis;`
 
 // The syntax highlighter the generated comparison page loads, next to the bundle.
 copyFileSync(
-	requireArtifact(join(root, 'media', 'vendor', 'highlight.min.js'), 'run `npm run compile` in plugin/ first'),
+	requireArtifact(join(root, 'media', 'vendor', 'highlight.min.js'), 'run `npm run compile` in vscode-git-graph-rs/ first'),
 	join(gitgraphDir, 'highlight.min.js')
 );
 

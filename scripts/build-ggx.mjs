@@ -22,8 +22,8 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const appDir = join(dirname(fileURLToPath(import.meta.url)), '..');
-// The git-graph-rs extension lives in its own repository, checked out as the plugin/ submodule.
-const root = join(appDir, 'plugin');
+// The git-graph-rs extension lives in its own repository, checked out as the vscode-git-graph-rs/ submodule.
+const root = join(appDir, 'vscode-git-graph-rs');
 const studio = join(appDir, 'target', 'studio');
 
 /** The platform key (VS Code's target names) the manifest files binaries under. */

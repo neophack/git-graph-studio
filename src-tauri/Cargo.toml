@@ -58,9 +58,9 @@ tauri-plugin-clipboard-manager = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 portable-pty = { version = "0.9", optional = true }
-# The engine, linked into the app from the plugin submodule: every repository read runs
-# in-process (cmd_graph is the one module that names it — build.rs enforces the seam).
-git-graph-core = { path = "../plugin/native/core" }
+# The engine, linked into the app from the vscode-git-graph-rs submodule: every repository
+# read runs in-process (cmd_graph is the one module that names it — build.rs enforces the seam).
+git-graph-core = { path = "../vscode-git-graph-rs/native/core" }
 ureq = { version = "3", features = ["rustls"], optional = true }
 sha1 = { version = "0.10", optional = true }
 hex = { version = "0.4", optional = true }

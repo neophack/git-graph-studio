@@ -14,11 +14,18 @@ fn main() {
         tauri_build::build();
     }
     // The integrated git-graph-rs extension's manifest and localisation, embedded from the
-    // plugin submodule's own files (the app is never built without it): what the built-in
-    // entry in the Extensions view and the workbench's command contributions read.
-    let manifest = Path::new("../plugin/package.json").canonicalize().expect("the plugin's package.json");
-    let nls = Path::new("../plugin/package.nls.json").canonicalize().expect("the plugin's package.nls.json");
-    println!("cargo:rustc-env=GITGRAPH_PACKAGE_JSON={}", manifest.display());
+    // vscode-git-graph-rs submodule's own files (the app is never built without it): what the
+    // built-in entry in the Extensions view and the workbench's command contributions read.
+    let manifest = Path::new("../vscode-git-graph-rs/package.json")
+        .canonicalize()
+        .expect("the vscode-git-graph-rs package.json");
+    let nls = Path::new("../vscode-git-graph-rs/package.nls.json")
+        .canonicalize()
+        .expect("the vscode-git-graph-rs package.nls.json");
+    println!(
+        "cargo:rustc-env=GITGRAPH_PACKAGE_JSON={}",
+        manifest.display()
+    );
     println!("cargo:rustc-env=GITGRAPH_NLS_JSON={}", nls.display());
     println!("cargo:rerun-if-changed={}", manifest.display());
     println!("cargo:rerun-if-changed={}", nls.display());

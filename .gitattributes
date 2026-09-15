@@ -1,0 +1,6 @@
+# Line endings: LF where a Linux container or cross-platform tool consumes the file raw,
+# CRLF for Windows batch. Everything else follows text=auto (LF in the index).
+* text=auto
+*.bat text eol=crlf
+*.sh text eol=lf
+scripts/Dockerfile.studio-linux text eol=lf

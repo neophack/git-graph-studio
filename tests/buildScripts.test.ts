@@ -60,8 +60,8 @@ describe('the baked-in contributions', () => {
 		}
 	});
 
-	it('reads the real plugin manifest the app ships', () => {
-		const [baked] = buildBuiltinContributions(join(dirname(fileURLToPath(import.meta.url)), '..', 'plugin'));
+	it('reads the real vscode-git-graph-rs manifest the app ships', () => {
+		const [baked] = buildBuiltinContributions(join(dirname(fileURLToPath(import.meta.url)), '..', 'vscode-git-graph-rs'));
 		expect(baked.extId).toBe('neophack.git-graph-rs');
 		// The menu locations the workbench surfaces are all declared there.
 		expect(Object.keys(baked.contributes.menus)).toContain('scm/title');

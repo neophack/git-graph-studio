@@ -57,7 +57,7 @@ const builtinContributionsPlugin = (): Plugin => ({
 	},
 	load(id) {
 		if (id !== '\0' + VIRTUAL_BUILTIN_CONTRIBUTIONS) return undefined;
-		const data = buildBuiltinContributions(resolve(__dirname, 'plugin'));
+		const data = buildBuiltinContributions(resolve(__dirname, 'vscode-git-graph-rs'));
 		return `export const builtinContributions = ${JSON.stringify(data)};`;
 	}
 });

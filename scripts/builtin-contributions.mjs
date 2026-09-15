@@ -1,6 +1,6 @@
 // Build-time extraction of the contributions (menus, commands, keybindings, settings) of the
 // extensions the app ships with - the integrated git-graph-rs, whose package.json is the
-// plugin submodule's own, plus any .ggx packages staged for bundling. The Vite virtual module
+// vscode-git-graph-rs submodule's own, plus any .ggx packages staged for bundling. The Vite virtual module
 // `virtual:builtin-contributions` (vite.config.ts) bakes the result into the frontend bundle, so
 // the workbench registers these menus synchronously before its first render - no runtime
 // ext_read_file round-trip, no race with the SCM view's boot render.

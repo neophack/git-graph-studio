@@ -13,10 +13,10 @@ if errorlevel 1 goto :nocargo
 where node >nul 2>nul
 if errorlevel 1 goto :nonode
 
-echo [1/4] Compiling the plugin submodule (the extension assets the app embeds)
-if not exist plugin\package.json git submodule update --init plugin
+echo [1/4] Compiling the vscode-git-graph-rs submodule (the extension assets the app embeds)
+if not exist vscode-git-graph-rs\package.json git submodule update --init vscode-git-graph-rs
 if errorlevel 1 goto :fail
-cd plugin
+cd vscode-git-graph-rs
 if not exist node_modules call npm install
 if errorlevel 1 goto :fail
 call npm run compile

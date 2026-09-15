@@ -22,7 +22,7 @@ function rand(n: number): number {
 /** Deterministic pseudo-random file paths with a realistic shape: a few top-level folders,
  *  nested packages, mixed-case names, and the usual extension mix of a TypeScript/Rust repo. */
 function syntheticFiles(count: number): string[] {
-	const folders = ['src', 'plugin/out', 'plugin/web', 'plugin/media', 'plugin/native/core/src', 'src-tauri/src', 'tests', 'plugin/lib/parser', 'plugin/lib/renderer'];
+	const folders = ['src', 'vscode-git-graph-rs/out', 'vscode-git-graph-rs/web', 'vscode-git-graph-rs/media', 'vscode-git-graph-rs/native/core/src', 'src-tauri/src', 'tests', 'vscode-git-graph-rs/lib/parser', 'vscode-git-graph-rs/lib/renderer'];
 	const stems = ['main', 'index', 'graph', 'commit', 'branch', 'utils', 'view', 'model', 'panel', 'status', 'diff', 'repo', 'config', 'settings', 'terminal', 'editor'];
 	const extensions = ['.ts', '.tsx', '.js', '.rs', '.css', '.json', '.html'];
 	const pick = <T>(array: T[], i: number, salt: number): T => array[Math.floor(rand(i * 8 + salt) * array.length)]!;

@@ -11,7 +11,7 @@ const { version } = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 
 
 // The same baked-in extension contributions the app build gets (vite.config.ts): tests import
 // the workbench modules, so `virtual:builtin-contributions` must resolve here too — filled from
-// the real plugin manifest, exactly what the app ships.
+// the real vscode-git-graph-rs manifest, exactly what the app ships.
 const builtinContributionsPlugin = () => ({
 	name: 'builtin-contributions',
 	resolveId(id: string) {
@@ -19,7 +19,7 @@ const builtinContributionsPlugin = () => ({
 	},
 	load(id: string) {
 		if (id !== '\0virtual:builtin-contributions') return undefined;
-		const data = buildBuiltinContributions(resolve(__dirname, 'plugin'));
+		const data = buildBuiltinContributions(resolve(__dirname, 'vscode-git-graph-rs'));
 		return `export const builtinContributions = ${JSON.stringify(data)};`;
 	}
 });

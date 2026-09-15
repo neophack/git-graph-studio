@@ -1,0 +1,110 @@
+# Releases Git Graph Studio: builds every installer through studio.yml (stamping the tag's
+# version into the binaries), then publishes them as a GitHub Release with SHA256 checksums.
+#
+# Trigger: push a v-prefixed tag (the normal path - the tag pins the exact commit being
+# released):
+#
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# or run it from the Actions tab ("Release" -> "Run workflow") with a version (bare or
+# v-prefixed; empty = package.json's version) - the tag is then created at the workflow's
+# commit. Check `full` to also build the macOS x64 dmg.
+#
+# Artifacts per release: windows NSIS setup exe + MSI, deb (Ubuntu 22.04-26.04 / Debian
+# 12+), rpm (Fedora 38+ / openSUSE Leap 15.6+), macOS arm64 dmg (+ x64 on `full`), each
+# with its SHA256 in SHA256SUMS. The Linux compatibility floors and why Ubuntu 20.04
+# cannot work are documented in studio.yml and scripts/Dockerfile.studio-linux.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (bare or v-prefixed, e.g. v0.2.0; empty = package.json version)'
+        required: false
+        default: ''
+        type: string
+      full:
+        description: 'Also build macOS x64'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The version must be known before the pipeline runs, because the builds inside it stamp
+  # the installers with it: the `version` input, else the tag being pushed, else
+  # package.json's version.
+  resolve-tag:
+    name: Resolve the release version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: resolve
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION="$INPUT_VERSION"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "main" ]; then
+            VERSION="$REF_NAME"
+          fi
+          if [ -z "$VERSION" ]; then
+            VERSION="$(node -p "require('./package.json').version")"
+          fi
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  # Everything studio.yml does: the test suite, then the installers for every platform,
+  # stamped with the release version. A release is only made when all of it passes.
+  build-and-test:
+    name: Build the installers
+    needs: resolve-tag
+    uses: ./.github/workflows/studio.yml
+    with:
+      full: ${{ inputs.full == true }}
+      studio-version: ${{ needs.resolve-tag.outputs.version }}
+
+  release:
+    name: Publish the GitHub Release
+    needs: [resolve-tag, build-and-test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download every installer
+        uses: actions/download-artifact@v4
+        with:
+          pattern: studio-*
+          merge-multiple: true
+          path: artifacts
+
+      # Flatten (the artifacts keep their bundle/... structure) and checksum everything;
+      # SHA256SUMS lists exactly the files attached to the release.
+      - name: Flatten and checksum
+        run: |
+          mkdir flat
+          find artifacts -type f -not -name SHA256SUMS -exec cp {} flat/ \;
+          cd flat
+          sha256sum * > SHA256SUMS
+          ls -l
+
+      - name: Create the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.resolve-tag.outputs.version }}
+          name: Git Graph Studio v${{ needs.resolve-tag.outputs.version }}
+          generate_release_notes: true
+          draft: false
+          files: flat/*

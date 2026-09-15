@@ -5,8 +5,8 @@
 >
 > History note: the plan was written while the app lived in the `app/` directory of the
 > vscode-git-graph-rs repository. The app is now this standalone repository and the extension
-> is the `plugin/` submodule — read `app/…` as the project root and `src/…`, `native/core/…`,
-> `web/…`, `media/…` as `plugin/…` where the distinction matters.
+> is the `vscode-git-graph-rs/` submodule — read `app/…` as the project root and `src/…`,
+> `native/core/…`, `web/…`, `media/…` as `vscode-git-graph-rs/…` where the distinction matters.
 
 ---
 
