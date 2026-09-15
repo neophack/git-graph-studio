@@ -49,6 +49,11 @@ on:
 permissions:
   contents: read
 
+# Incremental compilation only pays off within a single job and the cache below discards it
+# anyway; turning it off speeds the debug clippy/test builds and shrinks the saved cache.
+env:
+  CARGO_INCREMENTAL: 0
+
 concurrency:
   group: studio-${{ github.ref }}
   cancel-in-progress: true
@@ -82,6 +87,9 @@ jobs:
   studio-windows:
     name: Studio installers (windows-x64)
     runs-on: windows-latest
+    # A cold-cache run (first run after a Cargo.lock change) fits in ~2.5 h; fail fast on
+    # a real hang instead of burning GitHub's 6 h default.
+    timeout-minutes: 180
     if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v4
@@ -89,9 +97,13 @@ jobs:
           submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
+      # src-tauri redirects cargo's target dir to ../target/studio/cargo (its
+      # .cargo/config.toml); rust-cache caches <workspace>/target unless the mapping is
+      # explicit, so every run recompiled the whole dependency graph twice (debug for the
+      # tests below, release for the installers). Mapping it keeps both profiles cached.
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: src-tauri -> ../target/studio/cargo
           key: studio-windows-x64
 
       - uses: actions/setup-node@v4
@@ -171,6 +183,7 @@ jobs:
   studio-linux:
     name: Studio installers (${{ matrix.artifact }})
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
@@ -229,10 +242,11 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
       - uses: dtolnay/rust-toolchain@stable
         if: matrix.bundles == 'deb'
+      # Same target-dir mapping as the Windows job (see its comment).
       - uses: Swatinem/rust-cache@v2
         if: matrix.bundles == 'deb'
         with:
-          workspaces: src-tauri
+          workspaces: src-tauri -> ../target/studio/cargo
           key: studio-linux-native
       # The window icons generate_context!() embeds, as in the Windows job.
       - name: Prepare the app assets
@@ -298,15 +312,17 @@ jobs:
       matrix:
         include: ${{ fromJSON((inputs.full == true) && '[{"os":"macos-latest","artifact":"studio-darwin-arm64"},{"os":"macos-13","artifact":"studio-darwin-x64"}]' || '[{"os":"macos-latest","artifact":"studio-darwin-arm64"}]') }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
+      # Same target-dir mapping as the Windows job (see its comment).
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: src-tauri -> ../target/studio/cargo
           key: studio-${{ matrix.artifact }}
 
       - uses: actions/setup-node@v4
