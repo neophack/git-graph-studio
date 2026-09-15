@@ -36,6 +36,11 @@ cp -r "$CARGO_TARGET_DIR/release/bundle/." "$REPO/target/studio/$OUT_DIR/"
 # The release binary too, so scripts/measure.mjs (which gates sizes against
 # target/studio/cargo/release) can run on the host once the container is done.
 cp "$CARGO_TARGET_DIR/release/git-graph-studio" "$REPO/target/studio/cargo/release/"
+# Everything above is written as root (the image defines no USER), so on the repository
+# mount it lands root-owned and the host steps after the container could not write into
+# it - CI's measure step mirrors the bundles into target/studio/cargo/release/bundle/
+# before running scripts/measure.mjs. Hand the container-made directories back writable.
+chmod -R a+rwX "$REPO/target/studio/$OUT_DIR" "$REPO/target/studio/cargo/release"
 
 echo "[container] done:"
 ls -l "$REPO/target/studio/$OUT_DIR"
