@@ -189,11 +189,14 @@ jobs:
       - name: Measure sizes and performance
         run: node scripts/measure.mjs --repo vscode-git-graph-rs
 
+      # Only the installers themselves are artefacts: bundle/ also keeps each bundler's
+      # work files, which must never reach the release page.
       - uses: actions/upload-artifact@v4
         with:
           name: studio-windows-x64
           path: |
-            target/studio/cargo/release/bundle/
+            target/studio/cargo/release/bundle/nsis/*.exe
+            target/studio/cargo/release/bundle/msi/*.msi
             target/studio/metrics.json
           if-no-files-found: error
 
@@ -281,15 +284,19 @@ jobs:
       - name: Measure sizes and performance
         run: node scripts/measure.mjs --repo vscode-git-graph-rs
 
+      # Only the packages themselves are artefacts: beside each one the bundler leaves its
+      # work tree (deb: control/, data.tar.gz, debian-binary, md5sums, the staged binary
+      # and desktop file; rpm: the same under <name>-<version>-<arch>/), which must never
+      # reach the release page.
       - uses: actions/upload-artifact@v4
         with:
           name: studio-linux-x64
-          path: target/studio/cargo/release/bundle/deb/
+          path: target/studio/cargo/release/bundle/deb/*.deb
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: studio-linux-rpm
-          path: target/studio/cargo/release/bundle/rpm/
+          path: target/studio/cargo/release/bundle/rpm/*.rpm
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
@@ -359,10 +366,13 @@ jobs:
       - name: Measure sizes and performance
         run: node scripts/measure.mjs --repo vscode-git-graph-rs
 
+      # Only the dmg is an artefact: bundle/dmg/ also keeps the create-dmg staging
+      # (bundle_dmg.sh, template.applescript, eula-resources-template.xml, Info.plist,
+      # icon.icns) and bundle/macos/ the raw .app, which must never reach the release page.
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: |
-            target/studio/cargo/release/bundle/
+            target/studio/cargo/release/bundle/dmg/*.dmg
             target/studio/metrics.json
           if-no-files-found: error

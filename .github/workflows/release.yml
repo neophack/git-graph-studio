@@ -12,7 +12,8 @@
 #
 # Artifacts per release: windows NSIS setup exe + MSI, deb (Ubuntu 24.04-26.04 / Debian
 # 13+), rpm (Fedora 40+ / openSUSE Leap 16+), macOS arm64 dmg (+ x64 on `full`), each
-# with its SHA256 in SHA256SUMS. The Linux compatibility floor is the ubuntu-24.04 runner
+# with its SHA256 in SHA256SUMS, plus the build's metrics.json - nothing else (no
+# bundler work files). The Linux compatibility floor is the ubuntu-24.04 runner
 # studio.yml builds on natively (glibc 2.39); scripts/docker/Dockerfile.studio-linux
 # documents the older ubuntu:22.04 / fedora:38 floors the local Docker builds still target.
 
@@ -92,11 +93,15 @@ jobs:
           path: artifacts
 
       # Flatten (the artifacts keep their bundle/... structure) and checksum everything;
-      # SHA256SUMS lists exactly the files attached to the release.
+      # SHA256SUMS lists exactly the files attached to the release. Only installers and
+      # metrics.json are taken - the v0.1.1 release carried every bundler work file that
+      # had slipped into an artifact, so this filter stays as the release page's guard.
       - name: Flatten and checksum
         run: |
           mkdir flat
-          find artifacts -type f -not -name SHA256SUMS -exec cp {} flat/ \;
+          find artifacts -type f \( \
+            -name '*.exe' -o -name '*.msi' -o -name '*.deb' -o -name '*.rpm' \
+            -o -name '*.dmg' -o -name 'metrics.json' \) -exec cp {} flat/ \;
           cd flat
           sha256sum * > SHA256SUMS
           ls -l
