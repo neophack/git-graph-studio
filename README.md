@@ -40,7 +40,7 @@ git-graph-studio/
 │   ├── build-ggx.mjs        packs the built-in .ggx extension package
 │   ├── builtin-contributions.mjs  bakes the extension manifest's menus/commands into the bundle
 │   ├── check-seams.mjs      the compile-time seam rules (graphHost.ts / view.html / cmd_graph.rs)
-│   ├── measure.mjs          exe/installer/first-paint size budgets + the backend probes
+│   ├── measure.mjs          exe/installer/dist size measurement + the backend probes
 │   ├── *-stub.cjs           the vscode/Node stubs the config and compare bundles build against
 │   ├── build-studio.bat     one-command Windows build (submodule → assets → tauri build)
 │   ├── build-studio-linux.bat   the Linux installers through Docker (deb | rpm | shell)

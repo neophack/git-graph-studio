@@ -4,10 +4,11 @@
 //
 //   node scripts/measure.mjs                 sizes only (after `npx tauri build`)
 //   node scripts/measure.mjs --repo <path>   sizes + the backend probes on <path>
-//   node scripts/measure.mjs --gate          exit 1 when a size budget is exceeded (CI)
 //
-// The budgets are the plan's section-4 acceptance lines. The gate is relative to them, not to
-// a previous run, so a failure always means an absolute limit was crossed.
+// Sizes are recorded, never gated: the exe / installer / dist / first-paint budgets and the
+// `--gate` exit code were removed on 2026-09-15 at the owner's request ("不要限制大小了"),
+// after the exe crossed the old 10 MB line. Backend performance stays gated where it always
+// was, in src-tauri/tests/perf.rs.
 
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
@@ -18,14 +19,6 @@ const appDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const studio = join(appDir, 'target', 'studio');
 const root = appDir;
 const release = join(studio, 'cargo', 'release');
-
-/** The plan's hard targets, in bytes. */
-export const BUDGETS = {
-	exe: 10 * 1024 * 1024,
-	installer: 8 * 1024 * 1024,
-	dist: 2 * 1024 * 1024,
-	firstPaintJs: 300 * 1024
-};
 
 function sizeOf(path) {
 	return existsSync(path) ? statSync(path).size : null;
@@ -100,29 +93,11 @@ export function runProbes(repo) {
 	return JSON.parse(result.stdout);
 }
 
-/** The budgets `--gate` fails the build on. `dist` (the whole frontend, language modes and
- *  the codicon font included) is reported but not gated until the font subsetting lands. */
-export const GATED = ['exe', 'installer', 'firstPaintJs'];
-
-/** Which budgets the sizes exceed, as `[name, actual, budget]` triples. */
-export function violations(sizes) {
-	const out = [];
-	const check = (name, actual, budget) => {
-		if (actual !== null && actual !== undefined && actual > budget) out.push([name, actual, budget]);
-	};
-	check('exe', sizes.exe, BUDGETS.exe);
-	check('installer', sizes.installer, BUDGETS.installer);
-	check('dist', sizes.dist, BUDGETS.dist);
-	check('firstPaintJs', sizes.firstPaintJs?.size ?? null, BUDGETS.firstPaintJs);
-	return out;
-}
-
 const mb = (bytes) => (bytes === null || bytes === undefined ? '-' : `${(bytes / (1024 * 1024)).toFixed(2)} MB`);
 const kb = (bytes) => (bytes === null || bytes === undefined ? '-' : `${(bytes / 1024).toFixed(0)} KB`);
 
 function main() {
 	const args = process.argv.slice(2);
-	const gate = args.includes('--gate');
 	const repoIndex = args.indexOf('--repo');
 	const repo = repoIndex !== -1 ? args[repoIndex + 1] : null;
 
@@ -132,31 +107,22 @@ function main() {
 		measuredAt: new Date().toISOString(),
 		platform: `${process.platform}-${process.arch}`,
 		version: JSON.parse(readFileSync(join(appDir, 'package.json'), 'utf8')).version,
-		budgets: BUDGETS,
 		sizes,
 		perf
 	};
 	writeFileSync(join(studio, 'metrics.json'), JSON.stringify(metrics, null, '\t') + '\n');
 
 	console.log('Git Graph Studio - size baseline');
-	console.log(`  exe            ${mb(sizes.exe).padStart(10)}   budget ${mb(BUDGETS.exe)}`);
-	console.log(`  installer      ${mb(sizes.installer).padStart(10)}   budget ${mb(BUDGETS.installer)}${sizes.installerPath ? `   (${sizes.installerPath})` : ''}`);
-	console.log(`  frontend dist  ${mb(sizes.dist).padStart(10)}   budget ${mb(BUDGETS.dist)}${sizes.distLargest?.path ? `   (largest: ${sizes.distLargest.path} ${kb(sizes.distLargest.size)})` : ''}`);
-	console.log(`  first-paint JS ${kb(sizes.firstPaintJs?.size ?? null).padStart(10)}   budget ${kb(BUDGETS.firstPaintJs)}   (static closure of the boot entry + workbench)`);
+	console.log(`  exe            ${mb(sizes.exe).padStart(10)}`);
+	console.log(`  installer      ${mb(sizes.installer).padStart(10)}${sizes.installerPath ? `   (${sizes.installerPath})` : ''}`);
+	console.log(`  frontend dist  ${mb(sizes.dist).padStart(10)}${sizes.distLargest?.path ? `   (largest: ${sizes.distLargest.path} ${kb(sizes.distLargest.size)})` : ''}`);
+	console.log(`  first-paint JS ${kb(sizes.firstPaintJs?.size ?? null).padStart(10)}   (static closure of the boot entry + workbench)`);
 	for (const chunk of sizes.firstPaintJs?.chunks ?? []) console.log(`${''.padStart(19)}${kb(chunk.bytes).padStart(8)}   ${chunk.file}`);
 	if (perf) {
 		console.log(`Backend probes on ${perf.folder} (${perf.files} files, ${perf.symbols} symbols)`);
 		for (const [phase, ms] of Object.entries(perf.ms)) console.log(`  ${phase.padEnd(15)} ${ms === null ? '-' : `${ms} ms`}`);
 	}
 	console.log(`Written to ${relative(root, join(studio, 'metrics.json')).split('\\').join('/')}`);
-
-	let failing = false;
-	for (const [name, actual, budget] of violations(sizes)) {
-		const gated = GATED.includes(name);
-		if (gate && gated) failing = true;
-		console.log(`${gate && gated ? 'FAIL' : 'over budget'}: ${name} ${mb(actual)} > ${mb(budget)}${gated ? '' : ' (not gated yet)'}`);
-	}
-	if (failing) process.exit(1);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) main();

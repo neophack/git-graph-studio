@@ -52,7 +52,7 @@ permissions:
 # Incremental compilation only pays off within a single job and the cache below discards it
 # anyway; turning it off speeds the debug clippy/test builds and shrinks the saved cache.
 env:
-  CARGO_INCREMENTAL: 0
+  CARGO_INCREMENTAL: "0"
 
 concurrency:
   group: studio-${{ github.ref }}
@@ -162,11 +162,12 @@ jobs:
       - name: Build the installers (NSIS + MSI)
         run: npx tauri build
 
-      # The size gate (docs/ggs-development-plan.md M1.7): exe and installer budgets, plus
+      # Size and performance measurement (docs/ggs-development-plan.md M1.7; the budgets
+      # were removed 2026-09-15 — sizes are recorded, not gated): the artefact sizes plus
       # the backend's headless probes on the submodule repository. The metrics land in
       # target/studio/metrics.json and are published with the bundles.
       - name: Measure sizes and performance
-        run: node scripts/measure.mjs --gate --repo vscode-git-graph-rs
+        run: node scripts/measure.mjs --repo vscode-git-graph-rs
 
       - uses: actions/upload-artifact@v4
         with:
@@ -281,15 +282,16 @@ jobs:
             ggs-linux-builder-${{ matrix.cache }} \
             bash /repo/scripts/docker/studio-linux-build.sh
 
-      # The size gate + backend probes (deb pass only - the rpm carries the same binaries).
-      # measure.mjs expects the bundles under target/studio/cargo/release/bundle/, so the
-      # deb pass's output is mirrored there first.
+      # Size measurement + backend probes (deb pass only - the rpm carries the same
+      # binaries). measure.mjs expects the bundles under
+      # target/studio/cargo/release/bundle/, so the deb pass's output is mirrored there
+      # first.
       - name: Measure sizes and performance
         if: matrix.bundles == 'deb'
         run: |
           mkdir -p target/studio/cargo/release
           cp -r target/studio/bundle-linux target/studio/cargo/release/bundle
-          node scripts/measure.mjs --gate --repo vscode-git-graph-rs
+          node scripts/measure.mjs --repo vscode-git-graph-rs
 
       - uses: actions/upload-artifact@v4
         with:
@@ -358,7 +360,7 @@ jobs:
         run: npx tauri build
 
       - name: Measure sizes and performance
-        run: node scripts/measure.mjs --gate --repo vscode-git-graph-rs
+        run: node scripts/measure.mjs --repo vscode-git-graph-rs
 
       - uses: actions/upload-artifact@v4
         with:

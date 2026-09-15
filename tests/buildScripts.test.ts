@@ -1,5 +1,4 @@
-// The build scripts' pure parts: the .ggx package header, the baked-in contributions, and
-// which size budgets a measurement violates.
+// The build scripts' pure parts: the .ggx package header and the baked-in contributions.
 
 import { describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -11,8 +10,6 @@ import { fileURLToPath } from 'node:url';
 import { ggxManifest } from '../scripts/build-ggx.mjs';
 // @ts-expect-error - plain ESM scripts without type declarations
 import { buildBuiltinContributions, buildBuiltinSettings } from '../scripts/builtin-contributions.mjs';
-// @ts-expect-error - plain ESM scripts without type declarations
-import { BUDGETS, GATED, violations } from '../scripts/measure.mjs';
 
 describe('.ggx packaging', () => {
 	it('writes a ggx/1 header with the frontend page — the shape cmd_ext.rs installs', () => {
@@ -79,17 +76,5 @@ describe('the baked-in contributions', () => {
 		expect(settings.extId).toBe('neophack.git-graph-rs');
 		expect(Object.keys(settings.configuration!.properties!)).toEqual(expect.arrayContaining(declared));
 		expect(Object.keys(settings.nls).length).toBeGreaterThan(Object.keys(baked.nls).length);
-	});
-});
-
-describe('size budgets', () => {
-	it('reports every exceeded budget and nothing else', () => {
-		const within = { exe: 9 * 1024 * 1024, installer: 7 * 1024 * 1024, dist: 1_500_000, firstPaintJs: { size: 250_000 } };
-		expect(violations(within)).toEqual([]);
-		const over = { exe: 23 * 1024 * 1024, installer: null, dist: null, firstPaintJs: { size: 820_000 } };
-		expect(violations(over).map(([name]: [string]) => name)).toEqual(['exe', 'firstPaintJs']);
-		expect(BUDGETS.exe).toBe(10 * 1024 * 1024);
-		// The whole-dist budget is informational until the font subsetting lands.
-		expect(GATED).toEqual(['exe', 'installer', 'firstPaintJs']);
 	});
 });

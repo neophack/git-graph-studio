@@ -21,7 +21,7 @@ const studio = resolve(__dirname, 'target', 'studio');
 // The first-paint closure: every chunk the window loads before the workbench can render -
 // the boot entry, the workbench chunk, and their static imports, transitively (dynamic
 // imports such as xterm, the merge views and the language modes are excluded). Written to
-// dist/first-paint.json so scripts/measure.mjs gates the real number, not a file-name guess.
+// dist/first-paint.json so scripts/measure.mjs reports the real number, not a file-name guess.
 const firstPaintPlugin = (): Plugin => ({
 	name: 'first-paint-closure',
 	generateBundle(_options, bundle) {

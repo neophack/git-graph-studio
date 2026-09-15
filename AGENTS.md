@@ -58,7 +58,7 @@ Everyday commands, from the repository root:
 | `cargo clippy --all-targets --all-features -- -D warnings` (in `src-tauri/`) | Backend lint, warnings are errors in CI |
 | `npx tauri build` | Installers into `target/studio/cargo/release/bundle/` |
 | `npm run dev:vite` | Frontend only, against the scripted fake backend; open `dev/dev-harness.html` |
-| `node scripts/measure.mjs --gate --repo vscode-git-graph-rs` | Size and performance budgets — the gate CI enforces on `main` |
+| `node scripts/measure.mjs --repo vscode-git-graph-rs` | Size and performance measurement — recorded to `target/studio/metrics.json` (no budgets; see principle 6) |
 
 All generated output — the Vite public dir and dist, the Cargo target, installers, coverage,
 `metrics.json` — lands under `target/studio/` (gitignored). Nothing generated is ever written
@@ -98,8 +98,10 @@ The principles below are the plan's §3, condensed. They apply to every change.
 5. **Three artefacts per feature.** A `#[tauri::command]` with a Rust test (scratch
    repository via `test_support.rs`), a vitest over the `tauriMock` recording, and a
    `dev/dev-harness.html` scenario for behaviour jsdom cannot express.
-6. **Budgets are CI gates.** Executable size, installer size, cold start and open-folder
-   time fail the build when exceeded (`scripts/measure.mjs --gate`).
+6. **Sizes are measured, not gated.** Artefact sizes and probe timings are recorded to
+   `target/studio/metrics.json`. The size budgets and their CI gate were removed on
+   2026-09-15 at the owner's request ("不要限制大小了"); backend performance budgets remain
+   enforced by `src-tauri/tests/perf.rs`.
 7. **The engine is consumed through exactly two seams**, both build-enforced — see
    [Invariants](#invariants).
 
@@ -125,7 +127,7 @@ Extensions view would call it), a mission line, and a test file.
 | 11 | Integrated Terminal | Shells inside the panel |
 | 12 | Extension Platform | VSIX / `.ggx` installs and the extension host |
 | 13 | CAN Trace Analyzer | CANoe-style `.blf` / `.asc` analysis |
-| 14 | Performance Lab | Measurement, budgets and the CI gate |
+| 14 | Performance Lab | Measurement, metrics and the perf gate |
 | 15 | Build & Release Pipeline | Asset preparation, packaging, installers, CI |
 
 ### 1. Workbench Shell
@@ -280,12 +282,13 @@ times, frame-loss blame, raw frame browsing and SVG charts.
 ### 14. Performance Lab
 
 Measurement is a feature. Sizes, boot stages, open-folder phases and theme contrast are
-measured, written to `metrics.json` and gated in CI.
+measured and written to `metrics.json`. Size budgets are gone (removed 2026-09-15); the
+performance gate lives in `src-tauri/tests/perf.rs`.
 
 - Backend: `src-tauri/src/measure.rs` (headless `--measure` probes),
   `src-tauri/src/stage_bench.rs` (launch-stage timing), `src-tauri/tests/perf.rs`
   (synthetic repository benchmark; `GGS_PERF_FILES` sets the size, CI runs 20 000)
-- Tooling: `scripts/measure.mjs` (sizes + probes + `--gate`), `scripts/probes/boot-bench.mjs`
+- Tooling: `scripts/measure.mjs` (sizes + probes), `scripts/probes/boot-bench.mjs`
   (end-to-end startup latency of the release exe), `scripts/probes/cdp-console.mjs` /
   `cdp-probe.mjs` / `cdp-trace.mjs` (live inspection over WebView2's CDP port),
   `dev/dev-harness.html` (the two-mode harness: real Tauri IPC under `tauri dev`, or the
@@ -416,8 +419,8 @@ Conventions:
   stand in for Node and `vscode` in the bundles the tests and build load.
 - Backend tests must not depend on the developer's global git configuration or on network
   access; use `test_support.rs`.
-- Do not weaken a sweep or budget test to make a change pass. If a budget must move, change
-  it deliberately in `scripts/measure.mjs` and say why in the commit.
+- Do not weaken a sweep or budget test to make a change pass. If a `tests/perf.rs` budget
+  must move, change it deliberately there and say why in the commit.
 
 ## Code style
 
