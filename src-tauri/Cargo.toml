@@ -71,7 +71,11 @@ ropey = { version = "1.6", optional = true }
 rayon = { version = "1", optional = true }
 # The Search view's queries and Find References' word matching (cmd_search).
 regex = { version = "1", optional = true }
-zip = { version = "2", optional = true }
+# The VSIX / .ggx readers and writers (cmd_ext): every archive this code writes picks
+# Deflated, and OPC packages (VSIX) are Deflate/stored by specification, so the pure-Rust
+# flate2 backend is the only codec linked — bzip2, zstd and xz (all C) stay out of the
+# tree (plan §3.1). Nothing sets entry timestamps, so the `time` feature is off too.
+zip = { version = "2", default-features = false, features = ["deflate", "deflate64"], optional = true }
 # `default-fancy` swaps syntect's default Oniguruma (C) engine for the pure-Rust fancy-regex
 # engine — the whole viewer stack stays free of C bindings.
 syntect = { version = "5", default-features = false, features = ["default-fancy"], optional = true }
