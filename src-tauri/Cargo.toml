@@ -1,0 +1,114 @@
+[package]
+name = "git-graph-studio"
+version = "0.1.1"
+description = "Git Graph Studio - a standalone Git repository viewer with an explorer, source control panel, terminal and the git-graph-rs engine"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+default-run = "git-graph-studio"
+
+# Own workspace, deliberately kept standalone: the plugin repository's CI jobs run
+# `cargo test --workspace` on runners without the WebKitGTK system libraries a Tauri
+# build links against, which would fail before running a single test. The app is built by its
+# own CI job, which installs those libraries first.
+[workspace]
+
+[lib]
+name = "git_graph_studio_lib"
+path = "src/lib.rs"
+
+# The desktop app: needs the `desktop` feature (Tauri and everything that touches a window).
+[[bin]]
+name = "git-graph-studio"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[features]
+default = ["desktop"]
+desktop = [
+    "dep:tauri",
+    "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-opener",
+    "dep:tauri-plugin-clipboard-manager",
+    "dep:portable-pty",
+    "dep:ureq",
+    "dep:sha1",
+    "dep:hex",
+    "dep:ropey",
+    "dep:rayon",
+    "dep:regex",
+    "dep:zip",
+    "dep:syntect",
+    "dep:base64",
+    "dep:ignore",
+    "dep:notify",
+    "dep:encoding_rs",
+    "dep:trash",
+    "dep:flate2",
+]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [], optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-opener = { version = "2", optional = true }
+tauri-plugin-clipboard-manager = { version = "2", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+portable-pty = { version = "0.9", optional = true }
+# The engine, linked into the app from the plugin submodule: every repository read runs
+# in-process (cmd_graph is the one module that names it — build.rs enforces the seam).
+git-graph-core = { path = "../plugin/native/core" }
+ureq = { version = "3", features = ["rustls"], optional = true }
+sha1 = { version = "0.10", optional = true }
+hex = { version = "0.4", optional = true }
+ropey = { version = "1.6", optional = true }
+# Quick Open's file list is walked across all cores instead of one (cmd_fs::walk_files).
+rayon = { version = "1", optional = true }
+# The Search view's queries and Find References' word matching (cmd_search).
+regex = { version = "1", optional = true }
+zip = { version = "2", optional = true }
+# `default-fancy` swaps syntect's default Oniguruma (C) engine for the pure-Rust fancy-regex
+# engine — the whole viewer stack stays free of C bindings.
+syntect = { version = "5", default-features = false, features = ["default-fancy"], optional = true }
+# Extension icons and README images cross the IPC bridge as base64 data URLs (cmd_ext).
+base64 = { version = "0.22", optional = true }
+# The `.gitignore`-aware parallel tree walk (ripgrep's) behind Quick Open, the Search view
+# and the symbol index (cmd_fs::walk_files) - uncapped, all cores.
+ignore = { version = "0.4", optional = true }
+# Text encodings of the files the editor opens and saves (encoding.rs): BOMs, UTF-16,
+# GB18030 / GBK, Shift_JIS, EUC-KR, Big5, Windows-1252.
+encoding_rs = { version = "0.8", optional = true }
+# BLF log containers are zlib-compressed (can_log.rs).
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"], optional = true }
+# The .asc walker's newline scan (can_log.rs): SIMD-accelerated where std's byte-by-byte
+# `position` is not; already in the tree via the `ignore` crate, so it costs nothing.
+memchr = "2"
+# The file-system watcher behind "external changes show up by themselves" (watcher.rs).
+notify = { version = "8", default-features = false, features = ["macos_fsevent"], optional = true }
+# measure.rs's large-file probe writes its synthetic file into a temp dir.
+tempfile = "3"
+trash = { version = "5", optional = true }
+
+[dev-dependencies]
+# The performance test's raw parallel read baseline (rayon is optional for the app itself).
+rayon = "1"
+
+# `tauri dev` builds here, and the CAN log walker crunches hundreds of MB/s of text:
+# opt-level 1 keeps incremental builds quick while making the parse loops an order of
+# magnitude faster than the unoptimised default (release stays the size-diet profile below).
+[profile.dev]
+opt-level = 1
+
+# The size diet (docs/ggs-development-plan.md M1.2): the app is its own workspace, so it does
+# not inherit the plugin workspace's release profile. Size-optimised, fat LTO, one codegen
+# unit, aborting panics, stripped - about 40% smaller than the default release profile.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false

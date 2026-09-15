@@ -1,0 +1,4 @@
+# Build artifacts go to the project's target/ (never into the source tree), in a sub-dir
+# of their own since the app is a separate Cargo workspace from the plugin's.
+[build]
+target-dir = "../target/studio/cargo"
