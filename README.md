@@ -4,7 +4,12 @@ A standalone desktop app that wraps the `git-graph-rs` engine (the `vscode-git-g
 submodule's `native/core`) in a small VS Code-like shell: an Explorer file tree with git status colouring,
 a Source Control panel (stage / unstage / discard / commit), an editor with tabs, a built-in
 terminal (ConPTY on Windows), and the full Git Graph webview — the same `out.min.js` the
-extension serves, hosted unchanged behind an `acquireVsCodeApi` shim.
+submodule's VS Code extension builds, hosted unchanged behind an `acquireVsCodeApi` shim.
+
+Everything is built in: there is no extension installation of any kind. The `git-graph-rs`
+engine is linked in-process behind the single seam `src/graphHost.ts` ↔
+`src-tauri/src/cmd_graph.rs`, its webview assets are assembled into the app at build time, and
+its version follows the app — upgrading the graph means upgrading the app.
 
 Code navigation rides a persistent symbol index (Source Insight's model): the workspace's
 declarations and their occurrences indexed once under `~/.ggs/index/`, resumed on open and
@@ -20,19 +25,18 @@ respects `prefers-reduced-motion`, and keyboard focus cycling on F6.
 ```text
 git-graph-studio/
 ├── index.html               the workbench window (Vite entry, loads src/main.ts)
-├── ext-host.html            the sandboxed extension-host frame (second Vite entry, loaded by src/extHost.ts)
 ├── package.json             npm scripts: dev / build / test / typecheck / prepare:assets / measure
 ├── vite.config.ts           the workbench build: entries, chunking, the first-paint closure
-├── vitest.config.ts         the test suite (jsdom + the baked contributions module)
+├── vitest.config.ts         the test suite (jsdom; runs the seam check as its global setup)
 ├── tsconfig.json
 │
 ├── src/                     the shell frontend, one module per workbench part
 │                            (explorer, editor, scm, search, settings, terminal, the git
-│                            graph host, the extension host, …)
+│                            graph host, …)
 ├── static/                  static assets served as-is: gitgraph/view.html (the webview
 │                            host page) and theme/*.css (the colour themes)
 ├── src-tauri/               the Rust backend — its own Cargo workspace
-│   ├── src/                 the command modules (fs / scm / graph / search / extensions),
+│   ├── src/                 the command modules (fs / scm / graph / search / symbols),
 │   │                        the PTY, the file watcher, the large-file viewer, the CAN parser
 │   ├── build.rs             Tauri codegen + the Rust seam check (only cmd_graph.rs names the engine)
 │   └── .cargo/config.toml   points the Cargo target at target/studio/cargo
@@ -46,8 +50,6 @@ git-graph-studio/
 ├── scripts/                 the build pipeline — every generated file lands in target/studio/
 │   ├── prepare.mjs          assembles the public dir the app serves (webview bundle, config,
 │   │                        compare page, icons; see the file header for the full layout)
-│   ├── build-ggx.mjs        packs the built-in .ggx extension package
-│   ├── builtin-contributions.mjs  bakes the extension manifest's menus/commands into the bundle
 │   ├── check-seams.mjs      the compile-time seam rules (graphHost.ts / view.html / cmd_graph.rs)
 │   ├── measure.mjs          exe/installer/dist size measurement + the backend probes
 │   ├── *-stub.cjs           the vscode/Node stubs the config and compare bundles build against
@@ -64,63 +66,13 @@ git-graph-studio/
 ├── .github/workflows/       studio.yml (CI) · release.yml (tag → GitHub Release)
 └── vscode-git-graph-rs/     the git-graph-rs VS Code extension, a git submodule tracking its
                              repository's main branch: the engine crate the app links
-                             (native/core), the webview assets it compiles (npm run compile
-                             → out/, media/), and the manifest the baked contributions read
+                             (native/core) and the webview assets it compiles (npm run
+                             compile → out/, media/)
 ```
 
 Everything generated — the Vite public dir and dist, the Cargo target, the installers, the
 coverage and the metrics — lives under `target/studio/` (gitignored), never in the source
 tree; `node_modules/` and the submodule's own build products stay where npm/cargo put them.
-
-## Extensions (.ggx and VSIX)
-
-git-graph-rs is **built in**: its engine (`git-graph-core`) is linked into the app and answers
-the graph in-process through the single seam `src/graphHost.ts` ↔ `src-tauri/src/cmd_graph.rs`
-(git's command echo for the write path streams into the panel's Git channel), and its webview
-assets are assembled by `scripts/prepare.mjs` into the app's own public dir. The Extensions
-view lists it as a built-in whose version follows the application; it cannot be uninstalled,
-and an install of its id (from a `.vsix` or a `.ggx`) is refused — upgrading the graph means
-upgrading the app (or the submodule it is built from).
-
-Studio's extension store (`~/.ggs/extensions/<id>-<version>/`, a user-level directory like
-`.vscode/extensions`) serves two package formats, installed by hand from local files
-(Extensions view → "Install from VSIX or GGX...", or the Command Palette):
-
-- **VSIX** — VS Code extensions whose `main` is a self-contained bundle (see the extension
-  host below).
-- **`.ggx`** — Studio's own format (`docs/ggs-development-plan.md` §8.2; the packer is
-  `scripts/build-ggx.mjs`): a zip with a `manifest.json` header (`format: "ggx/1"`, id,
-  version, the frontend page under `web/`) next to the VS Code-style `package.json` the
-  Extensions view and the contribution points read.
-
-A `.ggx` and a `.vsix` of the same id are the same extension; whichever has the higher version
-wins, and a downgrade is refused. The Extensions page shows each package's format.
-
-The Extensions view also parses each install's richer metadata — `displayName`, icon,
-categories, repository, license, `engines.vscode`, `extensionDependencies` / `extensionPack` —
-and a click opens a VS Code-style detail page as an editor tab: the icon and metadata header,
-category chips, and the install's `README.md` / `CHANGELOG.md` rendered as markdown (the same
-markdown-it bundle the Git Graph webview ships), with relative README images inlined as data
-URLs via `ext_read_file_base64` and dangerous markup stripped.
-
-What the extension host (`src/extHost.ts` + the sandboxed `ext-host.html` frame) supports:
-
-- **Manifest contributions** (`src/contributions.ts`): every installed extension's
-  `contributes.commands` (titles localized through `package.nls.json`), `contributes.keybindings`
-  and the context menu locations Studio surfaces — `explorer/context`, `editor/context` and
-  `editor/title/context` — are parsed and merged into the workbench (palette, keybindings,
-  context menus), the built-in git-graph-rs included (its `git-graph-rs.view` dispatches to the
-  workbench's Git Graph view). `when` clauses other than `"false"` are treated as matching.
-- Extensions whose `main` is a **self-contained bundle** — `require()` only resolves
-  `'vscode'`. Extensions that require other local files at runtime do not load.
-- A subset of the `vscode` API (`src/vscodeApi.ts`): commands, messages/quick input,
-  configuration (persisted per extension), `env.openExternal`, clipboard, and the common
-  value types. Anything else (webview panels, tree views, `workspace.fs`, …) throws a clear
-  "not supported" error.
-- No Node native addons (`.node`) — the built-in git-graph-rs never runs here; the workbench
-  hosts its webview and backend natively (`src/graphHost.ts` + `cmd_graph.rs`), so upgrades of
-  it only refresh that path.
-- No marketplace: installation and upgrades are manual, from local VSIX files.
 
 ## Build
 
@@ -231,4 +183,4 @@ version; the tag is then created at that commit.
   no `git` child processes.
 - Write operations from the Git Graph view (fetch, push, checkout, …) are refused with a pointer
   to the built-in terminal; the Source Control panel's own writes (stage/commit/discard) do shell
-  out to `git`, like the extension's CLI backend.
+  out to `git`.
