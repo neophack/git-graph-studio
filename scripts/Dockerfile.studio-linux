@@ -1,0 +1,33 @@
+# The Linux build environment for Git Graph Studio, used by build-studio-linux.bat.
+#
+# A Tauri app cannot be cross-compiled from Windows the way the extension's .node engines can
+# (build-rust.bat / cargo-zigbuild): it links against webkit2gtk, GTK3 and friends at build
+# time, and its deb/AppImage bundling steps must run in a real Linux userland. So the Linux
+# installers are built in this container instead - the same approach the CI's studio job
+# (native-build.yml) takes on its ubuntu runner.
+#
+# The build context is the scripts/ directory (the image needs nothing from the repository),
+# which keeps node_modules and target/ out of the context transfer:
+#
+#   docker build -t ggs-linux-builder -f scripts/Dockerfile.studio-linux scripts
+
+FROM ubuntu:22.04
+
+# Tauri 2's Linux build dependencies (the same set native-build.yml installs), plus the
+# toolchain basics. patchelf is needed by the AppImage bundling step.
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates curl file git pkg-config patchelf xz-utils xdg-utils \
+        libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+        librsvg2-dev libxdo-dev libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node 20 from the official tarball (CI's setup-node version), no external apt repo needed.
+RUN curl -fsSL https://nodejs.org/dist/v20.18.1/node-v20.18.1-linux-x64.tar.xz \
+        | tar -xJ -C /usr/local --strip-components=1
+
+# Rust stable, minimal profile. RUSTUP_HOME/CARGO_HOME are split so a build can redirect
+# CARGO_HOME to a cache volume (scripts/studio-linux-build.sh) while the toolchains stay here.
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
+    && chmod -R a+rwX /opt/rustup /opt/cargo

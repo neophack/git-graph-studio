@@ -1,0 +1,150 @@
+# Git Graph Studio's own CI: the frontend test suite plus the per-platform installer builds.
+#
+# The app is self-contained except for the plugin/ submodule (the git-graph-rs extension):
+# its compiled webview assets (media/, out/) feed prepare.mjs, so every job checks the
+# submodule out and the build jobs compile it first. A dispatch run can stamp a release
+# version into the build (studio-version) and add the niche macOS x64 platform (full).
+
+name: Studio
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      full:
+        description: 'Also build macOS x64'
+        required: false
+        default: false
+        type: boolean
+      studio-version:
+        description: 'Version to stamp into the Studio build (empty = keep the sources version)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: studio-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The Studio app's frontend: typecheck plus the vitest suite from tests/, which runs
+  # against a mocked Tauri backend (tests/tauriMock.ts), so neither Rust nor the compiled
+  # extension assets are needed here — only the plugin manifest the baked contributions read.
+  studio-test:
+    name: Studio tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install app dependencies
+        run: npm ci || npm install
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npx vitest run
+
+  # Git Graph Studio — the Tauri app — built natively per platform. The same job serves CI
+  # (push/PR) and manual release runs: a dispatch passes `studio-version` so the installers
+  # are stamped with the version being published. Linux arm64 is never built (no arm64
+  # WebKitGTK on the hosted runners); macOS x64 joins on a `full` run.
+  studio:
+    name: Studio (${{ matrix.directory }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.full) && '[{"os":"windows-latest","directory":"windows-x64"},{"os":"ubuntu-latest","directory":"linux-x64"},{"os":"macos-latest","directory":"darwin-arm64"},{"os":"macos-13","directory":"darwin-x64"}]' || '[{"os":"windows-latest","directory":"windows-x64"},{"os":"ubuntu-latest","directory":"linux-x64"},{"os":"macos-latest","directory":"darwin-arm64"}]') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: studio-${{ matrix.directory }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Tauri 2's Linux build needs WebKitGTK and friends; Windows and macOS need nothing
+      # beyond the Rust toolchain.
+      - name: Install the Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf
+
+      # The app consumes the extension's own build products (media/out.min.js, out/config.js,
+      # resources/), so the plugin submodule must be compiled before prepare.mjs runs.
+      - name: Build the plugin submodule
+        working-directory: plugin
+        run: |
+          npm ci || npm install
+          npm run compile
+
+      - name: Install app dependencies
+        run: npm ci || npm install
+
+      # Release runs only: sync the app's version with the tag before anything reads it.
+      - name: Stamp the release version
+        if: github.event_name == 'workflow_dispatch' && inputs.studio-version != ''
+        env:
+          STUDIO_VERSION: ${{ inputs.studio-version }}
+        run: |
+          VERSION="${STUDIO_VERSION#v}"
+          npm pkg set version="$VERSION"
+          node -e "
+            const fs = require('fs');
+            const conf = 'src-tauri/tauri.conf.json';
+            const json = JSON.parse(fs.readFileSync(conf, 'utf8'));
+            json.version = process.argv[1];
+            fs.writeFileSync(conf, JSON.stringify(json, null, '\t') + '\n');
+          " "$VERSION"
+
+      # The app crate is its own workspace (see src-tauri/Cargo.toml), so the plugin
+      # repository's `cargo test --workspace` never reaches it: its tests, the plugin
+      # backend's protocol test against the real binary, and clippy for both feature sets
+      # run here.
+      - name: Test and lint the app backend
+        working-directory: src-tauri
+        run: |
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo clippy --bin git-graph-backend --no-default-features --features engine -- -D warnings
+          cargo test --all-features
+        env:
+          GGS_PERF_FILES: "20000"
+
+      - name: Build the installers
+        run: npx tauri build
+
+      # The size gate (docs/ggs-development-plan.md M1.7): exe ≤ 10 MB, installer ≤ 8 MB,
+      # bundled VSIX ≤ 0.6 MB, plus the backend's headless probes on the plugin repository.
+      # The metrics land in target/studio/metrics.json and are published with the bundles.
+      - name: Measure sizes and performance
+        run: node scripts/measure.mjs --gate --repo plugin
+
+      # prepare.mjs and .cargo/config.toml keep every build product under target/studio/,
+      # so the bundles all live in one place regardless of platform.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: studio-${{ matrix.directory }}
+          path: |
+            target/studio/cargo/release/bundle/
+            target/studio/metrics.json
+          if-no-files-found: error
