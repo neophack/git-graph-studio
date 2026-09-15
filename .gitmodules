@@ -1,0 +1,4 @@
+[submodule "plugin"]
+	path = plugin
+	url = https://github.com/neophack/vscode-git-graph-rs
+	branch = main

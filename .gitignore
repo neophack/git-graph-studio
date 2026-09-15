@@ -1,0 +1,13 @@
+# Everything generated lands in target/studio (see scripts/prepare.mjs); this only guards
+# against tools that insist on writing next to their inputs.
+node_modules/
+target/
+dist/
+coverage/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/icons/
+vite.config.ts.timestamp-*
+*.log
+.DS_Store
+Thumbs.db

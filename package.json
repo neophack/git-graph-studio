@@ -1,0 +1,44 @@
+{
+	"name": "git-graph-studio",
+	"private": true,
+	"version": "0.1.1",
+	"type": "module",
+	"scripts": {
+		"prepare:assets": "node scripts/prepare.mjs",
+		"dev:vite": "vite",
+		"build:vite": "vite build",
+		"typecheck": "tsc --noEmit",
+		"tauri": "tauri",
+		"dev": "tauri dev",
+		"build": "tauri build",
+		"measure": "node scripts/measure.mjs",
+		"test": "vitest run"
+	},
+	"dependencies": {
+		"@codemirror/autocomplete": "^6.20.3",
+		"@codemirror/commands": "^6.11.0",
+		"@codemirror/language": "^6.12.4",
+		"@codemirror/language-data": "^6.5.2",
+		"@codemirror/merge": "^6.12.2",
+		"@codemirror/search": "^6.7.2",
+		"@codemirror/state": "^6.7.4",
+		"@codemirror/view": "^6.43.11",
+		"@lezer/highlight": "^1.2.3",
+		"@tauri-apps/api": "^2",
+		"@tauri-apps/plugin-clipboard-manager": "^2",
+		"@tauri-apps/plugin-dialog": "^2",
+		"@tauri-apps/plugin-opener": "^2",
+		"@vscode/codicons": "^0.0.46-24",
+		"@xterm/addon-fit": "^0.10.0",
+		"@xterm/xterm": "^5.5.0",
+		"codemirror": "^6.0.1"
+	},
+	"devDependencies": {
+		"@tauri-apps/cli": "^2",
+		"@vitest/coverage-v8": "^5.0.0",
+		"jsdom": "^29.1.1",
+		"typescript": "^5.6.0",
+		"vite": "^6.0.0",
+		"vitest": "^5.0.0"
+	}
+}
