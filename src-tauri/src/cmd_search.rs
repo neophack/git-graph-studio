@@ -179,7 +179,7 @@ fn whole_word_wrap(query: &str, body: &str) -> String {
     format!("{start}(?:{body}){end}")
 }
 
-fn build_matcher(query: &str, is_regex: bool, case_sensitive: bool, word_only: bool) -> Result<Regex, String> {
+pub(crate) fn build_matcher(query: &str, is_regex: bool, case_sensitive: bool, word_only: bool) -> Result<Regex, String> {
     let body = if is_regex { query.to_owned() } else { regex::escape(query) };
     // The edge-character rule looks at the raw query, for a regex the same as for a literal.
     let body = if word_only { whole_word_wrap(query, &body) } else { body };
@@ -193,7 +193,7 @@ fn build_matcher(query: &str, is_regex: bool, case_sensitive: bool, word_only: b
 /// UTF-16 file arrives decoded to UTF-8 with its encoding id remembered, so its matches are
 /// found at all and a replace can write it back the way it was; anything else stays the raw
 /// bytes, which are never decoded wholesale - only matched lines are.
-fn read_searchable(path: &Path) -> Option<(Vec<u8>, &'static str)> {
+pub(crate) fn read_searchable(path: &Path) -> Option<(Vec<u8>, &'static str)> {
     if fs::metadata(path).map(|m| m.len()).unwrap_or(u64::MAX) > MAX_TEXT_FILE {
         return None;
     }
@@ -229,7 +229,7 @@ fn encode_searchable(text: Vec<u8>, encoding: &str) -> Vec<u8> {
 
 /// Scan raw bytes, decoding only the lines that have at least one hit. Columns and lengths are
 /// character counts, so byte offsets are mapped through the decoded line.
-fn scan_text(bytes: &[u8], matcher: &Regex) -> Vec<SearchMatch> {
+pub(crate) fn scan_text(bytes: &[u8], matcher: &Regex) -> Vec<SearchMatch> {
     let mut out = Vec::new();
     let mut start = 0usize;
     let mut line_no = 0usize;
@@ -628,7 +628,7 @@ pub async fn compare_dirs(left: String, right: String, include: Option<String>, 
 
 /* ---------- The workspace symbol index ---------- */
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSymbol {
     pub kind: String,
@@ -700,7 +700,7 @@ pub fn search_literal(files: &[String], root: &str, query: &str) -> Result<Searc
 }
 
 /// Serve the symbol index from the per-folder cache when it is fresh; otherwise rebuild it.
-fn cached_symbols(root: &str, cache: &SymbolCache) -> Vec<WorkspaceSymbol> {
+pub(crate) fn cached_symbols(root: &str, cache: &SymbolCache) -> Vec<WorkspaceSymbol> {
     {
         let cached = cache.0.lock().unwrap();
         if let Some((at, symbols)) = cached.get(root) {
@@ -720,6 +720,8 @@ fn cached_symbols(root: &str, cache: &SymbolCache) -> Vec<WorkspaceSymbol> {
 
 /// Every workspace symbol whose name contains the (case-insensitive) query; an empty query
 /// returns the first `limit` symbols, so the frontend can list "all" for the call tree.
+/// The persistent index (cmd_symbols) answers when it has landed; the in-memory rebuild
+/// below stays the fallback for the window before it does.
 #[tauri::command]
 pub async fn workspace_symbols(
     state: State<'_, AppState>,
@@ -730,7 +732,7 @@ pub async fn workspace_symbols(
     let root = repo
         .or_else(|| state.first_repo())
         .ok_or_else(|| "No folder is open".to_string())?;
-    let all = cached_symbols(&root, &state.symbol_cache);
+    let all = state.symbol_index.all_symbols(&root).unwrap_or_else(|| cached_symbols(&root, &state.symbol_cache));
     let needle = query.to_lowercase();
     let mut hits: Vec<WorkspaceSymbol> = all
         .into_iter()
@@ -745,29 +747,12 @@ pub async fn workspace_symbols(
 /* ---------- Find references ---------- */
 
 /// Every occurrence of `name` as a whole word in the workspace's code files - the raw material
-/// of Find References and the call tree, which filter and rank it frontend-side.
+/// of Find References and the call tree, which filter and rank it frontend-side. The scan is
+/// the shared implementation in cmd_symbols: the persistent index's occurrence list narrows
+/// it to the files that contain the word, when one has landed.
 #[tauri::command]
 pub async fn find_references(state: State<'_, AppState>, name: String) -> Result<Vec<FileMatches>, String> {
-    let root = state.first_repo().ok_or_else(|| "No folder is open".to_string())?;
-    let matcher = build_matcher(&name, false, true, true)?;
-    let files: Vec<String> = walk_files(&root)
-        .into_iter()
-        .filter(|file| {
-            let ext = file.rsplit('.').next().unwrap_or("");
-            SYMBOL_EXTENSIONS.contains(&ext)
-        })
-        .collect();
-    let found: Vec<Option<FileMatches>> = files
-        .into_par_iter()
-        .map(|relative| {
-            let (text, _) = read_searchable(&Path::new(&root).join(&relative))?;
-            let matches = scan_text(&text, &matcher);
-            (!matches.is_empty()).then_some(FileMatches { path: relative, matches })
-        })
-        .collect();
-    let mut files: Vec<FileMatches> = found.into_iter().flatten().collect();
-    files.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(files)
+    crate::cmd_symbols::references_for(&state, &name, None).await
 }
 
 /* ---------- Hex comparison ---------- */

@@ -12,6 +12,19 @@ fn main() {
     // pulls in; a bare library build (the tests) builds without it.
     if std::env::var_os("CARGO_FEATURE_DESKTOP").is_some() {
         tauri_build::build();
+        // The desktop feature links the dialog plugin, whose message dialogs import
+        // `TaskDialogIndirect` from common-controls v6 — an export the System32 v5
+        // comctl32.dll lacks, so a manifest-less exe dies at load with
+        // STATUS_ENTRYPOINT_NOT_FOUND. The app's binaries get v6 through tauri-build's own
+        // embedded manifest resource; the lib's test exe does not, so the side-by-side
+        // dependency is spelled for every target here and link.exe writes it as an
+        // EXTERNAL manifest beside the exes that lack an embedded one (the loader prefers
+        // an embedded manifest, so the shipped app binary is untouched).
+        if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+            println!(
+                "cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' publicKeyToken='6595b64144ccf1df' language='*' processorArchitecture='*'"
+            );
+        }
     }
     // The integrated git-graph-rs extension's manifest and localisation, embedded from the
     // vscode-git-graph-rs submodule's own files (the app is never built without it): what the

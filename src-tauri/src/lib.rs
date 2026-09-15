@@ -32,6 +32,8 @@ pub mod cmd_scm;
 #[cfg(feature = "desktop")]
 pub mod cmd_search;
 #[cfg(feature = "desktop")]
+pub mod cmd_symbols;
+#[cfg(feature = "desktop")]
 pub mod encoding;
 #[cfg(feature = "desktop")]
 pub mod measure;
@@ -39,6 +41,8 @@ pub mod measure;
 pub mod pty;
 #[cfg(feature = "desktop")]
 pub mod scm_ops;
+#[cfg(feature = "desktop")]
+pub mod symbols;
 #[cfg(all(test, feature = "desktop"))]
 mod stage_bench;
 #[cfg(feature = "desktop")]
@@ -72,6 +76,9 @@ mod desktop {
         pub symbol_cache: Arc<cmd_search::SymbolCache>,
         /// The running search's generation, for cancellation (cmd_search).
         pub search: Arc<cmd_search::SearchState>,
+        /// The persistent workspace symbol index (cmd_symbols / symbols): one database per
+        /// open root, resumed from `~/.ggs/index/` on open and updated by the watcher.
+        pub symbol_index: Arc<cmd_symbols::SymbolIndex>,
         /// The watch on the open folder; `None` when no folder is open or the OS refused it.
         /// One watcher per open root: a plain folder keeps one, a multi-root workspace one per root.
         pub watcher: Mutex<Vec<watcher::FolderWatcher>>,
@@ -85,6 +92,7 @@ mod desktop {
                 file_list_cache: Arc::new(cmd_fs::FileListCache::default()),
                 symbol_cache: Arc::new(cmd_search::SymbolCache::default()),
                 search: Arc::new(cmd_search::SearchState::default()),
+                symbol_index: Arc::new(cmd_symbols::SymbolIndex::new()),
                 watcher: Mutex::new(Vec::new()),
             }
         }
@@ -176,6 +184,7 @@ mod desktop {
         state.file_list_cache.invalidate();
         state.symbol_cache.invalidate();
         state.search.cancel();
+        state.symbol_index.cancel();
         // The previous folder's watch ends here, like in open_workspace / close_folder —
         // not when the new one installs below: a refused start_watcher, or a reopen racing
         // the install, must not leave the old folder emitting studio://fs-changed.
@@ -196,6 +205,14 @@ mod desktop {
             let files = cmd_fs::walk_files(&prefetch_root);
             cache.store(&prefetch_root, files);
         });
+        // The symbol database resumes from ~/.ggs/index/ and repairs against the disk in the
+        // background (cmd_symbols); Go-to-Definition and Find References pick it up when it
+        // lands, falling back to the in-memory index until then.
+        {
+            let index = std::sync::Arc::clone(&state.symbol_index);
+            let index_root = root.clone();
+            index.start_build(Some(app.clone()), &index_root);
+        }
         // External changes reach the webview through the watcher; a refused watch (an exotic
         // filesystem, too many watches) just means the command-driven refreshes carry on alone.
         // Starting it costs filesystem work that must not sit on the open path — the graph and
@@ -204,9 +221,10 @@ mod desktop {
             let app = app.clone();
             let file_list = state.file_list_cache.clone();
             let symbols = state.symbol_cache.clone();
+            let index = std::sync::Arc::clone(&state.symbol_index);
             let watch_root = root.clone();
             std::thread::spawn(move || {
-                match start_watcher(&app, &file_list, &symbols, &watch_root) {
+                match start_watcher(&app, &file_list, &symbols, &index, &watch_root) {
                     Ok(watch) => {
                         use tauri::Manager;
                         // Only the watcher of the folder that is still open survives a rapid reopen;
@@ -249,18 +267,26 @@ mod desktop {
         app: &tauri::AppHandle,
         file_list: &std::sync::Arc<cmd_fs::FileListCache>,
         symbols: &std::sync::Arc<cmd_search::SymbolCache>,
+        index: &std::sync::Arc<cmd_symbols::SymbolIndex>,
         root: &str,
     ) -> Result<watcher::FolderWatcher, String> {
         use tauri::Emitter;
         let app = app.clone();
         let file_list = file_list.clone();
         let symbols = symbols.clone();
+        let index = std::sync::Arc::clone(index);
+        let watch_root = root.to_owned();
         watcher::FolderWatcher::new(root, move |change| {
             // The caches are stale the moment anything changed; the next Quick Open / search /
             // Go to Definition re-walks. The webview decides what to refresh from the batch.
             file_list.invalidate();
             if change.paths.iter().any(|p| cmd_search::is_symbol_source(p)) || change.truncated {
                 symbols.invalidate();
+            }
+            // The persistent index updates file by file (a truncated batch only drops the
+            // legacy cache above; the next open's resume repairs the index in full).
+            if !change.truncated {
+                index.apply_changes(Some(app.clone()), &watch_root, change.paths.clone());
             }
             let _ = app.emit(FS_CHANGED_EVENT, change);
         })
@@ -383,6 +409,7 @@ mod desktop {
         state.file_list_cache.invalidate();
         state.symbol_cache.invalidate();
         state.search.cancel();
+        state.symbol_index.cancel();
         state.watcher.lock().unwrap().clear();
         *state.repos.lock().unwrap() = roots.iter().map(|root| root.root.clone()).collect();
         cmd_graph::close_engine_repos();
@@ -395,12 +422,18 @@ mod desktop {
                 let files = cmd_fs::walk_files(&prefetch_root);
                 cache.store(&prefetch_root, files);
             });
+            {
+                let index = std::sync::Arc::clone(&state.symbol_index);
+                let index_root = root.root.clone();
+                index.start_build(Some(app.clone()), &index_root);
+            }
             let app = app.clone();
             let file_list = state.file_list_cache.clone();
             let symbols = state.symbol_cache.clone();
+            let index = std::sync::Arc::clone(&state.symbol_index);
             let watch_root = root.root.clone();
             std::thread::spawn(move || {
-                match start_watcher(&app, &file_list, &symbols, &watch_root) {
+                match start_watcher(&app, &file_list, &symbols, &index, &watch_root) {
                     Ok(watch) => {
                         use tauri::Manager;
                         let state = app.state::<AppState>();
@@ -520,6 +553,7 @@ mod desktop {
         }
         state.watcher.lock().unwrap().clear();
         state.search.cancel();
+        state.symbol_index.cancel();
         state.file_list_cache.invalidate();
         state.symbol_cache.invalidate();
         state.repos.lock().unwrap().clear();
@@ -534,6 +568,7 @@ mod desktop {
         *state.single_file.lock().unwrap() = None;
         state.watcher.lock().unwrap().clear();
         state.search.cancel();
+        state.symbol_index.cancel();
         state.file_list_cache.invalidate();
         state.symbol_cache.invalidate();
         state.repos.lock().unwrap().clear();
@@ -943,6 +978,11 @@ mod desktop {
             cmd_search::compare_dirs,
             cmd_search::workspace_symbols,
             cmd_search::find_references,
+            cmd_symbols::symbols_status,
+            cmd_symbols::symbols_rebuild,
+            cmd_symbols::symbol_lookup,
+            cmd_symbols::symbol_references,
+            cmd_symbols::symbol_tree,
             cmd_search::hex_diff
         ])
         .run(tauri::generate_context!())
