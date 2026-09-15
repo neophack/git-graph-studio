@@ -347,6 +347,9 @@ describe('the full UI sweep', () => {
 			await clickAll(explorer, '.tree .row', count, { after: async () => { await flush(4); } });
 			// Outcomes: a file row opens (and activates) its tab; F2 offers the name for editing.
 			const notesRow = Array.from(explorer.querySelectorAll<HTMLElement>('.tree .row')).find((r) => r.textContent!.includes('notes.txt'))!;
+			// The last-clicked row (blob.bin) opens a hex view whose async load re-activates
+			// its tab when it lands; let that settle before the click that must win.
+			await flush(12);
 			click(notesRow); count();
 			await flush(6);
 			expect(document.querySelector('.editor-group-box.focused .tab.active .label, .tab.active .label')!.textContent).toBe('notes.txt');

@@ -270,7 +270,9 @@ describe('the commands no other harness drives', () => {
 	it('Compare Two Folders... opens a Folder Compare tab from the two picked folders', async () => {
 		backend.dialog.openResult = 'C:\\left';
 		await commands.execute('workbench.compareFolders');
-		await flush(4);
+		// The boot-time graph tab can finish loading and re-activate itself one async hop
+		// after the compare tab opens; let that settle before reading the active input.
+		await flush(12);
 		expect(workbench.editors.activeInput).toEqual({ kind: 'folders', id: 'C:\\left::C:\\left', left: 'C:\\left', right: 'C:\\left' });
 		// A cancelled picker opens nothing.
 		backend.dialog.openResult = null;
