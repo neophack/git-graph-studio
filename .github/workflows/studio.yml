@@ -137,7 +137,6 @@ jobs:
         working-directory: src-tauri
         run: |
           cargo clippy --all-targets --all-features -- -D warnings
-          cargo clippy --bin git-graph-backend --no-default-features --features engine -- -D warnings
           cargo test --all-features
         env:
           GGS_PERF_FILES: '20000'
@@ -234,7 +233,6 @@ jobs:
         working-directory: src-tauri
         run: |
           cargo clippy --all-targets --all-features -- -D warnings
-          cargo clippy --bin git-graph-backend --no-default-features --features engine -- -D warnings
           cargo test --all-features
         env:
           GGS_PERF_FILES: '20000'

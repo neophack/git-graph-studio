@@ -1,5 +1,5 @@
-// The build scripts' pure parts: the .ggx package header, the platform keys the manifest files
-// its backends under, and which size budgets a measurement violates.
+// The build scripts' pure parts: the .ggx package header, the baked-in contributions, and
+// which size budgets a measurement violates.
 
 import { describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -8,31 +8,23 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // @ts-expect-error - plain ESM scripts without type declarations
-import { ggxManifest, platformKey } from '../scripts/build-ggx.mjs';
+import { ggxManifest } from '../scripts/build-ggx.mjs';
 // @ts-expect-error - plain ESM scripts without type declarations
 import { buildBuiltinContributions } from '../scripts/builtin-contributions.mjs';
 // @ts-expect-error - plain ESM scripts without type declarations
 import { BUDGETS, GATED, violations } from '../scripts/measure.mjs';
 
 describe('.ggx packaging', () => {
-	it('names platforms the way the backend host looks them up', () => {
-		expect(platformKey('win32', 'x64')).toBe('win32-x64');
-		expect(platformKey('win32', 'arm64')).toBe('win32-arm64');
-		expect(platformKey('darwin', 'arm64')).toBe('darwin-arm64');
-		expect(platformKey('linux', 'x64')).toBe('linux-x64');
-	});
-
-	it('writes a ggx/1 header with the frontend page and the backend process binaries', () => {
+	it('writes a ggx/1 header with the frontend page — the shape cmd_ext.rs installs', () => {
 		const pkg = { name: 'git-graph-rs', publisher: 'neophack', version: '1.0.23', displayName: 'Git Graph' };
-		const manifest = ggxManifest(pkg, { backends: { 'win32-x64': 'backend/win32-x64/git-graph-backend.exe' } });
+		const manifest = ggxManifest(pkg);
 		expect(manifest.format).toBe('ggx/1');
 		expect(manifest.id).toBe('neophack.git-graph-rs');
 		expect(manifest.version).toBe('1.0.23');
 		expect(manifest.frontend).toEqual({ kind: 'webview', page: 'web/view.html', config: 'web/config.js', compare: 'web/compare.js' });
-		expect(manifest.backend).toEqual({ kind: 'process', protocol: 'ggx-rpc/2', binaries: { 'win32-x64': 'backend/win32-x64/git-graph-backend.exe' } });
 		expect(manifest.permissions).toContain('git:write');
-		// A frontend-only package declares no backend at all.
-		expect(ggxManifest(pkg).backend).toBeUndefined();
+		// The header carries no process backend: the engine is linked into the app.
+		expect('backend' in manifest).toBe(false);
 	});
 });
 

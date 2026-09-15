@@ -33,13 +33,9 @@ echo "[container] copying the bundles and binaries into the repository"
 rm -rf "$REPO/target/studio/$OUT_DIR"
 mkdir -p "$REPO/target/studio/$OUT_DIR" "$REPO/target/studio/cargo/release"
 cp -r "$CARGO_TARGET_DIR/release/bundle/." "$REPO/target/studio/$OUT_DIR/"
-# The release binaries too, so scripts/measure.mjs (which gates sizes against
+# The release binary too, so scripts/measure.mjs (which gates sizes against
 # target/studio/cargo/release) can run on the host once the container is done.
-for binary in git-graph-studio git-graph-backend; do
-	if [ -f "$CARGO_TARGET_DIR/release/$binary" ]; then
-		cp "$CARGO_TARGET_DIR/release/$binary" "$REPO/target/studio/cargo/release/"
-	fi
-done
+cp "$CARGO_TARGET_DIR/release/git-graph-studio" "$REPO/target/studio/cargo/release/"
 
 echo "[container] done:"
 ls -l "$REPO/target/studio/$OUT_DIR"
