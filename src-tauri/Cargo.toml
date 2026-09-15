@@ -1,6 +1,6 @@
 [package]
 name = "git-graph-studio"
-version = "0.1.1"
+version = "0.1.2"
 description = "Git Graph Studio - a standalone Git repository viewer with an explorer, source control panel, terminal and the git-graph-rs engine"
 edition = "2021"
 rust-version = "1.82"
