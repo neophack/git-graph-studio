@@ -6,9 +6,12 @@
 import { invoke } from '@tauri-apps/api/core';
 
 import { load, save } from './state';
-import { setLocale } from './i18n';
+import { setLocale, t } from './i18n';
+import { notify } from './ui';
 
 export type AutoSave = 'off' | 'afterDelay' | 'onFocusChange' | 'onWindowChange';
+export type LinuxDmabuf = 'auto' | 'disable' | 'keep';
+export type WorkbenchDensity = 'comfortable' | 'compact';
 
 export interface AppSettings {
 	theme: string;
@@ -35,12 +38,24 @@ export interface AppSettings {
 	snippetSuggestions: boolean;
 	/** Offer workspace paths in the completion list when a fragment looks like one. */
 	pathCompletion: boolean;
+	/** The file extensions (no dot) GGS registers itself to open at the OS level - the
+	 *  File Associations row in Settings; changing it re-registers via `assoc_apply`. */
+	fileAssociations: string[];
+	/** How the webview renders on Linux (`auto` disables the DMABUF renderer only when the
+	 *  NVIDIA proprietary driver is detected). Read by the backend before the webview
+	 *  starts, so a change takes effect on the next launch. */
+	linuxDmabuf: LinuxDmabuf;
+	/** `workbench.density`: how tightly rows, tabs and bars are packed (M7 7.3). */
+	density: WorkbenchDensity;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
 	theme: 'dark-modern', locale: 'en', showOutline: false, autoSave: 'off', autoSaveDelay: 1000,
 	minimap: true, stickyScroll: true, bracketColors: true,
-	fontSize: 14, tabSize: 4, wordWrap: false, snippetSuggestions: true, pathCompletion: true
+	fontSize: 14, tabSize: 4, wordWrap: false, snippetSuggestions: true, pathCompletion: true,
+	fileAssociations: ['blf', 'asc', 'ggx', 'bin', 'hex'],
+	linuxDmabuf: 'auto',
+	density: 'comfortable'
 };
 
 export const settings: AppSettings = { ...DEFAULT_SETTINGS, ...load<Partial<AppSettings>>('appSettings', {}) };
@@ -50,11 +65,12 @@ export const settings: AppSettings = { ...DEFAULT_SETTINGS, ...load<Partial<AppS
 export type SettingCategory = 'general' | 'appearance' | 'editor';
 
 /** How the generated Settings dialog renders one setting. `theme` and `locale` pick from
- *  THEMES / LOCALES; `enum` from its own options; a number gets bounds; a boolean a checkbox. */
+ *  THEMES / LOCALES; `enum` from its own options; a number gets bounds; a boolean a checkbox;
+ *  `extensionList` renders the File Associations checkbox grid over the backend catalogue. */
 export interface SettingDef {
 	key: keyof AppSettings;
 	category: SettingCategory;
-	kind: 'boolean' | 'number' | 'enum' | 'theme' | 'locale';
+	kind: 'boolean' | 'number' | 'enum' | 'theme' | 'locale' | 'extensionList';
 	options?: { value: string; label: string }[];
 	min?: number;
 	max?: number;
@@ -66,6 +82,12 @@ export interface SettingDef {
  */
 export const SETTING_DEFS: SettingDef[] = [
 	{ key: 'locale', category: 'general', kind: 'locale' },
+	{ key: 'fileAssociations', category: 'general', kind: 'extensionList' },
+	{ key: 'linuxDmabuf', category: 'general', kind: 'enum', options: [
+		{ value: 'auto', label: 'settings.linuxDmabuf.auto' },
+		{ value: 'disable', label: 'settings.linuxDmabuf.disable' },
+		{ value: 'keep', label: 'settings.linuxDmabuf.keep' }
+	] },
 	{ key: 'theme', category: 'appearance', kind: 'theme' },
 	{ key: 'autoSave', category: 'editor', kind: 'enum', options: [
 		{ value: 'off', label: 'settings.autoSave.off' },
@@ -85,9 +107,10 @@ export const SETTING_DEFS: SettingDef[] = [
 	{ key: 'pathCompletion', category: 'editor', kind: 'boolean' }
 ];
 
-/** A setting's value differs from its default (the dialog's "modified" marker). */
+/** A setting's value differs from its default (the dialog's "modified" marker). The JSON
+ *  comparison is for `fileAssociations` - array identity never matches a default literal. */
 export function isSettingModified(key: keyof AppSettings): boolean {
-	return settings[key] !== DEFAULT_SETTINGS[key];
+	return JSON.stringify(settings[key]) !== JSON.stringify(DEFAULT_SETTINGS[key]);
 }
 
 /** Dispatched on document whenever a setting changes (`detail.key` is the one that changed). */
@@ -140,7 +163,10 @@ export function applyTheme(id: string = settings.theme): void {
 
 /** Change one setting: store it, apply its side effects, and notify the workbench. */
 export function updateSetting<K extends keyof AppSettings>(key: K, value: AppSettings[K]): void {
-	if (settings[key] === value) return;
+	// Deep compare: the File Associations row rebuilds its array on every toggle, and a
+	// no-op re-registration at the OS level (a click that lands on a re-rendered row)
+	// must not fire the backend command.
+	if (JSON.stringify(settings[key]) === JSON.stringify(value)) return;
 	settings[key] = value;
 	save('appSettings', settings);
 	if (key === 'theme') applyTheme();
@@ -148,6 +174,15 @@ export function updateSetting<K extends keyof AppSettings>(key: K, value: AppSet
 	if (key === 'fontSize') applyFontSize();
 	persistSettingsFile();
 	dispatch(SETTINGS_EVENT, key);
+}
+
+/** Re-register the OS-level "open with" associations for the current selection. The
+ *  backend reports per-platform; on Windows the result explains that Default Apps
+ *  needs one confirmation (Win10/11 will not let an app set the default silently). */
+function applyFileAssociations(): void {
+	void invoke<{ messageKey: string; detail: string }>('assoc_apply', { extensions: settings.fileAssociations })
+		.then((result) => notify('info', t(result.messageKey as 'assoc.applied.windows') + (result.detail ? ` (${result.detail})` : '')))
+		.catch((error: unknown) => notify('error', t('assoc.failed') + String(error)));
 }
 
 /* ---------- The user-level settings.json (M3 3.9): the file wins on the next launch ---------- */

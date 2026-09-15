@@ -22,6 +22,8 @@ pub mod can_log;
 #[cfg(feature = "desktop")]
 pub mod cmd_ext;
 #[cfg(feature = "desktop")]
+pub mod cmd_assoc;
+#[cfg(feature = "desktop")]
 pub mod cmd_fs;
 #[cfg(feature = "desktop")]
 pub mod cmd_fuzzy;
@@ -49,7 +51,7 @@ pub use desktop::{run, AppState};
 
 #[cfg(feature = "desktop")]
 mod desktop {
-    use crate::{can_log, cmd_ext, cmd_fs, cmd_fuzzy, cmd_graph, cmd_scm, cmd_search, git, measure, pty, viewer, watcher};
+    use crate::{can_log, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_graph, cmd_scm, cmd_search, cmd_symbols, git, mcp, measure, pty, viewer, watcher};
     #[allow(unused_imports)]
     use cmd_graph as _cmd_graph_seam;
 
@@ -643,8 +645,87 @@ mod desktop {
         }
     }
 
+    /// WebKitGTK's DMABUF renderer fails on machines whose X server runs on the
+    /// NVIDIA proprietary driver: GBM falls back from the broken EGL-GBM image
+    /// allocation to KMS dumb buffers, which a render node cannot create
+    /// (EACCES), leaving the window black. Disable DMABUF there — but only
+    /// there, and only when the user has not chosen a renderer themselves via
+    /// `WEBKIT_DISABLE_DMABUF_RENDERER` or an EGL vendor override.
+    /// WebKitGTK's DMABUF renderer fails on machines whose X server runs on the
+    /// NVIDIA proprietary driver: GBM falls back from the broken EGL-GBM image
+    /// allocation to KMS dumb buffers, which a render node cannot create
+    /// (EACCES), leaving the window black. Like RustDesk's
+    /// `allow-always-software-render` option, the behaviour is driven by a user
+    /// setting (`linuxDmabuf` in `~/.ggs/settings.json`, taking effect on the
+    /// next launch): `auto` disables DMABUF only when the NVIDIA driver is
+    /// detected, `disable` always disables it, `keep` never touches it. An
+    /// environment variable set by the user always wins over everything.
+    #[cfg(target_os = "linux")]
+    fn apply_webkit_compat() {
+        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some()
+            || std::env::var_os("EGL_VENDOR_LIBRARY_FILENAMES").is_some()
+        {
+            return;
+        }
+        let settings_text = std::fs::read_to_string(settings_file().unwrap_or_default()).ok();
+        let mode = linux_dmabuf_mode(settings_text.as_deref());
+        let nvidia = std::path::Path::new("/proc/driver/nvidia/version").exists();
+        if should_disable_dmabuf(&mode, nvidia) {
+            // Must run before the webview picks its renderer; we are first in
+            // `run`, so no threads have spawned yet.
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn apply_webkit_compat() {}
+
+    /// The `linuxDmabuf` setting as written by the Settings form; anything the
+    /// form does not produce (missing file, bad JSON, unknown value) is `auto`.
+    #[cfg(target_os = "linux")]
+    fn linux_dmabuf_mode(settings: Option<&str>) -> String {
+        settings
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+            .and_then(|value| value.get("linuxDmabuf").and_then(serde_json::Value::as_str).map(str::to_owned))
+            .unwrap_or_else(|| "auto".to_owned())
+    }
+
+    /// `auto` disables DMABUF only on NVIDIA-driver machines; `disable` always;
+    /// `keep` (and any unknown value) never.
+    #[cfg(target_os = "linux")]
+    fn should_disable_dmabuf(mode: &str, nvidia_driver: bool) -> bool {
+        match mode {
+            "disable" => true,
+            "auto" => nvidia_driver,
+            _ => false,
+        }
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    mod webkit_compat_tests {
+        use super::{linux_dmabuf_mode, should_disable_dmabuf};
+
+        #[test]
+        fn mode_falls_back_to_auto() {
+            assert_eq!(linux_dmabuf_mode(None), "auto");
+            assert_eq!(linux_dmabuf_mode(Some("not json")), "auto");
+            assert_eq!(linux_dmabuf_mode(Some("{}")), "auto");
+            assert_eq!(linux_dmabuf_mode(Some(r#"{"linuxDmabuf":"disable"}"#)), "disable");
+            assert_eq!(linux_dmabuf_mode(Some(r#"{"linuxDmabuf":42}"#)), "auto");
+        }
+
+        #[test]
+        fn auto_disables_only_on_nvidia() {
+            assert!(should_disable_dmabuf("auto", true));
+            assert!(!should_disable_dmabuf("auto", false));
+            assert!(should_disable_dmabuf("disable", false));
+            assert!(!should_disable_dmabuf("keep", true));
+        }
+    }
+
     /// The app's entry point (`main.rs` is a one-line stub around it).
     pub fn run() {
+        apply_webkit_compat();
         let _boot = boot_started();
         // `git-graph-studio --measure <folder>` runs the performance probes headless and prints
         // JSON (scripts/measure.mjs folds it into metrics.json); no window is created.
@@ -833,6 +914,8 @@ mod desktop {
             keybindings_read,
             keybindings_write,
             cmd_fuzzy::path_completions,
+            cmd_assoc::assoc_list_defaults,
+            cmd_assoc::assoc_apply,
             pty::pty_create,
             pty::pty_write,
             pty::pty_resize,

@@ -354,6 +354,23 @@ describe('the integrated terminal\'s cd', () => {
 	});
 });
 
+describe('files dragged onto the window', () => {
+	it('opens each dropped file like "Open File..." would', async () => {
+		expect(backend.dropHandlers).toHaveLength(1);
+		backend.dropHandlers[0]!({ payload: { type: 'over', position: { x: 10, y: 10 } } });
+		backend.dropHandlers[0]!({ payload: { type: 'drop', paths: [`${REPO_A}\\a.txt`, 'C:\\outside\\readme.md'] } });
+		await flush(8);
+		expect(workbench.editors.openFilePaths()).toEqual([`${REPO_A}\\a.txt`, 'C:\\outside\\readme.md']);
+	});
+
+	it('ignores the hover and leave phases', async () => {
+		backend.dropHandlers[0]!({ payload: { type: 'enter', paths: [`${REPO_A}\\a.txt`] } });
+		backend.dropHandlers[0]!({ payload: { type: 'leave' } });
+		await flush(4);
+		expect(workbench.editors.openFilePaths()).toEqual([]);
+	});
+});
+
 describe('Quick Open in a multi-root workspace', () => {
 	it('lists every root\'s files, not just the first root the backend scorer knows', async () => {
 		// The backend scorer only ever sees the first root's list (relative paths).

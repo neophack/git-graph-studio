@@ -153,6 +153,10 @@ language are user data under `~/.ggs/`; theme and UI quality are enforced, not h
   registry `SETTING_DEFS`), `src/settingsPanel.ts` (generated Settings dialog),
   `src/i18n.ts` (`t(key)`, en / zh-cn), `src/themeMetrics.ts` (WCAG contrast per theme),
   `src/uiMetrics.ts` (layout invariants)
+- Backend: `src-tauri/src/cmd_assoc.rs` (the File Associations setting: OS-level
+  "open with" registration per platform — HKCU ProgIds + RegisteredApplications on
+  Windows, desktop entry / MIME package / `mimeapps.list` on Linux, bundle-declared on
+  macOS)
 - Assets: `static/theme/*.css` (the colour themes)
 
 ### 3. File Explorer
@@ -306,7 +310,12 @@ Everything that turns the source tree into installers: asset assembly into
   them natively on the pinned ubuntu-24.04 runner (glibc 2.39 floor — see `studio.yml`);
   `scripts/build-studio-linux.bat` + `scripts/docker/Dockerfile.studio-linux` +
   `scripts/docker/studio-linux-build.sh` build them locally in containers pinned to the
-  older Ubuntu 22.04 / Fedora 38 floors
+  older Ubuntu 22.04 / Fedora 38 floors. The `ggs` command line ships with every package:
+  the bundled binary is named `ggs` (`mainBinaryName`), `src-tauri/nsis-hooks.nsh` puts the
+  NSIS install directory on the user's PATH (and removes it on uninstall), and the deb/rpm
+  packages install it as `/usr/bin/ggs`. Installer-level file associations for the default
+  extension set come from `bundle.fileAssociations` in `tauri.conf.json`; the NSIS hooks also
+  remove the runtime-registered ProgIds and the RegisteredApplications entry on uninstall
 - CI: `.github/workflows/studio.yml` (PRs: typecheck + vitest; `main`: also `cargo clippy
   -D warnings`, `cargo test`, installers for Windows and Linux, the perf gate — the tests
   gate the installer build, and the two Linux package formats share one release compile);

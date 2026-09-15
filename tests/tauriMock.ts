@@ -16,6 +16,7 @@ export const backend = {
 	clipboard: [] as string[],
 	clipboardText: '',
 	window: { minimized: 0, toggled: 0, closed: 0, maximized: false, resizeHandlers: [] as (() => void)[] },
+	dropHandlers: [] as ((event: { payload: { type: string; paths?: string[] } }) => void)[],
 
 	on(command: string, handler: Handler): void {
 		this.handlers.set(command, handler);
@@ -36,6 +37,7 @@ export const backend = {
 		this.revealed.length = 0;
 		this.clipboard.length = 0;
 		this.window = { minimized: 0, toggled: 0, closed: 0, maximized: false, resizeHandlers: [] };
+		this.dropHandlers.length = 0;
 	}
 };
 
@@ -132,5 +134,15 @@ export const windowApi = {
 		isMaximized: async () => backend.window.maximized,
 		onResized: async (handler: () => void) => { backend.window.resizeHandlers.push(handler); return () => undefined; },
 		onCloseRequested: async () => () => undefined
+	})
+};
+
+/** The registered drag-drop handlers; a test emits `drop` payloads through `dropFiles`. */
+export const webviewApi = {
+	getCurrentWebview: () => ({
+		onDragDropEvent: async (handler: (event: { payload: { type: string; paths?: string[] } }) => void) => {
+			backend.dropHandlers.push(handler);
+			return () => undefined;
+		}
 	})
 };

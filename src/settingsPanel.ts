@@ -5,6 +5,8 @@
 // Changes apply immediately, persist to localStorage and write ~/.ggs/settings.json (which a
 // hand edit of overrides on the next launch); the labels re-render on a language switch.
 
+import { invoke } from '@tauri-apps/api/core';
+
 import { LOCALES, t } from './i18n';
 import { SETTINGS_EVENT, SETTING_DEFS, THEMES, isSettingModified, settings, updateSetting, type SettingDef } from './settings';
 import { extensionSettingDefs } from './contributions';
@@ -67,9 +69,36 @@ function numberInput(value: number, onChange: (value: number) => void, min: numb
 	return input;
 }
 
+/** The File Associations control: one checkbox per catalogued extension, its checked
+ *  state the current selection. The catalogue comes from the backend (`assoc_list_defaults`)
+ *  so the platform list and the Settings dialog can never drift apart. */
+function extensionListControl(): HTMLElement {
+	const grid = el('div', 'settings-extlist');
+	void invoke<{ ext: string; recommended: boolean }[]>('assoc_list_defaults')
+		.then((catalog) => {
+			for (const entry of catalog) {
+				const box = el('input', 'settings-checkbox') as HTMLInputElement;
+				box.type = 'checkbox';
+				box.checked = settings.fileAssociations.includes(entry.ext);
+				box.addEventListener('change', () => {
+					const next = new Set(settings.fileAssociations);
+					if (box.checked) next.add(entry.ext);
+					else next.delete(entry.ext);
+					updateSetting('fileAssociations', [...next]);
+				});
+				const label = el('label', 'settings-extlist-item', [box, el('span', '', [`.${entry.ext}`])]);
+				grid.appendChild(label);
+			}
+		})
+		.catch(() => grid.appendChild(el('span', 'empty', [t('assoc.unavailable')])));
+	return grid;
+}
+
 /** The control one schema entry renders. */
 function controlFor(def: SettingDef): HTMLElement {
 	switch (def.kind) {
+		case 'extensionList':
+			return extensionListControl();
 		case 'theme':
 			return select(settings.theme, THEMES.map((theme) => ({ value: theme.id, label: theme.label })), (value) => updateSetting('theme', value));
 		case 'locale':
@@ -77,7 +106,10 @@ function controlFor(def: SettingDef): HTMLElement {
 		case 'enum':
 			return select(String(settings[def.key]), def.options ?? [], (value) => {
 				if (def.key === 'autoSave') updateSetting('autoSave', value as typeof settings.autoSave);
-				else updateSetting(def.key, Number(value) as never);
+				// Numeric enums (fontSize, tabSize) store numbers; string enums
+				// (autoSave, linuxDmabuf) keep the option text.
+				else if (/^-?\d+$/.test(value)) updateSetting(def.key, Number(value) as never);
+				else updateSetting(def.key, value as never);
 			});
 		case 'number':
 			return numberInput(settings[def.key] as number, (value) => updateSetting(def.key, value as never), def.min ?? 0, def.max ?? 10000, def.step);
