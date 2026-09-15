@@ -2343,9 +2343,19 @@ export class EditorGroup {
 		else notify('info', `No definition found for '${name}'.`);
 	}
 
-	/** Try the workspace symbol index for an exact-name definition. A same-file hit that is
-	 *  where the cursor already is does not count (that is the declaration itself). */
+	/** Try the workspace symbol index for an exact-name definition. The persistent index's
+	 *  exact-name lookup (`symbol_lookup`, M4 4.4) answers first - one declaration jumps
+	 *  straight there, several offer VS Code's definition list; without an index the
+	 *  substring query below is the fallback it always was. A same-file hit that is where
+	 *  the cursor already is does not count (that is the declaration itself). */
 	private async goToIndexedDefinition(name: string, currentPath: string | null, view: EditorView): Promise<boolean> {
+		try {
+			const exact = await invoke<WsSymbol[]>('symbol_lookup', { name });
+			if (exact.length === 1) return this.jumpToDefinition(exact[0]!, currentPath, view);
+			if (exact.length > 1) return this.pickDefinition(exact, currentPath, view);
+		} catch {
+			// No persistent index yet (or an old backend): the substring query takes over.
+		}
 		let symbols: WsSymbol[];
 		try {
 			symbols = await invoke<WsSymbol[]>('workspace_symbols', { query: name, limit: 200 });
@@ -2359,6 +2369,31 @@ export class EditorGroup {
 		const other = hits.find((s) => s.path !== currentRelative);
 		const target = other ?? hits[0];
 		if (!target) return false;
+		return this.jumpToDefinition(target, currentPath, view);
+	}
+
+	/** VS Code's definition list on multiple hits (M4 4.4): a pick that jumps to whichever
+	 *  declaration the user means. */
+	private async pickDefinition(defs: WsSymbol[], currentPath: string | null, view: EditorView): Promise<boolean> {
+		const chosen = await quickPick(
+			defs.map((def) => ({ label: def.name, description: `${def.path}:${def.line + 1}`, icon: 'symbol-method', value: `${def.path}\u0000${def.line}` })),
+			`${defs.length} definitions`,
+			'Definitions'
+		);
+		if (chosen === null) return true; // dismissed - the gesture is consumed either way
+		const [path, line] = chosen.split('\u0000');
+		const absolute = joinPath(this.rootPath!, path!);
+		if (currentPath && absolute === currentPath) {
+			this.revealPosition(view, Number(line) + 1, 1);
+			return true;
+		}
+		await this.openFile(absolute, { line: Number(line) + 1, column: 1 });
+		return true;
+	}
+
+	/** Jump to one resolved definition: within this file when that is where it lives, into
+	 *  another file otherwise. */
+	private async jumpToDefinition(target: WsSymbol, currentPath: string | null, view: EditorView): Promise<boolean> {
 		const path = joinPath(this.rootPath!, target.path);
 		if (currentPath && path === currentPath) {
 			// Jump within this file only when it is a different line than the cursor's word.
@@ -2380,10 +2415,16 @@ export class EditorGroup {
 		const name = view.state.sliceDoc(word.from, word.to);
 		let files: { path: string; matches: { line: number; column: number }[] }[];
 		try {
-			files = await invoke('find_references', { name });
-		} catch (error) {
-			notify('error', String(error));
-			return;
+			// The index's occurrence list narrows this scan to the files that contain the
+			// word (M4); the older full-scan command stays as the fallback.
+			files = (await invoke('symbol_references', { name })) ?? [];
+		} catch {
+			try {
+				files = (await invoke('find_references', { name })) ?? [];
+			} catch (error) {
+				notify('error', String(error));
+				return;
+			}
 		}
 		const total = files.reduce((sum, f) => sum + f.matches.length, 0);
 		if (total === 0) {

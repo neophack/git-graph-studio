@@ -3,9 +3,10 @@
 // (terminal, output) and the status bar, wired together through the command registry - and
 // the folder lifecycle (open / reopen last / close) that feeds them all.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, Channel } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
 
@@ -48,6 +49,19 @@ export interface FsChange {
 
 /** The backend watcher's event (main.rs `FS_CHANGED_EVENT`). */
 export const FS_CHANGED_EVENT = 'studio://fs-changed';
+
+/** The symbol index's progress event (cmd_symbols `SYMBOL_INDEX_EVENT`): what the status
+ *  bar's "Indexing symbols n/m" item follows. */
+export interface SymbolIndexStatus {
+	state: 'empty' | 'building' | 'ready';
+	done: number;
+	total: number;
+	files: number;
+	symbols: number;
+}
+
+/** What `symbols_rebuild` pushes over its channel before the final answer. */
+export type SymbolIndexEvent = { kind: 'progress'; done: number; total: number } | { kind: 'done'; files: number; symbols: number; cancelled: boolean };
 
 /** How long after a refresh a git-only change batch is taken for that refresh's own echo. */
 const REFRESH_ECHO_MS = 1500;
@@ -255,6 +269,7 @@ export class Workbench {
 		register({ id: 'workbench.gotoSymbolInWorkspace', title: 'Go to Symbol in Workspace...', category: 'Go', keybinding: 'Ctrl+T', enabled: hasRepo, run: () => void this.gotoWorkspaceSymbol() });
 		register({ id: 'workbench.gotoLine', title: 'Go to Line/Column...', category: 'Go', keybinding: 'Ctrl+G', enabled: () => this.editors.activeView !== null, run: () => this.quickOpen(':') });
 		register({ id: 'editor.findReferences', title: 'Find References', category: 'Go', keybinding: 'Shift+F12', enabled: () => this.editors.activeView !== null, run: () => void this.editors.findReferences() });
+		register({ id: 'symbols.rebuild', title: 'Rebuild Symbol Index', category: 'Go', enabled: hasRepo, run: () => void this.rebuildSymbolIndex() });
 		register({ id: 'editor.callTree', title: 'Show Call Tree', category: 'Go', enabled: () => this.editors.activeView !== null, run: () => void this.editors.openCallTreeAtCursor() });
 		register({ id: 'editor.toggleBookmark', title: 'Toggle Bookmark', category: 'Edit', keybinding: 'Ctrl+Alt+B', enabled: () => this.editors.activeInput?.kind === 'file', run: () => void this.toggleBookmark() });
 		register({ id: 'editor.listBookmarks', title: 'List Bookmarks', category: 'Edit', keybinding: 'Ctrl+Alt+K', run: () => void this.listBookmarks() });
@@ -264,6 +279,9 @@ export class Workbench {
 		register({ id: 'workbench.toggleSidebar', title: 'Toggle Primary Side Bar', category: 'View', keybinding: 'Ctrl+B', run: () => this.toggleSidebar() });
 		register({ id: 'workbench.togglePanel', title: 'Toggle Panel', category: 'View', keybinding: 'Ctrl+J', run: () => this.panel.toggle() });
 		register({ id: 'workbench.showOutput', title: 'Output', category: 'View', run: () => this.panel.show('output') });
+		register({ id: 'workbench.showContext', title: 'Context', category: 'View', run: () => this.panel.show('context') });
+		register({ id: 'workbench.showSymbolDatabase', title: 'Symbol Database', category: 'View', enabled: hasRepo, run: () => void this.editors.openSymbolDatabase() });
+		register({ id: 'workbench.focusNextPart', title: 'Focus Next Part', category: 'View', keybinding: 'F6', run: () => this.focusNextPart() });
 		register({ id: 'terminal.toggle', title: 'Toggle Terminal', category: 'Terminal', keybinding: 'Ctrl+`', run: () => this.panel.toggle('terminal') });
 		register({ id: 'terminal.new', title: 'New Terminal', category: 'Terminal', keybinding: 'Ctrl+Shift+`', run: async () => { this.panel.show('terminal'); await this.panel.terminal.newTerminal(); } });
 		register({ id: 'terminal.kill', title: 'Kill the Active Terminal Instance', category: 'Terminal', enabled: () => this.panel.terminal.sessionCount() > 0, run: () => this.panel.terminal.killActive() });
@@ -302,7 +320,7 @@ export class Workbench {
 			{ label: t('menu.selection'), entries: (): MenuEntry[] => [item('editor.selectAll')] },
 				{ label: t('menu.view'), entries: (): MenuEntry[] => [
 				item('workbench.commandPalette'), 'separator',
-				item('workbench.showExplorer'), item('workbench.showSearch'), item('workbench.showScm'), item('workbench.showGraph'), item('workbench.showOutput'), 'separator', item('markdown.showPreview'), item('markdown.showPreviewToSide'), item('git.openFileHistory'), item('git.toggleBlame'), 'separator',
+				item('workbench.showExplorer'), item('workbench.showSearch'), item('workbench.showScm'), item('workbench.showGraph'), item('workbench.showOutput'), item('workbench.showContext'), item('workbench.showSymbolDatabase'), 'separator', item('markdown.showPreview'), item('markdown.showPreviewToSide'), item('git.openFileHistory'), item('git.toggleBlame'), 'separator',
 				{ label: 'Editor Layout', submenu: [
 				item('workbench.splitEditor'), item('workbench.splitEditorDown'), 'separator', item('workbench.focusFirstEditorGroup'), item('workbench.focusSecondEditorGroup'), item('workbench.focusThirdEditorGroup')
 				] },
@@ -312,7 +330,7 @@ export class Workbench {
 				] },
 				'separator', item('workbench.closeEditor'), item('workbench.closeAllEditors')
 			] },
-			{ label: t('menu.go'), entries: (): MenuEntry[] => [item('workbench.quickOpen'), 'separator', item('workbench.gotoSymbolInFile'), item('workbench.gotoSymbolInWorkspace'), item('editor.gotoDefinition'), item('editor.findReferences'), item('editor.callTree'), item('workbench.gotoLine'), 'separator', item('workbench.goBack'), item('workbench.goForward'), 'separator', item('workbench.nextEditor'), item('workbench.previousEditor')] },
+			{ label: t('menu.go'), entries: (): MenuEntry[] => [item('workbench.quickOpen'), 'separator', item('workbench.gotoSymbolInFile'), item('workbench.gotoSymbolInWorkspace'), item('editor.gotoDefinition'), item('editor.findReferences'), item('editor.callTree'), item('workbench.gotoLine'), item('symbols.rebuild'), 'separator', item('workbench.goBack'), item('workbench.goForward'), 'separator', item('workbench.nextEditor'), item('workbench.previousEditor')] },
 			{ label: t('menu.terminal'), entries: (): MenuEntry[] => [item('terminal.new'), item('terminal.toggle'), 'separator', item('terminal.kill')] },
 			{ label: t('menu.help'), entries: (): MenuEntry[] => [item('help.welcome'), item('help.shortcuts'), 'separator', item('help.repository'), 'separator', item('help.about')] }
 		];
@@ -325,14 +343,19 @@ export class Workbench {
 	async quickOpen(initial: string): Promise<void> {
 		const chosen = await quickInput({
 			value: initial,
-			placeholder: 'Search files by name (append : to go to a line or > to run commands)',
-			items: quickOpenItems(this.fileSource(), () => this.editors.lineInfo())
+			placeholder: t('quickopen.placeholder'),
+			items: quickOpenItems(this.fileSource(), () => this.editors.lineInfo(), this.symbolSources())
 		});
 		if (!chosen) return;
 		if (chosen.startsWith('command:')) await commands.execute(chosen.slice('command:'.length));
 		else if (chosen.startsWith('line:')) {
 			const [line, column] = chosen.slice('line:'.length).split(':').map(Number);
 			this.editors.gotoLine(line!, column || 1);
+		} else if (chosen.startsWith('sym:')) {
+			// Quick Open's "#" mode: a workspace symbol, its path relative to its own root.
+			const [path, line] = chosen.slice('sym:'.length).split('\u0000');
+			const picked = path!;
+			await this.editors.openFile(/^([a-zA-Z]:[\\/]|\\|\/)/.test(picked) || !this.repoPath ? picked : joinRepo(this.repoPath, picked), { line: Number(line) + 1 });
 		} else if (chosen.startsWith('file:') && this.repoPath) {
 			// Multi-root Quick Open hands out absolute paths; a plain folder's are repo-relative.
 			const picked = chosen.slice('file:'.length);
@@ -362,6 +385,70 @@ export class Workbench {
 		}
 		void this.filePicks.refresh();
 		return this.filePicks;
+	}
+
+	/* ---------- Symbol sources (Quick Open's @ and # modes, M4 4.9) ---------- */
+
+	/** The active file's outline, cached briefly so the picker's per-keystroke queries do not
+	 *  re-open a backend document each time. */
+	private fileSymbolsCache: { path: string; at: number; symbols: { name: string; kind: string; line: number }[] } | null = null;
+
+	/** The whole-workspace list, cached like Go to Symbol in Workspace keeps its copy. */
+	private workspaceSymbolsCache: { at: number; symbols: { name: string; kind: string; path: string; line: number }[] } | null = null;
+
+	private symbolSources() {
+		return {
+			fileSymbols: async () => {
+				const input = this.editors.activeInput;
+				const path = input?.kind === 'file' ? input.path : null;
+				if (!path) return [];
+				if (this.fileSymbolsCache && this.fileSymbolsCache.path === path && Date.now() - this.fileSymbolsCache.at < 5000) {
+					return this.fileSymbolsCache.symbols;
+				}
+				let symbols: { name: string; kind: string; line: number }[] = [];
+				try {
+					const info = await invoke<{ docId: number; symbols: { name: string; kind: string; line: number }[] | null }>('viewer_open', { path });
+					symbols = info.symbols ?? [];
+					await invoke('viewer_close', { docId: info.docId }).catch(() => undefined);
+				} catch {
+					symbols = [];
+				}
+				this.fileSymbolsCache = { path, at: Date.now(), symbols };
+				return symbols;
+			},
+			workspaceSymbols: async () => {
+				if (this.workspaceSymbolsCache && Date.now() - this.workspaceSymbolsCache.at < 30000) return this.workspaceSymbolsCache.symbols;
+				let symbols: { name: string; kind: string; path: string; line: number }[] = [];
+				try {
+					// A multi-root workspace indexes each root; a symbol's path is relative to its own.
+					const roots = this.repoPaths.length > 1 ? this.repoPaths : [null];
+					const perRoot = await Promise.all(roots.map((root) => invoke<{ name: string; kind: string; path: string; line: number }[] | null>('workspace_symbols', { query: '', limit: 10000, repo: root })));
+					symbols = perRoot.flatMap((list, index) => (list ?? []).map((symbol) => ({ ...symbol, path: roots[index] ? joinRepo(roots[index]!, symbol.path) : symbol.path })));
+				} catch {
+					symbols = [];
+				}
+				this.workspaceSymbolsCache = { at: Date.now(), symbols };
+				return symbols;
+			}
+		};
+	}
+
+	/** Rebuild the symbol index on demand (the status item's click): a channel-fed progress
+	 *  into the status bar, a busy cursor while it runs (M7 7.8). */
+	private async rebuildSymbolIndex(): Promise<void> {
+		busy(true);
+		try {
+			const onEvent = new Channel<SymbolIndexEvent>();
+			onEvent.onmessage = (event) => {
+				if (event.kind === 'progress') this.statusBar.setSymbols({ state: 'building', done: event.done, total: event.total, files: 0, symbols: 0 });
+			};
+			await invoke<SymbolIndexStatus | null>('symbols_rebuild', { onEvent });
+			notify('info', t('symbols.rebuildDone'));
+		} catch (error) {
+			notify('error', String(error));
+		} finally {
+			busy(false);
+		}
 	}
 
 	/* ---------- Layout ---------- */
@@ -658,6 +745,7 @@ export class Workbench {
 		this.editors.onActiveChange = (editor) => {
 			this.scheduleSnapshot();
 			this.statusBar.setEditor(editor);
+			this.followContextSymbol(editor);
 			this.activityItems['graph']?.classList.toggle('active', editor?.kind === 'graph');
 			if (editor?.kind === 'file' && editor.path && state.layout.sidebarVisible && this.activeView === 'explorer') {
 				void this.explorer.reveal(editor.path);
@@ -687,11 +775,21 @@ export class Workbench {
 		this.statusBar.onEncodingClick = () => void this.pickEncoding();
 		this.statusBar.onEolClick = () => void this.pickEol();
 		this.statusBar.onIndentClick = () => void this.pickIndent();
+		this.statusBar.onSymbolsClick = () => void commands.execute('symbols.rebuild');
+		this.panel.context.onOpenDefinition = (definition) => {
+			void this.editors.openFile(definition.path, { line: definition.line + 1 });
+		};
 
 		document.addEventListener('keydown', this.onKeyDownBound);
 		// External changes arrive from the backend's file watcher; the focus refresh stays as
 		// the fallback for the filesystems the watcher cannot cover.
 		void listen<FsChange>(FS_CHANGED_EVENT, (event) => this.onFsChanged(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
+		// The symbol index's builds report from the backend (an open's resume, a watcher's
+		// incremental update, this command's own rebuild): the status item follows them all.
+		void listen<SymbolIndexStatus>('studio://symbol-index', (event) => this.statusBar.setSymbols(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
+		// A second launch forwards its path here (M7 7.7, the single-instance plugin): a
+		// folder switches the workspace, a file opens beside whatever is open.
+		void listen<string>('studio://open-path', (event) => void this.openForwardedPath(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
 		window.addEventListener('focus', this.onWindowFocusBound);
 		window.addEventListener('blur', this.onWindowBlurBound);
 		void getCurrentWindow().onCloseRequested(async (event) => {
@@ -704,6 +802,125 @@ export class Workbench {
 				if (!closed) event.preventDefault();
 			}
 		}).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
+		// Tauri captures webview drag-and-drop itself (the DOM never sees the drop), so files
+		// dragged onto the window arrive here; each one opens like "Open File..." would.
+		void getCurrentWebview().onDragDropEvent((event) => {
+			if (event.payload.type === 'drop') {
+				for (const path of event.payload.paths) void this.editors.openFile(path);
+			}
+		}).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
+	}
+
+	/** The Context Window's debounce (M4 4.7): the symbol under the cursor settles for this
+	 *  long before its definition is resolved - a pass over the code must not spam the panel. */
+	private contextTimer: number | null = null;
+	private contextGeneration = 0;
+
+	private followContextSymbol(editor: { kind: string; path?: string; line: number; column: number } | null): void {
+		// The view only follows while it is the one being looked at (or pinned to a symbol);
+		// anything else leaves it as it is - never a background query per keystroke.
+		if (!this.panel.context.isPinned() && this.panel.activeView() !== 'context') return;
+		if (this.contextTimer !== null) window.clearTimeout(this.contextTimer);
+		const generation = ++this.contextGeneration;
+		this.contextTimer = window.setTimeout(() => {
+			this.contextTimer = null;
+			if (generation !== this.contextGeneration) return;
+			void this.resolveContextSymbol(editor);
+		}, 150);
+	}
+
+	private async resolveContextSymbol(editor: { kind: string; path?: string; line: number; column: number } | null): Promise<void> {
+		const view = this.editors.activeView;
+		if (!editor || editor.kind !== 'file' || !view || !this.repoPath) {
+			this.panel.context.show(null);
+			return;
+		}
+		const line = view.state.doc.line(Math.min(Math.max(1, editor.line), view.state.doc.lines));
+		const at = Math.min(Math.max(line.from, line.from + editor.column - 1), line.to);
+		const word = view.state.wordAt(at);
+		if (!word) {
+			this.panel.context.show(null);
+			return;
+		}
+		const name = view.state.sliceDoc(word.from, word.to);
+		let defs: { kind: string; name: string; path: string; line: number }[] = [];
+		try {
+			defs = (await invoke<{ kind: string; name: string; path: string; line: number }[]>('symbol_lookup', { name })) ?? [];
+		} catch {
+			defs = [];
+		}
+		if (defs.length !== 1) {
+			this.panel.context.show(null, defs.length > 1 ? `${defs.length} ${t('symbols.context.ambiguous')}` : undefined);
+			return;
+		}
+		const def = defs[0]!;
+		const absolute = /^([a-zA-Z]:[\\/]|\\|\/)/.test(def.path) ? def.path : joinRepo(this.repoPath, def.path);
+		let fragment = '';
+		try {
+			const file = await invoke<{ contents: string } | null>('read_file', { path: absolute });
+			const lines = (file?.contents ?? '').split('\n');
+			const from = Math.max(0, def.line - 2);
+			// The declaration and what follows it, until the column-0 brace that closes it.
+			let to = Math.min(lines.length, def.line + 80);
+			for (let i = def.line + 1; i < Math.min(lines.length, def.line + 80); i++) {
+				if (lines[i] === '}') { to = i + 1; break; }
+			}
+			fragment = lines.slice(from, to).join('\n');
+		} catch {
+			fragment = '';
+		}
+		this.panel.context.show({ kind: def.kind, name: def.name, path: absolute, line: def.line, fragment });
+	}
+
+	/** A forwarded path from a second launch: a folder switches the workspace, anything
+	 *  else (a file) opens as an editor. The single-instance callback canonicalised it
+	 *  already; extension-shaped tails are files, bare names and trailing separators are
+	 *  folders. */
+	private async openForwardedPath(path: string): Promise<void> {
+		if (!path) return;
+		const tail = path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
+		const isDirectory = tail === '' || !/\.[a-z0-9]{1,8}$/i.test(tail);
+		if (isDirectory) await this.openFolder(path);
+		else await this.editors.openFile(path);
+	}
+
+	/** F6 (M7 7.4): cycle the keyboard through the workbench's parts - activity bar, side
+	 *  bar, editor, panel - starting from the one that holds the focus. */
+	private focusNextPart(): void {
+		const parts: (() => boolean)[] = [
+			() => {
+				const first = this.activityBar.querySelector<HTMLElement>('.activity-item');
+				first?.focus();
+				return document.activeElement === first;
+			},
+			() => {
+				this.showView(this.activeView);
+				const body = this.sidebar.querySelector<HTMLElement>('.view-pane:not([hidden]) [tabindex]');
+				body?.focus();
+				return !!body && document.activeElement === body;
+			},
+			() => {
+				this.editors.focusActiveEditor();
+				return this.editors.activeView !== null;
+			},
+			() => {
+				if (!this.panel.isVisible()) this.panel.show('terminal');
+				this.panel.terminal.focus();
+				return true;
+			}
+		];
+		const holds = (element: HTMLElement | null): boolean => !!element && (this.activityBar.contains(element) || this.sidebar.contains(element) || this.editorPart.contains(element) || this.panelElement.contains(element));
+		const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		let start = 0;
+		if (active && holds(active)) {
+			if (this.editorPart.contains(active) && !this.panelElement.contains(active)) start = 2;
+			else if (this.panelElement.contains(active)) start = 3;
+			else if (this.sidebar.contains(active)) start = 1;
+			else start = 0;
+		}
+		for (let step = 1; step <= parts.length; step++) {
+			if (parts[(start + step) % parts.length]!()) return;
+		}
 	}
 
 	/** Keybindings: the registry's, except the editing ones CodeMirror handles themselves. */
@@ -1310,21 +1527,51 @@ function joinRepo(root: string, relative: string): string {
 
 /** Quick Open's modes in one source, as VS Code switches them: a leading ">" filters the
  *  command palette (a small list, filtered in place), a leading ":" is Go to Line/Column
- *  (the picker's one row narrates the jump); anything else goes to the chunked file scan,
- *  including mid-session - backspacing out of a prefix returns to files. */
-function quickOpenItems(files: FilePickSource, lineInfo: () => { line: number; column: number; lines: number } | null): QuickPickSource {
+ *  (the picker's one row narrates the jump), "@" is Go to Symbol in File and "#" Go to
+ *  Symbol in Workspace (M4 4.9); anything else goes to the chunked file scan, including
+ *  mid-session - backspacing out of a prefix returns to files. */
+export interface SymbolSources {
+	fileSymbols(): Promise<{ name: string; kind: string; line: number }[]>;
+	workspaceSymbols(): Promise<{ name: string; kind: string; path: string; line: number }[]>;
+}
+
+function quickOpenItems(files: FilePickSource, lineInfo: () => { line: number; column: number; lines: number } | null, symbols: SymbolSources): QuickPickSource {
 	return {
-		query: (query, onPartial, isCancelled) => {
-			if (query.startsWith(':')) return Promise.resolve(gotoLineItems(query.slice(1), lineInfo()));
+		query: async (query, onPartial, isCancelled) => {
+			if (query.startsWith(':')) return gotoLineItems(query.slice(1), lineInfo());
+			if (query.startsWith('@')) return fileSymbolItems(query.slice(1), await symbols.fileSymbols());
+			if (query.startsWith('#')) return workspaceSymbolItems(query.slice(1), await symbols.workspaceSymbols());
 			if (!query.startsWith('>')) return files.query(query, onPartial, isCancelled);
 			const q = query.slice(1).trim().toLowerCase();
 			const items = commands.paletteItems()
 				.filter((command) => command.label.toLowerCase().includes(q))
 				.map((command) => ({ ...command, value: 'command:' + command.value }))
 				.slice(0, 60);
-			return Promise.resolve(items);
+			return items;
 		}
 	};
+}
+
+/** The "@" mode's rows: the file's outline filtered by name; a pick jumps by line (the
+ *  picker's `line:` dispatch already lands in the active editor). */
+export function fileSymbolItems(typed: string, symbols: { name: string; kind: string; line: number }[]): QuickPickItem[] {
+	if (symbols.length === 0) return [{ label: t('quickopen.noSymbols'), value: '' }];
+	const q = typed.trim().toLowerCase();
+	return symbols
+		.filter((symbol) => symbol.name.toLowerCase().includes(q))
+		.slice(0, 60)
+		.map((symbol) => ({ label: symbol.name, description: symbol.kind, icon: 'symbol-method', value: `line:${symbol.line + 1}` }));
+}
+
+/** The "#" mode's rows: the whole workspace's declarations; a pick opens the file at the
+ *  declaration (the `sym:` dispatch absolutises the path like Ctrl+T does). */
+export function workspaceSymbolItems(typed: string, symbols: { name: string; kind: string; path: string; line: number }[]): QuickPickItem[] {
+	if (symbols.length === 0) return [{ label: t('quickopen.noWorkspaceSymbols'), value: '' }];
+	const q = typed.trim().toLowerCase();
+	return symbols
+		.filter((symbol) => symbol.name.toLowerCase().includes(q))
+		.slice(0, 60)
+		.map((symbol) => ({ label: symbol.name, description: symbol.path, icon: 'symbol-method', value: `sym:${symbol.path}\u0000${symbol.line}` }));
 }
 
 /** The single row of Go to Line/Column, worded as VS Code words it: the cursor position and

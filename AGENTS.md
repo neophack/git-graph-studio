@@ -181,12 +181,20 @@ in event-loop-yielding chunks.
 ### 5. Workspace Search
 
 Workspace-wide search & replace with streaming results, and Source Insight-style symbol
-navigation (Go-to-Definition, Find References, Call Tree) over the workspace symbol index.
+navigation (Go-to-Definition, Find References, Call Tree, Quick Open's `@` / `#` symbol
+modes, the Context Window) over the persistent workspace symbol index: interned names,
+per-file fingerprints and per-name occurrence lists under `~/.ggs/index/`, resumed on open,
+updated file-by-file by the watcher.
 
-- Frontend: `src/searchView.ts`, `src/callTree.ts`
-- Backend: `src-tauri/src/cmd_search.rs` (rayon-parallelised text search, the symbol index,
-  the folder-comparison and byte-comparison services; reuses the Quick Open walk so the
-  exclusion policy is one list)
+- Frontend: `src/searchView.ts`, `src/callTree.ts`, `src/contextView.ts` (the Context
+  Window panel page - the definition of the symbol under the cursor),
+  `src/symbolDbView.ts` (the Symbol Database page - the index as a collapsible
+  folder / file / symbol tree with reference counts, filter and rebuild)
+- Backend: `src-tauri/src/cmd_symbols.rs` (the index state, the build / resume / rebuild
+  commands, `symbol_lookup` / `symbol_references`), `src-tauri/src/symbols/store.rs` (the
+  compact on-disk store), `src-tauri/src/cmd_search.rs` (rayon-parallelised text search, the
+  in-memory index fallback, the folder-comparison and byte-comparison services; reuses the
+  Quick Open walk so the exclusion policy is one list)
 
 ### 6. Editor Suite
 

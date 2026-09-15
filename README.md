@@ -6,6 +6,15 @@ a Source Control panel (stage / unstage / discard / commit), an editor with tabs
 terminal (ConPTY on Windows), and the full Git Graph webview — the same `out.min.js` the
 extension serves, hosted unchanged behind an `acquireVsCodeApi` shim.
 
+Code navigation rides a persistent symbol index (Source Insight's model): the workspace's
+declarations and their occurrences indexed once under `~/.ggs/index/`, resumed on open and
+updated file-by-file as files change — powering Go-to-Definition (with a list on ambiguous
+names), Find References narrowed to the files that contain the word, Quick Open's `@`
+(file symbols) and `#` (workspace symbols) modes, the Call Tree, and a Context Window panel
+that shows the definition of the symbol under the cursor. The shell itself is themeable
+(`Auto (System)` follows the OS) with a Compact / Comfortable density setting, motion that
+respects `prefers-reduced-motion`, and keyboard focus cycling on F6.
+
 ## Layout
 
 ```text

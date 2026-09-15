@@ -376,7 +376,11 @@ const zhCnText: Record<string, string> = {
 	'Amend Last Commit': '修订上次提交',
 	'Fetch commit-msg Hook (Gerrit)': '获取 commit-msg 钩子（Gerrit）',
 	'Reset Current Branch to Remote (Soft)': '重置当前分支到远程（软）',
-	'Push to Gerrit Ref for Current Branch (refs/for/...)': '推送到当前分支的 Gerrit 引用（refs/for/...）'
+	'Push to Gerrit Ref for Current Branch (refs/for/...)': '推送到当前分支的 Gerrit 引用（refs/for/...）',
+	'Rebuild Symbol Index': '重建符号索引',
+	Context: '上下文',
+	'Symbol Database': '符号数据库',
+	'Focus Next Part': '聚焦下一区域'
 };
 
 let current: Locale = 'en';

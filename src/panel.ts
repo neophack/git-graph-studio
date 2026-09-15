@@ -5,12 +5,13 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
+import { ContextView } from './contextView';
 import { TerminalView } from './terminal';
 import { t } from './i18n';
 import { SETTINGS_EVENT } from './settings';
 import { actionButton, el, icon } from './ui';
 
-export type PanelViewId = 'terminal' | 'output';
+export type PanelViewId = 'terminal' | 'output' | 'context';
 
 export class OutputView {
 	readonly element: HTMLElement;
@@ -60,6 +61,8 @@ export class OutputView {
 export class Panel {
 	readonly terminal: TerminalView;
 	readonly output: OutputView;
+	/** Source Insight's Context Window (M4 4.7): the symbol-under-the-cursor's definition. */
+	readonly context: ContextView;
 	private readonly element: HTMLElement;
 	private readonly tabs: HTMLElement;
 	private readonly actionsHost: HTMLElement;
@@ -74,9 +77,10 @@ export class Panel {
 		this.element = element;
 		this.terminal = new TerminalView();
 		this.output = new OutputView();
+		this.context = new ContextView();
 		this.tabs = el('div', 'panel-tabs');
 		this.tabs.setAttribute('role', 'tablist');
-		for (const [id, view] of [['terminal', 'terminal'], ['output', 'output']] as [PanelViewId, string][]) {
+		for (const [id, view] of [['terminal', 'terminal'], ['output', 'output'], ['context', 'context']] as [PanelViewId, string][]) {
 			const tab = el('span', 'panel-title', [t(`panel.${view}` as 'panel.terminal')]);
 			tab.dataset['view'] = id;
 			tab.setAttribute('role', 'tab');
@@ -92,7 +96,7 @@ export class Panel {
 			this.actionsHost,
 			el('div', 'actions', [this.maximizeButton, actionButton('close', 'Hide Panel (Ctrl+J)', () => this.hide())])
 		]);
-		element.append(header, this.terminal.element, this.output.element);
+		element.append(header, this.terminal.element, this.output.element, this.context.element);
 		this.terminal.onEmpty = () => this.hide();
 		this.render();
 	}
@@ -112,9 +116,12 @@ export class Panel {
 		this.render();
 		if (wasHidden) this.onVisibilityChange?.(true);
 		if (view === 'terminal') void this.terminal.shown();
-		else {
+		else if (view === 'output') {
 			this.terminal.hidden();
 			void this.output.shown();
+		} else {
+			this.terminal.hidden();
+			this.context.shown();
 		}
 	}
 
@@ -155,7 +162,7 @@ export class Panel {
 	}
 
 	private renderTabLabels(): void {
-		const labels: Record<PanelViewId, string> = { terminal: t('panel.terminal'), output: t('panel.output') };
+		const labels: Record<PanelViewId, string> = { terminal: t('panel.terminal'), output: t('panel.output'), context: t('panel.context') };
 		for (const tab of this.tabs.children) {
 			const view = (tab as HTMLElement).dataset['view'] as PanelViewId | undefined;
 			if (view) tab.textContent = labels[view];

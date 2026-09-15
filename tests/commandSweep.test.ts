@@ -60,6 +60,9 @@ beforeEach(async () => {
 		['scm_tags', () => ['v1']],
 		['scm_stashes', () => []],
 		['workspace_symbols', () => [{ kind: 'function', name: 'two', path: 'notes.txt', line: 1 }]],
+		// Find References asks the index's narrowed scan first (M4); the full-scan command
+		// stays scripted as the fallback it is.
+		['symbol_references', () => [{ path: 'notes.txt', matches: [{ line: 1, column: 5, length: 3, text: 'one two one' }] }]],
 		['find_references', () => [{ path: 'notes.txt', matches: [{ line: 1, column: 5, length: 3, text: 'one two one' }] }]],
 		['viewer_open', () => ({ docId: 1, lineCount: 2, language: 'plaintext', syntaxName: 'Plain Text', symbols: [] })],
 		['ext_list', () => []],
@@ -215,7 +218,7 @@ describe('the commands no other harness drives', () => {
 		workbench.editors.activeView!.dispatch({ selection: { anchor: 5 } });
 		void commands.execute('editor.findReferences');
 		await flush(4);
-		expect(backend.callsTo('find_references')).toEqual([{ name: 'two' }]);
+		expect(backend.callsTo('symbol_references')).toEqual([{ name: 'two' }]);
 		expect(texts('.quick-input .row .label')).toEqual(['notes.txt:1']);
 		await dismissOverlays();
 	});

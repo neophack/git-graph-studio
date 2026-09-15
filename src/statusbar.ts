@@ -35,6 +35,9 @@ export class StatusBar {
 	private readonly graphItem: HTMLElement;
 	/** VS Code's "N conflicts" item, shown while a merge / rebase has unmerged paths. */
 	private readonly conflictsItem: HTMLElement;
+	/** The symbol index state (M4 4.11): "Indexing symbols 12/300" while a build runs, the
+	 *  symbol count when it is ready; a click rebuilds. */
+	private readonly symbolsItem: HTMLElement;
 	private readonly positionItem: HTMLElement;
 	private readonly indentItem: HTMLElement;
 	private readonly encodingItem: HTMLElement;
@@ -51,6 +54,8 @@ export class StatusBar {
 	onPullClick: (() => void) | null = null;
 	onGraphClick: (() => void) | null = null;
 	onConflictsClick: (() => void) | null = null;
+	/** The symbols item was clicked - the workbench offers the rebuild. */
+	onSymbolsClick: (() => void) | null = null;
 	/** The encoding / line-ending / indent items were clicked (the workbench offers pickers). */
 	onEncodingClick: (() => void) | null = null;
 	onEolClick: (() => void) | null = null;
@@ -72,7 +77,10 @@ export class StatusBar {
 		this.conflictsItem = el('div', 'status-item warning');
 		this.conflictsItem.hidden = true;
 		this.conflictsItem.addEventListener('click', () => this.onConflictsClick?.());
-		this.left.append(this.branchItem, this.pullItem, this.graphItem, this.conflictsItem);
+		this.symbolsItem = el('div', 'status-item');
+		this.symbolsItem.hidden = true;
+		this.symbolsItem.addEventListener('click', () => this.onSymbolsClick?.());
+		this.left.append(this.branchItem, this.pullItem, this.graphItem, this.conflictsItem, this.symbolsItem);
 
 		this.positionItem = el('div', 'status-item static');
 		this.indentItem = el('div', 'status-item', ['Spaces: 4']);
@@ -156,12 +164,30 @@ export class StatusBar {
 		return row;
 	}
 
+	/** Show (or, with null, hide) the symbol index state. */
+	setSymbols(status: { state: string; done: number; total: number; files: number; symbols: number } | null): void {
+		this.symbolsItem.hidden = status === null;
+		if (status === null) return;
+		this.symbolsItem.innerHTML = '';
+		if (status.state === 'building') {
+			this.symbolsItem.append(icon('sync', 'codicon-modifier-spin'), ` ${t('symbols.indexing')} ${status.done}/${status.total}`);
+			tooltip(this.symbolsItem, () => `${t('symbols.indexing')} ${status.done}/${status.total}`);
+		} else if (status.state === 'ready') {
+			this.symbolsItem.append(icon('symbol-method'), ` ${status.symbols} ${t('symbols.ready')}`);
+			tooltip(this.symbolsItem, () => `${status.symbols} ${t('symbols.ready')} - ${status.files}`);
+		} else {
+			this.symbolsItem.append(icon('symbol-method'), ` ${t('symbols.ready')}`);
+			tooltip(this.symbolsItem, () => t('symbols.rebuild'));
+		}
+	}
+
 	setRepo(hasRepo: boolean): void {
 		this.hasRepo = hasRepo;
 		this.generation++; // a repo_head still in flight for the old folder is dropped
 		this.branchItem.hidden = !hasRepo;
 		this.pullItem.hidden = true;
 		this.graphItem.hidden = !hasRepo;
+		this.symbolsItem.hidden = !hasRepo;
 		document.body.classList.toggle('no-folder', !hasRepo);
 		this.setConflicts(0);
 		if (hasRepo) void this.refreshHead();
