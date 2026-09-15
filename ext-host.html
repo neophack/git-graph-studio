@@ -1,0 +1,14 @@
+<!-- The extension host frame. One sandboxed frame per installed extension: the extension's
+     compiled entry point runs here with a `require('vscode')` shim (src/vscodeApi.ts), and
+     every workbench call crosses back to the main window over postMessage (src/extHost.ts).
+     This file is a Vite rollup input, so it is emitted with its hashed assets at build time. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<title>Git Graph Studio - Extension Host</title>
+</head>
+<body>
+	<script type="module" src="/src/extHostBoot.ts"></script>
+</body>
+</html>

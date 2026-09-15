@@ -1,0 +1,213 @@
+<!doctype html>
+<!--
+	The Git Graph webview, hosted as-is: this page loads the same out.min.js / out.min.css the
+	VS Code extension serves, with `initialState` / `globalState` / `workspaceState` and an
+	`acquireVsCodeApi` shim supplied by the host page before the script runs. The theme tokens
+	(the --vscode-* variables) are injected by the host as a stylesheet link, exactly as VS Code
+	injects them into a webview: this page carries only the extension's own CSS. Requests travel
+	to the parent window (which forwards them to the Rust backend or serves them itself);
+	responses come back as messages and are re-posted so out.min.js's own window message
+	listener picks them up.
+-->
+<html lang="en" class="vscode-dark">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<title>Git Graph</title>
+	<link rel="stylesheet" href="out.min.css" />
+	<style>
+		html, body { height: 100%; margin: 0; background: var(--vscode-editor-background); }
+	</style>
+</head>
+<body class="vscode-dark" data-vscode-theme-kind="vscode-dark" data-vscode-theme-name="Dark Modern">
+	<div id="view" tabindex="-1">
+		<div id="headerRow">
+			<div id="controls">
+				<span id="repoControl"><span id="repoControlLabel" class="unselectable"></span><div id="repoDropdown" class="dropdown"></div></span>
+				<span id="branchControl"><span id="branchControlLabel" class="unselectable"></span><div id="branchDropdown" class="dropdown"></div></span>
+				<span id="authorControl"><span id="authorControlLabel" class="unselectable"></span><div id="authorDropdown" class="dropdown"></div></span>
+
+				<label id="showRemoteBranchesControl"><input type="checkbox" id="showRemoteBranchesCheckbox" tabindex="-1"><span class="customCheckbox"></span><span id="showRemoteBranchesLabel"></span></label>
+				<div id="currentBtn"></div>
+				<div id="findBtn"></div>
+				<div id="filterBtn"></div>
+				<div id="statisticsBtn"></div>
+				<div id="terminalBtn"></div>
+				<div id="settingsBtn"></div>
+				<div id="fetchBtn"></div>
+				<div id="refreshBtn"></div>
+			</div>
+			<div id="pinnedControls" style="display:none">
+				<span id="pinnedRowLabel" class="unselectable pinnedRowLabel"></span>
+			</div>
+		</div>
+		<div id="conflictBanner" style="display:none"></div>
+		<div id="content">
+			<div id="commitGraph"></div>
+			<div id="commitTable"></div>
+		</div>
+		<div id="footer"></div>
+	</div>
+		<script>
+			(function () {
+				'use strict';
+				// A script error here or in out.min.js must not leave the page as a silent
+				// near-empty skeleton: it goes to the host's session log, so "Open Session Log"
+				// shows what died.
+				window.addEventListener('error', function (event) {
+					try {
+						window.parent.postMessage({
+							__studioGraphError: (event.message || 'Script error') +
+								(event.filename ? ' (' + event.filename.split('/').pop() + ':' + event.lineno + ')' : '')
+						}, '*');
+					} catch (e) { /* nothing more we can do */ }
+				});
+				// sessionStorage, not localStorage: it is per top-level browsing context, so a
+			// second app instance (another window, another repository) can never overwrite this
+			// one's initial state; within the window the iframe shares it with the host.
+				var initial = JSON.parse(sessionStorage.getItem('ggstudio.initial') || 'null');
+				if (!initial) {
+					window.__ggViewNoRepo = true;
+					document.body.innerHTML = '<p style="padding:20px">No repository is open.</p>';
+					return;
+				}
+
+			window.initialState = initial.initialState;
+			window.globalState = initial.globalState;
+			window.workspaceState = initial.workspaceState;
+
+			// The per-branch colour variables the extension inlines into the generated page.
+			var colours = (initial.initialState.config.graph && initial.initialState.config.graph.colours) || [];
+			var style = document.createElement('style');
+			var text = '';
+			for (var i = 0; i < colours.length; i++) {
+				text += 'body{--git-graph-color' + i + ':' + colours[i] + ';}' +
+					'[data-color="' + i + '"]{--git-graph-color:var(--git-graph-color' + i + ');}';
+			}
+			style.textContent = text;
+			document.head.appendChild(style);
+			if (initial.initialState.config.stickyHeader) {
+				document.getElementById('headerRow').className = 'sticky';
+			}
+
+			// VS Code injects the --vscode-* theme tokens as an inline style on <html>, which is
+			// where the view reads them (web/utils.ts getVSCodeStyle) - in particular the colour
+			// behind the "scroll to commit" flash and the Find widget's highlight. The host
+			// (graphHost.ts) carries the current theme as a stylesheet instead, normally linked
+			// into this page only after it has finished loading - too late for that read, which
+			// runs once, synchronously, as this page boots. So this page links the theme itself,
+			// from the value the host stored alongside the initial state, and waits for it before
+			// mirroring the computed values into inline style (and before the view script that
+			// reads them ever runs). A later, live theme switch is handled the same way, on a
+			// message from the host once it has swapped this page's stylesheet in place.
+			var THEME_LINK_ID = 'ggs-host-theme';
+			function mirrorThemeVars() {
+				var computedStyle = getComputedStyle(document.documentElement);
+				['--vscode-font-family', '--vscode-editor-font-family',
+				 '--vscode-editor-findMatchHighlightBackground', '--vscode-selection-background'
+				].forEach(function (name) {
+					var value = computedStyle.getPropertyValue(name).trim();
+					if (value) document.documentElement.style.setProperty(name, value);
+				});
+			}
+			function applyThemeClasses(theme) {
+				[document.documentElement, document.body].forEach(function (el) {
+					el.classList.remove('vscode-dark', 'vscode-light');
+					el.classList.add(theme.kind);
+					el.dataset.vscodeThemeKind = theme.kind;
+					el.dataset.vscodeThemeName = theme.label;
+				});
+			}
+
+			function bootView() {
+				mirrorThemeVars();
+
+				// The acquireVsCodeApi shim: state in sessionStorage, requests through the parent.
+				var api = {
+					getState: function () {
+						try { return JSON.parse(sessionStorage.getItem('ggstudio.viewState') || 'null'); }
+						catch (e) { return null; }
+					},
+					setState: function (state) {
+						sessionStorage.setItem('ggstudio.viewState', JSON.stringify(state));
+					},
+					postMessage: function (message) {
+						window.parent.postMessage({ __studioGraphRequest: message }, '*');
+					}
+				};
+				window.acquireVsCodeApi = function () { return api; };
+
+				// Route the parent's responses back through this window's message listeners,
+				// which is where out.min.js listens for them; also catches a live theme switch.
+				window.addEventListener('message', function (event) {
+					var data = event.data;
+					if (data && data.__studioGraphResponse !== undefined) {
+						window.postMessage(data.__studioGraphResponse, '*');
+					}
+					if (data && data.__studioThemeReady) mirrorThemeVars();
+				});
+
+				// Keyboard shortcuts of the shell (Ctrl+B, Ctrl+`, …) must work while the graph has focus.
+				window.addEventListener('keydown', function (event) {
+					if (!(event.ctrlKey || event.metaKey)) return;
+					var key = event.key.toLowerCase();
+					if (['`', 'j', 'b', 'o', 'w', 'tab', 'pageup', 'pagedown'].indexOf(key) !== -1 || (event.shiftKey && (key === 'e' || key === 'g'))) {
+						event.preventDefault();
+						window.parent.document.dispatchEvent(new KeyboardEvent('keydown', {
+							key: event.key, ctrlKey: event.ctrlKey, metaKey: event.metaKey, shiftKey: event.shiftKey, altKey: event.altKey
+						}));
+					}
+				});
+
+				// markdown-it must be global before the view runs; async=false keeps the order.
+				// When the host loaded this page out of the installed git-graph-rs package, it
+				// maps the asset names to the package's copies (window.__ggAssets, blob URLs of
+				// the same origin); otherwise the names resolve next to this page.
+				var assets = window.__ggAssets || {};
+				['markdown-it.min.js', 'out.min.js'].forEach(function (src) {
+					var script = document.createElement('script');
+					script.src = assets[src] || src;
+					script.async = false;
+					document.head.appendChild(script);
+				});
+				window.__ggViewBooted = true;
+			}
+
+			if (initial.theme) {
+				applyThemeClasses(initial.theme);
+				var themeLink = document.createElement('link');
+				themeLink.id = THEME_LINK_ID;
+				themeLink.rel = 'stylesheet';
+				var themeSettled = false;
+				var finishBoot = function () {
+					if (themeSettled) return;
+					themeSettled = true;
+					bootView();
+				};
+				themeLink.addEventListener('load', finishBoot);
+				themeLink.addEventListener('error', finishBoot);
+				// A local stylesheet firing neither event should not happen, but must not hang
+				// the view forever if it somehow does.
+				window.setTimeout(finishBoot, 1000);
+				themeLink.href = initial.theme.css;
+				document.head.insertBefore(themeLink, document.head.firstChild);
+			} else {
+				bootView();
+			}
+			})();
+		</script>
+		<script>
+			// Boot watchdog: if the script above (or out.min.js) died - as happened with a
+			// syntax error in an early build, which left nothing but the header skeleton -
+			// say so instead of showing an almost-empty page.
+			window.setTimeout(function () {
+				if (window.__ggViewBooted || window.__ggViewNoRepo) return;
+				var div = document.createElement('div');
+				div.style.cssText = 'padding:20px;color:var(--vscode-errorForeground,#f48771)';
+				div.textContent = 'The Git Graph view failed to start. Open the session log ' +
+					'(View → Open Session Log) or restart the app; if it persists, reinstall Git Graph Studio.';
+				(document.getElementById('content') || document.body).appendChild(div);
+			}, 4000);
+		</script>
+</body>
+</html>

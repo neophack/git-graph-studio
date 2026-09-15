@@ -1,0 +1,228 @@
+<!doctype html>
+<!-- A dev-only page (served by `npm run dev` as /dev-harness.html; `vite build` only bundles
+     index.html and ext-host.html, so this never ships) that runs the real workbench outside the
+     main window's boot flow. It has two modes, and they differ in what they can prove:
+
+     - Under `npm run dev` (tauri dev → http://localhost:5173/dev-harness.html) Tauri has already
+       injected the real IPC bridge, so this page uses it: the real Rust backend, the real
+       graph_request protocol, the real view.html - the exact pipeline the packaged app runs.
+       This is the mode that can catch packaged-only regressions.
+     - In a plain browser (vite serve, no Tauri) there is no IPC bridge, so a scripted fake
+       backend stands in: enough repository data to open the Git Graph view, a diff and the pull
+       / checkout actions. This mode only verifies frontend behaviour a jsdom test cannot (real
+       layout, scrolling, the webview's Settings widget) - it says nothing about the backend.
+
+     A banner at the top states which mode is active, so a green harness is never mistaken for
+     an end-to-end pass when it ran against the mocks. -->
+<html lang="en" class="vscode-dark">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<title>Git Graph Studio - dev harness</title>
+	<link rel="stylesheet" href="/theme/dark-modern.css" />
+	<script src="/gitgraph/config.js"></script>
+	<script>
+		(function () {
+			'use strict';
+
+			/* ---------- The fake backend, for plain-browser sessions only ---------- */
+
+			// A long file, so a diff of it must scroll.
+			var lines = [];
+			for (var i = 1; i <= 400; i++) lines.push('line ' + i + ' of the file');
+			var oldText = lines.join('\n');
+			var newText = lines.map(function (l, i) { return i % 50 === 0 ? 'CHANGED ' + l : l; }).join('\n');
+			var commit = {
+				hash: '0123456789abcdef0123456789abcdef01234567', parents: [],
+				author: 'Dev Harness', email: 'dev@example.com', date: 1700000000000,
+				message: 'initial commit', heads: ['main'], tags: [{ name: 'v1.0.0', annotated: true }], remotes: [], stash: null
+			};
+
+			function graphResponse(message) {
+				switch (message.command) {
+					case 'loadRepoInfo':
+						return { command: 'loadRepoInfo', refreshId: message.refreshId, branches: ['main'], head: commit.hash,
+							remotes: ['origin'], stashes: [], isRepo: true,
+							operationState: { type: null, conflictedFiles: [], progress: null }, error: null };
+					case 'loadCommits':
+						return { command: 'loadCommits', refreshId: message.refreshId, commits: [commit], head: commit.hash,
+							tags: ['v1.0.0'], moreCommitsAvailable: false, onlyFollowFirstParent: false, gerritStates: null, error: null };
+					case 'loadConfig':
+						return { command: 'loadConfig', repo: message.repo, config: {
+							branches: { main: { pushRemote: null, remote: 'origin' } },
+							authors: [{ name: 'Dev Harness', email: 'dev@example.com' }],
+							diffTool: null, guiDiffTool: null, pushDefault: null,
+							remotes: [{ name: 'origin', url: 'https://example.com/repo.git', pushUrl: null }],
+							user: { name: { local: 'Dev Harness', global: null }, email: { local: 'dev@example.com', global: null } }
+						}, error: null };
+					default:
+						return { command: message.command, error: null };
+				}
+			}
+
+			var handlers = {
+				'initial_repo': function () { return '/repo'; },
+				'open_folder': function (args) { return { root: args && args.path ? args.path : '/repo', isRepo: true }; },
+				'repo_head': function () { return { branch: 'main', shortHash: commit.hash.slice(0, 7), ahead: 0, behind: 3, upstream: 'origin/main' }; },
+				'list_files': function () { return ['file.txt']; },
+				'list_dir': function () { return [{ name: 'file.txt', path: '/repo/file.txt', isDir: false, size: 1000 }]; },
+				'scm_status': function () { return [{ path: 'file.txt', oldPath: null, staged: null, unstaged: 'M', untracked: false }]; },
+				'scm_branches': function () { return [
+					{ name: 'main', remote: false, current: true, upstream: 'origin/main' },
+					{ name: 'feature', remote: false, current: false, upstream: null },
+					{ name: 'origin/main', remote: true, current: false, upstream: null }
+				]; },
+				'scm_remotes': function () { return [{ name: 'origin', url: 'https://example.com/repo.git' }]; },
+				'scm_tags': function () { return ['v1.0.0']; },
+				'scm_pull': function () { window.__harness.pulled++; return null; },
+				'scm_checkout': function (args) { window.__harness.checkedOut.push(args.name); return null; },
+			'read_file': function (args) { return { contents: oldText, binary: false, size: oldText.length }; },
+				'read_file_at': function (args) { return { contents: args.revision === 'HEAD' ? oldText : newText, binary: false, size: oldText.length }; },
+				'graph_request': function (args) { return graphResponse(args.message); },
+				'pty_create': function () { return 'mockshell'; },
+				'pty_write': function (args) { window.__harness.typed.push(String(args.data)); return null; },
+				'pty_kill': function () { return null; },
+				'git_output_log': function () { return []; },
+				'ext_list': function () { return []; },
+				'settings_read': function () { return null; },
+				'keybindings_read': function () { return null; }
+			};
+
+			window.__harness = { pulled: 0, checkedOut: [], oldText: oldText, typed: [] };
+
+			// Tauri injects its IPC bridge before any page script runs; if it is there we are
+			// running under `tauri dev` and must NOT replace it - the whole point of the harness
+			// in that mode is to exercise the real backend. The mocks below are for plain
+			// browser sessions only.
+			window.__harness.mocked = !window.__TAURI_INTERNALS__;
+			if (window.__harness.mocked) {
+				window.__TAURI_INTERNALS__ = {
+					metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+					invoke: function (command, args) {
+						var handler = handlers[command];
+						if (handler) return Promise.resolve(handler(args || {}));
+						console.warn('[harness] unhandled invoke:', command, args);
+						return Promise.resolve(null);
+					},
+					transformCallback: function (callback) { return Math.floor(Math.random() * 1e9); }
+				};
+			}
+
+			// The mode banner: a green harness against the mocks proves nothing about the
+			// packaged app, so the mode must always be visible.
+			window.addEventListener('DOMContentLoaded', function () {
+				var banner = document.createElement('div');
+				banner.id = 'harness-mode';
+				banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;pointer-events:none;' +
+					'font:11px monospace;padding:2px 8px;color:#fff;background:' +
+					(window.__harness.mocked ? '#a31515' : '#2e7d32') + '"';
+				banner.textContent = window.__harness.mocked
+					? 'DEV HARNESS - MOCKED BACKEND (plain browser): no real Rust backend is involved; frontend layout only'
+					: 'DEV HARNESS - REAL BACKEND (tauri dev): the same Rust IPC pipeline as the packaged app';
+					document.body.appendChild(banner);
+					document.getElementById('titlebar').style.marginTop = '18px';
+				});
+
+			// Page errors and unhandled rejections, collected from the earliest moment so the
+			// metrics report (and anyone driving the harness) sees what the console saw.
+			window.__pageErrors = [];
+			window.addEventListener('error', (event) => {
+				window.__pageErrors.push(event.message + (event.filename ? ' @ ' + event.filename + ':' + event.lineno : ''));
+			});
+			window.addEventListener('unhandledrejection', (event) => {
+				window.__pageErrors.push('rejection: ' + String(event.reason));
+			});
+			// CodeMirror reports plugin crashes through console.error - capture those too.
+			const nativeError = console.error.bind(console);
+			console.error = function () {
+				window.__pageErrors.push('console.error: ' + Array.from(arguments).map((a) => (typeof a === 'string' ? a : String(a && a.message ? a.message : a))).join(' '));
+				nativeError.apply(null, arguments);
+			};
+		})();
+	</script>
+</head>
+<body class="vscode-dark" data-vscode-theme-kind="vscode-dark" data-vscode-theme-name="Dark Modern">
+	<div id="titlebar"></div>
+	<div id="workbench">
+		<div id="activitybar" role="toolbar" aria-label="Activity Bar"></div>
+		<div id="sidebar" role="complementary"></div>
+		<div id="sidebarSash" class="sash sash-vertical"></div>
+		<div id="editorPart">
+			<div id="editorGroup"></div>
+			<div id="panelSash" class="sash sash-horizontal" hidden></div>
+			<div id="panel" hidden></div>
+		</div>
+	</div>
+	<div id="statusbar" role="status"></div>
+	<div id="notifications" aria-live="polite"></div>
+	<div id="overlays"></div>
+	<script type="module" src="/src/main.ts"></script>
+	<script type="module">
+		// The metrics mode (?metrics=1): the harness's second job - after the workbench
+		// settles, drive the surfaces a measurement needs (a file open, a split, the find
+		// widget), then measure the laid-out components and render the invariant report.
+		// Automation reads window.__uiMetrics; a human sees the table and the console summary.
+		if (new URLSearchParams(location.search).has('metrics')) {
+			// A measurement needs a deterministic workbench: drop the previous session's
+			// snapshot (it would restore its own tabs and splits) and boot once from clean
+			// storage. The sessionStorage marker breaks the reload loop.
+			if (!sessionStorage.getItem('ui-metrics-clean')) {
+				sessionStorage.setItem('ui-metrics-clean', '1');
+				localStorage.clear();
+				location.reload();
+			}
+			const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+			const click = (element) => {
+				for (const type of ['mousedown', 'mouseup', 'click']) {
+					element.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true }));
+				}
+			};
+			await sleep(1500); // the workbench boots and the first paint settles
+			const fileRow = document.querySelector('.tree .row');
+			if (fileRow) click(fileRow);
+			await sleep(2000); // the editor chunk's first load is real wall-clock in a cold browser
+			// The find widget opens in the FOCUSED group's editor - find before splitting.
+			document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true }));
+			await sleep(400);
+			document.dispatchEvent(new KeyboardEvent('keydown', { key: '\\', ctrlKey: true, bubbles: true, cancelable: true }));
+			await sleep(400);
+			// A second chance: back to the file's group and find again (the first try can race
+			// the editor chunk's cold load).
+			document.dispatchEvent(new KeyboardEvent('keydown', { key: '1', ctrlKey: true, bubbles: true, cancelable: true }));
+			await sleep(200);
+			document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true }));
+			await sleep(400);
+			const { runUiMetrics } = await import('/src/uiMetrics.ts');
+			const results = runUiMetrics();
+			// Every shipped theme must keep its text readable: each theme is applied in turn
+			// and its foreground/background token pairs measured as WCAG contrast ratios (the
+			// user's theme is restored afterwards). Same jsdom caveat: real pass is here.
+			const { runThemeContrastMetrics } = await import('/src/themeMetrics.ts');
+			results.push(...await runThemeContrastMetrics());
+			// Page errors are part of the report: a green measurement over a console full of
+			// exceptions is not green.
+			for (const error of window.__pageErrors || []) {
+				results.push({ name: 'page error', status: 'fail', detail: error });
+			}
+			window.__uiMetrics = results;
+			const failed = results.filter((r) => r.status === 'fail').length;
+			console.table(results);
+			console.log('[ui-metrics] ' + (results.length - failed) + ' pass, ' + failed + ' fail, ' + results.filter((r) => r.status === 'skipped').length + ' skipped');
+			const panel = document.createElement('div');
+			panel.id = 'ui-metrics';
+			panel.style.cssText = 'position:fixed;left:8px;bottom:34px;z-index:9998;max-width:560px;max-height:60vh;overflow:auto;' +
+				'font:11px monospace;color:#eee;background:rgba(20,20,20,0.95);border:1px solid #555;padding:8px;';
+			panel.innerHTML = '<b>UI METRICS - ' + (failed === 0 ? 'ALL PASS' : failed + ' FAILING') + '</b>' +
+				'<table style="border-collapse:collapse;margin-top:4px">' +
+				results.map((r) => '<tr><td style="padding:1px 8px;color:' +
+					(r.status === 'fail' ? '#f48771' : r.status === 'pass' ? '#73c991' : '#888') + '">' +
+					r.status.toUpperCase() + '</td><td style="padding:1px 8px">' + r.name + '</td><td style="padding:1px 8px;color:#aaa">' + r.detail + '</td></tr>').join('') +
+				'</table>';
+			document.body.appendChild(panel);
+			// The run itself writes a session snapshot (its splits); drop it so the NEXT
+			// measurement boots clean instead of restoring this run's groups.
+			localStorage.clear();
+		}
+	</script>
+</body>
+</html>

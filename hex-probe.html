@@ -1,0 +1,118 @@
+<!doctype html>
+<!-- Dev-only hex layout probe (vite serve only; never bundled): mounts HexView against a
+     scripted fake read_file_chunk and walks a list of viewport widths, writing each
+     measurement into window.__hexMetrics. ?size=<bytes> shrinks the fake file to bisect
+     layout hangs. Used to eyeball and automate the hex layout without the workbench. -->
+<html lang="en" class="vscode-dark">
+<head>
+	<meta charset="UTF-8" />
+	<title>hex layout probe</title>
+	<script>document.write('<link rel="stylesheet" href="/theme/' + (new URLSearchParams(location.search).get('theme') || 'dark-modern') + '.css" />');</script>
+	<script src="/gitgraph/config.js"></script>
+	<style>
+		html, body { margin: 0; height: 100%; }
+		/* The layout pieces of shell.css the view depends on (a <link> to /src/shell.css is
+		   served by vite as a JS module, so the constraints are inlined here instead). */
+		.hex-view { display: flex; flex-direction: column; flex: 1; min-height: 0; height: 100%; }
+				/* The ruler and the rows share one font: their ch-based grid tracks only line up when
+		   both measure the same monospace glyph. */
+		.hex-header-wrap, .hex-scroller { font-family: var(--vscode-editor-font-family, Consolas, monospace); font-size: var(--vscode-editor-font-size, 13px); color: var(--vscode-editor-foreground); background: var(--vscode-editor-background, #1e1e1e); }
+		.hex-scroller { flex: 1; min-height: 0; overflow: auto; position: relative; }
+		.hex-sizer { position: relative; }
+		.hex-row { display: grid; white-space: pre; line-height: 1.6; padding: 0 12px; }
+		.hex-offset { color: var(--vscode-editorLineNumber-foreground, #999); padding-right: 1ch; border-right: 1px solid var(--vscode-editorIndentGuide-background, #333); }
+		.hex-header-wrap { flex: none; overflow: hidden; border-bottom: 1px solid var(--vscode-editorIndentGuide-background, #333); }
+		.hex-row.hex-header { color: var(--vscode-editorLineNumber-foreground, #999); }
+		.hex-cell, .hex-ascii-cell { text-align: center; }
+		.hex-cell.hex-blank { visibility: hidden; }
+		/* Every other row is faintly tinted, the zebra banding hex editors use to keep the eye on
+		   a row across the three panes; a wash of the foreground so it suits any theme. */
+		.hex-row-odd { background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 6%, transparent); }
+		.hex-gutter { border-left: 1px solid var(--vscode-editorIndentGuide-background, #333); margin-left: 1.5ch; }
+	</style>
+	<script>
+		(function () {
+			'use strict';
+			var HEX_SIZE = Number(new URLSearchParams(location.search).get('size')) || 128 * 1024;
+			window.__hexSize = HEX_SIZE;
+			window.__TAURI_INTERNALS__ = {
+				metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+				invoke: function (command, args) {
+					if (command !== 'read_file_chunk') return Promise.resolve(null);
+					args = args || {};
+					var out = [], seed = (Number(args.offset) + 1) | 0;
+					for (var i = 0; i < Number(args.len) && Number(args.offset) + i < HEX_SIZE; i++) {
+						seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+						out.push(String.fromCharCode((seed >> 16) & 0xff));
+					}
+					return Promise.resolve({ size: HEX_SIZE, base64: btoa(out.join('')) });
+				},
+				transformCallback: function (callback) { return Math.floor(Math.random() * 1e9); }
+			};
+		})();
+	</script>
+</head>
+<body class="vscode-dark">
+	<div id="stage" style="position:absolute;inset:0;"></div>
+	<script type="module">
+		const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+		const progress = document.createElement('div');
+		progress.style.cssText = 'position:fixed;top:4px;right:8px;z-index:9999;font:11px monospace;color:#fff;background:#333;padding:2px 8px;';
+		document.body.appendChild(progress);
+		const widths = (new URLSearchParams(location.search).get('widths') || '480,800,1024,1280,1440,1680,1920,2400').split(',').map(Number);
+		const keep = new URLSearchParams(location.search).has('keep'); // keep the last view for eyeballing
+		const { HexView } = await import('/src/hexView.ts');
+		progress.textContent = 'imported';
+		const stage = document.getElementById('stage');
+		const results = [];
+		window.addEventListener('error', (e) => { window.__hexError = String(e.message); });
+		window.addEventListener('unhandledrejection', (e) => { window.__hexError = 'rejection: ' + String(e.reason && e.reason.stack || e.reason); });
+		try {
+		for (const width of widths) {
+			stage.innerHTML = '';
+			window.__hexStage = 'width ' + width + ': constructing';
+			progress.textContent = window.__hexStage;
+			await sleep(50);
+			const frame = document.createElement('div');
+			frame.style.cssText = 'position:absolute;top:0;bottom:0;left:50%;transform:translateX(-50%);width:' + width + 'px;';
+			stage.appendChild(frame);
+			const view = new HexView('/repo/blob.bin');
+			frame.appendChild(view.root);
+			window.__hexStage = 'width ' + width + ': loading';
+			progress.textContent = window.__hexStage;
+			await sleep(50);
+			await Promise.race([view.load(), sleep(4000)]);
+			const pin = new URLSearchParams(location.search).get('pin'); // pin a row width (e.g. 64) to force a horizontal scroll
+			if (pin) { const sel = view.root.querySelector('.hex-width'); sel.value = pin; sel.dispatchEvent(new Event('change')); }
+			window.__hexStage = 'width ' + width + ': settling';
+			progress.textContent = window.__hexStage;
+			await sleep(150);
+			const row = view.root.querySelector('.hex-scroller .hex-row');
+			const cells = row ? Array.from(row.querySelectorAll('.hex-cell')).filter((c) => !c.classList.contains('hex-blank')) : [];
+			const ascii = row ? Array.from(row.querySelectorAll('.hex-ascii-cell')) : [];
+			const bpr = Number(/(\d+) bytes\/row/.exec(view.root.querySelector('.hex-status').textContent)?.[1] ?? 0);
+			const hexRight = cells.length ? Math.max(...cells.map((c) => c.getBoundingClientRect().right)) : 0;
+			const asciiLeft = ascii.length ? ascii[0].getBoundingClientRect().left : 0;
+			const scroller = view.root.querySelector('.hex-scroller');
+			const rowFills = row ? row.getBoundingClientRect().width >= scroller.clientWidth - 1 : false;
+			// The ruler must sit exactly over the rows: every header cell's centre within half
+			// a pixel of its row cell's, hex and ASCII alike, also after a horizontal scroll.
+			if (pin) { scroller.scrollLeft = 40; await sleep(50); }
+			const header = view.root.querySelector('.hex-header');
+			const centre = (c) => { const r = c.getBoundingClientRect(); return (r.left + r.right) / 2; };
+			const pairs = header && row ? ['.hex-cell', '.hex-ascii-cell', '.hex-offset', '.hex-gutter'].flatMap((sel) => {
+				const h = Array.from(header.querySelectorAll(sel)), b = Array.from(row.querySelectorAll(sel));
+				return h.length === b.length ? h.map((c, i) => Math.abs(centre(c) - centre(b[i]))) : [Infinity];
+			}) : [Infinity];
+			const rulerDrift = Math.max(...pairs);
+			results.push({ width, bytesPerRow: bpr, panesSeparated: asciiLeft > hexRight, rowFillsViewport: rowFills, rulerDrift, rulerAligned: rulerDrift <= 0.5,
+				groupsDrawn: row ? row.querySelectorAll('.hex-cell.hex-group-start').length : 0 });
+			if (!keep) view.root.remove();
+		}
+		} catch (e) { window.__hexError = String(e && e.stack || e); progress.textContent = 'ERROR: ' + e.message; throw e; }
+		progress.textContent = 'done';
+		window.__hexMetrics = results;
+		console.table(results);
+	</script>
+</body>
+</html>

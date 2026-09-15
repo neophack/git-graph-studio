@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en" class="vscode-dark">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<title>Git Graph Studio</title>
+	<link id="theme-css" rel="stylesheet" href="/theme/dark-modern.css" />
+	<script src="/gitgraph/config.js"></script>
+	<style>
+		/* Paints before any module loads, so the window is never an empty dark rectangle.
+		   Removed by the Workbench constructor once the shell's first frame is up. */
+		#boot-splash {
+			position: fixed;
+			inset: 0;
+			z-index: 999;
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			justify-content: center;
+			gap: 14px;
+			background: #1f1f1f;
+			color: #cccccc;
+			font-family: system-ui, sans-serif;
+			font-size: 13px;
+		}
+		#boot-splash .spinner {
+			width: 28px;
+			height: 28px;
+			border: 3px solid #3c3c3c;
+			border-top-color: #3794ff;
+			border-radius: 50%;
+			animation: boot-spin 0.9s linear infinite;
+		}
+		@keyframes boot-spin {
+			to { transform: rotate(360deg); }
+		}
+	</style>
+</head>
+<body class="vscode-dark" data-vscode-theme-kind="vscode-dark">
+	<div id="boot-splash" aria-label="Loading"><div class="spinner"></div><div>Loading Git Graph Studio…</div></div>
+	<div id="titlebar"></div>
+	<div id="workbench">
+		<div id="activitybar" role="toolbar" aria-label="Activity Bar"></div>
+		<div id="sidebar" role="complementary"></div>
+		<div id="sidebarSash" class="sash sash-vertical"></div>
+		<div id="editorPart">
+			<div id="editorGroup"></div>
+			<div id="panelSash" class="sash sash-horizontal" hidden></div>
+			<div id="panel" hidden></div>
+		</div>
+	</div>
+	<div id="statusbar" role="status"></div>
+	<div id="notifications" aria-live="polite"></div>
+	<div id="overlays"></div>
+	<script type="module" src="/src/main.ts"></script>
+</body>
+</html>
