@@ -40,6 +40,23 @@ export interface DiffRequest {
 	right: DiffSide;
 }
 
+/** One of the open folder's initialised submodules, rendered as its own repository section
+ *  below the main one - VS Code's Source Control view when several repositories are open:
+ *  its own branch/sync header, commit box and change groups, all scoped to `repoPath`. */
+interface SubRepoState {
+	repoPath: string;
+	changes: ScmChange[];
+	branch: string | null;
+	ahead: number;
+	behind: number;
+	upstream: string | null;
+	message: string;
+	collapsed: Record<ScmGroup, boolean>;
+	error: string | null;
+	/** The section itself, collapsed by its own twistie (independent of the group twisties). */
+	sectionCollapsed: boolean;
+}
+
 function letterFor(status: string | null, untracked: boolean): string {
 	if (untracked) return 'U';
 	switch (status) {
@@ -146,6 +163,10 @@ export class SourceControlView {
 	private scrollFrame: number | null = null;
 	viewMode: ScmViewMode = state.load<ScmViewMode>('scmViewMode', 'list');
 	sort: ScmSort = state.load<ScmSort>('scmSort', 'path');
+	/** The open repository's initialised submodules, absolute paths - VS Code's multi-repo
+	 *  Source Control view: one section per submodule renders below the main one. */
+	private submodules: string[] = [];
+	private subRepos: SubRepoState[] = [];
 
 	/** Refreshed alongside the view so the Explorer can colour its tree. */
 	onStatus: ((status: StatusMap) => void) | null = null;
@@ -181,6 +202,8 @@ export class SourceControlView {
 		this.message = '';
 		this.selected = null;
 		this.collapsedFolders.clear();
+		this.submodules = [];
+		this.subRepos = [];
 		this.onStatus?.(new Map());
 		this.onCount?.(0);
 		this.onConflicts?.(0);
@@ -216,14 +239,74 @@ export class SourceControlView {
 			this.changes = [];
 			this.error = String(error);
 		}
+		await this.refreshSubmodules(generation);
+		if (generation !== this.generation) return;
 		const status: StatusMap = new Map();
 		for (const change of this.changes) {
 			status.set(toPosix(change.path), change.conflicted ? '!' : letterFor(change.staged ?? change.unstaged, change.untracked));
 		}
+		let allChanges = this.changes;
+		let allConflicts = this.changes.filter((c) => c.conflicted).length;
+		for (const sub of this.subRepos) {
+			for (const change of sub.changes) {
+				status.set(toPosix(`${sub.repoPath}/${change.path}`), change.conflicted ? '!' : letterFor(change.staged ?? change.unstaged, change.untracked));
+			}
+			allChanges = allChanges.concat(sub.changes);
+			allConflicts += sub.changes.filter((c) => c.conflicted).length;
+		}
 		this.onStatus?.(status);
-		this.onCount?.(this.changes.length);
-		this.onConflicts?.(this.changes.filter((c) => c.conflicted).length);
+		this.onCount?.(allChanges.length);
+		this.onConflicts?.(allConflicts);
 		this.render();
+	}
+
+	/** Re-read the submodule roots (a `git submodule update` may have initialised or removed
+	 *  some since the last look) and each one's status and branch/sync info - its own section
+	 *  of the view, exactly as VS Code's Git extension lists every open repository. */
+	private async refreshSubmodules(generation: number): Promise<void> {
+		let submodules: string[];
+		try {
+			// A test's (or an older backend build's) defaulting layer may answer `null` rather
+			// than throw for a command it does not know: treated the same as no submodules.
+			submodules = (await invoke<string[] | null>('repo_submodules', { repo: this.repoPath })) ?? [];
+		} catch {
+			submodules = [];
+		}
+		if (generation !== this.generation) return;
+		this.submodules = submodules;
+		// Existing sections keep their message box, collapsed groups and section twistie
+		// across a refresh; a submodule no longer present (removed, deinitialised) is dropped
+		// and a newly initialised one gets a fresh section.
+		const previous = new Map(this.subRepos.map((s) => [s.repoPath, s]));
+		this.subRepos = submodules.map((repoPath) => previous.get(repoPath) ?? {
+			repoPath,
+			changes: [],
+			branch: null,
+			ahead: 0,
+			behind: 0,
+			upstream: null,
+			message: '',
+			collapsed: { merge: false, staged: false, changes: false },
+			error: null,
+			sectionCollapsed: false
+		});
+		await Promise.all(this.subRepos.map(async (sub) => {
+			try {
+				const [changes, head] = await Promise.all([
+					invoke<ScmChange[]>('scm_status', { repo: sub.repoPath }),
+					invoke<{ branch: string | null; ahead: number; behind: number; upstream: string | null }>('repo_head', { repo: sub.repoPath })
+				]);
+				sub.changes = changes;
+				sub.branch = head.branch;
+				sub.ahead = head.ahead;
+				sub.behind = head.behind;
+				sub.upstream = head.upstream;
+				sub.error = null;
+			} catch (error) {
+				sub.changes = [];
+				sub.error = String(error);
+			}
+		}));
 	}
 
 	/* ---------- Rendering ---------- */
@@ -297,6 +380,9 @@ export class SourceControlView {
 		this.content.appendChild(body);
 		this.list.scrollTop = previousScroll;
 		this.renderWindow();
+		// Every initialised submodule gets its own repository section below the main one -
+		// VS Code's Source Control view when several repositories are open.
+		for (const sub of this.subRepos) this.content.appendChild(this.renderSubRepo(sub));
 		if (hadFocus) {
 			const input = body.querySelector<HTMLTextAreaElement>('textarea');
 			if (input) {
@@ -728,6 +814,277 @@ export class SourceControlView {
 	private async run(command: string, args: Record<string, unknown> = {}): Promise<void> {
 		try {
 			await invoke(command, args);
+		} catch (error) {
+			notify('error', String(error));
+		}
+		await this.refresh();
+		this.onChanged?.();
+	}
+
+	/* ---------- Submodule sections ----------
+	 * Every initialised submodule renders as its own repository section, the way VS Code's
+	 * Git extension lists every open repository in the Source Control view: a header (branch,
+	 * sync/publish, refresh, "..."), a commit box, the Publish Branch / Sync Changes button,
+	 * and its own Merge/Staged/Changes groups - the same actions as the main repository's,
+	 * scoped to this one by always passing its `repo` path to the backend. */
+
+	private subGroups(sub: SubRepoState): { key: ScmGroup; label: string; files: ScmChange[]; always: boolean }[] {
+		const merge = sub.changes.filter((c) => c.conflicted);
+		const staged = sub.changes.filter((c) => !c.conflicted && c.staged !== null);
+		const unstaged = sub.changes.filter((c) => !c.conflicted && (c.unstaged !== null || c.untracked));
+		return [
+			{ key: 'merge', label: 'Merge Changes', files: merge, always: false },
+			{ key: 'staged', label: 'Staged Changes', files: staged, always: false },
+			{ key: 'changes', label: 'Changes', files: unstaged, always: true }
+		];
+	}
+
+	private renderSubRepo(sub: SubRepoState): HTMLElement {
+		const header = el('div', 'pane-header scm-repo-header', [
+			icon(sub.sectionCollapsed ? 'chevron-right' : 'chevron-down', 'twistie'),
+			el('span', 'icon', [icon('repo')]),
+			el('span', 'label', [basename(sub.repoPath)])
+		]);
+		header.title = sub.repoPath;
+		if (sub.branch) {
+			const branchLabel = el('span', 'scm-repo-branch', [icon('git-branch'), ` ${sub.branch}`]);
+			if (sub.upstream) {
+				if (sub.behind > 0) branchLabel.append(` ${sub.behind}`, icon('arrow-down'));
+				if (sub.ahead > 0) branchLabel.append(` ${sub.ahead}`, icon('arrow-up'));
+			}
+			header.appendChild(branchLabel);
+		}
+		header.appendChild(el('div', 'actions', [
+			actionButton('refresh', 'Refresh', () => void this.refresh()),
+			actionButton('ellipsis', 'More Actions...', (event) => showMenuBelow(event.currentTarget as HTMLElement, [
+				{ label: 'Stage All Changes', run: () => void this.subRun(sub, 'git_stage_all') },
+				{ label: 'Unstage All Changes', run: () => void this.subRun(sub, 'git_unstage_all') },
+				{ label: 'Discard All Changes', run: () => void this.subDiscardAll(sub) }
+			], 220))
+		]));
+		if (sub.changes.length > 0) header.appendChild(el('span', 'badge', [String(sub.changes.length)]));
+		header.addEventListener('click', () => {
+			sub.sectionCollapsed = !sub.sectionCollapsed;
+			this.render();
+		});
+		const section = el('div', 'scm-repo', [header]);
+		if (sub.sectionCollapsed) return section;
+
+		const body = el('div', 'scm-repo-body');
+		body.appendChild(this.subCommitBox(sub));
+		const syncButton = this.subSyncButton(sub);
+		if (syncButton) body.appendChild(syncButton);
+		if (sub.error) body.appendChild(el('div', 'scm-input', [el('div', 'error', [sub.error])]));
+		for (const group of this.subGroups(sub)) {
+			if (group.files.length === 0 && !group.always) continue;
+			body.appendChild(this.subGroupSection(sub, group));
+		}
+		section.appendChild(body);
+		return section;
+	}
+
+	private subCommitBox(sub: SubRepoState): HTMLElement {
+		const box = el('div', 'scm-input');
+		const input = el('textarea', 'input');
+		input.placeholder = `Message (Ctrl+Enter to commit${sub.branch ? ` on "${sub.branch}"` : ''})`;
+		input.rows = 1;
+		input.value = sub.message;
+		input.spellcheck = false;
+		const grow = () => {
+			input.style.height = 'auto';
+			input.style.height = `${Math.min(140, input.scrollHeight + 2)}px`;
+		};
+		input.addEventListener('input', () => {
+			sub.message = input.value;
+			grow();
+			commit.disabled = input.value.trim() === '';
+		});
+		input.addEventListener('keydown', (event) => {
+			if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+				event.preventDefault();
+				void this.subCommit(sub);
+			}
+		});
+		const commit = el('button', 'button', [icon('check'), 'Commit']);
+		commit.disabled = sub.message.trim() === '';
+		commit.addEventListener('click', () => void this.subCommit(sub));
+		box.append(input, el('div', 'commit-row single', [commit]));
+		requestAnimationFrame(grow);
+		return box;
+	}
+
+	/** The full-width blue button below the commit box - "Publish Branch" (no upstream yet) or
+	 *  "Sync Changes" (an upstream exists), exactly as VS Code's Git extension shows it. `null`
+	 *  when the branch is already published and in sync with nothing to push or pull. */
+	private subSyncButton(sub: SubRepoState): HTMLElement | null {
+		if (!sub.upstream) {
+			const button = el('button', 'button scm-sync-button', [icon('cloud-upload'), ' Publish Branch']);
+			button.addEventListener('click', () => void this.subRun(sub, 'scm_push', { remote: null, setUpstream: true, force: false }));
+			return button;
+		}
+		if (sub.ahead === 0 && sub.behind === 0) return null;
+		const label = [' Sync Changes'];
+		if (sub.ahead > 0) label.push(String(sub.ahead));
+		const button = el('button', 'button scm-sync-button', [icon('sync'), ...label]);
+		button.addEventListener('click', () => void this.subRun(sub, 'scm_sync', { rebase: false }));
+		return button;
+	}
+
+	private subGroupSection(sub: SubRepoState, group: { key: ScmGroup; label: string; files: ScmChange[] }): HTMLElement {
+		const files = sortChanges(group.files, this.sort, group.key);
+		const groupActions = group.key === 'merge'
+			? [actionButton('add', 'Stage All Merge Changes', () => void this.subRun(sub, 'git_stage', { paths: files.map((c) => c.path) }))]
+			: group.key === 'staged'
+			? [actionButton('remove', 'Unstage All Changes', () => void this.subRun(sub, 'git_unstage_all'))]
+			: [
+				actionButton('discard', 'Discard All Changes', () => void this.subDiscardAll(sub)),
+				actionButton('add', 'Stage All Changes', () => void this.subRun(sub, 'git_stage_all'))
+			];
+		const header = el('div', 'pane-header', [
+			icon(sub.collapsed[group.key] ? 'chevron-right' : 'chevron-down', 'twistie'),
+			el('span', 'label', [trText(group.label)]),
+			el('div', 'actions', groupActions),
+			el('span', 'badge', [String(files.length)])
+		]);
+		header.addEventListener('click', () => {
+			sub.collapsed[group.key] = !sub.collapsed[group.key];
+			this.render();
+		});
+		const rows = sub.collapsed[group.key]
+			? []
+			: files.length === 0
+			? [el('div', 'scm-empty', [t('scm.noChanges')])]
+			: files.map((file) => this.subFileRow(sub, file, group.key));
+		return el('div', 'scm-group', [header, ...rows]);
+	}
+
+	private subFileRow(sub: SubRepoState, file: ScmChange, key: ScmGroup): HTMLElement {
+		const letter = letterOf(file, key);
+		const cls = { M: 'git-modified', A: 'git-added', D: 'git-deleted', R: 'git-renamed', U: 'git-untracked', '!': 'git-conflict' }[letter] ?? '';
+		const posix = toPosix(file.path);
+		const name = basename(posix);
+		const dir = posix.slice(0, Math.max(0, posix.length - name.length - 1));
+		const glyph = icon(fileIcon(name));
+		glyph.style.color = fileIconColor(name) ?? '';
+		const row = el('div', `row ${cls}`, [
+			el('span', 'icon', [glyph]),
+			el('span', 'label-block', [el('span', 'label', [name]), dir ? el('span', 'description', [dir]) : null])
+		]);
+		row.title = `${posix} • ${LETTER_TITLE[letter] ?? letter}`;
+		const actions = el('div', 'actions', [
+			actionButton('go-to-file', 'Open File', () => this.onOpenFile?.(this.subAbsolute(sub, file.path)))
+		]);
+		if (key === 'merge') {
+			actions.appendChild(actionButton('add', 'Stage Changes (Mark Resolved)', () => void this.subRun(sub, 'git_stage', { paths: [file.path] })));
+		} else if (key === 'changes') {
+			actions.appendChild(actionButton('discard', 'Discard Changes', () => void this.subDiscard(sub, file)));
+			actions.appendChild(actionButton('add', 'Stage Changes', () => void this.subRun(sub, 'git_stage', { paths: [file.path] })));
+		} else {
+			actions.appendChild(actionButton('remove', 'Unstage Changes', () => void this.subRun(sub, 'git_unstage', { paths: [file.path] })));
+		}
+		row.appendChild(actions);
+		const decoration = el('span', 'decoration', [letter]);
+		decoration.title = LETTER_TITLE[letter] ?? letter;
+		row.appendChild(decoration);
+		row.addEventListener('click', () => this.subOpenChange(sub, file, key, letter));
+		return row;
+	}
+
+	private subAbsolute(sub: SubRepoState, relative: string): string {
+		const separator = sub.repoPath.includes('\\') ? '\\' : '/';
+		return sub.repoPath.replace(/[\\/]+$/, '') + separator + relative.replaceAll('/', separator);
+	}
+
+	private subOpenChange(sub: SubRepoState, file: ScmChange, key: ScmGroup, letter: string): void {
+		const path = toPosix(file.path);
+		if (letter === '!' || letter === 'U' || (key === 'changes' && file.unstaged === 'added')) {
+			this.onOpenFile?.(this.subAbsolute(sub, file.path));
+			return;
+		}
+		const oldPath = file.oldPath ? toPosix(file.oldPath) : path;
+		const diff: DiffRequest = key === 'staged'
+			? {
+				id: `scm:${sub.repoPath}:index:${path}`,
+				title: `${basename(path)} (Index)`,
+				repo: sub.repoPath,
+				left: { revision: 'HEAD', path: oldPath, label: 'HEAD', exists: letter !== 'A' },
+				right: { revision: ':index', path, label: 'Index', exists: letter !== 'D' }
+			}
+			: {
+				id: `scm:${sub.repoPath}:worktree:${path}`,
+				title: `${basename(path)} (Working Tree)`,
+				repo: sub.repoPath,
+				left: { revision: file.staged !== null ? ':index' : 'HEAD', path: file.staged !== null ? path : oldPath, label: file.staged !== null ? 'Index' : 'HEAD', exists: true },
+				right: { revision: '*', path, label: 'Working Tree', exists: letter !== 'D' }
+			};
+		this.onOpenDiff?.(diff);
+	}
+
+	private async subCommit(sub: SubRepoState): Promise<void> {
+		const message = sub.message.trim();
+		if (message === '') {
+			notify('warning', 'Please provide a commit message.');
+			return;
+		}
+		const staged = sub.changes.some((c) => c.staged !== null);
+		if (!staged) {
+			if (sub.changes.length === 0) {
+				notify('info', 'There are no changes to commit.');
+				return;
+			}
+			const confirmed = await confirmDialog('There are no staged changes to commit.\n\nWould you like to stage all your changes and commit them directly?', 'Yes', 'info');
+			if (!confirmed) return;
+			try {
+				await invoke('git_stage_all', { repo: sub.repoPath });
+			} catch (error) {
+				notify('error', String(error));
+				return;
+			}
+		}
+		try {
+			await invoke('git_commit', { message, amend: false, repo: sub.repoPath });
+		} catch (error) {
+			notify('error', String(error));
+			await this.refresh();
+			return;
+		}
+		sub.message = '';
+		await this.refresh();
+		this.onChanged?.();
+	}
+
+	private async subDiscard(sub: SubRepoState, file: ScmChange): Promise<void> {
+		const label = basename(toPosix(file.path));
+		const confirmed = await confirmDialog(
+			file.untracked
+				? `Are you sure you want to DELETE ${label}?\nThis is IRREVERSIBLE!\nThis file will be FOREVER LOST if you proceed.`
+				: `Are you sure you want to discard changes in ${label}?`,
+			file.untracked ? 'Delete file' : 'Discard Changes'
+		);
+		if (!confirmed) return;
+		await this.subRun(sub, 'git_discard', { path: file.path, untracked: file.untracked });
+	}
+
+	private async subDiscardAll(sub: SubRepoState): Promise<void> {
+		const unstaged = sub.changes.filter((c) => !c.conflicted && (c.unstaged !== null || c.untracked));
+		if (unstaged.length === 0) return;
+		const untracked = unstaged.filter((c) => c.untracked);
+		const confirmed = await confirmDialog(
+			untracked.length > 0
+				? `Are you sure you want to discard ALL changes? ${untracked.length} untracked file(s) will be DELETED!\nThis is IRREVERSIBLE!\nYour current working set will be FOREVER LOST.`
+				: `Are you sure you want to discard ALL ${unstaged.length} changes?\nThis is IRREVERSIBLE!\nYour current working set will be FOREVER LOST if you proceed.`,
+			'Discard All Changes'
+		);
+		if (!confirmed) return;
+		await this.subRun(sub, 'git_discard_all', {
+			restore: unstaged.filter((c) => !c.untracked).map((c) => c.path),
+			clean: untracked.map((c) => c.path)
+		});
+	}
+
+	private async subRun(sub: SubRepoState, command: string, args: Record<string, unknown> = {}): Promise<void> {
+		try {
+			await invoke(command, { ...args, repo: sub.repoPath });
 		} catch (error) {
 			notify('error', String(error));
 		}

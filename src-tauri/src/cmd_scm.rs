@@ -13,24 +13,27 @@ use crate::git::Git;
 use crate::AppState;
 use tauri::State;
 
-fn open_repo(state: &State<AppState>) -> Result<String, String> {
-    state
-        .first_repo()
-        .ok_or_else(|| "No repository is open".to_string())
+/// The repository a command acts on: the one the view names (`repo`, a submodule's section
+/// of the view), or the open repository when it names none. See `AppState::resolve_repo`.
+fn open_repo(state: &State<AppState>, repo: Option<String>) -> Result<String, String> {
+    state.resolve_repo(repo)
 }
 
 /// The working tree's changes, staged and unstaged halves kept apart, as the two sections of
 /// the Source Control view list them. Read by the engine, in this process.
 #[tauri::command]
-pub async fn scm_status(state: State<'_, AppState>) -> Result<Value, String> {
-    let repo_path = open_repo(&state)?;
+pub async fn scm_status(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<Value, String> {
+    let repo_path = open_repo(&state, repo)?;
     tauri::async_runtime::spawn_blocking(move || crate::cmd_graph::scm_changes(&repo_path))
         .await
         .map_err(|e| e.to_string())?
 }
 
-fn git(state: &State<AppState>) -> Result<Git, String> {
-    Ok(Git::new(open_repo(state)?))
+fn git(state: &State<AppState>, repo: Option<String>) -> Result<Git, String> {
+    Ok(Git::new(open_repo(state, repo)?))
 }
 
 /// Turn the open folder into a Git repository (`git init`), so the git-backed views — the
@@ -38,20 +41,20 @@ fn git(state: &State<AppState>) -> Result<Git, String> {
 /// itself is the repository's root; the caller re-opens it to re-resolve everything.
 #[tauri::command]
 pub async fn git_init(state: State<'_, AppState>) -> Result<String, String> {
-    let folder = open_repo(&state)?;
+    let folder = open_repo(&state, None)?;
     Git::new(&folder).run(&["init"])?;
     Ok(folder)
 }
 
 #[tauri::command]
-pub async fn git_stage(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), String> {
+pub async fn git_stage(state: State<'_, AppState>, paths: Vec<String>, repo: Option<String>) -> Result<(), String> {
     let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
-    git(&state)?.run(&[&["add", "--all", "--"], &refs[..]].concat())
+    git(&state, repo)?.run(&[&["add", "--all", "--"], &refs[..]].concat())
 }
 
 #[tauri::command]
-pub async fn git_stage_all(state: State<'_, AppState>) -> Result<(), String> {
-    git(&state)?.run(&["add", "--all"])
+pub async fn git_stage_all(state: State<'_, AppState>, repo: Option<String>) -> Result<(), String> {
+    git(&state, repo)?.run(&["add", "--all"])
 }
 
 pub(crate) fn unstage_paths(git: &crate::git::Git, paths: &[String]) -> Result<(), String> {
@@ -66,13 +69,13 @@ pub(crate) fn unstage_paths(git: &crate::git::Git, paths: &[String]) -> Result<(
 }
 
 #[tauri::command]
-pub async fn git_unstage(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), String> {
-    unstage_paths(&git(&state)?, &paths)
+pub async fn git_unstage(state: State<'_, AppState>, paths: Vec<String>, repo: Option<String>) -> Result<(), String> {
+    unstage_paths(&git(&state, repo)?, &paths)
 }
 
 #[tauri::command]
-pub async fn git_unstage_all(state: State<'_, AppState>) -> Result<(), String> {
-    let git = git(&state)?;
+pub async fn git_unstage_all(state: State<'_, AppState>, repo: Option<String>) -> Result<(), String> {
+    let git = git(&state, repo)?;
     if git.run(&["rev-parse", "-q", "--verify", "HEAD"]).is_err() {
         git.run(&["rm", "-q", "--cached", "-r", "--", "."])
     } else {
@@ -104,8 +107,9 @@ pub async fn git_commit(
     state: State<'_, AppState>,
     message: String,
     amend: bool,
+    repo: Option<String>,
 ) -> Result<(), String> {
-    commit_index(&git(&state)?, &message, amend)
+    commit_index(&git(&state, repo)?, &message, amend)
 }
 
 /// Discard a path's unstaged changes (`git restore`), or delete an untracked file — the
@@ -115,9 +119,10 @@ pub async fn git_discard(
     state: State<'_, AppState>,
     path: String,
     untracked: bool,
+    repo: Option<String>,
 ) -> Result<(), String> {
     if untracked {
-        let full = Path::new(&open_repo(&state)?).join(&path);
+        let full = Path::new(&open_repo(&state, repo)?).join(&path);
         let meta = std::fs::symlink_metadata(&full).map_err(|e| format!("{path}: {e}"))?;
         if meta.is_dir() {
             std::fs::remove_dir_all(&full).map_err(|e| format!("{path}: {e}"))
@@ -125,7 +130,7 @@ pub async fn git_discard(
             std::fs::remove_file(&full).map_err(|e| format!("{path}: {e}"))
         }
     } else {
-        git(&state)?.run(&["restore", "--", &path])
+        git(&state, repo)?.run(&["restore", "--", &path])
     }
 }
 
@@ -138,8 +143,9 @@ pub async fn git_discard_all(
     state: State<'_, AppState>,
     restore: Option<Vec<String>>,
     clean: Option<Vec<String>>,
+    repo: Option<String>,
 ) -> Result<(), String> {
-    let git = git(&state)?;
+    let git = git(&state, repo)?;
     match (&restore, &clean) {
         (None, None) => {
             git.run(&["restore", "--", "."])?;
@@ -168,23 +174,23 @@ pub(crate) fn discard_paths(git: &Git, restore: &[String], clean: &[String]) -> 
 use crate::scm_ops;
 
 #[tauri::command]
-pub async fn scm_branches(state: State<'_, AppState>) -> Result<Vec<scm_ops::BranchInfo>, String> {
-    scm_ops::branches(&git(&state)?)
+pub async fn scm_branches(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<scm_ops::BranchInfo>, String> {
+    scm_ops::branches(&git(&state, repo)?)
 }
 
 #[tauri::command]
-pub async fn scm_remotes(state: State<'_, AppState>) -> Result<Vec<scm_ops::RemoteInfo>, String> {
-    scm_ops::remotes(&git(&state)?)
+pub async fn scm_remotes(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<scm_ops::RemoteInfo>, String> {
+    scm_ops::remotes(&git(&state, repo)?)
 }
 
 #[tauri::command]
-pub async fn scm_stashes(state: State<'_, AppState>) -> Result<Vec<scm_ops::StashInfo>, String> {
-    scm_ops::stashes(&git(&state)?)
+pub async fn scm_stashes(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<scm_ops::StashInfo>, String> {
+    scm_ops::stashes(&git(&state, repo)?)
 }
 
 #[tauri::command]
-pub async fn scm_tags(state: State<'_, AppState>) -> Result<Vec<String>, String> {
-    scm_ops::tags(&git(&state)?)
+pub async fn scm_tags(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<String>, String> {
+    scm_ops::tags(&git(&state, repo)?)
 }
 
 #[tauri::command]
@@ -193,8 +199,9 @@ pub async fn scm_pull(
     remote: Option<String>,
     branch: Option<String>,
     rebase: bool,
+    repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::pull(&git(&state)?, remote.as_deref(), branch.as_deref(), rebase)
+    scm_ops::pull(&git(&state, repo)?, remote.as_deref(), branch.as_deref(), rebase)
 }
 
 #[tauri::command]
@@ -203,13 +210,14 @@ pub async fn scm_push(
     remote: Option<String>,
     set_upstream: bool,
     force: bool,
+    repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::push(&git(&state)?, remote.as_deref(), set_upstream, force)
+    scm_ops::push(&git(&state, repo)?, remote.as_deref(), set_upstream, force)
 }
 
 #[tauri::command]
-pub async fn scm_sync(state: State<'_, AppState>, rebase: bool) -> Result<(), String> {
-    scm_ops::sync(&git(&state)?, rebase)
+pub async fn scm_sync(state: State<'_, AppState>, rebase: bool, repo: Option<String>) -> Result<(), String> {
+    scm_ops::sync(&git(&state, repo)?, rebase)
 }
 
 #[tauri::command]
@@ -217,13 +225,14 @@ pub async fn scm_fetch(
     state: State<'_, AppState>,
     remote: Option<String>,
     prune: bool,
+    repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::fetch(&git(&state)?, remote.as_deref(), prune)
+    scm_ops::fetch(&git(&state, repo)?, remote.as_deref(), prune)
 }
 
 #[tauri::command]
-pub async fn scm_checkout(state: State<'_, AppState>, name: String) -> Result<(), String> {
-    scm_ops::checkout(&git(&state)?, &name)
+pub async fn scm_checkout(state: State<'_, AppState>, name: String, repo: Option<String>) -> Result<(), String> {
+    scm_ops::checkout(&git(&state, repo)?, &name)
 }
 
 #[tauri::command]
@@ -231,18 +240,19 @@ pub async fn scm_create_branch(
     state: State<'_, AppState>,
     name: String,
     from: Option<String>,
+    repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::create_branch(&git(&state)?, &name, from.as_deref())
+    scm_ops::create_branch(&git(&state, repo)?, &name, from.as_deref())
 }
 
 #[tauri::command]
-pub async fn scm_amend_last_commit(state: State<'_, AppState>) -> Result<(), String> {
-    scm_ops::amend_last_commit(&git(&state)?)
+pub async fn scm_amend_last_commit(state: State<'_, AppState>, repo: Option<String>) -> Result<(), String> {
+    scm_ops::amend_last_commit(&git(&state, repo)?)
 }
 
 #[tauri::command]
-pub async fn scm_reset_to_remote(state: State<'_, AppState>) -> Result<String, String> {
-    scm_ops::reset_to_remote(&git(&state)?)
+pub async fn scm_reset_to_remote(state: State<'_, AppState>, repo: Option<String>) -> Result<String, String> {
+    scm_ops::reset_to_remote(&git(&state, repo)?)
 }
 
 /// Clone into `parent`; the new repository's path is returned for the app to open.
@@ -255,16 +265,18 @@ pub fn scm_clone(url: String, parent: String, name: Option<String>) -> Result<St
 pub async fn gerrit_install_hook(
     state: State<'_, AppState>,
     remote: String,
+    repo: Option<String>,
 ) -> Result<bool, String> {
-    scm_ops::gerrit_install_hook(&git(&state)?, &remote, "commit-msg")
+    scm_ops::gerrit_install_hook(&git(&state, repo)?, &remote, "commit-msg")
 }
 
 #[tauri::command]
 pub async fn gerrit_push_ref(
     state: State<'_, AppState>,
     remote: String,
+    repo: Option<String>,
 ) -> Result<Option<String>, String> {
-    scm_ops::gerrit_push_ref(&git(&state)?, &remote)
+    scm_ops::gerrit_push_ref(&git(&state, repo)?, &remote)
 }
 
 /// The "Git" output channel: everything git printed so far.
@@ -330,8 +342,8 @@ pub(crate) fn parse_blame(porcelain: &str) -> Vec<BlameLine> {
 
 /// Who last changed every line of a file in the working tree (`git blame --porcelain`).
 #[tauri::command]
-pub async fn scm_blame(state: State<'_, AppState>, path: String) -> Result<Vec<BlameLine>, String> {
-    let git = git(&state)?;
+pub async fn scm_blame(state: State<'_, AppState>, path: String, repo: Option<String>) -> Result<Vec<BlameLine>, String> {
+    let git = git(&state, repo)?;
     let output = git.output(&["blame", "--porcelain", "--", &path])?;
     Ok(parse_blame(&output))
 }

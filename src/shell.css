@@ -183,11 +183,22 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 .scm-input .commit-row { display: flex; margin-top: 6px; gap: 1px; }
 .scm-input .commit-row .button { flex: 1; border-radius: 2px 0 0 2px; }
 .scm-input .commit-row .button.more { flex: none; width: 28px; padding: 0; border-radius: 0 2px 2px 0; border-left: 1px solid #ffffff2e; }
+.scm-input .commit-row.single .button { border-radius: 2px; }
 .scm-input .error { margin-top: 6px; padding: 4px 6px; font-size: 12px; white-space: pre-wrap; user-select: text;
 	background: var(--vscode-inputValidation-errorBackground); border: 1px solid var(--vscode-inputValidation-errorBorder); }
 .scm-group .row { padding-left: 22px; }
 .scm-group .row .decoration { width: 14px; text-align: center; }
 .scm-empty { padding: 4px 20px; color: var(--vscode-descriptionForeground); }
+
+/* A submodule's own repository section (VS Code's multi-repo Source Control view): a header
+   (branch, sync/publish, refresh, "..."), then its commit box, Publish/Sync button and groups -
+   the same layout as the main repository's, repeated once per initialised submodule. */
+.scm-repo { flex: none; border-top: 1px solid var(--vscode-sideBarSectionHeader-border); }
+.scm-repo-header .icon { width: 16px; height: 16px; font-size: 16px; margin: 0 6px 0 2px; flex: none; display: inline-flex; align-items: center; justify-content: center; }
+.scm-repo-branch { flex: none; display: inline-flex; align-items: center; gap: 2px; margin-right: 6px; font-weight: 400; text-transform: none; color: var(--vscode-sideBarSectionHeader-foreground); opacity: 0.85; }
+.scm-repo-branch .codicon { font-size: 14px; }
+.scm-repo-body { padding-top: 2px; }
+.scm-sync-button { display: flex; align-items: center; justify-content: center; gap: 4px; margin: 0 12px 8px 20px; width: calc(100% - 32px); border-radius: 2px; }
 
 /* ---------- Editor group ---------- */
 #editorPart { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }

@@ -412,10 +412,12 @@ pub struct HeadInfo {
 }
 
 #[tauri::command]
-pub async fn repo_head(state: State<'_, AppState>) -> Result<HeadInfo, String> {
-    let repo_path = state
-        .first_repo()
-        .ok_or_else(|| "No repository is open".to_string())?;
+pub async fn repo_head(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<HeadInfo, String> {
+    // `repo` names a submodule's section of the Source Control view; the open repository otherwise.
+    let repo_path = state.resolve_repo(repo)?;
     let git = Git::new(&repo_path);
     // One subprocess instead of four (each git spawn costs ~50-90 ms on Windows): the
     // porcelain v2 branch header carries the branch, the oid, the upstream and the

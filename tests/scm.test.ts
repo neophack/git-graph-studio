@@ -376,6 +376,117 @@ describe('source control view', () => {
 
 });
 
+describe('submodule sections', () => {
+	const SUB = 'C:\\repo\\vendor\\dep';
+
+	function setup(options: { subUpstream?: string | null; subAhead?: number; subBehind?: number } = {}) {
+		const mainChanges = [change('README.md', { unstaged: 'modified' })];
+		let subChanges = [change('lib.rs', { staged: 'modified' })];
+		const upstream = 'subUpstream' in options ? options.subUpstream : 'origin/main';
+		backend.on('repo_submodules', () => [SUB]);
+		backend.on('scm_status', (args) => (args['repo'] === SUB ? subChanges : mainChanges));
+		backend.on('repo_head', (args) => (args['repo'] === SUB
+			? { branch: 'main', shortHash: 'dead123', ahead: options.subAhead ?? 0, behind: options.subBehind ?? 0, upstream }
+			: { branch: 'main', shortHash: 'abc1234', ahead: 0, behind: 0, upstream: 'origin/main' }));
+		for (const command of ['git_stage', 'git_unstage', 'git_stage_all', 'git_unstage_all', 'git_discard', 'git_discard_all', 'git_commit', 'scm_push', 'scm_sync']) {
+			backend.on(command, () => null);
+		}
+		const view = new SourceControlView(document.getElementById('sidebar')!, new CommandRegistry());
+		return { view, setSubChanges: (c: typeof subChanges) => { subChanges = c; } };
+	}
+
+	it('renders every initialised submodule as its own repository section, scoped to its own changes', async () => {
+		const { view } = setup();
+		view.setRepo(REPO);
+		await view.refresh();
+
+		const repoHeaders = Array.from(document.querySelectorAll<HTMLElement>('.scm-repo-header .label'));
+		expect(repoHeaders.map((h) => h.textContent)).toEqual(['dep']);
+		const subSection = document.querySelector('.scm-repo')!;
+		expect(subSection.querySelector('.scm-repo-branch')!.textContent).toContain('main');
+		expect(texts('.scm-repo .pane-header .label')).toEqual(['dep', 'Staged Changes', 'Changes']);
+		expect(subSection.querySelector('.row .label')!.textContent).toBe('lib.rs');
+		// The main repository's own list is untouched: only the submodule's change shows there.
+		expect(texts('.scm-list .row .label')).toEqual(['README.md']);
+	});
+
+	it('stages a change within a submodule, passing its own repo path', async () => {
+		const { view, setSubChanges } = setup();
+		setSubChanges([change('lib.rs', { unstaged: 'modified' })]);
+		view.setRepo(REPO);
+		await view.refresh();
+
+		const subSection = document.querySelector('.scm-repo')!;
+		click(subSection.querySelector('.row .codicon-add')!.parentElement);
+		await flush();
+		expect(backend.callsTo('git_stage')).toEqual([{ paths: ['lib.rs'], repo: SUB }]);
+	});
+
+	it('commits within a submodule, passing its own repo path', async () => {
+		const { view } = setup(); // the default fixture's lib.rs is already staged
+		view.setRepo(REPO);
+		await view.refresh();
+
+		const subSection = document.querySelector('.scm-repo')!;
+		const textarea = subSection.querySelector<HTMLTextAreaElement>('textarea')!;
+		type(textarea, 'Update dep');
+		click(subSection.querySelector('.commit-row .button')!);
+		await flush();
+		expect(backend.callsTo('git_commit')).toEqual([{ message: 'Update dep', amend: false, repo: SUB }]);
+	});
+
+	it('shows Publish Branch when the submodule has no upstream yet', async () => {
+		const { view } = setup({ subUpstream: null });
+		view.setRepo(REPO);
+		await view.refresh();
+		const button = document.querySelector<HTMLButtonElement>('.scm-sync-button')!;
+		expect(button.textContent).toContain('Publish Branch');
+		click(button);
+		await flush();
+		expect(backend.callsTo('scm_push')).toEqual([{ remote: null, setUpstream: true, force: false, repo: SUB }]);
+	});
+
+	it('shows Sync Changes N↑ once the submodule has an upstream with unpushed commits', async () => {
+		const { view } = setup({ subUpstream: 'origin/main', subAhead: 2 });
+		view.setRepo(REPO);
+		await view.refresh();
+		const button = document.querySelector<HTMLButtonElement>('.scm-sync-button')!;
+		expect(button.textContent).toContain('Sync Changes');
+		expect(button.textContent).toContain('2');
+		click(button);
+		await flush();
+		expect(backend.callsTo('scm_sync')).toEqual([{ rebase: false, repo: SUB }]);
+	});
+
+	it('hides the sync button once a submodule with an upstream has nothing to push or pull', async () => {
+		const { view } = setup({ subUpstream: 'origin/main', subAhead: 0, subBehind: 0 });
+		view.setRepo(REPO);
+		await view.refresh();
+		expect(document.querySelector('.scm-sync-button')).toBeNull();
+	});
+
+	it('collapses a submodule section by clicking its header, keeping the others open', async () => {
+		const { view } = setup();
+		view.setRepo(REPO);
+		await view.refresh();
+		expect(document.querySelector('.scm-repo-body')).not.toBeNull();
+		click(document.querySelector('.scm-repo-header')!);
+		expect(document.querySelector('.scm-repo-body')).toBeNull();
+	});
+
+	it('aggregates the badge count and conflict count across the main repository and its submodules', async () => {
+		const { view } = setup();
+		let count = -1;
+		let conflicts = -1;
+		view.onCount = (n) => { count = n; };
+		view.onConflicts = (n) => { conflicts = n; };
+		view.setRepo(REPO);
+		await view.refresh();
+		expect(count).toBe(2); // one main change, one submodule change
+		expect(conflicts).toBe(0);
+	});
+});
+
 describe('git commands', () => {
 	function setup() {
 		const registry = new CommandRegistry();

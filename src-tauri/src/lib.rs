@@ -90,6 +90,48 @@ mod desktop {
         pub fn first_repo(&self) -> Option<String> {
             self.repos.lock().unwrap().first().cloned()
         }
+
+        /// The repository a Source Control command acts on: the open repository when the
+        /// view names none, otherwise the named one - which must be an open root or a
+        /// checkout below one (a submodule the view lists as its own section). Anything
+        /// else is refused: the frontend never gets to run git in an arbitrary folder.
+        pub fn resolve_repo(&self, repo: Option<String>) -> Result<String, String> {
+            let repos = self.repos.lock().unwrap();
+            let Some(repo) = repo else {
+                return repos
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| "No repository is open".to_string());
+            };
+            if repos.contains(&repo) {
+                return Ok(repo);
+            }
+            if is_repo_below(&repos, &repo) {
+                return Ok(repo);
+            }
+            Err(format!("{repo} is not a repository of the open folder"))
+        }
+    }
+
+    /// Whether `path` is a git checkout (a `.git` directory or file) strictly inside one of
+    /// `roots`, spelled without `..` segments - the shape a submodule root takes.
+    pub fn is_repo_below(roots: &[String], path: &str) -> bool {
+        use std::path::{Component, Path};
+        let candidate = Path::new(path);
+        if candidate
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+        {
+            return false;
+        }
+        let normalised = |p: &str| p.replace('\\', "/").trim_end_matches('/').to_lowercase();
+        let wanted = normalised(path);
+        roots.iter().any(|root| {
+            let root = normalised(root);
+            wanted.len() > root.len() + 1
+                && wanted.starts_with(&root)
+                && wanted.as_bytes()[root.len()] == b'/'
+        }) && candidate.join(".git").exists()
     }
 
     /// What `open_folder` answers: the folder actually opened, and whether it is (or sits
@@ -374,6 +416,27 @@ mod desktop {
     #[cfg(test)]
     mod workspace_tests {
         use super::*;
+
+        #[test]
+        fn a_command_may_name_an_open_root_or_a_checkout_below_it_only() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("repo");
+            let sub = root.join("vendor").join("dep");
+            let plain = root.join("plain");
+            std::fs::create_dir_all(sub.join(".git")).unwrap();
+            std::fs::create_dir_all(&plain).unwrap();
+            let roots = vec![root.to_string_lossy().into_owned()];
+            let path = |p: &std::path::Path| p.to_string_lossy().into_owned();
+            assert!(is_repo_below(&roots, &path(&sub)), "an initialised submodule");
+            assert!(!is_repo_below(&roots, &path(&plain)), "a plain folder inside the root");
+            assert!(!is_repo_below(&roots, &path(&root)), "the root itself is not below itself");
+            assert!(!is_repo_below(&roots, &path(&dir.path().join("elsewhere"))), "outside the root");
+            let dotted = root.join("vendor").join("..").join("vendor").join("dep");
+            assert!(!is_repo_below(&roots, &path(&dotted)), "no .. segments");
+            // Windows spells the root with backslashes; the same checkout named with forward
+            // slashes (as the view may pass it back) still qualifies.
+            assert!(is_repo_below(&roots, &path(&sub).replace('\\', "/")));
+        }
 
         #[test]
         fn strip_jsonc_removes_line_and_block_comments() {
