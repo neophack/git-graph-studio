@@ -129,6 +129,12 @@ jobs:
             fs.writeFileSync(cargo, fs.readFileSync(cargo, 'utf8').replace(/^version = \"[^\"]*\"/m, 'version = \"' + process.argv[1] + '\"'));
           " "$VERSION"
 
+      # `tauri::generate_context!()` embeds the window icons from tauri.conf.json at compile
+      # time, and prepare.mjs is what derives them into target/studio/icons/ - `tauri build`
+      # runs it as its beforeBuildCommand, but the test step below compiles first.
+      - name: Prepare the app assets
+        run: node scripts/prepare.mjs
+
       # The app crate is its own workspace (see src-tauri/Cargo.toml), so the submodule
       # repository's `cargo test --workspace` never reaches it: its tests, the backend
       # binary's protocol test against the real executable, and clippy for both feature
@@ -228,6 +234,10 @@ jobs:
         with:
           workspaces: src-tauri
           key: studio-linux-native
+      # The window icons generate_context!() embeds, as in the Windows job.
+      - name: Prepare the app assets
+        if: matrix.bundles == 'deb'
+        run: node scripts/prepare.mjs
       - name: Test and lint the app backend
         if: matrix.bundles == 'deb'
         working-directory: src-tauri
