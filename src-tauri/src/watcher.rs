@@ -158,17 +158,25 @@ fn debounce_loop(root: &Path, raw: &mpsc::Receiver<PathBuf>, stopped: &mpsc::Rec
 mod tests {
     use super::*;
 
+    /// Build a path under `root` from forward-slash segments with the platform's separator,
+    /// so the test sees the same `Path` shapes the OS watcher hands over on Linux, macOS
+    /// and Windows alike.
+    fn under(root: &Path, relative: &str) -> PathBuf {
+        relative.split('/').fold(root.to_path_buf(), |p, seg| p.join(seg))
+    }
+
     #[test]
     fn folds_paths_relative_flags_git_and_drops_noise() {
-        let root = Path::new("C:\\repo");
+        let root = &std::env::temp_dir().join("repo");
+        let elsewhere = &std::env::temp_dir().join("elsewhere");
         let mut batch = FsChange::default();
-        fold_path(&mut batch, root, Path::new("C:\\repo\\src\\b.rs"));
-        fold_path(&mut batch, root, Path::new("C:\\repo\\src\\a.rs"));
-        fold_path(&mut batch, root, Path::new("C:\\repo\\src\\a.rs"));
-        fold_path(&mut batch, root, Path::new("C:\\repo\\.git\\refs\\heads\\main"));
-        fold_path(&mut batch, root, Path::new("C:\\repo\\target\\debug\\x.o"));
-        fold_path(&mut batch, root, Path::new("C:\\repo\\node_modules\\m\\index.js"));
-        fold_path(&mut batch, root, Path::new("D:\\elsewhere\\c.rs"));
+        fold_path(&mut batch, root, &under(root, "src/b.rs"));
+        fold_path(&mut batch, root, &under(root, "src/a.rs"));
+        fold_path(&mut batch, root, &under(root, "src/a.rs"));
+        fold_path(&mut batch, root, &under(root, ".git/refs/heads/main"));
+        fold_path(&mut batch, root, &under(root, "target/debug/x.o"));
+        fold_path(&mut batch, root, &under(root, "node_modules/m/index.js"));
+        fold_path(&mut batch, root, &under(elsewhere, "c.rs"));
         assert_eq!(batch.paths, ["src/a.rs", "src/b.rs"]);
         assert!(batch.git_changed);
         assert!(!batch.truncated);
@@ -176,14 +184,14 @@ mod tests {
         // The index (rewritten by every `git status`), loose objects and reflogs never count
         // as a repository change: they are what the app's own reads and writes produce.
         let mut quiet = FsChange::default();
-        for noise in ["index", "index.lock", "objects\\ab\\cdef", "logs\\HEAD", "hooks\\pre-commit", "COMMIT_EDITMSG"] {
-            fold_path(&mut quiet, root, &root.join(".git").join(noise));
+        for noise in ["index", "index.lock", "objects/ab/cdef", "logs/HEAD", "hooks/pre-commit", "COMMIT_EDITMSG"] {
+            fold_path(&mut quiet, root, &under(root, &format!(".git/{noise}")));
         }
         assert!(!quiet.git_changed);
         assert!(quiet.paths.is_empty());
-        for signal in ["HEAD", "MERGE_HEAD", "packed-refs", "refs\\remotes\\origin\\main"] {
+        for signal in ["HEAD", "MERGE_HEAD", "packed-refs", "refs/remotes/origin/main"] {
             let mut change = FsChange::default();
-            fold_path(&mut change, root, &root.join(".git").join(signal));
+            fold_path(&mut change, root, &under(root, &format!(".git/{signal}")));
             assert!(change.git_changed, "{signal}");
         }
     }
@@ -203,6 +211,11 @@ mod tests {
     fn a_real_watch_reports_a_debounced_batch() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().display().to_string();
+        // The subfolder exists before the watch starts: inotify only covers a directory
+        // created under a live watch once `notify` has registered it, which happens
+        // asynchronously, so a file written into a brand-new folder can slip past the
+        // recursive watch on Linux. That gap is `notify`'s, not what this test checks.
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
         let (tx, rx) = mpsc::channel();
         let watcher = FolderWatcher::new(&root, move |change| {
             let _ = tx.send(change);
@@ -210,7 +223,6 @@ mod tests {
         .unwrap();
         // The OS watch is registered asynchronously on some platforms; give it a moment.
         std::thread::sleep(Duration::from_millis(200));
-        std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("src").join("main.rs"), b"fn main() {}").unwrap();
         std::fs::write(dir.path().join("README.md"), b"#").unwrap();
 

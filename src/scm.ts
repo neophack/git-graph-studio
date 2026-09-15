@@ -7,6 +7,7 @@
 // working tree with thousands of changes renders as fast as one with ten.
 
 import { invoke } from '@tauri-apps/api/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
 
 import type { CommandRegistry } from './commands';
 import { resolvedMenuEntries } from './contributions';
@@ -15,7 +16,7 @@ import { fileIcon, fileIconColor } from './editor';
 import type { StatusMap } from './explorer';
 import { t, trText } from './i18n';
 import * as state from './state';
-import { actionButton, basename, confirmDialog, el, icon, notify, showContextMenu, showMenuBelow, toPosix, type MenuEntry } from './ui';
+import { actionButton, basename, confirmDialog, el, icon, notify, quickInput, quickPick, showContextMenu, showMenuBelow, toPosix, type MenuEntry, type QuickPickItem } from './ui';
 
 interface ScmChange {
 	path: string;
@@ -55,6 +56,57 @@ interface SubRepoState {
 	error: string | null;
 	/** The section itself, collapsed by its own twistie (independent of the group twisties). */
 	sectionCollapsed: boolean;
+}
+
+interface SubBranchInfo { name: string; remote: boolean; current: boolean; upstream: string | null }
+interface SubRemoteInfo { name: string; url: string }
+interface SubStashInfo { selector: string; index: number; message: string; hash: string }
+
+/** Same validity rule gitCommands.ts uses for a new branch/tag/remote name - a submodule's
+ *  "..." menu asks for one exactly like the main repository's. */
+const SUB_REF_NAME = /^(?![-.])(?!.*(\.\.|@\{|[\\^:?*\[\s~]))[^\x00-\x1f\x7f]+(?<![./])(?<!\.lock)$/;
+function validateSubRef(value: string): string | null {
+	return value.trim() === '' ? 'A name is required' : SUB_REF_NAME.test(value.trim()) ? null : `'${value}' is not a valid Git reference name`;
+}
+
+/** The pick flows a submodule's "..." menu needs, scoped to `repo` - gitCommands.ts's own
+ *  pickBranch/pickRemote/pickStash, reimplemented here because those are wired to the single
+ *  open repository the global Command Registry manages, not an arbitrary one. */
+async function pickBranchIn(repo: string, placeholder: string, filter: (b: SubBranchInfo) => boolean = () => true): Promise<SubBranchInfo | null> {
+	const branches = await invoke<SubBranchInfo[]>('scm_branches', { repo });
+	const items: QuickPickItem[] = branches.filter(filter).map((b) => ({
+		label: b.name,
+		description: b.current ? 'current' : b.remote ? 'remote branch' : b.upstream ? `→ ${b.upstream}` : undefined,
+		icon: b.remote ? 'cloud' : 'git-branch',
+		value: b.name
+	}));
+	if (items.length === 0) {
+		notify('info', 'There are no branches to choose from.');
+		return null;
+	}
+	const chosen = await quickPick(items, placeholder);
+	return branches.find((b) => b.name === chosen) ?? null;
+}
+
+async function pickRemoteIn(repo: string, placeholder: string): Promise<SubRemoteInfo | null> {
+	const remotes = await invoke<SubRemoteInfo[]>('scm_remotes', { repo });
+	if (remotes.length === 0) {
+		notify('info', 'The repository has no remotes. Add one with Remote > Add Remote...');
+		return null;
+	}
+	if (remotes.length === 1) return remotes[0]!;
+	const chosen = await quickPick(remotes.map((r) => ({ label: r.name, description: r.url, icon: 'cloud', value: r.name })), placeholder);
+	return remotes.find((r) => r.name === chosen) ?? null;
+}
+
+async function pickStashIn(repo: string, placeholder: string): Promise<SubStashInfo | null> {
+	const stashes = await invoke<SubStashInfo[]>('scm_stashes', { repo });
+	if (stashes.length === 0) {
+		notify('info', 'There are no stashes in the repository.');
+		return null;
+	}
+	const chosen = await quickPick(stashes.map((s) => ({ label: `#${s.index}: ${s.message}`, icon: 'archive', value: s.selector })), placeholder);
+	return stashes.find((s) => s.selector === chosen) ?? null;
 }
 
 function letterFor(status: string | null, untracked: boolean): string {
@@ -172,7 +224,9 @@ export class SourceControlView {
 	onStatus: ((status: StatusMap) => void) | null = null;
 	onOpenFile: ((path: string) => void) | null = null;
 	onOpenDiff: ((diff: DiffRequest) => void) | null = null;
-	onOpenGraph: (() => void) | null = null;
+	/** Opens the Git Graph view - `repo` switches its dropdown to a submodule's own section's
+	 *  graph icon instead of the currently active one. */
+	onOpenGraph: ((repo?: string) => void) | null = null;
 	/** "Show File History in Git Graph" (git-graph-rs.filterByFile) from a resource's own
 	 *  context menu - VS Code passes the right-clicked resource as the command's argument;
 	 *  Studio's commands carry none, so this menu wires the path directly instead. */
@@ -183,6 +237,15 @@ export class SourceControlView {
 	onCount: ((count: number) => void) | null = null;
 	/** Fired with the number of unmerged paths after every refresh (the status bar's "N conflicts"). */
 	onConflicts: ((count: number) => void) | null = null;
+	/** A submodule section's "..." menu runs a Git Graph write request (merge, rebase, stash,
+	 *  branch/remote/tag mutations) through the same seam the main "..." menu's commands use -
+	 *  the workbench wires this to `runGraphAction`, since that seam needs the graph's own
+	 *  action settings and confirmation dialog, which live outside this view. */
+	onGraphAction: ((message: Record<string, unknown>, repo: string) => Promise<void>) | null = null;
+	/** A submodule section's "Clone" entry (the same one the main "..." menu offers). */
+	onOpenFolder: ((path: string) => void) | null = null;
+	/** A submodule section's "Show Git Output" entry. */
+	onShowOutput: (() => void) | null = null;
 
 	constructor(container: HTMLElement, private readonly commands: CommandRegistry | null = null) {
 		this.container = container;
@@ -854,14 +917,20 @@ export class SourceControlView {
 			}
 			header.appendChild(branchLabel);
 		}
-		header.appendChild(el('div', 'actions', [
+		// Same placement rule as the main repository's own title bar (render()): the extension's
+		// "View Git Graph" icon shows inline unless the manifest tucks it into "..." instead.
+		const graphTitleEntry = resolvedMenuEntries('scm/title').find((entry) => entry.command === 'git-graph-rs.view');
+		const headerActions: HTMLElement[] = [];
+		if (!graphTitleEntry || graphTitleEntry.group === 'navigation') {
+			const graphButton = actionButton('', graphTitleEntry?.label ?? 'View Git Graph', () => this.onOpenGraph?.(sub.repoPath));
+			graphButton.innerHTML = '<img src="/icons/git-graph-16.svg" alt="" width="16" height="16">';
+			headerActions.push(graphButton);
+		}
+		headerActions.push(
 			actionButton('refresh', 'Refresh', () => void this.refresh()),
-			actionButton('ellipsis', 'More Actions...', (event) => showMenuBelow(event.currentTarget as HTMLElement, [
-				{ label: 'Stage All Changes', run: () => void this.subRun(sub, 'git_stage_all') },
-				{ label: 'Unstage All Changes', run: () => void this.subRun(sub, 'git_unstage_all') },
-				{ label: 'Discard All Changes', run: () => void this.subDiscardAll(sub) }
-			], 220))
-		]));
+			actionButton('ellipsis', 'More Actions...', (event) => showMenuBelow(event.currentTarget as HTMLElement, this.subMoreMenu(sub), 220))
+		);
+		header.appendChild(el('div', 'actions', headerActions));
 		if (sub.changes.length > 0) header.appendChild(el('span', 'badge', [String(sub.changes.length)]));
 		header.addEventListener('click', () => {
 			sub.sectionCollapsed = !sub.sectionCollapsed;
@@ -1020,20 +1089,27 @@ export class SourceControlView {
 		this.onOpenDiff?.(diff);
 	}
 
-	private async subCommit(sub: SubRepoState): Promise<void> {
+	/** Commit within a submodule - the same smart-commit rules as the main repository's
+	 *  `commit()`, scoped to `sub` (its own message box, its own repo path on every call). */
+	private async subCommit(sub: SubRepoState, options: { amend?: boolean; all?: boolean; stagedOnly?: boolean } = {}, followUp: (() => Promise<void>) | null = null): Promise<void> {
+		const amend = options.amend === true;
 		const message = sub.message.trim();
-		if (message === '') {
+		if (message === '' && !amend) {
 			notify('warning', 'Please provide a commit message.');
 			return;
 		}
 		const staged = sub.changes.some((c) => c.staged !== null);
-		if (!staged) {
-			if (sub.changes.length === 0) {
+		if (!staged && !amend) {
+			if (options.stagedOnly || sub.changes.length === 0) {
 				notify('info', 'There are no changes to commit.');
 				return;
 			}
-			const confirmed = await confirmDialog('There are no staged changes to commit.\n\nWould you like to stage all your changes and commit them directly?', 'Yes', 'info');
-			if (!confirmed) return;
+			if (!options.all) {
+				const confirmed = await confirmDialog('There are no staged changes to commit.\n\nWould you like to stage all your changes and commit them directly?', 'Yes', 'info');
+				if (!confirmed) return;
+			}
+		}
+		if ((!staged && !amend) || (options.all && !options.stagedOnly)) {
 			try {
 				await invoke('git_stage_all', { repo: sub.repoPath });
 			} catch (error) {
@@ -1042,7 +1118,7 @@ export class SourceControlView {
 			}
 		}
 		try {
-			await invoke('git_commit', { message, amend: false, repo: sub.repoPath });
+			await invoke('git_commit', { message, amend, repo: sub.repoPath });
 		} catch (error) {
 			notify('error', String(error));
 			await this.refresh();
@@ -1051,6 +1127,7 @@ export class SourceControlView {
 		sub.message = '';
 		await this.refresh();
 		this.onChanged?.();
+		if (followUp) await followUp();
 	}
 
 	private async subDiscard(sub: SubRepoState, file: ScmChange): Promise<void> {
@@ -1090,5 +1167,297 @@ export class SourceControlView {
 		}
 		await this.refresh();
 		this.onChanged?.();
+	}
+
+	/** Runs one action of the submodule "..." menu: reports git's complaint (or the success
+	 *  message, when given), then always catches the view up - gitCommands.ts's own `run`. */
+	private async subMenuRun(work: () => Promise<void>, done?: string): Promise<void> {
+		try {
+			await work();
+			if (done) notify('info', done);
+		} catch (error) {
+			notify('error', String(error instanceof Error ? error.message : error));
+		}
+		await this.refresh();
+		this.onChanged?.();
+	}
+
+	/** A Git Graph write request (merge, rebase, stash, branch/remote/tag mutations), scoped to
+	 *  `sub` through `onGraphAction` - the workbench-provided seam to `runGraphAction`. */
+	private subGraphAction(sub: SubRepoState, message: Record<string, unknown>): Promise<void> {
+		if (!this.onGraphAction) return Promise.reject(new Error('No repository is open.'));
+		return this.onGraphAction(message, sub.repoPath);
+	}
+
+	/** The "..." menu of a submodule's own repository section - the same commands, in the same
+	 *  layout, as the main repository's `moreMenu()` (gitCommands.ts's registered `git.*`
+	 *  commands, reimplemented here scoped to `sub.repoPath` since the Command Registry those
+	 *  commands are registered on always acts on the single open repository). */
+	private subMoreMenu(sub: SubRepoState): MenuEntry[] {
+		const repo = sub.repoPath;
+		const run = (work: () => Promise<void>, done?: string) => void this.subMenuRun(work, done);
+		const graphAction = (message: Record<string, unknown>) => this.subGraphAction(sub, message);
+		return [
+			{ label: 'Pull', run: () => run(() => invoke('scm_pull', { remote: null, branch: null, rebase: false, repo })) },
+			{ label: 'Push', run: () => run(() => invoke('scm_push', { remote: null, setUpstream: false, force: false, repo })) },
+			{ label: 'Clone', run: () => void this.commands?.execute('git.clone') },
+			{
+				label: 'Checkout to...',
+				run: () => void (async () => {
+					const branches = await invoke<SubBranchInfo[]>('scm_branches', { repo });
+					const tags = await invoke<string[]>('scm_tags', { repo });
+					const items: QuickPickItem[] = [
+						...branches.filter((b) => !b.current).map((b) => ({
+							label: b.name,
+							description: b.remote ? 'remote branch' : b.upstream ? `→ ${b.upstream}` : undefined,
+							icon: b.remote ? 'cloud' : 'git-branch',
+							value: 'branch:' + b.name
+						})),
+						...tags.map((t2) => ({ label: t2, description: 'tag', icon: 'tag', value: 'tag:' + t2 }))
+					];
+					if (items.length === 0) {
+						notify('info', 'There are no branches or tags to checkout.');
+						return;
+					}
+					const chosen = await quickPick(items, 'Select a branch or tag to checkout');
+					if (chosen) run(() => invoke('scm_checkout', { name: chosen.replace(/^(branch|tag):/, ''), repo }));
+				})()
+			},
+			{ label: 'Fetch', run: () => run(() => invoke('scm_fetch', { remote: null, prune: false, repo })) },
+			'separator',
+			{
+				label: 'Commit', submenu: [
+					{ label: 'Commit', run: () => void this.subCommit(sub) },
+					{ label: 'Commit Staged', run: () => void this.subCommit(sub, { stagedOnly: true }) },
+					{ label: 'Commit All', run: () => void this.subCommit(sub, { all: true }) },
+					'separator',
+					{ label: 'Commit (Amend)', run: () => void this.subCommit(sub, { amend: true }) },
+					{ label: 'Commit Staged (Amend)', run: () => void this.subCommit(sub, { amend: true, stagedOnly: true }) },
+					'separator',
+					{ label: 'Undo Last Commit', run: () => run(() => graphAction({ command: 'undoLastCommit' })) }
+				]
+			},
+			{
+				label: 'Changes', submenu: [
+					{ label: 'Stage All Changes', run: () => void this.subRun(sub, 'git_stage_all') },
+					{ label: 'Unstage All Changes', run: () => void this.subRun(sub, 'git_unstage_all') },
+					{ label: 'Discard All Changes', run: () => void this.subDiscardAll(sub) }
+				]
+			},
+			{
+				label: 'Pull, Push', submenu: [
+					{ label: 'Sync', run: () => run(() => invoke('scm_sync', { rebase: false, repo })) },
+					{ label: 'Sync (Rebase)', run: () => run(() => invoke('scm_sync', { rebase: true, repo })) },
+					'separator',
+					{ label: 'Pull', run: () => run(() => invoke('scm_pull', { remote: null, branch: null, rebase: false, repo })) },
+					{ label: 'Pull (Rebase)', run: () => run(() => invoke('scm_pull', { remote: null, branch: null, rebase: true, repo })) },
+					{
+						label: 'Pull from...', run: () => void (async () => {
+							const remote = await pickRemoteIn(repo, 'Pick a remote to pull the branch from');
+							if (!remote) return;
+							const branch = await pickBranchIn(repo, `Pick a branch to pull from ${remote.name}`, (b) => b.remote && b.name.startsWith(remote.name + '/'));
+							if (!branch) return;
+							run(() => invoke('scm_pull', { remote: remote.name, branch: branch.name.slice(remote.name.length + 1), rebase: false, repo }));
+						})()
+					},
+					'separator',
+					{ label: 'Push', run: () => run(() => invoke('scm_push', { remote: null, setUpstream: false, force: false, repo })) },
+					{
+						label: 'Push to...', run: () => void (async () => {
+							const remote = await pickRemoteIn(repo, 'Pick a remote to publish the branch to');
+							if (!remote) return;
+							run(() => invoke('scm_push', { remote: remote.name, setUpstream: true, force: false, repo }));
+						})()
+					},
+					{
+						label: 'Push (Force With Lease)', run: () => void (async () => {
+							if (!(await confirmDialog('Force-push the current branch to its upstream? Commits the remote has that this push does not contain become unreachable there.', 'Force Push'))) return;
+							run(() => invoke('scm_push', { remote: null, setUpstream: false, force: true, repo }));
+						})()
+					},
+					'separator',
+					{ label: 'Fetch', run: () => run(() => invoke('scm_fetch', { remote: null, prune: false, repo })) },
+					{ label: 'Fetch (Prune)', run: () => run(() => invoke('scm_fetch', { remote: null, prune: true, repo })) },
+					{
+						label: 'Fetch From...', run: () => void (async () => {
+							const remote = await pickRemoteIn(repo, 'Pick a remote to fetch from');
+							if (remote) run(() => invoke('scm_fetch', { remote: remote.name, prune: false, repo }));
+						})()
+					}
+				]
+			},
+			{
+				label: 'Branch', submenu: [
+					{
+						label: 'Merge Branch...', run: () => void (async () => {
+							const branch = await pickBranchIn(repo, 'Select a branch to merge from', (b) => !b.current);
+							if (branch) run(() => graphAction({ command: 'merge', obj: branch.name, actionOn: 'Branch', createNewCommit: false, squash: false, noCommit: false }));
+						})()
+					},
+					{
+						label: 'Rebase Branch...', run: () => void (async () => {
+							const branch = await pickBranchIn(repo, 'Select a branch to rebase onto', (b) => !b.current);
+							if (branch) run(() => graphAction({ command: 'rebase', obj: branch.name, actionOn: 'Branch', ignoreDate: false, interactive: false, autosquash: false }));
+						})()
+					},
+					'separator',
+					{
+						label: 'Create Branch...', run: () => void (async () => {
+							const name = await quickInput({ placeholder: 'Branch name', title: 'Please provide a new branch name', validate: validateSubRef });
+							if (name) run(() => invoke('scm_create_branch', { name: name.trim(), from: null, repo }));
+						})()
+					},
+					{
+						label: 'Create Branch From...', run: () => void (async () => {
+							const from = await pickBranchIn(repo, 'Select a ref to create the branch from');
+							if (!from) return;
+							const name = await quickInput({ placeholder: 'Branch name', title: `Please provide a new branch name (from ${from.name})`, validate: validateSubRef });
+							if (name) run(() => invoke('scm_create_branch', { name: name.trim(), from: from.name, repo }));
+						})()
+					},
+					{
+						label: 'Rename Branch...', run: () => void (async () => {
+							const branch = await pickBranchIn(repo, 'Select a branch to rename', (b) => !b.remote);
+							if (!branch) return;
+							const name = await quickInput({ placeholder: 'Branch name', title: `Please provide a new name for '${branch.name}'`, value: branch.name, validate: validateSubRef });
+							if (name && name.trim() !== branch.name) run(() => graphAction({ command: 'renameBranch', oldName: branch.name, newName: name.trim() }));
+						})()
+					},
+					{
+						label: 'Delete Branch...', run: () => void (async () => {
+							const branch = await pickBranchIn(repo, 'Select a branch to delete', (b) => !b.remote && !b.current);
+							if (!branch) return;
+							if (!(await confirmDialog(`Delete the branch '${branch.name}'? Commits only reachable from it will be lost.`, 'Delete Branch'))) return;
+							run(() => graphAction({ command: 'deleteBranch', branchName: branch.name, forceDelete: true, deleteOnRemotes: [] }));
+						})()
+					}
+				]
+			},
+			{
+				label: 'Remote', submenu: [
+					{
+						label: 'Add Remote...', run: () => void (async () => {
+							const url = await quickInput({ title: 'Add Remote', placeholder: 'Provide repository URL', validate: (v) => (v.trim() === '' ? 'A URL is required' : v.startsWith('-') ? 'Invalid URL' : null) });
+							if (!url) return;
+							const name = await quickInput({ title: 'Add Remote', placeholder: 'Remote name', value: 'origin', validate: validateSubRef });
+							if (!name) return;
+							run(() => graphAction({ command: 'addRemote', name: name.trim(), url: url.trim(), pushUrl: null, fetch: true }));
+						})()
+					},
+					{
+						label: 'Remove Remote', run: () => void (async () => {
+							const remotes = await invoke<SubRemoteInfo[]>('scm_remotes', { repo });
+							if (remotes.length === 0) {
+								notify('info', 'The repository has no remotes.');
+								return;
+							}
+							const chosen = await quickPick(remotes.map((r) => ({ label: r.name, description: r.url, icon: 'cloud', value: r.name })), 'Pick a remote to remove');
+							if (chosen) run(() => graphAction({ command: 'deleteRemote', name: chosen }));
+						})()
+					}
+				]
+			},
+			{
+				label: 'Stash', submenu: [
+					{
+						label: 'Stash', run: () => void (async () => {
+							const message = await quickInput({ title: 'Stash', placeholder: 'Optionally provide a stash message' });
+							if (message === null) return;
+							run(() => graphAction({ command: 'pushStash', message, includeUntracked: false }));
+						})()
+					},
+					{
+						label: 'Stash (Include Untracked)', run: () => void (async () => {
+							const message = await quickInput({ title: 'Stash (Include Untracked)', placeholder: 'Optionally provide a stash message' });
+							if (message === null) return;
+							run(() => graphAction({ command: 'pushStash', message, includeUntracked: true }));
+						})()
+					},
+					{
+						label: 'Apply Stash...', run: () => void (async () => {
+							const stash = await pickStashIn(repo, 'Pick a stash to apply');
+							if (stash) run(() => graphAction({ command: 'applyStash', selector: stash.selector, reinstateIndex: false }));
+						})()
+					},
+					{ label: 'Apply Latest Stash', run: () => run(() => graphAction({ command: 'applyStash', selector: 'refs/stash@{0}', reinstateIndex: false })) },
+					{
+						label: 'Pop Stash...', run: () => void (async () => {
+							const stash = await pickStashIn(repo, 'Pick a stash to pop');
+							if (stash) run(() => graphAction({ command: 'popStash', selector: stash.selector, reinstateIndex: false }));
+						})()
+					},
+					{ label: 'Pop Latest Stash', run: () => run(() => graphAction({ command: 'popStash', selector: 'refs/stash@{0}', reinstateIndex: false })) },
+					{
+						label: 'Drop Stash...', run: () => void (async () => {
+							const stash = await pickStashIn(repo, 'Pick a stash to drop');
+							if (stash && (await confirmDialog(`Drop the stash '${stash.message}'? This cannot be undone.`, 'Drop Stash'))) {
+								run(() => graphAction({ command: 'dropStash', selector: stash.selector }));
+							}
+						})()
+					}
+				]
+			},
+			{
+				label: 'Tags', submenu: [
+					{
+						label: 'Create Tag', run: () => void (async () => {
+							const name = await quickInput({ title: 'Create Tag', placeholder: 'Tag name', validate: validateSubRef });
+							if (!name) return;
+							const message = await quickInput({ title: 'Create Tag', placeholder: 'Message (leave empty for a lightweight tag)' });
+							if (message === null) return;
+							const head = await invoke<{ shortHash: string }>('repo_head', { repo });
+							run(() => graphAction({ command: 'addTag', tagName: name.trim(), commitHash: head.shortHash, type: message.trim() === '' ? 1 : 0, message, force: false, pushToRemote: null, pushSkipRemoteCheck: false }));
+						})()
+					},
+					{
+						label: 'Delete Tag', run: () => void (async () => {
+							const tags = await invoke<string[]>('scm_tags', { repo });
+							if (tags.length === 0) {
+								notify('info', 'The repository has no tags.');
+								return;
+							}
+							const chosen = await quickPick(tags.map((t2) => ({ label: t2, icon: 'tag', value: t2 })), 'Select a tag to delete');
+							if (chosen) run(() => graphAction({ command: 'deleteTag', tagName: chosen, deleteOnRemote: null }));
+						})()
+					}
+				]
+			},
+			'separator',
+			{ label: 'Show Git Output', run: () => this.onShowOutput?.() },
+			'separator',
+			{
+				label: 'Amend Last Commit', run: () => void (async () => {
+					if (!(await confirmDialog('Amend the last commit with the staged changes (the message is kept)?', 'Amend'))) return;
+					run(() => invoke('scm_amend_last_commit', { repo }));
+				})()
+			},
+			{
+				label: 'Fetch commit-msg Hook (Gerrit)', run: () => void (async () => {
+					const remote = await pickRemoteIn(repo, 'Pick the Gerrit remote');
+					if (!remote) return;
+					const installed = await invoke<boolean>('gerrit_install_hook', { remote: remote.name, repo });
+					notify('info', installed ? 'The Gerrit commit-msg hook was installed.' : 'The Gerrit commit-msg hook is already installed.');
+					await this.refresh();
+				})()
+			},
+			{
+				label: 'Reset Current Branch to Remote (Soft)', run: () => void (async () => {
+					if (!(await confirmDialog('Soft-reset the current branch to its upstream? Your local commits are kept as staged changes.', 'Reset'))) return;
+					const upstream = await invoke<string>('scm_reset_to_remote', { repo });
+					notify('info', `The current branch was reset to ${upstream}; its changes are staged.`);
+					await this.refresh();
+					this.onChanged?.();
+				})()
+			},
+			{
+				label: 'Push to Gerrit Ref for Current Branch (refs/for/...)', run: () => void (async () => {
+					const remote = await pickRemoteIn(repo, 'Pick the Gerrit remote');
+					if (!remote) return;
+					const url = await invoke<string | null>('gerrit_push_ref', { remote: remote.name, repo });
+					if (url) notify('info', `Pushed for review: ${url}`, [{ label: 'Open Change', run: () => void openUrl(url) }]);
+					else notify('info', `Pushed the current branch to ${remote.name} for review.`);
+				})()
+			}
+		];
 	}
 }
