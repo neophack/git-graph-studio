@@ -9,7 +9,7 @@
 import { invoke } from '@tauri-apps/api/core';
 
 import { el, icon } from './ui';
-import { OFFSET_DIGITS, ROW_LADDER, asciiChar, bytesPerRowFor, decodeBase64, groupSizeFor, hexByte, hexHeader, rowGridTemplate } from './hexView';
+import { OFFSET_DIGITS, ROW_LADDER, asciiChar, bytesPerRowFor, decodeBase64, groupSizeFor, hexAddress, hexByte, hexHeader, rowGridTemplate } from './hexView';
 
 /** Visible rows are filled from 64 KiB slabs, so scrolling reads a slab at a time. */
 const SLAB_BYTES = 64 * 1024;
@@ -47,11 +47,16 @@ function compareRow(offset: number, bytes: Uint8Array, diff: Uint8Array, bytesPe
 	const group = groupSizeFor(bytesPerRow);
 	for (let i = 0; i < bytesPerRow; i++) {
 		const cls = ['hex-cell', i % group === 0 && i > 0 ? 'hex-group-start' : '', i < bytes.length && diff[i] ? 'hex-diff' : ''].filter(Boolean).join(' ');
-		cells.push(el('span', i < bytes.length ? cls : 'hex-cell hex-blank', [i < bytes.length ? hexByte(bytes[i]!) : '00']));
+		const cell = el('span', i < bytes.length ? cls : 'hex-cell hex-blank', [i < bytes.length ? hexByte(bytes[i]!) : '00']);
+		// Only a pane's real bytes carry an address; the blanks past a file's end are filler.
+		if (i < bytes.length) cell.title = hexAddress(offset + i);
+		cells.push(cell);
 	}
 	cells.push(el('span', 'hex-gutter'));
 	for (let i = 0; i < bytes.length; i++) {
-		cells.push(el('span', diff[i] ? 'hex-ascii-cell hex-diff' : 'hex-ascii-cell', [asciiChar(bytes[i]!)]));
+		const cell = el('span', diff[i] ? 'hex-ascii-cell hex-diff' : 'hex-ascii-cell', [asciiChar(bytes[i]!)]);
+		cell.title = hexAddress(offset + i);
+		cells.push(cell);
 	}
 	const row = el('div', 'hex-row', cells);
 	row.style.gridTemplateColumns = rowGridTemplate(bytesPerRow);

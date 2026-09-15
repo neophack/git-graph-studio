@@ -4,7 +4,8 @@
 // follows a hex editor's table: a ruled-off offset column, a one-digit ruler over the
 // byte columns, hex bytes in 4/8-byte groups, and a compact ASCII pane behind a second
 // rule; the row width is the widest of 4..64 bytes that fits the window (or one pinned
-// in the toolbar). An address box (Ctrl+G) jumps to any byte offset.
+// in the toolbar). An address box (Ctrl+G) jumps to any byte offset, and every hex and
+// ASCII cell titles itself with its byte's address so a hover reads it off either pane.
 //
 // The view is read-only until its Edit toggle is switched on; editing works the way hex
 // editors classically do - a byte cursor walks the hex column with the arrow keys, typing
@@ -61,6 +62,13 @@ export function hexByte(b: number): string {
 	return b.toString(16).padStart(2, '0').toUpperCase();
 }
 
+/** A byte's address the way a cell tooltip shows it: the offset column's fixed eight hex
+ *  digits with the `0x` prefix the address box parses, so a hover reads back the same
+ *  address either column states. */
+export function hexAddress(offset: number): string {
+	return '0x' + offset.toString(16).padStart(OFFSET_DIGITS, '0').toUpperCase();
+}
+
 /** The ASCII column's glyph for a byte: printable ASCII and Latin-1 as themselves, a
  *  0x00 as a blank so zero-filled regions read as empty space, and other control bytes
  *  as a dot. */
@@ -91,14 +99,18 @@ function hexRow(offset: number, bytes: Uint8Array, highlight: Uint8Array, cursor
 	const cells: (Node | string | null)[] = [el('span', 'hex-offset', [offset.toString(16).padStart(OFFSET_DIGITS, '0').toUpperCase()])];
 	const group = groupSizeFor(bytesPerRow);
 	for (let i = 0; i < bytes.length; i++) {
-		cells.push(el('span', classes(!!highlight[i], i === cursor, !!edited?.has(offset + i), i % group === 0 && i > 0 ? 'hex-cell hex-group-start' : 'hex-cell'), [hexByte(bytes[i]!)]));
+		const cell = el('span', classes(!!highlight[i], i === cursor, !!edited?.has(offset + i), i % group === 0 && i > 0 ? 'hex-cell hex-group-start' : 'hex-cell'), [hexByte(bytes[i]!)]);
+		cell.title = hexAddress(offset + i);
+		cells.push(cell);
 	}
 	for (let i = bytes.length; i < bytesPerRow; i++) cells.push(el('span', 'hex-cell hex-blank'));
 	// Occupies the grid's gutter column - without a child there, auto-placement would
 	// slide the ASCII block into the gutter and the panes would touch.
 	cells.push(el('span', 'hex-gutter'));
 	for (let i = 0; i < bytes.length; i++) {
-		cells.push(el('span', classes(!!highlight[i], i === cursor, !!edited?.has(offset + i), 'hex-ascii-cell'), [asciiChar(bytes[i]!)]));
+		const cell = el('span', classes(!!highlight[i], i === cursor, !!edited?.has(offset + i), 'hex-ascii-cell'), [asciiChar(bytes[i]!)]);
+		cell.title = hexAddress(offset + i);
+		cells.push(cell);
 	}
 	const row = el('div', 'hex-row', cells);
 	// A CSS grid keeps the three columns strictly apart however wide the font is (see

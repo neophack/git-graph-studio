@@ -74,6 +74,22 @@ describe('hex view', () => {
 		expect(hex[10]).toBe('0A');
 	});
 
+	it('titles every hex and ASCII cell with its byte address', async () => {
+		const view = new HexView('/tmp/blob.bin');
+		await view.load();
+		await new Promise((resolve) => setTimeout(resolve, 0)); // placeholder rows fill from the slab
+		const row = view.root.querySelector('.hex-scroller [data-row="0"]')!;
+		// A hover over any cell - hex or ASCII - reads that byte's address: the offset
+		// column's digits with the address box's 0x prefix.
+		const expected = ['0x00000000', '0x00000001', '0x00000002', '0x00000003'];
+		expect(Array.from(row.querySelectorAll('.hex-cell'), (c) => c.title).slice(0, 4)).toEqual(expected);
+		expect(Array.from(row.querySelectorAll('.hex-ascii-cell'), (c) => c.title).slice(0, 4)).toEqual(expected);
+		// A later row's cells carry their own addresses, not the first row's.
+		const third = view.root.querySelector('.hex-scroller [data-row="3"]')!;
+		expect(third.querySelector('.hex-cell')!.title).toBe('0x00000030');
+		expect(third.querySelector('.hex-ascii-cell')!.title).toBe('0x00000030');
+	});
+
 	it('shows a column header that follows the row width', async () => {
 		const view = new HexView('/tmp/blob.bin');
 		await view.load();

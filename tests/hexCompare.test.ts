@@ -57,6 +57,10 @@ describe('hex compare', () => {
 		expect(sides[1]!.querySelectorAll('.hex-cell')[3]!.textContent).toBe('FC');
 		// An equal byte carries no tint.
 		expect(sides[0]!.querySelectorAll('.hex-cell')[4]!.classList.contains('hex-diff')).toBe(false);
+		// Every cell titles itself with its byte's address - both panes, hex and ASCII alike.
+		expect(sides[0]!.querySelectorAll('.hex-cell')[3]!.title).toBe('0x00000003');
+		expect(sides[1]!.querySelectorAll('.hex-cell')[3]!.title).toBe('0x00000003');
+		expect(sides[0]!.querySelectorAll('.hex-ascii-cell')[3]!.title).toBe('0x00000003');
 
 		// The scan lands on the first difference (byte 3), the counter says 1 of 3.
 		expect(view.root.querySelector('.hex-search-count')!.textContent).toBe('1 / 3 differences');
@@ -76,6 +80,10 @@ describe('hex compare', () => {
 		const tailSides = tail.querySelectorAll('.hex-row');
 		expect(tailSides[0]!.querySelectorAll('.hex-cell:not(.hex-blank)')).toHaveLength(0);
 		expect(tailSides[1]!.querySelectorAll('.hex-cell.hex-diff')).toHaveLength(6);
+		// The blanks past the left file's end are filler and carry no address; the right
+		// side's bytes carry theirs (row 4 starts at byte 64).
+		expect(tailSides[0]!.querySelectorAll('.hex-cell')[0]!.title).toBe('');
+		expect(tailSides[1]!.querySelectorAll('.hex-cell:not(.hex-blank)')[0]!.title).toBe('0x00000040');
 
 		// Short equal runs merge into one region: bytes 20 and 24 (gap 3 < 16) are one.
 		const mergeLeft = Uint8Array.from({ length: 64 }, (_, i) => i);
