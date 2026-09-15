@@ -222,7 +222,9 @@ pub(crate) fn read_searchable(path: &Path) -> Option<(Vec<u8>, &'static str)> {
 /// back out in the same encoding; anything else is written as the raw bytes it was.
 fn encode_searchable(text: Vec<u8>, encoding: &str) -> Vec<u8> {
     match encoding {
-        "utf-16le" | "utf-16be" => crate::encoding::encode(&String::from_utf8_lossy(&text), encoding, "lf"),
+        "utf-16le" | "utf-16be" => {
+            crate::encoding::encode(&String::from_utf8_lossy(&text), encoding, "lf")
+        }
         _ => text,
     }
 }
@@ -553,9 +555,13 @@ fn walk_all_files(root: &str) -> BTreeMap<String, u64> {
     let mut out = BTreeMap::new();
     let mut pending = vec![PathBuf::from(root)];
     while let Some(dir) = pending.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
-            let Ok(kind) = entry.file_type() else { continue };
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
             let name = entry.file_name().to_string_lossy().into_owned();
             if kind.is_dir() {
                 if name != ".git" {
@@ -563,7 +569,9 @@ fn walk_all_files(root: &str) -> BTreeMap<String, u64> {
                 }
             } else if kind.is_file() {
                 let full = entry.path();
-                let Ok(relative) = full.strip_prefix(root) else { continue };
+                let Ok(relative) = full.strip_prefix(root) else {
+                    continue;
+                };
                 let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
                 out.insert(relative.to_string_lossy().replace('\\', "/"), size);
             }
@@ -676,11 +684,18 @@ fn index_symbols(root: &str) -> Vec<WorkspaceSymbol> {
         .into_par_iter()
         .map(|relative| {
             let path = PathBuf::from(root).join(&relative);
-            let Ok(text) = fs::read_to_string(&path) else { return Vec::new() };
+            let Ok(text) = fs::read_to_string(&path) else {
+                return Vec::new();
+            };
             let ext = relative.rsplit('.').next().unwrap_or("").to_owned();
             crate::viewer::outline_symbols_for(&text, &ext)
                 .into_iter()
-                .map(|s| WorkspaceSymbol { kind: s.kind, name: s.name, path: relative.clone(), line: s.line })
+                .map(|s| WorkspaceSymbol {
+                    kind: s.kind,
+                    name: s.name,
+                    path: relative.clone(),
+                    line: s.line,
+                })
                 .collect()
         })
         .collect();
