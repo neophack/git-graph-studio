@@ -9,7 +9,7 @@ import type { MergeView } from '@codemirror/merge';
 import { invoke } from '@tauri-apps/api/core';
 
 import { hasBookmark, toggleBookmark } from './bookmarks';
-import { loadCanViews, loadCallTree, loadFastView, loadFileHistory, loadFolderCompare, loadHexCompare, loadHexView, loadMerge, loadMergeEditor, loadSnippetRegistry, loadTextEditor } from './lazy';
+import { loadCanViews, loadCallTree, loadFastView, loadFileHistory, loadFolderCompare, loadHexCompare, loadHexView, loadMerge, loadMergeEditor, loadSnippetRegistry, loadSymbolDbView, loadTextEditor } from './lazy';
 // The hex and CAN views are async chunks (lazy.ts): a binary or a CAN trace is the exception
 // among opens, and their code would otherwise ride in the first-paint bundle. The fast
 // viewer, the folder-compare, merge-conflict, file-history and call-tree views and the
@@ -145,6 +145,7 @@ export type EditorInput =
 	| { kind: 'diff'; id: string; title: string; repo?: string; left: DiffSide; right: DiffSide }
 	| { kind: 'folders'; id: string; left: string; right: string }
 	| { kind: 'calltree'; id: string; symbol: WsSymbol }
+	| { kind: 'symboldb'; id: string }
 	| { kind: 'graph' }
 	| { kind: 'help'; help: 'welcome' | 'shortcuts' }
 	| { kind: 'markdown'; path: string }
@@ -171,6 +172,7 @@ export interface Editor {
 	/** An address-aligned hex comparison of two binary files on disk. */
 	hexCompare?: HexCompareView;
 	callTree?: CallTreeView;
+	symbolDatabase?: import('./symbolDbView').SymbolDatabaseView;
 	mergeToolbar?: MergeToolbar;
 	/** A preview's re-render (the Markdown preview follows its source). */
 	render?: () => Promise<void>;
@@ -211,6 +213,7 @@ function inputId(input: EditorInput): string {
 		case 'file': return 'file:' + input.path;
 		case 'diff': return 'diff:' + input.id;
 		case 'folders': return 'folders:' + input.id;
+		case 'symboldb': return input.id;
 		case 'calltree': return 'calltree:' + input.id;
 		case 'compare': return 'compare:' + input.id;
 		case 'graph': return 'graph';
@@ -1723,6 +1726,28 @@ export class EditorGroup {
 		this.add(editor);
 	}
 
+	/** The Symbol Database tab of this repository (M4): the whole index as a tree. */
+	async openSymbolDatabase(): Promise<void> {
+		const id = `symboldb:${this.rootPath ?? ''}`;
+		const existing = this.open.find((e) => e.input.kind === 'symboldb' && e.input.id === id);
+		if (existing) {
+			this.activate(existing);
+			return;
+		}
+		const { SymbolDatabaseView } = await loadSymbolDbView();
+		const editor: Editor = {
+			input: { kind: 'symboldb', id },
+			id,
+			label: 'Symbol Database',
+			iconClass: 'symbol-structure',
+			pane: el('div', 'editor-pane'),
+			dirty: false
+		};
+		editor.symbolDatabase = new SymbolDatabaseView(editor.pane);
+		editor.symbolDatabase.onOpen = (path, line) => void this.openFile(joinPath(this.rootPath ?? '', path), { line });
+		this.add(editor);
+	}
+
 	/** A Call Tree tab for the symbol under the cursor (or given). */
 	async openCallTree(symbol: WsSymbol): Promise<void> {
 		const id = `calltree:${symbol.path}:${symbol.line}`;
@@ -2011,6 +2036,7 @@ export class EditorGroup {
 			if (!(await editor.doc.save())) return;
 			editor.dirty = false;
 			this.renderTabs();
+			this.flashSavedTab(editor);
 			this.forgetBackup(editor);
 			this.onFileSaved?.(editor.input.path);
 			return;

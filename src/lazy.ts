@@ -48,4 +48,5 @@ export const loadFolderCompare = once(() => import('./folderCompare'));
 export const loadMergeEditor = once(() => import('./mergeEditor'));
 export const loadFileHistory = once(() => import('./fileHistory'));
 export const loadCallTree = once(() => import('./callTree'));
+export const loadSymbolDbView = once(() => import('./symbolDbView'));
 export const loadSnippetRegistry = once(() => import('./snippetRegistry'));
