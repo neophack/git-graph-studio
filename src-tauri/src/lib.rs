@@ -36,6 +36,8 @@ pub mod cmd_symbols;
 #[cfg(feature = "desktop")]
 pub mod encoding;
 #[cfg(feature = "desktop")]
+pub mod mcp;
+#[cfg(feature = "desktop")]
 pub mod measure;
 #[cfg(feature = "desktop")]
 pub mod pty;
@@ -772,6 +774,19 @@ mod desktop {
                     println!("{json}");
                     std::process::exit(0);
                 }
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        // `git-graph-studio --mcp [folder]` speaks the Model Context Protocol on stdio:
+        // an AI assistant's bridge to that folder's symbol index (default: the working
+        // directory). No window is created; stderr carries the one startup line.
+        if args.get(1).map(String::as_str) == Some("--mcp") {
+            let folder = args.get(2).cloned().unwrap_or_else(|| ".".to_owned());
+            match mcp::run(&folder) {
+                Ok(code) => std::process::exit(code),
                 Err(error) => {
                     eprintln!("{error}");
                     std::process::exit(1);

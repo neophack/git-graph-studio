@@ -129,6 +129,7 @@ Extensions view would call it), a mission line, and a test file.
 | 13 | CAN Trace Analyzer | CANoe-style `.blf` / `.asc` analysis |
 | 14 | Performance Lab | Measurement, metrics and the perf gate |
 | 15 | Build & Release Pipeline | Asset preparation, packaging, installers, CI |
+| 16 | Symbol MCP Server | The `ggs --mcp` AI bridge over the symbol index |
 
 ### 1. Workbench Shell
 
@@ -305,6 +306,18 @@ performance gate lives in `src-tauri/tests/perf.rs`.
   `cdp-probe.mjs` / `cdp-trace.mjs` (live inspection over WebView2's CDP port),
   `dev/dev-harness.html` (the two-mode harness: real Tauri IPC under `tauri dev`, or the
   scripted fake backend under `npm run dev:vite`)
+
+### 16. Symbol MCP Server
+
+The `ggs --mcp <repository>` mode: the persistent symbol index served to AI assistants
+over the Model Context Protocol (newline-delimited JSON-RPC 2.0 on stdio). Five tools —
+`symbol_lookup`, `symbol_references` (the occurrence-narrowed scan), `symbol_tree` (the
+same per-file outline the Symbol Database page renders), `search_symbols`,
+`index_status`. stderr is logs; stdout is protocol only.
+
+- Backend: `src-tauri/src/mcp.rs` (the server loop, the tool implementations, the
+  handshake); the index itself is module 5's (`cmd_symbols.rs` / `symbols/store.rs`)
+- Tests: `mcp.rs`'s `#[cfg(test)]` module (scratch repository over a temp index home)
 
 ### 15. Build & Release Pipeline
 
