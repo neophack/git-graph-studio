@@ -577,6 +577,35 @@ mod desktop {
         cmd_graph::close_engine_repos();
     }
 
+    /// The path a launch (or a single-instance forward) should open: the last argument
+    /// that is neither a flag nor a flag's value, canonicalised when it exists. RustDesk's
+    /// `core_main_invoke_new_connection` normalisation lesson: one function decides what a
+    /// second instance means, and both the launch path and the forward path use it.
+    pub fn launch_path_of(args: &[String]) -> Option<String> {
+        let mut path = None;
+        let mut skip_next = false;
+        for arg in args.iter().skip(1) {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if arg == "--measure" || arg == "--mcp" {
+                // These modes take a folder argument of their own and never reach the window.
+                skip_next = true;
+                continue;
+            }
+            if arg.starts_with("--") || arg.starts_with('-') {
+                continue;
+            }
+            path = Some(arg.clone());
+        }
+        path.filter(|arg| std::path::Path::new(arg).exists()).map(|arg| {
+            std::fs::canonicalize(&arg)
+                .map(|p| p.display().to_string().trim_start_matches(r"\\?\").to_owned())
+                .unwrap_or(arg)
+        })
+    }
+
     /// Process-start stamp, so boot timings from the frontend are printed against the same clock.
     static BOOT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
@@ -856,6 +885,21 @@ mod desktop {
 
         stamp("builder: run");
         tauri::Builder::default()
+        // One window per user session (M7 7.7, RustDesk's "forward, don't duplicate"): a
+        // second launch hands its path to the running instance and exits. The callback runs
+        // in the primary process; the webview opens what it was handed.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            use tauri::Manager;
+            if let Some(path) = launch_path_of(&argv) {
+                use tauri::Emitter;
+                let _ = app.emit("studio://open-path", path);
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -1003,6 +1047,34 @@ mod desktop {
         .run(tauri::generate_context!())
         .expect("error while running Git Graph Studio");
     }
+}
+
+#[cfg(all(test, feature = "desktop"))]
+mod launch_path_tests {
+	use super::desktop::launch_path_of;
+
+	fn args(list: &[&str]) -> Vec<String> {
+		list.iter().map(|arg| (*arg).to_owned()).collect()
+	}
+
+	#[test]
+	fn flags_are_skipped_and_the_last_plain_argument_wins() {
+		// A flag never reads as the path; an existing plain argument is canonicalised.
+		let argv = args(&["ggs", "--flag", "-x", "Z:/definitely/not/here"]);
+		assert_eq!(launch_path_of(&argv), None);
+		let exe = std::env::current_exe().unwrap();
+		let argv = vec!["ggs".to_owned(), exe.display().to_string()];
+		assert!(launch_path_of(&argv).is_some());
+	}
+
+	#[test]
+	fn headless_mode_arguments_are_not_read_as_paths() {
+		// `--mcp`/`--measure` consume their own folder: a forward never names it.
+		let argv = args(&["ggs", "--mcp", "Z:/definitely/not/here"]);
+		assert_eq!(launch_path_of(&argv), None);
+		let argv = args(&["ggs", "--measure", "Z:/definitely/not/here"]);
+		assert_eq!(launch_path_of(&argv), None);
+	}
 }
 
 #[cfg(all(test, feature = "desktop"))]

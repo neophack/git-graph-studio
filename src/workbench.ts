@@ -200,6 +200,10 @@ export class Workbench {
 		// A language switch relabels the menus (and the settings dialog relabels itself); the Git
 		// Graph view reloads so its "auto" interface language follows the new workbench locale.
 		document.addEventListener(SETTINGS_EVENT, this.onSettingsChangedBound);
+		// The platform class the styles key on (M7 7.1): macOS draws its own traffic lights
+		// over the title bar and needs the left padding for them; its window buttons are
+		// ours to hide. Linux and Windows keep the custom-drawn controls.
+		if (/Mac/i.test(navigator.userAgent)) document.body.classList.add('mac');
 		this.wire();
 		this.applyLayout();
 		// The shell is up: the boot splash (index.html) has done its job of filling the
