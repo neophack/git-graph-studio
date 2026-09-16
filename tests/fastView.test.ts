@@ -113,6 +113,28 @@ describe('the fast viewer', () => {
 		view.dispose();
 	});
 
+	it('adopts the staged open\'s exact line count when the tail lands', async () => {
+		// A huge file opens on its head: the count the scroller starts with is an estimate,
+		// and the background tail's landing event replaces it in place.
+		backend.on('viewer_open', () => ({ ...OPEN, lineCount: 1_900_000 }));
+		backend.on('viewer_close', () => undefined);
+		backend.on('viewer_symbols', () => []);
+		backend.on('viewer_lines', ({ start, end }) => linesResult(start as number, end as number));
+		const view = new FastView(document.getElementById('editorGroup')!);
+		await view.openFile('C:\\repo\\huge.txt');
+		await flush();
+		expect(view.lineCount).toBe(1_900_000);
+		backend.emit('studio://viewer-lines', { docId: view.docId, lineCount: 2_000_000 });
+		await flush();
+		// The scroller's range follows: the spacer carries the exact count's height.
+		expect(view.lineCount).toBe(2_000_000);
+		expect(Number.parseInt(view.root.querySelector<HTMLElement>('.fast-spacer')!.style.height, 10)).toBeGreaterThan(1_999_000 * 19 / 2);
+		// Another document's landing is not this one's business.
+		backend.emit('studio://viewer-lines', { docId: 999, lineCount: 50 });
+		await flush();
+		expect(view.lineCount).toBe(2_000_000);
+		view.dispose();
+	});
 	it('paints a cold window as plain text, then colors it when viewer_highlight lands', async () => {
 		backend.on('viewer_open', () => ({ ...OPEN, lineCount: 100_000 }));
 		backend.on('viewer_close', () => undefined);

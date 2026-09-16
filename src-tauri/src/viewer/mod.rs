@@ -463,7 +463,7 @@ fn build_tail(path: &str, from: u64, total: u64) -> Result<ropey::Rope, String> 
         .collect();
     let mut whole = ropey::Rope::new();
     for part in parts {
-        whole = whole + part?;
+        whole.append(part?);
     }
     Ok(whole)
 }
@@ -506,6 +506,7 @@ fn spawn_tail(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
     let landing = Arc::clone(handle);
+    let landing_gate = Arc::clone(&gate);
     let spawned = std::thread::Builder::new()
         .name("viewer-tail".to_owned())
         .spawn(move || {
@@ -521,7 +522,7 @@ fn spawn_tail(
                 if doc.tail_id == Some(id) {
                     match built {
                         Ok(Ok(tail)) => {
-                            doc.rope = doc.rope.clone() + tail;
+                            doc.rope.append(tail);
                             doc.line_estimate = None;
                             doc.tail_id = None;
                             landed = Some(doc.line_count());
@@ -541,7 +542,7 @@ fn spawn_tail(
             }
             // The gate opens however the build ended — superseded builds included, or a
             // reader of a reloaded document would wait forever.
-            gate.land();
+            landing_gate.land();
             if let Some(count) = landed {
                 if let Some(app) = app {
                     use tauri::Emitter;
@@ -649,14 +650,20 @@ fn take_prewarmed(path: &str) -> Option<Result<Staged, String>> {
     let slot = {
         let mut guard = PREWARMED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         match guard.as_ref() {
-            Some(prewarmed) if prewarmed.path == path => Arc::clone(&prewarmed.slot),
+            Some(prewarmed) if prewarmed.path == path => {
+                let slot = Arc::clone(&prewarmed.slot);
+                // The slot serves one open: clear it before waiting, so a second taker
+                // never parks on a condvar nobody will signal again.
+                *guard = None;
+                slot
+            }
             _ => return None,
         }
     };
     guard_take(&slot)
 }
 
-fn guard_take(slot: &Arc<(Mutex<Option<Result<Staged, String>>>, Condvar)>) -> Option<Result<Staged, String>> {
+fn guard_take(slot: &PrewarmSlot) -> Option<Result<Staged, String>> {
     let (lock, signal) = &**slot;
     let mut guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     loop {
@@ -682,9 +689,16 @@ fn open_result(doc_id: u64, doc: &ViewerDoc) -> OpenResult {
 
 #[cfg(test)]
 fn open_impl(state: &ViewerState, path: &str) -> Result<OpenResult, String> {
-    let doc = open_doc(path)?;
+    let staged = open_staged(path)?;
+    let (doc, tail) = match staged {
+        Staged::Full(doc) => (doc, None),
+        Staged::Head { doc, from_byte, total_bytes } => (doc, Some((from_byte, total_bytes))),
+    };
     let result = open_result(state.next_id.fetch_add(1, Ordering::Relaxed), &doc);
-    state.insert_doc(result.doc_id, doc);
+    let handle = state.insert_doc(result.doc_id, doc, None);
+    if let Some((from, total)) = tail {
+        spawn_tail(&handle, None, result.doc_id, path.to_owned(), from, total);
+    }
     Ok(result)
 }
 
@@ -700,8 +714,11 @@ fn plain_line(doc: &ViewerDoc, line: usize) -> String {
 /// The window over an already-locked document. A warm window (its nearest checkpoint close
 /// enough) is highlighted inline; a cold one is served as plain text with `tokens_pending`
 /// so the rows reach the screen at rope-read speed, whatever syntect still owes them.
+/// The rope's own bounds do the clamping — while a tail is building, the line count the
+/// frontend sees is the estimate, which may name lines the rope does not hold yet.
 fn lines_fast(doc: &mut ViewerDoc, start: usize, end: usize) -> LinesResult {
-    let total = doc.line_count();
+    let total = doc.rope_lines();
+    let reported = doc.line_count();
     if total == 0 {
         return LinesResult {
             start_line: 0,
@@ -712,12 +729,11 @@ fn lines_fast(doc: &mut ViewerDoc, start: usize, end: usize) -> LinesResult {
     }
     let start = start.min(total - 1);
     let end = end.min(total - 1);
-    let line_count = total;
     if start - doc.resume_line(start) <= QUICK_CATCHUP {
         let lines = doc.highlight_lines(start, end);
         return LinesResult {
             start_line: start,
-            line_count,
+            line_count: reported,
             lines,
             tokens_pending: false,
         };
@@ -725,7 +741,7 @@ fn lines_fast(doc: &mut ViewerDoc, start: usize, end: usize) -> LinesResult {
     let lines = (start..=end).map(|line| (plain_line(doc, line), Vec::new())).collect();
     LinesResult {
         start_line: start,
-        line_count,
+        line_count: reported,
         lines,
         tokens_pending: true,
     }
@@ -748,7 +764,7 @@ fn catch_up(handle: &DocHandle, start: usize, end: usize, alive: &dyn Fn() -> bo
             if !alive() {
                 return Err("superseded".to_string());
             }
-            let total = doc.line_count();
+            let total = doc.rope_lines();
             if total == 0 {
                 return Ok(());
             }
@@ -776,12 +792,13 @@ fn highlight_doc(handle: &DocHandle, start: usize, end: usize, generation: u64) 
         .doc
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let total = doc.line_count();
+    let total = doc.rope_lines();
+    let reported = doc.line_count();
     let start = start.min(total.saturating_sub(1));
     let lines = doc.highlight_lines(start, end);
     Ok(LinesResult {
         start_line: start,
-        line_count: total,
+        line_count: reported,
         lines,
         tokens_pending: false,
     })
@@ -795,7 +812,7 @@ fn warm_all(handle: &DocHandle) -> Result<(), String> {
             .doc
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        doc.line_count()
+        doc.rope_lines()
     };
     let generation = handle.warm_gen.load(Ordering::Relaxed);
     warm_with(handle, total, generation)
@@ -845,6 +862,10 @@ fn lines_impl(
     end: usize,
 ) -> Result<LinesResult, String> {
     check_window(start, end)?;
+    let handle = state
+        .doc_handle(doc_id)
+        .ok_or_else(|| format!("No open document {doc_id}"))?;
+    ensure_lines(&handle, start)?;
     state.with_doc(doc_id, |doc| lines_fast(doc, start, end))
 }
 
@@ -925,12 +946,18 @@ fn text_impl(
     end: usize,
 ) -> Result<TextResult, String> {
     check_window(start, end)?;
+    let handle = state
+        .doc_handle(doc_id)
+        .ok_or_else(|| format!("No open document {doc_id}"))?;
+    ensure_lines(&handle, start)?;
     state.with_doc(doc_id, |doc| text_of(doc, start, end))
 }
 
 /// The plain-text window over an already-locked document.
 fn text_of(doc: &mut ViewerDoc, start: usize, end: usize) -> TextResult {
-    let total = doc.line_count();
+    // The rope's own bounds clamp (the reported count may still be the staged estimate).
+    let total = doc.rope_lines();
+    let reported = doc.line_count();
     let start = start.min(total.saturating_sub(1));
     let end = end.min(total.saturating_sub(1));
     let lines = (start..=end)
@@ -944,29 +971,38 @@ fn text_of(doc: &mut ViewerDoc, start: usize, end: usize) -> TextResult {
         .collect();
     TextResult {
         start_line: start,
-        line_count: total,
+        line_count: reported,
         lines,
     }
 }
 
-/// Open a file in the viewer. Reads, decodes and ropes the file — highlighting is
-/// deliberately lazy (per window via `viewer_lines`), and so is the outline (`viewer_symbols`
-/// on demand): neither a whole-file scan nor its symbol payload belongs between the open
-/// request and the first painted row.
+/// Open a file in the viewer. The head — read, decoded and roped synchronously — is what
+/// this returns, tens of milliseconds whatever the file's size; the rest of a huge file
+/// appends on a background thread, and the `studio://viewer-lines` event delivers the exact
+/// line count when it lands. Highlighting stays lazy (per window via `viewer_lines`), and
+/// so does the outline (`viewer_symbols` on demand).
 #[tauri::command]
 pub async fn viewer_open(
     state: tauri::State<'_, ViewerState>,
+    app: tauri::AppHandle,
     path: String,
 ) -> Result<OpenResult, String> {
     let doc_id = state.next_id.fetch_add(1, Ordering::Relaxed);
     let load = path.clone();
-    let doc = tauri::async_runtime::spawn_blocking(move || {
-        take_prewarmed(&load).unwrap_or_else(|| open_doc(&load))
+    let staged = tauri::async_runtime::spawn_blocking(move || {
+        take_prewarmed(&load).unwrap_or_else(|| open_staged(&load))
     })
     .await
     .map_err(|e| e.to_string())??;
+    let (doc, tail) = match staged {
+        Staged::Full(doc) => (doc, None),
+        Staged::Head { doc, from_byte, total_bytes } => (doc, Some((from_byte, total_bytes))),
+    };
     let result = open_result(doc_id, &doc);
-    state.insert_doc(doc_id, doc);
+    let handle = state.insert_doc(doc_id, doc, None);
+    if let Some((from, total)) = tail {
+        spawn_tail(&handle, Some(app), doc_id, path, from, total);
+    }
     Ok(result)
 }
 
@@ -989,14 +1025,15 @@ pub async fn viewer_lines(
     // The bump cancels any catch-up still walking toward a window nobody is looking at.
     handle.lines_gen.fetch_add(1, Ordering::Relaxed);
     let result = tauri::async_runtime::spawn_blocking(move || {
+        ensure_lines(&handle, start)?;
         let mut doc = handle
             .doc
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        lines_fast(&mut doc, start, end)
+        Ok::<LinesResult, String>(lines_fast(&mut doc, start, end))
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())??;
     // The first screen and every cold window are where warming pays: the background walk
     // starts there and keeps every later jump cheap. Warm mid-file scrolls spawn nothing.
     if result.tokens_pending || start == 0 {
@@ -1082,6 +1119,14 @@ pub async fn viewer_save(
     state: tauri::State<'_, ViewerState>,
     doc_id: u64,
 ) -> Result<(), String> {
+    // Saving a document whose tail has not landed would write the head alone — the file
+    // truncated to a fraction of itself. Wait the tail out first.
+    let wait = state
+        .doc_handle(doc_id)
+        .ok_or_else(|| format!("No open document {doc_id}"))?;
+    tauri::async_runtime::spawn_blocking(move || wait_tail(&wait))
+        .await
+        .map_err(|e| e.to_string())??;
     let (path, encoding, eol, text) = state.with_doc(doc_id, |doc| {
         (
             doc.path.clone(),
@@ -1111,6 +1156,7 @@ pub async fn viewer_save(
 #[tauri::command]
 pub async fn viewer_reload(
     state: tauri::State<'_, ViewerState>,
+    app: tauri::AppHandle,
     doc_id: u64,
 ) -> Result<ReloadResult, String> {
     let (path, stamp) =
@@ -1121,10 +1167,14 @@ pub async fn viewer_reload(
             line_count: 0,
         });
     }
-    let load = path.clone();
-    let doc = tauri::async_runtime::spawn_blocking(move || open_doc(&load.display().to_string()))
+    let load = path.display().to_string();
+    let staged = tauri::async_runtime::spawn_blocking(move || open_staged(&load))
         .await
         .map_err(|e| e.to_string())??;
+    let (doc, tail) = match staged {
+        Staged::Full(doc) => (doc, None),
+        Staged::Head { doc, from_byte, total_bytes } => (doc, Some((from_byte, total_bytes))),
+    };
     let line_count = doc.line_count();
     // The tab may have closed while the file was being read: a closed id must not come
     // back as a document nobody will ever close again.
@@ -1143,7 +1193,11 @@ pub async fn viewer_reload(
                 lines_gen: AtomicU64::new(0),
                 warm_gen: AtomicU64::new(0),
                 warmer_running: AtomicBool::new(false),
-            })
+                tail: Mutex::new(None),
+            });
+            if let Some((from, total)) = tail {
+                spawn_tail(slot, Some(app), doc_id, path.display().to_string(), from, total);
+            }
         }
         None => return Err(format!("No open document {doc_id}")),
     }
@@ -1155,6 +1209,8 @@ pub async fn viewer_reload(
 
 /// A window of lines as plain text (0-based, inclusive), for the editable windowed editor.
 /// Off the main thread like `viewer_lines`: the same rope reads, the same latency spikes.
+/// Lines the rope does not hold yet (a huge file's tail still building) wait for the
+/// landing — the head's window never does.
 #[tauri::command]
 pub async fn viewer_text(
     state: tauri::State<'_, ViewerState>,
@@ -1167,14 +1223,15 @@ pub async fn viewer_text(
         .doc_handle(doc_id)
         .ok_or_else(|| format!("No open document {doc_id}"))?;
     tauri::async_runtime::spawn_blocking(move || {
+        ensure_lines(&doc, start)?;
         let mut doc = doc
             .doc
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        text_of(&mut doc, start, end)
+        Ok(text_of(&mut doc, start, end))
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?
 }
 
 /// Find every (single-line) match of a query over a whole document. The scan runs on the
@@ -1196,6 +1253,8 @@ pub async fn viewer_find(
     // still holds.
     let generation = handle.find_gen.fetch_add(1, Ordering::Relaxed) + 1;
     tauri::async_runtime::spawn_blocking(move || {
+        // A whole-document scan must see the whole document: wait out a still-building tail.
+        wait_tail(&handle)?;
         let doc = handle
             .doc
             .lock()
@@ -1228,8 +1287,8 @@ pub async fn viewer_find(
 /// Every replacement lands in the rope as one undo step, so a Replace All is a single Ctrl+Z.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // the find options mirror viewer_find's, plus the replace spec
-pub fn viewer_replace(
-    state: tauri::State<ViewerState>,
+pub async fn viewer_replace(
+    state: tauri::State<'_, ViewerState>,
     doc_id: u64,
     query: String,
     replacement: String,
@@ -1240,6 +1299,14 @@ pub fn viewer_replace(
     from_col: usize,
     max: usize,
 ) -> Result<ReplaceResult, String> {
+    // A Replace All walks the whole document: wait out a still-building tail off the
+    // command's thread first (the rope work below is the same synchronous pass as ever).
+    let handle = state
+        .doc_handle(doc_id)
+        .ok_or_else(|| format!("No open document {doc_id}"))?;
+    tauri::async_runtime::spawn_blocking(move || wait_tail(&handle))
+        .await
+        .map_err(|e| e.to_string())??;
     let options = find::FindOptions {
         case_sensitive,
         whole_word,
@@ -1326,6 +1393,14 @@ pub async fn viewer_backup(
     state: tauri::State<'_, ViewerState>,
     doc_id: u64,
 ) -> Result<(), String> {
+    // The backup writes the document whole: a still-building tail must land first, or the
+    // hot-exit restore would resurrect a truncated file.
+    let wait = state
+        .doc_handle(doc_id)
+        .ok_or_else(|| format!("No open document {doc_id}"))?;
+    tauri::async_runtime::spawn_blocking(move || wait_tail(&wait))
+        .await
+        .map_err(|e| e.to_string())??;
     let (path, text) = state.with_doc(doc_id, |doc| {
         (doc.path.display().to_string(), doc.full_text())
     })?;
@@ -1349,6 +1424,11 @@ pub async fn viewer_symbols(
     let handle = state
         .doc_handle(doc_id)
         .ok_or_else(|| format!("No open document {doc_id}"))?;
+    // The outline is a whole-document scan: it must see the whole document.
+    let wait = Arc::clone(&handle);
+    tauri::async_runtime::spawn_blocking(move || wait_tail(&wait))
+        .await
+        .map_err(|e| e.to_string())??;
     let (rope, language) = {
         let doc = handle
             .doc
@@ -1432,8 +1512,21 @@ mod tests {
         let state = ViewerState::default();
         let opened = open_impl(&state, &path).expect("open");
         let open_ms = t.elapsed().as_millis();
+        // The staged open returns from the head; the tail builds in the background. The
+        // whole-document time is when the landing has cleared the estimate.
         let lines = opened.line_count;
-        let mid = lines / 2;
+        let t = std::time::Instant::now();
+        while state
+            .with_doc(opened.doc_id, |doc| doc.line_estimate.is_some())
+            .unwrap_or(false)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let whole_ms = t.elapsed().as_millis();
+        let exact = state
+            .with_doc(opened.doc_id, |doc| doc.line_count())
+            .unwrap_or(0);
+        let mid = exact / 2;
         let t = std::time::Instant::now();
         let window = lines_impl(&state, opened.doc_id, mid, mid + 60).unwrap();
         let text_ms = t.elapsed().as_millis();
@@ -1446,7 +1539,7 @@ mod tests {
         let again = lines_impl(&state, opened.doc_id, mid, mid + 60).unwrap();
         let revisit_ms = t.elapsed().as_millis();
         println!(
-            "open={open_ms}ms (read={read_ms}ms decode={decode_ms}ms rope={rope_ms}ms, {bytes_len} bytes) lines={lines} cold_text={text_ms}ms pending={} cold_color={color_ms}ms revisit={revisit_ms}ms pending_again={} mid_line_scopes={}",
+            "head_open={open_ms}ms whole={whole_ms}ms (read={read_ms}ms decode={decode_ms}ms rope={rope_ms}ms sequential, {bytes_len} bytes) est_lines={lines} exact_lines={exact} cold_text={text_ms}ms pending={} cold_color={color_ms}ms revisit={revisit_ms}ms pending_again={} mid_line_scopes={}",
             window.tokens_pending,
             again.tokens_pending,
             colored.lines[0].1.len()
@@ -1455,6 +1548,39 @@ mod tests {
 
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn a_file_past_the_head_opens_staged_and_appends_its_tail() {
+        let s = scratch();
+        // ~12 MB of uniform lines: past HEAD_BYTES, so the open returns from the head
+        // while the tail builds on its own thread.
+        let mut text = String::with_capacity(12 << 20);
+        for i in 0..330_000 {
+            text.push_str(&format!("line {i:06} of the staged open test\n"));
+        }
+        let path = s.file("staged.log", &text);
+        let state = ViewerState::default();
+        let opened = open_impl(&state, &path).unwrap();
+        // The scroller's first count is the estimate, in the right ballpark immediately.
+        let (estimate, staging) = state
+            .with_doc(opened.doc_id, |doc| (doc.line_count(), doc.tail_id.is_some()))
+            .unwrap();
+        assert!(staging, "a file past the head must open staged");
+        assert!((300_000..=360_000).contains(&estimate), "estimate {estimate}");
+        // A window beyond the head waits for the tail and then serves real lines (the
+        // estimate may overshoot the exact count; the mid-file window cannot).
+        let mid = estimate / 2;
+        let beyond = text_impl(&state, opened.doc_id, mid, mid + 9).unwrap();
+        assert_eq!(beyond.lines.len(), 10);
+        // Landed: the exact count, the estimate gone.
+        let exact = state.with_doc(opened.doc_id, |doc| doc.line_count()).unwrap();
+        assert_eq!(exact, 330_001); // the trailing newline's empty final line
+        assert!(state.with_doc(opened.doc_id, |doc| doc.line_estimate.is_none()).unwrap());
+        let last = text_impl(&state, opened.doc_id, exact - 3, exact - 1).unwrap();
+        assert_eq!(last.lines[0], "line 329998 of the staged open test");
+        assert_eq!(last.lines[1], "line 329999 of the staged open test");
+        assert_eq!(last.lines[2], "", "the trailing newline's empty final line");
+    }
 
     struct Scratch {
         _dir: tempfile::TempDir,
@@ -1500,7 +1626,10 @@ mod tests {
         let s = scratch();
         let path = s.file("warm.rs", "fn warm() {}\n");
         prewarm(path.clone());
-        let doc = take_prewarmed(&path).unwrap().unwrap();
+        let doc = match take_prewarmed(&path).unwrap().unwrap() {
+            Staged::Full(doc) => doc,
+            Staged::Head { .. } => panic!("a small file must open whole"),
+        };
         assert_eq!(doc.syntax_name, "Rust");
         assert_eq!(doc.line_count(), 2);
         // The slot serves one open; the next open of the same path builds afresh.

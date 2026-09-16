@@ -104,6 +104,31 @@ describe('text file editing', () => {
 		await group.closeAll();
 	});
 
+	it('adopts the staged open\'s exact line count when the tail lands', async () => {
+		fileBackend();
+		// The windowed editor opens a huge file on its estimated count; the landing event
+		// replaces it and the scroller re-ranges in place.
+		const LINES = Array.from({ length: 200 }, (_, i) => `line ${i}`);
+		backend.on('file_probe', () => ({ size: 100 * 1024 * 1024, binary: false, longLines: false }));
+		backend.on('viewer_open', () => ({ docId: 7, lineCount: 200, language: 'log', syntaxName: 'Plain Text', symbols: [] }));
+		backend.on('viewer_text', ({ start, end }: { start: number; end: number }) => ({
+			startLine: start,
+			lineCount: 200,
+			lines: LINES.slice(start, Math.min(end + 1, LINES.length))
+		}));
+		backend.on('viewer_close', () => null);
+		const view = new EditableDocView(document.getElementById('editorGroup')!);
+		await view.openFile('C:\\repo\\staged.log');
+		await new Promise((resolve) => setTimeout(resolve, 200)); // the opening swap settles
+		const spacer = view.root.querySelector<HTMLElement>('.doc-edit-spacer')!;
+		const before = Number.parseInt(spacer.style.height, 10);
+		backend.emit('studio://viewer-lines', { docId: 7, lineCount: 4_000 });
+		await new Promise((resolve) => setTimeout(resolve, 250)); // the relayout's measure lands
+		const after = Number.parseInt(spacer.style.height, 10);
+		expect(after).toBeGreaterThan(before + 30_000); // 3,800 more lines of height
+		view.dispose();
+	});
+
 	it('refills the window a fast scrollbar drag ends on, even inside the slide cooldown', { timeout: 10_000 }, async () => {
 		fileBackend();
 		const LINES = Array.from({ length: 20_000 }, (_, i) => `line ${i}`);

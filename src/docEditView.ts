@@ -7,6 +7,7 @@
 import { EditorState, StateEffect, StateField } from '@codemirror/state';
 import { Decoration, type DecorationSet, EditorView, drawSelection, highlightActiveLine, highlightSpecialChars, keymap, lineNumbers } from '@codemirror/view';
 import { defaultKeymap } from '@codemirror/commands';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import { DocFindController, type DocFindHost, type DocFindMatch, type DocFindSpec } from './docFind';
 import { vscodeHighlighting } from './cmTheme';
@@ -134,6 +135,9 @@ export class EditableDocView {
 	private touched = false;
 	/** The whole-file find/replace bar, mounted on first open (docFind.ts). */
 	private findBar: DocFindController | null = null;
+	/** The staged open's landing event subscription (the exact line count replacing the
+	 *  estimate the scroller started with). */
+	private unlisten: UnlistenFn | null = null;
 
 	/** The buffer became dirty (the editor group marks the tab). */
 	onChanged: (() => void) | null = null;
@@ -151,6 +155,17 @@ export class EditableDocView {
 		this.root.appendChild(this.scroller);
 		parent.appendChild(this.root);
 		this.scroller.addEventListener('scroll', () => this.onScroll(), { passive: true });
+		// A huge file opens on its head with an estimated line count; the background tail's
+		// landing delivers the exact one, and the scroller takes it in place.
+		void listen<{ docId: number; lineCount: number }>('studio://viewer-lines', (event) => {
+			if (this.docId === event.payload.docId) {
+				this.lineCount = event.payload.lineCount;
+				this.relayout();
+			}
+		}).then((unlisten) => {
+			if (this.disposed) unlisten();
+			else this.unlisten = unlisten;
+		}).catch(() => undefined);
 	}
 
 	/** Open a file into the windowed editor. False when the backend refused it (binary,
@@ -840,6 +855,8 @@ export class EditableDocView {
 		if (this.syncTimer !== undefined) window.clearTimeout(this.syncTimer);
 		if (this.backupTimer !== undefined) window.clearTimeout(this.backupTimer);
 		if (this.swapCheckTimer !== undefined) window.clearTimeout(this.swapCheckTimer);
+		this.unlisten?.();
+		this.unlisten = null;
 		// Close now, not after the sync queue: the buffer was either just saved (save
 		// flushes first) or intentionally discarded, and a sync still in flight checks
 		// `disposed` when it lands and drops its edit.

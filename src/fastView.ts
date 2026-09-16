@@ -6,6 +6,7 @@
 // from `viewer_symbols` once the rows are up, so neither ever blocks the first paint.
 
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import { DocFindController, type DocFindHost, type DocFindMatch } from './docFind';
 import { el, icon, notify, VirtualScroll } from './ui';
@@ -134,6 +135,9 @@ export class FastView {
 	private readonly sizer: ResizeObserver | null;
 	/** The whole-file find bar (docFind.ts) — read-only surface, find without replace. */
 	private findBar: DocFindController | null = null;
+	/** The staged open's landing event subscription (the exact line count replacing the
+	 *  estimate the scroller started with). */
+	private unlisten: UnlistenFn | null = null;
 	/** The find's matches per rendered line, in the code-point columns `viewer_find` reports. */
 	private matchMarks = new Map<number, [number, number][]>();
 	/** The match the find bar names current, for the stronger mark. */
@@ -164,6 +168,14 @@ export class FastView {
 		this.sizer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => { this.refresh(); this.refreshOutline(); });
 		this.sizer?.observe(this.scroller);
 		this.sizer?.observe(this.outline);
+		// A huge file opens on its head with an estimated line count; the background tail's
+		// landing delivers the exact one, and the scroller takes it in place.
+		void listen<{ docId: number; lineCount: number }>('studio://viewer-lines', (event) => {
+			if (this.open?.docId === event.payload.docId) this.resyncLineCount(event.payload.lineCount);
+		}).then((unlisten) => {
+			if (this.disposed) unlisten();
+			else this.unlisten = unlisten;
+		}).catch(() => undefined);
 	}
 
 	/** Open a file in the viewer. Returns false when the backend refused it (binary, missing…)
@@ -512,6 +524,8 @@ export class FastView {
 	dispose(): void {
 		this.disposed = true;
 		this.sizer?.disconnect();
+		this.unlisten?.();
+		this.unlisten = null;
 		this.findBar?.destroy();
 		this.findBar = null;
 		if (this.open) void invoke('viewer_close', { docId: this.open.docId });
