@@ -462,6 +462,13 @@ body.resizing iframe { pointer-events: none; }
 .status-item.warning { background: var(--vscode-statusBarItem-warningBackground, #7a6400); color: var(--vscode-statusBarItem-warningForeground, #fff); }
 .status-item.warning:hover { background: var(--vscode-statusBarItem-warningHoverBackground, #8f7600); }
 .status-item.static:hover { background: transparent; }
+/* The save progress item (M7): a thin track that fills as `viewer_save` streams its
+ * report, or slides indeterminately before the first report lands. */
+.status-save { cursor: default; }
+.status-save:hover { background: transparent; }
+.status-save-track { width: 40px; height: 3px; border-radius: 2px; overflow: hidden; background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 15%, transparent); }
+.status-save-track i { display: block; height: 100%; width: 0%; background: var(--vscode-progressBar-background, #0e70c0); transition: width 0.2s ease; }
+.status-save-track i.indeterminate { width: 40%; transition: none; animation: search-progress-slide 1.3s ease-in-out infinite; }
 .status-left { display: flex; align-items: center; padding-left: 4px; overflow: hidden; }
 .status-right { display: flex; align-items: center; margin-left: auto; padding-right: 4px; }
 

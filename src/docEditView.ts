@@ -14,7 +14,7 @@ import { toggleBlockComment, toggleLineComment } from './comments';
 import { vscodeHighlighting } from './cmTheme';
 import { settings } from './settings';
 import { attachSmoothWheel, el, notify, VirtualScroll, type SmoothWheelHandle } from './ui';
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 
 interface OpenInfo {
 	docId: number;
@@ -28,6 +28,13 @@ interface TextWindow {
 	startLine: number;
 	lineCount: number;
 	lines: string[];
+}
+
+/** One save-progress report from `viewer_save` (`src-tauri/src/viewer/mod.rs`): bytes of
+ *  the document streamed out so far, and the document's whole byte size. */
+interface SaveProgress {
+	written: number;
+	total: number;
 }
 
 /** The window size, matching the backend's `MAX_WINDOW` so one `viewer_text` call fills it. */
@@ -151,6 +158,9 @@ export class EditableDocView {
 	onStatusChange: (() => void) | null = null;
 	/** Ctrl+S inside the window. */
 	onSaveRequest: (() => void) | null = null;
+	/** The save's progress as the backend streams the rope out (`null` clears it). The
+	 *  editor group forwards this straight to the status bar's save item. */
+	onSaveProgress: ((progress: { written: number; total: number } | null) => void) | null = null;
 
 	constructor(parent: HTMLElement) {
 		this.root = el('div', 'doc-edit');
@@ -604,7 +614,12 @@ export class EditableDocView {
 			// An edit the backend refused is not on disk after a save: the tab stays dirty.
 			if (!(await this.sendDiff()) || this.disposed || this.docId === null) return false;
 			try {
-				await invoke('viewer_save', { docId: this.docId });
+				// The indeterminate pulse shows immediately; the backend's own reports
+				// (once the write starts) replace it with a real percentage.
+				this.onSaveProgress?.({ written: 0, total: 0 });
+				const onProgress = new Channel<SaveProgress>();
+				onProgress.onmessage = (progress) => this.onSaveProgress?.(progress);
+				await invoke('viewer_save', { docId: this.docId, onProgress });
 				this.touched = false;
 				const path = this.path;
 				if (path) void invoke('backup_clear', { path }).catch(() => undefined);
@@ -612,6 +627,8 @@ export class EditableDocView {
 			} catch (error) {
 				notify('error', String(error));
 				return false;
+			} finally {
+				this.onSaveProgress?.(null);
 			}
 		}).then((saved) => saved ?? false);
 	}

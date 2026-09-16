@@ -771,6 +771,7 @@ export class Workbench {
 		this.editors.onTabsChange = () => this.scheduleSnapshot();
 		this.explorer.onExpandedChange = () => this.scheduleSnapshot();
 		this.editors.onFileSaved = () => this.scheduleRefresh(0);
+		this.editors.onSaveProgress = (progress) => this.statusBar.setSaveProgress(progress);
 		this.editors.renderWelcome = (container) => this.renderWelcome(container);
 		this.editors.renderHelp = (help, container) => (help === 'welcome' ? this.renderWelcome(container) : this.renderShortcuts(container));
 

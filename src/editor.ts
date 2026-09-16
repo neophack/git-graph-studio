@@ -335,6 +335,9 @@ export class EditorGroup {
 	/** The set or order of open tabs changed (an open, a close, a rename): the workbench snapshots it. */
 	onTabsChange: (() => void) | null = null;
 	onFileSaved: ((path: string) => void) | null = null;
+	/** A windowed editor's save streamed a progress report (`null` clears it); the workbench
+	 *  forwards this to the status bar's save item. */
+	onSaveProgress: ((progress: { written: number; total: number } | null) => void) | null = null;
 	/** Pending auto-save / backup timers per editor id. */
 	private readonly autoSaveTimers = new Map<string, number>();
 	private readonly backupTimers = new Map<string, number>();
@@ -629,6 +632,7 @@ export class EditorGroup {
 		};
 		view.onSaveRequest = () => void this.save(editor);
 		view.onStatusChange = () => this.emitActive();
+		view.onSaveProgress = (progress) => this.onSaveProgress?.(progress);
 		editor.doc = view;
 		editor.languageName = view.languageName ?? undefined;
 		editor.onClose = () => editor.doc?.dispose();

@@ -1119,39 +1119,189 @@ pub fn viewer_edit(
     )
 }
 
-/// Write a viewer document back to disk. The encode and write of a large file can take
-/// hundreds of milliseconds, so they run on the blocking pool — the UI must not freeze on
-/// Ctrl+S the way it did when the whole document crossed the IPC as one JSON string.
+/// One chunk's CRLF normalisation: the same `"\r\n" → "\n" → "\r\n"` double replace
+/// [`crate::encoding::encode`] applies whole-text, on a slice whose line breaks never
+/// straddle its ends (a trailing `\r` is held back and re-joined with the next chunk by
+/// the caller, so a pair split across a rope chunk boundary still comes out as one CRLF).
+fn write_crlf_chunk(out: &mut impl std::io::Write, text: &str) -> std::io::Result<()> {
+	if text.contains('\r') || text.contains('\n') {
+		let normalised = text.replace("\r\n", "\n").replace('\n', "\r\n");
+		out.write_all(normalised.as_bytes())
+	} else {
+		out.write_all(text.as_bytes())
+	}
+}
+
+/// The CRLF pass over an iterator of chunks: each chunk's line breaks are normalised the
+/// way [`crate::encoding::encode`] does whole-text, while a `\r` at a chunk's end is held
+/// back and re-joined with the next chunk — a `\r\n` pair split across a rope chunk
+/// boundary still comes out as one CRLF, and a lone CR survives as itself. `on_chunk`
+/// hears every chunk's input size, the save progress's unit.
+fn write_crlf<'a>(
+	out: &mut impl std::io::Write,
+	chunks: impl Iterator<Item = &'a str>,
+	mut on_chunk: impl FnMut(u64),
+) -> std::io::Result<()> {
+	let mut pending_cr = false;
+	for chunk in chunks {
+		let mut text = chunk;
+		// An empty chunk (possible at the ends of a sliced iteration) decides nothing:
+		// the held-back `\r` keeps waiting for the text that follows it.
+		if pending_cr && text.is_empty() {
+			continue;
+		}
+		if pending_cr {
+			if let Some(rest) = text.strip_prefix('\n') {
+				out.write_all(b"\r\n")?;
+				text = rest;
+			} else {
+				out.write_all(b"\r")?;
+			}
+			pending_cr = false;
+		}
+		if text.ends_with('\r') {
+			pending_cr = true;
+			text = &text[..text.len() - 1];
+		}
+		write_crlf_chunk(out, text)?;
+		on_chunk(chunk.len() as u64);
+	}
+	if pending_cr {
+		out.write_all(b"\r")?;
+	}
+	Ok(())
+}
+
+/// The throttled save reporter: the write stream reports every [`PROGRESS_STEP`] input
+/// bytes and exactly once at each end, so the status bar follows a gigabyte at a hundred
+/// updates instead of one per rope chunk.
+struct SaveReporter<'a> {
+	total: u64,
+	written: u64,
+	reported: u64,
+	sink: &'a dyn Fn(u64, u64),
+}
+
+impl<'a> SaveReporter<'a> {
+	fn new(total: u64, sink: &'a dyn Fn(u64, u64)) -> Self {
+		sink(0, total);
+		SaveReporter { total, written: 0, reported: 0, sink }
+	}
+
+	fn step(&mut self, bytes: u64) {
+		self.written += bytes;
+		if self.written - self.reported >= PROGRESS_STEP {
+			self.reported = self.written;
+			(self.sink)(self.written, self.total);
+		}
+	}
+
+	fn done(&mut self) {
+		(self.sink)(self.total, self.total);
+	}
+}
+
+/// How many written bytes separate two progress reports — small enough that a long save
+/// visibly moves, large enough that a gigabyte costs ~a hundred IPC messages.
+const PROGRESS_STEP: u64 = 8 << 20;
+
+/// Write a rope out as `encoding`/`eol` without ever holding the whole text: chunks stream
+/// through a buffer for the UTF-8 family — a gigabyte log's Ctrl+S must not first allocate
+/// the gigabyte `String` plus gigabyte `Vec<u8>` that `full_text` + `encode` would. Other
+/// encodings keep the whole-text path: they are rare at this size and `encode` is their one
+/// implementation. `progress` receives `(written, total)` in input bytes — the read side of
+/// the stream, so BOM and CRLF expansion never push the ratio past 1.
+fn write_doc(
+	path: &std::path::Path,
+	rope: &ropey::Rope,
+	encoding: &str,
+	eol: &str,
+	progress: &dyn Fn(u64, u64),
+) -> Result<(), String> {
+	use std::io::Write;
+	let file = std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
+	let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
+	let mut reporter = SaveReporter::new(rope.len_bytes() as u64, progress);
+	let written = (|| -> std::io::Result<()> {
+		match encoding {
+			"utf8" | "utf8bom" => {
+				if encoding == "utf8bom" {
+					out.write_all(&[0xEF, 0xBB, 0xBF])?;
+				}
+				if eol == "crlf" {
+					write_crlf(&mut out, rope.chunks(), |bytes| reporter.step(bytes))?;
+				} else {
+					for chunk in rope.chunks() {
+						out.write_all(chunk.as_bytes())?;
+						reporter.step(chunk.len() as u64);
+					}
+				}
+			}
+			_ => {
+				let bytes = crate::encoding::encode(&rope.to_string(), encoding, eol);
+				out.write_all(&bytes)?;
+			}
+		}
+		Ok(())
+	})();
+	written.map_err(|e| format!("{}: {e}", path.display()))?;
+	out.into_inner()
+		.map_err(|e| format!("{}: {e}", path.display()))?
+		.flush()
+		.map_err(|e| format!("{}: {e}", path.display()))?;
+	reporter.done();
+	Ok(())
+}
+
+/// One save-progress report over the command's channel: bytes of the document streamed out
+/// so far, and the document's whole byte size. `written == 0 && total == 0` never happens
+/// from here — the frontend's own start-of-save report is what the indeterminate bar serves.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveProgress {
+	pub written: u64,
+	pub total: u64,
+}
+
+/// Write a viewer document back to disk, reporting progress over `on_progress` as the rope
+/// streams out — a multi-hundred-megabyte Ctrl+S takes seconds, and the status bar's bar is
+/// how the user knows it is moving. The encode and write run on the blocking pool — the UI
+/// must not freeze the way it did when the whole document crossed the IPC as one JSON string.
 #[tauri::command]
 pub async fn viewer_save(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, ViewerState>,
-    doc_id: u64,
+	app: tauri::AppHandle,
+	state: tauri::State<'_, ViewerState>,
+	doc_id: u64,
+	on_progress: tauri::ipc::Channel<SaveProgress>,
 ) -> Result<(), String> {
-    // Saving a document whose tail has not landed would write the head alone — the file
-    // truncated to a fraction of itself. Wait the tail out first.
-    let wait = state
-        .doc_handle(doc_id)
-        .ok_or_else(|| format!("No open document {doc_id}"))?;
-    tauri::async_runtime::spawn_blocking(move || wait_tail(&wait))
-        .await
-        .map_err(|e| e.to_string())??;
-    let (path, encoding, eol, text) = state.with_doc(doc_id, |doc| {
-        (
-            doc.path.clone(),
-            doc.encoding.clone(),
-            doc.eol.clone(),
-            doc.full_text(),
-        )
-    })?;
-    let stamp = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        std::fs::write(&path, crate::encoding::encode(&text, &encoding, &eol))
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        // The stamp the file now carries, so the save's own watcher echo reads as "unchanged".
-        Ok(fingerprint(&path))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+	// Saving a document whose tail has not landed would write the head alone — the file
+	// truncated to a fraction of itself. Wait the tail out first.
+	let wait = state
+		.doc_handle(doc_id)
+		.ok_or_else(|| format!("No open document {doc_id}"))?;
+	tauri::async_runtime::spawn_blocking(move || wait_tail(&wait))
+		.await
+		.map_err(|e| e.to_string())??;
+	// The rope clones cheap (ropey chunks share under an Arc — the `viewer_symbols` pattern),
+	// so the blocking writer below never queues the document lock behind a whole-file pass.
+	let (path, encoding, eol, rope) = state.with_doc(doc_id, |doc| {
+		(
+			doc.path.clone(),
+			doc.encoding.clone(),
+			doc.eol.clone(),
+			doc.rope.clone(),
+		)
+	})?;
+	let stamp = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+		let progress = move |written: u64, total: u64| {
+			let _ = on_progress.send(SaveProgress { written, total });
+		};
+		write_doc(&path, &rope, &encoding, &eol, &progress)?;
+		// The stamp the file now carries, so the save's own watcher echo reads as "unchanged".
+		Ok(fingerprint(&path))
+	})
+	.await
+	.map_err(|e| e.to_string())??;
     let _ = state.with_doc(doc_id, |doc| doc.fingerprint = stamp.clone());
     // Match write_file: a saved (possibly new) file must show up in Quick Open and search.
     use tauri::Manager;
@@ -1715,13 +1865,126 @@ mod tests {
         let edit = edit_impl(&state, opened.doc_id, 1, 0, 2, 0, "TWO\n").unwrap();
         assert_eq!(edit.line_count, 3);
         assert_eq!(edit.rehighlight_from, 1);
-        state
+        // The save path itself (the streaming writer `viewer_save` runs), not a manual dump.
+        let (path_of, encoding, eol, rope) = state
             .with_doc(opened.doc_id, |doc| {
-                std::fs::write(&doc.path, doc.full_text()).map_err(|e| e.to_string())
+                (doc.path.clone(), doc.encoding.clone(), doc.eol.clone(), doc.rope.clone())
             })
-            .unwrap()
             .unwrap();
+        write_doc(&path_of, &rope, &encoding, &eol, &|_, _| {}).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\nTWO\n");
+    }
+
+    #[test]
+    fn streamed_save_matches_the_whole_text_encoder() {
+        let s = scratch();
+        // The encodings and line-ending shapes a document can carry: the streaming writer
+        // must produce byte-for-byte what `full_text` + `encode` always did.
+        for (text, encoding, eol) in [
+            ("one\ntwo\n", "utf8", "lf"),
+            ("one\ntwo\n", "utf8", "crlf"),
+            ("bom\r\nlines\r\r\n", "utf8bom", "crlf"),
+            ("lone\rcr kept\r", "utf8", "crlf"),
+            ("中文\r\n行\n", "utf8bom", "crlf"),
+            ("", "utf8", "lf"),
+            ("legacy é\r\n", "windows-1252", "crlf"),
+            ("中文\n", "gb18030", "lf"),
+        ] {
+            let path = s.file("save.out", text);
+            write_doc(std::path::Path::new(&path), &ropey::Rope::from(text), encoding, eol, &|_, _| {})
+                .unwrap();
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                crate::encoding::encode(text, encoding, eol),
+                "{encoding}/{eol}: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn crlf_streaming_joins_pairs_split_across_chunk_boundaries() {
+        // The exact splits the rope's internal chunking can produce: a `\r\n` pair cut in
+        // half by a chunk boundary, a lone CR at a chunk's end, empty chunks between them.
+        let joined = |chunks: &[&str]| -> Vec<u8> {
+            let mut out = Vec::new();
+            write_crlf(&mut out, chunks.iter().copied(), |_| {}).unwrap();
+            out
+        };
+        assert_eq!(joined(&["a\r", "\nb"]), b"a\r\nb");
+        assert_eq!(joined(&["a\r", "b"]), b"a\rb");
+        assert_eq!(joined(&["a\r", "", "\nb"]), b"a\r\nb");
+        assert_eq!(joined(&["a\r"]), b"a\r");
+        assert_eq!(joined(&["\r\n", "x\r\n"]), b"\r\nx\r\n");
+        // Exhaustively: every split of a mixed text streams to exactly what the whole-text
+        // encoder makes of the same text, so no boundary can change the bytes.
+        let text = "one\r\ntwo\nthree\r\rfour\r\n\r\nfive\r";
+        let whole = crate::encoding::encode(text, "utf8", "crlf");
+        for at in 0..=text.len() {
+            let (head, tail) = text.split_at(at);
+            let mut out = Vec::new();
+            write_crlf(&mut out, [head, tail].into_iter(), |_| {}).unwrap();
+            assert_eq!(out, whole, "split at {at}");
+        }
+    }
+
+    #[test]
+    fn save_progress_streams_monotonic_bytes() {
+        let s = scratch();
+        // ~21 MB, so the 8 MiB step reports intermediates, not only the two ends.
+        let text = (0..1_000_000)
+            .map(|i| format!("progress line {i:06}\n"))
+            .collect::<String>();
+        let path = s.file("progress.log", &text);
+        let events: std::sync::Arc<std::sync::Mutex<Vec<(u64, u64)>>> = Default::default();
+        let seen = std::sync::Arc::clone(&events);
+        write_doc(
+            std::path::Path::new(&path),
+            &ropey::Rope::from(text.as_str()),
+            "utf8",
+            "lf",
+            &move |written, total| seen.lock().unwrap().push((written, total)),
+        )
+        .unwrap();
+        let events = events.lock().unwrap();
+        let total = text.len() as u64;
+        assert_eq!(events.first(), Some(&(0, total)), "starts at zero over the whole size");
+        assert_eq!(events.last(), Some(&(total, total)), "ends at the whole size");
+        assert!(events.len() >= 4, "the 8 MiB step must report intermediates: {events:?}");
+        assert!(
+            events.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "written bytes only ever grow: {events:?}"
+        );
+        assert!(events.iter().all(|&(written, of)| written <= of));
+    }
+
+    #[test]
+    fn a_staged_document_saves_whole_after_its_tail_lands() {
+        let s = scratch();
+        // ~13 MB: past HEAD_BYTES, so the open returns from the head while the tail builds
+        // on its own thread. `viewer_save` waits that tail out before writing; the same
+        // landing is proven here before the writer runs.
+        let mut text = String::with_capacity(13 << 20);
+        for i in 0..330_000 {
+            text.push_str(&format!("line {i:06} to save\n"));
+        }
+        let path = s.file("staged-save.log", &text);
+        let state = ViewerState::default();
+        let opened = open_impl(&state, &path).unwrap();
+        while state
+            .with_doc(opened.doc_id, |doc| doc.line_estimate.is_some())
+            .unwrap()
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        edit_impl(&state, opened.doc_id, 0, 0, 0, 0, "edited ").unwrap();
+        let (path_of, encoding, eol, rope) = state
+            .with_doc(opened.doc_id, |doc| {
+                (doc.path.clone(), doc.encoding.clone(), doc.eol.clone(), doc.rope.clone())
+            })
+            .unwrap();
+        write_doc(&path_of, &rope, &encoding, &eol, &|_, _| {}).unwrap();
+        let expect = text.replacen("line 000000", "edited line 000000", 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expect);
     }
 
     #[test]

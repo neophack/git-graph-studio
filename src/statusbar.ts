@@ -1,8 +1,9 @@
 // The status bar, VS Code's layout (M3 3.11 / 3.12): on the left the checked-out branch with
 // its ahead count, the behind count as its own item (both click through to git), the "Git
-// Graph" item and the conflict count; on the right the cursor position, the indent, the
-// encoding, the line endings, the language, and the notification bell (which opens the
-// notification centre - every toast ever shown stays listed there until cleared).
+// Graph" item, the conflict count, the symbol index state and the save progress; on the
+// right the cursor position, the indent, the encoding, the line endings, the language, and
+// the notification bell (which opens the notification centre - every toast ever shown stays
+// listed there until cleared).
 
 import { invoke } from '@tauri-apps/api/core';
 
@@ -39,6 +40,12 @@ export class StatusBar {
 	/** The symbol index state (M4 4.11): "Indexing symbols 12/300" while a build runs, the
 	 *  symbol count when it is ready; a click rebuilds. */
 	private readonly symbolsItem: HTMLElement;
+	/** The save progress: "Saving… 42%" over a thin bar that fills as the backend streams
+	 *  the rope out. The whole point is the multi-hundred-megabyte Ctrl+S that takes
+	 *  seconds; `total` 0 (the save has not reported yet) shows the indeterminate pulse. */
+	private readonly saveItem: HTMLElement;
+	private readonly saveFill: HTMLElement;
+	private readonly saveLabel: HTMLElement;
 	private readonly positionItem: HTMLElement;
 	private readonly indentItem: HTMLElement;
 	private readonly encodingItem: HTMLElement;
@@ -81,7 +88,12 @@ export class StatusBar {
 		this.symbolsItem = el('div', 'status-item');
 		this.symbolsItem.hidden = true;
 		this.symbolsItem.addEventListener('click', () => this.onSymbolsClick?.());
-		this.left.append(this.branchItem, this.pullItem, this.graphItem, this.conflictsItem, this.symbolsItem);
+		this.saveItem = el('div', 'status-item status-save');
+		this.saveItem.hidden = true;
+		this.saveFill = el('i');
+		this.saveLabel = el('span');
+		this.saveItem.append(el('div', 'status-save-track', [this.saveFill]), this.saveLabel);
+		this.left.append(this.branchItem, this.pullItem, this.graphItem, this.conflictsItem, this.symbolsItem, this.saveItem);
 
 		this.positionItem = el('div', 'status-item static');
 		this.indentItem = el('div', 'status-item', ['Spaces: 4']);
@@ -180,6 +192,25 @@ export class StatusBar {
 			this.symbolsItem.append(icon('symbol-method'), ` ${t('symbols.ready')}`);
 			tooltip(this.symbolsItem, () => t('symbols.rebuild'));
 		}
+	}
+
+	/** Show (or, with null, hide) the save progress. `total` 0 is the indeterminate pulse —
+	 *  the save is running but the backend has not streamed a report yet (its tail is still
+	 *  landing, or the document is a whole-file save the backend reports nothing about). */
+	setSaveProgress(progress: { written: number; total: number } | null): void {
+		this.saveItem.hidden = progress === null;
+		if (progress === null) return;
+		if (progress.total > 0) {
+			const percent = Math.min(100, Math.floor((progress.written / progress.total) * 100));
+			this.saveLabel.textContent = `${t('status.saving')} ${percent}%`;
+			this.saveFill.style.width = `${percent}%`;
+			this.saveFill.classList.remove('indeterminate');
+		} else {
+			this.saveLabel.textContent = t('status.saving');
+			this.saveFill.classList.add('indeterminate');
+			this.saveFill.style.width = '';
+		}
+		this.saveItem.title = t('status.saving');
 	}
 
 	setRepo(hasRepo: boolean): void {

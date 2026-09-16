@@ -56,6 +56,9 @@ export class EditorArea {
 	/** Any group's set of tabs changed: the workbench snapshots the session. */
 	onTabsChange: (() => void) | null = null;
 	onFileSaved: ((path: string) => void) | null = null;
+	/** A windowed editor's save streamed a progress report (`null` clears it), from whichever
+	 *  group it belongs to; the workbench forwards this to the status bar's save item. */
+	onSaveProgress: ((progress: { written: number; total: number } | null) => void) | null = null;
 	onMergeResolved: (() => void) | null = null;
 	onExternalFileChange: (() => void) | null = null;
 	private welcomeRenderer: ((container: HTMLElement) => void) | null = null;
@@ -430,6 +433,7 @@ export class EditorArea {
 			this.onTabsChange?.();
 		};
 		group.onFileSaved = (path) => this.onFileSaved?.(path);
+		group.onSaveProgress = (progress) => this.onSaveProgress?.(progress);
 		group.onMergeResolved = () => this.onMergeResolved?.();
 		group.onExternalFileChange = () => this.onExternalFileChange?.();
 		group.onOpenPreviewToSide = (path) => void this.openMarkdownPreviewToSide(path);
