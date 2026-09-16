@@ -536,6 +536,17 @@ export class HexView {
 				placeholder.replaceWith(filled);
 			});
 		}
+		// The load-time probe can measure before the theme's editor font applies (a fresh
+		// window's fallback font lays rows a couple of pixels shorter), and the model then
+		// misplaces every row by that fraction - magnified to whole rows at a scaled
+		// document's bottom. The first drawn row is the truth; a real mismatch re-lays-out
+		// once, after which the model matches the layout.
+		const laidRow = body.firstElementChild as HTMLElement | null;
+		const laid = laidRow ? laidRow.getBoundingClientRect().height : 0;
+		if (laid > 1 && Math.abs(laid - this.rowHeight) > 0.25) {
+			this.rowHeight = laid;
+			this.relayout();
+		}
 	}
 
 	/** The cursor byte's index within a row starting at `offset`, or -1. */

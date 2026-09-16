@@ -306,6 +306,14 @@ export class HexCompareView {
 				placeholder.replaceWith(filled);
 			});
 		}
+		// Same self-correction as the hex viewer's: the load-time probe can measure before
+		// the theme's editor font applies; the first drawn row is the truth.
+		const laidRow = body.firstElementChild as HTMLElement | null;
+		const laid = laidRow ? laidRow.getBoundingClientRect().height : 0;
+		if (laid > 1 && Math.abs(laid - this.rowHeight) > 0.25) {
+			this.rowHeight = laid;
+			this.relayout();
+		}
 	}
 
 	/** Which of a pane's bytes at [offset, offset+length) differ: the regions overlapping
