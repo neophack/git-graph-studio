@@ -252,6 +252,7 @@ export class Workbench {
 		const hasCommentSurface = () => this.editors.activeView !== null || this.editors.activeInput !== null;
 		register({ id: 'editor.toggleLineComment', title: 'Toggle Line Comment', category: 'Edit', keybinding: 'Ctrl+/', enabled: hasCommentSurface, run: () => this.editors.runEditorCommand('toggleLineComment') });
 		register({ id: 'editor.toggleBlockComment', title: 'Toggle Block Comment', category: 'Edit', keybinding: 'Shift+Alt+A', enabled: hasCommentSurface, run: () => this.editors.runEditorCommand('toggleBlockComment') });
+		register({ id: 'editor.toggleWordWrap', title: 'Toggle Word Wrap', category: 'View', keybinding: 'Alt+Z', run: () => updateSetting('wordWrap', !settings.wordWrap) });
 		register({ id: 'editor.selectAll', title: 'Select All', category: 'Selection', keybinding: 'Ctrl+A', enabled: hasEditor, run: () => this.editors.runEditorCommand('selectAll') });
 
 		register({ id: 'workbench.quickOpen', title: 'Go to File...', category: 'Go', keybinding: 'Ctrl+P', enabled: hasRepo, run: () => this.quickOpen('') });
@@ -328,7 +329,7 @@ export class Workbench {
 			{ label: t('menu.selection'), entries: (): MenuEntry[] => [item('editor.selectAll')] },
 				{ label: t('menu.view'), entries: (): MenuEntry[] => [
 				item('workbench.commandPalette'), 'separator',
-				item('workbench.showExplorer'), item('workbench.showSearch'), item('workbench.showScm'), item('workbench.showGraph'), item('workbench.showOutput'), item('workbench.showContext'), item('workbench.showSymbolDatabase'), 'separator', item('markdown.showPreview'), item('markdown.showPreviewToSide'), item('git.openFileHistory'), item('git.toggleBlame'), 'separator',
+				item('workbench.showExplorer'), item('workbench.showSearch'), item('workbench.showScm'), item('workbench.showGraph'), item('workbench.showOutput'), item('workbench.showContext'), item('workbench.showSymbolDatabase'), 'separator', item('editor.toggleWordWrap'), 'separator', item('markdown.showPreview'), item('markdown.showPreviewToSide'), item('git.openFileHistory'), item('git.toggleBlame'), 'separator',
 				{ label: 'Editor Layout', submenu: [
 				item('workbench.splitEditor'), item('workbench.splitEditorDown'), 'separator', item('workbench.focusFirstEditorGroup'), item('workbench.focusSecondEditorGroup'), item('workbench.focusThirdEditorGroup')
 				] },
