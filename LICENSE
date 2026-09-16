@@ -1,0 +1,77 @@
+Git Graph Studio is a composite work: everything committed to this repository is
+original to it, but the products it builds embed the Git Graph webview ported
+from Git Graph by mhutchie and the third-party components listed below. This
+file grants rights only to the parts original to this project; the other parts
+remain governed by their upstream licenses.
+
+# Original contributions
+
+Copyright (c) 2026 penghongxia
+
+The "Original Contributions" are the parts of this repository that are not
+derived from any third-party work. They include the workbench frontend (./src/,
+./static/, ./index.html, ./ext-host.html), the Rust backend (./src-tauri/), the
+tests (./tests/), the dev harness (./dev/), the build and measurement tooling
+(./scripts/, ./vite.config.ts, ./vitest.config.ts, ./tsconfig.json) and the
+documentation (./README.md, ./AGENTS.md, ./docs/).
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+# The Git Graph webview and built products
+
+The installers and application binaries produced by `npx tauri build` embed
+artifacts compiled from the vscode-git-graph-rs submodule (scripts/prepare.mjs):
+
+- the Git Graph webview (gitgraph/out.min.js and out.min.css) and the bundles
+  generated from the extension's compiled sources (gitgraph/config.js,
+  gitgraph/compare.js), which carry the Git Graph view's behaviour;
+- the application icons, derived from the submodule's icon.png, itself a
+  modified derivative of the upstream Git Graph icon.
+
+The webview and extension-host layers are ported and modified from Git Graph by
+mhutchie (https://github.com/mhutchie/vscode-git-graph) and are governed by
+vscode-git-graph-rs/licenses/LICENSE_GIT_GRAPH. That license DOES NOT grant
+permission to publish, distribute, sublicense, and/or sell derivative works of
+that software. Anyone redistributing the built products of this repository must
+comply with that restriction as it applies to the embedded webview and icons.
+The Rust engine (git-graph-core, vscode-git-graph-rs/native/) is original to
+the submodule and may be used under the MIT grant above independently of them.
+
+# Third-party components
+
+The application additionally bundles, statically links or derives from:
+
+- CodeMirror 6 (@codemirror/*, codemirror, @lezer/highlight) — MIT.
+- xterm.js (@xterm/xterm, @xterm/addon-fit) — MIT.
+- The codicon set (@vscode/codicons) — MIT, Copyright (c) Microsoft Corporation.
+- Tauri 2 and its plugins — MIT OR Apache-2.0.
+- The Rust crates the backend links — MIT OR Apache-2.0; the license texts and
+  the full inventory are the submodule's (vscode-git-graph-rs/licenses/
+  THIRD-PARTY-NOTICES.md, LICENSE-MIT, LICENSE-APACHE).
+- ./src/fuzzy.ts, ported from VS Code's vs/base/common/fuzzyScorer.ts, and the
+  --vscode-* token values in ./static/theme/, which follow VS Code's theme
+  definitions — Copyright (c) 2015 - present Microsoft Corporation, MIT.
+- markdown-it (MIT) and highlight.js (BSD-3-Clause), vendored from the
+  submodule's media/vendor into the app bundle.
+
+The respective license texts are available in the upstream packages and, for
+the engine-side components, in the vscode-git-graph-rs/licenses/ directory.
+
+This file is not legal advice. If the terms above ever conflict with an
+upstream license, the upstream license prevails for its respective component.

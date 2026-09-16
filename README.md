@@ -184,3 +184,12 @@ version; the tag is then created at that commit.
 - Write operations from the Git Graph view (fetch, push, checkout, …) are refused with a pointer
   to the built-in terminal; the Source Control panel's own writes (stage/commit/discard) do shell
   out to `git`.
+
+## License
+
+The repository's own code is MIT ([LICENSE](LICENSE)). The built installers are more restricted
+than that: they embed the Git Graph webview and the app icon, ported from Git Graph by mhutchie,
+whose license does not permit distributing derivative works — read the *Git Graph webview and
+built products* section of the [LICENSE](LICENSE) and
+`vscode-git-graph-rs/licenses/LICENSE_GIT_GRAPH` before redistributing anything produced by
+`npx tauri build`.
