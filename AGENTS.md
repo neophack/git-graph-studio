@@ -214,8 +214,9 @@ colouring, sticky scroll, minimap, bookmarks, markdown preview.
   renders extension READMEs)
 - Backend: `src-tauri/src/viewer/` (`doc.rs`: ropey rope + syntect highlight checkpoints;
   `find.rs`: the whole-document find/replace matcher, scan and replacement pass;
-  `outline.rs`: symbol outline), `src-tauri/src/encoding.rs` (encoding detection and line
-  endings)
+  `indexed.rs`: the memory-bounded line-index viewer for enormous files (index + on-demand
+  windows + streaming find); `outline.rs`: symbol outline), `src-tauri/src/encoding.rs`
+  (encoding detection and line endings)
 
 ### 7. Large-File Viewers
 
@@ -309,6 +310,8 @@ performance gate lives in `src-tauri/tests/perf.rs`.
   `cdp-probe.mjs` / `cdp-trace.mjs` (live inspection over WebView2's CDP port),
   `scripts/probes/verify-can-scroll.mjs` (drags a live CAN raw view to its scrollbar's
   bottom and verifies the tail rows are really visible in the layout),
+  `scripts/probes/verify-indexed-view.mjs` (the same for the indexed viewer: mount time,
+  first text, drag latency),
   `dev/dev-harness.html` (the two-mode harness: real Tauri IPC under `tauri dev`, or the
   scripted fake backend under `npm run dev:vite`)
 

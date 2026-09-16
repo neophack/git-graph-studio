@@ -9,7 +9,8 @@
 //! the landing corrects over the `studio://viewer-lines` event.
 
 pub mod doc;
-mod find;
+pub mod indexed;
+pub(crate) mod find;
 mod outline;
 
 use serde::Serialize;
@@ -30,7 +31,7 @@ const MAX_WINDOW: usize = 500;
 /// The head `viewer_open` builds synchronously — a couple of screens plus the scrollbar's
 /// first estimate, tens of milliseconds whatever the file's size. Everything past it builds
 /// in the background.
-const HEAD_BYTES: usize = 4 << 20;
+pub(crate) const HEAD_BYTES: usize = 4 << 20;
 
 /// How far the head may extend past `HEAD_BYTES` hunting the newline that ends its last
 /// whole line (a minified file's "line" can run for megabytes; the head stays bounded).
@@ -74,24 +75,24 @@ struct DocHandle {
 
 /// What a reader of beyond-the-head lines blocks on until the tail lands: a one-shot gate
 /// the build thread opens exactly once, however it ends (append, failure, supersede).
-struct TailGate {
+pub(crate) struct TailGate {
     pending: (Mutex<bool>, Condvar),
 }
 
 impl TailGate {
-    fn pending() -> Arc<TailGate> {
+    pub(crate) fn pending() -> Arc<TailGate> {
         Arc::new(TailGate { pending: (Mutex::new(true), Condvar::new()) })
     }
 
     /// Open the gate from the build thread: whatever waited proceeds against the doc's
     /// now-truthful fields.
-    fn land(&self) {
+    pub(crate) fn land(&self) {
         let (lock, signal) = &self.pending;
         *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
         signal.notify_all();
     }
 
-    fn wait(&self) {
+    pub(crate) fn wait(&self) {
         let (lock, signal) = &self.pending;
         let mut pending = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         while *pending {
@@ -382,7 +383,7 @@ fn open_staged(path: &str) -> Result<Staged, String> {
 }
 
 /// A positioned read: Windows' `seek_read` or Unix's `read_at`, whichever platform builds.
-fn positioned_read(file: &File, buf: &mut [u8], at: u64) -> std::io::Result<usize> {
+pub(crate) fn positioned_read(file: &File, buf: &mut [u8], at: u64) -> std::io::Result<usize> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::FileExt;
@@ -395,7 +396,7 @@ fn positioned_read(file: &File, buf: &mut [u8], at: u64) -> std::io::Result<usiz
     }
 }
 
-fn read_exact_at(file: &File, buf: &mut [u8], at: u64) -> std::io::Result<()> {
+pub(crate) fn read_exact_at(file: &File, buf: &mut [u8], at: u64) -> std::io::Result<()> {
     let mut done = 0usize;
     while done < buf.len() {
         let read = positioned_read(file, &mut buf[done..], at + done as u64)?;
@@ -607,26 +608,36 @@ fn ensure_lines(handle: &DocHandle, start: usize) -> Result<(), String> {
     wait_tail(handle)
 }
 
+/// The prewarm slot: filled once with the staged open (head or whole), signalled when it
+/// is. A condvar pair rather than a join, because the thread keeps building the tail after
+/// the slot fills — only the head is worth waiting for.
+type PrewarmSlot = Arc<(Mutex<Option<Result<Staged, String>>>, Condvar)>;
+
 /// A document built ahead of its `viewer_open`: `git-graph-studio <file>` starts the staged
 /// open of its launch file at process start, in parallel with the window and the webview
 /// coming up, so the page's open request finds the head already built instead of starting
 /// it then. The slot fills as soon as the head (or the whole small file) is ready.
 struct Prewarmed {
     path: String,
-    slot: Arc<(Mutex<Option<Result<Staged, String>>>, Condvar)>,
+    slot: PrewarmSlot,
 }
 
 static PREWARMED: Mutex<Option<Prewarmed>> = Mutex::new(None);
 
+/// The size past which a text file opens through the indexed, memory-bounded viewer
+/// instead of a rope — the frontend routes on the same number (`HUGE_VIEW_BYTES` there).
+pub const HUGE_VIEW_BYTES: u64 = 256 << 20;
+
 /// Start opening `path` on a background thread. A binary file is not worth a document (the
-/// hex viewer reads windows on demand), so its head is sniffed first - the sniff is what
-/// the frontend's probe asks anyway, and it costs one small read.
+/// hex viewer reads windows on demand), and an enormous or minified one will open through
+/// the indexed viewer whose own open is fast — either way no rope is worth building, so
+/// the head is sniffed first: the sniff is what the frontend's probe asks anyway, and it
+/// costs one small read.
 pub fn prewarm(path: String) {
-    if !matches!(crate::cmd_fs::probe(&path), Ok(probe) if !probe.binary) {
+    if !matches!(crate::cmd_fs::probe(&path), Ok(probe) if !probe.binary && probe.size <= HUGE_VIEW_BYTES && !probe.long_lines) {
         return;
     }
-    let slot: Arc<(Mutex<Option<Result<Staged, String>>>, Condvar)> =
-        Arc::new((Mutex::new(None), Condvar::new()));
+    let slot: PrewarmSlot = Arc::new((Mutex::new(None), Condvar::new()));
     {
         let mut guard = PREWARMED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         // A second prewarm replaces the first: the launch path is what the window opens.

@@ -906,6 +906,7 @@ mod desktop {
         .manage(state)
         .manage(Mutex::new(pty::PtyState::default()))
         .manage(viewer::ViewerState::default())
+        .manage(viewer::indexed::IndexedState::default())
         .manage(can_log::CanLogState::default())
         .setup(|app| {
             // Git's output reaches the panel's "Git" channel as it happens.
@@ -1028,6 +1029,10 @@ mod desktop {
             viewer::viewer_backup,
             viewer::viewer_symbols,
             viewer::viewer_close,
+            viewer::indexed::indexed_open,
+            viewer::indexed::indexed_lines,
+            viewer::indexed::indexed_find,
+            viewer::indexed::indexed_close,
             cmd_ext::ext_list,
             cmd_ext::ext_install_from_vsix,
             cmd_ext::ext_uninstall,

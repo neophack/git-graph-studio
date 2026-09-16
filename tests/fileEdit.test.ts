@@ -104,6 +104,46 @@ describe('text file editing', () => {
 		await group.closeAll();
 	});
 
+	it('routes an enormous file to the indexed, memory-bounded viewer instead of a rope', async () => {
+		fileBackend();
+		// 300 MB: past HUGE_VIEW_BYTES, so the open never builds a rope — the line index
+		// and on-demand windows keep memory at megabytes whatever the file's size.
+		backend.on('file_probe', () => ({ size: 300 * 1024 * 1024, binary: false, longLines: false }));
+		backend.on('indexed_open', () => ({ docId: 3, lineCount: 1_200_000, language: 'log', syntaxName: 'Plain Text', encoding: 'utf8', eol: 'lf' }));
+		backend.on('indexed_lines', ({ start, end }) => ({
+			startLine: start as number,
+			lineCount: 1_200_000,
+			tokensPending: false,
+			lines: Array.from({ length: (end as number) - (start as number) + 1 }, (_, i) => [`indexed line ${(start as number) + i}`, []])
+		}));
+		backend.on('indexed_close', () => undefined);
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openFile('C:\\repo\\giant.log');
+		await flush();
+		// The indexed family served the open; no rope document was ever asked for.
+		expect(backend.callsTo('indexed_open')).toHaveLength(1);
+		expect(backend.callsTo('viewer_open')).toHaveLength(0);
+		expect(document.querySelector('.doc-edit')).toBeNull();
+		expect(document.querySelector('.fast-view')).not.toBeNull();
+		await group.closeAll();
+	});
+
+	it('routes a minified single-line monster to the indexed viewer too', async () => {
+		fileBackend();
+		backend.on('file_probe', () => ({ size: 40 * 1024 * 1024, binary: false, longLines: true }));
+		backend.on('indexed_open', () => ({ docId: 4, lineCount: 12, language: 'txt', syntaxName: 'Plain Text', encoding: 'utf8', eol: 'lf' }));
+		backend.on('indexed_lines', ({ start }) => ({ startLine: start as number, lineCount: 12, tokensPending: false, lines: [['minified', []]] }));
+		backend.on('indexed_close', () => undefined);
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openFile('C:\\repo\\bundle.js');
+		await flush();
+		expect(backend.callsTo('indexed_open')).toHaveLength(1);
+		expect(document.querySelector('.fast-view')).not.toBeNull();
+		await group.closeAll();
+	});
+
 	it('adopts the staged open\'s exact line count when the tail lands', async () => {
 		fileBackend();
 		// The windowed editor opens a huge file on its estimated count; the landing event

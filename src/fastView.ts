@@ -23,6 +23,8 @@ interface OpenResult {
 	lineCount: number;
 	language: string;
 	syntaxName: string;
+	/** Set locally: this document serves through the indexed command family. */
+	indexed?: boolean;
 }
 
 interface LinesResult {
@@ -100,6 +102,10 @@ export class FastView {
 	private readonly spacer: HTMLElement;
 	private readonly rows: HTMLElement;
 	private open: OpenResult | null = null;
+	/** The window-fetch command of the open document's family (rope or indexed). */
+	private linesCommand: Parameters<typeof invoke>[0] = 'viewer_lines';
+	/** True while the open document serves through the indexed, memory-bounded backend. */
+	private indexed = false;
 	/** The outline's symbols, fetched after the rows are up (`viewer_symbols`). */
 	private symbols: Symbol[] = [];
 	/** Line cache, 0-based → rendered row element. Missing lines are fetched on demand. */
@@ -187,21 +193,27 @@ export class FastView {
 		}).catch(() => undefined);
 	}
 
-	/** Open a file in the viewer. Returns false when the backend refused it (binary, missing…)
-	 *  so the caller can fall back to its normal open path. */
-	async openFile(path: string): Promise<boolean> {
+	/** Open a file in the viewer. `indexed` serves it through the memory-bounded backend
+	 *  (line index + windows read on demand) instead of the rope — the mode enormous files
+	 *  and minified single-line monsters open in. Returns false when the backend refused it
+	 *  (binary, missing…) so the caller can fall back to its normal open path. */
+	async openFile(path: string, options: { indexed?: boolean } = {}): Promise<boolean> {
+		const openCommand = options.indexed ? 'indexed_open' : 'viewer_open';
+		const closeCommand = options.indexed ? 'indexed_close' : 'viewer_close';
+		this.indexed = options.indexed ?? false;
+		this.linesCommand = options.indexed ? 'indexed_lines' : 'viewer_lines';
 		let info: OpenResult;
 		try {
-			info = await invoke<OpenResult>('viewer_open', { path });
+			info = await invoke<OpenResult>(openCommand, { path });
 		} catch (error) {
 			return false;
 		}
 		if (this.disposed) {
-			void invoke('viewer_close', { docId: info.docId });
+			void invoke(closeCommand, { docId: info.docId });
 			return true;
 		}
-		if (this.open) void invoke('viewer_close', { docId: this.open.docId });
-		this.open = info;
+		if (this.open) void invoke(this.open.indexed ? 'indexed_close' : 'viewer_close', { docId: this.open.docId });
+		this.open = { ...info, indexed: this.indexed };
 		this.symbols = [];
 		this.wantedTokens = null;
 		this.cache.clear();
@@ -215,15 +227,18 @@ export class FastView {
 		this.outlineItems.clear();
 		this.resyncLineCount(info.lineCount);
 		// The outline scans the whole file; it is the backend's second delivery, asked for
-		// only once the rows are on screen. A failure just leaves the pane hidden.
+		// only once the rows are on screen. The indexed tier has no outline (no rope, no
+		// syntax walk), so the pane simply stays hidden there.
 		const docId = info.docId;
-		void invoke<Symbol[]>('viewer_symbols', { docId })
-			.then((symbols) => {
-				if (this.disposed || this.open?.docId !== docId) return;
-				this.symbols = symbols;
-				this.renderOutline(symbols);
-			})
-			.catch(() => undefined);
+		if (!this.indexed) {
+			void invoke<Symbol[]>('viewer_symbols', { docId })
+				.then((symbols) => {
+					if (this.disposed || this.open?.docId !== docId) return;
+					this.symbols = symbols;
+					this.renderOutline(symbols);
+				})
+				.catch(() => undefined);
+		}
 		return true;
 	}
 
@@ -291,7 +306,7 @@ export class FastView {
 		for (let line = start; line <= end; line++) this.fetching.add(line);
 		this.fetchInFlight = true;
 		const docId = this.open.docId;
-		invoke<LinesResult>('viewer_lines', { docId, start, end })
+		invoke<LinesResult>(this.linesCommand, { docId, start, end })
 			.then((result) => {
 				this.fetchInFlight = false;
 				if (!this.disposed && this.open?.docId === docId) {
@@ -505,9 +520,10 @@ export class FastView {
 	/** Open the find bar: Ctrl+F for a file too large for an editable document at all. */
 	openFind(): void {
 		if (!this.findBar) {
-			const host: DocFindHost = {
-				docId: () => this.open?.docId ?? null,
-				position: () => ({ line: Math.max(0, Math.floor(this.docTop / this.lineHeight)), col: 0 }),
+		const host: DocFindHost = {
+			docId: () => this.open?.docId ?? null,
+			findCommand: () => (this.indexed ? 'indexed_find' : 'viewer_find'),
+			position: () => ({ line: Math.max(0, Math.floor(this.docTop / this.lineHeight)), col: 0 }),
 				revealMatch: (match) => {
 					this.currentMatch = match;
 					this.revealLine(match.line);
@@ -538,7 +554,7 @@ export class FastView {
 		this.unlisten = null;
 		this.findBar?.destroy();
 		this.findBar = null;
-		if (this.open) void invoke('viewer_close', { docId: this.open.docId });
+		if (this.open) void invoke(this.open.indexed ? 'indexed_close' : 'viewer_close', { docId: this.open.docId });
 		this.root.remove();
 	}
 }

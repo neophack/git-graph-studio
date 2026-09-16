@@ -136,6 +136,33 @@ describe('the fast viewer', () => {
 		expect(view.lineCount).toBe(2_000_000);
 		view.dispose();
 	});
+
+	it('serves the indexed family end to end: open, fetch, find, close', async () => {
+		// The memory-bounded mode: enormous files never build a rope — every request goes
+		// to the indexed command family, find included.
+		backend.on('indexed_open', () => ({ ...OPEN, docId: 5 }));
+		backend.on('indexed_close', () => undefined);
+		backend.on('indexed_find', () => ({ matches: [{ line: 3, startCol: 0, endCol: 2 }], capped: false, lineCount: 100 }));
+		backend.on('indexed_lines', ({ start, end }) => linesResult(start as number, end as number));
+		const view = new FastView(document.getElementById('editorGroup')!);
+		expect(await view.openFile('C:\repo\huge.log', { indexed: true })).toBe(true);
+		await flush();
+		expect(view.root.querySelectorAll('.fast-row').length).toBeGreaterThan(0);
+		expect(backend.callsTo('indexed_open')).toHaveLength(1);
+		expect(backend.callsTo('viewer_open')).toHaveLength(0);
+		expect(backend.callsTo('viewer_symbols')).toHaveLength(0); // no outline without a rope
+		// The find bar scans through the indexed backend.
+		view.openFind();
+		const input = view.root.querySelector<HTMLInputElement>('.cm-find-input')!;
+		input.value = 'line';
+		input.dispatchEvent(new Event('input'));
+		await new Promise((resolve) => setTimeout(resolve, 350)); // the find debounce
+		expect(backend.callsTo('indexed_find').length).toBeGreaterThanOrEqual(1);
+		expect(backend.callsTo('viewer_find')).toHaveLength(0);
+		view.dispose();
+		expect(backend.callsTo('indexed_close').length).toBe(1);
+	});
+
 	it('paints a cold window as plain text, then colors it when viewer_highlight lands', async () => {
 		backend.on('viewer_open', () => ({ ...OPEN, lineCount: 100_000 }));
 		backend.on('viewer_close', () => undefined);

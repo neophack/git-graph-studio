@@ -66,6 +66,9 @@ const LARGE_DOC_CHARS = 1024 * 1024;
  *  Minified files (few enormous lines) defeat the line window and stay on the full path
  *  whatever their size. */
 const WINDOWED_EDIT_BYTES = 8 * 1024 * 1024;
+/** Past this a text file opens through the indexed, memory-bounded viewer instead of a
+ *  rope: a gigabyte costs its line index (eight bytes a line), not the decoded file. */
+const HUGE_VIEW_BYTES = 256 * 1024 * 1024;
 /** How long after the last keystroke a Markdown preview follows its source. */
 const PREVIEW_DELAY_MS = 300;
 
@@ -521,6 +524,22 @@ export class EditorGroup {
 			this.add(editor, !options.inactive);
 			return;
 		}
+		// An enormous text file (past what any rope in memory should cost) or a minified
+		// one (few enormous lines) opens in the fast viewer's indexed mode: a line-start
+		// index plus windows read from disk on demand, memory-bounded whatever the size,
+		// with a single line of millions of characters as cheap as any other. Read-only —
+		// editing stays for files a rope can reasonably hold.
+		if (probe !== null && (probe.size > HUGE_VIEW_BYTES || (probe.longLines && probe.size > WINDOWED_EDIT_BYTES))) {
+			if (await this.tryMountFastView(editor, editor.pane, true)) {
+				if (probe.size > HUGE_VIEW_BYTES) {
+					notify('info', t('viewer.hugeReadOnly') + basename(path));
+				}
+				this.add(editor, !options.inactive);
+				if (options.inactive) return;
+				if (options.line !== undefined) this.revealIn(editor, options.line, options.column ?? 1);
+				return;
+			}
+		}
 		// A large text file edits in the windowed editor — no size wall: the document lives
 		// in the backend's rope and the webview holds one window of lines. Only when the
 		// backend refuses the document does the read-only fast viewer take over, and a
@@ -578,11 +597,11 @@ export class EditorGroup {
 	 *  (binary, unreadable) — the caller then falls back to its usual read-and-mount path.
 	 *  `parent` defaults to the editor pane; the CAN text form passes its wrapper so the
 	 *  Frames bar stays above the viewer. */
-	private async tryMountFastView(editor: Editor, parent: HTMLElement = editor.pane): Promise<boolean> {
+	private async tryMountFastView(editor: Editor, parent: HTMLElement = editor.pane, indexed = false): Promise<boolean> {
 		if (editor.input.kind !== 'file') return false;
 		const { FastView } = await loadFastView();
 		const view = new FastView(parent);
-		if (!(await view.openFile(editor.input.path))) {
+		if (!(await view.openFile(editor.input.path, { indexed }))) {
 			view.dispose();
 			return false;
 		}
@@ -663,8 +682,16 @@ export class EditorGroup {
 		} catch {
 			probe = null; // `read_file` below reports the real error
 		}
-		// A large log edits in the windowed editor like any large text file; the read-only
-		// fast viewer is only the fallback when the backend refuses the document.
+		// An enormous log (past what a rope should cost) reads in the indexed, memory-bounded
+		// fast viewer — read-only, like any file that size; an ordinary large log edits in
+		// the windowed editor, and the read-only rope viewer is only the fallback when the
+		// backend refuses the document.
+		if (probe !== null && probe.size > HUGE_VIEW_BYTES) {
+			if (await this.tryMountFastView(editor, wrap, true)) {
+				notify('info', t('viewer.hugeReadOnly') + basename(path));
+				return;
+			}
+		}
 		if (probe !== null && probe.size > WINDOWED_EDIT_BYTES && !probe.longLines && (await this.tryMountDocEdit(editor, wrap))) return;
 		if (probe !== null && probe.size > WINDOWED_EDIT_BYTES && (await this.tryMountFastView(editor, wrap))) {
 			notify('info', `'${basename(path)}' could not be opened for editing — showing it read-only`);

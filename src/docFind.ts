@@ -26,6 +26,9 @@ export interface DocFindMatch {
 export interface DocFindHost {
 	/** The document to search — read live, so a reopened file addresses the right rope. */
 	docId(): number | null;
+	/** The backend find command for this surface: `indexed_find` on the memory-bounded
+	 *  viewer, the rope's `viewer_find` (the default) everywhere else. */
+	findCommand?(): string;
 	/** The absolute position a fresh find anchors on: the first match at or after it is the
 	 *  current one (an editor's cursor; a viewer's top line, column 0). */
 	position(): { line: number; col: number };
@@ -223,7 +226,7 @@ export class DocFindController {
 		const options = findOptions();
 		let result: FindResult;
 		try {
-			result = await invoke<FindResult>('viewer_find', {
+			result = await invoke<FindResult>(this.host.findCommand?.() ?? 'viewer_find', {
 				docId,
 				query,
 				caseSensitive: options.caseSensitive,

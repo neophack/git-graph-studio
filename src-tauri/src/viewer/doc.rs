@@ -74,6 +74,20 @@ pub fn syntax_set() -> &'static SyntaxSet {
     SET.get_or_init(SyntaxSet::load_defaults_newlines)
 }
 
+/// The syntax definition's name for a file extension, without building a document — the
+/// indexed viewer reports a language for the status bar without any rope.
+pub fn syntax_name_for(language: &str) -> String {
+    let set = syntax_set();
+    set.find_syntax_by_extension(language)
+        .filter(|s| s.name != "Plain Text")
+        .or_else(|| set.find_syntax_by_extension(fallback_extension(language)))
+        .filter(|s| s.name != "Plain Text")
+        .or_else(|| set.find_syntax_by_extension("txt"))
+        .expect("syntect always ships a plain-text syntax")
+        .name
+        .to_owned()
+}
+
 impl ViewerDoc {
     /// Build a document from already-decoded text. `language` is the file extension, used to
     /// pick a syntax definition (falling back to syntect's plain-text one).
