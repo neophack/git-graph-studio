@@ -13,7 +13,7 @@
 import { invoke } from '@tauri-apps/api/core';
 
 import { convertCanLog, idHex } from './canLogView';
-import { basename, el, icon } from './ui';
+import { basename, el, icon, VirtualScroll } from './ui';
 
 interface CanOpenResult {
 	docId: number;
@@ -92,6 +92,16 @@ export class CanRawView {
 	private doc: CanOpenResult | null = null;
 	/** The frame count the backend has published so far — the scroll range's length. */
 	private parsed = 0;
+	/** The scroll range for the frames parsed so far — clamped and scaled past the layout
+	 *  engines' height ceiling, so a multi-million-frame log reaches its last row. */
+	private range = new VirtualScroll(0, ROW_HEIGHT);
+	/** The document-space offset the viewport is at (equals `scrollTop` until the range
+	 *  scales; the row placement follows it from there). */
+	private docTop = 0;
+	/** The visible window the last refresh computed — what a landing fetch checks itself
+	 *  against before placing rows. */
+	private windowFirst = 0;
+	private windowLast = Infinity;
 	private done = false;
 	private failed = false;
 	/** The previous poll's reading, so the live chip can show the walk's speed. */
@@ -201,7 +211,8 @@ export class CanRawView {
 			this.paintProgress(count);
 			if (count.parsed !== this.parsed) {
 				this.parsed = count.parsed;
-				this.spacer.style.height = `${this.parsed * ROW_HEIGHT}px`;
+				this.range = new VirtualScroll(this.parsed, ROW_HEIGHT);
+				this.spacer.style.height = `${this.range.spacerHeight}px`;
 				this.refresh();
 			}
 			if (count.done) {
@@ -234,9 +245,23 @@ export class CanRawView {
 	private refresh(): void {
 		const doc = this.doc;
 		if (!doc || this.disposed || this.failed) return;
-		const visible = Math.ceil(this.scroller.clientHeight / ROW_HEIGHT);
-		const first = Math.max(0, Math.floor(this.scroller.scrollTop / ROW_HEIGHT) - OVERSCAN);
+		const clientHeight = this.scroller.clientHeight;
+		const scrollTop = this.scroller.scrollTop;
+		const docTop = this.range.documentTop(scrollTop, clientHeight);
+		// Under a scaled range the rows are placed viewport-relative (their document-space
+		// offsets would themselves be clamped away) and must follow every scroll; unscaled
+		// they stay document-space and the engine scrolls them natively.
+		if (docTop !== this.docTop) {
+			this.docTop = docTop;
+			if (this.range.scaled) {
+				for (const [index, node] of this.cache) node.style.top = `${Math.round(index * ROW_HEIGHT - docTop + scrollTop)}px`;
+			}
+		}
+		const visible = Math.ceil(clientHeight / ROW_HEIGHT);
+		const first = Math.max(0, Math.floor(docTop / ROW_HEIGHT) - OVERSCAN);
 		const last = Math.min(this.parsed - 1, first + visible + OVERSCAN * 2);
+		this.windowFirst = first;
+		this.windowLast = last;
 		const wanted: number[] = [];
 		for (let index = first; index <= last; index++) {
 			if (!this.cache.has(index) && !this.fetching.has(index)) wanted.push(index);
@@ -259,6 +284,10 @@ export class CanRawView {
 				lines.forEach((line, offset) => {
 					const index = start + offset;
 					this.fetching.delete(index);
+					// A fetch lands after the viewport moved on (a scaled drag covers
+					// millions of rows in one bound): a row outside the current window is
+					// dropped, not placed — its viewport-relative offset would mean nothing.
+					if (index < this.windowFirst || index > this.windowLast) return;
 					if (this.cache.has(index)) return;
 					const row = this.renderRow(index, line);
 					this.cache.set(index, row);
@@ -271,7 +300,11 @@ export class CanRawView {
 	}
 
 	private place(row: HTMLElement, index: number): void {
-		row.style.top = `${index * ROW_HEIGHT}px`;
+		// Viewport-relative under a scaled range: the row's document offset, pulled back by
+		// how far the scroll position and that offset differ (`+ scrollTop` is what keeps
+		// the row on screen — without it a scaled scroll lands everything far above the
+		// viewport, blank). Unscaled, document-space, exactly as before.
+		row.style.top = this.range.scaled ? `${Math.round(index * ROW_HEIGHT - this.docTop + this.scroller.scrollTop)}px` : `${index * ROW_HEIGHT}px`;
 		// Rows arrive out of order; insert before the first row with a larger index.
 		const key = (node: HTMLElement) => Number(node.dataset.frame);
 		let after: HTMLElement | null = null;

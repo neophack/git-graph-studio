@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 import { EditorGroup } from '../src/editor';
 import { HexCompareView } from '../src/hexCompare';
+import { MAX_SCROLL_PX } from '../src/ui';
 import { backend } from './tauriMock';
 import { click, texts } from './helpers';
 
@@ -188,6 +189,31 @@ describe('hex compare', () => {
 		expect(tailSides[1]!.querySelectorAll('.hex-cell:not(.hex-blank)')).toHaveLength(5);
 		// The whole size tail is a difference region, tinted on the side that still has it.
 		expect(tailSides[1]!.querySelectorAll('.hex-cell.hex-diff')).toHaveLength(5);
+		view.destroy();
+	});
+
+	it('clamps the scrollbar and keeps the tail reachable past the engines\' height clamp', async () => {
+		// A 64 MiB pair at 16 bytes/row is 4,194,304 rows ≈ 84M px; the engines clamp near
+		// 33.5M px, which used to strand the tail behind a sizer the scrollbar could not move
+		// past. The sizer clamps at the ceiling and the scroll range scales instead.
+		const SIZE = 64 * 1024 * 1024;
+		backend.on('read_file_chunk', ({ offset, len }) => {
+			const start = Math.min(Number(offset), SIZE);
+			const end = Math.min(start + Number(len), SIZE);
+			return { size: SIZE, base64: Buffer.alloc(Math.max(0, end - start)).toString('base64') };
+		});
+		const view = new HexCompareView('C:\\g-l.bin', 'C:\\g-r.bin');
+		document.getElementById('editorGroup')!.appendChild(view.root);
+		await view.load();
+		expect(Number.parseInt(view.root.querySelector<HTMLElement>('.hex-sizer')!.style.height, 10)).toBe(MAX_SCROLL_PX);
+		const scroller = view.root.querySelector<HTMLElement>('.hex-scroller')!;
+		scroller.scrollTop = MAX_SCROLL_PX;
+		scroller.dispatchEvent(new Event('scroll'));
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		// The scrollbar's bottom maps to the pair's end: the final rows draw.
+		const rows = Array.from(view.root.querySelectorAll<HTMLElement>('.hex-body [data-row]'));
+		expect(rows.length).toBeGreaterThan(0);
+		expect(Math.max(...rows.map((row) => Number(row.dataset.row)))).toBeGreaterThanOrEqual(SIZE / 16 - 64);
 		view.destroy();
 	});
 

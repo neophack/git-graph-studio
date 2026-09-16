@@ -10,7 +10,7 @@ import { defaultKeymap } from '@codemirror/commands';
 
 import { DocFindController, type DocFindHost, type DocFindMatch, type DocFindSpec } from './docFind';
 import { vscodeHighlighting } from './cmTheme';
-import { el, notify } from './ui';
+import { el, notify, VirtualScroll } from './ui';
 import { invoke } from '@tauri-apps/api/core';
 
 interface OpenInfo {
@@ -88,8 +88,9 @@ function codePointCol(lineText: string, utf16: number): number {
 export class EditableDocView {
 	readonly root: HTMLElement;
 	private readonly scroller: HTMLElement;
-	private readonly spacerTop: HTMLElement;
-	private readonly spacerBottom: HTMLElement;
+	/** The one spacer: it stands in for every line outside the window, clamped and scaled
+	 *  past the layout engines' height ceiling (VirtualScroll), so any line count scrolls. */
+	private readonly spacer: HTMLElement;
 	private readonly host: HTMLElement;
 	private cm: EditorView | null = null;
 	private docId: number | null = null;
@@ -101,6 +102,8 @@ export class EditableDocView {
 	/** The window's lines exactly as the backend holds them (the last synced state). */
 	private synced: string[] = [];
 	private lineHeight = 19;
+	/** The scroll range for the document's lines — scaled past the height ceiling. */
+	private range = new VirtualScroll(0, 19);
 	private syncTimer: number | undefined;
 	private backupTimer: number | undefined;
 	/** Edits are sent strictly one at a time, chained through this promise. */
@@ -142,10 +145,9 @@ export class EditableDocView {
 	constructor(parent: HTMLElement) {
 		this.root = el('div', 'doc-edit');
 		this.scroller = el('div', 'doc-edit-scroll');
-		this.spacerTop = el('div', 'doc-edit-spacer');
+		this.spacer = el('div', 'doc-edit-spacer');
 		this.host = el('div', 'doc-edit-host');
-		this.spacerBottom = el('div', 'doc-edit-spacer');
-		this.scroller.append(this.spacerTop, this.host, this.spacerBottom);
+		this.scroller.append(this.spacer, this.host);
 		this.root.appendChild(this.scroller);
 		parent.appendChild(this.root);
 		this.scroller.addEventListener('scroll', () => this.onScroll(), { passive: true });
@@ -235,7 +237,7 @@ export class EditableDocView {
 		const docId = this.docId;
 		// The viewport's top line is captured before the window moves, so the layout pass
 		// below can put it back where it was — unless a jump claimed the slot first.
-		const anchor = this.pendingScrollLine ?? Math.floor(this.scroller.scrollTop / this.lineHeight);
+		const anchor = this.pendingScrollLine ?? Math.floor(this.viewportTop() / this.lineHeight);
 		this.pendingScrollLine = null;
 		const end = Math.min(start + WINDOW - 1, this.lineCount - 1);
 		let fetched: TextWindow;
@@ -282,11 +284,11 @@ export class EditableDocView {
 		}, 250);
 	}
 
-	/** Lay the window out from what CodeMirror actually rendered. The spacers and the host
+	/** Lay the window out from what CodeMirror actually rendered. The spacer and the host
 	 *  height follow the measured content height divided by the line count — an estimated
 	 *  line height drifts a fraction of a pixel per line, and at a 500-line window that
-	 *  drift showed as lines piling onto the spacers at the file's end. `anchor`, when
-	 *  given, is the 0-based line to keep at the viewport's top across a window slide.
+	 *  drift showed as lines piling up at the file's end. `anchor`, when given, is the
+	 *  0-based line to keep at the viewport's top across a window slide.
 	 *  A layout pass superseded by a newer swap applies nothing: its captured anchor is
 	 *  the old window's, and writing it late would yank the viewport back up the file. */
 	private relayout(anchor?: number): void {
@@ -301,10 +303,12 @@ export class EditableDocView {
 					this.lineHeight = height / this.synced.length;
 					this.host.style.height = `${height}px`;
 				}
-				const below = Math.max(0, this.lineCount - this.first - this.synced.length);
-				this.spacerTop.style.height = `${this.first * this.lineHeight}px`;
-				this.spacerBottom.style.height = `${below * this.lineHeight}px`;
-				if (anchor !== undefined) this.scroller.scrollTop = anchor * this.lineHeight;
+				// The spacer is the whole document, clamped and scaled past the layout
+				// engines' height ceiling — no line count is too many to scroll.
+				this.range = new VirtualScroll(this.lineCount, this.lineHeight);
+				this.spacer.style.height = `${this.range.spacerHeight}px`;
+				this.placeHost();
+				if (anchor !== undefined) this.scrollToDocument(anchor * this.lineHeight);
 				window.setTimeout(() => {
 					this.swapping = false;
 					// The swap repositioned the content under the viewport; re-check in case
@@ -315,10 +319,39 @@ export class EditableDocView {
 		});
 	}
 
+	/** The document-space offset the viewport's top stands for — the scaled-range mapping
+	 *  of the scroll position, and the plain scroll position while the document fits the
+	 *  height ceiling (the identity, unchanged behaviour). */
+	private viewportTop(): number {
+		return this.range.documentTop(this.scroller.scrollTop, this.scroller.clientHeight);
+	}
+
+	/** Scroll so that a document-space offset sits at the viewport's top. */
+	private scrollToDocument(offset: number): void {
+		this.scroller.scrollTop = this.range.scrollTopFor(offset, this.scroller.clientHeight);
+	}
+
+	/** Place the window's host at its content offset: the window's document offset, pulled
+	 *  back by how far the scroll position and that offset differ under a scaled range
+	 *  (unscaled the two coincide and this is just the document offset — exactly where the
+	 *  old top spacer put it). One style write per scroll: the host is absolutely
+	 *  positioned, so nothing else relayouts and no feedback touches the scroll position. */
+	private placeHost(): void {
+		const clientHeight = this.scroller.clientHeight;
+		const scrollTop = this.scroller.scrollTop;
+		const docTop = this.range.documentTop(scrollTop, clientHeight);
+		this.host.style.top = `${Math.max(0, Math.round(this.first * this.lineHeight - docTop + scrollTop))}px`;
+	}
+
 	private onScroll(): void {
-		if (!this.cm || this.lineCount <= this.synced.length) return;
+		if (!this.cm) return;
+		// Under a scaled range the host follows the thumb continuously (the slide below only
+		// recenters the window every so often — between slides this write is what keeps the
+		// lines under the viewport).
+		this.placeHost();
+		if (this.lineCount <= this.synced.length) return;
 		const visible = Math.ceil(this.scroller.clientHeight / this.lineHeight);
-		const anchor = Math.floor(this.scroller.scrollTop / this.lineHeight);
+		const anchor = Math.floor(this.viewportTop() / this.lineHeight);
 		const windowEnd = this.first + this.synced.length;
 		const nearTop = anchor < this.first + EDGE && this.first > 0;
 		const nearBottom = anchor + visible > windowEnd - EDGE && windowEnd < this.lineCount;
@@ -372,10 +405,11 @@ export class EditableDocView {
 		// cursor and the scroll position.
 		if (inside || this.lineCount <= this.synced.length) {
 			if (jump) this.placeCursor(line, column);
+			const top = this.viewportTop();
 			if (!inside ||
-				relative < Math.floor(this.scroller.scrollTop / this.lineHeight) - this.first ||
-				relative > Math.floor((this.scroller.scrollTop + this.scroller.clientHeight) / this.lineHeight) - this.first) {
-				this.scroller.scrollTop = Math.max(0, (line - Math.floor(visible / 2)) * this.lineHeight);
+				relative < Math.floor(top / this.lineHeight) - this.first ||
+				relative > Math.floor((top + this.scroller.clientHeight) / this.lineHeight) - this.first) {
+				this.scrollToDocument((line - Math.floor(visible / 2)) * this.lineHeight);
 			}
 			return;
 		}
@@ -386,7 +420,7 @@ export class EditableDocView {
 		if (windowFor() === this.first) {
 			if (jump) {
 				this.placeCursor(line, column);
-				this.scroller.scrollTop = Math.max(0, (line - Math.floor(visible / 2)) * this.lineHeight);
+				this.scrollToDocument((line - Math.floor(visible / 2)) * this.lineHeight);
 			}
 			return;
 		}

@@ -68,6 +68,42 @@ describe('text file editing', () => {
 		await group.closeAll();
 	});
 
+	it('edits a document past the engines\' scroll ceiling — the range scales, no read-only detour', { timeout: 10_000 }, async () => {
+		fileBackend();
+		// 2,000,000 lines ≈ 38M px: past what the layout engines can natively scroll, where
+		// a document-space spacer would strand the tail. The windowed editor's spacer clamps
+		// at the ceiling and the scroll range scales instead — the file stays editable end
+		// to end.
+		const LINES = 2_000_000;
+		backend.on('file_probe', () => ({ size: 100 * 1024 * 1024, binary: false, longLines: false }));
+		backend.on('viewer_open', () => ({ docId: 7, lineCount: LINES, language: 'log', syntaxName: 'Plain Text', symbols: [] }));
+		backend.on('viewer_text', ({ start, end }: { start: number; end: number }) => ({
+			startLine: start,
+			lineCount: LINES,
+			lines: Array.from({ length: Math.max(0, Math.min(end, LINES - 1) - start + 1) }, (_, i) => `line ${start + i}`)
+		}));
+		backend.on('viewer_edit', () => ({ lineCount: LINES, rehighlightFrom: 0 }));
+		backend.on('viewer_close', () => null);
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openFile('C:\\repo\\giant.log');
+		await flush();
+		// The windowed editor took the file — no read-only fast-view fallback.
+		expect(document.querySelector('.doc-edit')).not.toBeNull();
+		expect(document.querySelector('.fast-view')).toBeNull();
+		await new Promise((resolve) => setTimeout(resolve, 150)); // the opening swap settles
+
+		// Drag the scrollbar to its very bottom: the mapped position is the file's end and
+		// the window slides there — the last lines are editable, not stranded.
+		const scroller = document.querySelector<HTMLElement>('.doc-edit-scroll')!;
+		scroller.scrollTop = 32_000_000;
+		scroller.dispatchEvent(new Event('scroll'));
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		const asked = backend.callsTo('viewer_text').at(-1)!['start'] as number;
+		expect(asked).toBeGreaterThanOrEqual(LINES - 1200);
+		await group.closeAll();
+	});
+
 	it('refills the window a fast scrollbar drag ends on, even inside the slide cooldown', { timeout: 10_000 }, async () => {
 		fileBackend();
 		const LINES = Array.from({ length: 20_000 }, (_, i) => `line ${i}`);

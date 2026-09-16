@@ -306,6 +306,8 @@ performance gate lives in `src-tauri/tests/perf.rs`.
 - Tooling: `scripts/measure.mjs` (sizes + probes), `scripts/probes/boot-bench.mjs`
   (end-to-end startup latency of the release exe), `scripts/probes/cdp-console.mjs` /
   `cdp-probe.mjs` / `cdp-trace.mjs` (live inspection over WebView2's CDP port),
+  `scripts/probes/verify-can-scroll.mjs` (drags a live CAN raw view to its scrollbar's
+  bottom and verifies the tail rows are really visible in the layout),
   `dev/dev-harness.html` (the two-mode harness: real Tauri IPC under `tauri dev`, or the
   scripted fake backend under `npm run dev:vite`)
 

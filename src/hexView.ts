@@ -13,7 +13,7 @@
 // and advances), Ctrl+Z steps the edits back, and saving writes only the changed bytes.
 
 import { invoke } from '@tauri-apps/api/core';
-import { el, icon } from './ui';
+import { el, icon, VirtualScroll } from './ui';
 
 /** Rows are requested in slabs so scrolling doesn't fire a read per row. */
 const SLAB_BYTES = 64 * 1024;
@@ -182,6 +182,9 @@ export class HexView {
 	private rows = 0;
 	private rowHeight = 0;
 	private bytesPerRow = 16;
+	/** The scroll range for the file's rows — clamped and scaled past the layout engines'
+	 *  height ceiling, so a multi-gigabyte file's tail stays reachable by scrolling. */
+	private range = new VirtualScroll(0, 1);
 	/** A row width the user picked in the toolbar (0 = follow the window width). */
 	private forcedBytesPerRow = 0;
 	/** The byte an address jump landed on, highlighted until the flash times out. */
@@ -369,7 +372,7 @@ export class HexView {
 			return;
 		}
 		this.jumpTarget = Math.max(0, Math.min(value, Math.max(0, this.size - 1)));
-		this.scroller.scrollTop = Math.max(0, Math.floor(this.jumpTarget / this.bytesPerRow) * this.rowHeight);
+		this.scroller.scrollTop = this.range.scrollTopFor(Math.max(0, Math.floor(this.jumpTarget / this.bytesPerRow) * this.rowHeight), this.scroller.clientHeight);
 		this.updateStatus();
 		this.sizer.querySelector('.hex-body')?.remove();
 		this.draw();
@@ -387,7 +390,8 @@ export class HexView {
 	/** Recomputes the row width and total height, keeping the top of the viewport
 	 *  anchored to the same byte when the window resizes. */
 	private relayout(): void {
-		const firstByte = this.rowHeight ? (this.scroller.scrollTop / this.rowHeight) * this.bytesPerRow : 0;
+		const clientHeight = this.scroller.clientHeight;
+		const firstByte = this.rowHeight ? (this.range.documentTop(this.scroller.scrollTop, clientHeight) / this.rowHeight) * this.bytesPerRow : 0;
 		const bpr = this.pickBytesPerRow();
 		if (bpr !== this.bytesPerRow) this.sizer.querySelector('.hex-body')?.remove();
 		this.bytesPerRow = bpr;
@@ -398,8 +402,9 @@ export class HexView {
 		this.header.scrollLeft = this.scroller.scrollLeft;
 		if (!this.size || !this.rowHeight) return;
 		this.rows = Math.ceil(this.size / bpr);
-		this.sizer.style.height = `${this.rows * this.rowHeight}px`;
-		this.scroller.scrollTop = Math.floor(firstByte / bpr) * this.rowHeight;
+		this.range = new VirtualScroll(this.rows, this.rowHeight);
+		this.sizer.style.height = `${this.range.spacerHeight}px`;
+		this.scroller.scrollTop = this.range.scrollTopFor(Math.floor(firstByte / bpr) * this.rowHeight, clientHeight);
 		this.draw();
 		this.updateStatus();
 	}
@@ -466,8 +471,9 @@ export class HexView {
 	 *  the read resolves. */
 	private draw(): void {
 		if (!this.rowHeight || !this.rows) return;
-		const top = this.scroller.scrollTop;
+		const scrollTop = this.scroller.scrollTop;
 		const height = this.scroller.clientHeight || 400;
+		const top = this.range.documentTop(scrollTop, height);
 		const first = Math.max(0, Math.floor(top / this.rowHeight) - 8);
 		const last = Math.min(this.rows - 1, Math.ceil((top + height) / this.rowHeight) + 8);
 		let body = this.sizer.querySelector<HTMLElement>('.hex-body');
@@ -479,7 +485,10 @@ export class HexView {
 			body.style.top = '0';
 			this.sizer.append(body);
 		}
-		body.style.transform = `translateY(${first * this.rowHeight}px)`;
+		// The body sits at the document offset of its first row, pulled back by how far the
+		// scroll position and that offset differ under a scaled range (nothing unscaled,
+		// where the document offset is the content offset).
+		body.style.transform = `translateY(${first * this.rowHeight - top + scrollTop}px)`;
 		// Drop the rows that scrolled out, keep the ones still visible.
 		for (const node of Array.from(body.children)) {
 			const row = Number((node as HTMLElement).dataset.row);
@@ -539,8 +548,10 @@ export class HexView {
 	private revealByte(offset: number): void {
 		const row = Math.floor(offset / this.bytesPerRow);
 		const top = row * this.rowHeight;
-		if (top < this.scroller.scrollTop) this.scroller.scrollTop = Math.max(0, top - 4 * this.rowHeight);
-		else if (top + this.rowHeight > this.scroller.scrollTop + this.scroller.clientHeight) this.scroller.scrollTop = top + this.rowHeight - this.scroller.clientHeight + 4 * this.rowHeight;
+		const clientHeight = this.scroller.clientHeight;
+		const at = this.range.documentTop(this.scroller.scrollTop, clientHeight);
+		if (top < at) this.scroller.scrollTop = this.range.scrollTopFor(Math.max(0, top - 4 * this.rowHeight), clientHeight);
+		else if (top + this.rowHeight > at + clientHeight) this.scroller.scrollTop = this.range.scrollTopFor(top + this.rowHeight - clientHeight + 4 * this.rowHeight, clientHeight);
 		else this.refreshRows([offset]);
 	}
 
@@ -615,7 +626,7 @@ export class HexView {
 		if (!this.hits.length || !this.searchNeedle) return;
 		this.hitIndex = ((index % this.hits.length) + this.hits.length) % this.hits.length;
 		const offset = this.hits[this.hitIndex]!;
-		this.scroller.scrollTop = Math.max(0, (Math.floor(offset / this.bytesPerRow) - 4) * this.rowHeight);
+		this.scroller.scrollTop = this.range.scrollTopFor(Math.max(0, (Math.floor(offset / this.bytesPerRow) - 4) * this.rowHeight), this.scroller.clientHeight);
 		this.updateCount();
 		this.draw();
 	}

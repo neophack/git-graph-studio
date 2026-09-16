@@ -4,6 +4,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { FastView } from '../src/fastView';
+import { MAX_SCROLL_PX } from '../src/ui';
 import { backend } from './tauriMock';
 import { flush } from './helpers';
 
@@ -73,6 +74,37 @@ describe('the fast viewer', () => {
 		expect(calls.length).toBe(2);
 		expect(calls[1]).toMatchObject({ start: 49_990, end: 50_010 });
 		expect(view.root.querySelector('.fast-row[data-line="50000"]')).not.toBeNull();
+		view.dispose();
+	});
+
+	it('scrolls a multi-million-line file to its end, past the engines\' height clamp', async () => {
+		// 2,000,000 lines at 19 px is 38M px of document; the engines clamp near 33.5M px,
+		// which used to strand the tail behind a spacer the scrollbar could not move past.
+		// The clamped, scaled range keeps the last lines reachable.
+		const LINES = 2_000_000;
+		backend.on('viewer_open', () => ({ ...OPEN, lineCount: LINES }));
+		backend.on('viewer_close', () => undefined);
+		backend.on('viewer_symbols', () => []);
+		backend.on('viewer_lines', ({ start, end }) => linesResult(start as number, end as number));
+		const view = new FastView(document.getElementById('editorGroup')!);
+		await view.openFile('C:\\repo\\huge.txt');
+		await flush();
+		expect(Number.parseInt(view.root.querySelector<HTMLElement>('.fast-spacer')!.style.height, 10)).toBe(MAX_SCROLL_PX);
+		// The scrollbar dragged to its bottom maps to the document's end: the final lines
+		// fetch and render (the unscaled spacer ended ~300k lines short of them).
+		const scroller = view.root.querySelector<HTMLElement>('.fast-scroll')!;
+		scroller.scrollTop = MAX_SCROLL_PX;
+		scroller.dispatchEvent(new Event('scroll'));
+		await flush();
+		expect(view.root.querySelector(`.fast-row[data-line="${LINES - 10}"]`)).not.toBeNull();
+		// And they render *in the viewport*, not merely fetched: each row's content offset
+		// sits within a viewport-and-overscan band of the scroll position (a row placed at
+		// its bare document offset lands `scrollTop` pixels above the viewport — blank).
+		for (const row of Array.from(view.root.querySelectorAll<HTMLElement>('.fast-row'))) {
+			const top = Number.parseInt(row.style.top, 10);
+			expect(top).toBeGreaterThan(MAX_SCROLL_PX - 1000);
+			expect(top).toBeLessThan(MAX_SCROLL_PX + 1000);
+		}
 		view.dispose();
 	});
 });

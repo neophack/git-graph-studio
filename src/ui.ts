@@ -38,6 +38,85 @@ export function escapeHtml(text: string): string {
 	return text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string);
 }
 
+/* ---------- Virtual scrolling past the engines' height ceiling ---------- */
+
+/** The document height to assume the engines can lay out when nothing can be measured (a
+ *  headless test DOM): under Chromium's and WebKit's ~33.5M px clamp with a margin. */
+export const MAX_SCROLL_PX = 32_000_000;
+
+/** The probe height for measuring the real clamp: the engines cut every element near
+ *  33,554,432 layout px (their 2^25-ish LayoutUnit). */
+const CEILING_PROBE_PX = 33_554_432;
+
+let measuredCeiling: number | null = null;
+
+/** The tallest document this engine will actually lay out, in CSS pixels. The ~33.5M layout
+ *  clamp divides by the webview's zoom: on a Windows display scaled to 150%, say, an
+ *  element is cut near 22.4M CSS px — so the ceiling is probed once (an element is laid
+ *  out and measured back) rather than assumed, and everything taller stays a guard band
+ *  under it so the rows and windows placed at its edge fit inside the clamp too. */
+function scrollHeightCeiling(): number {
+	if (measuredCeiling === null) {
+		measuredCeiling = MAX_SCROLL_PX;
+		if (typeof document !== 'undefined' && document.body) {
+			const probe = document.createElement('div');
+			probe.style.cssText = `position:absolute;top:0;left:0;width:1px;height:${CEILING_PROBE_PX}px;visibility:hidden;pointer-events:none;`;
+			document.body.appendChild(probe);
+			const laid = probe.getBoundingClientRect().height;
+			probe.remove();
+			if (laid > 0 && laid < CEILING_PROBE_PX) measuredCeiling = Math.max(1_000_000, Math.floor(laid) - 65_536);
+		}
+	}
+	return measuredCeiling;
+}
+
+/** The scrollbar mapping for a virtual document of `count` rows × `rowHeight`: the spacer
+ *  height to ask the engine for, the document offset a scroll position stands for, and the
+ *  scroll position that lands a given document offset. While the document fits the ceiling
+ *  (the common case) everything is the identity; past it the scroll range is scaled — a
+ *  four-million-row trace stays browsable to its last row instead of ending at the clamp. */
+export class VirtualScroll {
+	private readonly documentHeight: number;
+	private readonly spacer: number;
+
+	constructor(count: number, rowHeight: number) {
+		this.documentHeight = Math.max(1, count) * rowHeight;
+		this.spacer = Math.min(scrollHeightCeiling(), this.documentHeight);
+	}
+
+	/** The height the spacer element should carry. */
+	get spacerHeight(): number {
+		return this.spacer;
+	}
+
+	/** True past the ceiling: rows must then be placed viewport-relative (their document-space
+	 *  offsets would themselves be clamped away) and repositioned as the scroller moves. */
+	get scaled(): boolean {
+		return this.documentHeight > scrollHeightCeiling();
+	}
+
+	/** The document-space offset (px from the document's top) the scroller's current position
+	 *  stands for. */
+	documentTop(scrollTop: number, clientHeight: number): number {
+		if (!this.scaled) return scrollTop;
+		const scale = this.scale(clientHeight);
+		return Math.max(0, Math.min(this.documentHeight - clientHeight, scrollTop * scale));
+	}
+
+	/** The scroll position that puts `documentOffset` at the viewport's top. */
+	scrollTopFor(documentOffset: number, clientHeight: number): number {
+		if (!this.scaled) return documentOffset;
+		return Math.max(0, Math.min(this.spacer - clientHeight, documentOffset / this.scale(clientHeight)));
+	}
+
+	private scale(clientHeight: number): number {
+		const scrollable = this.spacer - clientHeight;
+		if (scrollable <= 0) return 1;
+		const document = this.documentHeight - clientHeight;
+		return document > scrollable ? document / scrollable : 1;
+	}
+}
+
 /* ---------- Delayed tooltips and the busy cursor (M7 7.8) ---------- */
 
 /** How long the pointer must rest on an element before its tooltip appears - long enough

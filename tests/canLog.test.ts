@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { EditorGroup, isCanLog } from '../src/editor';
 import { busLoad, formatCycle, idHex, parseIdFilter, progressText, type CanFrameLine, type CanIntervals, type CanLogStats, type CanProgress } from '../src/canLogView';
+import { MAX_SCROLL_PX } from '../src/ui';
 import { backend, Channel, dialog } from './tauriMock';
 import { click, texts } from './helpers';
 
@@ -193,6 +194,44 @@ describe('CAN log views', () => {
 		select.value = '1000000';
 		select.dispatchEvent(new Event('change'));
 		expect(document.querySelector(`${STATS_VIEW} .can-channels .can-load`)!.textContent).toBe('0.94 %');
+	});
+
+	it('a multi-million-frame log scrolls to its last frames, past the engines\' height clamp', async () => {
+		// 2,000,000 frames at 20 px a row is 40M px of document; the layout engines clamp
+		// element height near 33.5M px, which used to strand every frame past ~1.6M behind a
+		// spacer the scrollbar could not move past. The spacer now clamps at the ceiling and
+		// the scroll range scales: the scrollbar's bottom is the log's end.
+		const FRAMES = 2_000_000;
+		const frameAt = (index: number): CanFrameLine => ({
+			tS: index * 0.001, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17'
+		});
+		backend.on('can_log_open', () => ({ docId: 9, totalBytes: 1000 }));
+		backend.on('can_log_count', () => ({ parsed: FRAMES, done: true, error: null }));
+		backend.on('can_log_frames', ({ start, end }) => Array.from({ length: (end as number) - (start as number) }, (_, i) => frameAt((start as number) + i)));
+		backend.on('can_log_close', () => undefined);
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		await group.openFile('C:\\logs\\huge.asc');
+		await waitForReady(() => document.querySelector('.can-raw-spacer') !== null);
+		expect(Number.parseInt(document.querySelector<HTMLElement>('.can-raw-spacer')!.style.height, 10)).toBe(MAX_SCROLL_PX);
+		// Drag the scrollbar to its very bottom: the mapped position is the log's end, and
+		// the tail frames render — the ones the clamped old spacer kept out of reach.
+		const scroller = document.querySelector<HTMLElement>('.can-raw-scroll')!;
+		scroller.scrollTop = MAX_SCROLL_PX;
+		scroller.dispatchEvent(new Event('scroll'));
+		await waitForReady(() => {
+			const rows = document.querySelectorAll('.can-raw-rows .can-raw-row');
+			return rows.length > 0 && Number((rows[rows.length - 1] as HTMLElement).dataset.frame) >= FRAMES - 50;
+		});
+		// And they render *in the viewport*, not merely fetched: each row's content offset
+		// sits within a viewport-and-overscan band of the scroll position. (A row placed at
+		// its bare document offset — the bug this guards against — lands `scrollTop` pixels
+		// above the viewport and the pane shows blank.)
+		for (const row of Array.from(document.querySelectorAll<HTMLElement>('.can-raw-rows .can-raw-row'))) {
+			const top = Number.parseInt(row.style.top, 10);
+			expect(top).toBeGreaterThan(MAX_SCROLL_PX - 1000);
+			expect(top).toBeLessThan(MAX_SCROLL_PX + 1000);
+		}
+		await group.closeAll();
 	});
 
 	it('Text swaps the frame view for the editable plain text form and closes the log document', async () => {

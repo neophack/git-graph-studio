@@ -8,7 +8,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 
-import { el, icon } from './ui';
+import { el, icon, VirtualScroll } from './ui';
 import { OFFSET_DIGITS, ROW_LADDER, asciiChar, bytesPerRowFor, decodeBase64, groupSizeFor, hexAddress, hexByte, hexHeader, rowGridTemplate } from './hexView';
 
 /** Visible rows are filled from 64 KiB slabs, so scrolling reads a slab at a time. */
@@ -85,6 +85,9 @@ export class HexCompareView {
 	private rowHeight = 0;
 	private bytesPerRow = 16;
 	private forcedBytesPerRow = 0;
+	/** The scroll range for the comparison's rows — clamped and scaled past the layout
+	 *  engines' height ceiling, so the tail of a multi-gigabyte pair stays reachable. */
+	private range = new VirtualScroll(0, 1);
 	/** The scan's difference regions, in address order; empty until (and unless) it finds any. */
 	private regions: DiffRegion[] = [];
 	private regionIndex = -1;
@@ -202,7 +205,8 @@ export class HexCompareView {
 	}
 
 	private relayout(): void {
-		const firstByte = this.rowHeight ? (this.scroller.scrollTop / this.rowHeight) * this.bytesPerRow : 0;
+		const clientHeight = this.scroller.clientHeight;
+		const firstByte = this.rowHeight ? (this.range.documentTop(this.scroller.scrollTop, clientHeight) / this.rowHeight) * this.bytesPerRow : 0;
 		const bpr = this.pickBytesPerRow();
 		if (bpr !== this.bytesPerRow) this.sizer.querySelector('.hex-body')?.remove();
 		this.bytesPerRow = bpr;
@@ -217,8 +221,9 @@ export class HexCompareView {
 		// empty files make for nothing to draw.
 		if (!this.rowHeight || (!this.sizeLeft && !this.sizeRight)) return;
 		this.rows = Math.ceil(Math.max(this.sizeLeft, this.sizeRight) / bpr);
-		this.sizer.style.height = `${this.rows * this.rowHeight}px`;
-		this.scroller.scrollTop = Math.floor(firstByte / bpr) * this.rowHeight;
+		this.range = new VirtualScroll(this.rows, this.rowHeight);
+		this.sizer.style.height = `${this.range.spacerHeight}px`;
+		this.scroller.scrollTop = this.range.scrollTopFor(Math.floor(firstByte / bpr) * this.rowHeight, clientHeight);
 		this.draw();
 		this.updateStatus();
 	}
@@ -242,8 +247,9 @@ export class HexCompareView {
 	 *  n*bytesPerRow of both files - the panes never shift against each other. */
 	private draw(): void {
 		if (!this.rowHeight || !this.rows) return;
-		const top = this.scroller.scrollTop;
+		const scrollTop = this.scroller.scrollTop;
 		const height = this.scroller.clientHeight || 400;
+		const top = this.range.documentTop(scrollTop, height);
 		const first = Math.max(0, Math.floor(top / this.rowHeight) - 8);
 		const last = Math.min(this.rows - 1, Math.ceil((top + height) / this.rowHeight) + 8);
 		let body = this.sizer.querySelector<HTMLElement>('.hex-body');
@@ -255,7 +261,10 @@ export class HexCompareView {
 			body.style.top = '0';
 			this.sizer.append(body);
 		}
-		body.style.transform = `translateY(${first * this.rowHeight}px)`;
+		// The body sits at the document offset of its first row, pulled back by how far the
+		// scroll position and that offset differ under a scaled range (nothing unscaled,
+		// where the document offset is the content offset).
+		body.style.transform = `translateY(${first * this.rowHeight - top + scrollTop}px)`;
 		for (const node of Array.from(body.children)) {
 			const row = Number((node as HTMLElement).dataset.row);
 			if (row < first || row > last) node.remove();
@@ -441,7 +450,7 @@ export class HexCompareView {
 		if (!this.regions.length) return;
 		this.regionIndex = ((index % this.regions.length) + this.regions.length) % this.regions.length;
 		const region = this.regions[this.regionIndex]!;
-		this.scroller.scrollTop = Math.max(0, (Math.floor(region.start / this.bytesPerRow) - 4) * this.rowHeight);
+		this.scroller.scrollTop = this.range.scrollTopFor(Math.max(0, (Math.floor(region.start / this.bytesPerRow) - 4) * this.rowHeight), this.scroller.clientHeight);
 		this.updateCounter();
 		// The freshly scrolled-in rows must pick up their difference tints.
 		this.sizer.querySelector('.hex-body')?.remove();
@@ -459,7 +468,7 @@ export class HexCompareView {
 			return;
 		}
 		const target = Math.max(0, Math.min(value, Math.max(0, Math.max(this.sizeLeft, this.sizeRight) - 1)));
-		this.scroller.scrollTop = Math.floor(target / this.bytesPerRow) * this.rowHeight;
+		this.scroller.scrollTop = this.range.scrollTopFor(Math.floor(target / this.bytesPerRow) * this.rowHeight, this.scroller.clientHeight);
 		this.draw();
 		this.gotoBox.value = '0x' + target.toString(16).toUpperCase();
 	}

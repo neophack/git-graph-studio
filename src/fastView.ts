@@ -5,7 +5,7 @@
 import { invoke } from '@tauri-apps/api/core';
 
 import { DocFindController, type DocFindHost, type DocFindMatch } from './docFind';
-import { el, icon, notify } from './ui';
+import { el, icon, notify, VirtualScroll } from './ui';
 
 interface Symbol {
 	kind: 'function' | 'method' | 'class' | 'struct' | 'interface' | 'enum' | 'module' | 'type';
@@ -107,6 +107,16 @@ export class FastView {
 	private outlineList: HTMLElement | null = null;
 	private outlineItems = new Map<number, HTMLElement>();
 	private lineHeight = LINE_HEIGHT;
+	/** The scroll range for the document's lines — clamped and scaled past the layout
+	 *  engines' height ceiling, so a multi-million-line file reaches its last line. */
+	private range = new VirtualScroll(0, LINE_HEIGHT);
+	/** The document-space offset the viewport is at (equals `scrollTop` until the range
+	 *  scales; the row placement follows it from there). */
+	private docTop = 0;
+	/** The visible window the last refresh computed — what a landing fetch checks itself
+	 *  against before placing rows. */
+	private windowFirst = 0;
+	private windowLast = Infinity;
 	private disposed = false;
 	/** The pane has no height while the tab is being opened, so the first refresh sees a zero
 	 *  viewport and fetches too few lines; this fires again once layout gives the scroller its
@@ -187,7 +197,9 @@ export class FastView {
 	revealLine(line: number): void {
 		if (!this.open) return;
 		const target = Math.max(0, Math.min(line, this.open.lineCount - 1));
-		this.scroller.scrollTop = Math.max(0, (target - Math.floor(this.scroller.clientHeight / this.lineHeight / 2)) * this.lineHeight);
+		const clientHeight = this.scroller.clientHeight;
+		const docTop = Math.max(0, (target - Math.floor(clientHeight / this.lineHeight / 2)) * this.lineHeight);
+		this.scroller.scrollTop = this.range.scrollTopFor(docTop, clientHeight);
 		this.refresh();
 	}
 
@@ -195,9 +207,23 @@ export class FastView {
 	 *  cache makes it a no-op unless the viewport actually moved. */
 	private refresh(): void {
 		if (!this.open || this.disposed) return;
-		const visible = Math.ceil(this.scroller.clientHeight / this.lineHeight);
-		const first = Math.max(0, Math.floor(this.scroller.scrollTop / this.lineHeight) - OVERSCAN);
+		const clientHeight = this.scroller.clientHeight;
+		const scrollTop = this.scroller.scrollTop;
+		const docTop = this.range.documentTop(scrollTop, clientHeight);
+		// Under a scaled range the rows are placed viewport-relative (their document-space
+		// offsets would themselves be clamped away) and must follow every scroll; unscaled
+		// they stay document-space and the engine scrolls them natively.
+		if (docTop !== this.docTop) {
+			this.docTop = docTop;
+			if (this.range.scaled) {
+				for (const [line, node] of this.cache) node.style.top = `${Math.round(line * this.lineHeight - docTop + scrollTop)}px`;
+			}
+		}
+		const visible = Math.ceil(clientHeight / this.lineHeight);
+		const first = Math.max(0, Math.floor(docTop / this.lineHeight) - OVERSCAN);
 		const last = Math.min(this.open.lineCount - 1, first + visible + OVERSCAN * 2);
+		this.windowFirst = first;
+		this.windowLast = last;
 		const wanted: number[] = [];
 		for (let line = first; line <= last; line++) {
 			if (!this.cache.has(line) && !this.fetching.has(line)) wanted.push(line);
@@ -226,6 +252,11 @@ export class FastView {
 					result.lines.forEach(([text, tokens], index) => {
 						const line = result.startLine + index;
 						this.fetching.delete(line);
+						// A fetch lands after the viewport moved on (a scaled drag covers
+						// millions of lines in one bound): a row outside the current window
+						// is dropped, not placed — its viewport-relative offset would mean
+						// nothing.
+						if (line < this.windowFirst || line > this.windowLast) return;
 						if (this.cache.has(line)) return;
 						const row = this.renderRow(line, text, tokens);
 						this.cache.set(line, row);
@@ -250,7 +281,11 @@ export class FastView {
 	}
 
 	private place(row: HTMLElement, line: number): void {
-		row.style.top = `${line * this.lineHeight}px`;
+		// Viewport-relative under a scaled range: the line's document offset, pulled back by
+		// how far the scroll position and that offset differ (`+ scrollTop` is what keeps
+		// the row on screen — without it a scaled scroll lands everything far above the
+		// viewport, blank). Unscaled, document-space, exactly as before.
+		row.style.top = this.range.scaled ? `${Math.round(line * this.lineHeight - this.docTop + this.scroller.scrollTop)}px` : `${line * this.lineHeight}px`;
 		// Rows arrive out of order; insert before the first row with a larger line.
 		const key = (node: HTMLElement) => Number(node.dataset.line);
 		let after: HTMLElement | null = null;
@@ -368,7 +403,8 @@ export class FastView {
 
 	resyncLineCount(lineCount: number): void {
 		if (this.open) this.open.lineCount = lineCount;
-		this.spacer.style.height = `${Math.max(1, lineCount) * this.lineHeight}px`;
+		this.range = new VirtualScroll(lineCount, this.lineHeight);
+		this.spacer.style.height = `${this.range.spacerHeight}px`;
 		this.refresh();
 	}
 
@@ -379,7 +415,7 @@ export class FastView {
 		if (!this.findBar) {
 			const host: DocFindHost = {
 				docId: () => this.open?.docId ?? null,
-				position: () => ({ line: Math.max(0, Math.floor(this.scroller.scrollTop / this.lineHeight)), col: 0 }),
+				position: () => ({ line: Math.max(0, Math.floor(this.docTop / this.lineHeight)), col: 0 }),
 				revealMatch: (match) => {
 					this.currentMatch = match;
 					this.revealLine(match.line);

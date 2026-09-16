@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { bytesPerRowFor, HexView } from '../src/hexView';
 import { EditorGroup } from '../src/editor';
+import { MAX_SCROLL_PX } from '../src/ui';
 import { backend } from './tauriMock';
 import { flush } from './helpers';
 
@@ -149,6 +150,30 @@ describe('hex view', () => {
 		// Only the slabs actually shown were requested, never the whole file.
 		expect(offsets.length).toBeLessThan(4);
 		expect(view.root.querySelector('.hex-sizer')!.getAttribute('style')).toContain('height');
+	});
+
+	it('scales the scrollbar for a file whose rows pass the engines\' height clamp', async () => {
+		// A 64 MB file at 16 bytes/row is 4,194,304 rows = ~84M px; the engines clamp near
+		// 33.5M px, which used to strand every byte past the first ~25 MB. The clamped,
+		// scaled range keeps the file's tail reachable: the scrollbar's bottom is its end.
+		backend.on('read_file_chunk', (args) => ({
+			size: 64 * 1024 * 1024,
+			base64: b64(new Uint8Array(Math.min(Number(args.len), 4096)))
+		}));
+		const view = new HexView('/tmp/giant.bin');
+		await view.load();
+		expect(Number.parseInt(view.root.querySelector<HTMLElement>('.hex-sizer')!.style.height, 10)).toBe(MAX_SCROLL_PX);
+		view.scroller.scrollTop = MAX_SCROLL_PX;
+		view.root.querySelector('.hex-scroller')!.dispatchEvent(new Event('scroll'));
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		// The rows drawn are the file's last ones (4,194,303 is the final row).
+		const rows = Array.from(view.root.querySelectorAll<HTMLElement>('.hex-body [data-row]'));
+		expect(rows.length).toBeGreaterThan(0);
+		expect(Math.max(...rows.map((row) => Number(row.dataset.row)))).toBeGreaterThanOrEqual(4 * 1024 * 1024 - 64);
+		// The tail's slab was read — a byte range at the file's end, not its start.
+		const offsets = backend.callsTo('read_file_chunk').map((args) => Number(args.offset));
+		expect(Math.max(...offsets)).toBeGreaterThanOrEqual(64 * 1024 * 1024 - 2 * 64 * 1024);
+		view.destroy();
 	});
 
 	it('finds a hex needle and highlights its bytes', async () => {

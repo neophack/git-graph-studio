@@ -534,20 +534,26 @@ body.resizing iframe { pointer-events: none; }
 .fast-outline-list { position: relative; flex: none; }
 .fast-outline-item { position: absolute; left: 0; right: 0; height: var(--row-height); box-sizing: border-box; display: flex; align-items: center; gap: 6px; padding: 3px 10px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fast-outline-item:hover { background: var(--vscode-list-hoverBackground); }
-.fast-scroll { position: relative; flex: 1; min-width: 0; overflow: auto; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); font-weight: var(--vscode-editor-font-weight); color: var(--vscode-editor-foreground); }
+/* The virtual scrollers below reposition their absolutely positioned rows/host as the thumb
+   moves (a document past the engines' ~33.5M px height ceiling maps its scroll range onto a
+   clamped spacer); scroll anchoring must not "correct" those placements, or the viewport
+   drifts and paints blank. */
+.fast-scroll { position: relative; flex: 1; min-width: 0; overflow: auto; overflow-anchor: none; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); font-weight: var(--vscode-editor-font-weight); color: var(--vscode-editor-foreground); }
 .fast-spacer { width: 1px; min-width: 100%; }
 .fast-rows { position: absolute; top: 0; left: 0; }
 .fast-row { position: absolute; left: 0; width: max-content; min-width: 100%; height: 19px; line-height: 19px; white-space: pre; tab-size: 4; font-variant-ligatures: none; }
 .fast-gutter { display: inline-block; min-width: 60px; padding: 0 5px 0 12px; text-align: right; color: var(--vscode-editorLineNumber-foreground); user-select: none; }
 
 /* The windowed editable editor for large files (docEditView.ts): the document lives in the
-   backend's rope; the scroller spacers stand in for the lines outside the window, and the
-   CodeMirror instance in between shows only the window's lines (its own scroller never
-   scrolls, so there are no nested scrollbars). The editor sizes itself to its content —
-   the view sets the host's height from what was actually rendered. */
+   backend's rope; the spacer stands in for every line outside the window, and the
+   CodeMirror instance in between — placed at the window's content offset, viewport-relative
+   once the scroll range scales past the height ceiling — shows only the window's lines (its
+   own scroller never scrolls, so there are no nested scrollbars). The editor sizes itself
+   to its content: the view sets the host's height from what was actually rendered. */
 .doc-edit { position: absolute; inset: 0; background: var(--vscode-editor-background); }
-.doc-edit-scroll { position: absolute; inset: 0; overflow: auto; }
+.doc-edit-scroll { position: absolute; inset: 0; overflow: auto; overflow-anchor: none; }
 .doc-edit-spacer { width: 1px; min-width: 100%; }
+.doc-edit-host { position: absolute; left: 0; right: 0; top: 0; }
 .doc-edit-host .cm-scroller { overflow: visible; }
 .can-text-wrap > .doc-edit { position: relative; inset: auto; flex: 1; min-height: 0; }
 
@@ -721,7 +727,7 @@ body.resizing iframe { pointer-events: none; }
 /* The ruler and the rows share one font: their ch-based grid tracks only line up when
    both measure the same monospace glyph. */
 .hex-header-wrap, .hex-scroller { font-family: var(--vscode-editor-font-family, Consolas, monospace); font-size: var(--vscode-editor-font-size, 13px); color: var(--vscode-editor-foreground); background: var(--vscode-editor-background, #1e1e1e); }
-.hex-scroller { flex: 1; min-height: 0; overflow: auto; position: relative; }
+.hex-scroller { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; position: relative; }
 .hex-sizer { position: relative; }
 /* The table a hex editor draws: each row is a grid over the template hexView.ts builds
    (offset | bytes | gutter | ASCII), and the ruler above shares it so its digits sit
@@ -1074,7 +1080,7 @@ body.resizing iframe { pointer-events: none; }
  * a frame's payload is never clipped or wrapped — the scroller grows a horizontal bar and
  * the fixed columns keep their alignment, since every width before Data is pixels. */
 .can-raw-grid { display: grid; align-items: center; gap: 4px 8px; grid-template-columns: 64px 96px 20px 96px 28px 96px 24px max-content; }
-.can-raw-scroll { flex: 1; min-height: 0; overflow: auto; position: relative; font-family: var(--vscode-editor-font-family, Consolas, monospace); font-size: var(--vscode-editor-font-size, 13px); font-variant-numeric: tabular-nums; }
+.can-raw-scroll { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; position: relative; font-family: var(--vscode-editor-font-family, Consolas, monospace); font-size: var(--vscode-editor-font-size, 13px); font-variant-numeric: tabular-nums; }
 .can-raw-row { position: absolute; left: 0; width: max-content; min-width: 100%; height: 20px; line-height: 20px; padding: 0 12px; box-sizing: border-box; }
 .can-raw-row:nth-child(even) { background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 3%, transparent); }
 .can-raw-row:hover { background: color-mix(in srgb, var(--vscode-focusBorder, #0078d4) 12%, transparent); }
