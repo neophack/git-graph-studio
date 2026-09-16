@@ -2329,6 +2329,56 @@ base dec timestamps relative
 	}
 
 	#[test]
+	fn asc_parses_canoe_12_digit_flags_and_trailing_metadata() {
+		// The lines a current CANoe (12.x) writes, taken verbatim from a four-million-line
+		// drive log: bare digit flags (`1 0` = BRS on, ESI off), the DLC as a single hex
+		// character, the payload length in decimal, and after the counted payload a long
+		// metadata run (duration, length, flags, crc, four bit timings). A symbolic name may
+		// sit between the id and the flags; the `CAN n Status:` chip-status and per-second
+		// `Statistic:` lines are internal events, not traffic.
+		let text = "\
+date Mon Sep 14 11:01:16.396 am 2026
+base hex  timestamps absolute
+internal events logged
+// version 12.0.0
+Begin TriggerBlock Mon Sep 14 11:01:16.396 am 2026
+   0.000000 Start of measurement
+   0.001279 CANFD   1 Rx        536                                   1 0 b 20 00 00 00 00 00 00 03 00 01 00 00 00 00 8b 0a 00 04 e1 40 8b   160000  249   303000 a8092d8f 50140850 4b280150 2007030e 2000091c
+   0.001665 CANFD   1 Rx        341  CCU_Info2_50ms                   1 0 d 32 67 0e 00 00 00 10 06 00 00 80 40 00 a0 00 00 02 00 1f ff 80 00 00 00 00 00 00 00 00 00 40 00 00   219500  365   303000 9802c285 50140850 4b280150 2007030e 2000091c
+   0.001837 CANFD   1 Rx        199                                   1 0 8  8 00 a0 aa aa aa aa a9 a8    99984  129   303000 d00162d6 50140850 4b280150 2007030e 2000091c
+   0.035271 CAN 1 Status:chip status error active
+   1.035271 1  Statistic: D 1645 R 0 XD 0 XR 0 E 0 O 0 B 32.10%
+";
+		struct FrameCollector(Vec<RawFrame>);
+		impl FrameSink for FrameCollector {
+			fn frame(&mut self, frame: RawFrame) {
+				self.0.push(frame);
+			}
+		}
+		let mut c = FrameCollector(Vec::new());
+		walk_asc(text, &mut c);
+		// Exactly the three CANFD frames — the internal events never reach a sink.
+		assert_eq!(c.0.len(), 3);
+		let (a, b, d) = (&c.0[0], &c.0[1], &c.0[2]);
+		assert_eq!(a.id, 0x536);
+		assert!(a.fd);
+		assert!(a.brs);
+		assert!(!a.esi);
+		assert_eq!(a.dlc, 0xb);
+		assert_eq!(a.len, 20);
+		assert_eq!(a.data[..a.len as usize], [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x8b, 0x0a, 0x00, 0x04, 0xe1, 0x40, 0x8b]);
+		// The named line: the name is skipped, DLC `d` is code 13 → 32 payload bytes.
+		assert_eq!(b.id, 0x341);
+		assert_eq!(b.dlc, 0xd);
+		assert_eq!(b.len, 32);
+		assert_eq!(b.data[0], 0x67);
+		// DLC 8 with its plain decimal count: an eight-byte frame.
+		assert_eq!(d.id, 0x199);
+		assert_eq!(d.len, 8);
+		assert_eq!(d.data[..8], [0x00, 0xa0, 0xaa, 0xaa, 0xaa, 0xaa, 0xa9, 0xa8]);
+	}
+
+	#[test]
 	fn frame_bits_scale_with_payload() {
 		assert!((frame_bits(false, false, 0) - (47.0 + 11.0)).abs() < 1e-9);
 		assert!(frame_bits(true, false, 8) > frame_bits(false, false, 8));
