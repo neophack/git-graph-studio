@@ -231,11 +231,16 @@ describe('hex view', () => {
 		const range = new VirtualScroll(6 * 1024 ** 3 / 16, 20, 580);
 		const before = range.documentTop(scroller.scrollTop, 600, MAX_SCROLL_PX);
 		const smooth = settings.smoothScrolling;
+		const sensitivity = settings.mouseWheelScrollSensitivity;
+		// The jump asserted below is the model's at sensitivity 1 — VS Code's own pace; the
+		// shipped default (2, settings.ts) is a product call, pinned away here.
 		settings.smoothScrolling = false; // the direct jump; the glide's frames are rAF-timed
+		settings.mouseWheelScrollSensitivity = 1;
 		try {
 			scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 1000, cancelable: true }));
 		} finally {
 			settings.smoothScrolling = smooth;
+			settings.mouseWheelScrollSensitivity = sensitivity;
 		}
 		const moved = range.documentTop(scroller.scrollTop, 600, MAX_SCROLL_PX) - before;
 		// 1000 px of browser delta is VS Code's 1250 document pixels, give or take one

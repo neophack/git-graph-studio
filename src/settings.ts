@@ -28,7 +28,9 @@ export interface AppSettings {
 	stickyScroll: boolean;
 	/** `editor.smoothScrolling`: wheel notches glide to their position instead of jumping. */
 	smoothScrolling: boolean;
-	/** `editor.mouseWheelScrollSensitivity`: a multiplier on the wheel's scrolling distance. */
+	/** `editor.mouseWheelScrollSensitivity`: a multiplier on the wheel's scrolling distance.
+	 *  The shipped default is 2 — VS Code's 1 (125 px per Windows notch) read code too
+	 *  slowly, so a notch clears ~300 px; the wheel model itself stays VS Code's (ui.ts). */
 	mouseWheelScrollSensitivity: number;
 	/** `editor.fastScrollSensitivity`: the multiplier Alt holds over the wheel's distance. */
 	fastScrollSensitivity: number;
@@ -58,7 +60,7 @@ export interface AppSettings {
 export const DEFAULT_SETTINGS: AppSettings = {
 	theme: 'dark-modern', locale: 'en', showOutline: false, autoSave: 'off', autoSaveDelay: 1000,
 	minimap: true, stickyScroll: true, smoothScrolling: true, bracketColors: true,
-	mouseWheelScrollSensitivity: 1, fastScrollSensitivity: 5,
+	mouseWheelScrollSensitivity: 2, fastScrollSensitivity: 5,
 	fontSize: 14, tabSize: 4, wordWrap: false, snippetSuggestions: true, pathCompletion: true,
 	fileAssociations: ['blf', 'asc', 'ggx', 'bin', 'hex'],
 	linuxDmabuf: 'auto',

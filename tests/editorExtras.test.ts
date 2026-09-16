@@ -115,6 +115,11 @@ describe('editor decorations (M3 3.2)', () => {
 			for (let i = 0; i < 50 && !done(); i++) await new Promise((resolve) => setTimeout(resolve, 16));
 		};
 
+		// The asserted distances are the model's at sensitivity 1 — VS Code's own pace; the
+		// shipped default (2, settings.ts) is a product call, pinned away here.
+		const sensitivity = settings.mouseWheelScrollSensitivity;
+		settings.mouseWheelScrollSensitivity = 1;
+
 		const notch = new WheelEvent('wheel', { deltaY: 120, cancelable: true });
 		scroll.dispatchEvent(notch);
 		expect(notch.defaultPrevented).toBe(true);
@@ -132,6 +137,7 @@ describe('editor decorations (M3 3.2)', () => {
 		scroll.dispatchEvent(new Event('scroll'));
 		await new Promise((resolve) => setTimeout(resolve, 100));
 		expect(top).toBe(2500);
+		settings.mouseWheelScrollSensitivity = sensitivity;
 	});
 
 	it('sticky scroll stays hidden without a layout instead of throwing', async () => {

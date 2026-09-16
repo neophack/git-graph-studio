@@ -3,10 +3,10 @@
 // two deliveries (plain rows, then `viewer_highlight` colors), and the outline is the
 // backend's third, `viewer_symbols`, asked for after the rows are up.
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FastView } from '../src/fastView';
-import { updateSetting } from '../src/settings';
+import { settings, updateSetting } from '../src/settings';
 import { MAX_SCROLL_PX } from '../src/ui';
 import { backend } from './tauriMock';
 import { flush } from './helpers';
@@ -273,6 +273,18 @@ describe('the fast viewer smooth wheel glide (ui.ts)', () => {
 	async function pumpUntil(done: () => boolean): Promise<void> {
 		for (let i = 0; i < 50 && !done(); i++) await new Promise((resolve) => setTimeout(resolve, 16));
 	}
+
+	/** The distances asserted below are the model's at sensitivity 1 — VS Code's own pace.
+	 *  The shipped default (2, settings.ts) is a product call, pinned away so these keep
+	 *  verifying the wheel model itself, not the default of the release. */
+	let heldSensitivity: number;
+	beforeEach(() => {
+		heldSensitivity = settings.mouseWheelScrollSensitivity;
+		settings.mouseWheelScrollSensitivity = 1;
+	});
+	afterEach(() => {
+		settings.mouseWheelScrollSensitivity = heldSensitivity;
+	});
 
 	async function openHuge(): Promise<FastView> {
 		backend.on('viewer_open', () => ({ ...OPEN, lineCount: 100_000 }));

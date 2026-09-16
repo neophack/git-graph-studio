@@ -149,7 +149,9 @@ const SMOOTH_WHEEL_MS = 125;
 /** VS Code's `SCROLL_WHEEL_SENSITIVITY` (`scrollableElement.ts`): the content pixels one
  *  normalised wheel notch moves. With `StandardWheelEvent`'s normalisation — 40 px of
  *  browser delta, or 3 lines, is one notch — the default Windows notch (100 px of browser
- *  delta) scrolls 50 × 100/40 = 125 px, on every surface, exactly VS Code. */
+ *  delta) walks 50 × 100/40 = 125 px at sensitivity 1, on every surface, exactly VS Code's
+ *  model. The shipped default sensitivity is 2 (settings.ts): VS Code's own pace read
+ *  code too slowly. */
 const WHEEL_NOTCH_PX = 50;
 
 export interface SmoothWheelOptions {
@@ -204,8 +206,8 @@ function hermite(from: number, velocity: number, target: number, s: number, dura
  *  notch is prevented and re-delivered as a 125 ms ease from the current position (carrying
  *  its velocity, so streaming notches compound instead of restarting), and any scroll the
  *  glide did not write — a thumb drag, a reveal, a window slide — cancels it on the spot.
- *  The notch's distance is VS Code's too — 50 px per normalised notch, 125 px at the
- *  Windows default — through the sensitivity options below. */
+ *  The notch's distance is VS Code's model too — 50 px per normalised notch through the
+ *  sensitivity options below; the shipped default sensitivity (settings.ts) doubles it. */
 export function attachSmoothWheel(element: HTMLElement, options: SmoothWheelOptions = {}): SmoothWheelHandle {
 	const isEnabled = options.enabled ?? (() => true);
 	const sensitivity = options.sensitivity ?? (() => 1);
