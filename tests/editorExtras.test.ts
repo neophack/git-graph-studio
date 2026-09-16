@@ -96,6 +96,36 @@ describe('editor decorations (M3 3.2)', () => {
 		document.dispatchEvent(new MouseEvent('mouseup'));
 	});
 
+	it('the wheel over the minimap scrolls the editor (the overlay is not a dead strip)', async () => {
+		// The map is the scroller's sibling: a wheel event on it never bubbles through the
+		// smooth-wheel listener, so the strip used to scroll nothing at all.
+		const view = group.activeView!;
+		const scroll = view.scrollDOM;
+		Object.defineProperty(scroll, 'scrollHeight', { configurable: true, value: 6000 });
+		Object.defineProperty(scroll, 'clientHeight', { configurable: true, value: 500 });
+		let scrollTop = 0;
+		Object.defineProperty(scroll, 'scrollTop', {
+			configurable: true,
+			get: () => scrollTop,
+			set: (v: number) => { scrollTop = Math.max(0, Math.min(5500, v)); }
+		});
+		// The asserted distance is the model's at sensitivity 1 — VS Code's own pace; the
+		// shipped default (settings.ts) is a product call, pinned away here.
+		const sensitivity = settings.mouseWheelScrollSensitivity;
+		settings.mouseWheelScrollSensitivity = 1;
+		try {
+			const minimap = view.dom.querySelector('.cm-minimap')!;
+			const notch = new WheelEvent('wheel', { deltaY: 120, cancelable: true });
+			minimap.dispatchEvent(notch);
+			expect(notch.defaultPrevented).toBe(true);
+			// The forwarded notch glides the editor's scroller by the model's distance.
+			for (let i = 0; i < 50 && scrollTop < 150; i++) await new Promise((resolve) => setTimeout(resolve, 16));
+			expect(scrollTop).toBe(150);
+		} finally {
+			settings.mouseWheelScrollSensitivity = sensitivity;
+		}
+	});
+
 	it('glides the wheel over the editor and yields to an outside scroll', async () => {
 		// The smooth-wheel extension (ui.ts's glide over scrollDOM): a notch eases in over
 		// 125 ms instead of jumping, and a scroll nobody asked the glide for — a thumb drag,

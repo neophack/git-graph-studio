@@ -302,6 +302,13 @@ export function minimapExtension(): Extension {
 			view.scrollDOM.addEventListener('scroll', this.scrollListener);
 			document.addEventListener(SETTINGS_EVENT, this.listener);
 			document.addEventListener(THEME_EVENT, this.listener);
+			// The map is the scroller's sibling, overlaid on its edge: the wheel over it would
+			// never reach the smooth-wheel listener (a dead strip) — forward it.
+			this.root.addEventListener('wheel', (event) => {
+				if (event.defaultPrevented) return;
+				event.preventDefault();
+				view.scrollDOM.dispatchEvent(new WheelEvent('wheel', event));
+			});
 			this.bindDrag();
 			this.draw();
 			// The theme's initialization rewrites the editor's className wholesale, wiping the
