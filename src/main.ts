@@ -8,6 +8,12 @@ import './shell.css';
 import { invoke } from '@tauri-apps/api/core';
 import { initSettings, loadSettingsFile } from './settings';
 
+// The webview's own right-click menu is the host browser's chrome (back/refresh/save
+// as/print/inspect) - never something this desktop app wants surfaced. Views that offer
+// their own context menu already call preventDefault() on their own 'contextmenu' handler;
+// this is the catch-all for everywhere else. Devtools stay reachable from the Help menu.
+document.addEventListener('contextmenu', (event) => event.preventDefault());
+
 // The persisted theme (and display language) take effect before the shell loads, so the
 // window never flashes the default theme at the user. A hand-edited ~/.ggs/settings.json
 // wins over the stored settings (M3 3.9) - one read before the theme applies.

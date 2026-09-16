@@ -53,7 +53,7 @@ desktop = [
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [], optional = true }
+tauri = { version = "2", features = ["devtools"], optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-opener = { version = "2", optional = true }
 tauri-plugin-clipboard-manager = { version = "2", optional = true }

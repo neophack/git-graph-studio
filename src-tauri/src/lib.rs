@@ -622,6 +622,14 @@ mod desktop {
         );
     }
 
+    /// The Help menu's "Open Developer Tools" entry: the webview's own context menu is
+    /// suppressed (it otherwise shows the host browser's chrome - back/refresh/save as/print),
+    /// so this is the only way left to reach devtools once installed.
+    #[tauri::command]
+    fn open_devtools(window: tauri::WebviewWindow) {
+        window.open_devtools();
+    }
+
     #[tauri::command]
     fn boot_stage(stage: String, page_ms: f64) {
         let line = format!(
@@ -941,6 +949,7 @@ mod desktop {
             open_folder,
             close_folder,
             boot_stage,
+            open_devtools,
             cmd_fs::list_dir,
             cmd_fs::read_file,
             cmd_fs::read_file_raw,

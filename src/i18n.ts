@@ -410,6 +410,7 @@ const zhCnText: Record<string, string> = {
 	'Keyboard Shortcuts': '键盘快捷键',
 	'Keyboard Shortcuts Reference': '键盘快捷键参考',
 	'Report Issue / Project Page': '报告问题 / 项目主页',
+	'Open Developer Tools': '打开开发者工具',
 	About: '关于',
 	Clone: '克隆',
 	Commit: '提交',

@@ -298,6 +298,7 @@ export class Workbench {
 		register({ id: 'help.shortcuts', title: 'Keyboard Shortcuts', category: 'Help', keybinding: 'Ctrl+K Ctrl+S', run: () => this.editors.openHelp('shortcuts') });
 		register({ id: 'help.repository', title: 'Report Issue / Project Page', category: 'Help', run: () => void openUrl('https://github.com/neophack/vscode-git-graph-rs') });
 		register({ id: 'help.about', title: 'About', category: 'Help', run: () => notify('info', `Git Graph Studio ${__APP_VERSION__} - a standalone desktop shell around the git-graph-rs engine.`) });
+		register({ id: 'help.openDevTools', title: 'Open Developer Tools', category: 'Help', run: () => void invoke('open_devtools').catch((e) => console.error('open_devtools failed:', e)) });
 
 		registerGitCommands(commands, {
 			repoPath: () => this.repoPath,
@@ -341,7 +342,7 @@ export class Workbench {
 			] },
 			{ label: t('menu.go'), entries: (): MenuEntry[] => [item('workbench.quickOpen'), 'separator', item('workbench.gotoSymbolInFile'), item('workbench.gotoSymbolInWorkspace'), item('editor.gotoDefinition'), item('editor.findReferences'), item('editor.callTree'), item('workbench.gotoLine'), item('symbols.rebuild'), 'separator', item('workbench.goBack'), item('workbench.goForward'), 'separator', item('workbench.nextEditor'), item('workbench.previousEditor')] },
 			{ label: t('menu.terminal'), entries: (): MenuEntry[] => [item('terminal.new'), item('terminal.toggle'), 'separator', item('terminal.kill')] },
-			{ label: t('menu.help'), entries: (): MenuEntry[] => [item('help.welcome'), item('help.shortcuts'), 'separator', item('help.repository'), 'separator', item('help.about')] }
+			{ label: t('menu.help'), entries: (): MenuEntry[] => [item('help.welcome'), item('help.shortcuts'), 'separator', item('help.repository'), 'separator', item('help.openDevTools'), 'separator', item('help.about')] }
 		];
 	}
 
