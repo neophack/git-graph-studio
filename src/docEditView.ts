@@ -52,6 +52,10 @@ const WINDOW = 500;
 const EDGE = 120;
 /** How long after the last keystroke the changed lines are sent to the backend's rope. */
 const SYNC_DELAY_MS = 150;
+/** How long after a window lands the scroller's own moves are treated as CodeMirror
+ *  re-anchoring over the replaced text (a viewport re-render can collapse the content
+ *  height a frame or two later and zero the scroller) and re-asserted against. */
+const LANDING_SETTLE_MS = 500;
 /** How long after a synced edit the hot-exit backup is written (backend-side, no payload). */
 const BACKUP_DELAY_MS = 3000;
 
@@ -126,7 +130,9 @@ export class EditableDocView {
 	/** A window just landed: replacing the text resets CodeMirror's scroller, and that
 	 *  reset is a layout artifact, not a position — reading it back would drag the model
 	 *  to wherever the window starts (a drag to the file's end loses its place to it).
-	 *  Readbacks resume once the reset has had its say; the timeout is the unwedge. */
+	 *  Until the landing settles, the scroller's own moves are re-asserted against (the
+	 *  model's word stands, CodeMirror's re-anchor included); the timeout is the unwedge
+	 *  and the settle's last word. */
 	private landing = 0;
 	/** A slide is queued or in flight: the model may run ahead of the window meanwhile, and
 	 *  the landing re-checks the edges rather than piling a second slide on the first. */
@@ -347,8 +353,13 @@ export class EditableDocView {
 		}
 		this.relayout();
 		window.setTimeout(() => {
-			if (Date.now() - this.landing < 260) this.landing = 0;
-		}, 250);
+			if (Date.now() - this.landing < LANDING_SETTLE_MS + 10) {
+				this.landing = 0;
+				// The settle's last word is the model's, in case the re-anchor's final move
+				// came after the last re-assert.
+				this.project();
+			}
+		}, LANDING_SETTLE_MS);
 		// The swap moved the window under matches whose absolute lines did not change:
 		// repaint the decorations for the lines now loaded.
 		this.findBar?.repaint();
@@ -410,14 +421,18 @@ export class EditableDocView {
 
 	/** CodeMirror's scroller moved on its own — a caret reveal, a selection drag past the
 	 *  edge: read the new position back into the model. A value the projection wrote (or
-	 *  the DOM's clamp of it) is ours and changes nothing. */
+	 *  the DOM's clamp of it) is ours and changes nothing, and while a landing settles the
+	 *  move is CodeMirror re-anchoring over replaced text — asserted against, not read. */
 	private onScrollerMoved(): void {
 		const cm = this.cm;
 		if (!cm) return;
 		const actual = cm.scrollDOM.scrollTop;
 		if (actual === this.projected) return;
+		if (Date.now() - this.landing < LANDING_SETTLE_MS) {
+			this.project();
+			return;
+		}
 		this.projected = actual;
-		if (Date.now() - this.landing < 250) return;
 		this.scroll.setTop(this.first + actual / this.lineHeight, 'autoscroll');
 	}
 
