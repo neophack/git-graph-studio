@@ -113,7 +113,14 @@ describe('explorer', () => {
 
 		// Rename through the context menu.
 		rightClick(document.querySelector('.tree .row'));
-		expect(menuLabels()).toEqual(['Open to the Right', 'Open to the Left', 'Open Below', 'Open Above', 'New File...', 'New Folder...', 'Reveal in File Explorer', 'Copy Path', 'Copy Relative Path', 'Rename...', 'Delete']);
+		expect(menuLabels()).toEqual(['Open to the Right', 'Open to the Left', 'Open Below', 'Open Above', 'Open in Hex Viewer', 'New File...', 'New Folder...', 'Reveal in File Explorer', 'Copy Path', 'Copy Relative Path', 'Rename...', 'Delete']);
+		// "Open in Hex Viewer" hands the clicked file's path to the hex tab.
+		const hexed: string[] = [];
+		explorer.onOpenHex = (p) => hexed.push(p);
+		rightClick(document.querySelector('.tree .row'));
+		click(menuItem('Open in Hex Viewer'));
+		expect(hexed).toEqual([`${ROOT}\\a.txt`]);
+		rightClick(document.querySelector('.tree .row'));
 		click(menuItem('Copy Relative Path'));
 		await flush();
 		expect(backend.clipboard).toEqual(['a.txt']);

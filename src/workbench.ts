@@ -721,6 +721,7 @@ export class Workbench {
 
 		this.explorer.onFileOpened = (path) => void this.editors.openFile(path);
 		this.explorer.onOpenInDirection = (path, direction) => this.editors.openInDirection(path, direction);
+		this.explorer.onOpenHex = (path) => void this.editors.openHex(path);
 		this.explorer.onOpenFolder = () => void this.pickFolder();
 		this.explorer.onPathRenamed = (from, to) => this.editors.pathRenamed(from, to);
 		this.explorer.onPathDeleted = (path) => this.editors.pathDeleted(path);

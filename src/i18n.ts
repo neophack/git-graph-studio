@@ -378,6 +378,7 @@ const zhCnText: Record<string, string> = {
 	'Open to the Left': '在左侧打开',
 	'Open Below': '在下方打开',
 	'Open Above': '在上方打开',
+	'Open in Hex Viewer': '在十六进制查看器中打开',
 	'New Folder...': '新建文件夹...',
 	'Reveal in File Explorer': '在文件资源管理器中显示',
 	'Open in Integrated Terminal': '在集成终端中打开',

@@ -58,6 +58,9 @@ export class Explorer {
 	/** "Open to the Left/Right/Above/Below": the file opens in that editor layer, which is
 	 *  created when missing and disappears again once all its files are closed. */
 	onOpenInDirection: ((path: string, direction: 'left' | 'right' | 'up' | 'down') => void) | null = null;
+	/** "Open in Hex Viewer": the file opens as the hex editor's tab (any file, however
+	 *  large - it is paged, never read whole). */
+	onOpenHex: ((path: string) => void) | null = null;
 	onOpenFolder: (() => void) | null = null;
 	onPathRenamed: ((from: string, to: string) => void) | null = null;
 	onPathDeleted: ((path: string) => void) | null = null;
@@ -579,6 +582,7 @@ export class Explorer {
 				{ label: 'Open to the Left', run: () => this.onOpenInDirection?.(path, 'left') },
 				{ label: 'Open Below', run: () => this.onOpenInDirection?.(path, 'down') },
 				{ label: 'Open Above', run: () => this.onOpenInDirection?.(path, 'up') },
+				{ label: 'Open in Hex Viewer', run: () => this.onOpenHex?.(path) },
 				'separator'
 			] as MenuEntry[]),
 			{ label: 'New File...', run: () => void this.createInline(folder, false) },
