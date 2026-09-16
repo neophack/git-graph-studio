@@ -8,9 +8,9 @@
 
 import { invoke } from '@tauri-apps/api/core';
 
-import { OFFSET_DIGITS, ROW_LADDER, asciiChar, bytesPerRowFor, decodeBase64, groupSizeFor, hexAddress, hexByte, hexHeader, rowGridTemplate } from './hexView';
 import { settings } from './settings';
 import { attachSmoothWheel, el, icon, VirtualScroll, type SmoothWheelHandle } from './ui';
+import { OFFSET_DIGITS, ROW_LADDER, asciiChar, bytesPerRowFor, decodeBase64, groupSizeFor, hexAddress, hexByte, hexHeader, offsetDigitsFor, rowGridTemplate } from './hexView';
 
 /** Visible rows are filled from 64 KiB slabs, so scrolling reads a slab at a time. */
 const SLAB_BYTES = 64 * 1024;
@@ -43,24 +43,26 @@ interface Slabs {
 
 /** One pane's row: offset, hex cells, gutter, ASCII - the hex viewer's grid with a
  *  differing byte's cells tinted instead of a search hit. */
-function compareRow(offset: number, bytes: Uint8Array, diff: Uint8Array, bytesPerRow: number): HTMLElement {
-	const cells: (Node | string | null)[] = [el('span', 'hex-offset', [offset.toString(16).padStart(OFFSET_DIGITS, '0').toUpperCase()])];
+function compareRow(offset: number, bytes: Uint8Array, diff: Uint8Array, bytesPerRow: number, digits = OFFSET_DIGITS): HTMLElement {
+	const cells: (Node | string | null)[] = [el('span', 'hex-offset', [offset.toString(16).padStart(digits, '0').toUpperCase()])];
 	const group = groupSizeFor(bytesPerRow);
 	for (let i = 0; i < bytesPerRow; i++) {
 		const cls = ['hex-cell', i % group === 0 && i > 0 ? 'hex-group-start' : '', i < bytes.length && diff[i] ? 'hex-diff' : ''].filter(Boolean).join(' ');
-		const cell = el('span', i < bytes.length ? cls : 'hex-cell hex-blank', [i < bytes.length ? hexByte(bytes[i]!) : '00']);
+		// A blank is an invisible spacer and carries no text: a hidden '00' would surface
+		// as phantom bytes at the file's end the moment anything makes it visible.
+		const cell = el('span', i < bytes.length ? cls : 'hex-cell hex-blank', [i < bytes.length ? hexByte(bytes[i]!) : '']);
 		// Only a pane's real bytes carry an address; the blanks past a file's end are filler.
-		if (i < bytes.length) cell.title = hexAddress(offset + i);
+		if (i < bytes.length) cell.title = hexAddress(offset + i, digits);
 		cells.push(cell);
 	}
 	cells.push(el('span', 'hex-gutter'));
 	for (let i = 0; i < bytes.length; i++) {
 		const cell = el('span', diff[i] ? 'hex-ascii-cell hex-diff' : 'hex-ascii-cell', [asciiChar(bytes[i]!)]);
-		cell.title = hexAddress(offset + i);
+		cell.title = hexAddress(offset + i, digits);
 		cells.push(cell);
 	}
 	const row = el('div', 'hex-row', cells);
-	row.style.gridTemplateColumns = rowGridTemplate(bytesPerRow);
+	row.style.gridTemplateColumns = rowGridTemplate(bytesPerRow, digits);
 	return row;
 }
 
@@ -85,6 +87,9 @@ export class HexCompareView {
 	private rows = 0;
 	private rowHeight = 0;
 	private bytesPerRow = 16;
+	/** The offset column's digits for the larger of the two files (see offsetDigitsFor),
+	 *  so past-4-GiB addresses still fit the column both panes print them in. */
+	private offsetDigits = OFFSET_DIGITS;
 	private forcedBytesPerRow = 0;
 	/** The scroll range for the comparison's rows — clamped and scaled past the layout
 	 *  engines' height ceiling, so the tail of a multi-gigabyte pair stays reachable. */
@@ -177,7 +182,8 @@ export class HexCompareView {
 	async load(): Promise<void> {
 		const [left, right] = await Promise.all([this.slab(this.leftSlabs, this.leftPath, 0), this.slab(this.rightSlabs, this.rightPath, 0)]);
 		if (this.destroyed || !left || !right) return;
-		const probe = el('div', 'hex-cmp-row', [compareRow(0, new Uint8Array(0), new Uint8Array(0), 16), compareRow(0, new Uint8Array(0), new Uint8Array(0), 16)]);
+		this.offsetDigits = offsetDigitsFor(Math.max(this.sizeLeft, this.sizeRight));
+		const probe = el('div', 'hex-cmp-row', [compareRow(0, new Uint8Array(0), new Uint8Array(0), 16, this.offsetDigits), compareRow(0, new Uint8Array(0), new Uint8Array(0), 16, this.offsetDigits)]);
 		this.sizer.append(probe);
 		this.rowHeight = probe.getBoundingClientRect().height || 20;
 		probe.remove();
@@ -211,12 +217,12 @@ export class HexCompareView {
 		const charWidth = probe.getBoundingClientRect().width / 28;
 		probe.remove();
 		if (!charWidth || !this.scroller.clientWidth) return 16;
-		return bytesPerRowFor(charWidth, this.scroller.clientWidth / 2 - 24);
+		return bytesPerRowFor(charWidth, this.scroller.clientWidth / 2 - 24, this.offsetDigits);
 	}
 
 	private relayout(): void {
 		const clientHeight = this.scroller.clientHeight;
-		const firstByte = this.rowHeight ? (this.range.documentTop(this.scroller.scrollTop, clientHeight) / this.rowHeight) * this.bytesPerRow : 0;
+		const firstByte = this.rowHeight ? (this.range.documentTop(this.scroller.scrollTop, clientHeight, this.scroller.scrollHeight) / this.rowHeight) * this.bytesPerRow : 0;
 		const bpr = this.pickBytesPerRow();
 		if (bpr !== this.bytesPerRow) this.sizer.querySelector('.hex-body')?.remove();
 		this.bytesPerRow = bpr;
@@ -224,7 +230,7 @@ export class HexCompareView {
 		this.ruler.replaceChildren(el('div', 'hex-cmp-head', [
 			el('div', 'hex-cmp-label', [this.labels.left]),
 			el('div', 'hex-cmp-label', [this.labels.right])
-		]), el('div', 'hex-cmp-ruler', [hexHeader(bpr), hexHeader(bpr)]));
+		]), el('div', 'hex-cmp-ruler', [hexHeader(bpr, this.offsetDigits), hexHeader(bpr, this.offsetDigits)]));
 		this.ruler.style.width = this.scroller.clientWidth ? `${this.scroller.clientWidth}px` : '';
 		this.ruler.scrollLeft = this.scroller.scrollLeft;
 		// An empty side still renders (as blank panes against the other's bytes); only two
@@ -282,8 +288,8 @@ export class HexCompareView {
 		for (let row = first; row <= last; row++) {
 			if (body.querySelector(`[data-row="${row}"]`)) continue;
 			const placeholder = el('div', 'hex-cmp-row', [
-				compareRow(row * this.bytesPerRow, new Uint8Array(0), new Uint8Array(0), this.bytesPerRow),
-				compareRow(row * this.bytesPerRow, new Uint8Array(0), new Uint8Array(0), this.bytesPerRow)
+				compareRow(row * this.bytesPerRow, new Uint8Array(0), new Uint8Array(0), this.bytesPerRow, this.offsetDigits),
+				compareRow(row * this.bytesPerRow, new Uint8Array(0), new Uint8Array(0), this.bytesPerRow, this.offsetDigits)
 			]);
 			placeholder.dataset.row = String(row);
 			if (row % 2) placeholder.classList.add('hex-row-odd');
@@ -298,8 +304,8 @@ export class HexCompareView {
 				const leftBytes = left ?? new Uint8Array(0);
 				const rightBytes = right ?? new Uint8Array(0);
 				const filled = el('div', 'hex-cmp-row', [
-					compareRow(offset, leftBytes, this.diffMask(offset, leftBytes.length), this.bytesPerRow),
-					compareRow(offset, rightBytes, this.diffMask(offset, rightBytes.length), this.bytesPerRow)
+					compareRow(offset, leftBytes, this.diffMask(offset, leftBytes.length), this.bytesPerRow, this.offsetDigits),
+					compareRow(offset, rightBytes, this.diffMask(offset, rightBytes.length), this.bytesPerRow, this.offsetDigits)
 				]);
 				filled.dataset.row = String(row);
 				if (row % 2) filled.classList.add('hex-row-odd');

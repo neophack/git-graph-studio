@@ -754,7 +754,19 @@ body.resizing iframe { pointer-events: none; }
 .hex-toolbar .button { flex: none; }
 .hex-toolbar .button.hidden, .hex-toolbar .button[hidden] { display: none; }
 .hex-hit { background: var(--vscode-editor-findMatchBackground, #515c6a); color: var(--vscode-editor-findMatchHighlightForeground, inherit); outline: 1px solid var(--vscode-editor-findMatchBorder, transparent); }
+/* A selected byte reads as the editor's selection in both panes (ruled after .hex-hit so
+   a hit inside a selection still shows the selection over it); the cells carry the
+   selection model, so the browser's own text selection is off the rows entirely. */
+.hex-row { user-select: none; -webkit-user-select: none; }
+.hex-selected { background: var(--vscode-editor-selectionBackground, #264f78); }
 .hex-status { padding: 4px 12px; font-size: 12px; color: var(--vscode-descriptionForeground, #999); border-top: 1px solid var(--vscode-panel-border, #2b2b2b); }
+/* The data inspector strip: the caret byte as u8..u64, floats and text - one monospaced
+   line between the rows and the status bar, hidden until a caret exists. */
+.hex-inspector { flex: none; padding: 3px 12px; font-family: var(--vscode-editor-font-family, Consolas, monospace); font-size: 12px; color: var(--vscode-editor-foreground, #ccc); white-space: nowrap; overflow-x: auto; border-top: 1px solid var(--vscode-panel-border, #2b2b2b); }
+.hex-inspector:empty { display: none; }
+.hex-inspector-at { color: var(--vscode-editorLineNumber-foreground, #999); margin-right: 10px; }
+.hex-inspector-field { margin-right: 12px; }
+.hex-inspector-label { color: var(--vscode-editorLineNumber-foreground, #999); margin-right: 4px; }
 
 /* ---------- The hex comparison ---------- */
 

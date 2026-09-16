@@ -187,6 +187,9 @@ describe('hex compare', () => {
 		const tailSides = tailRow.querySelectorAll('.hex-row');
 		expect(tailSides[0]!.querySelectorAll('.hex-cell:not(.hex-blank)')).toHaveLength(0); // the left file ended 5 bytes ago
 		expect(tailSides[1]!.querySelectorAll('.hex-cell:not(.hex-blank)')).toHaveLength(5);
+		// A blank is an invisible spacer, never a hidden '00': nothing past a file's end
+		// carries bytes that could surface as phantom data at the end of the view.
+		expect(Array.from(tailRow.querySelectorAll('.hex-blank')).every((cell) => cell.textContent === '')).toBe(true);
 		// The whole size tail is a difference region, tinted on the side that still has it.
 		expect(tailSides[1]!.querySelectorAll('.hex-cell.hex-diff')).toHaveLength(5);
 		view.destroy();

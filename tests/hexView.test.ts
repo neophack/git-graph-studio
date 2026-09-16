@@ -281,6 +281,34 @@ describe('hex view', () => {
 		const lastRowTop = rows * rowHeight - rowHeight;
 		expect(Math.abs(top - lastRowTop)).toBeLessThanOrEqual(1);
 	});
+
+	it('widens the offset column for a file past 4 GiB', async () => {
+		// A DVD image is 4.7 GB: its addresses need nine hex digits, and the fixed
+		// eight-digit column would print them under the first hex bytes. The width follows
+		// the file instead - every label and tooltip carries the digits that fit the track.
+		const size = 5 * 1024 * 1024 * 1024;
+		backend.on('read_file_chunk', () => ({
+			size,
+			base64: b64(new Uint8Array(4096))
+		}));
+		const view = new HexView('/tmp/dvd.iso');
+		await view.load();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const row = view.root.querySelector('.hex-scroller .hex-row')!;
+		expect(row.querySelector('.hex-offset')!.textContent).toBe('000000000'); // nine digits, zero-padded
+		expect(row.style.gridTemplateColumns.split(' ')[0]).toBe('11ch'); // digits + 2, the offset track
+		expect(row.querySelector('.hex-cell')!.title).toBe('0x000000000');
+		// The ruler widened with the rows, so its template stays cell-for-cell theirs.
+		expect(view.root.querySelector<HTMLElement>('.hex-header')!.style.gridTemplateColumns).toBe(row.style.gridTemplateColumns);
+		// The address box takes the wide addresses and reports them back at full width.
+		const box = view.root.querySelector('.hex-goto') as HTMLInputElement;
+		box.value = '0x123456789';
+		keydown(box, 'Enter');
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(box.value).toBe('0x123456789');
+		view.destroy();
+	});
+
 	it('finds a hex needle and highlights its bytes', async () => {
 		const view = new HexView('/tmp/blob.bin');
 		await view.load();
@@ -627,5 +655,328 @@ describe('hex view', () => {
 		await flush(10);
 		expect(backend.callsTo('read_file_chunk').length).toBeLessThan(4);
 		expect(document.querySelector('.hex-view')).toBeNull();
+	});
+
+	/* ---------- Selection & copy ---------- */
+
+	const cellAt = (view: HexView, byte: number, pane: 'hex' | 'ascii' = 'hex'): HTMLElement => {
+		const row = Math.floor(byte / 16);
+		const cells = view.root.querySelector(`.hex-scroller [data-row="${row}"]`)!.querySelectorAll(pane === 'ascii' ? '.hex-ascii-cell' : '.hex-cell');
+		return cells[byte % 16] as HTMLElement;
+	};
+	const mouse = (type: string, cell: HTMLElement, shift = false): void => {
+		cell.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, shiftKey: shift }));
+	};
+	const menuItem = (label: string): HTMLElement | undefined =>
+		Array.from(document.querySelectorAll<HTMLElement>('.context-menu .item')).find((item) => item.querySelector('.label')?.textContent === label);
+
+	it('drag-selects bytes in the hex pane and Ctrl+C copies space-free uppercase hex', async () => {
+		const view = new HexView('/tmp/blob.bin');
+		await view.load();
+		await flush();
+		mouse('mousedown', cellAt(view, 2));
+		mouse('mousemove', cellAt(view, 5));
+		window.dispatchEvent(new MouseEvent('mouseup'));
+		await flush();
+		// Bytes 2..5 are selected in both panes, and the status bar reports the span.
+		expect(view.root.querySelectorAll('.hex-selected').length).toBe(8);
+		expect(view.root.querySelector('.hex-status')!.textContent).toContain('0x00000002–0x00000005');
+		expect(view.root.querySelector('.hex-status')!.textContent).toContain('4 bytes');
+		keydown(view.root, 'c', false, true);
+		await flush();
+		// No spaces in the middle: the classic hex-editor clipboard payload.
+		expect(backend.clipboard).toEqual(['02030405']);
+	});
+
+	it('a selection made in the ASCII pane copies as raw text', async () => {
+		const view = new HexView('/tmp/blob.bin');
+		await view.load();
+		await flush();
+		// Bytes 0x30..0x33 are the digits '0123' - each byte one character, no dotting.
+		mouse('mousedown', cellAt(view, 0x30, 'ascii'));
+		mouse('mousemove', cellAt(view, 0x33, 'ascii'));
+		window.dispatchEvent(new MouseEvent('mouseup'));
+		await flush();
+		keydown(view.root, 'c', false, true);
+		await flush();
+		expect(backend.clipboard).toEqual(['0123']);
+	});
+
+	it('right-click marks the selection start and end wherever the two clicks land', async () => {
+		const view = new HexView('/tmp/blob.bin');
+		await view.load();
+		await flush();
+		const open = (cell: HTMLElement): void => cell.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+		open(cellAt(view, 4));
+		menuItem('Mark Selection Start')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		expect(view.root.querySelectorAll('.hex-selected').length).toBe(0); // one end alone is no span yet
+		open(cellAt(view, 9));
+		menuItem('Mark Selection End')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush();
+		expect(view.root.querySelectorAll('.hex-selected').length).toBe(12); // bytes 4..9, both panes
+		expect(view.root.querySelector('.hex-status')!.textContent).toContain('0x00000004–0x00000009');
+		// The menu's Clear Selection drops it again.
+		open(cellAt(view, 9));
+		menuItem('Clear Selection')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush();
+		expect(view.root.querySelectorAll('.hex-selected').length).toBe(0);
+	});
+
+	it('the context menu copies the professional formats: C array, Base64, address', async () => {
+		const view = new HexView('/tmp/blob.bin');
+		await view.load();
+		await flush();
+		// 0x20..0x23 is the fixture's planted DE AD BE EF.
+		mouse('mousedown', cellAt(view, 0x20));
+		mouse('mousemove', cellAt(view, 0x23));
+		window.dispatchEvent(new MouseEvent('mouseup'));
+		const openMenu = (): void => cellAt(view, 0x20).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+		openMenu();
+		menuItem('Copy as C Array')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush();
+		openMenu();
+		menuItem('Copy as Base64')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush();
+		openMenu();
+		menuItem('Copy Address')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush();
+		expect(backend.clipboard).toEqual([
+			'0xDE, 0xAD, 0xBE, 0xEF', // C array
+			'3q2+7w==', // base64 of the four bytes
+			'0x00000020-0x00000023' // the selection's start-end span
+		]);
+	});
+
+	it('right-click copies the clicked byte\'s address when nothing is selected', async () => {
+		const view = new HexView('/tmp/blob.bin');
+		await view.load();
+		await flush();
+		cellAt(view, 5).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+		menuItem('Copy Address')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush();
+		expect(backend.clipboard).toEqual(['0x00000005']);
+	});
+
+	it('Select Range selects start-to-end (or +length) by address', async () => {
+		const view = new HexView('/tmp/blob.bin');
+		await view.load();
+		await flush();
+		cellAt(view, 0).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+		menuItem('Select Range...')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush();
+		const answer = (value: string): void => {
+			const input = document.querySelector<HTMLInputElement>('.quick-input input')!;
+			input.value = value;
+			input.dispatchEvent(new Event('input', { bubbles: true }));
+			keydown(input, 'Enter');
+		};
+		answer('0x30');
+		await flush();
+		answer('+4'); // four bytes from 0x30
+		await flush(2);
+		expect(view.root.querySelectorAll('.hex-selected').length).toBe(8); // 0x30..0x33 in both panes
+		expect(view.root.querySelector('.hex-status')!.textContent).toContain('0x00000030–0x00000033');
+		keydown(view.root, 'c', false, true);
+		await flush();
+		expect(backend.clipboard).toEqual(['30313233']);
+	});
+
+	it('Ctrl+A selects all; a copy past the limit refuses instead of reading it', async () => {
+		backend.on('read_file_chunk', () => ({ size: 16 * 1024 * 1024 + 1, base64: b64(new Uint8Array(4096)) }));
+		const view = new HexView('/tmp/giant.bin');
+		await view.load();
+		await flush();
+		keydown(view.root, 'a', false, true);
+		await flush();
+		expect(view.root.querySelector('.hex-status')!.textContent).toContain('16,777,217 bytes');
+		keydown(view.root, 'c', false, true);
+		await flush();
+		// The 10 MiB cap refuses the copy with a reminder naming both sizes; the clipboard
+		// stays empty and the range was never read.
+		expect(backend.clipboard).toEqual([]);
+		expect(document.querySelector('.notification')!.textContent).toContain('too large');
+		expect(document.querySelector('.notification')!.textContent).toContain('10 MiB');
+	});
+
+	it('paste carries bytes between two instances: hex, C array and text clipboards', async () => {
+		// One instance copies, another pastes - the clipboard is the only thing shared.
+		const source = new HexView('/tmp/src.bin');
+		await source.load();
+		await flush();
+		mouse('mousedown', cellAt(source, 0x30));
+		mouse('mousemove', cellAt(source, 0x33));
+		window.dispatchEvent(new MouseEvent('mouseup'));
+		keydown(source.root, 'c', false, true);
+		await flush();
+		expect(backend.clipboard).toEqual(['30313233']);
+		const cellsOf = async (view: HexView, row: number): Promise<string[]> => {
+			await flush();
+			return Array.from(view.root.querySelector(`.hex-scroller [data-row="${row}"]`)!.querySelectorAll('.hex-cell'), (c) => c.textContent);
+		};
+		const target = new HexView('/tmp/dst.bin');
+		await target.load();
+		await flush();
+		(target.root.querySelector('.hex-edit-toggle') as HTMLButtonElement).click();
+		await flush();
+		backend.clipboardText = backend.clipboard[0]!; // what the OS clipboard now holds
+		keydown(target.root, 'v', false, true);
+		await flush();
+		// The pasted hex overwrote the caret's four bytes; the view is dirty and the caret
+		// stepped past them.
+		expect(await cellsOf(target, 0)).toEqual(expect.arrayContaining(['30', '31', '32', '33']));
+		expect(target.isDirty).toBe(true);
+		// A C-array clipboard pastes as the same bytes too.
+		backend.clipboardText = '0xAA, 0xBB';
+		keydown(target.root, 'ArrowDown');
+		await flush();
+		keydown(target.root, 'v', false, true);
+		await flush();
+		expect(await cellsOf(target, 1)).toEqual(expect.arrayContaining(['AA', 'BB']));
+		// Anything else pastes as its text, one byte per character.
+		backend.clipboardText = 'ZZ';
+		keydown(target.root, 'v', false, true);
+		await flush();
+		expect(await cellsOf(target, 1)).toEqual(expect.arrayContaining(['5A', '5A']));
+	});
+
+	it('paste stops at the file\'s end with a reminder of what did not fit', async () => {
+		const view = new HexView('/tmp/blob.bin');
+		await view.load();
+		await flush();
+		(view.root.querySelector('.hex-edit-toggle') as HTMLButtonElement).click();
+		await flush();
+		// Four bytes pasted at 62 of a 64-byte file: two land, two do not.
+		mouse('mousedown', cellAt(view, 62));
+		backend.clipboardText = '31323334';
+		keydown(view.root, 'v', false, true);
+		await flush();
+		const lastRow = Array.from(view.root.querySelector('.hex-scroller [data-row="3"]')!.querySelectorAll('.hex-cell'), (c) => c.textContent);
+		expect(lastRow.slice(14)).toEqual(['31', '32']);
+		expect(document.querySelector('.notification')!.textContent).toContain('Pasted 2 of 4 bytes');
+		// A read-only view never pastes.
+		const ro = new HexView('/tmp/blob.bin');
+		await ro.load();
+		await flush();
+		keydown(ro.root, 'v', false, true);
+		await flush();
+		expect(ro.isDirty).toBe(false);
+	});
+
+	it('the menu\'s Paste overwrites from the right-clicked byte', async () => {
+		const view = new HexView('/tmp/blob.bin');
+		await view.load();
+		await flush();
+		(view.root.querySelector('.hex-edit-toggle') as HTMLButtonElement).click();
+		await flush();
+		backend.clipboardText = 'AABB';
+		// No selection, no caret walked there: the paste lands at byte 8 exactly.
+		cellAt(view, 8).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+		menuItem('Paste')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush();
+		const row = Array.from(view.root.querySelector('.hex-scroller [data-row="0"]')!.querySelectorAll('.hex-cell'), (c) => c.textContent);
+		expect(row.slice(7, 11)).toEqual(['07', 'AA', 'BB', '0A']);
+		expect(view.isDirty).toBe(true);
+	});
+
+	it('Shift+arrows extend the selection, a plain arrow collapses it, Escape clears it', async () => {
+		const view = new HexView('/tmp/blob.bin');
+		await view.load();
+		await flush();
+		mouse('mousedown', cellAt(view, 1));
+		await flush();
+		for (let i = 0; i < 3; i++) keydown(view.root, 'ArrowRight', true);
+		await flush();
+		expect(view.root.querySelectorAll('.hex-selected').length).toBe(8); // bytes 1..4, both panes
+		keydown(view.root, 'ArrowRight'); // collapse onto the selection's end
+		await flush();
+		expect(view.root.querySelectorAll('.hex-selected').length).toBe(0);
+		// The caret landed on the byte the walk came from; extending back selects the two
+		// bytes it walked over.
+		keydown(view.root, 'ArrowLeft', true);
+		await flush();
+		expect(view.root.querySelectorAll('.hex-selected').length).toBe(4); // bytes 3..4, both panes
+		keydown(view.root, 'Escape');
+		await flush();
+		expect(view.root.querySelectorAll('.hex-selected').length).toBe(0);
+	});
+
+	it('typing over a selection edits from its first byte, and copies show edited bytes', async () => {
+		const view = new HexView('/tmp/blob.bin');
+		await view.load();
+		await flush();
+		(view.root.querySelector('.hex-edit-toggle') as HTMLButtonElement).click();
+		mouse('mousedown', cellAt(view, 2));
+		mouse('mousemove', cellAt(view, 3));
+		window.dispatchEvent(new MouseEvent('mouseup'));
+		await flush();
+		keydown(view.root, 'f');
+		await flush();
+		keydown(view.root, 'f');
+		await flush();
+		// Byte 2 (the selection's start) was replaced, not the caret byte the drag left.
+		expect(Array.from(view.root.querySelector('.hex-scroller .hex-row')!.querySelectorAll('.hex-cell')).map((c) => c.textContent)[2]).toBe('FF');
+		expect(view.isDirty).toBe(true);
+		keydown(view.root, 'a', false, true);
+		await flush();
+		// Re-select bytes 2..3 through marking; the copy overlays the unsaved edit.
+		cellAt(view, 2).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+		menuItem('Mark Selection Start')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		cellAt(view, 3).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+		menuItem('Mark Selection End')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush();
+		keydown(view.root, 'c', false, true);
+		await flush();
+		expect(backend.clipboard).toEqual(['FF03']);
+	});
+
+	it('a plain click drops the previous selection from every row, and a re-select shows only the new span', async () => {
+		const view = new HexView('/tmp/blob.bin');
+		await view.load();
+		await flush();
+		// A span over rows 0..2, then a click on row 3: the old highlight must leave the
+		// rows it covered, not just the caret's (they were left painted on screen).
+		mouse('mousedown', cellAt(view, 4));
+		mouse('mousemove', cellAt(view, 40));
+		window.dispatchEvent(new MouseEvent('mouseup'));
+		await flush();
+		expect(view.root.querySelectorAll('.hex-selected').length).toBeGreaterThan(0);
+		mouse('mousedown', cellAt(view, 60));
+		await flush();
+		expect(view.root.querySelectorAll('.hex-selected').length).toBe(0);
+		expect(view.root.querySelector('.hex-status')!.textContent).not.toContain('sel ');
+		// Re-selecting a smaller span paints exactly it.
+		mouse('mousedown', cellAt(view, 8));
+		mouse('mousemove', cellAt(view, 10));
+		window.dispatchEvent(new MouseEvent('mouseup'));
+		await flush();
+		expect(view.root.querySelectorAll('.hex-selected').length).toBe(6); // bytes 8..10, both panes
+	});
+
+	it('the data inspector reads the clicked byte as u8..f64 and text', async () => {
+		const view = new HexView('/tmp/blob.bin');
+		await view.load();
+		await flush();
+		mouse('mousedown', cellAt(view, 0x20));
+		await flush(2);
+		const inspector = view.root.querySelector('.hex-inspector')!;
+		// Byte 0x20 is the fixture's planted DE AD BE EF: every width reads the same bytes.
+		const fields = new Map(Array.from(inspector.querySelectorAll('.hex-inspector-field'), (field) => [
+			field.querySelector('.hex-inspector-label')!.textContent!,
+			field.lastChild!.textContent!
+		]));
+		expect(inspector.querySelector('.hex-inspector-at')!.textContent).toBe('0x00000020');
+		expect(fields.get('u8')).toBe('0xDE');
+		expect(fields.get('i8')).toBe('-34');
+		expect(fields.get('u16le')).toBe('0xADDE');
+		expect(fields.get('u16be')).toBe('0xDEAD');
+		expect(fields.get('u32le')).toBe('0xEFBEADDE');
+		expect(fields.get('u64le')).toBe('0x27262524EFBEADDE');
+		expect(fields.get('text')).toBe('Þ­¾ï');
+		// A selection points the inspector at its first byte.
+		mouse('mousedown', cellAt(view, 0x30));
+		mouse('mousemove', cellAt(view, 0x31));
+		window.dispatchEvent(new MouseEvent('mouseup'));
+		await flush(2);
+		expect(view.root.querySelector('.hex-inspector')!.querySelector('.hex-inspector-at')!.textContent).toBe('0x00000030');
 	});
 });
