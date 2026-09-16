@@ -5,7 +5,7 @@
 // around; `folderCompare.ts` does the same for its read-only panes.
 
 import { Compartment, EditorSelection, EditorState, type Extension, type StateCommand } from '@codemirror/state';
-import { EditorView, gutter, GutterMarker, keymap, type Command, type KeyBinding, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, highlightSpecialChars, rectangularSelection, crosshairCursor } from '@codemirror/view';
+import { EditorView, gutter, GutterMarker, keymap, type Command, type KeyBinding, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, highlightSpecialChars, rectangularSelection, crosshairCursor, ViewPlugin, type ViewUpdate } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap, indentWithTab, redo, selectAll, selectLine, undo } from '@codemirror/commands';
 import { closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
 import { searchKeymap, highlightSelectionMatches, search, openSearchPanel, selectSelectionMatches } from '@codemirror/search';
@@ -78,6 +78,24 @@ function indentSettings(): Extension {
 	return [indentUnit.of(' '.repeat(settings.tabSize)), EditorState.tabSize.of(settings.tabSize)];
 }
 
+/** Sets the content's underhang for the editors' scroll-past-the-end: a page (minus a
+ *  line) of padding under the last line, so the scrollbar's bottom puts the file's final
+ *  line at the top of the view and the page below it stays blank. Re-applied on every
+ *  geometry change, so it follows the window size.
+ */
+export function pastEndPadding(view: EditorView): void {
+	const pad = Math.max(0, view.scrollDOM.clientHeight - view.defaultLineHeight);
+	const current = parseFloat(view.contentDOM.style.paddingBottom || '0');
+	if (Math.abs(current - pad) > 0.5) view.contentDOM.style.paddingBottom = `${pad}px`;
+}
+
+function pastEndExtension(): Extension {
+	return ViewPlugin.fromClass(class {
+		constructor(view: EditorView) { pastEndPadding(view); }
+		update(update: ViewUpdate) { pastEndPadding(update.view); }
+	});
+}
+
 export function baseExtensions(readOnly: boolean): Extension[] {
 	return [
 		lineNumbers(),
@@ -100,6 +118,8 @@ export function baseExtensions(readOnly: boolean): Extension[] {
 		search({ top: true, createPanel: createFindPanel }),
 		keymap.of([...vscodeKeymap, ...editingKeymap, ...closeBracketsKeymap, ...completionKeymap, ...findKeymap, ...historyKeymap, ...foldKeymap, indentWithTab]),
 		// The M3 3.2 decorations belong to the editable editor: diff and revision panes stay lean.
+		// Every text surface scrolls past its end: the last line parks at the viewport's top.
+		pastEndExtension(),
 		...(readOnly ? [] : [bracketColorsExtension(), stickyScrollExtension(), minimapExtension()]),
 		vscodeHighlighting,
 		EditorState.readOnly.of(readOnly),
@@ -120,7 +140,7 @@ export function reconfigureEditorSettings(view: EditorView): void {
 
 /** Read-only extensions for a comparison pane that is never edited or navigated. */
 export function readOnlyExtensions(): Extension[] {
-	return [EditorState.readOnly.of(true), EditorView.editable.of(false)];
+	return [EditorState.readOnly.of(true), EditorView.editable.of(false), pastEndExtension()];
 }
 
 /* ---------- The bookmark gutter ---------- */

@@ -77,16 +77,26 @@ function scrollHeightCeiling(): number {
  *  four-million-row trace stays browsable to its last row instead of ending at the clamp. */
 export class VirtualScroll {
 	private readonly documentHeight: number;
-	private readonly spacer: number;
+	private spacer: number;
 
-	constructor(count: number, rowHeight: number) {
-		this.documentHeight = Math.max(1, count) * rowHeight;
+	/** `padBottom` extends the scrollable document past its last row (a page minus a row,
+	 *  the editors' scroll-past-the-end): at the scrollbar's bottom the last row sits at
+	 *  the viewport's top and the page below it stays blank. */
+	constructor(count: number, rowHeight: number, padBottom = 0) {
+		this.documentHeight = Math.max(1, count) * rowHeight + Math.max(0, padBottom);
 		this.spacer = Math.min(scrollHeightCeiling(), this.documentHeight);
 	}
 
-	/** The height the spacer element should carry. */
-	get spacerHeight(): number {
-		return this.spacer;
+	/** Sets the spacer's height and adopts the height the engine actually laid out. The
+	 *  engine rounds the laid box a step shorter than asked (a spacer of 22,304,100 lays
+	 *  out as 22,304,084); the mapping must divide by the real scrollable extent, or that
+	 *  shortfall — multiplied by the scale, a hundred-fold on a multi-gigabyte document —
+	 *  parks the document's last rows below the viewport where scrolling can never reach
+	 *  them. A zero rect (a hidden pane, a test DOM) keeps the asked-for height. */
+	lay(spacer: HTMLElement): void {
+		spacer.style.height = `${this.spacer}px`;
+		const laid = spacer.getBoundingClientRect().height;
+		if (laid > 0 && laid < this.spacer) this.spacer = Math.floor(laid);
 	}
 
 	/** True past the ceiling: rows must then be placed viewport-relative (their document-space
@@ -96,11 +106,16 @@ export class VirtualScroll {
 	}
 
 	/** The document-space offset (px from the document's top) the scroller's current position
-	 *  stands for. */
-	documentTop(scrollTop: number, clientHeight: number): number {
+	 *  stands for. `scrollHeight` (the scroller's own, when the caller has it) pins the
+	 *  mapping at the bottom: the engine snaps scroll positions to device pixels, so a
+	 *  position a fraction of a pixel short of the bottom times the scale (135 rows' worth
+	 *  on a 3 GB file) would otherwise park the document's last rows below the viewport. */
+	documentTop(scrollTop: number, clientHeight: number, scrollHeight = 0): number {
 		if (!this.scaled) return scrollTop;
+		const maxTop = this.documentHeight - clientHeight;
+		if (scrollHeight > 0 && scrollTop >= scrollHeight - clientHeight - 1) return Math.max(0, maxTop);
 		const scale = this.scale(clientHeight);
-		return Math.max(0, Math.min(this.documentHeight - clientHeight, scrollTop * scale));
+		return Math.max(0, Math.min(maxTop, scrollTop * scale));
 	}
 
 	/** The scroll position that puts `documentOffset` at the viewport's top. */

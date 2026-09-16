@@ -221,8 +221,8 @@ export class HexCompareView {
 		// empty files make for nothing to draw.
 		if (!this.rowHeight || (!this.sizeLeft && !this.sizeRight)) return;
 		this.rows = Math.ceil(Math.max(this.sizeLeft, this.sizeRight) / bpr);
-		this.range = new VirtualScroll(this.rows, this.rowHeight);
-		this.sizer.style.height = `${this.range.spacerHeight}px`;
+		this.range = new VirtualScroll(this.rows, this.rowHeight, Math.max(0, clientHeight - this.rowHeight));
+		this.range.lay(this.sizer);
 		this.scroller.scrollTop = this.range.scrollTopFor(Math.floor(firstByte / bpr) * this.rowHeight, clientHeight);
 		this.draw();
 		this.updateStatus();
@@ -249,7 +249,7 @@ export class HexCompareView {
 		if (!this.rowHeight || !this.rows) return;
 		const scrollTop = this.scroller.scrollTop;
 		const height = this.scroller.clientHeight || 400;
-		const top = this.range.documentTop(scrollTop, height);
+		const top = this.range.documentTop(scrollTop, height, this.scroller.scrollHeight);
 		const first = Math.max(0, Math.floor(top / this.rowHeight) - 8);
 		const last = Math.min(this.rows - 1, Math.ceil((top + height) / this.rowHeight) + 8);
 		let body = this.sizer.querySelector<HTMLElement>('.hex-body');

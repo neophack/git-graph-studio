@@ -246,7 +246,7 @@ export class FastView {
 		if (!this.open || this.disposed) return;
 		const clientHeight = this.scroller.clientHeight;
 		const scrollTop = this.scroller.scrollTop;
-		const docTop = this.range.documentTop(scrollTop, clientHeight);
+		const docTop = this.range.documentTop(scrollTop, clientHeight, this.scroller.scrollHeight);
 		// Under a scaled range the rows are placed viewport-relative (their document-space
 		// offsets would themselves be clamped away) and must follow every scroll; unscaled
 		// they stay document-space and the engine scrolls them natively.
@@ -486,8 +486,8 @@ export class FastView {
 
 	resyncLineCount(lineCount: number): void {
 		if (this.open) this.open.lineCount = lineCount;
-		this.range = new VirtualScroll(lineCount, this.lineHeight);
-		this.spacer.style.height = `${this.range.spacerHeight}px`;
+		this.range = new VirtualScroll(lineCount, this.lineHeight, Math.max(0, this.scroller.clientHeight - this.lineHeight));
+		this.range.lay(this.spacer);
 		this.refresh();
 	}
 

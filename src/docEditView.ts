@@ -320,8 +320,8 @@ export class EditableDocView {
 				}
 				// The spacer is the whole document, clamped and scaled past the layout
 				// engines' height ceiling — no line count is too many to scroll.
-				this.range = new VirtualScroll(this.lineCount, this.lineHeight);
-				this.spacer.style.height = `${this.range.spacerHeight}px`;
+				this.range = new VirtualScroll(this.lineCount, this.lineHeight, Math.max(0, this.scroller.clientHeight - this.lineHeight));
+				this.range.lay(this.spacer);
 				this.placeHost();
 				if (anchor !== undefined) this.scrollToDocument(anchor * this.lineHeight);
 				window.setTimeout(() => {
@@ -338,7 +338,7 @@ export class EditableDocView {
 	 *  of the scroll position, and the plain scroll position while the document fits the
 	 *  height ceiling (the identity, unchanged behaviour). */
 	private viewportTop(): number {
-		return this.range.documentTop(this.scroller.scrollTop, this.scroller.clientHeight);
+		return this.range.documentTop(this.scroller.scrollTop, this.scroller.clientHeight, this.scroller.scrollHeight);
 	}
 
 	/** Scroll so that a document-space offset sits at the viewport's top. */
@@ -354,7 +354,7 @@ export class EditableDocView {
 	private placeHost(): void {
 		const clientHeight = this.scroller.clientHeight;
 		const scrollTop = this.scroller.scrollTop;
-		const docTop = this.range.documentTop(scrollTop, clientHeight);
+		const docTop = this.range.documentTop(scrollTop, clientHeight, this.scroller.scrollHeight);
 		this.host.style.top = `${Math.max(0, Math.round(this.first * this.lineHeight - docTop + scrollTop))}px`;
 	}
 

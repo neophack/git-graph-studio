@@ -391,7 +391,7 @@ export class HexView {
 	 *  anchored to the same byte when the window resizes. */
 	private relayout(): void {
 		const clientHeight = this.scroller.clientHeight;
-		const firstByte = this.rowHeight ? (this.range.documentTop(this.scroller.scrollTop, clientHeight) / this.rowHeight) * this.bytesPerRow : 0;
+		const firstByte = this.rowHeight ? (this.range.documentTop(this.scroller.scrollTop, clientHeight, this.scroller.scrollHeight) / this.rowHeight) * this.bytesPerRow : 0;
 		const bpr = this.pickBytesPerRow();
 		if (bpr !== this.bytesPerRow) this.sizer.querySelector('.hex-body')?.remove();
 		this.bytesPerRow = bpr;
@@ -402,8 +402,8 @@ export class HexView {
 		this.header.scrollLeft = this.scroller.scrollLeft;
 		if (!this.size || !this.rowHeight) return;
 		this.rows = Math.ceil(this.size / bpr);
-		this.range = new VirtualScroll(this.rows, this.rowHeight);
-		this.sizer.style.height = `${this.range.spacerHeight}px`;
+		this.range = new VirtualScroll(this.rows, this.rowHeight, Math.max(0, clientHeight - this.rowHeight));
+		this.range.lay(this.sizer);
 		this.scroller.scrollTop = this.range.scrollTopFor(Math.floor(firstByte / bpr) * this.rowHeight, clientHeight);
 		this.draw();
 		this.updateStatus();
@@ -473,7 +473,7 @@ export class HexView {
 		if (!this.rowHeight || !this.rows) return;
 		const scrollTop = this.scroller.scrollTop;
 		const height = this.scroller.clientHeight || 400;
-		const top = this.range.documentTop(scrollTop, height);
+		const top = this.range.documentTop(scrollTop, height, this.scroller.scrollHeight);
 		const first = Math.max(0, Math.floor(top / this.rowHeight) - 8);
 		const last = Math.min(this.rows - 1, Math.ceil((top + height) / this.rowHeight) + 8);
 		let body = this.sizer.querySelector<HTMLElement>('.hex-body');
@@ -549,10 +549,24 @@ export class HexView {
 		const row = Math.floor(offset / this.bytesPerRow);
 		const top = row * this.rowHeight;
 		const clientHeight = this.scroller.clientHeight;
-		const at = this.range.documentTop(this.scroller.scrollTop, clientHeight);
+		const at = this.range.documentTop(this.scroller.scrollTop, clientHeight, this.scroller.scrollHeight);
 		if (top < at) this.scroller.scrollTop = this.range.scrollTopFor(Math.max(0, top - 4 * this.rowHeight), clientHeight);
 		else if (top + this.rowHeight > at + clientHeight) this.scroller.scrollTop = this.range.scrollTopFor(top + this.rowHeight - clientHeight + 4 * this.rowHeight, clientHeight);
-		else this.refreshRows([offset]);
+		else {
+			this.refreshRows([offset]);
+			return;
+		}
+		// Under a scaled range one scrollbar pixel spans many rows, and the engine snaps the
+		// write to whole pixels: the aimed position can round back onto the pixel the
+		// viewport never left (or land one short of the row), and a walk with the arrow keys
+		// then outruns the viewport until enough sub-pixel steps add up to a pixel. Read
+		// where the viewport really landed and step whole scrollbar pixels until it shows
+		// the row.
+		for (let guard = 0; guard < 2; guard++) {
+			const landed = this.range.documentTop(this.scroller.scrollTop, clientHeight, this.scroller.scrollHeight);
+			if (top >= landed - 0.5 && top + this.rowHeight <= landed + clientHeight + 0.5) break;
+			this.scroller.scrollTop = this.scroller.scrollTop + (top < landed ? -1 : 1);
+		}
 	}
 
 	/* ---------- Search ---------- */

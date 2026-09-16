@@ -211,8 +211,8 @@ export class CanRawView {
 			this.paintProgress(count);
 			if (count.parsed !== this.parsed) {
 				this.parsed = count.parsed;
-				this.range = new VirtualScroll(this.parsed, ROW_HEIGHT);
-				this.spacer.style.height = `${this.range.spacerHeight}px`;
+				this.range = new VirtualScroll(this.parsed, ROW_HEIGHT, Math.max(0, this.scroller.clientHeight - ROW_HEIGHT));
+				this.range.lay(this.spacer);
 				this.refresh();
 			}
 			if (count.done) {
@@ -247,7 +247,7 @@ export class CanRawView {
 		if (!doc || this.disposed || this.failed) return;
 		const clientHeight = this.scroller.clientHeight;
 		const scrollTop = this.scroller.scrollTop;
-		const docTop = this.range.documentTop(scrollTop, clientHeight);
+		const docTop = this.range.documentTop(scrollTop, clientHeight, this.scroller.scrollHeight);
 		// Under a scaled range the rows are placed viewport-relative (their document-space
 		// offsets would themselves be clamped away) and must follow every scroll; unscaled
 		// they stay document-space and the engine scrolls them natively.

@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { bytesPerRowFor, HexView } from '../src/hexView';
 import { EditorGroup } from '../src/editor';
-import { MAX_SCROLL_PX } from '../src/ui';
+import { MAX_SCROLL_PX, VirtualScroll } from '../src/ui';
 import { backend } from './tauriMock';
 import { flush } from './helpers';
 
@@ -176,6 +176,79 @@ describe('hex view', () => {
 		view.destroy();
 	});
 
+	it('keeps the arrow-walked cursor inside the viewport over a scaled range', async () => {
+		// Past the engines' height clamp one scrollbar pixel spans hundreds of rows, and
+		// the engine snaps scroll writes to whole pixels: the aimed reveal used to round
+		// back onto the pixel the viewport never left, so a walk with the arrow keys
+		// outran the viewport — the cursor strolled past the edge until enough
+		// sub-pixel steps added up to a pixel the scrollbar could move.
+		backend.on('read_file_chunk', () => ({ size: 6 * 1024 ** 3, base64: b64(new Uint8Array(4096)) }));
+		const view = new HexView('/tmp/huge.bin');
+		// The engine's numbers, which the test DOM cannot produce: a 300 px window over
+		// the 32 Mpx scrollbar (the headless ceiling) of a 6 GiB file, with scroll
+		// writes snapped to whole pixels as the engine does.
+		const scroller = view.root.querySelector('.hex-scroller') as HTMLElement;
+		let raw = 0;
+		Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => 300 });
+		Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => MAX_SCROLL_PX });
+		Object.defineProperty(scroller, 'scrollTop', { configurable: true, get: () => raw, set: (v: number) => { raw = Math.round(v); } });
+		await view.load();
+		scroller.dispatchEvent(new Event('scroll'));
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const range = new VirtualScroll(6 * 1024 ** 3 / 16, 20, 280);
+		const visible = (row: number) => {
+			const at = range.documentTop(scroller.scrollTop, 300, MAX_SCROLL_PX);
+			expect(row * 20, `row ${row} top`).toBeGreaterThanOrEqual(at - 1);
+			expect(row * 20 + 20, `row ${row} bottom`).toBeLessThanOrEqual(at + 301);
+		};
+		for (let i = 1; i <= 24; i++) {
+			keydown(view.root, 'ArrowDown');
+			visible(i);
+		}
+		for (let i = 23; i >= 0; i--) {
+			keydown(view.root, 'ArrowUp');
+			visible(i);
+		}
+		view.destroy();
+	}, 15000); // 48 keydowns each repaint the window's rows; heavy under a full-suite load
+
+
+	it('adopts the spacer height the engine really laid out, so the scaled bottom is the file\'s end', () => {
+		// The engine rounds a spacer a step shorter than asked (22,304,100 asks, 22,304,084
+		// lays). Dividing by the asked height left the shortfall × scale (~125 on a 3 GB
+		// file) of rows below the viewport at the scrollbar's bottom - the last four rows
+		// of a 3 GB ISO were drawn but unreachable. Dividing by the laid height maps the
+		// scrollbar's bottom onto the document's end exactly.
+		const rows = 134_653_270; // the 3,231,678,464-byte ISO at 24 bytes/row
+		const rowHeight = 20.8;
+		const clientHeight = 558;
+		const fakeSpacer = { style: {}, getBoundingClientRect: () => ({ height: 22_304_084 }) } as unknown as HTMLElement;
+		const range = new VirtualScroll(rows, rowHeight);
+		range.lay(fakeSpacer); // the engine laid the spacer shorter than asked
+		const bottom = range.documentTop(22_304_084 - clientHeight, clientHeight);
+		const documentHeight = rows * rowHeight;
+		expect(bottom).toBeGreaterThanOrEqual(documentHeight - clientHeight - 1);
+		// The engine snaps scroll positions to device pixels; a position a fraction of a
+		// pixel short of the bottom, multiplied by the scale, is several rows of document.
+		// Within a pixel of the scroller's own bottom the mapping pins to the document's
+		// end instead of multiplying.
+		const snapped = range.documentTop(22_304_084 - clientHeight - 0.7, clientHeight, 22_304_084);
+		expect(snapped).toBeGreaterThanOrEqual(documentHeight - clientHeight - 1);
+	});
+
+	it("pads the scroll range so the last row sits at the viewport top at the scrollbar bottom", () => {
+		// The editors' scroll-past-the-end: a page (minus a row) of blank below the last
+		// row, so dragging to the bottom puts the file's final row at the top of the view.
+		const rows = 134_653_270;
+		const rowHeight = 22.4;
+		const clientHeight = 558;
+		const fakeSpacer = { style: {}, getBoundingClientRect: () => ({ height: 22_304_084 }) } as unknown as HTMLElement;
+		const range = new VirtualScroll(rows, rowHeight, clientHeight - rowHeight);
+		range.lay(fakeSpacer);
+		const top = range.documentTop(22_304_084 - clientHeight, clientHeight, 22_304_084);
+		const lastRowTop = rows * rowHeight - rowHeight;
+		expect(Math.abs(top - lastRowTop)).toBeLessThanOrEqual(1);
+	});
 	it('finds a hex needle and highlights its bytes', async () => {
 		const view = new HexView('/tmp/blob.bin');
 		await view.load();
