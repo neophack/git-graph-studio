@@ -529,6 +529,17 @@ body.resizing iframe { pointer-events: none; }
 .quick-input .list .row .codicon { margin-right: 6px; font-size: 16px; }
 .quick-input .list .row .label b { font-weight: 600; } /* the matched characters, as VS Code bolds picker matches */
 
+/* ---------- The drawn scrollbar (scroll/scrollbar.ts) ---------- */
+/* The row-model surfaces (Fast Viewer, the windowed editor, the hex views, CAN raw) scroll
+   nothing natively: the model owns the position and only the visible rows exist, so the
+   browser draws no scrollbar and this one stands in — a 14px track on the surface's right
+   edge, the thumb sized to the viewport's share of the document (never under 25px). */
+.scrollbar.vertical { position: absolute; top: 0; right: 0; bottom: 0; width: 14px; z-index: 5; cursor: default; user-select: none; touch-action: none; }
+.scrollbar.vertical.idle { display: none; }
+.scrollbar-thumb { position: absolute; top: 0; left: 0; right: 0; background: var(--vscode-scrollbarSlider-background); }
+.scrollbar-thumb:hover { background: var(--vscode-scrollbarSlider-hoverBackground); }
+.scrollbar.dragging .scrollbar-thumb { background: var(--vscode-scrollbarSlider-activeBackground); }
+
 /* ---------- CodeMirror (VS Code editor look) ---------- */
 /* The fast viewer for very large files: a hand-rolled virtual scroller over a backend rope
    document. Its metrics are fixed in fastView.ts (LINE_HEIGHT 21) and must match the row
