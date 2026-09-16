@@ -372,6 +372,11 @@ describe('the windowed editor page keys', () => {
 		const fetches = backend.callsTo('viewer_text').length;
 		const view = doc.editorView!;
 		key(view.contentDOM, 'PageDown');
+		// The page is applied through the same queue every sync, slide and undo uses (so a
+		// burst of presses each start from where the previous one actually landed, rather
+		// than a still-stale cursor) — even the common, already-loaded case now settles a
+		// microtask after the key, not synchronously with it.
+		await flush();
 		const pageLines = doc.status().line - 1;
 		const pagePx = top();
 		// One press is one viewport: the page tracks the viewport, not the whole window.
@@ -379,14 +384,17 @@ describe('the windowed editor page keys', () => {
 		expect(pageLines).toBeLessThan(60);
 		expect(Math.abs(pagePx - 380)).toBeLessThanOrEqual(pagePx / pageLines); // ≤ one row of quantisation
 		key(view.contentDOM, 'PageDown');
+		await flush();
 		// The second page is exactly the first again — nothing skipped, no drift (the engine's
 		// whole-pixel snapping can land a fractional line height one pixel off the double).
 		expect(doc.status().line).toBe(1 + 2 * pageLines);
 		expect(Math.abs(top() - 2 * pagePx)).toBeLessThanOrEqual(1);
 		key(view.contentDOM, 'PageUp');
+		await flush();
 		expect(doc.status().line).toBe(1 + pageLines);
 		expect(top()).toBe(pagePx);
 		key(view.contentDOM, 'PageUp');
+		await flush();
 		expect(doc.status().line).toBe(1);
 		expect(top()).toBe(0);
 		// Every page stayed inside the loaded window: no refetch.
@@ -409,9 +417,12 @@ describe('the windowed editor page keys', () => {
 		const lineBefore = doc.status().line;
 		const topBefore = top();
 		key(view.contentDOM, 'PageDown');
+		// Applied through the queue now (see the previous test): a microtask behind the key.
+		await flush();
 		const pageLines = doc.status().line - lineBefore;
 		const pagePx = top() - topBefore;
 		key(view.contentDOM, 'PageUp');
+		await flush();
 		expect(doc.status().line).toBe(lineBefore);
 		expect(top()).toBe(topBefore);
 		// Park the cursor at the viewport's bottom line — where a real page-down leaves it
@@ -446,6 +457,51 @@ describe('the windowed editor page keys', () => {
 		// engine's whole-pixel snapping can land a fractional line height one pixel off).
 		expect(Math.abs(top() - (fromTop + pagePx))).toBeLessThanOrEqual(1);
 		expect(shown(doc)).toContain(`line ${landed}`);
+		await group.closeAll();
+	});
+
+	it('a burst of presses during an in-flight window slide still advances one page each', async () => {
+		// A real slide round-trips to the backend (a flush of any pending edit, then the
+		// window fetch) — several microtask turns. Holding PageDown down, or just hitting it
+		// a few times fast, is the ordinary way to page through a huge file, and lands well
+		// inside that window. Reading the cursor from `cm.state` eagerly at each press while
+		// only the slide's *application* was queued meant every press landing before the
+		// first one's fetch came back read the same still-stale cursor and computed the same
+		// target — so a burst of N presses only ever moved the buffer by one page, however
+		// many times the key was hit.
+		const LINES = Array.from({ length: 3_000 }, (_, i) => `line ${i}`);
+		const { group, doc } = await openWindowed(LINES.join('\n') + '\n');
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		await flush();
+		const top = stubScroller(doc, 380);
+		const view = doc.editorView!;
+		const settle = async (): Promise<void> => {
+			await flush();
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			await flush();
+		};
+		// Park at the loaded window's last line: the very next PageDown must slide, every time.
+		await doc.revealLine(499);
+		await settle();
+		const before = doc.status().line;
+		// One press, for the reference distance a single page covers.
+		key(view.contentDOM, 'PageDown');
+		await settle();
+		const onePage = doc.status().line - before;
+		expect(onePage).toBeGreaterThan(0);
+		// Reset to the same starting line, then the same key hit three times with no await
+		// between them — a burst, not three isolated presses.
+		await doc.revealLine(499);
+		await settle();
+		key(view.contentDOM, 'PageDown');
+		key(view.contentDOM, 'PageDown');
+		key(view.contentDOM, 'PageDown');
+		await settle();
+		// eslint-disable-next-line no-console
+		console.log('DEBUG onePage', onePage, 'burst delta', doc.status().line - before, 'fetches', backend.callsTo('viewer_text').length);
+		// Three presses must land well past what one alone did — the bug this guards against
+		// left them equal.
+		expect(doc.status().line - before).toBeGreaterThan(onePage * 2);
 		await group.closeAll();
 	});
 });

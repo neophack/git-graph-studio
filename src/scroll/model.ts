@@ -60,6 +60,10 @@ export class ScrollModel {
 	private height = 0;
 	private rowPx: number;
 	private readonly listeners = new Set<ScrollListener>();
+	/** An autoscroll asked for before the viewport had a height (a reveal on open, the
+	 *  pane not yet laid out): applied by the first layout, the way Zed's autoscroll
+	 *  request waits for the prepaint that knows the bounds. */
+	private pendingAutoscroll: { row: number; strategy: AutoscrollStrategy; reason: ScrollReason } | null = null;
 	/** The margin `fit` keeps above and below the target row. */
 	verticalScrollMargin = VERTICAL_SCROLL_MARGIN;
 	beyondLastLine: ScrollBeyondLastLine = 'onePage';
@@ -113,6 +117,9 @@ export class ScrollModel {
 
 	/** Move the viewport's top; true when it moved (Zed's `WasScrolled`). */
 	setTop(top: number, reason: ScrollReason = 'user'): boolean {
+		// A move of any kind supersedes a reveal still waiting for a layout (Zed's
+		// `set_anchor` takes the autoscroll request).
+		if (reason !== 'layout') this.pendingAutoscroll = null;
 		const next = this.clamp(top);
 		if (next === this.topRow) return false;
 		this.topRow = next;
@@ -148,12 +155,18 @@ export class ScrollModel {
 		this.reclamp();
 	}
 
-	/** The viewport was laid out `heightPx` tall. */
+	/** The viewport was laid out `heightPx` tall. A zero height is no layout at all (a
+	 *  hidden pane, a test DOM) and leaves the last known height standing. */
 	setViewport(heightPx: number): void {
 		const height = Math.max(0, heightPx);
-		if (height === this.height) return;
+		if (height === 0 || height === this.height) return;
 		this.height = height;
 		this.reclamp();
+		const pending = this.pendingAutoscroll;
+		if (pending) {
+			this.pendingAutoscroll = null;
+			this.autoscroll(pending.row, pending.strategy, pending.reason);
+		}
 	}
 
 	setRowHeight(px: number): void {
@@ -176,7 +189,10 @@ export class ScrollModel {
 	 *  and then by the least amount; the others place it. */
 	autoscroll(row: number, strategy: AutoscrollStrategy = 'fit', reason: ScrollReason = 'autoscroll'): boolean {
 		const visible = this.visibleLines;
-		if (visible <= 0) return false;
+		if (visible <= 0) {
+			this.pendingAutoscroll = { row, strategy, reason };
+			return false;
+		}
 		const target = Math.max(0, Math.min(this.rows > 0 ? this.rows - 1 : 0, Math.floor(row)));
 		const targetBottom = target + 1;
 		// Half the viewport less the row: the margin a centred row has on either side.

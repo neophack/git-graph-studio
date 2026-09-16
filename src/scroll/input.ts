@@ -22,6 +22,10 @@ export interface WheelOptions {
 	 *  own `scrollLeft` — the surfaces keep native horizontal overflow, whose width no
 	 *  document reaches the engines' layout limit with. */
 	horizontal?: (px: number) => void;
+	/** The element scrolls vertically on its own too (the windowed editor's CodeMirror,
+	 *  whose inner scroll is the model's projection): leave its `scrollTop` alone. Absent:
+	 *  the element's vertical scroll is pinned at zero, the rows being placed by the model. */
+	ownVerticalScroll?: boolean;
 }
 
 /** Take the wheel over `element` into the model. Ctrl/Meta chords pass through (the
@@ -43,10 +47,18 @@ export function attachWheel(element: HTMLElement, model: ScrollModel, options: W
 		if (delta.y !== 0) model.applyWheel({ kind: delta.kind, x: 0, y: delta.y }, speed);
 		if (delta.x !== 0) horizontal((delta.kind === 'lines' ? delta.x * model.rowHeight : delta.x) * speed);
 	}
+	// The surface's own vertical scroll is hidden, not gone: a focus or a scrollIntoView
+	// inside it could still nudge `scrollTop`, and the rows are placed on the model's
+	// word, not the element's — so any such nudge is undone on the spot.
+	function onScroll(): void {
+		if (element.scrollTop !== 0) element.scrollTop = 0;
+	}
 	element.addEventListener('wheel', onWheel, { passive: false });
+	if (!options.ownVerticalScroll) element.addEventListener('scroll', onScroll, { passive: true });
 	return {
 		dispose(): void {
 			element.removeEventListener('wheel', onWheel);
+			element.removeEventListener('scroll', onScroll);
 		}
 	};
 }

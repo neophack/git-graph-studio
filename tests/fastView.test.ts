@@ -7,9 +7,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FastView } from '../src/fastView';
 import { settings, updateSetting } from '../src/settings';
-import { MAX_SCROLL_PX } from '../src/ui';
 import { backend } from './tauriMock';
 import { flush } from './helpers';
+
+/** A viewer whose viewport is 380px — 20 rows of 19px — since jsdom lays nothing out and
+ *  the model would otherwise never know how many rows to show. */
+function mount(): FastView {
+	const view = new FastView(document.getElementById('editorGroup')!);
+	view.scroll.setViewport(380);
+	return view;
+}
 
 const OPEN = { docId: 7, lineCount: 100, language: 'plaintext', syntaxName: 'Plain Text' };
 
@@ -30,7 +37,7 @@ describe('the fast viewer', () => {
 			if (fail) throw new Error('transient backend error');
 			return linesResult(start as number, end as number);
 		});
-		const view = new FastView(document.getElementById('editorGroup')!);
+		const view = mount();
 		expect(await view.openFile('C:\\repo\\big.txt')).toBe(true);
 		await flush();
 		// The fetch ran and failed: nothing rendered yet.
@@ -60,7 +67,7 @@ describe('the fast viewer', () => {
 				release = resolve as (value: unknown) => void;
 			});
 		});
-		const view = new FastView(document.getElementById('editorGroup')!);
+		const view = mount();
 		await view.openFile('C:\\repo\\huge.txt');
 		await flush();
 		expect(backend.callsTo('viewer_lines').length).toBe(1);
@@ -74,43 +81,47 @@ describe('the fast viewer', () => {
 
 		// The drag ends (no more scroll events); the in-flight window lands far away. The
 		// landing itself must fetch the lines the viewport is still missing.
-		held(linesResult(0, 20));
+		held(linesResult(0, 30));
 		await flush();
 		const calls = backend.callsTo('viewer_lines');
 		expect(calls.length).toBe(2);
-		expect(calls[1]).toMatchObject({ start: 49_990, end: 50_010 });
+		// The reveal centred the line (Zed's go-to-line strategy): the top is 9 rows above
+		// it, and the window is the viewport plus ten rows of overscan on each side.
+		expect(view.scroll.top).toBe(49_991);
+		expect(calls[1]).toMatchObject({ start: 49_981, end: 50_021 });
 		expect(view.root.querySelector('.fast-row[data-line="50000"]')).not.toBeNull();
 		view.dispose();
 	});
 
-	it('scrolls a multi-million-line file to its end, past the engines\' height clamp', async () => {
-		// 2,000,000 lines at 19 px is 38M px of document; the engines clamp near 33.5M px,
-		// which used to strand the tail behind a spacer the scrollbar could not move past.
-		// The clamped, scaled range keeps the last lines reachable.
+	it('scrolls a multi-million-line file to its end - no layout clamp stands in the way', async () => {
+		// 2,000,000 lines at 19 px is 38M px of document, past the engines' ~33.5M px
+		// layout clamp. Nothing is that tall here: the model owns the position in rows and
+		// the rows are placed relative to the viewport, so the last line is a position like
+		// any other.
 		const LINES = 2_000_000;
 		backend.on('viewer_open', () => ({ ...OPEN, lineCount: LINES }));
 		backend.on('viewer_close', () => undefined);
 		backend.on('viewer_symbols', () => []);
 		backend.on('viewer_lines', ({ start, end }) => linesResult(start as number, end as number));
-		const view = new FastView(document.getElementById('editorGroup')!);
+		const view = mount();
 		await view.openFile('C:\\repo\\huge.txt');
 		await flush();
-		expect(Number.parseInt(view.root.querySelector<HTMLElement>('.fast-spacer')!.style.height, 10)).toBe(MAX_SCROLL_PX);
-		// The scrollbar dragged to its bottom maps to the document's end: the final lines
-		// fetch and render (the unscaled spacer ended ~300k lines short of them).
-		const scroller = view.root.querySelector<HTMLElement>('.fast-scroll')!;
-		scroller.scrollTop = MAX_SCROLL_PX;
-		scroller.dispatchEvent(new Event('scroll'));
+		expect(view.scroll.maxScrollTop()).toBe(LINES - 1);
+		// The scrollbar dragged to its bottom is the last row at the viewport's top (Zed's
+		// scroll_beyond_last_line = one_page): it fetches and renders there.
+		view.scroll.setTop(view.scroll.maxScrollTop());
 		await flush();
-		expect(view.root.querySelector(`.fast-row[data-line="${LINES - 10}"]`)).not.toBeNull();
-		// And they render *in the viewport*, not merely fetched: each row's content offset
-		// sits within a viewport-and-overscan band of the scroll position (a row placed at
-		// its bare document offset lands `scrollTop` pixels above the viewport — blank).
+		const last = view.root.querySelector<HTMLElement>(`.fast-row[data-line="${LINES - 1}"]`)!;
+		expect(last).not.toBeNull();
+		expect(last.style.top).toBe('0px');
+		// Every rendered row sits within the viewport-and-overscan band above it.
 		for (const row of Array.from(view.root.querySelectorAll<HTMLElement>('.fast-row'))) {
 			const top = Number.parseInt(row.style.top, 10);
-			expect(top).toBeGreaterThan(MAX_SCROLL_PX - 1000);
-			expect(top).toBeLessThan(MAX_SCROLL_PX + 1000);
+			expect(top).toBeGreaterThanOrEqual(-10 * 19);
+			expect(top).toBeLessThanOrEqual(0);
 		}
+		// The surface scrolls nothing natively: the drawn scrollbar is the only one.
+		expect(view.root.querySelector('.scrollbar.vertical')).not.toBeNull();
 		view.dispose();
 	});
 
@@ -121,15 +132,16 @@ describe('the fast viewer', () => {
 		backend.on('viewer_close', () => undefined);
 		backend.on('viewer_symbols', () => []);
 		backend.on('viewer_lines', ({ start, end }) => linesResult(start as number, end as number));
-		const view = new FastView(document.getElementById('editorGroup')!);
+		const view = mount();
 		await view.openFile('C:\\repo\\huge.txt');
 		await flush();
 		expect(view.lineCount).toBe(1_900_000);
 		backend.emit('studio://viewer-lines', { docId: view.docId, lineCount: 2_000_000 });
 		await flush();
-		// The scroller's range follows: the spacer carries the exact count's height.
+		// The model's range follows the exact count.
 		expect(view.lineCount).toBe(2_000_000);
-		expect(Number.parseInt(view.root.querySelector<HTMLElement>('.fast-spacer')!.style.height, 10)).toBeGreaterThan(1_999_000 * 19 / 2);
+		expect(view.scroll.rowCount).toBe(2_000_000);
+		expect(view.scroll.maxScrollTop()).toBe(1_999_999);
 		// Another document's landing is not this one's business.
 		backend.emit('studio://viewer-lines', { docId: 999, lineCount: 50 });
 		await flush();
@@ -144,7 +156,7 @@ describe('the fast viewer', () => {
 		backend.on('indexed_close', () => undefined);
 		backend.on('indexed_find', () => ({ matches: [{ line: 3, startCol: 0, endCol: 2 }], capped: false, lineCount: 100 }));
 		backend.on('indexed_lines', ({ start, end }) => linesResult(start as number, end as number));
-		const view = new FastView(document.getElementById('editorGroup')!);
+		const view = mount();
 		expect(await view.openFile('C:\repo\huge.log', { indexed: true })).toBe(true);
 		await flush();
 		expect(view.root.querySelectorAll('.fast-row').length).toBeGreaterThan(0);
@@ -174,7 +186,7 @@ describe('the fast viewer', () => {
 		backend.on('viewer_highlight', () => new Promise((resolve) => {
 			releaseColors = resolve as (value: unknown) => void;
 		}));
-		const view = new FastView(document.getElementById('editorGroup')!);
+		const view = mount();
 		await view.openFile('C:\\repo\\huge.rs');
 		view.revealLine(50_000);
 		await flush();
@@ -225,7 +237,7 @@ describe('the fast viewer', () => {
 				reject(new Error('superseded'));
 			};
 		}));
-		const view = new FastView(document.getElementById('editorGroup')!);
+		const view = mount();
 		await view.openFile('C:\\repo\\huge.rs');
 		await flush();
 		expect(backend.callsTo('viewer_lines').length).toBe(1);
@@ -234,7 +246,7 @@ describe('the fast viewer', () => {
 		// the dragged-to window pending and queues its colors.
 		view.revealLine(50_000);
 		await flush();
-		releaseWindow!(linesResult(0, 20, true));
+		releaseWindow!(linesResult(0, 30, true));
 		await flush();
 		const queued = backend.callsTo('viewer_highlight');
 		expect(queued.length).toBe(1);
@@ -244,7 +256,7 @@ describe('the fast viewer', () => {
 		await flush();
 		const pumped = backend.callsTo('viewer_highlight');
 		expect(pumped.length).toBe(2);
-		expect(pumped[1]).toMatchObject({ start: 49_990, end: 50_010 });
+		expect(pumped[1]).toMatchObject({ start: 49_981, end: 50_021 });
 		view.dispose();
 	});
 
@@ -253,7 +265,7 @@ describe('the fast viewer', () => {
 		backend.on('viewer_close', () => undefined);
 		backend.on('viewer_lines', ({ start, end }) => linesResult(start as number, end as number));
 		backend.on('viewer_symbols', () => [{ kind: 'function', name: 'alpha', line: 3 }]);
-		const view = new FastView(document.getElementById('editorGroup')!);
+		const view = mount();
 		await view.openFile('C:\\repo\\huge.rs');
 		await flush();
 		const item = view.root.querySelector('.fast-outline-item') as HTMLElement;
@@ -267,16 +279,9 @@ describe('the fast viewer', () => {
 	});
 });
 
-describe('the fast viewer smooth wheel glide (ui.ts)', () => {
-	/** Pump frames until `done` holds (the 125 ms glide needs a handful of jsdom's ~16 ms
-	 *  animation frames to land; the cap bounds a starved clock). */
-	async function pumpUntil(done: () => boolean): Promise<void> {
-		for (let i = 0; i < 50 && !done(); i++) await new Promise((resolve) => setTimeout(resolve, 16));
-	}
-
-	/** The distances asserted below are the model's at sensitivity 1 — VS Code's own pace.
-	 *  The shipped default (2, settings.ts) is a product call, pinned away so these keep
-	 *  verifying the wheel model itself, not the default of the release. */
+describe('the fast viewer wheel (scroll/)', () => {
+	/** The distances asserted below are the model's at sensitivity 1 (Zed's default): a
+	 *  notch is the system's lines per notch, three on Windows. */
 	let heldSensitivity: number;
 	beforeEach(() => {
 		heldSensitivity = settings.mouseWheelScrollSensitivity;
@@ -291,95 +296,46 @@ describe('the fast viewer smooth wheel glide (ui.ts)', () => {
 		backend.on('viewer_close', () => undefined);
 		backend.on('viewer_symbols', () => []);
 		backend.on('viewer_lines', ({ start, end }) => linesResult(start as number, end as number));
-		const view = new FastView(document.getElementById('editorGroup')!);
+		const view = mount();
 		await view.openFile('C:\\repo\\huge.txt');
 		await flush();
 		return view;
 	}
 
-	it('eases a wheel notch to its position instead of jumping it there', async () => {
+	it('lands a wheel notch at once: three rows, Alt four times that, no frames to wait for', async () => {
 		const view = await openHuge();
 		const scroller = view.root.querySelector<HTMLElement>('.fast-scroll')!;
-		const notch = new WheelEvent('wheel', { deltaY: 120, cancelable: true });
+		const notch = new WheelEvent('wheel', { deltaY: 100, deltaMode: 0, cancelable: true });
 		scroller.dispatchEvent(notch);
-		// The notch is intercepted, and the glide starts from rest: before the first frame
-		// the position has not moved at all — a native wheel would already have jumped.
 		expect(notch.defaultPrevented).toBe(true);
-		expect(scroller.scrollTop).toBe(0);
-		// VS Code's notch distance everywhere: 120 px of browser delta × 50/40 = 150 px.
-		await pumpUntil(() => scroller.scrollTop >= 150);
-		expect(scroller.scrollTop).toBe(150);
-		// Alt holds the fast-scroll factor (VS Code's fastScrollSensitivity, default 5).
-		scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, altKey: true, cancelable: true }));
-		await pumpUntil(() => scroller.scrollTop >= 150 + 750);
-		expect(scroller.scrollTop).toBe(900);
-		view.dispose();
-	});
-
-	it('stacks a second notch onto the running glide, and with the glide off lands the same distance at once', async () => {
-		const view = await openHuge();
-		const scroller = view.root.querySelector<HTMLElement>('.fast-scroll')!;
-		scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, cancelable: true }));
-		await pumpUntil(() => scroller.scrollTop > 0);
-		// Mid-glide: part of the way to the first notch, and the second re-targets the same
-		// glide to 300 rather than restarting it from zero.
-		const mid = scroller.scrollTop;
-		expect(mid).toBeGreaterThan(0);
-		expect(mid).toBeLessThan(150);
-		scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, cancelable: true }));
-		await pumpUntil(() => scroller.scrollTop >= 300);
-		expect(scroller.scrollTop).toBe(300);
-		view.dispose();
-
-		// The glide off: the wheel is still the model's — the platform's own step would
-		// ignore the sensitivity — so the notch is prevented and its distance lands at
-		// once, in the same task, with no frames to wait for.
-		updateSetting('smoothScrolling', false);
-		const plain = await openHuge();
-		const off = plain.root.querySelector<HTMLElement>('.fast-scroll')!;
-		const notch = new WheelEvent('wheel', { deltaY: 120, cancelable: true });
-		off.dispatchEvent(notch);
-		expect(notch.defaultPrevented).toBe(true);
-		expect(off.scrollTop).toBe(150);
-		await new Promise((resolve) => setTimeout(resolve, 100));
-		expect(off.scrollTop).toBe(150); // no glide frames sneak behind the jump
+		// Chromium's 100 px notch is the system's three lines: the view moved three rows,
+		// in the same task — Zed scrolls the wheel without easing.
+		expect(view.scroll.top).toBe(3);
+		expect(view.root.querySelector<HTMLElement>('.fast-row[data-line="3"]')!.style.top).toBe('0px');
+		scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, deltaMode: 0, altKey: true, cancelable: true }));
+		expect(view.scroll.top).toBe(3 + 3 * settings.fastScrollSensitivity);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(view.scroll.top).toBe(3 + 3 * settings.fastScrollSensitivity); // nothing glides afterwards
+		// The old glide setting has no say on this surface.
 		updateSetting('smoothScrolling', true);
-		plain.dispose();
+		scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, deltaMode: 0, cancelable: true }));
+		expect(view.scroll.top).toBe(3 * settings.fastScrollSensitivity);
+		updateSetting('smoothScrolling', false);
+		view.dispose();
 	});
 
-	it('eases every notch for its own full duration — a steady cadence never snaps', async () => {
+	it('a trackpad\'s pixels scroll by the row height, fractions kept', async () => {
 		const view = await openHuge();
 		const scroller = view.root.querySelector<HTMLElement>('.fast-scroll')!;
-		// Two notches 60 ms apart. The distance is exact either way; the timing is the point:
-		// the second notch must glide its own ~125 ms, not squeeze into the first notch's
-		// leftover window (that alternation between glides and snaps is what made the wheel
-		// feel faster and slower by turns).
-		const t0 = Date.now();
-		scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, cancelable: true }));
-		await new Promise((resolve) => setTimeout(resolve, 60));
-		scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, cancelable: true }));
-		await pumpUntil(() => scroller.scrollTop >= 300);
-		expect(scroller.scrollTop).toBe(300);
-		expect(Date.now() - t0).toBeGreaterThan(160);
+		scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 9.5, deltaMode: 0, cancelable: true }));
+		expect(view.scroll.top).toBeCloseTo(0.5);
+		// The rows follow to the pixel (snapped): row 0 sits ten pixels up.
+		expect(view.root.querySelector<HTMLElement>('.fast-row[data-line="0"]')!.style.top).toBe('-10px');
 		view.dispose();
 	});
 });
 
-describe('the fast viewer page keys (ui.ts)', () => {
-	/** jsdom has no layout: the viewport and scroll position are stubbed the way the wheel
-	 *  tests stub them — scroll writes snap to whole pixels, as the engine's do. */
-	function stubScroller(scroller: HTMLElement, clientHeight: number, scrollHeight: number): () => number {
-		let raw = 0;
-		Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => clientHeight });
-		Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => scrollHeight });
-		Object.defineProperty(scroller, 'scrollTop', {
-			configurable: true,
-			get: () => raw,
-			set: (v: number) => { raw = Math.max(0, Math.min(scrollHeight - clientHeight, Math.round(v))); }
-		});
-		return () => raw;
-	}
-
+describe('the fast viewer page keys (scroll/)', () => {
 	function page(scroller: HTMLElement, key: 'PageUp' | 'PageDown', mods: { ctrl?: boolean } = {}): KeyboardEvent {
 		const event = new KeyboardEvent('keydown', { key, ctrlKey: mods.ctrl ?? false, cancelable: true });
 		scroller.dispatchEvent(event);
@@ -391,71 +347,58 @@ describe('the fast viewer page keys (ui.ts)', () => {
 		backend.on('viewer_close', () => undefined);
 		backend.on('viewer_symbols', () => []);
 		backend.on('viewer_lines', ({ start, end }) => linesResult(start as number, end as number));
-		const view = new FastView(document.getElementById('editorGroup')!);
+		const view = mount();
+		await view.openFile('C:\\repo\\big.txt');
+		await flush();
 		return view;
 	}
 
-	it('pages exactly one viewport of document rows — never short, never skipped', async () => {
+	it('pages a viewport less one anchor row - never short, never skipped', async () => {
 		const view = await openWith(100_000);
 		const scroller = view.root.querySelector<HTMLElement>('.fast-scroll')!;
-		// A 380 px viewport over the unscaled 100k-line document: exactly 20 rows a page.
-		const top = stubScroller(scroller, 380, 1_900_000);
-		await view.openFile('C:\\repo\\big.txt');
+		// A 380 px viewport is 20 rows: a page is 19 (Zed's ScrollAmount::Page keeps the
+		// last row of the old screen as the first of the new).
+		page(scroller, 'PageDown');
+		expect(view.scroll.top).toBe(19);
 		await flush();
 		page(scroller, 'PageDown');
-		expect(top()).toBe(380);
-		await flush();
-		page(scroller, 'PageDown');
-		expect(top()).toBe(760); // two presses, two pages
+		expect(view.scroll.top).toBe(38);
 		await flush();
 		page(scroller, 'PageUp');
-		expect(top()).toBe(380);
+		expect(view.scroll.top).toBe(19);
 		page(scroller, 'PageUp');
-		expect(top()).toBe(0);
+		expect(view.scroll.top).toBe(0);
 		// At the document's head a PageUp is a no-op, not a negative position.
 		page(scroller, 'PageUp');
-		expect(top()).toBe(0);
-		// Each landing window was fetched around the viewport's new top line (the open fetch
-		// covered lines 0..40; the first page asks from 41, the second from 51) — never
-		// around some jumped-to position.
+		expect(view.scroll.top).toBe(0);
+		// Each landing window was fetched from where the previous one ended (the open fetch
+		// covered rows 0..30; the first page asks from 31, the second from 50).
 		const calls = backend.callsTo('viewer_lines');
-		expect(calls[1]).toMatchObject({ start: 41 });
-		expect(calls[2]).toMatchObject({ start: 51 });
+		expect(calls[1]).toMatchObject({ start: 31 });
+		expect(calls[2]).toMatchObject({ start: 50 });
 		view.dispose();
 	});
 
-	it('pages one viewport under a scaled range — not the scale-multiplied leap', async () => {
-		// 2,000,000 lines × 19 px is 38 M px of document over the 32 M px headless ceiling:
-		// one scrollbar pixel stands for ~1.19 document pixels, and the native page key
-		// would overshoot the page by that factor.
+	it('pages the same rows on a two-million-line document', async () => {
 		const view = await openWith(2_000_000);
 		const scroller = view.root.querySelector<HTMLElement>('.fast-scroll')!;
-		const top = stubScroller(scroller, 380, MAX_SCROLL_PX);
-		await view.openFile('C:\\repo\\huge.txt');
+		view.scroll.setTop(1_500_000);
 		await flush();
 		page(scroller, 'PageDown');
-		// 380 document pixels map back through the scale: ~320 scrollbar pixels.
-		expect(top()).toBe(320);
+		expect(view.scroll.top).toBe(1_500_019);
 		page(scroller, 'PageDown');
-		expect(top()).toBe(640); // the second page lands exactly — quantisation never accumulates
+		expect(view.scroll.top).toBe(1_500_038);
 		await flush();
-		// And the viewport really is there: each fetch asked for the rows around the page's
-		// top line (20, then 40) — not the scale-multiplied lines a native page would hit.
-		const calls = backend.callsTo('viewer_lines');
-		expect(calls[1]).toMatchObject({ start: 41 });
-		expect(calls[2]).toMatchObject({ start: 51 });
+		expect(view.root.querySelector('.fast-row[data-line="1500038"]')).not.toBeNull();
 		view.dispose();
 	});
 
 	it('leaves Ctrl+PageUp/Down to the workbench (Next / Previous Editor)', async () => {
 		const view = await openWith(100_000);
 		const scroller = view.root.querySelector<HTMLElement>('.fast-scroll')!;
-		const top = stubScroller(scroller, 380, 1_900_000);
-		await view.openFile('C:\\repo\\big.txt');
-		await flush();
 		const event = page(scroller, 'PageDown', { ctrl: true });
 		expect(event.defaultPrevented).toBe(false);
-		expect(top()).toBe(0);
+		expect(view.scroll.top).toBe(0);
 		view.dispose();
 	});
 });
@@ -492,7 +435,7 @@ describe('the fast viewer whole-file find (docFind.ts)', () => {
 			});
 			return { matches, capped: false };
 		});
-		const view = new FastView(document.getElementById('editorGroup')!);
+		const view = mount();
 		await view.openFile('C:\repo\huge.txt');
 		await flush();
 		view.openFind();

@@ -1,6 +1,8 @@
-// The fast code viewer: a backend-rope document (ropey + syntect, pure Rust) rendered through
-// a hand-rolled virtual scroller. Only the visible lines exist as DOM, and only the visible
-// lines are highlighted — a million-line file opens as fast as its bytes can be read. A cold
+// The fast code viewer: a backend-rope document (ropey + syntect, pure Rust) rendered over
+// the row scroll model (scroll/). Only the visible lines exist as DOM, placed where the
+// model's top puts them — nothing scrolls natively, so no line count is too tall for the
+// layout engine — and only the visible lines are highlighted: a million-line file opens as
+// fast as its bytes can be read. A cold
 // window (dragged far past every highlight checkpoint) is painted as plain text the moment
 // its lines arrive and colored by `viewer_highlight` a beat later; the outline pane fills
 // from `viewer_symbols` once the rows are up, so neither ever blocks the first paint.
@@ -10,8 +12,10 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import { DocFindController, type DocFindHost, type DocFindMatch } from './docFind';
 import { t } from './i18n';
-import { settings } from './settings';
-import { attachPageKeys, attachSmoothWheel, el, icon, notify, VirtualScroll, type SmoothWheelHandle } from './ui';
+import { attachPageKeys, attachWheel, type Disposable } from './scroll/input';
+import { ScrollModel } from './scroll/model';
+import { Scrollbar } from './scroll/scrollbar';
+import { el, icon, notify } from './ui';
 
 interface Symbol {
 	kind: 'function' | 'method' | 'class' | 'struct' | 'interface' | 'enum' | 'module' | 'type';
@@ -100,8 +104,11 @@ export class FastView {
 	private readonly toolbar: HTMLElement;
 	private readonly outline: HTMLElement;
 	private readonly scroller: HTMLElement;
-	private readonly spacer: HTMLElement;
 	private readonly rows: HTMLElement;
+	/** The viewport's position over the document, in rows — the one source of truth the
+	 *  rows, the scrollbar, the find bar and the status line all read. */
+	readonly scroll: ScrollModel;
+	private readonly scrollbar: Scrollbar;
 	private open: OpenResult | null = null;
 	/** The window-fetch command of the open document's family (rope or indexed). */
 	private linesCommand: Parameters<typeof invoke>[0] = 'viewer_lines';
@@ -126,12 +133,6 @@ export class FastView {
 	private outlineList: HTMLElement | null = null;
 	private outlineItems = new Map<number, HTMLElement>();
 	private lineHeight = LINE_HEIGHT;
-	/** The scroll range for the document's lines — clamped and scaled past the layout
-	 *  engines' height ceiling, so a multi-million-line file reaches its last line. */
-	private range = new VirtualScroll(0, LINE_HEIGHT);
-	/** The document-space offset the viewport is at (equals `scrollTop` until the range
-	 *  scales; the row placement follows it from there). */
-	private docTop = 0;
 	/** The visible window the last refresh computed — what a landing fetch checks itself
 	 *  against before placing rows. */
 	private windowFirst = 0;
@@ -141,12 +142,9 @@ export class FastView {
 	 *  viewport and fetches too few lines; this fires again once layout gives the scroller its
 	 *  real size, and on every later resize. (Absent under jsdom, where nothing lays out.) */
 	private readonly sizer: ResizeObserver | null;
-	/** The smooth wheel glide over the scroller (ui.ts), disposed with the view. */
-	private readonly wheel: SmoothWheelHandle;
-	/** PageUp/PageDown over the scroller (ui.ts): exactly one viewport of document rows per
-	 *  press — the native page key would leap a viewport of *scrollbar* pixels, which a
-	 *  scaled range multiplies into whole screens skipped at once. */
-	private readonly pageKeys: SmoothWheelHandle;
+	/** The wheel and the page keys over the scroller (scroll/input.ts), disposed with the view. */
+	private readonly wheel: Disposable;
+	private readonly pageKeys: Disposable;
 	/** The whole-file find bar (docFind.ts) — read-only surface, find without replace. */
 	private findBar: DocFindController | null = null;
 	/** The staged open's landing event subscription (the exact line count replacing the
@@ -162,11 +160,15 @@ export class FastView {
 		this.toolbar = el('div', 'fast-toolbar');
 		this.outline = el('div', 'fast-outline');
 		this.scroller = el('div', 'fast-scroll');
-		this.spacer = el('div', 'fast-spacer');
 		this.rows = el('div', 'fast-rows');
-		this.scroller.append(this.spacer, this.rows);
+		this.scroller.appendChild(this.rows);
 		const main = el('div', 'fast-main');
 		main.append(this.outline, this.scroller);
+		this.scroll = new ScrollModel(LINE_HEIGHT);
+		this.scroll.onChange(() => this.refresh());
+		// The bar sits over the main pane's right edge — inside the scroller it would ride
+		// along with the rows' horizontal overflow.
+		this.scrollbar = new Scrollbar(main, this.scroll);
 		this.toolbar.hidden = true;
 		this.outline.hidden = true;
 		this.root.append(this.toolbar, main);
@@ -177,22 +179,10 @@ export class FastView {
 			edit.addEventListener('click', options.onEdit);
 			this.toolbar.appendChild(edit);
 		}
-		this.scroller.addEventListener('scroll', () => this.refresh(), { passive: true });
 		this.outline.addEventListener('scroll', () => this.refreshOutline(), { passive: true });
-		this.wheel = attachSmoothWheel(this.scroller, {
-			enabled: () => settings.smoothScrolling,
-			sensitivity: () => settings.mouseWheelScrollSensitivity,
-			fastSensitivity: () => settings.fastScrollSensitivity,
-			zoom: () => this.range.documentPxPerScrollPx(this.scroller.clientHeight)
-		});
-		this.pageKeys = attachPageKeys(this.scroller, {
-			range: () => this.range,
-			rowHeight: () => this.lineHeight,
-			// The jsdom DOM fires no scroll event for the write; the window due now must
-			// not wait for one.
-			paged: () => this.refresh()
-		});
-		this.sizer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => { this.refresh(); this.refreshOutline(); });
+		this.wheel = attachWheel(this.scroller, this.scroll);
+		this.pageKeys = attachPageKeys(this.scroller, this.scroll);
+		this.sizer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => { this.layout(); this.refreshOutline(); });
 		this.sizer?.observe(this.scroller);
 		this.sizer?.observe(this.outline);
 		// A huge file opens on its head with an estimated line count; the background tail's
@@ -267,34 +257,26 @@ export class FastView {
 		return this.open?.syntaxName ?? null;
 	}
 
+	/** Bring `line` to the viewport's middle (Zed's `Autoscroll::center`, the go-to-line
+	 *  strategy). A line already centred refreshes the window anyway: a failed fetch is
+	 *  retried this way. */
 	revealLine(line: number): void {
 		if (!this.open) return;
-		const target = Math.max(0, Math.min(line, this.open.lineCount - 1));
-		const clientHeight = this.scroller.clientHeight;
-		const docTop = Math.max(0, (target - Math.floor(clientHeight / this.lineHeight / 2)) * this.lineHeight);
-		this.scroller.scrollTop = this.range.scrollTopFor(docTop, clientHeight);
+		if (!this.scroll.autoscroll(line, 'center')) this.refresh();
+	}
+
+	/** The viewport was (re)laid out: the model takes its height, and the rows follow. */
+	private layout(): void {
+		this.scroll.setViewport(this.scroller.clientHeight);
 		this.refresh();
 	}
 
-	/** Pull the newly visible window from the backend. Runs on every scroll event; the line
-	 *  cache makes it a no-op unless the viewport actually moved. */
+	/** Place the rows for the model's position and pull the missing ones from the backend.
+	 *  Runs on every model change; the line cache makes it a no-op unless a row is missing. */
 	private refresh(): void {
 		if (!this.open || this.disposed) return;
-		const clientHeight = this.scroller.clientHeight;
-		const scrollTop = this.scroller.scrollTop;
-		const docTop = this.range.documentTop(scrollTop, clientHeight, this.scroller.scrollHeight);
-		// Under a scaled range the rows are placed viewport-relative (their document-space
-		// offsets would themselves be clamped away) and must follow every scroll; unscaled
-		// they stay document-space and the engine scrolls them natively.
-		if (docTop !== this.docTop) {
-			this.docTop = docTop;
-			if (this.range.scaled) {
-				for (const [line, node] of this.cache) node.style.top = `${Math.round(line * this.lineHeight - docTop + scrollTop)}px`;
-			}
-		}
-		const visible = Math.ceil(clientHeight / this.lineHeight);
-		const first = Math.max(0, Math.floor(docTop / this.lineHeight) - OVERSCAN);
-		const last = Math.min(this.open.lineCount - 1, first + visible + OVERSCAN * 2);
+		for (const [line, node] of this.cache) node.style.top = `${this.scroll.rowTop(line)}px`;
+		const { first, last } = this.scroll.visibleRange(OVERSCAN);
 		this.windowFirst = first;
 		this.windowLast = last;
 		const wanted: number[] = [];
@@ -399,11 +381,10 @@ export class FastView {
 	}
 
 	private place(row: HTMLElement, line: number): void {
-		// Viewport-relative under a scaled range: the line's document offset, pulled back by
-		// how far the scroll position and that offset differ (`+ scrollTop` is what keeps
-		// the row on screen — without it a scaled scroll lands everything far above the
-		// viewport, blank). Unscaled, document-space, exactly as before.
-		row.style.top = this.range.scaled ? `${Math.round(line * this.lineHeight - this.docTop + this.scroller.scrollTop)}px` : `${line * this.lineHeight}px`;
+		// Viewport-relative: where the model's top puts the line, whatever its number — a
+		// document-space offset would hit the layout engine's clamp a couple of million
+		// lines in.
+		row.style.top = `${this.scroll.rowTop(line)}px`;
 		// Rows arrive out of order; insert before the first row with a larger line.
 		const key = (node: HTMLElement) => Number(node.dataset.line);
 		let after: HTMLElement | null = null;
@@ -522,9 +503,8 @@ export class FastView {
 
 	resyncLineCount(lineCount: number): void {
 		if (this.open) this.open.lineCount = lineCount;
-		this.range = new VirtualScroll(lineCount, this.lineHeight, Math.max(0, this.scroller.clientHeight - this.lineHeight));
-		this.range.lay(this.spacer);
-		this.refresh();
+		this.scroll.setRowCount(lineCount);
+		this.layout();
 	}
 
 	/* ---------- The whole-file find bar (docFind.ts), find without replace ---------- */
@@ -535,7 +515,7 @@ export class FastView {
 		const host: DocFindHost = {
 			docId: () => this.open?.docId ?? null,
 			findCommand: () => (this.indexed ? 'indexed_find' : 'viewer_find'),
-			position: () => ({ line: Math.max(0, Math.floor(this.docTop / this.lineHeight)), col: 0 }),
+			position: () => ({ line: Math.floor(this.scroll.top), col: 0 }),
 				revealMatch: (match) => {
 					this.currentMatch = match;
 					this.revealLine(match.line);
@@ -563,6 +543,7 @@ export class FastView {
 		this.sizer?.disconnect();
 		this.wheel.dispose();
 		this.pageKeys.dispose();
+		this.scrollbar.dispose();
 		this.unlisten?.();
 		this.unlisten = null;
 		this.findBar?.destroy();
