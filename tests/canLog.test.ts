@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { EditorGroup, isCanLog } from '../src/editor';
 import { busLoad, formatCycle, idHex, parseIdFilter, progressText, type CanFrameLine, type CanIntervals, type CanLogStats, type CanProgress } from '../src/canLogView';
+import { CanRawView } from '../src/canRawView';
 import { MAX_SCROLL_PX } from '../src/ui';
 import { backend, Channel, dialog } from './tauriMock';
 import { click, texts } from './helpers';
@@ -275,6 +276,49 @@ describe('CAN log views', () => {
 		// the scrollTop instead of leaving the user's drag to drift under it.
 		expect(frameOf()).toBe(before);
 		await group.closeAll();
+	}, 10000);
+
+	it('recovers rows a short backend response left unfetched, without the user scrolling again', async () => {
+		// can_log_frames' own contract (can_log.rs): "a range past the parsed prefix comes back
+		// short (or empty)" rather than waiting for it. The old fetch-completion handler only
+		// cleared `fetching` for indices a line actually arrived for, so a short response
+		// stranded the rest there forever — never retried, the view blank at that spot until
+		// the whole log finished parsing (only then did a fresh scroll fetch it clean). The
+		// fix clears the whole requested range unconditionally, so the next poll tick's
+		// refresh (no user action needed) picks the gap back up on its own.
+		const frameAt = (index: number): CanFrameLine => ({
+			tS: index * 0.001, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17'
+		});
+		let parsed = 2_000_000;
+		let calls = 0;
+		let sawShortResponse = false;
+		backend.on('can_log_open', () => ({ docId: 21, totalBytes: 1000 }));
+		backend.on('can_log_count', () => ({ parsed, done: false, error: null }));
+		backend.on('can_log_frames', ({ start, end }: any) => {
+			calls++;
+			if (calls === 1) {
+				sawShortResponse = true;
+				return []; // the parsed prefix has not reached this window yet
+			}
+			return Array.from({ length: (end as number) - (start as number) }, (_, i) => frameAt((start as number) + i));
+		});
+		backend.on('can_log_close', () => undefined);
+
+		const view = new CanRawView('/tmp/short.asc');
+		document.body.append(view.root);
+		await waitForReady(() => Number.parseInt(view.root.querySelector<HTMLElement>('.can-raw-spacer')?.style.height ?? '', 10) === MAX_SCROLL_PX);
+		await waitForReady(() => sawShortResponse);
+
+		// The short response left the window's rows unfetched, not stuck as blank placeholders
+		// masquerading as loaded — nothing renders yet.
+		expect(view.root.querySelectorAll('.can-raw-rows .can-raw-row').length).toBe(0);
+
+		// The parse keeps going: the next poll tick refetches the still-missing window on its
+		// own, with no scroll or other user action.
+		parsed += 500_000;
+		await waitForReady(() => view.root.querySelectorAll('.can-raw-rows .can-raw-row').length > 0, 3000);
+		expect(calls).toBeGreaterThanOrEqual(2);
+		view.dispose();
 	}, 10000);
 
 	it('Text swaps the frame view for the editable plain text form and closes the log document', async () => {

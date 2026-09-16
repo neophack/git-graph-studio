@@ -111,6 +111,14 @@ export class CanRawView {
 	 * cached row never goes stale; far-scrolled rows are dropped to bound the DOM. */
 	private cache = new Map<number, HTMLElement>();
 	private fetching = new Set<number>();
+	/** One `can_log_frames` request in flight at a time. A fast drag (or a poll tick landing
+	 *  mid-drag) fires a refresh per scroll event; letting each issue its own fetch piles
+	 *  overlapping requests onto the backend — exactly while its CPU is busiest with the walk
+	 *  — so later ones queue up and the view sits blank until parsing lets the backlog drain.
+	 *  A later refresh while one is pending just marks `refetch`, and the landing fetch picks
+	 *  up whatever the viewport still wants. */
+	private fetchInFlight = false;
+	private refetch = false;
 	private timer: number | null = null;
 	private disposed = false;
 	/** The smooth wheel glide over the scroller (ui.ts), disposed with the view. */
@@ -291,27 +299,49 @@ export class CanRawView {
 			}
 		}
 		if (wanted.length === 0) return;
+		if (this.fetchInFlight) {
+			this.refetch = true;
+			return;
+		}
 		const start = wanted[0]!;
 		const end = Math.min(wanted[wanted.length - 1]! + 1, start + MAX_WINDOW);
 		for (let index = start; index < end; index++) this.fetching.add(index);
+		this.fetchInFlight = true;
 		const docId = doc.docId;
 		invoke<CanFrameLine[]>('can_log_frames', { docId, start, end })
 			.then((lines) => {
-				if (this.disposed || this.doc?.docId !== docId) return;
-				lines.forEach((line, offset) => {
-					const index = start + offset;
-					this.fetching.delete(index);
-					// A fetch lands after the viewport moved on (a scaled drag covers
-					// millions of rows in one bound): a row outside the current window is
-					// dropped, not placed — its viewport-relative offset would mean nothing.
-					if (index < this.windowFirst || index > this.windowLast) return;
-					if (this.cache.has(index)) return;
-					const row = this.renderRow(index, line);
-					this.cache.set(index, row);
-					this.place(row, index);
-				});
+				this.fetchInFlight = false;
+				if (!this.disposed && this.doc?.docId === docId) {
+					// The backend serves only its parsed prefix: a window that reaches past it
+					// comes back short (or empty) rather than waiting. Every requested index is
+					// released here regardless — clearing only the ones a line arrived for would
+					// strand the rest in `fetching` forever, never retried once the walk actually
+					// gets there, leaving the view blank at that spot until the whole log finishes.
+					for (let index = start; index < end; index++) this.fetching.delete(index);
+					lines.forEach((line, offset) => {
+						const index = start + offset;
+						// A fetch lands after the viewport moved on (a scaled drag covers
+						// millions of rows in one bound): a row outside the current window is
+						// dropped, not placed — its viewport-relative offset would mean nothing.
+						if (index < this.windowFirst || index > this.windowLast) return;
+						if (this.cache.has(index)) return;
+						const row = this.renderRow(index, line);
+						this.cache.set(index, row);
+						this.place(row, index);
+					});
+				}
+				// The viewport (or the parsed prefix) moved on while this fetch was out: pick up
+				// whatever it still wants, short response or not — no scroll event is coming to
+				// ask again on its own.
+				if (this.refetch) {
+					this.refetch = false;
+					this.refresh();
+				}
 			})
 			.catch((error) => {
+				this.fetchInFlight = false;
+				this.refetch = false;
+				for (let index = start; index < end; index++) this.fetching.delete(index);
 				if (!this.disposed) this.fail(String(error));
 			});
 	}
