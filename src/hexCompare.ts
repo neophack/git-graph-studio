@@ -8,8 +8,9 @@
 
 import { invoke } from '@tauri-apps/api/core';
 
-import { el, icon, VirtualScroll } from './ui';
 import { OFFSET_DIGITS, ROW_LADDER, asciiChar, bytesPerRowFor, decodeBase64, groupSizeFor, hexAddress, hexByte, hexHeader, rowGridTemplate } from './hexView';
+import { settings } from './settings';
+import { attachSmoothWheel, el, icon, VirtualScroll, type SmoothWheelHandle } from './ui';
 
 /** Visible rows are filled from 64 KiB slabs, so scrolling reads a slab at a time. */
 const SLAB_BYTES = 64 * 1024;
@@ -98,6 +99,8 @@ export class HexCompareView {
 	private destroyed = false;
 	/** Watches the scroller for relayouts; disconnected by destroy(). */
 	private readonly observer: ResizeObserver;
+	/** The smooth wheel glide over the scroller (ui.ts), disposed with the view. */
+	private readonly wheel: SmoothWheelHandle;
 
 	constructor(private leftPath: string, private rightPath: string, private labels: HexCompareLabels = { left: leftPath, right: rightPath }) {
 		const prev = el('button', 'button secondary', [icon('arrow-up')]);
@@ -151,6 +154,12 @@ export class HexCompareView {
 			this.ruler.scrollLeft = this.scroller.scrollLeft;
 			this.draw();
 		});
+		this.wheel = attachSmoothWheel(this.scroller, {
+			enabled: () => settings.smoothScrolling,
+			sensitivity: () => settings.mouseWheelScrollSensitivity,
+			fastSensitivity: () => settings.fastScrollSensitivity,
+			zoom: () => this.range.documentPxPerScrollPx(this.scroller.clientHeight)
+		});
 		let pending = 0;
 		this.observer = new ResizeObserver(() => {
 			if (pending) return;
@@ -180,6 +189,7 @@ export class HexCompareView {
 		this.destroyed = true;
 		this.scanToken++;
 		this.observer.disconnect();
+		this.wheel.dispose();
 		this.leftSlabs.pending.clear();
 		this.leftSlabs.values.clear();
 		this.rightSlabs.pending.clear();

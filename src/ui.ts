@@ -124,12 +124,212 @@ export class VirtualScroll {
 		return Math.max(0, Math.min(this.spacer - clientHeight, documentOffset / this.scale(clientHeight)));
 	}
 
+	/** Document pixels per scrollbar pixel — 1 while the document fits the ceiling, the
+	 *  scale past it. Deltas that mean document distance (a wheel notch) divide by this
+	 *  before they move the thumb, or the scaled range multiplies them into whole
+	 *  screens per notch. */
+	documentPxPerScrollPx(clientHeight: number): number {
+		return this.scaled ? this.scale(clientHeight) : 1;
+	}
+
 	private scale(clientHeight: number): number {
 		const scrollable = this.spacer - clientHeight;
 		if (scrollable <= 0) return 1;
 		const document = this.documentHeight - clientHeight;
 		return document > scrollable ? document / scrollable : 1;
 	}
+}
+
+/* ---------- Smooth wheel scrolling (VS Code's scrollable model) ---------- */
+
+/** VS Code's smooth-scroll duration (`SMOOTH_SCROLL_DURATION` in its `scrollable.ts`): a
+ *  wheel notch glides over 125 ms instead of jumping its pixels in a single frame. */
+const SMOOTH_WHEEL_MS = 125;
+
+/** VS Code's `SCROLL_WHEEL_SENSITIVITY` (`scrollableElement.ts`): the content pixels one
+ *  normalised wheel notch moves. With `StandardWheelEvent`'s normalisation — 40 px of
+ *  browser delta, or 3 lines, is one notch — the default Windows notch (100 px of browser
+ *  delta) scrolls 50 × 100/40 = 125 px, on every surface, exactly VS Code. */
+const WHEEL_NOTCH_PX = 50;
+
+export interface SmoothWheelOptions {
+	/** Whether the glide is on, read live at wheel time so the setting flips without a
+	 *  remount. Absent means always on; false leaves the native wheel scroll in place. */
+	enabled?: () => boolean;
+	/** VS Code's `editor.mouseWheelScrollSensitivity`: a multiplier on the wheel's
+	 *  distance, read live at wheel time. Absent means 1. */
+	sensitivity?: () => number;
+	/** VS Code's `editor.fastScrollSensitivity`: the extra multiplier Alt holds while
+	 *  scrolling. Absent means 1. */
+	fastSensitivity?: () => number;
+	/** How many document pixels one scrollbar pixel stands for — a VirtualScroll range
+	 *  past the engines' height ceiling. Wheel deltas are document-space: they divide by
+	 *  this, so a notch moves the same rows whatever the file's size. Absent means 1. */
+	zoom?: () => number;
+}
+
+/** Detach the handler and stop any glide in flight. */
+export interface SmoothWheelHandle {
+	dispose(): void;
+}
+
+/** The glide in flight: a cubic hermite spline per axis — position and velocity captured at
+ *  its start, rest at its target — so a notch that lands mid-glide re-splines from where the
+ *  motion stands and never resets it. The clock is the rAF timestamps alone: `start` is
+ *  anchored by the first frame, and a retarget reads the velocity at `s`, the parameter the
+ *  last frame reached — never a second clock (under jsdom, `performance.now()` and the frame
+ *  timestamps are different timelines, and mixing them sent the spline negative). */
+interface SmoothWheelGlide {
+	start: number | null;
+	s: number;
+	fromTop: number;
+	fromLeft: number;
+	velocityTop: number;
+	velocityLeft: number;
+	targetTop: number;
+	targetLeft: number;
+	frame: number;
+}
+
+/** One hermite step (end velocity zero): the position and velocity `s` of the way through. */
+function hermite(from: number, velocity: number, target: number, s: number, duration: number): [number, number] {
+	const s2 = s * s;
+	const s3 = s2 * s;
+	const position = (2 * s3 - 3 * s2 + 1) * from + (s3 - 2 * s2 + s) * duration * velocity + (-2 * s3 + 3 * s2) * target;
+	const d = (6 * s2 - 6 * s) / duration * from + (3 * s2 - 4 * s + 1) * velocity + (-6 * s2 + 6 * s) / duration * target;
+	return [position, d];
+}
+
+/** Smooth mouse-wheel scrolling over any scrollable element, VS Code's model: each wheel
+ *  notch is prevented and re-delivered as a 125 ms ease from the current position (carrying
+ *  its velocity, so streaming notches compound instead of restarting), and any scroll the
+ *  glide did not write — a thumb drag, a reveal, a window slide — cancels it on the spot.
+ *  The notch's distance is VS Code's too — 50 px per normalised notch, 125 px at the
+ *  Windows default — through the sensitivity options below. */
+export function attachSmoothWheel(element: HTMLElement, options: SmoothWheelOptions = {}): SmoothWheelHandle {
+	const isEnabled = options.enabled ?? (() => true);
+	const sensitivity = options.sensitivity ?? (() => 1);
+	const fastSensitivity = options.fastSensitivity ?? (() => 1);
+	const zoom = options.zoom;
+	let glide: SmoothWheelGlide | null = null;
+	/** The scroll positions the glide itself last wrote; anything else arriving through a
+	 *  scroll event is an external move and owns the element. */
+	let writtenTop = 0;
+	let writtenLeft = 0;
+
+	function onWheel(event: WheelEvent): void {
+		if (event.defaultPrevented || event.ctrlKey || event.metaKey) return;
+		// A scaled virtual range (VirtualScroll below) makes one scrollbar pixel stand for
+		// many document pixels, so the notch is applied in document space — divided back to
+		// scrollbar pixels — and the wheel is taken over from the engine even with the glide
+		// off, or the native scroll would race the document by the same factor.
+		const factor = Math.max(1, zoom?.() ?? 1);
+		const smooth = isEnabled();
+		if (!smooth && factor <= 1) return;
+		// VS Code's wheel model (`StandardWheelEvent` over `SCROLL_WHEEL_SENSITIVITY`): the
+		// delta is normalised to notches — 40 px of browser delta, or 3 lines in Firefox's
+		// line mode, is one notch — the sensitivity multipliers scale it (Alt holds the
+		// fast-scroll factor), and one notch is 50 px of content.
+		const notchUnit = event.deltaMode === 1 ? 3 : 40;
+		const speed = sensitivity() * (event.altKey ? fastSensitivity() : 1);
+		let dx = ((event.deltaX / notchUnit) * WHEEL_NOTCH_PX * speed) / factor;
+		let dy = ((event.deltaY / notchUnit) * WHEEL_NOTCH_PX * speed) / factor;
+		// Shift+wheel scrolls horizontally — Chromium swaps the axes itself, Firefox does not.
+		if (event.shiftKey && dx === 0 && dy !== 0) {
+			dx = dy;
+			dy = 0;
+		}
+		// VS Code rounds the delta away from zero ("otherwise low speed scrolling will
+		// never scroll"): a scaled range can leave a notch under half a scrollbar pixel,
+		// and the engine's whole-pixel snapping would swallow it whole.
+		dx = dx < 0 ? Math.floor(dx) : Math.ceil(dx);
+		dy = dy < 0 ? Math.floor(dy) : Math.ceil(dy);
+		const baseTop = glide ? glide.targetTop : element.scrollTop;
+		const baseLeft = glide ? glide.targetLeft : element.scrollLeft;
+		// The engine clamps writes anyway, but clamping the target too keeps a notch that
+		// lands past an edge from banking there: the first notch the other way must answer.
+		const maxTop = element.scrollHeight - element.clientHeight;
+		const maxLeft = element.scrollWidth - element.clientWidth;
+		const targetTop = Math.max(0, maxTop > 0 ? Math.min(baseTop + dy, maxTop) : baseTop + dy);
+		const targetLeft = Math.max(0, maxLeft > 0 ? Math.min(baseLeft + dx, maxLeft) : baseLeft + dx);
+		event.preventDefault();
+		// The glide off, the scaled notch still applies — at once, the way the native
+		// wheel would have.
+		if (!smooth) {
+			cancelGlide();
+			element.scrollTop = targetTop;
+			element.scrollLeft = targetLeft;
+			return;
+		}
+		// A glide already running hands its live position and velocity to the new spline, so
+		// streaming notches compound the motion instead of restarting it on every event.
+		const pending = glide;
+		let velocityTop = 0;
+		let velocityLeft = 0;
+		if (pending) {
+			velocityTop = hermite(pending.fromTop, pending.velocityTop, pending.targetTop, pending.s, SMOOTH_WHEEL_MS)[1];
+			velocityLeft = hermite(pending.fromLeft, pending.velocityLeft, pending.targetLeft, pending.s, SMOOTH_WHEEL_MS)[1];
+		}
+		glide = {
+			start: pending ? pending.start : null,
+			s: pending ? pending.s : 0,
+			fromTop: element.scrollTop,
+			fromLeft: element.scrollLeft,
+			velocityTop,
+			velocityLeft,
+			targetTop,
+			targetLeft,
+			frame: pending ? pending.frame : 0
+		};
+		// Adopt the current positions as ours, so a scroll event still pending from before
+		// this notch does not read as an external move and kill the glide it belongs to.
+		writtenTop = element.scrollTop;
+		writtenLeft = element.scrollLeft;
+		if (!pending) glide.frame = requestAnimationFrame(tick);
+	}
+
+	function tick(now: number): void {
+		if (!glide) return;
+		if (!element.isConnected) {
+			cancelGlide();
+			return;
+		}
+		glide.start ??= now;
+		glide.s = Math.min(1, Math.max(0, (now - glide.start) / SMOOTH_WHEEL_MS));
+		const s = glide.s;
+		// The spline is defined by its start position and velocity — the velocity out is only
+		// read at a retarget, never stored back or the curve would bend mid-flight.
+		writtenTop = Math.round(hermite(glide.fromTop, glide.velocityTop, glide.targetTop, s, SMOOTH_WHEEL_MS)[0]);
+		writtenLeft = Math.round(hermite(glide.fromLeft, glide.velocityLeft, glide.targetLeft, s, SMOOTH_WHEEL_MS)[0]);
+		element.scrollTop = writtenTop;
+		element.scrollLeft = writtenLeft;
+		if (s >= 1) {
+			glide = null;
+			return;
+		}
+		glide.frame = requestAnimationFrame(tick);
+	}
+
+	function cancelGlide(): void {
+		if (!glide) return;
+		cancelAnimationFrame(glide.frame);
+		glide = null;
+	}
+
+	function onScroll(): void {
+		// A position the glide did not write: an external scroll owns the element now.
+		if (glide && (element.scrollTop !== writtenTop || element.scrollLeft !== writtenLeft)) cancelGlide();
+	}
+
+	element.addEventListener('wheel', onWheel, { passive: false });
+	element.addEventListener('scroll', onScroll, { passive: true });
+	return {
+		dispose(): void {
+			cancelGlide();
+			element.removeEventListener('wheel', onWheel);
+			element.removeEventListener('scroll', onScroll);
+		}
+	};
 }
 
 /* ---------- Delayed tooltips and the busy cursor (M7 7.8) ---------- */

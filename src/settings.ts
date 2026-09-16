@@ -26,6 +26,12 @@ export interface AppSettings {
 	minimap: boolean;
 	/** `editor.stickyScroll.enabled`: the enclosing blocks pinned over the code. */
 	stickyScroll: boolean;
+	/** `editor.smoothScrolling`: wheel notches glide to their position instead of jumping. */
+	smoothScrolling: boolean;
+	/** `editor.mouseWheelScrollSensitivity`: a multiplier on the wheel's scrolling distance. */
+	mouseWheelScrollSensitivity: number;
+	/** `editor.fastScrollSensitivity`: the multiplier Alt holds over the wheel's distance. */
+	fastScrollSensitivity: number;
 	/** `editor.bracketPairColorization.enabled`: brackets coloured by nesting depth. */
 	bracketColors: boolean;
 	/** `editor.fontSize`, in pixels - the code editors follow a CSS variable. */
@@ -51,7 +57,8 @@ export interface AppSettings {
 
 export const DEFAULT_SETTINGS: AppSettings = {
 	theme: 'dark-modern', locale: 'en', showOutline: false, autoSave: 'off', autoSaveDelay: 1000,
-	minimap: true, stickyScroll: true, bracketColors: true,
+	minimap: true, stickyScroll: true, smoothScrolling: true, bracketColors: true,
+	mouseWheelScrollSensitivity: 1, fastScrollSensitivity: 5,
 	fontSize: 14, tabSize: 4, wordWrap: false, snippetSuggestions: true, pathCompletion: true,
 	fileAssociations: ['blf', 'asc', 'ggx', 'bin', 'hex'],
 	linuxDmabuf: 'auto',
@@ -106,6 +113,9 @@ export const SETTING_DEFS: SettingDef[] = [
 	{ key: 'showOutline', category: 'editor', kind: 'boolean' },
 	{ key: 'minimap', category: 'editor', kind: 'boolean' },
 	{ key: 'stickyScroll', category: 'editor', kind: 'boolean' },
+	{ key: 'smoothScrolling', category: 'editor', kind: 'boolean' },
+	{ key: 'mouseWheelScrollSensitivity', category: 'editor', kind: 'number', min: 0.1, max: 10, step: 0.1 },
+	{ key: 'fastScrollSensitivity', category: 'editor', kind: 'number', min: 1, max: 20, step: 1 },
 	{ key: 'bracketColors', category: 'editor', kind: 'boolean' },
 	{ key: 'snippetSuggestions', category: 'editor', kind: 'boolean' },
 	{ key: 'pathCompletion', category: 'editor', kind: 'boolean' }

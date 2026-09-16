@@ -11,7 +11,8 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import { DocFindController, type DocFindHost, type DocFindMatch, type DocFindSpec } from './docFind';
 import { vscodeHighlighting } from './cmTheme';
-import { el, notify, VirtualScroll } from './ui';
+import { settings } from './settings';
+import { attachSmoothWheel, el, notify, VirtualScroll, type SmoothWheelHandle } from './ui';
 import { invoke } from '@tauri-apps/api/core';
 
 interface OpenInfo {
@@ -138,6 +139,10 @@ export class EditableDocView {
 	/** The staged open's landing event subscription (the exact line count replacing the
 	 *  estimate the scroller started with). */
 	private unlisten: UnlistenFn | null = null;
+	/** The smooth wheel glide over the scroller (ui.ts). A window slide repositions the
+	 *  scroller itself — that external write cancels the glide, and the next notch retargets
+	 *  from wherever the slide landed. */
+	private readonly wheel: SmoothWheelHandle;
 
 	/** The buffer became dirty (the editor group marks the tab). */
 	onChanged: (() => void) | null = null;
@@ -155,6 +160,12 @@ export class EditableDocView {
 		this.root.appendChild(this.scroller);
 		parent.appendChild(this.root);
 		this.scroller.addEventListener('scroll', () => this.onScroll(), { passive: true });
+		this.wheel = attachSmoothWheel(this.scroller, {
+			enabled: () => settings.smoothScrolling,
+			sensitivity: () => settings.mouseWheelScrollSensitivity,
+			fastSensitivity: () => settings.fastScrollSensitivity,
+			zoom: () => this.range.documentPxPerScrollPx(this.scroller.clientHeight)
+		});
 		// A huge file opens on its head with an estimated line count; the background tail's
 		// landing delivers the exact one, and the scroller takes it in place.
 		void listen<{ docId: number; lineCount: number }>('studio://viewer-lines', (event) => {
@@ -852,6 +863,7 @@ export class EditableDocView {
 
 	dispose(): void {
 		this.disposed = true;
+		this.wheel.dispose();
 		if (this.syncTimer !== undefined) window.clearTimeout(this.syncTimer);
 		if (this.backupTimer !== undefined) window.clearTimeout(this.backupTimer);
 		if (this.swapCheckTimer !== undefined) window.clearTimeout(this.swapCheckTimer);

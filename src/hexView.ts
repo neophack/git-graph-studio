@@ -13,7 +13,8 @@
 // and advances), Ctrl+Z steps the edits back, and saving writes only the changed bytes.
 
 import { invoke } from '@tauri-apps/api/core';
-import { el, icon, VirtualScroll } from './ui';
+import { settings } from './settings';
+import { attachSmoothWheel, el, icon, notify, quickInput, showContextMenu, VirtualScroll, type MenuEntry, type SmoothWheelHandle } from './ui';
 
 /** Rows are requested in slabs so scrolling doesn't fire a read per row. */
 const SLAB_BYTES = 64 * 1024;
@@ -178,6 +179,8 @@ export class HexView {
 	private readonly header: HTMLElement;
 	/** Watches the scroller for relayouts; disconnected by destroy(). */
 	private readonly observer: ResizeObserver;
+	/** The smooth wheel glide over the scroller (ui.ts), disposed with the view. */
+	private readonly wheel: SmoothWheelHandle;
 	private size = 0;
 	private rows = 0;
 	private rowHeight = 0;
@@ -290,6 +293,12 @@ export class HexView {
 			this.header.scrollLeft = this.scroller.scrollLeft;
 			this.draw();
 		});
+		this.wheel = attachSmoothWheel(this.scroller, {
+			enabled: () => settings.smoothScrolling,
+			sensitivity: () => settings.mouseWheelScrollSensitivity,
+			fastSensitivity: () => settings.fastScrollSensitivity,
+			zoom: () => this.range.documentPxPerScrollPx(this.scroller.clientHeight)
+		});
 		this.scroller.addEventListener('mousedown', (event) => {
 			if (!this.editing) return;
 			const cell = (event.target as HTMLElement).closest('.hex-cell');
@@ -327,6 +336,7 @@ export class HexView {
 	 *  runs this via `onClose`. */
 	destroy(): void {
 		this.observer.disconnect();
+		this.wheel.dispose();
 		this.searchToken++;
 		this.slabs.clear();
 		this.slabValues.clear();

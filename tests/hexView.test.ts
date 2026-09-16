@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { bytesPerRowFor, HexView } from '../src/hexView';
 import { EditorGroup } from '../src/editor';
+import { settings } from '../src/settings';
 import { MAX_SCROLL_PX, VirtualScroll } from '../src/ui';
 import { backend } from './tauriMock';
 import { flush } from './helpers';
@@ -212,6 +213,37 @@ describe('hex view', () => {
 		view.destroy();
 	}, 15000); // 48 keydowns each repaint the window's rows; heavy under a full-suite load
 
+	it('moves a wheel notch a document-space distance over a scaled range', async () => {
+		// One scrollbar pixel of a scaled range stands for hundreds of document pixels:
+		// left to the scrollbar, a notch ran the document by that factor — a
+		// thousand-pixel notch moved a quarter million pixels on a 6 GiB file, so the
+		// wheel felt wildly faster the larger the file. The notch now divides by the
+		// scale and moves VS Code's distance — the browser delta × 50/40 (125 px per
+		// default Windows notch) — whatever the file's size.
+		backend.on('read_file_chunk', () => ({ size: 6 * 1024 ** 3, base64: b64(new Uint8Array(4096)) }));
+		const view = new HexView('/tmp/huge.bin');
+		const scroller = view.root.querySelector('.hex-scroller') as HTMLElement;
+		let raw = 0;
+		Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => 600 });
+		Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => MAX_SCROLL_PX });
+		Object.defineProperty(scroller, 'scrollTop', { configurable: true, get: () => raw, set: (v: number) => { raw = Math.round(v); } });
+		await view.load();
+		const range = new VirtualScroll(6 * 1024 ** 3 / 16, 20, 580);
+		const before = range.documentTop(scroller.scrollTop, 600, MAX_SCROLL_PX);
+		const smooth = settings.smoothScrolling;
+		settings.smoothScrolling = false; // the direct jump; the glide's frames are rAF-timed
+		try {
+			scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 1000, cancelable: true }));
+		} finally {
+			settings.smoothScrolling = smooth;
+		}
+		const moved = range.documentTop(scroller.scrollTop, 600, MAX_SCROLL_PX) - before;
+		// 1000 px of browser delta is VS Code's 1250 document pixels, give or take one
+		// scrollbar pixel of quantisation — not the scale-multiplied 250,000.
+		expect(moved).toBeGreaterThan(1100);
+		expect(moved).toBeLessThan(1400);
+		view.destroy();
+	});
 
 	it('adopts the spacer height the engine really laid out, so the scaled bottom is the file\'s end', () => {
 		// The engine rounds a spacer a step shorter than asked (22,304,100 asks, 22,304,084

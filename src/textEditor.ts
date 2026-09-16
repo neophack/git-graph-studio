@@ -14,7 +14,7 @@ import { languages } from '@codemirror/language-data';
 
 import { completionExtension } from './autocomplete';
 import { hasBookmark } from './bookmarks';
-import { bracketColorsExtension, minimapExtension, stickyScrollExtension } from './editorExtras';
+import { bracketColorsExtension, minimapExtension, smoothWheelExtension, stickyScrollExtension } from './editorExtras';
 import { createFindPanel, openReplacePanel } from './findWidget';
 import { vscodeHighlighting } from './cmTheme';
 import { settings } from './settings';
@@ -117,9 +117,12 @@ export function baseExtensions(readOnly: boolean): Extension[] {
 		// keymap (Ctrl+F, Enter/F3) keeps driving it.
 		search({ top: true, createPanel: createFindPanel }),
 		keymap.of([...vscodeKeymap, ...editingKeymap, ...closeBracketsKeymap, ...completionKeymap, ...findKeymap, ...historyKeymap, ...foldKeymap, indentWithTab]),
-		// The M3 3.2 decorations belong to the editable editor: diff and revision panes stay lean.
 		// Every text surface scrolls past its end: the last line parks at the viewport's top.
 		pastEndExtension(),
+		// The M3 3.2 decorations belong to the editable editor: diff and revision panes stay
+		// lean. The wheel glide is not a decoration — every surface that scrolls file content
+		// gets it, read-only panes included.
+		smoothWheelExtension(),
 		...(readOnly ? [] : [bracketColorsExtension(), stickyScrollExtension(), minimapExtension()]),
 		vscodeHighlighting,
 		EditorState.readOnly.of(readOnly),
@@ -138,9 +141,10 @@ export function reconfigureEditorSettings(view: EditorView): void {
 	});
 }
 
-/** Read-only extensions for a comparison pane that is never edited or navigated. */
+/** Read-only extensions for a comparison pane that is never edited or navigated. The wheel
+ *  glide rides along: a comparison is browsed exactly like the file it came from. */
 export function readOnlyExtensions(): Extension[] {
-	return [EditorState.readOnly.of(true), EditorView.editable.of(false), pastEndExtension()];
+	return [EditorState.readOnly.of(true), EditorView.editable.of(false), pastEndExtension(), smoothWheelExtension()];
 }
 
 /* ---------- The bookmark gutter ---------- */

@@ -13,7 +13,8 @@
 import { invoke } from '@tauri-apps/api/core';
 
 import { convertCanLog, idHex } from './canLogView';
-import { basename, el, icon, VirtualScroll } from './ui';
+import { settings } from './settings';
+import { attachSmoothWheel, basename, el, icon, VirtualScroll, type SmoothWheelHandle } from './ui';
 
 interface CanOpenResult {
 	docId: number;
@@ -112,6 +113,8 @@ export class CanRawView {
 	private fetching = new Set<number>();
 	private timer: number | null = null;
 	private disposed = false;
+	/** The smooth wheel glide over the scroller (ui.ts), disposed with the view. */
+	private readonly wheel: SmoothWheelHandle;
 
 	constructor(private path: string, options: CanRawViewOptions = {}) {
 		const analyzeButton = el('button', 'button secondary can-analyze', [icon('pulse'), ' Statistics']) as HTMLButtonElement;
@@ -152,6 +155,12 @@ export class CanRawView {
 		this.scroller.append(this.spacer, this.rows);
 		this.root = el('div', 'can-view can-raw-view', [toolbar, this.progress, header, this.banner, this.scroller]);
 		this.scroller.addEventListener('scroll', () => this.refresh(), { passive: true });
+		this.wheel = attachSmoothWheel(this.scroller, {
+			enabled: () => settings.smoothScrolling,
+			sensitivity: () => settings.mouseWheelScrollSensitivity,
+			fastSensitivity: () => settings.fastScrollSensitivity,
+			zoom: () => this.range.documentPxPerScrollPx(this.scroller.clientHeight)
+		});
 		void this.load();
 	}
 
@@ -343,6 +352,7 @@ export class CanRawView {
 
 	dispose(): void {
 		this.disposed = true;
+		this.wheel.dispose();
 		if (this.timer !== null) clearTimeout(this.timer);
 		if (this.doc) void invoke('can_log_close', { docId: this.doc.docId });
 		this.root.remove();

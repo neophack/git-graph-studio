@@ -57,6 +57,45 @@ describe('editor decorations (M3 3.2)', () => {
 		expect(group.activeView!.dom.classList.contains('has-minimap')).toBe(false);
 	});
 
+
+	it('glides the wheel over the editor and yields to an outside scroll', async () => {
+		// The smooth-wheel extension (ui.ts's glide over scrollDOM): a notch eases in over
+		// 125 ms instead of jumping, and a scroll nobody asked the glide for — a thumb drag,
+		// a reveal — stops it where it stands. jsdom has no layout, so the range is stubbed
+		// the way the minimap drag test stubs it.
+		const view = group.activeView!;
+		const scroll = view.scrollDOM;
+		Object.defineProperty(scroll, 'scrollHeight', { configurable: true, value: 6000 });
+		Object.defineProperty(scroll, 'clientHeight', { configurable: true, value: 500 });
+		let top = 0;
+		Object.defineProperty(scroll, 'scrollTop', {
+			configurable: true,
+			get: () => top,
+			set: (v: number) => { top = Math.max(0, Math.min(5500, v)); }
+		});
+		const settle = async (done: () => boolean): Promise<void> => {
+			for (let i = 0; i < 50 && !done(); i++) await new Promise((resolve) => setTimeout(resolve, 16));
+		};
+
+		const notch = new WheelEvent('wheel', { deltaY: 120, cancelable: true });
+		scroll.dispatchEvent(notch);
+		expect(notch.defaultPrevented).toBe(true);
+		expect(top).toBe(0); // intercepted, and the glide starts from rest
+		await settle(() => top > 0);
+		expect(top).toBeLessThan(150); // part-way there: the ease is in flight
+		await settle(() => top >= 150);
+		expect(top).toBe(150); // VS Code's notch distance: 120 px of browser delta × 50/40
+
+		// A second notch glides again — and a thumb drag mid-flight cancels it: the outside
+		// position stands, no frame writes 300 over it.
+		scroll.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, cancelable: true }));
+		await settle(() => top > 150);
+		top = 2500;
+		scroll.dispatchEvent(new Event('scroll'));
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(top).toBe(2500);
+	});
+
 	it('sticky scroll stays hidden without a layout instead of throwing', async () => {
 		// jsdom has no layout: posAtCoords throws and the overlay must hide, not crash.
 		expect(() => updateSetting('stickyScroll', true)).not.toThrow();

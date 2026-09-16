@@ -1,13 +1,14 @@
-// The three VS Code editor decorations of M3 3.2: bracket pair colouring, sticky scroll and
-// the minimap. All three live as CodeMirror extensions here (so they stay in the text editor's
-// async chunk), read the settings live, and degrade to no-ops in environments without layout
-// or canvas (jsdom) rather than throwing.
+// The VS Code editor extras of M3 3.2: bracket pair colouring, sticky scroll, the minimap,
+// and the smooth wheel glide. All live as CodeMirror extensions here (so they stay in the
+// text editor's async chunk), read the settings live, and degrade to no-ops in environments
+// without layout or canvas (jsdom) rather than throwing.
 
 import { RangeSetBuilder, StateEffect, StateField, type Extension } from '@codemirror/state';
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import { syntaxTree } from '@codemirror/language';
 
 import { SETTINGS_EVENT, THEME_EVENT, settings } from './settings';
+import { attachSmoothWheel, type SmoothWheelHandle } from './ui';
 
 /** A coalesced redraw around a callback: the returned trigger runs the callback once per
  *  animation frame however often it is asked for (a plain timeout where frames do not exist,
@@ -404,4 +405,28 @@ export function minimapExtension(): Extension {
 		}
 	}
 	return ViewPlugin.fromClass(Minimap);
+}
+
+/* ---------- Smooth wheel scrolling ---------- */
+
+/** VS Code's `editor.smoothScrolling` for every CodeMirror surface: the shared wheel glide
+ *  (ui.ts) attached to the view's scroll DOM, alive exactly as long as the view. A plugin —
+ *  not a `domEventHandlers` entry — so the listener covers the gutters too and CodeMirror's
+ *  own destroy unmounts it with the editor. */
+export function smoothWheelExtension(): Extension {
+	return ViewPlugin.fromClass(class {
+		private readonly handle: SmoothWheelHandle;
+
+		constructor(view: EditorView) {
+			this.handle = attachSmoothWheel(view.scrollDOM, {
+				enabled: () => settings.smoothScrolling,
+				sensitivity: () => settings.mouseWheelScrollSensitivity,
+				fastSensitivity: () => settings.fastScrollSensitivity
+			});
+		}
+
+		destroy(): void {
+			this.handle.dispose();
+		}
+	});
 }

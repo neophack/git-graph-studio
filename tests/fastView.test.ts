@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { FastView } from '../src/fastView';
+import { updateSetting } from '../src/settings';
 import { MAX_SCROLL_PX } from '../src/ui';
 import { backend } from './tauriMock';
 import { flush } from './helpers';
@@ -236,6 +237,73 @@ describe('the fast viewer', () => {
 		expect(opens.length).toBe(1);
 		expect((opens[0] as Record<string, unknown>)['symbols']).toBeUndefined();
 		view.dispose();
+	});
+});
+
+describe('the fast viewer smooth wheel glide (ui.ts)', () => {
+	/** Pump frames until `done` holds (the 125 ms glide needs a handful of jsdom's ~16 ms
+	 *  animation frames to land; the cap bounds a starved clock). */
+	async function pumpUntil(done: () => boolean): Promise<void> {
+		for (let i = 0; i < 50 && !done(); i++) await new Promise((resolve) => setTimeout(resolve, 16));
+	}
+
+	async function openHuge(): Promise<FastView> {
+		backend.on('viewer_open', () => ({ ...OPEN, lineCount: 100_000 }));
+		backend.on('viewer_close', () => undefined);
+		backend.on('viewer_symbols', () => []);
+		backend.on('viewer_lines', ({ start, end }) => linesResult(start as number, end as number));
+		const view = new FastView(document.getElementById('editorGroup')!);
+		await view.openFile('C:\\repo\\huge.txt');
+		await flush();
+		return view;
+	}
+
+	it('eases a wheel notch to its position instead of jumping it there', async () => {
+		const view = await openHuge();
+		const scroller = view.root.querySelector<HTMLElement>('.fast-scroll')!;
+		const notch = new WheelEvent('wheel', { deltaY: 120, cancelable: true });
+		scroller.dispatchEvent(notch);
+		// The notch is intercepted, and the glide starts from rest: before the first frame
+		// the position has not moved at all — a native wheel would already have jumped.
+		expect(notch.defaultPrevented).toBe(true);
+		expect(scroller.scrollTop).toBe(0);
+		// VS Code's notch distance everywhere: 120 px of browser delta × 50/40 = 150 px.
+		await pumpUntil(() => scroller.scrollTop >= 150);
+		expect(scroller.scrollTop).toBe(150);
+		// Alt holds the fast-scroll factor (VS Code's fastScrollSensitivity, default 5).
+		scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, altKey: true, cancelable: true }));
+		await pumpUntil(() => scroller.scrollTop >= 150 + 750);
+		expect(scroller.scrollTop).toBe(900);
+		view.dispose();
+	});
+
+	it('stacks a second notch onto the running glide, and leaves the wheel alone when the setting is off', async () => {
+		const view = await openHuge();
+		const scroller = view.root.querySelector<HTMLElement>('.fast-scroll')!;
+		scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, cancelable: true }));
+		await pumpUntil(() => scroller.scrollTop > 0);
+		// Mid-glide: part of the way to the first notch, and the second re-targets the same
+		// glide to 300 rather than restarting it from zero.
+		const mid = scroller.scrollTop;
+		expect(mid).toBeGreaterThan(0);
+		expect(mid).toBeLessThan(150);
+		scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, cancelable: true }));
+		await pumpUntil(() => scroller.scrollTop >= 300);
+		expect(scroller.scrollTop).toBe(300);
+		view.dispose();
+
+		// The setting off: the wheel is not prevented and nothing moves it but the platform.
+		updateSetting('smoothScrolling', false);
+		const plain = await openHuge();
+		const off = plain.root.querySelector<HTMLElement>('.fast-scroll')!;
+		const notch = new WheelEvent('wheel', { deltaY: 120, cancelable: true });
+		off.dispatchEvent(notch);
+		expect(notch.defaultPrevented).toBe(false);
+		// Plenty of frames for a glide that must not exist.
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(off.scrollTop).toBe(0);
+		updateSetting('smoothScrolling', true);
+		plain.dispose();
 	});
 });
 
