@@ -68,12 +68,12 @@ describe('text file editing', () => {
 		await group.closeAll();
 	});
 
-	it('edits a document past the engines\' scroll ceiling — the range scales, no read-only detour', { timeout: 10_000 }, async () => {
+	it('edits a document past the engines\' scroll ceiling — the row model owns the position, no read-only detour', { timeout: 10_000 }, async () => {
 		fileBackend();
 		// 2,000,000 lines ≈ 38M px: past what the layout engines can natively scroll, where
-		// a document-space spacer would strand the tail. The windowed editor's spacer clamps
-		// at the ceiling and the scroll range scales instead — the file stays editable end
-		// to end.
+		// a document-space spacer would strand the tail. The scroll model holds the position
+		// as a line index — no pixel range ever exists to scale — and the drawn scrollbar
+		// spans the whole file, so it stays reachable and editable end to end.
 		const LINES = 2_000_000;
 		backend.on('file_probe', () => ({ size: 100 * 1024 * 1024, binary: false, longLines: false }));
 		backend.on('viewer_open', () => ({ docId: 7, lineCount: LINES, language: 'log', syntaxName: 'Plain Text', symbols: [] }));
@@ -93,11 +93,11 @@ describe('text file editing', () => {
 		expect(document.querySelector('.fast-view')).toBeNull();
 		await new Promise((resolve) => setTimeout(resolve, 150)); // the opening swap settles
 
-		// Drag the scrollbar to its very bottom: the mapped position is the file's end and
-		// the window slides there — the last lines are editable, not stranded.
-		const scroller = document.querySelector<HTMLElement>('.doc-edit-scroll')!;
-		scroller.scrollTop = 32_000_000;
-		scroller.dispatchEvent(new Event('scroll'));
+		// Drag the scrollbar to its very bottom: the model takes the line index and the
+		// window slides there — the last lines are editable, not stranded.
+		const doc = group.open[0]!.doc!;
+		doc.scroll.setViewport(380);
+		doc.scroll.setTop(LINES);
 		await new Promise((resolve) => setTimeout(resolve, 500));
 		const asked = backend.callsTo('viewer_text').at(-1)!['start'] as number;
 		expect(asked).toBeGreaterThanOrEqual(LINES - 1200);
@@ -183,7 +183,7 @@ describe('text file editing', () => {
 	it('adopts the staged open\'s exact line count when the tail lands', async () => {
 		fileBackend();
 		// The windowed editor opens a huge file on its estimated count; the landing event
-		// replaces it and the scroller re-ranges in place.
+		// replaces it and the scroll model re-ranges in place.
 		const LINES = Array.from({ length: 200 }, (_, i) => `line ${i}`);
 		backend.on('file_probe', () => ({ size: 100 * 1024 * 1024, binary: false, longLines: false }));
 		backend.on('viewer_open', () => ({ docId: 7, lineCount: 200, language: 'log', syntaxName: 'Plain Text', symbols: [] }));
@@ -196,16 +196,14 @@ describe('text file editing', () => {
 		const view = new EditableDocView(document.getElementById('editorGroup')!);
 		await view.openFile('C:\\repo\\staged.log');
 		await new Promise((resolve) => setTimeout(resolve, 200)); // the opening swap settles
-		const spacer = view.root.querySelector<HTMLElement>('.doc-edit-spacer')!;
-		const before = Number.parseInt(spacer.style.height, 10);
+		expect(view.scroll.rowCount).toBe(200);
 		backend.emit('studio://viewer-lines', { docId: 7, lineCount: 4_000 });
 		await new Promise((resolve) => setTimeout(resolve, 250)); // the relayout's measure lands
-		const after = Number.parseInt(spacer.style.height, 10);
-		expect(after).toBeGreaterThan(before + 30_000); // 3,800 more lines of height
+		expect(view.scroll.rowCount).toBe(4_000);
 		view.dispose();
 	});
 
-	it('refills the window a fast scrollbar drag ends on, even inside the slide cooldown', { timeout: 10_000 }, async () => {
+	it('refills the window a fast scrollbar drag ends on, even while the first slide is in flight', { timeout: 10_000 }, async () => {
 		fileBackend();
 		const LINES = Array.from({ length: 20_000 }, (_, i) => `line ${i}`);
 		backend.on('file_probe', () => ({ size: 100 * 1024 * 1024, binary: false, longLines: false }));
@@ -218,23 +216,21 @@ describe('text file editing', () => {
 		backend.on('viewer_close', () => null);
 		const view = new EditableDocView(document.getElementById('editorGroup')!);
 		await view.openFile('C:\\repo\\huge.log');
-		// Let the opening swap's measure/timeout machinery settle so `swapping` clears.
+		// Let the opening window's fetch and layout machinery settle before the drag.
 		await new Promise((resolve) => setTimeout(resolve, 150));
+		view.scroll.setViewport(380);
 
-		const scroller = view.root.querySelector<HTMLElement>('.doc-edit-scroll')!;
-		// A fast drag: the first scroll event slides the window under the thumb…
-		scroller.scrollTop = 1500 * 19;
-		scroller.dispatchEvent(new Event('scroll'));
+		// A fast drag: the model jumps ahead of the loaded window and the first slide starts…
+		view.scroll.setTop(1500);
 		await flush();
 		const slidTo = backend.callsTo('viewer_text').at(-1)!['start'] as number;
 		expect(slidTo).toBeGreaterThan(0);
-		// …the second lands while the slide cooldown is still running and is rate-limited.
-		scroller.scrollTop = 8000 * 19;
-		scroller.dispatchEvent(new Event('scroll'));
-		// The thumb is released here: no further scroll events ever fire. The deferred
-		// check must still slide the window toward where the drag ended — without it the
-		// viewport stays parked on the spacer below the old window, blank.
+		// …and a second drag lands before that slide's fetch has. The edge re-check when
+		// the slide lands must carry the window to where the drag ended — without it the
+		// viewport stays parked below the old window, blank.
+		view.scroll.setTop(8000);
 		await new Promise((resolve) => setTimeout(resolve, 450));
+		await flush();
 		const endedOn = backend.callsTo('viewer_text').at(-1)!['start'] as number;
 		expect(endedOn).toBeGreaterThan(slidTo + 1000);
 		view.dispose();

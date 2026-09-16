@@ -3,17 +3,26 @@
 // lines around the viewport in a CodeMirror instance. Editing, scrolling, undo and save all
 // cost the same whether the file is 9 MB or 200 MB — the whole-document round trips that
 // froze the full editor never happen; only the changed lines cross the IPC.
+//
+// Scrolling is the row model's (scroll/): the viewport's top is a whole-file line the model
+// owns, projected onto CodeMirror's own scroller as `(top − first) × lineHeight`. A window
+// slide replaces the text and re-projects the same top, so the view never moves when a
+// fetch lands; the drawn scrollbar spans the whole file; and the wheel, the page keys and
+// the reveals all go through the model — no scroll event is ever an input, except the
+// scroller's own moves (CodeMirror keeping the caret in view), which are read back into it.
 
 import { EditorState, StateEffect, StateField } from '@codemirror/state';
 import { Decoration, type DecorationSet, EditorView, drawSelection, highlightActiveLine, highlightSpecialChars, keymap, lineNumbers } from '@codemirror/view';
+import { attachWheel, type Disposable } from './scroll/input';
+import { type AutoscrollStrategy, ScrollModel, VERTICAL_SCROLL_MARGIN } from './scroll/model';
+import { Scrollbar } from './scroll/scrollbar';
 import { defaultKeymap } from '@codemirror/commands';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import { DocFindController, type DocFindHost, type DocFindMatch, type DocFindSpec } from './docFind';
 import { toggleBlockComment, toggleLineComment } from './comments';
 import { vscodeHighlighting } from './cmTheme';
-import { settings } from './settings';
-import { attachSmoothWheel, el, notify, VirtualScroll, type SmoothWheelHandle } from './ui';
+import { el, notify } from './ui';
 import { Channel, invoke } from '@tauri-apps/api/core';
 
 interface OpenInfo {
@@ -45,8 +54,6 @@ const EDGE = 120;
 const SYNC_DELAY_MS = 150;
 /** How long after a synced edit the hot-exit backup is written (backend-side, no payload). */
 const BACKUP_DELAY_MS = 3000;
-/** Two window slides must be at least this far apart, or typing at a window edge thrashes. */
-const SWAP_COOLDOWN_MS = 250;
 
 /* ---------- The whole-file find's window decorations ---------- */
 
@@ -97,10 +104,8 @@ function codePointCol(lineText: string, utf16: number): number {
 
 export class EditableDocView {
 	readonly root: HTMLElement;
-	private readonly scroller: HTMLElement;
-	/** The one spacer: it stands in for every line outside the window, clamped and scaled
-	 *  past the layout engines' height ceiling (VirtualScroll), so any line count scrolls. */
-	private readonly spacer: HTMLElement;
+	/** The viewport: the host fills it, the drawn scrollbar sits on its edge. */
+	private readonly viewport: HTMLElement;
 	private readonly host: HTMLElement;
 	private cm: EditorView | null = null;
 	private docId: number | null = null;
@@ -112,8 +117,21 @@ export class EditableDocView {
 	/** The window's lines exactly as the backend holds them (the last synced state). */
 	private synced: string[] = [];
 	private lineHeight = 19;
-	/** The scroll range for the document's lines — scaled past the height ceiling. */
-	private range = new VirtualScroll(0, 19);
+	/** The viewport's position over the whole document, in lines (scroll/model.ts). */
+	readonly scroll: ScrollModel;
+	private readonly scrollbar: Scrollbar;
+	/** The scroller position the model was last projected to (after the DOM's own clamp),
+	 *  so a scroll event carrying that value is known to be ours and not CodeMirror's. */
+	private projected = 0;
+	/** A window just landed: replacing the text resets CodeMirror's scroller, and that
+	 *  reset is a layout artifact, not a position — reading it back would drag the model
+	 *  to wherever the window starts (a drag to the file's end loses its place to it).
+	 *  Readbacks resume once the reset has had its say; the timeout is the unwedge. */
+	private landing = 0;
+	/** A slide is queued or in flight: the model may run ahead of the window meanwhile, and
+	 *  the landing re-checks the edges rather than piling a second slide on the first. */
+	private sliding = false;
+	private readonly sizer: ResizeObserver | null;
 	private syncTimer: number | undefined;
 	private backupTimer: number | undefined;
 	/** Edits are sent strictly one at a time, chained through this promise. */
@@ -121,23 +139,9 @@ export class EditableDocView {
 	private disposed = false;
 	/** Set when a send failed: the next sync resends the whole window instead of a diff. */
 	private needsFullResync = false;
-	/** While a slide replaces the window and repositions the scroller, its own scroll events are ignored. */
-	private swapping = false;
-	/** Bumped by every relayout; a layout pass whose write arrives after a newer one was
-	 *  scheduled is stale and must not write its captured scroll anchor. */
-	private layoutSeq = 0;
-	/** A scroll that wanted a slide but hit the cooldown parks a re-check here. A fast
-	 *  scrollbar drag ends inside the cooldown all the time, and with the thumb released no
-	 *  further scroll events ever fire — without the re-check the viewport stays parked over
-	 *  a spacer, blank, until the user nudges it. */
-	private swapCheckTimer: number | undefined;
 	/** True only for the dispatches that put fetched window text into the view, so the
 	 *  update listener can tell them from the user's edits. */
 	private replacing = false;
-	private lastSwapAt = 0;
-	/** A jump (reveal, undo) sets the line the next layout must scroll to, overriding the
-	 *  keep-the-top-line-steady anchor a plain slide uses. */
-	private pendingScrollLine: number | null = null;
 	/** True from the first keystroke until the save that lands it: a file-change event in
 	 *  that window (usually our own watcher echo) must not reload the document out from
 	 *  under unsynced or just-typed edits. */
@@ -147,10 +151,8 @@ export class EditableDocView {
 	/** The staged open's landing event subscription (the exact line count replacing the
 	 *  estimate the scroller started with). */
 	private unlisten: UnlistenFn | null = null;
-	/** The smooth wheel glide over the scroller (ui.ts). A window slide repositions the
-	 *  scroller itself — that external write cancels the glide, and the next notch retargets
-	 *  from wherever the slide landed. */
-	private readonly wheel: SmoothWheelHandle;
+	/** The wheel over CodeMirror's scroller (scroll/input.ts), attached with the editor. */
+	private wheel: Disposable | null = null;
 
 	/** The buffer became dirty (the editor group marks the tab). */
 	onChanged: (() => void) | null = null;
@@ -164,21 +166,21 @@ export class EditableDocView {
 
 	constructor(parent: HTMLElement) {
 		this.root = el('div', 'doc-edit');
-		this.scroller = el('div', 'doc-edit-scroll');
-		this.spacer = el('div', 'doc-edit-spacer');
+		this.viewport = el('div', 'doc-edit-viewport');
 		this.host = el('div', 'doc-edit-host');
-		this.scroller.append(this.spacer, this.host);
-		this.root.appendChild(this.scroller);
+		this.viewport.appendChild(this.host);
+		this.root.appendChild(this.viewport);
 		parent.appendChild(this.root);
-		this.scroller.addEventListener('scroll', () => this.onScroll(), { passive: true });
-		this.wheel = attachSmoothWheel(this.scroller, {
-			enabled: () => settings.smoothScrolling,
-			sensitivity: () => settings.mouseWheelScrollSensitivity,
-			fastSensitivity: () => settings.fastScrollSensitivity,
-			zoom: () => this.range.documentPxPerScrollPx(this.scroller.clientHeight)
+		this.scroll = new ScrollModel(this.lineHeight);
+		this.scroll.onChange(() => {
+			this.project();
+			this.checkEdges();
 		});
+		this.scrollbar = new Scrollbar(this.viewport, this.scroll);
+		this.sizer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => this.layout());
+		this.sizer?.observe(this.viewport);
 		// A huge file opens on its head with an estimated line count; the background tail's
-		// landing delivers the exact one, and the scroller takes it in place.
+		// landing delivers the exact one, and the model takes it in place.
 		void listen<{ docId: number; lineCount: number }>('studio://viewer-lines', (event) => {
 			if (this.docId === event.payload.docId) {
 				this.lineCount = event.payload.lineCount;
@@ -246,12 +248,11 @@ export class EditableDocView {
 					{ key: 'Mod-z', preventDefault: true, run: () => (void this.undo(), true) },
 						{ key: 'Mod-Z', preventDefault: true, run: () => (void this.redo(), true) },
 						{ key: 'Mod-y', preventDefault: true, run: () => (void this.redo(), true) },
-						// PageUp / PageDown are this editor's own: CodeMirror's cursorPageUp/Down
-						// measure the host's overflow:visible scroller — their "page" is the whole
-						// loaded window plus the screen height, and they scroll nothing here. These
-						// move exactly one viewport of document lines, sliding the window when a
-						// page lands past its edge. Shift keeps the caret move: a selection cannot
-						// span lines the window has not loaded.
+						// PageUp / PageDown are this editor's own (Zed's MovePageUp/Down): the caret
+						// walks a viewport less one line and the model's autoscroll brings the
+						// view after it, sliding the window when the landing line is outside it.
+						// Shift keeps the caret move: a selection cannot span lines the window has
+						// not loaded.
 						{ key: 'PageUp', preventDefault: true, run: () => (this.pageBy(-1), true), shift: () => (this.pageBy(-1), true) },
 						{ key: 'PageDown', preventDefault: true, run: () => (this.pageBy(1), true), shift: () => (this.pageBy(1), true) },
 						// Alt-ArrowLeft / Alt-ArrowRight stay the workbench's Go Back / Forward;
@@ -259,10 +260,13 @@ export class EditableDocView {
 						...defaultKeymap.filter((binding) => !['Alt-ArrowLeft', 'Alt-ArrowRight', 'PageUp', 'PageDown'].includes(binding.key ?? ''))
 					]),
 					vscodeHighlighting,
+					// The caret's own moves keep Zed's margin from the viewport's edges: CodeMirror
+					// scrolls its own scroller for them, and the scroll listener below reads
+					// that back into the model.
+					EditorView.scrollMargins.of(() => ({ top: VERTICAL_SCROLL_MARGIN * this.lineHeight, bottom: VERTICAL_SCROLL_MARGIN * this.lineHeight })),
 					EditorView.updateListener.of((update) => {
 						// A window swap rewrites the whole view: that is our own text arriving, not
-						// the user typing — it must not dirty the document, schedule a sync, or
-						// start the edge-slide cooldown that would swallow the reveal behind it.
+						// the user typing — it must not dirty the document or schedule a sync.
 						if (update.docChanged && !this.replacing) {
 							this.touched = true;
 							this.scheduleSync();
@@ -277,16 +281,39 @@ export class EditableDocView {
 			parent: this.host
 		});
 		this.lineHeight = this.cm.defaultLineHeight || 19;
+		this.scroll.setRowHeight(this.lineHeight);
+		const scrollDOM = this.cm.scrollDOM;
+		// The wheel lands in the model; the scroller's vertical scroll is the model's
+		// projection and stays its own (a caret reveal writes it too).
+		this.wheel = attachWheel(scrollDOM, this.scroll, { ownVerticalScroll: true });
+		scrollDOM.addEventListener('scroll', () => this.onScrollerMoved(), { passive: true });
+		this.layout();
+		this.measureRowHeight();
 	}
 
-	/** Replace the window with lines `start..start+WINDOW` of the backend document. */
+	/** `defaultLineHeight` read before CodeMirror's first measure is the height oracle's
+	 *  placeholder (14 px), not the font's real line — every projection until the first
+	 *  window slide would be scaled by it. Read it again once measured. */
+	private measureRowHeight(): void {
+		const cm = this.cm;
+		if (!cm) return;
+		cm.requestMeasure({
+			read: () => cm.defaultLineHeight,
+			write: (rowHeight) => {
+				if (this.disposed || this.cm !== cm || !rowHeight || rowHeight === this.lineHeight) return;
+				this.lineHeight = rowHeight;
+				this.scroll.setRowHeight(rowHeight);
+				this.project();
+			}
+		});
+	}
+
+	/** Replace the window with lines `start..start+WINDOW` of the backend document. The
+	 *  model's top is untouched: the new text is projected under the same position, so a
+	 *  slide never moves the view (a reveal moves the model itself, before or after). */
 	private async showWindow(start: number, cursorLine?: number, cursorColumn?: number): Promise<void> {
 		if (!this.cm || this.docId === null) return;
 		const docId = this.docId;
-		// The viewport's top line is captured before the window moves, so the layout pass
-		// below can put it back where it was — unless a jump claimed the slot first.
-		const anchor = this.pendingScrollLine ?? Math.floor(this.viewportTop() / this.lineHeight);
-		this.pendingScrollLine = null;
 		const end = Math.min(start + WINDOW - 1, this.lineCount - 1);
 		let fetched: TextWindow;
 		try {
@@ -296,7 +323,6 @@ export class EditableDocView {
 			return;
 		}
 		if (this.disposed || this.docId !== docId || !this.cm) return;
-		this.swapping = true;
 		// Where the cursor sits now, captured before the replace resets it: an explicit
 		// `cursorLine` (a reveal, an undo) wins over "keep the current position", and a slide
 		// keeps both the line and the column. A jump to a *different* line lands at the
@@ -310,6 +336,7 @@ export class EditableDocView {
 		this.lineCount = fetched.lineCount;
 		const text = fetched.lines.join('\n');
 		this.replacing = true;
+		this.landing = Date.now();
 		try {
 			this.cm.dispatch({ changes: { from: 0, to: this.cm.state.doc.length, insert: text } });
 			const relative = Math.max(0, Math.min(target - this.first, fetched.lines.length - 1));
@@ -318,225 +345,190 @@ export class EditableDocView {
 		} finally {
 			this.replacing = false;
 		}
-		this.relayout(anchor);
+		this.relayout();
+		window.setTimeout(() => {
+			if (Date.now() - this.landing < 260) this.landing = 0;
+		}, 250);
 		// The swap moved the window under matches whose absolute lines did not change:
 		// repaint the decorations for the lines now loaded.
 		this.findBar?.repaint();
-		// `swapping` normally clears inside relayout's write callback, which rides on
-		// CodeMirror's next measure pass. If that pass is long delayed, the flag must not
-		// wedge the scroller's event handling — but this is only an unwedge: until the
-		// swap's own layout has applied, the scroll position still speaks the old window's
-		// coordinates, so no scroll check may run from here.
-		window.setTimeout(() => {
-			this.swapping = false;
-		}, 250);
 	}
 
-	/** Lay the window out from what CodeMirror actually rendered. The spacer and the host
-	 *  height follow the measured content height divided by the line count — an estimated
-	 *  line height drifts a fraction of a pixel per line, and at a 500-line window that
-	 *  drift showed as lines piling up at the file's end. `anchor`, when given, is the
-	 *  0-based line to keep at the viewport's top across a window slide.
-	 *  A layout pass superseded by a newer swap applies nothing: its captured anchor is
-	 *  the old window's, and writing it late would yank the viewport back up the file. */
-	private relayout(anchor?: number): void {
+	/** The document or the window changed shape: the model takes the line count, the
+	 *  past-the-end padding follows the window, and the same top is projected again. The
+	 *  line height is re-read after the measure too — the oracle's placeholder must not
+	 *  outlive the first real layout. The projection runs in CodeMirror's measure phase:
+	 *  a write before it would clamp against the replaced document's not-yet-laid-out
+	 *  height and strand a long-range landing a row into its new window. */
+	private relayout(): void {
 		const cm = this.cm;
 		if (!cm) return;
-		const seq = ++this.layoutSeq;
+		this.lineHeight = cm.defaultLineHeight || this.lineHeight;
+		this.scroll.setRowHeight(this.lineHeight);
+		this.scroll.setRowCount(this.lineCount);
+		this.padPastEnd();
 		cm.requestMeasure({
-			read: () => cm.contentHeight,
-			write: (height) => {
-				if (this.disposed || this.cm !== cm || seq !== this.layoutSeq) return;
-				// A measure that comes back shorter than one pixel per line is no measure at
-				// all (a headless DOM reports 8 px for 500 lines): deriving the line height
-				// from it would poison every later scroll calculation, so it is ignored and
-				// the previous line height stands.
-				if (this.synced.length > 0 && height > this.synced.length) {
-					this.lineHeight = height / this.synced.length;
-					this.host.style.height = `${height}px`;
-				}
-				// The spacer is the whole document, clamped and scaled past the layout
-				// engines' height ceiling — no line count is too many to scroll.
-				this.range = new VirtualScroll(this.lineCount, this.lineHeight, Math.max(0, this.scroller.clientHeight - this.lineHeight));
-				this.range.lay(this.spacer);
-				this.placeHost();
-				if (anchor !== undefined) this.scrollToDocument(anchor * this.lineHeight);
-				window.setTimeout(() => {
-					this.swapping = false;
-					// The swap repositioned the content under the viewport; re-check in case
-					// the user scrolled on while the window was being fetched.
-					this.onScroll();
-				}, 0);
+			read: () => null,
+			write: () => {
+				this.project();
+				// CodeMirror re-anchors its own scroll over the replaced text inside the
+				// same measure; the projection is asserted once more after it, with the
+				// layout real, so the model's word is the one that stands.
+				window.setTimeout(() => this.project(), 0);
 			}
 		});
+		this.measureRowHeight();
 	}
 
-	/** The document-space offset the viewport's top stands for — the scaled-range mapping
-	 *  of the scroll position, and the plain scroll position while the document fits the
-	 *  height ceiling (the identity, unchanged behaviour). */
-	private viewportTop(): number {
-		return this.range.documentTop(this.scroller.scrollTop, this.scroller.clientHeight, this.scroller.scrollHeight);
+	/** The viewport was (re)laid out: the model takes its height. */
+	private layout(): void {
+		this.scroll.setViewport(this.viewport.clientHeight);
+		this.padPastEnd();
+		this.project();
 	}
 
-	/** Scroll so that a document-space offset sits at the viewport's top. */
-	private scrollToDocument(offset: number): void {
-		this.scroller.scrollTop = this.range.scrollTopFor(offset, this.scroller.clientHeight);
+	/** The last window scrolls past its end (Zed's scroll_beyond_last_line = one_page): the
+	 *  content is padded by a viewport less a line, so the file's last line can sit at the
+	 *  viewport's top like the model says. Any other window ends where the next slide
+	 *  begins and needs no padding. */
+	private padPastEnd(): void {
+		const atEnd = this.first + this.synced.length >= this.lineCount;
+		const pad = atEnd ? Math.max(0, this.scroll.viewportHeight - this.lineHeight) : 0;
+		this.host.style.setProperty('--doc-edit-pad', `${Math.round(pad)}px`);
 	}
 
-	/** Place the window's host at its content offset: the window's document offset, pulled
-	 *  back by how far the scroll position and that offset differ under a scaled range
-	 *  (unscaled the two coincide and this is just the document offset — exactly where the
-	 *  old top spacer put it). One style write per scroll: the host is absolutely
-	 *  positioned, so nothing else relayouts and no feedback touches the scroll position. */
-	private placeHost(): void {
-		const clientHeight = this.scroller.clientHeight;
-		const scrollTop = this.scroller.scrollTop;
-		const docTop = this.range.documentTop(scrollTop, clientHeight, this.scroller.scrollHeight);
-		this.host.style.top = `${Math.max(0, Math.round(this.first * this.lineHeight - docTop + scrollTop))}px`;
+	/** Write the model's top onto CodeMirror's scroller: `(top − first) × lineHeight`,
+	 *  which the DOM clamps to the window while a slide is still on its way. */
+	private project(): void {
+		const cm = this.cm;
+		if (!cm) return;
+		const scrollDOM = cm.scrollDOM;
+		const target = Math.max(0, Math.round((this.scroll.top - this.first) * this.lineHeight));
+		if (scrollDOM.scrollTop !== target) scrollDOM.scrollTop = target;
+		this.projected = scrollDOM.scrollTop;
 	}
 
-	private onScroll(): void {
-		if (!this.cm) return;
-		// Under a scaled range the host follows the thumb continuously (the slide below only
-		// recenters the window every so often — between slides this write is what keeps the
-		// lines under the viewport).
-		this.placeHost();
-		if (this.lineCount <= this.synced.length) return;
-		const visible = Math.ceil(this.scroller.clientHeight / this.lineHeight);
-		const anchor = Math.floor(this.viewportTop() / this.lineHeight);
-		const windowEnd = this.first + this.synced.length;
-		const nearTop = anchor < this.first + EDGE && this.first > 0;
-		const nearBottom = anchor + visible > windowEnd - EDGE && windowEnd < this.lineCount;
-		if (!nearTop && !nearBottom) return;
-		// Neither an in-progress swap nor the cooldown may simply drop the request: a fast
-		// drag ends inside them all the time, and this scroll event is the last thing that
-		// knows where it ended.
-		if (this.swapping || Date.now() - this.lastSwapAt < SWAP_COOLDOWN_MS) {
-			this.scheduleSwapCheck();
-			return;
-		}
-		void this.slideTo(anchor, visible);
+	/** CodeMirror's scroller moved on its own — a caret reveal, a selection drag past the
+	 *  edge: read the new position back into the model. A value the projection wrote (or
+	 *  the DOM's clamp of it) is ours and changes nothing. */
+	private onScrollerMoved(): void {
+		const cm = this.cm;
+		if (!cm) return;
+		const actual = cm.scrollDOM.scrollTop;
+		if (actual === this.projected) return;
+		this.projected = actual;
+		if (Date.now() - this.landing < 250) return;
+		this.scroll.setTop(this.first + actual / this.lineHeight, 'autoscroll');
 	}
 
-	/** Re-run the scroll check once the swap/cooldown is out of the way. The drag that was
-	 *  rate-limited may have been its last movement — this is what fills the window it
-	 *  ended on instead of leaving the viewport over a blank spacer. */
-	private scheduleSwapCheck(): void {
-		if (this.swapCheckTimer !== undefined) return;
-		const wait = Math.max(0, SWAP_COOLDOWN_MS - (Date.now() - this.lastSwapAt));
-		this.swapCheckTimer = window.setTimeout(() => {
-			this.swapCheckTimer = undefined;
-			this.onScroll();
-		}, wait);
-	}
-
-	/** Slide the window so `anchor` (the line at the viewport's top) stays put. The flush
-	 *  and the window replacement run as one queued step: two slides (or a slide racing an
-	 *  undo) must never interleave, or the slower fetch overwrites the newer one with stale
-	 *  lines and desyncs the editor from its document. */
-	private slideTo(anchor: number, visible: number): Promise<void> {
-		if (!this.cm || this.docId === null) return Promise.resolve();
-		this.lastSwapAt = Date.now();
-		return this.enqueue(async () => {
-			if (!(await this.sendDiff()) || this.disposed || !this.cm || this.docId === null) return;
-			const target = Math.max(0, Math.min(anchor + Math.floor(visible / 2) - Math.floor(WINDOW / 2), Math.max(0, this.lineCount - WINDOW)));
-			await this.showWindow(target);
+	/** The window slides when the viewport nears its edge: one queued flush-then-fetch
+	 *  (a slide racing an undo would otherwise overwrite the newer window with stale
+	 *  lines), re-checked when it lands in case the viewport moved on meanwhile. The model
+	 *  may run ahead of the window in between — the projection clamps, the fetch catches up. */
+	private checkEdges(): void {
+		if (!this.cm || this.docId === null || this.sliding || !this.viewportNearEdge()) return;
+		this.sliding = true;
+		void this.enqueue(async () => {
+			try {
+				// Re-read after the steps ahead in the queue (a reveal's own slide, say): the
+				// viewport may sit comfortably inside the window by now.
+				if (!this.viewportNearEdge()) return;
+				if (!(await this.sendDiff()) || this.disposed || !this.cm || this.docId === null) return;
+				const middle = Math.floor(this.scroll.top) + Math.floor(this.scroll.visibleLines / 2);
+				const target = Math.max(0, Math.min(middle - Math.floor(WINDOW / 2), Math.max(0, this.lineCount - WINDOW)));
+				if (target !== this.first) await this.showWindow(target);
+			} finally {
+				this.sliding = false;
+			}
+			this.checkEdges();
 		});
 	}
 
-	/** Bring `line` (0-based) into the middle of the window. A `jump` (a reveal, a
-	 *  go-to-line) also puts the cursor on it, at `column` (0-based), and always slides; the
-	 *  follow-the-cursor slide typing triggers at a window edge leaves the cursor where the
-	 *  user has it and is rate-limited, since it fires on every keystroke there. */
-	private async ensureAround(line: number, jump = true, column = 0): Promise<void> {
+	/** Whether the viewport stands within the edge band of the window, with lines beyond. */
+	private viewportNearEdge(): boolean {
+		if (this.lineCount <= this.synced.length) return false;
+		const top = this.scroll.top;
+		const windowEnd = this.first + this.synced.length;
+		const nearTop = top < this.first + EDGE && this.first > 0;
+		const nearBottom = top + this.scroll.visibleLines > windowEnd - EDGE && windowEnd < this.lineCount;
+		return nearTop || nearBottom;
+	}
+
+	/** Bring `line` (0-based) into the window and the viewport. A `jump` (a reveal, a
+	 *  go-to-line, a find match) also puts the cursor on it, at `column` (0-based), and
+	 *  scrolls by `strategy` (Zed's autoscroll: `center` for a go-to-line, `fit` for a
+	 *  match); the follow-the-cursor slide typing triggers at a window edge leaves the
+	 *  cursor where the user has it. */
+	private async ensureAround(line: number, jump = true, column = 0, strategy: AutoscrollStrategy = 'center'): Promise<void> {
 		if (!this.cm || this.docId === null) return;
 		const relative = line - this.first;
-		const visible = Math.max(1, Math.floor(this.scroller.clientHeight / this.lineHeight));
-		const inside = relative >= EDGE / 2 && relative <= this.synced.length - EDGE / 2 && this.synced.length >= visible;
-		// Already comfortably inside (or the whole file is the window): no slide, just the
-		// cursor and the scroll position.
-		if (inside || this.lineCount <= this.synced.length) {
-			if (jump) this.placeCursor(line, column);
-			const top = this.viewportTop();
-			if (!inside ||
-				relative < Math.floor(top / this.lineHeight) - this.first ||
-				relative > Math.floor((top + this.scroller.clientHeight) / this.lineHeight) - this.first) {
-				this.scrollToDocument((line - Math.floor(visible / 2)) * this.lineHeight);
-			}
-			return;
-		}
+		const inside = relative >= EDGE / 2 && relative <= this.synced.length - EDGE / 2;
 		const windowFor = (): number => Math.max(0, Math.min(line - Math.floor(WINDOW / 2), Math.max(0, this.lineCount - WINDOW)));
-		// At the file's first or last window the line sits near an edge the window cannot
-		// move past: there is nothing to slide to, and refetching the same window would only
-		// throw away whatever the user has typed since the last sync.
-		if (windowFor() === this.first) {
+		// Already comfortably inside, or the whole file is the window, or the line sits near
+		// an edge the window cannot move past (the file's first or last window): no slide —
+		// refetching the same window would only throw away whatever the user has typed
+		// since the last sync — just the cursor and the scroll position.
+		if (inside || this.lineCount <= this.synced.length || windowFor() === this.first) {
 			if (jump) {
 				this.placeCursor(line, column);
-				this.scrollToDocument((line - Math.floor(visible / 2)) * this.lineHeight);
+				this.scroll.autoscroll(line, strategy);
 			}
 			return;
 		}
-		if (!jump && Date.now() - this.lastSwapAt < SWAP_COOLDOWN_MS) return;
-		this.lastSwapAt = Date.now();
 		await this.enqueue(async () => {
+			if (this.disposed || !this.cm || this.docId === null) return;
+			// A follow-the-cursor slide re-reads its need after the steps ahead of it — one
+			// per keystroke at the edge was queued, and the first one centres the window.
+			if (!jump) {
+				const now = line - this.first;
+				if (now >= EDGE / 2 && now <= this.synced.length - EDGE / 2) return;
+			}
 			if (!(await this.sendDiff()) || this.disposed || !this.cm || this.docId === null) return;
 			const target = windowFor();
-			if (target === this.first) {
-				if (jump) this.placeCursor(line, column);
-				return;
+			if (target !== this.first) await this.showWindow(target, jump ? line : undefined, jump ? column : undefined);
+			else if (jump) this.placeCursor(line, column);
+			if (jump) {
+				this.scroll.autoscroll(line, strategy);
+				this.cm?.focus();
 			}
-			this.pendingScrollLine = Math.max(0, line - Math.floor(visible / 2));
-			await this.showWindow(target, line, jump ? column : undefined);
-			this.cm?.focus();
 		});
 	}
 
-	/** Put the cursor on an absolute line (0-based) that is inside the current window. */
+	/** Put the cursor on an absolute line (0-based) that is inside the current window. The
+	 *  scroll is the caller's (the model's autoscroll), not CodeMirror's. */
 	private placeCursor(line: number, column: number): void {
 		const cm = this.cm;
 		if (!cm) return;
 		const relative = line - this.first;
 		if (relative < 0 || relative >= cm.state.doc.lines) return;
 		const target = cm.state.doc.line(relative + 1);
-		cm.dispatch({ selection: { anchor: Math.min(target.from + column, target.to) }, scrollIntoView: true });
+		cm.dispatch({ selection: { anchor: Math.min(target.from + column, target.to) } });
 	}
 
-	/** PageUp / PageDown: exactly one viewport of document lines, cursor and scroll
-	 *  together. A page that lands past the window's edge slides the window there — the
-	 *  same flush-then-refetch discipline as a reveal, with the layout pass putting the
-	 *  page's top line where the press asked for it. */
+	/** PageUp / PageDown (Zed's `move_page_down`): the caret walks a viewport less one line
+	 *  and the model's `fit` brings the view after it — a caret at the bottom margin pages
+	 *  the view a full screen each press. Every press is a queued step, so a burst of them
+	 *  each starts from where the previous one actually put the caret, a slide in between
+	 *  or not; a landing line outside the window slides the window there first. */
 	private pageBy(direction: 1 | -1): void {
-		const cm = this.cm;
-		if (!cm || this.docId === null || this.swapping) return;
-		const clientHeight = this.scroller.clientHeight;
-		if (clientHeight <= 0) return;
-		const head = cm.state.selection.main.head;
-		const current = this.first + cm.state.doc.lineAt(head).number - 1;
-		const column = head - cm.state.doc.lineAt(head).from;
-		const lines = Math.max(1, Math.floor(clientHeight / this.lineHeight));
-		const target = Math.max(0, Math.min(current + direction * lines, this.lineCount - 1));
-		// The viewport's new top: one viewport of document distance, row-quantised so
-		// repeated pages never drift (a scaled range quantises scroll positions anyway).
-		const maxTop = Math.max(0, (this.lineCount - 1) * this.lineHeight);
-		const top = Math.max(0, Math.min(Math.round((this.viewportTop() + direction * clientHeight) / this.lineHeight) * this.lineHeight, maxTop));
-		const relative = target - this.first;
-		const inside = relative >= EDGE / 2 && relative <= this.synced.length - EDGE / 2;
-		const windowTarget = Math.max(0, Math.min(target - Math.floor(WINDOW / 2), Math.max(0, this.lineCount - WINDOW)));
-		if (inside || this.lineCount <= this.synced.length || windowTarget === this.first) {
-			// The landing line is loaded (or the window cannot move closer to it): the page
-			// is just the cursor and the scroll position.
-			this.placeCursor(target, column);
-			this.scrollToDocument(top);
-			return;
-		}
-		// The cooldown marker absorbs the edge-slide the swap's own scroll events would
-		// otherwise trigger on top of this one.
-		this.lastSwapAt = Date.now();
-		this.pendingScrollLine = Math.round(top / this.lineHeight);
+		if (!this.cm || this.docId === null) return;
 		void this.enqueue(async () => {
-			if (!(await this.sendDiff()) || this.disposed || !this.cm || this.docId === null) return;
-			const windowStart = Math.max(0, Math.min(target - Math.floor(WINDOW / 2), Math.max(0, this.lineCount - WINDOW)));
-			await this.showWindow(windowStart, target, column);
+			const cm = this.cm;
+			if (!cm || this.disposed || this.docId === null || this.scroll.viewportHeight <= 0) return;
+			const head = cm.state.selection.main.head;
+			const line = cm.state.doc.lineAt(head);
+			const current = this.first + line.number - 1;
+			const column = head - line.from;
+			const target = Math.max(0, Math.min(current + direction * this.scroll.visibleRows, this.lineCount - 1));
+			const relative = target - this.first;
+			if (relative < 0 || relative >= this.synced.length) {
+				if (!(await this.sendDiff()) || this.disposed || !this.cm || this.docId === null) return;
+				const windowStart = Math.max(0, Math.min(target - Math.floor(WINDOW / 2), Math.max(0, this.lineCount - WINDOW)));
+				await this.showWindow(windowStart, target, column);
+			} else {
+				this.placeCursor(target, column);
+			}
+			this.scroll.autoscroll(target, 'fit');
 		});
 	}
 
@@ -708,14 +700,12 @@ export class EditableDocView {
 				const result = await invoke<{ firstLine: number; lineCount: number } | null>(command, { docId: this.docId });
 				if (!result || this.disposed || this.docId === null) return;
 				this.lineCount = result.lineCount;
-				const visible = Math.max(1, Math.floor(this.scroller.clientHeight / this.lineHeight));
 				// Centre the window on the restored line, so the cursor lands well inside it
 				// and the follow-the-cursor slide never fires a second, view-jarring swap on
-				// top of this one; the cooldown absorbs any edge-triggered slide for a moment.
-				this.lastSwapAt = Date.now();
-				this.pendingScrollLine = Math.max(0, result.firstLine - Math.floor(visible / 2));
+				// top of this one; then centre the view on it too.
 				const target = Math.max(0, Math.min(result.firstLine - Math.floor(WINDOW / 2), Math.max(0, this.lineCount - WINDOW)));
 				await this.showWindow(target, result.firstLine);
+				this.scroll.autoscroll(result.firstLine, 'center');
 				this.cm?.focus();
 				this.onChanged?.();
 			} catch (error) {
@@ -818,7 +808,7 @@ export class EditableDocView {
 					return this.cm.state.sliceDoc(selection.from, selection.to);
 				},
 				revealMatch: (match) => {
-					void this.ensureAround(match.line, true, match.startCol).then(() => this.selectMatch(match));
+					void this.ensureAround(match.line, true, match.startCol, 'fit').then(() => this.selectMatch(match));
 				},
 				paintMatches: (matches, current) => this.paintMatches(matches, current),
 				replace: (spec, from, replacement, all) => this.replaceMatches(spec, from, replacement, all),
@@ -840,8 +830,7 @@ export class EditableDocView {
 			selection: {
 				anchor: line.from + utf16Col(line.text, match.startCol),
 				head: line.from + utf16Col(line.text, match.endCol)
-			},
-			scrollIntoView: true
+			}
 		});
 	}
 
@@ -892,11 +881,9 @@ export class EditableDocView {
 				this.lineCount = result.lineCount;
 				// A replaced buffer is dirty however the watch reports it, and the tab must say so.
 				this.touched = true;
-				const visible = Math.max(1, Math.floor(this.scroller.clientHeight / this.lineHeight));
-				this.lastSwapAt = Date.now();
-				this.pendingScrollLine = Math.max(0, result.firstLine - Math.floor(visible / 2));
 				const target = Math.max(0, Math.min(result.firstLine - Math.floor(WINDOW / 2), Math.max(0, this.lineCount - WINDOW)));
 				await this.showWindow(target, result.firstLine, from ? from.startCol : 0);
+				this.scroll.autoscroll(result.firstLine, 'center');
 				this.cm?.focus();
 				this.onChanged?.();
 				this.scheduleBackup();
@@ -945,10 +932,11 @@ export class EditableDocView {
 
 	dispose(): void {
 		this.disposed = true;
-		this.wheel.dispose();
+		this.wheel?.dispose();
+		this.scrollbar.dispose();
+		this.sizer?.disconnect();
 		if (this.syncTimer !== undefined) window.clearTimeout(this.syncTimer);
 		if (this.backupTimer !== undefined) window.clearTimeout(this.backupTimer);
-		if (this.swapCheckTimer !== undefined) window.clearTimeout(this.swapCheckTimer);
 		this.unlisten?.();
 		this.unlisten = null;
 		// Close now, not after the sync queue: the buffer was either just saved (save

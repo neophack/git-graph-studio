@@ -535,7 +535,7 @@ body.resizing iframe { pointer-events: none; }
    browser draws no scrollbar and this one stands in — a 14px track on the surface's right
    edge, the thumb sized to the viewport's share of the document (never under 25px). */
 .scrollbar.vertical { position: absolute; top: 0; right: 0; bottom: 0; width: 14px; z-index: 5; cursor: default; user-select: none; touch-action: none; }
-.scrollbar.vertical.idle { display: none; }
+.scrollbar.vertical.idle { visibility: hidden; pointer-events: none; }
 .scrollbar-thumb { position: absolute; top: 0; left: 0; right: 0; background: var(--vscode-scrollbarSlider-background); }
 .scrollbar-thumb:hover { background: var(--vscode-scrollbarSlider-hoverBackground); }
 .scrollbar.dragging .scrollbar-thumb { background: var(--vscode-scrollbarSlider-activeBackground); }
@@ -566,16 +566,17 @@ body.resizing iframe { pointer-events: none; }
 .fast-gutter { display: inline-block; min-width: 60px; padding: 0 5px 0 12px; text-align: right; color: var(--vscode-editorLineNumber-foreground); user-select: none; }
 
 /* The windowed editable editor for large files (docEditView.ts): the document lives in the
-   backend's rope; the spacer stands in for every line outside the window, and the
-   CodeMirror instance in between — placed at the window's content offset, viewport-relative
-   once the scroll range scales past the height ceiling — shows only the window's lines (its
-   own scroller never scrolls, so there are no nested scrollbars). The editor sizes itself
-   to its content: the view sets the host's height from what was actually rendered. */
+   backend's rope; the CodeMirror instance holds one window of lines and fills the viewport,
+   its own scroller the projection of the row model's position (scroll/) — hidden from the
+   user, written by the model, read back when a caret reveal moves it. The drawn scrollbar
+   spans the whole file. The last window pads past its end by a viewport less a line, so
+   the file's last line can sit at the viewport's top (Zed's one_page). */
 .doc-edit { position: absolute; inset: 0; background: var(--vscode-editor-background); }
-.doc-edit-scroll { position: absolute; inset: 0; overflow: auto; overflow-anchor: none; }
-.doc-edit-spacer { width: 1px; min-width: 100%; }
-.doc-edit-host { position: absolute; left: 0; right: 0; top: 0; }
-.doc-edit-host .cm-scroller { overflow: visible; }
+.doc-edit-viewport { position: absolute; inset: 0; overflow: hidden; }
+.doc-edit-host { position: absolute; inset: 0; }
+.doc-edit-host .cm-editor { height: 100%; }
+.doc-edit-host .cm-scroller { overflow-x: auto; overflow-y: hidden; overflow-anchor: none; }
+.doc-edit .doc-edit-host .cm-content { padding-bottom: var(--doc-edit-pad, 0px); }
 .can-text-wrap > .doc-edit { position: relative; inset: auto; flex: 1; min-height: 0; }
 
 .cm-editor { font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); background: var(--vscode-editor-background); color: var(--vscode-editor-foreground); }

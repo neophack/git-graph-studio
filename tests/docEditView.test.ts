@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 import { EditorGroup } from '../src/editor';
 import type { EditableDocView } from '../src/docEditView';
+import { settings } from '../src/settings';
 import { backend } from './tauriMock';
 import { flush, key, notifications, type } from './helpers';
 import { RopeDocMock } from './ropeDocMock';
@@ -348,115 +349,85 @@ describe('the whole-file find and replace (docFind.ts over viewer_find / viewer_
 	});
 });
 
-describe('the windowed editor page keys', () => {
-	/** jsdom has no layout: the outer scroller's viewport and position are stubbed — scroll
-	 *  writes snap to whole pixels, as the engine's do. */
-	function stubScroller(doc: EditableDocView, clientHeight: number): () => number {
-		const scroller = doc.root.querySelector<HTMLElement>('.doc-edit-scroll')!;
-		let raw = 0;
-		Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => clientHeight });
-		Object.defineProperty(scroller, 'scrollTop', { configurable: true, get: () => raw, set: (v: number) => { raw = Math.max(0, Math.round(v)); } });
-		return () => raw;
+describe('the windowed editor page keys and scrolling (scroll/)', () => {
+	/** jsdom lays nothing out: the viewport is given to the model directly — 380 px, some
+	 *  twenty of CodeMirror's estimated lines. */
+	function viewport(doc: EditableDocView): void {
+		doc.scroll.setViewport(380);
 	}
 
-	it('moves exactly one viewport of lines a press, cursor and scroll together', async () => {
-		const LINES = Array.from({ length: 3_000 }, (_, i) => `line ${i}`);
-		const { group, doc } = await openWindowed(LINES.join('\n') + '\n');
-		// The open's layout pass is rAF-timed (its swap flag is cleared there); let it land
-		// before the keys come. jsdom's no-layout measurement makes the line height whatever
-		// CodeMirror estimates, so the page size is read back from the first press rather
-		// than assumed.
+	/** Let the queue's steps land (a page is a queued step; a slide round-trips the backend). */
+	async function settleQueue(): Promise<void> {
+		await flush();
 		await new Promise((resolve) => setTimeout(resolve, 30));
 		await flush();
-		const top = stubScroller(doc, 380);
+	}
+
+	it('pages the caret a viewport less one line and the view follows it (Zed\'s move_page_down)', async () => {
+		const LINES = Array.from({ length: 3_000 }, (_, i) => `line ${i}`);
+		const { group, doc } = await openWindowed(LINES.join('\n') + '\n');
+		viewport(doc);
 		const fetches = backend.callsTo('viewer_text').length;
 		const view = doc.editorView!;
-		key(view.contentDOM, 'PageDown');
-		// The page is applied through the same queue every sync, slide and undo uses (so a
-		// burst of presses each start from where the previous one actually landed, rather
-		// than a still-stale cursor) — even the common, already-loaded case now settles a
-		// microtask after the key, not synchronously with it.
-		await flush();
-		const pageLines = doc.status().line - 1;
-		const pagePx = top();
-		// One press is one viewport: the page tracks the viewport, not the whole window.
-		expect(pageLines).toBeGreaterThan(10);
-		expect(pageLines).toBeLessThan(60);
-		expect(Math.abs(pagePx - 380)).toBeLessThanOrEqual(pagePx / pageLines); // ≤ one row of quantisation
+		const rows = doc.scroll.visibleRows;
+		expect(rows).toBeGreaterThan(10);
+		expect(rows).toBeLessThan(60);
 		key(view.contentDOM, 'PageDown');
 		await flush();
-		// The second page is exactly the first again — nothing skipped, no drift (the engine's
-		// whole-pixel snapping can land a fractional line height one pixel off the double).
-		expect(doc.status().line).toBe(1 + 2 * pageLines);
-		expect(Math.abs(top() - 2 * pagePx)).toBeLessThanOrEqual(1);
+		// The caret walked `visible − 1` lines; the view scrolled the least that keeps it
+		// three lines off the bottom edge (Zed's autoscroll fit).
+		expect(doc.status().line).toBe(1 + rows);
+		expect(doc.scroll.top).toBeCloseTo(rows + 1 + 3 - doc.scroll.visibleLines);
+		expect(doc.scroll.isRowVisible(rows)).toBe(true);
+		key(view.contentDOM, 'PageDown');
+		await flush();
+		// From the bottom margin every further page is a full `rows` lines of view.
+		expect(doc.status().line).toBe(1 + 2 * rows);
+		expect(doc.scroll.top).toBeCloseTo(2 * rows + 1 + 3 - doc.scroll.visibleLines);
 		key(view.contentDOM, 'PageUp');
 		await flush();
-		expect(doc.status().line).toBe(1 + pageLines);
-		expect(top()).toBe(pagePx);
+		expect(doc.status().line).toBe(1 + rows);
+		expect(doc.scroll.top).toBe(rows - 3);
 		key(view.contentDOM, 'PageUp');
 		await flush();
 		expect(doc.status().line).toBe(1);
-		expect(top()).toBe(0);
-		// Every page stayed inside the loaded window: no refetch.
+		expect(doc.scroll.top).toBe(0);
+		// Every page stayed inside the loaded window: no refetch. And the projection put
+		// the model's top on CodeMirror's own scroller.
 		expect(backend.callsTo('viewer_text')).toHaveLength(fetches);
+		expect(view.scrollDOM.scrollTop).toBe(0);
 		await group.closeAll();
 	});
 
-	it('slides the window when a page lands past its edge', async () => {
+	it('slides the window when a page lands past its edge, the view moving one page', async () => {
 		const LINES = Array.from({ length: 3_000 }, (_, i) => `line ${i}`);
 		const { group, doc } = await openWindowed(LINES.join('\n') + '\n');
-		await new Promise((resolve) => setTimeout(resolve, 30));
-		await flush();
-		const top = stubScroller(doc, 380);
+		viewport(doc);
 		await doc.revealLine(2_500);
-		await flush();
-		await new Promise((resolve) => setTimeout(resolve, 30));
-		await flush();
+		await settleQueue();
+		expect(doc.status().line).toBe(2_501);
+		// The reveal centred the line (Zed's go-to-line strategy).
+		expect(doc.scroll.top).toBe(2_500 - Math.floor((doc.scroll.visibleLines - 1) / 2));
 		const view = doc.editorView!;
-		// A reference page inside the window measures the page the viewport actually shows.
-		const lineBefore = doc.status().line;
-		const topBefore = top();
-		key(view.contentDOM, 'PageDown');
-		// Applied through the queue now (see the previous test): a microtask behind the key.
-		await flush();
-		const pageLines = doc.status().line - lineBefore;
-		const pagePx = top() - topBefore;
-		key(view.contentDOM, 'PageUp');
-		await flush();
-		expect(doc.status().line).toBe(lineBefore);
-		expect(top()).toBe(topBefore);
-		// Park the cursor at the viewport's bottom line — where a real page-down leaves it
-		// (the reveal centred line 2500, so half a page below it is the viewport's floor)
-		// and page until the landing line crosses the window's bottom edge band. The cursor
-		// rides the viewport the whole way, as paging keeps it: a window placed centred on
-		// the landing line then leaves the viewport ≥ 250−2 pages from its start, outside
-		// the slide edge zone — the scroll handler's post-swap re-check stays quiet and the
-		// slide is exactly one fetch. (A cursor parked far below the viewport — a state only
-		// a direct dispatch can produce — would re-centre the window on the viewport one
-		// fetch later; that is the re-check doing its job, not a page.)
-		view.dispatch({ selection: { anchor: view.state.doc.line(lineBefore - 2_250 + Math.floor(pageLines / 2)).from } });
+		const rows = doc.scroll.visibleRows;
+		const first = backend.callsTo('viewer_text').at(-1)!['start'] as number;
+		// Park the caret at the window's last loaded line, the view left centred on 2500
+		// (a viewport near the window's edge would slide it by itself): the next page's
+		// landing line is outside the window, so the page itself must slide.
+		const last = first + view.state.doc.lines - 1;
+		view.dispatch({ selection: { anchor: view.state.doc.line(view.state.doc.lines).from } });
 		const fetches = backend.callsTo('viewer_text').length;
-		let fromLine = doc.status().line;
-		let fromTop = top();
-		for (let i = 0; i < 12 && backend.callsTo('viewer_text').length === fetches; i++) {
-			fromLine = doc.status().line;
-			fromTop = top();
-			key(view.contentDOM, 'PageDown');
-			await flush();
-			await new Promise((resolve) => setTimeout(resolve, 30));
-			await flush();
-		}
-		// Every page until the last stayed inside the loaded window; the last slid it once.
+		key(view.contentDOM, 'PageDown');
+		await settleQueue();
+		// One slide, exactly one page of caret, the window centred on the landing line...
 		expect(backend.callsTo('viewer_text')).toHaveLength(fetches + 1);
 		const landed = doc.status().line - 1;
-		// Exactly one page below where the last inside page left the cursor...
-		expect(landed).toBe(fromLine - 1 + pageLines);
-		// ...the window slid to centre on it...
-		expect(backend.callsTo('viewer_text').at(-1)!['start']).toBe(Math.max(0, Math.min(landed - 250, 2_500)));
-		// ...and the scroll anchored exactly one page below where the viewport stood (the
-		// engine's whole-pixel snapping can land a fractional line height one pixel off).
-		expect(Math.abs(top() - (fromTop + pagePx))).toBeLessThanOrEqual(1);
+		expect(landed).toBe(last + rows);
+		expect(backend.callsTo('viewer_text').at(-1)!['start']).toBe(Math.max(0, Math.min(landed - 250, LINES.length + 1 - 500)));
 		expect(shown(doc)).toContain(`line ${landed}`);
+		// ...and the view brought after the caret, three lines of margin below it.
+		expect(doc.scroll.top).toBeCloseTo(landed + 1 + 3 - doc.scroll.visibleLines);
+		expect(doc.scroll.isRowVisible(landed)).toBe(true);
 		await group.closeAll();
 	});
 
@@ -464,44 +435,56 @@ describe('the windowed editor page keys', () => {
 		// A real slide round-trips to the backend (a flush of any pending edit, then the
 		// window fetch) — several microtask turns. Holding PageDown down, or just hitting it
 		// a few times fast, is the ordinary way to page through a huge file, and lands well
-		// inside that window. Reading the cursor from `cm.state` eagerly at each press while
-		// only the slide's *application* was queued meant every press landing before the
-		// first one's fetch came back read the same still-stale cursor and computed the same
-		// target — so a burst of N presses only ever moved the buffer by one page, however
-		// many times the key was hit.
+		// inside that window. Every press is a queued step that reads the caret the previous
+		// step actually placed, so N presses are N pages however fast they come.
 		const LINES = Array.from({ length: 3_000 }, (_, i) => `line ${i}`);
 		const { group, doc } = await openWindowed(LINES.join('\n') + '\n');
-		await new Promise((resolve) => setTimeout(resolve, 30));
-		await flush();
-		const top = stubScroller(doc, 380);
+		viewport(doc);
 		const view = doc.editorView!;
-		const settle = async (): Promise<void> => {
-			await flush();
-			await new Promise((resolve) => setTimeout(resolve, 30));
-			await flush();
-		};
+		const rows = doc.scroll.visibleRows;
 		// Park at the loaded window's last line: the very next PageDown must slide, every time.
 		await doc.revealLine(499);
-		await settle();
+		await settleQueue();
 		const before = doc.status().line;
-		// One press, for the reference distance a single page covers.
-		key(view.contentDOM, 'PageDown');
-		await settle();
-		const onePage = doc.status().line - before;
-		expect(onePage).toBeGreaterThan(0);
-		// Reset to the same starting line, then the same key hit three times with no await
-		// between them — a burst, not three isolated presses.
-		await doc.revealLine(499);
-		await settle();
 		key(view.contentDOM, 'PageDown');
 		key(view.contentDOM, 'PageDown');
 		key(view.contentDOM, 'PageDown');
-		await settle();
-		// eslint-disable-next-line no-console
-		console.log('DEBUG onePage', onePage, 'burst delta', doc.status().line - before, 'fetches', backend.callsTo('viewer_text').length);
-		// Three presses must land well past what one alone did — the bug this guards against
-		// left them equal.
-		expect(doc.status().line - before).toBeGreaterThan(onePage * 2);
+		await settleQueue();
+		expect(doc.status().line).toBe(before + 3 * rows);
+		expect(doc.scroll.isRowVisible(before - 1 + 3 * rows)).toBe(true);
+		await group.closeAll();
+	});
+
+	it('a wheel notch moves the model three lines and CodeMirror\'s scroller with it; a slide keeps the view put', async () => {
+		const LINES = Array.from({ length: 3_000 }, (_, i) => `line ${i}`);
+		const { group, doc } = await openWindowed(LINES.join('\n') + '\n');
+		viewport(doc);
+		const view = doc.editorView!;
+		const held = settings.mouseWheelScrollSensitivity;
+		settings.mouseWheelScrollSensitivity = 1;
+		try {
+			const notch = new WheelEvent('wheel', { deltaY: 100, deltaMode: 0, cancelable: true });
+			view.scrollDOM.dispatchEvent(notch);
+			expect(notch.defaultPrevented).toBe(true);
+			expect(doc.scroll.top).toBe(3);
+			// The projection: three lines of the window's own scroller (jsdom clamps nothing).
+			expect(view.scrollDOM.scrollTop).toBe(Math.round(3 * doc.scroll.rowHeight));
+			// A drag deep into the window's edge zone slides it; the model's top is untouched
+			// by the landing and the new window is projected under the same position.
+			const fetches = backend.callsTo('viewer_text').length;
+			doc.scroll.setTop(450);
+			await settleQueue();
+			expect(backend.callsTo('viewer_text')).toHaveLength(fetches + 1);
+			const first = backend.callsTo('viewer_text').at(-1)!['start'] as number;
+			expect(doc.scroll.top).toBe(450);
+			expect(shown(doc)).toContain('line 450');
+			expect(view.scrollDOM.scrollTop).toBe(Math.round((450 - first) * doc.scroll.rowHeight));
+			// The scroll model spans the whole file, not the window.
+			expect(doc.scroll.rowCount).toBe(LINES.length + 1);
+			expect(doc.root.querySelector('.scrollbar.vertical')).not.toBeNull();
+		} finally {
+			settings.mouseWheelScrollSensitivity = held;
+		}
 		await group.closeAll();
 	});
 });

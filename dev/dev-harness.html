@@ -224,5 +224,455 @@
 			localStorage.clear();
 		}
 	</script>
+	<script type="module">
+		// The scroll mode (?scroll=1): drive every scrolling surface - the code editor, the
+		// windowed large-file editor, the indexed Fast Viewer, the hex view, the hex compare,
+		// the CAN raw view - through the wheel and the page keys in real layout, and report
+		// the amounts against the row model (scroll/, Zed's): a notch is the system's three
+		// lines at sensitivity 1, Alt multiplies by the fast sensitivity, a page is the
+		// viewport less one anchor row, the caret's fit keeps three rows of margin. The base
+		// mock gains the viewer, indexed, chunk and CAN commands the surfaces need; the
+		// surfaces themselves are opened through the real tree and the real tabs, except the
+		// hex compare and the CAN raw view, which are constructed directly (their launch UI
+		// is the folder compare's) so their models can be read exactly.
+		if (new URLSearchParams(location.search).has('scroll')) {
+			// A clean boot per distinct query string: a re-run with a new ?run=N must not
+			// inherit the previous run's restored session (its tabs reopen and race the
+			// scenario's own opens).
+			if (sessionStorage.getItem('scroll-clean') !== location.search) {
+				sessionStorage.setItem('scroll-clean', location.search);
+				localStorage.clear();
+				location.reload();
+			}
+			const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+			const waitFor = async (ready, ms = 15000) => {
+				const end = Date.now() + ms;
+				while (Date.now() < end) {
+					if (ready()) return true;
+					await sleep(100);
+				}
+				return ready();
+			};
+			const click = (element) => {
+				for (const type of ['mousedown', 'mouseup', 'click']) {
+					element.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true }));
+				}
+			};
+			const key = (element, k, mods = {}) => {
+				const event = new KeyboardEvent('keydown', { key: k, code: k, bubbles: true, cancelable: true, ...mods });
+				element.dispatchEvent(event);
+				return event;
+			};
+			// Did a keydown reach the element, and was it already eaten on the way?
+			const probeKey = (element, k, mods = {}) => {
+				const seen = [];
+				const mark = (phase) => (event) => seen.push(phase + (event.defaultPrevented ? ':prevented' : ''));
+				element.addEventListener('keydown', mark('capture'), { capture: true, once: true });
+				element.addEventListener('keydown', mark('at'), { once: true });
+				const event = key(element, k, mods);
+				return { seen, prevented: event.defaultPrevented };
+			};
+			// A dispatched notch must look like Chromium's real one: deltaY 100 px paired with
+			// the legacy wheelDeltaY of -120 per notch. A constructed WheelEvent carries
+			// wheelDeltaY = -3 x deltaY instead, which wheelToDelta's notch sniff rightly
+			// reads as a trackpad - the app is correct, the synthetic event was not.
+			const wheel = (element, deltaY, mods = {}) => {
+				const event = new WheelEvent('wheel', { deltaY, deltaMode: 0, bubbles: true, cancelable: true, ...mods });
+				Object.defineProperty(event, 'wheelDeltaY', { value: -Math.sign(deltaY) * 120 });
+				element.dispatchEvent(event);
+				return event;
+			};
+			const rect = (element) => element.getBoundingClientRect();
+			// A scroll into rows the surface has not fetched yet lands a promise later; let a
+			// couple of frames pass before measuring. The rAF is raced with a timer: a hidden
+			// tab never fires animation frames, and the scenario must not hang on one.
+			const settle = () => Promise.race([
+				new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+				sleep(150)
+			]);
+			const report = [];
+			const check = (surface, name, expected, actual) => {
+				const pass = typeof expected === 'function' ? expected(actual) : expected === actual;
+				report.push({ surface, check: name, expected: typeof expected === 'function' ? 'see note' : String(expected), actual: String(actual), status: pass ? 'pass' : 'fail' });
+			};
+
+			/* ---------- the extended fake backend: what the base mock lacks ---------- */
+
+			const HUGE_LINES = 300_000;
+			const MONSTER_LINES = 60_000;
+			const CAN_FRAMES = 20_000;
+			const NAMES = ['file.txt', 'huge.txt', 'monster.js', 'blob.bin', 'trace.asc'];
+			const hexLine = (n, tag) => 'line ' + n + ' of ' + tag;
+			const chunkB64 = (path, offset, len) => {
+				const name = String(path).split(/[\\/]/).pop();
+				const size = name === 'l.bin' || name === 'r.bin' ? 64 * 1024 : 256 * 1024;
+				const start = Math.min(Number(offset), size);
+				const end = Math.min(start + Number(len), size);
+				const bytes = new Uint8Array(Math.max(0, end - start));
+				// The compare panes are all zero; the blob is a walking pattern so rows differ.
+				for (let i = 0; i < bytes.length; i++) bytes[i] = name === 'blob.bin' ? (start + i) & 0xff : 0;
+				let binary = '';
+				for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+				return { size, base64: btoa(binary) };
+			};
+			const scrollHandlers = {
+				list_files: () => NAMES,
+				list_dir: () => NAMES.map((name) => ({ name, path: '/repo/' + name, isDir: false, size: 1000 })),
+				file_probe: ({ path }) => {
+					const name = String(path).split(/[\\/]/).pop();
+					if (name === 'blob.bin') return { size: 256 * 1024, binary: true, longLines: false };
+					if (name === 'monster.js') return { size: 40 * 1024 * 1024, binary: false, longLines: true };
+					if (name === 'huge.txt') return { size: 300 * 1024 * 1024, binary: false, longLines: false };
+					return { size: 1000, binary: false, longLines: false };
+				},
+				viewer_open: () => ({ docId: 1, lineCount: HUGE_LINES, language: 'log', syntaxName: 'Plain Text', symbols: [] }),
+				viewer_text: ({ start, end }) => ({ startLine: Number(start), lineCount: HUGE_LINES, lines: Array.from({ length: Math.max(0, Number(end) - Number(start) + 1) }, (_, i) => hexLine(Number(start) + i + 1, 'huge')) }),
+				viewer_edit: () => ({ lineCount: HUGE_LINES, rehighlightFrom: 0 }),
+				viewer_reload: () => ({ changed: false, lineCount: HUGE_LINES }),
+				viewer_save: () => null,
+				viewer_close: () => null,
+				viewer_backup: () => null,
+				backup_clear: () => null,
+				viewer_symbols: () => [],
+				indexed_open: () => ({ docId: 2, lineCount: MONSTER_LINES, language: 'js', syntaxName: 'JavaScript', encoding: 'utf8', eol: 'lf' }),
+				indexed_lines: ({ start, end }) => ({ startLine: Number(start), lineCount: MONSTER_LINES, tokensPending: false, lines: Array.from({ length: Math.max(0, (end === undefined ? Number(start) + 100 : Number(end) + 1) - Number(start)) }, (_, i) => ['monster line ' + (Number(start) + i), []]) }),
+				read_file_chunk: ({ path, offset, len }) => chunkB64(path, offset, len),
+				can_log_open: () => ({ docId: 22, totalBytes: 500_000 }),
+				can_log_count: () => ({ parsed: CAN_FRAMES, done: true, error: null }),
+				can_log_frames: ({ start, end }) => Array.from({ length: Math.max(0, Number(end) - Number(start)) }, (_, i) => ({ tS: (Number(start) + i) * 0.001, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17' })),
+				can_log_close: () => undefined,
+				settings_write: () => null,
+				write_file: () => null,
+				read_file_raw: () => {
+					// The raw channel's frame: 8-byte little-endian header length, the JSON
+					// metadata, then the text itself (editor.ts readFileRaw).
+					const text = new TextEncoder().encode(window.__harness.oldText);
+					const meta = new TextEncoder().encode(JSON.stringify({ binary: false, size: text.length, encoding: 'utf8', eol: 'lf' }));
+					const out = new Uint8Array(8 + meta.length + text.length);
+					new DataView(out.buffer).setBigUint64(0, BigInt(meta.length), true);
+					out.set(meta, 8);
+					out.set(text, 8 + meta.length);
+					return out;
+				},
+				read_file_base64: () => btoa(window.__harness.oldText)
+			};
+			const baseInvoke = window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
+			window.__TAURI_INTERNALS__.invoke = (command, args) =>
+				Object.prototype.hasOwnProperty.call(scrollHandlers, command)
+					? Promise.resolve(scrollHandlers[command](args || {}))
+					: baseInvoke(command, args);
+
+			/* ---------- real-layout measurement over each surface's own DOM ---------- */
+
+			// The row the scroller's top edge cuts through: the row the model's floor(top)
+			// says is at the viewport's head. Exact on surfaces whose rows carry no padding.
+			const cutRow = (scroller, item, read) => {
+				const boundary = rect(scroller).top + 1;
+				let found = null;
+				for (const node of scroller.querySelectorAll(item)) {
+					const box = rect(node);
+					if (box.top <= boundary && box.bottom > boundary) found = node;
+				}
+				return found === null ? null : read(found);
+			};
+			const parseN = (node) => Number(/line (\d+)/.exec(node.textContent)?.[1] ?? -1);
+			const docEditScroller = () => document.querySelector('.doc-edit .cm-scroller');
+			// CodeMirror pads its content, so the windowed editor's top is computed rather
+			// than cut: the first loaded line's offset from the scroller's top, the content's
+			// padding and the measured line height give the model's floating top exactly.
+			const docEditTopRow = () => {
+				const scroller = docEditScroller();
+				const lines = scroller?.querySelectorAll('.cm-line');
+				if (!lines || lines.length < 2) return NaN;
+				const lineHeight = rect(lines[1]).top - rect(lines[0]).top;
+				if (lineHeight <= 0) return NaN;
+				const pad = parseFloat(getComputedStyle(lines[0].parentElement).paddingTop) || 0;
+				return (parseN(lines[0]) - 1) + (pad - (rect(lines[0]).top - rect(scroller).top)) / lineHeight;
+			};
+			const docEditTop = () => {
+				const row = docEditTopRow();
+				return Number.isFinite(row) ? row + 1 : -1;
+			};
+			// The projection snaps the scroller to whole pixels, so a measured position lands
+			// a rounding error from the model's word; compare within a quarter of a row.
+			const near = (expected) => (actual) => Math.abs(actual - expected) <= 0.25;
+			const docEditCaret = () => {
+				const line = document.querySelector('.doc-edit .cm-activeLine');
+				return line ? parseN(line) : -1;
+			};
+			const codeScroller = () => Array.from(document.querySelectorAll('.cm-scroller')).find((s) => !s.closest('.doc-edit'));
+			const dragThumbTo = (container, fraction) => {
+				const bar = container.querySelector('.scrollbar.vertical');
+				const thumb = bar.querySelector('.scrollbar-thumb');
+				const track = rect(bar);
+				const grab = rect(thumb).top + 2;
+				const at = (type, clientY) => bar.dispatchEvent(new PointerEvent(type, { clientY, button: 0, bubbles: true, pointerId: 1 }));
+				thumb.dispatchEvent(new PointerEvent('pointerdown', { clientY: grab, button: 0, bubbles: true, pointerId: 1 }));
+				const target = fraction >= 1 ? track.bottom + 10_000 : track.top + track.height * fraction;
+				at('pointermove', target);
+				at('pointerup', target);
+			};
+			const openFromTree = async (name) => {
+				const row = Array.from(document.querySelectorAll('.tree .row')).find((r) => r.textContent.includes(name));
+				if (!row) throw new Error('no tree row for ' + name);
+				click(row);
+				await sleep(1200);
+			};
+			const activateTab = (name) => {
+				const tab = Array.from(document.querySelectorAll('.tab')).find((t) => t.textContent.includes(name));
+				if (tab) click(tab);
+			};
+			// One surface's failure must not take the rest down: each block records what it
+			// got and the harness moves on.
+			const surface = async (name, body) => {
+				try {
+					await body();
+				} catch (error) {
+					report.push({ surface: name, check: 'the block threw', expected: 'a completed run', actual: String(error && error.message ? error.message : error), status: 'fail' });
+				}
+			};
+
+			await sleep(1500); // the workbench boots
+			await waitFor(() => document.querySelectorAll('.tree .row').length >= 5);
+			// Ground-truth probes for a stuck surface: what the scrollbar last measured,
+			// what viewport heights the models were told, and whether this page is even
+			// visible (a hidden page freezes rAF and with it CM's measure and the glide).
+			window.__scrollProbe = { visibility: document.visibilityState, layouts: [], viewports: [] };
+			const { Scrollbar } = await import('/src/scroll/scrollbar.ts');
+			const { ScrollModel } = await import('/src/scroll/model.ts');
+			const origLayout = Scrollbar.prototype.layout;
+			Scrollbar.prototype.layout = function () {
+				const geometry = this.geometry();
+				window.__scrollProbe.layouts.push({ track: this.trackLength, idle: this.root.classList.contains('idle'), thumb: geometry ? Math.round(geometry.thumb) : null });
+				if (window.__scrollProbe.layouts.length > 40) window.__scrollProbe.layouts.shift();
+				return origLayout.call(this);
+			};
+			const origSetViewport = ScrollModel.prototype.setViewport;
+			ScrollModel.prototype.setViewport = function (height) {
+				window.__scrollProbe.viewports.push(height);
+				if (window.__scrollProbe.viewports.length > 40) window.__scrollProbe.viewports.shift();
+				return origSetViewport.call(this, height);
+			};
+			// Zed's own defaults for the amounts the model defines; the shipped app defaults
+			// (3 / 5) are re-checked at the end.
+			const { updateSetting } = await import('/src/settings.ts');
+			updateSetting('mouseWheelScrollSensitivity', 1);
+			updateSetting('fastScrollSensitivity', 4);
+
+			/* ----- the code editor (a small file: CodeMirror's native scroll and keys) ----- */
+			await surface('code editor', async () => {
+				await openFromTree('file.txt');
+				await waitFor(() => codeScroller());
+				const scroller = codeScroller();
+				const lineHeight = rect(scroller.querySelector('.cm-line')).height;
+				const viewport = rect(scroller).height;
+				wheel(scroller, 120);
+				await sleep(60);
+				const mid = scroller.scrollTop;
+				await sleep(500);
+				const final = scroller.scrollTop;
+				check('code editor', 'a wheel notch glides to VS Code\'s 150 px (sensitivity 1), not Zed\'s jump', 150, final);
+				check('code editor', 'the glide is in flight part-way (an ease, not the row model)', (m) => m > 0 && m < 150, mid);
+				key(document.querySelector('.cm-content'), 'PageDown');
+				await sleep(300);
+				const caret = Number(/line (\d+)/.exec(document.querySelector('.cm-activeLine').textContent)?.[1] ?? -1);
+				check('code editor', 'PageDown moves the caret about one viewport (CodeMirror native)', (n) => n >= Math.floor(viewport / lineHeight) - 3 && n <= Math.floor(viewport / lineHeight) + 1, caret - 1);
+			});
+
+			/* ----- the windowed large-file editor (the row model under CodeMirror) ----- */
+			await surface('windowed editor', async () => {
+				await openFromTree('huge.txt');
+				await waitFor(() => document.querySelector('.doc-edit'));
+				await waitFor(() => docEditTop() === 1);
+				// An independent observer on the same element the view's sizer watches: if
+				// this one hears the box and the model never did, the view's own wiring is
+				// the suspect, not the layout.
+				const heard = [];
+				const probeRO = new ResizeObserver((entries) => heard.push(Math.round(entries[0].contentRect.height)));
+				probeRO.observe(document.querySelector('.doc-edit-viewport'));
+				await sleep(400);
+				probeRO.disconnect();
+				report.push({ surface: 'windowed editor', check: 'an independent RO on .doc-edit-viewport', expected: 'a real height delivered', actual: JSON.stringify(heard), status: 'info' });
+				report.push({ surface: 'windowed editor', check: 'DOM chain heights at open', expected: 'every layer sized', actual: JSON.stringify((() => {
+					const out = {};
+					for (const s of ['.doc-edit', '.doc-edit-viewport', '.doc-edit-host', '.doc-edit-host .cm-editor', '.doc-edit-host .cm-scroller']) {
+						const e = document.querySelector(s);
+						out[s.replace(/.*\./, '')] = e ? Math.round(e.getBoundingClientRect().height) : null;
+					}
+					out.viewportsHeard = window.__scrollProbe.viewports;
+					return out;
+				})()), status: 'info' });
+				let hugeRows;
+				const lines = document.querySelectorAll('.doc-edit .cm-line');
+				const lineHeight = rect(lines[1]).top - rect(lines[0]).top;
+				const viewport = rect(docEditScroller()).height;
+				const visible = viewport / lineHeight;
+				hugeRows = Math.max(1, Math.floor(visible) - 1);
+				wheel(docEditScroller(), 100);
+				await settle();
+				check('windowed editor', 'a wheel notch is the system\'s three lines (sensitivity 1)', near(4), docEditTop());
+				wheel(docEditScroller(), 100, { altKey: true });
+				await settle();
+				check('windowed editor', 'Alt multiplies by the fast sensitivity (4): twelve more', near(16), docEditTop());
+				wheel(docEditScroller(), -100);
+				await settle();
+				check('windowed editor', 'a notch up is three lines back', near(13), docEditTop());
+				// Back to the head for the page keys.
+				dragThumbTo(document.querySelector(".doc-edit"), 0);
+				await sleep(600);
+				if (docEditCaret() === 1 && docEditTop() > 2) {
+					const probe = probeKey(document.querySelector('.doc-edit .cm-content'), 'PageDown');
+					report.push({ surface: 'windowed editor', check: 'PageDown probe (the caret had not moved)', expected: 'seen at the element, not prevented', actual: JSON.stringify(probe), status: 'info' });
+				}
+				key(document.querySelector('.doc-edit .cm-content'), 'PageDown');
+				await sleep(800);
+				check('windowed editor', 'PageDown walks the caret a viewport less one row', (n) => Math.abs(n - (1 + hugeRows)) <= 1, docEditCaret());
+				check('windowed editor', 'the view follows, the caret three rows off the bottom (fit)', near(1 + hugeRows + 4 - visible), docEditTop());
+				for (let i = 0; i < 3; i++) key(document.querySelector('.doc-edit .cm-content'), 'PageDown');
+				await sleep(1500);
+				check('windowed editor', 'a burst of three more presses is exactly three pages of caret', (n) => Math.abs(n - (1 + 4 * hugeRows)) <= 2, docEditCaret());
+				key(document.querySelector('.doc-edit .cm-content'), 'PageUp');
+				await sleep(800);
+				check('windowed editor', 'PageUp walks one page back', (n) => Math.abs(n - (1 + 3 * hugeRows)) <= 1, docEditCaret());
+				// Drag the drawn scrollbar to the file's very end: the last window slides in
+				// and the last line stands at the viewport's top (one_page).
+				dragThumbTo(document.querySelector(".doc-edit"), 1);
+				await sleep(1200);
+				check('windowed editor', 'a drag to the bottom lands the last line at the viewport\'s top', near(HUGE_LINES), docEditTop());
+			});
+
+			/* ----- the indexed Fast Viewer (the read-only large-file page) ----- */
+			await surface('Fast Viewer', async () => {
+				await openFromTree('monster.js');
+				await waitFor(() => document.querySelector('.fast-view .fast-scroll'));
+				await waitFor(() => cutRow(document.querySelector('.fast-scroll'), '.fast-row[data-line]', (n) => Number(n.dataset.line)) === 0);
+				let fastPage;
+				const scroller = document.querySelector('.fast-scroll');
+				const row = scroller.querySelector('.fast-row');
+				const lineHeight = rect(row).height;
+				fastPage = Math.trunc(rect(scroller).height / lineHeight - 1);
+				const top = () => cutRow(scroller, '.fast-row[data-line]', (n) => Number(n.dataset.line));
+				wheel(scroller, 100);
+				await settle();
+				check('Fast Viewer', 'a wheel notch is three rows', 3, top());
+				wheel(scroller, 100, { altKey: true });
+				await settle();
+				check('Fast Viewer', 'Alt is four notches more', 15, top());
+				const probe = probeKey(scroller, 'PageDown');
+				await sleep(200);
+				if (top() === 15) report.push({ surface: 'Fast Viewer', check: 'PageDown probe (the view had not moved)', expected: 'seen at the element, not prevented', actual: JSON.stringify(probe), status: 'info' });
+				key(scroller, 'PageDown');
+				await sleep(300);
+				check('Fast Viewer', 'two PageDowns are exactly two pages (viewport less one row)', 15 + 2 * fastPage, top());
+				key(scroller, 'PageUp');
+				await sleep(300);
+				check('Fast Viewer', 'PageUp is one page back', 15 + fastPage, top());
+				// Ctrl+PageDown is the workbench's Next Editor here: prevented, and the tab
+				// moves - so this press comes last in the block.
+				const event = new KeyboardEvent('keydown', { key: 'PageDown', ctrlKey: true, bubbles: true, cancelable: true });
+				scroller.dispatchEvent(event);
+				check('Fast Viewer', 'Ctrl+PageDown goes to the workbench\'s Next Editor (prevented)', true, event.defaultPrevented);
+			});
+
+			/* ----- the hex view (a binary page, with a caret) ----- */
+			await surface('hex view', async () => {
+				await openFromTree('blob.bin');
+				await waitFor(() => document.querySelector('.hex-scroller'));
+				await waitFor(() => document.querySelector('.hex-scroller [data-row="0"]'));
+				const scroller = document.querySelector('.hex-scroller');
+				const top = () => cutRow(scroller, '.hex-row[data-row]', (n) => Number(n.dataset.row));
+				const lineHeight = rect(scroller.querySelector('.hex-row[data-row]')).height;
+				const visible = rect(scroller).height / lineHeight;
+				wheel(scroller, 100);
+				await settle();
+				check('hex view', 'a wheel notch is three rows on a binary too', 3, top());
+				key(scroller, 'PageDown');
+				await sleep(400);
+				check('hex view', 'PageDown pages the caret and the view follows with margin', (t) => Math.abs(t - Math.floor(Math.floor(visible) + 3 - visible)) <= 1, top());
+				key(scroller, 'PageUp');
+				await sleep(400);
+				check('hex view', 'PageUp returns to the head', 0, top());
+			});
+
+			/* ----- the hex compare (two panes over one model), constructed directly ----- */
+			await surface('hex compare', async () => {
+				const { HexCompareView } = await import('/src/hexCompare.ts');
+				const view = new HexCompareView('C:\\l.bin', 'C:\\r.bin');
+				document.getElementById('editorGroup').appendChild(view.root);
+				await view.load();
+				const scroller = view.root.querySelector('.hex-scroller');
+				await waitFor(() => view.scroll.visibleLines > 0);
+				const page = Math.trunc(view.scroll.visibleLines - 1);
+				wheel(scroller, 100);
+				check('hex compare', 'a wheel notch is three rows, both panes', 3, view.scroll.top);
+				wheel(scroller, 100, { altKey: true });
+				check('hex compare', 'Alt is four notches more', 15, view.scroll.top);
+				key(scroller, 'PageDown');
+				key(scroller, 'PageDown');
+				check('hex compare', 'two PageDowns are two pages', 15 + 2 * page, view.scroll.top);
+				key(scroller, 'PageUp');
+				check('hex compare', 'PageUp is one page back', 15 + page, view.scroll.top);
+				view.destroy();
+				view.root.remove();
+			});
+
+			/* ----- the CAN raw view (.asc), constructed directly ----- */
+			await surface('CAN raw view', async () => {
+				const { CanRawView } = await import('/src/canRawView.ts');
+				const view = new CanRawView('/repo/trace.asc');
+				document.getElementById('editorGroup').appendChild(view.root);
+				await waitFor(() => view.scroll.rowCount === CAN_FRAMES && view.scroll.visibleLines > 0);
+				const scroller = view.root.querySelector('.can-raw-scroll');
+				const page = Math.trunc(view.scroll.visibleLines - 1);
+				wheel(scroller, 100);
+				check('CAN raw view', 'a wheel notch is three rows of frames', 3, view.scroll.top);
+				wheel(scroller, 100, { altKey: true });
+				check('CAN raw view', 'Alt is four notches more', 15, view.scroll.top);
+				key(scroller, 'PageDown');
+				key(scroller, 'PageDown');
+				check('CAN raw view', 'two PageDowns are two pages', 15 + 2 * page, view.scroll.top);
+				key(scroller, 'PageUp');
+				check('CAN raw view', 'PageUp is one page back', 15 + page, view.scroll.top);
+				view.dispose();
+				view.root.remove();
+			});
+
+			/* ----- the shipped defaults: the same notches at sensitivity 3 / fast 5 ----- */
+			await surface('shipped defaults', async () => {
+				activateTab('huge.txt');
+			await sleep(600);
+			dragThumbTo(document.querySelector(".doc-edit"), 0);
+			await sleep(600);
+			updateSetting('mouseWheelScrollSensitivity', 3);
+			updateSetting('fastScrollSensitivity', 5);
+			wheel(docEditScroller(), 100);
+				check('shipped defaults', 'a notch at the shipped sensitivity 3 is nine lines - three times Zed\'s default', near(10), docEditTop());
+				wheel(docEditScroller(), 100, { altKey: true });
+				check('shipped defaults', 'Alt at the shipped fast 5 is fifteen more - Zed\'s default is twelve', near(25), docEditTop());
+			});
+
+			for (const error of window.__pageErrors || []) {
+				report.push({ surface: 'page', check: 'page error', expected: 'none', actual: error, status: 'fail' });
+			}
+			const toast = document.querySelector('#notifications');
+			if (toast && toast.textContent) report.push({ surface: 'page', check: 'notification shown', expected: 'none', actual: toast.textContent, status: 'info' });
+			report.push({ surface: 'page', check: 'probe: visibility / model viewports / scrollbar tracks', expected: 'visible, real heights', actual: JSON.stringify(window.__scrollProbe), status: 'info' });
+			window.__scrollReport = report;
+			const failed = report.filter((r) => r.status === 'fail').length;
+			console.table(report);
+			console.log('[scroll-harness] ' + (report.length - failed) + ' pass, ' + failed + ' fail');
+			const panel = document.createElement('div');
+			panel.id = 'scroll-report';
+			panel.style.cssText = 'position:fixed;left:8px;bottom:34px;z-index:9998;max-width:640px;max-height:60vh;overflow:auto;' +
+				'font:11px monospace;color:#eee;background:rgba(20,20,20,0.95);border:1px solid #555;padding:8px;';
+			panel.innerHTML = '<b>SCROLL HARNESS - ' + (failed === 0 ? 'ALL PASS' : failed + ' FAILING') + '</b>' +
+				'<table style="border-collapse:collapse;margin-top:4px">' +
+				report.map((r) => '<tr><td style="padding:1px 8px;color:' + (r.status === 'fail' ? '#f48771' : '#73c991') + '">' + r.status.toUpperCase() +
+					'</td><td style="padding:1px 8px">' + r.surface + '</td><td style="padding:1px 8px">' + r.check +
+					'</td><td style="padding:1px 8px;color:#aaa">' + r.expected + ' / got ' + r.actual + '</td></tr>').join('') +
+				'</table>';
+			document.body.appendChild(panel);
+		}
+	</script>
 </body>
 </html>
