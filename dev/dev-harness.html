@@ -384,8 +384,19 @@
 				const scroller = docEditScroller();
 				const lines = scroller?.querySelectorAll('.cm-line');
 				if (!lines || lines.length < 2) return NaN;
-				const lineHeight = rect(lines[1]).top - rect(lines[0]).top;
-				if (lineHeight <= 0) return NaN;
+				// CodeMirror keeps the caret's line rendered wherever the caret is — a stray
+				// block pinned at the content's top when a far drag lands the caret above the
+				// slice. The line height comes from the first pair of *adjacent* labels, never
+				// from the first two nodes in the DOM (the stray and the slice's head are a
+				// window apart).
+				let lineHeight = 0;
+				for (let i = 0; i < lines.length - 1; i++) {
+					if (parseN(lines[i + 1]) === parseN(lines[i]) + 1) {
+						lineHeight = rect(lines[i + 1]).top - rect(lines[i]).top;
+						break;
+					}
+				}
+				if (!(lineHeight > 0)) return NaN;
 				const pad = parseFloat(getComputedStyle(lines[0].parentElement).paddingTop) || 0;
 				return (parseN(lines[0]) - 1) + (pad - (rect(lines[0]).top - rect(scroller).top)) / lineHeight;
 			};
