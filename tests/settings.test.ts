@@ -91,7 +91,7 @@ describe('settings store', () => {
 describe('settings dialog', () => {
 	it('groups its controls into categories', () => {
 		openSettingsPanel();
-		expect(texts('.settings-nav-item')).toEqual(['General', 'Appearance', 'Editor', 'Extensions']);
+		expect(texts('.settings-nav-item')).toEqual(['General', 'Appearance', 'Editor', 'Search', 'Extensions']);
 		// General holds the language picker, Appearance the theme picker.
 		expect(document.querySelector('.settings-content .settings-select')).not.toBeNull();
 		click(document.querySelectorAll('.settings-nav-item')[1]!);
@@ -116,7 +116,7 @@ describe('settings dialog', () => {
 		const language = document.querySelector('.settings-select') as HTMLSelectElement;
 		language.value = 'zh-cn';
 		language.dispatchEvent(new Event('change', { bubbles: true }));
-		expect(texts('.settings-nav-item')).toEqual(['常规', '外观', '编辑器', '扩展']);
+		expect(texts('.settings-nav-item')).toEqual(['常规', '外观', '编辑器', '搜索', '扩展']);
 		expect(document.querySelector('.settings-title')!.textContent).toBe('设置');
 		// Escape closes the dialog.
 		document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));

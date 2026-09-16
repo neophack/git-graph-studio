@@ -56,6 +56,10 @@ export interface AppSettings {
 	linuxDmabuf: LinuxDmabuf;
 	/** `workbench.density`: how tightly rows, tabs and bars are packed (M7 7.3). */
 	density: WorkbenchDensity;
+	/** Zed's `use_smartcase_search`: a query containing an uppercase letter matches case
+	 *  exactly, an all-lowercase query ignores case. The Match Case toggle shows the state
+	 *  the query's case picked — and can still override it — in every search field. */
+	searchSmartCase: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -65,7 +69,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	fontSize: 14, tabSize: 4, wordWrap: false, snippetSuggestions: true, pathCompletion: true,
 	fileAssociations: ['blf', 'asc', 'ggx', 'bin', 'hex'],
 	linuxDmabuf: 'auto',
-	density: 'comfortable'
+	density: 'comfortable',
+	searchSmartCase: true
 };
 
 /** Any settings write persists the whole object, so a store from an older release pins the
@@ -84,7 +89,7 @@ export const settings: AppSettings = { ...DEFAULT_SETTINGS, ...migrateStoredSett
 
 /* ---------- The setting registry (M3 3.9): one row per setting, schema-driven ---------- */
 
-export type SettingCategory = 'general' | 'appearance' | 'editor';
+export type SettingCategory = 'general' | 'appearance' | 'editor' | 'search';
 
 /** How the generated Settings dialog renders one setting. `theme` and `locale` pick from
  *  THEMES / LOCALES; `enum` from its own options; a number gets bounds; a boolean a checkbox;
@@ -133,7 +138,8 @@ export const SETTING_DEFS: SettingDef[] = [
 	{ key: 'fastScrollSensitivity', category: 'editor', kind: 'number', min: 1, max: 20, step: 1 },
 	{ key: 'bracketColors', category: 'editor', kind: 'boolean' },
 	{ key: 'snippetSuggestions', category: 'editor', kind: 'boolean' },
-	{ key: 'pathCompletion', category: 'editor', kind: 'boolean' }
+	{ key: 'pathCompletion', category: 'editor', kind: 'boolean' },
+	{ key: 'searchSmartCase', category: 'search', kind: 'boolean' }
 ];
 
 /** A setting's value differs from its default (the dialog's "modified" marker). The JSON

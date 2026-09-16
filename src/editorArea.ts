@@ -476,6 +476,10 @@ export class EditorArea {
 		return this.activeGroup.activeView;
 	}
 
+	get seedableView(): EditorView | null {
+		return this.activeGroup.seedableView;
+	}
+
 	setRoot(rootPath: string | null): void {
 		for (const group of this.groups()) group.setRoot(rootPath);
 	}

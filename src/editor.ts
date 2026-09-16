@@ -429,6 +429,13 @@ export class EditorGroup {
 		return this.active?.view ?? null;
 	}
 
+	/** The active text surface's CodeMirror view for seeding a search query (Zed's
+	 *  `query_suggestion`): the text editor's own, or the windowed large-file editor's
+	 *  loaded window — whichever text the user has in front of them. */
+	get seedableView(): EditorView | null {
+		return this.active?.view ?? this.active?.doc?.editorView ?? null;
+	}
+
 	openEditorIds(): string[] {
 		return this.open.map((e) => e.id);
 	}

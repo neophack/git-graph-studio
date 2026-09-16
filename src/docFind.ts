@@ -9,7 +9,9 @@
 
 import { invoke } from '@tauri-apps/api/core';
 
-import { findOptions, updateFindOption, type FindOptions } from './findOptions';
+import { findOptions, queryHasUppercase, updateFindOption, type FindOptions } from './findOptions';
+import { FindHistory, HistoryRecall, recallKey } from './findHistory';
+import { settings } from './settings';
 import { t, tf } from './i18n';
 import { el, icon } from './ui';
 
@@ -74,6 +76,8 @@ export class DocFindController {
 	private readonly count: HTMLElement;
 	private readonly replaceRow: HTMLElement;
 	private readonly expand: HTMLElement;
+	/** The Match Case toggle, kept for the smart-case sync (the query's own case drives it). */
+	private caseButton: HTMLElement | null = null;
 	private matches: DocFindMatch[] = [];
 	private capped = false;
 	private current = -1;
@@ -81,6 +85,10 @@ export class DocFindController {
 	private generation = 0;
 	private timer: number | undefined;
 	private showReplace = false;
+	/** The query history the find fields share (findHistory.ts): typed refinements collapse
+	 *  into one entry, and Up / Down at the field's edges walk it. */
+	private readonly history = new FindHistory('findHistory');
+	private readonly recall = new HistoryRecall(this.history);
 
 	constructor(host: DocFindHost, parent: HTMLElement, editable: boolean) {
 		this.host = host;
@@ -130,6 +138,7 @@ export class DocFindController {
 			return node;
 		};
 		const caseButton = optionButton('case-sensitive', t('find.matchCase'), 'caseSensitive');
+		this.caseButton = caseButton;
 		const wordButton = optionButton('whole-word', t('find.wholeWord'), 'wholeWord');
 		const regexButton = optionButton('regex', t('find.useRegex'), 'useRegex');
 		const close = button('close', t('find.close'), () => this.close());
@@ -150,6 +159,17 @@ export class DocFindController {
 			field.addEventListener('input', () => this.scheduleFind());
 			field.addEventListener('keydown', (event) => this.keydown(event, caseButton, wordButton, regexButton));
 		}
+		// The query field's own behaviours: typing is remembered (refinements collapse) and
+		// drives the smart-case toggle; Up / Down at the field's edges walk the history.
+		this.input.addEventListener('input', () => {
+			this.recall.edited();
+			this.history.add(this.input.value, 'replaceIfPrefix');
+			this.syncSmartCase();
+		});
+		this.input.addEventListener('keydown', (event) => {
+			const text = recallKey(this.recall, this.input, event);
+			if (text !== null) this.scheduleFind(0);
+		});
 	}
 
 	get isOpen(): boolean {
@@ -162,9 +182,18 @@ export class DocFindController {
 		if (withReplace && this.editable) this.setReplaceRow(true, true);
 		const seed = this.host.seedText?.();
 		if (seed !== null && seed !== undefined) this.input.value = seed;
+		this.syncSmartCase();
 		this.input.focus();
 		this.input.select();
 		this.scheduleFind(0);
+	}
+
+	/** Zed's `use_smartcase_search` (settings.searchSmartCase): the query's own case drives
+	 *  the shared Match Case option — the toggle lights up, so the state stays visible and
+	 *  a manual flip still holds until the query's case changes again. */
+	private syncSmartCase(): void {
+		if (!settings.searchSmartCase || !this.caseButton) return;
+		if (queryHasUppercase(this.input.value) !== findOptions().caseSensitive) this.caseButton.click();
 	}
 
 	close(): void {

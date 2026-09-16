@@ -19,7 +19,9 @@ import {
 } from '@codemirror/search';
 import type { EditorView, Panel, ViewUpdate } from '@codemirror/view';
 
-import { findOptions, updateFindOption } from './findOptions';
+import { findOptions, queryHasUppercase, updateFindOption } from './findOptions';
+import { FindHistory, HistoryRecall, recallKey } from './findHistory';
+import { settings } from './settings';
 import { t, tf } from './i18n';
 import { el, icon } from './ui';
 
@@ -95,6 +97,10 @@ export function createFindPanel(view: EditorView): Panel {
 	const options = findOptions();
 	let inSelection = false;
 	let showReplace = openWithReplace && !view.state.readOnly;
+	// The query history shared with the windowed editor's bar (findHistory.ts): typed
+	// refinements collapse into one entry, Up / Down at the field's edges walk it.
+	const history = new FindHistory('findHistory');
+	const recall = new HistoryRecall(history);
 
 	const dom = el('div', 'cm-find-widget');
 	const input = el('input', 'cm-find-input') as HTMLInputElement;
@@ -211,14 +217,20 @@ export function createFindPanel(view: EditorView): Panel {
 		} else if (event.key === 'Enter' && event.altKey && (event.ctrlKey || event.metaKey)) {
 			// Ctrl+Alt+Enter replaces every match, from either field (VS Code's binding).
 			event.preventDefault();
+			history.add(input.value);
 			void replaceAll(view);
 		} else if (event.key === 'Enter' && event.target === replaceInput) {
 			// Enter in the replace field replaces the current match and moves to the next.
 			event.preventDefault();
+			history.add(input.value);
 			void replaceNext(view);
 		} else if (event.key === 'Enter') {
 			event.preventDefault();
+			history.add(input.value);
 			void (event.shiftKey ? findPrevious(view) : findNext(view));
+		} else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+			// The query field's Up / Down at its edges walk the history (findHistory.ts).
+			if (event.target === input && recallKey(recall, input, event) !== null) apply();
 		} else if ((event.code === 'Digit1' || event.key === '1') && event.shiftKey && (event.ctrlKey || event.metaKey)) {
 			event.preventDefault();
 			void replaceNext(view);
@@ -239,6 +251,22 @@ export function createFindPanel(view: EditorView): Panel {
 	for (const field of [input, replaceInput]) {
 		field.addEventListener('input', apply);
 		field.addEventListener('keydown', keydown);
+	}
+	// The query field's own behaviours: typing is remembered and drives the smart-case
+	// toggle (Zed's use_smartcase_search — the toggle lights up, so the state stays visible).
+	input.addEventListener('input', () => {
+		recall.edited();
+		history.add(input.value, 'replaceIfPrefix');
+		if (settings.searchSmartCase && queryHasUppercase(input.value) !== options.caseSensitive) caseButton.click();
+	});
+	// A seeded field (a single-line selection, or a prior query) follows the seed's case too.
+	// The panel is created inside a view update, where dispatching is not allowed - the
+	// click (whose apply dispatches) waits until the update has finished, and only runs
+	// while the panel still lives.
+	if (settings.searchSmartCase && queryHasUppercase(input.value) !== options.caseSensitive) {
+		window.setTimeout(() => {
+			if (dom.isConnected) caseButton.click();
+		}, 0);
 	}
 
 	// No dispatch here: the panel is created inside a view update, where dispatching is not

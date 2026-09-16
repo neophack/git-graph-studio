@@ -4,8 +4,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { backend, Channel } from './tauriMock';
-import { click, flush, notifications, notificationButton, texts, type } from './helpers';
+import { click, flush, key, notifications, notificationButton, texts, type } from './helpers';
 import { SearchView, renderMatchLine, validateQuery, type FileMatches, type SearchEvent } from '../src/searchView';
+import { settings } from '../src/settings';
 
 /** Answer `search_workspace` the way the backend does: every batch, then `done`, pushed over
  *  the channel the view passed in. */
@@ -268,5 +269,100 @@ describe('Search view', () => {
 		const view = new SearchView(host);
 		view.focus();
 		expect(document.activeElement).toBe(host.querySelector('.search-row input'));
+	});
+
+	it('focus selects the query, ready to be typed over', () => {
+		const host = document.createElement('div');
+		document.body.appendChild(host);
+		const view = new SearchView(host);
+		const input = host.querySelector('.search-row.query-row input') as HTMLInputElement;
+		type(input, 'previous');
+		view.focus();
+		expect(input.selectionStart).toBe(0);
+		expect(input.selectionEnd).toBe('previous'.length);
+	});
+
+	it('recalls executed searches with Up and Down — typed-but-never-run queries are not history', async () => {
+		const search = streams([]);
+		const view = new SearchView(document.createElement('div'));
+		const input = view.container.querySelector('.search-row.query-row input') as HTMLInputElement;
+		type(input, 'alpha');
+		await view.runSearch();
+		type(input, 'beta');
+		await view.runSearch();
+		// A half-typed query that never ran stays out of the history (Zed records project
+		// searches on confirmation, not as they type).
+		type(input, 'ga');
+		key(input, 'ArrowUp'); // the last confirmed search
+		expect(input.value).toBe('beta');
+		key(input, 'ArrowUp');
+		expect(input.value).toBe('alpha');
+		key(input, 'ArrowDown');
+		expect(input.value).toBe('beta');
+		key(input, 'ArrowDown'); // past the newest: the unconfirmed draft returns
+		expect(input.value).toBe('ga');
+		expect(search).toHaveBeenCalledTimes(2);
+	});
+
+	it('the include field recalls its own history, not the query\'s', async () => {
+		const view = new SearchView(document.createElement('div'));
+		const query = view.container.querySelector('.search-row.query-row input') as HTMLInputElement;
+		const include = view.container.querySelector('.search-filter-rows input') as HTMLInputElement;
+		type(query, 'needle');
+		type(include, '*.rs');
+		await view.runSearch();
+		type(include, '*.ts');
+		await view.runSearch();
+		key(include, 'ArrowUp');
+		expect(include.value).toBe('*.rs');
+		expect(query.value).toBe('needle'); // the query field's text is not the include history's
+	});
+
+	it('smart case: an uppercase query turns Match Case on and reaches the backend', async () => {
+		const search = streams([]);
+		const view = new SearchView(document.createElement('div'));
+		const input = view.container.querySelector('.search-row.query-row input') as HTMLInputElement;
+		type(input, 'Foo');
+		await view.runSearch();
+		expect(search.mock.calls.at(-1)![0]).toMatchObject({ query: 'Foo', caseSensitive: true });
+		expect(view.container.querySelector('[title="Match Case (Alt+C)"]')!.classList.contains('active')).toBe(true);
+		// An all-lowercase query turns it back off.
+		type(input, 'foo');
+		await view.runSearch();
+		expect(search.mock.calls.at(-1)![0]).toMatchObject({ query: 'foo', caseSensitive: false });
+		expect(view.container.querySelector('[title="Match Case (Alt+C)"]')!.classList.contains('active')).toBe(false);
+	});
+
+	it('smart case off: the query\'s case leaves the toggle alone', async () => {
+		const held = settings.searchSmartCase;
+		settings.searchSmartCase = false;
+		try {
+			const search = streams([]);
+			const view = new SearchView(document.createElement('div'));
+			const input = view.container.querySelector('.search-row.query-row input') as HTMLInputElement;
+			type(input, 'Foo');
+			await view.runSearch();
+			expect(search.mock.calls.at(-1)![0]).toMatchObject({ query: 'Foo', caseSensitive: false });
+			expect(view.container.querySelector('[title="Match Case (Alt+C)"]')!.classList.contains('active')).toBe(false);
+		} finally {
+			settings.searchSmartCase = held;
+		}
+	});
+
+	it('seedQuery fills the box (escaped for a regex search) and runs the search', async () => {
+		const search = streams([]);
+		const view = new SearchView(document.createElement('div'));
+		view.seedQuery('fn (');
+		const input = view.container.querySelector('.search-row.query-row input') as HTMLInputElement;
+		expect(input.value).toBe('fn (');
+		// With the regex toggle on, the seed is escaped so the literal text is searched.
+		click(view.container.querySelector('[title="Use Regular Expression (Alt+R)"]')!);
+		view.seedQuery('fn (');
+		expect(input.value).toBe('fn \\(');
+		// The seeded search runs after the typing pause, as if it had been typed.
+		await new Promise((resolve) => setTimeout(resolve, 350));
+		await flush();
+		expect(search).toHaveBeenCalled();
+		expect(search.mock.calls.at(-1)![0]).toMatchObject({ query: 'fn \\(', isRegex: true });
 	});
 });

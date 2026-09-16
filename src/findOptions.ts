@@ -25,3 +25,9 @@ export function findOptions(): FindOptions {
 export function updateFindOption<K extends keyof FindOptions>(key: K, value: FindOptions[K]): void {
 	save('searchOptions', { ...load<Record<string, unknown>>('searchOptions', {}), [key]: value });
 }
+
+/** Whether the query carries an uppercase letter (Zed's `contains_uppercase`): a case-mapped
+ *  difference, so letters without case (CJK, digits, symbols) never trigger it. */
+export function queryHasUppercase(query: string): boolean {
+	return query !== query.toLowerCase();
+}

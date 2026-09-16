@@ -210,8 +210,9 @@ colouring, sticky scroll, minimap, bookmarks, markdown preview.
   `src/docFind.ts` (the whole-file find/replace bar the windowed editor and the Fast Viewer
   serve, over `viewer_find` / `viewer_replace`), `src/editorExtras.ts`, `src/autocomplete.ts`,
   `src/snippetRegistry.ts`, `src/findWidget.ts`, `src/findOptions.ts` (options shared with
-  Workspace Search), `src/bookmarks.ts`, `src/cmTheme.ts`, `src/markdown.ts` (preview; also
-  renders extension READMEs)
+  Workspace Search), `src/findHistory.ts` (the find and search fields' query history — the
+  Up/Down recall — shared with Workspace Search), `src/bookmarks.ts`, `src/cmTheme.ts`,
+  `src/markdown.ts` (preview; also renders extension READMEs)
 - Backend: `src-tauri/src/viewer/` (`doc.rs`: ropey rope + syntect highlight checkpoints;
   `find.rs`: the whole-document find/replace matcher, scan and replacement pass;
   `indexed.rs`: the memory-bounded line-index viewer for enormous files (index + on-demand

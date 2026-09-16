@@ -9,8 +9,10 @@ import { SearchQuery, openSearchPanel, setSearchQuery } from '@codemirror/search
 
 import { countMatches, createFindPanel } from '../src/findWidget';
 import { findOptions } from '../src/findOptions';
+import { FindHistory, HistoryRecall } from '../src/findHistory';
+import { settings } from '../src/settings';
 import { search } from '@codemirror/search';
-import { click, texts } from './helpers';
+import { click, key, texts, type } from './helpers';
 
 const DOC = 'one two One twoo\nthree one\n';
 
@@ -196,7 +198,7 @@ describe('the widget', () => {
 		expect(input.value).toBe('three');
 	});
 
-	it('a single-line selection seeds the field', () => {
+	it('a single-line selection seeds the field, and the seed\'s case drives Match Case', async () => {
 		const view = viewOf(DOC, 4); // inside "two One twoo" line; select "One"
 		view.dispatch({ selection: { anchor: 8, head: 11 } });
 		openSearchPanel(view);
@@ -204,6 +206,141 @@ describe('the widget', () => {
 		expect(input.value).toBe('One');
 		// The seeded occurrence is the second of the three and stays the current match.
 		expect(texts('.cm-find-count', view.dom)).toEqual(['2 of 3']);
+		// Smart case follows the seeded text once the panel's creating update is done (the
+		// flip dispatches, so it waits a tick): "One" turns exact, leaving the one match.
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(findOptions().caseSensitive).toBe(true);
+		expect(texts('.cm-find-count', view.dom)).toEqual(['1 of 1']);
 		view.destroy();
+	});
+
+	it('recalls past queries with Up and Down at the field\'s edges', () => {
+		const view = viewOf(DOC, 0);
+		openSearchPanel(view);
+		const input = view.dom.querySelector('.cm-find-input') as HTMLInputElement;
+		// Two queries typed in this widget, each remembered as it is typed; the field is
+		// then cleared — the empty query is not remembered, so the draft differs from the
+		// newest entry and the walk's ends are both observable.
+		type(input, 'alpha');
+		type(input, 'beta');
+		type(input, '');
+		key(input, 'ArrowUp'); // the newest query, the draft ('') stashed
+		expect(input.value).toBe('beta');
+		key(input, 'ArrowUp'); // the walk continues
+		expect(input.value).toBe('alpha');
+		key(input, 'ArrowDown');
+		expect(input.value).toBe('beta');
+		key(input, 'ArrowDown'); // past the newest: the stashed draft returns
+		expect(input.value).toBe('');
+		// Down on the live field is not history's (the browser moves the caret to the end).
+		const event = key(input, 'ArrowDown');
+		expect(event.defaultPrevented).toBe(false);
+		// The recalled query is selected, ready to be typed over.
+		key(input, 'ArrowUp');
+		expect(input.selectionStart).toBe(0);
+		expect(input.selectionEnd).toBe('beta'.length);
+		view.destroy();
+	});
+
+	it('recalls across widgets: the windowed editor\'s bar and this one share a history', () => {
+		const history = new FindHistory('findHistory');
+		history.add('from-the-other-widget');
+		const view = viewOf(DOC, 0);
+		openSearchPanel(view);
+		const input = view.dom.querySelector('.cm-find-input') as HTMLInputElement;
+		type(input, 'mine');
+		key(input, 'ArrowUp');
+		expect(input.value).toBe('from-the-other-widget');
+		view.destroy();
+	});
+
+	it('smart case: an uppercase query turns Match Case on, an all-lowercase one turns it off', async () => {
+		const view = viewOf(DOC, 0);
+		openSearchPanel(view);
+		const widget = view.dom.querySelector('.cm-find-widget') as HTMLElement;
+		const input = widget.querySelector('.cm-find-input') as HTMLInputElement;
+		const caseButton = Array.from(widget.querySelectorAll('.cm-find-btn.toggle')).find((b) => b.title.startsWith('Match Case'))! as HTMLElement;
+		expect(caseButton.classList.contains('active')).toBe(false);
+		type(input, 'One');
+		await Promise.resolve();
+		expect(caseButton.classList.contains('active')).toBe(true);
+		expect(findOptions().caseSensitive).toBe(true);
+		expect(widget.querySelector('.cm-find-count')!.textContent).toBe('1 of 1');
+		type(input, 'one');
+		await Promise.resolve();
+		expect(caseButton.classList.contains('active')).toBe(false);
+		expect(widget.querySelector('.cm-find-count')!.textContent).toBe('1 of 3');
+		view.destroy();
+	});
+
+	it('smart case off: the toggle stays wherever the user left it', async () => {
+		const held = settings.searchSmartCase;
+		settings.searchSmartCase = false;
+		try {
+			const view = viewOf(DOC, 0);
+			openSearchPanel(view);
+			const widget = view.dom.querySelector('.cm-find-widget') as HTMLElement;
+			const input = widget.querySelector('.cm-find-input') as HTMLInputElement;
+			type(input, 'One');
+			await Promise.resolve();
+			const caseButton = Array.from(widget.querySelectorAll('.cm-find-btn.toggle')).find((b) => b.title.startsWith('Match Case'))! as HTMLElement;
+			expect(caseButton.classList.contains('active')).toBe(false);
+			expect(widget.querySelector('.cm-find-count')!.textContent).toBe('1 of 3');
+			view.destroy();
+		} finally {
+			settings.searchSmartCase = held;
+		}
+	});
+});
+
+describe('the query history (findHistory.ts)', () => {
+	beforeEach(() => {
+		localStorage.clear();
+	});
+
+	it('collapses prefix refinements and moves repeats to the end', () => {
+		const history = new FindHistory('findHistory');
+		history.add('foo', 'replaceIfPrefix');
+		history.add('foobar', 'replaceIfPrefix'); // extends the last entry: replaces it
+		history.add('foobar', 'replaceIfPrefix'); // an exact repeat grows nothing
+		history.add('other');
+		history.add('foo'); // re-searched: lands at the end
+		expect(history.size()).toBe(3);
+		expect(history.at(0)).toBe('foobar');
+		expect(history.at(1)).toBe('other');
+		expect(history.at(2)).toBe('foo');
+	});
+
+	it('recalls Up through the entries and Down back to the stashed draft', () => {
+		const history = new FindHistory('findHistory');
+		history.add('alpha');
+		history.add('beta');
+		const recall = new HistoryRecall(history);
+		expect(recall.up('half')).toBe('beta'); // the draft is stashed, the newest shows
+		expect(recall.up('half')).toBe('alpha');
+		expect(recall.up('half')).toBe('alpha'); // the oldest holds
+		expect(recall.down()).toBe('beta');
+		expect(recall.down()).toBe('half'); // the draft returns
+		expect(recall.down()).toBeNull(); // live again: the key keeps its default
+	});
+
+	it('an edit returns the cursor to the live field', () => {
+		const history = new FindHistory('findHistory');
+		history.add('alpha');
+		history.add('beta');
+		const recall = new HistoryRecall(history);
+		expect(recall.up('typed')).toBe('beta');
+		recall.edited();
+		expect(recall.up('new draft')).toBe('beta'); // a fresh walk from the newest
+		expect(recall.down()).toBe('new draft');
+	});
+
+	it('Up from the just-recorded live text skips to the previous distinct query', () => {
+		const history = new FindHistory('findHistory');
+		history.add('old');
+		history.add('current'); // what the field shows right now
+		const recall = new HistoryRecall(history);
+		expect(recall.up('current')).toBe('old');
+		expect(recall.down()).toBe('current');
 	});
 });

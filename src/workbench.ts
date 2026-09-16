@@ -264,7 +264,7 @@ export class Workbench {
 		register({ id: 'workbench.previousEditor', title: 'Previous Editor', category: 'Go', keybinding: 'Ctrl+PageUp', run: () => this.editors.activateNext(-1) });
 
 		register({ id: 'workbench.showExplorer', title: 'Explorer', category: 'View', keybinding: 'Ctrl+Shift+E', run: () => this.showView('explorer') });
-		register({ id: 'workbench.showSearch', title: 'Search', category: 'View', keybinding: 'Ctrl+Shift+F', run: () => { this.showView('search'); this.search.focus(); } });
+		register({ id: 'workbench.showSearch', title: 'Search', category: 'View', keybinding: 'Ctrl+Shift+F', run: () => { this.showView('search'); this.seedSearchQuery(); this.search.focus(); } });
 		register({ id: 'workbench.replaceInFiles', title: 'Replace in Files', category: 'Search', keybinding: 'Ctrl+Shift+H', run: () => { this.showView('search'); this.search.focusReplace(); } });
 		register({ id: 'workbench.showScm', title: 'Source Control', category: 'View', keybinding: 'Ctrl+Shift+G', run: () => this.showView('scm') });
 		register({ id: 'workbench.showExtensions', title: 'Extensions', category: 'View', keybinding: 'Ctrl+Shift+X', run: () => this.showView('extensions') });
@@ -570,6 +570,22 @@ export class Workbench {
 		if (view === 'scm') void this.scm.refresh();
 		if (view === 'extensions') void this.extensions.refresh();
 		if (focus) this.views[view].querySelector<HTMLElement>('[tabindex]')?.focus();
+	}
+
+	/** Zed's `query_suggestion` (SeedQuery::Always): the Search view opens with the active
+	 *  editor's single-line selection — else the word at its caret — as its query, so
+	 *  Ctrl+Shift+F is find-usages without the retyping. The view escapes the seed when the
+	 *  search is a regex; no editor (or no word under the caret) keeps the previous query. */
+	private seedSearchQuery(): void {
+		const view = this.editors.seedableView;
+		if (!view) return;
+		const selection = view.state.selection.main;
+		if (!selection.empty && view.state.doc.lineAt(selection.from).number === view.state.doc.lineAt(selection.to).number) {
+			this.search.seedQuery(view.state.sliceDoc(selection.from, selection.to));
+			return;
+		}
+		const word = view.state.wordAt(selection.head);
+		if (word) this.search.seedQuery(view.state.sliceDoc(word.from, word.to));
 	}
 
 	get activeSidebarView(): ViewId {

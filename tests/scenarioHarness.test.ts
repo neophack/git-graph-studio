@@ -8,6 +8,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 import { Workbench } from '../src/workbench';
+import { commands } from '../src/commands';
 import { SCENARIOS, handlersFor, type Scenario } from './scenarioFixtures';
 import { backend } from './tauriMock';
 import { click, flush, texts } from './helpers';
@@ -177,5 +178,28 @@ describe('the scenario harness', () => {
 		const target = resolve(process.cwd(), 'target', 'studio', 'scenario-report.md');
 		mkdirSync(dirname(target), { recursive: true });
 		writeFileSync(target, markdown, 'utf8');
+	});
+});
+
+describe('the search command seeds from the active editor', () => {
+	it('the word at the caret - or a single-line selection - opens as the query (Zed\'s query_suggestion)', async () => {
+		const clean = SCENARIOS.find((scenario) => scenario.name === 'clean-repository')!;
+		const workbench = await bootScenario(clean);
+		await workbench.editors.openFile(`${REPO}\\notes.txt`);
+		await flush(8);
+		const view = workbench.editors.activeView!;
+		expect(view.state.doc.toString()).toBe('one two one\n');
+		// The caret inside "two": Ctrl+Shift+F opens the Search view with that word as its
+		// query, selected, ready to be typed over.
+		view.dispatch({ selection: { anchor: 5 } });
+		await commands.execute('workbench.showSearch');
+		const input = document.querySelector('#sidebar .search-row.query-row input') as HTMLInputElement;
+		expect(input.value).toBe('two');
+		expect(input.selectionStart).toBe(0);
+		expect(input.selectionEnd).toBe(3);
+		// A single-line selection wins over the word at the caret.
+		view.dispatch({ selection: { anchor: 0, head: 3 } });
+		await commands.execute('workbench.showSearch');
+		expect(input.value).toBe('one');
 	});
 });

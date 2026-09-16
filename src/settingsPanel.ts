@@ -14,7 +14,7 @@ import { ensureBuiltinSettings } from './extHost';
 import { saveExtSetting, extSettings } from './state';
 import { el, icon } from './ui';
 
-type CategoryId = 'general' | 'appearance' | 'editor' | 'extensions';
+type CategoryId = 'general' | 'appearance' | 'editor' | 'search' | 'extensions';
 
 /** The single open dialog, so a second invocation just re-focuses it. */
 let openDialog: HTMLElement | null = null;
@@ -152,7 +152,7 @@ export function openSettingsPanel(): void {
 		search.placeholder = t('settings.searchPlaceholder');
 		nav.textContent = '';
 		const query = search.value.trim().toLowerCase();
-		const categories: CategoryId[] = ['general', 'appearance', 'editor', 'extensions'];
+		const categories: CategoryId[] = ['general', 'appearance', 'editor', 'search', 'extensions'];
 		for (const id of categories) {
 			const item = el('div', 'settings-nav-item' + (id === category ? ' active' : ''), [t(`settings.category.${id}` as 'settings.category.general')]);
 			item.addEventListener('click', () => {

@@ -8,6 +8,9 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 
 import * as state from './state';
+import { queryHasUppercase } from './findOptions';
+import { FindHistory, HistoryRecall, recallKey } from './findHistory';
+import { settings } from './settings';
 import { actionButton, basename, confirmDialog, dirname, el, icon, notify } from './ui';
 
 export interface SearchMatch {
@@ -128,6 +131,14 @@ export class SearchView {
 	/** Each file's group element, so folding a file is a class flip on its group, not a rebuild. */
 	private readonly groups = new Map<string, HTMLElement>();
 	private debounceTimer: number | null = null;
+	/** The fields' own query histories (findHistory.ts, Zed's `SearchHistory`): Up / Down at
+	 *  a field's edges walk it, and as-you-type query refinements collapse into one entry. */
+	private readonly queryHistory = new FindHistory('searchHistory.query');
+	private readonly includeHistory = new FindHistory('searchHistory.include');
+	private readonly excludeHistory = new FindHistory('searchHistory.exclude');
+	private readonly queryRecall = new HistoryRecall(this.queryHistory);
+	private readonly includeRecall = new HistoryRecall(this.includeHistory);
+	private readonly excludeRecall = new HistoryRecall(this.excludeHistory);
 
 	/** A click on a match: open the file at the position. */
 	onOpenMatch: ((path: string, line: number, column: number, root?: string) => void) | null = null;
@@ -140,8 +151,8 @@ export class SearchView {
 
 		this.queryInput = el('input', 'input');
 		this.replaceInput = el('input', 'input');
-		this.includeInput = this.makeFilterInput('files to include (e.g. *.rs, *.ts)', 'include');
-		this.excludeInput = this.makeFilterInput('files to exclude (e.g. node_modules, *.lock)', 'exclude');
+		this.includeInput = this.makeFilterInput('files to include (e.g. *.rs, *.ts)', 'include', this.includeRecall);
+		this.excludeInput = this.makeFilterInput('files to exclude (e.g. node_modules, *.lock)', 'exclude', this.excludeRecall);
 		this.filterRows = el('div', 'search-filter-rows', [
 			el('div', 'search-widget', [this.includeInput]),
 			el('div', 'search-widget', [this.excludeInput])
@@ -182,9 +193,23 @@ export class SearchView {
 		this.container.classList.toggle('disabled', !hasFolder);
 	}
 
-	/** Focus the query box (the Search command / Ctrl+Shift+F). */
+	/** Focus the query box (the Search command / Ctrl+Shift+F), its text selected so typing
+	 *  replaces it — a seeded query is one keystroke away from a fresh one. */
 	focus(): void {
 		this.queryInput.focus();
+		this.queryInput.select();
+	}
+
+	/** Put `text` into the query box as the ready-made query — the workbench's Search command
+	 *  seeding it from the active editor's selection (Zed's `query_suggestion`). A regex
+	 *  search escapes the seed, smart case follows the seeded text, and the search runs after
+	 *  the typing pause, as if it had been typed. */
+	seedQuery(text: string): void {
+		const value = this.options.useRegex ? text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : text;
+		this.queryInput.value = value;
+		this.query = value;
+		this.syncSmartCase();
+		this.scheduleTypedSearch();
 	}
 
 	/** VS Code's Replace in Files (Ctrl+Shift+H): the replace row unfolded and focused. */
@@ -226,9 +251,16 @@ export class SearchView {
 		this.queryInput.value = this.query;
 		this.queryInput.addEventListener('input', () => {
 			this.query = this.queryInput.value;
+			this.queryRecall.edited();
+			this.syncSmartCase();
 			this.scheduleTypedSearch();
 		});
 		this.queryInput.addEventListener('keydown', (event) => this.onInputKey(event, () => this.runSearchNow()));
+		this.attachRecall(this.queryInput, this.queryRecall, (text) => {
+			this.query = text;
+			this.syncSmartCase();
+			this.scheduleTypedSearch();
+		});
 		const queryWidget = el('div', 'search-widget', [
 			this.queryInput,
 			el('div', 'search-toggles', [
@@ -279,19 +311,34 @@ export class SearchView {
 		this.replaceToggleIcon?.classList.toggle('codicon-chevron-down', this.showReplace);
 	}
 
-	private makeFilterInput(placeholder: string, key: 'include' | 'exclude'): HTMLInputElement {
+	private makeFilterInput(placeholder: string, key: 'include' | 'exclude', recall: HistoryRecall): HTMLInputElement {
 		const input = el('input', 'input');
 		input.type = 'text';
 		input.placeholder = placeholder;
 		input.spellcheck = false;
 		input.value = this.options[key];
 		input.addEventListener('input', () => {
+			recall.edited();
 			this.options[key] = input.value;
 			state.save('searchOptions', this.options);
 			this.scheduleTypedSearch();
 		});
 		input.addEventListener('keydown', (event) => this.onInputKey(event, () => this.runSearchNow()));
+		this.attachRecall(input, recall, (text) => {
+			this.options[key] = text;
+			state.save('searchOptions', this.options);
+			this.scheduleTypedSearch();
+		});
 		return input;
+	}
+
+	/** Up / Down at a field's edges walk its history (findHistory.ts, Zed's
+	 *  `should_navigate_history`); a recalled value is applied exactly as typing it. */
+	private attachRecall(input: HTMLInputElement, recall: HistoryRecall, apply: (text: string) => void): void {
+		input.addEventListener('keydown', (event) => {
+			const text = recallKey(recall, input, event);
+			if (text !== null) apply(text);
+		});
 	}
 
 	/** Enter searches at once; Alt+C / Alt+W / Alt+R flip the toggles, as in VS Code. */
@@ -325,12 +372,22 @@ export class SearchView {
 
 	/* ---------- Search ---------- */
 
-	private setOption<K extends keyof SearchOptions>(key: K, value: SearchOptions[K]): void {
+	private setOption<K extends keyof SearchOptions>(key: K, value: SearchOptions[K], rerun = true): void {
 		this.options[key] = value;
 		state.save('searchOptions', this.options);
 		const button = this.toggleButtons.get(key);
 		if (button) button.classList.toggle('active', Boolean(value));
-		if (this.query !== '') this.runSearchNow();
+		if (rerun && this.query !== '') this.runSearchNow();
+	}
+
+	/** Zed's `use_smartcase_search` (settings.searchSmartCase): the query's own case drives
+	 *  the Match Case toggle — the toggle lights up, so the state stays visible and a manual
+	 *  flip holds until the query's case changes again. The flip rides the search the caller
+	 *  already scheduled, not one of its own. */
+	private syncSmartCase(): void {
+		if (!settings.searchSmartCase) return;
+		const wants = queryHasUppercase(this.query);
+		if (wants !== this.options.caseSensitive) this.setOption('caseSensitive', wants, false);
 	}
 
 	/** The as-you-type search: fires once typing pauses, cancelled by an explicit run. */
@@ -396,6 +453,11 @@ export class SearchView {
 			this.render();
 			return;
 		}
+		// The search runs: its query and filters are what history should recall (Zed records
+		// on confirmed searches; as-you-type query refinements collapse into one entry).
+		this.queryHistory.add(query, 'replaceIfPrefix');
+		if (this.options.include !== '') this.includeHistory.add(this.options.include);
+		if (this.options.exclude !== '') this.excludeHistory.add(this.options.exclude);
 		// A newer search supersedes the running one: its id moves on, so the old channel's
 		// batches are dropped on arrival, and the backend stops it (the generation counter
 		// behind `search_workspace` treats a new search as a cancel).
