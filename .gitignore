@@ -11,3 +11,4 @@ vite.config.ts.timestamp-*
 *.log
 .DS_Store
 Thumbs.db
+.zcode/
