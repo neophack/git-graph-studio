@@ -332,7 +332,10 @@ export function minimapExtension(): Extension {
 				event.preventDefault();
 				const scroll = this.view.scrollDOM;
 				const to = (clientY: number): void => {
-					const bounds = this.root.getBoundingClientRect();
+					// The canvas is the ruler the slider is drawn on. A file shorter than the
+					// column paints a map that ends above the root's bottom edge, so measuring
+					// the drag against the root would park the slider off the pointer.
+					const bounds = this.canvas.getBoundingClientRect();
 					const at = Math.max(0, Math.min(1, (clientY - bounds.top) / Math.max(1, bounds.height)));
 					scroll.scrollTop = at * (scroll.scrollHeight || 0) - scroll.clientHeight / 2;
 				};
@@ -400,8 +403,11 @@ export function minimapExtension(): Extension {
 			const total = scroll.scrollHeight || 1;
 			const mapHeight = this.canvas.height || 1;
 			const scale = mapHeight / total;
-			this.slider.style.top = `${scroll.scrollTop * scale}px`;
-			this.slider.style.height = `${Math.max(12, scroll.clientHeight * scale)}px`;
+			// The minimum height keeps a huge file's slider grabbable; splitting the padding it
+			// adds keeps the slider's middle on the viewport, where a drag puts the pointer.
+			const height = Math.max(12, scroll.clientHeight * scale);
+			this.slider.style.top = `${Math.max(0, scroll.scrollTop * scale - (height - scroll.clientHeight * scale) / 2)}px`;
+			this.slider.style.height = `${height}px`;
 		}
 	}
 	return ViewPlugin.fromClass(Minimap);

@@ -57,6 +57,44 @@ describe('editor decorations (M3 3.2)', () => {
 		expect(group.activeView!.dom.classList.contains('has-minimap')).toBe(false);
 	});
 
+	it('a minimap drag keeps the slider’s centre under the pointer', async () => {
+		// jsdom has no layout, so the geometry the drag and the slider share is stubbed: a
+		// 600 px painted map inside an 800 px column (shorter than the column — measuring
+		// the drag against the column instead of the map is what parked the slider off the
+		// pointer), a 6000 px scroll range and a 500 px viewport.
+		const view = group.activeView!;
+		const scroll = view.scrollDOM;
+		const root = view.dom.querySelector('.cm-minimap') as HTMLElement;
+		const canvas = view.dom.querySelector('.cm-minimap-canvas') as HTMLCanvasElement;
+		const slider = view.dom.querySelector('.cm-minimap-slider') as HTMLElement;
+		root.getBoundingClientRect = () => new DOMRect(900, 100, 86, 800);
+		canvas.width = 84;
+		canvas.height = 600;
+		canvas.getBoundingClientRect = () => new DOMRect(901, 100, 84, 600);
+		Object.defineProperty(scroll, 'scrollHeight', { configurable: true, value: 6000 });
+		Object.defineProperty(scroll, 'clientHeight', { configurable: true, value: 500 });
+		let scrollTop = 0;
+		Object.defineProperty(scroll, 'scrollTop', {
+			configurable: true,
+			get: () => scrollTop,
+			// The browser clamps to the scrollable range; model that or the drag's ends cheat.
+			set: (v: number) => { scrollTop = Math.max(0, Math.min(5500, v)); }
+		});
+		const sliderCentre = (): number => parseFloat(slider.style.top) + parseFloat(slider.style.height) / 2;
+
+		root.dispatchEvent(new MouseEvent('mousedown', { clientY: 400 })); // mid-map
+		scroll.dispatchEvent(new Event('scroll'));
+		await frame();
+		expect(scrollTop).toBe(2750); // 0.5 * 6000 - 250
+		expect(sliderCentre()).toBeCloseTo(300); // the pointer's y on the map
+
+		document.dispatchEvent(new MouseEvent('mousemove', { clientY: 250 })); // a quarter down
+		scroll.dispatchEvent(new Event('scroll'));
+		await frame();
+		expect(scrollTop).toBe(1250); // 0.25 * 6000 - 250
+		expect(sliderCentre()).toBeCloseTo(150);
+		document.dispatchEvent(new MouseEvent('mouseup'));
+	});
 
 	it('glides the wheel over the editor and yields to an outside scroll', async () => {
 		// The smooth-wheel extension (ui.ts's glide over scrollDOM): a notch eases in over
