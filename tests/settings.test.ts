@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { setLocale, t } from '../src/i18n';
-import { THEMES, applyTheme, settings, updateSetting } from '../src/settings';
+import { DEFAULT_SETTINGS, THEMES, applyTheme, migrateStoredSettings, settings, updateSetting } from '../src/settings';
 import { openSettingsPanel } from '../src/settingsPanel';
 import { EditorGroup } from '../src/editor';
 import { backend } from './tauriMock';
@@ -36,6 +36,18 @@ describe('settings store', () => {
 
 	it('defaults the code outline to off', () => {
 		expect(settings.showOutline).toBe(false);
+	});
+
+	it('migrates a stored wheel sensitivity that was only ever a shipped default', () => {
+		// The whole settings object persists on any change, so a store from an older release
+		// pins the *default* of the day: 1 and 2 were shipped defaults (never user picks) and
+		// follow the current default; any other value is the user's own and stands.
+		expect(DEFAULT_SETTINGS.mouseWheelScrollSensitivity).toBe(3);
+		expect(migrateStoredSettings({ mouseWheelScrollSensitivity: 1 }).mouseWheelScrollSensitivity).toBe(3);
+		expect(migrateStoredSettings({ mouseWheelScrollSensitivity: 2 }).mouseWheelScrollSensitivity).toBe(3);
+		expect(migrateStoredSettings({ mouseWheelScrollSensitivity: 0.5 }).mouseWheelScrollSensitivity).toBe(0.5);
+		expect(migrateStoredSettings({ mouseWheelScrollSensitivity: 5 }).mouseWheelScrollSensitivity).toBe(5);
+		expect(migrateStoredSettings({}).mouseWheelScrollSensitivity).toBeUndefined();
 	});
 
 	it('persists a change and notifies the workbench', () => {

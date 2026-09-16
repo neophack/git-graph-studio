@@ -150,13 +150,14 @@ const SMOOTH_WHEEL_MS = 125;
  *  normalised wheel notch moves. With `StandardWheelEvent`'s normalisation — 40 px of
  *  browser delta, or 3 lines, is one notch — the default Windows notch (100 px of browser
  *  delta) walks 50 × 100/40 = 125 px at sensitivity 1, on every surface, exactly VS Code's
- *  model. The shipped default sensitivity is 2 (settings.ts): VS Code's own pace read
- *  code too slowly. */
+ *  model. The shipped default sensitivity is 3 (settings.ts): VS Code's own pace — even
+ *  doubled — read code too slowly. */
 const WHEEL_NOTCH_PX = 50;
 
 export interface SmoothWheelOptions {
 	/** Whether the glide is on, read live at wheel time so the setting flips without a
-	 *  remount. Absent means always on; false leaves the native wheel scroll in place. */
+	 *  remount. Absent means always on; false lands the same distance at once — the
+	 *  sensitivity sets the scroll distance with or without the glide. */
 	enabled?: () => boolean;
 	/** VS Code's `editor.mouseWheelScrollSensitivity`: a multiplier on the wheel's
 	 *  distance, read live at wheel time. Absent means 1. */
@@ -177,7 +178,7 @@ export interface SmoothWheelHandle {
 
 /** The glide in flight: a cubic hermite spline per axis — position and velocity captured at
  *  its start, rest at its target — so a notch that lands mid-glide re-splines from where the
- *  motion stands and never resets it. The clock is the rAF timestamps alone: `start` is
+ *  motion stands and never jerks it. The clock is the rAF timestamps alone: `start` is
  *  anchored by the first frame, and a retarget reads the velocity at `s`, the parameter the
  *  last frame reached — never a second clock (under jsdom, `performance.now()` and the frame
  *  timestamps are different timelines, and mixing them sent the spline negative). */
@@ -204,10 +205,14 @@ function hermite(from: number, velocity: number, target: number, s: number, dura
 
 /** Smooth mouse-wheel scrolling over any scrollable element, VS Code's model: each wheel
  *  notch is prevented and re-delivered as a 125 ms ease from the current position (carrying
- *  its velocity, so streaming notches compound instead of restarting), and any scroll the
- *  glide did not write — a thumb drag, a reveal, a window slide — cancels it on the spot.
+ *  its velocity, so streaming notches compound smoothly — but every notch restarts the
+ *  125 ms clock, or later notches would be squeezed into the first notch's window and the
+ *  same cadence would alternate between glides and snaps), and any scroll the glide did not
+ *  write — a thumb drag, a reveal, a window slide — cancels it on the spot.
  *  The notch's distance is VS Code's model too — 50 px per normalised notch through the
- *  sensitivity options below; the shipped default sensitivity (settings.ts) doubles it. */
+ *  sensitivity options below; the shipped default sensitivity (settings.ts) triples it.
+ *  With the glide off the same distance lands at once: the wheel never falls back to the
+ *  platform's own step, which would ignore the sensitivity. */
 export function attachSmoothWheel(element: HTMLElement, options: SmoothWheelOptions = {}): SmoothWheelHandle {
 	const isEnabled = options.enabled ?? (() => true);
 	const sensitivity = options.sensitivity ?? (() => 1);
@@ -221,13 +226,15 @@ export function attachSmoothWheel(element: HTMLElement, options: SmoothWheelOpti
 
 	function onWheel(event: WheelEvent): void {
 		if (event.defaultPrevented || event.ctrlKey || event.metaKey) return;
-		// A scaled virtual range (VirtualScroll below) makes one scrollbar pixel stand for
-		// many document pixels, so the notch is applied in document space — divided back to
-		// scrollbar pixels — and the wheel is taken over from the engine even with the glide
-		// off, or the native scroll would race the document by the same factor.
+		// The wheel is always taken over, glide or not: the sensitivity multipliers are the
+		// scroll distance's only source (VS Code's mouseWheelScrollSensitivity is not tied to
+		// smoothScrolling either — leaving the native scroll in place when the glide is off
+		// would silently drop the setting). A scaled virtual range (VirtualScroll above)
+		// makes one scrollbar pixel stand for many document pixels, so the notch is computed
+		// in document space and divided back to scrollbar pixels, or the native scroll would
+		// race the document by the same factor.
 		const factor = Math.max(1, zoom?.() ?? 1);
 		const smooth = isEnabled();
-		if (!smooth && factor <= 1) return;
 		// VS Code's wheel model (`StandardWheelEvent` over `SCROLL_WHEEL_SENSITIVITY`): the
 		// delta is normalised to notches — 40 px of browser delta, or 3 lines in Firefox's
 		// line mode, is one notch — the sensitivity multipliers scale it (Alt holds the
@@ -255,26 +262,33 @@ export function attachSmoothWheel(element: HTMLElement, options: SmoothWheelOpti
 		const targetTop = Math.max(0, maxTop > 0 ? Math.min(baseTop + dy, maxTop) : baseTop + dy);
 		const targetLeft = Math.max(0, maxLeft > 0 ? Math.min(baseLeft + dx, maxLeft) : baseLeft + dx);
 		event.preventDefault();
-		// The glide off, the scaled notch still applies — at once, the way the native
-		// wheel would have.
+		// The glide off, the same distance lands at once, the way the native wheel would
+		// have moved — but at the sensitivity-set distance, not the platform's.
 		if (!smooth) {
 			cancelGlide();
 			element.scrollTop = targetTop;
 			element.scrollLeft = targetLeft;
 			return;
 		}
-		// A glide already running hands its live position and velocity to the new spline, so
-		// streaming notches compound the motion instead of restarting it on every event.
+		// A glide already running hands its live position and velocity to the new spline, but
+		// the clock restarts: every notch eases for the full 125 ms from wherever the motion
+		// stands. Keeping the old clock squeezed each later notch into the glide's shrinking
+		// remainder, so one cadence alternated between full eases and near-instant snaps —
+		// the wheel felt faster and slower from notch to notch. A notch against the glide's
+		// direction starts from rest: carrying the velocity would lurch the view the wrong
+		// way first.
 		const pending = glide;
 		let velocityTop = 0;
 		let velocityLeft = 0;
 		if (pending) {
 			velocityTop = hermite(pending.fromTop, pending.velocityTop, pending.targetTop, pending.s, SMOOTH_WHEEL_MS)[1];
 			velocityLeft = hermite(pending.fromLeft, pending.velocityLeft, pending.targetLeft, pending.s, SMOOTH_WHEEL_MS)[1];
+			if (dy !== 0 && Math.sign(dy) !== Math.sign(pending.targetTop - pending.fromTop)) velocityTop = 0;
+			if (dx !== 0 && Math.sign(dx) !== Math.sign(pending.targetLeft - pending.fromLeft)) velocityLeft = 0;
 		}
 		glide = {
-			start: pending ? pending.start : null,
-			s: pending ? pending.s : 0,
+			start: null,
+			s: 0,
 			fromTop: element.scrollTop,
 			fromLeft: element.scrollLeft,
 			velocityTop,

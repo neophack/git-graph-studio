@@ -316,7 +316,7 @@ describe('the fast viewer smooth wheel glide (ui.ts)', () => {
 		view.dispose();
 	});
 
-	it('stacks a second notch onto the running glide, and leaves the wheel alone when the setting is off', async () => {
+	it('stacks a second notch onto the running glide, and with the glide off lands the same distance at once', async () => {
 		const view = await openHuge();
 		const scroller = view.root.querySelector<HTMLElement>('.fast-scroll')!;
 		scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, cancelable: true }));
@@ -331,18 +331,37 @@ describe('the fast viewer smooth wheel glide (ui.ts)', () => {
 		expect(scroller.scrollTop).toBe(300);
 		view.dispose();
 
-		// The setting off: the wheel is not prevented and nothing moves it but the platform.
+		// The glide off: the wheel is still the model's — the platform's own step would
+		// ignore the sensitivity — so the notch is prevented and its distance lands at
+		// once, in the same task, with no frames to wait for.
 		updateSetting('smoothScrolling', false);
 		const plain = await openHuge();
 		const off = plain.root.querySelector<HTMLElement>('.fast-scroll')!;
 		const notch = new WheelEvent('wheel', { deltaY: 120, cancelable: true });
 		off.dispatchEvent(notch);
-		expect(notch.defaultPrevented).toBe(false);
-		// Plenty of frames for a glide that must not exist.
+		expect(notch.defaultPrevented).toBe(true);
+		expect(off.scrollTop).toBe(150);
 		await new Promise((resolve) => setTimeout(resolve, 100));
-		expect(off.scrollTop).toBe(0);
+		expect(off.scrollTop).toBe(150); // no glide frames sneak behind the jump
 		updateSetting('smoothScrolling', true);
 		plain.dispose();
+	});
+
+	it('eases every notch for its own full duration — a steady cadence never snaps', async () => {
+		const view = await openHuge();
+		const scroller = view.root.querySelector<HTMLElement>('.fast-scroll')!;
+		// Two notches 60 ms apart. The distance is exact either way; the timing is the point:
+		// the second notch must glide its own ~125 ms, not squeeze into the first notch's
+		// leftover window (that alternation between glides and snaps is what made the wheel
+		// feel faster and slower by turns).
+		const t0 = Date.now();
+		scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, cancelable: true }));
+		await new Promise((resolve) => setTimeout(resolve, 60));
+		scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, cancelable: true }));
+		await pumpUntil(() => scroller.scrollTop >= 300);
+		expect(scroller.scrollTop).toBe(300);
+		expect(Date.now() - t0).toBeGreaterThan(160);
+		view.dispose();
 	});
 });
 

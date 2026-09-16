@@ -29,8 +29,9 @@ export interface AppSettings {
 	/** `editor.smoothScrolling`: wheel notches glide to their position instead of jumping. */
 	smoothScrolling: boolean;
 	/** `editor.mouseWheelScrollSensitivity`: a multiplier on the wheel's scrolling distance.
-	 *  The shipped default is 2 — VS Code's 1 (125 px per Windows notch) read code too
-	 *  slowly, so a notch clears ~300 px; the wheel model itself stays VS Code's (ui.ts). */
+	 *  The shipped default is 3 — VS Code's 1 (125 px per Windows notch) read code too
+	 *  slowly, even doubled, so a notch clears ~450 px; the wheel model itself stays VS
+	 *  Code's (ui.ts), and it applies with the glide on or off. */
 	mouseWheelScrollSensitivity: number;
 	/** `editor.fastScrollSensitivity`: the multiplier Alt holds over the wheel's distance. */
 	fastScrollSensitivity: number;
@@ -60,14 +61,26 @@ export interface AppSettings {
 export const DEFAULT_SETTINGS: AppSettings = {
 	theme: 'dark-modern', locale: 'en', showOutline: false, autoSave: 'off', autoSaveDelay: 1000,
 	minimap: true, stickyScroll: true, smoothScrolling: true, bracketColors: true,
-	mouseWheelScrollSensitivity: 2, fastScrollSensitivity: 5,
+	mouseWheelScrollSensitivity: 3, fastScrollSensitivity: 5,
 	fontSize: 14, tabSize: 4, wordWrap: false, snippetSuggestions: true, pathCompletion: true,
 	fileAssociations: ['blf', 'asc', 'ggx', 'bin', 'hex'],
 	linuxDmabuf: 'auto',
 	density: 'comfortable'
 };
 
-export const settings: AppSettings = { ...DEFAULT_SETTINGS, ...load<Partial<AppSettings>>('appSettings', {}) };
+/** Any settings write persists the whole object, so a store from an older release pins the
+ *  *default* of the day rather than a choice: a sensitivity equal to a previously shipped
+ *  default (1, then 2) is treated as "never picked" and follows the current default — a
+ *  store without this migration would keep the slow pace past the fix that raised it. Any
+ *  other value is the user's own and stands. */
+export function migrateStoredSettings(stored: Partial<AppSettings>): Partial<AppSettings> {
+	if (stored.mouseWheelScrollSensitivity === 1 || stored.mouseWheelScrollSensitivity === 2) {
+		return { ...stored, mouseWheelScrollSensitivity: DEFAULT_SETTINGS.mouseWheelScrollSensitivity };
+	}
+	return stored;
+}
+
+export const settings: AppSettings = { ...DEFAULT_SETTINGS, ...migrateStoredSettings(load<Partial<AppSettings>>('appSettings', {})) };
 
 /* ---------- The setting registry (M3 3.9): one row per setting, schema-driven ---------- */
 
