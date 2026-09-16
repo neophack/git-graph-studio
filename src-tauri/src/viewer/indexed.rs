@@ -8,8 +8,10 @@
 //! scrollbar; the landing swaps in the exact count over the same `studio://viewer-lines`
 //! event the rope viewer uses, so the frontend does not care which backend serves it.
 //! Find streams the file in chunks and matches whole lines, exactly the rope viewer's
-//! matcher over a scan that never holds the document. Documents here are read-only: the
-//! rope viewer keeps editing for files small enough that a rope in memory is reasonable.
+//! matcher over a scan that never holds the document. Documents here are read-only: this
+//! tier serves the minified monsters whose enormous lines defeat every line window and the
+//! files the rope backend refused — the view's Edit button still swaps the tab into the
+//! whole-file editor, so nothing a JavaScript string can hold is beyond editing.
 
 use std::collections::HashMap;
 use std::fs::File;

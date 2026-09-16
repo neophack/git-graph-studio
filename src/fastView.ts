@@ -9,6 +9,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import { DocFindController, type DocFindHost, type DocFindMatch } from './docFind';
+import { t } from './i18n';
 import { settings } from './settings';
 import { attachSmoothWheel, el, icon, notify, VirtualScroll, type SmoothWheelHandle } from './ui';
 
@@ -167,8 +168,8 @@ export class FastView {
 		this.root.append(this.toolbar, main);
 		parent.appendChild(this.root);
 		if (options.onEdit) {
-			const edit = el('button', 'fast-edit-btn', [icon('edit'), el('span', '', ['Edit'])]);
-			edit.title = 'Edit this file (switches to the text editor)';
+			const edit = el('button', 'fast-edit-btn', [icon('edit'), el('span', '', [t('viewer.edit')])]);
+			edit.title = t('viewer.editTitle');
 			edit.addEventListener('click', options.onEdit);
 			this.toolbar.appendChild(edit);
 		}

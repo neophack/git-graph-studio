@@ -624,19 +624,17 @@ struct Prewarmed {
 
 static PREWARMED: Mutex<Option<Prewarmed>> = Mutex::new(None);
 
-/// The size past which a text file opens through the indexed, memory-bounded viewer
-/// instead of a rope — the frontend routes on the same number (`HUGE_VIEW_BYTES` there).
-pub const HUGE_VIEW_BYTES: u64 = 256 << 20;
-
 /// Start opening `path` on a background thread. A binary file is not worth a document (the
-/// hex viewer reads windows on demand), and an enormous or minified one will open through
-/// the indexed viewer whose own open is fast — either way no rope is worth building, so
-/// the head is sniffed first: the sniff is what the frontend's probe asks anyway, and it
-/// costs one small read.
+/// hex viewer reads windows on demand), and a minified one (few enormous lines that defeat
+/// the line windows both viewers serve) opens read-only through the indexed viewer — either
+/// way no rope is worth building, so the head is sniffed first: the sniff is what the
+/// frontend's probe asks anyway, and it costs one small read. Size is no reason to refuse:
+/// the staged open builds the rope in parallel chunks and the document edits however big
+/// the file is.
 pub fn prewarm(path: String) {
-    if !matches!(crate::cmd_fs::probe(&path), Ok(probe) if !probe.binary && probe.size <= HUGE_VIEW_BYTES && !probe.long_lines) {
-        return;
-    }
+	if !matches!(crate::cmd_fs::probe(&path), Ok(probe) if !probe.binary && !probe.long_lines) {
+		return;
+	}
     let slot: PrewarmSlot = Arc::new((Mutex::new(None), Condvar::new()));
     {
         let mut guard = PREWARMED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

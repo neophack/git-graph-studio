@@ -63,12 +63,14 @@ const LARGE_DOC_CHARS = 1024 * 1024;
  *  document lives in the backend's rope and the webview holds a window of lines, so editing
  *  a 100 MB log costs the same as editing a 10 KB one — with no upper size wall. Below it
  *  the full editor is snappier (its extras — minimap, folding, completion — all work).
- *  Minified files (few enormous lines) defeat the line window and stay on the full path
- *  whatever their size. */
+ *  Minified files (few enormous lines) defeat the line window: a small one takes the full
+ *  editor, a large one the read-only indexed view with its Edit button into the full
+ *  editor. */
 const WINDOWED_EDIT_BYTES = 8 * 1024 * 1024;
-/** Past this a text file opens through the indexed, memory-bounded viewer instead of a
- *  rope: a gigabyte costs its line index (eight bytes a line), not the decoded file. */
-const HUGE_VIEW_BYTES = 256 * 1024 * 1024;
+/** Past this the fast viewer's Edit button refuses the swap to the whole-file editor: that
+ *  editor holds the file as one JavaScript string, and V8 strings cap at 2²⁹ − 24
+ *  characters — a byte past this margin would make the decode throw instead of edit. */
+const WHOLE_FILE_EDITOR_BYTES = 480 * 1024 * 1024;
 /** How long after the last keystroke a Markdown preview follows its source. */
 const PREVIEW_DELAY_MS = 300;
 
@@ -524,29 +526,16 @@ export class EditorGroup {
 			this.add(editor, !options.inactive);
 			return;
 		}
-		// An enormous text file (past what any rope in memory should cost) or a minified
-		// one (few enormous lines) opens in the fast viewer's indexed mode: a line-start
-		// index plus windows read from disk on demand, memory-bounded whatever the size,
-		// with a single line of millions of characters as cheap as any other. Read-only —
-		// editing stays for files a rope can reasonably hold.
-		if (probe !== null && (probe.size > HUGE_VIEW_BYTES || (probe.longLines && probe.size > WINDOWED_EDIT_BYTES))) {
-			if (await this.tryMountFastView(editor, editor.pane, true)) {
-				if (probe.size > HUGE_VIEW_BYTES) {
-					notify('info', t('viewer.hugeReadOnly') + basename(path));
-				}
-				this.add(editor, !options.inactive);
-				if (options.inactive) return;
-				if (options.line !== undefined) this.revealIn(editor, options.line, options.column ?? 1);
-				return;
-			}
-		}
 		// A large text file edits in the windowed editor — no size wall: the document lives
-		// in the backend's rope and the webview holds one window of lines. Only when the
-		// backend refuses the document does the read-only fast viewer take over, and a
-		// minified file (few enormous lines that defeat line windows) stays on the
-		// whole-file editor path below.
-		if (probe !== null && probe.size > WINDOWED_EDIT_BYTES && !probe.longLines) {
-			if (await this.tryMountDocEdit(editor)) {
+		// in the backend's rope (built in parallel chunks however big the file is) and the
+		// webview holds one window of lines. A minified file (few enormous lines that defeat
+		// line windows) opens in the read-only fast viewer instead, as does any document the
+		// rope backend refuses — both still offer the whole-file editor through the view's
+		// Edit button, and only when every editable surface refuses does the plain
+		// read-and-mount path below take over.
+		if (probe !== null && probe.size > WINDOWED_EDIT_BYTES) {
+			const offerWholeEditor = () => void this.swapFastToWholeEditor(editor);
+			if (!probe.longLines && (await this.tryMountDocEdit(editor))) {
 				this.add(editor, !options.inactive);
 				if (options.inactive) return;
 				if (options.line !== undefined) {
@@ -558,7 +547,8 @@ export class EditorGroup {
 				}
 				return;
 			}
-			if (await this.tryMountFastView(editor)) {
+			if (await this.tryMountFastView(editor, editor.pane, true, offerWholeEditor)) {
+				if (!probe.longLines) notify('info', t('viewer.readOnlyFallback') + basename(path));
 				this.add(editor, !options.inactive);
 				if (options.inactive) return;
 				if (options.line !== undefined) this.revealIn(editor, options.line, options.column ?? 1);
@@ -596,11 +586,12 @@ export class EditorGroup {
 	/** Mount the fast viewer for a large text file. False when the backend refused it
 	 *  (binary, unreadable) — the caller then falls back to its usual read-and-mount path.
 	 *  `parent` defaults to the editor pane; the CAN text form passes its wrapper so the
-	 *  Frames bar stays above the viewer. */
-	private async tryMountFastView(editor: Editor, parent: HTMLElement = editor.pane, indexed = false): Promise<boolean> {
+	 *  Frames bar stays above the viewer. `onEdit`, when given, is the view's Edit button:
+	 *  the one road out of the read-only view into the whole-file editor. */
+	private async tryMountFastView(editor: Editor, parent: HTMLElement = editor.pane, indexed = false, onEdit?: () => void): Promise<boolean> {
 		if (editor.input.kind !== 'file') return false;
 		const { FastView } = await loadFastView();
-		const view = new FastView(parent);
+		const view = new FastView(parent, onEdit ? { onEdit } : {});
 		if (!(await view.openFile(editor.input.path, { indexed }))) {
 			view.dispose();
 			return false;
@@ -644,11 +635,52 @@ export class EditorGroup {
 		return true;
 	}
 
+	/** The indexed viewer's Edit button: the file crosses the IPC once and the whole-file
+	 *  editor — the one surface a minified file's enormous lines edit in — takes the tab
+	 *  over from the read-only view. Nothing is disposed until the read has landed, so a
+	 *  refused or binary read keeps the view it has; past the JavaScript string ceiling the
+	 *  swap is refused outright rather than letting the decode throw. */
+	private async swapFastToWholeEditor(editor: Editor): Promise<void> {
+		if (editor.input.kind !== 'file' || !editor.fast) return;
+		const path = editor.input.path;
+		try {
+			const probe = await invoke<FileProbe>('file_probe', { path });
+			if (probe.size > WHOLE_FILE_EDITOR_BYTES) {
+				notify('info', t('viewer.tooLargeWholeFile') + basename(path));
+				return;
+			}
+		} catch {
+			// No verdict on the size: the read below answers with the real error.
+		}
+		let file: FileContents;
+		try {
+			file = await readFileRaw(path);
+		} catch (error) {
+			notify('error', String(error));
+			return;
+		}
+		if (file.binary || file.contents === null) {
+			// The file changed under the view (the probe saw text, this read does not).
+			notify('info', t('viewer.readOnlyFallback') + basename(path));
+			return;
+		}
+		const parent = editor.fast.root.parentElement ?? editor.pane;
+		editor.fast.dispose();
+		editor.fast = undefined;
+		editor.encoding = file.encoding ?? 'utf8';
+		editor.eol = file.eol ?? 'lf';
+		await this.mountTextEditor(editor, file.contents, parent);
+		this.attachMergeSupport(editor);
+		this.updateOutline(editor);
+		this.emitActive();
+	}
+
 	/** The raw view's Text button (or a jump to a text line, like a search hit): the same tab
 	 *  becomes the log's plain text form, editable like any text file — large logs included,
-	 *  which is the default rather than a read-only detour. Only a log too big for an editable
-	 *  document at all (the multi-gigabyte case) stays read-only in the fast viewer, and a slim
-	 *  bar with the path and a Frames button switches the tab back. */
+	 *  which is the default rather than a read-only detour. Only a minified log (few enormous
+	 *  lines) stays read-only in the fast viewer — its Edit button still swaps to the
+	 *  whole-file editor — and a slim bar with the path and a Frames button switches the tab
+	 *  back. */
 	private async swapCanRawToText(editor: Editor): Promise<void> {
 		if (editor.input.kind !== 'file' || !editor.canraw) return;
 		editor.canraw.dispose();
@@ -661,8 +693,8 @@ export class EditorGroup {
 
 	/** Mount a CAN log's plain text form into the editor's pane: the bar with the path and the
 	 *  Frames button (which swaps back to the raw frame view), then the editable text editor —
-	 *  or, past what an editable document can hold, the read-only fast viewer sharing the same
-	 *  wrapper so the bar stays above it. */
+	 *  a large log in the windowed editable editor whatever its size, and only a minified one
+	 *  in the read-only fast viewer sharing the same wrapper so the bar stays above it. */
 	private async mountCanTextForm(editor: Editor): Promise<void> {
 		if (editor.input.kind !== 'file') return;
 		const path = editor.input.path;
@@ -682,20 +714,16 @@ export class EditorGroup {
 		} catch {
 			probe = null; // `read_file` below reports the real error
 		}
-		// An enormous log (past what a rope should cost) reads in the indexed, memory-bounded
-		// fast viewer — read-only, like any file that size; an ordinary large log edits in
-		// the windowed editor, and the read-only rope viewer is only the fallback when the
-		// backend refuses the document.
-		if (probe !== null && probe.size > HUGE_VIEW_BYTES) {
-			if (await this.tryMountFastView(editor, wrap, true)) {
-				notify('info', t('viewer.hugeReadOnly') + basename(path));
+		// A large log edits in the windowed editor whatever its size — no read-only wall.
+		// A minified one (few enormous lines) or a document the rope backend refuses opens
+		// in the indexed fast viewer instead, still offering the whole-file editor through
+		// its Edit button.
+		if (probe !== null && probe.size > WINDOWED_EDIT_BYTES) {
+			if (!probe.longLines && (await this.tryMountDocEdit(editor, wrap))) return;
+			if (await this.tryMountFastView(editor, wrap, true, () => void this.swapFastToWholeEditor(editor))) {
+				if (!probe.longLines) notify('info', t('viewer.readOnlyFallback') + basename(path));
 				return;
 			}
-		}
-		if (probe !== null && probe.size > WINDOWED_EDIT_BYTES && !probe.longLines && (await this.tryMountDocEdit(editor, wrap))) return;
-		if (probe !== null && probe.size > WINDOWED_EDIT_BYTES && (await this.tryMountFastView(editor, wrap))) {
-			notify('info', `'${basename(path)}' could not be opened for editing — showing it read-only`);
-			return;
 		}
 		let file: FileContents;
 		try {

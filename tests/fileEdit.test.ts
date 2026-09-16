@@ -7,7 +7,7 @@ import { EditorGroup } from '../src/editor';
 import { EditableDocView } from '../src/docEditView';
 import { FastView } from '../src/fastView';
 import { backend } from './tauriMock';
-import { flush } from './helpers';
+import { flush, notifications } from './helpers';
 
 const SAMPLE = 'fn main() {\n    println!("hi");\n}\n';
 
@@ -104,43 +104,79 @@ describe('text file editing', () => {
 		await group.closeAll();
 	});
 
-	it('routes an enormous file to the indexed, memory-bounded viewer instead of a rope', async () => {
+	it('opens an enormous file in the windowed editable editor — the read-only wall is gone', async () => {
 		fileBackend();
-		// 300 MB: past HUGE_VIEW_BYTES, so the open never builds a rope — the line index
-		// and on-demand windows keep memory at megabytes whatever the file's size.
+		// 300 MB: past the 256 MB threshold that once routed the file to the read-only
+		// indexed viewer. Size no longer decides: the rope builds in parallel chunks and
+		// the windowed editor serves the file editable, end to end.
+		const LINES = Array.from({ length: 3_000 }, (_, i) => `line ${i}`);
 		backend.on('file_probe', () => ({ size: 300 * 1024 * 1024, binary: false, longLines: false }));
-		backend.on('indexed_open', () => ({ docId: 3, lineCount: 1_200_000, language: 'log', syntaxName: 'Plain Text', encoding: 'utf8', eol: 'lf' }));
-		backend.on('indexed_lines', ({ start, end }) => ({
-			startLine: start as number,
-			lineCount: 1_200_000,
-			tokensPending: false,
-			lines: Array.from({ length: (end as number) - (start as number) + 1 }, (_, i) => [`indexed line ${(start as number) + i}`, []])
+		backend.on('viewer_open', () => ({ docId: 9, lineCount: LINES.length, language: 'log', syntaxName: 'Plain Text', symbols: [] }));
+		backend.on('viewer_text', ({ start, end }: { start: number; end: number }) => ({
+			startLine: start,
+			lineCount: LINES.length,
+			lines: LINES.slice(start, Math.min(end + 1, LINES.length))
 		}));
-		backend.on('indexed_close', () => undefined);
+		backend.on('viewer_edit', () => ({ lineCount: LINES.length, rehighlightFrom: 0 }));
+		backend.on('viewer_close', () => null);
 		const group = new EditorGroup(document.getElementById('editorGroup')!);
 		group.setRoot('C:\\repo');
-		await group.openFile('C:\\repo\\giant.log');
+		await group.openFile('C:\\repo\\enormous.log');
 		await flush();
-		// The indexed family served the open; no rope document was ever asked for.
-		expect(backend.callsTo('indexed_open')).toHaveLength(1);
-		expect(backend.callsTo('viewer_open')).toHaveLength(0);
-		expect(document.querySelector('.doc-edit')).toBeNull();
-		expect(document.querySelector('.fast-view')).not.toBeNull();
+		expect(backend.callsTo('viewer_open')).toHaveLength(1);
+		expect(backend.callsTo('indexed_open')).toHaveLength(0);
+		expect(document.querySelector('.doc-edit')).not.toBeNull();
+		expect(document.querySelector('.fast-view')).toBeNull();
 		await group.closeAll();
 	});
 
-	it('routes a minified single-line monster to the indexed viewer too', async () => {
+	it('routes a minified single-line monster to the indexed viewer, editable through its Edit button', async () => {
 		fileBackend();
+		// The few enormous lines defeat the line-windowed editor, so the file opens in the
+		// indexed view — but the Edit button pays the whole-file cost on demand: the file
+		// crosses the IPC once and the full editor takes the tab over.
+		const MINIFIED = 'var f=function(){/* one enormous line */};';
+		backend.on('read_file', ({ path }) => ({ contents: MINIFIED, binary: false, size: MINIFIED.length, path }));
 		backend.on('file_probe', () => ({ size: 40 * 1024 * 1024, binary: false, longLines: true }));
 		backend.on('indexed_open', () => ({ docId: 4, lineCount: 12, language: 'txt', syntaxName: 'Plain Text', encoding: 'utf8', eol: 'lf' }));
 		backend.on('indexed_lines', ({ start }) => ({ startLine: start as number, lineCount: 12, tokensPending: false, lines: [['minified', []]] }));
 		backend.on('indexed_close', () => undefined);
 		const group = new EditorGroup(document.getElementById('editorGroup')!);
 		group.setRoot('C:\\repo');
-		await group.openFile('C:\\repo\\bundle.js');
+		await group.openFile('C:\\repo\\bundle.txt');
 		await flush();
 		expect(backend.callsTo('indexed_open')).toHaveLength(1);
 		expect(document.querySelector('.fast-view')).not.toBeNull();
+		const edit = document.querySelector<HTMLButtonElement>('.fast-edit-btn')!;
+		expect(edit).not.toBeNull();
+		edit.click();
+		await flush();
+		expect(backend.callsTo('read_file')).toHaveLength(1);
+		expect(backend.callsTo('indexed_close')).toHaveLength(1);
+		expect(document.querySelector('.fast-view')).toBeNull();
+		const view = group.activeView;
+		expect(view).not.toBeNull();
+		expect(view!.state.doc.toString()).toBe(MINIFIED);
+		await group.closeAll();
+	});
+
+	it('refuses the Edit swap past what a JavaScript string can hold', async () => {
+		fileBackend();
+		// 600 MB exceeds V8's 2²⁹-character string ceiling: the swap would throw at the
+		// decode, so the button refuses with a notification and the read-only view stays.
+		backend.on('file_probe', () => ({ size: 600 * 1024 * 1024, binary: false, longLines: true }));
+		backend.on('indexed_open', () => ({ docId: 4, lineCount: 12, language: 'txt', syntaxName: 'Plain Text', encoding: 'utf8', eol: 'lf' }));
+		backend.on('indexed_lines', ({ start }) => ({ startLine: start as number, lineCount: 12, tokensPending: false, lines: [['minified', []]] }));
+		backend.on('indexed_close', () => undefined);
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openFile('C:\\repo\\huge-bundle.txt');
+		await flush();
+		document.querySelector<HTMLButtonElement>('.fast-edit-btn')!.click();
+		await flush();
+		expect(backend.callsTo('read_file')).toHaveLength(0);
+		expect(document.querySelector('.fast-view')).not.toBeNull();
+		expect(notifications().some((n) => n.includes('Too large for the whole-file editor'))).toBe(true);
 		await group.closeAll();
 	});
 
