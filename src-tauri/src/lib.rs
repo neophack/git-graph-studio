@@ -1016,6 +1016,7 @@ mod desktop {
             pty::pty_kill,
             viewer::viewer_open,
             viewer::viewer_lines,
+            viewer::viewer_highlight,
             viewer::viewer_text,
             viewer::viewer_edit,
             viewer::viewer_find,

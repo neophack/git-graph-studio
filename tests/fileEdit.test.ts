@@ -255,8 +255,9 @@ describe('text file editing', () => {
 	it('materialises only a window of a huge outline (the read-only fast view)', async () => {
 		fileBackend();
 		const symbols = Array.from({ length: 20_000 }, (_, i) => ({ kind: 'function', name: `fn_${i}`, line: i }));
-		backend.on('viewer_open', () => ({ docId: 1, lineCount: 20_000, language: 'rs', syntaxName: 'Rust', symbols }));
-		backend.on('viewer_lines', ({ start, end }: { start: number; end: number }) => ({ startLine: start, lineCount: 20_000, lines: Array.from({ length: end - start + 1 }, () => ['fn', []]) }));
+		backend.on('viewer_open', () => ({ docId: 1, lineCount: 20_000, language: 'rs', syntaxName: 'Rust' }));
+		backend.on('viewer_symbols', () => symbols);
+		backend.on('viewer_lines', ({ start, end }: { start: number; end: number }) => ({ startLine: start, lineCount: 20_000, tokensPending: false, lines: Array.from({ length: end - start + 1 }, () => ['fn', []]) }));
 		backend.on('viewer_close', () => null);
 		// The fast view is the read-only fallback behind the open path; its own virtual
 		// outline is exercised directly.

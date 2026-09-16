@@ -1,6 +1,9 @@
 // The fast code viewer: a backend-rope document (ropey + syntect, pure Rust) rendered through
 // a hand-rolled virtual scroller. Only the visible lines exist as DOM, and only the visible
-// lines are highlighted — a million-line file opens as fast as its bytes can be read.
+// lines are highlighted — a million-line file opens as fast as its bytes can be read. A cold
+// window (dragged far past every highlight checkpoint) is painted as plain text the moment
+// its lines arrive and colored by `viewer_highlight` a beat later; the outline pane fills
+// from `viewer_symbols` once the rows are up, so neither ever blocks the first paint.
 
 import { invoke } from '@tauri-apps/api/core';
 
@@ -18,13 +21,14 @@ interface OpenResult {
 	lineCount: number;
 	language: string;
 	syntaxName: string;
-	symbols: Symbol[];
 }
 
 interface LinesResult {
 	startLine: number;
 	lineCount: number;
 	lines: [string, [number, number, string][]][];
+	/** True when the lines above are plain text — the tokens are owed by `viewer_highlight`. */
+	tokensPending: boolean;
 }
 
 /** Fixed line height keeps scroll math allocation-free; matches .cm-scroller's 19px so the
@@ -94,6 +98,8 @@ export class FastView {
 	private readonly spacer: HTMLElement;
 	private readonly rows: HTMLElement;
 	private open: OpenResult | null = null;
+	/** The outline's symbols, fetched after the rows are up (`viewer_symbols`). */
+	private symbols: Symbol[] = [];
 	/** Line cache, 0-based → rendered row element. Missing lines are fetched on demand. */
 	private cache = new Map<number, HTMLElement>();
 	private fetching = new Set<number>();
@@ -103,6 +109,10 @@ export class FastView {
 	 *  `refetch`, and the landing fetch picks up whatever is still missing. */
 	private fetchInFlight = false;
 	private refetch = false;
+	/** The range a pending window owes tokens for, and whether `viewer_highlight` is out for
+	 *  it — the same single-flight discipline as the line fetch, one color pass at a time. */
+	private wantedTokens: [number, number] | null = null;
+	private tokensInFlight = false;
 	/** The outline's virtual list: its spacer, and the items currently materialised by index. */
 	private outlineList: HTMLElement | null = null;
 	private outlineItems = new Map<number, HTMLElement>();
@@ -171,13 +181,28 @@ export class FastView {
 		}
 		if (this.open) void invoke('viewer_close', { docId: this.open.docId });
 		this.open = info;
+		this.symbols = [];
+		this.wantedTokens = null;
 		this.cache.clear();
 		this.fetching.clear();
 		this.rows.textContent = '';
 		// An empty toolbar (no Edit button configured) would show as a blank strip.
 		this.toolbar.hidden = this.toolbar.childElementCount === 0;
-		this.renderOutline(info);
+		this.outline.hidden = true;
+		this.outline.textContent = '';
+		this.outlineList = null;
+		this.outlineItems.clear();
 		this.resyncLineCount(info.lineCount);
+		// The outline scans the whole file; it is the backend's second delivery, asked for
+		// only once the rows are on screen. A failure just leaves the pane hidden.
+		const docId = info.docId;
+		void invoke<Symbol[]>('viewer_symbols', { docId })
+			.then((symbols) => {
+				if (this.disposed || this.open?.docId !== docId) return;
+				this.symbols = symbols;
+				this.renderOutline(symbols);
+			})
+			.catch(() => undefined);
 		return true;
 	}
 
@@ -262,6 +287,9 @@ export class FastView {
 						this.cache.set(line, row);
 						this.place(row, line);
 					});
+					// A cold window owes its colors: the rows are up as plain text, now ask
+					// for the tokens without holding the content hostage to them.
+					if (result.tokensPending) this.queueTokens(result.startLine, result.startLine + result.lines.length - 1);
 				}
 				// The viewport moved while this window was in flight (a drag — or another file
 				// opened past it): fetch what the current position is still missing, since no
@@ -277,6 +305,48 @@ export class FastView {
 				// Release the range: kept in `fetching`, these lines would never be retried.
 				for (let line = start; line <= end; line++) this.fetching.delete(line);
 				notify('error', String(error));
+			});
+	}
+
+	/** Remember that `start..end` is on screen without its tokens and pump the single
+	 *  outstanding `viewer_highlight` if none is out. */
+	private queueTokens(start: number, end: number): void {
+		this.wantedTokens = [start, end];
+		this.pumpTokens();
+	}
+
+	private pumpTokens(): void {
+		if (this.tokensInFlight || !this.wantedTokens || !this.open || this.disposed) return;
+		const [start, end] = this.wantedTokens;
+		this.wantedTokens = null;
+		this.tokensInFlight = true;
+		const docId = this.open.docId;
+		invoke<LinesResult>('viewer_highlight', { docId, start, end })
+			.then((result) => {
+				this.tokensInFlight = false;
+				if (this.disposed || this.open?.docId !== docId) return;
+				result.lines.forEach(([text, tokens], index) => {
+					const line = result.startLine + index;
+					const existing = this.cache.get(line);
+					if (!existing) return; // scrolled away — the refetch colors it instead
+					const row = this.renderRow(line, text, tokens);
+					existing.replaceWith(row);
+					this.cache.set(line, row);
+				});
+				this.pumpTokens();
+			})
+			.catch((error) => {
+				this.tokensInFlight = false;
+				// A superseded walk is a cancelled one (a newer window bumped the backend's
+				// generation): whatever range was queued while it ran is still wanted — pump
+				// it rather than dropping it, or those rows would stay plain forever. A real
+				// error just gives up on coloring this window.
+				if (String(error).includes('superseded')) {
+					this.pumpTokens();
+				} else {
+					this.wantedTokens = null;
+					notify('error', String(error));
+				}
 			});
 	}
 
@@ -346,17 +416,18 @@ export class FastView {
 	/** The outline pane is virtual like the rows: a big source file carries thousands of
 	 *  symbols (the backend caps them at 20,000), and building a DOM node for each would
 	 *  cost more than the open itself. Only the items in view exist. */
-	private renderOutline(info: OpenResult): void {
+	private renderOutline(symbols: Symbol[]): void {
 		this.outline.textContent = '';
 		this.outlineItems.clear();
-		if (info.symbols.length === 0) {
+		if (symbols.length === 0) {
 			this.outline.hidden = true;
+			this.outlineList = null;
 			return;
 		}
 		this.outline.hidden = false;
 		this.outline.appendChild(el('div', 'fast-outline-title', ['Outline']));
 		this.outlineList = el('div', 'fast-outline-list');
-		this.outlineList.style.height = `${info.symbols.length * OUTLINE_ITEM_HEIGHT}px`;
+		this.outlineList.style.height = `${symbols.length * OUTLINE_ITEM_HEIGHT}px`;
 		this.outline.appendChild(this.outlineList);
 		this.refreshOutline();
 	}
@@ -365,7 +436,7 @@ export class FastView {
 	private refreshOutline(): void {
 		const list = this.outlineList;
 		if (!this.open || !list) return;
-		const symbols = this.open.symbols;
+		const symbols = this.symbols;
 		// Under jsdom the pane has no height: everything up to the overscan is rendered.
 		const visible = Math.ceil((this.outline.clientHeight || OUTLINE_ITEM_HEIGHT * OVERSCAN) / OUTLINE_ITEM_HEIGHT);
 		const first = Math.max(0, Math.floor(this.outline.scrollTop / OUTLINE_ITEM_HEIGHT) - OVERSCAN);

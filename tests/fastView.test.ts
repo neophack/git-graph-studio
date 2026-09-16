@@ -1,5 +1,7 @@
 // The fast code viewer's line fetching: a failed `viewer_lines` call must not wedge the
-// affected lines — the next refresh re-requests them and the rows render.
+// affected lines — the next refresh re-requests them and the rows render. A cold window is
+// two deliveries (plain rows, then `viewer_highlight` colors), and the outline is the
+// backend's third, `viewer_symbols`, asked for after the rows are up.
 
 import { describe, expect, it } from 'vitest';
 
@@ -8,11 +10,12 @@ import { MAX_SCROLL_PX } from '../src/ui';
 import { backend } from './tauriMock';
 import { flush } from './helpers';
 
-const OPEN = { docId: 7, lineCount: 100, language: 'plaintext', syntaxName: 'Plain Text', symbols: [] };
+const OPEN = { docId: 7, lineCount: 100, language: 'plaintext', syntaxName: 'Plain Text' };
 
-const linesResult = (start: number, end: number) => ({
+const linesResult = (start: number, end: number, tokensPending = false) => ({
 	startLine: start,
 	lineCount: end - start + 1,
+	tokensPending,
 	lines: Array.from({ length: end - start + 1 }, (_, i) => [`line ${start + i}`, []] as [string, [number, number, string][]])
 });
 
@@ -20,6 +23,7 @@ describe('the fast viewer', () => {
 	it('retries a failed line fetch on the next refresh instead of leaving the rows blank', async () => {
 		backend.on('viewer_open', () => OPEN);
 		backend.on('viewer_close', () => undefined);
+		backend.on('viewer_symbols', () => []);
 		let fail = true;
 		backend.on('viewer_lines', ({ start, end }) => {
 			if (fail) throw new Error('transient backend error');
@@ -43,6 +47,7 @@ describe('the fast viewer', () => {
 	it('fills the viewport a drag ended on once the in-flight window lands', async () => {
 		backend.on('viewer_open', () => ({ ...OPEN, lineCount: 100_000 }));
 		backend.on('viewer_close', () => undefined);
+		backend.on('viewer_symbols', () => []);
 		// The first fetch hangs until the test releases it, the way a slow window on a huge
 		// file does; later fetches answer immediately.
 		let holdNext = true;
@@ -105,6 +110,109 @@ describe('the fast viewer', () => {
 			expect(top).toBeGreaterThan(MAX_SCROLL_PX - 1000);
 			expect(top).toBeLessThan(MAX_SCROLL_PX + 1000);
 		}
+		view.dispose();
+	});
+
+	it('paints a cold window as plain text, then colors it when viewer_highlight lands', async () => {
+		backend.on('viewer_open', () => ({ ...OPEN, lineCount: 100_000 }));
+		backend.on('viewer_close', () => undefined);
+		backend.on('viewer_symbols', () => []);
+		// The backend serves a drag past every checkpoint as text-now-colors-later; the
+		// colors hang until the test releases them, the way a long catch-up parse does.
+		backend.on('viewer_lines', ({ start, end }) => linesResult(start as number, end as number, true));
+		let releaseColors: ((value: unknown) => void) | null = null;
+		backend.on('viewer_highlight', () => new Promise((resolve) => {
+			releaseColors = resolve as (value: unknown) => void;
+		}));
+		const view = new FastView(document.getElementById('editorGroup')!);
+		await view.openFile('C:\\repo\\huge.rs');
+		view.revealLine(50_000);
+		await flush();
+		// Delivery one: the rows are on screen at once, plain (no token spans), with the
+		// color pass asked for but not yet answered.
+		const row = view.root.querySelector('.fast-row[data-line="50000"]')!;
+		expect(row).not.toBeNull();
+		expect(row.querySelector('.fast-code span')).toBeNull();
+		expect(backend.callsTo('viewer_highlight').length).toBe(1);
+
+		// Delivery two: the tokens land and re-render the same rows in place.
+		releaseColors!({
+			startLine: 49_990,
+			lineCount: 100_000,
+			tokensPending: false,
+			lines: Array.from({ length: 21 }, (_, i) => {
+				const line = 49_990 + i;
+				return [`let v${line} = ${line};`, [[0, 3, 'storage.type.rust']] as [number, number, string][]];
+			})
+		});
+		await flush();
+		const colored = view.root.querySelector('.fast-row[data-line="50000"] .fast-code span')!;
+		expect(colored).not.toBeNull();
+		expect(colored.textContent).toBe('let');
+		view.dispose();
+	});
+
+	it('keeps the newer range queued when an older highlight walk is superseded', async () => {
+		backend.on('viewer_open', () => ({ ...OPEN, lineCount: 100_000 }));
+		backend.on('viewer_close', () => undefined);
+		backend.on('viewer_symbols', () => []);
+		// The first window fetch hangs like a slow open; later ones answer pending.
+		let releaseWindow: ((value: unknown) => void) | null = null;
+		backend.on('viewer_lines', ({ start, end }) => {
+			if (!releaseWindow) {
+				return new Promise((resolve) => {
+					releaseWindow = resolve as (value: unknown) => void;
+				});
+			}
+			return linesResult(start as number, end as number, true);
+		});
+		// The first color walk hangs, then comes back superseded — a newer window bumped
+		// the backend's generation while it ran.
+		let releaseColors: ((resolve: (value: unknown) => void) => void) | null = null;
+		backend.on('viewer_highlight', () => new Promise((_resolve, reject) => {
+			releaseColors = (resolve) => {
+				resolve(undefined);
+				reject(new Error('superseded'));
+			};
+		}));
+		const view = new FastView(document.getElementById('editorGroup')!);
+		await view.openFile('C:\\repo\\huge.rs');
+		await flush();
+		expect(backend.callsTo('viewer_lines').length).toBe(1);
+
+		// Drag while the first window is in flight; release it — the landing fetch serves
+		// the dragged-to window pending and queues its colors.
+		view.revealLine(50_000);
+		await flush();
+		releaseWindow!(linesResult(0, 20, true));
+		await flush();
+		const queued = backend.callsTo('viewer_highlight');
+		expect(queued.length).toBe(1);
+
+		// The superseded rejection must not drop the queued range: the pump re-issues it.
+		releaseColors!(() => undefined);
+		await flush();
+		const pumped = backend.callsTo('viewer_highlight');
+		expect(pumped.length).toBe(2);
+		expect(pumped[1]).toMatchObject({ start: 49_990, end: 50_010 });
+		view.dispose();
+	});
+
+	it('fills the outline from viewer_symbols after the rows are up', async () => {
+		backend.on('viewer_open', () => ({ ...OPEN, lineCount: 200 }));
+		backend.on('viewer_close', () => undefined);
+		backend.on('viewer_lines', ({ start, end }) => linesResult(start as number, end as number));
+		backend.on('viewer_symbols', () => [{ kind: 'function', name: 'alpha', line: 3 }]);
+		const view = new FastView(document.getElementById('editorGroup')!);
+		await view.openFile('C:\\repo\\huge.rs');
+		await flush();
+		const item = view.root.querySelector('.fast-outline-item') as HTMLElement;
+		expect(item).not.toBeNull();
+		expect(item.title).toBe('alpha — line 4');
+		// The open itself never waited on the outline scan.
+		const opens = backend.callsTo('viewer_open');
+		expect(opens.length).toBe(1);
+		expect((opens[0] as Record<string, unknown>)['symbols']).toBeUndefined();
 		view.dispose();
 	});
 });

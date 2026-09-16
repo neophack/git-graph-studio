@@ -35,22 +35,32 @@ enum UndoEntry {
 const UNDO_LIMIT: usize = 500;
 
 pub struct ViewerDoc {
-    pub path: PathBuf,
-    pub rope: Rope,
-    /// Extension used to pick the syntax definition and the outline extractor.
-    pub language: String,
-    pub syntax_name: String,
-    /// The encoding id and line endings the file was read with (`crate::encoding`).
-    pub encoding: String,
-    pub eol: String,
-    syntax: SyntaxReference,
-    checkpoints: HashMap<usize, Checkpoint>,
-    undo_stack: Vec<UndoEntry>,
-    redo_stack: Vec<UndoEntry>,
-    /// The file's `size:mtime` as it was read (and as `viewer_save` last wrote it): the
-    /// cheap half of "did the file change on disk", so a save's own watcher echo never
-    /// reloads the document out from under the editor's cursor.
-    pub fingerprint: String,
+	pub path: PathBuf,
+	pub rope: Rope,
+	/// Extension used to pick the syntax definition and the outline extractor.
+	pub language: String,
+	pub syntax_name: String,
+	/// The encoding id and line endings the file was read with (`crate::encoding`).
+	pub encoding: String,
+	pub eol: String,
+	syntax: SyntaxReference,
+	checkpoints: HashMap<usize, Checkpoint>,
+	undo_stack: Vec<UndoEntry>,
+	redo_stack: Vec<UndoEntry>,
+	/// The background tail build that still owes this document its remainder: while `Some`,
+	/// `line_count` reports the estimate and lines past the rope wait for the landing. The
+	/// id is checked on landing — a document replaced by a reload never receives a stale tail.
+	pub tail_id: Option<u64>,
+	/// `Some` exactly while `tail_id` is: the approximate total line count (the head's line
+	/// density extrapolated over the file's size) the scroller shows until the exact count.
+	pub line_estimate: Option<usize>,
+	/// Set when the tail build failed: the document serves its head, but a save must refuse
+	/// (writing the head alone would truncate the file) and whole-document scans report it.
+	pub tail_error: Option<String>,
+	/// The file's `size:mtime` as it was read (and as `viewer_save` last wrote it): the
+	/// cheap half of "did the file change on disk", so a save's own watcher echo never
+	/// reloads the document out from under the editor's cursor.
+	pub fingerprint: String,
 }
 
 #[derive(Clone)]
@@ -88,11 +98,22 @@ impl ViewerDoc {
             checkpoints: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            tail_id: None,
+            line_estimate: None,
+            tail_error: None,
             fingerprint: String::new(),
         }
     }
 
+    /// The line count the frontend sees: the estimate while the tail is still building,
+    /// the rope's exact count once it lands.
     pub fn line_count(&self) -> usize {
+        self.line_estimate.unwrap_or_else(|| self.rope.len_lines())
+    }
+
+    /// The line count the rope actually holds — the clamp every rope indexing uses, so an
+    /// estimate beyond the loaded head can never walk the rope out of bounds.
+    pub fn rope_lines(&self) -> usize {
         self.rope.len_lines()
     }
 
@@ -116,12 +137,14 @@ impl ViewerDoc {
         // A past-the-end line is the document's end, whatever the last line holds: the
         // windowed editor addresses "through the end of the file" as `(line_count, 0)`, and
         // collapsing that onto the last line's start would splice an edit into its text.
-        if line >= self.line_count() {
+        // The rope's own bounds decide — during a staged open the estimate can name lines
+        // the rope does not hold yet.
+        if line >= self.rope_lines() {
             return self.rope.len_chars();
         }
         let base = self.rope.line_to_char(line);
         let line_len = self.rope.line(line).len_chars();
-        let last = line + 1 >= self.line_count();
+        let last = line + 1 >= self.rope_lines();
         (base + col.min(line_len - usize::from(!last))).min(self.rope.len_chars())
     }
 
@@ -253,6 +276,23 @@ impl ViewerDoc {
         Some((first_line, self.line_count()))
     }
 
+    /// The line the nearest checkpoint at or before `line`'s block sits on (0 when none
+    /// exists) — the answer to "how far is the catch-up from here", without cloning any
+    /// parse state. `resume_before` resumes from the checkpoint this names.
+    pub fn resume_line(&self, line: usize) -> usize {
+        let start = line - (line % BLOCK);
+        let mut probe = start;
+        loop {
+            if self.checkpoints.contains_key(&probe) {
+                return probe;
+            }
+            if probe == 0 {
+                return 0;
+            }
+            probe -= BLOCK.min(probe);
+        }
+    }
+
     /// The state to resume from: the latest checkpoint at or before `line`'s block, or a fresh
     /// state at the top of the file.
     fn resume_before(&self, line: usize) -> (usize, Checkpoint) {
@@ -278,7 +318,7 @@ impl ViewerDoc {
     /// Highlight lines `start..=end` (0-based, inclusive), checkpointing every block boundary
     /// crossed on the way so later windows resume closer to where they need.
     pub fn highlight_lines(&mut self, start: usize, end: usize) -> Vec<HighlightedLine> {
-        let total = self.line_count();
+        let total = self.rope_lines();
         if total == 0 {
             return vec![(String::new(), Vec::new())];
         }
@@ -298,23 +338,27 @@ impl ViewerDoc {
                 .map(|t| t.strip_suffix('\r').unwrap_or(t))
                 .unwrap_or(&text);
             let parsed = cp.parse.parse_line(text, set).unwrap_or_default();
+            // The lines before `start` exist only to advance the parse state: skipping their
+            // token extraction (a scope-string clone per span) keeps a long catch-up walk
+            // close to the cost of the parse itself.
+            let collect = line_no >= start;
             let mut tokens: Vec<Token> = Vec::new();
             // `parse_line` yields `(byte_offset, op)` pairs; the text between two offsets
             // belongs to the stack state *after* the earlier op was applied.
             let mut byte = 0usize;
             let mut cp_offset = 0usize;
             for (pos, op) in parsed {
-                if pos > byte {
+                if collect && pos > byte {
                     push_token(&mut tokens, &text[byte..pos], cp_offset, &cp.stack);
                     cp_offset += text[byte..pos].chars().count();
                     byte = pos;
                 }
                 cp.stack.apply(&op).ok();
             }
-            if byte < text.len() {
+            if collect && byte < text.len() {
                 push_token(&mut tokens, &text[byte..], cp_offset, &cp.stack);
             }
-            if line_no >= start {
+            if collect {
                 out.push((text.to_owned(), tokens));
             }
             line_no += 1;

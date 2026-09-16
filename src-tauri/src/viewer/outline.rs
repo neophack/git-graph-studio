@@ -4,7 +4,7 @@
 
 use serde::Serialize;
 
-use super::doc::ViewerDoc;
+use ropey::Rope;
 
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -54,14 +54,15 @@ fn symbol_of(language: &str, line: &str, index: usize) -> Option<Symbol> {
     Some(Symbol { kind, name: name.to_owned(), line: index })
 }
 
-/// Extract an outline from a document. Unknown languages return an empty list — the viewer
-/// shows the document without a pane rather than failing.
-pub fn outline(doc: &ViewerDoc) -> Vec<Symbol> {
+/// The scan over a rope. `viewer_symbols` works on a snapshot clone of the document's rope
+/// (ropey clones share chunks), so the document lock is held only for that clone while the
+/// scan itself runs free — a window fetch never queues behind a whole-file outline pass.
+pub fn outline_rope(rope: &Rope, language: &str) -> Vec<Symbol> {
     let mut symbols = Vec::new();
-    if !known(&doc.language) {
+    if !known(language) {
         return symbols;
     }
-    for (i, line) in doc.rope.lines().enumerate() {
+    for (i, line) in rope.lines().enumerate() {
         // A line inside one rope chunk is borrowed as it is; only a line straddling two
         // chunks is copied out — the scan of a huge file stays allocation-free.
         let owned;
@@ -72,7 +73,7 @@ pub fn outline(doc: &ViewerDoc) -> Vec<Symbol> {
                 &owned
             }
         };
-        if let Some(symbol) = symbol_of(&doc.language, text, i) {
+        if let Some(symbol) = symbol_of(language, text, i) {
             symbols.push(symbol);
             if symbols.len() >= MAX_SYMBOLS {
                 break;
@@ -260,19 +261,17 @@ fn c_like_symbol(t: &str) -> Option<(SymbolKind, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
-    fn doc(text: &str, language: &str) -> ViewerDoc {
-        ViewerDoc::new(PathBuf::from("t"), text, language)
+    fn outline(text: &str, language: &str) -> Vec<Symbol> {
+        outline_rope(&Rope::from(text), language)
     }
 
     #[test]
     fn rust_outline() {
-        let d = doc(
+        let syms = outline(
             "pub fn alpha() {}\nstruct Beta;\nasync unsafe fn gamma(x: u8) {}\n",
             "rs",
         );
-        let syms = outline(&d);
         assert_eq!(
             syms,
             vec![
@@ -297,9 +296,8 @@ mod tests {
 
     #[test]
     fn python_and_go_outline() {
-        let d = doc("class Foo:\n    def bar(self):\n        pass\n", "py");
         assert_eq!(
-            outline(&d),
+            outline("class Foo:\n    def bar(self):\n        pass\n", "py"),
             vec![
                 Symbol {
                     kind: SymbolKind::Class,
@@ -313,12 +311,11 @@ mod tests {
                 },
             ]
         );
-        let d = doc(
-            "func main() {}\nfunc (s *Server) Start() {}\ntype Reader interface {\n",
-            "go",
-        );
         assert_eq!(
-            outline(&d),
+            outline(
+                "func main() {}\nfunc (s *Server) Start() {}\ntype Reader interface {\n",
+                "go"
+            ),
             vec![
                 Symbol {
                     kind: SymbolKind::Function,
@@ -341,22 +338,20 @@ mod tests {
 
     #[test]
     fn text_scan_matches_the_rope_scan() {
-        // The open path scans decoded text, the edit path scans the rope: same symbols, same
-        // lines - including a CRLF file and a final line without a newline.
+        // The workspace index scans decoded text, the viewer scans the rope: same symbols,
+        // same lines - including a CRLF file and a final line without a newline.
         let text = "pub fn alpha() {}\r\nstruct Beta;\r\n\r\nmod gamma";
-        let d = doc(text, "rs");
-        assert_eq!(outline_text(text, "rs"), outline(&d));
-        assert_eq!(outline(&d).iter().map(|s| s.line).collect::<Vec<_>>(), [0, 1, 3]);
+        assert_eq!(outline_text(text, "rs"), outline(text, "rs"));
+        assert_eq!(outline(text, "rs").iter().map(|s| s.line).collect::<Vec<_>>(), [0, 1, 3]);
         assert!(outline_text("fn nothing() {}", "log").is_empty());
     }
 
     #[test]
     fn c_like_skips_control_flow() {
-        let d = doc(
+        let syms = outline(
             "class Widget {\n  render(items) {\n    if (x) {\n      return;\n    }\n  }\n}\nfunction setup() {}\n",
             "ts",
         );
-        let syms = outline(&d);
         let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["Widget", "render", "setup"]);
     }

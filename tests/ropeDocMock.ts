@@ -228,7 +228,7 @@ export class RopeDocMock {
 	 *  whatever the text's real length. */
 	install(docId = 1): void {
 		backend.on('file_probe', () => ({ size: 100 * 1024 * 1024, binary: false, longLines: false }));
-		backend.on('viewer_open', () => ({ docId, lineCount: this.lineCount(), language: 'log', syntaxName: 'Plain Text', symbols: [], encoding: 'utf8', eol: 'lf' }));
+		backend.on('viewer_open', () => ({ docId, lineCount: this.lineCount(), language: 'log', syntaxName: 'Plain Text', encoding: 'utf8', eol: 'lf' }));
 		backend.on('viewer_text', ({ start, end }: { start: number; end: number }) => {
 			if (end - start + 1 > 500) throw new Error(`window too large: ${start}..${end}`);
 			const lines = this.lines();
