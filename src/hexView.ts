@@ -1141,12 +1141,18 @@ export class HexView {
 		}
 	}
 
-	private placeCursor(offset: number): void {
+	private placeCursor(offset: number, reveal = true): void {
 		const clamped = Math.max(0, Math.min(offset, this.size - 1));
 		const before = this.cursor;
 		this.stagedNibble = null;
 		this.cursor = clamped;
-		this.revealByte(clamped);
+		// A page move already parked the viewport exactly (pageScroll, below): revealByte's
+		// own margin is tuned for arrow-key walking, and — on a viewport height that is not
+		// an exact multiple of the row height — its floor-vs-round rounding can disagree with
+		// pageScrollTop's by a row, reading the freshly-paged caret as "just scrolled off
+		// screen" and yanking the view an extra 4 rows the other way. A PageDown could then
+		// net-scroll up.
+		if (reveal) this.revealByte(clamped);
 		this.refreshRows([before, clamped]);
 		this.updateInspector();
 		this.root.focus();
@@ -1287,7 +1293,10 @@ export class HexView {
 			return true;
 		}
 		if (page !== null) this.pageScroll(page);
-		this.placeCursor(clamped);
+		// The page move above already landed the viewport exactly; placeCursor's own reveal
+		// would fight it (see its comment) when the viewport height is not a whole number of
+		// rows — skip it for a page press, keep it for the caret keys.
+		this.placeCursor(clamped, page === null);
 		return true;
 	}
 

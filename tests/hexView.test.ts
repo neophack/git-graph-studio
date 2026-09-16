@@ -279,6 +279,27 @@ describe('hex view', () => {
 		view.destroy();
 	});
 
+	it('never lets the paged-to caret\'s own reveal drag the viewport back the other way', async () => {
+		// A 315 px viewport over 20 px rows is not a whole number of rows (15.75): the page
+		// lands the *viewport* on the nearest row (round → 320) while the caret walks a whole
+		// 15 rows (floor → 300). That one-row gap used to read, to placeCursor's revealByte,
+		// as "the caret just scrolled off the top", which then yanked the view a further
+		// 4 rows *backward* — a PageDown that net-scrolled the wrong way.
+		backend.on('read_file_chunk', (args) => ({ size: 4096, base64: b64(new Uint8Array(Number(args.len))) }));
+		const view = new HexView('/tmp/big.bin');
+		const scroller = view.root.querySelector('.hex-scroller') as HTMLElement;
+		let raw = 0;
+		Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => 315 });
+		Object.defineProperty(scroller, 'scrollTop', { configurable: true, get: () => raw, set: (v: number) => { raw = Math.max(0, Math.round(v)); } });
+		await view.load();
+		await flush();
+		keydown(view.root, 'PageDown');
+		// The viewport still lands exactly where pageScrollTop puts it — the caret's own
+		// reveal must not second-guess a page move that already parked the scroller.
+		expect(scroller.scrollTop).toBe(320);
+		view.destroy();
+	});
+
 	it('adopts the spacer height the engine really laid out, so the scaled bottom is the file\'s end', () => {
 		// The engine rounds a spacer a step shorter than asked (22,304,100 asks, 22,304,084
 		// lays). Dividing by the asked height left the shortfall × scale (~125 on a 3 GB
