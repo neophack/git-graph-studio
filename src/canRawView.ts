@@ -220,8 +220,16 @@ export class CanRawView {
 			this.paintProgress(count);
 			if (count.parsed !== this.parsed) {
 				this.parsed = count.parsed;
-				this.range = new VirtualScroll(this.parsed, ROW_HEIGHT, Math.max(0, this.scroller.clientHeight - ROW_HEIGHT));
+				const clientHeight = this.scroller.clientHeight;
+				// The scale of a scaled range grows with the (still-growing) parsed count while
+				// the scrollbar's own pixel range stays maxed at the ceiling, so rebuilding the
+				// range under an unchanged scrollTop would keep sliding the visible window
+				// forward on every poll tick. Anchor on the document position the user is
+				// actually looking at instead, and carry it across the rescale.
+				const anchorDocTop = this.range.documentTop(this.scroller.scrollTop, clientHeight, this.scroller.scrollHeight);
+				this.range = new VirtualScroll(this.parsed, ROW_HEIGHT, Math.max(0, clientHeight - ROW_HEIGHT));
 				this.range.lay(this.spacer);
+				this.scroller.scrollTop = this.range.scrollTopFor(anchorDocTop, clientHeight);
 				this.refresh();
 			}
 			if (count.done) {

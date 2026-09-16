@@ -234,6 +234,49 @@ describe('CAN log views', () => {
 		await group.closeAll();
 	});
 
+	it('keeps a scaled scroll position anchored while the parse keeps growing under it', async () => {
+		// Past the engines' height clamp, one scrollbar pixel stands for many document
+		// pixels, and that scale is documentHeight / (the scrollbar's own pixel range,
+		// pinned at the ceiling). While the walk is still running, `parsed` - and so the
+		// estimated documentHeight - keeps growing every poll tick; rebuilding the range
+		// from it without re-anchoring used to slide the same scrollTop onto an
+		// ever-further-forward document offset, so a drag left mid-parse kept jumping
+		// forward on its own. It must stay put until the user actually scrolls again.
+		const frameAt = (index: number): CanFrameLine => ({
+			tS: index * 0.001, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17'
+		});
+		let parsed = 2_000_000;
+		backend.on('can_log_open', () => ({ docId: 11, totalBytes: 1000 }));
+		backend.on('can_log_count', () => ({ parsed, done: false, error: null }));
+		backend.on('can_log_frames', ({ start, end }) => Array.from({ length: (end as number) - (start as number) }, (_, i) => frameAt((start as number) + i)));
+		backend.on('can_log_close', () => undefined);
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		await group.openFile('C:\\logs\\growing.asc');
+		await waitForReady(() => Number.parseInt(document.querySelector<HTMLElement>('.can-raw-spacer')?.style.height ?? '', 10) === MAX_SCROLL_PX);
+
+		// Drag to a mid-file position - "page 10" of a log that is still being parsed.
+		const scroller = document.querySelector<HTMLElement>('.can-raw-scroll')!;
+		scroller.scrollTop = 10_000_000;
+		scroller.dispatchEvent(new Event('scroll'));
+		const frameOf = (): number | null => {
+			const row = document.querySelector<HTMLElement>('.can-raw-rows .can-raw-row');
+			return row ? Number(row.dataset.frame) : null;
+		};
+		await waitForReady(() => (frameOf() ?? 0) > 500_000);
+		const before = frameOf();
+
+		// The parse keeps going in the background: the backend now counts twice as many
+		// frames, still not done. The scrollbar itself was never touched.
+		const pollsBefore = backend.callsTo('can_log_count').length;
+		parsed = 4_000_000;
+		await waitForReady(() => backend.callsTo('can_log_count').length > pollsBefore, 3000);
+
+		// The visible frame stayed exactly where it was - the range's rescale re-anchored
+		// the scrollTop instead of leaving the user's drag to drift under it.
+		expect(frameOf()).toBe(before);
+		await group.closeAll();
+	}, 10000);
+
 	it('Text swaps the frame view for the editable plain text form and closes the log document', async () => {
 		const TEXT = 'date 09/14/2026 08:30:00.250\nbase hex timestamps absolute\n';
 		backend.on('read_file', () => ({ contents: TEXT, binary: false, size: TEXT.length, encoding: 'utf8', eol: 'lf' }));
