@@ -365,6 +365,101 @@ describe('the fast viewer smooth wheel glide (ui.ts)', () => {
 	});
 });
 
+describe('the fast viewer page keys (ui.ts)', () => {
+	/** jsdom has no layout: the viewport and scroll position are stubbed the way the wheel
+	 *  tests stub them — scroll writes snap to whole pixels, as the engine's do. */
+	function stubScroller(scroller: HTMLElement, clientHeight: number, scrollHeight: number): () => number {
+		let raw = 0;
+		Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => clientHeight });
+		Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => scrollHeight });
+		Object.defineProperty(scroller, 'scrollTop', {
+			configurable: true,
+			get: () => raw,
+			set: (v: number) => { raw = Math.max(0, Math.min(scrollHeight - clientHeight, Math.round(v))); }
+		});
+		return () => raw;
+	}
+
+	function page(scroller: HTMLElement, key: 'PageUp' | 'PageDown', mods: { ctrl?: boolean } = {}): KeyboardEvent {
+		const event = new KeyboardEvent('keydown', { key, ctrlKey: mods.ctrl ?? false, cancelable: true });
+		scroller.dispatchEvent(event);
+		return event;
+	}
+
+	async function openWith(lineCount: number): Promise<FastView> {
+		backend.on('viewer_open', () => ({ ...OPEN, lineCount }));
+		backend.on('viewer_close', () => undefined);
+		backend.on('viewer_symbols', () => []);
+		backend.on('viewer_lines', ({ start, end }) => linesResult(start as number, end as number));
+		const view = new FastView(document.getElementById('editorGroup')!);
+		return view;
+	}
+
+	it('pages exactly one viewport of document rows — never short, never skipped', async () => {
+		const view = await openWith(100_000);
+		const scroller = view.root.querySelector<HTMLElement>('.fast-scroll')!;
+		// A 380 px viewport over the unscaled 100k-line document: exactly 20 rows a page.
+		const top = stubScroller(scroller, 380, 1_900_000);
+		await view.openFile('C:\\repo\\big.txt');
+		await flush();
+		page(scroller, 'PageDown');
+		expect(top()).toBe(380);
+		await flush();
+		page(scroller, 'PageDown');
+		expect(top()).toBe(760); // two presses, two pages
+		await flush();
+		page(scroller, 'PageUp');
+		expect(top()).toBe(380);
+		page(scroller, 'PageUp');
+		expect(top()).toBe(0);
+		// At the document's head a PageUp is a no-op, not a negative position.
+		page(scroller, 'PageUp');
+		expect(top()).toBe(0);
+		// Each landing window was fetched around the viewport's new top line (the open fetch
+		// covered lines 0..40; the first page asks from 41, the second from 51) — never
+		// around some jumped-to position.
+		const calls = backend.callsTo('viewer_lines');
+		expect(calls[1]).toMatchObject({ start: 41 });
+		expect(calls[2]).toMatchObject({ start: 51 });
+		view.dispose();
+	});
+
+	it('pages one viewport under a scaled range — not the scale-multiplied leap', async () => {
+		// 2,000,000 lines × 19 px is 38 M px of document over the 32 M px headless ceiling:
+		// one scrollbar pixel stands for ~1.19 document pixels, and the native page key
+		// would overshoot the page by that factor.
+		const view = await openWith(2_000_000);
+		const scroller = view.root.querySelector<HTMLElement>('.fast-scroll')!;
+		const top = stubScroller(scroller, 380, MAX_SCROLL_PX);
+		await view.openFile('C:\\repo\\huge.txt');
+		await flush();
+		page(scroller, 'PageDown');
+		// 380 document pixels map back through the scale: ~320 scrollbar pixels.
+		expect(top()).toBe(320);
+		page(scroller, 'PageDown');
+		expect(top()).toBe(640); // the second page lands exactly — quantisation never accumulates
+		await flush();
+		// And the viewport really is there: each fetch asked for the rows around the page's
+		// top line (20, then 40) — not the scale-multiplied lines a native page would hit.
+		const calls = backend.callsTo('viewer_lines');
+		expect(calls[1]).toMatchObject({ start: 41 });
+		expect(calls[2]).toMatchObject({ start: 51 });
+		view.dispose();
+	});
+
+	it('leaves Ctrl+PageUp/Down to the workbench (Next / Previous Editor)', async () => {
+		const view = await openWith(100_000);
+		const scroller = view.root.querySelector<HTMLElement>('.fast-scroll')!;
+		const top = stubScroller(scroller, 380, 1_900_000);
+		await view.openFile('C:\\repo\\big.txt');
+		await flush();
+		const event = page(scroller, 'PageDown', { ctrl: true });
+		expect(event.defaultPrevented).toBe(false);
+		expect(top()).toBe(0);
+		view.dispose();
+	});
+});
+
 describe('the fast viewer whole-file find (docFind.ts)', () => {
 	/** Wait out the find bar's 250 ms debounce with real time. */
 	async function settle(): Promise<void> {

@@ -14,7 +14,7 @@ import { invoke } from '@tauri-apps/api/core';
 
 import { convertCanLog, idHex } from './canLogView';
 import { settings } from './settings';
-import { attachSmoothWheel, basename, el, icon, VirtualScroll, type SmoothWheelHandle } from './ui';
+import { attachPageKeys, attachSmoothWheel, basename, el, icon, VirtualScroll, type SmoothWheelHandle } from './ui';
 
 interface CanOpenResult {
 	docId: number;
@@ -123,6 +123,9 @@ export class CanRawView {
 	private disposed = false;
 	/** The smooth wheel glide over the scroller (ui.ts), disposed with the view. */
 	private readonly wheel: SmoothWheelHandle;
+	/** PageUp/PageDown over the scroller (ui.ts): exactly one viewport of document rows per
+	 *  press, never the scaled-range leap the native page key would make. */
+	private readonly pageKeys: SmoothWheelHandle;
 
 	constructor(private path: string, options: CanRawViewOptions = {}) {
 		const analyzeButton = el('button', 'button secondary can-analyze', [icon('pulse'), ' Statistics']) as HTMLButtonElement;
@@ -168,6 +171,11 @@ export class CanRawView {
 			sensitivity: () => settings.mouseWheelScrollSensitivity,
 			fastSensitivity: () => settings.fastScrollSensitivity,
 			zoom: () => this.range.documentPxPerScrollPx(this.scroller.clientHeight)
+		});
+		this.pageKeys = attachPageKeys(this.scroller, {
+			range: () => this.range,
+			rowHeight: () => ROW_HEIGHT,
+			paged: () => this.refresh()
 		});
 		void this.load();
 	}
@@ -391,6 +399,7 @@ export class CanRawView {
 	dispose(): void {
 		this.disposed = true;
 		this.wheel.dispose();
+		this.pageKeys.dispose();
 		if (this.timer !== null) clearTimeout(this.timer);
 		if (this.doc) void invoke('can_log_close', { docId: this.doc.docId });
 		this.root.remove();

@@ -246,8 +246,17 @@ export class EditableDocView {
 					{ key: 'Mod-z', preventDefault: true, run: () => (void this.undo(), true) },
 						{ key: 'Mod-Z', preventDefault: true, run: () => (void this.redo(), true) },
 						{ key: 'Mod-y', preventDefault: true, run: () => (void this.redo(), true) },
-						// Alt-ArrowLeft / Alt-ArrowRight stay the workbench's Go Back / Forward.
-						...defaultKeymap.filter((binding) => !['Alt-ArrowLeft', 'Alt-ArrowRight'].includes(binding.key ?? ''))
+						// PageUp / PageDown are this editor's own: CodeMirror's cursorPageUp/Down
+						// measure the host's overflow:visible scroller — their "page" is the whole
+						// loaded window plus the screen height, and they scroll nothing here. These
+						// move exactly one viewport of document lines, sliding the window when a
+						// page lands past its edge. Shift keeps the caret move: a selection cannot
+						// span lines the window has not loaded.
+						{ key: 'PageUp', preventDefault: true, run: () => (this.pageBy(-1), true), shift: () => (this.pageBy(-1), true) },
+						{ key: 'PageDown', preventDefault: true, run: () => (this.pageBy(1), true), shift: () => (this.pageBy(1), true) },
+						// Alt-ArrowLeft / Alt-ArrowRight stay the workbench's Go Back / Forward;
+						// PageUp / PageDown are the pair above.
+						...defaultKeymap.filter((binding) => !['Alt-ArrowLeft', 'Alt-ArrowRight', 'PageUp', 'PageDown'].includes(binding.key ?? ''))
 					]),
 					vscodeHighlighting,
 					EditorView.updateListener.of((update) => {
@@ -338,7 +347,11 @@ export class EditableDocView {
 			read: () => cm.contentHeight,
 			write: (height) => {
 				if (this.disposed || this.cm !== cm || seq !== this.layoutSeq) return;
-				if (this.synced.length > 0 && height > 0) {
+				// A measure that comes back shorter than one pixel per line is no measure at
+				// all (a headless DOM reports 8 px for 500 lines): deriving the line height
+				// from it would poison every later scroll calculation, so it is ignored and
+				// the previous line height stands.
+				if (this.synced.length > 0 && height > this.synced.length) {
 					this.lineHeight = height / this.synced.length;
 					this.host.style.height = `${height}px`;
 				}
@@ -486,6 +499,45 @@ export class EditableDocView {
 		if (relative < 0 || relative >= cm.state.doc.lines) return;
 		const target = cm.state.doc.line(relative + 1);
 		cm.dispatch({ selection: { anchor: Math.min(target.from + column, target.to) }, scrollIntoView: true });
+	}
+
+	/** PageUp / PageDown: exactly one viewport of document lines, cursor and scroll
+	 *  together. A page that lands past the window's edge slides the window there — the
+	 *  same flush-then-refetch discipline as a reveal, with the layout pass putting the
+	 *  page's top line where the press asked for it. */
+	private pageBy(direction: 1 | -1): void {
+		const cm = this.cm;
+		if (!cm || this.docId === null || this.swapping) return;
+		const clientHeight = this.scroller.clientHeight;
+		if (clientHeight <= 0) return;
+		const head = cm.state.selection.main.head;
+		const current = this.first + cm.state.doc.lineAt(head).number - 1;
+		const column = head - cm.state.doc.lineAt(head).from;
+		const lines = Math.max(1, Math.floor(clientHeight / this.lineHeight));
+		const target = Math.max(0, Math.min(current + direction * lines, this.lineCount - 1));
+		// The viewport's new top: one viewport of document distance, row-quantised so
+		// repeated pages never drift (a scaled range quantises scroll positions anyway).
+		const maxTop = Math.max(0, (this.lineCount - 1) * this.lineHeight);
+		const top = Math.max(0, Math.min(Math.round((this.viewportTop() + direction * clientHeight) / this.lineHeight) * this.lineHeight, maxTop));
+		const relative = target - this.first;
+		const inside = relative >= EDGE / 2 && relative <= this.synced.length - EDGE / 2;
+		const windowTarget = Math.max(0, Math.min(target - Math.floor(WINDOW / 2), Math.max(0, this.lineCount - WINDOW)));
+		if (inside || this.lineCount <= this.synced.length || windowTarget === this.first) {
+			// The landing line is loaded (or the window cannot move closer to it): the page
+			// is just the cursor and the scroll position.
+			this.placeCursor(target, column);
+			this.scrollToDocument(top);
+			return;
+		}
+		// The cooldown marker absorbs the edge-slide the swap's own scroll events would
+		// otherwise trigger on top of this one.
+		this.lastSwapAt = Date.now();
+		this.pendingScrollLine = Math.round(top / this.lineHeight);
+		void this.enqueue(async () => {
+			if (!(await this.sendDiff()) || this.disposed || !this.cm || this.docId === null) return;
+			const windowStart = Math.max(0, Math.min(target - Math.floor(WINDOW / 2), Math.max(0, this.lineCount - WINDOW)));
+			await this.showWindow(windowStart, target, column);
+		});
 	}
 
 	/** After a pause in typing: compute what changed between the window and its last synced

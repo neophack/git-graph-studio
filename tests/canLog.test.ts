@@ -321,6 +321,41 @@ describe('CAN log views', () => {
 		view.dispose();
 	}, 10000);
 
+	it('pages exactly one viewport of frames per PageUp/PageDown — not the scaled-range leap', async () => {
+		// 2,000,000 frames × 20 px is 40 M px over the 32 M px ceiling: a scaled range, where
+		// the native page key leaps one viewport of *scrollbar* pixels — ~1.25 pages here,
+		// whole screens skipped on bigger logs.
+		const frameAt = (index: number): CanFrameLine => ({
+			tS: index * 0.001, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17'
+		});
+		backend.on('can_log_open', () => ({ docId: 22, totalBytes: 1000 }));
+		backend.on('can_log_count', () => ({ parsed: 2_000_000, done: true, error: null }));
+		backend.on('can_log_frames', ({ start, end }) => Array.from({ length: (end as number) - (start as number) }, (_, i) => frameAt((start as number) + i)));
+		backend.on('can_log_close', () => undefined);
+		const view = new CanRawView('/tmp/huge.asc');
+		document.body.append(view.root);
+		await waitForReady(() => Number.parseInt(view.root.querySelector<HTMLElement>('.can-raw-spacer')?.style.height ?? '', 10) === MAX_SCROLL_PX);
+		const scroller = view.root.querySelector<HTMLElement>('.can-raw-scroll')!;
+		let raw = 0;
+		Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => 400 });
+		Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => MAX_SCROLL_PX });
+		Object.defineProperty(scroller, 'scrollTop', { configurable: true, get: () => raw, set: (v: number) => { raw = Math.max(0, Math.min(MAX_SCROLL_PX - 400, Math.round(v))); } });
+		// One viewport is 20 frames of document rows; through the ~1.25 scale that is ~320
+		// scrollbar pixels — and the second press lands exactly, no quantisation drift.
+		scroller.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', cancelable: true }));
+		expect(raw).toBe(320);
+		scroller.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', cancelable: true }));
+		expect(raw).toBe(640);
+		scroller.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', cancelable: true }));
+		expect(raw).toBe(320);
+		// Ctrl+PageDown is the workbench's Next Editor: untouched.
+		const event = new KeyboardEvent('keydown', { key: 'PageDown', ctrlKey: true, cancelable: true });
+		scroller.dispatchEvent(event);
+		expect(event.defaultPrevented).toBe(false);
+		expect(raw).toBe(320);
+		view.dispose();
+	}, 10000);
+
 	it('Text swaps the frame view for the editable plain text form and closes the log document', async () => {
 		const TEXT = 'date 09/14/2026 08:30:00.250\nbase hex timestamps absolute\n';
 		backend.on('read_file', () => ({ contents: TEXT, binary: false, size: TEXT.length, encoding: 'utf8', eol: 'lf' }));

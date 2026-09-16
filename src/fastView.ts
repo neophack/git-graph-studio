@@ -11,7 +11,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { DocFindController, type DocFindHost, type DocFindMatch } from './docFind';
 import { t } from './i18n';
 import { settings } from './settings';
-import { attachSmoothWheel, el, icon, notify, VirtualScroll, type SmoothWheelHandle } from './ui';
+import { attachPageKeys, attachSmoothWheel, el, icon, notify, VirtualScroll, type SmoothWheelHandle } from './ui';
 
 interface Symbol {
 	kind: 'function' | 'method' | 'class' | 'struct' | 'interface' | 'enum' | 'module' | 'type';
@@ -143,6 +143,10 @@ export class FastView {
 	private readonly sizer: ResizeObserver | null;
 	/** The smooth wheel glide over the scroller (ui.ts), disposed with the view. */
 	private readonly wheel: SmoothWheelHandle;
+	/** PageUp/PageDown over the scroller (ui.ts): exactly one viewport of document rows per
+	 *  press — the native page key would leap a viewport of *scrollbar* pixels, which a
+	 *  scaled range multiplies into whole screens skipped at once. */
+	private readonly pageKeys: SmoothWheelHandle;
 	/** The whole-file find bar (docFind.ts) — read-only surface, find without replace. */
 	private findBar: DocFindController | null = null;
 	/** The staged open's landing event subscription (the exact line count replacing the
@@ -180,6 +184,13 @@ export class FastView {
 			sensitivity: () => settings.mouseWheelScrollSensitivity,
 			fastSensitivity: () => settings.fastScrollSensitivity,
 			zoom: () => this.range.documentPxPerScrollPx(this.scroller.clientHeight)
+		});
+		this.pageKeys = attachPageKeys(this.scroller, {
+			range: () => this.range,
+			rowHeight: () => this.lineHeight,
+			// The jsdom DOM fires no scroll event for the write; the window due now must
+			// not wait for one.
+			paged: () => this.refresh()
 		});
 		this.sizer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => { this.refresh(); this.refreshOutline(); });
 		this.sizer?.observe(this.scroller);
@@ -551,6 +562,7 @@ export class FastView {
 		this.disposed = true;
 		this.sizer?.disconnect();
 		this.wheel.dispose();
+		this.pageKeys.dispose();
 		this.unlisten?.();
 		this.unlisten = null;
 		this.findBar?.destroy();

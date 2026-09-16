@@ -348,6 +348,51 @@ export function attachSmoothWheel(element: HTMLElement, options: SmoothWheelOpti
 	};
 }
 
+/* ---------- PageUp / PageDown over a VirtualScroll ---------- */
+
+/** The scroll position one PageUp/PageDown lands on: exactly one viewport of *document*
+ *  distance from where the viewport stands, row-quantised so repeated pages never drift a
+ *  line. Under a scaled range the native page key moves one viewport of *scrollbar* pixels,
+ *  which the scale multiplies into whole screens skipped at once — this never skips. */
+export function pageScrollTop(range: VirtualScroll, scroller: HTMLElement, direction: 1 | -1, rowHeight: number): number {
+	const clientHeight = scroller.clientHeight;
+	const docTop = range.documentTop(scroller.scrollTop, clientHeight, scroller.scrollHeight);
+	const target = Math.round((docTop + direction * clientHeight) / rowHeight) * rowHeight;
+	return range.scrollTopFor(Math.max(0, target), clientHeight);
+}
+
+export interface PageKeysOptions {
+	/** The live scroll range — it is rebuilt as documents load and resync, hence a getter. */
+	range: () => VirtualScroll;
+	/** The live row height, for the drift-free quantisation. */
+	rowHeight: () => number;
+	/** Runs right after the jump (a view's own scroll listener does not fire under every
+	 *  test DOM, and a repaint due this frame need not wait for it anyway). */
+	paged?: () => void;
+}
+
+/** PageUp / PageDown on a VirtualScroll scroller, one viewport of document rows per press.
+ *  Ctrl/Meta/Alt chords pass through — Ctrl+PageUp/Down are the workbench's editor-tab keys;
+ *  Shift pages too, these caret-less surfaces having no selection to extend. The element is
+ *  made focusable if it is not already, or the keys would never reach it. */
+export function attachPageKeys(element: HTMLElement, options: PageKeysOptions): SmoothWheelHandle {
+	if (!element.hasAttribute('tabindex')) element.tabIndex = 0;
+	function onKeydown(event: KeyboardEvent): void {
+		if (event.key !== 'PageUp' && event.key !== 'PageDown') return;
+		if (event.ctrlKey || event.metaKey || event.altKey) return;
+		if (element.clientHeight <= 0) return;
+		event.preventDefault();
+		element.scrollTop = pageScrollTop(options.range(), element, event.key === 'PageDown' ? 1 : -1, options.rowHeight());
+		options.paged?.();
+	}
+	element.addEventListener('keydown', onKeydown);
+	return {
+		dispose(): void {
+			element.removeEventListener('keydown', onKeydown);
+		}
+	};
+}
+
 /* ---------- Delayed tooltips and the busy cursor (M7 7.8) ---------- */
 
 /** How long the pointer must rest on an element before its tooltip appears - long enough

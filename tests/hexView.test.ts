@@ -250,6 +250,35 @@ describe('hex view', () => {
 		view.destroy();
 	});
 
+	it('pages the caret by exactly the viewport — and leaves Ctrl+PageUp/Down to the workbench', async () => {
+		// 4096 bytes = 256 rows of 16. A 300 px viewport over 20 px rows pages 15 rows
+		// (240 bytes) a press; the fixed 16-row walk the keys used to take matched no
+		// window's height.
+		backend.on('read_file_chunk', (args) => ({ size: 4096, base64: b64(new Uint8Array(Number(args.len))) }));
+		const view = new HexView('/tmp/big.bin');
+		const scroller = view.root.querySelector('.hex-scroller') as HTMLElement;
+		let raw = 0;
+		Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => 300 });
+		Object.defineProperty(scroller, 'scrollTop', { configurable: true, get: () => raw, set: (v: number) => { raw = Math.max(0, Math.round(v)); } });
+		await view.load();
+		await flush();
+		keydown(view.root, 'ArrowDown'); // the caret lands on byte 16 (row 1)
+		keydown(view.root, 'PageDown');
+		// The viewport moved exactly one viewport of document pixels...
+		expect(scroller.scrollTop).toBe(300);
+		keydown(view.root, 'PageDown');
+		expect(scroller.scrollTop).toBe(600); // two presses, two pages — no drift, no skip
+		await flush(2);
+		// ...and the caret moved the same 15 rows a press: 16 + 240 + 240.
+		expect(view.root.querySelector('.hex-inspector .hex-inspector-at')!.textContent).toBe('0x000001F0');
+		// Ctrl+PageUp/Down switch editor tabs: not the caret's business.
+		const event = new KeyboardEvent('keydown', { key: 'PageDown', ctrlKey: true, bubbles: true, cancelable: true });
+		view.root.dispatchEvent(event);
+		expect(event.defaultPrevented).toBe(false);
+		expect(scroller.scrollTop).toBe(600);
+		view.destroy();
+	});
+
 	it('adopts the spacer height the engine really laid out, so the scaled bottom is the file\'s end', () => {
 		// The engine rounds a spacer a step shorter than asked (22,304,100 asks, 22,304,084
 		// lays). Dividing by the asked height left the shortfall × scale (~125 on a 3 GB

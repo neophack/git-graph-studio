@@ -9,7 +9,7 @@
 import { invoke } from '@tauri-apps/api/core';
 
 import { settings } from './settings';
-import { attachSmoothWheel, el, icon, VirtualScroll, type SmoothWheelHandle } from './ui';
+import { attachPageKeys, attachSmoothWheel, el, icon, VirtualScroll, type SmoothWheelHandle } from './ui';
 import { OFFSET_DIGITS, ROW_LADDER, asciiChar, bytesPerRowFor, decodeBase64, groupSizeFor, hexAddress, hexByte, hexHeader, offsetDigitsFor, rowGridTemplate } from './hexView';
 
 /** Visible rows are filled from 64 KiB slabs, so scrolling reads a slab at a time. */
@@ -106,6 +106,9 @@ export class HexCompareView {
 	private readonly observer: ResizeObserver;
 	/** The smooth wheel glide over the scroller (ui.ts), disposed with the view. */
 	private readonly wheel: SmoothWheelHandle;
+	/** PageUp/PageDown over the scroller (ui.ts): exactly one viewport of document rows per
+	 *  press, never the scaled-range leap the native page key would make. */
+	private readonly pageKeys: SmoothWheelHandle;
 
 	constructor(private leftPath: string, private rightPath: string, private labels: HexCompareLabels = { left: leftPath, right: rightPath }) {
 		const prev = el('button', 'button secondary', [icon('arrow-up')]);
@@ -165,6 +168,11 @@ export class HexCompareView {
 			fastSensitivity: () => settings.fastScrollSensitivity,
 			zoom: () => this.range.documentPxPerScrollPx(this.scroller.clientHeight)
 		});
+		this.pageKeys = attachPageKeys(this.scroller, {
+			range: () => this.range,
+			rowHeight: () => this.rowHeight || 20,
+			paged: () => this.draw()
+		});
 		let pending = 0;
 		this.observer = new ResizeObserver(() => {
 			if (pending) return;
@@ -196,6 +204,7 @@ export class HexCompareView {
 		this.scanToken++;
 		this.observer.disconnect();
 		this.wheel.dispose();
+		this.pageKeys.dispose();
 		this.leftSlabs.pending.clear();
 		this.leftSlabs.values.clear();
 		this.rightSlabs.pending.clear();

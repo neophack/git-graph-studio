@@ -100,6 +100,29 @@ describe('hex compare', () => {
 		view.destroy();
 	});
 
+	it('pages exactly one viewport of rows per PageUp/PageDown', async () => {
+		// Two equal 64 KiB files: 4096 rows of 16 bytes. A 400 px viewport over 20 px rows
+		// is 20 rows a page — one press moves one viewport of document, never a leap.
+		chunkServer({ 'C:\\l.bin': new Uint8Array(64 * 1024), 'C:\\r.bin': new Uint8Array(64 * 1024) });
+		const view = new HexCompareView('C:\\l.bin', 'C:\\r.bin');
+		document.getElementById('editorGroup')!.appendChild(view.root);
+		await view.load();
+		const scroller = view.root.querySelector<HTMLElement>('.hex-scroller')!;
+		Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => 400 });
+		scroller.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', cancelable: true }));
+		expect(scroller.scrollTop).toBe(400);
+		scroller.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', cancelable: true }));
+		expect(scroller.scrollTop).toBe(800); // two presses, two pages — no drift
+		scroller.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', cancelable: true }));
+		expect(scroller.scrollTop).toBe(400);
+		// Ctrl+PageUp/Down stay the workbench's editor-tab keys.
+		const event = new KeyboardEvent('keydown', { key: 'PageDown', ctrlKey: true, cancelable: true });
+		scroller.dispatchEvent(event);
+		expect(event.defaultPrevented).toBe(false);
+		expect(scroller.scrollTop).toBe(400);
+		view.destroy();
+	});
+
 	it('a binary pair from the explorer compare opens the hex view without reading either file whole', async () => {
 		const left = Uint8Array.from({ length: 300 }, (_, i) => i & 0xff);
 		const right = Uint8Array.from({ length: 300 }, (_, i) => (i === 5 ? 0xff : i & 0xff));

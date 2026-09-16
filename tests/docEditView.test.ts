@@ -347,3 +347,105 @@ describe('the whole-file find and replace (docFind.ts over viewer_find / viewer_
 		await group.closeAll();
 	});
 });
+
+describe('the windowed editor page keys', () => {
+	/** jsdom has no layout: the outer scroller's viewport and position are stubbed — scroll
+	 *  writes snap to whole pixels, as the engine's do. */
+	function stubScroller(doc: EditableDocView, clientHeight: number): () => number {
+		const scroller = doc.root.querySelector<HTMLElement>('.doc-edit-scroll')!;
+		let raw = 0;
+		Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => clientHeight });
+		Object.defineProperty(scroller, 'scrollTop', { configurable: true, get: () => raw, set: (v: number) => { raw = Math.max(0, Math.round(v)); } });
+		return () => raw;
+	}
+
+	it('moves exactly one viewport of lines a press, cursor and scroll together', async () => {
+		const LINES = Array.from({ length: 3_000 }, (_, i) => `line ${i}`);
+		const { group, doc } = await openWindowed(LINES.join('\n') + '\n');
+		// The open's layout pass is rAF-timed (its swap flag is cleared there); let it land
+		// before the keys come. jsdom's no-layout measurement makes the line height whatever
+		// CodeMirror estimates, so the page size is read back from the first press rather
+		// than assumed.
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		await flush();
+		const top = stubScroller(doc, 380);
+		const fetches = backend.callsTo('viewer_text').length;
+		const view = doc.editorView!;
+		key(view.contentDOM, 'PageDown');
+		const pageLines = doc.status().line - 1;
+		const pagePx = top();
+		// One press is one viewport: the page tracks the viewport, not the whole window.
+		expect(pageLines).toBeGreaterThan(10);
+		expect(pageLines).toBeLessThan(60);
+		expect(Math.abs(pagePx - 380)).toBeLessThanOrEqual(pagePx / pageLines); // ≤ one row of quantisation
+		key(view.contentDOM, 'PageDown');
+		// The second page is exactly the first again — nothing skipped, no drift (the engine's
+		// whole-pixel snapping can land a fractional line height one pixel off the double).
+		expect(doc.status().line).toBe(1 + 2 * pageLines);
+		expect(Math.abs(top() - 2 * pagePx)).toBeLessThanOrEqual(1);
+		key(view.contentDOM, 'PageUp');
+		expect(doc.status().line).toBe(1 + pageLines);
+		expect(top()).toBe(pagePx);
+		key(view.contentDOM, 'PageUp');
+		expect(doc.status().line).toBe(1);
+		expect(top()).toBe(0);
+		// Every page stayed inside the loaded window: no refetch.
+		expect(backend.callsTo('viewer_text')).toHaveLength(fetches);
+		await group.closeAll();
+	});
+
+	it('slides the window when a page lands past its edge', async () => {
+		const LINES = Array.from({ length: 3_000 }, (_, i) => `line ${i}`);
+		const { group, doc } = await openWindowed(LINES.join('\n') + '\n');
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		await flush();
+		const top = stubScroller(doc, 380);
+		await doc.revealLine(2_500);
+		await flush();
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		await flush();
+		const view = doc.editorView!;
+		// A reference page inside the window measures the page the viewport actually shows.
+		const lineBefore = doc.status().line;
+		const topBefore = top();
+		key(view.contentDOM, 'PageDown');
+		const pageLines = doc.status().line - lineBefore;
+		const pagePx = top() - topBefore;
+		key(view.contentDOM, 'PageUp');
+		expect(doc.status().line).toBe(lineBefore);
+		expect(top()).toBe(topBefore);
+		// Park the cursor at the viewport's bottom line — where a real page-down leaves it
+		// (the reveal centred line 2500, so half a page below it is the viewport's floor)
+		// and page until the landing line crosses the window's bottom edge band. The cursor
+		// rides the viewport the whole way, as paging keeps it: a window placed centred on
+		// the landing line then leaves the viewport ≥ 250−2 pages from its start, outside
+		// the slide edge zone — the scroll handler's post-swap re-check stays quiet and the
+		// slide is exactly one fetch. (A cursor parked far below the viewport — a state only
+		// a direct dispatch can produce — would re-centre the window on the viewport one
+		// fetch later; that is the re-check doing its job, not a page.)
+		view.dispatch({ selection: { anchor: view.state.doc.line(lineBefore - 2_250 + Math.floor(pageLines / 2)).from } });
+		const fetches = backend.callsTo('viewer_text').length;
+		let fromLine = doc.status().line;
+		let fromTop = top();
+		for (let i = 0; i < 12 && backend.callsTo('viewer_text').length === fetches; i++) {
+			fromLine = doc.status().line;
+			fromTop = top();
+			key(view.contentDOM, 'PageDown');
+			await flush();
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			await flush();
+		}
+		// Every page until the last stayed inside the loaded window; the last slid it once.
+		expect(backend.callsTo('viewer_text')).toHaveLength(fetches + 1);
+		const landed = doc.status().line - 1;
+		// Exactly one page below where the last inside page left the cursor...
+		expect(landed).toBe(fromLine - 1 + pageLines);
+		// ...the window slid to centre on it...
+		expect(backend.callsTo('viewer_text').at(-1)!['start']).toBe(Math.max(0, Math.min(landed - 250, 2_500)));
+		// ...and the scroll anchored exactly one page below where the viewport stood (the
+		// engine's whole-pixel snapping can land a fractional line height one pixel off).
+		expect(Math.abs(top() - (fromTop + pagePx))).toBeLessThanOrEqual(1);
+		expect(shown(doc)).toContain(`line ${landed}`);
+		await group.closeAll();
+	});
+});

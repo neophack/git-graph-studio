@@ -29,7 +29,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { t, tf } from './i18n';
 import { settings } from './settings';
-import { attachSmoothWheel, el, icon, notify, quickInput, showContextMenu, VirtualScroll, type MenuEntry, type SmoothWheelHandle } from './ui';
+import { attachSmoothWheel, el, icon, notify, pageScrollTop, quickInput, showContextMenu, VirtualScroll, type MenuEntry, type SmoothWheelHandle } from './ui';
 
 /** Rows are requested in slabs so scrolling doesn't fire a read per row. */
 const SLAB_BYTES = 64 * 1024;
@@ -1240,29 +1240,45 @@ export class HexView {
 	 *  walked off, as text editors do). The caret walks in read-only mode too - the
 	 *  inspector follows it. Returns whether the key was one of these. */
 	private navigate(event: KeyboardEvent): boolean {
+		// Modifier chords are the workbench's, not the caret's: Ctrl+PageUp/Down switch
+		// editor tabs, Alt+ArrowLeft/Right are Go Back / Forward. Only Ctrl+Home/End stay —
+		// every hex editor walks them to the file's ends.
+		if (event.altKey) return false;
+		const ctrl = event.ctrlKey || event.metaKey;
+		if (ctrl && event.key !== 'Home' && event.key !== 'End') return false;
 		const bpr = this.bytesPerRow;
 		const from = Math.max(0, this.hasSelection() ? this.selHead : this.cursor);
 		let target: number;
+		let page: 1 | -1 | null = null;
 		switch (event.key) {
 			case 'ArrowLeft': target = from - 1; break;
 			case 'ArrowRight': target = from + 1; break;
 			case 'ArrowUp': target = from - bpr; break;
 			case 'ArrowDown': target = from + bpr; break;
-			case 'Home': target = Math.floor(from / bpr) * bpr; break;
-			case 'End': target = Math.floor(from / bpr) * bpr + bpr - 1; break;
-			case 'PageUp': target = from - bpr * 16; break;
-			case 'PageDown': target = from + bpr * 16; break;
+			case 'Home': target = ctrl ? 0 : Math.floor(from / bpr) * bpr; break;
+			case 'End': target = ctrl ? Math.max(0, this.size - 1) : Math.floor(from / bpr) * bpr + bpr - 1; break;
+			case 'PageUp': case 'PageDown': {
+				// One viewport of rows: any fixed row count pages wrong on every other
+				// window height. The scroller moves the same distance in document space
+				// (mapped through the scaled range), so the caret keeps its row on screen.
+				const rows = Math.max(1, Math.floor(this.scroller.clientHeight / (this.rowHeight || 20)));
+				page = event.key === 'PageDown' ? 1 : -1;
+				target = from + bpr * rows * page;
+				break;
+			}
 			default: return false;
 		}
 		event.preventDefault();
 		const clamped = Math.max(0, Math.min(target, Math.max(0, this.size - 1)));
 		if (event.shiftKey) {
 			// Extending with nothing selected anchors at the caret, as text editors do.
+			if (page !== null) this.pageScroll(page);
 			if (!this.hasSelection() && this.selAnchor < 0) this.selAnchor = from;
 			this.setSelectionHead(clamped);
 			return true;
 		}
 		if (this.hasSelection()) {
+			// Collapsing onto a selection end is not a page move: the viewport stays.
 			const to = target < from ? this.selectionStart() : this.selectionEnd();
 			this.selAnchor = -1;
 			this.selHead = -1;
@@ -1270,8 +1286,15 @@ export class HexView {
 			this.repaintSelection();
 			return true;
 		}
+		if (page !== null) this.pageScroll(page);
 		this.placeCursor(clamped);
 		return true;
+	}
+
+	/** PageUp/PageDown's viewport move: one viewport of document pixels through the scaled
+	 *  range's mapping — a page is a page whatever the file's size. */
+	private pageScroll(direction: 1 | -1): void {
+		this.scroller.scrollTop = pageScrollTop(this.range, this.scroller, direction, this.rowHeight || 20);
 	}
 
 	/** Types one hex digit over the cursor: the first digit stages (and shows) the new
