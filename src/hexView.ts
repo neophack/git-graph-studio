@@ -29,7 +29,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { t, tf } from './i18n';
 import { settings } from './settings';
-import { attachSmoothWheel, el, icon, notify, pageScrollTop, quickInput, showContextMenu, VirtualScroll, type MenuEntry, type SmoothWheelHandle } from './ui';
+import { attachWheel, type Disposable } from './scroll/input';
+import { ScrollModel } from './scroll/model';
+import { Scrollbar } from './scroll/scrollbar';
+import { el, icon, notify, quickInput, showContextMenu, type MenuEntry } from './ui';
 
 /** Rows are requested in slabs so scrolling doesn't fire a read per row. */
 const SLAB_BYTES = 64 * 1024;
@@ -285,8 +288,12 @@ export class HexView {
 	private readonly header: HTMLElement;
 	/** Watches the scroller for relayouts; disconnected by destroy(). */
 	private readonly observer: ResizeObserver;
-	/** The smooth wheel glide over the scroller (ui.ts), disposed with the view. */
-	private readonly wheel: SmoothWheelHandle;
+	/** The wheel over the scroller (scroll/input.ts), disposed with the view. */
+	private readonly wheel: Disposable;
+	/** The viewport's position over the file's rows (scroll/model.ts): the rows, the caret
+	 *  reveals, the page keys and the drawn scrollbar all go through it. */
+	readonly scroll: ScrollModel;
+	private readonly scrollbar: Scrollbar;
 	private size = 0;
 	private rows = 0;
 	private rowHeight = 0;
@@ -294,9 +301,6 @@ export class HexView {
 	/** The offset column's digits for this file - eight, or more past 4 GiB (see
 	 *  offsetDigitsFor), so every address fits the column it is printed in. */
 	private offsetDigits = OFFSET_DIGITS;
-	/** The scroll range for the file's rows — clamped and scaled past the layout engines'
-	 *  height ceiling, so a multi-gigabyte file's tail stays reachable by scrolling. */
-	private range = new VirtualScroll(0, 1);
 	/** A row width the user picked in the toolbar (0 = follow the window width). */
 	private forcedBytesPerRow = 0;
 	/** The byte an address jump landed on, highlighted until the flash times out. */
@@ -407,23 +411,23 @@ export class HexView {
 		this.scroller = el('div', 'hex-scroller');
 		this.sizer = el('div', 'hex-sizer');
 		this.scroller.append(this.sizer);
+		// The viewport wraps the scroller so the drawn scrollbar can sit on its edge without
+		// riding along with the rows' horizontal overflow.
+		const viewport = el('div', 'hex-viewport', [this.scroller]);
 		this.header = el('div', 'hex-header-wrap');
 		this.status = el('div', 'hex-status', ['Loading…']);
 		this.inspector = el('div', 'hex-inspector');
-		this.root = el('div', 'hex-view', [toolbar, this.header, this.scroller, this.inspector, this.status]);
+		this.root = el('div', 'hex-view', [toolbar, this.header, viewport, this.inspector, this.status]);
 		this.root.tabIndex = 0;
+		this.scroll = new ScrollModel(20);
+		this.scroll.onChange(() => this.draw());
+		this.scrollbar = new Scrollbar(viewport, this.scroll);
 		this.scroller.addEventListener('scroll', () => {
 			// The ruler follows a horizontal scroll (a pinned row wider than the window), so
 			// its digits stay over their byte columns.
 			this.header.scrollLeft = this.scroller.scrollLeft;
-			this.draw();
 		});
-		this.wheel = attachSmoothWheel(this.scroller, {
-			enabled: () => settings.smoothScrolling,
-			sensitivity: () => settings.mouseWheelScrollSensitivity,
-			fastSensitivity: () => settings.fastScrollSensitivity,
-			zoom: () => this.range.documentPxPerScrollPx(this.scroller.clientHeight)
-		});
+		this.wheel = attachWheel(this.scroller, this.scroll);
 		this.scroller.addEventListener('mousedown', (event) => {
 			if (event.button !== 0) return;
 			const target = byteAtCell(event.target as HTMLElement);
@@ -494,6 +498,7 @@ export class HexView {
 	destroy(): void {
 		this.observer.disconnect();
 		this.wheel.dispose();
+		this.scrollbar.dispose();
 		window.removeEventListener('mouseup', this.onWindowMouseUp);
 		this.searchToken++;
 		this.slabs.clear();
@@ -539,7 +544,7 @@ export class HexView {
 			return;
 		}
 		this.jumpTarget = Math.max(0, Math.min(value, Math.max(0, this.size - 1)));
-		this.scroller.scrollTop = this.range.scrollTopFor(Math.max(0, Math.floor(this.jumpTarget / this.bytesPerRow) * this.rowHeight), this.scroller.clientHeight);
+		this.scroll.autoscroll(Math.floor(this.jumpTarget / this.bytesPerRow), 'top');
 		this.updateStatus();
 		this.sizer.querySelector('.hex-body')?.remove();
 		this.draw();
@@ -557,8 +562,7 @@ export class HexView {
 	/** Recomputes the row width and total height, keeping the top of the viewport
 	 *  anchored to the same byte when the window resizes. */
 	private relayout(): void {
-		const clientHeight = this.scroller.clientHeight;
-		const firstByte = this.rowHeight ? (this.range.documentTop(this.scroller.scrollTop, clientHeight, this.scroller.scrollHeight) / this.rowHeight) * this.bytesPerRow : 0;
+		const firstByte = Math.floor(this.scroll.top) * this.bytesPerRow;
 		const bpr = this.pickBytesPerRow();
 		if (bpr !== this.bytesPerRow) this.sizer.querySelector('.hex-body')?.remove();
 		this.bytesPerRow = bpr;
@@ -569,9 +573,12 @@ export class HexView {
 		this.header.scrollLeft = this.scroller.scrollLeft;
 		if (!this.size || !this.rowHeight) return;
 		this.rows = Math.ceil(this.size / bpr);
-		this.range = new VirtualScroll(this.rows, this.rowHeight, Math.max(0, clientHeight - this.rowHeight));
-		this.range.lay(this.sizer);
-		this.scroller.scrollTop = this.range.scrollTopFor(Math.floor(firstByte / bpr) * this.rowHeight, clientHeight);
+		// The model takes the new geometry; the byte at the viewport's top stays there
+		// across a row-width change.
+		this.scroll.setRowHeight(this.rowHeight);
+		this.scroll.setRowCount(this.rows);
+		this.scroll.setViewport(this.scroller.clientHeight);
+		this.scroll.setTop(Math.floor(firstByte / bpr), 'layout');
 		this.draw();
 		this.updateStatus();
 	}
@@ -644,11 +651,7 @@ export class HexView {
 	 *  the read resolves. */
 	private draw(): void {
 		if (!this.rowHeight || !this.rows) return;
-		const scrollTop = this.scroller.scrollTop;
-		const height = this.scroller.clientHeight || 400;
-		const top = this.range.documentTop(scrollTop, height, this.scroller.scrollHeight);
-		const first = Math.max(0, Math.floor(top / this.rowHeight) - 8);
-		const last = Math.min(this.rows - 1, Math.ceil((top + height) / this.rowHeight) + 8);
+		const { first, last } = this.scroll.visibleRange(8);
 		let body = this.sizer.querySelector<HTMLElement>('.hex-body');
 		if (!body) {
 			body = el('div', 'hex-body');
@@ -658,10 +661,9 @@ export class HexView {
 			body.style.top = '0';
 			this.sizer.append(body);
 		}
-		// The body sits at the document offset of its first row, pulled back by how far the
-		// scroll position and that offset differ under a scaled range (nothing unscaled,
-		// where the document offset is the content offset).
-		body.style.transform = `translateY(${first * this.rowHeight - top + scrollTop}px)`;
+		// The body sits where the model puts its first row: viewport-relative, one transform
+		// per scroll, whatever the file's size.
+		body.style.transform = `translateY(${this.scroll.rowTop(first)}px)`;
 		// Drop the rows that scrolled out, keep the ones still visible.
 		for (const node of Array.from(body.children)) {
 			const row = Number((node as HTMLElement).dataset.row);
@@ -728,29 +730,10 @@ export class HexView {
 		this.draw();
 	}
 
-	/** Scrolls until the row holding `offset` is on screen, then redraws. */
+	/** Scrolls the least that keeps the row holding `offset` and its margin on screen
+	 *  (Zed's `Autoscroll::fit`), then redraws the row. */
 	private revealByte(offset: number): void {
-		const row = Math.floor(offset / this.bytesPerRow);
-		const top = row * this.rowHeight;
-		const clientHeight = this.scroller.clientHeight;
-		const at = this.range.documentTop(this.scroller.scrollTop, clientHeight, this.scroller.scrollHeight);
-		if (top < at) this.scroller.scrollTop = this.range.scrollTopFor(Math.max(0, top - 4 * this.rowHeight), clientHeight);
-		else if (top + this.rowHeight > at + clientHeight) this.scroller.scrollTop = this.range.scrollTopFor(top + this.rowHeight - clientHeight + 4 * this.rowHeight, clientHeight);
-		else {
-			this.refreshRows([offset]);
-			return;
-		}
-		// Under a scaled range one scrollbar pixel spans many rows, and the engine snaps the
-		// write to whole pixels: the aimed position can round back onto the pixel the
-		// viewport never left (or land one short of the row), and a walk with the arrow keys
-		// then outruns the viewport until enough sub-pixel steps add up to a pixel. Read
-		// where the viewport really landed and step whole scrollbar pixels until it shows
-		// the row.
-		for (let guard = 0; guard < 2; guard++) {
-			const landed = this.range.documentTop(this.scroller.scrollTop, clientHeight, this.scroller.scrollHeight);
-			if (top >= landed - 0.5 && top + this.rowHeight <= landed + clientHeight + 0.5) break;
-			this.scroller.scrollTop = this.scroller.scrollTop + (top < landed ? -1 : 1);
-		}
+		if (!this.scroll.autoscroll(Math.floor(offset / this.bytesPerRow), 'fit')) this.refreshRows([offset]);
 	}
 
 	/* ---------- Search ---------- */
@@ -824,7 +807,7 @@ export class HexView {
 		if (!this.hits.length || !this.searchNeedle) return;
 		this.hitIndex = ((index % this.hits.length) + this.hits.length) % this.hits.length;
 		const offset = this.hits[this.hitIndex]!;
-		this.scroller.scrollTop = this.range.scrollTopFor(Math.max(0, (Math.floor(offset / this.bytesPerRow) - 4) * this.rowHeight), this.scroller.clientHeight);
+		this.scroll.autoscroll(Math.floor(offset / this.bytesPerRow), 'focused');
 		this.updateCount();
 		this.draw();
 	}
@@ -1141,18 +1124,12 @@ export class HexView {
 		}
 	}
 
-	private placeCursor(offset: number, reveal = true): void {
+	private placeCursor(offset: number): void {
 		const clamped = Math.max(0, Math.min(offset, this.size - 1));
 		const before = this.cursor;
 		this.stagedNibble = null;
 		this.cursor = clamped;
-		// A page move already parked the viewport exactly (pageScroll, below): revealByte's
-		// own margin is tuned for arrow-key walking, and — on a viewport height that is not
-		// an exact multiple of the row height — its floor-vs-round rounding can disagree with
-		// pageScrollTop's by a row, reading the freshly-paged caret as "just scrolled off
-		// screen" and yanking the view an extra 4 rows the other way. A PageDown could then
-		// net-scroll up.
-		if (reveal) this.revealByte(clamped);
+		this.revealByte(clamped);
 		this.refreshRows([before, clamped]);
 		this.updateInspector();
 		this.root.focus();
@@ -1255,7 +1232,6 @@ export class HexView {
 		const bpr = this.bytesPerRow;
 		const from = Math.max(0, this.hasSelection() ? this.selHead : this.cursor);
 		let target: number;
-		let page: 1 | -1 | null = null;
 		switch (event.key) {
 			case 'ArrowLeft': target = from - 1; break;
 			case 'ArrowRight': target = from + 1; break;
@@ -1264,12 +1240,11 @@ export class HexView {
 			case 'Home': target = ctrl ? 0 : Math.floor(from / bpr) * bpr; break;
 			case 'End': target = ctrl ? Math.max(0, this.size - 1) : Math.floor(from / bpr) * bpr + bpr - 1; break;
 			case 'PageUp': case 'PageDown': {
-				// One viewport of rows: any fixed row count pages wrong on every other
-				// window height. The scroller moves the same distance in document space
-				// (mapped through the scaled range), so the caret keeps its row on screen.
-				const rows = Math.max(1, Math.floor(this.scroller.clientHeight / (this.rowHeight || 20)));
-				page = event.key === 'PageDown' ? 1 : -1;
-				target = from + bpr * rows * page;
+				// Zed's MovePageDown: the caret walks a viewport less one row, and the reveal
+				// below (fit) brings the view after it — a caret at the bottom margin pages the
+				// view a full screen each press.
+				const rows = this.scroll.visibleRows;
+				target = from + bpr * rows * (event.key === 'PageDown' ? 1 : -1);
 				break;
 			}
 			default: return false;
@@ -1278,7 +1253,6 @@ export class HexView {
 		const clamped = Math.max(0, Math.min(target, Math.max(0, this.size - 1)));
 		if (event.shiftKey) {
 			// Extending with nothing selected anchors at the caret, as text editors do.
-			if (page !== null) this.pageScroll(page);
 			if (!this.hasSelection() && this.selAnchor < 0) this.selAnchor = from;
 			this.setSelectionHead(clamped);
 			return true;
@@ -1292,18 +1266,8 @@ export class HexView {
 			this.repaintSelection();
 			return true;
 		}
-		if (page !== null) this.pageScroll(page);
-		// The page move above already landed the viewport exactly; placeCursor's own reveal
-		// would fight it (see its comment) when the viewport height is not a whole number of
-		// rows — skip it for a page press, keep it for the caret keys.
-		this.placeCursor(clamped, page === null);
+		this.placeCursor(clamped);
 		return true;
-	}
-
-	/** PageUp/PageDown's viewport move: one viewport of document pixels through the scaled
-	 *  range's mapping — a page is a page whatever the file's size. */
-	private pageScroll(direction: 1 | -1): void {
-		this.scroller.scrollTop = pageScrollTop(this.range, this.scroller, direction, this.rowHeight || 20);
 	}
 
 	/** Types one hex digit over the cursor: the first digit stages (and shows) the new

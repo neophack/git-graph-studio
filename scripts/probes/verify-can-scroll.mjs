@@ -43,9 +43,20 @@ const expr = `
 		await sleep(1000);
 	}
 	const scroller = document.querySelector('.can-raw-scroll');
-	const spacer = document.querySelector('.can-raw-spacer');
-	scroller.scrollTop = scroller.scrollHeight;
-	scroller.dispatchEvent(new Event('scroll'));
+	// The surfaces scroll nothing natively: the drawn scrollbar (scroll/scrollbar.ts) is
+	// dragged instead — its thumb grabbed and the pointer taken to a fraction of the track.
+	const dragTo = (surface, fraction) => {
+		const bar = surface.parentElement.querySelector('.scrollbar.vertical');
+		const thumb = bar.querySelector('.scrollbar-thumb');
+		const track = bar.getBoundingClientRect();
+		const grab = thumb.getBoundingClientRect().top + 2;
+		const at = (type, clientY) => bar.dispatchEvent(new PointerEvent(type, { clientY, button: 0, bubbles: true, pointerId: 1 }));
+		thumb.dispatchEvent(new PointerEvent('pointerdown', { clientY: grab, button: 0, bubbles: true, pointerId: 1 }));
+		const target = fraction >= 1 ? track.bottom + 10_000 : track.top + track.height * fraction;
+		at('pointermove', target);
+		at('pointerup', target);
+	};
+	dragTo(scroller, 1);
 	await sleep(1200);
 	const rows = Array.from(document.querySelectorAll('.can-raw-rows .can-raw-row'));
 	const srect = scroller.getBoundingClientRect();
@@ -58,9 +69,7 @@ const expr = `
 		ok: inView.length > 0 && rows.length > 0,
 		url: location.href,
 		chip,
-		spacerHeight: spacer.style.height,
-		scrollHeight: scroller.scrollHeight,
-		scrollTopAfterDrag: scroller.scrollTop,
+		thumbAfterDrag: scroller.parentElement.querySelector('.scrollbar-thumb').style.transform,
 		rowsRendered: rows.length,
 		rowsVisibleInViewport: inView.length,
 		firstFrame: frames.length ? Math.min(...frames) : null,

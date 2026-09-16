@@ -10,7 +10,6 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { EditorGroup, isCanLog } from '../src/editor';
 import { busLoad, formatCycle, idHex, parseIdFilter, progressText, type CanFrameLine, type CanIntervals, type CanLogStats, type CanProgress } from '../src/canLogView';
 import { CanRawView } from '../src/canRawView';
-import { MAX_SCROLL_PX } from '../src/ui';
 import { backend, Channel, dialog } from './tauriMock';
 import { click, texts } from './helpers';
 
@@ -200,8 +199,8 @@ describe('CAN log views', () => {
 	it('a multi-million-frame log scrolls to its last frames, past the engines\' height clamp', async () => {
 		// 2,000,000 frames at 20 px a row is 40M px of document; the layout engines clamp
 		// element height near 33.5M px, which used to strand every frame past ~1.6M behind a
-		// spacer the scrollbar could not move past. The spacer now clamps at the ceiling and
-		// the scroll range scales: the scrollbar's bottom is the log's end.
+		// spacer the scrollbar could not move past. Nothing is laid out at that height now:
+		// the row model's bottom is the log's last frame, at the viewport's top.
 		const FRAMES = 2_000_000;
 		const frameAt = (index: number): CanFrameLine => ({
 			tS: index * 0.001, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17'
@@ -210,39 +209,32 @@ describe('CAN log views', () => {
 		backend.on('can_log_count', () => ({ parsed: FRAMES, done: true, error: null }));
 		backend.on('can_log_frames', ({ start, end }) => Array.from({ length: (end as number) - (start as number) }, (_, i) => frameAt((start as number) + i)));
 		backend.on('can_log_close', () => undefined);
-		const group = new EditorGroup(document.getElementById('editorGroup')!);
-		await group.openFile('C:\\logs\\huge.asc');
-		await waitForReady(() => document.querySelector('.can-raw-spacer') !== null);
-		expect(Number.parseInt(document.querySelector<HTMLElement>('.can-raw-spacer')!.style.height, 10)).toBe(MAX_SCROLL_PX);
-		// Drag the scrollbar to its very bottom: the mapped position is the log's end, and
-		// the tail frames render — the ones the clamped old spacer kept out of reach.
-		const scroller = document.querySelector<HTMLElement>('.can-raw-scroll')!;
-		scroller.scrollTop = MAX_SCROLL_PX;
-		scroller.dispatchEvent(new Event('scroll'));
+		const view = new CanRawView('/tmp/huge.asc');
+		document.body.append(view.root);
+		view.scroll.setViewport(400);
+		await waitForReady(() => view.scroll.rowCount === FRAMES);
+		expect(view.scroll.maxScrollTop()).toBe(FRAMES - 1);
+		// The scrollbar dragged to its very bottom is the log's last frame at the viewport's
+		// top: the tail frames render — the ones the clamped old spacer kept out of reach.
+		view.scroll.setTop(view.scroll.maxScrollTop());
 		await waitForReady(() => {
-			const rows = document.querySelectorAll('.can-raw-rows .can-raw-row');
-			return rows.length > 0 && Number((rows[rows.length - 1] as HTMLElement).dataset.frame) >= FRAMES - 50;
+			const rows = view.root.querySelectorAll('.can-raw-rows .can-raw-row');
+			return rows.length > 0 && Number((rows[rows.length - 1] as HTMLElement).dataset.frame) === FRAMES - 1;
 		});
-		// And they render *in the viewport*, not merely fetched: each row's content offset
-		// sits within a viewport-and-overscan band of the scroll position. (A row placed at
-		// its bare document offset — the bug this guards against — lands `scrollTop` pixels
-		// above the viewport and the pane shows blank.)
-		for (const row of Array.from(document.querySelectorAll<HTMLElement>('.can-raw-rows .can-raw-row'))) {
+		// And they render *in the viewport*, not merely fetched: each row sits within the
+		// overscan band above the last frame's row at 0.
+		for (const row of Array.from(view.root.querySelectorAll<HTMLElement>('.can-raw-rows .can-raw-row'))) {
 			const top = Number.parseInt(row.style.top, 10);
-			expect(top).toBeGreaterThan(MAX_SCROLL_PX - 1000);
-			expect(top).toBeLessThan(MAX_SCROLL_PX + 1000);
+			expect(top).toBeGreaterThanOrEqual(-10 * 20);
+			expect(top).toBeLessThanOrEqual(0);
 		}
-		await group.closeAll();
+		view.dispose();
 	});
 
-	it('keeps a scaled scroll position anchored while the parse keeps growing under it', async () => {
-		// Past the engines' height clamp, one scrollbar pixel stands for many document
-		// pixels, and that scale is documentHeight / (the scrollbar's own pixel range,
-		// pinned at the ceiling). While the walk is still running, `parsed` - and so the
-		// estimated documentHeight - keeps growing every poll tick; rebuilding the range
-		// from it without re-anchoring used to slide the same scrollTop onto an
-		// ever-further-forward document offset, so a drag left mid-parse kept jumping
-		// forward on its own. It must stay put until the user actually scrolls again.
+	it('keeps the scroll position anchored while the parse keeps growing under it', async () => {
+		// While the walk is still running, `parsed` keeps growing every poll tick. The row
+		// model's top is a row index: a growing row count changes the scrollbar's thumb and
+		// nothing else — a drag left mid-parse stays put until the user scrolls again.
 		const frameAt = (index: number): CanFrameLine => ({
 			tS: index * 0.001, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17'
 		});
@@ -251,16 +243,15 @@ describe('CAN log views', () => {
 		backend.on('can_log_count', () => ({ parsed, done: false, error: null }));
 		backend.on('can_log_frames', ({ start, end }) => Array.from({ length: (end as number) - (start as number) }, (_, i) => frameAt((start as number) + i)));
 		backend.on('can_log_close', () => undefined);
-		const group = new EditorGroup(document.getElementById('editorGroup')!);
-		await group.openFile('C:\\logs\\growing.asc');
-		await waitForReady(() => Number.parseInt(document.querySelector<HTMLElement>('.can-raw-spacer')?.style.height ?? '', 10) === MAX_SCROLL_PX);
+		const view = new CanRawView('/tmp/growing.asc');
+		document.body.append(view.root);
+		view.scroll.setViewport(400);
+		await waitForReady(() => view.scroll.rowCount === 2_000_000);
 
-		// Drag to a mid-file position - "page 10" of a log that is still being parsed.
-		const scroller = document.querySelector<HTMLElement>('.can-raw-scroll')!;
-		scroller.scrollTop = 10_000_000;
-		scroller.dispatchEvent(new Event('scroll'));
+		// Drag to a mid-file position of a log that is still being parsed.
+		view.scroll.setTop(1_000_000);
 		const frameOf = (): number | null => {
-			const row = document.querySelector<HTMLElement>('.can-raw-rows .can-raw-row');
+			const row = view.root.querySelector<HTMLElement>('.can-raw-rows .can-raw-row');
 			return row ? Number(row.dataset.frame) : null;
 		};
 		await waitForReady(() => (frameOf() ?? 0) > 500_000);
@@ -272,10 +263,11 @@ describe('CAN log views', () => {
 		parsed = 4_000_000;
 		await waitForReady(() => backend.callsTo('can_log_count').length > pollsBefore, 3000);
 
-		// The visible frame stayed exactly where it was - the range's rescale re-anchored
-		// the scrollTop instead of leaving the user's drag to drift under it.
+		// The visible frame stayed exactly where it was.
 		expect(frameOf()).toBe(before);
-		await group.closeAll();
+		expect(view.scroll.top).toBe(1_000_000);
+		expect(view.scroll.rowCount).toBe(4_000_000);
+		view.dispose();
 	}, 10000);
 
 	it('recovers rows a short backend response left unfetched, without the user scrolling again', async () => {
@@ -306,7 +298,8 @@ describe('CAN log views', () => {
 
 		const view = new CanRawView('/tmp/short.asc');
 		document.body.append(view.root);
-		await waitForReady(() => Number.parseInt(view.root.querySelector<HTMLElement>('.can-raw-spacer')?.style.height ?? '', 10) === MAX_SCROLL_PX);
+		view.scroll.setViewport(400);
+		await waitForReady(() => view.scroll.rowCount === 2_000_000);
 		await waitForReady(() => sawShortResponse);
 
 		// The short response left the window's rows unfetched, not stuck as blank placeholders
@@ -321,10 +314,9 @@ describe('CAN log views', () => {
 		view.dispose();
 	}, 10000);
 
-	it('pages exactly one viewport of frames per PageUp/PageDown — not the scaled-range leap', async () => {
-		// 2,000,000 frames × 20 px is 40 M px over the 32 M px ceiling: a scaled range, where
-		// the native page key leaps one viewport of *scrollbar* pixels — ~1.25 pages here,
-		// whole screens skipped on bigger logs.
+	it('pages a viewport less one row of frames per PageUp/PageDown, on a two-million-frame log', async () => {
+		// 2,000,000 frames × 20 px is 40 M px, past the engines' ceiling: the row model has
+		// no scale, so a page is the same 19 rows here as on a hundred-frame log.
 		const frameAt = (index: number): CanFrameLine => ({
 			tS: index * 0.001, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17'
 		});
@@ -334,25 +326,21 @@ describe('CAN log views', () => {
 		backend.on('can_log_close', () => undefined);
 		const view = new CanRawView('/tmp/huge.asc');
 		document.body.append(view.root);
-		await waitForReady(() => Number.parseInt(view.root.querySelector<HTMLElement>('.can-raw-spacer')?.style.height ?? '', 10) === MAX_SCROLL_PX);
+		view.scroll.setViewport(400);
+		await waitForReady(() => view.scroll.rowCount === 2_000_000);
 		const scroller = view.root.querySelector<HTMLElement>('.can-raw-scroll')!;
-		let raw = 0;
-		Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => 400 });
-		Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => MAX_SCROLL_PX });
-		Object.defineProperty(scroller, 'scrollTop', { configurable: true, get: () => raw, set: (v: number) => { raw = Math.max(0, Math.min(MAX_SCROLL_PX - 400, Math.round(v))); } });
-		// One viewport is 20 frames of document rows; through the ~1.25 scale that is ~320
-		// scrollbar pixels — and the second press lands exactly, no quantisation drift.
+		// A 400 px viewport is 20 rows: a page is 19, and the second press lands exactly.
 		scroller.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', cancelable: true }));
-		expect(raw).toBe(320);
+		expect(view.scroll.top).toBe(19);
 		scroller.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', cancelable: true }));
-		expect(raw).toBe(640);
+		expect(view.scroll.top).toBe(38);
 		scroller.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', cancelable: true }));
-		expect(raw).toBe(320);
+		expect(view.scroll.top).toBe(19);
 		// Ctrl+PageDown is the workbench's Next Editor: untouched.
 		const event = new KeyboardEvent('keydown', { key: 'PageDown', ctrlKey: true, cancelable: true });
 		scroller.dispatchEvent(event);
 		expect(event.defaultPrevented).toBe(false);
-		expect(raw).toBe(320);
+		expect(view.scroll.top).toBe(19);
 		view.dispose();
 	}, 10000);
 

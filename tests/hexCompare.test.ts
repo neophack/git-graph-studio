@@ -6,7 +6,6 @@ import { describe, expect, it } from 'vitest';
 
 import { EditorGroup } from '../src/editor';
 import { HexCompareView } from '../src/hexCompare';
-import { MAX_SCROLL_PX } from '../src/ui';
 import { backend } from './tauriMock';
 import { click, texts } from './helpers';
 
@@ -65,17 +64,18 @@ describe('hex compare', () => {
 
 		// The scan lands on the first difference (byte 3), the counter says 1 of 3.
 		expect(view.root.querySelector('.hex-search-count')!.textContent).toBe('1 / 3 differences');
-		const scroller = view.root.querySelector<HTMLElement>('.hex-scroller')!;
-		scroller.scrollTop = 0;
-		// Next steps to the second region (bytes 40-41): row 2 less four rows of lead.
+		// A 20-row viewport: a region is revealed near the top, three rows of lead.
+		view.scroll.setViewport(400);
+		view.scroll.setTop(0);
+		// Next steps to the second region (bytes 40-41): row 2 less the lead.
 		const next = view.root.querySelectorAll('button')[1]!;
 		click(next);
 		expect(view.root.querySelector('.hex-search-count')!.textContent).toBe('2 / 3 differences');
 		// Both remaining regions sit near the top of a 5-row file: the jump clamps to 0.
-		expect(scroller.scrollTop).toBe(Math.max(0, (Math.floor(40 / 16) - 4) * 20));
+		expect(view.scroll.top).toBe(Math.max(0, Math.floor(40 / 16) - 3));
 		// Third: the size tail - the left pane runs out (blank cells), the right's bytes tint.
 		click(next);
-		expect(scroller.scrollTop).toBe(Math.max(0, (Math.floor(64 / 16) - 4) * 20));
+		expect(view.scroll.top).toBe(Math.max(0, Math.floor(64 / 16) - 3));
 		await waitForReady(() => view.root.querySelector('.hex-cmp-row[data-row="4"]')?.querySelectorAll('.hex-row')[1]?.querySelectorAll('.hex-cell:not(.hex-blank)').length === 6);
 		const tail = view.root.querySelector<HTMLElement>('.hex-cmp-row[data-row="4"]')!;
 		const tailSides = tail.querySelectorAll('.hex-row');
@@ -100,26 +100,27 @@ describe('hex compare', () => {
 		view.destroy();
 	});
 
-	it('pages exactly one viewport of rows per PageUp/PageDown', async () => {
+	it('pages a viewport less one row per PageUp/PageDown', async () => {
 		// Two equal 64 KiB files: 4096 rows of 16 bytes. A 400 px viewport over 20 px rows
-		// is 20 rows a page — one press moves one viewport of document, never a leap.
+		// is 20 rows: a page is 19 (Zed's ScrollAmount::Page keeps one anchor row), and
+		// two presses are exactly two pages.
 		chunkServer({ 'C:\\l.bin': new Uint8Array(64 * 1024), 'C:\\r.bin': new Uint8Array(64 * 1024) });
 		const view = new HexCompareView('C:\\l.bin', 'C:\\r.bin');
 		document.getElementById('editorGroup')!.appendChild(view.root);
 		await view.load();
 		const scroller = view.root.querySelector<HTMLElement>('.hex-scroller')!;
-		Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => 400 });
+		view.scroll.setViewport(400);
 		scroller.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', cancelable: true }));
-		expect(scroller.scrollTop).toBe(400);
+		expect(view.scroll.top).toBe(19);
 		scroller.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', cancelable: true }));
-		expect(scroller.scrollTop).toBe(800); // two presses, two pages — no drift
+		expect(view.scroll.top).toBe(38);
 		scroller.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', cancelable: true }));
-		expect(scroller.scrollTop).toBe(400);
+		expect(view.scroll.top).toBe(19);
 		// Ctrl+PageUp/Down stay the workbench's editor-tab keys.
 		const event = new KeyboardEvent('keydown', { key: 'PageDown', ctrlKey: true, cancelable: true });
 		scroller.dispatchEvent(event);
 		expect(event.defaultPrevented).toBe(false);
-		expect(scroller.scrollTop).toBe(400);
+		expect(view.scroll.top).toBe(19);
 		view.destroy();
 	});
 
@@ -218,10 +219,10 @@ describe('hex compare', () => {
 		view.destroy();
 	});
 
-	it('clamps the scrollbar and keeps the tail reachable past the engines\' height clamp', async () => {
+	it('keeps the tail reachable past the engines\' height clamp', async () => {
 		// A 64 MiB pair at 16 bytes/row is 4,194,304 rows ≈ 84M px; the engines clamp near
 		// 33.5M px, which used to strand the tail behind a sizer the scrollbar could not move
-		// past. The sizer clamps at the ceiling and the scroll range scales instead.
+		// past. Nothing is laid out at that height now: the model's bottom is the last row.
 		const SIZE = 64 * 1024 * 1024;
 		backend.on('read_file_chunk', ({ offset, len }) => {
 			const start = Math.min(Number(offset), SIZE);
@@ -231,15 +232,13 @@ describe('hex compare', () => {
 		const view = new HexCompareView('C:\\g-l.bin', 'C:\\g-r.bin');
 		document.getElementById('editorGroup')!.appendChild(view.root);
 		await view.load();
-		expect(Number.parseInt(view.root.querySelector<HTMLElement>('.hex-sizer')!.style.height, 10)).toBe(MAX_SCROLL_PX);
-		const scroller = view.root.querySelector<HTMLElement>('.hex-scroller')!;
-		scroller.scrollTop = MAX_SCROLL_PX;
-		scroller.dispatchEvent(new Event('scroll'));
+		expect(view.scroll.maxScrollTop()).toBe(SIZE / 16 - 1);
+		view.scroll.setTop(view.scroll.maxScrollTop());
 		await new Promise((resolve) => setTimeout(resolve, 0));
-		// The scrollbar's bottom maps to the pair's end: the final rows draw.
+		// The scrollbar's bottom is the pair's last row: the final rows draw.
 		const rows = Array.from(view.root.querySelectorAll<HTMLElement>('.hex-body [data-row]'));
 		expect(rows.length).toBeGreaterThan(0);
-		expect(Math.max(...rows.map((row) => Number(row.dataset.row)))).toBeGreaterThanOrEqual(SIZE / 16 - 64);
+		expect(Math.max(...rows.map((row) => Number(row.dataset.row)))).toBe(SIZE / 16 - 1);
 		view.destroy();
 	});
 
@@ -261,9 +260,7 @@ describe('hex compare', () => {
 		select.value = '24';
 		select.dispatchEvent(new Event('change'));
 		const rowIndex = Math.floor(SLAB / 24); // 2730
-		const scroller = view.root.querySelector<HTMLElement>('.hex-scroller')!;
-		scroller.scrollTop = rowIndex * 20;
-		scroller.dispatchEvent(new Event('scroll'));
+		view.scroll.setTop(rowIndex);
 		const row = () => view.root.querySelector(`.hex-cmp-row[data-row="${rowIndex}"]`);
 		await waitForReady(() => (row()?.querySelectorAll('.hex-cell:not(.hex-blank)').length ?? 0) > 0);
 		const panes = row()!.querySelectorAll('.hex-row');
@@ -295,7 +292,7 @@ describe('hex compare', () => {
 			document.getElementById('editorGroup')!.appendChild(view.root);
 			await view.load();
 			view.destroy();
-			expect(disconnected).toBe(1);
+			expect(disconnected).toBe(2); // the view's own and the drawn scrollbar's
 		} finally {
 			(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = realObserver;
 		}

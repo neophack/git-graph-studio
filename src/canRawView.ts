@@ -1,9 +1,8 @@
 // The raw CAN log view a `.blf` / `.asc` trace opens in: every frame as a row, on screen
 // the moment the tab paints. The backend parse runs in the background and appends frames
 // as it walks (`can_log_open`); this view polls the published count (`can_log_count`) to
-// extend its scroll range and fetches only the visible window of rows (`can_log_frames`)
-// through a hand-rolled virtual scroller — a multi-gigabyte log is browsable while it is
-// still being parsed.
+// extend the row model's range (scroll/) and fetches only the visible window of rows
+// (`can_log_frames`) — a multi-gigabyte log is browsable while it is still being parsed.
 //
 // The chrome stays out of the way: one live chip in the toolbar (frame count, percentage
 // and speed while the walk runs) and two actions — "Statistics" opens the analysis as its
@@ -13,8 +12,10 @@
 import { invoke } from '@tauri-apps/api/core';
 
 import { convertCanLog, idHex } from './canLogView';
-import { settings } from './settings';
-import { attachPageKeys, attachSmoothWheel, basename, el, icon, VirtualScroll, type SmoothWheelHandle } from './ui';
+import { attachPageKeys, attachWheel, type Disposable } from './scroll/input';
+import { ScrollModel } from './scroll/model';
+import { Scrollbar } from './scroll/scrollbar';
+import { basename, el, icon } from './ui';
 
 interface CanOpenResult {
 	docId: number;
@@ -82,8 +83,11 @@ export interface CanRawViewOptions {
 export class CanRawView {
 	readonly root: HTMLElement;
 	private readonly scroller: HTMLElement;
-	private readonly spacer: HTMLElement;
 	private readonly rows: HTMLElement;
+	/** The viewport's position over the parsed frames (scroll/model.ts). */
+	readonly scroll: ScrollModel;
+	private readonly scrollbar: Scrollbar;
+	private readonly sizer: ResizeObserver | null;
 	private readonly live: HTMLElement;
 	private readonly liveText: HTMLElement;
 	private readonly liveDot: HTMLElement;
@@ -93,12 +97,6 @@ export class CanRawView {
 	private doc: CanOpenResult | null = null;
 	/** The frame count the backend has published so far — the scroll range's length. */
 	private parsed = 0;
-	/** The scroll range for the frames parsed so far — clamped and scaled past the layout
-	 *  engines' height ceiling, so a multi-million-frame log reaches its last row. */
-	private range = new VirtualScroll(0, ROW_HEIGHT);
-	/** The document-space offset the viewport is at (equals `scrollTop` until the range
-	 *  scales; the row placement follows it from there). */
-	private docTop = 0;
 	/** The visible window the last refresh computed — what a landing fetch checks itself
 	 *  against before placing rows. */
 	private windowFirst = 0;
@@ -121,11 +119,9 @@ export class CanRawView {
 	private refetch = false;
 	private timer: number | null = null;
 	private disposed = false;
-	/** The smooth wheel glide over the scroller (ui.ts), disposed with the view. */
-	private readonly wheel: SmoothWheelHandle;
-	/** PageUp/PageDown over the scroller (ui.ts): exactly one viewport of document rows per
-	 *  press, never the scaled-range leap the native page key would make. */
-	private readonly pageKeys: SmoothWheelHandle;
+	/** The wheel and the page keys over the scroller (scroll/input.ts), disposed with the view. */
+	private readonly wheel: Disposable;
+	private readonly pageKeys: Disposable;
 
 	constructor(private path: string, options: CanRawViewOptions = {}) {
 		const analyzeButton = el('button', 'button secondary can-analyze', [icon('pulse'), ' Statistics']) as HTMLButtonElement;
@@ -161,22 +157,17 @@ export class CanRawView {
 		this.banner = el('div', 'can-error can-raw-banner');
 		this.banner.hidden = true;
 		this.scroller = el('div', 'can-raw-scroll');
-		this.spacer = el('div', 'can-raw-spacer');
 		this.rows = el('div', 'can-raw-rows');
-		this.scroller.append(this.spacer, this.rows);
-		this.root = el('div', 'can-view can-raw-view', [toolbar, this.progress, header, this.banner, this.scroller]);
-		this.scroller.addEventListener('scroll', () => this.refresh(), { passive: true });
-		this.wheel = attachSmoothWheel(this.scroller, {
-			enabled: () => settings.smoothScrolling,
-			sensitivity: () => settings.mouseWheelScrollSensitivity,
-			fastSensitivity: () => settings.fastScrollSensitivity,
-			zoom: () => this.range.documentPxPerScrollPx(this.scroller.clientHeight)
-		});
-		this.pageKeys = attachPageKeys(this.scroller, {
-			range: () => this.range,
-			rowHeight: () => ROW_HEIGHT,
-			paged: () => this.refresh()
-		});
+		this.scroller.appendChild(this.rows);
+		const viewport = el('div', 'can-raw-viewport', [this.scroller]);
+		this.root = el('div', 'can-view can-raw-view', [toolbar, this.progress, header, this.banner, viewport]);
+		this.scroll = new ScrollModel(ROW_HEIGHT);
+		this.scroll.onChange(() => this.refresh());
+		this.scrollbar = new Scrollbar(viewport, this.scroll);
+		this.wheel = attachWheel(this.scroller, this.scroll);
+		this.pageKeys = attachPageKeys(this.scroller, this.scroll);
+		this.sizer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => this.layout());
+		this.sizer?.observe(this.scroller);
 		void this.load();
 	}
 
@@ -236,17 +227,10 @@ export class CanRawView {
 			this.paintProgress(count);
 			if (count.parsed !== this.parsed) {
 				this.parsed = count.parsed;
-				const clientHeight = this.scroller.clientHeight;
-				// The scale of a scaled range grows with the (still-growing) parsed count while
-				// the scrollbar's own pixel range stays maxed at the ceiling, so rebuilding the
-				// range under an unchanged scrollTop would keep sliding the visible window
-				// forward on every poll tick. Anchor on the document position the user is
-				// actually looking at instead, and carry it across the rescale.
-				const anchorDocTop = this.range.documentTop(this.scroller.scrollTop, clientHeight, this.scroller.scrollHeight);
-				this.range = new VirtualScroll(this.parsed, ROW_HEIGHT, Math.max(0, clientHeight - ROW_HEIGHT));
-				this.range.lay(this.spacer);
-				this.scroller.scrollTop = this.range.scrollTopFor(anchorDocTop, clientHeight);
-				this.refresh();
+				// The model's range grows with the parse; the row the user is looking at
+				// stays put, the scrollbar's thumb shrinks.
+				this.scroll.setRowCount(this.parsed);
+				this.layout();
 			}
 			if (count.done) {
 				this.done = true;
@@ -275,24 +259,17 @@ export class CanRawView {
 
 	/** Pull the newly visible window from the backend. Runs on every scroll event and every
 	 *  progress tick; the row cache makes it a no-op unless something actually moved. */
+	/** The viewport was (re)laid out: the model takes its height, and the rows follow. */
+	private layout(): void {
+		this.scroll.setViewport(this.scroller.clientHeight);
+		this.refresh();
+	}
+
 	private refresh(): void {
 		const doc = this.doc;
 		if (!doc || this.disposed || this.failed) return;
-		const clientHeight = this.scroller.clientHeight;
-		const scrollTop = this.scroller.scrollTop;
-		const docTop = this.range.documentTop(scrollTop, clientHeight, this.scroller.scrollHeight);
-		// Under a scaled range the rows are placed viewport-relative (their document-space
-		// offsets would themselves be clamped away) and must follow every scroll; unscaled
-		// they stay document-space and the engine scrolls them natively.
-		if (docTop !== this.docTop) {
-			this.docTop = docTop;
-			if (this.range.scaled) {
-				for (const [index, node] of this.cache) node.style.top = `${Math.round(index * ROW_HEIGHT - docTop + scrollTop)}px`;
-			}
-		}
-		const visible = Math.ceil(clientHeight / ROW_HEIGHT);
-		const first = Math.max(0, Math.floor(docTop / ROW_HEIGHT) - OVERSCAN);
-		const last = Math.min(this.parsed - 1, first + visible + OVERSCAN * 2);
+		for (const [index, node] of this.cache) node.style.top = `${this.scroll.rowTop(index)}px`;
+		const { first, last } = this.scroll.visibleRange(OVERSCAN);
 		this.windowFirst = first;
 		this.windowLast = last;
 		const wanted: number[] = [];
@@ -355,11 +332,8 @@ export class CanRawView {
 	}
 
 	private place(row: HTMLElement, index: number): void {
-		// Viewport-relative under a scaled range: the row's document offset, pulled back by
-		// how far the scroll position and that offset differ (`+ scrollTop` is what keeps
-		// the row on screen — without it a scaled scroll lands everything far above the
-		// viewport, blank). Unscaled, document-space, exactly as before.
-		row.style.top = this.range.scaled ? `${Math.round(index * ROW_HEIGHT - this.docTop + this.scroller.scrollTop)}px` : `${index * ROW_HEIGHT}px`;
+		// Viewport-relative: where the model's top puts the row, whatever its index.
+		row.style.top = `${this.scroll.rowTop(index)}px`;
 		// Rows arrive out of order; insert before the first row with a larger index.
 		const key = (node: HTMLElement) => Number(node.dataset.frame);
 		let after: HTMLElement | null = null;
@@ -400,6 +374,8 @@ export class CanRawView {
 		this.disposed = true;
 		this.wheel.dispose();
 		this.pageKeys.dispose();
+		this.scrollbar.dispose();
+		this.sizer?.disconnect();
 		if (this.timer !== null) clearTimeout(this.timer);
 		if (this.doc) void invoke('can_log_close', { docId: this.doc.docId });
 		this.root.remove();

@@ -51,7 +51,8 @@ function isWheelNotch(event: WheelEvent): boolean {
 export function wheelToDelta(event: WheelEvent): ScrollDelta {
 	if (event.deltaMode === 1) return { kind: 'lines', x: event.deltaX, y: event.deltaY };
 	if (event.deltaMode === 2) return { kind: 'lines', x: event.deltaX * LINES_PER_WHEEL_PAGE, y: event.deltaY * LINES_PER_WHEEL_PAGE };
-	if (isWheelNotch(event)) return { kind: 'lines', x: event.deltaX / PX_PER_WHEEL_LINE, y: event.deltaY / PX_PER_WHEEL_LINE };
+	// Whole lines: the division by a repeating fraction must not leave 29.999… of 30.
+	if (isWheelNotch(event)) return { kind: 'lines', x: Math.round(event.deltaX / PX_PER_WHEEL_LINE), y: Math.round(event.deltaY / PX_PER_WHEEL_LINE) };
 	return { kind: 'pixels', x: event.deltaX, y: event.deltaY };
 }
 

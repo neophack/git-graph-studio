@@ -1,13 +1,12 @@
 // The hex viewer: rows are paged from read_file_chunk (16 bytes each, offset + hex + ASCII),
-// the sizer stands in for the whole file so only visible rows are drawn, and the search box
-// scans the file for text or hex-byte needles.
+// only the rows the scroll model (scroll/) has in view are drawn, and the search box scans
+// the file for text or hex-byte needles.
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { bytesPerRowFor, HexView } from '../src/hexView';
 import { EditorGroup } from '../src/editor';
 import { settings } from '../src/settings';
-import { MAX_SCROLL_PX, VirtualScroll } from '../src/ui';
 import { backend } from './tauriMock';
 import { flush } from './helpers';
 
@@ -142,199 +141,138 @@ describe('hex view', () => {
 		}));
 		const view = new HexView('/tmp/big.bin');
 		await view.load();
-		// The second slab begins at byte 65536 = row 4096; rows are 20px in the test DOM.
-		view.scroller.scrollTop = 4096 * 20;
-		view.root.querySelector('.hex-scroller')!.dispatchEvent(new Event('scroll'));
+		// The second slab begins at byte 65536 = row 4096.
+		view.scroll.setTop(4096);
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		const offsets = backend.callsTo('read_file_chunk').map((args) => args.offset);
 		expect(offsets).toContain(65536);
 		// Only the slabs actually shown were requested, never the whole file.
 		expect(offsets.length).toBeLessThan(4);
-		expect(view.root.querySelector('.hex-sizer')!.getAttribute('style')).toContain('height');
+		// Nothing is laid out at the file's height: the model owns the range.
+		expect(view.scroll.rowCount).toBe(160 * 1024 / 16);
+		expect(view.root.querySelector('.hex-sizer')!.getAttribute('style')).toBeNull();
 	});
 
-	it('scales the scrollbar for a file whose rows pass the engines\' height clamp', async () => {
+	it('reaches the last row of a file whose rows pass the engines\' height clamp', async () => {
 		// A 64 MB file at 16 bytes/row is 4,194,304 rows = ~84M px; the engines clamp near
-		// 33.5M px, which used to strand every byte past the first ~25 MB. The clamped,
-		// scaled range keeps the file's tail reachable: the scrollbar's bottom is its end.
+		// 33.5M px, which used to strand every byte past the first ~25 MB. Nothing is laid
+		// out at that height any more: the model's bottom is the file's last row, drawn at
+		// the viewport's top.
 		backend.on('read_file_chunk', (args) => ({
 			size: 64 * 1024 * 1024,
 			base64: b64(new Uint8Array(Math.min(Number(args.len), 4096)))
 		}));
 		const view = new HexView('/tmp/giant.bin');
 		await view.load();
-		expect(Number.parseInt(view.root.querySelector<HTMLElement>('.hex-sizer')!.style.height, 10)).toBe(MAX_SCROLL_PX);
-		view.scroller.scrollTop = MAX_SCROLL_PX;
-		view.root.querySelector('.hex-scroller')!.dispatchEvent(new Event('scroll'));
+		expect(view.scroll.maxScrollTop()).toBe(4 * 1024 * 1024 - 1);
+		view.scroll.setTop(view.scroll.maxScrollTop());
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		// The rows drawn are the file's last ones (4,194,303 is the final row).
 		const rows = Array.from(view.root.querySelectorAll<HTMLElement>('.hex-body [data-row]'));
 		expect(rows.length).toBeGreaterThan(0);
-		expect(Math.max(...rows.map((row) => Number(row.dataset.row)))).toBeGreaterThanOrEqual(4 * 1024 * 1024 - 64);
+		expect(Math.max(...rows.map((row) => Number(row.dataset.row)))).toBe(4 * 1024 * 1024 - 1);
+		expect(view.root.querySelector<HTMLElement>('.hex-body')!.style.transform).toBe(`translateY(${view.scroll.rowTop(4 * 1024 * 1024 - 1 - 8)}px)`);
 		// The tail's slab was read — a byte range at the file's end, not its start.
 		const offsets = backend.callsTo('read_file_chunk').map((args) => Number(args.offset));
 		expect(Math.max(...offsets)).toBeGreaterThanOrEqual(64 * 1024 * 1024 - 2 * 64 * 1024);
 		view.destroy();
 	});
 
-	it('keeps the arrow-walked cursor inside the viewport over a scaled range', async () => {
-		// Past the engines' height clamp one scrollbar pixel spans hundreds of rows, and
-		// the engine snaps scroll writes to whole pixels: the aimed reveal used to round
-		// back onto the pixel the viewport never left, so a walk with the arrow keys
-		// outran the viewport — the cursor strolled past the edge until enough
-		// sub-pixel steps added up to a pixel the scrollbar could move.
+	it('keeps the arrow-walked cursor inside the viewport, three rows off its edge', async () => {
+		// A 300 px window (15 rows of 20) over a 6 GiB file: the caret's every move is an
+		// autoscroll fit (Zed's vertical_scroll_margin of 3), so a walk with the arrow keys
+		// carries the viewport along, the caret never nearer than three rows to an edge.
 		backend.on('read_file_chunk', () => ({ size: 6 * 1024 ** 3, base64: b64(new Uint8Array(4096)) }));
 		const view = new HexView('/tmp/huge.bin');
-		// The engine's numbers, which the test DOM cannot produce: a 300 px window over
-		// the 32 Mpx scrollbar (the headless ceiling) of a 6 GiB file, with scroll
-		// writes snapped to whole pixels as the engine does.
 		const scroller = view.root.querySelector('.hex-scroller') as HTMLElement;
-		let raw = 0;
 		Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => 300 });
-		Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => MAX_SCROLL_PX });
-		Object.defineProperty(scroller, 'scrollTop', { configurable: true, get: () => raw, set: (v: number) => { raw = Math.round(v); } });
 		await view.load();
-		scroller.dispatchEvent(new Event('scroll'));
 		await new Promise((resolve) => setTimeout(resolve, 0));
-		const range = new VirtualScroll(6 * 1024 ** 3 / 16, 20, 280);
-		const visible = (row: number) => {
-			const at = range.documentTop(scroller.scrollTop, 300, MAX_SCROLL_PX);
-			expect(row * 20, `row ${row} top`).toBeGreaterThanOrEqual(at - 1);
-			expect(row * 20 + 20, `row ${row} bottom`).toBeLessThanOrEqual(at + 301);
+		const inside = (row: number) => {
+			expect(view.scroll.isRowVisible(row), `row ${row}`).toBe(true);
 		};
 		for (let i = 1; i <= 24; i++) {
 			keydown(view.root, 'ArrowDown');
-			visible(i);
+			inside(i);
 		}
+		// Row 24 sits at the bottom margin: the top is 24 + 1 + 3 − 15 = 13.
+		expect(view.scroll.top).toBe(13);
 		for (let i = 23; i >= 0; i--) {
 			keydown(view.root, 'ArrowUp');
-			visible(i);
+			inside(i);
 		}
+		expect(view.scroll.top).toBe(0);
 		view.destroy();
 	}, 15000); // 48 keydowns each repaint the window's rows; heavy under a full-suite load
 
-	it('moves a wheel notch a document-space distance over a scaled range', async () => {
-		// One scrollbar pixel of a scaled range stands for hundreds of document pixels:
-		// left to the scrollbar, a notch ran the document by that factor — a
-		// thousand-pixel notch moved a quarter million pixels on a 6 GiB file, so the
-		// wheel felt wildly faster the larger the file. The notch now divides by the
-		// scale and moves VS Code's distance — the browser delta × 50/40 (125 px per
-		// default Windows notch) — whatever the file's size.
+	it('moves a wheel notch three rows on a 6 GiB file, the same as on any other', async () => {
+		// The wheel used to run the document by the scaled range's factor — a notch moved a
+		// quarter million pixels on a 6 GiB file. The model has no scale: a Chromium notch
+		// is the system's three lines, three rows, whatever the file's size.
 		backend.on('read_file_chunk', () => ({ size: 6 * 1024 ** 3, base64: b64(new Uint8Array(4096)) }));
 		const view = new HexView('/tmp/huge.bin');
 		const scroller = view.root.querySelector('.hex-scroller') as HTMLElement;
-		let raw = 0;
 		Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => 600 });
-		Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => MAX_SCROLL_PX });
-		Object.defineProperty(scroller, 'scrollTop', { configurable: true, get: () => raw, set: (v: number) => { raw = Math.round(v); } });
 		await view.load();
-		const range = new VirtualScroll(6 * 1024 ** 3 / 16, 20, 580);
-		const before = range.documentTop(scroller.scrollTop, 600, MAX_SCROLL_PX);
-		const smooth = settings.smoothScrolling;
 		const sensitivity = settings.mouseWheelScrollSensitivity;
-		// The jump asserted below is the model's at sensitivity 1 — VS Code's own pace; the
-		// shipped default (2, settings.ts) is a product call, pinned away here.
-		settings.smoothScrolling = false; // the direct jump; the glide's frames are rAF-timed
 		settings.mouseWheelScrollSensitivity = 1;
 		try {
-			scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 1000, cancelable: true }));
+			scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, deltaMode: 0, cancelable: true }));
+			expect(view.scroll.top).toBe(3);
+			scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 1000, deltaMode: 0, cancelable: true }));
+			expect(view.scroll.top).toBe(33);
 		} finally {
-			settings.smoothScrolling = smooth;
 			settings.mouseWheelScrollSensitivity = sensitivity;
 		}
-		const moved = range.documentTop(scroller.scrollTop, 600, MAX_SCROLL_PX) - before;
-		// 1000 px of browser delta is VS Code's 1250 document pixels, give or take one
-		// scrollbar pixel of quantisation — not the scale-multiplied 250,000.
-		expect(moved).toBeGreaterThan(1100);
-		expect(moved).toBeLessThan(1400);
 		view.destroy();
 	});
 
-	it('pages the caret by exactly the viewport — and leaves Ctrl+PageUp/Down to the workbench', async () => {
-		// 4096 bytes = 256 rows of 16. A 300 px viewport over 20 px rows pages 15 rows
-		// (240 bytes) a press; the fixed 16-row walk the keys used to take matched no
-		// window's height.
+	it('pages the caret a viewport less one row and the view follows it — Ctrl+PageUp/Down stay the workbench\'s', async () => {
+		// 4096 bytes = 256 rows of 16. A 300 px viewport over 20 px rows is 15 rows: the
+		// caret pages 14 (Zed's MovePageDown, the viewport less its anchor row) and the
+		// autoscroll fit brings the view after it, three rows of margin below the caret.
 		backend.on('read_file_chunk', (args) => ({ size: 4096, base64: b64(new Uint8Array(Number(args.len))) }));
 		const view = new HexView('/tmp/big.bin');
 		const scroller = view.root.querySelector('.hex-scroller') as HTMLElement;
-		let raw = 0;
 		Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => 300 });
-		Object.defineProperty(scroller, 'scrollTop', { configurable: true, get: () => raw, set: (v: number) => { raw = Math.max(0, Math.round(v)); } });
 		await view.load();
 		await flush();
 		keydown(view.root, 'ArrowDown'); // the caret lands on byte 16 (row 1)
 		keydown(view.root, 'PageDown');
-		// The viewport moved exactly one viewport of document pixels...
-		expect(scroller.scrollTop).toBe(300);
+		// Row 15: its bottom plus the margin is 19 rows, four past the 15 in view.
+		expect(view.scroll.top).toBe(4);
 		keydown(view.root, 'PageDown');
-		expect(scroller.scrollTop).toBe(600); // two presses, two pages — no drift, no skip
+		// The caret sits at the bottom margin now, so each further page is a full 14 rows.
+		expect(view.scroll.top).toBe(18);
 		await flush(2);
-		// ...and the caret moved the same 15 rows a press: 16 + 240 + 240.
-		expect(view.root.querySelector('.hex-inspector .hex-inspector-at')!.textContent).toBe('0x000001F0');
+		// The caret moved 14 rows a press: 16 + 224 + 224.
+		expect(view.root.querySelector('.hex-inspector .hex-inspector-at')!.textContent).toBe('0x000001D0');
+		keydown(view.root, 'PageUp');
+		// Back up: row 15, whose top less the margin (12) is under the top of 18.
+		expect(view.scroll.top).toBe(12);
 		// Ctrl+PageUp/Down switch editor tabs: not the caret's business.
 		const event = new KeyboardEvent('keydown', { key: 'PageDown', ctrlKey: true, bubbles: true, cancelable: true });
 		view.root.dispatchEvent(event);
 		expect(event.defaultPrevented).toBe(false);
-		expect(scroller.scrollTop).toBe(600);
+		expect(view.scroll.top).toBe(12);
 		view.destroy();
 	});
 
-	it('never lets the paged-to caret\'s own reveal drag the viewport back the other way', async () => {
-		// A 315 px viewport over 20 px rows is not a whole number of rows (15.75): the page
-		// lands the *viewport* on the nearest row (round → 320) while the caret walks a whole
-		// 15 rows (floor → 300). That one-row gap used to read, to placeCursor's revealByte,
-		// as "the caret just scrolled off the top", which then yanked the view a further
-		// 4 rows *backward* — a PageDown that net-scrolled the wrong way.
+	it('a page press on a viewport that is not a whole number of rows never scrolls the wrong way', async () => {
+		// 315 px over 20 px rows is 15.75 rows: the caret pages 14 whole rows and the fit
+		// works in fractional rows — the view only ever moves down on a PageDown.
 		backend.on('read_file_chunk', (args) => ({ size: 4096, base64: b64(new Uint8Array(Number(args.len))) }));
 		const view = new HexView('/tmp/big.bin');
 		const scroller = view.root.querySelector('.hex-scroller') as HTMLElement;
-		let raw = 0;
 		Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => 315 });
-		Object.defineProperty(scroller, 'scrollTop', { configurable: true, get: () => raw, set: (v: number) => { raw = Math.max(0, Math.round(v)); } });
 		await view.load();
 		await flush();
 		keydown(view.root, 'PageDown');
-		// The viewport still lands exactly where pageScrollTop puts it — the caret's own
-		// reveal must not second-guess a page move that already parked the scroller.
-		expect(scroller.scrollTop).toBe(320);
+		expect(view.scroll.top).toBeCloseTo(14 + 1 + 3 - 15.75);
+		const after = view.scroll.top;
+		keydown(view.root, 'PageDown');
+		expect(view.scroll.top).toBeGreaterThan(after);
 		view.destroy();
-	});
-
-	it('adopts the spacer height the engine really laid out, so the scaled bottom is the file\'s end', () => {
-		// The engine rounds a spacer a step shorter than asked (22,304,100 asks, 22,304,084
-		// lays). Dividing by the asked height left the shortfall × scale (~125 on a 3 GB
-		// file) of rows below the viewport at the scrollbar's bottom - the last four rows
-		// of a 3 GB ISO were drawn but unreachable. Dividing by the laid height maps the
-		// scrollbar's bottom onto the document's end exactly.
-		const rows = 134_653_270; // the 3,231,678,464-byte ISO at 24 bytes/row
-		const rowHeight = 20.8;
-		const clientHeight = 558;
-		const fakeSpacer = { style: {}, getBoundingClientRect: () => ({ height: 22_304_084 }) } as unknown as HTMLElement;
-		const range = new VirtualScroll(rows, rowHeight);
-		range.lay(fakeSpacer); // the engine laid the spacer shorter than asked
-		const bottom = range.documentTop(22_304_084 - clientHeight, clientHeight);
-		const documentHeight = rows * rowHeight;
-		expect(bottom).toBeGreaterThanOrEqual(documentHeight - clientHeight - 1);
-		// The engine snaps scroll positions to device pixels; a position a fraction of a
-		// pixel short of the bottom, multiplied by the scale, is several rows of document.
-		// Within a pixel of the scroller's own bottom the mapping pins to the document's
-		// end instead of multiplying.
-		const snapped = range.documentTop(22_304_084 - clientHeight - 0.7, clientHeight, 22_304_084);
-		expect(snapped).toBeGreaterThanOrEqual(documentHeight - clientHeight - 1);
-	});
-
-	it("pads the scroll range so the last row sits at the viewport top at the scrollbar bottom", () => {
-		// The editors' scroll-past-the-end: a page (minus a row) of blank below the last
-		// row, so dragging to the bottom puts the file's final row at the top of the view.
-		const rows = 134_653_270;
-		const rowHeight = 22.4;
-		const clientHeight = 558;
-		const fakeSpacer = { style: {}, getBoundingClientRect: () => ({ height: 22_304_084 }) } as unknown as HTMLElement;
-		const range = new VirtualScroll(rows, rowHeight, clientHeight - rowHeight);
-		range.lay(fakeSpacer);
-		const top = range.documentTop(22_304_084 - clientHeight, clientHeight, 22_304_084);
-		const lastRowTop = rows * rowHeight - rowHeight;
-		expect(Math.abs(top - lastRowTop)).toBeLessThanOrEqual(1);
 	});
 
 	it('widens the offset column for a file past 4 GiB', async () => {
@@ -426,7 +364,7 @@ describe('hex view', () => {
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(box.value).toBe('0x24');
 		expect(view.root.querySelectorAll('.hex-jump').length).toBe(2); // hex + ASCII cell
-		expect(view.scroller.scrollTop).toBe(Math.floor(0x24 / 8) * 20); // rows are 20px in the test DOM
+		expect(view.scroll.top).toBe(Math.floor(0x24 / 8)); // the row at the viewport's top
 		// A bad address is reported, not jumped.
 		box.value = 'zz';
 		keydown(box, 'Enter');
@@ -517,8 +455,7 @@ describe('hex view', () => {
 		select.value = '24';
 		select.dispatchEvent(new Event('change'));
 		const row = 2730;
-		view.scroller.scrollTop = row * 20;
-		view.root.querySelector('.hex-scroller')!.dispatchEvent(new Event('scroll'));
+		view.scroll.setTop(row);
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		const filled = view.root.querySelector(`.hex-scroller [data-row="${row}"]`)!;
@@ -584,6 +521,8 @@ describe('hex view', () => {
 			base64: b64(bytes.subarray(Number(args.offset), Number(args.offset) + Number(args.len)))
 		}));
 		const view = new HexView('/tmp/big.bin');
+		// A hit is revealed against the viewport, which the test DOM must give a height.
+		Object.defineProperty(view.root.querySelector('.hex-scroller')!, 'clientHeight', { configurable: true, get: () => 300 });
 		await view.load();
 		const box = view.root.querySelector('.hex-search') as HTMLInputElement;
 		const count = () => view.root.querySelector('.hex-search-count')!.textContent!;
@@ -594,10 +533,10 @@ describe('hex view', () => {
 		// Stepping lands on the other two distinct addresses, never the same one twice.
 		const tops: number[] = [];
 		keydown(box, 'Enter');
-		tops.push(view.scroller.scrollTop);
+		tops.push(view.scroll.top);
 		expect(count()).toBe('2 of 3');
 		keydown(box, 'Enter');
-		tops.push(view.scroller.scrollTop);
+		tops.push(view.scroll.top);
 		expect(count()).toBe('3 of 3');
 		expect(new Set(tops).size).toBe(2);
 	});
@@ -684,7 +623,7 @@ describe('hex view', () => {
 			box.value = 'ab';
 			keydown(box, 'Enter');
 			view.destroy();
-			expect(disconnected).toBe(1);
+			expect(disconnected).toBe(2); // the view's own and the drawn scrollbar's
 			expect(view.root.isConnected).toBe(false);
 			expect((view as unknown as { slabs: Map<number, unknown> }).slabs.size).toBe(0);
 			await flush(10);

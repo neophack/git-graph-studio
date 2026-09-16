@@ -189,11 +189,12 @@ export class ScrollModel {
 	 *  and then by the least amount; the others place it. */
 	autoscroll(row: number, strategy: AutoscrollStrategy = 'fit', reason: ScrollReason = 'autoscroll'): boolean {
 		const visible = this.visibleLines;
-		if (visible <= 0) {
+		const target = Math.max(0, Math.min(this.rows > 0 ? this.rows - 1 : 0, Math.floor(row)));
+		// `top` needs no viewport; every other placement waits for one.
+		if (visible <= 0 && strategy !== 'top') {
 			this.pendingAutoscroll = { row, strategy, reason };
 			return false;
 		}
-		const target = Math.max(0, Math.min(this.rows > 0 ? this.rows - 1 : 0, Math.floor(row)));
 		const targetBottom = target + 1;
 		// Half the viewport less the row: the margin a centred row has on either side.
 		const margin = Math.floor((visible - 1) / 2);

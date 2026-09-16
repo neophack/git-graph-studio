@@ -49,9 +49,21 @@ const expr = `
 	await sleep(2500); // the index lands meanwhile
 	// 3. Drag to the very bottom: the tail lines must appear, fast.
 	const before = document.querySelector('.fast-row .fast-code')?.textContent ?? '';
+	// The surfaces scroll nothing natively: the drawn scrollbar (scroll/scrollbar.ts) is
+	// dragged instead — its thumb grabbed and the pointer taken to a fraction of the track.
+	const dragTo = (surface, fraction) => {
+		const bar = surface.parentElement.querySelector('.scrollbar.vertical');
+		const thumb = bar.querySelector('.scrollbar-thumb');
+		const track = bar.getBoundingClientRect();
+		const grab = thumb.getBoundingClientRect().top + 2;
+		const at = (type, clientY) => bar.dispatchEvent(new PointerEvent(type, { clientY, button: 0, bubbles: true, pointerId: 1 }));
+		thumb.dispatchEvent(new PointerEvent('pointerdown', { clientY: grab, button: 0, bubbles: true, pointerId: 1 }));
+		const target = fraction >= 1 ? track.bottom + 10_000 : track.top + track.height * fraction;
+		at('pointermove', target);
+		at('pointerup', target);
+	};
 	const t1 = performance.now();
-	scroller.scrollTop = scroller.scrollHeight;
-	scroller.dispatchEvent(new Event('scroll'));
+	dragTo(scroller, 1);
 	let bottom = null, bottomMs = -1;
 	for (let i = 0; i < 400; i++) {
 		await sleep(5);
@@ -63,8 +75,7 @@ const expr = `
 	}
 	// 4. A mid-file drag.
 	const t2 = performance.now();
-	scroller.scrollTop = Math.floor(scroller.scrollHeight / 2);
-	scroller.dispatchEvent(new Event('scroll'));
+	dragTo(scroller, 0.5);
 	let mid = null, midMs = -1;
 	for (let i = 0; i < 400; i++) {
 		await sleep(5);
@@ -73,7 +84,7 @@ const expr = `
 			mid = first.slice(0, 60); midMs = Math.round(performance.now() - t2); break;
 		}
 	}
-	return { chip, mountMs, firstTextMs, firstText, bottomMs, bottom, midMs, mid, spacer: document.querySelector('.fast-spacer')?.style.height ?? null, docEdit: !!document.querySelector('.doc-edit') };
+	return { chip, mountMs, firstTextMs, firstText, bottomMs, bottom, midMs, mid, thumb: document.querySelector('.fast-main .scrollbar-thumb')?.style.transform ?? null, docEdit: !!document.querySelector('.doc-edit') };
 })()
 `;
 const result = await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });

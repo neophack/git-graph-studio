@@ -8,8 +8,10 @@
 
 import { invoke } from '@tauri-apps/api/core';
 
-import { settings } from './settings';
-import { attachPageKeys, attachSmoothWheel, el, icon, VirtualScroll, type SmoothWheelHandle } from './ui';
+import { attachPageKeys, attachWheel, type Disposable } from './scroll/input';
+import { ScrollModel } from './scroll/model';
+import { Scrollbar } from './scroll/scrollbar';
+import { el, icon } from './ui';
 import { OFFSET_DIGITS, ROW_LADDER, asciiChar, bytesPerRowFor, decodeBase64, groupSizeFor, hexAddress, hexByte, hexHeader, offsetDigitsFor, rowGridTemplate } from './hexView';
 
 /** Visible rows are filled from 64 KiB slabs, so scrolling reads a slab at a time. */
@@ -91,9 +93,10 @@ export class HexCompareView {
 	 *  so past-4-GiB addresses still fit the column both panes print them in. */
 	private offsetDigits = OFFSET_DIGITS;
 	private forcedBytesPerRow = 0;
-	/** The scroll range for the comparison's rows — clamped and scaled past the layout
-	 *  engines' height ceiling, so the tail of a multi-gigabyte pair stays reachable. */
-	private range = new VirtualScroll(0, 1);
+	/** The viewport's position over the comparison's rows (scroll/model.ts) — one model,
+	 *  both panes: row `n` is offset n×bytesPerRow of either file. */
+	readonly scroll: ScrollModel;
+	private readonly scrollbar: Scrollbar;
 	/** The scan's difference regions, in address order; empty until (and unless) it finds any. */
 	private regions: DiffRegion[] = [];
 	private regionIndex = -1;
@@ -104,11 +107,9 @@ export class HexCompareView {
 	private destroyed = false;
 	/** Watches the scroller for relayouts; disconnected by destroy(). */
 	private readonly observer: ResizeObserver;
-	/** The smooth wheel glide over the scroller (ui.ts), disposed with the view. */
-	private readonly wheel: SmoothWheelHandle;
-	/** PageUp/PageDown over the scroller (ui.ts): exactly one viewport of document rows per
-	 *  press, never the scaled-range leap the native page key would make. */
-	private readonly pageKeys: SmoothWheelHandle;
+	/** The wheel and the page keys over the scroller (scroll/input.ts), disposed with the view. */
+	private readonly wheel: Disposable;
+	private readonly pageKeys: Disposable;
 
 	constructor(private leftPath: string, private rightPath: string, private labels: HexCompareLabels = { left: leftPath, right: rightPath }) {
 		const prev = el('button', 'button secondary', [icon('arrow-up')]);
@@ -148,10 +149,14 @@ export class HexCompareView {
 		this.scroller = el('div', 'hex-scroller');
 		this.sizer = el('div', 'hex-sizer');
 		this.scroller.append(this.sizer);
+		const viewport = el('div', 'hex-viewport', [this.scroller]);
 		this.ruler = el('div', 'hex-header-wrap');
 		this.status = el('div', 'hex-status', ['Loading…']);
-		this.root = el('div', 'hex-view hex-compare', [toolbar, this.ruler, this.scroller, this.status]);
+		this.root = el('div', 'hex-view hex-compare', [toolbar, this.ruler, viewport, this.status]);
 		this.root.tabIndex = 0;
+		this.scroll = new ScrollModel(20);
+		this.scroll.onChange(() => this.draw());
+		this.scrollbar = new Scrollbar(viewport, this.scroll);
 		this.root.addEventListener('keydown', (event) => {
 			if (event.key === 'F7') {
 				event.preventDefault();
@@ -160,19 +165,9 @@ export class HexCompareView {
 		});
 		this.scroller.addEventListener('scroll', () => {
 			this.ruler.scrollLeft = this.scroller.scrollLeft;
-			this.draw();
 		});
-		this.wheel = attachSmoothWheel(this.scroller, {
-			enabled: () => settings.smoothScrolling,
-			sensitivity: () => settings.mouseWheelScrollSensitivity,
-			fastSensitivity: () => settings.fastScrollSensitivity,
-			zoom: () => this.range.documentPxPerScrollPx(this.scroller.clientHeight)
-		});
-		this.pageKeys = attachPageKeys(this.scroller, {
-			range: () => this.range,
-			rowHeight: () => this.rowHeight || 20,
-			paged: () => this.draw()
-		});
+		this.wheel = attachWheel(this.scroller, this.scroll);
+		this.pageKeys = attachPageKeys(this.scroller, this.scroll);
 		let pending = 0;
 		this.observer = new ResizeObserver(() => {
 			if (pending) return;
@@ -203,6 +198,7 @@ export class HexCompareView {
 		this.destroyed = true;
 		this.scanToken++;
 		this.observer.disconnect();
+		this.scrollbar.dispose();
 		this.wheel.dispose();
 		this.pageKeys.dispose();
 		this.leftSlabs.pending.clear();
@@ -230,8 +226,7 @@ export class HexCompareView {
 	}
 
 	private relayout(): void {
-		const clientHeight = this.scroller.clientHeight;
-		const firstByte = this.rowHeight ? (this.range.documentTop(this.scroller.scrollTop, clientHeight, this.scroller.scrollHeight) / this.rowHeight) * this.bytesPerRow : 0;
+		const firstByte = Math.floor(this.scroll.top) * this.bytesPerRow;
 		const bpr = this.pickBytesPerRow();
 		if (bpr !== this.bytesPerRow) this.sizer.querySelector('.hex-body')?.remove();
 		this.bytesPerRow = bpr;
@@ -246,9 +241,10 @@ export class HexCompareView {
 		// empty files make for nothing to draw.
 		if (!this.rowHeight || (!this.sizeLeft && !this.sizeRight)) return;
 		this.rows = Math.ceil(Math.max(this.sizeLeft, this.sizeRight) / bpr);
-		this.range = new VirtualScroll(this.rows, this.rowHeight, Math.max(0, clientHeight - this.rowHeight));
-		this.range.lay(this.sizer);
-		this.scroller.scrollTop = this.range.scrollTopFor(Math.floor(firstByte / bpr) * this.rowHeight, clientHeight);
+		this.scroll.setRowHeight(this.rowHeight);
+		this.scroll.setRowCount(this.rows);
+		this.scroll.setViewport(this.scroller.clientHeight);
+		this.scroll.setTop(Math.floor(firstByte / bpr), 'layout');
 		this.draw();
 		this.updateStatus();
 	}
@@ -272,11 +268,7 @@ export class HexCompareView {
 	 *  n*bytesPerRow of both files - the panes never shift against each other. */
 	private draw(): void {
 		if (!this.rowHeight || !this.rows) return;
-		const scrollTop = this.scroller.scrollTop;
-		const height = this.scroller.clientHeight || 400;
-		const top = this.range.documentTop(scrollTop, height, this.scroller.scrollHeight);
-		const first = Math.max(0, Math.floor(top / this.rowHeight) - 8);
-		const last = Math.min(this.rows - 1, Math.ceil((top + height) / this.rowHeight) + 8);
+		const { first, last } = this.scroll.visibleRange(8);
 		let body = this.sizer.querySelector<HTMLElement>('.hex-body');
 		if (!body) {
 			body = el('div', 'hex-body');
@@ -286,10 +278,9 @@ export class HexCompareView {
 			body.style.top = '0';
 			this.sizer.append(body);
 		}
-		// The body sits at the document offset of its first row, pulled back by how far the
-		// scroll position and that offset differ under a scaled range (nothing unscaled,
-		// where the document offset is the content offset).
-		body.style.transform = `translateY(${first * this.rowHeight - top + scrollTop}px)`;
+		// The body sits where the model puts its first row: viewport-relative, one transform
+		// per scroll, whatever the files' size.
+		body.style.transform = `translateY(${this.scroll.rowTop(first)}px)`;
 		for (const node of Array.from(body.children)) {
 			const row = Number((node as HTMLElement).dataset.row);
 			if (row < first || row > last) node.remove();
@@ -483,7 +474,7 @@ export class HexCompareView {
 		if (!this.regions.length) return;
 		this.regionIndex = ((index % this.regions.length) + this.regions.length) % this.regions.length;
 		const region = this.regions[this.regionIndex]!;
-		this.scroller.scrollTop = this.range.scrollTopFor(Math.max(0, (Math.floor(region.start / this.bytesPerRow) - 4) * this.rowHeight), this.scroller.clientHeight);
+		this.scroll.autoscroll(Math.floor(region.start / this.bytesPerRow), 'focused');
 		this.updateCounter();
 		// The freshly scrolled-in rows must pick up their difference tints.
 		this.sizer.querySelector('.hex-body')?.remove();
@@ -501,7 +492,7 @@ export class HexCompareView {
 			return;
 		}
 		const target = Math.max(0, Math.min(value, Math.max(0, Math.max(this.sizeLeft, this.sizeRight) - 1)));
-		this.scroller.scrollTop = this.range.scrollTopFor(Math.floor(target / this.bytesPerRow) * this.rowHeight, this.scroller.clientHeight);
+		this.scroll.autoscroll(Math.floor(target / this.bytesPerRow), 'top');
 		this.draw();
 		this.gotoBox.value = '0x' + target.toString(16).toUpperCase();
 	}
