@@ -215,7 +215,7 @@ describe('source control view', () => {
 		const { view } = setup();
 		view.setRepo(REPO);
 		await view.refresh();
-		click(document.querySelector('.sidebar-title .codicon-ellipsis')!.parentElement);
+		click(document.querySelector('.scm-main-header .codicon-ellipsis')!.parentElement);
 		expect(menuLabels()).toEqual([
 			'View as Tree', 'View & Sort', 'Pull', 'Push', 'Clone', 'Checkout to...', 'Fetch',
 			'Commit', 'Changes', 'Pull, Push', 'Branch', 'Remote', 'Stash', 'Tags', 'Show Git Output',
@@ -232,27 +232,30 @@ describe('source control view', () => {
 		expect(view.sort).toBe('name');
 		expect(texts('.scm-group .row .label')).toEqual(['main.ts', 'gone.txt', 'new.txt', 'README.md']);
 
-		click(document.querySelector('.sidebar-title .codicon-ellipsis')!.parentElement);
+		click(document.querySelector('.scm-main-header .codicon-ellipsis')!.parentElement);
 		click(menuItem('View as Tree'));
 		expect(view.viewMode).toBe('tree');
 		expect(texts('.scm-group .row .label')).toEqual(['src', 'main.ts', 'gone.txt', 'new.txt', 'README.md']);
 		click(document.querySelector('.scm-folder'));
 		expect(texts('.scm-group .row .label')).toEqual(['src', 'gone.txt', 'new.txt', 'README.md']);
 		expect(localStorage.getItem('ggstudio.scmViewMode')).toBe('"tree"');
-		click(document.querySelector('.sidebar-title .codicon-list-flat')!.parentElement);
+		click(document.querySelector('.scm-main-header .codicon-list-flat')!.parentElement);
 		expect(view.viewMode).toBe('list');
 
 		rightClick(document.querySelector('.scm-group .row'));
 		expect(menuLabels()).toEqual(['Open File', 'Open Changes', 'Unstage Changes']);
 	});
 
-	it('places the Git Graph title button following the manifest\'s scm/title placement, not hardcoded', async () => {
+	it('places the Git Graph header button following the manifest\'s scm/title placement, not hardcoded', async () => {
 		const { view } = setup();
 		view.setRepo(REPO);
 		await view.refresh();
+		// The view title stays bare - the repository's own header row carries every action,
+		// arranged like a submodule section's header (label, actions, badge).
+		expect(document.querySelector('.sidebar-title .actions')).toBeNull();
 		// No contribution registered for git-graph-rs.view at all: the icon shows by default
 		// (git-graph-rs.sourceCodeProviderIntegrationLocation's own default is "Inline").
-		expect(document.querySelector('.sidebar-title .actions img[alt=""]')).not.toBeNull();
+		expect(document.querySelector('.scm-main-header .actions img[alt=""]')).not.toBeNull();
 
 		applyContributions('test-view-ext', {
 			commands: [{ command: 'git-graph-rs.view', title: 'View Git Graph' }],
@@ -260,8 +263,8 @@ describe('source control view', () => {
 		}, {}, () => undefined, () => true);
 		view.setRepo(REPO); // re-render
 		await view.refresh();
-		expect(document.querySelector('.sidebar-title .actions img[alt=""]')).toBeNull();
-		click(document.querySelector('.sidebar-title .codicon-ellipsis')!.parentElement);
+		expect(document.querySelector('.scm-main-header .actions img[alt=""]')).toBeNull();
+		click(document.querySelector('.scm-main-header .codicon-ellipsis')!.parentElement);
 		expect(menuLabels()).toContain('View Git Graph');
 		removeContributions('test-view-ext');
 	});
@@ -434,10 +437,11 @@ describe('submodule sections', () => {
 		const subIcon = document.querySelector<HTMLButtonElement>('.scm-repo-header .action-btn img[src="/icons/git-graph-16.svg"]')!.closest('button')!;
 		click(subIcon);
 		expect(opened).toEqual([SUB]);
-		// The main repository's own graph icon opens the view without switching repositories.
-		const mainIcon = document.querySelector<HTMLButtonElement>('.sidebar-title .action-btn img[src="/icons/git-graph-16.svg"]')!.closest('button')!;
+		// The main repository's own graph icon switches the view back to the open repository
+		// (e.g. after a submodule's icon had switched it away).
+		const mainIcon = document.querySelector<HTMLButtonElement>('.scm-main-header .action-btn img[src="/icons/git-graph-16.svg"]')!.closest('button')!;
 		click(mainIcon);
-		expect(opened).toEqual([SUB, undefined]);
+		expect(opened).toEqual([SUB, REPO]);
 	});
 
 	it('stages a change within a submodule, passing its own repo path', async () => {

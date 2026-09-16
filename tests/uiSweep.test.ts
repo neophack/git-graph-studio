@@ -400,9 +400,9 @@ describe('the full UI sweep', () => {
 			await showView('scm');
 			const scm = view(2);
 			expect(scm.querySelectorAll('.scm-list .row').length).toBeGreaterThan(3);
-			await clickAll(scm, '.sidebar-title .action-btn', count);
+			await clickAll(scm, '.scm-main-header .action-btn', count);
 			// The "..." menu and its submenus.
-			await driveMenu(() => click(scm.querySelector('.sidebar-title .action-btn:last-child')!), count, 'scm more');
+			await driveMenu(() => click(scm.querySelector('.scm-main-header .action-btn:last-child')!), count, 'scm more');
 			// Group headers (collapse / expand) and their inline actions.
 			await clickAll(scm, '.scm-list .pane-header', count);
 			await clickAll(scm, '.scm-list .pane-header', count);

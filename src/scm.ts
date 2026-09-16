@@ -224,8 +224,9 @@ export class SourceControlView {
 	onStatus: ((status: StatusMap) => void) | null = null;
 	onOpenFile: ((path: string) => void) | null = null;
 	onOpenDiff: ((diff: DiffRequest) => void) | null = null;
-	/** Opens the Git Graph view - `repo` switches its dropdown to a submodule's own section's
-	 *  graph icon instead of the currently active one. */
+	/** Opens the Git Graph view with its repository dropdown switched to `repo`: every
+	 *  repository header's own graph icon passes its repository - the main one's switches the
+	 *  view back to the open repository, a submodule section's switches to that submodule. */
 	onOpenGraph: ((repo?: string) => void) | null = null;
 	/** "Show File History in Git Graph" (git-graph-rs.filterByFile) from a resource's own
 	 *  context menu - VS Code passes the right-clicked resource as the command's argument;
@@ -379,7 +380,6 @@ export class SourceControlView {
 	}
 
 	private render(): void {
-		this.title.querySelector('.actions')?.remove();
 		// A refresh re-renders under the user's hands; the commit box keeps its focus and caret.
 		const previous = this.content.querySelector<HTMLTextAreaElement>('textarea');
 		const hadFocus = previous !== null && document.activeElement === previous;
@@ -400,14 +400,18 @@ export class SourceControlView {
 			]));
 			return;
 		}
-		// The extension's manifest places "View Git Graph" as a title-bar icon or inside "..."
+		// The view title stays bare ("Source Control" only): the repository's own header row
+		// carries the actions, in the same slot every submodule section's header uses below
+		// (after the label, before the badge - hover-revealed, like any pane header's).
+		// The extension's manifest places "View Git Graph" as a header icon or inside "..."
 		// depending on the git-graph-rs.sourceCodeProviderIntegrationLocation setting (scm/title,
 		// group "navigation" vs. anything else) - default to the icon if the manifest is
 		// somehow not loaded yet, matching that setting's own default ("Inline").
 		const graphTitleEntry = resolvedMenuEntries('scm/title').find((entry) => entry.command === 'git-graph-rs.view');
+		const repoPath = this.repoPath;
 		const actions: HTMLElement[] = [];
 		if (!graphTitleEntry || graphTitleEntry.group === 'navigation') {
-			const graphButton = actionButton('', graphTitleEntry?.label ?? 'View Git Graph', () => this.onOpenGraph?.());
+			const graphButton = actionButton('', graphTitleEntry?.label ?? 'View Git Graph', () => this.onOpenGraph?.(repoPath));
 			graphButton.innerHTML = '<img src="/icons/git-graph-16.svg" alt="" width="16" height="16">';
 			actions.push(graphButton);
 		}
@@ -416,10 +420,11 @@ export class SourceControlView {
 			actionButton('refresh', 'Refresh', () => void this.refresh()),
 			actionButton('ellipsis', 'More Actions...', (event) => showMenuBelow(event.currentTarget as HTMLElement, this.moreMenu(), 220))
 		);
-		this.title.appendChild(el('div', 'actions', actions));
-		this.title.querySelector<HTMLElement>('.actions')!.style.visibility = 'visible';
-
-		const header = el('div', 'pane-header', [icon('chevron-down', 'twistie'), el('span', 'label', [basename(this.repoPath)])]);
+		const header = el('div', 'pane-header scm-main-header', [
+			icon('chevron-down', 'twistie'),
+			el('span', 'label', [basename(this.repoPath)]),
+			el('div', 'actions', actions)
+		]);
 		header.title = this.repoPath;
 		if (this.changes.length > 0) header.appendChild(el('span', 'badge', [String(this.changes.length)]));
 		this.content.appendChild(header);

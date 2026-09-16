@@ -589,8 +589,9 @@ export class Workbench {
 		state.saveLayout();
 	}
 
-	/** Open the Git Graph view - on `repo` (a submodule's own graph icon in the Source Control
-	 *  view) with its repository dropdown switched to that repository. */
+	/** Open the Git Graph view - on `repo` (a repository header's graph icon in the Source
+	 *  Control view: the open repository's or a submodule's) with its repository dropdown
+	 *  switched to that repository. */
 	openGraph(repo?: string): void {
 		if (!this.repoPath) {
 			notify('info', 'Open a folder containing a Git repository to view its Git Graph.', [{ label: 'Open Folder', run: () => void this.pickFolder() }]);
