@@ -10,6 +10,7 @@ import { defaultKeymap } from '@codemirror/commands';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import { DocFindController, type DocFindHost, type DocFindMatch, type DocFindSpec } from './docFind';
+import { toggleBlockComment, toggleLineComment } from './comments';
 import { vscodeHighlighting } from './cmTheme';
 import { settings } from './settings';
 import { attachSmoothWheel, el, notify, VirtualScroll, type SmoothWheelHandle } from './ui';
@@ -230,7 +231,9 @@ export class EditableDocView {
 						{ key: 'F3', preventDefault: true, run: () => (this.findStep(1), true) },
 						{ key: 'Shift-F3', preventDefault: true, run: () => (this.findStep(-1), true) },
 						{ key: 'Mod-s', preventDefault: true, run: () => (this.onSaveRequest?.(), true) },
-						{ key: 'Mod-z', preventDefault: true, run: () => (void this.undo(), true) },
+						{ key: 'Mod-/', preventDefault: true, run: (view) => toggleLineComment(view, this.path) },
+					{ key: 'Shift-Alt-a', preventDefault: true, run: (view) => toggleBlockComment(view, this.path) },
+					{ key: 'Mod-z', preventDefault: true, run: () => (void this.undo(), true) },
 						{ key: 'Mod-Z', preventDefault: true, run: () => (void this.redo(), true) },
 						{ key: 'Mod-y', preventDefault: true, run: () => (void this.redo(), true) },
 						// Alt-ArrowLeft / Alt-ArrowRight stay the workbench's Go Back / Forward.
@@ -855,6 +858,16 @@ export class EditableDocView {
 	selectAll(): void {
 		this.cm?.focus();
 		this.cm?.dispatch({ selection: { anchor: 0, head: this.cm.state.doc.length } });
+	}
+
+	/** VS Code's comment toggles on the loaded window — the edit syncs to the rope like
+	 *  any other, so the whole file comments correctly however far the window has slid. */
+	toggleComment(kind: 'line' | 'block'): void {
+		const cm = this.cm;
+		if (!cm) return;
+		cm.focus();
+		if (kind === 'line') toggleLineComment(cm, this.path);
+		else toggleBlockComment(cm, this.path);
 	}
 
 	focus(): void {

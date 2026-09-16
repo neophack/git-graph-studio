@@ -205,7 +205,8 @@ completion (document words, snippets, paths), the find/replace widget, bracket-p
 colouring, sticky scroll, minimap, bookmarks, markdown preview.
 
 - Frontend: `src/editor.ts` (groups, tabs, breadcrumbs), `src/editorArea.ts` (split grid),
-  `src/textEditor.ts` (CodeMirror host), `src/docEditView.ts` (windowed large-file editor),
+  `src/textEditor.ts` (CodeMirror host), `src/comments.ts` (VS Code's comment toggles),
+  `src/docEditView.ts` (windowed large-file editor),
   `src/docFind.ts` (the whole-file find/replace bar the windowed editor and the Fast Viewer
   serve, over `viewer_find` / `viewer_replace`), `src/editorExtras.ts`, `src/autocomplete.ts`,
   `src/snippetRegistry.ts`, `src/findWidget.ts`, `src/findOptions.ts` (options shared with

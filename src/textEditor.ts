@@ -13,6 +13,7 @@ import { bracketMatching, foldGutter, foldKeymap, indentOnInput, indentUnit } fr
 import { languages } from '@codemirror/language-data';
 
 import { completionExtension } from './autocomplete';
+import { commentKeymapFor } from './comments';
 import { hasBookmark } from './bookmarks';
 import { bracketColorsExtension, minimapExtension, smoothWheelExtension, stickyScrollExtension } from './editorExtras';
 import { createFindPanel, openReplacePanel } from './findWidget';
@@ -78,6 +79,15 @@ function indentSettings(): Extension {
 	return [indentUnit.of(' '.repeat(settings.tabSize)), EditorState.tabSize.of(settings.tabSize)];
 }
 
+/** VS Code's comment keys (Ctrl+/, Shift+Alt+A) against a file's comment tokens. */
+function commentBindings(path: string): KeyBinding[] {
+	const comment = commentKeymapFor(() => path);
+	return [
+		{ key: 'Mod-/', run: comment.line, preventDefault: true },
+		{ key: 'Shift-Alt-a', run: comment.block, preventDefault: true }
+	];
+}
+
 /** Sets the content's underhang for the editors' scroll-past-the-end: a page (minus a
  *  line) of padding under the last line, so the scrollbar's bottom puts the file's final
  *  line at the top of the view and the page below it stays blank. Re-applied on every
@@ -96,7 +106,7 @@ function pastEndExtension(): Extension {
 	});
 }
 
-export function baseExtensions(readOnly: boolean): Extension[] {
+export function baseExtensions(readOnly: boolean, path = ''): Extension[] {
 	return [
 		lineNumbers(),
 		highlightActiveLineGutter(),
@@ -116,9 +126,9 @@ export function baseExtensions(readOnly: boolean): Extension[] {
 		// The M3 3.4 find/replace widget replaces CodeMirror's default panel; the search
 		// keymap (Ctrl+F, Enter/F3) keeps driving it.
 		search({ top: true, createPanel: createFindPanel }),
-		keymap.of([...vscodeKeymap, ...editingKeymap, ...closeBracketsKeymap, ...completionKeymap, ...findKeymap, ...historyKeymap, ...foldKeymap, indentWithTab]),
 		// Every text surface scrolls past its end: the last line parks at the viewport's top.
 		pastEndExtension(),
+		keymap.of([...commentBindings(path), ...vscodeKeymap, ...editingKeymap, ...closeBracketsKeymap, ...completionKeymap, ...findKeymap, ...historyKeymap, ...foldKeymap, indentWithTab]),
 		// The M3 3.2 decorations belong to the editable editor: diff and revision panes stay
 		// lean. The wheel glide is not a decoration — every surface that scrolls file content
 		// gets it, read-only panes included.

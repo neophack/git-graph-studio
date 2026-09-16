@@ -1196,7 +1196,7 @@ export class EditorGroup {
 	}
 
 	/** Run one of the editing commands the Edit menu offers on the active text view. */
-	runEditorCommand(command: 'undo' | 'redo' | 'selectAll' | 'find' | 'replace'): void {
+	runEditorCommand(command: 'undo' | 'redo' | 'selectAll' | 'find' | 'replace' | 'toggleLineComment' | 'toggleBlockComment'): void {
 		// A windowed editor keeps its undo stack in the backend's document; the rest run on
 		// its small window view.
 		if (this.active?.doc) {
@@ -1204,6 +1204,8 @@ export class EditorGroup {
 			else if (command === 'redo') void this.active.doc.redo();
 			else if (command === 'find') this.active.doc.openFind();
 			else if (command === 'replace') this.active.doc.openReplace();
+			else if (command === 'toggleLineComment') this.active.doc.toggleComment('line');
+			else if (command === 'toggleBlockComment') this.active.doc.toggleComment('block');
 			else this.active.doc.selectAll();
 			return;
 		}
@@ -1214,8 +1216,11 @@ export class EditorGroup {
 		}
 		const view = this.activeView;
 		if (!view || !cm) return;
+		const path = this.active?.input.kind === 'file' ? this.active.input.path : this.active?.label ?? '';
 		if (command === 'find') cm.openSearchPanel(view);
 		else if (command === 'replace') cm.openReplacePanel(view);
+		else if (command === 'toggleLineComment') void import('./comments').then(({ toggleLineComment }) => toggleLineComment(view, path));
+		else if (command === 'toggleBlockComment') void import('./comments').then(({ toggleBlockComment }) => toggleBlockComment(view, path));
 		else cm[command](view);
 	}
 
@@ -1229,7 +1234,7 @@ export class EditorGroup {
 			state: EditorState.create({
 				doc: contents,
 				extensions: [
-					...baseExtensions(false),
+					...baseExtensions(false, editor.input.kind === 'file' ? editor.input.path : editor.label),
 					...completionExtension(editor.input.kind === 'file' ? editor.input.path : editor.label),
 					bookmarkGutter(editor.input.kind === 'file' ? editor.input.path : ''),
 					languageSlot.of([]),

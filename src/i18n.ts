@@ -337,6 +337,8 @@ const zhCnText: Record<string, string> = {
 	'Show Call Tree': '显示调用树',
 	'Toggle Bookmark': '切换书签',
 	'List Bookmarks': '列出书签',
+	'Toggle Line Comment': '切换行注释',
+	'Toggle Block Comment': '切换块注释',
 	'Install Extension from VSIX...': '从 VSIX 安装扩展...',
 	'Install from VSIX or GGX...': '从 VSIX 或 GGX 安装...',
 	'Git: Open File History': 'Git: 打开文件历史',
