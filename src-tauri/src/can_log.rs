@@ -18,7 +18,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /* ---------- The frame ---------- */
 
@@ -1886,6 +1886,45 @@ impl<W: Write + Seek> Converter<W> {
 
 /* ---------- Raw-frame documents (the raw log view) ---------- */
 
+/// The raw view's filter, one dimension per toolbar control. Every dimension is "empty =
+/// keep everything", so the zero spec is the whole log; a `None` filter skips the index
+/// machinery entirely (the common, unfiltered browse).
+#[derive(Deserialize, Clone, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CanFrameFilter {
+	/// The channels to keep; empty = every channel.
+	pub channels: Vec<u16>,
+	/// The direction to keep; `All` (the default) keeps both.
+	pub direction: CanDirection,
+	/// The frame type to keep; `All` (the default) keeps every kind.
+	pub kind: CanKind,
+	/// Inclusive id ranges as `[from, to]` pairs; empty = every id.
+	pub id_ranges: Vec<(u32, u32)>,
+}
+
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CanDirection {
+	#[default]
+	All,
+	Rx,
+	Tx,
+}
+
+/// The frame kinds the Type column badges: a frame is exactly one of these, in this order
+/// of precedence — error frames first (an FD error chip is an error), then remote requests,
+/// then CAN FD data frames, then classic CAN data frames.
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CanKind {
+	#[default]
+	All,
+	Can,
+	Canfd,
+	Error,
+	Remote,
+}
+
 /// The raw view's frames as columns, not an array of 90-byte records: a fifty-million-frame
 /// trace costs ~24 bytes of columns per frame plus its payload (instead of a fixed 64-byte
 /// array per frame), and a viewport fetch walks four hot runs instead of striding through
@@ -1898,6 +1937,24 @@ struct FrameStore {
 	/// Cumulative payload-arena offsets: frame i's bytes are `bytes[ends[i-1]..ends[i]]`.
 	ends: Vec<u64>,
 	bytes: Vec<u8>,
+	/// The channels named so far, ascending — the filter bar's channel list, which grows
+	/// with the walk.
+	channels: Vec<u16>,
+	/// The cached match index of the filter the view last asked about, if any. Kept beside
+	/// the columns so one lock guards both (see `refresh_filter`).
+	filter: Option<FilteredIndex>,
+}
+
+/// `FrameStore`'s cached answer to one filter: the frames that pass it, as their indices in
+/// log order. The store is append-only, so an unchanged filter only ever extends the index
+/// as the walk lands more batches — a changed one rebuilds from scratch.
+struct FilteredIndex {
+	spec: CanFrameFilter,
+	/// The store indices of the passing frames, ascending: position i of the filtered row
+	/// space is `matches[i]`.
+	matches: Vec<u32>,
+	/// How many frames of the store `matches` already covers.
+	applied: usize,
 }
 
 /// `meta`'s flag bits, MSB to LSB after the channel: extended, fd, brs, esi, remote, error, tx.
@@ -1919,11 +1976,15 @@ impl FrameStore {
 			| (F_REMOTE * frame.remote as u32)
 			| (F_ERROR * frame.error as u32)
 			| (F_TX * frame.tx as u32);
+		let channel = frame.channel.min(0xfff);
 		self.t_ns.push(frame.t_ns);
 		self.ids.push(frame.id);
-		self.meta.push(flags | ((frame.dlc as u32 & 0xf) << 7) | (len as u32 & 0x7f) | ((frame.channel.min(0xfff) as u32) << 19));
+		self.meta.push(flags | ((frame.dlc as u32 & 0xf) << 7) | (len as u32 & 0x7f) | ((channel as u32) << 19));
 		self.bytes.extend_from_slice(&frame.data[..len]);
 		self.ends.push(self.bytes.len() as u64);
+		if let Err(at) = self.channels.binary_search(&channel) {
+			self.channels.insert(at, channel);
+		}
 	}
 
 	fn len(&self) -> usize {
@@ -1954,6 +2015,7 @@ impl FrameStore {
 			data_hex.push_str(&format!("{byte:02X}"));
 		}
 		CanFrameLine {
+			index: index as u64,
 			t_s: self.t_ns[index] as f64 / 1e9,
 			channel: (meta >> 19) as u16,
 			id: self.ids[index],
@@ -1968,6 +2030,71 @@ impl FrameStore {
 			data_hex,
 		}
 	}
+
+	/// Whether the frame at `index` passes `spec` — one branch per dimension, the columns
+	/// read straight out of `meta` (no per-frame record is ever materialised).
+	fn passes(&self, index: usize, spec: &CanFrameFilter) -> bool {
+		let meta = self.meta[index];
+		let error = meta & F_ERROR != 0;
+		let remote = meta & F_REMOTE != 0;
+		let fd = meta & F_FD != 0;
+		let kind_ok = match spec.kind {
+			CanKind::All => true,
+			// The kind is exactly what the row's Type badge shows, error frames first.
+			CanKind::Error => error,
+			CanKind::Remote => remote && !error,
+			CanKind::Canfd => fd && !remote && !error,
+			CanKind::Can => !fd && !remote && !error,
+		};
+		if !kind_ok {
+			return false;
+		}
+		let tx = meta & F_TX != 0;
+		if match spec.direction {
+			CanDirection::All => false,
+			CanDirection::Rx => tx,
+			CanDirection::Tx => !tx,
+		} {
+			return false;
+		}
+		if !spec.channels.is_empty() && !spec.channels.contains(&((meta >> 19) as u16)) {
+			return false;
+		}
+		// No id ranges named: every id passes; otherwise the id must lie in one of them.
+		let id = self.ids[index];
+		spec.id_ranges.is_empty() || spec.id_ranges.iter().any(|&(from, to)| id >= from && id <= to)
+	}
+
+	/// Brings the cached match index up to date with `spec`: extends it over the frames the
+	/// walk has landed since it last ran, or rebuilds it from scratch when the spec changed
+	/// (the view sends a fresh spec on every toolbar change, so the rebuild is exactly the
+	/// user-visible filter change). A changed filter only ever needs the store as it is —
+	/// nothing outside this lock reads the index.
+	fn refresh_filter(&mut self, spec: &CanFrameFilter) {
+		if !matches!(&self.filter, Some(cached) if cached.spec == *spec) {
+			self.filter = Some(FilteredIndex { spec: spec.clone(), matches: Vec::new(), applied: 0 });
+		}
+		// The guard above made the cached spec identical to `spec`, so the loop reads the
+		// caller's — one shared immutable borrow of self, no fighting the cached one.
+		let applied = self.filter.as_ref().unwrap().applied;
+		let total = self.len();
+		for index in applied..total {
+			if self.passes(index, spec) {
+				self.filter.as_mut().unwrap().matches.push(index as u32);
+			}
+		}
+		self.filter.as_mut().unwrap().applied = total;
+	}
+
+	/// A window of the filtered row space, in log order: position `i` of the window maps
+	/// through the match index to the frame's own columns, and each line carries its
+	/// original index so the "No." column stays the frame's place in the whole log.
+	fn filtered_window(&mut self, spec: &CanFrameFilter, start: usize, end: usize) -> Vec<CanFrameLine> {
+		self.refresh_filter(spec);
+		let filter = self.filter.as_ref().unwrap();
+		let end = end.min(filter.matches.len());
+		(start.min(end)..end).map(|i| self.line(filter.matches[i] as usize)).collect()
+	}
 }
 
 /// One frame as the raw view's table row: the display fields only, with the payload already
@@ -1975,6 +2102,9 @@ impl FrameStore {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CanFrameLine {
+	/// The frame's position in the whole log — the row's "No.", whatever filter narrowed
+	/// the view (the lines arrive in filtered order but number in log order).
+	pub index: u64,
 	pub t_s: f64,
 	pub channel: u16,
 	pub id: u32,
@@ -2006,7 +2136,7 @@ pub struct CanLogDoc {
 impl CanLogDoc {
 	fn new(total_bytes: u64) -> Self {
 		CanLogDoc {
-			frames: Mutex::new(FrameStore { t_ns: Vec::new(), ids: Vec::new(), meta: Vec::new(), ends: Vec::new(), bytes: Vec::new() }),
+			frames: Mutex::new(FrameStore { t_ns: Vec::new(), ids: Vec::new(), meta: Vec::new(), ends: Vec::new(), bytes: Vec::new(), channels: Vec::new(), filter: None }),
 			parsed: AtomicUsize::new(0),
 			bytes: AtomicU64::new(0),
 			total_bytes,
@@ -2110,39 +2240,176 @@ pub async fn can_log_open(path: String, state: tauri::State<'_, CanLogState>) ->
 }
 
 /// A window of the document's frames, in log order — only what the viewport shows ever
-/// crosses the bridge. A range past the parsed prefix comes back short (or empty).
+/// crosses the bridge. A range past the parsed prefix comes back short (or empty). With a
+/// filter, the window is of the frames that pass it and each line still numbers its frame
+/// in the whole log; the first application of a filter walks the parsed prefix once, so
+/// this runs on the blocking pool like every other heavy walk in this module.
 #[tauri::command]
-pub fn can_log_frames(state: tauri::State<'_, CanLogState>, doc_id: u32, start: usize, end: usize) -> Result<Vec<CanFrameLine>, String> {
+pub async fn can_log_frames(state: tauri::State<'_, CanLogState>, doc_id: u32, start: usize, end: usize, filter: Option<CanFrameFilter>) -> Result<Vec<CanFrameLine>, String> {
 	let doc = state.get(doc_id).ok_or_else(|| "this log view was closed".to_string())?;
-	let frames = doc.frames.lock().unwrap();
-	let end = end.min(frames.len());
-	Ok((start.min(end)..end).map(|i| frames.line(i)).collect())
+	tauri::async_runtime::spawn_blocking(move || {
+		let mut frames = doc.frames.lock().unwrap();
+		Ok(match &filter {
+			None => {
+				let end = end.min(frames.len());
+				(start.min(end)..end).map(|i| frames.line(i)).collect()
+			}
+			Some(spec) => frames.filtered_window(spec, start, end),
+		})
+	})
+	.await
+	.map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CanLogCount {
 	pub parsed: u64,
+	/// The frames that pass the filter the caller asked about — the scroll range's length
+	/// while one is active; equals `parsed` without a filter.
+	pub matched: u64,
 	pub done: bool,
 	pub error: Option<String>,
 	/// The walk's file position and the file's size — the live percentage.
 	pub bytes: u64,
 	pub total_bytes: u64,
+	/// The channels the frames have named so far, ascending — the filter bar's channel list.
+	pub channels: Vec<u16>,
 }
 
 /// How far the background walk has come — what the raw view polls to extend its scroll
-/// range, and where a parse failure surfaces once the walk ends.
+/// range, and where a parse failure surfaces once the walk ends. The optional filter makes
+/// the same poll report the filtered row count (`matched`) and refresh the cached match
+/// index as the walk lands more batches.
 #[tauri::command]
-pub fn can_log_count(state: tauri::State<'_, CanLogState>, doc_id: u32) -> Result<CanLogCount, String> {
+pub async fn can_log_count(state: tauri::State<'_, CanLogState>, doc_id: u32, filter: Option<CanFrameFilter>) -> Result<CanLogCount, String> {
 	let doc = state.get(doc_id).ok_or_else(|| "this log view was closed".to_string())?;
-	let error = doc.error.lock().unwrap().clone();
-	Ok(CanLogCount {
-		parsed: doc.parsed.load(Ordering::Relaxed) as u64,
-		done: doc.done.load(Ordering::Acquire),
-		error,
-		bytes: doc.bytes.load(Ordering::Relaxed),
-		total_bytes: doc.total_bytes,
+	tauri::async_runtime::spawn_blocking(move || {
+		let error = doc.error.lock().unwrap().clone();
+		let parsed = doc.parsed.load(Ordering::Relaxed) as u64;
+		let mut frames = doc.frames.lock().unwrap();
+		// An unfiltered poll touches no index — the whole point of `Option`.
+		let matched = match &filter {
+			Some(spec) => {
+				frames.refresh_filter(spec);
+				frames.filter.as_ref().map_or(0, |f| f.matches.len()) as u64
+			}
+			None => parsed,
+		};
+		let channels = frames.channels.clone();
+		drop(frames);
+		Ok(CanLogCount {
+			parsed,
+			matched,
+			done: doc.done.load(Ordering::Acquire),
+			error,
+			bytes: doc.bytes.load(Ordering::Relaxed),
+			total_bytes: doc.total_bytes,
+			channels,
+		})
 	})
+	.await
+	.map_err(|e| e.to_string())?
+}
+
+/// A find query normalised for the frame columns: the bytes to look for inside payloads
+/// and, when the whole query parses as one 29-bit number, the id to look for. A frame
+/// matches on either — CANoe's trace find is id-or-content, not a text regex.
+struct CanQuery {
+	id: Option<u32>,
+	bytes: Vec<u8>,
+}
+
+/// Parse a find query: whitespace, commas and colons are dropped, an optional `0x` prefix
+/// is stripped, and the rest must be hexadecimal digits. `100` is the id 0x100; `1000` is
+/// both the id 0x1000 and the byte pair 10 00; an odd-length query can only be an id.
+fn parse_can_query(query: &str) -> Result<CanQuery, String> {
+	let cleaned: String = query.chars().filter(|c| !c.is_whitespace() && *c != ',' && *c != ':').collect();
+	let cleaned = cleaned.strip_prefix("0x").or_else(|| cleaned.strip_prefix("0X")).unwrap_or(&cleaned);
+	if cleaned.is_empty() {
+		return Err("the find query is empty".to_string());
+	}
+	if !cleaned.chars().all(|c| c.is_ascii_hexdigit()) {
+		return Err(format!("'{query}' is not a hexadecimal query — ids and data bytes are written in hex"));
+	}
+	let id = u32::from_str_radix(cleaned, 16).ok().filter(|&id| id <= 0x1fff_ffff);
+	let bytes = if cleaned.len() % 2 == 0 {
+		cleaned.as_bytes().chunks_exact(2).map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap()).collect()
+	} else {
+		Vec::new()
+	};
+	Ok(CanQuery { id, bytes })
+}
+
+/// How many hit positions cross the bridge — the count stays exact, the jump list is capped
+/// the way the editor's find caps its match count.
+const MAX_FIND_POSITIONS: usize = 10_000;
+
+/// A find's answer: the matching positions of the (filtered) row space — capped — and the
+/// true total, so the bar can say "10,000+" while still jumping exactly.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanFindResult {
+	pub positions: Vec<u32>,
+	pub total: u64,
+	pub capped: bool,
+}
+
+/// The matches of `query` over an ordered walk of `(frame index, row position)` pairs — one
+/// bounded pass of the columns, no per-frame record on the heap.
+fn find_positions<'a>(frames: &FrameStore, walk: impl Iterator<Item = (usize, u32)> + 'a, query: &CanQuery) -> CanFindResult {
+	let mut out = CanFindResult { positions: Vec::new(), total: 0, capped: false };
+	for (frame_index, position) in walk {
+		if !frames.matches_query(frame_index, query) {
+			continue;
+		}
+		out.total += 1;
+		if out.positions.len() < MAX_FIND_POSITIONS {
+			out.positions.push(position);
+		} else {
+			out.capped = true;
+		}
+	}
+	out
+}
+
+impl FrameStore {
+	/// Whether the frame at `index` matches a find query: its id equals the query's id, or
+	/// the query's byte sequence occurs consecutively in its payload.
+	fn matches_query(&self, index: usize, query: &CanQuery) -> bool {
+		if query.id.is_some_and(|id| self.ids[index] == id) {
+			return true;
+		}
+		if query.bytes.is_empty() {
+			return false;
+		}
+		let start = if index == 0 { 0 } else { self.ends[index - 1] as usize };
+		let payload = &self.bytes[start..self.ends[index] as usize];
+		payload.windows(query.bytes.len()).any(|window| window == query.bytes)
+	}
+}
+
+/// Find in the raw log — the raw view's search bar (Ctrl+F): every frame whose id or
+/// payload matches the hex query, in log order, as positions of the current row space (a
+/// filter on means only its frames are searched, and the positions address the filtered
+/// rows the view scrolls). One bounded pass over the columns on the blocking pool.
+#[tauri::command]
+pub async fn can_log_find(state: tauri::State<'_, CanLogState>, doc_id: u32, query: String, filter: Option<CanFrameFilter>) -> Result<CanFindResult, String> {
+	let doc = state.get(doc_id).ok_or_else(|| "this log view was closed".to_string())?;
+	tauri::async_runtime::spawn_blocking(move || {
+		let needle = parse_can_query(&query)?;
+		let mut frames = doc.frames.lock().unwrap();
+		Ok(match &filter {
+			None => find_positions(&frames, (0..frames.len()).map(|index| (index, index as u32)), &needle),
+			Some(spec) => {
+				frames.refresh_filter(spec);
+				let filter = frames.filter.as_ref().unwrap();
+				find_positions(&frames, filter.matches.iter().enumerate().map(|(position, &frame)| (frame as usize, position as u32)), &needle)
+			}
+		})
+	})
+	.await
+	.map_err(|e| e.to_string())?
 }
 
 /// Releases a raw-log document's frames when its tab closes.
@@ -2786,6 +3053,170 @@ base hex timestamps relative
 		assert_eq!(lines[2].data_hex, "");
 	}
 
+	/* ----- the raw view's filter ----- */
+
+	/// A raw document over one frame per filter dimension, walked out of a small .asc:
+	/// two classic frames and an extended one on channel 1, a CAN FD pair on channel 2,
+	/// a remote request and an error frame.
+	fn filter_doc() -> Arc<CanLogDoc> {
+		let doc = Arc::new(CanLogDoc::new(0));
+		let mut sink = VecSink { doc: Arc::clone(&doc), staging: Vec::new() };
+		walk_asc(
+			"base hex timestamps relative\n\
+			   0.000000 1  100  Rx   d 1 AA\n\
+			   0.010000 1  100  Rx   d 1 AA\n\
+			   0.020000 1  18FF0001x  Tx   d 2 BB CC\n\
+			   0.030000 CANFD 2 Rx 200 BRS 9 12 00 11 22 33 44 55 66 77 88 99 AA BB\n\
+			   0.040000 CANFD 2 Tx 1FF NoBRS 2 11 22\n\
+			   0.050000 1  55  Rx   r 2\n\
+			   0.060000 1 ErrorFrame\n",
+			&mut sink,
+		);
+		sink.flush();
+		doc
+	}
+
+	/// The matching frame indices under `spec`, through the same cached index the commands
+	/// drive.
+	fn matches_of(store: &mut FrameStore, spec: &CanFrameFilter) -> Vec<u32> {
+		store.refresh_filter(spec);
+		store.filter.as_ref().unwrap().matches.clone()
+	}
+
+	#[test]
+	fn raw_filter_dimensions_narrow_independently_and_together() {
+		let doc = filter_doc();
+		let mut store = doc.frames.lock().unwrap();
+		// The channel list the filter bar's select is built from.
+		assert_eq!(store.channels, vec![1, 2]);
+		let ids = |store: &mut FrameStore, spec: &CanFrameFilter| matches_of(store, spec);
+		// Every dimension empty: the whole log.
+		assert_eq!(ids(&mut store, &CanFrameFilter::default()), vec![0, 1, 2, 3, 4, 5, 6]);
+		// Ids: a single id, then a range around both classic ids — the extended 0x18FF0001
+		// is far outside it.
+		assert_eq!(ids(&mut store, &CanFrameFilter { id_ranges: vec![(0x100, 0x100)], ..Default::default() }), vec![0, 1]);
+		assert_eq!(ids(&mut store, &CanFrameFilter { id_ranges: vec![(0x100, 0x2FF)], ..Default::default() }), vec![0, 1, 3, 4]);
+		// Channels: channel 2 is the FD pair.
+		assert_eq!(ids(&mut store, &CanFrameFilter { channels: vec![2], ..Default::default() }), vec![3, 4]);
+		// Direction.
+		assert_eq!(ids(&mut store, &CanFrameFilter { direction: CanDirection::Tx, ..Default::default() }), vec![2, 4]);
+		assert_eq!(ids(&mut store, &CanFrameFilter { direction: CanDirection::Rx, ..Default::default() }), vec![0, 1, 3, 5, 6]);
+		// Kinds — each is exactly what the row's Type badge shows.
+		assert_eq!(ids(&mut store, &CanFrameFilter { kind: CanKind::Can, ..Default::default() }), vec![0, 1, 2]);
+		assert_eq!(ids(&mut store, &CanFrameFilter { kind: CanKind::Canfd, ..Default::default() }), vec![3, 4]);
+		assert_eq!(ids(&mut store, &CanFrameFilter { kind: CanKind::Remote, ..Default::default() }), vec![5]);
+		assert_eq!(ids(&mut store, &CanFrameFilter { kind: CanKind::Error, ..Default::default() }), vec![6]);
+		// Together: channel 1's classic frames, transmitted only — the extended 0x18FF0001.
+		assert_eq!(
+			ids(&mut store, &CanFrameFilter { channels: vec![1], direction: CanDirection::Tx, kind: CanKind::Can, ..Default::default() }),
+			vec![2]
+		);
+	}
+
+	#[test]
+	fn raw_filter_windows_number_frames_in_log_order() {
+		let doc = filter_doc();
+		let mut store = doc.frames.lock().unwrap();
+		let spec = CanFrameFilter { direction: CanDirection::Tx, ..Default::default() };
+		let lines = store.filtered_window(&spec, 0, 10);
+		assert_eq!(lines.len(), 2);
+		// The lines arrive in filtered order but each carries its own index — the row's
+		// "No." stays the frame's place in the whole log.
+		assert_eq!(lines[0].index, 2);
+		assert_eq!(lines[0].id, 0x18FF0001);
+		assert!(lines[0].tx);
+		assert_eq!(lines[1].index, 4);
+		assert_eq!(lines[1].id, 0x1FF);
+		// A window past the filtered end clamps, exactly like the unfiltered one.
+		assert!(store.filtered_window(&spec, 5, 10).is_empty());
+	}
+
+	#[test]
+	fn raw_filter_index_extends_with_the_walk_and_rebuilds_on_change() {
+		let doc = Arc::new(CanLogDoc::new(0));
+		let mut sink = VecSink { doc: Arc::clone(&doc), staging: Vec::new() };
+		walk_asc("base hex timestamps relative\n   0.000000 1  100  Rx   d 1 AA\n", &mut sink);
+		sink.flush();
+		{
+			let mut store = doc.frames.lock().unwrap();
+			let spec = CanFrameFilter { id_ranges: vec![(0x100, 0x100)], ..Default::default() };
+			store.refresh_filter(&spec);
+			assert_eq!(matches_of(&mut store, &spec), vec![0]);
+			assert_eq!(store.filter.as_ref().unwrap().applied, 1);
+		}
+		// The walk lands two more frames — the unchanged spec only scans the extension.
+		sink.frame(RawFrame::data_frame(1_000_000, 1, 0x100, false, false, 1, 1, &[0xAA], false));
+		sink.frame(RawFrame::data_frame(2_000_000, 1, 0x300, false, false, 1, 1, &[0xBB], false));
+		sink.flush();
+		let mut store = doc.frames.lock().unwrap();
+		let spec = CanFrameFilter { id_ranges: vec![(0x100, 0x100)], ..Default::default() };
+		assert_eq!(matches_of(&mut store, &spec), vec![0, 1]);
+		// A changed spec rebuilds: the old matches never leak into the new row space.
+		let other = CanFrameFilter { id_ranges: vec![(0x300, 0x300)], ..Default::default() };
+		assert_eq!(matches_of(&mut store, &other), vec![2]);
+		assert_eq!(store.filter.as_ref().unwrap().applied, 3);
+	}
+
+	#[test]
+	fn find_queries_parse_as_an_id_and_or_a_byte_sequence() {
+		// An odd-length query can only be an id; an even-length one is both.
+		let odd = parse_can_query("100").unwrap();
+		assert_eq!(odd.id, Some(0x100));
+		assert!(odd.bytes.is_empty());
+		let both = parse_can_query("1000").unwrap();
+		assert_eq!(both.id, Some(0x1000));
+		assert_eq!(both.bytes, vec![0x10, 0x00]);
+		// Spaces, commas and an 0x prefix are tolerated; case does not matter.
+		let spaced = parse_can_query("0xAA BB,cc").unwrap();
+		assert_eq!(spaced.bytes, vec![0xAA, 0xBB, 0xCC]);
+		assert!(parse_can_query("123").unwrap().id.is_some());
+		assert!(parse_can_query("not hex!").is_err());
+		assert!(parse_can_query("").is_err());
+	}
+
+	#[test]
+	fn find_matches_frames_by_id_or_payload_and_respects_the_filter() {
+		let doc = filter_doc();
+		// Id: the two 0x100 frames (its byte pair 10 00 matches no payload in the fixture).
+		let frames = doc.frames.lock().unwrap();
+		let by_id = parse_can_query("0x100").unwrap();
+		let found = find_positions(&frames, (0..frames.len()).map(|index| (index, index as u32)), &by_id);
+		assert_eq!(found.positions, vec![0, 1]);
+		assert_eq!(found.total, 2);
+		assert!(!found.capped);
+		// Payload: only the 12-byte FD frame carries the consecutive bytes 99 AA.
+		let by_data = parse_can_query("99 AA").unwrap();
+		let found = find_positions(&frames, (0..frames.len()).map(|index| (index, index as u32)), &by_data);
+		assert_eq!(found.positions, vec![3]);
+		drop(frames);
+		// A filter narrows the searched row space: with only the FD pair kept, the id 0x1FF
+		// is a hit and its position is the filtered one (the second FD frame is row 1).
+		let mut store = doc.frames.lock().unwrap();
+		let spec = CanFrameFilter { kind: CanKind::Canfd, ..Default::default() };
+		store.refresh_filter(&spec);
+		let by_fd_id = parse_can_query("1FF").unwrap();
+		let found = find_positions(&store, store.filter.as_ref().unwrap().matches.iter().enumerate().map(|(position, &frame)| (frame as usize, position as u32)), &by_fd_id);
+		assert_eq!(found.positions, vec![1]);
+	}
+
+	#[test]
+	fn find_caps_the_positions_but_counts_everything() {
+		let doc = Arc::new(CanLogDoc::new(0));
+		let mut sink = VecSink { doc: Arc::clone(&doc), staging: Vec::new() };
+		// More 0x100 frames than the cap, so the jump list fills but the count does not stop.
+		const FRAMES: u64 = MAX_FIND_POSITIONS as u64 * 2 + 5_000;
+		for i in 0..FRAMES {
+			sink.frame(RawFrame::data_frame(i * 1_000, 1, 0x100, false, false, 1, 1, &[0x55], false));
+		}
+		sink.flush();
+		let frames = doc.frames.lock().unwrap();
+		let needle = parse_can_query("0x100").unwrap();
+		let found = find_positions(&frames, (0..frames.len()).map(|index| (index, index as u32)), &needle);
+		assert_eq!(found.positions.len(), MAX_FIND_POSITIONS);
+		assert_eq!(found.total, FRAMES);
+		assert!(found.capped);
+	}
+
 	#[test]
 	fn asc_digit_fd_flags_with_name_and_trailing_metadata() {
 		// CANoe 12 writes the FD flags as bare `1`/`0` digits, not BRS/ESI words, and
@@ -3310,3 +3741,4 @@ base hex timestamps relative
 		assert_eq!(row.payload_bytes, 64);
 	}
 }
+

@@ -1,6 +1,8 @@
 // The CAN log views: a .blf or .asc opens straight into the raw frame view (never the hex
-// viewer) and browses frames while the backend parses, its Statistics button opens the
-// statistics analysis as its own tab, where the backend's `can_log_stats` result renders
+// viewer) and browses frames while the backend parses — with CANoe's Trace-window filters
+// (identifier ranges, channel, direction, frame type) narrowing the whole log on the
+// backend, rows numbering in log order. Its Statistics button opens the statistics
+// analysis as its own tab, where the backend's `can_log_stats` result renders
 // asynchronously, the bus load follows the toolbar's bitrate, the filter bar narrows the
 // tables, an identifier click opens the cycle analysis with its charts, and the convert
 // button writes the log out in the other format.
@@ -8,8 +10,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { EditorGroup, isCanLog } from '../src/editor';
-import { busLoad, formatCycle, idHex, parseIdFilter, progressText, type CanFrameLine, type CanIntervals, type CanLogStats, type CanProgress } from '../src/canLogView';
-import { CanRawView } from '../src/canRawView';
+import { busLoad, formatCycle, idHex, parseIdFilter, progressText, type CanIntervals, type CanLogStats, type CanProgress } from '../src/canLogView';
+import { CanRawView, type CanFrameLine } from '../src/canRawView';
 import { backend, Channel, dialog } from './tauriMock';
 import { click, texts } from './helpers';
 
@@ -71,10 +73,10 @@ const INTERVALS: CanIntervals = {
 };
 
 const RAW_LINES: CanFrameLine[] = [
-	{ tS: 0, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17 03 22 01 F1 26 08 08' },
-	{ tS: 0.01, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17 03 22 01 F1 26 08 08' },
-	{ tS: 0.02, channel: 1, id: 0x18ff0001, extended: true, fd: true, brs: true, esi: false, remote: false, error: false, tx: true, dlc: 9, dataHex: 'AA BB CC' },
-	{ tS: 0.03, channel: 1, id: 0, extended: false, fd: false, brs: false, esi: false, remote: false, error: true, tx: false, dlc: 0, dataHex: '' }
+	{ index: 0, tS: 0, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17 03 22 01 F1 26 08 08' },
+	{ index: 1, tS: 0.01, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17 03 22 01 F1 26 08 08' },
+	{ index: 2, tS: 0.02, channel: 1, id: 0x18ff0001, extended: true, fd: true, brs: true, esi: false, remote: false, error: false, tx: true, dlc: 9, dataHex: 'AA BB CC' },
+	{ index: 3, tS: 0.03, channel: 1, id: 0, extended: false, fd: false, brs: false, esi: false, remote: false, error: true, tx: false, dlc: 0, dataHex: '' }
 ];
 
 /** Scripts the raw view's commands: an already-complete walk of `RAW_LINES`. */
@@ -83,6 +85,70 @@ function mockRawDoc(): void {
 	backend.on('can_log_count', () => ({ parsed: RAW_LINES.length, done: true, error: null }));
 	backend.on('can_log_frames', ({ start, end }) => RAW_LINES.slice(start as number, end as number));
 	backend.on('can_log_close', () => undefined);
+}
+
+/** One frame per filter dimension: both channels, both directions, classic / FD / remote /
+ *  error frames — the raw view's filter test walks every combination out of these. */
+const FILTER_LINES: CanFrameLine[] = [
+	{ index: 0, tS: 0, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17' },
+	{ index: 1, tS: 0.01, channel: 2, id: 0x200, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: true, dlc: 8, dataHex: '18' },
+	{ index: 2, tS: 0.02, channel: 1, id: 0x300, extended: true, fd: true, brs: true, esi: false, remote: false, error: false, tx: false, dlc: 9, dataHex: 'AA BB' },
+	{ index: 3, tS: 0.03, channel: 2, id: 0x55, extended: false, fd: false, brs: false, esi: false, remote: true, error: false, tx: false, dlc: 2, dataHex: '' },
+	{ index: 4, tS: 0.04, channel: 1, id: 0x400, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: true, dlc: 1, dataHex: '17 CC' },
+	{ index: 5, tS: 0.05, channel: 2, id: 0, extended: false, fd: false, brs: false, esi: false, remote: false, error: true, tx: false, dlc: 0, dataHex: '' }
+];
+
+/** The filter semantics of `can_log.rs`'s `passes`, over a scripted line. */
+function framePassesFilter(line: CanFrameLine, filter: unknown): boolean {
+	const f = (filter ?? {}) as { channels?: number[]; direction?: string; kind?: string; idRanges?: [number, number][] };
+	if (f.channels?.length && !f.channels.includes(line.channel)) return false;
+	if (f.direction === 'rx' && line.tx) return false;
+	if (f.direction === 'tx' && !line.tx) return false;
+	if (f.kind === 'error' && !line.error) return false;
+	if (f.kind === 'remote' && (line.error || !line.remote)) return false;
+	if (f.kind === 'canfd' && (line.error || line.remote || !line.fd)) return false;
+	if (f.kind === 'can' && (line.error || line.remote || line.fd)) return false;
+	if (f.idRanges?.length && !f.idRanges.some(([from, to]) => line.id >= from && line.id <= to)) return false;
+	return true;
+}
+
+/** The raw view's commands over `FILTER_LINES`, honouring the filter argument the way
+ *  `can_log.rs` does: the count reports the matches, the window serves them, and each
+ *  line keeps its own index in the whole log. */
+function mockFilteredDoc(): void {
+	const matched = (filter: unknown): CanFrameLine[] => FILTER_LINES.filter((line) => framePassesFilter(line, filter));
+	backend.on('can_log_open', () => ({ docId: 33, totalBytes: 1000 }));
+	backend.on('can_log_count', ({ filter }) => ({ parsed: FILTER_LINES.length, matched: matched(filter).length, done: true, error: null, channels: [1, 2] }));
+	backend.on('can_log_frames', ({ start, end, filter }) => matched(filter).slice(start as number, end as number));
+	backend.on('can_log_close', () => undefined);
+}
+
+/** The same doc with `can_log_find` scripted beside the browse commands: a hex query
+ *  matches a frame's id or a consecutive run of its payload bytes, and the positions
+ *  address the (optionally filtered) row space — the command's exact contract. */
+function mockFindDoc(): void {
+	mockFilteredDoc();
+	const parse = (query: string): { id: number | null; bytes: number[] } | null => {
+		const cleaned = query.replace(/[\s,:]/g, '').replace(/^0x/i, '');
+		if (!cleaned || /[^0-9a-fA-F]/.test(cleaned)) return null;
+		const value = parseInt(cleaned, 16);
+		return {
+			id: value <= 0x1fff_ffff ? value : null,
+			bytes: cleaned.length % 2 === 0 ? (cleaned.match(/../g) ?? []).map((pair) => parseInt(pair, 16)) : []
+		};
+	};
+	backend.on('can_log_find', ({ query, filter }: { query: string; filter: unknown }) => {
+		const needle = parse(query);
+		if (!needle) throw new Error(`'${query}' is not a hexadecimal query — ids and data bytes are written in hex`);
+		const positions: number[] = [];
+		FILTER_LINES.filter((line) => framePassesFilter(line, filter)).forEach((line, position) => {
+			const bytes = line.dataHex ? line.dataHex.split(' ').map((pair) => parseInt(pair, 16)) : [];
+			const idHit = needle.id !== null && needle.id === line.id;
+			const dataHit = needle.bytes.length > 0 && bytes.some((_, at) => needle.bytes.every((byte, offset) => bytes[at + offset] === byte));
+			if (idHit || dataHit) positions.push(position);
+		});
+		return { positions, total: positions.length, capped: false };
+	});
 }
 
 /** Scripts the statistics commands. */
@@ -196,6 +262,146 @@ describe('CAN log views', () => {
 		expect(document.querySelector(`${STATS_VIEW} .can-channels .can-load`)!.textContent).toBe('0.94 %');
 	});
 
+	it('the raw view filters by id, channel, direction and type, numbering rows in log order', async () => {
+		mockFilteredDoc();
+		const view = new CanRawView('/tmp/filter.asc');
+		document.body.append(view.root);
+		view.scroll.setViewport(400);
+		await waitForReady(() => view.scroll.rowCount === FILTER_LINES.length);
+		// The channel select lists the channels the walk has named.
+		expect(texts('.can-raw-view .can-channel option')).toEqual(['All channels', 'Channel 1', 'Channel 2']);
+		expect(view.root.querySelector('.can-raw-empty')!.hidden).toBe(true);
+
+		// Id range 0x300-0x3FF: the one FD frame, its "No." still its log number (3).
+		const box = view.root.querySelector<HTMLInputElement>('.can-filter')!;
+		box.value = '300-3FF';
+		box.dispatchEvent(new Event('input'));
+		await waitForReady(() => view.scroll.rowCount === 1);
+		expect(texts('.can-raw-rows .can-raw-id')).toEqual(['0x00000300x']);
+		expect(texts('.can-raw-rows .can-raw-no')).toEqual(['3']);
+		// The spec the backend saw: the parsed range, every other control on its default.
+		const asked = backend.callsTo('can_log_count').at(-1)!;
+		expect(asked.filter).toEqual({ channels: [], direction: 'all', kind: 'all', idRanges: [[0x300, 0x3ff]] });
+
+		// Id box cleared, direction Tx: the two transmitted frames.
+		box.value = '';
+		box.dispatchEvent(new Event('input'));
+		const dir = view.root.querySelector<HTMLSelectElement>('.can-dir')!;
+		dir.value = 'tx';
+		dir.dispatchEvent(new Event('change'));
+		await waitForReady(() => view.scroll.rowCount === 2);
+		expect(texts('.can-raw-rows .can-raw-no')).toEqual(['2', '5']);
+
+		// Channel 1 on top: the one channel-1 Tx frame.
+		const channel = view.root.querySelector<HTMLSelectElement>('.can-channel')!;
+		channel.value = '1';
+		channel.dispatchEvent(new Event('change'));
+		await waitForReady(() => view.scroll.rowCount === 1);
+		expect(texts('.can-raw-rows .can-raw-no')).toEqual(['5']);
+
+		// Channel and direction back to all, type CAN FD: the FD frame wherever it sits.
+		channel.value = '';
+		channel.dispatchEvent(new Event('change'));
+		const kind = view.root.querySelector<HTMLSelectElement>('.can-type')!;
+		kind.value = 'canfd';
+		dir.value = 'all';
+		dir.dispatchEvent(new Event('change'));
+		await waitForReady(() => view.scroll.rowCount === 1);
+		expect(texts('.can-raw-rows .can-raw-type')).toEqual(['CAN FD BRS']);
+
+		// A CAN FD frame that was also transmitted: nothing matches, and the view says so.
+		dir.value = 'tx';
+		dir.dispatchEvent(new Event('change'));
+		await waitForReady(() => view.scroll.rowCount === 0);
+		expect(texts('.can-raw-rows .can-raw-row')).toEqual([]);
+		expect(view.root.querySelector('.can-raw-empty')!.hidden).toBe(false);
+		// The live chip carries the match against the whole log.
+		expect(view.root.querySelector('.can-live-text')!.textContent).toContain('0 of 6 frames');
+
+		// Everything back on its defaults: the whole log, and no filter crosses the bridge.
+		kind.value = 'all';
+		kind.dispatchEvent(new Event('change'));
+		dir.value = 'all';
+		dir.dispatchEvent(new Event('change'));
+		await waitForReady(() => view.scroll.rowCount === FILTER_LINES.length);
+		expect(backend.callsTo('can_log_frames').at(-1)!.filter).toBeNull();
+		expect(view.root.querySelector('.can-raw-empty')!.hidden).toBe(true);
+		view.dispose();
+	});
+
+	it('Ctrl+F opens the top-right search bar: id and payload hits, stepping, no replace', async () => {
+		mockFindDoc();
+		const view = new CanRawView('/tmp/find.asc');
+		document.body.append(view.root);
+		view.scroll.setViewport(400);
+		await waitForReady(() => view.scroll.rowCount === FILTER_LINES.length);
+		// Ctrl+F anywhere in the view opens the bar over the viewport's top right.
+		view.root.querySelector<HTMLElement>('.can-raw-scroll')!.dispatchEvent(
+			new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, cancelable: true, bubbles: true })
+		);
+		const bar = view.root.querySelector<HTMLElement>('.can-find')!;
+		expect(bar.hidden).toBe(false);
+		expect(bar.closest('.can-raw-viewport')).not.toBeNull();
+		// Search only: one input, no replace row or replace controls.
+		expect(view.root.querySelectorAll('.cm-find-input').length).toBe(1);
+		expect(view.root.querySelector('.cm-replace-row')).toBeNull();
+		const box = view.root.querySelector<HTMLInputElement>('.cm-find-input')!;
+		const count = view.root.querySelector<HTMLElement>('.cm-find-count')!;
+
+		// An id search: the 0x55 remote frame is row 3.
+		box.value = '55';
+		box.dispatchEvent(new Event('input'));
+		await waitForReady(() => count.textContent === '1 of 1');
+		expect(view.scroll.top).toBe(3);
+		await waitForReady(() => view.root.querySelector('.can-raw-rows .can-raw-cur') !== null);
+
+		// A payload search with two hits: the nearest from row 3 is the second (row 4), and
+		// Enter steps and wraps through both.
+		box.value = '17';
+		box.dispatchEvent(new Event('input'));
+		await waitForReady(() => count.textContent === '2 of 2');
+		expect(view.scroll.top).toBe(4);
+		box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }));
+		expect(count.textContent).toBe('1 of 2');
+		expect(view.scroll.top).toBe(0);
+		box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }));
+		expect(count.textContent).toBe('2 of 2');
+		expect(view.scroll.top).toBe(4);
+		box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, cancelable: true }));
+		expect(count.textContent).toBe('1 of 2');
+		expect(view.scroll.top).toBe(0);
+
+		// The searched row space is the filtered one: CAN FD only leaves the 0x300 frame,
+		// where the payload query AA BB is row 0 and the id query 400 finds nothing.
+		const kind = view.root.querySelector<HTMLSelectElement>('.can-type')!;
+		kind.value = 'canfd';
+		kind.dispatchEvent(new Event('change'));
+		await waitForReady(() => view.scroll.rowCount === 1);
+		box.value = 'AA BB';
+		box.dispatchEvent(new Event('input'));
+		await waitForReady(() => count.textContent === '1 of 1');
+		expect(view.scroll.top).toBe(0);
+		box.value = '400';
+		box.dispatchEvent(new Event('input'));
+		await waitForReady(() => count.textContent === 'No matches');
+
+		// A non-hex query is the bar's own invalid state, not the view's error banner.
+		box.value = 'zz';
+		box.dispatchEvent(new Event('input'));
+		await waitForReady(() => count.textContent === 'Not hex');
+		expect(box.classList.contains('invalid')).toBe(true);
+		expect(view.root.querySelector('.can-raw-banner')!.hidden).toBe(true);
+
+		// Escape closes the bar, clears the marks and returns focus to the rows.
+		box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', cancelable: true }));
+		expect(bar.hidden).toBe(true);
+		expect(view.root.querySelector('.can-raw-rows .can-raw-hit')).toBeNull();
+		// The toolbar button reopens it with the query kept.
+		click(view.root.querySelector('.can-find-open')!);
+		expect(bar.hidden).toBe(false);
+		view.dispose();
+	});
+
 	it('a multi-million-frame log scrolls to its last frames, past the engines\' height clamp', async () => {
 		// 2,000,000 frames at 20 px a row is 40M px of document; the layout engines clamp
 		// element height near 33.5M px, which used to strand every frame past ~1.6M behind a
@@ -203,6 +409,7 @@ describe('CAN log views', () => {
 		// the row model's bottom is the log's last frame, at the viewport's top.
 		const FRAMES = 2_000_000;
 		const frameAt = (index: number): CanFrameLine => ({
+			index,
 			tS: index * 0.001, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17'
 		});
 		backend.on('can_log_open', () => ({ docId: 9, totalBytes: 1000 }));
@@ -236,6 +443,7 @@ describe('CAN log views', () => {
 		// model's top is a row index: a growing row count changes the scrollbar's thumb and
 		// nothing else — a drag left mid-parse stays put until the user scrolls again.
 		const frameAt = (index: number): CanFrameLine => ({
+			index,
 			tS: index * 0.001, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17'
 		});
 		let parsed = 2_000_000;
@@ -279,6 +487,7 @@ describe('CAN log views', () => {
 		// fix clears the whole requested range unconditionally, so the next poll tick's
 		// refresh (no user action needed) picks the gap back up on its own.
 		const frameAt = (index: number): CanFrameLine => ({
+			index,
 			tS: index * 0.001, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17'
 		});
 		let parsed = 2_000_000;
@@ -318,6 +527,7 @@ describe('CAN log views', () => {
 		// 2,000,000 frames × 20 px is 40 M px, past the engines' ceiling: the row model has
 		// no scale, so a page is the same 19 rows here as on a hundred-frame log.
 		const frameAt = (index: number): CanFrameLine => ({
+			index,
 			tS: index * 0.001, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17'
 		});
 		backend.on('can_log_open', () => ({ docId: 22, totalBytes: 1000 }));
@@ -368,6 +578,36 @@ describe('CAN log views', () => {
 		await waitForReady(() => document.querySelector('.can-raw-view') !== null);
 		expect(backend.callsTo('can_log_open').length).toBe(opensBefore + 1);
 		expect(document.querySelector('.cm-editor')).toBeNull();
+	});
+
+	it('a .blf offers Hex, not Text: the hex editor lands under the Frames bar and swaps back', async () => {
+		backend.on('read_file', () => ({ contents: null, binary: true, size: 144 }));
+		backend.on('file_probe', () => ({ size: 144, binary: true }));
+		backend.on('read_file_chunk', ({ offset }: { offset: number }) => ({
+			size: 144,
+			base64: btoa(String.fromCharCode(...Array.from({ length: 16 }, (_, i) => (offset + i) & 0xff)))
+		}));
+		mockRawDoc();
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		await group.openFile('C:\\logs\\drive.blf');
+		await waitForReady(() => document.querySelectorAll('.can-raw-rows .can-raw-row').length > 0);
+		// A .blf is binary: the button offers the hex editor, not a text form.
+		const button = document.querySelector<HTMLButtonElement>('.can-text')!;
+		expect(button.textContent).toContain('Hex');
+		click(button);
+		// The hex viewer mounts inside the text-form wrapper, under the path bar — not as a
+		// sibling of it sharing the pane, which pushed the find-bytes toolbar mid-window.
+		await waitForReady(() => document.querySelector('.can-text-wrap .hex-view') !== null);
+		const wrap = document.querySelector('.can-text-wrap')!;
+		expect(wrap.querySelector('.can-text-bar')).not.toBeNull();
+		expect(wrap.querySelector('.hex-view .hex-toolbar')).not.toBeNull();
+		expect(document.querySelector('.hex-view .hex-search')!.getAttribute('placeholder')).toContain('Find bytes');
+		// Frames switches back to the raw frame view, releasing the hex view with it.
+		const opensBefore = backend.callsTo('can_log_open').length;
+		click(document.querySelector('.can-frames')!);
+		await waitForReady(() => document.querySelector('.can-raw-view') !== null);
+		expect(document.querySelector('.hex-view')).toBeNull();
+		expect(backend.callsTo('can_log_open').length).toBe(opensBefore + 1);
 	});
 
 	it('a search hit opens the log directly in its text form at the line', async () => {

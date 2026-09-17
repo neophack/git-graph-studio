@@ -133,9 +133,11 @@ export function formatCycle(seconds: number): string {
 	return `${(seconds * 1000).toFixed(seconds * 1000 < 10 ? 3 : 1)} ms`;
 }
 
-/** Parse the filter bar's identifier list: hex ids or `from-to` ranges, comma or space
- *  separated (`0x100, 1A0-1FF 300`). Returns null when the box is empty (no filtering). */
-export function parseIdFilter(text: string): ((id: number) => boolean) | null {
+/** Parse the filter bar's identifier list into inclusive ranges: hex ids or `from-to`
+ *  ranges, comma or space separated (`0x100, 1A0-1FF 300`). Returns null when the box is
+ *  empty (or nothing in it parses) — the raw view ships the ranges to the backend, which
+ *  filters while it browses. */
+export function idFilterRanges(text: string): [number, number][] | null {
 	const terms = text.split(/[\s,;]+/).filter(Boolean);
 	if (!terms.length) return null;
 	const ranges: [number, number][] = [];
@@ -151,7 +153,13 @@ export function parseIdFilter(text: string): ((id: number) => boolean) | null {
 			if (!Number.isNaN(id)) ranges.push([id, id]);
 		}
 	}
-	if (!ranges.length) return null;
+	return ranges.length ? ranges : null;
+}
+
+/** The same list as a predicate, for the views that filter client-side. */
+export function parseIdFilter(text: string): ((id: number) => boolean) | null {
+	const ranges = idFilterRanges(text);
+	if (!ranges) return null;
 	return (id) => ranges.some(([from, to]) => id >= from && id <= to);
 }
 

@@ -969,6 +969,7 @@ mod desktop {
             can_log::can_log_open,
             can_log::can_log_frames,
             can_log::can_log_count,
+            can_log::can_log_find,
             can_log::can_log_close,
             cmd_fs::initial_repo,
             cmd_fs::repo_submodules,

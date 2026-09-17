@@ -1134,10 +1134,17 @@ body.resizing iframe { pointer-events: none; }
 .can-badge-rmt { background: color-mix(in srgb, var(--vscode-charts-purple, #b180d7) 14%, transparent); color: var(--vscode-charts-purple, #b180d7); }
 .can-raw-data { white-space: nowrap; }
 .can-raw-banner { padding: 8px 12px; text-align: left; }
+/* The find bar's marks over the raw rows (the bar itself is the shared .cm-find-widget,
+   top right over the viewport). Two classes each so they outrank the zebra stripe. */
+.can-raw-row.can-raw-hit { background: color-mix(in srgb, var(--vscode-editor-findMatchBackground, #515c6a) 70%, transparent); }
+.can-raw-row.can-raw-cur { background: color-mix(in srgb, var(--vscode-editor-findMatchHighlightBackground, #ea5c00) 45%, transparent); outline: 1px solid var(--vscode-focusBorder, #0078d4); }
 
 /* Filter bar, analysis panel and charts of the CAN statistics view. */
 .can-toolbar .can-filter { flex: 0 1 240px; min-width: 120px; }
-.can-toolbar .can-channel { flex: none; }
+.can-toolbar .can-channel, .can-toolbar .can-dir, .can-toolbar .can-type { flex: none; }
+/* The raw view's filter-empty note, centred over the viewport it stands in for. */
+.can-raw-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--vscode-descriptionForeground, #999); font-style: italic; pointer-events: none; }
+.can-raw-empty[hidden] { display: none; }
 .can-convert { flex: none; white-space: nowrap; }
 .can-msg-row { cursor: pointer; }
 .can-msg-row:hover { background: color-mix(in srgb, var(--vscode-focusBorder, #0078d4) 18%, transparent); }

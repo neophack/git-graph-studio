@@ -744,7 +744,9 @@ export class EditorGroup {
 			return;
 		}
 		if (file.binary || file.contents === null) {
-			await this.mountHexView(editor);
+			// A binary "text form" (a .blf whose Raw button was pressed) is the hex viewer,
+			// inside the wrapper so the path bar with the Frames button stays above it.
+			await this.mountHexView(editor, wrap);
 		} else {
 			editor.encoding = file.encoding ?? 'utf8';
 			editor.eol = file.eol ?? 'lf';
@@ -773,6 +775,10 @@ export class EditorGroup {
 		editor.fast = undefined;
 		editor.doc?.dispose();
 		editor.doc = undefined;
+		// The text form of a binary log is the hex viewer (the Raw button's landing); its
+		// observer and slab caches must go with the swap back.
+		editor.hex?.destroy();
+		editor.hex = undefined;
 		editor.mergeToolbar = undefined;
 		editor.outline?.remove();
 		editor.outline = undefined;
@@ -842,8 +848,11 @@ export class EditorGroup {
 	/* ---------- Previews ---------- */
 
 	/** A binary file's hex viewer: virtual-scrolling rows with byte search, read-only
-	 *  until its Edit toggle is switched on; saving patches the changed bytes in place. */
-	private async mountHexView(editor: Editor): Promise<void> {
+	 *  until its Edit toggle is switched on; saving patches the changed bytes in place.
+	 *  `parent` defaults to the editor's pane — the CAN text form passes its wrapper so the
+	 *  path bar stays above the viewer (into the pane itself it would share space with the
+	 *  wrapper and land mid-window). */
+	private async mountHexView(editor: Editor, parent: HTMLElement = editor.pane): Promise<void> {
 		if (editor.input.kind !== 'file' && editor.input.kind !== 'hex') return;
 		editor.languageName = 'Hex';
 		const { HexView } = await loadHexView();
@@ -857,7 +866,7 @@ export class EditorGroup {
 		// The view's observer and slab caches outlive the tab unless they're released.
 		editor.onClose = () => view.destroy();
 		editor.pane.classList.add('binary-hex');
-		editor.pane.appendChild(view.root);
+		parent.appendChild(view.root);
 		await view.load();
 	}
 
