@@ -42,6 +42,37 @@ describe('image preview', () => {
 		expect(pane.querySelector('.image-preview-status')!.textContent).toContain('B');
 		expect(group.activeInput).toEqual({ kind: 'file', path: `${REPO}\\logo.png` });
 	});
+
+	it('zooms with the mouse wheel, notch by notch like the toolbar', async () => {
+		backend.on('read_file_base64', () => PNG);
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot(REPO);
+		await group.openFile(`${REPO}\\logo.png`);
+		await flush();
+		const pane = document.querySelector('.editor-pane.image-preview')!;
+		const image = pane.querySelector<HTMLImageElement>('img.image-preview-img')!;
+		// jsdom loads no images, so the intrinsic size is pinned by hand.
+		Object.defineProperty(image, 'naturalWidth', { value: 320 });
+		Object.defineProperty(image, 'naturalHeight', { value: 240 });
+		const stage = pane.querySelector<HTMLElement>('.image-preview-stage')!;
+		const notch = (deltaY: number) => {
+			const event = new WheelEvent('wheel', { deltaY, cancelable: true });
+			stage.dispatchEvent(event);
+			return event;
+		};
+		const wheelIn = notch(-100);
+		expect(wheelIn.defaultPrevented).toBe(true); // the stage neither scrolls nor zooms the page
+		expect(pane.querySelector('.image-preview-zoom')!.textContent).toBe('125%');
+		expect(image.style.width).toBe('400px');
+		expect(image.classList.contains('fit')).toBe(false);
+		notch(100);
+		expect(pane.querySelector('.image-preview-zoom')!.textContent).toBe('100%');
+		notch(100);
+		expect(pane.querySelector('.image-preview-zoom')!.textContent).toBe('80%');
+		const horizontal = new WheelEvent('wheel', { deltaX: 100, deltaY: 0, cancelable: true });
+		stage.dispatchEvent(horizontal);
+		expect(horizontal.defaultPrevented).toBe(false); // pans, does not zoom
+	});
 });
 
 describe('markdown', () => {

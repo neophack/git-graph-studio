@@ -901,6 +901,26 @@ export class EditorGroup {
 			button('1:1', 'Actual Size', () => { fit = false; zoom = 1; apply(); }),
 			button('Fit', 'Fit to Window', () => { fit = true; apply(); })
 		]);
+		// The wheel zooms like a desktop image viewer: a notch up zooms in, down zooms out,
+		// anchored on the pointer — the image fraction under the cursor stays under it. The
+		// Ctrl wheel that would otherwise zoom the whole window is swallowed here too.
+		stage.addEventListener('wheel', (e) => {
+			if (!e.deltaY) return; // a purely horizontal wheel pans
+			e.preventDefault();
+			if (!image.naturalWidth) return; // not loaded yet — nothing to scale
+			const before = image.getBoundingClientRect();
+			const fx = before.width > 0 ? (e.clientX - before.left) / before.width : 0.5;
+			const fy = before.height > 0 ? (e.clientY - before.top) / before.height : 0.5;
+			// Leaving Fit starts from the fitted scale, so the first notch grows the image
+			// as it is on screen rather than jumping to its natural size's zoom.
+			if (fit && before.width > 0) zoom = before.width / image.naturalWidth;
+			fit = false;
+			zoom = e.deltaY < 0 ? Math.min(16, zoom * 1.25) : Math.max(0.1, zoom / 1.25);
+			apply();
+			const after = image.getBoundingClientRect();
+			stage.scrollLeft += after.left + fx * after.width - e.clientX;
+			stage.scrollTop += after.top + fy * after.height - e.clientY;
+		}, { passive: false });
 		editor.pane.classList.add('image-preview');
 		editor.pane.append(toolbar, stage, status);
 		try {
