@@ -52,6 +52,12 @@ describe('settings store', () => {
 		expect(migrateStoredSettings({ fastScrollSensitivity: 5 }).fastScrollSensitivity).toBe(4);
 		expect(migrateStoredSettings({ fastScrollSensitivity: 8 }).fastScrollSensitivity).toBe(8);
 		expect(migrateStoredSettings({}).mouseWheelScrollSensitivity).toBeUndefined();
+		// Sticky scroll shipped defaulting to on: a stored true is that default, not a pick,
+		// so it follows the current default (off); an explicit off stands as it is.
+		expect(DEFAULT_SETTINGS.stickyScroll).toBe(false);
+		expect(migrateStoredSettings({ stickyScroll: true }).stickyScroll).toBe(false);
+		expect(migrateStoredSettings({ stickyScroll: false }).stickyScroll).toBe(false);
+		expect(migrateStoredSettings({}).stickyScroll).toBeUndefined();
 		const stale = migrateStoredSettings({ smoothScrolling: true, minimap: false } as Partial<AppSettings>);
 		expect('smoothScrolling' in stale).toBe(false);
 		expect(stale.minimap).toBe(false);
@@ -61,18 +67,20 @@ describe('settings store', () => {
 		// The file is read after boot and its values applied over the in-memory settings:
 		// without the migration a wheel sensitivity of 3 saved by an older release would
 		// override the migrated store and every notch would run three times Zed's.
-		backend.on('settings_read', () => JSON.stringify({ mouseWheelScrollSensitivity: 3, fastScrollSensitivity: 5, smoothScrolling: true, tabSize: 2 }));
-		const held = { wheel: settings.mouseWheelScrollSensitivity, fast: settings.fastScrollSensitivity, tab: settings.tabSize };
+		backend.on('settings_read', () => JSON.stringify({ mouseWheelScrollSensitivity: 3, fastScrollSensitivity: 5, smoothScrolling: true, tabSize: 2, stickyScroll: true }));
+		const held = { wheel: settings.mouseWheelScrollSensitivity, fast: settings.fastScrollSensitivity, tab: settings.tabSize, sticky: settings.stickyScroll };
 		try {
 			await loadSettingsFile();
 			expect(settings.mouseWheelScrollSensitivity).toBe(1);
 			expect(settings.fastScrollSensitivity).toBe(4);
 			expect(settings.tabSize).toBe(2);
+			expect(settings.stickyScroll).toBe(false);
 			expect('smoothScrolling' in settings).toBe(false);
 		} finally {
 			settings.mouseWheelScrollSensitivity = held.wheel;
 			settings.fastScrollSensitivity = held.fast;
 			settings.tabSize = held.tab;
+			settings.stickyScroll = held.sticky;
 		}
 	});
 

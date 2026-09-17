@@ -61,7 +61,7 @@ export interface AppSettings {
 
 export const DEFAULT_SETTINGS: AppSettings = {
 	theme: 'dark-modern', locale: 'en', showOutline: false, autoSave: 'off', autoSaveDelay: 1000,
-	minimap: true, stickyScroll: true, bracketColors: true,
+	minimap: true, stickyScroll: false, bracketColors: true,
 	mouseWheelScrollSensitivity: 1, fastScrollSensitivity: 4,
 	fontSize: 14, tabSize: 4, wordWrap: false, snippetSuggestions: true, pathCompletion: true,
 	fileAssociations: ['blf', 'asc', 'ggx', 'bin', 'hex'],
@@ -75,13 +75,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
  *  the Zed scroll model (a notch is the system's lines, not VS Code's 50 px): a value equal
  *  to any previously shipped default (1, 2 and 3 for the wheel, 5 for the fast one) is
  *  treated as "never picked" and follows the current default; any other value is the
- *  user's own and stands. The glide setting is gone — nothing eases any more — and a
- *  stored one is dropped. */
+ *  user's own and stands. Sticky scroll shipped defaulting to on and now defaults to off
+ *  (2026-09-17): a stored `true` is that shipped default, not a pick, and follows. The
+ *  glide setting is gone — nothing eases any more — and a stored one is dropped. */
 export function migrateStoredSettings(stored: Partial<AppSettings>): Partial<AppSettings> {
 	const { smoothScrolling: _glide, ...rest } = stored as Partial<AppSettings> & { smoothScrolling?: boolean };
 	const next: Partial<AppSettings> = { ...rest };
 	if ([1, 2, 3].includes(next.mouseWheelScrollSensitivity as number)) next.mouseWheelScrollSensitivity = DEFAULT_SETTINGS.mouseWheelScrollSensitivity;
 	if (next.fastScrollSensitivity === 5) next.fastScrollSensitivity = DEFAULT_SETTINGS.fastScrollSensitivity;
+	if (next.stickyScroll === true) next.stickyScroll = DEFAULT_SETTINGS.stickyScroll;
 	return next;
 }
 

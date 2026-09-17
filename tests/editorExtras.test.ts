@@ -4,7 +4,7 @@ import { EditorView } from '@codemirror/view';
 
 import { EditorGroup } from '../src/editor';
 import { t } from '../src/i18n';
-import { settings, updateSetting } from '../src/settings';
+import { settings, updateSetting, DEFAULT_SETTINGS } from '../src/settings';
 import { backend } from './tauriMock';
 import { texts } from './helpers';
 
@@ -194,10 +194,10 @@ describe('editor decorations (M3 3.2)', () => {
 		expect(texts('.cm-sticky-line', overlay)).toEqual(['fn outer() {']);
 	});
 
-	it('the three settings default to on and are persisted as settings', () => {
-		expect(settings.minimap).toBe(true);
-		expect(settings.stickyScroll).toBe(true);
-		expect(settings.bracketColors).toBe(true);
+	it('minimap and bracket colours default to on, sticky scroll to off', () => {
+		expect(DEFAULT_SETTINGS.minimap).toBe(true);
+		expect(DEFAULT_SETTINGS.stickyScroll).toBe(false);
+		expect(DEFAULT_SETTINGS.bracketColors).toBe(true);
 		// The settings dialog renders a labelled row per setting once open (smoke: the keys
 		// exist in the i18n table, so `t()` resolves rather than echoing the key).
 		for (const key of ['minimap', 'stickyScroll', 'bracketColors']) {
