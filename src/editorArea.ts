@@ -622,6 +622,7 @@ export class EditorArea {
 	openRevision = (revision: string, path: string, title: string, repo?: string) => this.activeGroup.openRevision(revision, path, title, repo);
 	openHelp = (help: 'welcome' | 'shortcuts') => this.activeGroup.openHelp(help);
 	openHex = (path?: string) => this.activeGroup.openHex(path);
+	openLocalHexCompare = (left: string, right: string) => this.activeGroup.openLocalHexCompare(left, right);
 	openMarkdownPreview = (path?: string) => this.activeGroup.openMarkdownPreview(path);
 	openMarkdownPreviewToSide = (path?: string) => {
 		// The path is captured before the split: the fresh group is empty and focused, so

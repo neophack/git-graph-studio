@@ -20,9 +20,9 @@ pub mod test_support;
 #[cfg(feature = "desktop")]
 pub mod can_log;
 #[cfg(feature = "desktop")]
-pub mod cmd_ext;
-#[cfg(feature = "desktop")]
 pub mod cmd_assoc;
+#[cfg(feature = "desktop")]
+pub mod cmd_ext;
 #[cfg(feature = "desktop")]
 pub mod cmd_fs;
 #[cfg(feature = "desktop")]
@@ -43,10 +43,10 @@ pub mod measure;
 pub mod pty;
 #[cfg(feature = "desktop")]
 pub mod scm_ops;
-#[cfg(feature = "desktop")]
-pub mod symbols;
 #[cfg(all(test, feature = "desktop"))]
 mod stage_bench;
+#[cfg(feature = "desktop")]
+pub mod symbols;
 #[cfg(feature = "desktop")]
 pub mod viewer;
 #[cfg(feature = "desktop")]
@@ -76,7 +76,10 @@ pub use desktop::{run, AppState};
 
 #[cfg(feature = "desktop")]
 mod desktop {
-    use crate::{can_log, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_graph, cmd_scm, cmd_search, cmd_symbols, git, mcp, measure, pty, viewer, watcher};
+    use crate::{
+        can_log, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_graph, cmd_scm, cmd_search,
+        cmd_symbols, git, mcp, measure, pty, viewer, watcher,
+    };
     #[allow(unused_imports)]
     use cmd_graph as _cmd_graph_seam;
 
@@ -89,6 +92,9 @@ mod desktop {
         /// Single-file mode (M3: `git-graph-studio <file>`): the one file the window shows,
         /// with no folder open - no side bar, no terminal, no repository views.
         pub single_file: Mutex<Option<String>>,
+        /// The comparisons a `ggs <subcommand> ...` launch opens in its window (see
+        /// [`StartupAction`]), applied by the frontend's boot after it read them once.
+        pub startup_actions: Mutex<Vec<StartupAction>>,
         /// Quick Open's file list, cached so repeat opens skip the tree walk (cmd_fs). The Arc
         /// lets the open-folder prefetch thread fill it without borrowing the Tauri state.
         pub file_list_cache: std::sync::Arc<cmd_fs::FileListCache>,
@@ -110,6 +116,7 @@ mod desktop {
             AppState {
                 repos: Mutex::new(Vec::new()),
                 single_file: Mutex::new(None),
+                startup_actions: Mutex::new(Vec::new()),
                 file_list_cache: Arc::new(cmd_fs::FileListCache::default()),
                 symbol_cache: Arc::new(cmd_search::SymbolCache::default()),
                 search: Arc::new(cmd_search::SearchState::default()),
@@ -192,7 +199,10 @@ mod desktop {
         // warm-up, which may still be running on a fresh launch.
         let found_root = find_repo_root(&path);
         let root = found_root.clone().unwrap_or(path);
-        let opened = OpenedFolder { is_repo: found_root.is_some(), root: root.clone() };
+        let opened = OpenedFolder {
+            is_repo: found_root.is_some(),
+            root: root.clone(),
+        };
         // Reopening the repository that is already open (the launch argument being re-opened by
         // the frontend's boot) keeps the engine's warm handle and the backend's caches: closing
         // them here would throw away exactly the work the boot-time warm-up did.
@@ -400,8 +410,8 @@ mod desktop {
         path: String,
     ) -> Result<OpenedWorkspace, String> {
         let text = std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
-        let parsed: WorkspaceFile = serde_json::from_str(&strip_jsonc(&text))
-            .map_err(|e| format!("parse {path}: {e}"))?;
+        let parsed: WorkspaceFile =
+            serde_json::from_str(&strip_jsonc(&text)).map_err(|e| format!("parse {path}: {e}"))?;
         let base = std::path::Path::new(&path)
             .parent()
             .map(std::path::Path::to_path_buf)
@@ -417,11 +427,17 @@ mod desktop {
             if !folder.is_dir() {
                 continue; // skipped, as VS Code skips a missing workspace folder
             }
-            let root = folder.to_string_lossy().trim_start_matches(r"\\?\").to_owned();
+            let root = folder
+                .to_string_lossy()
+                .trim_start_matches(r"\\?\")
+                .to_owned();
             if roots.iter().any(|existing| existing.root == root) {
                 continue;
             }
-            roots.push(WorkspaceRoot { is_repo: find_repo_root(&root).is_some(), root });
+            roots.push(WorkspaceRoot {
+                is_repo: find_repo_root(&root).is_some(),
+                root,
+            });
         }
         if roots.is_empty() {
             return Err(format!("{path} names no folder that exists"));
@@ -483,10 +499,22 @@ mod desktop {
             std::fs::create_dir_all(&plain).unwrap();
             let roots = vec![root.to_string_lossy().into_owned()];
             let path = |p: &std::path::Path| p.to_string_lossy().into_owned();
-            assert!(is_repo_below(&roots, &path(&sub)), "an initialised submodule");
-            assert!(!is_repo_below(&roots, &path(&plain)), "a plain folder inside the root");
-            assert!(!is_repo_below(&roots, &path(&root)), "the root itself is not below itself");
-            assert!(!is_repo_below(&roots, &path(&dir.path().join("elsewhere"))), "outside the root");
+            assert!(
+                is_repo_below(&roots, &path(&sub)),
+                "an initialised submodule"
+            );
+            assert!(
+                !is_repo_below(&roots, &path(&plain)),
+                "a plain folder inside the root"
+            );
+            assert!(
+                !is_repo_below(&roots, &path(&root)),
+                "the root itself is not below itself"
+            );
+            assert!(
+                !is_repo_below(&roots, &path(&dir.path().join("elsewhere"))),
+                "outside the root"
+            );
             let dotted = root.join("vendor").join("..").join("vendor").join("dep");
             assert!(!is_repo_below(&roots, &path(&dotted)), "no .. segments");
             // Windows spells the root with backslashes; the same checkout named with forward
@@ -499,7 +527,10 @@ mod desktop {
             assert_eq!(strip_jsonc("a // line\nb"), "a \nb");
             assert_eq!(strip_jsonc("a /* block */ b"), "a  b");
             // A string protects its slashes: URLs inside strings survive.
-            assert_eq!(strip_jsonc(r#""see https://example.com""#), r#""see https://example.com""#);
+            assert_eq!(
+                strip_jsonc(r#""see https://example.com""#),
+                r#""see https://example.com""#
+            );
             assert_eq!(strip_jsonc("no comments"), "no comments");
         }
 
@@ -509,7 +540,14 @@ mod desktop {
                 "{ \"settings\": {}, \"folders\": [ {\"path\": \"./a\"}, {\"path\": \"b\"}, {\"name\": \"c\", \"path\": \"/abs/c\"} ] }",
             ))
             .unwrap();
-            assert_eq!(parsed.folders.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["./a", "b", "/abs/c"]);
+            assert_eq!(
+                parsed
+                    .folders
+                    .iter()
+                    .map(|f| f.path.as_str())
+                    .collect::<Vec<_>>(),
+                ["./a", "b", "/abs/c"]
+            );
             // A file without folders opens nothing (the command rejects that separately).
             let empty: WorkspaceFile = serde_json::from_str("{}").unwrap();
             assert!(empty.folders.is_empty());
@@ -557,6 +595,13 @@ mod desktop {
     #[tauri::command]
     fn initial_file(state: tauri::State<AppState>) -> Option<String> {
         state.single_file.lock().unwrap().clone()
+    }
+
+    /// The comparisons a `ggs <subcommand> ...` launch opens in its window: the tabs the
+    /// Explorer's context menu would open, read once by the frontend's boot.
+    #[tauri::command]
+    fn initial_actions(state: tauri::State<AppState>) -> Vec<StartupAction> {
+        state.startup_actions.lock().unwrap().clone()
     }
 
     /// Single-file mode (File > Open File...): show exactly this file - no folder, no
@@ -612,11 +657,133 @@ mod desktop {
             }
             path = Some(arg.clone());
         }
-        path.filter(|arg| std::path::Path::new(arg).exists()).map(|arg| {
-            std::fs::canonicalize(&arg)
-                .map(|p| p.display().to_string().trim_start_matches(r"\\?\").to_owned())
-                .unwrap_or(arg)
-        })
+        path.filter(|arg| std::path::Path::new(arg).exists())
+            .map(|arg| {
+                std::fs::canonicalize(&arg)
+                    .map(|p| {
+                        p.display()
+                            .to_string()
+                            .trim_start_matches(r"\\?\")
+                            .to_owned()
+                    })
+                    .unwrap_or(arg)
+            })
+    }
+
+    /// One comparison a `ggs <subcommand>` launch opens in its window, serialised to the
+    /// frontend's boot (`initial_actions`): the same tabs the Explorer's "Compare Two
+    /// Files/Folders" menu opens, so the command line and the UI show one view.
+    #[derive(Clone, Debug, PartialEq, serde::Serialize)]
+    #[serde(tag = "type", rename_all = "camelCase")]
+    pub enum StartupAction {
+        /// A text diff of two files on disk (a binary pair opens the hex comparison).
+        CompareFiles { left: String, right: String },
+        /// One file in the hex viewer.
+        HexView { path: String },
+        /// The address-aligned hex comparison of two files on disk, whatever their content.
+        HexCompare { left: String, right: String },
+        /// Two folders in the Folder Compare view.
+        FolderCompare { left: String, right: String },
+    }
+
+    /// The launch flags that open a comparison: `ggs --compare <a> <b>`,
+    /// `ggs --hex <file>`, `ggs --hex-compare <a> <b>`, `ggs --folder-compare <dirA> <dirB>`.
+    /// They are flagged (`--`) the way `--mcp` / `--measure` are, so they can never be read
+    /// as the path a plain `ggs <path>` launch opens; the flag is the first argument and each
+    /// takes exactly the paths of its kind, canonicalised as `launch_path_of` canonicalises.
+    /// A wrong count, a missing path or the wrong kind is a usage error the caller reports
+    /// before any window exists. `Ok(vec![])` for a launch without such a flag - the plain
+    /// `<path>` forms apply.
+    pub fn parse_startup_actions(args: &[String]) -> Result<Vec<StartupAction>, String> {
+        let Some(sub) = args.get(1).map(String::as_str) else {
+            return Ok(Vec::new());
+        };
+        // Missing paths are reported as missing; only an existing path of the wrong kind is
+        // "not a file" / "not a directory". The canonical form is the same `launch_path_of`
+        // produces (a `\\?\` device path reads as one outside the API it came from).
+        let canonical = |raw: &str, want_dir: bool| -> Result<String, String> {
+            let path = std::path::Path::new(raw);
+            if !path.exists() {
+                return Err(format!("ggs {sub}: {raw}: no such file or directory"));
+            }
+            if want_dir && !path.is_dir() {
+                return Err(format!("ggs {sub}: {raw}: not a directory"));
+            }
+            if !want_dir && !path.is_file() {
+                return Err(format!("ggs {sub}: {raw}: not a file"));
+            }
+            std::fs::canonicalize(path)
+                .map(|p| {
+                    p.display()
+                        .to_string()
+                        .trim_start_matches(r"\\?\")
+                        .to_owned()
+                })
+                .map_err(|_| format!("ggs {sub}: {raw}: could not be resolved"))
+        };
+        let usage = |takes: &str| format!("usage: ggs {sub} {takes}");
+        let path_at = |index: usize, takes: &str| -> Result<&String, String> {
+            args.get(index).ok_or_else(|| usage(takes))
+        };
+        let pair = |want_dir: bool| -> Result<(String, String), String> {
+            let (left, right) = (path_at(2, "<left> <right>")?, path_at(3, "<left> <right>")?);
+            if args.len() > 4 {
+                return Err(usage("<left> <right>"));
+            }
+            Ok((canonical(left, want_dir)?, canonical(right, want_dir)?))
+        };
+        match sub {
+            "--compare" => {
+                let (left, right) = pair(false)?;
+                Ok(vec![StartupAction::CompareFiles { left, right }])
+            }
+            "--hex-compare" => {
+                let (left, right) = pair(false)?;
+                Ok(vec![StartupAction::HexCompare { left, right }])
+            }
+            "--hex" => {
+                let raw = path_at(2, "<file>")?;
+                if args.len() > 3 {
+                    return Err(usage("<file>"));
+                }
+                Ok(vec![StartupAction::HexView {
+                    path: canonical(raw, false)?,
+                }])
+            }
+            "--folder-compare" => {
+                let (left, right) = pair(true)?;
+                Ok(vec![StartupAction::FolderCompare { left, right }])
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// `ggs --help` / `ggs -h`: print every launch form and exit before any window exists.
+    pub fn wants_help(args: &[String]) -> bool {
+        matches!(args.get(1).map(String::as_str), Some("--help") | Some("-h"))
+    }
+
+    /// The `--help` text: every launch form, the flagged commands indented like the plain
+    /// ones (the README's command-line section carries the same list).
+    pub fn cli_help() -> String {
+        [
+            format!("Git Graph Studio {}", env!("CARGO_PKG_VERSION")),
+            String::new(),
+            "Usage: ggs [flag] [paths]".to_owned(),
+            String::new(),
+            "  ggs                                  open the app (the last folder, as at a normal launch)".to_owned(),
+            "  ggs <path>                           open that folder (a file opens in single-file mode)".to_owned(),
+            "  ggs --compare <left> <right>         open a text diff of two files (a binary pair opens".to_owned(),
+            "                                       the hex comparison)".to_owned(),
+            "  ggs --hex <file>                     open the file in the hex viewer".to_owned(),
+            "  ggs --hex-compare <left> <right>     open the hex comparison of two files".to_owned(),
+            "  ggs --folder-compare <left> <right>  open two folders in the Folder Compare view".to_owned(),
+            "  ggs --mcp [path]                     serve that repository's symbol database over MCP".to_owned(),
+            "  ggs --measure <path>                 run the performance probes headless (JSON on stdout)".to_owned(),
+            "  ggs --help, ggs -h                   show this help".to_owned(),
+        ]
+        .join("\n")
+            + "\n"
     }
 
     /// Process-start stamp, so boot timings from the frontend are printed against the same clock.
@@ -683,7 +850,10 @@ mod desktop {
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.split(',').any(|tag| tag.trim() == etag));
         let headers = response.headers_mut();
-        headers.insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-cache"));
+        headers.insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-cache"),
+        );
         if let Ok(value) = header::HeaderValue::from_str(&etag) {
             headers.insert(header::ETAG, value);
         }
@@ -700,7 +870,10 @@ mod desktop {
         use tauri::http::{header, Request, Response, StatusCode};
 
         fn asset(body: &'static [u8]) -> Response<Cow<'static, [u8]>> {
-            Response::builder().status(200).body(Cow::Borrowed(body)).unwrap()
+            Response::builder()
+                .status(200)
+                .body(Cow::Borrowed(body))
+                .unwrap()
         }
 
         #[test]
@@ -713,7 +886,12 @@ mod desktop {
             let etag = first.headers()[header::ETAG].to_str().unwrap().to_owned();
             assert!(etag.starts_with('"') && etag.ends_with('"'));
 
-            let revalidate = || Request::builder().header(header::IF_NONE_MATCH, &etag).body(Vec::new()).unwrap();
+            let revalidate = || {
+                Request::builder()
+                    .header(header::IF_NONE_MATCH, &etag)
+                    .body(Vec::new())
+                    .unwrap()
+            };
             let mut same = asset(body);
             revalidate_assets(revalidate(), &mut same);
             assert_eq!(same.status(), StatusCode::NOT_MODIFIED);
@@ -726,7 +904,10 @@ mod desktop {
             assert!(!changed.body().is_empty());
 
             // An error response is left alone.
-            let mut missing = Response::builder().status(404).body(Cow::Borrowed(&b""[..])).unwrap();
+            let mut missing = Response::builder()
+                .status(404)
+                .body(Cow::Borrowed(&b""[..]))
+                .unwrap();
             revalidate_assets(revalidate(), &mut missing);
             assert!(missing.headers().get(header::ETAG).is_none());
         }
@@ -773,7 +954,12 @@ mod desktop {
     fn linux_dmabuf_mode(settings: Option<&str>) -> String {
         settings
             .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
-            .and_then(|value| value.get("linuxDmabuf").and_then(serde_json::Value::as_str).map(str::to_owned))
+            .and_then(|value| {
+                value
+                    .get("linuxDmabuf")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
             .unwrap_or_else(|| "auto".to_owned())
     }
 
@@ -797,7 +983,10 @@ mod desktop {
             assert_eq!(linux_dmabuf_mode(None), "auto");
             assert_eq!(linux_dmabuf_mode(Some("not json")), "auto");
             assert_eq!(linux_dmabuf_mode(Some("{}")), "auto");
-            assert_eq!(linux_dmabuf_mode(Some(r#"{"linuxDmabuf":"disable"}"#)), "disable");
+            assert_eq!(
+                linux_dmabuf_mode(Some(r#"{"linuxDmabuf":"disable"}"#)),
+                "disable"
+            );
             assert_eq!(linux_dmabuf_mode(Some(r#"{"linuxDmabuf":42}"#)), "auto");
         }
 
@@ -814,9 +1003,14 @@ mod desktop {
     pub fn run() {
         apply_webkit_compat();
         let _boot = boot_started();
+        // `ggs --help` / `ggs -h` prints every launch form; no window is created.
+        let args: Vec<String> = std::env::args().collect();
+        if wants_help(&args) {
+            print!("{}", cli_help());
+            std::process::exit(0);
+        }
         // `git-graph-studio --measure <folder>` runs the performance probes headless and prints
         // JSON (scripts/measure.mjs folds it into metrics.json); no window is created.
-        let args: Vec<String> = std::env::args().collect();
         if args.get(1).map(String::as_str) == Some("--measure") {
             let folder = args.get(2).cloned().unwrap_or_else(|| ".".to_owned());
             match measure::run(&folder) {
@@ -847,22 +1041,37 @@ mod desktop {
         // a plain file opens in single-file mode. `launch_path_of` is the one normalisation
         // (the path arrives canonicalised, flags never read as paths), and with the app
         // multi-instance this launch's path opens in this launch's window.
+        //
+        // A comparison launch flag (`ggs --compare|--hex|--hex-compare|--folder-compare ...`)
+        // opens its comparison instead: no folder of its own, and its arguments are never read
+        // as the launch path. A usage error is reported before any window exists.
+        let startup_actions = match parse_startup_actions(&args) {
+            Ok(actions) => actions,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        };
         let state = AppState::new();
-        if let Some(arg) = launch_path_of(&args) {
-            let path = std::path::PathBuf::from(&arg);
-            if path.is_file() {
-                // The file's document (read, decode, rope, outline, the syntax set) builds
-                // now, while the window and the webview come up: the page's `viewer_open`
-                // then takes it ready-made. A small file never reaches the viewer, so its
-                // prewarm is wasted but cheap; a binary file is skipped by the probe.
-                viewer::prewarm(arg.clone());
-                *state.single_file.lock().unwrap() = Some(arg.clone());
+        if startup_actions.is_empty() {
+            if let Some(arg) = launch_path_of(&args) {
+                let path = std::path::PathBuf::from(&arg);
+                if path.is_file() {
+                    // The file's document (read, decode, rope, outline, the syntax set) builds
+                    // now, while the window and the webview come up: the page's `viewer_open`
+                    // then takes it ready-made. A small file never reaches the viewer, so its
+                    // prewarm is wasted but cheap; a binary file is skipped by the probe.
+                    viewer::prewarm(arg.clone());
+                    *state.single_file.lock().unwrap() = Some(arg.clone());
+                }
+                if path.is_dir() {
+                    // The frontend's boot re-opens this path through `open_folder`, which resolves
+                    // the repository root once the backend is up.
+                    state.repos.lock().unwrap().push(arg);
+                }
             }
-            if path.is_dir() {
-                // The frontend's boot re-opens this path through `open_folder`, which resolves
-                // the repository root once the backend is up.
-                state.repos.lock().unwrap().push(arg);
-            }
+        } else {
+            *state.startup_actions.lock().unwrap() = startup_actions;
         }
 
         stamp("main: args parsed");
@@ -880,7 +1089,9 @@ mod desktop {
             .map(|folder| find_repo_root(folder).unwrap_or_else(|| folder.clone()))
         {
             std::thread::spawn(move || match cmd_graph::warm_first_page(&root) {
-                Ok(count) => stamp(&format!("engine ready: first page warmed ({count} commits)")),
+                Ok(count) => stamp(&format!(
+                    "engine ready: first page warmed ({count} commits)"
+                )),
                 Err(error) => eprintln!("[boot] engine warm-up failed: {error}"),
             });
             // The first file opened in a folder (a restored session's, or the user's first
@@ -900,212 +1111,350 @@ mod desktop {
         // `~/.ggs` — its writers go through `atomic_write`, so instances cannot corrupt
         // each other's user data.
         tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_clipboard_manager::init())
-        .manage(state)
-        .manage(Mutex::new(pty::PtyState::default()))
-        .manage(viewer::ViewerState::default())
-        .manage(viewer::indexed::IndexedState::default())
-        .manage(can_log::CanLogState::default())
-        .setup(|app| {
-            // Git's output reaches the panel's "Git" channel as it happens.
-            use tauri::Emitter;
-            let handle = app.handle().clone();
-            git::set_log_emitter(move |line| {
-                let _ = handle.emit("studio://git-output", line);
-            });
-            stamp("setup entered");
-            // The main window is declared in tauri.conf.json but built here (`create: false`)
-            // rather than by Tauri's own setup: this is where the response hook that lets the
-            // webview cache the app's assets is attached, and where the window's creation -
-            // the WebView2 environment and its browser processes, most of the time between
-            // process start and the first frame - gets its own boot stamp.
-            let config = app
-                .config()
-                .app
-                .windows
-                .first()
-                .cloned()
-                .expect("tauri.conf.json declares the main window");
-            tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
-                .on_web_resource_request(revalidate_assets)
-                .build()?;
-            stamp("window + webview created");
-            Ok(())
-        })
-        .on_page_load(|_webview, payload| {
-            stamp(&format!("page load event ({:?})", payload.event()));
-        })
-        .invoke_handler(tauri::generate_handler![
-            open_folder,
-            close_folder,
-            boot_stage,
-            open_devtools,
-            cmd_fs::list_dir,
-            cmd_fs::read_file,
-            cmd_fs::read_file_raw,
-            cmd_fs::file_probe,
-            cmd_fs::file_fingerprint,
-            cmd_fs::encodings,
-            cmd_fs::read_file_base64,
-            cmd_fs::read_file_chunk,
-            cmd_fs::patch_file,
-            cmd_fs::write_file,
-            cmd_fs::read_file_at,
-            cmd_fs::repo_head,
-            cmd_fs::create_file,
-            cmd_fs::create_folder,
-            cmd_fs::rename_path,
-            cmd_fs::delete_path,
-            cmd_fs::session_log_file,
-            cmd_fs::backup_write,
-            cmd_fs::backup_clear,
-            cmd_fs::backup_list,
-            cmd_fs::backup_read,
-            can_log::can_log_stats,
-            can_log::can_intervals,
-            can_log::convert_can_log,
-            can_log::can_log_open,
-            can_log::can_log_frames,
-            can_log::can_log_count,
-            can_log::can_log_find,
-            can_log::can_log_close,
-            cmd_fs::initial_repo,
-            cmd_fs::repo_submodules,
-            cmd_graph::graph_request,
-            cmd_scm::scm_status,
-            cmd_scm::git_init,
-            cmd_scm::git_stage,
-            cmd_scm::git_unstage,
-            cmd_scm::git_stage_all,
-            cmd_scm::git_unstage_all,
-            cmd_scm::git_commit,
-            cmd_scm::git_discard,
-            cmd_scm::git_discard_all,
-            cmd_scm::scm_branches,
-            cmd_scm::scm_remotes,
-            cmd_scm::scm_stashes,
-            cmd_scm::scm_tags,
-            cmd_scm::scm_pull,
-            cmd_scm::scm_push,
-            cmd_scm::scm_sync,
-            cmd_scm::scm_fetch,
-            cmd_scm::scm_checkout,
-            cmd_scm::scm_create_branch,
-            cmd_scm::scm_amend_last_commit,
-            cmd_scm::scm_reset_to_remote,
-            cmd_scm::scm_clone,
-            cmd_scm::gerrit_install_hook,
-            cmd_scm::gerrit_push_ref,
-            cmd_scm::git_output_log,
-            cmd_scm::scm_blame,
-            cmd_scm::git_output_clear,
-            cmd_fs::list_files,
-            cmd_fuzzy::fuzzy_files,
-            open_workspace,
-            settings_read,
-            initial_file,
-            open_single_file,
-            settings_write,
-            keybindings_read,
-            keybindings_write,
-            cmd_fuzzy::path_completions,
-            cmd_assoc::assoc_list_defaults,
-            cmd_assoc::assoc_apply,
-            pty::pty_create,
-            pty::pty_write,
-            pty::pty_resize,
-            pty::pty_kill,
-            viewer::viewer_open,
-            viewer::viewer_lines,
-            viewer::viewer_highlight,
-            viewer::viewer_text,
-            viewer::viewer_edit,
-            viewer::viewer_find,
-            viewer::viewer_replace,
-            viewer::viewer_save,
-            viewer::viewer_reload,
-            viewer::viewer_undo,
-            viewer::viewer_redo,
-            viewer::viewer_backup,
-            viewer::viewer_symbols,
-            viewer::viewer_close,
-            viewer::indexed::indexed_open,
-            viewer::indexed::indexed_lines,
-            viewer::indexed::indexed_find,
-            viewer::indexed::indexed_close,
-            cmd_ext::ext_list,
-            cmd_ext::ext_install_from_vsix,
-            cmd_ext::ext_uninstall,
-            cmd_ext::ext_read_file,
-            cmd_ext::ext_read_file_base64,
-            cmd_ext::ext_install_from_ggx,
-            cmd_search::search_workspace,
-            cmd_search::search_cancel,
-            cmd_search::replace_in_files,
-            cmd_search::compare_dirs,
-            cmd_search::workspace_symbols,
-            cmd_search::find_references,
-            cmd_symbols::symbols_status,
-            cmd_symbols::symbols_rebuild,
-            cmd_symbols::symbol_lookup,
-            cmd_symbols::symbol_references,
-            cmd_symbols::symbol_tree,
-            cmd_search::hex_diff
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running Git Graph Studio");
+            .plugin(tauri_plugin_dialog::init())
+            .plugin(tauri_plugin_opener::init())
+            .plugin(tauri_plugin_clipboard_manager::init())
+            .manage(state)
+            .manage(Mutex::new(pty::PtyState::default()))
+            .manage(viewer::ViewerState::default())
+            .manage(viewer::indexed::IndexedState::default())
+            .manage(can_log::CanLogState::default())
+            .setup(|app| {
+                // Git's output reaches the panel's "Git" channel as it happens.
+                use tauri::Emitter;
+                let handle = app.handle().clone();
+                git::set_log_emitter(move |line| {
+                    let _ = handle.emit("studio://git-output", line);
+                });
+                stamp("setup entered");
+                // The main window is declared in tauri.conf.json but built here (`create: false`)
+                // rather than by Tauri's own setup: this is where the response hook that lets the
+                // webview cache the app's assets is attached, and where the window's creation -
+                // the WebView2 environment and its browser processes, most of the time between
+                // process start and the first frame - gets its own boot stamp.
+                let config = app
+                    .config()
+                    .app
+                    .windows
+                    .first()
+                    .cloned()
+                    .expect("tauri.conf.json declares the main window");
+                tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
+                    .on_web_resource_request(revalidate_assets)
+                    .build()?;
+                stamp("window + webview created");
+                Ok(())
+            })
+            .on_page_load(|_webview, payload| {
+                stamp(&format!("page load event ({:?})", payload.event()));
+            })
+            .invoke_handler(tauri::generate_handler![
+                open_folder,
+                close_folder,
+                boot_stage,
+                open_devtools,
+                cmd_fs::list_dir,
+                cmd_fs::read_file,
+                cmd_fs::read_file_raw,
+                cmd_fs::file_probe,
+                cmd_fs::file_fingerprint,
+                cmd_fs::encodings,
+                cmd_fs::read_file_base64,
+                cmd_fs::read_file_chunk,
+                cmd_fs::patch_file,
+                cmd_fs::write_file,
+                cmd_fs::read_file_at,
+                cmd_fs::repo_head,
+                cmd_fs::create_file,
+                cmd_fs::create_folder,
+                cmd_fs::rename_path,
+                cmd_fs::delete_path,
+                cmd_fs::session_log_file,
+                cmd_fs::backup_write,
+                cmd_fs::backup_clear,
+                cmd_fs::backup_list,
+                cmd_fs::backup_read,
+                can_log::can_log_stats,
+                can_log::can_intervals,
+                can_log::convert_can_log,
+                can_log::can_log_open,
+                can_log::can_log_frames,
+                can_log::can_log_count,
+                can_log::can_log_find,
+                can_log::can_log_close,
+                cmd_fs::initial_repo,
+                cmd_fs::repo_submodules,
+                cmd_graph::graph_request,
+                cmd_scm::scm_status,
+                cmd_scm::git_init,
+                cmd_scm::git_stage,
+                cmd_scm::git_unstage,
+                cmd_scm::git_stage_all,
+                cmd_scm::git_unstage_all,
+                cmd_scm::git_commit,
+                cmd_scm::git_discard,
+                cmd_scm::git_discard_all,
+                cmd_scm::scm_branches,
+                cmd_scm::scm_remotes,
+                cmd_scm::scm_stashes,
+                cmd_scm::scm_tags,
+                cmd_scm::scm_pull,
+                cmd_scm::scm_push,
+                cmd_scm::scm_sync,
+                cmd_scm::scm_fetch,
+                cmd_scm::scm_checkout,
+                cmd_scm::scm_create_branch,
+                cmd_scm::scm_amend_last_commit,
+                cmd_scm::scm_reset_to_remote,
+                cmd_scm::scm_clone,
+                cmd_scm::gerrit_install_hook,
+                cmd_scm::gerrit_push_ref,
+                cmd_scm::git_output_log,
+                cmd_scm::scm_blame,
+                cmd_scm::git_output_clear,
+                cmd_fs::list_files,
+                cmd_fuzzy::fuzzy_files,
+                open_workspace,
+                settings_read,
+                initial_file,
+                initial_actions,
+                open_single_file,
+                settings_write,
+                keybindings_read,
+                keybindings_write,
+                cmd_fuzzy::path_completions,
+                cmd_assoc::assoc_list_defaults,
+                cmd_assoc::assoc_apply,
+                pty::pty_create,
+                pty::pty_write,
+                pty::pty_resize,
+                pty::pty_kill,
+                viewer::viewer_open,
+                viewer::viewer_lines,
+                viewer::viewer_highlight,
+                viewer::viewer_text,
+                viewer::viewer_edit,
+                viewer::viewer_find,
+                viewer::viewer_replace,
+                viewer::viewer_save,
+                viewer::viewer_reload,
+                viewer::viewer_undo,
+                viewer::viewer_redo,
+                viewer::viewer_backup,
+                viewer::viewer_symbols,
+                viewer::viewer_close,
+                viewer::indexed::indexed_open,
+                viewer::indexed::indexed_lines,
+                viewer::indexed::indexed_find,
+                viewer::indexed::indexed_close,
+                cmd_ext::ext_list,
+                cmd_ext::ext_install_from_vsix,
+                cmd_ext::ext_uninstall,
+                cmd_ext::ext_read_file,
+                cmd_ext::ext_read_file_base64,
+                cmd_ext::ext_install_from_ggx,
+                cmd_search::search_workspace,
+                cmd_search::search_cancel,
+                cmd_search::replace_in_files,
+                cmd_search::compare_dirs,
+                cmd_search::workspace_symbols,
+                cmd_search::find_references,
+                cmd_symbols::symbols_status,
+                cmd_symbols::symbols_rebuild,
+                cmd_symbols::symbol_lookup,
+                cmd_symbols::symbol_references,
+                cmd_symbols::symbol_tree,
+                cmd_search::hex_diff
+            ])
+            .run(tauri::generate_context!())
+            .expect("error while running Git Graph Studio");
     }
 }
 
 #[cfg(test)]
 mod atomic_write_tests {
-	use super::atomic_write;
+    use super::atomic_write;
 
-	#[test]
-	fn replaces_the_target_whole_and_leaves_no_temp_behind() {
-		let dir = tempfile::tempdir().unwrap();
-		// The parent is created on demand, exactly like `~/.ggs` on a first write.
-		let path = dir.path().join("ggs-home").join("settings.json");
-		atomic_write(&path, b"{\"theme\":\"dark\"}").unwrap();
-		atomic_write(&path, b"{\"theme\":\"light\"}").unwrap();
-		assert_eq!(std::fs::read(&path).unwrap(), b"{\"theme\":\"light\"}");
-		// Only the target remains: the process-unique temp sibling never survives.
-		let entries: Vec<_> = std::fs::read_dir(path.parent().unwrap())
-			.unwrap()
-			.map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-			.collect();
-		assert_eq!(entries, vec!["settings.json".to_owned()]);
-	}
+    #[test]
+    fn replaces_the_target_whole_and_leaves_no_temp_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        // The parent is created on demand, exactly like `~/.ggs` on a first write.
+        let path = dir.path().join("ggs-home").join("settings.json");
+        atomic_write(&path, b"{\"theme\":\"dark\"}").unwrap();
+        atomic_write(&path, b"{\"theme\":\"light\"}").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"theme\":\"light\"}");
+        // Only the target remains: the process-unique temp sibling never survives.
+        let entries: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec!["settings.json".to_owned()]);
+    }
 }
 
 #[cfg(all(test, feature = "desktop"))]
 mod launch_path_tests {
-	use super::desktop::launch_path_of;
+    use super::desktop::launch_path_of;
 
-	fn args(list: &[&str]) -> Vec<String> {
-		list.iter().map(|arg| (*arg).to_owned()).collect()
-	}
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|arg| (*arg).to_owned()).collect()
+    }
 
-	#[test]
-	fn flags_are_skipped_and_the_last_plain_argument_wins() {
-		// A flag never reads as the path; an existing plain argument is canonicalised.
-		let argv = args(&["ggs", "--flag", "-x", "Z:/definitely/not/here"]);
-		assert_eq!(launch_path_of(&argv), None);
-		let exe = std::env::current_exe().unwrap();
-		let argv = vec!["ggs".to_owned(), exe.display().to_string()];
-		assert!(launch_path_of(&argv).is_some());
-	}
+    #[test]
+    fn flags_are_skipped_and_the_last_plain_argument_wins() {
+        // A flag never reads as the path; an existing plain argument is canonicalised.
+        let argv = args(&["ggs", "--flag", "-x", "Z:/definitely/not/here"]);
+        assert_eq!(launch_path_of(&argv), None);
+        let exe = std::env::current_exe().unwrap();
+        let argv = vec!["ggs".to_owned(), exe.display().to_string()];
+        assert!(launch_path_of(&argv).is_some());
+    }
 
-	#[test]
-	fn headless_mode_arguments_are_not_read_as_paths() {
-		// `--mcp`/`--measure` consume their own folder: a forward never names it.
-		let argv = args(&["ggs", "--mcp", "Z:/definitely/not/here"]);
-		assert_eq!(launch_path_of(&argv), None);
-		let argv = args(&["ggs", "--measure", "Z:/definitely/not/here"]);
-		assert_eq!(launch_path_of(&argv), None);
-	}
+    #[test]
+    fn headless_mode_arguments_are_not_read_as_paths() {
+        // `--mcp`/`--measure` consume their own folder: a forward never names it.
+        let argv = args(&["ggs", "--mcp", "Z:/definitely/not/here"]);
+        assert_eq!(launch_path_of(&argv), None);
+        let argv = args(&["ggs", "--measure", "Z:/definitely/not/here"]);
+        assert_eq!(launch_path_of(&argv), None);
+    }
+}
+
+#[cfg(all(test, feature = "desktop"))]
+mod startup_action_tests {
+    use super::desktop::{parse_startup_actions, StartupAction};
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    /// A scratch tree with two files and a folder, so the parser's existence and kind checks
+    /// run against the real filesystem (paths arrive canonicalised, `\\?\`-prefix trimmed).
+    fn scratch() -> (tempfile::TempDir, String, String, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let a = temp.path().join("a.bin");
+        let b = temp.path().join("b.bin");
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        let sub = temp.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let show = |path: &std::path::Path| path.display().to_string();
+        (temp, show(&a), show(&b), show(&sub))
+    }
+
+    #[test]
+    fn a_launch_without_a_subcommand_has_no_actions() {
+        assert!(parse_startup_actions(&args(&["ggs"])).unwrap().is_empty());
+        assert!(parse_startup_actions(&args(&["ggs", "--flag", "Z:/x"]))
+            .unwrap()
+            .is_empty());
+        let exe = std::env::current_exe().unwrap();
+        assert!(
+            parse_startup_actions(&args(&["ggs", &exe.display().to_string()]))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn each_subcommand_builds_its_action_from_canonical_paths() {
+        let (_dir, a, b, sub) = scratch();
+        // `fs::canonicalize` on Windows may answer in 8.3 short-path form, so the expected
+        // paths are canonicalised the same way rather than compared to the built-up strings.
+        let canon = |raw: &str| {
+            std::fs::canonicalize(raw)
+                .unwrap()
+                .display()
+                .to_string()
+                .trim_start_matches(r"\\?\")
+                .to_owned()
+        };
+        assert_eq!(
+            parse_startup_actions(&args(&["ggs", "--compare", &a, &b])).unwrap(),
+            vec![StartupAction::CompareFiles {
+                left: canon(&a),
+                right: canon(&b)
+            }]
+        );
+        assert_eq!(
+            parse_startup_actions(&args(&["ggs", "--hex-compare", &a, &b])).unwrap(),
+            vec![StartupAction::HexCompare {
+                left: canon(&a),
+                right: canon(&b)
+            }]
+        );
+        assert_eq!(
+            parse_startup_actions(&args(&["ggs", "--hex", &a])).unwrap(),
+            vec![StartupAction::HexView { path: canon(&a) }]
+        );
+        assert_eq!(
+            parse_startup_actions(&args(&["ggs", "--folder-compare", &sub, &sub])).unwrap(),
+            vec![StartupAction::FolderCompare {
+                left: canon(&sub),
+                right: canon(&sub)
+            }]
+        );
+    }
+
+    #[test]
+    fn wrong_counts_missing_paths_and_wrong_kinds_are_usage_errors() {
+        let (_dir, a, b, sub) = scratch();
+        let missing = "Z:/definitely/not/here";
+        assert!(parse_startup_actions(&args(&["ggs", "--compare", &a]))
+            .unwrap_err()
+            .starts_with("usage: ggs --compare"));
+        assert!(parse_startup_actions(&args(&["ggs", "--hex", &a, &b]))
+            .unwrap_err()
+            .starts_with("usage: ggs --hex"));
+        assert!(
+            parse_startup_actions(&args(&["ggs", "--compare", &a, missing]))
+                .unwrap_err()
+                .contains("no such file or directory")
+        );
+        assert!(parse_startup_actions(&args(&["ggs", "--hex", missing]))
+            .unwrap_err()
+            .contains("no such file or directory"));
+        assert!(
+            parse_startup_actions(&args(&["ggs", "--compare", &sub, &b]))
+                .unwrap_err()
+                .contains("not a file")
+        );
+        assert!(
+            parse_startup_actions(&args(&["ggs", "--folder-compare", &a, &b]))
+                .unwrap_err()
+                .contains("not a directory")
+        );
+    }
+
+    #[test]
+    fn help_is_a_flag_and_bare_names_are_paths_not_subcommands() {
+        use super::desktop::{cli_help, wants_help};
+        assert!(wants_help(&args(&["ggs", "--help"])));
+        assert!(wants_help(&args(&["ggs", "-h"])));
+        assert!(!wants_help(&args(&["ggs", "help"])));
+        assert!(!wants_help(&args(&["ggs", "--compare"])));
+        // A bare `compare` is a path like any other (a folder named "compare" opens as one);
+        // only the flagged forms build actions, so flags can never be read as paths.
+        assert!(
+            parse_startup_actions(&args(&["ggs", "compare", "Z:/a", "Z:/b"]))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(parse_startup_actions(&args(&["ggs", "hex", "Z:/a"]))
+            .unwrap()
+            .is_empty());
+        // The help names every launch form.
+        for line in [
+            "--compare",
+            "--hex-compare",
+            "--folder-compare",
+            "--mcp",
+            "--measure",
+            "--help",
+        ] {
+            assert!(cli_help().contains(line), "help text names {line}");
+        }
+    }
 }
 
 #[cfg(all(test, feature = "desktop"))]

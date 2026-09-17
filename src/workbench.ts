@@ -1467,23 +1467,48 @@ export class Workbench {
 	/* ---------- Boot ---------- */
 
 	async boot(): Promise<void> {
-		// A `git-graph-studio <file>` launch shows exactly that file, alone.
+		// A `ggs <file>` launch shows exactly that file, alone.
 		const launchFile = await invoke<string | null>('initial_file').catch(() => null);
 		if (launchFile) {
 			await this.openFileStandalone(launchFile);
 			return;
 		}
-		const current = await invoke<string | null>('initial_repo').catch(() => null);
-		// The backend re-opens its launch folder (a workspace's first root); the recents may
-		// hold the workspace file itself, which must win - opening the root as a plain folder
-		// would drop the workspace's other roots.
-		const remembered = state.lastFolder();
-		const last = remembered !== null && remembered.toLowerCase().endsWith('.ggs-workspace') ? remembered : current ?? remembered;
-		if (last) {
-			if (last.toLowerCase().endsWith('.ggs-workspace')) await this.openWorkspace(last);
-			else await this.openFolder(last);
-		} else {
+		// A `ggs compare|hex|hex-compare|folder-compare ...` launch opens its comparison as the
+		// window's first tab, over no folder of its own - the same tabs the Explorer's
+		// "Compare Two Files/Folders" menu opens.
+		const actions = await invoke<{ type: string; left?: string; right?: string; path?: string }[]>('initial_actions').catch(() => null);
+		if (actions !== null && actions.length > 0) {
 			this.statusBar.setRepo(false);
+			for (const action of actions) {
+				if (action.type === 'compareFiles' && action.left && action.right) {
+					await this.editors.openDiff({
+						kind: 'diff',
+						id: `paths:${action.left}::${action.right}`,
+						title: `${basename(action.left)} ↔ ${basename(action.right)}`,
+						left: { revision: '*', path: action.left, label: action.left, exists: true, local: true },
+						right: { revision: '*', path: action.right, label: action.right, exists: true, local: true }
+					});
+				} else if (action.type === 'hexView' && action.path) {
+					await this.editors.openHex(action.path);
+				} else if (action.type === 'hexCompare' && action.left && action.right) {
+					await this.editors.openLocalHexCompare(action.left, action.right);
+				} else if (action.type === 'folderCompare' && action.left && action.right) {
+					await this.editors.openFolderCompare({ kind: 'folders', id: `${action.left}::${action.right}`, left: action.left, right: action.right });
+				}
+			}
+		} else {
+			const current = await invoke<string | null>('initial_repo').catch(() => null);
+			// The backend re-opens its launch folder (a workspace's first root); the recents may
+			// hold the workspace file itself, which must win - opening the root as a plain folder
+			// would drop the workspace's other roots.
+			const remembered = state.lastFolder();
+			const last = remembered !== null && remembered.toLowerCase().endsWith('.ggs-workspace') ? remembered : current ?? remembered;
+			if (last) {
+				if (last.toLowerCase().endsWith('.ggs-workspace')) await this.openWorkspace(last);
+				else await this.openFolder(last);
+			} else {
+				this.statusBar.setRepo(false);
+			}
 		}
 		// The rest of the boot is not what the user is waiting for, and it all shares the one
 		// main thread with the explorer's first listing and the graph view's boot: the

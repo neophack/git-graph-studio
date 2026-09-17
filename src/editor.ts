@@ -1600,6 +1600,25 @@ export class EditorGroup {
 		this.add(editor);
 	}
 
+	/** The hex comparison of two files on disk, asked for as hex (the CLI's `ggs hex-compare`):
+	 *  the same tab the binary pair of "Compare Two Files" opens, without the text probe that
+	 *  would route text files to a text diff. */
+	async openLocalHexCompare(left: string, right: string): Promise<void> {
+		const input: Extract<EditorInput, { kind: 'diff' }> = {
+			kind: 'diff',
+			id: `paths:${left}::${right}`,
+			title: `${basename(left)} ↔ ${basename(right)}`,
+			left: { revision: '*', path: left, label: left, exists: true, local: true },
+			right: { revision: '*', path: right, label: right, exists: true, local: true }
+		};
+		const existing = this.open.find((e) => e.input.kind === 'diff' && e.input.id === input.id);
+		if (existing) {
+			this.activate(existing);
+			return;
+		}
+		await this.openHexCompare(input);
+	}
+
 	/** Two binary files on disk: the address-aligned hex comparison, streamed in chunks so
 	 *  the pair's size never matters. */
 	private async openHexCompare(input: Extract<EditorInput, { kind: 'diff' }>): Promise<void> {

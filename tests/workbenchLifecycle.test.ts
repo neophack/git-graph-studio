@@ -396,3 +396,63 @@ describe('Quick Open in a multi-root workspace', () => {
 		expect(backend.callsTo('fuzzy_files')).toEqual([]);
 	});
 });
+
+describe('command-line launch actions', () => {
+	/** The `read_file_raw` framing: 8-byte little-endian metadata length, the JSON metadata,
+	 *  then the UTF-8 text (the raw channel's contract, editor.ts readFileRaw). */
+	const framed = (text: string): Uint8Array => {
+		const encode = new TextEncoder();
+		const meta = encode.encode(JSON.stringify({ binary: false, size: text.length, encoding: 'utf8', eol: 'lf' }));
+		const bytes = new Uint8Array(8 + meta.length + encode.encode(text).length);
+		new DataView(bytes.buffer).setBigUint64(0, BigInt(meta.length), true);
+		bytes.set(meta, 8);
+		bytes.set(encode.encode(text), 8 + meta.length);
+		return bytes;
+	};
+
+	/** Re-boot the workbench as a `ggs <subcommand> ...` launch would: the actions the backend
+	 *  parsed answer `initial_actions`, and the backend commands the comparison views read are
+	 *  scripted (the raw text channel, the hex slabs, the folder comparison). */
+	const bootWithActions = async (action: Record<string, unknown>): Promise<void> => {
+		workbench.dispose();
+		backend.handlers.set('initial_actions', () => [action]);
+		backend.handlers.set('read_file_raw', () => framed('the left text\n'));
+		backend.handlers.set('read_file_chunk', () => ({ size: 2, base64: 'aGk=' }));
+		backend.handlers.set('compare_dirs', () => []);
+		workbench = new Workbench();
+		await workbench.boot();
+		await flush(10);
+	};
+
+	it('compare opens the two-file diff as the window\'s first tab, over no folder', async () => {
+		await bootWithActions({ type: 'compareFiles', left: 'C:\l.txt', right: 'C:\r.txt' });
+		expect(workbench.editors.activeInput).toMatchObject({ kind: 'diff', id: 'paths:C:\l.txt::C:\r.txt' });
+		// The launch opened its comparison instead of a folder: the repo view never booted.
+		expect(document.querySelector('.graph-host iframe')).toBeNull();
+	});
+
+	it('hex-compare opens the hex comparison tab', async () => {
+		await bootWithActions({ type: 'hexCompare', left: 'C:\l.bin', right: 'C:\r.bin' });
+		expect(workbench.editors.activeInput).toMatchObject({ kind: 'diff', id: 'paths:C:\l.bin::C:\r.bin' });
+		expect(document.querySelector('.hex-view.hex-compare')).not.toBeNull();
+	});
+
+	it('hex opens the hex viewer tab', async () => {
+		await bootWithActions({ type: 'hexView', path: 'C:\data.bin' });
+		expect(workbench.editors.activeInput).toMatchObject({ kind: 'hex', path: 'C:\data.bin' });
+	});
+
+	it('folder-compare opens the Folder Compare tab', async () => {
+		await bootWithActions({ type: 'folderCompare', left: 'C:\left', right: 'C:\right' });
+		expect(workbench.editors.activeInput).toMatchObject({ kind: 'folders', id: 'C:\left::C:\right' });
+	});
+
+	it('a launch without actions boots the folder as before', async () => {
+		workbench.dispose();
+		backend.handlers.set('initial_actions', () => []);
+		workbench = new Workbench();
+		await workbench.boot();
+		await flush(10);
+		expect(workbench.editors.activeInput).toMatchObject({ kind: 'graph' });
+	});
+});
