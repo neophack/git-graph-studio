@@ -52,6 +52,25 @@ pub mod viewer;
 #[cfg(feature = "desktop")]
 pub mod watcher;
 
+/// One user-data file write, safe across the app's processes: the app is multi-instance
+/// (every launch is its own process and window), so two instances can write the same
+/// `~/.ggs` file at once. The contents go to a process-unique temp sibling, then a single
+/// rename replaces the target — a concurrent reader (another instance booting, the MCP
+/// mode) sees the old or the new whole file, never a torn one, and two writers never
+/// share a temp name.
+pub(crate) fn atomic_write(path: &std::path::Path, contents: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    let stem = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_owned());
+    let tmp = path.with_file_name(format!(".{stem}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, contents).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("replace {}: {e}", path.display()))
+}
+
 #[cfg(feature = "desktop")]
 pub use desktop::{run, AppState};
 
@@ -524,20 +543,14 @@ mod desktop {
 
     #[tauri::command]
     fn keybindings_write(contents: String) -> Result<(), String> {
-        let path = keybindings_file()?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-        }
-        std::fs::write(&path, contents).map_err(|e| format!("write {}: {e}", path.display()))
+        // Atomic: a second running instance may be reading or writing the same file.
+        crate::atomic_write(&keybindings_file()?, contents.as_bytes())
     }
 
     #[tauri::command]
     fn settings_write(contents: String) -> Result<(), String> {
-        let path = settings_file()?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-        }
-        std::fs::write(&path, contents).map_err(|e| format!("write {}: {e}", path.display()))
+        // Atomic: a second running instance may be reading or writing the same file.
+        crate::atomic_write(&settings_file()?, contents.as_bytes())
     }
 
     /// The file a `git-graph-studio <file>` launch should show (single-file mode).
@@ -577,10 +590,10 @@ mod desktop {
         cmd_graph::close_engine_repos();
     }
 
-    /// The path a launch (or a single-instance forward) should open: the last argument
-    /// that is neither a flag nor a flag's value, canonicalised when it exists. RustDesk's
-    /// `core_main_invoke_new_connection` normalisation lesson: one function decides what a
-    /// second instance means, and both the launch path and the forward path use it.
+    /// The path a launch should open: the last argument that is neither a flag nor a flag's
+    /// value, canonicalised when it exists (flags and the `--mcp` / `--measure` folder
+    /// arguments never read as paths). The app is multi-instance — every launch is its own
+    /// process and window — so this decides only what the window it started opens.
     pub fn launch_path_of(args: &[String]) -> Option<String> {
         let mut path = None;
         let mut skip_next = false;
@@ -830,36 +843,25 @@ mod desktop {
                 }
             }
         }
-        // `git-graph-studio <folder>` opens that folder (a repository resolves to its root).
+        // `git-graph-studio <folder>` opens that folder (a repository resolves to its root);
+        // a plain file opens in single-file mode. `launch_path_of` is the one normalisation
+        // (the path arrives canonicalised, flags never read as paths), and with the app
+        // multi-instance this launch's path opens in this launch's window.
         let state = AppState::new();
-        if let Some(arg) = std::env::args().nth(1) {
-            let path = std::path::Path::new(&arg);
-            // A plain file opens in single-file mode: the window shows just that file, with
-            // no folder wiring at all.
+        if let Some(arg) = launch_path_of(&args) {
+            let path = std::path::PathBuf::from(&arg);
             if path.is_file() {
-                let absolute = std::fs::canonicalize(path)
-                    .map(|p| p.display().to_string().trim_start_matches(r"\\?\").to_owned())
-                    .unwrap_or_else(|_| arg.clone());
                 // The file's document (read, decode, rope, outline, the syntax set) builds
                 // now, while the window and the webview come up: the page's `viewer_open`
                 // then takes it ready-made. A small file never reaches the viewer, so its
                 // prewarm is wasted but cheap; a binary file is skipped by the probe.
-                viewer::prewarm(absolute.clone());
-                *state.single_file.lock().unwrap() = Some(absolute);
+                viewer::prewarm(arg.clone());
+                *state.single_file.lock().unwrap() = Some(arg.clone());
             }
             if path.is_dir() {
-                let absolute = std::fs::canonicalize(path)
-                    .map(|p| {
-                        // Windows' canonical form is the \\?\ prefixed one; the app shows paths.
-                        p.display()
-                            .to_string()
-                            .trim_start_matches(r"\\?\")
-                            .to_owned()
-                    })
-                    .unwrap_or(arg);
                 // The frontend's boot re-opens this path through `open_folder`, which resolves
                 // the repository root once the backend is up.
-                state.repos.lock().unwrap().push(absolute);
+                state.repos.lock().unwrap().push(arg);
             }
         }
 
@@ -892,22 +894,12 @@ mod desktop {
         }
 
         stamp("builder: run");
+        // No single-instance plugin: the app is multi-instance (M7 7.7 re-decided
+        // 2026-09-17), every launch is its own process and window, and `ggs <path>` (or
+        // an "Open with GGS" launch) opens in the window it started. Instances share
+        // `~/.ggs` — its writers go through `atomic_write`, so instances cannot corrupt
+        // each other's user data.
         tauri::Builder::default()
-        // One window per user session (M7 7.7, RustDesk's "forward, don't duplicate"): a
-        // second launch hands its path to the running instance and exits. The callback runs
-        // in the primary process; the webview opens what it was handed.
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            use tauri::Manager;
-            if let Some(path) = launch_path_of(&argv) {
-                use tauri::Emitter;
-                let _ = app.emit("studio://open-path", path);
-            }
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
-        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -1064,6 +1056,27 @@ mod desktop {
         .run(tauri::generate_context!())
         .expect("error while running Git Graph Studio");
     }
+}
+
+#[cfg(test)]
+mod atomic_write_tests {
+	use super::atomic_write;
+
+	#[test]
+	fn replaces_the_target_whole_and_leaves_no_temp_behind() {
+		let dir = tempfile::tempdir().unwrap();
+		// The parent is created on demand, exactly like `~/.ggs` on a first write.
+		let path = dir.path().join("ggs-home").join("settings.json");
+		atomic_write(&path, b"{\"theme\":\"dark\"}").unwrap();
+		atomic_write(&path, b"{\"theme\":\"light\"}").unwrap();
+		assert_eq!(std::fs::read(&path).unwrap(), b"{\"theme\":\"light\"}");
+		// Only the target remains: the process-unique temp sibling never survives.
+		let entries: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+			.unwrap()
+			.map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+			.collect();
+		assert_eq!(entries, vec!["settings.json".to_owned()]);
+	}
 }
 
 #[cfg(all(test, feature = "desktop"))]

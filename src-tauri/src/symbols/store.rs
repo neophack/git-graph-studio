@@ -469,9 +469,12 @@ impl SymbolStore {
 		home.join("index").join(&hash[..16])
 	}
 
+	/// Persist the root's index. Two app instances can have the same root open (the app is
+	/// multi-instance), so the write goes through `crate::atomic_write` — each instance
+	/// writes its own temp sibling and one rename lands the whole file, never a shared
+	/// `symbols.bin.new` two saves would interleave through.
 	pub fn save(&self, home: &Path) -> Result<(), String> {
 		let dir = Self::index_dir(&self.root, home);
-		fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 		let mut out = Vec::new();
 		out.extend_from_slice(MAGIC);
 		out.push(VERSION);
@@ -504,9 +507,7 @@ impl SymbolStore {
 				}
 			}
 		}
-		let tmp = dir.join("symbols.bin.new");
-		fs::write(&tmp, &out).map_err(|e| e.to_string())?;
-		fs::rename(&tmp, dir.join("symbols.bin")).map_err(|e| e.to_string())
+		crate::atomic_write(&dir.join("symbols.bin"), &out)
 	}
 
 	/// Read the root's index back. `None` for anything absent or not exactly this format's

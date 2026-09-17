@@ -28,7 +28,6 @@ default = ["desktop"]
 desktop = [
     "dep:tauri",
     "dep:tauri-plugin-dialog",
-    "dep:tauri-plugin-single-instance",
     "dep:tauri-plugin-opener",
     "dep:tauri-plugin-clipboard-manager",
     "dep:portable-pty",
@@ -100,7 +99,6 @@ notify = { version = "8", default-features = false, features = ["macos_fsevent"]
 # measure.rs's large-file probe writes its synthetic file into a temp dir.
 tempfile = "3"
 trash = { version = "5", optional = true }
-tauri-plugin-single-instance = { version = "2.4.4", optional = true }
 
 # The File Associations service (cmd_assoc): per-user ProgIds and the
 # RegisteredApplications entry under HKCU.

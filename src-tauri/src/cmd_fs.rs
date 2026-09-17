@@ -477,13 +477,27 @@ fn checked(path: &str) -> Result<PathBuf, String> {
 }
 
 /// Where the Git Graph view's session log is written when the user opens it (graphHost.ts
-/// `openLogFile`): one file per app session, in the OS temp directory.
+/// `openLogFile`): one file per app session, in the OS temp directory. The name carries
+/// the process id — the app is multi-instance, and each instance's session logs to its
+/// own file instead of overwriting another window's export.
 #[tauri::command]
 pub fn session_log_file() -> String {
     std::env::temp_dir()
-        .join("git-graph-studio-session.log")
+        .join(format!("git-graph-studio-session-{}.log", std::process::id()))
         .to_string_lossy()
         .into_owned()
+}
+
+#[cfg(test)]
+mod session_log_tests {
+    use super::session_log_file;
+
+    #[test]
+    fn the_log_file_is_named_per_process() {
+        let path = session_log_file();
+        assert!(path.contains("git-graph-studio-session-"));
+        assert!(path.contains(&std::process::id().to_string()));
+    }
 }
 
 #[tauri::command]
@@ -765,14 +779,13 @@ pub(crate) fn backup_write_into(dir: &Path, path: &str, contents: String) -> Res
         contents,
     };
     let target = backup_file(dir, path);
-    let tmp = target.with_extension("json.tmp");
-    fs::write(
-        &tmp,
-        serde_json::to_vec(&backup).map_err(|e| e.to_string())?,
+    // Atomic replace, and a process-unique temp name: a crash mid-write never leaves a
+    // half backup behind, and two app instances back up the same file without sharing
+    // one temp path.
+    crate::atomic_write(
+        &target,
+        &serde_json::to_vec(&backup).map_err(|e| e.to_string())?,
     )
-    .map_err(|e| format!("{}: {e}", tmp.display()))?;
-    // Atomic replace: a crash mid-write never leaves a half backup behind.
-    fs::rename(&tmp, &target).map_err(|e| format!("{}: {e}", target.display()))
 }
 
 pub(crate) fn backup_clear_in(dir: &Path, path: &str) {

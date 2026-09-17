@@ -819,9 +819,6 @@ export class Workbench {
 		// The symbol index's builds report from the backend (an open's resume, a watcher's
 		// incremental update, this command's own rebuild): the status item follows them all.
 		void listen<SymbolIndexStatus>('studio://symbol-index', (event) => this.statusBar.setSymbols(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
-		// A second launch forwards its path here (M7 7.7, the single-instance plugin): a
-		// folder switches the workspace, a file opens beside whatever is open.
-		void listen<string>('studio://open-path', (event) => void this.openForwardedPath(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
 		window.addEventListener('focus', this.onWindowFocusBound);
 		window.addEventListener('blur', this.onWindowBlurBound);
 		void getCurrentWindow().onCloseRequested(async (event) => {
@@ -902,18 +899,6 @@ export class Workbench {
 			fragment = '';
 		}
 		this.panel.context.show({ kind: def.kind, name: def.name, path: absolute, line: def.line, fragment });
-	}
-
-	/** A forwarded path from a second launch: a folder switches the workspace, anything
-	 *  else (a file) opens as an editor. The single-instance callback canonicalised it
-	 *  already; extension-shaped tails are files, bare names and trailing separators are
-	 *  folders. */
-	private async openForwardedPath(path: string): Promise<void> {
-		if (!path) return;
-		const tail = path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
-		const isDirectory = tail === '' || !/\.[a-z0-9]{1,8}$/i.test(tail);
-		if (isDirectory) await this.openFolder(path);
-		else await this.editors.openFile(path);
 	}
 
 	/** F6 (M7 7.4): cycle the keyboard through the workbench's parts - activity bar, side

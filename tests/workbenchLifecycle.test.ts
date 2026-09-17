@@ -105,25 +105,6 @@ async function openAndDirty(files: string[]): Promise<void> {
 	expect(workbench.editors.hasDirtyEditors()).toBe(true);
 }
 
-describe('a second launch forwarding its path (M7 7.7)', () => {
-	it('a forwarded file opens as an editor tab', async () => {
-		// The boot-time graph tab settles first (it re-activates itself one async hop after
-		// any tab), then the forward lands on a quiet shell.
-		await flush(12);
-		backend.emit('studio://open-path', REPO_A + '\\' + 'notes.md');
-		await flush(8);
-		expect(workbench.editors.activeInput?.kind).toBe('file');
-		expect(document.querySelector('.tab.active .label')!.textContent).toBe('notes.md');
-	});
-
-	it('a forwarded folder switches the workspace', async () => {
-		backend.emit('studio://open-path', REPO_B);
-		await flush(10);
-		const opened = backend.callsTo('open_folder').map((call) => call['path']);
-		expect(opened.at(-1)).toBe(REPO_B);
-	});
-});
-
 describe('the session snapshot across a folder switch', () => {
 	it('switching folders with a dirty editor keeps the old folder\'s session', async () => {
 		await openAndDirty([`${REPO_A}\\a.txt`, `${REPO_A}\\b.txt`]);
