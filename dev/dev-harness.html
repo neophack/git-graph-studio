@@ -447,7 +447,7 @@
 			await waitFor(() => document.querySelectorAll('.tree .row').length >= 5);
 			// Ground-truth probes for a stuck surface: what the scrollbar last measured,
 			// what viewport heights the models were told, and whether this page is even
-			// visible (a hidden page freezes rAF and with it CM's measure and the glide).
+			// visible (a hidden page freezes rAF and with it CM's measure).
 			window.__scrollProbe = { visibility: document.visibilityState, layouts: [], viewports: [] };
 			const { Scrollbar } = await import('/src/scroll/scrollbar.ts');
 			const { ScrollModel } = await import('/src/scroll/model.ts');
@@ -464,26 +464,27 @@
 				if (window.__scrollProbe.viewports.length > 40) window.__scrollProbe.viewports.shift();
 				return origSetViewport.call(this, height);
 			};
-			// Zed's own defaults for the amounts the model defines; the shipped app defaults
-			// (3 / 5) are re-checked at the end.
-			const { updateSetting } = await import('/src/settings.ts');
+			// Zed's own defaults for the amounts the model defines - the shipped app defaults
+			// too (settings.ts), which the end of the run re-checks.
+			const { updateSetting, DEFAULT_SETTINGS } = await import('/src/settings.ts');
 			updateSetting('mouseWheelScrollSensitivity', 1);
 			updateSetting('fastScrollSensitivity', 4);
 
-			/* ----- the code editor (a small file: CodeMirror's native scroll and keys) ----- */
+			/* ----- the code editor (a small file: Zed's wheel over CodeMirror's native scroll) ----- */
 			await surface('code editor', async () => {
 				await openFromTree('file.txt');
 				await waitFor(() => codeScroller());
 				const scroller = codeScroller();
 				const lineHeight = rect(scroller.querySelector('.cm-line')).height;
 				const viewport = rect(scroller).height;
-				wheel(scroller, 120);
-				await sleep(60);
-				const mid = scroller.scrollTop;
-				await sleep(500);
+				wheel(scroller, 100);
+				const atOnce = scroller.scrollTop;
+				await sleep(300);
 				const final = scroller.scrollTop;
-				check('code editor', 'a wheel notch glides to VS Code\'s 150 px (sensitivity 1), not Zed\'s jump', 150, final);
-				check('code editor', 'the glide is in flight part-way (an ease, not the row model)', (m) => m > 0 && m < 150, mid);
+				check('code editor', 'a wheel notch is three lines at once (Zed, sensitivity 1) - no glide', (px) => Math.abs(px - 3 * lineHeight) <= 1, atOnce);
+				check('code editor', 'and nothing eases afterwards', (px) => Math.abs(px - atOnce) <= 1, final);
+				wheel(scroller, 100, { altKey: true });
+				check('code editor', 'Alt is the fast sensitivity: twelve more lines', (px) => Math.abs(px - 15 * lineHeight) <= 1, scroller.scrollTop);
 				key(document.querySelector('.cm-content'), 'PageDown');
 				await sleep(300);
 				const caret = Number(/line (\d+)/.exec(document.querySelector('.cm-activeLine').textContent)?.[1] ?? -1);
@@ -648,18 +649,20 @@
 				view.root.remove();
 			});
 
-			/* ----- the shipped defaults: the same notches at sensitivity 3 / fast 5 ----- */
+			/* ----- the shipped defaults are Zed's: the same notches at the app's own settings ----- */
 			await surface('shipped defaults', async () => {
 				activateTab('huge.txt');
-			await sleep(600);
-			dragThumbTo(document.querySelector(".doc-edit"), 0);
-			await sleep(600);
-			updateSetting('mouseWheelScrollSensitivity', 3);
-			updateSetting('fastScrollSensitivity', 5);
-			wheel(docEditScroller(), 100);
-				check('shipped defaults', 'a notch at the shipped sensitivity 3 is nine lines - three times Zed\'s default', near(10), docEditTop());
+				await sleep(600);
+				dragThumbTo(document.querySelector(".doc-edit"), 0);
+				await sleep(600);
+				check('shipped defaults', 'the shipped wheel sensitivity is Zed\'s 1', 1, DEFAULT_SETTINGS.mouseWheelScrollSensitivity);
+				check('shipped defaults', 'the shipped fast sensitivity is Zed\'s 4', 4, DEFAULT_SETTINGS.fastScrollSensitivity);
+				updateSetting('mouseWheelScrollSensitivity', DEFAULT_SETTINGS.mouseWheelScrollSensitivity);
+				updateSetting('fastScrollSensitivity', DEFAULT_SETTINGS.fastScrollSensitivity);
+				wheel(docEditScroller(), 100);
+				check('shipped defaults', 'a notch at the shipped sensitivity is three lines', near(4), docEditTop());
 				wheel(docEditScroller(), 100, { altKey: true });
-				check('shipped defaults', 'Alt at the shipped fast 5 is fifteen more - Zed\'s default is twelve', near(25), docEditTop());
+				check('shipped defaults', 'Alt at the shipped fast sensitivity is twelve more', near(16), docEditTop());
 			});
 
 			for (const error of window.__pageErrors || []) {

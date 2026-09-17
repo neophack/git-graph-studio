@@ -317,7 +317,9 @@ performance gate lives in `src-tauri/tests/perf.rs`.
   `scripts/probes/verify-can-scroll.mjs` (drags a live CAN raw view to its scrollbar's
   bottom and verifies the tail rows are really visible in the layout),
   `scripts/probes/verify-indexed-view.mjs` (the same for the indexed viewer: mount time,
-  first text, drag latency),
+  first text, drag latency), `scripts/probes/run-scroll-harness.mjs` (the harness's
+  `?scroll=1` scenario — every scrolling surface through the wheel, the page keys and the
+  drawn scrollbar — in headless Edge over CDP, against the dev server),
   `dev/dev-harness.html` (the two-mode harness: real Tauri IPC under `tauri dev`, or the
   scripted fake backend under `npm run dev:vite`)
 
