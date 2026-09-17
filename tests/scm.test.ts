@@ -39,6 +39,8 @@ describe('source control view', () => {
 	]) {
 		let current = changes;
 		backend.on('scm_status', () => current);
+		// The in-sync tracked branch: a clean tree keeps the plain gray Commit button.
+		backend.on('repo_head', () => ({ branch: 'main', shortHash: 'abc1234', ahead: 0, behind: 0, upstream: 'origin/main' }));
 		for (const command of ['git_stage', 'git_unstage', 'git_stage_all', 'git_unstage_all', 'git_discard', 'git_discard_all', 'git_commit']) {
 			backend.on(command, () => null);
 		}
@@ -183,7 +185,9 @@ describe('source control view', () => {
 		view.setRepo(REPO);
 		await view.refresh();
 		const textarea = document.querySelector<HTMLTextAreaElement>('textarea')!;
-		expect(document.querySelector<HTMLButtonElement>('.commit-row .button')!.disabled).toBe(true);
+		// Live with changes to commit whatever the message says - the commit itself demands
+		// one; gray is reserved for "nothing to commit".
+		expect(document.querySelector<HTMLButtonElement>('.commit-row .button')!.disabled).toBe(false);
 		key(textarea, 'Enter', { ctrlKey: true });
 		await flush();
 		expect(notifications().at(-1)).toContain('Please provide a commit message');
@@ -284,6 +288,26 @@ describe('source control view', () => {
 		click(menuItem('Show File History in Git Graph'));
 		expect(shown).toEqual([`${REPO}\\src\\main.ts`]);
 		removeContributions('test-history-ext');
+	});
+
+	it('keeps the button gray with a clean, synced tree, and turns it into Push with unpushed commits', async () => {
+		const { view, setChanges } = setup([]);
+		view.setRepo(REPO);
+		await view.refresh();
+		let button = document.querySelector<HTMLButtonElement>('.commit-row.single .button')!;
+		expect(button.textContent).toContain('Commit');
+		expect(button.disabled).toBe(true);
+		backend.on('scm_push', () => null);
+		backend.on('repo_head', () => ({ branch: 'main', shortHash: 'abc1234', ahead: 3, behind: 0, upstream: 'origin/main' }));
+		await view.refresh();
+		button = document.querySelector<HTMLButtonElement>('.commit-row.single .button')!;
+		expect(button.textContent).toContain('Push');
+		expect(button.textContent).toContain('3');
+		expect(button.disabled).toBe(false);
+		setChanges([]);
+		click(button);
+		await flush();
+		expect(backend.callsTo('scm_push')).toEqual([{ remote: null, setUpstream: false, force: false }]);
 	});
 
 	it('offers Commit & Push, and keeps the commit box focused with its caret across refreshes', async () => {
@@ -469,34 +493,66 @@ describe('submodule sections', () => {
 		expect(backend.callsTo('git_commit')).toEqual([{ message: 'Update dep', amend: false, repo: SUB }]);
 	});
 
-	it('shows Publish Branch when the submodule has no upstream yet', async () => {
-		const { view } = setup({ subUpstream: null });
+	it('turns the submodule\'s button into Publish Branch once its tree is clean and the branch is unpublished', async () => {
+		const { view, setSubChanges } = setup({ subUpstream: null });
+		setSubChanges([]);
 		view.setRepo(REPO);
 		await view.refresh();
-		const button = document.querySelector<HTMLButtonElement>('.scm-sync-button')!;
+		const button = document.querySelector<HTMLButtonElement>('.scm-repo .commit-row.single .button')!;
 		expect(button.textContent).toContain('Publish Branch');
+		expect(button.disabled).toBe(false);
 		click(button);
 		await flush();
 		expect(backend.callsTo('scm_push')).toEqual([{ remote: null, setUpstream: true, force: false, repo: SUB }]);
 	});
 
-	it('shows Sync Changes N↑ once the submodule has an upstream with unpushed commits', async () => {
-		const { view } = setup({ subUpstream: 'origin/main', subAhead: 2 });
+	it('pushes from the same button once the submodule has nothing to commit but unpushed commits', async () => {
+		const { view, setSubChanges } = setup({ subUpstream: 'origin/main', subAhead: 2 });
+		setSubChanges([]);
 		view.setRepo(REPO);
 		await view.refresh();
-		const button = document.querySelector<HTMLButtonElement>('.scm-sync-button')!;
-		expect(button.textContent).toContain('Sync Changes');
+		const button = document.querySelector<HTMLButtonElement>('.scm-repo .commit-row.single .button')!;
+		expect(button.textContent).toContain('Push');
 		expect(button.textContent).toContain('2');
+		click(button);
+		await flush();
+		expect(backend.callsTo('scm_push')).toEqual([{ remote: null, setUpstream: false, force: false, repo: SUB }]);
+	});
+
+	it('syncs from the same button once the submodule diverged from its upstream', async () => {
+		const { view, setSubChanges } = setup({ subUpstream: 'origin/main', subAhead: 2, subBehind: 1 });
+		setSubChanges([]);
+		view.setRepo(REPO);
+		await view.refresh();
+		const button = document.querySelector<HTMLButtonElement>('.scm-repo .commit-row.single .button')!;
+		expect(button.textContent).toContain('Sync Changes');
 		click(button);
 		await flush();
 		expect(backend.callsTo('scm_sync')).toEqual([{ rebase: false, repo: SUB }]);
 	});
 
-	it('hides the sync button once a submodule with an upstream has nothing to push or pull', async () => {
-		const { view } = setup({ subUpstream: 'origin/main', subAhead: 0, subBehind: 0 });
+	it('grays the submodule\'s commit button once a clean tree has nothing to commit, push or pull', async () => {
+		const { view, setSubChanges } = setup({ subUpstream: 'origin/main', subAhead: 0, subBehind: 0 });
+		setSubChanges([]);
 		view.setRepo(REPO);
 		await view.refresh();
-		expect(document.querySelector('.scm-sync-button')).toBeNull();
+		const button = document.querySelector<HTMLButtonElement>('.scm-repo .commit-row.single .button')!;
+		expect(button.textContent).toContain('Commit');
+		expect(button.disabled).toBe(true);
+	});
+
+	it('rests a detached, clean submodule at the gray Commit - its recorded commit has no branch to publish', async () => {
+		const { view, setSubChanges } = setup({ subUpstream: null });
+		setSubChanges([]);
+		backend.on('repo_head', (args) => (args['repo'] === SUB
+			? { branch: null, shortHash: 'f43634a', ahead: 0, behind: 0, upstream: null }
+			: { branch: 'main', shortHash: 'abc1234', ahead: 0, behind: 0, upstream: 'origin/main' }));
+		view.setRepo(REPO);
+		await view.refresh();
+		const button = document.querySelector<HTMLButtonElement>('.scm-repo .commit-row.single .button')!;
+		expect(button.textContent).toContain('Commit');
+		expect(button.textContent).not.toContain('Publish');
+		expect(button.disabled).toBe(true);
 	});
 
 	it('collapses a submodule section by clicking its header, keeping the others open', async () => {

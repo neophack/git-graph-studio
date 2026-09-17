@@ -48,6 +48,9 @@ interface SubRepoState {
 	repoPath: string;
 	changes: ScmChange[];
 	branch: string | null;
+	/** The checked-out commit - empty on an unborn branch. A submodule typically checks out
+	 *  its recorded commit detached: `branch` null, `shortHash` set, and nothing to publish. */
+	shortHash: string;
 	ahead: number;
 	behind: number;
 	upstream: string | null;
@@ -201,6 +204,13 @@ export class SourceControlView {
 	/** Whether the open folder is a Git repository (false: the Initialize button shows). */
 	private isRepo = true;
 	private branch: string | null = null;
+	/** The branch's ahead/behind/upstream (repo_head, refreshed with the status): with a clean
+	 *  tree these steer the commit button's other roles - Push, Sync Changes, Publish Branch. */
+	private ahead = 0;
+	private behind = 0;
+	private upstream: string | null = null;
+	/** The checked-out commit - empty on an unborn branch; a detached HEAD has it but no branch. */
+	private shortHash = '';
 	private message = '';
 	private collapsed: Record<ScmGroup, boolean> = { merge: false, staged: false, changes: false };
 	private readonly collapsedFolders = new Set<string>();
@@ -263,6 +273,10 @@ export class SourceControlView {
 		this.changes = [];
 		this.error = null;
 		this.branch = null;
+		this.ahead = 0;
+		this.behind = 0;
+		this.upstream = null;
+		this.shortHash = '';
 		this.message = '';
 		this.selected = null;
 		this.collapsedFolders.clear();
@@ -302,6 +316,18 @@ export class SourceControlView {
 			if (generation !== this.generation) return;
 			this.changes = [];
 			this.error = String(error);
+		}
+		// The branch's own state rides along: the commit button's clean-tree roles (Push, Sync
+		// Changes, Publish Branch) read it. A backend build or scripted test without repo_head
+		// keeps the previous values; the workbench no longer needs its own follow-up fetch.
+		const head = await invoke<{ branch: string | null; shortHash: string; ahead: number; behind: number; upstream: string | null }>('repo_head').catch(() => null);
+		if (generation !== this.generation) return;
+		if (head) {
+			this.branch = head.branch;
+			this.shortHash = head.shortHash;
+			this.ahead = head.ahead;
+			this.behind = head.behind;
+			this.upstream = head.upstream;
 		}
 		await this.refreshSubmodules(generation);
 		if (generation !== this.generation) return;
@@ -346,6 +372,7 @@ export class SourceControlView {
 			repoPath,
 			changes: [],
 			branch: null,
+			shortHash: '',
 			ahead: 0,
 			behind: 0,
 			upstream: null,
@@ -358,10 +385,11 @@ export class SourceControlView {
 			try {
 				const [changes, head] = await Promise.all([
 					invoke<ScmChange[]>('scm_status', { repo: sub.repoPath }),
-					invoke<{ branch: string | null; ahead: number; behind: number; upstream: string | null }>('repo_head', { repo: sub.repoPath })
+					invoke<{ branch: string | null; shortHash: string; ahead: number; behind: number; upstream: string | null }>('repo_head', { repo: sub.repoPath })
 				]);
 				sub.changes = changes;
 				sub.branch = head.branch;
+				sub.shortHash = head.shortHash;
 				sub.ahead = head.ahead;
 				sub.behind = head.behind;
 				sub.upstream = head.upstream;
@@ -462,6 +490,24 @@ export class SourceControlView {
 		}
 	}
 
+	/** What the wide button below a repository's message box is this refresh - one button for
+	 *  commit and push, VS Code's own split button. With changes to commit it is the Commit
+	 *  split button (the chevron carries the Commit & Push / Amend variants), and it is live
+	 *  whatever the message says - the commit itself demands one, so "gray" stays reserved
+	 *  for "nothing to commit". With a clean tree the button takes the repository's
+	 *  outstanding server action instead: Publish Branch (a named, committed branch without
+	 *  an upstream - a detached HEAD, the shape a submodule checks out at, and an unborn
+	 *  branch have nothing to publish), Push (commits the upstream does not have),
+	 *  Sync Changes (diverged); a branch that is clean and already on its server rests at
+	 *  the gray Commit. */
+	private commitAction(state: { changes: number; branch: string | null; shortHash: string; ahead: number; behind: number; upstream: string | null }): 'commit' | 'publish' | 'push' | 'sync' | 'idle' {
+		if (state.changes > 0) return 'commit';
+		if (!state.upstream) return state.branch !== null && state.shortHash !== '' ? 'publish' : 'idle';
+		if (state.behind > 0) return 'sync';
+		if (state.ahead > 0) return 'push';
+		return 'idle';
+	}
+
 	private commitBox(): HTMLElement {
 		const box = el('div', 'scm-input');
 		const input = el('textarea', 'input');
@@ -476,7 +522,6 @@ export class SourceControlView {
 		input.addEventListener('input', () => {
 			this.message = input.value;
 			grow();
-			commit.disabled = input.value.trim() === '';
 		});
 		input.addEventListener('keydown', (event) => {
 			if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
@@ -484,26 +529,51 @@ export class SourceControlView {
 				void this.commit();
 			}
 		});
+		const action = this.commitAction({ changes: this.changes.length, branch: this.branch, shortHash: this.shortHash, ahead: this.ahead, behind: this.behind, upstream: this.upstream });
 		const commit = el('button', 'button', [icon('check'), 'Commit']);
-		commit.disabled = this.message.trim() === '';
-		commit.addEventListener('click', () => void this.commit());
-		const more = el('button', 'button more', [icon('chevron-down')]);
-		more.title = 'More Commit Actions...';
-		more.addEventListener('click', (event) => {
-			const rect = more.getBoundingClientRect();
-			showContextMenu(rect.left, rect.bottom, [
-				{ label: 'Commit', run: () => void this.commit() },
-				{ label: 'Commit & Push', run: () => void this.commit({}, () => this.afterCommit('scm_push', { remote: null, setUpstream: false, force: false })) },
-				{ label: 'Commit & Sync', run: () => void this.commit({}, () => this.afterCommit('scm_sync', { rebase: false })) },
-				{ label: 'Commit Staged', disabled: this.changes.every((c) => c.staged === null), run: () => void this.commit({ stagedOnly: true }) },
-				{ label: 'Commit All', run: () => void this.commit({ all: true }) },
-				'separator',
-				{ label: 'Commit (Amend)', run: () => void this.commit({ amend: true }) },
-				{ label: 'Commit Staged (Amend)', run: () => void this.commit({ amend: true, stagedOnly: true }) }
-			]);
-			event.stopPropagation();
-		});
-		box.append(input, el('div', 'commit-row', [commit, more]));
+		if (action === 'commit') {
+			// Live whatever the message says: a click without one warns and focuses the box.
+			commit.addEventListener('click', () => void this.commit());
+			const more = el('button', 'button more', [icon('chevron-down')]);
+			more.title = 'More Commit Actions...';
+			more.addEventListener('click', (event) => {
+				const rect = more.getBoundingClientRect();
+				showContextMenu(rect.left, rect.bottom, [
+					{ label: 'Commit', run: () => void this.commit() },
+					{ label: 'Commit & Push', run: () => void this.commit({}, () => this.afterCommit('scm_push', { remote: null, setUpstream: false, force: false })) },
+					{ label: 'Commit & Sync', run: () => void this.commit({}, () => this.afterCommit('scm_sync', { rebase: false })) },
+					{ label: 'Commit Staged', disabled: this.changes.every((c) => c.staged === null), run: () => void this.commit({ stagedOnly: true }) },
+					{ label: 'Commit All', run: () => void this.commit({ all: true }) },
+					'separator',
+					{ label: 'Commit (Amend)', run: () => void this.commit({ amend: true }) },
+					{ label: 'Commit Staged (Amend)', run: () => void this.commit({ amend: true, stagedOnly: true }) }
+				]);
+				event.stopPropagation();
+			});
+			box.append(input, el('div', 'commit-row', [commit, more]));
+		} else {
+			// A clean tree turns the button into the repository's server action; the chevron is
+			// gone - there is no commit to configure.
+			commit.innerHTML = '';
+			if (action === 'publish') {
+				commit.append(icon('cloud-upload'), 'Publish Branch');
+				commit.title = 'Publish the branch to its remote (push, setting the upstream)';
+				commit.addEventListener('click', () => void this.run('scm_push', { remote: null, setUpstream: true, force: false }));
+			} else if (action === 'push') {
+				commit.append(icon('cloud-upload'), `Push ${this.ahead}`);
+				commit.title = `Push ${this.ahead} commit${this.ahead === 1 ? '' : 's'} to ${this.upstream}`;
+				commit.addEventListener('click', () => void this.run('scm_push', { remote: null, setUpstream: false, force: false }));
+			} else if (action === 'sync') {
+				commit.append(icon('sync'), 'Sync Changes', ...(this.ahead > 0 ? [String(this.ahead)] : []));
+				commit.title = `Pull ${this.behind} and push ${this.ahead} commits from/to ${this.upstream}`;
+				commit.addEventListener('click', () => void this.run('scm_sync', { rebase: false }));
+			} else {
+				commit.append(icon('check'), 'Commit');
+				commit.disabled = true;
+				commit.title = 'Nothing to commit - the branch is up to date with its upstream';
+			}
+			box.append(input, el('div', 'commit-row single', [commit]));
+		}
 		requestAnimationFrame(grow);
 		return box;
 	}
@@ -894,11 +964,11 @@ export class SourceControlView {
 	/* ---------- Submodule sections ----------
 	 * Every initialised submodule renders as its own repository section, the way VS Code's
 	 * Git extension lists every open repository in the Source Control view: a header (branch,
-	 * sync/publish, refresh, "..."), a commit box, the Publish Branch / Sync Changes button,
-	 * and its own Merge/Staged/Changes groups - the same actions as the main repository's,
-	 * scoped to this one by always passing its `repo` path to the backend. The sections live
-	 * inside the change list's scroll flow (see render), stacked below the main repository's
-	 * rows as compactly as VS Code stacks its repository sections. */
+	 * refresh, "..."), a commit box with the same one-button commit/push as the main
+	 * repository's, and its own Merge/Staged/Changes groups - the same actions as the main
+	 * repository's, scoped to this one by always passing its `repo` path to the backend. The
+	 * sections live inside the change list's scroll flow (see render), stacked below the main
+	 * repository's rows as compactly as VS Code stacks its repository sections. */
 
 	private subGroups(sub: SubRepoState): { key: ScmGroup; label: string; files: ScmChange[]; always: boolean }[] {
 		const merge = sub.changes.filter((c) => c.conflicted);
@@ -950,8 +1020,6 @@ export class SourceControlView {
 
 		const body = el('div', 'scm-repo-body');
 		body.appendChild(this.subCommitBox(sub));
-		const syncButton = this.subSyncButton(sub);
-		if (syncButton) body.appendChild(syncButton);
 		if (sub.error) body.appendChild(el('div', 'scm-input', [el('div', 'error', [sub.error])]));
 		for (const group of this.subGroups(sub)) {
 			if (group.files.length === 0 && !group.always) continue;
@@ -975,7 +1043,6 @@ export class SourceControlView {
 		input.addEventListener('input', () => {
 			sub.message = input.value;
 			grow();
-			commit.disabled = input.value.trim() === '';
 		});
 		input.addEventListener('keydown', (event) => {
 			if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
@@ -983,29 +1050,53 @@ export class SourceControlView {
 				void this.subCommit(sub);
 			}
 		});
+		// The same one-button-for-commit-and-push as the main repository's box, over this
+		// submodule's own branch state - the sections read as one product, not two toolkits.
+		const action = this.commitAction({ changes: sub.changes.length, branch: sub.branch, shortHash: sub.shortHash, ahead: sub.ahead, behind: sub.behind, upstream: sub.upstream });
 		const commit = el('button', 'button', [icon('check'), 'Commit']);
-		commit.disabled = sub.message.trim() === '';
-		commit.addEventListener('click', () => void this.subCommit(sub));
-		box.append(input, el('div', 'commit-row single', [commit]));
+		if (action === 'commit') {
+			// Live whatever the message says: a click without one warns and focuses the box.
+			commit.addEventListener('click', () => void this.subCommit(sub));
+			const more = el('button', 'button more', [icon('chevron-down')]);
+			more.title = 'More Commit Actions...';
+			more.addEventListener('click', (event) => {
+				const rect = more.getBoundingClientRect();
+				showContextMenu(rect.left, rect.bottom, [
+					{ label: 'Commit', run: () => void this.subCommit(sub) },
+					{ label: 'Commit & Push', run: () => void this.subCommit(sub, {}, () => this.subRun(sub, 'scm_push', { remote: null, setUpstream: false, force: false })) },
+					{ label: 'Commit & Sync', run: () => void this.subCommit(sub, {}, () => this.subRun(sub, 'scm_sync', { rebase: false })) },
+					{ label: 'Commit Staged', disabled: sub.changes.every((c) => c.staged === null), run: () => void this.subCommit(sub, { stagedOnly: true }) },
+					{ label: 'Commit All', run: () => void this.subCommit(sub, { all: true }) },
+					'separator',
+					{ label: 'Commit (Amend)', run: () => void this.subCommit(sub, { amend: true }) },
+					{ label: 'Commit Staged (Amend)', run: () => void this.subCommit(sub, { amend: true, stagedOnly: true }) }
+				]);
+				event.stopPropagation();
+			});
+			box.append(input, el('div', 'commit-row', [commit, more]));
+		} else {
+			commit.innerHTML = '';
+			if (action === 'publish') {
+				commit.append(icon('cloud-upload'), 'Publish Branch');
+				commit.title = 'Publish the branch to its remote (push, setting the upstream)';
+				commit.addEventListener('click', () => void this.subRun(sub, 'scm_push', { remote: null, setUpstream: true, force: false }));
+			} else if (action === 'push') {
+				commit.append(icon('cloud-upload'), `Push ${sub.ahead}`);
+				commit.title = `Push ${sub.ahead} commit${sub.ahead === 1 ? '' : 's'} to ${sub.upstream}`;
+				commit.addEventListener('click', () => void this.subRun(sub, 'scm_push', { remote: null, setUpstream: false, force: false }));
+			} else if (action === 'sync') {
+				commit.append(icon('sync'), 'Sync Changes', ...(sub.ahead > 0 ? [String(sub.ahead)] : []));
+				commit.title = `Pull ${sub.behind} and push ${sub.ahead} commits from/to ${sub.upstream}`;
+				commit.addEventListener('click', () => void this.subRun(sub, 'scm_sync', { rebase: false }));
+			} else {
+				commit.append(icon('check'), 'Commit');
+				commit.disabled = true;
+				commit.title = 'Nothing to commit - the branch is up to date with its upstream';
+			}
+			box.append(input, el('div', 'commit-row single', [commit]));
+		}
 		requestAnimationFrame(grow);
 		return box;
-	}
-
-	/** The full-width blue button below the commit box - "Publish Branch" (no upstream yet) or
-	 *  "Sync Changes" (an upstream exists), exactly as VS Code's Git extension shows it. `null`
-	 *  when the branch is already published and in sync with nothing to push or pull. */
-	private subSyncButton(sub: SubRepoState): HTMLElement | null {
-		if (!sub.upstream) {
-			const button = el('button', 'button scm-sync-button', [icon('cloud-upload'), ' Publish Branch']);
-			button.addEventListener('click', () => void this.subRun(sub, 'scm_push', { remote: null, setUpstream: true, force: false }));
-			return button;
-		}
-		if (sub.ahead === 0 && sub.behind === 0) return null;
-		const label = [' Sync Changes'];
-		if (sub.ahead > 0) label.push(String(sub.ahead));
-		const button = el('button', 'button scm-sync-button', [icon('sync'), ...label]);
-		button.addEventListener('click', () => void this.subRun(sub, 'scm_sync', { rebase: false }));
-		return button;
 	}
 
 	private subGroupSection(sub: SubRepoState, group: { key: ScmGroup; label: string; files: ScmChange[] }): HTMLElement {

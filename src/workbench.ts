@@ -1367,14 +1367,9 @@ export class Workbench {
 		ExtensionHost.workspaceFolders = [...this.repoPaths];
 		// `git status` is the slowest part of opening a folder, and the tree above renders
 		// without it: the SCM view and the branch name settle here in the background while
-		// the explorer is already usable.
-		if (anyRepo) {
-			void this.scm.refresh().then(async () => {
-				const head = await invoke<{ branch: string | null }>('repo_head').catch(() => null);
-				// The folder may have switched while the status and the head were in flight.
-				if (this.repoPath === root) this.scm.setBranch(head?.branch ?? null);
-			});
-		}
+		// the explorer is already usable (the view's own refresh also fetches the branch head
+		// that steers its commit button).
+		if (anyRepo) void this.scm.refresh();
 		if (state.layout.sidebarVisible) this.showView(this.activeView);
 	}
 
