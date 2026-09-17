@@ -28,6 +28,7 @@ interface Change {
 }
 
 interface Head {
+	repo: string;
 	branch: string | null;
 	shortHash: string;
 	ahead: number;
@@ -68,7 +69,7 @@ export function commonHandlers(): [string, Handler][] {
 			];
 		}],
 		['list_files', () => ['notes.txt', 'src/main.rs']],
-		['repo_head', () => ({ branch: 'main', shortHash: '0123456', ahead: 0, behind: 0, upstream: null })],
+		['repo_head', () => ({ repo: 'repo', branch: 'main', shortHash: '0123456', ahead: 0, behind: 0, upstream: null })],
 		['scm_status', () => []],
 		['scm_branches', () => [{ name: 'main', current: true, remote: false, upstream: null }]],
 		['scm_remotes', () => []],
@@ -107,7 +108,7 @@ export function commonHandlers(): [string, Handler][] {
 }
 
 const status = (changes: Change[]): [string, Handler] => ['scm_status', () => changes];
-const head = (info: Partial<Head>): [string, Handler] => ['repo_head', () => ({ branch: 'main', shortHash: '0123456', ahead: 0, behind: 0, upstream: null, ...info })];
+const head = (info: Partial<Head>): [string, Handler] => ['repo_head', () => ({ repo: 'repo', branch: 'main', shortHash: '0123456', ahead: 0, behind: 0, upstream: null, ...info })];
 
 /** The situations the harness covers. */
 export const SCENARIOS: Scenario[] = [

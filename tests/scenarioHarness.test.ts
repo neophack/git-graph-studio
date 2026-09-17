@@ -125,10 +125,15 @@ describe('the scenario harness', () => {
 					case 'detached-head':
 						expect(statusItems()).toContain('0123456');
 						break;
-					case 'ahead-and-behind':
-						expect(statusItems().some((item) => item.includes('2'))).toBe(true); // ahead on the branch item
-						expect(statusItems().some((item) => item.trim().startsWith('3'))).toBe(true); // the behind item
-						break;
+				case 'ahead-and-behind': {
+					// The repo name, the branch and the sync counts are separate items; both
+					// counts ride the sync item, none on the branch.
+					expect(statusItems()).toContain('repo');
+					expect(statusItems()).toContain('main');
+					const sync = statusItems().find((item) => item.trim().startsWith('2'));
+					expect(sync).toContain('3');
+					break;
+				}
 					case 'branches-and-tags':
 						// The current branch settles in the status bar; the listing rides the graph's
 						// repository info (inside the iframe - not observable from jsdom).

@@ -77,7 +77,7 @@ function richHandlers(): Map<string, Handler> {
 		{ path: 'gone.txt', oldPath: null, staged: null, unstaged: 'D', untracked: false },
 		{ path: 'conflicted.txt', oldPath: null, staged: null, unstaged: 'U', untracked: false, conflicted: true }
 	]);
-	map.set('repo_head', () => ({ branch: 'main', shortHash: '0123456', ahead: 2, behind: 1, upstream: 'origin/main' }));
+	map.set('repo_head', () => ({ repo: 'git-graph-studio', branch: 'main', shortHash: '0123456', ahead: 2, behind: 1, upstream: 'origin/main' }));
 	map.set('scm_branches', () => [
 		{ name: 'main', current: true, remote: false, upstream: 'origin/main' },
 		{ name: 'feature/x', current: false, remote: false, upstream: null },
@@ -653,12 +653,16 @@ describe('the full UI sweep', () => {
 			await flush(4);
 			const bar = document.getElementById('statusbar')!;
 			expect(bar.querySelectorAll('.status-item:not([hidden])').length).toBeGreaterThan(5);
-			// Outcomes: the branch, its ahead count, the behind count as the pull item.
+			// Outcomes: the repo name, the branch and the sync item are three separate
+			// buttons, then the Git Graph entry; the counts live on the sync item alone.
 			const left = Array.from(bar.querySelectorAll<HTMLElement>('.status-left .status-item'));
-			expect(left[0]!.textContent).toContain('main');
-			expect(left[0]!.textContent).toContain('2');
-			expect(left[1]!.hidden).toBe(false);
-			expect(left[1]!.textContent).toContain('1');
+			expect(left[0]!.textContent).toContain('git-graph-studio');
+			expect(left[1]!.textContent).toContain('main');
+			expect(left[1]!.textContent).not.toContain('2');
+			expect(left[2]!.hidden).toBe(false);
+			expect(left[2]!.textContent).toContain('2');
+			expect(left[2]!.textContent).toContain('1');
+			expect(left[3]!.textContent).toContain('Git Graph');
 			expect(bar.textContent).toContain('1 conflict');
 			// Every item's picker opens and is dismissed; each picker's first row is chosen once.
 			for (const item of Array.from(bar.querySelectorAll<HTMLElement>('.status-item'))) {

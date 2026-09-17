@@ -163,30 +163,35 @@ describe('title bar', () => {
 });
 
 describe('status bar', () => {
-	it('shows the branch with its ahead count, the behind count as a Pull item, and the editor position', async () => {
-		backend.on('repo_head', () => ({ branch: 'main', shortHash: 'abc1234', ahead: 2, behind: 1, upstream: 'origin/main' }));
+	it('shows the repo, the branch and the sync counts as separate items, and the editor position', async () => {
+		backend.on('repo_head', () => ({ repo: 'git-graph-studio', branch: 'main', shortHash: 'abc1234', ahead: 2, behind: 1, upstream: 'origin/main' }));
 		const bar = new StatusBar(document.getElementById('statusbar')!);
 		let clicks = '';
+		bar.onRepoClick = () => { clicks += 'r'; };
 		bar.onBranchClick = () => { clicks += 'b'; };
-		bar.onPullClick = () => { clicks += 'p'; };
+		bar.onSyncClick = () => { clicks += 's'; };
 		bar.onGraphClick = () => { clicks += 'g'; };
 		expect(document.body.classList.contains('no-folder')).toBe(true);
 		bar.setRepo(true);
 		await flush();
-		const [branch, pull, graph] = Array.from(document.querySelectorAll<HTMLElement>('.status-left .status-item'));
+		const [repo, branch, sync, graph] = Array.from(document.querySelectorAll<HTMLElement>('.status-left .status-item'));
+		// The repository's name is a button of its own, opening Source Control.
+		expect(repo!.textContent).toContain('git-graph-studio');
+		// The branch shows the name only; both counts ride the sync item.
 		expect(branch!.textContent).toContain('main');
-		expect(branch!.querySelector('.codicon-arrow-up')).not.toBeNull();
-		// The behind count is a button of its own: the count with a down arrow, titled to pull.
-		expect(branch!.querySelector('.codicon-arrow-down')).toBeNull();
-		expect(pull!.hidden).toBe(false);
-		expect(pull!.textContent).toContain('1');
-		expect(pull!.querySelector('.codicon-arrow-down')).not.toBeNull();
-		expect(pull!.title).toBe('Pull 1 commit from origin/main');
-		expect(branch!.title).toBe('main (tracking origin/main: 2 ahead, 1 behind) - Checkout Branch/Tag...');
+		expect(branch!.querySelector('.codicon-arrow-up')).toBeNull();
+		expect(sync!.hidden).toBe(false);
+		expect(sync!.textContent).toContain('2');
+		expect(sync!.textContent).toContain('1');
+		expect(sync!.querySelector('.codicon-arrow-up')).not.toBeNull();
+		expect(sync!.querySelector('.codicon-arrow-down')).not.toBeNull();
+		expect(sync!.title).toBe('Synchronize Changes - pull 1 and push 2 from/to origin/main');
+		expect(branch!.title).toBe('main (tracking origin/main) - Checkout Branch/Tag...');
+		click(repo);
 		click(branch);
-		click(pull);
-		click(graph!);
-		expect(clicks).toBe('bpg');
+		click(sync);
+		click(graph);
+		expect(clicks).toBe('rbsg');
 
 		bar.setEditor({ kind: 'file', languageName: 'Rust', line: 3, column: 7 });
 		expect(texts('.status-right .status-item:not([hidden])')).toEqual(['Ln 3, Col 7', 'Spaces: 4', 'LF', 'UTF-8', 'Rust']);
@@ -210,19 +215,20 @@ describe('status bar', () => {
 		bar.setEditor({ kind: 'graph', line: 1, column: 1 });
 		expect(document.querySelectorAll('.status-right .status-item:not([hidden])')).toHaveLength(0);
 
-		// Without commits behind (or without an upstream) there is nothing to pull.
-		backend.on('repo_head', () => ({ branch: 'main', shortHash: 'abc1234', ahead: 0, behind: 0, upstream: 'origin/main' }));
+		// A level branch keeps the sync item (a pull/push against its upstream is exactly what
+		// it offers); without an upstream there is nothing to synchronize.
+		backend.on('repo_head', () => ({ repo: 'git-graph-studio', branch: 'main', shortHash: 'abc1234', ahead: 0, behind: 0, upstream: 'origin/main' }));
 		await bar.refreshHead();
-		expect(pull!.hidden).toBe(true);
-		backend.on('repo_head', () => ({ branch: 'main', shortHash: 'abc1234', ahead: 0, behind: 2, upstream: null }));
+		expect(sync!.hidden).toBe(false);
+		backend.on('repo_head', () => ({ repo: 'git-graph-studio', branch: 'main', shortHash: 'abc1234', ahead: 0, behind: 2, upstream: null }));
 		await bar.refreshHead();
-		expect(pull!.hidden).toBe(true);
+		expect(sync!.hidden).toBe(true);
 		expect(branch!.querySelector('.codicon-arrow-up')).toBeNull();
 
-		backend.on('repo_head', () => ({ branch: null, shortHash: 'deadbee', ahead: 0, behind: 0, upstream: null }));
+		backend.on('repo_head', () => ({ repo: 'git-graph-studio', branch: null, shortHash: 'deadbee', ahead: 0, behind: 0, upstream: null }));
 		await bar.refreshHead();
 		expect(branch!.textContent).toContain('deadbee');
-		expect(pull!.hidden).toBe(true);
+		expect(sync!.hidden).toBe(true);
 	});
 
 	it('shows the unmerged-path count as a warning item that opens Source Control', () => {

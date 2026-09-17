@@ -1,14 +1,14 @@
-// The status bar, VS Code's layout (M3 3.11 / 3.12): on the left the checked-out branch with
-// its ahead count, the behind count as its own item (both click through to git), the "Git
-// Graph" item, the conflict count, the symbol index state and the save progress; on the
-// right the cursor position, the indent, the encoding, the line endings, the language, and
-// the notification bell (which opens the notification centre - every toast ever shown stays
-// listed there until cleared).
+// The status bar, VS Code's layout (M3 3.11 / 3.12): on the left the repository's name, the
+// checked-out branch and the "Synchronize Changes" item - three buttons of its own, not one
+// block - then the "Git Graph" item, the conflict count, the symbol index state and the save
+// progress; on the right the cursor position, the indent, the encoding, the line endings,
+// the language, and the notification bell (which opens the notification centre - every toast
+// ever shown stays listed there until cleared).
 
 import { invoke } from '@tauri-apps/api/core';
 
 import { ENCODING_LABELS } from './editor';
-import { t } from './i18n';
+import { t, tf } from './i18n';
 import { SETTINGS_EVENT, settings } from './settings';
 import { clearAllNotifications, clearNotification, el, icon, notificationEntries, onNotificationsChange, tooltip, type CentreEntry } from './ui';
 
@@ -22,6 +22,7 @@ function ago(at: number): string {
 }
 
 interface HeadInfo {
+	repo: string;
 	branch: string | null;
 	shortHash: string;
 	ahead: number;
@@ -32,8 +33,12 @@ interface HeadInfo {
 export class StatusBar {
 	private readonly left: HTMLElement;
 	private readonly right: HTMLElement;
+	/** The repository's folder name; a click opens Source Control. */
+	private readonly repoItem: HTMLElement;
 	private readonly branchItem: HTMLElement;
-	private readonly pullItem: HTMLElement;
+	/** VS Code's "Synchronize Changes": sync icon with the ahead/behind counts; a click
+	 *  pulls then pushes. Only a branch with an upstream has anything to synchronize. */
+	private readonly syncItem: HTMLElement;
 	private readonly graphItem: HTMLElement;
 	/** VS Code's "N conflicts" item, shown while a merge / rebase has unmerged paths. */
 	private readonly conflictsItem: HTMLElement;
@@ -58,8 +63,9 @@ export class StatusBar {
 	private centreOpen = false;
 	private hasRepo = false;
 
+	onRepoClick: (() => void) | null = null;
 	onBranchClick: (() => void) | null = null;
-	onPullClick: (() => void) | null = null;
+	onSyncClick: (() => void) | null = null;
 	onGraphClick: (() => void) | null = null;
 	onConflictsClick: (() => void) | null = null;
 	/** The symbols item was clicked - the workbench offers the rebuild. */
@@ -74,11 +80,14 @@ export class StatusBar {
 		this.right = el('div', 'status-right');
 		container.append(this.left, this.right);
 
+		this.repoItem = el('div', 'status-item');
+		this.repoItem.hidden = true;
+		this.repoItem.addEventListener('click', () => this.onRepoClick?.());
 		this.branchItem = el('div', 'status-item');
 		this.branchItem.addEventListener('click', () => this.onBranchClick?.());
-		this.pullItem = el('div', 'status-item');
-		this.pullItem.addEventListener('click', () => this.onPullClick?.());
-		this.pullItem.hidden = true;
+		this.syncItem = el('div', 'status-item');
+		this.syncItem.hidden = true;
+		this.syncItem.addEventListener('click', () => this.onSyncClick?.());
 		this.graphItem = el('div', 'status-item', [(() => { const image = el('img'); image.src = '/icons/git-graph-16.svg'; image.alt = ''; return image; })(), 'Git Graph']);
 		this.graphItem.title = 'View Git Graph';
 		this.graphItem.addEventListener('click', () => this.onGraphClick?.());
@@ -93,7 +102,7 @@ export class StatusBar {
 		this.saveFill = el('i');
 		this.saveLabel = el('span');
 		this.saveItem.append(el('div', 'status-save-track', [this.saveFill]), this.saveLabel);
-		this.left.append(this.branchItem, this.pullItem, this.graphItem, this.conflictsItem, this.symbolsItem, this.saveItem);
+		this.left.append(this.repoItem, this.branchItem, this.syncItem, this.graphItem, this.conflictsItem, this.symbolsItem, this.saveItem);
 
 		this.positionItem = el('div', 'status-item static');
 		this.indentItem = el('div', 'status-item', ['Spaces: 4']);
@@ -216,8 +225,9 @@ export class StatusBar {
 	setRepo(hasRepo: boolean): void {
 		this.hasRepo = hasRepo;
 		this.generation++; // a repo_head still in flight for the old folder is dropped
+		this.repoItem.hidden = true;
 		this.branchItem.hidden = !hasRepo;
-		this.pullItem.hidden = true;
+		this.syncItem.hidden = true;
 		this.graphItem.hidden = !hasRepo;
 		this.symbolsItem.hidden = !hasRepo;
 		document.body.classList.toggle('no-folder', !hasRepo);
@@ -245,26 +255,32 @@ export class StatusBar {
 			head = await invoke<HeadInfo>('repo_head');
 		} catch {
 			if (generation !== this.generation) return;
+			this.repoItem.hidden = true;
 			this.branchItem.hidden = true;
-			this.pullItem.hidden = true;
+			this.syncItem.hidden = true;
 			return;
 		}
 		if (generation !== this.generation) return; // the folder switched mid-flight
+		// The repo item: the repository's folder name, its own button like the branch is.
+		this.repoItem.hidden = !head.repo;
+		this.repoItem.innerHTML = '';
+		this.repoItem.append(icon('repo'), head.repo);
+		this.repoItem.title = head.repo ? tf('status.repoTitle', head.repo) : '';
 		this.branchItem.hidden = false;
 		this.branchItem.innerHTML = '';
 		this.branchItem.append(icon('source-control'), head.branch ?? head.shortHash);
-		if (head.upstream && head.behind > 0) {
-			// The behind count is a button of its own, like VS Code's remote indicator.
-			this.pullItem.hidden = false;
-			this.pullItem.innerHTML = '';
-			this.pullItem.append(`${head.behind}`, icon('arrow-down'));
-			this.pullItem.title = `Pull ${head.behind} commit${head.behind === 1 ? '' : 's'} from ${head.upstream}`;
+		// The sync item carries both counts (VS Code puts them on the branch; one button per
+		// action reads better), and appears only for a branch that tracks an upstream.
+		if (head.upstream) {
+			this.syncItem.hidden = false;
+			this.syncItem.innerHTML = '';
+			this.syncItem.append(icon('sync'), ` ${head.ahead}`, icon('arrow-up'), ` ${head.behind}`, icon('arrow-down'));
+			this.syncItem.title = tf('status.syncTitle', head.behind, head.ahead, head.upstream);
 		} else {
-			this.pullItem.hidden = true;
+			this.syncItem.hidden = true;
 		}
-		if (head.upstream && head.ahead > 0) this.branchItem.append(` ${head.ahead}`, icon('arrow-up'));
 		this.branchItem.title = head.branch
-			? `${head.branch}${head.upstream ? ` (tracking ${head.upstream}: ${head.ahead} ahead, ${head.behind} behind)` : ''} - Checkout Branch/Tag...`
+			? `${head.branch}${head.upstream ? ` (tracking ${head.upstream})` : ''} - Checkout Branch/Tag...`
 			: `Detached at ${head.shortHash} - Checkout Branch/Tag...`;
 	}
 

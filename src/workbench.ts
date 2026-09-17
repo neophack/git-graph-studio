@@ -800,9 +800,11 @@ export class Workbench {
 		};
 		this.panel.onMaximizeChange = (maximized) => this.editorPart.classList.toggle('panel-maximized', maximized);
 
-		// Clicking the branch offers a switch (branches and tags); the behind count pulls.
+		// Clicking the repo name opens Source Control; the branch offers a switch (branches
+		// and tags); the sync item pulls then pushes (git.sync).
+		this.statusBar.onRepoClick = () => this.showView('scm');
 		this.statusBar.onBranchClick = () => void commands.execute('git.checkout');
-		this.statusBar.onPullClick = () => void commands.execute('git.pull');
+		this.statusBar.onSyncClick = () => void commands.execute('git.sync');
 		this.statusBar.onGraphClick = () => this.openGraph();
 		this.statusBar.onEncodingClick = () => void this.pickEncoding();
 		this.statusBar.onEolClick = () => void this.pickEol();

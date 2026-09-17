@@ -399,16 +399,25 @@ pub async fn read_file_at(
     })
 }
 
-/// The status bar's branch item: the checked-out branch (or the short hash when detached),
-/// plus how far it is ahead of / behind its upstream.
+/// The status bar's left items: the repository's folder name, the checked-out branch (or
+/// the short hash when detached), plus how far it is ahead of / behind its upstream.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HeadInfo {
+    pub repo: String,
     pub branch: Option<String>,
     pub short_hash: String,
     pub ahead: u32,
     pub behind: u32,
     pub upstream: Option<String>,
+}
+
+/// The repository's folder name, as the status bar's repo item shows it. A path without a
+/// final component (a root) yields the empty string, which the frontend reads as "no item".
+pub(crate) fn repo_folder_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -423,13 +432,16 @@ pub async fn repo_head(
     // porcelain v2 branch header carries the branch, the oid, the upstream and the
     // ahead/behind counts in a single `git status`.
     let out = git.output(&["status", "--porcelain=v2", "--branch"])?;
-    Ok(parse_status_branch(&out))
+    let mut info = parse_status_branch(&out);
+    info.repo = repo_folder_name(&repo_path);
+    Ok(info)
 }
 
 /// The `# branch.*` header lines of `git status --porcelain=v2 --branch`, as `HeadInfo`.
 /// A detached HEAD reports `branch.head (detached)`, an empty repo `branch.oid (initial)`.
 pub(crate) fn parse_status_branch(out: &str) -> HeadInfo {
     let mut info = HeadInfo {
+        repo: String::new(),
         branch: None,
         short_hash: String::new(),
         ahead: 0,
@@ -1156,5 +1168,14 @@ mod head_info_tests {
         let info = parse_status_branch(out);
         assert_eq!(info.branch.as_deref(), Some("main"));
         assert_eq!(info.short_hash, "");
+    }
+
+    #[test]
+    fn the_repo_item_names_the_repositorys_folder() {
+        assert_eq!(repo_folder_name("C:\\dev\\git-graph-studio"), "git-graph-studio");
+        assert_eq!(repo_folder_name("/home/neophack/vscode-git-graph-rs"), "vscode-git-graph-rs");
+        // A path with no final component names no repo; the frontend hides the item.
+        assert_eq!(repo_folder_name("/"), "");
+        assert_eq!(repo_folder_name(""), "");
     }
 }
