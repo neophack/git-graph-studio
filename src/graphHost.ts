@@ -666,6 +666,14 @@ export class GraphHost {
 		const handled = await this.handleLocally(command, request);
 		if (handled) return;
 
+		// The Gerrit remote and the resolved fetch limit ride along with the requests the
+		// backend's Gerrit pipeline reads (the view's own message names neither).
+		if (command === 'loadCommits' && request['gerritFetchRefs'] === true) {
+			request = { ...request, gerritRemote: this.gerritRemote(), gerritFetchLimit: this.gerritFetchLimitOf(request) };
+		} else if (command === 'gerritSetFetchRefs') {
+			request = { ...request, gerritRemote: this.gerritRemote() };
+		}
+
 		const started = performance.now();
 		// Until the first page is up, every request is a boot stage too (sent and answered),
 		// so the boot log shows what the graph waited on before it became visible.
@@ -688,6 +696,12 @@ export class GraphHost {
 		}
 		this.decorate(command, request, response);
 		this.post(response);
+		if (command === 'loadCommits' && response['gerritPending'] === true) {
+			// The Gerrit pipeline runs behind the first paint: the refresh fetches the remote's
+			// change refs and parses their NoteDb metas, then the fresh states arrive as the
+			// extension's staged follow-up responses - the badges first, the event timelines last.
+			void this.gerritFollowUp(request);
+		}
 		if (WRITE_COMMANDS.has(command) && response['command'] !== 'lossWarning') {
 			this.delegate.repoChanged();
 			if (command === 'cherrypickCommit' && request['noCommit'] === true && (response['errors'] as unknown[])?.[0] === null) {
@@ -710,6 +724,73 @@ export class GraphHost {
 		} else if (command === 'compareCommits' && request['toHash'] !== UNCOMMITTED) {
 			response['codeReview'] = touchCodeReview(repo, `${request['fromHash']}-${request['toHash']}`);
 		}
+	}
+
+	/* ---------- Gerrit change states (the review badges) ---------- */
+
+	/** The Gerrit remote of the extension's configuration (gitgraph/config.js defaults it to
+	 *  "origin"); the backend's pipeline lists and fetches `refs/changes/*` from it. */
+	private gerritRemote(): string {
+		const gerrit = this.config['gerrit'] as { remote?: unknown } | undefined;
+		return typeof gerrit?.['remote'] === 'string' && gerrit['remote'] !== '' ? gerrit['remote'] : 'origin';
+	}
+
+	/** The fetch limit a request's Gerrit states are selected under: the repository's own limit,
+	 *  or the configuration's when it carries none (gitGraphView.ts `gerritFetchLimitOf`). */
+	private gerritFetchLimitOf(request: Message): number {
+		const limit = request['gerritFetchLimit'];
+		if (typeof limit === 'number' && Number.isInteger(limit) && limit >= 1 && limit <= 10000) return limit;
+		const gerrit = this.config['gerrit'] as { fetchLimit?: unknown } | undefined;
+		return typeof gerrit?.['fetchLimit'] === 'number' && gerrit['fetchLimit'] >= 1 ? gerrit['fetchLimit'] : 20;
+	}
+
+	/** One follow-up pipeline per repository: concurrent loads chain onto the one running, so a
+	 *  refresh is never run twice over the same remote. */
+	private readonly gerritFollowUps = new Map<string, Promise<void>>();
+
+	private gerritFollowUp(request: Message): Promise<void> {
+		const repo = typeof request['repo'] === 'string' && request['repo'] !== '' ? request['repo'] : this.repoPath;
+		if (!repo) return Promise.resolve();
+		const chained = (this.gerritFollowUps.get(repo) ?? Promise.resolve()).then(() => this.runGerritFollowUp(request, repo));
+		this.gerritFollowUps.set(repo, chained);
+		chained.then(() => {
+			if (this.gerritFollowUps.get(repo) === chained) this.gerritFollowUps.delete(repo);
+		}, () => undefined);
+		return chained;
+	}
+
+	/** Complete a load the backend answered `gerritPending` (gitGraphView.ts
+	 *  `loadCommitsGerritFollowUp`): run the refresh pipeline, then deliver the fresh states as
+	 *  two further `loadCommits` responses under the same refresh id - first the light part the
+	 *  badges render (no event timelines), then the full states, which only the review dialog a
+	 *  badge click opens reads. A failed refresh still delivers the reloaded page with the
+	 *  previously cached states, exactly as the extension degrades; a still-pending cache leaves
+	 *  the retry to the next load, so the follow-up never loops. */
+	private async runGerritFollowUp(request: Message, repo: string): Promise<void> {
+		const settings = this.actionSettings();
+		const started = performance.now();
+		const refresh = await graphRequest({
+			command: 'gerritRefresh',
+			repo,
+			gerritRemote: this.gerritRemote(),
+			gerritFetchLimit: this.gerritFetchLimitOf(request),
+			gerritStatusFilter: request['gerritStatusFilter']
+		}, settings);
+		if (refresh !== null && refresh['error'] !== null && refresh['error'] !== undefined) {
+			this.logLine(`gerritRefresh failed: ${String(refresh['error'])}`);
+		}
+		const stage = await graphRequest({ ...request, gerritRemote: this.gerritRemote(), gerritFetchLimit: this.gerritFetchLimitOf(request) }, settings);
+		this.logLine(`gerritRefresh + stage: ${(performance.now() - started).toFixed(0)} ms`);
+		if (stage === null || (stage['error'] !== null && stage['error'] !== undefined)) {
+			if (stage !== null) this.logLine(`ERROR gerrit stage: ${String(stage['error'])}`);
+			return;
+		}
+		delete stage['gerritPending'];
+		const states = stage['gerritStates'];
+		if (Array.isArray(states)) {
+			this.post({ ...stage, gerritStates: (states as Message[]).map((state) => ({ ...state, events: [], eventsPending: true })) });
+		}
+		this.post(stage);
 	}
 
 	/** The requests the shell serves itself. Returns true when handled. */

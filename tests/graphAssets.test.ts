@@ -187,4 +187,77 @@ describe('graph assets', () => {
 		expect(host.frame.src).toContain('about:blank');
 		expect(host.loaded).toBe(false);
 	});
+
+	it('delivers the Gerrit states in stages after a pending load', async () => {
+		// The backend's first answer pends (the refresh pipeline has not run); the host then
+		// refreshes and delivers the fresh states as the extension's staged follow-up responses
+		// under the same refresh id: the light part the badges render, then the full states.
+		let loads = 0;
+		const state = { change: 41466, patchset: 2, codeReview: 2, verified: 0, status: 'new', wip: false, headHash: 'deadbeef', url: null,
+			events: [{ type: 'vote', patchset: 2, reviewer: 'R', labels: [{ name: 'Code-Review', value: 2 }], timestamp: 1, raw: 'Patch Set 2', rawFull: 'Patch Set 2' }] };
+		backend.on('graph_request', (args) => {
+			const message = args['message'] as Record<string, unknown>;
+			if (message['command'] === 'gerritRefresh') {
+				return { command: 'gerritRefresh', error: null, changes: 1, refreshed: true };
+			}
+			if (message['command'] === 'loadCommits') {
+				loads += 1;
+				return loads === 1
+					? { command: 'loadCommits', refreshId: 7, commits: [], head: 'abc', tags: [], moreCommitsAvailable: false, gerritStates: null, gerritPending: true, error: null }
+					: { command: 'loadCommits', refreshId: 7, commits: [], head: 'abc', tags: [], moreCommitsAvailable: false, gerritStates: [state], error: null };
+			}
+			return { command: message['command'], error: null };
+		});
+		const host = new GraphHost(delegate);
+		document.body.appendChild(host.element);
+		host.load('C:\\repo');
+		await flush(10);
+		const frameWindow = host.frame.contentWindow!;
+		const postSpy = vi.spyOn(frameWindow, 'postMessage').mockImplementation(() => undefined);
+		window.dispatchEvent(new MessageEvent('message', { source: frameWindow, data: { __studioGraphRequest: {
+			command: 'loadCommits', repo: 'C:\\repo', refreshId: 7, gerritFetchRefs: true, gerritFetchLimit: null,
+			gerritStatusFilter: { new: true, merged: true, abandoned: true, wip: true }
+		} } }));
+		await vi.waitFor(() => expect(postSpy.mock.calls
+			.filter((call) => (call[0] as { __studioGraphResponse: Record<string, unknown> }).__studioGraphResponse['command'] === 'loadCommits')
+			.length).toBe(3));
+
+		// The Gerrit remote and the resolved fetch limit ride along with the requests (the
+		// view's own message names neither).
+		const calls = backend.callsTo('graph_request').map((call) => call['message'] as Record<string, unknown>);
+		expect(calls.find((message) => message['command'] === 'gerritRefresh')).toMatchObject({ repo: 'C:\\repo', gerritRemote: 'origin', gerritFetchLimit: 20 });
+		expect(calls.find((message) => message['command'] === 'loadCommits')).toMatchObject({ gerritRemote: 'origin', gerritFetchLimit: 20 });
+
+		const posted = postSpy.mock.calls
+			.map((call) => (call[0] as { __studioGraphResponse: Record<string, unknown> }).__studioGraphResponse)
+			.filter((message) => message['command'] === 'loadCommits');
+		expect(posted[0]!['gerritPending']).toBe(true);
+		// Stage 1 - the badges: the states without their event timelines; stage 2 - the full
+		// states, which only the review dialog reads. Neither says pending again.
+		const light = posted[1]!['gerritStates'] as Record<string, unknown>[];
+		expect(light[0]!['events']).toEqual([]);
+		expect(light[0]!['eventsPending']).toBe(true);
+		expect('gerritPending' in posted[1]!).toBe(false);
+		const full = posted[2]!['gerritStates'] as Record<string, unknown>[];
+		expect((full[0]!['events'] as unknown[]).length).toBe(1);
+		expect('gerritPending' in posted[2]!).toBe(false);
+	});
+
+	it('does not run the Gerrit follow-up when the backend\'s answer is not pending', async () => {
+		backend.on('graph_request', (args) => {
+			const message = args['message'] as Record<string, unknown>;
+			return { command: message['command'], error: null };
+		});
+		const host = new GraphHost(delegate);
+		document.body.appendChild(host.element);
+		host.load('C:\\repo');
+		await flush(10);
+		const frameWindow = host.frame.contentWindow!;
+		const postSpy = vi.spyOn(frameWindow, 'postMessage').mockImplementation(() => undefined);
+		window.dispatchEvent(new MessageEvent('message', { source: frameWindow, data: { __studioGraphRequest: {
+			command: 'loadCommits', repo: 'C:\\repo', refreshId: 1, gerritFetchRefs: false
+		} } }));
+		await flush(20);
+		expect(backend.callsTo('graph_request').some((call) => (call['message'] as Record<string, unknown>)['command'] === 'gerritRefresh')).toBe(false);
+	});
 });

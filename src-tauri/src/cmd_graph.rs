@@ -11,7 +11,7 @@
 
 use serde_json::{json, Value};
 
-use git_graph_core::types::LogOptions;
+use git_graph_core::types::{GerritChangeState, LogOptions};
 use git_graph_core::{config, details, diff, graph, log, stats, RepoManager};
 
 use crate::git::Git;
@@ -43,6 +43,10 @@ pub fn submodule_roots(repo_path: &str) -> Vec<String> {
 /// Drop every cached engine repository: the folder was closed or switched.
 pub fn close_engine_repos() {
     drop_warm_responses();
+    GERRIT_CACHE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clear();
     RepoManager::global().close_all();
 }
 
@@ -214,11 +218,40 @@ pub fn handle_repo_request(
         );
     }
 
+    // The Gerrit refresh pipeline (the host's follow-up to a `gerritPending` load): a fetch of
+    // the remote's change refs and a parse of their NoteDb metas — a write, so the engine's
+    // caches are dropped after it, exactly as for every write request.
+    if command == "gerritRefresh" {
+        let remote = message
+            .get("gerritRemote")
+            .and_then(Value::as_str)
+            .unwrap_or("origin");
+        let response = match gerrit_refresh(
+            &repo_path,
+            remote,
+            gerrit_fetch_limit(&message),
+            gerrit_status_filter(&message),
+        ) {
+            Ok((changes, refreshed)) => json!({
+                "command": "gerritRefresh", "error": null, "changes": changes, "refreshed": refreshed
+            }),
+            Err(error) => json!({ "command": "gerritRefresh", "error": error }),
+        };
+        drop_warm_responses();
+        RepoManager::global().close(&repo_path);
+        return Ok(response);
+    }
+
     // Every write operation: the engine's caches are dropped afterwards, since refs, HEAD or the
     // working tree may have changed.
     if let Some(response) = handle(&git, &message, settings) {
         drop_warm_responses();
         RepoManager::global().close(&repo_path);
+        // A fetch the user ran may have moved the remote's change refs: the next load re-runs
+        // the Gerrit pipeline (the extension marks its cache stale the same way).
+        if command == "fetch" && response.get("error").is_some_and(Value::is_null) {
+            mark_gerrit_stale(&repo_path);
+        }
         return Ok(response);
     }
 
@@ -235,7 +268,7 @@ pub fn handle_repo_request(
                     if command == "loadRepoInfo" {
                         repo_info_response(&repo, &git, &message)?
                     } else {
-                        load_commits_response(&repo, &message)?
+                        load_commits_response(&repo_path, &repo, &message)?
                     }
                 }
             };
@@ -677,17 +710,61 @@ fn repo_info_response(
 }
 
 /// The `loadCommits` response for a request (its `refreshId` is filled in by the caller).
-fn load_commits_response(repo: &git_graph_core::Repo, message: &Value) -> Result<Value, String> {
-    let options = log_options_from_request(message);
+fn load_commits_response(
+    repo_path: &str,
+    repo: &git_graph_core::Repo,
+    message: &Value,
+) -> Result<Value, String> {
+    let mut options = log_options_from_request(message);
+    // The Gerrit integration: the page loads with the cached changes' latest patchset refs
+    // pinned onto it (the engine gives each change's commit a row, whatever its age) and their
+    // states riding along. A cache that is missing, stale or built under another fetch limit
+    // answers from the locally fetched refs and marks the response `gerritPending` — the host
+    // then runs the refresh pipeline (`gerritRefresh`) and delivers the fresh states as further
+    // `loadCommits` responses under the same refresh id.
+    let mut gerrit_states = Value::Null;
+    let mut gerrit_pending = false;
+    if options.gerrit_refs.is_some() {
+        let remote = message
+            .get("gerritRemote")
+            .and_then(Value::as_str)
+            .unwrap_or("origin");
+        let filter = gerrit_status_filter(message);
+        let fetch_limit = gerrit_fetch_limit(message);
+        gerrit_cached_entry(
+            repo_path,
+            repo,
+            remote,
+            fetch_limit,
+            message
+                .get("hard")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        );
+        let entry = GERRIT_CACHE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(repo_path)
+            .and_then(|state| state.entry.clone());
+        if let Some(entry) = entry {
+            options.gerrit_refs = Some(gerrit_change_refs(&entry, remote, filter, fetch_limit));
+            gerrit_states = serde_json::to_value(&entry.states).unwrap_or(Value::Null);
+        }
+        gerrit_pending = gerrit_needs_refresh(repo_path, fetch_limit);
+    }
     let data = graph::load_commits(repo, &options).map_err(|e| e.message)?;
-    Ok(json!({
+    let mut response = json!({
         "command": "loadCommits",
         "commits": data.commits, "head": data.head, "tags": data.tags,
         "moreCommitsAvailable": data.more_commits_available,
         "onlyFollowFirstParent": options.only_follow_first_parent,
-        "gerritStates": null,
+        "gerritStates": gerrit_states,
         "error": null
-    }))
+    });
+    if gerrit_pending {
+        response["gerritPending"] = json!(true);
+    }
+    Ok(response)
 }
 
 /// The requests the view sends first, with the options it sends when nothing is configured
@@ -733,9 +810,9 @@ static WARM_RESPONSES: std::sync::Mutex<Vec<WarmResponse>> = std::sync::Mutex::n
 fn take_warm_response(repo_path: &str, command: &str, message: &Value) -> Option<Value> {
     let key = request_key(message);
     let mut warm = WARM_RESPONSES.lock().unwrap_or_else(|p| p.into_inner());
-    let at = warm.iter().position(|w| {
-        w.repo == repo_path && w.request["command"] == command && w.request == key
-    })?;
+    let at = warm
+        .iter()
+        .position(|w| w.repo == repo_path && w.request["command"] == command && w.request == key)?;
     Some(warm.remove(at).response)
 }
 
@@ -772,17 +849,28 @@ pub fn warm_first_page(repo_path: &str) -> Result<usize, String> {
     let info_response = repo_info_response(&repo, &git, &info)?;
     let remotes: Vec<String> = info_response["remotes"]
         .as_array()
-        .map(|list| list.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
         .unwrap_or_default();
     let [_, commits] = default_first_requests(&remotes);
-    let commits_response = load_commits_response(&repo, &commits)?;
-    let count = commits_response["commits"]
-        .as_array()
-        .map_or(0, Vec::len);
+    let commits_response = load_commits_response(repo_path, &repo, &commits)?;
+    let count = commits_response["commits"].as_array().map_or(0, Vec::len);
     let mut warm = WARM_RESPONSES.lock().unwrap_or_else(|p| p.into_inner());
     warm.retain(|w| w.repo != repo_path);
-    warm.push(WarmResponse { repo: repo_path.to_owned(), request: request_key(&info), response: info_response });
-    warm.push(WarmResponse { repo: repo_path.to_owned(), request: request_key(&commits), response: commits_response });
+    warm.push(WarmResponse {
+        repo: repo_path.to_owned(),
+        request: request_key(&info),
+        response: info_response,
+    });
+    warm.push(WarmResponse {
+        repo: repo_path.to_owned(),
+        request: request_key(&commits),
+        response: commits_response,
+    });
     Ok(count)
 }
 
@@ -849,6 +937,596 @@ fn log_options_from_request(message: &Value) -> LogOptions {
         show_commits_only_referenced_by_tags: false,
         use_mailmap: false,
     }
+}
+
+/* ---------- Gerrit change states (the review badges) ---------- */
+
+/// One repository's cached Gerrit data: the parsed NoteDb states of every change the last fetch
+/// sampled, their locally fetched patchsets, and the fetch limit that fetch ran under.
+#[derive(Clone)]
+struct GerritEntry {
+    states: Vec<GerritChangeState>,
+    patchsets: std::collections::HashMap<u64, Vec<u32>>,
+    fetch_limit: u32,
+}
+
+/// The Gerrit data of every repository the view has loaded: its cache entry, and whether the
+/// next load must re-run the fetch pipeline (the integration was just enabled, or the view
+/// fetched from the remote).
+struct GerritRepo {
+    entry: Option<GerritEntry>,
+    stale: bool,
+}
+
+static GERRIT_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, GerritRepo>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Mark a repository's Gerrit data stale: the next `loadCommits` answers from the locally
+/// fetched refs and flags itself pending, and the host then runs the refresh pipeline.
+fn mark_gerrit_stale(repo_path: &str) {
+    GERRIT_CACHE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .entry(repo_path.to_owned())
+        .or_insert(GerritRepo {
+            entry: None,
+            stale: false,
+        })
+        .stale = true;
+}
+
+/// Drop a repository's Gerrit cache entirely (the integration was disabled: the change refs the
+/// entry was built from are gone).
+fn clear_gerrit_cache(repo_path: &str) {
+    GERRIT_CACHE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(repo_path);
+}
+
+/// The status filter of a `loadCommits` request (the Repository Settings checkboxes): a WIP
+/// change passes through its own flag, any other through its status.
+#[derive(Clone, Copy)]
+struct GerritStatusFilter {
+    new_change: bool,
+    merged: bool,
+    abandoned: bool,
+    wip: bool,
+}
+
+fn gerrit_status_filter(message: &Value) -> GerritStatusFilter {
+    let filter = message.get("gerritStatusFilter");
+    let flag = |key: &str| {
+        filter
+            .and_then(|f| f.get(key))
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+    };
+    GerritStatusFilter {
+        new_change: flag("new"),
+        merged: flag("merged"),
+        abandoned: flag("abandoned"),
+        wip: flag("wip"),
+    }
+}
+
+/// The fetch limit a request displays the Gerrit changes under: the repository's own limit, or
+/// the extension's default of 20 when it carries none (the host resolves the configuration's
+/// limit into the request; gitGraphView.ts `gerritFetchLimitOf`).
+fn gerrit_fetch_limit(message: &Value) -> u32 {
+    message
+        .get("gerritFetchLimit")
+        .and_then(Value::as_u64)
+        .filter(|limit| (1..=10000).contains(limit))
+        .map_or(20, |limit| limit as u32)
+}
+
+fn gerrit_state_passes(state: &GerritChangeState, filter: GerritStatusFilter) -> bool {
+    if state.wip {
+        return filter.wip;
+    }
+    match state.status.as_str() {
+        "new" => filter.new_change,
+        "merged" => filter.merged,
+        _ => filter.abandoned,
+    }
+}
+
+/// The `limit` most recent changes (by change number) passing the status filter — the set whose
+/// latest patchset refs are injected into the graph, one badge per change (src/gerrit.ts
+/// `limitChangeStates`).
+fn gerrit_limit_states(
+    states: &[GerritChangeState],
+    filter: GerritStatusFilter,
+    limit: u32,
+) -> Vec<&GerritChangeState> {
+    let mut passing: Vec<&GerritChangeState> = states
+        .iter()
+        .filter(|state| gerrit_state_passes(state, filter))
+        .collect();
+    passing.sort_by_key(|state| std::cmp::Reverse(state.change));
+    if limit > 0 {
+        passing.truncate(limit as usize);
+    }
+    passing
+}
+
+/// The Gerrit change refs injected into the commit graph: the latest locally fetched patchset
+/// ref of every change the fetch limit selects (gitGraphView.ts `gerritChangeRefs`). The engine
+/// walks and pins them, so each change's commit carries its badge whatever its age.
+fn gerrit_change_refs(
+    entry: &GerritEntry,
+    remote: &str,
+    filter: GerritStatusFilter,
+    limit: u32,
+) -> Vec<String> {
+    gerrit_limit_states(&entry.states, filter, limit)
+        .iter()
+        .filter_map(|state| {
+            let patchsets = entry.patchsets.get(&state.change)?;
+            let latest = *patchsets.last()?;
+            Some(format!(
+                "refs/remotes/{remote}/changes/{}/{}/{}",
+                gerrit_change_shard(state.change),
+                state.change,
+                latest
+            ))
+        })
+        .collect()
+}
+
+/// The two-digit shard of a change number (`41466` → `"66"`, `5` → `"05"`).
+fn gerrit_change_shard(change: u64) -> String {
+    format!("{:02}", change % 100)
+}
+
+/// The change a change ref names — `refs/[remotes/<remote>/]changes/NN/<change>/(meta|<patchset>)`
+/// (src/gerrit.ts `parseChangeRef`): the change number, and its patchset (`None` for a NoteDb
+/// meta ref). `None` when the ref is not a change ref.
+fn gerrit_parse_change_ref(refname: &str) -> Option<(u64, Option<u32>)> {
+    let parts: Vec<&str> = refname.split('/').collect();
+    let index = parts.iter().position(|part| *part == "changes")?;
+    if parts.len() != index + 4 {
+        return None;
+    }
+    let change: u64 = parts[index + 2].parse().ok()?;
+    if change == 0 {
+        return None;
+    }
+    match parts[index + 3] {
+        "meta" => Some((change, None)),
+        patchset => Some((change, Some(patchset.parse().ok()?))),
+    }
+}
+
+/// `git ls-remote <remote> 'refs/changes/*'` parsed into change number → patchset numbers
+/// (ascending), the non-meta refs only (src/gerrit.ts `parseLsRemoteChanges`).
+fn gerrit_parse_ls_remote(output: &str) -> std::collections::BTreeMap<u64, Vec<u32>> {
+    let mut changes: std::collections::BTreeMap<u64, Vec<u32>> = std::collections::BTreeMap::new();
+    for line in output.lines() {
+        let Some((_, refname)) = line.split_once([' ', '\t']) else {
+            continue;
+        };
+        if let Some((change, Some(patchset))) = gerrit_parse_change_ref(refname.trim()) {
+            let patchsets = changes.entry(change).or_default();
+            if !patchsets.contains(&patchset) {
+                patchsets.push(patchset);
+            }
+        }
+    }
+    for patchsets in changes.values_mut() {
+        patchsets.sort_unstable();
+    }
+    changes
+}
+
+/// The fetch refspecs of a set of changes — the latest patchset and the NoteDb meta ref of
+/// each, written into `refs/remotes/<remote>/changes/` (src/gerrit.ts `buildFetchRefspecs`).
+fn gerrit_fetch_refspecs(
+    changes: &std::collections::BTreeMap<u64, Vec<u32>>,
+    remote: &str,
+) -> Vec<String> {
+    let mut refspecs = Vec::new();
+    for (change, patchsets) in changes {
+        let Some(latest) = patchsets.last() else {
+            continue;
+        };
+        let shard = gerrit_change_shard(*change);
+        refspecs.push(format!(
+            "+refs/changes/{shard}/{change}/{latest}:refs/remotes/{remote}/changes/{shard}/{change}/{latest}"
+        ));
+        refspecs.push(format!(
+            "+refs/changes/{shard}/{change}/meta:refs/remotes/{remote}/changes/{shard}/{change}/meta"
+        ));
+    }
+    refspecs
+}
+
+/// The refspec budget of one `git fetch` command line: Windows caps a process command line at
+/// ~32k characters, which a few hundred change refspecs exceed (src/gerrit.ts
+/// `FETCH_REFSPEC_BUDGET`), so large fetches are split into batches inside every limit.
+const GERRIT_FETCH_REFSPEC_BUDGET: usize = 8000;
+
+fn gerrit_chunk_refspecs(refspecs: &[String]) -> Vec<Vec<String>> {
+    let mut batches = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    let mut length = 0;
+    for refspec in refspecs {
+        if !current.is_empty() && length + refspec.len() + 1 > GERRIT_FETCH_REFSPEC_BUDGET {
+            batches.push(std::mem::take(&mut current));
+            length = 0;
+        }
+        current.push(refspec.clone());
+        length += refspec.len() + 1;
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
+}
+
+/// The initial and maximum over-sampling factors of the Gerrit fetch (src/gerrit.ts): a
+/// change's status is only known once its NoteDb meta has been fetched and parsed, so the fetch
+/// samples the most recent changes starting at `fetch_limit * 4` and doubles the window (up to
+/// ×16) while fewer than `fetch_limit` of them pass the status filter.
+const GERRIT_FETCH_WINDOW_FACTOR: usize = 4;
+const GERRIT_FETCH_WINDOW_FACTOR_MAX: usize = 16;
+
+/// The next window of the adaptive Gerrit sampling, or `None` when sampling is complete —
+/// enough passing changes collected, the remote exhausted, or the cap reached (src/gerrit.ts
+/// `nextGerritSampleWindow`).
+fn gerrit_next_sample_window(
+    window: usize,
+    passing: usize,
+    fetch_limit: u32,
+    remote_count: usize,
+) -> Option<usize> {
+    let limit = fetch_limit as usize;
+    if limit > 0 && passing >= limit {
+        return None;
+    }
+    if window >= remote_count {
+        return None;
+    }
+    let cap = if limit > 0 {
+        limit * GERRIT_FETCH_WINDOW_FACTOR_MAX
+    } else {
+        GERRIT_FETCH_WINDOW_FACTOR_MAX
+    };
+    if window >= cap {
+        return None;
+    }
+    Some(remote_count.min(cap.min(window.max(1) * 2)))
+}
+
+/// The credentials of a remote URL, dropped: they belong to the Git transport, not to a web
+/// link (`user:pass@host`, `user@host`).
+fn gerrit_without_credentials(rest: &str) -> &str {
+    match rest.find('@') {
+        Some(at) if !rest[..at].contains('/') && !rest[..at].contains('@') => &rest[at + 1..],
+        _ => rest,
+    }
+}
+
+/// The Gerrit web-URL base of a remote URL (src/gerrit.ts `getChangeUrlBase`), or `None` when
+/// the remote names no server (a local path) or no project.
+fn gerrit_url_base(remote_url: &str) -> Option<String> {
+    let (scheme, host, project) = gerrit_remote_server(remote_url)?;
+    let project = project.strip_prefix("a/").unwrap_or(&project);
+    if project.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}://{host}/c/{project}/+/",
+        scheme.unwrap_or("http")
+    ))
+}
+
+/// The Gerrit server a remote's URL names: the scheme its web interface is served over (`None`
+/// when the remote itself doesn't say — both ssh forms), the host, and the project path. Both
+/// of Git's ssh forms and the scp-style shorthand are understood; credentials belong to the Git
+/// transport and are dropped. (src/gerrit.ts `gerritRemoteServer`, case for case.)
+fn gerrit_remote_server(remote_url: &str) -> Option<(Option<&str>, &str, String)> {
+    let url = remote_url.trim();
+    let lower = url.to_ascii_lowercase();
+    for scheme in ["https", "http"] {
+        if lower.starts_with(&format!("{scheme}://")) {
+            let rest = gerrit_without_credentials(&url[scheme.len() + 3..]);
+            let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+            if host.is_empty() {
+                return None;
+            }
+            return Some((Some(scheme), host, gerrit_project_path(path)));
+        }
+    }
+    if lower.starts_with("ssh://") {
+        let rest = gerrit_without_credentials(&url[6..]);
+        let host_end = rest.find(['/', ':']).unwrap_or(rest.len());
+        let host = &rest[..host_end];
+        if host.is_empty() {
+            return None;
+        }
+        let after_host = &rest[host_end..];
+        let path = match after_host.strip_prefix(':') {
+            // An ssh port is digits up to the project path; anything else is not this form.
+            Some(tail) => match tail.find('/') {
+                Some(slash)
+                    if !tail[..slash].is_empty()
+                        && tail[..slash].bytes().all(|b| b.is_ascii_digit()) =>
+                {
+                    &tail[slash + 1..]
+                }
+                None if tail.bytes().all(|b| b.is_ascii_digit()) => "",
+                _ => return None,
+            },
+            None => after_host.strip_prefix('/').unwrap_or(""),
+        };
+        return Some((None, host, gerrit_project_path(path)));
+    }
+    // The scp-style form has no port, and a single-letter host is a Windows drive, not a host.
+    if let Some((host, path)) = gerrit_without_credentials(url).split_once(':') {
+        let host_ok = host.len() > 1
+            && host.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+            && host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+        if host_ok && !path.starts_with('/') {
+            return Some((None, host, gerrit_project_path(path)));
+        }
+    }
+    None
+}
+
+/// The project a remote URL's path names, without the surrounding slashes or the `.git` suffix.
+fn gerrit_project_path(path: &str) -> String {
+    let mut project = path.trim_matches('/').to_owned();
+    if project.len() >= 4 && project.as_bytes()[project.len() - 4..].eq_ignore_ascii_case(b".git") {
+        project.truncate(project.len() - 4);
+    }
+    project
+}
+
+/// Build a cache entry from the locally fetched change refs (`refs/remotes/<remote>/changes/*`)
+/// without any network access — the Gerrit data of a previous session shows instantly (and
+/// offline) until the refresh pipeline lands (gitGraphView.ts `buildLocalGerritEntry`).
+fn build_local_gerrit_entry(
+    repo: &git_graph_core::Repo,
+    remote: &str,
+    fetch_limit: u32,
+) -> Option<GerritEntry> {
+    let refs = git_graph_core::gerrit::list_change_refs(repo, remote).ok()?;
+    let mut changes: std::collections::BTreeMap<u64, Vec<u32>> = std::collections::BTreeMap::new();
+    for (refname, _) in refs {
+        if let Some((change, Some(patchset))) = gerrit_parse_change_ref(&refname) {
+            let patchsets = changes.entry(change).or_default();
+            if !patchsets.contains(&patchset) {
+                patchsets.push(patchset);
+            }
+        }
+    }
+    if changes.is_empty() {
+        return None;
+    }
+    let url_base = git_graph_core::config::remote_url(repo, remote)
+        .ok()
+        .flatten()
+        .and_then(|url| gerrit_url_base(&url));
+    let numbers: Vec<i64> = changes.keys().map(|change| *change as i64).collect();
+    let parsed =
+        git_graph_core::gerrit::parse_gerrit_metas(repo, remote, &numbers, url_base.as_deref())
+            .ok()?;
+    let mut entry = GerritEntry {
+        states: Vec::new(),
+        patchsets: std::collections::HashMap::new(),
+        fetch_limit,
+    };
+    for ((change, patchsets), state) in changes.into_iter().zip(parsed) {
+        if let Some(state) = state {
+            entry.states.push(state);
+            entry.patchsets.insert(change, patchsets);
+        }
+    }
+    entry
+        .states
+        .sort_by_key(|state| std::cmp::Reverse(state.change));
+    (!entry.states.is_empty()).then_some(entry)
+}
+
+/// The cache half of a Gerrit load (gitGraphView.ts `loadGerritData`): keep the cached entry
+/// when it is fresh under the request's fetch limit; otherwise rebuild the entry from the
+/// locally fetched change refs, which also replaces an entry built under another limit. `hard`
+/// always rebuilds, observing a repository that changed behind the cache's back. The network
+/// half is `gerrit_refresh`, which the host runs while the pending response is on screen.
+fn gerrit_cached_entry(
+    repo_path: &str,
+    repo: &git_graph_core::Repo,
+    remote: &str,
+    fetch_limit: u32,
+    hard: bool,
+) {
+    let fresh = !hard
+        && {
+            let cache = GERRIT_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+            matches!(cache.get(repo_path), Some(state)
+            if !state.stale && state.entry.as_ref().is_some_and(|entry| entry.fetch_limit == fetch_limit))
+        };
+    if fresh {
+        return;
+    }
+    let local = build_local_gerrit_entry(repo, remote, fetch_limit);
+    let mut cache = GERRIT_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    let state = cache.entry(repo_path.to_owned()).or_insert(GerritRepo {
+        entry: None,
+        stale: false,
+    });
+    if let Some(local) = local {
+        state.entry = Some(local);
+    }
+}
+
+/// Whether a repository's Gerrit data still needs the refresh pipeline: it was marked stale,
+/// has no entry at all, or its entry was built under another fetch limit.
+fn gerrit_needs_refresh(repo_path: &str, fetch_limit: u32) -> bool {
+    let cache = GERRIT_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    match cache.get(repo_path) {
+        Some(state) => {
+            state.stale
+                || state
+                    .entry
+                    .as_ref()
+                    .is_none_or(|entry| entry.fetch_limit != fetch_limit)
+        }
+        None => true,
+    }
+}
+
+/// Run the Gerrit refresh pipeline of a repository (gitGraphView.ts `fetchGerritChanges`):
+/// list the remote's open change refs, fetch the latest patchset and NoteDb meta of the changes
+/// the sampling window selects, parse the metas, and prune the locally fetched refs the new set
+/// no longer keeps. The result becomes the repository's cache entry; a failure keeps the
+/// previous entry and its stale flag, so the next load retries.
+///
+/// Returns the number of changes in the new entry, and whether the remote was actually reached
+/// (`false`: ls-remote answered nothing while local change refs exist — the remote is treated
+/// as unreachable, and the previously cached data stays).
+fn gerrit_refresh(
+    repo_path: &str,
+    remote: &str,
+    fetch_limit: u32,
+    filter: GerritStatusFilter,
+) -> Result<(usize, bool), String> {
+    let git = Git::new(repo_path);
+    let repo = RepoManager::global()
+        .get(repo_path)
+        .map_err(|e| e.message)?;
+    let listing = git
+        .output(&["ls-remote", remote, "refs/changes/*"])
+        .map_err(|e| {
+            format!("Could not list the Gerrit changes of the remote \"{remote}\": {e}")
+        })?;
+    let remote_changes = gerrit_parse_ls_remote(&listing);
+    if remote_changes.is_empty() {
+        if let Some(local) = build_local_gerrit_entry(&repo, remote, fetch_limit) {
+            return Ok((local.states.len(), false));
+        }
+    }
+    let url_base = git_graph_core::config::remote_url(&repo, remote)
+        .ok()
+        .flatten()
+        .and_then(|url| gerrit_url_base(&url));
+
+    let mut entry = GerritEntry {
+        states: Vec::new(),
+        patchsets: std::collections::HashMap::new(),
+        fetch_limit,
+    };
+    if !remote_changes.is_empty() {
+        let remote_count = remote_changes.len();
+        let mut window = remote_count
+            .min((fetch_limit as usize).saturating_mul(GERRIT_FETCH_WINDOW_FACTOR))
+            .max(1);
+        let filter_passes_anything =
+            filter.new_change || filter.merged || filter.abandoned || filter.wip;
+        loop {
+            // The delta: the changes newly inside the window (already-sampled changes are
+            // neither re-fetched nor re-parsed).
+            let delta: Vec<(u64, Vec<u32>)> = remote_changes
+                .iter()
+                .rev()
+                .take(window)
+                .filter(|(change, _)| !entry.patchsets.contains_key(change))
+                .map(|(change, patchsets)| (*change, patchsets.clone()))
+                .collect();
+            if !delta.is_empty() {
+                let numbers: std::collections::BTreeMap<u64, Vec<u32>> =
+                    delta.iter().cloned().collect();
+                for batch in gerrit_chunk_refspecs(&gerrit_fetch_refspecs(&numbers, remote)) {
+                    let mut args = vec!["fetch", "--no-tags", remote];
+                    args.extend(batch.iter().map(String::as_str));
+                    git.run(&args).map_err(|e| {
+                        format!(
+                            "Fetching the Gerrit changes from the remote \"{remote}\" failed: {e}"
+                        )
+                    })?;
+                }
+                // The engine's warm repository handle predates the fetched refs: reopen it so
+                // the meta parse reads the fresh ref store.
+                RepoManager::global().close(repo_path);
+                let repo = RepoManager::global()
+                    .get(repo_path)
+                    .map_err(|e| e.message)?;
+                let changes: Vec<i64> = delta.iter().map(|(change, _)| *change as i64).collect();
+                let parsed = git_graph_core::gerrit::parse_gerrit_metas(
+                    &repo,
+                    remote,
+                    &changes,
+                    url_base.as_deref(),
+                )
+                .map_err(|e| e.message)?;
+                for ((change, patchsets), state) in delta.into_iter().zip(parsed) {
+                    if let Some(state) = state {
+                        entry.states.push(state);
+                        entry.patchsets.insert(change, patchsets);
+                    }
+                }
+            }
+            let passing = entry
+                .states
+                .iter()
+                .filter(|state| gerrit_state_passes(state, filter))
+                .count();
+            match filter_passes_anything
+                .then(|| gerrit_next_sample_window(window, passing, fetch_limit, remote_count))
+            {
+                Some(Some(next)) => window = next,
+                _ => break,
+            }
+        }
+        // Prune the locally fetched change refs the new set no longer keeps (the repository
+        // stays a constant size across refreshes); best-effort — a failure only leaves stale
+        // refs behind. One batched update-ref, as the extension deletes them.
+        let keep: Vec<String> = entry
+            .patchsets
+            .keys()
+            .map(|change| {
+                format!(
+                    "refs/remotes/{remote}/changes/{}/{change}/",
+                    gerrit_change_shard(*change)
+                )
+            })
+            .collect();
+        if let Ok(repo) = RepoManager::global().get(repo_path) {
+            if let Ok(refs) = git_graph_core::gerrit::list_change_refs(&repo, remote) {
+                let deletions: String = refs
+                    .into_iter()
+                    .filter(|(refname, _)| !keep.iter().any(|prefix| refname.starts_with(prefix)))
+                    .map(|(refname, _)| format!("delete {refname}\n"))
+                    .collect();
+                if !deletions.is_empty() {
+                    let _ = git.output_with_input(&["update-ref", "--stdin"], &deletions);
+                }
+            }
+        }
+    }
+    entry
+        .states
+        .sort_by_key(|state| std::cmp::Reverse(state.change));
+    let count = entry.states.len();
+    GERRIT_CACHE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(
+            repo_path.to_owned(),
+            GerritRepo {
+                entry: Some(entry),
+                stale: false,
+            },
+        );
+    // The fetches wrote refs the engine's caches predate.
+    drop_warm_responses();
+    RepoManager::global().close(repo_path);
+    Ok((count, true))
 }
 
 #[cfg(test)]
@@ -948,7 +1626,8 @@ mod engine_tests {
             "command": "loadCommits", "repo": root, "refreshId": 1,
             "filterPath": "src/a.txt, docs/b.txt",
         });
-        let response = super::handle_repo_request(&root, &request, super::ActionSettings::default()).unwrap();
+        let response =
+            super::handle_repo_request(&root, &request, super::ActionSettings::default()).unwrap();
         let subjects: Vec<&str> = response["commits"]
             .as_array()
             .unwrap()
@@ -1615,11 +2294,29 @@ pub fn handle(git: &Git, message: &Value, settings: ActionSettings) -> Option<Va
         }
         "gerritSetFetchRefs" => {
             let enabled = bool_of("enabled");
-            let (status, cleared) =
-                gerrit_set_fetch_refs(git, str_of("remote").unwrap_or("origin"), enabled);
-            return Some(json!({
-                "command": "gerritSetFetchRefs", "error": error_of(status), "enabled": enabled, "cleared": cleared
-            }));
+            let remote = str_of("gerritRemote")
+                .or_else(|| str_of("remote"))
+                .unwrap_or("origin")
+                .to_owned();
+            let mut response = json!({ "command": "gerritSetFetchRefs", "enabled": enabled, "cleared": 0, "error": null });
+            if enabled {
+                // Enabling marks the repository's Gerrit data stale: the very next load runs the
+                // fetch pipeline (its response stays pending until the host's refresh lands).
+                mark_gerrit_stale(&git.repo.display().to_string());
+            } else {
+                let (status, cleared) = gerrit_set_fetch_refs(git, &remote, enabled);
+                response["cleared"] = json!(cleared);
+                match status {
+                    Ok(()) => {
+                        // The change refs are gone: drop everything derived from them.
+                        clear_gerrit_cache(&git.repo.display().to_string());
+                    }
+                    Err(error) => {
+                        response["error"] = json!(error);
+                    }
+                }
+            }
+            return Some(response);
         }
         "createPullRequest" => {
             // The push half; the shell then opens the provider's "new pull request" page.
@@ -2669,3 +3366,251 @@ fn predict_conflicts(git: &Git, ours: &str, theirs: &str) -> Value {
 
 #[cfg(test)]
 mod write_tests;
+
+#[cfg(test)]
+mod gerrit_tests {
+    use super::*;
+
+    /// A scratch repository whose `origin` is a bare remote playing a Gerrit server: one change
+    /// with two patchsets, its NoteDb `meta` chain recording the creation and a Code-Review +2
+    /// on the second patchset — everything the refresh pipeline must discover on its own.
+    fn gerrit_repo(name: &str, change: u64) -> (crate::test_support::Scratch, Git, String) {
+        let scratch = crate::test_support::Scratch::new(name);
+        let server = scratch.bare("server.git");
+        let git = scratch.repo("repo");
+        git.run(&["remote", "add", "origin", &server.display().to_string()])
+            .unwrap();
+
+        let ps1 = crate::test_support::commit(&git, "a.txt", "v1\n", "patchset 1");
+        let ps2 = crate::test_support::commit(&git, "a.txt", "v2\n", "patchset 2");
+        let meta1 = crate::test_support::commit(
+            &git,
+            "meta.txt",
+            "1\n",
+            &format!("Create change\n\nPatch-set: 1\nCommit: {ps1}\nStatus: new\n"),
+        );
+        let meta2 = crate::test_support::commit(
+            &git,
+            "meta.txt",
+            "2\n",
+            &format!("Patch Set 2: Code-Review+2\n\nPatch-set: 2\nCommit: {ps2}\nLabel: Code-Review=+2\n"),
+        );
+        assert_ne!(meta1, meta2);
+        let shard = gerrit_change_shard(change);
+        git.run(&[
+            "push",
+            "-q",
+            "origin",
+            &format!("{ps1}:refs/changes/{shard}/{change}/1"),
+            &format!("{ps2}:refs/changes/{shard}/{change}/2"),
+            &format!("{meta2}:refs/changes/{shard}/{change}/meta"),
+        ])
+        .unwrap();
+        (scratch, git, ps2)
+    }
+
+    fn load_commits(root: &str) -> Value {
+        handle_repo_request(
+            root,
+            &json!({
+                "command": "loadCommits", "repo": root, "maxCommits": 300, "showTags": true,
+                "showRemoteBranches": true, "gerritFetchRefs": true, "gerritFetchLimit": 20,
+                "gerritStatusFilter": { "new": true, "merged": true, "abandoned": true, "wip": true }
+            }),
+            ActionSettings::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_refresh_pipeline_fetches_and_parses_the_remote_changes() {
+        let (_scratch, git, ps2) = gerrit_repo("gerrit-refresh", 41466);
+        let root = git.repo.display().to_string();
+
+        // The first load of a just-enabled repository: nothing is fetched yet, so it pends.
+        let first = load_commits(&root);
+        assert_eq!(first["error"], json!(null));
+        assert_eq!(first["gerritPending"], json!(true));
+        assert_eq!(first["gerritStates"], json!(null));
+
+        // The host's follow-up refresh: ls-remote, the targeted fetch, the NoteDb parse.
+        let refresh = handle_repo_request(
+            &root,
+            &json!({ "command": "gerritRefresh", "repo": root, "gerritRemote": "origin", "gerritFetchLimit": 20 }),
+            ActionSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(refresh["error"], json!(null));
+        assert_eq!(refresh["refreshed"], json!(true));
+        assert_eq!(refresh["changes"], json!(1));
+
+        // The reloaded page carries the parsed state and its change commit, and no longer pends.
+        let second = load_commits(&root);
+        assert_eq!(second.get("gerritPending"), None);
+        let states = second["gerritStates"].as_array().unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0]["change"], json!(41466));
+        assert_eq!(states[0]["patchset"], json!(2));
+        assert_eq!(states[0]["codeReview"], json!(2));
+        assert_eq!(states[0]["status"], json!("new"));
+        assert_eq!(states[0]["headHash"], json!(ps2));
+        let hashes: Vec<&str> = second["commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|commit| commit["hash"].as_str().unwrap())
+            .collect();
+        assert!(hashes.contains(&ps2.as_str()));
+    }
+
+    #[test]
+    fn an_unreachable_remote_keeps_the_locally_cached_states() {
+        let (_scratch, git, _ps2) = gerrit_repo("gerrit-unreachable", 41466);
+        let root = git.repo.display().to_string();
+        handle_repo_request(
+            &root,
+            &json!({ "command": "gerritRefresh", "repo": root, "gerritRemote": "origin", "gerritFetchLimit": 20 }),
+            ActionSettings::default(),
+        )
+        .unwrap();
+
+        // The remote loses its change refs: ls-remote answers nothing while local change refs
+        // exist — the remote is treated as unreachable, the cached data stays.
+        let shard = gerrit_change_shard(41466);
+        git.run(&[
+            "push",
+            "-q",
+            "origin",
+            "--delete",
+            &format!("refs/changes/{shard}/41466/1"),
+            &format!("refs/changes/{shard}/41466/2"),
+            &format!("refs/changes/{shard}/41466/meta"),
+        ])
+        .unwrap();
+        let refresh = handle_repo_request(
+            &root,
+            &json!({ "command": "gerritRefresh", "repo": root, "gerritRemote": "origin", "gerritFetchLimit": 20 }),
+            ActionSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(refresh["error"], json!(null));
+        assert_eq!(refresh["refreshed"], json!(false));
+        assert_eq!(refresh["changes"], json!(1));
+
+        // The next load still serves the cached states.
+        let load = load_commits(&root);
+        assert_eq!(load["error"], json!(null));
+        assert_eq!(load["gerritStates"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn enabling_pends_and_disabling_deletes_the_fetched_refs() {
+        let (_scratch, git, _ps2) = gerrit_repo("gerrit-toggle", 41466);
+        let root = git.repo.display().to_string();
+
+        let enable = handle_repo_request(
+            &root,
+            &json!({ "command": "gerritSetFetchRefs", "repo": root, "enabled": true, "gerritRemote": "origin" }),
+            ActionSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(enable["error"], json!(null));
+        assert_eq!(load_commits(&root)["gerritPending"], json!(true));
+
+        handle_repo_request(
+            &root,
+            &json!({ "command": "gerritRefresh", "repo": root, "gerritRemote": "origin", "gerritFetchLimit": 20 }),
+            ActionSettings::default(),
+        )
+        .unwrap();
+        let disable = handle_repo_request(
+            &root,
+            &json!({ "command": "gerritSetFetchRefs", "repo": root, "enabled": false, "gerritRemote": "origin" }),
+            ActionSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(disable["error"], json!(null));
+        assert_eq!(disable["enabled"], json!(false));
+        assert!(disable["cleared"].as_u64().unwrap() >= 2);
+        assert!(git
+            .output(&[
+                "rev-parse",
+                "--verify",
+                "-q",
+                "refs/remotes/origin/changes/66/41466/meta"
+            ])
+            .is_err());
+    }
+
+    #[test]
+    fn change_refs_are_parsed_from_every_form() {
+        assert_eq!(
+            gerrit_parse_change_ref("refs/changes/66/41466/2"),
+            Some((41466, Some(2)))
+        );
+        assert_eq!(
+            gerrit_parse_change_ref("refs/remotes/origin/changes/05/5/meta"),
+            Some((5, None))
+        );
+        assert_eq!(gerrit_parse_change_ref("refs/heads/main"), None);
+        assert_eq!(gerrit_parse_change_ref("refs/changes/66/41466"), None);
+    }
+
+    #[test]
+    fn ls_remote_output_becomes_changes_with_sorted_patchsets() {
+        let changes = gerrit_parse_ls_remote(
+            "hash\trefs/changes/66/41466/2\nhash2\trefs/changes/66/41466/1\nhash3\trefs/changes/66/41466/meta\nhash4\trefs/heads/main\n",
+        );
+        assert_eq!(changes.get(&41466).unwrap(), &vec![1, 2]);
+        assert_eq!(changes.len(), 1);
+    }
+
+    #[test]
+    fn remote_urls_derive_the_change_link_base() {
+        assert_eq!(
+            gerrit_url_base("https://user@gerrit.example.com:8443/a/project/repo.git").as_deref(),
+            Some("https://gerrit.example.com:8443/c/project/repo/+/")
+        );
+        assert_eq!(
+            gerrit_url_base("ssh://gerrit.example.com:29418/project/repo").as_deref(),
+            Some("http://gerrit.example.com/c/project/repo/+/")
+        );
+        assert_eq!(
+            gerrit_url_base("gerrit.example.com:project/repo").as_deref(),
+            Some("http://gerrit.example.com/c/project/repo/+/")
+        );
+        assert_eq!(gerrit_url_base("D:/repos/repo"), None);
+        assert_eq!(gerrit_url_base("https://gerrit.example.com"), None);
+    }
+
+    #[test]
+    fn the_sample_window_deepens_until_the_limit_is_filled() {
+        assert_eq!(gerrit_next_sample_window(80, 20, 20, 1000), None); // enough pass already
+        assert_eq!(gerrit_next_sample_window(80, 5, 20, 1000), Some(160));
+        assert_eq!(gerrit_next_sample_window(80, 5, 20, 90), Some(90)); // the remote's end
+        assert_eq!(gerrit_next_sample_window(320, 5, 20, 1000), None); // the ×16 cap
+    }
+
+    #[test]
+    fn fetch_refspecs_are_chunked_inside_the_command_line_budget() {
+        let refspecs: Vec<String> = (0..300)
+            .map(|patchset| {
+                format!("+refs/changes/01/1/{patchset}:refs/remotes/origin/changes/01/1/{patchset}")
+            })
+            .collect();
+        let batches = gerrit_chunk_refspecs(&refspecs);
+        assert!(batches.len() >= 2);
+        assert_eq!(batches.iter().map(Vec::len).sum::<usize>(), 300);
+    }
+
+    #[test]
+    fn the_fetch_limit_falls_back_to_the_extension_default() {
+        assert_eq!(gerrit_fetch_limit(&json!({})), 20);
+        assert_eq!(gerrit_fetch_limit(&json!({ "gerritFetchLimit": 50 })), 50);
+        assert_eq!(gerrit_fetch_limit(&json!({ "gerritFetchLimit": 0 })), 20);
+        assert_eq!(
+            gerrit_fetch_limit(&json!({ "gerritFetchLimit": 10001 })),
+            20
+        );
+    }
+}
