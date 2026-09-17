@@ -520,12 +520,14 @@ export class HexView {
 	}
 
 	/** The bytes per row that fit the scroller, measured in the row font: a row needs
-	 *  rowCells() character cells, so narrower windows step down the ladder. */
+	 *  rowCells() character cells, so narrower windows step down the ladder. The probe
+	 *  zeroes the row's own padding — 28 zeros in the row font, nothing else. */
 	private pickBytesPerRow(): number {
 		if (this.forcedBytesPerRow) return this.forcedBytesPerRow;
 		const probe = el('span', 'hex-row');
 		probe.style.visibility = 'hidden';
 		probe.style.position = 'absolute';
+		probe.style.padding = '0';
 		probe.textContent = '0'.repeat(28);
 		this.scroller.append(probe);
 		const charWidth = probe.getBoundingClientRect().width / 28;

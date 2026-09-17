@@ -211,12 +211,14 @@ export class HexCompareView {
 	/* ---------- Layout & drawing ---------- */
 
 	/** The row width of one pane: half the scroller (both panes share the row), or the
-	 *  width the user pinned. */
+	 *  width the user pinned. The probe zeroes the row's own padding — 28 zeros in the
+	 *  row font, nothing else. */
 	private pickBytesPerRow(): number {
 		if (this.forcedBytesPerRow) return this.forcedBytesPerRow;
 		const probe = el('span', 'hex-row');
 		probe.style.visibility = 'hidden';
 		probe.style.position = 'absolute';
+		probe.style.padding = '0';
 		probe.textContent = '0'.repeat(28);
 		this.scroller.append(probe);
 		const charWidth = probe.getBoundingClientRect().width / 28;
