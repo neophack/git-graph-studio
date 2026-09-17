@@ -35,32 +35,32 @@ enum UndoEntry {
 const UNDO_LIMIT: usize = 500;
 
 pub struct ViewerDoc {
-	pub path: PathBuf,
-	pub rope: Rope,
-	/// Extension used to pick the syntax definition and the outline extractor.
-	pub language: String,
-	pub syntax_name: String,
-	/// The encoding id and line endings the file was read with (`crate::encoding`).
-	pub encoding: String,
-	pub eol: String,
-	syntax: SyntaxReference,
-	checkpoints: HashMap<usize, Checkpoint>,
-	undo_stack: Vec<UndoEntry>,
-	redo_stack: Vec<UndoEntry>,
-	/// The background tail build that still owes this document its remainder: while `Some`,
-	/// `line_count` reports the estimate and lines past the rope wait for the landing. The
-	/// id is checked on landing — a document replaced by a reload never receives a stale tail.
-	pub tail_id: Option<u64>,
-	/// `Some` exactly while `tail_id` is: the approximate total line count (the head's line
-	/// density extrapolated over the file's size) the scroller shows until the exact count.
-	pub line_estimate: Option<usize>,
-	/// Set when the tail build failed: the document serves its head, but a save must refuse
-	/// (writing the head alone would truncate the file) and whole-document scans report it.
-	pub tail_error: Option<String>,
-	/// The file's `size:mtime` as it was read (and as `viewer_save` last wrote it): the
-	/// cheap half of "did the file change on disk", so a save's own watcher echo never
-	/// reloads the document out from under the editor's cursor.
-	pub fingerprint: String,
+    pub path: PathBuf,
+    pub rope: Rope,
+    /// Extension used to pick the syntax definition and the outline extractor.
+    pub language: String,
+    pub syntax_name: String,
+    /// The encoding id and line endings the file was read with (`crate::encoding`).
+    pub encoding: String,
+    pub eol: String,
+    syntax: SyntaxReference,
+    checkpoints: HashMap<usize, Checkpoint>,
+    undo_stack: Vec<UndoEntry>,
+    redo_stack: Vec<UndoEntry>,
+    /// The background tail build that still owes this document its remainder: while `Some`,
+    /// `line_count` reports the estimate and lines past the rope wait for the landing. The
+    /// id is checked on landing — a document replaced by a reload never receives a stale tail.
+    pub tail_id: Option<u64>,
+    /// `Some` exactly while `tail_id` is: the approximate total line count (the head's line
+    /// density extrapolated over the file's size) the scroller shows until the exact count.
+    pub line_estimate: Option<usize>,
+    /// Set when the tail build failed: the document serves its head, but a save must refuse
+    /// (writing the head alone would truncate the file) and whole-document scans report it.
+    pub tail_error: Option<String>,
+    /// The file's `size:mtime` as it was read (and as `viewer_save` last wrote it): the
+    /// cheap half of "did the file change on disk", so a save's own watcher echo never
+    /// reloads the document out from under the editor's cursor.
+    pub fingerprint: String,
 }
 
 #[derive(Clone)]

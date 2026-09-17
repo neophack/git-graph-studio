@@ -122,7 +122,10 @@ pub async fn read_file_raw(
     encoding: Option<String>,
 ) -> Result<tauri::ipc::Response, String> {
     let bytes = fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
-    Ok(tauri::ipc::Response::new(raw_payload(&bytes, encoding.as_deref())))
+    Ok(tauri::ipc::Response::new(raw_payload(
+        &bytes,
+        encoding.as_deref(),
+    )))
 }
 
 /// Build `read_file_raw`'s payload: header length, metadata, text.
@@ -131,7 +134,12 @@ fn raw_payload(bytes: &[u8], forced: Option<&str>) -> Vec<u8> {
     let forced_utf16 = matches!(forced, Some("utf-16le" | "utf-16be"));
     let (meta, text) = if crate::encoding::looks_binary(bytes) && !forced_utf16 {
         (
-            RawFileMeta { binary: true, size, encoding: "utf8".into(), eol: "lf".into() },
+            RawFileMeta {
+                binary: true,
+                size,
+                encoding: "utf8".into(),
+                eol: "lf".into(),
+            },
             Vec::new(),
         )
     } else {
@@ -255,7 +263,8 @@ fn read_chunk(path: &str, offset: u64, len: u32) -> Result<FileChunk, String> {
     let size = file.metadata().map_err(|e| format!("{path}: {e}"))?.len();
     let start = offset.min(size);
     let len = (len as u64).min(size - start).min(u32::MAX as u64) as usize;
-    file.seek(SeekFrom::Start(start)).map_err(|e| format!("{path}: {e}"))?;
+    file.seek(SeekFrom::Start(start))
+        .map_err(|e| format!("{path}: {e}"))?;
     let mut bytes = vec![0u8; len];
     file.read_exact(&mut bytes)
         .map_err(|e| format!("{path}: {e}"))?;
@@ -495,7 +504,10 @@ fn checked(path: &str) -> Result<PathBuf, String> {
 #[tauri::command]
 pub fn session_log_file() -> String {
     std::env::temp_dir()
-        .join(format!("git-graph-studio-session-{}.log", std::process::id()))
+        .join(format!(
+            "git-graph-studio-session-{}.log",
+            std::process::id()
+        ))
         .to_string_lossy()
         .into_owned()
 }
@@ -560,7 +572,10 @@ fn same_entry(a: &Path, b: &Path) -> bool {
         return true;
     }
     // Windows file systems ignore case: the same spelling up to case is the same entry.
-    if cfg!(windows) && a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()) {
+    if cfg!(windows)
+        && a.to_string_lossy()
+            .eq_ignore_ascii_case(&b.to_string_lossy())
+    {
         return true;
     }
     let (Ok(a), Ok(b)) = (fs::canonicalize(a), fs::canonicalize(b)) else {
@@ -575,12 +590,17 @@ fn same_entry(a: &Path, b: &Path) -> bool {
 /// system's Recycle Bin / Trash so it can be restored; `permanent` (Shift+Delete, or the
 /// fallback the Explorer offers when the trash refuses) removes it outright.
 #[tauri::command]
-pub fn delete_path(state: State<'_, AppState>, path: String, permanent: Option<bool>) -> Result<(), String> {
+pub fn delete_path(
+    state: State<'_, AppState>,
+    path: String,
+    permanent: Option<bool>,
+) -> Result<(), String> {
     state.file_list_cache.invalidate();
     let target = checked(&path)?;
     let meta = fs::symlink_metadata(&target).map_err(|e| format!("{path}: {e}"))?;
     if !permanent.unwrap_or(false) {
-        return trash::delete(&target).map_err(|e| format!("{path}: could not move to the Recycle Bin: {e}"));
+        return trash::delete(&target)
+            .map_err(|e| format!("{path}: could not move to the Recycle Bin: {e}"));
     }
     if meta.is_dir() {
         fs::remove_dir_all(&target).map_err(|e| format!("{path}: {e}"))
@@ -879,15 +899,31 @@ mod file_list_tests {
         patch_bytes(
             &path,
             &[
-                BytePatch { offset: 3, byte: 0xaa },
-                BytePatch { offset: 15, byte: 0xbb },
+                BytePatch {
+                    offset: 3,
+                    byte: 0xaa,
+                },
+                BytePatch {
+                    offset: 15,
+                    byte: 0xbb,
+                },
             ],
         )
         .unwrap();
         let patched = fs::read(&path).unwrap();
-        assert_eq!(patched, [0, 1, 2, 0xaa, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 0xbb]);
+        assert_eq!(
+            patched,
+            [0, 1, 2, 0xaa, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 0xbb]
+        );
         // An offset past the end is refused, leaving the file as it was.
-        let err = patch_bytes(&path, &[BytePatch { offset: 99, byte: 1 }]).unwrap_err();
+        let err = patch_bytes(
+            &path,
+            &[BytePatch {
+                offset: 99,
+                byte: 1,
+            }],
+        )
+        .unwrap_err();
         assert!(err.contains("past the end"));
         assert_eq!(fs::read(&path).unwrap(), patched);
     }
@@ -922,18 +958,15 @@ mod file_list_tests {
     #[test]
     fn raw_payload_carries_meta_header_then_text() {
         let payload = raw_payload(b"hello\r\nworld", None);
-        let header_len =
-            u64::from_le_bytes(payload[..8].try_into().unwrap()) as usize;
-        let meta: serde_json::Value =
-            serde_json::from_slice(&payload[8..8 + header_len]).unwrap();
+        let header_len = u64::from_le_bytes(payload[..8].try_into().unwrap()) as usize;
+        let meta: serde_json::Value = serde_json::from_slice(&payload[8..8 + header_len]).unwrap();
         assert_eq!(meta["binary"], false);
         assert_eq!(meta["eol"], "crlf");
         assert_eq!(&payload[8 + header_len..], b"hello\r\nworld");
         // A binary sniff yields no text, only the header saying so.
         let binary = raw_payload(b"ab\0cd", None);
         let header_len = u64::from_le_bytes(binary[..8].try_into().unwrap()) as usize;
-        let meta: serde_json::Value =
-            serde_json::from_slice(&binary[8..8 + header_len]).unwrap();
+        let meta: serde_json::Value = serde_json::from_slice(&binary[8..8 + header_len]).unwrap();
         assert_eq!(meta["binary"], true);
         assert_eq!(binary.len(), 8 + header_len);
     }
@@ -958,7 +991,11 @@ mod file_list_tests {
             let path = path.to_string_lossy().into_owned();
             assert_eq!(
                 probe(&path).unwrap(),
-                FileProbe { size: bytes.len() as u64, binary, long_lines },
+                FileProbe {
+                    size: bytes.len() as u64,
+                    binary,
+                    long_lines
+                },
                 "{name}"
             );
             assert_eq!(decode(bytes, None).binary, binary, "{name}");
@@ -1172,8 +1209,14 @@ mod head_info_tests {
 
     #[test]
     fn the_repo_item_names_the_repositorys_folder() {
-        assert_eq!(repo_folder_name("C:\\dev\\git-graph-studio"), "git-graph-studio");
-        assert_eq!(repo_folder_name("/home/neophack/vscode-git-graph-rs"), "vscode-git-graph-rs");
+        assert_eq!(
+            repo_folder_name("C:\\dev\\git-graph-studio"),
+            "git-graph-studio"
+        );
+        assert_eq!(
+            repo_folder_name("/home/neophack/vscode-git-graph-rs"),
+            "vscode-git-graph-rs"
+        );
         // A path with no final component names no repo; the frontend hides the item.
         assert_eq!(repo_folder_name("/"), "");
         assert_eq!(repo_folder_name(""), "");

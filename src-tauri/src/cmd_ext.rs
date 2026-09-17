@@ -127,10 +127,13 @@ impl ExtInfo {
 fn find_doc(dir: &Path, name: &str) -> Option<String> {
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let file_name = entry.file_name();
-        let Some(file) = file_name.to_str() else { continue };
+        let Some(file) = file_name.to_str() else {
+            continue;
+        };
         let stem = file.split('.').next().unwrap_or("");
         if stem.eq_ignore_ascii_case(name)
-            && (file.len() == stem.len() || file[stem.len()..].eq_ignore_ascii_case(".md")
+            && (file.len() == stem.len()
+                || file[stem.len()..].eq_ignore_ascii_case(".md")
                 || file[stem.len()..].eq_ignore_ascii_case(".markdown"))
         {
             return Some(file.to_string());
@@ -261,7 +264,9 @@ pub fn ext_install_from_ggx(app: tauri::AppHandle, path: String) -> Result<ExtIn
 #[tauri::command]
 pub fn ext_uninstall(app: tauri::AppHandle, ext_id: String) -> Result<(), String> {
     if ext_id == GRAPH_PACKAGE_ID {
-        return Err(format!("{ext_id} is part of the application and cannot be uninstalled"));
+        return Err(format!(
+            "{ext_id} is part of the application and cannot be uninstalled"
+        ));
     }
     let dir = extensions_dir(&app)?;
     uninstall(&dir, &ext_id)
@@ -282,7 +287,9 @@ pub fn ext_read_file(
         return match rel_path.as_str() {
             "package.json" => Ok(GRAPH_PACKAGE_JSON.to_owned()),
             "package.nls.json" => Ok(GRAPH_PACKAGE_NLS.to_owned()),
-            _ => Err(format!("{rel_path} is not part of the built-in {GRAPH_PACKAGE_ID}")),
+            _ => Err(format!(
+                "{rel_path} is not part of the built-in {GRAPH_PACKAGE_ID}"
+            )),
         };
     }
     let dir = extensions_dir(&app)?;
@@ -311,7 +318,10 @@ fn list_installed(dir: &Path) -> Result<Vec<ExtInfo>, String> {
         let meta: StudioExtMeta = std::fs::read_to_string(path.join("studio-ext.json"))
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or(StudioExtMeta { builtin: false, format: default_format() });
+            .unwrap_or(StudioExtMeta {
+                builtin: false,
+                format: default_format(),
+            });
         let ggx: Option<GgxManifest> = std::fs::read_to_string(path.join("manifest.json"))
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok());
@@ -324,28 +334,35 @@ fn list_installed(dir: &Path) -> Result<Vec<ExtInfo>, String> {
             manifest.license,
             manifest.engines.and_then(|e| e.vscode),
         );
-        out.push(ExtInfo {
-            id: format!("{}.{}", manifest.publisher, manifest.name),
-            name: manifest.name,
-            display_name: manifest.display_name.clone(),
-            publisher: manifest.publisher,
-            version: manifest.version,
-            description: manifest.description.unwrap_or_default(),
-            builtin: meta.builtin,
-            icon,
-            path: path.to_string_lossy().into_owned(),
-            categories: manifest.categories,
-            keywords: manifest.keywords,
-            repository,
-            license,
-            engines_vscode,
-            extension_dependencies: manifest.extension_dependencies,
-            extension_pack: manifest.extension_pack,
-            readme: None,
-            changelog: None,
-            format: if ggx.is_some() { "ggx".to_owned() } else { meta.format },
-            ggx,
-        }.with_docs(&path));
+        out.push(
+            ExtInfo {
+                id: format!("{}.{}", manifest.publisher, manifest.name),
+                name: manifest.name,
+                display_name: manifest.display_name.clone(),
+                publisher: manifest.publisher,
+                version: manifest.version,
+                description: manifest.description.unwrap_or_default(),
+                builtin: meta.builtin,
+                icon,
+                path: path.to_string_lossy().into_owned(),
+                categories: manifest.categories,
+                keywords: manifest.keywords,
+                repository,
+                license,
+                engines_vscode,
+                extension_dependencies: manifest.extension_dependencies,
+                extension_pack: manifest.extension_pack,
+                readme: None,
+                changelog: None,
+                format: if ggx.is_some() {
+                    "ggx".to_owned()
+                } else {
+                    meta.format
+                },
+                ggx,
+            }
+            .with_docs(&path),
+        );
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(out)
@@ -378,7 +395,10 @@ fn install_from_vsix_into(dir: &Path, vsix: &Path, builtin: bool) -> Result<ExtI
     }
 
     extract_vsix(vsix, &target)?;
-    let meta = StudioExtMeta { builtin, format: "vsix".to_owned() };
+    let meta = StudioExtMeta {
+        builtin,
+        format: "vsix".to_owned(),
+    };
     std::fs::write(
         target.join("studio-ext.json"),
         serde_json::to_vec(&meta).unwrap(),
@@ -403,20 +423,31 @@ fn read_ggx_manifest(ggx: &Path) -> Result<(GgxManifest, VsixManifest), String> 
             .map_err(|e| e.to_string())?;
         Ok(bytes)
     };
-    let header: GgxManifest = serde_json::from_slice(&read(&mut zip, "manifest.json")?).map_err(|e| format!("invalid manifest.json: {e}"))?;
+    let header: GgxManifest = serde_json::from_slice(&read(&mut zip, "manifest.json")?)
+        .map_err(|e| format!("invalid manifest.json: {e}"))?;
     if header.format != GGX_FORMAT {
-        return Err(format!("unsupported package format {} (this app reads {GGX_FORMAT})", header.format));
+        return Err(format!(
+            "unsupported package format {} (this app reads {GGX_FORMAT})",
+            header.format
+        ));
     }
-    let manifest: VsixManifest = serde_json::from_slice(&read(&mut zip, "package.json")?).map_err(|e| format!("invalid package.json: {e}"))?;
+    let manifest: VsixManifest = serde_json::from_slice(&read(&mut zip, "package.json")?)
+        .map_err(|e| format!("invalid package.json: {e}"))?;
     if manifest.name.is_empty() || manifest.publisher.is_empty() {
         return Err("package.json needs a name and a publisher".to_string());
     }
     let id = format!("{}.{}", manifest.publisher, manifest.name);
     if header.id != id {
-        return Err(format!("manifest.json names {} but package.json is {id}", header.id));
+        return Err(format!(
+            "manifest.json names {} but package.json is {id}",
+            header.id
+        ));
     }
     if header.version != manifest.version {
-        return Err(format!("manifest.json is version {} but package.json is {}", header.version, manifest.version));
+        return Err(format!(
+            "manifest.json is version {} but package.json is {}",
+            header.version, manifest.version
+        ));
     }
     Ok((header, manifest))
 }
@@ -424,7 +455,11 @@ fn read_ggx_manifest(ggx: &Path) -> Result<(GgxManifest, VsixManifest), String> 
 /// Install a `.ggx` into `dir`: the same upgrade rules as a VSIX (forward only, a same-id
 /// `.vsix` counts as an older install of the same extension), every entry extracted at the
 /// package root, the platform's backend binary made executable.
-pub(crate) fn install_from_ggx_into(dir: &Path, ggx: &Path, builtin: bool) -> Result<ExtInfo, String> {
+pub(crate) fn install_from_ggx_into(
+    dir: &Path,
+    ggx: &Path,
+    builtin: bool,
+) -> Result<ExtInfo, String> {
     let (header, manifest) = read_ggx_manifest(ggx)?;
     refuse_integrated(&manifest)?;
     let id = header.id.clone();
@@ -432,25 +467,40 @@ pub(crate) fn install_from_ggx_into(dir: &Path, ggx: &Path, builtin: bool) -> Re
     for existing in find_installed(dir, &id)? {
         match compare_versions(&existing, &manifest.version) {
             std::cmp::Ordering::Greater => {
-                return Err(format!("{id} {existing} is already installed; {id} {} is older", manifest.version))
+                return Err(format!(
+                    "{id} {existing} is already installed; {id} {} is older",
+                    manifest.version
+                ))
             }
             std::cmp::Ordering::Equal => {
                 // The same version from a .vsix is replaced by the .ggx (it carries more);
                 // the same .ggx again is a no-op error, as for a VSIX.
-                let old_meta: Option<StudioExtMeta> = std::fs::read_to_string(target.join("studio-ext.json")).ok().and_then(|s| serde_json::from_str(&s).ok());
+                let old_meta: Option<StudioExtMeta> =
+                    std::fs::read_to_string(target.join("studio-ext.json"))
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok());
                 if old_meta.map(|m| m.format == "ggx").unwrap_or(false) {
                     return Err(format!("{id} {existing} is already installed"));
                 }
-                std::fs::remove_dir_all(&target).map_err(|e| format!("remove old {id} {existing}: {e}"))?;
+                std::fs::remove_dir_all(&target)
+                    .map_err(|e| format!("remove old {id} {existing}: {e}"))?;
             }
             std::cmp::Ordering::Less => {
-                std::fs::remove_dir_all(dir.join(format!("{id}-{existing}"))).map_err(|e| format!("remove old {id} {existing}: {e}"))?;
+                std::fs::remove_dir_all(dir.join(format!("{id}-{existing}")))
+                    .map_err(|e| format!("remove old {id} {existing}: {e}"))?;
             }
         }
     }
     extract_ggx(ggx, &target)?;
-    let meta = StudioExtMeta { builtin, format: "ggx".to_owned() };
-    std::fs::write(target.join("studio-ext.json"), serde_json::to_vec(&meta).unwrap()).map_err(|e| format!("write meta: {e}"))?;
+    let meta = StudioExtMeta {
+        builtin,
+        format: "ggx".to_owned(),
+    };
+    std::fs::write(
+        target.join("studio-ext.json"),
+        serde_json::to_vec(&meta).unwrap(),
+    )
+    .map_err(|e| format!("write meta: {e}"))?;
     list_installed(dir)?
         .into_iter()
         .find(|e| e.id == id && e.version == manifest.version)
@@ -487,7 +537,10 @@ fn uninstall(dir: &Path, ext_id: &str) -> Result<(), String> {
         let meta: StudioExtMeta = std::fs::read_to_string(path.join("studio-ext.json"))
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or(StudioExtMeta { builtin: false, format: default_format() });
+            .unwrap_or(StudioExtMeta {
+                builtin: false,
+                format: default_format(),
+            });
         if meta.builtin {
             return Err(format!(
                 "{ext_id} is built into Git Graph Studio and cannot be uninstalled"
@@ -525,7 +578,9 @@ pub fn ext_read_file_base64(
     rel_path: String,
 ) -> Result<String, String> {
     if ext_id == GRAPH_PACKAGE_ID {
-        return Err(format!("{ext_id} is built into the application; it has no installed files"));
+        return Err(format!(
+            "{ext_id} is built into the application; it has no installed files"
+        ));
     }
     let dir = extensions_dir(&app)?;
     let versions = find_installed(&dir, &ext_id)?;
@@ -672,11 +727,7 @@ fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 fn parse_version(v: &str) -> (u64, u64, u64) {
-    let mut parts = v
-        .split(['-', '+'])
-        .next()
-        .unwrap_or("")
-        .split('.');
+    let mut parts = v.split(['-', '+']).next().unwrap_or("").split('.');
     let mut next = || parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
     (next(), next(), next())
 }
@@ -760,13 +811,22 @@ mod tests {
         assert_eq!(info.display_name.as_deref(), Some("Rich Demo"));
         assert_eq!(info.categories, vec!["Other", "SCM Providers"]);
         assert_eq!(info.keywords, vec!["git"]);
-        assert_eq!(info.repository.as_deref(), Some("https://example.com/rich.git"));
+        assert_eq!(
+            info.repository.as_deref(),
+            Some("https://example.com/rich.git")
+        );
         assert_eq!(info.license.as_deref(), Some("MIT"));
         assert_eq!(info.engines_vscode.as_deref(), Some("^1.80.0"));
         assert_eq!(info.extension_dependencies, vec!["acme.base"]);
         assert_eq!(info.extension_pack, vec!["acme.pack"]);
-        assert!(info.readme.as_deref().is_some_and(|f| f.eq_ignore_ascii_case("README.md")));
-        assert!(info.changelog.as_deref().is_some_and(|f| f.eq_ignore_ascii_case("CHANGELOG.md")));
+        assert!(info
+            .readme
+            .as_deref()
+            .is_some_and(|f| f.eq_ignore_ascii_case("README.md")));
+        assert!(info
+            .changelog
+            .as_deref()
+            .is_some_and(|f| f.eq_ignore_ascii_case("CHANGELOG.md")));
 
         // A string repository field resolves to the URL too.
         assert_eq!(
@@ -939,8 +999,11 @@ mod ggx_tests {
         let ggx = dir.join(format!("acme.demo-{version}.ggx"));
         let file = std::fs::File::create(&ggx).unwrap();
         let mut zip = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-        let header = format!(r#"{{"format":"{format}","id":"acme.demo","version":"{version}","frontend":{{"page":"web/view.html"}}}}"#);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        let header = format!(
+            r#"{{"format":"{format}","id":"acme.demo","version":"{version}","frontend":{{"page":"web/view.html"}}}}"#
+        );
         zip.start_file("manifest.json", options).unwrap();
         zip.write_all(header.as_bytes()).unwrap();
         zip.start_file("package.json", options).unwrap();
@@ -963,18 +1026,41 @@ mod ggx_tests {
 
         let ggx = make_ggx(tmp.path(), "1.0.0", true, GGX_FORMAT);
         let info = install_from_ggx_into(&exts, &ggx, true).unwrap();
-        assert_eq!((info.id.as_str(), info.version.as_str(), info.format.as_str(), info.builtin), ("acme.demo", "1.0.0", "ggx", true));
-        assert_eq!(info.ggx.as_ref().unwrap().frontend.as_ref().unwrap().page, "web/view.html");
-        assert!(exts.join("acme.demo-1.0.0").join("web").join("view.html").is_file());
-        assert!(exts.join("acme.demo-1.0.0").join("data").join("payload.bin").is_file());
+        assert_eq!(
+            (
+                info.id.as_str(),
+                info.version.as_str(),
+                info.format.as_str(),
+                info.builtin
+            ),
+            ("acme.demo", "1.0.0", "ggx", true)
+        );
+        assert_eq!(
+            info.ggx.as_ref().unwrap().frontend.as_ref().unwrap().page,
+            "web/view.html"
+        );
+        assert!(exts
+            .join("acme.demo-1.0.0")
+            .join("web")
+            .join("view.html")
+            .is_file());
+        assert!(exts
+            .join("acme.demo-1.0.0")
+            .join("data")
+            .join("payload.bin")
+            .is_file());
 
         // Installing the same package again is refused; a newer one replaces it.
-        assert!(install_from_ggx_into(&exts, &ggx, false).unwrap_err().contains("already installed"));
+        assert!(install_from_ggx_into(&exts, &ggx, false)
+            .unwrap_err()
+            .contains("already installed"));
         let newer = make_ggx(tmp.path(), "1.1.0", false, GGX_FORMAT);
         let info = install_from_ggx_into(&exts, &newer, false).unwrap();
         assert_eq!(info.version, "1.1.0");
         assert_eq!(list_installed(&exts).unwrap().len(), 1);
-        assert!(install_from_ggx_into(&exts, &ggx, false).unwrap_err().contains("is older"));
+        assert!(install_from_ggx_into(&exts, &ggx, false)
+            .unwrap_err()
+            .contains("is older"));
     }
 
     #[test]
@@ -983,18 +1069,24 @@ mod ggx_tests {
         let exts = tmp.path().join("extensions");
         std::fs::create_dir_all(&exts).unwrap();
         let bad = make_ggx(tmp.path(), "1.0.0", false, "ggx/9");
-        assert!(install_from_ggx_into(&exts, &bad, false).unwrap_err().contains("unsupported package format"));
+        assert!(install_from_ggx_into(&exts, &bad, false)
+            .unwrap_err()
+            .contains("unsupported package format"));
 
         let ggx = tmp.path().join("mismatch.ggx");
         let file = std::fs::File::create(&ggx).unwrap();
         let mut zip = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
         zip.start_file("manifest.json", options).unwrap();
-        zip.write_all(br#"{"format":"ggx/1","id":"acme.other","version":"1.0.0"}"#).unwrap();
+        zip.write_all(br#"{"format":"ggx/1","id":"acme.other","version":"1.0.0"}"#)
+            .unwrap();
         zip.start_file("package.json", options).unwrap();
-        zip.write_all(br#"{"name":"demo","publisher":"acme","version":"1.0.0"}"#).unwrap();
+        zip.write_all(br#"{"name":"demo","publisher":"acme","version":"1.0.0"}"#)
+            .unwrap();
         zip.finish().unwrap();
-        assert!(install_from_ggx_into(&exts, &ggx, false).unwrap_err().contains("names acme.other"));
+        assert!(install_from_ggx_into(&exts, &ggx, false)
+            .unwrap_err()
+            .contains("names acme.other"));
 
         // A plain zip is not a package.
         let plain = tmp.path().join("plain.ggx");
@@ -1003,7 +1095,9 @@ mod ggx_tests {
         zip.start_file("readme.txt", options).unwrap();
         zip.write_all(b"hi").unwrap();
         zip.finish().unwrap();
-        assert!(install_from_ggx_into(&exts, &plain, false).unwrap_err().contains("not a .ggx"));
+        assert!(install_from_ggx_into(&exts, &plain, false)
+            .unwrap_err()
+            .contains("not a .ggx"));
     }
 }
 
@@ -1018,7 +1112,14 @@ mod integrated_tests {
         let list = with_builtin(Vec::new());
         assert_eq!(list.len(), 1);
         let builtin = &list[0];
-        assert_eq!((builtin.id.as_str(), builtin.builtin, builtin.format.as_str()), (GRAPH_PACKAGE_ID, true, "builtin"));
+        assert_eq!(
+            (
+                builtin.id.as_str(),
+                builtin.builtin,
+                builtin.format.as_str()
+            ),
+            (GRAPH_PACKAGE_ID, true, "builtin")
+        );
         assert_eq!(builtin.version, crate::cmd_graph::engine_version());
         assert!(!builtin.name.is_empty() && !builtin.publisher.is_empty());
 
@@ -1029,10 +1130,19 @@ mod integrated_tests {
         std::fs::create_dir_all(exts.join("someone.else-1.0.0")).unwrap();
         let stray = exts.join(format!("{GRAPH_PACKAGE_ID}-9.9.9"));
         std::fs::create_dir_all(&stray).unwrap();
-        let mut other_manifest = std::fs::File::create(exts.join("someone.else-1.0.0").join("package.json")).unwrap();
-        write!(other_manifest, r#"{{"name":"else","publisher":"someone","version":"1.0.0"}}"#).unwrap();
+        let mut other_manifest =
+            std::fs::File::create(exts.join("someone.else-1.0.0").join("package.json")).unwrap();
+        write!(
+            other_manifest,
+            r#"{{"name":"else","publisher":"someone","version":"1.0.0"}}"#
+        )
+        .unwrap();
         let mut stray_manifest = std::fs::File::create(stray.join("package.json")).unwrap();
-        write!(stray_manifest, r#"{{"name":"git-graph-rs","publisher":"neophack","version":"9.9.9"}}"#).unwrap();
+        write!(
+            stray_manifest,
+            r#"{{"name":"git-graph-rs","publisher":"neophack","version":"9.9.9"}}"#
+        )
+        .unwrap();
         let list = with_builtin(list_installed(&exts).unwrap());
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].id, GRAPH_PACKAGE_ID);
@@ -1049,7 +1159,11 @@ mod integrated_tests {
         let mut zip = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
         zip.start_file("manifest.json", options).unwrap();
-        zip.write_all(format!(r#"{{"format":"ggx/1","id":"{GRAPH_PACKAGE_ID}","version":"99.0.0"}}"#).as_bytes()).unwrap();
+        zip.write_all(
+            format!(r#"{{"format":"ggx/1","id":"{GRAPH_PACKAGE_ID}","version":"99.0.0"}}"#)
+                .as_bytes(),
+        )
+        .unwrap();
         zip.start_file("package.json", options).unwrap();
         zip.write_all(br#"{"name":"git-graph-rs","publisher":"neophack","version":"99.0.0","main":"out/extension.js"}"#).unwrap();
         zip.finish().unwrap();

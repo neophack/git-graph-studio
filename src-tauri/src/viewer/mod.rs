@@ -9,8 +9,8 @@
 //! the landing corrects over the `studio://viewer-lines` event.
 
 pub mod doc;
-pub mod indexed;
 pub(crate) mod find;
+pub mod indexed;
 mod outline;
 
 use serde::Serialize;
@@ -81,7 +81,9 @@ pub(crate) struct TailGate {
 
 impl TailGate {
     pub(crate) fn pending() -> Arc<TailGate> {
-        Arc::new(TailGate { pending: (Mutex::new(true), Condvar::new()) })
+        Arc::new(TailGate {
+            pending: (Mutex::new(true), Condvar::new()),
+        })
     }
 
     /// Open the gate from the build thread: whatever waited proceeds against the doc's
@@ -96,7 +98,9 @@ impl TailGate {
         let (lock, signal) = &self.pending;
         let mut pending = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         while *pending {
-            pending = signal.wait(pending).unwrap_or_else(|poisoned| poisoned.into_inner());
+            pending = signal
+                .wait(pending)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
     }
 }
@@ -121,7 +125,12 @@ impl ViewerState {
             .cloned()
     }
 
-    fn insert_doc(&self, doc_id: u64, doc: ViewerDoc, tail: Option<Arc<TailGate>>) -> Arc<DocHandle> {
+    fn insert_doc(
+        &self,
+        doc_id: u64,
+        doc: ViewerDoc,
+        tail: Option<Arc<TailGate>>,
+    ) -> Arc<DocHandle> {
         let handle = Arc::new(DocHandle {
             doc: Mutex::new(doc),
             find_gen: AtomicU64::new(0),
@@ -379,7 +388,11 @@ fn open_staged(path: &str) -> Result<Staged, String> {
     let per_line = (head.len() as u64 / head_lines as u64).max(1);
     let estimate = head_lines + ((total - head.len() as u64) / per_line) as usize;
     doc.line_estimate = Some(estimate.max(head_lines));
-    Ok(Staged::Head { doc, from_byte: head.len() as u64, total_bytes: total })
+    Ok(Staged::Head {
+        doc,
+        from_byte: head.len() as u64,
+        total_bytes: total,
+    })
 }
 
 /// A positioned read: Windows' `seek_read` or Unix's `read_at`, whichever platform builds.
@@ -450,7 +463,13 @@ fn build_tail(path: &str, from: u64, total: u64) -> Result<ropey::Rope, String> 
     let bounds: Vec<u64> = bounds
         .iter()
         .enumerate()
-        .map(|(i, &bound)| if i == 0 { bound } else { utf8_boundary(file, bound).min(total) })
+        .map(|(i, &bound)| {
+            if i == 0 {
+                bound
+            } else {
+                utf8_boundary(file, bound).min(total)
+            }
+        })
         .collect();
     let parts: Vec<Result<ropey::Rope, String>> = bounds
         .par_windows(2)
@@ -547,7 +566,13 @@ fn spawn_tail(
             if let Some(count) = landed {
                 if let Some(app) = app {
                     use tauri::Emitter;
-                    let _ = app.emit("studio://viewer-lines", LinesLanded { doc_id, line_count: count });
+                    let _ = app.emit(
+                        "studio://viewer-lines",
+                        LinesLanded {
+                            doc_id,
+                            line_count: count,
+                        },
+                    );
                 }
             }
         });
@@ -582,7 +607,9 @@ fn wait_tail(handle: &DocHandle) -> Result<(), String> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     match &doc.tail_error {
-        Some(error) => Err(format!("the rest of this file did not finish loading: {error}")),
+        Some(error) => Err(format!(
+            "the rest of this file did not finish loading: {error}"
+        )),
         None => Ok(()),
     }
 }
@@ -597,7 +624,9 @@ fn ensure_lines(handle: &DocHandle, start: usize) -> Result<(), String> {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if doc.tail_id.is_none() {
             return match &doc.tail_error {
-                Some(error) => Err(format!("the rest of this file did not finish loading: {error}")),
+                Some(error) => Err(format!(
+                    "the rest of this file did not finish loading: {error}"
+                )),
                 None => Ok(()),
             };
         }
@@ -632,14 +661,19 @@ static PREWARMED: Mutex<Option<Prewarmed>> = Mutex::new(None);
 /// the staged open builds the rope in parallel chunks and the document edits however big
 /// the file is.
 pub fn prewarm(path: String) {
-	if !matches!(crate::cmd_fs::probe(&path), Ok(probe) if !probe.binary && !probe.long_lines) {
-		return;
-	}
+    if !matches!(crate::cmd_fs::probe(&path), Ok(probe) if !probe.binary && !probe.long_lines) {
+        return;
+    }
     let slot: PrewarmSlot = Arc::new((Mutex::new(None), Condvar::new()));
     {
-        let mut guard = PREWARMED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = PREWARMED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // A second prewarm replaces the first: the launch path is what the window opens.
-        *guard = Some(Prewarmed { path: path.clone(), slot: Arc::clone(&slot) });
+        *guard = Some(Prewarmed {
+            path: path.clone(),
+            slot: Arc::clone(&slot),
+        });
     }
     let load = path;
     let fill = Arc::clone(&slot);
@@ -657,7 +691,9 @@ pub fn prewarm(path: String) {
 /// prewarmed for this path (the slot serves one open, then clears).
 fn take_prewarmed(path: &str) -> Option<Result<Staged, String>> {
     let slot = {
-        let mut guard = PREWARMED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = PREWARMED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         match guard.as_ref() {
             Some(prewarmed) if prewarmed.path == path => {
                 let slot = Arc::clone(&prewarmed.slot);
@@ -701,7 +737,11 @@ fn open_impl(state: &ViewerState, path: &str) -> Result<OpenResult, String> {
     let staged = open_staged(path)?;
     let (doc, tail) = match staged {
         Staged::Full(doc) => (doc, None),
-        Staged::Head { doc, from_byte, total_bytes } => (doc, Some((from_byte, total_bytes))),
+        Staged::Head {
+            doc,
+            from_byte,
+            total_bytes,
+        } => (doc, Some((from_byte, total_bytes))),
     };
     let result = open_result(state.next_id.fetch_add(1, Ordering::Relaxed), &doc);
     let handle = state.insert_doc(result.doc_id, doc, None);
@@ -747,7 +787,9 @@ fn lines_fast(doc: &mut ViewerDoc, start: usize, end: usize) -> LinesResult {
             tokens_pending: false,
         };
     }
-    let lines = (start..=end).map(|line| (plain_line(doc, line), Vec::new())).collect();
+    let lines = (start..=end)
+        .map(|line| (plain_line(doc, line), Vec::new()))
+        .collect();
     LinesResult {
         start_line: start,
         line_count: reported,
@@ -762,7 +804,13 @@ fn lines_fast(doc: &mut ViewerDoc, start: usize, end: usize) -> LinesResult {
 /// supersedes it. `pace` (the warmer) sleeps for half of each slice's duration — a slow
 /// grammar's slices hold the lock long enough to matter, and warming must never crowd the
 /// fetches the user is waiting on.
-fn catch_up(handle: &DocHandle, start: usize, end: usize, alive: &dyn Fn() -> bool, pace: bool) -> Result<(), String> {
+fn catch_up(
+    handle: &DocHandle,
+    start: usize,
+    end: usize,
+    alive: &dyn Fn() -> bool,
+    pace: bool,
+) -> Result<(), String> {
     loop {
         let slice_at = std::time::Instant::now();
         {
@@ -794,7 +842,12 @@ fn catch_up(handle: &DocHandle, start: usize, end: usize, alive: &dyn Fn() -> bo
 
 /// The full window after its catch-up: tokens for `start..=end`, checkpointing every block
 /// crossed on the way (the walk leaves them behind, so the region stays warm).
-fn highlight_doc(handle: &DocHandle, start: usize, end: usize, generation: u64) -> Result<LinesResult, String> {
+fn highlight_doc(
+    handle: &DocHandle,
+    start: usize,
+    end: usize,
+    generation: u64,
+) -> Result<LinesResult, String> {
     let alive = || handle.lines_gen.load(Ordering::Relaxed) == generation;
     catch_up(handle, start, end, &alive, false)?;
     let mut doc = handle
@@ -1005,7 +1058,11 @@ pub async fn viewer_open(
     .map_err(|e| e.to_string())??;
     let (doc, tail) = match staged {
         Staged::Full(doc) => (doc, None),
-        Staged::Head { doc, from_byte, total_bytes } => (doc, Some((from_byte, total_bytes))),
+        Staged::Head {
+            doc,
+            from_byte,
+            total_bytes,
+        } => (doc, Some((from_byte, total_bytes))),
     };
     let result = open_result(doc_id, &doc);
     let handle = state.insert_doc(doc_id, doc, None);
@@ -1070,9 +1127,11 @@ pub async fn viewer_highlight(
         .doc_handle(doc_id)
         .ok_or_else(|| format!("No open document {doc_id}"))?;
     let generation = handle.lines_gen.fetch_add(1, Ordering::Relaxed) + 1;
-    let result = tauri::async_runtime::spawn_blocking(move || highlight_doc(&handle, start, end, generation))
-        .await
-        .map_err(|e| e.to_string())??;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        highlight_doc(&handle, start, end, generation)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     // The catch-up left the region warm up to this window; keep warming what is beyond it.
     let handle = state.doc_handle(doc_id);
     if let Some(handle) = handle {
@@ -1124,12 +1183,12 @@ pub fn viewer_edit(
 /// straddle its ends (a trailing `\r` is held back and re-joined with the next chunk by
 /// the caller, so a pair split across a rope chunk boundary still comes out as one CRLF).
 fn write_crlf_chunk(out: &mut impl std::io::Write, text: &str) -> std::io::Result<()> {
-	if text.contains('\r') || text.contains('\n') {
-		let normalised = text.replace("\r\n", "\n").replace('\n', "\r\n");
-		out.write_all(normalised.as_bytes())
-	} else {
-		out.write_all(text.as_bytes())
-	}
+    if text.contains('\r') || text.contains('\n') {
+        let normalised = text.replace("\r\n", "\n").replace('\n', "\r\n");
+        out.write_all(normalised.as_bytes())
+    } else {
+        out.write_all(text.as_bytes())
+    }
 }
 
 /// The CRLF pass over an iterator of chunks: each chunk's line breaks are normalised the
@@ -1138,67 +1197,72 @@ fn write_crlf_chunk(out: &mut impl std::io::Write, text: &str) -> std::io::Resul
 /// boundary still comes out as one CRLF, and a lone CR survives as itself. `on_chunk`
 /// hears every chunk's input size, the save progress's unit.
 fn write_crlf<'a>(
-	out: &mut impl std::io::Write,
-	chunks: impl Iterator<Item = &'a str>,
-	mut on_chunk: impl FnMut(u64),
+    out: &mut impl std::io::Write,
+    chunks: impl Iterator<Item = &'a str>,
+    mut on_chunk: impl FnMut(u64),
 ) -> std::io::Result<()> {
-	let mut pending_cr = false;
-	for chunk in chunks {
-		let mut text = chunk;
-		// An empty chunk (possible at the ends of a sliced iteration) decides nothing:
-		// the held-back `\r` keeps waiting for the text that follows it.
-		if pending_cr && text.is_empty() {
-			continue;
-		}
-		if pending_cr {
-			if let Some(rest) = text.strip_prefix('\n') {
-				out.write_all(b"\r\n")?;
-				text = rest;
-			} else {
-				out.write_all(b"\r")?;
-			}
-			pending_cr = false;
-		}
-		if text.ends_with('\r') {
-			pending_cr = true;
-			text = &text[..text.len() - 1];
-		}
-		write_crlf_chunk(out, text)?;
-		on_chunk(chunk.len() as u64);
-	}
-	if pending_cr {
-		out.write_all(b"\r")?;
-	}
-	Ok(())
+    let mut pending_cr = false;
+    for chunk in chunks {
+        let mut text = chunk;
+        // An empty chunk (possible at the ends of a sliced iteration) decides nothing:
+        // the held-back `\r` keeps waiting for the text that follows it.
+        if pending_cr && text.is_empty() {
+            continue;
+        }
+        if pending_cr {
+            if let Some(rest) = text.strip_prefix('\n') {
+                out.write_all(b"\r\n")?;
+                text = rest;
+            } else {
+                out.write_all(b"\r")?;
+            }
+            pending_cr = false;
+        }
+        if text.ends_with('\r') {
+            pending_cr = true;
+            text = &text[..text.len() - 1];
+        }
+        write_crlf_chunk(out, text)?;
+        on_chunk(chunk.len() as u64);
+    }
+    if pending_cr {
+        out.write_all(b"\r")?;
+    }
+    Ok(())
 }
 
 /// The throttled save reporter: the write stream reports every [`PROGRESS_STEP`] input
 /// bytes and exactly once at each end, so the status bar follows a gigabyte at a hundred
 /// updates instead of one per rope chunk.
 struct SaveReporter<'a> {
-	total: u64,
-	written: u64,
-	reported: u64,
-	sink: &'a dyn Fn(u64, u64),
+    total: u64,
+    written: u64,
+    reported: u64,
+    sink: &'a dyn Fn(u64, u64),
 }
 
 impl<'a> SaveReporter<'a> {
-	fn new(total: u64, sink: &'a dyn Fn(u64, u64)) -> Self {
-		sink(0, total);
-		SaveReporter { total, written: 0, reported: 0, sink }
-	}
+    fn new(total: u64, sink: &'a dyn Fn(u64, u64)) -> Self {
+        sink(0, total);
+        SaveReporter {
+            total,
+            written: 0,
+            reported: 0,
+            sink,
+        }
+    }
 
-	fn step(&mut self, bytes: u64) {
-		self.written += bytes;
-		if self.written - self.reported >= PROGRESS_STEP {
-			self.reported = self.written;
-			(self.sink)(self.written, self.total);
-		}
-	}
+    fn step(&mut self, bytes: u64) {
+        self.written += bytes;
+        if self.written - self.reported >= PROGRESS_STEP {
+            self.reported = self.written;
+            (self.sink)(self.written, self.total);
+        }
+    }
 
-	fn done(&mut self) {
-		(self.sink)(self.total, self.total);
-	}
+    fn done(&mut self) {
+        (self.sink)(self.total, self.total);
+    }
 }
 
 /// How many written bytes separate two progress reports — small enough that a long save
@@ -1212,45 +1276,45 @@ const PROGRESS_STEP: u64 = 8 << 20;
 /// implementation. `progress` receives `(written, total)` in input bytes — the read side of
 /// the stream, so BOM and CRLF expansion never push the ratio past 1.
 fn write_doc(
-	path: &std::path::Path,
-	rope: &ropey::Rope,
-	encoding: &str,
-	eol: &str,
-	progress: &dyn Fn(u64, u64),
+    path: &std::path::Path,
+    rope: &ropey::Rope,
+    encoding: &str,
+    eol: &str,
+    progress: &dyn Fn(u64, u64),
 ) -> Result<(), String> {
-	use std::io::Write;
-	let file = std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
-	let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
-	let mut reporter = SaveReporter::new(rope.len_bytes() as u64, progress);
-	let written = (|| -> std::io::Result<()> {
-		match encoding {
-			"utf8" | "utf8bom" => {
-				if encoding == "utf8bom" {
-					out.write_all(&[0xEF, 0xBB, 0xBF])?;
-				}
-				if eol == "crlf" {
-					write_crlf(&mut out, rope.chunks(), |bytes| reporter.step(bytes))?;
-				} else {
-					for chunk in rope.chunks() {
-						out.write_all(chunk.as_bytes())?;
-						reporter.step(chunk.len() as u64);
-					}
-				}
-			}
-			_ => {
-				let bytes = crate::encoding::encode(&rope.to_string(), encoding, eol);
-				out.write_all(&bytes)?;
-			}
-		}
-		Ok(())
-	})();
-	written.map_err(|e| format!("{}: {e}", path.display()))?;
-	out.into_inner()
-		.map_err(|e| format!("{}: {e}", path.display()))?
-		.flush()
-		.map_err(|e| format!("{}: {e}", path.display()))?;
-	reporter.done();
-	Ok(())
+    use std::io::Write;
+    let file = std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
+    let mut reporter = SaveReporter::new(rope.len_bytes() as u64, progress);
+    let written = (|| -> std::io::Result<()> {
+        match encoding {
+            "utf8" | "utf8bom" => {
+                if encoding == "utf8bom" {
+                    out.write_all(&[0xEF, 0xBB, 0xBF])?;
+                }
+                if eol == "crlf" {
+                    write_crlf(&mut out, rope.chunks(), |bytes| reporter.step(bytes))?;
+                } else {
+                    for chunk in rope.chunks() {
+                        out.write_all(chunk.as_bytes())?;
+                        reporter.step(chunk.len() as u64);
+                    }
+                }
+            }
+            _ => {
+                let bytes = crate::encoding::encode(&rope.to_string(), encoding, eol);
+                out.write_all(&bytes)?;
+            }
+        }
+        Ok(())
+    })();
+    written.map_err(|e| format!("{}: {e}", path.display()))?;
+    out.into_inner()
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .flush()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    reporter.done();
+    Ok(())
 }
 
 /// One save-progress report over the command's channel: bytes of the document streamed out
@@ -1259,8 +1323,8 @@ fn write_doc(
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveProgress {
-	pub written: u64,
-	pub total: u64,
+    pub written: u64,
+    pub total: u64,
 }
 
 /// Write a viewer document back to disk, reporting progress over `on_progress` as the rope
@@ -1269,39 +1333,39 @@ pub struct SaveProgress {
 /// must not freeze the way it did when the whole document crossed the IPC as one JSON string.
 #[tauri::command]
 pub async fn viewer_save(
-	app: tauri::AppHandle,
-	state: tauri::State<'_, ViewerState>,
-	doc_id: u64,
-	on_progress: tauri::ipc::Channel<SaveProgress>,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ViewerState>,
+    doc_id: u64,
+    on_progress: tauri::ipc::Channel<SaveProgress>,
 ) -> Result<(), String> {
-	// Saving a document whose tail has not landed would write the head alone — the file
-	// truncated to a fraction of itself. Wait the tail out first.
-	let wait = state
-		.doc_handle(doc_id)
-		.ok_or_else(|| format!("No open document {doc_id}"))?;
-	tauri::async_runtime::spawn_blocking(move || wait_tail(&wait))
-		.await
-		.map_err(|e| e.to_string())??;
-	// The rope clones cheap (ropey chunks share under an Arc — the `viewer_symbols` pattern),
-	// so the blocking writer below never queues the document lock behind a whole-file pass.
-	let (path, encoding, eol, rope) = state.with_doc(doc_id, |doc| {
-		(
-			doc.path.clone(),
-			doc.encoding.clone(),
-			doc.eol.clone(),
-			doc.rope.clone(),
-		)
-	})?;
-	let stamp = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-		let progress = move |written: u64, total: u64| {
-			let _ = on_progress.send(SaveProgress { written, total });
-		};
-		write_doc(&path, &rope, &encoding, &eol, &progress)?;
-		// The stamp the file now carries, so the save's own watcher echo reads as "unchanged".
-		Ok(fingerprint(&path))
-	})
-	.await
-	.map_err(|e| e.to_string())??;
+    // Saving a document whose tail has not landed would write the head alone — the file
+    // truncated to a fraction of itself. Wait the tail out first.
+    let wait = state
+        .doc_handle(doc_id)
+        .ok_or_else(|| format!("No open document {doc_id}"))?;
+    tauri::async_runtime::spawn_blocking(move || wait_tail(&wait))
+        .await
+        .map_err(|e| e.to_string())??;
+    // The rope clones cheap (ropey chunks share under an Arc — the `viewer_symbols` pattern),
+    // so the blocking writer below never queues the document lock behind a whole-file pass.
+    let (path, encoding, eol, rope) = state.with_doc(doc_id, |doc| {
+        (
+            doc.path.clone(),
+            doc.encoding.clone(),
+            doc.eol.clone(),
+            doc.rope.clone(),
+        )
+    })?;
+    let stamp = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let progress = move |written: u64, total: u64| {
+            let _ = on_progress.send(SaveProgress { written, total });
+        };
+        write_doc(&path, &rope, &encoding, &eol, &progress)?;
+        // The stamp the file now carries, so the save's own watcher echo reads as "unchanged".
+        Ok(fingerprint(&path))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     let _ = state.with_doc(doc_id, |doc| doc.fingerprint = stamp.clone());
     // Match write_file: a saved (possibly new) file must show up in Quick Open and search.
     use tauri::Manager;
@@ -1332,7 +1396,11 @@ pub async fn viewer_reload(
         .map_err(|e| e.to_string())??;
     let (doc, tail) = match staged {
         Staged::Full(doc) => (doc, None),
-        Staged::Head { doc, from_byte, total_bytes } => (doc, Some((from_byte, total_bytes))),
+        Staged::Head {
+            doc,
+            from_byte,
+            total_bytes,
+        } => (doc, Some((from_byte, total_bytes))),
     };
     let line_count = doc.line_count();
     // The tab may have closed while the file was being read: a closed id must not come
@@ -1355,7 +1423,14 @@ pub async fn viewer_reload(
                 tail: Mutex::new(None),
             });
             if let Some((from, total)) = tail {
-                spawn_tail(slot, Some(app), doc_id, path.display().to_string(), from, total);
+                spawn_tail(
+                    slot,
+                    Some(app),
+                    doc_id,
+                    path.display().to_string(),
+                    from,
+                    total,
+                );
             }
         }
         None => return Err(format!("No open document {doc_id}")),
@@ -1722,19 +1797,28 @@ mod tests {
         let opened = open_impl(&state, &path).unwrap();
         // The scroller's first count is the estimate, in the right ballpark immediately.
         let (estimate, staging) = state
-            .with_doc(opened.doc_id, |doc| (doc.line_count(), doc.tail_id.is_some()))
+            .with_doc(opened.doc_id, |doc| {
+                (doc.line_count(), doc.tail_id.is_some())
+            })
             .unwrap();
         assert!(staging, "a file past the head must open staged");
-        assert!((300_000..=360_000).contains(&estimate), "estimate {estimate}");
+        assert!(
+            (300_000..=360_000).contains(&estimate),
+            "estimate {estimate}"
+        );
         // A window beyond the head waits for the tail and then serves real lines (the
         // estimate may overshoot the exact count; the mid-file window cannot).
         let mid = estimate / 2;
         let beyond = text_impl(&state, opened.doc_id, mid, mid + 9).unwrap();
         assert_eq!(beyond.lines.len(), 10);
         // Landed: the exact count, the estimate gone.
-        let exact = state.with_doc(opened.doc_id, |doc| doc.line_count()).unwrap();
+        let exact = state
+            .with_doc(opened.doc_id, |doc| doc.line_count())
+            .unwrap();
         assert_eq!(exact, 330_001); // the trailing newline's empty final line
-        assert!(state.with_doc(opened.doc_id, |doc| doc.line_estimate.is_none()).unwrap());
+        assert!(state
+            .with_doc(opened.doc_id, |doc| doc.line_estimate.is_none())
+            .unwrap());
         let last = text_impl(&state, opened.doc_id, exact - 3, exact - 1).unwrap();
         assert_eq!(last.lines[0], "line 329998 of the staged open test");
         assert_eq!(last.lines[1], "line 329999 of the staged open test");
@@ -1775,7 +1859,10 @@ mod tests {
         assert_eq!(symbols[0].name, "main");
         let lines = lines_impl(&state, opened.doc_id, 0, 3).unwrap();
         assert_eq!(lines.start_line, 0);
-        assert!(!lines.tokens_pending, "line 0 always has a fresh state to resume from");
+        assert!(
+            !lines.tokens_pending,
+            "line 0 always has a fresh state to resume from"
+        );
         assert_eq!(lines.lines[1].0, "    println!(\"hi\");");
         assert!(!lines.lines[1].1.is_empty(), "the body line carries tokens");
     }
@@ -1868,7 +1955,12 @@ mod tests {
         // The save path itself (the streaming writer `viewer_save` runs), not a manual dump.
         let (path_of, encoding, eol, rope) = state
             .with_doc(opened.doc_id, |doc| {
-                (doc.path.clone(), doc.encoding.clone(), doc.eol.clone(), doc.rope.clone())
+                (
+                    doc.path.clone(),
+                    doc.encoding.clone(),
+                    doc.eol.clone(),
+                    doc.rope.clone(),
+                )
             })
             .unwrap();
         write_doc(&path_of, &rope, &encoding, &eol, &|_, _| {}).unwrap();
@@ -1891,8 +1983,14 @@ mod tests {
             ("中文\n", "gb18030", "lf"),
         ] {
             let path = s.file("save.out", text);
-            write_doc(std::path::Path::new(&path), &ropey::Rope::from(text), encoding, eol, &|_, _| {})
-                .unwrap();
+            write_doc(
+                std::path::Path::new(&path),
+                &ropey::Rope::from(text),
+                encoding,
+                eol,
+                &|_, _| {},
+            )
+            .unwrap();
             assert_eq!(
                 std::fs::read(&path).unwrap(),
                 crate::encoding::encode(text, encoding, eol),
@@ -1947,9 +2045,20 @@ mod tests {
         .unwrap();
         let events = events.lock().unwrap();
         let total = text.len() as u64;
-        assert_eq!(events.first(), Some(&(0, total)), "starts at zero over the whole size");
-        assert_eq!(events.last(), Some(&(total, total)), "ends at the whole size");
-        assert!(events.len() >= 4, "the 8 MiB step must report intermediates: {events:?}");
+        assert_eq!(
+            events.first(),
+            Some(&(0, total)),
+            "starts at zero over the whole size"
+        );
+        assert_eq!(
+            events.last(),
+            Some(&(total, total)),
+            "ends at the whole size"
+        );
+        assert!(
+            events.len() >= 4,
+            "the 8 MiB step must report intermediates: {events:?}"
+        );
         assert!(
             events.windows(2).all(|pair| pair[0].0 < pair[1].0),
             "written bytes only ever grow: {events:?}"
@@ -1979,7 +2088,12 @@ mod tests {
         edit_impl(&state, opened.doc_id, 0, 0, 0, 0, "edited ").unwrap();
         let (path_of, encoding, eol, rope) = state
             .with_doc(opened.doc_id, |doc| {
-                (doc.path.clone(), doc.encoding.clone(), doc.eol.clone(), doc.rope.clone())
+                (
+                    doc.path.clone(),
+                    doc.encoding.clone(),
+                    doc.eol.clone(),
+                    doc.rope.clone(),
+                )
             })
             .unwrap();
         write_doc(&path_of, &rope, &encoding, &eol, &|_, _| {}).unwrap();
@@ -2008,14 +2122,20 @@ mod tests {
         let state = ViewerState::default();
         let opened = open_impl(&state, &path).unwrap();
         let window = lines_impl(&state, opened.doc_id, 2000, 2020).unwrap();
-        assert!(window.tokens_pending, "the cold window must not wait on the catch-up parse");
+        assert!(
+            window.tokens_pending,
+            "the cold window must not wait on the catch-up parse"
+        );
         assert!(window.lines.iter().all(|(_, tokens)| tokens.is_empty()));
         assert_eq!(window.lines[0].0, "let v2000 = 2000; // c");
         // The colors are the second delivery: same range, now with tokens.
         let colored = highlight_impl(&state, opened.doc_id, 2000, 2020).unwrap();
         assert!(!colored.tokens_pending);
         assert!(
-            colored.lines[0].1.iter().any(|(_, _, scope)| scope.contains("storage.type")),
+            colored.lines[0]
+                .1
+                .iter()
+                .any(|(_, _, scope)| scope.contains("storage.type")),
             "the highlight must carry syntect scopes, got {:?}",
             colored.lines[0].1
         );

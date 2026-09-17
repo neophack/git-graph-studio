@@ -475,8 +475,9 @@ Conventions:
 
 ## Code style
 
-- **Indentation**: tabs in both TypeScript and Rust. TypeScript uses semicolons and double
-  quotes.
+- **Indentation**: tabs in TypeScript (semicolons, double quotes); Rust follows `cargo fmt`'s
+  default style (4-space indent, reordered modules and imports) - the tree was reformatted to
+  it once, 2026-09-17, and stays on it.
 - **Formatting and lint**: Rust is `rustfmt`-clean and `clippy -D warnings`-clean.
   TypeScript is `tsc --strict`-clean; there is no separate linter, so keep to the surrounding
   idiom.

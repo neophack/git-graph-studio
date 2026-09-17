@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::git::Git;
 use crate::cmd_graph::is_safe_ref_name;
+use crate::git::Git;
 
 type Status = Result<(), String>;
 

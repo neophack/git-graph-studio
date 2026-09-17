@@ -33,7 +33,9 @@ fn serial_walk(root: &str, skipped: &[&str], cap: usize) -> Vec<String> {
             continue;
         };
         for entry in entries.flatten() {
-            let Ok(kind) = entry.file_type() else { continue };
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
             let name = entry.file_name().to_string_lossy().into_owned();
             if kind.is_dir() {
                 if !skipped.contains(&name.as_str()) {
@@ -56,22 +58,50 @@ fn serial_walk(root: &str, skipped: &[&str], cap: usize) -> Vec<String> {
 #[ignore = "measurement, not an assertion: prints per-stage timings"]
 fn stage_timings() {
     let root = repo_root();
-    let root_str = root.display().to_string().trim_start_matches(r"\\?\").to_string();
+    let root_str = root
+        .display()
+        .to_string()
+        .trim_start_matches(r"\\?\")
+        .to_string();
     println!("== stage timings on {root_str} ==");
 
     // list_dir of the root: the explorer's first paint waits on exactly this.
     let t = Instant::now();
     let entries = fs::read_dir(&root).unwrap().count();
-    println!("{:>28} {:>10.1} ms ({} entries)", "list_dir(root)", ms(t), entries);
+    println!(
+        "{:>28} {:>10.1} ms ({} entries)",
+        "list_dir(root)",
+        ms(t),
+        entries
+    );
 
     // The Quick Open walk: old serial baseline, new parallel walk (cold and OS-warm), cache hit.
-    const SKIPPED: &[&str] = &[".git", "node_modules", "target", "out", "dist", ".svn", ".hg", "bower_components"];
+    const SKIPPED: &[&str] = &[
+        ".git",
+        "node_modules",
+        "target",
+        "out",
+        "dist",
+        ".svn",
+        ".hg",
+        "bower_components",
+    ];
     let t = Instant::now();
     let serial = serial_walk(&root_str, SKIPPED, 20_000);
-    println!("{:>28} {:>10.1} ms ({} files)", "list_files(serial, cold)", ms(t), serial.len());
+    println!(
+        "{:>28} {:>10.1} ms ({} files)",
+        "list_files(serial, cold)",
+        ms(t),
+        serial.len()
+    );
     let t = Instant::now();
     let parallel = walk_files(&root_str);
-    println!("{:>28} {:>10.1} ms ({} files)", "list_files(parallel, warm)", ms(t), parallel.len());
+    println!(
+        "{:>28} {:>10.1} ms ({} files)",
+        "list_files(parallel, warm)",
+        ms(t),
+        parallel.len()
+    );
     let t = Instant::now();
     let _ = walk_files(&root_str);
     println!("{:>28} {:>10.1} ms", "list_files(parallel, warm2)", ms(t));
@@ -89,7 +119,12 @@ fn stage_timings() {
         vec!["status", "--porcelain", "--untracked-files=all"],
         vec!["rev-parse", "--short", "HEAD"],
         vec!["symbolic-ref", "--short", "-q", "HEAD"],
-        vec!["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        vec![
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
         vec!["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
     ] {
         let t = Instant::now();

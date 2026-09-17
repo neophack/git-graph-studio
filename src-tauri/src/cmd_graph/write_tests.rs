@@ -825,8 +825,10 @@ fn user_details_local_and_global() {
 fn edit_user_details_leaves_absent_fields_unchanged() {
     let scratch = Scratch::new("user-details-absent");
     let git = scratch.repo("repo");
-    git.run(&["config", "--local", "user.name", "Kept Name"]).unwrap();
-    git.run(&["config", "--local", "user.email", "kept@example.com"]).unwrap();
+    git.run(&["config", "--local", "user.name", "Kept Name"])
+        .unwrap();
+    git.run(&["config", "--local", "user.email", "kept@example.com"])
+        .unwrap();
 
     // Only the email is sent: the name must survive instead of being overwritten with an
     // empty string (git rejects commits with an empty ident).
@@ -835,11 +837,15 @@ fn edit_user_details_leaves_absent_fields_unchanged() {
         json!({ "command": "editUserDetails", "email": "new@example.com", "location": "local", "deleteLocalName": false, "deleteLocalEmail": false }),
     ));
     assert_eq!(
-        git.output(&["config", "--local", "user.name"]).unwrap().trim(),
+        git.output(&["config", "--local", "user.name"])
+            .unwrap()
+            .trim(),
         "Kept Name"
     );
     assert_eq!(
-        git.output(&["config", "--local", "user.email"]).unwrap().trim(),
+        git.output(&["config", "--local", "user.email"])
+            .unwrap()
+            .trim(),
         "new@example.com"
     );
 }

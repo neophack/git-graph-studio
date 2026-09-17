@@ -43,8 +43,12 @@ const NOISE_DIRS: &[&str] = &["node_modules", "target", ".svn", ".hg"];
 /// tested without a watcher: paths outside the root are dropped, `.git/` sets the flag (its
 /// own paths are never listed), noise folders are dropped, everything else is listed.
 pub(crate) fn fold_path(batch: &mut FsChange, root: &Path, path: &Path) {
-    let Ok(relative) = path.strip_prefix(root) else { return };
-    let mut parts = relative.components().map(|c| c.as_os_str().to_string_lossy().into_owned());
+    let Ok(relative) = path.strip_prefix(root) else {
+        return;
+    };
+    let mut parts = relative
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned());
     let Some(first) = parts.next() else { return };
     if first == ".git" {
         // Only the entries that mean the repository's state moved count: HEAD and the refs
@@ -55,8 +59,20 @@ pub(crate) fn fold_path(batch: &mut FsChange, root: &Path, path: &Path) {
         let head = parts.next().unwrap_or_default();
         let significant = matches!(
             head.as_str(),
-            "HEAD" | "ORIG_HEAD" | "FETCH_HEAD" | "MERGE_HEAD" | "CHERRY_PICK_HEAD" | "REBASE_HEAD" | "REVERT_HEAD" | "MERGE_MSG"
-                | "packed-refs" | "config" | "refs" | "worktrees" | "rebase-merge" | "rebase-apply"
+            "HEAD"
+                | "ORIG_HEAD"
+                | "FETCH_HEAD"
+                | "MERGE_HEAD"
+                | "CHERRY_PICK_HEAD"
+                | "REBASE_HEAD"
+                | "REVERT_HEAD"
+                | "MERGE_MSG"
+                | "packed-refs"
+                | "config"
+                | "refs"
+                | "worktrees"
+                | "rebase-merge"
+                | "rebase-apply"
         );
         if significant {
             batch.git_changed = true;
@@ -87,21 +103,25 @@ impl FolderWatcher {
     /// Watch `root` recursively, calling `on_change` with each debounced batch from a
     /// background thread. Returns an error when the OS refuses the watch (the app then falls
     /// back to its command-driven refreshes, exactly as before the watcher existed).
-    pub fn new(root: &str, on_change: impl Fn(FsChange) + Send + 'static) -> Result<FolderWatcher, String> {
+    pub fn new(
+        root: &str,
+        on_change: impl Fn(FsChange) + Send + 'static,
+    ) -> Result<FolderWatcher, String> {
         let (raw_tx, raw_rx) = mpsc::channel::<PathBuf>();
         let (stop, stopped) = mpsc::channel::<()>();
-        let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-            if let Ok(event) = result {
-                // Pure reads (`Access`) are not changes; everything else is.
-                if matches!(event.kind, notify::EventKind::Access(_)) {
-                    return;
+        let mut watcher =
+            notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+                if let Ok(event) = result {
+                    // Pure reads (`Access`) are not changes; everything else is.
+                    if matches!(event.kind, notify::EventKind::Access(_)) {
+                        return;
+                    }
+                    for path in event.paths {
+                        let _ = raw_tx.send(path);
+                    }
                 }
-                for path in event.paths {
-                    let _ = raw_tx.send(path);
-                }
-            }
-        })
-        .map_err(|e| format!("Could not create the file watcher: {e}"))?;
+            })
+            .map_err(|e| format!("Could not create the file watcher: {e}"))?;
         watcher
             .watch(Path::new(root), RecursiveMode::Recursive)
             .map_err(|e| format!("Could not watch {root}: {e}"))?;
@@ -111,7 +131,10 @@ impl FolderWatcher {
             .name("fs-watcher".into())
             .spawn(move || debounce_loop(&root_path, &raw_rx, &stopped, on_change))
             .map_err(|e| format!("Could not start the watcher thread: {e}"))?;
-        Ok(FolderWatcher { _watcher: watcher, stop })
+        Ok(FolderWatcher {
+            _watcher: watcher,
+            stop,
+        })
     }
 }
 
@@ -123,7 +146,12 @@ impl Drop for FolderWatcher {
 
 /// Collect raw paths until the stream has been quiet for `DEBOUNCE`, then report the batch.
 /// Ends when the watcher is dropped (the raw sender closes) or `stopped` fires.
-fn debounce_loop(root: &Path, raw: &mpsc::Receiver<PathBuf>, stopped: &mpsc::Receiver<()>, on_change: impl Fn(FsChange)) {
+fn debounce_loop(
+    root: &Path,
+    raw: &mpsc::Receiver<PathBuf>,
+    stopped: &mpsc::Receiver<()>,
+    on_change: impl Fn(FsChange),
+) {
     loop {
         // Idle: block until the first event of a burst.
         let first = match raw.recv() {
@@ -162,7 +190,9 @@ mod tests {
     /// so the test sees the same `Path` shapes the OS watcher hands over on Linux, macOS
     /// and Windows alike.
     fn under(root: &Path, relative: &str) -> PathBuf {
-        relative.split('/').fold(root.to_path_buf(), |p, seg| p.join(seg))
+        relative
+            .split('/')
+            .fold(root.to_path_buf(), |p, seg| p.join(seg))
     }
 
     #[test]
@@ -184,12 +214,24 @@ mod tests {
         // The index (rewritten by every `git status`), loose objects and reflogs never count
         // as a repository change: they are what the app's own reads and writes produce.
         let mut quiet = FsChange::default();
-        for noise in ["index", "index.lock", "objects/ab/cdef", "logs/HEAD", "hooks/pre-commit", "COMMIT_EDITMSG"] {
+        for noise in [
+            "index",
+            "index.lock",
+            "objects/ab/cdef",
+            "logs/HEAD",
+            "hooks/pre-commit",
+            "COMMIT_EDITMSG",
+        ] {
             fold_path(&mut quiet, root, &under(root, &format!(".git/{noise}")));
         }
         assert!(!quiet.git_changed);
         assert!(quiet.paths.is_empty());
-        for signal in ["HEAD", "MERGE_HEAD", "packed-refs", "refs/remotes/origin/main"] {
+        for signal in [
+            "HEAD",
+            "MERGE_HEAD",
+            "packed-refs",
+            "refs/remotes/origin/main",
+        ] {
             let mut change = FsChange::default();
             fold_path(&mut change, root, &under(root, &format!(".git/{signal}")));
             assert!(change.git_changed, "{signal}");
@@ -226,9 +268,19 @@ mod tests {
         std::fs::write(dir.path().join("src").join("main.rs"), b"fn main() {}").unwrap();
         std::fs::write(dir.path().join("README.md"), b"#").unwrap();
 
-        let batch = rx.recv_timeout(Duration::from_secs(5)).expect("a change batch within 5 s");
-        assert!(batch.paths.iter().any(|p| p == "src/main.rs"), "got {:?}", batch.paths);
-        assert!(batch.paths.iter().any(|p| p == "README.md"), "got {:?}", batch.paths);
+        let batch = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a change batch within 5 s");
+        assert!(
+            batch.paths.iter().any(|p| p == "src/main.rs"),
+            "got {:?}",
+            batch.paths
+        );
+        assert!(
+            batch.paths.iter().any(|p| p == "README.md"),
+            "got {:?}",
+            batch.paths
+        );
         assert!(!batch.git_changed);
         drop(watcher);
     }

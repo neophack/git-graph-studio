@@ -241,10 +241,21 @@ mod git_dir_tests {
         // A worktree / submodule checkout: `.git` is a `gitdir:` pointer, relative or absolute.
         let linked = dir.path().join("linked");
         std::fs::create_dir_all(&linked).unwrap();
-        std::fs::write(linked.join(".git"), "gitdir: ../plain/.git/worktrees/linked\n").unwrap();
-        assert_eq!(Git::new(&linked).git_dir().unwrap(), linked.join("../plain/.git/worktrees/linked"));
+        std::fs::write(
+            linked.join(".git"),
+            "gitdir: ../plain/.git/worktrees/linked\n",
+        )
+        .unwrap();
+        assert_eq!(
+            Git::new(&linked).git_dir().unwrap(),
+            linked.join("../plain/.git/worktrees/linked")
+        );
         let absolute = plain.join(".git").join("modules").join("sub");
-        std::fs::write(linked.join(".git"), format!("gitdir: {}", absolute.display())).unwrap();
+        std::fs::write(
+            linked.join(".git"),
+            format!("gitdir: {}", absolute.display()),
+        )
+        .unwrap();
         assert_eq!(Git::new(&linked).git_dir().unwrap(), absolute);
         // Anything else (no `.git` at all) still goes to git, which rejects a non-repository.
         let none = dir.path().join("none");

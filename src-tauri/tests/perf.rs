@@ -38,10 +38,16 @@ fn synthetic_repo(files: usize) -> tempfile::TempDir {
     let root = dir.path();
     let started = Instant::now();
     for i in 0..files {
-        let folder = root.join(format!("mod{}", i / 1600)).join(format!("sub{}", (i / 40) % 40));
+        let folder = root
+            .join(format!("mod{}", i / 1600))
+            .join(format!("sub{}", (i / 40) % 40));
         std::fs::create_dir_all(&folder).unwrap();
         let ext = ["rs", "ts", "py", "c"][i % 4];
-        let todo = if i % 10 == 0 { "// TODO: revisit\n" } else { "" };
+        let todo = if i % 10 == 0 {
+            "// TODO: revisit\n"
+        } else {
+            ""
+        };
         let body = match ext {
             "rs" => format!("{todo}pub fn item_{i}() -> u32 {{ {i} }}\nfn helper_{i}(x: u32) -> u32 {{ x + 1 }}\n"),
             "ts" => format!("{todo}export function item{i}(): number {{ return {i}; }}\nclass Thing{i} {{ run(): void {{}} }}\n"),
@@ -56,12 +62,23 @@ fn synthetic_repo(files: usize) -> tempfile::TempDir {
     // A few more commits so the graph has a history to page.
     for n in 0..6 {
         let i = n * 4; // every fourth file is Rust
-        std::fs::write(root.join(format!("mod0/sub{}/file{i}.rs", i / 40)), format!("pub fn item_{i}() -> u32 {{ {i} + 1 }}\n")).unwrap();
+        std::fs::write(
+            root.join(format!("mod0/sub{}/file{i}.rs", i / 40)),
+            format!("pub fn item_{i}() -> u32 {{ {i} + 1 }}\n"),
+        )
+        .unwrap();
         git(root, &["commit", "-q", "-am", &format!("change {n}")]);
     }
     // The working tree has a change, so the status has something to find.
-    std::fs::write(root.join("mod0/sub2/file80.rs"), "pub fn item_80() -> u32 { 81 }\n").unwrap();
-    eprintln!("[perf] synthetic repository of {files} files built in {:.1} s", started.elapsed().as_secs_f64());
+    std::fs::write(
+        root.join("mod0/sub2/file80.rs"),
+        "pub fn item_80() -> u32 { 81 }\n",
+    )
+    .unwrap();
+    eprintln!(
+        "[perf] synthetic repository of {files} files built in {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
     dir
 }
 
@@ -71,7 +88,10 @@ fn ms(started: Instant) -> f64 {
 
 #[test]
 fn opening_a_large_repository_stays_within_the_budgets() {
-    let files: usize = std::env::var("GGS_PERF_FILES").ok().and_then(|v| v.parse().ok()).unwrap_or(5_000);
+    let files: usize = std::env::var("GGS_PERF_FILES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5_000);
     let repo = synthetic_repo(files);
     let root = repo.path().display().to_string();
     // Debug builds of the walk / search / index are several times slower than the shipped
@@ -91,7 +111,13 @@ fn opening_a_large_repository_stays_within_the_budgets() {
     let started = Instant::now();
     let bytes: usize = {
         use rayon::prelude::*;
-        list.par_iter().map(|relative| std::fs::read(Path::new(&root).join(relative)).map(|b| b.len()).unwrap_or(0)).sum()
+        list.par_iter()
+            .map(|relative| {
+                std::fs::read(Path::new(&root).join(relative))
+                    .map(|b| b.len())
+                    .unwrap_or(0)
+            })
+            .sum()
     };
     let raw_read_ms = ms(started);
     assert!(bytes > 0);
@@ -101,12 +127,19 @@ fn opening_a_large_repository_stays_within_the_budgets() {
     let search_ms = ms(started);
     let hits: usize = search.files.iter().map(|f| f.matches.len()).sum();
     // Every 10th file carries a TODO, minus the few the extra commits rewrote.
-    assert!(hits >= files / 10 - 8, "every 10th file carries a TODO ({hits} found)");
+    assert!(
+        hits >= files / 10 - 8,
+        "every 10th file carries a TODO ({hits} found)"
+    );
 
     let started = Instant::now();
     let symbols = cmd_search::index_symbols_of(&root);
     let index_ms = ms(started);
-    assert!(symbols.len() >= files, "at least one symbol per file ({} found)", symbols.len());
+    assert!(
+        symbols.len() >= files,
+        "at least one symbol per file ({} found)",
+        symbols.len()
+    );
 
     // The engine phases run in-process, exactly as the app runs them (the engine is linked
     // into the app; there is no backend process).
@@ -118,7 +151,11 @@ fn opening_a_large_repository_stays_within_the_budgets() {
     let started = Instant::now();
     let status = git_graph_studio_lib::cmd_graph::scm_changes(&root).unwrap();
     let status_ms = ms(started);
-    assert_eq!(status.as_array().map(Vec::len), Some(1), "one modified file");
+    assert_eq!(
+        status.as_array().map(Vec::len),
+        Some(1),
+        "one modified file"
+    );
 
     let started = Instant::now();
     let commits = git_graph_studio_lib::cmd_graph::load_first_page(&root).unwrap();
@@ -152,13 +189,29 @@ fn opening_a_large_repository_stays_within_the_budgets() {
     }
 
     // The plan's section-4 lines, scaled to the file count (100,000 files = the line itself).
-    let budget = |per_100k_ms: f64, floor_ms: f64| (per_100k_ms * per_file).max(floor_ms) * allowance;
+    let budget =
+        |per_100k_ms: f64, floor_ms: f64| (per_100k_ms * per_file).max(floor_ms) * allowance;
     assert!(walk_ms <= budget(1500.0, 300.0), "walk {walk_ms} ms");
     // Content phases: no more than a small multiple of the raw read (plus a CPU floor).
-    assert!(search_ms <= (2.0 * raw_read_ms + 300.0) * allowance, "search {search_ms} ms against a raw read of {raw_read_ms} ms");
-    assert!(index_ms <= (3.0 * raw_read_ms + 1500.0) * allowance, "symbol index {index_ms} ms against a raw read of {raw_read_ms} ms");
+    assert!(
+        search_ms <= (2.0 * raw_read_ms + 300.0) * allowance,
+        "search {search_ms} ms against a raw read of {raw_read_ms} ms"
+    );
+    assert!(
+        index_ms <= (3.0 * raw_read_ms + 1500.0) * allowance,
+        "symbol index {index_ms} ms against a raw read of {raw_read_ms} ms"
+    );
     assert!(root_ms <= budget(1000.0, 300.0), "repo root {root_ms} ms");
-    assert!(status_ms <= budget(3000.0, 500.0), "scm status {status_ms} ms");
-    assert!(first_page_ms <= budget(1500.0, 500.0), "graph first page {first_page_ms} ms");
-    assert!(warm_page_ms <= 150.0 * allowance, "warm graph first page {warm_page_ms} ms");
+    assert!(
+        status_ms <= budget(3000.0, 500.0),
+        "scm status {status_ms} ms"
+    );
+    assert!(
+        first_page_ms <= budget(1500.0, 500.0),
+        "graph first page {first_page_ms} ms"
+    );
+    assert!(
+        warm_page_ms <= 150.0 * allowance,
+        "warm graph first page {warm_page_ms} ms"
+    );
 }

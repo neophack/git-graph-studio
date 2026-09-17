@@ -77,7 +77,15 @@ pub fn decode(bytes: &[u8], forced: Option<&str>) -> Decoded {
             let (text, _, _) = encoding.decode(bytes);
             let text = text.into_owned();
             let eol = detect_eol(&text);
-            return Decoded { text, encoding: if id == "utf8bom" { "utf8bom" } else { canonical_id(encoding) }, eol };
+            return Decoded {
+                text,
+                encoding: if id == "utf8bom" {
+                    "utf8bom"
+                } else {
+                    canonical_id(encoding)
+                },
+                eol,
+            };
         }
     }
     // A BOM settles it (and is stripped from the text).
@@ -85,24 +93,49 @@ pub fn decode(bytes: &[u8], forced: Option<&str>) -> Decoded {
         let (text, _) = encoding.decode_without_bom_handling(&bytes[bom_len..]);
         let text = text.into_owned();
         let eol = detect_eol(&text);
-        let id = if encoding == encoding_rs::UTF_8 { "utf8bom" } else { canonical_id(encoding) };
-        return Decoded { text, encoding: id, eol };
+        let id = if encoding == encoding_rs::UTF_8 {
+            "utf8bom"
+        } else {
+            canonical_id(encoding)
+        };
+        return Decoded {
+            text,
+            encoding: id,
+            eol,
+        };
     }
     if let Ok(text) = std::str::from_utf8(bytes) {
-        return Decoded { text: text.to_owned(), encoding: "utf8", eol: detect_eol(text) };
+        return Decoded {
+            text: text.to_owned(),
+            encoding: "utf8",
+            eol: detect_eol(text),
+        };
     }
-    for candidate in [encoding_rs::GB18030, encoding_rs::SHIFT_JIS, encoding_rs::EUC_KR, encoding_rs::BIG5] {
+    for candidate in [
+        encoding_rs::GB18030,
+        encoding_rs::SHIFT_JIS,
+        encoding_rs::EUC_KR,
+        encoding_rs::BIG5,
+    ] {
         let (text, had_errors) = candidate.decode_without_bom_handling(bytes);
         if !had_errors {
             let text = text.into_owned();
             let eol = detect_eol(&text);
-            return Decoded { text, encoding: canonical_id(candidate), eol };
+            return Decoded {
+                text,
+                encoding: canonical_id(candidate),
+                eol,
+            };
         }
     }
     let (text, _) = encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes);
     let text = text.into_owned();
     let eol = detect_eol(&text);
-    Decoded { text, encoding: "windows-1252", eol }
+    Decoded {
+        text,
+        encoding: "windows-1252",
+        eol,
+    }
 }
 
 /// Encode `text` for saving as `id` (defaults to UTF-8 for an unknown id). `eol` converts the
@@ -123,7 +156,11 @@ pub fn encode(text: &str, id: &str, eol: &str) -> Vec<u8> {
             let big = id == "utf-16be";
             out.extend_from_slice(if big { &[0xFE, 0xFF] } else { &[0xFF, 0xFE] });
             for unit in normalised.encode_utf16() {
-                out.extend_from_slice(&if big { unit.to_be_bytes() } else { unit.to_le_bytes() });
+                out.extend_from_slice(&if big {
+                    unit.to_be_bytes()
+                } else {
+                    unit.to_le_bytes()
+                });
             }
         }
         other => match known(other) {
@@ -143,14 +180,42 @@ mod tests {
 
     #[test]
     fn detects_utf8_boms_utf16_and_gbk() {
-        assert_eq!(decode("héllo\n".as_bytes(), None), Decoded { text: "héllo\n".into(), encoding: "utf8", eol: "lf" });
-        assert_eq!(decode(b"\xEF\xBB\xBFhi\r\n", None), Decoded { text: "hi\r\n".into(), encoding: "utf8bom", eol: "crlf" });
+        assert_eq!(
+            decode("héllo\n".as_bytes(), None),
+            Decoded {
+                text: "héllo\n".into(),
+                encoding: "utf8",
+                eol: "lf"
+            }
+        );
+        assert_eq!(
+            decode(b"\xEF\xBB\xBFhi\r\n", None),
+            Decoded {
+                text: "hi\r\n".into(),
+                encoding: "utf8bom",
+                eol: "crlf"
+            }
+        );
         let utf16 = encode("你好\n", "utf-16le", "lf");
-        assert_eq!(decode(&utf16, None), Decoded { text: "你好\n".into(), encoding: "utf-16le", eol: "lf" });
+        assert_eq!(
+            decode(&utf16, None),
+            Decoded {
+                text: "你好\n".into(),
+                encoding: "utf-16le",
+                eol: "lf"
+            }
+        );
         // 中文 in GBK: the bytes are not valid UTF-8 and decode cleanly as GB18030.
         let gbk = encode("中文注释\r\n", "gb18030", "crlf");
         assert_eq!(gbk, b"\xD6\xD0\xCE\xC4\xD7\xA2\xCA\xCD\r\n");
-        assert_eq!(decode(&gbk, None), Decoded { text: "中文注释\r\n".into(), encoding: "gb18030", eol: "crlf" });
+        assert_eq!(
+            decode(&gbk, None),
+            Decoded {
+                text: "中文注释\r\n".into(),
+                encoding: "gb18030",
+                eol: "crlf"
+            }
+        );
         // Anything else falls back to Windows-1252, which never fails.
         assert_eq!(decode(b"caf\xE9", None).encoding, "windows-1252");
         assert_eq!(decode(b"caf\xE9", None).text, "café");
@@ -161,7 +226,11 @@ mod tests {
         let gbk = encode("中文", "gb18030", "lf");
         assert_eq!(decode(&gbk, Some("gb18030")).text, "中文");
         assert_ne!(decode(&gbk, Some("windows-1252")).text, "中文");
-        assert_eq!(decode(&gbk, Some("nonsense")).encoding, "gb18030", "an unknown id falls back to detection");
+        assert_eq!(
+            decode(&gbk, Some("nonsense")).encoding,
+            "gb18030",
+            "an unknown id falls back to detection"
+        );
     }
 
     #[test]
@@ -178,9 +247,21 @@ mod tests {
         // picker), which is what VS Code offers for the same ambiguity.
         for id in ["big5", "shift_jis", "euc-kr"] {
             let bytes = encode("第一行\n第二行\n", id, "crlf");
-            assert_eq!(decode(&bytes, Some(id)).text, "第一行\r\n第二行\r\n", "{id}");
+            assert_eq!(
+                decode(&bytes, Some(id)).text,
+                "第一行\r\n第二行\r\n",
+                "{id}"
+            );
         }
-        assert_eq!(encode("a\r\nb\n", "utf8", "lf"), b"a\r\nb\n", "lf keeps the text as the editor holds it");
-        assert_eq!(encode("a\r\nb\n", "utf8", "crlf"), b"a\r\nb\r\n", "crlf never doubles an existing CR");
+        assert_eq!(
+            encode("a\r\nb\n", "utf8", "lf"),
+            b"a\r\nb\n",
+            "lf keeps the text as the editor holds it"
+        );
+        assert_eq!(
+            encode("a\r\nb\n", "utf8", "crlf"),
+            b"a\r\nb\r\n",
+            "crlf never doubles an existing CR"
+        );
     }
 }

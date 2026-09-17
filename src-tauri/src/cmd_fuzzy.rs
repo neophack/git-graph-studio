@@ -124,7 +124,8 @@ fn score_file(path: &str, label_range: (usize, usize), query: &FuzzyQuery) -> Op
         // name, the better, so typing most of a filename prefers the shorter file.
         let label_lower: Vec<u16> = label.to_lowercase().encode_utf16().collect();
         if label_lower.starts_with(&query.lower) {
-            let boost = (query.lower.len() as f64 * 100.0 / label_lower.len() as f64).round() as i64;
+            let boost =
+                (query.lower.len() as f64 * 100.0 / label_lower.len() as f64).round() as i64;
             return Some(LABEL_PREFIX_SCORE + boost + score);
         }
         return Some(LABEL_SCORE + score);
@@ -167,7 +168,11 @@ pub async fn fuzzy_files(
             .take(limit)
             .map(|path| {
                 let start = path.rfind('/').map(|at| at + 1).unwrap_or(0);
-                FuzzyFileHit { path: path.clone(), label: path[start..].to_owned(), ranges: Vec::new() }
+                FuzzyFileHit {
+                    path: path.clone(),
+                    label: path[start..].to_owned(),
+                    ranges: Vec::new(),
+                }
             })
             .collect());
     }
@@ -194,7 +199,11 @@ pub async fn fuzzy_files(
             let ranges = score_label(label, &query)
                 .map(|(_, positions)| merge_positions(&positions))
                 .unwrap_or_default();
-            FuzzyFileHit { path: path.clone(), label: label.to_owned(), ranges }
+            FuzzyFileHit {
+                path: path.clone(),
+                label: label.to_owned(),
+                ranges,
+            }
         })
         .collect())
 }
@@ -343,7 +352,10 @@ mod tests {
         };
         // A folder fragment lists its directory, slash-marked; a deeper fragment its files.
         assert_eq!(labels("./sr"), vec![("src/".to_owned(), true)]);
-        assert_eq!(labels("src/lib/"), vec![("mod.rs".to_owned(), false), ("util.rs".to_owned(), false)]);
+        assert_eq!(
+            labels("src/lib/"),
+            vec![("mod.rs".to_owned(), false), ("util.rs".to_owned(), false)]
+        );
         assert_eq!(labels("src/m"), vec![("main.rs".to_owned(), false)]);
         // Not a path fragment (no slash): nothing, the word source takes over instead.
         assert_eq!(labels("src"), Vec::<(String, bool)>::new());

@@ -22,10 +22,7 @@ fn open_repo(state: &State<AppState>, repo: Option<String>) -> Result<String, St
 /// The working tree's changes, staged and unstaged halves kept apart, as the two sections of
 /// the Source Control view list them. Read by the engine, in this process.
 #[tauri::command]
-pub async fn scm_status(
-    state: State<'_, AppState>,
-    repo: Option<String>,
-) -> Result<Value, String> {
+pub async fn scm_status(state: State<'_, AppState>, repo: Option<String>) -> Result<Value, String> {
     let repo_path = open_repo(&state, repo)?;
     tauri::async_runtime::spawn_blocking(move || crate::cmd_graph::scm_changes(&repo_path))
         .await
@@ -47,7 +44,11 @@ pub async fn git_init(state: State<'_, AppState>) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn git_stage(state: State<'_, AppState>, paths: Vec<String>, repo: Option<String>) -> Result<(), String> {
+pub async fn git_stage(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    repo: Option<String>,
+) -> Result<(), String> {
     let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
     git(&state, repo)?.run(&[&["add", "--all", "--"], &refs[..]].concat())
 }
@@ -69,12 +70,19 @@ pub(crate) fn unstage_paths(git: &crate::git::Git, paths: &[String]) -> Result<(
 }
 
 #[tauri::command]
-pub async fn git_unstage(state: State<'_, AppState>, paths: Vec<String>, repo: Option<String>) -> Result<(), String> {
+pub async fn git_unstage(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    repo: Option<String>,
+) -> Result<(), String> {
     unstage_paths(&git(&state, repo)?, &paths)
 }
 
 #[tauri::command]
-pub async fn git_unstage_all(state: State<'_, AppState>, repo: Option<String>) -> Result<(), String> {
+pub async fn git_unstage_all(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<(), String> {
     let git = git(&state, repo)?;
     if git.run(&["rev-parse", "-q", "--verify", "HEAD"]).is_err() {
         git.run(&["rm", "-q", "--cached", "-r", "--", "."])
@@ -151,7 +159,11 @@ pub async fn git_discard_all(
             git.run(&["restore", "--", "."])?;
             git.run(&["clean", "-fdq"])
         }
-        _ => discard_paths(&git, &restore.unwrap_or_default(), &clean.unwrap_or_default()),
+        _ => discard_paths(
+            &git,
+            &restore.unwrap_or_default(),
+            &clean.unwrap_or_default(),
+        ),
     }
 }
 
@@ -174,22 +186,34 @@ pub(crate) fn discard_paths(git: &Git, restore: &[String], clean: &[String]) -> 
 use crate::scm_ops;
 
 #[tauri::command]
-pub async fn scm_branches(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<scm_ops::BranchInfo>, String> {
+pub async fn scm_branches(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<Vec<scm_ops::BranchInfo>, String> {
     scm_ops::branches(&git(&state, repo)?)
 }
 
 #[tauri::command]
-pub async fn scm_remotes(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<scm_ops::RemoteInfo>, String> {
+pub async fn scm_remotes(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<Vec<scm_ops::RemoteInfo>, String> {
     scm_ops::remotes(&git(&state, repo)?)
 }
 
 #[tauri::command]
-pub async fn scm_stashes(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<scm_ops::StashInfo>, String> {
+pub async fn scm_stashes(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<Vec<scm_ops::StashInfo>, String> {
     scm_ops::stashes(&git(&state, repo)?)
 }
 
 #[tauri::command]
-pub async fn scm_tags(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<String>, String> {
+pub async fn scm_tags(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<Vec<String>, String> {
     scm_ops::tags(&git(&state, repo)?)
 }
 
@@ -201,7 +225,12 @@ pub async fn scm_pull(
     rebase: bool,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::pull(&git(&state, repo)?, remote.as_deref(), branch.as_deref(), rebase)
+    scm_ops::pull(
+        &git(&state, repo)?,
+        remote.as_deref(),
+        branch.as_deref(),
+        rebase,
+    )
 }
 
 #[tauri::command]
@@ -216,7 +245,11 @@ pub async fn scm_push(
 }
 
 #[tauri::command]
-pub async fn scm_sync(state: State<'_, AppState>, rebase: bool, repo: Option<String>) -> Result<(), String> {
+pub async fn scm_sync(
+    state: State<'_, AppState>,
+    rebase: bool,
+    repo: Option<String>,
+) -> Result<(), String> {
     scm_ops::sync(&git(&state, repo)?, rebase)
 }
 
@@ -231,7 +264,11 @@ pub async fn scm_fetch(
 }
 
 #[tauri::command]
-pub async fn scm_checkout(state: State<'_, AppState>, name: String, repo: Option<String>) -> Result<(), String> {
+pub async fn scm_checkout(
+    state: State<'_, AppState>,
+    name: String,
+    repo: Option<String>,
+) -> Result<(), String> {
     scm_ops::checkout(&git(&state, repo)?, &name)
 }
 
@@ -246,12 +283,18 @@ pub async fn scm_create_branch(
 }
 
 #[tauri::command]
-pub async fn scm_amend_last_commit(state: State<'_, AppState>, repo: Option<String>) -> Result<(), String> {
+pub async fn scm_amend_last_commit(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<(), String> {
     scm_ops::amend_last_commit(&git(&state, repo)?)
 }
 
 #[tauri::command]
-pub async fn scm_reset_to_remote(state: State<'_, AppState>, repo: Option<String>) -> Result<String, String> {
+pub async fn scm_reset_to_remote(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<String, String> {
     scm_ops::reset_to_remote(&git(&state, repo)?)
 }
 
@@ -315,11 +358,9 @@ pub(crate) fn parse_blame(porcelain: &str) -> Vec<BlameLine> {
         }
         if current.is_none() {
             // "<hash> <orig> <final> [<count>]" opens a line group.
-            if let Some(hash) = line
-                .split(' ')
-                .next()
-                .filter(|h| (40..=64).contains(&h.len()) && h.bytes().all(|b| b.is_ascii_hexdigit()))
-            {
+            if let Some(hash) = line.split(' ').next().filter(|h| {
+                (40..=64).contains(&h.len()) && h.bytes().all(|b| b.is_ascii_hexdigit())
+            }) {
                 current = Some(hash.to_owned());
                 known.entry(hash.to_owned()).or_default();
             }
@@ -342,7 +383,11 @@ pub(crate) fn parse_blame(porcelain: &str) -> Vec<BlameLine> {
 
 /// Who last changed every line of a file in the working tree (`git blame --porcelain`).
 #[tauri::command]
-pub async fn scm_blame(state: State<'_, AppState>, path: String, repo: Option<String>) -> Result<Vec<BlameLine>, String> {
+pub async fn scm_blame(
+    state: State<'_, AppState>,
+    path: String,
+    repo: Option<String>,
+) -> Result<Vec<BlameLine>, String> {
     let git = git(&state, repo)?;
     let output = git.output(&["blame", "--porcelain", "--", &path])?;
     Ok(parse_blame(&output))
@@ -419,7 +464,10 @@ mod tests {
         commit(&git, "conf.txt", "side\n", "side");
         git.run(&["checkout", "-q", "main"]).unwrap();
         commit(&git, "conf.txt", "main\n", "main");
-        assert!(git.run(&["merge", "side"]).is_err(), "the merge stops on the conflict");
+        assert!(
+            git.run(&["merge", "side"]).is_err(),
+            "the merge stops on the conflict"
+        );
 
         write(&git, "README.md", "edited\n");
         write(&git, "keep.txt", "changed\n");
@@ -436,14 +484,20 @@ mod tests {
             "hello\n",
             "the listed tracked path is restored"
         );
-        assert!(!git.repo.join("new.txt").exists(), "the listed untracked path is deleted");
+        assert!(
+            !git.repo.join("new.txt").exists(),
+            "the listed untracked path is deleted"
+        );
         assert_eq!(
             std::fs::read_to_string(git.repo.join("keep.txt")).unwrap(),
             "changed\n",
             "an unlisted modification survives"
         );
         let conf = std::fs::read_to_string(git.repo.join("conf.txt")).unwrap();
-        assert!(conf.contains("<<<<<<<"), "the conflicted file keeps its markers");
+        assert!(
+            conf.contains("<<<<<<<"),
+            "the conflicted file keeps its markers"
+        );
         assert!(
             !git.output(&["ls-files", "-u"]).unwrap().trim().is_empty(),
             "the path stays unmerged"

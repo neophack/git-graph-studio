@@ -21,9 +21,9 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use serde::Serialize;
 
-use super::{positioned_read, read_exact_at, LinesLanded, TailGate, HEAD_BYTES};
 use super::doc;
-use super::find::{FindOptions, Matcher, MatchLoc};
+use super::find::{FindOptions, MatchLoc, Matcher};
+use super::{positioned_read, read_exact_at, LinesLanded, TailGate, HEAD_BYTES};
 
 /// The index: every line's starting byte offset into the raw file. Line 0 starts after the
 /// BOM when one exists; every later entry is the byte after a line break.
@@ -39,7 +39,11 @@ impl LineIndex {
     /// The raw byte range of lines `start..=end` (0-based, inclusive).
     fn byte_range(&self, start: usize, end: usize, total: u64) -> (u64, u64) {
         let from = self.starts[start];
-        let to = if end + 1 < self.starts.len() { self.starts[end + 1] } else { total };
+        let to = if end + 1 < self.starts.len() {
+            self.starts[end + 1]
+        } else {
+            total
+        };
         (from, to)
     }
 }
@@ -58,7 +62,13 @@ fn utf16_of(encoding: &str) -> Option<bool> {
 /// The parallel index build: positioned reads in chunks, `memchr` for `\n` on each core,
 /// offsets concatenated in order. UTF-16 checks the pairing (`0A 00` / `00 0A`) and the
 /// code-unit parity, reading two bytes past its chunk end so a pair never straddles unseen.
-fn build_index(path: &str, from: u64, total: u64, utf16: Option<bool>, bom: u64) -> Result<LineIndex, String> {
+fn build_index(
+    path: &str,
+    from: u64,
+    total: u64,
+    utf16: Option<bool>,
+    bom: u64,
+) -> Result<LineIndex, String> {
     use rayon::prelude::*;
     let file = File::open(path).map_err(|e| format!("{path}: {e}"))?;
     let file = &file;
@@ -92,7 +102,9 @@ fn build_index(path: &str, from: u64, total: u64, utf16: Option<bool>, bom: u64)
                         let paired = if little == low_first {
                             buf.get(at_newline + 1).copied() == Some(0)
                         } else {
-                            buf.get(at_newline).copied() == Some(0) && at_newline > 0 && buf[at_newline - 1] == b'\n'
+                            buf.get(at_newline).copied() == Some(0)
+                                && at_newline > 0
+                                && buf[at_newline - 1] == b'\n'
                         };
                         if paired {
                             found.push(raw + 1);
@@ -139,7 +151,12 @@ struct IndexedDoc {
 
 impl IndexedDoc {
     fn line_count(&self) -> usize {
-        match self.index.read().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref() {
+        match self
+            .index
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
             Some(index) => index.line_count(),
             None => self.estimate,
         }
@@ -148,7 +165,12 @@ impl IndexedDoc {
     /// Wait for the index to land (or fail), then report the verdict.
     fn wait_index(&self) -> Result<(), String> {
         self.gate.wait();
-        match self.error.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref() {
+        match self
+            .error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
             Some(error) => Err(format!("the line index did not finish building: {error}")),
             None => Ok(()),
         }
@@ -160,7 +182,11 @@ impl IndexedDoc {
         let total = self.line_count().max(1);
         let start = start.min(total - 1);
         let end = end.min(total - 1);
-        let index = self.index.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        let index = self
+            .index
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         let Some(index) = index else {
             // Still building: the head covers what it covers, past it waits.
             if start >= self.head_lines() {
@@ -175,7 +201,10 @@ impl IndexedDoc {
         const WINDOW_BYTES: u64 = 4 << 20;
         const LINE_BYTES: u64 = 1 << 20;
         // The cached handle, opened once and held for the document's life.
-        let mut slot = self.file.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut slot = self
+            .file
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if slot.is_none() {
             *slot = Some(File::open(&self.path).map_err(|e| format!("{}: {e}", self.path))?);
         }
@@ -205,12 +234,16 @@ impl IndexedDoc {
                 let mut buf = vec![0u8; (to - from) as usize];
                 read_exact_at(file, &mut buf, from).map_err(|e| format!("{}: {e}", self.path))?;
                 let decoded = self.decode(&buf);
-                let mut split: Vec<String> = decoded.split('\n').map(|text| text.trim_end_matches('\r').to_owned()).collect();
+                let mut split: Vec<String> = decoded
+                    .split('\n')
+                    .map(|text| text.trim_end_matches('\r').to_owned())
+                    .collect();
                 // A range that ends on a line-start boundary carries the last line's own
                 // `\n`; the empty split artefact after it is the *next* line's beginning,
                 // not a line of this window. At the file's end there is no boundary — the
                 // final (possibly empty) line is real and stays.
-                if stop + 1 < index.line_count() && split.last().is_some_and(|text| text.is_empty()) {
+                if stop + 1 < index.line_count() && split.last().is_some_and(|text| text.is_empty())
+                {
                     split.pop();
                 }
                 lines.append(&mut split);
@@ -302,8 +335,17 @@ pub async fn indexed_open(
 ) -> Result<IndexedOpenResult, String> {
     let doc_id = state.next_id.fetch_add(1, Ordering::Relaxed);
     let load = path.clone();
-    let opened = tauri::async_runtime::spawn_blocking(move || open_indexed(&load)).await.map_err(|e| e.to_string())??;
-    let IndexedHead { total, encoding, eol, head_bytes, head_text, bom } = opened;
+    let opened = tauri::async_runtime::spawn_blocking(move || open_indexed(&load))
+        .await
+        .map_err(|e| e.to_string())??;
+    let IndexedHead {
+        total,
+        encoding,
+        eol,
+        head_bytes,
+        head_text,
+        bom,
+    } = opened;
     let language = std::path::Path::new(&path)
         .extension()
         .and_then(|e| e.to_str())
@@ -378,14 +420,21 @@ pub async fn indexed_open(
             scan_gate.land();
             if let Some(count) = landed {
                 use tauri::Emitter;
-                let _ = app.emit("studio://viewer-lines", LinesLanded { doc_id, line_count: count });
+                let _ = app.emit(
+                    "studio://viewer-lines",
+                    LinesLanded {
+                        doc_id,
+                        line_count: count,
+                    },
+                );
             }
         });
     if spawned.is_err() {
         *document
             .error
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some("the index build could not start".to_owned());
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some("the index build could not start".to_owned());
         gate.land();
     }
     Ok(result)
@@ -404,11 +453,14 @@ struct IndexedHead {
 /// Read and decode the head: `HEAD_BYTES` extended to the next line break, the encoding
 /// sniffed the way every reader of the app sniffs it.
 fn open_indexed(path: &str) -> Result<IndexedHead, String> {
-    let total = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?.len();
+    let total = std::fs::metadata(path)
+        .map_err(|e| format!("{path}: {e}"))?
+        .len();
     let mut file = File::open(path).map_err(|e| format!("{path}: {e}"))?;
     let mut head = vec![0u8; HEAD_BYTES.min(total as usize)];
     if !head.is_empty() {
-        file.read_exact(&mut head).map_err(|e| format!("{path}: {e}"))?;
+        file.read_exact(&mut head)
+            .map_err(|e| format!("{path}: {e}"))?;
     }
     if head.len() < total as usize {
         let mut slack = [0u8; 4096];
@@ -495,7 +547,14 @@ pub async fn indexed_find(
     let generation = doc.find_gen.fetch_add(1, Ordering::Relaxed) + 1;
     tauri::async_runtime::spawn_blocking(move || {
         doc.wait_index()?;
-        let matcher = Matcher::compile(&query, &FindOptions { case_sensitive, whole_word, regexp })?;
+        let matcher = Matcher::compile(
+            &query,
+            &FindOptions {
+                case_sensitive,
+                whole_word,
+                regexp,
+            },
+        )?;
         const CHUNK: usize = 4 << 20;
         const LINE_CAP: usize = 4 << 20;
         let mut file = File::open(&doc.path).map_err(|e| format!("{}: {e}", doc.path))?;
@@ -505,7 +564,9 @@ pub async fn indexed_find(
         let mut line_no = 0usize;
         let mut chunk = vec![0u8; CHUNK];
         loop {
-            let read = file.read(&mut chunk).map_err(|e| format!("{}: {e}", doc.path))?;
+            let read = file
+                .read(&mut chunk)
+                .map_err(|e| format!("{}: {e}", doc.path))?;
             if read == 0 {
                 break;
             }
@@ -522,7 +583,11 @@ pub async fn indexed_find(
                         capped = true;
                         break;
                     }
-                    matches.push(MatchLoc { line: line_no, start_col: start, end_col: end });
+                    matches.push(MatchLoc {
+                        line: line_no,
+                        start_col: start,
+                        end_col: end,
+                    });
                 }
                 line_no += 1;
                 from = line_end + 1;
@@ -541,10 +606,18 @@ pub async fn indexed_find(
                     capped = true;
                     break;
                 }
-                matches.push(MatchLoc { line: line_no, start_col: start, end_col: end });
+                matches.push(MatchLoc {
+                    line: line_no,
+                    start_col: start,
+                    end_col: end,
+                });
             }
         }
-        Ok(IndexedFindResult { matches, capped, line_count: doc.line_count() })
+        Ok(IndexedFindResult {
+            matches,
+            capped,
+            line_count: doc.line_count(),
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -553,7 +626,10 @@ pub async fn indexed_find(
 /// Drop an indexed document (its tab closed).
 #[tauri::command]
 pub fn indexed_close(state: tauri::State<IndexedState>, doc_id: u64) {
-    let mut docs = state.docs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut docs = state
+        .docs
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(doc) = docs.get(&doc_id) {
         doc.find_gen.fetch_add(1, Ordering::Relaxed);
     }
@@ -608,7 +684,9 @@ mod tests {
         let index = build_index(&path, head.bom, head.total, utf16, head.bom).expect("index");
         let index_ms = t.elapsed().as_millis();
         let lines = index.line_count();
-        *doc.index.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(index));
+        *doc.index
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(index));
         gate.land();
         let t = std::time::Instant::now();
         let window = doc.window(lines / 2, lines / 2 + 60).expect("window");
@@ -626,7 +704,9 @@ mod tests {
 
     #[test]
     fn windows_read_lines_from_the_index() {
-        let text = (0..40_000).map(|i| format!("line {i:05}\r\n")).collect::<String>();
+        let text = (0..40_000)
+            .map(|i| format!("line {i:05}\r\n"))
+            .collect::<String>();
         let (_dir, path) = scratch_file("indexed.log", &text);
         // The head covers the first lines; the index lands in the background.
         let head = open_indexed(&path).unwrap();
@@ -684,7 +764,9 @@ mod tests {
 
     #[test]
     fn find_streams_matches_over_the_file() {
-        let text = (0..20_000).map(|i| format!("needle {i} plain\n")).collect::<String>();
+        let text = (0..20_000)
+            .map(|i| format!("needle {i} plain\n"))
+            .collect::<String>();
         let (_dir, path) = scratch_file("find.log", &text);
         // Wire the document like indexed_open does, but synchronously.
         let head = open_indexed(&path).unwrap();
@@ -704,7 +786,15 @@ mod tests {
         let index = build_index(&path, head.bom, head.total, None, head.bom).unwrap();
         *doc.index.write().unwrap() = Some(Arc::new(index));
         gate.land();
-        let matcher = Matcher::compile("needle 199", &FindOptions { case_sensitive: false, whole_word: false, regexp: false }).unwrap();
+        let matcher = Matcher::compile(
+            "needle 199",
+            &FindOptions {
+                case_sensitive: false,
+                whole_word: false,
+                regexp: false,
+            },
+        )
+        .unwrap();
         let mut matches = Vec::new();
         let mut file = File::open(&path).unwrap();
         let mut chunk = vec![0u8; 8192];
@@ -720,16 +810,26 @@ mod tests {
             while let Some(hit) = memchr::memchr(b'\n', &carried[from..]) {
                 let text = String::from_utf8_lossy(&carried[from..from + hit]);
                 for (start, end) in matcher.matches_in(&text, false) {
-                    matches.push(MatchLoc { line: line_no, start_col: start, end_col: end });
+                    matches.push(MatchLoc {
+                        line: line_no,
+                        start_col: start,
+                        end_col: end,
+                    });
                 }
                 line_no += 1;
                 from += hit + 1;
             }
             carried.drain(..from);
         }
-        let hit_199x: Vec<&MatchLoc> = matches.iter().filter(|m| (1990..=1999).contains(&m.line)).collect();
+        let hit_199x: Vec<&MatchLoc> = matches
+            .iter()
+            .filter(|m| (1990..=1999).contains(&m.line))
+            .collect();
         assert!(hit_199x.iter().all(|m| (1990..=1999).contains(&m.line)));
         assert_eq!(hit_199x.len(), 10, "one match per line 1990..=1999");
-        assert!(matches.len() >= 11, "line 199 matches the prefix too: {matches:?}");
+        assert!(
+            matches.len() >= 11,
+            "line 199 matches the prefix too: {matches:?}"
+        );
     }
 }

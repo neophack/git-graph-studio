@@ -73,7 +73,15 @@ pub(crate) fn glob_match(pattern: &str, path: &str) -> bool {
     let pattern: Vec<char> = pattern.chars().collect();
     let path: Vec<char> = path.chars().collect();
     if !pattern.contains(&'/') {
-        let name: Vec<char> = path.iter().copied().rev().take_while(|c| *c != '/').collect::<Vec<_>>().into_iter().rev().collect();
+        let name: Vec<char> = path
+            .iter()
+            .copied()
+            .rev()
+            .take_while(|c| *c != '/')
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         return m(&pattern, &name);
     }
     m(&pattern, &path)
@@ -108,7 +116,8 @@ fn pattern_selects(pattern: &str, file: &str) -> bool {
     if glob_match(pattern, file) {
         return true;
     }
-    file.match_indices('/').any(|(at, _)| glob_match(pattern, &file[..at]))
+    file.match_indices('/')
+        .any(|(at, _)| glob_match(pattern, &file[..at]))
 }
 
 /* ---------- Text search & replace ---------- */
@@ -144,8 +153,14 @@ pub struct SearchOutcome {
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum SearchEvent {
-    Batch { files: Vec<FileMatches> },
-    Done { scanned: usize, truncated: bool, cancelled: bool },
+    Batch {
+        files: Vec<FileMatches>,
+    },
+    Done {
+        scanned: usize,
+        truncated: bool,
+        cancelled: bool,
+    },
 }
 
 /// The generation counter behind search cancellation: every search takes the next number
@@ -174,16 +189,41 @@ impl SearchState {
 /// (`->`, `(int)`) keeps no boundary to demand there and still matches `a -> b`.
 fn whole_word_wrap(query: &str, body: &str) -> String {
     let word_edge = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
-    let start = if word_edge(query.chars().next()) { r"\b" } else { "" };
-    let end = if word_edge(query.chars().next_back()) { r"\b" } else { "" };
+    let start = if word_edge(query.chars().next()) {
+        r"\b"
+    } else {
+        ""
+    };
+    let end = if word_edge(query.chars().next_back()) {
+        r"\b"
+    } else {
+        ""
+    };
     format!("{start}(?:{body}){end}")
 }
 
-pub(crate) fn build_matcher(query: &str, is_regex: bool, case_sensitive: bool, word_only: bool) -> Result<Regex, String> {
-    let body = if is_regex { query.to_owned() } else { regex::escape(query) };
+pub(crate) fn build_matcher(
+    query: &str,
+    is_regex: bool,
+    case_sensitive: bool,
+    word_only: bool,
+) -> Result<Regex, String> {
+    let body = if is_regex {
+        query.to_owned()
+    } else {
+        regex::escape(query)
+    };
     // The edge-character rule looks at the raw query, for a regex the same as for a literal.
-    let body = if word_only { whole_word_wrap(query, &body) } else { body };
-    let pattern = if case_sensitive { body } else { format!("(?i){body}") };
+    let body = if word_only {
+        whole_word_wrap(query, &body)
+    } else {
+        body
+    };
+    let pattern = if case_sensitive {
+        body
+    } else {
+        format!("(?i){body}")
+    };
     Regex::new(&pattern).map_err(|e| format!("Invalid pattern: {e}"))
 }
 
@@ -249,9 +289,20 @@ pub(crate) fn scan_text(bytes: &[u8], matcher: &Regex) -> Vec<SearchMatch> {
         let mut text: Option<String> = None;
         for hit in matcher.find_iter(line) {
             let text = text.get_or_insert_with(|| String::from_utf8_lossy(line).into_owned());
-            let column = text.char_indices().take_while(|(i, _)| *i < hit.start()).count() + 1;
-            let length = String::from_utf8_lossy(&line[hit.start()..hit.end()]).chars().count();
-            out.push(SearchMatch { line: line_no, column, length, text: text.clone() });
+            let column = text
+                .char_indices()
+                .take_while(|(i, _)| *i < hit.start())
+                .count()
+                + 1;
+            let length = String::from_utf8_lossy(&line[hit.start()..hit.end()])
+                .chars()
+                .count();
+            out.push(SearchMatch {
+                line: line_no,
+                column,
+                length,
+                text: text.clone(),
+            });
         }
         if end == bytes.len() {
             return out;
@@ -264,7 +315,12 @@ pub(crate) fn scan_text(bytes: &[u8], matcher: &Regex) -> Vec<SearchMatch> {
 /// `MAX_TEXT_FILE` streams — a giant `.asc` trace is as searchable as a source file, without
 /// ever holding it in memory. `None` leaves the file invisible to the search, the rules
 /// [`read_searchable`] already applies.
-fn scan_file(path: &Path, matcher: &Regex, budget: usize, cancelled: &dyn Fn() -> bool) -> Option<Vec<SearchMatch>> {
+fn scan_file(
+    path: &Path,
+    matcher: &Regex,
+    budget: usize,
+    cancelled: &dyn Fn() -> bool,
+) -> Option<Vec<SearchMatch>> {
     let size = fs::metadata(path).map(|m| m.len()).unwrap_or(u64::MAX);
     if size > MAX_TEXT_FILE {
         return scan_stream(path, matcher, budget, cancelled);
@@ -279,7 +335,12 @@ fn scan_file(path: &Path, matcher: &Regex, budget: usize, cancelled: &dyn Fn() -
 /// result past what the match cap would keep anyway, and `cancelled` is honoured every few
 /// thousand lines so a superseded search stops mid-gigabyte. A binary head or a BOM-marked
 /// UTF-16 body (which would need whole-file decoding) returns `None`, as today.
-fn scan_stream(path: &Path, matcher: &Regex, budget: usize, cancelled: &dyn Fn() -> bool) -> Option<Vec<SearchMatch>> {
+fn scan_stream(
+    path: &Path,
+    matcher: &Regex,
+    budget: usize,
+    cancelled: &dyn Fn() -> bool,
+) -> Option<Vec<SearchMatch>> {
     use std::io::BufRead as _;
     let file = fs::File::open(path).ok()?;
     let mut reader = std::io::BufReader::new(file);
@@ -288,7 +349,8 @@ fn scan_stream(path: &Path, matcher: &Regex, budget: usize, cancelled: &dyn Fn()
     if crate::encoding::looks_binary(head) {
         return None;
     }
-    if matches!(encoding_rs::Encoding::for_bom(head), Some((e, _)) if e == encoding_rs::UTF_16LE || e == encoding_rs::UTF_16BE) {
+    if matches!(encoding_rs::Encoding::for_bom(head), Some((e, _)) if e == encoding_rs::UTF_16LE || e == encoding_rs::UTF_16BE)
+    {
         return None;
     }
     let mut out = Vec::new();
@@ -304,10 +366,22 @@ fn scan_stream(path: &Path, matcher: &Regex, budget: usize, cancelled: &dyn Fn()
                 line_no += 1;
                 let mut text: Option<String> = None;
                 for hit in matcher.find_iter(&buf) {
-                    let text = text.get_or_insert_with(|| String::from_utf8_lossy(&buf).into_owned());
-                    let column = text.char_indices().take_while(|(i, _)| *i < hit.start()).count() + 1;
-                    let length = String::from_utf8_lossy(&buf[hit.start()..hit.end()]).chars().count();
-                    out.push(SearchMatch { line: line_no, column, length, text: text.clone() });
+                    let text =
+                        text.get_or_insert_with(|| String::from_utf8_lossy(&buf).into_owned());
+                    let column = text
+                        .char_indices()
+                        .take_while(|(i, _)| *i < hit.start())
+                        .count()
+                        + 1;
+                    let length = String::from_utf8_lossy(&buf[hit.start()..hit.end()])
+                        .chars()
+                        .count();
+                    out.push(SearchMatch {
+                        line: line_no,
+                        column,
+                        length,
+                        text: text.clone(),
+                    });
                 }
                 if out.len() >= budget {
                     return Some(out);
@@ -354,7 +428,10 @@ fn search_files(
             .par_iter()
             .map(|relative| {
                 let matches = scan_file(&Path::new(root).join(relative), matcher, cap, &cancelled)?;
-                (!matches.is_empty()).then(|| FileMatches { path: relative.clone(), matches })
+                (!matches.is_empty()).then(|| FileMatches {
+                    path: relative.clone(),
+                    matches,
+                })
             })
             .collect();
         scanned += batch.len();
@@ -378,11 +455,23 @@ fn search_files(
     (scanned, false, false)
 }
 
-fn search_root(files: Vec<String>, root: &str, query: &str, is_regex: bool, case_sensitive: bool, word_only: bool) -> Result<SearchOutcome, String> {
+fn search_root(
+    files: Vec<String>,
+    root: &str,
+    query: &str,
+    is_regex: bool,
+    case_sensitive: bool,
+    word_only: bool,
+) -> Result<SearchOutcome, String> {
     let matcher = build_matcher(query, is_regex, case_sensitive, word_only)?;
     let mut all = Vec::new();
-    let (scanned, truncated, _) = search_files(&files, root, &matcher, |batch| all.extend(batch), || false);
-    Ok(SearchOutcome { files: all, truncated, scanned })
+    let (scanned, truncated, _) =
+        search_files(&files, root, &matcher, |batch| all.extend(batch), || false);
+    Ok(SearchOutcome {
+        files: all,
+        truncated,
+        scanned,
+    })
 }
 
 /// Search every file of the open folder, streaming results over `on_event`. `query` is a
@@ -406,7 +495,11 @@ pub async fn search_workspace(
 ) -> Result<(), String> {
     let generation = state.search.next();
     if query.is_empty() {
-        let _ = on_event.send(SearchEvent::Done { scanned: 0, truncated: false, cancelled: false });
+        let _ = on_event.send(SearchEvent::Done {
+            scanned: 0,
+            truncated: false,
+            cancelled: false,
+        });
         return Ok(());
     }
     let root = repo
@@ -431,7 +524,11 @@ pub async fn search_workspace(
             },
             || !search.is_current(generation),
         );
-        let _ = on_event.send(SearchEvent::Done { scanned, truncated, cancelled });
+        let _ = on_event.send(SearchEvent::Done {
+            scanned,
+            truncated,
+            cancelled,
+        });
     })
     .await
     .map_err(|e| format!("The search thread failed: {e}"))
@@ -468,12 +565,13 @@ fn replace_per_line(bytes: &[u8], matcher: &Regex, replacement: &str) -> (Vec<u8
         if line_end > start && bytes[line_end - 1] == b'\r' {
             line_end -= 1;
         }
-        let replaced = matcher.replace_all(&bytes[start..line_end], |caps: &regex::bytes::Captures| {
-            count += 1;
-            let mut expanded = Vec::new();
-            caps.expand(replacement.as_bytes(), &mut expanded);
-            expanded
-        });
+        let replaced =
+            matcher.replace_all(&bytes[start..line_end], |caps: &regex::bytes::Captures| {
+                count += 1;
+                let mut expanded = Vec::new();
+                caps.expand(replacement.as_bytes(), &mut expanded);
+                expanded
+            });
         out.extend_from_slice(&replaced);
         out.extend_from_slice(&bytes[line_end..end]);
         if end == bytes.len() {
@@ -484,11 +582,23 @@ fn replace_per_line(bytes: &[u8], matcher: &Regex, replacement: &str) -> (Vec<u8
     }
 }
 
-fn replace_root(files: Vec<String>, root: &str, query: &str, replacement: &str, is_regex: bool, case_sensitive: bool, word_only: bool) -> Result<ReplaceOutcome, String> {
+fn replace_root(
+    files: Vec<String>,
+    root: &str,
+    query: &str,
+    replacement: &str,
+    is_regex: bool,
+    case_sensitive: bool,
+    word_only: bool,
+) -> Result<ReplaceOutcome, String> {
     // An empty query would match the empty string at every byte position; like the search,
     // it is a no-op.
     if query.is_empty() {
-        return Ok(ReplaceOutcome { files: 0, replacements: 0, failed: 0 });
+        return Ok(ReplaceOutcome {
+            files: 0,
+            replacements: 0,
+            failed: 0,
+        });
     }
     let matcher = build_matcher(query, is_regex, case_sensitive, word_only)?;
     let results: Vec<Option<(usize, bool)>> = files
@@ -499,14 +609,19 @@ fn replace_root(files: Vec<String>, root: &str, query: &str, replacement: &str, 
             let (replaced, count) = replace_per_line(&text, &matcher, replacement);
             // Report a failed write instead of discarding the count, which would make the
             // replace look like it never matched anything.
-            let failed = count > 0 && fs::write(&path, encode_searchable(replaced, encoding)).is_err();
+            let failed =
+                count > 0 && fs::write(&path, encode_searchable(replaced, encoding)).is_err();
             Some((count, failed))
         })
         .collect();
     let replacements: usize = results.iter().flatten().map(|(c, _)| *c).sum();
     let files = results.iter().flatten().filter(|(c, _)| *c > 0).count();
     let failed = results.iter().flatten().filter(|(_, f)| *f).count();
-    Ok(ReplaceOutcome { files, replacements, failed })
+    Ok(ReplaceOutcome {
+        files,
+        replacements,
+        failed,
+    })
 }
 
 /// Replace every match in every file of the open folder. Files are rewritten whole; the file
@@ -532,7 +647,15 @@ pub async fn replace_in_files(
         include.as_deref().unwrap_or(""),
         exclude.as_deref().unwrap_or(""),
     );
-    let outcome = replace_root(files, &root, &query, &replacement, is_regex, case_sensitive, word_only.unwrap_or(false))?;
+    let outcome = replace_root(
+        files,
+        &root,
+        &query,
+        &replacement,
+        is_regex,
+        case_sensitive,
+        word_only.unwrap_or(false),
+    )?;
     state.file_list_cache.invalidate();
     Ok(outcome)
 }
@@ -585,7 +708,12 @@ fn file_hash(path: &Path) -> Option<[u8; 20]> {
     Some(Sha1::digest(&bytes).into())
 }
 
-fn compare_roots(left: &str, right: &str, include: &str, exclude: &str) -> Result<Vec<DirDiffEntry>, String> {
+fn compare_roots(
+    left: &str,
+    right: &str,
+    include: &str,
+    exclude: &str,
+) -> Result<Vec<DirDiffEntry>, String> {
     for (label, dir) in [("left", left), ("right", right)] {
         if !Path::new(dir).is_dir() {
             return Err(format!("The {label} folder does not exist: {dir}"));
@@ -598,7 +726,10 @@ fn compare_roots(left: &str, right: &str, include: &str, exclude: &str) -> Resul
     paths.dedup();
     let mut entries = Vec::new();
     for path in filter_paths(paths.into_iter().cloned().collect(), include, exclude) {
-        let (l_size, r_size) = (left_files.get(&path).copied(), right_files.get(&path).copied());
+        let (l_size, r_size) = (
+            left_files.get(&path).copied(),
+            right_files.get(&path).copied(),
+        );
         let status = match (l_size, r_size) {
             (Some(_), None) => "leftOnly",
             (None, Some(_)) => "rightOnly",
@@ -612,7 +743,11 @@ fn compare_roots(left: &str, right: &str, include: &str, exclude: &str) -> Resul
                         (Some(a), Some(b)) => a == b,
                         _ => false,
                     };
-                    if same { "same" } else { "different" }
+                    if same {
+                        "same"
+                    } else {
+                        "different"
+                    }
                 }
             }
             (None, None) => continue,
@@ -630,8 +765,18 @@ fn compare_roots(left: &str, right: &str, include: &str, exclude: &str) -> Resul
 /// Compare two folders file by file. Equal sizes hash to equal content before two files are
 /// called the same. Directories themselves are not reported - only files, with their status.
 #[tauri::command]
-pub async fn compare_dirs(left: String, right: String, include: Option<String>, exclude: Option<String>) -> Result<Vec<DirDiffEntry>, String> {
-    compare_roots(&left, &right, include.as_deref().unwrap_or(""), exclude.as_deref().unwrap_or(""))
+pub async fn compare_dirs(
+    left: String,
+    right: String,
+    include: Option<String>,
+    exclude: Option<String>,
+) -> Result<Vec<DirDiffEntry>, String> {
+    compare_roots(
+        &left,
+        &right,
+        include.as_deref().unwrap_or(""),
+        exclude.as_deref().unwrap_or(""),
+    )
 }
 
 /* ---------- The workspace symbol index ---------- */
@@ -648,7 +793,9 @@ pub struct WorkspaceSymbol {
 }
 
 /// The extensions the outline extractor can parse; everything else is skipped.
-pub(crate) const SYMBOL_EXTENSIONS: &[&str] = &["rs", "py", "go", "ts", "tsx", "js", "jsx", "java", "c", "h", "cpp", "hpp", "cs"];
+pub(crate) const SYMBOL_EXTENSIONS: &[&str] = &[
+    "rs", "py", "go", "ts", "tsx", "js", "jsx", "java", "c", "h", "cpp", "hpp", "cs",
+];
 
 /// The per-root symbol index cache (a multi-root workspace keeps one slot per root): which
 /// folder each index was built for, when, and the symbols.
@@ -747,7 +894,10 @@ pub async fn workspace_symbols(
     let root = repo
         .or_else(|| state.first_repo())
         .ok_or_else(|| "No folder is open".to_string())?;
-    let all = state.symbol_index.all_symbols(&root).unwrap_or_else(|| cached_symbols(&root, &state.symbol_cache));
+    let all = state
+        .symbol_index
+        .all_symbols(&root)
+        .unwrap_or_else(|| cached_symbols(&root, &state.symbol_cache));
     let needle = query.to_lowercase();
     let mut hits: Vec<WorkspaceSymbol> = all
         .into_iter()
@@ -766,7 +916,10 @@ pub async fn workspace_symbols(
 /// the shared implementation in cmd_symbols: the persistent index's occurrence list narrows
 /// it to the files that contain the word, when one has landed.
 #[tauri::command]
-pub async fn find_references(state: State<'_, AppState>, name: String) -> Result<Vec<FileMatches>, String> {
+pub async fn find_references(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<Vec<FileMatches>, String> {
     crate::cmd_symbols::references_for(&state, &name, None).await
 }
 
@@ -805,19 +958,41 @@ fn hex_of(a: Vec<u8>, b: Vec<u8>) -> HexDiff {
             let sa = &a[start.min(a.len())..(start + HEX_ROW).min(a.len())];
             let sb = &b[start.min(b.len())..(start + HEX_ROW).min(b.len())];
             if sa != sb {
-                rows.push(HexRow { offset: start as u64, a: sa.to_vec(), b: sb.to_vec() });
+                rows.push(HexRow {
+                    offset: start as u64,
+                    a: sa.to_vec(),
+                    b: sb.to_vec(),
+                });
             }
         }
     }
-    HexDiff { identical, size_a: a.len() as u64, size_b: b.len() as u64, rows }
+    HexDiff {
+        identical,
+        size_a: a.len() as u64,
+        size_b: b.len() as u64,
+        rows,
+    }
 }
 
-fn bytes_at(git: &crate::git::Git, root: &str, revision: &str, path: &str) -> Result<Vec<u8>, String> {
+fn bytes_at(
+    git: &crate::git::Git,
+    root: &str,
+    revision: &str,
+    path: &str,
+) -> Result<Vec<u8>, String> {
     if revision == "*" {
         return fs::read(Path::new(root).join(path)).map_err(|e| format!("{path}: {e}"));
     }
-    let spec = if revision == ":index" { format!(":{path}") } else { format!("{revision}:{path}") };
-    let output = git.command().args(["cat-file", "blob", &spec]).output().map_err(|e| e.to_string())?;
+    let spec = if revision == ":index" {
+        format!(":{path}")
+    } else {
+        format!("{revision}:{path}")
+    };
+    let output = git
+        .command()
+        .args(["cat-file", "blob", &spec])
+        .output()
+        .map_err(|e| e.to_string())?;
     if !output.status.success() {
         return Err(format!("git cat-file failed for {spec}"));
     }
@@ -834,7 +1009,9 @@ pub async fn hex_diff(
     path_a: String,
     path_b: String,
 ) -> Result<HexDiff, String> {
-    let root = state.first_repo().ok_or_else(|| "No folder is open".to_string())?;
+    let root = state
+        .first_repo()
+        .ok_or_else(|| "No folder is open".to_string())?;
     let git = crate::git::Git::new(&root);
     let a = bytes_at(&git, &root, &revision_a, &path_a)?;
     let b = bytes_at(&git, &root, &revision_b, &path_b)?;
@@ -860,7 +1037,10 @@ mod tests {
     #[test]
     fn filter_paths_applies_include_and_exclude() {
         let files = vec!["a.rs".to_owned(), "src/b.rs".to_owned(), "c.ts".to_owned()];
-        assert_eq!(filter_paths(files.clone(), "*.rs", ""), ["a.rs", "src/b.rs"]);
+        assert_eq!(
+            filter_paths(files.clone(), "*.rs", ""),
+            ["a.rs", "src/b.rs"]
+        );
         assert_eq!(filter_paths(files.clone(), "", "src/*"), ["a.rs", "c.ts"]);
         assert_eq!(filter_paths(files, "**/*.rs", "src/**"), ["a.rs"]);
     }
@@ -882,12 +1062,28 @@ mod tests {
         std::fs::write(dir.path().join("b.txt"), "alpha beta alpha\n").unwrap();
         let root = dir.path().display().to_string();
 
-        let outcome = search_root(filter_paths(walk_files(&root), "*.rs", ""), &root, "alpha", false, false, false).unwrap();
+        let outcome = search_root(
+            filter_paths(walk_files(&root), "*.rs", ""),
+            &root,
+            "alpha",
+            false,
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(outcome.scanned, 1);
         assert_eq!(outcome.files.len(), 1);
         assert_eq!(outcome.files[0].path, "a.rs");
 
-        let none = search_root(filter_paths(walk_files(&root), "", ""), &root, "Alpha", false, true, false).unwrap();
+        let none = search_root(
+            filter_paths(walk_files(&root), "", ""),
+            &root,
+            "Alpha",
+            false,
+            true,
+            false,
+        )
+        .unwrap();
         assert!(none.files.is_empty());
     }
 
@@ -903,16 +1099,33 @@ mod tests {
 
         // Uncancelled: every file is scanned, batches arrive in path order.
         let mut batches: Vec<Vec<String>> = Vec::new();
-        let (scanned, truncated, cancelled) = search_files(&files, &root, &matcher, |b| batches.push(b.iter().map(|f| f.path.clone()).collect()), || false);
+        let (scanned, truncated, cancelled) = search_files(
+            &files,
+            &root,
+            &matcher,
+            |b| batches.push(b.iter().map(|f| f.path.clone()).collect()),
+            || false,
+        );
         assert_eq!((scanned, truncated, cancelled), (600, false, false));
-        assert!(batches.len() >= 2, "600 files must stream as more than one batch");
+        assert!(
+            batches.len() >= 2,
+            "600 files must stream as more than one batch"
+        );
         let flat: Vec<String> = batches.concat();
         assert_eq!(flat, files);
 
         // Cancelled after the first batch: the scan stops and says so. The flag is an atomic
         // because the cancellation is also checked inside rayon's per-file workers.
         let seen = std::sync::atomic::AtomicUsize::new(0);
-        let (scanned, _, cancelled) = search_files(&files, &root, &matcher, |_| { seen.fetch_add(1, Ordering::SeqCst); }, || seen.load(Ordering::SeqCst) >= 1);
+        let (scanned, _, cancelled) = search_files(
+            &files,
+            &root,
+            &matcher,
+            |_| {
+                seen.fetch_add(1, Ordering::SeqCst);
+            },
+            || seen.load(Ordering::SeqCst) >= 1,
+        );
         assert!(cancelled);
         assert!(scanned < 600);
     }
@@ -951,7 +1164,14 @@ mod tests {
         flat.extend_from_slice(b"tail-needle\n");
         std::fs::write(dir.path().join("flat.log"), &flat).unwrap();
         // The same needle in a normally-lined file is found.
-        std::fs::write(dir.path().join("ok.txt"), format!("{}\nneedle\n", "padding".repeat(MAX_TEXT_FILE as usize / 6 + 8))).unwrap();
+        std::fs::write(
+            dir.path().join("ok.txt"),
+            format!(
+                "{}\nneedle\n",
+                "padding".repeat(MAX_TEXT_FILE as usize / 6 + 8)
+            ),
+        )
+        .unwrap();
         let root = dir.path().display().to_string();
 
         let outcome = search_root(walk_files(&root), &root, "needle", false, false, false).unwrap();
@@ -961,9 +1181,11 @@ mod tests {
         // A cancelled search stops mid-stream: the well-lined file yields nothing once the
         // flag is up before its first line settles in.
         let matcher = build_matcher("needle", false, false, false).unwrap();
-        let hits = scan_stream(&dir.path().join("ok.txt"), &matcher, MAX_MATCHES, &|| true).unwrap();
+        let hits =
+            scan_stream(&dir.path().join("ok.txt"), &matcher, MAX_MATCHES, &|| true).unwrap();
         assert!(hits.is_empty());
-        let hits = scan_stream(&dir.path().join("ok.txt"), &matcher, MAX_MATCHES, &|| false).unwrap();
+        let hits =
+            scan_stream(&dir.path().join("ok.txt"), &matcher, MAX_MATCHES, &|| false).unwrap();
         assert_eq!(hits.len(), 1);
     }
 
@@ -990,7 +1212,10 @@ mod tests {
         let root = dir.path().display().to_string();
         let outcome = search_root(walk_files(&root), &root, "x", false, false, false).unwrap();
         assert!(outcome.truncated);
-        assert_eq!(outcome.files.iter().map(|f| f.matches.len()).sum::<usize>(), MAX_MATCHES);
+        assert_eq!(
+            outcome.files.iter().map(|f| f.matches.len()).sum::<usize>(),
+            MAX_MATCHES
+        );
     }
 
     #[test]
@@ -1011,9 +1236,21 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "x y x\n").unwrap();
         std::fs::write(dir.path().join("b.txt"), "z\n").unwrap();
         let root = dir.path().display().to_string();
-        let outcome = replace_root(filter_paths(walk_files(&root), "", ""), &root, "x", "w", false, false, false).unwrap();
+        let outcome = replace_root(
+            filter_paths(walk_files(&root), "", ""),
+            &root,
+            "x",
+            "w",
+            false,
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!((outcome.files, outcome.replacements), (1, 2));
-        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "w y w\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "w y w\n"
+        );
     }
 
     #[test]
@@ -1027,11 +1264,26 @@ mod tests {
         std::fs::set_permissions(&locked, perms).unwrap();
         let root = dir.path().display().to_string();
 
-        let outcome = replace_root(filter_paths(walk_files(&root), "", ""), &root, "x", "w", false, false, false).unwrap();
+        let outcome = replace_root(
+            filter_paths(walk_files(&root), "", ""),
+            &root,
+            "x",
+            "w",
+            false,
+            false,
+            false,
+        )
+        .unwrap();
         // The writable file is replaced normally; the locked one is reported, not silently
         // dropped from the counts.
-        assert_eq!((outcome.files, outcome.replacements, outcome.failed), (2, 2, 1));
-        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "w y\n");
+        assert_eq!(
+            (outcome.files, outcome.replacements, outcome.failed),
+            (2, 2, 1)
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "w y\n"
+        );
 
         // Clearing the read-only bit so the temp dir can be removed (clippy warns that on Unix
         // this alone does not make a file world-writable; here it only undoes the line above).
@@ -1054,10 +1306,18 @@ mod tests {
         std::fs::write(left.path().join("only-l.txt"), b"").unwrap();
         std::fs::write(right.path().join("only-r.txt"), b"").unwrap();
 
-        let mut entries = compare_roots(&left.path().display().to_string(), &right.path().display().to_string(), "", "").unwrap();
+        let mut entries = compare_roots(
+            &left.path().display().to_string(),
+            &right.path().display().to_string(),
+            "",
+            "",
+        )
+        .unwrap();
         entries.sort_by(|a, b| a.path.cmp(&b.path));
-        let by_path: std::collections::BTreeMap<&str, &str> =
-            entries.iter().map(|e| (e.path.as_str(), e.status.as_str())).collect();
+        let by_path: std::collections::BTreeMap<&str, &str> = entries
+            .iter()
+            .map(|e| (e.path.as_str(), e.status.as_str()))
+            .collect();
         assert_eq!(by_path["same.txt"], "same");
         assert_eq!(by_path["diff.txt"], "different");
         assert_eq!(by_path["only-l.txt"], "leftOnly");
@@ -1067,7 +1327,11 @@ mod tests {
     #[test]
     fn index_symbols_extracts_rust_functions() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("lib.rs"), "pub fn alpha() {}\nfn beta() {}\n").unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "pub fn alpha() {}\nfn beta() {}\n",
+        )
+        .unwrap();
         let symbols = index_symbols(&dir.path().display().to_string());
         let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["alpha", "beta"]);
@@ -1097,9 +1361,13 @@ mod tests {
         let file = dir.path().join("a.txt");
         std::fs::write(&file, "foo one\nbar\nfoo two\n").unwrap();
         let root = dir.path().display().to_string();
-        let outcome = replace_root(walk_files(&root), &root, "^foo", "X", true, false, false).unwrap();
+        let outcome =
+            replace_root(walk_files(&root), &root, "^foo", "X", true, false, false).unwrap();
         assert_eq!(outcome.replacements, 2);
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "X one\nbar\nX two\n");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "X one\nbar\nX two\n"
+        );
     }
 
     #[test]
@@ -1110,7 +1378,8 @@ mod tests {
         let file = dir.path().join("a.txt");
         std::fs::write(&file, "a\nb\n").unwrap();
         let root = dir.path().display().to_string();
-        let outcome = replace_root(walk_files(&root), &root, "a\nb", "x", false, false, false).unwrap();
+        let outcome =
+            replace_root(walk_files(&root), &root, "a\nb", "x", false, false, false).unwrap();
         assert_eq!(outcome.replacements, 0);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "a\nb\n");
     }
@@ -1119,7 +1388,10 @@ mod tests {
     fn whole_word_demands_boundaries_only_at_word_character_edges() {
         let word = |query: &str| build_matcher(query, false, true, true).unwrap();
         // Word-character edges keep their boundaries.
-        assert_eq!(scan_text("a foo b afoo foob\n".as_bytes(), &word("foo")).len(), 1);
+        assert_eq!(
+            scan_text("a foo b afoo foob\n".as_bytes(), &word("foo")).len(),
+            1
+        );
         // A non-word edge has no boundary to demand: `->` matches spaced too, and `(int)`
         // matches at a line start.
         assert_eq!(scan_text("a -> b\n".as_bytes(), &word("->")).len(), 1);
@@ -1143,15 +1415,25 @@ mod tests {
         let outcome = search_root(walk_files(&root), &root, "bar", false, false, false).unwrap();
         assert_eq!(outcome.files.len(), 1);
         assert_eq!(outcome.files[0].matches.len(), 1);
-        assert_eq!((outcome.files[0].matches[0].line, outcome.files[0].matches[0].column), (1, 5));
+        assert_eq!(
+            (
+                outcome.files[0].matches[0].line,
+                outcome.files[0].matches[0].column
+            ),
+            (1, 5)
+        );
         assert_eq!(outcome.files[0].matches[0].text, "foo bar");
 
         // A replace writes the file back as UTF-16, not as re-encoded UTF-8.
-        let outcome = replace_root(walk_files(&root), &root, "bar", "qux", false, false, false).unwrap();
+        let outcome =
+            replace_root(walk_files(&root), &root, "bar", "qux", false, false, false).unwrap();
         assert_eq!(outcome.replacements, 1);
         let written = std::fs::read(&file).unwrap();
         let decoded = crate::encoding::decode(&written, None);
-        assert_eq!((decoded.text.as_str(), decoded.encoding), ("foo qux\nbaz\n", "utf-16le"));
+        assert_eq!(
+            (decoded.text.as_str(), decoded.encoding),
+            ("foo qux\nbaz\n", "utf-16le")
+        );
     }
 
     #[test]
@@ -1172,8 +1454,14 @@ mod tests {
             "vendorized/x.js".to_owned(),
         ];
         // A bare name prunes a directory at any depth; a path prefix prunes its subtree.
-        assert_eq!(filter_paths(files.clone(), "", "vendor"), ["src/a.rs", "src/generated/g.rs", "vendorized/x.js"]);
-        assert_eq!(filter_paths(files.clone(), "", "src/generated"), ["src/a.rs", "vendor/lib.js", "vendorized/x.js"]);
+        assert_eq!(
+            filter_paths(files.clone(), "", "vendor"),
+            ["src/a.rs", "src/generated/g.rs", "vendorized/x.js"]
+        );
+        assert_eq!(
+            filter_paths(files.clone(), "", "src/generated"),
+            ["src/a.rs", "vendor/lib.js", "vendorized/x.js"]
+        );
         // As an include, a directory name selects its subtree.
         assert_eq!(filter_paths(files, "vendor", ""), ["vendor/lib.js"]);
     }
@@ -1185,7 +1473,10 @@ mod tests {
         std::fs::write(&file, "hello\n").unwrap();
         let root = dir.path().display().to_string();
         let outcome = replace_root(walk_files(&root), &root, "", "x", false, false, false).unwrap();
-        assert_eq!((outcome.files, outcome.replacements, outcome.failed), (0, 0, 0));
+        assert_eq!(
+            (outcome.files, outcome.replacements, outcome.failed),
+            (0, 0, 0)
+        );
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello\n");
     }
 

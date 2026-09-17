@@ -33,7 +33,18 @@ pub enum SymbolKind {
 fn known(language: &str) -> bool {
     matches!(
         language,
-        "rs" | "py" | "go" | "ts" | "tsx" | "js" | "jsx" | "java" | "c" | "h" | "cpp" | "hpp" | "cs"
+        "rs" | "py"
+            | "go"
+            | "ts"
+            | "tsx"
+            | "js"
+            | "jsx"
+            | "java"
+            | "c"
+            | "h"
+            | "cpp"
+            | "hpp"
+            | "cs"
     )
 }
 
@@ -48,10 +59,16 @@ fn symbol_of(language: &str, line: &str, index: usize) -> Option<Symbol> {
         ("rs", t) => rust_symbol(t),
         ("py", t) => python_symbol(t),
         ("go", t) => go_symbol(t),
-        ("ts" | "tsx" | "js" | "jsx" | "java" | "c" | "h" | "cpp" | "hpp" | "cs", t) => c_like_symbol(t),
+        ("ts" | "tsx" | "js" | "jsx" | "java" | "c" | "h" | "cpp" | "hpp" | "cs", t) => {
+            c_like_symbol(t)
+        }
         _ => None,
     }?;
-    Some(Symbol { kind, name: name.to_owned(), line: index })
+    Some(Symbol {
+        kind,
+        name: name.to_owned(),
+        line: index,
+    })
 }
 
 /// The scan over a rope. `viewer_symbols` works on a snapshot clone of the document's rope
@@ -160,11 +177,7 @@ fn python_symbol(t: &str) -> Option<(SymbolKind, &str)> {
         }
     }
     if let Some(name) = t.strip_prefix("class ") {
-        let word = name
-            .split(['(', ':'])
-            .next()
-            .unwrap_or("")
-            .trim();
+        let word = name.split(['(', ':']).next().unwrap_or("").trim();
         if !word.is_empty() {
             return Some((SymbolKind::Class, word));
         }
@@ -342,7 +355,13 @@ mod tests {
         // same lines - including a CRLF file and a final line without a newline.
         let text = "pub fn alpha() {}\r\nstruct Beta;\r\n\r\nmod gamma";
         assert_eq!(outline_text(text, "rs"), outline(text, "rs"));
-        assert_eq!(outline(text, "rs").iter().map(|s| s.line).collect::<Vec<_>>(), [0, 1, 3]);
+        assert_eq!(
+            outline(text, "rs")
+                .iter()
+                .map(|s| s.line)
+                .collect::<Vec<_>>(),
+            [0, 1, 3]
+        );
         assert!(outline_text("fn nothing() {}", "log").is_empty());
     }
 
