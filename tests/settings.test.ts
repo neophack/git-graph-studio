@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { setLocale, t } from '../src/i18n';
-import { DEFAULT_SETTINGS, THEMES, applyTheme, migrateStoredSettings, settings, updateSetting } from '../src/settings';
+import { DEFAULT_SETTINGS, THEMES, applyTheme, loadSettingsFile, migrateStoredSettings, settings, updateSetting } from '../src/settings';
 import { openSettingsPanel } from '../src/settingsPanel';
 import { EditorGroup } from '../src/editor';
 import { backend } from './tauriMock';
@@ -55,6 +55,25 @@ describe('settings store', () => {
 		const stale = migrateStoredSettings({ smoothScrolling: true, minimap: false } as Partial<AppSettings>);
 		expect('smoothScrolling' in stale).toBe(false);
 		expect(stale.minimap).toBe(false);
+	});
+
+	it('migrates the settings file the same way - an old shipped default in ~/.ggs follows the new one', async () => {
+		// The file is read after boot and its values applied over the in-memory settings:
+		// without the migration a wheel sensitivity of 3 saved by an older release would
+		// override the migrated store and every notch would run three times Zed's.
+		backend.on('settings_read', () => JSON.stringify({ mouseWheelScrollSensitivity: 3, fastScrollSensitivity: 5, smoothScrolling: true, tabSize: 2 }));
+		const held = { wheel: settings.mouseWheelScrollSensitivity, fast: settings.fastScrollSensitivity, tab: settings.tabSize };
+		try {
+			await loadSettingsFile();
+			expect(settings.mouseWheelScrollSensitivity).toBe(1);
+			expect(settings.fastScrollSensitivity).toBe(4);
+			expect(settings.tabSize).toBe(2);
+			expect('smoothScrolling' in settings).toBe(false);
+		} finally {
+			settings.mouseWheelScrollSensitivity = held.wheel;
+			settings.fastScrollSensitivity = held.fast;
+			settings.tabSize = held.tab;
+		}
 	});
 
 	it('persists a change and notifies the workbench', () => {

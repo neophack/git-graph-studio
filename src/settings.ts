@@ -244,7 +244,9 @@ export async function loadSettingsFile(): Promise<void> {
 	try {
 		const text = await invoke<string | null>('settings_read');
 		if (!text) return;
-		const parsed = JSON.parse(text) as Partial<AppSettings>;
+		// The file is a store from an older release as much as localStorage is: the same
+		// migration applies (a wheel sensitivity that was only ever a shipped default).
+		const parsed = migrateStoredSettings(JSON.parse(text) as Partial<AppSettings>);
 		for (const def of SETTING_DEFS) {
 			if (parsed[def.key] !== undefined) (settings as unknown as Record<string, unknown>)[def.key] = parsed[def.key];
 		}
