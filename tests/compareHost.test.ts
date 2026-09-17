@@ -5,6 +5,7 @@
 import { describe, expect, test, vi } from 'vitest';
 
 import { CompareHost } from '../src/graphHost';
+import { THEME_EVENT, updateSetting } from '../src/settings';
 import { backend } from './tauriMock';
 
 const generated: Record<string, unknown>[] = [];
@@ -134,6 +135,48 @@ describe('CompareHost', () => {
 			.toMatchObject({ from: 'abc12345', to: 'def67890', paths: ['a.txt'] });
 		expect(postSpy.mock.calls.map((c) => c[0] as Record<string, unknown>).find((m) => m['command'] === 'lineCounts')!['counts'])
 			.toEqual({ 'a.txt': { additions: 3, deletions: 1 } });
+		host.dispose();
+		container.remove();
+	});
+
+	test('is themed by the shell from the first paint and follows theme switches', async () => {
+		generated.length = 0;
+		stubGenerator();
+		backend.on('graph_request', (args) => {
+			const message = args['message'] as Record<string, unknown>;
+			switch (message['command']) {
+				case 'getCommitComparison':
+					return { command: 'getCommitComparison', fileChanges: [], error: null };
+				case 'getCommitSummaries':
+					return { command: 'getCommitSummaries', summaries: {}, error: null };
+				case 'countCommitsBefore':
+					return { command: 'countCommitsBefore', count: 0 };
+				default:
+					return { command: message['command'], error: null };
+			}
+		});
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const host = new CompareHost(container, { fromHash: 'abc12345', toHash: 'def67890', singleCommit: false }, { openDiff: vi.fn() });
+		await vi.waitFor(() => expect(generated.length).toBe(2));
+		// The generated page's CSS is all var(--vscode-*) tokens: the theme's token sheet rides
+		// under the page's head from the first paint, and the vscode-* class gates its
+		// light-theme overrides onto the body.
+		const frame = container.querySelector('iframe')!;
+		const srcdoc = frame.getAttribute('srcdoc')!;
+		expect(srcdoc).toContain('id="ggs-host-theme"');
+		expect(srcdoc).toContain('href="/theme/dark-modern.css"');
+		expect(srcdoc).toContain('<body class="vscode-dark">');
+
+		// A theme switch swaps the sheet and the classes in the live page (no re-render: the
+		// page's styles are all variables). The event bubbles: the host listens on window.
+		updateSetting('theme', 'light-modern');
+		document.dispatchEvent(new CustomEvent(THEME_EVENT, { bubbles: true }));
+		const doc = frame.contentDocument!;
+		expect(doc.documentElement.classList.contains('vscode-light')).toBe(true);
+		expect(doc.body!.classList.contains('vscode-light')).toBe(true);
+		expect((doc.getElementById('ggs-host-theme') as HTMLLinkElement).getAttribute('href')).toBe('/theme/light-modern.css');
+		updateSetting('theme', 'dark-modern');
 		host.dispose();
 		container.remove();
 	});

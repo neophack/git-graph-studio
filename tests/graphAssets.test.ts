@@ -6,6 +6,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { GraphHost, type GraphHostDelegate } from '../src/graphHost';
+import { THEME_EVENT, updateSetting } from '../src/settings';
 import { backend } from './tauriMock';
 import { flush } from './helpers';
 
@@ -185,6 +186,35 @@ describe('graph assets', () => {
 		host.unload();
 		expect(host.frame.srcdoc).toBe('');
 		expect(host.frame.src).toContain('about:blank');
+
+	it('follows a theme switch into the view frame without a reload', async () => {
+		const host = new GraphHost(delegate);
+		document.body.appendChild(host.element);
+		host.load('C:\\repo');
+		await flush(10);
+		// jsdom's never-navigated iframe document has no html/head/body; a real browser always
+		// provides them (view.html carries all three), so the skeleton exists before the theme
+		// switch the way the real page's does.
+		const doc = host.frame.contentDocument!;
+		if (!doc.documentElement) doc.appendChild(doc.createElement('html'));
+		if (!doc.head) doc.documentElement.appendChild(doc.createElement('head'));
+		if (!doc.body) doc.documentElement.appendChild(doc.createElement('body'));
+		// The theme event bubbles (the host listens on window); jsdom never fires a stylesheet
+		// link's load, so the event the real applyTheme waits for is dispatched as the
+		// convention of tests/settings.test.ts.
+		const themed = (): Record<string, unknown> => {
+			const link = doc.getElementById('ggs-host-theme') as HTMLLinkElement | null;
+			return { href: link?.getAttribute('href') ?? null, html: doc.documentElement.className, body: doc.body.className };
+		};
+		updateSetting('theme', 'light-modern');
+		document.dispatchEvent(new CustomEvent(THEME_EVENT, { bubbles: true }));
+		expect(themed()).toMatchObject({ href: '/theme/light-modern.css', html: expect.stringContaining('vscode-light'), body: expect.stringContaining('vscode-light') });
+		// The sheet swap announces itself so the view re-mirrors its colour tokens; jsdom
+		// cannot fire the link load, so only the swap itself is asserted here.
+		updateSetting('theme', 'dark-modern');
+		document.dispatchEvent(new CustomEvent(THEME_EVENT, { bubbles: true }));
+		expect(themed()).toMatchObject({ href: '/theme/dark-modern.css', html: expect.stringContaining('vscode-dark'), body: expect.stringContaining('vscode-dark') });
+	});
 		expect(host.loaded).toBe(false);
 	});
 

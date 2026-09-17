@@ -186,7 +186,9 @@ export function themeById(id: string = settings.theme): ThemeDef {
 }
 
 function dispatch(name: string, detail?: unknown): void {
-	document.dispatchEvent(new CustomEvent(name, { detail }));
+	// Bubbling: the listeners live on document (the minimap, the theme metrics) and on window
+	// (the graph view host, the terminal) — a bubbling event reaches both from either target.
+	document.dispatchEvent(new CustomEvent(name, { detail, bubbles: true }));
 }
 
 /** Swap the theme stylesheet and the vscode-* classes on html/body. Fires THEME_EVENT once the

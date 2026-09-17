@@ -50,11 +50,47 @@ declare global {
 
 /* ---------- Where the graph's assets come from ---------- */
 
-/** The id of the theme-token stylesheet the host injects into the view page. */
+/** The id of the theme-token stylesheet the host injects into a hosted page. */
 const HOST_THEME_LINK_ID = 'ggs-host-theme';
 
 function hostThemeLink(css: string): string {
 	return `<link id="${HOST_THEME_LINK_ID}" rel="stylesheet" href="${css}" />`;
+}
+
+/** The host's contract with a hosted page, as VS Code's with a webview: the `--vscode-*` token
+ *  sheet of the current theme and the `vscode-dark` / `vscode-light` classes, injected into the
+ *  page's document - never a stylesheet of the plugin's own. Both hosted pages (the graph view,
+ *  the comparison page) get it on load and on every theme switch. */
+function applyFrameTheme(frame: HTMLIFrameElement): void {
+	try {
+		const doc = frame.contentDocument;
+		if (!doc) return;
+		const theme = themeById();
+		let link = doc.getElementById(HOST_THEME_LINK_ID) as HTMLLinkElement | null;
+		if (!link && doc.head) {
+			doc.head.insertAdjacentHTML('afterbegin', hostThemeLink(theme.css));
+			link = doc.getElementById(HOST_THEME_LINK_ID) as HTMLLinkElement | null;
+		}
+		for (const element of [doc.documentElement, doc.body]) {
+			if (!element) continue;
+			element.classList.remove('vscode-dark', 'vscode-light');
+			element.classList.add(theme.kind);
+			element.dataset['vscodeThemeKind'] = theme.kind;
+			element.dataset['vscodeThemeName'] = theme.label;
+		}
+		if (link && link.getAttribute('href') !== theme.css) {
+			// A live switch while the page is already running (no reload): once the new
+			// stylesheet has loaded, tell the page to re-mirror the --vscode-* colour tokens
+			// it copied into inline style at boot (see static/gitgraph/view.html), so the
+			// scroll-to-commit flash and Find highlight follow the new theme too. The
+			// comparison page mirrors no tokens; the message is simply not for it.
+			const frameWindow = frame.contentWindow;
+			link.addEventListener('load', () => frameWindow?.postMessage({ __studioThemeReady: true }, '*'), { once: true });
+			link.href = theme.css;
+		}
+	} catch {
+		// A cross-origin or not-yet-created document: the page keeps its loaded theme.
+	}
 }
 
 let compareGenerator: Promise<void> | null = null;
@@ -101,12 +137,19 @@ export class CompareHost {
 		this.frame.title = 'Commit Comparison';
 		this.container.appendChild(this.frame);
 		window.addEventListener('message', this.onMessage);
+		// The page's own load applies the classes; a theme switch swaps the token sheet in place
+		// (the page's CSS is all `var(--vscode-*)`, so no re-render is needed).
+		this.frame.addEventListener('load', () => applyFrameTheme(this.frame));
+		window.addEventListener(THEME_EVENT, this.onTheme);
 		void this.load();
 	}
+
+	private readonly onTheme = (): void => applyFrameTheme(this.frame);
 
 	dispose(): void {
 		this.disposed = true;
 		window.removeEventListener('message', this.onMessage);
+		window.removeEventListener(THEME_EVENT, this.onTheme);
 	}
 
 	/** The extension host's own load: the comparison, the header's summary cards and the
@@ -143,7 +186,10 @@ export class CompareHost {
 
 	/** Generate the page with the extension's own template and hand it to the frame, with the
 	 *  acquireVsCodeApi shim (state in sessionStorage, requests posted to this host) injected
-	 *  under the page's own nonce so its CSP lets it run. */
+	 *  under the page's own nonce so its CSP lets it run. The theme's token sheet rides under the
+	 *  page's head from the first paint - a srcdoc document inherits nothing from this one, and
+	 *  the page's CSS is all `var(--vscode-*, fallback)` tokens - and the `vscode-*` class gates
+	 *  its light-theme overrides onto the body. */
 	private async setPage(page: Record<string, unknown>): Promise<void> {
 		await loadCompareGenerator();
 		const build = window.GitGraphCompare;
@@ -157,7 +203,10 @@ export class CompareHost {
 			"setState:function(s){sessionStorage.setItem('ggstudio.compareState',JSON.stringify(s));}" +
 			'}};' +
 			'})();</script>';
-		this.frame.srcdoc = html.replace('<head>', '<head>' + shim);
+		const theme = themeById();
+		this.frame.srcdoc = html
+			.replace('<head>', '<head>' + hostThemeLink(theme.css) + shim)
+			.replace('<body>', `<body class="${theme.kind}">`);
 	}
 
 	private handlePageMessage(event: MessageEvent): void {
@@ -384,12 +433,12 @@ export class GraphHost {
 		// the view page itself only: an iframe also fires `load` for its initial empty document,
 		// which is not a page the user ever sees.
 		this.frame.addEventListener('load', () => {
-			this.applyFrameTheme();
+			applyFrameTheme(this.frame);
 			const src = this.frame.getAttribute('src') ?? '';
 			const isViewPage = this.frame.getAttribute('srcdoc') !== null || (src !== '' && src !== 'about:blank');
 			if (isViewPage) void invoke('boot_stage', { stage: 'graph view page loaded', pageMs: performance.now() }).catch(() => undefined);
 		});
-		window.addEventListener(THEME_EVENT, () => this.applyFrameTheme());
+		window.addEventListener(THEME_EVENT, () => applyFrameTheme(this.frame));
 		// The editor group dispatches this on the shared element when the Git Graph tab becomes
 		// the visible one (see EditorGroup.activate): the pane may have been `hidden` (zero-size)
 		// while the view loaded or last rendered, so its column widths and virtual window are
@@ -398,40 +447,6 @@ export class GraphHost {
 		this.element.addEventListener('ggs-graph-shown', () => {
 			requestAnimationFrame(() => this.frame.contentWindow?.dispatchEvent(new Event('resize')));
 		});
-	}
-
-	/** The host's contract with the view, as VS Code's with a webview: the `--vscode-*` token
-	 *  sheet of the current theme and the `vscode-dark` / `vscode-light` classes, injected into
-	 *  the page - never a stylesheet of the plugin's own. */
-	private applyFrameTheme(): void {
-		try {
-			const doc = this.frame.contentDocument;
-			if (!doc) return;
-			const theme = themeById();
-			let link = doc.getElementById(HOST_THEME_LINK_ID) as HTMLLinkElement | null;
-			if (!link && doc.head) {
-				doc.head.insertAdjacentHTML('afterbegin', hostThemeLink(theme.css));
-				link = doc.getElementById(HOST_THEME_LINK_ID) as HTMLLinkElement | null;
-			}
-			for (const element of [doc.documentElement, doc.body]) {
-				if (!element) continue;
-				element.classList.remove('vscode-dark', 'vscode-light');
-				element.classList.add(theme.kind);
-				element.dataset['vscodeThemeKind'] = theme.kind;
-				element.dataset['vscodeThemeName'] = theme.label;
-			}
-			if (link && link.getAttribute('href') !== theme.css) {
-				// A live switch while the view is already running (no reload): once the new
-				// stylesheet has loaded, tell the view to re-mirror the --vscode-* colour tokens
-				// it copied into inline style at boot (see static/gitgraph/view.html), so the
-				// scroll-to-commit flash and Find highlight follow the new theme too.
-				const frameWindow = this.frame.contentWindow;
-				link.addEventListener('load', () => frameWindow?.postMessage({ __studioThemeReady: true }, '*'), { once: true });
-				link.href = theme.css;
-			}
-		} catch {
-			// A cross-origin or not-yet-created document: the view keeps its loaded theme.
-		}
 	}
 
 	private logLine(line: string): void {
