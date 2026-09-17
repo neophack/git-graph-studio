@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 /// One CAN frame as either format can express it: the common ground of BLF and ASC, so a
 /// conversion is exactly a read into this and a write out of it.
+#[derive(Clone, Copy)]
 pub struct RawFrame {
     /// Seconds into the measurement, in nanoseconds.
     pub t_ns: u64,
@@ -158,6 +159,8 @@ pub struct CanIdStats {
     pub min_cycle_s: f64,
     pub max_cycle_s: f64,
     pub avg_cycle_s: f64,
+    /// The standard deviation of the cycle times — the jitter figure the table sorts by.
+    pub std_cycle_s: f64,
 }
 
 /// A bus channel's totals, from which the view computes the load at any bitrate.
@@ -176,6 +179,62 @@ pub struct CanChannelStats {
     pub last_s: f64,
 }
 
+/// One time slice of a channel's load profile: everything the load and frame-rate charts
+/// draw. The bus bits cross raw, so the view recomputes the load at any bitrate without
+/// re-walking the log.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadBucket {
+    /// The bucket's start, seconds into the measurement.
+    pub t_s: f64,
+    /// The bucket's width, seconds — doubles each time the profile compacts.
+    pub dur_s: f64,
+    pub frames: u64,
+    pub errors: u64,
+    pub bus_bits: f64,
+}
+
+/// A channel's timeline of buckets, the width the tracker settled on.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelLoadProfile {
+    pub channel: u16,
+    pub buckets: Vec<LoadBucket>,
+}
+
+/// The payload-length histogram the way the bus writes it: the classic lengths 0..8 then
+/// the CAN FD lengths 12,16,20,24,32,48,64 — `PAYLOAD_DIST_BINS` bins whose labels the
+/// view draws in the same order.
+pub const PAYLOAD_DIST_BINS: usize = 15;
+
+/// Which payload bin a frame's length falls into — CAN FD keeps the classic bins up to 8;
+/// a remote frame's length is 0.
+fn payload_bin(fd: bool, len: u64) -> usize {
+    if !fd || len <= 8 {
+        (len as usize).min(8)
+    } else {
+        match len {
+            12 => 9,
+            16 => 10,
+            20 => 11,
+            24 => 12,
+            32 => 13,
+            48 => 14,
+            // 64, and whatever a truncated object left: the last bin collects it.
+            _ => PAYLOAD_DIST_BINS - 1,
+        }
+    }
+}
+
+/// A channel's frame counts per payload bin.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelPayloadDist {
+    pub channel: u16,
+    /// One count per payload bin, `PAYLOAD_DIST_BINS` of them.
+    pub counts: [u64; PAYLOAD_DIST_BINS],
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CanLogStats {
@@ -192,6 +251,10 @@ pub struct CanLogStats {
     pub messages_truncated: u64,
     /// Objects the parser saw but did not understand (BLF holds many; they are not errors).
     pub skipped_objects: u64,
+    /// The per-channel load timelines the charts draw (bus bits per bucket).
+    pub load_profiles: Vec<ChannelLoadProfile>,
+    /// The per-channel payload-length histograms.
+    pub payload_dist: Vec<ChannelPayloadDist>,
 }
 
 /// How many identifiers the aggregate tracks before further distinct ids fold into a
@@ -212,6 +275,8 @@ struct IdAgg {
     min_cycle_ns: u64,
     max_cycle_ns: u64,
     cycle_sum_ns: u128,
+    /// Sum of squared cycle times (ns²) as an f64 — the raw material of the jitter σ.
+    cycle_sq_sum: f64,
 }
 
 #[derive(Default)]
@@ -223,6 +288,104 @@ struct ChannelAgg {
     first_ns: u64,
     last_ns: u64,
     seen: bool,
+    /// The timeline the load charts draw, created by the channel's first frame.
+    load: Option<LoadTracker>,
+    /// One count per payload-length bin.
+    payload: [u64; PAYLOAD_DIST_BINS],
+}
+
+/// How many buckets one channel's load tracker keeps before it compacts — bounds both the
+/// parse's memory and the response on a log of any length.
+const MAX_PROFILE_BUCKETS: usize = 1024;
+/// The width the tracker starts at (1 ms); it doubles at every compaction, so a
+/// measurement's profile settles at the finest width that still fits the bucket cap.
+const INITIAL_BUCKET_NS: u64 = 1_000_000;
+
+#[derive(Default, Clone, Copy)]
+struct BucketState {
+    frames: u64,
+    errors: u64,
+    bits: f64,
+}
+
+/// The streaming load profile of one channel: dense buckets from the channel's first
+/// frame on, compacted by doubling the width whenever a frame's timestamp would push the
+/// profile past the bucket cap. Timestamps may arrive out of order (an .asc can hold
+/// them); a late frame simply lands in an earlier bucket — `saturating_sub` keeps the
+/// index arithmetic in `u64` — and only a frame beyond the cap triggers a compaction.
+struct LoadTracker {
+    bucket_ns: u64,
+    origin_ns: u64,
+    buckets: Vec<BucketState>,
+}
+
+impl LoadTracker {
+    fn new(origin_ns: u64) -> Self {
+        LoadTracker {
+            bucket_ns: INITIAL_BUCKET_NS,
+            origin_ns,
+            buckets: Vec::new(),
+        }
+    }
+
+    fn note(&mut self, t_ns: u64, error: bool, bits: f64) {
+        // Compact until the timestamp fits under the cap: a frame hours into a
+        // measurement, walked at the initial width, would otherwise ask for millions of
+        // buckets. Each compaction halves the count and doubles the width, so this loop
+        // runs at most log2(span / (cap × initial)) times.
+        let mut idx = t_ns.saturating_sub(self.origin_ns) / self.bucket_ns;
+        while idx as usize >= MAX_PROFILE_BUCKETS {
+            self.compact();
+            idx = t_ns.saturating_sub(self.origin_ns) / self.bucket_ns;
+        }
+        let idx = idx as usize;
+        if idx >= self.buckets.len() {
+            self.buckets.resize(idx + 1, BucketState::default());
+        }
+        let bucket = &mut self.buckets[idx];
+        if error {
+            bucket.errors += 1;
+        } else {
+            bucket.frames += 1;
+        }
+        bucket.bits += bits;
+    }
+
+    /// Merges neighbouring buckets in pairs and doubles the width — every frame stays in
+    /// its own (wider) time slice, because the merged index is the old index halved.
+    fn compact(&mut self) {
+        let mut merged = Vec::with_capacity(self.buckets.len().div_ceil(2));
+        for pair in self.buckets.chunks(2) {
+            let mut state = pair[0];
+            if let Some(second) = pair.get(1) {
+                state.frames += second.frames;
+                state.errors += second.errors;
+                state.bits += second.bits;
+            }
+            merged.push(state);
+        }
+        self.buckets = merged;
+        self.bucket_ns *= 2;
+    }
+
+    fn finish(self, channel: u16) -> ChannelLoadProfile {
+        let width = self.bucket_ns;
+        ChannelLoadProfile {
+            channel,
+            buckets: self
+                .buckets
+                .into_iter()
+                .enumerate()
+                .map(|(i, b)| LoadBucket {
+                    t_s: (self.origin_ns + i as u64 * width) as f64 / 1e9,
+                    dur_s: width as f64 / 1e9,
+                    frames: b.frames,
+                    errors: b.errors,
+                    bus_bits: b.bits,
+                })
+                .collect(),
+        }
+    }
 }
 
 struct Aggregator {
@@ -268,6 +431,15 @@ impl Aggregator {
                 } else {
                     0.0
                 },
+                // σ over the count-1 deltas (E[x²] − E[x]², clamped at 0 against float
+                // cancellation on a perfectly periodic message).
+                std_cycle_s: if a.count > 2 {
+                    let n = (a.count - 1) as f64;
+                    let mean_ns = (a.cycle_sum_ns as f64) / n;
+                    ((a.cycle_sq_sum / n - mean_ns * mean_ns).max(0.0)).sqrt() / 1e9
+                } else {
+                    0.0
+                },
             })
             .collect();
         messages.sort_by(|a, b| b.count.cmp(&a.count).then(a.id.cmp(&b.id)));
@@ -280,28 +452,41 @@ impl Aggregator {
             .channels
             .values()
             .fold(0u64, |acc, c| acc.max(c.last_ns.saturating_sub(c.first_ns)));
+        // The channel rows, their load timelines and payload histograms come off the same
+        // per-channel aggregate — one map walk, three views of it.
+        let mut channels = Vec::with_capacity(self.channels.len());
+        let mut load_profiles = Vec::with_capacity(self.channels.len());
+        let mut payload_dist = Vec::with_capacity(self.channels.len());
+        for (channel, c) in self.channels {
+            if let Some(load) = c.load {
+                load_profiles.push(load.finish(channel));
+            }
+            payload_dist.push(ChannelPayloadDist {
+                channel,
+                counts: c.payload,
+            });
+            channels.push(CanChannelStats {
+                channel,
+                frames: c.frames,
+                error_frames: c.error_frames,
+                payload_bytes: c.payload_bytes,
+                bus_bits: c.bus_bits,
+                first_s: c.first_ns as f64 / 1e9,
+                last_s: c.last_ns as f64 / 1e9,
+            });
+        }
         CanLogStats {
             format,
             start_timestamp_s,
             duration_s: duration as f64 / 1e9,
             total_frames: self.total_frames,
             error_frames: self.error_frames,
-            channels: self
-                .channels
-                .into_iter()
-                .map(|(channel, c)| CanChannelStats {
-                    channel,
-                    frames: c.frames,
-                    error_frames: c.error_frames,
-                    payload_bytes: c.payload_bytes,
-                    bus_bits: c.bus_bits,
-                    first_s: c.first_ns as f64 / 1e9,
-                    last_s: c.last_ns as f64 / 1e9,
-                })
-                .collect(),
+            channels,
             messages,
             messages_truncated,
             skipped_objects: self.skipped,
+            load_profiles,
+            payload_dist,
         }
     }
 }
@@ -311,15 +496,26 @@ impl FrameSink for Aggregator {
         self.note_time(frame.channel, frame.t_ns);
         if frame.error {
             self.error_frames += 1;
-            self.channels.get_mut(&frame.channel).unwrap().error_frames += 1;
+            let entry = self.channels.get_mut(&frame.channel).unwrap();
+            entry.error_frames += 1;
+            // An error frame holds no payload length to price, so the profile counts it
+            // without bits — its share of the wire is its rarity, not its size.
+            if let Some(load) = entry.load.as_mut() {
+                load.note(frame.t_ns, true, 0.0);
+            }
             return;
         }
         self.total_frames += 1;
         let len = if frame.remote { 0 } else { frame.len as u64 };
+        let bits = frame_bits(frame.extended, frame.fd, len);
         let entry = self.channels.get_mut(&frame.channel).unwrap();
         entry.frames += 1;
         entry.payload_bytes += len;
-        entry.bus_bits += frame_bits(frame.extended, frame.fd, len);
+        entry.bus_bits += bits;
+        entry.payload[payload_bin(frame.fd, len)] += 1;
+        if let Some(load) = entry.load.as_mut() {
+            load.note(frame.t_ns, false, bits);
+        }
         let key = (frame.channel, frame.id, frame.extended);
         // An id already tracked updates in place; a new one joins only while there is
         // room — past the cap its frames still count in every total above, just not per-id.
@@ -339,6 +535,7 @@ impl FrameSink for Aggregator {
                     min_cycle_ns: 0,
                     max_cycle_ns: 0,
                     cycle_sum_ns: 0,
+                    cycle_sq_sum: 0.0,
                 },
             );
             update_id(&frame, len, self.ids.get_mut(&key).unwrap());
@@ -360,6 +557,9 @@ impl Aggregator {
         if !entry.seen {
             entry.first_ns = t_ns;
             entry.seen = true;
+            // The channel's buckets are indexed from its first frame, but the serialized
+            // starts stay on the measurement's clock — every channel draws on one x axis.
+            entry.load = Some(LoadTracker::new(t_ns));
         }
         if t_ns > entry.last_ns {
             entry.last_ns = t_ns;
@@ -388,6 +588,8 @@ fn update_id(frame: &RawFrame, len: u64, id_agg: &mut IdAgg) {
             id_agg.max_cycle_ns = id_agg.max_cycle_ns.max(cycle);
         }
         id_agg.cycle_sum_ns += cycle as u128;
+        let cycle_f = cycle as f64;
+        id_agg.cycle_sq_sum += cycle_f * cycle_f;
     }
 }
 
@@ -2969,6 +3171,129 @@ mod tests {
         let mut agg = Aggregator::new();
         let (start, _) = walk_blf(Cursor::new(bytes.to_vec()), &mut agg).unwrap();
         agg.finish("BLF", start)
+    }
+
+    /// The aggregator over frames pushed directly — the profile and jitter tests have no
+    /// interest in either file format.
+    fn stats_of_frames(frames: &[RawFrame]) -> CanLogStats {
+        let mut agg = Aggregator::new();
+        for frame in frames {
+            agg.frame(*frame);
+        }
+        agg.finish("ASC", None)
+    }
+
+    #[test]
+    fn load_profile_buckets_and_compacts_to_fit_the_cap() {
+        // 3000 frames 1 ms apart: at the 1 ms initial width that is 3000 buckets, past the
+        // 1024 cap, so the profile compacts twice (2 ms, then 4 ms) and settles there.
+        let mut frames: Vec<RawFrame> = (0..3000u64)
+            .map(|i| {
+                RawFrame::data_frame(
+                    i * 1_000_000,
+                    1,
+                    0x100,
+                    false,
+                    false,
+                    8,
+                    8,
+                    &[1, 2, 3, 4, 5, 6, 7, 8],
+                    false,
+                )
+            })
+            .collect();
+        // An error frame 2 s in: counted in its bucket's errors, priced at no bits.
+        frames.push(error_frame(2_000_000_000, 1));
+        let stats = stats_of_frames(&frames);
+        let profile = &stats.load_profiles[0];
+        assert_eq!(profile.channel, 1);
+        assert!((profile.buckets[0].dur_s - 0.004).abs() < 1e-12);
+        // Buckets stay dense: 3 s at 4 ms is 750 of them, the first at the origin.
+        assert_eq!(profile.buckets.len(), 750);
+        assert!(profile.buckets[0].t_s.abs() < 1e-12);
+        assert_eq!(
+            profile.buckets.iter().map(|b| b.frames).sum::<u64>(),
+            3000
+        );
+        assert_eq!(profile.buckets.iter().map(|b| b.errors).sum::<u64>(), 1);
+        assert!(profile.buckets[500].errors == 1); // 2 s in = bucket 500
+        // The merge keeps every frame's bits: each bucket carries whole 8-byte frames.
+        let per_frame = profile.buckets[0].bus_bits / profile.buckets[0].frames as f64;
+        for b in &profile.buckets {
+            assert!((b.bus_bits / b.frames as f64 - per_frame).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn load_profile_starts_each_channel_at_its_own_first_frame() {
+        // Channel 2 appears 5 s after channel 1: its buckets are indexed from its own
+        // first frame (the tracker's origin), but the serialized starts stay on the
+        // measurement's clock so every channel draws against one x axis.
+        let stats = stats_of_frames(&[
+            RawFrame::data_frame(0, 1, 0x10, false, false, 8, 8, &[0; 8], false),
+            RawFrame::data_frame(0, 1, 0x10, false, false, 8, 8, &[0; 8], false),
+            RawFrame::data_frame(
+                5_000_000_000,
+                2,
+                0x20,
+                false,
+                false,
+                8,
+                8,
+                &[0; 8],
+                false,
+            ),
+        ]);
+        assert_eq!(stats.load_profiles.len(), 2);
+        let ch2 = &stats.load_profiles[1];
+        assert_eq!(ch2.channel, 2);
+        assert!((ch2.buckets[0].t_s - 5.0).abs() < 1e-12);
+        assert_eq!(ch2.buckets[0].frames, 1);
+    }
+
+    #[test]
+    fn payload_dist_bins_classic_and_fd_lengths() {
+        let data: Vec<u8> = (0..64u8).collect();
+        let mut frames = vec![
+            RawFrame::data_frame(0, 3, 0x1, false, false, 8, 8, &data, false),
+            RawFrame::data_frame(0, 3, 0x2, false, false, 0, 0, &data, false),
+            RawFrame::data_frame(0, 3, 0x3, false, true, 15, 64, &data, false),
+            RawFrame::data_frame(0, 3, 0x4, false, true, 9, 12, &data, false),
+        ];
+        // A remote frame asks for a length it does not carry — binned by its 0 bytes.
+        let mut remote = RawFrame::data_frame(0, 3, 0x5, false, false, 2, 2, &data, false);
+        remote.remote = true;
+        frames.push(remote);
+        let stats = stats_of_frames(&frames);
+        let dist = &stats.payload_dist[0];
+        assert_eq!(dist.channel, 3);
+        // Bins 0..8, then 12 and 64; everything else empty.
+        let mut expected = [0u64; PAYLOAD_DIST_BINS];
+        expected[0] = 2; // the zero-length frame and the remote request
+        expected[8] = 1;
+        expected[9] = 1; // FD 12
+        expected[14] = 1; // FD 64
+        assert_eq!(dist.counts, expected);
+    }
+
+    #[test]
+    fn cycle_std_is_the_jitter_figure() {
+        // Deltas of 10 ms then 20 ms: mean 15 ms, σ over the two deltas = 5 ms.
+        let stats = stats_of_frames(&[
+            RawFrame::data_frame(0, 1, 0x42, false, false, 8, 8, &[0; 8], false),
+            RawFrame::data_frame(10_000_000, 1, 0x42, false, false, 8, 8, &[0; 8], false),
+            RawFrame::data_frame(30_000_000, 1, 0x42, false, false, 8, 8, &[0; 8], false),
+        ]);
+        let m = stats.messages.iter().find(|m| m.id == 0x42).unwrap();
+        assert!((m.std_cycle_s - 0.005).abs() < 1e-9);
+        // A perfectly periodic message clamps float cancellation at zero, not negative.
+        let stats = stats_of_frames(&[
+            RawFrame::data_frame(0, 1, 0x43, false, false, 8, 8, &[0; 8], false),
+            RawFrame::data_frame(10_000_000, 1, 0x43, false, false, 8, 8, &[0; 8], false),
+            RawFrame::data_frame(20_000_000, 1, 0x43, false, false, 8, 8, &[0; 8], false),
+        ]);
+        let m = stats.messages.iter().find(|m| m.id == 0x43).unwrap();
+        assert!(m.std_cycle_s.abs() < 1e-12);
     }
 
     #[test]

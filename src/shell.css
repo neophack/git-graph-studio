@@ -1068,32 +1068,75 @@ body.resizing iframe { pointer-events: none; }
 .diff-stats .added { color: var(--vscode-gitDecoration-addedResourceForeground, #73c991); margin-right: 6px; }
 .diff-stats .deleted { color: var(--vscode-gitDecoration-deletedResourceForeground, #c74e39); margin-right: 6px; }
 
-/* CAN log statistics view (a .blf / .asc trace): a summary strip, a per-channel table with
-   the bus load, and the per-identifier table below - CANoe's Statistics window. */
+/* CAN log statistics view (a .blf / .asc trace): a resizable dashboard - measurement
+   summary and channel table left, bus charts and the periodic analysis right, the
+   per-identifier table full-width below - CANoe's Statistics and Graphics windows.
+   The status bar carries the live parse chip; the panes fill in asynchronously. */
 .can-view { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .can-toolbar-title { display: flex; align-items: center; gap: 6px; font-weight: 600; white-space: nowrap; }
 .can-toolbar .can-bitrate { flex: none; }
-.can-body { flex: 1; min-height: 0; overflow: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 16px; }
+.can-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.can-dash-top { display: flex; flex: 1 1 0; min-height: 0; }
+.can-body > .can-pane { flex: 1 1 0; min-height: 0; }
+.can-dash-top > .can-pane { flex: 1 1 0; min-width: 0; }
+.can-pane { min-width: 0; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; }
+.can-sash { flex: none; z-index: 5; }
+.can-sash.vertical { width: 5px; cursor: ew-resize; margin: 0 -2px; }
+.can-sash.horizontal { height: 5px; cursor: ns-resize; margin: -2px 0; }
+.can-sash:hover, .can-sash.active { background: var(--vscode-sash-hoverBorder, #0078d4); }
 .can-loading, .can-error { color: var(--vscode-descriptionForeground, #999); padding: 24px; text-align: center; }
 .can-error { color: var(--vscode-errorForeground, #f48771); }
-.can-summary { display: flex; flex-wrap: wrap; gap: 8px 32px; padding: 12px 16px; border: 1px solid var(--vscode-panel-border, #2b2b2b); border-radius: 4px; background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 3%, transparent); }
+.can-section { border: 1px solid var(--vscode-panel-border, #2b2b2b); border-radius: 4px; display: flex; flex-direction: column; overflow: hidden; }
+.can-section-head { display: flex; align-items: center; gap: 7px; padding: 4px 10px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--vscode-descriptionForeground, #999); background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 3%, transparent); border-bottom: 1px solid var(--vscode-panel-border, #2b2b2b); }
+.can-section-title { white-space: nowrap; }
+.can-section-body { padding: 8px 10px; }
+.can-section-body.can-section-flush { padding: 0; }
+.can-summary { display: flex; flex-wrap: wrap; gap: 6px 24px; padding: 6px 10px; border: 1px solid var(--vscode-panel-border, #2b2b2b); border-radius: 4px; background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 3%, transparent); }
 .can-summary-cell { display: flex; flex-direction: column; gap: 2px; }
 .can-summary-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--vscode-descriptionForeground, #999); }
-.can-summary-value { font-size: 14px; font-weight: 600; }
+.can-summary-value { font-size: 13px; font-weight: 600; }
 .can-table { border: 1px solid var(--vscode-panel-border, #2b2b2b); border-radius: 4px; overflow: hidden; }
-.can-table-head, .can-table-row { display: grid; align-items: center; padding: 4px 12px; gap: 4px 12px; }
-.can-table-head { color: var(--vscode-descriptionForeground, #999); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; border-bottom: 1px solid var(--vscode-panel-border, #2b2b2b); }
+.can-section-flush > .can-table { border: none; border-radius: 0; }
+.can-table-head, .can-table-row { display: grid; align-items: center; padding: 3px 10px; gap: 4px 10px; }
+.can-table-head { color: var(--vscode-descriptionForeground, #999); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; border-bottom: 1px solid var(--vscode-panel-border, #2b2b2b); position: sticky; top: 0; background: var(--vscode-editor-background, #1e1e1e); z-index: 1; }
 .can-table-row:nth-child(even) { background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 4%, transparent); }
 .can-table-row:not(:last-child) { border-bottom: 1px solid color-mix(in srgb, var(--vscode-panel-border, #2b2b2b) 50%, transparent); }
-.can-ch-grid { grid-template-columns: minmax(110px, auto) repeat(3, minmax(80px, 1fr)) minmax(90px, 1fr) minmax(90px, 1fr) minmax(90px, 1fr); }
-.can-msg-grid { grid-template-columns: minmax(110px, 1.2fr) 40px 70px minmax(70px, 0.8fr) minmax(100px, 1fr) minmax(80px, 0.8fr) minmax(220px, 2fr) minmax(70px, 0.7fr); }
+.can-ch-grid { grid-template-columns: minmax(96px, auto) repeat(3, minmax(72px, 1fr)) minmax(84px, 1fr) minmax(84px, 1fr) minmax(84px, 1fr) minmax(84px, 1fr); }
+.can-msg-grid { grid-template-columns: minmax(96px, 1.1fr) 36px 62px minmax(64px, 0.8fr) minmax(92px, 1fr) minmax(72px, 0.8fr) minmax(190px, 1.9fr) minmax(76px, 0.8fr) minmax(64px, 0.7fr); }
 .can-num { text-align: right; }
 .can-left { text-align: left; }
 .can-mono { font-family: var(--vscode-editor-font-family, Consolas, monospace); font-size: var(--vscode-editor-font-size, 13px); }
 .can-load { font-weight: 600; }
 .can-warn { color: var(--vscode-errorForeground, #f48771); }
-.can-messages { max-height: 55vh; overflow: auto; }
+.can-messages { overflow: visible; }
 .can-sort { padding: 0; height: auto; min-width: 0; justify-content: flex-end; text-transform: uppercase; letter-spacing: 0.04em; font-size: 11px; }
+.can-status { display: flex; align-items: center; gap: 16px; min-width: 0; }
+.can-summary-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* The chart palette: one class per series position, mapped onto the theme's chart
+ * colours - a channel keeps one colour across the tables' legend, the load and rate
+ * lines, and the distribution's bar segments. */
+.can-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 2px 0 6px; }
+.can-legend-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--vscode-descriptionForeground, #999); }
+.can-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.can-series-0 { color: var(--vscode-charts-blue, #3794ff); }
+.can-series-1 { color: var(--vscode-charts-green, #89d185); }
+.can-series-2 { color: var(--vscode-charts-yellow, #cca700); }
+.can-series-3 { color: var(--vscode-charts-orange, #d18616); }
+.can-series-4 { color: var(--vscode-charts-red, #f14c4c); }
+.can-series-5 { color: var(--vscode-charts-purple, #b180d7); }
+.can-chart-line.can-series-0 { stroke: var(--vscode-charts-blue, #3794ff); }
+.can-chart-line.can-series-1 { stroke: var(--vscode-charts-green, #89d185); }
+.can-chart-line.can-series-2 { stroke: var(--vscode-charts-yellow, #cca700); }
+.can-chart-line.can-series-3 { stroke: var(--vscode-charts-orange, #d18616); }
+.can-chart-line.can-series-4 { stroke: var(--vscode-charts-red, #f14c4c); }
+.can-chart-line.can-series-5 { stroke: var(--vscode-charts-purple, #b180d7); }
+.can-chart-bar.can-series-0, .can-swatch.can-series-0 { fill: var(--vscode-charts-blue, #3794ff); background: var(--vscode-charts-blue, #3794ff); }
+.can-chart-bar.can-series-1, .can-swatch.can-series-1 { fill: var(--vscode-charts-green, #89d185); background: var(--vscode-charts-green, #89d185); }
+.can-chart-bar.can-series-2, .can-swatch.can-series-2 { fill: var(--vscode-charts-yellow, #cca700); background: var(--vscode-charts-yellow, #cca700); }
+.can-chart-bar.can-series-3, .can-swatch.can-series-3 { fill: var(--vscode-charts-orange, #d18616); background: var(--vscode-charts-orange, #d18616); }
+.can-chart-bar.can-series-4, .can-swatch.can-series-4 { fill: var(--vscode-charts-red, #f14c4c); background: var(--vscode-charts-red, #f14c4c); }
+.can-chart-bar.can-series-5, .can-swatch.can-series-5 { fill: var(--vscode-charts-purple, #b180d7); background: var(--vscode-charts-purple, #b180d7); }
 
 /* The raw frame view a .blf / .asc opens in: a toolbar with a live progress chip, a thin
  * progress strip while the walk runs, and a virtual table whose scroller grows as the
@@ -1157,11 +1200,13 @@ body.resizing iframe { pointer-events: none; }
 .can-msg-row:hover { background: color-mix(in srgb, var(--vscode-focusBorder, #0078d4) 18%, transparent); }
 .can-msg-row.can-selected { background: color-mix(in srgb, var(--vscode-list-activeSelectionBackground, #04395e) 60%, transparent); outline: 1px solid var(--vscode-focusBorder, #0078d4); }
 .can-empty { color: var(--vscode-descriptionForeground, #999); padding: 12px; text-align: center; font-style: italic; }
-.can-analysis { border: 1px solid var(--vscode-panel-border, #2b2b2b); border-radius: 4px; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
-.can-analysis-head { display: flex; align-items: center; gap: 12px; }
+/* The analysis panel is a dashboard section; its head reuses the section chrome, with the
+ * frame-loss note and the close button riding along. */
+.can-analysis .can-section-head { text-transform: none; letter-spacing: 0; gap: 10px; }
 .can-analysis-title { font-weight: 600; }
 .can-analysis-missed { color: var(--vscode-descriptionForeground, #999); }
-.can-analysis-close { margin-left: auto; }
+.can-analysis-close { margin-left: auto; height: 20px; padding: 0 8px; font-size: 11px; flex: none; }
+.can-analysis .can-summary { margin-bottom: 8px; }
 .can-chart-block { display: flex; flex-direction: column; gap: 4px; }
 .can-chart-title { font-size: 12px; color: var(--vscode-descriptionForeground, #999); }
 .can-chart-wrap { width: 100%; }

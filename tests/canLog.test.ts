@@ -46,12 +46,35 @@ const STATS: CanLogStats = {
 		{ channel: 2, frames: 500, errorFrames: 0, payloadBytes: 6000, busBits: 18720, firstS: 0, lastS: 10 }
 	],
 	messages: [
-		{ channel: 1, id: 0x100, extended: false, fd: false, count: 1000, tx: 0, rx: 1000, payloadBytes: 8000, firstS: 0, lastS: 9.99, minCycleS: 0.01, maxCycleS: 0.01, avgCycleS: 0.01 },
-		{ channel: 1, id: 0x18ff0001, extended: true, fd: true, count: 500, tx: 100, rx: 400, payloadBytes: 6000, firstS: 0, lastS: 10, minCycleS: 0.02, maxCycleS: 0.02, avgCycleS: 0.02 },
-		{ channel: 2, id: 0x200, extended: false, fd: false, count: 500, tx: 0, rx: 500, payloadBytes: 4000, firstS: 0, lastS: 10, minCycleS: 0.02, maxCycleS: 0.02, avgCycleS: 0.02 }
+		{ channel: 1, id: 0x100, extended: false, fd: false, count: 1000, tx: 0, rx: 1000, payloadBytes: 8000, firstS: 0, lastS: 9.99, minCycleS: 0.01, maxCycleS: 0.01, avgCycleS: 0.01, stdCycleS: 0.0001 },
+		{ channel: 1, id: 0x18ff0001, extended: true, fd: true, count: 500, tx: 100, rx: 400, payloadBytes: 6000, firstS: 0, lastS: 10, minCycleS: 0.02, maxCycleS: 0.02, avgCycleS: 0.02, stdCycleS: 0.0002 },
+		{ channel: 2, id: 0x200, extended: false, fd: false, count: 500, tx: 0, rx: 500, payloadBytes: 4000, firstS: 0, lastS: 10, minCycleS: 0.02, maxCycleS: 0.02, avgCycleS: 0.02, stdCycleS: 0 }
 	],
 	skippedObjects: 7,
-	messagesTruncated: 0
+	messagesTruncated: 0,
+	// The load timeline the backend's streaming buckets produce: channel 1 in ten 1 s
+	// buckets (the first carries the burst - its load is the peak), channel 2 in two 5 s
+	// buckets. The bits sum to the channels' own busBits totals above.
+	loadProfiles: [
+		{
+			channel: 1,
+			buckets: Array.from({ length: 10 }, (_, i) => ({
+				tS: i, durS: 1,
+				frames: i === 0 ? 399 : 289,
+				errors: i === 3 ? 2 : 0,
+				busBits: i === 0 ? 18720 : 8320
+			}))
+		},
+		{
+			channel: 2,
+			buckets: [0, 5].map((t) => ({ tS: t, durS: 5, frames: 250, errors: 0, busBits: 9360 }))
+		}
+	],
+	// Classic 8-byte frames dominate; channel 1 also carries the FD 12-byte message.
+	payloadDist: [
+		{ channel: 1, counts: [0, 0, 0, 0, 0, 0, 0, 0, 1000, 500, 0, 0, 0, 0, 0] },
+		{ channel: 2, counts: [0, 0, 0, 0, 0, 0, 0, 0, 500, 0, 0, 0, 0, 0, 0] }
+	]
 };
 
 const INTERVALS: CanIntervals = {
@@ -735,7 +758,7 @@ describe('CAN log views', () => {
 		expect(asked.id).toBe(256);
 		expect(asked.extended).toBe(false);
 		// The panel reports the cycle and the frame loss.
-		expect(document.querySelector('.can-analysis-title')!.textContent).toContain('0x100');
+		expect(document.querySelector('.can-analysis .can-section-title')!.textContent).toContain('0x100');
 		expect(document.querySelector('.can-analysis-missed')!.textContent).toContain('1 frame lost in 1 gap');
 		const values = texts('.can-analysis .can-summary-value');
 		expect(values.some((v) => v.includes('ms'))).toBe(true);
@@ -798,25 +821,135 @@ describe('CAN log views', () => {
 		expect(document.querySelector(`${STATS_VIEW} .can-loading`)).toBeNull();
 	});
 
-	it('a re-render while the analysis loads cancels it: panel and row selection go together', async () => {
+	it('a late answer for a superseded selection is dropped; a filter re-render keeps the panel', async () => {
 		await openStats('C:\\logs\\analysis.blf');
-		let release!: (intervals: CanIntervals) => void;
-		backend.on('can_intervals', () => new Promise<CanIntervals>((resolve) => { release = resolve; }));
-		click(document.querySelector(`${STATS_VIEW} .can-messages .can-table-row`));
-		await waitForReady(() => document.querySelector('.can-analysis .can-loading') !== null);
-
-		// Typing in the filter box re-renders the tables underneath the in-flight analysis.
+		const pending: ((intervals: CanIntervals) => void)[] = [];
+		backend.on('can_intervals', ({ channel, id, extended }: { channel: number; id: number; extended: boolean }) =>
+			new Promise<CanIntervals>((resolve) => { pending.push((answer: CanIntervals) => resolve({ ...answer, channel, id, extended })); }));
+		const rows = () => Array.from(document.querySelectorAll(`${STATS_VIEW} .can-messages .can-table-row`));
+		// Two analyses are kicked off in a row; only the last click owns the panel.
+		click(rows()[0]!);
+		await waitForReady(() => document.querySelector('.can-analysis-host .can-loading') !== null);
+		click(rows()[1]!);
+		// The first (superseded) answer arrives: it must not paint.
+		pending.shift()!(INTERVALS);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(document.querySelector('.can-analysis .can-chart')).toBeNull();
+		expect(document.querySelector('.can-analysis-host .can-loading')).not.toBeNull();
+		// The second answer paints the clicked identifier's panel.
+		pending.shift()!(INTERVALS);
+		await waitForReady(() => document.querySelector('.can-analysis .can-chart') !== null);
+		expect(document.querySelector('.can-analysis .can-section-title')!.textContent).toContain('0x18FF0001');
+		// A filter re-render redraws the panel from the cached answer - no third walk - and
+		// the tables narrow underneath it.
+		const walks = backend.callsTo('can_intervals').length;
 		const filter = document.querySelector<HTMLInputElement>(`${STATS_VIEW} .can-filter`)!;
 		filter.value = '100';
 		filter.dispatchEvent(new Event('input'));
-		expect(document.querySelector('.can-analysis')).toBeNull();
-		expect(document.querySelector('.can-selected')).toBeNull();
+		expect(backend.callsTo('can_intervals').length).toBe(walks);
+		expect(document.querySelector('.can-analysis .can-chart')).not.toBeNull();
+	});
 
-		// The late answer is dropped, not painted into the detached panel.
-		release(INTERVALS);
-		await waitForReady(() => backend.callsTo('can_intervals').length === 1);
-		await new Promise((resolve) => setTimeout(resolve, 50));
-		expect(document.querySelector('.can-analysis')).toBeNull();
+	it('the dashboard draws the per-channel load, rate and payload charts off the one walk', async () => {
+		await openStats('C:\\logs\\charts.blf');
+		// One line per channel on the load and rate charts, each in its palette colour.
+		expect(document.querySelectorAll(`${STATS_VIEW} .can-section-load path.can-chart-line`).length).toBe(2);
+		expect(document.querySelectorAll(`${STATS_VIEW} .can-section-rate path.can-chart-line`).length).toBe(2);
+		expect(document.querySelector(`${STATS_VIEW} .can-section-load path.can-chart-line`)!.getAttribute('class')).toContain('can-series-0');
+		expect(document.querySelector(`${STATS_VIEW} .can-section-load path.can-chart-line.can-series-1`)).not.toBeNull();
+		// The legends name the channels.
+		expect(texts(`${STATS_VIEW} .can-section-load .can-legend-chip`)).toEqual(['Channel 1', 'Channel 2']);
+		// The payload distribution stacks one segment per channel per bin: bin 8 holds
+		// both channels, bin 9 (FD 12) only channel 1 - three segments in all.
+		expect(document.querySelectorAll(`${STATS_VIEW} .can-section-payload rect.can-chart-bar`).length).toBe(3);
+		// The channel table carries the peak beside the average load: channel 1's burst
+		// bucket (18720 bits in 1 s at 500 kbit/s) is 3.74 % against the 1.87 % average.
+		const loads = (row: Element): string[] => Array.from(row.querySelectorAll('.can-load')).map((c) => c.textContent!);
+		expect(loads(document.querySelector(`${STATS_VIEW} .can-channels .can-table-row`)!)).toEqual(['1.87 %', '3.74 %']);
+
+		// The channel select narrows the charts to the one channel's series.
+		const channel = document.querySelector<HTMLSelectElement>(`${STATS_VIEW} .can-channel`)!;
+		channel.value = '2';
+		channel.dispatchEvent(new Event('change'));
+		expect(document.querySelectorAll(`${STATS_VIEW} .can-section-load path.can-chart-line`).length).toBe(1);
+		expect(texts(`${STATS_VIEW} .can-section-load .can-legend-chip`)).toEqual(['Channel 2']);
+
+		// A bitrate change recomputes every load figure from the same buckets - channel 2
+		// at 1 Mbit/s (18720 bits over 10 s; the peak bucket 9360 over 5 s) - without a
+		// second backend call.
+		const walks = backend.callsTo('can_log_stats').length;
+		const select = document.querySelector<HTMLSelectElement>(`${STATS_VIEW} .can-bitrate`)!;
+		select.value = '1000000';
+		select.dispatchEvent(new Event('change'));
+		expect(loads(document.querySelector(`${STATS_VIEW} .can-channels .can-table-row`)!)).toEqual(['0.19 %', '0.19 %']);
+		expect(backend.callsTo('can_log_stats').length).toBe(walks);
+	});
+
+	it('the sashes resize the panes, persist the shares, and a double-click resets', async () => {
+		await openStats('C:\\logs\\panes.blf');
+		const left = document.querySelector(`${STATS_VIEW} .can-pane-left`) as HTMLElement;
+		const right = document.querySelector(`${STATS_VIEW} .can-pane-right`) as HTMLElement;
+		const top = document.querySelector(`${STATS_VIEW} .can-dash-top`) as HTMLElement;
+		const messages = document.querySelector(`${STATS_VIEW} .can-pane-messages`) as HTMLElement;
+		// The defaults: 34/66 across, 62/38 down.
+		expect(left.style.flexGrow).toBe('34');
+		expect(top.style.flexGrow).toBe('62');
+		// Drag the vertical sash 50 px right (jsdom's zero-width parents clamp to the cap).
+		const drag = (target: Element, from: number, to: number): void => {
+			target.dispatchEvent(new MouseEvent('mousedown', { clientX: from, clientY: from, bubbles: true }));
+			document.dispatchEvent(new MouseEvent('mousemove', { clientX: to, clientY: to }));
+			document.dispatchEvent(new MouseEvent('mouseup'));
+		};
+		drag(document.querySelector(`${STATS_VIEW} .can-sash.vertical`)!, 100, 150);
+		expect(left.style.flexGrow).toBe('82');
+		expect(right.style.flexGrow).toBe('18');
+		expect(JSON.parse(localStorage.getItem('ggstudio.canStats.layout')!)).toEqual({ left: 82, top: 62 });
+		// Drag the horizontal sash up: the dashboard takes more height, capped.
+		drag(document.querySelector(`${STATS_VIEW} .can-sash.horizontal`)!, 300, 200);
+		expect(top.style.flexGrow).toBe('85');
+		expect(messages.style.flexGrow).toBe('15');
+		// A double-click resets the whole layout to the defaults (both shares) and saves them.
+		document.querySelector(`${STATS_VIEW} .can-sash.vertical`)!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+		expect(left.style.flexGrow).toBe('34');
+		expect(right.style.flexGrow).toBe('66');
+		expect(top.style.flexGrow).toBe('62');
+		expect(messages.style.flexGrow).toBe('38');
+		expect(JSON.parse(localStorage.getItem('ggstudio.canStats.layout')!)).toEqual({ left: 34, top: 62 });
+	});
+
+	it('the status bar separates the live walk from the sections that fill in late', async () => {
+		let release!: (stats: CanLogStats) => void;
+		backend.on('can_log_stats', () => new Promise<CanLogStats>((resolve) => { release = resolve; }));
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.openCanStats('C:\\logs\\slow.blf');
+		// While the walk runs: the chip pulses, the progress strip moves, and the sections
+		// hold their parse placeholders - the tables have not been invented early.
+		await waitForReady(() => document.querySelector(`${STATS_VIEW} .can-live-parsing`) !== null);
+		expect(document.querySelectorAll(`${STATS_VIEW} .can-loading`).length).toBeGreaterThan(0);
+		expect(document.querySelector(`${STATS_VIEW} .can-summary`)).toBeNull();
+		const args = backend.callsTo('can_log_stats')[0]!;
+		(args.onProgress as Channel<CanProgress>).send({ frames: 10, bytes: 500, totalBytes: 1000 });
+		expect(document.querySelector(`${STATS_VIEW} .can-live-text`)!.textContent).toContain('50%');
+		// jsdom's CSSOM normalises '50.0%' on read-back.
+		expect((document.querySelector(`${STATS_VIEW} .can-progress i`) as HTMLElement).style.width).toBe('50%');
+		// The answer lands: the pulsing stands down and the sections fill in.
+		release(STATS);
+		await waitForReady(() => document.querySelector(`${STATS_VIEW} .can-summary`) !== null);
+		expect(document.querySelector(`${STATS_VIEW} .can-live-parsing`)).toBeNull();
+		expect(document.querySelector(`${STATS_VIEW} .can-loading`)).toBeNull();
+		expect(document.querySelector(`${STATS_VIEW} .can-live-text`)!.textContent).toContain('3,500');
+	});
+
+	it('an open analysis survives a bitrate change from its cached answer, without a re-walk', async () => {
+		await openStats('C:\\logs\\analysis.blf');
+		click(document.querySelector(`${STATS_VIEW} .can-messages .can-table-row`));
+		await waitForReady(() => document.querySelector('.can-analysis .can-chart') !== null);
+		const walks = backend.callsTo('can_intervals').length;
+		const select = document.querySelector<HTMLSelectElement>(`${STATS_VIEW} .can-bitrate`)!;
+		select.value = '1000000';
+		select.dispatchEvent(new Event('change'));
+		expect(backend.callsTo('can_intervals').length).toBe(walks);
+		expect(document.querySelector('.can-analysis .can-chart')).not.toBeNull();
 	});
 
 	it('the analysis charts label their axes in the units the data carries', async () => {
