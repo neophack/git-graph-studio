@@ -5,7 +5,8 @@
 
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { Workbench } from '../src/workbench';
 import { commands } from '../src/commands';
@@ -180,7 +181,7 @@ describe('the scenario harness', () => {
 			'|---|---|---|---|---|',
 			...rows, ''
 		].join('\n');
-		const target = resolve(process.cwd(), 'target', 'studio', 'scenario-report.md');
+		const target = join(dirname(fileURLToPath(import.meta.url)), '..', 'target', 'studio', 'scenario-report.md');
 		mkdirSync(dirname(target), { recursive: true });
 		writeFileSync(target, markdown, 'utf8');
 	});

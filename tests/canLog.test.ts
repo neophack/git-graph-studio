@@ -226,8 +226,10 @@ describe('CAN log views', () => {
 	});
 
 	it('progress reports land on the status line while the backend walks the file', () => {
-		expect(progressText({ frames: 1_500_000, bytes: 500, totalBytes: 1000 }, 'Parsing')).toBe('Parsing… 50%  ·  1,500,000 frames');
-		expect(progressText({ frames: 3, bytes: 0, totalBytes: 0 }, 'Parsing')).toBe('Parsing… 0%  ·  3 frames');
+		// Frame counts are grouped by the host locale (toLocaleString in canLogView); mirror
+		// that formatting instead of pinning en-US grouping.
+		expect(progressText({ frames: 1_500_000, bytes: 500, totalBytes: 1000 }, 'Parsing')).toBe(`Parsing… 50%  ·  ${(1_500_000).toLocaleString()} frames`);
+		expect(progressText({ frames: 3, bytes: 0, totalBytes: 0 }, 'Parsing')).toBe(`Parsing… 0%  ·  ${(3).toLocaleString()} frames`);
 	});
 
 	it('a .blf opens in the raw frame view at once; Statistics opens the analysis in its own tab', async () => {
@@ -268,15 +270,15 @@ describe('CAN log views', () => {
 		expect(statsArgs.onProgress).toBeInstanceOf(Channel);
 		(statsArgs.onProgress as Channel<CanProgress>).send({ frames: 1_234_567, bytes: 250, totalBytes: 1000 });
 		expect(document.querySelector(`${STATS_VIEW} .hex-status`)!.textContent).toContain('25%');
-		expect(document.querySelector(`${STATS_VIEW} .hex-status`)!.textContent).toContain('1,234,567');
+		expect(document.querySelector(`${STATS_VIEW} .hex-status`)!.textContent).toContain((1_234_567).toLocaleString());
 		// The summary carries the headline numbers; the channel row carries the load.
-		expect(texts(`${STATS_VIEW} .can-summary .can-summary-value`)).toContain('3,500');
+		expect(texts(`${STATS_VIEW} .can-summary .can-summary-value`)).toContain((3_500).toLocaleString());
 		expect(document.querySelector(`${STATS_VIEW} .can-channels .can-load`)!.textContent).toBe('1.87 %');
 		// The identifier table: busiest first, cycle times in CANoe's ms units.
 		const ids = texts(`${STATS_VIEW} .can-messages .can-table-row .can-left`);
 		expect(ids[0]).toBe('0x100');
 		const firstRow = document.querySelectorAll(`${STATS_VIEW} .can-messages .can-table-row`)[0]!;
-		expect(firstRow.querySelectorAll('.can-num')[1]!.textContent).toBe('1,000');
+		expect(firstRow.querySelectorAll('.can-num')[1]!.textContent).toBe((1_000).toLocaleString());
 
 		// Switching the bitrate recomputes the load: 93600 bits over 10 s at 1 Mbit/s.
 		const select = document.querySelector<HTMLSelectElement>(`${STATS_VIEW} .can-bitrate`)!;
@@ -724,7 +726,7 @@ describe('CAN log views', () => {
 		const idsOf = (): string[] => Array.from(document.querySelectorAll(`${STATS_VIEW} .can-messages .can-table-row`)).map((r) => r.querySelector('.can-left')!.textContent!);
 		// All three identifiers before any filter.
 		expect(document.querySelectorAll(`${STATS_VIEW} .can-messages .can-table-row`).length).toBe(3);
-		expect(texts(`${STATS_VIEW} .can-summary .can-summary-value`)).toContain('3,500');
+		expect(texts(`${STATS_VIEW} .can-summary .can-summary-value`)).toContain((3_500).toLocaleString());
 
 		// Only ids in 0x100-0x2FF: 0x100 and 0x200 remain, 0x18FF0001 is gone.
 		const filter = document.querySelector<HTMLInputElement>(`${STATS_VIEW} .can-filter`)!;
@@ -733,7 +735,7 @@ describe('CAN log views', () => {
 		expect(document.querySelectorAll(`${STATS_VIEW} .can-messages .can-table-row`).length).toBe(2);
 		expect(idsOf()).toEqual(['0x100', '0x200']);
 		// The summary follows the filtered channels, not the whole log.
-		expect(texts(`${STATS_VIEW} .can-summary .can-summary-value`)).toContain('3,500');
+		expect(texts(`${STATS_VIEW} .can-summary .can-summary-value`)).toContain((3_500).toLocaleString());
 
 		// The channel select narrows to channel 2: only 0x200 remains.
 		const channel = document.querySelector<HTMLSelectElement>(`${STATS_VIEW} .can-channel`)!;
@@ -789,7 +791,7 @@ describe('CAN log views', () => {
 		expect(converted.from).toBe('C:\\logs\\drive.blf');
 		expect(converted.to).toBe('C:\\logs\\drive.asc');
 		expect(converted.format).toBe('asc');
-		await waitForReady(() => document.querySelector(`${STATS_VIEW} .hex-status`)!.textContent!.includes('Exported 5,678 frames'));
+		await waitForReady(() => document.querySelector(`${STATS_VIEW} .hex-status`)!.textContent!.includes(`Exported ${(5_678).toLocaleString()} frames`));
 	});
 
 	it('a log with more identifiers than the response cap notes it instead of flooding the table', async () => {
@@ -798,7 +800,7 @@ describe('CAN log views', () => {
 		group.openCanStats('C:\\logs\\huge.blf');
 		await waitForReady(() => document.querySelector(`${STATS_VIEW} .can-summary`) !== null);
 		expect(document.querySelectorAll(`${STATS_VIEW} .can-messages .can-table-row`).length).toBe(1);
-		expect(document.querySelector(`${STATS_VIEW} .hex-status`)!.textContent).toContain('top 1 of 12,346 identifiers shown');
+		expect(document.querySelector(`${STATS_VIEW} .hex-status`)!.textContent).toContain(`top 1 of ${(12_346).toLocaleString()} identifiers shown`);
 	});
 
 	it('an .asc opens the same analysis', async () => {
@@ -937,7 +939,7 @@ describe('CAN log views', () => {
 		await waitForReady(() => document.querySelector(`${STATS_VIEW} .can-summary`) !== null);
 		expect(document.querySelector(`${STATS_VIEW} .can-live-parsing`)).toBeNull();
 		expect(document.querySelector(`${STATS_VIEW} .can-loading`)).toBeNull();
-		expect(document.querySelector(`${STATS_VIEW} .can-live-text`)!.textContent).toContain('3,500');
+		expect(document.querySelector(`${STATS_VIEW} .can-live-text`)!.textContent).toContain((3_500).toLocaleString());
 	});
 
 	it('an open analysis survives a bitrate change from its cached answer, without a re-walk', async () => {

@@ -782,7 +782,9 @@ describe('hex view', () => {
 		await flush();
 		keydown(view.root, 'a', false, true);
 		await flush();
-		expect(view.root.querySelector('.hex-status')!.textContent).toContain('16,777,217 bytes');
+		// The size is grouped by the host locale (toLocaleString in hexView); mirror the
+		// same formatting instead of pinning en-US grouping.
+		expect(view.root.querySelector('.hex-status')!.textContent).toContain(`${(16 * 1024 * 1024 + 1).toLocaleString()} bytes`);
 		keydown(view.root, 'c', false, true);
 		await flush();
 		// The 10 MiB cap refuses the copy with a reminder naming both sizes; the clipboard

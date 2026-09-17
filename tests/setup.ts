@@ -68,6 +68,12 @@ if (typeof document !== 'undefined') {
 	Range.prototype.getClientRects = function (): DOMRectList { return emptyRectList; };
 	Range.prototype.getBoundingClientRect = function (): DOMRect { return new DOMRect(0, 0, 0, 0); };
 	(document as unknown as { execCommand: (name: string) => boolean }).execCommand = () => true;
+	// jsdom builds its user agent from process.platform, so the host OS would leak into the
+	// workbench's Mac detection; every test sees the same Windows UA on every machine.
+	Object.defineProperty(navigator, 'userAgent', {
+		value: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)',
+		configurable: true
+	});
 	// The Git Graph config bundle: a minimal stand-in that echoes the overrides into a config.
 	(window as unknown as { GitGraphStudioConfig: (settings: Record<string, unknown>) => Record<string, unknown> }).GitGraphStudioConfig = (settings) => ({
 		graph: { colours: ['#0085d9', '#d9008f'], style: settings['graph.style'] === 'angular' ? 1 : 0, rowHeight: settings['graph.rowHeight'] ?? 24 },

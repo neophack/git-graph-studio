@@ -16,7 +16,8 @@
 
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { commands } from '../src/commands';
 import { settings, updateSetting } from '../src/settings';
@@ -882,7 +883,7 @@ describe('the full UI sweep', () => {
 		// The report: every surface, what it drove, what broke.
 		const lines = ['# UI sweep report', '', '| Surface | Driven | Failures |', '| --- | ---: | --- |'];
 		for (const entry of report) lines.push(`| ${entry.surface} | ${entry.driven} | ${entry.failures.length === 0 ? '-' : entry.failures.join('<br>')} |`);
-		const out = resolve(join(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', '..', 'target', 'studio', 'ui-sweep-report.md'));
+		const out = join(dirname(fileURLToPath(import.meta.url)), '..', 'target', 'studio', 'ui-sweep-report.md');
 		mkdirSync(dirname(out), { recursive: true });
 		writeFileSync(out, lines.join('\n') + '\n');
 

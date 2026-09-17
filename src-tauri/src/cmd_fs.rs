@@ -1209,6 +1209,8 @@ mod head_info_tests {
 
     #[test]
     fn the_repo_item_names_the_repositorys_folder() {
+        // A backslash path is only a Windows path; on Unix it is one long component.
+        #[cfg(windows)]
         assert_eq!(
             repo_folder_name("C:\\dev\\git-graph-studio"),
             "git-graph-studio"

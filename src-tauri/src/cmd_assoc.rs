@@ -414,4 +414,14 @@ mod tests {
         assert!(rewritten.contains("text/plain=other.desktop"));
         assert!(rewritten.contains("application/pdf=other.desktop"));
     }
+
+    /// On macOS the registration is the bundle's own declaration, decided at build time
+    /// (tauri.conf.json); at runtime `assoc_apply` only reports that no-op.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_registration_reports_the_bundle_noop() {
+        let result = assoc_apply(vec!["blf".into()]).unwrap();
+        assert_eq!(result.message_key, "assoc.applied.macos");
+        assert_eq!(result.detail, "");
+    }
 }
