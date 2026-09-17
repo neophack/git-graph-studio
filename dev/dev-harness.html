@@ -76,8 +76,20 @@
 				'scm_tags': function () { return ['v1.0.0']; },
 				'scm_pull': function () { window.__harness.pulled++; return null; },
 				'scm_checkout': function (args) { window.__harness.checkedOut.push(args.name); return null; },
-			'read_file': function (args) { return { contents: oldText, binary: false, size: oldText.length }; },
-				'read_file_at': function (args) { return { contents: args.revision === 'HEAD' ? oldText : newText, binary: false, size: oldText.length }; },
+				'read_file': function (args) { return { contents: oldText, binary: false, size: oldText.length }; },
+					'read_file_at': function (args) { return { contents: args.revision === 'HEAD' ? oldText : newText, binary: false, size: oldText.length }; },
+					// The open path probes before it reads; without these two a click on the
+					// tree's file never mounts an editor in plain-browser mode.
+					'file_probe': function () { return { size: oldText.length, binary: false, longLines: false }; },
+					'read_file_raw': function () {
+						var body = new TextEncoder().encode(oldText);
+						var meta = new TextEncoder().encode(JSON.stringify({ binary: false, size: body.length, encoding: 'utf8', eol: 'lf' }));
+						var out = new Uint8Array(8 + meta.length + body.length);
+						new DataView(out.buffer).setBigUint64(0, BigInt(meta.length), true);
+						out.set(meta, 8);
+						out.set(body, 8 + meta.length);
+						return out;
+					},
 				'graph_request': function (args) { return graphResponse(args.message); },
 				'pty_create': function () { return 'mockshell'; },
 				'pty_write': function (args) { window.__harness.typed.push(String(args.data)); return null; },
