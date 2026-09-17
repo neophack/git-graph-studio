@@ -618,14 +618,27 @@ fn object_header(buf: &[u8], pos: usize, version: u16) -> Option<(u64, u32)> {
 	Some((ts, flags))
 }
 
+/// The offset of the next `LOBJ` header at or after `from`, searching at most the few
+/// bytes of inter-object padding that exist — CANoe's loggers and python-can pad an object
+/// by `size % 4` bytes (files this app wrote before that convention carry the round-up
+/// kind), so the search window covers both. None when no header follows (the run's end,
+/// or trailing damage).
+fn next_lobj(buf: &[u8], from: usize) -> Option<usize> {
+	(0..8).find(|&skip| {
+		let at = from + skip;
+		at + 4 <= buf.len() && &buf[at..at + 4] == b"LOBJ"
+	}).map(|skip| from + skip)
+}
+
 /// The uncompressed payload of one log container: a run of LOBJ objects, each padded to a
 /// 4-byte boundary.
 fn walk_blf_objects(buf: &[u8], sink: &mut dyn FrameSink) {
 	let mut pos = 0usize;
-	while pos + 16 <= buf.len() {
-		if &buf[pos..pos + 4] != b"LOBJ" {
+	while let Some(at) = next_lobj(buf, pos) {
+		if at + 16 > buf.len() {
 			break;
 		}
+		pos = at;
 		let _header_size = u16_at(buf, pos + 4) as usize;
 		let header_version = u16_at(buf, pos + 6);
 		let object_size = u32_at(buf, pos + 8) as usize;
@@ -700,7 +713,7 @@ fn walk_blf_objects(buf: &[u8], sink: &mut dyn FrameSink) {
 				_ => sink.other(),
 			}
 		}
-		pos += (object_size + 3) & !3;
+		pos += object_size;
 	}
 }
 
@@ -711,6 +724,26 @@ const MAX_BLF_OBJECT: usize = 512 << 20;
 /// The most one zlib container may expand to — the same reasoning, against a decompression
 /// bomb.
 const MAX_BLF_UNCOMPRESSED: usize = 512 << 20;
+
+/// The next object's 16-byte base header, sliding over the 0–3 padding bytes that follow
+/// the previous object. Writers round differently — CANoe's loggers and python-can pad by
+/// the object size mod 4 (files this app wrote before that convention carry the round-up
+/// kind) — so the reader searches for the signature instead of trusting either
+/// (python-can's reader does the same). None at EOF or when no header follows; every byte
+/// consumed is added so the progress position stays honest.
+fn next_base<R: Read>(r: &mut R, bytes: &mut u64) -> Option<[u8; 16]> {
+	let mut base = [0u8; 16];
+	r.read_exact(&mut base).ok()?;
+	for _ in 0..3 {
+		if &base[0..4] == b"LOBJ" {
+			return Some(base);
+		}
+		base.copy_within(1.., 0);
+		r.read_exact(&mut base[15..]).ok()?;
+		*bytes += 1;
+	}
+	(&base[0..4] == b"LOBJ").then_some(base)
+}
 
 /// A whole BLF file, streamed container by container: the 144-byte LOGG header, then log
 /// containers (LOBJ objects of type 10) whose payload is zlib-compressed runs of objects.
@@ -732,16 +765,9 @@ fn walk_blf_progress<R: Read>(mut r: R, sink: &mut dyn FrameSink, on_chunk: &mut
 	}
 	let start_timestamp_s = (0..8).map(|i| u16_at(&header, 40 + i * 2)).collect::<Vec<_>>();
 	let start_timestamp_s = systemtime_to_epoch(&start_timestamp_s);
-	// The bytes consumed so far: the header plus every container's padded size.
+	// The bytes consumed so far: the header plus every container's size.
 	let mut bytes = header_size as u64;
-	loop {
-		let mut base = [0u8; 16];
-		if r.read_exact(&mut base).is_err() {
-			break;
-		}
-		if &base[0..4] != b"LOBJ" {
-			break;
-		}
+	while let Some(base) = next_base(&mut r, &mut bytes) {
 		let object_size = u32_at(&base, 8) as usize;
 		let object_type = u32_at(&base, 12);
 		if !(32..=MAX_BLF_OBJECT).contains(&object_size) {
@@ -772,12 +798,6 @@ fn walk_blf_progress<R: Read>(mut r: R, sink: &mut dyn FrameSink, on_chunk: &mut
 			sink.other();
 		}
 		bytes += object_size as u64;
-		let rem = object_size % 4;
-		if rem != 0 {
-			let mut pad = vec![0u8; 4 - rem];
-			let _ = r.read_exact(&mut pad);
-			bytes += (4 - rem) as u64;
-		}
 		on_chunk(sink.seen(), bytes);
 		if sink.failed() {
 			break;
@@ -826,14 +846,15 @@ impl<W: Write + Seek> BlfWriter<W> {
 		BlfWriter { out, start_epoch, written_bytes: 0, buffer: Vec::with_capacity(CONTAINER_BYTES + 256), objects: 0, uncompressed_size: 144, frames: 0, finished: false, error }
 	}
 
-	/// One LOBJ object into the buffer, 4-byte aligned the way every BLF object is. The
-	/// buffer is flushed once it holds a container's worth — here, not in `frame`, so the
-	/// error-frame and CAN FD early returns cannot grow it without bound.
+	/// One LOBJ object into the buffer, padded the way CANoe's loggers and python-can pad
+	/// every object: `size % 4` zero bytes. The buffer is flushed once it holds a
+	/// container's worth — here, not in `frame`, so the error-frame and CAN FD early
+	/// returns cannot grow it without bound.
 	fn push_object(&mut self, object: &[u8]) {
 		self.buffer.extend_from_slice(object);
 		let rem = object.len() % 4;
 		if rem != 0 {
-			self.buffer.extend(std::iter::repeat_n(0, 4 - rem));
+			self.buffer.extend(std::iter::repeat_n(0, rem));
 		}
 		self.objects += 1;
 		if self.buffer.len() >= CONTAINER_BYTES {
@@ -972,11 +993,13 @@ impl<W: Write + Seek> BlfWriter<W> {
 		container.extend_from_slice(&(self.buffer.len() as u32).to_le_bytes());
 		container.extend_from_slice(&[0u8; 4]);
 		container.extend_from_slice(&compressed);
+		self.uncompressed_size += 32 + self.buffer.len() as u64;
+		// The padding between objects follows the ecosystem convention (`size % 4`), the
+		// way CANoe's loggers and python-can write it — the reader slides over either.
 		let rem = obj_size % 4;
 		if rem != 0 {
-			container.extend(std::iter::repeat_n(0, 4 - rem));
+			container.extend(std::iter::repeat_n(0, rem));
 		}
-		self.uncompressed_size += 32 + self.buffer.len() as u64;
 		match self.out.write_all(&container) {
 			Ok(()) => {
 				self.written_bytes += container.len() as u64;
@@ -2256,6 +2279,106 @@ mod tests {
 		assert!((stats.duration_s - 1.0).abs() < 1e-9);
 	}
 
+	/// One CAN_MESSAGE object of a chosen total size, so a test can place objects at every
+	/// `size % 4` residue. A size under 48 simply holds fewer payload bytes than the DLC
+	/// claims — the walk clamps, exactly as it does for a corrupt object.
+	fn can_message_of_size(ns: u64, channel: u16, id: u32, size: usize) -> Vec<u8> {
+		let mut o = can_message(ns, channel, id, 8);
+		o.truncate(size);
+		o[8..12].copy_from_slice(&(size as u32).to_le_bytes());
+		o.resize(size, 0);
+		o
+	}
+
+	/// One uncompressed log container around `objects`, with the container itself followed
+	/// by its `size % 4` padding — the file-level twin of the padding objects carry.
+	fn container_with(objects: &[u8]) -> Vec<u8> {
+		let object_size = 32 + objects.len() as u32;
+		let mut c = Vec::new();
+		c.extend_from_slice(b"LOBJ");
+		c.extend_from_slice(&16u16.to_le_bytes());
+		c.extend_from_slice(&1u16.to_le_bytes());
+		c.extend_from_slice(&object_size.to_le_bytes());
+		c.extend_from_slice(&OBJ_LOG_CONTAINER.to_le_bytes());
+		c.extend_from_slice(&0u16.to_le_bytes());
+		c.extend_from_slice(&[0u8; 6]);
+		c.extend_from_slice(&(objects.len() as u32).to_le_bytes());
+		c.extend_from_slice(&[0u8; 4]);
+		c.extend_from_slice(objects);
+		c.extend(std::iter::repeat_n(0, object_size as usize % 4));
+		c
+	}
+
+	#[test]
+	fn blf_reads_canoe_style_object_padding() {
+		// CANoe's loggers pad an object by `size % 4` bytes — not rounded up to a multiple
+		// of 4 — inside containers and between them alike (python-can reads and writes the
+		// same convention; a real Vector logger file walks only under this rule). One
+		// object per residue class at both levels.
+		let mut first = Vec::new();
+		for (i, size) in [45usize, 46, 47, 48, 47].into_iter().enumerate() {
+			first.extend(can_message_of_size(i as u64 * 1_000_000, 1, 0x100 + i as u32, size));
+			first.extend(std::iter::repeat_n(0, size % 4));
+		}
+		let mut second = Vec::new();
+		second.extend(can_message_of_size(9_000_000, 2, 0x201, 46));
+		second.extend(std::iter::repeat_n(0, 46 % 4));
+		second.extend(can_message_of_size(9_500_000, 2, 0x202, 45));
+		second.extend(std::iter::repeat_n(0, 45 % 4));
+		let mut file = vec![0u8; 144];
+		file[0..4].copy_from_slice(b"LOGG");
+		file[4..8].copy_from_slice(&144u32.to_le_bytes());
+		file.extend(container_with(&first));
+		file.extend(container_with(&second));
+		let stats = stats_of_blf(&file);
+		assert_eq!(stats.total_frames, 7);
+		assert_eq!(stats.messages.len(), 7);
+	}
+
+	#[test]
+	fn blf_writer_pads_the_way_canoe_and_python_can_do() {
+		// The reader tolerates either padding, but python-can's is a strict `size % 4` skip
+		// with no searching: a BLF this app writes must stay aligned under that rule, which
+		// only holds if the writer pads the same way. Inside a container, and at file level.
+		let mut writer = BlfWriter::new(Cursor::new(Vec::new()), 0.0);
+		for (i, size) in [48usize, 45, 46, 47].into_iter().enumerate() {
+			writer.push_object(&can_message_of_size(i as u64 * 1_000_000, 1, 0x100 + i as u32, size));
+		}
+		let buffer = writer.buffer.clone();
+		let mut pos = 0usize;
+		for size in [48usize, 45, 46, 47] {
+			assert_eq!(u32_at(&buffer, pos + 8) as usize, size);
+			pos += size;
+			for _ in 0..size % 4 {
+				assert_eq!(buffer[pos], 0, "padding after a {}-byte object", size);
+				pos += 1;
+			}
+		}
+		assert_eq!(pos, buffer.len());
+		// The strict file-level walk python-can performs stays on every container header.
+		let mut writer = BlfWriter::new(Cursor::new(Vec::new()), 0.0);
+		for i in 0..3_000u64 {
+			writer.frame(&RawFrame::data_frame(i * 1_000_000, 1, 0x100 + (i % 4) as u32, false, false, 8, 8, &[1, 2, 3, 4, 5, 6, 7, 8], false));
+		}
+		writer.finish().unwrap();
+		let bytes = writer.out.into_inner();
+		let mut at = 144usize;
+		let mut containers = 0;
+		let mut odd_residues = 0;
+		while at + 16 <= bytes.len() {
+			assert_eq!(&bytes[at..at + 4], b"LOBJ", "a strict size%4 reader desynchronises at {}", at);
+			let size = u32_at(&bytes, at + 8) as usize;
+			if size % 4 != 0 {
+				odd_residues += 1;
+			}
+			containers += 1;
+			at += size + size % 4;
+		}
+		assert_eq!(at, bytes.len());
+		assert!(containers >= 1);
+		assert!(odd_residues >= 1, "the fixture never exercised a padded container");
+	}
+
 	#[test]
 	fn blf_read_the_start_time() {
 		let mut objects = can_message(0, 1, 0x1, 0);
@@ -3035,7 +3158,7 @@ base hex timestamps relative
 			let uncompressed = u32_at(&bytes, pos + 24) as usize;
 			assert!(uncompressed <= CONTAINER_BYTES + 256, "a container holds {uncompressed} uncompressed bytes");
 			containers += 1;
-			pos += (object_size + 3) & !3;
+			pos += object_size + object_size % 4;
 		}
 		assert!(containers >= 2, "{containers} containers for {fd_count} FD frames");
 		// Nothing was lost on the way out.
