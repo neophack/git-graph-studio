@@ -284,12 +284,27 @@ impl SymbolStore {
 			keep.push(false);
 		}
 		let mut kept: Vec<FileEntry> = Vec::with_capacity(files.len());
+		// The compacted id of every old id — u32::MAX for the dropped rows. The occurrence
+		// lists still name pre-compaction ids, and renumber_after_edits remaps by current
+		// position, so a kept file whose old id outlives the shrunken table would index out
+		// of bounds there. Rewrite the ids here; a dropped id subtraction somehow left
+		// behind is a reference to a file that no longer exists and goes with it.
+		let mut compact: Vec<u32> = Vec::with_capacity(files.len());
 		for (file, keep_file) in files.drain(..).zip(keep) {
 			if keep_file {
+				compact.push(kept.len() as u32);
 				kept.push(file);
+			} else {
+				compact.push(u32::MAX);
 			}
 		}
 		*files = kept;
+		for list in refs.iter_mut().flatten() {
+			for id in list.iter_mut() {
+				*id = compact.get(*id as usize).copied().unwrap_or(u32::MAX);
+			}
+			list.retain(|&id| id != u32::MAX);
+		}
 		// Watched paths the store never knew (a brand-new file) join the re-extraction.
 		for path in wanted {
 			if !to_extract.contains(path) && Path::new(&root).join(path).exists() {
@@ -756,6 +771,28 @@ mod tests {
 		fs::remove_file(dir.path().join("c.rs")).unwrap();
 		store.apply_changes(&["c.rs".to_owned()]);
 		assert_eq!(store.lookup("beta").len(), 0);
+	}
+
+	/// A deletion from the middle of the path order compacts the table: the surviving
+	/// files' ids in the occurrence lists must move down with them, not outlive the table
+	/// (renumber_after_edits remaps by current position, and an unremapped id past the end
+	/// panics — the release profile aborts the process on it).
+	#[test]
+	fn deleting_a_middle_file_keeps_occurrence_ids_in_bounds() {
+		let dir = tempfile::tempdir().unwrap();
+		write(dir.path(), "a.rs", "fn alpha() {}\n");
+		write(dir.path(), "b.rs", "fn beta() { alpha(); }\n");
+		write(dir.path(), "c.rs", "fn gamma() { alpha(); }\n");
+		let root = dir.path().display().to_string();
+		let mut store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+		assert_eq!(
+			store.files_containing("alpha"),
+			Some(vec!["a.rs".to_owned(), "b.rs".to_owned(), "c.rs".to_owned()])
+		);
+
+		fs::remove_file(dir.path().join("b.rs")).unwrap();
+		store.apply_changes(&["b.rs".to_owned()]);
+		assert_eq!(store.files_containing("alpha"), Some(vec!["a.rs".to_owned(), "c.rs".to_owned()]));
 	}
 
 	#[test]
