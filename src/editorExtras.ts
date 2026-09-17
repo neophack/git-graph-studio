@@ -422,13 +422,26 @@ export function minimapExtension(): Extension {
 
 /* ---------- The wheel ---------- */
 
+/** The scroll container of a merge view's pane: CodeMirror's merge package scrolls its outer
+ *  `.cm-mergeView` (the panes' scrollers are `overflow: visible` by its design), so a pane's
+ *  wheel and underhang must drive that element. `null` outside a merge view — a plain editor,
+ *  the unified diff included, scrolls its own scroller. */
+function mergeScroller(view: EditorView): HTMLElement | null {
+	return view.dom.closest<HTMLElement>('.cm-mergeView');
+}
+
 /** Zed's wheel for every CodeMirror surface (the same arithmetic the row-model viewers
  *  use, scroll/wheel.ts): a mouse notch is the system's lines per notch times the line
  *  height, a trackpad's pixels pass through with their axis locked, the sensitivity scales
  *  the distance (Alt the fast one), and the scroller moves at once — no easing. Attached to
  *  the view's scroll DOM, alive exactly as long as the view. A plugin — not a
  *  `domEventHandlers` entry — so the listener covers the gutters too and CodeMirror's own
- *  destroy unmounts it with the editor. */
+ *  destroy unmounts it with the editor.
+ *
+ *  Inside a side-by-side merge view the panes' scrollers are `overflow: visible` by the
+ *  package's own design — the outer `.cm-mergeView` is the scroll container — so the wheel
+ *  drives that outer element there (a plain editor, the unified diff included, scrolls
+ *  itself). */
 export function wheelExtension(): Extension {
 	return ViewPlugin.fromClass(class {
 		private readonly gesture = new OngoingScroll();
@@ -441,7 +454,7 @@ export function wheelExtension(): Extension {
 			event.preventDefault();
 			const speed = Math.max(0.01, event.altKey ? settings.fastScrollSensitivity : settings.mouseWheelScrollSensitivity);
 			const px = deltaToPixels(delta, this.view.defaultLineHeight, this.view.defaultCharacterWidth);
-			const scroll = this.view.scrollDOM;
+			const scroll = mergeScroller(this.view) ?? this.view.scrollDOM;
 			if (px.y !== 0) scroll.scrollTop += px.y * speed;
 			if (px.x !== 0) scroll.scrollLeft += px.x * speed;
 		};

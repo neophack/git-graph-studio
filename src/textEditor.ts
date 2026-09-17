@@ -94,7 +94,10 @@ function commentBindings(path: string): KeyBinding[] {
  *  geometry change, so it follows the window size.
  */
 export function pastEndPadding(view: EditorView): void {
-	const pad = Math.max(0, view.scrollDOM.clientHeight - view.defaultLineHeight);
+	// Inside a merge view the pane's scroller is full-content-height by the package's design:
+	// the viewport the user actually scrolls is the outer `.cm-mergeView`.
+	const viewport = view.dom.closest<HTMLElement>('.cm-mergeView') ?? view.scrollDOM;
+	const pad = Math.max(0, viewport.clientHeight - view.defaultLineHeight);
 	const current = parseFloat(view.contentDOM.style.paddingBottom || '0');
 	if (Math.abs(current - pad) > 0.5) view.contentDOM.style.paddingBottom = `${pad}px`;
 }

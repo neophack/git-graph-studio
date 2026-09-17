@@ -288,6 +288,11 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 .editor-pane[hidden] { display: none; }
 .editor-pane .cm-editor { flex: 1; min-height: 0; height: 100%; }
 .editor-pane .cm-merge-view { display: flex; flex: 1; min-height: 0; }
+/* @codemirror/merge's own root is the scroll container of the side-by-side view (its panes'
+   scrollers are overflow:visible by the package's design) and carries no height of its own:
+   it fills the app's host. Without the bound it grows to its content and no wheel can scroll
+   the diff. */
+.cm-merge-view > .cm-mergeView { height: 100%; }
 .editor-pane iframe { flex: 1; border: none; width: 100%; height: 100%; background: var(--vscode-editor-background); }
 /* The Git Graph host: the view's frame, with the not-a-repository placeholder over it. */
 .graph-host { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
