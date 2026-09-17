@@ -1,6 +1,9 @@
 // Runs before every test file: the Tauri modules are replaced by tests/tauriMock.ts, the DOM
 // gets the containers index.html provides, and jsdom's gaps (ResizeObserver, scrollIntoView,
-// the config bundle) are filled in.
+// the config bundle) are filled in. Files that opt into the node environment
+// (@vitest-environment node, e.g. the build-script suite, which runs esbuild - its
+// TextEncoder/Uint8Array invariant does not hold in the mixed jsdom realm) load this too, so
+// every DOM fill-in is guarded.
 
 import { beforeEach, vi } from 'vitest';
 
@@ -57,27 +60,30 @@ class ResizeObserverStub {
 	unobserve(): void { /* no-op */ }
 }
 (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = ResizeObserverStub;
-Element.prototype.scrollIntoView = () => undefined;
-// jsdom has no layout engine, so Range coordinate APIs are missing; CodeMirror calls them from
-// its rAF measure pass. Empty rects make it fall back to Element.getBoundingClientRect (zeroed in jsdom).
-const emptyRectList: DOMRectList = { length: 0, item: () => null, [Symbol.iterator]: [][Symbol.iterator] } as DOMRectList;
-Range.prototype.getClientRects = function (): DOMRectList { return emptyRectList; };
-Range.prototype.getBoundingClientRect = function (): DOMRect { return new DOMRect(0, 0, 0, 0); };
-(document as unknown as { execCommand: (name: string) => boolean }).execCommand = () => true;
-// The Git Graph config bundle: a minimal stand-in that echoes the overrides into a config.
-(window as unknown as { GitGraphStudioConfig: (settings: Record<string, unknown>) => Record<string, unknown> }).GitGraphStudioConfig = (settings) => ({
-	graph: { colours: ['#0085d9', '#d9008f'], style: settings['graph.style'] === 'angular' ? 1 : 0, rowHeight: settings['graph.rowHeight'] ?? 24 },
-	stickyHeader: settings['stickyHeader'] ?? true,
-	signCommits: false,
-	signTags: false,
-	squashMergeMessageFormat: 0,
-	squashPullMessageFormat: 0,
-	overrides: settings
-});
+if (typeof document !== 'undefined') {
+	Element.prototype.scrollIntoView = () => undefined;
+	// jsdom has no layout engine, so Range coordinate APIs are missing; CodeMirror calls them from
+	// its rAF measure pass. Empty rects make it fall back to Element.getBoundingClientRect (zeroed in jsdom).
+	const emptyRectList: DOMRectList = { length: 0, item: () => null, [Symbol.iterator]: [][Symbol.iterator] } as DOMRectList;
+	Range.prototype.getClientRects = function (): DOMRectList { return emptyRectList; };
+	Range.prototype.getBoundingClientRect = function (): DOMRect { return new DOMRect(0, 0, 0, 0); };
+	(document as unknown as { execCommand: (name: string) => boolean }).execCommand = () => true;
+	// The Git Graph config bundle: a minimal stand-in that echoes the overrides into a config.
+	(window as unknown as { GitGraphStudioConfig: (settings: Record<string, unknown>) => Record<string, unknown> }).GitGraphStudioConfig = (settings) => ({
+		graph: { colours: ['#0085d9', '#d9008f'], style: settings['graph.style'] === 'angular' ? 1 : 0, rowHeight: settings['graph.rowHeight'] ?? 24 },
+		stickyHeader: settings['stickyHeader'] ?? true,
+		signCommits: false,
+		signTags: false,
+		squashMergeMessageFormat: 0,
+		squashPullMessageFormat: 0,
+		overrides: settings
+	});
+}
 
 beforeEach(() => {
 	backend.reset();
 	(globalThis as unknown as { __xterms?: unknown[] }).__xterms = [];
+	if (typeof document === 'undefined') return;
 	localStorage.clear();
 	document.body.innerHTML = `
 		<div id="titlebar"></div>

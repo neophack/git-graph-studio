@@ -20,14 +20,15 @@
 // in vscode-git-graph-rs/ (its out/config.js and media/).
 import { build } from 'esbuild';
 import { checkSeams } from './check-seams.mjs';
-import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { buildCompareBundle } from './compare-bundle.mjs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 
 // The seam rules first: nothing may consume the extension's artifacts outside the designated
 // interface files (graphHost.ts, view.html, cmd_graph.rs), so a violation fails the build
 // before anything is assembled.
 checkSeams();
-import { dirname, join, relative } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -164,95 +165,16 @@ await build({
 	logLevel: 'warning'
 });
 
-/* 3. The Commit Comparison page generator.
-
-   The comparison view is not part of the webview bundle the graph view loads - the extension
-   generates its complete HTML page (inline CSS and script included) from extension-host code
-   (src/comparisonView.ts). The app calls that same compiled generator: this bundle exposes
-   `GitGraphCompare.buildComparePage()`, which runs the extension's own `getHtml` template
-   against a stubbed panel, so the app hosts the extension's real comparison page - styles,
-   markup and embedded script - instead of maintaining a copy. `vscode` resolves to the same
-   stub the config bundle uses (the page's language follows the workbench locale); the Node
-   built-ins that only the hex-session machinery touches resolve to inert stubs, unused here.
-
-   The extension's compiled output wraps its fs requires in an Electron `original-fs` fallback
-   (scripts/package-src.js) whose variable-argument require() defeats static bundling, so the
-   bundle is built from patched copies under target/studio with that wrapper folded back to
-   the plain require - the extension's sources and out/ are never touched. */
-const patchedOut = join(out, 'compare-src');
-rmSync(patchedOut, { recursive: true, force: true });
-mkdirSync(patchedOut, { recursive: true });
-(function patchCopies(dir) {
-	const relativePath = relative(join(root, 'out'), dir);
-	const targetDir = join(patchedOut, relativePath);
-	mkdirSync(targetDir, { recursive: true });
-	for (const entry of readdirSync(dir, { withFileTypes: true })) {
-		if (entry.isDirectory()) {
-			patchCopies(join(dir, entry.name));
-		} else if (entry.name.endsWith('.js')) {
-			const text = readFileSync(join(dir, entry.name), 'utf8');
-			writeFileSync(join(targetDir, entry.name),
-				text.split('requireWithFallback("original-fs", "fs")').join('require("fs")'));
-		}
-	}
-})(join(root, 'out'));
-
-await build({
-	stdin: {
-		contents: `
-			const { CommitComparisonView } = require('./comparisonView.js');
-			function buildComparePage(options) {
-				// The view's own template runs against a prototype-linked stand-in (so its own
-				// helper methods resolve) carrying only the fields getHtml reads; the panel
-				// supplies the CSP source and the highlight.js URL, here pointed at the copy
-				// this build ships beside the bundle.
-				const fake = Object.create(CommitComparisonView.prototype);
-				fake.fileChanges = options.fileChanges || [];
-				fake.singleCommit = options.singleCommit === true;
-				fake.fromHash = options.fromHash;
-				fake.toHash = options.toHash;
-				fake.extensionPath = '';
-				fake.panel = { webview: {
-					cspSource: "'self'",
-					asWebviewUri: () => ({ toString: () => '/gitgraph/highlight.min.js' })
-				} };
-				return CommitComparisonView.prototype.getHtml.call(fake,
-					options.error || null,
-					options.summaries || {},
-					typeof options.commitsBetween === 'number' ? options.commitsBetween : null,
-					options.loading === true);
-			}
-			globalThis.GitGraphCompare = { buildComparePage };
-		`,
-		resolveDir: patchedOut,
-		loader: 'js'
-	},
-	bundle: true,
-	format: 'iife',
-	platform: 'browser',
-	target: 'es2020',
-	minify: true,
-	alias: { vscode: join(appDir, 'scripts', 'vscode-stub.cjs') },
-	plugins: [{
-		// esbuild resolves Node built-ins inside CommonJS requires before `alias` applies, so
-		// they are redirected here instead: `path` gets a real join(), the rest inert stubs.
-		name: 'node-builtin-shims',
-		setup(builder) {
-			builder.onResolve({ filter: /^(fs|child_process|os|util|crypto|http|https)$/ }, () => ({ path: join(appDir, 'scripts', 'empty-stub.cjs') }));
-			builder.onResolve({ filter: /^path$/ }, () => ({ path: join(appDir, 'scripts', 'path-stub.cjs') }));
-		}
-	}],
-	// The hex-session machinery the page generator is bundled with touches Node globals at
-	// module scope (hexDiff's empty-buffer constant) and in its (here unused) code paths; the
-	// banner gives the bundle inert browser stand-ins so loading never throws. The page
-	// generation path itself uses none of them.
-	banner: {
-		js: `var Buffer = globalThis.Buffer || { alloc: function (n, f) { var a = new Uint8Array(n); if (f !== undefined) a.fill(f); return a; }, concat: function (list) { var t = 0; for (var i = 0; i < list.length; i++) t += list[i].length; var a = new Uint8Array(t); var o = 0; for (var j = 0; j < list.length; j++) { a.set(list[j], o); o += list[j].length; } return a; }, from: function (x) { return typeof x === 'string' ? new TextEncoder().encode(x) : new Uint8Array(x); }, isBuffer: function (b) { return b instanceof Uint8Array; } };
-var process = globalThis.process || { env: {}, platform: 'browser', nextTick: function (f) { Promise.resolve().then(f); } };
-var global = globalThis;`
-	},
-	outfile: join(gitgraphDir, 'compare.js'),
-	logLevel: 'warning'
+/* 3. The Commit Comparison page generator. The comparison view is not part of the webview
+   bundle the graph view loads - the extension generates its whole page (styles and script
+   inline) from extension-host code. scripts/compare-bundle.mjs bundles that same compiled
+   generator (the patched CommonJS copies under target/studio, the `vscode` stub, the Node
+   built-in shims and the browser-globals banner live there) and exposes
+   `GitGraphCompare.buildComparePage()` for graphHost.ts's CompareHost. */
+await buildCompareBundle({
+	root,
+	patchedOut: join(out, 'compare-src'),
+	outfile: join(gitgraphDir, 'compare.js')
 });
 
 // The syntax highlighter the generated comparison page loads, next to the bundle.

@@ -340,8 +340,10 @@ same per-file outline the Symbol Database page renders), `search_symbols`,
 Everything that turns the source tree into installers: asset assembly into
 `target/studio/`, the seam checks, CI, and the local Linux build containers.
 
-- Assets: `scripts/prepare.mjs` (assembles `target/studio/`), `scripts/*-stub.cjs` (the
-  `vscode` / Node stubs the config and compare bundles build against), `vite.config.ts`
+- Assets: `scripts/prepare.mjs` (assembles `target/studio/`), `scripts/compare-bundle.mjs`
+  (the Git Graph Commit Comparison page generator `prepare.mjs` builds from the extension's
+  compiled CommonJS output), `scripts/*-stub.cjs` (the `vscode` / Node stubs the config and
+  compare bundles build against), `vite.config.ts`
 - Seam checks: `scripts/check-seams.mjs` (TypeScript / CSS) and `src-tauri/build.rs` (Rust)
 - Packaging: `scripts/build-studio.bat` (Windows, one command). Linux installers: CI builds
   them natively on the pinned ubuntu-24.04 runner (glibc 2.39 floor — see `studio.yml`);

@@ -39,8 +39,9 @@ interface CompareFileChange {
 	deletions: number | null;
 }
 
-/** The extension's compiled page generator (scripts/prepare.mjs builds it from
- *  out/comparisonView.js, its `getHtml` template over a stubbed panel). */
+/** The extension's compiled page generator (scripts/compare-bundle.mjs, driven by
+ *  scripts/prepare.mjs, builds it from out/comparisonView.js — its `getHtml` template over a
+ *  stubbed panel). */
 declare global {
 	interface Window {
 		GitGraphCompare?: { buildComparePage(options: Record<string, unknown>): string };

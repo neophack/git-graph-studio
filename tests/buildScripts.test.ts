@@ -1,7 +1,10 @@
-// The build scripts' pure parts: the .ggx package header and the baked-in contributions.
+// @vitest-environment node
+// The build scripts' pure parts: the .ggx package header, the baked-in contributions and the
+// Commit Comparison page bundle (esbuild itself runs here - its TextEncoder/Uint8Array invariant
+// does not hold in the mixed jsdom realm).
 
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +13,8 @@ import { fileURLToPath } from 'node:url';
 import { ggxManifest } from '../scripts/build-ggx.mjs';
 // @ts-expect-error - plain ESM scripts without type declarations
 import { buildBuiltinContributions, buildBuiltinSettings } from '../scripts/builtin-contributions.mjs';
+// @ts-expect-error - plain ESM scripts without type declarations
+import { buildCompareBundle } from '../scripts/compare-bundle.mjs';
 
 describe('.ggx packaging', () => {
 	it('writes a ggx/1 header with the frontend page — the shape cmd_ext.rs installs', () => {
@@ -22,6 +27,63 @@ describe('.ggx packaging', () => {
 		expect(manifest.permissions).toContain('git:write');
 		// The header carries no process backend: the engine is linked into the app.
 		expect('backend' in manifest).toBe(false);
+	});
+});
+
+describe('the Commit Comparison page bundle', () => {
+	it('bundles the extension\'s compiled CommonJS output so it runs as a plain browser script', async () => {
+		const dir = mkdtempSync(join(tmpdir(), 'compare-bundle-'));
+		try {
+			// The layout the app really builds in: the patched copies land under the app's own
+			// package.json, which is "type": "module" - without the CommonJS marker the bundle
+			// step writes, esbuild would read the extension's compiled .js as ECMAScript modules
+			// and their `exports.X` assignments would throw at script load.
+			writeFileSync(join(dir, 'package.json'), JSON.stringify({ type: 'module' }));
+			mkdirSync(join(dir, 'out', 'utils'), { recursive: true });
+			writeFileSync(join(dir, 'out', 'utils', 'disposable.js'), [
+				'"use strict";',
+				'Object.defineProperty(exports, "__esModule", { value: true });',
+				'exports.Disposable = void 0;',
+				'exports.Disposable = class Disposable { dispose() {} };',
+				''
+			].join('\n'));
+			// The compiled shape the patch step expects: the Electron original-fs fallback
+			// wrapper its scripts/package-src.js weaves into every file that requires fs.
+			writeFileSync(join(dir, 'out', 'comparisonView.js'), [
+				'"use strict";',
+				'function requireWithFallback(electronModule, nodeModule) { try { return require(electronModule); } catch (err) {} return require(nodeModule); }',
+				'Object.defineProperty(exports, "__esModule", { value: true });',
+				'exports.CommitComparisonView = void 0;',
+				'const fs = requireWithFallback("original-fs", "fs");',
+				'const disposable_1 = require("./utils/disposable");',
+				'class CommitComparisonView extends disposable_1.Disposable {',
+				'	getHtml() { return "<!DOCTYPE html><html><body>fixture comparison page</body></html>"; }',
+				'}',
+				'exports.CommitComparisonView = CommitComparisonView;',
+				''
+			].join('\n'));
+
+			const outfile = join(dir, 'gitgraph', 'compare.js');
+			await buildCompareBundle({ root: dir, patchedOut: join(dir, 'compare-src'), outfile });
+
+			// The patch step folded the original-fs fallback back to the plain require.
+			const patched = readFileSync(join(dir, 'compare-src', 'comparisonView.js'), 'utf8');
+			expect(patched).toContain('require("fs")');
+			expect(patched).not.toContain('requireWithFallback("original-fs", "fs")');
+			expect(readFileSync(join(dir, 'compare-src', 'package.json'), 'utf8')).toContain('"commonjs"');
+			// The bundle must load as the plain <script> graphHost.ts injects: if esbuild had
+			// read the files as ECMAScript modules, `exports` would be a free reference and this
+			// evaluation would throw ReferenceError before the generator was registered.
+			expect(existsSync(outfile)).toBe(true);
+			new Function(readFileSync(outfile, 'utf8'))();
+			const generator = (globalThis as { GitGraphCompare?: { buildComparePage(options: Record<string, unknown>): string } }).GitGraphCompare;
+			expect(generator).toBeDefined();
+			expect(generator!.buildComparePage({ fromHash: 'aaaa', toHash: 'bbbb', singleCommit: false, loading: true }))
+				.toBe('<!DOCTYPE html><html><body>fixture comparison page</body></html>');
+		} finally {
+			delete (globalThis as { GitGraphCompare?: unknown }).GitGraphCompare;
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 
