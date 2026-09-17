@@ -855,8 +855,10 @@ body.resizing iframe { pointer-events: none; }
 .settings-row-control { flex: none; display: flex; align-items: center; }
 .settings-select { height: 26px; min-width: 200px; background: var(--vscode-dropdown-background, #313131); color: var(--vscode-dropdown-foreground, #ccc); border: 1px solid var(--vscode-dropdown-border, #3c3c3c); font: inherit; font-size: 12px; }
 .settings-checkbox { width: 16px; height: 16px; accent-color: var(--vscode-checkbox-border, #3c3c3c); }
-/* The File Associations grid: the whole catalogue wraps inside the row's control side. */
-.settings-extlist { display: flex; flex-wrap: wrap; gap: 4px 12px; max-width: 380px; justify-content: flex-end; }
+/* The File Associations grid: equal-width columns so the checkboxes and extension names
+   line up vertically however long each name is (.c beside .patch); auto-fill keeps the
+   phantom tracks, so a short catalogue still renders full-width, tidy columns. */
+.settings-extlist { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 4px 12px; max-width: 380px; }
 .settings-extlist-item { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer; }
 
 /* ---------- Search view (VS Code's search widget look) ---------- */
