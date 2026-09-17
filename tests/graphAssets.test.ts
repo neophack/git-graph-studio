@@ -186,6 +186,28 @@ describe('graph assets', () => {
 		host.unload();
 		expect(host.frame.srcdoc).toBe('');
 		expect(host.frame.src).toContain('about:blank');
+		expect(host.loaded).toBe(false);
+	});
+
+	it('drops the view\'s persisted state on a repository switch, and keeps it on a reload', async () => {
+		const host = new GraphHost(delegate);
+		document.body.appendChild(host.element);
+		host.load('C:\\repo');
+		await flush(10);
+		// What the view persists through its own shim (view.html): the repository it last
+		// showed, and where it was scrolled to.
+		sessionStorage.setItem('ggstudio.viewState', JSON.stringify({ currentRepo: 'C:\\repo', scrollTop: 120 }));
+		// A reload of the same folder keeps it - the reader's place survives an external reload.
+		host.load('C:\\repo');
+		await flush(10);
+		expect(JSON.parse(sessionStorage.getItem('ggstudio.viewState')!)).toMatchObject({ currentRepo: 'C:\\repo' });
+		// A switch must not: on boot the page offers the persisted repository back as a
+		// loadViewTo, and a repository the new set does not contain makes the view show its
+		// "not currently included in Git Graph" error naming the previous repository.
+		host.load('D:\\other');
+		await flush(10);
+		expect(sessionStorage.getItem('ggstudio.viewState')).toBeNull();
+	});
 
 	it('follows a theme switch into the view frame without a reload', async () => {
 		const host = new GraphHost(delegate);
@@ -214,8 +236,6 @@ describe('graph assets', () => {
 		updateSetting('theme', 'dark-modern');
 		document.dispatchEvent(new CustomEvent(THEME_EVENT, { bubbles: true }));
 		expect(themed()).toMatchObject({ href: '/theme/dark-modern.css', html: expect.stringContaining('vscode-dark'), body: expect.stringContaining('vscode-dark') });
-	});
-		expect(host.loaded).toBe(false);
 	});
 
 	it('delivers the Gerrit states in stages after a pending load', async () => {

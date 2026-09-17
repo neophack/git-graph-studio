@@ -490,7 +490,16 @@ export class GraphHost {
 		}
 		// A reload of the same folder keeps the repository the view had selected (a submodule,
 		// perhaps); switching folders starts from the newly opened one.
-		if (switched) this.currentRepo = null;
+		if (switched) {
+			this.currentRepo = null;
+			// The view's persisted state (written by the page's shim, see view.html) names the
+			// repository it last showed. Offered back to a freshly mounted page it becomes a
+			// loadViewTo into a repository set that does not contain it, and the view greets the
+			// switch with its "not currently included in Git Graph" error naming the previous
+			// repository. A switch starts from a clean slate; a reload of the same folder keeps
+			// the state, so the reader's place survives it.
+			sessionStorage.removeItem('ggstudio.viewState');
+		}
 		this.hidePlaceholder();
 		this.loaded = true;
 		const generation = ++this.loadGeneration;
