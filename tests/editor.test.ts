@@ -343,6 +343,57 @@ describe('editor group', () => {
 		expect(group.activeView!.state.doc.toString()).toBe('edit two');
 	});
 
+	it('an external reload keeps the cursor where the reader was, clamped to the new text', async () => {
+		const contents: Record<string, string | null> = { '/r/a.txt': 'one\ntwo\nthree\nfour\nfive\n' };
+		files(contents);
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		await group.openFile('/r/a.txt');
+		const view = group.activeView!;
+		// Reading in the middle: the cursor rests one column into line 3.
+		view.dispatch({ selection: { anchor: view.state.doc.line(3).from + 1 } });
+		// Lines shift around the reader (one inserted above, more appended below).
+		contents['/r/a.txt'] = 'zero\none\ntwo\nthree\nfour\nfive\nsix\n';
+		await group.reloadIfClean('/r/a.txt');
+		const head = view.state.selection.main.head;
+		const line = view.state.doc.lineAt(head);
+		expect(line.number).toBe(3); // the cursor's line and column survive the replace
+		expect(head - line.from).toBe(1);
+		// A reload that shrinks the file past the cursor clamps it to the document's end.
+		contents['/r/a.txt'] = 'x\n';
+		await group.reloadIfClean('/r/a.txt');
+		expect(view.state.selection.main.head).toBe(view.state.doc.length);
+	});
+
+	it('a CRLF file that did not change is not rebuilt by a refresh (the refocus path)', async () => {
+		const contents: Record<string, string | null> = { '/r/crlf.txt': 'one\r\ntwo\r\nthree\r\n' };
+		files(contents);
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		await group.openFile('/r/crlf.txt');
+		const view = group.activeView!;
+		view.dispatch({ selection: { anchor: view.state.doc.line(2).from } });
+		const state = view.state;
+		// The disk bytes are unchanged (still CRLF): a window refocus's refresh must not
+		// rebuild the document - CodeMirror's text normalises line endings, so the raw
+		// comparison alone would see a change on every read of every CRLF file.
+		await group.reloadIfClean('/r/crlf.txt');
+		expect(view.state).toBe(state);
+	});
+
+	it('a real change to a CRLF file reloads with normalised endings and the reader in place', async () => {
+		const contents: Record<string, string | null> = { '/r/crlf.txt': 'one\r\ntwo\r\nthree\r\n' };
+		files(contents);
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		await group.openFile('/r/crlf.txt');
+		const view = group.activeView!;
+		view.dispatch({ selection: { anchor: view.state.doc.line(2).from + 1 } });
+		contents['/r/crlf.txt'] = 'zero\r\none\r\ntwo\r\nthree\r\n';
+		await group.reloadIfClean('/r/crlf.txt');
+		expect(view.state.doc.toString()).toBe('zero\none\ntwo\nthree\n');
+		const head = view.state.selection.main.head;
+		expect(view.state.doc.lineAt(head).number).toBe(2);
+		expect(head - view.state.doc.lineAt(head).from).toBe(1);
+	});
+
 	it('offers the VS Code tab context menu', async () => {
 		files({ 'C:\\repo\\a.txt': 'a', 'C:\\repo\\b.txt': 'b' });
 		const group = new EditorGroup(document.getElementById('editorGroup')!);

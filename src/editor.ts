@@ -1239,8 +1239,7 @@ export class EditorGroup {
 		// so the redecode cannot wipe what is on screen now.
 		const view = editor.view;
 		if (!view || editor.view !== view || !this.open.includes(editor)) return;
-		const current = view.state.doc.toString();
-		view.dispatch({ changes: { from: 0, to: current.length, insert: file.contents } });
+		cm?.replaceDocument(view, file.contents);
 		editor.dirty = false;
 		editor.encoding = file.encoding ?? encoding;
 		editor.eol = file.eol ?? editor.eol;
@@ -2189,8 +2188,12 @@ export class EditorGroup {
 			const current = view.state.doc.toString();
 			editor.encoding = file.encoding ?? editor.encoding;
 			editor.eol = file.eol ?? editor.eol;
-			if (current === file.contents) return;
-			view.dispatch({ changes: { from: 0, to: current.length, insert: file.contents } });
+			// The document holds LF (CodeMirror normalises CRLF on insert) while the read
+			// carries the file's decoded bytes verbatim: an unchanged CRLF file never compares
+			// equal as-is, and every refresh - a window refocus among them - would rebuild the
+			// whole document (a full re-highlight) and nudge the view for nothing.
+			if (current === file.contents || current === file.contents.replace(/\r\n?/g, '\n')) return;
+			cm?.replaceDocument(view, file.contents);
 			editor.dirty = false;
 			this.renderTabs();
 			this.refreshPreviews(path);

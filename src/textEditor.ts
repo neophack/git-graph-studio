@@ -243,3 +243,56 @@ export function revealPosition(view: EditorView, line: number, column: number): 
 	});
 	view.focus();
 }
+
+/** The position of a 1-based line / 0-based column in `text`, clamped to the line and to the
+ *  text's end: a selection set in the same transaction as a whole-document replace is spelled
+ *  in the new text's coordinates, not mapped. */
+function posAtLineColumn(text: string, line: number, column: number): number {
+	let at = 0;
+	for (let n = 1; n < line; n++) {
+		const next = text.indexOf('\n', at);
+		if (next === -1) return text.length;
+		at = next + 1;
+	}
+	const end = text.indexOf('\n', at);
+	return Math.min(at + column, end === -1 ? text.length : end);
+}
+
+/** The 1-based line at the viewport's top edge, probed against the scroller's own bounds (the
+ *  sticky scroll's measurement); without a layout (jsdom, a hidden pane) the viewport's first
+ *  line stands in. */
+function topVisibleLine(view: EditorView): number {
+	try {
+		const rect = view.scrollDOM.getBoundingClientRect();
+		const at = view.posAtCoords({ x: rect.left + rect.width / 2, y: rect.top + 2 });
+		if (at !== null) return view.state.doc.lineAt(at).number;
+	} catch {
+		// No layout to probe: the viewport's head is the best anchor available.
+	}
+	return view.state.doc.lineAt(view.viewport.from).number;
+}
+
+/** Swap the whole document - an external change, a redecode in another encoding - without
+ * losing the reader's place. CodeMirror maps a viewport inside a replaced range to the
+ * range's edge, so a bare whole-document replace parks both the scroll and the cursor at
+ * the file head on every reload (a watcher burst, a refocus). The cursor's line/column and
+ * the top visible line carry over instead, clamped to the new text. */
+export function replaceDocument(view: EditorView, contents: string): void {
+	const state = view.state;
+	const head = state.selection.main.head;
+	const cursorLine = state.doc.lineAt(head);
+	const column = head - cursorLine.from;
+	const topLine = topVisibleLine(view);
+	// The document's own line ending is LF - CodeMirror normalises CRLF and CR on insert -
+	// so every position below is computed against the same normalised text, or each CRLF
+	// line start would land one character late (a drift that grows with the line number).
+	const text = contents.replace(/\r\n?/g, '\n');
+	view.dispatch({ changes: { from: 0, to: state.doc.length, insert: text } });
+	// The restore runs as its own follow-up transaction: a `scrollIntoView` effect rides
+	// through its transaction's changes, and a whole-document replace maps any interior
+	// position onto the replaced range's edge - these coordinates must not be mapped.
+	view.dispatch({
+		selection: { anchor: posAtLineColumn(text, cursorLine.number, column) },
+		effects: EditorView.scrollIntoView(posAtLineColumn(text, topLine, 0), { y: 'start', yMargin: 0 })
+	});
+}
