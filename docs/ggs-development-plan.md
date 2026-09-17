@@ -49,7 +49,7 @@ Each of the five benchmarks contributes one thing, and each has a measurable acc
 - Activity bar: Explorer / Source Control / Extensions / Git Graph / Terminal / Open Folder.
 - Resizable, persisted side bar and panel; command palette (`Ctrl+Shift+P`) and Quick Open (`Ctrl+P`, backend rayon walk, prefetched on folder open, capped at 20,000 files).
 - 46 keybindings; the `commands.ts` registry drives menus / panels / keybindings / context menus alike.
-- 7 themes (Dark / Light Modern, Dark / Light+, HC Black, Monokai, Nord), English and Chinese UI, a settings panel (theme / language / outline toggle).
+- 6 themes (Dark / Light Modern, Default Dark+, HC Black, Monokai, Nord), English and Chinese UI, a settings panel (theme / language / outline toggle).
 - A boot splash (`index.html`) covers the window while the module graph loads.
 
 **Explorer (`explorer.ts`, `cmd_fs.rs`)**

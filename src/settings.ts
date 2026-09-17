@@ -173,7 +173,6 @@ export const THEMES: ThemeDef[] = [
 	{ id: 'dark-modern', label: 'Dark Modern', kind: 'vscode-dark', css: '/theme/dark-modern.css' },
 	{ id: 'light-modern', label: 'Light Modern', kind: 'vscode-light', css: '/theme/light-modern.css' },
 	{ id: 'dark-plus', label: 'Default Dark+', kind: 'vscode-dark', css: '/theme/dark-plus.css' },
-	{ id: 'light-plus', label: 'Default Light+', kind: 'vscode-light', css: '/theme/light-plus.css' },
 	{ id: 'hc-black', label: 'Dark High Contrast', kind: 'vscode-dark', css: '/theme/hc-black.css' },
 	{ id: 'monokai', label: 'Monokai', kind: 'vscode-dark', css: '/theme/monokai.css' },
 	{ id: 'nord', label: 'Nord', kind: 'vscode-dark', css: '/theme/nord.css' }
