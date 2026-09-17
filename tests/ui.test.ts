@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { attachPageKeys, basename, closeContextMenu, confirmDialog, dirname, el, icon, isMenuOpen, joinPath, matchesQuery, MAX_SCROLL_PX, notify, pageScrollTop, quickInput, quickPick, relativeTo, showContextMenu, showMenuBelow, toPosix, VirtualScroll, type QuickPickItem, type QuickPickSource } from '../src/ui';
+import { basename, closeContextMenu, confirmDialog, dirname, el, icon, isMenuOpen, joinPath, matchesQuery, notify, quickInput, quickPick, relativeTo, showContextMenu, showMenuBelow, toPosix, type QuickPickItem, type QuickPickSource } from '../src/ui';
 import { click, flush, hover, key, menuItem, menuLabels, notificationButton, notifications, texts, type } from './helpers';
 
 describe('dom & path helpers', () => {
@@ -256,70 +256,5 @@ describe('quick input', () => {
 		} finally {
 			warn.mockRestore();
 		}
-	});
-});
-
-describe('page keys over a virtual scroll range', () => {
-	/** A scroller stub for the headless DOM: fixed viewport, scroll writes snap to whole
-	 *  pixels the way the engines' do. */
-	function scrollerStub(clientHeight: number, scrollHeight: number): { element: HTMLElement; top: () => number } {
-		const element = document.createElement('div');
-		let raw = 0;
-		Object.defineProperty(element, 'clientHeight', { configurable: true, get: () => clientHeight });
-		Object.defineProperty(element, 'scrollHeight', { configurable: true, get: () => scrollHeight });
-		Object.defineProperty(element, 'scrollTop', {
-			configurable: true,
-			get: () => raw,
-			set: (v: number) => { raw = Math.max(0, Math.min(scrollHeight - clientHeight, Math.round(v))); }
-		});
-		document.body.appendChild(element);
-		return { element, top: () => raw };
-	}
-
-	it('moves exactly one viewport of document rows a press — past the height ceiling, never the scaled leap', () => {
-		// Fits the ceiling: the range is the identity, a page is the viewport outright.
-		const small = scrollerStub(380, 1_900_000);
-		const identity = new VirtualScroll(100_000, 19, 361);
-		const keys = attachPageKeys(small.element, { range: () => identity, rowHeight: () => 19 });
-		small.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', cancelable: true }));
-		expect(small.top()).toBe(380);
-		small.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', cancelable: true }));
-		expect(small.top()).toBe(760); // the second page is exactly the first again
-		small.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', cancelable: true }));
-		expect(small.top()).toBe(380);
-		keys.dispose();
-
-		// 2M lines × 19 px = 38 M px over the 32 M px headless ceiling: one scrollbar pixel
-		// stands for ~1.19 document pixels, and the native page key would overshoot the page
-		// by that factor — rows the reader never sees.
-		const huge = scrollerStub(380, MAX_SCROLL_PX);
-		const scaled = new VirtualScroll(2_000_000, 19, 361);
-		attachPageKeys(huge.element, { range: () => scaled, rowHeight: () => 19 });
-		huge.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', cancelable: true }));
-		expect(huge.top()).toBe(320); // 380 document pixels, mapped back through the scale
-		huge.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', cancelable: true }));
-		expect(huge.top()).toBe(640); // row quantisation keeps the second page exact
-	});
-
-	it('passes Ctrl/Meta/Alt chords through and makes the scroller focusable', () => {
-		const { element, top } = scrollerStub(380, 1_900_000);
-		attachPageKeys(element, { range: () => new VirtualScroll(100_000, 19, 361), rowHeight: () => 19 });
-		// The keys can only reach a scroller that takes focus.
-		expect(element.tabIndex).toBe(0);
-		// Ctrl+PageUp/Down are the workbench's editor-tab keys: not consumed here.
-		const event = new KeyboardEvent('keydown', { key: 'PageDown', ctrlKey: true, cancelable: true });
-		element.dispatchEvent(event);
-		expect(event.defaultPrevented).toBe(false);
-		expect(top()).toBe(0);
-	});
-
-	it('pageScrollTop clamps at the document edges', () => {
-		const { element } = scrollerStub(380, 1_900_000);
-		const range = new VirtualScroll(100_000, 19, 361);
-		expect(pageScrollTop(range, element, -1, 19)).toBe(0); // PageUp at the head
-		element.scrollTop = 1_899_000; // near the bottom
-		const last = pageScrollTop(range, element, 1, 19);
-		expect(last).toBeLessThanOrEqual(1_900_000 - 380 + 361); // never past the padded end
-		expect(last).toBeGreaterThan(1_899_000);
 	});
 });

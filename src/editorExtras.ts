@@ -8,7 +8,7 @@ import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate
 import { syntaxTree } from '@codemirror/language';
 
 import { SETTINGS_EVENT, THEME_EVENT, settings } from './settings';
-import { attachSmoothWheel, type SmoothWheelHandle } from './ui';
+import { deltaToPixels, OngoingScroll, wheelToDelta } from './scroll/wheel';
 
 /** A coalesced redraw around a callback: the returned trigger runs the callback once per
  *  animation frame however often it is asked for (a plain timeout where frames do not exist,
@@ -303,7 +303,7 @@ export function minimapExtension(): Extension {
 			document.addEventListener(SETTINGS_EVENT, this.listener);
 			document.addEventListener(THEME_EVENT, this.listener);
 			// The map is the scroller's sibling, overlaid on its edge: the wheel over it would
-			// never reach the smooth-wheel listener (a dead strip) — forward it.
+			// never reach the wheel listener (a dead strip) — forward it.
 			this.root.addEventListener('wheel', (event) => {
 				if (event.defaultPrevented) return;
 				event.preventDefault();
@@ -420,26 +420,38 @@ export function minimapExtension(): Extension {
 	return ViewPlugin.fromClass(Minimap);
 }
 
-/* ---------- Smooth wheel scrolling ---------- */
+/* ---------- The wheel ---------- */
 
-/** VS Code's `editor.smoothScrolling` for every CodeMirror surface: the shared wheel glide
- *  (ui.ts) attached to the view's scroll DOM, alive exactly as long as the view. A plugin —
- *  not a `domEventHandlers` entry — so the listener covers the gutters too and CodeMirror's
- *  own destroy unmounts it with the editor. */
-export function smoothWheelExtension(): Extension {
+/** Zed's wheel for every CodeMirror surface (the same arithmetic the row-model viewers
+ *  use, scroll/wheel.ts): a mouse notch is the system's lines per notch times the line
+ *  height, a trackpad's pixels pass through with their axis locked, the sensitivity scales
+ *  the distance (Alt the fast one), and the scroller moves at once — no easing. Attached to
+ *  the view's scroll DOM, alive exactly as long as the view. A plugin — not a
+ *  `domEventHandlers` entry — so the listener covers the gutters too and CodeMirror's own
+ *  destroy unmounts it with the editor. */
+export function wheelExtension(): Extension {
 	return ViewPlugin.fromClass(class {
-		private readonly handle: SmoothWheelHandle;
+		private readonly gesture = new OngoingScroll();
+		private readonly onWheel = (event: WheelEvent): void => {
+			if (event.defaultPrevented || event.ctrlKey || event.metaKey) return;
+			let delta = wheelToDelta(event);
+			// Shift turns a vertical notch horizontal where the browser did not already.
+			if (event.shiftKey && delta.x === 0 && delta.y !== 0) delta = { kind: delta.kind, x: delta.y, y: 0 };
+			if (delta.kind === 'pixels') delta = { kind: 'pixels', ...this.gesture.filter({ x: delta.x, y: delta.y }) };
+			event.preventDefault();
+			const speed = Math.max(0.01, event.altKey ? settings.fastScrollSensitivity : settings.mouseWheelScrollSensitivity);
+			const px = deltaToPixels(delta, this.view.defaultLineHeight, this.view.defaultCharacterWidth);
+			const scroll = this.view.scrollDOM;
+			if (px.y !== 0) scroll.scrollTop += px.y * speed;
+			if (px.x !== 0) scroll.scrollLeft += px.x * speed;
+		};
 
-		constructor(view: EditorView) {
-			this.handle = attachSmoothWheel(view.scrollDOM, {
-				enabled: () => settings.smoothScrolling,
-				sensitivity: () => settings.mouseWheelScrollSensitivity,
-				fastSensitivity: () => settings.fastScrollSensitivity
-			});
+		constructor(private readonly view: EditorView) {
+			view.scrollDOM.addEventListener('wheel', this.onWheel, { passive: false });
 		}
 
 		destroy(): void {
-			this.handle.dispose();
+			this.view.scrollDOM.removeEventListener('wheel', this.onWheel);
 		}
 	});
 }

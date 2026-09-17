@@ -26,14 +26,11 @@ export interface AppSettings {
 	minimap: boolean;
 	/** `editor.stickyScroll.enabled`: the enclosing blocks pinned over the code. */
 	stickyScroll: boolean;
-	/** `editor.smoothScrolling`: wheel notches glide to their position instead of jumping. */
-	smoothScrolling: boolean;
-	/** `editor.mouseWheelScrollSensitivity`: a multiplier on the wheel's scrolling distance.
-	 *  The shipped default is 3 — VS Code's 1 (125 px per Windows notch) read code too
-	 *  slowly, even doubled, so a notch clears ~450 px; the wheel model itself stays VS
-	 *  Code's (ui.ts), and it applies with the glide on or off. */
+	/** Zed's `scroll_sensitivity`: a multiplier on the wheel's distance. At 1 a mouse notch
+	 *  is the system's lines per notch (three on Windows) — the wheel model is Zed's
+	 *  (scroll/wheel.ts), on every viewer and editor, and nothing eases. */
 	mouseWheelScrollSensitivity: number;
-	/** `editor.fastScrollSensitivity`: the multiplier Alt holds over the wheel's distance. */
+	/** Zed's `fast_scroll_sensitivity`: the multiplier Alt holds over the wheel's distance. */
 	fastScrollSensitivity: number;
 	/** `editor.bracketPairColorization.enabled`: brackets coloured by nesting depth. */
 	bracketColors: boolean;
@@ -64,8 +61,8 @@ export interface AppSettings {
 
 export const DEFAULT_SETTINGS: AppSettings = {
 	theme: 'dark-modern', locale: 'en', showOutline: false, autoSave: 'off', autoSaveDelay: 1000,
-	minimap: true, stickyScroll: true, smoothScrolling: true, bracketColors: true,
-	mouseWheelScrollSensitivity: 3, fastScrollSensitivity: 5,
+	minimap: true, stickyScroll: true, bracketColors: true,
+	mouseWheelScrollSensitivity: 1, fastScrollSensitivity: 4,
 	fontSize: 14, tabSize: 4, wordWrap: false, snippetSuggestions: true, pathCompletion: true,
 	fileAssociations: ['blf', 'asc', 'ggx', 'bin', 'hex'],
 	linuxDmabuf: 'auto',
@@ -74,15 +71,18 @@ export const DEFAULT_SETTINGS: AppSettings = {
 };
 
 /** Any settings write persists the whole object, so a store from an older release pins the
- *  *default* of the day rather than a choice: a sensitivity equal to a previously shipped
- *  default (1, then 2) is treated as "never picked" and follows the current default — a
- *  store without this migration would keep the slow pace past the fix that raised it. Any
- *  other value is the user's own and stands. */
+ *  *default* of the day rather than a choice. The wheel sensitivities changed meaning with
+ *  the Zed scroll model (a notch is the system's lines, not VS Code's 50 px): a value equal
+ *  to any previously shipped default (1, 2 and 3 for the wheel, 5 for the fast one) is
+ *  treated as "never picked" and follows the current default; any other value is the
+ *  user's own and stands. The glide setting is gone — nothing eases any more — and a
+ *  stored one is dropped. */
 export function migrateStoredSettings(stored: Partial<AppSettings>): Partial<AppSettings> {
-	if (stored.mouseWheelScrollSensitivity === 1 || stored.mouseWheelScrollSensitivity === 2) {
-		return { ...stored, mouseWheelScrollSensitivity: DEFAULT_SETTINGS.mouseWheelScrollSensitivity };
-	}
-	return stored;
+	const { smoothScrolling: _glide, ...rest } = stored as Partial<AppSettings> & { smoothScrolling?: boolean };
+	const next: Partial<AppSettings> = { ...rest };
+	if ([1, 2, 3].includes(next.mouseWheelScrollSensitivity as number)) next.mouseWheelScrollSensitivity = DEFAULT_SETTINGS.mouseWheelScrollSensitivity;
+	if (next.fastScrollSensitivity === 5) next.fastScrollSensitivity = DEFAULT_SETTINGS.fastScrollSensitivity;
+	return next;
 }
 
 export const settings: AppSettings = { ...DEFAULT_SETTINGS, ...migrateStoredSettings(load<Partial<AppSettings>>('appSettings', {})) };
@@ -133,7 +133,6 @@ export const SETTING_DEFS: SettingDef[] = [
 	{ key: 'showOutline', category: 'editor', kind: 'boolean' },
 	{ key: 'minimap', category: 'editor', kind: 'boolean' },
 	{ key: 'stickyScroll', category: 'editor', kind: 'boolean' },
-	{ key: 'smoothScrolling', category: 'editor', kind: 'boolean' },
 	{ key: 'mouseWheelScrollSensitivity', category: 'editor', kind: 'number', min: 0.1, max: 10, step: 0.1 },
 	{ key: 'fastScrollSensitivity', category: 'editor', kind: 'number', min: 1, max: 20, step: 1 },
 	{ key: 'bracketColors', category: 'editor', kind: 'boolean' },

@@ -109,28 +109,26 @@ describe('editor decorations (M3 3.2)', () => {
 			get: () => scrollTop,
 			set: (v: number) => { scrollTop = Math.max(0, Math.min(5500, v)); }
 		});
-		// The asserted distance is the model's at sensitivity 1 — VS Code's own pace; the
-		// shipped default (settings.ts) is a product call, pinned away here.
+		// The asserted distance is Zed's at sensitivity 1: a Chromium notch is the system's
+		// three lines, times the line height.
 		const sensitivity = settings.mouseWheelScrollSensitivity;
 		settings.mouseWheelScrollSensitivity = 1;
 		try {
 			const minimap = view.dom.querySelector('.cm-minimap')!;
-			const notch = new WheelEvent('wheel', { deltaY: 120, cancelable: true });
+			const notch = new WheelEvent('wheel', { deltaY: 100, deltaMode: 0, cancelable: true });
 			minimap.dispatchEvent(notch);
 			expect(notch.defaultPrevented).toBe(true);
-			// The forwarded notch glides the editor's scroller by the model's distance.
-			for (let i = 0; i < 50 && scrollTop < 150; i++) await new Promise((resolve) => setTimeout(resolve, 16));
-			expect(scrollTop).toBe(150);
+			// The forwarded notch moves the editor's scroller three lines, at once.
+			expect(scrollTop).toBe(3 * view.defaultLineHeight);
 		} finally {
 			settings.mouseWheelScrollSensitivity = sensitivity;
 		}
 	});
 
-	it('glides the wheel over the editor and yields to an outside scroll', async () => {
-		// The smooth-wheel extension (ui.ts's glide over scrollDOM): a notch eases in over
-		// 125 ms instead of jumping, and a scroll nobody asked the glide for — a thumb drag,
-		// a reveal — stops it where it stands. jsdom has no layout, so the range is stubbed
-		// the way the minimap drag test stubs it.
+	it('the wheel over the editor is Zed\'s: a notch lands three lines at once, Alt four times that, a trackpad its pixels', async () => {
+		// The wheel extension (editorExtras.ts over scroll/wheel.ts): no easing, no frames to
+		// wait for. jsdom has no layout, so the range is stubbed the way the minimap drag
+		// test stubs it.
 		const view = group.activeView!;
 		const scroll = view.scrollDOM;
 		Object.defineProperty(scroll, 'scrollHeight', { configurable: true, value: 6000 });
@@ -141,33 +139,29 @@ describe('editor decorations (M3 3.2)', () => {
 			get: () => top,
 			set: (v: number) => { top = Math.max(0, Math.min(5500, v)); }
 		});
-		const settle = async (done: () => boolean): Promise<void> => {
-			for (let i = 0; i < 50 && !done(); i++) await new Promise((resolve) => setTimeout(resolve, 16));
-		};
-
-		// The asserted distances are the model's at sensitivity 1 — VS Code's own pace; the
-		// shipped default (2, settings.ts) is a product call, pinned away here.
 		const sensitivity = settings.mouseWheelScrollSensitivity;
 		settings.mouseWheelScrollSensitivity = 1;
-
-		const notch = new WheelEvent('wheel', { deltaY: 120, cancelable: true });
-		scroll.dispatchEvent(notch);
-		expect(notch.defaultPrevented).toBe(true);
-		expect(top).toBe(0); // intercepted, and the glide starts from rest
-		await settle(() => top > 0);
-		expect(top).toBeLessThan(150); // part-way there: the ease is in flight
-		await settle(() => top >= 150);
-		expect(top).toBe(150); // VS Code's notch distance: 120 px of browser delta × 50/40
-
-		// A second notch glides again — and a thumb drag mid-flight cancels it: the outside
-		// position stands, no frame writes 300 over it.
-		scroll.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, cancelable: true }));
-		await settle(() => top > 150);
-		top = 2500;
-		scroll.dispatchEvent(new Event('scroll'));
-		await new Promise((resolve) => setTimeout(resolve, 100));
-		expect(top).toBe(2500);
-		settings.mouseWheelScrollSensitivity = sensitivity;
+		try {
+			const line = view.defaultLineHeight;
+			const notch = new WheelEvent('wheel', { deltaY: 100, deltaMode: 0, cancelable: true });
+			scroll.dispatchEvent(notch);
+			expect(notch.defaultPrevented).toBe(true);
+			expect(top).toBe(3 * line);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			expect(top).toBe(3 * line); // nothing glides afterwards
+			scroll.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, deltaMode: 0, altKey: true, cancelable: true }));
+			expect(top).toBe(3 * line + 3 * line * settings.fastScrollSensitivity);
+			// A trackpad's odd pixel count passes through as pixels.
+			const before = top;
+			scroll.dispatchEvent(new WheelEvent('wheel', { deltaY: 7.5, deltaMode: 0, cancelable: true }));
+			expect(top).toBe(before + 7.5);
+			// Ctrl+wheel is the workbench's (zoom): left alone.
+			const zoom = new WheelEvent('wheel', { deltaY: 100, deltaMode: 0, ctrlKey: true, cancelable: true });
+			scroll.dispatchEvent(zoom);
+			expect(zoom.defaultPrevented).toBe(false);
+		} finally {
+			settings.mouseWheelScrollSensitivity = sensitivity;
+		}
 	});
 
 	it('sticky scroll stays hidden without a layout instead of throwing', async () => {

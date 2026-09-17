@@ -316,11 +316,8 @@ describe('the fast viewer wheel (scroll/)', () => {
 		expect(view.scroll.top).toBe(3 + 3 * settings.fastScrollSensitivity);
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		expect(view.scroll.top).toBe(3 + 3 * settings.fastScrollSensitivity); // nothing glides afterwards
-		// The old glide setting has no say on this surface.
-		updateSetting('smoothScrolling', true);
 		scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, deltaMode: 0, cancelable: true }));
 		expect(view.scroll.top).toBe(3 * settings.fastScrollSensitivity);
-		updateSetting('smoothScrolling', false);
 		view.dispose();
 	});
 

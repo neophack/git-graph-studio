@@ -82,6 +82,10 @@ Each of the five benchmarks contributes one thing, and each has a measurable acc
 
 ### 1.3 Progress log
 
+**2026-09-17, Zed scroll-model round** (580 vitest; plan: `docs/zed-scroll-port-plan.md`):
+
+Zed's scrolling (`crates/editor/src/scroll.rs` and kin) ported to every file-browsing surface, on branch `port/zed-scroll`: `src/scroll/` is the row model — the viewport's top is a row index the model owns, clamped to the document (`one_page` beyond the last line), with the autoscroll strategies (`fit` with a 3-row margin, `center`, `top`, `bottom`); a wheel notch is the system's lines per notch (three on Windows) times the row height, landed at once, Alt ×4, a trackpad's pixels with the gesture's axis lock; a page is the viewport less one anchor row; the scrollbar is drawn (thumb = the viewport's share, 25 px minimum). The Fast Viewer, the hex views, the CAN raw view and the windowed editor place only the visible rows where the model puts them — the spacer, the scaled `VirtualScroll` range past the engines' 33.5M px clamp, the 125 ms wheel glide, `pageScrollTop` and the windowed editor's slide cooldown / unwedge / anchor-capture timers are gone (`ui.ts` −300 lines). The windowed editor projects the model onto CodeMirror's own scroller (`(top − first) × lineHeight`) and reads its caret reveals back; PageDown is Zed's `move_page_down` (caret + `visible − 1`, then `fit`), queued so a burst of presses is a page each. The CodeMirror editor's wheel is the same model (`wheelExtension`). Settings: `mouseWheelScrollSensitivity` now means Zed's `scroll_sensitivity` (default 1), `fastScrollSensitivity` 4, `smoothScrolling` removed (stored values of the old defaults migrate). The CDP probes drag the drawn scrollbar.
+
 **2026-09-16, RustDesk study round (M7 7.1 / 7.7 + indexing performance)** (484 vitest, 193 backend tests, clippy clean):
 
 The RustDesk source (rustdesk/rustdesk@851d2df, a shallow clone studied outside the tree) was mined for its multi-platform and performance practice, and four techniques landed:

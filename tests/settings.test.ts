@@ -38,16 +38,23 @@ describe('settings store', () => {
 		expect(settings.showOutline).toBe(false);
 	});
 
-	it('migrates a stored wheel sensitivity that was only ever a shipped default', () => {
+	it('migrates stored wheel settings that were only ever a shipped default, and drops the glide', () => {
 		// The whole settings object persists on any change, so a store from an older release
-		// pins the *default* of the day: 1 and 2 were shipped defaults (never user picks) and
-		// follow the current default; any other value is the user's own and stands.
-		expect(DEFAULT_SETTINGS.mouseWheelScrollSensitivity).toBe(3);
-		expect(migrateStoredSettings({ mouseWheelScrollSensitivity: 1 }).mouseWheelScrollSensitivity).toBe(3);
-		expect(migrateStoredSettings({ mouseWheelScrollSensitivity: 2 }).mouseWheelScrollSensitivity).toBe(3);
+		// pins the *default* of the day: 1, 2 and 3 were shipped wheel defaults (never user
+		// picks) and 5 the fast one — they follow the current, Zed-model defaults; any other
+		// value is the user's own and stands. The glide setting no longer exists.
+		expect(DEFAULT_SETTINGS.mouseWheelScrollSensitivity).toBe(1);
+		expect(DEFAULT_SETTINGS.fastScrollSensitivity).toBe(4);
+		expect(migrateStoredSettings({ mouseWheelScrollSensitivity: 3 }).mouseWheelScrollSensitivity).toBe(1);
+		expect(migrateStoredSettings({ mouseWheelScrollSensitivity: 2 }).mouseWheelScrollSensitivity).toBe(1);
 		expect(migrateStoredSettings({ mouseWheelScrollSensitivity: 0.5 }).mouseWheelScrollSensitivity).toBe(0.5);
-		expect(migrateStoredSettings({ mouseWheelScrollSensitivity: 5 }).mouseWheelScrollSensitivity).toBe(5);
+		expect(migrateStoredSettings({ mouseWheelScrollSensitivity: 6 }).mouseWheelScrollSensitivity).toBe(6);
+		expect(migrateStoredSettings({ fastScrollSensitivity: 5 }).fastScrollSensitivity).toBe(4);
+		expect(migrateStoredSettings({ fastScrollSensitivity: 8 }).fastScrollSensitivity).toBe(8);
 		expect(migrateStoredSettings({}).mouseWheelScrollSensitivity).toBeUndefined();
+		const stale = migrateStoredSettings({ smoothScrolling: true, minimap: false } as Partial<AppSettings>);
+		expect('smoothScrolling' in stale).toBe(false);
+		expect(stale.minimap).toBe(false);
 	});
 
 	it('persists a change and notifies the workbench', () => {

@@ -206,7 +206,7 @@ colouring, sticky scroll, minimap, bookmarks, markdown preview.
 
 - Frontend: `src/editor.ts` (groups, tabs, breadcrumbs), `src/editorArea.ts` (split grid),
   `src/textEditor.ts` (CodeMirror host), `src/comments.ts` (VS Code's comment toggles),
-  `src/docEditView.ts` (windowed large-file editor),
+  `src/docEditView.ts` (windowed large-file editor, scrolling on module 7's `src/scroll/`),
   `src/docFind.ts` (the whole-file find/replace bar the windowed editor and the Fast Viewer
   serve, over `viewer_find` / `viewer_replace`), `src/editorExtras.ts`, `src/autocomplete.ts`,
   `src/snippetRegistry.ts`, `src/findWidget.ts`, `src/findOptions.ts` (options shared with
@@ -224,9 +224,14 @@ colouring, sticky scroll, minimap, bookmarks, markdown preview.
 A million-line file opens as fast as its bytes can be read; a multi-gigabyte binary is
 paged, never loaded whole.
 
-- Frontend: `src/fastView.ts` (Fast Viewer — backend-rope document behind a virtual
-  scroller), `src/hexView.ts` (offset / hex / ASCII), `src/hexCompare.ts` (byte-aligned
-  two-pane compare)
+- Frontend: `src/scroll/` (the row scroll model every viewer and the windowed editor
+  share — Zed's ScrollManager in TypeScript: `model.ts` owns the viewport's top as a row
+  index, clamped, with the autoscroll strategies; `wheel.ts` reads a wheel event as system
+  lines per notch or trackpad pixels; `amount.ts` the page distance; `input.ts` the DOM
+  listeners; `scrollbar.ts` the drawn scrollbar — the surfaces scroll nothing natively, so
+  no document is too tall for the layout engine), `src/fastView.ts` (Fast Viewer —
+  backend-rope document, the visible rows only), `src/hexView.ts` (offset / hex / ASCII),
+  `src/hexCompare.ts` (byte-aligned two-pane compare)
 - Backend: `src-tauri/src/viewer/`, byte comparison in `cmd_search.rs`, chunked reads via
   `cmd_fs.rs`
 - Dev probe: `dev/hex-probe.html` (the hex view in isolation, against any theme)
