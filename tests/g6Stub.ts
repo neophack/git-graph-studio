@@ -6,6 +6,10 @@
 export class Graph {
 	readonly options: Record<string, unknown>;
 	readonly handlers = new Map<string, ((event: unknown) => void)[]>();
+	/** Every `setElementState` batch, in order — the highlight tests read these. */
+	readonly stateCalls: Record<string, unknown>[] = [];
+	/** Every `focusElement` target, in order — the menu-jump tests read these. */
+	readonly focused: unknown[] = [];
 	rendered = 0;
 	destroyed = false;
 
@@ -35,6 +39,16 @@ export class Graph {
 
 	setLayout(layout: unknown): void {
 		this.options.layout = layout;
+	}
+
+	setElementState(states: Record<string, unknown>): Promise<void> {
+		this.stateCalls.push(states);
+		return Promise.resolve();
+	}
+
+	focusElement(id: unknown): Promise<void> {
+		this.focused.push(id);
+		return Promise.resolve();
 	}
 
 	async fitView(): Promise<void> {

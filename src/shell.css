@@ -1301,9 +1301,32 @@ body.resizing iframe { pointer-events: none; }
 .an-toggle:first-child { border-radius: 4px 0 0 4px; }
 .an-toggle:last-of-type { border-radius: 0 4px 4px 0; }
 .an-toggle.on { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
-.an-layout { height: 24px; font-size: 11px; border-radius: 4px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); }
+.an-layout, .an-sort { height: 24px; font-size: 11px; border-radius: 4px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); }
 .an-page.an-tree .an-layout { display: none; }
 .an-g6 { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+
+/* The overlays on the drawing: the module colour legend in the top corner (plain
+   information, so it never takes pointer events from the canvas) and the
+   selection / focus chips in the bottom corner, each with its clear action. */
+.an-legend {
+	position: absolute; top: 6px; left: 8px; z-index: 2;
+	display: flex; flex-wrap: wrap; gap: 2px 14px; max-width: calc(100% - 16px);
+	padding: 4px 10px; border-radius: 6px;
+	background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-widget-border, transparent);
+	font-size: 11px; color: var(--vscode-descriptionForeground); pointer-events: none;
+}
+.an-legend:empty { display: none; }
+.an-legend-item { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.an-legend-item .dot { width: 8px; height: 8px; border-radius: 2px; }
+.an-graphbar { position: absolute; left: 8px; bottom: 6px; z-index: 2; display: flex; gap: 6px; align-items: center; }
+.an-graphbar:empty { display: none; }
+.an-graphbar .chip {
+	display: inline-flex; align-items: center; gap: 4px; max-width: 60vw;
+	padding: 2px 4px 2px 8px; border-radius: 6px;
+	background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-widget-border, transparent);
+	font-size: 11px; color: var(--vscode-descriptionForeground);
+}
+.an-graphbar .chip > span:not(.codicon) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* The MCP Server page's setup snippets: a labelled bar with the copy action over a
    monospace block, and the note under them. */

@@ -2,19 +2,21 @@
 // reports (Complexity & Hotspots, Dead Code, Security Scan) over the shared
 // batch-then-done channel rhythm, the Import Graph list, and the Module Analysis page —
 // the workspace's cross-file calls drawn as file blocks on an @antv/G6 canvas (built-in
-// layouts assign the positions, blocks drag, double-click opens) beside a collapsible
-// tree of module dependencies → file pairs → call sites. Both views cap what they draw
-// and the tree renders lazily, so no workspace size can stall the page. Loaded lazily
-// behind the Analysis sidebar; nothing here belongs to the first-paint bundle.
+// layouts assign the positions, blocks drag, a click highlights a block's dependencies,
+// the right-click menu jumps between the related files, double-click opens) beside a
+// collapsible tree of module dependencies → file pairs → call sites. Both views cap what
+// they draw and the tree renders lazily, so no workspace size can stall the page. Loaded
+// lazily behind the Analysis sidebar; nothing here belongs to the first-paint bundle.
 
 import { invoke, Channel } from '@tauri-apps/api/core';
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import type { Graph as G6Graph, IEvent, LayoutOptions } from '@antv/g6';
 
 import { t, tf } from './i18n';
 import { KIND_ICONS } from './contextView';
 import { analysisTool, type AnalysisToolId } from './analysisTools';
 import { McpPage } from './mcpPage';
-import { actionButton, el, icon } from './ui';
+import { actionButton, basename, el, icon, showContextMenu, type MenuEntry } from './ui';
 
 /* ---------- The backend shapes ---------- */
 
@@ -83,7 +85,7 @@ abstract class ReportPage<T> implements AnalysisPageView {
 	protected error: string | null = null;
 	protected running = false;
 	protected summary = '';
-	private runId = 0;
+	protected runId = 0;
 	private readonly title: HTMLElement;
 	private readonly filterInput: HTMLInputElement;
 	private readonly progress: HTMLElement;
@@ -182,9 +184,44 @@ abstract class ReportPage<T> implements AnalysisPageView {
 
 /* ---------- Complexity & Hotspots ---------- */
 
+/** The dimensions the rows can be sorted by — one per column the rows carry,
+ *  biggest first (name goes alphabetically), hotspot the default because it is
+ *  the page's own ranking. The big-code-analysis columns push unmeasured rows
+ *  to the end; maintainability is the one column where smaller is worse, so it
+ *  runs ascending — the least maintainable function leads. */
+const METRIC_SORTS = [
+	{ id: 'hotspot', key: 'analysis.metrics.sort.hotspot', compare: (a: MetricRow, b: MetricRow) => b.hotspot - a.hotspot || b.complexity - a.complexity },
+	{ id: 'complexity', key: 'analysis.metrics.sort.complexity', compare: (a: MetricRow, b: MetricRow) => b.complexity - a.complexity || b.hotspot - a.hotspot },
+	{ id: 'cognitive', key: 'analysis.metrics.sort.cognitive', compare: (a: MetricRow, b: MetricRow) => (b.cognitive ?? -1) - (a.cognitive ?? -1) || b.complexity - a.complexity },
+	{ id: 'mi', key: 'analysis.metrics.sort.mi', compare: (a: MetricRow, b: MetricRow) => (a.mi ?? 101) - (b.mi ?? 101) || b.complexity - a.complexity },
+	{ id: 'lines', key: 'analysis.metrics.sort.lines', compare: (a: MetricRow, b: MetricRow) => b.lines - a.lines || b.hotspot - a.hotspot },
+	{ id: 'params', key: 'analysis.metrics.sort.params', compare: (a: MetricRow, b: MetricRow) => b.params - a.params || b.hotspot - a.hotspot },
+	{ id: 'nesting', key: 'analysis.metrics.sort.nesting', compare: (a: MetricRow, b: MetricRow) => b.nesting - a.nesting || b.hotspot - a.hotspot },
+	{ id: 'refs', key: 'analysis.metrics.sort.refs', compare: (a: MetricRow, b: MetricRow) => b.refs - a.refs || b.hotspot - a.hotspot },
+	{ id: 'name', key: 'analysis.metrics.sort.name', compare: (a: MetricRow, b: MetricRow) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || a.path.localeCompare(b.path) }
+] as const;
+type MetricSortId = typeof METRIC_SORTS[number]['id'];
+
 class MetricsPage extends ReportPage<MetricRow> {
+	private sort: MetricSortId = 'hotspot';
+
 	constructor(container: HTMLElement) {
-		super(container, 'metrics');
+		// The sort picker rides the header like the module page's layout picker; the
+		// order applies only through `resort`, never on the render path itself.
+		const sortSelect = el('select', 'an-sort') as HTMLSelectElement;
+		for (const entry of METRIC_SORTS) {
+			const option = el('option', undefined, [t(entry.key)]) as HTMLOptionElement;
+			option.value = entry.id;
+			sortSelect.appendChild(option);
+		}
+		sortSelect.value = 'hotspot';
+		sortSelect.setAttribute('aria-label', t('analysis.metrics.sort'));
+		sortSelect.addEventListener('change', () => {
+			const picked = sortSelect.value as MetricSortId;
+			if (METRIC_SORTS.some((entry) => entry.id === picked)) this.sort = picked;
+			void this.resort();
+		});
+		super(container, 'metrics', [sortSelect]);
 	}
 
 	protected async fetch(run: number): Promise<void> {
@@ -192,6 +229,8 @@ class MetricsPage extends ReportPage<MetricRow> {
 		onEvent.onmessage = (event) => {
 			if (!this.isCurrent(run)) return;
 			if (event.kind === 'batch') {
+				// Batches render in arrival order — sorting every batch would hold the
+				// UI thread for the whole stream; `resort` orders the rows once at the end.
 				this.rows.push(...event.rows);
 				this.render();
 			} else {
@@ -199,7 +238,22 @@ class MetricsPage extends ReportPage<MetricRow> {
 			}
 		};
 		await invoke('analysis_metrics', { onEvent });
-		this.rows.sort((a, b) => b.hotspot - a.hotspot || b.complexity - a.complexity);
+		// Sort before the stream's final render (`render: false` — `start` renders).
+		await this.resort(false);
+	}
+
+	/** Sort the streamed rows by the picked dimension, off the synchronous render
+	 *  path: the yield lets the loading paint and the picker's change event land
+	 *  first, and a pass made stale — a rerun started, the dimension switched
+	 *  again — steps aside for the newest one. */
+	private async resort(render = true): Promise<void> {
+		const run = this.runId;
+		const picked = this.sort;
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		if (!this.isCurrent(run) || picked !== this.sort) return;
+		const entry = METRIC_SORTS.find((sort) => sort.id === picked) ?? METRIC_SORTS[0];
+		this.rows.sort(entry.compare);
+		if (render) this.render();
 	}
 
 	protected doneTitle(): string {
@@ -373,10 +427,40 @@ interface GraphNodeDatum {
 }
 
 interface GraphEdgeDatum {
+	id: string;
 	source: string;
 	target: string;
 	style: Record<string, unknown>;
 	[key: string]: unknown;
+}
+
+/** What `mapGraph` hands `mountGraph`: the drawing's data plus everything the page's own
+ *  interactions need — the theme accents states are styled with, the dependency rows the
+ *  edges came from (the right-click menus read them), and the module legend. */
+interface MappedGraph {
+	nodes: GraphNodeDatum[];
+	edges: GraphEdgeDatum[];
+	edgeStroke: string;
+	/** The colour the selected element and its dependencies take over. */
+	accent: string;
+	/** The dependency rows behind the edges, capped the same way — the menus' data. */
+	deps: FileDep[];
+	/** The modules on the canvas and the stroke colour each one paints its files. */
+	legend: { module: string; color: string }[];
+	dropped: number;
+	ringRadius: number;
+}
+
+/** The element id a G6 element event carries, if any. */
+function elementId(event: IEvent): unknown {
+	return (event as { target?: { id?: unknown } }).target?.id;
+}
+
+/** Where a context menu opens: the pointer's viewport position, whichever shape the
+ *  library's event mirror exposes (native `clientX/Y` or G6's `client` point). */
+function menuAt(event: IEvent): { x: number; y: number } {
+	const pointer = event as { clientX?: number; clientY?: number; client?: { x?: number; y?: number } };
+	return { x: pointer.clientX ?? pointer.client?.x ?? 0, y: pointer.clientY ?? pointer.client?.y ?? 0 };
 }
 
 /** The layouts the picker offers — the @antv/G6 built-ins that read a dependency graph
@@ -419,8 +503,12 @@ function loadG6(): Promise<G6Module> {
  *  busy file a block whose position a G6 layout assigns automatically (switchable:
  *  force, layered, circular, …), every dependency an arrow, blocks draggable, a
  *  double-click opening the file — beside a collapsible tree (module dependencies →
- *  file pairs → call sites). Both views cap what they draw and children render only
- *  while expanded, so the page stays responsive on any workspace. */
+ *  file pairs → call sites). A click highlights the clicked element and the
+ *  dependencies it touches and dims the rest; the right-click menu opens the file,
+ *  jumps to a related block (Calls / Called By), isolates the neighbourhood or lists
+ *  an edge's call sites; a legend maps the module stroke colours. Both views cap what
+ *  they draw and children render only while expanded, so the page stays responsive on
+ *  any workspace. */
 class ModulePage implements AnalysisPageView {
 	private data: ModuleGraphData | null = null;
 	private loading = true;
@@ -430,7 +518,14 @@ class ModulePage implements AnalysisPageView {
 	private graphFilter = '';
 	private filterTimer: ReturnType<typeof setTimeout> | null = null;
 	private view: 'graph' | 'tree' = 'graph';
-	private layout: GraphLayoutId = 'force';
+	private layout: GraphLayoutId = 'circular';
+	/** The block whose neighbourhood the drawing isolates, or null for everything. */
+	private focusNode: string | null = null;
+	/** The clicked block or edge on the current mount — states do not survive a remount. */
+	private selectedId: string | null = null;
+	/** The current drawing's mapping (null while loading / empty), kept for the
+	 *  interactions: adjacency for the highlight, dependency rows for the menus. */
+	private mapped: MappedGraph | null = null;
 	private readonly openModules = new Set<string>();
 	private readonly openFiles = new Set<string>();
 	/** Bumps on every load; part of the graph rebuild key. */
@@ -443,6 +538,9 @@ class ModulePage implements AnalysisPageView {
 	private readonly statusHost: HTMLElement;
 	private readonly body: HTMLElement;
 	private readonly canvasHost: HTMLElement;
+	/** The colour legend and the selection / focus chips, overlays on the canvas. */
+	private readonly legend: HTMLElement;
+	private readonly graphbar: HTMLElement;
 	private readonly filterInput: HTMLInputElement;
 	private readonly layoutSelect: HTMLSelectElement;
 	private readonly toggles: { graph: HTMLElement; tree: HTMLElement };
@@ -490,6 +588,13 @@ class ModulePage implements AnalysisPageView {
 		this.body = el('div', 'an-list');
 		this.canvasHost = el('div', 'an-g6');
 		this.canvasHost.title = t('analysis.modules.hint');
+		this.legend = el('div', 'an-legend');
+		this.legend.setAttribute('aria-label', t('analysis.modules.legend'));
+		this.graphbar = el('div', 'an-graphbar');
+		this.canvasHost.append(this.legend, this.graphbar);
+		// The canvas's own menu is never what the user wants — the blocks' and arrows'
+		// right-click menus replace it (G6's contextmenu events still fire).
+		this.canvasHost.addEventListener('contextmenu', (event) => event.preventDefault());
 		container.append(
 			el('div', 'an-header', [
 				icon('symbol-module'),
@@ -599,7 +704,7 @@ class ModulePage implements AnalysisPageView {
 	}
 
 	private renderGraph(data: ModuleGraphData, status: (text: string, cls?: string) => void): void {
-		const key = `${this.loadId}|${this.layout}|${this.graphFilter}`;
+		const key = `${this.loadId}|${this.layout}|${this.graphFilter}|${this.focusNode ?? ''}`;
 		if (key !== this.graphKey) {
 			this.graphKey = key;
 			const mapped = this.mapGraph(data);
@@ -617,8 +722,11 @@ class ModulePage implements AnalysisPageView {
 	 *  readable), blocks sized by cross-file traffic, stroke colour by module, arrows
 	 *  weighted by call count. Pure mapping — no library involved. `ringRadius` is the
 	 *  circle the blocks' combined widths fit on, for the layout that needs it. */
-	private mapGraph(data: ModuleGraphData): { nodes: GraphNodeDatum[]; edges: GraphEdgeDatum[]; edgeStroke: string; dropped: number; ringRadius: number } | null {
-		const deps = data.fileEdges.filter((dep) => this.fileMatches(dep));
+	private mapGraph(data: ModuleGraphData): MappedGraph | null {
+		// While a block is focused the drawing carries only its dependencies — the
+		// neighbourhood a jump-to-related wants to see, not the whole workspace.
+		const deps = data.fileEdges.filter((dep) => this.fileMatches(dep)
+			&& (!this.focusNode || dep.from === this.focusNode || dep.to === this.focusNode));
 		if (deps.length === 0) return null;
 		const traffic = new Map<string, { callsIn: number; callsOut: number }>();
 		for (const dep of deps) {
@@ -642,13 +750,13 @@ class ModulePage implements AnalysisPageView {
 			themeColor('--vscode-charts-red', '#f14c4c'),
 			themeColor('--vscode-charts-purple', '#b180d7')
 		];
+		const moduleIndex = new Map(data.modules.map((module, index) => [module.name, index]));
+		const moduleColor = (name: string): string => palette[(moduleIndex.get(name) ?? 0) % palette.length];
 		const fill = themeColor('--vscode-editorWidget-background', '#2d2d2d');
 		const labelFill = themeColor('--vscode-editor-foreground', '#cccccc');
-		const moduleIndex = new Map(data.modules.map((module, index) => [module.name, index]));
 		let span = 0;
 		const nodes: GraphNodeDatum[] = kept.map(([path, counts]) => {
 			const label = path.slice(path.lastIndexOf('/') + 1);
-			const color = palette[(moduleIndex.get(moduleOf(path)) ?? 0) % palette.length];
 			const size: [number, number] = [Math.min(210, Math.max(72, label.length * 7 + 18)), 30];
 			// The circle these blocks fit on, with a gap and corner margin — the circular
 			// layout has no collision pass of its own.
@@ -661,7 +769,7 @@ class ModulePage implements AnalysisPageView {
 					size,
 					radius: 6,
 					fill,
-					stroke: color,
+					stroke: moduleColor(moduleOf(path)),
 					lineWidth: 1.5,
 					labelText: label,
 					labelFill,
@@ -670,31 +778,48 @@ class ModulePage implements AnalysisPageView {
 				}
 			};
 		});
-		const edges: GraphEdgeDatum[] = deps
+		const drawnDeps = deps
 			.filter((dep) => keptSet.has(dep.from) && keptSet.has(dep.to))
-			.slice(0, MAX_GRAPH_EDGES)
-			.map((dep) => ({
-				source: dep.from,
-				target: dep.to,
-				style: { lineWidth: Math.min(4, 1 + Math.log2(dep.calls + 1)) }
-			}));
+			.slice(0, MAX_GRAPH_EDGES);
+		const edges: GraphEdgeDatum[] = drawnDeps.map((dep) => ({
+			// The pair is unique among the drawn rows, so the id addresses the arrow in
+			// state updates and context menus alike.
+			id: `${dep.from}→${dep.to}`,
+			source: dep.from,
+			target: dep.to,
+			style: { lineWidth: Math.min(4, 1 + Math.log2(dep.calls + 1)) }
+		}));
+		// The legend maps what the canvas actually paints: the modules with blocks on it,
+		// busiest first. Past the palette the colours repeat, so the legend stops there.
+		const onCanvas = new Map<string, number>();
+		for (const [path] of kept) onCanvas.set(moduleOf(path), (onCanvas.get(moduleOf(path)) ?? 0) + 1);
+		const legend = [...onCanvas.entries()]
+			.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+			.slice(0, palette.length)
+			.map(([module]) => ({ module, color: moduleColor(module) }));
 		return {
 			nodes,
 			edges,
 			edgeStroke: themeColor('--vscode-descriptionForeground', '#999999'),
+			accent: themeColor('--vscode-focusBorder', '#007fd4'),
+			deps: drawnDeps,
+			legend,
 			dropped: ranked.length - kept.length,
 			ringRadius: Math.max(260, Math.round(span * 1.25 / (2 * Math.PI)))
 		};
 	}
 
 	/** Create (or replace) the G6 drawing. The library loads first, and a newer key —
-	 *  a layout switch, a rerun, the filter settling — retires this mount before it
-	 *  ever builds. */
-	private async mountGraph(key: string, mapped: { nodes: GraphNodeDatum[]; edges: GraphEdgeDatum[]; edgeStroke: string; ringRadius: number } | null): Promise<void> {
+	 *  a layout switch, a rerun, the filter settling, a focus change — retires this
+	 *  mount before it ever builds. */
+	private async mountGraph(key: string, mapped: MappedGraph | null): Promise<void> {
 		if (!mapped) return;
 		const { Graph } = await loadG6();
 		if (key !== this.graphKey) return;
 		this.graph?.destroy();
+		// A fresh mount starts unselected — element states live inside the instance.
+		this.selectedId = null;
+		this.mapped = mapped;
 		this.graph = new Graph({
 			container: this.canvasHost,
 			width: this.canvasHost.clientWidth || undefined,
@@ -703,26 +828,58 @@ class ModulePage implements AnalysisPageView {
 			layout: this.layoutOptions(mapped.ringRadius),
 			node: {
 				state: {
-					selected: { lineWidth: 2.5, halo: false },
-					active: { lineWidth: 2.5, halo: false }
+					// The page owns selection itself (click-select is not loaded): the
+					// clicked block takes the accent, its neighbours keep their module
+					// stroke but thicken, everything else fades back.
+					selected: { stroke: mapped.accent, lineWidth: 3, halo: false },
+					related: { lineWidth: 2.5, halo: false },
+					dim: { opacity: 0.25 }
 				}
 			},
 			edge: {
-				style: { stroke: mapped.edgeStroke, endArrow: true }
+				style: { stroke: mapped.edgeStroke, endArrow: true },
+				state: {
+					selected: { stroke: mapped.accent },
+					dim: { opacity: 0.12 }
+				}
 			},
 			behaviors: [
 				'zoom-canvas',
 				'drag-canvas',
 				// The force layouts follow a dragged block; the others move it alone.
-				this.layout === 'force' ? 'drag-element-force' : 'drag-element',
-				'click-select'
+				this.layout === 'force' ? 'drag-element-force' : 'drag-element'
 			],
 			animation: false
 		});
 		this.graph.on('node:dblclick', (event: IEvent) => {
-			const path = (event as { target?: { id?: unknown } }).target?.id;
+			const path = elementId(event);
 			if (typeof path === 'string') this.onOpen?.(path, 1);
 		});
+		this.graph.on('node:click', (event: IEvent) => {
+			const id = elementId(event);
+			if (typeof id !== 'string') return;
+			if (id === this.selectedId) this.clearSelection();
+			else this.selectElement(id);
+		});
+		this.graph.on('edge:click', (event: IEvent) => {
+			const id = elementId(event);
+			if (typeof id === 'string') this.selectElement(id);
+		});
+		this.graph.on('canvas:click', () => this.clearSelection());
+		this.graph.on('node:contextmenu', (event: IEvent) => {
+			const id = elementId(event);
+			if (typeof id !== 'string') return;
+			const at = menuAt(event);
+			this.nodeMenu(at.x, at.y, id);
+		});
+		this.graph.on('edge:contextmenu', (event: IEvent) => {
+			const id = elementId(event);
+			if (typeof id !== 'string') return;
+			const at = menuAt(event);
+			this.edgeMenu(at.x, at.y, id);
+		});
+		this.updateLegend(mapped);
+		this.updateGraphbar();
 		this.graph.render()
 			.then(() => this.graph?.fitView())
 			.catch(() => {
@@ -753,6 +910,200 @@ class ModulePage implements AnalysisPageView {
 			case 'concentric':
 				return { type: 'concentric', preventOverlap: true, nodeSize };
 		}
+	}
+
+	/** Highlight one element and everything it touches: a clicked block with its
+	 *  dependencies and neighbours, or a clicked arrow with its two endpoints. The rest
+	 *  of the drawing fades back, so the highlight reads at any workspace size. */
+	private selectElement(id: string): void {
+		const mapped = this.mapped;
+		if (!mapped) return;
+		const states: Record<string, string[]> = {};
+		const edge = mapped.edges.find((candidate) => candidate.id === id);
+		if (edge) {
+			states[id] = ['selected'];
+			states[edge.source] = ['related'];
+			states[edge.target] = ['related'];
+		} else {
+			states[id] = ['selected'];
+			for (const candidate of mapped.edges) {
+				if (candidate.source === id) {
+					states[candidate.id] = ['selected'];
+					states[candidate.target] = ['related'];
+				} else if (candidate.target === id) {
+					states[candidate.id] = ['selected'];
+					states[candidate.source] = ['related'];
+				}
+			}
+		}
+		for (const node of mapped.nodes) if (!states[node.id]) states[node.id] = ['dim'];
+		for (const candidate of mapped.edges) if (!states[candidate.id]) states[candidate.id] = ['dim'];
+		this.selectedId = id;
+		this.applyStates(states);
+		this.updateGraphbar();
+	}
+
+	/** Back to the drawing's neutral state — a click on empty canvas, the chip's close,
+	 *  or a second click on the selected element. */
+	private clearSelection(): void {
+		if (!this.selectedId) return;
+		this.selectedId = null;
+		const mapped = this.mapped;
+		if (mapped) {
+			const states: Record<string, string[]> = {};
+			for (const node of mapped.nodes) states[node.id] = [];
+			for (const edge of mapped.edges) states[edge.id] = [];
+			this.applyStates(states);
+		}
+		this.updateGraphbar();
+	}
+
+	/** One batched state update; a retired mount rejects it, and the next mount starts
+	 *  clean anyway. */
+	private applyStates(states: Record<string, string[]>): void {
+		this.graph?.setElementState(states).catch(() => {
+			// nothing to do — the mount this update targeted is gone
+		});
+	}
+
+	/** A menu jump to a related block: select it as if clicked and bring it into view. */
+	private jumpTo(nodeId: string): void {
+		this.selectElement(nodeId);
+		this.graph?.focusElement(nodeId).catch(() => {
+			// nothing to do — the mount is gone
+		});
+	}
+
+	/** Isolate the drawing to one block's neighbourhood, or back to everything. */
+	private focusOn(path: string): void {
+		if (this.focusNode === path) return;
+		this.focusNode = path;
+		this.render();
+	}
+
+	private clearFocus(): void {
+		if (!this.focusNode) return;
+		this.focusNode = null;
+		this.render();
+	}
+
+	/** The chips over the canvas's bottom corner: what is selected, what the drawing is
+	 *  focused on — each with its way out. */
+	private updateGraphbar(): void {
+		this.graphbar.textContent = '';
+		if (this.focusNode) {
+			this.graphbar.appendChild(this.graphbarChip(
+				tf('analysis.modules.focusChip', this.focusNode), 'filter',
+				t('analysis.modules.clearFocus'), () => this.clearFocus()));
+		}
+		if (this.selectedId && this.mapped) {
+			const node = this.mapped.nodes.find((candidate) => candidate.id === this.selectedId);
+			if (node) {
+				this.graphbar.appendChild(this.graphbarChip(
+					tf('analysis.modules.selected', node.id, node.data.callsOut, node.data.callsIn), 'circle-filled',
+					t('analysis.modules.clearSelection'), () => this.clearSelection()));
+			} else {
+				const dep = this.mapped.deps.find((candidate) => `${candidate.from}→${candidate.to}` === this.selectedId);
+				if (dep) {
+					this.graphbar.appendChild(this.graphbarChip(
+						tf('analysis.modules.selectedEdge', dep.from, dep.to, dep.calls), 'arrow-right',
+						t('analysis.modules.clearSelection'), () => this.clearSelection()));
+				}
+			}
+		}
+	}
+
+	private graphbarChip(text: string, iconName: string, clearTitle: string, onClear: () => void): HTMLElement {
+		const chip = el('span', 'chip', [icon(iconName), el('span', undefined, [text]), actionButton('close', clearTitle, onClear)]);
+		chip.title = text;
+		return chip;
+	}
+
+	/** The colour legend over the canvas's top corner — the modules the drawing paints,
+	 *  with the stroke colour each one gave its blocks. */
+	private updateLegend(mapped: MappedGraph | null): void {
+		this.legend.textContent = '';
+		if (!mapped) return;
+		for (const entry of mapped.legend) {
+			const dot = el('span', 'dot');
+			// A canvas palette colour — data the theme minted, which CSS variables cannot
+			// carry inline.
+			dot.style.background = entry.color;
+			this.legend.appendChild(el('span', 'an-legend-item', [dot, moduleLabel(entry.module)]));
+		}
+	}
+
+	/** The block's right-click menu: open the file, jump to a related block through the
+	 *  Calls / Called By submenus, isolate the neighbourhood, copy the path. */
+	private nodeMenu(x: number, y: number, path: string): void {
+		const out = new Map<string, number>();
+		const inn = new Map<string, number>();
+		for (const dep of this.mapped?.deps ?? []) {
+			if (dep.from === path) out.set(dep.to, (out.get(dep.to) ?? 0) + dep.calls);
+			if (dep.to === path) inn.set(dep.from, (inn.get(dep.from) ?? 0) + dep.calls);
+		}
+		const neighbourItems = (list: Map<string, number>): MenuEntry[] => {
+			const ranked = [...list.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+			const items: MenuEntry[] = ranked.slice(0, 30).map(([file, calls]) => ({
+				label: `${file} (${tf('analysis.modules.calls', calls)})`,
+				run: () => this.jumpTo(file)
+			}));
+			if (ranked.length > 30) items.push({ label: tf('analysis.page.more', ranked.length - 30), disabled: true });
+			return items;
+		};
+		const entries: MenuEntry[] = [
+			{ label: t('analysis.modules.openFile'), run: () => this.onOpen?.(path, 1) },
+			'separator',
+			out.size > 0
+				? { label: tf('analysis.modules.callsOut', out.size), submenu: neighbourItems(out) }
+				: { label: tf('analysis.modules.callsOut', 0), disabled: true },
+			inn.size > 0
+				? { label: tf('analysis.modules.callsIn', inn.size), submenu: neighbourItems(inn) }
+				: { label: tf('analysis.modules.callsIn', 0), disabled: true },
+			this.focusNode === path
+				? { label: t('analysis.modules.clearFocus'), run: () => this.clearFocus() }
+				: { label: t('analysis.modules.focus'), run: () => this.focusOn(path) },
+			'separator',
+			{ label: t('analysis.modules.copyPath'), run: () => {
+				void writeText(path).then(
+					() => { /* the clipboard has it */ },
+					() => { /* the clipboard is unavailable — the menu still closed */ }
+				);
+			} }
+		];
+		showContextMenu(x, y, entries);
+	}
+
+	/** The arrow's right-click menu: its call sites (each opening the caller's line),
+	 *  both files, the pair to copy. */
+	private edgeMenu(x: number, y: number, edgeId: string): void {
+		const dep = this.mapped?.deps.find((candidate) => `${candidate.from}→${candidate.to}` === edgeId);
+		if (!dep) return;
+		const sites: MenuEntry[] = dep.sites.slice(0, 25).map((site) => ({
+			label: `${site.from}→${site.to}  ${dep.from}:${site.line + 1}`,
+			run: () => this.onOpen?.(dep.from, site.line + 1)
+		}));
+		if (dep.calls > dep.sites.length) {
+			sites.push({ label: tf('analysis.modules.more', dep.calls - dep.sites.length), disabled: true });
+		}
+		const entries: MenuEntry[] = [
+			{ label: `${dep.from} → ${dep.to}`, disabled: true },
+			'separator',
+			sites.length > 0
+				? { label: tf('analysis.modules.edgeSites', dep.sites.length), submenu: sites }
+				: { label: tf('analysis.modules.edgeSites', 0), disabled: true },
+			'separator',
+			{ label: tf('analysis.modules.openNamed', basename(dep.from)), run: () => this.onOpen?.(dep.from, 1) },
+			{ label: tf('analysis.modules.openNamed', basename(dep.to)), run: () => this.onOpen?.(dep.to, 1) },
+			'separator',
+			{ label: t('analysis.modules.copyPair'), run: () => {
+				void writeText(`${dep.from} → ${dep.to}`).then(
+					() => { /* the clipboard has it */ },
+					() => { /* the clipboard is unavailable — the menu still closed */ }
+				);
+			} }
+		];
+		showContextMenu(x, y, entries);
 	}
 
 	private renderTree(data: ModuleGraphData, status: (text: string, cls?: string) => void): void {

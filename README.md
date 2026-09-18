@@ -23,7 +23,10 @@ symbol carries its column, range, enclosing type and complexity.
 The **Code Analysis** view (`Ctrl+Shift+A`, module 17) turns that parsed model into five
 tools, each a streamed result page in the editor area: **Module Analysis** (the
 workspace's cross-file calls drawn as file blocks on a canvas — @antv/G6 layouts assign
-the positions (force, layered, circular, …), blocks drag, a double-click opens the file —
+the positions (force, layered, circular, …), blocks drag, a click highlights a block
+and the dependencies it touches, the right-click menu jumps to related files (calls /
+called-by, an arrow's call sites, neighbourhood focus), a double-click opens the file,
+a legend maps the module colours —
 beside a collapsible tree of module → file → call site), **Complexity & Hotspots** (cyclomatic
 complexity, size, nesting per function), **Dead Code** (declarations no call site in the
 workspace spells), a rule-based **Security Scan** (hardcoded secrets, dangerous and

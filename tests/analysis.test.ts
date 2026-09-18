@@ -182,21 +182,23 @@ describe('the report pages', () => {
 		expect(select.value).toBe('hotspot');
 		const labels = () => texts('.an-row .label');
 		expect(labels()).toEqual(['two', 'one', 'x'], 'hotspot leads by default');
+		// Each switch sorts asynchronously — a yield, then the sorted render.
+		const pick = async (id: string) => {
+			select.value = id;
+			select.dispatchEvent(new Event('change', { bubbles: true }));
+			await flush(2);
+		};
 		// Lines: the longest function first.
-		select.value = 'lines';
-		select.dispatchEvent(new Event('change', { bubbles: true }));
+		await pick('lines');
 		expect(labels()).toEqual(['two', 'x', 'one']);
 		// Name: alphabetical.
-		select.value = 'name';
-		select.dispatchEvent(new Event('change', { bubbles: true }));
+		await pick('name');
 		expect(labels()).toEqual(['one', 'two', 'x']);
 		// Maintainability: the worst index leads and unmeasured rows trail last.
-		select.value = 'mi';
-		select.dispatchEvent(new Event('change', { bubbles: true }));
+		await pick('mi');
 		expect(labels()).toEqual(['two', 'one', 'x']);
 		// The filter and the sort compose: the narrowed rows keep the picked order.
-		select.value = 'lines';
-		select.dispatchEvent(new Event('change', { bubbles: true }));
+		await pick('lines');
 		const filter = document.querySelector<HTMLInputElement>('.an-filter')!;
 		filter.value = 'big';
 		filter.dispatchEvent(new Event('input', { bubbles: true }));
@@ -280,12 +282,12 @@ describe('the graph pages', () => {
 			'src/b.ts→src/ui.ts',
 			'top.rs→src/a.ts'
 		]);
-		// The default layout is force, pushing overlapping blocks apart over their real
-		// sizes; its blocks drag the layout with them.
-		expect(options.layout.type).toBe('force');
-		expect((options.layout as { preventOverlap?: boolean }).preventOverlap).toBe(true);
-		expect(typeof (options.layout as { nodeSize?: unknown }).nodeSize).toBe('function');
-		expect(options.behaviors).toContain('drag-element-force');
+		// The default layout is circular — the blocks on a ring whose radius fits their
+		// combined widths; without a force simulation, blocks drag alone.
+		expect(options.layout.type).toBe('circular');
+		expect((options.layout as { radius?: number }).radius).toBeGreaterThanOrEqual(260);
+		expect(options.behaviors).toContain('drag-element');
+		expect(options.behaviors).not.toContain('drag-element-force');
 		expect(options.behaviors).toContain('zoom-canvas');
 		// A double-clicked block opens the file.
 		graph.emit('node:dblclick', { target: { id: 'src/a.ts' } });
@@ -415,6 +417,118 @@ describe('the graph pages', () => {
 		await flush(8);
 		expect(texts('.an-empty', root)[0]).toContain('No cross-file calls');
 		expect(g6Graphs.length).toBe(0, 'nothing to draw');
+	});
+
+	it('module analysis highlights the clicked block\'s dependencies and dims the rest', async () => {
+		await modules();
+		backend.on('analysis_module_graph', moduleGraphAnswer);
+		const root = host();
+		createAnalysisPage('modules', root);
+		await flush(8);
+		const graph = g6Graphs[0]!;
+		graph.emit('node:click', { target: { id: 'src/a.ts' } });
+		await flush(2);
+		// The clicked block takes the selection, its neighbours thicken, every arrow it
+		// touches is selected too, and everything else fades back.
+		const states = graph.stateCalls[0] as Record<string, string[]>;
+		expect(states['src/a.ts']).toEqual(['selected']);
+		expect(states['src/ui.ts']).toEqual(['related']);
+		expect(states['top.rs']).toEqual(['related']);
+		expect(states['src/b.ts']).toEqual(['dim']);
+		expect(states['src/a.ts→src/ui.ts']).toEqual(['selected']);
+		expect(states['top.rs→src/a.ts']).toEqual(['selected']);
+		expect(states['src/b.ts→src/ui.ts']).toEqual(['dim']);
+		// The chip over the canvas states what is selected.
+		expect(texts('.an-graphbar .chip', root)[0]).toContain('src/a.ts');
+		// A click on empty canvas returns the drawing to neutral.
+		graph.emit('canvas:click', {});
+		await flush(2);
+		const cleared = graph.stateCalls[1] as Record<string, string[]>;
+		expect(cleared['src/a.ts']).toEqual([]);
+		expect(cleared['src/b.ts→src/ui.ts']).toEqual([]);
+		expect(root.querySelectorAll('.an-graphbar .chip').length).toBe(0);
+	});
+
+	it('module analysis right-clicks a block into a navigation menu', async () => {
+		await modules();
+		backend.on('analysis_module_graph', moduleGraphAnswer);
+		const root = host();
+		const page = createAnalysisPage('modules', root);
+		const opened: string[] = [];
+		page.onOpen = (path, line) => opened.push(`${path}:${line}`);
+		await flush(8);
+		const graph = g6Graphs[0]!;
+		graph.emit('node:contextmenu', { target: { id: 'src/a.ts' }, clientX: 40, clientY: 40 });
+		await flush(2);
+		const items = () => [...document.querySelectorAll<HTMLElement>('.context-menu .item')];
+		expect(items().map((item) => item.textContent)).toContain('Open File');
+		// Open File is the double-click jump, from the menu.
+		items().find((item) => item.textContent === 'Open File')!.click();
+		expect(opened).toEqual(['src/a.ts:1']);
+		// The Calls submenu lists the related blocks; picking one selects and centres it.
+		graph.emit('node:contextmenu', { target: { id: 'src/a.ts' }, clientX: 40, clientY: 40 });
+		await flush(2);
+		items().find((item) => item.textContent === 'Calls (1)')!.dispatchEvent(new MouseEvent('mouseenter'));
+		await flush(2);
+		const neighbour = items().find((item) => item.textContent?.includes('src/ui.ts'))!;
+		neighbour.click();
+		expect(graph.focused).toEqual(['src/ui.ts']);
+		const states = graph.stateCalls.at(-1) as Record<string, string[]>;
+		expect(states['src/ui.ts']).toEqual(['selected']);
+	});
+
+	it('module analysis right-clicks an arrow into its call sites', async () => {
+		await modules();
+		backend.on('analysis_module_graph', moduleGraphAnswer);
+		const root = host();
+		const page = createAnalysisPage('modules', root);
+		const opened: string[] = [];
+		page.onOpen = (path, line) => opened.push(`${path}:${line}`);
+		await flush(8);
+		const graph = g6Graphs[0]!;
+		graph.emit('edge:contextmenu', { target: { id: 'src/a.ts→src/ui.ts' }, clientX: 40, clientY: 40 });
+		await flush(2);
+		const items = () => [...document.querySelectorAll<HTMLElement>('.context-menu .item')];
+		expect(items().some((item) => item.textContent === 'src/a.ts → src/ui.ts')).toBe(true);
+		items().find((item) => item.textContent === 'Call Sites (2)')!.dispatchEvent(new MouseEvent('mouseenter'));
+		await flush(2);
+		items().find((item) => item.textContent?.includes('main→render'))!.click();
+		expect(opened).toEqual(['src/a.ts:4']);
+	});
+
+	it('module analysis focuses a block\'s neighbourhood from the menu', async () => {
+		await modules();
+		backend.on('analysis_module_graph', moduleGraphAnswer);
+		const root = host();
+		createAnalysisPage('modules', root);
+		await flush(8);
+		const graph = g6Graphs[0]!;
+		graph.emit('node:contextmenu', { target: { id: 'src/ui.ts' }, clientX: 40, clientY: 40 });
+		await flush(2);
+		[...document.querySelectorAll<HTMLElement>('.context-menu .item')]
+			.find((item) => item.textContent === 'Show Only Related Files')!.click();
+		await flush(6);
+		// The drawing rebuilds around the block: itself and the two files that call it.
+		const focused = g6Graphs.at(-1)!;
+		expect(focused).not.toBe(graph);
+		const ids = (focused.options as { data: { nodes: { id: string }[] } }).data.nodes.map((node) => node.id);
+		expect(ids).toEqual(['src/ui.ts', 'src/a.ts', 'src/b.ts']);
+		// The chip names the focus and clears it — back to every file.
+		expect(texts('.an-graphbar .chip', root)[0]).toContain('src/ui.ts');
+		(root.querySelector('.an-graphbar .chip .action-btn') as HTMLElement).click();
+		await flush(6);
+		const restored = g6Graphs.at(-1)!;
+		expect((restored.options as { data: { nodes: unknown[] } }).data.nodes.length).toBe(4);
+	});
+
+	it('module analysis draws a legend of the modules on the canvas', async () => {
+		await modules();
+		backend.on('analysis_module_graph', moduleGraphAnswer);
+		const root = host();
+		createAnalysisPage('modules', root);
+		await flush(8);
+		// Busiest module first, the workspace root included under its label.
+		expect(texts('.an-legend-item', root)).toEqual(['src', '(root)']);
 	});
 
 	it('the MCP page lists setup, the catalogue and the call log', async () => {

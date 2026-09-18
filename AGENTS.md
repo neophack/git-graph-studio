@@ -362,7 +362,11 @@ five analysis tools plus module 16's MCP Server entry — Module Analysis (the w
 drawing renders on @antv/G6 — canvas, built-in layouts the picker switches (force,
 layered, circular, radial, grid, concentric), each sized to the blocks' real extents so
 rectangles never overlap (nodeSize from `data.size`, preventOverlap, per-layout spacing,
-a computed ring radius), blocks draggable, double-click opening the file — over at most
+a computed ring radius), blocks draggable, a click highlighting the clicked element
+with the dependencies it touches (the rest dims; a canvas click or the chip clears),
+the right-click menu opening the file, jumping to a related block through the
+Calls / Called-by submenus, isolating the neighbourhood or listing an arrow's call
+sites, double-click opening the file, a colour legend mapping the modules — over at most
 400 blocks and 1500 arrows; the tree collapses the same data into
 module dependencies → file pairs → call sites, children rendering only while expanded),
 Complexity & Hotspots, Dead Code, Security Scan (rule-based, no taint tracking) and the
