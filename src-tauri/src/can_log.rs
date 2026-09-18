@@ -1976,7 +1976,7 @@ fn walk_asc_reader<R: std::io::BufRead>(
             Ok(LineRead::Eof) => break,
         }
         lines += 1;
-        if lines % 4096 == 0 {
+        if lines.is_multiple_of(4096) {
             on_chunk(sink.seen(), bytes);
             if sink.failed() {
                 break;
@@ -2949,7 +2949,7 @@ fn parse_can_query(query: &str) -> Result<CanQuery, String> {
     let id = u32::from_str_radix(cleaned, 16)
         .ok()
         .filter(|&id| id <= 0x1fff_ffff);
-    let bytes = if cleaned.len() % 2 == 0 {
+    let bytes = if cleaned.len().is_multiple_of(2) {
         cleaned
             .as_bytes()
             .chunks_exact(2)
@@ -3425,7 +3425,7 @@ mod tests {
                 at
             );
             let size = u32_at(&bytes, at + 8) as usize;
-            if size % 4 != 0 {
+            if !size.is_multiple_of(4) {
                 odd_residues += 1;
             }
             containers += 1;

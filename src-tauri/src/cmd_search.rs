@@ -358,7 +358,7 @@ fn scan_stream(
     let mut bytes = 0u64;
     let mut line_no = 0usize;
     loop {
-        if line_no % 4096 == 0 && cancelled() {
+        if line_no.is_multiple_of(4096) && cancelled() {
             return Some(out);
         }
         match crate::can_log::read_line_bounded(&mut reader, &mut buf, &mut bytes) {

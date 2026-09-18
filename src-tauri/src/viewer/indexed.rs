@@ -98,7 +98,7 @@ fn build_index(
                 let raw = start + at_newline as u64;
                 match utf16 {
                     Some(little) => {
-                        let low_first = (raw - bom) % 2 == 0;
+                        let low_first = (raw - bom).is_multiple_of(2);
                         let paired = if little == low_first {
                             buf.get(at_newline + 1).copied() == Some(0)
                         } else {
