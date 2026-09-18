@@ -697,6 +697,13 @@ export class GraphHost {
 		} else if (command === 'gerritSetFetchRefs') {
 			request = { ...request, gerritRemote: this.gerritRemote() };
 		}
+		// The "Uncommitted Changes" row is deferred off every load, as the extension host deferred
+		// it: the row's count is a whole-working-tree status scan - seconds on a large tree - and
+		// the page must never wait for it. The backend answers without the row and flags the
+		// response `uncommittedPending`; the count is delivered by the follow-up below.
+		if (command === 'loadCommits') {
+			request = { ...request, deferUncommittedChanges: true };
+		}
 
 		const started = performance.now();
 		// Until the first page is up, every request is a boot stage too (sent and answered),
@@ -720,11 +727,15 @@ export class GraphHost {
 		}
 		this.decorate(command, request, response);
 		this.post(response);
-		if (command === 'loadCommits' && response['gerritPending'] === true) {
-			// The Gerrit pipeline runs behind the first paint: the refresh fetches the remote's
-			// change refs and parses their NoteDb metas, then the fresh states arrive as the
-			// extension's staged follow-up responses - the badges first, the event timelines last.
-			void this.gerritFollowUp(request);
+		if (command === 'loadCommits' && response['error'] === null) {
+			// The completion pipeline runs behind the first paint, the stages of the extension
+			// host's own load: the Gerrit refresh first (its staged responses arrive as further
+			// `loadCommits` responses under the same refresh id), then the "Uncommitted Changes"
+			// count on top of the commit data the pipeline actually rendered.
+			const gerrit = response['gerritPending'] === true
+				? this.gerritFollowUp(request)
+				: Promise.resolve<Message | null>(null);
+			void gerrit.then((stage) => this.uncommittedFollowUp(request, stage ?? response));
 		}
 		if (WRITE_COMMANDS.has(command) && response['command'] !== 'lossWarning') {
 			this.delegate.repoChanged();
@@ -769,13 +780,15 @@ export class GraphHost {
 	}
 
 	/** One follow-up pipeline per repository: concurrent loads chain onto the one running, so a
-	 *  refresh is never run twice over the same remote. */
-	private readonly gerritFollowUps = new Map<string, Promise<void>>();
+	 * refresh is never run twice over the same remote. Resolves to the final `loadCommits`
+	 * response the pipeline posted (the Gerrit stages' last), or `null` when it delivered
+	 * nothing - a failed refresh leaves the page as it rendered it. */
+	private readonly gerritFollowUps = new Map<string, Promise<Message | null>>();
 
-	private gerritFollowUp(request: Message): Promise<void> {
+	private gerritFollowUp(request: Message): Promise<Message | null> {
 		const repo = typeof request['repo'] === 'string' && request['repo'] !== '' ? request['repo'] : this.repoPath;
-		if (!repo) return Promise.resolve();
-		const chained = (this.gerritFollowUps.get(repo) ?? Promise.resolve()).then(() => this.runGerritFollowUp(request, repo));
+		if (!repo) return Promise.resolve(null);
+		const chained = (this.gerritFollowUps.get(repo) ?? Promise.resolve<Message | null>(null)).then(() => this.runGerritFollowUp(request, repo));
 		this.gerritFollowUps.set(repo, chained);
 		chained.then(() => {
 			if (this.gerritFollowUps.get(repo) === chained) this.gerritFollowUps.delete(repo);
@@ -784,13 +797,14 @@ export class GraphHost {
 	}
 
 	/** Complete a load the backend answered `gerritPending` (gitGraphView.ts
-	 *  `loadCommitsGerritFollowUp`): run the refresh pipeline, then deliver the fresh states as
-	 *  two further `loadCommits` responses under the same refresh id - first the light part the
-	 *  badges render (no event timelines), then the full states, which only the review dialog a
-	 *  badge click opens reads. A failed refresh still delivers the reloaded page with the
-	 *  previously cached states, exactly as the extension degrades; a still-pending cache leaves
-	 *  the retry to the next load, so the follow-up never loops. */
-	private async runGerritFollowUp(request: Message, repo: string): Promise<void> {
+	 * `loadCommitsGerritFollowUp`): run the refresh pipeline, then deliver the fresh states as
+	 * two further `loadCommits` responses under the same refresh id - first the light part the
+	 * badges render (no event timelines), then the full states, which only the review dialog a
+	 * badge click opens reads. A failed refresh still delivers the reloaded page with the
+	 * previously cached states, exactly as the extension degrades; a still-pending cache leaves
+	 * the retry to the next load, so the follow-up never loops. Returns the full stage it
+	 * posted, or `null` when the pipeline failed before delivering one. */
+	private async runGerritFollowUp(request: Message, repo: string): Promise<Message | null> {
 		const settings = this.actionSettings();
 		const started = performance.now();
 		const refresh = await graphRequest({
@@ -807,7 +821,7 @@ export class GraphHost {
 		this.logLine(`gerritRefresh + stage: ${(performance.now() - started).toFixed(0)} ms`);
 		if (stage === null || (stage['error'] !== null && stage['error'] !== undefined)) {
 			if (stage !== null) this.logLine(`ERROR gerrit stage: ${String(stage['error'])}`);
-			return;
+			return null;
 		}
 		delete stage['gerritPending'];
 		const states = stage['gerritStates'];
@@ -815,6 +829,55 @@ export class GraphHost {
 			this.post({ ...stage, gerritStates: (states as Message[]).map((state) => ({ ...state, events: [], eventsPending: true })) });
 		}
 		this.post(stage);
+		return stage;
+	}
+
+	/** Deliver the deferred "Uncommitted Changes" row (gitGraphView.ts
+	 * `sendUncommittedChangesFollowUp`): count the working tree - the scan the load deferred -
+	 * and repeat the page's response with the exact count, under the same refresh id. The view
+	 * synthesises the row from the count itself (its own locale strings), keeps an already
+	 * rendered row in place while the count is `pending`, and drops the row on a count of zero;
+	 * a row whose HEAD is not on the page would have no parent to hang off, so such pages ask
+	 * for no count at all. One pipeline per repository, so refreshes cannot stack scans. */
+	private readonly uncommittedFollowUps = new Map<string, Promise<void>>();
+
+	private uncommittedFollowUp(request: Message, page: Message): Promise<void> {
+		const repo = typeof request['repo'] === 'string' && request['repo'] !== '' ? request['repo'] : this.repoPath;
+		if (!repo) return Promise.resolve();
+		const run = () => this.runUncommittedFollowUp(request, page, repo);
+		const chained = (this.uncommittedFollowUps.get(repo) ?? Promise.resolve()).then(run, run);
+		this.uncommittedFollowUps.set(repo, chained);
+		chained.then(() => {
+			if (this.uncommittedFollowUps.get(repo) === chained) this.uncommittedFollowUps.delete(repo);
+		}, () => undefined);
+		return chained;
+	}
+
+	private async runUncommittedFollowUp(request: Message, page: Message, repo: string): Promise<void> {
+		if (this.config['showUncommittedChanges'] === false) return;
+		const head = page['head'];
+		const commits = page['commits'];
+		// Exactly the guard the extension's follow-up applies: the row is a child of HEAD, so it
+		// only exists when HEAD is among the loaded commits.
+		if (typeof head !== 'string' || head === '' || !Array.isArray(commits)
+			|| !commits.some((commit) => (commit as Message)['hash'] === head)) return;
+		const started = performance.now();
+		const counted = await graphRequest({
+			command: 'countUncommittedChanges',
+			repo,
+			includeUntracked: this.config['showUntrackedFiles'] !== false
+		}, this.actionSettings());
+		this.logLine(`countUncommittedChanges: ${(performance.now() - started).toFixed(0)} ms`);
+		if (counted === null || (counted['error'] !== null && counted['error'] !== undefined)) {
+			if (counted !== null) this.logLine(`ERROR countUncommittedChanges: ${String(counted['error'])}`);
+			return;
+		}
+		// `gerritPending` is stripped from the repeat: this response completes the uncommitted
+		// row, and on the Gerrit-failure fallback the flag would promise states no pipeline is
+		// coming to deliver.
+		const completion: Message = { ...page, uncommittedCount: counted['count'] };
+		delete completion['gerritPending'];
+		this.post(completion);
 	}
 
 	/** The requests the shell serves itself. Returns true when handled. */

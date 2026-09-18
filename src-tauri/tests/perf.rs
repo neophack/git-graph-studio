@@ -178,12 +178,15 @@ fn opening_a_large_repository_stays_within_the_budgets() {
     let started = Instant::now();
     let commits = git_graph_studio_lib::cmd_graph::load_first_page(&root).unwrap();
     let first_page_ms = ms(started);
-    assert_eq!(commits, 8, "7 commits plus the uncommitted-changes row");
+    // The page defers the "Uncommitted Changes" row (the working-tree scan completes it in a
+    // follow-up count), so it holds the history's commits alone - the row no longer blocks
+    // the first paint, which is what this budget guards.
+    assert_eq!(commits, 7, "7 commits; the uncommitted-changes row arrives deferred");
 
     let started = Instant::now();
     let commits_again = git_graph_studio_lib::cmd_graph::load_first_page(&root).unwrap();
     let warm_page_ms = ms(started);
-    assert_eq!(commits_again, 8);
+    assert_eq!(commits_again, 7);
 
     let report = json!({
         "files": files,

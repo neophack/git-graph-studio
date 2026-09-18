@@ -310,4 +310,67 @@ describe('graph assets', () => {
 		await flush(20);
 		expect(backend.callsTo('graph_request').some((call) => (call['message'] as Record<string, unknown>)['command'] === 'gerritRefresh')).toBe(false);
 	});
+
+	it('defers the uncommitted row off the load and delivers its count as the follow-up', async () => {
+		// The load asks the backend for the page without the working-tree scan; once the page is
+		// posted, the count is read on its own and the page is repeated with `uncommittedCount`
+		// under the same refresh id - the row itself is the view's to synthesise.
+		const page = { command: 'loadCommits', refreshId: 5, commits: [{ hash: 'abc', parents: [], author: 'A', email: '', date: 1, message: 'm', heads: [], tags: [], remotes: [], stash: null }], head: 'abc', tags: [], moreCommitsAvailable: false, error: null };
+		backend.on('graph_request', (args) => {
+			const message = args['message'] as Record<string, unknown>;
+			if (message['command'] === 'loadCommits') return { ...page, uncommittedPending: true };
+			if (message['command'] === 'countUncommittedChanges') return { command: 'countUncommittedChanges', count: 6, error: null };
+			return { command: message['command'], error: null };
+		});
+		const host = new GraphHost(delegate);
+		document.body.appendChild(host.element);
+		host.load('C:\\repo');
+		await flush(10);
+		const frameWindow = host.frame.contentWindow!;
+		const postSpy = vi.spyOn(frameWindow, 'postMessage').mockImplementation(() => undefined);
+		window.dispatchEvent(new MessageEvent('message', { source: frameWindow, data: { __studioGraphRequest: {
+			command: 'loadCommits', repo: 'C:\\repo', refreshId: 5, maxCommits: 300
+		} } }));
+		await vi.waitFor(() => expect(postSpy.mock.calls
+			.filter((call) => (call[0] as { __studioGraphResponse: Record<string, unknown> }).__studioGraphResponse['command'] === 'loadCommits')
+			.length).toBe(2));
+
+		// The deferred flag rode along with the load, and the count was asked with the
+		// configuration's untracked-files setting.
+		const sent = backend.callsTo('graph_request').map((call) => call['message'] as Record<string, unknown>);
+		expect(sent.find((message) => message['command'] === 'loadCommits')).toMatchObject({ deferUncommittedChanges: true });
+		expect(sent.find((message) => message['command'] === 'countUncommittedChanges')).toMatchObject({ repo: 'C:\\repo', includeUntracked: true });
+
+		const posted = postSpy.mock.calls
+			.map((call) => (call[0] as { __studioGraphResponse: Record<string, unknown> }).__studioGraphResponse)
+			.filter((message) => message['command'] === 'loadCommits');
+		expect(posted[0]!['uncommittedPending']).toBe(true);
+		expect(posted[1]!['uncommittedCount']).toBe(6);
+		expect(posted[1]!['refreshId']).toBe(5);
+		expect((posted[1]!['commits'] as unknown[]).length).toBe(1);
+	});
+
+	it('asks for no uncommitted count when the page does not show HEAD', async () => {
+		// The row hangs off HEAD: a filtered page that cut HEAD out gets no count at all, so no
+		// row is ever synthesised above a commit it does not belong to.
+		backend.on('graph_request', (args) => {
+			const message = args['message'] as Record<string, unknown>;
+			if (message['command'] === 'loadCommits') {
+				return { command: 'loadCommits', refreshId: 9, commits: [{ hash: 'def', parents: [], author: 'A', email: '', date: 1, message: 'm', heads: [], tags: [], remotes: [], stash: null }], head: 'abc', tags: [], moreCommitsAvailable: false, uncommittedPending: true, error: null };
+			}
+			return { command: message['command'], error: null };
+		});
+		const host = new GraphHost(delegate);
+		document.body.appendChild(host.element);
+		host.load('C:\\repo');
+		await flush(10);
+		const frameWindow = host.frame.contentWindow!;
+		const postSpy = vi.spyOn(frameWindow, 'postMessage').mockImplementation(() => undefined);
+		window.dispatchEvent(new MessageEvent('message', { source: frameWindow, data: { __studioGraphRequest: {
+			command: 'loadCommits', repo: 'C:\\repo', refreshId: 9, maxCommits: 300
+		} } }));
+		await flush(20);
+		expect(backend.callsTo('graph_request').some((call) => (call['message'] as Record<string, unknown>)['command'] === 'countUncommittedChanges')).toBe(false);
+		expect(postSpy.mock.calls.filter((call) => (call[0] as { __studioGraphResponse: Record<string, unknown> }).__studioGraphResponse['command'] === 'loadCommits').length).toBe(1);
+	});
 });

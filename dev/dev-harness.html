@@ -45,8 +45,12 @@
 							remotes: ['origin'], stashes: [], isRepo: true,
 							operationState: { type: null, conflictedFiles: [], progress: null }, error: null };
 					case 'loadCommits':
+						// The deferred load the host now asks for: the page carries no "Uncommitted
+						// Changes" row and says it is pending; the count case below completes it.
 						return { command: 'loadCommits', refreshId: message.refreshId, commits: [commit], head: commit.hash,
-							tags: ['v1.0.0'], moreCommitsAvailable: false, onlyFollowFirstParent: false, gerritStates: null, error: null };
+							tags: ['v1.0.0'], moreCommitsAvailable: false, onlyFollowFirstParent: false, gerritStates: null, uncommittedPending: true, error: null };
+					case 'countUncommittedChanges':
+						return { command: 'countUncommittedChanges', count: 2, error: null };
 					case 'loadConfig':
 						return { command: 'loadConfig', repo: message.repo, config: {
 							branches: { main: { pushRemote: null, remote: 'origin' } },

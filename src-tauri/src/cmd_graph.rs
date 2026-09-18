@@ -430,6 +430,23 @@ pub fn handle_repo_request(
                 }
             })
         }
+        // The "Uncommitted Changes" row's count, asked for on its own: a load pipeline that
+        // deferred the row (see `log_options_from_request`) delivers its first page without the
+        // working-tree scan and completes the row from this answer afterwards - the scan is the
+        // better part of the load time on a large working tree.
+        "countUncommittedChanges" => {
+            let repo = open()?;
+            let include_untracked = message
+                .get("includeUntracked")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let count =
+                git_graph_core::status::count_changes(&repo, include_untracked)
+                    .map_err(|e| e.message)?;
+            Ok(
+                json!({ "command": "countUncommittedChanges", "count": count, "error": null }),
+            )
+        }
         "countCommitsBefore" => {
             let repo = open()?;
             let hash = message
@@ -764,6 +781,13 @@ fn load_commits_response(
     if gerrit_pending {
         response["gerritPending"] = json!(true);
     }
+    if options.defer_uncommitted_changes {
+        // The response deliberately carries no "Uncommitted Changes" row: the caller asked for
+        // the page without the working-tree scan and completes the row from
+        // `countUncommittedChanges` - the flag tells the view to keep whatever row it already
+        // rendered until that count arrives (the same protocol the extension host used).
+        response["uncommittedPending"] = json!(true);
+    }
     Ok(response)
 }
 
@@ -774,7 +798,10 @@ fn load_commits_response(
 fn default_first_requests(remotes: &[String]) -> [Value; 2] {
     [
         json!({ "command": "loadRepoInfo", "showRemoteBranches": true, "showStashes": true, "hideRemotes": [] }),
-        json!({ "command": "loadCommits", "maxCommits": 300, "showTags": true, "showRemoteBranches": true, "remotes": remotes }),
+        // The deferred uncommitted scan is what the view's first request asks for (graphHost.ts
+        // injects the flag): the warm page must be built under the same options, or its key
+        // stops matching and the view pays the cold load anyway.
+        json!({ "command": "loadCommits", "maxCommits": 300, "showTags": true, "showRemoteBranches": true, "remotes": remotes, "deferUncommittedChanges": true }),
     ]
 }
 
@@ -825,8 +852,9 @@ fn drop_warm_responses() {
 
 /// Translate a `loadCommits` request into the engine's `LogOptions`.
 /// The graph's first page (the view's default `loadCommits` request: every branch, 300
-/// commits, date order), returning how many commits it holds. The `--measure` run times it
-/// exactly as the view experiences it.
+/// commits, date order, the "Uncommitted Changes" row deferred exactly as the view asks for
+/// it), returning how many commits it holds. The `--measure` run times it exactly as the view
+/// experiences it - without the working-tree scan, which lands in the follow-up count.
 pub fn load_first_page(repo_path: &str) -> Result<usize, String> {
     let repo = RepoManager::global()
         .get(repo_path)
@@ -931,7 +959,7 @@ fn log_options_from_request(message: &Value) -> LogOptions {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default(),
-        defer_uncommitted_changes: false,
+        defer_uncommitted_changes: bool_of("deferUncommittedChanges", false),
         show_uncommitted_changes: bool_of("showUncommittedChanges", true),
         show_untracked_files: bool_of("showUntrackedFiles", true),
         show_commits_only_referenced_by_tags: false,
@@ -1542,12 +1570,14 @@ mod warm_tests {
         assert_eq!(warm_first_page(&root).unwrap(), 2);
 
         // The view's messages carry more than the options (a refresh id, the stashes it
-        // knows, the repo) and name the remotes it learnt: still the warm answer.
+        // knows, the repo) and name the remotes it learnt: still the warm answer. The
+        // deferred uncommitted scan is part of that first request (graphHost.ts injects it),
+        // so the fixture carries it too.
         let info = json!({ "command": "loadRepoInfo", "repo": root, "refreshId": 3, "showRemoteBranches": true, "showStashes": true, "hideRemotes": [] });
         let answered = handle_repo_request(&root, &info, ActionSettings::default()).unwrap();
         assert_eq!(answered["refreshId"], 3);
         assert_eq!(answered["isRepo"], true);
-        let commits = json!({ "command": "loadCommits", "repo": root, "refreshId": 4, "branches": null, "authors": null, "maxCommits": 300, "showTags": true, "showRemoteBranches": true, "includeCommitsMentionedByReflogs": false, "onlyFollowFirstParent": false, "commitOrdering": "date", "remotes": [], "hideRemotes": [], "stashes": [] });
+        let commits = json!({ "command": "loadCommits", "repo": root, "refreshId": 4, "branches": null, "authors": null, "maxCommits": 300, "showTags": true, "showRemoteBranches": true, "includeCommitsMentionedByReflogs": false, "onlyFollowFirstParent": false, "commitOrdering": "date", "remotes": [], "hideRemotes": [], "stashes": [], "deferUncommittedChanges": true });
         assert!(take_warm_response(&root, "loadCommits", &commits).is_some());
         // Served once: the next identical request goes to the engine (and still answers).
         assert!(take_warm_response(&root, "loadCommits", &commits).is_none());
@@ -1561,6 +1591,64 @@ mod warm_tests {
         assert!(take_warm_response(&root, "loadCommits", &other).is_none());
         close_engine_repos();
         assert!(take_warm_response(&root, "loadRepoInfo", &info).is_none());
+    }
+
+    /// The first page defers the working-tree scan: it answers without the "Uncommitted
+    /// Changes" row, flags itself pending, and the row's count is served by the dedicated
+    /// command instead. A complete load (no deferral) still carries the row inline.
+    #[test]
+    fn a_deferred_load_marks_the_uncommitted_row_pending() {
+        let scratch = crate::test_support::Scratch::new("defer-uncommitted");
+        let git = scratch.repo("repo");
+        crate::test_support::commit(&git, "a.rs", "fn a() {}\n", "second");
+        let root = git.repo.display().to_string();
+        // A dirty working tree: one tracked file modified, one untracked file added.
+        std::fs::write(std::path::Path::new(&root).join("a.rs"), "fn a() { changed }\n").unwrap();
+        std::fs::write(std::path::Path::new(&root).join("new.txt"), "untracked\n").unwrap();
+
+        let deferred = handle_repo_request(
+            &root,
+            &json!({ "command": "loadCommits", "repo": root, "maxCommits": 300, "showTags": true, "showRemoteBranches": true, "deferUncommittedChanges": true }),
+            ActionSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(deferred["error"], json!(null));
+        assert_eq!(deferred["uncommittedPending"], json!(true));
+        let hashes: Vec<&str> = deferred["commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|commit| commit["hash"].as_str().unwrap())
+            .collect();
+        assert!(!hashes.contains(&git_graph_core::types::UNCOMMITTED));
+
+        let complete = handle_repo_request(
+            &root,
+            &json!({ "command": "loadCommits", "repo": root, "maxCommits": 300, "showTags": true, "showRemoteBranches": true }),
+            ActionSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(complete["error"], json!(null));
+        assert!(complete.get("uncommittedPending").is_none());
+        assert_eq!(
+            complete["commits"][0]["hash"],
+            json!(git_graph_core::types::UNCOMMITTED)
+        );
+
+        // The count the follow-up delivers: the whole working tree with untracked files, only
+        // the tracked changes without them.
+        let count = |include_untracked: bool| {
+            handle_repo_request(
+                &root,
+                &json!({ "command": "countUncommittedChanges", "repo": root, "includeUntracked": include_untracked }),
+                ActionSettings::default(),
+            )
+            .unwrap()
+        };
+        assert_eq!(count(true)["count"], json!(2));
+        assert_eq!(count(false)["count"], json!(1));
+
+        RepoManager::global().close(&root);
     }
 }
 
