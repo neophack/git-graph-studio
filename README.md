@@ -16,7 +16,18 @@ declarations and their occurrences indexed once under `~/.ggs/index/`, resumed o
 updated file-by-file as files change — powering Go-to-Definition (with a list on ambiguous
 names), Find References narrowed to the files that contain the word, Quick Open's `@`
 (file symbols) and `#` (workspace symbols) modes, the Call Tree, and a Context Window panel
-that shows the definition of the symbol under the cursor. The shell itself is themeable
+that shows the definition of the symbol under the cursor. The declarations are extracted by
+a tree-sitter parser layer (one grammar per language, each behind a Cargo feature), so every
+symbol carries its column, range, enclosing type and complexity.
+
+The **Code Analysis** view (`Ctrl+Shift+A`, module 17) turns that parsed model into five
+tools, each a streamed result page in the editor area: a **Call Graph** (opens on the
+workspace's every call relationship with its edges, then walks per symbol — callers and
+callees, click a node to continue from it), **Complexity & Hotspots** (cyclomatic
+complexity, size, nesting per function), **Dead Code** (declarations no call site in the
+workspace spells), a rule-based **Security Scan** (hardcoded secrets, dangerous and
+weak-crypto APIs, with CWE tags) and the **Import Graph** (file dependencies with import
+cycles). The shell itself is themeable
 (`Auto (System)` follows the OS) with a Compact / Comfortable density setting, motion that
 respects `prefers-reduced-motion`, and keyboard focus cycling on F6.
 
@@ -124,7 +135,9 @@ bridge to the repository's symbol index — the same persistent database the app
 Definition, Find References and Symbol Database page use. Five tools: `symbol_lookup`
 (where is this declared), `symbol_references` (every whole-word occurrence as
 `file:line:column`), `symbol_tree` (the per-file outline with per-symbol reference counts,
-narrowable by a `path` prefix), `search_symbols` (name search) and `index_status`. The
+narrowable by a `path` prefix), `search_symbols` (name search) and `index_status` — plus the Code Analysis tools:
+`analysis_call_graph`, `analysis_call_path`, `analysis_metrics`, `analysis_dead_code`,
+`analysis_security` and `analysis_import_cycles`. The
 index resumes from `~/.ggs/index/`, so the first start of a big repository is the slow
 one. Configure a client (Claude Desktop, Cline, Cursor, …) with a stdio command entry
 shaped like:

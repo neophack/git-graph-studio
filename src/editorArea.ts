@@ -655,6 +655,7 @@ export class EditorArea {
 	findReferences = () => this.activeGroup.findReferences();
 	openCallTreeAtCursor = () => this.activeGroup.openCallTreeAtCursor();
 	openSymbolDatabase = () => this.activeGroup.openSymbolDatabase();
+	openAnalysisPage = (tool: import('./analysisTools').AnalysisToolId) => this.activeGroup.openAnalysisPage(tool);
 	gotoSymbolInFile = () => this.activeGroup.gotoSymbolInFile();
 	lineInfo = () => this.activeGroup.lineInfo();
 	gotoLine = (line: number, column = 1) => this.activeGroup.gotoLine(line, column);

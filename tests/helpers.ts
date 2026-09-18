@@ -56,3 +56,9 @@ export function notificationButton(label: string): HTMLElement | null {
 export async function flush(times = 5): Promise<void> {
 	for (let i = 0; i < times; i++) await new Promise((resolve) => setTimeout(resolve, 0));
 }
+
+/** Poll an async end state into view: each round lets queued promises settle, so a
+ *  starved worker reaches the state a fast one does — just more rounds later. */
+export async function until(condition: () => boolean, rounds = 40): Promise<void> {
+	for (let i = 0; i < rounds && !condition(); i++) await flush(1);
+}

@@ -117,6 +117,12 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 .pane-header:first-child { border-top: none; }
 .pane-header .twistie { width: 16px; font-size: 16px; }
 .pane-header .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Headers without a twistie (the Analysis sections, the Extensions header) keep the
+   twistie's 16px anyway, so every sidebar's headers sit on the same text edge. */
+.pane-header:not(:has(> .twistie)) .label { padding-left: 16px; }
+/* VS Code renders its pane headers in normal weight for the CJK scripts, whose glyphs
+   carry the weight the Latin bold would add. */
+.pane-header:lang(zh) { font-weight: 400; }
 .pane-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
 .pane-body.collapsed { display: none; }
 .view-pane.collapsed { flex: none; }
@@ -1218,3 +1224,88 @@ body.resizing iframe { pointer-events: none; }
 .can-chart-ref { stroke: var(--vscode-editorLineNumber-foreground, #999); stroke-width: 1; stroke-dasharray: 4 3; }
 .can-chart-missed { fill: var(--vscode-errorForeground, #f48771); }
 .can-chart-bar { fill: var(--vscode-charts-blue, #3794ff); fill-opacity: 0.7; }
+
+/* ---------- Code Analysis (module 17) ---------- */
+
+.an-page { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.an-header {
+	display: flex; align-items: center; gap: 8px; padding: 6px 12px; flex: none;
+	border-bottom: 1px solid var(--vscode-panel-border);
+}
+.an-title { font-size: 12px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
+.an-filter {
+	flex: 1; max-width: 260px; height: 24px; padding: 0 8px; border-radius: 4px;
+	background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, transparent); font-size: 12px;
+}
+.an-option { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
+.an-progress { height: 2px; flex: none; background: transparent; }
+.an-progress.running { background: var(--vscode-focusBorder); animation: an-slide 1.2s ease-in-out infinite; }
+@keyframes an-slide { 0% { transform: scaleX(0.05); transform-origin: left; } 60% { transform: scaleX(0.7); } 100% { transform: scaleX(1); transform-origin: left; } }
+.an-list { flex: 1; min-height: 0; overflow: auto; padding: 4px 0 12px; }
+.an-empty { color: var(--vscode-descriptionForeground); padding: 12px 20px; }
+.an-more { color: var(--vscode-descriptionForeground); font-size: 11px; padding: 6px 20px; }
+.an-section {
+	padding: 8px 20px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+	color: var(--vscode-descriptionForeground);
+}
+.an-row {
+	display: flex; align-items: center; gap: 6px; height: var(--row-height);
+	padding: 0 20px; white-space: nowrap; cursor: pointer; overflow: hidden;
+	color: var(--vscode-sideBar-foreground); font-size: 12px;
+}
+.an-row:hover { background: var(--vscode-list-hoverBackground); }
+.an-row:hover .label { color: var(--vscode-textLink-foreground); }
+.an-row .label { overflow: hidden; text-overflow: ellipsis; }
+.an-row .description { color: var(--vscode-descriptionForeground); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+.an-row .tail { margin-left: auto; color: var(--vscode-descriptionForeground); font-size: 11px; flex: none; }
+.an-metrics { display: inline-flex; gap: 8px; margin-left: auto; color: var(--vscode-descriptionForeground); font-size: 11px; flex: none; }
+.an-metrics .an-hot { color: var(--vscode-charts-orange, var(--vscode-descriptionForeground)); }
+.an-chip {
+	flex: none; font-size: 10px; padding: 1px 6px; border-radius: 8px;
+	background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
+}
+.an-sev-error > .codicon { color: var(--vscode-editorError-foreground); }
+.an-sev-warning > .codicon { color: var(--vscode-editorWarning-foreground); }
+.an-sev-info > .codicon { color: var(--vscode-descriptionForeground); }
+.an-loading { color: var(--vscode-descriptionForeground); padding: 24px; }
+
+/* The Analysis sidebar's tool rows and index status: VS Code's Extensions-list
+   geometry — a 16px icon beside a two-line column (13px label over a 12px
+   description), the icon aligned with the section headers' text edge. */
+.an-tool { height: auto; align-items: flex-start; padding: 6px 10px 6px 20px; }
+.an-tool > .codicon { font-size: 16px; margin: 1px 8px 0 0; }
+.an-tool .text { flex: 1 1 auto; min-width: 0; }
+.an-tool .text .label { display: block; flex: none; font-size: 13px; line-height: 18px; }
+.an-tool .text .description {
+	display: block; flex: none; margin: 1px 0 0; opacity: 1;
+	font-size: 12px; line-height: 16px; color: var(--vscode-descriptionForeground);
+}
+.an-status { padding: 8px 20px 12px; color: var(--vscode-descriptionForeground); font-size: 12px; line-height: 18px; }
+
+/* The call graph drawing. */
+.an-graph .an-note { padding: 4px 20px; color: var(--vscode-descriptionForeground); font-size: 11px; flex: none; }
+.an-graph-body { flex: 1; min-height: 0; overflow: auto; }
+.an-svg-host { padding: 8px 12px; }
+.an-svg { width: 100%; height: auto; display: block; }
+.an-edge { fill: none; stroke: var(--vscode-descriptionForeground); stroke-opacity: 0.5; stroke-width: 1.2; }
+.an-node rect { fill: var(--vscode-editorWidget-background); stroke: var(--vscode-focusBorder); stroke-width: 1; }
+.an-node.root rect { stroke-width: 2; }
+.an-node:hover rect { fill: var(--vscode-list-hoverBackground); }
+.an-node text { fill: var(--vscode-editor-foreground); font-size: 12px; text-anchor: middle; }
+.an-node .an-node-sub { fill: var(--vscode-descriptionForeground); font-size: 10px; }
+.an-toggles { display: inline-flex; gap: 0; }
+.an-toggle {
+	height: 24px; padding: 0 10px; font-size: 11px; border: 1px solid var(--vscode-input-border, transparent);
+	background: var(--vscode-input-background); color: var(--vscode-input-foreground); cursor: pointer;
+}
+.an-toggle:first-child { border-radius: 4px 0 0 4px; }
+.an-toggle:last-of-type { border-radius: 0 4px 4px 0; }
+.an-toggle.on { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+.an-depth { height: 24px; font-size: 11px; border-radius: 4px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); }
+/* The whole-workspace drawing carries every relationship already; the direction and
+   depth controls only speak to a focused walk, so they step aside until one begins. */
+.an-page.an-full .an-toggles, .an-page.an-full .an-depth { display: none; }
+.an-cycle .an-arrow { color: var(--vscode-descriptionForeground); flex: none; }
+.an-cycle-step { color: var(--vscode-descriptionForeground); }
+

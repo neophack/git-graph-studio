@@ -72,6 +72,21 @@ pub fn run(folder: &str) -> Result<String, String> {
     let symbols_ms = ms(started);
 
     let started = Instant::now();
+    let analysis = crate::analysis::AnalysisData::build(
+        &root,
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4),
+        &|_, _| {},
+        &|| false,
+    );
+    let analysis_ms = ms(started);
+    let (analysis_symbols, analysis_calls) = analysis
+        .as_ref()
+        .map(|data| (data.symbol_count(), data.call_count()))
+        .unwrap_or((0, 0));
+
+    let started = Instant::now();
     let search = cmd_search::search_literal(&files, &root, "TODO")?;
     let search_ms = ms(started);
 
@@ -88,6 +103,8 @@ pub fn run(folder: &str) -> Result<String, String> {
         "engine": crate::cmd_graph::engine_version(),
         "files": files.len(),
         "symbols": symbols,
+        "analysisSymbols": analysis_symbols,
+        "analysisCalls": analysis_calls,
         "commitsFirstPage": commits,
         "largeFileMb": file_mb,
         "scmChanges": scm_changes,
@@ -98,6 +115,7 @@ pub fn run(folder: &str) -> Result<String, String> {
             "scmStatus": scm_ms,
             "graphFirstPage": graph_ms,
             "symbolIndex": symbols_ms,
+            "analysisBuild": analysis_ms,
             "searchTodo": search_ms,
             "largeFileRead": read_ms,
             "largeFileDecode": decode_ms,

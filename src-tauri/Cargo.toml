@@ -3,7 +3,9 @@ name = "git-graph-studio"
 version = "0.1.2"
 description = "Git Graph Studio - a standalone Git repository viewer with an explorer, source control panel, terminal and the git-graph-rs engine"
 edition = "2021"
-rust-version = "1.82"
+# The floor is big-code-analysis (module 17's richer-metrics engine): it is Rust
+# 2024 edition, which needs 1.94. Everything else in the tree builds below it.
+rust-version = "1.94"
 license = "MIT"
 default-run = "git-graph-studio"
 
@@ -46,7 +48,32 @@ desktop = [
     "dep:encoding_rs",
     "dep:trash",
     "dep:flate2",
+    "dep:tree-sitter",
+    "dep:big-code-analysis",
+    "grammar-rust",
+    "grammar-python",
+    "grammar-go",
+    "grammar-javascript",
+    "grammar-typescript",
+    "grammar-java",
+    "grammar-c",
+    "grammar-cpp",
+    "grammar-c-sharp",
 ]
+# The tree-sitter grammars (plan §3.1: compiled with cc, the single sanctioned exception to
+# the pure-Rust rule), one feature per language and all on by default through `desktop` —
+# a build can shed a language by dropping its feature, and the parser layer (symbols/parse.rs)
+# falls back to the outline scan for anything switched off. Each feature also forwards to
+# big-code-analysis's same-language feature, so a shed language is shed in both engines.
+grammar-rust = ["dep:tree-sitter-rust", "big-code-analysis/rust"]
+grammar-python = ["dep:tree-sitter-python", "big-code-analysis/python"]
+grammar-go = ["dep:tree-sitter-go", "big-code-analysis/go"]
+grammar-javascript = ["dep:tree-sitter-javascript", "big-code-analysis/javascript"]
+grammar-typescript = ["dep:tree-sitter-typescript", "big-code-analysis/typescript"]
+grammar-java = ["dep:tree-sitter-java", "big-code-analysis/java"]
+grammar-c = ["dep:tree-sitter-c", "big-code-analysis/c"]
+grammar-cpp = ["dep:tree-sitter-cpp", "big-code-analysis/cpp"]
+grammar-c-sharp = ["dep:tree-sitter-c-sharp", "big-code-analysis/csharp"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -99,6 +126,28 @@ notify = { version = "8", default-features = false, features = ["macos_fsevent"]
 # measure.rs's large-file probe writes its synthetic file into a temp dir.
 tempfile = "3"
 trash = { version = "5", optional = true }
+# The tree-sitter parser layer (plan M4.1, symbols/parse.rs): the core runtime plus one
+# grammar crate per language, each behind its `grammar-*` feature. On the 0.26 line because
+# big-code-analysis (below) is compiled against it — one core for both engines. The grammar
+# crates bind through the ABI-neutral `tree-sitter-language` crate, so they do not semver-
+# couple to the core.
+tree-sitter = { version = "0.26", optional = true }
+tree-sitter-rust = { version = "0.24", optional = true }
+tree-sitter-python = { version = "0.25", optional = true }
+tree-sitter-go = { version = "0.25", optional = true }
+tree-sitter-javascript = { version = "0.25", optional = true }
+tree-sitter-typescript = { version = "0.23", optional = true }
+tree-sitter-java = { version = "0.23", optional = true }
+tree-sitter-c = { version = "0.24", optional = true }
+tree-sitter-cpp = { version = "0.23", optional = true }
+tree-sitter-c-sharp = { version = "0.23", optional = true }
+# The richer-metrics engine behind Complexity & Hotspots (module 17, analysis/bca.rs): the
+# rust-code-analysis fork, computing cognitive complexity, Halstead, logical SLOC and the
+# maintainability index per function at report time. `default-features = false` keeps to the
+# grammar-* languages (no 23-grammar `all-languages`); `vcs` (its gitoxide churn metrics)
+# stays off — the engine's own gix version is not for churn here. Pure Rust beyond the
+# sanctioned tree-sitter grammars. Rust 2024 edition, hence the 1.94 rust-version floor.
+big-code-analysis = { version = "2.2", default-features = false, optional = true }
 
 # The File Associations service (cmd_assoc): per-user ProgIds and the
 # RegisteredApplications entry under HKCU.

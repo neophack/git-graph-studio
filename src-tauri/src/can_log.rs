@@ -3211,13 +3211,10 @@ mod tests {
         // Buckets stay dense: 3 s at 4 ms is 750 of them, the first at the origin.
         assert_eq!(profile.buckets.len(), 750);
         assert!(profile.buckets[0].t_s.abs() < 1e-12);
-        assert_eq!(
-            profile.buckets.iter().map(|b| b.frames).sum::<u64>(),
-            3000
-        );
+        assert_eq!(profile.buckets.iter().map(|b| b.frames).sum::<u64>(), 3000);
         assert_eq!(profile.buckets.iter().map(|b| b.errors).sum::<u64>(), 1);
         assert!(profile.buckets[500].errors == 1); // 2 s in = bucket 500
-        // The merge keeps every frame's bits: each bucket carries whole 8-byte frames.
+                                                   // The merge keeps every frame's bits: each bucket carries whole 8-byte frames.
         let per_frame = profile.buckets[0].bus_bits / profile.buckets[0].frames as f64;
         for b in &profile.buckets {
             assert!((b.bus_bits / b.frames as f64 - per_frame).abs() < 1e-9);
@@ -3232,17 +3229,7 @@ mod tests {
         let stats = stats_of_frames(&[
             RawFrame::data_frame(0, 1, 0x10, false, false, 8, 8, &[0; 8], false),
             RawFrame::data_frame(0, 1, 0x10, false, false, 8, 8, &[0; 8], false),
-            RawFrame::data_frame(
-                5_000_000_000,
-                2,
-                0x20,
-                false,
-                false,
-                8,
-                8,
-                &[0; 8],
-                false,
-            ),
+            RawFrame::data_frame(5_000_000_000, 2, 0x20, false, false, 8, 8, &[0; 8], false),
         ]);
         assert_eq!(stats.load_profiles.len(), 2);
         let ch2 = &stats.load_profiles[1];

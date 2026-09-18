@@ -790,6 +790,12 @@ pub struct WorkspaceSymbol {
     pub path: String,
     /// 0-based line of the declaration.
     pub line: usize,
+    /// 0-based byte column of the name (the parser layer; 0 from the outline fallback).
+    pub column: usize,
+    /// 0-based line the declaration ends on (the parser layer; the start line as fallback).
+    pub end_line: usize,
+    /// The enclosing type of a method (`impl`/class/receiver), when the parser knows one.
+    pub container: Option<String>,
 }
 
 /// The extensions the outline extractor can parse; everything else is skipped.
@@ -835,13 +841,16 @@ fn index_symbols(root: &str) -> Vec<WorkspaceSymbol> {
                 return Vec::new();
             };
             let ext = relative.rsplit('.').next().unwrap_or("").to_owned();
-            crate::viewer::outline_symbols_for(&text, &ext)
+            crate::symbols::parse::parse_symbols(&text, &ext)
                 .into_iter()
                 .map(|s| WorkspaceSymbol {
-                    kind: s.kind,
+                    kind: s.kind.to_owned(),
                     name: s.name,
                     path: relative.clone(),
                     line: s.line,
+                    column: s.column,
+                    end_line: s.end_line,
+                    container: s.container,
                 })
                 .collect()
         })

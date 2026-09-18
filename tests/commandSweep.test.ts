@@ -11,7 +11,7 @@ import { commands } from '../src/commands';
 import { bookmarksFor } from '../src/bookmarks';
 import * as state from '../src/state';
 import { backend } from './tauriMock';
-import { flush, key, notifications, texts } from './helpers';
+import { flush, key, notifications, texts, until } from './helpers';
 
 const REPO = 'C:\\repo';
 const NOTES = `${REPO}\\notes.txt`;
@@ -60,6 +60,23 @@ beforeEach(async () => {
 		['scm_tags', () => ['v1']],
 		['scm_stashes', () => []],
 		['workspace_symbols', () => [{ kind: 'function', name: 'two', path: 'notes.txt', line: 1 }]],
+		['analysis_status', () => ({ state: 'ready', done: 2, total: 2, files: 2, symbols: 3, calls: 2 })],
+		['analysis_rebuild', () => ({ state: 'ready', done: 2, total: 2, files: 2, symbols: 3, calls: 2 })],
+		['analysis_call_graph', () => ({ nodes: [], edges: [], ambiguous: 0 })],
+		['analysis_workspace_call_graph', () => ({ nodes: [], edges: [], ambiguous: 0, totalNodes: 0, totalEdges: 0 })],
+		['analysis_metrics', ({ onEvent }) => {
+			(onEvent as { onmessage: (e: unknown) => void }).onmessage({ kind: 'done', files: 1, functions: 1, cancelled: false });
+			return null;
+		}],
+		['analysis_dead_code', ({ onEvent }) => {
+			(onEvent as { onmessage: (e: unknown) => void }).onmessage({ kind: 'done', found: 0, cancelled: false });
+			return null;
+		}],
+		['analysis_security', ({ onEvent }) => {
+			(onEvent as { onmessage: (e: unknown) => void }).onmessage({ kind: 'done', files: 1, findings: 0, cancelled: false });
+			return null;
+		}],
+		['analysis_import_graph', () => ({ edges: [], cycles: [] })],
 		// Find References asks the index's narrowed scan first (M4); the full-scan command
 		// stays scripted as the fallback it is.
 		['symbol_references', () => [{ path: 'notes.txt', matches: [{ line: 1, column: 5, length: 3, text: 'one two one' }] }]],
@@ -273,9 +290,11 @@ describe('the commands no other harness drives', () => {
 	it('Compare Two Folders... opens a Folder Compare tab from the two picked folders', async () => {
 		backend.dialog.openResult = 'C:\\left';
 		await commands.execute('workbench.compareFolders');
-		// The boot-time graph tab can finish loading and re-activate itself one async hop
-		// after the compare tab opens; let that settle before reading the active input.
-		await flush(12);
+		// The registry fires the command's two dialog round-trips without awaiting them,
+		// so under a loaded worker the tab lands later than any fixed flush count: poll
+		// for the end state, then let any late activation settle before reading it.
+		await until(() => workbench.editors.activeInput?.kind === 'folders');
+		await flush(2);
 		expect(workbench.editors.activeInput).toEqual({ kind: 'folders', id: 'C:\\left::C:\\left', left: 'C:\\left', right: 'C:\\left' });
 		// A cancelled picker opens nothing.
 		backend.dialog.openResult = null;

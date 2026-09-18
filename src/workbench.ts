@@ -10,6 +10,8 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
 
+import { AnalysisView, type AnalysisStatus } from './analysisView';
+import type { AnalysisToolId } from './analysisTools';
 import { commandForBinding, commands, effectiveBinding, setKeybindingResolver, UNSHIFTED_GLYPHS } from './commands';
 import { registerContextProvider } from './contributions';
 import { EditorArea } from './editorArea';
@@ -33,7 +35,7 @@ import { TitleBar } from './titlebar';
 import { basename, busy, el, icon, notify, quickInput, quickPick, relativeTo, toPosix, tooltip, type MenuEntry, type QuickPickItem, type QuickPickSource } from './ui';
 import { FilePickSource } from './filePicker';
 
-type ViewId = 'explorer' | 'search' | 'scm' | 'extensions';
+type ViewId = 'explorer' | 'search' | 'scm' | 'extensions' | 'analysis';
 
 /** One debounced burst of external file changes, as the backend watcher reports it. */
 export interface FsChange {
@@ -86,13 +88,14 @@ export class Workbench {
 	private readonly panelElement = document.getElementById('panel')!;
 	private readonly panelSash = document.getElementById('panelSash')!;
 
-	private readonly views: Record<ViewId, HTMLElement> = { explorer: el('div', 'view'), search: el('div', 'view'), scm: el('div', 'view'), extensions: el('div', 'view') };
+	private readonly views: Record<ViewId, HTMLElement> = { explorer: el('div', 'view'), search: el('div', 'view'), scm: el('div', 'view'), extensions: el('div', 'view'), analysis: el('div', 'view') };
 	private readonly activityItems: Record<string, HTMLElement> = {};
 	readonly titleBar: TitleBar;
 	readonly explorer: Explorer;
 	readonly search: SearchView;
 	readonly scm: SourceControlView;
 	readonly extensions: ExtensionsPanel;
+	readonly analysis: AnalysisView;
 	readonly extensionHost: ExtensionHost;
 	readonly editors: EditorArea;
 	readonly graph: GraphHost;
@@ -127,6 +130,7 @@ export class Workbench {
 		this.explorer = new Explorer(this.views.explorer);
 		this.search = new SearchView(this.views.search);
 		this.scm = new SourceControlView(this.views.scm, commands);
+		this.analysis = new AnalysisView(this.views.analysis);
 		this.extensionHost = new ExtensionHost();
 		// The built-in git-graph-rs never runs in the frame host; the commands its manifest
 		// declares dispatch to the workbench's own views. The scm/title Amend/Gerrit commands
@@ -268,6 +272,12 @@ export class Workbench {
 		register({ id: 'workbench.replaceInFiles', title: 'Replace in Files', category: 'Search', keybinding: 'Ctrl+Shift+H', run: () => { this.showView('search'); this.search.focusReplace(); } });
 		register({ id: 'workbench.showScm', title: 'Source Control', category: 'View', keybinding: 'Ctrl+Shift+G', run: () => this.showView('scm') });
 		register({ id: 'workbench.showExtensions', title: 'Extensions', category: 'View', keybinding: 'Ctrl+Shift+X', run: () => this.showView('extensions') });
+		register({ id: 'workbench.showAnalysis', title: 'Analysis', category: 'View', keybinding: 'Ctrl+Shift+A', run: () => this.showView('analysis') });
+		register({ id: 'analysis.showCallGraph', title: 'Call Graph', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('callgraph') });
+		register({ id: 'analysis.showMetrics', title: 'Complexity & Hotspots', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('metrics') });
+		register({ id: 'analysis.showDeadCode', title: 'Dead Code', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('deadcode') });
+		register({ id: 'analysis.showSecurity', title: 'Security Scan', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('security') });
+		register({ id: 'analysis.showImports', title: 'Import Graph', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('imports') });
 		register({ id: 'git.openFileHistory', title: 'Git: Open File History', category: 'Git', enabled: () => hasRepo() && this.editors.activeInput?.kind === 'file', run: () => this.editors.openFileHistory() });
 		register({ id: 'git.toggleBlame', title: 'Git: Toggle Blame', category: 'Git', keybinding: 'Ctrl+K Ctrl+B', enabled: () => hasRepo() && this.editors.activeView !== null && this.editors.activeInput?.kind === 'file', run: () => this.editors.toggleBlame() });
 		register({ id: 'markdown.showPreview', title: 'Markdown: Open Preview', category: 'View', keybinding: 'Ctrl+Shift+V', enabled: () => this.editors.activeInput?.kind === 'file' && /\.(md|markdown)$/i.test(this.editors.activeInput.path), run: () => this.editors.openMarkdownPreview() });
@@ -329,8 +339,12 @@ export class Workbench {
 			{ label: t('menu.edit'), entries: (): MenuEntry[] => [item('editor.undo'), item('editor.redo'), 'separator', item('editor.cut'), item('editor.copy'), item('editor.paste'), 'separator', item('editor.find'), item('editor.replace'), item('workbench.showSearch'), item('workbench.replaceInFiles'), 'separator', item('editor.toggleLineComment'), item('editor.toggleBlockComment'), 'separator', item('editor.toggleBookmark'), item('editor.listBookmarks')] },
 			{ label: t('menu.selection'), entries: (): MenuEntry[] => [item('editor.selectAll')] },
 				{ label: t('menu.view'), entries: (): MenuEntry[] => [
-				item('workbench.commandPalette'), 'separator',
-				item('workbench.showExplorer'), item('workbench.showSearch'), item('workbench.showScm'), item('workbench.showGraph'), item('workbench.showOutput'), item('workbench.showContext'), item('workbench.showSymbolDatabase'), 'separator', item('editor.toggleWordWrap'), 'separator', item('markdown.showPreview'), item('markdown.showPreviewToSide'), item('git.openFileHistory'), item('git.toggleBlame'), 'separator',
+			item('workbench.commandPalette'), 'separator',
+			item('workbench.showExplorer'), item('workbench.showSearch'), item('workbench.showScm'), item('workbench.showGraph'), item('workbench.showOutput'), item('workbench.showContext'), item('workbench.showSymbolDatabase'), 'separator',
+			{ label: t('menu.analysis'), submenu: [
+				item('analysis.showCallGraph'), item('analysis.showMetrics'), item('analysis.showDeadCode'), item('analysis.showSecurity'), item('analysis.showImports')
+			] },
+			'separator', item('editor.toggleWordWrap'), 'separator', item('markdown.showPreview'), item('markdown.showPreviewToSide'), item('git.openFileHistory'), item('git.toggleBlame'), 'separator',
 				{ label: 'Editor Layout', submenu: [
 				item('workbench.splitEditor'), item('workbench.splitEditorDown'), 'separator', item('workbench.focusFirstEditorGroup'), item('workbench.focusSecondEditorGroup'), item('workbench.focusThirdEditorGroup')
 				] },
@@ -487,6 +501,7 @@ export class Workbench {
 		add('explorer', icon('files'), 'Explorer (Ctrl+Shift+E)', () => this.toggleView('explorer'));
 		add('search', icon('search'), 'Search (Ctrl+Shift+F)', () => this.toggleView('search'));
 		add('scm', icon('source-control'), 'Source Control (Ctrl+Shift+G)', () => this.toggleView('scm'));
+		add('analysis', icon('graph'), 'Analysis (Ctrl+Shift+A)', () => this.toggleView('analysis'));
 		const graphIcon = el('img');
 		graphIcon.src = '/icons/git-graph.svg';
 		graphIcon.alt = '';
@@ -510,7 +525,7 @@ export class Workbench {
 			state.saveLayout();
 		}
 		if (!state.layout.sidebarVisible) this.activityItems[this.activeView]?.classList.remove('active');
-		for (const id of ['explorer', 'search', 'scm']) this.activityItems[id]?.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
+		for (const id of ['explorer', 'search', 'scm', 'analysis']) this.activityItems[id]?.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
 		this.installSash(this.sidebarSash, 'horizontal', (delta, start) => {
 			state.layout.sidebarWidth = Math.max(170, Math.min(window.innerWidth - 400, start + delta));
 			this.sidebar.style.width = `${state.layout.sidebarWidth}px`;
@@ -565,10 +580,11 @@ export class Workbench {
 		this.sidebar.hidden = false;
 		this.sidebarSash.hidden = false;
 		for (const [id, element] of Object.entries(this.views)) element.style.display = id === view ? 'flex' : 'none';
-		for (const [id, item] of Object.entries(this.activityItems)) if (id === 'explorer' || id === 'search' || id === 'scm') item.classList.toggle('active', id === view);
+		for (const [id, item] of Object.entries(this.activityItems)) if (id === 'explorer' || id === 'search' || id === 'scm' || id === 'analysis') item.classList.toggle('active', id === view);
 		state.saveLayout();
 		if (view === 'scm') void this.scm.refresh();
 		if (view === 'extensions') void this.extensions.refresh();
+		if (view === 'analysis') void this.analysis.refresh();
 		if (focus) this.views[view].querySelector<HTMLElement>('[tabindex]')?.focus();
 	}
 
@@ -601,7 +617,7 @@ export class Workbench {
 		state.layout.sidebarVisible = !state.layout.sidebarVisible;
 		this.sidebar.hidden = !state.layout.sidebarVisible;
 		this.sidebarSash.hidden = !state.layout.sidebarVisible;
-		for (const id of ['explorer', 'search', 'scm']) this.activityItems[id]?.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
+		for (const id of ['explorer', 'search', 'scm', 'analysis']) this.activityItems[id]?.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
 		state.saveLayout();
 	}
 
@@ -762,6 +778,8 @@ export class Workbench {
 		this.extensions.onChanged = () => this.scheduleRefresh(0);
 		this.scm.onOpenFile = (path) => void this.editors.openFile(path);
 		this.scm.onOpenDiff = (diff) => void this.editors.openDiff({ kind: 'diff', ...diff });
+		// The Analysis sidebar's tool rows open their result pages in the editor area.
+		this.analysis.onOpenTool = (tool: AnalysisToolId) => void this.editors.openAnalysisPage(tool);
 		this.scm.onOpenGraph = (repo) => this.openGraph(repo);
 		this.scm.onShowFileHistory = (path) => this.showFileHistoryInGraph(path);
 		this.scm.onCount = (count) => this.setScmBadge(count);
@@ -821,6 +839,7 @@ export class Workbench {
 		// The symbol index's builds report from the backend (an open's resume, a watcher's
 		// incremental update, this command's own rebuild): the status item follows them all.
 		void listen<SymbolIndexStatus>('studio://symbol-index', (event) => this.statusBar.setSymbols(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
+		void listen<AnalysisStatus>('studio://analysis-index', (event) => this.analysis.noteStatus(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
 		window.addEventListener('focus', this.onWindowFocusBound);
 		window.addEventListener('blur', this.onWindowBlurBound);
 		void getCurrentWindow().onCloseRequested(async (event) => {
@@ -1293,7 +1312,7 @@ export class Workbench {
 		this.sidebar.hidden = true;
 		this.sidebarSash.hidden = true;
 		if (this.panel.isVisible()) this.panel.toggle();
-		for (const id of ['explorer', 'search', 'scm']) this.activityItems[id]?.classList.remove('active');
+		for (const id of ['explorer', 'search', 'scm', 'analysis']) this.activityItems[id]?.classList.remove('active');
 		state.saveLayout();
 		document.title = `${basename(path)} - Git Graph Studio`;
 		this.titleBar.setFolderName(basename(path));

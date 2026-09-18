@@ -86,7 +86,9 @@ Two processes joined by Tauri IPC, with one library at the core:
 
 The principles below are the plan's §3, condensed. They apply to every change.
 
-1. **Pure-Rust backend.** No C bindings; syntect runs on `default-fancy`, git access is gix.
+1. **Pure-Rust backend.** No C bindings beyond the one sanctioned exception (plan §3.1):
+   tree-sitter grammars compiled by cargo's `cc`, each behind a `grammar-*` feature;
+   syntect runs on `default-fancy`, git access is gix.
 2. **The read path never spawns a process.** Commit, ref, diff, config and file-at-revision
    reads use the linked engine. Writes (stage, commit, fetch, push, …) use the `git` CLI, and
    only through `src-tauri/src/git.rs`.
@@ -130,6 +132,7 @@ Extensions view would call it), a mission line, and a test file.
 | 14 | Performance Lab | Measurement, metrics and the perf gate |
 | 15 | Build & Release Pipeline | Asset preparation, packaging, installers, CI |
 | 16 | Symbol MCP Server | The `ggs --mcp` AI bridge over the symbol index |
+| 17 | Code Analysis | tree-sitter parsing and the five analysis tools |
 
 ### 1. Workbench Shell
 
@@ -192,8 +195,10 @@ updated file-by-file by the watcher.
   `src/symbolDbView.ts` (the Symbol Database page - the index as a collapsible
   folder / file / symbol tree with reference counts, filter and rebuild)
 - Backend: `src-tauri/src/cmd_symbols.rs` (the index state, the build / resume / rebuild
-  commands, `symbol_lookup` / `symbol_references`), `src-tauri/src/symbols/store.rs` (the
-  compact on-disk store), `src-tauri/src/cmd_search.rs` (rayon-parallelised text search, the
+  commands, `symbol_lookup` / `symbol_references`), `src-tauri/src/symbols/parse.rs` (the
+  tree-sitter parser layer, plan M4.1: one embedded `.scm` query per language over defs,
+  call sites and imports, each grammar behind a `grammar-*` Cargo feature, the outline scan
+  as the fallback), `src-tauri/src/symbols/store.rs` (the compact on-disk store), `src-tauri/src/cmd_search.rs` (rayon-parallelised text search, the
   in-memory index fallback, the folder-comparison and byte-comparison services; reuses the
   Quick Open walk so the exclusion policy is one list)
 
@@ -332,8 +337,27 @@ same per-file outline the Symbol Database page renders), `search_symbols`,
 `index_status`. stderr is logs; stdout is protocol only.
 
 - Backend: `src-tauri/src/mcp.rs` (the server loop, the tool implementations, the
-  handshake); the index itself is module 5's (`cmd_symbols.rs` / `symbols/store.rs`)
+  handshake); the index itself is module 5's (`cmd_symbols.rs` / `symbols/store.rs`), the
+  analysis tools sit on module 17's engine (`cmd_analysis.rs` / `analysis/`)
 - Tests: `mcp.rs`'s `#[cfg(test)]` module (scratch repository over a temp index home)
+
+### 17. Code Analysis
+
+The Code Analysis workbench: an activity bar entry (`Ctrl+Shift+A`) with a sidebar of five
+tools — Call Graph (SVG: every call relationship in the workspace on open, then per-symbol
+callers/callees walks, click a node to walk), Complexity & Hotspots, Dead Code,
+Security Scan (rule-based, no taint tracking) and the Import Graph (with cycles) — each
+opening a streamed result page in the editor area. The engine resolves calls by name with
+receiver hints (no type inference); its honest limits are stated on the pages themselves.
+
+- Frontend: `src/analysisView.ts` (the sidebar), `src/analysisTools.ts` (the shared tool
+  registry), `src/analysisPages.ts` (the lazy result pages: streaming reports and the SVG
+  graphs)
+- Backend: `src-tauri/src/cmd_analysis.rs` (the per-root `AnalysisIndex`, the streaming
+  tool commands), `src-tauri/src/analysis/` (`mod.rs` the engine and call graph,
+  `metrics.rs`, `deadcode.rs`, `security.rs`, `imports.rs`); parsing comes from module 5's
+  `symbols/parse.rs`
+- Tests: `tests/analysis.test.ts`, the `analysis/` modules' `#[cfg(test)]`
 
 ### 15. Build & Release Pipeline
 

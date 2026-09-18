@@ -21,8 +21,8 @@ use rayon::prelude::*;
 use crate::cmd_fs::walk_files;
 use crate::cmd_search::{is_symbol_source, WorkspaceSymbol};
 
-/// The symbol kinds the outline extractor produces, as ids on disk. The order is the format:
-/// a kind byte is an index into this table.
+/// The symbol kinds the parser layer produces, as ids on disk. The order is the format:
+/// a kind byte is an index into this table — new kinds are appended, never inserted.
 const KINDS: &[&str] = &[
     "function",
     "method",
@@ -32,6 +32,7 @@ const KINDS: &[&str] = &[
     "enum",
     "module",
     "type",
+    "macro",
 ];
 
 fn kind_id(kind: &str) -> u8 {
@@ -44,7 +45,12 @@ fn kind_name(id: u8) -> &'static str {
 
 /// The format marker: a corrupt or foreign file is discarded, never fatal.
 const MAGIC: &[u8; 6] = b"GGSIDX";
-const VERSION: u8 = 1;
+/// Format 2 (the tree-sitter parser layer, plan M4.1): symbols gained a column, an end
+/// line and an interned container name. A version-1 file fails the load below and is
+/// rebuilt from scratch.
+const VERSION: u8 = 2;
+/// The interned-name id a symbol without a container carries.
+const NO_CONTAINER: u32 = u32::MAX;
 /// Full builds report progress every this many files; also the cancellation checkpoint.
 pub const BUILD_BATCH: usize = 256;
 
@@ -52,7 +58,11 @@ pub const BUILD_BATCH: usize = 256;
 struct StoredSymbol {
     kind: u8,
     name_id: u32,
+    /// The enclosing type's interned name, or [`NO_CONTAINER`].
+    container_id: u32,
     line: u32,
+    column: u32,
+    end_line: u32,
 }
 
 /// One indexed file: its fingerprint and what it declares. `words` is the transpose of the
@@ -71,7 +81,17 @@ struct Extraction {
     path: String,
     mtime_ms: u64,
     size: u64,
-    symbols: Vec<(u8, String, u32)>,
+    symbols: Vec<Extracted>,
+}
+
+/// One declaration as extracted, names still owned by the file.
+struct Extracted {
+    kind: u8,
+    name: String,
+    container: Option<String>,
+    line: u32,
+    column: u32,
+    end_line: u32,
 }
 
 pub struct SymbolStore {
@@ -144,6 +164,10 @@ impl SymbolStore {
                     name: self.names[symbol.name_id as usize].clone(),
                     path: file.path.clone(),
                     line: symbol.line as usize,
+                    column: symbol.column as usize,
+                    end_line: symbol.end_line as usize,
+                    container: (symbol.container_id != NO_CONTAINER)
+                        .then(|| self.names[symbol.container_id as usize].clone()),
                 });
             }
         }
@@ -233,11 +257,15 @@ impl SymbolStore {
         }
         extracted.sort_by(|a, b| a.path.cmp(&b.path));
 
-        // Phase 2: the name table, interned in sorted order so ids are binary-searchable.
+        // Phase 2: the name table (declaration names and container names alike), interned
+        // in sorted order so ids are binary-searchable.
         let mut interned: BTreeMap<String, u32> = BTreeMap::new();
         for file in &extracted {
-            for (_, name, _) in &file.symbols {
-                interned.entry(name.clone()).or_insert_with(|| 0);
+            for symbol in &file.symbols {
+                interned.entry(symbol.name.clone()).or_insert_with(|| 0);
+                if let Some(container) = &symbol.container {
+                    interned.entry(container.clone()).or_insert_with(|| 0);
+                }
             }
         }
         let names: Vec<String> = interned.keys().cloned().collect();
@@ -267,10 +295,17 @@ impl SymbolStore {
                     let symbols = file
                         .symbols
                         .iter()
-                        .map(|&(kind, ref name, line)| StoredSymbol {
-                            kind,
-                            name_id: lookup[name.as_str()],
-                            line,
+                        .map(|symbol| StoredSymbol {
+                            kind: symbol.kind,
+                            name_id: lookup[symbol.name.as_str()],
+                            container_id: symbol
+                                .container
+                                .as_deref()
+                                .and_then(|name| lookup.get(name).copied())
+                                .unwrap_or(NO_CONTAINER),
+                            line: symbol.line,
+                            column: symbol.column,
+                            end_line: symbol.end_line,
                         })
                         .collect();
                     (file.path.clone(), words, symbols)
@@ -446,13 +481,15 @@ impl SymbolStore {
         // Intern the names not yet known (the sorted invariant makes the check a search).
         let mut fresh: BTreeSet<String> = BTreeSet::new();
         for file in &upserts {
-            for (_, name, _) in &file.symbols {
-                if self
-                    .names
-                    .binary_search_by(|n| n.as_str().cmp(name.as_str()))
-                    .is_err()
-                {
-                    fresh.insert(name.clone());
+            for symbol in &file.symbols {
+                for name in std::iter::once(&symbol.name).chain(symbol.container.iter()) {
+                    if self
+                        .names
+                        .binary_search_by(|n| n.as_str().cmp(name.as_str()))
+                        .is_err()
+                    {
+                        fresh.insert(name.clone());
+                    }
                 }
             }
         }
@@ -476,10 +513,17 @@ impl SymbolStore {
             let symbols = file
                 .symbols
                 .iter()
-                .map(|&(kind, ref name, line)| StoredSymbol {
-                    kind,
-                    name_id: lookup[name.as_str()],
-                    line,
+                .map(|symbol| StoredSymbol {
+                    kind: symbol.kind,
+                    name_id: lookup[symbol.name.as_str()],
+                    container_id: symbol
+                        .container
+                        .as_deref()
+                        .and_then(|name| lookup.get(name).copied())
+                        .unwrap_or(NO_CONTAINER),
+                    line: symbol.line,
+                    column: symbol.column,
+                    end_line: symbol.end_line,
                 })
                 .collect();
             let entry = FileEntry {
@@ -523,6 +567,9 @@ impl SymbolStore {
         for file in &mut self.files {
             for symbol in &mut file.symbols {
                 symbol.name_id = new_ids[symbol.name_id as usize];
+                if symbol.container_id != NO_CONTAINER {
+                    symbol.container_id = new_ids[symbol.container_id as usize];
+                }
             }
             for word in &mut file.words {
                 *word = new_ids[*word as usize];
@@ -606,7 +653,10 @@ impl SymbolStore {
             for symbol in &file.symbols {
                 out.push(symbol.kind);
                 out.extend_from_slice(&symbol.name_id.to_le_bytes());
+                out.extend_from_slice(&symbol.container_id.to_le_bytes());
                 out.extend_from_slice(&symbol.line.to_le_bytes());
+                out.extend_from_slice(&symbol.column.to_le_bytes());
+                out.extend_from_slice(&symbol.end_line.to_le_bytes());
             }
         }
         for refs in &self.refs {
@@ -651,14 +701,22 @@ impl SymbolStore {
             for _ in 0..symbols {
                 let kind = take(&bytes, &mut at, 1)?[0];
                 let name_id = take_u32(&bytes, &mut at)?;
+                let container_id = take_u32(&bytes, &mut at)?;
                 let line = take_u32(&bytes, &mut at)?;
-                if name_id as usize >= names.len() {
+                let column = take_u32(&bytes, &mut at)?;
+                let end_line = take_u32(&bytes, &mut at)?;
+                if name_id as usize >= names.len()
+                    || (container_id != NO_CONTAINER && container_id as usize >= names.len())
+                {
                     return None;
                 }
                 parsed.push(StoredSymbol {
                     kind,
                     name_id,
+                    container_id,
                     line,
+                    column,
+                    end_line,
                 });
             }
             files.push(FileEntry {
@@ -728,9 +786,16 @@ fn extract_file(root: &str, relative: &str) -> Option<Extraction> {
     let stat = stat_of(&path)?;
     let text = fs::read_to_string(&path).ok()?;
     let ext = relative.rsplit_once('.')?.1;
-    let symbols = crate::viewer::outline_symbols_for(&text, ext)
+    let symbols = crate::symbols::parse::parse_symbols(&text, ext)
         .into_iter()
-        .map(|s| (kind_id(&s.kind), s.name, s.line as u32))
+        .map(|s| Extracted {
+            kind: kind_id(s.kind),
+            name: s.name,
+            container: s.container,
+            line: s.line as u32,
+            column: s.column as u32,
+            end_line: s.end_line as u32,
+        })
         .collect();
     Some(Extraction {
         path: relative.to_owned(),

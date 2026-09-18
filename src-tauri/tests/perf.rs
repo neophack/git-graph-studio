@@ -141,6 +141,24 @@ fn opening_a_large_repository_stays_within_the_budgets() {
         symbols.len()
     );
 
+    // The Code Analysis build (module 17): the same tree-sitter parse plus the call-edge
+    // derivation — budgeted like the symbol index, with room for the edge pass.
+    let started = Instant::now();
+    let analysis = git_graph_studio_lib::analysis::AnalysisData::build(
+        &root,
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4),
+        &|_, _| {},
+        &|| false,
+    )
+    .expect("the analysis builds");
+    let analysis_ms = ms(started);
+    assert!(
+        analysis.symbol_count() >= files,
+        "at least one symbol per file in the analysis"
+    );
+
     // The engine phases run in-process, exactly as the app runs them (the engine is linked
     // into the app; there is no backend process).
     let started = Instant::now();
@@ -175,6 +193,7 @@ fn opening_a_large_repository_stays_within_the_budgets() {
             "rawReadAllFiles": raw_read_ms,
             "searchTodo": search_ms,
             "symbolIndex": index_ms,
+            "analysisBuild": analysis_ms,
             "repoRoot": root_ms,
             "scmStatus": status_ms,
             "graphFirstPage": first_page_ms,
@@ -200,6 +219,10 @@ fn opening_a_large_repository_stays_within_the_budgets() {
     assert!(
         index_ms <= (3.0 * raw_read_ms + 1500.0) * allowance,
         "symbol index {index_ms} ms against a raw read of {raw_read_ms} ms"
+    );
+    assert!(
+        analysis_ms <= (4.0 * raw_read_ms + 2500.0) * allowance,
+        "analysis build {analysis_ms} ms against a raw read of {raw_read_ms} ms"
     );
     assert!(root_ms <= budget(1000.0, 300.0), "repo root {root_ms} ms");
     assert!(

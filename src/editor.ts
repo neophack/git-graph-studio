@@ -9,7 +9,7 @@ import type { MergeView } from '@codemirror/merge';
 import { invoke } from '@tauri-apps/api/core';
 
 import { hasBookmark, toggleBookmark } from './bookmarks';
-import { loadCanViews, loadCallTree, loadFastView, loadFileHistory, loadFolderCompare, loadHexCompare, loadHexView, loadMerge, loadMergeEditor, loadSnippetRegistry, loadSymbolDbView, loadTextEditor } from './lazy';
+import { loadAnalysisPages, loadCanViews, loadCallTree, loadFastView, loadFileHistory, loadFolderCompare, loadHexCompare, loadHexView, loadMerge, loadMergeEditor, loadSnippetRegistry, loadSymbolDbView, loadTextEditor } from './lazy';
 // The hex and CAN views are async chunks (lazy.ts): a binary or a CAN trace is the exception
 // among opens, and their code would otherwise ride in the first-paint bundle. The fast
 // viewer, the folder-compare, merge-conflict, file-history and call-tree views and the
@@ -43,6 +43,23 @@ let cm: typeof TextEditor | null = null;
 async function textEditor(): Promise<typeof TextEditor> {
 	return (cm ??= await loadTextEditor());
 }
+
+/** The Code Analysis tabs' labels and icons (module 17): English, like every tab label —
+ *  the pages' own text goes through `t()`. */
+const ANALYSIS_PAGE_LABELS: Record<import('./analysisTools').AnalysisToolId, string> = {
+	callgraph: 'Call Graph',
+	metrics: 'Complexity & Hotspots',
+	deadcode: 'Dead Code',
+	security: 'Security Scan',
+	imports: 'Import Graph'
+};
+const ANALYSIS_PAGE_ICONS: Record<import('./analysisTools').AnalysisToolId, string> = {
+	callgraph: 'callout',
+	metrics: 'pulse',
+	deadcode: 'circle-slash',
+	security: 'shield',
+	imports: 'type-hierarchy-sub'
+};
 
 /** The windowed editor module, loaded on the first large-file open (it drags CodeMirror in,
  *  so like the text editor it stays out of the first-paint bundle). */
@@ -151,6 +168,7 @@ export type EditorInput =
 	| { kind: 'folders'; id: string; left: string; right: string }
 	| { kind: 'calltree'; id: string; symbol: WsSymbol }
 	| { kind: 'symboldb'; id: string }
+	| { kind: 'analysis'; id: string; tool: import('./analysisTools').AnalysisToolId }
 	| { kind: 'graph' }
 	| { kind: 'help'; help: 'welcome' | 'shortcuts' }
 	| { kind: 'markdown'; path: string }
@@ -178,6 +196,8 @@ export interface Editor {
 	hexCompare?: HexCompareView;
 	callTree?: CallTreeView;
 	symbolDatabase?: import('./symbolDbView').SymbolDatabaseView;
+	/** A Code Analysis page (module 17) — the view the lazy analysisPages chunk mounts. */
+	analysis?: import('./analysisPages').AnalysisPageView;
 	mergeToolbar?: MergeToolbar;
 	/** A preview's re-render (the Markdown preview follows its source). */
 	render?: () => Promise<void>;
@@ -219,6 +239,7 @@ function inputId(input: EditorInput): string {
 		case 'diff': return 'diff:' + input.id;
 		case 'folders': return 'folders:' + input.id;
 		case 'symboldb': return input.id;
+		case 'analysis': return 'analysis:' + input.tool;
 		case 'calltree': return 'calltree:' + input.id;
 		case 'compare': return 'compare:' + input.id;
 		case 'graph': return 'graph';
@@ -1871,6 +1892,32 @@ export class EditorGroup {
 		editor.symbolDatabase = new SymbolDatabaseView(editor.pane);
 		editor.symbolDatabase.onOpen = (path, line) => void this.openFile(joinPath(this.rootPath ?? '', path), { line });
 		this.add(editor);
+	}
+
+	/** A Code Analysis tab (module 17): one per tool — the streaming reports and the graph
+	 *  drawings the lazy analysisPages chunk mounts, like the CAN views after it. */
+	async openAnalysisPage(tool: import('./analysisTools').AnalysisToolId): Promise<void> {
+		const id = `analysis:${tool}`;
+		const existing = this.open.find((e) => e.input.kind === 'analysis' && e.input.id === id);
+		if (existing) {
+			this.activate(existing);
+			return;
+		}
+		const editor: Editor = {
+			input: { kind: 'analysis', id, tool },
+			id,
+			label: ANALYSIS_PAGE_LABELS[tool],
+			iconClass: ANALYSIS_PAGE_ICONS[tool],
+			pane: el('div', 'editor-pane'),
+			dirty: false
+		};
+		editor.pane.appendChild(el('div', 'an-loading', ['Loading…']));
+		this.add(editor);
+		const { createAnalysisPage } = await loadAnalysisPages();
+		if (!this.open.includes(editor)) return; // the tab closed while the chunk loaded
+		editor.pane.textContent = '';
+		editor.analysis = createAnalysisPage(tool, editor.pane);
+		editor.analysis.onOpen = (path, line) => void this.openFile(joinPath(this.rootPath ?? '', path), { line });
 	}
 
 	/** A Call Tree tab for the symbol under the cursor (or given). */

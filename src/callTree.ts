@@ -13,6 +13,10 @@ export interface WsSymbol {
 	name: string;
 	path: string;
 	line: number;
+	/** The parser layer's additions (symbols/parse.rs); 0 / the start line when absent. */
+	column?: number;
+	endLine?: number;
+	container?: string | null;
 }
 
 export interface RefFile {

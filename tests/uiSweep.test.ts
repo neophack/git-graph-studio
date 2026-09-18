@@ -90,6 +90,48 @@ function richHandlers(): Map<string, Handler> {
 	map.set('scm_blame', () => [{ hash: 'a'.repeat(40), author: 'Ada', time: 1, summary: 'first' }]);
 	map.set('file_history', () => [{ hash: 'a'.repeat(40), author: 'Ada', date: 1700000000, message: 'first' }]);
 	map.set('workspace_symbols', () => [{ kind: 'function', name: 'alpha', path: 'src/main.rs', line: 0 }]);
+	map.set('analysis_status', () => ({ state: 'ready', done: 2, total: 2, files: 2, symbols: 4, calls: 2 }));
+	map.set('analysis_rebuild', ({ onEvent }) => {
+		const channel = onEvent as { onmessage: (e: unknown) => void };
+		channel.onmessage({ kind: 'progress', done: 2, total: 2 });
+		channel.onmessage({ kind: 'done', files: 2, symbols: 4, calls: 2, cancelled: false });
+		return { state: 'ready', done: 2, total: 2, files: 2, symbols: 4, calls: 2 };
+	});
+	map.set('analysis_call_graph', () => ({
+		nodes: [
+			{ kind: 'function', name: 'alpha', container: null, path: 'src/main.rs', line: 0, complexity: 2, signature: 'fn alpha()', depth: 0 },
+			{ kind: 'function', name: 'beta', container: null, path: 'src/main.rs', line: 1, complexity: 1, signature: 'fn beta()', depth: 1 }
+		],
+		edges: [{ from: { name: 'alpha', path: 'src/main.rs', line: 0 }, to: { name: 'beta', path: 'src/main.rs', line: 1 }, callPath: 'src/main.rs', callLine: 0, callColumn: 12 }],
+		ambiguous: 0
+	}));
+	map.set('analysis_workspace_call_graph', () => ({
+		nodes: [
+			{ kind: 'function', name: 'alpha', container: null, path: 'src/main.rs', line: 0, complexity: 2, signature: 'fn alpha()', depth: 0 },
+			{ kind: 'function', name: 'beta', container: null, path: 'src/main.rs', line: 1, complexity: 1, signature: 'fn beta()', depth: 1 }
+		],
+		edges: [{ from: { name: 'alpha', path: 'src/main.rs', line: 0 }, to: { name: 'beta', path: 'src/main.rs', line: 1 }, callPath: 'src/main.rs', callLine: 0, callColumn: 12 }],
+		ambiguous: 0, totalNodes: 2, totalEdges: 1
+	}));
+	map.set('analysis_metrics', ({ onEvent }) => {
+		const channel = onEvent as { onmessage: (e: unknown) => void };
+		channel.onmessage({ kind: 'batch', rows: [{ path: 'src/main.rs', name: 'alpha', kind: 'function', container: null, line: 0, lines: 1, params: 0, complexity: 4, nesting: 1, refs: 2, hotspot: 8 }] });
+		channel.onmessage({ kind: 'done', files: 2, functions: 4, cancelled: false });
+		return null;
+	});
+	map.set('analysis_dead_code', ({ onEvent }) => {
+		const channel = onEvent as { onmessage: (e: unknown) => void };
+		channel.onmessage({ kind: 'batch', rows: [{ path: 'src/main.rs', name: 'orphan', kind: 'function', container: null, line: 2, exported: false, lines: 3 }] });
+		channel.onmessage({ kind: 'done', found: 1, cancelled: false });
+		return null;
+	});
+	map.set('analysis_security', ({ onEvent }) => {
+		const channel = onEvent as { onmessage: (e: unknown) => void };
+		channel.onmessage({ kind: 'batch', findings: [{ ruleId: 'SEC-003', severity: 'error', message: 'secret-looking literal assigned to a credential variable', path: 'src/main.rs', line: 3, column: 0, cwe: 'CWE-798' }] });
+		channel.onmessage({ kind: 'done', files: 2, findings: 1, cancelled: false });
+		return null;
+	});
+	map.set('analysis_import_graph', () => ({ edges: [['src/a.js', 'src/b.js'], ['src/b.js', 'src/a.js']], cycles: [['src/a.js', 'src/b.js']] }));
 	map.set('find_references', () => [{ path: 'src/main.rs', matches: [{ line: 2, column: 13, length: 5, text: 'fn main() { alpha(); }' }] }]);
 	map.set('search_workspace', ({ onEvent }) => {
 		const channel = onEvent as { onmessage: (e: unknown) => void };
@@ -265,8 +307,8 @@ function view(index: number): HTMLElement {
 	return document.querySelectorAll<HTMLElement>('#sidebar .view')[index]!;
 }
 
-async function showView(id: 'explorer' | 'search' | 'scm' | 'extensions'): Promise<void> {
-	await commands.execute({ explorer: 'workbench.showExplorer', search: 'workbench.showSearch', scm: 'workbench.showScm', extensions: 'workbench.showExtensions' }[id]);
+async function showView(id: 'explorer' | 'search' | 'scm' | 'extensions' | 'analysis'): Promise<void> {
+	await commands.execute({ explorer: 'workbench.showExplorer', search: 'workbench.showSearch', scm: 'workbench.showScm', extensions: 'workbench.showExtensions', analysis: 'workbench.showAnalysis' }[id]);
 	await flush(6);
 }
 
@@ -514,6 +556,48 @@ describe('the full UI sweep', () => {
 			await showView('extensions');
 			const extensions = view(3);
 			await clickAll(extensions, '.sidebar-title .action-btn, button, .row', count);
+			await showView('explorer');
+		});
+	});
+
+	it('analysis sidebar and pages', { timeout: 120_000 }, async () => {
+		await surface('analysis sidebar and pages', async (count) => {
+			await showView('analysis');
+			const analysis = view(4);
+			// The rebuild action and every tool row: each row opens a result page in the
+			// editor area, whose report commands are all scripted above.
+			await clickAll(analysis, '.pane-header .action-btn, .an-tool', count, { after: async () => { await flush(6); } });
+			// The five pages are tabs now; drive every control they own.
+			const pages = document.querySelectorAll<HTMLElement>('.an-page');
+			for (const page of pages) {
+				await clickAll(page, '.an-header .action-btn, .an-toggle, .an-row, .an-cycle', count);
+				const filter = page.querySelector<HTMLInputElement>('.an-filter');
+				if (filter) type(filter, 'al');
+				const checkbox = page.querySelector<HTMLInputElement>('.an-option input');
+				if (checkbox) {
+					checkbox.checked = true;
+					checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+					count();
+					await flush(4);
+				}
+				const depth = page.querySelector<HTMLSelectElement>('.an-depth');
+				if (depth) {
+					depth.value = '3';
+					depth.dispatchEvent(new Event('change', { bubbles: true }));
+					count();
+					await flush(4);
+				}
+				const search = page.querySelector<HTMLInputElement>('.an-symbol');
+				if (search) {
+					type(search, 'alpha');
+					await flush(2);
+				}
+			}
+			// The call graph's nodes: a click walks from the node, a double-click opens it.
+			for (const node of document.querySelectorAll<SVGElement>('.an-node')) {
+				click(node); count();
+				await flush(2);
+			}
 			await showView('explorer');
 		});
 	});

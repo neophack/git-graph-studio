@@ -50,3 +50,7 @@ export const loadFileHistory = once(() => import('./fileHistory'));
 export const loadCallTree = once(() => import('./callTree'));
 export const loadSymbolDbView = once(() => import('./symbolDbView'));
 export const loadSnippetRegistry = once(() => import('./snippetRegistry'));
+
+/** The Code Analysis result pages (module 17): the streaming reports and the graph
+ *  drawings, loaded with the first tool tab the Analysis sidebar opens. */
+export const loadAnalysisPages = once(() => import('./analysisPages'));

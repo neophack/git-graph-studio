@@ -1,20 +1,28 @@
 //! The Model Context Protocol server behind `ggs --mcp <folder>` (plan M4's AI bridge):
-//! the persistent symbol index served to AI assistants over stdio. One process, one
-//! repository, newline-delimited JSON-RPC 2.0 — the transport every MCP client (Claude
-//! Desktop, Cline, Cursor, …) launches servers with. The protocol surface is deliberately
-//! the small complete set: the `initialize` handshake, `ping`, `tools/list`, `tools/call`.
+//! the persistent symbol index and the Code Analysis engine served to AI assistants over
+//! stdio. One process, one repository, newline-delimited JSON-RPC 2.0 — the transport
+//! every MCP client (Claude Desktop, Cline, Cursor, …) launches servers with. The
+//! protocol surface is deliberately the small complete set: the `initialize` handshake,
+//! `ping`, `tools/list`, `tools/call`.
 //!
 //! The tools mirror the in-app queries an AI needs to navigate a codebase it cannot load:
 //! `symbol_lookup` (where is this declared), `symbol_references` (where is it used —
 //! occurrence-narrowed like the app's own Find References), `symbol_tree` (the per-file
 //! outline the Symbol Database page shows), `search_symbols` (name search) and
-//! `index_status`. stderr carries the one startup line; stdout is protocol only.
+//! `index_status` — plus the module-17 analysis tools: `analysis_call_graph`,
+//! `analysis_metrics`, `analysis_dead_code`, `analysis_security` and
+//! `analysis_import_cycles`. stderr carries the one startup line; stdout is protocol only.
 
 use std::io::{BufRead, Write};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
+use crate::analysis::imports::import_graph;
+use crate::analysis::metrics::metric_rows;
+use crate::analysis::security::scan_file;
+use crate::analysis::{deadcode, AnalysisData, Direction};
+use crate::cmd_analysis::AnalysisIndex;
 use crate::cmd_search::WorkspaceSymbol;
 use crate::cmd_symbols::{scan_references, SymbolIndex};
 
@@ -24,14 +32,18 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 /// How many outline lines `symbol_tree` prints before saying it truncated — a whole
 /// monorepo must not flood the model's context.
 const TREE_LINE_BUDGET: usize = 4000;
+/// The same budget for the analysis reports.
+const REPORT_LINE_BUDGET: usize = 400;
 
 pub struct McpServer {
     root: String,
     index: Arc<SymbolIndex>,
+    analysis: Arc<AnalysisIndex>,
 }
 
 impl McpServer {
-    /// Build (or resume from `~/.ggs/index/`) the folder's symbol index, then serve.
+    /// Build (or resume from `~/.ggs/index/`) the folder's symbol index and analysis,
+    /// then serve.
     pub fn start(folder: &str) -> Result<McpServer, String> {
         let root = std::fs::canonicalize(folder)
             .map_err(|e| format!("{folder}: {e}"))?
@@ -43,16 +55,31 @@ impl McpServer {
         // A server start is what the client is waiting on: every core, like an explicit
         // rebuild, not the background half-budget.
         index.build_blocking(None, &root, None)?;
-        Ok(McpServer { root, index })
+        let analysis = Arc::new(AnalysisIndex::new());
+        analysis.build_blocking(None, &root, None)?;
+        Ok(McpServer {
+            root,
+            index,
+            analysis,
+        })
     }
 
-    /// A test seam: an index over a home the caller controls (never the developer's).
+    /// A test seam: an index and analysis over homes the caller controls (never the
+    /// developer's).
     #[cfg(test)]
-    fn with_index(root: &str, index: Arc<SymbolIndex>) -> McpServer {
+    fn with_parts(root: &str, index: Arc<SymbolIndex>, analysis: Arc<AnalysisIndex>) -> McpServer {
         McpServer {
             root: root.to_owned(),
             index,
+            analysis,
         }
+    }
+
+    /// The analysis behind the analysis tools, when it has landed.
+    fn analysis_data(&self) -> Result<Arc<Mutex<AnalysisData>>, (i64, String)> {
+        self.analysis
+            .analysis(&self.root)
+            .ok_or((-32603, "the analysis index is still building".to_owned()))
     }
 
     /// One received line becomes at most one response line. Notifications (no `id`) and
@@ -113,6 +140,12 @@ impl McpServer {
             "symbol_tree" => self.tool_tree(&args)?,
             "search_symbols" => self.tool_search(&args)?,
             "index_status" => self.tool_status(),
+            "analysis_call_graph" => self.tool_call_graph(&args)?,
+            "analysis_call_path" => self.tool_call_path(&args)?,
+            "analysis_metrics" => self.tool_metrics(&args)?,
+            "analysis_dead_code" => self.tool_dead_code(&args)?,
+            "analysis_security" => self.tool_security()?,
+            "analysis_import_cycles" => self.tool_import_cycles()?,
             other => return Err((-32602, format!("unknown tool: {other}"))),
         };
         // Tool failures are in-band (isError), protocol errors above are not — the MCP
@@ -261,6 +294,234 @@ impl McpServer {
 			symbols = status.symbols
 		)
     }
+
+    /* ---------- The module-17 analysis tools ---------- */
+
+    fn tool_call_graph(&self, args: &Value) -> Result<String, (i64, String)> {
+        let name = Self::arg_str(args, "name")?;
+        let direction = match args.get("direction").and_then(Value::as_str) {
+            Some("callers") => Direction::Callers,
+            _ => Direction::Callees,
+        };
+        let depth = args
+            .get("maxDepth")
+            .and_then(Value::as_u64)
+            .unwrap_or(2)
+            .clamp(1, 6) as u32;
+        let data = self.analysis_data()?;
+        let data = data.lock().unwrap();
+        let graph = data.call_graph(&name, None, direction, depth);
+        if graph.nodes.is_empty() {
+            return Ok(format!("No symbol named '{name}' is in the analysis."));
+        }
+        let mut out = format!(
+            "{n} node(s) around '{name}' ({direction}, depth ≤ {depth}), {edges} edge(s):",
+            n = graph.nodes.len(),
+            direction = match direction {
+                Direction::Callers => "callers",
+                Direction::Callees => "callees",
+            },
+            edges = graph.edges.len(),
+            depth = depth
+        );
+        for node in &graph.nodes {
+            let container = node
+                .container
+                .as_deref()
+                .map(|c| format!("{c}."))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "{n}depth {depth}  {kind} {container}{name} — {path}:{line}  (complexity {complexity})",
+                n = '\n',
+                depth = node.depth,
+                kind = node.kind,
+                name = node.name,
+                path = node.path,
+                line = node.line + 1,
+                complexity = node.complexity
+            ));
+        }
+        for edge in graph.edges.iter().take(REPORT_LINE_BUDGET) {
+            out.push_str(&format!(
+                "{n}{from_name} → {to_name}  at {path}:{line}",
+                n = '\n',
+                from_name = edge.from.name,
+                to_name = edge.to.name,
+                path = edge.call_path,
+                line = edge.call_line + 1
+            ));
+        }
+        Ok(out)
+    }
+
+    fn tool_call_path(&self, args: &Value) -> Result<String, (i64, String)> {
+        let from = Self::arg_str(args, "from")?;
+        let to = Self::arg_str(args, "to")?;
+        let data = self.analysis_data()?;
+        let data = data.lock().unwrap();
+        match data.call_path(&from, &to) {
+            None => Ok(format!("No call chain leads from '{from}' to '{to}'.")),
+            Some(chain) => {
+                let mut out = format!(
+                    "A shortest chain from '{from}' to '{to}' ({n} step(s)):",
+                    n = chain.len().saturating_sub(1)
+                );
+                for node in &chain {
+                    out.push_str(&format!(
+                        "{n}{kind} {name} — {path}:{line}",
+                        n = '\n',
+                        kind = node.kind,
+                        name = node.name,
+                        path = node.path,
+                        line = node.line + 1
+                    ));
+                }
+                Ok(out)
+            }
+        }
+    }
+
+    fn tool_metrics(&self, args: &Value) -> Result<String, (i64, String)> {
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(20)
+            .clamp(1, 200) as usize;
+        let data = self.analysis_data()?;
+        let rows = {
+            let data = data.lock().unwrap();
+            metric_rows(&data, &|_| 0)
+        };
+        let mut rows = rows;
+        rows.sort_by(|a, b| {
+            b.hotspot
+                .cmp(&a.hotspot)
+                .then(b.complexity.cmp(&a.complexity))
+        });
+        if rows.is_empty() {
+            return Ok("The analysis has no functions to measure.".to_owned());
+        }
+        let mut out = format!(
+            "Top {shown} of {total} function(s) by hotspot (complexity × references):",
+            shown = limit.min(rows.len()),
+            total = rows.len()
+        );
+        for row in rows.iter().take(limit) {
+            let container = row
+                .container
+                .as_deref()
+                .map(|c| format!("{c}."))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "{n}complexity {complexity}  {lines} lines  {params} params  nesting {nesting}  {kind} {container}{name} — {path}:{line}",
+                n = '\n',
+                complexity = row.complexity,
+                lines = row.lines,
+                params = row.params,
+                nesting = row.nesting,
+                kind = row.kind,
+                name = row.name,
+                path = row.path,
+                line = row.line + 1
+            ));
+        }
+        Ok(out)
+    }
+
+    fn tool_dead_code(&self, args: &Value) -> Result<String, (i64, String)> {
+        let include_exported = args
+            .get("includeExported")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let data = self.analysis_data()?;
+        let rows = {
+            let data = data.lock().unwrap();
+            deadcode::dead_rows(&data, include_exported)
+        };
+        if rows.is_empty() {
+            return Ok("No uncalled declarations found.".to_owned());
+        }
+        let mut out = format!(
+            "{total} declaration(s) no call site in this repository spells (first {shown}; exported declarations are excluded unless includeExported is true):",
+            total = rows.len(),
+            shown = rows.len().min(REPORT_LINE_BUDGET)
+        );
+        for row in rows.iter().take(REPORT_LINE_BUDGET) {
+            out.push_str(&format!(
+                "{n}{kind} {name} — {path}:{line}  ({lines} lines{exported})",
+                n = '\n',
+                kind = row.kind,
+                name = row.name,
+                path = row.path,
+                line = row.line + 1,
+                lines = row.lines,
+                exported = if row.exported { ", exported" } else { "" }
+            ));
+        }
+        Ok(out)
+    }
+
+    fn tool_security(&self) -> Result<String, (i64, String)> {
+        let data = self.analysis_data()?;
+        let mut out = String::new();
+        let mut total = 0usize;
+        {
+            let data = data.lock().unwrap();
+            for file in data.files() {
+                let Ok(text) =
+                    std::fs::read_to_string(std::path::Path::new(&self.root).join(&file.path))
+                else {
+                    continue;
+                };
+                let ext = file.path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+                for finding in scan_file(&file.path, ext, &text, &file.calls) {
+                    total += 1;
+                    if total > REPORT_LINE_BUDGET {
+                        continue;
+                    }
+                    out.push_str(&format!(
+                        "{n}[{severity}] {message} ({rule}, {cwe}) — {path}:{line}",
+                        n = '\n',
+                        severity = serde_json::to_string(&finding.severity)
+                            .unwrap_or_default()
+                            .trim_matches('"'),
+                        message = finding.message,
+                        rule = finding.rule_id,
+                        cwe = finding.cwe,
+                        path = finding.path,
+                        line = finding.line + 1
+                    ));
+                }
+            }
+        }
+        if total == 0 {
+            return Ok("No security rule findings.".to_owned());
+        }
+        Ok(format!("{total} finding(s):{out}"))
+    }
+
+    fn tool_import_cycles(&self) -> Result<String, (i64, String)> {
+        let data = self.analysis_data()?;
+        let graph = {
+            let data = data.lock().unwrap();
+            import_graph(&data)
+        };
+        if graph.cycles.is_empty() {
+            return Ok(format!(
+                "No import cycles among the {edges} dependency edge(s).",
+                edges = graph.edges.len()
+            ));
+        }
+        let mut out = format!(
+            "{count} import cycle(s) among {edges} dependency edge(s):",
+            count = graph.cycles.len(),
+            edges = graph.edges.len()
+        );
+        for cycle in graph.cycles.iter().take(REPORT_LINE_BUDGET) {
+            out.push_str(&format!("\n{}", cycle.join(" → ")));
+        }
+        Ok(out)
+    }
 }
 
 fn tool_catalogue() -> Value {
@@ -288,6 +549,36 @@ fn tool_catalogue() -> Value {
         {
             "name": "index_status",
             "description": "Which repository is indexed, its state, and the file / symbol counts.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "analysis_call_graph",
+            "description": "The call graph around every declaration of a name: callers or callees up to maxDepth (default 2), with each edge's call site. Resolution is name-based with receiver hints — same-named declarations fan out.",
+            "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "direction": { "type": "string", "enum": ["callers", "callees"], "description": "Which way to walk (default callees)" }, "maxDepth": { "type": "number", "description": "Levels to walk (1-6, default 2)" } }, "required": ["name"] }
+        },
+        {
+            "name": "analysis_call_path",
+            "description": "A shortest chain of calls between two declarations, by name: how control reaches `to` from `from`, as function — file:line steps.",
+            "inputSchema": { "type": "object", "properties": { "from": { "type": "string", "description": "The starting function's name" }, "to": { "type": "string", "description": "The target function's name" } }, "required": ["from", "to"] }
+        },
+        {
+            "name": "analysis_metrics",
+            "description": "Functions ranked by hotspot (cyclomatic complexity × references): complexity, lines, parameters and nesting per function.",
+            "inputSchema": { "type": "object", "properties": { "limit": { "type": "number", "description": "How many top functions to list (1-200, default 20)" } } }
+        },
+        {
+            "name": "analysis_dead_code",
+            "description": "Functions and methods no call site in the repository spells — conservative candidates, not verdicts; exported declarations are excluded unless includeExported is true.",
+            "inputSchema": { "type": "object", "properties": { "includeExported": { "type": "boolean", "description": "Also list exported declarations (default false)" } } }
+        },
+        {
+            "name": "analysis_security",
+            "description": "The rule-based security scan: hardcoded secrets, dangerous and weak-crypto APIs, each finding with severity and CWE.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "analysis_import_cycles",
+            "description": "The file dependency graph's strongly-connected components — every import cycle, as chains of file names.",
             "inputSchema": { "type": "object", "properties": {} }
         }
     ])
@@ -326,13 +617,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("src").join("lib.rs");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, "pub fn alpha() { beta(); }\nfn beta() {}\n").unwrap();
-        std::fs::write(dir.path().join("other.rs"), "fn alpha() { alpha(); }\n").unwrap();
+        std::fs::write(
+            &file,
+            "pub fn alpha() { beta(); }\nfn beta() {}\nfn orphan() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("other.rs"),
+            "fn alpha() { alpha(); }\nlet password = \"hunter2-super-secret-value\";\n",
+        )
+        .unwrap();
         let home = tempfile::tempdir().unwrap();
         let index = Arc::new(SymbolIndex::with_home(home.path().to_owned()));
         let root = dir.path().display().to_string();
         index.build_blocking(None, &root, None).unwrap();
-        (dir, McpServer::with_index(&root, index))
+        let analysis = Arc::new(AnalysisIndex::new());
+        analysis.build_blocking(None, &root, None).unwrap();
+        (dir, McpServer::with_parts(&root, index, analysis))
     }
 
     fn reply(server: &McpServer, line: &str) -> Value {
@@ -417,7 +718,13 @@ mod tests {
                 "symbol_references",
                 "symbol_tree",
                 "search_symbols",
-                "index_status"
+                "index_status",
+                "analysis_call_graph",
+                "analysis_call_path",
+                "analysis_metrics",
+                "analysis_dead_code",
+                "analysis_security",
+                "analysis_import_cycles"
             ]
         );
     }
@@ -449,7 +756,7 @@ mod tests {
 
         let status = call(&server, "index_status", json!({}));
         assert!(status.contains("state \"ready\""), "{status}");
-        assert!(status.contains("symbols 3"), "{status}");
+        assert!(status.contains("symbols 4"), "{status}");
     }
 
     #[test]
@@ -463,5 +770,32 @@ mod tests {
         );
         assert!(call(&server, "search_symbols", json!({ "query": "zzz" }))
             .contains("No symbol name contains"));
+    }
+
+    #[test]
+    fn the_analysis_tools_answer_over_the_engine() {
+        let (_dir, server) = scratch_server();
+        let graph = call(&server, "analysis_call_graph", json!({ "name": "alpha" }));
+        assert!(graph.contains("function alpha — src/lib.rs:1"), "{graph}");
+        assert!(graph.contains("alpha → beta"), "{graph}");
+
+        let metrics = call(&server, "analysis_metrics", json!({ "limit": 10 }));
+        assert!(metrics.contains("of 4 function(s)"), "{metrics}");
+        assert!(metrics.contains("function alpha"), "{metrics}");
+
+        let dead = call(&server, "analysis_dead_code", json!({}));
+        assert!(dead.contains("function orphan — src/lib.rs:3"), "{dead}");
+        assert!(!dead.contains("function alpha"), "{dead}");
+
+        let security = call(&server, "analysis_security", json!({}));
+        assert!(
+            security.contains("[error] secret-looking literal"),
+            "{security}"
+        );
+        assert!(security.contains("SEC-003"), "{security}");
+        assert!(security.contains("other.rs:2"), "{security}");
+
+        let cycles = call(&server, "analysis_import_cycles", json!({}));
+        assert!(cycles.contains("No import cycles"), "{cycles}");
     }
 }
