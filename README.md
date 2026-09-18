@@ -21,9 +21,10 @@ a tree-sitter parser layer (one grammar per language, each behind a Cargo featur
 symbol carries its column, range, enclosing type and complexity.
 
 The **Code Analysis** view (`Ctrl+Shift+A`, module 17) turns that parsed model into five
-tools, each a streamed result page in the editor area: a **Call Graph** (opens on the
-workspace's every call relationship with its edges on a pan-and-zoom canvas, then walks
-per symbol — callers and callees, click a node to continue from it), **Complexity & Hotspots** (cyclomatic
+tools, each a streamed result page in the editor area: **Module Analysis** (the
+workspace's cross-file calls drawn as file blocks on a canvas — @antv/G6 layouts assign
+the positions (force, layered, circular, …), blocks drag, a double-click opens the file —
+beside a collapsible tree of module → file → call site), **Complexity & Hotspots** (cyclomatic
 complexity, size, nesting per function), **Dead Code** (declarations no call site in the
 workspace spells), a rule-based **Security Scan** (hardcoded secrets, dangerous and
 weak-crypto APIs, with CWE tags) and the **Import Graph** (file dependencies with import

@@ -14,7 +14,7 @@
 // lists what was driven, so a surface that silently lost its controls shows up as a shrinking
 // count.
 
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +25,9 @@ import { Workbench } from '../src/workbench';
 import { commonHandlers, type Handler } from './scenarioFixtures';
 import { backend } from './tauriMock';
 import { click, flush, hover, key, rightClick, type } from './helpers';
+
+// jsdom has no canvas: the module analysis drawing runs on the G6 stub.
+vi.mock('@antv/g6', () => import('./g6Stub'));
 
 const REPO = 'C:\\repo';
 const NOTES = `${REPO}\\notes.txt`;
@@ -97,21 +100,21 @@ function richHandlers(): Map<string, Handler> {
 		channel.onmessage({ kind: 'done', files: 2, symbols: 4, calls: 2, cancelled: false });
 		return { state: 'ready', done: 2, total: 2, files: 2, symbols: 4, calls: 2 };
 	});
-	map.set('analysis_call_graph', () => ({
-		nodes: [
-			{ kind: 'function', name: 'alpha', container: null, path: 'src/main.rs', line: 0, complexity: 2, signature: 'fn alpha()', depth: 0 },
-			{ kind: 'function', name: 'beta', container: null, path: 'src/main.rs', line: 1, complexity: 1, signature: 'fn beta()', depth: 1 }
+	map.set('analysis_module_graph', () => ({
+		modules: [{ name: 'src', files: 1, symbols: 2 }, { name: '', files: 1, symbols: 1 }],
+		edges: [
+			{ from: 'src', to: '', calls: 2, files: 1 },
+			{ from: '', to: 'src', calls: 1, files: 1 }
 		],
-		edges: [{ from: { name: 'alpha', path: 'src/main.rs', line: 0 }, to: { name: 'beta', path: 'src/main.rs', line: 1 }, callPath: 'src/main.rs', callLine: 0, callColumn: 12 }],
-		ambiguous: 0
-	}));
-	map.set('analysis_workspace_call_graph', () => ({
-		nodes: [
-			{ kind: 'function', name: 'alpha', container: null, path: 'src/main.rs', line: 0, complexity: 2, signature: 'fn alpha()', depth: 0 },
-			{ kind: 'function', name: 'beta', container: null, path: 'src/main.rs', line: 1, complexity: 1, signature: 'fn beta()', depth: 1 }
+		fileEdges: [
+			{ from: 'src/main.rs', to: 'notes.txt', calls: 2, sites: [
+				{ from: 'alpha', to: 'beta', line: 0, column: 12 },
+				{ from: 'beta', to: 'gamma', line: 2, column: 8 }
+			] },
+			{ from: 'notes.txt', to: 'src/main.rs', calls: 1, sites: [{ from: 'gamma', to: 'alpha', line: 1, column: 4 }] }
 		],
-		edges: [{ from: { name: 'alpha', path: 'src/main.rs', line: 0 }, to: { name: 'beta', path: 'src/main.rs', line: 1 }, callPath: 'src/main.rs', callLine: 0, callColumn: 12 }],
-		ambiguous: 0, totalNodes: 2, totalEdges: 1
+		totalCalls: 3,
+		totalFileEdges: 2
 	}));
 	map.set('analysis_metrics', ({ onEvent }) => {
 		const channel = onEvent as { onmessage: (e: unknown) => void };
@@ -580,23 +583,14 @@ describe('the full UI sweep', () => {
 					count();
 					await flush(4);
 				}
-				const depth = page.querySelector<HTMLSelectElement>('.an-depth');
-				if (depth) {
-					depth.value = '3';
-					depth.dispatchEvent(new Event('change', { bubbles: true }));
+				// The module drawing's layout picker rebuilds the G6 graph.
+				const layout = page.querySelector<HTMLSelectElement>('.an-layout');
+				if (layout) {
+					layout.value = 'circular';
+					layout.dispatchEvent(new Event('change', { bubbles: true }));
 					count();
 					await flush(4);
 				}
-				const search = page.querySelector<HTMLInputElement>('.an-symbol');
-				if (search) {
-					type(search, 'alpha');
-					await flush(2);
-				}
-			}
-			// The call graph's nodes: a click walks from the node, a double-click opens it.
-			for (const node of document.querySelectorAll<SVGElement>('.an-node')) {
-				click(node); count();
-				await flush(2);
 			}
 			await showView('explorer');
 		});

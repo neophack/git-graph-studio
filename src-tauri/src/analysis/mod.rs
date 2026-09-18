@@ -16,6 +16,7 @@ pub mod bca;
 pub mod deadcode;
 pub mod imports;
 pub mod metrics;
+pub mod modules;
 pub mod security;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -91,18 +92,17 @@ pub struct CallGraph {
     pub ambiguous: usize,
 }
 
-/// The workspace-wide call graph the Call Graph page opens on: every declaration a
-/// resolved call touches (as caller or callee), one edge per caller→callee pair — the
-/// pair's first call site names it — layered by call depth, entry points at the top.
-/// `total_*` count before the caps below bite, so the page can say how much it shows.
-#[derive(Serialize, Clone, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceCallGraph {
-    pub nodes: Vec<GraphNode>,
-    pub edges: Vec<GraphEdge>,
-    pub ambiguous: usize,
-    pub total_nodes: usize,
-    pub total_edges: usize,
+/// One resolved call whose caller and callee sit in different files — the Module
+/// Analysis report's material. A call site that resolved to several declarations
+/// contributes one record per target, exactly as the per-symbol walk draws its fan-out.
+pub struct CrossFileCall {
+    pub from_file: String,
+    pub to_file: String,
+    /// Display spellings: `container.name` when the declaration has a container.
+    pub from_name: String,
+    pub to_name: String,
+    pub line: usize,
+    pub column: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -521,145 +521,38 @@ impl AnalysisData {
         }
     }
 
-    /// Every call relationship in the workspace at once (see [`WorkspaceCallGraph`]) —
-    /// the Call Graph page's opening view, before any symbol is picked. Capped: a
-    /// hundred-thousand-node SVG helps nobody; the page says what was left out, and the
-    /// filter and the per-symbol walk cover the rest.
-    pub fn workspace_call_graph(&self) -> WorkspaceCallGraph {
-        const MAX_NODES: usize = 2000;
-        const MAX_EDGES: usize = 6000;
-        // Participants: every declaration that calls or is called. Emission in file
-        // order keeps the caps deterministic run to run.
-        let participants: HashSet<DefKey> = self
-            .callees
-            .keys()
-            .chain(self.callers.keys())
-            .copied()
-            .collect();
-        let total_nodes = participants.len();
-        let mut kept: Vec<DefKey> = Vec::new();
-        'emit: for (file_id, file) in self.files.iter().enumerate() {
-            for symbol_id in 0..file.symbols.len() {
-                let key = (file_id as u32, symbol_id as u32);
-                if participants.contains(&key) {
-                    kept.push(key);
-                    if kept.len() >= MAX_NODES {
-                        break 'emit;
-                    }
-                }
-            }
-        }
-        let kept_set: HashSet<DefKey> = kept.iter().copied().collect();
-        // Every distinct pair workspace-wide, so `total_edges` counts what the caps hid.
-        let total_edges = self
-            .callees
-            .iter()
-            .flat_map(|(caller, list)| list.iter().map(move |(target, ..)| (*caller, *target)))
-            .collect::<HashSet<(DefKey, DefKey)>>()
-            .len();
-        // One drawn edge per pair, at the pair's first call site (call order). A site
-        // that resolved to several same-named declarations fans out in `ambiguous`
-        // exactly as the per-symbol walk counts it.
-        let mut edges: Vec<GraphEdge> = Vec::new();
-        let mut ambiguous = 0usize;
-        let mut drawn: HashSet<(DefKey, DefKey)> = HashSet::new();
-        let mut preds: HashMap<DefKey, Vec<DefKey>> = HashMap::new();
-        for &caller in &kept {
-            let Some(list) = self.callees.get(&caller) else {
-                continue;
-            };
-            let mut by_site: HashMap<(String, usize, usize), Vec<DefKey>> = HashMap::new();
-            for (target, path, line, column) in list {
-                by_site
-                    .entry((path.clone(), *line, *column))
-                    .or_default()
-                    .push(*target);
-            }
-            let mut sites: Vec<((String, usize, usize), Vec<DefKey>)> =
-                by_site.into_iter().collect();
-            sites.sort_by_key(|(site, _)| (site.1, site.2));
-            for ((path, line, column), targets) in sites {
-                let targets: Vec<DefKey> = targets
-                    .into_iter()
-                    .filter(|target| kept_set.contains(target))
-                    .collect();
-                if targets.is_empty() {
+    /// Every resolved cross-file call, in caller order (file, then declaration, then
+    /// call line) — the Module Analysis report's material.
+    pub fn cross_file_calls(&self) -> Vec<CrossFileCall> {
+        let mut calls: Vec<CrossFileCall> = Vec::new();
+        for (file_id, file) in self.files.iter().enumerate() {
+            // The callees table is keyed by declaration; walking each file's symbols in
+            // order keeps the output deterministic (HashMap iteration is not).
+            for (symbol_id, _) in file.symbols.iter().enumerate() {
+                let Some(list) = self.callees.get(&(file_id as u32, symbol_id as u32)) else {
                     continue;
-                }
-                ambiguous += targets.len() - 1;
-                for target in targets {
-                    if drawn.insert((caller, target)) {
-                        // The pair's first sight feeds the layering; the drawing stops
-                        // at its own cap.
-                        preds.entry(target).or_default().push(caller);
-                        if edges.len() < MAX_EDGES {
-                            edges.push(GraphEdge {
-                                from: self.endpoint_of(&caller),
-                                to: self.endpoint_of(&target),
-                                call_path: path.clone(),
-                                call_line: line,
-                                call_column: column,
-                            });
-                        }
+                };
+                let mut sites = list.clone();
+                sites.sort_by_key(|(_, _, line, column)| (*line, *column));
+                for (target, _, line, column) in sites {
+                    if target.0 as usize == file_id {
+                        continue; // the module report is the cross-file view
                     }
+                    let caller = &file.symbols[symbol_id];
+                    let callee_file = &self.files[target.0 as usize];
+                    let callee = &callee_file.symbols[target.1 as usize];
+                    calls.push(CrossFileCall {
+                        from_file: file.path.clone(),
+                        to_file: callee_file.path.clone(),
+                        from_name: display_name(caller),
+                        to_name: display_name(callee),
+                        line,
+                        column,
+                    });
                 }
             }
         }
-        edges.sort_by(|a, b| {
-            (&a.from.path, a.from.line, &a.to.path, a.to.line).cmp(&(
-                &b.from.path,
-                b.from.line,
-                &b.to.path,
-                b.to.line,
-            ))
-        });
-        // Longest-path layering: a declaration no kept node calls sits at 0, everything
-        // else one row below its deepest caller. A back edge (recursion, mutual
-        // recursion) stops at the node already on the stack — the edge still draws,
-        // just upward.
-        let mut color: HashMap<DefKey, u8> = HashMap::new();
-        let mut depth: HashMap<DefKey, u32> = HashMap::new();
-        fn layer(
-            key: DefKey,
-            preds: &HashMap<DefKey, Vec<DefKey>>,
-            color: &mut HashMap<DefKey, u8>,
-            depth: &mut HashMap<DefKey, u32>,
-        ) {
-            if depth.contains_key(&key) {
-                return;
-            }
-            color.insert(key, 1);
-            let mut level = 0u32;
-            if let Some(list) = preds.get(&key) {
-                for &p in list {
-                    if color.get(&p) == Some(&1) {
-                        continue;
-                    }
-                    layer(p, preds, color, depth);
-                    level = level.max(depth[&p] + 1);
-                }
-            }
-            color.insert(key, 2);
-            depth.insert(key, level);
-        }
-        for &key in &kept {
-            layer(key, &preds, &mut color, &mut depth);
-        }
-        let nodes: Vec<GraphNode> = kept
-            .iter()
-            .map(|&key| {
-                let mut node = self.node_of(&key, 0);
-                node.depth = depth[&key];
-                node
-            })
-            .collect();
-        WorkspaceCallGraph {
-            nodes,
-            edges,
-            ambiguous,
-            total_nodes,
-            total_edges,
-        }
+        calls
     }
 
     /// A shortest callee chain between any declaration of `from` and any declaration of
@@ -749,6 +642,15 @@ fn enclosing_symbol(file: &FileAnalysis, line: usize) -> Option<u32> {
         .iter()
         .position(|s| s.line <= line && line <= s.end_line)
         .map(|id| id as u32)
+}
+
+/// A declaration's display spelling: `container.name` when it has a container.
+fn display_name(symbol: &ParsedSymbol) -> String {
+    symbol
+        .container
+        .as_deref()
+        .map(|container| format!("{container}.{}", symbol.name))
+        .unwrap_or_else(|| symbol.name.clone())
 }
 
 /// Read and parse one file. `None` when it is gone or not decodable text.
@@ -884,81 +786,6 @@ mod tests {
         assert_eq!(graph.edges.len(), 1);
         assert_eq!(graph.nodes.len(), 2);
         assert_eq!(graph.nodes[1].container.as_deref(), Some("A"));
-    }
-
-    #[test]
-    fn workspace_graph_covers_every_relationship() {
-        let dir = tempfile::tempdir().unwrap();
-        write(
-            dir.path(),
-            "a.rs",
-            "fn start() -> u32 { middle(); middle() }\nfn middle() -> u32 { helper() }\nfn helper() -> u32 { 7 }\nfn orphan() -> u32 { 0 }\n",
-        );
-        let root = dir.path().display().to_string();
-        let data = built(&root);
-        let graph = data.workspace_call_graph();
-        // orphan joins no call relationship, so it is not a node; the two start→middle
-        // sites fold into one edge at the first site.
-        assert_eq!(graph.total_nodes, 3);
-        assert_eq!(graph.total_edges, 2);
-        assert_eq!(graph.nodes.len(), 3);
-        assert_eq!(graph.edges.len(), 2);
-        assert_eq!(graph.ambiguous, 0);
-        let depth_of = |name: &str| graph.nodes.iter().find(|n| n.name == name).unwrap().depth;
-        assert_eq!(depth_of("start"), 0);
-        assert_eq!(depth_of("middle"), 1);
-        assert_eq!(depth_of("helper"), 2);
-        let first = &graph.edges[0];
-        assert_eq!(
-            first.call_line, 0,
-            "the pair's first call site names the edge"
-        );
-    }
-
-    #[test]
-    fn workspace_graph_layers_cycles_without_hanging() {
-        let dir = tempfile::tempdir().unwrap();
-        write(
-            dir.path(),
-            "a.rs",
-            "fn ping() { pong() }\nfn pong() { ping() }\nfn lone() -> u32 { 1 }\n",
-        );
-        let root = dir.path().display().to_string();
-        let data = built(&root);
-        let graph = data.workspace_call_graph();
-        // The mutual recursion lays out (a back edge stops the layering) and both
-        // directions of the cycle draw.
-        assert_eq!(graph.nodes.len(), 2);
-        assert_eq!(graph.edges.len(), 2);
-        assert!(graph.nodes.iter().all(|n| n.depth <= 1));
-    }
-
-    #[test]
-    fn workspace_graph_counts_ambiguity_and_caps_the_drawing() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut text = String::new();
-        for i in 0..2100u32 {
-            text.push_str(&format!("fn f{i:04}() -> u32 {{ f{:04}() }}\n", i + 1));
-        }
-        text.push_str("fn f2100() -> u32 { 0 }\n");
-        // A bare call to a name declared twice: one site, two targets, one ambiguity.
-        text.push_str("fn steer() {}\nstruct Car;\nimpl Car { fn steer(&self) {} }\n");
-        text.push_str("fn drive() { steer() }\n");
-        write(dir.path(), "a.rs", &text);
-        let root = dir.path().display().to_string();
-        let data = built(&root);
-        let graph = data.workspace_call_graph();
-        // 2101 chain participants + drive + both steers (lone f2100 is called, so in).
-        assert_eq!(graph.total_nodes, 2104);
-        assert_eq!(graph.nodes.len(), 2000, "the drawing caps at 2000 nodes");
-        assert_eq!(graph.total_edges, 2102);
-        assert!(graph.edges.len() <= 6000);
-        assert!(graph.edges.len() < graph.total_edges, "the cap hid edges");
-        // drive sits past the cap (file order), so its ambiguity is not drawn — the
-        // count stays honest about what is shown.
-        assert_eq!(graph.ambiguous, 0);
-        let graph = data.call_graph("drive", None, Direction::Callees, 1);
-        assert_eq!(graph.ambiguous, 1);
     }
 
     #[test]

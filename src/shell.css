@@ -1283,22 +1283,16 @@ body.resizing iframe { pointer-events: none; }
 }
 .an-status { padding: 8px 20px 12px; color: var(--vscode-descriptionForeground); font-size: 12px; line-height: 18px; }
 
-/* The call graph drawing. */
-.an-graph .an-note { padding: 4px 20px; color: var(--vscode-descriptionForeground); font-size: 11px; flex: none; }
-.an-graph-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-/* The pan-and-zoom canvas: the wheel zooms (preventDefaulted), the pointer drags, so
-   the surface owns its gestures and never scrolls. */
-.an-canvas { position: relative; flex: 1 1 auto; min-height: 120px; overflow: hidden; cursor: grab; touch-action: none; user-select: none; }
-.an-canvas.panning { cursor: grabbing; }
-.an-canvas .an-svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-.an-zoom { position: absolute; right: 10px; bottom: 10px; display: flex; flex-direction: column; gap: 4px; }
-.an-graph-body .an-callsites { flex: none; max-height: 32%; overflow-y: auto; border-top: 1px solid var(--vscode-panel-border, transparent); }
-.an-edge { fill: none; stroke: var(--vscode-descriptionForeground); stroke-opacity: 0.5; stroke-width: 1.2; }
-.an-node rect { fill: var(--vscode-editorWidget-background); stroke: var(--vscode-focusBorder); stroke-width: 1; }
-.an-node.root rect { stroke-width: 2; }
-.an-node:hover rect { fill: var(--vscode-list-hoverBackground); }
-.an-node text { fill: var(--vscode-editor-foreground); font-size: 12px; text-anchor: middle; }
-.an-node .an-node-sub { fill: var(--vscode-descriptionForeground); font-size: 10px; }
+/* The Module Analysis tree: a module dependency opens into its file pairs, a file pair
+   into its call sites — three indent levels over the shared row geometry, built lazily
+   so only expanded branches exist in the DOM. */
+.an-arrow { color: var(--vscode-descriptionForeground); flex: none; }
+.an-branch > .codicon, .an-l1 > .codicon { flex: none; font-size: 14px; }
+.an-l1 { padding-left: 44px; }
+.an-l2 { padding-left: 64px; }
+
+/* The Module Analysis drawing: the view toggle and the layout picker it owns (the
+   picker steps aside in the tree view), then the @antv/G6 canvas filling the body. */
 .an-toggles { display: inline-flex; gap: 0; }
 .an-toggle {
 	height: 24px; padding: 0 10px; font-size: 11px; border: 1px solid var(--vscode-input-border, transparent);
@@ -1307,10 +1301,10 @@ body.resizing iframe { pointer-events: none; }
 .an-toggle:first-child { border-radius: 4px 0 0 4px; }
 .an-toggle:last-of-type { border-radius: 0 4px 4px 0; }
 .an-toggle.on { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
-.an-depth { height: 24px; font-size: 11px; border-radius: 4px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); }
-/* The whole-workspace drawing carries every relationship already; the direction and
-   depth controls only speak to a focused walk, so they step aside until one begins. */
-.an-page.an-full .an-toggles, .an-page.an-full .an-depth { display: none; }
+.an-layout { height: 24px; font-size: 11px; border-radius: 4px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); }
+.an-page.an-tree .an-layout { display: none; }
+.an-g6 { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+
 .an-cycle .an-arrow { color: var(--vscode-descriptionForeground); flex: none; }
 .an-cycle-step { color: var(--vscode-descriptionForeground); }
 

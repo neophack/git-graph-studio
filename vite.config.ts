@@ -91,6 +91,9 @@ export default defineConfig({
 					// library chunk it meets first and the boot entry then pulls that chunk in.
 					if (id.includes('vite/preload-helper')) return 'preload';
 					if (id.includes('node_modules/@xterm/')) return 'xterm';
+					// The module analysis drawing's canvas engine — one named chunk the
+					// page loads on the drawing's first mount (never first paint).
+					if (id.includes('node_modules/@antv/')) return 'g6';
 					if (id.includes('node_modules/@codemirror/merge/')) return 'cm-merge';
 					if (id.includes('node_modules/@codemirror/language-data/')) return 'cm-language-data';
 					if (/node_modules\/@codemirror\/(state|view|commands|language|search|autocomplete|lint)\//.test(id) || /node_modules\/@lezer\/(common|highlight|lr)\//.test(id) || /node_modules\/(style-mod|w3c-keyname|crelt)\//.test(id)) return 'codemirror';

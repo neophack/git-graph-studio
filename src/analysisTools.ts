@@ -5,7 +5,7 @@
 
 import type { t } from './i18n';
 
-export type AnalysisToolId = 'callgraph' | 'metrics' | 'deadcode' | 'security' | 'imports';
+export type AnalysisToolId = 'modules' | 'metrics' | 'deadcode' | 'security' | 'imports';
 
 export interface AnalysisTool {
 	id: AnalysisToolId;
@@ -18,11 +18,10 @@ export interface AnalysisTool {
 
 export const ANALYSIS_TOOLS: AnalysisTool[] = [
 	{
-		id: 'callgraph',
-		// `callout` has no glyph in the codicons font — the row rendered blank.
-		icon: 'graph',
-		titleKey: 'analysis.tool.callgraph',
-		descriptionKey: 'analysis.tool.callgraph.desc'
+		id: 'modules',
+		icon: 'symbol-module',
+		titleKey: 'analysis.tool.modules',
+		descriptionKey: 'analysis.tool.modules.desc'
 	},
 	{
 		id: 'metrics',

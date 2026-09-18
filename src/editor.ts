@@ -47,14 +47,14 @@ async function textEditor(): Promise<typeof TextEditor> {
 /** The Code Analysis tabs' labels and icons (module 17): English, like every tab label —
  *  the pages' own text goes through `t()`. */
 const ANALYSIS_PAGE_LABELS: Record<import('./analysisTools').AnalysisToolId, string> = {
-	callgraph: 'Call Graph',
+	modules: 'Module Analysis',
 	metrics: 'Complexity & Hotspots',
 	deadcode: 'Dead Code',
 	security: 'Security Scan',
 	imports: 'Import Graph'
 };
 const ANALYSIS_PAGE_ICONS: Record<import('./analysisTools').AnalysisToolId, string> = {
-	callgraph: 'graph',
+	modules: 'symbol-module',
 	metrics: 'pulse',
 	deadcode: 'circle-slash',
 	security: 'shield',

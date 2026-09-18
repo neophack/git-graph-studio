@@ -18,10 +18,9 @@ use rayon::prelude::*;
 use crate::analysis::bca;
 use crate::analysis::imports::ImportGraph;
 use crate::analysis::metrics::MetricRow;
+use crate::analysis::modules::{self, ModuleGraph};
 use crate::analysis::security::{self, Finding};
-use crate::analysis::{
-    deadcode, imports, metrics, AnalysisData, CallGraph, Direction, GraphNode, WorkspaceCallGraph,
-};
+use crate::analysis::{deadcode, imports, metrics, AnalysisData};
 use crate::AppState;
 
 /// The event the Analysis sidebar listens to; the payload is an [`AnalysisStatus`].
@@ -111,13 +110,6 @@ pub enum SecurityEvent {
         findings: usize,
         cancelled: bool,
     },
-}
-
-#[derive(Serialize, Clone, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct CallPathResult {
-    pub found: bool,
-    pub path: Vec<GraphNode>,
 }
 
 /// The per-root analyses plus their build state. The generation counter cancels a running
@@ -368,58 +360,17 @@ pub async fn analysis_rebuild(
         .map_err(|e| e.to_string())?
 }
 
-/// The call graph around a declaration: `max_depth` levels of callers or callees. When
-/// `path` and `line` name one declaration exactly, the graph starts there; otherwise
-/// every declaration of `name` is a root.
+/// The workspace's module graph: which module (directory) depends on which, the file
+/// pairs that carry the calls and the call sites under each — the Module Analysis
+/// page's whole model, in one answer (see `analysis::modules`).
 #[tauri::command]
-pub async fn analysis_call_graph(
-    state: State<'_, AppState>,
-    name: String,
-    path: Option<String>,
-    line: Option<usize>,
-    direction: Direction,
-    max_depth: Option<u32>,
-    repo: Option<String>,
-) -> Result<CallGraph, String> {
-    let data = analysis_of(&state, repo)?;
-    let data = data.lock().unwrap();
-    Ok(data.call_graph(
-        &name,
-        path.as_deref().zip(line),
-        direction,
-        max_depth.unwrap_or(2),
-    ))
-}
-
-/// The workspace's every call relationship at once — the Call Graph page's opening
-/// view, before any symbol is picked (see `AnalysisData::workspace_call_graph`).
-#[tauri::command]
-pub async fn analysis_workspace_call_graph(
+pub async fn analysis_module_graph(
     state: State<'_, AppState>,
     repo: Option<String>,
-) -> Result<WorkspaceCallGraph, String> {
+) -> Result<ModuleGraph, String> {
     let data = analysis_of(&state, repo)?;
     let data = data.lock().unwrap();
-    Ok(data.workspace_call_graph())
-}
-
-/// A shortest callee chain between two declarations, by name.
-#[tauri::command]
-pub async fn analysis_call_path(
-    state: State<'_, AppState>,
-    from: String,
-    to: String,
-    repo: Option<String>,
-) -> Result<CallPathResult, String> {
-    let data = analysis_of(&state, repo)?;
-    let data = data.lock().unwrap();
-    match data.call_path(&from, &to) {
-        Some(path) => Ok(CallPathResult { found: true, path }),
-        None => Ok(CallPathResult {
-            found: false,
-            path: Vec::new(),
-        }),
-    }
+    Ok(modules::module_graph(&data))
 }
 
 /// Every function and method with its measured shape, streamed in batches. The hotspot
@@ -454,10 +405,7 @@ pub async fn analysis_metrics(
                 .map(|file| {
                     (
                         file.path.clone(),
-                        metrics::rows_for_file(
-                            file,
-                            &|name| refs.get(name).copied().unwrap_or(0),
-                        ),
+                        metrics::rows_for_file(file, &|name| refs.get(name).copied().unwrap_or(0)),
                     )
                 })
                 .collect()
@@ -611,6 +559,7 @@ pub async fn analysis_import_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis::Direction;
 
     fn write(root: &std::path::Path, path: &str, text: &str) {
         let file = root.join(path);
@@ -648,6 +597,11 @@ mod tests {
             names.contains(&"start") && names.contains(&"middle"),
             "{names:?}"
         );
+
+        // The whole seed sits in one file, so the module graph has no cross-file edge.
+        let modules = modules::module_graph(&data.lock().unwrap());
+        assert!(modules.edges.is_empty());
+        assert_eq!(modules.modules.len(), 1);
 
         index.remove(&root);
         assert_eq!(index.status(&root).state, AnalysisState::Empty);

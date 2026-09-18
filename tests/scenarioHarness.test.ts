@@ -3,7 +3,7 @@
 // becomes visible - the SCM groups, the status bar, the graph tab, the conflict toolbar, a
 // file open. After the run, a markdown report lands in target/studio/scenario-report.md.
 
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +13,9 @@ import { commands } from '../src/commands';
 import { SCENARIOS, handlersFor, type Scenario } from './scenarioFixtures';
 import { backend } from './tauriMock';
 import { click, flush, texts } from './helpers';
+
+// jsdom has no canvas: the module analysis drawing runs on the G6 stub.
+vi.mock('@antv/g6', () => import('./g6Stub'));
 
 const REPO = 'C:\\repo';
 

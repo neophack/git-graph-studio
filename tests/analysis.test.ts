@@ -1,12 +1,17 @@
 // The Code Analysis module's vitest (module 17): the sidebar (tool rows, index state,
 // rebuild) and the five result pages — the streaming reports over their batch/done
-// channels, the call graph's search → draw → walk flow, and the import graph's cycles.
-// Everything runs against the scripted `tauriMock` backend like every other view suite.
+// channels, the module analysis drawing (the @antv/G6 stub verifying the mapping, the
+// layout switch and the block double-click) beside its tree, and the import graph's
+// cycles. Everything runs against the scripted `tauriMock` backend like every other
+// view suite.
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { flush } from './helpers';
 
 import { backend, Channel } from './tauriMock';
+import { created as g6Graphs } from './g6Stub';
+
+vi.mock('@antv/g6', () => import('./g6Stub'));
 
 let AnalysisView: typeof import('../src/analysisView').AnalysisView;
 let createAnalysisPage: typeof import('../src/analysisPages').createAnalysisPage;
@@ -28,6 +33,37 @@ function texts(selector: string, root: ParentNode = document): string[] {
 	return [...root.querySelectorAll<HTMLElement>(selector)].map((node) => node.textContent ?? '');
 }
 
+/** The module graph fixture the drawing and the tree share. */
+function moduleGraphAnswer(): Record<string, unknown> {
+	return {
+		modules: [
+			{ name: '', files: 1, symbols: 2 },
+			{ name: 'src', files: 3, symbols: 9 }
+		],
+		edges: [
+			{ from: 'src', to: 'src', calls: 6, files: 2 },
+			{ from: '', to: 'src', calls: 2, files: 1 }
+		],
+		fileEdges: [
+			{ from: 'src/a.ts', to: 'src/ui.ts', calls: 5, sites: [
+				{ from: 'main', to: 'render', line: 3, column: 2 },
+				{ from: 'boot', to: 'render', line: 9, column: 7 }
+			] },
+			{ from: 'src/b.ts', to: 'src/ui.ts', calls: 1, sites: [{ from: 'walk', to: 'render', line: 0, column: 4 }] },
+			{ from: 'top.rs', to: 'src/a.ts', calls: 2, sites: [
+				{ from: 'start', to: 'main', line: 1, column: 0 },
+				{ from: 'stop', to: 'main', line: 5, column: 1 }
+			] }
+		],
+		totalCalls: 8,
+		totalFileEdges: 3
+	};
+}
+
+beforeEach(() => {
+	g6Graphs.length = 0;
+});
+
 describe('the Analysis sidebar', () => {
 	it('lists the five tools and opens their pages on click', async () => {
 		await modules();
@@ -46,7 +82,7 @@ describe('the Analysis sidebar', () => {
 			expect((row as HTMLElement).title).toContain('—');
 		}
 		(rows[0] as HTMLElement).click();
-		expect(opened).toEqual(['callgraph']);
+		expect(opened).toEqual(['modules']);
 		expect(texts('.an-status')[0]).toContain('3');
 		expect(texts('.an-status')[0]).toContain('9');
 	});
@@ -172,137 +208,171 @@ describe('the report pages', () => {
 });
 
 describe('the graph pages', () => {
-	it('call graph opens on the whole workspace, filters and returns from a walk', async () => {
+	it('module analysis opens on the drawing and opens a file on block double-click', async () => {
 		await modules();
-		backend.on('analysis_workspace_call_graph', () => ({
-			nodes: [
-				{ kind: 'function', name: 'main', container: null, path: 'src/main.rs', line: 1, complexity: 1, signature: 'fn main()', depth: 0 },
-				{ kind: 'method', name: 'render', container: 'View', path: 'src/view.rs', line: 4, complexity: 2, signature: 'fn render()', depth: 1 },
-				{ kind: 'method', name: 'paint', container: 'View', path: 'src/view.rs', line: 9, complexity: 1, signature: 'fn paint()', depth: 2 }
-			],
-			edges: [
-				{ from: { name: 'main', path: 'src/main.rs', line: 1 }, to: { name: 'render', path: 'src/view.rs', line: 4 }, callPath: 'src/main.rs', callLine: 2, callColumn: 8 },
-				{ from: { name: 'render', path: 'src/view.rs', line: 4 }, to: { name: 'paint', path: 'src/view.rs', line: 9 }, callPath: 'src/view.rs', callLine: 5, callColumn: 4 }
-			],
-			ambiguous: 0, totalNodes: 3, totalEdges: 2
-		}));
-		backend.on('workspace_symbols', () => [{ kind: 'method', name: 'render', path: 'src/view.rs', line: 4, container: 'View' }]);
-		backend.on('analysis_call_graph', ({ name }) => ({
-			nodes: [
-				{ kind: 'method', name, container: 'View', path: 'src/view.rs', line: 4, complexity: 2, signature: 'fn render()', depth: 0 },
-				{ kind: 'method', name: 'paint', container: 'View', path: 'src/view.rs', line: 9, complexity: 1, signature: 'fn paint()', depth: 1 }
-			],
-			edges: [{ from: { name, path: 'src/view.rs', line: 4 }, to: { name: 'paint', path: 'src/view.rs', line: 9 }, callPath: 'src/view.rs', callLine: 5, callColumn: 4 }],
-			ambiguous: 0
-		}));
-		createAnalysisPage('callgraph', host());
+		backend.on('analysis_module_graph', moduleGraphAnswer);
+		const root = host();
+		const page = createAnalysisPage('modules', root);
+		const opened: string[] = [];
+		page.onOpen = (path, line) => opened.push(`${path}:${line}`);
 		await flush(8);
-		// The opening view draws every relationship: nodes and their connecting lines.
-		expect(document.querySelectorAll('svg.an-svg .an-node').length).toBe(3);
-		expect(document.querySelectorAll('svg.an-svg .an-edge').length).toBe(2);
-		expect(texts('.an-note')[0]).toContain('3');
-		expect(document.querySelector('.an-page.an-full')).toBeTruthy();
-		// Typing filters the drawing live (a lone node keeps no edge).
-		const search = document.querySelector<HTMLInputElement>('.an-symbol')!;
-		search.value = 'paint';
-		search.dispatchEvent(new Event('input', { bubbles: true }));
-		expect(document.querySelectorAll('svg.an-svg .an-node').length).toBe(1);
-		expect(document.querySelectorAll('svg.an-svg .an-edge').length).toBe(0);
-		// A node click becomes a focused walk; "All calls" returns to the whole graph.
-		search.value = '';
-		search.dispatchEvent(new Event('input', { bubbles: true }));
-		(document.querySelectorAll('.an-node')[0] as SVGElement).dispatchEvent(new MouseEvent('click', { bubbles: true }));
-		await flush(6);
-		expect(document.querySelector('.an-page.an-full')).toBeFalsy();
-		expect(document.querySelectorAll('svg.an-svg .an-node').length).toBe(2);
-		(document.querySelector('.an-header .action-btn') as HTMLElement).click();
-		await flush(6);
-		expect(document.querySelector('.an-page.an-full')).toBeTruthy();
-		expect(document.querySelectorAll('svg.an-svg .an-node').length).toBe(3);
-		expect(document.querySelectorAll('svg.an-svg .an-edge').length).toBe(2);
+		// The page opens on the drawing: one G6 graph over the files, rendered once.
+		expect(g6Graphs.length).toBe(1);
+		const graph = g6Graphs[0]!;
+		const options = graph.options as {
+			data: { nodes: { id: string; data: { module: string } }[]; edges: { source: string; target: string }[] };
+			layout: { type: string };
+			behaviors: string[];
+		};
+		expect(graph.rendered).toBe(1);
+		// The busiest files lead the blocks: a.ts (5 out + 2 in) before ui.ts (6 in).
+		expect(options.data.nodes.map((node) => node.id)).toEqual(['src/a.ts', 'src/ui.ts', 'top.rs', 'src/b.ts']);
+		expect(options.data.nodes[0].data.module).toBe('src');
+		// Every block carries its real rectangle in data.size — the collision source the
+		// layouts read, so no block ever sits on another.
+		const firstNode = options.data.nodes[0] as { data: { size: [number, number] } };
+		expect(firstNode.data.size[1]).toBe(30);
+		expect(firstNode.data.size[0]).toBeGreaterThanOrEqual(72);
+		expect(options.data.edges.map((edge) => `${edge.source}→${edge.target}`)).toEqual([
+			'src/a.ts→src/ui.ts',
+			'src/b.ts→src/ui.ts',
+			'top.rs→src/a.ts'
+		]);
+		// The default layout is circular — the blocks on a ring whose radius fits their
+		// combined widths; without a force simulation, blocks drag alone.
+		expect(options.layout.type).toBe('circular');
+		expect((options.layout as { radius?: number }).radius).toBeGreaterThanOrEqual(260);
+		expect(options.behaviors).toContain('drag-element');
+		expect(options.behaviors).not.toContain('drag-element-force');
+		expect(options.behaviors).toContain('zoom-canvas');
+		// A double-clicked block opens the file.
+		graph.emit('node:dblclick', { target: { id: 'src/a.ts' } });
+		expect(opened).toEqual(['src/a.ts:1']);
 	});
 
-	it('call graph canvas zooms with the wheel and pans by dragging', async () => {
+	it('module analysis switches layouts, capping the drawing at 400 blocks', async () => {
 		await modules();
-		backend.on('analysis_workspace_call_graph', () => ({
-			nodes: [
-				{ kind: 'function', name: 'main', container: null, path: 'src/main.rs', line: 1, complexity: 1, signature: 'fn main()', depth: 0 },
-				{ kind: 'function', name: 'leaf', container: null, path: 'src/main.rs', line: 5, complexity: 1, signature: 'fn leaf()', depth: 1 }
-			],
-			edges: [{ from: { name: 'main', path: 'src/main.rs', line: 1 }, to: { name: 'leaf', path: 'src/main.rs', line: 5 }, callPath: 'src/main.rs', callLine: 2, callColumn: 8 }],
-			ambiguous: 0, totalNodes: 2, totalEdges: 1
+		const fileEdges = Array.from({ length: 401 }, (_, i) => ({
+			from: `f${String(i).padStart(3, '0')}.rs`,
+			to: 'hub.rs',
+			calls: 1,
+			sites: []
 		}));
-		const walks: string[] = [];
-		backend.on('analysis_call_graph', ({ name }) => {
-			walks.push(name);
-			return { nodes: [], edges: [], ambiguous: 0 };
-		});
-		createAnalysisPage('callgraph', host());
+		backend.on('analysis_module_graph', () => ({
+			modules: [{ name: '', files: 402, symbols: 500 }],
+			edges: [{ from: '', to: '', calls: 401, files: 401 }],
+			fileEdges,
+			totalCalls: 401,
+			totalFileEdges: 401
+		}));
+		const root = host();
+		createAnalysisPage('modules', root);
 		await flush(8);
-		const canvas = document.querySelector('.an-canvas') as HTMLElement;
-		const view = document.querySelector('.an-viewport') as SVGGElement;
-		const transform = () => view.getAttribute('transform') ?? '';
-		// No layout in jsdom: the opening fit stands at identity.
-		expect(transform()).toBe('translate(0 0) scale(1)');
-		// The wheel zooms at the cursor.
-		canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: -120, clientX: 50, clientY: 40, bubbles: true, cancelable: true }));
-		expect(transform()).not.toBe('translate(0 0) scale(1)');
-		// The overlay's zoom and fit buttons drive the same transform.
-		const buttons = [...document.querySelectorAll('.an-zoom .action-btn')] as HTMLElement[];
-		buttons[2].click();
-		expect(transform()).toBe('translate(0 0) scale(1)');
-		buttons[0].click();
-		expect(transform()).toContain('scale(1.25)');
-		buttons[2].click();
-		// A drag pans the canvas and its trailing click never walks into the node it lands on.
-		const node = document.querySelector('.an-node') as SVGElement;
-		node.dispatchEvent(new MouseEvent('pointerdown', { button: 0, clientX: 10, clientY: 10, bubbles: true }));
-		canvas.dispatchEvent(new MouseEvent('pointermove', { clientX: 25, clientY: 10, bubbles: true }));
-		canvas.dispatchEvent(new MouseEvent('pointermove', { clientX: 40, clientY: 12, bubbles: true }));
-		canvas.dispatchEvent(new MouseEvent('pointerup', { clientX: 40, clientY: 12, bubbles: true }));
-		expect(transform()).toBe('translate(30 2) scale(1)');
-		node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-		expect(walks).toEqual([]);
-		// A click without a pan still walks from the node.
-		node.dispatchEvent(new MouseEvent('pointerdown', { button: 0, clientX: 10, clientY: 10, bubbles: true }));
-		node.dispatchEvent(new MouseEvent('pointerup', { clientX: 10, clientY: 10, bubbles: true }));
-		node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-		expect(walks).toEqual(['main']);
-	});
-
-	it('call graph searches, draws and walks to a clicked node', async () => {
-		await modules();
-		backend.on('analysis_workspace_call_graph', () => ({ nodes: [], edges: [], ambiguous: 0, totalNodes: 0, totalEdges: 0 }));
-		backend.on('workspace_symbols', () => [{ kind: 'function', name: 'alpha', path: 'src/a.rs', line: 3 }]);
-		const graphs: { name: string; direction: string }[] = [];
-		backend.on('analysis_call_graph', ({ name, direction }) => {
-			graphs.push({ name, direction });
-			return {
-				nodes: [
-					{ kind: 'function', name, container: null, path: 'src/a.rs', line: 3, complexity: 2, signature: `fn ${name}()`, depth: 0 },
-					{ kind: 'function', name: 'beta', container: 'S', path: 'src/b.rs', line: 0, complexity: 1, signature: 'fn beta()', depth: 1 }
-				],
-				edges: [{ from: { name, path: 'src/a.rs', line: 3 }, to: { name: 'beta', path: 'src/b.rs', line: 0 }, callPath: 'src/a.rs', callLine: 4, callColumn: 10 }],
-				ambiguous: 0
-			};
-		});
-		createAnalysisPage('callgraph', host());
+		const first = g6Graphs.at(-1)!;
+		const firstData = (first.options as { data: { nodes: unknown[] } }).data;
+		expect(firstData.nodes.length).toBe(400, 'the drawing caps at 400 blocks');
+		expect(texts('.an-more', root)[0]).toContain('2 more files');
+		// The layout picker rebuilds the drawing with the chosen algorithm — the layered
+		// layout runs left-to-right with spacing wide enough for the blocks.
+		const select = root.querySelector<HTMLSelectElement>('.an-layout')!;
+		select.value = 'dagre';
+		select.dispatchEvent(new Event('change', { bubbles: true }));
 		await flush(4);
-		const search = document.querySelector<HTMLInputElement>('.an-symbol')!;
-		search.value = 'alpha';
-		search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+		const second = g6Graphs.at(-1)!;
+		expect(second).not.toBe(first);
+		const layout = (second.options as { layout: { type: string; rankdir?: string; nodesep?: number; ranksep?: number } }).layout;
+		expect(layout.type).toBe('dagre');
+		expect(layout.rankdir).toBe('LR');
+		expect(layout.nodesep).toBeGreaterThanOrEqual(20);
+		expect(layout.ranksep).toBeGreaterThanOrEqual(50);
+		expect((second.options as { behaviors: string[] }).behaviors).toContain('drag-element');
+	});
+
+	it('module analysis toggles to the tree and expands to files and call sites', async () => {
+		await modules();
+		backend.on('analysis_module_graph', moduleGraphAnswer);
+		const root = host();
+		const page = createAnalysisPage('modules', root);
+		const opened: string[] = [];
+		page.onOpen = (path, line) => opened.push(`${path}:${line}`);
 		await flush(8);
-		expect(graphs[0]).toMatchObject({ name: 'alpha', direction: 'callees' });
-		expect(document.querySelectorAll('svg.an-svg .an-node').length).toBe(2);
-		expect(texts('.an-callsites .an-row .label')[0]).toContain('alpha → beta');
-		// The direction toggle re-queries the other way.
-		(document.querySelectorAll('.an-toggle')[0] as HTMLElement).click();
-		await flush(6);
-		expect(graphs[1].direction).toBe('callers');
-		// A node click makes that node the next root.
-		(document.querySelectorAll('.an-node')[1] as SVGElement).dispatchEvent(new MouseEvent('click', { bubbles: true }));
-		await flush(6);
-		expect(graphs[2]).toMatchObject({ name: 'beta' });
+		expect(texts('.an-title', root)[0]).toBe('2 modules · 3 file dependencies · 8 cross-file calls');
+		// The Tree toggle flips the view; the layout picker steps aside.
+		const toggles = [...root.querySelectorAll<HTMLElement>('.an-toggle')];
+		expect(toggles[0].classList.contains('on')).toBe(true);
+		toggles[1].click();
+		expect(root.classList.contains('an-tree')).toBe(true);
+		expect(root.querySelector<HTMLElement>('.an-branch')).toBeTruthy();
+		// The tree starts collapsed at the module edges.
+		const branches = [...root.querySelectorAll<HTMLElement>('.an-branch')];
+		expect(branches.length).toBe(2);
+		expect(branches[0].textContent).toContain('src→src');
+		expect(branches[0].textContent).toContain('6 calls');
+		expect(branches[0].textContent).toContain('2 file pairs');
+		expect(branches[1].textContent).toContain('(root)→src');
+		expect(root.querySelectorAll('.an-row.an-l1').length).toBe(0, 'the tree starts collapsed');
+
+		// Expanding a module edge lists its file pairs in the payload's calls-first order.
+		branches[0].click();
+		await flush(2);
+		const files = [...root.querySelectorAll<HTMLElement>('.an-row.an-l1')];
+		expect(files.length).toBe(2);
+		expect(files[0].textContent).toContain('src/a.ts→src/ui.ts');
+		expect(files[1].textContent).toContain('src/b.ts→src/ui.ts');
+		expect(root.querySelectorAll('.an-row.an-l2').length).toBe(0);
+
+		// Expanding a file pair lists its call sites; a site click opens the caller's line.
+		files[0].click();
+		await flush(2);
+		const sites = [...root.querySelectorAll<HTMLElement>('.an-row.an-l2')];
+		expect(sites.length).toBe(2);
+		expect(sites[0].textContent).toContain('main→render');
+		expect(sites[0].textContent).toContain('src/a.ts:4');
+		// 5 calls but only 2 sites listed — the trailing count stays honest.
+		expect(texts('.an-more', root).some((text) => text.includes('3'))).toBe(true);
+		sites[0].click();
+		expect(opened).toEqual(['src/a.ts:4']);
+
+		// The filter narrows the whole tree — a symbol name reaches the pair that calls
+		// it, and an edge that matched only through a child shows just that child.
+		const filter = root.querySelector<HTMLInputElement>('.an-filter')!;
+		filter.value = 'boot';
+		filter.dispatchEvent(new Event('input', { bubbles: true }));
+		expect(root.querySelectorAll('.an-branch').length).toBe(1);
+		expect(root.querySelectorAll('.an-row.an-l1').length).toBe(1);
+		expect(texts('.an-row.an-l1', root)[0]).toContain('src/a.ts→src/ui.ts');
+	});
+
+	it('module analysis says how many file dependencies the cap hid', async () => {
+		await modules();
+		backend.on('analysis_module_graph', () => ({
+			modules: [{ name: 'src', files: 2, symbols: 4 }],
+			edges: [{ from: 'src', to: 'src', calls: 3, files: 2 }],
+			fileEdges: [{ from: 'src/a.ts', to: 'src/b.ts', calls: 3, sites: [] }],
+			totalCalls: 3,
+			totalFileEdges: 2
+		}));
+		const root = host();
+		createAnalysisPage('modules', root);
+		await flush(8);
+		(root.querySelectorAll<HTMLElement>('.an-toggle')[1]).click();
+		expect(texts('.an-more', root)[0]).toBe('showing 1 of 2 file dependencies');
+	});
+
+	it('module analysis shows its empty state when no file calls another', async () => {
+		await modules();
+		backend.on('analysis_module_graph', () => ({
+			modules: [{ name: 'src', files: 2, symbols: 4 }],
+			edges: [],
+			fileEdges: [],
+			totalCalls: 0,
+			totalFileEdges: 0
+		}));
+		const root = host();
+		createAnalysisPage('modules', root);
+		await flush(8);
+		expect(texts('.an-empty', root)[0]).toContain('No cross-file calls');
+		expect(g6Graphs.length).toBe(0, 'nothing to draw');
 	});
 
 	it('import graph lists cycles before dependencies', async () => {

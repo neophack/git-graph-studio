@@ -344,20 +344,29 @@ same per-file outline the Symbol Database page renders), `search_symbols`,
 
 ### 17. Code Analysis
 
-The Code Analysis workbench: an activity bar entry (`Ctrl+Shift+A`) with a sidebar of five
-tools — Call Graph (SVG: every call relationship in the workspace on open, on a
-wheel-zoom, drag-pan canvas, then per-symbol callers/callees walks, click a node to
-walk), Complexity & Hotspots, Dead Code,
-Security Scan (rule-based, no taint tracking) and the Import Graph (with cycles) — each
-opening a streamed result page in the editor area. The engine resolves calls by name with
-receiver hints (no type inference); its honest limits are stated on the pages themselves.
+The Code Analysis workbench: an activity bar entry (`Ctrl+Shift+A`) with a sidebar of
+five analysis tools — Module Analysis (the workspace's cross-file calls as a drawing and a tree: the
+drawing renders on @antv/G6 — canvas, built-in layouts the picker switches (force,
+layered, circular, radial, grid, concentric), each sized to the blocks' real extents so
+rectangles never overlap (nodeSize from `data.size`, preventOverlap, per-layout spacing,
+a computed ring radius), blocks draggable, double-click opening the file — over at most
+400 blocks and 1500 arrows; the tree collapses the same data into
+module dependencies → file pairs → call sites, children rendering only while expanded),
+Complexity & Hotspots, Dead Code, Security Scan (rule-based, no taint tracking) and the
+Import Graph (with cycles) — each opening a streamed result page in the editor area. The
+engine resolves calls by name with receiver hints (no type inference); its honest limits
+are stated on the pages themselves. The per-symbol call graph walk and the shortest call
+chain remain engine services served to the MCP server (module 16), not a page. G6 is the
+CodeMirror precedent: a specialized canvas engine living in the lazy analysisPages chunk,
+not a frontend framework — the rest of the page stays hand-written DOM.
 
 - Frontend: `src/analysisView.ts` (the sidebar), `src/analysisTools.ts` (the shared tool
-  registry), `src/analysisPages.ts` (the lazy result pages: streaming reports and the SVG
-  graphs)
+  registry), `src/analysisPages.ts` (the lazy result pages: streaming reports, the G6
+  drawing and the module tree — jsdom suites stub G6 through `tests/g6Stub.ts`)
 - Backend: `src-tauri/src/cmd_analysis.rs` (the per-root `AnalysisIndex`, the streaming
-  tool commands), `src-tauri/src/analysis/` (`mod.rs` the engine and call graph,
-  `metrics.rs`, `deadcode.rs`, `security.rs`, `imports.rs`, `bca.rs` the big-code-analysis
+  tool commands), `src-tauri/src/analysis/` (`mod.rs` the engine and the per-symbol call
+  graph, `metrics.rs`, `deadcode.rs`, `security.rs`, `modules.rs` the Module Analysis
+  aggregation, `imports.rs`, `bca.rs` the big-code-analysis
   bridge whose report-time columns — cognitive complexity, Halstead volume, logical SLOC,
   the maintainability index — enrich the Complexity & Hotspots rows); parsing comes from
   module 5's `symbols/parse.rs`

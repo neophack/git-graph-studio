@@ -273,7 +273,7 @@ export class Workbench {
 		register({ id: 'workbench.showScm', title: 'Source Control', category: 'View', keybinding: 'Ctrl+Shift+G', run: () => this.showView('scm') });
 		register({ id: 'workbench.showExtensions', title: 'Extensions', category: 'View', keybinding: 'Ctrl+Shift+X', run: () => this.showView('extensions') });
 		register({ id: 'workbench.showAnalysis', title: 'Analysis', category: 'View', keybinding: 'Ctrl+Shift+A', run: () => this.showView('analysis') });
-		register({ id: 'analysis.showCallGraph', title: 'Call Graph', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('callgraph') });
+		register({ id: 'analysis.showModules', title: 'Module Analysis', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('modules') });
 		register({ id: 'analysis.showMetrics', title: 'Complexity & Hotspots', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('metrics') });
 		register({ id: 'analysis.showDeadCode', title: 'Dead Code', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('deadcode') });
 		register({ id: 'analysis.showSecurity', title: 'Security Scan', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('security') });
@@ -342,7 +342,7 @@ export class Workbench {
 			item('workbench.commandPalette'), 'separator',
 			item('workbench.showExplorer'), item('workbench.showSearch'), item('workbench.showScm'), item('workbench.showGraph'), item('workbench.showOutput'), item('workbench.showContext'), item('workbench.showSymbolDatabase'), 'separator',
 			{ label: t('menu.analysis'), submenu: [
-				item('analysis.showCallGraph'), item('analysis.showMetrics'), item('analysis.showDeadCode'), item('analysis.showSecurity'), item('analysis.showImports')
+				item('analysis.showModules'), item('analysis.showMetrics'), item('analysis.showDeadCode'), item('analysis.showSecurity'), item('analysis.showImports')
 			] },
 			'separator', item('editor.toggleWordWrap'), 'separator', item('markdown.showPreview'), item('markdown.showPreviewToSide'), item('git.openFileHistory'), item('git.toggleBlame'), 'separator',
 				{ label: 'Editor Layout', submenu: [

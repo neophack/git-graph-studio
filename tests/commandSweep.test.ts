@@ -4,7 +4,7 @@
 // must visibly do), then the sweep proper: every registered command executes without throwing
 // and leaves the shell usable (the next command still runs, no quick input or menu lingers).
 
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Workbench } from '../src/workbench';
 import { commands } from '../src/commands';
@@ -12,6 +12,9 @@ import { bookmarksFor } from '../src/bookmarks';
 import * as state from '../src/state';
 import { backend } from './tauriMock';
 import { flush, key, notifications, texts, until } from './helpers';
+
+// jsdom has no canvas: the module analysis drawing runs on the G6 stub.
+vi.mock('@antv/g6', () => import('./g6Stub'));
 
 const REPO = 'C:\\repo';
 const NOTES = `${REPO}\\notes.txt`;
@@ -62,8 +65,7 @@ beforeEach(async () => {
 		['workspace_symbols', () => [{ kind: 'function', name: 'two', path: 'notes.txt', line: 1 }]],
 		['analysis_status', () => ({ state: 'ready', done: 2, total: 2, files: 2, symbols: 3, calls: 2 })],
 		['analysis_rebuild', () => ({ state: 'ready', done: 2, total: 2, files: 2, symbols: 3, calls: 2 })],
-		['analysis_call_graph', () => ({ nodes: [], edges: [], ambiguous: 0 })],
-		['analysis_workspace_call_graph', () => ({ nodes: [], edges: [], ambiguous: 0, totalNodes: 0, totalEdges: 0 })],
+		['analysis_module_graph', () => ({ modules: [], edges: [], fileEdges: [], totalCalls: 0, totalFileEdges: 0 })],
 		['analysis_metrics', ({ onEvent }) => {
 			(onEvent as { onmessage: (e: unknown) => void }).onmessage({ kind: 'done', files: 1, functions: 1, cancelled: false });
 			return null;
