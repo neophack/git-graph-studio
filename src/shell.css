@@ -1285,9 +1285,14 @@ body.resizing iframe { pointer-events: none; }
 
 /* The call graph drawing. */
 .an-graph .an-note { padding: 4px 20px; color: var(--vscode-descriptionForeground); font-size: 11px; flex: none; }
-.an-graph-body { flex: 1; min-height: 0; overflow: auto; }
-.an-svg-host { padding: 8px 12px; }
-.an-svg { width: 100%; height: auto; display: block; }
+.an-graph-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* The pan-and-zoom canvas: the wheel zooms (preventDefaulted), the pointer drags, so
+   the surface owns its gestures and never scrolls. */
+.an-canvas { position: relative; flex: 1 1 auto; min-height: 120px; overflow: hidden; cursor: grab; touch-action: none; user-select: none; }
+.an-canvas.panning { cursor: grabbing; }
+.an-canvas .an-svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.an-zoom { position: absolute; right: 10px; bottom: 10px; display: flex; flex-direction: column; gap: 4px; }
+.an-graph-body .an-callsites { flex: none; max-height: 32%; overflow-y: auto; border-top: 1px solid var(--vscode-panel-border, transparent); }
 .an-edge { fill: none; stroke: var(--vscode-descriptionForeground); stroke-opacity: 0.5; stroke-width: 1.2; }
 .an-node rect { fill: var(--vscode-editorWidget-background); stroke: var(--vscode-focusBorder); stroke-width: 1; }
 .an-node.root rect { stroke-width: 2; }

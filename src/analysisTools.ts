@@ -19,7 +19,8 @@ export interface AnalysisTool {
 export const ANALYSIS_TOOLS: AnalysisTool[] = [
 	{
 		id: 'callgraph',
-		icon: 'callout',
+		// `callout` has no glyph in the codicons font — the row rendered blank.
+		icon: 'graph',
 		titleKey: 'analysis.tool.callgraph',
 		descriptionKey: 'analysis.tool.callgraph.desc'
 	},

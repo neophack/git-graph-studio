@@ -345,8 +345,9 @@ same per-file outline the Symbol Database page renders), `search_symbols`,
 ### 17. Code Analysis
 
 The Code Analysis workbench: an activity bar entry (`Ctrl+Shift+A`) with a sidebar of five
-tools — Call Graph (SVG: every call relationship in the workspace on open, then per-symbol
-callers/callees walks, click a node to walk), Complexity & Hotspots, Dead Code,
+tools — Call Graph (SVG: every call relationship in the workspace on open, on a
+wheel-zoom, drag-pan canvas, then per-symbol callers/callees walks, click a node to
+walk), Complexity & Hotspots, Dead Code,
 Security Scan (rule-based, no taint tracking) and the Import Graph (with cycles) — each
 opening a streamed result page in the editor area. The engine resolves calls by name with
 receiver hints (no type inference); its honest limits are stated on the pages themselves.

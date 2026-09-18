@@ -1,10 +1,10 @@
 // The Analysis result pages (module 17), one editor tab per tool: three streaming
 // reports (Complexity & Hotspots, Dead Code, Security Scan) over the shared
 // batch-then-done channel rhythm, and two graph pages (Call Graph, Import Graph) drawn
-// as SVG the CAN chart way — one viewBox, theme colours. The Call Graph opens on the
-// workspace's every call relationship; the search then narrows it to a per-symbol walk.
-// Loaded lazily behind the Analysis sidebar; nothing here belongs to the first-paint
-// bundle.
+// as SVG with theme colours. The Call Graph opens on the workspace's every call
+// relationship, on a canvas the wheel zooms and the pointer pans; the search then
+// narrows it to a per-symbol walk. Loaded lazily behind the Analysis sidebar; nothing
+// here belongs to the first-paint bundle.
 
 import { invoke, Channel } from '@tauri-apps/api/core';
 
@@ -384,6 +384,9 @@ class CallGraphPage implements AnalysisPageView {
 	private filter = '';
 	private loading = false;
 	private error: string | null = null;
+	/** True while the pointer gesture that just ended was a pan — its trailing click
+	 *  must not walk into the node it happens to land on. */
+	private panned = false;
 
 	onOpen: ((path: string, line: number) => void) | null = null;
 
@@ -424,7 +427,7 @@ class CallGraphPage implements AnalysisPageView {
 		this.body = el('div', 'an-graph-body');
 		container.append(
 			el('div', 'an-header', [
-				icon('callout'),
+				icon('graph'),
 				el('span', 'an-title', [t('analysis.tool.callgraph')]),
 				this.search,
 				el('div', 'an-toggles', [callers, callees]),
@@ -559,7 +562,9 @@ class CallGraphPage implements AnalysisPageView {
 				this.body.appendChild(el('div', 'an-empty', [t('analysis.page.empty')]));
 				return;
 			}
-			if (graph.ambiguous > 0) this.note.textContent = tf('analysis.callgraph.ambiguous', graph.ambiguous);
+			const notes = [t('analysis.callgraph.panHint')];
+			if (graph.ambiguous > 0) notes.unshift(tf('analysis.callgraph.ambiguous', graph.ambiguous));
+			this.note.textContent = notes.join(' · ');
 			this.body.appendChild(this.drawGraph(graph.nodes, graph.edges));
 			this.body.appendChild(this.drawCallSites(graph.edges));
 			return;
@@ -580,6 +585,7 @@ class CallGraphPage implements AnalysisPageView {
 			notes.push(tf('analysis.callgraph.truncated', full.nodes.length, full.totalNodes, full.edges.length, full.totalEdges));
 		}
 		if (full.ambiguous > 0) notes.push(tf('analysis.callgraph.ambiguous', full.ambiguous));
+		notes.push(t('analysis.callgraph.panHint'));
 		this.note.textContent = notes.join(' · ');
 		if (nodes.length === 0) {
 			this.body.appendChild(el('div', 'an-empty', [t('analysis.page.empty')]));
@@ -595,7 +601,8 @@ class CallGraphPage implements AnalysisPageView {
 			|| node.path.toLowerCase().includes(this.filter);
 	}
 
-	/** The layered SVG: one row per BFS depth, nodes spread horizontally, curved edges. */
+	/** The layered SVG: one row per depth, nodes spread horizontally, curved edges —
+	 *  all inside the viewport group the pan-and-zoom canvas transforms. */
 	private drawGraph(nodes: GraphNode[], edges: GraphEdge[]): HTMLElement {
 		const nodeWidth = 190;
 		const nodeHeight = 38;
@@ -609,10 +616,8 @@ class CallGraphPage implements AnalysisPageView {
 		}
 		const width = Math.max(...[...layers.values()].map((layer) => layer.length)) * (nodeWidth + columnGap) + columnGap;
 		const height = layers.size * (nodeHeight + rowGap - nodeHeight / 2) + 30;
-		const svg = svgNode('svg', { viewBox: `0 0 ${width} ${height}`, class: 'an-svg', role: 'img' });
-		// A wide workspace drawing keeps a readable minimum width and scrolls instead of
-		// shrinking to a hairline; past the second cap it scales down (the filter narrows).
-		if (width > 1600) svg.style.minWidth = `${Math.min(width, 3200)}px`;
+		const svg = svgNode('svg', { class: 'an-svg', role: 'img' });
+		const view = svgNode('g', { class: 'an-viewport' });
 		const at = new Map<string, { x: number; y: number }>();
 		for (const [depth, layer] of [...layers.entries()].sort((a, b) => a[0] - b[0])) {
 			layer.forEach((node, index) => {
@@ -630,7 +635,7 @@ class CallGraphPage implements AnalysisPageView {
 			const x2 = to.x + nodeWidth / 2;
 			const y2 = to.y;
 			const bend = (y1 + y2) / 2;
-			svg.appendChild(svgNode('path', {
+			view.appendChild(svgNode('path', {
 				d: `M ${x1} ${y1} C ${x1} ${bend}, ${x2} ${bend}, ${x2} ${y2}`,
 				class: 'an-edge'
 			}));
@@ -646,18 +651,125 @@ class CallGraphPage implements AnalysisPageView {
 				tail.textContent = node.kind;
 				group.append(label, tail);
 				group.addEventListener('click', () => {
+					if (this.panned) {
+						this.panned = false;
+						return; // that was a pan gesture ending on the node, not a click
+					}
 					// A node click makes it the new root — the graph walks from there.
 					this.root = { kind: node.kind, name: node.name, path: node.path, line: node.line };
 					this.search.value = node.name;
 					void this.load();
 				});
-				group.addEventListener('dblclick', () => this.onOpen?.(node.path, node.line + 1));
-				svg.appendChild(group);
+				group.addEventListener('dblclick', () => {
+					if (!this.panned) this.onOpen?.(node.path, node.line + 1);
+				});
+				view.appendChild(group);
 			});
 		}
-		const host = el('div', 'an-svg-host');
-		host.appendChild(svg);
-		return host;
+		svg.appendChild(view);
+		return this.panZoomCanvas(svg, view, width, height);
+	}
+
+	/** Wrap a drawing in the pan-and-zoom canvas: the wheel zooms at the cursor, a
+	 *  left-button drag pans (and never becomes a node click), the overlay buttons zoom
+	 *  and refit. The transform lives on the viewport group, so node coordinates stay
+	 *  the drawing's own. */
+	private panZoomCanvas(svg: SVGElement, view: SVGGElement, contentW: number, contentH: number): HTMLElement {
+		const minScale = 0.05;
+		const maxScale = 4;
+		let scale = 1;
+		let tx = 0;
+		let ty = 0;
+		const apply = () => view.setAttribute('transform', `translate(${tx} ${ty}) scale(${scale})`);
+		const clampScale = (value: number) => Math.min(maxScale, Math.max(minScale, value));
+		const zoomAt = (cx: number, cy: number, factor: number) => {
+			const next = clampScale(scale * factor);
+			// Keep the point under the cursor fixed while the scale changes.
+			tx = cx - (cx - tx) * (next / scale);
+			ty = cy - (cy - ty) * (next / scale);
+			scale = next;
+			apply();
+		};
+		const canvas = el('div', 'an-canvas');
+		const center = () => ({ x: canvas.clientWidth / 2, y: canvas.clientHeight / 2 });
+		const fit = () => {
+			const w = canvas.clientWidth;
+			const h = canvas.clientHeight;
+			// A 0×0 canvas means layout is unavailable (jsdom, a hidden tab): stand at
+			// identity rather than computing against zeros.
+			if (w && h) {
+				scale = clampScale(Math.min(1, w / contentW, h / contentH));
+				tx = (w - contentW * scale) / 2;
+				ty = (h - contentH * scale) / 2;
+			} else {
+				scale = 1;
+				tx = 0;
+				ty = 0;
+			}
+			apply();
+		};
+		canvas.append(svg, el('div', 'an-zoom', [
+			actionButton('zoom-in', t('analysis.callgraph.zoomIn'), () => {
+				const at = center();
+				zoomAt(at.x, at.y, 1.25);
+			}),
+			actionButton('zoom-out', t('analysis.callgraph.zoomOut'), () => {
+				const at = center();
+				zoomAt(at.x, at.y, 0.8);
+			}),
+			actionButton('screen-full', t('analysis.callgraph.fit'), fit)
+		]));
+		canvas.addEventListener('wheel', (event) => {
+			event.preventDefault();
+			const rect = canvas.getBoundingClientRect();
+			zoomAt(event.clientX - rect.left, event.clientY - rect.top, Math.exp(-event.deltaY * 0.0015));
+		}, { passive: false });
+		let panning = false;
+		let lastX = 0;
+		let lastY = 0;
+		let moved = 0;
+		canvas.addEventListener('pointerdown', (event) => {
+			if (event.button !== 0 || (event.target as Element).closest('.an-zoom')) return;
+			panning = true;
+			moved = 0;
+			this.panned = false;
+			lastX = event.clientX;
+			lastY = event.clientY;
+			canvas.classList.add('panning');
+			// A synthetic or vanished pointer makes the capture throw — the pan works
+			// without it, only less neatly.
+			try {
+				canvas.setPointerCapture(event.pointerId);
+			} catch {
+				/* keep panning */
+			}
+		});
+		canvas.addEventListener('pointermove', (event) => {
+			if (!panning) return;
+			const dx = event.clientX - lastX;
+			const dy = event.clientY - lastY;
+			lastX = event.clientX;
+			lastY = event.clientY;
+			moved += Math.abs(dx) + Math.abs(dy);
+			if (moved > 4) this.panned = true;
+			tx += dx;
+			ty += dy;
+			apply();
+		});
+		const endPan = (event: PointerEvent) => {
+			if (!panning) return;
+			panning = false;
+			canvas.classList.remove('panning');
+			try {
+				canvas.releasePointerCapture(event.pointerId);
+			} catch {
+				/* nothing captured */
+			}
+		};
+		canvas.addEventListener('pointerup', endPan);
+		canvas.addEventListener('pointercancel', endPan);
+		fit();
+		return canvas;
 	}
 
 	/** The call sites under the drawing: every edge as a clickable row. */

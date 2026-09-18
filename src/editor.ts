@@ -54,7 +54,7 @@ const ANALYSIS_PAGE_LABELS: Record<import('./analysisTools').AnalysisToolId, str
 	imports: 'Import Graph'
 };
 const ANALYSIS_PAGE_ICONS: Record<import('./analysisTools').AnalysisToolId, string> = {
-	callgraph: 'callout',
+	callgraph: 'graph',
 	metrics: 'pulse',
 	deadcode: 'circle-slash',
 	security: 'shield',

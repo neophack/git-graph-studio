@@ -222,6 +222,54 @@ describe('the graph pages', () => {
 		expect(document.querySelectorAll('svg.an-svg .an-edge').length).toBe(2);
 	});
 
+	it('call graph canvas zooms with the wheel and pans by dragging', async () => {
+		await modules();
+		backend.on('analysis_workspace_call_graph', () => ({
+			nodes: [
+				{ kind: 'function', name: 'main', container: null, path: 'src/main.rs', line: 1, complexity: 1, signature: 'fn main()', depth: 0 },
+				{ kind: 'function', name: 'leaf', container: null, path: 'src/main.rs', line: 5, complexity: 1, signature: 'fn leaf()', depth: 1 }
+			],
+			edges: [{ from: { name: 'main', path: 'src/main.rs', line: 1 }, to: { name: 'leaf', path: 'src/main.rs', line: 5 }, callPath: 'src/main.rs', callLine: 2, callColumn: 8 }],
+			ambiguous: 0, totalNodes: 2, totalEdges: 1
+		}));
+		const walks: string[] = [];
+		backend.on('analysis_call_graph', ({ name }) => {
+			walks.push(name);
+			return { nodes: [], edges: [], ambiguous: 0 };
+		});
+		createAnalysisPage('callgraph', host());
+		await flush(8);
+		const canvas = document.querySelector('.an-canvas') as HTMLElement;
+		const view = document.querySelector('.an-viewport') as SVGGElement;
+		const transform = () => view.getAttribute('transform') ?? '';
+		// No layout in jsdom: the opening fit stands at identity.
+		expect(transform()).toBe('translate(0 0) scale(1)');
+		// The wheel zooms at the cursor.
+		canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: -120, clientX: 50, clientY: 40, bubbles: true, cancelable: true }));
+		expect(transform()).not.toBe('translate(0 0) scale(1)');
+		// The overlay's zoom and fit buttons drive the same transform.
+		const buttons = [...document.querySelectorAll('.an-zoom .action-btn')] as HTMLElement[];
+		buttons[2].click();
+		expect(transform()).toBe('translate(0 0) scale(1)');
+		buttons[0].click();
+		expect(transform()).toContain('scale(1.25)');
+		buttons[2].click();
+		// A drag pans the canvas and its trailing click never walks into the node it lands on.
+		const node = document.querySelector('.an-node') as SVGElement;
+		node.dispatchEvent(new MouseEvent('pointerdown', { button: 0, clientX: 10, clientY: 10, bubbles: true }));
+		canvas.dispatchEvent(new MouseEvent('pointermove', { clientX: 25, clientY: 10, bubbles: true }));
+		canvas.dispatchEvent(new MouseEvent('pointermove', { clientX: 40, clientY: 12, bubbles: true }));
+		canvas.dispatchEvent(new MouseEvent('pointerup', { clientX: 40, clientY: 12, bubbles: true }));
+		expect(transform()).toBe('translate(30 2) scale(1)');
+		node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		expect(walks).toEqual([]);
+		// A click without a pan still walks from the node.
+		node.dispatchEvent(new MouseEvent('pointerdown', { button: 0, clientX: 10, clientY: 10, bubbles: true }));
+		node.dispatchEvent(new MouseEvent('pointerup', { clientX: 10, clientY: 10, bubbles: true }));
+		node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		expect(walks).toEqual(['main']);
+	});
+
 	it('call graph searches, draws and walks to a clicked node', async () => {
 		await modules();
 		backend.on('analysis_workspace_call_graph', () => ({ nodes: [], edges: [], ambiguous: 0, totalNodes: 0, totalEdges: 0 }));
