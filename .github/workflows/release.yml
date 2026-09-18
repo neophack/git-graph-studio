@@ -10,12 +10,12 @@
 # v-prefixed; empty = package.json's version) - the tag is then created at the workflow's
 # commit. Check `full` to also build the macOS x64 dmg.
 #
-# Artifacts per release: windows NSIS setup exe + MSI, deb (Ubuntu 24.04-26.04 / Debian
-# 13+), rpm (Fedora 40+ / openSUSE Leap 16+), macOS arm64 dmg (+ x64 on `full`), each
+# Artifacts per release: windows NSIS setup exe + MSI, deb (Ubuntu 22.04-26.04 / Debian
+# 12/13), rpm (Fedora 38+ / openSUSE Leap 15.6+), macOS arm64 dmg (+ x64 on `full`), each
 # with its SHA256 in SHA256SUMS, plus the build's metrics.json - nothing else (no
-# bundler work files). The Linux compatibility floor is the ubuntu-24.04 runner
-# studio.yml builds on natively (glibc 2.39); scripts/docker/Dockerfile.studio-linux
-# documents the older ubuntu:22.04 / fedora:38 floors the local Docker builds still target.
+# bundler work files). The Linux compatibility floor is each installer's build container
+# (ubuntu:22.04 for the deb, fedora:38 for the rpm - see studio.yml); the same containers
+# serve local builds through scripts/build-studio-linux.bat.
 
 name: Release
 

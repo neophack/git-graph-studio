@@ -9,20 +9,28 @@
 # compiled twice per platform - dev for the tests, release for the installers - because
 # `panic = "abort"` in the size-diet [profile.release] (src-tauri/Cargo.toml) can never be
 # shared with test targets, which always unwind; dropping it to share one compile was
-# rejected (verified experimentally, 2026-09-15). What IS shared: the two Linux package
-# formats bundle the single release binary from one build, and rust-cache keeps the target
-# dir and the crates.io registry warm across runs (fewer downloads, near-incremental
-# rebuilds); npm downloads are cached the same way through setup-node's cache.
+# rejected (verified experimentally, 2026-09-15). What IS shared: rust-cache keeps the
+# target dir and the crates.io registry warm across runs (fewer downloads, near-incremental
+# rebuilds); npm downloads are cached the same way through setup-node's cache. The two
+# Linux package formats are back to one compile each - each in its own floor container -
+# because one binary cannot carry two glibc floors.
 #
-# The Linux installers are built natively on the pinned ubuntu-24.04 runner - no containers
-# (the old container path spent every run re-pulling the base image and reinstalling its
-# packages). The runner's toolchain defines the compatibility floor, glibc 2.39:
-#   deb -> Ubuntu 24.04-26.04, Debian 13+, Mint 22+, Pop!_OS 24.04+
-#   rpm -> Fedora 40+, openSUSE Leap 16+/Tumbleweed
-# The older ubuntu:22.04 / fedora:38 container floors remain available for local builds
-# through scripts/build-studio-linux.bat. The runner is pinned, not ubuntu-latest, so a
-# future `latest` flip cannot move the floor silently - and the ubuntu-22.04 image begins
-# its GitHub retirement on 2026-09-17 regardless.
+# The Linux installers are built in Docker containers whose base image IS the compatibility
+# floor - the oldest distro that still has WebKitGTK 4.1, which Tauri 2 hard-requires
+# (Ubuntu 20.04 only ships the 4.0 API and can never run the app):
+#   ubuntu:22.04 -> deb (glibc 2.35): Ubuntu 22.04-26.04, Debian 12/13, Mint 21+,
+#                   Pop!_OS 22.04+
+#   fedora:38    -> rpm (glibc 2.37): Fedora 38+, openSUSE Leap 15.6+/Tumbleweed
+# This is the pre-0.1.2 shape, restored: 0.1.2's deb was built natively on ubuntu-24.04,
+# whose glibc 2.39 became a hard requirement (Rust std's weak pidfd_spawn / pidfd_getpid
+# references turn into GLIBC_2.39 version entries at link time) that no Ubuntu 22.04 /
+# Debian 12 machine could load. The costs that pushed CI to the native runner are paid
+# differently now: buildx's GitHub cache keeps the image's apt layers warm across runs
+# (the old path rebuilt them every run), and actions/cache warms the in-container compile
+# through the /cache volume. The runner is ubuntu-latest on purpose - with containers the
+# floor comes from the base image, not the runner, so a `latest` flip cannot move it (and
+# the ubuntu-22.04 runner image retired 2026-09-17 anyway). The in-container pass fails
+# the build if the binary ever asks for a newer glibc than its container's floor.
 #
 # Pull requests run the tests only; the installers build on push to main, on dispatch, and
 # when release.yml calls this workflow with `studio-version` to stamp the version being
@@ -200,28 +208,36 @@ jobs:
             target/studio/metrics.json
           if-no-files-found: error
 
-  # The Linux installers (deb + rpm), built natively on the pinned ubuntu-24.04 runner (see
-  # the header note): one job, one release compile - both package formats bundle the same
-  # binary - gated by the backend tests. Ubuntu's `rpm` package provides the rpmbuild the
-  # rpm bundler shells out to - the only addition beyond the deb dependencies.
+  # The Linux installers, built in floor containers (see the header note): one pass per
+  # package format, each on the oldest base that keeps the binary loadable on
+  # still-supported distros of that family. The extension assets are compiled on the
+  # runner (node is already there) and reach the container through the repository mount.
+  # The deb leg also runs the backend test gate natively (the Windows job runs the same
+  # suite on Windows); the rpm leg compiles the same sources inside its container, and a
+  # failed workflow run never reaches release.yml.
   studio-linux:
-    name: Studio installers (linux-x64)
-    runs-on: ubuntu-24.04
+    name: Studio installers (${{ matrix.artifact }})
+    runs-on: ubuntu-latest
     timeout-minutes: 180
     if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - base: ubuntu:22.04
+            bundles: deb
+            out: bundle-linux
+            cache: linux-deb
+            artifact: studio-linux-x64
+          - base: fedora:38
+            bundles: rpm
+            out: bundle-rpm
+            cache: linux-rpm
+            artifact: studio-linux-rpm
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
-
-      - uses: dtolnay/rust-toolchain@stable
-      # Same target-dir mapping as the Windows job (see its comment): one warm cache for
-      # the registry and the release artifacts both passes share.
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> ../target/studio/cargo
-          key: studio-linux-x64
-          cache-on-failure: true
 
       - uses: actions/setup-node@v4
         with:
@@ -230,11 +246,6 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             vscode-git-graph-rs/package-lock.json
-
-      - name: Install the Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev rpm
 
       - name: Build the vscode-git-graph-rs submodule
         working-directory: vscode-git-graph-rs
@@ -261,13 +272,30 @@ jobs:
             fs.writeFileSync(cargo, fs.readFileSync(cargo, 'utf8').replace(/^version = \"[^\"]*\"/m, 'version = \"' + process.argv[1] + '\"'));
           " "$VERSION"
 
+      # Native tests of the app crate on Linux too (the Windows job runs them on Windows):
+      # on the runner, with its system WebKitGTK, and rust-cache acceleration. Deb leg only.
+      - name: Install the Linux build dependencies
+        if: matrix.bundles == 'deb'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.bundles == 'deb'
+      # Same target-dir mapping as the Windows job (see its comment).
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.bundles == 'deb'
+        with:
+          workspaces: src-tauri -> ../target/studio/cargo
+          key: studio-linux-native
+          cache-on-failure: true
+
       # The window icons generate_context!() embeds, as in the Windows job.
       - name: Prepare the app assets
+        if: matrix.bundles == 'deb'
         run: node scripts/prepare.mjs
 
-      # Native Linux coverage of the app crate (the Windows job runs the same suite on
-      # Windows) - before the installer build, which only starts if every test passed.
       - name: Test and lint the app backend
+        if: matrix.bundles == 'deb'
         working-directory: src-tauri
         run: |
           cargo clippy --all-targets --all-features -- -D warnings
@@ -275,30 +303,65 @@ jobs:
         env:
           GGS_PERF_FILES: '20000'
 
-      # Bundles the one release binary into both package formats.
-      - name: Build the installers (deb + rpm)
-        run: npx tauri build --bundles deb,rpm
+      # The container's cargo target and registries, cached across runs via the /cache
+      # volume scripts/docker/studio-linux-build.sh redirects everything into.
+      - name: Cache the container build
+        uses: actions/cache@v4
+        with:
+          path: ~/.ggs-linux-cache
+          key: studio-${{ matrix.cache }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: studio-${{ matrix.cache }}-
 
-      # Size measurement + backend probes. The bundles already sit under
-      # target/studio/cargo/release/bundle/ where measure.mjs expects them.
+      # buildx with the GitHub cache keeps the image's apt layers warm across runs - the
+      # cold rebuild of those layers every run is exactly why the container path was
+      # abandoned on 2026-09-15. --load hands the built image to the docker run below.
+      - name: Build the ${{ matrix.bundles }} installers in a ${{ matrix.base }} container
+        run: |
+          docker buildx create --name ggs-builder --driver docker-container --use
+          docker buildx build \
+            --build-arg BASE_IMAGE=${{ matrix.base }} \
+            --cache-from type=gha,scope=studio-${{ matrix.cache }} \
+            --cache-to type=gha,scope=studio-${{ matrix.cache }},mode=max \
+            --load \
+            -t ggs-linux-builder-${{ matrix.cache }} \
+            -f scripts/docker/Dockerfile.studio-linux scripts/docker
+          docker run --rm \
+            -v "$PWD:/repo" \
+            -v "$HOME/.ggs-linux-cache:/cache" \
+            -e BUNDLES=${{ matrix.bundles }} \
+            -e OUT_DIR=${{ matrix.out }} \
+            ggs-linux-builder-${{ matrix.cache }} \
+            bash /repo/scripts/docker/studio-linux-build.sh
+
+      # Size measurement + backend probes (deb pass only - the rpm carries the same
+      # binaries). measure.mjs expects the bundles under
+      # target/studio/cargo/release/bundle/, so the deb pass's output is mirrored there
+      # first; the probes run the container-built ggs binary itself.
       - name: Measure sizes and performance
-        run: node scripts/measure.mjs --repo vscode-git-graph-rs
+        if: matrix.bundles == 'deb'
+        run: |
+          mkdir -p target/studio/cargo/release
+          cp -r target/studio/bundle-linux target/studio/cargo/release/bundle
+          node scripts/measure.mjs --repo vscode-git-graph-rs
 
-      # Only the packages themselves are artefacts: beside each one the bundler leaves its
-      # work tree (deb: control/, data.tar.gz, debian-binary, md5sums, the staged binary
-      # and desktop file; rpm: the same under <name>-<version>-<arch>/), which must never
-      # reach the release page.
+      # Only the packages themselves are artefacts: beside each package the bundler leaves
+      # its work tree (deb: control/, data.tar.gz, debian-binary, md5sums, the staged
+      # binary and desktop file; rpm: the same under <name>-<version>-<arch>/), which must
+      # never reach the release page.
       - uses: actions/upload-artifact@v4
+        if: matrix.bundles == 'deb'
         with:
-          name: studio-linux-x64
-          path: target/studio/cargo/release/bundle/deb/*.deb
+          name: ${{ matrix.artifact }}
+          path: target/studio/bundle-linux/deb/*.deb
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
+        if: matrix.bundles == 'rpm'
         with:
-          name: studio-linux-rpm
-          path: target/studio/cargo/release/bundle/rpm/*.rpm
+          name: ${{ matrix.artifact }}
+          path: target/studio/bundle-rpm/rpm/*.rpm
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
+        if: matrix.bundles == 'deb'
         with:
           name: studio-linux-metrics
           path: target/studio/metrics.json

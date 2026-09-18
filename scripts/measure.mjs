@@ -62,7 +62,8 @@ function firstPaintChunk(dist) {
 }
 
 export function collectSizes() {
-	const exe = process.platform === 'win32' ? join(release, 'git-graph-studio.exe') : join(release, 'git-graph-studio');
+	// ggs: the release artifact is named by tauri.conf.json's mainBinaryName.
+	const exe = join(release, process.platform === 'win32' ? 'ggs.exe' : 'ggs');
 	const nsis = firstMatching(join(release, 'bundle', 'nsis'), (f) => f.endsWith('.exe'));
 	const msi = firstMatching(join(release, 'bundle', 'msi'), (f) => f.endsWith('.msi'));
 	const dmg = firstMatching(join(release, 'bundle', 'dmg'), (f) => f.endsWith('.dmg'));
@@ -83,7 +84,7 @@ export function collectSizes() {
 
 /** Run the backend's `--measure` against a repository; `null` when the exe is not built. */
 export function runProbes(repo) {
-	const exe = process.platform === 'win32' ? join(release, 'git-graph-studio.exe') : join(release, 'git-graph-studio');
+	const exe = join(release, process.platform === 'win32' ? 'ggs.exe' : 'ggs');
 	if (!existsSync(exe)) return null;
 	const result = spawnSync(exe, ['--measure', repo], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
 	if (result.status !== 0) {

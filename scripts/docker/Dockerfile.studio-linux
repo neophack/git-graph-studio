@@ -1,6 +1,7 @@
-# The Linux build environment for Git Graph Studio, used by scripts/build-studio-linux.bat
-# (local builds from Windows). CI builds the Linux installers natively on the ubuntu-24.04
-# runner instead - higher glibc floor, no image to maintain (.github/workflows/studio.yml).
+# The Linux build environment for Git Graph Studio, used by CI's studio-linux job
+# (.github/workflows/studio.yml - image layers kept warm through buildx's GitHub cache)
+# and by scripts/build-studio-linux.bat (local builds from Windows). The base image IS
+# the compatibility floor of the installers it produces.
 #
 # A Tauri app cannot be cross-compiled from Windows the way the extension's .node engines can
 # (build-rust.bat / cargo-zigbuild): it links against webkit2gtk, GTK3 and friends at build

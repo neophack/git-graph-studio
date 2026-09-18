@@ -392,18 +392,20 @@ not a frontend framework — the rest of the page stays hand-written DOM.
 ### 15. Build & Release Pipeline
 
 Everything that turns the source tree into installers: asset assembly into
-`target/studio/`, the seam checks, CI, and the local Linux build containers.
+`target/studio/`, the seam checks, CI, and the Linux build containers.
 
 - Assets: `scripts/prepare.mjs` (assembles `target/studio/`), `scripts/compare-bundle.mjs`
   (the Git Graph Commit Comparison page generator `prepare.mjs` builds from the extension's
   compiled CommonJS output), `scripts/*-stub.cjs` (the `vscode` / Node stubs the config and
   compare bundles build against), `vite.config.ts`
 - Seam checks: `scripts/check-seams.mjs` (TypeScript / CSS) and `src-tauri/build.rs` (Rust)
-- Packaging: `scripts/build-studio.bat` (Windows, one command). Linux installers: CI builds
-  them natively on the pinned ubuntu-24.04 runner (glibc 2.39 floor — see `studio.yml`);
-  `scripts/build-studio-linux.bat` + `scripts/docker/Dockerfile.studio-linux` +
-  `scripts/docker/studio-linux-build.sh` build them locally in containers pinned to the
-  older Ubuntu 22.04 / Fedora 38 floors. The `ggs` command line ships with every package:
+- Packaging: `scripts/build-studio.bat` (Windows, one command). Linux installers are built
+  in floor containers — the base image IS the compatibility floor: `ubuntu:22.04`
+  (glibc 2.35) for the deb, `fedora:38` (glibc 2.37) for the rpm. CI (`studio.yml`) runs
+  the same containers `scripts/build-studio-linux.bat` +
+  `scripts/docker/Dockerfile.studio-linux` + `scripts/docker/studio-linux-build.sh` drive
+  locally, and the in-container pass fails the build if the binary's glibc requirements
+  ever exceed the floor. The `ggs` command line ships with every package:
   the bundled binary is named `ggs` (`mainBinaryName`), `src-tauri/nsis-hooks.nsh` puts the
   NSIS install directory on the user's PATH (and removes it on uninstall), and the deb/rpm
   packages install it as `/usr/bin/ggs`. Installer-level file associations for the default
@@ -411,7 +413,8 @@ Everything that turns the source tree into installers: asset assembly into
   remove the runtime-registered ProgIds and the RegisteredApplications entry on uninstall
 - CI: `.github/workflows/studio.yml` (PRs: typecheck + vitest; `main`: also `cargo clippy
   -D warnings`, `cargo test`, installers for Windows and Linux, the perf gate — the tests
-  gate the installer build, and the two Linux package formats share one release compile);
+  gate the installer build, and each Linux package format compiles in its own floor
+  container);
   `.github/workflows/release.yml` (a pushed `v*` tag publishes installers with `SHA256SUMS`)
 
 ## Development workflow
