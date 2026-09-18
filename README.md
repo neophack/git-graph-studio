@@ -87,7 +87,7 @@ tree; `node_modules/` and the submodule's own build products stay where npm/carg
 
 ## Build
 
-Prerequisites: Rust 1.82+, Node.js, and the submodule compiled once:
+Prerequisites: Rust 1.94+, Node.js, and the submodule compiled once:
 
 ```sh
 git submodule update --init      # checks out vscode-git-graph-rs/ (the extension)

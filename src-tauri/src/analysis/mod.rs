@@ -12,6 +12,7 @@
 //! fan out to several same-named declarations), and every call-site name is recorded so
 //! the dead-code report can stay conservative.
 
+pub mod bca;
 pub mod deadcode;
 pub mod imports;
 pub mod metrics;

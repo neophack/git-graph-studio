@@ -99,6 +99,32 @@ describe('the report pages', () => {
 		expect(texts('.an-row .label').length).toBe(1);
 	});
 
+	it('metrics rows carry the big-code-analysis columns when measured', async () => {
+		await modules();
+		backend.on('analysis_metrics', ({ onEvent }) => {
+			const channel = onEvent as Channel;
+			channel.send({
+				kind: 'batch',
+				rows: [
+					// Measured: cognitive, Halstead, LLOC and MI all present.
+					{ path: 'src/deep.rs', name: 'deep', kind: 'function', container: null, line: 0, lines: 5, params: 1, complexity: 3, nesting: 2, refs: 1, hotspot: 3, cognitive: 5, halstead: 210, lloc: 4, mi: 62 },
+					// Not measured (a language without a grammar): the columns are absent.
+					{ path: 'src/plain.sh', name: 'plain', kind: 'function', container: null, line: 0, lines: 2, params: 0, complexity: 1, nesting: 0, refs: 1, hotspot: 1 }
+				]
+			});
+			channel.send({ kind: 'done', files: 2, functions: 2, cancelled: false });
+			return null;
+		});
+		createAnalysisPage('metrics', host());
+		await flush(8);
+		const chips = texts('.an-row .an-metrics span');
+		expect(chips.filter((text) => text.startsWith('Co '))).toEqual(['Co 5']);
+		expect(chips.filter((text) => text.startsWith('MI '))).toEqual(['MI 62']);
+		const rows = [...document.querySelectorAll<HTMLElement>('.an-row')];
+		expect(rows[0].title).toContain('Halstead volume 210', 'the tooltip carries the full detail');
+		expect(rows[1].title).toBe('src/plain.sh', 'an unmeasured row keeps the plain path tooltip');
+	});
+
 	it('dead code honours the exported checkbox by rerunning', async () => {
 		await modules();
 		const calls: boolean[] = [];

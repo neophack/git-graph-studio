@@ -51,6 +51,8 @@ interface WorkspaceCallGraph extends CallGraph {
 interface MetricRow {
 	path: string; name: string; kind: string; container: string | null; line: number;
 	lines: number; params: number; complexity: number; nesting: number; refs: number; hotspot: number;
+	/** The big-code-analysis columns — present when that engine measured the function. */
+	cognitive?: number; halstead?: number; lloc?: number; mi?: number;
 }
 
 interface DeadRow {
@@ -227,13 +229,17 @@ class MetricsPage extends ReportPage<MetricRow> {
 
 	protected renderRow(row: MetricRow): HTMLElement {
 		const element = el('div', 'an-row');
-		element.title = row.path;
+		element.title = row.cognitive === undefined
+			? row.path
+			: `${row.path}\n${tf('analysis.metrics.rich', row.cognitive, row.lloc ?? 0, row.halstead ?? 0, row.mi ?? 0)}`;
 		element.append(
 			icon(KIND_ICONS[row.kind] ?? 'symbol-method'),
 			el('span', 'label', [row.container ? `${row.container}.${row.name}` : row.name]),
 			el('span', 'description', [row.path]),
 			el('span', 'an-metrics', [
 				el('span', 'an-hot', [`C ${row.complexity}`]),
+				...(row.cognitive !== undefined ? [el('span', undefined, [`Co ${row.cognitive}`])] : []),
+				...(row.mi !== undefined ? [el('span', undefined, [`MI ${row.mi}`])] : []),
 				el('span', undefined, [`L ${row.lines}`]),
 				el('span', undefined, [`P ${row.params}`]),
 				el('span', undefined, [`N ${row.nesting}`]),

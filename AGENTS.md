@@ -34,7 +34,8 @@ When this file and the plan disagree, the plan wins; fix this file in the same c
 
 ## Quick start
 
-Prerequisites: Rust 1.82+ (`rust-version` in `src-tauri/Cargo.toml`), Node.js 20+, and a
+Prerequisites: Rust 1.94+ (`rust-version` in `src-tauri/Cargo.toml`; the floor is
+big-code-analysis, module 17's metrics engine), Node.js 20+, and a
 `git` executable on `PATH`.
 
 ```sh
@@ -355,8 +356,10 @@ receiver hints (no type inference); its honest limits are stated on the pages th
   graphs)
 - Backend: `src-tauri/src/cmd_analysis.rs` (the per-root `AnalysisIndex`, the streaming
   tool commands), `src-tauri/src/analysis/` (`mod.rs` the engine and call graph,
-  `metrics.rs`, `deadcode.rs`, `security.rs`, `imports.rs`); parsing comes from module 5's
-  `symbols/parse.rs`
+  `metrics.rs`, `deadcode.rs`, `security.rs`, `imports.rs`, `bca.rs` the big-code-analysis
+  bridge whose report-time columns — cognitive complexity, Halstead volume, logical SLOC,
+  the maintainability index — enrich the Complexity & Hotspots rows); parsing comes from
+  module 5's `symbols/parse.rs`
 - Tests: `tests/analysis.test.ts`, the `analysis/` modules' `#[cfg(test)]`
 
 ### 15. Build & Release Pipeline

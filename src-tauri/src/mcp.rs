@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 
 use crate::analysis::imports::import_graph;
-use crate::analysis::metrics::metric_rows;
+use crate::analysis::metrics::enriched_rows;
 use crate::analysis::security::scan_file;
 use crate::analysis::{deadcode, AnalysisData, Direction};
 use crate::cmd_analysis::AnalysisIndex;
@@ -390,7 +390,7 @@ impl McpServer {
         let data = self.analysis_data()?;
         let rows = {
             let data = data.lock().unwrap();
-            metric_rows(&data, &|_| 0)
+            enriched_rows(&data, &|_| 0, data.root())
         };
         let mut rows = rows;
         rows.sort_by(|a, b| {
@@ -412,8 +412,15 @@ impl McpServer {
                 .as_deref()
                 .map(|c| format!("{c}."))
                 .unwrap_or_default();
+            // The big-code-analysis columns, when they were measured — cognitive
+            // complexity and the maintainability index lead the AI's eye to the
+            // functions a refactor pays off on.
+            let rich = match (row.cognitive, row.mi) {
+                (Some(cognitive), Some(mi)) => format!("  cognitive {cognitive}  MI {mi}"),
+                _ => String::new(),
+            };
             out.push_str(&format!(
-                "{n}complexity {complexity}  {lines} lines  {params} params  nesting {nesting}  {kind} {container}{name} — {path}:{line}",
+                "{n}complexity {complexity}{rich}  {lines} lines  {params} params  nesting {nesting}  {kind} {container}{name} — {path}:{line}",
                 n = '\n',
                 complexity = row.complexity,
                 lines = row.lines,
@@ -563,7 +570,7 @@ fn tool_catalogue() -> Value {
         },
         {
             "name": "analysis_metrics",
-            "description": "Functions ranked by hotspot (cyclomatic complexity × references): complexity, lines, parameters and nesting per function.",
+            "description": "Functions ranked by hotspot (cyclomatic complexity × references): complexity, cognitive complexity, maintainability index, lines, parameters and nesting per function.",
             "inputSchema": { "type": "object", "properties": { "limit": { "type": "number", "description": "How many top functions to list (1-200, default 20)" } } }
         },
         {

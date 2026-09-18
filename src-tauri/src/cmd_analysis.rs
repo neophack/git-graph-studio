@@ -13,6 +13,9 @@ use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::State;
 
+use rayon::prelude::*;
+
+use crate::analysis::bca;
 use crate::analysis::imports::ImportGraph;
 use crate::analysis::metrics::MetricRow;
 use crate::analysis::security::{self, Finding};
@@ -25,7 +28,8 @@ use crate::AppState;
 pub const ANALYSIS_INDEX_EVENT: &str = "studio://analysis-index";
 
 /// Rows per streamed batch — small enough that the first batch lands in milliseconds,
-/// large enough that the channel is not the bottleneck.
+/// large enough that the channel is not the bottleneck (the metrics report batches by
+/// file, which lands the same rhythm).
 const REPORT_BATCH: usize = 256;
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -419,7 +423,9 @@ pub async fn analysis_call_path(
 }
 
 /// Every function and method with its measured shape, streamed in batches. The hotspot
-/// column blends the symbol index's occurrence counts in when it has landed.
+/// column blends the symbol index's occurrence counts in when it has landed; the
+/// big-code-analysis columns (cognitive complexity, Halstead, LLOC, MI) enrich each
+/// batch outside the analysis lock — a re-read per report, the security scan's rhythm.
 #[tauri::command]
 pub async fn analysis_metrics(
     state: State<'_, AppState>,
@@ -439,12 +445,26 @@ pub async fn analysis_metrics(
         .unwrap_or_default();
     tauri::async_runtime::spawn_blocking(move || {
         let run = index.begin_run();
-        let rows = {
+        // Base rows under the lock (the index already measured the shape); the
+        // enrichment parses outside it, so the analysis keeps serving queries.
+        let mut files: Vec<(String, Vec<MetricRow>)> = {
             let data = data.lock().unwrap();
-            metrics::metric_rows(&data, &|name| refs.get(name).copied().unwrap_or(0))
+            data.files()
+                .iter()
+                .map(|file| {
+                    (
+                        file.path.clone(),
+                        metrics::rows_for_file(
+                            file,
+                            &|name| refs.get(name).copied().unwrap_or(0),
+                        ),
+                    )
+                })
+                .collect()
         };
-        let files = rows.len();
-        for batch in rows.chunks(REPORT_BATCH) {
+        let file_count = files.len();
+        let mut functions = 0usize;
+        for batch in files.chunks_mut(REPORT_BATCH) {
             if !index.is_current_run(run) {
                 let _ = on_event.send(MetricsEvent::Done {
                     files: 0,
@@ -453,13 +473,24 @@ pub async fn analysis_metrics(
                 });
                 return Ok(());
             }
-            let _ = on_event.send(MetricsEvent::Batch {
-                rows: batch.to_vec(),
+            batch.par_iter_mut().for_each(|(path, rows)| {
+                let ext = path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+                if let Ok(text) =
+                    std::fs::read_to_string(std::path::Path::new(&root).join(path.as_str()))
+                {
+                    bca::enrich_file(ext, &text, rows);
+                }
             });
+            functions += batch.iter().map(|(_, rows)| rows.len()).sum::<usize>();
+            let rows: Vec<MetricRow> = batch
+                .iter()
+                .flat_map(|(_, rows)| rows.iter().cloned())
+                .collect();
+            let _ = on_event.send(MetricsEvent::Batch { rows });
         }
         let _ = on_event.send(MetricsEvent::Done {
-            files,
-            functions: rows.len(),
+            files: file_count,
+            functions,
             cancelled: false,
         });
         Ok(())
