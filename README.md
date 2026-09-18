@@ -28,7 +28,9 @@ beside a collapsible tree of module → file → call site), **Complexity & Hots
 complexity, size, nesting per function), **Dead Code** (declarations no call site in the
 workspace spells), a rule-based **Security Scan** (hardcoded secrets, dangerous and
 weak-crypto APIs, with CWE tags) and the **Import Graph** (file dependencies with import
-cycles). The shell itself is themeable
+cycles). The sidebar's sixth entry opens the **MCP Server** page: the connection
+snippets (with copy buttons) for pointing an AI client at this repository through
+`ggs --mcp`, the 15-tool catalogue, and the bridge's recent call log. The shell itself is themeable
 (`Auto (System)` follows the OS) with a Compact / Comfortable density setting, motion that
 respects `prefers-reduced-motion`, and keyboard focus cycling on F6.
 

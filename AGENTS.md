@@ -331,21 +331,34 @@ performance gate lives in `src-tauri/tests/perf.rs`.
 
 ### 16. Symbol MCP Server
 
-The `ggs --mcp <repository>` mode: the persistent symbol index served to AI assistants
-over the Model Context Protocol (newline-delimited JSON-RPC 2.0 on stdio). Five tools —
+The `ggs --mcp <repository>` mode: the persistent symbol index and the Code Analysis
+engine served to AI assistants over the Model Context Protocol (newline-delimited
+JSON-RPC 2.0 on stdio; headless — no window is ever created). The navigation tools —
 `symbol_lookup`, `symbol_references` (the occurrence-narrowed scan), `symbol_tree` (the
-same per-file outline the Symbol Database page renders), `search_symbols`,
-`index_status`. stderr is logs; stdout is protocol only.
+same per-file outline the Symbol Database page renders), `search_symbols`, `read_file`
+(a line-windowed file reader, path-confined to the repository), `search_text` (the
+workspace text search), `index_status` — plus module 17's analysis tools
+(`analysis_module_graph`, `analysis_call_graph`, `analysis_call_path`,
+`analysis_metrics`, `analysis_dead_code`, `analysis_security`, `analysis_import_graph`,
+`analysis_import_cycles`). Every call is logged as one JSON line to
+`~/.ggs/logs/mcp.log` (rotated past 1 MB), which the in-app MCP Server page shows.
+stderr is logs; stdout is protocol only.
 
+- Frontend: `src/mcpPage.ts` (the MCP Server page — the connection snippets with copy
+  buttons, the tool catalogue, the recent-call log; listed by module 17's tool registry
+  as the Analysis sidebar's sixth entry and hosted in its editor pages, loading lazily
+  with them)
 - Backend: `src-tauri/src/mcp.rs` (the server loop, the tool implementations, the
-  handshake); the index itself is module 5's (`cmd_symbols.rs` / `symbols/store.rs`), the
-  analysis tools sit on module 17's engine (`cmd_analysis.rs` / `analysis/`)
-- Tests: `mcp.rs`'s `#[cfg(test)]` module (scratch repository over a temp index home)
+  handshake, the call log); the index itself is module 5's (`cmd_symbols.rs` /
+  `symbols/store.rs`), the analysis tools sit on module 17's engine (`cmd_analysis.rs` /
+  `analysis/`)
+- Tests: `mcp.rs`'s `#[cfg(test)]` module (scratch repository over a temp index home);
+  the page's vitest lives in `tests/analysis.test.ts` (it rides the analysis suite)
 
 ### 17. Code Analysis
 
 The Code Analysis workbench: an activity bar entry (`Ctrl+Shift+A`) with a sidebar of
-five analysis tools — Module Analysis (the workspace's cross-file calls as a drawing and a tree: the
+five analysis tools plus module 16's MCP Server entry — Module Analysis (the workspace's cross-file calls as a drawing and a tree: the
 drawing renders on @antv/G6 — canvas, built-in layouts the picker switches (force,
 layered, circular, radial, grid, concentric), each sized to the blocks' real extents so
 rectangles never overlap (nodeSize from `data.size`, preventOverlap, per-layout spacing,

@@ -1301,6 +1301,8 @@ mod desktop {
                 cmd_analysis::analysis_dead_code,
                 cmd_analysis::analysis_security,
                 cmd_analysis::analysis_import_graph,
+                mcp::mcp_log,
+                mcp::mcp_tools,
                 cmd_search::hex_diff
             ])
             .run(tauri::generate_context!())

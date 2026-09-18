@@ -161,6 +161,48 @@ describe('the report pages', () => {
 		expect(rows[1].title).toBe('src/plain.sh', 'an unmeasured row keeps the plain path tooltip');
 	});
 
+	it('metrics re-sorts the rows by the picked dimension', async () => {
+		await modules();
+		backend.on('analysis_metrics', ({ onEvent }) => {
+			const channel = onEvent as Channel;
+			channel.send({
+				kind: 'batch',
+				rows: [
+					{ path: 'src/big/two.rs', name: 'two', kind: 'function', container: null, line: 0, lines: 40, params: 1, complexity: 3, nesting: 0, refs: 1, hotspot: 3, cognitive: 2, halstead: 20, lloc: 30, mi: 55 },
+					{ path: 'src/big/one.rs', name: 'one', kind: 'function', container: null, line: 0, lines: 5, params: 1, complexity: 2, nesting: 0, refs: 1, hotspot: 2, cognitive: 1, halstead: 10, lloc: 4, mi: 80 },
+					{ path: 'lib/x.rs', name: 'x', kind: 'function', container: null, line: 0, lines: 7, params: 1, complexity: 1, nesting: 0, refs: 1, hotspot: 1 }
+				]
+			});
+			channel.send({ kind: 'done', files: 3, functions: 3, cancelled: false });
+			return null;
+		});
+		createAnalysisPage('metrics', host());
+		await flush(8);
+		const select = document.querySelector<HTMLSelectElement>('.an-sort')!;
+		expect(select.value).toBe('hotspot');
+		const labels = () => texts('.an-row .label');
+		expect(labels()).toEqual(['two', 'one', 'x'], 'hotspot leads by default');
+		// Lines: the longest function first.
+		select.value = 'lines';
+		select.dispatchEvent(new Event('change', { bubbles: true }));
+		expect(labels()).toEqual(['two', 'x', 'one']);
+		// Name: alphabetical.
+		select.value = 'name';
+		select.dispatchEvent(new Event('change', { bubbles: true }));
+		expect(labels()).toEqual(['one', 'two', 'x']);
+		// Maintainability: the worst index leads and unmeasured rows trail last.
+		select.value = 'mi';
+		select.dispatchEvent(new Event('change', { bubbles: true }));
+		expect(labels()).toEqual(['two', 'one', 'x']);
+		// The filter and the sort compose: the narrowed rows keep the picked order.
+		select.value = 'lines';
+		select.dispatchEvent(new Event('change', { bubbles: true }));
+		const filter = document.querySelector<HTMLInputElement>('.an-filter')!;
+		filter.value = 'big';
+		filter.dispatchEvent(new Event('input', { bubbles: true }));
+		expect(labels()).toEqual(['two', 'one']);
+	});
+
 	it('dead code honours the exported checkbox by rerunning', async () => {
 		await modules();
 		const calls: boolean[] = [];
@@ -238,12 +280,12 @@ describe('the graph pages', () => {
 			'src/b.ts→src/ui.ts',
 			'top.rs→src/a.ts'
 		]);
-		// The default layout is circular — the blocks on a ring whose radius fits their
-		// combined widths; without a force simulation, blocks drag alone.
-		expect(options.layout.type).toBe('circular');
-		expect((options.layout as { radius?: number }).radius).toBeGreaterThanOrEqual(260);
-		expect(options.behaviors).toContain('drag-element');
-		expect(options.behaviors).not.toContain('drag-element-force');
+		// The default layout is force, pushing overlapping blocks apart over their real
+		// sizes; its blocks drag the layout with them.
+		expect(options.layout.type).toBe('force');
+		expect((options.layout as { preventOverlap?: boolean }).preventOverlap).toBe(true);
+		expect(typeof (options.layout as { nodeSize?: unknown }).nodeSize).toBe('function');
+		expect(options.behaviors).toContain('drag-element-force');
 		expect(options.behaviors).toContain('zoom-canvas');
 		// A double-clicked block opens the file.
 		graph.emit('node:dblclick', { target: { id: 'src/a.ts' } });
@@ -373,6 +415,37 @@ describe('the graph pages', () => {
 		await flush(8);
 		expect(texts('.an-empty', root)[0]).toContain('No cross-file calls');
 		expect(g6Graphs.length).toBe(0, 'nothing to draw');
+	});
+
+	it('the MCP page lists setup, the catalogue and the call log', async () => {
+		await modules();
+		backend.on('mcp_tools', () => [
+			{ name: 'symbol_lookup', description: 'Every declaration of exactly this symbol name' },
+			{ name: 'analysis_module_graph', description: 'The cross-file calls as module dependencies' }
+		]);
+		backend.on('mcp_log', () => [
+			{ time: 1760000095000, tool: 'symbol_lookup', ok: false, ms: 12, args: '{"name":"missing"}' },
+			{ time: 1760000000000, tool: '(start)', ok: true, ms: 0, args: '{"root":"D:\\repo"}' }
+		]);
+		const root = host();
+		createAnalysisPage('mcp', root);
+		await flush(8);
+		const sections = texts('.an-section', root);
+		expect(sections.length).toBe(3);
+		expect(sections[0]).toContain('Connecting');
+		expect(sections[1]).toContain('Tool catalogue (2)');
+		expect(sections[2]).toContain('Recent calls (2)');
+		// The command line and the stdio snippet, each with its copy action.
+		const snippets = texts('.an-code', root);
+		expect(snippets[0]).toContain('ggs --mcp');
+		expect(snippets[1]).toContain('"mcpServers"');
+		expect(root.querySelectorAll('.an-codebar .action-btn').length).toBe(2);
+		// The catalogue rows, and the log rows with the failure marked.
+		expect(texts('.an-row .label', root)).toContain('analysis_module_graph');
+		const failed = root.querySelector('.an-row.an-sev-error')!;
+		expect(failed.textContent).toContain('symbol_lookup');
+		expect(failed.textContent).toContain('12 ms');
+		expect((failed as HTMLElement).title).toContain('"name":"missing"');
 	});
 
 	it('import graph lists cycles before dependencies', async () => {

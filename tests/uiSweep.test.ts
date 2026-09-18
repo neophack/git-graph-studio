@@ -134,6 +134,8 @@ function richHandlers(): Map<string, Handler> {
 		channel.onmessage({ kind: 'done', files: 2, findings: 1, cancelled: false });
 		return null;
 	});
+	map.set('mcp_tools', () => [{ name: 'symbol_lookup', description: 'look up a symbol' }]);
+	map.set('mcp_log', () => [{ time: 1700000000000, tool: 'symbol_lookup', ok: true, ms: 3, args: '{"name":"alpha"}' }]);
 	map.set('analysis_import_graph', () => ({ edges: [['src/a.js', 'src/b.js'], ['src/b.js', 'src/a.js']], cycles: [['src/a.js', 'src/b.js']] }));
 	map.set('find_references', () => [{ path: 'src/main.rs', matches: [{ line: 2, column: 13, length: 5, text: 'fn main() { alpha(); }' }] }]);
 	map.set('search_workspace', ({ onEvent }) => {

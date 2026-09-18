@@ -13,6 +13,7 @@ import type { Graph as G6Graph, IEvent, LayoutOptions } from '@antv/g6';
 import { t, tf } from './i18n';
 import { KIND_ICONS } from './contextView';
 import { analysisTool, type AnalysisToolId } from './analysisTools';
+import { McpPage } from './mcpPage';
 import { actionButton, el, icon } from './ui';
 
 /* ---------- The backend shapes ---------- */
@@ -67,6 +68,7 @@ export function createAnalysisPage(tool: AnalysisToolId, container: HTMLElement)
 		case 'deadcode': return new DeadCodePage(container);
 		case 'security': return new SecurityPage(container);
 		case 'imports': return new ImportsPage(container);
+		case 'mcp': return new McpPage(container);
 	}
 }
 
@@ -169,18 +171,12 @@ abstract class ReportPage<T> implements AnalysisPageView {
 			this.list.appendChild(el('div', 'an-empty', [t('analysis.page.empty')]));
 			return;
 		}
-		const visible = this.sortRows(this.rows.filter((row) => this.matches(row)));
+		const visible = this.rows.filter((row) => this.matches(row));
 		const cap = 5000;
 		for (const row of visible.slice(0, cap)) this.list.appendChild(this.renderRow(row));
 		if (visible.length > cap) {
 			this.list.appendChild(el('div', 'an-more', [tf('analysis.page.more', visible.length - cap)]));
 		}
-	}
-
-	/** The order the filtered rows render in; a page with a user-chosen dimension
-	 *  overrides this. The array is a fresh filter copy, safe to sort in place. */
-	protected sortRows(rows: T[]): T[] {
-		return rows;
 	}
 }
 
@@ -434,7 +430,7 @@ class ModulePage implements AnalysisPageView {
 	private graphFilter = '';
 	private filterTimer: ReturnType<typeof setTimeout> | null = null;
 	private view: 'graph' | 'tree' = 'graph';
-	private layout: GraphLayoutId = 'circular';
+	private layout: GraphLayoutId = 'force';
 	private readonly openModules = new Set<string>();
 	private readonly openFiles = new Set<string>();
 	/** Bumps on every load; part of the graph rebuild key. */

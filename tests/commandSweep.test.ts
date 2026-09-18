@@ -66,6 +66,8 @@ beforeEach(async () => {
 		['analysis_status', () => ({ state: 'ready', done: 2, total: 2, files: 2, symbols: 3, calls: 2 })],
 		['analysis_rebuild', () => ({ state: 'ready', done: 2, total: 2, files: 2, symbols: 3, calls: 2 })],
 		['analysis_module_graph', () => ({ modules: [], edges: [], fileEdges: [], totalCalls: 0, totalFileEdges: 0 })],
+		['mcp_tools', () => [{ name: 'symbol_lookup', description: 'look up a symbol' }]],
+		['mcp_log', () => []],
 		['analysis_metrics', ({ onEvent }) => {
 			(onEvent as { onmessage: (e: unknown) => void }).onmessage({ kind: 'done', files: 1, functions: 1, cancelled: false });
 			return null;

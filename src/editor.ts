@@ -51,14 +51,16 @@ const ANALYSIS_PAGE_LABELS: Record<import('./analysisTools').AnalysisToolId, str
 	metrics: 'Complexity & Hotspots',
 	deadcode: 'Dead Code',
 	security: 'Security Scan',
-	imports: 'Import Graph'
+	imports: 'Import Graph',
+	mcp: 'MCP Server'
 };
 const ANALYSIS_PAGE_ICONS: Record<import('./analysisTools').AnalysisToolId, string> = {
 	modules: 'symbol-module',
 	metrics: 'pulse',
 	deadcode: 'circle-slash',
 	security: 'shield',
-	imports: 'type-hierarchy-sub'
+	imports: 'type-hierarchy-sub',
+	mcp: 'plug'
 };
 
 /** The windowed editor module, loaded on the first large-file open (it drags CodeMirror in,

@@ -278,6 +278,7 @@ export class Workbench {
 		register({ id: 'analysis.showDeadCode', title: 'Dead Code', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('deadcode') });
 		register({ id: 'analysis.showSecurity', title: 'Security Scan', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('security') });
 		register({ id: 'analysis.showImports', title: 'Import Graph', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('imports') });
+		register({ id: 'analysis.showMcp', title: 'MCP Server', category: 'Analysis', run: () => void this.editors.openAnalysisPage('mcp') });
 		register({ id: 'git.openFileHistory', title: 'Git: Open File History', category: 'Git', enabled: () => hasRepo() && this.editors.activeInput?.kind === 'file', run: () => this.editors.openFileHistory() });
 		register({ id: 'git.toggleBlame', title: 'Git: Toggle Blame', category: 'Git', keybinding: 'Ctrl+K Ctrl+B', enabled: () => hasRepo() && this.editors.activeView !== null && this.editors.activeInput?.kind === 'file', run: () => this.editors.toggleBlame() });
 		register({ id: 'markdown.showPreview', title: 'Markdown: Open Preview', category: 'View', keybinding: 'Ctrl+Shift+V', enabled: () => this.editors.activeInput?.kind === 'file' && /\.(md|markdown)$/i.test(this.editors.activeInput.path), run: () => this.editors.openMarkdownPreview() });
@@ -342,7 +343,7 @@ export class Workbench {
 			item('workbench.commandPalette'), 'separator',
 			item('workbench.showExplorer'), item('workbench.showSearch'), item('workbench.showScm'), item('workbench.showGraph'), item('workbench.showOutput'), item('workbench.showContext'), item('workbench.showSymbolDatabase'), 'separator',
 			{ label: t('menu.analysis'), submenu: [
-				item('analysis.showModules'), item('analysis.showMetrics'), item('analysis.showDeadCode'), item('analysis.showSecurity'), item('analysis.showImports')
+				item('analysis.showModules'), item('analysis.showMetrics'), item('analysis.showDeadCode'), item('analysis.showSecurity'), item('analysis.showImports'), item('analysis.showMcp')
 			] },
 			'separator', item('editor.toggleWordWrap'), 'separator', item('markdown.showPreview'), item('markdown.showPreviewToSide'), item('git.openFileHistory'), item('git.toggleBlame'), 'separator',
 				{ label: 'Editor Layout', submenu: [

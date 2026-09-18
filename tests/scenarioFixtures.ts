@@ -51,6 +51,8 @@ export function commonHandlers(): [string, Handler][] {
 		['boot_stage', () => null],
 		['analysis_status', () => ({ state: 'ready', done: 3, total: 3, files: 3, symbols: 8, calls: 5 })],
 		['analysis_module_graph', () => ({ modules: [], edges: [], fileEdges: [], totalCalls: 0, totalFileEdges: 0 })],
+		['mcp_tools', () => [{ name: 'symbol_lookup', description: 'look up a symbol' }]],
+		['mcp_log', () => []],
 		['analysis_metrics', ({ onEvent }) => { (onEvent as { onmessage: (e: unknown) => void }).onmessage({ kind: 'done', files: 3, functions: 8, cancelled: false }); return null; }],
 		['analysis_dead_code', ({ onEvent }) => { (onEvent as { onmessage: (e: unknown) => void }).onmessage({ kind: 'done', found: 0, cancelled: false }); return null; }],
 		['analysis_security', ({ onEvent }) => { (onEvent as { onmessage: (e: unknown) => void }).onmessage({ kind: 'done', files: 3, findings: 0, cancelled: false }); return null; }],

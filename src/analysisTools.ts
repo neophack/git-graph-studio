@@ -1,11 +1,13 @@
-// The Code Analysis tool registry (module 17): the five tools the Analysis sidebar lists
-// and the editor pages host. This module is deliberately dependency-free — the sidebar
-// (first paint) and the lazy pages module both read it, so it must not import either.
-// The type-only i18n import keeps the keys compile-checked without a runtime edge.
+// The Code Analysis tool registry (module 17): the five analysis tools the Analysis
+// sidebar lists, plus module 16's MCP Server page that rides the same registry (the
+// sidebar row and the editor page host). This module is deliberately dependency-free —
+// the sidebar (first paint) and the lazy pages module both read it, so it must not
+// import either. The type-only i18n import keeps the keys compile-checked without a
+// runtime edge.
 
 import type { t } from './i18n';
 
-export type AnalysisToolId = 'modules' | 'metrics' | 'deadcode' | 'security' | 'imports';
+export type AnalysisToolId = 'modules' | 'metrics' | 'deadcode' | 'security' | 'imports' | 'mcp';
 
 export interface AnalysisTool {
 	id: AnalysisToolId;
@@ -46,6 +48,12 @@ export const ANALYSIS_TOOLS: AnalysisTool[] = [
 		icon: 'type-hierarchy-sub',
 		titleKey: 'analysis.tool.imports',
 		descriptionKey: 'analysis.tool.imports.desc'
+	},
+	{
+		id: 'mcp',
+		icon: 'plug',
+		titleKey: 'mcp.tool',
+		descriptionKey: 'mcp.tool.desc'
 	}
 ];
 

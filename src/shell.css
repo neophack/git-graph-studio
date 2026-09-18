@@ -1305,6 +1305,19 @@ body.resizing iframe { pointer-events: none; }
 .an-page.an-tree .an-layout { display: none; }
 .an-g6 { flex: 1; min-height: 0; position: relative; overflow: hidden; }
 
+/* The MCP Server page's setup snippets: a labelled bar with the copy action over a
+   monospace block, and the note under them. */
+.an-codebar { display: flex; align-items: center; gap: 8px; margin: 6px 20px 0; }
+.an-codebar-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--vscode-descriptionForeground); flex: 1; }
+.an-code {
+	display: block; margin: 2px 20px 0; padding: 8px 12px; border-radius: 4px;
+	background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background));
+	color: var(--vscode-editor-foreground);
+	font-family: var(--vscode-editor-font-family, Consolas, monospace); font-size: 12px;
+	white-space: pre; overflow-x: auto;
+}
+.an-note { font-size: 11px; padding: 8px 20px 0; }
+
 .an-cycle .an-arrow { color: var(--vscode-descriptionForeground); flex: none; }
 .an-cycle-step { color: var(--vscode-descriptionForeground); }
 
