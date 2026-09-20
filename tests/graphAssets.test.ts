@@ -373,4 +373,162 @@ describe('graph assets', () => {
 		expect(backend.callsTo('graph_request').some((call) => (call['message'] as Record<string, unknown>)['command'] === 'countUncommittedChanges')).toBe(false);
 		expect(postSpy.mock.calls.filter((call) => (call[0] as { __studioGraphResponse: Record<string, unknown> }).__studioGraphResponse['command'] === 'loadCommits').length).toBe(1);
 	});
+
+	it('drops a deferred follow-up that outlived its page (a folder switch remounts the frame)', async () => {
+		// The count scan the old page's load scheduled resolves after the frame was remounted onto
+		// another repository. The fresh page restarts its refresh-id counter at 0, so the id alone
+		// cannot reject the stale completion - the host's load generation must.
+		let resolveCount: (() => void) | null = null;
+		const page = { command: 'loadCommits', refreshId: 5, commits: [{ hash: 'abc', parents: [], author: 'A', email: '', date: 1, message: 'm', heads: [], tags: [], remotes: [], stash: null }], head: 'abc', tags: [], moreCommitsAvailable: false, error: null };
+		backend.on('graph_request', (args) => {
+			const message = args['message'] as Record<string, unknown>;
+			if (message['command'] === 'loadCommits') return { ...page, uncommittedPending: true };
+			if (message['command'] === 'countUncommittedChanges') {
+				return new Promise((resolve) => {
+					resolveCount = () => resolve({ command: 'countUncommittedChanges', count: 6, error: null });
+				});
+			}
+			return { command: message['command'], error: null };
+		});
+		const host = new GraphHost(delegate);
+		document.body.appendChild(host.element);
+		host.load('C:\\repo');
+		await flush(10);
+		const frameWindow = host.frame.contentWindow!;
+		const postSpy = vi.spyOn(frameWindow, 'postMessage').mockImplementation(() => undefined);
+		window.dispatchEvent(new MessageEvent('message', { source: frameWindow, data: { __studioGraphRequest: {
+			command: 'loadCommits', repo: 'C:\\repo', refreshId: 5, maxCommits: 300
+		} } }));
+		await vi.waitFor(() => expect(resolveCount).not.toBeNull());
+		host.load('D:\\other'); // the folder switch: the frame remounts, the count's page is gone
+		await flush(10);
+		resolveCount!();
+		await flush(20);
+		const posted = postSpy.mock.calls
+			.map((call) => (call[0] as { __studioGraphResponse: Record<string, unknown> }).__studioGraphResponse)
+			.filter((message) => message['command'] === 'loadCommits');
+		expect(posted.length).toBe(1); // only the original page: the stale completion never posted
+	});
+
+	it('drops the gerrit stages the same way', async () => {
+		let resolveRefresh: (() => void) | null = null;
+		const page = { command: 'loadCommits', refreshId: 5, commits: [{ hash: 'abc', parents: [], author: 'A', email: '', date: 1, message: 'm', heads: [], tags: [], remotes: [], stash: null }], head: 'abc', tags: [], moreCommitsAvailable: false, error: null };
+		backend.on('graph_request', (args) => {
+			const message = args['message'] as Record<string, unknown>;
+			if (message['command'] === 'loadCommits') return { ...page, gerritPending: true };
+			if (message['command'] === 'gerritRefresh') {
+				return new Promise<void>((resolve) => { resolveRefresh = resolve; })
+					.then(() => ({ command: 'gerritRefresh', error: null }));
+			}
+			return { command: message['command'], error: null };
+		});
+		const host = new GraphHost(delegate);
+		document.body.appendChild(host.element);
+		host.load('C:\\repo');
+		await flush(10);
+		const frameWindow = host.frame.contentWindow!;
+		const postSpy = vi.spyOn(frameWindow, 'postMessage').mockImplementation(() => undefined);
+		window.dispatchEvent(new MessageEvent('message', { source: frameWindow, data: { __studioGraphRequest: {
+			command: 'loadCommits', repo: 'C:\\repo', refreshId: 5, maxCommits: 300, gerritFetchRefs: true
+		} } }));
+		await vi.waitFor(() => expect(resolveRefresh).not.toBeNull());
+		host.load('D:\\other');
+		await flush(10);
+		resolveRefresh!();
+		await flush(20);
+		const posted = postSpy.mock.calls
+			.map((call) => (call[0] as { __studioGraphResponse: Record<string, unknown> }).__studioGraphResponse)
+			.filter((message) => message['command'] === 'loadCommits');
+		expect(posted.length).toBe(1); // no stage response reached the fresh page
+		const loads = backend.callsTo('graph_request')
+			.map((call) => (call['message'] as Record<string, unknown>)['command']);
+		expect(loads.filter((command) => command === 'loadCommits').length).toBe(1); // the stage was never even requested
+	});
+
+	it('confirms a zero count across the confirm window before the row drops', async () => {
+		vi.useFakeTimers();
+		try {
+			const counts: number[] = [];
+			const page = { command: 'loadCommits', refreshId: 5, commits: [{ hash: 'abc', parents: [], author: 'A', email: '', date: 1, message: 'm', heads: [], tags: [], remotes: [], stash: null }], head: 'abc', tags: [], moreCommitsAvailable: false, error: null };
+			backend.on('graph_request', (args) => {
+				const message = args['message'] as Record<string, unknown>;
+				if (message['command'] === 'loadCommits') return { ...page, uncommittedPending: true };
+				if (message['command'] === 'countUncommittedChanges') return { command: 'countUncommittedChanges', count: counts.shift() ?? 0, error: null };
+				return { command: message['command'], error: null };
+			});
+			const host = new GraphHost(delegate);
+			document.body.appendChild(host.element);
+			host.load('C:\\repo');
+			await vi.advanceTimersByTimeAsync(0);
+			const frameWindow = host.frame.contentWindow!;
+			const postSpy = vi.spyOn(frameWindow, 'postMessage').mockImplementation(() => undefined);
+			const posted = () => postSpy.mock.calls
+				.map((call) => (call[0] as { __studioGraphResponse: Record<string, unknown> }).__studioGraphResponse)
+				.filter((message) => message['command'] === 'loadCommits');
+
+			// A positive count is delivered at once.
+			counts.push(6);
+			window.dispatchEvent(new MessageEvent('message', { source: frameWindow, data: { __studioGraphRequest: {
+				command: 'loadCommits', repo: 'C:\\repo', refreshId: 5, maxCommits: 300
+			} } }));
+			await vi.advanceTimersByTimeAsync(0);
+			expect(posted().length).toBe(2);
+			expect(posted()[1]!['uncommittedCount']).toBe(6);
+
+			// A refresh that reads a transient zero holds the row: the refresh's own page is
+			// posted, but no count completion follows it - and through the whole confirm window
+			// the zero is re-read, never delivered.
+			counts.push(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+			window.dispatchEvent(new MessageEvent('message', { source: frameWindow, data: { __studioGraphRequest: {
+				command: 'loadCommits', repo: 'C:\\repo', refreshId: 6, maxCommits: 300
+			} } }));
+			await vi.advanceTimersByTimeAsync(0);
+			expect(posted().length).toBe(3);
+			expect('uncommittedCount' in posted()[2]!).toBe(false);
+			await vi.advanceTimersByTimeAsync(4000);
+			expect(posted().length).toBe(3);
+			// Once the readings have spanned the window, the confirmed zero lands.
+			await vi.advanceTimersByTimeAsync(2000);
+			expect(posted().length).toBe(4);
+			expect(posted()[3]!['uncommittedCount']).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('delivers nothing when the count read keeps failing', async () => {
+		vi.useFakeTimers();
+		try {
+			const page = { command: 'loadCommits', refreshId: 5, commits: [{ hash: 'abc', parents: [], author: 'A', email: '', date: 1, message: 'm', heads: [], tags: [], remotes: [], stash: null }], head: 'abc', tags: [], moreCommitsAvailable: false, error: null };
+			backend.on('graph_request', (args) => {
+				const message = args['message'] as Record<string, unknown>;
+				if (message['command'] === 'loadCommits') return { ...page, uncommittedPending: true };
+				if (message['command'] === 'countUncommittedChanges') return { command: 'countUncommittedChanges', count: 0, error: 'status failed' };
+				return { command: message['command'], error: null };
+			});
+			const host = new GraphHost(delegate);
+			document.body.appendChild(host.element);
+			host.load('C:\\repo');
+			await vi.advanceTimersByTimeAsync(0);
+			const frameWindow = host.frame.contentWindow!;
+			const postSpy = vi.spyOn(frameWindow, 'postMessage').mockImplementation(() => undefined);
+			window.dispatchEvent(new MessageEvent('message', { source: frameWindow, data: { __studioGraphRequest: {
+				command: 'loadCommits', repo: 'C:\\repo', refreshId: 5, maxCommits: 300
+			} } }));
+			await vi.advanceTimersByTimeAsync(0);
+			// The page only: a failed read is "unknown", never a delivered count.
+			expect(postedCount(postSpy)).toBe(1);
+			// The confirm loop is bounded - it gives up instead of reading forever.
+			await vi.advanceTimersByTimeAsync(30000);
+			expect(postedCount(postSpy)).toBe(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });
+
+function postedCount(postSpy: ReturnType<typeof vi.spyOn>): number {
+	return postSpy.mock.calls
+		.map((call) => (call[0] as { __studioGraphResponse: Record<string, unknown> }).__studioGraphResponse)
+		.filter((message) => message['command'] === 'loadCommits').length;
+}

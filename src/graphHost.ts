@@ -484,6 +484,7 @@ export class GraphHost {
 		if (!isRepo || repoPath === null) {
 			this.currentRepo = null;
 			this.loadGeneration++;
+			this.uncommittedStabiliser.reset();
 			this.showPlaceholder(repoPath !== null);
 			this.loaded = false;
 			return;
@@ -492,6 +493,8 @@ export class GraphHost {
 		// perhaps); switching folders starts from the newly opened one.
 		if (switched) {
 			this.currentRepo = null;
+			// The uncommitted count of the previous repository says nothing about this one
+			this.uncommittedStabiliser.reset();
 			// The view's persisted state (written by the page's shim, see view.html) names the
 			// repository it last showed. Offered back to a freshly mounted page it becomes a
 			// loadViewTo into a repository set that does not contain it, and the view greets the
@@ -507,6 +510,10 @@ export class GraphHost {
 	}
 
 	private loadGeneration = 0;
+
+	/** The uncommitted-row follow-up's flicker guard; reset when the rendered repository changes
+	 *  (the previous repository's count says nothing about the next one). */
+	private readonly uncommittedStabiliser = new UncommittedCountStabiliser(UNCOMMITTED_ZERO_CONFIRM_MS, UNCOMMITTED_RECHECK_MS);
 
 	/** The repository set for the view: the open repository plus its initialised submodules,
 	 *  each with its saved view state. */
@@ -577,6 +584,7 @@ export class GraphHost {
 		this.repoPath = null;
 		this.currentRepo = null;
 		this.loadGeneration++;
+		this.uncommittedStabiliser.reset();
 		this.showPlaceholder(false);
 		this.frame.removeAttribute('srcdoc');
 		this.frame.src = 'about:blank';
@@ -636,6 +644,8 @@ export class GraphHost {
 		const postSwitch = () => {
 			if (this.currentRepo === repo || !this.repos.includes(repo)) return;
 			this.currentRepo = repo;
+			// The uncommitted count of the previous repository says nothing about this one
+			this.uncommittedStabiliser.reset();
 			this.post({ command: 'loadRepos', repos: this.repoStates(), lastActiveRepo: repo, loadViewTo: { repo } });
 		};
 		// The Source Control view may know a submodule this host has not re-read since its load
@@ -732,10 +742,15 @@ export class GraphHost {
 			// host's own load: the Gerrit refresh first (its staged responses arrive as further
 			// `loadCommits` responses under the same refresh id), then the "Uncommitted Changes"
 			// count on top of the commit data the pipeline actually rendered.
+			// The pipeline captures the load generation: a folder switch or unload remounts the
+			// frame, and the fresh page restarts its refresh-id counter at 0, so the id alone can
+			// no longer reject a completion the old page's load scheduled - without this guard a
+			// stale follow-up could paint the previous repository's commits into the new page.
+			const generation = this.loadGeneration;
 			const gerrit = response['gerritPending'] === true
-				? this.gerritFollowUp(request)
+				? this.gerritFollowUp(request, generation)
 				: Promise.resolve<Message | null>(null);
-			void gerrit.then((stage) => this.uncommittedFollowUp(request, stage ?? response));
+			void gerrit.then((stage) => this.uncommittedFollowUp(request, stage ?? response, generation));
 		}
 		if (WRITE_COMMANDS.has(command) && response['command'] !== 'lossWarning') {
 			this.delegate.repoChanged();
@@ -785,10 +800,10 @@ export class GraphHost {
 	 * nothing - a failed refresh leaves the page as it rendered it. */
 	private readonly gerritFollowUps = new Map<string, Promise<Message | null>>();
 
-	private gerritFollowUp(request: Message): Promise<Message | null> {
+	private gerritFollowUp(request: Message, generation: number): Promise<Message | null> {
 		const repo = typeof request['repo'] === 'string' && request['repo'] !== '' ? request['repo'] : this.repoPath;
 		if (!repo) return Promise.resolve(null);
-		const chained = (this.gerritFollowUps.get(repo) ?? Promise.resolve<Message | null>(null)).then(() => this.runGerritFollowUp(request, repo));
+		const chained = (this.gerritFollowUps.get(repo) ?? Promise.resolve<Message | null>(null)).then(() => this.runGerritFollowUp(request, repo, generation));
 		this.gerritFollowUps.set(repo, chained);
 		chained.then(() => {
 			if (this.gerritFollowUps.get(repo) === chained) this.gerritFollowUps.delete(repo);
@@ -804,7 +819,7 @@ export class GraphHost {
 	 * previously cached states, exactly as the extension degrades; a still-pending cache leaves
 	 * the retry to the next load, so the follow-up never loops. Returns the full stage it
 	 * posted, or `null` when the pipeline failed before delivering one. */
-	private async runGerritFollowUp(request: Message, repo: string): Promise<Message | null> {
+	private async runGerritFollowUp(request: Message, repo: string, generation: number): Promise<Message | null> {
 		const settings = this.actionSettings();
 		const started = performance.now();
 		const refresh = await graphRequest({
@@ -814,10 +829,12 @@ export class GraphHost {
 			gerritFetchLimit: this.gerritFetchLimitOf(request),
 			gerritStatusFilter: request['gerritStatusFilter']
 		}, settings);
+		if (generation !== this.loadGeneration) return null; // remounted onto another page: the staged responses would paint the old one
 		if (refresh !== null && refresh['error'] !== null && refresh['error'] !== undefined) {
 			this.logLine(`gerritRefresh failed: ${String(refresh['error'])}`);
 		}
 		const stage = await graphRequest({ ...request, gerritRemote: this.gerritRemote(), gerritFetchLimit: this.gerritFetchLimitOf(request) }, settings);
+		if (generation !== this.loadGeneration) return null;
 		this.logLine(`gerritRefresh + stage: ${(performance.now() - started).toFixed(0)} ms`);
 		if (stage === null || (stage['error'] !== null && stage['error'] !== undefined)) {
 			if (stage !== null) this.logLine(`ERROR gerrit stage: ${String(stage['error'])}`);
@@ -841,10 +858,10 @@ export class GraphHost {
 	 * for no count at all. One pipeline per repository, so refreshes cannot stack scans. */
 	private readonly uncommittedFollowUps = new Map<string, Promise<void>>();
 
-	private uncommittedFollowUp(request: Message, page: Message): Promise<void> {
+	private uncommittedFollowUp(request: Message, page: Message, generation: number): Promise<void> {
 		const repo = typeof request['repo'] === 'string' && request['repo'] !== '' ? request['repo'] : this.repoPath;
 		if (!repo) return Promise.resolve();
-		const run = () => this.runUncommittedFollowUp(request, page, repo);
+		const run = () => this.runUncommittedFollowUp(request, page, repo, generation);
 		const chained = (this.uncommittedFollowUps.get(repo) ?? Promise.resolve()).then(run, run);
 		this.uncommittedFollowUps.set(repo, chained);
 		chained.then(() => {
@@ -853,7 +870,7 @@ export class GraphHost {
 		return chained;
 	}
 
-	private async runUncommittedFollowUp(request: Message, page: Message, repo: string): Promise<void> {
+	private async runUncommittedFollowUp(request: Message, page: Message, repo: string, generation: number): Promise<void> {
 		if (this.config['showUncommittedChanges'] === false) return;
 		const head = page['head'];
 		const commits = page['commits'];
@@ -862,20 +879,59 @@ export class GraphHost {
 		if (typeof head !== 'string' || head === '' || !Array.isArray(commits)
 			|| !commits.some((commit) => (commit as Message)['hash'] === head)) return;
 		const started = performance.now();
+		let count = await this.readUncommittedCount(repo);
+		this.logLine(`countUncommittedChanges: ${(performance.now() - started).toFixed(0)} ms`);
+		// The confirm loop is bounded: a status read that keeps failing (or zeros that keep racing
+		// new reads) gives up after twice the confirm window, leaving the row at its last delivered
+		// state for the next refresh to settle.
+		let attemptsLeft = Math.ceil((2 * UNCOMMITTED_ZERO_CONFIRM_MS) / UNCOMMITTED_RECHECK_MS);
+		while (true) {
+			// Remounted onto another page (folder switch, unload): the row this count completes is
+			// gone, and the stale completion must not reach the fresh page.
+			if (generation !== this.loadGeneration) return;
+			if (request['hard'] === true) {
+				// A hard refresh wiped the view (the row included) before this pipeline started, so
+				// there is no rendered row whose disappearance needs stabilising: deliver the
+				// reading directly, and give up on a read that fails.
+				if (count === null) return;
+				this.postUncommittedCompletion(page, count);
+				this.uncommittedStabiliser.delivered(count);
+				return;
+			}
+			const outcome = this.uncommittedStabiliser.observe(count, Date.now());
+			if ('recheckAfterMs' in outcome) {
+				if (--attemptsLeft < 0) return;
+				await new Promise((resolve) => setTimeout(resolve, outcome.recheckAfterMs));
+				count = await this.readUncommittedCount(repo);
+				continue;
+			}
+			this.postUncommittedCompletion(page, outcome.send);
+			this.uncommittedStabiliser.delivered(outcome.send);
+			return;
+		}
+	}
+
+	/** Read the deferred row's count on its own backend round trip. A failed scan reads as null -
+	 *  "unknown", never 0: a momentarily failing status scan is exactly how the row used to
+	 *  vanish and come back. */
+	private async readUncommittedCount(repo: string): Promise<number | null> {
 		const counted = await graphRequest({
 			command: 'countUncommittedChanges',
 			repo,
 			includeUntracked: this.config['showUntrackedFiles'] !== false
 		}, this.actionSettings());
-		this.logLine(`countUncommittedChanges: ${(performance.now() - started).toFixed(0)} ms`);
-		if (counted === null || (counted['error'] !== null && counted['error'] !== undefined)) {
+		if (counted === null || counted['error'] !== null && counted['error'] !== undefined) {
 			if (counted !== null) this.logLine(`ERROR countUncommittedChanges: ${String(counted['error'])}`);
-			return;
+			return null;
 		}
-		// `gerritPending` is stripped from the repeat: this response completes the uncommitted
-		// row, and on the Gerrit-failure fallback the flag would promise states no pipeline is
-		// coming to deliver.
-		const completion: Message = { ...page, uncommittedCount: counted['count'] };
+		return typeof counted['count'] === 'number' ? counted['count'] : null;
+	}
+
+	/** Repeat the page with the confirmed count under the same refresh id. `gerritPending` is
+	 *  stripped from the repeat: this response completes the uncommitted row, and on the
+	 *  Gerrit-failure fallback the flag would promise states no pipeline is coming to deliver. */
+	private postUncommittedCompletion(page: Message, count: number): void {
+		const completion: Message = { ...page, uncommittedCount: count };
 		delete completion['gerritPending'];
 		this.post(completion);
 	}
@@ -1146,6 +1202,63 @@ export class GraphHost {
 		}
 	}
 }
+
+/* ---------- The deferred "Uncommitted Changes" count ---------- */
+
+/** The decision for one reading of the repository's uncommitted-change count. */
+type UncommittedReading =
+	| { readonly send: number } // deliver this count to the view now
+	| { readonly recheckAfterMs: number }; // deliver nothing yet: read the count again after this delay
+
+/** Ported from the extension's UncommittedCountStabiliser (src/gitGraphView.ts): decides when a
+ *  reading of the "Uncommitted Changes" count may be delivered, so the row never disappears and
+ *  reappears on a momentary reading (a `git status` that raced a concurrent index write reports
+ *  0, not the real count - delivering that 0 removes the rendered row, and the next refresh
+ *  brings it straight back):
+ *  - a positive count is delivered immediately, whatever the row currently shows;
+ *  - a zero that would REMOVE the row is delivered only once re-reads span the confirm window;
+ *  - a failed reading (null) delivers nothing: the failure neither confirms nor denies
+ *    anything, and the next refresh reads the status again. */
+class UncommittedCountStabiliser {
+	/** The count the view last rendered (null => unknown: nothing was delivered since the last reset). */
+	private renderedCount: number | null = null;
+	/** When the current streak of zero readings started (null => the latest reading wasn't a zero). */
+	private zeroSince: number | null = null;
+
+	constructor(private readonly confirmWindowMs: number, private readonly recheckIntervalMs: number) {}
+
+	/** Observe one reading of the count; returns whether to deliver a count now or re-read after a delay. */
+	public observe(count: number | null, now: number): UncommittedReading {
+		if (count === null) return { recheckAfterMs: this.recheckIntervalMs };
+		if (count > 0) {
+			this.zeroSince = null;
+			return { send: count };
+		}
+		if (this.renderedCount === null || this.renderedCount === 0) {
+			// No row is rendered: delivering 0 changes nothing on screen, so there is nothing to stabilise
+			return { send: 0 };
+		}
+		if (this.zeroSince === null) this.zeroSince = now;
+		if (now - this.zeroSince < this.confirmWindowMs) return { recheckAfterMs: this.recheckIntervalMs };
+		this.zeroSince = null;
+		return { send: 0 };
+	}
+
+	/** Record the count a delivered response rendered in the view (call only after actually sending). */
+	public delivered(count: number): void {
+		this.renderedCount = count;
+		if (count > 0) this.zeroSince = null;
+	}
+
+	/** Forget what the view renders (the view switched repository or was reset). */
+	public reset(): void {
+		this.renderedCount = null;
+		this.zeroSince = null;
+	}
+}
+
+const UNCOMMITTED_ZERO_CONFIRM_MS = 5000;
+const UNCOMMITTED_RECHECK_MS = 1000;
 
 /* ---------- Helpers ---------- */
 
