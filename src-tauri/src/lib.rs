@@ -368,6 +368,98 @@ mod deferred_services_tests {
         })
     }
 
+    #[cfg(test)]
+    mod open_folder_impl_tests {
+        use super::*;
+
+        /// Opening a subfolder of a repository resolves to the repository root - both in the
+        /// answer the frontend applies and in the root `post_first_paint` will later start
+        /// services for (a service started against the subfolder would watch the wrong tree).
+        #[test]
+        fn opening_a_repo_subfolder_resolves_and_records_the_repo_root() {
+            let scratch = crate::test_support::Scratch::new("open-folder-subdir");
+            let git = scratch.repo("repo");
+            let sub = git.repo.join("src");
+            std::fs::create_dir_all(&sub).unwrap();
+            let state = AppState::new();
+            let opened = tauri::async_runtime::block_on(open_folder_impl(
+                &state,
+                &sub.display().to_string(),
+            ))
+            .unwrap();
+            let root = git.repo.display().to_string();
+            assert!(opened.is_repo);
+            assert_eq!(opened.root, root);
+            assert_eq!(*state.repos.lock().unwrap(), vec![root.clone()]);
+            // The subfolder never reaches DeferredServices: the resolved root does, so
+            // `post_first_paint` starts the watcher and the index builds on the right tree.
+            assert_eq!(state.deferred_services.take(), vec![root]);
+        }
+
+        /// A folder with no `.git` ancestor opens in place - no root resolution, still recorded
+        /// for its background services (Quick Open and the symbol index work without git).
+        #[test]
+        fn opening_a_plain_folder_reports_no_repository_and_still_defers_its_services() {
+            let scratch = crate::test_support::Scratch::new("open-folder-plain");
+            let plain = scratch.path("plain");
+            std::fs::create_dir_all(&plain).unwrap();
+            let state = AppState::new();
+            let opened = tauri::async_runtime::block_on(open_folder_impl(
+                &state,
+                &plain.display().to_string(),
+            ))
+            .unwrap();
+            assert!(!opened.is_repo);
+            assert_eq!(opened.root, plain.display().to_string());
+            assert_eq!(state.deferred_services.take(), vec![plain.display().to_string()]);
+        }
+
+        /// A path that is not a folder at all (missing, or a file) is refused before anything in
+        /// the app's state changes - a failed open must not clear the folder that is still open.
+        #[test]
+        fn opening_a_path_that_is_not_a_folder_leaves_the_open_state_untouched() {
+            let scratch = crate::test_support::Scratch::new("open-folder-missing");
+            let state = AppState::new();
+            state.repos.lock().unwrap().push("C:\\already\\open".to_owned());
+            state.deferred_services.record(vec!["C:\\already\\open".to_owned()]);
+            let missing = scratch.path("does-not-exist");
+            let result = tauri::async_runtime::block_on(open_folder_impl(
+                &state,
+                &missing.display().to_string(),
+            ));
+            assert!(result.is_err());
+            assert_eq!(
+                *state.repos.lock().unwrap(),
+                vec!["C:\\already\\open".to_owned()]
+            );
+            assert_eq!(state.deferred_services.take(), vec!["C:\\already\\open".to_owned()]);
+        }
+
+        /// A rapid reopen of a different folder replaces the previous one - both in `repos` and
+        /// in the pending deferred-services record, so a superseded folder's watcher and index
+        /// build never start against a root the app has already moved on from.
+        #[test]
+        fn reopening_a_different_folder_replaces_the_previous_one_everywhere() {
+            let scratch = crate::test_support::Scratch::new("open-folder-reopen");
+            let first = scratch.repo("first");
+            let second = scratch.repo("second");
+            let state = AppState::new();
+            tauri::async_runtime::block_on(open_folder_impl(
+                &state,
+                &first.repo.display().to_string(),
+            ))
+            .unwrap();
+            tauri::async_runtime::block_on(open_folder_impl(
+                &state,
+                &second.repo.display().to_string(),
+            ))
+            .unwrap();
+            let second_root = second.repo.display().to_string();
+            assert_eq!(*state.repos.lock().unwrap(), vec![second_root.clone()]);
+            assert_eq!(state.deferred_services.take(), vec![second_root]);
+        }
+    }
+
     /// One open root's background services: the symbol index build, the analysis index build
     /// and the file watcher, all off the calling thread. Shared by `post_first_paint` so the
     /// folder and workspace open paths start identical services.
