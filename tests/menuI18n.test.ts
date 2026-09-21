@@ -53,7 +53,7 @@ beforeEach(async () => {
 		<div id="overlays"></div>`;
 	workbench?.dispose();
 	backend.reset();
-	backend.on('initial_repo', () => REPO);
+	backend.on('boot_context', () => ({ file: null, actions: [], repo: REPO }));
 	backend.on('open_folder', ({ path }) => ({ root: path, isRepo: true }));
 	backend.on('boot_stage', () => null);
 	backend.on('list_dir', () => []);

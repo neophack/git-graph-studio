@@ -244,6 +244,10 @@ export class SourceControlView {
 	onShowFileHistory: ((path: string) => void) | null = null;
 	/** Fired after every write, so the graph and the status bar can catch up. */
 	onChanged: (() => void) | null = null;
+	/** Fired with the head this refresh fetched (branch, upstream, ahead/behind) so the status
+	 *  bar can render it without a second `repo_head` subprocess; fired with `null` when that
+	 *  fetch failed, so the host can fall back to fetching it itself. */
+	onHead: ((head: { repo: string; branch: string | null; shortHash: string; ahead: number; behind: number; upstream: string | null } | null) => void) | null = null;
 	/** Fired whenever the pending change count changes, so the activity bar badge can track it. */
 	onCount: ((count: number) => void) | null = null;
 	/** Fired with the number of unmerged paths after every refresh (the status bar's "N conflicts"). */
@@ -320,7 +324,7 @@ export class SourceControlView {
 		// The branch's own state rides along: the commit button's clean-tree roles (Push, Sync
 		// Changes, Publish Branch) read it. A backend build or scripted test without repo_head
 		// keeps the previous values; the workbench no longer needs its own follow-up fetch.
-		const head = await invoke<{ branch: string | null; shortHash: string; ahead: number; behind: number; upstream: string | null }>('repo_head').catch(() => null);
+		const head = await invoke<{ repo: string; branch: string | null; shortHash: string; ahead: number; behind: number; upstream: string | null }>('repo_head').catch(() => null);
 		if (generation !== this.generation) return;
 		if (head) {
 			this.branch = head.branch;
@@ -329,6 +333,7 @@ export class SourceControlView {
 			this.behind = head.behind;
 			this.upstream = head.upstream;
 		}
+		this.onHead?.(head);
 		await this.refreshSubmodules(generation);
 		if (generation !== this.generation) return;
 		const status: StatusMap = new Map();

@@ -164,13 +164,26 @@
 				// maps the asset names to the package's copies (window.__ggAssets, blob URLs of
 				// the same origin); otherwise the names resolve next to this page.
 				var assets = window.__ggAssets || {};
-				['markdown-it.min.js', 'out.min.js'].forEach(function (src) {
+				['markdown-it.min.js', 'out.min.js'].forEach(function (src, index, list) {
 					var script = document.createElement('script');
 					script.src = assets[src] || src;
 					script.async = false;
+					if (index === list.length - 1) {
+						// The frame's load event does not prove out.min.js has executed, and the
+						// host (graphHost.ts) may have preloaded this page to warm the bundle
+						// before a repository mount: it waits for this signal (true = the bundle
+						// ran, false = it failed to load) before talking to the page, and falls
+						// back to a plain reload when the signal never comes. __ggViewBooted is
+						// set here - not when the scripts are appended - so that reading it back
+						// means the bundle has actually executed.
+						var notify = function (ok) {
+							try { window.parent.postMessage({ __studioGraphBooted: ok === true }, '*'); } catch (e) { /* the host is gone */ }
+						};
+						script.addEventListener('load', function () { window.__ggViewBooted = true; notify(true); });
+						script.addEventListener('error', function () { notify(false); });
+					}
 					document.head.appendChild(script);
 				});
-				window.__ggViewBooted = true;
 			}
 
 			if (initial.theme) {

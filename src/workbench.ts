@@ -788,8 +788,13 @@ export class Workbench {
 		this.statusBar.onConflictsClick = () => this.showView('scm');
 		this.scm.onChanged = () => {
 			this.graph.refresh();
-			void this.statusBar.refreshHead();
 			void this.explorer.refresh();
+		};
+		// The refresh's own repo_head feeds the bar (one subprocess serves both views); a failed
+		// fetch falls back to the bar fetching the head itself.
+		this.scm.onHead = (head) => {
+			if (head) this.statusBar.applyHead(head);
+			else void this.statusBar.refreshHead();
 		};
 
 		this.editors.onActiveChange = (editor) => {
@@ -1192,9 +1197,8 @@ export class Workbench {
 				return;
 			}
 			this.lastRefreshAt = performance.now();
-			void this.scm.refresh();
+			void this.scm.refresh(); // its repo_head feeds the status bar (see scm.onHead)
 			this.graph.refresh();
-			void this.statusBar.refreshHead();
 			void this.explorer.refresh();
 			const active = this.editors.activeInput;
 			if (active?.kind === 'file') void this.editors.reloadIfClean(active.path);
@@ -1388,10 +1392,14 @@ export class Workbench {
 		if (snapshot && (snapshot.openFiles.length > 0 || snapshot.activeFile)) whenIdle(() => void this.restoreSnapshot(root, snapshot), 1000);
 		ExtensionHost.workspaceFolders = [...this.repoPaths];
 		// `git status` is the slowest part of opening a folder, and the tree above renders
-		// without it: the SCM view and the branch name settle here in the background while
-		// the explorer is already usable (the view's own refresh also fetches the branch head
-		// that steers its commit button).
-		if (anyRepo) void this.scm.refresh();
+		// without it: the SCM refresh and the branch head it fetches wait for the first painted
+		// frame, so the full-tree scan and the head subprocess no longer compete with the graph
+		// view's boot for the CPU. The same signal starts the backend's own deferred services
+		// (the symbol/analysis indexes and the file watcher).
+		requestAnimationFrame(() => {
+			void invoke('post_first_paint').catch(() => undefined);
+			if (anyRepo) void this.scm.refresh();
+		});
 		if (state.layout.sidebarVisible) this.showView(this.activeView);
 	}
 
@@ -1487,19 +1495,23 @@ export class Workbench {
 	/* ---------- Boot ---------- */
 
 	async boot(): Promise<void> {
+		// One round trip instead of three: the launch form (a file, comparison actions, or the
+		// folder argument) decides everything the boot does next. A plain-folder launch is
+		// opened inside this very call (the backend opens it during the splash), so when the
+		// folder the boot picks matches, the answer is applied directly - no second round trip.
+		const context = await invoke<{ file: string | null; actions: { type: string; left?: string; right?: string; path?: string }[]; repo: string | null; opened: { root: string; isRepo: boolean } | null; openedFor: string | null }>('boot_context')
+			.catch(() => ({ file: null as string | null, actions: [] as { type: string; left?: string; right?: string; path?: string }[], repo: null as string | null, opened: null as { root: string; isRepo: boolean } | null, openedFor: null as string | null }));
 		// A `ggs <file>` launch shows exactly that file, alone.
-		const launchFile = await invoke<string | null>('initial_file').catch(() => null);
-		if (launchFile) {
-			await this.openFileStandalone(launchFile);
+		if (context.file) {
+			await this.openFileStandalone(context.file);
 			return;
 		}
 		// A `ggs compare|hex|hex-compare|folder-compare ...` launch opens its comparison as the
 		// window's first tab, over no folder of its own - the same tabs the Explorer's
 		// "Compare Two Files/Folders" menu opens.
-		const actions = await invoke<{ type: string; left?: string; right?: string; path?: string }[]>('initial_actions').catch(() => null);
-		if (actions !== null && actions.length > 0) {
+		if (context.actions.length > 0) {
 			this.statusBar.setRepo(false);
-			for (const action of actions) {
+			for (const action of context.actions) {
 				if (action.type === 'compareFiles' && action.left && action.right) {
 					await this.editors.openDiff({
 						kind: 'diff',
@@ -1517,15 +1529,27 @@ export class Workbench {
 				}
 			}
 		} else {
-			const current = await invoke<string | null>('initial_repo').catch(() => null);
 			// The backend re-opens its launch folder (a workspace's first root); the recents may
 			// hold the workspace file itself, which must win - opening the root as a plain folder
 			// would drop the workspace's other roots.
 			const remembered = state.lastFolder();
-			const last = remembered !== null && remembered.toLowerCase().endsWith('.ggs-workspace') ? remembered : current ?? remembered;
+			const last = remembered !== null && remembered.toLowerCase().endsWith('.ggs-workspace') ? remembered : context.repo ?? remembered;
 			if (last) {
-				if (last.toLowerCase().endsWith('.ggs-workspace')) await this.openWorkspace(last);
-				else await this.openFolder(last);
+				if (last.toLowerCase().endsWith('.ggs-workspace')) {
+					await this.openWorkspace(last);
+				} else {
+					// The graph's view page starts loading in the background now, so its bundle
+					// fetch, parse and first data requests overlap the folder's own open
+					// sequence (graphHost.preload reconciles the page when the load lands).
+					this.graph.preload(last);
+					if (context.opened !== null && context.openedFor === last) {
+						// The backend already opened this very folder inside `boot_context`:
+						// apply the answer directly instead of spending another round trip.
+						await this.applyRoots([context.opened.root], context.opened.isRepo, null);
+					} else {
+						await this.openFolder(last);
+					}
+				}
 			} else {
 				this.statusBar.setRepo(false);
 			}

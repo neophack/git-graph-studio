@@ -116,7 +116,65 @@ mod desktop {
         /// The watch on the open folder; `None` when no folder is open or the OS refused it.
         /// One watcher per open root: a plain folder keeps one, a multi-root workspace one per root.
         pub watcher: Mutex<Vec<watcher::FolderWatcher>>,
+    /// Roots whose heavy background services (the symbol/analysis index builds and the
+    /// file watcher) are recorded by `open_folder` / `open_workspace` but only started by
+    /// `post_first_paint`, which the shell calls once its first frame with the new folder
+    /// has painted - so none of them competes with that frame for the CPU.
+    pub deferred_services: DeferredServices,
+}
+
+/// The open folders whose background services wait for the shell's first painted frame.
+/// A plain struct (not raw state inline) so the record/take lifecycle - replace on reopen,
+/// consume once, clear on close - is unit-testable without a Tauri app.
+pub struct DeferredServices(Mutex<Vec<String>>);
+
+impl DeferredServices {
+    /// `open_folder` / `open_workspace` record their roots; a rapid reopen replaces the
+    /// previous record, so a superseded folder's services can never start late.
+    pub fn record(&self, roots: Vec<String>) {
+        *self.0.lock().unwrap() = roots;
     }
+
+    /// `post_first_paint` takes the recorded roots, leaving nothing pending: the call is
+    /// idempotent, and only services recorded after it wait for the next one.
+    pub fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+
+    /// Closing the folder (or switching to single-file mode) drops any pending roots.
+    pub fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
+}
+
+impl Default for DeferredServices {
+    fn default() -> Self {
+        DeferredServices(Mutex::new(Vec::new()))
+    }
+}
+
+#[cfg(test)]
+mod deferred_services_tests {
+    use super::DeferredServices;
+
+    #[test]
+    fn a_reopen_replaces_the_pending_roots() {
+        let pending = DeferredServices::default();
+        pending.record(vec!["a".to_owned()]);
+        pending.record(vec!["b".to_owned(), "c".to_owned()]);
+        assert_eq!(pending.take(), vec!["b".to_owned(), "c".to_owned()]);
+        // Consumed: a second first-paint starts nothing until the next open records again.
+        assert!(pending.take().is_empty());
+    }
+
+    #[test]
+    fn clear_drops_a_folder_that_never_reached_its_first_frame() {
+        let pending = DeferredServices::default();
+        pending.record(vec!["a".to_owned()]);
+        pending.clear();
+        assert!(pending.take().is_empty());
+    }
+}
 
     impl AppState {
         fn new() -> Self {
@@ -130,6 +188,7 @@ mod desktop {
                 symbol_index: Arc::new(cmd_symbols::SymbolIndex::new()),
                 analysis_index: Arc::new(cmd_analysis::AnalysisIndex::new()),
                 watcher: Mutex::new(Vec::new()),
+                deferred_services: DeferredServices::default(),
             }
         }
 
@@ -195,18 +254,21 @@ mod desktop {
     /// without git, and the git-backed views offer to initialise a repository instead.
     #[tauri::command]
     async fn open_folder(
-        app: tauri::AppHandle,
         state: tauri::State<'_, AppState>,
         path: String,
     ) -> Result<OpenedFolder, String> {
-        if !std::path::Path::new(&path).is_dir() {
+        open_folder_impl(state.inner(), &path).await
+    }
+
+    async fn open_folder_impl(state: &AppState, path: &str) -> Result<OpenedFolder, String> {
+        if !std::path::Path::new(path).is_dir() {
             return Err(format!("{path} is not a folder"));
         }
         // The repository root is found on the file system here (the nearest ancestor holding a
         // `.git`), not asked of the engine: opening a folder must never wait for the engine's
         // warm-up, which may still be running on a fresh launch.
-        let found_root = find_repo_root(&path);
-        let root = found_root.clone().unwrap_or(path);
+        let found_root = find_repo_root(path);
+        let root = found_root.clone().unwrap_or_else(|| path.to_owned());
         let opened = OpenedFolder {
             is_repo: found_root.is_some(),
             root: root.clone(),
@@ -238,60 +300,22 @@ mod desktop {
             cmd_graph::close_engine_repos();
         }
         // Warm Quick Open's file list in the background: by the time the user hits Ctrl+P the
-        // walk has usually finished and the picker opens on a cache hit.
+        // walk has usually finished and the picker opens on a cache hit. This walk is the one
+        // background service that stays on the open path - it is cheap, and Quick Open's first
+        // keystroke can come at any moment.
         let prefetch_root = root.clone();
         let cache = state.file_list_cache.clone();
         std::thread::spawn(move || {
             let files = cmd_fs::walk_files(&prefetch_root);
             cache.store(&prefetch_root, files);
         });
-        // The symbol database resumes from ~/.ggs/index/ and repairs against the disk in the
-        // background (cmd_symbols); Go-to-Definition and Find References pick it up when it
-        // lands, falling back to the in-memory index until then.
-        {
-            let index = std::sync::Arc::clone(&state.symbol_index);
-            let index_root = root.clone();
-            index.start_build(Some(app.clone()), &index_root);
-        }
-        // The Code Analysis index builds the same way, behind the symbol index (its parse
-        // is the heavier half; the analysis pages pick it up when it lands).
-        {
-            let analysis = std::sync::Arc::clone(&state.analysis_index);
-            let analysis_root = root.clone();
-            analysis.start_build(Some(app.clone()), &analysis_root);
-        }
-        // External changes reach the webview through the watcher; a refused watch (an exotic
-        // filesystem, too many watches) just means the command-driven refreshes carry on alone.
-        // Starting it costs filesystem work that must not sit on the open path — the graph and
-        // the SCM view load while it comes up.
-        {
-            let app = app.clone();
-            let file_list = state.file_list_cache.clone();
-            let symbols = state.symbol_cache.clone();
-            let index = std::sync::Arc::clone(&state.symbol_index);
-            let analysis = std::sync::Arc::clone(&state.analysis_index);
-            let watch_root = root.clone();
-            std::thread::spawn(move || {
-                match start_watcher(&app, &file_list, &symbols, &index, &analysis, &watch_root) {
-                    Ok(watch) => {
-                        use tauri::Manager;
-                        // Only the watcher of the folder that is still open survives a rapid reopen;
-                        // installing it drops the previous folder's watchers (their handles close).
-                        let state = app.state::<AppState>();
-                        let still_open = state
-                            .repos
-                            .lock()
-                            .unwrap()
-                            .first()
-                            .is_some_and(|open| *open == watch_root);
-                        if still_open {
-                            *state.watcher.lock().unwrap() = vec![watch];
-                        }
-                    }
-                    Err(error) => eprintln!("[watcher] {error}"),
-                }
-            });
-        }
+        // The heavy background services (the symbol/analysis index builds and the file
+        // watcher) record themselves here but start only with `post_first_paint`, once the
+        // shell has painted its first frame with this folder: the index resume and the
+        // watcher's recursive scan used to share the CPU with that frame and the graph
+        // view's boot. They are not needed for the frame itself - Go-to-Definition, the
+        // analysis pages and external-change refreshes pick them up whenever they land.
+        state.deferred_services.record(vec![root.clone()]);
         Ok(opened)
     }
 
@@ -342,6 +366,61 @@ mod desktop {
             }
             let _ = app.emit(FS_CHANGED_EVENT, change);
         })
+    }
+
+    /// One open root's background services: the symbol index build, the analysis index build
+    /// and the file watcher, all off the calling thread. Shared by `post_first_paint` so the
+    /// folder and workspace open paths start identical services.
+    fn start_root_services(app: &tauri::AppHandle, state: &AppState, root: &str) {
+        // The symbol database resumes from ~/.ggs/index/ and repairs against the disk
+        // (cmd_symbols); Go-to-Definition and Find References pick it up when it lands,
+        // falling back to the in-memory index until then.
+        {
+            let index = Arc::clone(&state.symbol_index);
+            let index_root = root.to_owned();
+            index.start_build(Some(app.clone()), &index_root);
+        }
+        // The Code Analysis index builds the same way, behind the symbol index (its parse
+        // is the heavier half; the analysis pages pick it up when it lands).
+        {
+            let analysis = Arc::clone(&state.analysis_index);
+            let analysis_root = root.to_owned();
+            analysis.start_build(Some(app.clone()), &analysis_root);
+        }
+        // External changes reach the webview through the watcher; a refused watch (an exotic
+        // filesystem, too many watches) just means the command-driven refreshes carry on alone.
+        let app = app.clone();
+        let file_list = state.file_list_cache.clone();
+        let symbols = state.symbol_cache.clone();
+        let index = Arc::clone(&state.symbol_index);
+        let analysis = Arc::clone(&state.analysis_index);
+        let watch_root = root.to_owned();
+        std::thread::spawn(move || {
+            match start_watcher(&app, &file_list, &symbols, &index, &analysis, &watch_root) {
+                Ok(watch) => {
+                    use tauri::Manager;
+                    // Only the watcher of a root that is still open survives a rapid reopen;
+                    // installing it drops the previous root's watchers (their handles close).
+                    let state = app.state::<AppState>();
+                    if state.repos.lock().unwrap().contains(&watch_root) {
+                        state.watcher.lock().unwrap().push(watch);
+                    }
+                }
+                Err(error) => eprintln!("[watcher] {error}"),
+            }
+        });
+    }
+
+    /// The shell's first frame with the newly opened folder has painted: start the background
+    /// services `open_folder` / `open_workspace` recorded, so their index resumes and watch
+    /// scans never shared the CPU with that frame and the graph view's boot. Idempotent - a
+    /// no-op when nothing waits (every folder open is followed by one call, later ones only
+    /// after a reopen, when a fresh set was recorded).
+    #[tauri::command]
+    fn post_first_paint(app: tauri::AppHandle, state: tauri::State<AppState>) {
+        for root in state.deferred_services.take() {
+            start_root_services(&app, &state, &root);
+        }
     }
 
     /// One root of an opened `.ggs-workspace`: the folder's path, and whether it sits inside
@@ -426,7 +505,7 @@ mod desktop {
     /// subfolder of one repository, or sit beside one.
     #[tauri::command]
     async fn open_workspace(
-        app: tauri::AppHandle,
+        _app: tauri::AppHandle,
         state: tauri::State<'_, AppState>,
         path: String,
     ) -> Result<OpenedWorkspace, String> {
@@ -473,7 +552,9 @@ mod desktop {
         *state.repos.lock().unwrap() = roots.iter().map(|root| root.root.clone()).collect();
         cmd_graph::close_engine_repos();
 
-        // Per root: the Quick Open prefetch and the watcher, both off the open path.
+        // The Quick Open prefetch stays on the open path (cheap, and the first Ctrl+P can come
+        // at any moment); the index builds and the watchers wait for the first painted frame,
+        // exactly as in `open_folder` - see `post_first_paint`.
         for root in &roots {
             let prefetch_root = root.root.clone();
             let cache = state.file_list_cache.clone();
@@ -481,35 +562,8 @@ mod desktop {
                 let files = cmd_fs::walk_files(&prefetch_root);
                 cache.store(&prefetch_root, files);
             });
-            {
-                let index = std::sync::Arc::clone(&state.symbol_index);
-                let index_root = root.root.clone();
-                index.start_build(Some(app.clone()), &index_root);
-            }
-            {
-                let analysis = std::sync::Arc::clone(&state.analysis_index);
-                let analysis_root = root.root.clone();
-                analysis.start_build(Some(app.clone()), &analysis_root);
-            }
-            let app = app.clone();
-            let file_list = state.file_list_cache.clone();
-            let symbols = state.symbol_cache.clone();
-            let index = std::sync::Arc::clone(&state.symbol_index);
-            let analysis = std::sync::Arc::clone(&state.analysis_index);
-            let watch_root = root.root.clone();
-            std::thread::spawn(move || {
-                match start_watcher(&app, &file_list, &symbols, &index, &analysis, &watch_root) {
-                    Ok(watch) => {
-                        use tauri::Manager;
-                        let state = app.state::<AppState>();
-                        if state.repos.lock().unwrap().contains(&watch_root) {
-                            state.watcher.lock().unwrap().push(watch);
-                        }
-                    }
-                    Err(error) => eprintln!("[watcher] {error}"),
-                }
-            });
         }
+        state.deferred_services.record(roots.iter().map(|root| root.root.clone()).collect());
         Ok(OpenedWorkspace { roots })
     }
 
@@ -619,17 +673,50 @@ mod desktop {
         crate::atomic_write(&settings_file()?, contents.as_bytes())
     }
 
-    /// The file a `git-graph-studio <file>` launch should show (single-file mode).
-    #[tauri::command]
-    fn initial_file(state: tauri::State<AppState>) -> Option<String> {
-        state.single_file.lock().unwrap().clone()
+    /// The launch form the frontend's boot decides on, in one round trip instead of three
+    /// serial `initial_*` asks: a `ggs <file>` launch's file, a comparison launch's actions,
+    /// or the folder argument's repository. At most one of the three is set (a file launch
+    /// and a comparison launch record no folder).
+    ///
+    /// `opened` / `openedFor`: when the launch form can only open a folder (`ggs <folder>`,
+    /// no file, no comparison), the folder is opened right here - one IPC round trip fewer
+    /// on the boot's critical path, and the open happens during the splash instead of after
+    /// it. The frontend's own folder choice can differ (a remembered workspace file still
+    /// wins over the launch argument), so it applies this only when `openedFor` matches the
+    /// folder it picked, and re-opens the plain way otherwise.
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BootContext {
+        file: Option<String>,
+        actions: Vec<StartupAction>,
+        repo: Option<String>,
+        opened: Option<OpenedFolder>,
+        opened_for: Option<String>,
     }
 
-    /// The comparisons a `ggs <subcommand> ...` launch opens in its window: the tabs the
-    /// Explorer's context menu would open, read once by the frontend's boot.
     #[tauri::command]
-    fn initial_actions(state: tauri::State<AppState>) -> Vec<StartupAction> {
-        state.startup_actions.lock().unwrap().clone()
+    async fn boot_context(state: tauri::State<'_, AppState>) -> Result<BootContext, String> {
+        let file = state.single_file.lock().unwrap().clone();
+        let actions = state.startup_actions.lock().unwrap().clone();
+        let repo = state.first_repo();
+        let (opened, opened_for) = if file.is_none() && actions.is_empty() {
+            match repo.clone() {
+                Some(folder) => (
+                    open_folder_impl(state.inner(), &folder).await.ok(),
+                    Some(folder),
+                ),
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+        Ok(BootContext {
+            file,
+            actions,
+            repo,
+            opened,
+            opened_for,
+        })
     }
 
     /// Single-file mode (File > Open File...): show exactly this file - no folder, no
@@ -646,6 +733,7 @@ mod desktop {
         state.file_list_cache.invalidate();
         state.symbol_cache.invalidate();
         state.repos.lock().unwrap().clear();
+        state.deferred_services.clear();
         *state.single_file.lock().unwrap() = Some(path);
         cmd_graph::close_engine_repos();
         Ok(())
@@ -662,6 +750,7 @@ mod desktop {
         state.file_list_cache.invalidate();
         state.symbol_cache.invalidate();
         state.repos.lock().unwrap().clear();
+        state.deferred_services.clear();
         cmd_graph::close_engine_repos();
     }
 
@@ -1212,7 +1301,6 @@ mod desktop {
                 can_log::can_log_count,
                 can_log::can_log_find,
                 can_log::can_log_close,
-                cmd_fs::initial_repo,
                 cmd_fs::repo_submodules,
                 cmd_graph::graph_request,
                 cmd_scm::scm_status,
@@ -1246,8 +1334,8 @@ mod desktop {
                 cmd_fuzzy::fuzzy_files,
                 open_workspace,
                 settings_read,
-                initial_file,
-                initial_actions,
+                boot_context,
+                post_first_paint,
                 open_single_file,
                 settings_write,
                 keybindings_read,

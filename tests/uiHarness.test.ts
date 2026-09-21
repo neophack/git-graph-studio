@@ -48,7 +48,7 @@ beforeEach(async () => {
 	workbench?.dispose();
 	backend.reset();
 	backend.handlers = new DefaultingHandlers([
-		['initial_repo', () => REPO],
+		['boot_context', () => ({ file: null, actions: [], repo: REPO })],
 		['open_folder', ({ path }) => ({ root: path, isRepo: true })],
 		['boot_stage', () => null],
 		['list_dir', () => [{ name: 'notes.txt', path: NOTES, isDir: false, size: 12 }]],

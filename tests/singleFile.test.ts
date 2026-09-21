@@ -1,6 +1,6 @@
 // Single-file mode (`git-graph-studio <file>` / File > Open File...): the window shows one
 // file and nothing else - the side bar and the terminal are hidden, no repository views run,
-// and the file's editor opens at once. The backend side is `initial_file` / `open_single_file`.
+// and the file's editor opens at once. The backend side is `boot_context` / `open_single_file`.
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -41,8 +41,7 @@ beforeEach(() => {
 	shell();
 	backend.reset();
 	backend.handlers = new DefaultingHandlers([
-		['initial_file', () => FILE],
-		['initial_repo', () => null],
+		['boot_context', () => ({ file: FILE, actions: [], repo: null })],
 		['boot_stage', () => null],
 		['read_file', () => ({ contents: '# Hello\n', binary: false, size: 8 })],
 		['open_single_file', () => null],
@@ -75,8 +74,7 @@ describe('single-file mode', () => {
 	});
 
 	it('File > Open File... switches an open folder into single-file mode', async () => {
-		backend.handlers.set('initial_file', () => null);
-		backend.handlers.set('initial_repo', () => 'C:\\repo');
+		backend.handlers.set('boot_context', () => ({ file: null, actions: [], repo: 'C:\\repo' }));
 		backend.handlers.set('open_folder', ({ path }) => ({ root: path, isRepo: true }));
 		backend.handlers.set('repo_head', () => ({ branch: 'main', shortHash: 'abc', ahead: 0, behind: 0, upstream: null }));
 		backend.handlers.set('scm_status', () => []);

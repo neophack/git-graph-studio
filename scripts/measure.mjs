@@ -94,6 +94,23 @@ export function runProbes(repo) {
 	return JSON.parse(result.stdout);
 }
 
+/** End-to-end cold-start latencies through the boot-bench probe (scripts/probes/boot-bench.mjs):
+ *  median wall-clock ms per boot stage, kept next to the other metrics so the startup trend is
+ *  visible across runs. `null` when the probe cannot run (no exe, no repo, or a failed run). */
+export function runBootBench(repo) {
+	const exe = join(release, process.platform === 'win32' ? 'ggs.exe' : 'ggs');
+	if (!existsSync(exe) || !repo) return null;
+	const out = join(studio, 'boot-bench.json');
+	const probe = join(appDir, 'scripts', 'probes', 'boot-bench.mjs');
+	const result = spawnSync(process.execPath, [probe, repo, '--runs', '5', '--until', 'graph first page', '--json', out], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+	if (result.status !== 0 || !existsSync(out)) {
+		console.error(result.stderr || result.stdout);
+		return null;
+	}
+	const bench = JSON.parse(readFileSync(out, 'utf8'));
+	return { until: bench.until, runs: bench.runs, stages: bench.summaries[''] ?? null };
+}
+
 const mb = (bytes) => (bytes === null || bytes === undefined ? '-' : `${(bytes / (1024 * 1024)).toFixed(2)} MB`);
 const kb = (bytes) => (bytes === null || bytes === undefined ? '-' : `${(bytes / 1024).toFixed(0)} KB`);
 
@@ -103,7 +120,9 @@ function main() {
 	const repo = repoIndex !== -1 ? args[repoIndex + 1] : null;
 
 	const sizes = collectSizes();
-	const perf = repo ? runProbes(repo) : null;
+	const probes = repo ? runProbes(repo) : null;
+	const boot = repo ? runBootBench(repo) : null;
+	const perf = repo ? { ...(probes ?? {}), boot } : null;
 	const metrics = {
 		measuredAt: new Date().toISOString(),
 		platform: `${process.platform}-${process.arch}`,
@@ -122,6 +141,12 @@ function main() {
 	if (perf) {
 		console.log(`Backend probes on ${perf.folder} (${perf.files} files, ${perf.symbols} symbols)`);
 		for (const [phase, ms] of Object.entries(perf.ms)) console.log(`  ${phase.padEnd(15)} ${ms === null ? '-' : `${ms} ms`}`);
+	}
+	if (perf?.boot?.stages) {
+		console.log(`Cold start to "${perf.boot.until}" (${perf.boot.runs} runs, median wall / min)`);
+		for (const [stage, s] of Object.entries(perf.boot.stages).sort((a, b) => a[1].wallMedian - b[1].wallMedian)) {
+			console.log(`  ${stage.padEnd(28)} ${String(s.wallMedian).padStart(6)} ms   min ${String(s.wallMin).padStart(6)}`);
+		}
 	}
 	console.log(`Written to ${relative(root, join(studio, 'metrics.json')).split('\\').join('/')}`);
 }

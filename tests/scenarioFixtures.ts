@@ -58,8 +58,7 @@ export function commonHandlers(): [string, Handler][] {
 		['analysis_security', ({ onEvent }) => { (onEvent as { onmessage: (e: unknown) => void }).onmessage({ kind: 'done', files: 3, findings: 0, cancelled: false }); return null; }],
 		['analysis_import_graph', () => ({ edges: [], cycles: [] })],
 		['analysis_rebuild', () => ({ state: 'ready', done: 3, total: 3, files: 3, symbols: 8, calls: 5 })],
-		['initial_file', () => null],
-		['initial_repo', () => SCENARIO_ROOT],
+		['boot_context', () => ({ file: null, actions: [], repo: SCENARIO_ROOT })],
 		['open_folder', ({ path }) => ({ root: path, isRepo: true })],
 		['read_file', ({ path }) => ({
 			contents: String(path).endsWith('conflicted.txt')

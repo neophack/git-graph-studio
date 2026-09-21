@@ -271,8 +271,10 @@ behind an `acquireVsCodeApi` shim, over the in-process gix engine. **This module
 seams**; nothing outside it may touch the extension's artifacts or crate (see
 [Invariants](#invariants)).
 
-- Frontend: `src/graphHost.ts` (the TypeScript seam), `static/gitgraph/view.html` (the CSS
-  seam)
+- Frontend: `src/graphHost.ts` (the TypeScript seam), `src/graphPreload.ts` (the boot
+  warmer — part of the seam: it names the view page and reads the config bundle to start
+  the page during the splash; it never speaks `graph_request`), `static/gitgraph/view.html`
+  (the CSS seam)
 - Backend: `src-tauri/src/cmd_graph.rs` (the Rust seam; + `cmd_graph/write_tests.rs`); the
   engine is `git-graph-core` from `vscode-git-graph-rs/native/core`
 
@@ -317,7 +319,8 @@ performance gate lives in `src-tauri/tests/perf.rs`.
 - Backend: `src-tauri/src/measure.rs` (headless `--measure` probes),
   `src-tauri/src/stage_bench.rs` (launch-stage timing), `src-tauri/tests/perf.rs`
   (synthetic repository benchmark; `GGS_PERF_FILES` sets the size, CI runs 20 000)
-- Tooling: `scripts/measure.mjs` (sizes + probes), `scripts/probes/boot-bench.mjs`
+- Tooling: `scripts/measure.mjs` (sizes + probes + the boot-bench cold-start stages,
+  folded into `metrics.json`'s `perf.boot` key), `scripts/probes/boot-bench.mjs`
   (end-to-end startup latency of the release exe), `scripts/probes/cdp-console.mjs` /
   `cdp-probe.mjs` / `cdp-trace.mjs` (live inspection over WebView2's CDP port),
   `scripts/probes/verify-can-scroll.mjs` (drags a live CAN raw view to its scrollbar's
@@ -465,9 +468,11 @@ These are the rules that keep the codebase navigable and the coupling to the eng
 contained. The build enforces the first two; reviewers enforce the rest.
 
 **Seam rule — TypeScript and CSS (enforced by `scripts/check-seams.mjs`).**
-The extension's artifacts are consumed by exactly one file per language: `src/graphHost.ts`
+The extension's artifacts are consumed by exactly one module per language: `src/graphHost.ts`
 is the only caller of the `graph_request` channel and the only namer of the extension's asset
-paths; `static/gitgraph/view.html` is the only loader of the webview bundle. The patterns
+paths, and its boot warmer `src/graphPreload.ts` (which names the view page and reads the
+config bundle to start the page during the splash) is the only other file allowed those two
+patterns; `static/gitgraph/view.html` is the only loader of the webview bundle. The patterns
 `graph_request`, `gitgraph/`, `GitGraphStudioConfig`, `out.min` and `web/styles` may not
 appear anywhere else under `src/` or `static/`. The check runs on every `prepare.mjs`, every
 Vite build and dev-server start, and as vitest's global setup.

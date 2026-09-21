@@ -21,7 +21,7 @@ function ago(at: number): string {
 	return `${Math.round(seconds / 86400)}d ago`;
 }
 
-interface HeadInfo {
+export interface HeadInfo {
 	repo: string;
 	branch: string | null;
 	shortHash: string;
@@ -232,7 +232,9 @@ export class StatusBar {
 		this.symbolsItem.hidden = !hasRepo;
 		document.body.classList.toggle('no-folder', !hasRepo);
 		this.setConflicts(0);
-		if (hasRepo) void this.refreshHead();
+		// No repo_head here: the Source Control view's refresh fetches it and feeds this bar
+		// through applyHead, so a refresh cycle costs one subprocess instead of two. The bar
+		// keeps its own refreshHead for cycles the SCM view is not part of.
 	}
 
 	/** Bumped by setRepo: a head request that started before a folder switch is dropped. */
@@ -261,6 +263,14 @@ export class StatusBar {
 			return;
 		}
 		if (generation !== this.generation) return; // the folder switched mid-flight
+		this.applyHead(head);
+	}
+
+	/** Render a head the Source Control view already fetched - one `repo_head` per refresh
+	 *  serves both views, where each used to run its own. The caller guards the folder
+	 *  generation; only a closed repository is dropped here. */
+	applyHead(head: HeadInfo): void {
+		if (!this.hasRepo) return;
 		// The repo item: the repository's folder name, its own button like the branch is.
 		this.repoItem.hidden = !head.repo;
 		this.repoItem.innerHTML = '';

@@ -50,7 +50,7 @@ beforeEach(async () => {
 	workbench?.dispose();
 	backend.reset();
 	backend.handlers = new DefaultingHandlers([
-		['initial_repo', () => REPO_A],
+		['boot_context', () => ({ file: null, actions: [], repo: REPO_A })],
 		['open_folder', ({ path }) => ({ root: path, isRepo: true })],
 		['open_workspace', () => ({ roots: [{ root: `${REPO_A}\\one`, isRepo: true }, { root: `${REPO_A}\\two`, isRepo: true }] })],
 		['open_single_file', () => null],
@@ -104,6 +104,29 @@ async function openAndDirty(files: string[]): Promise<void> {
 	await flush(2);
 	expect(workbench.editors.hasDirtyEditors()).toBe(true);
 }
+
+describe('the boot sequence', () => {
+	it('asks the launch form in one round trip and starts the deferred services after the first frame', async () => {
+		// The beforeEach booted the workbench against the scripted backend.
+		expect(backend.callsTo('boot_context').length).toBe(1);
+		expect(backend.callsTo('initial_file').length + backend.callsTo('initial_actions').length + backend.callsTo('initial_repo').length).toBe(0);
+		// ...and the backend's heavy services (the symbol/analysis index builds, the watcher)
+		// start only once the first frame with the folder has painted.
+		expect(backend.callsTo('post_first_paint').length).toBe(1);
+	});
+
+	it('applies the folder the launch already opened, without a second round trip', async () => {
+		const openCallsBefore = backend.callsTo('open_folder').length;
+		workbench.dispose();
+		backend.handlers.set('boot_context', () => ({ file: null, actions: [], repo: REPO_A, opened: { root: REPO_A, isRepo: true }, openedFor: REPO_A }));
+		workbench = new Workbench();
+		await workbench.boot();
+		await flush(10);
+		expect(workbench.currentRepo).toBe(REPO_A);
+		// The folder rode along with boot_context: this boot ran no open_folder exchange.
+		expect(backend.callsTo('open_folder').length).toBe(openCallsBefore);
+	});
+});
 
 describe('the session snapshot across a folder switch', () => {
 	it('switching folders with a dirty editor keeps the old folder\'s session', async () => {
@@ -411,11 +434,11 @@ describe('command-line launch actions', () => {
 	};
 
 	/** Re-boot the workbench as a `ggs <subcommand> ...` launch would: the actions the backend
-	 *  parsed answer `initial_actions`, and the backend commands the comparison views read are
+	 *  parsed answer `boot_context`'s actions, and the backend commands the comparison views read are
 	 *  scripted (the raw text channel, the hex slabs, the folder comparison). */
 	const bootWithActions = async (action: Record<string, unknown>): Promise<void> => {
 		workbench.dispose();
-		backend.handlers.set('initial_actions', () => [action]);
+		backend.handlers.set('boot_context', () => ({ file: null, actions: [action], repo: null }));
 		backend.handlers.set('read_file_raw', () => framed('the left text\n'));
 		backend.handlers.set('read_file_chunk', () => ({ size: 2, base64: 'aGk=' }));
 		backend.handlers.set('compare_dirs', () => []);
@@ -449,7 +472,7 @@ describe('command-line launch actions', () => {
 
 	it('a launch without actions boots the folder as before', async () => {
 		workbench.dispose();
-		backend.handlers.set('initial_actions', () => []);
+		backend.handlers.set('boot_context', () => ({ file: null, actions: [], repo: REPO_A }));
 		workbench = new Workbench();
 		await workbench.boot();
 		await flush(10);

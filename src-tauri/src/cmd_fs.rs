@@ -873,12 +873,6 @@ pub async fn backup_read(path: String) -> Result<String, String> {
     backup_read_in(&backups_dir()?, &path)
 }
 
-/// The repository the app opened, if any — the frontend asks for this at startup.
-#[tauri::command]
-pub fn initial_repo(state: State<'_, AppState>) -> Option<String> {
-    state.first_repo()
-}
-
 /// The roots of a repository's initialised submodules (absolute paths), as the Git Graph
 /// view's repository dropdown lists them alongside the repository itself.
 #[tauri::command]

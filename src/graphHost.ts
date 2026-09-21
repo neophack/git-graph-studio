@@ -18,6 +18,7 @@ import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
 
 import type { DiffRequest } from './scm';
+import { claimGraphPreload } from './graphPreload';
 import { THEME_EVENT, themeById } from './settings';
 import * as state from './state';
 import { basename, el, joinPath, notify, toPosix } from './ui';
@@ -408,6 +409,15 @@ export class GraphHost {
 	private pending: Promise<unknown> = Promise.resolve();
 	/** Whether the view frame has been loaded at least once (a locale switch only reloads it then). */
 	loaded = false;
+	/** The repository the preloaded page started with, if `preload` ran. */
+	private preloadRepo: string | null = null;
+	/** The preloaded page's boot report once it arrives (`null` while the bundle is still
+	 *  coming up): stored on the host, not only handed to a waiting mount, so a signal that
+	 *  lands before the mount asks is not lost. */
+	private preloadBooted: boolean | null = null;
+	/** Resolves once the preloaded page reports whether out.min.js executed. */
+	private preloadSettled: ((booted: boolean) => void) | null = null;
+	private preloadConsumed = false;
 
 	/** The session log the view's "Open Session Log" action writes out (see `openLogFile`). */
 	private sessionLog: string[] = [];
@@ -415,7 +425,18 @@ export class GraphHost {
 
 	constructor(private readonly delegate: GraphHostDelegate) {
 		this.element = el('div', 'graph-host');
-		this.frame = document.createElement('iframe');
+		// The boot warmer (graphPreload.ts, part of this seam) may already have started the
+		// view page in a hidden frame while the workbench was loading: claim that frame
+		// instead of a fresh one, so the mount can feed the live page over loadRepos.
+		const claimed = claimGraphPreload();
+		this.frame = claimed?.frame ?? document.createElement('iframe');
+		if (claimed) {
+			this.preloadRepo = claimed.repo;
+			this.frame.style.display = '';
+			// The frame loaded before this host existed: its load event (which applies the
+			// theme) has already fired, and the theme may have settled differently since.
+			applyFrameTheme(this.frame);
+		}
 		this.frame.title = 'Git Graph';
 		this.frame.setAttribute('aria-label', 'Git Graph');
 		this.element.appendChild(this.frame);
@@ -426,6 +447,16 @@ export class GraphHost {
 			const data = event.data as { __studioGraphError?: string } | null;
 			if (data && typeof data.__studioGraphError === 'string' && event.source === this.frame.contentWindow) {
 				this.logLine(`VIEW ERROR: ${data.__studioGraphError}`);
+			}
+		});
+		// The view page's own boot signal (see view.html): the frame's load event fires before
+		// out.min.js has necessarily executed, so a preloaded page is only safe to talk to once
+		// this arrives.
+		window.addEventListener('message', (event) => {
+			const data = event.data as { __studioGraphBooted?: boolean } | null;
+			if (data && typeof data.__studioGraphBooted === 'boolean' && event.source === this.frame.contentWindow) {
+				this.preloadBooted = data.__studioGraphBooted;
+				this.preloadSettled?.(data.__studioGraphBooted);
 			}
 		});
 		// The view is same-origin: after it (re)loads - and after a theme switch - its theme
@@ -471,6 +502,75 @@ export class GraphHost {
 			squashMergeMessageFormat: Number(this.config['squashMergeMessageFormat'] ?? 0),
 			squashPullMessageFormat: Number(this.config['squashPullMessageFormat'] ?? 0)
 		};
+	}
+
+	/** Start the view page in the background for the folder the boot is about to open, so its
+	 *  bundle's fetch, parse and first data requests overlap the folder's own open sequence
+	 *  instead of serialising after it. The page is started with the one repository known
+	 *  synchronously (the boot's remembered folder); `mount` reconciles it with the real
+	 *  repository set - feeding it `loadRepos` when it is already running, reloading otherwise
+	 *  (the reload then hits warm HTTP and script caches). A page started for any other folder,
+	 *  or that never reports its bundle ran, is always reloaded, so a preload that misfires
+	 *  costs a little overlap work and nothing else. */
+	preload(repoPath: string): void {
+		if (this.preloadRepo !== null) return;
+		let config: Record<string, unknown>;
+		try {
+			config = this.buildConfig();
+		} catch {
+			return; // no config bundle (tests): the preload has nothing to boot with
+		}
+		this.preloadRepo = repoPath;
+		const theme = themeById();
+		sessionStorage.setItem('ggstudio.initial', JSON.stringify({
+			initialState: {
+				config,
+				repos: { [repoPath]: state.repoState(repoPath) },
+				lastActiveRepo: repoPath,
+				loadViewTo: null,
+				loadRepoInfoRefreshId: 0,
+				loadCommitsRefreshId: 0,
+				backend: { platform: 'studio', engineAvailable: true, engineVersion: 'embedded', gitCliAvailable: true, capabilities: [] }
+			},
+			globalState: state.globalViewState(),
+			workspaceState: state.workspaceViewState(),
+			theme: { css: theme.css, kind: theme.kind, label: theme.label }
+		}));
+		this.frame.src = '/gitgraph/view.html';
+	}
+
+	/** The preloaded page's boot report: resolves `true` once out.min.js has executed there,
+	 *  `false` when its load failed, or `null` after a short grace (never answered - the mount
+	 *  then falls back to the plain reload). A page that finished booting before this host
+	 *  attached left its mark on its own window (view.html), which is read first - the boot
+	 *  message alone would have been missed. */
+	private whenPreloadSettled(generation: number): Promise<boolean | null> {
+		if (this.preloadBooted !== null) {
+			return Promise.resolve(generation === this.loadGeneration ? this.preloadBooted : null);
+		}
+		if (this.viewPageBooted()) return Promise.resolve(true);
+		return new Promise((resolve) => {
+			const timer = window.setTimeout(() => {
+				this.preloadSettled = null;
+				resolve(this.viewPageBooted() ? true : null);
+			}, 1500);
+			this.preloadSettled = (booted) => {
+				window.clearTimeout(timer);
+				this.preloadSettled = null;
+				resolve(generation === this.loadGeneration ? booted : null);
+			};
+		});
+	}
+
+	/** Whether the frame's page booted fully (the bundle executed, and it found an initial
+	 *  state - a page that showed the no-repository placeholder never ran the bundle). */
+	private viewPageBooted(): boolean {
+		try {
+			const viewWindow = this.frame.contentWindow as (Window & { __ggViewBooted?: boolean; __ggViewNoRepo?: boolean }) | null;
+			return viewWindow?.__ggViewBooted === true && viewWindow.__ggViewNoRepo !== true;
+		} catch {
+			return false;
+		}
 	}
 
 	/** Load (or reload) the view for a repository. The page is the app's own
@@ -576,6 +676,21 @@ export class GraphHost {
 		// after the first one cheaper.
 		this.frame.removeAttribute('srcdoc');
 		if (!this.firstPageSeen) void invoke('boot_stage', { stage: 'graph view load started', pageMs: performance.now() }).catch(() => undefined);
+		// The preloaded page is already running this very repository: hand it the full
+		// repository set instead of paying the bundle's fetch and parse a second time.
+		if (!this.preloadConsumed && this.preloadRepo === repoPath) {
+			this.preloadConsumed = true;
+			const settled = await this.whenPreloadSettled(generation);
+			if (generation !== this.loadGeneration) return;
+			if (settled === true) {
+				const loadViewTo = this.pendingFilterPath !== null ? { repo: repoPath, filterPath: this.pendingFilterPath } : null;
+				this.post({ command: 'loadRepos', repos: this.repoStates(), lastActiveRepo: this.currentRepo, loadViewTo });
+				this.pendingFilterPath = null;
+				return;
+			}
+			// Never answered (or the bundle failed): the plain reload below recovers.
+		}
+		this.preloadConsumed = true;
 		this.frame.src = '/gitgraph/view.html';
 		this.pendingFilterPath = null;
 	}
@@ -589,6 +704,9 @@ export class GraphHost {
 		this.frame.removeAttribute('srcdoc');
 		this.frame.src = 'about:blank';
 		this.loaded = false;
+		// The warm preloaded page is gone with the folder; the next mount reloads.
+		this.preloadRepo = null;
+		this.preloadConsumed = false;
 	}
 
 	/* ---------- The not-a-repository placeholder ---------- */
@@ -602,6 +720,9 @@ export class GraphHost {
 		this.frame.removeAttribute('src');
 		this.frame.removeAttribute('srcdoc');
 		this.frame.src = 'about:blank';
+		// The preloaded view page (if any) is replaced by the blank document.
+		this.preloadRepo = null;
+		this.preloadConsumed = false;
 		if (!overFolder) return;
 		const button = el('button', 'button', ['Initialize Repository']);
 		button.addEventListener('click', () => this.delegate.initRepository());

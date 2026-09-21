@@ -122,7 +122,7 @@ describe('auto-save and backups', () => {
 	it('recovers the previous session\'s backups into dirty editors on boot', async () => {
 		const files = { [FILE]: 'hello\n' };
 		fileBackend(files);
-		backend.on('initial_repo', () => REPO);
+		backend.on('boot_context', () => ({ file: null, actions: [], repo: REPO }));
 		backend.on('open_folder', ({ path }) => ({ root: path, isRepo: true }));
 		backend.on('ext_list', () => []);
 		backend.on('ext_read_file', () => { throw 'missing'; });

@@ -173,7 +173,7 @@ describe('status bar', () => {
 		bar.onGraphClick = () => { clicks += 'g'; };
 		expect(document.body.classList.contains('no-folder')).toBe(true);
 		bar.setRepo(true);
-		await flush();
+		await bar.refreshHead(); // the host drives this from the SCM refresh (or itself)
 		const [repo, branch, sync, graph] = Array.from(document.querySelectorAll<HTMLElement>('.status-left .status-item'));
 		// The repository's name is a button of its own, opening Source Control.
 		expect(repo!.textContent).toContain('git-graph-studio');
@@ -253,7 +253,7 @@ describe('status bar', () => {
 
 describe('file watcher events', () => {
 	it('reloads clean tabs of the changed files and refreshes the git views', async () => {
-		backend.on('initial_repo', () => null);
+		backend.on('boot_context', () => ({ file: null, actions: [], repo: null }));
 		backend.on('ext_list', () => []);
 		const workbench = new Workbench();
 		let refreshes = 0;
@@ -291,7 +291,7 @@ describe('file watcher events', () => {
 	});
 
 	it('joins a change batch to the root it came from, not the first root (multi-root)', () => {
-		backend.on('initial_repo', () => null);
+		backend.on('boot_context', () => ({ file: null, actions: [], repo: null }));
 		backend.on('ext_list', () => []);
 		const workbench = new Workbench();
 		const reloaded: string[] = [];
@@ -470,7 +470,7 @@ describe('session snapshot', () => {
 	it('restores the file tabs, the active tab and the expanded folders of a folder on reopen', { timeout: 20_000 }, async () => {
 		const REPO = 'C:\\repo';
 		const files: Record<string, string> = { [`${REPO}\\a.txt`]: 'aaa\n', [`${REPO}\\b.txt`]: 'bbb\n', [`${REPO}\\src\\c.txt`]: 'ccc\n' };
-		backend.on('initial_repo', () => null);
+		backend.on('boot_context', () => ({ file: null, actions: [], repo: null }));
 		backend.on('open_folder', ({ path }) => ({ root: path, isRepo: true }));
 		backend.on('close_folder', () => null);
 		backend.on('ext_list', () => []);

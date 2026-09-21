@@ -6,6 +6,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { GraphHost, type GraphHostDelegate } from '../src/graphHost';
+import { claimGraphPreload, startGraphPreload } from '../src/graphPreload';
 import { THEME_EVENT, updateSetting } from '../src/settings';
 import { backend } from './tauriMock';
 import { flush } from './helpers';
@@ -40,6 +41,75 @@ describe('graph assets', () => {
 		// No cache-busting query: the webview may cache the bundle between loads.
 		expect(host.frame.src).not.toContain('?');
 		expect(sessionStorage.getItem('ggstudio.initial')).toContain('C:\\\\repo');
+	});
+
+	it('feeds the preloaded page its repositories instead of reloading it', async () => {
+		// tests/setup.ts provides the GitGraphStudioConfig stand-in, so the preload boots.
+		const host = new GraphHost(delegate);
+		document.body.appendChild(host.element);
+		host.preload('C:\\repo');
+		// The page starts in the background with the one repository known up front.
+		expect(host.frame.getAttribute('src')).toBe('/gitgraph/view.html');
+		const initial = JSON.parse(sessionStorage.getItem('ggstudio.initial')!) as { initialState: { lastActiveRepo: string; repos: Record<string, unknown> } };
+		expect(initial.initialState.lastActiveRepo).toBe('C:\\repo');
+		expect(Object.keys(initial.initialState.repos)).toEqual(['C:\\repo']);
+		// The page reports its bundle ran (see view.html): the mount hands the live page
+		// the full repository set over loadRepos rather than paying the reload.
+		const frameWindow = host.frame.contentWindow!;
+		const postSpy = vi.spyOn(frameWindow, 'postMessage').mockImplementation(() => undefined);
+		window.dispatchEvent(new MessageEvent('message', { source: frameWindow, data: { __studioGraphBooted: true } }));
+		host.load('C:\\repo');
+		await flush(10);
+		const sent = postSpy.mock.calls
+			.map((call) => (call[0] as { __studioGraphResponse: Record<string, unknown> }).__studioGraphResponse)
+			.filter((message) => message['command'] === 'loadRepos')[0];
+		expect(sent).toBeDefined();
+		expect(Object.keys(sent['repos'] as Record<string, unknown>)).toContain('C:\\repo');
+		expect(sent['lastActiveRepo']).toBe('C:\\repo');
+	});
+
+	it('reloads the plain way when the preloaded page reports its bundle failed', async () => {
+		const host = new GraphHost(delegate);
+		document.body.appendChild(host.element);
+		host.preload('C:\\repo');
+		const frameWindow = host.frame.contentWindow!;
+		const postSpy = vi.spyOn(frameWindow, 'postMessage').mockImplementation(() => undefined);
+		// A page whose bundle did not run must not be talked to: the mount falls back to
+		// the src re-assignment (the reload re-reads the fresh initial state).
+		window.dispatchEvent(new MessageEvent('message', { source: frameWindow, data: { __studioGraphBooted: false } }));
+		host.load('C:\\repo');
+		await flush(10);
+		expect(host.frame.getAttribute('src')).toBe('/gitgraph/view.html');
+		expect(postSpy.mock.calls.filter((call) => (call[0] as { __studioGraphResponse: Record<string, unknown> }).__studioGraphResponse['command'] === 'loadRepos').length).toBe(0);
+	});
+
+	it('claims the splash-warmed frame and mounts it without a reload', async () => {
+		// The splash warmer starts the page for the launch's folder before the workbench
+		// exists; the host adopts the frame when it comes up.
+		backend.on('boot_context', () => ({ file: null, actions: [], repo: 'C:\\repo' }));
+		startGraphPreload();
+		await flush(5);
+		const host = new GraphHost(delegate);
+		try {
+			document.body.appendChild(host.element);
+			// One claim only: the frame is the warmed one, back in the layout.
+			expect(claimGraphPreload()).toBeNull();
+			expect(host.frame.getAttribute('src')).toBe('/gitgraph/view.html');
+			expect(host.frame.style.display).toBe('');
+			// The page finished booting while the workbench was still loading (its window
+			// says so - view.html): the mount talks to the live page directly.
+			(host.frame.contentWindow as unknown as { __ggViewBooted: boolean }).__ggViewBooted = true;
+			const postSpy = vi.spyOn(host.frame.contentWindow!, 'postMessage').mockImplementation(() => undefined);
+			host.load('C:\\repo');
+			await flush(10);
+			const sent = postSpy.mock.calls
+				.map((call) => (call[0] as { __studioGraphResponse: Record<string, unknown> }).__studioGraphResponse)
+				.filter((message) => message['command'] === 'loadRepos')[0];
+			expect(sent).toBeDefined();
+			expect(sent['lastActiveRepo']).toBe('C:\\repo');
+		} finally {
+			claimGraphPreload();
+		}
 	});
 
 	it('offers the open repository and its initialised submodules to the view', async () => {
