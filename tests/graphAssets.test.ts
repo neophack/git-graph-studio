@@ -595,6 +595,71 @@ describe('graph assets', () => {
 			vi.useRealTimers();
 		}
 	});
+
+	it('delivers a hard refresh\'s zero count at once, with none of the confirm window a soft refresh would need', async () => {
+		// A hard refresh already wiped the rendered row before this pipeline started - there is
+		// nothing on screen for a bare zero reading to flicker, so it skips the stabiliser
+		// entirely instead of spending the 5s confirm window a soft refresh's zero would.
+		vi.useFakeTimers();
+		try {
+			const page = { command: 'loadCommits', refreshId: 5, commits: [{ hash: 'abc', parents: [], author: 'A', email: '', date: 1, message: 'm', heads: [], tags: [], remotes: [], stash: null }], head: 'abc', tags: [], moreCommitsAvailable: false, error: null };
+			backend.on('graph_request', (args) => {
+				const message = args['message'] as Record<string, unknown>;
+				if (message['command'] === 'loadCommits') return { ...page, uncommittedPending: true };
+				if (message['command'] === 'countUncommittedChanges') return { command: 'countUncommittedChanges', count: 0, error: null };
+				return { command: message['command'], error: null };
+			});
+			const host = new GraphHost(delegate);
+			document.body.appendChild(host.element);
+			host.load('C:\\repo');
+			await vi.advanceTimersByTimeAsync(0);
+			const frameWindow = host.frame.contentWindow!;
+			const postSpy = vi.spyOn(frameWindow, 'postMessage').mockImplementation(() => undefined);
+			window.dispatchEvent(new MessageEvent('message', { source: frameWindow, data: { __studioGraphRequest: {
+				command: 'loadCommits', repo: 'C:\\repo', refreshId: 5, maxCommits: 300, hard: true
+			} } }));
+			// No timer advance beyond the microtask queue: a soft refresh's zero would still be
+			// sitting in the confirm window here (see the test above), holding the row unposted.
+			await vi.advanceTimersByTimeAsync(0);
+			expect(postedCount(postSpy)).toBe(2);
+			const posted = postSpy.mock.calls
+				.map((call) => (call[0] as { __studioGraphResponse: Record<string, unknown> }).__studioGraphResponse)
+				.filter((message) => message['command'] === 'loadCommits');
+			expect(posted[1]!['uncommittedCount']).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('delivers nothing for a hard refresh whose count read fails, instead of a wrong zero', async () => {
+		vi.useFakeTimers();
+		try {
+			const page = { command: 'loadCommits', refreshId: 5, commits: [{ hash: 'abc', parents: [], author: 'A', email: '', date: 1, message: 'm', heads: [], tags: [], remotes: [], stash: null }], head: 'abc', tags: [], moreCommitsAvailable: false, error: null };
+			backend.on('graph_request', (args) => {
+				const message = args['message'] as Record<string, unknown>;
+				if (message['command'] === 'loadCommits') return { ...page, uncommittedPending: true };
+				if (message['command'] === 'countUncommittedChanges') return { command: 'countUncommittedChanges', count: 0, error: 'status failed' };
+				return { command: message['command'], error: null };
+			});
+			const host = new GraphHost(delegate);
+			document.body.appendChild(host.element);
+			host.load('C:\\repo');
+			await vi.advanceTimersByTimeAsync(0);
+			const frameWindow = host.frame.contentWindow!;
+			const postSpy = vi.spyOn(frameWindow, 'postMessage').mockImplementation(() => undefined);
+			window.dispatchEvent(new MessageEvent('message', { source: frameWindow, data: { __studioGraphRequest: {
+				command: 'loadCommits', repo: 'C:\\repo', refreshId: 5, maxCommits: 300, hard: true
+			} } }));
+			await vi.advanceTimersByTimeAsync(0);
+			// The page only: a failed read on a hard refresh gives up at once (no confirm loop to
+			// bound, since the hard path never enters it) rather than delivering a false zero.
+			expect(postedCount(postSpy)).toBe(1);
+			await vi.advanceTimersByTimeAsync(30000);
+			expect(postedCount(postSpy)).toBe(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });
 
 function postedCount(postSpy: ReturnType<typeof vi.spyOn>): number {
