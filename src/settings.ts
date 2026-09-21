@@ -47,6 +47,11 @@ export interface AppSettings {
 	/** The file extensions (no dot) GGS registers itself to open at the OS level - the
 	 *  File Associations row in Settings; changing it re-registers via `assoc_apply`. */
 	fileAssociations: string[];
+	/** Whether the Explorer's right-click menu offers "Open with Git Graph Studio" on a
+	 *  file, a folder, a folder background and a drive root (Windows; the static shell
+	 *  verb Zed's installer writes, per-user HKCU). Re-applied at every boot, so the verb
+	 *  always names the executable's current path. */
+	explorerContextMenu: boolean;
 	/** How the webview renders on Linux (`auto` disables the DMABUF renderer only when the
 	 *  NVIDIA proprietary driver is detected). Read by the backend before the webview
 	 *  starts, so a change takes effect on the next launch. */
@@ -65,6 +70,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	mouseWheelScrollSensitivity: 1, fastScrollSensitivity: 4,
 	fontSize: 14, tabSize: 4, wordWrap: false, snippetSuggestions: true, pathCompletion: true,
 	fileAssociations: ['blf', 'asc', 'ggx', 'bin', 'hex'],
+	explorerContextMenu: true,
 	linuxDmabuf: 'auto',
 	density: 'comfortable',
 	searchSmartCase: true
@@ -112,6 +118,7 @@ export interface SettingDef {
 export const SETTING_DEFS: SettingDef[] = [
 	{ key: 'locale', category: 'general', kind: 'locale' },
 	{ key: 'fileAssociations', category: 'general', kind: 'extensionList' },
+	{ key: 'explorerContextMenu', category: 'general', kind: 'boolean' },
 	{ key: 'linuxDmabuf', category: 'general', kind: 'enum', options: [
 		{ value: 'auto', label: 'settings.linuxDmabuf.auto' },
 		{ value: 'disable', label: 'settings.linuxDmabuf.disable' },
@@ -225,6 +232,7 @@ export function updateSetting<K extends keyof AppSettings>(key: K, value: AppSet
 	if (key === 'fontSize') applyFontSize();
 	if (key === 'density') applyDensity();
 	if (key === 'fileAssociations') applyFileAssociations();
+	if (key === 'explorerContextMenu') applyExplorerContextMenu(true);
 	persistSettingsFile();
 	dispatch(SETTINGS_EVENT, key);
 }
@@ -236,6 +244,22 @@ function applyFileAssociations(): void {
 	void invoke<{ messageKey: string; detail: string }>('assoc_apply', { extensions: settings.fileAssociations })
 		.then((result) => notify('info', t(result.messageKey as 'assoc.applied.windows') + (result.detail ? ` (${result.detail})` : '')))
 		.catch((error: unknown) => notify('error', t('assoc.failed') + String(error)));
+}
+
+/** Register or remove the Explorer's "Open with Git Graph Studio" right-click entry via
+ *  `context_menu_apply`. The label is resolved here, so the menu shows the current display
+ *  language; boot re-applies it quietly (a repaired verb after a move or an upgrade needs
+ *  no toast), a Settings change notifies like the associations do. A `null` answer is the
+ *  scripted backend's "write succeeded" - nothing to report, no toast. */
+function applyExplorerContextMenu(notifyUser: boolean): void {
+	void invoke<{ messageKey: string; detail: string } | null>('context_menu_apply', { on: settings.explorerContextMenu, label: t('contextmenu.title') })
+		.then((result) => {
+			const key = result?.messageKey;
+			if (notifyUser && key) notify('info', t(key as 'contextmenu.applied.on'));
+		})
+		.catch((error: unknown) => {
+			if (notifyUser) notify('error', t('contextmenu.failed') + String(error));
+		});
 }
 
 /* ---------- The user-level settings.json (M3 3.9): the file wins on the next launch ---------- */
@@ -300,4 +324,8 @@ export function initSettings(): void {
 	applyTheme();
 	applyFontSize();
 	applyDensity();
+	// The Explorer context-menu verb is re-registered on every boot (quietly): it is
+	// idempotent, and this keeps it naming the executable's current path after a move or
+	// an upgrade - and withdrawn when the setting was turned off.
+	applyExplorerContextMenu(false);
 }

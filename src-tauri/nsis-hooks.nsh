@@ -52,6 +52,13 @@
   DeleteRegKey HKCU "Software\Classes\GGS.ggx.1"
   DeleteRegKey HKCU "Software\Classes\GGS.bin.1"
   DeleteRegKey HKCU "Software\Classes\GGS.hex.1"
+  ; The Explorer context-menu verbs (cmd_assoc's context_menu_apply) - the same four
+  ; targets the command writes, removed whatever executable they name: a leftover would
+  ; keep "Open with Git Graph Studio" in the right-click menu with a dead command.
+  DeleteRegKey HKCU "Software\Classes\*\shell\GitGraphStudio"
+  DeleteRegKey HKCU "Software\Classes\Directory\shell\GitGraphStudio"
+  DeleteRegKey HKCU "Software\Classes\Directory\Background\shell\GitGraphStudio"
+  DeleteRegKey HKCU "Software\Classes\Drive\shell\GitGraphStudio"
   ReadRegStr $R0 HKCU "Environment" "Path"
   StrCmp $R0 "" ggs_unpath_done
   StrCmp $R0 "$INSTDIR" ggs_unpath_exact

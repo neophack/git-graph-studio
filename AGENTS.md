@@ -161,7 +161,9 @@ language are user data under `~/.ggs/`; theme and UI quality are enforced, not h
 - Backend: `src-tauri/src/cmd_assoc.rs` (the File Associations setting: OS-level
   "open with" registration per platform — HKCU ProgIds + RegisteredApplications on
   Windows, desktop entry / MIME package / `mimeapps.list` on Linux, bundle-declared on
-  macOS)
+  macOS; and the Explorer context-menu entry `context_menu_apply` — the "Open with Git
+  Graph Studio" static shell verb under `*` / `Directory` / `Directory\Background` /
+  `Drive`, re-applied at every boot, removed by the NSIS uninstall hooks)
 - Assets: `static/theme/*.css` (the colour themes)
 
 ### 3. File Explorer

@@ -1343,6 +1343,7 @@ mod deferred_services_tests {
                 cmd_fuzzy::path_completions,
                 cmd_assoc::assoc_list_defaults,
                 cmd_assoc::assoc_apply,
+                cmd_assoc::context_menu_apply,
                 pty::pty_create,
                 pty::pty_write,
                 pty::pty_resize,

@@ -7,6 +7,10 @@
 //! type and writes the desktop entry, the MIME package and `mimeapps.list`. macOS
 //! offers no runtime registration - associations are declared at bundle time
 //! (`bundle.fileAssociations`) and chosen in Finder.
+//!
+//! The same file owns the Explorer context-menu entry (`context_menu_apply`): the
+//! "Open with Git Graph Studio" verb Zed's Windows 10 install writes - static shell
+//! verbs under HKCU, no admin rights, no shell-extension DLL.
 
 use serde::Serialize;
 
@@ -104,6 +108,38 @@ pub fn assoc_apply(extensions: Vec<String>) -> Result<AssocResult, String> {
     }
 }
 
+/// Add or remove the Explorer's "Open with Git Graph Studio" right-click entry. Windows
+/// only - Zed's static shell verb under the per-user HKCU classes (no admin rights, no
+/// shell-extension DLL; Windows 11 lists it under "Show more options", exactly like VS
+/// Code's entry). The label is the localized title the menu should show, resolved by the
+/// caller; the other platforms report an explanatory no-op. Idempotent, and re-applied
+/// at every boot by the frontend, so the verb always names the executable's current path.
+#[tauri::command]
+pub fn context_menu_apply(on: bool, label: String) -> Result<AssocResult, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+        let classes = windows_impl::create_key(&hkcu, "Software\\Classes", "")?;
+        windows_impl::apply_context_menu(&classes, on, &label)?;
+        Ok(AssocResult {
+            message_key: if on {
+                "contextmenu.applied.on".into()
+            } else {
+                "contextmenu.applied.off".into()
+            },
+            detail: String::new(),
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (on, label);
+        Ok(AssocResult {
+            message_key: "contextmenu.applied.unsupported".into(),
+            detail: String::new(),
+        })
+    }
+}
+
 /* ---------- Windows: HKCU ProgIds + RegisteredApplications ---------- */
 
 #[cfg(target_os = "windows")]
@@ -120,7 +156,47 @@ mod windows_impl {
         format!("{PROGID_PREFIX}{ext}.1")
     }
 
-    fn create_key(parent: &RegKey, path: &str, default: &str) -> Result<RegKey, String> {
+    /// The Explorer context-menu verb's key name under `<target>\shell`: a fixed id (the
+    /// display title is the key's default value, so re-applying with a new language
+    /// re-titles it), ours alone to create and delete.
+    pub const CONTEXT_VERB: &str = "GitGraphStudio";
+    /// The targets the verb is registered for, each with the placeholder its command
+    /// receives: `%1` on `*` (the clicked file), `%V` on the folder targets (a background
+    /// click has no `%1` at all - `%V` is the folder the user right-clicked inside).
+    pub const CONTEXT_TARGETS: &[(&str, &str)] = &[
+        ("*", "%1"),
+        ("Directory", "%V"),
+        ("Directory\\Background", "%V"),
+        ("Drive", "%V"),
+    ];
+
+    /// Register (`on`) or remove the context-menu verbs under `classes` (the real HKCU
+    /// `Software\Classes`, or a test key). Removal deletes only the verb's own subtree -
+    /// `<target>\shell` is shared with every other application's verbs and stays.
+    pub fn apply_context_menu(classes: &RegKey, on: bool, label: &str) -> Result<(), String> {
+        for (target, argument) in CONTEXT_TARGETS {
+            let verb = format!("{target}\\shell\\{CONTEXT_VERB}");
+            if on {
+                let exe = std::env::current_exe()
+                    .map_err(|e| e.to_string())?
+                    .to_string_lossy()
+                    .into_owned();
+                create_key(classes, &verb, label)?;
+                let icon = create_key(classes, &format!("{verb}\\Icon"), "")?;
+                icon.set_value("", &exe)
+                    .map_err(|e| format!("registry Icon {verb}: {e}"))?;
+                let command = create_key(classes, &format!("{verb}\\command"), "")?;
+                command
+                    .set_value("", &format!("\"{exe}\" \"{argument}\""))
+                    .map_err(|e| format!("registry command {verb}: {e}"))?;
+            } else {
+                let _ = classes.delete_subkey_all(&verb);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn create_key(parent: &RegKey, path: &str, default: &str) -> Result<RegKey, String> {
         let (key, _) = parent
             .create_subkey(path)
             .map_err(|e| format!("registry create {path}: {e}"))?;
@@ -361,6 +437,60 @@ mod tests {
         windows_impl::apply_extension(&base, "blf", false).unwrap();
         assert!(base.open_subkey("GGS.blf.1").is_err());
         hkcu.delete_subkey_all(&base_path).unwrap();
+    }
+
+    /// The context-menu verb covers every target Zed's does, with the right placeholder:
+    /// `%1` for files, `%V` for folders, folder backgrounds and drive roots. The title is
+    /// the verb key's default value; removal takes the whole subtree away again.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_context_menu_writes_and_removes_the_verbs() {
+        use winreg::enums::HKEY_CURRENT_USER;
+        let base_path = format!("Software\\Classes\\ggs-assoc-ctxmenu-test-{}", std::process::id());
+        let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
+        let (base, _) = hkcu.create_subkey(&base_path).unwrap();
+        windows_impl::apply_context_menu(&base, true, "Open with Git Graph Studio").unwrap();
+        let command = |target: &str| {
+            base.open_subkey(format!("{target}\\shell\\GitGraphStudio\\command"))
+                .unwrap()
+                .get_value::<String, _>("")
+                .unwrap()
+        };
+        assert!(
+            command("*").ends_with("\" \"%1\""),
+            "files arrive as %1: {}",
+            command("*")
+        );
+        for target in ["Directory", "Directory\\Background", "Drive"] {
+            assert!(
+                command(target).ends_with("\" \"%V\""),
+                "{target} arrives as %V: {}",
+                command(target)
+            );
+        }
+        let verb = base.open_subkey("Directory\\shell\\GitGraphStudio").unwrap();
+        assert_eq!(
+            verb.get_value::<String, _>("").unwrap(),
+            "Open with Git Graph Studio"
+        );
+        windows_impl::apply_context_menu(&base, false, "").unwrap();
+        for (target, _) in windows_impl::CONTEXT_TARGETS {
+            assert!(
+                base.open_subkey(format!("{target}\\shell\\GitGraphStudio"))
+                    .is_err(),
+                "{target} verb removed"
+            );
+        }
+        hkcu.delete_subkey_all(&base_path).unwrap();
+    }
+
+    /// The context menu is a Windows feature; the command answers a no-op elsewhere
+    /// instead of failing, so the same toggle works on every platform.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn context_menu_reports_the_noop_off_windows() {
+        let result = context_menu_apply(true, "Open with Git Graph Studio".into()).unwrap();
+        assert_eq!(result.message_key, "contextmenu.applied.unsupported");
     }
 
     #[cfg(target_os = "linux")]
