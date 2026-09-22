@@ -40,7 +40,7 @@ const SLAB_BYTES = 64 * 1024;
 const SEARCH_CHUNK = 1024 * 1024;
 /** The largest selection Copy reads at once and Paste writes at once - a clipboard
  *  payload, not a file dump; 10 MiB, and anything larger is refused with a reminder. */
-const COPY_LIMIT = 10 * 1024 * 1024;
+export const COPY_LIMIT = 10 * 1024 * 1024;
 
 interface FileChunk {
 	size: number;
@@ -75,14 +75,21 @@ export function offsetDigitsFor(size: number): number {
 }
 
 /** Tracks the ruler and every row share, laid out the way a classic hex editor's table
- *  is: a fixed offset column ruled off by a vertical line, 3ch per byte (4ch where a
- *  4/8-byte group starts, so the extra space reads as a group gap), a ruled 3ch gutter,
- *  and a compact ASCII pane of 1ch per byte. Nothing stretches - leftover page width
- *  stays empty on the right - so the table keeps the same shape at every window size. */
+ *  is: a fixed offset column ruled off by a vertical line, 3ch per byte with a dedicated
+ *  1ch gap track opening every 4/8-byte group, a ruled 3ch gutter, and a compact ASCII
+ *  pane of 1ch per byte. The gap is its own track rather than extra width folded into
+ *  the group's first byte column - a byte cell that were widened would center its digits
+ *  in the middle of that width, splitting the group gap into two smaller, uneven-looking
+ *  gaps straddling the byte instead of one gap between the groups. Nothing stretches -
+ *  leftover page width stays empty on the right - so the table keeps the same shape at
+ *  every window size. */
 export function rowGridTemplate(bytesPerRow: number, digits = OFFSET_DIGITS): string {
 	const group = groupSizeFor(bytesPerRow);
 	const widths = [`${digits + 2}ch`];
-	for (let i = 0; i < bytesPerRow; i++) widths.push(i % group === 0 && i > 0 ? '4ch' : '3ch');
+	for (let i = 0; i < bytesPerRow; i++) {
+		if (i % group === 0 && i > 0) widths.push('1ch');
+		widths.push('3ch');
+	}
 	widths.push('3ch');
 	for (let i = 0; i < bytesPerRow; i++) widths.push('1ch');
 	return widths.join(' ');
@@ -101,7 +108,7 @@ export function hexAddress(offset: number, digits = OFFSET_DIGITS): string {
 
 /** Parses an address the address box, the range dialog and Go To all accept: `0x1A0`
  *  hex, `1A0h` Intel style, or plain decimal. Returns null when it is none of them. */
-function parseAddress(text: string): number | null {
+export function parseAddress(text: string): number | null {
 	const trimmed = text.trim();
 	const hex = /^0x([0-9a-f]+)$/i.exec(trimmed) || /^([0-9a-f]+)h$/i.exec(trimmed);
 	if (hex) return parseInt(hex[1]!, 16);
@@ -124,7 +131,8 @@ export function hexHeader(bytesPerRow: number, digits = OFFSET_DIGITS): HTMLElem
 	const group = groupSizeFor(bytesPerRow);
 	const cells: (Node | string | null)[] = [el('span', 'hex-offset')];
 	for (let i = 0; i < bytesPerRow; i++) {
-		cells.push(el('span', i % group === 0 && i > 0 ? 'hex-cell hex-group-start' : 'hex-cell', [(i % 16).toString(16).toUpperCase()]));
+		if (i % group === 0 && i > 0) cells.push(el('span', 'hex-group-gap'));
+		cells.push(el('span', 'hex-cell', [(i % 16).toString(16).toUpperCase()]));
 	}
 	cells.push(el('span', 'hex-gutter'));
 	for (let i = 0; i < bytesPerRow; i++) cells.push(el('span', 'hex-ascii-cell', [(i % 16).toString(16).toUpperCase()]));
@@ -140,11 +148,15 @@ function hexRow(offset: number, bytes: Uint8Array, highlight: Uint8Array, cursor
 	const cells: (Node | string | null)[] = [el('span', 'hex-offset', [offset.toString(16).padStart(digits, '0').toUpperCase()])];
 	const group = groupSizeFor(bytesPerRow);
 	for (let i = 0; i < bytes.length; i++) {
-		const cell = el('span', classes(!!highlight[i], i === cursor, !!edited?.has(offset + i), inSelection(i), i % group === 0 && i > 0 ? 'hex-cell hex-group-start' : 'hex-cell'), [hexByte(bytes[i]!)]);
+		if (i % group === 0 && i > 0) cells.push(el('span', 'hex-group-gap'));
+		const cell = el('span', classes(!!highlight[i], i === cursor, !!edited?.has(offset + i), inSelection(i), 'hex-cell'), [hexByte(bytes[i]!)]);
 		cell.title = hexAddress(offset + i, digits);
 		cells.push(cell);
 	}
-	for (let i = bytes.length; i < bytesPerRow; i++) cells.push(el('span', 'hex-cell hex-blank'));
+	for (let i = bytes.length; i < bytesPerRow; i++) {
+		if (i % group === 0 && i > 0) cells.push(el('span', 'hex-group-gap'));
+		cells.push(el('span', 'hex-cell hex-blank'));
+	}
 	// Occupies the grid's gutter column - without a child there, auto-placement would
 	// slide the ASCII block into the gutter and the panes would touch.
 	cells.push(el('span', 'hex-gutter'));
@@ -185,7 +197,7 @@ function byteAtCell(node: HTMLElement): { offset: number; pane: 'hex' | 'ascii' 
 
 /** Bytes as Latin-1 text - one code unit per byte, the way a hex editor's ASCII pane
  *  copies (no re-encoding, no lossy replacement characters). */
-function bytesToLatin1(bytes: Uint8Array): string {
+export function bytesToLatin1(bytes: Uint8Array): string {
 	let out = '';
 	const CHUNK = 0x8000;
 	for (let i = 0; i < bytes.length; i += CHUNK) {
@@ -196,8 +208,8 @@ function bytesToLatin1(bytes: Uint8Array): string {
 
 /** The clipboard formats Copy Special offers; the i18n key names each one for the
  *  status line's confirmation. */
-type CopyFormat = 'smart' | 'hex' | 'text' | 'c' | 'base64';
-const COPY_FORMAT_KEYS: Record<CopyFormat, Parameters<typeof t>[0]> = {
+export type CopyFormat = 'smart' | 'hex' | 'text' | 'c' | 'base64';
+export const COPY_FORMAT_KEYS: Record<CopyFormat, Parameters<typeof t>[0]> = {
 	smart: 'hex.menu.copy',
 	hex: 'hex.menu.copyHex',
 	text: 'hex.menu.copyText',
@@ -207,7 +219,7 @@ const COPY_FORMAT_KEYS: Record<CopyFormat, Parameters<typeof t>[0]> = {
 
 /** A byte count the way a size reminder reads it: whole KiB/MiB without a fraction,
  *  one decimal otherwise. */
-function formatBytes(count: number): string {
+export function formatBytes(count: number): string {
 	if (count < 1024) return `${count} B`;
 	if (count < 1024 * 1024) return `${Number((count / 1024).toFixed(1))} KiB`;
 	return `${Number((count / (1024 * 1024)).toFixed(1))} MiB`;
@@ -696,9 +708,10 @@ export class HexView {
 				// The address-jump flash lands on the row whenever its bytes arrive.
 				if (this.jumpTarget >= row * this.bytesPerRow && this.jumpTarget < row * this.bytesPerRow + rowBytes.length) {
 					const i = this.jumpTarget - row * this.bytesPerRow;
-					// Children: offset, hex cells, gutter, ascii cells.
-					filled.children[1 + i]!.classList.add('hex-jump');
-					filled.children[2 + this.bytesPerRow + i]!.classList.add('hex-jump');
+					// Indexed by byte, not DOM position: the hex pane's group gaps are plain
+					// spacer spans interspersed between the .hex-cell bytes.
+					filled.querySelectorAll('.hex-cell')[i]?.classList.add('hex-jump');
+					filled.querySelectorAll('.hex-ascii-cell')[i]?.classList.add('hex-jump');
 				}
 				placeholder.replaceWith(filled);
 			});

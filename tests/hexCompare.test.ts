@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { EditorGroup } from '../src/editor';
 import { HexCompareView } from '../src/hexCompare';
 import { backend } from './tauriMock';
-import { click, texts } from './helpers';
+import { click, flush, menuItem, texts } from './helpers';
 
 /** The slab reads around the scan's own two streams: an allowance, not a budget. */
 const SLAB_ALLOWANCE = 8 * 64 * 1024;
@@ -30,6 +30,24 @@ function chunkServer(files: Record<string, Uint8Array>): void {
 		const end = Math.min(start + Number(len), bytes.length);
 		return { size: bytes.length, base64: Buffer.from(bytes.subarray(start, end)).toString('base64') };
 	});
+}
+
+function keydown(target: HTMLElement, key: string, shift = false, ctrl = false): void {
+	target.dispatchEvent(new KeyboardEvent('keydown', { key, shiftKey: shift, ctrlKey: ctrl, bubbles: true, cancelable: true }));
+}
+
+/** The compare view's cell for byte `byte` on `side`, at 16 bytes/row (jsdom's fallback
+ *  layout width). */
+function cellAt(view: HexCompareView, byte: number, side: 'left' | 'right' = 'left', pane: 'hex' | 'ascii' = 'hex'): HTMLElement {
+	const row = Math.floor(byte / 16);
+	const cmpRow = view.root.querySelector(`.hex-cmp-row[data-row="${row}"]`)!;
+	const sideRow = cmpRow.querySelectorAll('.hex-row')[side === 'left' ? 0 : 1]!;
+	const cells = sideRow.querySelectorAll(pane === 'ascii' ? '.hex-ascii-cell' : '.hex-cell');
+	return cells[byte % 16] as HTMLElement;
+}
+
+function mouse(type: string, cell: HTMLElement, shift = false): void {
+	cell.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, shiftKey: shift }));
 }
 
 describe('hex compare', () => {
@@ -149,6 +167,36 @@ describe('hex compare', () => {
 		for (const call of backend.callsTo('read_file_chunk')) {
 			expect(Number(call.len)).toBeLessThanOrEqual(1024 * 1024);
 		}
+	});
+
+	it('a binary diff against a revision materializes both sides to temp files and opens the hex compare', async () => {
+		// Git Graph's file list sends a revision pair, not disk paths - `openDiff` reads
+		// both sides through `read_file_at` first (as any diff does), finds one binary, and
+		// materializes each side through the backend before handing the resulting paths to
+		// the same hex comparison a local binary pair opens.
+		const left = Uint8Array.from({ length: 40 }, (_, i) => i);
+		const right = Uint8Array.from({ length: 40 }, (_, i) => (i === 2 ? 0xff : i));
+		chunkServer({ 'C:\\tmp\\left.bin': left, 'C:\\tmp\\right.bin': right });
+		backend.on('read_file_at', () => ({ contents: null, binary: true, size: 40 }));
+		backend.on('materialize_revision_file', ({ revision }) => (revision === 'abc1234' ? 'C:\\tmp\\left.bin' : 'C:\\tmp\\right.bin'));
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openDiff({
+			kind: 'diff', id: 'graph:abc1234:archive.bin:*:archive.bin', title: 'archive.bin (abc1234 ↔ Present)', repo: 'C:\\repo',
+			left: { revision: 'abc1234', path: 'archive.bin', label: 'abc1234', exists: true },
+			right: { revision: '*', path: 'archive.bin', label: 'Working Tree', exists: true }
+		});
+		await waitForReady(() => document.querySelector('.hex-compare .hex-cmp-label') !== null);
+		expect(backend.callsTo('materialize_revision_file').map((c) => c['revision'])).toEqual(['abc1234', '*']);
+		expect(backend.callsTo('materialize_revision_file').map((c) => c['repo'])).toEqual(['C:\\repo', 'C:\\repo']);
+		expect(texts('.hex-compare .hex-cmp-label')).toEqual(['archive.bin (abc1234)', 'archive.bin (Working Tree)']);
+		// Re-opening the same diff activates the existing tab instead of materializing again.
+		await group.openDiff({
+			kind: 'diff', id: 'graph:abc1234:archive.bin:*:archive.bin', title: 'archive.bin (abc1234 ↔ Present)', repo: 'C:\\repo',
+			left: { revision: 'abc1234', path: 'archive.bin', label: 'abc1234', exists: true },
+			right: { revision: '*', path: 'archive.bin', label: 'Working Tree', exists: true }
+		});
+		expect(backend.callsTo('materialize_revision_file')).toHaveLength(2);
 	});
 
 	it('streams a 128 MiB pair in bounded chunks: the viewport reads kilobytes, the scan never holds a file', { timeout: 180000 }, async () => {
@@ -343,6 +391,86 @@ describe('hex compare', () => {
 		expect(panes[1]!.querySelectorAll('.hex-cell.hex-diff')).toHaveLength(16);
 		// All three rows of the 48-byte side exist in the virtual list.
 		expect(view.root.querySelector('.hex-cmp-row[data-row="2"]')).not.toBeNull();
+		view.destroy();
+	});
+
+	/* ---------- Selection & copy ---------- */
+
+	it('drag-selecting bytes on one pane mirrors the same address span on the other side', async () => {
+		const left = Uint8Array.from({ length: 32 }, (_, i) => i);
+		const right = Uint8Array.from({ length: 32 }, (_, i) => i ^ 0xff);
+		chunkServer({ 'C:\\l.bin': left, 'C:\\r.bin': right });
+		const view = new HexCompareView('C:\\l.bin', 'C:\\r.bin', { left: 'left.bin', right: 'right.bin' });
+		document.getElementById('editorGroup')!.appendChild(view.root);
+		await view.load();
+		await flush();
+		mouse('mousedown', cellAt(view, 2, 'left'));
+		mouse('mousemove', cellAt(view, 5, 'left'));
+		window.dispatchEvent(new MouseEvent('mouseup'));
+		await flush();
+		// Bytes 2..5: 4 bytes, hex + ASCII columns, both sides - 16 selected cells in all.
+		expect(view.root.querySelectorAll('.hex-selected').length).toBe(16);
+		expect(cellAt(view, 2, 'right').classList.contains('hex-selected')).toBe(true);
+		expect(cellAt(view, 5, 'right').classList.contains('hex-selected')).toBe(true);
+		expect(cellAt(view, 1, 'right').classList.contains('hex-selected')).toBe(false);
+		expect(cellAt(view, 6, 'right').classList.contains('hex-selected')).toBe(false);
+		expect(view.root.querySelector('.hex-status')!.textContent).toContain('0x00000002–0x00000005');
+		// Ctrl+C copies from the side the drag started on - the left file's bytes.
+		keydown(view.root, 'c', false, true);
+		await flush();
+		expect(backend.clipboard).toEqual(['02030405']);
+		view.destroy();
+	});
+
+	it('a Shift+click on the other pane extends the shared selection, and the right-click menu names each side', async () => {
+		const left = Uint8Array.from({ length: 32 }, (_, i) => i);
+		const right = Uint8Array.from({ length: 32 }, (_, i) => i ^ 0xff);
+		chunkServer({ 'C:\\l.bin': left, 'C:\\r.bin': right });
+		const view = new HexCompareView('C:\\l.bin', 'C:\\r.bin', { left: 'left.bin', right: 'right.bin' });
+		document.getElementById('editorGroup')!.appendChild(view.root);
+		await view.load();
+		await flush();
+		mouse('mousedown', cellAt(view, 2, 'left'));
+		window.dispatchEvent(new MouseEvent('mouseup'));
+		await flush();
+		// Shift+click on the RIGHT pane extends the one shared span, though it started
+		// on the left.
+		mouse('mousedown', cellAt(view, 5, 'right'), true);
+		await flush();
+		expect(cellAt(view, 2, 'left').classList.contains('hex-selected')).toBe(true);
+		expect(cellAt(view, 5, 'left').classList.contains('hex-selected')).toBe(true);
+		expect(cellAt(view, 5, 'right').classList.contains('hex-selected')).toBe(true);
+		// Right-click on the right pane: Copy is offered against the right file, and
+		// copies that side's (different) bytes for the very same address span.
+		cellAt(view, 3, 'right').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+		expect(menuItem('Copy — right.bin')).toBeTruthy();
+		expect(menuItem('Copy — left.bin')).toBeFalsy();
+		menuItem('Copy — right.bin')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush();
+		// right[i] = i ^ 0xff for bytes 2..5: FD FC FB FA.
+		expect(backend.clipboard).toEqual(['FDFCFBFA']);
+		view.destroy();
+	});
+
+	it('Copy Address copies the shared span, and Clear Selection removes the highlight on both sides', async () => {
+		chunkServer({ 'C:\\l.bin': new Uint8Array(32), 'C:\\r.bin': new Uint8Array(32) });
+		const view = new HexCompareView('C:\\l.bin', 'C:\\r.bin');
+		document.getElementById('editorGroup')!.appendChild(view.root);
+		await view.load();
+		await flush();
+		mouse('mousedown', cellAt(view, 4, 'left'));
+		mouse('mousemove', cellAt(view, 9, 'right'));
+		window.dispatchEvent(new MouseEvent('mouseup'));
+		await flush();
+		expect(view.root.querySelectorAll('.hex-selected').length).toBeGreaterThan(0);
+		cellAt(view, 4, 'left').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+		menuItem('Copy Address')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush();
+		expect(backend.clipboard).toEqual(['0x00000004-0x00000009']);
+		cellAt(view, 4, 'left').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+		menuItem('Clear Selection')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush();
+		expect(view.root.querySelectorAll('.hex-selected').length).toBe(0);
 		view.destroy();
 	});
 });

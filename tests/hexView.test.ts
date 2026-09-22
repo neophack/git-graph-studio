@@ -59,17 +59,20 @@ describe('hex view', () => {
 		await view.load();
 		await new Promise((resolve) => setTimeout(resolve, 0)); // placeholder rows fill from the slab
 		const row = view.root.querySelector('.hex-scroller .hex-row')!;
-		// 16 bytes/row means 8-byte groups: separators before bytes 8 (and 12 never, 8-only).
-		const groupStarts = Array.from(row.querySelectorAll('.hex-cell')).filter((c) => c.classList.contains('hex-group-start'));
-		expect(groupStarts.length).toBe(1);
-		// The grid template: a 10ch offset column, 3ch per byte (4ch at the group start),
-		// the 3ch gutter and 1ch per ASCII character - fixed, nothing stretches.
+		// 16 bytes/row means 8-byte groups: one dedicated gap track before byte 8.
+		const groupGaps = row.querySelectorAll('.hex-group-gap');
+		expect(groupGaps.length).toBe(1);
+		// Bytes stay a uniform 8 wide - the gap is its own track, not extra width folded
+		// into the group's first byte.
+		expect(Array.from(row.querySelectorAll('.hex-cell')).every((c) => !c.classList.contains('hex-group-start'))).toBe(true);
+		// The grid template: a 10ch offset column, 3ch per byte plus a 1ch gap track at the
+		// group start, the 3ch gutter and 1ch per ASCII character - fixed, nothing stretches.
 		const template = row.style.gridTemplateColumns.split(' ');
-		expect(template.length).toBe(1 + 16 + 1 + 16);
+		expect(template.length).toBe(1 + 16 + 1 + 1 + 16);
 		expect(template[0]).toBe('10ch');
-		expect(template.filter((c) => c === '4ch')).toEqual(['4ch']);
-		expect(template[17]).toBe('3ch');
-		expect(template.slice(18).every((c) => c === '1ch')).toBe(true);
+		expect(template.filter((c) => c === '1ch').length).toBe(16 + 1); // the gap track plus the ASCII pane
+		expect(template[18]).toBe('3ch'); // the gutter, after the gap-widened hex section
+		expect(template.slice(19).every((c) => c === '1ch')).toBe(true);
 		// The uppercase hex a hex editor shows.
 		const hex = Array.from(row.querySelectorAll('.hex-cell')).map((c) => c.textContent);
 		expect(hex[10]).toBe('0A');
@@ -349,10 +352,10 @@ describe('hex view', () => {
 		select.dispatchEvent(new Event('change'));
 		expect(view.root.querySelector('.hex-status')!.textContent).toContain('8 bytes/row');
 		expect(view.root.querySelector('.hex-status')!.textContent).toContain('8 rows'); // 64 bytes, 8 per row
-		// The row grid follows: 8 hex columns and 4-byte groups (separator before byte 4).
+		// The row grid follows: 8 hex columns and 4-byte groups (a gap track before byte 4).
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		const row = view.root.querySelector('.hex-scroller .hex-row')!;
-		expect(row.querySelectorAll('.hex-cell.hex-group-start').length).toBe(1);
+		expect(row.querySelectorAll('.hex-group-gap').length).toBe(1);
 		// Ctrl+G focuses the address box; Enter jumps to the byte and flashes it.
 		document.body.append(view.root); // focus needs a connected element
 		keydown(view.root, 'g', false, true);

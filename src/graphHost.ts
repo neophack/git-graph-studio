@@ -8,17 +8,23 @@
 // This is deliberately the app's ONLY module that consumes the extension's TypeScript
 // artifacts at runtime: the webview bundle (loaded by the view page), the config bundle
 // (gitgraph/config.js = the extension's compiled src/config.ts, exposed as
-// window.GitGraphStudioConfig by scripts/prepare.mjs) and the comparison page generator
-// (gitgraph/compare.js, built from the extension's own compiled src/comparisonView.ts - see
-// CompareHost below). The Rust counterpart of this seam is src-tauri/src/cmd_graph.rs, the one
-// module that talks to git-graph-core.
+// window.GitGraphStudioConfig by scripts/prepare.mjs), the Commit Comparison page generator
+// with its binary-area host machinery (gitgraph/compare.js, built from the extension's own
+// compiled src/comparisonView.ts + src/binaryCompare.ts + src/hexDiff.ts - see CompareHost
+// below) and the standalone Binary Compare page generator (gitgraph/binarycompare.js, from
+// src/binaryCompareView.ts - see BinaryCompareHost). The pages and the hex/image session
+// machinery are the extension's own compiled code; only their I/O - blob bytes and
+// working-tree reads - is adapted to the app's backend commands here. The Rust counterpart of
+// this seam is src-tauri/src/cmd_graph.rs, the one module that talks to git-graph-core.
 
 import { invoke } from '@tauri-apps/api/core';
 import { save as saveDialog } from '@tauri-apps/plugin-dialog';
+import { writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import { openUrl } from '@tauri-apps/plugin-opener';
 
 import type { DiffRequest } from './scm';
 import { claimGraphPreload } from './graphPreload';
+import { t, tf } from './i18n';
 import { THEME_EVENT, themeById } from './settings';
 import * as state from './state';
 import { basename, el, joinPath, notify, toPosix } from './ui';
@@ -42,11 +48,32 @@ interface CompareFileChange {
 
 /** The extension's compiled page generator (scripts/compare-bundle.mjs, driven by
  *  scripts/prepare.mjs, builds it from out/comparisonView.js — its `getHtml` template over a
- *  stubbed panel). */
+ *  stubbed panel). The same bundle also exposes the binary-area responders (out/binaryCompare.js
+ *  + out/hexDiff.js) the pages' hex/picture comparison is driven through; the standalone Binary
+ *  Compare page generator (out/binaryCompareView.js) ships as the separate
+ *  GitGraphBinaryCompare below. */
 declare global {
 	interface Window {
-		GitGraphCompare?: { buildComparePage(options: Record<string, unknown>): string };
+		GitGraphCompare?: {
+			buildComparePage(options: Record<string, unknown>): string;
+			createHexSession?(dataSource: { spawnGitStream(args: string[], repo: string): unknown }, repo: string, fromHash: string, toHash: string, file: CompareFileChange): HexSession;
+			wireHexSession?(session: HexSession, index: number, post: (message: Record<string, unknown>) => void): void;
+			respondHexInfo?(session: HexSession, index: number, bytesPerRow: number, post: (message: Record<string, unknown>) => void): Promise<void>;
+			respondHexRows?(session: HexSession, index: number, start: number, count: number, post: (message: Record<string, unknown>) => void): Promise<void>;
+			respondImageData?(session: HexSession, index: number, file: CompareFileChange, post: (message: Record<string, unknown>) => void): Promise<void>;
+			respondCopyToClipboard?(post: (message: Record<string, unknown>) => void, type: string, data: string): Promise<void>;
+		};
+		GitGraphBinaryCompare?: { buildBinaryComparePage(options: Record<string, unknown>): string };
+		__ggsHexFs?: HexFileSystem;
+		__ggsWriteClipboard?: (text: string) => Promise<void>;
 	}
+}
+
+/** One hex-diff session as the hosts drive it — the extension's compiled HexDiffSession
+ *  (src/hexDiff.ts) served out of compare.js; only the surface the responders call is named. */
+interface HexSession {
+	onSections: ((sections: unknown, error: string | null) => void) | null;
+	dispose(): void;
 }
 
 /* ---------- Where the graph's assets come from ---------- */
@@ -95,6 +122,7 @@ function applyFrameTheme(frame: HTMLIFrameElement): void {
 }
 
 let compareGenerator: Promise<void> | null = null;
+let binaryCompareGenerator: Promise<void> | null = null;
 
 /** Load the extension's comparison page generator once per document. A generator that is
  *  already present (tests pre-set it) resolves at once. */
@@ -104,8 +132,15 @@ function loadCompareGenerator(): Promise<void> {
 	return compareGenerator;
 }
 
+/** Load the extension's standalone Binary Compare page generator (gitgraph/binarycompare.js). */
+function loadBinaryCompareGenerator(): Promise<void> {
+	if (window.GitGraphBinaryCompare) return Promise.resolve();
+	binaryCompareGenerator ??= loadGitGraphScript('binarycompare.js', 'The Git Graph binary comparison page generator (gitgraph/binarycompare.js) did not load');
+	return binaryCompareGenerator;
+}
+
 /** Run one of the app's /gitgraph/ script assets (config.js is on the page already via
- *  index.html; compare.js loads here) in the document. */
+ *  index.html; compare.js and binarycompare.js load here) in the document. */
 function loadGitGraphScript(name: string, failure: string): Promise<void> {
 	return new Promise<void>((resolve, reject) => {
 		const script = document.createElement('script');
@@ -116,23 +151,316 @@ function loadGitGraphScript(name: string, failure: string): Promise<void> {
 	});
 }
 
+/* ---------- The binary comparison's host machinery (the extension's own, adapted) ---------- */
+
+/** The byte carrier for the bytes this host hands the machinery: the Node Buffer surface its
+ *  compiled code actually uses — indexing, `subarray` (results stay this class, so they encode
+ *  and compare the same way), base64/latin1 `toString`, `equals`, `copy`. The bundle carries
+ *  its own polyfill for the buffers it allocates internally; these are the ones the host
+ *  produces, shaped so the two interoperate. */
+class HexBuffer extends Uint8Array {
+	static fromBytes(bytes: Uint8Array): HexBuffer {
+		const copy = new HexBuffer(bytes.length);
+		copy.set(bytes);
+		return copy;
+	}
+	toString(encoding?: string): string {
+		if (encoding === 'base64') {
+			let binary = '';
+			for (let i = 0; i < this.length; i += 0x8000) {
+				binary += String.fromCharCode.apply(null, this.subarray(i, Math.min(this.length, i + 0x8000)) as unknown as number[]);
+			}
+			return btoa(binary);
+		}
+		if (encoding === 'latin1') {
+			let text = '';
+			for (let i = 0; i < this.length; i++) text += String.fromCharCode(this[i]!);
+			return text;
+		}
+		return new TextDecoder().decode(this);
+	}
+	equals(other: Uint8Array): boolean {
+		if (other.length !== this.length) return false;
+		for (let i = 0; i < this.length; i++) if (this[i] !== other[i]) return false;
+		return true;
+	}
+	copy(target: Uint8Array, targetStart: number, sourceStart: number, sourceEnd: number): void {
+		target.set(this.subarray(sourceStart, sourceEnd), targetStart);
+	}
+}
+
+function decodeBase64(data: string): Uint8Array {
+	const binary = atob(data);
+	const bytes = new Uint8Array(binary.length);
+	for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+	return bytes;
+}
+
+type FakeListener = (...args: unknown[]) => void;
+
+/** The slice of Node's stream surface the machinery consumes: `on('data'|'end'|'error')`,
+ *  `resume` (its stderr drains) and `destroy`. Data is pulled eagerly from the backend, so a
+ *  `resume` is a no-op and `destroy` just stops the feed. */
+class FakeStream {
+	private readonly listeners = new Map<string, Set<FakeListener>>();
+	private destroyed = false;
+	on(event: string, listener: FakeListener): this {
+		let set = this.listeners.get(event);
+		if (!set) {
+			set = new Set();
+			this.listeners.set(event, set);
+		}
+		set.add(listener);
+		return this;
+	}
+	emit(event: string, ...args: unknown[]): void {
+		for (const listener of [...(this.listeners.get(event) ?? [])]) listener(...args);
+	}
+	resume(): void { /* the adapter pushes eagerly; nothing to kick */ }
+	destroy(): void {
+		this.destroyed = true;
+	}
+	get isDestroyed(): boolean {
+		return this.destroyed;
+	}
+}
+
+/** The slice of cp.ChildProcess the machinery consumes: stdout/stderr streams, `on('close')`
+ *  and `kill()`. */
+class FakeChild {
+	readonly stdout = new FakeStream();
+	readonly stderr = new FakeStream();
+	private readonly listeners = new Map<string, Set<FakeListener>>();
+	private killed = false;
+	on(event: string, listener: FakeListener): this {
+		let set = this.listeners.get(event);
+		if (!set) {
+			set = new Set();
+			this.listeners.set(event, set);
+		}
+		set.add(listener);
+		return this;
+	}
+	emitClose(code: number): void {
+		for (const listener of [...(this.listeners.get('close') ?? [])]) listener(code);
+	}
+	kill(): void {
+		this.killed = true;
+		this.stdout.destroy();
+	}
+	get isKilled(): boolean {
+		return this.killed;
+	}
+}
+
+/** The callback-style fs surface the compare.js bundle's shim (scripts/hex-fs-stub.cjs) calls
+ *  into: the machinery's working-tree sides read through it. Every call reaches the backend —
+ *  no file byte ever crosses through this window's own runtime. */
+interface HexFileSystem {
+	stat(path: string, callback: (error: { code: string; message?: string } | null, stats?: { size: number }) => void): void;
+	open(path: string, callback: (error: Error | null, fd?: number) => void): void;
+	read(fd: number, buffer: Uint8Array, offset: number, length: number, position: number, callback: (error: Error | null, bytesRead?: number, buffer?: Uint8Array) => void): void;
+	createReadStream(path: string): FakeStream;
+	readFile(path: string, callback: (error: Error | null, data?: HexBuffer) => void): void;
+	closeSync(fd: number): void;
+}
+
+/** The transport size of one backend range read: the machinery works in 64 KiB blocks, and a
+ *  4×-bigger transport window keeps a multi-megabyte scan to a bounded number of IPC calls. */
+const HEX_RANGE_CHUNK = 256 * 1024;
+
+/** The file descriptors the fs shim's `open`/`read`/`closeSync` trade in: reads are addressed
+ *  absolutely (`read_file_chunk` reopens by path), so the table only maps fd → path. */
+const hexOpenFiles = new Map<number, string>();
+let hexNextFd = 1;
+
+const hexFileSystem: HexFileSystem = {
+	stat(path, callback) {
+		void invoke<{ size: number }>('file_probe', { path }).then(
+			(probe) => callback(null, { size: probe.size }),
+			// An unreadable side reads as absent, exactly how the machinery's statSize treats
+			// ENOENT — the missing side of an added or deleted file.
+			(error) => callback({ code: 'ENOENT', message: String(error) })
+		);
+	},
+	open(path, callback) {
+		const fd = hexNextFd++;
+		hexOpenFiles.set(fd, path);
+		callback(null, fd);
+	},
+	read(fd, buffer, offset, length, position, callback) {
+		const path = hexOpenFiles.get(fd);
+		if (path === undefined) {
+			callback(new Error('bad file descriptor'));
+			return;
+		}
+		void invoke<{ base64: string }>('read_file_chunk', { path, offset: position, len: length }).then(
+			(chunk) => {
+				const bytes = decodeBase64(chunk.base64);
+				buffer.set(bytes.subarray(0, length), offset);
+				callback(null, bytes.length, buffer);
+			},
+			(error) => callback(error instanceof Error ? error : new Error(String(error)))
+		);
+	},
+	createReadStream(path) {
+		const stream = new FakeStream();
+		void (async () => {
+			try {
+				const head = await invoke<{ size: number; base64: string }>('read_file_chunk', { path, offset: 0, len: HEX_RANGE_CHUNK });
+				let offset = 0;
+				while (offset < head.size && !stream.isDestroyed) {
+					const chunk = offset === 0 ? head : await invoke<{ size: number; base64: string }>('read_file_chunk', { path, offset, len: HEX_RANGE_CHUNK });
+					const bytes = decodeBase64(chunk.base64);
+					if (bytes.length === 0) break;
+					stream.emit('data', HexBuffer.fromBytes(bytes));
+					offset += bytes.length;
+				}
+				if (!stream.isDestroyed) stream.emit('end');
+			} catch (error) {
+				stream.emit('error', error instanceof Error ? error : new Error(String(error)));
+			}
+		})();
+		return stream;
+	},
+	readFile(path, callback) {
+		// Whole-file reads happen for the picture view's data URLs, which the responder already
+		// caps at the same 32 MiB the backend enforces.
+		void invoke<string>('read_file_base64', { path }).then(
+			(base64) => callback(null, HexBuffer.fromBytes(decodeBase64(base64))),
+			(error) => callback(error instanceof Error ? error : new Error(String(error)))
+		);
+	},
+	closeSync(fd) {
+		hexOpenFiles.delete(fd);
+	}
+};
+
+// Install the adapters where the bundles look for them (scripts/hex-fs-stub.cjs and
+// scripts/vscode-stub.cjs): before any machinery call can happen, at module scope.
+window.__ggsHexFs = hexFileSystem;
+window.__ggsWriteClipboard = (text) => writeClipboardText(text);
+
+/** The blob temp files one host's sessions materialized — each side's revision content exists
+ *  only as a blob until `materialize_revision_file` writes it out — released together when the
+ *  host goes away. Every acquire materializes its own file (the command never reuses one), so
+ *  no cross-host refcounting is needed. */
+class TempBlobScope {
+	private readonly temps = new Map<string, Promise<string>>();
+	acquire(repo: string, revision: string, path: string): Promise<string> {
+		const key = repo + '\0' + revision + '\0' + path;
+		let pending = this.temps.get(key);
+		if (pending === undefined) {
+			pending = invoke<string>('materialize_revision_file', { repo, revision, path }).catch((error) => {
+				this.temps.delete(key);
+				throw error;
+			});
+			this.temps.set(key, pending);
+		}
+		return pending;
+	}
+	release(): void {
+		for (const pending of this.temps.values()) {
+			void pending.then(
+				(path) => invoke('discard_temp_blob', { path }).catch(() => undefined),
+				() => undefined
+			);
+		}
+		this.temps.clear();
+	}
+}
+
+/** `spawnGitStream` as the machinery expects it — the only DataSource surface its hex sessions
+ *  use — over the app's backend. The two argument shapes it is issued with (`cat-file -s` for
+ *  a size, `cat-file blob` for the bytes) both resolve to a materialized temp file read through
+ *  `file_probe` / `read_file_chunk`; the blob is read by the linked engine on the way there, so
+ *  this path never spawns git. */
+class HexIo {
+	constructor(private readonly temps: TempBlobScope) {}
+
+	spawnGitStream(args: string[], repo: string): FakeChild {
+		const spec = String(args[2] ?? '');
+		const separator = spec.indexOf(':');
+		const revision = separator > 0 ? spec.slice(0, separator) : spec;
+		const path = separator > 0 ? spec.slice(separator + 1) : '';
+		const child = new FakeChild();
+		const read = (): Promise<string> => this.temps.acquire(repo, revision, path);
+		if (args[1] === '-s') {
+			void (async () => {
+				try {
+					const probe = await read().then((temp) => invoke<{ size: number }>('file_probe', { path: temp }));
+					child.stdout.emit('data', String(probe.size));
+					child.stdout.emit('end');
+					child.emitClose(0);
+				} catch (error) {
+					// The machinery's measureSize reads "does not exist" as "the side is absent".
+					child.stderr.emit('data', `${spec}: does not exist (${String(error)})`);
+					child.emitClose(128);
+				}
+			})();
+			return child;
+		}
+		void (async () => {
+			try {
+				const temp = await read();
+				const head = await invoke<{ size: number; base64: string }>('read_file_chunk', { path: temp, offset: 0, len: HEX_RANGE_CHUNK });
+				let offset = 0;
+				while (offset < head.size && !child.isKilled) {
+					const chunk = offset === 0 ? head : await invoke<{ size: number; base64: string }>('read_file_chunk', { path: temp, offset, len: HEX_RANGE_CHUNK });
+					const bytes = decodeBase64(chunk.base64);
+					if (bytes.length === 0) break;
+					child.stdout.emit('data', HexBuffer.fromBytes(bytes));
+					offset += bytes.length;
+				}
+				if (!child.isKilled) child.stdout.emit('end');
+				child.emitClose(0);
+			} catch (error) {
+				child.stderr.emit('data', String(error));
+				child.emitClose(1);
+			}
+		})();
+		return child;
+	}
+}
+
 /** The comparison view is not part of the webview bundle: the extension generates its whole
  *  page (styles and script inline) from extension-host code. This host does what the extension
  *  host does with it - the loading page first, the page with the fetched data once it lands,
  *  and the page's requests answered over the same graph_request channel - so Studio shows the
- *  extension's real comparison UI. */
+ *  extension's real comparison UI: the file list and textual diffs, and the binary files' own
+ *  hex / picture comparison area (the extension's HexDiffSession machinery, served out of the
+ *  same compare.js bundle and driven over the backend adapters above). */
+export interface BinaryCompareInput {
+	repo?: string;
+	fromHash: string;
+	toHash: string;
+	file: { oldFilePath: string; newFilePath: string; type: string };
+}
+
+/** The tab title of a Binary Compare — the extension's own binaryCompareTitle shape,
+ *  localised. */
+export function binaryCompareTitle(compare: BinaryCompareInput): string {
+	const filePath = compare.file.newFilePath !== '' ? compare.file.newFilePath : compare.file.oldFilePath;
+	const abbrev = (hash: string) => (hash === '' || hash === UNCOMMITTED ? t('graph.binaryCompare.present') : hash.length > 8 ? hash.slice(0, 8) : hash);
+	return tf('graph.binaryCompare.title', filePath, abbrev(compare.fromHash), abbrev(compare.toHash));
+}
+
 export class CompareHost {
 	readonly frame: HTMLIFrameElement;
 	private changes: CompareFileChange[] = [];
 	private disposed = false;
-	private binaryNotified = false;
 	private countsSettled = false;
+	/** Hex sessions by file index; at most a few stay alive (each may hold chunk caches), the
+	 *  least recently used is evicted - exactly the extension host's own bound. */
+	private readonly hexSessions = new Map<number, HexSession>();
+	private readonly temps = new TempBlobScope();
+	private readonly io = new HexIo(this.temps);
 	private readonly onMessage = (event: MessageEvent): void => this.handlePageMessage(event);
 
 	constructor(
 		private readonly container: HTMLElement,
 		private readonly input: { fromHash: string; toHash: string; singleCommit: boolean; repo?: string },
-		private readonly delegate: { openDiff(diff: DiffRequest): void }
+		private readonly delegate: { openDiff(diff: DiffRequest): void; openBinaryCompare(compare: BinaryCompareInput): void }
 	) {
 		this.frame = document.createElement('iframe');
 		this.frame.title = 'Commit Comparison';
@@ -151,6 +479,9 @@ export class CompareHost {
 		this.disposed = true;
 		window.removeEventListener('message', this.onMessage);
 		window.removeEventListener(THEME_EVENT, this.onTheme);
+		for (const session of this.hexSessions.values()) session.dispose();
+		this.hexSessions.clear();
+		this.temps.release();
 	}
 
 	/** The extension host's own load: the comparison, the header's summary cards and the
@@ -222,15 +553,65 @@ export class CompareHost {
 		} else if (command === 'viewDiff') {
 			const file = this.changes[Number(message['index'])];
 			if (file) this.delegate.openDiff(this.diffRequest(file));
-		} else if (command === 'viewDiffBinary' || command === 'getHexInfo' || command === 'getHexRows' || command === 'getImageData') {
-			// The binary/hex area needs the extension's hex-session machinery, which reads blobs
-			// through Node streams; hosting it is future work (see the development plan).
-			if (!this.binaryNotified) {
-				this.binaryNotified = true;
-				notify('info', 'Binary files have no textual comparison. The hex/image comparison page is not wired into Studio yet.');
+		} else if (command === 'viewDiffBinary') {
+			// The extension's own host opens the standalone Binary Compare tab for a binary
+			// file, with the comparison's own two ends (comparisonView.ts); so does this one.
+			const file = this.changes[Number(message['index'])];
+			if (file) {
+				this.delegate.openBinaryCompare({
+					repo: this.input.repo,
+					fromHash: this.input.fromHash,
+					toHash: this.input.toHash,
+					file: { oldFilePath: file.oldFilePath, newFilePath: file.newFilePath, type: file.type }
+				});
 			}
+		} else if (command === 'getHexInfo') {
+			const session = this.hexSession(Number(message['index']));
+			if (session) void window.GitGraphCompare?.respondHexInfo?.(session, Number(message['index']), Number(message['bytesPerRow']), (reply) => this.post(reply));
+		} else if (command === 'getHexRows') {
+			const session = this.hexSessions.get(Number(message['index']));
+			if (session) void window.GitGraphCompare?.respondHexRows?.(session, Number(message['index']), Number(message['start']), Number(message['count']), (reply) => this.post(reply));
+		} else if (command === 'getImageData') {
+			const index = Number(message['index']);
+			const session = this.hexSession(index);
+			const file = this.changes[index];
+			if (session && file) void window.GitGraphCompare?.respondImageData?.(session, index, file, (reply) => this.post(reply));
+		} else if (command === 'copyToClipboard') {
+			void window.GitGraphCompare?.respondCopyToClipboard?.((reply) => this.post(reply), String(message['type']), String(message['data']));
 		}
 		this.settlePendingCounts();
+	}
+
+	/** The hex session of a file, creating it on first use — the extension host's own
+	 *  `hexSession` (src/comparisonView.ts): re-selecting a file reuses its session, and at
+	 *  most a few stay alive. */
+	private hexSession(index: number): HexSession | null {
+		const existing = this.hexSessions.get(index);
+		if (existing !== undefined) {
+			this.hexSessions.delete(index);
+			this.hexSessions.set(index, existing);
+			return existing;
+		}
+		const machinery = window.GitGraphCompare;
+		const file = this.changes[index];
+		if (machinery === undefined || machinery.createHexSession === undefined || file === undefined) return null;
+		const session = machinery.createHexSession(
+			{ spawnGitStream: (args, repo) => this.io.spawnGitStream(args, repo) },
+			this.input.repo ?? '',
+			this.input.fromHash,
+			this.input.toHash,
+			file
+		);
+		machinery.wireHexSession?.(session, index, (reply) => this.post(reply));
+		this.hexSessions.set(index, session);
+		while (this.hexSessions.size > 4) {
+			const oldest = this.hexSessions.keys().next();
+			if (oldest.done) break;
+			const evicted = this.hexSessions.get(oldest.value);
+			this.hexSessions.delete(oldest.value);
+			evicted?.dispose();
+		}
+		return session;
 	}
 
 	/** The page requests the deferred "+/-" counts only when the right side is a commit
@@ -286,6 +667,106 @@ export class CompareHost {
 			left: { revision: from, path: oldPath, label: abbrev(from), exists: file.type !== 'A' },
 			right: { revision: to, path: newPath, label: to === UNCOMMITTED ? 'Working Tree' : abbrev(to), exists: file.type !== 'D' }
 		};
+	}
+}
+
+/** The extension's standalone Binary Compare page (out/binaryCompareView.js, served as
+ *  gitgraph/binarycompare.js), hosted the same way as the Commit Comparison page: the
+ *  extension host's own tab for one binary file between two revisions — the hex view with its
+ *  difference navigation, or the picture view with its pixel difference — generated by the
+ *  extension's own template and driven by the extension's own HexDiffSession machinery over
+ *  the backend adapters. The page always addresses its session as index 0. */
+export class BinaryCompareHost {
+	readonly frame: HTMLIFrameElement;
+	private disposed = false;
+	private session: HexSession | null = null;
+	private readonly temps = new TempBlobScope();
+	private readonly io = new HexIo(this.temps);
+	private readonly onMessage = (event: MessageEvent): void => this.handlePageMessage(event);
+	private readonly onTheme = (): void => applyFrameTheme(this.frame);
+
+	constructor(private readonly container: HTMLElement, private readonly input: BinaryCompareInput) {
+		this.frame = document.createElement('iframe');
+		this.frame.title = 'Binary Compare';
+		this.container.appendChild(this.frame);
+		window.addEventListener('message', this.onMessage);
+		this.frame.addEventListener('load', () => applyFrameTheme(this.frame));
+		window.addEventListener(THEME_EVENT, this.onTheme);
+		void this.setPage();
+	}
+
+	dispose(): void {
+		this.disposed = true;
+		window.removeEventListener('message', this.onMessage);
+		window.removeEventListener(THEME_EVENT, this.onTheme);
+		this.session?.dispose();
+		this.session = null;
+		this.temps.release();
+	}
+
+	/** Generate the page with the extension's own template and hand it to the frame, with the
+	 *  acquireVsCodeApi shim (requests posted to this host) injected under the page's own nonce
+	 *  and the theme's token sheet riding under the head from the first paint — the same
+	 *  contract the Commit Comparison page is hosted under. */
+	private async setPage(): Promise<void> {
+		await Promise.all([loadBinaryCompareGenerator(), loadCompareGenerator()]);
+		if (this.disposed) return;
+		const build = window.GitGraphBinaryCompare;
+		if (!build) throw new Error('The Git Graph binary comparison page generator did not load');
+		const file = { ...this.input.file, additions: null, deletions: null };
+		const filePath = file.newFilePath !== '' ? file.newFilePath : file.oldFilePath;
+		const html = build.buildBinaryComparePage({ fromHash: this.input.fromHash, toHash: this.input.toHash, filePath, file });
+		const nonce = /nonce="([^"]+)"/.exec(html)?.[1] ?? '';
+		const shim = '<script nonce="' + nonce + '">(function(){' +
+			'window.acquireVsCodeApi=function(){return{' +
+			"postMessage:function(m){window.parent.postMessage({__ggBinComparePage:m},'*');}," +
+			"getState:function(){return null;},setState:function(){}" +
+			'}};' +
+			'})();</script>';
+		const theme = themeById();
+		this.frame.srcdoc = html
+			.replace('<head>', '<head>' + hostThemeLink(theme.css) + shim)
+			.replace('<body>', `<body class="${theme.kind}">`);
+	}
+
+	private handlePageMessage(event: MessageEvent): void {
+		if (this.disposed || event.source !== this.frame.contentWindow) return;
+		const message = (event.data as { __ggBinComparePage?: Record<string, unknown> } | null)?.__ggBinComparePage;
+		if (message === undefined) return;
+		const command = String(message['command']);
+		const post = (reply: Record<string, unknown>): void => this.post(reply);
+		if (command === 'getHexInfo') {
+			const session = this.ensureSession();
+			if (session) void window.GitGraphCompare?.respondHexInfo?.(session, 0, Number(message['bytesPerRow']), post);
+		} else if (command === 'getHexRows') {
+			if (this.session) void window.GitGraphCompare?.respondHexRows?.(this.session, 0, Number(message['start']), Number(message['count']), post);
+		} else if (command === 'getImageData') {
+			const session = this.ensureSession();
+			if (session) void window.GitGraphCompare?.respondImageData?.(session, 0, { ...this.input.file, additions: null, deletions: null }, post);
+		} else if (command === 'copyToClipboard') {
+			void window.GitGraphCompare?.respondCopyToClipboard?.(post, String(message['type']), String(message['data']));
+		}
+	}
+
+	/** The one session this page drives, created on its first message (the extension creates
+	 *  it with the view; lazily here, which the page cannot tell apart). */
+	private ensureSession(): HexSession | null {
+		if (this.session !== null) return this.session;
+		const machinery = window.GitGraphCompare;
+		if (machinery === undefined || machinery.createHexSession === undefined) return null;
+		this.session = machinery.createHexSession(
+			{ spawnGitStream: (args, repo) => this.io.spawnGitStream(args, repo) },
+			this.input.repo ?? '',
+			this.input.fromHash,
+			this.input.toHash,
+			{ ...this.input.file, additions: null, deletions: null }
+		);
+		machinery.wireHexSession?.(this.session, 0, (reply) => this.post(reply));
+		return this.session;
+	}
+
+	private post(message: Record<string, unknown>): void {
+		this.frame.contentWindow?.postMessage(message, '*');
 	}
 }
 
@@ -381,6 +862,9 @@ export interface GraphHostDelegate {
 	openFileAtRevision(revision: string, path: string, title: string, repo?: string): void;
 	/** The graph asked for a Commit Comparison tab ("Open Changes", "Compare with..."). */
 	openCompareTab(fromHash: string, toHash: string, singleCommit: boolean, repo?: string): void;
+	/** The graph asked for a Binary Compare tab - a binary file clicked in the view, or the
+	 *  comparison page's "Open Diff in Editor" on one. */
+	openBinaryCompare(compare: BinaryCompareInput): void;
 	showSourceControl(): void;
 	revealTerminal(): void;
 	runInTerminal(command: string): void;
@@ -1057,6 +1541,31 @@ export class GraphHost {
 		this.post(completion);
 	}
 
+	/** `viewDiff` opens the shell's own diff editor, titled as the extension's viewDiff titles
+	 *  it (the VS Code-side analog: the extension opens the native diff editor). Untracked
+	 *  (`U`) has no revision to diff against, so it just opens the working file. */
+	private viewDiffRequest(repo: string, request: Message): void {
+		const from = String(request['fromHash']), to = String(request['toHash']);
+		const type = String(request['type']);
+		const oldPath = toPosix(String(request['oldFilePath'])), newPath = toPosix(String(request['newFilePath']));
+		if (type === 'U') {
+			this.delegate.openFile(joinPath(repo, newPath));
+			return;
+		}
+		const leftRevision = resolveDiffFromHash(from, to);
+		const toLabel = to === UNCOMMITTED ? 'Present' : abbrev(to);
+		const description = from === to
+			? (from === UNCOMMITTED ? 'Uncommitted Changes' : type === 'A' ? `Added in ${toLabel}` : type === 'D' ? `Deleted in ${toLabel}` : `${abbrev(leftRevision)} ↔ ${toLabel}`)
+			: (type === 'A' ? `Added between ${abbrev(from)} & ${toLabel}` : type === 'D' ? `Deleted between ${abbrev(from)} & ${toLabel}` : `${abbrev(from)} ↔ ${toLabel}`);
+		this.delegate.openDiff({
+			id: `graph:${leftRevision}:${oldPath}:${to}:${newPath}`,
+			title: `${basename(newPath)} (${description})`,
+			repo,
+			left: { revision: leftRevision, path: oldPath, label: abbrev(leftRevision), exists: type !== 'A' },
+			right: { revision: to, path: newPath, label: to === UNCOMMITTED ? 'Working Tree' : abbrev(to), exists: type !== 'D' }
+		});
+	}
+
 	/** The requests the shell serves itself. Returns true when handled. */
 	private async handleLocally(command: string, request: Message): Promise<boolean> {
 		// The repository the request names - a submodule's graph sends its own path, and every
@@ -1113,30 +1622,10 @@ export class GraphHost {
 				ok();
 				return true;
 			}
-			case 'viewDiff': {
-				const from = String(request['fromHash']), to = String(request['toHash']);
-				const type = String(request['type']);
-				const oldPath = toPosix(String(request['oldFilePath'])), newPath = toPosix(String(request['newFilePath']));
-				if (type === 'U') {
-					this.delegate.openFile(joinPath(repo, newPath));
-					ok();
-					return true;
-				}
-				const leftRevision = resolveDiffFromHash(from, to);
-				const toLabel = to === UNCOMMITTED ? 'Present' : abbrev(to);
-				const description = from === to
-					? (from === UNCOMMITTED ? 'Uncommitted Changes' : type === 'A' ? `Added in ${toLabel}` : type === 'D' ? `Deleted in ${toLabel}` : `${abbrev(leftRevision)} ↔ ${toLabel}`)
-					: (type === 'A' ? `Added between ${abbrev(from)} & ${toLabel}` : type === 'D' ? `Deleted between ${abbrev(from)} & ${toLabel}` : `${abbrev(from)} ↔ ${toLabel}`);
-				this.delegate.openDiff({
-					id: `graph:${leftRevision}:${oldPath}:${to}:${newPath}`,
-					title: `${basename(newPath)} (${description})`,
-					repo,
-					left: { revision: leftRevision, path: oldPath, label: abbrev(leftRevision), exists: type !== 'A' },
-					right: { revision: to, path: newPath, label: to === UNCOMMITTED ? 'Working Tree' : abbrev(to), exists: type !== 'D' }
-				});
+			case 'viewDiff':
+				this.viewDiffRequest(repo, request);
 				ok();
 				return true;
-			}
 			case 'viewDiffWithWorkingFile': {
 				const hash = String(request['hash']);
 				const path = toPosix(String(request['filePath']));
@@ -1151,7 +1640,20 @@ export class GraphHost {
 				return true;
 			}
 			case 'viewDiffBinary':
-				notify('info', `${basename(String(request['newFilePath']))} is a binary file; Git Graph Studio has no binary comparison view. Use "View File at this Revision" or an external diff tool.`);
+				// The extension's own handler (src/gitGraphView.ts) opens the standalone Binary
+				// Compare tab - the extension's page, hosted by BinaryCompareHost - with the
+				// left side resolved exactly as its viewDiff resolves it, and sends no response;
+				// the shell keeps both halves of that contract.
+				this.delegate.openBinaryCompare({
+					repo,
+					fromHash: resolveDiffFromHash(String(request['fromHash']), String(request['toHash'])),
+					toHash: String(request['toHash']),
+					file: {
+						oldFilePath: String(request['oldFilePath']),
+						newFilePath: String(request['newFilePath']),
+						type: String(request['type'])
+					}
+				});
 				return true;
 			case 'openCompareTab':
 				this.delegate.openCompareTab(String(request['fromHash']), String(request['toHash']), request['singleCommit'] === true, repo);

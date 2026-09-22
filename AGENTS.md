@@ -400,9 +400,12 @@ Everything that turns the source tree into installers: asset assembly into
 `target/studio/`, the seam checks, CI, and the Linux build containers.
 
 - Assets: `scripts/prepare.mjs` (assembles `target/studio/`), `scripts/compare-bundle.mjs`
-  (the Git Graph Commit Comparison page generator `prepare.mjs` builds from the extension's
-  compiled CommonJS output), `scripts/*-stub.cjs` (the `vscode` / Node stubs the config and
-  compare bundles build against), `vite.config.ts`
+  (the Git Graph comparison bundles `prepare.mjs` builds from the extension's compiled CommonJS
+  output: the Commit Comparison page generator with the binary-area host machinery
+  `gitgraph/compare.js`, and the standalone Binary Compare page generator
+  `gitgraph/binarycompare.js`), `scripts/*-stub.cjs` (the `vscode` / Node stubs the config and
+  compare bundles build against; `hex-fs-stub.cjs` lazily proxies the hex machinery's `fs`
+  calls to the adapter `graphHost.ts` installs), `vite.config.ts`
 - Seam checks: `scripts/check-seams.mjs` (TypeScript / CSS) and `src-tauri/build.rs` (Rust)
 - Packaging: `scripts/build-studio.bat` (Windows, one command). Linux installers are built
   in floor containers — the base image IS the compatibility floor: `ubuntu:22.04`

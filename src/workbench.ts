@@ -20,13 +20,13 @@ import { Explorer } from './explorer';
 import { ExtensionHost, GIT_GRAPH_RS_EXT_ID } from './extHost';
 import { ExtensionsPanel } from './extensionsPanel';
 import { registerGitCommands } from './gitCommands';
-import { GraphHost } from './graphHost';
+import { binaryCompareTitle, GraphHost } from './graphHost';
 import { clearBookmarks, listBookmarks, toggleBookmark } from './bookmarks';
 import { effectiveKeybinding, loadUserKeybindings, renderKeybindingsEditor } from './keybindings';
 import { Panel } from './panel';
 import { SearchView } from './searchView';
 import { SourceControlView } from './scm';
-import { t } from './i18n';
+import { t, tf } from './i18n';
 import { openSettingsPanel } from './settingsPanel';
 import { SETTINGS_EVENT, settings, updateSetting } from './settings';
 import * as state from './state';
@@ -186,6 +186,7 @@ export class Workbench {
 			openDiff: (diff) => void this.editors.openDiff({ kind: 'diff', ...diff }),
 			openFileAtRevision: (revision, path, title, repo) => void this.editors.openRevision(revision, path, title, repo),
 			openCompareTab: (fromHash, toHash, singleCommit, repo) => void this.editors.openCompare({ kind: 'compare', id: `${fromHash}:${toHash}:${singleCommit ? 1 : 0}`, title: compareTitle(fromHash, toHash, singleCommit), fromHash, toHash, singleCommit, repo }),
+			openBinaryCompare: (compare) => void this.editors.openBinaryCompare({ kind: 'bincompare', id: `${compare.repo ?? ''}:${compare.fromHash}:${compare.toHash}:${compare.file.newFilePath || compare.file.oldFilePath}`, title: binaryCompareTitle(compare), fromHash: compare.fromHash, toHash: compare.toHash, repo: compare.repo, file: compare.file }),
 			showSourceControl: () => this.showView('scm'),
 			revealTerminal: () => this.panel.show('terminal'),
 			runInTerminal: (command) => void this.panel.runInTerminal(command),

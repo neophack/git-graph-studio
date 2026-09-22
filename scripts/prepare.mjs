@@ -20,7 +20,7 @@
 // in vscode-git-graph-rs/ (its out/config.js and media/).
 import { build } from 'esbuild';
 import { checkSeams } from './check-seams.mjs';
-import { buildCompareBundle } from './compare-bundle.mjs';
+import { buildBinaryCompareBundle, buildCompareBundle } from './compare-bundle.mjs';
 import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 
@@ -165,16 +165,23 @@ await build({
 	logLevel: 'warning'
 });
 
-/* 3. The Commit Comparison page generator. The comparison view is not part of the webview
-   bundle the graph view loads - the extension generates its whole page (styles and script
+/* 3. The Git Graph comparison pages. Neither comparison view is part of the webview bundle
+   the graph view loads - the extension generates their whole pages (styles and script
    inline) from extension-host code. scripts/compare-bundle.mjs bundles that same compiled
-   generator (the patched CommonJS copies under target/studio, the `vscode` stub, the Node
-   built-in shims and the browser-globals banner live there) and exposes
-   `GitGraphCompare.buildComparePage()` for graphHost.ts's CompareHost. */
+   code (the patched CommonJS copies under target/studio, the `vscode` stub, the Node
+   built-in shims and the browser-globals banner live there) and exposes, for
+   graphHost.ts, the Commit Comparison page generator with the binary-area host machinery
+   (`GitGraphCompare`, compare.js) and the standalone Binary Compare page generator
+   (`GitGraphBinaryCompare`, binarycompare.js). */
 await buildCompareBundle({
 	root,
 	patchedOut: join(out, 'compare-src'),
 	outfile: join(gitgraphDir, 'compare.js')
+});
+await buildBinaryCompareBundle({
+	root,
+	patchedOut: join(out, 'compare-src'),
+	outfile: join(gitgraphDir, 'binarycompare.js')
 });
 
 // The syntax highlighter the generated comparison page loads, next to the bundle.

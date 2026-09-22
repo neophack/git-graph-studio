@@ -16,6 +16,7 @@ const delegate: GraphHostDelegate = {
 	openDiff: () => undefined,
 	openFileAtRevision: () => undefined,
 	openCompareTab: () => undefined,
+	openBinaryCompare: () => undefined,
 	showSourceControl: () => undefined,
 	revealTerminal: () => undefined,
 	runInTerminal: () => undefined,
@@ -196,6 +197,53 @@ describe('graph assets', () => {
 		const diff = openDiff.mock.calls[0][0] as { repo?: string; left: { revision: string } };
 		expect(diff.repo).toBe('C:\repo\dep');
 		expect(diff.left.revision).toBe('abc123def^');
+	});
+
+	it('opens a binary file\'s comparison as the extension does - the Binary Compare tab, no response', async () => {
+		// The webview sends `viewDiffBinary` once it already knows a file is binary; the
+		// extension host opens its standalone Binary Compare tab with the left side resolved
+		// exactly as its viewDiff resolves it, and sends no response. The shell keeps both
+		// halves of that contract - the tab it opens is the extension's own page.
+		const openBinaryCompare = vi.fn();
+		const host = new GraphHost({ ...delegate, openBinaryCompare });
+		document.body.appendChild(host.element);
+		host.load('C:\\repo');
+		await flush(10);
+		const frameWindow = host.frame.contentWindow!;
+		const posted = vi.spyOn(frameWindow, 'postMessage').mockImplementation(() => undefined);
+		window.dispatchEvent(new MessageEvent('message', { source: frameWindow, data: { __studioGraphRequest: {
+			command: 'viewDiffBinary', repo: 'C:\\repo', fromHash: 'abc12345', toHash: 'def67890',
+			type: 'M', oldFilePath: 'archive.bin', newFilePath: 'archive.bin'
+		} } }));
+		await flush(10);
+		expect(openBinaryCompare).toHaveBeenCalledTimes(1);
+		expect(openBinaryCompare.mock.calls[0][0]).toEqual({
+			repo: 'C:\\repo',
+			// resolveDiffFromHash: different ends, so the left side is the from hash as-is.
+			fromHash: 'abc12345',
+			toHash: 'def67890',
+			file: { oldFilePath: 'archive.bin', newFilePath: 'archive.bin', type: 'M' }
+		});
+		// The extension never answers viewDiffBinary (its Binary Compare tab just opens); the
+		// webview has no handler for a response.
+		expect(posted).not.toHaveBeenCalled();
+	});
+
+	it('resolves the left side of a same-commit binary comparison to its first parent', async () => {
+		const openBinaryCompare = vi.fn();
+		const host = new GraphHost({ ...delegate, openBinaryCompare });
+		document.body.appendChild(host.element);
+		host.load('C:\\repo');
+		await flush(10);
+		const frameWindow = host.frame.contentWindow!;
+		vi.spyOn(frameWindow, 'postMessage').mockImplementation(() => undefined);
+		window.dispatchEvent(new MessageEvent('message', { source: frameWindow, data: { __studioGraphRequest: {
+			command: 'viewDiffBinary', repo: 'C:\\repo', fromHash: '1234abcd', toHash: '1234abcd',
+			type: 'M', oldFilePath: 'a.png', newFilePath: 'a.png'
+		} } }));
+		await flush(10);
+		// resolveDiffFromHash(from, to) with from === to gives "<from>^" - the commit's parent.
+		expect(openBinaryCompare.mock.calls[0][0]['fromHash']).toBe('1234abcd^');
 	});
 
 	it('keys a code review to the repository the request names, so a submodule review is found', async () => {

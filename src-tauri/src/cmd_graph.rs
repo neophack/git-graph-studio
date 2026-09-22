@@ -89,6 +89,25 @@ pub struct RevisionFile {
     pub contents: Option<String>,
 }
 
+/// A file's raw bytes at one revision (`:index` reads the staged copy) — unlike
+/// [`revision_file`], binary content is not discarded: the byte-level comparison views (the hex
+/// viewer, the hex comparison) need it precisely because it is not text. `None` when the path
+/// does not exist at that revision (the missing side of an added or deleted file).
+pub fn revision_file_bytes(
+    repo_path: &str,
+    revision: &str,
+    file_path: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let repo = RepoManager::global()
+        .get(repo_path)
+        .map_err(|e| e.message)?;
+    if revision == ":index" {
+        git_graph_core::blob::index_file_bytes(&repo, file_path).map_err(|e| e.message)
+    } else {
+        git_graph_core::blob::commit_file_bytes(&repo, revision, file_path).map_err(|e| e.message)
+    }
+}
+
 /// Handle one `RequestMessage` from the Git Graph view, returning its `ResponseMessage`
 /// (or `null` for the requests the protocol defines no response for).
 ///
@@ -1771,6 +1790,33 @@ mod engine_tests {
             cfg["authors"],
             json!([{ "name": "Test", "email": "test@example.com" }])
         );
+    }
+
+    /// Unlike `revision_file`, a binary blob's bytes come back instead of being discarded - and
+    /// the same wrapper reads `:index` for the staged copy, matching `revision_file`'s contract.
+    #[test]
+    fn revision_file_bytes_reads_a_commit_and_the_staged_copy() {
+        let scratch = Scratch::new("revision-file-bytes");
+        let git = scratch.repo("repo");
+        crate::test_support::write(&git, "blob.bin", "one\0two\n");
+        git.run(&["add", "blob.bin"]).unwrap();
+        git.run(&["commit", "-q", "-m", "add a binary file"])
+            .unwrap();
+        let hash = crate::test_support::head(&git);
+        crate::test_support::write(&git, "staged.bin", "three\0four\n");
+        git.run(&["add", "staged.bin"]).unwrap();
+        let root = git.repo.display().to_string();
+
+        let committed = super::revision_file_bytes(&root, &hash, "blob.bin").unwrap();
+        assert_eq!(committed.as_deref(), Some("one\0two\n".as_bytes()));
+
+        let staged = super::revision_file_bytes(&root, ":index", "staged.bin").unwrap();
+        assert_eq!(staged.as_deref(), Some("three\0four\n".as_bytes()));
+
+        let missing = super::revision_file_bytes(&root, &hash, "no-such.bin").unwrap();
+        assert_eq!(missing, None);
+
+        RepoManager::global().close(&root);
     }
 }
 

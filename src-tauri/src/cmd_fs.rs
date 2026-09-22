@@ -408,6 +408,135 @@ pub async fn read_file_at(
     })
 }
 
+/// A monotonic tag distinguishing one materialized blob's temp file from the next, so two
+/// binary sides of the same basename (or repeat opens of the same diff) never collide.
+static TEMP_BLOB_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A file's bytes at a revision, written to a private temp file so the byte-level comparison
+/// views (Hex Compare, Hex View) can open it exactly like a file on disk — they stream from a
+/// path, and a revision's content only exists in memory once the engine reads its blob. The
+/// working tree sentinel `*` needs no copy and hands its own path straight back; a path absent
+/// at the revision (the missing side of an added/deleted binary file) materializes as an empty
+/// file, so the other side still has something to compare against.
+#[tauri::command]
+pub async fn materialize_revision_file(
+    state: State<'_, AppState>,
+    revision: String,
+    path: String,
+    repo: Option<String>,
+) -> Result<String, String> {
+    let repo_path = repo
+        .or_else(|| state.first_repo())
+        .ok_or_else(|| "No repository is open".to_string())?;
+    if revision == "*" {
+        let full = Path::new(&repo_path).join(&path);
+        if full.is_file() {
+            return Ok(full.display().to_string());
+        }
+        return write_temp_blob(&path, &[]);
+    }
+    let file_path = path.clone();
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        crate::cmd_graph::revision_file_bytes(&repo_path, &revision, &file_path)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    write_temp_blob(&path, &bytes.unwrap_or_default())
+}
+
+/// Write `bytes` to a fresh temp file named after `path`'s basename, in a directory unique to
+/// this call, and return its absolute path.
+fn write_temp_blob(path: &str, bytes: &[u8]) -> Result<String, String> {
+    let seq = TEMP_BLOB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "git-graph-studio-hex-{}-{seq}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let name = Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string());
+    let target = dir.join(name);
+    fs::write(&target, bytes).map_err(|e| format!("{}: {e}", target.display()))?;
+    Ok(target.display().to_string())
+}
+
+/// Delete a temp file `materialize_revision_file` wrote, once the comparison view that asked
+/// for it is gone. Only a file directly inside one of the studio temp blob directories under
+/// the system temp dir is accepted — the command can never be aimed at a real file.
+#[tauri::command]
+pub fn discard_temp_blob(path: String) -> Result<(), String> {
+    let target = Path::new(&path);
+    let not_a_blob = || format!("{path}: not a Studio temp blob");
+    let parent = target.parent().ok_or_else(not_a_blob)?;
+    let studio_dir = parent
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if !parent.starts_with(std::env::temp_dir())
+        || !studio_dir.starts_with("git-graph-studio-hex-")
+        || target.file_name().is_none()
+    {
+        return Err(not_a_blob());
+    }
+    // The directory is unique to the one materialized blob, so removing it clears the file and
+    // the directory together; one that is already gone means a previous discard won.
+    match fs::remove_dir_all(parent) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("{path}: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod temp_blob_tests {
+    use super::{discard_temp_blob, write_temp_blob};
+
+    #[test]
+    fn writes_the_bytes_under_the_original_basename() {
+        let path = write_temp_blob("some/repo/relative/archive.bin", b"one\0two").unwrap();
+        assert!(path.ends_with("archive.bin"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"one\0two");
+    }
+
+    #[test]
+    fn an_empty_slice_still_produces_a_readable_zero_byte_file() {
+        let path = write_temp_blob("added.bin", &[]).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn repeat_calls_for_the_same_name_never_collide() {
+        let first = write_temp_blob("archive.bin", b"left").unwrap();
+        let second = write_temp_blob("archive.bin", b"right").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read(&first).unwrap(), b"left");
+        assert_eq!(std::fs::read(&second).unwrap(), b"right");
+    }
+
+    #[test]
+    fn discard_removes_the_blobs_own_directory_and_tolerates_a_repeat() {
+        let path = write_temp_blob("pair/logo.png", b"\x89PNG").unwrap();
+        let dir = std::path::Path::new(&path).parent().unwrap().to_path_buf();
+        discard_temp_blob(path.clone()).unwrap();
+        assert!(!dir.exists());
+        discard_temp_blob(path).unwrap(); // already gone: not an error
+    }
+
+    #[test]
+    fn discard_refuses_anything_outside_the_studio_temp_prefix() {
+        let err = discard_temp_blob("C:\\real\\file.bin".to_string()).unwrap_err();
+        assert!(err.contains("not a Studio temp blob"));
+        // The studio temp directory itself (not a file inside one) is refused too.
+        let dir_only = std::env::temp_dir()
+            .join("git-graph-studio-hex-made-up-1")
+            .display()
+            .to_string();
+        assert!(discard_temp_blob(dir_only).is_err());
+    }
+}
+
 /// The status bar's left items: the repository's folder name, the checked-out branch (or
 /// the short hash when detached), plus how far it is ahead of / behind its upstream.
 #[derive(Serialize)]

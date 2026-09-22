@@ -26,7 +26,7 @@ import type * as TextEditor from './textEditor';
 import type { CallTreeView, WsSymbol } from './callTree';
 import { commands } from './commands';
 import { menuSection } from './contributions';
-import { CompareHost } from './graphHost';
+import { BinaryCompareHost, binaryCompareTitle, CompareHost } from './graphHost';
 import type { FolderCompareView } from './folderCompare';
 import type { MergeToolbar } from './mergeEditor';
 import { t } from './i18n';
@@ -175,9 +175,10 @@ export type EditorInput =
 	| { kind: 'help'; help: 'welcome' | 'shortcuts' }
 	| { kind: 'markdown'; path: string }
 	| { kind: 'history'; path: string }
-| { kind: 'hex'; path: string }
+	| { kind: 'hex'; path: string }
 	| { kind: 'canlog'; path: string }
-	| { kind: 'compare'; id: string; title: string; fromHash: string; toHash: string; singleCommit: boolean; repo?: string };
+	| { kind: 'compare'; id: string; title: string; fromHash: string; toHash: string; singleCommit: boolean; repo?: string }
+	| { kind: 'bincompare'; id: string; title: string; repo?: string; fromHash: string; toHash: string; file: { oldFilePath: string; newFilePath: string; type: string } };
 
 export interface Editor {
 	input: EditorInput;
@@ -193,6 +194,8 @@ export interface Editor {
 	merge?: MergeView;
 	diffObserver?: ResizeObserver;
 	compare?: CompareHost;
+	/** The extension's own Binary Compare page — a binary file between two revisions. */
+	bincompare?: BinaryCompareHost;
 	folderCompare?: FolderCompareView;
 	/** An address-aligned hex comparison of two binary files on disk. */
 	hexCompare?: HexCompareView;
@@ -244,6 +247,7 @@ function inputId(input: EditorInput): string {
 		case 'analysis': return 'analysis:' + input.tool;
 		case 'calltree': return 'calltree:' + input.id;
 		case 'compare': return 'compare:' + input.id;
+		case 'bincompare': return 'bincompare:' + input.id;
 		case 'graph': return 'graph';
 		case 'help': return 'help:' + input.help;
 		case 'markdown': return 'markdown:' + input.path;
@@ -255,6 +259,13 @@ function inputId(input: EditorInput): string {
 
 /** Below this width (px) a diff drops the side-by-side layout for a single-column inline view. */
 const DIFF_SPLIT_MIN_WIDTH = 720;
+
+/** The reuse key of a Binary Compare tab: the same file between the same two revisions
+ *  reveals the existing tab — the extension's own openViews key. */
+function binCompareId(input: { repo?: string; fromHash: string; toHash: string; file: { oldFilePath: string; newFilePath: string } }): string {
+	const filePath = input.file.newFilePath !== '' ? input.file.newFilePath : input.file.oldFilePath;
+	return `${input.repo ?? ''}:${input.fromHash}:${input.toHash}:${filePath}`;
+}
 
 /** Every open Markdown preview, across groups: a source's edits refresh its preview wherever
  *  the preview tab lives, and the scroll sync finds its pair without caring which group
@@ -1424,6 +1435,21 @@ export class EditorGroup {
 			notify('error', String(error));
 			return;
 		}
+		// A binary side that reached here was not a local-local pair (the probe above would
+		// have routed it to the hex comparison already), so at least one side is a revision:
+		// its bytes only exist as a blob, materialized here to a temp file so the same hex
+		// comparison can stream it like any file on disk.
+		if (left.binary || right.binary) {
+			const resolve = (side: DiffSide): Promise<string> =>
+				side.local ? Promise.resolve(side.path) : invoke<string>('materialize_revision_file', { repo: input.repo ?? '', revision: side.revision, path: side.path });
+			try {
+				const [leftPath, rightPath] = await Promise.all([resolve(input.left), resolve(input.right)]);
+				await this.openHexCompare(input, { left: leftPath, right: rightPath });
+			} catch (error) {
+				notify('error', String(error));
+			}
+			return;
+		}
 		const name = basename(input.right.path || input.left.path);
 		const editor: Editor = {
 			input,
@@ -1492,154 +1518,150 @@ export class EditorGroup {
 			toolbar,
 			stats
 		]));
-		if (left.binary || right.binary) {
-			editor.pane.appendChild(notice('file-binary', 'The file is binary: its two versions cannot be compared as text.'));
-		} else {
-			editor.languageName = 'Plain Text';
-			const host = el('div', 'cm-merge-view');
-			editor.pane.appendChild(host);
-			// The text editor and the merge views are async chunks, loaded with the first diff.
-			const [{ EditorView, EditorState, baseExtensions, keymap, languageSlot, loadLanguage }, { Chunk, MergeView, goToNextChunk, goToPreviousChunk, unifiedMergeView }] = await Promise.all([textEditor(), loadMerge()]);
-			// The language support, once loaded, so that a layout switch rebuilds an already
-			// highlighted view instead of dropping back to Plain Text until the next open.
-			let languageSupport: Extension | null = null;
-			/** The change navigation's state: the hunks, which one the cursor is in, and the
-			 *  +added/−deleted line statistics the header badge shows. Recomputed per render -
-			 *  both layouts expose their chunks (the merge view directly, the unified view via
-			 *  a build over its two texts). */
-			let chunks: readonly InstanceType<typeof Chunk>[] = [];
-			const at = (): number => {
-				const view = editor.view ?? editor.merge?.b ?? null;
-				if (!view) return 0;
-				const head = view.state.selection.main.head;
-				let index = 0;
-				for (const chunk of chunks) {
-					if (chunk.fromB > head) break;
-					index++;
+		editor.languageName = 'Plain Text';
+		const host = el('div', 'cm-merge-view');
+		editor.pane.appendChild(host);
+		// The text editor and the merge views are async chunks, loaded with the first diff.
+		const [{ EditorView, EditorState, baseExtensions, keymap, languageSlot, loadLanguage }, { Chunk, MergeView, goToNextChunk, goToPreviousChunk, unifiedMergeView }] = await Promise.all([textEditor(), loadMerge()]);
+		// The language support, once loaded, so that a layout switch rebuilds an already
+		// highlighted view instead of dropping back to Plain Text until the next open.
+		let languageSupport: Extension | null = null;
+		/** The change navigation's state: the hunks, which one the cursor is in, and the
+		 *  +added/−deleted line statistics the header badge shows. Recomputed per render -
+		 *  both layouts expose their chunks (the merge view directly, the unified view via
+		 *  a build over its two texts). */
+		let chunks: readonly InstanceType<typeof Chunk>[] = [];
+		const at = (): number => {
+			const view = editor.view ?? editor.merge?.b ?? null;
+			if (!view) return 0;
+			const head = view.state.selection.main.head;
+			let index = 0;
+			for (const chunk of chunks) {
+				if (chunk.fromB > head) break;
+				index++;
+			}
+			return Math.min(index, chunks.length);
+		};
+		const refreshChangeInfo = (): void => {
+			const aDoc = EditorState.create({ doc: normalize(left.contents ?? '') }).doc;
+			const bDoc = editor.view?.state.doc ?? editor.merge?.b.state.doc ?? EditorState.create({ doc: normalize(right.contents ?? '') }).doc;
+			chunks = editor.merge?.chunks ?? Chunk.build(aDoc, bDoc);
+			let additions = 0;
+			let deletions = 0;
+			for (const chunk of chunks) {
+				for (const change of chunk.changes) {
+					if (change.toA > change.fromA) deletions += aDoc.lineAt(chunk.fromA + change.toA - 1).number - aDoc.lineAt(chunk.fromA + change.fromA).number + 1;
+					if (change.toB > change.fromB) additions += bDoc.lineAt(chunk.fromB + change.toB - 1).number - bDoc.lineAt(chunk.fromB + change.fromB).number + 1;
 				}
-				return Math.min(index, chunks.length);
-			};
-			const refreshChangeInfo = (): void => {
-				const aDoc = EditorState.create({ doc: normalize(left.contents ?? '') }).doc;
-				const bDoc = editor.view?.state.doc ?? editor.merge?.b.state.doc ?? EditorState.create({ doc: normalize(right.contents ?? '') }).doc;
-				chunks = editor.merge?.chunks ?? Chunk.build(aDoc, bDoc);
-				let additions = 0;
-				let deletions = 0;
-				for (const chunk of chunks) {
-					for (const change of chunk.changes) {
-						if (change.toA > change.fromA) deletions += aDoc.lineAt(chunk.fromA + change.toA - 1).number - aDoc.lineAt(chunk.fromA + change.fromA).number + 1;
-						if (change.toB > change.fromB) additions += bDoc.lineAt(chunk.fromB + change.toB - 1).number - bDoc.lineAt(chunk.fromB + change.fromB).number + 1;
-					}
-				}
-				stats.innerHTML = '';
-				if (chunks.length > 0) {
-					const added = el('span', 'added', [`+${additions}`]);
-					const removed = el('span', 'deleted', [`\u2212${deletions}`]);
-					stats.append(added, removed, `${chunks.length} change${chunks.length === 1 ? '' : 's'}`);
-					stats.title = `${additions} added, ${deletions} deleted lines across ${chunks.length} changes`;
-				} else {
-					stats.textContent = 'No changes';
-					stats.title = 'The two sides are identical';
-				}
-				updateCounter();
-			};
-			const updateCounter = (): void => {
-				if (chunks.length === 0) {
-					counter.textContent = '';
-					return;
-				}
-				counter.textContent = `${Math.min(at() + 1, chunks.length)} / ${chunks.length}`;
-			};
-			/** Jump to the previous/next change (Xcode's version editor arrows). */
-			stepChange = (direction: 1 | -1): void => {
-				const view = editor.view ?? editor.merge?.b ?? null;
-				if (!view || chunks.length === 0) return;
-				const command = direction === 1 ? goToNextChunk : goToPreviousChunk;
-				command(view);
-				// The command moves the selection; scroll it in and refresh the counter.
-				view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main.head, { y: 'center' }) });
-				updateCounter();
-			};
-			// VS Code's diff-editor keys: F7 / Shift+F7 step through the changes.
-			const diffKeys = keymap.of([{ key: 'F7', run: () => (stepChange(1), true), shift: () => (stepChange(-1), true) }]);
-			// Wide panes get the classic side-by-side view; narrow ones a single-column inline
-			// view - unless the layout button pinned one. A ResizeObserver rebuilds the editors
-			// whenever the pane crosses the threshold.
-			const render = (split: boolean) => {
-				lastSplit = split;
-				editor.merge?.destroy();
-				editor.merge = undefined;
-				editor.view?.destroy();
-				editor.view = undefined;
-				host.textContent = '';
-				editor.pane.classList.toggle('diff-inline', !split);
-				if (split) {
-					editor.merge = new MergeView({
-						a: { doc: normalize(left.contents ?? ''), extensions: [...baseExtensions(true), languageSlot.of(languageSupport ?? []), diffKeys, EditorView.updateListener.of(() => updateCounter())] },
-						b: { doc: normalize(right.contents ?? ''), extensions: [...baseExtensions(true), languageSlot.of(languageSupport ?? []), diffKeys, EditorView.updateListener.of(() => updateCounter())] },
-						parent: host,
-						collapseUnchanged: { margin: 3, minSize: 4 },
-						highlightChanges: true,
-						gutter: true
-					});
-				} else {
-					editor.view = new EditorView({
-						state: EditorState.create({
-							doc: normalize(right.contents ?? ''),
-							extensions: [
-								...baseExtensions(true),
-								languageSlot.of(languageSupport ?? []),
-								diffKeys,
-								EditorView.updateListener.of(() => updateCounter()),
-								unifiedMergeView({
-									original: normalize(left.contents ?? ''),
-									collapseUnchanged: { margin: 3, minSize: 4 },
-									highlightChanges: true,
-									gutter: true,
-									mergeControls: false
-								})
-							]
-						}),
-						parent: host
-					});
-				}
-				refreshChangeInfo();
-			};
-			rebuild = render;
-			let split: boolean | undefined;
-			// The first render waits one frame for the pane to be mounted and measurable: the
-			// naive build-then-flip cost a full editor construction twice on narrow panes.
-			requestAnimationFrame(() => {
-				// Dropped as a parallel-open duplicate (or already rendered): nothing to build.
-				if (!this.open.includes(editor) || editor.view !== undefined || editor.merge !== undefined) return;
-				split = manualSplit ?? (host.clientWidth >= DIFF_SPLIT_MIN_WIDTH || host.clientWidth === 0);
-				lastSplit = split;
-				render(split);
-			});
-			editor.diffObserver = new ResizeObserver(() => {
-				// A pinned layout stays; the pane width only rules until the user chooses.
-				if (manualSplit !== undefined) return;
-				const want = host.clientWidth >= DIFF_SPLIT_MIN_WIDTH;
-				if (want !== split) {
-					split = want;
-					lastSplit = want;
-					render(want);
-				}
-			});
-			editor.diffObserver.observe(host);
-			void loadLanguage(name).then((language) => {
-				if (!language) return;
-				languageSupport = language.support;
-				editor.languageName = language.name;
-				const effect = languageSlot.reconfigure(language.support);
-				if (editor.merge) {
-					editor.merge.a.dispatch({ effects: effect });
-					editor.merge.b.dispatch({ effects: effect });
-				}
-				if (editor.view) editor.view.dispatch({ effects: effect });
-				this.emitActive();
-			});
-		}
+			}
+			stats.innerHTML = '';
+			if (chunks.length > 0) {
+				const added = el('span', 'added', [`+${additions}`]);
+				const removed = el('span', 'deleted', [`\u2212${deletions}`]);
+				stats.append(added, removed, `${chunks.length} change${chunks.length === 1 ? '' : 's'}`);
+				stats.title = `${additions} added, ${deletions} deleted lines across ${chunks.length} changes`;
+			} else {
+				stats.textContent = 'No changes';
+				stats.title = 'The two sides are identical';
+			}
+			updateCounter();
+		};
+		const updateCounter = (): void => {
+			if (chunks.length === 0) {
+				counter.textContent = '';
+				return;
+			}
+			counter.textContent = `${Math.min(at() + 1, chunks.length)} / ${chunks.length}`;
+		};
+		/** Jump to the previous/next change (Xcode's version editor arrows). */
+		stepChange = (direction: 1 | -1): void => {
+			const view = editor.view ?? editor.merge?.b ?? null;
+			if (!view || chunks.length === 0) return;
+			const command = direction === 1 ? goToNextChunk : goToPreviousChunk;
+			command(view);
+			// The command moves the selection; scroll it in and refresh the counter.
+			view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main.head, { y: 'center' }) });
+			updateCounter();
+		};
+		// VS Code's diff-editor keys: F7 / Shift+F7 step through the changes.
+		const diffKeys = keymap.of([{ key: 'F7', run: () => (stepChange(1), true), shift: () => (stepChange(-1), true) }]);
+		// Wide panes get the classic side-by-side view; narrow ones a single-column inline
+		// view - unless the layout button pinned one. A ResizeObserver rebuilds the editors
+		// whenever the pane crosses the threshold.
+		const render = (split: boolean) => {
+			lastSplit = split;
+			editor.merge?.destroy();
+			editor.merge = undefined;
+			editor.view?.destroy();
+			editor.view = undefined;
+			host.textContent = '';
+			editor.pane.classList.toggle('diff-inline', !split);
+			if (split) {
+				editor.merge = new MergeView({
+					a: { doc: normalize(left.contents ?? ''), extensions: [...baseExtensions(true), languageSlot.of(languageSupport ?? []), diffKeys, EditorView.updateListener.of(() => updateCounter())] },
+					b: { doc: normalize(right.contents ?? ''), extensions: [...baseExtensions(true), languageSlot.of(languageSupport ?? []), diffKeys, EditorView.updateListener.of(() => updateCounter())] },
+					parent: host,
+					collapseUnchanged: { margin: 3, minSize: 4 },
+					highlightChanges: true,
+					gutter: true
+				});
+			} else {
+				editor.view = new EditorView({
+					state: EditorState.create({
+						doc: normalize(right.contents ?? ''),
+						extensions: [
+							...baseExtensions(true),
+							languageSlot.of(languageSupport ?? []),
+							diffKeys,
+							EditorView.updateListener.of(() => updateCounter()),
+							unifiedMergeView({
+								original: normalize(left.contents ?? ''),
+								collapseUnchanged: { margin: 3, minSize: 4 },
+								highlightChanges: true,
+								gutter: true,
+								mergeControls: false
+							})
+						]
+					}),
+					parent: host
+				});
+			}
+			refreshChangeInfo();
+		};
+		rebuild = render;
+		let split: boolean | undefined;
+		// The first render waits one frame for the pane to be mounted and measurable: the
+		// naive build-then-flip cost a full editor construction twice on narrow panes.
+		requestAnimationFrame(() => {
+			// Dropped as a parallel-open duplicate (or already rendered): nothing to build.
+			if (!this.open.includes(editor) || editor.view !== undefined || editor.merge !== undefined) return;
+			split = manualSplit ?? (host.clientWidth >= DIFF_SPLIT_MIN_WIDTH || host.clientWidth === 0);
+			lastSplit = split;
+			render(split);
+		});
+		editor.diffObserver = new ResizeObserver(() => {
+			// A pinned layout stays; the pane width only rules until the user chooses.
+			if (manualSplit !== undefined) return;
+			const want = host.clientWidth >= DIFF_SPLIT_MIN_WIDTH;
+			if (want !== split) {
+				split = want;
+				lastSplit = want;
+				render(want);
+			}
+		});
+		editor.diffObserver.observe(host);
+		void loadLanguage(name).then((language) => {
+			if (!language) return;
+			languageSupport = language.support;
+			editor.languageName = language.name;
+			const effect = languageSlot.reconfigure(language.support);
+			if (editor.merge) {
+				editor.merge.a.dispatch({ effects: effect });
+				editor.merge.b.dispatch({ effects: effect });
+			}
+			if (editor.view) editor.view.dispatch({ effects: effect });
+			this.emitActive();
+		});
 		this.add(editor);
 	}
 
@@ -1662,9 +1684,12 @@ export class EditorGroup {
 		await this.openHexCompare(input);
 	}
 
-	/** Two binary files on disk: the address-aligned hex comparison, streamed in chunks so
-	 *  the pair's size never matters. */
-	private async openHexCompare(input: Extract<EditorInput, { kind: 'diff' }>): Promise<void> {
+	/** Two binary files, the address-aligned hex comparison streamed in chunks so the pair's
+	 *  size never matters. `paths` overrides the file each pane actually reads - a revision's
+	 *  side has no disk path of its own, so `openDiff` materializes its blob to a temp file
+	 *  first and passes that in here instead of `input.left.path`/`input.right.path`, which
+	 *  stay the repo-relative identity the tab and its labels are built from. */
+	private async openHexCompare(input: Extract<EditorInput, { kind: 'diff' }>, paths?: { left: string; right: string }): Promise<void> {
 		const editor: Editor = {
 			input,
 			id: 'diff:' + input.id,
@@ -1673,8 +1698,9 @@ export class EditorGroup {
 			pane: el('div', 'editor-pane binary-hex'),
 			dirty: false
 		};
+		const sideLabel = (side: DiffSide): string => side.local || side.label === side.path ? side.path : `${side.path} (${side.label})`;
 		const { HexCompareView } = await loadHexCompare();
-		const view = new HexCompareView(input.left.path, input.right.path, { left: input.left.path, right: input.right.path });
+		const view = new HexCompareView(paths?.left ?? input.left.path, paths?.right ?? input.right.path, { left: sideLabel(input.left), right: sideLabel(input.right) });
 		editor.hexCompare = view;
 		editor.pane.appendChild(view.root);
 		editor.onClose = () => view.destroy();
@@ -1800,8 +1826,30 @@ export class EditorGroup {
 			dirty: false
 		};
 		editor.compare = new CompareHost(editor.pane, { fromHash: input.fromHash, toHash: input.toHash, singleCommit: input.singleCommit, repo: input.repo }, {
-			openDiff: (diff) => void this.openDiff({ kind: 'diff', ...diff })
+			openDiff: (diff) => void this.openDiff({ kind: 'diff', ...diff }),
+			openBinaryCompare: (compare) => void this.openBinaryCompare({ kind: 'bincompare', ...compare, id: binCompareId(compare), title: binaryCompareTitle(compare) })
 		});
+		this.add(editor);
+	}
+
+	/** A Binary Compare tab — the extension's own page for one binary file between two
+	 *  revisions, opened from the graph view's click on a binary file and from the Commit
+	 *  Comparison page's "Open Diff in Editor" on one. */
+	openBinaryCompare(input: Extract<EditorInput, { kind: 'bincompare' }>): void {
+		const existing = this.open.find((e) => e.input.kind === 'bincompare' && e.input.id === input.id);
+		if (existing) {
+			this.activate(existing);
+			return;
+		}
+		const editor: Editor = {
+			input,
+			id: 'bincompare:' + input.id,
+			label: input.title,
+			iconClass: 'diff',
+			pane: el('div', 'editor-pane compare-pane'),
+			dirty: false
+		};
+		editor.bincompare = new BinaryCompareHost(editor.pane, { repo: input.repo, fromHash: input.fromHash, toHash: input.toHash, file: input.file });
 		this.add(editor);
 	}
 
@@ -2129,6 +2177,7 @@ export class EditorGroup {
 		editor.merge?.destroy();
 		editor.diffObserver?.disconnect();
 		editor.compare?.dispose();
+		editor.bincompare?.dispose();
 		editor.folderCompare?.dispose();
 		editor.fast?.dispose();
 		editor.onClose?.();
@@ -2818,7 +2867,7 @@ export class EditorGroup {
 			const relative = this.rootPath ? relativeTo(this.rootPath, this.active.input.path) : toPosix(this.active.input.path);
 			const parts = relative.split('/').filter((p) => p !== '');
 			parts.forEach((part, index) => crumbs.push({ label: part, iconName: index === parts.length - 1 ? fileIcon(part) : 'folder', iconColor: index === parts.length - 1 ? fileIconColor(part) : undefined }));
-		} else if (this.active.input.kind === 'diff' || this.active.input.kind === 'compare' || this.active.input.kind === 'folders' || this.active.input.kind === 'calltree') {
+		} else if (this.active.input.kind === 'diff' || this.active.input.kind === 'compare' || this.active.input.kind === 'bincompare' || this.active.input.kind === 'folders' || this.active.input.kind === 'calltree') {
 			crumbs.push({ label: this.active.label, iconName: 'diff' });
 		} else if (this.active.input.kind === 'graph') {
 			crumbs.push({ label: 'Git Graph' });

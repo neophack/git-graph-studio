@@ -14,7 +14,7 @@ import { ggxManifest } from '../scripts/build-ggx.mjs';
 // @ts-expect-error - plain ESM scripts without type declarations
 import { buildBuiltinContributions, buildBuiltinSettings } from '../scripts/builtin-contributions.mjs';
 // @ts-expect-error - plain ESM scripts without type declarations
-import { buildCompareBundle } from '../scripts/compare-bundle.mjs';
+import { buildBinaryCompareBundle, buildCompareBundle } from '../scripts/compare-bundle.mjs';
 
 describe('.ggx packaging', () => {
 	it('writes a ggx/1 header with the frontend page — the shape cmd_ext.rs installs', () => {
@@ -30,7 +30,7 @@ describe('.ggx packaging', () => {
 	});
 });
 
-describe('the Commit Comparison page bundle', () => {
+describe('the Git Graph comparison page bundles', () => {
 	it('bundles the extension\'s compiled CommonJS output so it runs as a plain browser script', async () => {
 		const dir = mkdtempSync(join(tmpdir(), 'compare-bundle-'));
 		try {
@@ -62,6 +62,31 @@ describe('the Commit Comparison page bundle', () => {
 				'exports.CommitComparisonView = CommitComparisonView;',
 				''
 			].join('\n'));
+			// The compiled binary-area machinery the same bundle exposes for the hosts.
+			writeFileSync(join(dir, 'out', 'binaryCompare.js'), [
+				'"use strict";',
+				'Object.defineProperty(exports, "__esModule", { value: true });',
+				'exports.createHexSession = void 0;',
+				'exports.createHexSession = function () { return null; };',
+				'exports.wireHexSession = function () {};',
+				'exports.respondHexInfo = function () {};',
+				'exports.respondHexRows = function () {};',
+				'exports.respondImageData = function () {};',
+				'exports.respondCopyToClipboard = function () {};',
+				''
+			].join('\n'));
+			// The compiled standalone Binary Compare view, for the second bundle.
+			writeFileSync(join(dir, 'out', 'binaryCompareView.js'), [
+				'"use strict";',
+				'Object.defineProperty(exports, "__esModule", { value: true });',
+				'exports.BinaryCompareView = void 0;',
+				'const binaryCompare = require("./binaryCompare");',
+				'class BinaryCompareView {',
+				'	getHtml(filePath) { return "<!DOCTYPE html><html><body>fixture binary page " + filePath + "</body></html>"; }',
+				'}',
+				'exports.BinaryCompareView = BinaryCompareView;',
+				''
+			].join('\n'));
 
 			const outfile = join(dir, 'gitgraph', 'compare.js');
 			await buildCompareBundle({ root: dir, patchedOut: join(dir, 'compare-src'), outfile });
@@ -76,12 +101,25 @@ describe('the Commit Comparison page bundle', () => {
 			// evaluation would throw ReferenceError before the generator was registered.
 			expect(existsSync(outfile)).toBe(true);
 			new Function(readFileSync(outfile, 'utf8'))();
-			const generator = (globalThis as { GitGraphCompare?: { buildComparePage(options: Record<string, unknown>): string } }).GitGraphCompare;
+			const generator = (globalThis as { GitGraphCompare?: { buildComparePage(options: Record<string, unknown>): string; createHexSession?: unknown; respondCopyToClipboard?: unknown } }).GitGraphCompare;
 			expect(generator).toBeDefined();
 			expect(generator!.buildComparePage({ fromHash: 'aaaa', toHash: 'bbbb', singleCommit: false, loading: true }))
 				.toBe('<!DOCTYPE html><html><body>fixture comparison page</body></html>');
+			// The binary-area host machinery rides in the same bundle, under the same global.
+			expect(typeof generator!.createHexSession).toBe('function');
+			expect(typeof generator!.respondCopyToClipboard).toBe('function');
+
+			// The standalone Binary Compare page generator is its own browser-loaded bundle.
+			const binaryOutfile = join(dir, 'gitgraph', 'binarycompare.js');
+			await buildBinaryCompareBundle({ root: dir, patchedOut: join(dir, 'compare-src'), outfile: binaryOutfile });
+			new Function(readFileSync(binaryOutfile, 'utf8'))();
+			const binary = (globalThis as { GitGraphBinaryCompare?: { buildBinaryComparePage(options: Record<string, unknown>): string } }).GitGraphBinaryCompare;
+			expect(binary).toBeDefined();
+			expect(binary!.buildBinaryComparePage({ fromHash: 'aaaa', toHash: 'bbbb', filePath: 'img.png', file: { oldFilePath: 'img.png', newFilePath: 'img.png', type: 'M', additions: null, deletions: null } }))
+				.toBe('<!DOCTYPE html><html><body>fixture binary page img.png</body></html>');
 		} finally {
 			delete (globalThis as { GitGraphCompare?: unknown }).GitGraphCompare;
+			delete (globalThis as { GitGraphBinaryCompare?: unknown }).GitGraphBinaryCompare;
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});

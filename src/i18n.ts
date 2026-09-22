@@ -262,7 +262,6 @@ const en = {
 	'can.filter.placeholder': 'Filter IDs (0x100, 1A0-1FF)',
 	'can.channel': 'Channel',
 	'can.channel.all': 'All channels',
-	'can.bitrate.title': 'Bus bitrate (for the load calculation)',
 	'can.convert': 'Convert…',
 	'can.convert.title': 'Convert this log to the other format (Save As)',
 	'can.sash.title': 'Drag to resize · double-click to reset the layout',
@@ -287,6 +286,9 @@ const en = {
 	'can.ch.payload': 'Payload',
 	'can.ch.duration': 'Duration',
 	'can.ch.rate': 'Avg rate',
+	'can.ch.rates': 'Bitrates',
+	'can.rate.arb.title': 'Arbitration bitrate',
+	'can.rate.data.title': 'CAN FD data bitrate',
 	'can.ch.load': 'Bus load',
 	'can.ch.peak': 'Peak load',
 	'can.load.bitsTitle': '{0} Mbit on the bus',
@@ -333,9 +335,11 @@ const en = {
 	'can.convert.same': 're-write in the same format',
 	'can.convert.command': 'Convert CAN log',
 	'can.convert.blfFilter': 'Vector Binary Log',
-	'can.convert.ascFilter': 'CANoe ASCII Log',
+	'can.convert.ascFilter': 'Vector ASCII Log',
 	'can.convert.done': 'Exported {0} frames to {1}',
-	'can.convert.failed': 'Conversion failed'
+	'can.convert.failed': 'Conversion failed',
+	'graph.binaryCompare.present': 'Present',
+	'graph.binaryCompare.title': '{0} ({1} ↔ {2})'
 };
 
 const zhCn: typeof en = {
@@ -595,7 +599,6 @@ const zhCn: typeof en = {
 	'can.filter.placeholder': '过滤 ID（0x100、1A0-1FF）',
 	'can.channel': '通道',
 	'can.channel.all': '所有通道',
-	'can.bitrate.title': '总线波特率（用于负载计算）',
 	'can.convert': '转换…',
 	'can.convert.title': '将此日志转换为另一种格式（另存为）',
 	'can.sash.title': '拖动调整大小 · 双击恢复默认布局',
@@ -620,6 +623,9 @@ const zhCn: typeof en = {
 	'can.ch.payload': '数据量',
 	'can.ch.duration': '持续时间',
 	'can.ch.rate': '平均帧率',
+	'can.ch.rates': '波特率',
+	'can.rate.arb.title': '仲裁段波特率',
+	'can.rate.data.title': 'CAN FD 数据段波特率',
 	'can.ch.load': '总线负载',
 	'can.ch.peak': '峰值负载',
 	'can.load.bitsTitle': '总线上 {0} Mbit',
@@ -668,7 +674,9 @@ const zhCn: typeof en = {
 	'can.convert.blfFilter': 'Vector 二进制日志',
 	'can.convert.ascFilter': 'CANoe ASCII 日志',
 	'can.convert.done': '已导出 {0} 帧到 {1}',
-	'can.convert.failed': '转换失败'
+	'can.convert.failed': '转换失败',
+	'graph.binaryCompare.present': '当前',
+	'graph.binaryCompare.title': '{0}（{1} ↔ {2}）'
 };
 
 const TABLES: Record<Locale, typeof en> = { en, 'zh-cn': zhCn };

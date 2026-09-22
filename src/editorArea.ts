@@ -633,6 +633,7 @@ export class EditorArea {
 	};
 	openFileHistory = (path?: string) => this.activeGroup.openFileHistory(path);
 	openCompare = (input: Extract<EditorInput, { kind: 'compare' }>) => this.activeGroup.openCompare(input);
+	openBinaryCompare = (input: Extract<EditorInput, { kind: 'bincompare' }>) => this.activeGroup.openBinaryCompare(input);
 	openFolderCompare = (input: Extract<EditorInput, { kind: 'folders' }>) => this.activeGroup.openFolderCompare(input);
 	toggleBlame = () => this.activeGroup.toggleBlame();
 	/** Back / forward follow the focused group; if it cannot go further, a group that can

@@ -774,6 +774,11 @@ body.resizing iframe { pointer-events: none; }
 .hex-row.hex-header { color: var(--vscode-editorLineNumber-foreground, #999); user-select: none; }
 .hex-cell { text-align: center; }
 .hex-cell.hex-blank { visibility: hidden; }
+/* .hex-group-gap marks the dedicated 1ch track rowGridTemplate opens between byte groups -
+   a plain blank spacer, styled by nothing here. It exists so the group boundary is one
+   gap between two bytes, not extra width folded into the group's first byte column (which
+   would center that byte in the middle of its own widened cell, splitting the gap into two
+   smaller, unevenly-sized ones straddling the byte instead). */
 /* Every other row is faintly tinted, the zebra banding hex editors use to keep the eye on
    a row across the three panes; a wash of the foreground so it suits any theme. */
 .hex-row-odd { background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 6%, transparent); }
@@ -1080,12 +1085,16 @@ body.resizing iframe { pointer-events: none; }
    The status bar carries the live parse chip; the panes fill in asynchronously. */
 .can-view { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .can-toolbar-title { display: flex; align-items: center; gap: 6px; font-weight: 600; white-space: nowrap; }
-.can-toolbar .can-bitrate { flex: none; }
 .can-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .can-dash-top { display: flex; flex: 1 1 0; min-height: 0; }
 .can-body > .can-pane { flex: 1 1 0; min-height: 0; }
 .can-dash-top > .can-pane { flex: 1 1 0; min-width: 0; }
 .can-pane { min-width: 0; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; }
+/* The panes scroll their stacked sections; a section keeps its content height. Its
+   `overflow: hidden` (rounded corners over the sticky tables) would otherwise resolve the
+   flexbox automatic minimum to zero, letting a full pane shrink and clip the charts
+   instead of scrolling - the load chart's bottom was the first to disappear. */
+.can-pane > .can-section, .can-pane > .can-analysis-host { flex: none; }
 .can-sash { flex: none; z-index: 5; }
 .can-sash.vertical { width: 5px; cursor: ew-resize; margin: 0 -2px; }
 .can-sash.horizontal { height: 5px; cursor: ns-resize; margin: -2px 0; }
@@ -1107,7 +1116,10 @@ body.resizing iframe { pointer-events: none; }
 .can-table-head { color: var(--vscode-descriptionForeground, #999); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; border-bottom: 1px solid var(--vscode-panel-border, #2b2b2b); position: sticky; top: 0; background: var(--vscode-editor-background, #1e1e1e); z-index: 1; }
 .can-table-row:nth-child(even) { background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 4%, transparent); }
 .can-table-row:not(:last-child) { border-bottom: 1px solid color-mix(in srgb, var(--vscode-panel-border, #2b2b2b) 50%, transparent); }
-.can-ch-grid { grid-template-columns: minmax(96px, auto) repeat(3, minmax(72px, 1fr)) minmax(84px, 1fr) minmax(84px, 1fr) minmax(84px, 1fr) minmax(84px, 1fr); }
+.can-ch-grid { grid-template-columns: minmax(96px, auto) repeat(3, minmax(72px, 1fr)) minmax(84px, 1fr) minmax(84px, 1fr) minmax(184px, 2fr) minmax(84px, 1fr) minmax(84px, 1fr); }
+/* A channel's rate pair - the arbitration and data bitrates whose load the row shows. */
+.can-rates { display: flex; gap: 4px; justify-content: flex-end; min-width: 0; }
+.can-rates select { min-width: 0; padding: 1px 4px; font-size: 12px; }
 .can-msg-grid { grid-template-columns: minmax(96px, 1.1fr) 36px 62px minmax(64px, 0.8fr) minmax(92px, 1fr) minmax(72px, 0.8fr) minmax(190px, 1.9fr) minmax(76px, 0.8fr) minmax(64px, 0.7fr); }
 .can-num { text-align: right; }
 .can-left { text-align: left; }

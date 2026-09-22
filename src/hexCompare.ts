@@ -5,14 +5,26 @@
 // on both sides; a background scan streams both files once in fixed-size chunks (never
 // holding more than two chunks) to collect the difference regions the prev/next arrows
 // navigate, so a multi-gigabyte pair compares in bounded memory.
+//
+// Selection is one shared span over the address space, not per-pane: a drag (or Shift+click)
+// in either pane picks bytes by absolute offset, and both sides paint the same [start, end]
+// highlighted - the same address is selected on the other side automatically, since that is
+// what comparing two files at the same offset means. The right-click menu copies in the hex
+// viewer's own formats (hex, text, C array, Base64) from whichever pane the click landed
+// on - the two sides can differ, so Copy always names its source file.
 
 import { invoke } from '@tauri-apps/api/core';
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
+import { t, tf } from './i18n';
 import { attachPageKeys, attachWheel, type Disposable } from './scroll/input';
 import { ScrollModel } from './scroll/model';
 import { Scrollbar } from './scroll/scrollbar';
-import { el, icon } from './ui';
-import { OFFSET_DIGITS, ROW_LADDER, asciiChar, bytesPerRowFor, decodeBase64, groupSizeFor, hexAddress, hexByte, hexHeader, offsetDigitsFor, rowGridTemplate } from './hexView';
+import { el, icon, notify, showContextMenu, type MenuEntry } from './ui';
+import {
+	COPY_FORMAT_KEYS, COPY_LIMIT, OFFSET_DIGITS, ROW_LADDER, asciiChar, bytesPerRowFor, bytesToLatin1, decodeBase64, formatBytes,
+	groupSizeFor, hexAddress, hexByte, hexHeader, offsetDigitsFor, rowGridTemplate, type CopyFormat
+} from './hexView';
 
 /** Visible rows are filled from 64 KiB slabs, so scrolling reads a slab at a time. */
 const SLAB_BYTES = 64 * 1024;
@@ -44,12 +56,16 @@ interface Slabs {
 }
 
 /** One pane's row: offset, hex cells, gutter, ASCII - the hex viewer's grid with a
- *  differing byte's cells tinted instead of a search hit. */
-function compareRow(offset: number, bytes: Uint8Array, diff: Uint8Array, bytesPerRow: number, digits = OFFSET_DIGITS): HTMLElement {
+ *  differing byte's cells tinted instead of a search hit. `selection` is the shared span
+ *  (absolute offsets, [start, end)) both panes paint identically - the same address range
+ *  reads as selected on either side. */
+function compareRow(offset: number, bytes: Uint8Array, diff: Uint8Array, bytesPerRow: number, digits = OFFSET_DIGITS, selection?: readonly [number, number]): HTMLElement {
+	const inSelection = (i: number): boolean => !!selection && offset + i >= selection[0] && offset + i < selection[1];
 	const cells: (Node | string | null)[] = [el('span', 'hex-offset', [offset.toString(16).padStart(digits, '0').toUpperCase()])];
 	const group = groupSizeFor(bytesPerRow);
 	for (let i = 0; i < bytesPerRow; i++) {
-		const cls = ['hex-cell', i % group === 0 && i > 0 ? 'hex-group-start' : '', i < bytes.length && diff[i] ? 'hex-diff' : ''].filter(Boolean).join(' ');
+		if (i % group === 0 && i > 0) cells.push(el('span', 'hex-group-gap'));
+		const cls = ['hex-cell', i < bytes.length && diff[i] ? 'hex-diff' : '', i < bytes.length && inSelection(i) ? 'hex-selected' : ''].filter(Boolean).join(' ');
 		// A blank is an invisible spacer and carries no text: a hidden '00' would surface
 		// as phantom bytes at the file's end the moment anything makes it visible.
 		const cell = el('span', i < bytes.length ? cls : 'hex-cell hex-blank', [i < bytes.length ? hexByte(bytes[i]!) : '']);
@@ -59,13 +75,34 @@ function compareRow(offset: number, bytes: Uint8Array, diff: Uint8Array, bytesPe
 	}
 	cells.push(el('span', 'hex-gutter'));
 	for (let i = 0; i < bytes.length; i++) {
-		const cell = el('span', diff[i] ? 'hex-ascii-cell hex-diff' : 'hex-ascii-cell', [asciiChar(bytes[i]!)]);
+		const cls = ['hex-ascii-cell', diff[i] ? 'hex-diff' : '', inSelection(i) ? 'hex-selected' : ''].filter(Boolean).join(' ');
+		const cell = el('span', cls, [asciiChar(bytes[i]!)]);
 		cell.title = hexAddress(offset + i, digits);
 		cells.push(cell);
 	}
 	const row = el('div', 'hex-row', cells);
 	row.style.gridTemplateColumns = rowGridTemplate(bytesPerRow, digits);
 	return row;
+}
+
+/** The byte a compare row's hex or ASCII cell stands for, with the side (left/right pane)
+ *  and pane (hex/ASCII) it belongs to - null anywhere else in the scroller (the offset
+ *  column, the gutter, the gaps). The row's own offset label states the base - as in the
+ *  hex viewer's byteAtCell - so the lookup holds at every row width and over a placeholder
+ *  mid-refill. */
+function byteAtCompareCell(node: HTMLElement): { offset: number; side: 'left' | 'right'; pane: 'hex' | 'ascii' } | null {
+	const cell = node.closest<HTMLElement>('.hex-cell, .hex-ascii-cell');
+	const rowEl = cell?.closest<HTMLElement>('.hex-row');
+	const cmpRow = rowEl?.parentElement;
+	if (!cell || !rowEl || !cmpRow?.classList.contains('hex-cmp-row')) return null;
+	const base = parseInt(rowEl.querySelector('.hex-offset')?.textContent ?? '', 16);
+	if (!Number.isFinite(base)) return null;
+	const pane: 'hex' | 'ascii' = cell.classList.contains('hex-ascii-cell') ? 'ascii' : 'hex';
+	const cells = rowEl.querySelectorAll(pane === 'ascii' ? '.hex-ascii-cell' : '.hex-cell');
+	const index = Array.prototype.indexOf.call(cells, cell);
+	if (index < 0) return null;
+	const side: 'left' | 'right' = cmpRow.children[0] === rowEl ? 'left' : 'right';
+	return { offset: base + index, side, pane };
 }
 
 export interface HexCompareLabels {
@@ -110,6 +147,21 @@ export class HexCompareView {
 	/** The wheel and the page keys over the scroller (scroll/input.ts), disposed with the view. */
 	private readonly wheel: Disposable;
 	private readonly pageKeys: Disposable;
+	/* ---------- Selection ---------- */
+	/** The selection's two ends (absolute offsets, either order) - one shared span the
+	 *  hex viewer applies to both panes alike (see compareRow); -1 means "not placed yet". */
+	private selAnchor = -1;
+	private selHead = -1;
+	/** The side and pane the selection was made in - a plain Copy reads that side's bytes
+	 *  and, for 'smart', follows the pane the way the hex viewer's own Copy does (hex from
+	 *  the hex pane, text from the ASCII pane). A right-click menu overrides both with
+	 *  wherever it landed, so Copy always names the file it is about to read from. */
+	private selSide: 'left' | 'right' = 'left';
+	private selPane: 'hex' | 'ascii' = 'hex';
+	/** A mouse drag is pulling the selection's head. */
+	private dragging = false;
+	/** Ends a drag wherever the mouse button comes up; removed by destroy(). */
+	private readonly onWindowMouseUp: () => void = () => { this.dragging = false; };
 
 	constructor(private leftPath: string, private rightPath: string, private labels: HexCompareLabels = { left: leftPath, right: rightPath }) {
 		const prev = el('button', 'button secondary', [icon('arrow-up')]);
@@ -161,10 +213,62 @@ export class HexCompareView {
 			if (event.key === 'F7') {
 				event.preventDefault();
 				this.gotoRegion(event.shiftKey ? this.regionIndex - 1 : this.regionIndex + 1);
+				return;
+			}
+			if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
+				const span = Math.max(this.sizeLeft, this.sizeRight);
+				if (!span) return;
+				event.preventDefault();
+				this.selAnchor = 0;
+				this.selHead = span - 1;
+				this.repaintSelection();
+				return;
+			}
+			if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') {
+				if (!this.hasSelection()) return;
+				event.preventDefault();
+				void this.copySelection('smart', this.selSide, this.selPane);
+				return;
+			}
+			if (event.key === 'Escape' && this.hasSelection()) {
+				event.preventDefault();
+				this.clearSelection();
 			}
 		});
 		this.scroller.addEventListener('scroll', () => {
 			this.ruler.scrollLeft = this.scroller.scrollLeft;
+		});
+		this.scroller.addEventListener('mousedown', (event) => {
+			if (event.button !== 0) return;
+			const target = byteAtCompareCell(event.target as HTMLElement);
+			if (!target) return;
+			// The cells carry the selection model; the browser's own text selection has no
+			// business over them.
+			event.preventDefault();
+			this.dragging = true;
+			if (event.shiftKey && this.selAnchor >= 0) {
+				this.setSelectionHead(target.offset, target.side, target.pane);
+				return;
+			}
+			const clamped = this.clampOffset(target.offset);
+			this.selAnchor = clamped;
+			this.selHead = clamped;
+			this.selSide = target.side;
+			this.selPane = target.pane;
+			this.repaintSelection();
+			this.root.focus();
+		});
+		this.scroller.addEventListener('mousemove', (event) => {
+			if (!this.dragging) return;
+			const target = byteAtCompareCell(event.target as HTMLElement);
+			if (target) this.setSelectionHead(target.offset, target.side, target.pane);
+		});
+		// The drag ends wherever the button comes up - over the view or past its edge.
+		window.addEventListener('mouseup', this.onWindowMouseUp);
+		this.scroller.addEventListener('contextmenu', (event) => {
+			event.preventDefault();
+			this.dragging = false;
+			this.showContextMenu(event, byteAtCompareCell(event.target as HTMLElement));
 		});
 		this.wheel = attachWheel(this.scroller, this.scroll);
 		this.pageKeys = attachPageKeys(this.scroller, this.scroll);
@@ -201,6 +305,7 @@ export class HexCompareView {
 		this.scrollbar.dispose();
 		this.wheel.dispose();
 		this.pageKeys.dispose();
+		window.removeEventListener('mouseup', this.onWindowMouseUp);
 		this.leftSlabs.pending.clear();
 		this.leftSlabs.values.clear();
 		this.rightSlabs.pending.clear();
@@ -252,17 +357,23 @@ export class HexCompareView {
 	}
 
 	private updateStatus(): void {
-		const sizes = `${this.sizeLeft.toLocaleString()} ↔ ${this.sizeRight.toLocaleString()} bytes  ·  ${this.rows.toLocaleString()} rows  ·  ${this.bytesPerRow} bytes/row`;
+		const parts = [`${this.sizeLeft.toLocaleString()} ↔ ${this.sizeRight.toLocaleString()} bytes  ·  ${this.rows.toLocaleString()} rows  ·  ${this.bytesPerRow} bytes/row`];
 		if (!this.scanDone) {
 			const percent = Math.min(100, Math.floor((this.scanned / Math.max(1, Math.min(this.sizeLeft, this.sizeRight))) * 100));
-			this.status.textContent = `${sizes}  ·  scanning ${percent}%`;
-			return;
+			parts.push(`scanning ${percent}%`);
+		} else if (this.regions.length === 0) {
+			parts.push('identical');
+		} else {
+			parts.push(`${this.differingBytes.toLocaleString()} differing bytes in ${this.regions.length.toLocaleString()} region${this.regions.length === 1 ? '' : 's'}`);
 		}
-		if (this.regions.length === 0) {
-			this.status.textContent = `${sizes}  ·  identical${this.differingBytes ? '' : ''}`;
-			return;
+		// The selection is one shared address span - its report doesn't say which side, since
+		// it means the same range on both.
+		if (this.hasSelection()) {
+			const from = this.selectionStart();
+			const to = this.selectionEnd();
+			parts.push(tf('hex.status.selected', hexAddress(from, this.offsetDigits), hexAddress(to, this.offsetDigits), (to - from + 1).toLocaleString()));
 		}
-		this.status.textContent = `${sizes}  ·  ${this.differingBytes.toLocaleString()} differing bytes in ${this.regions.length.toLocaleString()} region${this.regions.length === 1 ? '' : 's'}`;
+		this.status.textContent = parts.join('  ·  ');
 	}
 
 	/** Repaints the visible rows (plus overscan): a placeholder row goes in synchronously,
@@ -290,8 +401,8 @@ export class HexCompareView {
 		for (let row = first; row <= last; row++) {
 			if (body.querySelector(`[data-row="${row}"]`)) continue;
 			const placeholder = el('div', 'hex-cmp-row', [
-				compareRow(row * this.bytesPerRow, new Uint8Array(0), new Uint8Array(0), this.bytesPerRow, this.offsetDigits),
-				compareRow(row * this.bytesPerRow, new Uint8Array(0), new Uint8Array(0), this.bytesPerRow, this.offsetDigits)
+				compareRow(row * this.bytesPerRow, new Uint8Array(0), new Uint8Array(0), this.bytesPerRow, this.offsetDigits, this.selectionRange()),
+				compareRow(row * this.bytesPerRow, new Uint8Array(0), new Uint8Array(0), this.bytesPerRow, this.offsetDigits, this.selectionRange())
 			]);
 			placeholder.dataset.row = String(row);
 			if (row % 2) placeholder.classList.add('hex-row-odd');
@@ -306,8 +417,8 @@ export class HexCompareView {
 				const leftBytes = left ?? new Uint8Array(0);
 				const rightBytes = right ?? new Uint8Array(0);
 				const filled = el('div', 'hex-cmp-row', [
-					compareRow(offset, leftBytes, this.diffMask(offset, leftBytes.length), this.bytesPerRow, this.offsetDigits),
-					compareRow(offset, rightBytes, this.diffMask(offset, rightBytes.length), this.bytesPerRow, this.offsetDigits)
+					compareRow(offset, leftBytes, this.diffMask(offset, leftBytes.length), this.bytesPerRow, this.offsetDigits, this.selectionRange()),
+					compareRow(offset, rightBytes, this.diffMask(offset, rightBytes.length), this.bytesPerRow, this.offsetDigits, this.selectionRange())
 				]);
 				filled.dataset.row = String(row);
 				if (row % 2) filled.classList.add('hex-row-odd');
@@ -497,5 +608,143 @@ export class HexCompareView {
 		this.scroll.autoscroll(Math.floor(target / this.bytesPerRow), 'top');
 		this.draw();
 		this.gotoBox.value = '0x' + target.toString(16).toUpperCase();
+	}
+
+	/* ---------- Selection & copy ---------- */
+
+	/** True when the anchor and head span at least one byte. */
+	private hasSelection(): boolean {
+		return this.selAnchor >= 0 && this.selHead >= 0 && this.selAnchor !== this.selHead;
+	}
+
+	private selectionStart(): number {
+		return Math.min(this.selAnchor, this.selHead);
+	}
+
+	/** The selection's last byte, inclusive - the address the status bar reports. */
+	private selectionEnd(): number {
+		return Math.max(this.selAnchor, this.selHead);
+	}
+
+	/** The selection as compareRow takes it: [start, end + 1), or undefined when nothing is. */
+	private selectionRange(): [number, number] | undefined {
+		return this.hasSelection() ? [this.selectionStart(), this.selectionEnd() + 1] : undefined;
+	}
+
+	private clampOffset(offset: number): number {
+		return Math.max(0, Math.min(offset, Math.max(0, Math.max(this.sizeLeft, this.sizeRight) - 1)));
+	}
+
+	/** Moves the selection's head (a drag, Shift+click) - the shared span both panes paint
+	 *  the same way, so extending it from either side extends it on both. Placing the
+	 *  anchor first when nothing was selected yet lets a shift-click on either pane start
+	 *  a span from scratch. */
+	private setSelectionHead(offset: number, side?: 'left' | 'right', pane?: 'hex' | 'ascii'): void {
+		if (side) this.selSide = side;
+		if (pane) this.selPane = pane;
+		const clamped = this.clampOffset(offset);
+		if (clamped === this.selHead && this.selAnchor >= 0) return;
+		if (this.selAnchor < 0) this.selAnchor = clamped;
+		this.selHead = clamped;
+		this.repaintSelection();
+	}
+
+	private clearSelection(): void {
+		if (this.selAnchor < 0 && this.selHead < 0) return;
+		this.selAnchor = -1;
+		this.selHead = -1;
+		this.repaintSelection();
+	}
+
+	/** Selection (or its absence) changed: the rows repaint with it (both panes, the same
+	 *  span) and the status bar reports it. */
+	private repaintSelection(): void {
+		this.sizer.querySelector('.hex-body')?.remove();
+		this.draw();
+		this.updateStatus();
+	}
+
+	/** The right-click menu over a byte: Copy in every format the hex viewer offers, read
+	 *  from whichever side the click landed on (or, off a byte, the side the selection was
+	 *  made in) - the two sides can hold different bytes at the same address, so every Copy
+	 *  entry names its source file. */
+	private showContextMenu(event: MouseEvent, target: { offset: number; side: 'left' | 'right'; pane: 'hex' | 'ascii' } | null): void {
+		const selected = this.hasSelection();
+		const side = target?.side ?? this.selSide;
+		const pane = target?.pane ?? this.selPane;
+		const sideLabel = side === 'left' ? this.labels.left : this.labels.right;
+		const entries: MenuEntry[] = [
+			{ label: `${t('hex.menu.copy')} — ${sideLabel}`, keybinding: 'Ctrl+C', disabled: !selected, run: () => void this.copySelection('smart', side, pane) },
+			{ label: `${t('hex.menu.copyHex')} — ${sideLabel}`, disabled: !selected, run: () => void this.copySelection('hex', side, pane) },
+			{ label: `${t('hex.menu.copyText')} — ${sideLabel}`, disabled: !selected, run: () => void this.copySelection('text', side, pane) },
+			{ label: `${t('hex.menu.copyC')} — ${sideLabel}`, disabled: !selected, run: () => void this.copySelection('c', side, pane) },
+			{ label: `${t('hex.menu.copyBase64')} — ${sideLabel}`, disabled: !selected, run: () => void this.copySelection('base64', side, pane) },
+			// The address of the right-clicked byte, or - with a selection - its start-end
+			// span; shared by both sides, so it names no file.
+			{ label: t('hex.menu.copyAddress'), disabled: !selected && !target, run: () => void this.copyAddress(target) },
+			'separator',
+			{ label: t('hex.menu.clearSelection'), disabled: !selected, run: () => this.clearSelection() },
+			'separator',
+			{ label: t('hex.menu.goto'), keybinding: 'Ctrl+G', run: () => { this.gotoBox.focus(); this.gotoBox.select(); } }
+		];
+		showContextMenu(event.clientX, event.clientY, entries);
+	}
+
+	/** Copies the selection in one of the hex viewer's Copy Special formats, reading from
+	 *  `side`'s file - 'smart' honours `pane`: hex bytes from the hex pane, raw text from
+	 *  the ASCII pane. Selections past the 10 MiB limit are refused with a reminder instead
+	 *  of being read. */
+	async copySelection(format: CopyFormat, side: 'left' | 'right' = this.selSide, pane: 'hex' | 'ascii' = this.selPane): Promise<void> {
+		if (!this.hasSelection()) return;
+		const start = this.selectionStart();
+		const count = this.selectionEnd() - start + 1;
+		if (count > COPY_LIMIT) {
+			notify('error', tf('hex.copy.tooLarge', formatBytes(count), formatBytes(COPY_LIMIT)));
+			return;
+		}
+		const bytes = await this.readRange(side === 'left' ? this.leftPath : this.rightPath, start, count);
+		if (!bytes) {
+			notify('error', t('hex.copy.readFailed'));
+			return;
+		}
+		let text: string;
+		if (format === 'base64') text = btoa(bytesToLatin1(bytes));
+		else if (format === 'c') text = Array.from(bytes, (b) => '0x' + hexByte(b)).join(', ');
+		else if (format === 'text' || (format === 'smart' && pane === 'ascii')) text = bytesToLatin1(bytes);
+		else text = Array.from(bytes, hexByte).join('');
+		try {
+			await writeText(text);
+		} catch (error) {
+			notify('error', String(error));
+			return;
+		}
+		const sideLabel = side === 'left' ? this.labels.left : this.labels.right;
+		this.status.textContent = `${this.status.textContent}  ·  ${tf('hex.copy.done', text.length.toLocaleString(), t(COPY_FORMAT_KEYS[format]))} (${sideLabel})`;
+	}
+
+	/** Copies the address the right-click states: a selection's span as its start-end
+	 *  addresses, or - when the click was on a lone byte with nothing selected - that
+	 *  byte's address alone. The address is shared by both sides, so this ignores which
+	 *  pane was clicked. */
+	private async copyAddress(target: { offset: number } | null): Promise<void> {
+		const text = this.hasSelection()
+			? `${hexAddress(this.selectionStart(), this.offsetDigits)}-${hexAddress(this.selectionEnd(), this.offsetDigits)}`
+			: target ? hexAddress(this.clampOffset(target.offset), this.offsetDigits) : null;
+		if (text === null) return;
+		try {
+			await writeText(text);
+		} catch (error) {
+			notify('error', String(error));
+		}
+	}
+
+	/** One side's bytes for Copy: a plain range read, bypassing the row slab cache - a
+	 *  selection's span is a one-off read, not the repeated small reads scrolling makes. */
+	private async readRange(path: string, start: number, count: number): Promise<Uint8Array | null> {
+		try {
+			return decodeBase64((await invoke<FileChunk>('read_file_chunk', { path, offset: start, len: count })).base64);
+		} catch {
+			return null;
+		}
 	}
 }

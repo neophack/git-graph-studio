@@ -1375,6 +1375,8 @@ mod deferred_services_tests {
                 cmd_fs::patch_file,
                 cmd_fs::write_file,
                 cmd_fs::read_file_at,
+                cmd_fs::materialize_revision_file,
+                cmd_fs::discard_temp_blob,
                 cmd_fs::repo_head,
                 cmd_fs::create_file,
                 cmd_fs::create_folder,

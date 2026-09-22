@@ -1,7 +1,8 @@
-// The `vscode` module as seen by the extension's compiled src/config.ts when it is bundled for
-// the app (scripts/prepare.mjs): every configuration read answers with the override the app
-// stored for that key, or the setting's declared default. Nothing else of the API is touched by
-// config.ts beyond the enum values referenced below.
+// The `vscode` module as seen by the extension's compiled code when it is bundled for the app
+// (scripts/prepare.mjs's config bundle, scripts/compare-bundle.mjs's comparison bundles): every
+// configuration read answers with the override the app stored for that key, or the setting's
+// declared default; `env.language` and `env.clipboard` carry the pieces the comparison views'
+// compiled i18n and Copy need. Nothing else of the API is touched beyond the enum values below.
 
 const overrides = (globalThis.__gitGraphStudioOverrides = globalThis.__gitGraphStudioOverrides || {});
 
@@ -27,7 +28,18 @@ const configuration = {
 };
 
 module.exports = {
-	env: { get language() { return workbenchLanguage(); } },
+	env: {
+		get language() { return workbenchLanguage(); },
+		// The hex comparison's Copy: the host (graphHost.ts) installs __ggsWriteClipboard over
+		// the app's clipboard plugin; outside the app, the browser's own clipboard answers.
+		clipboard: {
+			writeText: (text) => {
+				const write = globalThis.__ggsWriteClipboard;
+				if (typeof write === 'function') return write(text);
+				return navigator.clipboard.writeText(text);
+			}
+		}
+	},
 	workspace: {
 		getConfiguration: () => configuration,
 		workspaceFolders: []

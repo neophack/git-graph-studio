@@ -1,15 +1,19 @@
-// Builds the Git Graph Commit Comparison page generator (public/gitgraph/compare.js). The
-// comparison view is not part of the webview bundle the graph view loads - the extension host
-// generates its complete HTML page (inline CSS and script included) from extension-host code
-// (src/comparisonView.ts). This module bundles that same compiled generator: it exposes
-// `GitGraphCompare.buildComparePage()`, which runs the extension's own `getHtml` template
-// against a stubbed panel, so the app (graphHost.ts's CompareHost) hosts the extension's real
-// comparison page - styles, markup and embedded script - instead of maintaining a copy.
+// Builds the Git Graph comparison assets the app serves under /gitgraph/ (compare.js and
+// binarycompare.js). The comparison views are not part of the webview bundle the graph view
+// loads - the extension host generates their complete HTML pages (inline CSS and script
+// included) from extension-host code (src/comparisonView.ts, src/binaryCompareView.ts), and
+// drives their binary-file area host-side (src/binaryCompare.ts + src/hexDiff.ts). These
+// modules bundle that same compiled code, so the app hosts the extension's real pages and the
+// extension's real hex/image session machinery instead of maintaining copies:
+//
+//   compare.js       -> GitGraphCompare.buildComparePage()    the Commit Comparison page
+//                       GitGraphCompare.createHexSession()…    the binary-area responders
+//   binarycompare.js -> GitGraphBinaryCompare.buildBinaryComparePage()  the Binary Compare page
 //
 // The extension's compiled output wraps its fs requires in an Electron `original-fs` fallback
-// (its scripts/package-src.js) whose variable-argument require() defeats static bundling, so the
-// bundle is built from patched copies under target/studio with that wrapper folded back to the
-// plain require - the extension's sources and out/ are never touched.
+// (its scripts/package-src.js) whose variable-argument require() defeats static bundling, so
+// both bundles are built from patched copies under target/studio with that wrapper folded back
+// to the plain require - the extension's sources and out/ are never touched.
 //
 // Those patched copies sit under the app's own package scope, and the app's package.json is
 // "type": "module": esbuild reads a .js file's format from the nearest package.json, so without
@@ -24,19 +28,47 @@ import { fileURLToPath } from 'node:url';
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 
-/** Build the comparison page generator from a compiled vscode-git-graph-rs checkout.
- *  `root` is the submodule; `patchedOut` receives the patched copies; `outfile` is the
- *  browser-loaded IIFE bundle graphHost.ts serves as /gitgraph/compare.js. */
-export async function buildCompareBundle({ root, patchedOut, outfile }) {
-	const compiledEntry = join(root, 'out', 'comparisonView.js');
-	if (!existsSync(compiledEntry)) {
-		throw new Error(`${compiledEntry} not found - run \`npm run compile\` in vscode-git-graph-rs/ first`);
+/** The banner both bundles carry: Node globals the compiled machinery touches. `Buffer` is the
+ *  critical one - hexDiff allocates, concatenates, slices, compares (`equals`), copies into
+ *  (`copy`) and base64-encodes (`toString('base64')`) blob chunks, and none of that exists on a
+ *  bare Uint8Array. The class keeps every view a Buffer instance (TypedArray species
+ *  construction), so `subarray` results encode and compare the same way. */
+const BROWSER_GLOBALS_BANNER = `var Buffer = globalThis.Buffer || (function () {
+	class Buffer extends Uint8Array {
+		static alloc(length, fill) { var b = new Buffer(length); if (fill !== undefined) b.fill(fill); return b; }
+		static concat(list) { var t = 0; for (var i = 0; i < list.length; i++) t += list[i].length; var a = new Buffer(t); var o = 0; for (var j = 0; j < list.length; j++) { a.set(list[j], o); o += list[j].length; } return a; }
+		static from(value) { return typeof value === 'string' ? new Buffer(new TextEncoder().encode(value)) : new Buffer(value); }
+		static isBuffer(value) { return value instanceof Buffer; }
+		toString(encoding) {
+			if (encoding === 'base64') {
+				var binary = '';
+				for (var i = 0; i < this.length; i += 0x8000) binary += String.fromCharCode.apply(null, this.subarray(i, Math.min(this.length, i + 0x8000)));
+				return btoa(binary);
+			}
+			if (encoding === 'latin1') { var text = ''; for (var i2 = 0; i2 < this.length; i2++) text += String.fromCharCode(this[i2]); return text; }
+			return new TextDecoder().decode(this);
+		}
+		equals(other) { if (!(other instanceof Uint8Array) || other.length !== this.length) return false; for (var i3 = 0; i3 < this.length; i3++) if (this[i3] !== other[i3]) return false; return true; }
+		copy(target, targetStart, sourceStart, sourceEnd) { target.set(this.subarray(sourceStart, sourceEnd), targetStart); }
+	}
+	return Buffer;
+})();
+var process = globalThis.process || { env: {}, platform: 'browser', nextTick: function (f) { Promise.resolve().then(f); } };
+var global = globalThis;`;
+
+/** Rewrite the extension's compiled out/ into `patchedOut` as bundleable CommonJS: the
+ *  Electron `original-fs` fallback wrapper folded back to the plain require, under a
+ *  package.json marking the files as CommonJS (see the header comment). */
+function patchCompiledOut(root, patchedOut) {
+	const compiledOut = join(root, 'out');
+	if (!existsSync(join(compiledOut, 'comparisonView.js'))) {
+		throw new Error(`${join(compiledOut, 'comparisonView.js')} not found - run \`npm run compile\` in vscode-git-graph-rs/ first`);
 	}
 	rmSync(patchedOut, { recursive: true, force: true });
 	mkdirSync(patchedOut, { recursive: true });
 	writeFileSync(join(patchedOut, 'package.json'), JSON.stringify({ type: 'commonjs' }) + '\n');
 	(function patchCopies(dir) {
-		const relativePath = relative(join(root, 'out'), dir);
+		const relativePath = relative(compiledOut, dir);
 		const targetDir = join(patchedOut, relativePath);
 		mkdirSync(targetDir, { recursive: true });
 		for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -48,12 +80,49 @@ export async function buildCompareBundle({ root, patchedOut, outfile }) {
 					text.split('requireWithFallback("original-fs", "fs")').join('require("fs")'));
 			}
 		}
-	})(join(root, 'out'));
+	})(compiledOut);
+}
 
+/** The esbuild options both bundles share: the `vscode` alias, the Node built-in shims (`fs`
+ *  resolves to a lazy proxy over the adapter graphHost.ts installs, so the hex machinery's
+ *  working-tree reads reach the app's backend; the rest are inert), and the browser-globals
+ *  banner. */
+function bundleOptions(patchedOut, outfile) {
+	return {
+		bundle: true,
+		format: 'iife',
+		platform: 'browser',
+		target: 'es2020',
+		minify: true,
+		alias: { vscode: join(scriptsDir, 'vscode-stub.cjs') },
+		plugins: [{
+			// esbuild resolves Node built-ins inside CommonJS requires before `alias` applies, so
+			// they are redirected here instead: `path` gets a real join(), `fs` the host-driven
+			// proxy, the rest inert stubs.
+			name: 'node-builtin-shims',
+			setup(builder) {
+				builder.onResolve({ filter: /^(child_process|os|util|crypto|http|https)$/ }, () => ({ path: join(scriptsDir, 'empty-stub.cjs') }));
+				builder.onResolve({ filter: /^fs$/ }, () => ({ path: join(scriptsDir, 'hex-fs-stub.cjs') }));
+				builder.onResolve({ filter: /^path$/ }, () => ({ path: join(scriptsDir, 'path-stub.cjs') }));
+			}
+		}],
+		banner: { js: BROWSER_GLOBALS_BANNER },
+		outfile,
+		logLevel: 'warning'
+	};
+}
+
+/** Build the Commit Comparison page generator AND the binary-area host machinery from a
+ *  compiled vscode-git-graph-rs checkout. `root` is the submodule; `patchedOut` receives the
+ *  patched copies; `outfile` is the browser-loaded IIFE bundle graphHost.ts serves as
+ *  /gitgraph/compare.js. */
+export async function buildCompareBundle({ root, patchedOut, outfile }) {
+	patchCompiledOut(root, patchedOut);
 	await build({
 		stdin: {
 			contents: `
 				const { CommitComparisonView } = require('./comparisonView.js');
+				const binary = require('./binaryCompare.js');
 				function buildComparePage(options) {
 					// The view's own template runs against a prototype-linked stand-in (so its own
 					// helper methods resolve) carrying only the fields getHtml reads; the panel
@@ -75,36 +144,50 @@ export async function buildCompareBundle({ root, patchedOut, outfile }) {
 						typeof options.commitsBetween === 'number' ? options.commitsBetween : null,
 						options.loading === true);
 				}
-				globalThis.GitGraphCompare = { buildComparePage };
+				// The responders the comparison page's binary-file area talks to, exactly as the
+				// extension host drives them (src/comparisonView.ts): graphHost.ts calls these with
+				// a spawnGitStream-capable DataSource stand-in over the app's backend.
+				globalThis.GitGraphCompare = {
+					buildComparePage: buildComparePage,
+					createHexSession: binary.createHexSession,
+					wireHexSession: binary.wireHexSession,
+					respondHexInfo: binary.respondHexInfo,
+					respondHexRows: binary.respondHexRows,
+					respondImageData: binary.respondImageData,
+					respondCopyToClipboard: binary.respondCopyToClipboard
+				};
 			`,
 			resolveDir: patchedOut,
 			loader: 'js'
 		},
-		bundle: true,
-		format: 'iife',
-		platform: 'browser',
-		target: 'es2020',
-		minify: true,
-		alias: { vscode: join(scriptsDir, 'vscode-stub.cjs') },
-		plugins: [{
-			// esbuild resolves Node built-ins inside CommonJS requires before `alias` applies, so
-			// they are redirected here instead: `path` gets a real join(), the rest inert stubs.
-			name: 'node-builtin-shims',
-			setup(builder) {
-				builder.onResolve({ filter: /^(fs|child_process|os|util|crypto|http|https)$/ }, () => ({ path: join(scriptsDir, 'empty-stub.cjs') }));
-				builder.onResolve({ filter: /^path$/ }, () => ({ path: join(scriptsDir, 'path-stub.cjs') }));
-			}
-		}],
-		// The hex-session machinery the page generator is bundled with touches Node globals at
-		// module scope (hexDiff's empty-buffer constant) and in its (here unused) code paths; the
-		// banner gives the bundle inert browser stand-ins so loading never throws. The page
-		// generation path itself uses none of them.
-		banner: {
-			js: `var Buffer = globalThis.Buffer || { alloc: function (n, f) { var a = new Uint8Array(n); if (f !== undefined) a.fill(f); return a; }, concat: function (list) { var t = 0; for (var i = 0; i < list.length; i++) t += list[i].length; var a = new Uint8Array(t); var o = 0; for (var j = 0; j < list.length; j++) { a.set(list[j], o); o += list[j].length; } return a; }, from: function (x) { return typeof x === 'string' ? new TextEncoder().encode(x) : new Uint8Array(x); }, isBuffer: function (b) { return b instanceof Uint8Array; } };
-var process = globalThis.process || { env: {}, platform: 'browser', nextTick: function (f) { Promise.resolve().then(f); } };
-var global = globalThis;`
+		...bundleOptions(patchedOut, outfile)
+	});
+}
+
+/** Build the standalone Binary Compare page generator (the tab the Commit Comparison view's
+ *  "Open Diff in Editor" opens for a binary file, and the graph view's own click on one) from
+ *  the same compiled checkout, served as /gitgraph/binarycompare.js. */
+export async function buildBinaryCompareBundle({ root, patchedOut, outfile }) {
+	patchCompiledOut(root, patchedOut);
+	await build({
+		stdin: {
+			contents: `
+				const { BinaryCompareView } = require('./binaryCompareView.js');
+				function buildBinaryComparePage(options) {
+					// The same prototype-linked stand-in over the view's own template: the slim
+					// header naming the file and the two revisions, and the shared binary
+					// comparison area (styles and client script inline) filling the rest.
+					const fake = Object.create(BinaryCompareView.prototype);
+					fake.fromHash = options.fromHash;
+					fake.toHash = options.toHash;
+					fake.panel = { webview: { cspSource: "'self'" } };
+					return BinaryCompareView.prototype.getHtml.call(fake, options.filePath, options.file);
+				}
+				globalThis.GitGraphBinaryCompare = { buildBinaryComparePage: buildBinaryComparePage };
+			`,
+			resolveDir: patchedOut,
+			loader: 'js'
 		},
-		outfile,
-		logLevel: 'warning'
+		...bundleOptions(patchedOut, outfile)
 	});
 }
