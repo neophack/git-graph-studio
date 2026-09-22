@@ -190,8 +190,7 @@ export class Workbench {
 			showSourceControl: () => this.showView('scm'),
 			revealTerminal: () => this.panel.show('terminal'),
 			runInTerminal: (command) => void this.panel.runInTerminal(command),
-			repoChanged: () => this.scheduleRefresh(0),
-			initRepository: () => void this.initializeRepository()
+			repoChanged: () => this.scheduleRefresh(0)
 		});
 		this.editors.graphElement = this.graph.element;
 

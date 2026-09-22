@@ -37,6 +37,10 @@ export interface DiffRequest {
 	/** The repository the revisions belong to (the open repository, or a submodule when the
 	 *  diff was opened from its graph). */
 	repo?: string;
+	/** The request came from the Git Graph view: the extension opens the native diff editor,
+	 *  whose binary sides show as placeholders - so a binary pair opens the shell's diff
+	 *  editor with the same notice instead of substituting the hex comparison. */
+	binaryNotice?: boolean;
 	left: DiffSide;
 	right: DiffSide;
 }

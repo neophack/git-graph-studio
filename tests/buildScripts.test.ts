@@ -14,7 +14,7 @@ import { ggxManifest } from '../scripts/build-ggx.mjs';
 // @ts-expect-error - plain ESM scripts without type declarations
 import { buildBuiltinContributions, buildBuiltinSettings } from '../scripts/builtin-contributions.mjs';
 // @ts-expect-error - plain ESM scripts without type declarations
-import { buildBinaryCompareBundle, buildCompareBundle } from '../scripts/compare-bundle.mjs';
+import { buildBinaryCompareBundle, buildCompareBundle, buildViewPageBundle } from '../scripts/compare-bundle.mjs';
 
 describe('.ggx packaging', () => {
 	it('writes a ggx/1 header with the frontend page — the shape cmd_ext.rs installs', () => {
@@ -117,9 +117,34 @@ describe('the Git Graph comparison page bundles', () => {
 			expect(binary).toBeDefined();
 			expect(binary!.buildBinaryComparePage({ fromHash: 'aaaa', toHash: 'bbbb', filePath: 'img.png', file: { oldFilePath: 'img.png', newFilePath: 'img.png', type: 'M', additions: null, deletions: null } }))
 				.toBe('<!DOCTYPE html><html><body>fixture binary page img.png</body></html>');
+
+			// The view page generator: the extension's own getHtmlForWebview over the host's
+			// inputs - repository states, view states, media URIs mapped to the served copies.
+			writeFileSync(join(dir, 'out', 'gitGraphView.js'), [
+				'"use strict";',
+				'Object.defineProperty(exports, "__esModule", { value: true });',
+				'exports.GitGraphView = void 0;',
+				'class GitGraphView {',
+				'	getHtmlForWebview() {',
+				'		const repos = Object.keys(this.repoManager.getRepos());',
+				'		return "<!DOCTYPE html><html lang=\\"en\\"><head></head><body>fixture view " + repos.length + " repo(s), active " + this.extensionState.getLastActiveRepo() +',
+				'			", media " + this.panel.webview.asWebviewUri({ fsPath: "media\\\\out.min.js" }).toString() + "</body></html>";',
+				'	}',
+				'}',
+				'exports.GitGraphView = GitGraphView;',
+				''
+			].join('\n'));
+			const viewOutfile = join(dir, 'gitgraph', 'viewpage.js');
+			await buildViewPageBundle({ root: dir, patchedOut: join(dir, 'compare-src'), outfile: viewOutfile });
+			new Function(readFileSync(viewOutfile, 'utf8'))();
+			const view = (globalThis as { GitGraphViewPage?: { buildViewPage(options: Record<string, unknown>): string } }).GitGraphViewPage;
+			expect(view).toBeDefined();
+			expect(view!.buildViewPage({ settings: {}, repos: { 'C:\\repo': {} }, lastActiveRepo: 'C:\\repo', loadViewTo: null, globalState: {}, workspaceState: {} }))
+				.toBe('<!DOCTYPE html><html lang="en"><head></head><body>fixture view 1 repo(s), active C:\\repo, media /gitgraph/out.min.js</body></html>');
 		} finally {
 			delete (globalThis as { GitGraphCompare?: unknown }).GitGraphCompare;
 			delete (globalThis as { GitGraphBinaryCompare?: unknown }).GitGraphBinaryCompare;
+			delete (globalThis as { GitGraphViewPage?: unknown }).GitGraphViewPage;
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});

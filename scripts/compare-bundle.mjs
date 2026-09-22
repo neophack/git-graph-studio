@@ -1,14 +1,17 @@
-// Builds the Git Graph comparison assets the app serves under /gitgraph/ (compare.js and
-// binarycompare.js). The comparison views are not part of the webview bundle the graph view
-// loads - the extension host generates their complete HTML pages (inline CSS and script
-// included) from extension-host code (src/comparisonView.ts, src/binaryCompareView.ts), and
-// drives their binary-file area host-side (src/binaryCompare.ts + src/hexDiff.ts). These
-// modules bundle that same compiled code, so the app hosts the extension's real pages and the
-// extension's real hex/image session machinery instead of maintaining copies:
+// Builds the Git Graph comparison assets the app serves under /gitgraph/ (compare.js,
+// binarycompare.js and viewpage.js). The comparison views and the main view page are not part
+// of one webview bundle the graph view loads - the extension host generates their complete
+// HTML pages (inline CSS and script included) from extension-host code (src/comparisonView.ts,
+// src/binaryCompareView.ts, src/gitGraphView.ts), and drives the binary-file areas host-side
+// (src/binaryCompare.ts + src/hexDiff.ts). These modules bundle that same compiled code, so
+// the app hosts the extension's real pages - the main view page included, markup, initial
+// state and all - and the extension's real hex/image session machinery instead of maintaining
+// copies:
 //
 //   compare.js       -> GitGraphCompare.buildComparePage()    the Commit Comparison page
 //                       GitGraphCompare.createHexSession()…    the binary-area responders
 //   binarycompare.js -> GitGraphBinaryCompare.buildBinaryComparePage()  the Binary Compare page
+//   viewpage.js      -> GitGraphViewPage.buildViewPage()      the Git Graph view page itself
 //
 // The extension's compiled output wraps its fs requires in an Electron `original-fs` fallback
 // (its scripts/package-src.js) whose variable-argument require() defeats static bundling, so
@@ -101,7 +104,7 @@ function bundleOptions(patchedOut, outfile) {
 			// proxy, the rest inert stubs.
 			name: 'node-builtin-shims',
 			setup(builder) {
-				builder.onResolve({ filter: /^(child_process|os|util|crypto|http|https)$/ }, () => ({ path: join(scriptsDir, 'empty-stub.cjs') }));
+				builder.onResolve({ filter: /^(child_process|os|util|crypto|http|https|url)$/ }, () => ({ path: join(scriptsDir, 'empty-stub.cjs') }));
 				builder.onResolve({ filter: /^fs$/ }, () => ({ path: join(scriptsDir, 'hex-fs-stub.cjs') }));
 				builder.onResolve({ filter: /^path$/ }, () => ({ path: join(scriptsDir, 'path-stub.cjs') }));
 			}
@@ -184,6 +187,52 @@ export async function buildBinaryCompareBundle({ root, patchedOut, outfile }) {
 					return BinaryCompareView.prototype.getHtml.call(fake, options.filePath, options.file);
 				}
 				globalThis.GitGraphBinaryCompare = { buildBinaryComparePage: buildBinaryComparePage };
+			`,
+			resolveDir: patchedOut,
+			loader: 'js'
+		},
+		...bundleOptions(patchedOut, outfile)
+	});
+}
+
+/** Build the Git Graph view page generator - the extension's own getHtmlForWebview, the very
+ *  page VS Code serves (markup, initial state, colours, CSP and the rescan-for-repos empty
+ *  state included) - served as /gitgraph/viewpage.js. graphPreload.ts / graphHost.ts compose
+ *  the generated page with the host environment (theme tokens, the acquireVsCodeApi protocol
+ *  shim, deferred script loading) instead of the app carrying a hand-written copy of it. */
+export async function buildViewPageBundle({ root, patchedOut, outfile }) {
+	patchCompiledOut(root, patchedOut);
+	await build({
+		stdin: {
+			contents: `
+				const { GitGraphView } = require('./gitGraphView.js');
+				function buildViewPage(options) {
+					// The extension host's own inputs to the template, carried by a
+					// prototype-linked stand-in so its helper methods resolve. getConfig() reads
+					// the stored overrides through the stub's configuration, exactly as the app's
+					// config bundle does.
+					globalThis.__gitGraphStudioOverrides = options.settings || {};
+					const fake = Object.create(GitGraphView.prototype);
+					fake.extensionPath = '';
+					fake.loadViewTo = options.loadViewTo || null;
+					fake.loadRepoInfoRefreshId = options.loadRepoInfoRefreshId || 0;
+					fake.loadCommitsRefreshId = options.loadCommitsRefreshId || 0;
+					fake.repoManager = { getRepos: () => options.repos || {} };
+					fake.extensionState = {
+						getLastActiveRepo: () => options.lastActiveRepo !== undefined ? options.lastActiveRepo : null,
+						getGlobalViewState: () => options.globalState || {},
+						getWorkspaceViewState: () => options.workspaceState || {},
+						isAvatarStorageAvailable: () => true
+					};
+					fake.dataSource = { isGitExecutableUnknown: () => false };
+					fake.getAutomationShimScript = () => ''; // the standard build injects no shim
+					fake.panel = { webview: {
+						cspSource: "'self'",
+						asWebviewUri: (uri) => ({ toString: () => '/gitgraph/' + String(uri.fsPath).split(/[\\\\\\\\/]/).pop() })
+					} };
+					return GitGraphView.prototype.getHtmlForWebview.call(fake);
+				}
+				globalThis.GitGraphViewPage = { buildViewPage: buildViewPage };
 			`,
 			resolveDir: patchedOut,
 			loader: 'js'

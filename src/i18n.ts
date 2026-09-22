@@ -339,7 +339,8 @@ const en = {
 	'can.convert.done': 'Exported {0} frames to {1}',
 	'can.convert.failed': 'Conversion failed',
 	'graph.binaryCompare.present': 'Present',
-	'graph.binaryCompare.title': '{0} ({1} ↔ {2})'
+	'graph.binaryCompare.title': '{0} ({1} ↔ {2})',
+	'diff.binaryNotice': 'The file is binary: its two versions cannot be compared as text.'
 };
 
 const zhCn: typeof en = {
@@ -676,7 +677,8 @@ const zhCn: typeof en = {
 	'can.convert.done': '已导出 {0} 帧到 {1}',
 	'can.convert.failed': '转换失败',
 	'graph.binaryCompare.present': '当前',
-	'graph.binaryCompare.title': '{0}（{1} ↔ {2}）'
+	'graph.binaryCompare.title': '{0}（{1} ↔ {2}）',
+	'diff.binaryNotice': '该文件是二进制文件：无法按文本比较它的两个版本。'
 };
 
 const TABLES: Record<Locale, typeof en> = { en, 'zh-cn': zhCn };

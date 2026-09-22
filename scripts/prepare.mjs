@@ -20,7 +20,7 @@
 // in vscode-git-graph-rs/ (its out/config.js and media/).
 import { build } from 'esbuild';
 import { checkSeams } from './check-seams.mjs';
-import { buildBinaryCompareBundle, buildCompareBundle } from './compare-bundle.mjs';
+import { buildBinaryCompareBundle, buildCompareBundle, buildViewPageBundle } from './compare-bundle.mjs';
 import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 
@@ -182,6 +182,11 @@ await buildBinaryCompareBundle({
 	root,
 	patchedOut: join(out, 'compare-src'),
 	outfile: join(gitgraphDir, 'binarycompare.js')
+});
+await buildViewPageBundle({
+	root,
+	patchedOut: join(out, 'compare-src'),
+	outfile: join(gitgraphDir, 'viewpage.js')
 });
 
 // The syntax highlighter the generated comparison page loads, next to the bundle.

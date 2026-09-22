@@ -1,8 +1,8 @@
 // The seam rules of the app (docs/ggs-development-plan.md §3.7), enforced at build time: the
-// extension's artifacts are consumed through exactly one file per language — graphHost.ts on
-// the TS side (the single `graph_request` channel and the only namer of the extension's asset
-// paths), view.html on the CSS side (the only loader of the webview bundle compiled from the
-// extension's web/styles). The Rust counterpart of this check lives in src-tauri/build.rs.
+// extension's artifacts are consumed through exactly one seam — graphHost.ts together with
+// graphPreload.ts on the TS side (the single `graph_request` channel and the only namer of
+// the extension's asset paths, including the page generators the view and the comparison
+// pages are built from). The Rust counterpart of this check lives in src-tauri/build.rs.
 //
 // Wired into every path that compiles the frontend: scripts/prepare.mjs runs it first, the
 // Vite plugin (vite.config.ts) runs it on every dev-server start and production build, and
@@ -17,9 +17,9 @@ const appDir = join(dirname(fileURLToPath(import.meta.url)), '..');
  *  names the pattern fails the build. */
 const RULES = [
 	{ pattern: /graph_request/, paths: ['src/graphHost.ts'], because: 'the graph protocol is invoked only by the TS seam (graphHost.ts)' },
-	{ pattern: /gitgraph\//, paths: ['src/graphHost.ts', 'src/graphPreload.ts'], because: 'the extension\'s assets are named only by the TS seam (graphHost.ts, and graphPreload.ts - the boot warmer that names the view page to start it early)' },
+	{ pattern: /gitgraph\//, paths: ['src/graphHost.ts', 'src/graphPreload.ts'], because: 'the extension\'s assets are named only by the TS seam (graphHost.ts, and graphPreload.ts - the composer of the view page it generates and warms)' },
 	{ pattern: /GitGraphStudioConfig/, paths: ['src/graphHost.ts', 'src/graphPreload.ts'], because: 'the extension\'s config bundle is read only by the TS seam (graphHost.ts, and graphPreload.ts for the warmed boot\'s initial state)' },
-	{ pattern: /out\.min/, paths: ['static/gitgraph/view.html', 'src/graphHost.ts'], because: 'the webview bundle (compiled from the extension\'s web/styles) is loaded only by the view page, and resolved to the installed package\'s copy only by the TS seam (graphHost.ts)' },
+	{ pattern: /out\.min/, paths: ['src/graphHost.ts'], because: 'the webview bundle (compiled from the extension\'s web/) is referenced only by the TS seam (graphHost.ts) - the extension\'s own generated page loads it' },
 	{ pattern: /web[\\/]styles/, paths: [], because: 'the extension\'s CSS sources are consumed only through the artifacts scripts/prepare.mjs builds from them — never referenced directly' }
 ];
 

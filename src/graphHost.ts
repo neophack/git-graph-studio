@@ -1,9 +1,9 @@
-// Hosts the Git Graph webview (static/gitgraph/view.html) in an iframe and plays the extension
-// host's part for it: composes `initialState` from the extension's own config code plus the
-// stored view/repo state, forwards read and write requests to the Rust backend, and serves
-// the requests that belong to the shell itself - opening files and diffs in the editor, the
-// terminal, dialogs, view state, code reviews, settings - so the unmodified webview has every
-// action it has inside VS Code.
+// Hosts the Git Graph webview - the extension's own generated page (gitgraph/viewpage.js,
+// its compiled src/gitGraphView.ts, composed with the host environment by graphPreload.ts) -
+// in an iframe and plays the extension host's part for it: forwards read and write requests
+// to the Rust backend, and serves the requests that belong to the shell itself - opening
+// files and diffs in the editor, the terminal, dialogs, view state, code reviews, settings -
+// so the unmodified view has every action it has inside VS Code.
 //
 // This is deliberately the app's ONLY module that consumes the extension's TypeScript
 // artifacts at runtime: the webview bundle (loaded by the view page), the config bundle
@@ -23,7 +23,7 @@ import { writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-ma
 import { openUrl } from '@tauri-apps/plugin-opener';
 
 import type { DiffRequest } from './scm';
-import { claimGraphPreload } from './graphPreload';
+import { buildViewPageHtml, claimGraphPreload } from './graphPreload';
 import { t, tf } from './i18n';
 import { THEME_EVENT, themeById } from './settings';
 import * as state from './state';
@@ -109,7 +109,7 @@ function applyFrameTheme(frame: HTMLIFrameElement): void {
 		if (link && link.getAttribute('href') !== theme.css) {
 			// A live switch while the page is already running (no reload): once the new
 			// stylesheet has loaded, tell the page to re-mirror the --vscode-* colour tokens
-			// it copied into inline style at boot (see static/gitgraph/view.html), so the
+			// it copied into inline style at boot (see the shim in graphPreload.ts), so the
 			// scroll-to-commit flash and Find highlight follow the new theme too. The
 			// comparison page mirrors no tokens; the message is simply not for it.
 			const frameWindow = frame.contentWindow;
@@ -664,6 +664,7 @@ export class CompareHost {
 			id: `compare:${from}:${oldPath}:${to}:${newPath}`,
 			title: `${basename(newPath)} (${from === to ? `${abbrev(from)}^ ↔ ${abbrev(to)}` : `${abbrev(from)} ↔ ${abbrev(to)}`})`,
 			repo: this.input.repo,
+			binaryNotice: true,
 			left: { revision: from, path: oldPath, label: abbrev(from), exists: file.type !== 'A' },
 			right: { revision: to, path: newPath, label: to === UNCOMMITTED ? 'Working Tree' : abbrev(to), exists: file.type !== 'D' }
 		};
@@ -870,8 +871,6 @@ export interface GraphHostDelegate {
 	runInTerminal(command: string): void;
 	/** The repository changed through the view: the SCM view, the explorer, the status bar catch up. */
 	repoChanged(): void;
-	/** The "Initialize Repository" button of the not-a-repository placeholder was clicked. */
-	initRepository(): void;
 }
 
 export class GraphHost {
@@ -926,16 +925,16 @@ export class GraphHost {
 		this.element.appendChild(this.frame);
 		this.logLine('Session started');
 		window.addEventListener('message', (event) => this.onMessage(event));
-		// Script errors inside the view page (view.html forwards them) belong in the session log.
+		// Script errors inside the view page (the shim forwards them) belong in the session log.
 		window.addEventListener('message', (event) => {
 			const data = event.data as { __studioGraphError?: string } | null;
 			if (data && typeof data.__studioGraphError === 'string' && event.source === this.frame.contentWindow) {
 				this.logLine(`VIEW ERROR: ${data.__studioGraphError}`);
 			}
 		});
-		// The view page's own boot signal (see view.html): the frame's load event fires before
-		// out.min.js has necessarily executed, so a preloaded page is only safe to talk to once
-		// this arrives.
+		// The view page's own boot signal (see the shim in graphPreload.ts): the frame's load
+		// event fires before out.min.js has necessarily executed, so a preloaded page is only
+		// safe to talk to once this arrives.
 		window.addEventListener('message', (event) => {
 			const data = event.data as { __studioGraphBooted?: boolean } | null;
 			if (data && typeof data.__studioGraphBooted === 'boolean' && event.source === this.frame.contentWindow) {
@@ -990,44 +989,38 @@ export class GraphHost {
 
 	/** Start the view page in the background for the folder the boot is about to open, so its
 	 *  bundle's fetch, parse and first data requests overlap the folder's own open sequence
-	 *  instead of serialising after it. The page is started with the one repository known
-	 *  synchronously (the boot's remembered folder); `mount` reconciles it with the real
-	 *  repository set - feeding it `loadRepos` when it is already running, reloading otherwise
-	 *  (the reload then hits warm HTTP and script caches). A page started for any other folder,
-	 *  or that never reports its bundle ran, is always reloaded, so a preload that misfires
-	 *  costs a little overlap work and nothing else. */
+	 *  instead of serialising after it. The page is the extension's own, generated with the one
+	 *  repository known synchronously (the boot's remembered folder); `mount` reconciles it
+	 *  with the real repository set - feeding it `loadRepos` when it is already running,
+	 *  regenerating otherwise (the generation then hits warm HTTP and script caches). A page
+	 *  started for any other folder, or that never reports its bundle ran, is always
+	 *  regenerated, so a preload that misfires costs a little overlap work and nothing else. */
 	preload(repoPath: string): void {
 		if (this.preloadRepo !== null) return;
-		let config: Record<string, unknown>;
-		try {
-			config = this.buildConfig();
-		} catch {
-			return; // no config bundle (tests): the preload has nothing to boot with
-		}
 		this.preloadRepo = repoPath;
-		const theme = themeById();
-		sessionStorage.setItem('ggstudio.initial', JSON.stringify({
-			initialState: {
-				config,
-				repos: { [repoPath]: state.repoState(repoPath) },
-				lastActiveRepo: repoPath,
-				loadViewTo: null,
-				loadRepoInfoRefreshId: 0,
-				loadCommitsRefreshId: 0,
-				backend: { platform: 'studio', engineAvailable: true, engineVersion: 'embedded', gitCliAvailable: true, capabilities: [] }
-			},
+		// The generator's absence (tests) rejects: the preload simply never starts, and the
+		// mount's own generation takes over.
+		void buildViewPageHtml({
+			settings: state.graphSettings(),
+			repos: { [repoPath]: state.repoState(repoPath) },
+			lastActiveRepo: repoPath,
+			loadViewTo: null,
 			globalState: state.globalViewState(),
-			workspaceState: state.workspaceViewState(),
-			theme: { css: theme.css, kind: theme.kind, label: theme.label }
-		}));
-		this.frame.src = '/gitgraph/view.html';
+			workspaceState: state.workspaceViewState()
+		}).then((html) => {
+			if (this.preloadRepo !== repoPath) return;
+			this.frame.removeAttribute('src');
+			this.frame.srcdoc = html;
+		}, () => {
+			if (this.preloadRepo === repoPath) this.preloadRepo = null;
+		});
 	}
 
 	/** The preloaded page's boot report: resolves `true` once out.min.js has executed there,
 	 *  `false` when its load failed, or `null` after a short grace (never answered - the mount
-	 *  then falls back to the plain reload). A page that finished booting before this host
-	 *  attached left its mark on its own window (view.html), which is read first - the boot
-	 *  message alone would have been missed. */
+	 *  then falls back to the plain regeneration). A page that finished booting before this
+	 *  host attached left its mark on its own window (the shim sets it), which is read first -
+	 *  the boot message alone would have been missed. */
 	private whenPreloadSettled(generation: number): Promise<boolean | null> {
 		if (this.preloadBooted !== null) {
 			return Promise.resolve(generation === this.loadGeneration ? this.preloadBooted : null);
@@ -1057,20 +1050,28 @@ export class GraphHost {
 		}
 	}
 
-	/** Load (or reload) the view for a repository. The page is the app's own
-	 *  /gitgraph/view.html (the extension is integrated: its assets ship with the app), and the
-	 *  mount runs asynchronously so the frame shows the page as soon as it is ready. A folder
-	 *  that is not a Git repository gets the placeholder with the Initialize button instead. */
+	/** Load (or reload) the view for a repository. The page is the extension's own, generated
+	 *  by its getHtmlForWebview (served as gitgraph/viewpage.js) and composed with the host
+	 *  environment by graphPreload.ts; the mount runs asynchronously so the frame shows the
+	 *  page as soon as it is ready. A folder that is not a Git repository gets the extension's
+	 *  own empty page (with its rescan button) - exactly what VS Code shows. */
 	load(repoPath: string | null, isRepo = true): void {
 		const switched = this.repoPath !== repoPath;
 		this.repoPath = repoPath;
 		this.isRepo = isRepo;
 		if (!isRepo || repoPath === null) {
 			this.currentRepo = null;
-			this.loadGeneration++;
+			const generation = ++this.loadGeneration;
 			this.uncommittedStabiliser.reset();
-			this.showPlaceholder(repoPath !== null);
 			this.loaded = false;
+			// The extension's own empty state, not a page of the app's own.
+			void buildViewPageHtml({ settings: state.graphSettings(), repos: {}, lastActiveRepo: null, loadViewTo: null, globalState: {}, workspaceState: {} })
+				.then((html) => {
+					if (generation !== this.loadGeneration) return;
+					this.frame.removeAttribute('src');
+					this.frame.srcdoc = html;
+				})
+				.catch((error) => this.logLine(`VIEW LOAD FAILED: ${String(error)}`));
 			return;
 		}
 		// A reload of the same folder keeps the repository the view had selected (a submodule,
@@ -1079,15 +1080,14 @@ export class GraphHost {
 			this.currentRepo = null;
 			// The uncommitted count of the previous repository says nothing about this one
 			this.uncommittedStabiliser.reset();
-			// The view's persisted state (written by the page's shim, see view.html) names the
-			// repository it last showed. Offered back to a freshly mounted page it becomes a
-			// loadViewTo into a repository set that does not contain it, and the view greets the
-			// switch with its "not currently included in Git Graph" error naming the previous
-			// repository. A switch starts from a clean slate; a reload of the same folder keeps
-			// the state, so the reader's place survives it.
+			// The view's persisted state (written by the page's shim, see graphPreload.ts)
+			// names the repository it last showed. Offered back to a freshly mounted page it
+			// becomes a loadViewTo into a repository set that does not contain it, and the view
+			// greets the switch with its "not currently included in Git Graph" error naming the
+			// previous repository. A switch starts from a clean slate; a reload of the same
+			// folder keeps the state, so the reader's place survives it.
 			sessionStorage.removeItem('ggstudio.viewState');
 		}
-		this.hidePlaceholder();
 		this.loaded = true;
 		const generation = ++this.loadGeneration;
 		void this.mount(repoPath, generation).catch((error) => this.logLine(`VIEW LOAD FAILED: ${String(error)}`));
@@ -1133,32 +1133,6 @@ export class GraphHost {
 		if (pendingRepo !== null && this.repos.includes(pendingRepo)) this.currentRepo = pendingRepo;
 		this.currentRepo ??= repoPath;
 		this.config = this.buildConfig();
-		const initialState = {
-			config: this.config,
-			lastActiveRepo: this.currentRepo,
-			loadViewTo: this.pendingFilterPath !== null ? { repo: repoPath, filterPath: this.pendingFilterPath } : null,
-			loadRepoInfoRefreshId: 0,
-			loadCommitsRefreshId: 0,
-			backend: { platform: 'studio', engineAvailable: true, engineVersion: 'embedded', gitCliAvailable: true, capabilities: [] }
-		};
-		// sessionStorage: per-window, so a second instance of the app (another window,
-		// another repository) cannot have its own mount overwrite this one's initial state.
-		// The view page reads it back on boot (static/gitgraph/view.html) - `theme` included so
-		// the page can link its own theme stylesheet up front and wait for it, instead of relying
-		// on this host inserting one later once the frame's `load` fires (too late for the
-		// view's first, synchronous read of the --vscode-* colour tokens: see applyFrameTheme).
-		const theme = themeById();
-		sessionStorage.setItem('ggstudio.initial', JSON.stringify({
-			initialState: { ...initialState, repos: this.repoStates() },
-			globalState: state.globalViewState(),
-			workspaceState: state.workspaceViewState(),
-			theme: { css: theme.css, kind: theme.kind, label: theme.label }
-		}));
-		// A (re)load re-reads the init state; the fresh page drops every cache. No
-		// cache-busting query: the page's freshness comes from the init state it reads on boot,
-		// and letting the webview cache the (multi-hundred-kilobyte) bundle makes every reload
-		// after the first one cheaper.
-		this.frame.removeAttribute('srcdoc');
 		if (!this.firstPageSeen) void invoke('boot_stage', { stage: 'graph view load started', pageMs: performance.now() }).catch(() => undefined);
 		// The preloaded page is already running this very repository: hand it the full
 		// repository set instead of paying the bundle's fetch and parse a second time.
@@ -1172,10 +1146,25 @@ export class GraphHost {
 				this.pendingFilterPath = null;
 				return;
 			}
-			// Never answered (or the bundle failed): the plain reload below recovers.
+			// Never answered (or the bundle failed): the plain generation below recovers.
 		}
 		this.preloadConsumed = true;
-		this.frame.src = '/gitgraph/view.html';
+		// The extension's own page over the full repository set: the initial state is embedded
+		// by the generator itself, so a fresh generation drops every cache the old page held.
+		// No cache-busting query of the app's own: the page's asset URLs carry the extension's
+		// per-session cache version, so the (multi-hundred-kilobyte) bundle is served from the
+		// browser cache on every generation after the first.
+		const html = await buildViewPageHtml({
+			settings: state.graphSettings(),
+			repos: this.repoStates(),
+			lastActiveRepo: this.currentRepo,
+			loadViewTo: this.pendingFilterPath !== null ? { repo: repoPath, filterPath: this.pendingFilterPath } : null,
+			globalState: state.globalViewState(),
+			workspaceState: state.workspaceViewState()
+		});
+		if (generation !== this.loadGeneration) return;
+		this.frame.removeAttribute('src');
+		this.frame.srcdoc = html;
 		this.pendingFilterPath = null;
 	}
 
@@ -1184,45 +1173,12 @@ export class GraphHost {
 		this.currentRepo = null;
 		this.loadGeneration++;
 		this.uncommittedStabiliser.reset();
-		this.showPlaceholder(false);
 		this.frame.removeAttribute('srcdoc');
 		this.frame.src = 'about:blank';
 		this.loaded = false;
-		// The warm preloaded page is gone with the folder; the next mount reloads.
+		// The warm preloaded page is gone with the folder; the next mount regenerates.
 		this.preloadRepo = null;
 		this.preloadConsumed = false;
-	}
-
-	/* ---------- The not-a-repository placeholder ---------- */
-
-	private placeholder: HTMLElement | null = null;
-
-	/** Cover the (blank) frame with the placeholder. `overFolder` says whether a folder is
-	 *  open (the Initialize button only makes sense then). */
-	private showPlaceholder(overFolder: boolean): void {
-		this.hidePlaceholder();
-		this.frame.removeAttribute('src');
-		this.frame.removeAttribute('srcdoc');
-		this.frame.src = 'about:blank';
-		// The preloaded view page (if any) is replaced by the blank document.
-		this.preloadRepo = null;
-		this.preloadConsumed = false;
-		if (!overFolder) return;
-		const button = el('button', 'button', ['Initialize Repository']);
-		button.addEventListener('click', () => this.delegate.initRepository());
-		this.placeholder = el('div', 'graph-placeholder', [
-			el('div', '', [
-				el('h2', '', ['Not a Git repository']),
-				el('p', '', ['The folder that is open does not contain a Git repository. Initialize one to see its graph, changes and branches here.']),
-				button
-			])
-		]);
-		this.element.appendChild(this.placeholder);
-	}
-
-	private hidePlaceholder(): void {
-		this.placeholder?.remove();
-		this.placeholder = null;
 	}
 
 	/** Ask the view to refresh (what the extension's file watcher triggers). */
@@ -1561,6 +1517,7 @@ export class GraphHost {
 			id: `graph:${leftRevision}:${oldPath}:${to}:${newPath}`,
 			title: `${basename(newPath)} (${description})`,
 			repo,
+			binaryNotice: true,
 			left: { revision: leftRevision, path: oldPath, label: abbrev(leftRevision), exists: type !== 'A' },
 			right: { revision: to, path: newPath, label: to === UNCOMMITTED ? 'Working Tree' : abbrev(to), exists: type !== 'D' }
 		});
@@ -1633,6 +1590,7 @@ export class GraphHost {
 					id: `graph:${hash}:${path}:*:${path}`,
 					title: `${basename(path)} (${abbrev(hash)} ↔ Present)`,
 					repo,
+					binaryNotice: true,
 					left: { revision: hash, path, label: abbrev(hash), exists: true },
 					right: { revision: UNCOMMITTED, path, label: 'Working Tree', exists: true }
 				});
@@ -1791,10 +1749,18 @@ export class GraphHost {
 			case 'fetchPullRequest':
 				return true;
 			case 'rescanForRepos': {
-				// The settings action: re-read the repository set (the open repository plus its
-				// submodules) and push it, exactly as the extension host did after a scan.
+				// The rescan action - the settings widget's, and the empty page's own button.
+				// A running view takes the fresh set over loadRepos, exactly as the extension
+				// host delivered it after a scan; the empty page cannot (no bundle is running
+				// there), and repositories having appeared is precisely the extension host's
+				// cue to write the page again - so this host regenerates it. An empty page
+				// with still no repositories stays as it is.
 				void this.refreshRepos().then(() => {
-					this.post({ command: 'loadRepos', repos: this.repoStates(), lastActiveRepo: this.currentRepo ?? this.repoPath, loadViewTo: null });
+					if (this.viewPageBooted()) {
+						this.post({ command: 'loadRepos', repos: this.repoStates(), lastActiveRepo: this.currentRepo ?? this.repoPath, loadViewTo: null });
+					} else if (this.isRepo && this.repos.length > 0 && this.repoPath !== null) {
+						this.load(this.repoPath, true);
+					}
 				});
 				return true;
 			}

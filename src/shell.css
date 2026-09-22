@@ -300,16 +300,11 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
    the diff. */
 .cm-merge-view > .cm-mergeView { height: 100%; }
 .editor-pane iframe { flex: 1; border: none; width: 100%; height: 100%; background: var(--vscode-editor-background); }
-/* The Git Graph host: the view's frame, with the not-a-repository placeholder over it. */
+/* The Git Graph host: the extension's own generated page in its frame. */
 .graph-host { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .graph-host iframe { flex: 1; }
-.graph-placeholder {
-	position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center;
-	background: var(--vscode-editor-background);
-}
-.graph-placeholder > div { max-width: 420px; padding: 0 24px; text-align: center; }
-.graph-placeholder h2 { font-size: 16px; font-weight: 400; margin: 0 0 6px; }
-.graph-placeholder p { font-size: 13px; line-height: 1.5em; color: var(--vscode-descriptionForeground); margin: 0 0 16px; }
+/* A Git Graph diff whose sides are binary - the native diff editor's binary placeholder. */
+.diff-binary-notice { padding: 16px; color: var(--vscode-descriptionForeground); }
 /* Extension-hosted webview panels: the iframe fills the tab pane outright. */
 .editor-pane.webview-panel-pane { display: flex; }
 .webview-panel-frame { flex: 1; border: none; width: 100%; height: 100%; background: var(--vscode-editor-background); }

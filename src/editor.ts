@@ -166,7 +166,7 @@ export interface DiffSide {
 
 export type EditorInput =
 	| { kind: 'file'; path: string }
-	| { kind: 'diff'; id: string; title: string; repo?: string; left: DiffSide; right: DiffSide }
+	| { kind: 'diff'; id: string; title: string; repo?: string; binaryNotice?: boolean; left: DiffSide; right: DiffSide }
 	| { kind: 'folders'; id: string; left: string; right: string }
 	| { kind: 'calltree'; id: string; symbol: WsSymbol }
 	| { kind: 'symboldb'; id: string }
@@ -1399,6 +1399,27 @@ export class EditorGroup {
 		this.attachTextServices(editor);
 	}
 
+	/** A Git Graph request whose sides turned out binary: the extension opens the native diff
+	 *  editor and VS Code shows binary sides as placeholders - the shell's diff editor answers
+	 *  with the same notice, substituting no other view for it. */
+	private openBinaryNoticeDiff(input: Extract<EditorInput, { kind: 'diff' }>): void {
+		const existing = this.open.find((e) => e.input.kind === 'diff' && e.input.id === input.id);
+		if (existing) {
+			this.activate(existing);
+			return;
+		}
+		const editor: Editor = {
+			input,
+			id: 'diff:' + input.id,
+			label: input.title,
+			iconClass: 'diff',
+			pane: el('div', 'editor-pane'),
+			dirty: false
+		};
+		editor.pane.appendChild(el('div', 'diff-binary-notice', [t('diff.binaryNotice')]));
+		this.add(editor);
+	}
+
 	/** A diff of two revisions of a file, as the SCM view and the Git Graph view request them. */
 	async openDiff(input: Extract<EditorInput, { kind: 'diff' }>): Promise<void> {
 		const existing = this.open.find((e) => e.input.kind === 'diff' && e.input.id === input.id);
@@ -1436,10 +1457,16 @@ export class EditorGroup {
 			return;
 		}
 		// A binary side that reached here was not a local-local pair (the probe above would
-		// have routed it to the hex comparison already), so at least one side is a revision:
-		// its bytes only exist as a blob, materialized here to a temp file so the same hex
-		// comparison can stream it like any file on disk.
+		// have routed it to the hex comparison already), so at least one side is a revision.
+		// A Git Graph request opens the diff editor with the binary placeholder notice - the
+		// extension opens the native diff editor, and that is what VS Code shows for binary
+		// sides; the shell's own surfaces (Source Control, file history) open the hex
+		// comparison, the bytes materialized to temp files it can stream.
 		if (left.binary || right.binary) {
+			if (input.binaryNotice === true) {
+				this.openBinaryNoticeDiff(input);
+				return;
+			}
 			const resolve = (side: DiffSide): Promise<string> =>
 				side.local ? Promise.resolve(side.path) : invoke<string>('materialize_revision_file', { repo: input.repo ?? '', revision: side.revision, path: side.path });
 			try {

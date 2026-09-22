@@ -273,10 +273,10 @@ behind an `acquireVsCodeApi` shim, over the in-process gix engine. **This module
 seams**; nothing outside it may touch the extension's artifacts or crate (see
 [Invariants](#invariants)).
 
-- Frontend: `src/graphHost.ts` (the TypeScript seam), `src/graphPreload.ts` (the boot
-  warmer — part of the seam: it names the view page and reads the config bundle to start
-  the page during the splash; it never speaks `graph_request`), `static/gitgraph/view.html`
-  (the CSS seam)
+- Frontend: `src/graphHost.ts` (the TypeScript seam), `src/graphPreload.ts` (the view page's
+  composer and boot warmer — part of the seam: it generates the extension's own page
+  (gitgraph/viewpage.js), composes it with the host environment and starts it during the
+  splash; it never speaks `graph_request`)
 - Backend: `src-tauri/src/cmd_graph.rs` (the Rust seam; + `cmd_graph/write_tests.rs`); the
   engine is `git-graph-core` from `vscode-git-graph-rs/native/core`
 
@@ -400,11 +400,12 @@ Everything that turns the source tree into installers: asset assembly into
 `target/studio/`, the seam checks, CI, and the Linux build containers.
 
 - Assets: `scripts/prepare.mjs` (assembles `target/studio/`), `scripts/compare-bundle.mjs`
-  (the Git Graph comparison bundles `prepare.mjs` builds from the extension's compiled CommonJS
-  output: the Commit Comparison page generator with the binary-area host machinery
-  `gitgraph/compare.js`, and the standalone Binary Compare page generator
-  `gitgraph/binarycompare.js`), `scripts/*-stub.cjs` (the `vscode` / Node stubs the config and
-  compare bundles build against; `hex-fs-stub.cjs` lazily proxies the hex machinery's `fs`
+  (the Git Graph page bundles `prepare.mjs` builds from the extension's compiled CommonJS
+  output: the view page generator `gitgraph/viewpage.js` — the extension's own
+  getHtmlForWebview — the Commit Comparison page generator with the binary-area host
+  machinery `gitgraph/compare.js`, and the standalone Binary Compare page generator
+  `gitgraph/binarycompare.js`), `scripts/*-stub.cjs` (the `vscode` / Node stubs the page
+  bundles build against; `hex-fs-stub.cjs` lazily proxies the hex machinery's `fs`
   calls to the adapter `graphHost.ts` installs), `vite.config.ts`
 - Seam checks: `scripts/check-seams.mjs` (TypeScript / CSS) and `src-tauri/build.rs` (Rust)
 - Packaging: `scripts/build-studio.bat` (Windows, one command). Linux installers are built
@@ -473,11 +474,14 @@ These are the rules that keep the codebase navigable and the coupling to the eng
 contained. The build enforces the first two; reviewers enforce the rest.
 
 **Seam rule — TypeScript and CSS (enforced by `scripts/check-seams.mjs`).**
-The extension's artifacts are consumed by exactly one module per language: `src/graphHost.ts`
+The extension's artifacts are consumed by exactly one seam: `src/graphHost.ts`
 is the only caller of the `graph_request` channel and the only namer of the extension's asset
-paths, and its boot warmer `src/graphPreload.ts` (which names the view page and reads the
-config bundle to start the page during the splash) is the only other file allowed those two
-patterns; `static/gitgraph/view.html` is the only loader of the webview bundle. The patterns
+paths, and its companion `src/graphPreload.ts` (which generates and composes the extension's
+own view page, and reads the config bundle for the warmed boot) is the only other file
+allowed those patterns. Every page the user sees — the view, the Commit Comparison, the
+Binary Compare — is the extension's own generated page; the app composes it with the host
+environment (theme tokens, `acquireVsCodeApi` shim, deferred script loading) instead of
+carrying a copy of it. The patterns
 `graph_request`, `gitgraph/`, `GitGraphStudioConfig`, `out.min` and `web/styles` may not
 appear anywhere else under `src/` or `static/`. The check runs on every `prepare.mjs`, every
 Vite build and dev-server start, and as vitest's global setup.
