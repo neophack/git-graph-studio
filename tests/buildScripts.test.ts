@@ -10,23 +10,37 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // @ts-expect-error - plain ESM scripts without type declarations
-import { ggxManifest } from '../scripts/build-ggx.mjs';
+import { ggxManifest } from '../plugins/git-graph-rs/build.mjs';
 // @ts-expect-error - plain ESM scripts without type declarations
 import { buildBuiltinContributions, buildBuiltinSettings } from '../scripts/builtin-contributions.mjs';
 // @ts-expect-error - plain ESM scripts without type declarations
 import { buildBinaryCompareBundle, buildCompareBundle, buildViewPageBundle } from '../scripts/compare-bundle.mjs';
 
 describe('.ggx packaging', () => {
-	it('writes a ggx/1 header with the frontend page — the shape cmd_ext.rs installs', () => {
+	it('writes a ggx/2 header with the page registry — the shape cmd_ext.rs installs', () => {
 		const pkg = { name: 'git-graph-rs', publisher: 'neophack', version: '1.0.23', displayName: 'Git Graph' };
 		const manifest = ggxManifest(pkg);
-		expect(manifest.format).toBe('ggx/1');
+		expect(manifest.format).toBe('ggx/2');
 		expect(manifest.id).toBe('neophack.git-graph-rs');
 		expect(manifest.version).toBe('1.0.23');
 		expect(manifest.frontend).toEqual({ kind: 'webview', page: 'web/view.html', config: 'web/config.js', compare: 'web/compare.js' });
+		// The named page registry: the package's openable page, by id.
+		expect(manifest.pages).toEqual({ view: { page: 'web/view.html' } });
 		expect(manifest.permissions).toContain('git:write');
-		// The header carries no process backend: the engine is linked into the app.
+		// Without a compiled backend the header stays frontend-only (the packer allows it);
+		// the app then reports the engine as "not installed" — it never links it itself.
 		expect('backend' in manifest).toBe(false);
+		// With one, the header declares the ggx-rpc/1 process backend the app spawns from the
+		// installed package — the only way the app reaches the engine.
+		const platform = `${process.platform}-${process.arch}`;
+		const exe = process.platform === 'win32' ? 'git-graph-backend.exe' : 'git-graph-backend';
+		const command = `backend/${platform}/${exe}`;
+		expect(ggxManifest(pkg, { backendPath: `target/studio/cargo/release/${exe}` }).backend).toEqual({
+			kind: 'process',
+			protocol: 'ggx-rpc/1',
+			command,
+			binaries: { [platform]: command }
+		});
 	});
 });
 
@@ -120,14 +134,50 @@ describe('the Git Graph comparison page bundles', () => {
 
 			// The view page generator: the extension's own getHtmlForWebview over the host's
 			// inputs - repository states, view states, media URIs mapped to the served copies.
+			// Its engine probe is the extension's own compiled backend/addon.js, in the shape
+			// the engine fold anchors to: without a host declaration it finds no .node binary
+			// (the fixture throws), with one it answers the in-process engine's version.
+			mkdirSync(join(dir, 'out', 'backend'), { recursive: true });
+			writeFileSync(join(dir, 'out', 'backend', 'addon.js'), [
+				'"use strict";',
+				'Object.defineProperty(exports, "__esModule", { value: true });',
+				'exports.isAddonAvailable = exports.loadAddon = exports.platformKey = void 0;',
+				'const path = require("path");',
+				'let cached = null;',
+				'function platformKey(platform = process.platform, arch = process.arch) {',
+				'    return platform + \'-\' + arch;',
+				'}',
+				'function loadAddon(root = path.join(__dirname, \'..\', \'..\')) {',
+				'    if (cached !== null)',
+				'        return cached;',
+				'    throw new Error("no native engine in the fixture");',
+				'}',
+				'function isAddonAvailable(root) {',
+				'    try {',
+				'        loadAddon(root);',
+				'        return true;',
+				'    }',
+				'    catch (_a) {',
+				'        return false;',
+				'    }',
+				'}',
+				'exports.platformKey = platformKey;',
+				'exports.loadAddon = loadAddon;',
+				'exports.isAddonAvailable = isAddonAvailable;',
+				''
+			].join('\n'));
 			writeFileSync(join(dir, 'out', 'gitGraphView.js'), [
 				'"use strict";',
 				'Object.defineProperty(exports, "__esModule", { value: true });',
 				'exports.GitGraphView = void 0;',
+				'const addon_1 = require("./backend/addon");',
 				'class GitGraphView {',
 				'	getHtmlForWebview() {',
 				'		const repos = Object.keys(this.repoManager.getRepos());',
+				'		const engineAvailable = addon_1.isAddonAvailable();',
+				'		const engineVersion = engineAvailable ? addon_1.loadAddon().engineVersion() : null;',
 				'		return "<!DOCTYPE html><html lang=\\"en\\"><head></head><body>fixture view " + repos.length + " repo(s), active " + this.extensionState.getLastActiveRepo() +',
+				'			", engine " + engineAvailable + " v" + engineVersion + " on " + addon_1.platformKey() +',
 				'			", media " + this.panel.webview.asWebviewUri({ fsPath: "media\\\\out.min.js" }).toString() + "</body></html>";',
 				'	}',
 				'}',
@@ -136,11 +186,23 @@ describe('the Git Graph comparison page bundles', () => {
 			].join('\n'));
 			const viewOutfile = join(dir, 'gitgraph', 'viewpage.js');
 			await buildViewPageBundle({ root: dir, patchedOut: join(dir, 'compare-src'), outfile: viewOutfile });
-			new Function(readFileSync(viewOutfile, 'utf8'))();
+			const viewBundle = readFileSync(viewOutfile, 'utf8');
+			// The banner bakes the build host's platform into the process shim, so the page's
+			// platform reporting is the app's own rather than 'browser-undefined'.
+			expect(viewBundle).toMatch(new RegExp('platform:\\s*' + JSON.stringify(process.platform).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ','));
+			new Function(viewBundle)();
 			const view = (globalThis as { GitGraphViewPage?: { buildViewPage(options: Record<string, unknown>): string } }).GitGraphViewPage;
 			expect(view).toBeDefined();
+			const withEngine = '<!DOCTYPE html><html lang="en"><head></head><body>fixture view 1 repo(s), active C:\\repo' +
+				', engine true v9.9.9 on ' + process.platform + '-' + process.arch + ', media /gitgraph/out.min.js</body></html>';
+			// The undeclared host first: the probe stands as written, and no earlier generation
+			// has cached an engine into the module.
 			expect(view!.buildViewPage({ settings: {}, repos: { 'C:\\repo': {} }, lastActiveRepo: 'C:\\repo', loadViewTo: null, globalState: {}, workspaceState: {} }))
-				.toBe('<!DOCTYPE html><html lang="en"><head></head><body>fixture view 1 repo(s), active C:\\repo, media /gitgraph/out.min.js</body></html>');
+				.toBe('<!DOCTYPE html><html lang="en"><head></head><body>fixture view 1 repo(s), active C:\\repo, engine false vnull on ' + process.platform + '-' + process.arch + ', media /gitgraph/out.min.js</body></html>');
+			// With the engine version the app resolves: the folded probe answers the in-process
+			// engine, and the page reports it as loaded.
+			expect(view!.buildViewPage({ settings: {}, repos: { 'C:\\repo': {} }, lastActiveRepo: 'C:\\repo', loadViewTo: null, globalState: {}, workspaceState: {}, engineVersion: '9.9.9' }))
+				.toBe(withEngine);
 		} finally {
 			delete (globalThis as { GitGraphCompare?: unknown }).GitGraphCompare;
 			delete (globalThis as { GitGraphBinaryCompare?: unknown }).GitGraphBinaryCompare;

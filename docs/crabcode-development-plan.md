@@ -232,7 +232,7 @@ Release numbers on 20,000 files (Windows, NVMe): walk 30 ms, raw read 938 ms, se
 | Task | What landed |
 |---|---|
 | M1.6 frontend splitting | The text editor widget is `textEditor.ts`, loaded on the first file / diff open (`lazy.ts`); xterm and `@codemirror/merge` are async chunks too; Vite emits `dist/first-paint.json` (the static closure of the boot entry + workbench) and `measure.mjs` gates it: **902 KB → 200 KB** first paint (workbench 173 KB + Tauri API 16 KB + boot 9 KB); `tests/lazy.test.ts` guards the module graph |
-| **git-graph-rs as a `.ggx` plugin** (§8.2) — *monorepo only; not carried into this repository, see the status note in §8.2* | `app/src-tauri` is a library + two binaries: the app (`desktop` feature) and **`git-graph-backend`** (no Tauri: the engine seam + git runner behind `ggx-rpc/1`, `src/bin/git-graph-backend.rs`, 3.9 MB release). `plugin_host.rs` spawns the installed package's binary, pairs answers by id, streams its `log` events and stderr into the panel's Git channel, restarts it after a crash, and `graph_request` forwards to it (falling back in-process when it is unhealthy). `cmd_ext` installs `.ggx` next to VSIX (same upgrade rules, platform binary resolved, `format` / `backend` on `ExtInfo`); `install_bundled` prefers the `.ggx`. `scripts/build-ggx.mjs` packs `web/` + `backend/<platform>/` + manifests (2.2 MB, replaces the slim VSIX); `prepare.mjs` bundles it (`--with-backend` on release builds). `graphHost.ts` loads the view page, `config.js` and `compare.js` **from the installed package** (same-origin `srcdoc` + blob URLs, `/gitgraph/` as the fallback). The Extensions page shows the format and the backend's pid / protocol / last error with a Restart button. Tests: `backend_rpc.rs` (protocol), `tests/backend_rpc.rs` (the real process: reads, a write with its log event, a 6-way burst, stop / restart), `cmd_ext::ggx_tests`, `graphAssets.test.ts`, `extensions.test.ts` |
+| **git-graph-rs as a `.ggx` plugin** (§8.2) — *the engine-as-backend-process split described below is now carried into this repository too (2026-09-22, fourth round) — see §8.2's status note for exactly how this repository's implementation differs (a generalized `ext_process.rs` host instead of a dedicated `plugin_host.rs` process manager, `__`-prefixed synthetic commands instead of the clean method names below, `graphHost.ts` unchanged rather than loading from the installed package). The row below otherwise describes the monorepo's own original implementation.* | `app/src-tauri` is a library + two binaries: the app (`desktop` feature) and **`git-graph-backend`** (no Tauri: the engine seam + git runner behind `ggx-rpc/1`, `src/bin/git-graph-backend.rs`, 3.9 MB release). `plugin_host.rs` spawns the installed package's binary, pairs answers by id, streams its `log` events and stderr into the panel's Git channel, restarts it after a crash, and `graph_request` forwards to it (falling back in-process when it is unhealthy). `cmd_ext` installs `.ggx` next to VSIX (same upgrade rules, platform binary resolved, `format` / `backend` on `ExtInfo`); `install_bundled` prefers the `.ggx`. `scripts/build-ggx.mjs` packs `web/` + `backend/<platform>/` + manifests (2.2 MB, replaces the slim VSIX); `prepare.mjs` bundles it (`--with-backend` on release builds). `graphHost.ts` loads the view page, `config.js` and `compare.js` **from the installed package** (same-origin `srcdoc` + blob URLs, `/gitgraph/` as the fallback). The Extensions page shows the format and the backend's pid / protocol / last error with a Restart button. Tests: `backend_rpc.rs` (protocol), `tests/backend_rpc.rs` (the real process: reads, a write with its log event, a 6-way burst, stop / restart), `cmd_ext::ggx_tests`, `graphAssets.test.ts`, `extensions.test.ts` |
 
 ### 1.4 The headline gaps (after 2026-09-13)
 
@@ -607,20 +607,96 @@ VSIX compatibility (above) is for the existing ecosystem. GGS's *own* plugin for
 
 ### 8.2 The `.ggx` package, as shipped (ggx/1)
 
-> **Status in this repository (2026-09-15).** The design below was landed in the monorepo's
-> `app/` tree, but the process backend did not come across in the split into this repository:
-> there is no `src/bin/git-graph-backend.rs`, `backend_rpc.rs` or `plugin_host.rs`, and
-> `Cargo.toml` builds one binary (`git-graph-studio`). What ships today is the **in-process**
-> engine behind the single seam (`cmd_graph.rs` / `graphHost.ts`); `cmd_ext.rs` installs
-> frontend-only `ggx/1` packages (`manifest.json` header + `web/`) and lists git-graph-rs as a
-> built-in whose version follows the app. The process backend (`backend` header, `ggx-rpc`,
-> host restart) is the M6 target, not the current state — `README.md` → *Extensions*
-> describes the shipped behaviour.
+> **Status in this repository (updated 2026-09-22, fourth round — the monorepo M6 split
+> carried in).** The engine no longer links into `git-graph-studio` at all: `git-graph-core`
+> is an `optional` dependency reachable only through the `engine` Cargo feature, which only
+> `git-graph-backend`'s `required-features` turns on (`src-tauri/Cargo.toml`; `cargo tree -e
+> normal` on the default build shows no `git-graph-core`). `cmd_graph.rs`'s engine-touching
+> code lives in `cmd_graph/engine_impl.rs`, `#[cfg(feature = "engine")]`, still the only file
+> family that names the crate (`build.rs`'s seam check now exempts the whole `cmd_graph/`
+> directory, not just the one file). Every other backend module keeps calling the same
+> wrapper functions it always has (`cmd_graph::resolve_repo_root`, `scm_changes`,
+> `revision_file`, `revision_file_bytes`, `submodule_roots`, `close_engine_repos`,
+> `load_first_page`, `warm_first_page`) — their signatures did not change, only what they do
+> internally: each now sends a `plugin_host::request` to the installed backend instead of
+> calling the engine directly.
+>
+> **Two wire protocols, not one.** `ggs-ext/1` (`ggx_protocol.rs`) stayed as designed —
+> command-style plugins, `serve_plugin`'s one-request-at-a-time loop — because rewriting it to
+> match this section's `ggx-rpc/1` design exactly would have meant editing already-shipped,
+> third-party-facing protocol code. The graph engine speaks a second, purpose-built protocol,
+> `backend_rpc.rs`, structurally close to what this section specifies (`hello` / `request` /
+> `closeRepos` / `shutdown`, push events `log` / `ready`) but framed as plain `{"id","method",
+> "params"}` lines rather than this section's exact shapes, and dispatched thread-per-`request`
+> (`serve_backend`) so the view's concurrent-read burst is never serialized. The host side
+> reuses `ext_process.rs`'s existing process-lifecycle plumbing (spawn, crash isolation, the
+> pending-call map) rather than a separate `plugin_host.rs`-owned process manager — a
+> `ProcKind` discriminant branches the four points that actually differ between the two
+> protocols. `plugin_host.rs` is a thin typed facade on top (`request` / `close_repos` /
+> `hello`), plus the bundled-install race's bounded wait this section describes.
+>
+> **The synthetic commands are `__`-prefixed, not the clean `repoRoot`/`scmStatus`/
+> `revisionFile`/`firstPage` methods this section names.** `cmd_fs.rs`/`cmd_scm.rs`/`lib.rs`'s
+> non-view callers, and the Gerrit refresh pipeline's engine-touching steps, wrap a synthetic
+> `command` (`__repoRoot`, `__scmChanges`, `__revisionFile`, `__revisionFileBytes`,
+> `__loadFirstPage`, `__warmFirstPage`, `__closeAfterWrite`, `__gerritMarkStale`,
+> `__gerritClearCache`, `__gerritLocalRebuildCount`, `__gerritRemoteUrl`,
+> `__gerritParseChanges`, `__gerritLocalChangeRefs`, `__gerritCacheFinalize`) inside the same
+> `request` verb the view's own messages use, rather than growing the wire protocol's method
+> set — `git-graph-backend/main.rs`'s dispatch checks for one of these first, falling through
+> to `engine_impl::engine_read` (the view's own protocol) otherwise.
+>
+> **Gerrit is genuinely split, not just proxied.** The cache (`GERRIT_CACHE`, parsed
+> `GerritChangeState` values) moved into `engine_impl.rs`; the network half
+> (`gerrit_refresh`'s `git ls-remote` / `git fetch` / the change-ref prune, plus every pure
+> string-parsing helper: change-ref/URL formats, the fetch-window arithmetic) stayed host-side
+> in `cmd_graph.rs`, now round-tripping to the backend once per adaptive-sampling-window
+> iteration instead of calling the engine in-process mid-loop.
+>
+> **The app installs no plugin by default.** The integrated git-graph-rs ships as the bundled
+> `.ggx` the installer carries (`extensions/git-graph-rs.ggx` beside the app — `prepare.mjs`
+> builds `git-graph-backend` in release first, then packs it into
+> `target/studio/bundled/app-resources/` for `tauri.conf.json`'s `bundle.resources`), and the
+> Extensions view's integrated entry offers it as a **one-click install**
+> (`cmd_ext::ext_install_bundled`) that lands it like any user `.ggx`: forward-only,
+> uninstallable, a standard package. **Boot auto-install is a known remaining gap**: nothing
+> in `lib.rs`'s `setup()` calls `ext_install_bundled` automatically yet (verified: no call
+> site), so a fresh profile has no Git Graph view, no SCM status and no file-at-revision until
+> a user visits Extensions and installs by hand once — landing that call, guarded so it only
+> fires when git-graph-rs isn't already installed, is the next piece of this work, not
+> optional polish. **Install means run**: the boot pass starts every installed package that
+> declares a backend (`start_all_installed`, off the window's thread), an install starts its
+> backend at once, the first command remains the lazy fallback, and the Extensions view shows
+> each backend's state (pid, start count, last error) with a Restart button — **the plugin
+> detail view (install path, declared backend, permissions) is not yet built**; `ExtInfo.path`
+> / `.ggx?.backend` / `.ggx?.permissions` exist on the type but nothing in
+> `extensionsPanel.ts` renders them. **Multiple app instances are independent by
+> construction** — each launch spawns and owns only its own backends, every child is told its
+> owner through `GGS_INSTANCE_ID`, and on exit every backend this instance spawned is stopped;
+> a package whose directory another window's backend still holds refuses its uninstall with a
+> close-that-window hint.
+>
+> **Every plugin's files live in its own folder under `plugins/`** (not scattered across
+> `src-tauri/src/bin/` and inline script strings): `plugins/ggs-ext-demo/` (`package.json`,
+> `web/view.html`, `src/main.rs` — the reference `ggs-ext/1` plugin) and
+> `plugins/git-graph-rs/` (`src/main.rs` the backend, `build.mjs` its own packer, plus
+> `package.json`/`README.md`; its frontend is the `vscode-git-graph-rs` submodule, which
+> cannot move into a plugin folder). Each is its own `[[bin]]` in `src-tauri/Cargo.toml`.
+> `scripts/build-ggx-demo.mjs` packs the demo; `plugins/git-graph-rs/build.mjs` packs
+> git-graph-rs; `scripts/build-plugins.bat` builds every plugin's `.ggx` independently of
+> the app build.
+>
+> **perf.rs / measure.rs**: not yet rewired to route through a spawned backend (both call the
+> same `cmd_graph` wrapper functions production code uses, so they compile and run unchanged,
+> but under a plain `cargo test` with no backend installed they exercise the "not installed"
+> degradation path, same as a non-repository folder, rather than the real engine numbers this
+> section's Performance paragraph quotes) — that rewiring, and a fresh measured "this
+> repository" entry in §4, is this milestone's last piece.
 
 git-graph-rs is the first `.ggx`: **frontend and backend in one package**, installed and upgraded like any extension, the backend running as its own process.
 
 ```
-git-graph-rs-1.0.23.ggx                       (zip; scripts/build-ggx.mjs)
+git-graph-rs-1.0.23.ggx                       (zip; plugins/git-graph-rs/build.mjs)
   manifest.json                               the ggx header (below)
   package.json, package.nls*.json             the VS Code-style manifest: contribution points, NLS, icon
   README.md, LICENSE.txt, licenses/, resources/
@@ -636,7 +712,7 @@ git-graph-rs-1.0.23.ggx                       (zip; scripts/build-ggx.mjs)
   "permissions": ["repo:read", "git:write", "clipboard", "terminal", "network"] }
 ```
 
-**Install** (`cmd_ext::install_from_ggx_into`): into `~/.ggs/extensions/<id>-<version>/`, the same store as VSIX; forward-only upgrades (a `.ggx` replaces a same-version `.vsix`); the platform's binary is validated and made executable; `studio-ext.json` records `format: "ggx"`. The app's bundled copy installs as built-in on first launch; a user-installed newer `.ggx` takes over the graph immediately (the backend restarts, the page reloads from the new `web/`).
+**Install** (`cmd_ext::install_from_ggx_into`): into `~/.ggs/extensions/<id>-<version>/`, the same store as VSIX; forward-only upgrades (a `.ggx` replaces a same-version `.vsix`); the platform's binary is validated and made executable; `studio-ext.json` records `format: "ggx"`. Nothing installs by default: the integrated entry's one-click install (`ext_install_bundled`) is how the bundled copy lands, as a standard uninstallable package; a user-installed newer `.ggx` takes over the listing immediately (the backend — for a package that has one — restarts, the page reloads from the new `web/`).
 
 **Backend protocol `ggx-rpc/1`** (`src-tauri/src/backend_rpc.rs`): newline-delimited JSON on stdin / stdout. Host → backend: `{"id","method":"hello"}`, `{"id","method":"request","repo","message","settings"}` (one `RequestMessage` of the view), `{"id","method":"closeRepos"}`, `{"id","method":"shutdown"}`. Backend → host: `{"id","result"}` / `{"id","error"}`, and events `{"event":"log","line":"> git fetch [120ms]"}` (git's command echo, folded into the panel's Git channel and the session log) and `{"event":"ready"}`. Requests are concurrent (a thread each in the backend), answers are paired by id; stderr is folded into the log as `[plugin] …`.
 

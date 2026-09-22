@@ -17,7 +17,7 @@ import { registerContextProvider } from './contributions';
 import { EditorArea } from './editorArea';
 import { ENCODING_LABELS } from './editor';
 import { Explorer } from './explorer';
-import { ExtensionHost, GIT_GRAPH_RS_EXT_ID } from './extHost';
+import { ExtensionHost, extTitle, GIT_GRAPH_RS_EXT_ID, type ExtInfo } from './extHost';
 import { ExtensionsPanel } from './extensionsPanel';
 import { registerGitCommands } from './gitCommands';
 import { binaryCompareTitle, GraphHost } from './graphHost';
@@ -81,6 +81,8 @@ const GIT_GRAPH_RS_SCM_COMMANDS: Record<string, string> = {
 };
 
 export class Workbench {
+	/** Serial for extension page tabs: every open of a ggx page is its own instance. */
+	private static extPageSerial = 0;
 	private readonly activityBar = document.getElementById('activitybar')!;
 	private readonly sidebar = document.getElementById('sidebar')!;
 	private readonly sidebarSash = document.getElementById('sidebarSash')!;
@@ -177,7 +179,13 @@ export class Workbench {
 			// menus build lazily at open time and the palette reads the registry on open.
 			void this.scm.refresh();
 		};
+		// An extension page opens in an editor tab (module 12's ggx pages — VS Code's webview
+		// panels): the host resolves and mounts the frame, the workbench owns the tab.
+		this.extensionHost.onOpenPage = (extId, pageId, params) => this.openExtPage(extId, pageId, params);
 		this.extensions = new ExtensionsPanel(this.views.extensions, this.extensionHost);
+		// A row's click opens the extension's detail page (VS Code's extension editor) in an
+		// editor tab — the panel owns the page's content, the workbench owns the tab.
+		this.extensions.onOpenDetail = (ext) => this.openExtensionDetail(ext);
 		this.editors = new EditorArea(document.getElementById('editorGroup')!);
 		this.panel = new Panel(this.panelElement);
 		this.statusBar = new StatusBar(document.getElementById('statusbar')!);
@@ -293,7 +301,7 @@ export class Workbench {
 		register({ id: 'editor.callTree', title: 'Show Call Tree', category: 'Go', enabled: () => this.editors.activeView !== null, run: () => void this.editors.openCallTreeAtCursor() });
 		register({ id: 'editor.toggleBookmark', title: 'Toggle Bookmark', category: 'Edit', keybinding: 'Ctrl+Alt+B', enabled: () => this.editors.activeInput?.kind === 'file', run: () => void this.toggleBookmark() });
 		register({ id: 'editor.listBookmarks', title: 'List Bookmarks', category: 'Edit', keybinding: 'Ctrl+Alt+K', run: () => void this.listBookmarks() });
-		register({ id: 'extensions.installFromVsix', title: 'Install Extension from VSIX...', category: 'Extensions', run: () => { this.showView('extensions'); void this.extensions.installFromVsixCommand(); } });
+		register({ id: 'extensions.installFromGgx', title: 'Install Extension from GGX...', category: 'Extensions', run: () => { this.showView('extensions'); void this.extensions.installFromGgxCommand(); } });
 		register({ id: 'workbench.showGraph', title: 'Git Graph', category: 'View', enabled: hasRepo, run: () => this.openGraph() });
 		register({ id: 'git.initRepository', title: 'Initialize Repository', category: 'Git', enabled: () => this.repoPath !== null && !this.isRepo, run: () => void this.initializeRepository() });
 		register({ id: 'workbench.toggleSidebar', title: 'Toggle Primary Side Bar', category: 'View', keybinding: 'Ctrl+B', run: () => this.toggleSidebar() });
@@ -507,6 +515,7 @@ export class Workbench {
 		graphIcon.src = '/icons/git-graph.svg';
 		graphIcon.alt = '';
 		add('graph', graphIcon, 'Git Graph', () => this.openGraph());
+		add('extensions', icon('extensions'), 'Extensions (Ctrl+Shift+X)', () => this.toggleView('extensions'));
 		this.activityBar.appendChild(el('div', 'activity-spacer'));
 		add('terminal', icon('terminal'), 'Terminal (Ctrl+`)', () => this.panel.toggle('terminal'));
 		add('open', icon('folder-opened'), 'Open Folder... (Ctrl+O)', () => void this.pickFolder());
@@ -526,7 +535,7 @@ export class Workbench {
 			state.saveLayout();
 		}
 		if (!state.layout.sidebarVisible) this.activityItems[this.activeView]?.classList.remove('active');
-		for (const id of ['explorer', 'search', 'scm', 'analysis']) this.activityItems[id]?.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
+		for (const id of ['explorer', 'search', 'scm', 'analysis', 'extensions']) this.activityItems[id]?.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
 		this.installSash(this.sidebarSash, 'horizontal', (delta, start) => {
 			state.layout.sidebarWidth = Math.max(170, Math.min(window.innerWidth - 400, start + delta));
 			this.sidebar.style.width = `${state.layout.sidebarWidth}px`;
@@ -581,7 +590,7 @@ export class Workbench {
 		this.sidebar.hidden = false;
 		this.sidebarSash.hidden = false;
 		for (const [id, element] of Object.entries(this.views)) element.style.display = id === view ? 'flex' : 'none';
-		for (const [id, item] of Object.entries(this.activityItems)) if (id === 'explorer' || id === 'search' || id === 'scm' || id === 'analysis') item.classList.toggle('active', id === view);
+		for (const [id, item] of Object.entries(this.activityItems)) if (id === 'explorer' || id === 'search' || id === 'scm' || id === 'analysis' || id === 'extensions') item.classList.toggle('active', id === view);
 		state.saveLayout();
 		if (view === 'scm') void this.scm.refresh();
 		if (view === 'extensions') void this.extensions.refresh();
@@ -618,7 +627,7 @@ export class Workbench {
 		state.layout.sidebarVisible = !state.layout.sidebarVisible;
 		this.sidebar.hidden = !state.layout.sidebarVisible;
 		this.sidebarSash.hidden = !state.layout.sidebarVisible;
-		for (const id of ['explorer', 'search', 'scm', 'analysis']) this.activityItems[id]?.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
+		for (const id of ['explorer', 'search', 'scm', 'analysis', 'extensions']) this.activityItems[id]?.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
 		state.saveLayout();
 	}
 
@@ -632,6 +641,29 @@ export class Workbench {
 		}
 		this.editors.openGraph();
 		if (repo) this.graph.switchRepo(repo);
+	}
+
+	/** An extension page (module 12): one of an installed `ggx` package's pages in an editor
+	 *  tab — the workbench's half of the extension host's `onOpenPage`, VS Code's webview
+	 *  panel counterpart. Every open is its own tab (the serial keeps them apart). */
+	openExtPage(extId: string, pageId: string, params?: unknown): void {
+		const entry = this.extensionHost.pageEntry(extId, pageId);
+		if (!entry) return; // the host already warned; nothing to open
+		const serial = ++Workbench.extPageSerial;
+		void this.editors.openExtPage(
+			{ kind: 'extpage', id: `extpage:${extId}:${pageId}:${serial}`, title: entry.title ?? pageId, extId, pageId, params },
+			(pane) => this.extensionHost.mountPage(extId, pageId, params, pane)
+		);
+	}
+
+	/** The Extensions view's detail page (module 12): a package's facts and README in an
+	 *  editor tab — one per extension id, so a second open focuses the tab already showing
+	 *  it (VS Code's extension editor behavior). */
+	private openExtensionDetail(ext: ExtInfo): void {
+		this.editors.openExtDetail(
+			{ kind: 'extdetail', id: `extdetail:${ext.id}`, title: extTitle(ext), extId: ext.id },
+			(pane) => this.extensions.mountDetail(ext, pane)
+		);
 	}
 
 	/** Git Graph RS: Show File History in Git Graph - the view filtered to `explicitPath` (the
@@ -1317,7 +1349,7 @@ export class Workbench {
 		this.sidebar.hidden = true;
 		this.sidebarSash.hidden = true;
 		if (this.panel.isVisible()) this.panel.toggle();
-		for (const id of ['explorer', 'search', 'scm', 'analysis']) this.activityItems[id]?.classList.remove('active');
+		for (const id of ['explorer', 'search', 'scm', 'analysis', 'extensions']) this.activityItems[id]?.classList.remove('active');
 		state.saveLayout();
 		document.title = `${basename(path)} - Git Graph Studio`;
 		this.titleBar.setFolderName(basename(path));

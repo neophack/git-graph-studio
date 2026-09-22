@@ -36,6 +36,12 @@ const scriptsDir = dirname(fileURLToPath(import.meta.url));
  *  (`copy`) and base64-encodes (`toString('base64')`) blob chunks, and none of that exists on a
  *  bare Uint8Array. The class keeps every view a Buffer instance (TypedArray species
  *  construction), so `subarray` results encode and compare the same way. */
+// The Node globals the compiled machinery sees, with the platform and arch of the machine this
+// bundle is built on baked in (prepare.mjs builds on the machine that ships the app, so they are
+// the app's own): the extension's platform reporting - the Settings page's backend section - and
+// its engine-directory lookup read `process.platform`/`process.arch`, and 'browser-undefined'
+// would be a lie about a host that runs the engine in-process on win32-x64 (or the build host's
+// real platform). When a real `process` exists (Node, the test harness) it stands, as before.
 const BROWSER_GLOBALS_BANNER = `var Buffer = globalThis.Buffer || (function () {
 	class Buffer extends Uint8Array {
 		static alloc(length, fill) { var b = new Buffer(length); if (fill !== undefined) b.fill(fill); return b; }
@@ -56,8 +62,32 @@ const BROWSER_GLOBALS_BANNER = `var Buffer = globalThis.Buffer || (function () {
 	}
 	return Buffer;
 })();
-var process = globalThis.process || { env: {}, platform: 'browser', nextTick: function (f) { Promise.resolve().then(f); } };
+var process = globalThis.process || { env: {}, platform: ${JSON.stringify(process.platform)}, arch: ${JSON.stringify(process.arch)}, nextTick: function (f) { Promise.resolve().then(f); } };
 var global = globalThis;`;
+
+/** Folds applied to individual patched copies beyond the shared original-fs one. The anchors are
+ *  checked, not searched for loosely: a submodule update that moves one fails this build loudly
+ *  rather than silently shipping an unadapted bundle.
+ *
+ *  The engine probe fold: the extension's engine-loading layer (backend/addon.js) decides "is
+ *  there a native engine on this machine" by probing for a `.node` binary beside the extension -
+ *  true in VS Code, false in this app, where the very same engine is linked in-process behind the
+ *  graph_request seam. The host declares it per page generation as
+ *  globalThis.__ggsInProcessEngine (set by the viewpage wrapper from the backend's engine
+ *  version), and the probe folds to that declaration so the page's own Settings backend section
+ *  reports the engine that actually serves it. Without a declaration the original probe stands.
+ *  The signature folds too: its default parameter reads `__dirname`, which does not exist in a
+ *  browser and would throw before any body statement could run - the default is restored below
+ *  the early return, so undeclared environments probe exactly as before. */
+const FILE_FOLDS = {
+	'backend/addon.js': [{
+		find: "function loadAddon(root = path.join(__dirname, '..', '..')) {",
+		replace: "function loadAddon(root) {\n" +
+			"    var inProcessEngine = globalThis.__ggsInProcessEngine;\n" +
+			"    if (inProcessEngine !== undefined) { cached = { engineVersion: function () { return inProcessEngine.version; } }; return cached; }\n" +
+			"    if (root === undefined) root = path.join(__dirname, '..', '..');"
+	}]
+};
 
 /** Rewrite the extension's compiled out/ into `patchedOut` as bundleable CommonJS: the
  *  Electron `original-fs` fallback wrapper folded back to the plain require, under a
@@ -78,9 +108,16 @@ function patchCompiledOut(root, patchedOut) {
 			if (entry.isDirectory()) {
 				patchCopies(join(dir, entry.name));
 			} else if (entry.name.endsWith('.js')) {
-				const text = readFileSync(join(dir, entry.name), 'utf8');
-				writeFileSync(join(targetDir, entry.name),
-					text.split('requireWithFallback("original-fs", "fs")').join('require("fs")'));
+				let text = readFileSync(join(dir, entry.name), 'utf8');
+				text = text.split('requireWithFallback("original-fs", "fs")').join('require("fs")');
+				const fileKey = relative(compiledOut, join(dir, entry.name)).split('\\').join('/');
+				for (const fold of FILE_FOLDS[fileKey] ?? []) {
+					if (!text.includes(fold.find)) {
+						throw new Error(`the viewpage fold anchor is gone from ${fileKey} - the submodule's engine-loading layer changed: ${JSON.stringify(fold.find)}`);
+					}
+					text = text.replace(fold.find, fold.replace);
+				}
+				writeFileSync(join(targetDir, entry.name), text);
 			}
 		}
 	})(compiledOut);
@@ -212,6 +249,11 @@ export async function buildViewPageBundle({ root, patchedOut, outfile }) {
 					// the stored overrides through the stub's configuration, exactly as the app's
 					// config bundle does.
 					globalThis.__gitGraphStudioOverrides = options.settings || {};
+					// The engine the app links in-process (see FILE_FOLDS): declared for the
+					// addon probe whenever the host knows its version, cleared otherwise so a
+					// generation without it can never report the previous one.
+					if (typeof options.engineVersion === 'string') globalThis.__ggsInProcessEngine = { version: options.engineVersion };
+					else delete globalThis.__ggsInProcessEngine;
 					const fake = Object.create(GitGraphView.prototype);
 					fake.extensionPath = '';
 					fake.loadViewTo = options.loadViewTo || null;

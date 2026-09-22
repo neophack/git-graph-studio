@@ -657,6 +657,11 @@ export class EditorArea {
 	openCallTreeAtCursor = () => this.activeGroup.openCallTreeAtCursor();
 	openSymbolDatabase = () => this.activeGroup.openSymbolDatabase();
 	openAnalysisPage = (tool: import('./analysisTools').AnalysisToolId) => this.activeGroup.openAnalysisPage(tool);
+	/** An extension page tab (module 12): mounts through the active group, like every other
+	 *  custom editor kind. */
+	openExtPage = (input: import('./editor').EditorInput & { kind: 'extpage' }, mount: (pane: HTMLElement) => (() => void) | void) => this.activeGroup.openExtPage(input, mount);
+	/** The Extensions view's detail page tab (module 12): the same mounting path. */
+	openExtDetail = (input: import('./editor').EditorInput & { kind: 'extdetail' }, mount: (pane: HTMLElement) => (() => void) | void) => this.activeGroup.openExtDetail(input, mount);
 	gotoSymbolInFile = () => this.activeGroup.gotoSymbolInFile();
 	lineInfo = () => this.activeGroup.lineInfo();
 	gotoLine = (line: number, column = 1) => this.activeGroup.gotoLine(line, column);

@@ -51,6 +51,7 @@ describe('graph assets', () => {
 		viewPages.length = 0;
 		stubViewPage();
 		backend.on('repo_submodules', () => []);
+		backend.on('graph_engine_version', () => '1.2.3');
 	});
 
 	it('generates the extension\'s own page into the frame, composed with the host environment', async () => {
@@ -63,6 +64,9 @@ describe('graph assets', () => {
 		expect(viewPages.length).toBe(1);
 		expect(Object.keys(viewPages[0]!['repos'] as Record<string, unknown>)).toEqual(['C:\\repo']);
 		expect(viewPages[0]!['lastActiveRepo']).toBe('C:\\repo');
+		// The linked engine's version rides along: the generator's own probe cannot see the
+		// in-process engine, so the host declares it for the Settings backend section.
+		expect(viewPages[0]!['engineVersion']).toBe('1.2.3');
 		// The composition: the theme sheet ahead of everything, the acquireVsCodeApi protocol
 		// shim under the page's own nonce, the theme kind on the body - and the media scripts
 		// lifted out for the shim to load after the theme has applied.

@@ -1,6 +1,6 @@
 [package]
 name = "git-graph-studio"
-version = "0.1.3"
+version = "0.1.4"
 description = "Git Graph Studio - a standalone Git repository viewer with an explorer, source control panel, terminal and the git-graph-rs engine"
 edition = "2021"
 # The floor is big-code-analysis (module 17's richer-metrics engine): it is Rust
@@ -25,8 +25,31 @@ name = "git-graph-studio"
 path = "src/main.rs"
 required-features = ["desktop"]
 
+# Every `.ggx` plugin's own folder under plugins/, one binary target each (scripts/build-*.bat
+# builds them independently of the app). The git-graph-rs engine backend: the `.ggx` process
+# backend `cmd_graph/engine_impl.rs` compiles into (`engine` feature only — this binary, never
+# `git-graph-studio`, links `git-graph-core`). Read-only: no `desktop` feature, no window, no
+# write path (writes stay in the app, over the `git` CLI). `scripts/build-ggx.mjs` packs it
+# into `git-graph-rs.ggx`.
+[[bin]]
+name = "git-graph-backend"
+path = "../plugins/git-graph-rs/src/main.rs"
+required-features = ["engine"]
+
+# The reference `ggx/2` process plugin (`scripts/build-ggx-demo.mjs` packs it) — a worked
+# example, not wired into the app.
+[[bin]]
+name = "ggs-ext-demo"
+path = "../plugins/ggs-ext-demo/src/main.rs"
+
 [features]
 default = ["desktop"]
+# The engine: reachable only through `git-graph-backend`'s `required-features`, never part of
+# `desktop` or the default set — `git-graph-studio` never links `git-graph-core` (plan §3.8,
+# §8.2's "the backend is the only engine"). `cargo test --all-features` turns it on alongside
+# `desktop`, compiling and exercising both `cmd_graph.rs`'s always-on proxy functions and
+# `cmd_graph/engine_impl.rs`'s real implementation in one pass.
+engine = ["dep:git-graph-core", "dep:base64"]
 desktop = [
     "dep:tauri",
     "dep:tauri-plugin-dialog",
@@ -86,9 +109,10 @@ tauri-plugin-clipboard-manager = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 portable-pty = { version = "0.9", optional = true }
-# The engine, linked into the app from the vscode-git-graph-rs submodule: every repository
-# read runs in-process (cmd_graph is the one module that names it — build.rs enforces the seam).
-git-graph-core = { path = "../vscode-git-graph-rs/native/core" }
+# The engine, from the vscode-git-graph-rs submodule: linked only into `git-graph-backend`
+# (the `engine` feature), never into `git-graph-studio` — `cmd_graph.rs` and its `engine_impl`
+# submodule are the only modules that name it; build.rs enforces the seam.
+git-graph-core = { path = "../vscode-git-graph-rs/native/core", optional = true }
 ureq = { version = "3", features = ["rustls"], optional = true }
 sha1 = { version = "0.10", optional = true }
 hex = { version = "0.4", optional = true }

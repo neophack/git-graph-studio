@@ -4,9 +4,10 @@
 // quick inputs, settings persistence and opener calls - over postMessage.
 //
 // The git-graph-rs extension is deliberately NOT activated here: it is integrated into the app
-// (its engine is in-process, its webview is hosted natively by GraphHost, and the Rust side
-// lists it as a built-in whose manifest it serves from the one embedded in the binary); the
-// frame-based host is for the few additional VSIX / `.ggx` extensions Studio supports.
+// (its engine is in-process, its webview is hosted natively by GraphHost); the Rust side lists
+// it from the bundled `.ggx` installed on first launch (falling back to the manifest embedded
+// in the binary when the package is absent), and the frame-based host is for the few additional
+// VSIX / `.ggx` extensions Studio supports.
 
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
@@ -15,7 +16,7 @@ import { builtinContributions } from 'virtual:builtin-contributions';
 
 import { commands } from './commands';
 import { applyContributions, applyExtensionSettings, declaredCommand, localize, removeContributions, type ManifestContributes } from './contributions';
-import { locale, registerZhCnText } from './i18n';
+import { locale, registerZhCnText, t } from './i18n';
 import { loadBuiltinSettings } from './lazy';
 import * as state from './state';
 import { notify, quickInput } from './ui';
@@ -46,12 +47,30 @@ export interface ExtInfo {
 	ggx: GgxManifest | null;
 }
 
+/** What `ext_process_status` reports for one extension's backend: running (pid > 0) or
+ *  remembered-dead (pid 0, `lastError` saying why) — the Extensions view's status lines. */
+export interface ExtProcessInfo {
+	extensionId: string;
+	pid: number;
+	commands: string[];
+	protocolVersion: string;
+	startCount: number;
+	lastError: string | null;
+}
+
 /** The `manifest.json` of a `.ggx` package. */
 export interface GgxManifest {
 	format: string;
 	id: string;
 	version: string;
 	frontend?: { page: string; config?: string; compare?: string } | null;
+	/** `ggx/2`: every page the package can show, by id (the named page registry). */
+	pages?: Record<string, { page: string; title?: string }> | null;
+	/** `ggx/2`: the process backend declaration — `ext_process.rs` spawns it on demand.
+	 *  `protocol` is `ggs-ext/1` (the default, command-style plugins) or `ggx-rpc/1` (the
+	 *  graph engine's thread-per-request protocol); `binaries` is the per-platform command
+	 *  map, when the package carries more than one platform's binary. */
+	backend?: { kind: string; command: string; args?: string[]; protocol?: string; binaries?: Record<string, string> } | null;
 	permissions?: string[];
 }
 
@@ -108,6 +127,27 @@ export function ensureBuiltinSettings(): Promise<void> {
 /** The extension whose webview and backend the workbench hosts natively (via GraphHost). */
 const NATIVELY_HOSTED = new Set([GIT_GRAPH_RS_EXT_ID]);
 
+/** One open extension page: a sandboxed iframe in an editor tab, speaking the page RPC the
+ *  composed bootstrap (`acquireGgsApi`) defines. The editor tab owns it — its disposer is
+ *  the tab's `onClose`. */
+interface PageFrameHandle {
+	extId: string;
+	pageId: string;
+	frame: HTMLIFrameElement;
+	/** Calls into the page still waiting for their result, settled when it goes away. */
+	pendingCalls: Set<(error: Error) => void>;
+}
+
+/** The `ggx://` URL of a file inside an installed package, the way the pages' iframes load
+ *  them: `{install dir name}/{relative path}` under the `ggx` protocol the backend serves.
+ *  Falls back to the plain scheme shape where Tauri's internals are absent (jsdom, probes). */
+function ggxAssetUrl(ext: ExtInfo | undefined, rel: string): string {
+	const dirName = ext?.path.split(/[\\/]/).pop() ?? '';
+	const path = `${dirName}/${rel.replace(/\\/g, '/')}`;
+	const internals = (window as { __TAURI_INTERNALS__?: { convertFileSrc?: (path: string, protocol: string) => string } }).__TAURI_INTERNALS__;
+	return internals?.convertFileSrc ? internals.convertFileSrc(path, 'ggx') : `ggx://localhost/${path}`;
+}
+
 interface FrameHandle {
 	frame: HTMLIFrameElement;
 	/** Command ids this extension registered; unregistered when it goes away. */
@@ -136,6 +176,19 @@ export class ExtensionHost {
 	/** Called after a registration pass added contributions asynchronously (installed
 	 *  extensions): the workbench re-renders the views that had already built their menus. */
 	onContributionsApplied: (() => void) | null = null;
+	/** Workbench hook: open one of an extension's pages in an editor tab — wired the same
+	 *  way `onNativeCommand` is (the workbench owns the editor area, the host owns pages). */
+	onOpenPage: ((extId: string, pageId: string, params?: unknown) => void) | null = null;
+	/** The installed extensions the host has listed; pages and backends resolve through it. */
+	private installedExts: ExtInfo[] = [];
+	/** The open page frames, by serial (their iframes live in editor tabs). */
+	private readonly pageFrames = new Map<number, PageFrameHandle>();
+	private nextPageSerial = 1;
+	/** Extensions whose commands dispatch to a `ggx/2` process backend, not a frame. */
+	private readonly processBacked = new Set<string>();
+	/** The declared commands of the process-backed extensions — runnable with no frame, the
+	 *  manifest alone (the backend spawns lazily on first execution). */
+	private readonly processCommandIds = new Set<string>();
 
 	/** Synchronously register the baked-in extensions' contributions (menus, commands,
 	 *  keybindings). The data comes from the build-time virtual module, so the workbench's
@@ -153,7 +206,9 @@ export class ExtensionHost {
 
 	/** List the installed extensions (the Extensions view renders these). */
 	async list(): Promise<ExtInfo[]> {
-		return await invoke<ExtInfo[]>('ext_list');
+		const installed = await invoke<ExtInfo[]>('ext_list');
+		this.installedExts = installed;
+		return installed;
 	}
 
 	/** Read a text file inside an installed extension (README, CHANGELOG, manifest). */
@@ -161,30 +216,46 @@ export class ExtensionHost {
 		return await invoke<string>('ext_read_file', { extId, relPath });
 	}
 
-	/** Install a VSIX, then activate newly installed extensions. Returns the installed id. */
-	async installFromVsix(path: string): Promise<ExtInfo> {
-		const info = await invoke<ExtInfo>('ext_install_from_vsix', { path });
-		await this.reload(info.id);
-		return info;
-	}
-
-	/** Install a `.ggx` package (a newer version replaces an installed `.vsix` or `.ggx` of the
-	 *  same id; the integrated git-graph-rs is refused on the Rust side). */
+	/** Install a `.ggx` package — the only format installs accept (a newer version replaces
+	 *  an installed `.vsix` or `.ggx` of the same id; the integrated git-graph-rs is refused
+	 *  on the Rust side). */
 	async installFromGgx(path: string): Promise<ExtInfo> {
 		const info = await invoke<ExtInfo>('ext_install_from_ggx', { path });
 		await this.reload(info.id);
 		return info;
 	}
 
-	/** Install whichever package format the file is. */
-	installPackage(path: string): Promise<ExtInfo> {
-		return path.toLowerCase().endsWith('.ggx') ? this.installFromGgx(path) : this.installFromVsix(path);
+	/** Install the bundled git-graph-rs `.ggx` the installer carries — the one-click Install
+	 *  on the Extensions view's integrated entry. The app installs nothing by default; this is
+	 *  the ask, and it lands as a standard (uninstallable) package. */
+	async installBundled(): Promise<ExtInfo> {
+		const info = await invoke<ExtInfo>('ext_install_bundled');
+		await this.reload(info.id);
+		return info;
+	}
+
+	/** The process backends this app instance knows — running and remembered-dead — for the
+	 *  Extensions view's status lines (pid `0` means not running; `lastError` says why). A
+	 *  null answer (a defaulting test mock, or nothing ever started) is no backends. */
+	async processStatus(): Promise<ExtProcessInfo[]> {
+		return (await invoke<ExtProcessInfo[] | null>('ext_process_status').catch(() => null)) ?? [];
+	}
+
+	/** Restart a plugin's process backend: stop, then start (the handshake runs again). */
+	async restartProcess(extId: string): Promise<void> {
+		await invoke('ext_process_stop', { extId }).catch(() => undefined);
+		await invoke('ext_process_start', { extId });
 	}
 
 	/** Uninstall an extension (the Rust side refuses built-ins), then drop its frame, its
-	 *  registry commands and its contributions. */
+	 *  backend process, its registry commands and its contributions. */
 	async uninstall(extId: string): Promise<void> {
 		await invoke('ext_uninstall', { extId });
+		// A ggx/2 process backend dies with its extension (nothing of it is running after).
+		await invoke('ext_process_stop', { extId }).catch(() => undefined);
+		this.processBacked.delete(extId);
+		for (const id of this.declaredCommandIds.get(extId) ?? []) this.processCommandIds.delete(id);
+		this.installedExts = this.installedExts.filter((ext) => ext.id !== extId);
 		this.deactivate(extId);
 		// The manifest-declared commands live in the workbench registry too: removeContributions
 		// only drops the declaration records, and a surviving (disabled) entry with a keybinding
@@ -235,6 +306,17 @@ export class ExtensionHost {
 			return; // unreadable manifest: nothing to contribute
 		}
 		this.registerContributions(ext.id, manifest?.contributes, nls, nlsZhCn);
+		// A ggx/2 process package's commands dispatch to its backend rather than a frame:
+		// its declared ids become runnable from the manifest alone. The backend itself comes
+		// up eagerly (the boot pass and the install both start it); a first command still
+		// spawns one that is not up — the lazy path remains the fallback.
+		const processBacked = ext.ggx?.backend?.kind === 'process';
+		if (processBacked) {
+			this.processBacked.add(ext.id);
+			for (const declared of manifest?.contributes?.commands ?? []) this.processCommandIds.add(declared.command);
+		} else {
+			this.processBacked.delete(ext.id);
+		}
 	}
 
 	/** Register one extension's parsed manifest contributions into the workbench. */
@@ -242,6 +324,7 @@ export class ExtensionHost {
 		this.declaredCommandIds.set(extId, (contributes?.commands ?? []).map((declared) => declared.command));
 		const dispatch = (command: string) => {
 			if (this.onNativeCommand?.(command)) return;
+			if (this.processBacked.has(extId)) return void this.runProcessCommand(extId, command);
 			const declared = declaredCommand(command);
 			if (!declared) return;
 			void this.runRegistered(command);
@@ -262,10 +345,11 @@ export class ExtensionHost {
 		registerZhCnText(zhPairs);
 	}
 
-	/** A declared command is runnable when its extension's frame holds a handler, or the
-	 *  workbench handles it natively. */
+	/** A declared command is runnable when its extension's frame holds a handler, the
+	 *  workbench handles it natively, or its extension's ggx/2 backend will take it. */
 	private canRunCommand(command: string): boolean {
 		if (this.nativeCommands.has(command)) return true;
+		if (this.processCommandIds.has(command)) return true;
 		return commandsRegistered.has(command);
 	}
 
@@ -280,10 +364,17 @@ export class ExtensionHost {
 		}
 		this.deactivate(extId);
 		removeContributions(extId);
+		// An upgraded process package restarts fresh: the old backend does not survive it.
+		await invoke('ext_process_stop', { extId }).catch(() => undefined);
 		const ext = (await this.list().catch(() => [] as ExtInfo[])).find((e) => e.id === extId);
 		if (ext) {
 			await this.applyContributions(ext);
 			await this.activate(ext);
+		}
+		// Install means run: a package that declares a process backend comes up at once — the
+		// same "detect and run" the boot pass does, without waiting for a first command.
+		if (this.processBacked.has(extId)) {
+			await invoke('ext_process_start', { extId }).catch(() => undefined);
 		}
 	}
 
@@ -347,6 +438,97 @@ export class ExtensionHost {
 		// Whatever was still running in the frame (the deactivate itself included) has no
 		// frame left to answer from.
 		for (const cancel of [...handle.pendingCalls]) cancel(new Error(`extension ${extId} was deactivated`));
+	}
+
+	/** The pages of an installed package: the `ggx/2` named registry, with a `ggx/1`
+	 *  package's single frontend page synthesized in as the page named "view". */
+	pageEntry(extId: string, pageId: string): { page: string; title?: string } | null {
+		const manifest = this.installedExts.find((ext) => ext.id === extId)?.ggx;
+		if (!manifest) return null;
+		const pages: Record<string, { page: string; title?: string }> = {};
+		if (manifest.frontend?.page) pages.view = { page: manifest.frontend.page };
+		Object.assign(pages, manifest.pages ?? {});
+		return pages[pageId] ?? null;
+	}
+
+	/** Open one of an extension's pages in an editor tab (the workbench's `onOpenPage` does
+	 *  the opening; this validates and hands over, the way a command's result may). */
+	openPage(extId: string, pageId: string, params?: unknown): void {
+		if (!this.pageEntry(extId, pageId)) {
+			notify('warning', `${t('extensions.pageMissing')}: ${extId} / ${pageId}`);
+			return;
+		}
+		this.onOpenPage?.(extId, pageId, params);
+	}
+
+	/** Mount one page into a container (its editor tab's pane) and return the disposer the
+	 *  tab runs on close. The iframe loads the package's own document through the `ggx`
+	 *  protocol — the backend composes the page bootstrap into it, so the page gets
+	 *  `acquireGgsApi()` and needs nothing else from the host to boot. */
+	mountPage(extId: string, pageId: string, params: unknown, container: HTMLElement): () => void {
+		const entry = this.pageEntry(extId, pageId);
+		const serial = this.nextPageSerial++;
+		const frame = document.createElement('iframe');
+		frame.className = 'ext-page-frame';
+		frame.title = `${extId}: ${pageId}`;
+		frame.setAttribute('sandbox', 'allow-scripts');
+		if (entry) frame.src = ggxAssetUrl(this.installedExts.find((ext) => ext.id === extId), entry.page);
+		const handle: PageFrameHandle = { extId, pageId, frame, pendingCalls: new Set() };
+		this.pageFrames.set(serial, handle);
+		frame.addEventListener('load', () => {
+			frame.contentWindow?.postMessage({
+				__ggxHost: true,
+				type: 'init',
+				context: { extensionId: extId, pageId, params: params ?? null, language: locale() }
+			}, '*');
+		});
+		container.appendChild(frame);
+		return () => {
+			this.pageFrames.delete(serial);
+			for (const cancel of [...handle.pendingCalls]) cancel(new Error(`page ${extId}/${pageId} was closed`));
+			frame.remove();
+		};
+	}
+
+	/** A page's request of the host: the same surface the extension frames get (commands,
+	 *  notifications, quick input, clipboard…), plus the page's own two — opening another
+	 *  page of its extension and running a command in its backend process. */
+	private async servePageRpc(method: string, args: unknown[], page: PageFrameHandle): Promise<unknown> {
+		switch (method) {
+			case 'pages.open':
+				this.openPage(page.extId, args[0] as string, args[1]);
+				return undefined;
+			case 'backend.run': {
+				const [command, commandArgs] = args as [string, unknown[]?];
+				return await invoke('ext_process_run', { extId: page.extId, command, args: commandArgs ?? [] });
+			}
+			case 'commands.register':
+			case 'commands.unregister':
+				// Pages render; commands are declared in package.json and live in the frame
+				// or the backend process, never in a page.
+				throw new Error('an extension page cannot register commands; declare them in package.json');
+			default: {
+				// The shared host surface, through a stand-in handle that can register
+				// nothing (the two cases above already rejected that).
+				const standIn: FrameHandle = { frame: page.frame, commandIds: new Set(), pendingCalls: page.pendingCalls };
+				return await this.serve(method, args, page.extId, standIn);
+			}
+		}
+	}
+
+	/** Run one command in a `ggx/2` process package's backend — the first execution spawns
+	 *  it (lazy activation). A result naming one of the package's pages opens it: the
+	 *  convention a backend uses to surface UI, the way a VS Code command shows a webview. */
+	private async runProcessCommand(extId: string, command: string): Promise<void> {
+		try {
+			const result = await invoke<unknown>('ext_process_run', { extId, command, args: [] });
+			if (result && typeof result === 'object' && typeof (result as { openPage?: unknown }).openPage === 'string') {
+				const { openPage: pageId, params } = result as { openPage: string; params?: unknown };
+				this.openPage(extId, pageId, params);
+			}
+		} catch (error) {
+			notify('error', `${t('extensions.processFailed')}: ${String(error)}`);
+		}
 	}
 
 	/** A request the frame made of the host; also resolves the frame's command registrations. */
@@ -450,6 +632,24 @@ export class ExtensionHost {
 		const data = event.data as { type?: string; id?: number; method?: string; args?: unknown[]; ok?: boolean; result?: unknown; extensionId?: string; error?: string };
 		if (!data || typeof data !== 'object') return;
 
+		// An extension page's RPC (the composed bootstrap's acquireGgsApi): routed by the
+		// frame it came from, the same way the logic frames' __studioExtRpc is.
+		if ((data as { __ggxPage?: boolean }).__ggxPage === true) {
+			const page = this.pageFor(event.source);
+			if (!page) return;
+			const message = data as { kind?: string; id?: number; method?: string; args?: unknown[] };
+			if (message.kind === 'rpc' && typeof message.method === 'string') {
+				// The page source is always a Window (a frame), and jsdom's postMessage takes
+				// the targetOrigin string form — not the options object the DOM lib offers.
+				const pageWindow = event.source as Window | null;
+				this.servePageRpc(message.method, message.args ?? [], page).then(
+					(result) => pageWindow?.postMessage({ __ggxHost: true, type: 'rpcResult', id: message.id, ok: true, result }, '*'),
+					(error) => pageWindow?.postMessage({ __ggxHost: true, type: 'rpcResult', id: message.id, ok: false, result: String(error) }, '*')
+				);
+			}
+			return;
+		}
+
 		if (data.type === '__studioExtActivated') {
 			return; // activation succeeded; nothing to surface
 		}
@@ -472,6 +672,13 @@ export class ExtensionHost {
 	private frameFor(source: MessageEventSource | null): FrameHandle | null {
 		for (const handle of this.frames.values()) {
 			if (handle.frame.contentWindow === source) return handle;
+		}
+		return null;
+	}
+
+	private pageFor(source: MessageEventSource | null): PageFrameHandle | null {
+		for (const page of this.pageFrames.values()) {
+			if (page.frame.contentWindow === source) return page;
 		}
 		return null;
 	}

@@ -663,3 +663,23 @@ describe('navigation history across renames', () => {
 		expect(notifications()).toEqual([]);
 	});
 });
+
+describe('extension page tabs (module 12, ggx/2)', () => {
+	it('opens each extension page open as its own tab, and closing runs its disposer', async () => {
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		let disposed = 0;
+		const mount = (pane: HTMLElement): (() => void) => {
+			pane.appendChild(el('iframe', 'ext-page-frame'));
+			return () => disposed++;
+		};
+		await group.openExtPage({ kind: 'extpage', id: 'extpage:a.b:main:1', title: 'Demo', extId: 'a.b', pageId: 'main' }, mount);
+		await group.openExtPage({ kind: 'extpage', id: 'extpage:a.b:main:2', title: 'Demo', extId: 'a.b', pageId: 'main', params: { x: 1 } }, mount);
+		expect(group.openEditorIds()).toEqual(['extpage:a.b:main:1', 'extpage:a.b:main:2']);
+		// Both tabs carry the page's frame (each open is its own instance).
+		expect(group['open'].filter((editor: Editor) => editor.input.kind === 'extpage' && editor.pane.querySelector('iframe.ext-page-frame')).length).toBe(2);
+
+		group.close(); // the active tab (the second open) goes, its frame with it
+		expect(group.openEditorIds()).toEqual(['extpage:a.b:main:1']);
+		expect(disposed).toBe(1);
+	});
+});

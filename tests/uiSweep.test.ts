@@ -380,6 +380,14 @@ describe('the full UI sweep', () => {
 			click(explorer); count();
 			click(explorer); count();
 			await flush(4);
+			// The Extensions entry: the plugin list is reachable from the activity bar (the
+			// view Ctrl+Shift+X opens), and its item takes the active highlight. The tooltip
+			// helper strips the native title for its own popup, so the name is the aria-label.
+			const extensionsItem = Array.from(document.querySelectorAll<HTMLElement>('.activity-item')).find((item) => (item.getAttribute('aria-label') ?? '').startsWith('Extensions'));
+			expect(extensionsItem).toBeTruthy();
+			click(extensionsItem!); count();
+			expect(view(3).style.display).toBe('flex');
+			expect(extensionsItem.classList.contains('active')).toBe(true);
 			await showView('explorer');
 		});
 	});

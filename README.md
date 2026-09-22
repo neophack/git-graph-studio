@@ -79,7 +79,7 @@ git-graph-studio/
 │       ├── boot-bench.mjs       end-to-end startup latency of the release exe
 │       └── cdp-*.mjs            live inspection over WebView2's CDP port
 │
-├── docs/                    ggs-development-plan.md — the development plan
+├── docs/                    crabcode-development-plan.md — the development plan
 ├── .github/workflows/       studio.yml (CI) · release.yml (tag → GitHub Release)
 └── vscode-git-graph-rs/     the git-graph-rs VS Code extension, a git submodule tracking its
                              repository's main branch: the engine crate the app links

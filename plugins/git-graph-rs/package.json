@@ -1,0 +1,11 @@
+{
+	"name": "git-graph-rs-backend",
+	"publisher": "ggs",
+	"private": true,
+	"displayName": "Git Graph (Rust) — backend build",
+	"description": "This plugin folder's own metadata — not the packaged extension's manifest. Unlike plugins/ggs-ext-demo (self-contained), git-graph-rs.ggx's real id/version/displayName/contributes come from the vscode-git-graph-rs submodule's own package.json; build.mjs reads that, not this file. This one only documents the backend build.mjs compiles and packs (src/main.rs, Cargo's git-graph-backend [[bin]], the engine feature).",
+	"engines": { "ggs": ">=0.1.0" },
+	"scripts": {
+		"build": "node build.mjs"
+	}
+}

@@ -22,12 +22,12 @@ repository. Read it once in full; consult the [Module map](#module-map) and
 **Git Graph Studio** is a standalone desktop application (Tauri 2 + TypeScript + Rust) that
 hosts the `git-graph-rs` engine in a VS Code-class workbench: a File Explorer with git status
 decoration, Source Control, a tabbed Editor Suite with split groups, an Integrated Terminal,
-the Git Graph view, a VSIX / `.ggx` Extension Platform, and a CAN Trace Analyzer.
+the Git Graph view, a `.ggx` Extension Platform, and a CAN Trace Analyzer.
 
 | Document | Role |
 | -------- | ---- |
 | `README.md` | What ships: features, repository layout, build instructions |
-| `docs/ggs-development-plan.md` | The authoritative plan. §3 *Architecture principles* binds every change; §5 lists milestones; §9 defines the quality bar |
+| `docs/crabcode-development-plan.md` | The authoritative plan. §3 *Architecture principles* binds every change; §5 lists milestones; §9 defines the quality bar |
 | `AGENTS.md` (this file) | How to change the code without breaking its structure |
 
 When this file and the plan disagree, the plan wins; fix this file in the same change.
@@ -77,11 +77,14 @@ Two processes joined by Tauri IPC, with one library at the core:
                                            │ invoke / Channel / events
 ┌──────────────────────────────────────────┴────────────────────────────────────────────────┐
 │ Backend (src-tauri/, Rust): one cmd_*.rs per domain, exposing #[tauri::command]s.         │
-│ Reads go through the in-process gix engine (git-graph-core); writes shell out via git.rs. │
+│ Graph/SCM/revision reads go to git-graph-backend, a warm sibling process, over ggx-rpc/1;  │
+│ every other read is plain in-process filesystem access; writes shell out via git.rs.       │
 └──────────────────────────────────────────┬────────────────────────────────────────────────┘
                                            │ single seam: cmd_graph.rs (Rust) · graphHost.ts (TS)
 ┌──────────────────────────────────────────┴────────────────────────────────────────────────┐
-│ vscode-git-graph-rs/ (submodule): git-graph-core (native/core) + the compiled webview      │
+│ git-graph-backend (plugins/git-graph-rs/): links git-graph-core (native/core) from        │
+│ vscode-git-graph-rs/ — the app binary itself never does. The compiled webview also        │
+│ comes from the submodule.                                                                 │
 └───────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -91,8 +94,11 @@ The principles below are the plan's §3, condensed. They apply to every change.
    tree-sitter grammars compiled by cargo's `cc`, each behind a `grammar-*` feature;
    syntect runs on `default-fancy`, git access is gix.
 2. **The read path never spawns a process.** Commit, ref, diff, config and file-at-revision
-   reads use the linked engine. Writes (stage, commit, fetch, push, …) use the `git` CLI, and
-   only through `src-tauri/src/git.rs`.
+   reads go to `git-graph-backend`, a warm sibling process reached over a pipe (`ggx-rpc/1`)
+   — no process is spawned per read, only once at install/boot. `git-graph-studio` itself
+   never links the engine (`cmd_graph/engine_impl.rs`, `engine` feature, `git-graph-backend`
+   only). Writes (stage, commit, fetch, push, …) use the `git` CLI, and only through
+   `src-tauri/src/git.rs`.
 3. **No frontend framework.** Hand-written DOM via `el()`; new views are built from the
    `ui.ts` primitives (quick input, context menu, notifications, codicons).
 4. **Heavy work runs in the backend and streams.** Search, indexing, folder compare and hex
@@ -128,7 +134,7 @@ Extensions view would call it), a mission line, and a test file.
 | 9 | Source Control | Stage / commit / history / git commands |
 | 10 | Git Graph Engine | The graph view and the engine seam |
 | 11 | Integrated Terminal | Shells inside the panel |
-| 12 | Extension Platform | VSIX / `.ggx` installs and the extension host |
+| 12 | Extension Platform | `.ggx` installs and the extension host |
 | 13 | CAN Trace Analyzer | CANoe-style `.blf` / `.asc` analysis |
 | 14 | Performance Lab | Measurement, metrics and the perf gate |
 | 15 | Build & Release Pipeline | Asset preparation, packaging, installers, CI |
@@ -269,16 +275,30 @@ commit-msg hook, `refs/for/` push).
 ### 10. Git Graph Engine
 
 The Git Graph webview — the same `out.min.js` the extension serves — hosted unchanged
-behind an `acquireVsCodeApi` shim, over the in-process gix engine. **This module owns both
-seams**; nothing outside it may touch the extension's artifacts or crate (see
-[Invariants](#invariants)).
+behind an `acquireVsCodeApi` shim, over the git-graph-rs engine running as its own process
+(`git-graph-backend`, the `.ggx` package's backend, `ggx-rpc/1`). **This module owns both
+seams**; nothing outside it may touch the extension's artifacts or the engine crate (see
+[Invariants](#invariants)). **`git-graph-studio` (the app binary) never links
+`git-graph-core`** — only `cmd_graph/engine_impl.rs` (the `engine` Cargo feature, compiled
+into `git-graph-backend`) does; every write still runs the `git` CLI from the app itself.
 
 - Frontend: `src/graphHost.ts` (the TypeScript seam), `src/graphPreload.ts` (the view page's
   composer and boot warmer — part of the seam: it generates the extension's own page
   (gitgraph/viewpage.js), composes it with the host environment and starts it during the
   splash; it never speaks `graph_request`)
-- Backend: `src-tauri/src/cmd_graph.rs` (the Rust seam; + `cmd_graph/write_tests.rs`); the
-  engine is `git-graph-core` from `vscode-git-graph-rs/native/core`
+- Backend: `src-tauri/src/cmd_graph.rs` (the Rust seam: the always-compiled wrappers and
+  `handle_repo_request`'s host-only arms, both proxying to `plugin_host.rs`; the write
+  dispatch `handle` over the `git` CLI; + `cmd_graph/write_tests.rs`),
+  `src-tauri/src/cmd_graph/engine_impl.rs` (`#[cfg(feature = "engine")]`: every call that
+  actually names `git-graph-core`, plus the Gerrit cache), `src-tauri/src/plugin_host.rs`
+  (the app's typed facade over the running backend — `ext_process::global()`, no `AppHandle`
+  threaded through, the bundled-install race's bounded wait), `src-tauri/src/backend_rpc.rs`
+  (the `ggx-rpc/1` wire protocol: thread-per-request, distinct from `ggs-ext/1` because the
+  view's opening burst needs concurrent reads), `plugins/git-graph-rs/src/main.rs`
+  (the `git-graph-backend` binary itself: `serve_backend` dispatch, the `__`-prefixed
+  synthetic commands `cmd_fs.rs`/`cmd_scm.rs`/`lib.rs`/the Gerrit pipeline send alongside the
+  view's own protocol messages). The engine is `git-graph-core` from
+  `vscode-git-graph-rs/native/core`.
 
 ### 11. Integrated Terminal
 
@@ -290,18 +310,59 @@ terminal list.
 
 ### 12. Extension Platform
 
-The extension store (`~/.ggs/extensions/`): VSIX and Studio's own frontend-only `.ggx`
-format (`ggx/1`), the Extensions view with detail pages, and the sandboxed extension host
-that serves a subset of the `vscode` API. git-graph-rs itself is a built-in — engine linked
-in-process, version following the app, installs of its id refused — not a package in the
-store.
+The extension store (`~/.ggs/extensions/`): Studio's own `.ggx` format — the only format
+installs accept (`ext_install_from_ggx`; VSIX install was removed 2026-09-22, while
+already-installed VSIX packages still list, host and uninstall) — `ggx/2`
+adds the named page registry (every page a package can show, opened as editor tabs over the
+`ggx://` protocol) and the process backend (a binary, speaking the `ggs-ext/1` line-JSON-RPC
+protocol over stdin/stdout — any language that can write lines to stdout qualifies; the app
+embeds no runtime) — plus the Extensions view with detail pages, backend status and restart.
+**Nothing installs by default.** git-graph-rs ships as the **bundled `.ggx`** the installer
+carries (`extensions/git-graph-rs.ggx`, packed by `prepare.mjs`); the Extensions view's
+integrated entry offers it as a **one-click install** (`ext_install_bundled`) that lands it
+as a standard, uninstallable package — its engine still linked in-process and its view assets
+still the app's own, and with no install (the default) the listing falls back to the manifest
+embedded at build time. **Install means run**: the boot pass starts every installed package
+that declares a backend (`ext_process::start_all_installed`, off the window's thread), an
+install starts its backend at once, and the first command remains the lazy fallback. Multiple
+app instances are independent — each spawns and owns only its own backends (`GGS_INSTANCE_ID`
+marks the owner), every backend this instance spawned is stopped on exit, and an uninstall
+stops the backend before removing its directory (a directory another window's backend still
+holds refuses with a close-that-window hint).
 
-- Frontend: `src/extensionsPanel.ts`, `src/extHost.ts` + `ext-host.html` +
+- Frontend: `src/extensionsPanel.ts`, `src/extHost.ts` (the frame host for VSIX/`.ggx`
+  extensions, the page host and the process-command dispatch of `ggx/2`) + `ext-host.html` +
   `src/extHostBoot.ts` (one sandboxed frame per extension), `src/vscodeApi.ts`,
   `src/contributions.ts` (manifest contributions merged into the workbench)
-- Backend: `src-tauri/src/cmd_ext.rs` (install / upgrade / uninstall, `.ggx` unpack)
+- Backend: `src-tauri/src/cmd_ext.rs` (install / upgrade / uninstall, `.ggx` unpack, the
+  `ggx://` protocol that serves an installed package's files — composing the page bootstrap
+  into every HTML page), `src-tauri/src/ext_process.rs` (the process extension host: eager
+  start at boot and install, lazy start on first command as the fallback, `initialize`
+  handshake, `runCommand`, crash isolation, remembered status (start count, last error),
+  stop on uninstall and at app exit), `src-tauri/src/ggx_protocol.rs` (the `ggs-ext/1` wire
+  protocol, shared with plugin binaries), `src-tauri/src/ext_page_boot.js` (the
+  `acquireGgsApi()` bootstrap the protocol composes into served pages),
+  `plugins/ggs-ext-demo/src/main.rs` (the reference plugin binary — a worked example, not
+  wired into the app)
+- Every `.ggx`-producing plugin's own folder under `plugins/` (its manifest fields, page
+  files, backend source and packer together, not scattered): `plugins/ggs-ext-demo/`
+  (`package.json`, `web/view.html`, `src/main.rs`) and `plugins/git-graph-rs/` (`src/main.rs`
+  the backend, `build.mjs` its own packer — the only script that reads the
+  `vscode-git-graph-rs` submodule for packaging — plus `package.json`/`README.md` as the
+  folder's own metadata; its frontend is that submodule, which cannot move). Each is its own
+  Cargo `[[bin]]` in `src-tauri/Cargo.toml`, pointing at that folder.
 - Build: `scripts/builtin-contributions.mjs` (bakes `virtual:builtin-contributions`),
-  `scripts/build-ggx.mjs` (reference packer for the `.ggx` format; not part of the app build)
+  `scripts/build-ggx.mjs` (the shared packing infrastructure — `writeGgx`, `hostPlatformKey`,
+  `filesUnder` — every plugin packer builds on it), `plugins/git-graph-rs/build.mjs`
+  (git-graph-rs's own packer: the ggx/2 header from the submodule's manifest, `--backend`
+  embedding the compiled `git-graph-backend`), `scripts/build-ggx-demo.mjs`
+  (packs the GGX Demo from `plugins/ggs-ext-demo/` — the format's worked example, page +
+  process backend; a dev tool, not part of the app build), `scripts/build-plugins.bat`
+  (builds every `.ggx` under `plugins/` independently of the app build — one command for all
+  of them)
+- Tests: `tests/extensions.test.ts` (pages, the process dispatch), `tests/editor.test.ts`
+  (the extpage tab), `src-tauri/tests/ext_process_host.rs` (the real
+  install→activate→command→stop chain over the demo binary)
 
 ### 13. CAN Trace Analyzer
 
@@ -408,7 +469,10 @@ Everything that turns the source tree into installers: asset assembly into
   bundles build against; `hex-fs-stub.cjs` lazily proxies the hex machinery's `fs`
   calls to the adapter `graphHost.ts` installs), `vite.config.ts`
 - Seam checks: `scripts/check-seams.mjs` (TypeScript / CSS) and `src-tauri/build.rs` (Rust)
-- Packaging: `scripts/build-studio.bat` (Windows, one command). Linux installers are built
+- Packaging: `scripts/build-studio.bat` (Windows, one command; builds `git-graph-backend`
+  through `prepare.mjs` as part of that). `scripts/build-plugins.bat` builds every plugin's
+  `.ggx` under `plugins/` on its own, without the app installer — useful when only a plugin
+  changed. Linux installers are built
   in floor containers — the base image IS the compatibility floor: `ubuntu:22.04`
   (glibc 2.35) for the deb, `fedora:38` (glibc 2.37) for the rpm. CI (`studio.yml`) runs
   the same containers `scripts/build-studio-linux.bat` +
@@ -434,7 +498,7 @@ Everything that turns the source tree into installers: asset assembly into
    three or more modules usually means a missing command or backend service — design that
    first.
 2. Read the module's existing files and its test file; match their structure and naming.
-3. Check `docs/ggs-development-plan.md` §3 for a principle that constrains the approach, and
+3. Check `docs/crabcode-development-plan.md` §3 for a principle that constrains the approach, and
    §5 for a milestone that already scopes the work.
 
 ### While changing
@@ -487,14 +551,27 @@ appear anywhere else under `src/` or `static/`. The check runs on every `prepare
 Vite build and dev-server start, and as vitest's global setup.
 
 **Seam rule — Rust (enforced by `src-tauri/build.rs`).**
-`src-tauri/src/cmd_graph.rs` is the only module that names the `git-graph-core` crate. Every
-other backend module reaches the engine through its wrappers (`resolve_repo_root`,
-`close_engine_repos`, `scm_changes`, `revision_file`, …). Add a wrapper there rather than a
-second `use git_graph_core`.
+`src-tauri/src/cmd_graph.rs` and its `cmd_graph/` submodules (`engine_impl.rs`, feature-gated
+behind `engine`; `write_tests.rs`) are the only files that may name the `git-graph-core`
+crate — `build.rs` exempts that one directory and scans everything else under `src/`. Every
+other backend module reaches the engine through `cmd_graph.rs`'s always-compiled wrappers
+(`resolve_repo_root`, `close_engine_repos`, `scm_changes`, `revision_file`, …), which since
+the M6 split proxy to `plugin_host.rs` rather than calling the engine directly — their
+signatures and call sites do not change; only their bodies do. Add a wrapper there rather than
+a second `use git_graph_core`, and put its real implementation in `engine_impl.rs` as a
+distinct name (never a bare `#[cfg(not(feature = "engine"))]` twin of the same name — that
+would never compile under `cargo test --all-features`, which turns both `desktop` and
+`engine` on at once).
 
-**Read path in-process, write path through `git.rs`.**
-Never spawn `git` for a read; never spawn `git` for a write anywhere except
-`src-tauri/src/git.rs`. The panel's Git channel is fed from that single runner.
+**The engine runs as its own process; `git-graph-studio` never links it.**
+`git-graph-core` is reachable only via the `engine` Cargo feature, which only
+`git-graph-backend`'s (`plugins/git-graph-rs/`) `required-features` turns on — the
+app's own binary (`desktop` feature) never enables it (verify with `cargo tree -e normal` on
+a default build). Reads still never spawn a process per call — the backend is a long-lived,
+warm sibling process (`plugin_host.rs` / `ext_process.rs` keep it running; `backend_rpc.rs`'s
+`ggx-rpc/1`, thread-per-request), reached over a pipe, not launched fresh each time. Writes
+still never spawn `git` anywhere except `src-tauri/src/git.rs`; the panel's Git channel is fed
+from that single runner, and the write path stays entirely in the app process.
 
 **One module, one responsibility.**
 A source file belongs to exactly one module and the map is the contract. If a file does not
@@ -585,13 +662,13 @@ Conventions:
 
 | Topic | Where |
 | ----- | ----- |
-| Architecture principles | `docs/ggs-development-plan.md` §3 |
-| Hard acceptance targets for 1.0 | `docs/ggs-development-plan.md` §4 |
-| Milestones and task breakdown | `docs/ggs-development-plan.md` §5 |
-| Size playbook / performance budgets | `docs/ggs-development-plan.md` §6–7, `scripts/measure.mjs` |
-| `.ggx` package format and extension host | `docs/ggs-development-plan.md` §8, `README.md` → *Extensions* |
-| Quality and release process | `docs/ggs-development-plan.md` §9 |
-| `~/.ggs/` layout | `docs/ggs-development-plan.md` Appendix B |
+| Architecture principles | `docs/crabcode-development-plan.md` §3 |
+| Hard acceptance targets for 1.0 | `docs/crabcode-development-plan.md` §4 |
+| Milestones and task breakdown | `docs/crabcode-development-plan.md` §5 |
+| Size playbook / performance budgets | `docs/crabcode-development-plan.md` §6–7, `scripts/measure.mjs` |
+| `.ggx` package format and extension host | `docs/crabcode-development-plan.md` §8, `README.md` → *Extensions* |
+| Quality and release process | `docs/crabcode-development-plan.md` §9 |
+| `~/.ggs/` layout | `docs/crabcode-development-plan.md` Appendix B |
 | Repository layout | `README.md` → *Layout* |
 | Seam rules, as code | `scripts/check-seams.mjs`, `src-tauri/build.rs` |
 | Engine API contract | `vscode-git-graph-rs/native/core/src/api.rs` (`git_graph_core::Engine`) |

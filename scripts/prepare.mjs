@@ -210,4 +210,38 @@ if (!existsSync(join(appIcons, 'icon.ico')) || !existsSync(join(appIcons, '32x32
 	}
 }
 
+/* 5. The engine backend (`git-graph-backend`, the `engine` Cargo feature) — the only binary
+ *    that links `git-graph-core`; the app itself never does (src-tauri/build.rs's seam check).
+ *    Release, so the shipped package carries the same size-optimised binary `tauri build`
+ *    produces for the app itself; cargo's incremental cache keeps repeat builds (dev iteration)
+ *    fast after the first. `hostPlatformKey`/`ggxManifest`'s `backend.binaries` key matches
+ *    Rust's own `cmd_ext::host_platform_key()` (`scripts/build-ggx.mjs`'s `hostPlatformKey`). */
+const srcTauri = join(appDir, 'src-tauri');
+const backendExe = process.platform === 'win32' ? 'git-graph-backend.exe' : 'git-graph-backend';
+const backendBuild = spawnSync(
+	'cargo',
+	['build', '--release', '--bin', 'git-graph-backend', '--no-default-features', '--features', 'engine'],
+	{ cwd: srcTauri, stdio: 'inherit', shell: process.platform === 'win32' }
+);
+let backendPath;
+if (backendBuild.status === 0) {
+	const built = join(out, 'cargo', 'release', backendExe);
+	if (existsSync(built)) backendPath = built;
+	else console.warn(`${built} was not produced; packing git-graph-rs.ggx without a backend`);
+} else {
+	console.warn('Building git-graph-backend failed; packing git-graph-rs.ggx without a backend');
+}
+
+/* 6. The git-graph-rs `.ggx` package — the app ships the extension as this package, not as an
+ *    embedded built-in: tauri.conf.json's bundle.resources packs the fixed-name copy
+ *    (app-resources/git-graph-rs.ggx) so the installer carries it beside the app, and the app
+ *    installs it on first launch (cmd_ext.rs's install_bundled). The versioned package beside
+ *    it is what a user can also install by hand from the Extensions view. Delegated to the
+ *    plugin's own packer (`plugins/git-graph-rs/build.mjs`) — this file never reaches into
+ *    `vscode-git-graph-rs` itself for packaging; only that plugin folder does. */
+const { buildGgx } = await import('../plugins/git-graph-rs/build.mjs');
+const { target: ggxPath } = await buildGgx({ backend: backendPath });
+mkdirSync(join(out, 'bundled', 'app-resources'), { recursive: true });
+copyFileSync(ggxPath, join(out, 'bundled', 'app-resources', 'git-graph-rs.ggx'));
+
 console.log(`Prepared ${out}`);

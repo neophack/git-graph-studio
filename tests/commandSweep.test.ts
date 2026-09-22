@@ -308,12 +308,12 @@ describe('the commands no other harness drives', () => {
 		expect(workbench.editors.activeInput?.kind).not.toBe('folders');
 	});
 
-	it('Install Extension from VSIX... shows the Extensions view and asks for the package', async () => {
-		await commands.execute('extensions.installFromVsix');
+	it('Install Extension from GGX... shows the Extensions view and asks for the package', async () => {
+		await commands.execute('extensions.installFromGgx');
 		await flush(4);
 		expect(workbench.activeSidebarView).toBe('extensions');
 		// The picker was cancelled: nothing installs, nothing complains.
-		expect(backend.callsTo('ext_install_from_vsix')).toEqual([]);
+		expect(backend.callsTo('ext_install_from_ggx')).toEqual([]);
 		expect(notifications()).toEqual([]);
 	});
 });

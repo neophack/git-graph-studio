@@ -1,8 +1,10 @@
 //! Build script: Tauri's code generation, the embedded manifest of the integrated git-graph-rs
 //! extension, then the compile-time seam check (docs/ggs-development-plan.md §3.7): the
-//! extension's Rust code — the `git-graph-core` crate — is linked through exactly one module,
-//! `src/cmd_graph.rs`. Any other module that names the crate fails the build here, so the
-//! coupling cannot quietly spread back out of the seam file.
+//! extension's Rust code — the `git-graph-core` crate — is linked through exactly one module
+//! family, `src/cmd_graph.rs` and its `src/cmd_graph/` submodules (`engine_impl.rs`, feature-
+//! gated behind `engine` and reachable only from `git-graph-backend`; `write_tests.rs`). Any
+//! other module that names the crate fails the build here, so the coupling cannot quietly
+//! spread back out of the seam.
 
 use std::fs;
 use std::path::Path;
@@ -64,8 +66,16 @@ fn visit(dir: &Path, violations: &mut Vec<String>) {
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
-        // The seam file itself (and the write-path tests beside it, which exercise `handle`).
-        if path.file_name().and_then(|n| n.to_str()) == Some("cmd_graph.rs") {
+        // The seam file itself, and everything beside it under `cmd_graph/` (the write-path
+        // tests, which exercise `handle`, and `engine_impl.rs`, the engine-feature-gated half
+        // of the seam that `git-graph-backend` links and the app does not).
+        if path.file_name().and_then(|n| n.to_str()) == Some("cmd_graph.rs")
+            || path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                == Some("cmd_graph")
+        {
             continue;
         }
         let content = fs::read_to_string(&path).expect("readable source file");

@@ -23,8 +23,9 @@ fn ms(started: Instant) -> f64 {
 }
 
 /// Run every probe against `folder` and return the JSON report. The git phases go through the
-/// in-process engine exactly as the app runs them; a folder that is not a git repository
-/// reports `null` for them while the walk, index and search still run.
+/// installed `git-graph-backend` process exactly as the app reaches it; a folder that is not a
+/// git repository, or a machine with no backend installed, reports `null` for them the same
+/// way, while the walk, index and search (none of which need the engine) still run.
 pub fn run(folder: &str) -> Result<String, String> {
     let path = std::path::Path::new(folder);
     if !path.is_dir() {
@@ -100,7 +101,7 @@ pub fn run(folder: &str) -> Result<String, String> {
     let report = json!({
         "folder": root,
         "isRepository": is_repo,
-        "engine": crate::cmd_graph::engine_version(),
+        "engine": crate::cmd_graph::graph_engine_version(),
         "files": files.len(),
         "symbols": symbols,
         "analysisSymbols": analysis_symbols,
@@ -174,6 +175,10 @@ mod tests {
 
     #[test]
     fn measures_a_plain_folder_and_a_repository() {
+        // The store is pinned to an empty directory: the developer's real `~/.ggs` may hold
+        // the backend-carrying bundled package, in which case the git phases below would be
+        // answered for real instead of degrading the way this test asserts.
+        let _store = crate::test_support::isolated_extension_store();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.rs"), "// TODO one\nfn alpha() {}\n").unwrap();
         let plain: serde_json::Value =
@@ -189,17 +194,20 @@ mod tests {
         assert!(plain["ms"]["largeFileViewer"].is_number());
         assert!(plain["largeFileLines"].as_u64().unwrap() > 0);
 
-        // A repository is measured for real: the root resolves, the status and the first page
-        // come back through the in-process engine.
+        // A repository, with no engine backend installed (this is a plain `cargo test --lib`
+        // run, not the real app): the git phases degrade exactly as a non-repository folder
+        // does — reported `null`, not an error — while the walk, index and search (none of
+        // which need the engine) still run for real. The "a repository is measured for real"
+        // scenario (root resolves, status and first page come back through a live spawned
+        // `git-graph-backend`) is `tests/graph_backend.rs`'s integration test.
         let scratch = crate::test_support::Scratch::new("measure");
         let git = scratch.repo("repo");
         crate::test_support::commit(&git, "b.rs", "fn beta() {} // TODO\n", "second");
         let report: serde_json::Value =
             serde_json::from_str(&run(&git.repo.display().to_string()).unwrap()).unwrap();
-        assert_eq!(report["isRepository"], true);
-        // The helper's initial commit plus the one made here.
-        assert_eq!(report["commitsFirstPage"], 2);
-        assert!(report["ms"]["graphFirstPage"].is_number());
+        assert_eq!(report["isRepository"], false);
+        assert!(report["ms"]["scmStatus"].is_null());
+        assert!(report["ms"]["graphFirstPage"].is_null());
         assert_eq!(report["files"], 2);
         // The measurements leave the scratch repository open in the global manager; on Windows
         // an mmap'd pack file would outlive the temp directory's removal.

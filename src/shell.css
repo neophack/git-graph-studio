@@ -292,6 +292,9 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 .editors { flex: 1; min-height: 0; position: relative; display: flex; }
 .editor-pane { position: absolute; inset: 0; display: flex; flex-direction: column; }
 .editor-pane[hidden] { display: none; }
+/* An extension page (module 12): the ggx package's own document, sandboxed, filling its tab. */
+.editor-pane.ext-page { display: block; }
+.ext-page-frame { width: 100%; height: 100%; border: 0; display: block; background: var(--vscode-editor-background, #1e1e1e); }
 .editor-pane .cm-editor { flex: 1; min-height: 0; height: 100%; }
 .editor-pane .cm-merge-view { display: flex; flex: 1; min-height: 0; }
 /* @codemirror/merge's own root is the scroll container of the side-by-side view (its panes'
@@ -712,11 +715,31 @@ body.resizing iframe { pointer-events: none; }
 .ext-publisher { font-size: 11px; color: var(--vscode-descriptionForeground, #999); }
 .ext-builtin { margin-left: 6px; padding: 0 4px; border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35)); border-radius: 3px; font-size: 10px; text-transform: uppercase; }
 .ext-description { font-size: 11px; color: var(--vscode-descriptionForeground, #999); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.ext-process { font-size: 11px; color: var(--vscode-descriptionForeground, #999); }
+.ext-process.running { color: var(--vscode-statusBar-foreground, #ccc); }
+.ext-process.running::before { content: "\25CF"; margin-right: 4px; color: var(--vscode-charts-green, #89d185); font-size: 9px; }
 
 /* ---------- The extension detail editor (VS Code's extension editor look) ---------- */
 
+.ext-detail-page { max-width: 900px; margin: 0 auto; padding: 24px 32px; }
+.ext-detail-head { display: flex; align-items: flex-start; gap: 20px; }
+.ext-detail-head .ext-icon-box { width: 96px; height: 96px; }
+.ext-detail-head .ext-icon { font-size: 72px; color: var(--vscode-sideBarTitle-foreground, #bbb); }
+.ext-detail-head .ext-icon-img { max-width: 96px; max-height: 96px; }
+.ext-detail-head-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.ext-detail-title { margin: 0; font-size: 22px; font-weight: 400; }
+.ext-detail-sub { font-size: 12px; color: var(--vscode-descriptionForeground, #999); }
+.ext-detail-desc { margin: 2px 0 0; font-size: 14px; }
+.ext-detail-actions { display: flex; flex-direction: column; gap: 8px; flex: none; }
+.ext-detail-facts { display: flex; flex-direction: column; gap: 4px; margin: 22px 0 4px; font-size: 12px; }
+.ext-detail-row { display: flex; gap: 8px; }
+.ext-detail-label { flex: none; width: 120px; color: var(--vscode-descriptionForeground, #999); }
+.ext-detail-value { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.ext-detail-readme { margin-top: 24px; }
+.ext-detail-readme h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+.ext-readme-missing { color: var(--vscode-descriptionForeground, #999); }
+.ext-readme-source { white-space: pre-wrap; overflow-wrap: anywhere; }
 
-/* README / CHANGELOG markdown, styled like VS Code's markdown preview. */
 /* ---------- File history and blame ---------- */
 .file-history { display: flex; flex-direction: column; height: 100%; }
 .file-history-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--vscode-panel-border, #2b2b2b); font-size: 13px; }

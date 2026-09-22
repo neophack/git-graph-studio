@@ -1,24 +1,29 @@
 //! Git Graph Studio: a standalone shell around the git-graph-rs engine.
 //!
-//! The read path goes straight to `git-graph-core` (the same in-process gix engine the VS Code
-//! extension uses); the write path (branches, tags, stashes, merges, staging, commits, …)
-//! shells out to the `git` executable, which is exactly what the extension's own CLI backend
-//! does. The engine is linked into this binary — there is no backend process; the graph's
-//! webview assets and its manifest are the app's own, and the extension store serves the
-//! additional VSIX / `.ggx` extensions installed from the Extensions view.
+//! The engine is not in this binary: every read (commits, refs, diffs, config,
+//! file-at-revision) goes to `git-graph-backend`, a warm sibling process packaged inside the
+//! bundled `git-graph-rs.ggx` plugin and reached over the `ggx-rpc/1` pipe (`plugin_host.rs`
+//! / `ext_process.rs`) — `git-graph-studio` never links `git-graph-core`. The write path
+//! (branches, tags, stashes, merges, staging, commits, …) stays in this process and shells
+//! out to the `git` executable through `git.rs`, exactly what the extension's own CLI
+//! backend does. The graph's webview pages are the extension's own, and the extension store
+//! serves the additional VSIX / `.ggx` extensions installed from the Extensions view.
 
-//! The crate is a library plus one binary: `git-graph-studio` (the Tauri app, the `desktop`
-//! feature). The modules that need no window — the engine seam `cmd_graph` and the git runner
-//! `git` — are always compiled; everything that needs a window is behind `desktop`.
+//! The crate is a library plus the binaries `Cargo.toml` declares: `git-graph-studio` (the
+//! Tauri app, the `desktop` feature) and the plugin backends under `plugins/` —
+//! `git-graph-backend` (the `engine` feature, the only linker of `git-graph-core`) and
+//! `ggs-ext-demo`. The modules that need no window — the engine seam `cmd_graph` and the git
+//! runner `git` — are always compiled; everything that needs a window is behind `desktop`.
 
+pub mod backend_rpc;
 pub mod cmd_graph;
+pub mod ggx_protocol;
 pub mod git;
 #[cfg(test)]
 pub mod test_support;
 
 #[cfg(feature = "desktop")]
 pub mod analysis;
-#[cfg(feature = "desktop")]
 #[cfg(feature = "desktop")]
 pub mod can_log;
 #[cfg(feature = "desktop")]
@@ -40,9 +45,13 @@ pub mod cmd_symbols;
 #[cfg(feature = "desktop")]
 pub mod encoding;
 #[cfg(feature = "desktop")]
+pub mod ext_process;
+#[cfg(feature = "desktop")]
 pub mod mcp;
 #[cfg(feature = "desktop")]
 pub mod measure;
+#[cfg(feature = "desktop")]
+pub mod plugin_host;
 #[cfg(feature = "desktop")]
 pub mod pty;
 #[cfg(feature = "desktop")]
@@ -82,7 +91,8 @@ pub use desktop::{run, AppState};
 mod desktop {
     use crate::{
         can_log, cmd_analysis, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_graph, cmd_scm,
-        cmd_search, cmd_symbols, git, mcp, measure, pty, viewer, watcher,
+        cmd_search, cmd_symbols, ext_process, git, mcp, measure, plugin_host, pty, viewer,
+        watcher,
     };
     #[allow(unused_imports)]
     use cmd_graph as _cmd_graph_seam;
@@ -1330,6 +1340,17 @@ mod deferred_services_tests {
             .manage(viewer::ViewerState::default())
             .manage(viewer::indexed::IndexedState::default())
             .manage(can_log::CanLogState::default())
+            // A clone of the process-wide handle (`ext_process::global()`), not a second,
+            // independent `ProcessHostState`: `plugin_host.rs` reaches the same running
+            // backends through `global()` directly, with no `AppHandle` to fetch Tauri-managed
+            // state through, and the two must agree on what is running.
+            .manage(ext_process::global().clone())
+            // The `ggx` protocol serves an installed package's own files to its sandboxed
+            // page iframes (cmd_ext.rs confines every request to the extensions home) — the
+            // extension-platform counterpart of the public dir the Git Graph page loads from.
+            .register_uri_scheme_protocol("ggx", |_ctx, request| {
+                cmd_ext::serve_ggx_asset(&request)
+            })
             .setup(|app| {
                 // Git's output reaches the panel's "Git" channel as it happens.
                 use tauri::Emitter;
@@ -1338,6 +1359,43 @@ mod deferred_services_tests {
                     let _ = handle.emit("studio://git-output", line);
                 });
                 stamp("setup entered");
+                // Detect and run: every installed package that declares a process backend
+                // comes up with the app, without waiting for its first command. Off the main
+                // thread — a slow handshake must never hold the window back — and best-effort:
+                // a package that fails to start holds the error in its status, not the boot.
+                //
+                // git-graph-rs's bundled `.ggx` is installed first, every launch, not only the
+                // first: `install_from_ggx_into`'s own forward-only version check makes this
+                // idempotent (an "already installed" / "already the newer version" error here
+                // is the expected, silent outcome on every boot after the first, or after an
+                // app update ships a newer bundled copy, this is how it takes over). Without
+                // this, since the seam is cut (the app itself links no engine), a fresh profile
+                // would have no Git Graph view, no SCM status and no file-at-revision at all
+                // until a user visited Extensions and installed by hand.
+                //
+                // `plugin_host::note_install_started`/`note_install_finished` bracket it so a
+                // `plugin_host` call racing this boot sequence (`warm_first_page`, below) waits
+                // for it (bounded) instead of failing outright with "not installed".
+                {
+                    let handle = app.handle().clone();
+                    std::thread::spawn(move || {
+                        use tauri::Manager;
+                        let Ok(dir) = cmd_ext::extensions_dir(&handle) else {
+                            return;
+                        };
+                        plugin_host::note_install_started();
+                        if let Err(reason) = cmd_ext::ext_install_bundled(handle.clone()) {
+                            eprintln!("[extensions] git-graph-rs auto-install: {reason}");
+                        }
+                        plugin_host::note_install_finished();
+                        let host = handle.state::<ext_process::ProcessHostState>();
+                        for started in host.start_all_installed(&dir) {
+                            if let Err(reason) = started {
+                                eprintln!("[extensions] backend failed to start: {reason}");
+                            }
+                        }
+                    });
+                }
                 // The main window is declared in tauri.conf.json but built here (`create: false`)
                 // rather than by Tauri's own setup: this is where the response hook that lets the
                 // webview cache the app's assets is attached, and where the window's creation -
@@ -1397,6 +1455,7 @@ mod deferred_services_tests {
                 can_log::can_log_close,
                 cmd_fs::repo_submodules,
                 cmd_graph::graph_request,
+                cmd_graph::graph_engine_version,
                 cmd_scm::scm_status,
                 cmd_scm::git_init,
                 cmd_scm::git_stage,
@@ -1461,11 +1520,15 @@ mod deferred_services_tests {
                 viewer::indexed::indexed_find,
                 viewer::indexed::indexed_close,
                 cmd_ext::ext_list,
-                cmd_ext::ext_install_from_vsix,
                 cmd_ext::ext_uninstall,
                 cmd_ext::ext_read_file,
                 cmd_ext::ext_read_file_base64,
                 cmd_ext::ext_install_from_ggx,
+                cmd_ext::ext_install_bundled,
+                ext_process::ext_process_start,
+                ext_process::ext_process_run,
+                ext_process::ext_process_stop,
+                ext_process::ext_process_status,
                 cmd_search::search_workspace,
                 cmd_search::search_cancel,
                 cmd_search::replace_in_files,
@@ -1488,8 +1551,16 @@ mod deferred_services_tests {
                 mcp::mcp_tools,
                 cmd_search::hex_diff
             ])
-            .run(tauri::generate_context!())
-            .expect("error while running Git Graph Studio");
+            .build(tauri::generate_context!())
+            .expect("error while building Git Graph Studio")
+            .run(|app, event| {
+                // No backend outlives its window: on exit every process this instance spawned
+                // is stopped (another instance's backends are not ours to stop).
+                if let tauri::RunEvent::Exit = event {
+                    use tauri::Manager;
+                    app.state::<ext_process::ProcessHostState>().stop_all();
+                }
+            });
     }
 }
 

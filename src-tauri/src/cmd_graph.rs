@@ -2,82 +2,100 @@
 //! code.
 //!
 //! The webview UI (`media/out.min.js`) speaks the same request/response protocol it uses inside
-//! VS Code; this module plays the role the extension host played there. Reads go to
-//! `git-graph-core`, linked into this process; writes (branches, tags, stashes, merges,
-//! remotes, …) run the `git` CLI, mirroring the extension's data source (the write-path
-//! section below). The requests the shell serves itself (files, diffs, terminal, dialogs, view
-//! state) are intercepted in `graphHost.ts` before they get here, and the host-only arms
-//! (clipboard, URLs) in the app's `graph_request`.
+//! VS Code; this module plays the role the extension host played there. Writes (branches, tags,
+//! stashes, merges, remotes, …) run the `git` CLI, mirroring the extension's data source (the
+//! write-path section below); reads go through [`engine_impl`] (only this file, and only its
+//! `engine_impl` submodule, ever names the crate — the seam `build.rs` enforces), compiled into
+//! `git-graph-backend` and reached over the process extension host (`plugin_host.rs`) — never
+//! linked into this app's own binary. The requests the shell serves itself (files, diffs,
+//! terminal, dialogs, view state) are intercepted in `graphHost.ts` before they get here, and
+//! the host-only arms (clipboard, URLs) in the app's `graph_request`.
 
 use serde_json::{json, Value};
 
-use git_graph_core::types::{GerritChangeState, LogOptions};
-use git_graph_core::{config, details, diff, graph, log, stats, RepoManager};
-
 use crate::git::Git;
 
-/* ---------- The engine seam (the only git-graph-core calls) ---------- */
+// `engine_impl` is reachable from this file even when the `engine` feature is off (Rust still
+// parses a `#[cfg(feature = "engine")] mod engine_impl;` item declaration either way), but every
+// item inside it is conditionally compiled — so `cargo test --all-features` compiles and tests
+// it, while the app's own build (features = `desktop` only, `engine` never on) never does.
+#[cfg(feature = "engine")]
+pub mod engine_impl;
+
+// `plugin_host` (and everything below that calls it) needs the `desktop` feature — it reaches
+// the Tauri-managed process host. `git-graph-backend` (features = `engine` only) never needs
+// these; it is `engine_impl` these wrappers talk to, over the wire, not by name.
+#[cfg(feature = "desktop")]
+use crate::plugin_host;
+
+/* ---------- The engine seam: always-present wrappers over the backend process ---------- */
 
 /// Resolve a path onto its repository's root directory — `None` when the path is not inside a
-/// Git repository (`open_folder` keeps the folder itself then).
+/// Git repository (`open_folder` keeps the folder itself then), or when the backend cannot be
+/// reached (a fresh install racing the boot-time auto-install waits inside `plugin_host`
+/// first; a genuinely absent backend answers `None`, same as "not a repository").
+#[cfg(feature = "desktop")]
 pub fn resolve_repo_root(path: &str) -> Option<String> {
-    git_graph_core::repository::repo_root(path).ok()
+    plugin_host::request(path, json!({ "command": "__repoRoot", "path": path }), Value::Null)
+        .ok()
+        .and_then(|value| value.get("root").and_then(Value::as_str).map(str::to_owned))
 }
 
-/// The version of the engine this process links — the version the built-in git-graph-rs
-/// entry in the Extensions view shows.
-pub fn engine_version() -> &'static str {
-    git_graph_core::VERSION
+/// The engine version for the Git Graph view's own Settings page (its backend section): the
+/// page's generator probes "is there a native engine on this machine" in its own browser
+/// environment; the app answers with the version the installed backend reports over `hello`,
+/// or a friendly sentinel when none is installed or not running.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub fn graph_engine_version() -> String {
+    plugin_host::hello()
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "not installed".to_owned())
 }
 
 /// The roots of the repository's initialised submodules (absolute paths), for the view's
 /// repository dropdown: the open repository plus these are the repository set it offers.
+#[cfg(feature = "desktop")]
 pub fn submodule_roots(repo_path: &str) -> Vec<String> {
-    RepoManager::global()
-        .get(repo_path)
-        .map_err(|e| e.message)
-        .and_then(|repo| config::submodules(&repo).map_err(|e| e.message))
+    plugin_host::request(repo_path, json!({ "command": "__submoduleRoots" }), Value::Null)
+        .ok()
+        .and_then(|value| value.get("roots").and_then(Value::as_array).cloned())
+        .map(|roots| roots.iter().filter_map(Value::as_str).map(str::to_owned).collect())
         .unwrap_or_default()
 }
 
-/// Drop every cached engine repository: the folder was closed or switched.
+/// Drop every cached engine repository: the folder was closed or switched. Not an error when
+/// the backend is not running (`plugin_host::close_repos` already treats that as nothing to
+/// close); this is best-effort cache maintenance, not a user-facing action.
+#[cfg(feature = "desktop")]
 pub fn close_engine_repos() {
-    drop_warm_responses();
-    GERRIT_CACHE
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clear();
-    RepoManager::global().close_all();
+    let _ = plugin_host::close_repos();
 }
 
 /// The working tree's changes, staged and unstaged halves kept apart, as the Source Control
 /// view's two sections list them.
+#[cfg(feature = "desktop")]
 pub fn scm_changes(repo_path: &str) -> Result<Value, String> {
-    let repo = RepoManager::global()
-        .get(repo_path)
-        .map_err(|e| e.message)?;
-    let changes = git_graph_core::status::scm_changes(&repo).map_err(|e| e.message)?;
-    serde_json::to_value(changes).map_err(|e| format!("Could not encode the status: {e}"))
+    plugin_host::request(repo_path, json!({ "command": "__scmChanges" }), Value::Null)
 }
 
 /// A file at one revision: `:index` reads the staged copy, anything else is a commit-ish.
 /// Binary files come back with `contents: None`, as the webview expects.
+#[cfg(feature = "desktop")]
 pub fn revision_file(
     repo_path: &str,
     revision: &str,
     file_path: &str,
 ) -> Result<RevisionFile, String> {
-    let repo = RepoManager::global()
-        .get(repo_path)
-        .map_err(|e| e.message)?;
-    let file = if revision == ":index" {
-        git_graph_core::blob::index_file(&repo, file_path).map_err(|e| e.message)?
-    } else {
-        git_graph_core::blob::commit_file(&repo, revision, file_path).map_err(|e| e.message)?
-    };
+    let response = plugin_host::request(
+        repo_path,
+        json!({ "command": "__revisionFile", "revision": revision, "path": file_path }),
+        Value::Null,
+    )?;
     Ok(RevisionFile {
-        binary: file.binary,
-        contents: file.contents,
+        binary: response.get("binary").and_then(Value::as_bool).unwrap_or(false),
+        contents: response.get("contents").and_then(Value::as_str).map(str::to_owned),
     })
 }
 
@@ -89,22 +107,47 @@ pub struct RevisionFile {
     pub contents: Option<String>,
 }
 
+/// The graph's first page under the view's default options, headlessly — what `--measure`
+/// times, exactly as the view experiences it.
+#[cfg(feature = "desktop")]
+pub fn load_first_page(repo_path: &str) -> Result<usize, String> {
+    let response = plugin_host::request(repo_path, json!({ "command": "__loadFirstPage" }), Value::Null)?;
+    Ok(response.get("count").and_then(Value::as_u64).unwrap_or(0) as usize)
+}
+
+/// The launch warm-up: ask the backend to open the repository and answer the view's two first
+/// requests ahead of time, keeping the answers for the requests themselves. Returns the first
+/// page's commit count.
+#[cfg(feature = "desktop")]
+pub fn warm_first_page(repo_path: &str) -> Result<usize, String> {
+    let response = plugin_host::request(repo_path, json!({ "command": "__warmFirstPage" }), Value::Null)?;
+    Ok(response.get("count").and_then(Value::as_u64).unwrap_or(0) as usize)
+}
+
 /// A file's raw bytes at one revision (`:index` reads the staged copy) — unlike
 /// [`revision_file`], binary content is not discarded: the byte-level comparison views (the hex
 /// viewer, the hex comparison) need it precisely because it is not text. `None` when the path
 /// does not exist at that revision (the missing side of an added or deleted file).
+#[cfg(feature = "desktop")]
 pub fn revision_file_bytes(
     repo_path: &str,
     revision: &str,
     file_path: &str,
 ) -> Result<Option<Vec<u8>>, String> {
-    let repo = RepoManager::global()
-        .get(repo_path)
-        .map_err(|e| e.message)?;
-    if revision == ":index" {
-        git_graph_core::blob::index_file_bytes(&repo, file_path).map_err(|e| e.message)
-    } else {
-        git_graph_core::blob::commit_file_bytes(&repo, revision, file_path).map_err(|e| e.message)
+    let response = plugin_host::request(
+        repo_path,
+        json!({ "command": "__revisionFileBytes", "revision": revision, "path": file_path }),
+        Value::Null,
+    )?;
+    match response.get("bytes").and_then(Value::as_str) {
+        Some(encoded) => {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map(Some)
+                .map_err(|e| format!("decode revision bytes: {e}"))
+        }
+        None => Ok(None),
     }
 }
 
@@ -215,6 +258,7 @@ pub async fn graph_request(
 
 /// Every request that concerns one repository: the write operations (`handle`, over the git
 /// CLI) and the engine's read arms.
+#[cfg(feature = "desktop")]
 pub fn handle_repo_request(
     repo_path: &str,
     message: &Value,
@@ -244,10 +288,11 @@ pub fn handle_repo_request(
         let remote = message
             .get("gerritRemote")
             .and_then(Value::as_str)
-            .unwrap_or("origin");
+            .unwrap_or("origin")
+            .to_owned();
         let response = match gerrit_refresh(
             &repo_path,
-            remote,
+            &remote,
             gerrit_fetch_limit(&message),
             gerrit_status_filter(&message),
         ) {
@@ -256,16 +301,13 @@ pub fn handle_repo_request(
             }),
             Err(error) => json!({ "command": "gerritRefresh", "error": error }),
         };
-        drop_warm_responses();
-        RepoManager::global().close(&repo_path);
         return Ok(response);
     }
 
     // Every write operation: the engine's caches are dropped afterwards, since refs, HEAD or the
     // working tree may have changed.
     if let Some(response) = handle(&git, &message, settings) {
-        drop_warm_responses();
-        RepoManager::global().close(&repo_path);
+        close_after_write(&repo_path);
         // A fetch the user ran may have moved the remote's change refs: the next load re-runs
         // the Gerrit pipeline (the extension marks its cache stale the same way).
         if command == "fetch" && response.get("error").is_some_and(Value::is_null) {
@@ -274,258 +316,14 @@ pub fn handle_repo_request(
         return Ok(response);
     }
 
-    let open = || RepoManager::global().get(&repo_path).map_err(|e| e.message);
-
-    match command.as_str() {
-        "loadRepoInfo" | "loadCommits" => {
-            // The launch warm-up computed these two with the view's default options before
-            // the window existed; a first request with the same options takes that answer.
-            let mut response = match take_warm_response(&repo_path, &command, &message) {
-                Some(warm) => warm,
-                None => {
-                    let repo = open()?;
-                    if command == "loadRepoInfo" {
-                        repo_info_response(&repo, &git, &message)?
-                    } else {
-                        load_commits_response(&repo_path, &repo, &message)?
-                    }
-                }
-            };
-            response["refreshId"] = message.get("refreshId").cloned().unwrap_or(json!(0));
-            Ok(response)
-        }
-        "loadConfig" => {
-            let repo = open()?;
-            let snapshot = config::read_config(&repo).map_err(|e| e.message)?;
-            Ok(
-                json!({ "command": "loadConfig", "repo": repo_path, "config": view_config(&Git::new(&repo_path), &snapshot), "error": null }),
-            )
-        }
-        "commitDetails" => {
-            let repo = open()?;
-            let hash = message
-                .get("commitHash")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let stash = message.get("stash").filter(|s| !s.is_null());
-            let details_value = if hash == git_graph_core::types::UNCOMMITTED {
-                details::uncommitted_details(&repo)
-            } else if let Some(stash) = stash {
-                let commit_stash = serde_json::from_value(stash.clone())
-                    .map_err(|e| format!("Could not decode the stash: {e}"))?;
-                details::stash_details(&repo, hash, &commit_stash)
-            } else {
-                details::commit_details(&repo, hash)
-            };
-            let refresh = message
-                .get("refresh")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            Ok(match details_value {
-                Ok(commit_details) => json!({
-                    "command": "commitDetails", "commitDetails": commit_details,
-                    "avatar": null, "codeReview": null, "refresh": refresh, "error": null
-                }),
-                Err(e) => json!({
-                    "command": "commitDetails", "commitDetails": null,
-                    "avatar": null, "codeReview": null, "refresh": refresh, "error": e.message
-                }),
-            })
-        }
-        "commitFileCounts" => {
-            let repo = open()?;
-            let from = message
-                .get("from")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            let to = message
-                .get("to")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let paths = string_list(message.get("paths"));
-            let counts =
-                diff::line_counts(&repo, from.as_deref(), to, &paths).map_err(|e| e.message)?;
-            Ok(json!({
-                "command": "commitFileCounts",
-                "commitHash": message.get("commitHash").cloned().unwrap_or(Value::Null),
-                "compareWithHash": message.get("compareWithHash").cloned().unwrap_or(Value::Null),
-                "counts": counts, "error": null
-            }))
-        }
-        "commitBodies" => {
-            let repo = open()?;
-            let hashes = string_list(message.get("commitHashes"));
-            let bodies = details::commit_bodies(&repo, &hashes).map_err(|e| e.message)?;
-            Ok(json!({ "command": "commitBodies", "bodies": bodies }))
-        }
-        "compareCommits" => {
-            let repo = open()?;
-            let from = message
-                .get("fromHash")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let to = message
-                .get("toHash")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let file_changes = diff::diff_revisions(&repo, from, to).map_err(|e| e.message)?;
-            Ok(json!({
-                "command": "compareCommits",
-                "commitHash": message.get("commitHash").cloned().unwrap_or(Value::Null),
-                "compareWithHash": message.get("compareWithHash").cloned().unwrap_or(Value::Null),
-                "fileChanges": file_changes, "codeReview": null,
-                "refresh": message.get("refresh").and_then(Value::as_bool).unwrap_or(false),
-                "error": null
-            }))
-        }
-        // The Commit Comparison View's own reads: the file list of the range, the summary cards
-        // of its two ends, and the unified diff of one selected file.
-        "getCommitComparison" => {
-            let repo = open()?;
-            let from = message
-                .get("fromHash")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let to = message
-                .get("toHash")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let file_changes = diff::diff_revisions(&repo, from, to).map_err(|e| e.message)?;
-            Ok(json!({
-                "command": "getCommitComparison",
-                "fileChanges": file_changes, "error": null
-            }))
-        }
-        "getCommitSummaries" => {
-            let repo = open()?;
-            let hashes = string_list(message.get("commitHashes"))
-                .into_iter()
-                .filter(|hash| !hash.is_empty() && hash != git_graph_core::types::UNCOMMITTED)
-                .collect::<Vec<_>>();
-            let summaries = details::commit_summaries(&repo, &hashes).map_err(|e| e.message)?;
-            Ok(json!({
-                "command": "getCommitSummaries",
-                "summaries": summaries, "error": null
-            }))
-        }
-        "getCommitFileDiff" => {
-            // The same `git diff` the extension's data source runs for the comparison view (the
-            // working tree stands in for the to-side when it is the uncommitted sentinel).
-            let from = message
-                .get("fromHash")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let to = message
-                .get("toHash")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let old_path = message
-                .get("oldFilePath")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let new_path = message
-                .get("newFilePath")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let to = if to == git_graph_core::types::UNCOMMITTED {
-                ""
-            } else {
-                to
-            };
-            let mut args: Vec<&str> = vec!["diff", "--no-color", "--find-renames", from];
-            if !to.is_empty() {
-                args.push(to);
-            }
-            args.push("--");
-            if old_path != new_path {
-                args.push(old_path);
-            }
-            args.push(new_path);
-            let diff = git.output(&args);
-            Ok(match diff {
-                Ok(diff) => json!({ "command": "getCommitFileDiff", "diff": diff, "error": null }),
-                Err(error) => {
-                    json!({ "command": "getCommitFileDiff", "diff": null, "error": error })
-                }
-            })
-        }
-        // The "Uncommitted Changes" row's count, asked for on its own: a load pipeline that
-        // deferred the row (see `log_options_from_request`) delivers its first page without the
-        // working-tree scan and completes the row from this answer afterwards - the scan is the
-        // better part of the load time on a large working tree.
-        "countUncommittedChanges" => {
-            let repo = open()?;
-            let include_untracked = message
-                .get("includeUntracked")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
-            let count =
-                git_graph_core::status::count_changes(&repo, include_untracked)
-                    .map_err(|e| e.message)?;
-            Ok(
-                json!({ "command": "countUncommittedChanges", "count": count, "error": null }),
-            )
-        }
-        "countCommitsBefore" => {
-            let repo = open()?;
-            let hash = message
-                .get("hash")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let branches = message.get("branches").and_then(Value::as_array).map(|a| {
-                a.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
-            });
-            let count = log::count_commits_before(
-                &repo,
-                branches.as_deref(),
-                hash,
-                message
-                    .get("showRemoteBranches")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true),
-                message
-                    .get("includeCommitsMentionedByReflogs")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-            )
-            .map_err(|e| e.message)?;
-            Ok(json!({ "command": "countCommitsBefore", "hash": hash, "count": count }))
-        }
-        "tagDetails" => {
-            let repo = open()?;
-            let tag_name = message
-                .get("tagName")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let commit_hash = message.get("commitHash").cloned().unwrap_or(Value::Null);
-            Ok(match details::tag_details(&repo, tag_name) {
-                Ok(details) => {
-                    json!({ "command": "tagDetails", "tagName": tag_name, "commitHash": commit_hash, "details": details, "error": null })
-                }
-                Err(e) => {
-                    json!({ "command": "tagDetails", "tagName": tag_name, "commitHash": commit_hash, "details": null, "error": e.message })
-                }
-            })
-        }
-        "repoStatistics" => {
-            let repo = open()?;
-            let authors = stats::author_stats(&repo).map_err(|e| e.message)?;
-            let activity = stats::activity_heatmap(&repo).map_err(|e| e.message)?;
-            Ok(json!({ "command": "repoStatistics", "authors": authors, "activity": activity }))
-        }
-        _ => Ok(error_response(
-            &command,
-            &format!("Git Graph Studio does not support the \"{command}\" request."),
-            &message,
-        )),
-    }
+    // Every remaining command is a read of the view's own protocol: the backend dispatches on
+    // `message["command"]` itself (`engine_impl::engine_read`), so the message goes over as-is.
+    plugin_host::request(&repo_path, message, Value::Null)
 }
 
 /// `git difftool --dir-diff`, launched detached for a GUI tool. A terminal tool is the shell's
 /// job (it types the command into the terminal panel), so this only handles `isGui`.
+#[cfg(feature = "desktop")]
 fn external_dir_diff(git: &Git, message: &Value) -> Result<(), String> {
     let from = message
         .get("fromHash")
@@ -607,6 +405,9 @@ fn error_response(command: &str, message_text: &str, request: &Value) -> Value {
     response
 }
 
+// Only `engine_impl`'s read dispatch parses list-shaped request fields this way; every other
+// caller of the view's protocol lives there too.
+#[cfg(feature = "engine")]
 fn string_list(value: Option<&Value>) -> Vec<String> {
     value
         .and_then(Value::as_array)
@@ -619,417 +420,36 @@ fn string_list(value: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The repository configuration in the shape the view's Settings Widget renders
-/// (`GG.GitRepoConfig`): the snapshot the engine reads, plus the branch, user and author
-/// configuration the extension's data source composes from the CLI. An incomplete shape here
-/// makes the widget's render throw, which empties the panel as soon as the response arrives.
-fn view_config(git: &Git, snapshot: &git_graph_core::types::ConfigSnapshot) -> Value {
-    let config_list = |scope: &str| -> std::collections::BTreeMap<String, String> {
-        git.output(&["config", scope, "--list"])
-            .map(|out| {
-                out.lines()
-                    .filter_map(|line| line.split_once('='))
-                    .map(|(k, v)| (k.to_lowercase(), v.to_owned()))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let local = config_list("--local");
-    let global = config_list("--global");
-
-    // branch.<name>.remote / .pushRemote, as the settings widget's branch section lists them.
-    let mut branches = serde_json::Map::new();
-    for (key, value) in &local {
-        let name = if let Some(name) = key
-            .strip_prefix("branch.")
-            .and_then(|k| k.strip_suffix(".remote"))
-        {
-            name
-        } else if let Some(name) = key
-            .strip_prefix("branch.")
-            .and_then(|k| k.strip_suffix(".pushremote"))
-        {
-            name
-        } else {
-            continue;
-        };
-        let entry = branches
-            .entry(name.to_owned())
-            .or_insert_with(|| json!({ "pushRemote": null, "remote": null }));
-        let field = if key.ends_with(".pushremote") {
-            "pushRemote"
-        } else {
-            "remote"
-        };
-        entry
-            .as_object_mut()
-            .unwrap()
-            .insert(field.to_owned(), json!(value));
-    }
-
-    // The author list: per (name, email) spellings of HEAD's history, de-duplicated by name
-    // keeping the most-prolific spelling, then sorted by name — the extension's own reduce.
-    let mut counts: Vec<(String, String, usize)> = Vec::new();
-    if let Ok(out) = git.output(&["log", "--format=%an%x1f%ae", "HEAD"]) {
-        for line in out.lines() {
-            let Some((name, email)) = line.split_once('\x1f') else {
-                continue;
-            };
-            if let Some(entry) = counts.iter_mut().find(|(n, e, _)| n == name && e == email) {
-                entry.2 += 1;
-            } else {
-                counts.push((name.to_owned(), email.to_owned(), 1));
-            }
-        }
-    }
-    counts.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
-    let mut seen = std::collections::BTreeSet::new();
-    let mut authors: Vec<Value> = Vec::new();
-    for (name, email, _) in counts {
-        if seen.insert(name.clone()) {
-            authors.push(json!({ "name": name, "email": email }));
-        }
-    }
-    authors.sort_by(|a, b| {
-        a["name"]
-            .as_str()
-            .unwrap_or_default()
-            .cmp(b["name"].as_str().unwrap_or_default())
-    });
-
-    let user = |key: &str| {
-        json!({
-            "local": local.get(key).map(|v| json!(v)).unwrap_or(Value::Null),
-            "global": global.get(key).map(|v| json!(v)).unwrap_or(Value::Null),
-        })
-    };
-    json!({
-        "branches": Value::Object(branches),
-        "authors": authors,
-        "diffTool": snapshot.diff_tool,
-        "guiDiffTool": snapshot.diff_gui_tool,
-        "pushDefault": snapshot.push_default,
-        "remotes": snapshot.remotes.iter().map(|remote| json!({
-            "name": remote.name, "url": remote.url, "pushUrl": remote.push_url
-        })).collect::<Vec<Value>>(),
-        "user": { "name": user("user.name"), "email": user("user.email") }
-    })
+/// Drop the caches a write invalidates for one repository (refs, HEAD or the working tree may
+/// have changed): the warm launch answers and the engine's own warm handle.
+#[cfg(feature = "desktop")]
+fn close_after_write(repo_path: &str) {
+    let _ = plugin_host::request(repo_path, json!({ "command": "__closeAfterWrite" }), Value::Null);
 }
 
-/// The `loadRepoInfo` response for a request (its `refreshId` is filled in by the caller).
-fn repo_info_response(
-    repo: &git_graph_core::Repo,
-    git: &Git,
-    message: &Value,
-) -> Result<Value, String> {
-    let show_stashes = message
-        .get("showStashes")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let options = git_graph_core::types::RefReadOptions {
-        show_remote_branches: message
-            .get("showRemoteBranches")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        show_remote_heads: false,
-        hide_remotes: string_list(message.get("hideRemotes")),
-        show_change_refs: false,
-    };
-    let info = graph::repo_info(repo, &options, show_stashes).map_err(|e| e.message)?;
-    Ok(json!({
-        "command": "loadRepoInfo",
-        "branches": info.branches, "head": info.head, "remotes": info.remotes,
-        "stashes": info.stashes, "isRepo": true, "remoteRefsPending": false,
-        "operationState": operation_state(git),
-        "error": null
-    }))
-}
-
-/// The `loadCommits` response for a request (its `refreshId` is filled in by the caller).
-fn load_commits_response(
-    repo_path: &str,
-    repo: &git_graph_core::Repo,
-    message: &Value,
-) -> Result<Value, String> {
-    let mut options = log_options_from_request(message);
-    // The Gerrit integration: the page loads with the cached changes' latest patchset refs
-    // pinned onto it (the engine gives each change's commit a row, whatever its age) and their
-    // states riding along. A cache that is missing, stale or built under another fetch limit
-    // answers from the locally fetched refs and marks the response `gerritPending` — the host
-    // then runs the refresh pipeline (`gerritRefresh`) and delivers the fresh states as further
-    // `loadCommits` responses under the same refresh id.
-    let mut gerrit_states = Value::Null;
-    let mut gerrit_pending = false;
-    if options.gerrit_refs.is_some() {
-        let remote = message
-            .get("gerritRemote")
-            .and_then(Value::as_str)
-            .unwrap_or("origin");
-        let filter = gerrit_status_filter(message);
-        let fetch_limit = gerrit_fetch_limit(message);
-        gerrit_cached_entry(
-            repo_path,
-            repo,
-            remote,
-            fetch_limit,
-            message
-                .get("hard")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        );
-        let entry = GERRIT_CACHE
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(repo_path)
-            .and_then(|state| state.entry.clone());
-        if let Some(entry) = entry {
-            options.gerrit_refs = Some(gerrit_change_refs(&entry, remote, filter, fetch_limit));
-            gerrit_states = serde_json::to_value(&entry.states).unwrap_or(Value::Null);
-        }
-        gerrit_pending = gerrit_needs_refresh(repo_path, fetch_limit);
-    }
-    let data = graph::load_commits(repo, &options).map_err(|e| e.message)?;
-    let mut response = json!({
-        "command": "loadCommits",
-        "commits": data.commits, "head": data.head, "tags": data.tags,
-        "moreCommitsAvailable": data.more_commits_available,
-        "onlyFollowFirstParent": options.only_follow_first_parent,
-        "gerritStates": gerrit_states,
-        "error": null
-    });
-    if gerrit_pending {
-        response["gerritPending"] = json!(true);
-    }
-    if options.defer_uncommitted_changes {
-        // The response deliberately carries no "Uncommitted Changes" row: the caller asked for
-        // the page without the working-tree scan and completes the row from
-        // `countUncommittedChanges` - the flag tells the view to keep whatever row it already
-        // rendered until that count arrives (the same protocol the extension host used).
-        response["uncommittedPending"] = json!(true);
-    }
-    Ok(response)
-}
-
-/// The requests the view sends first, with the options it sends when nothing is configured
-/// away from the defaults: what the launch warm-up computes ahead of the window. The view
-/// names the repository's remotes in its `loadCommits` (it learnt them from `loadRepoInfo`),
-/// so the warm-up's page names them too.
-fn default_first_requests(remotes: &[String]) -> [Value; 2] {
-    [
-        json!({ "command": "loadRepoInfo", "showRemoteBranches": true, "showStashes": true, "hideRemotes": [] }),
-        // The deferred uncommitted scan is what the view's first request asks for (graphHost.ts
-        // injects the flag): the warm page must be built under the same options, or its key
-        // stops matching and the view pays the cold load anyway.
-        json!({ "command": "loadCommits", "maxCommits": 300, "showTags": true, "showRemoteBranches": true, "remotes": remotes, "deferUncommittedChanges": true }),
-    ]
-}
-
-/// What decides a first request's answer: the engine options it translates to (the view's
-/// message carries more - the refresh id, the stashes it knows - that changes nothing).
-fn request_key(message: &Value) -> Value {
-    match message.get("command").and_then(Value::as_str) {
-        Some("loadCommits") => json!({
-            "command": "loadCommits",
-            "options": serde_json::to_value(log_options_from_request(message)).unwrap_or(Value::Null)
-        }),
-        _ => json!({
-            "command": "loadRepoInfo",
-            "showRemoteBranches": message.get("showRemoteBranches").and_then(Value::as_bool).unwrap_or(true),
-            "showStashes": message.get("showStashes").and_then(Value::as_bool).unwrap_or(true),
-            "hideRemotes": string_list(message.get("hideRemotes"))
-        }),
-    }
-}
-
-/// One warm response: the repository and request it answers, and the answer itself.
-struct WarmResponse {
-    repo: String,
-    request: Value,
-    response: Value,
-}
-
-/// The responses the launch warm-up computed. Each serves one request (the view's first),
-/// then is gone; every later refresh goes to the engine, and a write or a folder switch
-/// drops them unserved.
-static WARM_RESPONSES: std::sync::Mutex<Vec<WarmResponse>> = std::sync::Mutex::new(Vec::new());
-
-fn take_warm_response(repo_path: &str, command: &str, message: &Value) -> Option<Value> {
-    let key = request_key(message);
-    let mut warm = WARM_RESPONSES.lock().unwrap_or_else(|p| p.into_inner());
-    let at = warm
-        .iter()
-        .position(|w| w.repo == repo_path && w.request["command"] == command && w.request == key)?;
-    Some(warm.remove(at).response)
-}
-
-fn drop_warm_responses() {
-    WARM_RESPONSES
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clear();
-}
-
-/// Translate a `loadCommits` request into the engine's `LogOptions`.
-/// The graph's first page (the view's default `loadCommits` request: every branch, 300
-/// commits, date order, the "Uncommitted Changes" row deferred exactly as the view asks for
-/// it), returning how many commits it holds. The `--measure` run times it exactly as the view
-/// experiences it - without the working-tree scan, which lands in the follow-up count.
-pub fn load_first_page(repo_path: &str) -> Result<usize, String> {
-    let repo = RepoManager::global()
-        .get(repo_path)
-        .map_err(|e| e.message)?;
-    let [_, commits] = default_first_requests(&[]);
-    let options = log_options_from_request(&commits);
-    let data = graph::load_commits(&repo, &options).map_err(|e| e.message)?;
-    Ok(data.commits.len())
-}
-
-/// The launch warm-up: open the repository and answer the view's two first requests -
-/// `loadRepoInfo` and the first page of `loadCommits` - with their default options, keeping
-/// the answers for the requests themselves. Returns the page's commit count.
-pub fn warm_first_page(repo_path: &str) -> Result<usize, String> {
-    let repo = RepoManager::global()
-        .get(repo_path)
-        .map_err(|e| e.message)?;
-    let git = Git::new(repo_path);
-    let [info, _] = default_first_requests(&[]);
-    let info_response = repo_info_response(&repo, &git, &info)?;
-    let remotes: Vec<String> = info_response["remotes"]
-        .as_array()
-        .map(|list| {
-            list.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
-    let [_, commits] = default_first_requests(&remotes);
-    let commits_response = load_commits_response(repo_path, &repo, &commits)?;
-    let count = commits_response["commits"].as_array().map_or(0, Vec::len);
-    let mut warm = WARM_RESPONSES.lock().unwrap_or_else(|p| p.into_inner());
-    warm.retain(|w| w.repo != repo_path);
-    warm.push(WarmResponse {
-        repo: repo_path.to_owned(),
-        request: request_key(&info),
-        response: info_response,
-    });
-    warm.push(WarmResponse {
-        repo: repo_path.to_owned(),
-        request: request_key(&commits),
-        response: commits_response,
-    });
-    Ok(count)
-}
-
-fn log_options_from_request(message: &Value) -> LogOptions {
-    let bool_of =
-        |key: &str, default: bool| message.get(key).and_then(Value::as_bool).unwrap_or(default);
-    let opt_list = |key: &str| {
-        message.get(key).and_then(Value::as_array).and_then(|a| {
-            if a.iter().all(Value::is_null) {
-                None
-            } else {
-                Some(
-                    a.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>(),
-                )
-            }
-        })
-    };
-    let ordering = match message.get("commitOrdering").and_then(Value::as_str) {
-        Some("author-date") => git_graph_core::types::CommitOrdering::AuthorDate,
-        Some("topo") => git_graph_core::types::CommitOrdering::Topo,
-        _ => git_graph_core::types::CommitOrdering::Date,
-    };
-    LogOptions {
-        branches: opt_list("branches"),
-        authors: opt_list("authors"),
-        max_commits: message
-            .get("maxCommits")
-            .and_then(Value::as_u64)
-            .unwrap_or(500) as u32,
-        show_tags: bool_of("showTags", true),
-        show_remote_branches: bool_of("showRemoteBranches", true),
-        show_remote_heads: false,
-        defer_remote_refs: false,
-        include_commits_mentioned_by_reflogs: bool_of("includeCommitsMentionedByReflogs", false),
-        only_follow_first_parent: bool_of("onlyFollowFirstParent", false),
-        commit_ordering: ordering,
-        remotes: string_list(message.get("remotes")),
-        hide_remotes: string_list(message.get("hideRemotes")),
-        gerrit_refs: if bool_of("gerritFetchRefs", false) {
-            Some(Vec::new())
-        } else {
-            None
-        },
-        gerrit_show_change_refs: false,
-        // The view sends comma-joined paths (web/main.ts showPathFilterDialog): split
-        // them so each becomes its own pathspec and a commit touching any one shows.
-        filter_paths: message
-            .get("filterPath")
-            .and_then(Value::as_str)
-            .map(|p| {
-                p.split(',')
-                    .map(str::trim)
-                    .filter(|path| !path.is_empty())
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default(),
-        defer_uncommitted_changes: bool_of("deferUncommittedChanges", false),
-        show_uncommitted_changes: bool_of("showUncommittedChanges", true),
-        show_untracked_files: bool_of("showUntrackedFiles", true),
-        show_commits_only_referenced_by_tags: false,
-        use_mailmap: false,
-    }
-}
-
-/* ---------- Gerrit change states (the review badges) ---------- */
-
-/// One repository's cached Gerrit data: the parsed NoteDb states of every change the last fetch
-/// sampled, their locally fetched patchsets, and the fetch limit that fetch ran under.
-#[derive(Clone)]
-struct GerritEntry {
-    states: Vec<GerritChangeState>,
-    patchsets: std::collections::HashMap<u64, Vec<u32>>,
-    fetch_limit: u32,
-}
-
-/// The Gerrit data of every repository the view has loaded: its cache entry, and whether the
-/// next load must re-run the fetch pipeline (the integration was just enabled, or the view
-/// fetched from the remote).
-struct GerritRepo {
-    entry: Option<GerritEntry>,
-    stale: bool,
-}
-
-static GERRIT_CACHE: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, GerritRepo>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+/* ---------- Gerrit change states (the review badges) ----------
+ *
+ * The cache itself (parsed NoteDb states, keyed by repository) lives in the backend
+ * (`cmd_graph/engine_impl.rs`'s `GERRIT_CACHE`) — it stores the engine's own `GerritChangeState`
+ * type, which only compiles under the `engine` feature. The pure string/number parsing below
+ * (the change-ref and remote-URL formats, the fetch-window arithmetic) has no engine dependency
+ * and stays always compiled — `engine_impl` calls into some of it too (`super::`). The host-side
+ * network half of the refresh pipeline (`gerrit_refresh`, `mark_gerrit_stale`,
+ * `clear_gerrit_cache`) needs `plugin_host`, so it needs `desktop`.
+ */
 
 /// Mark a repository's Gerrit data stale: the next `loadCommits` answers from the locally
 /// fetched refs and flags itself pending, and the host then runs the refresh pipeline.
+#[cfg(feature = "desktop")]
 fn mark_gerrit_stale(repo_path: &str) {
-    GERRIT_CACHE
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .entry(repo_path.to_owned())
-        .or_insert(GerritRepo {
-            entry: None,
-            stale: false,
-        })
-        .stale = true;
+    let _ = plugin_host::request(repo_path, json!({ "command": "__gerritMarkStale" }), Value::Null);
 }
 
-/// Drop a repository's Gerrit cache entirely (the integration was disabled: the change refs the
-/// entry was built from are gone).
+/// The change refs are gone (the Gerrit integration was disabled): drop everything derived from
+/// them.
+#[cfg(feature = "desktop")]
 fn clear_gerrit_cache(repo_path: &str) {
-    GERRIT_CACHE
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .remove(repo_path);
+    let _ = plugin_host::request(repo_path, json!({ "command": "__gerritClearCache" }), Value::Null);
 }
 
 /// The status filter of a `loadCommits` request (the Repository Settings checkboxes): a WIP
@@ -1069,58 +489,17 @@ fn gerrit_fetch_limit(message: &Value) -> u32 {
         .map_or(20, |limit| limit as u32)
 }
 
-fn gerrit_state_passes(state: &GerritChangeState, filter: GerritStatusFilter) -> bool {
-    if state.wip {
+/// [`gerrit_refresh`]'s own pass-count check, against the plain JSON a parsed change comes back
+/// as over the wire (the same three fields `engine_impl`'s typed `gerrit_state_passes` reads).
+fn gerrit_state_passes_json(state: &Value, filter: GerritStatusFilter) -> bool {
+    if state.get("wip").and_then(Value::as_bool).unwrap_or(false) {
         return filter.wip;
     }
-    match state.status.as_str() {
+    match state.get("status").and_then(Value::as_str).unwrap_or_default() {
         "new" => filter.new_change,
         "merged" => filter.merged,
         _ => filter.abandoned,
     }
-}
-
-/// The `limit` most recent changes (by change number) passing the status filter — the set whose
-/// latest patchset refs are injected into the graph, one badge per change (src/gerrit.ts
-/// `limitChangeStates`).
-fn gerrit_limit_states(
-    states: &[GerritChangeState],
-    filter: GerritStatusFilter,
-    limit: u32,
-) -> Vec<&GerritChangeState> {
-    let mut passing: Vec<&GerritChangeState> = states
-        .iter()
-        .filter(|state| gerrit_state_passes(state, filter))
-        .collect();
-    passing.sort_by_key(|state| std::cmp::Reverse(state.change));
-    if limit > 0 {
-        passing.truncate(limit as usize);
-    }
-    passing
-}
-
-/// The Gerrit change refs injected into the commit graph: the latest locally fetched patchset
-/// ref of every change the fetch limit selects (gitGraphView.ts `gerritChangeRefs`). The engine
-/// walks and pins them, so each change's commit carries its badge whatever its age.
-fn gerrit_change_refs(
-    entry: &GerritEntry,
-    remote: &str,
-    filter: GerritStatusFilter,
-    limit: u32,
-) -> Vec<String> {
-    gerrit_limit_states(&entry.states, filter, limit)
-        .iter()
-        .filter_map(|state| {
-            let patchsets = entry.patchsets.get(&state.change)?;
-            let latest = *patchsets.last()?;
-            Some(format!(
-                "refs/remotes/{remote}/changes/{}/{}/{}",
-                gerrit_change_shard(state.change),
-                state.change,
-                latest
-            ))
-        })
-        .collect()
 }
 
 /// The two-digit shard of a change number (`41466` → `"66"`, `5` → `"05"`).
@@ -1334,100 +713,6 @@ fn gerrit_project_path(path: &str) -> String {
     project
 }
 
-/// Build a cache entry from the locally fetched change refs (`refs/remotes/<remote>/changes/*`)
-/// without any network access — the Gerrit data of a previous session shows instantly (and
-/// offline) until the refresh pipeline lands (gitGraphView.ts `buildLocalGerritEntry`).
-fn build_local_gerrit_entry(
-    repo: &git_graph_core::Repo,
-    remote: &str,
-    fetch_limit: u32,
-) -> Option<GerritEntry> {
-    let refs = git_graph_core::gerrit::list_change_refs(repo, remote).ok()?;
-    let mut changes: std::collections::BTreeMap<u64, Vec<u32>> = std::collections::BTreeMap::new();
-    for (refname, _) in refs {
-        if let Some((change, Some(patchset))) = gerrit_parse_change_ref(&refname) {
-            let patchsets = changes.entry(change).or_default();
-            if !patchsets.contains(&patchset) {
-                patchsets.push(patchset);
-            }
-        }
-    }
-    if changes.is_empty() {
-        return None;
-    }
-    let url_base = git_graph_core::config::remote_url(repo, remote)
-        .ok()
-        .flatten()
-        .and_then(|url| gerrit_url_base(&url));
-    let numbers: Vec<i64> = changes.keys().map(|change| *change as i64).collect();
-    let parsed =
-        git_graph_core::gerrit::parse_gerrit_metas(repo, remote, &numbers, url_base.as_deref())
-            .ok()?;
-    let mut entry = GerritEntry {
-        states: Vec::new(),
-        patchsets: std::collections::HashMap::new(),
-        fetch_limit,
-    };
-    for ((change, patchsets), state) in changes.into_iter().zip(parsed) {
-        if let Some(state) = state {
-            entry.states.push(state);
-            entry.patchsets.insert(change, patchsets);
-        }
-    }
-    entry
-        .states
-        .sort_by_key(|state| std::cmp::Reverse(state.change));
-    (!entry.states.is_empty()).then_some(entry)
-}
-
-/// The cache half of a Gerrit load (gitGraphView.ts `loadGerritData`): keep the cached entry
-/// when it is fresh under the request's fetch limit; otherwise rebuild the entry from the
-/// locally fetched change refs, which also replaces an entry built under another limit. `hard`
-/// always rebuilds, observing a repository that changed behind the cache's back. The network
-/// half is `gerrit_refresh`, which the host runs while the pending response is on screen.
-fn gerrit_cached_entry(
-    repo_path: &str,
-    repo: &git_graph_core::Repo,
-    remote: &str,
-    fetch_limit: u32,
-    hard: bool,
-) {
-    let fresh = !hard
-        && {
-            let cache = GERRIT_CACHE.lock().unwrap_or_else(|p| p.into_inner());
-            matches!(cache.get(repo_path), Some(state)
-            if !state.stale && state.entry.as_ref().is_some_and(|entry| entry.fetch_limit == fetch_limit))
-        };
-    if fresh {
-        return;
-    }
-    let local = build_local_gerrit_entry(repo, remote, fetch_limit);
-    let mut cache = GERRIT_CACHE.lock().unwrap_or_else(|p| p.into_inner());
-    let state = cache.entry(repo_path.to_owned()).or_insert(GerritRepo {
-        entry: None,
-        stale: false,
-    });
-    if let Some(local) = local {
-        state.entry = Some(local);
-    }
-}
-
-/// Whether a repository's Gerrit data still needs the refresh pipeline: it was marked stale,
-/// has no entry at all, or its entry was built under another fetch limit.
-fn gerrit_needs_refresh(repo_path: &str, fetch_limit: u32) -> bool {
-    let cache = GERRIT_CACHE.lock().unwrap_or_else(|p| p.into_inner());
-    match cache.get(repo_path) {
-        Some(state) => {
-            state.stale
-                || state
-                    .entry
-                    .as_ref()
-                    .is_none_or(|entry| entry.fetch_limit != fetch_limit)
-        }
-        None => true,
-    }
-}
-
 /// Run the Gerrit refresh pipeline of a repository (gitGraphView.ts `fetchGerritChanges`):
 /// list the remote's open change refs, fetch the latest patchset and NoteDb meta of the changes
 /// the sampling window selects, parse the metas, and prune the locally fetched refs the new set
@@ -1437,6 +722,7 @@ fn gerrit_needs_refresh(repo_path: &str, fetch_limit: u32) -> bool {
 /// Returns the number of changes in the new entry, and whether the remote was actually reached
 /// (`false`: ls-remote answered nothing while local change refs exist — the remote is treated
 /// as unreachable, and the previously cached data stays).
+#[cfg(feature = "desktop")]
 fn gerrit_refresh(
     repo_path: &str,
     remote: &str,
@@ -1444,9 +730,6 @@ fn gerrit_refresh(
     filter: GerritStatusFilter,
 ) -> Result<(usize, bool), String> {
     let git = Git::new(repo_path);
-    let repo = RepoManager::global()
-        .get(repo_path)
-        .map_err(|e| e.message)?;
     let listing = git
         .output(&["ls-remote", remote, "refs/changes/*"])
         .map_err(|e| {
@@ -1454,20 +737,29 @@ fn gerrit_refresh(
         })?;
     let remote_changes = gerrit_parse_ls_remote(&listing);
     if remote_changes.is_empty() {
-        if let Some(local) = build_local_gerrit_entry(&repo, remote, fetch_limit) {
-            return Ok((local.states.len(), false));
+        let local = plugin_host::request(
+            repo_path,
+            json!({ "command": "__gerritLocalRebuildCount", "remote": remote, "fetchLimit": fetch_limit }),
+            Value::Null,
+        )?;
+        if let Some(count) = local.get("count").and_then(Value::as_u64) {
+            return Ok((count as usize, false));
         }
     }
-    let url_base = git_graph_core::config::remote_url(&repo, remote)
-        .ok()
-        .flatten()
-        .and_then(|url| gerrit_url_base(&url));
+    let url_base = plugin_host::request(
+        repo_path,
+        json!({ "command": "__gerritRemoteUrl", "remote": remote }),
+        Value::Null,
+    )?
+    .get("url")
+    .and_then(Value::as_str)
+    .and_then(gerrit_url_base);
 
-    let mut entry = GerritEntry {
-        states: Vec::new(),
-        patchsets: std::collections::HashMap::new(),
-        fetch_limit,
-    };
+    // The accumulated cache entry, built up over the adaptive sampling loop below: every
+    // parsed state (opaque JSON — its shape is the engine's `GerritChangeState`, which this
+    // process cannot name) and the patchsets it was parsed from.
+    let mut states: Vec<Value> = Vec::new();
+    let mut patchsets: std::collections::BTreeMap<u64, Vec<u32>> = std::collections::BTreeMap::new();
     if !remote_changes.is_empty() {
         let remote_count = remote_changes.len();
         let mut window = remote_count
@@ -1482,8 +774,8 @@ fn gerrit_refresh(
                 .iter()
                 .rev()
                 .take(window)
-                .filter(|(change, _)| !entry.patchsets.contains_key(change))
-                .map(|(change, patchsets)| (*change, patchsets.clone()))
+                .filter(|(change, _)| !patchsets.contains_key(change))
+                .map(|(change, ps)| (*change, ps.clone()))
                 .collect();
             if !delta.is_empty() {
                 let numbers: std::collections::BTreeMap<u64, Vec<u32>> =
@@ -1497,32 +789,31 @@ fn gerrit_refresh(
                         )
                     })?;
                 }
-                // The engine's warm repository handle predates the fetched refs: reopen it so
-                // the meta parse reads the fresh ref store.
-                RepoManager::global().close(repo_path);
-                let repo = RepoManager::global()
-                    .get(repo_path)
-                    .map_err(|e| e.message)?;
-                let changes: Vec<i64> = delta.iter().map(|(change, _)| *change as i64).collect();
-                let parsed = git_graph_core::gerrit::parse_gerrit_metas(
-                    &repo,
-                    remote,
-                    &changes,
-                    url_base.as_deref(),
-                )
-                .map_err(|e| e.message)?;
-                for ((change, patchsets), state) in delta.into_iter().zip(parsed) {
-                    if let Some(state) = state {
-                        entry.states.push(state);
-                        entry.patchsets.insert(change, patchsets);
+                // The engine's warm repository handle predates the fetches just run: the
+                // backend reopens it before parsing (`gerrit_parse_changes`).
+                let changes_json: Vec<Value> = delta.iter().map(|(change, ps)| json!([change, ps])).collect();
+                let response = plugin_host::request(
+                    repo_path,
+                    json!({
+                        "command": "__gerritParseChanges", "remote": remote,
+                        "changes": changes_json, "urlBase": url_base
+                    }),
+                    Value::Null,
+                )?;
+                for parsed in response.get("parsed").and_then(Value::as_array).cloned().unwrap_or_default() {
+                    let change = parsed.get("change").and_then(Value::as_u64).unwrap_or_default();
+                    let ps: Vec<u32> = parsed
+                        .get("patchsets")
+                        .and_then(Value::as_array)
+                        .map(|a| a.iter().filter_map(Value::as_u64).map(|n| n as u32).collect())
+                        .unwrap_or_default();
+                    if let Some(state) = parsed.get("state").filter(|s| !s.is_null()) {
+                        states.push(state.clone());
+                        patchsets.insert(change, ps);
                     }
                 }
             }
-            let passing = entry
-                .states
-                .iter()
-                .filter(|state| gerrit_state_passes(state, filter))
-                .count();
+            let passing = states.iter().filter(|state| gerrit_state_passes_json(state, filter)).count();
             match filter_passes_anything
                 .then(|| gerrit_next_sample_window(window, passing, fetch_limit, remote_count))
             {
@@ -1533,8 +824,7 @@ fn gerrit_refresh(
         // Prune the locally fetched change refs the new set no longer keeps (the repository
         // stays a constant size across refreshes); best-effort — a failure only leaves stale
         // refs behind. One batched update-ref, as the extension deletes them.
-        let keep: Vec<String> = entry
-            .patchsets
+        let keep: Vec<String> = patchsets
             .keys()
             .map(|change| {
                 format!(
@@ -1543,12 +833,17 @@ fn gerrit_refresh(
                 )
             })
             .collect();
-        if let Ok(repo) = RepoManager::global().get(repo_path) {
-            if let Ok(refs) = git_graph_core::gerrit::list_change_refs(&repo, remote) {
+        if let Ok(response) = plugin_host::request(
+            repo_path,
+            json!({ "command": "__gerritLocalChangeRefs", "remote": remote }),
+            Value::Null,
+        ) {
+            if let Some(refs) = response.get("refs").and_then(Value::as_array) {
                 let deletions: String = refs
-                    .into_iter()
-                    .filter(|(refname, _)| !keep.iter().any(|prefix| refname.starts_with(prefix)))
-                    .map(|(refname, _)| format!("delete {refname}\n"))
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|refname| !keep.iter().any(|prefix| refname.starts_with(prefix.as_str())))
+                    .map(|refname| format!("delete {refname}\n"))
                     .collect();
                 if !deletions.is_empty() {
                     let _ = git.output_with_input(&["update-ref", "--stdin"], &deletions);
@@ -1556,119 +851,22 @@ fn gerrit_refresh(
             }
         }
     }
-    entry
-        .states
-        .sort_by_key(|state| std::cmp::Reverse(state.change));
-    let count = entry.states.len();
-    GERRIT_CACHE
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(
-            repo_path.to_owned(),
-            GerritRepo {
-                entry: Some(entry),
-                stale: false,
-            },
-        );
-    // The fetches wrote refs the engine's caches predate.
-    drop_warm_responses();
-    RepoManager::global().close(repo_path);
+    let patchsets_json: serde_json::Map<String, Value> = patchsets
+        .iter()
+        .map(|(change, ps)| (change.to_string(), json!(ps)))
+        .collect();
+    // Caches the accumulated states as the repository's fresh Gerrit entry and drops the
+    // caches the fetches invalidated (the fetches wrote refs the engine's caches predate).
+    let response = plugin_host::request(
+        repo_path,
+        json!({
+            "command": "__gerritCacheFinalize", "states": states,
+            "patchsets": patchsets_json, "fetchLimit": fetch_limit
+        }),
+        Value::Null,
+    )?;
+    let count = response.get("count").and_then(Value::as_u64).unwrap_or(0) as usize;
     Ok((count, true))
-}
-
-#[cfg(test)]
-mod warm_tests {
-    use super::*;
-
-    #[test]
-    fn the_warm_up_answers_the_first_default_requests_once() {
-        let scratch = crate::test_support::Scratch::new("warm");
-        let git = scratch.repo("repo");
-        crate::test_support::commit(&git, "a.rs", "fn a() {}\n", "second");
-        let root = git.repo.display().to_string();
-        assert_eq!(warm_first_page(&root).unwrap(), 2);
-
-        // The view's messages carry more than the options (a refresh id, the stashes it
-        // knows, the repo) and name the remotes it learnt: still the warm answer. The
-        // deferred uncommitted scan is part of that first request (graphHost.ts injects it),
-        // so the fixture carries it too.
-        let info = json!({ "command": "loadRepoInfo", "repo": root, "refreshId": 3, "showRemoteBranches": true, "showStashes": true, "hideRemotes": [] });
-        let answered = handle_repo_request(&root, &info, ActionSettings::default()).unwrap();
-        assert_eq!(answered["refreshId"], 3);
-        assert_eq!(answered["isRepo"], true);
-        let commits = json!({ "command": "loadCommits", "repo": root, "refreshId": 4, "branches": null, "authors": null, "maxCommits": 300, "showTags": true, "showRemoteBranches": true, "includeCommitsMentionedByReflogs": false, "onlyFollowFirstParent": false, "commitOrdering": "date", "remotes": [], "hideRemotes": [], "stashes": [], "deferUncommittedChanges": true });
-        assert!(take_warm_response(&root, "loadCommits", &commits).is_some());
-        // Served once: the next identical request goes to the engine (and still answers).
-        assert!(take_warm_response(&root, "loadCommits", &commits).is_none());
-        let fresh = handle_repo_request(&root, &commits, ActionSettings::default()).unwrap();
-        assert_eq!(fresh["refreshId"], 4);
-        assert_eq!(fresh["commits"].as_array().unwrap().len(), 2);
-
-        // Different options never take a warm answer, and a folder switch drops them all.
-        assert_eq!(warm_first_page(&root).unwrap(), 2);
-        let other = json!({ "command": "loadCommits", "maxCommits": 50 });
-        assert!(take_warm_response(&root, "loadCommits", &other).is_none());
-        close_engine_repos();
-        assert!(take_warm_response(&root, "loadRepoInfo", &info).is_none());
-    }
-
-    /// The first page defers the working-tree scan: it answers without the "Uncommitted
-    /// Changes" row, flags itself pending, and the row's count is served by the dedicated
-    /// command instead. A complete load (no deferral) still carries the row inline.
-    #[test]
-    fn a_deferred_load_marks_the_uncommitted_row_pending() {
-        let scratch = crate::test_support::Scratch::new("defer-uncommitted");
-        let git = scratch.repo("repo");
-        crate::test_support::commit(&git, "a.rs", "fn a() {}\n", "second");
-        let root = git.repo.display().to_string();
-        // A dirty working tree: one tracked file modified, one untracked file added.
-        std::fs::write(std::path::Path::new(&root).join("a.rs"), "fn a() { changed }\n").unwrap();
-        std::fs::write(std::path::Path::new(&root).join("new.txt"), "untracked\n").unwrap();
-
-        let deferred = handle_repo_request(
-            &root,
-            &json!({ "command": "loadCommits", "repo": root, "maxCommits": 300, "showTags": true, "showRemoteBranches": true, "deferUncommittedChanges": true }),
-            ActionSettings::default(),
-        )
-        .unwrap();
-        assert_eq!(deferred["error"], json!(null));
-        assert_eq!(deferred["uncommittedPending"], json!(true));
-        let hashes: Vec<&str> = deferred["commits"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|commit| commit["hash"].as_str().unwrap())
-            .collect();
-        assert!(!hashes.contains(&git_graph_core::types::UNCOMMITTED));
-
-        let complete = handle_repo_request(
-            &root,
-            &json!({ "command": "loadCommits", "repo": root, "maxCommits": 300, "showTags": true, "showRemoteBranches": true }),
-            ActionSettings::default(),
-        )
-        .unwrap();
-        assert_eq!(complete["error"], json!(null));
-        assert!(complete.get("uncommittedPending").is_none());
-        assert_eq!(
-            complete["commits"][0]["hash"],
-            json!(git_graph_core::types::UNCOMMITTED)
-        );
-
-        // The count the follow-up delivers: the whole working tree with untracked files, only
-        // the tracked changes without them.
-        let count = |include_untracked: bool| {
-            handle_repo_request(
-                &root,
-                &json!({ "command": "countUncommittedChanges", "repo": root, "includeUntracked": include_untracked }),
-                ActionSettings::default(),
-            )
-            .unwrap()
-        };
-        assert_eq!(count(true)["count"], json!(2));
-        assert_eq!(count(false)["count"], json!(1));
-
-        RepoManager::global().close(&root);
-    }
 }
 
 #[cfg(test)]
@@ -1682,141 +880,17 @@ mod tests {
         assert_eq!(dir_diff_range("abc", "*"), vec!["abc"]);
         assert_eq!(dir_diff_range("abc", "def"), vec!["abc..def"]);
     }
-}
 
-#[cfg(test)]
-mod engine_tests {
-    use serde_json::{json, Value};
-
-    use super::{submodule_roots, view_config};
-    use crate::test_support::Scratch;
-    use git_graph_core::{config, RepoManager};
-
-    /// The repository dropdown offers the main repository plus its initialised submodules: a
-    /// `.gitmodules` entry whose path holds a `.git` counts, one that was never initialised
-    /// (cloned without `--recurse-submodules`) does not.
+    /// `graph_engine_version`'s "not installed" sentinel when no backend is reachable — the
+    /// real "reports the linked engine's version" behavior needs a spawned `git-graph-backend`
+    /// and is covered by the integration test in `tests/graph_backend.rs`.
+    #[cfg(feature = "desktop")]
     #[test]
-    fn submodule_roots_list_only_initialised_submodules() {
-        let scratch = Scratch::new("submodules");
-        let git = scratch.repo("main");
-        crate::test_support::commit(&git, "README.md", "hi\n", "Initial commit");
-        let root = git.repo.display().to_string();
-        std::fs::write(
-            std::path::Path::new(&root).join(".gitmodules"),
-            "[submodule \"dep\"]\n\tpath = dep\n\turl = ../dep.git\n[submodule \"missing\"]\n\tpath = missing\n\turl = ../missing.git\n",
-        )
-        .unwrap();
-        // An initialised submodule: a .git below its path (a directory, like a real checkout's
-        // gitfile-based one would also be found).
-        std::fs::create_dir_all(std::path::Path::new(&root).join("dep").join(".git")).unwrap();
-        let dep = std::fs::canonicalize(std::path::Path::new(&root).join("dep"))
-            .unwrap()
-            .display()
-            .to_string()
-            .trim_start_matches(r"\\?\")
-            .to_owned();
-        assert_eq!(submodule_roots(&root), vec![dep]);
-        RepoManager::global().close(&root);
-    }
-
-    /// The Path filter sends comma-separated paths: a commit shows when it changes any one
-    /// of them, not only when it changes the literal comma-joined string.
-    #[test]
-    fn comma_separated_path_filter_matches_any_file() {
-        let scratch = Scratch::new("path-filter");
-        let git = scratch.repo("repo");
-        crate::test_support::commit(&git, "src/a.txt", "a\n", "touch a");
-        crate::test_support::commit(&git, "docs/b.txt", "b\n", "touch b");
-        crate::test_support::commit(&git, "other/c.txt", "c\n", "touch c");
-        let root = git.repo.display().to_string();
-        let request = json!({
-            "command": "loadCommits", "repo": root, "refreshId": 1,
-            "filterPath": "src/a.txt, docs/b.txt",
-        });
-        let response =
-            super::handle_repo_request(&root, &request, super::ActionSettings::default()).unwrap();
-        let subjects: Vec<&str> = response["commits"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|c| c["message"].as_str().unwrap())
-            .collect();
-        assert_eq!(subjects, vec!["touch b", "touch a"]);
-        RepoManager::global().close(&root);
-    }
-
-    /// The Settings Widget renders `GG.GitRepoConfig`: the branch map, the author list and the
-    /// split local/global user identity must all be present alongside the snapshot's own fields
-    /// (an incomplete shape makes the widget's render throw and empty the panel).
-    #[test]
-    fn view_config_matches_the_webview_shape() {
-        let scratch = Scratch::new("view-config");
-        let path = scratch.path("cfg");
-        std::fs::create_dir_all(&path).unwrap();
-        let git = scratch.git(&path);
-        git.run(&["init", "-q", "-b", "main"]).unwrap();
-        crate::test_support::commit(&git, "README.md", "hello\n", "Initial commit");
-        git.run(&["config", "--local", "user.name", "Local Me"])
-            .unwrap();
-        git.run(&["config", "--global", "user.name", "Global Me"])
-            .unwrap();
-        git.run(&["config", "--local", "user.email", "local@example.com"])
-            .unwrap();
-        git.run(&["remote", "add", "origin", "https://example.com/repo.git"])
-            .unwrap();
-        git.run(&["config", "--local", "branch.main.remote", "origin"])
-            .unwrap();
-        git.run(&["config", "--local", "branch.main.pushRemote", "origin"])
-            .unwrap();
-
-        let repo = RepoManager::global().get(&path).unwrap();
-        let snapshot = config::read_config(&repo).unwrap();
-        RepoManager::global().close(&path);
-        let cfg = view_config(&git, &snapshot);
-
-        assert_eq!(cfg["branches"]["main"]["remote"], json!("origin"));
-        assert_eq!(cfg["branches"]["main"]["pushRemote"], json!("origin"));
-        assert_eq!(cfg["remotes"][0]["name"], json!("origin"));
-        assert_eq!(
-            cfg["remotes"][0]["url"],
-            json!("https://example.com/repo.git")
-        );
-        assert_eq!(cfg["user"]["name"]["local"], json!("Local Me"));
-        assert_eq!(cfg["user"]["name"]["global"], json!("Global Me"));
-        assert_eq!(cfg["user"]["email"]["local"], json!("local@example.com"));
-        assert_eq!(cfg["user"]["email"]["global"], Value::Null);
-        // The commit's author, deduplicated by name and sorted.
-        assert_eq!(
-            cfg["authors"],
-            json!([{ "name": "Test", "email": "test@example.com" }])
-        );
-    }
-
-    /// Unlike `revision_file`, a binary blob's bytes come back instead of being discarded - and
-    /// the same wrapper reads `:index` for the staged copy, matching `revision_file`'s contract.
-    #[test]
-    fn revision_file_bytes_reads_a_commit_and_the_staged_copy() {
-        let scratch = Scratch::new("revision-file-bytes");
-        let git = scratch.repo("repo");
-        crate::test_support::write(&git, "blob.bin", "one\0two\n");
-        git.run(&["add", "blob.bin"]).unwrap();
-        git.run(&["commit", "-q", "-m", "add a binary file"])
-            .unwrap();
-        let hash = crate::test_support::head(&git);
-        crate::test_support::write(&git, "staged.bin", "three\0four\n");
-        git.run(&["add", "staged.bin"]).unwrap();
-        let root = git.repo.display().to_string();
-
-        let committed = super::revision_file_bytes(&root, &hash, "blob.bin").unwrap();
-        assert_eq!(committed.as_deref(), Some("one\0two\n".as_bytes()));
-
-        let staged = super::revision_file_bytes(&root, ":index", "staged.bin").unwrap();
-        assert_eq!(staged.as_deref(), Some("three\0four\n".as_bytes()));
-
-        let missing = super::revision_file_bytes(&root, &hash, "no-such.bin").unwrap();
-        assert_eq!(missing, None);
-
-        RepoManager::global().close(&root);
+    fn graph_engine_version_answers_a_sentinel_without_a_backend() {
+        // The store is pinned to an empty directory: the developer's real `~/.ggs` may hold
+        // the backend-carrying bundled package, which would answer with a real version.
+        let _store = crate::test_support::isolated_extension_store();
+        assert_eq!(super::graph_engine_version(), "not installed");
     }
 }
 
@@ -1868,7 +942,10 @@ type Status = Result<(), String>;
 /* ---------- Dispatch ---------- */
 
 /// Handle one write request. `None` when the command is not a write operation (the caller
-/// serves it from the engine instead).
+/// serves it from the engine instead). `desktop`-only: every arm runs the `git` CLI through
+/// `plugin_host`-adjacent state (the Gerrit cache invalidation calls), so the whole write path
+/// stays with the app; `git-graph-backend` (`engine` only) never calls it.
+#[cfg(feature = "desktop")]
 pub fn handle(git: &Git, message: &Value, settings: ActionSettings) -> Option<Value> {
     let command = message.get("command")?.as_str()?;
     let str_of = |key: &str| message.get(key).and_then(Value::as_str);
@@ -3504,177 +2581,6 @@ mod write_tests;
 #[cfg(test)]
 mod gerrit_tests {
     use super::*;
-
-    /// A scratch repository whose `origin` is a bare remote playing a Gerrit server: one change
-    /// with two patchsets, its NoteDb `meta` chain recording the creation and a Code-Review +2
-    /// on the second patchset — everything the refresh pipeline must discover on its own.
-    fn gerrit_repo(name: &str, change: u64) -> (crate::test_support::Scratch, Git, String) {
-        let scratch = crate::test_support::Scratch::new(name);
-        let server = scratch.bare("server.git");
-        let git = scratch.repo("repo");
-        git.run(&["remote", "add", "origin", &server.display().to_string()])
-            .unwrap();
-
-        let ps1 = crate::test_support::commit(&git, "a.txt", "v1\n", "patchset 1");
-        let ps2 = crate::test_support::commit(&git, "a.txt", "v2\n", "patchset 2");
-        let meta1 = crate::test_support::commit(
-            &git,
-            "meta.txt",
-            "1\n",
-            &format!("Create change\n\nPatch-set: 1\nCommit: {ps1}\nStatus: new\n"),
-        );
-        let meta2 = crate::test_support::commit(
-            &git,
-            "meta.txt",
-            "2\n",
-            &format!("Patch Set 2: Code-Review+2\n\nPatch-set: 2\nCommit: {ps2}\nLabel: Code-Review=+2\n"),
-        );
-        assert_ne!(meta1, meta2);
-        let shard = gerrit_change_shard(change);
-        git.run(&[
-            "push",
-            "-q",
-            "origin",
-            &format!("{ps1}:refs/changes/{shard}/{change}/1"),
-            &format!("{ps2}:refs/changes/{shard}/{change}/2"),
-            &format!("{meta2}:refs/changes/{shard}/{change}/meta"),
-        ])
-        .unwrap();
-        (scratch, git, ps2)
-    }
-
-    fn load_commits(root: &str) -> Value {
-        handle_repo_request(
-            root,
-            &json!({
-                "command": "loadCommits", "repo": root, "maxCommits": 300, "showTags": true,
-                "showRemoteBranches": true, "gerritFetchRefs": true, "gerritFetchLimit": 20,
-                "gerritStatusFilter": { "new": true, "merged": true, "abandoned": true, "wip": true }
-            }),
-            ActionSettings::default(),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn the_refresh_pipeline_fetches_and_parses_the_remote_changes() {
-        let (_scratch, git, ps2) = gerrit_repo("gerrit-refresh", 41466);
-        let root = git.repo.display().to_string();
-
-        // The first load of a just-enabled repository: nothing is fetched yet, so it pends.
-        let first = load_commits(&root);
-        assert_eq!(first["error"], json!(null));
-        assert_eq!(first["gerritPending"], json!(true));
-        assert_eq!(first["gerritStates"], json!(null));
-
-        // The host's follow-up refresh: ls-remote, the targeted fetch, the NoteDb parse.
-        let refresh = handle_repo_request(
-            &root,
-            &json!({ "command": "gerritRefresh", "repo": root, "gerritRemote": "origin", "gerritFetchLimit": 20 }),
-            ActionSettings::default(),
-        )
-        .unwrap();
-        assert_eq!(refresh["error"], json!(null));
-        assert_eq!(refresh["refreshed"], json!(true));
-        assert_eq!(refresh["changes"], json!(1));
-
-        // The reloaded page carries the parsed state and its change commit, and no longer pends.
-        let second = load_commits(&root);
-        assert_eq!(second.get("gerritPending"), None);
-        let states = second["gerritStates"].as_array().unwrap();
-        assert_eq!(states.len(), 1);
-        assert_eq!(states[0]["change"], json!(41466));
-        assert_eq!(states[0]["patchset"], json!(2));
-        assert_eq!(states[0]["codeReview"], json!(2));
-        assert_eq!(states[0]["status"], json!("new"));
-        assert_eq!(states[0]["headHash"], json!(ps2));
-        let hashes: Vec<&str> = second["commits"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|commit| commit["hash"].as_str().unwrap())
-            .collect();
-        assert!(hashes.contains(&ps2.as_str()));
-    }
-
-    #[test]
-    fn an_unreachable_remote_keeps_the_locally_cached_states() {
-        let (_scratch, git, _ps2) = gerrit_repo("gerrit-unreachable", 41466);
-        let root = git.repo.display().to_string();
-        handle_repo_request(
-            &root,
-            &json!({ "command": "gerritRefresh", "repo": root, "gerritRemote": "origin", "gerritFetchLimit": 20 }),
-            ActionSettings::default(),
-        )
-        .unwrap();
-
-        // The remote loses its change refs: ls-remote answers nothing while local change refs
-        // exist — the remote is treated as unreachable, the cached data stays.
-        let shard = gerrit_change_shard(41466);
-        git.run(&[
-            "push",
-            "-q",
-            "origin",
-            "--delete",
-            &format!("refs/changes/{shard}/41466/1"),
-            &format!("refs/changes/{shard}/41466/2"),
-            &format!("refs/changes/{shard}/41466/meta"),
-        ])
-        .unwrap();
-        let refresh = handle_repo_request(
-            &root,
-            &json!({ "command": "gerritRefresh", "repo": root, "gerritRemote": "origin", "gerritFetchLimit": 20 }),
-            ActionSettings::default(),
-        )
-        .unwrap();
-        assert_eq!(refresh["error"], json!(null));
-        assert_eq!(refresh["refreshed"], json!(false));
-        assert_eq!(refresh["changes"], json!(1));
-
-        // The next load still serves the cached states.
-        let load = load_commits(&root);
-        assert_eq!(load["error"], json!(null));
-        assert_eq!(load["gerritStates"].as_array().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn enabling_pends_and_disabling_deletes_the_fetched_refs() {
-        let (_scratch, git, _ps2) = gerrit_repo("gerrit-toggle", 41466);
-        let root = git.repo.display().to_string();
-
-        let enable = handle_repo_request(
-            &root,
-            &json!({ "command": "gerritSetFetchRefs", "repo": root, "enabled": true, "gerritRemote": "origin" }),
-            ActionSettings::default(),
-        )
-        .unwrap();
-        assert_eq!(enable["error"], json!(null));
-        assert_eq!(load_commits(&root)["gerritPending"], json!(true));
-
-        handle_repo_request(
-            &root,
-            &json!({ "command": "gerritRefresh", "repo": root, "gerritRemote": "origin", "gerritFetchLimit": 20 }),
-            ActionSettings::default(),
-        )
-        .unwrap();
-        let disable = handle_repo_request(
-            &root,
-            &json!({ "command": "gerritSetFetchRefs", "repo": root, "enabled": false, "gerritRemote": "origin" }),
-            ActionSettings::default(),
-        )
-        .unwrap();
-        assert_eq!(disable["error"], json!(null));
-        assert_eq!(disable["enabled"], json!(false));
-        assert!(disable["cleared"].as_u64().unwrap() >= 2);
-        assert!(git
-            .output(&[
-                "rev-parse",
-                "--verify",
-                "-q",
-                "refs/remotes/origin/changes/66/41466/meta"
-            ])
-            .is_err());
-    }
 
     #[test]
     fn change_refs_are_parsed_from_every_form() {

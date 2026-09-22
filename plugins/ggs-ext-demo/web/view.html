@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GGX Demo</title>
+<style>
+	body { font-family: var(--ggs-font, system-ui); margin: 2rem; color: #ddd; background: #1e1e1e; }
+	h1 { font-size: 1.2rem; }
+	pre { background: #2a2a2a; padding: .75rem; border-radius: 4px; white-space: pre-wrap; }
+	button { margin-right: .5rem; padding: .35rem .8rem; }
+</style>
+</head>
+<body>
+<h1>GGX Demo — a ggx/2 extension page</h1>
+<p><button id="hello">Say hello (backend.run)</button>
+<button id="notify">Notify the workbench</button></p>
+<pre id="out">waiting for the host's init…</pre>
+<script>
+	const api = acquireGgsApi();
+	const out = document.getElementById('out');
+	const show = (text) => { out.textContent = text; };
+	api.ready.then((context) => show('page context: ' + JSON.stringify(context, null, 2)));
+	document.getElementById('hello').addEventListener('click', async () => {
+		try {
+			const result = await api.request('backend.run', ['ggs.ext-demo.hello', ['the page']]);
+			show('backend answered: ' + JSON.stringify(result, null, 2));
+		} catch (error) { show('backend failed: ' + error); }
+	});
+	document.getElementById('notify').addEventListener('click', () => {
+		void api.request('notify', ['info', 'Hello from the GGX demo page']);
+	});
+</script>
+</body>
+</html>

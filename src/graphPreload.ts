@@ -48,6 +48,23 @@ export interface ViewPageInput {
 
 let viewPageBundle: Promise<void> | null = null;
 
+/** The linked engine's version, resolved once per document: the page generator's own engine
+ *  probe runs in the browser and cannot see the engine this app links in-process, so the host
+ *  declares it — the version the view's Settings backend section then reports. A failed read
+ *  leaves it undeclared, and the generator honestly reports the engine as unavailable (if the
+ *  backend cannot answer, nothing is serving the view anyway). */
+let engineVersionPromise: Promise<string | null> | null = null;
+
+function linkedEngineVersion(): Promise<string | null> {
+	engineVersionPromise ??= invoke<string>('graph_engine_version').catch(() => {
+		// A failed read is not cached: the next generation asks again, and until one answers
+		// the generator honestly reports the engine as unavailable.
+		engineVersionPromise = null;
+		return null;
+	});
+	return engineVersionPromise;
+}
+
 /** Load the view page generator once per document. A generator that is already present (tests
  *  pre-set it) resolves at once; a failed load rejects, and the caller falls back to whatever
  *  it can do without a page (the host logs it). */
@@ -64,12 +81,13 @@ export function loadViewPageGenerator(): Promise<void> {
 }
 
 /** Generate the extension's own page and compose it with the host environment for the current
- *  theme. */
+ *  theme. The linked engine's version rides along for the page's Settings backend section. */
 export async function buildViewPageHtml(input: ViewPageInput): Promise<string> {
 	await loadViewPageGenerator();
 	const generate = window.GitGraphViewPage;
 	if (!generate) throw new Error('The Git Graph view page generator did not load');
-	return composeViewPage(generate.buildViewPage({ ...input }), themeById());
+	const engineVersion = await linkedEngineVersion();
+	return composeViewPage(generate.buildViewPage({ ...input, engineVersion: engineVersion ?? undefined }), themeById());
 }
 
 /**

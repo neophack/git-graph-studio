@@ -9,12 +9,50 @@
 //!
 //! Run the plan's full-size line with `GGS_PERF_FILES=100000` (a few minutes, mostly git).
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use git_graph_studio_lib::{cmd_fs, cmd_search};
-use serde_json::json;
+use git_graph_studio_lib::ext_process::ProcessHostState;
+use git_graph_studio_lib::{cmd_ext, cmd_fs, cmd_search};
+use serde_json::{json, Value};
+
+const ENGINE_ID: &str = "perf.git-graph-rs";
+
+/// Installs a `git-graph-rs`-shaped `ggx/2` package — backend the just-built engine binary,
+/// `ggx-rpc/1` — into its own temp extensions directory, isolated from the developer's or CI
+/// runner's real `~/.ggs/extensions` (`plugin_host.rs`'s own global state is not used here;
+/// this drives `ProcessHostState` directly, the same way `tests/graph_backend.rs` does).
+fn install_engine_backend(exts: &Path) {
+    std::fs::create_dir_all(exts).unwrap();
+    let ggx = exts.parent().unwrap().join("git-graph-rs-perf.ggx");
+    let file = std::fs::File::create(&ggx).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+    zip.start_file("manifest.json", options).unwrap();
+    zip.write_all(
+        format!(
+            r#"{{"format":"ggx/2","id":"{ENGINE_ID}","version":"1.0.0","pages":{{"view":{{"page":"web/view.html"}}}},"backend":{{"kind":"process","command":{},"protocol":"ggx-rpc/1"}}}}"#,
+            serde_json::to_string(env!("CARGO_BIN_EXE_git-graph-backend")).unwrap()
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    zip.start_file("package.json", options).unwrap();
+    zip.write_all(br#"{"name":"git-graph-rs","publisher":"perf","version":"1.0.0"}"#).unwrap();
+    zip.start_file("web/view.html", options).unwrap();
+    zip.write_all(b"<html></html>").unwrap();
+    zip.finish().unwrap();
+    cmd_ext::install_from_ggx_into(exts, &ggx, false).unwrap();
+}
+
+/// One `request` call against the isolated engine backend, mirroring exactly what
+/// `cmd_graph.rs`'s top-level wrappers send `plugin_host` in production (the same synthetic
+/// `__`-prefixed commands, or a real view message).
+fn engine_request(state: &ProcessHostState, exts: &Path, repo: &str, message: Value) -> Result<Value, String> {
+    state.call(exts, ENGINE_ID, "request", json!({ "repo": repo, "settings": null, "message": message }))
+}
 
 fn git(repo: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -159,15 +197,28 @@ fn opening_a_large_repository_stays_within_the_budgets() {
         "at least one symbol per file in the analysis"
     );
 
-    // The engine phases run in-process, exactly as the app runs them (the engine is linked
-    // into the app; there is no backend process).
+    // The engine phases run through the installed backend process, exactly as the app runs
+    // them (`cmd_graph.rs`'s wrapper functions send the same `request`, over `plugin_host`'s
+    // `ext_process::global()` in production; this test drives its own isolated
+    // `ProcessHostState` instead, so it needs no real `~/.ggs/extensions` install and does not
+    // pollute the developer's or CI runner's real profile). The one-time spawn + `hello`
+    // handshake cost (plan §8.2: ~99 ms on the reference machine) is not charged to `root_ms`
+    // below — it happens on `state.start`, before timing starts.
+    let exts_tmp = tempfile::tempdir().unwrap();
+    let exts = exts_tmp.path().join("extensions");
+    install_engine_backend(&exts);
+    let state = ProcessHostState::default();
+    state.start(&exts, ENGINE_ID).expect("the engine backend starts");
+
     let started = Instant::now();
-    let resolved = git_graph_studio_lib::cmd_graph::resolve_repo_root(&format!("{root}/mod0"));
+    let resolved = engine_request(&state, &exts, &format!("{root}/mod0"), json!({ "command": "__repoRoot", "path": format!("{root}/mod0") }))
+        .ok()
+        .and_then(|v| v.get("root").and_then(Value::as_str).map(str::to_owned));
     let root_ms = ms(started);
     assert!(resolved.is_some());
 
     let started = Instant::now();
-    let status = git_graph_studio_lib::cmd_graph::scm_changes(&root).unwrap();
+    let status = engine_request(&state, &exts, &root, json!({ "command": "__scmChanges" })).unwrap();
     let status_ms = ms(started);
     assert_eq!(
         status.as_array().map(Vec::len),
@@ -176,17 +227,27 @@ fn opening_a_large_repository_stays_within_the_budgets() {
     );
 
     let started = Instant::now();
-    let commits = git_graph_studio_lib::cmd_graph::load_first_page(&root).unwrap();
+    let first_page = engine_request(
+        &state, &exts, &root,
+        json!({ "command": "loadCommits", "maxCommits": 300, "showTags": true, "showRemoteBranches": true, "deferUncommittedChanges": true }),
+    )
+    .unwrap();
     let first_page_ms = ms(started);
+    let commits = first_page["commits"].as_array().map_or(0, Vec::len);
     // The page defers the "Uncommitted Changes" row (the working-tree scan completes it in a
     // follow-up count), so it holds the history's commits alone - the row no longer blocks
     // the first paint, which is what this budget guards.
     assert_eq!(commits, 7, "7 commits; the uncommitted-changes row arrives deferred");
 
     let started = Instant::now();
-    let commits_again = git_graph_studio_lib::cmd_graph::load_first_page(&root).unwrap();
+    let warm_page = engine_request(
+        &state, &exts, &root,
+        json!({ "command": "loadCommits", "maxCommits": 300, "showTags": true, "showRemoteBranches": true, "deferUncommittedChanges": true }),
+    )
+    .unwrap();
     let warm_page_ms = ms(started);
-    assert_eq!(commits_again, 7);
+    assert_eq!(warm_page["commits"].as_array().map_or(0, Vec::len), 7);
+    state.stop(ENGINE_ID).unwrap();
 
     let report = json!({
         "files": files,

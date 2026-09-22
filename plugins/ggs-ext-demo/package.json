@@ -1,0 +1,20 @@
+{
+	"name": "ext-demo",
+	"publisher": "ggs",
+	"version": "0.1.0",
+	"displayName": "GGX Demo",
+	"description": "The ggx/2 package format's worked example: a page plus a process backend.",
+	"engines": { "ggs": ">=0.1.0" },
+	"categories": ["Other"],
+	"contributes": {
+		"commands": [
+			{ "command": "ggs.ext-demo.hello", "title": "GGX Demo: Hello (process backend)" },
+			{ "command": "ggs.ext-demo.openPage", "title": "GGX Demo: Open the Page" }
+		],
+		"keybindings": [{ "command": "ggs.ext-demo.openPage", "key": "ctrl+alt+g" }],
+		"menus": {
+			"explorer/context": [{ "command": "ggs.ext-demo.hello" }],
+			"editor/context": [{ "command": "ggs.ext-demo.hello" }]
+		}
+	}
+}

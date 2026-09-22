@@ -178,7 +178,9 @@ export type EditorInput =
 	| { kind: 'hex'; path: string }
 	| { kind: 'canlog'; path: string }
 	| { kind: 'compare'; id: string; title: string; fromHash: string; toHash: string; singleCommit: boolean; repo?: string }
-	| { kind: 'bincompare'; id: string; title: string; repo?: string; fromHash: string; toHash: string; file: { oldFilePath: string; newFilePath: string; type: string } };
+	| { kind: 'bincompare'; id: string; title: string; repo?: string; fromHash: string; toHash: string; file: { oldFilePath: string; newFilePath: string; type: string } }
+	| { kind: 'extpage'; id: string; title: string; extId: string; pageId: string; params?: unknown }
+	| { kind: 'extdetail'; id: string; title: string; extId: string };
 
 export interface Editor {
 	input: EditorInput;
@@ -245,6 +247,8 @@ function inputId(input: EditorInput): string {
 		case 'folders': return 'folders:' + input.id;
 		case 'symboldb': return input.id;
 		case 'analysis': return 'analysis:' + input.tool;
+		case 'extpage': return input.id;
+		case 'extdetail': return input.id;
 		case 'calltree': return 'calltree:' + input.id;
 		case 'compare': return 'compare:' + input.id;
 		case 'bincompare': return 'bincompare:' + input.id;
@@ -2017,6 +2021,47 @@ export class EditorGroup {
 		CallTreeView.repoRoot = this.rootPath;
 		editor.callTree = new CallTreeView(editor.pane, symbol);
 		editor.callTree.onOpen = (path, line) => void this.openFile(path, { line });
+		this.add(editor);
+	}
+
+	/** An extension page tab (module 12): a `ggx` package's page in a sandboxed iframe, the
+	 *  counterpart of VS Code's webview panels. Each open is its own instance (the caller's
+	 *  id carries a serial); `mount` builds the content and returns its disposer, run on
+	 *  close — the extension host owns the frame, the editor owns the tab's lifetime. */
+	async openExtPage(
+		input: Extract<EditorInput, { kind: 'extpage' }>,
+		mount: (pane: HTMLElement) => (() => void) | void
+	): Promise<void> {
+		const editor: Editor = {
+			input,
+			id: input.id,
+			label: input.title,
+			iconClass: 'globe',
+			pane: el('div', 'editor-pane ext-page'),
+			dirty: false
+		};
+		const dispose = mount(editor.pane);
+		if (dispose) editor.onClose = dispose;
+		this.add(editor);
+	}
+
+	/** The Extensions view's detail page (module 12): a package's facts and README in an
+	 *  editor tab — VS Code's extension editor. One tab per extension (the input id is the
+	 *  extension id), so a second open focuses the tab already showing it. */
+	openExtDetail(
+		input: Extract<EditorInput, { kind: 'extdetail' }>,
+		mount: (pane: HTMLElement) => (() => void) | void
+	): void {
+		const editor: Editor = {
+			input,
+			id: input.id,
+			label: input.title,
+			iconClass: 'extensions',
+			pane: el('div', 'editor-pane ext-page'),
+			dirty: false
+		};
+		const dispose = mount(editor.pane);
+		if (dispose) editor.onClose = dispose;
 		this.add(editor);
 	}
 

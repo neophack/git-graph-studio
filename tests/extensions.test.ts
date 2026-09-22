@@ -9,7 +9,8 @@ import { createVscodeApi } from '../src/vscodeApi';
 // frame's `parent` is this same window, so tests drive it with MessageEvents and read its posts.
 import '../src/extHostBoot';
 import { backend } from './tauriMock';
-import { click, flush, key, notificationButton, notifications, type } from './helpers';
+import { click, flush, key, menuItem, menuLabels, notificationButton, notifications, rightClick, type } from './helpers';
+import { Explorer } from '../src/explorer';
 
 const BUILTIN: ExtInfo = { id: 'neophack.git-graph-rs', name: 'git-graph-rs', displayName: 'Git Graph', publisher: 'neophack', version: '1.0.23', description: 'Git Graph', builtin: true, icon: null, path: '', categories: ['SCM Providers'], keywords: ['git'], repository: 'https://github.com/neophack/git-graph-rs', license: 'MIT', enginesVscode: '^1.80.0', extensionDependencies: [], extensionPack: [], readme: 'README.md', changelog: null, format: 'builtin', ggx: null };
 const USER: ExtInfo = { id: 'acme.demo', name: 'demo', displayName: null, publisher: 'acme', version: '2.0.0', description: 'A demo', builtin: false, icon: null, path: '/ext/acme.demo-2.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: ['acme.base'], extensionPack: [], readme: null, changelog: null, format: 'vsix', ggx: null };
@@ -33,53 +34,148 @@ describe('ExtensionsPanel', () => {
 		expect(names.join('|')).toContain('Git Graph');
 		expect(names.join('|')).toContain('demo');
 		expect(document.querySelector('.ext-builtin')).not.toBeNull();
-		// Built-ins have no uninstall button; user extensions do.
-		expect(document.querySelectorAll('.ext-row')[0]!.querySelector('.action-btn')).toBeNull();
-		expect(document.querySelectorAll('.ext-row')[1]!.querySelector('.action-btn')).not.toBeNull();
+		// The integrated entry (no package installed) offers the one-click bundled install, not
+		// an uninstall; user extensions get the uninstall.
+		const builtinButton = document.querySelectorAll<HTMLElement>('.ext-row')[0]!.querySelector<HTMLElement>('.action-btn')!;
+		expect(builtinButton.title).toContain('Install the bundled');
+		const userButton = document.querySelectorAll<HTMLElement>('.ext-row')[1]!.querySelector<HTMLElement>('.action-btn')!;
+		expect(userButton.title).toContain('Uninstall acme.demo');
 	});
 
-	it('installs from a picked VSIX and refreshes', async () => {
-		backend.dialog.openResult = 'C:\\downloads\\acme.demo-2.1.0.vsix';
-		const installed: ExtInfo = { ...USER, version: '2.1.0' };
-		backend.on('ext_install_from_vsix', () => installed);
+	it('installs the bundled git-graph-rs package from the integrated entry, as a standard package', async () => {
+		let listed: ExtInfo[] = [BUILTIN, USER];
+		backend.on('ext_list', () => listed);
+		const installedGgx: ExtInfo = { ...BUILTIN, builtin: false, format: 'ggx', version: '1.0.25', path: '/ext/neophack.git-graph-rs-1.0.25' };
+		backend.on('ext_install_bundled', () => installedGgx);
+		const panel = mountedPanel();
+		await panel.refresh();
+		document.querySelectorAll<HTMLElement>('.ext-row')[0]!.querySelector<HTMLElement>('.action-btn')!.click();
+		await flush();
+		expect(backend.callsTo('ext_install_bundled')).toEqual([{}]);
+		expect(notifications().join()).toContain('neophack.git-graph-rs v1.0.25');
+		// Once installed it is a standard package: the button becomes the ordinary uninstall.
+		listed = [installedGgx, USER];
+		await panel.refresh();
+		const integrated = document.querySelectorAll<HTMLElement>('.ext-row')[0]!.querySelector<HTMLElement>('.action-btn')!;
+		expect(integrated.title).toContain('Uninstall neophack.git-graph-rs');
+	});
+
+	it('shows a process package\'s backend state and restarts it', async () => {
+		const PROC: ExtInfo = {
+			...USER, id: 'acme.proc', displayName: 'Proc', format: 'ggx',
+			ggx: { format: 'ggx/2', id: 'acme.proc', version: '2.0.0', pages: {}, backend: { kind: 'process', command: 'bin/main' }, permissions: [] }
+		};
+		backend.on('ext_list', () => [BUILTIN, PROC]);
+		backend.on('ext_process_status', () => [
+			{ extensionId: 'acme.proc', pid: 4321, commands: ['acme.proc.hello'], protocolVersion: 'ggs-ext/1', startCount: 2, lastError: null }
+		]);
+		const panel = mountedPanel();
+		await panel.refresh();
+		expect(document.querySelector('.ext-process.running')!.textContent).toContain('Running · pid 4321');
+		expect(document.querySelector('.ext-process.running')!.textContent).toContain('start #2');
+
+		// Restart: stop, then start; a backend that is down says so, with its last error.
+		backend.on('ext_process_stop', () => null);
+		backend.on('ext_process_start', () => null);
+		backend.on('ext_process_status', () => [
+			{ extensionId: 'acme.proc', pid: 0, commands: [], protocolVersion: 'ggs-ext/1', startCount: 2, lastError: 'the backend exited' }
+		]);
+		document.querySelector<HTMLElement>('.action-btn[title*="Restart"]')!.click();
+		await flush();
+		expect(backend.callsTo('ext_process_stop')).toEqual([{ extId: 'acme.proc' }]);
+		expect(backend.callsTo('ext_process_start')).toEqual([{ extId: 'acme.proc' }]);
+		expect(document.querySelector('.ext-process')!.textContent).toContain('Not running · the backend exited');
+	});
+
+	it('a row click asks the workbench to open the extension\'s detail page', async () => {
+		const panel = mountedPanel();
+		await panel.refresh();
+		let opened: ExtInfo | null = null;
+		panel.onOpenDetail = (ext) => { opened = ext; };
+		document.querySelectorAll<HTMLElement>('.ext-row')[1]!.click();
+		expect(opened).toBeTruthy();
+		expect(opened!.id).toBe('acme.demo');
+		// The inline chevron section is gone: the page carries the details now.
+		expect(document.querySelector('.ext-detail')).toBeNull();
+	});
+
+	it('the detail page shows the facts and renders the package\'s README', async () => {
+		const PROC: ExtInfo = {
+			...USER, id: 'acme.proc', displayName: 'Proc', format: 'ggx', path: '/ext/acme.proc-2.0.0', readme: 'README.md',
+			ggx: {
+				format: 'ggx/2', id: 'acme.proc', version: '2.0.0', pages: {},
+				backend: { kind: 'process', command: 'bin/main', protocol: 'ggx-rpc/1' },
+				permissions: ['repo:read', 'network']
+			}
+		};
+		backend.on('ext_list', () => [BUILTIN, PROC]);
+		backend.on('ext_process_status', () => [
+			{ extensionId: 'acme.proc', pid: 4321, commands: [], protocolVersion: 'ggx-rpc/1', startCount: 1, lastError: null }
+		]);
+		backend.on('ext_read_file', () => '# Proc\n\nThe readme.');
+		// jsdom loads no vendor script: a tiny markdown-it stand-in renders the README.
+		(window as unknown as { markdownit: unknown }).markdownit = {
+			render: (text: string) => text.split('\n').map((line) => `<p>${line}</p>`).join(''),
+			renderer: { rules: {} }
+		};
+		const panel = mountedPanel();
+		await panel.refresh();
+		const pane = document.body.appendChild(document.createElement('div'));
+		panel.mountDetail(PROC, pane);
+		const page = pane.querySelector<HTMLElement>('.ext-detail-page')!;
+		expect(page).not.toBeNull();
+		// The header: the resolved name and the description.
+		expect(page.textContent).toContain('Proc');
+		expect(page.textContent).toContain('A demo');
+		// The facts: identifier, install location, declared backend and its live process,
+		// permissions.
+		expect(page.textContent).toContain('acme.proc');
+		expect(page.textContent).toContain('/ext/acme.proc-2.0.0');
+		expect(page.textContent).toContain('ggx-rpc/1');
+		expect(page.textContent).toContain('bin/main');
+		expect(page.textContent).toContain('repo:read, network');
+		await flush(4);
+		expect(pane.querySelector('.ext-detail-readme article')!.innerHTML).toContain('<p># Proc</p>');
+
+		// The built-in entry (no ggx, no path) reports "embedded" and no backend, and points
+		// at the install for the README it cannot read yet.
+		const builtinPane = document.body.appendChild(document.createElement('div'));
+		panel.mountDetail(BUILTIN, builtinPane);
+		expect(builtinPane.textContent).toContain('Embedded (not installed as a package)');
+		expect(builtinPane.textContent).toContain('None (frontend only)');
+		expect(builtinPane.textContent).toContain('Install the package to read its README');
+	});
+
+	it('installs from a picked .ggx package and refreshes', async () => {
+		backend.dialog.openResult = 'C:\\downloads\\acme.demo-2.1.0.ggx';
+		const installed: ExtInfo = { ...USER, version: '2.1.0', format: 'ggx' };
+		backend.on('ext_install_from_ggx', () => installed);
 		let listed = [BUILTIN, USER];
 		backend.on('ext_list', () => listed);
 		const panel = mountedPanel();
 		await panel.refresh();
-		await panel.installFromVsixCommand();
-		expect(backend.callsTo('ext_install_from_vsix')).toEqual([{ path: 'C:\\downloads\\acme.demo-2.1.0.vsix' }]);
+		await panel.installFromGgxCommand();
+		expect(backend.callsTo('ext_install_from_ggx')).toEqual([{ path: 'C:\\downloads\\acme.demo-2.1.0.ggx' }]);
 		expect(notifications().join()).toContain('acme.demo v2.1.0');
 		listed = [BUILTIN, installed];
 		await panel.refresh();
 		expect([...document.querySelectorAll('.ext-version')].map((v) => v.textContent)).toContain('v2.1.0');
 	});
 
-	it('installs a .ggx package through its own command', async () => {
-		backend.dialog.openResult = 'C:\downloadscme.demo-2.1.0.ggx';
-		const installed: ExtInfo = { ...USER, version: '2.1.0', format: 'ggx' };
-		backend.on('ext_install_from_ggx', () => installed);
+	it('surfaces the error when a same-version package is installed again', async () => {
+		backend.dialog.openResult = 'C:\\downloads\\git-graph-rs-1.0.24.ggx';
+		backend.on('ext_install_from_ggx', () => { throw 'neophack.git-graph-rs 1.0.24 is already installed'; });
 		const panel = mountedPanel();
 		await panel.refresh();
-		await panel.installFromVsixCommand();
-		expect(backend.callsTo('ext_install_from_ggx')).toEqual([{ path: 'C:\downloadscme.demo-2.1.0.ggx' }]);
-		expect(backend.callsTo('ext_install_from_vsix')).toEqual([]);
-		expect(notifications().join()).toContain('acme.demo v2.1.0');
-	});
-
-	it('surfaces the refusal when a package of the integrated extension is installed', async () => {
-		backend.dialog.openResult = 'C:\downloads\git-graph-rs-1.0.24.ggx';
-		backend.on('ext_install_from_ggx', () => { throw 'neophack.git-graph-rs is built into Git Graph Studio; its version follows the application'; });
-		const panel = mountedPanel();
-		await panel.refresh();
-		await panel.installFromVsixCommand();
-		expect(notifications().join()).toContain('built into Git Graph Studio');
+		await panel.installFromGgxCommand();
+		expect(notifications().join()).toContain('already installed');
 	});
 
 	it('surfaces install errors (a downgrade, for instance)', async () => {
-		backend.dialog.openResult = 'old.vsix';
-		backend.on('ext_install_from_vsix', () => { throw 'acme.demo 2.0.0 is already installed; acme.demo 1.0.0 is older'; });
+		backend.dialog.openResult = 'old.ggx';
+		backend.on('ext_install_from_ggx', () => { throw 'acme.demo 2.0.0 is already installed; acme.demo 1.0.0 is older'; });
 		const panel = mountedPanel();
-		await panel.installFromVsixCommand();
+		await panel.installFromGgxCommand();
 		expect(notifications().join()).toContain('older');
 	});
 
@@ -356,5 +452,262 @@ describe('calls into an extension frame that goes away', () => {
 		expect(settled).toContain('acme.demo was deactivated');
 		expect(handle.pendingCalls.size).toBe(0);
 		expect(host['frames'].size).toBe(listenersBefore - 1);
+	});
+});
+
+describe('ggx/2 packages: the page registry and the process backend', () => {
+	const GGX2: ExtInfo = {
+		id: 'acme.proc', name: 'proc', displayName: 'Proc Demo', publisher: 'acme', version: '1.0.0', description: 'A ggx/2 package',
+		builtin: false, icon: null, path: '/ext/acme.proc-1.0.0', categories: [], keywords: [], repository: null, license: null,
+		enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggx',
+		ggx: {
+			format: 'ggx/2', id: 'acme.proc', version: '1.0.0',
+			pages: { main: { page: 'web/view.html', title: 'Demo Page' } },
+			backend: { kind: 'process', command: 'bin/main' },
+			permissions: []
+		}
+	};
+
+	it('dispatches a process-backed declared command to its backend and opens the page its result names', async () => {
+		withExtensions(GGX2);
+		backend.on('ext_read_file', ({ relPath }) => {
+			if (relPath === 'package.json') return JSON.stringify({
+				main: './main.js',
+				contributes: { commands: [
+					{ command: 'acme.proc.hello', title: 'Hello' },
+					{ command: 'acme.proc.open', title: 'Open' }
+				] }
+			});
+			if (relPath === 'main.js') return 'exports.activate = function () {};';
+			throw new Error('no such file');
+		});
+		backend.on('ext_process_run', ({ command }) => (command === 'acme.proc.open' ? { openPage: 'main', params: { by: 'command' } } : { greeting: 'hi' }));
+		const host = new ExtensionHost();
+		const opened: Array<[string, string, unknown]> = [];
+		host.onOpenPage = (extId, pageId, params) => opened.push([extId, pageId, params]);
+		await host.activateInstalled();
+
+		// The declared command is runnable from the manifest alone — no frame, no spawn yet.
+		expect(commands.get('acme.proc.hello')).toBeDefined();
+		expect(commands.paletteItems().some((item) => item.value === 'acme.proc.hello')).toBe(true);
+		await commands.execute('acme.proc.open');
+		await flush();
+		// The palette invocation reached the backend process command, and its page-open
+		// convention surfaced the package's page.
+		expect(backend.callsTo('ext_process_run')).toEqual([{ extId: 'acme.proc', command: 'acme.proc.open', args: [] }]);
+		expect(opened).toEqual([['acme.proc', 'main', { by: 'command' }]]);
+
+		// A failing backend command surfaces as an error notification, not a throw.
+		backend.on('ext_process_run', () => { throw 'spawn failed'; });
+		await commands.execute('acme.proc.hello');
+		await flush();
+		expect(notifications().join()).toContain('Extension backend command failed');
+	});
+
+	it('resolves pages through the registry (ggx/1 frontend pages included) and mounts them sandboxed', async () => {
+		const FRONTEND_ONLY: ExtInfo = { ...GGX2, id: 'acme.front', ggx: { format: 'ggx/1', id: 'acme.front', version: '1.0.0', frontend: { page: 'web/view.html' } } };
+		withExtensions(GGX2, FRONTEND_ONLY);
+		const host = new ExtensionHost();
+		await host.list();
+		// The ggx/2 registry names its page; a ggx/1 package's single frontend page is the
+		// page named "view".
+		expect(host.pageEntry('acme.proc', 'main')!.page).toBe('web/view.html');
+		expect(host.pageEntry('acme.front', 'view')!.page).toBe('web/view.html');
+		expect(host.pageEntry('acme.proc', 'missing')).toBeNull();
+
+		const opened: Array<[string, string, unknown]> = [];
+		host.onOpenPage = (extId, pageId, params) => opened.push([extId, pageId, params]);
+		host.openPage('acme.proc', 'main', { x: 1 });
+		host.openPage('acme.proc', 'missing');
+		expect(opened).toEqual([['acme.proc', 'main', { x: 1 }]]);
+		expect(notifications().join()).toContain('Extension page not found');
+
+		const container = document.body.appendChild(document.createElement('div'));
+		const dispose = host.mountPage('acme.proc', 'main', { x: 1 }, container);
+		const frame = container.querySelector<HTMLIFrameElement>('iframe.ext-page-frame')!;
+		expect(frame).not.toBeNull();
+		expect(frame.getAttribute('sandbox')).toBe('allow-scripts');
+		expect(frame.src).toContain('acme.proc-1.0.0/web/view.html');
+		expect(frame.src.startsWith('ggx://localhost/') || frame.src.startsWith('http://ggx.localhost/')).toBe(true);
+
+		// A page's backend.run routes to the process command with the page's extension.
+		backend.on('ext_process_run', () => ({ greeting: 'from the page' }));
+		const replies: unknown[] = [];
+		frame.contentWindow!.addEventListener('message', (event: MessageEvent) => {
+			const data = event.data as { __ggxHost?: boolean; type?: string; result?: unknown };
+			if (data?.__ggxHost && data.type === 'rpcResult') replies.push(data.result);
+		});
+		window.dispatchEvent(new MessageEvent('message', {
+			source: frame.contentWindow,
+			data: { __ggxPage: true, kind: 'rpc', id: 9, method: 'backend.run', args: ['acme.proc.hello', ['page']] }
+		}));
+		await flush();
+		expect(backend.callsTo('ext_process_run')).toContainEqual({ extId: 'acme.proc', command: 'acme.proc.hello', args: ['page'] });
+		expect(replies).toEqual([{ greeting: 'from the page' }]);
+
+		// Pages may not register commands — that is a package.json (or backend) concern.
+		const errors: unknown[] = [];
+		frame.contentWindow!.addEventListener('message', (event: MessageEvent) => {
+			const data = event.data as { __ggxHost?: boolean; type?: string; ok?: boolean; result?: unknown };
+			if (data?.__ggxHost && data.type === 'rpcResult' && data.ok === false) errors.push(data.result);
+		});
+		window.dispatchEvent(new MessageEvent('message', {
+			source: frame.contentWindow,
+			data: { __ggxPage: true, kind: 'rpc', id: 10, method: 'commands.register', args: ['nope'] }
+		}));
+		await flush();
+		expect(errors.join()).toContain('cannot register commands');
+
+		dispose();
+		expect(container.querySelector('iframe')).toBeNull();
+	});
+
+	it('uninstalling a process package stops its backend', async () => {
+		withExtensions(GGX2);
+		backend.on('ext_uninstall', () => null);
+		backend.on('ext_process_stop', () => null);
+		const host = new ExtensionHost();
+		await host.list();
+		await host.uninstall('acme.proc');
+		expect(backend.callsTo('ext_process_stop')).toEqual([{ extId: 'acme.proc' }]);
+	});
+
+	it('starts a process package\'s backend as soon as it is installed', async () => {
+		// Install means run: the reload that follows an install brings the declared backend up,
+		// without waiting for a first command — the same detect-and-run the boot pass does.
+		backend.on('ext_install_from_ggx', () => GGX2);
+		backend.on('ext_list', () => [GGX2]);
+		backend.on('ext_read_file', ({ relPath }) => {
+			if (relPath === 'package.json') return JSON.stringify({
+				main: './main.js',
+				contributes: { commands: [{ command: 'acme.proc.hello', title: 'Hello' }] }
+			});
+			if (relPath === 'main.js') return 'exports.activate = function () {};';
+			throw new Error('no such file');
+		});
+		backend.on('ext_process_stop', () => null);
+		backend.on('ext_process_start', () => null);
+		const host = new ExtensionHost();
+		await host.installFromGgx('C:\\pkgs\\acme.proc-1.0.0.ggx');
+		expect(backend.callsTo('ext_process_start')).toEqual([{ extId: 'acme.proc' }]);
+	});
+});
+
+describe('an installed ggx/2 package in the workbench surfaces (the full feature matrix)', () => {
+	/** The package.json the acme.proc fixture reads back: two commands, a keybinding and an
+	 *  explorer/context menu entry — everything a plugin can contribute to the workbench. */
+	const PROC_MANIFEST = {
+		main: './main.js',
+		contributes: {
+			commands: [
+				{ command: 'acme.proc.hello', title: 'Hello' },
+				{ command: 'acme.proc.open', title: 'Open' }
+			],
+			keybindings: [{ command: 'acme.proc.hello', key: 'ctrl+alt+g' }],
+			menus: { 'explorer/context': [{ command: 'acme.proc.hello' }] }
+		}
+	};
+	const PROC: ExtInfo = {
+		id: 'acme.proc', name: 'proc', displayName: 'Proc Demo', publisher: 'acme', version: '1.0.0', description: 'A ggx/2 package',
+		builtin: false, icon: null, path: '/ext/acme.proc-1.0.0', categories: [], keywords: [], repository: null, license: null,
+		enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggx',
+		ggx: {
+			format: 'ggx/2', id: 'acme.proc', version: '1.0.0',
+			pages: { main: { page: 'web/view.html', title: 'Demo Page' } },
+			backend: { kind: 'process', command: 'bin/main' },
+			permissions: []
+		}
+	};
+
+	function scriptProc(listed: ExtInfo[] = [PROC]): void {
+		withExtensions(...listed);
+		backend.on('ext_read_file', ({ relPath }) => {
+			if (relPath === 'package.json') return JSON.stringify(PROC_MANIFEST);
+			if (relPath === 'main.js') return 'exports.activate = function () {};';
+			throw new Error('no such file');
+		});
+		backend.on('ext_process_run', () => ({ openPage: 'main', params: { by: 'menu' } }));
+	}
+
+	/** A one-file workspace the Explorer renders, like explorer.test.ts's fileSystem. */
+	function fileSystem(tree: Record<string, string[]>): void {
+		backend.on('list_dir', ({ path }) => {
+			const entries = tree[String(path)];
+			if (!entries) throw new Error(`${path}: no such directory`);
+			return entries.map((name) => {
+				const isDir = name.endsWith('/');
+				const clean = isDir ? name.slice(0, -1) : name;
+				return { name: clean, path: `${path}\${clean}`, isDir, size: 0 };
+			});
+		});
+	}
+
+	it('merges the plugin\'s and the built-in\'s entries into the file context menu, and each dispatches its own way', async () => {
+		scriptProc();
+		fileSystem({ 'C:\repo': ['README.md'] });
+		const host = new ExtensionHost();
+		// The built-in git-graph-rs contributes explorer/context (filterByFile, the file
+		// history entry); its baked contributions join first, as at boot.
+		host.applyBuiltinContributions();
+		const native: string[] = [];
+		// The workbench declares the built-in's commands native (workbench.ts wires the same
+		// set); without it the entry renders disabled, as a real host would show.
+		host.nativeCommands = new Set(['git-graph-rs.filterByFile']);
+		host.onNativeCommand = (command) => {
+			if (command === 'git-graph-rs.filterByFile') {
+				native.push(command);
+				return true;
+			}
+			return false;
+		};
+		const opened: Array<[string, string, unknown]> = [];
+		host.onOpenPage = (extId, pageId, params) => opened.push([extId, pageId, params]);
+		await host.activateInstalled();
+
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoot('C:\repo');
+		await flush();
+		rightClick(document.querySelector('.tree .row'));
+		const labels = menuLabels();
+		// The built-in's file-history entry and the plugin's entry sit in the same menu.
+		expect(labels).toContain('Show File History in Git Graph RS');
+		expect(labels).toContain('Hello');
+
+		// Clicking the plugin entry runs its backend command and opens the page it names.
+		click(menuItem('Hello'));
+		await flush();
+		expect(backend.callsTo('ext_process_run')).toEqual([{ extId: 'acme.proc', command: 'acme.proc.hello', args: [] }]);
+		expect(opened).toEqual([['acme.proc', 'main', { by: 'menu' }]]);
+
+		// Clicking the built-in's entry reaches the native command hook (GraphHost's path).
+		rightClick(document.querySelector('.tree .row'));
+		click(menuItem('Show File History in Git Graph RS'));
+		await flush();
+		expect(native).toEqual(['git-graph-rs.filterByFile']);
+	});
+
+	it('binds the plugin\'s keybinding, and uninstalling releases it, drops the menu entry and stops the backend', async () => {
+		scriptProc();
+		fileSystem({ 'C:\repo': ['README.md'] });
+		backend.on('ext_uninstall', () => null);
+		backend.on('ext_process_stop', () => null);
+		const host = new ExtensionHost();
+		host.applyBuiltinContributions(); // the built-in's entries stay after the plugin goes
+		await host.activateInstalled();
+		expect(commandForBinding('Ctrl+Alt+G')?.id).toBe('acme.proc.hello');
+
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoot('C:\repo');
+		await flush();
+
+		await host.uninstall('acme.proc');
+		// The keybinding no longer swallows the keystroke.
+		expect(commandForBinding('Ctrl+Alt+G')).toBeUndefined();
+		// The context menu entry is gone with the extension; the built-in's survives.
+		rightClick(document.querySelector('.tree .row'));
+		expect(menuLabels()).not.toContain('Hello');
+		expect(menuLabels()).toContain('Show File History in Git Graph RS');
+		// The backend process died with its extension.
+		expect(backend.callsTo('ext_process_stop')).toEqual([{ extId: 'acme.proc' }]);
 	});
 });

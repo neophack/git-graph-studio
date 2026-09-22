@@ -123,3 +123,25 @@ pub fn current_branch(git: &Git) -> Option<String> {
         .map(|b| b.trim().to_owned())
         .filter(|b| !b.is_empty())
 }
+
+/// Pin the extension store to an isolated empty directory for the guard's lifetime, and stop
+/// any backend the developer's real store left warm: "nothing installed" assertions (the
+/// engine-version sentinel, the measure report's degraded phases) must hold on any machine,
+/// not just one whose `~/.ggs` happens to be empty.
+pub struct IsolatedExtensionStore {
+    _dir: tempfile::TempDir,
+}
+
+impl Drop for IsolatedExtensionStore {
+    fn drop(&mut self) {
+        crate::ext_process::global().stop_all();
+        crate::cmd_ext::unpin_extensions_home_for_tests();
+    }
+}
+
+pub fn isolated_extension_store() -> IsolatedExtensionStore {
+    let dir = tempfile::tempdir().expect("a tempdir for the isolated extension store");
+    crate::cmd_ext::pin_extensions_home_for_tests(dir.path().to_path_buf());
+    crate::ext_process::global().stop_all();
+    IsolatedExtensionStore { _dir: dir }
+}
