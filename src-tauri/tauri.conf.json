@@ -35,7 +35,8 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "../target/studio/bundled/app-resources/git-graph-rs.ggx": "extensions/git-graph-rs.ggx"
+      "../target/studio/bundled/app-resources/extensions/git-graph-rs.ggx": "extensions/git-graph-rs.ggx",
+      "../target/studio/bundled/app-resources/extensions/ggs-ext-demo.ggx": "extensions/ggs-ext-demo.ggx"
     },
     "fileAssociations": [
       {

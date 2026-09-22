@@ -317,12 +317,14 @@ adds the named page registry (every page a package can show, opened as editor ta
 `ggx://` protocol) and the process backend (a binary, speaking the `ggs-ext/1` line-JSON-RPC
 protocol over stdin/stdout — any language that can write lines to stdout qualifies; the app
 embeds no runtime) — plus the Extensions view with detail pages, backend status and restart.
-**Nothing installs by default.** git-graph-rs ships as the **bundled `.ggx`** the installer
-carries (`extensions/git-graph-rs.ggx`, packed by `prepare.mjs`); the Extensions view's
-integrated entry offers it as a **one-click install** (`ext_install_bundled`) that lands it
-as a standard, uninstallable package — its engine still linked in-process and its view assets
-still the app's own, and with no install (the default) the listing falls back to the manifest
-embedded at build time. **Install means run**: the boot pass starts every installed package
+**Nothing installs by default.** Two packages ship beside the installer (`extensions/`, packed
+by `prepare.mjs`): git-graph-rs, whose integrated entry offers it as a **one-click install**
+(`ext_install_bundled`) that lands it as a standard, uninstallable package — its engine still
+linked in-process and its view assets still the app's own — and the **GGX Demo**, the format's
+worked example and the template new plugins (human- or AI-authored) start from, offered the
+same one-click way as a pure sample (`plugins/ggs-ext-demo/`, its README the authoring guide).
+With no install of either (the default), each listing falls back to the manifest embedded at
+build time. **Install means run**: the boot pass starts every installed package
 that declares a backend (`ext_process::start_all_installed`, off the window's thread), an
 install starts its backend at once, and the first command remains the lazy fallback. Multiple
 app instances are independent — each spawns and owns only its own backends (`GGS_INSTANCE_ID`
@@ -335,6 +337,7 @@ holds refuses with a close-that-window hint).
   `src/extHostBoot.ts` (one sandboxed frame per extension), `src/vscodeApi.ts`,
   `src/contributions.ts` (manifest contributions merged into the workbench)
 - Backend: `src-tauri/src/cmd_ext.rs` (install / upgrade / uninstall, `.ggx` unpack, the
+  bundled-package registry — git-graph-rs and the GGX Demo, `ext_install_bundled`'s ids — the
   `ggx://` protocol that serves an installed package's files — composing the page bootstrap
   into every HTML page), `src-tauri/src/ext_process.rs` (the process extension host: eager
   start at boot and install, lazy start on first command as the fallback, `initialize`
@@ -342,11 +345,13 @@ holds refuses with a close-that-window hint).
   stop on uninstall and at app exit), `src-tauri/src/ggx_protocol.rs` (the `ggs-ext/1` wire
   protocol, shared with plugin binaries), `src-tauri/src/ext_page_boot.js` (the
   `acquireGgsApi()` bootstrap the protocol composes into served pages),
-  `plugins/ggs-ext-demo/src/main.rs` (the reference plugin binary — a worked example, not
-  wired into the app)
+  `plugins/ggs-ext-demo/src/main.rs` (the reference plugin binary — the shipped sample's
+  backend, every `ggs-ext/1` capability once)
 - Every `.ggx`-producing plugin's own folder under `plugins/` (its manifest fields, page
   files, backend source and packer together, not scattered): `plugins/ggs-ext-demo/`
-  (`package.json`, `web/view.html`, `src/main.rs`) and `plugins/git-graph-rs/` (`src/main.rs`
+  (`package.json`, `web/view.html` + `web/params.html`, `resources/icon.svg`, `src/main.rs`,
+  `build.mjs` its own packer, `README.md` the plugin authoring guide) and
+  `plugins/git-graph-rs/` (`src/main.rs`
   the backend, `build.mjs` its own packer — the only script that reads the
   `vscode-git-graph-rs` submodule for packaging — plus `package.json`/`README.md` as the
   folder's own metadata; its frontend is that submodule, which cannot move). Each is its own
@@ -355,11 +360,11 @@ holds refuses with a close-that-window hint).
   `scripts/build-ggx.mjs` (the shared packing infrastructure — `writeGgx`, `hostPlatformKey`,
   `filesUnder` — every plugin packer builds on it), `plugins/git-graph-rs/build.mjs`
   (git-graph-rs's own packer: the ggx/2 header from the submodule's manifest, `--backend`
-  embedding the compiled `git-graph-backend`), `scripts/build-ggx-demo.mjs`
-  (packs the GGX Demo from `plugins/ggs-ext-demo/` — the format's worked example, page +
-  process backend; a dev tool, not part of the app build), `scripts/build-plugins.bat`
-  (builds every `.ggx` under `plugins/` independently of the app build — one command for all
-  of them)
+  embedding the compiled `git-graph-backend`), `plugins/ggs-ext-demo/build.mjs`
+  (the GGX Demo's own packer: the format's worked example, two pages + the process backend —
+  run by `prepare.mjs` as part of every app build, so the installer carries the sample),
+  `scripts/build-plugins.bat` (builds every `.ggx` under `plugins/` independently of the app
+  build — one command for all of them)
 - Tests: `tests/extensions.test.ts` (pages, the process dispatch), `tests/editor.test.ts`
   (the extpage tab), `src-tauri/tests/ext_process_host.rs` (the real
   install→activate→command→stop chain over the demo binary)

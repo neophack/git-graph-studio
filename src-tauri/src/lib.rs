@@ -1384,7 +1384,9 @@ mod deferred_services_tests {
                             return;
                         };
                         plugin_host::note_install_started();
-                        if let Err(reason) = cmd_ext::ext_install_bundled(handle.clone()) {
+                        // No id: the boot pass auto-installs the integrated git-graph-rs only.
+                        // The bundled sample stays an offer until the user asks for it.
+                        if let Err(reason) = cmd_ext::ext_install_bundled(handle.clone(), None) {
                             eprintln!("[extensions] git-graph-rs auto-install: {reason}");
                         }
                         plugin_host::note_install_finished();

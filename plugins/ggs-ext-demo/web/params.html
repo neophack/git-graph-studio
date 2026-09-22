@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<!-- The GGX Demo's second page — what a page registry is for.
+     The manifest lists this document as the page named "params"; anything may open it with
+     parameters (a command's openPage result, another page's pages.open call), and the
+     parameters arrive in the api.ready context. A one-screen page: show what you were opened
+     with, send it back through the backend, put it on the clipboard. Same styling rules as the
+     tour page (the package carries its own CSS; the host injects none). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GGX Demo — Params</title>
+<style>
+	:root { --bg: #f6f7f9; --card: #ffffff; --ink: #1c2128; --muted: #5a6472; --line: #d8dde3; --accent: #1f6feb; }
+	@media (prefers-color-scheme: dark) {
+		:root { --bg: #161a21; --card: #1d232c; --ink: #d7dde5; --muted: #8b95a3; --line: #2d3542; --accent: #3d8bfd; }
+	}
+	body { margin: 0; padding: 1.25rem 1.5rem 3rem; background: var(--bg); color: var(--ink); font: 14px/1.55 system-ui, "Segoe UI", sans-serif; }
+	h1 { font-size: 1.05rem; margin: 0 0 .25rem; }
+	.sub { color: var(--muted); margin: 0 0 1.1rem; }
+	section { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: .9rem 1rem; margin-bottom: .9rem; max-width: 42rem; }
+	pre { margin: 0; padding: .6rem .8rem; background: rgba(127, 127, 127, .08); border-radius: 6px; font: 12.5px/1.6 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+	button { font: inherit; color: var(--accent); background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: .3rem .7rem; margin: .6rem .4rem 0 0; cursor: pointer; }
+	button:hover { border-color: var(--accent); }
+	p { color: var(--muted); margin: .2rem 0 .5rem; }
+</style>
+</head>
+<body>
+<h1>GGX Demo — the Params page</h1>
+<p class="sub">Opened as the page <code>params</code> of the package. This is what its opener sent:</p>
+
+<section>
+	<h2 style="font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 .6rem">The open parameters</h2>
+	<pre id="params">waiting for the page context…</pre>
+	<button id="echo">Echo them back through the backend</button>
+	<button id="copy">Copy as JSON</button>
+	<button id="notify">Tell the workbench</button>
+</section>
+
+<script>
+	'use strict';
+	const api = acquireGgsApi();
+	api.ready.then((context) => {
+		document.getElementById('params').textContent = JSON.stringify(context, null, 2);
+	});
+
+	// Round-trip: the params the page was opened with go to the backend and come back —
+	// the same command the tour page runs, proving commands serve every page alike.
+	document.getElementById('echo').addEventListener('click', async () => {
+		const context = await api.ready;
+		const answer = await api.request('backend.run', ['ggs.ext-demo.echo', [context.params]]);
+		document.getElementById('params').textContent =
+			'the backend echoed:\n' + JSON.stringify(answer, null, 2);
+	});
+	document.getElementById('copy').addEventListener('click', async () => {
+		const context = await api.ready;
+		await api.request('clipboard.writeText', [JSON.stringify(context.params, null, 2)]);
+	});
+	document.getElementById('notify').addEventListener('click', async () => {
+		const context = await api.ready;
+		void api.request('notify', ['info', 'Params page: opened by ' + JSON.stringify(context.params)]);
+	});
+</script>
+</body>
+</html>

@@ -31,12 +31,12 @@ if errorlevel 1 goto :fail
 
 echo [2/3] Building plugins\ggs-ext-demo
 cd src-tauri
-cargo build --release --bin ggs-ext-demo
+cargo build --release --bin ggs-ext-demo --no-default-features
 if errorlevel 1 goto :fail
 cd ..
 
 echo [3/3] Packing plugins\ggs-ext-demo\ into ggs-ext-demo.ggx
-node scripts\build-ggx-demo.mjs --bin target\studio\cargo\release\ggs-ext-demo.exe
+node plugins\ggs-ext-demo\build.mjs --bin target\studio\cargo\release\ggs-ext-demo.exe
 if errorlevel 1 goto :fail
 
 echo.

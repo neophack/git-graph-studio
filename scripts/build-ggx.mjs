@@ -2,8 +2,8 @@
 // and the platform-key spelling every plugin's own packer uses. Generic on purpose — this file
 // names neither `vscode-git-graph-rs` nor any other plugin's sources; a plugin's own folder
 // under plugins/ owns that (its manifest, its files, its packer). `plugins/git-graph-rs/
-// build.mjs` is git-graph-rs's own packer, built on this; `scripts/build-ggx-demo.mjs` is the
-// GGX Demo's, reading `plugins/ggs-ext-demo/`.
+// build.mjs` is git-graph-rs's own packer, built on this; `plugins/ggs-ext-demo/build.mjs` is
+// the GGX Demo's.
 
 import { createWriteStream, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';

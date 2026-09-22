@@ -13,13 +13,13 @@
 //! and licences. A `.ggx` and a `.vsix` of the same id are the same extension: whichever has
 //! the higher version wins.
 //!
-//! The integrated git-graph-rs extension ships as the bundled `.ggx` the installer carries
-//! (`extensions/git-graph-rs.ggx` beside the app — prepare.mjs packs it), but the app installs
-//! nothing by default: [`ext_install_bundled`] is the one-click Install on the Extensions
-//! view's integrated entry, and it installs the package like any user `.ggx` (forward-only,
-//! uninstallable). The engine stays linked in-process and the view assets stay the app's own;
-//! when no install is present (the default, or a dev run without the package), the listing
-//! falls back to the manifest embedded at build time.
+//! The integrated git-graph-rs extension and the GGX Demo sample both ship as bundled `.ggx`
+//! packages the installer carries (`extensions/` beside the app — prepare.mjs packs them), but
+//! the app installs nothing by default: [`ext_install_bundled`] is the one-click Install on
+//! each bundled entry of the Extensions view, and it installs the package like any user `.ggx`
+//! (forward-only, uninstallable). The engine stays linked in-process and the view assets stay
+//! the app's own; when no install is present (the default, or a dev run without the package),
+//! each listing falls back to the manifest embedded at build time.
 
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -160,12 +160,30 @@ pub const GGX2_FORMAT: &str = "ggx/2";
 /// `.ggx` the installer carries (installed on first launch, listed like any package).
 pub const GRAPH_PACKAGE_ID: &str = "neophack.git-graph-rs";
 
+/// The id of the GGX Demo — the `ggx/2` format's worked example, shipped as the installer's
+/// second bundled package. Unlike the integrated extension nothing of it is built into the
+/// app: it is a pure sample, one-click installable and uninstallable like any user package.
+pub const DEMO_PACKAGE_ID: &str = "ggs.ext-demo";
+
+/// The bundled `.ggx` packages the installer carries (its `extensions/` resource dir), by
+/// extension id: the fixed file name [`bundled_ggx_path`] resolves, and the stem the dev-run
+/// fallback looks for (`<stem>-<version>.ggx` under target/studio/bundled). prepare.mjs packs
+/// both; `ext_install_bundled` installs either.
+const BUNDLED_PACKAGES: [(&str, &str); 2] = [
+    (GRAPH_PACKAGE_ID, "git-graph-rs.ggx"),
+    (DEMO_PACKAGE_ID, "ggs-ext-demo.ggx"),
+];
+
 /// The integrated extension's `package.json`, embedded from the repository's own file at build
 /// time (build.rs passes the path): what the built-in entry in the Extensions view is described
 /// by, and where the workbench reads the built-in's command contributions from.
 const GRAPH_PACKAGE_JSON: &str = include_str!(env!("GITGRAPH_PACKAGE_JSON"));
 /// Its `package.nls.json`, the same way — the contribution titles' default localisation.
 const GRAPH_PACKAGE_NLS: &str = include_str!(env!("GITGRAPH_NLS_JSON"));
+/// The bundled sample's `package.json`, the same way — what the Extensions view lists the GGX
+/// Demo from until its package is installed (its README travels inside the package, not the
+/// binary).
+const DEMO_PACKAGE_JSON: &str = include_str!(env!("GGS_DEMO_PACKAGE_JSON"));
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -327,12 +345,16 @@ pub fn ext_list(app: tauri::AppHandle) -> Result<Vec<ExtInfo>, String> {
     Ok(with_builtin(list_installed(&dir)?))
 }
 
-/// The list the Extensions view renders: the integrated git-graph-rs first, then the installs.
-/// An installed `.ggx` of the integrated id — the one-click bundled install, or a user's newer
-/// upgrade of it — IS the listing now (its version is the package's own); only when no such
-/// install exists does the build-time embedded entry stand in (the default: the app installs
-/// no plugin until asked). An installed `.vsix` of the id stays hidden behind that fallback: it
-/// could never take effect, the engine and view assets being the app's own.
+/// The list the Extensions view renders: the integrated git-graph-rs first, then the bundled
+/// sample, then the installs. An installed `.ggx` of the integrated id — the one-click bundled
+/// install, or a user's newer upgrade of it — IS the listing now (its version is the package's
+/// own); only when no such install exists does the build-time embedded entry stand in (the
+/// default: the app installs no plugin until asked). An installed `.vsix` of the id stays
+/// hidden behind that fallback: it could never take effect, the engine and view assets being
+/// the app's own. The sample follows the same rule with one difference: it is not integrated
+/// (nothing of it is built into the app), so any install of its id — a `.ggx`, the only form
+/// it ships in — simply lists, and only with no install at all does its embedded entry stand
+/// in as the not-yet-installed offer.
 fn with_builtin(mut list: Vec<ExtInfo>) -> Vec<ExtInfo> {
     if let Some(at) = list
         .iter()
@@ -340,10 +362,19 @@ fn with_builtin(mut list: Vec<ExtInfo>) -> Vec<ExtInfo> {
     {
         let integrated = list.remove(at);
         list.insert(0, integrated);
-        return list;
+    } else {
+        list.retain(|ext| ext.id != GRAPH_PACKAGE_ID);
+        list.insert(0, builtin_graph_extension());
     }
-    list.retain(|ext| ext.id != GRAPH_PACKAGE_ID);
-    list.insert(0, builtin_graph_extension());
+    if let Some(at) = list
+        .iter()
+        .position(|ext| ext.id == DEMO_PACKAGE_ID && ext.format == "ggx")
+    {
+        let sample = list.remove(at);
+        list.insert(1, sample);
+    } else if !list.iter().any(|ext| ext.id == DEMO_PACKAGE_ID) {
+        list.insert(1, sample_demo_extension());
+    }
     list
 }
 
@@ -351,24 +382,38 @@ fn with_builtin(mut list: Vec<ExtInfo>) -> Vec<ExtInfo> {
 /// exists (a dev run without the bundled `.ggx`): an embedded manifest, versioned by that
 /// manifest's own `package.json`, no install directory, nothing to activate in a frame.
 fn builtin_graph_extension() -> ExtInfo {
-    let manifest: VsixManifest = serde_json::from_str(GRAPH_PACKAGE_JSON)
-        .expect("the embedded git-graph-rs package.json is well-formed");
-    // Read before the field moves below hand ownership to the entry.
-    let repository_url = manifest.url_of().map(str::to_string);
     // The embedded manifest carries `%displayName%` placeholders like any VS Code extension;
     // the embedded NLS table resolves them the way the installed package's own does.
-    let nls: serde_json::Value =
-        serde_json::from_str(GRAPH_PACKAGE_NLS).unwrap_or(serde_json::Value::Null);
-    let display_name = nls_resolve(manifest.display_name, &nls);
-    let description = nls_resolve(manifest.description, &nls);
+    let nls: serde_json::Value = serde_json::from_str(GRAPH_PACKAGE_NLS).unwrap_or(serde_json::Value::Null);
+    embedded_extension(GRAPH_PACKAGE_ID, GRAPH_PACKAGE_JSON, true, &nls)
+}
+
+/// The bundled sample as the Extensions view lists it when it is not installed: the same
+/// embedded-manifest shape as the integrated entry, but a plain sample — no built-in flag, so
+/// nothing claims it is part of the app (and once installed, it is an ordinary uninstallable
+/// package like any user's).
+fn sample_demo_extension() -> ExtInfo {
+    embedded_extension(DEMO_PACKAGE_ID, DEMO_PACKAGE_JSON, false, &serde_json::Value::Null)
+}
+
+/// One embedded-manifest listing entry: no install directory, `format: "builtin"` (the
+/// frontend's cue for the one-click bundled-install offer), `builtin` only when the extension
+/// is integrated into the app.
+fn embedded_extension(id: &str, package_json: &str, builtin: bool, nls: &serde_json::Value) -> ExtInfo {
+    let manifest: VsixManifest = serde_json::from_str(package_json)
+        .unwrap_or_else(|e| panic!("the embedded {id} package.json is well-formed: {e}"));
+    // Read before the field moves below hand ownership to the entry.
+    let repository_url = manifest.url_of().map(str::to_string);
+    let display_name = nls_resolve(manifest.display_name, nls);
+    let description = nls_resolve(manifest.description, nls);
     ExtInfo {
-        id: GRAPH_PACKAGE_ID.to_owned(),
+        id: id.to_owned(),
         name: manifest.name,
         display_name,
         publisher: manifest.publisher,
-        version: manifest.version.clone(),
+        version: manifest.version,
         description: description.unwrap_or_default(),
-        builtin: true,
+        builtin,
         icon: None,
         path: String::new(),
         categories: manifest.categories,
@@ -401,14 +446,17 @@ pub fn ext_install_from_ggx(
     install_from_ggx_into(&dir, Path::new(&path), false)
 }
 
-/// Install the bundled git-graph-rs `.ggx` the installer ships — the one-click Install on the
-/// Extensions view's integrated entry. The app installs no plugin by default; this is the ask.
-/// A standard install: forward-only like any package, uninstallable like any package — the
-/// integrated entry simply becomes a normal package of its id.
+/// Install one of the bundled `.ggx` packages the installer ships — the one-click Install on
+/// the Extensions view's bundled entries (the integrated git-graph-rs, and the GGX Demo
+/// sample). `ext_id` selects which (`BUNDLED_PACKAGES`); omitted (or an unknown id from an
+/// older frontend) it means the integrated git-graph-rs, the only bundled package before the
+/// parameter existed. The app installs no plugin by default; this is the ask. A standard
+/// install either way: forward-only like any package, uninstallable like any package.
 #[tauri::command]
-pub fn ext_install_bundled(app: tauri::AppHandle) -> Result<ExtInfo, String> {
+pub fn ext_install_bundled(app: tauri::AppHandle, ext_id: Option<String>) -> Result<ExtInfo, String> {
     let dir = extensions_dir(&app)?;
-    let package = bundled_ggx_path(&app)?;
+    let id = ext_id.as_deref().filter(|id| BUNDLED_PACKAGES.iter().any(|(known, _)| known == id));
+    let package = bundled_ggx_path(&app, id.unwrap_or(GRAPH_PACKAGE_ID))?;
     install_from_ggx_into(&dir, &package, false)
 }
 
@@ -762,37 +810,45 @@ pub fn installed_dir(dir: &Path, ext_id: &str) -> Result<PathBuf, String> {
     Ok(dir.join(format!("{ext_id}-{version}")))
 }
 
-/// Where the bundled package lives: the installer's resource dir in a packaged app; the
-/// build's own versioned copy (`target/studio/bundled/`) in a dev run.
-fn bundled_ggx_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    if let Ok(resource) =
-        app.path()
-            .resolve("extensions/git-graph-rs.ggx", tauri::path::BaseDirectory::Resource)
+/// Where a bundled package lives: the installer's `extensions/` resource dir in a packaged
+/// app (the fixed file name `BUNDLED_PACKAGES` records); the build's own versioned copy
+/// (`target/studio/bundled/<stem>-<version>.ggx`) in a dev run.
+fn bundled_ggx_path(app: &tauri::AppHandle, ext_id: &str) -> Result<PathBuf, String> {
+    let Some((_, file)) = BUNDLED_PACKAGES.iter().find(|(known, _)| *known == ext_id) else {
+        return Err(format!("{ext_id} has no bundled package (bundled: the integrated git-graph-rs and the GGX Demo sample)"));
+    };
+    if let Ok(resource) = app
+        .path()
+        .resolve(format!("extensions/{file}"), tauri::path::BaseDirectory::Resource)
     {
         if resource.is_file() {
             return Ok(resource);
         }
     }
     // `tauri dev` runs cargo from src-tauri/; the bat and CI from the repository root.
+    let stem = file.strip_suffix(".ggx").unwrap_or(file);
     for base in ["target/studio/bundled", "../target/studio/bundled"] {
-        let found = newest_ggx_under(Path::new(base));
+        let found = newest_ggx_under(Path::new(base), stem);
         if let Some((_, path)) = found {
             return Ok(path);
         }
     }
-    Err("the bundled git-graph-rs package is not present (run scripts/prepare.mjs)".to_owned())
+    Err(format!(
+        "the bundled {ext_id} package is not present (run scripts/prepare.mjs)"
+    ))
 }
 
-/// The newest `git-graph-rs-<version>.ggx` under `dir`, as `(version, path)`.
-fn newest_ggx_under(dir: &Path) -> Option<(String, PathBuf)> {
+/// The newest `<stem>-<version>.ggx` under `dir`, as `(version, path)`.
+fn newest_ggx_under(dir: &Path, stem: &str) -> Option<(String, PathBuf)> {
     let entries = std::fs::read_dir(dir).ok()?;
+    let prefix = format!("{stem}-");
     let mut newest: Option<(String, PathBuf)> = None;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.starts_with("git-graph-rs-") || !name.ends_with(".ggx") {
+        if !name.starts_with(&prefix) || !name.ends_with(".ggx") {
             continue;
         }
-        let version = name["git-graph-rs-".len()..name.len() - ".ggx".len()].to_owned();
+        let version = name[prefix.len()..name.len() - ".ggx".len()].to_owned();
         if newest
             .as_ref()
             .is_some_and(|(best, _)| compare_versions(best, &version) != std::cmp::Ordering::Less)
@@ -1549,9 +1605,11 @@ mod integrated_tests {
 
     #[test]
     fn the_integrated_extension_is_listed_as_a_builtin_and_cannot_be_installed_over() {
-        // The built-in entry comes from the embedded manifest, versioned by the engine.
+        // Both bundled entries stand in from their embedded manifests: the integrated
+        // git-graph-rs first (built-in — its engine is in-process), the sample second (a
+        // plain offer, no built-in flag).
         let list = with_builtin(Vec::new());
-        assert_eq!(list.len(), 1);
+        assert_eq!(list.len(), 2);
         let builtin = &list[0];
         assert_eq!(
             (
@@ -1564,6 +1622,13 @@ mod integrated_tests {
         let embedded: serde_json::Value = serde_json::from_str(GRAPH_PACKAGE_JSON).unwrap();
         assert_eq!(builtin.version, embedded["version"].as_str().unwrap());
         assert!(!builtin.name.is_empty() && !builtin.publisher.is_empty());
+        let sample = &list[1];
+        assert_eq!(
+            (sample.id.as_str(), sample.builtin, sample.format.as_str()),
+            (DEMO_PACKAGE_ID, false, "builtin")
+        );
+        let demo_embedded: serde_json::Value = serde_json::from_str(DEMO_PACKAGE_JSON).unwrap();
+        assert_eq!(sample.version, demo_embedded["version"].as_str().unwrap());
 
         // An installed copy of the integrated extension (left by an earlier app version) is
         // hidden behind the built-in entry.
@@ -1586,9 +1651,91 @@ mod integrated_tests {
         )
         .unwrap();
         let list = with_builtin(list_installed(&exts).unwrap());
-        assert_eq!(list.len(), 2);
+        assert_eq!(list.len(), 3);
         assert_eq!(list[0].id, GRAPH_PACKAGE_ID);
-        assert_eq!(list[1].id, "someone.else");
+        assert_eq!(list[1].id, DEMO_PACKAGE_ID);
+        assert_eq!(list[2].id, "someone.else");
+    }
+
+    #[test]
+    fn the_bundled_sample_lists_until_installed_then_becomes_an_ordinary_package() {
+        // The sample is not integrated: an installed `.ggx` of its id simply lists (moved up
+        // beside the bundled entries), uninstalling it restores the embedded offer, and its
+        // install carries no built-in flag — it goes away like any user package.
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+
+        let package = demo_ggx(tmp.path(), "0.2.0");
+        let info = install_from_ggx_into(&exts, &package, false).unwrap();
+        assert_eq!(info.id, DEMO_PACKAGE_ID);
+        assert!(!info.builtin);
+        let list = with_builtin(list_installed(&exts).unwrap());
+        assert_eq!(list.len(), 2);
+        assert_eq!(
+            (list[1].id.as_str(), list[1].format.as_str(), list[1].version.as_str()),
+            (DEMO_PACKAGE_ID, "ggx", "0.2.0")
+        );
+
+        uninstall(&exts, DEMO_PACKAGE_ID).unwrap();
+        let offer = &with_builtin(list_installed(&exts).unwrap())[1];
+        assert_eq!((offer.id.as_str(), offer.format.as_str()), (DEMO_PACKAGE_ID, "builtin"));
+        assert!(!offer.builtin);
+        // The sample installs and uninstalls freely — nothing of it is built into the app.
+        assert!(uninstall(&exts, GRAPH_PACKAGE_ID).unwrap_err().contains("not installed"));
+    }
+
+    /// A `.ggx` of the sample's id at `version`, mirroring what its own packer produces.
+    fn demo_ggx(dir: &Path, version: &str) -> PathBuf {
+        let ggx = dir.join(format!("ggs-ext-demo-{version}.ggx"));
+        let file = std::fs::File::create(&ggx).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("manifest.json", options).unwrap();
+        zip.write_all(
+            format!(
+                r#"{{"format":"ggx/2","id":"{DEMO_PACKAGE_ID}","version":"{version}","pages":{{"main":{{"page":"web/view.html"}}}},"backend":{{"kind":"process","command":"bin/main.exe"}}}}"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        zip.start_file("package.json", options).unwrap();
+        zip.write_all(
+            format!(
+                r#"{{"name":"ext-demo","publisher":"ggs","version":"{version}","description":"the sample"}}"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        zip.start_file("web/view.html", options).unwrap();
+        zip.write_all(b"<html></html>").unwrap();
+        zip.finish().unwrap();
+        ggx
+    }
+
+    #[test]
+    fn the_dev_run_fallback_finds_each_bundled_stem_separately() {
+        // `bundled_ggx_path`'s dev-run half: the newest versioned copy of the right stem under
+        // target/studio/bundled — one stem's package never answers for the other's.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("bundled");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in [
+            "git-graph-rs-1.0.0.ggx",
+            "git-graph-rs-1.0.2.ggx",
+            "ggs-ext-demo-0.2.0.ggx",
+        ] {
+            std::fs::write(dir.join(name), b"zip").unwrap();
+        }
+        assert_eq!(
+            newest_ggx_under(&dir, "git-graph-rs").map(|(v, p)| (v, p.file_name().unwrap().to_string_lossy().into_owned())),
+            Some(("1.0.2".to_owned(), "git-graph-rs-1.0.2.ggx".to_owned()))
+        );
+        assert_eq!(
+            newest_ggx_under(&dir, "ggs-ext-demo").map(|(v, _)| v),
+            Some("0.2.0".to_owned())
+        );
+        assert!(newest_ggx_under(&dir, "unknown-plugin").is_none());
     }
 
     #[test]
@@ -1668,7 +1815,8 @@ mod integrated_tests {
         assert_eq!(info.id, GRAPH_PACKAGE_ID);
         assert!(!info.builtin);
         let list = with_builtin(list_installed(&exts).unwrap());
-        assert_eq!(list.len(), 1);
+        // The graph install plus the sample's standing offer.
+        assert_eq!(list.len(), 2);
         assert_eq!(
             (list[0].id.as_str(), list[0].format.as_str(), list[0].version.as_str()),
             (GRAPH_PACKAGE_ID, "ggx", "1.0.25")

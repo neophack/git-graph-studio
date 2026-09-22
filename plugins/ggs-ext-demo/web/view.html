@@ -1,33 +1,190 @@
 <!DOCTYPE html>
+<!-- The GGX Demo's main page — the guided tour of what a ggx/2 plugin page can do.
+     A page is plain HTML the app serves from the installed package over its ggx:// protocol,
+     in a sandboxed iframe (scripts allowed, nothing else). The host composes exactly one thing
+     into every served page before this document's own scripts run: the bootstrap that defines
+     acquireGgsApi() — the page's single entry into the host (your backend, notifications,
+     quick inputs, the clipboard, opening sibling pages). No build step, no framework, no
+     bundler: what you read here is exactly what ships inside the .ggx.
+
+     Styling is the page's own: the host injects no stylesheet, so the package carries its CSS
+     with it (this <style> block). Follow the system's light/dark preference so the page sits
+     well beside the app either way. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <title>GGX Demo</title>
 <style>
-	body { font-family: var(--ggs-font, system-ui); margin: 2rem; color: #ddd; background: #1e1e1e; }
-	h1 { font-size: 1.2rem; }
-	pre { background: #2a2a2a; padding: .75rem; border-radius: 4px; white-space: pre-wrap; }
-	button { margin-right: .5rem; padding: .35rem .8rem; }
+	:root {
+		--bg: #f6f7f9; --card: #ffffff; --ink: #1c2128; --muted: #5a6472;
+		--line: #d8dde3; --accent: #1f6feb; --accent-ink: #ffffff;
+		--ok: #1a7f37; --err: #cf222e; --code: #f0f2f5;
+	}
+	@media (prefers-color-scheme: dark) {
+		:root {
+			--bg: #161a21; --card: #1d232c; --ink: #d7dde5; --muted: #8b95a3;
+			--line: #2d3542; --accent: #3d8bfd; --accent-ink: #0d1117;
+			--ok: #3fb950; --err: #f85149; --code: #11151b;
+		}
+	}
+	html { height: 100%; }
+	body {
+		margin: 0; padding: 1.25rem 1.5rem 3rem; background: var(--bg); color: var(--ink);
+		font: 14px/1.55 system-ui, "Segoe UI", sans-serif;
+	}
+	h1 { font-size: 1.15rem; margin: 0 0 .25rem; }
+	h1 small { color: var(--muted); font-weight: normal; font-size: .8rem; }
+	.sub { color: var(--muted); margin: 0 0 1.25rem; }
+	section {
+		background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+		padding: .9rem 1rem 1rem; margin: 0 0 .9rem; max-width: 46rem;
+	}
+	h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 .6rem; }
+	p { margin: .2rem 0 .7rem; color: var(--muted); }
+	button {
+		font: inherit; color: var(--accent); background: transparent;
+		border: 1px solid var(--line); border-radius: 6px;
+		padding: .3rem .7rem; margin: 0 .4rem .4rem 0; cursor: pointer;
+	}
+	button:hover { border-color: var(--accent); }
+	code { font: 12px/1.5 ui-monospace, Consolas, monospace; }
+	dl { display: grid; grid-template-columns: auto 1fr; gap: .15rem .9rem; margin: 0; }
+	dt { color: var(--muted); } dd { margin: 0; font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+	ol.log {
+		list-style: none; margin: .4rem 0 0; padding: .5rem .7rem; background: var(--code);
+		border-radius: 6px; max-height: 14rem; overflow-y: auto;
+		font: 12px/1.6 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-word;
+	}
+	ol.log li { border-bottom: 1px solid var(--line); padding: .15rem 0; }
+	ol.log li:last-child { border-bottom: none; }
+	ol.log .tag { color: var(--muted); }
+	ol.log .err { color: var(--err); }
 </style>
 </head>
 <body>
-<h1>GGX Demo — a ggx/2 extension page</h1>
-<p><button id="hello">Say hello (backend.run)</button>
-<button id="notify">Notify the workbench</button></p>
-<pre id="out">waiting for the host's init…</pre>
+<h1>GGX Demo <small>the ggx/2 plugin format's worked example</small></h1>
+<p class="sub">Every button below is one capability of the extension platform, used exactly the way a real plugin uses it. The plugin's README.md walks through the same ground file by file.</p>
+
+<section id="context">
+	<h2>1 · The page context</h2>
+	<p>Acquired once at boot: <code>api.ready</code> resolves with which extension and page this is, the parameters the opener passed, and the display language.</p>
+	<dl id="context-fields"></dl>
+</section>
+
+<section id="backend">
+	<h2>2 · Backend commands <code>api.request('backend.run', …)</code></h2>
+	<p>Every button asks the plugin's process backend (a warm sibling binary speaking JSON lines over stdio). The backend keeps state between calls, so <em>Tick</em> counts up; <em>Fail</em> shows how an error arrives.</p>
+	<button id="hello">Hello (with an input box)</button>
+	<button id="tick">Tick (warm state)</button>
+	<button id="echo">Echo (JSON round-trip)</button>
+	<button id="stats">Backend stats</button>
+	<button id="fail">Fail (error path)</button>
+	<ol class="log" id="backend-log"><li><span class="tag">— backend answers land here —</span></li></ol>
+</section>
+
+<section id="host">
+	<h2>3 · Host services <code>api.request('notify' | 'showInputBox' | 'showQuickPick' | 'clipboard.writeText', …)</code></h2>
+	<p>The same request channel reaches the workbench itself — notifications, quick inputs, the clipboard, workbench commands.</p>
+	<button id="notify">Notify the workbench</button>
+	<button id="pick">Quick pick</button>
+	<button id="copy">Copy the last answer</button>
+</section>
+
+<section id="pages">
+	<h2>4 · Sibling pages <code>api.request('pages.open', …)</code></h2>
+	<p>A package can ship several pages (the manifest's <code>pages</code> registry); any of them can open another with parameters.</p>
+	<button id="open-params">Open the Params page…</button>
+</section>
+
 <script>
+	'use strict';
+	// The host's single entry point. Calling it twice is an error by design — one API object
+	// per page, like VS Code's acquireVsCodeApi.
 	const api = acquireGgsApi();
-	const out = document.getElementById('out');
-	const show = (text) => { out.textContent = text; };
-	api.ready.then((context) => show('page context: ' + JSON.stringify(context, null, 2)));
-	document.getElementById('hello').addEventListener('click', async () => {
-		try {
-			const result = await api.request('backend.run', ['ggs.ext-demo.hello', ['the page']]);
-			show('backend answered: ' + JSON.stringify(result, null, 2));
-		} catch (error) { show('backend failed: ' + error); }
+
+	// ---- 1 · The page context -------------------------------------------------------------
+	const fields = document.getElementById('context-fields');
+	const row = (term, value) => {
+		const dt = document.createElement('dt'); dt.textContent = term;
+		const dd = document.createElement('dd'); dd.textContent = value;
+		fields.append(dt, dd);
+	};
+	api.ready.then((context) => {
+		// context = { extensionId, pageId, params, language } — the open parameters are
+		// whatever the opener passed: a command's openPage convention, or another page.
+		row('extensionId', context.extensionId);
+		row('pageId', context.pageId);
+		row('language', context.language);
+		row('params', JSON.stringify(context.params));
+		log('context', JSON.stringify(context), document.getElementById('backend-log'));
 	});
+
+	// ---- shared logging -------------------------------------------------------------------
+	// The little console every request and answer lands in — the page's own DOM, nothing hosty.
+	function log(tag, text, into) {
+		const li = document.createElement('li');
+		const span = document.createElement('span');
+		span.className = 'tag';
+		span.textContent = tag + ' › ';
+		li.append(span, text);
+		const failed = typeof text === 'string' && text.startsWith('!');
+		if (failed) li.classList.add('err');
+		into.appendChild(li);
+		into.scrollTop = into.scrollHeight;
+	}
+	const backendLog = document.getElementById('backend-log');
+	// The runner every backend button shares: one request, one log line, errors kept visible.
+	let lastAnswer = null;
+	async function run(tag, command, args) {
+		try {
+			const result = await api.request('backend.run', [command, args || []]);
+			lastAnswer = result;
+			log(tag, JSON.stringify(result), backendLog);
+			return result;
+		} catch (error) {
+			// A backend error (the JSON-RPC error message) rejects the promise — the page
+			// decides how to surface it; the host does not force a dialog.
+			log(tag, '! ' + String(error), backendLog);
+		}
+	}
+
+	// ---- 2 · Backend commands ---------------------------------------------------------------
+	// Hello asks for a name through the host's input box first — a page mixes host services
+	// and backend calls freely.
+	document.getElementById('hello').addEventListener('click', async () => {
+		const name = await api.request('showInputBox', ['Your name', 'Git Graph Studio']);
+		if (name === undefined) return; // dismissed
+		await run('hello', 'ggs.ext-demo.hello', [name]);
+	});
+	document.getElementById('tick').addEventListener('click', () => run('tick', 'ggs.ext-demo.tick'));
+	document.getElementById('echo').addEventListener('click', () =>
+		run('echo', 'ggs.ext-demo.echo', [{ sentAt: new Date().toISOString(), list: [1, 2, 3], nested: { ok: true } }]));
+	document.getElementById('stats').addEventListener('click', () => run('stats', 'ggs.ext-demo.stats'));
+	document.getElementById('fail').addEventListener('click', () => run('fail', 'ggs.ext-demo.fail', ['the demo fails on purpose']));
+
+	// ---- 3 · Host services ------------------------------------------------------------------
+	// A notification with a button: the promise resolves with the chosen label (or undefined).
 	document.getElementById('notify').addEventListener('click', () => {
-		void api.request('notify', ['info', 'Hello from the GGX demo page']);
+		void api.request('notify', ['info', 'Hello from the GGX demo page', ['Nice']).then((picked) => {
+			if (picked) log('notify', 'you picked: ' + picked, backendLog);
+		});
+	});
+	document.getElementById('pick').addEventListener('click', async () => {
+		const color = await api.request('showQuickPick', [['Red', 'Green', 'Blue'], 'Pick a colour']);
+		if (color !== undefined) log('pick', 'you picked: ' + color, backendLog);
+	});
+	document.getElementById('copy').addEventListener('click', async () => {
+		// clipboard.writeText is permission-gated: the manifest lists "clipboard".
+		if (lastAnswer === null) return;
+		await api.request('clipboard.writeText', [JSON.stringify(lastAnswer, null, '\t')]);
+		log('copy', 'last answer copied to the clipboard', backendLog);
+	});
+
+	// ---- 4 · Sibling pages --------------------------------------------------------------------
+	// pages.open opens another page of the SAME extension (the manifest's registry limits
+	// what a package can show); the params travel to that page's context.
+	document.getElementById('open-params').addEventListener('click', () => {
+		void api.request('pages.open', ['params', { openedBy: 'page', at: new Date().toISOString(), hint: 'opened from the tour page' }]);
 	});
 </script>
 </body>

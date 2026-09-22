@@ -3,9 +3,10 @@
 // backends' status (running pid / why not, restart). A row's click opens the extension's
 // detail page — VS Code's extension editor: the header's facts and actions, then the README
 // rendered — in an editor tab through `onOpenDetail` (the workbench wires it). Installs accept
-// `.ggx` packages only. Nothing is installed by default: the integrated git-graph-rs lists
-// from its embedded manifest until its bundled package is one-click installed (installBundled)
-// — after which it is a standard, uninstallable package.
+// `.ggx` packages only. Nothing is installed by default: the two bundled packages — the
+// integrated git-graph-rs and the GGX Demo sample, both carried by the installer — list from
+// their embedded manifests until one-click installed (installBundled), after which each is a
+// standard, uninstallable package.
 
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
@@ -80,14 +81,20 @@ export class ExtensionsPanel {
 				this.iconBox(ext),
 				el('div', 'ext-main', [
 					el('div', 'ext-name', [extTitle(ext), ' ', el('span', 'ext-version', [`v${ext.version}`])]),
-					el('div', 'ext-publisher', [ext.publisher, ext.builtin ? el('span', 'ext-builtin', [t('extensions.builtIn')]) : null]),
+					el('div', 'ext-publisher', [
+						ext.publisher,
+						ext.builtin ? el('span', 'ext-builtin', [t('extensions.builtIn')])
+							: ext.format === 'builtin' ? el('span', 'ext-builtin', [t('extensions.sample')]) : null
+					]),
 					ext.description ? el('div', 'ext-description', [ext.description]) : null,
 					this.processLine(ext, isProcessPackage, processInfo)
 				]),
-				// The integrated entry when no package is installed: the bundled package is one
-				// click away. Installed entries: uninstall (a process package's backend dies with
-				// it — the Rust side stops it before removing the directory).
-				ext.format === 'builtin' ? actionButton('package', t('extensions.installBundled'), () => void this.installBundled())
+				// A bundled entry that is not yet installed (an embedded-manifest offer): the
+				// bundled package is one click away. Installed entries: uninstall (a process
+				// package's backend dies with it — the Rust side stops it before removing the
+				// directory).
+				ext.format === 'builtin'
+					? actionButton('package', t(ext.builtin ? 'extensions.installBundled' : 'extensions.installSample'), () => void this.installBundled(ext))
 					: ext.builtin ? null : actionButton('trash', tf('extensions.uninstall', ext.id), () => void this.uninstall(ext)),
 				isProcessPackage ? actionButton('refresh', t('extensions.restart'), () => void this.restart(ext)) : null
 			]);
@@ -152,8 +159,8 @@ export class ExtensionsPanel {
 		uninstall.addEventListener('click', () => void this.uninstall(ext));
 		const restart = el('button', 'button secondary', [t('extensions.restart')]);
 		restart.addEventListener('click', () => void this.restart(ext));
-		const install = el('button', 'button', [t('extensions.install')]);
-		install.addEventListener('click', () => void this.installBundled());
+		const install = el('button', 'button', [t(ext.builtin ? 'extensions.installBundled' : 'extensions.installSample')]);
+		install.addEventListener('click', () => void this.installBundled(ext));
 		return el('div', 'ext-detail-head', [
 			this.iconBox(ext, 'ext-detail-icon'),
 			el('div', 'ext-detail-head-main', [
@@ -240,10 +247,12 @@ export class ExtensionsPanel {
 		await this.refresh();
 	}
 
-	/** One-click install of the bundled git-graph-rs package (the integrated entry's button). */
-	private async installBundled(): Promise<void> {
+	/** One-click install of an entry's bundled package (the integrated git-graph-rs or the
+	 *  bundled GGX Demo sample — both shipped by the installer, neither installed until the
+	 *  user asks here). */
+	private async installBundled(ext: ExtInfo): Promise<void> {
 		try {
-			const info = await this.host.installBundled();
+			const info = await this.host.installBundled(ext.id);
 			notify('info', tf('extensions.installedOk', info.id, info.version));
 			this.onChanged?.();
 		} catch (error) {

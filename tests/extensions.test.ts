@@ -51,13 +51,41 @@ describe('ExtensionsPanel', () => {
 		await panel.refresh();
 		document.querySelectorAll<HTMLElement>('.ext-row')[0]!.querySelector<HTMLElement>('.action-btn')!.click();
 		await flush();
-		expect(backend.callsTo('ext_install_bundled')).toEqual([{}]);
+		expect(backend.callsTo('ext_install_bundled')).toEqual([{ extId: 'neophack.git-graph-rs' }]);
 		expect(notifications().join()).toContain('neophack.git-graph-rs v1.0.25');
 		// Once installed it is a standard package: the button becomes the ordinary uninstall.
 		listed = [installedGgx, USER];
 		await panel.refresh();
 		const integrated = document.querySelectorAll<HTMLElement>('.ext-row')[0]!.querySelector<HTMLElement>('.action-btn')!;
 		expect(integrated.title).toContain('Uninstall neophack.git-graph-rs');
+	});
+
+	it('offers the bundled sample the same way: a not-yet-installed entry installs by its id', async () => {
+		// What cmd_ext.rs's listing composes when no demo package is installed: the embedded
+		// manifest stands in, `format: 'builtin'` (the install offer), `builtin: false` (it is
+		// a sample, nothing of it is built into the app).
+		const SAMPLE: ExtInfo = { id: 'ggs.ext-demo', name: 'ext-demo', displayName: 'GGX Demo', publisher: 'ggs', version: '0.2.0', description: 'The worked example', builtin: false, icon: null, path: '', categories: ['Examples'], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'builtin', ggx: null };
+		let listed: ExtInfo[] = [BUILTIN, SAMPLE, USER];
+		backend.on('ext_list', () => listed);
+		const installed: ExtInfo = { ...SAMPLE, format: 'ggx', path: '/ext/ggs.ext-demo-0.2.0', ggx: { format: 'ggx/2', id: 'ggs.ext-demo', version: '0.2.0', pages: { main: { page: 'web/view.html' } }, backend: { kind: 'process', command: 'bin/win32-x64/ggs-ext-demo.exe' }, permissions: ['clipboard'] } };
+		backend.on('ext_install_bundled', ({ extId }) => (extId === 'ggs.ext-demo' ? installed : BUILTIN));
+		const panel = mountedPanel();
+		await panel.refresh();
+		// The sample row: its badge and its one-click install button.
+		expect([...document.querySelectorAll('.ext-builtin')].map((b) => b.textContent)).toEqual(['built-in', 'sample']);
+		const sampleRow = document.querySelectorAll<HTMLElement>('.ext-row')[1]!;
+		const button = sampleRow.querySelector<HTMLElement>('.action-btn')!;
+		expect(button.title).toContain('Install the bundled sample');
+		button.click();
+		await flush();
+		expect(backend.callsTo('ext_install_bundled')).toEqual([{ extId: 'ggs.ext-demo' }]);
+		expect(notifications().join()).toContain('ggs.ext-demo v0.2.0');
+		// Installed, it is an ordinary process package: uninstall and restart buttons, no offer.
+		listed = [BUILTIN, installed, USER];
+		await panel.refresh();
+		const row = document.querySelectorAll<HTMLElement>('.ext-row')[1]!;
+		expect([...row.querySelectorAll('.action-btn')].map((b) => b.title).join('|')).toContain('Uninstall ggs.ext-demo');
+		expect([...row.querySelectorAll('.action-btn')].map((b) => b.title).join('|')).toContain('Restart');
 	});
 
 	it('shows a process package\'s backend state and restarts it', async () => {
@@ -590,6 +618,29 @@ describe('ggx/2 packages: the page registry and the process backend', () => {
 		const host = new ExtensionHost();
 		await host.installFromGgx('C:\\pkgs\\acme.proc-1.0.0.ggx');
 		expect(backend.callsTo('ext_process_start')).toEqual([{ extId: 'acme.proc' }]);
+	});
+
+	it('never frame-activates embedded offers or process packages — no entry needs a frame it has', async () => {
+		// The builtin-format entries (git-graph-rs without its package, the bundled sample)
+		// have no files on disk, and a ggx/2 process package's manifest is its whole program:
+		// a frame boot for either would only read a missing extension.js and warn.
+		const SAMPLE: ExtInfo = { id: 'ggs.ext-demo', name: 'ext-demo', displayName: 'GGX Demo', publisher: 'ggs', version: '0.2.0', description: 'sample', builtin: false, icon: null, path: '', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'builtin', ggx: null };
+		const PROC: ExtInfo = { ...GGX2, path: '/ext/acme.proc-1.0.0' };
+		withExtensions(SAMPLE, PROC);
+		backend.on('ext_read_file', ({ relPath }) => {
+			if (relPath === 'package.json') return JSON.stringify({
+				contributes: { commands: [{ command: 'acme.proc.hello', title: 'Hello' }] }
+			});
+			throw new Error('no such file'); // extension.js: must never be asked for
+		});
+		const host = new ExtensionHost();
+		await host.activateInstalled();
+		expect(notifications().join()).not.toContain('Could not load');
+		// No frame entry point was ever asked for (the nls probes are allowed and miss).
+		expect(backend.callsTo('ext_read_file').some((call) => call.relPath === 'extension.js')).toBe(false);
+		expect(host['frames'].size).toBe(0);
+		// The process package's declared command is still runnable, straight from the manifest.
+		expect(commands.get('acme.proc.hello')).toBeDefined();
 	});
 });
 

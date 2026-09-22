@@ -653,18 +653,18 @@ VSIX compatibility (above) is for the existing ecosystem. GGS's *own* plugin for
 > in `cmd_graph.rs`, now round-tripping to the backend once per adaptive-sampling-window
 > iteration instead of calling the engine in-process mid-loop.
 >
-> **The app installs no plugin by default.** The integrated git-graph-rs ships as the bundled
-> `.ggx` the installer carries (`extensions/git-graph-rs.ggx` beside the app — `prepare.mjs`
-> builds `git-graph-backend` in release first, then packs it into
-> `target/studio/bundled/app-resources/` for `tauri.conf.json`'s `bundle.resources`), and the
-> Extensions view's integrated entry offers it as a **one-click install**
-> (`cmd_ext::ext_install_bundled`) that lands it like any user `.ggx`: forward-only,
-> uninstallable, a standard package. **Boot auto-install is a known remaining gap**: nothing
-> in `lib.rs`'s `setup()` calls `ext_install_bundled` automatically yet (verified: no call
-> site), so a fresh profile has no Git Graph view, no SCM status and no file-at-revision until
-> a user visits Extensions and installs by hand once — landing that call, guarded so it only
-> fires when git-graph-rs isn't already installed, is the next piece of this work, not
-> optional polish. **Install means run**: the boot pass starts every installed package that
+> **The app installs no plugin by default.** Two packages ship beside the app — the
+> integrated git-graph-rs (`extensions/git-graph-rs.ggx` — `prepare.mjs` builds
+> `git-graph-backend` in release first, then packs it into
+> `target/studio/bundled/app-resources/extensions/` for `tauri.conf.json`'s
+> `bundle.resources`) and the GGX Demo (`extensions/ggs-ext-demo.ggx`, the format's worked
+> example and the plugin-authoring template — see below). The Extensions view offers each as
+> a **one-click install** (`cmd_ext::ext_install_bundled`, which takes the extension id since
+> the demo joined) that lands it like any user `.ggx`: forward-only, uninstallable, a
+> standard package. The boot pass auto-installs the integrated git-graph-rs every launch
+> (`lib.rs`'s `setup()`, idempotent through the forward-only version check; the bundled
+> sample deliberately stays an offer until the user asks). **Install means run**: the boot
+> pass starts every installed package that
 > declares a backend (`start_all_installed`, off the window's thread), an install starts its
 > backend at once, the first command remains the lazy fallback, and the Extensions view shows
 > each backend's state (pid, start count, last error) with a Restart button — **the plugin
@@ -678,11 +678,15 @@ VSIX compatibility (above) is for the existing ecosystem. GGS's *own* plugin for
 >
 > **Every plugin's files live in its own folder under `plugins/`** (not scattered across
 > `src-tauri/src/bin/` and inline script strings): `plugins/ggs-ext-demo/` (`package.json`,
-> `web/view.html`, `src/main.rs` — the reference `ggs-ext/1` plugin) and
+> `web/view.html` + `web/params.html`, `resources/icon.svg`, `src/main.rs`, `build.mjs`,
+> `README.md` — the reference `ggs-ext/1` plugin, every protocol capability exercised once;
+> its README is the plugin authoring guide, written so a human — or an AI assistant asked to
+> design a new plugin — can build a correct package from the folder alone) and
 > `plugins/git-graph-rs/` (`src/main.rs` the backend, `build.mjs` its own packer, plus
 > `package.json`/`README.md`; its frontend is the `vscode-git-graph-rs` submodule, which
 > cannot move into a plugin folder). Each is its own `[[bin]]` in `src-tauri/Cargo.toml`.
-> `scripts/build-ggx-demo.mjs` packs the demo; `plugins/git-graph-rs/build.mjs` packs
+> `plugins/ggs-ext-demo/build.mjs` packs the demo (run by `prepare.mjs` as part of every app
+> build — the installer carries the sample); `plugins/git-graph-rs/build.mjs` packs
 > git-graph-rs; `scripts/build-plugins.bat` builds every plugin's `.ggx` independently of
 > the app build.
 >

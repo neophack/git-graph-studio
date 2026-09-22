@@ -36,8 +36,9 @@ name = "git-graph-backend"
 path = "../plugins/git-graph-rs/src/main.rs"
 required-features = ["engine"]
 
-# The reference `ggx/2` process plugin (`scripts/build-ggx-demo.mjs` packs it) — a worked
-# example, not wired into the app.
+# The reference `ggx/2` process plugin — the format's worked example, shipped as the
+# installer's bundled sample (plugins/ggs-ext-demo/build.mjs packs it; the Extensions view
+# offers it as the one-click-installable GGX Demo).
 [[bin]]
 name = "ggs-ext-demo"
 path = "../plugins/ggs-ext-demo/src/main.rs"

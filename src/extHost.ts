@@ -225,11 +225,12 @@ export class ExtensionHost {
 		return info;
 	}
 
-	/** Install the bundled git-graph-rs `.ggx` the installer carries — the one-click Install
-	 *  on the Extensions view's integrated entry. The app installs nothing by default; this is
-	 *  the ask, and it lands as a standard (uninstallable) package. */
-	async installBundled(): Promise<ExtInfo> {
-		const info = await invoke<ExtInfo>('ext_install_bundled');
+	/** Install one of the bundled `.ggx` packages the installer carries — the one-click
+	 *  Install on the Extensions view's bundled entries (the integrated git-graph-rs, and the
+	 *  GGX Demo sample). The app installs nothing by default; this is the ask, and it lands
+	 *  as a standard (uninstallable) package. */
+	async installBundled(extId: string): Promise<ExtInfo> {
+		const info = await invoke<ExtInfo>('ext_install_bundled', { extId });
 		await this.reload(info.id);
 		return info;
 	}
@@ -285,7 +286,17 @@ export class ExtensionHost {
 		}
 		// Each extension gets its own frame, so activations are independent — run them in
 		// parallel instead of serializing every iframe boot behind the slowest bundle read.
-		const toActivate = installed.filter((ext) => !NATIVELY_HOSTED.has(ext.id) && !this.frames.has(ext.id));
+		// Skipped for entries with nothing to boot: a `builtin`-format entry (an
+		// embedded-manifest offer — the integrated git-graph-rs without its package, the
+		// bundled sample) has no files on disk, and a ggx/2 process package's commands
+		// dispatch to its backend — its `package.json` is its whole program.
+		const toActivate = installed.filter(
+			(ext) =>
+				ext.format !== 'builtin' &&
+				!this.processBacked.has(ext.id) &&
+				!NATIVELY_HOSTED.has(ext.id) &&
+				!this.frames.has(ext.id)
+		);
 		await Promise.all(toActivate.map((ext) => this.activate(ext)));
 		this.onContributionsApplied?.();
 	}
@@ -369,7 +380,9 @@ export class ExtensionHost {
 		const ext = (await this.list().catch(() => [] as ExtInfo[])).find((e) => e.id === extId);
 		if (ext) {
 			await this.applyContributions(ext);
-			await this.activate(ext);
+			// A process package activates through its backend, not a frame (see
+			// activateInstalled); anything else gets a fresh frame for its new files.
+			if (!this.processBacked.has(extId)) await this.activate(ext);
 		}
 		// Install means run: a package that declares a process backend comes up at once — the
 		// same "detect and run" the boot pass does, without waiting for a first command.

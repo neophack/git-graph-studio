@@ -6,10 +6,14 @@ a Source Control panel (stage / unstage / discard / commit), an editor with tabs
 terminal (ConPTY on Windows), and the full Git Graph webview — the same `out.min.js` the
 submodule's VS Code extension builds, hosted unchanged behind an `acquireVsCodeApi` shim.
 
-Everything is built in: there is no extension installation of any kind. The `git-graph-rs`
-engine is linked in-process behind the single seam `src/graphHost.ts` ↔
-`src-tauri/src/cmd_graph.rs`, its webview assets are assembled into the app at build time, and
-its version follows the app — upgrading the graph means upgrading the app.
+Extensions are a first-class part of that shell: `.ggx` packages (Studio's own format — pages
+plus an optional process backend) install from the Extensions view, contribute commands to the
+palette and menus, and run their backend as a warm sibling process. Two packages ship beside
+the app, neither installed until you ask: **git-graph-rs** itself (the same engine, in-process
+behind the single seam `src/graphHost.ts` ↔ `src-tauri/src/cmd_graph.rs`, its webview assets
+assembled at build time) and the **GGX Demo** — the format's worked example, the template
+new plugins (human- or AI-authored) start from (`plugins/ggs-ext-demo/`, its README is the
+authoring guide).
 
 Code navigation rides a persistent symbol index (Source Insight's model): the workspace's
 declarations and their occurrences indexed once under `~/.ggs/index/`, resumed on open and

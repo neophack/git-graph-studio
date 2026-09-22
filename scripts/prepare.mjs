@@ -232,16 +232,38 @@ if (backendBuild.status === 0) {
 	console.warn('Building git-graph-backend failed; packing git-graph-rs.ggx without a backend');
 }
 
-/* 6. The git-graph-rs `.ggx` package — the app ships the extension as this package, not as an
- *    embedded built-in: tauri.conf.json's bundle.resources packs the fixed-name copy
- *    (app-resources/git-graph-rs.ggx) so the installer carries it beside the app, and the app
- *    installs it on first launch (cmd_ext.rs's install_bundled). The versioned package beside
- *    it is what a user can also install by hand from the Extensions view. Delegated to the
- *    plugin's own packer (`plugins/git-graph-rs/build.mjs`) — this file never reaches into
- *    `vscode-git-graph-rs` itself for packaging; only that plugin folder does. */
+/* 6. The bundled `.ggx` packages — the app ships extensions as packages beside the app, not as
+ *    embedded built-ins: tauri.conf.json's bundle.resources packs the fixed-name copies under
+ *    app-resources/extensions/ so the installer carries them, and the app installs them only
+ *    when asked (cmd_ext.rs's ext_install_bundled, the one-click Install on the Extensions
+ *    view — the integrated git-graph-rs and the GGX Demo sample). The versioned packages
+ *    beside them are what a user can also install by hand. Each is delegated to the plugin's
+ *    own packer under plugins/ — this file never reaches into a plugin's sources for
+ *    packaging; only that plugin folder does. */
 const { buildGgx } = await import('../plugins/git-graph-rs/build.mjs');
 const { target: ggxPath } = await buildGgx({ backend: backendPath });
-mkdirSync(join(out, 'bundled', 'app-resources'), { recursive: true });
-copyFileSync(ggxPath, join(out, 'bundled', 'app-resources', 'git-graph-rs.ggx'));
+const { buildDemo } = await import('../plugins/ggs-ext-demo/build.mjs');
+// The sample's backend: a plain `cargo build` of its own [[bin]] (no `engine` feature — it
+// links only the protocol helpers, so the same no-default-features profile as the engine
+// backend compiles it fastest). Without it the package still packs, frontend-only.
+const demoExe = process.platform === 'win32' ? 'ggs-ext-demo.exe' : 'ggs-ext-demo';
+const demoBuild = spawnSync(
+	'cargo',
+	['build', '--release', '--bin', 'ggs-ext-demo', '--no-default-features'],
+	{ cwd: srcTauri, stdio: 'inherit', shell: process.platform === 'win32' }
+);
+let demoBin;
+if (demoBuild.status === 0) {
+	const built = join(out, 'cargo', 'release', demoExe);
+	if (existsSync(built)) demoBin = built;
+	else console.warn(`${built} was not produced; packing ggs-ext-demo.ggx without a backend`);
+} else {
+	console.warn('Building ggs-ext-demo failed; packing ggs-ext-demo.ggx without a backend');
+}
+const { target: demoGgxPath } = await buildDemo({ bin: demoBin });
+const bundledDir = join(out, 'bundled', 'app-resources', 'extensions');
+mkdirSync(bundledDir, { recursive: true });
+copyFileSync(ggxPath, join(bundledDir, 'git-graph-rs.ggx'));
+copyFileSync(demoGgxPath, join(bundledDir, 'ggs-ext-demo.ggx'));
 
 console.log(`Prepared ${out}`);

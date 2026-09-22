@@ -44,6 +44,13 @@ fn main() {
     println!("cargo:rustc-env=GITGRAPH_NLS_JSON={}", nls.display());
     println!("cargo:rerun-if-changed={}", manifest.display());
     println!("cargo:rerun-if-changed={}", nls.display());
+    // The bundled sample plugin's manifest, the same way: the Extensions view lists the GGX
+    // Demo from it until its bundled package is one-click installed (cmd_ext.rs's listing).
+    let demo = Path::new("../plugins/ggs-ext-demo/package.json")
+        .canonicalize()
+        .expect("the ggs-ext-demo package.json");
+    println!("cargo:rustc-env=GGS_DEMO_PACKAGE_JSON={}", demo.display());
+    println!("cargo:rerun-if-changed={}", demo.display());
     println!("cargo:rerun-if-changed=src");
     let mut violations = Vec::new();
     visit(Path::new("src"), &mut violations);
