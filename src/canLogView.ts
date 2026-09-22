@@ -11,10 +11,13 @@
 // The status bar is the one live region: a pulsing chip and a progress bar report the
 // backend walk while it runs, the summary line lands only when the numbers are in.
 //
-// The bus load divides the bits the frames put on the wire (stuffing estimate included)
-// by the bitrate-time product - the bitrate is a toolbar choice, because neither log
-// format records it, and every load figure (table, peak, charts) recomputes live on a
-// change. A filter bar narrows the tables and charts to chosen identifiers and channels.
+// The bus load is CANoe's arithmetic: a frame's arbitration-phase bits at the channel's
+// arbitration bitrate, its data-phase bits (a CAN FD frame after the BRS switch) at its
+// data bitrate, the busy seconds summed over the measurement window. Neither log format
+// records either rate, so each channel row carries its own pair of rate selects beside
+// the load they produce — two channels of one log may well run different rates — and
+// every load figure (table, peak, charts) recomputes live on a change. A filter bar
+// narrows the tables and charts to chosen identifiers and channels.
 
 import { invoke, Channel } from '@tauri-apps/api/core';
 import { save as saveDialog } from '@tauri-apps/plugin-dialog';
@@ -24,9 +27,12 @@ import { t, tf } from './i18n';
 import { load as loadState, save as saveState } from './state';
 import { basename, el, icon, quickPick } from './ui';
 
-/** The bitrates a CAN (FD) bus commonly runs at; the load is recomputed on any change. */
+/** The arbitration bitrates a CAN (FD) bus commonly runs at; the load is recomputed on any change. */
 export const CAN_BITRATES = [1_000_000, 800_000, 500_000, 250_000, 125_000, 100_000, 50_000, 33_333, 20_000, 10_000, 5_000] as const;
 export const DEFAULT_CAN_BITRATE = 500_000;
+/** The data-phase bitrates a CAN FD bus switches to after BRS; classic traffic ignores them. */
+export const CAN_DATA_BITRATES = [8_000_000, 5_000_000, 4_000_000, 2_000_000, 1_000_000] as const;
+export const DEFAULT_FD_DATA_BITRATE = 2_000_000;
 
 export interface CanIdStats {
 	channel: number;
@@ -51,19 +57,23 @@ export interface CanChannelStats {
 	frames: number;
 	errorFrames: number;
 	payloadBytes: number;
-	busBits: number;
+	/** The wire bits per phase, stuffing estimate included: the arbitration phase (all of
+	 *  a classic or NoBRS frame) and the data phase (a BRS frame after the switch). */
+	arbBits: number;
+	dataBits: number;
 	firstS: number;
 	lastS: number;
 }
 
 /** One time slice of a channel's load timeline — the raw material of the load and
- *  frame-rate charts (the bits cross raw, so the load follows the bitrate choice live). */
+ *  frame-rate charts (the bits cross raw per phase, so the load follows the rate pair live). */
 export interface LoadBucket {
 	tS: number;
 	durS: number;
 	frames: number;
 	errors: number;
-	busBits: number;
+	arbBits: number;
+	dataBits: number;
 }
 
 export interface ChannelLoadProfile {
@@ -150,10 +160,14 @@ export interface CanIntervals {
 	histogram: CycleBin[];
 }
 
-/** The share of the measurement time the bus was busy: bits on the wire ÷ (time × bitrate). */
-export function busLoad(busBits: number, durationS: number, bitrate: number): number {
-	if (durationS <= 0 || bitrate <= 0) return 0;
-	return (busBits / (durationS * bitrate)) * 100;
+/** The share of the measurement time the bus was busy, CANoe's arithmetic: each phase's
+ *  bits at its own bitrate — the arbitration phase at the arbitration rate, the data
+ *  phase (a CAN FD frame after the BRS switch) at the data rate — the busy seconds
+ *  divided by the window. */
+export function busLoad(arbBits: number, dataBits: number, durationS: number, arbRate: number, dataRate: number): number {
+	if (durationS <= 0 || arbRate <= 0) return 0;
+	const busyS = arbBits / arbRate + (dataRate > 0 ? dataBits / dataRate : 0);
+	return (busyS / durationS) * 100;
 }
 
 /** `0x123` (or an 8-digit extended `0x18FF1234`), the way CANoe shows an identifier. */
@@ -296,34 +310,23 @@ export class CanLogView {
 	private readonly payloadBody: HTMLElement;
 	private readonly analysisHost: HTMLElement;
 	private readonly messagesBody: HTMLElement;
-	private readonly bitrateSelect: HTMLSelectElement;
 	private readonly filterBox: HTMLInputElement;
 	private readonly channelSelect: HTMLSelectElement;
 	private readonly convertButton: HTMLButtonElement;
 	private stats: CanLogStats | null = null;
-	private bitrate = DEFAULT_CAN_BITRATE;
+	/** Each channel's rate pair — the channel configuration CANoe reads from its hardware
+	 *  setup, here chosen beside the load it produces. Channels absent from the map run the
+	 *  defaults until their row's selects say otherwise. */
+	private readonly channelRates = new Map<number, { arb: number; data: number }>();
 	private sortKey: SortKey = 'count';
 	private sortAsc = false;
 	private layout: CanStatsLayout = { ...DEFAULT_CAN_STATS_LAYOUT };
 	/** The identifier whose analysis panel is open, if any, and the walk's answer for it -
-	 *  cached so a bitrate or filter change re-renders the panel without re-walking the log. */
+	 *  cached so a rate or filter change re-renders the panel without re-walking the log. */
 	private selected: { channel: number; id: number; extended: boolean } | null = null;
 	private intervals: CanIntervals | null = null;
 
 	constructor(private path: string) {
-		this.bitrateSelect = el('select', 'can-bitrate') as HTMLSelectElement;
-		this.bitrateSelect.title = t('can.bitrate.title');
-		this.bitrateSelect.setAttribute('aria-label', t('can.bitrate.title'));
-		for (const rate of CAN_BITRATES) {
-			const option = el('option', undefined, [rate >= 1_000_000 ? `${rate / 1_000_000} Mbit/s` : `${rate / 1000} kbit/s`]) as HTMLOptionElement;
-			option.value = String(rate);
-			if (rate === DEFAULT_CAN_BITRATE) option.selected = true;
-			this.bitrateSelect.append(option);
-		}
-		this.bitrateSelect.addEventListener('change', () => {
-			this.bitrate = Number(this.bitrateSelect.value);
-			if (this.stats) this.render();
-		});
 		this.filterBox = el('input', 'hex-search can-filter') as HTMLInputElement;
 		this.filterBox.type = 'search';
 		this.filterBox.placeholder = t('can.filter.placeholder');
@@ -341,7 +344,6 @@ export class CanLogView {
 			this.filterBox,
 			this.channelSelect,
 			el('span', 'hex-toolbar-sep'),
-			this.bitrateSelect,
 			this.convertButton
 		]);
 		// The dashboard skeleton: the panes and sashes are laid out once; every render
@@ -537,17 +539,18 @@ export class CanLogView {
 		]));
 	}
 
-	/** One row per channel: counts, the window, the average rate, and the load at the
-	 *  chosen bitrate - the load columns follow the toolbar's bitrate select live, the
-	 *  peak off the load profile's buckets. */
+	/** One row per channel: counts, the window, the average rate, the channel's own rate
+	 *  pair, and the load they produce - the load columns follow the row's selects live,
+	 *  the peak off the load profile's buckets. */
 	private renderChannels(view: NonNullable<ReturnType<CanLogView['filtered']>>): void {
 		const profiles = new Map((this.stats?.loadProfiles ?? []).map((p) => [p.channel, p]));
-		const head = el('div', 'can-table-head can-ch-grid', [t('can.ch.channel'), t('can.ch.frames'), t('can.ch.errors'), t('can.ch.payload'), t('can.ch.duration'), t('can.ch.rate'), t('can.ch.load'), t('can.ch.peak')].map((label, i) => el('span', i === 0 ? 'can-left' : 'can-num', [label])));
+		const head = el('div', 'can-table-head can-ch-grid', [t('can.ch.channel'), t('can.ch.frames'), t('can.ch.errors'), t('can.ch.payload'), t('can.ch.duration'), t('can.ch.rate'), t('can.ch.rates'), t('can.ch.load'), t('can.ch.peak')].map((label, i) => el('span', i === 0 ? 'can-left' : 'can-num', [label])));
 		const rows = view.channels.map((c) => {
+			const rates = this.ratesOf(c.channel);
 			const duration = Math.max(0, c.lastS - c.firstS);
-			const load = busLoad(c.busBits, duration, this.bitrate);
+			const load = busLoad(c.arbBits, c.dataBits, duration, rates.arb, rates.data);
 			const buckets = profiles.get(c.channel)?.buckets ?? [];
-			const peak = Math.max(0, ...buckets.map((b) => busLoad(b.busBits, b.durS, this.bitrate)));
+			const peak = Math.max(0, ...buckets.map((b) => busLoad(b.arbBits, b.dataBits, b.durS, rates.arb, rates.data)));
 			const cells = [
 				el('span', 'can-left', [`${t('can.channel')} ${c.channel}`]),
 				el('span', 'can-num', [c.frames.toLocaleString()]),
@@ -555,30 +558,61 @@ export class CanLogView {
 				el('span', 'can-num', [formatBytes(c.payloadBytes)]),
 				el('span', 'can-num', [duration.toFixed(3) + ' s']),
 				el('span', 'can-num', [duration > 0 ? (c.frames / duration).toFixed(1) + ' fr/s' : '—']),
+				el('span', 'can-rates', [
+					this.rateSelect(c.channel, 'arb', CAN_BITRATES, rates.arb, t('can.rate.arb.title')),
+					this.rateSelect(c.channel, 'data', CAN_DATA_BITRATES, rates.data, t('can.rate.data.title'))
+				]),
 				el('span', 'can-num can-load', [load.toFixed(2) + ' %']),
 				el('span', 'can-num can-load', [buckets.length ? peak.toFixed(2) + ' %' : '—'])
 			];
 			const row = el('div', 'can-table-row can-ch-grid can-mono', cells);
-			row.title = tf('can.load.bitsTitle', (c.busBits / 1e6).toFixed(2));
+			row.title = tf('can.load.bitsTitle', ((c.arbBits + c.dataBits) / 1e6).toFixed(2));
 			return row;
 		});
 		this.channelsBody.replaceChildren(el('div', 'can-channels can-table', [head, ...rows]));
 	}
 
+	/** The channel's rate pair - the row's selects edit the map, every load figure
+	 *  follows, and a channel never named there runs the defaults. */
+	private ratesOf(channel: number): { arb: number; data: number } {
+		return this.channelRates.get(channel) ?? { arb: DEFAULT_CAN_BITRATE, data: DEFAULT_FD_DATA_BITRATE };
+	}
+
+	/** One of a channel row's two rate selects (arbitration, data): choosing a rate
+	 *  re-prices that channel's load and charts alone, without a second backend walk. */
+	private rateSelect(channel: number, key: 'arb' | 'data', rates: readonly number[], value: number, title: string): HTMLSelectElement {
+		const select = el('select', `can-rate can-rate-${key}`) as HTMLSelectElement;
+		select.title = title;
+		select.setAttribute('aria-label', title);
+		for (const rate of rates) {
+			const option = el('option', undefined, [rate >= 1_000_000 ? `${rate / 1_000_000} Mbit/s` : `${rate / 1000} kbit/s`]) as HTMLOptionElement;
+			option.value = String(rate);
+			if (rate === value) option.selected = true;
+			select.append(option);
+		}
+		select.addEventListener('change', () => {
+			const current = this.ratesOf(channel);
+			this.channelRates.set(channel, { ...current, [key]: Number(select.value) });
+			if (this.stats) this.render();
+		});
+		return select;
+	}
+
 	/** The bus charts, one series per shown channel in its palette colour: the load over
-	 *  time (percent of the chosen bitrate), the frame rate over time, and the payload
-	 *  length distribution stacked per channel. All three are divisions of the walked
-	 *  numbers, so a bitrate change redraws them without asking the backend anything. */
+	 *  time (each channel at its own rate pair, the data phase at the data bitrate), the
+	 *  frame rate over time, and the payload length distribution stacked per channel. All
+	 *  three are divisions of the walked numbers, so a rate change redraws them without
+	 *  asking the backend anything. */
 	private renderCharts(view: NonNullable<ReturnType<CanLogView['filtered']>>): void {
 		const profiles = new Map((this.stats?.loadProfiles ?? []).map((p) => [p.channel, p]));
 		const dists = new Map((this.stats?.payloadDist ?? []).map((d) => [d.channel, d]));
-		const seriesOf = (y: (b: LoadBucket) => number): ChartSeries[] => view.channels.map((c, i) => ({
+		const seriesOf = (y: (b: LoadBucket, rates: { arb: number; data: number }) => number): ChartSeries[] => view.channels.map((c, i) => ({
 			name: `${t('can.channel')} ${c.channel}`,
 			cls: seriesStyle(i),
-			points: (profiles.get(c.channel)?.buckets ?? []).map((b) => ({ x: b.tS, y: y(b) }))
+			points: (profiles.get(c.channel)?.buckets ?? []).map((b) => ({ x: b.tS, y: y(b, this.ratesOf(c.channel)) }))
 		}));
 		this.loadBody.replaceChildren(
-			multiLineChart(seriesOf((b) => busLoad(b.busBits, b.durS, this.bitrate)), { xUnit: 's', yUnit: '%', height: 200, fmtX: formatAxisSeconds })
+			multiLineChart(seriesOf((b, r) => busLoad(b.arbBits, b.dataBits, b.durS, r.arb, r.data)), { xUnit: 's', yUnit: '%', height: 200, fmtX: formatAxisSeconds })
 		);
 		this.rateBody.replaceChildren(
 			multiLineChart(seriesOf((b) => (b.durS > 0 ? b.frames / b.durS : 0)), { xUnit: 's', yUnit: 'fr/s', height: 160, fmtX: formatAxisSeconds })
@@ -655,7 +689,7 @@ export class CanLogView {
 
 	/** One identifier's analysis: the cycle statistics, the interval series with its
 	 *  missing frames marked, and the distribution — CANoe's Graphics window. The answer
-	 *  is cached against the selection, so re-renders (a bitrate change, a filter) redraw
+	 *  is cached against the selection, so re-renders (a rate change, a filter) redraw
 	 *  the panel instead of re-walking the log. */
 	private async openAnalysis(m: CanIdStats): Promise<void> {
 		this.selected = { channel: m.channel, id: m.id, extended: m.extended };

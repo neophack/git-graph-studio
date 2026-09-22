@@ -42,8 +42,10 @@ const STATS: CanLogStats = {
 	totalFrames: 3500,
 	errorFrames: 2,
 	channels: [
-		{ channel: 1, frames: 3000, errorFrames: 2, payloadBytes: 24000, busBits: 93600, firstS: 0, lastS: 10 },
-		{ channel: 2, frames: 500, errorFrames: 0, payloadBytes: 6000, busBits: 18720, firstS: 0, lastS: 10 }
+		// Channel 1 carries the FD message, so its bits split between the phases
+		// (40 % of them land in the data phase); channel 2 is classic-only.
+		{ channel: 1, frames: 3000, errorFrames: 2, payloadBytes: 24000, arbBits: 56160, dataBits: 37440, firstS: 0, lastS: 10 },
+		{ channel: 2, frames: 500, errorFrames: 0, payloadBytes: 6000, arbBits: 18720, dataBits: 0, firstS: 0, lastS: 10 }
 	],
 	messages: [
 		{ channel: 1, id: 0x100, extended: false, fd: false, count: 1000, tx: 0, rx: 1000, payloadBytes: 8000, firstS: 0, lastS: 9.99, minCycleS: 0.01, maxCycleS: 0.01, avgCycleS: 0.01, stdCycleS: 0.0001 },
@@ -54,7 +56,7 @@ const STATS: CanLogStats = {
 	messagesTruncated: 0,
 	// The load timeline the backend's streaming buckets produce: channel 1 in ten 1 s
 	// buckets (the first carries the burst - its load is the peak), channel 2 in two 5 s
-	// buckets. The bits sum to the channels' own busBits totals above.
+	// buckets. The phases sum to the channels' own arb/data totals above.
 	loadProfiles: [
 		{
 			channel: 1,
@@ -62,12 +64,13 @@ const STATS: CanLogStats = {
 				tS: i, durS: 1,
 				frames: i === 0 ? 399 : 289,
 				errors: i === 3 ? 2 : 0,
-				busBits: i === 0 ? 18720 : 8320
+				arbBits: i === 0 ? 11232 : 4992,
+				dataBits: i === 0 ? 7488 : 3328
 			}))
 		},
 		{
 			channel: 2,
-			buckets: [0, 5].map((t) => ({ tS: t, durS: 5, frames: 250, errors: 0, busBits: 9360 }))
+			buckets: [0, 5].map((t) => ({ tS: t, durS: 5, frames: 250, errors: 0, arbBits: 9360, dataBits: 0 }))
 		}
 	],
 	// Classic 8-byte frames dominate; channel 1 also carries the FD 12-byte message.
@@ -197,11 +200,15 @@ describe('CAN log views', () => {
 		expect(isCanLog('run.bat')).toBe(false);
 	});
 
-	it('bus load divides the wire bits by the bitrate-time product', () => {
-		// 93600 bits over 10 s at 500 kbit/s = 1.872 %.
-		expect(busLoad(93600, 10, 500_000)).toBeCloseTo(1.872, 9);
-		expect(busLoad(500_000, 1, 500_000)).toBeCloseTo(100, 9);
-		expect(busLoad(100, 0, 500_000)).toBe(0);
+	it('bus load prices each phase at its own bitrate, the CANoe arithmetic', () => {
+		// 93600 arbitration bits over 10 s at 500 kbit/s = 1.872 %.
+		expect(busLoad(93600, 0, 10, 500_000, 2_000_000)).toBeCloseTo(1.872, 9);
+		expect(busLoad(500_000, 0, 1, 500_000, 2_000_000)).toBeCloseTo(100, 9);
+		// The data phase at 2 Mbit/s: 500 kbits occupy a quarter of the second.
+		expect(busLoad(0, 500_000, 1, 500_000, 2_000_000)).toBeCloseTo(25, 9);
+		// A mixed window: 100 k arbitration bits at 500 k + 100 k data bits at 2 M = 0.25 s.
+		expect(busLoad(100_000, 100_000, 1, 500_000, 2_000_000)).toBeCloseTo(25, 9);
+		expect(busLoad(100, 0, 0, 500_000, 2_000_000)).toBe(0);
 	});
 
 	it('formats ids and cycles', () => {
@@ -271,20 +278,26 @@ describe('CAN log views', () => {
 		(statsArgs.onProgress as Channel<CanProgress>).send({ frames: 1_234_567, bytes: 250, totalBytes: 1000 });
 		expect(document.querySelector(`${STATS_VIEW} .hex-status`)!.textContent).toContain('25%');
 		expect(document.querySelector(`${STATS_VIEW} .hex-status`)!.textContent).toContain((1_234_567).toLocaleString());
-		// The summary carries the headline numbers; the channel row carries the load.
+		// The summary carries the headline numbers; the channel rows carry the load at
+		// each channel's own rates (defaults 500 k arbitration, 2 M data) - the FD channel
+		// and the classic channel land apart, the CANoe figures.
 		expect(texts(`${STATS_VIEW} .can-summary .can-summary-value`)).toContain((3_500).toLocaleString());
-		expect(document.querySelector(`${STATS_VIEW} .can-channels .can-load`)!.textContent).toBe('1.87 %');
+		const channelRows = document.querySelectorAll(`${STATS_VIEW} .can-channels .can-table-row`);
+		expect(channelRows[0]!.querySelector('.can-load')!.textContent).toBe('1.31 %');
+		expect(channelRows[1]!.querySelector('.can-load')!.textContent).toBe('0.37 %');
 		// The identifier table: busiest first, cycle times in CANoe's ms units.
 		const ids = texts(`${STATS_VIEW} .can-messages .can-table-row .can-left`);
 		expect(ids[0]).toBe('0x100');
 		const firstRow = document.querySelectorAll(`${STATS_VIEW} .can-messages .can-table-row`)[0]!;
 		expect(firstRow.querySelectorAll('.can-num')[1]!.textContent).toBe((1_000).toLocaleString());
 
-		// Switching the bitrate recomputes the load: 93600 bits over 10 s at 1 Mbit/s.
-		const select = document.querySelector<HTMLSelectElement>(`${STATS_VIEW} .can-bitrate`)!;
-		select.value = '1000000';
-		select.dispatchEvent(new Event('change'));
-		expect(document.querySelector(`${STATS_VIEW} .can-channels .can-load`)!.textContent).toBe('0.94 %');
+		// Switching the channel's arbitration rate recomputes its load: 56160 arb bits at
+		// 1 Mbit/s, 37440 data bits still at 2 Mbit/s, over 10 s. (The table rebuilds, so
+		// the row is re-queried, not the stale reference above.)
+		const arb = channelRows[0]!.querySelector<HTMLSelectElement>('.can-rate-arb')!;
+		arb.value = '1000000';
+		arb.dispatchEvent(new Event('change'));
+		expect(document.querySelector(`${STATS_VIEW} .can-channels .can-table-row .can-load`)!.textContent).toBe('0.75 %');
 	});
 
 	it('the raw view filters by id, channel, direction and type, numbering rows in log order', async () => {
@@ -865,9 +878,10 @@ describe('CAN log views', () => {
 		// both channels, bin 9 (FD 12) only channel 1 - three segments in all.
 		expect(document.querySelectorAll(`${STATS_VIEW} .can-section-payload rect.can-chart-bar`).length).toBe(3);
 		// The channel table carries the peak beside the average load: channel 1's burst
-		// bucket (18720 bits in 1 s at 500 kbit/s) is 3.74 % against the 1.87 % average.
+		// bucket (11232 arb bits + 7488 data bits in 1 s at 500 k / 2 M) is 2.62 % against
+		// the 1.31 % average.
 		const loads = (row: Element): string[] => Array.from(row.querySelectorAll('.can-load')).map((c) => c.textContent!);
-		expect(loads(document.querySelector(`${STATS_VIEW} .can-channels .can-table-row`)!)).toEqual(['1.87 %', '3.74 %']);
+		expect(loads(document.querySelector(`${STATS_VIEW} .can-channels .can-table-row`)!)).toEqual(['1.31 %', '2.62 %']);
 
 		// The channel select narrows the charts to the one channel's series.
 		const channel = document.querySelector<HTMLSelectElement>(`${STATS_VIEW} .can-channel`)!;
@@ -876,13 +890,13 @@ describe('CAN log views', () => {
 		expect(document.querySelectorAll(`${STATS_VIEW} .can-section-load path.can-chart-line`).length).toBe(1);
 		expect(texts(`${STATS_VIEW} .can-section-load .can-legend-chip`)).toEqual(['Channel 2']);
 
-		// A bitrate change recomputes every load figure from the same buckets - channel 2
-		// at 1 Mbit/s (18720 bits over 10 s; the peak bucket 9360 over 5 s) - without a
-		// second backend call.
+		// A rate change recomputes every load figure from the same buckets - the shown
+		// channel 2 at 1 Mbit/s (18720 bits over 10 s; the peak bucket 9360 over 5 s) -
+		// without a second backend call.
 		const walks = backend.callsTo('can_log_stats').length;
-		const select = document.querySelector<HTMLSelectElement>(`${STATS_VIEW} .can-bitrate`)!;
-		select.value = '1000000';
-		select.dispatchEvent(new Event('change'));
+		const arb = document.querySelector<HTMLSelectElement>(`${STATS_VIEW} .can-channels .can-table-row .can-rate-arb`)!;
+		arb.value = '1000000';
+		arb.dispatchEvent(new Event('change'));
 		expect(loads(document.querySelector(`${STATS_VIEW} .can-channels .can-table-row`)!)).toEqual(['0.19 %', '0.19 %']);
 		expect(backend.callsTo('can_log_stats').length).toBe(walks);
 	});
@@ -942,12 +956,12 @@ describe('CAN log views', () => {
 		expect(document.querySelector(`${STATS_VIEW} .can-live-text`)!.textContent).toContain((3_500).toLocaleString());
 	});
 
-	it('an open analysis survives a bitrate change from its cached answer, without a re-walk', async () => {
+	it('an open analysis survives a rate change from its cached answer, without a re-walk', async () => {
 		await openStats('C:\\logs\\analysis.blf');
 		click(document.querySelector(`${STATS_VIEW} .can-messages .can-table-row`));
 		await waitForReady(() => document.querySelector('.can-analysis .can-chart') !== null);
 		const walks = backend.callsTo('can_intervals').length;
-		const select = document.querySelector<HTMLSelectElement>(`${STATS_VIEW} .can-bitrate`)!;
+		const select = document.querySelector<HTMLSelectElement>(`${STATS_VIEW} .can-channels .can-table-row .can-rate-arb`)!;
 		select.value = '1000000';
 		select.dispatchEvent(new Event('change'));
 		expect(backend.callsTo('can_intervals').length).toBe(walks);

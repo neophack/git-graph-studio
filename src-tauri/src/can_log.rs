@@ -1,7 +1,8 @@
 //! CAN log parsing, statistics and conversion (CANoe's Statistics window and "Save As"):
 //! parses Vector `.blf` (binary logging format) and `.asc` (text logging format) traces,
-//! aggregates them — per-channel frame and error counts, bus load from the bits each frame
-//! puts on the wire, per-identifier counts and cycle times — and converts between the two
+//! aggregates them — per-channel frame and error counts, bus load from the arbitration-
+//! and data-phase bits each frame puts on the wire, per-identifier counts and cycle
+//! times — and converts between the two
 //! formats without losing a frame. Everything performance-critical (the container
 //! decompression, the per-frame walk, the median/percentile math, the writing) runs here;
 //! the statistics view only renders results.
@@ -99,16 +100,29 @@ pub trait FrameSink {
     }
 }
 
-/** The bits a CAN frame occupies on the bus, CANoe's worst-case stuffing estimate: the raw
- *  frame (SOF, arbitration, control, data, CRC, ACK, EOF and the 3-bit intermission), plus
- *  one stuff bit per four raw bits.
- */
-fn frame_bits(extended: bool, fd: bool, len: u64) -> f64 {
-    // Classic: 47 bits + data (67 with the 18 extended-id bits); CAN FD keeps the same
-    // arbitration phase and the estimate stops there — a detailed CRC/EOF split would not
-    // change a load figure by a percent.
-    let raw = if extended { 67.0 } else { 47.0 } + 8.0 * len as f64 + if fd { 12.0 } else { 0.0 };
-    raw + ((raw - 1.0) / 4.0).floor()
+/// The bits a CAN frame occupies on the bus, split the way CANoe prices one: the
+/// arbitration-phase bits (clocked at the channel's arbitration bitrate) and the
+/// data-phase bits (clocked at the CAN FD data bitrate once the BRS bit switches). Each
+/// phase carries CANoe's worst-case stuffing estimate — its raw bits plus one stuff bit
+/// per four — applied per phase.
+///
+/// Classic and NoBRS frames never switch, so every bit lands in the arbitration phase.
+/// A BRS frame splits: SOF through BRS run at the arbitration rate (17 bits standard, 37
+/// with the extended-id field), the rest — ESI, DLC, payload, CRC, ACK, EOF, the 3-bit
+/// intermission and FD's wider control — at the data rate. The two phases sum to the
+/// same whole-frame estimate a classic-only walk carries (59/79 + payload, stuffed), so
+/// a mixed log's totals keep their scale.
+fn frame_phases(extended: bool, fd: bool, brs: bool, len: u64) -> (f64, f64) {
+    let stuffed = |raw: f64| raw + ((raw - 1.0) / 4.0).floor();
+    if fd && brs {
+        let arb = if extended { 37.0 } else { 17.0 };
+        (stuffed(arb), stuffed(42.0 + 8.0 * len as f64))
+    } else {
+        // All at the arbitration rate: 47 + data (67 with the extended-id bits), +12 for
+        // FD's wider control when the frame never switches.
+        let raw = if extended { 67.0 } else { 47.0 } + 8.0 * len as f64 + if fd { 12.0 } else { 0.0 };
+        (stuffed(raw), 0.0)
+    }
 }
 
 /// A CAN FD DLC code (9..15) to its payload length in bytes; 0..8 map to themselves.
@@ -171,17 +185,19 @@ pub struct CanChannelStats {
     pub frames: u64,
     pub error_frames: u64,
     pub payload_bytes: u64,
-    /// The bits the frames put on the wire, including the worst-case bit-stuffing estimate
-    /// (one stuff bit per four) and the 3-bit intermission — what the load divides by the
-    /// bitrate-time product.
-    pub bus_bits: f64,
+    /// The bits the frames put on the wire in each phase, worst-case stuffing included —
+    /// the arbitration phase at the channel's arbitration bitrate, the data phase at its
+    /// CAN FD data bitrate. Classic and NoBRS frames sit wholly in the arbitration phase;
+    /// the view prices each phase at its own rate, CANoe's bus-load arithmetic.
+    pub arb_bits: f64,
+    pub data_bits: f64,
     pub first_s: f64,
     pub last_s: f64,
 }
 
 /// One time slice of a channel's load profile: everything the load and frame-rate charts
-/// draw. The bus bits cross raw, so the view recomputes the load at any bitrate without
-/// re-walking the log.
+/// draw. The bus bits cross raw per phase, so the view recomputes the load at any
+/// arbitration/data bitrate pair without re-walking the log.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoadBucket {
@@ -191,7 +207,8 @@ pub struct LoadBucket {
     pub dur_s: f64,
     pub frames: u64,
     pub errors: u64,
-    pub bus_bits: f64,
+    pub arb_bits: f64,
+    pub data_bits: f64,
 }
 
 /// A channel's timeline of buckets, the width the tracker settled on.
@@ -284,7 +301,8 @@ struct ChannelAgg {
     frames: u64,
     error_frames: u64,
     payload_bytes: u64,
-    bus_bits: f64,
+    arb_bits: f64,
+    data_bits: f64,
     first_ns: u64,
     last_ns: u64,
     seen: bool,
@@ -305,7 +323,8 @@ const INITIAL_BUCKET_NS: u64 = 1_000_000;
 struct BucketState {
     frames: u64,
     errors: u64,
-    bits: f64,
+    arb_bits: f64,
+    data_bits: f64,
 }
 
 /// The streaming load profile of one channel: dense buckets from the channel's first
@@ -328,7 +347,7 @@ impl LoadTracker {
         }
     }
 
-    fn note(&mut self, t_ns: u64, error: bool, bits: f64) {
+    fn note(&mut self, t_ns: u64, error: bool, arb_bits: f64, data_bits: f64) {
         // Compact until the timestamp fits under the cap: a frame hours into a
         // measurement, walked at the initial width, would otherwise ask for millions of
         // buckets. Each compaction halves the count and doubles the width, so this loop
@@ -348,7 +367,8 @@ impl LoadTracker {
         } else {
             bucket.frames += 1;
         }
-        bucket.bits += bits;
+        bucket.arb_bits += arb_bits;
+        bucket.data_bits += data_bits;
     }
 
     /// Merges neighbouring buckets in pairs and doubles the width — every frame stays in
@@ -360,7 +380,8 @@ impl LoadTracker {
             if let Some(second) = pair.get(1) {
                 state.frames += second.frames;
                 state.errors += second.errors;
-                state.bits += second.bits;
+                state.arb_bits += second.arb_bits;
+                state.data_bits += second.data_bits;
             }
             merged.push(state);
         }
@@ -381,7 +402,8 @@ impl LoadTracker {
                     dur_s: width as f64 / 1e9,
                     frames: b.frames,
                     errors: b.errors,
-                    bus_bits: b.bits,
+                    arb_bits: b.arb_bits,
+                    data_bits: b.data_bits,
                 })
                 .collect(),
         }
@@ -470,7 +492,8 @@ impl Aggregator {
                 frames: c.frames,
                 error_frames: c.error_frames,
                 payload_bytes: c.payload_bytes,
-                bus_bits: c.bus_bits,
+                arb_bits: c.arb_bits,
+                data_bits: c.data_bits,
                 first_s: c.first_ns as f64 / 1e9,
                 last_s: c.last_ns as f64 / 1e9,
             });
@@ -501,20 +524,21 @@ impl FrameSink for Aggregator {
             // An error frame holds no payload length to price, so the profile counts it
             // without bits — its share of the wire is its rarity, not its size.
             if let Some(load) = entry.load.as_mut() {
-                load.note(frame.t_ns, true, 0.0);
+                load.note(frame.t_ns, true, 0.0, 0.0);
             }
             return;
         }
         self.total_frames += 1;
         let len = if frame.remote { 0 } else { frame.len as u64 };
-        let bits = frame_bits(frame.extended, frame.fd, len);
+        let (arb_bits, data_bits) = frame_phases(frame.extended, frame.fd, frame.brs, len);
         let entry = self.channels.get_mut(&frame.channel).unwrap();
         entry.frames += 1;
         entry.payload_bytes += len;
-        entry.bus_bits += bits;
+        entry.arb_bits += arb_bits;
+        entry.data_bits += data_bits;
         entry.payload[payload_bin(frame.fd, len)] += 1;
         if let Some(load) = entry.load.as_mut() {
-            load.note(frame.t_ns, false, bits);
+            load.note(frame.t_ns, false, arb_bits, data_bits);
         }
         let key = (frame.channel, frame.id, frame.extended);
         // An id already tracked updates in place; a new one joins only while there is
@@ -3155,13 +3179,15 @@ mod tests {
         assert_eq!(stats.channels[0].frames, 3);
         // Duration from first frame (0) to last (20 ms).
         assert!((stats.duration_s - 0.02).abs() < 1e-9);
-        // 2 × (47+64 stuffed) + 1 × extended (67+16 stuffed).
+        // 2 × (47+64 stuffed) + 1 × extended (67+16 stuffed) — all classic, so the whole
+        // total sits in the arbitration phase.
         let classic = 47.0 + 64.0;
         let ext = 67.0 + 16.0;
         let stuffed = |raw: f64| raw + ((raw - 1.0) / 4.0).floor();
         assert!(
-            (stats.channels[0].bus_bits - (stuffed(classic) * 2.0 + stuffed(ext))).abs() < 1e-9
+            (stats.channels[0].arb_bits - (stuffed(classic) * 2.0 + stuffed(ext))).abs() < 1e-9
         );
+        assert_eq!(stats.channels[0].data_bits, 0.0);
         // The cyclic id's stats: 2 frames, a 10 ms cycle.
         let id100 = stats.messages.iter().find(|m| m.id == 0x100).unwrap();
         assert_eq!(id100.count, 2);
@@ -3217,10 +3243,29 @@ mod tests {
         assert_eq!(profile.buckets.iter().map(|b| b.errors).sum::<u64>(), 1);
         assert!(profile.buckets[500].errors == 1); // 2 s in = bucket 500
                                                    // The merge keeps every frame's bits: each bucket carries whole 8-byte frames.
-        let per_frame = profile.buckets[0].bus_bits / profile.buckets[0].frames as f64;
+        let per_frame = profile.buckets[0].arb_bits / profile.buckets[0].frames as f64;
         for b in &profile.buckets {
-            assert!((b.bus_bits / b.frames as f64 - per_frame).abs() < 1e-9);
+            assert!((b.arb_bits / b.frames as f64 - per_frame).abs() < 1e-9);
         }
+    }
+
+    #[test]
+    fn brs_frames_land_their_bits_in_both_phases_of_the_stats() {
+        // One BRS frame and one NoBRS frame: the switcher's payload bits price at the
+        // data rate, the plain FD frame's at the arbitration rate, in the channel totals
+        // and the load profile alike.
+        let mut switching = RawFrame::data_frame(0, 1, 0x100, false, true, 15, 64, &[0x55; 64], false);
+        switching.brs = true;
+        let stats = stats_of_frames(&[
+            switching,
+            RawFrame::data_frame(500_000, 1, 0x101, false, true, 15, 64, &[0x55; 64], false),
+        ]);
+        let (arb, data) = frame_phases(false, true, true, 64);
+        assert!((stats.channels[0].data_bits - data).abs() < 1e-9);
+        assert!((stats.channels[0].arb_bits - (arb + frame_phases(false, true, false, 64).0)).abs() < 1e-9);
+        let bucket = &stats.load_profiles[0].buckets[0];
+        assert!((bucket.data_bits - data).abs() < 1e-9);
+        assert!((bucket.arb_bits - (arb + frame_phases(false, true, false, 64).0)).abs() < 1e-9);
     }
 
     #[test]
@@ -3575,9 +3620,27 @@ Begin TriggerBlock Mon Sep 14 11:01:16.396 am 2026
     }
 
     #[test]
-    fn frame_bits_scale_with_payload() {
-        assert!((frame_bits(false, false, 0) - (47.0 + 11.0)).abs() < 1e-9);
-        assert!(frame_bits(true, false, 8) > frame_bits(false, false, 8));
+    fn frame_phases_split_the_way_canoe_prices_a_frame() {
+        let stuffed = |raw: f64| raw + ((raw - 1.0) / 4.0).floor();
+        // Classic and NoBRS frames never switch: everything at the arbitration rate.
+        assert!(
+            (frame_phases(false, false, false, 0).0 - stuffed(47.0)).abs() < 1e-9
+        );
+        assert_eq!(frame_phases(false, false, false, 0).1, 0.0);
+        assert_eq!(frame_phases(true, true, false, 8).1, 0.0);
+        assert!(frame_phases(true, false, false, 8).0 > frame_phases(false, false, false, 8).0);
+        // A BRS frame splits: 17 arbitration bits (37 extended), the payload and FD
+        // control in the data phase.
+        let (arb, data) = frame_phases(false, true, true, 8);
+        assert!((arb - stuffed(17.0)).abs() < 1e-9);
+        assert!((data - stuffed(42.0 + 64.0)).abs() < 1e-9);
+        let (ext_arb, ext_data) = frame_phases(true, true, true, 64);
+        assert!((ext_arb - stuffed(37.0)).abs() < 1e-9);
+        assert!((ext_data - stuffed(42.0 + 512.0)).abs() < 1e-9);
+        // The two phases of a BRS frame sum to the whole-frame estimate a NoBRS frame
+        // of the same shape carries, so mixed totals keep their scale.
+        let whole = frame_phases(true, true, false, 64).0;
+        assert!((ext_arb + ext_data - whole).abs() < 3.0);
         assert_eq!(fd_dlc_bytes(15), 64);
         assert_eq!(len2fd_dlc(64), 15);
         assert_eq!(len2fd_dlc(12), 9);

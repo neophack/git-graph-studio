@@ -247,10 +247,11 @@
 		// the amounts against the row model (scroll/, Zed's): a notch is the system's three
 		// lines at sensitivity 1, Alt multiplies by the fast sensitivity, a page is the
 		// viewport less one anchor row, the caret's fit keeps three rows of margin. The base
-		// mock gains the viewer, indexed, chunk and CAN commands the surfaces need; the
-		// surfaces themselves are opened through the real tree and the real tabs, except the
-		// hex compare and the CAN raw view, which are constructed directly (their launch UI
-		// is the folder compare's) so their models can be read exactly.
+			// mock gains the viewer, indexed, chunk and CAN commands the surfaces need; the
+			// surfaces themselves are opened through the real tree and the real tabs, except the
+			// hex compare, the CAN raw view and the CAN statistics dashboard, which are
+			// constructed directly (their launch UI is the folder compare's) so their models can
+			// be read exactly.
 		if (new URLSearchParams(location.search).has('scroll')) {
 			// A clean boot per distinct query string: a re-run with a new ?run=N must not
 			// inherit the previous run's restored session (its tabs reopen and race the
@@ -357,6 +358,27 @@
 				can_log_count: () => ({ parsed: CAN_FRAMES, done: true, error: null }),
 				can_log_frames: ({ start, end }) => Array.from({ length: Math.max(0, Number(end) - Number(start)) }, (_, i) => ({ tS: (Number(start) + i) * 0.001, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17' })),
 				can_log_close: () => undefined,
+				// The statistics dashboard's walk answer: two channels (one FD, its bits split
+				// between the phases), the load timeline both charts draw, the payload histogram.
+				can_log_stats: () => ({
+					format: 'ASC', startTimestampS: 1_760_000_000, durationS: 10, totalFrames: 3500, errorFrames: 2,
+					channels: [
+						{ channel: 1, frames: 3000, errorFrames: 2, payloadBytes: 24000, arbBits: 56160, dataBits: 37440, firstS: 0, lastS: 10 },
+						{ channel: 2, frames: 500, errorFrames: 0, payloadBytes: 6000, arbBits: 18720, dataBits: 0, firstS: 0, lastS: 10 }
+					],
+					messages: [
+						{ channel: 1, id: 0x100, extended: false, fd: false, count: 1000, tx: 0, rx: 1000, payloadBytes: 8000, firstS: 0, lastS: 9.99, minCycleS: 0.01, maxCycleS: 0.01, avgCycleS: 0.01, stdCycleS: 0.0001 }
+					],
+					messagesTruncated: 0, skippedObjects: 0,
+					loadProfiles: [
+						{ channel: 1, buckets: Array.from({ length: 10 }, (_, i) => ({ tS: i, durS: 1, frames: 300, errors: 0, arbBits: i === 0 ? 11232 : 4992, dataBits: i === 0 ? 7488 : 3328 })) },
+						{ channel: 2, buckets: [0, 5].map((t) => ({ tS: t, durS: 5, frames: 250, errors: 0, arbBits: 9360, dataBits: 0 })) }
+					],
+					payloadDist: [
+						{ channel: 1, counts: [0, 0, 0, 0, 0, 0, 0, 0, 1000, 500, 0, 0, 0, 0, 0] },
+						{ channel: 2, counts: [0, 0, 0, 0, 0, 0, 0, 0, 500, 0, 0, 0, 0, 0, 0] }
+					]
+				}),
 				settings_write: () => null,
 				write_file: () => null,
 				read_file_raw: () => {
@@ -662,6 +684,28 @@
 				key(scroller, 'PageUp');
 				check('CAN raw view', 'PageUp is one page back', 15 + page, view.scroll.top);
 				view.dispose();
+				view.root.remove();
+			});
+
+			/* ----- the CAN statistics dashboard: a full pane scrolls, no chart is clipped ----- */
+			await surface('CAN statistics', async () => {
+				const { CanLogView } = await import('/src/canLogView.ts');
+				const view = new CanLogView('/repo/trace.asc');
+				document.getElementById('editorGroup').appendChild(view.root);
+				await waitFor(() => view.root.querySelectorAll('.can-chart').length >= 3);
+				// A short window over the full dashboard: the right pane cannot fit its
+				// stacked sections, so the pane must scroll while every section keeps its
+				// content height - before the flex fix the sections were squeezed instead and
+				// `overflow: hidden` clipped the load chart's bottom.
+				view.root.style.flex = 'none';
+				view.root.style.height = '420px';
+				await settle();
+				const pane = view.root.querySelector('.can-pane-right');
+				const clipped = Array.from(pane.querySelectorAll(':scope > .can-section')).filter((s) => s.scrollHeight > s.clientHeight + 1);
+				check('CAN statistics', 'the overflowing pane itself scrolls', true, pane.scrollHeight > pane.clientHeight);
+				check('CAN statistics', 'no chart section clips its content', 0, clipped.length);
+				// And the load chart really is the pane's scrollable content, not a blank.
+				check('CAN statistics', 'the load chart drew its lines', 2, pane.querySelectorAll('.can-section-load path.can-chart-line').length);
 				view.root.remove();
 			});
 
