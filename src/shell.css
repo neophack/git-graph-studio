@@ -477,6 +477,13 @@ body.resizing iframe { pointer-events: none; }
 .status-save-track { width: 40px; height: 3px; border-radius: 2px; overflow: hidden; background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 15%, transparent); }
 .status-save-track i { display: block; height: 100%; width: 0%; background: var(--vscode-progressBar-background, #0e70c0); transition: width 0.2s ease; }
 .status-save-track i.indeterminate { width: 40%; transition: none; animation: search-progress-slide 1.3s ease-in-out infinite; }
+/* The extension host's status bar cluster: items VS Code's createStatusBarItem adds, left
+ * of the app's own right-hand items, after its own left-hand ones. */
+.status-ext { display: flex; align-items: center; }
+/* A withProgress toast's bar — the same fill as the save progress, full width. */
+.progress-track { width: 100%; height: 3px; border-radius: 2px; overflow: hidden; margin-top: 6px; background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 15%, transparent); }
+.progress-track i { display: block; height: 100%; width: 0%; background: var(--vscode-progressBar-background, #0e70c0); transition: width 0.2s ease; }
+.progress-track i.indeterminate { width: 40%; transition: none; animation: search-progress-slide 1.3s ease-in-out infinite; }
 .status-left { display: flex; align-items: center; padding-left: 4px; overflow: hidden; }
 .status-right { display: flex; align-items: center; margin-left: auto; padding-right: 4px; }
 
@@ -696,6 +703,8 @@ body.resizing iframe { pointer-events: none; }
 	font-family: var(--vscode-editor-font-family); font-size: 13px; line-height: 18px; white-space: pre-wrap; word-break: break-all;
 	color: var(--vscode-foreground);
 }
+/* The Output view's channel dropdown (Git plus the extensions' channels). */
+.output-channel-picker { height: 24px; max-width: 220px; margin-right: 6px; background: var(--vscode-dropdown-background, #313131); color: var(--vscode-dropdown-foreground, #ccc); border: 1px solid var(--vscode-dropdown-border, #3c3c3c); font: inherit; font-size: 12px; }
 
 /* ---------- SCM tree view ---------- */
 .scm-group .row.scm-folder { padding-left: 8px; }

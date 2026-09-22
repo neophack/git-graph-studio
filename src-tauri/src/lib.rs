@@ -1526,6 +1526,7 @@ mod deferred_services_tests {
                 cmd_ext::ext_read_file,
                 cmd_ext::ext_read_file_base64,
                 cmd_ext::ext_install_from_ggx,
+                cmd_ext::ext_install_from_vsix,
                 cmd_ext::ext_install_bundled,
                 ext_process::ext_process_start,
                 ext_process::ext_process_run,

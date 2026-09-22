@@ -206,6 +206,43 @@ export function notify(kind: NotificationKind, message: string, actions: Notific
 	});
 }
 
+/* ---------- Progress toasts (withProgress: an extension task with a visible bar) ---------- */
+
+/** A progress toast's handle: `update` moves the bar (null keeps the indeterminate pulse),
+ *  `done` removes it. */
+export interface ProgressToast {
+	update(percent: number | null, message?: string): void;
+	done(): void;
+}
+
+/** Show a toast with a progress bar that lives until `done` — the UI behind
+ *  `vscode.window.withProgress`. The bar starts indeterminate (the null pulse) until the
+ *  first report with a value arrives. */
+export function progressToast(title: string): ProgressToast {
+	const container = document.getElementById('notifications')!;
+	const fill = el('i');
+	const track = el('div', 'progress-track', [fill]);
+	fill.classList.add('indeterminate');
+	const label = el('div', 'message', [title]);
+	const toast = el('div', 'notification', [icon('sync', 'codicon-modifier-spin'), el('div', 'body', [label, track])]);
+	container.appendChild(toast);
+	return {
+		update(percent, message): void {
+			label.textContent = message && message !== '' ? message : title;
+			if (percent === null) {
+				fill.classList.add('indeterminate');
+				fill.style.width = '';
+			} else {
+				fill.classList.remove('indeterminate');
+				fill.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+			}
+		},
+		done(): void {
+			toast.remove();
+		}
+	};
+}
+
 /* ---------- Menus (context menus, the title bar's menus, the "..." menus) ---------- */
 
 export interface MenuItem {

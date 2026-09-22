@@ -190,6 +190,21 @@ describe('ExtensionsPanel', () => {
 		expect([...document.querySelectorAll('.ext-version')].map((v) => v.textContent)).toContain('v2.1.0');
 	});
 
+	it('installs from a picked .vsix — the VS Code compatibility path', async () => {
+		backend.dialog.openResult = 'C:\\downloads\\acme.demo-2.1.0.vsix';
+		const installed: ExtInfo = { ...USER, version: '2.1.0', format: 'vsix' };
+		backend.on('ext_install_from_vsix', () => installed);
+		let listed = [BUILTIN, USER];
+		backend.on('ext_list', () => listed);
+		const panel = mountedPanel();
+		await panel.refresh();
+		await panel.installFromVsixCommand();
+		expect(backend.callsTo('ext_install_from_vsix')).toEqual([{ path: 'C:\\downloads\\acme.demo-2.1.0.vsix' }]);
+		expect(notifications().join()).toContain('acme.demo v2.1.0');
+		// The panel's header carries both install actions: the GGX one and the VSIX one.
+		expect([...document.querySelectorAll('.pane-header .action-btn')].some((b) => b.title.includes('Install from VSIX'))).toBe(true);
+	});
+
 	it('surfaces the error when a same-version package is installed again', async () => {
 		backend.dialog.openResult = 'C:\\downloads\\git-graph-rs-1.0.24.ggx';
 		backend.on('ext_install_from_ggx', () => { throw 'neophack.git-graph-rs 1.0.24 is already installed'; });
@@ -303,10 +318,202 @@ describe('the vscode API shim', () => {
 
 	it('throws a clear error for unsupported APIs', () => {
 		const api = createVscodeApi(
-			{ extensionId: 'x', extensionPath: '/x', workspaceFolders: [], settings: {}, language: 'en' },
+			{ extensionId: 'x', extensionPath: '/x', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggx://localhost/x-1.0.0/', state: { global: {}, workspace: {} } },
 			{ request: async () => undefined, registerCommandHandler: () => undefined }
 		);
-		expect(() => api.window.createWebviewPanel('viewType', 'title', { enableScripts: false })).toThrow('not supported');
+		expect(() => api.window.createTreeView('files', { treeDataProvider: {} as never })).toThrow('not supported');
+		expect(() => api.window.registerWebviewViewProvider('view', {} as never)).toThrow('not supported');
+		// Webview panels ARE supported now (the round-one VS Code API surface).
+		expect(typeof api.window.createWebviewPanel).toBe('function');
+	});
+});
+
+describe('the VS Code API surface, round one (messages, picks, progress, status bar, webviews)', () => {
+	/** The shim under test plus every bridge request it made. */
+	function shim() {
+		const requests: { method: string; args: unknown[] }[] = [];
+		const answers = new Map<string, unknown>([['notify', 'Retry'], ['showQuickPick', 'second']]);
+		let nextId = 0;
+		const api = createVscodeApi(
+			{ extensionId: 'acme.demo', extensionPath: '/ext/acme.demo-2.0.0', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggx://localhost/acme.demo-2.0.0/', state: { global: {}, workspace: {} } },
+			{ request: async (method, args) => { requests.push({ method, args }); if (method === 'progress.begin') return ++nextId; return answers.get(method); }, registerCommandHandler: () => undefined }
+		);
+		return { api, requests };
+	}
+
+	it('showInformationMessage returns the MessageItem object the user picked', async () => {
+		const { api, requests } = shim();
+		const retry = { title: 'Retry', isCloseAffordance: false };
+		const picked = await api.window.showInformationMessage('It broke', retry, 'Ignore');
+		// The wire carries titles; the original object comes back.
+		expect(picked).toBe(retry);
+		expect(requests[0]).toMatchObject({ method: 'notify', args: ['info', 'It broke', ['Retry', 'Ignore']] });
+	});
+
+	it('showQuickPick accepts object items and returns the picked item', async () => {
+		const { api, requests } = shim();
+		const first = { label: 'first', description: 'the one' };
+		const second = { label: 'second', detail: 'the other' };
+		const picked = await api.window.showQuickPick([first, second], { placeHolder: 'pick' });
+		expect(picked).toBe(second);
+		// The wire carries {label, description, detail} entries (the host renders those), and
+		// answers with the label.
+		expect(requests[0]).toMatchObject({ method: 'showQuickPick', args: [[{ label: 'first', description: 'the one', detail: undefined }, { label: 'second', description: undefined, detail: 'the other' }], 'pick'] });
+	});
+
+	it('withProgress drives the progress bridge begin -> report -> end', async () => {
+		const { api, requests } = shim();
+		const result = await api.window.withProgress({ title: 'Working' }, async (progress) => {
+			progress.report({ increment: 25, message: 'quarter' });
+			progress.report({ increment: 75 });
+			return 'done';
+		});
+		expect(result).toBe('done');
+		const methods = requests.map((r) => r.method);
+		expect(methods.slice(0, 4)).toEqual(['progress.begin', 'progress.report', 'progress.report', 'progress.end']);
+		// Increments accumulate into a percentage: 25, then 100.
+		expect(requests[1]!.args).toEqual([1, 25, 'quarter']);
+		expect(requests[2]!.args).toEqual([1, 100, '']);
+	});
+
+	it('a status bar item posts create, every field write, and dispose', async () => {
+		const { api, requests } = shim();
+		const item = api.window.createStatusBarItem(2 /* Right */);
+		item.text = '$(sync) syncing';
+		item.tooltip = 'Syncing changes';
+		item.command = 'acme.demo.sync';
+		item.show();
+		item.dispose();
+		await flush();
+		expect(requests[0]).toMatchObject({ method: 'statusbar.create', args: ['acme.demo:1', 2] });
+		// Every field write posts the full current state; show() is the last of them, so the
+		// final set carries everything, visible.
+		const sets = requests.filter((r) => r.method === 'statusbar.set');
+		expect(sets).toHaveLength(4);
+		expect(sets.at(-1)).toMatchObject({ args: ['acme.demo:1', { alignment: 2, text: '$(sync) syncing', tooltip: 'Syncing changes', command: 'acme.demo.sync', visible: true }] });
+		expect(requests.at(-1)).toMatchObject({ method: 'statusbar.dispose', args: ['acme.demo:1'] });
+	});
+
+	it('a webview panel proxies html, messages and disposal; events route back in', async () => {
+		const { api, requests } = shim();
+		const panel = api.window.createWebviewPanel('demo.view', 'Demo', undefined, { enableScripts: true });
+		panel.webview.html = '<html><body>hi</body></html>';
+		await expect(panel.webview.postMessage({ hello: 1 })).resolves.toBe(true);
+		// asWebviewUri composes the preloaded base with the extension-relative path, both for
+		// an absolute path inside the install and a ./-relative one.
+		expect(panel.webview.asWebviewUri('/ext/acme.demo-2.0.0/media/logo.png').toString()).toBe('ggx://localhost/acme.demo-2.0.0/media/logo.png');
+		expect(panel.webview.asWebviewUri('./media/logo.png').toString()).toBe('ggx://localhost/acme.demo-2.0.0/media/logo.png');
+		expect(panel.visible).toBe(true);
+
+		// The panel's messages arrive as host events and reach onDidReceiveMessage.
+		const received: unknown[] = [];
+		panel.webview.onDidReceiveMessage((message) => received.push(message));
+		api.handleHostEvent({ event: 'webviewMessage', panelId: 1, message: { from: 'webview' } });
+		expect(received).toEqual([{ from: 'webview' }]);
+
+		// Disposal fires onDidDispose exactly once, whichever side went first.
+		let disposals = 0;
+		panel.onDidDispose(() => disposals++);
+		panel.dispose();
+		expect(disposals).toBe(1);
+		api.handleHostEvent({ event: 'webviewDisposed', panelId: 1 }); // the tab's disposer, late
+		expect(disposals).toBe(1);
+		expect(requests.map((r) => r.method)).toEqual(['webview.create', 'webview.setHtml', 'webview.postMessage', 'webview.dispose']);
+		expect(panel.visible).toBe(false);
+	});
+
+	it('a configChanged host event refreshes the settings and fires onDidChangeConfiguration', async () => {
+		const { api } = shim();
+		const fired: unknown[] = [];
+		api.workspace.onDidChangeConfiguration(() => fired.push('changed'));
+		api.handleHostEvent({ event: 'configChanged', settings: { 'demo.level': 3 } });
+		expect(fired).toEqual(['changed']);
+		expect(api.workspace.getConfiguration('demo').get('level')).toBe(3);
+	});
+});
+
+describe('the extension host UI surfaces (status bar, output, webview tabs)', () => {
+	/** A host with one live frame for acme.demo, recording everything pushed into it. */
+	function hostWithFrame() {
+		const host = new ExtensionHost();
+		const sent: unknown[] = [];
+		const handle = { frame: document.body.appendChild(document.createElement('iframe')), commandIds: new Set<string>(), pendingCalls: new Set<(error: Error) => void>(), send: (message: unknown) => sent.push(message) };
+		host['frames'].set('acme.demo', handle);
+		return { host, sent };
+	}
+
+	it('status bar items flow to the workbench callback and back on dispose', async () => {
+		const { host } = hostWithFrame();
+		const pushed: { id: string; alignment: number; text: string; tooltip: string; command?: string; visible: boolean }[][] = [];
+		host.onStatusBarItems = (items) => pushed.push(items);
+		await host['serve']('statusbar.create', ['acme.demo:1', 1], 'acme.demo', {} as never);
+		await host['serve']('statusbar.set', ['acme.demo:1', { alignment: 1, text: 'OK', tooltip: '', command: undefined, visible: true }], 'acme.demo', {} as never);
+		expect(pushed.at(-1)).toEqual([{ id: 'acme.demo:1', alignment: 1, text: 'OK', tooltip: '', command: undefined, visible: true }]);
+		await host['serve']('statusbar.dispose', ['acme.demo:1'], 'acme.demo', {} as never);
+		expect(pushed.at(-1)).toEqual([]);
+	});
+
+	it('output channels register on first line and forward every append', async () => {
+		const { host } = hostWithFrame();
+		const channels: { extId: string; name: string }[][] = [];
+		const lines: [string, string][] = [];
+		host.onOutputChannels = (list) => channels.push(list);
+		host.onOutputAppend = (_extId, name, line) => lines.push([name, line]);
+		await host['serve']('output.append', ['Build', 'compiling...'], 'acme.demo', {} as never);
+		await host['serve']('output.append', ['Build', 'done'], 'acme.demo', {} as never);
+		await host['serve']('output.append', ['Tests', 'ran'], 'acme.demo', {} as never);
+		expect(channels.at(-1)).toEqual([{ extId: 'acme.demo', name: 'Build' }, { extId: 'acme.demo', name: 'Tests' }]);
+		expect(lines).toEqual([['Build', 'compiling...'], ['Build', 'done'], ['Tests', 'ran']]);
+		await host['serve']('output.dispose', ['Build'], 'acme.demo', {} as never);
+		expect(channels.at(-1)).toEqual([{ extId: 'acme.demo', name: 'Tests' }]);
+	});
+
+	it('webview panels open a tab, mount a sandboxed srcdoc frame, and notify the extension on close', async () => {
+		const { host, sent } = hostWithFrame();
+		const opened: [number, string, string][] = [];
+		let closedTab = '';
+		host.onOpenWebview = (panelId, title, extId) => opened.push([panelId, title, extId]);
+		host.onCloseWebviewTab = (tabId) => { closedTab = tabId; host['webviewClosed'](1); };
+
+		await host['serve']('webview.create', [1, 'demo.view', 'Demo Panel'], 'acme.demo', {} as never);
+		expect(opened).toEqual([[1, 'Demo Panel', 'acme.demo']]);
+		await host['serve']('webview.setHtml', [1, '<html><body>hi</body></html>'], 'acme.demo', {} as never);
+
+		// The workbench's mount: the tab pane gets a sandboxed iframe whose srcdoc carries the
+		// composed acquireVsCodeApi bootstrap and the extension's document.
+		const pane = document.body.appendChild(document.createElement('div'));
+		const dispose = host.mountWebview(1, pane);
+		const frame = pane.querySelector('iframe')!;
+		expect(frame.getAttribute('sandbox')).toBe('allow-scripts');
+		expect(frame.getAttribute('srcdoc')).toContain('acquireVsCodeApi');
+		expect(frame.getAttribute('srcdoc')).toContain('<body>hi</body>');
+		// A later setHtml reloads the document, as VS Code's webviews do.
+		await host['serve']('webview.setHtml', [1, '<html><body>again</body></html>'], 'acme.demo', {} as never);
+		expect(frame.getAttribute('srcdoc')).toContain('<body>again</body>');
+
+		// The extension's dispose closes the tab; the frame is told the panel is gone.
+		await host['serve']('webview.dispose', [1], 'acme.demo', {} as never);
+		expect(closedTab).toBe('webview:1');
+		expect(sent.filter((m) => (m as { type?: string }).type === '__studioExtEvent' && (m as { event?: string }).event === 'webviewDisposed')).toHaveLength(1);
+
+		// The tab closing on its own (user close) runs the disposer: same notification, once.
+		dispose();
+		expect(sent.filter((m) => (m as { type?: string }).type === '__studioExtEvent' && (m as { event?: string }).event === 'webviewDisposed')).toHaveLength(1);
+	});
+
+	it('a settings change reaches the frame as a configChanged event', async () => {
+		const { host, sent } = hostWithFrame();
+		document.dispatchEvent(new CustomEvent('ggs-ext-settings', { detail: 'acme.demo' }));
+		const events = sent.filter((m) => (m as { type?: string }).type === '__studioExtEvent') as { event: string; settings: unknown }[];
+		expect(events).toHaveLength(1);
+		expect(events[0]!.event).toBe('configChanged');
+		expect(events[0]!.settings).toEqual({});
+	});
+
+	it('state.update persists the memento under the extension id', async () => {
+		const { host } = hostWithFrame();
+		await host['serve']('state.update', ['global', 'lastOpen', 'file-a'], 'acme.demo', {} as never);
+		expect(JSON.parse(localStorage.getItem('ggstudio.extMemento.global.acme.demo')!)).toEqual({ lastOpen: 'file-a' });
 	});
 });
 
@@ -411,7 +618,7 @@ describe('the extension host frame (src/extHostBoot.ts)', () => {
 		window.dispatchEvent(new MessageEvent('message', {
 			data: {
 				type: '__studioExtInit',
-				context: { extensionId: 'acme.demo', extensionPath: '/ext/acme.demo-2.0.0', workspaceFolders: [], settings: {}, language: 'en' },
+				context: { extensionId: 'acme.demo', extensionPath: '/ext/acme.demo-2.0.0', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggx://localhost/acme.demo-2.0.0/', state: { global: {}, workspace: {} } },
 				code
 			}
 		}));

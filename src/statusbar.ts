@@ -1,9 +1,10 @@
 // The status bar, VS Code's layout (M3 3.11 / 3.12): on the left the repository's name, the
 // checked-out branch and the "Synchronize Changes" item - three buttons of its own, not one
 // block - then the "Git Graph" item, the conflict count, the symbol index state and the save
-// progress; on the right the cursor position, the indent, the encoding, the line endings,
-// the language, and the notification bell (which opens the notification centre - every toast
-// ever shown stays listed there until cleared).
+// progress, then the extension-owned items (`window.createStatusBarItem`); on the right the
+// extension items come first, then the cursor position, the indent, the encoding, the line
+// endings, the language, and the notification bell (which opens the notification centre -
+// every toast ever shown stays listed there until cleared).
 
 import { invoke } from '@tauri-apps/api/core';
 
@@ -62,6 +63,14 @@ export class StatusBar {
 	private readonly centrePanel: HTMLElement;
 	private centreOpen = false;
 	private hasRepo = false;
+	/** Extension-owned items (`window.createStatusBarItem`): left items join after the app's
+	 *  own left cluster, right items before its right one, as VS Code places them. */
+	private readonly extLeft: HTMLElement;
+	private readonly extRight: HTMLElement;
+	private extItems: { id: string; alignment: number; text: string; tooltip: string; command?: string; visible: boolean }[] = [];
+	/** An extension item was clicked - the workbench routes the command (through the
+	 *  extension host, which knows whether its handler lives in a frame). */
+	onExtensionCommand: ((command: string) => void) | null = null;
 
 	onRepoClick: (() => void) | null = null;
 	onBranchClick: (() => void) | null = null;
@@ -102,7 +111,9 @@ export class StatusBar {
 		this.saveFill = el('i');
 		this.saveLabel = el('span');
 		this.saveItem.append(el('div', 'status-save-track', [this.saveFill]), this.saveLabel);
-		this.left.append(this.repoItem, this.branchItem, this.syncItem, this.graphItem, this.conflictsItem, this.symbolsItem, this.saveItem);
+		this.extLeft = el('div', 'status-ext');
+		this.extRight = el('div', 'status-ext');
+		this.left.append(this.repoItem, this.branchItem, this.syncItem, this.graphItem, this.conflictsItem, this.symbolsItem, this.saveItem, this.extLeft);
 
 		this.positionItem = el('div', 'status-item static');
 		this.indentItem = el('div', 'status-item', ['Spaces: 4']);
@@ -120,6 +131,8 @@ export class StatusBar {
 		this.bellItem.title = 'Notifications';
 		this.bellItem.hidden = true;
 		this.bellItem.addEventListener('click', () => this.toggleCentre());
+		// Extension items sit before the app's own right cluster (VS Code's placement).
+		this.right.prepend(this.extRight);
 		this.right.append(this.positionItem, this.indentItem, this.eolItem, this.encodingItem, this.languageItem, this.bellItem);
 		this.centrePanel = el('div', 'notification-centre');
 		this.centrePanel.hidden = true;
@@ -184,6 +197,25 @@ export class StatusBar {
 		clear.addEventListener('click', () => clearNotification(entry.id));
 		row.appendChild(clear);
 		return row;
+	}
+
+	/** Replace the extension-owned items (the extension host pushes the current set on every
+	 *  change — create, field write, dispose). A click runs the item's declared command. */
+	setExtensionItems(items: { id: string; alignment: number; text: string; tooltip: string; command?: string; visible: boolean }[]): void {
+		this.extItems = items;
+		this.renderExtensionItems();
+	}
+
+	private renderExtensionItems(): void {
+		this.extLeft.replaceChildren();
+		this.extRight.replaceChildren();
+		for (const item of this.extItems) {
+			if (!item.visible || item.text === '') continue;
+			const entry = el('div', 'status-item', [item.text]);
+			if (item.tooltip) entry.title = item.tooltip;
+			if (item.command) entry.addEventListener('click', () => this.onExtensionCommand?.(item.command!));
+			(item.alignment === 2 ? this.extRight : this.extLeft).appendChild(entry);
+		}
 	}
 
 	/** Show (or, with null, hide) the symbol index state. */

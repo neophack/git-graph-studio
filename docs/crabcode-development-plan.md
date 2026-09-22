@@ -696,6 +696,25 @@ VSIX compatibility (above) is for the existing ecosystem. GGS's *own* plugin for
 > degradation path, same as a non-repository folder, rather than the real engine numbers this
 > section's Performance paragraph quotes) — that rewiring, and a fresh measured "this
 > repository" entry in §4, is this milestone's last piece.
+>
+> **VSIX installs returned as the VS Code compatibility path** (2026-09-22, the same day the
+> ggx-only removal had dropped them): `ext_install_from_vsix` unzips `extension/` into the
+> same `~/.ggs/extensions/` store with the same forward-only upgrades (a `.ggx` and a `.vsix`
+> of one id are one extension; the integrated git-graph-rs id is still refused — its engine
+> and view are the app's own). The frame host activates them through the `vscode` shim
+> (`src/vscodeApi.ts`), whose round-one surface covers the shapes real extensions hit first:
+> message toasts with `MessageItem`, quick picks with object items, `withProgress` toasts,
+> output channels (the Output view's channel dropdown beside Git), status bar items
+> (`createStatusBarItem` / `setStatusBarMessage`, rendered by the status bar), webview panels
+> (`createWebviewPanel`: a sandboxed srcdoc iframe in an editor tab with `acquireVsCodeApi()`
+> composed in, `asWebviewUri` mapping package files onto `ggx://`, messages relayed both
+> ways, `onDidDispose` on tab close), persisted `globalState`/`workspaceState` mementos
+> (localStorage-backed, preloaded at activation), `onDidChangeConfiguration` (pushed in when
+> the extension's settings change), `env.clipboard.readText` and `CancellationTokenSource`.
+> Still unsupported, next rounds: tree views and `viewsContainers`/`views` contributions,
+> `activationEvents` (everything activates eagerly today), `languages`/`grammars`/`snippets`
+> contributions, `activeTextEditor`/`applyEdit`, the Node-only half of the ecosystem
+> (M6.8's optional Node host).
 
 git-graph-rs is the first `.ggx`: **frontend and backend in one package**, installed and upgraded like any extension, the backend running as its own process.
 

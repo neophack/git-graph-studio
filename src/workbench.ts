@@ -189,6 +189,21 @@ export class Workbench {
 		this.editors = new EditorArea(document.getElementById('editorGroup')!);
 		this.panel = new Panel(this.panelElement);
 		this.statusBar = new StatusBar(document.getElementById('statusbar')!);
+		// The extension host's webview panels (`window.createWebviewPanel`) ride the same
+		// editor-tab path the ggx pages do; the status bar and Output view host its items
+		// and channels. All wired here: the host owns the data, the views own the DOM.
+		this.extensionHost.onOpenWebview = (panelId, title, extId) => this.openWebviewPanel(panelId, title, extId);
+		this.extensionHost.onCloseWebviewTab = (tabId) => this.editors.closeById(tabId);
+		this.extensionHost.onRevealWebviewTab = (tabId) => this.editors.revealById(tabId);
+		this.extensionHost.onStatusBarItems = (items) => this.statusBar.setExtensionItems(items);
+		this.statusBar.onExtensionCommand = (command) => void this.extensionHost.executeCommand(command);
+		this.extensionHost.onOutputChannels = (channels) => this.panel.output.setExtensionChannels(channels);
+		this.extensionHost.onOutputAppend = (extId, name, line) => this.panel.output.appendLine(name, line);
+		this.extensionHost.onOutputClearChannel = (_extId, name) => this.panel.output.clearChannel(name);
+		this.extensionHost.onOutputReveal = (_extId, name) => {
+			this.panel.show('output');
+			this.panel.output.showChannel(name);
+		};
 		this.graph = new GraphHost({
 			openFile: (path) => void this.editors.openFile(path),
 			openDiff: (diff) => void this.editors.openDiff({ kind: 'diff', ...diff }),
@@ -302,6 +317,7 @@ export class Workbench {
 		register({ id: 'editor.toggleBookmark', title: 'Toggle Bookmark', category: 'Edit', keybinding: 'Ctrl+Alt+B', enabled: () => this.editors.activeInput?.kind === 'file', run: () => void this.toggleBookmark() });
 		register({ id: 'editor.listBookmarks', title: 'List Bookmarks', category: 'Edit', keybinding: 'Ctrl+Alt+K', run: () => void this.listBookmarks() });
 		register({ id: 'extensions.installFromGgx', title: 'Install Extension from GGX...', category: 'Extensions', run: () => { this.showView('extensions'); void this.extensions.installFromGgxCommand(); } });
+		register({ id: 'extensions.installFromVsix', title: 'Install Extension from VSIX...', category: 'Extensions', run: () => { this.showView('extensions'); void this.extensions.installFromVsixCommand(); } });
 		register({ id: 'workbench.showGraph', title: 'Git Graph', category: 'View', enabled: hasRepo, run: () => this.openGraph() });
 		register({ id: 'git.initRepository', title: 'Initialize Repository', category: 'Git', enabled: () => this.repoPath !== null && !this.isRepo, run: () => void this.initializeRepository() });
 		register({ id: 'workbench.toggleSidebar', title: 'Toggle Primary Side Bar', category: 'View', keybinding: 'Ctrl+B', run: () => this.toggleSidebar() });
@@ -653,6 +669,17 @@ export class Workbench {
 		void this.editors.openExtPage(
 			{ kind: 'extpage', id: `extpage:${extId}:${pageId}:${serial}`, title: entry.title ?? pageId, extId, pageId, params },
 			(pane) => this.extensionHost.mountPage(extId, pageId, params, pane)
+		);
+	}
+
+	/** A webview panel (module 12): what `vscode.window.createWebviewPanel` opens — a VSIX
+	 *  extension's own HTML in an editor tab, over the same mounting path the ggx pages
+	 *  take. The extension host owns the panel record and the iframe; the workbench owns
+	 *  the tab, and closing it tells the extension (`onDidDispose`). */
+	private openWebviewPanel(panelId: number, title: string, extId: string): void {
+		void this.editors.openExtPage(
+			{ kind: 'extpage', id: this.extensionHost.webviewTabId(panelId), title, extId, pageId: 'webview' },
+			(pane) => this.extensionHost.mountWebview(panelId, pane)
 		);
 	}
 

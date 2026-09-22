@@ -113,6 +113,27 @@ export class EditorArea {
 		return this.focused?.group ?? this.groups()[0]!;
 	}
 
+	/** Close the tab with this input id in whichever group holds it (the extension host
+	 *  closes a webview panel's tab this way). Returns whether a tab was found. */
+	closeById(id: string): boolean {
+		for (const group of this.groups()) {
+			if (group.closeById(id)) return true;
+		}
+		return false;
+	}
+
+	/** Focus the tab with this input id in whichever group holds it (a webview panel's
+	 *  `reveal()`); returns whether a tab was found. */
+	revealById(id: string): boolean {
+		for (const group of this.groups()) {
+			if (group.hasEditor(id)) {
+				group.activateById(id);
+				return true;
+			}
+		}
+		return false;
+	}
+
 	get focusedIndex(): number {
 		return Math.max(0, this.leaves().findIndex((leaf) => leaf.box === this.focused));
 	}

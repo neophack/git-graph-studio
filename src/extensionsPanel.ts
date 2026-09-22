@@ -1,12 +1,12 @@
 // The Extensions view: the installed extensions (built-in and user-installed) with their icons
-// and metadata, the "Install from GGX..." action, per-extension uninstall, and the process
+// and metadata, the "Install from GGX..." / "Install from VSIX..." actions (Studio's own
+// format, and the VS Code compatibility path), per-extension uninstall, and the process
 // backends' status (running pid / why not, restart). A row's click opens the extension's
 // detail page — VS Code's extension editor: the header's facts and actions, then the README
-// rendered — in an editor tab through `onOpenDetail` (the workbench wires it). Installs accept
-// `.ggx` packages only. Nothing is installed by default: the two bundled packages — the
-// integrated git-graph-rs and the GGX Demo sample, both carried by the installer — list from
-// their embedded manifests until one-click installed (installBundled), after which each is a
-// standard, uninstallable package.
+// rendered — in an editor tab through `onOpenDetail` (the workbench wires it). Nothing is
+// installed by default: the two bundled packages — the integrated git-graph-rs and the GGX
+// Demo sample, both carried by the installer — list from their embedded manifests until
+// one-click installed (installBundled), after which each is a standard, uninstallable package.
 
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
@@ -46,6 +46,7 @@ export class ExtensionsPanel {
 		const header = el('div', 'pane-header');
 		header.appendChild(el('span', 'label', [t('extensions.installed')]));
 		header.appendChild(actionButton('package', t('extensions.installFromGgx'), () => void this.pickGgx()));
+		header.appendChild(actionButton('package', t('extensions.installFromVsix'), () => void this.pickVsix()));
 		this.body = el('div', 'pane-body list');
 		this.body.tabIndex = 0;
 		this.list = el('div', 'ext-list');
@@ -224,21 +225,32 @@ export class ExtensionsPanel {
 		await this.pickGgx();
 	}
 
+	/** The command palette entry point (Extensions: Install Extension from VSIX...) — the
+	 *  VS Code compatibility path. */
+	async installFromVsixCommand(): Promise<void> {
+		await this.pickVsix();
+	}
+
 	private async pickGgx(): Promise<void> {
+		await this.pickPackage(t('extensions.installPickTitle'), [{ name: 'GGX package', extensions: ['ggx'] }], (path) => this.host.installFromGgx(path));
+	}
+
+	private async pickVsix(): Promise<void> {
+		await this.pickPackage(t('extensions.installPickTitleVsix'), [{ name: 'VS Code extension', extensions: ['vsix'] }], (path) => this.host.installFromVsix(path));
+	}
+
+	private async pickPackage(title: string, filters: { name: string; extensions: string[] }[], install: (path: string) => Promise<{ id: string; version: string }>): Promise<void> {
 		let selected: string | string[] | null;
 		try {
-			selected = await openDialog({ multiple: false, directory: false, title: t('extensions.installPickTitle'), filters: [{ name: 'GGX package', extensions: ['ggx'] }] });
+			selected = await openDialog({ multiple: false, directory: false, title, filters });
 		} catch (error) {
 			notify('error', tf('extensions.installPickFailed', String(error)));
 			return;
 		}
 		if (!selected) return;
-		await this.install(Array.isArray(selected) ? selected[0]! : selected);
-	}
-
-	async install(path: string): Promise<void> {
+		const path = Array.isArray(selected) ? selected[0]! : selected;
 		try {
-			const info = await this.host.installFromGgx(path);
+			const info = await install(path);
 			notify('info', tf('extensions.installedOk', info.id, info.version));
 			this.onChanged?.();
 		} catch (error) {

@@ -310,33 +310,48 @@ terminal list.
 
 ### 12. Extension Platform
 
-The extension store (`~/.ggs/extensions/`): Studio's own `.ggx` format — the only format
-installs accept (`ext_install_from_ggx`; VSIX install was removed 2026-09-22, while
-already-installed VSIX packages still list, host and uninstall) — `ggx/2`
-adds the named page registry (every page a package can show, opened as editor tabs over the
-`ggx://` protocol) and the process backend (a binary, speaking the `ggs-ext/1` line-JSON-RPC
-protocol over stdin/stdout — any language that can write lines to stdout qualifies; the app
-embeds no runtime) — plus the Extensions view with detail pages, backend status and restart.
-**Nothing installs by default.** Two packages ship beside the installer (`extensions/`, packed
-by `prepare.mjs`): git-graph-rs, whose integrated entry offers it as a **one-click install**
-(`ext_install_bundled`) that lands it as a standard, uninstallable package — its engine still
-linked in-process and its view assets still the app's own — and the **GGX Demo**, the format's
-worked example and the template new plugins (human- or AI-authored) start from, offered the
-same one-click way as a pure sample (`plugins/ggs-ext-demo/`, its README the authoring guide).
-With no install of either (the default), each listing falls back to the manifest embedded at
-build time. **Install means run**: the boot pass starts every installed package
-that declares a backend (`ext_process::start_all_installed`, off the window's thread), an
-install starts its backend at once, and the first command remains the lazy fallback. Multiple
-app instances are independent — each spawns and owns only its own backends (`GGS_INSTANCE_ID`
-marks the owner), every backend this instance spawned is stopped on exit, and an uninstall
-stops the backend before removing its directory (a directory another window's backend still
-holds refuses with a close-that-window hint).
+The extension store (`~/.ggs/extensions/`): Studio's own `.ggx` format (`ext_install_from_ggx`)
+plus `.vsix` as the VS Code compatibility path (restored 2026-09-22 after that day's
+ggx-only removal; same store, same forward-only upgrades, a `.ggx` and a `.vsix` of one id
+are one extension — the higher version wins). `ggx/2` adds the named page registry (every
+page a package can show, opened as editor tabs over the `ggx://` protocol) and the process
+backend (a binary, speaking the `ggs-ext/1` line-JSON-RPC protocol over stdin/stdout — any
+language that can write lines to stdout qualifies; the app embeds no runtime) — plus the
+Extensions view with detail pages, backend status and restart. VSIX extensions activate in
+the frame host (`extHost.ts` + `vscodeApi.ts`) with a growing `vscode` API surface:
+commands, configuration (with `onDidChangeConfiguration` pushed in), message toasts with
+MessageItem, quick picks (string and object items), `withProgress` toasts, output channels
+(the Output view's channel dropdown), status bar items (`window.createStatusBarItem` /
+`setStatusBarMessage`, rendered by the status bar), webview panels
+(`window.createWebviewPanel` — a sandboxed srcdoc iframe in an editor tab, with
+`acquireVsCodeApi()` composed in, `asWebviewUri` mapping onto `ggx://`), persisted
+`globalState`/`workspaceState` mementos, and `env.clipboard`. **Nothing installs by
+default.** Two packages ship beside the installer (`extensions/`, packed by `prepare.mjs`):
+git-graph-rs, whose integrated entry offers it as a **one-click install**
+(`ext_install_bundled`) that lands it as a standard, uninstallable package — its engine
+linked in its backend process and its view assets the extension's own — and the **GGX
+Demo**, the format's worked example and the template new plugins (human- or AI-authored)
+start from, offered the same one-click way as a pure sample (`plugins/ggs-ext-demo/`, its
+README the authoring guide). With no install of either (the default), each listing falls
+back to the manifest embedded at build time. **Install means run**: the boot pass starts
+every installed package that declares a backend (`ext_process::start_all_installed`, off the
+window's thread), an install starts its backend at once, and the first command remains the
+lazy fallback. Multiple app instances are independent — each spawns and owns only its own
+backends (`GGS_INSTANCE_ID` marks the owner), every backend this instance spawned is stopped
+on exit, and an uninstall stops the backend before removing its directory (a directory
+another window's backend still holds refuses with a close-that-window hint).
 
 - Frontend: `src/extensionsPanel.ts`, `src/extHost.ts` (the frame host for VSIX/`.ggx`
-  extensions, the page host and the process-command dispatch of `ggx/2`) + `ext-host.html` +
-  `src/extHostBoot.ts` (one sandboxed frame per extension), `src/vscodeApi.ts`,
-  `src/contributions.ts` (manifest contributions merged into the workbench)
-- Backend: `src-tauri/src/cmd_ext.rs` (install / upgrade / uninstall, `.ggx` unpack, the
+  extensions, the page host, the process-command dispatch of `ggx/2`, and the host services
+  behind the `vscode` API — webview panels, status bar items, output channels, progress
+  toasts, memento persistence) + `ext-host.html` +
+  `src/extHostBoot.ts` (one sandboxed frame per extension), `src/vscodeApi.ts` (the `vscode`
+  shim the frames require),
+  `src/contributions.ts` (manifest contributions merged into the workbench); the surfaces it
+  reaches into: `src/statusbar.ts` (extension items), `src/panel.ts` (the Output view's
+  channel dropdown), `src/ui.ts` (`progressToast`)
+- Backend: `src-tauri/src/cmd_ext.rs` (install / upgrade / uninstall, `.ggx` and `.vsix`
+  unpack (the VS Code compatibility path), the
   bundled-package registry — git-graph-rs and the GGX Demo, `ext_install_bundled`'s ids — the
   `ggx://` protocol that serves an installed package's files — composing the page bootstrap
   into every HTML page), `src-tauri/src/ext_process.rs` (the process extension host: eager

@@ -75,9 +75,11 @@ function handleCall(method: string, args: unknown[]): unknown {
 }
 
 let module_: { exports: { activate?: (context: unknown) => unknown; deactivate?: () => unknown } } | null = null;
+/** The shim of the extension that booted (null until `__studioExtInit` lands). */
+let api_: VscodeApi | null = null;
 
 window.addEventListener('message', (event) => {
-	const data = event.data as { type?: string; id?: number; ok?: boolean; result?: unknown; context?: HostContext; code?: string };
+	const data = event.data as { type?: string; id?: number; ok?: boolean; result?: unknown; context?: HostContext; code?: string; event?: string };
 	if (!data || typeof data !== 'object') return;
 	if (data.type === '__studioExtRpcResult') {
 		const id = data.id as number;
@@ -101,6 +103,12 @@ window.addEventListener('message', (event) => {
 		}
 		return;
 	}
+	// An event the host pushed in (configuration change, webview message, disposal) — the
+	// single listener routes it into the shim, which owns the emitters.
+	if (data.type === '__studioExtEvent' && typeof data.event === 'string') {
+		api_?.handleHostEvent(data as Parameters<NonNullable<typeof api_>['handleHostEvent']>[0]);
+		return;
+	}
 	if (data.type === '__studioExtInit') boot(data as InitMessage);
 });
 
@@ -110,6 +118,7 @@ function boot(message: InitMessage): void {
 		request: hostRequest,
 		registerCommandHandler: (id, handler) => registered.set(id, handler)
 	});
+	api_ = api;
 	const require = (id: string): unknown => {
 		if (id === 'vscode') return api;
 		throw new Error(`require('${id}') is not supported: Git Graph Studio only runs extensions whose main entry is a self-contained bundle`);
@@ -120,7 +129,7 @@ function boot(message: InitMessage): void {
 		// the shim, which parks the handler here (via 'registerHandler') and forwards the
 		// command id to the workbench's registry.
 		new Function('require', 'module', 'exports', code)(require, module_, module_.exports);
-		Promise.resolve(module_.exports.activate?.(activationContext(context))).then(
+		Promise.resolve(module_.exports.activate?.(activationContext(context, api))).then(
 			() => parent.postMessage({ type: '__studioExtActivated', extensionId: context.extensionId }, '*'),
 			(error) => parent.postMessage({ type: '__studioExtActivateFailed', extensionId: context.extensionId, error: String(error) }, '*')
 		);
@@ -129,15 +138,19 @@ function boot(message: InitMessage): void {
 	}
 }
 
-/** The ExtensionContext VS Code hands to activate(), with an in-frame store standing in for Memento. */
-function activationContext(context: HostContext): Record<string, unknown> {
-	const memento = new Map<string, unknown>();
+/** The ExtensionContext VS Code hands to activate(): the mementos are the shim's persisted
+ *  ones (`globalState` survives restarts, `workspaceState` per install), and `extension` is
+ *  the extension's own API entry, as `vscode.extensions.getExtension(id)` reports it. */
+function activationContext(context: HostContext, api: VscodeApi): Record<string, unknown> {
 	return {
 		subscriptions: [] as Disposable[],
 		extensionPath: context.extensionPath,
 		extensionUri: { scheme: 'file', path: context.extensionPath, fsPath: context.extensionPath, toString: () => 'file:' + context.extensionPath },
-		globalState: { get: (key: string, fallback?: unknown) => memento.get(key) ?? fallback, update: (key: string, value: unknown) => memento.set(key, value), setKeysForSync: () => undefined },
-		workspaceState: { get: (key: string, fallback?: unknown) => memento.get('ws:' + key) ?? fallback, update: (key: string, value: unknown) => memento.set('ws:' + key, value) },
+		globalState: api.__mementos.global,
+		workspaceState: api.__mementos.workspace,
+		storagePath: context.extensionPath,
+		globalStoragePath: context.extensionPath,
+		extensionMode: 3, // ExtensionMode.Production — the frame host has no dev mode
 		asAbsolutePath: (relative: string) => context.extensionPath + '/' + relative,
 		environmentVariableCollection: undefined,
 		outputChannel: { append: () => undefined, appendLine: () => undefined, show: () => undefined, dispose: () => undefined }

@@ -170,6 +170,11 @@ export function saveGraphSetting(key: string, value: unknown): void {
 
 /* ---------- Extension settings (what installed extensions wrote via update()) ---------- */
 
+/** The event `saveExtSetting` dispatches on `document` (detail: the extension id), so the
+ *  extension host can push the change into the extension's frame — the `onDidChangeConfiguration`
+ *  half of the vscode API. */
+export const EXT_SETTINGS_EVENT = 'ggs-ext-settings';
+
 export function extSettings(extId: string): Record<string, unknown> {
 	return load<Record<string, unknown>>(`extSettings.${extId}`, {});
 }
@@ -178,6 +183,23 @@ export function saveExtSetting(extId: string, key: string, value: unknown): void
 	const settings = extSettings(extId);
 	settings[key] = value;
 	save(`extSettings.${extId}`, settings);
+	document.dispatchEvent(new CustomEvent(EXT_SETTINGS_EVENT, { detail: extId }));
+}
+
+/* ---------- Extension mementos (ExtensionContext.globalState / workspaceState) ---------- */
+
+/** The persisted memento of one extension and scope, as the activation context preloads and
+ *  `state.update` writes through (VS Code keeps globalState machine-wide and workspaceState
+ *  per-workspace; Studio persists both per install — one webview storage, one machine). */
+export function extMemento(extId: string, scope: 'global' | 'workspace'): Record<string, unknown> {
+	return load<Record<string, unknown>>(`extMemento.${scope}.${extId}`, {});
+}
+
+export function saveExtMemento(extId: string, scope: 'global' | 'workspace', key: string, value: unknown): void {
+	const values = extMemento(extId, scope);
+	if (value === undefined) delete values[key];
+	else values[key] = value;
+	save(`extMemento.${scope}.${extId}`, values);
 }
 
 /* ---------- Code reviews (the Commit Details View's "mark as reviewed") ---------- */

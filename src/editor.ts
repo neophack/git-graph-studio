@@ -2231,6 +2231,21 @@ export class EditorGroup {
 		if (editor) this.activate(editor);
 	}
 
+	/** Whether a tab with this input id is open here (the editor area's revealById scans
+	 *  the groups with it). */
+	hasEditor(id: string): boolean {
+		return this.open.some((e) => e.id === id);
+	}
+
+	/** Close the tab with this input id (the extension host closes a webview panel's tab
+	 *  this way — `panel.dispose()` from the extension side). */
+	closeById(id: string): boolean {
+		const editor = this.open.find((e) => e.id === id);
+		if (!editor) return false;
+		void this.close(editor);
+		return true;
+	}
+
 	async close(editor: Editor = this.active!): Promise<void> {
 		if (!editor) return;
 		if (editor.dirty) {

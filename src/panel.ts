@@ -1,6 +1,8 @@
 // The bottom panel: VS Code's panel header with its view tabs (TERMINAL, OUTPUT), the active
-// view's actions, and the maximize / close controls. The Output view is the "Git" channel -
-// every git command the app ran, as VS Code's Git extension logs them.
+// view's actions, and the maximize / close controls. The Output view is channel-based like
+// VS Code's: the "Git" channel (every git command the app ran, as VS Code's Git extension
+// logs them) plus the channels installed extensions created (`createOutputChannel`), picked
+// from a dropdown in the view's actions.
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -13,17 +15,29 @@ import { actionButton, el, icon } from './ui';
 
 export type PanelViewId = 'terminal' | 'output' | 'context';
 
+/** The Output view's channels, in the picker: the built-in "Git" one first, then the
+ *  extensions' (creation order; a name collisions gets the owning extension in brackets). */
+const GIT_CHANNEL = 'Git';
+
 export class OutputView {
 	readonly element: HTMLElement;
 	readonly actions: HTMLElement;
 	private readonly log: HTMLElement;
 	private loaded = false;
+	/** Per-channel line buffers; the Git channel's backend history loads lazily on first show. */
+	private readonly channels = new Map<string, string[]>([[GIT_CHANNEL, []]]);
+	private readonly picker: HTMLSelectElement;
 
 	constructor() {
 		this.log = el('pre', 'output-log');
 		this.log.setAttribute('aria-live', 'polite');
+		this.picker = el('select', 'output-channel-picker') as HTMLSelectElement;
+		this.picker.setAttribute('aria-label', 'Select Channel');
+		this.picker.appendChild(new Option(GIT_CHANNEL, GIT_CHANNEL, true, true));
+		this.picker.addEventListener('change', () => this.renderActive());
 		this.element = el('div', 'panel-body', [this.log]);
 		this.actions = el('div', 'actions', [
+			this.picker,
 			actionButton('clear-all', 'Clear Output', () => void this.clear())
 		]);
 		void listen<string>('studio://git-output', (event) => this.append(event.payload)).catch(() => undefined);
@@ -35,26 +49,87 @@ export class OutputView {
 		this.loaded = true;
 		try {
 			const lines = await invoke<string[]>('git_output_log');
-			this.log.textContent = lines.join('\n') + (lines.length > 0 ? '\n' : '');
-			this.log.scrollTop = this.log.scrollHeight;
+			this.channels.set(GIT_CHANNEL, lines);
+			this.renderActive();
 		} catch {
 			// No backend (tests): the live events alone fill the view.
 		}
 	}
 
 	append(line: string): void {
+		this.appendLine(GIT_CHANNEL, line);
+	}
+
+	/** One line into a channel: buffered whether or not the view is visible, rendered when
+	 *  the channel is the one on screen (and the log was at its bottom, as live tails are). */
+	appendLine(channel: string, line: string): void {
+		const buffer = this.channels.get(channel) ?? [];
+		if (buffer.length > 5000) buffer.splice(0, buffer.length - 5000); // bounded, like the session log
+		buffer.push(line);
+		this.channels.set(channel, buffer);
+		if (channel === this.activeChannel()) this.appendLive(line);
+	}
+
+	/** An extension channel list arrived (the extension host pushes the full set). */
+	setExtensionChannels(channels: { extId: string; name: string }[]): void {
+		const known = new Set(this.channels.keys());
+		const used = new Set<string>([GIT_CHANNEL]);
+		this.picker.textContent = '';
+		this.picker.appendChild(new Option(GIT_CHANNEL, GIT_CHANNEL, true, this.activeChannel() === GIT_CHANNEL));
+		for (const { extId, name } of channels) {
+			const label = used.has(name) ? `${name} (${extId})` : name;
+			used.add(name);
+			known.add(label);
+			this.channels.set(label, this.channels.get(label) ?? []);
+			this.picker.appendChild(new Option(label, label, false, this.activeChannel() === label));
+		}
+		// Channels that went away (dispose/uninstall) leave the picker; their buffers follow
+		// unless still referenced by a same-named survivor.
+		for (const name of [...this.channels.keys()]) {
+			if (name !== GIT_CHANNEL && !known.has(name) && this.activeChannel() !== name) this.channels.delete(name);
+		}
+	}
+
+	/** Switch the view to a channel (an extension's `outputChannel.show()`); the caller shows
+	 *  the panel itself. */
+	showChannel(channel: string): void {
+		if (this.channels.has(channel) || [...this.picker.options].some((option) => option.value === channel)) {
+			this.picker.value = channel;
+			this.renderActive();
+		}
+	}
+
+	/** Empty one channel (the Clear action works the active one; extensions clear their own). */
+	clearChannel(channel: string): void {
+		this.channels.set(channel, []);
+		if (channel === this.activeChannel()) this.log.textContent = '';
+		if (channel === GIT_CHANNEL) void invoke('git_output_clear').catch(() => undefined);
+	}
+
+	private activeChannel(): string {
+		return this.picker.value || GIT_CHANNEL;
+	}
+
+	/** Render the active channel's whole buffer (a channel switch or a late history load). */
+	private renderActive(): void {
+		const lines = this.channels.get(this.activeChannel()) ?? [];
+		this.log.textContent = lines.join('\n') + (lines.length > 0 ? '\n' : '');
+		this.log.scrollTop = this.log.scrollHeight;
+	}
+
+	/** One live line onto the visible tail, keeping the stick-to-bottom behaviour. */
+	private appendLive(line: string): void {
 		const atBottom = this.log.scrollTop + this.log.clientHeight >= this.log.scrollHeight - 4;
 		this.log.textContent += line + '\n';
 		if (atBottom) this.log.scrollTop = this.log.scrollHeight;
 	}
 
 	text(): string {
-		return this.log.textContent ?? '';
+		return (this.channels.get(GIT_CHANNEL) ?? []).join('\n');
 	}
 
 	async clear(): Promise<void> {
-		this.log.textContent = '';
-		await invoke('git_output_clear').catch(() => undefined);
+		this.clearChannel(this.activeChannel());
 	}
 }
 

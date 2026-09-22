@@ -1,17 +1,15 @@
 //! Extension management for Git Graph Studio.
 //!
-//! Studio installs VS Code extensions from `.vsix` files (zip archives with an `extension/`
-//! folder holding `package.json` and the compiled entry point). Extensions live under
-//! `~/.ggs/extensions/{id}-{version}/` — a user-level directory like `.vscode/extensions`, so
-//! installs are easy to inspect and survive app data resets; any extension can be upgraded
-//! independently by installing a `.vsix` with a higher version.
-//!
-//! Studio's own package format, `.ggx` (docs/ggs-development-plan.md §8.2), installs into the
-//! same directory: a zip with `manifest.json` (the ggx header: id, version and the page
-//! registry / process backend) and `package.json` (the VS Code-style manifest the Extensions
-//! view and the contribution points read) at its root, plus `web/`, the localisations, README
-//! and licences. A `.ggx` and a `.vsix` of the same id are the same extension: whichever has
-//! the higher version wins.
+//! Studio's own package format is `.ggx` (docs/crabcode-development-plan.md §8.2): a zip with
+//! `manifest.json` (the ggx header: id, version and the page registry / process backend) and
+//! `package.json` (the VS Code-style manifest the Extensions view and the contribution points
+//! read) at its root, plus `web/`, the localisations, README and licences. `.vsix` packages
+//! install as the VS Code compatibility path: a zip with an `extension/` folder holding
+//! `package.json` and the compiled entry point, activated in the frame host with the `vscode`
+//! API shim. Both live under `~/.ggs/extensions/{id}-{version}/` — a user-level directory
+//! like `.vscode/extensions`, so installs are easy to inspect and survive app data resets —
+//! and a `.ggx` and a `.vsix` of the same id are the same extension: whichever has the higher
+//! version wins.
 //!
 //! The integrated git-graph-rs extension and the GGX Demo sample both ship as bundled `.ggx`
 //! packages the installer carries (`extensions/` beside the app — prepare.mjs packs them), but
@@ -430,8 +428,24 @@ fn embedded_extension(id: &str, package_json: &str, builtin: bool, nls: &serde_j
     }
 }
 
-/// Install a `.ggx` package (Studio's own format — the only format installs accept; a newer
-/// version replaces an installed `.vsix` or `.ggx` of the same id).
+/// Install a `.vsix` package — the VS Code compatibility path. A newer version replaces an
+/// installed `.vsix` or `.ggx` of the same id (the integrated git-graph-rs is refused: its
+/// engine and view assets are the app's own, so a package of that id could never take effect).
+#[tauri::command]
+pub fn ext_install_from_vsix(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::ext_process::ProcessHostState>,
+    path: String,
+) -> Result<ExtInfo, String> {
+    let dir = extensions_dir(&app)?;
+    // The old install's backend cannot outlive the directory its exe lives in.
+    let manifest = read_vsix_manifest(Path::new(&path))?;
+    let _ = state.stop(&format!("{}.{}", manifest.publisher, manifest.name));
+    install_from_vsix_into(&dir, Path::new(&path), false)
+}
+
+/// Install a `.ggx` package (Studio's own format; a newer version replaces an installed
+/// `.vsix` or `.ggx` of the same id).
 #[tauri::command]
 pub fn ext_install_from_ggx(
     app: tauri::AppHandle,
@@ -745,6 +759,108 @@ fn extract_ggx(ggx: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Install a `.vsix` into `dir`: the same forward-only upgrade rules as a `.ggx` (a same-id
+/// `.ggx` counts as just another install of the same extension).
+fn install_from_vsix_into(dir: &Path, vsix: &Path, builtin: bool) -> Result<ExtInfo, String> {
+    let manifest = read_vsix_manifest(vsix)?;
+    refuse_integrated(&manifest)?;
+    let id = format!("{}.{}", manifest.publisher, manifest.name);
+    let target = dir.join(format!("{id}-{}", manifest.version));
+    for existing in find_installed(dir, &id)? {
+        match compare_versions(&existing, &manifest.version) {
+            std::cmp::Ordering::Greater => {
+                return Err(format!(
+                    "{id} {existing} is already installed; {id} {} is older",
+                    manifest.version
+                ))
+            }
+            std::cmp::Ordering::Equal => {
+                return Err(format!("{id} {existing} is already installed"))
+            }
+            std::cmp::Ordering::Less => {
+                std::fs::remove_dir_all(dir.join(format!("{id}-{existing}")))
+                    .map_err(|e| format!("remove old {id} {existing}: {e}"))?;
+            }
+        }
+    }
+    extract_vsix(vsix, &target)?;
+    let meta = StudioExtMeta {
+        builtin,
+        format: "vsix".to_owned(),
+    };
+    std::fs::write(
+        target.join("studio-ext.json"),
+        serde_json::to_vec(&meta).unwrap(),
+    )
+    .map_err(|e| format!("write meta: {e}"))?;
+    list_installed(dir)?
+        .into_iter()
+        .find(|e| e.id == id && e.version == manifest.version)
+        .ok_or_else(|| "installed extension not listed after install".to_string())
+}
+
+/// Refuse a VSIX install of the integrated extension: its engine and view assets are the
+/// app's own (a `.ggx` of the id is fine — that is the bundled package's own shape).
+fn refuse_integrated(manifest: &VsixManifest) -> Result<(), String> {
+    let id = format!("{}.{}", manifest.publisher, manifest.name);
+    if id == GRAPH_PACKAGE_ID {
+        Err(format!(
+            "{id} is built into Git Graph Studio; its version follows the application"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Read and validate the `extension/package.json` a `.vsix` carries. The `main` entry point
+/// is required: the frame host only runs extensions with a compiled bundle.
+fn read_vsix_manifest(vsix: &Path) -> Result<VsixManifest, String> {
+    let file = std::fs::File::open(vsix).map_err(|e| format!("open {}: {e}", vsix.display()))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("read VSIX: {e}"))?;
+    let mut bytes = Vec::new();
+    zip.by_name("extension/package.json")
+        .map_err(|_| "not a VSIX: missing extension/package.json".to_string())?
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    let manifest: VsixManifest =
+        serde_json::from_slice(&bytes).map_err(|e| format!("invalid package.json: {e}"))?;
+    if manifest.name.is_empty() || manifest.publisher.is_empty() {
+        return Err("package.json needs a name and a publisher".to_string());
+    }
+    if manifest.main.as_deref().unwrap_or("").is_empty() {
+        return Err(format!(
+            "{} has no `main` entry point; Studio only hosts extensions with a compiled bundle",
+            manifest.name
+        ));
+    }
+    Ok(manifest)
+}
+
+/// Unpack a `.vsix`: everything under `extension/` lands at the install root; the OPC
+/// housekeeping files VSIXs carry at the archive root (`[Content_Types].xml`, …) are skipped.
+fn extract_vsix(vsix: &Path, target: &Path) -> Result<(), String> {
+    let file = std::fs::File::open(vsix).map_err(|e| format!("open {}: {e}", vsix.display()))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("read VSIX: {e}"))?;
+    std::fs::create_dir_all(target).map_err(|e| e.to_string())?;
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
+        if entry.is_dir() {
+            continue;
+        }
+        let Some(rel) = entry.name().strip_prefix("extension/") else {
+            continue;
+        };
+        let dest = safe_join(target, rel)?;
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        std::fs::write(&dest, &bytes).map_err(|e| format!("write {}: {e}", dest.display()))?;
+    }
+    Ok(())
+}
+
 fn uninstall(dir: &Path, ext_id: &str) -> Result<(), String> {
     let versions = find_installed(dir, ext_id)?;
     if versions.is_empty() {
@@ -1021,7 +1137,7 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct VsixManifest {
     name: String,
     publisher: String,
@@ -1030,6 +1146,10 @@ struct VsixManifest {
     description: Option<String>,
     #[serde(default)]
     icon: Option<String>,
+    /// The compiled entry point (`./out/extension.js`) — required of a `.vsix` (the frame
+    /// host runs it), meaningless to a `.ggx` (whose program is its backend and pages).
+    #[serde(default)]
+    main: Option<String>,
     #[serde(default, rename = "displayName")]
     display_name: Option<String>,
     #[serde(default)]
@@ -1049,7 +1169,7 @@ struct VsixManifest {
 }
 
 /// `repository` is either a URL string or `{ "type": "git", "url": "..." }`.
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[serde(untagged)]
 enum RepositoryField {
     Url(String),
@@ -1065,7 +1185,7 @@ impl RepositoryField {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct Engines {
     #[serde(rename = "vscode", default)]
     vscode: Option<String>,
@@ -1166,8 +1286,9 @@ mod ggx_tests {
     use std::io::Write;
 
     /// A `.ggx` with the header, a package.json and a web page (an extra data file,
-    /// optionally, to prove every entry lands).
-    fn make_ggx(dir: &Path, name: &str, publisher: &str, version: &str, with_data: bool, format: &str) -> PathBuf {
+    /// optionally, to prove every entry lands). Visible to `vsix_tests`, which builds a
+    /// same-id `.ggx`/`.vsix` pair to prove the two formats share one install slot.
+    pub(super) fn make_ggx(dir: &Path, name: &str, publisher: &str, version: &str, with_data: bool, format: &str) -> PathBuf {
         let ggx = dir.join(format!("{publisher}.{name}-{version}.ggx"));
         let file = std::fs::File::create(&ggx).unwrap();
         let mut zip = zip::ZipWriter::new(file);
@@ -1845,6 +1966,141 @@ mod integrated_tests {
         let list = with_builtin(list_installed(&exts).unwrap());
         assert_eq!(list[0].version, "1.0.26");
         uninstall(&exts, GRAPH_PACKAGE_ID).unwrap();
+        assert!(list_installed(&exts).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod vsix_tests {
+    use super::*;
+    use std::io::Write;
+
+    /// A `.vsix` carrying `extension/package.json` + a compiled entry bundle, plus the OPC
+    /// root files real packages ship (which the extractor must skip).
+    fn make_vsix(dir: &Path, name: &str, publisher: &str, version: &str) -> PathBuf {
+        let vsix = dir.join(format!("{publisher}.{name}-{version}.vsix"));
+        let file = std::fs::File::create(&vsix).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        let manifest = format!(
+            r#"{{"name":"{name}","publisher":"{publisher}","version":"{version}","main":"./out/extension.js","description":"test"}}"#
+        );
+        zip.start_file("extension/package.json", options).unwrap();
+        zip.write_all(manifest.as_bytes()).unwrap();
+        zip.start_file("extension/out/extension.js", options)
+            .unwrap();
+        zip.write_all(b"exports.activate = function() {};").unwrap();
+        zip.start_file("[Content_Types].xml", options).unwrap();
+        zip.write_all(b"<Types/>").unwrap();
+        zip.finish().unwrap();
+        vsix
+    }
+
+    #[test]
+    fn install_list_and_uninstall() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        let vsix = make_vsix(tmp.path(), "demo", "acme", "1.0.0");
+
+        let info = install_from_vsix_into(&exts, &vsix, false).unwrap();
+        assert_eq!(info.id, "acme.demo");
+        assert_eq!(info.version, "1.0.0");
+        assert_eq!(info.format, "vsix");
+        // The entry bundle lands at the install root, the OPC files do not.
+        assert!(Path::new(&info.path).join("out/extension.js").is_file());
+        assert!(!Path::new(&info.path).join("[Content_Types].xml").exists());
+
+        let list = list_installed(&exts).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!((list[0].id.as_str(), list[0].format.as_str()), ("acme.demo", "vsix"));
+
+        uninstall(&exts, "acme.demo").unwrap();
+        assert!(list_installed(&exts).unwrap().is_empty());
+    }
+
+    #[test]
+    fn upgrades_are_forward_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        assert!(install_from_vsix_into(&exts, &make_vsix(tmp.path(), "demo", "acme", "1.0.0"), false).is_ok());
+
+        let same = install_from_vsix_into(&exts, &make_vsix(tmp.path(), "demo", "acme", "1.0.0"), false);
+        assert!(same.unwrap_err().contains("already installed"));
+        let older = install_from_vsix_into(&exts, &make_vsix(tmp.path(), "demo", "acme", "0.9.0"), false);
+        assert!(older.unwrap_err().contains("is older"));
+
+        let newer = install_from_vsix_into(&exts, &make_vsix(tmp.path(), "demo", "acme", "1.1.0"), false);
+        assert_eq!(newer.unwrap().version, "1.1.0");
+        // The old directory is gone: one install per id.
+        assert!(list_installed(&exts).unwrap().len() == 1);
+    }
+
+    #[test]
+    fn a_newer_vsix_replaces_a_ggx_and_vice_versa() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        let ggx = super::ggx_tests::make_ggx(tmp.path(), "demo", "acme", "1.0.0", false, GGX_FORMAT);
+        assert!(install_from_ggx_into(&exts, &ggx, false).is_ok());
+
+        // The newer VSIX of the same id wins; the format follows the newer package.
+        let info = install_from_vsix_into(&exts, &make_vsix(tmp.path(), "demo", "acme", "1.1.0"), false).unwrap();
+        assert_eq!((info.version.as_str(), info.format.as_str()), ("1.1.0", "vsix"));
+        let list = list_installed(&exts).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].format, "vsix");
+    }
+
+    #[test]
+    fn not_a_vsix_or_missing_main_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plain = tmp.path().join("plain.zip");
+        std::fs::write(&plain, b"not a zip").unwrap();
+        assert!(read_vsix_manifest(&plain).unwrap_err().contains("read VSIX"));
+
+        // A zip without extension/package.json is not a VSIX.
+        let noext = tmp.path().join("noext.vsix");
+        let file = std::fs::File::create(&noext).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file(
+            "package.json",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(b"{}").unwrap();
+        zip.finish().unwrap();
+        assert!(read_vsix_manifest(&noext)
+            .unwrap_err()
+            .contains("not a VSIX"));
+
+        // A bundle-less manifest cannot run in the frame host.
+        let nobundle = tmp.path().join("nobundle.vsix");
+        let file = std::fs::File::create(&nobundle).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file(
+            "extension/package.json",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(br#"{"name":"n","publisher":"p","version":"1.0.0"}"#)
+            .unwrap();
+        zip.finish().unwrap();
+        assert!(read_vsix_manifest(&nobundle)
+            .unwrap_err()
+            .contains("no `main` entry point"));
+    }
+
+    #[test]
+    fn the_integrated_id_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        let vsix = make_vsix(tmp.path(), "git-graph-rs", "neophack", "99.0.0");
+        let err = install_from_vsix_into(&exts, &vsix, false).unwrap_err();
+        assert!(err.contains("built into Git Graph Studio"));
         assert!(list_installed(&exts).unwrap().is_empty());
     }
 }
