@@ -731,6 +731,13 @@ export class SourceControlView {
 				disabled: this.commands ? !this.commands.isEnabled(entry.command) : true,
 				run: () => void this.commands?.execute(entry.command)
 			}));
+		// Its git.pullpush entries (the Gerrit `refs/for/` push) sit in the Pull, Push submenu,
+		// the placement VS Code's own sync menu gives them.
+		const pullPushMenu: MenuEntry[] = resolvedMenuEntries('git.pullpush').map((entry) => ({
+			label: entry.label,
+			disabled: this.commands ? !this.commands.isEnabled(entry.command) : true,
+			run: () => void this.commands?.execute(entry.command)
+		}));
 		return [
 			toggleView,
 			{
@@ -756,7 +763,7 @@ export class SourceControlView {
 				{ label: 'Unstage All Changes', run: () => void this.run('git_unstage_all') },
 				{ label: 'Discard All Changes', run: () => void this.discardAll() }
 			] },
-			{ label: 'Pull, Push', submenu: [cmd('git.sync'), cmd('git.syncRebase'), 'separator', cmd('git.pull'), cmd('git.pullRebase'), cmd('git.pullFrom'), 'separator', cmd('git.push'), cmd('git.pushTo'), cmd('git.pushForce'), 'separator', cmd('git.fetch'), cmd('git.fetchPrune'), cmd('git.fetchFrom')] },
+			{ label: 'Pull, Push', submenu: [cmd('git.sync'), cmd('git.syncRebase'), 'separator', cmd('git.pull'), cmd('git.pullRebase'), cmd('git.pullFrom'), 'separator', cmd('git.push'), cmd('git.pushTo'), cmd('git.pushForce'), 'separator', cmd('git.fetch'), cmd('git.fetchPrune'), cmd('git.fetchFrom'), ...(pullPushMenu.length > 0 ? ['separator' as const, ...pullPushMenu] : [])] },
 			{ label: 'Branch', submenu: [cmd('git.merge'), cmd('git.rebase'), 'separator', cmd('git.branch'), cmd('git.branchFrom'), cmd('git.renameBranch'), cmd('git.deleteBranch')] },
 			{ label: 'Remote', submenu: [cmd('git.addRemote'), cmd('git.removeRemote')] },
 			{ label: 'Stash', submenu: [cmd('git.stash'), cmd('git.stashIncludeUntracked'), 'separator', cmd('git.stashApply'), cmd('git.stashApplyLatest'), cmd('git.stashPop'), cmd('git.stashPopLatest'), cmd('git.stashDrop')] },

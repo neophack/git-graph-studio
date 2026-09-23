@@ -25,7 +25,7 @@ export function save(key: string, value: unknown): void {
 export interface LayoutState {
 	sidebarWidth: number;
 	sidebarVisible: boolean;
-	activeView: 'explorer' | 'search' | 'scm' | 'extensions' | 'analysis';
+	activeView: string;
 	panelHeight: number;
 	panelVisible: boolean;
 }

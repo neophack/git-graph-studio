@@ -58,19 +58,26 @@ describe('source control view', () => {
 		// The "..." menu's Amend/Gerrit entries (and the Git Graph title button's Inline/More
 		// Actions placement) come from the extension's own manifest (contributions.ts), the
 		// same way the real Workbench wires the built-in git-graph-rs: the manifest ids
-		// dispatch to gitCommands.ts's working `gitGraph.*` implementations.
+		// dispatch to gitCommands.ts's working `gitGraph.*` implementations. The placements
+		// mirror the shipped manifest: three commands in scm/title, the Gerrit refs/for push
+		// in git.pullpush — the sync menu's push group, rendered in the Pull, Push submenu.
 		removeContributions('git-graph-rs');
-		const scmCommands: Record<string, { impl: string; title: string }> = {
-			'git-graph-rs.amendLastCommit': { impl: 'gitGraph.amendLastCommit', title: 'Amend Last Commit' },
-			'git-graph-rs.gerritFetchCommitMsgHook': { impl: 'gitGraph.gerritFetchCommitMsgHook', title: 'Fetch commit-msg Hook (Gerrit)' },
-			'git-graph-rs.resetCurrentBranchToRemote': { impl: 'gitGraph.resetCurrentBranchToRemote', title: 'Reset Current Branch to Remote (Soft)' },
-			'git-graph-rs.gerritPushRef': { impl: 'gitGraph.gerritPushRef', title: 'Push to Gerrit Ref for Current Branch (refs/for/...)' }
+		const scmCommands: Record<string, { impl: string; title: string; location: 'scm/title' | 'git.pullpush' }> = {
+			'git-graph-rs.amendLastCommit': { impl: 'gitGraph.amendLastCommit', title: 'Amend Last Commit', location: 'scm/title' },
+			'git-graph-rs.gerritFetchCommitMsgHook': { impl: 'gitGraph.gerritFetchCommitMsgHook', title: 'Fetch commit-msg Hook (Gerrit)', location: 'scm/title' },
+			'git-graph-rs.resetCurrentBranchToRemote': { impl: 'gitGraph.resetCurrentBranchToRemote', title: 'Reset Current Branch to Remote (Soft)', location: 'scm/title' },
+			'git-graph-rs.gerritPushRef': { impl: 'gitGraph.gerritPushRef', title: 'Push to Gerrit Ref for Current Branch (refs/for/...)', location: 'git.pullpush' }
 		};
 		applyContributions(
 			'git-graph-rs',
 			{
 				commands: Object.entries(scmCommands).map(([command, { title }]) => ({ command, title })),
-				menus: { 'scm/title': Object.keys(scmCommands).map((command, index) => ({ command, group: `git-graph-rs@${index}` })) }
+				menus: {
+					'scm/title': Object.keys(scmCommands)
+						.filter((command) => scmCommands[command]!.location === 'scm/title')
+						.map((command, index) => ({ command, group: `git-graph-rs@${index}` })),
+					'git.pullpush': [{ command: 'git-graph-rs.gerritPushRef', group: '3_push@5' }]
+				}
 			},
 			{},
 			(command) => void registry.execute(scmCommands[command]!.impl),
@@ -223,7 +230,13 @@ describe('source control view', () => {
 		expect(menuLabels()).toEqual([
 			'View as Tree', 'View & Sort', 'Pull', 'Push', 'Clone', 'Checkout to...', 'Fetch',
 			'Commit', 'Changes', 'Pull, Push', 'Branch', 'Remote', 'Stash', 'Tags', 'Show Git Output',
-			'Amend Last Commit', 'Fetch commit-msg Hook (Gerrit)', 'Reset Current Branch to Remote (Soft)', 'Push to Gerrit Ref for Current Branch (refs/for/...)'
+			'Amend Last Commit', 'Fetch commit-msg Hook (Gerrit)', 'Reset Current Branch to Remote (Soft)'
+		]);
+		hover(menuItem('Pull, Push'));
+		expect(menuLabels()).toEqual([
+			'Sync', 'Sync (Rebase)', 'Pull', 'Pull (Rebase)', 'Pull from...',
+			'Push', 'Push to...', 'Push (Force With Lease)', 'Fetch', 'Fetch (Prune)', 'Fetch From...',
+			'Push to Gerrit Ref for Current Branch (refs/for/...)'
 		]);
 		hover(menuItem('Branch'));
 		expect(menuLabels()).toEqual(['Merge Branch...', 'Rebase Branch...', 'Create Branch...', 'Create Branch From...', 'Rename Branch...', 'Delete Branch...']);

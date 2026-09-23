@@ -34,6 +34,9 @@ import { StatusBar } from './statusbar';
 import { TitleBar } from './titlebar';
 import { basename, busy, el, icon, notify, quickInput, quickPick, relativeTo, toPosix, tooltip, type MenuEntry, type QuickPickItem, type QuickPickSource } from './ui';
 import { FilePickSource } from './filePicker';
+import { ExtensionTreeView } from './treeView';
+import { extensionViewContributions } from './contributions';
+import { extFileDataUrl } from './extHost';
 
 type ViewId = 'explorer' | 'search' | 'scm' | 'extensions' | 'analysis';
 
@@ -92,6 +95,17 @@ export class Workbench {
 
 	private readonly views: Record<ViewId, HTMLElement> = { explorer: el('div', 'view'), search: el('div', 'view'), scm: el('div', 'view'), extensions: el('div', 'view'), analysis: el('div', 'view') };
 	private readonly activityItems: Record<string, HTMLElement> = {};
+	/** The spacer between the main activity items and the bottom ones — extension containers
+	 *  insert their icons before it, as VS Code appends them after Extensions. */
+	private activitySpacer: HTMLElement | null = null;
+	/** The extension-contributed containers (`contributes.viewsContainers`): sidebar view
+	 *  element + the view ids it stacks, keyed `ext-container:{extId}.{containerId}`. */
+	private readonly extContainers = new Map<string, { element: HTMLElement; viewIds: string[] }>();
+	/** The extension tree views by view id (their sections live in a container's element or
+	 *  a built-in sidebar view's tail). */
+	private readonly extTreeViews = new Map<string, ExtensionTreeView>();
+	/** Extension sections appended to a built-in sidebar view (explorer / scm targets). */
+	private readonly extBuiltinSections: HTMLElement[] = [];
 	readonly titleBar: TitleBar;
 	readonly explorer: Explorer;
 	readonly search: SearchView;
@@ -117,7 +131,7 @@ export class Workbench {
 	/** The `.ggs-workspace` file the roots came from (null for a plain folder): the session
 	 *  snapshot is keyed by it, so a workspace keeps its own tabs. */
 	private workspaceFile: string | null = null;
-	private activeView: ViewId = state.layout.activeView;
+	private activeView: string = state.layout.activeView;
 	private refreshTimer: number | null = null;
 
 	constructor() {
@@ -204,6 +218,10 @@ export class Workbench {
 			this.panel.show('output');
 			this.panel.output.showChannel(name);
 		};
+		// The extension-contributed sidebar surface: containers / views rebuild on every
+		// install / uninstall, and a view's `onDidChangeTreeData` re-fetches just that tree.
+		this.extensionHost.onViewsChanged = () => this.applyExtensionViews();
+		this.extensionHost.onTreeRefresh = (viewId) => this.extTreeViews.get(viewId)?.refresh();
 		this.graph = new GraphHost({
 			openFile: (path) => void this.editors.openFile(path),
 			openDiff: (diff) => void this.editors.openDiff({ kind: 'diff', ...diff }),
@@ -532,7 +550,8 @@ export class Workbench {
 		graphIcon.alt = '';
 		add('graph', graphIcon, 'Git Graph', () => this.openGraph());
 		add('extensions', icon('extensions'), 'Extensions (Ctrl+Shift+X)', () => this.toggleView('extensions'));
-		this.activityBar.appendChild(el('div', 'activity-spacer'));
+		this.activitySpacer = el('div', 'activity-spacer');
+		this.activityBar.appendChild(this.activitySpacer);
 		add('terminal', icon('terminal'), 'Terminal (Ctrl+`)', () => this.panel.toggle('terminal'));
 		add('open', icon('folder-opened'), 'Open Folder... (Ctrl+O)', () => void this.pickFolder());
 	}
@@ -551,7 +570,9 @@ export class Workbench {
 			state.saveLayout();
 		}
 		if (!state.layout.sidebarVisible) this.activityItems[this.activeView]?.classList.remove('active');
-		for (const id of ['explorer', 'search', 'scm', 'analysis', 'extensions']) this.activityItems[id]?.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
+		for (const [id, item] of Object.entries(this.activityItems)) {
+			if (id === 'explorer' || id === 'search' || id === 'scm' || id === 'analysis' || id === 'extensions' || this.isExtensionView(id)) item.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
+		}
 		this.installSash(this.sidebarSash, 'horizontal', (delta, start) => {
 			state.layout.sidebarWidth = Math.max(170, Math.min(window.innerWidth - 400, start + delta));
 			this.sidebar.style.width = `${state.layout.sidebarWidth}px`;
@@ -599,20 +620,42 @@ export class Workbench {
 		});
 	}
 
-	showView(view: ViewId, focus = true): void {
+	/** A built-in view id, or an extension container's key (`ext-container:{extId}.{id}`). */
+	private isExtensionView(view: string): boolean {
+		return view.startsWith('ext-container:');
+	}
+
+	showView(view: ViewId | string, focus = true): void {
+		// An extension container that no longer exists (uninstalled) falls back to Explorer.
+		if (this.isExtensionView(view) && !this.extContainers.has(view)) view = 'explorer';
 		this.activeView = view;
 		state.layout.activeView = view;
 		state.layout.sidebarVisible = true;
 		this.sidebar.hidden = false;
 		this.sidebarSash.hidden = false;
 		for (const [id, element] of Object.entries(this.views)) element.style.display = id === view ? 'flex' : 'none';
-		for (const [id, item] of Object.entries(this.activityItems)) if (id === 'explorer' || id === 'search' || id === 'scm' || id === 'analysis' || id === 'extensions') item.classList.toggle('active', id === view);
+		let visibleExtViews: string[] = [];
+		for (const [id, container] of this.extContainers) {
+			container.element.style.display = id === view ? 'flex' : 'none';
+			if (id === view) visibleExtViews = container.viewIds;
+		}
+		for (const [id, item] of Object.entries(this.activityItems)) if (id === 'explorer' || id === 'search' || id === 'scm' || id === 'analysis' || id === 'extensions' || this.isExtensionView(id)) item.classList.toggle('active', id === view);
+		// The views of the container just left stop being visible; the selected one's start.
+		for (const viewId of this.lastVisibleExtViews) this.extensionHost.noteViewVisible(viewId, false);
+		for (const viewId of visibleExtViews) this.extensionHost.noteViewVisible(viewId, true);
+		this.lastVisibleExtViews = visibleExtViews;
 		state.saveLayout();
 		if (view === 'scm') void this.scm.refresh();
 		if (view === 'extensions') void this.extensions.refresh();
 		if (view === 'analysis') void this.analysis.refresh();
-		if (focus) this.views[view].querySelector<HTMLElement>('[tabindex]')?.focus();
+		if (focus) {
+			const element = this.isExtensionView(view) ? this.extContainers.get(view)?.element : this.views[view as ViewId];
+			element?.querySelector<HTMLElement>('[tabindex]')?.focus();
+		}
 	}
+
+	/** The extension view ids the sidebar currently shows (visibility tracking across switches). */
+	private lastVisibleExtViews: string[] = [];
 
 	/** Zed's `query_suggestion` (SeedQuery::Always): the Search view opens with the active
 	 *  editor's single-line selection — else the word at its caret — as its query, so
@@ -630,11 +673,11 @@ export class Workbench {
 		if (word) this.search.seedQuery(view.state.sliceDoc(word.from, word.to));
 	}
 
-	get activeSidebarView(): ViewId {
+	get activeSidebarView(): string {
 		return this.activeView;
 	}
 
-	private toggleView(view: ViewId): void {
+	private toggleView(view: ViewId | string): void {
 		if (this.activeView === view && state.layout.sidebarVisible) this.toggleSidebar();
 		else this.showView(view);
 	}
@@ -643,8 +686,79 @@ export class Workbench {
 		state.layout.sidebarVisible = !state.layout.sidebarVisible;
 		this.sidebar.hidden = !state.layout.sidebarVisible;
 		this.sidebarSash.hidden = !state.layout.sidebarVisible;
-		for (const id of ['explorer', 'search', 'scm', 'analysis', 'extensions']) this.activityItems[id]?.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
+		for (const [id, item] of Object.entries(this.activityItems)) {
+			if (id === 'explorer' || id === 'search' || id === 'scm' || id === 'analysis' || id === 'extensions' || this.isExtensionView(id)) item.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
+		}
 		state.saveLayout();
+	}
+
+	/* ---------- Extension-contributed sidebar views (module 12) ---------- */
+
+	/** Rebuild the extension-contributed sidebar surface (`contributes.viewsContainers` +
+	 *  `views`): one activity-bar entry and stacked view sections per container, and views
+	 *  declared for a built-in container (explorer / scm) as sections at that view's tail.
+	 *  Idempotent — install and uninstall both end here. */
+	private applyExtensionViews(): void {
+		for (const id of Object.keys(this.activityItems)) {
+			if (!this.isExtensionView(id)) continue;
+			this.activityItems[id]!.remove();
+			delete this.activityItems[id];
+		}
+		for (const container of this.extContainers.values()) container.element.remove();
+		for (const section of this.extBuiltinSections) section.remove();
+		this.extContainers.clear();
+		this.extTreeViews.clear();
+		this.extBuiltinSections.length = 0;
+		if (this.isExtensionView(this.activeView)) this.activeView = 'explorer';
+
+		const makeSection = (viewId: string, name: string, into: HTMLElement): void => {
+			const section = el('div', 'ext-view-section');
+			const tree = new ExtensionTreeView(section, name, {
+				fetchChildren: (handle) => this.extensionHost.treeChildren(viewId, handle),
+				onCommand: (command, args) => void this.extensionHost.executeCommand(command, args)
+			});
+			this.extTreeViews.set(viewId, tree);
+			into.appendChild(section);
+			if (into !== this.sidebar) this.extBuiltinSections.push(section);
+		};
+
+		for (const contribution of extensionViewContributions()) {
+			for (const container of contribution.containers) {
+				const key = `ext-container:${contribution.extId}.${container.id}`;
+				const element = el('div', 'view ext-container-view');
+				element.style.display = 'none';
+				const viewIds: string[] = [];
+				for (const declared of contribution.views.filter((view) => view.container === container.id)) {
+					makeSection(declared.viewId, declared.name, element);
+					viewIds.push(declared.viewId);
+				}
+				this.sidebar.appendChild(element);
+				this.extContainers.set(key, { element, viewIds });
+				const item = el('div', 'activity-item', [icon('list-tree')]);
+				item.title = container.title;
+				item.setAttribute('role', 'button');
+				item.tabIndex = 0;
+				tooltip(item, () => container.title);
+				item.addEventListener('click', () => this.toggleView(key));
+				this.activityItems[key] = item;
+				this.activityBar.insertBefore(item, this.activitySpacer);
+				if (container.icon) {
+					void extFileDataUrl(contribution.extId, container.icon).then((url) => {
+						if (!url) return;
+						const image = el('img');
+						image.src = url;
+						image.alt = '';
+						item.replaceChildren(image);
+					});
+				}
+			}
+			// Views a manifest placed in a built-in container ride that sidebar view's tail —
+			// the Explorer / Source Control trees manage their own DOM, never the tail.
+			for (const declared of contribution.views) {
+				const host = declared.container === 'scm' ? this.views.scm : declared.container === 'explorer' ? this.views.explorer : null;
+				if (host) makeSection(declared.viewId, declared.name, host);
+			}
+		}
 	}
 
 	/** Open the Git Graph view - on `repo` (a repository header's graph icon in the Source
@@ -864,6 +978,8 @@ export class Workbench {
 			if (editor?.kind === 'file' && editor.path && state.layout.sidebarVisible && this.activeView === 'explorer') {
 				void this.explorer.reveal(editor.path);
 			}
+			// An editor of a declared language wakes the extensions listening for it.
+			if (editor?.kind === 'file' && editor.path) this.extensionHost.noteLanguageOpened(editor.path);
 		};
 		this.editors.onNavigationChange = () => this.titleBar.setNavigation(this.editors.canGoBack(), this.editors.canGoForward());
 		// The session snapshot (tabs, active tab, expanded folders) follows every change, coalesced.

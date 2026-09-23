@@ -339,14 +339,19 @@ window's thread), an install starts its backend at once, and the first command r
 lazy fallback. Multiple app instances are independent — each spawns and owns only its own
 backends (`GGS_INSTANCE_ID` marks the owner), every backend this instance spawned is stopped
 on exit, and an uninstall stops the backend before removing its directory (a directory
-another window's backend still holds refuses with a close-that-window hint).
+another window's backend still holds refuses with a close-that-window hint). A completed
+uninstall also writes an `<id>.uninstalled` marker beside the version directories: the boot
+pass's every-launch auto-install of the bundled git-graph-rs honours it, so a deliberate
+uninstall survives the next launch (any explicit install of the id clears the marker and
+revives the auto-upgrade).
 
 - Frontend: `src/extensionsPanel.ts`, `src/extHost.ts` (the frame host for VSIX/`.ggx`
   extensions, the page host, the process-command dispatch of `ggx/2`, and the host services
   behind the `vscode` API — webview panels, status bar items, output channels, progress
-  toasts, memento persistence) + `ext-host.html` +
+  toasts, memento persistence, tree views, activationEvents) + `ext-host.html` +
   `src/extHostBoot.ts` (one sandboxed frame per extension), `src/vscodeApi.ts` (the `vscode`
-  shim the frames require),
+  shim the frames require), `src/treeView.ts` (the generic tree view host — the sidebar
+  surface `contributes.views` declares and `createTreeView` feeds),
   `src/contributions.ts` (manifest contributions merged into the workbench); the surfaces it
   reaches into: `src/statusbar.ts` (extension items), `src/panel.ts` (the Output view's
   channel dropdown), `src/ui.ts` (`progressToast`)
@@ -354,7 +359,8 @@ another window's backend still holds refuses with a close-that-window hint).
   unpack (the VS Code compatibility path), the
   bundled-package registry — git-graph-rs and the GGX Demo, `ext_install_bundled`'s ids — the
   `ggx://` protocol that serves an installed package's files — composing the page bootstrap
-  into every HTML page), `src-tauri/src/ext_process.rs` (the process extension host: eager
+  into every HTML page, and `ext_fs` — the workspace-confined file services behind
+  `vscode.workspace.fs`, `findFiles` and `workspaceContains` activations), `src-tauri/src/ext_process.rs` (the process extension host: eager
   start at boot and install, lazy start on first command as the fallback, `initialize`
   handshake, `runCommand`, crash isolation, remembered status (start count, last error),
   stop on uninstall and at app exit), `src-tauri/src/ggx_protocol.rs` (the `ggs-ext/1` wire

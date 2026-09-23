@@ -11,6 +11,10 @@ const manifest: ManifestContributes = {
 	menus: {
 		'explorer/context': [{ command: 'git-graph-rs.filterByFile', when: 'resourceScheme == file' }],
 		'editor/context': [{ command: 'git-graph-rs.filterByFile' }, { command: 'git-graph-rs.hidden', when: 'false' }],
+		'git.pullpush': [
+			{ command: 'git-graph-rs.view', when: 'scmProvider == git', group: '3_push@5' },
+			{ command: 'git-graph-rs.filterByFile', when: 'scmProvider == svn' }
+		],
 		'commandPalette': [{ command: 'git-graph-rs.view', when: 'false' }]
 	},
 	keybindings: [{ command: 'git-graph-rs.view', key: 'ctrl+shift+g g', when: 'false' }, { command: 'git-graph-rs.filterByFile', key: 'ctrl+alt+f' }]
@@ -53,6 +57,9 @@ describe('manifest contributions', () => {
 		expect(editor.map((item) => item.label)).toEqual(['Filter Commits by File']); // when:"false" dropped
 		expect(menuSection('explorer/context')).toHaveLength(2); // separator + entry
 		expect(menuSection('editor/title/context')).toHaveLength(0);
+		// git.pullpush (the sync menu) resolves like any location, `when` narrowing included:
+		// the git provider's entry shows, the other provider's does not.
+		expect(menuItems('git.pullpush').map((item) => item.label)).toEqual(['View Git Graph']);
 	});
 
 	it('disables menu entries whose command cannot run', () => {

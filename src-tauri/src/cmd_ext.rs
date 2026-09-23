@@ -544,6 +544,264 @@ pub fn ext_read_file(
 }
 
 // ---------------------------------------------------------------------------
+// The extension filesystem (`vscode.workspace.fs`): workspace-confined file services
+// ---------------------------------------------------------------------------
+
+/// One workspace entry as `ext_fs`'s `list` answers it: name, kind and size, the shape the
+/// frontend's `workspace.fs.readDirectory` consumes.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtFsEntry {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: u8, // 1 file, 2 directory, 64 symlink — VS Code's FileType bits
+    pub size: u64,
+}
+
+/// Resolve `path` (absolute, or relative to one of `roots`) and confine it to `roots`: an
+/// extension's `workspace.fs` may only touch the open folders (VS Code's own limit).
+fn confine_to_roots(roots: &[String], path: &str) -> Result<PathBuf, String> {
+    if roots.is_empty() {
+        return Err("no workspace folder is open".to_owned());
+    }
+    let candidate = Path::new(path);
+    let resolved = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        Path::new(&roots[0]).join(candidate)
+    };
+    let canonical = std::fs::canonicalize(&resolved).or_else(|_| {
+        // A not-yet-existing target (a write, a mkdir): walk up to the nearest existing
+        // ancestor, canonicalize that, and re-join the missing tail — confinement holds for
+        // paths being created however many of their directories are still missing.
+        let mut ancestor = resolved
+            .parent()
+            .ok_or_else(|| format!("{} has no parent", resolved.display()))?
+            .to_path_buf();
+        let mut tail = std::ffi::OsString::from(
+            resolved
+                .file_name()
+                .ok_or_else(|| format!("{} has no file name", resolved.display()))?,
+        );
+        loop {
+            match std::fs::canonicalize(&ancestor) {
+                Ok(canonical) => return Ok::<PathBuf, String>(canonical.join(&tail)),
+                Err(_) => {
+                    let name = ancestor.file_name().ok_or_else(|| {
+                        format!("cannot resolve {}", resolved.display())
+                    })?;
+                    let Some(parent) = ancestor.parent() else {
+                        return Err(format!("cannot resolve {}", resolved.display()));
+                    };
+                    let mut next = std::ffi::OsString::from(name);
+                    next.push(std::path::MAIN_SEPARATOR.to_string());
+                    next.push(&tail);
+                    tail = next;
+                    ancestor = parent.to_path_buf();
+                }
+            }
+        }
+    })?;
+    for root in roots {
+        let Ok(root_canonical) = std::fs::canonicalize(root) else {
+            continue;
+        };
+        if canonical.starts_with(&root_canonical) {
+            return Ok(canonical);
+        }
+    }
+    Err(format!(
+        "{} is outside the workspace folders — vscode.workspace.fs is confined to them",
+        canonical.display()
+    ))
+}
+
+/// A tiny glob matcher (`find` / `findFiles`): `**` crosses directory boundaries, `*` within
+/// one segment, `?` one character. Classic backtracking, no regex dependency.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    fn segment(seg: &[char], s: &[char]) -> bool {
+        let (mut pi, mut si) = (0usize, 0usize);
+        let mut star: Option<(usize, usize)> = None;
+        while si < s.len() {
+            if pi < seg.len() && (seg[pi] == '?' || seg[pi] == s[si]) {
+                pi += 1;
+                si += 1;
+            } else if pi < seg.len() && seg[pi] == '*' {
+                star = Some((pi, si));
+                pi += 1;
+            } else if let Some((sp, ss)) = star {
+                pi = sp + 1;
+                si = ss + 1;
+                star = Some((sp, ss + 1));
+            } else {
+                return false;
+            }
+        }
+        while pi < seg.len() && seg[pi] == '*' {
+            pi += 1;
+        }
+        pi == seg.len()
+    }
+    fn walk(pat: &[&str], parts: &[&str]) -> bool {
+        match pat.first() {
+            None => parts.is_empty(),
+            Some(&"**") => (0..=parts.len()).any(|skip| walk(&pat[1..], &parts[skip..])),
+            Some(seg) => {
+                if parts.is_empty() {
+                    return false;
+                }
+                let seg: Vec<char> = seg.chars().collect();
+                let head: Vec<char> = parts[0].chars().collect();
+                segment(&seg, &head) && walk(&pat[1..], &parts[1..])
+            }
+        }
+    }
+    walk(
+        &pattern.split('/').collect::<Vec<_>>(),
+        &text.split('/').collect::<Vec<_>>(),
+    )
+}
+
+/// Collect the files under `dir` whose workspace-relative path matches `pattern` (bounded in
+/// depth and count — a `**` over a big tree must not walk forever).
+fn walk_find(dir: &Path, prefix: &str, pattern: &str, found: &mut Vec<String>, depth: usize) {
+    if depth > 12 || found.len() >= 2000 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == ".git" {
+            continue;
+        }
+        let relative = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            walk_find(&entry.path(), &relative, pattern, found, depth + 1);
+        } else if glob_match(pattern, &relative) {
+            found.push(relative);
+        }
+    }
+}
+
+/// `vscode.workspace.fs` over one command: every op confines its path to the workspace
+/// folders first (see [`confine_to_roots`]), so an extension can never reach outside them.
+/// `exists` / `find` answer matching paths (empty = none) — the activation pass uses them
+/// for `workspaceContains`, the frame's `workspace.fs` for everything else.
+#[tauri::command]
+pub fn ext_fs(
+    op: String,
+    roots: Vec<String>,
+    path: String,
+    to: Option<String>,
+    data: Option<String>,
+) -> Result<serde_json::Value, String> {
+    use base64::Engine;
+    ext_fs_core(&op, &roots, &path, to.as_deref(), data.as_deref(), |bytes| {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    })
+}
+
+/// The core the command delegates to (and the tests call with plain paths): byte answers
+/// pass through `encode` so the command layer can base64 them for the JSON bridge.
+fn ext_fs_core(
+    op: &str,
+    roots: &[String],
+    path: &str,
+    to: Option<&str>,
+    data: Option<&str>,
+    encode: impl Fn(&[u8]) -> String,
+) -> Result<serde_json::Value, String> {
+    // `find` takes a glob, not a path — it cannot be confined the way a file target is; its
+    // walk starts at the canonical roots and never leaves them.
+    if op == "find" {
+        let mut found = Vec::new();
+        for root in roots {
+            let Ok(root_canonical) = std::fs::canonicalize(root) else {
+                continue;
+            };
+            walk_find(&root_canonical, "", path, &mut found, 0);
+        }
+        return Ok(serde_json::to_value(found).expect("paths serialize"));
+    }
+    let target = confine_to_roots(roots, path)?;
+    match op {
+        "exists" => Ok(serde_json::json!(if target.exists() {
+            vec![path.to_owned()]
+        } else {
+            Vec::<String>::new()
+        })),
+        "read" => {
+            let bytes = std::fs::read(&target).map_err(|e| format!("read {}: {e}", target.display()))?;
+            Ok(serde_json::json!({ "data": encode(&bytes) }))
+        }
+        "write" => {
+            use base64::Engine;
+            let bytes = data
+                .and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
+                .ok_or_else(|| "write needs base64 data".to_owned())?;
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&target, bytes).map_err(|e| format!("write {}: {e}", target.display()))?;
+            Ok(serde_json::json!(()))
+        }
+        "list" => {
+            let mut entries = Vec::new();
+            for entry in std::fs::read_dir(&target).map_err(|e| format!("read {}: {e}", target.display()))? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                let meta = entry.metadata().map_err(|e| e.to_string())?;
+                let kind = if meta.is_dir() { 2 } else if entry.path().is_symlink() { 64 } else { 1 };
+                entries.push(ExtFsEntry {
+                    name: entry.file_name().to_string_lossy().into_owned(),
+                    kind,
+                    size: meta.len(),
+                });
+            }
+            entries.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(serde_json::to_value(entries).expect("entries serialize"))
+        }
+        "stat" => {
+            let meta = std::fs::metadata(&target).map_err(|e| format!("stat {}: {e}", target.display()))?;
+            Ok(serde_json::json!({
+                "type": if meta.is_dir() { 2 } else { 1 },
+                "size": meta.len(),
+                "mtime": meta
+                    .modified()
+                    .ok()
+                    .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0)
+            }))
+        }
+        "mkdir" => {
+            std::fs::create_dir_all(&target).map_err(|e| format!("mkdir {}: {e}", target.display()))?;
+            Ok(serde_json::json!(()))
+        }
+        "delete" => {
+            if target.is_dir() {
+                std::fs::remove_dir_all(&target).map_err(|e| format!("delete {}: {e}", target.display()))?;
+            } else {
+                std::fs::remove_file(&target).map_err(|e| format!("delete {}: {e}", target.display()))?;
+            }
+            Ok(serde_json::json!(()))
+        }
+        "rename" => {
+            let to = to.ok_or_else(|| "rename needs a destination".to_owned())?;
+            let destination = confine_to_roots(roots, to)?;
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::rename(&target, &destination).map_err(|e| format!("rename: {e}"))?;
+            Ok(serde_json::json!(()))
+        }
+        _ => Err(format!("unknown ext_fs op {op}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Core logic (dir-based, so the unit tests run without a Tauri app handle)
 // ---------------------------------------------------------------------------
 
@@ -733,6 +991,8 @@ pub fn install_from_ggx_into(
         serde_json::to_vec(&meta).unwrap(),
     )
     .map_err(|e| format!("write meta: {e}"))?;
+    // An explicit install revives the boot pass's auto-install (upgrade) pass for this id.
+    let _ = std::fs::remove_file(uninstall_marker(dir, &id));
     list_installed(dir)?
         .into_iter()
         .find(|e| e.id == id && e.version == manifest.version)
@@ -793,6 +1053,8 @@ fn install_from_vsix_into(dir: &Path, vsix: &Path, builtin: bool) -> Result<ExtI
         serde_json::to_vec(&meta).unwrap(),
     )
     .map_err(|e| format!("write meta: {e}"))?;
+    // An explicit install revives the boot pass's auto-install (upgrade) pass for this id.
+    let _ = std::fs::remove_file(uninstall_marker(dir, &id));
     list_installed(dir)?
         .into_iter()
         .find(|e| e.id == id && e.version == manifest.version)
@@ -866,7 +1128,7 @@ fn uninstall(dir: &Path, ext_id: &str) -> Result<(), String> {
     if versions.is_empty() {
         return Err(format!("{ext_id} is not installed"));
     }
-    for version in versions {
+    for version in &versions {
         let path = dir.join(format!("{ext_id}-{version}"));
         let meta: StudioExtMeta = std::fs::read_to_string(path.join("studio-ext.json"))
             .ok()
@@ -882,7 +1144,29 @@ fn uninstall(dir: &Path, ext_id: &str) -> Result<(), String> {
         }
         std::fs::remove_dir_all(&path).map_err(|e| removal_error(&path, &e))?;
     }
+    // A completed uninstall is a decision about the package, not a cache to refill at the
+    // next launch: the marker keeps the boot pass's bundled auto-install from silently
+    // reinstalling it (`deliberately_uninstalled`); any explicit install of the id clears it.
+    std::fs::write(
+        uninstall_marker(dir, ext_id),
+        format!("{}\n", versions.last().map(String::as_str).unwrap_or("")),
+    )
+    .map_err(|e| format!("write the uninstall marker: {e}"))?;
     Ok(())
+}
+
+/// The deliberate-uninstall marker of `ext_id`: a `<id>.uninstalled` file beside the version
+/// directories (never mistaken for one — those carry the `<id>-<version>` shape), holding the
+/// uninstalled version for anyone reading the store by hand.
+fn uninstall_marker(dir: &Path, ext_id: &str) -> PathBuf {
+    dir.join(format!("{ext_id}.uninstalled"))
+}
+
+/// Whether `ext_id` was deliberately uninstalled and the boot pass's bundled auto-install
+/// must leave the store alone. An explicit install of the id — the Extensions view's
+/// one-click Install included — clears the marker and flips this back.
+pub fn deliberately_uninstalled(dir: &Path, ext_id: &str) -> bool {
+    uninstall_marker(dir, ext_id).exists()
 }
 
 /// The remove error, with the multi-instance hint when the directory is held: another GGS
@@ -1380,6 +1664,35 @@ mod ggx_tests {
 
         let err = uninstall(&exts, "neophack.graph").unwrap_err();
         assert!(err.contains("cannot be uninstalled"), "{err}");
+    }
+
+    /// The uninstall marker is the boot pass's auto-install handbrake: a completed uninstall
+    /// writes it (and nothing else sees it — the listing stays empty), a refused builtin
+    /// uninstall does not, and the next explicit install clears it.
+    #[test]
+    fn uninstall_marker_gates_the_boot_auto_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        let ggx = make_ggx(tmp.path(), "demo", "acme", "1.0.0", false, GGX_FORMAT);
+        install_from_ggx_into(&exts, &ggx, false).unwrap();
+        assert!(!deliberately_uninstalled(&exts, "acme.demo"));
+
+        uninstall(&exts, "acme.demo").unwrap();
+        assert!(deliberately_uninstalled(&exts, "acme.demo"));
+        // The marker is a plain file beside the version directories, never an install itself.
+        assert!(list_installed(&exts).unwrap().is_empty());
+        assert!(find_installed(&exts, "acme.demo").unwrap().is_empty());
+
+        // The way back: installing again revives the boot pass's upgrade auto-install.
+        install_from_ggx_into(&exts, &ggx, false).unwrap();
+        assert!(!deliberately_uninstalled(&exts, "acme.demo"));
+
+        // A refused (built-in) uninstall leaves no marker behind.
+        let builtin = make_ggx(tmp.path(), "graph", "neophack", "1.0.23", false, GGX_FORMAT);
+        install_from_ggx_into(&exts, &builtin, true).unwrap();
+        assert!(uninstall(&exts, "neophack.graph").is_err());
+        assert!(!deliberately_uninstalled(&exts, "neophack.graph"));
     }
 
     #[test]
@@ -2102,5 +2415,104 @@ mod vsix_tests {
         let err = install_from_vsix_into(&exts, &vsix, false).unwrap_err();
         assert!(err.contains("built into Git Graph Studio"));
         assert!(list_installed(&exts).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod ext_fs_tests {
+    use super::*;
+
+    fn roots(tmp: &tempfile::TempDir) -> Vec<String> {
+        vec![tmp.path().join("ws").to_string_lossy().into_owned()]
+    }
+
+    #[test]
+    fn paths_are_confined_to_the_workspace_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("ws")).unwrap();
+        let roots = roots(&tmp);
+        // A relative path resolves against the first root.
+        std::fs::write(tmp.path().join("ws/file.txt"), b"x").unwrap();
+        let resolved = confine_to_roots(&roots, "file.txt").unwrap();
+        assert!(resolved.ends_with("file.txt"));
+        // An absolute path outside the roots is refused.
+        let outside = tmp.path().join("outside.txt");
+        std::fs::write(&outside, b"x").unwrap();
+        assert!(confine_to_roots(&roots, &outside.to_string_lossy()).is_err());
+        // A `..` escape canonicalizes outside too.
+        assert!(confine_to_roots(&roots, "../ws2/file").is_err());
+        // A not-yet-existing file inside is fine (its parent canonicalizes).
+        assert!(confine_to_roots(&roots, "newdir/newfile.txt").is_ok());
+    }
+
+    #[test]
+    fn read_write_list_stat_mkdir_delete_rename_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("ws")).unwrap();
+        let roots = roots(&tmp);
+        let encode = |bytes: &[u8]| {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        };
+
+        ext_fs_core("write", &roots, "notes/a.txt", None, Some(&encode(b"hello")), encode)
+            .unwrap();
+        let read = ext_fs_core("read", &roots, "notes/a.txt", None, None, encode).unwrap();
+        assert_eq!(read["data"], encode(b"hello"));
+
+        ext_fs_core("mkdir", &roots, "empty", None, None, encode).unwrap();
+        let list = ext_fs_core("list", &roots, ".", None, None, encode).unwrap();
+        let names: Vec<&str> = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"notes") && names.contains(&"empty"));
+
+        let stat = ext_fs_core("stat", &roots, "notes/a.txt", None, None, encode).unwrap();
+        assert_eq!(stat["type"], 1);
+        assert_eq!(stat["size"], 5);
+
+        ext_fs_core("rename", &roots, "notes/a.txt", Some("notes/b.txt"), None, encode)
+            .unwrap();
+        assert!(ext_fs_core("exists", &roots, "notes/a.txt", None, None, encode).unwrap()[0]
+            .is_null());
+        let found = ext_fs_core("exists", &roots, "notes/b.txt", None, None, encode).unwrap();
+        assert_eq!(found.as_array().unwrap().len(), 1);
+
+        ext_fs_core("delete", &roots, "notes", None, None, encode).unwrap();
+        assert!(!tmp.path().join("ws/notes").exists());
+    }
+
+    #[test]
+    fn find_walks_the_globs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(ws.join("src/deep")).unwrap();
+        std::fs::create_dir_all(ws.join(".git")).unwrap();
+        std::fs::write(ws.join("src/main.rs"), b"").unwrap();
+        std::fs::write(ws.join("src/deep/util.rs"), b"").unwrap();
+        std::fs::write(ws.join(".git/config"), b"").unwrap();
+        let roots = roots(&tmp);
+        let encode = |_: &[u8]| String::new();
+
+        let all_rs = ext_fs_core("find", &roots, "**/*.rs", None, None, encode).unwrap();
+        let list = all_rs.as_array().unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().all(|p| p.as_str().unwrap().ends_with(".rs")));
+
+        let top = ext_fs_core("find", &roots, "src/*.rs", None, None, encode).unwrap();
+        assert_eq!(top.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_glob_matcher_understands_double_star_and_question() {
+        assert!(glob_match("**/*.rs", "src/main.rs"));
+        assert!(glob_match("**/*.rs", "main.rs"));
+        assert!(!glob_match("src/*.rs", "src/deep/util.rs"));
+        assert!(glob_match("a?c", "abc"));
+        assert!(!glob_match("a?c", "abbc"));
+        assert!(glob_match("*.json", "package.json"));
     }
 }

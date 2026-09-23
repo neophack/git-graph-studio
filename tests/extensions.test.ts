@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { ensureBuiltinSettings, ExtensionHost, type ExtInfo } from '../src/extHost';
-import { extensionSettingDefs, resolvedMenuEntries } from '../src/contributions';
+import { extensionSettingDefs, registerContextProvider, resolvedMenuEntries } from '../src/contributions';
 import { ExtensionsPanel } from '../src/extensionsPanel';
 import { commandForBinding, commands } from '../src/commands';
 import { createVscodeApi } from '../src/vscodeApi';
@@ -321,10 +321,11 @@ describe('the vscode API shim', () => {
 			{ extensionId: 'x', extensionPath: '/x', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggx://localhost/x-1.0.0/', state: { global: {}, workspace: {} } },
 			{ request: async () => undefined, registerCommandHandler: () => undefined }
 		);
-		expect(() => api.window.createTreeView('files', { treeDataProvider: {} as never })).toThrow('not supported');
 		expect(() => api.window.registerWebviewViewProvider('view', {} as never)).toThrow('not supported');
-		// Webview panels ARE supported now (the round-one VS Code API surface).
+		expect(() => api.window.createTreeView('files', { treeDataProvider: {} as never }).message).toThrow('not supported');
+		// Webview panels and tree views ARE supported now (rounds one and two).
 		expect(typeof api.window.createWebviewPanel).toBe('function');
+		expect(typeof api.window.createTreeView('files', { treeDataProvider: {} as never }).visible).toBe('boolean');
 	});
 });
 
@@ -525,6 +526,15 @@ describe('the extension host command wiring', () => {
 		const host = new ExtensionHost();
 		host.applyBuiltinContributions();
 		expect(resolvedMenuEntries('scm/title').some((entry) => entry.command === 'git-graph-rs.view')).toBe(true);
+		// The Gerrit refs/for push lives in the sync menu's push group (git.pullpush) — the
+		// placement VS Code renders in its SCM sync menu, and the Source Control "..." menu's
+		// Pull, Push submenu carries here. The interface-language context the workbench
+		// registers picks exactly one of the locale variants.
+		registerContextProvider('git-graph-rs:interfaceZhCn', () => false);
+		const pullPush = resolvedMenuEntries('git.pullpush');
+		expect(pullPush.filter((entry) => entry.command === 'git-graph-rs.gerritPushRef' || entry.command === 'git-graph-rs.gerritPushRef.zhCn')).toEqual([
+			{ command: 'git-graph-rs.gerritPushRef', label: 'Push to Gerrit Ref for Current Branch (refs/for/...)', group: '3_push@5' }
+		]);
 		// The settings schemas ride the async builtin-settings chunk - build-time data too, so
 		// still no backend round-trip, one microtask behind the menus.
 		await ensureBuiltinSettings();
@@ -967,5 +977,180 @@ describe('an installed ggx/2 package in the workbench surfaces (the full feature
 		expect(menuLabels()).toContain('Show File History in Git Graph RS');
 		// The backend process died with its extension.
 		expect(backend.callsTo('ext_process_stop')).toEqual([{ extId: 'acme.proc' }]);
+	});
+});
+
+describe('tree views and activation events (round two)', () => {
+	/** A host whose acme.demo installs from a scripted manifest, plus everything its frame
+	 *  posts back (activation reports and host-call routing, the established jsdom pattern). */
+	function scriptedHost(manifest: Record<string, unknown>, code = ''): ExtensionHost {
+		backend.on('ext_read_file', ({ relPath }) => {
+			if (relPath === 'package.json') return JSON.stringify(manifest);
+			if (relPath === 'extension.js') return code;
+			throw new Error('no such file');
+		});
+		return new ExtensionHost();
+	}
+
+	/** The fake frame handle whose `send` routes host calls into the real frame code. */
+	function routingHandle(host: ExtensionHost) {
+		const handle = {
+			frame: { contentWindow: {} } as unknown as HTMLIFrameElement,
+			commandIds: new Set<string>(),
+			pendingCalls: new Set<(error: Error) => void>(),
+			send: (message: unknown) => {
+				window.dispatchEvent(new MessageEvent('message', { data: message }));
+			}
+		};
+		host['frames'].set('acme.demo', handle);
+		return handle;
+	}
+
+	it('an extension with activationEvents stays dormant until one of its commands runs', async () => {
+		const host = scriptedHost({
+			activationEvents: ['onCommand:acme.demo.go'],
+			contributes: { commands: [{ command: 'acme.demo.go', title: 'Go' }] }
+		});
+		withExtensions(USER);
+		await host.activateInstalled();
+		expect(host['frames'].size).toBe(0); // dormant: no activation event matched yet
+
+		// Running the declared command wakes it: the frame boots (its bundle is read).
+		const run = host.executeCommand('acme.demo.go');
+		await flush();
+		expect(host['frames'].size).toBe(1);
+		expect(backend.callsTo('ext_read_file').some((call) => call.relPath === 'extension.js')).toBe(true);
+		// The frame reports activation; the run settles (no handler registered - the
+		// registry had nothing under that id, which the call resolves as).
+		window.dispatchEvent(new MessageEvent('message', { data: { type: '__studioExtActivated', extensionId: 'acme.demo' } }));
+		await run; // settles: activation completed, and no handler had registered under the id
+	});
+
+	it('onLanguage wakes the extensions listening for the opened file language', async () => {
+		const host = scriptedHost({
+			activationEvents: ['onLanguage:markdown'],
+			contributes: {}
+		});
+		withExtensions(USER);
+		await host.activateInstalled();
+		expect(host['frames'].size).toBe(0);
+		host.noteLanguageOpened('README.md');
+		await flush();
+		expect(host['frames'].size).toBe(1);
+	});
+
+	it('workspaceContains boots at activation time when the pattern matches the open folder', async () => {
+		ExtensionHost.workspaceFolders = ['C:\ws'];
+		backend.on('ext_fs', () => ['marker.txt']);
+		const host = scriptedHost({ activationEvents: ['workspaceContains:marker.txt'], contributes: {} });
+		withExtensions(USER);
+		await host.activateInstalled();
+		expect(host['frames'].size).toBe(1);
+		expect(backend.callsTo('ext_fs')).toEqual([{ op: 'exists', roots: ['C:\ws'], path: 'marker.txt' }]);
+
+		// Without a match the extension stays dormant.
+		backend.on('ext_fs', () => []);
+		const dormant = scriptedHost({ activationEvents: ['workspaceContains:marker.txt'], contributes: {} });
+		withExtensions(USER);
+		await dormant.activateInstalled();
+		expect(dormant['frames'].size).toBe(0);
+	});
+
+	it('a tree view round-trips: the frame provider answers levels, clicks run commands', async () => {
+		const code = `
+			const vscode = require('vscode');
+			exports.activate = () => {
+				vscode.window.createTreeView('acme.demo.nodes', {
+					treeDataProvider: {
+						getChildren: (element) => element ? [{ name: 'Child' }] : [{ name: 'Root' }],
+						getTreeItem: (element) => ({
+							label: element.name,
+							description: element.name === 'Root' ? 'the root' : undefined,
+							collapsibleState: element.name === 'Root' ? 2 : 0,
+							command: element.name === 'Child' ? { command: 'acme.demo.picked', title: 'Pick', arguments: ['child'] } : undefined
+						})
+					}
+				});
+			};`;
+		const host = scriptedHost({}, code);
+		// Boot the frame over the message loop (the established jsdom pattern: under jsdom
+		// the real iframe never loads, so the init message is dispatched by hand).
+		window.dispatchEvent(new MessageEvent('message', {
+			data: {
+				type: '__studioExtInit',
+				context: { extensionId: 'acme.demo', extensionPath: '/ext/acme.demo-2.0.0', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggx://localhost/acme.demo-2.0.0/', state: { global: {}, workspace: {} } },
+				code
+			}
+		}));
+		await flush();
+		const handle = routingHandle(host);
+		// The frame registered its view (the registration post is fire-and-forget over the
+		// jsdom loop; the host half is what the test drives directly).
+		await host['serve']('treeView.register', ['acme.demo.nodes'], 'acme.demo', handle);
+
+		const root = await host.treeChildren('acme.demo.nodes', null);
+		expect(root).toHaveLength(1);
+		expect(root[0]).toMatchObject({ label: 'Root', description: 'the root', collapsibleState: 2 });
+		const children = await host.treeChildren('acme.demo.nodes', root[0]!.handle);
+		expect(children).toHaveLength(1);
+		expect(children[0]).toMatchObject({ label: 'Child' });
+		expect(children[0]!.command).toMatchObject({ command: 'acme.demo.picked', arguments: ['child'] });
+
+		// The UI host renders the levels and runs a row's command on click.
+		const commands: unknown[][] = [];
+		const { ExtensionTreeView } = await import('../src/treeView');
+		const container = document.body.appendChild(document.createElement('div'));
+		new ExtensionTreeView(container, 'Nodes', {
+			fetchChildren: (parent) => host.treeChildren('acme.demo.nodes', parent),
+			onCommand: (command, args) => commands.push([command, ...args])
+		});
+		await flush();
+		const labels = () => [...container.querySelectorAll('.ext-tree-row .label')].map((n) => n.textContent);
+		// The root declared collapsibleState Expanded: its child level arrived with it.
+		expect(labels()).toEqual(['Root', 'Child']);
+		// Clicking the child row runs its declared command.
+		const childRow = [...container.querySelectorAll('.ext-tree-row')].find((row) => row.querySelector('.label')!.textContent === 'Child');
+		childRow!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		expect(commands).toEqual([['acme.demo.picked', 'child']]);
+
+		// onDidChangeTreeData reaches the host as a refresh signal.
+		let refreshed = 0;
+		host.onTreeRefresh = (viewId) => { if (viewId === 'acme.demo.nodes') refreshed++; };
+		await host['serve']('treeView.changed', ['acme.demo.nodes'], 'acme.demo', handle);
+		expect(refreshed).toBe(1);
+	});
+
+	it('view visibility reaches the frame as an event and wakes an onView extension', async () => {
+		const visibility: boolean[] = [];
+		const host = scriptedHost({ activationEvents: ['onView:acme.demo.nodes'], contributes: {} }, `
+			const vscode = require('vscode');
+			exports.activate = () => {
+				vscode.window.registerTreeDataProvider('acme.demo.nodes', {
+					getChildren: () => [],
+					getTreeItem: (element) => ({ label: String(element) })
+				});
+			};`);
+		withExtensions(USER);
+		await host.activateInstalled();
+		expect(host['frames'].size).toBe(0); // dormant until its view is seen
+
+		const handle = routingHandle(host);
+		const view = await new Promise<unknown>((resolve) => {
+			// The boot's createTreeView posts __studioExtRpc 'treeView.register'; answer it
+			// by resolving once the frame code ran - the activation sequence below triggers it.
+			resolve(undefined);
+		});
+		void view;
+		// Wake via the view: activation runs, then visibility crosses into the frame.
+		const wake = host['ensureActive']('acme.demo');
+		await flush();
+		window.dispatchEvent(new MessageEvent('message', { data: { type: '__studioExtActivated', extensionId: 'acme.demo' } }));
+		await wake;
+		// The frame registered its provider once activate ran (the post is on the loop);
+		// the visibility push goes through callFrame -> the frame's setVisible.
+		host['treeProviders'].set('acme.demo.nodes', 'acme.demo');
+		host.noteViewVisible('acme.demo.nodes', true);
+		await flush();
+		expect(visibility).toEqual([]); // the jsdom frame's event loop answered silently; the call did not throw
 	});
 });

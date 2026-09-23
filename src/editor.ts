@@ -2047,17 +2047,24 @@ export class EditorGroup {
 
 	/** The Extensions view's detail page (module 12): a package's facts and README in an
 	 *  editor tab — VS Code's extension editor. One tab per extension (the input id is the
-	 *  extension id), so a second open focuses the tab already showing it. */
+	 *  extension id), so a second open focuses the tab already showing it instead of
+	 *  re-reading the README into a pane that `add` would discard. The pane is a document
+	 *  host, not a frame host: it is the page's scroll container (shell.css). */
 	openExtDetail(
 		input: Extract<EditorInput, { kind: 'extdetail' }>,
 		mount: (pane: HTMLElement) => (() => void) | void
 	): void {
+		const existing = this.open.find((editor) => editor.id === input.id);
+		if (existing) {
+			this.activate(existing);
+			return;
+		}
 		const editor: Editor = {
 			input,
 			id: input.id,
 			label: input.title,
 			iconClass: 'extensions',
-			pane: el('div', 'editor-pane ext-page'),
+			pane: el('div', 'editor-pane ext-detail-pane'),
 			dirty: false
 		};
 		const dispose = mount(editor.pane);

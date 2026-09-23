@@ -71,6 +71,13 @@ function handleCall(method: string, args: unknown[]): unknown {
 		module_?.exports.deactivate?.();
 		return undefined;
 	}
+	// The tree views: one level's children (serialized in-frame through getTreeItem), and
+	// the visibility pushes the sidebar's view switching produces.
+	if (method === 'tree.getChildren') return api_?.__serveTree.children(args[0] as string, args[1] as string | null) ?? [];
+	if (method === 'treeView.setVisible') {
+		api_?.__serveTree.setVisible(args[0] as string, args[1] as boolean);
+		return undefined;
+	}
 	throw new Error(`unknown extension host call: ${method}`);
 }
 

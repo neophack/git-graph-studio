@@ -294,6 +294,11 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 .editor-pane[hidden] { display: none; }
 /* An extension page (module 12): the ggx package's own document, sandboxed, filling its tab. */
 .editor-pane.ext-page { display: block; }
+/* The extension detail page is a document, not a frame: it grows past the tab's height, so the
+   pane is its scroll container (the markdown-preview pattern). A scroll container also clips,
+   which is what keeps the README inside the editor area instead of painting over the status
+   bar — .editors itself does not clip. */
+.editor-pane.ext-detail-pane { display: block; overflow: auto; }
 .ext-page-frame { width: 100%; height: 100%; border: 0; display: block; background: var(--vscode-editor-background, #1e1e1e); }
 .editor-pane .cm-editor { flex: 1; min-height: 0; height: 100%; }
 .editor-pane .cm-merge-view { display: flex; flex: 1; min-height: 0; }
@@ -484,6 +489,17 @@ body.resizing iframe { pointer-events: none; }
 .progress-track { width: 100%; height: 3px; border-radius: 2px; overflow: hidden; margin-top: 6px; background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 15%, transparent); }
 .progress-track i { display: block; height: 100%; width: 0%; background: var(--vscode-progressBar-background, #0e70c0); transition: width 0.2s ease; }
 .progress-track i.indeterminate { width: 40%; transition: none; animation: search-progress-slide 1.3s ease-in-out infinite; }
+/* An extension-contributed tree view (`contributes.views` + createTreeView): rows with a
+ * twistie, a dimmed description and a lazy-children click, stacked in a sidebar section. */
+.ext-view-section { display: flex; flex-direction: column; min-height: 0; }
+.ext-tree .ext-tree-row { display: flex; align-items: center; gap: 4px; height: 22px; line-height: 22px; white-space: nowrap; cursor: pointer; user-select: none; }
+.ext-tree .ext-tree-row:hover { background: var(--vscode-list-hoverBackground); }
+.ext-tree .ext-tree-row .label { overflow: hidden; text-overflow: ellipsis; }
+.ext-tree .ext-tree-row .description { color: var(--vscode-list-deemphasizedForeground, var(--vscode-descriptionForeground, #8b8b8b)); font-size: 12px; margin-left: 6px; overflow: hidden; text-overflow: ellipsis; }
+.ext-tree .ext-tree-row .twistie-placeholder { width: 16px; display: inline-block; }
+.ext-tree .ext-tree-icon { width: 16px; height: 16px; flex: none; }
+.ext-tree .empty { color: var(--vscode-list-deemphasizedForeground, var(--vscode-descriptionForeground, #8b8b8b)); padding: 4px 8px; margin: 0; }
+.ext-container-view { flex-direction: column; overflow: auto; }
 .status-left { display: flex; align-items: center; padding-left: 4px; overflow: hidden; }
 .status-right { display: flex; align-items: center; margin-left: auto; padding-right: 4px; }
 

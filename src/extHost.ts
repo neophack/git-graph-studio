@@ -18,11 +18,13 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { builtinContributions } from 'virtual:builtin-contributions';
 
 import { commands } from './commands';
-import { applyContributions, applyExtensionSettings, declaredCommand, localize, removeContributions, type ManifestContributes } from './contributions';
+import { applyContributions, applyExtensionSettings, declaredCommand, extensionViewContributions, localize, removeContributions, type ManifestContributes } from './contributions';
 import { locale, registerZhCnText, t } from './i18n';
 import { loadBuiltinSettings } from './lazy';
+import { languageOf } from './snippetRegistry';
 import * as state from './state';
 import { notify, progressToast, quickInput, type ProgressToast } from './ui';
+import type { SerializedTreeItem } from './treeView';
 
 export interface ExtInfo {
 	id: string;
@@ -190,6 +192,35 @@ export interface ExtStatusBarItem {
 	visible: boolean;
 }
 
+/** What wakes an extension, parsed from `activationEvents`: an extension with no events (or
+ *  only `onStartupFinished` / `*`) starts eagerly at boot; the others activate when one of
+ *  their declared commands / languages / views is first touched, or when a `workspaceContains`
+ *  pattern matches the open folder. */
+export interface ActivationPolicy {
+	eager: boolean;
+	commands: Set<string>;
+	languages: Set<string>;
+	views: Set<string>;
+	workspaceContains: string[];
+}
+
+/** Parse VS Code's `activationEvents` into the policy the host activates by. Events this
+ *  model does not carry (`onFileSystem:`, `onUri`, `onDebugResolve`, …) leave the extension
+ *  eager — never un-activatable. */
+function parseActivationPolicy(events: string[] | undefined): ActivationPolicy {
+	const policy: ActivationPolicy = { eager: true, commands: new Set(), languages: new Set(), views: new Set(), workspaceContains: [] };
+	if (!events || events.length === 0) return policy;
+	policy.eager = false;
+	for (const event of events) {
+		if (event.startsWith('onCommand:')) policy.commands.add(event.slice('onCommand:'.length));
+		else if (event.startsWith('onLanguage:')) policy.languages.add(event.slice('onLanguage:'.length));
+		else if (event.startsWith('onView:')) policy.views.add(event.slice('onView:'.length));
+		else if (event.startsWith('workspaceContains:')) policy.workspaceContains.push(event.slice('workspaceContains:'.length));
+		else policy.eager = true; // `*`, onStartupFinished, and every event this host cannot observe
+	}
+	return policy;
+}
+
 /** The bootstrap composed into a webview panel's HTML: `acquireVsCodeApi()` — one per page,
  *  VS Code's own rule — whose `postMessage` reaches the owning extension frame, plus the
  *  message listener the host relays through. State stays inside the frame (as much of it as
@@ -291,6 +322,19 @@ export class ExtensionHost {
 	private readonly progress = new Map<number, ProgressToast>();
 	private nextProgressId = 1;
 
+	/** The tree views frame extensions registered (`createTreeView`), view id -> ext id. */
+	private readonly treeProviders = new Map<string, string>();
+	/** Workbench hooks: one view's data changed (re-fetch it), and the declared view set
+	 *  changed (install / uninstall — the workbench rebuilds its sidebar sections). */
+	onTreeRefresh: ((viewId: string) => void) | null = null;
+	onViewsChanged: (() => void) | null = null;
+	/** Activation policy per extension, parsed from its `activationEvents`. */
+	private readonly activationPolicies = new Map<string, ActivationPolicy>();
+	/** The activation pass of a lazily-woken extension, in flight (idempotency). */
+	private readonly pendingActivations = new Map<string, Promise<void>>();
+	/** Resolved when a frame reports `__studioExtActivated` (lazy activation waits for it). */
+	private readonly activationWaiters = new Map<string, () => void>();
+
 	/** Synchronously register the baked-in extensions' contributions (menus, commands,
 	 *  keybindings). The data comes from the build-time virtual module, so the workbench's
 	 *  first render already sees these menus - the async activateInstalled() pass skips them.
@@ -380,6 +424,11 @@ export class ExtensionHost {
 		for (const id of this.declaredCommandIds.get(extId) ?? []) unregisterCommand(id);
 		this.declaredCommandIds.delete(extId);
 		removeContributions(extId);
+		this.activationPolicies.delete(extId);
+		for (const [viewId, owner] of [...this.treeProviders]) {
+			if (owner === extId) this.treeProviders.delete(viewId);
+		}
+		this.onViewsChanged?.();
 	}
 
 	/** Activate every installed extension that the workbench does not host natively. */
@@ -405,26 +454,28 @@ export class ExtensionHost {
 		// Skipped for entries with nothing to boot: a `builtin`-format entry (an
 		// embedded-manifest offer — the integrated git-graph-rs without its package, the
 		// bundled sample) has no files on disk, and a ggx/2 process package's commands
-		// dispatch to its backend — its `package.json` is its whole program.
-		const toActivate = installed.filter(
-			(ext) =>
-				ext.format !== 'builtin' &&
-				!this.processBacked.has(ext.id) &&
-				!NATIVELY_HOSTED.has(ext.id) &&
-				!this.frames.has(ext.id)
-		);
+		// dispatch to its backend — its `package.json` is its whole program. Activation
+		// follows `activationEvents`: eager extensions boot here, the lazy ones wait for
+		// their first command / language / view (a `workspaceContains` match boots them too).
+		const toActivate: ExtInfo[] = [];
+		for (const ext of installed) {
+			if (ext.format === 'builtin' || this.processBacked.has(ext.id) || NATIVELY_HOSTED.has(ext.id) || this.frames.has(ext.id)) continue;
+			const policy = this.activationPolicies.get(ext.id);
+			if ((policy?.eager ?? true) || (await this.matchesWorkspaceContains(policy?.workspaceContains ?? []))) toActivate.push(ext);
+		}
 		await Promise.all(toActivate.map((ext) => this.activate(ext)));
 		this.onContributionsApplied?.();
+		this.onViewsChanged?.();
 	}
 
 	/** Parse the extension's package.json (and package.nls.json) and register its declared
 	 *  commands, keybindings and context menu entries. */
 	private async applyContributions(ext: ExtInfo): Promise<void> {
-		let manifest: { contributes?: ManifestContributes } | null = null;
+		let manifest: { contributes?: ManifestContributes; activationEvents?: string[] } | null = null;
 		let nls: Record<string, string> = {};
 		let nlsZhCn: Record<string, string> = {};
 		try {
-			manifest = JSON.parse(await invoke<string>('ext_read_file', { extId: ext.id, relPath: 'package.json' }));
+			manifest = JSON.parse(await invoke<string>('ext_read_file', { extId: ext.id, relPath: 'package.json' })) as { contributes?: ManifestContributes; activationEvents?: string[] };
 			const localization = await invoke<string>('ext_read_file', { extId: ext.id, relPath: 'package.nls.json' }).catch(() => null);
 			if (localization) nls = JSON.parse(localization) as Record<string, string>;
 			const zhCn = await invoke<string>('ext_read_file', { extId: ext.id, relPath: 'package.nls.zh-cn.json' }).catch(() => null);
@@ -432,6 +483,7 @@ export class ExtensionHost {
 		} catch {
 			return; // unreadable manifest: nothing to contribute
 		}
+		this.activationPolicies.set(ext.id, parseActivationPolicy(manifest?.activationEvents));
 		this.registerContributions(ext.id, manifest?.contributes, nls, nlsZhCn);
 		// A ggx/2 process package's commands dispatch to its backend rather than a frame:
 		// its declared ids become runnable from the manifest alone. The backend itself comes
@@ -452,8 +504,8 @@ export class ExtensionHost {
 		const dispatch = (command: string) => {
 			if (this.onNativeCommand?.(command)) return;
 			if (this.processBacked.has(extId)) return void this.runProcessCommand(extId, command);
-			const declared = declaredCommand(command);
-			if (!declared) return;
+			// A lazily-activating extension wakes here: runRegistered activates it first, then
+			// runs the handler its activation registered.
 			void this.runRegistered(command);
 		};
 		const canRun = (command: string) => this.canRunCommand(command);
@@ -472,11 +524,13 @@ export class ExtensionHost {
 		registerZhCnText(zhPairs);
 	}
 
-	/** A declared command is runnable when its extension's frame holds a handler, the
-	 *  workbench handles it natively, or its extension's ggx/2 backend will take it. */
+	/** A declared command is runnable when the workbench handles it natively, its extension's
+	 *  ggx/2 backend will take it, its manifest declares it (a lazily-activating extension
+	 *  wakes on the run — VS Code's palette behaviour), or its frame holds a handler. */
 	private canRunCommand(command: string): boolean {
 		if (this.nativeCommands.has(command)) return true;
 		if (this.processCommandIds.has(command)) return true;
+		if (declaredCommand(command)) return true;
 		return commandsRegistered.has(command);
 	}
 
@@ -863,6 +917,18 @@ export class ExtensionHost {
 				this.emitStatusBarItems();
 				return Promise.resolve(undefined);
 			}
+			case 'treeView.register': {
+				this.treeProviders.set(args[0] as string, extId);
+				return Promise.resolve(undefined);
+			}
+			case 'treeView.changed': {
+				this.onTreeRefresh?.(args[0] as string);
+				return Promise.resolve(undefined);
+			}
+			case 'treeView.dispose': {
+				this.treeProviders.delete(args[0] as string);
+				return Promise.resolve(undefined);
+			}
 			case 'webview.create': {
 				// A webview panel needs its extension's frame alive (events route back into it);
 				// an extension page has none and gets the clear error instead.
@@ -911,17 +977,117 @@ export class ExtensionHost {
 	/** `vscode.commands.executeCommand`: an extension-registered command receives its arguments
 	 *  in its frame, and the handler's result comes back (CommandRegistry.execute takes no
 	 *  arguments, so only the workbench's own commands go through it). Public because the
-	 *  workbench routes extension status bar items' clicks through it. */
+	 *  workbench routes extension status bar items' clicks through it. A declared command of
+	 *  a not-yet-active extension wakes it first (activationEvents' `onCommand`). */
 	executeCommand(id: string, args: unknown[] = []): Promise<unknown> {
 		const entry = commandsRegistered.get(id);
 		if (entry) return this.callFrame(entry.handle, 'runCommand', [id, args]);
+		const extId = this.declaringExtension(id);
+		if (extId && !this.processBacked.has(extId) && !NATIVELY_HOSTED.has(extId)) {
+			return this.ensureActive(extId).then(() => {
+				const late = commandsRegistered.get(id);
+				return late ? this.callFrame(late.handle, 'runCommand', [id, args]) : commands.execute(id);
+			});
+		}
 		return commands.execute(id);
 	}
 
-	/** Run a command an extension registered: the handler lives in its frame. */
+	/** Run a command an extension registered: the handler lives in its frame. A declared
+	 *  command whose frame is not up yet belongs to a lazily-activating extension — wake it,
+	 *  then run what its activation registered. */
 	private async runRegistered(id: string, args: unknown[] = []): Promise<void> {
 		const entry = commandsRegistered.get(id);
-		if (entry) await this.callFrame(entry.handle, 'runCommand', [id, args]);
+		if (entry) {
+			await this.callFrame(entry.handle, 'runCommand', [id, args]);
+			return;
+		}
+		const extId = this.declaringExtension(id);
+		if (extId && !this.processBacked.has(extId) && !NATIVELY_HOSTED.has(extId)) {
+			await this.ensureActive(extId);
+			const late = commandsRegistered.get(id);
+			if (late) await this.callFrame(late.handle, 'runCommand', [id, args]);
+		}
+	}
+
+	/** The extension whose manifest declares `command`, if any. */
+	private declaringExtension(command: string): string | null {
+		for (const [extId, ids] of this.declaredCommandIds) {
+			if (ids.includes(command)) return extId;
+		}
+		return null;
+	}
+
+	/** Activate a lazily-woken extension (its first command / language / view): one frame,
+	 *  one activation wait, however many triggers land while it is in flight. The promise
+	 *  settles when the frame reports activation (`__studioExtActivated`) — a failed
+	 *  activation resolves too (the failure was surfaced as a notification). */
+	ensureActive(extId: string): Promise<void> {
+		if (this.frames.has(extId) && !this.pendingActivations.has(extId)) return Promise.resolve();
+		let activation = this.pendingActivations.get(extId);
+		if (activation) return activation;
+		const ext = this.installedExts.find((candidate) => candidate.id === extId);
+		if (!ext || ext.format === 'builtin' || this.processBacked.has(extId) || NATIVELY_HOSTED.has(extId)) return Promise.resolve();
+		activation = new Promise<void>((resolve) => {
+			this.activationWaiters.set(extId, resolve);
+			void this.activate(ext);
+		});
+		this.pendingActivations.set(extId, activation);
+		void activation.then(() => this.pendingActivations.delete(extId), () => this.pendingActivations.delete(extId));
+		return activation;
+	}
+
+	/** One tree view level, for the sidebar section: routed into the owning frame, whose
+	 *  provider answers serialized items; an item's `iconUrl` (an extension-relative path on
+	 *  the wire) is resolved into a data URL before the sidebar renders it. */
+	async treeChildren(viewId: string, handle: string | null): Promise<SerializedTreeItem[]> {
+		const extId = this.treeProviders.get(viewId);
+		const frame = extId ? this.frames.get(extId) : undefined;
+		if (!frame) return [];
+		const items = (await this.callFrame(frame, 'tree.getChildren', [viewId, handle]).catch(() => [])) as SerializedTreeItem[];
+		if (extId) {
+			await Promise.all(items.map(async (item) => {
+				if (item.iconUrl) item.iconUrl = (await extFileDataUrl(extId, item.iconUrl!)) ?? '';
+			}));
+		}
+		return items;
+	}
+
+	/** The workbench reports a declared view's visibility (its container selected or the
+	 *  sidebar hidden): the frame's TreeView fires `onDidChangeVisibility`, and an `onView:`
+	 *  activation wakes the extension the first time its view is seen. */
+	noteViewVisible(viewId: string, visible: boolean): void {
+		const declaredBy = extensionViewContributions().find((contribution) => contribution.views.some((view) => view.viewId === viewId))?.extId;
+		const owner = this.treeProviders.get(viewId) ?? declaredBy;
+		if (visible && owner) void this.ensureActive(owner);
+		const frame = owner ? this.frames.get(owner) : undefined;
+		if (frame && this.treeProviders.has(viewId)) void this.callFrame(frame, 'treeView.setVisible', [viewId, visible]).catch(() => undefined);
+	}
+
+	/** A file opened in an editor: every extension declaring `onLanguage:<its language>`
+	 *  wakes (the language id follows VS Code's map plus any `contributes.languages` entry —
+	 *  module 12's language registry feeds `languageOf`). */
+	noteLanguageOpened(fileName: string): void {
+		const language = languageOf(fileName);
+		if (!language) return;
+		for (const [extId, policy] of this.activationPolicies) {
+			if (policy.languages.has(language)) void this.ensureActive(extId);
+		}
+	}
+
+	/** Do any `workspaceContains` patterns match the open folders? An exact relative path
+	 *  checks existence; a pattern with wildcards walks (`ext_fs`, workspace-confined). */
+	private async matchesWorkspaceContains(patterns: string[]): Promise<boolean> {
+		const roots = ExtensionHost.workspaceFolders;
+		if (patterns.length === 0 || roots.length === 0) return false;
+		for (const pattern of patterns) {
+			try {
+				const found = await invoke<string[]>('ext_fs', { op: /[*?]/.test(pattern) ? 'find' : 'exists', roots, path: pattern });
+				if (found.length > 0) return true;
+			} catch {
+				// The path (or the backend answer) is unavailable: this pattern cannot match.
+			}
+		}
+		return false;
 	}
 
 	private callFrame(handle: FrameHandle, method: string, args: unknown[]): Promise<unknown> {
@@ -983,9 +1149,16 @@ export class ExtensionHost {
 		}
 
 		if (data.type === '__studioExtActivated') {
+			// Lazy activation waits for exactly this; eager activation never set a waiter.
+			this.activationWaiters.get(data.extensionId ?? '')?.();
+			this.activationWaiters.delete(data.extensionId ?? '');
 			return; // activation succeeded; nothing to surface
 		}
 		if (data.type === '__studioExtActivateFailed') {
+			// The failure surfaces as a notification; a lazy activation waiting on it settles
+			// rather than hanging its trigger.
+			this.activationWaiters.get(data.extensionId ?? '')?.();
+			this.activationWaiters.delete(data.extensionId ?? '');
 			notify('warning', `Extension ${data.extensionId} failed to activate: ${data.error ?? 'unknown error'}`);
 			return;
 		}

@@ -377,6 +377,63 @@ class StatusBarItem {
 	}
 }
 
+/** A tree data provider as VS Code spells it: children on demand, an item per element, a
+ *  change event that re-reads whatever is on screen. */
+export interface TreeDataProvider<T> {
+	getChildren(element?: T): T[] | PromiseLike<T[]>;
+	getTreeItem(element: T): { label: string | { label: string; highlights?: [number, number][] }; description?: string; tooltip?: string | undefined; iconPath?: string | { light?: string; dark?: string }; collapsibleState?: number; command?: { command: string; title?: string; arguments?: unknown[] } } | PromiseLike<Record<string, unknown>>;
+	onDidChangeTreeData?: (listener: (element: T | undefined | null) => void) => Disposable;
+	getParent?(element: T): T | undefined;
+}
+
+/** One registered tree view: the provider, its element handles (host calls walk by handle),
+ *  and the visibility events the host pushes. */
+class TreeViewRegistration {
+	visible = false;
+	readonly handles = new Map<string, unknown>();
+	private nextHandle = 1;
+	readonly visibilityChanged = new EventEmitter<{ visible: boolean }>();
+	readonly selectionChanged = new EventEmitter<unknown[]>();
+
+	constructor(readonly viewId: string, private readonly provider: TreeDataProvider<unknown>, private readonly bridge: HostBridge) {
+		void bridge.request('treeView.register', [viewId]);
+		provider.onDidChangeTreeData?.(() => void bridge.request('treeView.changed', [viewId]));
+	}
+
+	/** The host asks for one level's children: elements become handles, `getTreeItem`
+	 *  serializes each, and the list crosses as plain JSON. */
+	async children(parent: string | null): Promise<unknown[]> {
+		const element = parent === null ? undefined : this.handles.get(parent);
+		const children = await Promise.resolve(this.provider.getChildren(element));
+		const items: unknown[] = [];
+		for (const child of children ?? []) {
+			const raw = await Promise.resolve(this.provider.getTreeItem(child) as Promise<Record<string, unknown>>);
+			const handle = String(this.nextHandle++);
+			this.handles.set(handle, child);
+			const label = typeof raw.label === 'string' ? raw.label : (raw.label as { label?: string } | undefined)?.label ?? '';
+			const iconPath = raw.iconPath as string | { light?: string; dark?: string } | undefined;
+			items.push({
+				handle,
+				label,
+				description: typeof raw.description === 'string' ? raw.description : undefined,
+				tooltip: typeof raw.tooltip === 'string' ? raw.tooltip : undefined,
+				// The extension-relative path crosses the wire; the host resolves it into a
+				// data URL before the sidebar renders (the field stays `iconUrl` end to end).
+				iconUrl: typeof iconPath === 'string' ? iconPath : iconPath?.light ?? iconPath?.dark,
+				collapsibleState: typeof raw.collapsibleState === 'number' ? raw.collapsibleState : 0,
+				command: raw.command as { command: string; title?: string; arguments?: unknown[] } | undefined
+			});
+		}
+		return items;
+	}
+
+	setVisible(visible: boolean): void {
+		if (this.visible === visible) return;
+		this.visible = visible;
+		this.visibilityChanged.fire({ visible });
+	}
+}
+
 /* ---------- The API ---------- */
 
 function unsupported(name: string): never {
@@ -394,6 +451,16 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 	let statusSeq = 0;
 	/** Set below the literal — the literal's `handleHostEvent` forwards into it. */
 	let dispatchHostEvent: (event: HostEvent) => void = () => undefined;
+	/** The tree views this frame registered, by view id (host calls and events route through). */
+	const treeRegistrations = new Map<string, TreeViewRegistration>();
+
+	function registerTree(viewId: string, provider: TreeDataProvider<unknown>): TreeViewRegistration {
+		const existing = treeRegistrations.get(viewId);
+		if (existing) return existing; // re-registering the same id keeps the first provider
+		const registration = new TreeViewRegistration(viewId, provider, bridge);
+		treeRegistrations.set(viewId, registration);
+		return registration;
+	}
 
 	/** `showXMessage(message, ...items)` accepts strings or `{title}` items, with an optional
 	 *  leading MessageOptions object; the picked entry comes back in the shape it was given. */
@@ -488,8 +555,29 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 				void bridge.request('webview.create', [panelId, viewType, title]);
 				return panel;
 			},
-			createTreeView: () => unsupported('window.createTreeView'),
-			registerTreeDataProvider: () => unsupported('window.registerTreeDataProvider'),
+			createTreeView: (viewId: string, options: { treeDataProvider: TreeDataProvider<unknown> }) => {
+				const registration = registerTree(viewId, options.treeDataProvider);
+				return {
+					get visible(): boolean {
+						return registration.visible;
+					},
+					onDidChangeVisibility: registration.visibilityChanged.event,
+					onDidChangeSelection: registration.selectionChanged.event,
+					get message(): never {
+						return unsupported('TreeView.message');
+					},
+					reveal: () => undefined, // the host has no reveal: the view is already the section
+					dispose: () => {
+						void bridge.request('treeView.dispose', [viewId]);
+						registration.visibilityChanged.dispose();
+						registration.selectionChanged.dispose();
+					}
+				};
+			},
+			registerTreeDataProvider: (viewId: string, treeDataProvider: TreeDataProvider<unknown>) => {
+				registerTree(viewId, treeDataProvider);
+				return new Disposable(() => void bridge.request('treeView.dispose', [viewId]));
+			},
 			registerWebviewViewProvider: () => unsupported('window.registerWebviewViewProvider')
 		},
 
@@ -556,6 +644,14 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 		/** Not part of VS Code's `vscode` module: the mementos `ExtensionContext.globalState` /
 		 *  `workspaceState` are built from (extHostBoot wires them into the context). */
 		__mementos: { global: globalState, workspace: workspaceState },
+
+		/** Not part of VS Code's `vscode` module either: the host's tree plumbing — the
+		 *  frame's answer to the host calls `tree.getChildren` and `treeView.setVisible`
+		 *  (extHostBoot routes them here). */
+		__serveTree: {
+			children: async (viewId: string, handle: string | null): Promise<unknown[]> => (await treeRegistrations.get(viewId)?.children(handle)) ?? [],
+			setVisible: (viewId: string, visible: boolean): void => treeRegistrations.get(viewId)?.setVisible(visible)
+		},
 
 		/** Deliver an event the host pushed in (see `HostEvent`); the frame's single message
 		 *  listener routes here — the shim needs no other channel into itself. */

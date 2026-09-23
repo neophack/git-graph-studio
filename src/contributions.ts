@@ -19,9 +19,11 @@ import { extSettings } from './state';
 import { commands } from './commands';
 import type { MenuEntry, MenuItem } from './ui';
 
-/** The menu locations Studio surfaces. Others (commandPalette, git.pullpush, …) only hide or
- *  relocate entries in VS Code itself, so they are ignored. */
-export const SUPPORTED_MENU_LOCATIONS = ['explorer/context', 'editor/context', 'editor/title/context', 'scm/title', 'scm/resourceState/context'] as const;
+/** The menu locations Studio surfaces. `git.pullpush` is VS Code's SCM sync menu — where
+ * git-graph-rs places its Gerrit `refs/for/` push — rendered inside the Source Control "..."
+ * menu's Pull, Push submenu. Others (commandPalette, …) only hide or relocate entries in
+ * VS Code itself, so they are ignored. */
+export const SUPPORTED_MENU_LOCATIONS = ['explorer/context', 'editor/context', 'editor/title/context', 'scm/title', 'scm/resourceState/context', 'git.pullpush'] as const;
 export type MenuLocation = (typeof SUPPORTED_MENU_LOCATIONS)[number];
 
 interface DeclaredCommand {
@@ -136,6 +138,22 @@ export interface ManifestContributes {
 		title?: string;
 		properties?: Record<string, { type?: string; default?: unknown; description?: string }>;
 	};
+	/** VS Code's `contributes.viewsContainers`: activity-bar containers an extension adds —
+	 *  each becomes its own sidebar view holding the views that name it in `views`. */
+	viewsContainers?: { activitybar?: { id: string; title: string; icon?: string }[] };
+	/** VS Code's `contributes.views`, by container id: the tree views the extension shows
+	 *  (`window.createTreeView` of the same id feeds them their content). */
+	views?: Record<string, { id: string; name: string; when?: string }[] | undefined>;
+	/** VS Code's `contributes.languages`: a language id with the file extensions and aliases
+	 *  that identify it (feeds the editor's language naming and snippets scoping). */
+	languages?: { id: string; aliases?: string[]; extensions?: string[] }[];
+	/** VS Code's `contributes.grammars`: TextMate grammars, loaded into the backend's syntect
+	 *  set so the Fast Viewer highlights files of their languages. */
+	grammars?: { language?: string; scopeName: string; path: string }[];
+	/** VS Code's `contributes.snippets`: `*.code-snippets` files joined into the registry. */
+	snippets?: { language: string; path: string }[];
+	/** VS Code's `contributes.themes`: color themes added to the theme picker. */
+	themes?: { label: string; uiTheme?: string; path: string }[];
 }
 
 /** One extension-declared setting, normalised for the Settings dialog's generated rows. */
@@ -145,6 +163,40 @@ export interface ExtensionSettingDef {
 	type: 'boolean' | 'string' | 'number';
 	default: unknown;
 	description: string;
+}
+
+/** One extension's declared sidebar surface: its activity-bar containers and the tree views
+ *  placed in them (or in a built-in container — `explorer` and `scm` are accepted ids, the
+ *  view then rides that container's sidebar view as a stacked section). */
+export interface ExtensionViewContribution {
+	extId: string;
+	containers: { id: string; title: string; icon?: string }[];
+	/** `container` is the manifest's container id; `viewId` is the view's own id (the
+	 *  `createTreeView` id). */
+	views: { viewId: string; name: string; container: string }[];
+}
+
+const viewContributions = new Map<string, ExtensionViewContribution>();
+
+/** Register one extension's view containers and views (called by `applyContributions`). */
+function applyExtensionViews(extId: string, contributes: ManifestContributes | undefined, nls: Record<string, string>): void {
+	const containers = (contributes?.viewsContainers?.activitybar ?? []).map((container) => ({
+		id: container.id,
+		title: localize(container.title, nls) || container.id,
+		icon: container.icon
+	}));
+	const views: ExtensionViewContribution['views'] = [];
+	for (const [container, entries] of Object.entries(contributes?.views ?? {})) {
+		for (const view of entries ?? []) views.push({ viewId: view.id, name: localize(view.name, nls) || view.id, container });
+	}
+	if (containers.length > 0 || views.length > 0) viewContributions.set(extId, { extId, containers, views });
+	else viewContributions.delete(extId);
+}
+
+/** Every active extension's declared containers and views (the workbench builds the activity
+ *  bar entries and sidebar sections from this list). */
+export function extensionViewContributions(): ExtensionViewContribution[] {
+	return [...viewContributions.values()];
 }
 
 const extensionSettings = new Map<string, ExtensionSettingDef[]>();
@@ -175,6 +227,9 @@ export function applyExtensionSettings(extId: string, configuration: ManifestCon
 export function applyContributions(extId: string, contributes: ManifestContributes | undefined, nls: Record<string, string>, dispatch: (command: string) => void, canRun: (command: string) => boolean): void {
 	// The declared settings join the registry the Settings dialog generates its rows from.
 	applyExtensionSettings(extId, contributes?.configuration, nls);
+	// The declared sidebar surface (containers + tree views) joins the same registry the
+	// workbench builds its activity bar sections from.
+	applyExtensionViews(extId, contributes, nls);
 	if (!contributes) return;
 	const registered: ExtensionContributions = { commands: new Map(), menus: {} };
 	byExtension.set(extId, registered);
@@ -204,6 +259,7 @@ export function applyContributions(extId: string, contributes: ManifestContribut
 /** Drop an extension's contributions (uninstall). */
 export function removeContributions(extId: string): void {
 	extensionSettings.delete(extId);
+	viewContributions.delete(extId);
 	byExtension.delete(extId);
 }
 

@@ -682,4 +682,22 @@ describe('extension page tabs (module 12, ggx/2)', () => {
 		expect(group.openEditorIds()).toEqual(['extpage:a.b:main:1']);
 		expect(disposed).toBe(1);
 	});
+
+	it('the extension detail page is a document pane — its own scroll container, one tab per extension', () => {
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		const mounted: HTMLElement[] = [];
+		const mount = (pane: HTMLElement) => {
+			mounted.push(pane);
+			pane.appendChild(el('div', 'ext-detail-page'));
+		};
+		group.openExtDetail({ kind: 'extdetail', id: 'extdetail:a.b', title: 'Demo', extId: 'a.b' }, mount);
+		// One tab per extension id: a second open focuses the tab already showing it.
+		group.openExtDetail({ kind: 'extdetail', id: 'extdetail:a.b', title: 'Demo', extId: 'a.b' }, mount);
+		expect(group.openEditorIds()).toEqual(['extdetail:a.b']);
+		expect(mounted.length).toBe(1);
+		// The document variant, not the iframe host: this class is what shell.css turns into
+		// the page's scroll container, so a long README wheel-scrolls inside the tab and clips
+		// at the editor area instead of painting over the status bar.
+		expect(mounted[0]!.className).toBe('editor-pane ext-detail-pane');
+	});
 });

@@ -1371,7 +1371,9 @@ mod deferred_services_tests {
                 // app update ships a newer bundled copy, this is how it takes over). Without
                 // this, since the seam is cut (the app itself links no engine), a fresh profile
                 // would have no Git Graph view, no SCM status and no file-at-revision at all
-                // until a user visited Extensions and installed by hand.
+                // until a user visited Extensions and installed by hand. A deliberate
+                // uninstall overrides all of that: its marker keeps the package out until the
+                // user asks for it again (Extensions' one-click Install, which clears it).
                 //
                 // `plugin_host::note_install_started`/`note_install_finished` bracket it so a
                 // `plugin_host` call racing this boot sequence (`warm_first_page`, below) waits
@@ -1386,7 +1388,13 @@ mod deferred_services_tests {
                         plugin_host::note_install_started();
                         // No id: the boot pass auto-installs the integrated git-graph-rs only.
                         // The bundled sample stays an offer until the user asks for it.
-                        if let Err(reason) = cmd_ext::ext_install_bundled(handle.clone(), None) {
+                        if cmd_ext::deliberately_uninstalled(&dir, cmd_ext::GRAPH_PACKAGE_ID) {
+                            eprintln!(
+                                "[extensions] git-graph-rs stays uninstalled (a deliberate uninstall); skipping its boot auto-install"
+                            );
+                        } else if let Err(reason) =
+                            cmd_ext::ext_install_bundled(handle.clone(), None)
+                        {
                             eprintln!("[extensions] git-graph-rs auto-install: {reason}");
                         }
                         plugin_host::note_install_finished();
@@ -1525,6 +1533,7 @@ mod deferred_services_tests {
                 cmd_ext::ext_uninstall,
                 cmd_ext::ext_read_file,
                 cmd_ext::ext_read_file_base64,
+                cmd_ext::ext_fs,
                 cmd_ext::ext_install_from_ggx,
                 cmd_ext::ext_install_from_vsix,
                 cmd_ext::ext_install_bundled,
