@@ -120,7 +120,8 @@ fn frame_phases(extended: bool, fd: bool, brs: bool, len: u64) -> (f64, f64) {
     } else {
         // All at the arbitration rate: 47 + data (67 with the extended-id bits), +12 for
         // FD's wider control when the frame never switches.
-        let raw = if extended { 67.0 } else { 47.0 } + 8.0 * len as f64 + if fd { 12.0 } else { 0.0 };
+        let raw =
+            if extended { 67.0 } else { 47.0 } + 8.0 * len as f64 + if fd { 12.0 } else { 0.0 };
         (stuffed(raw), 0.0)
     }
 }
@@ -3254,7 +3255,8 @@ mod tests {
         // One BRS frame and one NoBRS frame: the switcher's payload bits price at the
         // data rate, the plain FD frame's at the arbitration rate, in the channel totals
         // and the load profile alike.
-        let mut switching = RawFrame::data_frame(0, 1, 0x100, false, true, 15, 64, &[0x55; 64], false);
+        let mut switching =
+            RawFrame::data_frame(0, 1, 0x100, false, true, 15, 64, &[0x55; 64], false);
         switching.brs = true;
         let stats = stats_of_frames(&[
             switching,
@@ -3262,7 +3264,10 @@ mod tests {
         ]);
         let (arb, data) = frame_phases(false, true, true, 64);
         assert!((stats.channels[0].data_bits - data).abs() < 1e-9);
-        assert!((stats.channels[0].arb_bits - (arb + frame_phases(false, true, false, 64).0)).abs() < 1e-9);
+        assert!(
+            (stats.channels[0].arb_bits - (arb + frame_phases(false, true, false, 64).0)).abs()
+                < 1e-9
+        );
         let bucket = &stats.load_profiles[0].buckets[0];
         assert!((bucket.data_bits - data).abs() < 1e-9);
         assert!((bucket.arb_bits - (arb + frame_phases(false, true, false, 64).0)).abs() < 1e-9);
@@ -3623,9 +3628,7 @@ Begin TriggerBlock Mon Sep 14 11:01:16.396 am 2026
     fn frame_phases_split_the_way_canoe_prices_a_frame() {
         let stuffed = |raw: f64| raw + ((raw - 1.0) / 4.0).floor();
         // Classic and NoBRS frames never switch: everything at the arbitration rate.
-        assert!(
-            (frame_phases(false, false, false, 0).0 - stuffed(47.0)).abs() < 1e-9
-        );
+        assert!((frame_phases(false, false, false, 0).0 - stuffed(47.0)).abs() < 1e-9);
         assert_eq!(frame_phases(false, false, false, 0).1, 0.0);
         assert_eq!(frame_phases(true, true, false, 8).1, 0.0);
         assert!(frame_phases(true, false, false, 8).0 > frame_phases(false, false, false, 8).0);

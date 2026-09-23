@@ -115,7 +115,10 @@ pub(crate) fn append_path_entry(current: &str, dir: &str) -> String {
     if dir.is_empty() {
         return current.to_owned();
     }
-    if current.split(';').any(|entry| entry.trim().eq_ignore_ascii_case(dir)) {
+    if current
+        .split(';')
+        .any(|entry| entry.trim().eq_ignore_ascii_case(dir))
+    {
         return current.to_owned();
     }
     if current.trim().is_empty() {
@@ -240,7 +243,15 @@ mod windows_impl {
         let mut result = 0usize;
         // HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG, 5000 ms.
         unsafe {
-            SendMessageTimeoutW(0xffff, 0x001A, 0, environment.as_ptr(), 0x0002, 5000, &mut result);
+            SendMessageTimeoutW(
+                0xffff,
+                0x001A,
+                0,
+                environment.as_ptr(),
+                0x0002,
+                5000,
+                &mut result,
+            );
         }
     }
 
@@ -542,7 +553,10 @@ mod tests {
     #[test]
     fn windows_context_menu_writes_and_removes_the_verbs() {
         use winreg::enums::HKEY_CURRENT_USER;
-        let base_path = format!("Software\\Classes\\ggs-assoc-ctxmenu-test-{}", std::process::id());
+        let base_path = format!(
+            "Software\\Classes\\ggs-assoc-ctxmenu-test-{}",
+            std::process::id()
+        );
         let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
         let (base, _) = hkcu.create_subkey(&base_path).unwrap();
         windows_impl::apply_context_menu(&base, true, "Open with Git Graph Studio").unwrap();
@@ -564,7 +578,9 @@ mod tests {
                 command(target)
             );
         }
-        let verb = base.open_subkey("Directory\\shell\\GitGraphStudio").unwrap();
+        let verb = base
+            .open_subkey("Directory\\shell\\GitGraphStudio")
+            .unwrap();
         assert_eq!(
             verb.get_value::<String, _>("").unwrap(),
             "Open with Git Graph Studio"
@@ -657,8 +673,14 @@ mod tests {
         assert_eq!(append_path_entry("C:\\A", "C:\\Tools"), "C:\\A;C:\\Tools");
         // No duplicate on an exact repeat or a case-only difference, and no trailing
         // separator tricks grow the value.
-        assert_eq!(append_path_entry("C:\\A;C:\\Tools", "C:\\Tools"), "C:\\A;C:\\Tools");
-        assert_eq!(append_path_entry("C:\\A;c:\\tools", "C:\\TOOLS"), "C:\\A;c:\\tools");
+        assert_eq!(
+            append_path_entry("C:\\A;C:\\Tools", "C:\\Tools"),
+            "C:\\A;C:\\Tools"
+        );
+        assert_eq!(
+            append_path_entry("C:\\A;c:\\tools", "C:\\TOOLS"),
+            "C:\\A;c:\\tools"
+        );
         assert_eq!(append_path_entry("C:\\A", ""), "C:\\A");
     }
 
@@ -679,20 +701,39 @@ mod tests {
             .filter_map(Result::ok)
             .find(|(name, _)| name == "Path")
             .map(|(_, value)| {
-                let units: Vec<u16> = value.bytes.chunks(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+                let units: Vec<u16> = value
+                    .bytes
+                    .chunks(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect();
                 let text = String::from_utf16_lossy(&units);
                 (text.trim_end_matches('\u{0}').to_owned(), value.vtype)
             });
         let marker = format!(
             "C:\\ggs-path-test-{}",
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
         );
 
         // Append through the same core the boot pass uses.
         let current: String = environment.get_value("Path").unwrap_or_default();
         let updated = append_path_entry(&current, &marker);
-        let bytes: Vec<u8> = updated.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect();
-        environment.set_raw_value("Path", &RegValue { bytes, vtype: RegType::REG_EXPAND_SZ }).unwrap();
+        let bytes: Vec<u8> = updated
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        environment
+            .set_raw_value(
+                "Path",
+                &RegValue {
+                    bytes,
+                    vtype: RegType::REG_EXPAND_SZ,
+                },
+            )
+            .unwrap();
         let after: String = environment.get_value("Path").unwrap();
         assert!(after.split(';').any(|entry| entry == marker));
         // Idempotent: the same append is a no-op.
@@ -701,8 +742,14 @@ mod tests {
         // Restore exactly what was there (value and type), or delete what we created.
         match original {
             Some((text, vtype)) => {
-                let bytes: Vec<u8> = text.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect();
-                environment.set_raw_value("Path", &RegValue { bytes, vtype }).unwrap();
+                let bytes: Vec<u8> = text
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .flat_map(u16::to_le_bytes)
+                    .collect();
+                environment
+                    .set_raw_value("Path", &RegValue { bytes, vtype })
+                    .unwrap();
             }
             None => {
                 environment.delete_value("Path").unwrap();
