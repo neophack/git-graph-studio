@@ -1,10 +1,13 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { ensureBuiltinSettings, ExtensionHost, type ExtInfo } from '../src/extHost';
 import { extensionSettingDefs, registerContextProvider, resolvedMenuEntries } from '../src/contributions';
 import { ExtensionsPanel } from '../src/extensionsPanel';
 import { commandForBinding, commands } from '../src/commands';
-import { createVscodeApi } from '../src/vscodeApi';
+import { createVscodeApi, applyTextEditsToText, Position, Range } from '../src/vscodeApi';
+import { registerDeclaredLanguages, declaredLanguageName, registerExtensionSnippets, registerExtensionThemes, extensionThemeList, languageIdFor } from '../src/contributions';
+import { snippetsFor } from '../src/snippetRegistry';
+import { THEMES, syncExtensionThemes, updateSetting } from '../src/settings';
 // The frame half of the extension host, loaded for its window message listener: under jsdom the
 // frame's `parent` is this same window, so tests drive it with MessageEvents and read its posts.
 import '../src/extHostBoot';
@@ -1152,5 +1155,191 @@ describe('tree views and activation events (round two)', () => {
 		host.noteViewVisible('acme.demo.nodes', true);
 		await flush();
 		expect(visibility).toEqual([]); // the jsdom frame's event loop answered silently; the call did not throw
+	});
+});
+
+
+describe('round three: languages, snippets, themes, workspace.fs and the editor API', () => {
+	afterEach(() => {
+		// The whole-set registries persist across tests; reset them so later suites see none.
+		registerDeclaredLanguages('acme.demo', []);
+		registerExtensionSnippets('acme.demo', []);
+		registerExtensionThemes('acme.demo', []);
+		syncExtensionThemes([]);
+	});
+
+	it('a declared language resolves file names and names the editor', () => {
+		expect(languageIdFor('script.mylang')).toBe('');
+		registerDeclaredLanguages('acme.demo', [{ id: 'mylang', aliases: ['MyLang'], extensions: ['.mylang'] }]);
+		expect(languageIdFor('script.mylang')).toBe('mylang');
+		expect(declaredLanguageName('script.mylang')).toBe('MyLang');
+		expect(declaredLanguageName('main.rs')).toBeNull(); // built-ins are not named here
+	});
+
+	it('contributed snippet files scope to their language and join the registry', () => {
+		registerExtensionSnippets('acme.demo', [{ language: 'mylang', text: '{"greeter": {"prefix": "hi", "body": "hello $0"} }' }]);
+		registerDeclaredLanguages('acme.demo', [{ id: 'mylang', aliases: ['MyLang'], extensions: ['.mylang'] }]);
+		const forMine = snippetsFor('a.mylang');
+		expect(forMine.some((snippet) => snippet.prefix === 'hi' && snippet.body === 'hello $0' && snippet.source === 'extension')).toBe(true);
+		// Another language does not see it (the scope the manifest declared).
+		expect(snippetsFor('a.rs').some((snippet) => snippet.source === 'extension')).toBe(false);
+	});
+
+	it('an extension theme joins the picker with a generated overlay', () => {
+		registerExtensionThemes('acme.demo', [{
+			extId: 'acme.demo',
+			label: 'Aurora',
+			kind: 'vscode-dark',
+			colors: { 'editor.background': '#101820', 'editor.foreground': '#d0d0d0' },
+			tokenColors: [
+				{ scope: ['comment.block'], settings: { foreground: '#5f7a5f' } },
+				{ scope: 'string.quoted', settings: { foreground: '#c98a6d' } }
+			]
+		}]);
+		syncExtensionThemes(extensionThemeList());
+		const entry = THEMES.find((theme) => theme.label === 'Aurora')!;
+		expect(entry.id).toBe('ext-theme:acme.demo:0');
+		expect(entry.overlay?.['--vscode-editor-background']).toBe('#101820');
+		expect(entry.overlay?.['--syntax-comment']).toBe('#5f7a5f');
+		expect(entry.overlay?.['--syntax-string']).toBe('#c98a6d');
+		// Applying it writes the overlay style; clearing the registry removes the entries.
+		updateSetting('theme', entry.id);
+		expect(document.getElementById('ext-theme-overlay')).not.toBeNull();
+		expect(document.getElementById('ext-theme-overlay')!.textContent).toContain('--vscode-editor-background:#101820');
+		registerExtensionThemes('acme.demo', []);
+		syncExtensionThemes([]);
+		expect(THEMES.some((theme) => theme.id.startsWith('ext-theme:'))).toBe(false);
+	});
+
+	it('workspace.fs and findFiles cross the fs.op bridge with base64 bytes', async () => {
+		const ops: { op: string; args: unknown[] }[] = [];
+		const api = createVscodeApi(
+			{ extensionId: 'acme.demo', extensionPath: '/ext', workspaceFolders: [{ uri: { scheme: 'file', path: 'C:/ws', fsPath: 'C:/ws', toString: () => 'file:C:/ws' }, name: 'ws', index: 0 }], settings: {}, language: 'en', webviewResourceBase: 'ggx://localhost/x/', state: { global: {}, workspace: {} } },
+			{
+				request: async (method, args) => {
+					ops.push({ op: method, args });
+					if (method === 'fs.op' && args[0] === 'read') return { data: btoa('hello') };
+					if (method === 'fs.op' && args[0] === 'list') return [{ name: 'src', kind: 2 }, { name: 'a.txt', kind: 1 }];
+					if (method === 'fs.op' && args[0] === 'stat') return { type: 1, size: 5, mtime: 7 };
+					if (method === 'fs.op' && args[0] === 'find') return ['src/a.mylang'];
+					return undefined;
+				},
+				registerCommandHandler: () => undefined
+			}
+		);
+		const bytes = await api.workspace.fs.readFile('a.txt');
+		expect(new TextDecoder().decode(bytes)).toBe('hello');
+		const entries = await api.workspace.fs.readDirectory('C:/ws');
+		expect(entries).toEqual([['src', 2], ['a.txt', 1]]);
+		const stat = await api.workspace.fs.stat('a.txt');
+		expect(stat).toMatchObject({ type: 1, size: 5, mtime: 7 });
+		const found = await api.workspace.findFiles('**/*.mylang');
+		expect(found[0]!.fsPath).toContain('a.mylang');
+		expect(ops[0]!.args.slice(0, 2)).toEqual(['read', 'a.txt']);
+	});
+
+	it('applyTextEditsToText applies batches bottom-up', () => {
+		expect(applyTextEditsToText('one\ntwo\nthree', [
+			{ startLine: 2, startCharacter: 0, endLine: 2, endCharacter: 3, newText: 'TWO' },
+			{ startLine: 1, startCharacter: 0, endLine: 1, endCharacter: 3, newText: 'ONE' }
+		])).toBe('ONE\nTWO\nthree');
+		expect(applyTextEditsToText('abc', [{ startLine: 1, startCharacter: 3, endLine: 1, endCharacter: 3, newText: '!' }])).toBe('abc!');
+	});
+
+	it('workspace.applyEdit edits open editors through the bridge and closed files through fs', async () => {
+		const calls: { method: string; args: unknown[] }[] = [];
+		const api = createVscodeApi(
+			{ extensionId: 'acme.demo', extensionPath: '/ext', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggx://localhost/x/', state: { global: {}, workspace: {} } },
+			{
+				request: async (method, args) => {
+					calls.push({ method, args });
+					if (method === 'editor.applyEdits') return args[0] === 'C:/ws/open.rs';
+					if (method === 'fs.op' && args[0] === 'read') return { data: btoa('closed\ndoc') };
+					return undefined;
+				},
+				registerCommandHandler: () => undefined
+			}
+		);
+		const edit = { startLine: 1, startCharacter: 0, endLine: 1, endCharacter: 6, newText: 'OPENED' };
+		await api.workspace.applyEdit({ changes: { 'file:C:/ws/open.rs': [edit], 'file:C:/ws/closed.rs': [edit] } });
+		// Both files went through the editor bridge first; only the closed one was read,
+		// spliced and written back through the extension filesystem.
+		expect(calls.filter((call) => call.method === 'editor.applyEdits')).toHaveLength(2);
+		const write = calls.find((call) => call.method === 'fs.op' && call.args[0] === 'write')!;
+		const bytes = Uint8Array.from(atob(write.args[3] as string), (c) => c.charCodeAt(0));
+		expect(new TextDecoder().decode(bytes)).toBe('OPENED\ndoc');
+	});
+
+	it('activeTextEditor mirrors the host pushes and fires change events', () => {
+		const api = createVscodeApi(
+			{ extensionId: 'acme.demo', extensionPath: '/ext', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggx://localhost/x/', state: { global: {}, workspace: {} } },
+			{ request: async () => undefined, registerCommandHandler: () => undefined }
+		);
+		expect(api.window.activeTextEditor).toBeUndefined();
+		const active: unknown[] = [];
+		const selections: unknown[] = [];
+		api.window.onDidChangeActiveTextEditor(() => active.push('active'));
+		api.window.onDidChangeTextEditorSelection(() => selections.push('selection'));
+		api.handleHostEvent({ event: 'activeEditorChanged', editor: { path: 'C:/ws/a.rs', languageId: 'rust', text: 'fn main() {}', line: 3, column: 5, selected: 2 } });
+		const editor = api.window.activeTextEditor!;
+		expect(editor.document.getText()).toBe('fn main() {}');
+		expect(editor.document.languageId).toBe('rust');
+		expect(editor.selection.start).toMatchObject({ line: 2, character: 4 });
+		expect(editor.selection.end).toMatchObject({ line: 2, character: 6 });
+		expect(active).toHaveLength(1);
+		// A selection-only change on the same document: no active-editor event, one more
+		// selection event, and the held text survives the push that carried none.
+		api.handleHostEvent({ event: 'activeEditorChanged', editor: { path: 'C:/ws/a.rs', languageId: 'rust', line: 4, column: 1, selected: 0 } });
+		expect(active).toHaveLength(1);
+		expect(selections).toHaveLength(2);
+		expect(api.window.activeTextEditor!.document.getText()).toBe('fn main() {}');
+	});
+
+	it('TextEditor.edit hands the in-frame-built batch to the host applier', async () => {
+		const applied: unknown[][] = [];
+		const api = createVscodeApi(
+			{ extensionId: 'acme.demo', extensionPath: '/ext', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggx://localhost/x/', state: { global: {}, workspace: {} } },
+			{ request: async (_method, args) => { applied.push(args); return true; }, registerCommandHandler: () => undefined }
+		);
+		api.handleHostEvent({ event: 'activeEditorChanged', editor: { path: 'C:/ws/a.rs', languageId: 'rust', text: 'x', line: 1, column: 1 } });
+		const ok = await api.window.activeTextEditor!.edit((builder) => {
+			builder.insert(new Position(0, 0), '// added\n');
+			builder.replace(new Range(new Position(0, 0), new Position(0, 1)), 'y');
+		});
+		expect(ok).toBe(true);
+		expect(applied).toEqual([[null, [
+			{ startLine: 1, startCharacter: 0, endLine: 1, endCharacter: 0, newText: '// added\n' },
+			{ startLine: 1, startCharacter: 0, endLine: 1, endCharacter: 1, newText: 'y' }
+		]]]);
+	});
+
+	it('onDidSaveTextDocument fires with the saved document', () => {
+		const api = createVscodeApi(
+			{ extensionId: 'acme.demo', extensionPath: '/ext', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggx://localhost/x/', state: { global: {}, workspace: {} } },
+			{ request: async () => undefined, registerCommandHandler: () => undefined }
+		);
+		const saved: string[] = [];
+		api.workspace.onDidSaveTextDocument((document: { fileName: string }) => saved.push(document.fileName));
+		api.handleHostEvent({ event: 'documentSaved', path: 'C:/ws/a.rs', languageId: 'rust' });
+		expect(saved).toEqual(['C:/ws/a.rs']);
+	});
+
+	it('the host side routes fs.op through ext_fs and pushes editor events to frames', async () => {
+		const host = new ExtensionHost();
+		ExtensionHost.workspaceFolders = ['C:/ws'];
+		backend.on('ext_fs', ({ op }) => (op === 'exists' ? ['x'] : []));
+		const handle = { frame: { contentWindow: {} } as unknown as HTMLIFrameElement, commandIds: new Set<string>(), pendingCalls: new Set<(error: Error) => void>(), send: () => undefined };
+		host['frames'].set('acme.demo', handle);
+		await host['serve']('fs.op', ['exists', 'marker.txt'], 'acme.demo', handle);
+		expect(backend.callsTo('ext_fs')).toEqual([{ op: 'exists', roots: ['C:/ws'], path: 'marker.txt', to: undefined, data: undefined }]);
+
+		const sent: unknown[] = [];
+		handle.send = (message: unknown) => sent.push(message);
+		host.noteActiveEditor({ kind: 'file', path: 'C:/ws/a.md', languageName: 'Markdown', line: 1, column: 1 });
+		host.noteDocumentSaved('C:/ws/a.md');
+		const events = sent.filter((message: { type?: string }) => message.type === '__studioExtEvent') as { event: string; editor?: { languageId?: string }; languageId?: string }[];
+		expect(events.map((event) => event.event)).toEqual(['activeEditorChanged', 'documentSaved']);
+		expect(events[0]!.editor?.languageId).toBe('markdown');
+		expect(events[1]!.languageId).toBe('markdown');
 	});
 });

@@ -222,6 +222,11 @@ export class Workbench {
 		// install / uninstall, and a view's `onDidChangeTreeData` re-fetches just that tree.
 		this.extensionHost.onViewsChanged = () => this.applyExtensionViews();
 		this.extensionHost.onTreeRefresh = (viewId) => this.extTreeViews.get(viewId)?.refresh();
+		// The editor-facing vscode API: text edits land in an open CodeMirror editor, opens
+		// go through the editor area, and the host pushes active-editor and save events.
+		this.extensionHost.onApplyEdits = (path, edits) => this.editors.applyTextEdits(path, edits);
+		this.extensionHost.onOpenFile = (path) => void this.editors.openFile(path);
+		this.extensionHost.activeText = () => this.editors.activeText();
 		this.graph = new GraphHost({
 			openFile: (path) => void this.editors.openFile(path),
 			openDiff: (diff) => void this.editors.openDiff({ kind: 'diff', ...diff }),
@@ -978,14 +983,19 @@ export class Workbench {
 			if (editor?.kind === 'file' && editor.path && state.layout.sidebarVisible && this.activeView === 'explorer') {
 				void this.explorer.reveal(editor.path);
 			}
-			// An editor of a declared language wakes the extensions listening for it.
+			// The extension frames learn the active editor, and an editor of a declared
+			// language wakes the extensions listening for it.
 			if (editor?.kind === 'file' && editor.path) this.extensionHost.noteLanguageOpened(editor.path);
+			this.extensionHost.noteActiveEditor(editor);
 		};
 		this.editors.onNavigationChange = () => this.titleBar.setNavigation(this.editors.canGoBack(), this.editors.canGoForward());
 		// The session snapshot (tabs, active tab, expanded folders) follows every change, coalesced.
 		this.editors.onTabsChange = () => this.scheduleSnapshot();
 		this.explorer.onExpandedChange = () => this.scheduleSnapshot();
-		this.editors.onFileSaved = () => this.scheduleRefresh(0);
+		this.editors.onFileSaved = (path) => {
+			this.scheduleRefresh(0);
+			this.extensionHost.noteDocumentSaved(path);
+		};
 		this.editors.onSaveProgress = (progress) => this.statusBar.setSaveProgress(progress);
 		this.editors.renderWelcome = (container) => this.renderWelcome(container);
 		this.editors.renderHelp = (help, container) => (help === 'welcome' ? this.renderWelcome(container) : this.renderShortcuts(container));

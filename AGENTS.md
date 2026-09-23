@@ -360,7 +360,9 @@ revives the auto-upgrade).
   bundled-package registry — git-graph-rs and the GGX Demo, `ext_install_bundled`'s ids — the
   `ggx://` protocol that serves an installed package's files — composing the page bootstrap
   into every HTML page, and `ext_fs` — the workspace-confined file services behind
-  `vscode.workspace.fs`, `findFiles` and `workspaceContains` activations), `src-tauri/src/ext_process.rs` (the process extension host: eager
+  `vscode.workspace.fs`, `findFiles` and `workspaceContains` activations),
+  `src-tauri/src/ext_grammar.rs` (the TextMate-grammar loader: `.tmLanguage` plists and
+  `.json` grammars converted to Sublime syntax and added to the rope viewer's syntect set), `src-tauri/src/ext_process.rs` (the process extension host: eager
   start at boot and install, lazy start on first command as the fallback, `initialize`
   handshake, `runCommand`, crash isolation, remembered status (start count, last error),
   stop on uninstall and at app exit), `src-tauri/src/ggx_protocol.rs` (the `ggs-ext/1` wire

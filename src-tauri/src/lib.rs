@@ -45,6 +45,8 @@ pub mod cmd_symbols;
 #[cfg(feature = "desktop")]
 pub mod encoding;
 #[cfg(feature = "desktop")]
+pub mod ext_grammar;
+#[cfg(feature = "desktop")]
 pub mod ext_process;
 #[cfg(feature = "desktop")]
 pub mod mcp;

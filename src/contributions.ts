@@ -199,6 +199,116 @@ export function extensionViewContributions(): ExtensionViewContribution[] {
 	return [...viewContributions.values()];
 }
 
+/* ---------- Extension languages, snippets and themes (module 12's registries) ---------- */
+
+/** File extensions mapped to VS Code's language ids — the base of every resolution; the
+ *  snippet registry keeps its own copy of the map for its lazy chunk, this one serves the
+ *  always-loaded half (onLanguage activations, the editor's language labelling). */
+const BASE_LANGUAGE_BY_EXTENSION: Record<string, string> = {
+	rs: 'rust', ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript',
+	mjs: 'javascript', cjs: 'javascript', py: 'python', go: 'go', java: 'java', c: 'c',
+	h: 'c', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp', cs: 'csharp', rb: 'ruby',
+	php: 'php', sh: 'shellscript', bash: 'shellscript', zsh: 'shellscript', ps1: 'powershell',
+	html: 'html', htm: 'html', css: 'css', scss: 'css', less: 'css', md: 'markdown',
+	markdown: 'markdown', sql: 'sql', kt: 'kotlin', swift: 'swift', lua: 'lua', dart: 'dart'
+};
+
+/** The language id a file name resolves to ('' when unknown): the base map, then the
+ *  extension-declared languages. Always loaded, so onLanguage activations resolve without
+ *  waking the snippet registry's chunk. */
+export function languageIdFor(fileName: string): string {
+	const ext = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : fileName.toLowerCase();
+	if (BASE_LANGUAGE_BY_EXTENSION[ext]) return BASE_LANGUAGE_BY_EXTENSION[ext];
+	return declaredLanguageId(fileName);
+}
+
+/** The languages installed extensions declared (`contributes.languages`), by extension id. */
+const declaredLanguages = new Map<string, { id: string; aliases: string[]; extensions: string[] }[]>();
+
+/** Register one extension's declared languages (whole-set replacement, like every registry
+ *  here — install and uninstall both re-emit). */
+export function registerDeclaredLanguages(extId: string, languages: { id: string; aliases?: string[]; extensions?: string[] }[]): void {
+	if (languages.length > 0) declaredLanguages.set(extId, languages.map((language) => ({ id: language.id, aliases: language.aliases ?? [], extensions: language.extensions ?? [] })));
+	else declaredLanguages.delete(extId);
+	bumpVersion();
+}
+
+/** The declared-language id a file's extension resolves to ('' when none matches) — the
+ *  half `languageIdFor` and the snippet registry both defer to. */
+export function declaredLanguageId(fileName: string): string {
+	const ext = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : fileName.toLowerCase();
+	for (const declared of declaredLanguages.values()) {
+		for (const entry of declared) {
+			if (entry.extensions.some((candidate) => candidate.toLowerCase().replace(/^\./, '') === ext)) return entry.id;
+		}
+	}
+	return '';
+}
+
+/** The display name for a file whose language only an extension declares — the first alias
+ *  (VS Code's `aliases[0]`), else null: no declared language matches. */
+export function declaredLanguageName(fileName: string): string | null {
+	const ext = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : fileName.toLowerCase();
+	for (const declared of declaredLanguages.values()) {
+		for (const entry of declared) {
+			if (entry.extensions.some((candidate) => candidate.toLowerCase().replace(/^\./, '') === ext)) return entry.aliases[0] ?? entry.id;
+		}
+	}
+	return null;
+}
+
+/** The extension-contributed snippet files, raw (`contributes.snippets` — `{language, path}`
+ *  with the file already read): the snippet registry's lazy chunk parses them on demand. */
+const extensionSnippetFilesByExt = new Map<string, { language: string; text: string }[]>();
+
+/** Register one extension's snippet files (whole-set replacement). */
+export function registerExtensionSnippets(extId: string, files: { language: string; text: string }[]): void {
+	if (files.length > 0) extensionSnippetFilesByExt.set(extId, files);
+	else extensionSnippetFilesByExt.delete(extId);
+	bumpVersion();
+}
+
+/** Every extension's snippet files, flattened (the lazy parser's input). */
+export function extensionSnippetFiles(): { language: string; text: string }[] {
+	return [...extensionSnippetFilesByExt.values()].flat();
+}
+
+/** One extension's declared themes (`contributes.themes`, the JSON already read): the
+ *  settings module turns each into a theme-picker entry with a generated overlay. */
+export interface ExtensionThemeDef {
+	extId: string;
+	label: string;
+	kind: 'vscode-dark' | 'vscode-light';
+	colors: Record<string, string>;
+	tokenColors: { scope: string | string[]; settings: { foreground?: string } }[];
+}
+
+const extensionThemes = new Map<string, ExtensionThemeDef[]>();
+
+/** Register one extension's themes (whole-set replacement). */
+export function registerExtensionThemes(extId: string, themes: ExtensionThemeDef[]): void {
+	if (themes.length > 0) extensionThemes.set(extId, themes);
+	else extensionThemes.delete(extId);
+	bumpVersion();
+}
+
+/** Every extension's declared themes, flattened. */
+export function extensionThemeList(): ExtensionThemeDef[] {
+	return [...extensionThemes.values()].flat();
+}
+
+/** Bumped by every whole-set registry write above, so lazy consumers (the snippet parser's
+ *  cache) and the settings module know the world changed. */
+let registryVersion = 0;
+
+export function contributionRegistryVersion(): number {
+	return registryVersion;
+}
+
+function bumpVersion(): void {
+	registryVersion++;
+}
+
 const extensionSettings = new Map<string, ExtensionSettingDef[]>();
 
 /** The extension-declared settings of every active extension (the dialog's Extensions rows). */
@@ -228,8 +338,11 @@ export function applyContributions(extId: string, contributes: ManifestContribut
 	// The declared settings join the registry the Settings dialog generates its rows from.
 	applyExtensionSettings(extId, contributes?.configuration, nls);
 	// The declared sidebar surface (containers + tree views) joins the same registry the
-	// workbench builds its activity bar sections from.
+	// workbench builds its activity bar sections from; the declared languages join the
+	// language resolution (the snippet files and themes are read by the host, which
+	// registers them whole once their contents land).
 	applyExtensionViews(extId, contributes, nls);
+	registerDeclaredLanguages(extId, contributes?.languages ?? []);
 	if (!contributes) return;
 	const registered: ExtensionContributions = { commands: new Map(), menus: {} };
 	byExtension.set(extId, registered);
@@ -260,6 +373,9 @@ export function applyContributions(extId: string, contributes: ManifestContribut
 export function removeContributions(extId: string): void {
 	extensionSettings.delete(extId);
 	viewContributions.delete(extId);
+	registerDeclaredLanguages(extId, []);
+	registerExtensionSnippets(extId, []);
+	registerExtensionThemes(extId, []);
 	byExtension.delete(extId);
 }
 

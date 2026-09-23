@@ -122,6 +122,39 @@ export class EditorArea {
 		return false;
 	}
 
+	/** The active editor's whole text, when a file editor is active — module 12 pushes it to
+	 *  extension frames on active-editor changes (only when the document changed). */
+	activeText(): string | null {
+		if (this.activeInput?.kind !== 'file') return null;
+		return this.activeView?.state.doc.toString() ?? null;
+	}
+
+	/** Apply a TextEdit batch (1-based lines, 0-based characters) to an open file editor —
+	 *  module 12's `vscode.workspace.applyEdit` / `TextEditor.edit`. A null path addresses
+	 *  the active file editor; false means the file is not open (the caller falls back to
+	 *  file-level edits through the extension filesystem). */
+	applyTextEdits(path: string | null, edits: { startLine: number; startCharacter: number; endLine: number; endCharacter: number; newText: string }[]): boolean {
+		const view = path === null
+			? (this.activeInput?.kind === 'file' ? this.activeView : null)
+			: (this.groups().map((group) => group.fileViewFor(path)).find((candidate) => candidate !== null) ?? null);
+		if (!view) return false;
+		const doc = view.state.doc;
+		const position = (line: number, character: number): number => {
+			const target = doc.line(Math.max(1, Math.min(line, doc.lines)));
+			return Math.min(target.from + Math.max(0, character), target.to);
+		};
+		const changes = [...edits]
+			.sort((a, b) => (a.startLine - b.startLine) || (a.startCharacter - b.startCharacter))
+			.reverse()
+			.map((edit) => {
+				const from = Math.min(position(edit.startLine, edit.startCharacter), doc.length);
+				const to = Math.max(from, Math.min(position(edit.endLine, edit.endCharacter), doc.length));
+				return { from, to, insert: edit.newText };
+			});
+		view.dispatch({ changes });
+		return true;
+	}
+
 	/** Focus the tab with this input id in whichever group holds it (a webview panel's
 	 *  `reveal()`); returns whether a tab was found. */
 	revealById(id: string): boolean {

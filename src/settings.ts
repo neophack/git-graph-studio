@@ -7,7 +7,7 @@ import { invoke } from '@tauri-apps/api/core';
 
 import { load, save } from './state';
 import { setLocale, t } from './i18n';
-import { notify } from './ui';
+import { el, notify } from './ui';
 
 export type AutoSave = 'off' | 'afterDelay' | 'onFocusChange' | 'onWindowChange';
 export type LinuxDmabuf = 'auto' | 'disable' | 'keep';
@@ -167,6 +167,9 @@ export interface ThemeDef {
 	kind: 'vscode-dark' | 'vscode-light';
 	/** The vscode-* class pair the theme's surfaces expect on html/body. */
 	css: string;
+	/** An extension theme's generated variables, applied as a `:root` overlay on top of the
+	 *  base stylesheet of its `kind` (`contributes.themes`, module 12). */
+	overlay?: Record<string, string>;
 }
 
 /** The theme the system's colour scheme picks for `auto` (dark first, VS Code's tie-break). */
@@ -184,6 +187,59 @@ export const THEMES: ThemeDef[] = [
 	{ id: 'monokai', label: 'Monokai', kind: 'vscode-dark', css: '/theme/monokai.css' },
 	{ id: 'nord', label: 'Nord', kind: 'vscode-dark', css: '/theme/nord.css' }
 ];
+
+/* ---------- Extension themes (`contributes.themes`) ---------- */
+
+/** VS Code theme JSON workbench colors → CSS variables (`editor.background` →
+ *  `--vscode-editor-background`, dots become dashes), plus the `--syntax-*` buckets the
+ *  editor and the Fast Viewer color from, mapped from `tokenColors` by the scope needles
+ *  both share (fastView.ts's SCOPE_COLORS list, most-specific first). */
+export function themeOverlayVars(theme: { colors: Record<string, string>; tokenColors: { scope: string | string[]; settings: { foreground?: string } }[] }): Record<string, string> {
+	const vars: Record<string, string> = {};
+	for (const [key, value] of Object.entries(theme.colors ?? {})) {
+		if (typeof value === 'string' && value !== '') vars[`--vscode-${key.replace(/\./g, '-')}`] = value;
+	}
+	const buckets: [string, string][] = [
+		['comment', '--syntax-comment'], ['string', '--syntax-string'], ['constant.numeric', '--syntax-number'],
+		['entity.name.function', '--syntax-function'], ['support.function', '--syntax-function'],
+		['entity.name.type', '--syntax-type'], ['support.class', '--syntax-type'], ['support.type', '--syntax-type'],
+		['storage.type', '--syntax-keyword'], ['keyword', '--syntax-keyword'], ['storage', '--syntax-keyword'],
+		['constant.language', '--syntax-keyword'], ['constant.character', '--syntax-char'],
+		['variable.language', '--syntax-keyword'], ['variable.parameter', '--syntax-parameter'],
+		['entity.other.attribute-name', '--syntax-parameter'], ['tag', '--syntax-keyword'], ['punctuation', '--syntax-punctuation']
+	];
+	for (const token of theme.tokenColors ?? []) {
+		const color = token.settings?.foreground;
+		if (!color) continue;
+		const scopes = (Array.isArray(token.scope) ? token.scope : String(token.scope ?? '').split(',')).map((scope) => scope.trim());
+		for (const scope of scopes) {
+			for (const [needle, variable] of buckets) {
+				if (scope.includes(needle) && !vars[variable]) vars[variable] = color;
+			}
+		}
+	}
+	return vars;
+}
+
+/** Replace the picker's extension-theme entries from the module-12 registry (the host calls
+ *  this after every install / uninstall). An extension theme rides the base stylesheet of
+ *  its `uiTheme` kind with its generated overlay on top. */
+export function syncExtensionThemes(themes: { extId: string; label: string; kind: 'vscode-dark' | 'vscode-light'; colors: Record<string, string>; tokenColors: { scope: string | string[]; settings: { foreground?: string } }[] }[]): void {
+	for (let at = THEMES.length - 1; at >= 0; at--) {
+		if (THEMES[at]!.id.startsWith('ext-theme:')) THEMES.splice(at, 1);
+	}
+	for (const [index, theme] of themes.entries()) {
+		THEMES.push({
+			id: `ext-theme:${theme.extId}:${index}`,
+			label: theme.label,
+			kind: theme.kind,
+			css: theme.kind === 'vscode-light' ? '/theme/light-modern.css' : '/theme/dark-modern.css',
+			overlay: themeOverlayVars(theme)
+		});
+	}
+	// A selected theme that just went away falls back to the default at the next apply.
+	applyTheme();
+}
 
 export function themeById(id: string = settings.theme): ThemeDef {
 	if (id === 'auto') return systemTheme();
@@ -214,7 +270,22 @@ export function applyTheme(id: string = settings.theme): void {
 		element.dataset['vscodeThemeKind'] = theme.kind;
 		element.dataset['vscodeThemeName'] = theme.label;
 	}
-	if (!link || link.getAttribute('href') === theme.css) return;
+	// An extension theme's overlay: a `:root` style on top of the base stylesheet (the
+	// generated variables from its workbench colors and tokenColors).
+	const overlay = document.getElementById('ext-theme-overlay');
+	if (theme.overlay && Object.keys(theme.overlay).length > 0) {
+		const style = overlay ?? document.head.appendChild(el('style'));
+		style.id = 'ext-theme-overlay';
+		style.textContent = `:root{${Object.entries(theme.overlay).map(([name, value]) => `${name}:${value};`).join('')}}`;
+	} else {
+		overlay?.remove();
+	}
+	if (!link || link.getAttribute('href') === theme.css) {
+		// Same base stylesheet: the change (if any) was the overlay alone — the color-reading
+		// consumers still need their re-read pass.
+		if (theme.overlay) dispatch(THEME_EVENT, theme.id);
+		return;
+	}
 	link.addEventListener('load', () => dispatch(THEME_EVENT, theme.id), { once: true });
 	link.href = theme.css;
 }

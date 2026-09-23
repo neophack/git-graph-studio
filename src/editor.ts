@@ -25,7 +25,7 @@ import type { BlameLine, FileHistoryView } from './fileHistory';
 import type * as TextEditor from './textEditor';
 import type { CallTreeView, WsSymbol } from './callTree';
 import { commands } from './commands';
-import { menuSection } from './contributions';
+import { declaredLanguageName, menuSection } from './contributions';
 import { BinaryCompareHost, binaryCompareTitle, CompareHost } from './graphHost';
 import type { FolderCompareView } from './folderCompare';
 import type { MergeToolbar } from './mergeEditor';
@@ -1395,9 +1395,15 @@ export class EditorGroup {
 		// was built here, and only while it is still the editor's current one.
 		const view = editor.view;
 		void loadLanguage(editor.label).then((language) => {
-			if (!language || editor.view !== view) return;
-			editor.languageName = language.name;
-			view.dispatch({ effects: languageSlot.reconfigure(language.support) });
+			if (editor.view !== view) return;
+			if (language) {
+				editor.languageName = language.name;
+				view.dispatch({ effects: languageSlot.reconfigure(language.support) });
+			} else {
+				// No CodeMirror language — but an installed extension may still declare one
+				// (`contributes.languages`): its name labels the editor (and scopes snippets).
+				editor.languageName = declaredLanguageName(editor.label) ?? 'Plain Text';
+			}
 			this.emitActive();
 		});
 		this.attachTextServices(editor);
@@ -2242,6 +2248,12 @@ export class EditorGroup {
 	 *  the groups with it). */
 	hasEditor(id: string): boolean {
 		return this.open.some((e) => e.id === id);
+	}
+
+	/** The open file editor's CodeMirror view for `path`, when this group holds it — module
+	 *  12's workspace.applyEdit applies text edits through it. */
+	fileViewFor(path: string): EditorView | null {
+		return this.open.find((candidate) => candidate.input.kind === 'file' && candidate.input.path === path)?.view ?? null;
 	}
 
 	/** Close the tab with this input id (the extension host closes a webview panel's tab

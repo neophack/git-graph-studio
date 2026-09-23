@@ -711,10 +711,26 @@ VSIX compatibility (above) is for the existing ecosystem. GGS's *own* plugin for
 > ways, `onDidDispose` on tab close), persisted `globalState`/`workspaceState` mementos
 > (localStorage-backed, preloaded at activation), `onDidChangeConfiguration` (pushed in when
 > the extension's settings change), `env.clipboard.readText` and `CancellationTokenSource`.
-> Still unsupported, next rounds: tree views and `viewsContainers`/`views` contributions,
-> `activationEvents` (everything activates eagerly today), `languages`/`grammars`/`snippets`
-> contributions, `activeTextEditor`/`applyEdit`, the Node-only half of the ecosystem
-> (M6.8's optional Node host).
+> **Rounds two and three (same day, "完成第二轮第三轮")**: tree views landed —
+> `contributes.viewsContainers`/`views` build activity-bar containers and sidebar sections
+> over a generic tree host, `createTreeView` round-trips levels/commands/visibility with
+> the frame, and `activationEvents` now gate activation (onCommand/onLanguage/onView wake
+> on first use, `workspaceContains` checks at boot through the new workspace-confined
+> `ext_fs` command — also `vscode.workspace.fs`/`findFiles`' backend). The editor-suite
+> half: `contributes.languages` resolve file names and label the editor,
+> `contributes.snippets` join the snippet registry, `contributes.themes` become picker
+> entries with generated CSS-variable overlays (workbench colors plus the `--syntax-*`
+> buckets mapped from `tokenColors`), `contributes.grammars` load through a
+> TextMate→Sublime converter into the rope viewer's syntect set
+> (match/begin-end/include/repository; an unconvertible grammar skips as plain text), and
+> `activeTextEditor`/`applyEdit`/`TextEditor.edit`/`onDidSaveTextDocument`/
+> `openTextDocument` cover the editor API (edits into open CodeMirror documents, closed
+> files through the extension filesystem).
+>
+> Still unsupported, next rounds: the Node-only half of the ecosystem (M6.8's optional
+> Node host), grammar constructs beyond the converter's core (while-regions, variables,
+> embedded-code injections), tree view `reveal`/drag-drop/contextValue menus, and
+> `workspace.fs` watcher events.
 
 git-graph-rs is the first `.ggx`: **frontend and backend in one package**, installed and upgraded like any extension, the backend running as its own process.
 

@@ -4,6 +4,8 @@
 
 import { invoke } from '@tauri-apps/api/core';
 
+import { contributionRegistryVersion, declaredLanguageId, extensionSnippetFiles } from './contributions';
+
 /** One snippet, as VS Code spells it: a prefix, a body with tabstops, optional description
  *  and a scope of language ids (empty = every language). */
 export interface VSSnippet {
@@ -12,7 +14,7 @@ export interface VSSnippet {
 	body: string;
 	description?: string;
 	scope?: string;
-	source: 'builtin' | 'workspace';
+	source: 'builtin' | 'workspace' | 'extension';
 }
 
 /** The built-in base set: two or three high-traffic snippets per language, keyed by VS Code's
@@ -120,14 +122,36 @@ const LANGUAGE_BY_EXTENSION: Record<string, string> = {
 	markdown: 'markdown', sql: 'sql', kt: 'kotlin', swift: 'swift', lua: 'lua', dart: 'dart'
 };
 
-/** The language id a file name is written in ('' when unknown). */
+/** The language id a file name is written in ('' when unknown): the built-in extension map,
+ *  then a language an installed extension declared (`contributes.languages` — the registry
+ *  lives in contributions.ts, always loaded, so this stays a plain lookup). */
 export function languageOf(fileName: string): string {
 	const ext = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : fileName.toLowerCase();
-	return LANGUAGE_BY_EXTENSION[ext] ?? '';
+	if (LANGUAGE_BY_EXTENSION[ext]) return LANGUAGE_BY_EXTENSION[ext];
+	return declaredLanguageId(fileName);
 }
 
 /** The workspace snippets the latest `loadWorkspaceSnippets` found (empty until it lands). */
 let workspaceSnippets: VSSnippet[] = [];
+
+/** The extension-contributed snippet files, parsed and cached by registry version (the raw
+ *  files register into contributions.ts — this lazy chunk parses them on first query). */
+let parsedExtensionSnippets: { version: number; snippets: VSSnippet[] } | null = null;
+
+function extensionSnippets(): VSSnippet[] {
+	const version = contributionRegistryVersion();
+	if (parsedExtensionSnippets?.version !== version) {
+		parsedExtensionSnippets = {
+			version,
+			snippets: extensionSnippetFiles().flatMap((file) => parseCodeSnippets(file.text).map((snippet) => ({
+				...snippet,
+				source: 'extension' as const,
+				scope: snippet.scope ?? file.language
+			})))
+		};
+	}
+	return parsedExtensionSnippets.snippets;
+}
 
 /** Read every `.vscode/*.code-snippets` of the workspace into the registry. A file that fails
  *  to parse is skipped silently (VS Code reports it in a log we do not have). */
@@ -224,18 +248,15 @@ function stripJsonc(text: string): string {
 	return out;
 }
 
-/** The snippets that apply to a file: the built-ins of its language plus workspace snippets
- *  whose scope matches (or that carry no scope at all). */
+/** The snippets that apply to a file: the extensions' contributed ones, the built-ins of its
+ *  language, and the workspace's — each set filtered by scope (or scope-less). */
 export function snippetsFor(fileName: string): VSSnippet[] {
 	const language = languageOf(fileName);
 	const builtin: VSSnippet[] = (BUILTINS[language] ?? []).map((s) => ({
-		label: s.prefix, prefix: s.prefix, body: s.body, description: s.description, source: 'builtin'
+		label: s.prefix, prefix: s.prefix, body: s.body, description: s.description, source: 'builtin' as const
 	}));
-	const scoped = workspaceSnippets.filter((s) => {
-		if (!s.scope) return true;
-		return s.scope.split(',').map((id) => id.trim()).includes(language);
-	});
-	return [...scoped, ...builtin];
+	const scoped = (snippet: VSSnippet) => !snippet.scope || snippet.scope.split(',').map((id) => id.trim()).includes(language);
+	return [...extensionSnippets().filter(scoped), ...workspaceSnippets.filter(scoped), ...builtin];
 }
 
 /** Resolve VS Code's snippet variables (`$TM_FILENAME`, …) in a body. Tabstops are left

@@ -18,10 +18,10 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { builtinContributions } from 'virtual:builtin-contributions';
 
 import { commands } from './commands';
-import { applyContributions, applyExtensionSettings, declaredCommand, extensionViewContributions, localize, removeContributions, type ManifestContributes } from './contributions';
+import { applyContributions, applyExtensionSettings, declaredCommand, extensionThemeList, extensionViewContributions, languageIdFor, localize, registerExtensionSnippets, registerExtensionThemes, removeContributions, type ExtensionThemeDef, type ManifestContributes } from './contributions';
+import { syncExtensionThemes } from './settings';
 import { locale, registerZhCnText, t } from './i18n';
 import { loadBuiltinSettings } from './lazy';
-import { languageOf } from './snippetRegistry';
 import * as state from './state';
 import { notify, progressToast, quickInput, type ProgressToast } from './ui';
 import type { SerializedTreeItem } from './treeView';
@@ -317,6 +317,16 @@ export class ExtensionHost {
 	onOutputAppend: ((extId: string, name: string, line: string) => void) | null = null;
 	onOutputClearChannel: ((extId: string, name: string) => void) | null = null;
 	onOutputReveal: ((extId: string, name: string) => void) | null = null;
+	/** Workbench hooks behind the editor-facing vscode API: text-edit application (into an
+	 *  open CodeMirror editor), file opening, and the active editor's text. */
+	onApplyEdits: ((path: string | null, edits: { startLine: number; startCharacter: number; endLine: number; endCharacter: number; newText: string }[]) => boolean) | null = null;
+	onOpenFile: ((path: string) => void) | null = null;
+	/** The active file editor's whole text, or null — pushed to frames when the active
+	 *  document changed, so `TextDocument.getText()` is synchronous inside the frame. */
+	activeText: (() => string | null) | null = null;
+	/** The path whose text the last activeEditorChanged push carried (suppresses re-sending
+	 *  a big document on selection-only changes). */
+	private lastPushedDocument: string | null = null;
 
 	/** The withProgress toasts, by progress id. */
 	private readonly progress = new Map<number, ProgressToast>();
@@ -485,6 +495,9 @@ export class ExtensionHost {
 		}
 		this.activationPolicies.set(ext.id, parseActivationPolicy(manifest?.activationEvents));
 		this.registerContributions(ext.id, manifest?.contributes, nls, nlsZhCn);
+		// The snippet and theme contributions are file contents: read them, then register
+		// whole (the settings module turns the themes into picker entries with overlays).
+		void this.loadContributionFiles(ext.id, manifest?.contributes);
 		// A ggx/2 process package's commands dispatch to its backend rather than a frame:
 		// its declared ids become runnable from the manifest alone. The backend itself comes
 		// up eagerly (the boot pass and the install both start it); a first command still
@@ -496,6 +509,41 @@ export class ExtensionHost {
 		} else {
 			this.processBacked.delete(ext.id);
 		}
+	}
+
+	/** Read one extension's `contributes.snippets` and `.themes` files and register their
+	 *  contents whole. An unreadable file is skipped (VS Code logs it; we have no channel
+	 *  for it) — the registries keep whatever else landed. */
+	private async loadContributionFiles(extId: string, contributes: ManifestContributes | undefined): Promise<void> {
+		const snippetFiles: { language: string; text: string }[] = [];
+		for (const declared of contributes?.snippets ?? []) {
+			try {
+				snippetFiles.push({ language: declared.language, text: await invoke<string>('ext_read_file', { extId, relPath: declared.path }) });
+			} catch {
+				// Unreadable snippet file: skip it, keep the rest.
+			}
+		}
+		registerExtensionSnippets(extId, snippetFiles);
+		const themes: ExtensionThemeDef[] = [];
+		for (const declared of contributes?.themes ?? []) {
+			try {
+				const parsed = JSON.parse(await invoke<string>('ext_read_file', { extId, relPath: declared.path })) as {
+					colors?: Record<string, string>;
+					tokenColors?: ExtensionThemeDef['tokenColors'];
+				};
+				themes.push({
+					extId,
+					label: declared.label,
+					kind: declared.uiTheme === 'vs' || declared.uiTheme === 'vs-light' ? 'vscode-light' : 'vscode-dark',
+					colors: parsed.colors ?? {},
+					tokenColors: Array.isArray(parsed.tokenColors) ? parsed.tokenColors : []
+				});
+			} catch {
+				// Unreadable theme file: skip it, keep the rest.
+			}
+		}
+		registerExtensionThemes(extId, themes);
+		syncExtensionThemes(extensionThemeList());
 	}
 
 	/** Register one extension's parsed manifest contributions into the workbench. */
@@ -917,6 +965,23 @@ export class ExtensionHost {
 				this.emitStatusBarItems();
 				return Promise.resolve(undefined);
 			}
+			case 'fs.op': {
+				// vscode.workspace.fs / findFiles: one command, workspace-confined on the Rust
+				// side (every path resolves inside the open folders or is refused there).
+				const [op, path, to, data] = args as [string, string, string?, string?];
+				return invoke('ext_fs', { op, roots: ExtensionHost.workspaceFolders, path, to, data });
+			}
+			case 'editor.applyEdits': {
+				// A null path addresses the active file editor; false (not open) tells the
+				// frame's applyEdit to fall back to file-level edits.
+				const [path, edits] = args as [string | null, { startLine: number; startCharacter: number; endLine: number; endCharacter: number; newText: string }[]];
+				return Promise.resolve(this.onApplyEdits ? this.onApplyEdits(path, edits) : false);
+			}
+			case 'workspace.openFile': {
+				const path = args[0] as string;
+				this.onOpenFile?.(path);
+				return Promise.resolve(undefined);
+			}
 			case 'treeView.register': {
 				this.treeProviders.set(args[0] as string, extId);
 				return Promise.resolve(undefined);
@@ -1063,11 +1128,37 @@ export class ExtensionHost {
 		if (frame && this.treeProviders.has(viewId)) void this.callFrame(frame, 'treeView.setVisible', [viewId, visible]).catch(() => undefined);
 	}
 
+	/** The workbench's active-editor change: every frame learns the active text editor
+	 *  (its document text rides along when the document itself changed — a selection-only
+	 *  change never re-sends a big document). */
+	noteActiveEditor(editor: { kind: string; path?: string; languageName?: string; line: number; column: number; selected?: number } | null): void {
+		const info = editor !== null && editor.kind === 'file' && editor.path
+			? { path: editor.path, languageId: languageIdFor(editor.path), line: editor.line, column: editor.column, selected: editor.selected }
+			: null;
+		let push: Record<string, unknown>;
+		if (info === null) {
+			push = { type: '__studioExtEvent', event: 'activeEditorChanged', editor: null };
+		} else if (info.path === this.lastPushedDocument) {
+			// Same document: strip the text — the frame already holds it.
+			push = { type: '__studioExtEvent', event: 'activeEditorChanged', editor: { ...info, text: undefined } };
+		} else {
+			this.lastPushedDocument = info.path;
+			push = { type: '__studioExtEvent', event: 'activeEditorChanged', editor: { ...info, text: this.activeText?.() ?? undefined } };
+		}
+		for (const handle of this.frames.values()) handle.send?.(push);
+	}
+
+	/** A document was saved: every frame's `onDidSaveTextDocument` fires. */
+	noteDocumentSaved(path: string): void {
+		const push = { type: '__studioExtEvent', event: 'documentSaved', path, languageId: languageIdFor(path) };
+		for (const handle of this.frames.values()) handle.send?.(push);
+	}
+
 	/** A file opened in an editor: every extension declaring `onLanguage:<its language>`
 	 *  wakes (the language id follows VS Code's map plus any `contributes.languages` entry —
 	 *  module 12's language registry feeds `languageOf`). */
 	noteLanguageOpened(fileName: string): void {
-		const language = languageOf(fileName);
+		const language = languageIdFor(fileName);
 		if (!language) return;
 		for (const [extId, policy] of this.activationPolicies) {
 			if (policy.languages.has(language)) void this.ensureActive(extId);

@@ -1771,6 +1771,7 @@ dependencies = [
  "ignore",
  "memchr",
  "notify",
+ "plist",
  "portable-pty",
  "rayon",
  "regex",

@@ -32,12 +32,63 @@ export interface HostContext {
 }
 
 /** An event the host pushed into the frame: a configuration change for this extension, a
- *  message from one of its webview panels, or a panel going away. */
+ *  message from one of its webview panels, a panel going away, the active editor changing
+ *  (with its document text when the document changed), or a document being saved. */
 export interface HostEvent {
-	event: 'configChanged' | 'webviewMessage' | 'webviewDisposed';
+	event: 'configChanged' | 'webviewMessage' | 'webviewDisposed' | 'activeEditorChanged' | 'documentSaved';
 	settings?: Record<string, unknown>;
 	panelId?: number;
 	message?: unknown;
+	/** The active editor as the host tracks it (null when no text editor is active). */
+	editor?: { path: string; languageId: string; text?: string; line: number; column: number; selected?: number } | null;
+	path?: string;
+	languageId?: string;
+}
+
+/** One edit as it crosses the bridge: 1-based line / 0-based character positions, the shape
+ *  both the open-editor path (CodeMirror) and the closed-file path (text splicing) apply. */
+export interface SerializableTextEdit {
+	startLine: number;
+	startCharacter: number;
+	endLine: number;
+	endCharacter: number;
+	newText: string;
+}
+
+/** Apply an edit batch to a text, bottom-up so earlier positions stay valid — the frame's
+ *  half of `workspace.applyEdit` for files that are not open in an editor. */
+export function applyTextEditsToText(text: string, edits: SerializableTextEdit[]): string {
+	const lines = text.split('\n');
+	const offsetOf = (line: number, character: number): number => {
+		const clamped = Math.max(1, Math.min(line, lines.length));
+		let offset = 0;
+		for (let at = 0; at < clamped - 1; at++) offset += lines[at]!.length + 1;
+		return offset + Math.max(0, character);
+	};
+	const sorted = [...edits].sort((a, b) => (a.startLine - b.startLine) || (a.startCharacter - b.startCharacter));
+	for (let index = sorted.length - 1; index >= 0; index--) {
+		const edit = sorted[index]!;
+		const from = Math.min(offsetOf(edit.startLine, edit.startCharacter), text.length);
+		const to = Math.max(from, Math.min(offsetOf(edit.endLine, edit.endCharacter), text.length));
+		text = text.slice(0, from) + edit.newText + text.slice(to);
+	}
+	return text;
+}
+
+/** Base64 helpers over the bridge's byte format (`atob` gives a binary string; the loops
+ *  move it into a real byte array without per-byte string ops on large buffers). */
+function decodeBase64(data: string): Uint8Array {
+	const raw = atob(data);
+	const bytes = new Uint8Array(raw.length);
+	for (let at = 0; at < raw.length; at++) bytes[at] = raw.charCodeAt(at);
+	return bytes;
+}
+
+function encodeBase64(bytes: Uint8Array): string {
+	let binary = '';
+	const chunk = 8192;
+	for (let at = 0; at < bytes.length; at += chunk) binary += String.fromCharCode(...bytes.subarray(at, at + chunk));
+	return btoa(binary);
 }
 
 /* ---------- The small value types VS Code's API is built from ---------- */
@@ -441,8 +492,6 @@ function unsupported(name: string): never {
 }
 
 export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
-	const workspaceFoldersChanged = new EventEmitter<void>();
-	const configurationChanged = new EventEmitter<void>();
 	/** The webview panels this frame created, by panel id (host events route through them). */
 	const webviewPanels = new Map<number, WebviewPanel>();
 	const globalState = new Memento(ctx, bridge, 'global');
@@ -451,6 +500,14 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 	let statusSeq = 0;
 	/** Set below the literal — the literal's `handleHostEvent` forwards into it. */
 	let dispatchHostEvent: (event: HostEvent) => void = () => undefined;
+	const workspaceFoldersChanged = new EventEmitter<void>();
+	const configurationChanged = new EventEmitter<void>();
+	const documentSaved = new EventEmitter<{ fileName: string } & Record<string, unknown>>();
+	const activeEditorChangedEmitter = new EventEmitter<void>();
+	const selectionChanged = new EventEmitter<void>();
+	/** The host's view of the active text editor, as the last `activeEditorChanged` push left
+	 *  it (text rides along whenever the document itself changed). */
+	let activeEditor: HostEvent['editor'] = null;
 	/** The tree views this frame registered, by view id (host calls and events route through). */
 	const treeRegistrations = new Map<string, TreeViewRegistration>();
 
@@ -487,6 +544,63 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			if (label === undefined || label === null) return undefined;
 			return entries.find((entry) => entry.label === label)?.item;
 		});
+	}
+
+	/** A TextDocument for a path, from the host's last knowledge of it (the text is the
+	 *  active-editor push's copy when this is the active document, else empty). */
+	function makeTextDocument(path: string): Record<string, unknown> {
+		const active = activeEditor?.path === path ? activeEditor : null;
+		return {
+			uri: Uri.file(path),
+			fileName: path,
+			languageId: active?.languageId ?? '',
+			version: 1,
+			isDirty: false,
+			isUntitled: false,
+			isClosed: false,
+			getText: () => active?.text ?? '',
+			save: async () => true
+		};
+	}
+
+	/** The active-editor proxy: `activeTextEditor` (undefined with no text editor open). Its
+	 *  selection is the host's push (a single range), its `edit` builds a TextEdit batch in
+	 *  the frame and hands it to the host's open-editor applier. */
+	function makeTextEditorProxy(): Record<string, unknown> {
+		const selectionRange = () => {
+			const line = Math.max(1, activeEditor?.line ?? 1);
+			const column = Math.max(1, activeEditor?.column ?? 1);
+			const start = new Position(line - 1, column - 1);
+			return new Range(start, new Position(start.line, start.character + (activeEditor?.selected ?? 0)));
+		};
+		return {
+			get document() {
+				return activeEditor ? makeTextDocument(activeEditor!.path) : makeTextDocument('');
+			},
+			get selection() {
+				return selectionRange();
+			},
+			get selections() {
+				return [selectionRange()];
+			},
+			get visibleRanges() {
+				const start = new Position(Math.max(0, (activeEditor?.line ?? 1) - 1), 0);
+				return [new Range(start, start)];
+			},
+			viewColumn: ViewColumn.One,
+			options: {},
+			edit: (callback: (builder: { replace(range: Range, newText: string): void; insert(position: Position, newText: string): void; delete(range: Range): void }) => void) => {
+				const edits: SerializableTextEdit[] = [];
+				const push = (start: Position, end: Position, newText: string) => edits.push({ startLine: start.line + 1, startCharacter: start.character, endLine: end.line + 1, endCharacter: end.character, newText });
+				callback({
+					replace: (range: Range, newText: string) => push(range.start, range.end, newText),
+					insert: (position: Position, newText: string) => push(position, position, newText),
+					delete: (range: Range) => push(range.start, range.end, '')
+				});
+				// A null path addresses the ACTIVE editor (the host resolves it there).
+				return bridge.request('editor.applyEdits', [null, edits]).then((applied) => applied === true) as Promise<boolean>;
+			}
+		};
 	}
 
 	const api = {
@@ -555,6 +669,19 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 				void bridge.request('webview.create', [panelId, viewType, title]);
 				return panel;
 			},
+			get activeTextEditor(): Record<string, unknown> | undefined {
+				return activeEditor ? makeTextEditorProxy() : undefined;
+			},
+			get visibleTextEditors(): Record<string, unknown>[] {
+				return activeEditor ? [makeTextEditorProxy()] : [];
+			},
+			onDidChangeActiveTextEditor: activeEditorChangedEmitter.event,
+			onDidChangeTextEditorSelection: selectionChanged.event,
+			showTextDocument: async (documentOrUri: Record<string, unknown> | Uri | string) => {
+				const path = typeof documentOrUri === 'string' ? documentOrUri : documentOrUri instanceof Object && 'fsPath' in (documentOrUri as Uri) ? (documentOrUri as Uri).fsPath : String((documentOrUri as { fileName?: string }).fileName ?? '');
+				await bridge.request('workspace.openFile', [path]);
+				return makeTextEditorProxy();
+			},
 			createTreeView: (viewId: string, options: { treeDataProvider: TreeDataProvider<unknown> }) => {
 				const registration = registerTree(viewId, options.treeDataProvider);
 				return {
@@ -587,12 +714,59 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			getWorkspaceFolder: () => ctx.workspaceFolders[0] ?? null,
 			getConfiguration: (section = '') => new WorkspaceConfiguration(ctx, bridge, section),
 			onDidChangeConfiguration: configurationChanged.event,
-			onDidSaveTextDocument: (() => new Disposable(() => undefined)) as never,
-			findFiles: () => unsupported('workspace.findFiles'),
-			applyEdit: () => unsupported('workspace.applyEdit'),
-			get fs(): never {
-				return unsupported('workspace.fs');
-			}
+			onDidSaveTextDocument: documentSaved.event,
+			onDidOpenTextDocument: (() => new Disposable(() => undefined)) as never,
+			/** Open a file in the editor area (the host half opens and reveals it); the
+			 *  returned document mirrors what the host knows — text arrives with the
+			 *  active-editor push an open produces. */
+			openTextDocument: async (uriOrPath: Uri | string) => {
+				const path = typeof uriOrPath === 'string' ? uriOrPath : uriOrPath.fsPath;
+				await bridge.request('workspace.openFile', [path]);
+				return makeTextDocument(path);
+			},
+			/** A WorkspaceEdit over its `changes`: open editors take their edits through the
+			 *  CodeMirror document; closed files are read, spliced and written back through
+			 *  `workspace.fs` — the same confinement the fs ops carry. */
+			applyEdit: async (edit: { changes?: Record<string, SerializableTextEdit[]>; documentChanges?: unknown[] }) => {
+				if (edit.documentChanges) unsupported('workspace.applyEdit documentChanges');
+				const changes = edit.changes ?? {};
+				for (const [uriString, edits] of Object.entries(changes)) {
+					const path = uriString.startsWith('file:') ? uriString.slice('file:'.length) : uriString;
+					const applied = await bridge.request('editor.applyEdits', [path, edits]);
+					if (applied === true) continue;
+					const read = (await bridge.request('fs.op', ['read', path])) as { data: string };
+					const after = applyTextEditsToText(new TextDecoder().decode(decodeBase64(read.data)), edits);
+					await bridge.request('fs.op', ['write', path, undefined, encodeBase64(new TextEncoder().encode(after))]);
+				}
+				return true;
+			},
+			findFiles: async (include: string, _exclude?: string | null, _maxResults?: number) => {
+				const root = ctx.workspaceFolders[0]?.uri.fsPath ?? '';
+				const found = (await bridge.request('fs.op', ['find', include])) as string[];
+				return found.map((relative) => Uri.file(root === '' ? relative : root.replace(/[\\/]+$/, '') + '/' + relative));
+			},
+			/** The workspace-confined file services, over the host's `ext_fs` command (bytes
+			 *  cross as base64; every path is confined to the open folders there). */
+			get fs() {
+				const op = (name: string, uri: Uri | string, to?: Uri | string, data?: string) =>
+					bridge.request('fs.op', [name, typeof uri === 'string' ? uri : uri.fsPath, to === undefined ? undefined : typeof to === 'string' ? to : to.fsPath, data]);
+				return {
+					readFile: async (uri: Uri | string) => decodeBase64(((await op('read', uri)) as { data: string }).data),
+					readDirectory: async (uri: Uri | string) => (((await op('list', uri)) as { name: string; kind: number }[]).map((entry) => [entry.name, entry.kind])) as [string, number][],
+					createDirectory: (uri: Uri | string) => op('mkdir', uri).then(() => undefined),
+					delete: (uri: Uri | string) => op('delete', uri).then(() => undefined),
+					rename: (uri: Uri | string, to: Uri | string) => op('rename', uri, to).then(() => undefined),
+					copy: async (uri: Uri | string, to: Uri | string) => {
+						const data = (await op('read', uri)) as { data: string };
+						await op('write', to, undefined, data.data);
+					},
+					stat: async (uri: Uri | string) => {
+						const stat = (await op('stat', uri)) as { type: number; size: number; mtime: number };
+						return { type: stat.type, ctime: 0, mtime: stat.mtime, size: stat.size };
+					}
+				};
+			},
+			textDocuments: [] as never[]
 		},
 
 		env: {
@@ -673,6 +847,24 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			const panel = webviewPanels.get(event.panelId);
 			webviewPanels.delete(event.panelId);
 			panel?.close();
+			return;
+		}
+		if (event.event === 'activeEditorChanged') {
+			const before = activeEditor?.path;
+			const incoming = event.editor ?? null;
+			// A selection-only push (same document, no text) keeps the text already held.
+			const held = activeEditor ?? null;
+			activeEditor = incoming !== null && incoming.text === undefined && held !== null && before === incoming.path
+				? { ...incoming, text: held.text }
+				: incoming;
+			if (before !== activeEditor?.path) activeEditorChangedEmitter.fire(undefined);
+			selectionChanged.fire(undefined);
+			return;
+		}
+		if (event.event === 'documentSaved' && event.path !== undefined) {
+			// The save refreshed the file on disk; the active-document copy (if it is the
+			// saved one) may be stale — the next active-editor push re-sends it.
+			documentSaved.fire(makeTextDocument(event.path) as { fileName: string } & Record<string, unknown>);
 		}
 	};
 

@@ -65,6 +65,7 @@ desktop = [
     "dep:regex",
     "dep:zip",
     "dep:syntect",
+    "dep:plist",
     "dep:fancy-regex",
     "dep:base64",
     "dep:ignore",
@@ -130,6 +131,9 @@ zip = { version = "2", default-features = false, features = ["deflate", "deflate
 # `default-fancy` swaps syntect's default Oniguruma (C) engine for the pure-Rust fancy-regex
 # engine — the whole viewer stack stays free of C bindings.
 syntect = { version = "5", default-features = false, features = ["default-fancy"], optional = true }
+# The extension-grammar loader (ext_grammar.rs): reading a `.tmLanguage` plist (the JSON
+# grammars go through serde_json directly).
+plist = { version = "1", default-features = false, features = ["serde"], optional = true }
 # The viewer's whole-file find/replace (viewer/find.rs): the same engine syntect's
 # `default-fancy` already pulls in, pinned to the tree's version so it costs nothing extra.
 fancy-regex = { version = "0.16", optional = true }
