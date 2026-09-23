@@ -1377,6 +1377,13 @@ mod deferred_services_tests {
                 // uninstall overrides all of that: its marker keeps the package out until the
                 // user asks for it again (Extensions' one-click Install, which clears it).
                 //
+                // The `ggs` launcher's reachability: append the install directory to the
+                // user PATH (idempotent, no length limits - the NSIS hooks no longer write
+                // PATH; see cmd_assoc::user_path_apply for the wipe they caused).
+                if let Err(reason) = cmd_assoc::user_path_apply() {
+                    eprintln!("[boot] user PATH apply: {reason}");
+                }
+
                 // `plugin_host::note_install_started`/`note_install_finished` bracket it so a
                 // `plugin_host` call racing this boot sequence (`warm_first_page`, below) waits
                 // for it (bounded) instead of failing outright with "not installed".

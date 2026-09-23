@@ -2,31 +2,24 @@
 ; The `ggs` command-line launcher (VS Code's `code` equivalent): the bundled
 ; binary is named ggs (see `mainBinaryName` in tauri.conf.json), so making the
 ; command reachable from any terminal only needs the install directory on the
-; user's PATH. The deb/rpm packages get /usr/bin/ggs for free; this hook
-; covers the NSIS installer, which does not touch PATH by itself. The
-; uninstaller removes the directory again. Only HKCU is written — the default
-; install mode is per-user, and a per-user entry is correct even when the app
-; itself was installed per-machine.
+; user's PATH. The deb/rpm packages get /usr/bin/ggs for free. The NSIS hooks
+; DO NOT write PATH: an NSIS ReadRegStr is string-length limited, and a user
+; PATH past that limit once read back empty — the hook's "Path was empty"
+; branch then wrote the install directory alone, wiping the variable
+; (2026-09-23). `cmd_assoc::user_path_apply` appends the install directory
+; idempotently at every boot instead, with no length limit; only HKCU is
+; written — per-user, correct even when the app itself was installed
+; per-machine. The uninstaller below still deletes the entry, but only when
+; the value is exactly the install directory (the empty shell a fresh install
+; leaves) — never by rewriting a multi-entry PATH through NSIS string space.
 
 ; WordReplace comes from WordFunc.nsh, included by Tauri's installer.nsi
 ; before this file.
 
 !macro NSIS_HOOK_POSTINSTALL
-  ReadRegStr $R0 HKCU "Environment" "Path"
-  ; Idempotent: an upgrade reinstalls into the same directory, and a duplicate
-  ; PATH entry would grow the variable on every update.
-  ${WordReplace} "$R0" "$INSTDIR" "GGS-ON-PATH" "+" $R1
-  StrCmp $R1 "$R0" 0 ggs_path_done
-    StrCmp $R0 "" 0 ggs_path_append
-      WriteRegExpandStr HKCU "Environment" "Path" "$INSTDIR"
-      Goto ggs_path_notify
-    ggs_path_append:
-      WriteRegExpandStr HKCU "Environment" "Path" "$R0;$INSTDIR"
-    ggs_path_notify:
-      ; Already-running terminals keep their PATH; this makes new explorer-spawned
-      ; ones see it without a logoff.
-      System::Call 'user32::SendMessageTimeout(p 0xffff, i 0x1A, p 0, t "Environment", i 2, i 5000, *p .r1)'
-  ggs_path_done:
+  ; PATH is deliberately untouched here — see the module comment. The app's
+  ; boot pass (`cmd_assoc::user_path_apply`) appends the install directory
+  ; idempotently, without NSIS's string-length read limits.
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
@@ -60,16 +53,11 @@
   DeleteRegKey HKCU "Software\Classes\Directory\Background\shell\GitGraphStudio"
   DeleteRegKey HKCU "Software\Classes\Drive\shell\GitGraphStudio"
   ReadRegStr $R0 HKCU "Environment" "Path"
-  StrCmp $R0 "" ggs_unpath_done
-  StrCmp $R0 "$INSTDIR" ggs_unpath_exact
-  ${WordReplace} "$R0" "$INSTDIR;" "" "+" $R1
-  ${WordReplace} "$R1" ";$INSTDIR" "" "+" $R1
-  StrCmp $R1 "$R0" ggs_unpath_done ggs_unpath_write
-  ggs_unpath_write:
-    WriteRegExpandStr HKCU "Environment" "Path" "$R1"
-    System::Call 'user32::SendMessageTimeout(p 0xffff, i 0x1A, p 0, t "Environment", i 2, i 5000, *p .r1)'
-    Goto ggs_unpath_done
-  ggs_unpath_exact:
+  ; Only the empty shell a fresh install could leave is deleted — anything
+  ; multi-entry belongs to the user and must never be rewritten from NSIS
+  ; string space (the module comment's wipe).
+  StrCmp $R0 "$INSTDIR" 0 ggs_unpath_done
     DeleteRegValue HKCU "Environment" "Path"
+    System::Call 'user32::SendMessageTimeout(p 0xffff, i 0x1A, p 0, t "Environment", i 2, i 5000, *p .r1)'
   ggs_unpath_done:
 !macroend

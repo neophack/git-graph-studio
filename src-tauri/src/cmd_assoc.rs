@@ -108,6 +108,80 @@ pub fn assoc_apply(extensions: Vec<String>) -> Result<AssocResult, String> {
     }
 }
 
+/// Append one directory to a `;`-joined PATH value, idempotently and case-insensitively
+/// (Windows PATH is case-insensitive; an upgrade must not grow a duplicate entry). An empty
+/// current value yields the directory alone.
+pub(crate) fn append_path_entry(current: &str, dir: &str) -> String {
+    if dir.is_empty() {
+        return current.to_owned();
+    }
+    if current.split(';').any(|entry| entry.trim().eq_ignore_ascii_case(dir)) {
+        return current.to_owned();
+    }
+    if current.trim().is_empty() {
+        dir.to_owned()
+    } else {
+        format!("{current};{dir}")
+    }
+}
+
+/// Append the running executable's directory to the user's PATH (HKCU\Environment), so the
+/// bundled `ggs` launcher is reachable from any terminal - VS Code's `code` equivalent.
+/// Idempotent, re-applied at every boot beside the Explorer verb: the NSIS hooks no longer
+/// write PATH (an NSIS `ReadRegStr` is string-length limited, and a user PATH past that
+/// limit once read back empty - the hook's "Path was empty" branch then wrote the install
+/// directory alone, wiping the variable; 2026-09-23). No length limits here, and the
+/// value's type (REG_EXPAND_SZ, the customary Path type) is preserved. Windows only.
+pub fn user_path_apply() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::enums::{RegType, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
+        use winreg::{RegKey, RegValue};
+
+        let dir = std::env::current_exe()
+            .map_err(|e| format!("current_exe: {e}"))?
+            .parent()
+            .ok_or_else(|| "current_exe has no parent directory".to_owned())?
+            .to_string_lossy()
+            .into_owned();
+
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let environment = hkcu
+            .open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)
+            .or_else(|_| hkcu.create_subkey("Environment").map(|(key, _)| key))
+            .map_err(|e| format!("open HKCU\\Environment: {e}"))?;
+        let current: String = environment.get_value("Path").unwrap_or_default();
+        let updated = append_path_entry(&current, &dir);
+        if updated == current {
+            return Ok(()); // already on the PATH
+        }
+        // Preserve the existing value's type - REG_EXPAND_SZ for a Path that spells
+        // %USERPROFILE%-style entries, REG_SZ for one that never did.
+        let vtype = environment
+            .enum_values()
+            .filter_map(Result::ok)
+            .find(|(name, _)| name == "Path")
+            .map(|(_, value)| value.vtype)
+            .unwrap_or(RegType::REG_EXPAND_SZ);
+        let bytes: Vec<u8> = updated
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        environment
+            .set_raw_value("Path", &RegValue { bytes, vtype })
+            .map_err(|e| format!("write HKCU\\Environment\\Path: {e}"))?;
+        // Already-running terminals keep their PATH; this makes new explorer-spawned ones
+        // see it without a logoff.
+        windows_impl::broadcast_environment_change();
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(()) // the deb/rpm packages install /usr/bin/ggs instead
+    }
+}
+
 /// Add or remove the Explorer's "Open with Git Graph Studio" right-click entry. Windows
 /// only - Zed's static shell verb under the per-user HKCU classes (no admin rights, no
 /// shell-extension DLL; Windows 11 lists it under "Show more options", exactly like VS
@@ -147,6 +221,28 @@ mod windows_impl {
     use super::CATALOG;
     use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
     use winreg::RegKey;
+
+    /// Tell the shell the environment changed (WM_SETTINGCHANGE on "Environment"), so new
+    /// explorer-spawned terminals see an updated PATH without a logoff.
+    pub(super) fn broadcast_environment_change() {
+        extern "system" {
+            fn SendMessageTimeoutW(
+                hwnd: isize,
+                msg: u32,
+                wparam: usize,
+                lparam: *const u16,
+                flags: u32,
+                timeout: u32,
+                result: *mut usize,
+            ) -> isize;
+        }
+        let environment: Vec<u16> = "Environment\u{0}".encode_utf16().collect();
+        let mut result = 0usize;
+        // HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG, 5000 ms.
+        unsafe {
+            SendMessageTimeoutW(0xffff, 0x001A, 0, environment.as_ptr(), 0x0002, 5000, &mut result);
+        }
+    }
 
     const PROGID_PREFIX: &str = "GGS.";
     const APP_NAME: &str = "Git Graph Studio";
@@ -553,5 +649,64 @@ mod tests {
         let result = assoc_apply(vec!["blf".into()]).unwrap();
         assert_eq!(result.message_key, "assoc.applied.macos");
         assert_eq!(result.detail, "");
+    }
+
+    #[test]
+    fn path_appends_are_idempotent_and_case_insensitive() {
+        assert_eq!(append_path_entry("", "C:\\Tools"), "C:\\Tools");
+        assert_eq!(append_path_entry("C:\\A", "C:\\Tools"), "C:\\A;C:\\Tools");
+        // No duplicate on an exact repeat or a case-only difference, and no trailing
+        // separator tricks grow the value.
+        assert_eq!(append_path_entry("C:\\A;C:\\Tools", "C:\\Tools"), "C:\\A;C:\\Tools");
+        assert_eq!(append_path_entry("C:\\A;c:\\tools", "C:\\TOOLS"), "C:\\A;c:\\tools");
+        assert_eq!(append_path_entry("C:\\A", ""), "C:\\A");
+    }
+
+    /// The registry round-trip of the boot PATH apply, against the real HKCU (the module's
+    /// own style): a marker directory is appended idempotently and the original value is
+    /// restored afterwards, so the developer's environment is left exactly as it was.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn user_path_apply_appends_and_restores() {
+        use winreg::enums::{RegType, HKEY_CURRENT_USER, KEY_ALL_ACCESS};
+        use winreg::{RegKey, RegValue};
+
+        let environment = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey_with_flags("Environment", KEY_ALL_ACCESS)
+            .unwrap();
+        let original: Option<(String, RegType)> = environment
+            .enum_values()
+            .filter_map(Result::ok)
+            .find(|(name, _)| name == "Path")
+            .map(|(_, value)| {
+                let units: Vec<u16> = value.bytes.chunks(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+                let text = String::from_utf16_lossy(&units);
+                (text.trim_end_matches('\u{0}').to_owned(), value.vtype)
+            });
+        let marker = format!(
+            "C:\\ggs-path-test-{}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+        );
+
+        // Append through the same core the boot pass uses.
+        let current: String = environment.get_value("Path").unwrap_or_default();
+        let updated = append_path_entry(&current, &marker);
+        let bytes: Vec<u8> = updated.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect();
+        environment.set_raw_value("Path", &RegValue { bytes, vtype: RegType::REG_EXPAND_SZ }).unwrap();
+        let after: String = environment.get_value("Path").unwrap();
+        assert!(after.split(';').any(|entry| entry == marker));
+        // Idempotent: the same append is a no-op.
+        assert_eq!(append_path_entry(&after, &marker), after);
+
+        // Restore exactly what was there (value and type), or delete what we created.
+        match original {
+            Some((text, vtype)) => {
+                let bytes: Vec<u8> = text.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect();
+                environment.set_raw_value("Path", &RegValue { bytes, vtype }).unwrap();
+            }
+            None => {
+                environment.delete_value("Path").unwrap();
+            }
+        }
     }
 }

@@ -167,9 +167,13 @@ language are user data under `~/.ggs/`; theme and UI quality are enforced, not h
 - Backend: `src-tauri/src/cmd_assoc.rs` (the File Associations setting: OS-level
   "open with" registration per platform — HKCU ProgIds + RegisteredApplications on
   Windows, desktop entry / MIME package / `mimeapps.list` on Linux, bundle-declared on
-  macOS; and the Explorer context-menu entry `context_menu_apply` — the "Open with Git
+  macOS; the Explorer context-menu entry `context_menu_apply` — the "Open with Git
   Graph Studio" static shell verb under `*` / `Directory` / `Directory\Background` /
-  `Drive`, re-applied at every boot, removed by the NSIS uninstall hooks)
+  `Drive`, re-applied at every boot, removed by the NSIS uninstall hooks; and the
+  `ggs` launcher's PATH entry `user_path_apply` — the install directory appended to
+  HKCU\Environment\Path at every boot, idempotently and without length limits: the
+  NSIS hooks no longer write PATH, whose string-limited read once mistook a long user
+  PATH for an empty one and wiped it, 2026-09-23)
 - Assets: `static/theme/*.css` (the colour themes)
 
 ### 3. File Explorer
@@ -507,9 +511,12 @@ Everything that turns the source tree into installers: asset assembly into
   `scripts/docker/Dockerfile.studio-linux` + `scripts/docker/studio-linux-build.sh` drive
   locally, and the in-container pass fails the build if the binary's glibc requirements
   ever exceed the floor. The `ggs` command line ships with every package:
-  the bundled binary is named `ggs` (`mainBinaryName`), `src-tauri/nsis-hooks.nsh` puts the
-  NSIS install directory on the user's PATH (and removes it on uninstall), and the deb/rpm
-  packages install it as `/usr/bin/ggs`. Installer-level file associations for the default
+  the bundled binary is named `ggs` (`mainBinaryName`), `cmd_assoc::user_path_apply`
+  appends the install directory to the user's PATH at every boot (the NSIS hooks no
+  longer write PATH — an NSIS `ReadRegStr` is string-length limited, and its empty-read
+  branch once overwrote a long user PATH with the install directory alone, 2026-09-23;
+  the uninstall hook deletes the value only when it is exactly the install directory),
+  and the deb/rpm packages install it as `/usr/bin/ggs`. Installer-level file associations for the default
   extension set come from `bundle.fileAssociations` in `tauri.conf.json`; the NSIS hooks also
   remove the runtime-registered ProgIds and the RegisteredApplications entry on uninstall
 - CI: `.github/workflows/studio.yml` (PRs: typecheck + vitest; `main`: also `cargo clippy
