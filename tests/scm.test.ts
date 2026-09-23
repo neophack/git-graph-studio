@@ -55,18 +55,17 @@ describe('source control view', () => {
 			commit: (options) => view.commit(options)
 		};
 		registerGitCommands(registry, host);
-		// The "..." menu's Amend/Gerrit entries (and the Git Graph title button's Inline/More
-		// Actions placement) come from the extension's own manifest (contributions.ts), the
-		// same way the real Workbench wires the built-in git-graph-rs: the manifest ids
-		// dispatch to gitCommands.ts's working `gitGraph.*` implementations. The placements
-		// mirror the shipped manifest: three commands in scm/title, the Gerrit refs/for push
-		// in git.pullpush — the sync menu's push group, rendered in the Pull, Push submenu.
+		// The "..." menu's Amend/Gerrit entries come from the extension's own manifest
+		// (contributions.ts), dispatched to the plugin's backend — the app registers no copy of
+		// its own. The placements mirror the shipped manifest: three commands in scm/title, the
+		// Gerrit refs/for push in git.pullpush — the sync menu's push group, rendered in the
+		// Pull, Push submenu.
 		removeContributions('git-graph-rs');
-		const scmCommands: Record<string, { impl: string; title: string; location: 'scm/title' | 'git.pullpush' }> = {
-			'git-graph-rs.amendLastCommit': { impl: 'gitGraph.amendLastCommit', title: 'Amend Last Commit', location: 'scm/title' },
-			'git-graph-rs.gerritFetchCommitMsgHook': { impl: 'gitGraph.gerritFetchCommitMsgHook', title: 'Fetch commit-msg Hook (Gerrit)', location: 'scm/title' },
-			'git-graph-rs.resetCurrentBranchToRemote': { impl: 'gitGraph.resetCurrentBranchToRemote', title: 'Reset Current Branch to Remote (Soft)', location: 'scm/title' },
-			'git-graph-rs.gerritPushRef': { impl: 'gitGraph.gerritPushRef', title: 'Push to Gerrit Ref for Current Branch (refs/for/...)', location: 'git.pullpush' }
+		const scmCommands: Record<string, { title: string; location: 'scm/title' | 'git.pullpush' }> = {
+			'git-graph-rs.amendLastCommit': { title: 'Amend Last Commit', location: 'scm/title' },
+			'git-graph-rs.gerritFetchCommitMsgHook': { title: 'Fetch commit-msg Hook (Gerrit)', location: 'scm/title' },
+			'git-graph-rs.resetCurrentBranchToRemote': { title: 'Reset Current Branch to Remote (Soft)', location: 'scm/title' },
+			'git-graph-rs.gerritPushRef': { title: 'Push to Gerrit Ref for Current Branch (refs/for/...)', location: 'git.pullpush' }
 		};
 		applyContributions(
 			'git-graph-rs',
@@ -80,7 +79,7 @@ describe('source control view', () => {
 				}
 			},
 			{},
-			(command) => void registry.execute(scmCommands[command]!.impl),
+			() => undefined,
 			() => true
 		);
 		return { view, registry, setChanges: (c: typeof changes) => { current = c; } };
@@ -263,46 +262,51 @@ describe('source control view', () => {
 		expect(menuLabels()).toEqual(['Open File', 'Open Changes', 'Unstage Changes']);
 	});
 
-	it('places the Git Graph header button following the manifest\'s scm/title placement, not hardcoded', async () => {
+	it('renders scm/title navigation entries as header buttons, and nothing else inline', async () => {
 		const { view } = setup();
 		view.setRepo(REPO);
 		await view.refresh();
-		// The view title stays bare - the repository's own header row carries every action,
-		// arranged like a submodule section's header (label, actions, badge).
-		expect(document.querySelector('.sidebar-title .actions')).toBeNull();
-		// No contribution registered for git-graph-rs.view at all: the icon shows by default
-		// (git-graph-rs.sourceCodeProviderIntegrationLocation's own default is "Inline").
-		expect(document.querySelector('.scm-main-header .actions img[alt=""]')).not.toBeNull();
+		// No installed extension contributes scm/title: the header carries only the view's own
+		// actions — nothing of any extension is hardcoded into the app.
+		expect(document.querySelector('.scm-main-header .actions img[alt=""]')).toBeNull();
 
 		applyContributions('test-view-ext', {
-			commands: [{ command: 'git-graph-rs.view', title: 'View Git Graph' }],
-			menus: { 'scm/title': [{ command: 'git-graph-rs.view', group: 'inline' }] } // "More Actions"
+			commands: [{ command: 'test.view', title: 'View Test' }],
+			menus: { 'scm/title': [{ command: 'test.view', group: 'navigation' }] }
 		}, {}, () => undefined, () => true);
 		view.setRepo(REPO); // re-render
 		await view.refresh();
+		expect(document.querySelector('.scm-main-header .actions img[alt=""]')).not.toBeNull();
+
+		// A non-navigation group ("inline", "More Actions") tucks the entry into "..." instead.
+		removeContributions('test-view-ext');
+		applyContributions('test-view-ext', {
+			commands: [{ command: 'test.view', title: 'View Test' }],
+			menus: { 'scm/title': [{ command: 'test.view', group: 'inline' }] }
+		}, {}, () => undefined, () => true);
+		view.setRepo(REPO);
+		await view.refresh();
 		expect(document.querySelector('.scm-main-header .actions img[alt=""]')).toBeNull();
 		click(document.querySelector('.scm-main-header .codicon-ellipsis')!.parentElement);
-		expect(menuLabels()).toContain('View Git Graph');
+		expect(menuLabels()).toContain('View Test');
 		removeContributions('test-view-ext');
 	});
-
-	it('shows "Show File History in Git Graph" on a change\'s context menu when the manifest declares it', async () => {
+	it('runs a scm/resourceState/context entry with the resource as the command argument', async () => {
 		const { view } = setup();
 		applyContributions('test-history-ext', {
-			commands: [{ command: 'git-graph-rs.filterByFile', title: 'Show File History in Git Graph' }],
-			menus: { 'scm/resourceState/context': [{ command: 'git-graph-rs.filterByFile', when: '!listMultiSelection' }] }
+			commands: [{ command: 'test.filterByFile', title: 'Show File History in Test' }],
+			menus: { 'scm/resourceState/context': [{ command: 'test.filterByFile', when: '!listMultiSelection' }] }
 		}, {}, () => undefined, () => true);
-		const shown: string[] = [];
-		view.onShowFileHistory = (path) => shown.push(path);
+		const dispatched: [string, unknown[] | undefined][] = [];
+		view.onExtensionCommand = (command, args) => dispatched.push([command, args]);
 		view.setRepo(REPO);
 		await view.refresh();
 		rightClick(document.querySelector('.scm-group .row'));
-		expect(menuLabels()).toEqual(['Open File', 'Open Changes', 'Unstage Changes', 'Show File History in Git Graph']);
-		click(menuItem('Show File History in Git Graph'));
-		expect(shown).toEqual([`${REPO}\\src\\main.ts`]);
+		expect(menuLabels()).toEqual(['Open File', 'Open Changes', 'Unstage Changes', 'Show File History in Test']);
+		click(menuItem('Show File History in Test'));
+		expect(dispatched).toEqual([['test.filterByFile', [REPO + '\\src\\main.ts']]]);
 		removeContributions('test-history-ext');
 	});
-
 	it('keeps the button gray with a clean, synced tree, and turns it into Push with unpushed commits', async () => {
 		const { view, setChanges } = setup([]);
 		view.setRepo(REPO);
@@ -464,23 +468,26 @@ describe('submodule sections', () => {
 		expect(document.querySelector('.scm-rows')!.nextElementSibling).toBe(document.querySelector('.scm-repo'));
 	});
 
-	it('opens the Git Graph view on the submodule whose header graph icon was clicked', async () => {
+	it('dispatches the scm/title button with the section\'s repository as the argument', async () => {
 		const { view } = setup();
-		const opened: (string | undefined)[] = [];
-		view.onOpenGraph = (repo) => opened.push(repo);
+		const dispatched: [string, unknown[] | undefined][] = [];
+		view.onExtensionCommand = (command, args) => dispatched.push([command, args]);
 		view.setRepo(REPO);
 		await view.refresh();
 
-		const subIcon = document.querySelector<HTMLButtonElement>('.scm-repo-header .action-btn img[src="/icons/git-graph-16.svg"]')!.closest('button')!;
+		applyContributions('test-view-ext', {
+			commands: [{ command: 'test.view', title: 'View Test' }],
+			menus: { 'scm/title': [{ command: 'test.view', group: 'navigation' }] }
+		}, {}, () => undefined, () => true);
+		view.render();
+		const subIcon = document.querySelector<HTMLButtonElement>('.scm-repo-header .action-btn')!;
 		click(subIcon);
-		expect(opened).toEqual([SUB]);
-		// The main repository's own graph icon switches the view back to the open repository
-		// (e.g. after a submodule's icon had switched it away).
-		const mainIcon = document.querySelector<HTMLButtonElement>('.scm-main-header .action-btn img[src="/icons/git-graph-16.svg"]')!.closest('button')!;
+		expect(dispatched).toEqual([['test.view', [SUB]]]);
+		const mainIcon = document.querySelector<HTMLButtonElement>('.scm-main-header .action-btn')!;
 		click(mainIcon);
-		expect(opened).toEqual([SUB, REPO]);
+		expect(dispatched).toEqual([['test.view', [SUB]], ['test.view', [REPO]]]);
+		removeContributions('test-view-ext');
 	});
-
 	it('stages a change within a submodule, passing its own repo path', async () => {
 		const { view, setSubChanges } = setup();
 		setSubChanges([change('lib.rs', { unstaged: 'modified' })]);

@@ -84,15 +84,14 @@ describe('the scenario harness', () => {
 			const notes: string[] = [];
 			try {
 				if (scenario.kind === 'git') {
-					// Shared expectations: the shell is up, the graph tab is there, nothing errored.
-					expect(texts('.tab .label')).toContain('Git Graph');
+					// Shared expectations: the shell is up, the repository chrome is up, nothing errored.
+					expect(scmGroups().length).toBeGreaterThan(0);
 					// The repository chrome is up (the branch settles asynchronously).
 					expect(statusItems().length).toBeGreaterThan(1);
 					notes.push(`status: ${statusItems().join(' | ')}`);
 					notes.push(`scm: ${scmGroups().join(', ') || '(no changes)'}`);
 				} else {
-					// A plain folder: the graph tab shows its "initialise a repository" placeholder,
-					// but the status bar carries no repository item and no branch.
+					// A plain folder: no repository item and no branch in the status bar.
 					expect(statusItems().some((item) => item.includes('Git Graph'))).toBe(false);
 					expect(statusItems()).not.toContain('main');
 					notes.push(`status: ${statusItems().join(' | ')}`);

@@ -1,5 +1,5 @@
-// File history and blame: the history tab lists a file's commits from the graph engine's log
-// (a path-filtered loadCommits through the graph host) and opens the diff of a commit's version
+// File history and blame: the history tab lists a file's commits from the backend's own
+// `git log --follow` (the `file_log` command) and opens the diff of a commit's version
 // against its parent; the blame gutter toggles onto the active editor with "author, when" per
 // line.
 
@@ -29,26 +29,24 @@ describe('file history', () => {
 		expect(blameLabel({ hash: 'abc', author: 'Ada', time: NOW / 1000 - 86400, summary: 's' }, NOW)).toBe('Ada, 1 day ago');
 	});
 
-	it('loads a path-filtered log through the graph channel, dropping the uncommitted row', async () => {
-		backend.on('graph_request', ({ message }) => {
-			const request = message as Record<string, unknown>;
-			expect(request['command']).toBe('loadCommits');
-			expect(request['filterPath']).toBe('src/a.ts');
-			return { command: 'loadCommits', error: null, commits: [
-				{ hash: '*', parents: [], author: '', date: 0, message: 'Uncommitted Changes' },
+	it('loads the path-filtered log over the backend command', async () => {
+		backend.on('file_log', ({ path, repo }) => {
+			expect(path).toBe('src/a.ts');
+			expect(repo).toBe(REPO);
+			return [
 				{ hash: 'b'.repeat(40), parents: ['a'.repeat(40)], author: 'Bob', date: NOW / 1000 - 60, message: 'second' },
 				{ hash: 'a'.repeat(40), parents: [], author: 'Ada', date: NOW / 1000 - 86400, message: 'first' }
-			] };
+			];
 		});
 		const entries = await loadFileHistory(REPO, 'src/a.ts');
 		expect(entries.map((e) => e.message)).toEqual(['second', 'first']);
 	});
 
 	it('opens the history tab and diffs a commit against its parent on click', async () => {
-		backend.on('graph_request', () => ({ command: 'loadCommits', error: null, commits: [
+		backend.on('file_log', () => [
 			{ hash: 'b'.repeat(40), parents: ['a'.repeat(40)], author: 'Bob', date: NOW / 1000, message: 'second' },
 			{ hash: 'a'.repeat(40), parents: [], author: 'Ada', date: NOW / 1000, message: 'first' }
-		] }));
+		]);
 		backend.on('read_file_at', () => ({ contents: 'x\n', binary: false, size: 2, encoding: 'utf8', eol: 'lf' }));
 		const group = new EditorGroup(document.getElementById('editorGroup')!);
 		group.setRoot(REPO);

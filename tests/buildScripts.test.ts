@@ -10,23 +10,36 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // @ts-expect-error - plain ESM scripts without type declarations
-import { ggxManifest } from '../plugins/git-graph-rs/build.mjs';
-// @ts-expect-error - plain ESM scripts without type declarations
-import { buildBuiltinContributions, buildBuiltinSettings } from '../scripts/builtin-contributions.mjs';
-// @ts-expect-error - plain ESM scripts without type declarations
-import { buildBinaryCompareBundle, buildCompareBundle, buildViewPageBundle } from '../scripts/compare-bundle.mjs';
+import { configEntry, ggxManifest } from '../plugins/git-graph-rs/build.mjs';
 
 describe('.ggx packaging', () => {
+	it('aims the config bundle entry\'s require at the compiled config, not its comment', () => {
+		const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'plugins', 'git-graph-rs', 'config-stdin.js'), 'utf8');
+		const entry = configEntry(source, 'C:\\ext\\out\\config.js');
+		// The call is rewritten; no bare placeholder survives in the code the page runs.
+		expect(entry).toContain(`require(${JSON.stringify('C:\\ext\\out\\config.js')})`);
+		expect(entry).not.toContain('require(CONFIG_PATH)');
+		expect(() => configEntry('module.exports = 1;', 'x')).toThrow(/require\(CONFIG_PATH\)/);
+	});
+
 	it('writes a ggx/2 header with the page registry — the shape cmd_ext.rs installs', () => {
 		const pkg = { name: 'git-graph-rs', publisher: 'neophack', version: '1.0.23', displayName: 'Git Graph' };
 		const manifest = ggxManifest(pkg);
 		expect(manifest.format).toBe('ggx/2');
 		expect(manifest.id).toBe('neophack.git-graph-rs');
 		expect(manifest.version).toBe('1.0.23');
-		expect(manifest.frontend).toEqual({ kind: 'webview', page: 'web/view.html', config: 'web/config.js', compare: 'web/compare.js' });
-		// The named page registry: the package's openable page, by id.
-		expect(manifest.pages).toEqual({ view: { page: 'web/view.html' } });
+		// The named page registry: the view page is a singleton (a second open reveals it,
+		// params as an event), and the two comparison pages are the graph's own diff surfaces.
+		expect(manifest.pages).toEqual({
+			view: { page: 'web/view.html', title: 'Git Graph', singleton: true, icon: 'resources/git-graph-rs-webview-icon.svg' },
+			compare: { page: 'web/compare.html', icon: 'resources/git-graph-rs-webview-icon.svg' },
+			binarycompare: { page: 'web/binarycompare.html', icon: 'resources/git-graph-rs-webview-icon.svg' }
+		});
 		expect(manifest.permissions).toContain('git:write');
+		// The activity-bar entry is the package's own declaration (the grey icon; the page tabs
+		// wear the colour one): its click runs the view command — the app hardcodes no icon of
+		// any plugin.
+		expect(manifest.activitybar).toEqual({ command: 'git-graph-rs.view', title: 'Git Graph', icon: 'resources/git-graph-rs-webview-icon-dark.svg' });
 		// Without a compiled backend the header stays frontend-only (the packer allows it);
 		// the app then reports the engine as "not installed" — it never links it itself.
 		expect('backend' in manifest).toBe(false);
@@ -41,227 +54,5 @@ describe('.ggx packaging', () => {
 			command,
 			binaries: { [platform]: command }
 		});
-	});
-});
-
-describe('the Git Graph comparison page bundles', () => {
-	it('bundles the extension\'s compiled CommonJS output so it runs as a plain browser script', async () => {
-		const dir = mkdtempSync(join(tmpdir(), 'compare-bundle-'));
-		try {
-			// The layout the app really builds in: the patched copies land under the app's own
-			// package.json, which is "type": "module" - without the CommonJS marker the bundle
-			// step writes, esbuild would read the extension's compiled .js as ECMAScript modules
-			// and their `exports.X` assignments would throw at script load.
-			writeFileSync(join(dir, 'package.json'), JSON.stringify({ type: 'module' }));
-			mkdirSync(join(dir, 'out', 'utils'), { recursive: true });
-			writeFileSync(join(dir, 'out', 'utils', 'disposable.js'), [
-				'"use strict";',
-				'Object.defineProperty(exports, "__esModule", { value: true });',
-				'exports.Disposable = void 0;',
-				'exports.Disposable = class Disposable { dispose() {} };',
-				''
-			].join('\n'));
-			// The compiled shape the patch step expects: the Electron original-fs fallback
-			// wrapper its scripts/package-src.js weaves into every file that requires fs.
-			writeFileSync(join(dir, 'out', 'comparisonView.js'), [
-				'"use strict";',
-				'function requireWithFallback(electronModule, nodeModule) { try { return require(electronModule); } catch (err) {} return require(nodeModule); }',
-				'Object.defineProperty(exports, "__esModule", { value: true });',
-				'exports.CommitComparisonView = void 0;',
-				'const fs = requireWithFallback("original-fs", "fs");',
-				'const disposable_1 = require("./utils/disposable");',
-				'class CommitComparisonView extends disposable_1.Disposable {',
-				'	getHtml() { return "<!DOCTYPE html><html><body>fixture comparison page</body></html>"; }',
-				'}',
-				'exports.CommitComparisonView = CommitComparisonView;',
-				''
-			].join('\n'));
-			// The compiled binary-area machinery the same bundle exposes for the hosts.
-			writeFileSync(join(dir, 'out', 'binaryCompare.js'), [
-				'"use strict";',
-				'Object.defineProperty(exports, "__esModule", { value: true });',
-				'exports.createHexSession = void 0;',
-				'exports.createHexSession = function () { return null; };',
-				'exports.wireHexSession = function () {};',
-				'exports.respondHexInfo = function () {};',
-				'exports.respondHexRows = function () {};',
-				'exports.respondImageData = function () {};',
-				'exports.respondCopyToClipboard = function () {};',
-				''
-			].join('\n'));
-			// The compiled standalone Binary Compare view, for the second bundle.
-			writeFileSync(join(dir, 'out', 'binaryCompareView.js'), [
-				'"use strict";',
-				'Object.defineProperty(exports, "__esModule", { value: true });',
-				'exports.BinaryCompareView = void 0;',
-				'const binaryCompare = require("./binaryCompare");',
-				'class BinaryCompareView {',
-				'	getHtml(filePath) { return "<!DOCTYPE html><html><body>fixture binary page " + filePath + "</body></html>"; }',
-				'}',
-				'exports.BinaryCompareView = BinaryCompareView;',
-				''
-			].join('\n'));
-
-			const outfile = join(dir, 'gitgraph', 'compare.js');
-			await buildCompareBundle({ root: dir, patchedOut: join(dir, 'compare-src'), outfile });
-
-			// The patch step folded the original-fs fallback back to the plain require.
-			const patched = readFileSync(join(dir, 'compare-src', 'comparisonView.js'), 'utf8');
-			expect(patched).toContain('require("fs")');
-			expect(patched).not.toContain('requireWithFallback("original-fs", "fs")');
-			expect(readFileSync(join(dir, 'compare-src', 'package.json'), 'utf8')).toContain('"commonjs"');
-			// The bundle must load as the plain <script> graphHost.ts injects: if esbuild had
-			// read the files as ECMAScript modules, `exports` would be a free reference and this
-			// evaluation would throw ReferenceError before the generator was registered.
-			expect(existsSync(outfile)).toBe(true);
-			new Function(readFileSync(outfile, 'utf8'))();
-			const generator = (globalThis as { GitGraphCompare?: { buildComparePage(options: Record<string, unknown>): string; createHexSession?: unknown; respondCopyToClipboard?: unknown } }).GitGraphCompare;
-			expect(generator).toBeDefined();
-			expect(generator!.buildComparePage({ fromHash: 'aaaa', toHash: 'bbbb', singleCommit: false, loading: true }))
-				.toBe('<!DOCTYPE html><html><body>fixture comparison page</body></html>');
-			// The binary-area host machinery rides in the same bundle, under the same global.
-			expect(typeof generator!.createHexSession).toBe('function');
-			expect(typeof generator!.respondCopyToClipboard).toBe('function');
-
-			// The standalone Binary Compare page generator is its own browser-loaded bundle.
-			const binaryOutfile = join(dir, 'gitgraph', 'binarycompare.js');
-			await buildBinaryCompareBundle({ root: dir, patchedOut: join(dir, 'compare-src'), outfile: binaryOutfile });
-			new Function(readFileSync(binaryOutfile, 'utf8'))();
-			const binary = (globalThis as { GitGraphBinaryCompare?: { buildBinaryComparePage(options: Record<string, unknown>): string } }).GitGraphBinaryCompare;
-			expect(binary).toBeDefined();
-			expect(binary!.buildBinaryComparePage({ fromHash: 'aaaa', toHash: 'bbbb', filePath: 'img.png', file: { oldFilePath: 'img.png', newFilePath: 'img.png', type: 'M', additions: null, deletions: null } }))
-				.toBe('<!DOCTYPE html><html><body>fixture binary page img.png</body></html>');
-
-			// The view page generator: the extension's own getHtmlForWebview over the host's
-			// inputs - repository states, view states, media URIs mapped to the served copies.
-			// Its engine probe is the extension's own compiled backend/addon.js, in the shape
-			// the engine fold anchors to: without a host declaration it finds no .node binary
-			// (the fixture throws), with one it answers the in-process engine's version.
-			mkdirSync(join(dir, 'out', 'backend'), { recursive: true });
-			writeFileSync(join(dir, 'out', 'backend', 'addon.js'), [
-				'"use strict";',
-				'Object.defineProperty(exports, "__esModule", { value: true });',
-				'exports.isAddonAvailable = exports.loadAddon = exports.platformKey = void 0;',
-				'const path = require("path");',
-				'let cached = null;',
-				'function platformKey(platform = process.platform, arch = process.arch) {',
-				'    return platform + \'-\' + arch;',
-				'}',
-				'function loadAddon(root = path.join(__dirname, \'..\', \'..\')) {',
-				'    if (cached !== null)',
-				'        return cached;',
-				'    throw new Error("no native engine in the fixture");',
-				'}',
-				'function isAddonAvailable(root) {',
-				'    try {',
-				'        loadAddon(root);',
-				'        return true;',
-				'    }',
-				'    catch (_a) {',
-				'        return false;',
-				'    }',
-				'}',
-				'exports.platformKey = platformKey;',
-				'exports.loadAddon = loadAddon;',
-				'exports.isAddonAvailable = isAddonAvailable;',
-				''
-			].join('\n'));
-			writeFileSync(join(dir, 'out', 'gitGraphView.js'), [
-				'"use strict";',
-				'Object.defineProperty(exports, "__esModule", { value: true });',
-				'exports.GitGraphView = void 0;',
-				'const addon_1 = require("./backend/addon");',
-				'class GitGraphView {',
-				'	getHtmlForWebview() {',
-				'		const repos = Object.keys(this.repoManager.getRepos());',
-				'		const engineAvailable = addon_1.isAddonAvailable();',
-				'		const engineVersion = engineAvailable ? addon_1.loadAddon().engineVersion() : null;',
-				'		return "<!DOCTYPE html><html lang=\\"en\\"><head></head><body>fixture view " + repos.length + " repo(s), active " + this.extensionState.getLastActiveRepo() +',
-				'			", engine " + engineAvailable + " v" + engineVersion + " on " + addon_1.platformKey() +',
-				'			", media " + this.panel.webview.asWebviewUri({ fsPath: "media\\\\out.min.js" }).toString() + "</body></html>";',
-				'	}',
-				'}',
-				'exports.GitGraphView = GitGraphView;',
-				''
-			].join('\n'));
-			const viewOutfile = join(dir, 'gitgraph', 'viewpage.js');
-			await buildViewPageBundle({ root: dir, patchedOut: join(dir, 'compare-src'), outfile: viewOutfile });
-			const viewBundle = readFileSync(viewOutfile, 'utf8');
-			// The banner bakes the build host's platform into the process shim, so the page's
-			// platform reporting is the app's own rather than 'browser-undefined'.
-			expect(viewBundle).toMatch(new RegExp('platform:\\s*' + JSON.stringify(process.platform).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ','));
-			new Function(viewBundle)();
-			const view = (globalThis as { GitGraphViewPage?: { buildViewPage(options: Record<string, unknown>): string } }).GitGraphViewPage;
-			expect(view).toBeDefined();
-			const withEngine = '<!DOCTYPE html><html lang="en"><head></head><body>fixture view 1 repo(s), active C:\\repo' +
-				', engine true v9.9.9 on ' + process.platform + '-' + process.arch + ', media /gitgraph/out.min.js</body></html>';
-			// The undeclared host first: the probe stands as written, and no earlier generation
-			// has cached an engine into the module.
-			expect(view!.buildViewPage({ settings: {}, repos: { 'C:\\repo': {} }, lastActiveRepo: 'C:\\repo', loadViewTo: null, globalState: {}, workspaceState: {} }))
-				.toBe('<!DOCTYPE html><html lang="en"><head></head><body>fixture view 1 repo(s), active C:\\repo, engine false vnull on ' + process.platform + '-' + process.arch + ', media /gitgraph/out.min.js</body></html>');
-			// With the engine version the app resolves: the folded probe answers the in-process
-			// engine, and the page reports it as loaded.
-			expect(view!.buildViewPage({ settings: {}, repos: { 'C:\\repo': {} }, lastActiveRepo: 'C:\\repo', loadViewTo: null, globalState: {}, workspaceState: {}, engineVersion: '9.9.9' }))
-				.toBe(withEngine);
-		} finally {
-			delete (globalThis as { GitGraphCompare?: unknown }).GitGraphCompare;
-			delete (globalThis as { GitGraphBinaryCompare?: unknown }).GitGraphBinaryCompare;
-			delete (globalThis as { GitGraphViewPage?: unknown }).GitGraphViewPage;
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
-});
-
-describe('the baked-in contributions', () => {
-	it('extracts the shipped extension manifest contributes and its NLS table', () => {
-		const dir = mkdtempSync(join(tmpdir(), 'builtin-contrib-'));
-		try {
-			writeFileSync(join(dir, 'package.json'), JSON.stringify({
-				name: 'git-graph-rs', publisher: 'acme',
-				contributes: {
-					commands: [{ command: 'git-graph-rs.view', title: '%cmd.view%' }],
-					menus: { 'scm/title': [{ command: 'git-graph-rs.view', group: 'navigation' }] }
-				}
-			}));
-			writeFileSync(join(dir, 'package.nls.json'), JSON.stringify({ 'cmd.view': 'Open Git Graph' }));
-			writeFileSync(join(dir, 'package.nls.zh-cn.json'), JSON.stringify({ 'cmd.view': '打开 Git Graph' }));
-			const [baked] = buildBuiltinContributions(dir);
-			expect(baked.extId).toBe('acme.git-graph-rs');
-			expect(baked.contributes.commands[0].command).toBe('git-graph-rs.view');
-			expect(baked.contributes.menus['scm/title'][0].group).toBe('navigation');
-			expect(baked.nls['cmd.view']).toBe('Open Git Graph');
-			expect(baked.nlsTranslations['zh-cn']['cmd.view']).toBe('打开 Git Graph');
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
-	it('reads the real vscode-git-graph-rs manifest the app ships', () => {
-		const [baked] = buildBuiltinContributions(join(dirname(fileURLToPath(import.meta.url)), '..', 'vscode-git-graph-rs'));
-		expect(baked.extId).toBe('neophack.git-graph-rs');
-		// The menu locations the workbench surfaces are all declared there.
-		expect(Object.keys(baked.contributes!.menus!)).toContain('scm/title');
-	});
-
-	it('keeps the first-paint slice free of the settings schema and its descriptions', () => {
-		// The baked module rides the first-paint bundle (plan §4: first-paint JS ≤ 300 KB), so
-		// it carries commands, menus and the `when`-referenced settings' defaults - never the
-		// whole configuration schema or the localised descriptions, which dwarf the commands.
-		const root = join(dirname(fileURLToPath(import.meta.url)), '..', 'vscode-git-graph-rs');
-		const [baked] = buildBuiltinContributions(root);
-		const full = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
-		const declared = Object.keys(full.contributes.configuration.properties);
-		const kept = Object.keys(baked.contributes!.configuration?.properties ?? {});
-		expect(kept).toEqual(['git-graph-rs.sourceCodeProviderIntegrationLocation']);
-		expect(kept.length).toBeLessThan(declared.length);
-		for (const key of Object.keys(baked.nls)) expect(key.startsWith('config.')).toBe(false);
-		expect(Object.keys(baked.nlsTranslations['zh-cn'])).toEqual(Object.keys(baked.nls));
-
-		// The async settings chunk carries the whole schema, with its descriptions resolved by
-		// the default NLS table once the Settings dialog loads it.
-		const [settings] = buildBuiltinSettings(root);
-		expect(settings.extId).toBe('neophack.git-graph-rs');
-		expect(Object.keys(settings.configuration!.properties!)).toEqual(expect.arrayContaining(declared));
-		expect(Object.keys(settings.nls).length).toBeGreaterThan(Object.keys(baked.nls).length);
 	});
 });

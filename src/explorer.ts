@@ -596,8 +596,10 @@ export class Explorer {
 			'separator',
 			{ label: 'Rename...', keybinding: 'F2', disabled: isRoot, run: () => void this.renameInline(path) },
 			{ label: 'Delete', keybinding: 'Delete', disabled: isRoot, run: () => void this.delete(path) },
-			// Extensions' `contributes.menus["explorer/context"]` entries.
-			...menuSection('explorer/context')
+			// Extensions' `contributes.menus["explorer/context"]` entries, handed VS Code's
+			// arguments: the clicked path, then every selected path (the clicked one alone when
+			// it is outside the selection).
+			...menuSection('explorer/context', [path, this.selection.includes(path) ? this.selectedPaths : [path]])
 		]);
 	}
 

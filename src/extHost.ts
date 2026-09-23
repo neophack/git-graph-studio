@@ -6,22 +6,18 @@
 // postMessage. Events flow back as `__studioExtEvent` pushes (configuration changes, webview
 // messages, disposals).
 //
-// The git-graph-rs extension is deliberately NOT activated here: it is integrated into the app
-// (its engine runs in its backend process, its webview is hosted natively by GraphHost); the
-// Rust side lists it from the bundled `.ggx` installed on first launch (falling back to the
-// manifest embedded in the binary when the package is absent), and the frame-based host is
-// for the additional VSIX / `.ggx` extensions Studio supports.
+// The host never interprets a package: every installed package is listed from its manifest,
+// its commands dispatch to its own frame (a VSIX) or its own backend process (a `ggx/2`
+// package), and its pages mount as sandboxed frames over the `ggx://` protocol.
 
 import { invoke } from '@tauri-apps/api/core';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
+import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { builtinContributions } from 'virtual:builtin-contributions';
-
 import { commands } from './commands';
-import { applyContributions, applyExtensionSettings, declaredCommand, extensionThemeList, extensionViewContributions, languageIdFor, localize, registerExtensionSnippets, registerExtensionThemes, removeContributions, type ExtensionThemeDef, type ManifestContributes } from './contributions';
-import { syncExtensionThemes } from './settings';
+import { applyContributions, applyExtensionSettings, declaredCommand, extensionThemeList, extensionViewContributions, languageIdFor, localize, registerContextProvider, registerExtensionSnippets, registerExtensionThemes, removeContributions, type ExtensionThemeDef, type ManifestContributes } from './contributions';
+import { syncExtensionThemes, themeById } from './settings';
 import { locale, registerZhCnText, t } from './i18n';
-import { loadBuiltinSettings } from './lazy';
 import * as state from './state';
 import { notify, progressToast, quickInput, type ProgressToast } from './ui';
 import type { SerializedTreeItem } from './treeView';
@@ -46,8 +42,8 @@ export interface ExtInfo {
 	/** README / CHANGELOG file names inside the install, when present (the detail page renders them). */
 	readme: string | null;
 	changelog: string | null;
-	/** `builtin` (the integrated git-graph-rs), `vsix` or `ggx`. */
-	format: 'builtin' | 'vsix' | 'ggx';
+	/** `bundled` (a not-yet-installed package the installer ships), `vsix` or `ggx`. */
+	format: 'bundled' | 'vsix' | 'ggx';
 	/** The `.ggx` header, for packages installed from one. */
 	ggx: GgxManifest | null;
 }
@@ -70,13 +66,26 @@ export interface GgxManifest {
 	version: string;
 	frontend?: { page: string; config?: string; compare?: string } | null;
 	/** `ggx/2`: every page the package can show, by id (the named page registry). */
-	pages?: Record<string, { page: string; title?: string }> | null;
+	pages?: Record<string, { page: string; title?: string; singleton?: boolean; icon?: string | null }> | null;
 	/** `ggx/2`: the process backend declaration — `ext_process.rs` spawns it on demand.
 	 *  `protocol` is `ggs-ext/1` (the default, command-style plugins) or `ggx-rpc/1` (the
 	 *  graph engine's thread-per-request protocol); `binaries` is the per-platform command
 	 *  map, when the package carries more than one platform's binary. */
 	backend?: { kind: string; command: string; args?: string[]; protocol?: string; binaries?: Record<string, string> } | null;
+	/** `ggx/2`: an activity-bar launcher — an icon (package-relative) whose click runs one of
+	 *  the package's declared commands (typically its view page's opener). */
+	activitybar?: { command: string; title?: string | null; icon?: string | null } | null;
 	permissions?: string[];
+}
+
+/** The icon path as `ext_read_file_base64` expects it: relative to the extension's install
+ *  root. `ExtInfo.icon` is absolute (`<root>/<manifest path>`), so strip the root — reducing
+ *  it to a bare file name loses icons kept in a subfolder (`resources/icon.png`). */
+export function extIconRelPath(ext: ExtInfo): string {
+	const iconPath = ext.icon!;
+	const root = ext.path.replace(/[\\/]+$/, '');
+	if (root !== '' && (iconPath.startsWith(root + '/') || iconPath.startsWith(root + '\\'))) return iconPath.slice(root.length + 1);
+	return iconPath.split(/[\\/]/).pop()!; // unexpected shape: at least the file name is right
 }
 
 /** The extension's display title, like VS Code's extension list (displayName falls back to name). */
@@ -109,28 +118,24 @@ export function extFileDataUrl(extId: string, relPath: string): Promise<string |
 	return pending;
 }
 
-/** The built-in git-graph-rs extension's id (publisher.name, matching Rust's GRAPH_PACKAGE_ID) -
- *  exported so anything reading its declared settings or context (workbench.ts) uses the same
- *  key `applyContributions` registered its manifest under, instead of a second, driftable copy
- *  of this string. */
-export const GIT_GRAPH_RS_EXT_ID = 'neophack.git-graph-rs';
-
-/** Apply the baked-in extensions' settings schemas once their async chunk loads (the second
- *  half of the baked contributions - the first-paint slice carries commands and menus only).
- *  The Settings dialog awaits this, so its extension rows cannot render without the schema
- *  unless the chunk itself failed - which leaves the rows absent, not the dialog broken. */
-let builtinSettingsLoaded: Promise<void> | null = null;
-
-export function ensureBuiltinSettings(): Promise<void> {
-	return (builtinSettingsLoaded ??= loadBuiltinSettings()
-		.then((module) => {
-			for (const ext of module.builtinSettings) applyExtensionSettings(ext.extId, ext.configuration, ext.nls);
-		})
-		.catch(() => undefined));
+/** A diff a page asks the workbench to open (the editor input's shape minus the kind):
+ *  the two sides carry a revision/path/label and whether that side exists. */
+export interface PageDiffRequest {
+	id: string;
+	title: string;
+	repo?: string;
+	binaryNotice?: boolean;
+	left: { revision: string; path: string; label: string; exists: boolean };
+	right: { revision: string; path: string; label: string; exists: boolean };
 }
 
-/** The extension whose webview and backend the workbench hosts natively (via GraphHost). */
-const NATIVELY_HOSTED = new Set([GIT_GRAPH_RS_EXT_ID]);
+/** The theme of the moment, as a page's 'theme.stylesheet' request answers it and the theme
+ *  event pushes carry it: the active theme's vscode-* class and its stylesheet text. */
+export interface PageTheme {
+	kind: 'vscode-dark' | 'vscode-light';
+	label: string;
+	css: string;
+}
 
 /** One open extension page: a sandboxed iframe in an editor tab, speaking the page RPC the
  *  composed bootstrap (`acquireGgsApi`) defines. The editor tab owns it — its disposer is
@@ -272,22 +277,32 @@ export class ExtensionHost {
 	private nextCallId = 1;
 	activated = false;
 
-	/** Commands the workbench executes itself for natively-hosted extensions (the built-in
-	 *  git-graph-rs never runs in a frame). `nativeCommands` lists the ids it handles;
-	 *  `onNativeCommand` executes one and returns whether it was handled. */
-	nativeCommands: ReadonlySet<string> = new Set();
 	onNativeCommand: ((command: string) => boolean) | null = null;
 	/** Called after a registration pass added contributions asynchronously (installed
 	 *  extensions): the workbench re-renders the views that had already built their menus. */
 	onContributionsApplied: (() => void) | null = null;
 	/** Workbench hook: open one of an extension's pages in an editor tab — wired the same
 	 *  way `onNativeCommand` is (the workbench owns the editor area, the host owns pages). */
-	onOpenPage: ((extId: string, pageId: string, params?: unknown) => void) | null = null;
+	onOpenPage: ((extId: string, pageId: string, params?: unknown, title?: string) => void) | null = null;
 	/** The installed extensions the host has listed; pages and backends resolve through it. */
 	private installedExts: ExtInfo[] = [];
 	/** The open page frames, by serial (their iframes live in editor tabs). */
 	private readonly pageFrames = new Map<number, PageFrameHandle>();
+	/** The serial of each singleton page's open frame, by `${extId}/${pageId}` (a second open
+	 *  reveals that tab and delivers its params as an event, instead of a duplicate tab). */
+	private readonly singletonPages = new Map<string, number>();
 	private nextPageSerial = 1;
+	/** Workbench hook: reveal a singleton page's tab (wired like `onOpenPage`). */
+	onRevealPage: ((extId: string, pageId: string) => void) | null = null;
+	/** Workbench hooks behind the page services: the diff/revision editors, the SCM view, the
+	 *  terminal, and the repo-changed nudge a page's own writes owe the workbench. */
+	onOpenDiff: ((diff: PageDiffRequest) => void) | null = null;
+	onOpenFileAtRevision: ((revision: string, path: string, title: string, repo?: string) => void) | null = null;
+	onShowView: ((id: string) => void) | null = null;
+	onRevealTerminal: (() => void) | null = null;
+	onRunInTerminal: ((command: string) => void) | null = null;
+	onRepoChanged: (() => void) | null = null;
+	onForwardKey: ((key: { key: string; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean }) => void) | null = null;
 	/** Extensions whose commands dispatch to a `ggx/2` process backend, not a frame. */
 	private readonly processBacked = new Set<string>();
 	/** The declared commands of the process-backed extensions — runnable with no frame, the
@@ -345,16 +360,7 @@ export class ExtensionHost {
 	/** Resolved when a frame reports `__studioExtActivated` (lazy activation waits for it). */
 	private readonly activationWaiters = new Map<string, () => void>();
 
-	/** Synchronously register the baked-in extensions' contributions (menus, commands,
-	 *  keybindings). The data comes from the build-time virtual module, so the workbench's
-	 *  first render already sees these menus - the async activateInstalled() pass skips them.
-	 *  The settings schemas ride their own async chunk (most of the manifest's bytes, needed
-	 *  only by the Settings dialog): their pass starts loading right away. */
-	applyBuiltinContributions(): void {
-		for (const baked of builtinContributions) this.registerContributions(baked.extId, baked.contributes, baked.nls, baked.nlsTranslations['zh-cn'] ?? {});
-		void ensureBuiltinSettings();
-	}
-
+	
 	constructor() {
 		window.addEventListener('message', (event) => this.onMessage(event));
 		// An extension's own settings change (its update(), or the Settings dialog writing the
@@ -372,14 +378,21 @@ export class ExtensionHost {
 		return installed;
 	}
 
+	/** The installed packages' activity-bar launchers (`manifest.json`'s `activitybar`), in
+	 *  install-list order — the workbench renders one activity item per entry. */
+	activityLaunchers(): { extId: string; command: string; title: string; icon: string | null }[] {
+		return this.installedExts
+			.filter((ext) => ext.format !== 'bundled' && ext.ggx?.activitybar?.command)
+			.map((ext) => ({ extId: ext.id, command: ext.ggx!.activitybar!.command, title: ext.ggx!.activitybar!.title ?? extTitle(ext), icon: ext.ggx!.activitybar!.icon ?? null }));
+	}
+
 	/** Read a text file inside an installed extension (README, CHANGELOG, manifest). */
 	async readFile(extId: string, relPath: string): Promise<string> {
 		return await invoke<string>('ext_read_file', { extId, relPath });
 	}
 
 	/** Install a `.ggx` package — Studio's own format (a newer version replaces an installed
-	 *  `.vsix` or `.ggx` of the same id; the integrated git-graph-rs is refused on the Rust
-	 *  side). */
+	 *  `.vsix` or `.ggx` of the same id, forward-only). */
 	async installFromGgx(path: string): Promise<ExtInfo> {
 		const info = await invoke<ExtInfo>('ext_install_from_ggx', { path });
 		await this.reload(info.id);
@@ -396,7 +409,7 @@ export class ExtensionHost {
 	}
 
 	/** Install one of the bundled `.ggx` packages the installer carries — the one-click
-	 *  Install on the Extensions view's bundled entries (the integrated git-graph-rs, and the
+	 *  Install on the Extensions view's bundled entries (the Git Graph engine view, and the
 	 *  GGX Demo sample). The app installs nothing by default; this is the ask, and it lands
 	 *  as a standard (uninstallable) package. */
 	async installBundled(extId: string): Promise<ExtInfo> {
@@ -461,15 +474,15 @@ export class ExtensionHost {
 		}
 		// Each extension gets its own frame, so activations are independent — run them in
 		// parallel instead of serializing every iframe boot behind the slowest bundle read.
-		// Skipped for entries with nothing to boot: a `builtin`-format entry (an
-		// embedded-manifest offer — the integrated git-graph-rs without its package, the
-		// bundled sample) has no files on disk, and a ggx/2 process package's commands
+		// Skipped for entries with nothing to boot: a `bundled`-format entry (an offer of a
+		// package the installer ships but nothing installed) has no files on disk, and a ggx/2
+		// process package's commands
 		// dispatch to its backend — its `package.json` is its whole program. Activation
 		// follows `activationEvents`: eager extensions boot here, the lazy ones wait for
 		// their first command / language / view (a `workspaceContains` match boots them too).
 		const toActivate: ExtInfo[] = [];
 		for (const ext of installed) {
-			if (ext.format === 'builtin' || this.processBacked.has(ext.id) || NATIVELY_HOSTED.has(ext.id) || this.frames.has(ext.id)) continue;
+			if (ext.format === 'bundled' || this.processBacked.has(ext.id) || this.frames.has(ext.id)) continue;
 			const policy = this.activationPolicies.get(ext.id);
 			if ((policy?.eager ?? true) || (await this.matchesWorkspaceContains(policy?.workspaceContains ?? []))) toActivate.push(ext);
 		}
@@ -495,6 +508,19 @@ export class ExtensionHost {
 		}
 		this.activationPolicies.set(ext.id, parseActivationPolicy(manifest?.activationEvents));
 		this.registerContributions(ext.id, manifest?.contributes, nls, nlsZhCn);
+		// The locale context key a manifest's own code would set on activation (VS Code's
+		// setContext): `<ext id>:interfaceZhCn` gates its locale-twin commands and menus (the
+		// English entry vs. the `.zhCn` one). A process-backed package never activates code,
+		// so the host resolves it — its declared `interfaceLanguage` setting when explicit,
+		// the app's display language when "auto". A manifest prefixes its context keys and
+		// settings with its package name (`git-graph-rs:interfaceZhCn`,
+		// `git-graph-rs.interfaceLanguage`), not the `publisher.name` id — both spellings answer.
+		const interfaceZhCn = (): boolean => {
+			const stored = state.extSettings(ext.id);
+			const language = String(stored[`${ext.name}.interfaceLanguage`] ?? stored[`${ext.id}.interfaceLanguage`] ?? 'auto');
+			return language === 'zh-cn' || (language === 'auto' && locale() === 'zh-cn');
+		};
+		for (const prefix of new Set([ext.id, ext.name])) registerContextProvider(`${prefix}:interfaceZhCn`, interfaceZhCn);
 		// The snippet and theme contributions are file contents: read them, then register
 		// whole (the settings module turns the themes into picker entries with overlays).
 		void this.loadContributionFiles(ext.id, manifest?.contributes);
@@ -549,12 +575,11 @@ export class ExtensionHost {
 	/** Register one extension's parsed manifest contributions into the workbench. */
 	private registerContributions(extId: string, contributes: ManifestContributes | null | undefined, nls: Record<string, string>, nlsZhCn: Record<string, string> = {}): void {
 		this.declaredCommandIds.set(extId, (contributes?.commands ?? []).map((declared) => declared.command));
-		const dispatch = (command: string) => {
-			if (this.onNativeCommand?.(command)) return;
-			if (this.processBacked.has(extId)) return void this.runProcessCommand(extId, command);
+		const dispatch = (command: string, args: unknown[] = []) => {
+			if (this.processBacked.has(extId)) return void this.runProcessCommand(extId, command, args);
 			// A lazily-activating extension wakes here: runRegistered activates it first, then
 			// runs the handler its activation registered.
-			void this.runRegistered(command);
+			void this.runRegistered(command, args);
 		};
 		const canRun = (command: string) => this.canRunCommand(command);
 		applyContributions(extId, contributes ?? undefined, nls, dispatch, canRun);
@@ -576,7 +601,6 @@ export class ExtensionHost {
 	 *  ggx/2 backend will take it, its manifest declares it (a lazily-activating extension
 	 *  wakes on the run — VS Code's palette behaviour), or its frame holds a handler. */
 	private canRunCommand(command: string): boolean {
-		if (this.nativeCommands.has(command)) return true;
 		if (this.processCommandIds.has(command)) return true;
 		if (declaredCommand(command)) return true;
 		return commandsRegistered.has(command);
@@ -584,14 +608,7 @@ export class ExtensionHost {
 
 	/** Re-activate one extension (after an install upgraded it): fresh contributions, fresh frame. */
 	private async reload(extId: string): Promise<void> {
-		if (NATIVELY_HOSTED.has(extId)) {
-			// A git-graph-rs upgrade is picked up by GraphHost's reload; refresh its contributions.
-			removeContributions(extId);
-			const ext = (await this.list().catch(() => [] as ExtInfo[])).find((e) => e.id === extId);
-			if (ext) await this.applyContributions(ext);
-			return;
-		}
-		this.deactivate(extId);
+			this.deactivate(extId);
 		removeContributions(extId);
 		// An upgraded process package restarts fresh: the old backend does not survive it.
 		await invoke('ext_process_stop', { extId }).catch(() => undefined);
@@ -689,23 +706,45 @@ export class ExtensionHost {
 
 	/** The pages of an installed package: the `ggx/2` named registry, with a `ggx/1`
 	 *  package's single frontend page synthesized in as the page named "view". */
-	pageEntry(extId: string, pageId: string): { page: string; title?: string } | null {
+	pageEntry(extId: string, pageId: string): { page: string; title?: string; singleton?: boolean; icon?: string | null } | null {
 		const manifest = this.installedExts.find((ext) => ext.id === extId)?.ggx;
 		if (!manifest) return null;
-		const pages: Record<string, { page: string; title?: string }> = {};
+		const pages: Record<string, { page: string; title?: string; singleton?: boolean; icon?: string | null }> = {};
 		if (manifest.frontend?.page) pages.view = { page: manifest.frontend.page };
 		Object.assign(pages, manifest.pages ?? {});
-		return pages[pageId] ?? null;
+		const entry = pages[pageId];
+		if (!entry) return null;
+		// A page without its own tab icon wears the package's activity-bar icon, else the
+		// package's own icon (package.json's `icon`, the one the Extensions view shows).
+		return { ...entry, icon: entry.icon ?? manifest.activitybar?.icon ?? this.packageIcon(extId) };
+	}
+
+	/** An installed extension's own icon, package-relative (for `extFileDataUrl`), or null. */
+	packageIcon(extId: string): string | null {
+		const ext = this.installedExts.find((candidate) => candidate.id === extId);
+		return ext?.icon ? extIconRelPath(ext) : null;
 	}
 
 	/** Open one of an extension's pages in an editor tab (the workbench's `onOpenPage` does
 	 *  the opening; this validates and hands over, the way a command's result may). */
-	openPage(extId: string, pageId: string, params?: unknown): void {
-		if (!this.pageEntry(extId, pageId)) {
+	openPage(extId: string, pageId: string, params?: unknown, title?: string): void {
+		const entry = this.pageEntry(extId, pageId);
+		if (!entry) {
 			notify('warning', `${t('extensions.pageMissing')}: ${extId} / ${pageId}`);
 			return;
 		}
-		this.onOpenPage?.(extId, pageId, params);
+		if (entry.singleton) {
+			const serial = this.singletonPages.get(`${extId}/${pageId}`);
+			const frame = serial !== undefined ? this.pageFrames.get(serial) : undefined;
+			if (frame) {
+				// A singleton's second open reveals its tab and hands the page the params as an
+				// event (a page that cannot use them simply ignores the event).
+				this.onRevealPage?.(extId, pageId);
+				frame.frame.contentWindow?.postMessage({ __ggxHost: true, type: 'event', event: { kind: 'params', params: params ?? null } }, '*');
+				return;
+			}
+		}
+		this.onOpenPage?.(extId, pageId, params, title);
 	}
 
 	/** Mount one page into a container (its editor tab's pane) and return the disposer the
@@ -715,6 +754,7 @@ export class ExtensionHost {
 	mountPage(extId: string, pageId: string, params: unknown, container: HTMLElement): () => void {
 		const entry = this.pageEntry(extId, pageId);
 		const serial = this.nextPageSerial++;
+		if (entry?.singleton) this.singletonPages.set(`${extId}/${pageId}`, serial);
 		const frame = document.createElement('iframe');
 		frame.className = 'ext-page-frame';
 		frame.title = `${extId}: ${pageId}`;
@@ -726,28 +766,99 @@ export class ExtensionHost {
 			frame.contentWindow?.postMessage({
 				__ggxHost: true,
 				type: 'init',
-				context: { extensionId: extId, pageId, params: params ?? null, language: locale() }
+				// Everything a self-contained page boots from: its identity and open params, the
+				// display language, its extension's settings, its persisted mementos and the
+				// workspace folders — the page plays its own extension host from these.
+				context: {
+					extensionId: extId, pageId, params: params ?? null, language: locale(),
+					settings: state.extSettings(extId),
+					state: { global: state.extMemento(extId, 'global'), workspace: state.extMemento(extId, 'workspace') },
+					folders: ExtensionHost.workspaceFolders
+				}
 			}, '*');
 		});
 		container.appendChild(frame);
 		return () => {
 			this.pageFrames.delete(serial);
+			if (this.singletonPages.get(`${extId}/${pageId}`) === serial) this.singletonPages.delete(`${extId}/${pageId}`);
 			for (const cancel of [...handle.pendingCalls]) cancel(new Error(`page ${extId}/${pageId} was closed`));
 			frame.remove();
 		};
 	}
 
+	/** The active theme as the pages need it: its vscode-* class and its stylesheet text
+	 *  (fetched from the app's own theme asset — a sandboxed page cannot link it). */
+	private async pageTheme(): Promise<PageTheme> {
+		const theme = themeById();
+		const css = await fetch(theme.css).then((response) => response.text(), () => '');
+		return { kind: theme.kind, label: theme.label, css };
+	}
+
+	/** The manifest permissions of a page's package, for the surface a page may use. */
+	private pagePermissions(page: PageFrameHandle): Set<string> {
+		return new Set(this.installedExts.find((ext) => ext.id === page.extId)?.ggx?.permissions ?? []);
+	}
+
 	/** A page's request of the host: the same surface the extension frames get (commands,
-	 *  notifications, quick input, clipboard…), plus the page's own two — opening another
-	 *  page of its extension and running a command in its backend process. */
+	 *  notifications, quick input, clipboard…), plus the page's own — opening another page of
+	 *  its extension, speaking its backend's own protocol, the theme, and the workbench
+	 *  surface (editors, views, the terminal, dialogs) a self-contained page acts through. */
 	private async servePageRpc(method: string, args: unknown[], page: PageFrameHandle): Promise<unknown> {
 		switch (method) {
-			case 'pages.open':
-				this.openPage(page.extId, args[0] as string, args[1]);
+			case 'pages.open': {
+				// `pages.open(pageId, params, { title })`: the optional title names this open's
+				// tab (a comparison page titles itself by the commits it shows).
+				const options = (args[2] ?? {}) as { title?: unknown };
+				this.openPage(page.extId, args[0] as string, args[1], typeof options.title === 'string' ? options.title : undefined);
 				return undefined;
+			}
 			case 'backend.run': {
 				const [command, commandArgs] = args as [string, unknown[]?];
 				return await invoke('ext_process_run', { extId: page.extId, command, args: commandArgs ?? [] });
+			}
+			case 'backend.message': {
+				// One opaque message of the package's own backend protocol — forwarded, never
+				// interpreted (the graph engine's request/response rides this).
+				const [message, settings] = args as [Record<string, unknown>, Record<string, unknown>?];
+				return await invoke('ext_process_message', { extId: page.extId, message, settings: settings ?? null });
+			}
+			case 'theme.stylesheet':
+				return await this.pageTheme();
+			case 'workbench.repoChanged':
+				this.onRepoChanged?.();
+				return undefined;
+			case 'workbench.openDiff':
+				this.onOpenDiff?.(args[0] as PageDiffRequest);
+				return undefined;
+			case 'workbench.openFileAtRevision': {
+				const [revision, path, title, repo] = args as [string, string, string, string?];
+				this.onOpenFileAtRevision?.(revision, path, title, repo);
+				return undefined;
+			}
+			case 'workbench.showView':
+				this.onShowView?.(args[0] as string);
+				return undefined;
+			case 'workbench.revealTerminal':
+				this.onRevealTerminal?.();
+				return undefined;
+			case 'workbench.runInTerminal': {
+				// Typing into the user's shell is gated on the package's declared permission.
+				if (!this.pagePermissions(page).has('terminal')) throw new Error('the package does not declare the terminal permission');
+				this.onRunInTerminal?.(args[0] as string);
+				return undefined;
+			}
+			case 'workbench.saveFile': {
+				const [title, defaultPath, filters] = args as [string, string, { name: string; extensions: string[] }[]];
+				return await saveDialog({ title, defaultPath, filters });
+			}
+			case 'workbench.writeFile': {
+				if (!this.pagePermissions(page).has('fs')) throw new Error('the package does not declare the fs permission');
+				const [path, contents] = args as [string, string];
+				return await invoke('write_file', { path, contents });
+			}
+			case 'workbench.forwardKey': {
+				this.onForwardKey?.(args[0] as { key: string; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean });
+				return undefined;
 			}
 			case 'commands.register':
 			case 'commands.unregister':
@@ -764,14 +875,19 @@ export class ExtensionHost {
 	}
 
 	/** Run one command in a `ggx/2` process package's backend — the first execution spawns
-	 *  it (lazy activation). A result naming one of the package's pages opens it: the
-	 *  convention a backend uses to surface UI, the way a VS Code command shows a webview. */
-	private async runProcessCommand(extId: string, command: string): Promise<void> {
+	 *  it (lazy activation). A result naming one of the package's pages opens it, and one
+	 *  naming a notification shows it: the convention a backend uses to surface UI, the way a
+	 *  VS Code command shows a webview or a message. */
+	private async runProcessCommand(extId: string, command: string, args: unknown[] = []): Promise<void> {
 		try {
-			const result = await invoke<unknown>('ext_process_run', { extId, command, args: [] });
-			if (result && typeof result === 'object' && typeof (result as { openPage?: unknown }).openPage === 'string') {
-				const { openPage: pageId, params } = result as { openPage: string; params?: unknown };
-				this.openPage(extId, pageId, params);
+			const result = await invoke<unknown>('ext_process_run', { extId, command, args });
+			if (result && typeof result === 'object') {
+				const { openPage: pageId, params, title, notify: toast } = result as {
+					openPage?: string; params?: unknown; title?: unknown; notify?: { kind: 'info' | 'warning' | 'error'; message: string };
+				};
+				// `title` names this open's tab, like pages.open's `{ title }` option.
+				if (typeof pageId === 'string') this.openPage(extId, pageId, params, typeof title === 'string' ? title : undefined);
+				if (toast && typeof toast.message === 'string') notify(toast.kind ?? 'info', toast.message);
 			}
 		} catch (error) {
 			notify('error', `${t('extensions.processFailed')}: ${String(error)}`);
@@ -1048,7 +1164,12 @@ export class ExtensionHost {
 		const entry = commandsRegistered.get(id);
 		if (entry) return this.callFrame(entry.handle, 'runCommand', [id, args]);
 		const extId = this.declaringExtension(id);
-		if (extId && !this.processBacked.has(extId) && !NATIVELY_HOSTED.has(extId)) {
+		if (extId && this.processBacked.has(extId)) {
+			// A process command keeps the caller's arguments (VS Code passes the menu's own —
+			// a right-clicked file, a repository) into its backend dispatch.
+			return this.runProcessCommand(extId, id, args);
+		}
+		if (extId && !this.processBacked.has(extId)) {
 			return this.ensureActive(extId).then(() => {
 				const late = commandsRegistered.get(id);
 				return late ? this.callFrame(late.handle, 'runCommand', [id, args]) : commands.execute(id);
@@ -1067,7 +1188,7 @@ export class ExtensionHost {
 			return;
 		}
 		const extId = this.declaringExtension(id);
-		if (extId && !this.processBacked.has(extId) && !NATIVELY_HOSTED.has(extId)) {
+		if (extId && !this.processBacked.has(extId)) {
 			await this.ensureActive(extId);
 			const late = commandsRegistered.get(id);
 			if (late) await this.callFrame(late.handle, 'runCommand', [id, args]);
@@ -1091,7 +1212,7 @@ export class ExtensionHost {
 		let activation = this.pendingActivations.get(extId);
 		if (activation) return activation;
 		const ext = this.installedExts.find((candidate) => candidate.id === extId);
-		if (!ext || ext.format === 'builtin' || this.processBacked.has(extId) || NATIVELY_HOSTED.has(extId)) return Promise.resolve();
+		if (!ext || ext.format === 'bundled' || this.processBacked.has(extId)) return Promise.resolve();
 		activation = new Promise<void>((resolve) => {
 			this.activationWaiters.set(extId, resolve);
 			void this.activate(ext);
@@ -1146,6 +1267,23 @@ export class ExtensionHost {
 			push = { type: '__studioExtEvent', event: 'activeEditorChanged', editor: { ...info, text: this.activeText?.() ?? undefined } };
 		}
 		for (const handle of this.frames.values()) handle.send?.(push);
+	}
+
+	/** The theme changed: every open page learns it (a page that follows the theme re-reads
+	 *  its stylesheet and re-mirrors its tokens). */
+	noteThemeChanged(): void {
+		for (const page of this.pageFrames.values()) {
+			page.frame.contentWindow?.postMessage({ __ggxHost: true, type: 'event', event: { kind: 'theme' } }, '*');
+		}
+	}
+
+	/** The app's open folders changed: every open page learns it (a page keyed to the
+	 *  workspace reloads itself; the backends hear it over their own wire). */
+	noteWorkspaceChanged(folders: string[]): void {
+		ExtensionHost.workspaceFolders = folders;
+		for (const page of this.pageFrames.values()) {
+			page.frame.contentWindow?.postMessage({ __ggxHost: true, type: 'event', event: { kind: 'workspace', folders } }, '*');
+		}
 	}
 
 	/** A document was saved: every frame's `onDidSaveTextDocument` fires. */

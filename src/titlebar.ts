@@ -53,7 +53,7 @@ export class TitleBar {
 		container.setAttribute('role', 'banner');
 
 		const logo = el('img', 'titlebar-logo');
-		logo.src = '/icons/git-graph-16.svg';
+		logo.src = '/icons/icon.png';
 		logo.alt = '';
 		logo.setAttribute('data-tauri-drag-region', '');
 		this.menubar = el('div', 'menubar');

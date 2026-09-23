@@ -128,6 +128,65 @@ describe('the boot sequence', () => {
 	});
 });
 
+describe('an installed package\'s activity-bar launcher', () => {
+	it('renders the manifest-declared icon and runs the package\'s command on click', async () => {
+		const launcher: import('../src/extHost').ExtInfo = { id: 'acme.viewer', name: 'viewer', displayName: 'Acme Viewer', publisher: 'acme', version: '1.0.0', description: '', builtin: false, icon: null, path: '/ext/acme.viewer-1.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggx', ggx: { format: 'ggx/2', id: 'acme.viewer', version: '1.0.0', pages: { view: { page: 'web/view.html', singleton: true } }, backend: { kind: 'process', command: 'bin/viewer.exe' }, activitybar: { command: 'acme.viewer.show', title: 'Acme Viewer', icon: 'resources/icon.svg' } } };
+		workbench.dispose();
+		backend.handlers.set('ext_list', () => [launcher]);
+		backend.handlers.set('ext_read_file', ({ relPath }) => {
+			if (relPath === 'package.json') return JSON.stringify({ contributes: { commands: [{ command: 'acme.viewer.show', title: 'Show Acme Viewer' }] } });
+			throw new Error('no such file');
+		});
+		// The command answers the ggx/2 result convention: open the package's `view` page.
+		backend.handlers.set('ext_process_run', () => ({ openPage: 'view' }));
+		backend.handlers.set('ext_read_file_base64', () => btoa('<svg xmlns="http://www.w3.org/2000/svg"/>'));
+		workbench = new Workbench();
+		await workbench.boot();
+		// Activation runs at the first idle moment after boot; the test drives it directly.
+		await workbench.extensionHost.activateInstalled();
+		await flush(10);
+		const item = document.querySelector<HTMLElement>('#activitybar .activity-item[aria-label="Acme Viewer"]');
+		expect(item).not.toBeNull();
+		click(item);
+		await flush(4);
+		expect(backend.callsTo('ext_process_run')).toEqual([{ extId: 'acme.viewer', command: 'acme.viewer.show', args: [] }]);
+		// The page's tab wears the package's own icon (the launcher's, the page declaring
+		// none), not the generic globe.
+		await flush(6);
+		const tab = [...document.querySelectorAll<HTMLElement>('.tabs-container .tab')].find((candidate) => candidate.textContent?.includes('view'));
+		expect(tab).toBeDefined();
+		expect(tab!.querySelector('img')?.getAttribute('src')).toMatch(/^data:image\/svg\+xml;base64,/);
+		expect(tab!.querySelector('.codicon-globe')).toBeNull();
+	});
+});
+
+describe('an extension page tab\'s icon', () => {
+	it('falls back to the package\'s own icon when neither the page nor a launcher declares one', async () => {
+		// The GGX Demo's shape: pages without icons, no activity-bar launcher, but package.json
+		// names an icon (the one the Extensions view shows).
+		const demo: import('../src/extHost').ExtInfo = { id: 'acme.demo', name: 'demo', displayName: 'Acme Demo', publisher: 'acme', version: '1.0.0', description: '', builtin: false, icon: 'C:\\ext\\acme.demo-1.0.0\\resources\\icon.svg', path: 'C:\\ext\\acme.demo-1.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggx', ggx: { format: 'ggx/2', id: 'acme.demo', version: '1.0.0', pages: { main: { page: 'web/view.html', title: 'Demo Page' } }, backend: { kind: 'process', command: 'bin/demo.exe' } } };
+		workbench.dispose();
+		backend.handlers.set('ext_list', () => [demo]);
+		backend.handlers.set('ext_read_file', ({ relPath }) => {
+			if (relPath === 'package.json') return JSON.stringify({ contributes: { commands: [{ command: 'acme.demo.open', title: 'Open Demo' }] } });
+			throw new Error('no such file');
+		});
+		backend.handlers.set('ext_process_run', () => ({ openPage: 'main' }));
+		backend.handlers.set('ext_read_file_base64', () => btoa('<svg xmlns="http://www.w3.org/2000/svg"/>'));
+		workbench = new Workbench();
+		await workbench.boot();
+		await workbench.extensionHost.activateInstalled();
+		await workbench.extensionHost.executeCommand('acme.demo.open', []);
+		await flush(10);
+		// The icon is read by its package-relative path.
+		expect(backend.callsTo('ext_read_file_base64')).toContainEqual({ extId: 'acme.demo', relPath: 'resources\\icon.svg' });
+		const tab = [...document.querySelectorAll<HTMLElement>('.tabs-container .tab')].find((candidate) => candidate.textContent?.includes('Demo Page'));
+		expect(tab).toBeDefined();
+		expect(tab!.querySelector('img')?.getAttribute('src')).toMatch(/^data:image\/svg\+xml;base64,/);
+		expect(tab!.querySelector('.codicon-globe')).toBeNull();
+	});
+});
+
 describe('the session snapshot across a folder switch', () => {
 	it('switching folders with a dirty editor keeps the old folder\'s session', async () => {
 		await openAndDirty([`${REPO_A}\\a.txt`, `${REPO_A}\\b.txt`]);
@@ -476,6 +535,8 @@ describe('command-line launch actions', () => {
 		workbench = new Workbench();
 		await workbench.boot();
 		await flush(10);
-		expect(workbench.editors.activeInput).toMatchObject({ kind: 'graph' });
+		// The shell boots to the welcome page now — the Git Graph view is the plugin's own
+		// page, opened by its command, not part of the app's boot.
+		expect(workbench.editors.activeInput?.kind ?? 'welcome').toBe('welcome');
 	});
 });

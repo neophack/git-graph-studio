@@ -55,7 +55,7 @@ describe('the hex and CAN chunks', () => {
 	});
 });
 
-describe('the on-demand view chunks and the builtin settings chunk', () => {
+describe('the on-demand view chunks', () => {
 	it('load once, on demand, and stay out of the first-paint graph', async () => {
 		const lazy = await import('../src/lazy');
 		expect(lazy.loadFastView()).toBe(lazy.loadFastView());
@@ -70,16 +70,8 @@ describe('the on-demand view chunks and the builtin settings chunk', () => {
 		expect(typeof (await lazy.loadFileHistory()).FileHistoryView).toBe('function');
 		expect(typeof (await lazy.loadCallTree()).CallTreeView).toBe('function');
 		expect(typeof (await lazy.loadSnippetRegistry()).loadWorkspaceSnippets).toBe('function');
-		// The settings schemas (most of the shipped manifest's bytes) ride their own chunk:
-		// only the Settings dialog renders them, and the first-paint budget (plan §4) does
-		// not have room for them.
-		expect(lazy.loadBuiltinSettings()).toBe(lazy.loadBuiltinSettings());
-		const settings = await lazy.loadBuiltinSettings();
-		expect(settings.builtinSettings[0]!.extId).toBe('neophack.git-graph-rs');
-		expect(settings.builtinSettings[0]!.configuration!.properties!['git-graph-rs.contextMenuActionsVisibility']).toBeDefined();
-		// Only `import type` may name any of them from the modules the workbench paints with -
-		// and nothing outside lazy.ts may reach the settings virtual module at all.
-		const forbidden = /^import .* from '\.\/(fastView|folderCompare|mergeEditor|fileHistory|callTree|snippetRegistry)'|'virtual:builtin-settings'/m;
+		// Only `import type` may name any of them from the modules the workbench paints with.
+		const forbidden = /^import .* from '\.\/(fastView|folderCompare|mergeEditor|fileHistory|callTree|snippetRegistry)'/m;
 		for (const file of ['workbench.ts', 'editor.ts', 'editorArea.ts', 'panel.ts', 'explorer.ts', 'scm.ts', 'searchView.ts', 'statusbar.ts', 'titlebar.ts', 'ui.ts', 'main.ts']) {
 			const source = readFileSync(join(__dirname, '..', 'src', file), 'utf8');
 			const offending = source.split('\n').filter((line) => forbidden.test(line) && !line.startsWith('import type'));

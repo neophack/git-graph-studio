@@ -73,18 +73,8 @@ describe('persisted state', () => {
 		state.forgetFolder('/b');
 		expect(state.recentFolders()).toEqual(['/a']);
 
-		expect(state.repoState('/a')['commitOrdering']).toBe('default');
-		state.saveRepoState('/a', { ...state.repoState('/a'), pinnedBranches: ['main'] });
-		expect(state.repoState('/a')['pinnedBranches']).toEqual(['main']);
-
-		state.saveGraphSetting('graph.style', 'angular');
-		expect(state.graphSettings()).toEqual({ 'graph.style': 'angular' });
-		expect(state.globalViewState()['pushTagSkipRemoteCheck']).toBe(false);
-
-		state.saveCodeReview('/a', { id: 'abc', lastActive: 1, lastViewedFile: null, remainingFiles: ['x'] });
-		expect(state.codeReview('/a', 'abc')?.remainingFiles).toEqual(['x']);
-		state.saveCodeReview('/a', null, 'abc');
-		expect(state.codeReview('/a', 'abc')).toBeNull();
+		// The Git Graph view's own state (repo settings, graph settings, code reviews) lives in
+		// the git-graph-rs plugin's mementos now; the workbench state carries folders and layout.
 	});
 });
 
@@ -170,11 +160,10 @@ describe('status bar', () => {
 		bar.onRepoClick = () => { clicks += 'r'; };
 		bar.onBranchClick = () => { clicks += 'b'; };
 		bar.onSyncClick = () => { clicks += 's'; };
-		bar.onGraphClick = () => { clicks += 'g'; };
 		expect(document.body.classList.contains('no-folder')).toBe(true);
 		bar.setRepo(true);
 		await bar.refreshHead(); // the host drives this from the SCM refresh (or itself)
-		const [repo, branch, sync, graph] = Array.from(document.querySelectorAll<HTMLElement>('.status-left .status-item'));
+		const [repo, branch, sync] = Array.from(document.querySelectorAll<HTMLElement>('.status-left .status-item'));
 		// The repository's name is a button of its own, opening Source Control.
 		expect(repo!.textContent).toContain('git-graph-studio');
 		// The branch shows the name only; both counts ride the sync item.
@@ -190,8 +179,7 @@ describe('status bar', () => {
 		click(repo);
 		click(branch);
 		click(sync);
-		click(graph);
-		expect(clicks).toBe('rbsg');
+		expect(clicks).toBe('rbs');
 
 		bar.setEditor({ kind: 'file', languageName: 'Rust', line: 3, column: 7 });
 		expect(texts('.status-right .status-item:not([hidden])')).toEqual(['Ln 3, Col 7', 'Spaces: 4', 'LF', 'UTF-8', 'Rust']);

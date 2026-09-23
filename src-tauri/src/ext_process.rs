@@ -57,6 +57,9 @@ pub struct ProcessHostState {
     /// Shared with the reader threads, which forget a handle when its process dies. An `Arc`
     /// (not a bare `Mutex`) because `State` must stay `Send + Sync` while threads hold a copy.
     procs: Arc<Mutex<HashMap<String, ProcHandle>>>,
+    /// The folders the app last reported open (`notify_workspace`): carried into every
+    /// backend's start handshake, so a lazily-started backend still learns its workspace.
+    workspace: Arc<Mutex<Vec<String>>>,
     /// What survives a backend's death: how often it came up, and why it is not running now.
     /// The status surface reads it so a dead backend can say more than "absent".
     history: Arc<Mutex<HashMap<String, ProcHistory>>>,
@@ -191,7 +194,9 @@ impl ProcessHostState {
         let ext_dir = cmd_ext::installed_dir(exts_dir, ext_id)?;
         let manifest: cmd_ext::GgxManifest = std::fs::read_to_string(ext_dir.join("manifest.json"))
             .map_err(|e| format!("read {} manifest.json: {e}", ext_dir.display()))
-            .and_then(|text| serde_json::from_str(&text).map_err(|e| format!("invalid manifest.json: {e}")))?;
+            .and_then(|text| {
+                serde_json::from_str(&text).map_err(|e| format!("invalid manifest.json: {e}"))
+            })?;
         let backend = manifest
             .backend
             .as_ref()
@@ -203,7 +208,8 @@ impl ProcessHostState {
             ));
         }
         let kind = ProcKind::from_protocol(backend.protocol_or_default());
-        let program = resolve_command(&ext_dir, backend.command_for(&cmd_ext::host_platform_key()))?;
+        let program =
+            resolve_command(&ext_dir, backend.command_for(&cmd_ext::host_platform_key()))?;
         let mut command = Command::new(&program);
         command
             .args(&backend.args)
@@ -226,14 +232,8 @@ impl ProcessHostState {
             .stdin
             .take()
             .ok_or_else(|| "the backend closed its stdin at spawn".to_string())?;
-        let stdout = child
-            .stdout
-            .take()
-            .expect("stdout is piped above");
-        let stderr = child
-            .stderr
-            .take()
-            .expect("stderr is piped above");
+        let stdout = child.stdout.take().expect("stdout is piped above");
+        let stderr = child.stderr.take().expect("stderr is piped above");
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -271,6 +271,11 @@ impl ProcessHostState {
 
         let (tx, rx) = mpsc::channel();
         pending.lock().unwrap().insert(1, tx);
+        let workspace_folders = self
+            .workspace
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         let handshake_line = match kind {
             ProcKind::GgsExt1 => proto::request(
                 1,
@@ -279,12 +284,13 @@ impl ProcessHostState {
                     "protocolVersion": kind.protocol_version(),
                     "extensionId": ext_id,
                     "extensionPath": ext_dir,
+                    "workspaceFolders": workspace_folders,
                 }),
             ),
             ProcKind::GgxRpc1 => crate::backend_rpc::request(
                 1,
                 kind.handshake_method(),
-                json!({ "extensionId": ext_id, "extensionPath": ext_dir }),
+                json!({ "extensionId": ext_id, "extensionPath": ext_dir, "workspaceFolders": workspace_folders }),
             ),
         };
         if let Err(e) = write_line(&procs, ext_id, &handshake_line) {
@@ -343,14 +349,73 @@ impl ProcessHostState {
     /// Run one of the extension's commands in its backend, starting the backend first if it
     /// is not running (lazy activation). No timeout: a command may be a long operation, and
     /// `stop` (or the process dying) fails the call. `ggs-ext/1`'s single RPC verb.
-    pub fn run(&self, exts_dir: &Path, ext_id: &str, command: &str, args: Value) -> Result<Value, String> {
-        self.call(exts_dir, ext_id, "runCommand", json!({ "command": command, "args": args }))
+    pub fn run(
+        &self,
+        exts_dir: &Path,
+        ext_id: &str,
+        command: &str,
+        args: Value,
+    ) -> Result<Value, String> {
+        self.call(
+            exts_dir,
+            ext_id,
+            "runCommand",
+            json!({ "command": command, "args": args }),
+        )
+    }
+
+    /// One opaque message for a `ggx-rpc/1` backend (the graph engine protocol: `{repo,
+    /// message, settings}` answered by the backend's own dispatch) — the page RPC
+    /// `backend.message` reaches this, so a plugin's pages speak their own backend's protocol
+    /// through the host without the host interpreting a word of it.
+    pub fn message(
+        &self,
+        exts_dir: &Path,
+        ext_id: &str,
+        message: Value,
+        settings: Value,
+    ) -> Result<Value, String> {
+        self.call(
+            exts_dir,
+            ext_id,
+            "request",
+            json!({ "repo": "", "message": message, "settings": settings }),
+        )
+    }
+
+    /// The app's report of its open folders: remembered for every later start's handshake
+    /// (a lazily-started backend learns the workspace it boots into) and pushed to every
+    /// backend already running, as a fire-and-forget `workspaceChanged` request — a backend
+    /// that keeps per-workspace state (a warm repository handle) acts on it; one that does
+    /// not know the method answers into its status log only. No backend is started for it.
+    pub fn notify_workspace(&self, folders: &[String]) {
+        *self.workspace.lock().unwrap_or_else(|p| p.into_inner()) = folders.to_vec();
+        let procs = self.procs.lock().unwrap();
+        let params = json!({ "folders": folders });
+        for (ext_id, handle) in procs.iter() {
+            // No pending entry: the response finds no waiter and is dropped — the report is
+            // delivery, not a round trip.
+            let id = handle.next_id.fetch_add(1, Ordering::Relaxed);
+            let line = match handle.kind {
+                ProcKind::GgsExt1 => proto::request(id, "workspaceChanged", params.clone()),
+                ProcKind::GgxRpc1 => {
+                    crate::backend_rpc::request(id, "workspaceChanged", params.clone())
+                }
+            };
+            let _ = write_line(&procs, ext_id, &line);
+        }
     }
 
     /// The general call: any method, any params, against either protocol — starting the
     /// backend first if it is not running. `ggs-ext/1`'s `run` is `call(.., "runCommand", ..)`;
-    /// `plugin_host.rs` calls this directly for `ggx-rpc/1`'s `request`/`closeRepos` verbs.
-    pub fn call(&self, exts_dir: &Path, ext_id: &str, method: &str, params: Value) -> Result<Value, String> {
+    /// `message` is `call(.., "request", ..)` for the `ggx-rpc/1` plugins.
+    pub fn call(
+        &self,
+        exts_dir: &Path,
+        ext_id: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, String> {
         if !self.procs.lock().unwrap().contains_key(ext_id) {
             self.start(exts_dir, ext_id)?;
         }
@@ -418,29 +483,33 @@ impl ProcessHostState {
             .map(|(ext_id, handle)| handle.info(ext_id, history.get(ext_id)))
             .collect();
         let running: std::collections::HashSet<&String> = procs.keys().collect();
-        out.extend(history.iter().filter(|(ext_id, _)| !running.contains(ext_id)).map(
-            |(ext_id, h)| ProcessInfo {
-                extension_id: ext_id.clone(),
-                pid: 0,
-                commands: Vec::new(),
-                // A dead entry's protocol is not remembered (only pid/counts/error are); the
-                // default reads as "not running" either way since pid is 0.
-                protocol_version: proto::PROTOCOL_VERSION.to_owned(),
-                start_count: h.start_count,
-                last_error: h.last_error.clone(),
-            },
-        ));
+        out.extend(
+            history
+                .iter()
+                .filter(|(ext_id, _)| !running.contains(ext_id))
+                .map(|(ext_id, h)| ProcessInfo {
+                    extension_id: ext_id.clone(),
+                    pid: 0,
+                    commands: Vec::new(),
+                    // A dead entry's protocol is not remembered (only pid/counts/error are); the
+                    // default reads as "not running" either way since pid is 0.
+                    protocol_version: proto::PROTOCOL_VERSION.to_owned(),
+                    start_count: h.start_count,
+                    last_error: h.last_error.clone(),
+                }),
+        );
         out
     }
 
     /// Apply `edit` to `ext_id`'s history entry, creating it first if this is its first mark.
     fn record(&self, ext_id: &str, edit: impl FnOnce(&mut ProcHistory)) {
-        edit(self
-            .history
-            .lock()
-            .unwrap()
-            .entry(ext_id.to_owned())
-            .or_default());
+        edit(
+            self.history
+                .lock()
+                .unwrap()
+                .entry(ext_id.to_owned())
+                .or_default(),
+        );
     }
 }
 
@@ -474,7 +543,9 @@ impl ReaderState {
                 continue;
             };
             match wire {
-                Wire::Response { id, result, error } => self.resolve(id, result, error.map(|e| e.message)),
+                Wire::Response { id, result, error } => {
+                    self.resolve(id, result, error.map(|e| e.message))
+                }
                 Wire::Notification { method, params } => {
                     let message = params
                         .get("message")
@@ -503,7 +574,9 @@ impl ReaderState {
                 continue;
             };
             match wire {
-                RpcWire::Response { id, result, error } => self.resolve(id, result, error.map(|e| e.message)),
+                RpcWire::Response { id, result, error } => {
+                    self.resolve(id, result, error.map(|e| e.message))
+                }
                 // The backend's push events: git's command echo and its one-time "up" signal —
                 // both fold into the same log the Extensions status view and crash reports read.
                 RpcWire::Event { event, line } => {
@@ -512,7 +585,10 @@ impl ReaderState {
                 // The host makes the requests in ggx-rpc/1 too; a stray one from the backend is
                 // logged, not answered.
                 RpcWire::Request { method, .. } => {
-                    push_log(&self.log, format!("unexpected request from backend: {method}"));
+                    push_log(
+                        &self.log,
+                        format!("unexpected request from backend: {method}"),
+                    );
                 }
             }
         }
@@ -596,7 +672,9 @@ fn drop_handle(procs: &mut HashMap<String, ProcHandle>, ext_id: &str) -> Result<
 fn resolve_command(ext_dir: &Path, command: &str) -> Result<PathBuf, String> {
     let as_path = Path::new(command);
     if !as_path.is_absolute() && command.split(['/', '\\']).any(|segment| segment == "..") {
-        return Err(format!("backend command may not climb out of the package: {command}"));
+        return Err(format!(
+            "backend command may not climb out of the package: {command}"
+        ));
     }
     let resolved = if as_path.is_absolute() {
         as_path.to_path_buf()
@@ -641,13 +719,36 @@ pub fn ext_process_run(
     )
 }
 
+/// One opaque message for a `ggx-rpc/1` package's backend — the page RPC `backend.message`
+/// reaches this, the host forwarding without interpreting the protocol.
 #[tauri::command]
-pub fn ext_process_stop(state: tauri::State<'_, ProcessHostState>, ext_id: String) -> Result<(), String> {
+pub fn ext_process_message(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ProcessHostState>,
+    ext_id: String,
+    message: Value,
+    settings: Option<Value>,
+) -> Result<Value, String> {
+    state.message(
+        &cmd_ext::extensions_dir(&app)?,
+        &ext_id,
+        message,
+        settings.unwrap_or(Value::Null),
+    )
+}
+
+#[tauri::command]
+pub fn ext_process_stop(
+    state: tauri::State<'_, ProcessHostState>,
+    ext_id: String,
+) -> Result<(), String> {
     state.stop(&ext_id)
 }
 
 #[tauri::command]
-pub fn ext_process_status(state: tauri::State<'_, ProcessHostState>) -> Result<Vec<ProcessInfo>, String> {
+pub fn ext_process_status(
+    state: tauri::State<'_, ProcessHostState>,
+) -> Result<Vec<ProcessInfo>, String> {
     Ok(state.status())
 }
 
@@ -683,7 +784,10 @@ mod tests {
         // An error response surfaces its message, not its code.
         let (tx, rx) = mpsc::channel();
         pending.lock().unwrap().insert(6, tx);
-        make_reader(&pending).serve(Cursor::new(proto::response(6, Err("unknown command".into()))));
+        make_reader(&pending).serve(Cursor::new(proto::response(
+            6,
+            Err("unknown command".into()),
+        )));
         assert_eq!(rx.recv().unwrap().unwrap_err(), "unknown command");
     }
 
@@ -693,7 +797,10 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         pending.lock().unwrap().insert(1, tx);
         make_reader(&pending).serve(Cursor::new(""));
-        assert_eq!(rx.recv().unwrap().unwrap_err(), "the backend process exited");
+        assert_eq!(
+            rx.recv().unwrap().unwrap_err(),
+            "the backend process exited"
+        );
     }
 
     #[test]
@@ -701,8 +808,9 @@ mod tests {
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let (tx, rx) = mpsc::channel();
         pending.lock().unwrap().insert(9, tx);
-        make_reader_kind(&pending, ProcKind::GgxRpc1)
-            .serve(Cursor::new(crate::backend_rpc::response(9, Ok(json!({ "commits": [] })))));
+        make_reader_kind(&pending, ProcKind::GgxRpc1).serve(Cursor::new(
+            crate::backend_rpc::response(9, Ok(json!({ "commits": [] }))),
+        ));
         assert_eq!(rx.recv().unwrap().unwrap(), json!({ "commits": [] }));
     }
 

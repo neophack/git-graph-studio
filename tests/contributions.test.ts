@@ -62,6 +62,18 @@ describe('manifest contributions', () => {
 		expect(menuItems('git.pullpush').map((item) => item.label)).toEqual(['View Git Graph']);
 	});
 
+	it('hands a menu entry the location\'s context as the command\'s arguments', () => {
+		// VS Code's (uri, uris) pair, as paths: the Explorer passes the clicked file and the
+		// whole selection; a location that passes nothing runs the command bare.
+		const run: { command: string; args?: unknown[] }[] = [];
+		applyContributions('neophack.git-graph-rs', manifest, nls, (command, args) => run.push({ command, args }), () => true);
+		menuItems('explorer/context', ['C:\\repo\\a.txt', ['C:\\repo\\a.txt', 'C:\\repo\\b.txt']])[0]!.run();
+		expect(run).toEqual([{ command: 'git-graph-rs.filterByFile', args: ['C:\\repo\\a.txt', ['C:\\repo\\a.txt', 'C:\\repo\\b.txt']] }]);
+		run.length = 0;
+		menuItems('explorer/context')[0]!.run();
+		expect(run).toEqual([{ command: 'git-graph-rs.filterByFile', args: undefined }]);
+	});
+
 	it('disables menu entries whose command cannot run', () => {
 		applyContributions('neophack.git-graph-rs', manifest, nls, () => undefined, () => false);
 		expect(menuItems('explorer/context')[0]!.disabled).toBe(true);

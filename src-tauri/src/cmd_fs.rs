@@ -365,6 +365,43 @@ pub async fn write_file(
     fs::write(target, bytes).map_err(|e| format!("{path}: {e}"))
 }
 
+/// A file's raw bytes at one revision, over the git CLI: `git cat-file` of `<rev>:<path>`,
+/// where `:index` (the staged copy) reads the index's stage-0 entry. `Ok(None)` when the path
+/// does not exist at that revision (the missing side of an added or deleted file); binary
+/// content passes through undecoded.
+fn revision_file_bytes(git: &Git, revision: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
+    let spec = format!(
+        "{}:{path}",
+        if revision == ":index" { "" } else { revision }
+    );
+    if git.output(&["cat-file", "-e", &spec]).is_err() {
+        return Ok(None);
+    }
+    git.output_bytes(&["cat-file", "blob", &spec]).map(Some)
+}
+
+/// A file at one revision as the diff editors read it: `binary` says whether `contents`
+/// (UTF-8 text, lossily decoded) is there — a NUL byte in the leading window is git's own
+/// binary heuristic. A missing path answers the same "does not exist" error the editors'
+/// missing-side handling keys off.
+fn revision_file_text(
+    git: &Git,
+    revision: &str,
+    path: &str,
+) -> Result<(bool, Option<String>), String> {
+    match revision_file_bytes(git, revision, path)? {
+        None => Err(format!("The file \"{path}\" does not exist in {revision}")),
+        Some(bytes) => {
+            let window = &bytes[..bytes.len().min(8000)];
+            if window.contains(&0) {
+                Ok((true, None))
+            } else {
+                Ok((false, Some(String::from_utf8_lossy(&bytes).into_owned())))
+            }
+        }
+    }
+}
+
 /// A file as it is in a revision of the open repository, for the diff editors. `HEAD`, a hash,
 /// `<hash>^`… are all accepted; `*` (the view's uncommitted sentinel) reads the working tree,
 /// and `:index` reads the staged copy.
@@ -388,22 +425,22 @@ pub async fn read_file_at(
         )
         .await;
     }
-    // The engine answers in this process.
-    let file = tauri::async_runtime::spawn_blocking(move || {
-        crate::cmd_graph::revision_file(&repo_path, &revision, &path)
+    let (rev, file_path) = (revision.clone(), path.clone());
+    let (binary, contents) = tauri::async_runtime::spawn_blocking(move || {
+        let git = Git::new(&repo_path);
+        revision_file_text(&git, &rev, &file_path)
     })
     .await
     .map_err(|e| e.to_string())??;
     Ok(FileContents {
-        binary: file.binary,
-        size: file.contents.as_ref().map(|c| c.len() as u64).unwrap_or(0),
-        eol: file
-            .contents
+        binary,
+        size: contents.as_ref().map(|c| c.len() as u64).unwrap_or(0),
+        eol: contents
             .as_deref()
             .map(crate::encoding::detect_eol)
             .unwrap_or("lf")
             .into(),
-        contents: file.contents,
+        contents,
         encoding: "utf8".into(),
     })
 }
@@ -435,9 +472,10 @@ pub async fn materialize_revision_file(
         }
         return write_temp_blob(&path, &[]);
     }
-    let file_path = path.clone();
+    let (rev, file_path) = (revision.clone(), path.clone());
     let bytes = tauri::async_runtime::spawn_blocking(move || {
-        crate::cmd_graph::revision_file_bytes(&repo_path, &revision, &file_path)
+        let git = Git::new(&repo_path);
+        revision_file_bytes(&git, &rev, &file_path)
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -448,10 +486,8 @@ pub async fn materialize_revision_file(
 /// this call, and return its absolute path.
 fn write_temp_blob(path: &str, bytes: &[u8]) -> Result<String, String> {
     let seq = TEMP_BLOB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "git-graph-studio-hex-{}-{seq}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("git-graph-studio-hex-{}-{seq}", std::process::id()));
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let name = Path::new(path)
         .file_name()
@@ -1002,11 +1038,29 @@ pub async fn backup_read(path: String) -> Result<String, String> {
     backup_read_in(&backups_dir()?, &path)
 }
 
-/// The roots of a repository's initialised submodules (absolute paths), as the Git Graph
-/// view's repository dropdown lists them alongside the repository itself.
+/// The roots of the repository's initialised submodules (absolute paths), as the repository
+/// dropdowns list them alongside the repository itself: `.gitmodules`'s entries whose working
+/// tree copy is checked out (a `.git` exists below it). Never errors — anything unreadable
+/// just lists nothing.
 #[tauri::command]
 pub fn repo_submodules(repo: String) -> Vec<String> {
-    crate::cmd_graph::submodule_roots(&repo)
+    let git = Git::new(&repo);
+    let Ok(listing) = git.output(&[
+        "config",
+        "--file",
+        ".gitmodules",
+        "--get-regexp",
+        r"^submodule\..*\.path$",
+    ]) else {
+        return Vec::new();
+    };
+    listing
+        .lines()
+        .filter_map(|line| line.split_once(' ').map(|(_, rel)| rel.trim().to_owned()))
+        .filter(|rel| !rel.is_empty())
+        .filter(|rel| Path::new(&repo).join(rel).join(".git").exists())
+        .map(|rel| Path::new(&repo).join(rel).display().to_string())
+        .collect()
 }
 
 #[cfg(test)]

@@ -185,16 +185,15 @@ describe('editor area (M3 3.1)', () => {
 		expect(group.activeInput?.kind === 'file' && !group.activeInput.path.endsWith('a.ts')).toBe(true);
 	});
 
-	it('opens the Git Graph tab in a group that was split after the graph host was wired', async () => {
-		files({ 'C:\\repo\\a.ts': 'a\n' });
+	it('carries an extension page tab into a group split after it opened', async () => {
+		files({ 'C:\\repo\\a.ts': 'a\\n' });
 		const area = new EditorArea(document.getElementById('editorGroup')!);
 		area.setRoot('C:\\repo');
-		const frame = document.createElement('iframe');
-		area.graphElement = frame;
-		area.split('right'); // the new group must receive the graph frame too
-		area.openGraph();
-		expect(area.activeInput?.kind).toBe('graph');
-		expect(frame.parentElement).not.toBeNull();
+		const pane = document.createElement('div');
+		area.split('right');
+		await area.openExtPage({ kind: 'extpage', id: 'extpage:x:1', title: 'Page', extId: 'x', pageId: '1' }, (container) => { container.appendChild(pane); });
+		expect(area.activeInput?.kind).toBe('extpage');
+		expect(pane.parentElement).not.toBeNull();
 	});
 
 	it('the welcome page belongs to the first group, and a split without files collapses back', async () => {
@@ -336,12 +335,11 @@ describe('the grid snapshot when a group holds no files', () => {
 	it('numbers the cells over the session-bearing groups only, so a restore lands files in their panes', async () => {
 		files({ 'C:\repo\a.ts': 'a\n', 'C:\repo\c.ts': 'c\n' });
 		const area = new EditorArea(document.getElementById('editorGroup')!);
-		area.graphElement = document.createElement('div');
 		area.setRoot('C:\repo');
 		await area.openFile('C:\repo\a.ts');
 		// Three groups: a.ts | Git Graph (no file - dropped from the sessions) | c.ts.
 		const middle = area.split('right');
-		middle.openGraph();
+		await middle.openHelp('welcome');
 		const right = area.split('right');
 		await right.openFile('C:\repo\c.ts');
 		expect(area.groupCount).toBe(3);
@@ -357,10 +355,9 @@ describe('the grid snapshot when a group holds no files', () => {
 
 		// A layout whose only file-bearing group is one of several is a single-group session.
 		const single = new EditorArea(document.getElementById('editorGroup')!);
-		single.graphElement = document.createElement('div');
 		single.setRoot('C:\repo');
 		await single.openFile('C:\repo\a.ts');
-		single.split('right').openGraph();
+		await single.split('right').openHelp('welcome');
 		expect(single.groupCount).toBe(2);
 		expect(single.gridLayout()).toBeNull();
 	});
@@ -368,13 +365,12 @@ describe('the grid snapshot when a group holds no files', () => {
 	it('collapses a split left with one cell into that cell', async () => {
 		files({ 'C:\repo\a.ts': 'a\n', 'C:\repo\b.ts': 'b\n' });
 		const area = new EditorArea(document.getElementById('editorGroup')!);
-		area.graphElement = document.createElement('div');
 		area.setRoot('C:\repo');
 		await area.openFile('C:\repo\a.ts');
 		// a.ts | (graph over b.ts): the right column's graph pane drops, leaving b.ts alone
 		// in it - the column disappears and b.ts becomes the row's second cell directly.
 		const rightTop = area.split('right');
-		rightTop.openGraph();
+		await rightTop.openHelp('welcome');
 		const rightBottom = area.split('down');
 		await rightBottom.openFile('C:\repo\b.ts');
 		expect(area.groupCount).toBe(3);

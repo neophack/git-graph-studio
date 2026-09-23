@@ -84,15 +84,6 @@ export class EditorArea {
 		this.focus(this.leaves()[0]!.box);
 	}
 
-	/** The one graph iframe, remembered so groups split later receive it too - a group
-	 *  without it could never open the Git Graph tab (only one graph tab exists at a time;
-	 *  `openGraph` below activates the existing tab wherever it lives). */
-	private graphFrame: HTMLElement | null = null;
-
-	set graphElement(element: HTMLElement | null) {
-		this.graphFrame = element;
-		for (const leaf of this.leaves()) leaf.box.group.graphElement = element;
-	}
 
 	/** The groups in visual order (depth-first, left to right, top to bottom). */
 	groups(): EditorGroup[] {
@@ -366,7 +357,6 @@ export class EditorArea {
 	private makeBox(): GroupBox {
 		const elBox = el('div', 'editor-group-box');
 		const group = new EditorGroup(elBox.appendChild(el('div', 'editor-group-container')));
-		group.graphElement = this.graphFrame;
 		// The first group owns the welcome page; `reassignWelcome` sorts that out after the
 		// tree change, so a box is created welcome-less here (the tree may not exist yet).
 		group.showWelcome = false;
@@ -538,18 +528,6 @@ export class EditorArea {
 		for (const group of this.groups()) group.setRoot(rootPath);
 	}
 
-	/** The Git Graph tab is one shared iframe: open it wherever it already is, else in the
-	 *  focused group. */
-	openGraph(): void {
-		const holder = this.groups().find((g) => g.isGraphOpen());
-		if (holder) holder.openGraph();
-		else this.activeGroup.openGraph();
-	}
-
-	isGraphOpen(): boolean {
-		return this.groups().some((g) => g.isGraphOpen());
-	}
-
 	/** The open file tabs of every group, in visual order (what a relaunch reopens). */
 	openFilePaths(): string[] {
 		return this.groups().flatMap((g) => g.openFilePaths());
@@ -686,8 +664,6 @@ export class EditorArea {
 		return this.split('right').openMarkdownPreview(target);
 	};
 	openFileHistory = (path?: string) => this.activeGroup.openFileHistory(path);
-	openCompare = (input: Extract<EditorInput, { kind: 'compare' }>) => this.activeGroup.openCompare(input);
-	openBinaryCompare = (input: Extract<EditorInput, { kind: 'bincompare' }>) => this.activeGroup.openBinaryCompare(input);
 	openFolderCompare = (input: Extract<EditorInput, { kind: 'folders' }>) => this.activeGroup.openFolderCompare(input);
 	toggleBlame = () => this.activeGroup.toggleBlame();
 	/** Back / forward follow the focused group; if it cannot go further, a group that can
@@ -713,7 +689,7 @@ export class EditorArea {
 	openAnalysisPage = (tool: import('./analysisTools').AnalysisToolId) => this.activeGroup.openAnalysisPage(tool);
 	/** An extension page tab (module 12): mounts through the active group, like every other
 	 *  custom editor kind. */
-	openExtPage = (input: import('./editor').EditorInput & { kind: 'extpage' }, mount: (pane: HTMLElement) => (() => void) | void) => this.activeGroup.openExtPage(input, mount);
+	openExtPage = (input: import('./editor').EditorInput & { kind: 'extpage' }, mount: (pane: HTMLElement) => (() => void) | void, iconSrc?: string | null) => this.activeGroup.openExtPage(input, mount, iconSrc);
 	/** The Extensions view's detail page tab (module 12): the same mounting path. */
 	openExtDetail = (input: import('./editor').EditorInput & { kind: 'extdetail' }, mount: (pane: HTMLElement) => (() => void) | void) => this.activeGroup.openExtDetail(input, mount);
 	gotoSymbolInFile = () => this.activeGroup.gotoSymbolInFile();

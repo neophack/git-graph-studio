@@ -92,7 +92,11 @@ pub fn serve_backend<F>(handle: F)
 where
     F: Fn(&str, &Value) -> Result<Value, String> + Send + Sync + 'static,
 {
-    serve_backend_on(std::io::BufReader::new(std::io::stdin()), std::io::stdout(), handle);
+    serve_backend_on(
+        std::io::BufReader::new(std::io::stdin()),
+        std::io::stdout(),
+        handle,
+    );
 }
 
 /// The testable core of [`serve_backend`], over an arbitrary reader/writer pair.
@@ -149,26 +153,57 @@ mod tests {
 
     #[test]
     fn a_request_line_parses_as_a_request_not_a_response() {
-        let wire: Wire = serde_json::from_str(&request(7, "request", json!({ "repo": "/r" }))).unwrap();
+        let wire: Wire =
+            serde_json::from_str(&request(7, "request", json!({ "repo": "/r" }))).unwrap();
         assert_eq!(
             wire,
-            Wire::Request { id: 7, method: "request".into(), params: json!({ "repo": "/r" }) }
+            Wire::Request {
+                id: 7,
+                method: "request".into(),
+                params: json!({ "repo": "/r" })
+            }
         );
     }
 
     #[test]
     fn responses_and_events_parse_by_their_fields() {
         let ok: Wire = serde_json::from_str(&response(3, Ok(json!("done")))).unwrap();
-        assert_eq!(ok, Wire::Response { id: 3, result: Some(json!("done")), error: None });
+        assert_eq!(
+            ok,
+            Wire::Response {
+                id: 3,
+                result: Some(json!("done")),
+                error: None
+            }
+        );
         let err: Wire = serde_json::from_str(&response(4, Err("nope".into()))).unwrap();
         assert_eq!(
             err,
-            Wire::Response { id: 4, result: None, error: Some(RpcError { code: 1, message: "nope".into() }) }
+            Wire::Response {
+                id: 4,
+                result: None,
+                error: Some(RpcError {
+                    code: 1,
+                    message: "nope".into()
+                })
+            }
         );
         let log: Wire = serde_json::from_str(&log_event("> git fetch [1ms]")).unwrap();
-        assert_eq!(log, Wire::Event { event: "log".into(), line: Some("> git fetch [1ms]".into()) });
+        assert_eq!(
+            log,
+            Wire::Event {
+                event: "log".into(),
+                line: Some("> git fetch [1ms]".into())
+            }
+        );
         let ready: Wire = serde_json::from_str(&ready_event()).unwrap();
-        assert_eq!(ready, Wire::Event { event: "ready".into(), line: None });
+        assert_eq!(
+            ready,
+            Wire::Event {
+                event: "ready".into(),
+                line: None
+            }
+        );
     }
 
     #[test]
@@ -216,7 +251,10 @@ mod tests {
         let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
         assert_eq!(lines.len(), 2, "{lines:?}");
         let first: Value = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(first["id"], 2, "the fast request should answer first: {lines:?}");
+        assert_eq!(
+            first["id"], 2,
+            "the fast request should answer first: {lines:?}"
+        );
     }
 
     #[test]
@@ -231,11 +269,18 @@ mod tests {
         );
         let seen = Arc::new(Mutex::new(Vec::new()));
         let seen_in_handler = Arc::clone(&seen);
-        serve_backend_on(Cursor::new(input.into_bytes()), writer, move |method, _params| {
-            seen_in_handler.lock().unwrap().push(method.to_owned());
-            Ok(Value::Null)
-        });
-        assert_eq!(*seen.lock().unwrap(), vec!["hello".to_owned(), "closeRepos".to_owned()]);
+        serve_backend_on(
+            Cursor::new(input.into_bytes()),
+            writer,
+            move |method, _params| {
+                seen_in_handler.lock().unwrap().push(method.to_owned());
+                Ok(Value::Null)
+            },
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["hello".to_owned(), "closeRepos".to_owned()]
+        );
         let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         assert_eq!(output.lines().filter(|l| !l.trim().is_empty()).count(), 3);
     }

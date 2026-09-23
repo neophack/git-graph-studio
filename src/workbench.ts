@@ -17,10 +17,9 @@ import { registerContextProvider } from './contributions';
 import { EditorArea } from './editorArea';
 import { ENCODING_LABELS } from './editor';
 import { Explorer } from './explorer';
-import { ExtensionHost, extTitle, GIT_GRAPH_RS_EXT_ID, type ExtInfo } from './extHost';
+import { ExtensionHost, extTitle, type ExtInfo, type PageDiffRequest } from './extHost';
 import { ExtensionsPanel } from './extensionsPanel';
 import { registerGitCommands } from './gitCommands';
-import { binaryCompareTitle, GraphHost } from './graphHost';
 import { clearBookmarks, listBookmarks, toggleBookmark } from './bookmarks';
 import { effectiveKeybinding, loadUserKeybindings, renderKeybindingsEditor } from './keybindings';
 import { Panel } from './panel';
@@ -28,7 +27,7 @@ import { SearchView } from './searchView';
 import { SourceControlView } from './scm';
 import { t, tf } from './i18n';
 import { openSettingsPanel } from './settingsPanel';
-import { SETTINGS_EVENT, settings, updateSetting } from './settings';
+import { SETTINGS_EVENT, settings, THEME_EVENT, updateSetting } from './settings';
 import * as state from './state';
 import { StatusBar } from './statusbar';
 import { TitleBar } from './titlebar';
@@ -71,21 +70,12 @@ export type SymbolIndexEvent = { kind: 'progress'; done: number; total: number }
 /** How long after a refresh a git-only change batch is taken for that refresh's own echo. */
 const REFRESH_ECHO_MS = 1500;
 
-/** The manifest's scm/title commands (git-graph-rs.amendLastCommit and friends) that keep their
- *  working implementation under gitCommands.ts's own `gitGraph.*` ids - keyed by the manifest's
- *  English command id (its `.zhCn` sibling shares the same implementation; see the constructor
- *  and contributions.ts's `git-graph-rs:interfaceZhCn` provider, which picks whichever of the
- *  pair the scm/title menu actually shows). */
-const GIT_GRAPH_RS_SCM_COMMANDS: Record<string, string> = {
-	'git-graph-rs.amendLastCommit': 'gitGraph.amendLastCommit',
-	'git-graph-rs.gerritFetchCommitMsgHook': 'gitGraph.gerritFetchCommitMsgHook',
-	'git-graph-rs.resetCurrentBranchToRemote': 'gitGraph.resetCurrentBranchToRemote',
-	'git-graph-rs.gerritPushRef': 'gitGraph.gerritPushRef'
-};
 
 export class Workbench {
 	/** Serial for extension page tabs: every open of a ggx page is its own instance. */
 	private static extPageSerial = 0;
+	/** Singleton pages' tab ids, by `${extId}/${pageId}` (a second open reveals the tab). */
+	private readonly extPageTabs = new Map<string, string>();
 	private readonly activityBar = document.getElementById('activitybar')!;
 	private readonly sidebar = document.getElementById('sidebar')!;
 	private readonly sidebarSash = document.getElementById('sidebarSash')!;
@@ -114,7 +104,6 @@ export class Workbench {
 	readonly analysis: AnalysisView;
 	readonly extensionHost: ExtensionHost;
 	readonly editors: EditorArea;
-	readonly graph: GraphHost;
 	readonly panel: Panel;
 	readonly statusBar: StatusBar;
 	private repoPath: string | null = null;
@@ -148,45 +137,11 @@ export class Workbench {
 		this.scm = new SourceControlView(this.views.scm, commands);
 		this.analysis = new AnalysisView(this.views.analysis);
 		this.extensionHost = new ExtensionHost();
-		// The built-in git-graph-rs never runs in the frame host; the commands its manifest
-		// declares dispatch to the workbench's own views. The scm/title Amend/Gerrit commands
-		// keep their working `gitGraph.*` implementations (gitCommands.ts) - the manifest ids
-		// (with their English/Chinese pair, so the menu can pick the locale-appropriate one; see
-		// GIT_GRAPH_RS_SCM_COMMANDS below) just forward to them, the same way `.view` and
-		// `.filterByFile` already forward to this workbench's own methods.
-		this.extensionHost.nativeCommands = new Set([
-			'git-graph-rs.view', 'git-graph-rs.filterByFile',
-			...Object.keys(GIT_GRAPH_RS_SCM_COMMANDS), ...Object.keys(GIT_GRAPH_RS_SCM_COMMANDS).map((id) => `${id}.zhCn`)
-		]);
-		this.extensionHost.onNativeCommand = (command) => {
-			if (command === 'git-graph-rs.view') {
-				this.openGraph();
-				return true;
-			}
-			if (command === 'git-graph-rs.filterByFile') {
-				this.showFileHistoryInGraph();
-				return true;
-			}
-			const implementation = GIT_GRAPH_RS_SCM_COMMANDS[command.replace(/\.zhCn$/, '')];
-			if (implementation) {
-				void commands.execute(implementation);
-				return true;
-			}
-			return false;
-		};
-		// The context git-graph-rs's own code would set (`isZhCn()`, src/i18n.ts) to pick
-		// between its scm/title menu's English/Chinese command pair - resolved live from the
-		// extension's own declared interfaceLanguage setting, "auto" following Studio's display
-		// language the same way "auto" follows VS Code's there.
-		registerContextProvider('git-graph-rs:interfaceZhCn', () => {
-			const configured = state.extSettings(GIT_GRAPH_RS_EXT_ID)['interfaceLanguage'];
-			return configured === 'zh-cn' || (configured !== 'en' && settings.locale === 'zh-cn');
-		});
-		// The shipped extensions' menus join the registry now, synchronously from the build-time
-		// baked manifest data - before any view renders, so the SCM title bar and every context
-		// menu see them on their first pass (installed extensions still register asynchronously
-		// via activateInstalled, which then asks for a re-render below).
-		this.extensionHost.applyBuiltinContributions();
+		// The SCM view's contributed entries (the graph button and the Gerrit actions) run
+		// through the host like the palette's — with their menu arguments (the repository a
+		// title button stands for, the right-clicked file a history filter names).
+		this.scm.onExtensionCommand = (command, args) => void this.extensionHost.executeCommand(command, args ?? []);
+				
 		this.extensionHost.onContributionsApplied = () => {
 			// Late (installed-at-runtime) contributions: the SCM title bar had already rendered
 			// its manifest-declared buttons, so it renders again to pick them up. The context
@@ -195,7 +150,9 @@ export class Workbench {
 		};
 		// An extension page opens in an editor tab (module 12's ggx pages — VS Code's webview
 		// panels): the host resolves and mounts the frame, the workbench owns the tab.
-		this.extensionHost.onOpenPage = (extId, pageId, params) => this.openExtPage(extId, pageId, params);
+		this.extensionHost.onOpenPage = (extId, pageId, params, title) => this.openExtPage(extId, pageId, params, title);
+		// A theme switch re-reaches every open extension page (each re-reads its stylesheet).
+		document.addEventListener(THEME_EVENT, () => this.extensionHost.noteThemeChanged());
 		this.extensions = new ExtensionsPanel(this.views.extensions, this.extensionHost);
 		// A row's click opens the extension's detail page (VS Code's extension editor) in an
 		// editor tab — the panel owns the page's content, the workbench owns the tab.
@@ -227,18 +184,20 @@ export class Workbench {
 		this.extensionHost.onApplyEdits = (path, edits) => this.editors.applyTextEdits(path, edits);
 		this.extensionHost.onOpenFile = (path) => void this.editors.openFile(path);
 		this.extensionHost.activeText = () => this.editors.activeText();
-		this.graph = new GraphHost({
-			openFile: (path) => void this.editors.openFile(path),
-			openDiff: (diff) => void this.editors.openDiff({ kind: 'diff', ...diff }),
-			openFileAtRevision: (revision, path, title, repo) => void this.editors.openRevision(revision, path, title, repo),
-			openCompareTab: (fromHash, toHash, singleCommit, repo) => void this.editors.openCompare({ kind: 'compare', id: `${fromHash}:${toHash}:${singleCommit ? 1 : 0}`, title: compareTitle(fromHash, toHash, singleCommit), fromHash, toHash, singleCommit, repo }),
-			openBinaryCompare: (compare) => void this.editors.openBinaryCompare({ kind: 'bincompare', id: `${compare.repo ?? ''}:${compare.fromHash}:${compare.toHash}:${compare.file.newFilePath || compare.file.oldFilePath}`, title: binaryCompareTitle(compare), fromHash: compare.fromHash, toHash: compare.toHash, repo: compare.repo, file: compare.file }),
-			showSourceControl: () => this.showView('scm'),
-			revealTerminal: () => this.panel.show('terminal'),
-			runInTerminal: (command) => void this.panel.runInTerminal(command),
-			repoChanged: () => this.scheduleRefresh(0)
-		});
-		this.editors.graphElement = this.graph.element;
+		// The page services a self-contained extension page acts through (the graph view's bridge
+		// opens diffs and revisions, shows the SCM view, runs the terminal, and nudges the
+		// workbench after its own writes — the delegate the graph page acts through).
+		this.extensionHost.onOpenDiff = (diff: PageDiffRequest) => void this.editors.openDiff({ kind: 'diff', ...diff });
+		this.extensionHost.onOpenFileAtRevision = (revision, path, title, repo) => void this.editors.openRevision(revision, path, title, repo);
+		this.extensionHost.onShowView = (id) => this.showView(id as never);
+		this.extensionHost.onRevealTerminal = () => this.panel.show('terminal');
+		this.extensionHost.onRunInTerminal = (command) => void this.panel.runInTerminal(command);
+		this.extensionHost.onRepoChanged = () => this.scheduleRefresh(0);
+		this.extensionHost.onForwardKey = (key) => document.dispatchEvent(new KeyboardEvent('keydown', key));
+		this.extensionHost.onRevealPage = (extId, pageId) => {
+			const tabId = this.extPageTabs.get(extId + '/' + pageId);
+			if (tabId !== undefined) this.editors.revealById(tabId);
+		};
 
 		// The user's keybindings (~/.ggs/keybindings.json) override the registry's defaults
 		// everywhere a binding is matched or shown (M3 3.10).
@@ -341,7 +300,6 @@ export class Workbench {
 		register({ id: 'editor.listBookmarks', title: 'List Bookmarks', category: 'Edit', keybinding: 'Ctrl+Alt+K', run: () => void this.listBookmarks() });
 		register({ id: 'extensions.installFromGgx', title: 'Install Extension from GGX...', category: 'Extensions', run: () => { this.showView('extensions'); void this.extensions.installFromGgxCommand(); } });
 		register({ id: 'extensions.installFromVsix', title: 'Install Extension from VSIX...', category: 'Extensions', run: () => { this.showView('extensions'); void this.extensions.installFromVsixCommand(); } });
-		register({ id: 'workbench.showGraph', title: 'Git Graph', category: 'View', enabled: hasRepo, run: () => this.openGraph() });
 		register({ id: 'git.initRepository', title: 'Initialize Repository', category: 'Git', enabled: () => this.repoPath !== null && !this.isRepo, run: () => void this.initializeRepository() });
 		register({ id: 'workbench.toggleSidebar', title: 'Toggle Primary Side Bar', category: 'View', keybinding: 'Ctrl+B', run: () => this.toggleSidebar() });
 		register({ id: 'workbench.togglePanel', title: 'Toggle Panel', category: 'View', keybinding: 'Ctrl+J', run: () => this.panel.toggle() });
@@ -354,8 +312,8 @@ export class Workbench {
 		register({ id: 'terminal.kill', title: 'Kill the Active Terminal Instance', category: 'Terminal', enabled: () => this.panel.terminal.sessionCount() > 0, run: () => this.panel.terminal.killActive() });
 		register({ id: 'help.welcome', title: 'Welcome', category: 'Help', run: () => this.editors.openHelp('welcome') });
 		register({ id: 'help.shortcuts', title: 'Keyboard Shortcuts', category: 'Help', keybinding: 'Ctrl+K Ctrl+S', run: () => this.editors.openHelp('shortcuts') });
-		register({ id: 'help.repository', title: 'Report Issue / Project Page', category: 'Help', run: () => void openUrl('https://github.com/neophack/vscode-git-graph-rs') });
-		register({ id: 'help.about', title: 'About', category: 'Help', run: () => notify('info', `Git Graph Studio ${__APP_VERSION__} - a standalone desktop shell around the git-graph-rs engine.`) });
+		register({ id: 'help.repository', title: 'Report Issue / Project Page', category: 'Help', run: () => void openUrl('https://github.com/neophack/git-graph-studio') });
+		register({ id: 'help.about', title: 'About', category: 'Help', run: () => notify('info', `Git Graph Studio ${__APP_VERSION__} - a standalone workbench whose views arrive as plugins.`) });
 		register({ id: 'help.openDevTools', title: 'Open Developer Tools', category: 'Help', run: () => void invoke('open_devtools').catch((e) => console.error('open_devtools failed:', e)) });
 
 		registerGitCommands(commands, {
@@ -363,7 +321,6 @@ export class Workbench {
 			repoChanged: () => this.scheduleRefresh(0),
 			openFolder: (path) => this.openFolder(path),
 			showOutput: () => this.panel.show('output'),
-			graphSettings: () => this.graph.actionSettings(),
 			commit: (options) => this.scm.commit(options)
 		});
 	}
@@ -388,7 +345,7 @@ export class Workbench {
 			{ label: t('menu.selection'), entries: (): MenuEntry[] => [item('editor.selectAll')] },
 				{ label: t('menu.view'), entries: (): MenuEntry[] => [
 			item('workbench.commandPalette'), 'separator',
-			item('workbench.showExplorer'), item('workbench.showSearch'), item('workbench.showScm'), item('workbench.showGraph'), item('workbench.showOutput'), item('workbench.showContext'), item('workbench.showSymbolDatabase'), 'separator',
+			item('workbench.showExplorer'), item('workbench.showSearch'), item('workbench.showScm'), item('workbench.showOutput'), item('workbench.showContext'), item('workbench.showSymbolDatabase'), 'separator',
 			{ label: t('menu.analysis'), submenu: [
 				item('analysis.showModules'), item('analysis.showMetrics'), item('analysis.showDeadCode'), item('analysis.showSecurity'), item('analysis.showImports'), item('analysis.showMcp')
 			] },
@@ -550,10 +507,6 @@ export class Workbench {
 		add('search', icon('search'), 'Search (Ctrl+Shift+F)', () => this.toggleView('search'));
 		add('scm', icon('source-control'), 'Source Control (Ctrl+Shift+G)', () => this.toggleView('scm'));
 		add('analysis', icon('graph'), 'Analysis (Ctrl+Shift+A)', () => this.toggleView('analysis'));
-		const graphIcon = el('img');
-		graphIcon.src = '/icons/git-graph.svg';
-		graphIcon.alt = '';
-		add('graph', graphIcon, 'Git Graph', () => this.openGraph());
 		add('extensions', icon('extensions'), 'Extensions (Ctrl+Shift+X)', () => this.toggleView('extensions'));
 		this.activitySpacer = el('div', 'activity-spacer');
 		this.activityBar.appendChild(this.activitySpacer);
@@ -705,7 +658,7 @@ export class Workbench {
 	 *  Idempotent — install and uninstall both end here. */
 	private applyExtensionViews(): void {
 		for (const id of Object.keys(this.activityItems)) {
-			if (!this.isExtensionView(id)) continue;
+			if (!this.isExtensionView(id) && !id.startsWith('ext-launcher:')) continue;
 			this.activityItems[id]!.remove();
 			delete this.activityItems[id];
 		}
@@ -764,31 +717,48 @@ export class Workbench {
 				if (host) makeSection(declared.viewId, declared.name, host);
 			}
 		}
+		// A ggx package's activity-bar launcher (`manifest.json`'s `activitybar`): an icon that
+		// runs the package's own command (a view page's opener) — the app names no plugin.
+		for (const launcher of this.extensionHost.activityLaunchers()) {
+			const key = `ext-launcher:${launcher.extId}`;
+			const item = el('div', 'activity-item', [icon('extensions')]);
+			item.title = launcher.title;
+			item.setAttribute('role', 'button');
+			item.tabIndex = 0;
+			tooltip(item, () => launcher.title);
+			item.addEventListener('click', () => void this.extensionHost.executeCommand(launcher.command, []));
+			this.activityItems[key] = item;
+			this.activityBar.insertBefore(item, this.activitySpacer);
+			if (launcher.icon) {
+				void extFileDataUrl(launcher.extId, launcher.icon).then((url) => {
+					if (!url) return;
+					const image = el('img');
+					image.src = url;
+					image.alt = '';
+					item.replaceChildren(image);
+				});
+			}
+		}
 	}
 
-	/** Open the Git Graph view - on `repo` (a repository header's graph icon in the Source
-	 *  Control view: the open repository's or a submodule's) with its repository dropdown
-	 *  switched to that repository. */
-	openGraph(repo?: string): void {
-		if (!this.repoPath) {
-			notify('info', 'Open a folder containing a Git repository to view its Git Graph.', [{ label: 'Open Folder', run: () => void this.pickFolder() }]);
-			return;
-		}
-		this.editors.openGraph();
-		if (repo) this.graph.switchRepo(repo);
-	}
 
 	/** An extension page (module 12): one of an installed `ggx` package's pages in an editor
 	 *  tab — the workbench's half of the extension host's `onOpenPage`, VS Code's webview
 	 *  panel counterpart. Every open is its own tab (the serial keeps them apart). */
-	openExtPage(extId: string, pageId: string, params?: unknown): void {
+	openExtPage(extId: string, pageId: string, params?: unknown, title?: string): void {
 		const entry = this.extensionHost.pageEntry(extId, pageId);
 		if (!entry) return; // the host already warned; nothing to open
 		const serial = ++Workbench.extPageSerial;
-		void this.editors.openExtPage(
-			{ kind: 'extpage', id: `extpage:${extId}:${pageId}:${serial}`, title: entry.title ?? pageId, extId, pageId, params },
-			(pane) => this.extensionHost.mountPage(extId, pageId, params, pane)
-		);
+		const tabId = `extpage:${extId}:${pageId}:${serial}`;
+		if (entry.singleton) this.extPageTabs.set(`${extId}/${pageId}`, tabId);
+		// The tab wears the package's own icon (the page's, else its activity-bar launcher's);
+		// a read failure keeps the generic one rather than holding the tab back.
+		const icon = entry.icon ? extFileDataUrl(extId, entry.icon).catch(() => null) : Promise.resolve(null);
+		void icon.then((iconSrc) => this.editors.openExtPage(
+			{ kind: 'extpage', id: tabId, title: title ?? entry.title ?? pageId, extId, pageId, params },
+			(pane) => this.extensionHost.mountPage(extId, pageId, params, pane),
+			iconSrc
+		));
 	}
 
 	/** A webview panel (module 12): what `vscode.window.createWebviewPanel` opens — a VSIX
@@ -796,10 +766,14 @@ export class Workbench {
 	 *  take. The extension host owns the panel record and the iframe; the workbench owns
 	 *  the tab, and closing it tells the extension (`onDidDispose`). */
 	private openWebviewPanel(panelId: number, title: string, extId: string): void {
-		void this.editors.openExtPage(
+		// The panel's tab wears the extension's own icon, like its ggx pages do.
+		const iconPath = this.extensionHost.packageIcon(extId);
+		const icon = iconPath ? extFileDataUrl(extId, iconPath).catch(() => null) : Promise.resolve(null);
+		void icon.then((iconSrc) => this.editors.openExtPage(
 			{ kind: 'extpage', id: this.extensionHost.webviewTabId(panelId), title, extId, pageId: 'webview' },
-			(pane) => this.extensionHost.mountWebview(panelId, pane)
-		);
+			(pane) => this.extensionHost.mountWebview(panelId, pane),
+			iconSrc
+		));
 	}
 
 	/** The Extensions view's detail page (module 12): a package's facts and README in an
@@ -812,23 +786,6 @@ export class Workbench {
 		);
 	}
 
-	/** Git Graph RS: Show File History in Git Graph - the view filtered to `explicitPath` (the
-	 *  Source Control view's own context menu, which names the resource it was opened on
-	 *  directly, VS Code's menu argument having no equivalent here), else the explorer's
-	 *  selection (a Studio extension over VS Code, which passes one file: every selected entry
-	 *  joins into the view's comma-separated path filter), or the active editor's file when
-	 *  nothing is selected. */
-	private showFileHistoryInGraph(explicitPath?: string): void {
-		const files = explicitPath ? [explicitPath] : this.explorer.selectedPaths;
-		if (files.length === 0 && this.editors.activeInput?.kind === 'file') files.push(this.editors.activeInput.path);
-		if (files.length === 0 || !this.repoPath) {
-			notify('info', 'Select a file in the Explorer (or open it in the editor) to show its history in Git Graph.');
-			return;
-		}
-		this.openGraph();
-		const filter = [...new Set(files.map((file) => toPosix(relativeTo(this.repoPath!, file))))].join(',');
-		this.graph.filterByFile(filter);
-	}
 
 	/* ---------- Wiring ---------- */
 
@@ -957,17 +914,14 @@ export class Workbench {
 		this.extensions.onChanged = () => this.scheduleRefresh(0);
 		this.scm.onOpenFile = (path) => void this.editors.openFile(path);
 		this.scm.onOpenDiff = (diff) => void this.editors.openDiff({ kind: 'diff', ...diff });
-		// The Analysis sidebar's tool rows open their result pages in the editor area.
-		this.analysis.onOpenTool = (tool: AnalysisToolId) => void this.editors.openAnalysisPage(tool);
-		this.scm.onOpenGraph = (repo) => this.openGraph(repo);
-		this.scm.onShowFileHistory = (path) => this.showFileHistoryInGraph(path);
 		this.scm.onCount = (count) => this.setScmBadge(count);
 		this.scm.onConflicts = (count) => this.statusBar.setConflicts(count);
-		this.statusBar.onConflictsClick = () => this.showView('scm');
 		this.scm.onChanged = () => {
-			this.graph.refresh();
 			void this.explorer.refresh();
 		};
+		// The Analysis sidebar's tool rows open their result pages in the editor area.
+		this.analysis.onOpenTool = (tool: AnalysisToolId) => void this.editors.openAnalysisPage(tool);
+
 		// The refresh's own repo_head feeds the bar (one subprocess serves both views); a failed
 		// fetch falls back to the bar fetching the head itself.
 		this.scm.onHead = (head) => {
@@ -979,7 +933,6 @@ export class Workbench {
 			this.scheduleSnapshot();
 			this.statusBar.setEditor(editor);
 			this.followContextSymbol(editor);
-			this.activityItems['graph']?.classList.toggle('active', editor?.kind === 'graph');
 			if (editor?.kind === 'file' && editor.path && state.layout.sidebarVisible && this.activeView === 'explorer') {
 				void this.explorer.reveal(editor.path);
 			}
@@ -1014,7 +967,6 @@ export class Workbench {
 		this.statusBar.onRepoClick = () => this.showView('scm');
 		this.statusBar.onBranchClick = () => void commands.execute('git.checkout');
 		this.statusBar.onSyncClick = () => void commands.execute('git.sync');
-		this.statusBar.onGraphClick = () => this.openGraph();
 		this.statusBar.onEncodingClick = () => void this.pickEncoding();
 		this.statusBar.onEolClick = () => void this.pickEol();
 		this.statusBar.onIndentClick = () => void this.pickIndent();
@@ -1161,7 +1113,6 @@ export class Workbench {
 	private readonly onWindowBlurBound = (): void => this.editors.onWindowBlur();
 	private readonly onSettingsChangedBound = (event: Event): void => {
 		this.titleBar.setMenus(this.menus());
-		if ((event as CustomEvent).detail === 'locale' && this.graph.loaded) this.graph.load(this.repoPath, this.isRepo);
 	};
 	/** The Tauri listeners' unlisten functions (they land asynchronously, maybe after dispose). */
 	private unlisteners: (() => void)[] = [];
@@ -1383,7 +1334,6 @@ export class Workbench {
 			}
 			this.lastRefreshAt = performance.now();
 			void this.scm.refresh(); // its repo_head feeds the status bar (see scm.onHead)
-			this.graph.refresh();
 			void this.explorer.refresh();
 			const active = this.editors.activeInput;
 			if (active?.kind === 'file') void this.editors.reloadIfClean(active.path);
@@ -1496,7 +1446,7 @@ export class Workbench {
 		this.search.setRoots([]);
 		this.scm.setRepo(null);
 		this.statusBar.setRepo(false);
-		this.graph.unload();
+		this.extensionHost.noteWorkspaceChanged([]);
 		// The window is the file: hide the side bar and the terminal, like a single-file editor.
 		state.layout.sidebarVisible = false;
 		this.sidebar.hidden = true;
@@ -1568,8 +1518,9 @@ export class Workbench {
 		// The graph view starts loading now, in parallel: its iframe boot and its first data
 		// request run on their own while the SCM view and the status bar settle below. A
 		// folder that is not a repository gets the placeholder with the Initialize button.
-		this.graph.load(root, anyRepo);
-		this.editors.openGraph();
+		// The graph view (when its plugin is installed) learns the folder and reloads through
+		// the page event; nothing of the app opens it automatically — the command does.
+		this.extensionHost.noteWorkspaceChanged([root]);
 		// The last session's editors come back once the main thread next idles (within a
 		// second at most): their CodeMirror chunk and language modes would otherwise load
 		// and parse in the same burst as the graph view's boot, and the graph tab is the one
@@ -1620,7 +1571,7 @@ export class Workbench {
 		this.editors.setRoot(null);
 		this.scm.setRepo(null);
 		this.statusBar.setRepo(false);
-		this.graph.unload();
+		this.extensionHost.noteWorkspaceChanged([]);
 		ExtensionHost.workspaceFolders = [];
 	}
 
@@ -1643,7 +1594,6 @@ export class Workbench {
 		start.appendChild(link('folder-opened', 'Open Folder...', null, () => void this.pickFolder()));
 		start.appendChild(link('repo-clone', 'Clone Git Repository...', null, () => void commands.execute('git.clone')));
 		if (this.repoPath) {
-			start.appendChild(link('git-branch', 'Open Git Graph', basename(this.repoPath), () => this.openGraph()));
 			start.appendChild(link('source-control', 'Source Control', null, () => this.showView('scm')));
 			start.appendChild(link('terminal', 'New Terminal', null, () => this.panel.show('terminal')));
 			start.appendChild(link('close', 'Close Folder', null, () => void this.closeFolder()));
@@ -1723,10 +1673,7 @@ export class Workbench {
 				if (last.toLowerCase().endsWith('.ggs-workspace')) {
 					await this.openWorkspace(last);
 				} else {
-					// The graph's view page starts loading in the background now, so its bundle
-					// fetch, parse and first data requests overlap the folder's own open
-					// sequence (graphHost.preload reconciles the page when the load lands).
-					this.graph.preload(last);
+					
 					if (context.opened !== null && context.openedFor === last) {
 						// The backend already opened this very folder inside `boot_context`:
 						// apply the answer directly instead of spending another round trip.

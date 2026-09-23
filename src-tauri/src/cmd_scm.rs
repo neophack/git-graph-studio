@@ -1,16 +1,14 @@
-//! The Source Control view: status listing through the engine, mutations through the git CLI.
+//! The Source Control view: status listing and mutations alike through the git CLI.
 //!
-//! The engine is deliberately read-only, and reproducing staging/commit through gix would mean
-//! reimplementing what git already does well — so the view's write path runs `git` directly,
-//! the same seam the extension's CLI backend uses for its writes. The status read itself goes
-//! through `cmd_graph`'s engine seam, in this process.
+//! The status read parses `git status --porcelain` directly (one spawn per refresh — the
+//! watcher's debounced batches pace it, the same way VS Code's own Git extension works); the
+//! write path runs `git` deliberately — reproducing staging/commit/merge through anything else
+//! would mean reimplementing what git already does well.
 
 use std::path::Path;
 
-use serde_json::Value;
-
 use crate::git::Git;
-use crate::AppState;
+use crate::{scm_ops, AppState};
 use tauri::State;
 
 /// The repository a command acts on: the one the view names (`repo`, a submodule's section
@@ -20,13 +18,167 @@ fn open_repo(state: &State<AppState>, repo: Option<String>) -> Result<String, St
 }
 
 /// The working tree's changes, staged and unstaged halves kept apart, as the two sections of
-/// the Source Control view list them. Read by the engine, in this process.
+/// the Source Control view list them.
 #[tauri::command]
-pub async fn scm_status(state: State<'_, AppState>, repo: Option<String>) -> Result<Value, String> {
-    let repo_path = open_repo(&state, repo)?;
-    tauri::async_runtime::spawn_blocking(move || crate::cmd_graph::scm_changes(&repo_path))
+pub async fn scm_status(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<Vec<scm_ops::ScmStatusChange>, String> {
+    let git = git(&state, repo)?;
+    tauri::async_runtime::spawn_blocking(move || scm_ops::status(&git))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// A file's commits, newest first, following the path across renames — the Timeline view's
+/// listing.
+#[tauri::command]
+pub async fn file_log(
+    state: State<'_, AppState>,
+    path: String,
+    limit: Option<usize>,
+    repo: Option<String>,
+) -> Result<Vec<scm_ops::FileLogEntry>, String> {
+    let git = git(&state, repo)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        scm_ops::file_log(&git, &path, limit.unwrap_or(300).clamp(1, 1000))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/* ---------- The palette's mutations (branch/remote/stash/tag) ---------- */
+
+#[tauri::command]
+pub async fn scm_rename_branch(
+    state: State<'_, AppState>,
+    old_name: String,
+    new_name: String,
+    repo: Option<String>,
+) -> Result<(), String> {
+    scm_ops::rename_branch(&git(&state, repo)?, &old_name, &new_name)
+}
+
+#[tauri::command]
+pub async fn scm_delete_branch(
+    state: State<'_, AppState>,
+    branch_name: String,
+    force: bool,
+    repo: Option<String>,
+) -> Result<(), String> {
+    scm_ops::delete_branch(&git(&state, repo)?, &branch_name, force)
+}
+
+#[tauri::command]
+pub async fn scm_merge(
+    state: State<'_, AppState>,
+    name: String,
+    repo: Option<String>,
+) -> Result<(), String> {
+    scm_ops::merge(&git(&state, repo)?, &name)
+}
+
+#[tauri::command]
+pub async fn scm_rebase(
+    state: State<'_, AppState>,
+    name: String,
+    repo: Option<String>,
+) -> Result<(), String> {
+    scm_ops::rebase(&git(&state, repo)?, &name)
+}
+
+#[tauri::command]
+pub async fn scm_add_remote(
+    state: State<'_, AppState>,
+    name: String,
+    url: String,
+    fetch: bool,
+    repo: Option<String>,
+) -> Result<(), String> {
+    scm_ops::add_remote(&git(&state, repo)?, &name, &url, fetch)
+}
+
+#[tauri::command]
+pub async fn scm_delete_remote(
+    state: State<'_, AppState>,
+    name: String,
+    repo: Option<String>,
+) -> Result<(), String> {
+    scm_ops::delete_remote(&git(&state, repo)?, &name)
+}
+
+#[tauri::command]
+pub async fn scm_push_stash(
+    state: State<'_, AppState>,
+    message: String,
+    include_untracked: bool,
+    repo: Option<String>,
+) -> Result<(), String> {
+    scm_ops::push_stash(&git(&state, repo)?, &message, include_untracked)
+}
+
+#[tauri::command]
+pub async fn scm_apply_stash(
+    state: State<'_, AppState>,
+    selector: String,
+    reinstate_index: bool,
+    repo: Option<String>,
+) -> Result<(), String> {
+    scm_ops::apply_stash(&git(&state, repo)?, &selector, reinstate_index)
+}
+
+#[tauri::command]
+pub async fn scm_pop_stash(
+    state: State<'_, AppState>,
+    selector: String,
+    reinstate_index: bool,
+    repo: Option<String>,
+) -> Result<(), String> {
+    scm_ops::pop_stash(&git(&state, repo)?, &selector, reinstate_index)
+}
+
+#[tauri::command]
+pub async fn scm_drop_stash(
+    state: State<'_, AppState>,
+    selector: String,
+    repo: Option<String>,
+) -> Result<(), String> {
+    scm_ops::drop_stash(&git(&state, repo)?, &selector)
+}
+
+#[tauri::command]
+pub async fn scm_add_tag(
+    state: State<'_, AppState>,
+    tag_name: String,
+    commit_hash: String,
+    message: String,
+    force: bool,
+    repo: Option<String>,
+) -> Result<(), String> {
+    scm_ops::add_tag(
+        &git(&state, repo)?,
+        &tag_name,
+        &commit_hash,
+        &message,
+        force,
+    )
+}
+
+#[tauri::command]
+pub async fn scm_delete_tag(
+    state: State<'_, AppState>,
+    tag_name: String,
+    repo: Option<String>,
+) -> Result<(), String> {
+    scm_ops::delete_tag(&git(&state, repo)?, &tag_name)
+}
+
+#[tauri::command]
+pub async fn scm_undo_last_commit(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<(), String> {
+    scm_ops::undo_last_commit(&git(&state, repo)?)
 }
 
 fn git(state: &State<AppState>, repo: Option<String>) -> Result<Git, String> {
@@ -182,8 +334,6 @@ pub(crate) fn discard_paths(git: &Git, restore: &[String], clean: &[String]) -> 
 }
 
 /* ---------- The "..." menu (scm_ops) ---------- */
-
-use crate::scm_ops;
 
 #[tauri::command]
 pub async fn scm_branches(
@@ -452,7 +602,7 @@ mod tests {
         );
     }
 
-    use crate::cmd_graph::is_valid_commit_hash;
+    use crate::git::is_valid_commit_hash;
 
     #[test]
     fn discard_paths_leaves_unmerged_and_unlisted_paths_alone() {

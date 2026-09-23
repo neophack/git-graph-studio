@@ -1,15 +1,13 @@
 // The Git commands behind the Source Control view's "..." menu and the Command Palette: the
 // set VS Code's Git extension offers (pull, push, sync, clone, checkout, branches, remotes,
-// stashes, tags) and the extension's own contributions (amend, soft-reset to remote, the
-// Gerrit hook and refs/for push). Each asks with a quick pick / input where VS Code does,
+// stashes, tags). The git-graph-rs contributions (amend, soft-reset to remote, the Gerrit hook
+// and refs/for push) are the plugin's own manifest commands, run by its backend. Each asks with a quick pick / input where VS Code does,
 // runs through the backend, and reports through notifications.
 
 import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
-import { openUrl } from '@tauri-apps/plugin-opener';
 
 import type { CommandRegistry } from './commands';
-import { runGraphAction, type GraphActionSettings } from './graphHost';
 import { confirmDialog, notify, quickInput, quickPick, type QuickPickItem } from './ui';
 
 interface BranchInfo { name: string; remote: boolean; current: boolean; upstream: string | null }
@@ -23,21 +21,14 @@ export interface GitCommandHost {
 	repoChanged(): void;
 	openFolder(path: string): Promise<void>;
 	showOutput(): void;
-	/** The Git Graph view's settings for its write path (signing, squash messages). */
-	graphSettings(): GraphActionSettings;
 	/** The staged/unstaged state the SCM view knows, for the commit commands. */
 	commit(options: { amend?: boolean; all?: boolean; stagedOnly?: boolean }): Promise<void>;
 }
 
-/** Run one of the Git Graph view's write requests through the seam (graphHost.ts): the
- *  confirmation protocol and git's complaint-as-Error are settled there. */
-async function graphAction(host: GitCommandHost, message: Record<string, unknown>): Promise<void> {
-	const repo = host.repoPath();
-	if (!repo) throw new Error('No repository is open.');
-	await runGraphAction({ ...message, repo }, {
-		settings: host.graphSettings(),
-		confirm: (text) => confirmDialog(text, 'Proceed')
-	});
+/** Run one mutating backend command against the open repository; git's own complaint travels
+ *  as the rejection the caller's `run` reports. */
+async function gitOp(command: string, args: Record<string, unknown>): Promise<void> {
+	await invoke(command, args);
 }
 
 async function run(host: GitCommandHost, work: () => Promise<void>, done?: string): Promise<void> {
@@ -191,21 +182,21 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 		const branch = await pickBranch('Select a branch to rename', (b) => !b.remote);
 		if (!branch) return;
 		const name = await quickInput({ placeholder: 'Branch name', title: `Please provide a new name for '${branch.name}'`, value: branch.name, validate: validateRef });
-		if (name && name.trim() !== branch.name) await graphAction(host, { command: 'renameBranch', oldName: branch.name, newName: name.trim() });
+		if (name && name.trim() !== branch.name) await gitOp('scm_rename_branch', { oldName: branch.name, newName: name.trim() });
 	});
 	add('git.deleteBranch', 'Delete Branch...', async () => {
 		const branch = await pickBranch('Select a branch to delete', (b) => !b.remote && !b.current);
 		if (!branch) return;
 		if (!(await confirmDialog(`Delete the branch '${branch.name}'? Commits only reachable from it will be lost.`, 'Delete Branch'))) return;
-		await graphAction(host, { command: 'deleteBranch', branchName: branch.name, forceDelete: true, deleteOnRemotes: [] });
+		await gitOp('scm_delete_branch', { branchName: branch.name, force: true });
 	});
 	add('git.merge', 'Merge Branch...', async () => {
 		const branch = await pickBranch('Select a branch to merge from', (b) => !b.current);
-		if (branch) await graphAction(host, { command: 'merge', obj: branch.name, actionOn: 'Branch', createNewCommit: false, squash: false, noCommit: false });
+		if (branch) await gitOp('scm_merge', { name: branch.name });
 	});
 	add('git.rebase', 'Rebase Branch...', async () => {
 		const branch = await pickBranch('Select a branch to rebase onto', (b) => !b.current);
-		if (branch) await graphAction(host, { command: 'rebase', obj: branch.name, actionOn: 'Branch', ignoreDate: false, interactive: false, autosquash: false });
+		if (branch) await gitOp('scm_rebase', { name: branch.name });
 	});
 
 	/* Remotes */
@@ -214,7 +205,7 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 		if (!url) return;
 		const name = await quickInput({ title: 'Add Remote', placeholder: 'Remote name', value: 'origin', validate: validateRef });
 		if (!name) return;
-		await graphAction(host, { command: 'addRemote', name: name.trim(), url: url.trim(), pushUrl: null, fetch: true });
+		await gitOp('scm_add_remote', { name: name.trim(), url: url.trim(), fetch: true });
 	});
 	add('git.removeRemote', 'Remove Remote', async () => {
 		const remotes = await invoke<RemoteInfo[]>('scm_remotes');
@@ -223,34 +214,34 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 			return;
 		}
 		const chosen = await quickPick(remotes.map((r) => ({ label: r.name, description: r.url, icon: 'cloud', value: r.name })), 'Pick a remote to remove');
-		if (chosen) await graphAction(host, { command: 'deleteRemote', name: chosen });
+		if (chosen) await gitOp('scm_delete_remote', { name: chosen });
 	});
 
 	/* Stashes */
 	add('git.stash', 'Stash', async () => {
 		const message = await quickInput({ title: 'Stash', placeholder: 'Optionally provide a stash message' });
 		if (message === null) return;
-		await graphAction(host, { command: 'pushStash', message, includeUntracked: false });
+		await gitOp('scm_push_stash', { message, includeUntracked: false });
 	});
 	add('git.stashIncludeUntracked', 'Stash (Include Untracked)', async () => {
 		const message = await quickInput({ title: 'Stash (Include Untracked)', placeholder: 'Optionally provide a stash message' });
 		if (message === null) return;
-		await graphAction(host, { command: 'pushStash', message, includeUntracked: true });
+		await gitOp('scm_push_stash', { message, includeUntracked: true });
 	});
 	add('git.stashApply', 'Apply Stash...', async () => {
 		const stash = await pickStash('Pick a stash to apply');
-		if (stash) await graphAction(host, { command: 'applyStash', selector: stash.selector, reinstateIndex: false });
+		if (stash) await gitOp('scm_apply_stash', { selector: stash.selector, reinstateIndex: false });
 	});
-	add('git.stashApplyLatest', 'Apply Latest Stash', () => graphAction(host, { command: 'applyStash', selector: 'refs/stash@{0}', reinstateIndex: false }));
+	add('git.stashApplyLatest', 'Apply Latest Stash', () => gitOp('scm_apply_stash', { selector: 'refs/stash@{0}', reinstateIndex: false }));
 	add('git.stashPop', 'Pop Stash...', async () => {
 		const stash = await pickStash('Pick a stash to pop');
-		if (stash) await graphAction(host, { command: 'popStash', selector: stash.selector, reinstateIndex: false });
+		if (stash) await gitOp('scm_pop_stash', { selector: stash.selector, reinstateIndex: false });
 	});
-	add('git.stashPopLatest', 'Pop Latest Stash', () => graphAction(host, { command: 'popStash', selector: 'refs/stash@{0}', reinstateIndex: false }));
+	add('git.stashPopLatest', 'Pop Latest Stash', () => gitOp('scm_pop_stash', { selector: 'refs/stash@{0}', reinstateIndex: false }));
 	add('git.stashDrop', 'Drop Stash...', async () => {
 		const stash = await pickStash('Pick a stash to drop');
 		if (stash && (await confirmDialog(`Drop the stash '${stash.message}'? This cannot be undone.`, 'Drop Stash'))) {
-			await graphAction(host, { command: 'dropStash', selector: stash.selector });
+			await gitOp('scm_drop_stash', { selector: stash.selector });
 		}
 	});
 
@@ -261,7 +252,7 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 		const message = await quickInput({ title: 'Create Tag', placeholder: 'Message (leave empty for a lightweight tag)' });
 		if (message === null) return;
 		const head = await invoke<{ shortHash: string }>('repo_head');
-		await graphAction(host, { command: 'addTag', tagName: name.trim(), commitHash: head.shortHash, type: message.trim() === '' ? 1 : 0, message, force: false, pushToRemote: null, pushSkipRemoteCheck: false });
+		await gitOp('scm_add_tag', { tagName: name.trim(), commitHash: head.shortHash, message, force: false });
 	});
 	add('git.deleteTag', 'Delete Tag', async () => {
 		const tags = await invoke<string[]>('scm_tags');
@@ -270,7 +261,7 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 			return;
 		}
 		const chosen = await quickPick(tags.map((t) => ({ label: t, icon: 'tag', value: t })), 'Select a tag to delete');
-		if (chosen) await graphAction(host, { command: 'deleteTag', tagName: chosen, deleteOnRemote: null });
+		if (chosen) await gitOp('scm_delete_tag', { tagName: chosen });
 	});
 
 	/* Commits (the SCM view owns the message box; these route through it) */
@@ -279,31 +270,7 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 	commands.register({ id: 'git.commitAll', title: 'Commit All', category, enabled: hasRepo, run: () => host.commit({ all: true }) });
 	commands.register({ id: 'git.commitAmend', title: 'Commit (Amend)', category, enabled: hasRepo, run: () => host.commit({ amend: true }) });
 	commands.register({ id: 'git.commitStagedAmend', title: 'Commit Staged (Amend)', category, enabled: hasRepo, run: () => host.commit({ amend: true, stagedOnly: true }) });
-	add('git.undoCommit', 'Undo Last Commit', () => graphAction(host, { command: 'undoLastCommit' }));
-
-	/* The extension's own commands */
-	add('gitGraph.amendLastCommit', 'Amend Last Commit', async () => {
-		if (!(await confirmDialog('Amend the last commit with the staged changes (the message is kept)?', 'Amend'))) return;
-		await invoke('scm_amend_last_commit');
-	});
-	add('gitGraph.gerritFetchCommitMsgHook', 'Fetch commit-msg Hook (Gerrit)', async () => {
-		const remote = await pickRemote('Pick the Gerrit remote');
-		if (!remote) return;
-		const installed = await invoke<boolean>('gerrit_install_hook', { remote: remote.name });
-		notify('info', installed ? 'The Gerrit commit-msg hook was installed.' : 'The Gerrit commit-msg hook is already installed.');
-	});
-	add('gitGraph.resetCurrentBranchToRemote', 'Reset Current Branch to Remote (Soft)', async () => {
-		if (!(await confirmDialog('Soft-reset the current branch to its upstream? Your local commits are kept as staged changes.', 'Reset'))) return;
-		const upstream = await invoke<string>('scm_reset_to_remote');
-		notify('info', `The current branch was reset to ${upstream}; its changes are staged.`);
-	});
-	add('gitGraph.gerritPushRef', 'Push to Gerrit Ref for Current Branch (refs/for/...)', async () => {
-		const remote = await pickRemote('Pick the Gerrit remote');
-		if (!remote) return;
-		const url = await invoke<string | null>('gerrit_push_ref', { remote: remote.name });
-		if (url) notify('info', `Pushed for review: ${url}`, [{ label: 'Open Change', run: () => void openUrl(url) }]);
-		else notify('info', `Pushed the current branch to ${remote.name} for review.`);
-	});
+	add('git.undoCommit', 'Undo Last Commit', () => gitOp('scm_undo_last_commit', {}));
 
 	commands.register({ id: 'git.showOutput', title: 'Show Git Output', category, run: () => host.showOutput() });
 }

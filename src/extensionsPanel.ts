@@ -1,30 +1,20 @@
-// The Extensions view: the installed extensions (built-in and user-installed) with their icons
-// and metadata, the "Install from GGX..." / "Install from VSIX..." actions (Studio's own
-// format, and the VS Code compatibility path), per-extension uninstall, and the process
-// backends' status (running pid / why not, restart). A row's click opens the extension's
-// detail page — VS Code's extension editor: the header's facts and actions, then the README
-// rendered — in an editor tab through `onOpenDetail` (the workbench wires it). Nothing is
-// installed by default: the two bundled packages — the integrated git-graph-rs and the GGX
-// Demo sample, both carried by the installer — list from their embedded manifests until
-// one-click installed (installBundled), after which each is a standard, uninstallable package.
+// The Extensions view: the installed extensions (bundled offers and user-installed packages)
+// with their icons and metadata, the "Install from GGX..." / "Install from VSIX..." actions
+// (Studio's own format, and the VS Code compatibility path), per-extension uninstall, and the
+// process backends' status (running pid / why not, restart). A row's click opens the
+// extension's detail page — VS Code's extension editor: the header's facts and actions, then
+// the README rendered — in an editor tab through `onOpenDetail` (the workbench wires it).
+// Nothing is installed by default: the packages the installer ships beside the app (the Git
+// Graph engine view, the GGX Demo sample) list from their manifests until one-click installed
+// (installBundled), after which each is a standard, uninstallable package.
 
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
 import type { ExtInfo, ExtProcessInfo, ExtensionHost } from './extHost';
-import { extFileDataUrl, extTitle } from './extHost';
+import { extFileDataUrl, extIconRelPath as iconRelPath, extTitle } from './extHost';
 import { renderMarkdown } from './markdown';
 import { t, tf } from './i18n';
 import { actionButton, confirmDialog, el, icon, notify } from './ui';
-
-/** The icon path as `ext_read_file_base64` expects it: relative to the extension's install
- *  root. `ExtInfo.icon` is absolute (`<root>/<manifest path>`), so strip the root — reducing
- *  it to a bare file name loses icons kept in a subfolder (`resources/icon.png`). */
-function iconRelPath(ext: ExtInfo): string {
-	const iconPath = ext.icon!;
-	const root = ext.path.replace(/[\\/]+$/, '');
-	if (root !== '' && (iconPath.startsWith(root + '/') || iconPath.startsWith(root + '\\'))) return iconPath.slice(root.length + 1);
-	return iconPath.split(/[\\/]/).pop()!; // unexpected shape: at least the file name is right
-}
 
 export class ExtensionsPanel {
 	private readonly body: HTMLElement;
@@ -85,7 +75,7 @@ export class ExtensionsPanel {
 					el('div', 'ext-publisher', [
 						ext.publisher,
 						ext.builtin ? el('span', 'ext-builtin', [t('extensions.builtIn')])
-							: ext.format === 'builtin' ? el('span', 'ext-builtin', [t('extensions.sample')]) : null
+							: ext.format === 'bundled' ? el('span', 'ext-builtin', [t('extensions.sample')]) : null
 					]),
 					ext.description ? el('div', 'ext-description', [ext.description]) : null,
 					this.processLine(ext, isProcessPackage, processInfo)
@@ -94,7 +84,7 @@ export class ExtensionsPanel {
 				// bundled package is one click away. Installed entries: uninstall (a process
 				// package's backend dies with it — the Rust side stops it before removing the
 				// directory).
-				ext.format === 'builtin'
+				ext.format === 'bundled'
 					? actionButton('package', t(ext.builtin ? 'extensions.installBundled' : 'extensions.installSample'), () => void this.installBundled(ext))
 					: ext.builtin ? null : actionButton('trash', tf('extensions.uninstall', ext.id), () => void this.uninstall(ext)),
 				isProcessPackage ? actionButton('refresh', t('extensions.restart'), () => void this.restart(ext)) : null
@@ -136,8 +126,8 @@ export class ExtensionsPanel {
 		pane.appendChild(page);
 		// The built-in listing has no install directory: nothing to read the README from until
 		// the bundled package is installed.
-		if (!ext.readme || ext.format === 'builtin') {
-			article.appendChild(el('p', 'ext-readme-missing', [t(ext.format === 'builtin' ? 'extensions.readmeNoneBuiltin' : 'extensions.readmeMissing')]));
+		if (!ext.readme || ext.format === 'bundled') {
+			article.appendChild(el('p', 'ext-readme-missing', [t(ext.format === 'bundled' ? 'extensions.readmeNoneBuiltin' : 'extensions.readmeMissing')]));
 			return;
 		}
 		const file = ext.readme;
@@ -167,12 +157,12 @@ export class ExtensionsPanel {
 			el('div', 'ext-detail-head-main', [
 				el('h2', 'ext-detail-title', [extTitle(ext)]),
 				el('div', 'ext-detail-sub', [
-					ext.publisher, ` · v${ext.version}`, ext.builtin && ext.format !== 'builtin' ? ` · ${t('extensions.builtIn')}` : ''
+					ext.publisher, ` · v${ext.version}`, ext.builtin ? ` · ${t('extensions.builtIn')}` : ''
 				]),
 				ext.description ? el('p', 'ext-detail-desc', [ext.description]) : null
 			]),
 			el('div', 'ext-detail-actions', [
-				ext.format === 'builtin' ? install : ext.builtin ? null : uninstall,
+				ext.format === 'bundled' ? install : ext.builtin ? null : uninstall,
 				backend ? restart : null
 			])
 		]);
@@ -259,7 +249,7 @@ export class ExtensionsPanel {
 		await this.refresh();
 	}
 
-	/** One-click install of an entry's bundled package (the integrated git-graph-rs or the
+	/** One-click install of an entry's bundled package (the Git Graph engine view or the
 	 *  bundled GGX Demo sample — both shipped by the installer, neither installed until the
 	 *  user asks here). */
 	private async installBundled(ext: ExtInfo): Promise<void> {

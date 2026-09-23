@@ -1,10 +1,8 @@
-//! Build script: Tauri's code generation, the embedded manifest of the integrated git-graph-rs
-//! extension, then the compile-time seam check (docs/ggs-development-plan.md §3.7): the
-//! extension's Rust code — the `git-graph-core` crate — is linked through exactly one module
-//! family, `src/cmd_graph.rs` and its `src/cmd_graph/` submodules (`engine_impl.rs`, feature-
-//! gated behind `engine` and reachable only from `git-graph-backend`; `write_tests.rs`). Any
-//! other module that names the crate fails the build here, so the coupling cannot quietly
-//! spread back out of the seam.
+//! Build script: Tauri's code generation, then the compile-time seam check (docs/ggs-development-plan.md §3.7): the engine crate
+//! (`git-graph-core`) is named by nothing under `src/` at all — it lives in the git-graph-rs
+//! plugin's own backend sources (`plugins/git-graph-rs/src/`, the `engine`-feature binary
+//! `git-graph-backend`). Any module of the app that names the crate fails the build here, so
+//! the coupling cannot quietly spread back into the app.
 
 use std::fs;
 use std::path::Path;
@@ -28,35 +26,13 @@ fn main() {
             );
         }
     }
-    // The integrated git-graph-rs extension's manifest and localisation, embedded from the
-    // vscode-git-graph-rs submodule's own files (the app is never built without it): what the
-    // built-in entry in the Extensions view and the workbench's command contributions read.
-    let manifest = Path::new("../vscode-git-graph-rs/package.json")
-        .canonicalize()
-        .expect("the vscode-git-graph-rs package.json");
-    let nls = Path::new("../vscode-git-graph-rs/package.nls.json")
-        .canonicalize()
-        .expect("the vscode-git-graph-rs package.nls.json");
-    println!(
-        "cargo:rustc-env=GITGRAPH_PACKAGE_JSON={}",
-        manifest.display()
-    );
-    println!("cargo:rustc-env=GITGRAPH_NLS_JSON={}", nls.display());
-    println!("cargo:rerun-if-changed={}", manifest.display());
-    println!("cargo:rerun-if-changed={}", nls.display());
-    // The bundled sample plugin's manifest, the same way: the Extensions view lists the GGX
-    // Demo from it until its bundled package is one-click installed (cmd_ext.rs's listing).
-    let demo = Path::new("../plugins/ggs-ext-demo/package.json")
-        .canonicalize()
-        .expect("the ggs-ext-demo package.json");
-    println!("cargo:rustc-env=GGS_DEMO_PACKAGE_JSON={}", demo.display());
-    println!("cargo:rerun-if-changed={}", demo.display());
     println!("cargo:rerun-if-changed=src");
     let mut violations = Vec::new();
     visit(Path::new("src"), &mut violations);
     if !violations.is_empty() {
         panic!(
-            "git-graph-core may only be used by src/cmd_graph.rs (the engine seam); found references in:\n  {}",
+            "the app's own sources under src/ may not name git-graph-core (the engine lives in \
+             the git-graph-rs plugin's backend, plugins/git-graph-rs/src/); found references in:\n  {}",
             violations.join("\n  ")
         );
     }
@@ -71,18 +47,6 @@ fn visit(dir: &Path, violations: &mut Vec<String>) {
             continue;
         }
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        // The seam file itself, and everything beside it under `cmd_graph/` (the write-path
-        // tests, which exercise `handle`, and `engine_impl.rs`, the engine-feature-gated half
-        // of the seam that `git-graph-backend` links and the app does not).
-        if path.file_name().and_then(|n| n.to_str()) == Some("cmd_graph.rs")
-            || path
-                .parent()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                == Some("cmd_graph")
-        {
             continue;
         }
         let content = fs::read_to_string(&path).expect("readable source file");

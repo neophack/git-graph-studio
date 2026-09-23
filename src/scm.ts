@@ -11,6 +11,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 
 import type { CommandRegistry } from './commands';
 import { resolvedMenuEntries } from './contributions';
+import { extFileDataUrl } from './extHost';
 import type { DiffSide } from './editor';
 import { fileIcon, fileIconColor } from './editor';
 import type { StatusMap } from './explorer';
@@ -238,14 +239,10 @@ export class SourceControlView {
 	onStatus: ((status: StatusMap) => void) | null = null;
 	onOpenFile: ((path: string) => void) | null = null;
 	onOpenDiff: ((diff: DiffRequest) => void) | null = null;
-	/** Opens the Git Graph view with its repository dropdown switched to `repo`: every
-	 *  repository header's own graph icon passes its repository - the main one's switches the
-	 *  view back to the open repository, a submodule section's switches to that submodule. */
-	onOpenGraph: ((repo?: string) => void) | null = null;
-	/** "Show File History in Git Graph" (git-graph-rs.filterByFile) from a resource's own
-	 *  context menu - VS Code passes the right-clicked resource as the command's argument;
-	 *  Studio's commands carry none, so this menu wires the path directly instead. */
-	onShowFileHistory: ((path: string) => void) | null = null;
+	/** A contributed command asked for with arguments (a resource context menu's entry names
+	 *  its file): dispatched through the extension host, which carries the args to a process
+	 *  backend. The workbench wires this. */
+	onExtensionCommand: ((command: string, args?: unknown[]) => void) | null = null;
 	/** Fired after every write, so the graph and the status bar can catch up. */
 	onChanged: (() => void) | null = null;
 	/** Fired with the head this refresh fetched (branch, upstream, ahead/behind) so the status
@@ -256,11 +253,6 @@ export class SourceControlView {
 	onCount: ((count: number) => void) | null = null;
 	/** Fired with the number of unmerged paths after every refresh (the status bar's "N conflicts"). */
 	onConflicts: ((count: number) => void) | null = null;
-	/** A submodule section's "..." menu runs a Git Graph write request (merge, rebase, stash,
-	 *  branch/remote/tag mutations) through the same seam the main "..." menu's commands use -
-	 *  the workbench wires this to `runGraphAction`, since that seam needs the graph's own
-	 *  action settings and confirmation dialog, which live outside this view. */
-	onGraphAction: ((message: Record<string, unknown>, repo: string) => Promise<void>) | null = null;
 	/** A submodule section's "Clone" entry (the same one the main "..." menu offers). */
 	onOpenFolder: ((path: string) => void) | null = null;
 	/** A submodule section's "Show Git Output" entry. */
@@ -440,18 +432,11 @@ export class SourceControlView {
 		// The view title stays bare ("Source Control" only): the repository's own header row
 		// carries the actions, in the same slot every submodule section's header uses below
 		// (after the label, before the badge - hover-revealed, like any pane header's).
-		// The extension's manifest places "View Git Graph" as a header icon or inside "..."
-		// depending on the git-graph-rs.sourceCodeProviderIntegrationLocation setting (scm/title,
-		// group "navigation" vs. anything else) - default to the icon if the manifest is
-		// somehow not loaded yet, matching that setting's own default ("Inline").
-		const graphTitleEntry = resolvedMenuEntries('scm/title').find((entry) => entry.command === 'git-graph-rs.view');
+		// Whatever an installed extension's manifest places in scm/title's "navigation" group
+		// renders inline (its own command icon and title); everything else the manifest places
+		// there sits inside "..." (moreMenu below) — exactly VS Code's split.
 		const repoPath = this.repoPath;
-		const actions: HTMLElement[] = [];
-		if (!graphTitleEntry || graphTitleEntry.group === 'navigation') {
-			const graphButton = actionButton('', graphTitleEntry?.label ?? 'View Git Graph', () => this.onOpenGraph?.(repoPath));
-			graphButton.innerHTML = '<img src="/icons/git-graph-16.svg" alt="" width="16" height="16">';
-			actions.push(graphButton);
-		}
+		const actions: HTMLElement[] = this.extensionTitleButtons(repoPath);
 		actions.push(
 			actionButton(this.viewMode === 'tree' ? 'list-flat' : 'list-tree', this.viewMode === 'tree' ? 'View as List' : 'View as Tree', () => this.setViewMode(this.viewMode === 'tree' ? 'list' : 'tree')),
 			actionButton('refresh', 'Refresh', () => void this.refresh()),
@@ -720,10 +705,9 @@ export class SourceControlView {
 	moreMenu(): MenuEntry[] {
 		const cmd = (id: string): MenuEntry => (this.commands ? this.commands.menuItem(id) : { label: id, disabled: true });
 		const toggleView: MenuEntry = { label: this.viewMode === 'tree' ? 'View as List' : 'View as Tree', run: () => this.setViewMode(this.viewMode === 'tree' ? 'list' : 'tree') };
-		// git-graph-rs's own scm/title entries not in the "navigation" group (the icon rendered
-		// in the title bar instead, see render()) - "View Git Graph" itself when the
-		// sourceCodeProviderIntegrationLocation setting tucks it in here, and the Amend/Gerrit
-		// commands, whichever locale variant the manifest's `when` currently selects.
+		// The installed extensions' scm/title entries not in the "navigation" group (those
+		// render as title-bar icons instead, see render()) — the extension's own commands,
+		// whichever locale variant its manifest's `when` currently selects.
 		const graphTitleMenu: MenuEntry[] = resolvedMenuEntries('scm/title')
 			.filter((entry) => entry.group !== 'navigation')
 			.map((entry) => ({
@@ -836,13 +820,39 @@ export class SourceControlView {
 					'separator' as const,
 					{ label: 'Unstage Changes', run: () => void this.run('git_unstage', { paths: [file.path] }) }
 				];
-			// The manifest's scm/resourceState/context contribution (git-graph-rs.filterByFile) -
-			// present whenever the extension declares it and its `when` currently allows it.
-			const fileHistory = resolvedMenuEntries('scm/resourceState/context').find((entry) => entry.command === 'git-graph-rs.filterByFile');
-			if (fileHistory) entries.push('separator', { label: fileHistory.label, run: () => this.onShowFileHistory?.(this.absolute(file.path)) });
+			// Every scm/resourceState/context contribution an installed extension's manifest
+			// declares: the right-clicked resource rides along as the command's argument (VS
+			// Code's own menu argument), so a "Show File History in Git Graph" filters to it.
+			for (const entry of resolvedMenuEntries('scm/resourceState/context')) {
+				entries.push('separator', { label: entry.label, run: () => this.onExtensionCommand?.(entry.command, [this.absolute(file.path)]) });
+			}
 			showContextMenu(event.clientX, event.clientY, entries);
 		});
 		return row;
+	}
+
+	/** The scm/title entries an installed extension's manifest places in the `navigation`
+	 *  group, as inline header buttons: the manifest's own command icon (resolved from the
+	 *  package, then cached) and title, dispatched with the repository as the argument — an
+	 *  extension whose view keys to a repository (a submodule section's header) gets it. */
+	private extensionTitleButtons(repoPath: string): HTMLElement[] {
+		const buttons: HTMLElement[] = [];
+		for (const entry of resolvedMenuEntries('scm/title')) {
+			if (entry.group !== 'navigation') continue;
+			const button = actionButton('', entry.label, () => this.onExtensionCommand?.(entry.command, [repoPath]));
+			const image = el('img');
+			image.alt = '';
+			image.width = 16;
+			image.height = 16;
+			button.replaceChildren(image);
+			buttons.push(button);
+			if (entry.extId && entry.icon) {
+				// The manifest carries light/dark icon paths into the package; either loads.
+				const iconPath = entry.icon.dark ?? entry.icon.light;
+				if (iconPath) void extFileDataUrl(entry.extId, iconPath).then((url) => { if (url) image.src = url; });
+			}
+		}
+		return buttons;
 	}
 
 	private absolute(relative: string): string {
@@ -1012,15 +1022,8 @@ export class SourceControlView {
 			}
 			header.appendChild(branchLabel);
 		}
-		// Same placement rule as the main repository's own title bar (render()): the extension's
-		// "View Git Graph" icon shows inline unless the manifest tucks it into "..." instead.
-		const graphTitleEntry = resolvedMenuEntries('scm/title').find((entry) => entry.command === 'git-graph-rs.view');
-		const headerActions: HTMLElement[] = [];
-		if (!graphTitleEntry || graphTitleEntry.group === 'navigation') {
-			const graphButton = actionButton('', graphTitleEntry?.label ?? 'View Git Graph', () => this.onOpenGraph?.(sub.repoPath));
-			graphButton.innerHTML = '<img src="/icons/git-graph-16.svg" alt="" width="16" height="16">';
-			headerActions.push(graphButton);
-		}
+		// Same placement rule as the main repository's own title bar (render()).
+		const headerActions: HTMLElement[] = this.extensionTitleButtons(sub.repoPath);
 		headerActions.push(
 			actionButton('refresh', 'Refresh', () => void this.refresh()),
 			actionButton('ellipsis', 'More Actions...', (event) => showMenuBelow(event.currentTarget as HTMLElement, this.subMoreMenu(sub), 220))
@@ -1298,13 +1301,6 @@ export class SourceControlView {
 		this.onChanged?.();
 	}
 
-	/** A Git Graph write request (merge, rebase, stash, branch/remote/tag mutations), scoped to
-	 *  `sub` through `onGraphAction` - the workbench-provided seam to `runGraphAction`. */
-	private subGraphAction(sub: SubRepoState, message: Record<string, unknown>): Promise<void> {
-		if (!this.onGraphAction) return Promise.reject(new Error('No repository is open.'));
-		return this.onGraphAction(message, sub.repoPath);
-	}
-
 	/** The "..." menu of a submodule's own repository section - the same commands, in the same
 	 *  layout, as the main repository's `moreMenu()` (gitCommands.ts's registered `git.*`
 	 *  commands, reimplemented here scoped to `sub.repoPath` since the Command Registry those
@@ -1312,7 +1308,7 @@ export class SourceControlView {
 	private subMoreMenu(sub: SubRepoState): MenuEntry[] {
 		const repo = sub.repoPath;
 		const run = (work: () => Promise<void>, done?: string) => void this.subMenuRun(work, done);
-		const graphAction = (message: Record<string, unknown>) => this.subGraphAction(sub, message);
+		const gitOp = (command: string, args: Record<string, unknown>): Promise<void> => invoke<void>(command, { ...args, repo });
 		return [
 			{ label: 'Pull', run: () => run(() => invoke('scm_pull', { remote: null, branch: null, rebase: false, repo })) },
 			{ label: 'Push', run: () => run(() => invoke('scm_push', { remote: null, setUpstream: false, force: false, repo })) },
@@ -1350,7 +1346,7 @@ export class SourceControlView {
 					{ label: 'Commit (Amend)', run: () => void this.subCommit(sub, { amend: true }) },
 					{ label: 'Commit Staged (Amend)', run: () => void this.subCommit(sub, { amend: true, stagedOnly: true }) },
 					'separator',
-					{ label: 'Undo Last Commit', run: () => run(() => graphAction({ command: 'undoLastCommit' })) }
+					{ label: 'Undo Last Commit', run: () => run(() => gitOp('scm_undo_last_commit', {})) }
 				]
 			},
 			{
@@ -1407,13 +1403,13 @@ export class SourceControlView {
 					{
 						label: 'Merge Branch...', run: () => void (async () => {
 							const branch = await pickBranchIn(repo, 'Select a branch to merge from', (b) => !b.current);
-							if (branch) run(() => graphAction({ command: 'merge', obj: branch.name, actionOn: 'Branch', createNewCommit: false, squash: false, noCommit: false }));
+							if (branch) run(() => gitOp('scm_merge', { name: branch.name }));
 						})()
 					},
 					{
 						label: 'Rebase Branch...', run: () => void (async () => {
 							const branch = await pickBranchIn(repo, 'Select a branch to rebase onto', (b) => !b.current);
-							if (branch) run(() => graphAction({ command: 'rebase', obj: branch.name, actionOn: 'Branch', ignoreDate: false, interactive: false, autosquash: false }));
+							if (branch) run(() => gitOp('scm_rebase', { name: branch.name }));
 						})()
 					},
 					'separator',
@@ -1436,7 +1432,7 @@ export class SourceControlView {
 							const branch = await pickBranchIn(repo, 'Select a branch to rename', (b) => !b.remote);
 							if (!branch) return;
 							const name = await quickInput({ placeholder: 'Branch name', title: `Please provide a new name for '${branch.name}'`, value: branch.name, validate: validateSubRef });
-							if (name && name.trim() !== branch.name) run(() => graphAction({ command: 'renameBranch', oldName: branch.name, newName: name.trim() }));
+							if (name && name.trim() !== branch.name) run(() => gitOp('scm_rename_branch', { oldName: branch.name, newName: name.trim() }));
 						})()
 					},
 					{
@@ -1444,7 +1440,7 @@ export class SourceControlView {
 							const branch = await pickBranchIn(repo, 'Select a branch to delete', (b) => !b.remote && !b.current);
 							if (!branch) return;
 							if (!(await confirmDialog(`Delete the branch '${branch.name}'? Commits only reachable from it will be lost.`, 'Delete Branch'))) return;
-							run(() => graphAction({ command: 'deleteBranch', branchName: branch.name, forceDelete: true, deleteOnRemotes: [] }));
+							run(() => gitOp('scm_delete_branch', { branchName: branch.name, force: true }));
 						})()
 					}
 				]
@@ -1457,7 +1453,7 @@ export class SourceControlView {
 							if (!url) return;
 							const name = await quickInput({ title: 'Add Remote', placeholder: 'Remote name', value: 'origin', validate: validateSubRef });
 							if (!name) return;
-							run(() => graphAction({ command: 'addRemote', name: name.trim(), url: url.trim(), pushUrl: null, fetch: true }));
+							run(() => gitOp('scm_add_remote', { name: name.trim(), url: url.trim(), fetch: true }));
 						})()
 					},
 					{
@@ -1468,7 +1464,7 @@ export class SourceControlView {
 								return;
 							}
 							const chosen = await quickPick(remotes.map((r) => ({ label: r.name, description: r.url, icon: 'cloud', value: r.name })), 'Pick a remote to remove');
-							if (chosen) run(() => graphAction({ command: 'deleteRemote', name: chosen }));
+							if (chosen) run(() => gitOp('scm_delete_remote', { name: chosen }));
 						})()
 					}
 				]
@@ -1479,35 +1475,35 @@ export class SourceControlView {
 						label: 'Stash', run: () => void (async () => {
 							const message = await quickInput({ title: 'Stash', placeholder: 'Optionally provide a stash message' });
 							if (message === null) return;
-							run(() => graphAction({ command: 'pushStash', message, includeUntracked: false }));
+							run(() => gitOp('scm_push_stash', { message, includeUntracked: false }));
 						})()
 					},
 					{
 						label: 'Stash (Include Untracked)', run: () => void (async () => {
 							const message = await quickInput({ title: 'Stash (Include Untracked)', placeholder: 'Optionally provide a stash message' });
 							if (message === null) return;
-							run(() => graphAction({ command: 'pushStash', message, includeUntracked: true }));
+							run(() => gitOp('scm_push_stash', { message, includeUntracked: true }));
 						})()
 					},
 					{
 						label: 'Apply Stash...', run: () => void (async () => {
 							const stash = await pickStashIn(repo, 'Pick a stash to apply');
-							if (stash) run(() => graphAction({ command: 'applyStash', selector: stash.selector, reinstateIndex: false }));
+							if (stash) run(() => gitOp('scm_apply_stash', { selector: stash.selector, reinstateIndex: false }));
 						})()
 					},
-					{ label: 'Apply Latest Stash', run: () => run(() => graphAction({ command: 'applyStash', selector: 'refs/stash@{0}', reinstateIndex: false })) },
+					{ label: 'Apply Latest Stash', run: () => run(() => gitOp('scm_apply_stash', { selector: 'refs/stash@{0}', reinstateIndex: false })) },
 					{
 						label: 'Pop Stash...', run: () => void (async () => {
 							const stash = await pickStashIn(repo, 'Pick a stash to pop');
-							if (stash) run(() => graphAction({ command: 'popStash', selector: stash.selector, reinstateIndex: false }));
+							if (stash) run(() => gitOp('scm_pop_stash', { selector: stash.selector, reinstateIndex: false }));
 						})()
 					},
-					{ label: 'Pop Latest Stash', run: () => run(() => graphAction({ command: 'popStash', selector: 'refs/stash@{0}', reinstateIndex: false })) },
+					{ label: 'Pop Latest Stash', run: () => run(() => gitOp('scm_pop_stash', { selector: 'refs/stash@{0}', reinstateIndex: false })) },
 					{
 						label: 'Drop Stash...', run: () => void (async () => {
 							const stash = await pickStashIn(repo, 'Pick a stash to drop');
 							if (stash && (await confirmDialog(`Drop the stash '${stash.message}'? This cannot be undone.`, 'Drop Stash'))) {
-								run(() => graphAction({ command: 'dropStash', selector: stash.selector }));
+								run(() => gitOp('scm_drop_stash', { selector: stash.selector }));
 							}
 						})()
 					}
@@ -1522,7 +1518,7 @@ export class SourceControlView {
 							const message = await quickInput({ title: 'Create Tag', placeholder: 'Message (leave empty for a lightweight tag)' });
 							if (message === null) return;
 							const head = await invoke<{ shortHash: string }>('repo_head', { repo });
-							run(() => graphAction({ command: 'addTag', tagName: name.trim(), commitHash: head.shortHash, type: message.trim() === '' ? 1 : 0, message, force: false, pushToRemote: null, pushSkipRemoteCheck: false }));
+							run(() => gitOp('scm_add_tag', { tagName: name.trim(), commitHash: head.shortHash, message, force: false }));
 						})()
 					},
 					{
@@ -1533,7 +1529,7 @@ export class SourceControlView {
 								return;
 							}
 							const chosen = await quickPick(tags.map((t2) => ({ label: t2, icon: 'tag', value: t2 })), 'Select a tag to delete');
-							if (chosen) run(() => graphAction({ command: 'deleteTag', tagName: chosen, deleteOnRemote: null }));
+							if (chosen) run(() => gitOp('scm_delete_tag', { tagName: chosen }));
 						})()
 					}
 				]

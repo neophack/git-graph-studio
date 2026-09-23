@@ -300,6 +300,12 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
    bar — .editors itself does not clip. */
 .editor-pane.ext-detail-pane { display: block; overflow: auto; }
 .ext-page-frame { width: 100%; height: 100%; border: 0; display: block; background: var(--vscode-editor-background, #1e1e1e); }
+/* A frame must not inherit the theme's `color-scheme: dark`: when a framed document's scheme
+   differs from its frame element's, Chromium paints an opaque canvas in the document's scheme -
+   white, for a page that has not yet applied the theme it asks the host for - and the page
+   flashes white on open. With `normal` on both sides the canvas stays transparent and the
+   frame's own editor background shows until the page paints its themed one. */
+.ext-page-frame, .webview-panel-frame, .editor-pane iframe { color-scheme: normal; }
 .editor-pane .cm-editor { flex: 1; min-height: 0; height: 100%; }
 .editor-pane .cm-merge-view { display: flex; flex: 1; min-height: 0; }
 /* @codemirror/merge's own root is the scroll container of the side-by-side view (its panes'

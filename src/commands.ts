@@ -13,6 +13,9 @@ export interface Command {
 	keybinding?: string;
 	/** False hides the command from the palette and disables its menu items. */
 	enabled?: () => boolean;
+	/** False hides the command from the palette only (its menu entries keep their own
+	 *  enablement) — the manifest `commandPalette` placements' `when` clauses. */
+	paletteHidden?: () => boolean;
 	run: () => void | Promise<void>;
 }
 
@@ -133,10 +136,10 @@ export class CommandRegistry {
 		return undefined;
 	}
 
-	/** Palette entries: "Category: Title", enabled commands only, sorted. */
+	/** Palette entries: "Category: Title", enabled and not palette-hidden commands only, sorted. */
 	paletteItems(): { label: string; description?: string; value: string }[] {
 		return this.all()
-			.filter((command) => this.isEnabled(command.id))
+			.filter((command) => this.isEnabled(command.id) && command.paletteHidden?.() !== true)
 			.map((command) => ({
 				label: command.category ? `${trText(command.category)}: ${trText(command.title)}` : trText(command.title),
 				description: effectiveBinding(command.id, command.keybinding) ?? undefined,

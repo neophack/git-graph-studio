@@ -50,7 +50,7 @@ default = ["desktop"]
 # §8.2's "the backend is the only engine"). `cargo test --all-features` turns it on alongside
 # `desktop`, compiling and exercising both `cmd_graph.rs`'s always-on proxy functions and
 # `cmd_graph/engine_impl.rs`'s real implementation in one pass.
-engine = ["dep:git-graph-core", "dep:base64"]
+engine = ["dep:git-graph-core", "dep:base64", "dep:sha1", "dep:hex", "dep:ureq"]
 desktop = [
     "dep:tauri",
     "dep:tauri-plugin-dialog",

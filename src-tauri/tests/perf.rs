@@ -1,7 +1,8 @@
 //! The performance gate (docs/ggs-development-plan.md §4, M2.8): a synthetic repository of
 //! `GGS_PERF_FILES` files (default 5,000, CI runs 20,000; the plan's line is drawn at 100,000) is built with
 //! git, then every phase of opening it is timed the way the app runs it - the walk, the text
-//! search, the symbol index in this process, and the repository root, the SCM status and the
+//! search, the symbol index, the repository-root lookup and the SCM status (all in this
+//! process, over the git CLI), and the
 //! graph's first page through the plugin backend process - and checked against budgets that
 //! scale with the file count. Debug builds get an 8× allowance (this runs in `cargo test`);
 //! `cargo test --release --test perf -- --nocapture` measures the shipped speed. The numbers
@@ -15,7 +16,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use git_graph_studio_lib::ext_process::ProcessHostState;
-use git_graph_studio_lib::{cmd_ext, cmd_fs, cmd_search};
+use git_graph_studio_lib::{cmd_ext, cmd_fs, cmd_search, find_repo_root, git::Git, scm_ops};
 use serde_json::{json, Value};
 
 const ENGINE_ID: &str = "perf.git-graph-rs";
@@ -40,18 +41,28 @@ fn install_engine_backend(exts: &Path) {
     )
     .unwrap();
     zip.start_file("package.json", options).unwrap();
-    zip.write_all(br#"{"name":"git-graph-rs","publisher":"perf","version":"1.0.0"}"#).unwrap();
+    zip.write_all(br#"{"name":"git-graph-rs","publisher":"perf","version":"1.0.0"}"#)
+        .unwrap();
     zip.start_file("web/view.html", options).unwrap();
     zip.write_all(b"<html></html>").unwrap();
     zip.finish().unwrap();
     cmd_ext::install_from_ggx_into(exts, &ggx, false).unwrap();
 }
 
-/// One `request` call against the isolated engine backend, mirroring exactly what
-/// `cmd_graph.rs`'s top-level wrappers send `plugin_host` in production (the same synthetic
-/// `__`-prefixed commands, or a real view message).
-fn engine_request(state: &ProcessHostState, exts: &Path, repo: &str, message: Value) -> Result<Value, String> {
-    state.call(exts, ENGINE_ID, "request", json!({ "repo": repo, "settings": null, "message": message }))
+/// One `request` call against the isolated engine backend, mirroring the view's own protocol
+/// messages the page sends `plugin_host`'s successor in production.
+fn engine_request(
+    state: &ProcessHostState,
+    exts: &Path,
+    repo: &str,
+    message: Value,
+) -> Result<Value, String> {
+    state.call(
+        exts,
+        ENGINE_ID,
+        "request",
+        json!({ "repo": repo, "settings": null, "message": message }),
+    )
 }
 
 fn git(repo: &Path, args: &[&str]) {
@@ -197,34 +208,30 @@ fn opening_a_large_repository_stays_within_the_budgets() {
         "at least one symbol per file in the analysis"
     );
 
-    // The engine phases run through the installed backend process, exactly as the app runs
-    // them (`cmd_graph.rs`'s wrapper functions send the same `request`, over `plugin_host`'s
-    // `ext_process::global()` in production; this test drives its own isolated
-    // `ProcessHostState` instead, so it needs no real `~/.ggs/extensions` install and does not
-    // pollute the developer's or CI runner's real profile). The one-time spawn + `hello`
-    // handshake cost (plan §8.2: ~99 ms on the reference machine) is not charged to `root_ms`
-    // below — it happens on `state.start`, before timing starts.
+    // The repository root and the SCM status are the app's own reads now (the filesystem walk
+    // `open_folder` runs, and one `git status --porcelain`); the graph's first page is the
+    // plugin backend's, spoken to exactly as the view speaks to it (`request` with the page's
+    // own message). This test drives its own isolated `ProcessHostState`, so it needs no real
+    // `~/.ggs/extensions` install and does not pollute the developer's or CI runner's real
+    // profile; the one-time spawn + `hello` handshake cost (plan §8.2: ~99 ms on the reference
+    // machine) happens on `state.start`, before any timing starts.
     let exts_tmp = tempfile::tempdir().unwrap();
     let exts = exts_tmp.path().join("extensions");
     install_engine_backend(&exts);
     let state = ProcessHostState::default();
-    state.start(&exts, ENGINE_ID).expect("the engine backend starts");
+    state
+        .start(&exts, ENGINE_ID)
+        .expect("the engine backend starts");
 
     let started = Instant::now();
-    let resolved = engine_request(&state, &exts, &format!("{root}/mod0"), json!({ "command": "__repoRoot", "path": format!("{root}/mod0") }))
-        .ok()
-        .and_then(|v| v.get("root").and_then(Value::as_str).map(str::to_owned));
+    let resolved = find_repo_root(&format!("{root}/mod0"));
     let root_ms = ms(started);
     assert!(resolved.is_some());
 
     let started = Instant::now();
-    let status = engine_request(&state, &exts, &root, json!({ "command": "__scmChanges" })).unwrap();
+    let status = scm_ops::status(&Git::new(&root)).unwrap();
     let status_ms = ms(started);
-    assert_eq!(
-        status.as_array().map(Vec::len),
-        Some(1),
-        "one modified file"
-    );
+    assert_eq!(status.len(), 1, "one modified file");
 
     let started = Instant::now();
     let first_page = engine_request(
@@ -237,7 +244,10 @@ fn opening_a_large_repository_stays_within_the_budgets() {
     // The page defers the "Uncommitted Changes" row (the working-tree scan completes it in a
     // follow-up count), so it holds the history's commits alone - the row no longer blocks
     // the first paint, which is what this budget guards.
-    assert_eq!(commits, 7, "7 commits; the uncommitted-changes row arrives deferred");
+    assert_eq!(
+        commits, 7,
+        "7 commits; the uncommitted-changes row arrives deferred"
+    );
 
     let started = Instant::now();
     let warm_page = engine_request(

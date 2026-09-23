@@ -377,8 +377,6 @@ const en = {
 	'can.convert.ascFilter': 'Vector ASCII Log',
 	'can.convert.done': 'Exported {0} frames to {1}',
 	'can.convert.failed': 'Conversion failed',
-	'graph.binaryCompare.present': 'Present',
-	'graph.binaryCompare.title': '{0} ({1} ↔ {2})',
 	'diff.binaryNotice': 'The file is binary: its two versions cannot be compared as text.'
 };
 
@@ -754,8 +752,6 @@ const zhCn: typeof en = {
 	'can.convert.ascFilter': 'CANoe ASCII 日志',
 	'can.convert.done': '已导出 {0} 帧到 {1}',
 	'can.convert.failed': '转换失败',
-	'graph.binaryCompare.present': '当前',
-	'graph.binaryCompare.title': '{0}（{1} ↔ {2}）',
 	'diff.binaryNotice': '该文件是二进制文件：无法按文本比较它的两个版本。'
 };
 
@@ -963,8 +959,8 @@ const zhCnText: Record<string, string> = {
 let current: Locale = 'en';
 
 /** Merge more English→Chinese pairs into the text table: an extension's manifest translations,
- *  registered as its contributions are applied (the built-in git-graph-rs's package.nls.zh-cn
- *  titles bake in at build time). Later registrations win, so an updated build re-labels. */
+ *  registered as its contributions are applied (a package's own package.nls.zh-cn titles
+ *  travel inside its install). Later registrations win, so an upgrade re-labels. */
 export function registerZhCnText(entries: Record<string, string>): void {
 	Object.assign(zhCnText, entries);
 }

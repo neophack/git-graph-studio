@@ -159,7 +159,7 @@ describe('the commands no other harness drives', () => {
 		await workbench.editors.openFile(README);
 		await flush(6);
 		const active = () => (workbench.editors.activeInput as { path?: string; kind: string }).path ?? workbench.editors.activeInput!.kind;
-		// Back / Forward walk the history: graph (opened with the folder), notes, README.
+		// Back / Forward walk the history: notes, README.
 		expect(active()).toBe(README);
 		expect(commands.isEnabled('workbench.goBack')).toBe(true);
 		await commands.execute('workbench.goBack');
@@ -168,15 +168,13 @@ describe('the commands no other harness drives', () => {
 		await commands.execute('workbench.goForward');
 		await flush(2);
 		expect(active()).toBe(README);
-		// The tabs: Git Graph, notes.txt, README.md - the cycle wraps.
-		await commands.execute('workbench.nextEditor');
-		expect(active()).toBe('graph');
+		// The tabs: notes.txt, README.md - the cycle wraps.
 		await commands.execute('workbench.nextEditor');
 		expect(active()).toBe(NOTES);
-		await commands.execute('workbench.previousEditor');
-		expect(active()).toBe('graph');
-		await commands.execute('workbench.previousEditor');
+		await commands.execute('workbench.nextEditor');
 		expect(active()).toBe(README);
+		await commands.execute('workbench.previousEditor');
+		expect(active()).toBe(NOTES);
 	});
 
 	it('Go to Line/Column opens Quick Open in its ":" mode', async () => {
@@ -288,7 +286,7 @@ describe('the commands no other harness drives', () => {
 		await dismissOverlays();
 		expect(backend.callsTo('scm_clone')).toEqual([]);
 		await commands.execute('help.repository');
-		expect(backend.opened).toEqual(['https://github.com/neophack/vscode-git-graph-rs']);
+		expect(backend.opened).toEqual(['https://github.com/neophack/git-graph-studio']);
 	});
 
 	it('Compare Two Folders... opens a Folder Compare tab from the two picked folders', async () => {

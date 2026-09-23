@@ -103,71 +103,6 @@ export function saveWorkspaceSnapshot(folder: string, snapshot: WorkspaceSnapsho
 	save('workspaces', Object.fromEntries(entries));
 }
 
-/* ---------- Git Graph view state ---------- */
-
-/** The default per-repository state, the counterpart of `DEFAULT_REPO_STATE` in the extension. */
-export function defaultRepoState(): Record<string, unknown> {
-	return {
-		cdvDivider: 0.5,
-		cdvHeight: 250,
-		columnWidths: null,
-		commitOrdering: 'default',
-		fileViewType: 0,
-		gerritFetchRefs: false,
-		gerritFetchLimit: null,
-		gerritStatusFilter: { new: true, merged: false, abandoned: false, wip: false },
-		hideRemotes: [],
-		includeCommitsMentionedByReflogs: 0,
-		issueLinkingConfig: null,
-		lastImportAt: 0,
-		name: null,
-		onlyFollowFirstParent: 0,
-		onRepoLoadShowCheckedOutBranch: 0,
-		onRepoLoadShowSpecificBranches: null,
-		pinnedBranches: [],
-		pinnedCommits: [],
-		pullRequestConfig: null,
-		showRemoteBranches: true,
-		showRemoteBranchesV2: 0,
-		showStashes: 0,
-		showTags: 0,
-		workspaceFolderIndex: null
-	};
-}
-
-export function repoState(repo: string): Record<string, unknown> {
-	const all = load<Record<string, Record<string, unknown>>>('repoStates', {});
-	return { ...defaultRepoState(), ...(all[repo] ?? {}) };
-}
-
-export function saveRepoState(repo: string, state: Record<string, unknown>): void {
-	const all = load<Record<string, Record<string, unknown>>>('repoStates', {});
-	all[repo] = state;
-	save('repoStates', all);
-}
-
-export const GLOBAL_VIEW_STATE_DEFAULTS = { alwaysAcceptCheckoutCommit: false, issueLinkingConfig: null, pushTagSkipRemoteCheck: false };
-export const WORKSPACE_VIEW_STATE_DEFAULTS = { findIsCaseSensitive: false, findIsRegex: false, findOpenCommitDetailsView: false };
-
-export function globalViewState(): Record<string, unknown> {
-	return { ...GLOBAL_VIEW_STATE_DEFAULTS, ...load<Record<string, unknown>>('globalViewState', {}) };
-}
-
-export function workspaceViewState(): Record<string, unknown> {
-	return { ...WORKSPACE_VIEW_STATE_DEFAULTS, ...load<Record<string, unknown>>('workspaceViewState', {}) };
-}
-
-/** The `git-graph-rs.*` settings the view's Settings Widget wrote (key -> value). */
-export function graphSettings(): Record<string, unknown> {
-	return load<Record<string, unknown>>('settings', {});
-}
-
-export function saveGraphSetting(key: string, value: unknown): void {
-	const settings = graphSettings();
-	settings[key] = value;
-	save('settings', settings);
-}
-
 /* ---------- Extension settings (what installed extensions wrote via update()) ---------- */
 
 /** The event `saveExtSetting` dispatches on `document` (detail: the extension id), so the
@@ -195,31 +130,16 @@ export function extMemento(extId: string, scope: 'global' | 'workspace'): Record
 	return load<Record<string, unknown>>(`extMemento.${scope}.${extId}`, {});
 }
 
-export function saveExtMemento(extId: string, scope: 'global' | 'workspace', key: string, value: unknown): void {
+/** A null key writes the scope whole (the shape a self-contained page's flush sends — it owns
+ *  the entire map); a named key writes or deletes that one entry, undefined deleting. */
+export function saveExtMemento(extId: string, scope: 'global' | 'workspace', key: string | null, value: unknown): void {
+	if (key === null) {
+		save(`extMemento.${scope}.${extId}`, value && typeof value === 'object' ? value : {});
+		return;
+	}
 	const values = extMemento(extId, scope);
 	if (value === undefined) delete values[key];
 	else values[key] = value;
 	save(`extMemento.${scope}.${extId}`, values);
 }
 
-/* ---------- Code reviews (the Commit Details View's "mark as reviewed") ---------- */
-
-export interface CodeReview {
-	id: string;
-	lastActive: number;
-	lastViewedFile: string | null;
-	remainingFiles: string[];
-}
-
-export function codeReview(repo: string, id: string): CodeReview | null {
-	const reviews = load<Record<string, CodeReview>>('codeReviews', {});
-	return reviews[repo + '|' + id] ?? null;
-}
-
-export function saveCodeReview(repo: string, review: CodeReview | null, id = review?.id ?? ''): void {
-	const reviews = load<Record<string, CodeReview>>('codeReviews', {});
-	const key = repo + '|' + id;
-	if (review) reviews[key] = review;
-	else delete reviews[key];
-	save('codeReviews', reviews);
-}

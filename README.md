@@ -1,19 +1,17 @@
 # Git Graph Studio
 
-A standalone desktop app that wraps the `git-graph-rs` engine (the `vscode-git-graph-rs/`
-submodule's `native/core`) in a small VS Code-like shell: an Explorer file tree with git status colouring,
-a Source Control panel (stage / unstage / discard / commit), an editor with tabs, a built-in
-terminal (ConPTY on Windows), and the full Git Graph webview — the same `out.min.js` the
-submodule's VS Code extension builds, hosted unchanged behind an `acquireVsCodeApi` shim.
-
-Extensions are a first-class part of that shell: `.ggx` packages (Studio's own format — pages
-plus an optional process backend) install from the Extensions view, contribute commands to the
-palette and menus, and run their backend as a warm sibling process. Two packages ship beside
-the app, neither installed until you ask: **git-graph-rs** itself (the same engine, in-process
-behind the single seam `src/graphHost.ts` ↔ `src-tauri/src/cmd_graph.rs`, its webview assets
-assembled at build time) and the **GGX Demo** — the format's worked example, the template
-new plugins (human- or AI-authored) start from (`plugins/ggs-ext-demo/`, its README is the
-authoring guide).
+A standalone desktop app in the shape of a small VS Code-like shell: an Explorer file tree
+with git status colouring, a Source Control panel (stage / unstage / discard / commit), an
+editor with tabs, a built-in terminal (ConPTY on Windows) — and an extension platform whose
+packages arrive as self-contained `.ggx` files (pages plus an optional process backend),
+installed from the Extensions view, contributing commands to the palette and menus, running
+their backends as warm sibling processes. The shell names no plugin: everything of the Git
+Graph view — the engine (the `vscode-git-graph-rs/` submodule's `native/core`), the view's
+write path, its webview page and its comparison pages — lives in the **git-graph-rs** plugin
+(`plugins/git-graph-rs/`, one-click installable from the Extensions view), and the app's own
+git reads and writes run the `git` CLI with no plugin installed. The **GGX Demo** ships
+beside it — the format's worked example, the template new plugins (human- or AI-authored)
+start from (`plugins/ggs-ext-demo/`, its README is the authoring guide).
 
 Code navigation rides a persistent symbol index (Source Insight's model): the workspace's
 declarations and their occurrences indexed once under `~/.ggs/index/`, resumed on open and
@@ -59,7 +57,7 @@ git-graph-studio/
 ├── src-tauri/               the Rust backend — its own Cargo workspace
 │   ├── src/                 the command modules (fs / scm / graph / search / symbols),
 │   │                        the PTY, the file watcher, the large-file viewer, the CAN parser
-│   ├── build.rs             Tauri codegen + the Rust seam check (only cmd_graph.rs names the engine)
+│   ├── build.rs             Tauri codegen + the Rust seam check (nothing under src/ names the engine)
 │   └── .cargo/config.toml   points the Cargo target at target/studio/cargo
 │
 ├── tests/                   the vitest suite — jsdom with a scripted Tauri backend
@@ -69,9 +67,9 @@ git-graph-studio/
 │   └── hex-probe.html       the hex view in isolation, against any theme
 │
 ├── scripts/                 the build pipeline — every generated file lands in target/studio/
-│   ├── prepare.mjs          assembles the public dir the app serves (webview bundle, config,
-│   │                        compare page, icons; see the file header for the full layout)
-│   ├── check-seams.mjs      the compile-time seam rules (graphHost.ts / view.html / cmd_graph.rs)
+│   ├── prepare.mjs          assembles the public dir the app serves and packs the bundled
+│   │                        plugin packages (delegating to each plugin's own packer)
+│   ├── check-seams.mjs      the compile-time seam rules (the app names no extension artifact)
 │   ├── measure.mjs          exe/installer/dist size measurement + the backend probes
 │   ├── *-stub.cjs           the vscode/Node stubs the config and compare bundles build against
 │   ├── build-studio.bat     one-command Windows build (submodule → assets → tauri build)

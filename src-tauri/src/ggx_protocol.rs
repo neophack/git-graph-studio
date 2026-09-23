@@ -125,29 +125,59 @@ mod tests {
     fn a_request_line_parses_as_a_request_not_a_response() {
         // A request also syntactically matches the response variant (its `result` is an
         // optional field), so the variant order is what discriminates them.
-        let wire: Wire = serde_json::from_str(&request(7, "runCommand", json!({ "command": "x" }))).unwrap();
+        let wire: Wire =
+            serde_json::from_str(&request(7, "runCommand", json!({ "command": "x" }))).unwrap();
         assert_eq!(
             wire,
-            Wire::Request { id: 7, method: "runCommand".into(), params: json!({ "command": "x" }) }
+            Wire::Request {
+                id: 7,
+                method: "runCommand".into(),
+                params: json!({ "command": "x" })
+            }
         );
     }
 
     #[test]
     fn responses_and_notifications_parse_by_their_fields() {
         let ok: Wire = serde_json::from_str(&response(3, Ok(json!("done")))).unwrap();
-        assert_eq!(ok, Wire::Response { id: 3, result: Some(json!("done")), error: None });
+        assert_eq!(
+            ok,
+            Wire::Response {
+                id: 3,
+                result: Some(json!("done")),
+                error: None
+            }
+        );
         let err: Wire = serde_json::from_str(&response(4, Err("nope".into()))).unwrap();
         assert_eq!(
             err,
-            Wire::Response { id: 4, result: None, error: Some(RpcError { code: 1, message: "nope".into() }) }
+            Wire::Response {
+                id: 4,
+                result: None,
+                error: Some(RpcError {
+                    code: 1,
+                    message: "nope".into()
+                })
+            }
         );
-        let note: Wire = serde_json::from_str(&notification("$/log", json!({ "message": "hi" }))).unwrap();
-        assert_eq!(note, Wire::Notification { method: "$/log".into(), params: json!({ "message": "hi" }) });
+        let note: Wire =
+            serde_json::from_str(&notification("$/log", json!({ "message": "hi" }))).unwrap();
+        assert_eq!(
+            note,
+            Wire::Notification {
+                method: "$/log".into(),
+                params: json!({ "message": "hi" })
+            }
+        );
     }
 
     #[test]
     fn every_builder_emits_one_jsonrpc_line() {
-        for text in [request(1, "m", Value::Null), response(1, Ok(Value::Null)), notification("n", Value::Null)] {
+        for text in [
+            request(1, "m", Value::Null),
+            response(1, Ok(Value::Null)),
+            notification("n", Value::Null),
+        ] {
             assert!(text.ends_with('\n'));
             assert_eq!(text.matches('\n').count(), 1);
             // serde_json orders a Value's keys, so the member order is not the insertion

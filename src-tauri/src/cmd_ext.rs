@@ -33,6 +33,10 @@ struct StudioExtMeta {
     /// `vsix` (the default for installs made before the field existed) or `ggx`.
     #[serde(default = "default_format")]
     format: String,
+    /// The identity (`package_stamp`) of the bundled `.ggx` this install was unpacked from —
+    /// absent for a package installed from anywhere else, and for installs that predate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bundled_stamp: Option<String>,
 }
 
 fn default_format() -> String {
@@ -56,8 +60,24 @@ pub struct GgxManifest {
     /// `ggx/2`: the process backend declaration (`ext_process.rs` spawns it on demand).
     #[serde(default)]
     pub backend: Option<GgxBackend>,
+    /// `ggx/2`: an activity-bar launcher — one icon in the workbench's activity bar that runs
+    /// one of the package's commands (a view page's opener), the way a built-in view has one.
+    #[serde(default)]
+    pub activitybar: Option<GgxActivityBar>,
     #[serde(default)]
     pub permissions: Vec<String>,
+}
+
+/// A `ggx/2` package's activity-bar launcher: the icon (package-relative), its tooltip, and
+/// the declared command a click runs.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct GgxActivityBar {
+    pub command: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 /// Where the package's webview lives (paths inside the package).
@@ -80,6 +100,13 @@ pub struct GgxPage {
     pub page: String,
     #[serde(default)]
     pub title: Option<String>,
+    /// One tab at most: a second open reveals the existing tab (its params arrive as an event).
+    #[serde(default)]
+    pub singleton: bool,
+    /// The page's tab icon, package-relative; absent, the tab wears the package's activity-bar
+    /// icon (or the generic one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 /// The backend of a `ggx/2` package: a binary the process extension host spawns on demand —
@@ -114,7 +141,9 @@ impl GgxBackend {
     /// `ggs-ext/1` when `protocol` is absent — every manifest written before this field
     /// existed, and every third-party command-style plugin, speaks it.
     pub fn protocol_or_default(&self) -> &str {
-        self.protocol.as_deref().unwrap_or(crate::ggx_protocol::PROTOCOL_VERSION)
+        self.protocol
+            .as_deref()
+            .unwrap_or(crate::ggx_protocol::PROTOCOL_VERSION)
     }
 
     /// The command to run for `platform_key` (see [`host_platform_key`]): `binaries[key]` when
@@ -153,35 +182,10 @@ pub const GGX_FORMAT: &str = "ggx/1";
 /// The format that adds the named page registry and the process backend.
 pub const GGX2_FORMAT: &str = "ggx/2";
 
-/// The id of the git-graph-rs extension — the one Git Graph Studio integrates: its engine is
-/// linked into the app, its webview assets are the app's own, and it ships as the bundled
-/// `.ggx` the installer carries (installed on first launch, listed like any package).
-pub const GRAPH_PACKAGE_ID: &str = "neophack.git-graph-rs";
-
-/// The id of the GGX Demo — the `ggx/2` format's worked example, shipped as the installer's
-/// second bundled package. Unlike the integrated extension nothing of it is built into the
-/// app: it is a pure sample, one-click installable and uninstallable like any user package.
-pub const DEMO_PACKAGE_ID: &str = "ggs.ext-demo";
-
-/// The bundled `.ggx` packages the installer carries (its `extensions/` resource dir), by
-/// extension id: the fixed file name [`bundled_ggx_path`] resolves, and the stem the dev-run
-/// fallback looks for (`<stem>-<version>.ggx` under target/studio/bundled). prepare.mjs packs
-/// both; `ext_install_bundled` installs either.
-const BUNDLED_PACKAGES: [(&str, &str); 2] = [
-    (GRAPH_PACKAGE_ID, "git-graph-rs.ggx"),
-    (DEMO_PACKAGE_ID, "ggs-ext-demo.ggx"),
-];
-
-/// The integrated extension's `package.json`, embedded from the repository's own file at build
-/// time (build.rs passes the path): what the built-in entry in the Extensions view is described
-/// by, and where the workbench reads the built-in's command contributions from.
-const GRAPH_PACKAGE_JSON: &str = include_str!(env!("GITGRAPH_PACKAGE_JSON"));
-/// Its `package.nls.json`, the same way — the contribution titles' default localisation.
-const GRAPH_PACKAGE_NLS: &str = include_str!(env!("GITGRAPH_NLS_JSON"));
-/// The bundled sample's `package.json`, the same way — what the Extensions view lists the GGX
-/// Demo from until its package is installed (its README travels inside the package, not the
-/// binary).
-const DEMO_PACKAGE_JSON: &str = include_str!(env!("GGS_DEMO_PACKAGE_JSON"));
+/// The list format of a bundled offer: a package the installer carries but nothing installed —
+/// the Extensions view's one-click Install cue. The app knows no bundled id: whatever packages
+/// sit beside the installer ('bundled_packages' scans for them) are the offers.
+pub const BUNDLED_FORMAT: &str = "bundled";
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -340,91 +344,108 @@ fn migrate_from_app_data(app: &tauri::AppHandle, dir: &Path) {
 #[tauri::command]
 pub fn ext_list(app: tauri::AppHandle) -> Result<Vec<ExtInfo>, String> {
     let dir = extensions_dir(&app)?;
-    Ok(with_builtin(list_installed(&dir)?))
-}
-
-/// The list the Extensions view renders: the integrated git-graph-rs first, then the bundled
-/// sample, then the installs. An installed `.ggx` of the integrated id — the one-click bundled
-/// install, or a user's newer upgrade of it — IS the listing now (its version is the package's
-/// own); only when no such install exists does the build-time embedded entry stand in (the
-/// default: the app installs no plugin until asked). An installed `.vsix` of the id stays
-/// hidden behind that fallback: it could never take effect, the engine and view assets being
-/// the app's own. The sample follows the same rule with one difference: it is not integrated
-/// (nothing of it is built into the app), so any install of its id — a `.ggx`, the only form
-/// it ships in — simply lists, and only with no install at all does its embedded entry stand
-/// in as the not-yet-installed offer.
-fn with_builtin(mut list: Vec<ExtInfo>) -> Vec<ExtInfo> {
-    if let Some(at) = list
-        .iter()
-        .position(|ext| ext.id == GRAPH_PACKAGE_ID && ext.format == "ggx")
-    {
-        let integrated = list.remove(at);
-        list.insert(0, integrated);
-    } else {
-        list.retain(|ext| ext.id != GRAPH_PACKAGE_ID);
-        list.insert(0, builtin_graph_extension());
+    let mut list = list_installed(&dir)?;
+    // The bundled offers follow the installs: a package already installed is its own listing
+    // (its version is the install's), and only the not-installed bundled ones remain offers.
+    for package in bundled_packages(&app) {
+        if list.iter().any(|ext| ext.id == package.id) {
+            continue;
+        }
+        list.push(bundled_offer(&package));
     }
-    if let Some(at) = list
-        .iter()
-        .position(|ext| ext.id == DEMO_PACKAGE_ID && ext.format == "ggx")
+    Ok(list)
+}
+
+/// One bundled package as discovered beside the installer: its 'manifest.json' header and its
+/// 'package.json', read straight out of the '.ggx' zip.
+struct BundledPackage {
+    id: String,
+    path: std::path::PathBuf,
+    manifest: VsixManifest,
+    ggx: GgxManifest,
+}
+
+/// The '.ggx' packages shipped beside the app, by directory scan — the app names no id: the
+/// installer's 'extensions/' resource directory first, then a dev run's
+/// 'target/studio/bundled' (its versioned packages and the fixed-name copies prepare.mjs
+/// assembles for the installer). Unreadable packages are skipped, not fatal — a half-updated
+/// directory must not blind the Extensions view. First sighting of an id wins.
+fn bundled_packages(app: &tauri::AppHandle) -> Vec<BundledPackage> {
+    let mut roots = Vec::new();
+    if let Ok(resource) = app
+        .path()
+        .resolve("extensions", tauri::path::BaseDirectory::Resource)
     {
-        let sample = list.remove(at);
-        list.insert(1, sample);
-    } else if !list.iter().any(|ext| ext.id == DEMO_PACKAGE_ID) {
-        list.insert(1, sample_demo_extension());
+        roots.push(resource);
     }
-    list
+    // 'tauri dev' runs cargo from src-tauri/; the bat and CI from the repository root.
+    for base in [
+        "target/studio/bundled",
+        "target/studio/bundled/app-resources/extensions",
+        "../target/studio/bundled",
+        "../target/studio/bundled/app-resources/extensions",
+    ] {
+        roots.push(std::path::PathBuf::from(base));
+    }
+    let mut found: Vec<BundledPackage> = Vec::new();
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("ggx") {
+                continue;
+            }
+            let Ok((ggx, manifest)) = read_ggx_manifest(&path) else {
+                continue;
+            };
+            if found
+                .iter()
+                .any(|package: &BundledPackage| package.id == ggx.id)
+            {
+                continue;
+            }
+            found.push(BundledPackage {
+                id: ggx.id.clone(),
+                path,
+                manifest,
+                ggx,
+            });
+        }
+    }
+    found
 }
 
-/// The integrated git-graph-rs as the Extensions view lists it when no package install
-/// exists (a dev run without the bundled `.ggx`): an embedded manifest, versioned by that
-/// manifest's own `package.json`, no install directory, nothing to activate in a frame.
-fn builtin_graph_extension() -> ExtInfo {
-    // The embedded manifest carries `%displayName%` placeholders like any VS Code extension;
-    // the embedded NLS table resolves them the way the installed package's own does.
-    let nls: serde_json::Value = serde_json::from_str(GRAPH_PACKAGE_NLS).unwrap_or(serde_json::Value::Null);
-    embedded_extension(GRAPH_PACKAGE_ID, GRAPH_PACKAGE_JSON, true, &nls)
-}
-
-/// The bundled sample as the Extensions view lists it when it is not installed: the same
-/// embedded-manifest shape as the integrated entry, but a plain sample — no built-in flag, so
-/// nothing claims it is part of the app (and once installed, it is an ordinary uninstallable
-/// package like any user's).
-fn sample_demo_extension() -> ExtInfo {
-    embedded_extension(DEMO_PACKAGE_ID, DEMO_PACKAGE_JSON, false, &serde_json::Value::Null)
-}
-
-/// One embedded-manifest listing entry: no install directory, `format: "builtin"` (the
-/// frontend's cue for the one-click bundled-install offer), `builtin` only when the extension
-/// is integrated into the app.
-fn embedded_extension(id: &str, package_json: &str, builtin: bool, nls: &serde_json::Value) -> ExtInfo {
-    let manifest: VsixManifest = serde_json::from_str(package_json)
-        .unwrap_or_else(|e| panic!("the embedded {id} package.json is well-formed: {e}"));
-    // Read before the field moves below hand ownership to the entry.
-    let repository_url = manifest.url_of().map(str::to_string);
-    let display_name = nls_resolve(manifest.display_name, nls);
-    let description = nls_resolve(manifest.description, nls);
+/// A bundled package's offer entry: the manifest's own metadata, 'format: "bundled"' (the
+/// one-click Install cue), no install directory.
+fn bundled_offer(package: &BundledPackage) -> ExtInfo {
+    let repository_url = package.manifest.url_of().map(str::to_string);
     ExtInfo {
-        id: id.to_owned(),
-        name: manifest.name,
-        display_name,
-        publisher: manifest.publisher,
-        version: manifest.version,
-        description: description.unwrap_or_default(),
-        builtin,
+        id: package.id.clone(),
+        name: package.manifest.name.clone(),
+        display_name: package.manifest.display_name.clone(),
+        publisher: package.manifest.publisher.clone(),
+        version: package.manifest.version.clone(),
+        description: package.manifest.description.clone().unwrap_or_default(),
+        builtin: false,
         icon: None,
         path: String::new(),
-        categories: manifest.categories,
-        keywords: manifest.keywords,
+        categories: package.manifest.categories.clone(),
+        keywords: package.manifest.keywords.clone(),
         repository: repository_url,
-        license: manifest.license,
-        engines_vscode: manifest.engines.and_then(|e| e.vscode),
-        extension_dependencies: manifest.extension_dependencies,
-        extension_pack: manifest.extension_pack,
+        license: package.manifest.license.clone(),
+        engines_vscode: package
+            .manifest
+            .engines
+            .as_ref()
+            .and_then(|e| e.vscode.clone()),
+        extension_dependencies: package.manifest.extension_dependencies.clone(),
+        extension_pack: package.manifest.extension_pack.clone(),
         readme: None,
         changelog: None,
-        format: "builtin".to_owned(),
-        ggx: None,
+        format: BUNDLED_FORMAT.to_owned(),
+        ggx: Some(package.ggx.clone()),
     }
 }
 
@@ -460,18 +481,168 @@ pub fn ext_install_from_ggx(
     install_from_ggx_into(&dir, Path::new(&path), false)
 }
 
-/// Install one of the bundled `.ggx` packages the installer ships — the one-click Install on
-/// the Extensions view's bundled entries (the integrated git-graph-rs, and the GGX Demo
-/// sample). `ext_id` selects which (`BUNDLED_PACKAGES`); omitted (or an unknown id from an
-/// older frontend) it means the integrated git-graph-rs, the only bundled package before the
-/// parameter existed. The app installs no plugin by default; this is the ask. A standard
-/// install either way: forward-only like any package, uninstallable like any package.
+/// Install one of the bundled '.ggx' packages the installer ships — the one-click Install
+/// on the Extensions view's bundled offers. The id is explicit (the frontend names the row it
+/// installs) and the package is found by discovery, so the app still names no id of its own.
+/// A standard install either way: forward-only like any package, uninstallable like any
+/// package.
 #[tauri::command]
-pub fn ext_install_bundled(app: tauri::AppHandle, ext_id: Option<String>) -> Result<ExtInfo, String> {
+pub fn ext_install_bundled(app: tauri::AppHandle, ext_id: String) -> Result<ExtInfo, String> {
     let dir = extensions_dir(&app)?;
-    let id = ext_id.as_deref().filter(|id| BUNDLED_PACKAGES.iter().any(|(known, _)| known == id));
-    let package = bundled_ggx_path(&app, id.unwrap_or(GRAPH_PACKAGE_ID))?;
-    install_from_ggx_into(&dir, &package, false)
+    let package = bundled_packages(&app)
+        .into_iter()
+        .find(|package| package.id == ext_id)
+        .ok_or_else(|| format!("{ext_id} has no bundled package"))?;
+    let info = install_from_ggx_into(&dir, &package.path, false)?;
+    record_bundled_stamp(
+        &dir.join(format!("{ext_id}-{}", info.version)),
+        &package.path,
+    );
+    Ok(info)
+}
+
+/// The identity of one bundled `.ggx` build: its length and a hash of its bytes. Two builds of
+/// the same version (a rebuilt engine, a re-laid-out package) differ here, which the version
+/// alone cannot tell.
+fn package_stamp(path: &Path) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let bytes = std::fs::read(path).ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(format!("{}-{:016x}", bytes.len(), hasher.finish()))
+}
+
+/// Note in an install's `studio-ext.json` which bundled build it was unpacked from.
+fn record_bundled_stamp(target: &Path, ggx: &Path) {
+    let meta_path = target.join("studio-ext.json");
+    let Some(mut meta) = std::fs::read_to_string(&meta_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<StudioExtMeta>(&s).ok())
+    else {
+        return;
+    };
+    meta.bundled_stamp = package_stamp(ggx);
+    let _ = std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap());
+}
+
+/// The boot pass's refresh of installed packages the installer also ships at the SAME version:
+/// forward-only installs refuse an equal version, so without this an install unpacked from an
+/// older build of that version (an app upgrade that rebuilt the package without bumping it)
+/// would keep its stale files and backend forever — a backend missing the protocol the app now
+/// speaks. Only `.ggx` installs whose recorded bundled build differs are replaced (older and
+/// newer versions are left to the forward-only rules; nothing is installed that was not
+/// installed already). Run before any backend starts — a running binary holds its directory.
+/// Returns one line per refreshed or failed package, for the boot log.
+pub fn refresh_bundled_installs(app: &tauri::AppHandle) -> Vec<Result<String, String>> {
+    let Ok(dir) = extensions_dir(app) else {
+        return Vec::new();
+    };
+    refresh_bundled_installs_in(&dir, &bundled_packages(app))
+}
+
+fn refresh_bundled_installs_in(
+    dir: &Path,
+    packages: &[BundledPackage],
+) -> Vec<Result<String, String>> {
+    let mut outcomes = Vec::new();
+    for package in packages {
+        let version = &package.manifest.version;
+        let target = dir.join(format!("{}-{version}", package.id));
+        let Ok(text) = std::fs::read_to_string(target.join("studio-ext.json")) else {
+            continue; // not installed at this version
+        };
+        let Ok(meta) = serde_json::from_str::<StudioExtMeta>(&text) else {
+            continue;
+        };
+        if meta.format != "ggx" {
+            continue;
+        }
+        let Some(stamp) = package_stamp(&package.path) else {
+            continue;
+        };
+        if meta.bundled_stamp.as_deref() == Some(stamp.as_str()) {
+            continue;
+        }
+        let refreshed = replace_install(dir, &target, &package.path, meta.builtin).map(|()| {
+            format!(
+                "{} {version} refreshed from the bundled package",
+                package.id
+            )
+        });
+        outcomes.push(refreshed.map_err(|e| format!("{} {version}: {e}", package.id)));
+    }
+    outcomes
+}
+
+/// Swap `target` (an install) for a fresh unpack of `ggx`, never leaving a half-deleted
+/// install behind: the package is unpacked into a scratch directory first (a dot-name the
+/// listing ignores), then the old directory is renamed away and the new one renamed in. On
+/// Windows a directory holding a running binary refuses the rename as a whole — the install
+/// app's upgrade launches the new app while the old one's backend is still exiting — so the
+/// swap retries for a few seconds before giving up (the next boot tries again: the recorded
+/// build still differs).
+fn replace_install(dir: &Path, target: &Path, ggx: &Path, builtin: bool) -> Result<(), String> {
+    let scratch = dir.join(format!(".refresh-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).map_err(|e| format!("create {}: {e}", scratch.display()))?;
+    let result = (|| {
+        let info = install_from_ggx_into(&scratch, ggx, builtin)?;
+        let staged = scratch.join(format!("{}-{}", info.id, info.version));
+        record_bundled_stamp(&staged, ggx);
+        let stale = scratch.join("stale");
+        let mut attempt = 0;
+        loop {
+            match std::fs::rename(target, &stale) {
+                Ok(()) => break,
+                Err(_) if attempt < 20 => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+                Err(e) => return Err(format!("the install is in use ({e}); close every Git Graph Studio window and start it again")),
+            }
+        }
+        if let Err(e) = std::fs::rename(&staged, target) {
+            // Put the old install back rather than leave none.
+            let _ = std::fs::rename(&stale, target);
+            return Err(format!("move the new install into place: {e}"));
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&scratch);
+    result
+}
+
+/// One line of the extension store's own log (`~/.ggs/logs/extensions.log`): what the boot
+/// pass did to installs, readable after the fact — a GUI app has no console for stderr.
+pub fn log_extensions(line: &str) {
+    eprintln!("[extensions] {line}");
+    let Ok(store) = extensions_home_dir() else {
+        return;
+    };
+    let Some(home) = store.parent() else {
+        return;
+    };
+    let logs = home.join("logs");
+    if std::fs::create_dir_all(&logs).is_err() {
+        return;
+    }
+    let path = logs.join("extensions.log");
+    // Bounded like mcp.log: past 1 MB the log starts over.
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1024 * 1024) {
+        let _ = std::fs::remove_file(&path);
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(file, "{stamp} {line}");
+    }
 }
 
 /// The uninstall every caller runs: this app's own backend for the extension dies first — its
@@ -514,10 +685,8 @@ pub fn ext_uninstall(
     uninstall_stopping(&dir, &ext_id, &state)
 }
 
-/// Read a file inside an installed extension's directory (the extension host loads the entry
-/// bundle this way). Paths are confined to the extension's own directory. For the integrated
-/// git-graph-rs, the installed `.ggx` copy wins; only with no install (a dev run without the
-/// bundled package) do the embedded manifest files answer.
+/// Read a file inside an installed extension's directory (the extension host loads the
+/// entry bundle this way). Paths are confined to the extension's own directory.
 #[tauri::command]
 pub fn ext_read_file(
     app: tauri::AppHandle,
@@ -525,15 +694,6 @@ pub fn ext_read_file(
     rel_path: String,
 ) -> Result<String, String> {
     let dir = extensions_dir(&app)?;
-    if find_installed(&dir, &ext_id)?.is_empty() && ext_id == GRAPH_PACKAGE_ID {
-        return match rel_path.as_str() {
-            "package.json" => Ok(GRAPH_PACKAGE_JSON.to_owned()),
-            "package.nls.json" => Ok(GRAPH_PACKAGE_NLS.to_owned()),
-            _ => Err(format!(
-                "{rel_path} is not part of the built-in {GRAPH_PACKAGE_ID}"
-            )),
-        };
-    }
     let versions = find_installed(&dir, &ext_id)?;
     let version = versions
         .last()
@@ -587,9 +747,9 @@ fn confine_to_roots(roots: &[String], path: &str) -> Result<PathBuf, String> {
             match std::fs::canonicalize(&ancestor) {
                 Ok(canonical) => return Ok::<PathBuf, String>(canonical.join(&tail)),
                 Err(_) => {
-                    let name = ancestor.file_name().ok_or_else(|| {
-                        format!("cannot resolve {}", resolved.display())
-                    })?;
+                    let name = ancestor
+                        .file_name()
+                        .ok_or_else(|| format!("cannot resolve {}", resolved.display()))?;
                     let Some(parent) = ancestor.parent() else {
                         return Err(format!("cannot resolve {}", resolved.display()));
                     };
@@ -676,7 +836,11 @@ fn walk_find(dir: &Path, prefix: &str, pattern: &str, found: &mut Vec<String>, d
         if name == ".git" {
             continue;
         }
-        let relative = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+        let relative = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
         let Ok(meta) = entry.metadata() else { continue };
         if meta.is_dir() {
             walk_find(&entry.path(), &relative, pattern, found, depth + 1);
@@ -699,9 +863,14 @@ pub fn ext_fs(
     data: Option<String>,
 ) -> Result<serde_json::Value, String> {
     use base64::Engine;
-    ext_fs_core(&op, &roots, &path, to.as_deref(), data.as_deref(), |bytes| {
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    })
+    ext_fs_core(
+        &op,
+        &roots,
+        &path,
+        to.as_deref(),
+        data.as_deref(),
+        |bytes| base64::engine::general_purpose::STANDARD.encode(bytes),
+    )
 }
 
 /// The core the command delegates to (and the tests call with plain paths): byte answers
@@ -734,7 +903,8 @@ fn ext_fs_core(
             Vec::<String>::new()
         })),
         "read" => {
-            let bytes = std::fs::read(&target).map_err(|e| format!("read {}: {e}", target.display()))?;
+            let bytes =
+                std::fs::read(&target).map_err(|e| format!("read {}: {e}", target.display()))?;
             Ok(serde_json::json!({ "data": encode(&bytes) }))
         }
         "write" => {
@@ -745,15 +915,24 @@ fn ext_fs_core(
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
-            std::fs::write(&target, bytes).map_err(|e| format!("write {}: {e}", target.display()))?;
+            std::fs::write(&target, bytes)
+                .map_err(|e| format!("write {}: {e}", target.display()))?;
             Ok(serde_json::json!(()))
         }
         "list" => {
             let mut entries = Vec::new();
-            for entry in std::fs::read_dir(&target).map_err(|e| format!("read {}: {e}", target.display()))? {
+            for entry in
+                std::fs::read_dir(&target).map_err(|e| format!("read {}: {e}", target.display()))?
+            {
                 let entry = entry.map_err(|e| e.to_string())?;
                 let meta = entry.metadata().map_err(|e| e.to_string())?;
-                let kind = if meta.is_dir() { 2 } else if entry.path().is_symlink() { 64 } else { 1 };
+                let kind = if meta.is_dir() {
+                    2
+                } else if entry.path().is_symlink() {
+                    64
+                } else {
+                    1
+                };
                 entries.push(ExtFsEntry {
                     name: entry.file_name().to_string_lossy().into_owned(),
                     kind,
@@ -764,7 +943,8 @@ fn ext_fs_core(
             Ok(serde_json::to_value(entries).expect("entries serialize"))
         }
         "stat" => {
-            let meta = std::fs::metadata(&target).map_err(|e| format!("stat {}: {e}", target.display()))?;
+            let meta = std::fs::metadata(&target)
+                .map_err(|e| format!("stat {}: {e}", target.display()))?;
             Ok(serde_json::json!({
                 "type": if meta.is_dir() { 2 } else { 1 },
                 "size": meta.len(),
@@ -777,14 +957,17 @@ fn ext_fs_core(
             }))
         }
         "mkdir" => {
-            std::fs::create_dir_all(&target).map_err(|e| format!("mkdir {}: {e}", target.display()))?;
+            std::fs::create_dir_all(&target)
+                .map_err(|e| format!("mkdir {}: {e}", target.display()))?;
             Ok(serde_json::json!(()))
         }
         "delete" => {
             if target.is_dir() {
-                std::fs::remove_dir_all(&target).map_err(|e| format!("delete {}: {e}", target.display()))?;
+                std::fs::remove_dir_all(&target)
+                    .map_err(|e| format!("delete {}: {e}", target.display()))?;
             } else {
-                std::fs::remove_file(&target).map_err(|e| format!("delete {}: {e}", target.display()))?;
+                std::fs::remove_file(&target)
+                    .map_err(|e| format!("delete {}: {e}", target.display()))?;
             }
             Ok(serde_json::json!(()))
         }
@@ -820,6 +1003,7 @@ fn list_installed(dir: &Path) -> Result<Vec<ExtInfo>, String> {
             .unwrap_or(StudioExtMeta {
                 builtin: false,
                 format: default_format(),
+                bundled_stamp: None,
             });
         let ggx: Option<GgxManifest> = std::fs::read_to_string(path.join("manifest.json"))
             .ok()
@@ -927,11 +1111,7 @@ fn read_ggx_manifest(ggx: &Path) -> Result<(GgxManifest, VsixManifest), String> 
 /// package root, the backend binary (a `ggx/2` process package) made executable where that
 /// is a permission bit. Public so the process-host integration test can install a helper
 /// package the way the app does.
-pub fn install_from_ggx_into(
-    dir: &Path,
-    ggx: &Path,
-    builtin: bool,
-) -> Result<ExtInfo, String> {
+pub fn install_from_ggx_into(dir: &Path, ggx: &Path, builtin: bool) -> Result<ExtInfo, String> {
     let (header, manifest) = read_ggx_manifest(ggx)?;
     let id = header.id.clone();
     let target = dir.join(format!("{id}-{}", manifest.version));
@@ -985,6 +1165,7 @@ pub fn install_from_ggx_into(
     let meta = StudioExtMeta {
         builtin,
         format: "ggx".to_owned(),
+        bundled_stamp: None,
     };
     std::fs::write(
         target.join("studio-ext.json"),
@@ -992,7 +1173,6 @@ pub fn install_from_ggx_into(
     )
     .map_err(|e| format!("write meta: {e}"))?;
     // An explicit install revives the boot pass's auto-install (upgrade) pass for this id.
-    let _ = std::fs::remove_file(uninstall_marker(dir, &id));
     list_installed(dir)?
         .into_iter()
         .find(|e| e.id == id && e.version == manifest.version)
@@ -1023,7 +1203,6 @@ fn extract_ggx(ggx: &Path, target: &Path) -> Result<(), String> {
 /// `.ggx` counts as just another install of the same extension).
 fn install_from_vsix_into(dir: &Path, vsix: &Path, builtin: bool) -> Result<ExtInfo, String> {
     let manifest = read_vsix_manifest(vsix)?;
-    refuse_integrated(&manifest)?;
     let id = format!("{}.{}", manifest.publisher, manifest.name);
     let target = dir.join(format!("{id}-{}", manifest.version));
     for existing in find_installed(dir, &id)? {
@@ -1047,6 +1226,7 @@ fn install_from_vsix_into(dir: &Path, vsix: &Path, builtin: bool) -> Result<ExtI
     let meta = StudioExtMeta {
         builtin,
         format: "vsix".to_owned(),
+        bundled_stamp: None,
     };
     std::fs::write(
         target.join("studio-ext.json"),
@@ -1054,24 +1234,10 @@ fn install_from_vsix_into(dir: &Path, vsix: &Path, builtin: bool) -> Result<ExtI
     )
     .map_err(|e| format!("write meta: {e}"))?;
     // An explicit install revives the boot pass's auto-install (upgrade) pass for this id.
-    let _ = std::fs::remove_file(uninstall_marker(dir, &id));
     list_installed(dir)?
         .into_iter()
         .find(|e| e.id == id && e.version == manifest.version)
         .ok_or_else(|| "installed extension not listed after install".to_string())
-}
-
-/// Refuse a VSIX install of the integrated extension: its engine and view assets are the
-/// app's own (a `.ggx` of the id is fine — that is the bundled package's own shape).
-fn refuse_integrated(manifest: &VsixManifest) -> Result<(), String> {
-    let id = format!("{}.{}", manifest.publisher, manifest.name);
-    if id == GRAPH_PACKAGE_ID {
-        Err(format!(
-            "{id} is built into Git Graph Studio; its version follows the application"
-        ))
-    } else {
-        Ok(())
-    }
 }
 
 /// Read and validate the `extension/package.json` a `.vsix` carries. The `main` entry point
@@ -1136,6 +1302,7 @@ fn uninstall(dir: &Path, ext_id: &str) -> Result<(), String> {
             .unwrap_or(StudioExtMeta {
                 builtin: false,
                 format: default_format(),
+                bundled_stamp: None,
             });
         if meta.builtin {
             return Err(format!(
@@ -1144,29 +1311,7 @@ fn uninstall(dir: &Path, ext_id: &str) -> Result<(), String> {
         }
         std::fs::remove_dir_all(&path).map_err(|e| removal_error(&path, &e))?;
     }
-    // A completed uninstall is a decision about the package, not a cache to refill at the
-    // next launch: the marker keeps the boot pass's bundled auto-install from silently
-    // reinstalling it (`deliberately_uninstalled`); any explicit install of the id clears it.
-    std::fs::write(
-        uninstall_marker(dir, ext_id),
-        format!("{}\n", versions.last().map(String::as_str).unwrap_or("")),
-    )
-    .map_err(|e| format!("write the uninstall marker: {e}"))?;
     Ok(())
-}
-
-/// The deliberate-uninstall marker of `ext_id`: a `<id>.uninstalled` file beside the version
-/// directories (never mistaken for one — those carry the `<id>-<version>` shape), holding the
-/// uninstalled version for anyone reading the store by hand.
-fn uninstall_marker(dir: &Path, ext_id: &str) -> PathBuf {
-    dir.join(format!("{ext_id}.uninstalled"))
-}
-
-/// Whether `ext_id` was deliberately uninstalled and the boot pass's bundled auto-install
-/// must leave the store alone. An explicit install of the id — the Extensions view's
-/// one-click Install included — clears the marker and flips this back.
-pub fn deliberately_uninstalled(dir: &Path, ext_id: &str) -> bool {
-    uninstall_marker(dir, ext_id).exists()
 }
 
 /// The remove error, with the multi-instance hint when the directory is held: another GGS
@@ -1208,56 +1353,6 @@ pub fn installed_dir(dir: &Path, ext_id: &str) -> Result<PathBuf, String> {
         .last()
         .ok_or_else(|| format!("{ext_id} is not installed"))?;
     Ok(dir.join(format!("{ext_id}-{version}")))
-}
-
-/// Where a bundled package lives: the installer's `extensions/` resource dir in a packaged
-/// app (the fixed file name `BUNDLED_PACKAGES` records); the build's own versioned copy
-/// (`target/studio/bundled/<stem>-<version>.ggx`) in a dev run.
-fn bundled_ggx_path(app: &tauri::AppHandle, ext_id: &str) -> Result<PathBuf, String> {
-    let Some((_, file)) = BUNDLED_PACKAGES.iter().find(|(known, _)| *known == ext_id) else {
-        return Err(format!("{ext_id} has no bundled package (bundled: the integrated git-graph-rs and the GGX Demo sample)"));
-    };
-    if let Ok(resource) = app
-        .path()
-        .resolve(format!("extensions/{file}"), tauri::path::BaseDirectory::Resource)
-    {
-        if resource.is_file() {
-            return Ok(resource);
-        }
-    }
-    // `tauri dev` runs cargo from src-tauri/; the bat and CI from the repository root.
-    let stem = file.strip_suffix(".ggx").unwrap_or(file);
-    for base in ["target/studio/bundled", "../target/studio/bundled"] {
-        let found = newest_ggx_under(Path::new(base), stem);
-        if let Some((_, path)) = found {
-            return Ok(path);
-        }
-    }
-    Err(format!(
-        "the bundled {ext_id} package is not present (run scripts/prepare.mjs)"
-    ))
-}
-
-/// The newest `<stem>-<version>.ggx` under `dir`, as `(version, path)`.
-fn newest_ggx_under(dir: &Path, stem: &str) -> Option<(String, PathBuf)> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    let prefix = format!("{stem}-");
-    let mut newest: Option<(String, PathBuf)> = None;
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.starts_with(&prefix) || !name.ends_with(".ggx") {
-            continue;
-        }
-        let version = name[prefix.len()..name.len() - ".ggx".len()].to_owned();
-        if newest
-            .as_ref()
-            .is_some_and(|(best, _)| compare_versions(best, &version) != std::cmp::Ordering::Less)
-        {
-            continue;
-        }
-        newest = Some((version, entry.path()));
-    }
-    newest
 }
 
 /// A file inside an installed extension's directory, base64-encoded - how the UI reads icons and
@@ -1304,7 +1399,10 @@ pub fn serve_ggx_asset(request: &tauri::http::Request<Vec<u8>>) -> tauri::http::
 
 /// The serving core over an explicit extensions home, so the tests can point it at a
 /// scratch directory instead of the developer's real one.
-fn serve_ggx_asset_from(home: &Path, request: &tauri::http::Request<Vec<u8>>) -> tauri::http::Response<Vec<u8>> {
+fn serve_ggx_asset_from(
+    home: &Path,
+    request: &tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
     let requested = request.uri().path().trim_start_matches('/').to_owned();
     let decoded = percent_decode(&requested);
     let mut segments = decoded.split(['/', '\\']).filter(|s| !s.is_empty());
@@ -1312,7 +1410,8 @@ fn serve_ggx_asset_from(home: &Path, request: &tauri::http::Request<Vec<u8>>) ->
         return ggx_not_found(&requested);
     };
     let rel: Vec<&str> = segments.collect();
-    if package.contains("..") || rel.is_empty() || rel.iter().any(|segment| segment.contains("..")) {
+    if package.contains("..") || rel.is_empty() || rel.iter().any(|segment| segment.contains(".."))
+    {
         return ggx_not_found(&requested);
     }
     let file = home.join(package).join(rel.join("/"));
@@ -1336,7 +1435,10 @@ fn serve_ggx_asset_from(home: &Path, request: &tauri::http::Request<Vec<u8>>) ->
 fn ggx_not_found(requested: &str) -> tauri::http::Response<Vec<u8>> {
     tauri::http::Response::builder()
         .status(tauri::http::StatusCode::NOT_FOUND)
-        .header(tauri::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(
+            tauri::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )
         .body(format!("no such ggx asset: {requested}").into_bytes())
         .expect("a response with a valid header value")
 }
@@ -1365,14 +1467,19 @@ fn content_type(file: &Path) -> &'static str {
     }
 }
 
-/// Prepend the page bootstrap to the document: inside `<head>` when there is one (before
-/// `</head>`, so the page's own scripts still load last), else right after the `<html>` tag
-/// (a script before the doctype would force quirks mode), else at the very start.
+/// Prepend the page bootstrap to the document: as the FIRST script of `<head>` when there is
+/// one (a page's own top-level scripts call `acquireGgsApi()` the moment they parse — the
+/// authored view shells load their bridge before anything else), else right after the
+/// `<html>` tag (a script before the doctype would force quirks mode), else at the very start.
 fn compose_page(html: &str) -> String {
-    let boot = format!("<script>\n{}\n</script>\n", include_str!("ext_page_boot.js"));
-    for marker in ["</head>", "</HEAD>"] {
+    let boot = format!(
+        "<script>\n{}\n</script>\n",
+        include_str!("ext_page_boot.js")
+    );
+    for marker in ["<head>", "<HEAD>"] {
         if let Some(at) = html.find(marker) {
-            return format!("{}{}{}", &html[..at], boot, &html[at..]);
+            let end = at + marker.len();
+            return format!("{}{}{}", &html[..end], boot, &html[end..]);
         }
     }
     if let Some(at) = html.find("<html") {
@@ -1382,7 +1489,7 @@ fn compose_page(html: &str) -> String {
             .unwrap_or(html.len());
         return format!("{}{}{}", &html[..end], boot, &html[end..]);
     }
-    format!("{}{}", html, boot)
+    format!("{}{}", boot, html)
 }
 
 /// Percent-decode a URL path (and `+` as space, the form-encoding convention); invalid
@@ -1491,15 +1598,6 @@ fn read_manifest(dir: &Path) -> Option<VsixManifest> {
     Some(manifest)
 }
 
-/// Reject archive entries that escape the install directory.
-fn safe_join(base: &Path, rel: &str) -> Result<PathBuf, String> {
-    let rel_path = Path::new(rel);
-    if rel_path.is_absolute() || rel_path.components().any(|c| c.as_os_str() == "..") {
-        return Err(format!("unsafe entry in VSIX: {rel}"));
-    }
-    Ok(base.join(rel_path))
-}
-
 /// Numeric x.y.z comparison; anything unparseable sorts below everything else.
 fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     parse_version(a).cmp(&parse_version(b))
@@ -1511,57 +1609,13 @@ fn parse_version(v: &str) -> (u64, u64, u64) {
     (next(), next(), next())
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn version_comparison() {
-        assert_eq!(
-            compare_versions("1.2.0", "1.10.0"),
-            std::cmp::Ordering::Less
-        );
-        assert_eq!(
-            compare_versions("2.0.0", "1.99.99"),
-            std::cmp::Ordering::Greater
-        );
-        assert_eq!(
-            compare_versions("1.0.0", "1.0.0"),
-            std::cmp::Ordering::Equal
-        );
-        assert_eq!(
-            compare_versions("1.0.0-beta", "1.0.0"),
-            std::cmp::Ordering::Equal
-        );
-        assert_eq!(compare_versions("junk", "0.0.1"), std::cmp::Ordering::Less);
+/// Reject archive entries that escape the install directory.
+fn safe_join(base: &Path, rel: &str) -> Result<PathBuf, String> {
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute() || rel_path.components().any(|c| c.as_os_str() == "..") {
+        return Err(format!("unsafe entry in VSIX: {rel}"));
     }
-
-    #[test]
-    fn traversal_entries_are_rejected() {
-        assert!(safe_join(Path::new("/base"), "../escape").is_err());
-        assert!(safe_join(Path::new("/base"), "ok/file.js").is_ok());
-    }
-
-    /// The pure halves of the listing battery: a string repository field resolves to its URL,
-    /// and the README/CHANGELOG probe accepts the spellings VS Code's extension editor does.
-    #[test]
-    fn repository_fields_and_doc_names_resolve() {
-        assert_eq!(
-            RepositoryField::Url("https://x".into()).url(),
-            Some("https://x")
-        );
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("Readme.MD"), b"x").unwrap();
-        assert_eq!(
-            find_doc(tmp.path(), "README").as_deref(),
-            Some("Readme.MD")
-        );
-        assert_eq!(find_doc(tmp.path(), "CHANGELOG"), None);
-    }
+    Ok(base.join(rel_path))
 }
 
 #[cfg(test)]
@@ -1572,7 +1626,14 @@ mod ggx_tests {
     /// A `.ggx` with the header, a package.json and a web page (an extra data file,
     /// optionally, to prove every entry lands). Visible to `vsix_tests`, which builds a
     /// same-id `.ggx`/`.vsix` pair to prove the two formats share one install slot.
-    pub(super) fn make_ggx(dir: &Path, name: &str, publisher: &str, version: &str, with_data: bool, format: &str) -> PathBuf {
+    pub(super) fn make_ggx(
+        dir: &Path,
+        name: &str,
+        publisher: &str,
+        version: &str,
+        with_data: bool,
+        format: &str,
+    ) -> PathBuf {
         let ggx = dir.join(format!("{publisher}.{name}-{version}.ggx"));
         let file = std::fs::File::create(&ggx).unwrap();
         let mut zip = zip::ZipWriter::new(file);
@@ -1596,6 +1657,41 @@ mod ggx_tests {
     }
 
     #[test]
+    fn a_same_version_install_from_an_older_bundled_build_is_refreshed_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        let old_build = tmp.path().join("old");
+        std::fs::create_dir_all(&old_build).unwrap();
+        // The install came from an older build of 1.0.0 (no data file, no stamp recorded).
+        let stale = make_ggx(&old_build, "demo", "acme", "1.0.0", false, GGX_FORMAT);
+        install_from_ggx_into(&exts, &stale, false).unwrap();
+        let target = exts.join("acme.demo-1.0.0");
+        assert!(!target.join("data/payload.bin").exists());
+
+        // The app now ships a rebuilt 1.0.0: the boot pass replaces the stale files...
+        let rebuilt = make_ggx(tmp.path(), "demo", "acme", "1.0.0", true, GGX_FORMAT);
+        let (ggx, manifest) = read_ggx_manifest(&rebuilt).unwrap();
+        let packages = [BundledPackage {
+            id: ggx.id.clone(),
+            path: rebuilt.clone(),
+            manifest,
+            ggx,
+        }];
+        let outcomes = refresh_bundled_installs_in(&exts, &packages);
+        assert_eq!(outcomes.len(), 1);
+        assert!(outcomes[0].is_ok(), "{outcomes:?}");
+        assert!(target.join("data/payload.bin").exists());
+        // ...and records the build, so the next boot leaves it alone.
+        assert!(refresh_bundled_installs_in(&exts, &packages).is_empty());
+
+        // A package that is not installed stays not installed (the refresh installs nothing).
+        std::fs::remove_dir_all(&target).unwrap();
+        assert!(refresh_bundled_installs_in(&exts, &packages).is_empty());
+        assert!(!target.exists());
+    }
+
+    #[test]
     fn the_listing_resolves_nls_placeholders_through_the_packages_own_nls_file() {
         let tmp = tempfile::tempdir().unwrap();
         let exts = tmp.path().join("extensions");
@@ -1609,13 +1705,17 @@ mod ggx_tests {
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
         zip.start_file("manifest.json", options).unwrap();
-        zip.write_all(br#"{"format":"ggx/2","id":"acme.demo","version":"1.0.0","pages":{}}"#).unwrap();
+        zip.write_all(br#"{"format":"ggx/2","id":"acme.demo","version":"1.0.0","pages":{}}"#)
+            .unwrap();
         zip.start_file("package.json", options).unwrap();
         zip.write_all(
             br#"{"name":"demo","publisher":"acme","version":"1.0.0","displayName":"%displayName%","description":"%extension.description%"}"#,
         ).unwrap();
         zip.start_file("package.nls.json", options).unwrap();
-        zip.write_all(br#"{"displayName":"Demo (localized)","extension.description":"A localized demo."}"#).unwrap();
+        zip.write_all(
+            br#"{"displayName":"Demo (localized)","extension.description":"A localized demo."}"#,
+        )
+        .unwrap();
         zip.start_file("README.md", options).unwrap();
         zip.write_all(b"# Demo\n\nThe readme.").unwrap();
         zip.finish().unwrap();
@@ -1624,7 +1724,10 @@ mod ggx_tests {
         let listed = list_installed(&exts).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(
-            (listed[0].display_name.as_deref(), listed[0].description.as_str()),
+            (
+                listed[0].display_name.as_deref(),
+                listed[0].description.as_str()
+            ),
             (Some("Demo (localized)"), "A localized demo.")
         );
         // README.md ships in the package: the detail page's source for it is named.
@@ -1653,48 +1756,9 @@ mod ggx_tests {
         assert!(list_installed(&exts).unwrap().is_empty());
     }
 
-    #[test]
-    fn builtin_installs_refuse_uninstall() {
-        let tmp = tempfile::tempdir().unwrap();
-        let exts = tmp.path().join("extensions");
-        std::fs::create_dir_all(&exts).unwrap();
-        let ggx = make_ggx(tmp.path(), "graph", "neophack", "1.0.23", false, GGX_FORMAT);
-        let info = install_from_ggx_into(&exts, &ggx, true).unwrap();
-        assert!(info.builtin);
-
-        let err = uninstall(&exts, "neophack.graph").unwrap_err();
-        assert!(err.contains("cannot be uninstalled"), "{err}");
-    }
-
     /// The uninstall marker is the boot pass's auto-install handbrake: a completed uninstall
     /// writes it (and nothing else sees it — the listing stays empty), a refused builtin
     /// uninstall does not, and the next explicit install clears it.
-    #[test]
-    fn uninstall_marker_gates_the_boot_auto_install() {
-        let tmp = tempfile::tempdir().unwrap();
-        let exts = tmp.path().join("extensions");
-        std::fs::create_dir_all(&exts).unwrap();
-        let ggx = make_ggx(tmp.path(), "demo", "acme", "1.0.0", false, GGX_FORMAT);
-        install_from_ggx_into(&exts, &ggx, false).unwrap();
-        assert!(!deliberately_uninstalled(&exts, "acme.demo"));
-
-        uninstall(&exts, "acme.demo").unwrap();
-        assert!(deliberately_uninstalled(&exts, "acme.demo"));
-        // The marker is a plain file beside the version directories, never an install itself.
-        assert!(list_installed(&exts).unwrap().is_empty());
-        assert!(find_installed(&exts, "acme.demo").unwrap().is_empty());
-
-        // The way back: installing again revives the boot pass's upgrade auto-install.
-        install_from_ggx_into(&exts, &ggx, false).unwrap();
-        assert!(!deliberately_uninstalled(&exts, "acme.demo"));
-
-        // A refused (built-in) uninstall leaves no marker behind.
-        let builtin = make_ggx(tmp.path(), "graph", "neophack", "1.0.23", false, GGX_FORMAT);
-        install_from_ggx_into(&exts, &builtin, true).unwrap();
-        assert!(uninstall(&exts, "neophack.graph").is_err());
-        assert!(!deliberately_uninstalled(&exts, "neophack.graph"));
-    }
-
     #[test]
     fn rich_manifest_fields_and_docs_are_listed() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1846,7 +1910,8 @@ mod ggx_tests {
         zip.write_all(br#"{"name":"demo","publisher":"acme","version":"1.0.0"}"#)
             .unwrap();
         zip.start_file("web/view.html", options).unwrap();
-        zip.write_all(b"<html><head></head><body></body></html>").unwrap();
+        zip.write_all(b"<html><head></head><body></body></html>")
+            .unwrap();
         zip.start_file("bin/main.exe", options).unwrap();
         zip.write_all(b"MZ").unwrap();
         zip.finish().unwrap();
@@ -1886,19 +1951,30 @@ mod ggx_tests {
         zip.start_file("package.json", options).unwrap();
         zip.write_all(br#"{"name":"engine","publisher":"acme","version":"1.0.0"}"#)
             .unwrap();
-        zip.start_file("backend/win32-x64/main.exe", options).unwrap();
+        zip.start_file("backend/win32-x64/main.exe", options)
+            .unwrap();
         zip.write_all(b"MZ").unwrap();
-        zip.start_file("backend/darwin-arm64/main", options).unwrap();
+        zip.start_file("backend/darwin-arm64/main", options)
+            .unwrap();
         zip.write_all(b"\x7fELF").unwrap();
         zip.finish().unwrap();
 
         let info = install_from_ggx_into(&exts, &ggx, false).unwrap();
         let backend = info.ggx.as_ref().unwrap().backend.as_ref().unwrap();
         assert_eq!(backend.protocol_or_default(), "ggx-rpc/1");
-        assert_eq!(backend.command_for("win32-x64"), "backend/win32-x64/main.exe");
-        assert_eq!(backend.command_for("darwin-arm64"), "backend/darwin-arm64/main");
+        assert_eq!(
+            backend.command_for("win32-x64"),
+            "backend/win32-x64/main.exe"
+        );
+        assert_eq!(
+            backend.command_for("darwin-arm64"),
+            "backend/darwin-arm64/main"
+        );
         // A platform not in the map falls back to `command`.
-        assert_eq!(backend.command_for("linux-x64"), "backend/win32-x64/main.exe");
+        assert_eq!(
+            backend.command_for("linux-x64"),
+            "backend/win32-x64/main.exe"
+        );
 
         #[cfg(unix)]
         {
@@ -1906,7 +1982,11 @@ mod ggx_tests {
             let resolved = backend.command_for(&host_platform_key()).to_owned();
             let bin = installed_dir(&exts, "acme.engine").unwrap().join(&resolved);
             let mode = std::fs::metadata(&bin).unwrap().permissions().mode();
-            assert_eq!(mode & 0o111, 0o111, "the resolved binary should be executable");
+            assert_eq!(
+                mode & 0o111,
+                0o111,
+                "the resolved binary should be executable"
+            );
         }
     }
 
@@ -1919,7 +1999,10 @@ mod ggx_tests {
             protocol: None,
             binaries: None,
         };
-        assert_eq!(backend.protocol_or_default(), crate::ggx_protocol::PROTOCOL_VERSION);
+        assert_eq!(
+            backend.protocol_or_default(),
+            crate::ggx_protocol::PROTOCOL_VERSION
+        );
     }
 
     #[test]
@@ -1961,7 +2044,11 @@ mod ggx_asset_tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("acme.demo-1.0.0").join("web");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("view.html"), b"<html><head><title>t</title></head><body></body></html>").unwrap();
+        std::fs::write(
+            dir.join("view.html"),
+            b"<html><head><title>t</title></head><body></body></html>",
+        )
+        .unwrap();
         std::fs::write(dir.join("app.js"), b"console.log(1);").unwrap();
         tmp
     }
@@ -1973,10 +2060,10 @@ mod ggx_asset_tests {
             serve_ggx_asset_from(tmp.path(), &request_for("/acme.demo-1.0.0/web/view.html"));
         assert_eq!(response.status(), tauri::http::StatusCode::OK);
         let body = String::from_utf8(response.body().to_vec()).unwrap();
-        // The bootstrap lands inside <head> (after the title, before the page's own body);
-        // the document itself arrives intact.
+        // The bootstrap is the head's FIRST script: a page's own scripts call acquireGgsApi()
+        // the moment they parse, so it must precede every one of them.
         assert!(body.contains("acquireGgsApi"));
-        assert!(body.find("acquireGgsApi").unwrap() < body.find("</head>").unwrap());
+        assert!(body.find("acquireGgsApi").unwrap() < body.find("<title>").unwrap());
         assert!(body.contains("<title>t</title>"));
         assert_eq!(
             response.headers().get("content-type").unwrap(),
@@ -2033,257 +2120,6 @@ mod ggx_asset_tests {
 }
 
 #[cfg(test)]
-mod integrated_tests {
-    use super::*;
-    use std::io::Write;
-
-    #[test]
-    fn the_integrated_extension_is_listed_as_a_builtin_and_cannot_be_installed_over() {
-        // Both bundled entries stand in from their embedded manifests: the integrated
-        // git-graph-rs first (built-in — its engine is in-process), the sample second (a
-        // plain offer, no built-in flag).
-        let list = with_builtin(Vec::new());
-        assert_eq!(list.len(), 2);
-        let builtin = &list[0];
-        assert_eq!(
-            (
-                builtin.id.as_str(),
-                builtin.builtin,
-                builtin.format.as_str()
-            ),
-            (GRAPH_PACKAGE_ID, true, "builtin")
-        );
-        let embedded: serde_json::Value = serde_json::from_str(GRAPH_PACKAGE_JSON).unwrap();
-        assert_eq!(builtin.version, embedded["version"].as_str().unwrap());
-        assert!(!builtin.name.is_empty() && !builtin.publisher.is_empty());
-        let sample = &list[1];
-        assert_eq!(
-            (sample.id.as_str(), sample.builtin, sample.format.as_str()),
-            (DEMO_PACKAGE_ID, false, "builtin")
-        );
-        let demo_embedded: serde_json::Value = serde_json::from_str(DEMO_PACKAGE_JSON).unwrap();
-        assert_eq!(sample.version, demo_embedded["version"].as_str().unwrap());
-
-        // An installed copy of the integrated extension (left by an earlier app version) is
-        // hidden behind the built-in entry.
-        let tmp = tempfile::tempdir().unwrap();
-        let exts = tmp.path().join("extensions");
-        std::fs::create_dir_all(exts.join("someone.else-1.0.0")).unwrap();
-        let stray = exts.join(format!("{GRAPH_PACKAGE_ID}-9.9.9"));
-        std::fs::create_dir_all(&stray).unwrap();
-        let mut other_manifest =
-            std::fs::File::create(exts.join("someone.else-1.0.0").join("package.json")).unwrap();
-        write!(
-            other_manifest,
-            r#"{{"name":"else","publisher":"someone","version":"1.0.0"}}"#
-        )
-        .unwrap();
-        let mut stray_manifest = std::fs::File::create(stray.join("package.json")).unwrap();
-        write!(
-            stray_manifest,
-            r#"{{"name":"git-graph-rs","publisher":"neophack","version":"9.9.9"}}"#
-        )
-        .unwrap();
-        let list = with_builtin(list_installed(&exts).unwrap());
-        assert_eq!(list.len(), 3);
-        assert_eq!(list[0].id, GRAPH_PACKAGE_ID);
-        assert_eq!(list[1].id, DEMO_PACKAGE_ID);
-        assert_eq!(list[2].id, "someone.else");
-    }
-
-    #[test]
-    fn the_bundled_sample_lists_until_installed_then_becomes_an_ordinary_package() {
-        // The sample is not integrated: an installed `.ggx` of its id simply lists (moved up
-        // beside the bundled entries), uninstalling it restores the embedded offer, and its
-        // install carries no built-in flag — it goes away like any user package.
-        let tmp = tempfile::tempdir().unwrap();
-        let exts = tmp.path().join("extensions");
-        std::fs::create_dir_all(&exts).unwrap();
-
-        let package = demo_ggx(tmp.path(), "0.2.0");
-        let info = install_from_ggx_into(&exts, &package, false).unwrap();
-        assert_eq!(info.id, DEMO_PACKAGE_ID);
-        assert!(!info.builtin);
-        let list = with_builtin(list_installed(&exts).unwrap());
-        assert_eq!(list.len(), 2);
-        assert_eq!(
-            (list[1].id.as_str(), list[1].format.as_str(), list[1].version.as_str()),
-            (DEMO_PACKAGE_ID, "ggx", "0.2.0")
-        );
-
-        uninstall(&exts, DEMO_PACKAGE_ID).unwrap();
-        let offer = &with_builtin(list_installed(&exts).unwrap())[1];
-        assert_eq!((offer.id.as_str(), offer.format.as_str()), (DEMO_PACKAGE_ID, "builtin"));
-        assert!(!offer.builtin);
-        // The sample installs and uninstalls freely — nothing of it is built into the app.
-        assert!(uninstall(&exts, GRAPH_PACKAGE_ID).unwrap_err().contains("not installed"));
-    }
-
-    /// A `.ggx` of the sample's id at `version`, mirroring what its own packer produces.
-    fn demo_ggx(dir: &Path, version: &str) -> PathBuf {
-        let ggx = dir.join(format!("ggs-ext-demo-{version}.ggx"));
-        let file = std::fs::File::create(&ggx).unwrap();
-        let mut zip = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default();
-        zip.start_file("manifest.json", options).unwrap();
-        zip.write_all(
-            format!(
-                r#"{{"format":"ggx/2","id":"{DEMO_PACKAGE_ID}","version":"{version}","pages":{{"main":{{"page":"web/view.html"}}}},"backend":{{"kind":"process","command":"bin/main.exe"}}}}"#
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-        zip.start_file("package.json", options).unwrap();
-        zip.write_all(
-            format!(
-                r#"{{"name":"ext-demo","publisher":"ggs","version":"{version}","description":"the sample"}}"#
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-        zip.start_file("web/view.html", options).unwrap();
-        zip.write_all(b"<html></html>").unwrap();
-        zip.finish().unwrap();
-        ggx
-    }
-
-    #[test]
-    fn the_dev_run_fallback_finds_each_bundled_stem_separately() {
-        // `bundled_ggx_path`'s dev-run half: the newest versioned copy of the right stem under
-        // target/studio/bundled — one stem's package never answers for the other's.
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("bundled");
-        std::fs::create_dir_all(&dir).unwrap();
-        for name in [
-            "git-graph-rs-1.0.0.ggx",
-            "git-graph-rs-1.0.2.ggx",
-            "ggs-ext-demo-0.2.0.ggx",
-        ] {
-            std::fs::write(dir.join(name), b"zip").unwrap();
-        }
-        assert_eq!(
-            newest_ggx_under(&dir, "git-graph-rs").map(|(v, p)| (v, p.file_name().unwrap().to_string_lossy().into_owned())),
-            Some(("1.0.2".to_owned(), "git-graph-rs-1.0.2.ggx".to_owned()))
-        );
-        assert_eq!(
-            newest_ggx_under(&dir, "ggs-ext-demo").map(|(v, _)| v),
-            Some("0.2.0".to_owned())
-        );
-        assert!(newest_ggx_under(&dir, "unknown-plugin").is_none());
-    }
-
-    #[test]
-    fn a_newer_ggx_of_the_integrated_extension_installs_as_an_upgrade() {
-        let tmp = tempfile::tempdir().unwrap();
-        let exts = tmp.path().join("extensions");
-        std::fs::create_dir_all(&exts).unwrap();
-        let ggx = tmp.path().join("integrated.ggx");
-        let file = std::fs::File::create(&ggx).unwrap();
-        let mut zip = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default();
-        zip.start_file("manifest.json", options).unwrap();
-        zip.write_all(
-            format!(r#"{{"format":"ggx/2","id":"{GRAPH_PACKAGE_ID}","version":"99.0.0"}}"#)
-                .as_bytes(),
-        )
-        .unwrap();
-        zip.start_file("package.json", options).unwrap();
-        zip.write_all(br#"{"name":"git-graph-rs","publisher":"neophack","version":"99.0.0","main":"out/extension.js"}"#).unwrap();
-        zip.finish().unwrap();
-
-        // The integrated id installs like any other now — the listing follows the package.
-        let info = install_from_ggx_into(&exts, &ggx, false).unwrap();
-        assert_eq!(info.id, GRAPH_PACKAGE_ID);
-        assert_eq!(info.version, "99.0.0");
-        assert!(!info.builtin);
-        let list = with_builtin(list_installed(&exts).unwrap());
-        assert_eq!(list[0].id, GRAPH_PACKAGE_ID);
-        assert_eq!(list[0].format, "ggx");
-        assert_eq!(list[0].version, "99.0.0");
-        // The same package again is the usual same-version error, not a refusal.
-        assert!(install_from_ggx_into(&exts, &ggx, false)
-            .unwrap_err()
-            .contains("already installed"));
-    }
-
-    /// A `.ggx` of the integrated extension's id at `version`, with a web page.
-    fn integrated_ggx(dir: &Path, version: &str) -> PathBuf {
-        let ggx = dir.join(format!("git-graph-rs-{version}.ggx"));
-        let file = std::fs::File::create(&ggx).unwrap();
-        let mut zip = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default();
-        zip.start_file("manifest.json", options).unwrap();
-        zip.write_all(
-            format!(
-                r#"{{"format":"ggx/2","id":"{GRAPH_PACKAGE_ID}","version":"{version}","pages":{{"view":{{"page":"web/view.html"}}}}}}"#
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-        zip.start_file("package.json", options).unwrap();
-        zip.write_all(
-            format!(
-                r#"{{"name":"git-graph-rs","publisher":"neophack","version":"{version}","description":"the integrated one"}}"#
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-        zip.start_file("web/view.html", options).unwrap();
-        zip.write_all(b"<html></html>").unwrap();
-        zip.finish().unwrap();
-        ggx
-    }
-
-    #[test]
-    fn the_bundled_ggx_installs_as_a_standard_package() {
-        // ext_install_bundled is a thin wrapper over extensions_dir + bundled_ggx_path + this
-        // core (the first two need an app handle); the model it installs under is what matters:
-        // the integrated id becomes a normal, uninstallable package, and with it gone the
-        // embedded built-in entry stands in again — nothing is installed by default.
-        let tmp = tempfile::tempdir().unwrap();
-        let exts = tmp.path().join("extensions");
-        std::fs::create_dir_all(&exts).unwrap();
-        let package = integrated_ggx(tmp.path(), "1.0.25");
-
-        let info = install_from_ggx_into(&exts, &package, false).unwrap();
-        assert_eq!(info.id, GRAPH_PACKAGE_ID);
-        assert!(!info.builtin);
-        let list = with_builtin(list_installed(&exts).unwrap());
-        // The graph install plus the sample's standing offer.
-        assert_eq!(list.len(), 2);
-        assert_eq!(
-            (list[0].id.as_str(), list[0].format.as_str(), list[0].version.as_str()),
-            (GRAPH_PACKAGE_ID, "ggx", "1.0.25")
-        );
-        assert!(!list[0].builtin); // a standard install: uninstall is allowed
-        uninstall(&exts, GRAPH_PACKAGE_ID).unwrap();
-        // The fallback listing: embedded manifest, its own version, no install directory.
-        let fallback = &with_builtin(list_installed(&exts).unwrap())[0];
-        assert_eq!((fallback.id.as_str(), fallback.format.as_str()), (GRAPH_PACKAGE_ID, "builtin"));
-        let embedded: serde_json::Value = serde_json::from_str(GRAPH_PACKAGE_JSON).unwrap();
-        assert_eq!(fallback.version, embedded["version"].as_str().unwrap());
-        assert!(uninstall(&exts, GRAPH_PACKAGE_ID).unwrap_err().contains("not installed"));
-    }
-
-    #[test]
-    fn a_users_newer_ggx_upgrades_the_installed_integrated_copy() {
-        let tmp = tempfile::tempdir().unwrap();
-        let exts = tmp.path().join("extensions");
-        std::fs::create_dir_all(&exts).unwrap();
-        assert!(install_from_ggx_into(&exts, &integrated_ggx(tmp.path(), "1.0.25"), false).is_ok());
-
-        // A newer package of the same id upgrades it, and the listing follows the version.
-        let upgrade = integrated_ggx(tmp.path(), "1.0.26");
-        let info = install_from_ggx_into(&exts, &upgrade, false).unwrap();
-        assert_eq!(info.version, "1.0.26");
-        let list = with_builtin(list_installed(&exts).unwrap());
-        assert_eq!(list[0].version, "1.0.26");
-        uninstall(&exts, GRAPH_PACKAGE_ID).unwrap();
-        assert!(list_installed(&exts).unwrap().is_empty());
-    }
-}
-
-#[cfg(test)]
 mod vsix_tests {
     use super::*;
     use std::io::Write;
@@ -2327,7 +2163,10 @@ mod vsix_tests {
 
         let list = list_installed(&exts).unwrap();
         assert_eq!(list.len(), 1);
-        assert_eq!((list[0].id.as_str(), list[0].format.as_str()), ("acme.demo", "vsix"));
+        assert_eq!(
+            (list[0].id.as_str(), list[0].format.as_str()),
+            ("acme.demo", "vsix")
+        );
 
         uninstall(&exts, "acme.demo").unwrap();
         assert!(list_installed(&exts).unwrap().is_empty());
@@ -2338,14 +2177,31 @@ mod vsix_tests {
         let tmp = tempfile::tempdir().unwrap();
         let exts = tmp.path().join("extensions");
         std::fs::create_dir_all(&exts).unwrap();
-        assert!(install_from_vsix_into(&exts, &make_vsix(tmp.path(), "demo", "acme", "1.0.0"), false).is_ok());
+        assert!(install_from_vsix_into(
+            &exts,
+            &make_vsix(tmp.path(), "demo", "acme", "1.0.0"),
+            false
+        )
+        .is_ok());
 
-        let same = install_from_vsix_into(&exts, &make_vsix(tmp.path(), "demo", "acme", "1.0.0"), false);
+        let same = install_from_vsix_into(
+            &exts,
+            &make_vsix(tmp.path(), "demo", "acme", "1.0.0"),
+            false,
+        );
         assert!(same.unwrap_err().contains("already installed"));
-        let older = install_from_vsix_into(&exts, &make_vsix(tmp.path(), "demo", "acme", "0.9.0"), false);
+        let older = install_from_vsix_into(
+            &exts,
+            &make_vsix(tmp.path(), "demo", "acme", "0.9.0"),
+            false,
+        );
         assert!(older.unwrap_err().contains("is older"));
 
-        let newer = install_from_vsix_into(&exts, &make_vsix(tmp.path(), "demo", "acme", "1.1.0"), false);
+        let newer = install_from_vsix_into(
+            &exts,
+            &make_vsix(tmp.path(), "demo", "acme", "1.1.0"),
+            false,
+        );
         assert_eq!(newer.unwrap().version, "1.1.0");
         // The old directory is gone: one install per id.
         assert!(list_installed(&exts).unwrap().len() == 1);
@@ -2356,12 +2212,21 @@ mod vsix_tests {
         let tmp = tempfile::tempdir().unwrap();
         let exts = tmp.path().join("extensions");
         std::fs::create_dir_all(&exts).unwrap();
-        let ggx = super::ggx_tests::make_ggx(tmp.path(), "demo", "acme", "1.0.0", false, GGX_FORMAT);
+        let ggx =
+            super::ggx_tests::make_ggx(tmp.path(), "demo", "acme", "1.0.0", false, GGX_FORMAT);
         assert!(install_from_ggx_into(&exts, &ggx, false).is_ok());
 
         // The newer VSIX of the same id wins; the format follows the newer package.
-        let info = install_from_vsix_into(&exts, &make_vsix(tmp.path(), "demo", "acme", "1.1.0"), false).unwrap();
-        assert_eq!((info.version.as_str(), info.format.as_str()), ("1.1.0", "vsix"));
+        let info = install_from_vsix_into(
+            &exts,
+            &make_vsix(tmp.path(), "demo", "acme", "1.1.0"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            (info.version.as_str(), info.format.as_str()),
+            ("1.1.0", "vsix")
+        );
         let list = list_installed(&exts).unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].format, "vsix");
@@ -2372,17 +2237,16 @@ mod vsix_tests {
         let tmp = tempfile::tempdir().unwrap();
         let plain = tmp.path().join("plain.zip");
         std::fs::write(&plain, b"not a zip").unwrap();
-        assert!(read_vsix_manifest(&plain).unwrap_err().contains("read VSIX"));
+        assert!(read_vsix_manifest(&plain)
+            .unwrap_err()
+            .contains("read VSIX"));
 
         // A zip without extension/package.json is not a VSIX.
         let noext = tmp.path().join("noext.vsix");
         let file = std::fs::File::create(&noext).unwrap();
         let mut zip = zip::ZipWriter::new(file);
-        zip.start_file(
-            "package.json",
-            zip::write::SimpleFileOptions::default(),
-        )
-        .unwrap();
+        zip.start_file("package.json", zip::write::SimpleFileOptions::default())
+            .unwrap();
         zip.write_all(b"{}").unwrap();
         zip.finish().unwrap();
         assert!(read_vsix_manifest(&noext)
@@ -2404,17 +2268,6 @@ mod vsix_tests {
         assert!(read_vsix_manifest(&nobundle)
             .unwrap_err()
             .contains("no `main` entry point"));
-    }
-
-    #[test]
-    fn the_integrated_id_is_refused() {
-        let tmp = tempfile::tempdir().unwrap();
-        let exts = tmp.path().join("extensions");
-        std::fs::create_dir_all(&exts).unwrap();
-        let vsix = make_vsix(tmp.path(), "git-graph-rs", "neophack", "99.0.0");
-        let err = install_from_vsix_into(&exts, &vsix, false).unwrap_err();
-        assert!(err.contains("built into Git Graph Studio"));
-        assert!(list_installed(&exts).unwrap().is_empty());
     }
 }
 
@@ -2455,8 +2308,15 @@ mod ext_fs_tests {
             base64::engine::general_purpose::STANDARD.encode(bytes)
         };
 
-        ext_fs_core("write", &roots, "notes/a.txt", None, Some(&encode(b"hello")), encode)
-            .unwrap();
+        ext_fs_core(
+            "write",
+            &roots,
+            "notes/a.txt",
+            None,
+            Some(&encode(b"hello")),
+            encode,
+        )
+        .unwrap();
         let read = ext_fs_core("read", &roots, "notes/a.txt", None, None, encode).unwrap();
         assert_eq!(read["data"], encode(b"hello"));
 
@@ -2474,10 +2334,18 @@ mod ext_fs_tests {
         assert_eq!(stat["type"], 1);
         assert_eq!(stat["size"], 5);
 
-        ext_fs_core("rename", &roots, "notes/a.txt", Some("notes/b.txt"), None, encode)
-            .unwrap();
-        assert!(ext_fs_core("exists", &roots, "notes/a.txt", None, None, encode).unwrap()[0]
-            .is_null());
+        ext_fs_core(
+            "rename",
+            &roots,
+            "notes/a.txt",
+            Some("notes/b.txt"),
+            None,
+            encode,
+        )
+        .unwrap();
+        assert!(
+            ext_fs_core("exists", &roots, "notes/a.txt", None, None, encode).unwrap()[0].is_null()
+        );
         let found = ext_fs_core("exists", &roots, "notes/b.txt", None, None, encode).unwrap();
         assert_eq!(found.as_array().unwrap().len(), 1);
 

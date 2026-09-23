@@ -1,9 +1,8 @@
 // Extension manifest contributions: the `contributes` section of each installed extension's
 // package.json - commands (with their localized titles from package.nls.json), menu placements
 // and keybindings - parsed into the workbench. This is static contribution data: it registers
-// commands in the palette and appends menu entries to Studio's context menus even when the
-// extension's code is not running in the frame host (the built-in git-graph-rs, whose view the
-// workbench hosts natively).
+// commands in the palette and appends menu entries to Studio's context menus, evaluated against
+// the extension's declared settings (a `when` clause reading `config.<id>`).
 //
 // `when` clauses get a minimal treatment: `evaluateWhen` below understands `&&`-joined clauses
 // of the shapes VS Code's own manifests actually use for the locations this module models -
@@ -13,14 +12,14 @@
 // stops narrowing it. `config.<extension-setting-id>` reads the extension's own declared setting
 // (its current value, or its declared default); anything else is looked up through
 // `registerContextProvider`, for the handful of context keys a natively-hosted extension's own
-// code would otherwise have set itself (see workbench.ts's `git-graph-rs:interfaceZhCn`).
+// code would otherwise have set itself (any `extension:key` identifier registered here).
 
 import { extSettings } from './state';
 import { commands } from './commands';
 import type { MenuEntry, MenuItem } from './ui';
 
 /** The menu locations Studio surfaces. `git.pullpush` is VS Code's SCM sync menu — where
- * git-graph-rs places its Gerrit `refs/for/` push — rendered inside the Source Control "..."
+ * a Gerrit `refs/for/` push goes — rendered inside the Source Control "..."
  * menu's Pull, Push submenu. Others (commandPalette, …) only hide or relocate entries in
  * VS Code itself, so they are ignored. */
 export const SUPPORTED_MENU_LOCATIONS = ['explorer/context', 'editor/context', 'editor/title/context', 'scm/title', 'scm/resourceState/context', 'git.pullpush'] as const;
@@ -30,11 +29,17 @@ interface DeclaredCommand {
 	id: string;
 	title: string;
 	category?: string;
+	/** The manifest's own icon paths for this command (VS Code renders them in scm/title's
+	 *  navigation group); resolved against the package by whoever renders. */
+	icon?: { light?: string; dark?: string };
 }
 
 interface MenuPlacement {
 	command: string;
-	when?: string;
+	/** VS Code's `when` clause. A bare JSON `false` is the "never" spelling (VS Code's own
+	 *  manifests use it to keep a command out of the palette); it normalizes through
+	 *  `whenText` before evaluation. */
+	when?: string | boolean;
 	/** VS Code renders a `scm/title` item in the `navigation` group as a title-bar icon, and
 	 *  everything else inside "..."; other locations declare a group only to order entries. */
 	group?: string;
@@ -43,6 +48,9 @@ interface MenuPlacement {
 interface ExtensionContributions {
 	commands: Map<string, DeclaredCommand>;
 	menus: Partial<Record<MenuLocation, MenuPlacement[]>>;
+	/** Runs one of this extension's commands with arguments — what a menu entry calls when
+	 *  its location hands the command its context (the clicked file, the selection). */
+	dispatch: (command: string, args?: unknown[]) => void;
 }
 
 const byExtension = new Map<string, ExtensionContributions>();
@@ -60,7 +68,7 @@ const contextProviders = new Map<string, () => boolean>();
 /** Supply a `when`-clause context key `evaluateWhen` cannot otherwise resolve, computed on
  *  demand (not cached: the caller reads whatever is current every time). Call for every context
  *  key a natively-hosted extension's own (non-running) code would have set via VS Code's
- *  `setContext` - e.g. `git-graph-rs:interfaceZhCn`. */
+ *  `setContext` - e.g. `git-graph-rs:interfaceZhCn`, set by an extension's own code. */
 export function registerContextProvider(key: string, provider: () => boolean): void {
 	contextProviders.set(key, provider);
 }
@@ -79,6 +87,12 @@ function resolveIdentifier(extId: string, name: string): unknown {
 	if (name.startsWith('config.')) return configValue(extId, name.slice('config.'.length));
 	if (contextProviders.has(name)) return contextProviders.get(name)!();
 	return undefined; // not modelled: never narrows the item away (see module doc)
+}
+
+/** A manifest `when` in the string form `evaluateWhen` parses: the bare JSON `false` (and any
+ *  boolean spelling) becomes its text, so "never" and the clause forms share one path. */
+function whenText(when: string | boolean | undefined): string | undefined {
+	return when === undefined ? undefined : String(when);
 }
 
 /** Evaluate a `when` clause - see the module doc for exactly which shapes this understands. */
@@ -130,7 +144,7 @@ export function localize(text: string | undefined, nls: Record<string, string>):
 }
 
 export interface ManifestContributes {
-	commands?: { command: string; title?: string; category?: string }[];
+	commands?: { command: string; title?: string; category?: string; icon?: { light?: string; dark?: string } }[];
 	menus?: Record<string, MenuPlacement[] | undefined>;
 	keybindings?: { command: string; key: string; when?: string }[];
 	/** VS Code's `contributes.configuration`: the settings an extension declares (M3 3.9). */
@@ -334,7 +348,7 @@ export function applyExtensionSettings(extId: string, configuration: ManifestCon
  * extension's frame, or the workbench's native handling for the built-in); `canRun` gates
  * palette enablement the same way.
  */
-export function applyContributions(extId: string, contributes: ManifestContributes | undefined, nls: Record<string, string>, dispatch: (command: string) => void, canRun: (command: string) => boolean): void {
+export function applyContributions(extId: string, contributes: ManifestContributes | undefined, nls: Record<string, string>, dispatch: (command: string, args?: unknown[]) => void, canRun: (command: string) => boolean): void {
 	// The declared settings join the registry the Settings dialog generates its rows from.
 	applyExtensionSettings(extId, contributes?.configuration, nls);
 	// The declared sidebar surface (containers + tree views) joins the same registry the
@@ -344,21 +358,30 @@ export function applyContributions(extId: string, contributes: ManifestContribut
 	applyExtensionViews(extId, contributes, nls);
 	registerDeclaredLanguages(extId, contributes?.languages ?? []);
 	if (!contributes) return;
-	const registered: ExtensionContributions = { commands: new Map(), menus: {} };
+	const registered: ExtensionContributions = { commands: new Map(), menus: {}, dispatch };
 	byExtension.set(extId, registered);
 
 	const keybindings = new Map((contributes.keybindings ?? []).map((binding) => [binding.command, binding]));
+	// VS Code's `commandPalette` placements: an entry whose `when` currently fails hides the
+	// command from the palette only — its menu entries keep their own clauses. This is how a
+	// locale-twin pair (`x` / `x.zhCn`, each palette-excluded abroad) shows exactly one
+	// palette entry, and `when: false` marks an internal command.
+	const paletteWhens = new Map<string, string | boolean>(
+		(contributes?.menus?.commandPalette ?? []).map((entry) => [entry.command, entry.when ?? true] as [string, string | boolean])
+	);
 	for (const declared of contributes.commands ?? []) {
-		const entry: DeclaredCommand = { id: declared.command, title: localize(declared.title, nls) || declared.command, category: declared.category ? localize(declared.category, nls) : undefined };
+		const entry: DeclaredCommand = { id: declared.command, title: localize(declared.title, nls) || declared.command, category: declared.category ? localize(declared.category, nls) : undefined, icon: declared.icon };
 		registered.commands.set(entry.id, entry);
 		const key = keybindings.get(entry.id);
 		const keybinding = key && key.when !== 'false' ? normalizeKeybinding(key.key) : undefined;
+		const paletteWhen = whenText(paletteWhens.get(entry.id));
 		commands.register({
 			id: entry.id,
 			title: entry.title,
 			category: entry.category,
 			keybinding,
 			enabled: () => canRun(entry.id),
+			paletteHidden: paletteWhen === undefined ? undefined : () => !evaluateWhen(extId, paletteWhen),
 			run: () => dispatch(entry.id)
 		});
 	}
@@ -396,6 +419,10 @@ export interface ResolvedMenuEntry {
 	command: string;
 	label: string;
 	group: string;
+	/** The contributing extension, for resolving its package-relative icon. */
+	extId?: string;
+	/** The declared command's icon paths, when the manifest carries them. */
+	icon?: { light?: string; dark?: string };
 }
 
 /** Every location's declared entries that currently apply, in declaration order. */
@@ -403,33 +430,40 @@ export function resolvedMenuEntries(location: MenuLocation): ResolvedMenuEntry[]
 	const out: ResolvedMenuEntry[] = [];
 	for (const [extId, contribution] of byExtension) {
 		for (const entry of contribution.menus[location] ?? []) {
-			if (!evaluateWhen(extId, entry.when)) continue;
+			if (!evaluateWhen(extId, whenText(entry.when))) continue;
 			const declared = contribution.commands.get(entry.command) ?? declaredCommand(entry.command);
 			if (!declared) continue; // a menu entry whose command is not declared: nothing to show
-			out.push({ command: entry.command, label: declared.title, group: entry.group ?? '' });
+			out.push({ command: entry.command, label: declared.title, group: entry.group ?? '', extId, icon: declared.icon });
 		}
 	}
 	return out;
 }
 
 /** Contributed entries for one of Studio's context menus; empty when nothing applies. */
-export function menuItems(location: MenuLocation): MenuItem[] {
-	return resolvedMenuEntries(location).map((entry) => ({
-		label: entry.label,
-		disabled: !commands.isEnabled(entry.command),
-		run: () => void commands.execute(entry.command)
-	}));
+export function menuItems(location: MenuLocation, args?: unknown[]): MenuItem[] {
+	return resolvedMenuEntries(location).map((entry) => {
+		// VS Code hands a menu's command the context it was opened on (the Explorer: the
+		// clicked resource and the whole selection); a location that passes `args` does the
+		// same through the contributing extension's own dispatch.
+		const dispatch = entry.extId !== undefined && args !== undefined ? byExtension.get(entry.extId)?.dispatch : undefined;
+		return {
+			label: entry.label,
+			disabled: !commands.isEnabled(entry.command),
+			run: dispatch ? () => dispatch(entry.command, args) : () => void commands.execute(entry.command)
+		};
+	});
 }
 
-/** Menu entries for a location, prefixed with a separator when non-empty. */
-export function menuSection(location: MenuLocation): MenuEntry[] {
-	const items = menuItems(location);
+/** Menu entries for a location, prefixed with a separator when non-empty. `args` is the
+ *  location's context for the commands (see `menuItems`). */
+export function menuSection(location: MenuLocation, args?: unknown[]): MenuEntry[] {
+	const items = menuItems(location, args);
 	return items.length > 0 ? ['separator', ...items] : [];
 }
 
 export function hasMenuItems(location: MenuLocation): boolean {
 	for (const [extId, contribution] of byExtension) {
-		if ((contribution.menus[location] ?? []).some((item) => evaluateWhen(extId, item.when))) return true;
+		if ((contribution.menus[location] ?? []).some((item) => evaluateWhen(extId, whenText(item.when)))) return true;
 	}
 	return false;
 }

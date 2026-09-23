@@ -304,27 +304,20 @@ describe('editor group', () => {
 		expect(document.querySelectorAll('.cm-mergeView')).toHaveLength(1);
 	});
 
-	it('hosts the graph frame as a tab and retargets tabs on rename/delete', async () => {
-		files({ 'C:\\repo\\old.txt': 'x', 'C:\\repo\\dir\\y.txt': 'y' });
+	it('retargets tabs on rename/delete and cycles them', async () => {
+		files({ 'C:\\repo\\old.txt': 'x', 'C:\\repo\\dir\\y.txt': 'y', 'C:\\repo\\z.txt': 'z' });
 		const group = new EditorGroup(document.getElementById('editorGroup')!);
-		const frame = document.createElement('iframe');
-		group.graphElement = frame;
-		group.openGraph();
-		expect(group.isGraphOpen()).toBe(true);
-		expect(texts('.tab .label')).toEqual(['Git Graph']);
-		expect(document.querySelector('.tab img')!.getAttribute('src')).toBe('/icons/git-graph.svg');
-		expect(document.querySelector('.editor-pane iframe')).toBe(frame);
-		group.openGraph();
-		expect(texts('.tab .label')).toEqual(['Git Graph']);
-
 		await group.openFile('C:\\repo\\old.txt');
 		await group.openFile('C:\\repo\\dir\\y.txt');
+		await group.openFile('C:\\repo\\z.txt');
+		expect(texts('.tab .label')).toEqual(['old.txt', 'y.txt', 'z.txt']);
+
 		group.pathRenamed('C:\\repo\\old.txt', 'C:\\repo\\new.txt');
-		expect(texts('.tab .label')).toEqual(['Git Graph', 'new.txt', 'y.txt']);
+		expect(texts('.tab .label')).toEqual(['new.txt', 'y.txt', 'z.txt']);
 		await group.pathDeleted('C:\\repo\\dir');
-		expect(texts('.tab .label')).toEqual(['Git Graph', 'new.txt']);
+		expect(texts('.tab .label')).toEqual(['new.txt', 'z.txt']);
 		group.activateNext(1);
-		expect(document.querySelector('.tab.active .label')!.textContent).toBe('Git Graph');
+		expect(document.querySelector('.tab.active .label')!.textContent).toBe('new.txt');
 		expect(await group.closeAll()).toBe(true);
 		expect(texts('.tab .label')).toEqual([]);
 	});

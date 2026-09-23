@@ -1,14 +1,13 @@
 //! The headless performance probe behind `git-graph-studio --measure <folder>`: the phases of
 //! opening a folder, timed the way the workbench runs them, printed as one JSON object that
 //! `scripts/measure.mjs` folds into `metrics.json` next to the size figures. No window, no
-//! webview — just the engine's work in this process, so the numbers are comparable across
+//! webview — just the backend's work in this process, so the numbers are comparable across
 //! machines and CI.
 //!
 //! Phases (each in milliseconds):
 //! - `resolveRoot`: the repository root lookup `open_folder` does first;
 //! - `walkFiles`: the `.gitignore`-aware parallel walk Quick Open and the search use;
-//! - `scmStatus`: the engine's working-tree status (the SCM view's list);
-//! - `graphFirstPage`: the graph view's default first `loadCommits` page;
+//! - `scmStatus`: the working-tree status over the git CLI (the SCM view's list);
 //! - `symbolIndex`: the whole-workspace symbol extraction Go to Definition reads;
 //! - `searchTodo`: a literal, case-insensitive search for `TODO` across the tree.
 
@@ -16,16 +15,15 @@ use std::time::Instant;
 
 use serde_json::json;
 
-use crate::{cmd_fs, cmd_search};
+use crate::{cmd_fs, cmd_search, scm_ops};
 
 fn ms(started: Instant) -> f64 {
     (started.elapsed().as_secs_f64() * 1000.0 * 10.0).round() / 10.0
 }
 
-/// Run every probe against `folder` and return the JSON report. The git phases go through the
-/// installed `git-graph-backend` process exactly as the app reaches it; a folder that is not a
-/// git repository, or a machine with no backend installed, reports `null` for them the same
-/// way, while the walk, index and search (none of which need the engine) still run.
+/// Run every probe against `folder` and return the JSON report. The git phases run the git CLI
+/// the same way the app's own views do; the engine-backed graph timings live with the plugin
+/// (`tests/perf.rs`), not here.
 pub fn run(folder: &str) -> Result<String, String> {
     let path = std::path::Path::new(folder);
     if !path.is_dir() {
@@ -41,7 +39,7 @@ pub fn run(folder: &str) -> Result<String, String> {
         .unwrap_or_else(|_| folder.to_owned());
 
     let started = Instant::now();
-    let root = crate::cmd_graph::resolve_repo_root(&absolute);
+    let root = crate::find_repo_root(&absolute);
     let resolve_ms = ms(started);
     let is_repo = root.is_some();
     let root = root.unwrap_or(absolute);
@@ -52,18 +50,10 @@ pub fn run(folder: &str) -> Result<String, String> {
 
     let (scm_ms, scm_changes) = if is_repo {
         let started = Instant::now();
-        let changes = crate::cmd_graph::scm_changes(&root)
+        let changes = scm_ops::status(&crate::git::Git::new(&root))
             .ok()
-            .and_then(|v| v.as_array().map(Vec::len));
+            .map(|c| c.len());
         (Some(ms(started)), changes)
-    } else {
-        (None, None)
-    };
-
-    let (graph_ms, commits) = if is_repo {
-        let started = Instant::now();
-        let count = crate::cmd_graph::load_first_page(&root).ok();
-        (Some(ms(started)), count)
     } else {
         (None, None)
     };
@@ -101,12 +91,10 @@ pub fn run(folder: &str) -> Result<String, String> {
     let report = json!({
         "folder": root,
         "isRepository": is_repo,
-        "engine": crate::cmd_graph::graph_engine_version(),
         "files": files.len(),
         "symbols": symbols,
         "analysisSymbols": analysis_symbols,
         "analysisCalls": analysis_calls,
-        "commitsFirstPage": commits,
         "largeFileMb": file_mb,
         "scmChanges": scm_changes,
         "searchMatches": search.files.iter().map(|f| f.matches.len()).sum::<usize>(),
@@ -114,7 +102,6 @@ pub fn run(folder: &str) -> Result<String, String> {
             "resolveRoot": resolve_ms,
             "walkFiles": walk_ms,
             "scmStatus": scm_ms,
-            "graphFirstPage": graph_ms,
             "symbolIndex": symbols_ms,
             "analysisBuild": analysis_ms,
             "searchTodo": search_ms,
@@ -175,10 +162,6 @@ mod tests {
 
     #[test]
     fn measures_a_plain_folder_and_a_repository() {
-        // The store is pinned to an empty directory: the developer's real `~/.ggs` may hold
-        // the backend-carrying bundled package, in which case the git phases below would be
-        // answered for real instead of degrading the way this test asserts.
-        let _store = crate::test_support::isolated_extension_store();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.rs"), "// TODO one\nfn alpha() {}\n").unwrap();
         let plain: serde_json::Value =
@@ -194,23 +177,16 @@ mod tests {
         assert!(plain["ms"]["largeFileViewer"].is_number());
         assert!(plain["largeFileLines"].as_u64().unwrap() > 0);
 
-        // A repository, with no engine backend installed (this is a plain `cargo test --lib`
-        // run, not the real app): the git phases degrade exactly as a non-repository folder
-        // does — reported `null`, not an error — while the walk, index and search (none of
-        // which need the engine) still run for real. The "a repository is measured for real"
-        // scenario (root resolves, status and first page come back through a live spawned
-        // `git-graph-backend`) is `tests/graph_backend.rs`'s integration test.
+        // A repository is measured for real now that the status read is the app's own: the
+        // root resolves and the status phase reports a timing and a (clean-tree) count.
         let scratch = crate::test_support::Scratch::new("measure");
         let git = scratch.repo("repo");
         crate::test_support::commit(&git, "b.rs", "fn beta() {} // TODO\n", "second");
         let report: serde_json::Value =
             serde_json::from_str(&run(&git.repo.display().to_string()).unwrap()).unwrap();
-        assert_eq!(report["isRepository"], false);
-        assert!(report["ms"]["scmStatus"].is_null());
-        assert!(report["ms"]["graphFirstPage"].is_null());
+        assert_eq!(report["isRepository"], true);
+        assert!(report["ms"]["scmStatus"].is_number());
+        assert_eq!(report["scmChanges"], 0);
         assert_eq!(report["files"], 2);
-        // The measurements leave the scratch repository open in the global manager; on Windows
-        // an mmap'd pack file would outlive the temp directory's removal.
-        crate::cmd_graph::close_engine_repos();
     }
 }

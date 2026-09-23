@@ -46,33 +46,12 @@ const firstPaintPlugin = (): Plugin => ({
 	}
 });
 
-// The baked-in extension contributions: read at build/dev-server start from the shipped
-// extensions' manifests, so the workbench can register their menus before its first render
-// instead of racing the async activation pass (see extHost.ts's applyBuiltinContributions).
-// The settings slice (`virtual:builtin-settings`) is the same manifests' configuration schemas
-// with their full NLS tables - loaded through lazy.ts, so its ~100 KB rides an async chunk the
-// Settings dialog's rows need, not the first-paint bundle.
-const VIRTUAL_BUILTIN_CONTRIBUTIONS = 'virtual:builtin-contributions';
-const VIRTUAL_BUILTIN_SETTINGS = 'virtual:builtin-settings';
-const builtinContributionsPlugin = (): Plugin => ({
-	name: 'builtin-contributions',
-	resolveId(id) {
-		return id === VIRTUAL_BUILTIN_CONTRIBUTIONS || id === VIRTUAL_BUILTIN_SETTINGS ? '\0' + id : undefined;
-	},
-	load(id) {
-		const root = resolve(__dirname, 'vscode-git-graph-rs');
-		if (id === '\0' + VIRTUAL_BUILTIN_CONTRIBUTIONS) return `export const builtinContributions = ${JSON.stringify(buildBuiltinContributions(root))};`;
-		if (id === '\0' + VIRTUAL_BUILTIN_SETTINGS) return `export const builtinSettings = ${JSON.stringify(buildBuiltinSettings(root))};`;
-		return undefined;
-	}
-});
-
 // The version the About box shows, from package.json - one source of truth for the number.
 const { version } = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf8')) as { version: string };
 
 export default defineConfig({
 	define: { __APP_VERSION__: JSON.stringify(version) },
-	plugins: [checkSeamsPlugin(), builtinContributionsPlugin(), firstPaintPlugin()],
+	plugins: [checkSeamsPlugin(), firstPaintPlugin()],
 	clearScreen: false,
 	publicDir: resolve(studio, 'public'),
 	build: {

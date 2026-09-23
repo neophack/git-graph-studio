@@ -40,7 +40,6 @@ export class StatusBar {
 	/** VS Code's "Synchronize Changes": sync icon with the ahead/behind counts; a click
 	 *  pulls then pushes. Only a branch with an upstream has anything to synchronize. */
 	private readonly syncItem: HTMLElement;
-	private readonly graphItem: HTMLElement;
 	/** VS Code's "N conflicts" item, shown while a merge / rebase has unmerged paths. */
 	private readonly conflictsItem: HTMLElement;
 	/** The symbol index state (M4 4.11): "Indexing symbols 12/300" while a build runs, the
@@ -75,7 +74,6 @@ export class StatusBar {
 	onRepoClick: (() => void) | null = null;
 	onBranchClick: (() => void) | null = null;
 	onSyncClick: (() => void) | null = null;
-	onGraphClick: (() => void) | null = null;
 	onConflictsClick: (() => void) | null = null;
 	/** The symbols item was clicked - the workbench offers the rebuild. */
 	onSymbolsClick: (() => void) | null = null;
@@ -97,9 +95,6 @@ export class StatusBar {
 		this.syncItem = el('div', 'status-item');
 		this.syncItem.hidden = true;
 		this.syncItem.addEventListener('click', () => this.onSyncClick?.());
-		this.graphItem = el('div', 'status-item', [(() => { const image = el('img'); image.src = '/icons/git-graph-16.svg'; image.alt = ''; return image; })(), 'Git Graph']);
-		this.graphItem.title = 'View Git Graph';
-		this.graphItem.addEventListener('click', () => this.onGraphClick?.());
 		this.conflictsItem = el('div', 'status-item warning');
 		this.conflictsItem.hidden = true;
 		this.conflictsItem.addEventListener('click', () => this.onConflictsClick?.());
@@ -113,7 +108,7 @@ export class StatusBar {
 		this.saveItem.append(el('div', 'status-save-track', [this.saveFill]), this.saveLabel);
 		this.extLeft = el('div', 'status-ext');
 		this.extRight = el('div', 'status-ext');
-		this.left.append(this.repoItem, this.branchItem, this.syncItem, this.graphItem, this.conflictsItem, this.symbolsItem, this.saveItem, this.extLeft);
+		this.left.append(this.repoItem, this.branchItem, this.syncItem, this.conflictsItem, this.symbolsItem, this.saveItem, this.extLeft);
 
 		this.positionItem = el('div', 'status-item static');
 		this.indentItem = el('div', 'status-item', ['Spaces: 4']);
@@ -260,7 +255,6 @@ export class StatusBar {
 		this.repoItem.hidden = true;
 		this.branchItem.hidden = !hasRepo;
 		this.syncItem.hidden = true;
-		this.graphItem.hidden = !hasRepo;
 		this.symbolsItem.hidden = !hasRepo;
 		document.body.classList.toggle('no-folder', !hasRepo);
 		this.setConflicts(0);

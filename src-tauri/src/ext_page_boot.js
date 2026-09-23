@@ -32,7 +32,7 @@
 			onMessage: function (listener) { listeners.push(listener); }
 		};
 	};
-	window.addEventListener('message', function (event) {
+	function onHostMessage(event) {
 		var data = event.data;
 		if (!data || data.__ggxHost !== true) return;
 		if (data.type === 'init') {
@@ -47,5 +47,17 @@
 		} else if (data.type === 'event') {
 			for (var i = 0; i < listeners.length; i++) listeners[i](data.event);
 		}
-	});
+	}
+	window.addEventListener('message', onHostMessage);
+	// A page that swaps its own document (document.open/write — the Git Graph view renders the
+	// extension's generated page that way) keeps this window, but document.open() erases every
+	// event listener on it (HTML spec), this one included: every host reply after the swap
+	// would then go unheard and the page's requests hang. Re-attach right after the erase.
+	var openDocument = document.open;
+	document.open = function () {
+		var result = openDocument.apply(this, arguments);
+		window.removeEventListener('message', onHostMessage);
+		window.addEventListener('message', onHostMessage);
+		return result;
+	};
 })();

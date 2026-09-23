@@ -1,25 +1,21 @@
-//! Git Graph Studio: a standalone shell around the git-graph-rs engine.
+//! Git Graph Studio: a standalone workbench whose git-graph views arrive as plugins.
 //!
-//! The engine is not in this binary: every read (commits, refs, diffs, config,
-//! file-at-revision) goes to `git-graph-backend`, a warm sibling process packaged inside the
-//! bundled `git-graph-rs.ggx` plugin and reached over the `ggx-rpc/1` pipe (`plugin_host.rs`
-//! / `ext_process.rs`) — `git-graph-studio` never links `git-graph-core`. The write path
-//! (branches, tags, stashes, merges, staging, commits, …) stays in this process and shells
-//! out to the `git` executable through `git.rs`, exactly what the extension's own CLI
-//! backend does. The graph's webview pages are the extension's own, and the extension store
-//! serves the additional VSIX / `.ggx` extensions installed from the Extensions view.
+//! The app knows no plugin by name: its own git reads and writes run the `git` CLI in this
+//! process (`git.rs`), and every plugin that declares a process backend is started by
+//! `ext_process.rs` and spoken to over its pipe (`ggs-ext/1` or `ggx-rpc/1`) — this binary
+//! never links `git-graph-core`. The Git Graph view's engine, write path and pages all
+//! belong to the git-graph-rs plugin (`plugins/git-graph-rs/`), and the extension store
+//! serves the VSIX / `.ggx` extensions installed from the Extensions view.
 
 //! The crate is a library plus the binaries `Cargo.toml` declares: `git-graph-studio` (the
 //! Tauri app, the `desktop` feature) and the plugin backends under `plugins/` —
 //! `git-graph-backend` (the `engine` feature, the only linker of `git-graph-core`) and
-//! `ggs-ext-demo`. The modules that need no window — the engine seam `cmd_graph` and the git
+//! `ggs-ext-demo`. The modules that need no window — the wire protocols and the git
 //! runner `git` — are always compiled; everything that needs a window is behind `desktop`.
 
 pub mod backend_rpc;
-pub mod cmd_graph;
 pub mod ggx_protocol;
 pub mod git;
-#[cfg(test)]
 pub mod test_support;
 
 #[cfg(feature = "desktop")]
@@ -53,10 +49,10 @@ pub mod mcp;
 #[cfg(feature = "desktop")]
 pub mod measure;
 #[cfg(feature = "desktop")]
-pub mod plugin_host;
-#[cfg(feature = "desktop")]
 pub mod pty;
-#[cfg(feature = "desktop")]
+// The git-graph-rs backend (the `engine` feature, built headless) runs the amend / reset /
+// Gerrit commands through the same operations the app's own menus use.
+#[cfg(any(feature = "desktop", feature = "engine"))]
 pub mod scm_ops;
 #[cfg(all(test, feature = "desktop"))]
 mod stage_bench;
@@ -87,18 +83,14 @@ pub(crate) fn atomic_write(path: &std::path::Path, contents: &[u8]) -> Result<()
 }
 
 #[cfg(feature = "desktop")]
-pub use desktop::{run, AppState};
+pub use desktop::{find_repo_root, run, AppState};
 
 #[cfg(feature = "desktop")]
 mod desktop {
     use crate::{
-        can_log, cmd_analysis, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_graph, cmd_scm,
-        cmd_search, cmd_symbols, ext_process, git, mcp, measure, plugin_host, pty, viewer,
-        watcher,
+        can_log, cmd_analysis, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_scm, cmd_search,
+        cmd_symbols, ext_process, git, mcp, measure, pty, viewer, watcher,
     };
-    #[allow(unused_imports)]
-    use cmd_graph as _cmd_graph_seam;
-
     use std::sync::{Arc, Mutex};
 
     /// The folders the app has open. The standalone shell works with one folder at a time, but the
@@ -128,65 +120,65 @@ mod desktop {
         /// The watch on the open folder; `None` when no folder is open or the OS refused it.
         /// One watcher per open root: a plain folder keeps one, a multi-root workspace one per root.
         pub watcher: Mutex<Vec<watcher::FolderWatcher>>,
-    /// Roots whose heavy background services (the symbol/analysis index builds and the
-    /// file watcher) are recorded by `open_folder` / `open_workspace` but only started by
-    /// `post_first_paint`, which the shell calls once its first frame with the new folder
-    /// has painted - so none of them competes with that frame for the CPU.
-    pub deferred_services: DeferredServices,
-}
-
-/// The open folders whose background services wait for the shell's first painted frame.
-/// A plain struct (not raw state inline) so the record/take lifecycle - replace on reopen,
-/// consume once, clear on close - is unit-testable without a Tauri app.
-pub struct DeferredServices(Mutex<Vec<String>>);
-
-impl DeferredServices {
-    /// `open_folder` / `open_workspace` record their roots; a rapid reopen replaces the
-    /// previous record, so a superseded folder's services can never start late.
-    pub fn record(&self, roots: Vec<String>) {
-        *self.0.lock().unwrap() = roots;
+        /// Roots whose heavy background services (the symbol/analysis index builds and the
+        /// file watcher) are recorded by `open_folder` / `open_workspace` but only started by
+        /// `post_first_paint`, which the shell calls once its first frame with the new folder
+        /// has painted - so none of them competes with that frame for the CPU.
+        pub deferred_services: DeferredServices,
     }
 
-    /// `post_first_paint` takes the recorded roots, leaving nothing pending: the call is
-    /// idempotent, and only services recorded after it wait for the next one.
-    pub fn take(&self) -> Vec<String> {
-        std::mem::take(&mut *self.0.lock().unwrap())
+    /// The open folders whose background services wait for the shell's first painted frame.
+    /// A plain struct (not raw state inline) so the record/take lifecycle - replace on reopen,
+    /// consume once, clear on close - is unit-testable without a Tauri app.
+    pub struct DeferredServices(Mutex<Vec<String>>);
+
+    impl DeferredServices {
+        /// `open_folder` / `open_workspace` record their roots; a rapid reopen replaces the
+        /// previous record, so a superseded folder's services can never start late.
+        pub fn record(&self, roots: Vec<String>) {
+            *self.0.lock().unwrap() = roots;
+        }
+
+        /// `post_first_paint` takes the recorded roots, leaving nothing pending: the call is
+        /// idempotent, and only services recorded after it wait for the next one.
+        pub fn take(&self) -> Vec<String> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+
+        /// Closing the folder (or switching to single-file mode) drops any pending roots.
+        pub fn clear(&self) {
+            self.0.lock().unwrap().clear();
+        }
     }
 
-    /// Closing the folder (or switching to single-file mode) drops any pending roots.
-    pub fn clear(&self) {
-        self.0.lock().unwrap().clear();
-    }
-}
-
-impl Default for DeferredServices {
-    fn default() -> Self {
-        DeferredServices(Mutex::new(Vec::new()))
-    }
-}
-
-#[cfg(test)]
-mod deferred_services_tests {
-    use super::DeferredServices;
-
-    #[test]
-    fn a_reopen_replaces_the_pending_roots() {
-        let pending = DeferredServices::default();
-        pending.record(vec!["a".to_owned()]);
-        pending.record(vec!["b".to_owned(), "c".to_owned()]);
-        assert_eq!(pending.take(), vec!["b".to_owned(), "c".to_owned()]);
-        // Consumed: a second first-paint starts nothing until the next open records again.
-        assert!(pending.take().is_empty());
+    impl Default for DeferredServices {
+        fn default() -> Self {
+            DeferredServices(Mutex::new(Vec::new()))
+        }
     }
 
-    #[test]
-    fn clear_drops_a_folder_that_never_reached_its_first_frame() {
-        let pending = DeferredServices::default();
-        pending.record(vec!["a".to_owned()]);
-        pending.clear();
-        assert!(pending.take().is_empty());
+    #[cfg(test)]
+    mod deferred_services_tests {
+        use super::DeferredServices;
+
+        #[test]
+        fn a_reopen_replaces_the_pending_roots() {
+            let pending = DeferredServices::default();
+            pending.record(vec!["a".to_owned()]);
+            pending.record(vec!["b".to_owned(), "c".to_owned()]);
+            assert_eq!(pending.take(), vec!["b".to_owned(), "c".to_owned()]);
+            // Consumed: a second first-paint starts nothing until the next open records again.
+            assert!(pending.take().is_empty());
+        }
+
+        #[test]
+        fn clear_drops_a_folder_that_never_reached_its_first_frame() {
+            let pending = DeferredServices::default();
+            pending.record(vec!["a".to_owned()]);
+            pending.clear();
+            assert!(pending.take().is_empty());
+        }
     }
-}
 
     impl AppState {
         fn new() -> Self {
@@ -309,7 +301,7 @@ mod deferred_services_tests {
             repos.push(root.clone());
         }
         if !already_open {
-            cmd_graph::close_engine_repos();
+            ext_process::global().notify_workspace(std::slice::from_ref(&root));
         }
         // Warm Quick Open's file list in the background: by the time the user hits Ctrl+P the
         // walk has usually finished and the picker opens on a cache hit. This walk is the one
@@ -423,7 +415,10 @@ mod deferred_services_tests {
             .unwrap();
             assert!(!opened.is_repo);
             assert_eq!(opened.root, plain.display().to_string());
-            assert_eq!(state.deferred_services.take(), vec![plain.display().to_string()]);
+            assert_eq!(
+                state.deferred_services.take(),
+                vec![plain.display().to_string()]
+            );
         }
 
         /// A path that is not a folder at all (missing, or a file) is refused before anything in
@@ -432,8 +427,14 @@ mod deferred_services_tests {
         fn opening_a_path_that_is_not_a_folder_leaves_the_open_state_untouched() {
             let scratch = crate::test_support::Scratch::new("open-folder-missing");
             let state = AppState::new();
-            state.repos.lock().unwrap().push("C:\\already\\open".to_owned());
-            state.deferred_services.record(vec!["C:\\already\\open".to_owned()]);
+            state
+                .repos
+                .lock()
+                .unwrap()
+                .push("C:\\already\\open".to_owned());
+            state
+                .deferred_services
+                .record(vec!["C:\\already\\open".to_owned()]);
             let missing = scratch.path("does-not-exist");
             let result = tauri::async_runtime::block_on(open_folder_impl(
                 &state,
@@ -444,7 +445,10 @@ mod deferred_services_tests {
                 *state.repos.lock().unwrap(),
                 vec!["C:\\already\\open".to_owned()]
             );
-            assert_eq!(state.deferred_services.take(), vec!["C:\\already\\open".to_owned()]);
+            assert_eq!(
+                state.deferred_services.take(),
+                vec!["C:\\already\\open".to_owned()]
+            );
         }
 
         /// A rapid reopen of a different folder replaces the previous one - both in `repos` and
@@ -654,7 +658,7 @@ mod deferred_services_tests {
         state.analysis_index.cancel();
         state.watcher.lock().unwrap().clear();
         *state.repos.lock().unwrap() = roots.iter().map(|root| root.root.clone()).collect();
-        cmd_graph::close_engine_repos();
+        ext_process::global().notify_workspace(&[]);
 
         // The Quick Open prefetch stays on the open path (cheap, and the first Ctrl+P can come
         // at any moment); the index builds and the watchers wait for the first painted frame,
@@ -667,7 +671,9 @@ mod deferred_services_tests {
                 cache.store(&prefetch_root, files);
             });
         }
-        state.deferred_services.record(roots.iter().map(|root| root.root.clone()).collect());
+        state
+            .deferred_services
+            .record(roots.iter().map(|root| root.root.clone()).collect());
         Ok(OpenedWorkspace { roots })
     }
 
@@ -839,7 +845,7 @@ mod deferred_services_tests {
         state.repos.lock().unwrap().clear();
         state.deferred_services.clear();
         *state.single_file.lock().unwrap() = Some(path);
-        cmd_graph::close_engine_repos();
+        ext_process::global().notify_workspace(&[]);
         Ok(())
     }
 
@@ -855,7 +861,7 @@ mod deferred_services_tests {
         state.symbol_cache.invalidate();
         state.repos.lock().unwrap().clear();
         state.deferred_services.clear();
-        cmd_graph::close_engine_repos();
+        ext_process::global().notify_workspace(&[]);
     }
 
     /// The path a launch should open: the last argument that is neither a flag nor a flag's
@@ -1299,28 +1305,13 @@ mod deferred_services_tests {
 
         stamp("main: args parsed");
 
-        // The engine warms the launch repository before the window exists: opening the
-        // repository and answering the view's two first requests (the repository info and
-        // the first page of commits) costs around a tenth of a second, and the window takes
-        // the better part of one to appear — so those requests are answered from the
-        // warm-up's results, and every later one lands on a hot repository handle.
-        if let Some(root) = state
-            .repos
-            .lock()
-            .unwrap()
-            .first()
-            .map(|folder| find_repo_root(folder).unwrap_or_else(|| folder.clone()))
-        {
-            std::thread::spawn(move || match cmd_graph::warm_first_page(&root) {
-                Ok(count) => stamp(&format!(
-                    "engine ready: first page warmed ({count} commits)"
-                )),
-                Err(error) => eprintln!("[boot] engine warm-up failed: {error}"),
-            });
-            // The first file opened in a folder (a restored session's, or the user's first
-            // click) builds a viewer document for its outline, and that needs the syntax
-            // set - a deserialisation worth a good fraction of a second, best paid now on
-            // a spare core rather than on that first open.
+        // The first file opened in a folder (a restored session's, or the user's first
+        // click) builds a viewer document for its outline, and that needs the syntax
+        // set - a deserialisation worth a good fraction of a second, best paid now on
+        // a spare core rather than on that first open. (The graph engine's own warm-up
+        // is a plugin's business now: the backend warms when `notify_workspace` reports
+        // the launch folder, right after the backends come up.)
+        if !state.repos.lock().unwrap().is_empty() {
             std::thread::spawn(|| {
                 viewer::doc::syntax_set();
                 stamp("syntax set ready");
@@ -1350,9 +1341,7 @@ mod deferred_services_tests {
             // The `ggx` protocol serves an installed package's own files to its sandboxed
             // page iframes (cmd_ext.rs confines every request to the extensions home) — the
             // extension-platform counterpart of the public dir the Git Graph page loads from.
-            .register_uri_scheme_protocol("ggx", |_ctx, request| {
-                cmd_ext::serve_ggx_asset(&request)
-            })
+            .register_uri_scheme_protocol("ggx", |_ctx, request| cmd_ext::serve_ggx_asset(&request))
             .setup(|app| {
                 // Git's output reaches the panel's "Git" channel as it happens.
                 use tauri::Emitter;
@@ -1361,22 +1350,6 @@ mod deferred_services_tests {
                     let _ = handle.emit("studio://git-output", line);
                 });
                 stamp("setup entered");
-                // Detect and run: every installed package that declares a process backend
-                // comes up with the app, without waiting for its first command. Off the main
-                // thread — a slow handshake must never hold the window back — and best-effort:
-                // a package that fails to start holds the error in its status, not the boot.
-                //
-                // git-graph-rs's bundled `.ggx` is installed first, every launch, not only the
-                // first: `install_from_ggx_into`'s own forward-only version check makes this
-                // idempotent (an "already installed" / "already the newer version" error here
-                // is the expected, silent outcome on every boot after the first, or after an
-                // app update ships a newer bundled copy, this is how it takes over). Without
-                // this, since the seam is cut (the app itself links no engine), a fresh profile
-                // would have no Git Graph view, no SCM status and no file-at-revision at all
-                // until a user visited Extensions and installed by hand. A deliberate
-                // uninstall overrides all of that: its marker keeps the package out until the
-                // user asks for it again (Extensions' one-click Install, which clears it).
-                //
                 // The `ggs` launcher's reachability: append the install directory to the
                 // user PATH (idempotent, no length limits - the NSIS hooks no longer write
                 // PATH; see cmd_assoc::user_path_apply for the wipe they caused).
@@ -1384,9 +1357,17 @@ mod deferred_services_tests {
                     eprintln!("[boot] user PATH apply: {reason}");
                 }
 
-                // `plugin_host::note_install_started`/`note_install_finished` bracket it so a
-                // `plugin_host` call racing this boot sequence (`warm_first_page`, below) waits
-                // for it (bounded) instead of failing outright with "not installed".
+                // "Install means run" (plan §8.2): every installed package that declares a
+                // backend comes up with the app, without waiting for its first command, and
+                // the whole set is told the app's open folders — a backend that keeps
+                // per-workspace state (the graph engine's warm repository handle) acts on it,
+                // the rest answer and forget. Off the main thread — a slow handshake must
+                // never hold the window back — and best-effort: a package that fails to start
+                // holds the error in its status, not the boot. Nothing installs by default:
+                // the bundled packages are offers the Extensions view lists (cmd_ext scans
+                // the installer's extensions/ directory), not boot-time installs; a
+                // deliberate uninstall stays uninstalled (its `<id>.uninstalled` marker is
+                // honoured by the Extensions view's one-click install that clears it).
                 {
                     let handle = app.handle().clone();
                     std::thread::spawn(move || {
@@ -1394,25 +1375,24 @@ mod deferred_services_tests {
                         let Ok(dir) = cmd_ext::extensions_dir(&handle) else {
                             return;
                         };
-                        plugin_host::note_install_started();
-                        // No id: the boot pass auto-installs the integrated git-graph-rs only.
-                        // The bundled sample stays an offer until the user asks for it.
-                        if cmd_ext::deliberately_uninstalled(&dir, cmd_ext::GRAPH_PACKAGE_ID) {
-                            eprintln!(
-                                "[extensions] git-graph-rs stays uninstalled (a deliberate uninstall); skipping its boot auto-install"
-                            );
-                        } else if let Err(reason) =
-                            cmd_ext::ext_install_bundled(handle.clone(), None)
-                        {
-                            eprintln!("[extensions] git-graph-rs auto-install: {reason}");
+                        // An install of the same version as the bundled package, but from
+                        // an older build of it, is refreshed before anything starts from it.
+                        for refreshed in cmd_ext::refresh_bundled_installs(&handle) {
+                            match refreshed {
+                                Ok(line) => cmd_ext::log_extensions(&line),
+                                Err(reason) => {
+                                    cmd_ext::log_extensions(&format!("refresh failed: {reason}"))
+                                }
+                            }
                         }
-                        plugin_host::note_install_finished();
                         let host = handle.state::<ext_process::ProcessHostState>();
                         for started in host.start_all_installed(&dir) {
                             if let Err(reason) = started {
                                 eprintln!("[extensions] backend failed to start: {reason}");
                             }
                         }
+                        let folders = handle.state::<AppState>().repos.lock().unwrap().clone();
+                        ext_process::global().notify_workspace(&folders);
                     });
                 }
                 // The main window is declared in tauri.conf.json but built here (`create: false`)
@@ -1473,9 +1453,8 @@ mod deferred_services_tests {
                 can_log::can_log_find,
                 can_log::can_log_close,
                 cmd_fs::repo_submodules,
-                cmd_graph::graph_request,
-                cmd_graph::graph_engine_version,
                 cmd_scm::scm_status,
+                cmd_scm::file_log,
                 cmd_scm::git_init,
                 cmd_scm::git_stage,
                 cmd_scm::git_unstage,
@@ -1488,6 +1467,19 @@ mod deferred_services_tests {
                 cmd_scm::scm_remotes,
                 cmd_scm::scm_stashes,
                 cmd_scm::scm_tags,
+                cmd_scm::scm_rename_branch,
+                cmd_scm::scm_delete_branch,
+                cmd_scm::scm_merge,
+                cmd_scm::scm_rebase,
+                cmd_scm::scm_add_remote,
+                cmd_scm::scm_delete_remote,
+                cmd_scm::scm_push_stash,
+                cmd_scm::scm_apply_stash,
+                cmd_scm::scm_pop_stash,
+                cmd_scm::scm_drop_stash,
+                cmd_scm::scm_add_tag,
+                cmd_scm::scm_delete_tag,
+                cmd_scm::scm_undo_last_commit,
                 cmd_scm::scm_pull,
                 cmd_scm::scm_push,
                 cmd_scm::scm_sync,
@@ -1548,6 +1540,7 @@ mod deferred_services_tests {
                 cmd_ext::ext_install_bundled,
                 ext_process::ext_process_start,
                 ext_process::ext_process_run,
+                ext_process::ext_process_message,
                 ext_process::ext_process_stop,
                 ext_process::ext_process_status,
                 cmd_search::search_workspace,

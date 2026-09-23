@@ -154,6 +154,19 @@ impl Git {
         record(line);
     }
 
+    /// Run a command and return its stdout as raw bytes — for content that must not pass
+    /// through UTF-8 (`cat-file` of a binary blob, the byte-level comparison views).
+    pub fn output_bytes(&self, args: &[&str]) -> Result<Vec<u8>, String> {
+        let started = Instant::now();
+        let output = self
+            .command()
+            .args(args)
+            .output()
+            .map_err(|e| format!("Could not run git (is it on the PATH?): {e}"))?;
+        self.log(args, &output, started);
+        collect_bytes(output)
+    }
+
     /// Run a command with text on its stdin, returning its stdout.
     pub fn output_with_input(&self, args: &[&str], input: &str) -> Result<String, String> {
         use std::io::Write;
@@ -212,11 +225,15 @@ impl Git {
 }
 
 fn collect(output: std::process::Output) -> Result<String, String> {
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    collect_bytes(output).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn collect_bytes(output: std::process::Output) -> Result<Vec<u8>, String> {
     if output.status.success() {
-        return Ok(stdout);
+        return Ok(output.stdout);
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let mut text = format!("{stderr}{stdout}");
     while text.ends_with('\n') || text.ends_with('\r') {
         text.pop();
@@ -225,6 +242,57 @@ fn collect(output: std::process::Output) -> Result<String, String> {
         text = format!("git exited with {}", output.status);
     }
     Err(text)
+}
+
+/* ---------- Pure argument validation (src/utils.ts: isSafeRefName & co.) ---------- */
+
+/// A commit hash as the view sends one: 4–64 hex digits (SHA-1 and SHA-256 both fit).
+pub fn is_valid_commit_hash(hash: &str) -> bool {
+    (4..=64).contains(&hash.len()) && hash.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+pub fn is_safe_ref_name(name: &str) -> bool {
+    if name.is_empty() || name.starts_with('-') || name.starts_with('.') {
+        return false;
+    }
+    if name.ends_with('/') || name.ends_with('.') || name.ends_with(".lock") {
+        return false;
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return false;
+    }
+    !["..", "@{", "\\", "^", ":", "?", "[", "*"]
+        .iter()
+        .any(|seq| name.contains(seq))
+}
+
+pub fn is_safe_stash_selector(selector: &str) -> bool {
+    selector
+        .strip_prefix("refs/stash@{")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .map(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+        .unwrap_or(false)
+}
+
+/// `git fetch` with the view's options: one named remote (validated) or `--all`, optional
+/// pruning (tags only alongside branches).
+pub fn fetch(git: &Git, remote: Option<&str>, prune: bool, prune_tags: bool) -> Result<(), String> {
+    if let Some(remote) = remote.filter(|name| !is_safe_ref_name(name)) {
+        return Err(format!(
+            "Invalid reference name was provided for \"remote\" ({remote})"
+        ));
+    }
+    let mut args = vec!["fetch", remote.unwrap_or("--all")];
+    if prune {
+        args.push("--prune");
+    }
+    if prune_tags {
+        if !prune {
+            return Err("In order to Prune Tags, pruning must also be enabled when fetching from remote(s).".to_owned());
+        }
+        args.push("--prune-tags");
+    }
+    git.run(&args)
 }
 
 #[cfg(test)]

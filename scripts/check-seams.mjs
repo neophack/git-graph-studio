@@ -1,8 +1,7 @@
-// The seam rules of the app (docs/ggs-development-plan.md §3.7), enforced at build time: the
-// extension's artifacts are consumed through exactly one seam — graphHost.ts together with
-// graphPreload.ts on the TS side (the single `graph_request` channel and the only namer of
-// the extension's asset paths, including the page generators the view and the comparison
-// pages are built from). The Rust counterpart of this check lives in src-tauri/build.rs.
+// The seam rules of the app, enforced at build time: nothing under src/ or static/ may name
+// the git-graph-rs extension's artifacts or protocols — the extension is a plugin (everything
+// of it lives in plugins/git-graph-rs/), and the app's only interface to it is the generic
+// extension platform. The Rust counterpart of this check lives in src-tauri/build.rs.
 //
 // Wired into every path that compiles the frontend: scripts/prepare.mjs runs it first, the
 // Vite plugin (vite.config.ts) runs it on every dev-server start and production build, and
@@ -16,11 +15,14 @@ const appDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 /** What each extension artifact may be referenced by, as paths under app/. Anything else that
  *  names the pattern fails the build. */
 const RULES = [
-	{ pattern: /graph_request/, paths: ['src/graphHost.ts'], because: 'the graph protocol is invoked only by the TS seam (graphHost.ts)' },
-	{ pattern: /gitgraph\//, paths: ['src/graphHost.ts', 'src/graphPreload.ts'], because: 'the extension\'s assets are named only by the TS seam (graphHost.ts, and graphPreload.ts - the composer of the view page it generates and warms)' },
-	{ pattern: /GitGraphStudioConfig/, paths: ['src/graphHost.ts', 'src/graphPreload.ts'], because: 'the extension\'s config bundle is read only by the TS seam (graphHost.ts, and graphPreload.ts for the warmed boot\'s initial state)' },
-	{ pattern: /out\.min/, paths: ['src/graphHost.ts'], because: 'the webview bundle (compiled from the extension\'s web/) is referenced only by the TS seam (graphHost.ts) - the extension\'s own generated page loads it' },
-	{ pattern: /web[\\/]styles/, paths: [], because: 'the extension\'s CSS sources are consumed only through the artifacts scripts/prepare.mjs builds from them — never referenced directly' }
+	// The app consumes no extension artifact at all anymore (everything of git-graph-rs lives
+	// in its plugin: plugins/git-graph-rs/). These patterns fail the build anywhere under src/
+	// or static/ — the seam is the extension platform itself, not a file of the app.
+	{ pattern: /graph_request/, paths: [], because: 'the graph protocol belongs to the git-graph-rs plugin (its bridge speaks it); the app never names it' },
+	{ pattern: /gitgraph\//, paths: [], because: 'the extension assets live inside its .ggx; nothing of the app names their paths' },
+	{ pattern: /GitGraphStudioConfig/, paths: [], because: 'the config bundle is the plugin page own (web/config.js); the app never reads it' },
+	{ pattern: /out\.min/, paths: [], because: 'the webview bundle is the plugin page own; the app never references it' },
+	{ pattern: /web[\\/]styles/, paths: [], because: 'the extension CSS sources are consumed only through its plugin packer — never referenced by the app' }
 ];
 
 function listFiles(dir) {

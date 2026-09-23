@@ -98,14 +98,17 @@ describe('the UI harness flows', () => {
 		expect(notesTab().classList.contains('dirty')).toBe(false);
 		notesTab().dispatchEvent(new MouseEvent('auxclick', { button: 1, bubbles: true }));
 		await flush();
-		expect(texts('.tab .label')).toEqual(['Git Graph']);
+		expect(texts('.tab .label')).toEqual([]);
 	});
 
 	it('opens a file to the side, and the emptied layer collapses when its last tab closes', async () => {
+		await workbench.editors.openFile(NOTES);
+		await flush();
 		workbench.editors.openInDirection(NOTES, 'right');
 		await flush();
 		expect(document.querySelectorAll('.editor-group-box')).toHaveLength(2);
-		expect(workbench.editors.groupSessions()).toEqual([{ files: [NOTES], active: NOTES }]);
+		// Both groups hold the file now (the first opened it, the side opened it again).
+		expect(workbench.editors.groupSessions()).toEqual([{ files: [NOTES], active: NOTES }, { files: [NOTES], active: NOTES }]);
 		// Close the only tab of the side group: the layer disappears again.
 		const tab = document.querySelectorAll('.editor-group-box')[1]!.querySelector('.tab')!;
 		tab.querySelector<HTMLElement>('.close')!.click();

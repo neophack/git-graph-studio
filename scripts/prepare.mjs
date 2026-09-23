@@ -1,32 +1,22 @@
 // Assembles everything the app build consumes under <project>/target/studio/, so no generated
 // file ever lands in the source tree:
 //
-//   target/studio/public/   the Vite public dir: static/** plus the extension's webview
-//                           build (media/out.min.js, out.min.css, markdown-it), the extension's
-//                           icons (resources/), and the runtime config bundle (see below) — the
-//                           integrated git-graph-rs serves its webview from here
-//   target/studio/icons/    the app icons `tauri icon` derives from vscode-git-graph-rs/resources/icon.png
+//   target/studio/public/   the Vite public dir: static/** plus the extension README renderer's
+//                           markdown-it vendor copy — nothing of any plugin (each plugin's
+//                           packer, under plugins/, builds its own package contents)
+//   target/studio/icons/    the app icons `tauri icon` derives from the app's own icon source
 //   target/studio/cargo/    the Cargo target dir (src-tauri/.cargo/config.toml)
 //   target/studio/dist/     the Vite build output (vite.config.ts)
 //
-// The config bundle (public/gitgraph/config.js) is the extension's own compiled src/config.ts,
-// bundled by esbuild with the `vscode` module replaced by a stub whose configuration reads
-// come from an override map. The app calls it at runtime to build the Git Graph view's
-// `initialState.config` - exactly as the extension host does - which keeps every default,
-// every derived field and every setting the view's Settings Widget writes in sync with the
-// extension, without a hand-maintained copy.
-//
-// Requires the plugin submodule checked out and compiled: `npm install && npm run compile`
-// in vscode-git-graph-rs/ (its out/config.js and media/).
-import { build } from 'esbuild';
+// The bundled `.ggx` packages the installer carries are each plugin's own packer's output —
+// prepare.mjs only builds their backends and delegates (it never reaches into a plugin's
+// sources, and never into the vscode-git-graph-rs submodule: only git-graph-rs's packer does).
 import { checkSeams } from './check-seams.mjs';
-import { buildBinaryCompareBundle, buildCompareBundle, buildViewPageBundle } from './compare-bundle.mjs';
 import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
-import { createRequire } from 'node:module';
 
-// The seam rules first: nothing may consume the extension's artifacts outside the designated
-// interface files (graphHost.ts, view.html, cmd_graph.rs), so a violation fails the build
-// before anything is assembled.
+// The seam rules first: nothing under src/ or static/ may name the git-graph-rs extension's
+// artifacts (it is a plugin; the app's only interface to it is the extension platform), so a
+// violation fails the build before anything is assembled.
 checkSeams();
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,156 +36,27 @@ function requireArtifact(path, hint) {
 	return path;
 }
 
-/* 1. The public dir: static sources, then the extension's artifacts. */
+/* 1. The public dir: the app's static sources and the README renderer's markdown-it. */
 // Windows keeps handles on the public dir for a moment after a dev server or Explorer
 // touched it; retrying makes the build resilient to that instead of failing with EPERM.
-	rmSync(publicDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+rmSync(publicDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 mkdirSync(publicDir, { recursive: true });
 cpSync(join(appDir, 'static'), publicDir, { recursive: true });
 
-const gitgraphDir = join(publicDir, 'gitgraph');
-mkdirSync(gitgraphDir, { recursive: true });
-for (const [from, to] of [
-	['media/out.min.js', 'out.min.js'],
-	['media/out.min.css', 'out.min.css'],
-	['media/vendor/markdown-it.min.js', 'markdown-it.min.js']
-]) {
-	requireArtifact(join(root, from), 'run `npm run compile` in vscode-git-graph-rs/ first');
-	copyFileSync(join(root, from), join(gitgraphDir, to));
-}
-
-// markdown-it once more as a workbench asset (public/vendor/), for the Extensions view's README
-// rendering — so no module outside the Git Graph seam (graphHost.ts + static/gitgraph) touches
-// the extension's files at runtime.
 const vendorDir = join(publicDir, 'vendor');
 mkdirSync(vendorDir, { recursive: true });
-copyFileSync(join(root, 'media', 'vendor', 'markdown-it.min.js'), join(vendorDir, 'markdown-it.min.js'));
-
-// The extension's own icons: the webview/tab icon, the 16px command icon, and the marketplace
-// icon the welcome page shows.
-const iconsDir = join(publicDir, 'icons');
-mkdirSync(iconsDir, { recursive: true });
-for (const [from, to] of [
-	['resources/git-graph-rs-webview-icon-dark.svg', 'git-graph.svg'],
-	['resources/git-graph-rs-cmd-icon-dark.svg', 'git-graph-16.svg'],
-	['resources/icon.png', 'icon.png']
-]) {
-	copyFileSync(join(root, from), join(iconsDir, to));
-}
-
-/* 2. The config bundle. */
-const configPath = join(root, 'out', 'config.js');
-requireArtifact(configPath, 'run `npm run compile` in vscode-git-graph-rs/ first');
-await build({
-	stdin: {
-		contents: `
-			const { getConfig } = require(${JSON.stringify(configPath)});
-			const overrides = globalThis.__gitGraphStudioOverrides = globalThis.__gitGraphStudioOverrides || {};
-			// The field mapping of GitGraphView.getWebviewConfig() (src/gitGraphView.ts), so the
-			// result is exactly the shape the webview's initialState.config expects.
-			module.exports = function buildWebviewConfig(settings) {
-				for (const key of Object.keys(overrides)) delete overrides[key];
-				Object.assign(overrides, settings || {});
-				const config = getConfig();
-				return {
-					commitAuthors: config.commitAuthors,
-					commitDetailsView: config.commitDetailsView,
-					commitOrdering: config.commitOrder,
-					contextMenuActionsVisibility: config.contextMenuActionsVisibility,
-					customBranchGlobPatterns: config.customBranchGlobPatterns,
-					customEmojiShortcodeMappings: config.customEmojiShortcodeMappings,
-					customPullRequestProviders: config.customPullRequestProviders,
-					dateFormat: config.dateFormat,
-					dateType: config.dateType,
-					defaultColumnVisibility: config.defaultColumnVisibility,
-					enableLog: config.enableLog,
-					stickyHeader: config.stickyHeader,
-					dialogDefaults: config.dialogDefaults,
-					enhancedAccessibility: config.enhancedAccessibility,
-					fetchAndPrune: config.fetchAndPrune,
-					fetchAndPruneTags: config.fetchAndPruneTags,
-					fetchAvatars: false,
-					gerrit: config.gerrit,
-					graph: config.graph,
-					// The resolved interface language: config.ts's interfaceLanguage getter defers
-					// "auto" to vscode.env.language, which the stub resolves to the workbench's
-					// locale - so "auto" follows the app's display language.
-					interfaceLanguage: config.interfaceLanguage,
-					interfaceLanguageSetting: config.interfaceLanguageSetting,
-					includeCommitsMentionedByReflogs: config.includeCommitsMentionedByReflogs,
-					initialLoadCommits: config.initialLoadCommits,
-					keybindings: config.keybindings,
-					loadMoreCommits: config.loadMoreCommits,
-					loadMoreCommitsAutomatically: config.loadMoreCommitsAutomatically,
-					markdown: config.markdown,
-					mute: config.muteCommits,
-					showBodyInline: config.showCommitBodyInline,
-					onlyFollowFirstParent: config.onlyFollowFirstParent,
-					onRepoLoad: config.onRepoLoad,
-					pullRequests: config.pullRequests,
-					referenceLabels: config.referenceLabels,
-					repoDropdownOrder: config.repoDropdownOrder,
-					showCommitBodyInline: config.showCommitBodyInline,
-					showRemoteBranches: config.showRemoteBranches,
-					showRemoteHeads: config.showRemoteHeads,
-					showStashes: config.showStashes,
-					showTags: config.showTags,
-					showUncommittedChanges: config.showUncommittedChanges,
-					showUntrackedFiles: config.showUntrackedFiles,
-					trackRemoteTags: config.trackRemoteTags,
-					// The git-side settings the app's own write path reads (the view never does).
-					signCommits: config.signCommits,
-					signTags: config.signTags,
-					squashMergeMessageFormat: config.squashMergeMessageFormat,
-					squashPullMessageFormat: config.squashPullMessageFormat
-				};
-			};
-		`,
-		resolveDir: root,
-		loader: 'js'
-	},
-	bundle: true,
-	format: 'iife',
-	globalName: 'GitGraphStudioConfig',
-	platform: 'browser',
-	target: 'es2020',
-	minify: true,
-	alias: { vscode: join(appDir, 'scripts', 'vscode-stub.cjs') },
-	outfile: join(gitgraphDir, 'config.js'),
-	logLevel: 'warning'
-});
-
-/* 3. The Git Graph comparison pages. Neither comparison view is part of the webview bundle
-   the graph view loads - the extension generates their whole pages (styles and script
-   inline) from extension-host code. scripts/compare-bundle.mjs bundles that same compiled
-   code (the patched CommonJS copies under target/studio, the `vscode` stub, the Node
-   built-in shims and the browser-globals banner live there) and exposes, for
-   graphHost.ts, the Commit Comparison page generator with the binary-area host machinery
-   (`GitGraphCompare`, compare.js) and the standalone Binary Compare page generator
-   (`GitGraphBinaryCompare`, binarycompare.js). */
-await buildCompareBundle({
-	root,
-	patchedOut: join(out, 'compare-src'),
-	outfile: join(gitgraphDir, 'compare.js')
-});
-await buildBinaryCompareBundle({
-	root,
-	patchedOut: join(out, 'compare-src'),
-	outfile: join(gitgraphDir, 'binarycompare.js')
-});
-await buildViewPageBundle({
-	root,
-	patchedOut: join(out, 'compare-src'),
-	outfile: join(gitgraphDir, 'viewpage.js')
-});
-
-// The syntax highlighter the generated comparison page loads, next to the bundle.
 copyFileSync(
-	requireArtifact(join(root, 'media', 'vendor', 'highlight.min.js'), 'run `npm run compile` in vscode-git-graph-rs/ first'),
-	join(gitgraphDir, 'highlight.min.js')
+	requireArtifact(join(root, 'media', 'vendor', 'markdown-it.min.js'), 'run `npm run compile` in vscode-git-graph-rs/ first'),
+	join(vendorDir, 'markdown-it.min.js')
 );
 
-/* 4. The app icons, once. */
+// The app's own chrome icon (the title bar's logo) — one asset copy from the icon set the
+// extension ships, the same source the installer icon derives from below.
+const iconsDir = join(publicDir, 'icons');
+mkdirSync(iconsDir, { recursive: true });
+copyFileSync(requireArtifact(join(root, 'resources', 'icon.png'), 'the submodule is checked out'), join(iconsDir, 'icon.png'));
+
+/* 2. The app icons, once. */
 const appIcons = join(out, 'icons');
 if (!existsSync(join(appIcons, 'icon.ico')) || !existsSync(join(appIcons, '32x32.png'))) {
 	mkdirSync(appIcons, { recursive: true });
@@ -210,56 +71,41 @@ if (!existsSync(join(appIcons, 'icon.ico')) || !existsSync(join(appIcons, '32x32
 	}
 }
 
-/* 5. The engine backend (`git-graph-backend`, the `engine` Cargo feature) — the only binary
- *    that links `git-graph-core`; the app itself never does (src-tauri/build.rs's seam check).
- *    Release, so the shipped package carries the same size-optimised binary `tauri build`
- *    produces for the app itself; cargo's incremental cache keeps repeat builds (dev iteration)
- *    fast after the first. `hostPlatformKey`/`ggxManifest`'s `backend.binaries` key matches
- *    Rust's own `cmd_ext::host_platform_key()` (`scripts/build-ggx.mjs`'s `hostPlatformKey`). */
+/* 3. The plugin backends. The git-graph-rs engine backend (`git-graph-backend`, the `engine`
+ *    Cargo feature) is the only binary that links `git-graph-core`; the app itself never does
+ *    (src-tauri/build.rs's seam check). Release, so the shipped package carries the same
+ *    size-optimised binary `tauri build` produces for the app itself; cargo's incremental
+ *    cache keeps repeat builds (dev iteration) fast after the first. The sample plugin's own
+ *    backend is a plain no-default-features build of its [[bin]]. */
 const srcTauri = join(appDir, 'src-tauri');
-const backendExe = process.platform === 'win32' ? 'git-graph-backend.exe' : 'git-graph-backend';
-const backendBuild = spawnSync(
-	'cargo',
-	['build', '--release', '--bin', 'git-graph-backend', '--no-default-features', '--features', 'engine'],
-	{ cwd: srcTauri, stdio: 'inherit', shell: process.platform === 'win32' }
-);
-let backendPath;
-if (backendBuild.status === 0) {
-	const built = join(out, 'cargo', 'release', backendExe);
-	if (existsSync(built)) backendPath = built;
-	else console.warn(`${built} was not produced; packing git-graph-rs.ggx without a backend`);
-} else {
-	console.warn('Building git-graph-backend failed; packing git-graph-rs.ggx without a backend');
+function buildBackend(bin, features) {
+	const exe = process.platform === 'win32' ? `${bin}.exe` : bin;
+	const built = spawnSync(
+		'cargo',
+		['build', '--release', '--bin', bin, ...(features ? ['--no-default-features', '--features', features] : ['--no-default-features'])],
+		{ cwd: srcTauri, stdio: 'inherit', shell: process.platform === 'win32' }
+	);
+	if (built.status === 0) {
+		const path = join(out, 'cargo', 'release', exe);
+		if (existsSync(path)) return path;
+		console.warn(`${path} was not produced; packing ${bin} without its backend`);
+		return undefined;
+	}
+	console.warn(`Building ${bin} failed; packing without its backend`);
+	return undefined;
 }
+const backendPath = buildBackend('git-graph-backend', 'engine');
+const demoBin = buildBackend('ggs-ext-demo', null);
 
-/* 6. The bundled `.ggx` packages — the app ships extensions as packages beside the app, not as
- *    embedded built-ins: tauri.conf.json's bundle.resources packs the fixed-name copies under
- *    app-resources/extensions/ so the installer carries them, and the app installs them only
- *    when asked (cmd_ext.rs's ext_install_bundled, the one-click Install on the Extensions
- *    view — the integrated git-graph-rs and the GGX Demo sample). The versioned packages
- *    beside them are what a user can also install by hand. Each is delegated to the plugin's
- *    own packer under plugins/ — this file never reaches into a plugin's sources for
- *    packaging; only that plugin folder does. */
+/* 4. The bundled `.ggx` packages — the app ships extensions as packages beside the app, not
+ *    as embedded built-ins: tauri.conf.json's bundle.resources packs the fixed-name copies
+ *    under app-resources/extensions/ so the installer carries them, and the app lists and
+ *    installs them by scanning that directory (cmd_ext.rs — it names no id). Each package is
+ *    its own plugin's packer's output; this file never reaches into a plugin's sources for
+ *    packaging. */
 const { buildGgx } = await import('../plugins/git-graph-rs/build.mjs');
 const { target: ggxPath } = await buildGgx({ backend: backendPath });
 const { buildDemo } = await import('../plugins/ggs-ext-demo/build.mjs');
-// The sample's backend: a plain `cargo build` of its own [[bin]] (no `engine` feature — it
-// links only the protocol helpers, so the same no-default-features profile as the engine
-// backend compiles it fastest). Without it the package still packs, frontend-only.
-const demoExe = process.platform === 'win32' ? 'ggs-ext-demo.exe' : 'ggs-ext-demo';
-const demoBuild = spawnSync(
-	'cargo',
-	['build', '--release', '--bin', 'ggs-ext-demo', '--no-default-features'],
-	{ cwd: srcTauri, stdio: 'inherit', shell: process.platform === 'win32' }
-);
-let demoBin;
-if (demoBuild.status === 0) {
-	const built = join(out, 'cargo', 'release', demoExe);
-	if (existsSync(built)) demoBin = built;
-	else console.warn(`${built} was not produced; packing ggs-ext-demo.ggx without a backend`);
-} else {
-	console.warn('Building ggs-ext-demo failed; packing ggs-ext-demo.ggx without a backend');
-}
 const { target: demoGgxPath } = await buildDemo({ bin: demoBin });
 const bundledDir = join(out, 'bundled', 'app-resources', 'extensions');
 mkdirSync(bundledDir, { recursive: true });

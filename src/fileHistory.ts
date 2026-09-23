@@ -1,11 +1,11 @@
 // A file's history: the commits that touched it, newest first, as VS Code's Timeline lists
 // them - hash, subject, author, relative date - each opening the diff of that commit's version
-// against its parent's. The commits come from the graph engine's own log (a `loadCommits`
-// request filtered to the path, through the graph host's channel), so the list matches what
-// the Git Graph view would show for "View File History".
+// against its parent's. The commits come from the backend's own `git log --follow` over the
+// path, so the list survives without any engine: it is the Source Control module's read.
+
+import { invoke } from '@tauri-apps/api/core';
 
 import type { DiffRequest } from './scm';
-import { graphRequest } from './graphHost';
 import { basename, el, icon, toPosix } from './ui';
 
 export interface HistoryEntry {
@@ -17,29 +17,10 @@ export interface HistoryEntry {
 	message: string;
 }
 
-/** The commits that touched `relativePath` (repo-relative, posix), newest first. */
+/** The commits that touched `relativePath` (repo-relative, posix), newest first. A null
+ *  answer (an unscripted mock, a backend that answered nothing) lists no commits. */
 export async function loadFileHistory(repo: string, relativePath: string, maxCommits = 300): Promise<HistoryEntry[]> {
-	const response = await graphRequest({
-		command: 'loadCommits',
-		repo,
-		refreshId: 0,
-		branches: null,
-		authors: null,
-		maxCommits,
-		showTags: false,
-		showRemoteBranches: true,
-		includeCommitsMentionedByReflogs: false,
-		onlyFollowFirstParent: false,
-		commitOrdering: 'date',
-		remotes: [],
-		hideRemotes: [],
-		showUncommittedChanges: false,
-		showUntrackedFiles: false,
-		filterPath: relativePath
-	});
-	if (!response || response['error']) throw new Error(String(response?.['error'] ?? 'The history could not be loaded'));
-	const commits = response['commits'];
-	return Array.isArray(commits) ? (commits as HistoryEntry[]).filter((c) => c.hash !== '*') : [];
+	return (await invoke<HistoryEntry[] | null>('file_log', { path: relativePath, limit: maxCommits, repo })) ?? [];
 }
 
 /** "3 hours ago", "2 days ago", or the date for anything older than a month. */

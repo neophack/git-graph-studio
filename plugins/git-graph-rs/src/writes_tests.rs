@@ -10,8 +10,10 @@ use std::fs;
 use serde_json::{json, Value};
 
 use super::{handle, operation_state, ActionSettings};
-use crate::git::Git;
-use crate::test_support::{branches, commit, current_branch, head, rev, subject, write, Scratch};
+use git_graph_studio_lib::git::Git;
+use git_graph_studio_lib::test_support::{
+    branches, commit, current_branch, head, rev, subject, write, Scratch,
+};
 
 fn dispatch(git: &Git, request: Value) -> Value {
     let mut request = request;

@@ -26,11 +26,6 @@ requestAnimationFrame(() => {
 	void invoke('boot_stage', { stage: 'splash painted', pageMs: performance.now() }).catch(() => undefined);
 });
 
-// The Git Graph view page warms in a hidden frame while this module graph is still
-// fetching and parsing: its bundle and first data requests overlap the splash instead of
-// serialising after the folder opens. The workbench claims the frame when it comes up
-// (graphHost mounts it without a reload when the page is already running).
-void import('./graphPreload').then((m) => m.startGraphPreload()).catch(() => undefined);
 
 void import('./workbench')
 	.then(({ bootWorkbench }) => bootWorkbench())

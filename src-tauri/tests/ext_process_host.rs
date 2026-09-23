@@ -40,7 +40,8 @@ fn install_demo_package(exts: &Path, version: &str) {
     )
     .unwrap();
     zip.start_file("web/view.html", options).unwrap();
-    zip.write_all(b"<html><body><h1>GGX Demo</h1></body></html>").unwrap();
+    zip.write_all(b"<html><body><h1>GGX Demo</h1></body></html>")
+        .unwrap();
     zip.finish().unwrap();
 
     cmd_ext::install_from_ggx_into(exts, &ggx, false).unwrap();
@@ -65,29 +66,107 @@ fn a_ggx2_backend_activates_answers_and_stops() {
     );
     assert_eq!(state.status().len(), 1);
 
-    // A command round-trips to the plugin and back.
+    // A command round-trips to the plugin and back. hello answers through the page-open
+    // convention: the greeting and the package's own file inventory travel as params —
+    // a palette click on it visibly opens the Files page.
     let answer = state
-        .run(&exts, "ggs.ext-demo", "ggs.ext-demo.hello", serde_json::json!(["integration test"]))
+        .run(
+            &exts,
+            "ggs.ext-demo",
+            "ggs.ext-demo.hello",
+            serde_json::json!(["integration test"]),
+        )
         .unwrap();
+    assert_eq!(
+        answer.get("openPage").and_then(|value| value.as_str()),
+        Some("files")
+    );
     let greeting = answer
-        .get("greeting")
+        .pointer("/params/greeting")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
     assert!(greeting.contains("Hello, integration test!"), "{greeting}");
     assert!(greeting.contains("process backend"), "{greeting}");
+    let files = answer
+        .pointer("/params/files")
+        .and_then(|value| value.as_array())
+        .expect("the file inventory is an array");
+    assert!(!files.is_empty(), "the install directory was walked");
+    assert!(
+        files.iter().any(
+            |file| file.pointer("/path").and_then(|value| value.as_str()) == Some("package.json")
+        ),
+        "{files:?}"
+    );
 
     // The page-open convention: a command result that names a page.
     let opened = state
-        .run(&exts, "ggs.ext-demo", "ggs.ext-demo.openPage", serde_json::json!([]))
+        .run(
+            &exts,
+            "ggs.ext-demo",
+            "ggs.ext-demo.openPage",
+            serde_json::json!([]),
+        )
         .unwrap();
     assert_eq!(
         opened.get("openPage").and_then(|value| value.as_str()),
         Some("main")
     );
 
+    // The context-menu command: the workbench hands it the clicked path and the selection
+    // (VS Code's pair, as paths); each selected path comes back with its metadata, and the
+    // result names the Files page with a tab title.
+    let picked = tmp.path().join("notes.txt");
+    std::fs::write(&picked, b"twelve bytes").unwrap();
+    let folder = tmp.path().join("folder");
+    std::fs::create_dir_all(folder.join("inside")).unwrap();
+    let details = state
+        .run(
+            &exts,
+            "ggs.ext-demo",
+            "ggs.ext-demo.fileDetails",
+            serde_json::json!([picked, [picked, folder]]),
+        )
+        .unwrap();
+    assert_eq!(
+        details.get("openPage").and_then(|value| value.as_str()),
+        Some("files")
+    );
+    assert_eq!(
+        details.get("title").and_then(|value| value.as_str()),
+        Some("File Details — 2 items")
+    );
+    let rows = details
+        .pointer("/params/details")
+        .and_then(|value| value.as_array())
+        .expect("one details row per selected path");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["name"], "notes.txt");
+    assert_eq!(rows[0]["kind"], "file");
+    assert_eq!(rows[0]["extension"], "txt");
+    assert_eq!(rows[0]["bytes"], 12);
+    assert!(rows[0]["modifiedMs"].is_u64(), "{:?}", rows[0]);
+    assert_eq!(rows[1]["kind"], "folder");
+    assert_eq!(rows[1]["entries"], 1);
+    // The palette passes no path: a clear error, not an empty page.
+    let bare = state
+        .run(
+            &exts,
+            "ggs.ext-demo",
+            "ggs.ext-demo.fileDetails",
+            serde_json::json!([]),
+        )
+        .unwrap_err();
+    assert!(bare.contains("context menu"), "{bare}");
+
     // An unknown command is the plugin's error, surfaced as-is.
     let error = state
-        .run(&exts, "ggs.ext-demo", "no.such.command", serde_json::json!([]))
+        .run(
+            &exts,
+            "ggs.ext-demo",
+            "no.such.command",
+            serde_json::json!([]),
+        )
         .unwrap_err();
     assert!(error.contains("unknown command"), "{error}");
 
@@ -112,14 +191,28 @@ fn run_starts_the_backend_lazily() {
     install_demo_package(&exts, "1.0.0");
 
     let state = ProcessHostState::default();
-    // No start() first: the first run() brings the backend up.
+    // No start() first: the first run() brings the backend up. The default name (no args)
+    // still names the Files page, and the inventory came along.
     let answer = state
-        .run(&exts, "ggs.ext-demo", "ggs.ext-demo.hello", serde_json::json!([]))
+        .run(
+            &exts,
+            "ggs.ext-demo",
+            "ggs.ext-demo.hello",
+            serde_json::json!([]),
+        )
         .unwrap();
+    assert_eq!(
+        answer.get("openPage").and_then(|value| value.as_str()),
+        Some("files")
+    );
     assert!(answer
-        .get("greeting")
+        .pointer("/params/greeting")
         .and_then(|value| value.as_str())
         .is_some_and(|greeting| greeting.contains("Hello, Git Graph Studio!")));
+    assert!(answer
+        .pointer("/params/files")
+        .and_then(|value| value.as_array())
+        .is_some_and(|files| !files.is_empty()));
     assert_eq!(state.status().len(), 1);
     state.stop("ggs.ext-demo").unwrap();
 }
@@ -140,7 +233,8 @@ fn an_extension_without_a_backend_is_a_clear_error() {
     )
     .unwrap();
     zip.start_file("package.json", options).unwrap();
-    zip.write_all(br#"{"name":"frontend","publisher":"acme","version":"1.0.0"}"#).unwrap();
+    zip.write_all(br#"{"name":"frontend","publisher":"acme","version":"1.0.0"}"#)
+        .unwrap();
     zip.start_file("web/view.html", options).unwrap();
     zip.write_all(b"<html></html>").unwrap();
     zip.finish().unwrap();
@@ -166,7 +260,8 @@ fn install_broken_package(exts: &Path) {
     )
     .unwrap();
     zip.start_file("package.json", options).unwrap();
-    zip.write_all(br#"{"name":"broken","publisher":"acme","version":"1.0.0"}"#).unwrap();
+    zip.write_all(br#"{"name":"broken","publisher":"acme","version":"1.0.0"}"#)
+        .unwrap();
     zip.finish().unwrap();
     cmd_ext::install_from_ggx_into(exts, &ggx, false).unwrap();
 }
@@ -186,16 +281,29 @@ fn the_boot_pass_starts_every_declaring_install_and_only_those() {
     assert_eq!(cmd_ext::process_backed_ids(&exts).len(), 2);
     let results = state.start_all_installed(&exts);
     assert_eq!(results.len(), 2);
-    assert!(results.iter().any(|r| r.is_ok()), "the demo package started");
+    assert!(
+        results.iter().any(|r| r.is_ok()),
+        "the demo package started"
+    );
 
     let status = state.status();
-    let demo = status.iter().find(|i| i.extension_id == "ggs.ext-demo").unwrap();
+    let demo = status
+        .iter()
+        .find(|i| i.extension_id == "ggs.ext-demo")
+        .unwrap();
     assert!(demo.pid > 0, "the demo backend is running");
     assert_eq!(demo.start_count, 1);
-    let broken = status.iter().find(|i| i.extension_id == "acme.broken").unwrap();
+    let broken = status
+        .iter()
+        .find(|i| i.extension_id == "acme.broken")
+        .unwrap();
     assert_eq!(broken.pid, 0);
     assert!(
-        broken.last_error.as_deref().unwrap_or_default().contains("not found"),
+        broken
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("not found"),
         "{:?}",
         broken.last_error
     );
@@ -205,7 +313,14 @@ fn the_boot_pass_starts_every_declaring_install_and_only_those() {
     state.stop_all();
     let stopped = state.status();
     assert!(stopped.iter().all(|i| i.pid == 0), "{stopped:?}");
-    assert_eq!(stopped.iter().find(|i| i.extension_id == "ggs.ext-demo").unwrap().start_count, 1);
+    assert_eq!(
+        stopped
+            .iter()
+            .find(|i| i.extension_id == "ggs.ext-demo")
+            .unwrap()
+            .start_count,
+        1
+    );
 }
 
 #[test]

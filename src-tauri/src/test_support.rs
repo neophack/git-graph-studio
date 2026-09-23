@@ -1,7 +1,9 @@
 //! Scratch repositories for the tests: a temporary directory with a scratch global git config
 //! (so "global" writes never touch the developer's own ~/.gitconfig), plus the small helpers the
-//! tests build histories with.
-#![cfg(test)]
+//! tests build histories with. Compiled into the app's tests and the plugin binaries' tests
+//! alike (the engine-feature backend links this crate, and its write-path tests use the
+//! same helpers); `tempfile` is a regular dependency, so nothing here needs a dev-only
+//! crate.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -127,11 +129,14 @@ pub fn current_branch(git: &Git) -> Option<String> {
 /// Pin the extension store to an isolated empty directory for the guard's lifetime, and stop
 /// any backend the developer's real store left warm: "nothing installed" assertions (the
 /// engine-version sentinel, the measure report's degraded phases) must hold on any machine,
+#[cfg(all(test, feature = "desktop"))]
 /// not just one whose `~/.ggs` happens to be empty.
+#[cfg(all(test, feature = "desktop"))]
 pub struct IsolatedExtensionStore {
     _dir: tempfile::TempDir,
 }
 
+#[cfg(all(test, feature = "desktop"))]
 impl Drop for IsolatedExtensionStore {
     fn drop(&mut self) {
         crate::ext_process::global().stop_all();
@@ -139,6 +144,7 @@ impl Drop for IsolatedExtensionStore {
     }
 }
 
+#[cfg(all(test, feature = "desktop"))]
 pub fn isolated_extension_store() -> IsolatedExtensionStore {
     let dir = tempfile::tempdir().expect("a tempdir for the isolated extension store");
     crate::cmd_ext::pin_extensions_home_for_tests(dir.path().to_path_buf());

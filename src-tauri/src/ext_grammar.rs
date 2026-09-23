@@ -44,12 +44,19 @@ fn read_manifest(dir: &Path) -> GrammarsManifest {
     }
     if let Some(languages) = contributes.get("languages").and_then(Json::as_array) {
         for language in languages {
-            let (Some(id), Some(extensions)) = (language.get("id").and_then(Json::as_str), language.get("extensions").and_then(Json::as_array)) else {
+            let (Some(id), Some(extensions)) = (
+                language.get("id").and_then(Json::as_str),
+                language.get("extensions").and_then(Json::as_array),
+            ) else {
                 continue;
             };
             out.languages.insert(
                 id.to_owned(),
-                extensions.iter().filter_map(Json::as_str).map(str::to_owned).collect(),
+                extensions
+                    .iter()
+                    .filter_map(Json::as_str)
+                    .map(str::to_owned)
+                    .collect(),
             );
         }
     }
@@ -60,7 +67,10 @@ fn read_manifest(dir: &Path) -> GrammarsManifest {
 /// `.tmLanguage` plist through the `plist` crate's JSON serialization.
 fn read_grammar_json(path: &Path) -> Option<Json> {
     let text = std::fs::read_to_string(path).ok()?;
-    if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")) {
+    if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+    {
         return serde_json::from_str(&text).ok();
     }
     let value = plist::Value::from_reader(std::io::Cursor::new(text.into_bytes())).ok()?;
@@ -73,13 +83,22 @@ fn yaml_string(value: &str) -> String {
 }
 
 fn yaml_list(values: &[String]) -> String {
-    format!("[{}]", values.iter().map(|value| yaml_string(value)).collect::<Vec<_>>().join(", "))
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(|value| yaml_string(value))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 /// Convert one TextMate pattern (a JSON object) into Sublime-syntax YAML rule lines at
 /// `indent`; returns how many lines were written (0 = nothing convertible).
 fn convert_pattern(pattern: &Json, indent: usize, out: &mut String) -> usize {
-    let Some(object) = pattern.as_object() else { return 0 };
+    let Some(object) = pattern.as_object() else {
+        return 0;
+    };
     let pad = " ".repeat(indent);
     let before = out.len();
     let match_name = object.get("name").and_then(Json::as_str).unwrap_or("");
@@ -92,11 +111,22 @@ fn convert_pattern(pattern: &Json, indent: usize, out: &mut String) -> usize {
             out.push_str(&format!("{pad}  scope: {}\n", yaml_string(match_name)));
         }
         let mut body = String::new();
-        let content_scope = object.get("contentName").and_then(Json::as_str).unwrap_or("");
+        let content_scope = object
+            .get("contentName")
+            .and_then(Json::as_str)
+            .unwrap_or("");
         if !content_scope.is_empty() {
-            body.push_str(&format!("{}- meta_scope: {}\n", " ".repeat(indent + 4), yaml_string(content_scope)));
+            body.push_str(&format!(
+                "{}- meta_scope: {}\n",
+                " ".repeat(indent + 4),
+                yaml_string(content_scope)
+            ));
         }
-        body.push_str(&format!("{}- match: {}\n", " ".repeat(indent + 4), yaml_string(end)));
+        body.push_str(&format!(
+            "{}- match: {}\n",
+            " ".repeat(indent + 4),
+            yaml_string(end)
+        ));
         body.push_str(&format!("{}  pop: true\n", " ".repeat(indent + 4)));
         if let Some(nested) = object.get("patterns").and_then(Json::as_array) {
             for child in nested {
@@ -143,11 +173,20 @@ fn convert_pattern(pattern: &Json, indent: usize, out: &mut String) -> usize {
 /// None when nothing of it survives (no name, no contexts).
 fn convert_grammar(grammar: &Json, extra_extensions: &[String]) -> Option<String> {
     let name = grammar.get("name").and_then(Json::as_str)?;
-    let scope = grammar.get("scopeName").and_then(Json::as_str).unwrap_or("source.unknown");
+    let scope = grammar
+        .get("scopeName")
+        .and_then(Json::as_str)
+        .unwrap_or("source.unknown");
     let mut extensions: Vec<String> = grammar
         .get("fileTypes")
         .and_then(Json::as_array)
-        .map(|entries| entries.iter().filter_map(Json::as_str).map(str::to_owned).collect())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(Json::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
         .unwrap_or_default();
     for extra in extra_extensions {
         let bare = extra.trim_start_matches('.');
@@ -170,9 +209,16 @@ fn convert_grammar(grammar: &Json, extra_extensions: &[String]) -> Option<String
     if let Some(repo) = grammar.get("repository").and_then(Json::as_object) {
         for (context_name, definition) in repo {
             // A repository entry may be the patterns list itself, or `{ patterns: [...] }`.
-            let patterns = definition.get("patterns").and_then(Json::as_array).cloned().or_else(|| {
-                definition.as_array().cloned().or_else(|| Some(vec![definition.clone()]))
-            });
+            let patterns = definition
+                .get("patterns")
+                .and_then(Json::as_array)
+                .cloned()
+                .or_else(|| {
+                    definition
+                        .as_array()
+                        .cloned()
+                        .or_else(|| Some(vec![definition.clone()]))
+                });
             let mut body = String::new();
             if let Some(patterns) = patterns {
                 for pattern in &patterns {
@@ -208,7 +254,10 @@ pub fn add_grammars_from(dir: &Path, builder: &mut syntect::parsing::SyntaxSetBu
             Some(path) => dir.join(path),
             None => continue,
         };
-        let fallback_name = declared.get("language").and_then(Json::as_str).unwrap_or("Extension");
+        let fallback_name = declared
+            .get("language")
+            .and_then(Json::as_str)
+            .unwrap_or("Extension");
         let extra = declared
             .get("language")
             .and_then(Json::as_str)
@@ -216,16 +265,25 @@ pub fn add_grammars_from(dir: &Path, builder: &mut syntect::parsing::SyntaxSetBu
             .cloned()
             .unwrap_or_default();
         let Some(grammar) = read_grammar_json(&path) else {
-            eprintln!("[extensions] grammar {} is unreadable; skipped", path.display());
+            eprintln!(
+                "[extensions] grammar {} is unreadable; skipped",
+                path.display()
+            );
             continue;
         };
         let Some(yaml) = convert_grammar(&grammar, &extra) else {
-            eprintln!("[extensions] grammar {} carries no convertible content; skipped", path.display());
+            eprintln!(
+                "[extensions] grammar {} carries no convertible content; skipped",
+                path.display()
+            );
             continue;
         };
         match syntect::parsing::SyntaxDefinition::load_from_str(&yaml, true, Some(fallback_name)) {
             Ok(definition) => builder.add(definition),
-            Err(error) => eprintln!("[extensions] grammar {} did not load ({error}); skipped", path.display()),
+            Err(error) => eprintln!(
+                "[extensions] grammar {} did not load ({error}); skipped",
+                path.display()
+            ),
         }
     }
 }
@@ -233,8 +291,12 @@ pub fn add_grammars_from(dir: &Path, builder: &mut syntect::parsing::SyntaxSetBu
 /// The loader over the whole extensions home — what the rope viewer's syntax set builds
 /// with (each installed package's grammars join syntect's defaults).
 pub fn add_extension_grammars(builder: &mut syntect::parsing::SyntaxSetBuilder) {
-    let Ok(home) = crate::cmd_ext::extensions_home_dir() else { return };
-    let Ok(entries) = std::fs::read_dir(&home) else { return };
+    let Ok(home) = crate::cmd_ext::extensions_home_dir() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&home) else {
+        return;
+    };
     for entry in entries.flatten() {
         if entry.path().is_dir() {
             add_grammars_from(&entry.path(), builder);
@@ -287,7 +349,9 @@ mod tests {
         add_grammars_from(tmp.path(), &mut builder);
         let set = builder.build();
         // The grammar's own fileTypes plus the language's declared `.mylang` resolve.
-        let syntax = set.find_syntax_by_extension("mylang").expect("the grammar loaded");
+        let syntax = set
+            .find_syntax_by_extension("mylang")
+            .expect("the grammar loaded");
         assert_eq!(syntax.name, "MyLang");
         // And it parses: the keyword scope appears on a match.
         let mut parser = syntect::parsing::ParseState::new(syntax);
@@ -301,7 +365,10 @@ mod tests {
             }
             stack.apply(op).unwrap();
         }
-        assert!(scopes.join(" ").contains("keyword.hello"), "scopes: {scopes:?}");
+        assert!(
+            scopes.join(" ").contains("keyword.hello"),
+            "scopes: {scopes:?}"
+        );
     }
 
     #[test]
@@ -328,7 +395,10 @@ mod tests {
         let mut builder = syntect::parsing::SyntaxSetBuilder::new();
         add_grammars_from(tmp.path(), &mut builder);
         let set = builder.build();
-        assert_eq!(set.find_syntax_by_extension("plang").unwrap().name, "PlistLang");
+        assert_eq!(
+            set.find_syntax_by_extension("plang").unwrap().name,
+            "PlistLang"
+        );
     }
 
     #[test]
@@ -344,7 +414,11 @@ mod tests {
             ]}}"#,
         )
         .unwrap();
-        std::fs::write(tmp.path().join("syntaxes/broken.tmLanguage.json"), "{ not json").unwrap();
+        std::fs::write(
+            tmp.path().join("syntaxes/broken.tmLanguage.json"),
+            "{ not json",
+        )
+        .unwrap();
         std::fs::write(
             tmp.path().join("syntaxes/good.tmLanguage.json"),
             r#"{"name":"Good","fileTypes":["good"],"patterns":[{"match":"x","name":"keyword.x"}]}"#,

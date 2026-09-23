@@ -2,8 +2,8 @@
 //! package (backend command pointing at the just-built engine backend,
 //! `plugins/git-graph-rs/src/main.rs`, `protocol: "ggx-rpc/1"`) is installed the way the app
 //! installs one, then spoken to over a real child process and a real pipe — `hello`, the
-//! view's own `loadRepoInfo`/`loadCommits` messages (through `request`), a synthetic
-//! `__scmChanges` command, `closeRepos`, and `stop`. Mirrors `ext_process_host.rs`'s shape for
+//! view's own `loadRepoInfo`/`loadCommits` messages (through `request`), `closeRepos`, and
+//! `stop`. Mirrors `ext_process_host.rs`'s shape for
 //! the general `ggs-ext/1` host; this one exercises `ProcKind::GgxRpc1` end to end.
 
 #![cfg(feature = "desktop")]
@@ -28,7 +28,10 @@ fn scratch_repo(tmp: &Path) -> Git {
     std::fs::create_dir_all(&repo).unwrap();
     let mut git = Git::new(&repo);
     git.env = vec![
-        ("GIT_CONFIG_GLOBAL".into(), tmp.join("gitconfig").display().to_string()),
+        (
+            "GIT_CONFIG_GLOBAL".into(),
+            tmp.join("gitconfig").display().to_string(),
+        ),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
         ("HOME".into(), tmp.display().to_string()),
         ("GIT_AUTHOR_NAME".into(), "Test".into()),
@@ -49,7 +52,10 @@ fn scratch_repo(tmp: &Path) -> Git {
 /// A `ggx/2` package whose backend is the real engine backend binary, `ggx-rpc/1`, installed
 /// into `exts`.
 fn install_backend_package(exts: &Path, version: &str) {
-    let ggx = exts.parent().unwrap().join(format!("git-graph-rs-{version}.ggx"));
+    let ggx = exts
+        .parent()
+        .unwrap()
+        .join(format!("git-graph-rs-{version}.ggx"));
     let file = std::fs::File::create(&ggx).unwrap();
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default();
@@ -64,7 +70,8 @@ fn install_backend_package(exts: &Path, version: &str) {
     .unwrap();
     zip.start_file("package.json", options).unwrap();
     zip.write_all(
-        format!(r#"{{"name":"git-graph-rs","publisher":"neophack","version":"{version}"}}"#).as_bytes(),
+        format!(r#"{{"name":"git-graph-rs","publisher":"neophack","version":"{version}"}}"#)
+            .as_bytes(),
     )
     .unwrap();
     zip.start_file("web/view.html", options).unwrap();
@@ -94,6 +101,21 @@ fn the_engine_backend_answers_hello_and_the_views_own_messages() {
     let hello = state.call(&exts, ID, "hello", Value::Null).unwrap();
     assert!(!hello.as_str().unwrap_or_default().is_empty(), "{hello:?}");
 
+    // The page bridge's shape: the host's page relay never interprets a message, so the
+    // envelope's repo is the empty string and the message's own `repo` is the one that counts.
+    let bridged = state
+        .call(
+            &exts,
+            ID,
+            "request",
+            json!({
+                "repo": "", "settings": null,
+                "message": { "command": "loadRepoInfo", "repo": root, "showRemoteBranches": true, "showStashes": true, "hideRemotes": [] }
+            }),
+        )
+        .unwrap();
+    assert_eq!(bridged["isRepo"], json!(true), "{bridged:?}");
+
     // `request`: the view's own `loadRepoInfo` message, answered by `engine_impl::engine_read`.
     let info_response = state
         .call(
@@ -109,12 +131,6 @@ fn the_engine_backend_answers_hello_and_the_views_own_messages() {
     assert_eq!(info_response["command"], json!("loadRepoInfo"));
     assert_eq!(info_response["isRepo"], json!(true));
     assert_eq!(info_response["error"], Value::Null);
-
-    // `request`: a synthetic, non-view command (`cmd_scm.rs`'s shape for `scm_changes`).
-    let scm = state
-        .call(&exts, ID, "request", json!({ "repo": root, "settings": null, "message": { "command": "__scmChanges" } }))
-        .unwrap();
-    assert!(scm.is_array(), "{scm:?}");
 
     // Two concurrent `loadCommits` reads answer independently (the thread-per-request design
     // `backend_rpc.rs` exists for) rather than one blocking the other.
@@ -136,9 +152,17 @@ fn the_engine_backend_answers_hello_and_the_views_own_messages() {
     // `closeRepos`: drops the backend's warm handle; a further read still answers correctly.
     state.call(&exts, ID, "closeRepos", Value::Null).unwrap();
     let reopened = state
-        .call(&exts, ID, "request", json!({ "repo": root, "settings": null, "message": { "command": "__scmChanges" } }))
+        .call(
+            &exts,
+            ID,
+            "request",
+            json!({
+                "repo": root, "settings": null,
+                "message": { "command": "loadRepoInfo", "showRemoteBranches": true, "showStashes": true, "hideRemotes": [] }
+            }),
+        )
         .unwrap();
-    assert!(reopened.is_array(), "{reopened:?}");
+    assert_eq!(reopened["isRepo"], json!(true));
 
     state.stop(ID).unwrap();
     assert_eq!(state.status()[0].pid, 0);

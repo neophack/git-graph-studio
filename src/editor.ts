@@ -26,7 +26,6 @@ import type * as TextEditor from './textEditor';
 import type { CallTreeView, WsSymbol } from './callTree';
 import { commands } from './commands';
 import { declaredLanguageName, menuSection } from './contributions';
-import { BinaryCompareHost, binaryCompareTitle, CompareHost } from './graphHost';
 import type { FolderCompareView } from './folderCompare';
 import type { MergeToolbar } from './mergeEditor';
 import { t } from './i18n';
@@ -171,14 +170,11 @@ export type EditorInput =
 	| { kind: 'calltree'; id: string; symbol: WsSymbol }
 	| { kind: 'symboldb'; id: string }
 	| { kind: 'analysis'; id: string; tool: import('./analysisTools').AnalysisToolId }
-	| { kind: 'graph' }
 	| { kind: 'help'; help: 'welcome' | 'shortcuts' }
 	| { kind: 'markdown'; path: string }
 	| { kind: 'history'; path: string }
 	| { kind: 'hex'; path: string }
 	| { kind: 'canlog'; path: string }
-	| { kind: 'compare'; id: string; title: string; fromHash: string; toHash: string; singleCommit: boolean; repo?: string }
-	| { kind: 'bincompare'; id: string; title: string; repo?: string; fromHash: string; toHash: string; file: { oldFilePath: string; newFilePath: string; type: string } }
 	| { kind: 'extpage'; id: string; title: string; extId: string; pageId: string; params?: unknown }
 	| { kind: 'extdetail'; id: string; title: string; extId: string };
 
@@ -195,9 +191,7 @@ export interface Editor {
 	view?: EditorView;
 	merge?: MergeView;
 	diffObserver?: ResizeObserver;
-	compare?: CompareHost;
 	/** The extension's own Binary Compare page — a binary file between two revisions. */
-	bincompare?: BinaryCompareHost;
 	folderCompare?: FolderCompareView;
 	/** An address-aligned hex comparison of two binary files on disk. */
 	hexCompare?: HexCompareView;
@@ -250,9 +244,6 @@ function inputId(input: EditorInput): string {
 		case 'extpage': return input.id;
 		case 'extdetail': return input.id;
 		case 'calltree': return 'calltree:' + input.id;
-		case 'compare': return 'compare:' + input.id;
-		case 'bincompare': return 'bincompare:' + input.id;
-		case 'graph': return 'graph';
 		case 'help': return 'help:' + input.help;
 		case 'markdown': return 'markdown:' + input.path;
 		case 'history': return 'history:' + input.path;
@@ -362,8 +353,6 @@ export class EditorGroup {
 	/** True while a back/forward jump itself activates an editor: those moves walk the history
 	 *  instead of extending it. */
 	private navigating = false;
-	/** The graph host hands over its frame element; the group only shows/hides it. */
-	graphElement: HTMLElement | null = null;
 	/** Whether an empty group shows the welcome page: the area keeps that to its first group,
 	 *  so an empty split shows an empty editor (VS Code's behaviour), not a second welcome. */
 	showWelcome = true;
@@ -1800,26 +1789,6 @@ export class EditorGroup {
 		this.add(editor);
 	}
 
-	/** The Git Graph tab: the host's frame, shown as a pinned-looking editor. */
-	openGraph(): void {
-		const existing = this.open.find((e) => e.input.kind === 'graph');
-		if (existing) {
-			this.activate(existing);
-			return;
-		}
-		if (!this.graphElement) return;
-		const editor: Editor = {
-			input: { kind: 'graph' },
-			id: 'graph',
-			label: 'Git Graph',
-			iconSrc: '/icons/git-graph.svg',
-			pane: el('div', 'editor-pane'),
-			dirty: false
-		};
-		editor.pane.appendChild(this.graphElement);
-		this.add(editor);
-	}
-
 	/** A help page as an editor tab: the Welcome page or the Keyboard Shortcuts reference. */
 	openHelp(help: 'welcome' | 'shortcuts'): void {
 		const id = 'help:' + help;
@@ -1839,54 +1808,6 @@ export class EditorGroup {
 		const page = el('div', 'welcome');
 		editor.pane.appendChild(page);
 		this.renderHelp?.(help, page);
-		this.add(editor);
-	}
-
-	isGraphOpen(): boolean {
-		return this.open.some((e) => e.input.kind === 'graph');
-	}
-
-	/** A Commit Comparison tab: the changes of one commit ("Open Changes") or between two of
-	 *  them, as the graph's context menu and the commit details request it. */
-	openCompare(input: Extract<EditorInput, { kind: 'compare' }>): void {
-		const existing = this.open.find((e) => e.input.kind === 'compare' && e.input.id === input.id);
-		if (existing) {
-			this.activate(existing);
-			return;
-		}
-		const editor: Editor = {
-			input,
-			id: 'compare:' + input.id,
-			label: input.title,
-			iconClass: 'diff',
-			pane: el('div', 'editor-pane compare-pane'),
-			dirty: false
-		};
-		editor.compare = new CompareHost(editor.pane, { fromHash: input.fromHash, toHash: input.toHash, singleCommit: input.singleCommit, repo: input.repo }, {
-			openDiff: (diff) => void this.openDiff({ kind: 'diff', ...diff }),
-			openBinaryCompare: (compare) => void this.openBinaryCompare({ kind: 'bincompare', ...compare, id: binCompareId(compare), title: binaryCompareTitle(compare) })
-		});
-		this.add(editor);
-	}
-
-	/** A Binary Compare tab — the extension's own page for one binary file between two
-	 *  revisions, opened from the graph view's click on a binary file and from the Commit
-	 *  Comparison page's "Open Diff in Editor" on one. */
-	openBinaryCompare(input: Extract<EditorInput, { kind: 'bincompare' }>): void {
-		const existing = this.open.find((e) => e.input.kind === 'bincompare' && e.input.id === input.id);
-		if (existing) {
-			this.activate(existing);
-			return;
-		}
-		const editor: Editor = {
-			input,
-			id: 'bincompare:' + input.id,
-			label: input.title,
-			iconClass: 'diff',
-			pane: el('div', 'editor-pane compare-pane'),
-			dirty: false
-		};
-		editor.bincompare = new BinaryCompareHost(editor.pane, { repo: input.repo, fromHash: input.fromHash, toHash: input.toHash, file: input.file });
 		this.add(editor);
 	}
 
@@ -2036,13 +1957,15 @@ export class EditorGroup {
 	 *  close — the extension host owns the frame, the editor owns the tab's lifetime. */
 	async openExtPage(
 		input: Extract<EditorInput, { kind: 'extpage' }>,
-		mount: (pane: HTMLElement) => (() => void) | void
+		mount: (pane: HTMLElement) => (() => void) | void,
+		iconSrc?: string | null
 	): Promise<void> {
 		const editor: Editor = {
 			input,
 			id: input.id,
 			label: input.title,
-			iconClass: 'globe',
+			// The package's own icon when it declares one (a data URL), the generic globe else.
+			...(iconSrc ? { iconSrc } : { iconClass: 'globe' }),
 			pane: el('div', 'editor-pane ext-page'),
 			dirty: false
 		};
@@ -2096,14 +2019,6 @@ export class EditorGroup {
 		this.mru.unshift(editor);
 		this.onFocus?.();
 		for (const other of this.open) other.pane.hidden = other !== editor;
-		if (editor.input.kind === 'graph' && this.graphElement) {
-			// The graph may have loaded (or last rendered) while its pane was `hidden` -
-			// `display:none` gives its iframe a zero-size viewport, and the shared web/ view
-			// only recomputes column widths and its virtual window on a 'resize' event. Toggling
-			// `hidden` off does not itself fire one, so ask GraphHost to raise one once the pane
-			// has its real size back.
-			this.graphElement.dispatchEvent(new CustomEvent('ggs-graph-shown'));
-		}
 		this.update();
 		editor.view?.focus();
 		editor.view?.requestMeasure();
@@ -2167,10 +2082,6 @@ export class EditorGroup {
 				// it reopens in the raw frame view, where a line option would force the text form.
 				const line = isCanLog(entry.input.path) ? undefined : entry.line;
 				await this.openFile(entry.input.path, { line, column: entry.column });
-			} else if (entry.input.kind === 'graph') {
-				this.openGraph();
-			} else if (entry.input.kind === 'help') {
-				this.openHelp(entry.input.help);
 			}
 			// A closed diff / comparison stop is gone with its data: the jump is a no-op.
 		} finally {
@@ -2282,15 +2193,9 @@ export class EditorGroup {
 		editor.view?.destroy();
 		editor.merge?.destroy();
 		editor.diffObserver?.disconnect();
-		editor.compare?.dispose();
-		editor.bincompare?.dispose();
 		editor.folderCompare?.dispose();
 		editor.fast?.dispose();
 		editor.onClose?.();
-		if (editor.input.kind === 'graph') {
-			// The frame survives: the host reuses it when the tab is opened again.
-			this.graphElement?.remove();
-		}
 		editor.pane.remove();
 		this.forget(editor);
 		this.activateSuccessor(editor, index);
@@ -2585,7 +2490,7 @@ export class EditorGroup {
 				{ label: 'Copy Path', keybinding: 'Shift+Alt+C', run: () => void writeText(path) },
 				{ label: 'Copy Relative Path', keybinding: 'Ctrl+K Ctrl+Shift+C', run: () => void writeText(this.rootPath ? relativeTo(this.rootPath, path) : path) });
 		}
-		entries.push(...menuSection('editor/title/context'));
+		entries.push(...menuSection('editor/title/context', editor.input.kind === 'file' ? [editor.input.path, [editor.input.path]] : undefined));
 		return entries;
 	}
 
@@ -2659,8 +2564,9 @@ export class EditorGroup {
 			'separator',
 			{ label: 'Find', keybinding: 'Ctrl+F', run: () => this.runEditorCommand('find') },
 			{ label: 'Command Palette...', keybinding: 'Ctrl+Shift+P', run: () => void commands.execute('workbench.commandPalette') },
-			// Extensions' `contributes.menus["editor/context"]` entries.
-			...menuSection('editor/context')
+			// Extensions' `contributes.menus["editor/context"]` entries, handed the file the
+			// editor shows (VS Code's resource argument) when it shows one.
+			...menuSection('editor/context', editor.input.kind === 'file' ? [editor.input.path, [editor.input.path]] : undefined)
 		];
 	}
 
@@ -2973,10 +2879,8 @@ export class EditorGroup {
 			const relative = this.rootPath ? relativeTo(this.rootPath, this.active.input.path) : toPosix(this.active.input.path);
 			const parts = relative.split('/').filter((p) => p !== '');
 			parts.forEach((part, index) => crumbs.push({ label: part, iconName: index === parts.length - 1 ? fileIcon(part) : 'folder', iconColor: index === parts.length - 1 ? fileIconColor(part) : undefined }));
-		} else if (this.active.input.kind === 'diff' || this.active.input.kind === 'compare' || this.active.input.kind === 'bincompare' || this.active.input.kind === 'folders' || this.active.input.kind === 'calltree') {
+		} else if (this.active.input.kind === 'diff' || this.active.input.kind === 'folders' || this.active.input.kind === 'calltree') {
 			crumbs.push({ label: this.active.label, iconName: 'diff' });
-		} else if (this.active.input.kind === 'graph') {
-			crumbs.push({ label: 'Git Graph' });
 		} else if (this.active.input.kind === 'markdown' || this.active.input.kind === 'history' || this.active.input.kind === 'hex' || this.active.input.kind === 'canlog') {
 			// A preview, history or hex tab of a file walks the file's own path, as VS Code's
 			// breadcrumbs do for a custom editor over that file.

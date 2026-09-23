@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::cmd_graph::is_safe_ref_name;
+use crate::git::is_safe_ref_name;
 use crate::git::Git;
 
 type Status = Result<(), String>;
@@ -111,6 +111,249 @@ pub fn tags(git: &Git) -> Result<Vec<String>, String> {
         .collect())
 }
 
+/* ---------- The working-tree status ---------- */
+
+/// One path's change as the Source Control view lists it — the staged and unstaged halves kept
+/// apart on one entry, the same shape the view has always consumed (camelCase on the wire).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScmStatusChange {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub staged: Option<&'static str>,
+    pub unstaged: Option<&'static str>,
+    pub untracked: bool,
+    pub conflicted: bool,
+}
+
+/// One porcelain status letter as the view's status word. `T` (type change) reads as a
+/// modification — the view has no separate state for it; `C` (copied) reads as added.
+fn status_word(letter: u8) -> Option<&'static str> {
+    match letter {
+        b'A' | b'C' => Some("added"),
+        b'M' | b'T' => Some("modified"),
+        b'D' => Some("deleted"),
+        b'R' => Some("renamed"),
+        _ => None,
+    }
+}
+
+/// Parse `git status --porcelain=v1 -z --untracked-files=all` output into the view's change
+/// list. The `-z` form is NUL-separated — `XY <path>\0`, with the original path as a second
+/// NUL-terminated field after a renamed (`R`/`C`) entry — so paths with spaces or quotes pass
+/// through without quoting.
+pub fn parse_status_z(output: &str) -> Vec<ScmStatusChange> {
+    let mut changes = Vec::new();
+    let mut fields = output.split('\0');
+    while let Some(entry) = fields.next() {
+        // "XY <path>" — at least three prefix bytes and a non-empty path.
+        if entry.len() < 4 || !entry.is_char_boundary(3) {
+            continue;
+        }
+        let letters = entry.as_bytes();
+        let (x, y) = (letters[0], letters[1]);
+        let path = entry[3..].to_owned();
+        let old_path = if x == b'R' || x == b'C' {
+            fields.next().map(str::to_owned)
+        } else {
+            None
+        };
+        if x == b'?' && y == b'?' {
+            changes.push(ScmStatusChange {
+                path,
+                old_path: None,
+                staged: None,
+                unstaged: None,
+                untracked: true,
+                conflicted: false,
+            });
+        } else if x == b'U' || y == b'U' || (x == b'A' && y == b'A') || (x == b'D' && y == b'D') {
+            // An unmerged path shows in the Merge Changes section; which side staged what is
+            // not a useful distinction there.
+            changes.push(ScmStatusChange {
+                path,
+                old_path,
+                staged: None,
+                unstaged: None,
+                untracked: false,
+                conflicted: true,
+            });
+        } else {
+            changes.push(ScmStatusChange {
+                path,
+                old_path,
+                staged: status_word(x),
+                unstaged: status_word(y),
+                untracked: false,
+                conflicted: false,
+            });
+        }
+    }
+    changes
+}
+
+/// The working tree's changes, staged and unstaged halves kept apart, as the Source Control
+/// view's two sections list them.
+pub fn status(git: &Git) -> Result<Vec<ScmStatusChange>, String> {
+    let output = git.output(&[
+        "-c",
+        "core.quotepath=false",
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+    ])?;
+    Ok(parse_status_z(&output))
+}
+
+/// One commit of a file's history, as the Timeline lists it (camelCase on the wire).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileLogEntry {
+    pub hash: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    /// Seconds since the epoch.
+    pub date: i64,
+    /// The subject line.
+    pub message: String,
+}
+
+/// The commits that touched `path`, newest first, following the path across renames — the
+/// Timeline of a file. The subject only (`%s`): the engine's history listed subjects too.
+pub fn file_log(git: &Git, path: &str, limit: usize) -> Result<Vec<FileLogEntry>, String> {
+    let output = git.output(&[
+        "-c",
+        "core.quotepath=false",
+        "log",
+        &format!("-n{limit}"),
+        "--follow",
+        "--format=%H%x00%P%x00%an%x00%at%x00%s%x1e",
+        "--",
+        path,
+    ])?;
+    let mut entries = Vec::new();
+    for record in output.split('\x1e') {
+        let record = record.trim_start_matches('\n');
+        if record.trim().is_empty() {
+            continue;
+        }
+        let mut fields = record.splitn(5, '\0');
+        let (Some(hash), Some(parents), Some(author), Some(date), Some(message)) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
+            continue;
+        };
+        entries.push(FileLogEntry {
+            hash: hash.to_owned(),
+            parents: parents.split_whitespace().map(str::to_owned).collect(),
+            author: author.to_owned(),
+            date: date.trim().parse().unwrap_or(0),
+            message: message.trim_end().to_owned(),
+        });
+    }
+    Ok(entries)
+}
+
+/* ---------- The palette's mutations (branch/remote/stash/tag) ---------- */
+
+pub fn rename_branch(git: &Git, old: &str, new: &str) -> Status {
+    check_ref("oldName", old)
+        .and_then(|_| check_ref("newName", new))
+        .and_then(|_| git.run(&["branch", "-m", old, new]))
+}
+
+pub fn delete_branch(git: &Git, name: &str, force: bool) -> Status {
+    check_ref("branchName", name)
+        .and_then(|_| git.run(&["branch", if force { "-D" } else { "-d" }, name]))
+}
+
+/// Merge `name` into the current branch, fast-forwarding when possible (the palette's choice:
+/// the "create a merge commit" variant is the Git Graph view's own dialog).
+pub fn merge(git: &Git, name: &str) -> Status {
+    check_ref("obj", name).and_then(|_| git.run(&["merge", "--no-edit", name]))
+}
+
+pub fn rebase(git: &Git, name: &str) -> Status {
+    check_ref("obj", name).and_then(|_| git.run(&["rebase", name]))
+}
+
+pub fn add_remote(git: &Git, name: &str, url: &str, fetch: bool) -> Status {
+    check_ref("name", name).and_then(|_| git.run(&["remote", "add", name, url]))?;
+    if fetch {
+        git.run(&["fetch", name])
+    } else {
+        Ok(())
+    }
+}
+
+pub fn delete_remote(git: &Git, name: &str) -> Status {
+    check_ref("name", name).and_then(|_| git.run(&["remote", "remove", name]))
+}
+
+pub fn push_stash(git: &Git, message: &str, include_untracked: bool) -> Status {
+    let mut args = vec!["stash", "push"];
+    if include_untracked {
+        args.push("--include-untracked");
+    }
+    if !message.trim().is_empty() {
+        args.extend(["--message", message]);
+    }
+    git.run(&args)
+}
+
+pub fn apply_stash(git: &Git, selector: &str, reinstate_index: bool) -> Status {
+    let mut args = vec!["stash", "apply"];
+    if reinstate_index {
+        args.push("--index");
+    }
+    args.push(selector);
+    git.run(&args)
+}
+
+pub fn pop_stash(git: &Git, selector: &str, reinstate_index: bool) -> Status {
+    let mut args = vec!["stash", "pop"];
+    if reinstate_index {
+        args.push("--index");
+    }
+    args.push(selector);
+    git.run(&args)
+}
+
+pub fn drop_stash(git: &Git, selector: &str) -> Status {
+    git.run(&["stash", "drop", selector])
+}
+
+/// Create a tag at `hash` — annotated when `message` names one, lightweight otherwise. An
+/// empty `hash` tags HEAD.
+pub fn add_tag(git: &Git, name: &str, hash: &str, message: &str, force: bool) -> Status {
+    check_ref("tagName", name)?;
+    let mut args = vec!["tag"];
+    if !message.trim().is_empty() {
+        args.extend(["--annotate", "--message", message]);
+    }
+    if force {
+        args.push("--force");
+    }
+    args.push(name);
+    if !hash.is_empty() {
+        args.push(hash);
+    }
+    git.run(&args)
+}
+
+pub fn delete_tag(git: &Git, name: &str) -> Status {
+    check_ref("tagName", name).and_then(|_| git.run(&["tag", "--delete", name]))
+}
+
+pub fn undo_last_commit(git: &Git) -> Status {
+    git.run(&["reset", "--soft", "HEAD^"])
+}
+
 fn current_branch(git: &Git) -> Option<String> {
     git.output(&["symbolic-ref", "--short", "-q", "HEAD"])
         .ok()
@@ -194,7 +437,7 @@ pub fn sync(git: &Git, rebase: bool) -> Status {
 }
 
 pub fn fetch(git: &Git, remote: Option<&str>, prune: bool) -> Status {
-    crate::cmd_graph::fetch(git, remote, prune, false)
+    crate::git::fetch(git, remote, prune, false)
 }
 
 /// `git clone <url>` into `parent/<name>` (the name derived from the URL when not given);
@@ -713,5 +956,157 @@ mod tests {
         assert!(
             !fs::exists(git.git_dir().unwrap().join("hooks").join("commit-msg")).unwrap_or(false)
         );
+    }
+
+    #[test]
+    fn parse_status_z_covers_every_entry_shape() {
+        // `XY <path>\0`, the rename's original path as the next field; untracked `??`, an
+        // unmerged `UU`, both-sides `AA`, and a dual `MM` entry.
+        let output = concat!(
+            "R  renamed.txt\0old.txt\0",
+            " M c.txt\0",
+            "?? deep/nested.txt\0",
+            "UU conf.txt\0",
+            "AA both.txt\0",
+            "MM half.txt\0",
+            "A  added.bin\0",
+        );
+        let changes = parse_status_z(output);
+        assert_eq!(changes.len(), 7);
+        assert_eq!(
+            changes[0],
+            ScmStatusChange {
+                path: "renamed.txt".into(),
+                old_path: Some("old.txt".into()),
+                staged: Some("renamed"),
+                unstaged: None,
+                untracked: false,
+                conflicted: false,
+            }
+        );
+        assert_eq!(changes[1].staged, None);
+        assert_eq!(changes[1].unstaged, Some("modified"));
+        assert!(changes[2].untracked);
+        assert!(changes[3].conflicted);
+        assert!(changes[4].conflicted, "added on both sides is a conflict");
+        assert_eq!(changes[5].staged, Some("modified"));
+        assert_eq!(changes[5].unstaged, Some("modified"));
+        assert_eq!(changes[6].staged, Some("added"));
+    }
+
+    #[test]
+    fn status_lists_staged_unstaged_untracked_and_conflicted_paths() {
+        let scratch = Scratch::new("scm-status");
+        let git = scratch.repo("repo");
+        commit(&git, "a.txt", "one\n", "init");
+        commit(&git, "c.txt", "base\n", "base");
+        git.run(&["mv", "a.txt", "renamed.txt"]).unwrap();
+        write(&git, "c.txt", "edited\n");
+        write(&git, "deep/entry.txt", "new\n");
+
+        let changes = status(&git).unwrap();
+        assert!(changes.iter().any(|c| {
+            c.path == "renamed.txt"
+                && c.old_path.as_deref() == Some("a.txt")
+                && c.staged == Some("renamed")
+        }));
+        assert!(changes
+            .iter()
+            .any(|c| c.path == "c.txt" && c.unstaged == Some("modified")));
+        assert!(changes
+            .iter()
+            .any(|c| c.path == "deep/entry.txt" && c.untracked));
+
+        // A content conflict: both sides of the merge changed c.txt differently.
+        git.run(&["checkout", "-q", "--", "."]).unwrap();
+        git.run(&["stash", "push", "-q", "-u"]).unwrap();
+        git.run(&["checkout", "-q", "-b", "side"]).unwrap();
+        commit(&git, "c.txt", "side\n", "side");
+        git.run(&["checkout", "-q", "main"]).unwrap();
+        commit(&git, "c.txt", "main\n", "main");
+        assert!(git.run(&["merge", "side"]).is_err());
+        let changes = status(&git).unwrap();
+        let conflict = changes
+            .iter()
+            .find(|c| c.path == "c.txt")
+            .expect("the conflicted path is listed");
+        assert!(conflict.conflicted);
+    }
+
+    #[test]
+    fn file_log_follows_renames_and_reports_parents() {
+        let scratch = Scratch::new("file-log");
+        let git = scratch.repo("repo");
+        // Multi-line, mostly-identical contents: `--follow`'s rename detection is
+        // similarity-based, and a one-character file never looks like a rename.
+        let five =
+            |third: &str, fifth: &str| format!("line one\nline two\n{third}\nline four\n{fifth}\n");
+        commit(&git, "a.txt", &five("line three", "line five"), "first");
+        commit(
+            &git,
+            "a.txt",
+            &five("line three changed", "line five"),
+            "second",
+        );
+        git.run(&["mv", "a.txt", "b.txt"]).unwrap();
+        commit(
+            &git,
+            "b.txt",
+            &five("line three changed", "line five edited"),
+            "third",
+        );
+
+        let log = file_log(&git, "b.txt", 100).unwrap();
+        assert_eq!(log.len(), 3, "{log:?}");
+        assert_eq!(log[0].message, "third");
+        assert_eq!(log[0].hash.len(), 40);
+        assert_eq!(log[0].parents, vec![log[1].hash.clone()]);
+        // The scratch's identity comes from its environment (GIT_AUTHOR_NAME), not config.
+        assert_eq!(log[0].author, "Test");
+        assert!(
+            log.iter().any(|entry| entry.message == "first"),
+            "--follow reaches the commits before the rename"
+        );
+    }
+
+    #[test]
+    fn tag_stash_and_branch_operations_run() {
+        let scratch = Scratch::new("scm-ops");
+        let git = scratch.repo("repo");
+        commit(&git, "a.txt", "one\n", "init");
+
+        add_tag(&git, "light", "", "", false).unwrap();
+        add_tag(&git, "v1", "", "release one", false).unwrap();
+        assert_eq!(git.output(&["tag", "--list"]).unwrap().lines().count(), 2);
+        assert!(
+            git.output(&["cat-file", "-t", "v1"]).unwrap().trim() == "tag",
+            "a message makes an annotated tag object"
+        );
+        delete_tag(&git, "v1").unwrap();
+
+        git.run(&["branch", "topic"]).unwrap();
+        rename_branch(&git, "topic", "feature").unwrap();
+        delete_branch(&git, "feature", true).unwrap();
+        assert_eq!(
+            git.output(&["branch", "--list", "feature"]).unwrap().trim(),
+            ""
+        );
+
+        write(&git, "a.txt", "wip\n");
+        push_stash(&git, "mine", true).unwrap();
+        assert!(stashes(&git).unwrap()[0].message.contains("mine"));
+        git.run(&["stash", "pop", "-q"]).unwrap();
+
+        git.run(&["branch", "side"]).unwrap();
+        merge(&git, "side").unwrap();
+        undo_last_commit(&git).unwrap();
+        // `repo()` made the initial commit before the test's own "init" one; undo drops the
+        // latter (its changes stay staged).
+        assert_eq!(subject(&git, "HEAD"), "Initial commit");
+        assert!(!git
+            .output(&["diff", "--name-only", "--cached"])
+            .unwrap()
+            .trim()
+            .is_empty());
     }
 }

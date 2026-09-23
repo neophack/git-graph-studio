@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-import { ensureBuiltinSettings, ExtensionHost, type ExtInfo } from '../src/extHost';
+import { ExtensionHost, type ExtInfo } from '../src/extHost';
 import { extensionSettingDefs, registerContextProvider, resolvedMenuEntries } from '../src/contributions';
 import { ExtensionsPanel } from '../src/extensionsPanel';
 import { commandForBinding, commands } from '../src/commands';
@@ -12,10 +15,11 @@ import { THEMES, syncExtensionThemes, updateSetting } from '../src/settings';
 // frame's `parent` is this same window, so tests drive it with MessageEvents and read its posts.
 import '../src/extHostBoot';
 import { backend } from './tauriMock';
+import { saveExtSetting } from '../src/state';
 import { click, flush, key, menuItem, menuLabels, notificationButton, notifications, rightClick, type } from './helpers';
 import { Explorer } from '../src/explorer';
 
-const BUILTIN: ExtInfo = { id: 'neophack.git-graph-rs', name: 'git-graph-rs', displayName: 'Git Graph', publisher: 'neophack', version: '1.0.23', description: 'Git Graph', builtin: true, icon: null, path: '', categories: ['SCM Providers'], keywords: ['git'], repository: 'https://github.com/neophack/git-graph-rs', license: 'MIT', enginesVscode: '^1.80.0', extensionDependencies: [], extensionPack: [], readme: 'README.md', changelog: null, format: 'builtin', ggx: null };
+const BUILTIN: ExtInfo = { id: 'neophack.git-graph-rs', name: 'git-graph-rs', displayName: 'Git Graph', publisher: 'neophack', version: '1.0.23', description: 'Git Graph', builtin: true, icon: null, path: '', categories: ['SCM Providers'], keywords: ['git'], repository: 'https://github.com/neophack/git-graph-rs', license: 'MIT', enginesVscode: '^1.80.0', extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'bundled', ggx: null };
 const USER: ExtInfo = { id: 'acme.demo', name: 'demo', displayName: null, publisher: 'acme', version: '2.0.0', description: 'A demo', builtin: false, icon: null, path: '/ext/acme.demo-2.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: ['acme.base'], extensionPack: [], readme: null, changelog: null, format: 'vsix', ggx: null };
 
 function withExtensions(...extensions: ExtInfo[]): void {
@@ -65,9 +69,9 @@ describe('ExtensionsPanel', () => {
 
 	it('offers the bundled sample the same way: a not-yet-installed entry installs by its id', async () => {
 		// What cmd_ext.rs's listing composes when no demo package is installed: the embedded
-		// manifest stands in, `format: 'builtin'` (the install offer), `builtin: false` (it is
+		// manifest stands in, `format: 'bundled'` (the install offer), `builtin: false` (it is
 		// a sample, nothing of it is built into the app).
-		const SAMPLE: ExtInfo = { id: 'ggs.ext-demo', name: 'ext-demo', displayName: 'GGX Demo', publisher: 'ggs', version: '0.2.0', description: 'The worked example', builtin: false, icon: null, path: '', categories: ['Examples'], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'builtin', ggx: null };
+		const SAMPLE: ExtInfo = { id: 'ggs.ext-demo', name: 'ext-demo', displayName: 'GGX Demo', publisher: 'ggs', version: '0.2.0', description: 'The worked example', builtin: false, icon: null, path: '', categories: ['Examples'], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'bundled', ggx: null };
 		let listed: ExtInfo[] = [BUILTIN, SAMPLE, USER];
 		backend.on('ext_list', () => listed);
 		const installed: ExtInfo = { ...SAMPLE, format: 'ggx', path: '/ext/ggs.ext-demo-0.2.0', ggx: { format: 'ggx/2', id: 'ggs.ext-demo', version: '0.2.0', pages: { main: { page: 'web/view.html' } }, backend: { kind: 'process', command: 'bin/win32-x64/ggs-ext-demo.exe' }, permissions: ['clipboard'] } };
@@ -522,36 +526,82 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 });
 
 describe('the extension host command wiring', () => {
-	it('registers the baked-in contributions synchronously, and the activation pass skips them', async () => {
-		// The build-time virtual module carries the shipped manifest: its menus must join the
-		// registry without a single backend round-trip, before any view has rendered.
-		backend.on('ext_read_file', () => { throw new Error('no such file'); });
+	it('applies an installed package manifest through the activation pass alone', async () => {
+		// Nothing is baked anymore: an installed package's manifest is read by the async
+		// activation pass, and until it lands nothing of the package is registered.
+		const manifest = {
+			contributes: {
+				commands: [{ command: 'acme.view', title: 'View Acme' }],
+				menus: { 'scm/title': [{ command: 'acme.view', group: 'navigation' }] },
+				configuration: { title: 'Acme', properties: { 'acme.colour': { type: 'string', default: 'red' } } }
+			}
+		};
+		const installed: ExtInfo = { id: 'acme.ggxdemo', name: 'ggxdemo', displayName: 'Acme GGX', publisher: 'acme', version: '1.0.0', description: '', builtin: false, icon: null, path: '/ext/acme.ggxdemo-1.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggx', ggx: { format: 'ggx/2', id: 'acme.ggxdemo', version: '1.0.0', pages: {}, backend: { kind: 'process', command: 'bin/tool.exe' } } };
+		backend.on('ext_list', () => [installed]);
+		backend.on('ext_read_file', ({ relPath }) => relPath === 'package.json' ? JSON.stringify(manifest) : (() => { throw new Error('no such file'); })());
 		const host = new ExtensionHost();
-		host.applyBuiltinContributions();
-		expect(resolvedMenuEntries('scm/title').some((entry) => entry.command === 'git-graph-rs.view')).toBe(true);
-		// The Gerrit refs/for push lives in the sync menu's push group (git.pullpush) — the
-		// placement VS Code renders in its SCM sync menu, and the Source Control "..." menu's
-		// Pull, Push submenu carries here. The interface-language context the workbench
-		// registers picks exactly one of the locale variants.
-		registerContextProvider('git-graph-rs:interfaceZhCn', () => false);
-		const pullPush = resolvedMenuEntries('git.pullpush');
-		expect(pullPush.filter((entry) => entry.command === 'git-graph-rs.gerritPushRef' || entry.command === 'git-graph-rs.gerritPushRef.zhCn')).toEqual([
-			{ command: 'git-graph-rs.gerritPushRef', label: 'Push to Gerrit Ref for Current Branch (refs/for/...)', group: '3_push@5' }
-		]);
-		// The settings schemas ride the async builtin-settings chunk - build-time data too, so
-		// still no backend round-trip, one microtask behind the menus.
-		await ensureBuiltinSettings();
-		expect(extensionSettingDefs().some((def) => def.extId === 'neophack.git-graph-rs')).toBe(true);
-		// The activation pass lists the built-in but must not re-read its manifest: the baked
-		// data already registered it, and the on-disk copy could even lag mid-upgrade.
-		const applied: string[] = [];
-		host.onContributionsApplied = () => applied.push('applied');
-		withExtensions(BUILTIN);
+		expect(resolvedMenuEntries('scm/title')).toEqual([]);
 		await host.activateInstalled();
-		expect(backend.callsTo('ext_read_file').some((call) => call.extId === 'neophack.git-graph-rs')).toBe(false);
-		expect(applied).toEqual(['applied']);
+		expect(resolvedMenuEntries('scm/title')).toEqual([
+			{ command: 'acme.view', label: 'View Acme', group: 'navigation', extId: 'acme.ggxdemo', icon: undefined }
+		]);
+		expect(extensionSettingDefs().some((def) => def.extId === 'acme.ggxdemo')).toBe(true);
 	});
-
+	it('resolves a locale-twin pair to one menu entry and one palette entry', async () => {
+		// The manifest's `x` / `x.zhCn` command pairs are discriminated by the `<package name>:
+		// interfaceZhCn` context key (the package name, not the publisher.name id) its own code
+		// would set in VS Code; a process package has
+		// no running code, so the host answers it — its declared interfaceLanguage setting
+		// when explicit, the app locale when "auto". The palette additionally honours the
+		// commandPalette placements' `when` clauses (menu entries keep their own).
+		const manifest = {
+			activationEvents: ['onCommand:acme.ggxdemo.act'],
+			contributes: {
+				commands: [
+					{ command: 'acme.ggxdemo.act', title: 'Act' },
+					{ command: 'acme.ggxdemo.act.zhCn', title: '行动' }
+				],
+				menus: {
+					'scm/title': [
+						{ command: 'acme.ggxdemo.act', when: 'scmProvider == git && !ggxdemo:interfaceZhCn', group: 'acme@1' },
+						{ command: 'acme.ggxdemo.act.zhCn', when: 'scmProvider == git && ggxdemo:interfaceZhCn', group: 'acme@1' }
+					],
+					commandPalette: [
+						{ command: 'acme.ggxdemo.act', when: '!ggxdemo:interfaceZhCn' },
+						{ command: 'acme.ggxdemo.act.zhCn', when: 'ggxdemo:interfaceZhCn' }
+					]
+				}
+			}
+		};
+		const installed: ExtInfo = { id: 'acme.ggxdemo', name: 'ggxdemo', displayName: 'Acme GGX', publisher: 'acme', version: '1.0.0', description: '', builtin: false, icon: null, path: '/ext/acme.ggxdemo-1.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggx', ggx: { format: 'ggx/2', id: 'acme.ggxdemo', version: '1.0.0', pages: {}, backend: { kind: 'process', command: 'bin/tool.exe' } } };
+		backend.on('ext_list', () => [installed]);
+		backend.on('ext_read_file', ({ relPath }) => relPath === 'package.json' ? JSON.stringify(manifest) : (() => { throw new Error('no such file'); })());
+		const host = new ExtensionHost();
+		await host.activateInstalled();
+		// The app's display language is en: exactly one of the twins, on every surface.
+		expect(resolvedMenuEntries('scm/title').map((entry) => entry.command)).toEqual(['acme.ggxdemo.act']);
+		expect(commands.paletteItems().filter((item) => item.value.startsWith('acme.ggxdemo.act')).map((item) => item.value)).toEqual(['acme.ggxdemo.act']);
+		// The package's own interface-language setting flips both surfaces to the zh twin.
+		saveExtSetting('acme.ggxdemo', 'ggxdemo.interfaceLanguage', 'zh-cn');
+		expect(resolvedMenuEntries('scm/title').map((entry) => entry.command)).toEqual(['acme.ggxdemo.act.zhCn']);
+		expect(commands.paletteItems().filter((item) => item.value.startsWith('acme.ggxdemo.act')).map((item) => item.value)).toEqual(['acme.ggxdemo.act.zhCn']);
+		saveExtSetting('acme.ggxdemo', 'ggxdemo.interfaceLanguage', 'auto');
+	});
+	it('runs a declared process command with the caller\'s arguments', async () => {
+		// VS Code hands a menu's own argument to the command (the right-clicked file, the
+		// repository a title button stands for); the process dispatch forwards it.
+		const manifest = { contributes: { commands: [{ command: 'acme.ggxdemo.filter', title: 'Filter' }] } };
+		const installed: ExtInfo = { id: 'acme.ggxdemo', name: 'ggxdemo', displayName: 'Acme GGX', publisher: 'acme', version: '1.0.0', description: '', builtin: false, icon: null, path: '/ext/acme.ggxdemo-1.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggx', ggx: { format: 'ggx/2', id: 'acme.ggxdemo', version: '1.0.0', pages: {}, backend: { kind: 'process', command: 'bin/tool.exe' } } };
+		backend.on('ext_list', () => [installed]);
+		backend.on('ext_read_file', ({ relPath }) => relPath === 'package.json' ? JSON.stringify(manifest) : (() => { throw new Error('no such file'); })());
+		backend.on('ext_process_run', ({ command, args }) => ({ command, args }));
+		const host = new ExtensionHost();
+		await host.activateInstalled();
+		await host.executeCommand('acme.ggxdemo.filter', ['C:\\repo\\file.rs']);
+		expect(backend.callsTo('ext_process_run')).toEqual([
+			{ extId: 'acme.ggxdemo', command: 'acme.ggxdemo.filter', args: ['C:\\repo\\file.rs'] }
+		]);
+	});
 	it('serves commands.register by adding to the workbench registry', async () => {
 		withExtensions();
 		const host = new ExtensionHost();
@@ -844,7 +894,7 @@ describe('ggx/2 packages: the page registry and the process backend', () => {
 		// The builtin-format entries (git-graph-rs without its package, the bundled sample)
 		// have no files on disk, and a ggx/2 process package's manifest is its whole program:
 		// a frame boot for either would only read a missing extension.js and warn.
-		const SAMPLE: ExtInfo = { id: 'ggs.ext-demo', name: 'ext-demo', displayName: 'GGX Demo', publisher: 'ggs', version: '0.2.0', description: 'sample', builtin: false, icon: null, path: '', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'builtin', ggx: null };
+		const SAMPLE: ExtInfo = { id: 'ggs.ext-demo', name: 'ext-demo', displayName: 'GGX Demo', publisher: 'ggs', version: '0.2.0', description: 'sample', builtin: false, icon: null, path: '', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'bundled', ggx: null };
 		const PROC: ExtInfo = { ...GGX2, path: '/ext/acme.proc-1.0.0' };
 		withExtensions(SAMPLE, PROC);
 		backend.on('ext_read_file', ({ relPath }) => {
@@ -908,80 +958,51 @@ describe('an installed ggx/2 package in the workbench surfaces (the full feature
 			return entries.map((name) => {
 				const isDir = name.endsWith('/');
 				const clean = isDir ? name.slice(0, -1) : name;
-				return { name: clean, path: `${path}\${clean}`, isDir, size: 0 };
+				return { name: clean, path: `${path}\\${clean}`, isDir, size: 0 };
 			});
 		});
 	}
 
-	it('merges the plugin\'s and the built-in\'s entries into the file context menu, and each dispatches its own way', async () => {
+	it('places the plugin\'s entry into the file context menu, dispatching to its backend', async () => {
 		scriptProc();
-		fileSystem({ 'C:\repo': ['README.md'] });
+		fileSystem({ 'C:\\repo': ['README.md'] });
 		const host = new ExtensionHost();
-		// The built-in git-graph-rs contributes explorer/context (filterByFile, the file
-		// history entry); its baked contributions join first, as at boot.
-		host.applyBuiltinContributions();
-		const native: string[] = [];
-		// The workbench declares the built-in's commands native (workbench.ts wires the same
-		// set); without it the entry renders disabled, as a real host would show.
-		host.nativeCommands = new Set(['git-graph-rs.filterByFile']);
-		host.onNativeCommand = (command) => {
-			if (command === 'git-graph-rs.filterByFile') {
-				native.push(command);
-				return true;
-			}
-			return false;
-		};
 		const opened: Array<[string, string, unknown]> = [];
 		host.onOpenPage = (extId, pageId, params) => opened.push([extId, pageId, params]);
 		await host.activateInstalled();
 
 		const explorer = new Explorer(document.getElementById('sidebar')!);
-		explorer.setRoot('C:\repo');
+		explorer.setRoot('C:\\repo');
 		await flush();
 		rightClick(document.querySelector('.tree .row'));
-		const labels = menuLabels();
-		// The built-in's file-history entry and the plugin's entry sit in the same menu.
-		expect(labels).toContain('Show File History in Git Graph RS');
-		expect(labels).toContain('Hello');
+		expect(menuLabels()).toContain('Hello');
 
-		// Clicking the plugin entry runs its backend command and opens the page it names.
+		// Clicking the entry runs its backend command — with VS Code's menu arguments, the
+		// clicked path and the selection — and opens the page it names.
 		click(menuItem('Hello'));
 		await flush();
-		expect(backend.callsTo('ext_process_run')).toEqual([{ extId: 'acme.proc', command: 'acme.proc.hello', args: [] }]);
+		expect(backend.callsTo('ext_process_run')).toEqual([{ extId: 'acme.proc', command: 'acme.proc.hello', args: ['C:\\repo\\README.md', ['C:\\repo\\README.md']] }]);
 		expect(opened).toEqual([['acme.proc', 'main', { by: 'menu' }]]);
-
-		// Clicking the built-in's entry reaches the native command hook (GraphHost's path).
-		rightClick(document.querySelector('.tree .row'));
-		click(menuItem('Show File History in Git Graph RS'));
-		await flush();
-		expect(native).toEqual(['git-graph-rs.filterByFile']);
 	});
-
-	it('binds the plugin\'s keybinding, and uninstalling releases it, drops the menu entry and stops the backend', async () => {
+	it('binds the plugin keybinding, and uninstalling releases it, drops the menu entry and stops the backend', async () => {
 		scriptProc();
-		fileSystem({ 'C:\repo': ['README.md'] });
+		fileSystem({ 'C:\\repo': ['README.md'] });
 		backend.on('ext_uninstall', () => null);
 		backend.on('ext_process_stop', () => null);
 		const host = new ExtensionHost();
-		host.applyBuiltinContributions(); // the built-in's entries stay after the plugin goes
 		await host.activateInstalled();
 		expect(commandForBinding('Ctrl+Alt+G')?.id).toBe('acme.proc.hello');
 
 		const explorer = new Explorer(document.getElementById('sidebar')!);
-		explorer.setRoot('C:\repo');
+		explorer.setRoot('C:\\repo');
 		await flush();
 
 		await host.uninstall('acme.proc');
-		// The keybinding no longer swallows the keystroke.
 		expect(commandForBinding('Ctrl+Alt+G')).toBeUndefined();
-		// The context menu entry is gone with the extension; the built-in's survives.
 		rightClick(document.querySelector('.tree .row'));
 		expect(menuLabels()).not.toContain('Hello');
-		expect(menuLabels()).toContain('Show File History in Git Graph RS');
-		// The backend process died with its extension.
 		expect(backend.callsTo('ext_process_stop')).toEqual([{ extId: 'acme.proc' }]);
-	});
-});
+	});});
 
 describe('tree views and activation events (round two)', () => {
 	/** A host whose acme.demo installs from a scripted manifest, plus everything its frame
@@ -1341,5 +1362,19 @@ describe('round three: languages, snippets, themes, workspace.fs and the editor 
 		expect(events.map((event) => event.event)).toEqual(['activeEditorChanged', 'documentSaved']);
 		expect(events[0]!.editor?.languageId).toBe('markdown');
 		expect(events[1]!.languageId).toBe('markdown');
+	});
+});
+
+describe('extension page frames (shell.css)', () => {
+	// A frame inheriting the theme's `color-scheme: dark` makes Chromium paint an opaque white
+	// canvas behind a page that has not applied its theme yet - the white flash on open.
+	it('opts every page frame out of the inherited colour scheme', () => {
+		// Comments out first: the rule's explanatory comment sits right above it, and the
+		// selector capture would otherwise swallow it into the first selector.
+		const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'shell.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+		const rule = /([^{}]+)\{\s*color-scheme:\s*normal;\s*\}/.exec(css);
+		expect(rule).not.toBeNull();
+		const selectors = rule![1].split(',').map((selector) => selector.trim());
+		expect(selectors).toEqual(expect.arrayContaining(['.ext-page-frame', '.webview-panel-frame', '.editor-pane iframe']));
 	});
 });
