@@ -7,30 +7,22 @@
      quick inputs, the clipboard, opening sibling pages). No build step, no framework, no
      bundler: what you read here is exactly what ships inside the .ggx.
 
-     Styling is the page's own: the host injects no stylesheet, so the package carries its CSS
-     with it (this <style> block). Follow the system's light/dark preference so the page sits
-     well beside the app either way. -->
+     Styling is the package's own CSS, painted with the app's palette: the host injects no
+     stylesheet, but it serves the workbench theme on request (`theme.stylesheet`, VS Code's
+     --vscode-* tokens) and announces every switch. theme.js applies it and theme.css maps the
+     pages' colours onto its tokens, so every demo page matches the app — whichever theme the
+     user picked — and this <style> block only lays the page out. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <title>GGX Demo</title>
+<link rel="stylesheet" href="theme.css">
+<script src="theme.js"></script>
 <style>
-	:root {
-		--bg: #f6f7f9; --card: #ffffff; --ink: #1c2128; --muted: #5a6472;
-		--line: #d8dde3; --accent: #1f6feb; --accent-ink: #ffffff;
-		--ok: #1a7f37; --err: #cf222e; --code: #f0f2f5;
-	}
-	@media (prefers-color-scheme: dark) {
-		:root {
-			--bg: #161a21; --card: #1d232c; --ink: #d7dde5; --muted: #8b95a3;
-			--line: #2d3542; --accent: #3d8bfd; --accent-ink: #0d1117;
-			--ok: #3fb950; --err: #f85149; --code: #11151b;
-		}
-	}
 	html { height: 100%; }
 	body {
 		margin: 0; padding: 1.25rem 1.5rem 3rem; background: var(--bg); color: var(--ink);
-		font: 14px/1.55 system-ui, "Segoe UI", sans-serif;
+		font: 13px/1.55 var(--font);
 	}
 	h1 { font-size: 1.15rem; margin: 0 0 .25rem; }
 	h1 small { color: var(--muted); font-weight: normal; font-size: .8rem; }
@@ -47,13 +39,13 @@
 		padding: .3rem .7rem; margin: 0 .4rem .4rem 0; cursor: pointer;
 	}
 	button:hover { border-color: var(--accent); }
-	code { font: 12px/1.5 ui-monospace, Consolas, monospace; }
+	code { font: 12px/1.5 var(--mono); }
 	dl { display: grid; grid-template-columns: auto 1fr; gap: .15rem .9rem; margin: 0; }
-	dt { color: var(--muted); } dd { margin: 0; font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+	dt { color: var(--muted); } dd { margin: 0; font-family: var(--mono); font-size: 12.5px; }
 	ol.log {
 		list-style: none; margin: .4rem 0 0; padding: .5rem .7rem; background: var(--code);
 		border-radius: 6px; max-height: 14rem; overflow-y: auto;
-		font: 12px/1.6 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-word;
+		font: 12px/1.6 var(--mono); white-space: pre-wrap; word-break: break-word;
 	}
 	ol.log li { border-bottom: 1px solid var(--line); padding: .15rem 0; }
 	ol.log li:last-child { border-bottom: none; }
@@ -101,6 +93,8 @@
 	// The host's single entry point. Calling it twice is an error by design — one API object
 	// per page, like VS Code's acquireVsCodeApi.
 	const api = acquireGgsApi();
+	// The workbench theme: the pages paint with the app's own palette and follow its switches.
+	ggxDemoFollowTheme(api);
 
 	// ---- 1 · The page context -------------------------------------------------------------
 	const fields = document.getElementById('context-fields');

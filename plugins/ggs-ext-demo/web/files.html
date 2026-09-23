@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<!-- The GGX Demo's third page, "files" in the manifest — opened by two commands through the
+     page-open convention (a command's result names this page and carries the payload):
+       * `ggs.ext-demo.fileDetails`, the Explorer / editor context-menu entry "GGX Demo: Show
+         File Details": the workbench hands the command the clicked file and the whole
+         selection, the backend reads each path's metadata, and the page renders the details
+         — one file or many (`params.details`).
+       * `ggs.ext-demo.hello` (the palette): the greeting plus the package's own file
+         inventory, walked from the install directory the initialize handshake names
+         (`params.files`).
+     Same styling rules as the other pages (the shared theme.css / theme.js: the app's own
+     palette). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GGX Demo — Files</title>
+<link rel="stylesheet" href="theme.css">
+<script src="theme.js"></script>
+<style>
+	body { margin: 0; padding: 1.25rem 1.5rem 3rem; background: var(--bg); color: var(--ink); font: 13px/1.55 var(--font); }
+	h1 { font-size: 1.05rem; margin: 0 0 .25rem; }
+	.sub { color: var(--muted); margin: 0 0 1.1rem; }
+	section { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: .9rem 1rem 1rem; margin-bottom: .9rem; max-width: 52rem; }
+	h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 .6rem; }
+	h3 { font-size: .95rem; margin: 0 0 .5rem; word-break: break-all; }
+	.mono, #root { font: 12.5px/1.5 var(--mono); }
+	#root { margin: 0; padding: .45rem .7rem; background: var(--code); border-radius: 6px; white-space: pre-wrap; word-break: break-all; }
+	table { width: 100%; border-collapse: collapse; font: 12.5px/1.6 var(--mono); }
+	th, td { padding: .22rem .6rem; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+	th { color: var(--muted); font-weight: normal; }
+	.num { text-align: right; }
+	td.path { word-break: break-all; white-space: normal; }
+	tr:last-child td { border-bottom: none; }
+	dl { display: grid; grid-template-columns: max-content 1fr; gap: .2rem 1.2rem; margin: 0; }
+	dt { color: var(--muted); }
+	dd { margin: 0; word-break: break-all; }
+	.error { color: var(--warn); }
+	.summary { color: var(--muted); margin: .5rem 0 0; }
+	button { font: inherit; color: var(--accent); background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: .3rem .7rem; margin: .6rem .4rem 0 0; cursor: pointer; }
+	button:hover { border-color: var(--accent); }
+	p { color: var(--muted); margin: .2rem 0 .5rem; }
+	[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+
+<!-- File details: the context-menu command's payload. -->
+<div id="details-view" hidden>
+	<h1>GGX Demo — File Details</h1>
+	<p class="sub">Opened from a file's context menu: the workbench handed the command the clicked file and the Explorer selection, and the backend read each path's metadata.</p>
+	<section id="details-summary-section" hidden>
+		<h2>The selection</h2>
+		<table>
+			<thead><tr><th>Name</th><th>Type</th><th class="num">Size</th><th>Created</th><th>Modified</th></tr></thead>
+			<tbody id="details-table"></tbody>
+		</table>
+		<p class="summary" id="details-total"></p>
+	</section>
+	<div id="details-cards"></div>
+	<button id="copy-details">Copy as JSON</button>
+</div>
+
+<!-- The package inventory: the Hello command's payload. -->
+<div id="inventory-view" hidden>
+	<h1>GGX Demo — the Files page</h1>
+	<p class="sub">Opened by the <code>Hello</code> command's <code>openPage</code> result: the backend walked its own install directory.</p>
+	<section>
+		<h2>The greeting the command answered</h2>
+		<p id="greeting"></p>
+	</section>
+	<section>
+		<h2>The package's files</h2>
+		<p>Every file under the install root, as the backend's inventory reported it:</p>
+		<pre id="root"></pre>
+		<table>
+			<thead><tr><th>Path</th><th class="num">Size</th><th>Modified</th></tr></thead>
+			<tbody id="files"></tbody>
+		</table>
+		<p class="summary" id="total"></p>
+		<button id="refresh">Walk the files again (backend.run)</button>
+		<button id="copy">Copy as JSON</button>
+	</section>
+</div>
+
+<p id="waiting">waiting for the page context…</p>
+
+<script>
+	'use strict';
+	const api = acquireGgsApi();
+	// The workbench theme: the pages paint with the app's own palette and follow its switches.
+	ggxDemoFollowTheme(api);
+
+	const size = (bytes) =>
+		bytes < 1024 ? bytes + ' B'
+		: bytes < 1024 * 1024 ? (bytes / 1024).toFixed(1) + ' KB'
+		: bytes < 1024 * 1024 * 1024 ? (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+		: (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+	const when = (ms) => (typeof ms === 'number' ? new Date(ms).toLocaleString() : '—');
+	const cell = (text, className) => {
+		const td = document.createElement('td');
+		if (className) td.className = className;
+		td.textContent = text;
+		return td;
+	};
+
+	/* ---------- file details (the context-menu command) ---------- */
+
+	// One entry of `params.details`: { path, name, folder, kind, symlink, extension, bytes,
+	// entries, createdMs, modifiedMs, accessedMs, readonly } — or { path, name, error }.
+	function describeSize(file) {
+		if (file.kind === 'folder') return typeof file.entries === 'number' ? file.entries + ' items' : '—';
+		return typeof file.bytes === 'number' ? size(file.bytes) + ' (' + file.bytes.toLocaleString() + ' bytes)' : '—';
+	}
+
+	function detailCard(file) {
+		const section = document.createElement('section');
+		const title = document.createElement('h3');
+		title.textContent = file.name;
+		section.appendChild(title);
+		if (file.error) {
+			const p = document.createElement('p');
+			p.className = 'error';
+			p.textContent = file.path + ' — ' + file.error;
+			section.appendChild(p);
+			return section;
+		}
+		const rows = [
+			['Location', file.folder ?? '—', true],
+			['Full path', file.path, true],
+			['Type', file.kind === 'folder' ? 'Folder' : (file.extension ? '.' + file.extension + ' file' : 'File') + (file.symlink ? ' (symbolic link)' : '')],
+			['Size', describeSize(file)],
+			['Created', when(file.createdMs)],
+			['Modified', when(file.modifiedMs)],
+			['Accessed', when(file.accessedMs)],
+			['Read-only', file.readonly ? 'Yes' : 'No']
+		];
+		const dl = document.createElement('dl');
+		for (const [label, value, mono] of rows) {
+			const dt = document.createElement('dt');
+			dt.textContent = label;
+			const dd = document.createElement('dd');
+			dd.textContent = value;
+			if (mono) dd.className = 'mono';
+			dl.append(dt, dd);
+		}
+		section.appendChild(dl);
+		return section;
+	}
+
+	function renderDetails(details) {
+		document.title = details.length === 1 ? 'File Details — ' + details[0].name : 'File Details — ' + details.length + ' items';
+		// Several paths: a summary table first (the whole selection at a glance), then a card
+		// per path. One path: just its card.
+		const summary = document.getElementById('details-summary-section');
+		summary.hidden = details.length < 2;
+		const body = document.getElementById('details-table');
+		body.replaceChildren();
+		for (const file of details) {
+			const tr = document.createElement('tr');
+			if (file.error) {
+				tr.append(cell(file.name), cell('unreadable', 'error'), cell('', 'num'), cell(''), cell(''));
+			} else {
+				tr.append(
+					cell(file.name),
+					cell(file.kind === 'folder' ? 'Folder' : (file.extension ? '.' + file.extension : 'File')),
+					cell(file.kind === 'folder' ? (typeof file.entries === 'number' ? file.entries + ' items' : '—') : size(file.bytes ?? 0), 'num'),
+					cell(when(file.createdMs)),
+					cell(when(file.modifiedMs))
+				);
+			}
+			body.appendChild(tr);
+		}
+		const files = details.filter((file) => !file.error && file.kind === 'file');
+		const folders = details.filter((file) => !file.error && file.kind === 'folder');
+		const unreadable = details.length - files.length - folders.length;
+		const total = files.reduce((sum, file) => sum + (file.bytes ?? 0), 0);
+		document.getElementById('details-total').textContent =
+			[files.length + ' files (' + size(total) + ')', folders.length ? folders.length + ' folders' : '', unreadable ? unreadable + ' unreadable' : '']
+				.filter(Boolean).join(' · ');
+		document.getElementById('details-cards').replaceChildren(...details.map(detailCard));
+	}
+
+	/* ---------- the package inventory (the Hello command) ---------- */
+
+	// The payload hello hands the page: { greeting, root, files: [{path, bytes, modifiedMs}] }.
+	// The Refresh button asks the backend the same command, so both surfaces — the command's
+	// openPage convention and a page's backend.run — render through this one function.
+	function renderInventory(payload) {
+		document.getElementById('greeting').textContent = payload.greeting ?? '(no greeting)';
+		document.getElementById('root').textContent = payload.root ?? '(install root unknown)';
+		const body = document.getElementById('files');
+		body.replaceChildren();
+		for (const file of payload.files ?? []) {
+			const tr = document.createElement('tr');
+			tr.append(cell(file.path, 'path'), cell(size(file.bytes ?? 0), 'num'), cell(file.modifiedMs ? when(file.modifiedMs) : '—'));
+			body.appendChild(tr);
+		}
+		const total = (payload.files ?? []).reduce((sum, file) => sum + (file.bytes ?? 0), 0);
+		document.getElementById('total').textContent = (payload.files ?? []).length + ' files · ' + size(total) + ' total';
+	}
+
+	/* ---------- boot ---------- */
+
+	let lastPayload = null;
+	function render(payload) {
+		lastPayload = payload;
+		document.getElementById('waiting').hidden = true;
+		const details = Array.isArray(payload.details) ? payload.details : null;
+		document.getElementById('details-view').hidden = details === null;
+		document.getElementById('inventory-view').hidden = details !== null;
+		if (details !== null) renderDetails(details);
+		else renderInventory(payload);
+	}
+	api.ready.then((context) => render(context.params ?? {}));
+
+	document.getElementById('refresh').addEventListener('click', async () => {
+		// backend.run returns exactly what the command returned — here including its
+		// openPage/params envelope, which a page may honour or, as here, simply render.
+		const result = await api.request('backend.run', ['ggs.ext-demo.hello', []]);
+		render(result?.params ?? result ?? {});
+	});
+	const copy = async () => {
+		if (lastPayload !== null) await api.request('clipboard.writeText', [JSON.stringify(lastPayload, null, '\t')]);
+	};
+	document.getElementById('copy').addEventListener('click', copy);
+	document.getElementById('copy-details').addEventListener('click', copy);
+</script>
+</body>
+</html>

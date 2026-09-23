@@ -1,11 +1,12 @@
 # GGX Demo — the `.ggx` plugin format's worked example
 
 This package is the reference plugin of Git Graph Studio's extension platform: one folder,
-small enough to read in one sitting, that uses **every part of the format once** — two pages, a
-process backend, commands, a keybinding, context-menu entries and an icon. It ships with the
-app as the **bundled sample**: the Extensions view lists it even before it is installed, and
-its *Install* button is one click (nothing is ever installed without that ask). New plugins —
-yours, or one an AI assistant designs from this document — start from this folder.
+small enough to read in one sitting, that uses **every part of the format once** — three
+pages, a process backend, commands, a keybinding, context-menu entries and an icon. It ships
+with the app as the **bundled sample**: the Extensions view lists it even before it is
+installed, and its *Install* button is one click (nothing is ever installed without that
+ask). New plugins — yours, or one an AI assistant designs from this document — start from
+this folder.
 
 ## Try it in one minute
 
@@ -14,7 +15,17 @@ yours, or one an AI assistant designs from this document — start from this fol
    Installing means running: the backend comes up at once and the row shows its pid.
 3. Run **GGX Demo: Open the Tour Page** from the command palette (or `Ctrl+Alt+G`): a guided
    tour page where every button exercises one platform capability.
-4. The backend's health, restart and log live on the same row and the extension's detail page.
+4. Right-click a file in the Explorer (or select several with Ctrl/Shift+click first, or
+   right-click inside an open editor) and choose **GGX Demo: Show File Details**: the
+   workbench hands the command the clicked file and the whole selection, the backend reads
+   each path's metadata, and the **Files** page opens with every file's size, type, created /
+   modified / accessed times and read-only flag — a summary table first when several are
+   selected.
+5. Run **GGX Demo: Hello (process backend)** from the palette: the backend answers through the
+   page-open convention — the **Files** page opens with its greeting and the package's own
+   file inventory. A command that only returns data shows nothing from the palette; this is
+   what "visible" looks like instead.
+6. The backend's health, restart and log live on the same row and the extension's detail page.
 
 The package can also be built and installed by hand: `scripts\build-plugins.bat` at the
 repository root packs `target\studio\bundled\ggs-ext-demo-<version>.ggx`, installable through
@@ -28,6 +39,8 @@ repository root packs `target\studio\bundled\ggs-ext-demo-<version>.ggx`, instal
 | `package.json` | The VS Code-style manifest: the contributed commands, keybindings and menus the workbench's palette and context menus read. |
 | `web/view.html` | The page named `main` — the tour. Plain HTML; the app composes its page bootstrap into it at serve time. |
 | `web/params.html` | The page named `params` — shows the parameters it was opened with. |
+| `web/files.html` | The page named `files` — the file details the context-menu command opens, and the file inventory the Hello command opens. |
+| `web/theme.css`, `web/theme.js` | The pages' shared look: their palette mapped onto the workbench theme's `--vscode-*` tokens, and the follower that asks the host for the theme (`theme.stylesheet`) and repaints on every switch — so the pages match the app. |
 | `src/main.rs` | The backend binary (`ggs-ext-demo`): one JSON line in, one JSON line out, over stdin/stdout. |
 | `resources/icon.svg` | The icon the Extensions view shows. |
 | `build.mjs` | The packer: zips the above into a `.ggx`. |
@@ -41,12 +54,13 @@ Written by `build.mjs`; the shape is the contract, not the script:
 {
 	"format": "ggx/2",
 	"id": "ggs.ext-demo",
-	"version": "0.2.0",
+	"version": "0.3.0",
 	"displayName": "GGX Demo",
 	"engines": { "ggs": ">=0.1.0" },
 	"pages": {
 		"main":   { "page": "web/view.html",   "title": "GGX Demo" },
-		"params": { "page": "web/params.html", "title": "Params" }
+		"params": { "page": "web/params.html", "title": "Params" },
+		"files":  { "page": "web/files.html",  "title": "Files" }
 	},
 	"backend": {
 		"kind": "process",
@@ -61,14 +75,22 @@ The id is `{publisher}.{name}` and must match `package.json`, as must the versio
 every page the package can show, by id. `backend` may be omitted (a frontend-only plugin);
 `command` names the build host's binary and doubles as the fallback for a platform not listed
 in `binaries` (`{os}-{arch}` keys, e.g. `win32-x64`). Upgrades are forward-only like VSIX: a
-newer version replaces, an equal version is refused, an older one is rejected.
+newer version replaces, an equal version is refused, an older one is rejected. (One exception:
+a package the installer ships is re-unpacked at boot over an install of the same version that
+came from a different build of it.) An optional `activitybar` —
+`{ "command": "<a declared command>", "title": "...", "icon": "<package-relative image>" }` —
+puts one icon in the workbench's activity bar whose click runs that command (typically the one
+that opens the package's main page).
 `format: "ggx/1"` (a single `frontend.page`, no registry, no backend) still installs.
 
 ## `package.json` — what the workbench reads
 
 `contributes.commands` (id + palette title), `contributes.keybindings`, and
 `contributes.menus` (`explorer/context`, `editor/context`) — the same contribution points VS
-Code uses, read from the installed copy at activation. **Commands declared here are the whole
+Code uses, read from the installed copy at activation. A menu entry's command receives the
+menu's context as its arguments, VS Code's `(uri, uris)` pair as paths: the clicked path
+first, then every selected path (the Explorer's multi-selection; an editor passes its own
+file for both). **Commands declared here are the whole
 UI surface of a plugin**: the palette lists them, menus bind them, keybindings fire them, and
 each execution reaches your backend (below). Keep the declared list and the backend's
 `initialize` answer identical — that agreement is on you, the host checks nothing.
@@ -96,7 +118,14 @@ Three conventions worth knowing:
 
 - **`openPage` is how a command surfaces UI.** A result object naming one of your own pages —
   `{ "openPage": "params", "params": { … } }` — opens it in an editor tab, with `params`
-  delivered to the page's context. `ggs.ext-demo.openParams` does exactly this.
+  delivered to the page's context. `ggs.ext-demo.openParams` does exactly this, and
+  `ggs.ext-demo.hello` does it with live data: the greeting plus the package's own file
+  inventory, gathered by walking the `extensionPath` the `initialize` handshake received.
+  An optional `"title"` names the tab (`ggs.ext-demo.fileDetails` titles it after the files
+  it shows); without one the tab takes the page's registered title.
+  Remember the flip side: a result that names no page, sends no notification and writes no
+  log is invisible from the palette — data commands are for *callers* (a page's
+  `backend.run`, a keybinding-driven flow), not for clicks that should show something.
 - **The process is warm.** It spawns once (at app boot, at install, or lazily on the first
   command) and stays; state survives between calls — `ggs.ext-demo.tick` counts up.
 - **`GGS_INSTANCE_ID`** tells two concurrently running windows' backends apart; per-instance
@@ -133,8 +162,8 @@ entry into the host (the webview's counterpart of `require('vscode')`). Call it 
 
 Pages render; they do not register commands (declare those in `package.json`) and cannot
 escape their own directory. **Styling is the page's own** — the host injects no stylesheet, so
-carry your CSS inside the package (both demo pages style themselves from one `<style>` block
-and follow the system's light/dark preference).
+carry your CSS inside the package (all three demo pages style themselves from one `<style>`
+block and follow the system's light/dark preference).
 
 ## Lifecycle, in one paragraph
 

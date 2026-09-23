@@ -1,0 +1,33 @@
+/* The GGX Demo pages' shared palette — one file, so the three pages look alike and look like
+   the app. Every colour is one of the workbench theme's --vscode-* tokens (the stylesheet
+   theme.js asks the host for, the same one the app's own chrome and the Git Graph view are
+   painted with), so a page follows the user's theme — Dark Modern, Light Modern, Monokai,
+   High Contrast… — and switches with it. The --fb-* values are the fallbacks for a page
+   opened outside the app (a browser, a test), following the system's light/dark preference. */
+:root {
+	--fb-bg: #f6f7f9; --fb-card: #ffffff; --fb-ink: #1c2128; --fb-muted: #5a6472;
+	--fb-line: #d8dde3; --fb-accent: #1f6feb; --fb-accent-ink: #ffffff;
+	--fb-ok: #1a7f37; --fb-err: #cf222e; --fb-code: #f0f2f5;
+}
+@media (prefers-color-scheme: dark) {
+	:root {
+		--fb-bg: #161a21; --fb-card: #1d232c; --fb-ink: #d7dde5; --fb-muted: #8b95a3;
+		--fb-line: #2d3542; --fb-accent: #3d8bfd; --fb-accent-ink: #0d1117;
+		--fb-ok: #3fb950; --fb-err: #f85149; --fb-code: #11151b;
+	}
+}
+:root {
+	--bg: var(--vscode-editor-background, var(--fb-bg));
+	--card: var(--vscode-editorWidget-background, var(--fb-card));
+	--ink: var(--vscode-editor-foreground, var(--fb-ink));
+	--muted: var(--vscode-descriptionForeground, var(--fb-muted));
+	--line: var(--vscode-widget-border, var(--vscode-panel-border, var(--fb-line)));
+	--accent: var(--vscode-textLink-foreground, var(--fb-accent));
+	--accent-ink: var(--vscode-button-foreground, var(--fb-accent-ink));
+	--ok: var(--vscode-testing-iconPassed, var(--fb-ok));
+	--err: var(--vscode-errorForeground, var(--fb-err));
+	--warn: var(--err);
+	--code: var(--vscode-textCodeBlock-background, var(--fb-code));
+	--font: var(--vscode-font-family, system-ui, "Segoe UI", sans-serif);
+	--mono: var(--vscode-editor-font-family, ui-monospace, Consolas, monospace);
+}

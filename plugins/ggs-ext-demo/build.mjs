@@ -8,10 +8,13 @@
 // scripts/build-plugins.bat does the same standalone.
 //
 //   target/studio/bundled/ggs-ext-demo-<version>.ggx
-//     manifest.json              the ggx/2 header: the two-page registry and the process backend
+//     manifest.json              the ggx/2 header: the three-page registry and the process backend
 //     package.json               the seven contributed commands — copied as-is
 //     web/view.html              the tour page — plain HTML whose script uses acquireGgsApi()
 //     web/params.html            the params page — what its opener sent, round-tripped
+//     web/files.html             the files page — the file details the context menu opens,
+//                                and the inventory the Hello command opens
+//     web/theme.css, theme.js    the pages' shared look: the palette on the workbench theme
 //     resources/icon.svg         the Extensions view's icon
 //     bin/<platform>/ggs-ext-demo[.exe]   the backend, under its platform key
 //     README.md                  the plugin authoring guide
@@ -41,11 +44,12 @@ function manifestFor(backendCommand) {
 		version: pkg.version,
 		displayName: pkg.displayName,
 		engines: pkg.engines,
-		// The two-page registry: everything a package can show, by id. A page is opened by a
+		// The page registry: everything a package can show, by id. A page is opened by a
 		// command's openPage result or another page's pages.open — never anything else.
 		pages: {
 			main: { page: 'web/view.html', title: pkg.displayName },
-			params: { page: 'web/params.html', title: 'GGX Demo — Params' }
+			params: { page: 'web/params.html', title: 'GGX Demo — Params' },
+			files: { page: 'web/files.html', title: 'GGX Demo — Files' }
 		},
 		permissions: ['clipboard']
 	};
@@ -71,6 +75,10 @@ export async function buildDemo({ out, bin } = {}) {
 		'package.json': readFileSync(join(pluginDir, 'package.json'), 'utf8'),
 		'web/view.html': readFileSync(join(pluginDir, 'web', 'view.html'), 'utf8'),
 		'web/params.html': readFileSync(join(pluginDir, 'web', 'params.html'), 'utf8'),
+		'web/files.html': readFileSync(join(pluginDir, 'web', 'files.html'), 'utf8'),
+		// The pages' shared look: the palette mapped onto the workbench theme, and its follower.
+		'web/theme.css': readFileSync(join(pluginDir, 'web', 'theme.css'), 'utf8'),
+		'web/theme.js': readFileSync(join(pluginDir, 'web', 'theme.js'), 'utf8'),
 		'resources/icon.svg': readFileSync(join(pluginDir, 'resources', 'icon.svg'), 'utf8'),
 		'README.md': readFileSync(join(pluginDir, 'README.md'), 'utf8')
 	};
