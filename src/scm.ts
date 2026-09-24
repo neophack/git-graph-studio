@@ -1175,6 +1175,35 @@ export class SourceControlView {
 		decoration.title = LETTER_TITLE[letter] ?? letter;
 		row.appendChild(decoration);
 		row.addEventListener('click', () => this.subOpenChange(sub, file, key, letter));
+		row.addEventListener('contextmenu', (event) => {
+			event.preventDefault();
+			const entries = key === 'merge'
+				? [
+					{ label: 'Open in Merge Editor', run: () => this.onOpenFile?.(this.subAbsolute(sub, file.path)) },
+					'separator' as const,
+					{ label: 'Stage Changes (Mark Resolved)', run: () => void this.subRun(sub, 'git_stage', { paths: [file.path] }) }
+				]
+				: key === 'changes'
+				? [
+					{ label: 'Open File', run: () => this.onOpenFile?.(this.subAbsolute(sub, file.path)) },
+					{ label: 'Open Changes', run: () => this.subOpenChange(sub, file, key, letter) },
+					'separator' as const,
+					{ label: 'Stage Changes', run: () => void this.subRun(sub, 'git_stage', { paths: [file.path] }) },
+					{ label: 'Discard Changes', run: () => void this.subDiscard(sub, file) }
+				]
+				: [
+					{ label: 'Open File', run: () => this.onOpenFile?.(this.subAbsolute(sub, file.path)) },
+					{ label: 'Open Changes', run: () => this.subOpenChange(sub, file, key, letter) },
+					'separator' as const,
+					{ label: 'Unstage Changes', run: () => void this.subRun(sub, 'git_unstage', { paths: [file.path] }) }
+				];
+			// Same extension contribution the main repository's rows offer (fileRow), scoped
+			// to this submodule's absolute path.
+			for (const entry of resolvedMenuEntries('scm/resourceState/context')) {
+				entries.push('separator', { label: entry.label, run: () => this.onExtensionCommand?.(entry.command, [this.subAbsolute(sub, file.path)]) });
+			}
+			showContextMenu(event.clientX, event.clientY, entries);
+		});
 		return row;
 	}
 

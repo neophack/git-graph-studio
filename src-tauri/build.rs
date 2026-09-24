@@ -1,6 +1,6 @@
 //! Build script: Tauri's code generation, then the compile-time seam check (docs/ggs-development-plan.md §3.7): the engine crate
 //! (`git-graph-core`) is named by nothing under `src/` at all — it lives in the git-graph-rs
-//! plugin's own backend sources (`plugins/git-graph-rs/src/`, the `engine`-feature binary
+//! engine-host module (`src/engine_host/`, the `engine`-feature sidecar
 //! `git-graph-backend`). Any module of the app that names the crate fails the build here, so
 //! the coupling cannot quietly spread back into the app.
 
@@ -31,8 +31,9 @@ fn main() {
     visit(Path::new("src"), &mut violations);
     if !violations.is_empty() {
         panic!(
-            "the app's own sources under src/ may not name git-graph-core (the engine lives in \
-             the git-graph-rs plugin's backend, plugins/git-graph-rs/src/); found references in:\n  {}",
+            "the app's own sources under src/ may not name git-graph-core (nothing in this \
+             tree links it — the engine ships inside the package as git-graph.node, loaded \
+             over its C ABI by src/engine_host/); found references in:\n  {}",
             violations.join("\n  ")
         );
     }

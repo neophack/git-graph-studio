@@ -72,7 +72,7 @@ const REFRESH_ECHO_MS = 1500;
 
 
 export class Workbench {
-	/** Serial for extension page tabs: every open of a ggx page is its own instance. */
+	/** Serial for extension page tabs: every open of an extension page is its own instance. */
 	private static extPageSerial = 0;
 	/** Singleton pages' tab ids, by `${extId}/${pageId}` (a second open reveals the tab). */
 	private readonly extPageTabs = new Map<string, string>();
@@ -96,6 +96,8 @@ export class Workbench {
 	private readonly extTreeViews = new Map<string, ExtensionTreeView>();
 	/** Extension sections appended to a built-in sidebar view (explorer / scm targets). */
 	private readonly extBuiltinSections: HTMLElement[] = [];
+	/** The webview views' iframe disposers, run when the sidebar surface rebuilds. */
+	private readonly extWebviewViewDisposers: (() => void)[] = [];
 	readonly titleBar: TitleBar;
 	readonly explorer: Explorer;
 	readonly search: SearchView;
@@ -148,7 +150,7 @@ export class Workbench {
 			// menus build lazily at open time and the palette reads the registry on open.
 			void this.scm.refresh();
 		};
-		// An extension page opens in an editor tab (module 12's ggx pages — VS Code's webview
+		// An extension page opens in an editor tab (module 12's extension pages — VS Code's webview
 		// panels): the host resolves and mounts the frame, the workbench owns the tab.
 		this.extensionHost.onOpenPage = (extId, pageId, params, title) => this.openExtPage(extId, pageId, params, title);
 		// A theme switch re-reaches every open extension page (each re-reads its stylesheet).
@@ -161,7 +163,7 @@ export class Workbench {
 		this.panel = new Panel(this.panelElement);
 		this.statusBar = new StatusBar(document.getElementById('statusbar')!);
 		// The extension host's webview panels (`window.createWebviewPanel`) ride the same
-		// editor-tab path the ggx pages do; the status bar and Output view host its items
+		// editor-tab path the extension pages do; the status bar and Output view host its items
 		// and channels. All wired here: the host owns the data, the views own the DOM.
 		this.extensionHost.onOpenWebview = (panelId, title, extId) => this.openWebviewPanel(panelId, title, extId);
 		this.extensionHost.onCloseWebviewTab = (tabId) => this.editors.closeById(tabId);
@@ -298,8 +300,8 @@ export class Workbench {
 		register({ id: 'editor.callTree', title: 'Show Call Tree', category: 'Go', enabled: () => this.editors.activeView !== null, run: () => void this.editors.openCallTreeAtCursor() });
 		register({ id: 'editor.toggleBookmark', title: 'Toggle Bookmark', category: 'Edit', keybinding: 'Ctrl+Alt+B', enabled: () => this.editors.activeInput?.kind === 'file', run: () => void this.toggleBookmark() });
 		register({ id: 'editor.listBookmarks', title: 'List Bookmarks', category: 'Edit', keybinding: 'Ctrl+Alt+K', run: () => void this.listBookmarks() });
-		register({ id: 'extensions.installFromGgx', title: 'Install Extension from GGX...', category: 'Extensions', run: () => { this.showView('extensions'); void this.extensions.installFromGgxCommand(); } });
 		register({ id: 'extensions.installFromVsix', title: 'Install Extension from VSIX...', category: 'Extensions', run: () => { this.showView('extensions'); void this.extensions.installFromVsixCommand(); } });
+		register({ id: 'extensions.searchMarketplace', title: 'Search Extensions in the Marketplace', category: 'Extensions', run: () => { this.showView('extensions'); this.extensions.focusSearch(); } });
 		register({ id: 'git.initRepository', title: 'Initialize Repository', category: 'Git', enabled: () => this.repoPath !== null && !this.isRepo, run: () => void this.initializeRepository() });
 		register({ id: 'workbench.toggleSidebar', title: 'Toggle Primary Side Bar', category: 'View', keybinding: 'Ctrl+B', run: () => this.toggleSidebar() });
 		register({ id: 'workbench.togglePanel', title: 'Toggle Panel', category: 'View', keybinding: 'Ctrl+J', run: () => this.panel.toggle() });
@@ -312,6 +314,7 @@ export class Workbench {
 		register({ id: 'terminal.kill', title: 'Kill the Active Terminal Instance', category: 'Terminal', enabled: () => this.panel.terminal.sessionCount() > 0, run: () => this.panel.terminal.killActive() });
 		register({ id: 'help.welcome', title: 'Welcome', category: 'Help', run: () => this.editors.openHelp('welcome') });
 		register({ id: 'help.shortcuts', title: 'Keyboard Shortcuts', category: 'Help', keybinding: 'Ctrl+K Ctrl+S', run: () => this.editors.openHelp('shortcuts') });
+		register({ id: 'help.selfTest', title: 'Run Module Self-Tests', category: 'Help', run: () => this.editors.openSelfTest() });
 		register({ id: 'help.repository', title: 'Report Issue / Project Page', category: 'Help', run: () => void openUrl('https://github.com/neophack/git-graph-studio') });
 		register({ id: 'help.about', title: 'About', category: 'Help', run: () => notify('info', `Git Graph Studio ${__APP_VERSION__} - a standalone workbench whose views arrive as plugins.`) });
 		register({ id: 'help.openDevTools', title: 'Open Developer Tools', category: 'Help', run: () => void invoke('open_devtools').catch((e) => console.error('open_devtools failed:', e)) });
@@ -361,7 +364,7 @@ export class Workbench {
 			] },
 			{ label: t('menu.go'), entries: (): MenuEntry[] => [item('workbench.quickOpen'), 'separator', item('workbench.gotoSymbolInFile'), item('workbench.gotoSymbolInWorkspace'), item('editor.gotoDefinition'), item('editor.findReferences'), item('editor.callTree'), item('workbench.gotoLine'), item('symbols.rebuild'), 'separator', item('workbench.goBack'), item('workbench.goForward'), 'separator', item('workbench.nextEditor'), item('workbench.previousEditor')] },
 			{ label: t('menu.terminal'), entries: (): MenuEntry[] => [item('terminal.new'), item('terminal.toggle'), 'separator', item('terminal.kill')] },
-			{ label: t('menu.help'), entries: (): MenuEntry[] => [item('help.welcome'), item('help.shortcuts'), 'separator', item('help.repository'), 'separator', item('help.openDevTools'), 'separator', item('help.about')] }
+			{ label: t('menu.help'), entries: (): MenuEntry[] => [item('help.welcome'), item('help.shortcuts'), item('help.selfTest'), 'separator', item('help.repository'), 'separator', item('help.openDevTools'), 'separator', item('help.about')] }
 		];
 	}
 
@@ -664,18 +667,30 @@ export class Workbench {
 		}
 		for (const container of this.extContainers.values()) container.element.remove();
 		for (const section of this.extBuiltinSections) section.remove();
+		for (const dispose of this.extWebviewViewDisposers) dispose();
 		this.extContainers.clear();
 		this.extTreeViews.clear();
 		this.extBuiltinSections.length = 0;
+		this.extWebviewViewDisposers.length = 0;
 		if (this.isExtensionView(this.activeView)) this.activeView = 'explorer';
 
-		const makeSection = (viewId: string, name: string, into: HTMLElement): void => {
+		// One sidebar section per declared view: a tree view renders through the generic
+		// tree host (its provider feeds it); a `type: "webview"` view mounts the extension
+		// host's iframe (its provider's resolveWebviewView fills it at first visibility).
+		const makeSection = (viewId: string, name: string, extId: string, type: 'tree' | 'webview', into: HTMLElement): void => {
 			const section = el('div', 'ext-view-section');
-			const tree = new ExtensionTreeView(section, name, {
-				fetchChildren: (handle) => this.extensionHost.treeChildren(viewId, handle),
-				onCommand: (command, args) => void this.extensionHost.executeCommand(command, args)
-			});
-			this.extTreeViews.set(viewId, tree);
+			if (type === 'webview') {
+				section.appendChild(el('div', 'sidebar-title', [el('span', 'label', [name])]));
+				const pane = el('div', 'view-pane ext-webview-view-pane');
+				section.appendChild(pane);
+				this.extWebviewViewDisposers.push(this.extensionHost.mountWebviewView(viewId, extId, pane));
+			} else {
+				const tree = new ExtensionTreeView(section, name, {
+					fetchChildren: (handle) => this.extensionHost.treeChildren(viewId, handle),
+					onCommand: (command, args) => void this.extensionHost.executeCommand(command, args)
+				});
+				this.extTreeViews.set(viewId, tree);
+			}
 			into.appendChild(section);
 			if (into !== this.sidebar) this.extBuiltinSections.push(section);
 		};
@@ -687,7 +702,7 @@ export class Workbench {
 				element.style.display = 'none';
 				const viewIds: string[] = [];
 				for (const declared of contribution.views.filter((view) => view.container === container.id)) {
-					makeSection(declared.viewId, declared.name, element);
+					makeSection(declared.viewId, declared.name, contribution.extId, declared.type ?? 'tree', element);
 					viewIds.push(declared.viewId);
 				}
 				this.sidebar.appendChild(element);
@@ -714,10 +729,10 @@ export class Workbench {
 			// the Explorer / Source Control trees manage their own DOM, never the tail.
 			for (const declared of contribution.views) {
 				const host = declared.container === 'scm' ? this.views.scm : declared.container === 'explorer' ? this.views.explorer : null;
-				if (host) makeSection(declared.viewId, declared.name, host);
+				if (host) makeSection(declared.viewId, declared.name, contribution.extId, declared.type ?? 'tree', host);
 			}
 		}
-		// A ggx package's activity-bar launcher (`manifest.json`'s `activitybar`): an icon that
+		// A package's activity-bar launcher (`manifest.json`'s `activitybar`): an icon that
 		// runs the package's own command (a view page's opener) — the app names no plugin.
 		for (const launcher of this.extensionHost.activityLaunchers()) {
 			const key = `ext-launcher:${launcher.extId}`;
@@ -742,7 +757,7 @@ export class Workbench {
 	}
 
 
-	/** An extension page (module 12): one of an installed `ggx` package's pages in an editor
+	/** An extension page (module 12): one of an installed `ggs` package's pages in an editor
 	 *  tab — the workbench's half of the extension host's `onOpenPage`, VS Code's webview
 	 *  panel counterpart. Every open is its own tab (the serial keeps them apart). */
 	openExtPage(extId: string, pageId: string, params?: unknown, title?: string): void {
@@ -762,11 +777,11 @@ export class Workbench {
 	}
 
 	/** A webview panel (module 12): what `vscode.window.createWebviewPanel` opens — a VSIX
-	 *  extension's own HTML in an editor tab, over the same mounting path the ggx pages
+	 *  extension's own HTML in an editor tab, over the same mounting path the extension pages
 	 *  take. The extension host owns the panel record and the iframe; the workbench owns
 	 *  the tab, and closing it tells the extension (`onDidDispose`). */
 	private openWebviewPanel(panelId: number, title: string, extId: string): void {
-		// The panel's tab wears the extension's own icon, like its ggx pages do.
+		// The panel's tab wears the extension's own icon, like its extension pages do.
 		const iconPath = this.extensionHost.packageIcon(extId);
 		const icon = iconPath ? extFileDataUrl(extId, iconPath).catch(() => null) : Promise.resolve(null);
 		void icon.then((iconSrc) => this.editors.openExtPage(
@@ -952,6 +967,11 @@ export class Workbench {
 		this.editors.onSaveProgress = (progress) => this.statusBar.setSaveProgress(progress);
 		this.editors.renderWelcome = (container) => this.renderWelcome(container);
 		this.editors.renderHelp = (help, container) => (help === 'welcome' ? this.renderWelcome(container) : this.renderShortcuts(container));
+		// The self-test page is a lazy chunk (it carries every module's suites): the pane
+		// mounts it on open, and the first open starts the run by itself.
+		this.editors.renderSelfTest = (container) => {
+			void import('./selfTestPage').then((page) => page.mountSelfTestPage(container, this));
+		};
 
 		this.panel.terminal.onCommandEntered = () => this.scheduleRefresh(300);
 		this.panel.onVisibilityChange = (visible) => {

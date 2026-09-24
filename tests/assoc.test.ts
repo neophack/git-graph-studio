@@ -15,7 +15,6 @@ import { click, flush, notifications, texts } from './helpers';
 const CATALOG = [
 	{ ext: 'blf', mime: 'application/x-vector-blf', recommended: true },
 	{ ext: 'asc', mime: 'application/x-vector-asc', recommended: true },
-	{ ext: 'ggx', mime: 'application/x-ggs-extension', recommended: true },
 	{ ext: 'bin', mime: 'application/octet-stream', recommended: true },
 	{ ext: 'hex', mime: 'application/x-hex', recommended: true },
 	{ ext: 'json', mime: 'application/json', recommended: false },
@@ -34,7 +33,7 @@ beforeEach(() => {
 
 describe('the file associations setting', () => {
 	it('defaults to the recommended formats', () => {
-		expect(DEFAULT_SETTINGS.fileAssociations).toEqual(['blf', 'asc', 'ggx', 'bin', 'hex']);
+		expect(DEFAULT_SETTINGS.fileAssociations).toEqual(['blf', 'asc', 'bin', 'hex']);
 		expect(isSettingModified('fileAssociations')).toBe(false);
 	});
 
@@ -45,13 +44,13 @@ describe('the file associations setting', () => {
 	});
 
 	it('a change re-registers through assoc_apply', async () => {
-		updateSetting('fileAssociations', ['blf', 'ggx']);
+		updateSetting('fileAssociations', ['blf', 'asc']);
 		await flush();
-		expect(settings.fileAssociations).toEqual(['blf', 'ggx']);
+		expect(settings.fileAssociations).toEqual(['blf', 'asc']);
 		expect(isSettingModified('fileAssociations')).toBe(true);
 		const calls = backend.callsTo('assoc_apply');
 		expect(calls).toHaveLength(1);
-		expect((calls[0] as { extensions: string[] }).extensions).toEqual(['blf', 'ggx']);
+		expect((calls[0] as { extensions: string[] }).extensions).toEqual(['blf', 'asc']);
 	});
 
 	it('an unchanged selection does not re-register', async () => {
@@ -65,7 +64,7 @@ describe('the settings dialog row', () => {
 	it('renders one checkbox per catalogued extension with the defaults checked', async () => {
 		openSettingsPanel();
 		await flush();
-		expect(texts('.settings-extlist-item')).toEqual(['.blf', '.asc', '.ggx', '.bin', '.hex', '.json', '.md']);
+		expect(texts('.settings-extlist-item')).toEqual(['.blf', '.asc', '.bin', '.hex', '.json', '.md']);
 		const jsonBox = () => Array.from(document.querySelectorAll('.settings-extlist-item')).find((item) => item.textContent === '.json')!.querySelector('input') as HTMLInputElement;
 		expect(jsonBox().checked).toBe(false);
 

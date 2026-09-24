@@ -1,13 +1,10 @@
-//! The process extension host: the backend half of a `ggx/2` package whose manifest declares
-//! `backend: { "kind": "process", "command": "bin/main" }`. The backend binary speaks one of
-//! two line-JSON protocols, picked by the manifest's `backend.protocol`
-//! ([`cmd_ext::GgxBackend::protocol_or_default`]): `ggs-ext/1` (`ggx_protocol.rs`, the
-//! default — one request answered at a time, for command-style plugins any language can write)
-//! or `ggx-rpc/1` (`backend_rpc.rs` — a request per thread, for the git-graph engine backend,
-//! which answers bursts of concurrent reads). The process-lifecycle plumbing below (spawn,
-//! crash isolation, the pending-call map, status/history) is shared between both; only the
-//! handshake method, the outbound request envelope and the reply parsing differ, branched on
-//! [`ProcKind`].
+//! The process extension host: the backend half of a `ggs/2` package whose manifest declares
+//! `backend: { "kind": "process", "command": "bin/main" }`. Every backend speaks the one
+//! wire protocol, `ggs-ext/1` (`ext_protocol.rs`) — newline-delimited JSON-RPC 2.0, every
+//! request dispatched onto its own thread on the plugin side, so a command-style plugin and
+//! a concurrent engine (the git-graph backend's opening fan of reads) plug in through the
+//! same handshake, the same envelope and the same reader. A manifest that still names a
+//! retired protocol fails `start` with an upgrade hint rather than a hung handshake.
 //!
 //! When it runs: eagerly — the boot pass starts every installed package that declares a
 //! backend (`start_all_installed`), and an install starts its backend at once — and lazily as
@@ -37,7 +34,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::cmd_ext;
-use crate::ggx_protocol::{self as proto, Wire};
+use crate::ext_protocol::{self as proto, Wire};
 
 /// How long `initialize` may take before the backend is declared unresponsive and killed.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -78,44 +75,9 @@ struct ProcHandle {
     stdin: Mutex<Option<ChildStdin>>,
     pending: PendingMap,
     next_id: AtomicU64,
-    /// The commands the backend declared in its `initialize` handshake (`ggs-ext/1` only;
-    /// empty for a `ggx-rpc/1` backend, which has no command-list concept).
+    /// The commands the backend declared in its `initialize` handshake.
     commands: Vec<String>,
     log: Arc<Mutex<Vec<String>>>,
-    kind: ProcKind,
-}
-
-/// Which of the two backend protocols a running handle speaks — see the module doc.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ProcKind {
-    GgsExt1,
-    GgxRpc1,
-}
-
-impl ProcKind {
-    fn from_protocol(protocol: &str) -> Self {
-        if protocol == crate::backend_rpc::PROTOCOL_VERSION {
-            ProcKind::GgxRpc1
-        } else {
-            ProcKind::GgsExt1
-        }
-    }
-
-    fn protocol_version(self) -> &'static str {
-        match self {
-            ProcKind::GgsExt1 => proto::PROTOCOL_VERSION,
-            ProcKind::GgxRpc1 => crate::backend_rpc::PROTOCOL_VERSION,
-        }
-    }
-
-    /// The handshake method the host sends first: `initialize` (`ggs-ext/1`) or `hello`
-    /// (`ggx-rpc/1`).
-    fn handshake_method(self) -> &'static str {
-        match self {
-            ProcKind::GgsExt1 => "initialize",
-            ProcKind::GgxRpc1 => "hello",
-        }
-    }
 }
 
 /// A backend's remembered state between runs (see `ProcessHostState::history`).
@@ -154,7 +116,7 @@ impl ProcHandle {
             extension_id: ext_id.to_owned(),
             pid: self.child.id(),
             commands: self.commands.clone(),
-            protocol_version: self.kind.protocol_version().to_owned(),
+            protocol_version: proto::PROTOCOL_VERSION.to_owned(),
             start_count: history.map_or(0, |h| h.start_count),
             last_error: None,
         }
@@ -192,24 +154,48 @@ impl ProcessHostState {
             return Ok(handle.info(ext_id, self.history.lock().unwrap().get(ext_id)));
         }
         let ext_dir = cmd_ext::installed_dir(exts_dir, ext_id)?;
-        let manifest: cmd_ext::GgxManifest = std::fs::read_to_string(ext_dir.join("manifest.json"))
-            .map_err(|e| format!("read {} manifest.json: {e}", ext_dir.display()))
-            .and_then(|text| {
-                serde_json::from_str(&text).map_err(|e| format!("invalid manifest.json: {e}"))
-            })?;
+        let manifest: cmd_ext::StudioManifest =
+            std::fs::read_to_string(ext_dir.join("manifest.json"))
+                .map_err(|e| format!("read {} manifest.json: {e}", ext_dir.display()))
+                .and_then(|text| {
+                    serde_json::from_str(&text).map_err(|e| format!("invalid manifest.json: {e}"))
+                })?;
         let backend = manifest
             .backend
             .as_ref()
             .ok_or_else(|| format!("{ext_id} declares no backend"))?;
-        if backend.kind != "process" {
+        if backend.kind != "process" && backend.kind != "node" {
             return Err(format!(
-                "{ext_id} declares backend kind {}; this app speaks process",
+                "{ext_id} declares backend kind {}; this app speaks process and node",
                 backend.kind
             ));
         }
-        let kind = ProcKind::from_protocol(backend.protocol_or_default());
-        let program =
-            resolve_command(&ext_dir, backend.command_for(&cmd_ext::host_platform_key()))?;
+        // One wire protocol. A manifest still naming a retired one fails here, with the
+        // remedy, instead of hanging a handshake the backend will never answer.
+        if let Some(protocol) = backend.protocol.as_deref() {
+            if protocol != proto::PROTOCOL_VERSION {
+                return Err(format!(
+                    "{ext_id} declares backend protocol {protocol}; this app speaks {} — \
+                     upgrade or reinstall the package",
+                    proto::PROTOCOL_VERSION
+                ));
+            }
+        }
+        // A `node` backend is the package's engine `.node` (the one engine binary the editor's
+        // Node runtime also loads), served by the app-bundled engine host the manifest names:
+        // the same ggs-ext/1 handshake, crash isolation and warm restarts, with the engine
+        // loaded over its C ABI instead of linked into a package-owned executable.
+        let (program, engine_node) = if backend.kind == "node" {
+            let host = backend.host.clone().unwrap_or_default();
+            let node =
+                resolve_command(&ext_dir, backend.command_for(&cmd_ext::host_platform_key()))?;
+            (resolve_engine_host(&host)?, Some(node))
+        } else {
+            (
+                resolve_command(&ext_dir, backend.command_for(&cmd_ext::host_platform_key()))?,
+                None,
+            )
+        };
         let mut command = Command::new(&program);
         command
             .args(&backend.args)
@@ -218,6 +204,9 @@ impl ProcessHostState {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(node) = engine_node.as_deref() {
+            command.arg(node);
+        }
         #[cfg(windows)]
         {
             // Never flash a console window for a plugin's backend (git.rs's precedent).
@@ -248,7 +237,6 @@ impl ProcessHostState {
             procs: Arc::clone(&self.procs),
             history: Arc::clone(&self.history),
             ext_id: ext_id.to_owned(),
-            kind,
         };
         std::thread::spawn(move || reader.serve(BufReader::new(stdout)));
         let stderr_log = Arc::clone(&log);
@@ -265,7 +253,6 @@ impl ProcessHostState {
             next_id: AtomicU64::new(1),
             commands: Vec::new(),
             log: Arc::clone(&log),
-            kind,
         };
         procs.insert(ext_id.to_owned(), handle);
 
@@ -276,23 +263,16 @@ impl ProcessHostState {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone();
-        let handshake_line = match kind {
-            ProcKind::GgsExt1 => proto::request(
-                1,
-                kind.handshake_method(),
-                json!({
-                    "protocolVersion": kind.protocol_version(),
-                    "extensionId": ext_id,
-                    "extensionPath": ext_dir,
-                    "workspaceFolders": workspace_folders,
-                }),
-            ),
-            ProcKind::GgxRpc1 => crate::backend_rpc::request(
-                1,
-                kind.handshake_method(),
-                json!({ "extensionId": ext_id, "extensionPath": ext_dir, "workspaceFolders": workspace_folders }),
-            ),
-        };
+        let handshake_line = proto::request(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": proto::PROTOCOL_VERSION,
+                "extensionId": ext_id,
+                "extensionPath": ext_dir,
+                "workspaceFolders": workspace_folders,
+            }),
+        );
         if let Err(e) = write_line(&procs, ext_id, &handshake_line) {
             let _ = drop_handle(&mut procs, ext_id);
             return Err(e);
@@ -302,34 +282,28 @@ impl ProcessHostState {
             Ok(Err(message)) => {
                 let _ = drop_handle(&mut procs, ext_id);
                 return Err(format!(
-                    "{ext_id} failed its {} handshake: {message}",
-                    kind.handshake_method()
+                    "{ext_id} failed its initialize handshake: {message}"
                 ));
             }
             Err(_) => {
                 let _ = drop_handle(&mut procs, ext_id);
                 return Err(format!(
-                    "{ext_id} did not answer {} within {} s",
-                    kind.handshake_method(),
+                    "{ext_id} did not answer initialize within {} s",
                     HANDSHAKE_TIMEOUT.as_secs()
                 ));
             }
         };
-        // `ggs-ext/1`'s `initialize` answers a command list; `ggx-rpc/1`'s `hello` has no
-        // command-list concept (the graph engine backend answers one `request` verb).
-        let commands: Vec<String> = match kind {
-            ProcKind::GgsExt1 => handshake_result
-                .pointer("/capabilities/commands")
-                .and_then(Value::as_array)
-                .map(|ids| {
-                    ids.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default(),
-            ProcKind::GgxRpc1 => Vec::new(),
-        };
+        // `initialize` answers a command list — the surface the Extensions view reports.
+        let commands: Vec<String> = handshake_result
+            .pointer("/capabilities/commands")
+            .and_then(Value::as_array)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
         let info = {
             let handle = procs
                 .get_mut(ext_id)
@@ -348,7 +322,8 @@ impl ProcessHostState {
 
     /// Run one of the extension's commands in its backend, starting the backend first if it
     /// is not running (lazy activation). No timeout: a command may be a long operation, and
-    /// `stop` (or the process dying) fails the call. `ggs-ext/1`'s single RPC verb.
+    /// `stop` (or the process dying) fails the call. The single RPC verb — a palette command
+    /// and a page's `backend.run` both arrive here.
     pub fn run(
         &self,
         exts_dir: &Path,
@@ -361,25 +336,6 @@ impl ProcessHostState {
             ext_id,
             "runCommand",
             json!({ "command": command, "args": args }),
-        )
-    }
-
-    /// One opaque message for a `ggx-rpc/1` backend (the graph engine protocol: `{repo,
-    /// message, settings}` answered by the backend's own dispatch) — the page RPC
-    /// `backend.message` reaches this, so a plugin's pages speak their own backend's protocol
-    /// through the host without the host interpreting a word of it.
-    pub fn message(
-        &self,
-        exts_dir: &Path,
-        ext_id: &str,
-        message: Value,
-        settings: Value,
-    ) -> Result<Value, String> {
-        self.call(
-            exts_dir,
-            ext_id,
-            "request",
-            json!({ "repo": "", "message": message, "settings": settings }),
         )
     }
 
@@ -396,19 +352,13 @@ impl ProcessHostState {
             // No pending entry: the response finds no waiter and is dropped — the report is
             // delivery, not a round trip.
             let id = handle.next_id.fetch_add(1, Ordering::Relaxed);
-            let line = match handle.kind {
-                ProcKind::GgsExt1 => proto::request(id, "workspaceChanged", params.clone()),
-                ProcKind::GgxRpc1 => {
-                    crate::backend_rpc::request(id, "workspaceChanged", params.clone())
-                }
-            };
+            let line = proto::request(id, "workspaceChanged", params.clone());
             let _ = write_line(&procs, ext_id, &line);
         }
     }
 
-    /// The general call: any method, any params, against either protocol — starting the
-    /// backend first if it is not running. `ggs-ext/1`'s `run` is `call(.., "runCommand", ..)`;
-    /// `message` is `call(.., "request", ..)` for the `ggx-rpc/1` plugins.
+    /// The general call: any method, any params — starting the backend first if it is not
+    /// running. `run` is `call(.., "runCommand", ..)`.
     pub fn call(
         &self,
         exts_dir: &Path,
@@ -427,10 +377,7 @@ impl ProcessHostState {
                 .ok_or_else(|| format!("{ext_id} backend stopped before its call ran"))?;
             let id = handle.next_id.fetch_add(1, Ordering::Relaxed);
             handle.pending.lock().unwrap().insert(id, tx);
-            let line = match handle.kind {
-                ProcKind::GgsExt1 => proto::request(id, method, params),
-                ProcKind::GgxRpc1 => crate::backend_rpc::request(id, method, params),
-            };
+            let line = proto::request(id, method, params);
             write_line(&procs, ext_id, &line)?;
             // The lock is dropped before the wait: a `stop` on another thread must be able
             // to reach the handle while this call is outstanding.
@@ -520,19 +467,10 @@ struct ReaderState {
     procs: Arc<Mutex<HashMap<String, ProcHandle>>>,
     history: Arc<Mutex<HashMap<String, ProcHistory>>>,
     ext_id: String,
-    kind: ProcKind,
 }
 
 impl ReaderState {
     fn serve(self, stdout: impl BufRead) {
-        match self.kind {
-            ProcKind::GgsExt1 => self.serve_ggs_ext1(stdout),
-            ProcKind::GgxRpc1 => self.serve_ggx_rpc1(stdout),
-        }
-        self.cleanup();
-    }
-
-    fn serve_ggs_ext1(&self, stdout: impl BufRead) {
         for line in stdout.lines() {
             let Ok(line) = line else { break };
             if line.trim().is_empty() {
@@ -553,45 +491,14 @@ impl ReaderState {
                         .unwrap_or("`message` missing");
                     push_log(&self.log, format!("[{method}] {message}"));
                 }
-                // The host makes the requests in ggs-ext/1; a plugin's stray one is logged,
-                // not answered (there is no request path back into the plugin's stdin here).
+                // The host makes the requests; a backend's stray one is logged, not answered
+                // (there is no request path back into the plugin's stdin here).
                 Wire::Request { method, .. } => {
                     push_log(&self.log, format!("unexpected request: {method}"));
                 }
             }
         }
-    }
-
-    fn serve_ggx_rpc1(&self, stdout: impl BufRead) {
-        use crate::backend_rpc::Wire as RpcWire;
-        for line in stdout.lines() {
-            let Ok(line) = line else { break };
-            if line.trim().is_empty() {
-                continue;
-            }
-            let Ok(wire) = serde_json::from_str::<RpcWire>(&line) else {
-                push_log(&self.log, format!("unparsable line: {line}"));
-                continue;
-            };
-            match wire {
-                RpcWire::Response { id, result, error } => {
-                    self.resolve(id, result, error.map(|e| e.message))
-                }
-                // The backend's push events: git's command echo and its one-time "up" signal —
-                // both fold into the same log the Extensions status view and crash reports read.
-                RpcWire::Event { event, line } => {
-                    push_log(&self.log, format!("[{event}] {}", line.unwrap_or_default()));
-                }
-                // The host makes the requests in ggx-rpc/1 too; a stray one from the backend is
-                // logged, not answered.
-                RpcWire::Request { method, .. } => {
-                    push_log(
-                        &self.log,
-                        format!("unexpected request from backend: {method}"),
-                    );
-                }
-            }
-        }
+        self.cleanup();
     }
 
     fn resolve(&self, id: u64, result: Option<Value>, error: Option<String>) {
@@ -647,12 +554,7 @@ fn drop_handle(procs: &mut HashMap<String, ProcHandle>, ext_id: &str) -> Result<
     };
     // Best-effort goodbye; the kill below is the real guarantee.
     if let Some(mut stdin) = handle.stdin.lock().unwrap().take() {
-        let goodbye = match handle.kind {
-            ProcKind::GgsExt1 => proto::notification("shutdown", Value::Null),
-            // ggx-rpc/1's `shutdown` is a request the backend answers before exiting its own
-            // read loop (`backend_rpc::serve_backend`); nothing here waits for that answer.
-            ProcKind::GgxRpc1 => crate::backend_rpc::request(0, "shutdown", Value::Null),
-        };
+        let goodbye = proto::notification("shutdown", Value::Null);
         let _ = stdin.write_all(goodbye.as_bytes());
         let _ = stdin.flush();
     }
@@ -690,6 +592,69 @@ fn resolve_command(ext_dir: &Path, command: &str) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 
+/// The app-bundled engine host a `node` backend names (`git-graph-backend`): beside the app's
+/// own binary first (the installer resources place the two together, and cargo's output
+/// directory holds both during a build), one profile up second (a dev run executes from
+/// `debug/` while `prepare.mjs` builds the host into `release/`), and exactly where
+/// `GGS_ENGINE_HOST` says last — the dev and test override. Only a host that ships with the
+/// app can ever run: the manifest names one, it never brings its own, so a package cannot
+/// smuggle an executable through a `node` backend.
+fn resolve_engine_host(name: &str) -> Result<PathBuf, String> {
+    if name
+        .split(['/', '\\'])
+        .any(|segment| segment == ".." || segment.is_empty())
+    {
+        return Err(format!("engine host name may not be a path: {name}"));
+    }
+    let file_name = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    };
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(dir) = std::env::var("GGS_ENGINE_HOST") {
+        candidates.push(PathBuf::from(dir).join(&file_name));
+    }
+    if let Ok(exe_dir) = std::env::current_exe()
+        .map_err(|e| format!("could not locate the app binary: {e}"))
+        .and_then(|exe| {
+            exe.parent()
+                .map(Path::to_owned)
+                .ok_or_else(|| "no parent".to_owned())
+        })
+    {
+        candidates.push(exe_dir.join(&file_name));
+        candidates.push(exe_dir.join("..").join("release").join(&file_name));
+    }
+    candidates
+        .iter()
+        .find(|candidate| candidate.is_file())
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "engine host {name} not found (looked at {})",
+                candidates
+                    .iter()
+                    .map(|c| c.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+}
+
+#[cfg(test)]
+mod engine_host_tests {
+    use super::resolve_engine_host;
+
+    /// A host name that is a path is refused outright — the field names an app-bundled
+    /// binary, never a location.
+    #[test]
+    fn an_engine_host_name_may_not_be_a_path() {
+        assert!(resolve_engine_host("../evil").is_err());
+        assert!(resolve_engine_host("some/dir").is_err());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The Tauri commands (thin: resolve the extensions directory, delegate to the core above)
 // ---------------------------------------------------------------------------
@@ -719,24 +684,6 @@ pub fn ext_process_run(
     )
 }
 
-/// One opaque message for a `ggx-rpc/1` package's backend — the page RPC `backend.message`
-/// reaches this, the host forwarding without interpreting the protocol.
-#[tauri::command]
-pub fn ext_process_message(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, ProcessHostState>,
-    ext_id: String,
-    message: Value,
-    settings: Option<Value>,
-) -> Result<Value, String> {
-    state.message(
-        &cmd_ext::extensions_dir(&app)?,
-        &ext_id,
-        message,
-        settings.unwrap_or(Value::Null),
-    )
-}
-
 #[tauri::command]
 pub fn ext_process_stop(
     state: tauri::State<'_, ProcessHostState>,
@@ -759,17 +706,12 @@ mod tests {
     use std::io::Cursor;
 
     fn make_reader(pending: &PendingMap) -> ReaderState {
-        make_reader_kind(pending, ProcKind::GgsExt1)
-    }
-
-    fn make_reader_kind(pending: &PendingMap, kind: ProcKind) -> ReaderState {
         ReaderState {
             pending: Arc::clone(pending),
             log: Arc::new(Mutex::new(Vec::new())),
             procs: Arc::new(Mutex::new(HashMap::new())),
             history: Arc::new(Mutex::new(HashMap::new())),
             ext_id: "acme.demo".to_owned(),
-            kind,
         }
     }
 
@@ -804,38 +746,16 @@ mod tests {
     }
 
     #[test]
-    fn ggx_rpc1_responses_resolve_their_pending_calls_too() {
+    fn a_backend_log_notification_is_logged_not_dropped_as_unparsable() {
         let pending = Arc::new(Mutex::new(HashMap::new()));
-        let (tx, rx) = mpsc::channel();
-        pending.lock().unwrap().insert(9, tx);
-        make_reader_kind(&pending, ProcKind::GgxRpc1).serve(Cursor::new(
-            crate::backend_rpc::response(9, Ok(json!({ "commits": [] }))),
-        ));
-        assert_eq!(rx.recv().unwrap().unwrap(), json!({ "commits": [] }));
-    }
-
-    #[test]
-    fn ggx_rpc1_push_events_are_logged_not_dropped_as_unparsable() {
-        let pending = Arc::new(Mutex::new(HashMap::new()));
-        let reader = make_reader_kind(&pending, ProcKind::GgxRpc1);
+        let reader = make_reader(&pending);
         let log = Arc::clone(&reader.log);
-        reader.serve(Cursor::new(format!(
-            "{}{}",
-            crate::backend_rpc::log_event("> git fetch [12ms]"),
-            crate::backend_rpc::ready_event(),
+        reader.serve(Cursor::new(proto::notification(
+            "$/log",
+            json!({ "message": "> git fetch [12ms]" }),
         )));
         let lines = log.lock().unwrap().clone();
         assert!(lines.iter().any(|l| l.contains("git fetch")), "{lines:?}");
-        assert!(lines.iter().any(|l| l == "[ready] "), "{lines:?}");
-    }
-
-    #[test]
-    fn a_backend_protocol_picks_the_matching_kind() {
-        assert_eq!(ProcKind::from_protocol("ggs-ext/1"), ProcKind::GgsExt1);
-        assert_eq!(ProcKind::from_protocol("ggx-rpc/1"), ProcKind::GgxRpc1);
-        // An unrecognized value degrades to the command-style default rather than failing to
-        // spawn at all.
-        assert_eq!(ProcKind::from_protocol("something-else"), ProcKind::GgsExt1);
     }
 
     #[test]

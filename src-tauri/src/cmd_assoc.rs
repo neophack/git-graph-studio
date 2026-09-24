@@ -16,7 +16,7 @@ use serde::Serialize;
 
 /// One entry of the extension catalogue the Settings dialog shows: the extension
 /// without the dot, the MIME type Linux registers for it, and whether it is checked
-/// by default (the formats GGS is built around: the CAN traces, `.ggx`, the viewers).
+/// by default (the formats GGS is built around: the CAN traces, the viewers).
 #[derive(Serialize)]
 pub struct AssocExt {
     pub ext: String,
@@ -28,7 +28,6 @@ pub struct AssocExt {
 const CATALOG: &[(&str, &str, bool)] = &[
     ("blf", "application/x-vector-blf", true),
     ("asc", "application/x-vector-asc", true),
-    ("ggx", "application/x-ggs-extension", true),
     ("bin", "application/octet-stream", true),
     ("hex", "application/x-hex", true),
     ("log", "text/plain", false),
@@ -111,6 +110,11 @@ pub fn assoc_apply(extensions: Vec<String>) -> Result<AssocResult, String> {
 /// Append one directory to a `;`-joined PATH value, idempotently and case-insensitively
 /// (Windows PATH is case-insensitive; an upgrade must not grow a duplicate entry). An empty
 /// current value yields the directory alone.
+///
+/// Only the Windows runtime and the test target compile it: every non-test caller sits in
+/// `user_path_apply`'s `#[cfg(windows)]` half, and on the other platforms the lib target
+/// would fail `clippy -D warnings` with dead_code (the deb leg's CI run of 2026-09-23).
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn append_path_entry(current: &str, dir: &str) -> String {
     if dir.is_empty() {
         return current.to_owned();
@@ -515,7 +519,7 @@ mod tests {
             .filter(|e| e.recommended)
             .map(|e| e.ext.as_str())
             .collect();
-        assert_eq!(recommended, ["blf", "asc", "ggx", "bin", "hex"]);
+        assert_eq!(recommended, ["blf", "asc", "bin", "hex"]);
         assert!(catalog.iter().any(|e| e.ext == "json" && !e.recommended));
     }
 
@@ -523,13 +527,13 @@ mod tests {
     fn apply_filters_out_unknown_extensions() {
         // The platform-specific halves are not exercised here (they touch the real
         // user configuration); this covers the normalisation the halves rely on.
-        let raw = [" .BLF", "nope", "asc", ".ggx"];
+        let raw = [" .BLF", "nope", "asc", ".hex"];
         let selected: Vec<String> = raw
             .iter()
             .map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase())
             .filter(|e| CATALOG.iter().any(|(c, _, _)| c == e))
             .collect();
-        assert_eq!(selected, ["blf", "asc", "ggx"]);
+        assert_eq!(selected, ["blf", "asc", "hex"]);
     }
 
     #[cfg(target_os = "windows")]

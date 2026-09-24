@@ -1,21 +1,45 @@
 // Runs inside the sandboxed extension host frame (ext-host.html). Loads one extension's
-// compiled entry point as a CommonJS module - the shape `vsce` packages - with `require`
-// limited to the `vscode` API shim, then calls its `activate` export.
+// compiled entry point the way VS Code's Node extension host does: a CommonJS `require`
+// over the package's whole loadable surface (the code map the host preloaded at
+// activation), with the Node builtins shimmed (nodeShims.ts) and `require('vscode')`
+// answering the API shim - then calls its `activate` export.
 //
-// Studio only runs extensions whose `main` is a self-contained bundle: a synchronous
-// `require` of another file cannot cross the frame boundary, so it fails with a clear error.
+// A package whose `main` is one self-contained bundle loads exactly as before; a package
+// compiled as many files, or carrying a `node_modules`, loads through the same resolver.
+// A `require` the map cannot answer fails with Node's own MODULE_NOT_FOUND shape.
 //
 // Two message channels connect the frame with the main window (src/extHost.ts):
 //   Rpc  (frame -> host): host services - the command registry, notifications, settings.
-//   Call (host -> frame): running a command handler the extension registered, deactivate.
+//   Call (host -> frame): running a command handler the extension registered, deactivate,
+//                         tree view walks, webview view resolutions.
 
-import { createVscodeApi, Disposable, type HostContext, type VscodeApi } from './vscodeApi';
+import { createVscodeApi, Disposable, Uri, type HostContext, type VscodeApi } from './vscodeApi';
+import { createNativeModule, createNodeRequire, type NodeEnv } from './extModuleLoader';
+import { createNodeBuiltins, installNodeGlobals } from './nodeShims';
+
+/** The context as it actually crosses `postMessage`: `workspaceFolders[].uri` is bare data
+ *  (no `toString`) since a function there fails the structured clone - `boot()` rebuilds
+ *  each into a real `Uri` once received, the same way `extensionUri` is built below. */
+type WireHostContext = Omit<HostContext, 'workspaceFolders'> & {
+	workspaceFolders: { uri: { scheme: string; path: string; fsPath: string }; name: string; index: number }[];
+};
 
 interface InitMessage {
 	type: '__studioExtInit';
-	context: HostContext;
-	/** The extension's compiled entry point (its `main`), as text. */
-	code: string;
+	context: WireHostContext;
+	/** The extension's compiled entry point (its `main`), as text - the shape a host that
+	 *  preloaded no code map sends (the jsdom tests, a host behind an older bridge). */
+	code?: string;
+	/** The package's whole loadable surface (`ext_load_code`): package-relative paths ->
+	 *  text. Every `require` resolves against it. */
+	files?: Record<string, string>;
+	/** The package's binary native modules (`.node`), as package-relative paths — a
+	 *  `require` of one answers the host-served native proxy. */
+	binaries?: string[];
+	/** `true` when the code map hit its bounds - a require beyond it fails naming this. */
+	truncated?: boolean;
+	/** The Node environment facts (`ext_node_env`): platform words, home and temp dirs. */
+	nodeEnv?: NodeEnv;
 }
 
 interface RpcRequest {
@@ -78,6 +102,13 @@ function handleCall(method: string, args: unknown[]): unknown {
 		api_?.__serveTree.setVisible(args[0] as string, args[1] as boolean);
 		return undefined;
 	}
+	// A webview view's first visibility: its provider's resolveWebviewView runs here, the
+	// way VS Code defers resolution to the view's first show.
+	if (method === 'webviewView.resolve') return api_?.__serveWebviewView.resolve(args[0] as string);
+	if (method === 'webviewView.setVisible') {
+		api_?.__serveWebviewView.setVisible(args[0] as string, args[1] as boolean);
+		return undefined;
+	}
 	throw new Error(`unknown extension host call: ${method}`);
 }
 
@@ -120,22 +151,46 @@ window.addEventListener('message', (event) => {
 });
 
 function boot(message: InitMessage): void {
-	const { context, code } = message;
+	const context: HostContext = {
+		...message.context,
+		workspaceFolders: message.context.workspaceFolders.map((folder) => ({ ...folder, uri: Uri.file(folder.uri.path) }))
+	};
 	const api = createVscodeApi(context, {
 		request: hostRequest,
 		registerCommandHandler: (id, handler) => registered.set(id, handler)
 	});
 	api_ = api;
-	const require = (id: string): unknown => {
-		if (id === 'vscode') return api;
-		throw new Error(`require('${id}') is not supported: Git Graph Studio only runs extensions whose main entry is a self-contained bundle`);
+	// The Node compatibility layer: the code map (the host's preload, or this message's
+	// bare entry code standing in for it), the builtin shims over it, and the globals
+	// extension code assumes (`process`, `Buffer`, `global`, `setImmediate`).
+	const files = message.files ?? (message.code !== undefined ? { 'extension.js': message.code } : {});
+	const binaries = message.binaries ?? [];
+	const nodeEnv: NodeEnv = message.nodeEnv ?? {
+		platform: 'win32', arch: 'x64', homedir: '', tmpdir: '', hostname: 'studio',
+		release: '', eol: '\r\n', separator: '\\', delimiter: ';'
 	};
-	module_ = { exports: {} };
+	const shimHost = { nodeEnv, extensionPath: context.extensionPath, files, binaries, bridge: { request: hostRequest } };
+	const builtins = createNodeBuiltins(shimHost);
+	const { require, runEntry } = createNodeRequire({
+		files,
+		binaries,
+		truncated: message.truncated ?? false,
+		extensionPath: context.extensionPath,
+		vscode: api,
+		builtin: (id) => (id in builtins ? builtins[id] : undefined),
+		// The host-served native module of one `.node`: every call crosses as
+		// `native.call(path, method, args)`, which the host forwards to the package's
+		// backend — the process that loaded the binary.
+		native: (rel) => createNativeModule(rel, (method, args) => hostRequest('native.call', [rel, method, args]))
+	});
+	installNodeGlobals(shimHost, builtins, require);
 	try {
-		// The CommonJS wrapper VS Code itself runs extension code through. Registration calls
-		// the shim, which parks the handler here (via 'registerHandler') and forwards the
-		// command id to the workbench's registry.
-		new Function('require', 'module', 'exports', code)(require, module_, module_.exports);
+		// The entry the manifest names (`main`), resolved the way `require()` resolves it:
+		// extensionless spellings gain `.js`, directories resolve through their package.json
+		// or index files. A bare `code` message (no map, no manifest) runs as 'extension.js'.
+		const pkg = files['package.json'] !== undefined ? JSON.parse(files['package.json']) as { main?: string } : {};
+		const main = message.files !== undefined ? (pkg.main ?? 'extension.js') : 'extension.js';
+		module_ = runEntry(main) as { exports: { activate?: (context: unknown) => unknown; deactivate?: () => unknown } };
 		Promise.resolve(module_.exports.activate?.(activationContext(context, api))).then(
 			() => parent.postMessage({ type: '__studioExtActivated', extensionId: context.extensionId }, '*'),
 			(error) => parent.postMessage({ type: '__studioExtActivateFailed', extensionId: context.extensionId, error: String(error) }, '*')
@@ -157,6 +212,10 @@ function activationContext(context: HostContext, api: VscodeApi): Record<string,
 		workspaceState: api.__mementos.workspace,
 		storagePath: context.extensionPath,
 		globalStoragePath: context.extensionPath,
+		globalStorageUri: { scheme: 'file', path: context.extensionPath, fsPath: context.extensionPath, toString: () => 'file:' + context.extensionPath },
+		storageUri: { scheme: 'file', path: context.extensionPath, fsPath: context.extensionPath, toString: () => 'file:' + context.extensionPath },
+		logUri: { scheme: 'file', path: context.extensionPath, fsPath: context.extensionPath, toString: () => 'file:' + context.extensionPath },
+		logPath: context.extensionPath,
 		extensionMode: 3, // ExtensionMode.Production — the frame host has no dev mode
 		asAbsolutePath: (relative: string) => context.extensionPath + '/' + relative,
 		environmentVariableCollection: undefined,

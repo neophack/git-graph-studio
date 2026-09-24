@@ -568,6 +568,15 @@ Goal: common VSIX beyond git-graph-rs (themes, snippets, grammars, light languag
 
 ## 8. Special topic: extension system design (M6 in detail)
 
+> **2026-09-24 update.** The package format converged to the store's own: **`.vsix` only**.
+> The custom `.ggx` package format described in this section is retired — installs made
+> from one still run and uninstall, nothing new installs from one. A VSIX declares the
+> Studio capabilities under `package.json`'s `ggs` key (the runtime `manifest.json` is
+> generated from it on install), and an engine package ships exactly one engine binary,
+> `git-graph.node`, which the editor's Node runtime and the app's Rust engine host (over
+> its C ABI) both load. The architectural roles below (the host, the pages, the protocol)
+> stand unchanged.
+
 ```
 ┌──────────────── main thread (workbench) ────────────┐
 │ contributions.ts  when-evaluator  commands  views     │
@@ -622,7 +631,28 @@ VSIX compatibility (above) is for the existing ecosystem. GGS's *own* plugin for
 > internally: each now sends a `plugin_host::request` to the installed backend instead of
 > calling the engine directly.
 >
-> **Two wire protocols, not one.** `ggs-ext/1` (`ggx_protocol.rs`) stayed as designed —
+> **The package format is the VSIX (2026-09-24).** git-graph-rs no longer packs a bespoke
+> `.ggx`: the packer emits a plain `.vsix` — the format a marketplace serves — with the
+> `ggx/2` capabilities (pages, activity bar, process backend, permissions) declared under a
+> `ggs` key in `package.json`, which VS Code ignores. Installing generates the same
+> `manifest.json` a `.ggx` carries, so the warm-backend / `ggx://`-page runtime serves a
+> VSIX unchanged; the bundled one-click offer installs the `.vsix`. The engine's third
+> front end, `native/capi` (a plain `extern "C"` JSON ABI, compiled into `git-graph.node`
+> itself — the Node addon links the crate as an `rlib`, so one engine file serves both ABIs
+> and no separate library is built),
+> exists for hosts that can load neither a Node addon nor this app.
+>
+> **One wire protocol, not two (unified 2026-09-23, superseding the note below).** The
+> second protocol is gone: `serve_plugin` itself dispatches every request onto its own
+> thread (absorbing `backend_rpc.rs`'s reason to exist), the engine backend answers the same
+> `initialize` / `runCommand` / `workspaceChanged` verbs as the demo, a page speaks to any
+> backend through the single `backend.run(command, args)` page service, and a manifest still
+> naming `ggx-rpc/1` fails its start with an upgrade hint. What this section specified as
+> `hello` / `request` / `closeRepos` now rides the standard verbs; the `log` / `ready` push
+> events folded into `$/log` and stderr.
+>
+> **Two wire protocols, not one** *(historical, before the unification)*. `ggs-ext/1`
+> (`ggx_protocol.rs`) stayed as designed —
 > command-style plugins, `serve_plugin`'s one-request-at-a-time loop — because rewriting it to
 > match this section's `ggx-rpc/1` design exactly would have meant editing already-shipped,
 > third-party-facing protocol code. The graph engine speaks a second, purpose-built protocol,
@@ -653,6 +683,15 @@ VSIX compatibility (above) is for the existing ecosystem. GGS's *own* plugin for
 > string-parsing helper: change-ref/URL formats, the fetch-window arithmetic) stayed host-side
 > in `cmd_graph.rs`, now round-tripping to the backend once per adaptive-sampling-window
 > iteration instead of calling the engine in-process mid-loop.
+>
+> **One bundled package, no `plugins/` directory (2026-09-24, superseding the next two
+> paragraphs).** The GGX Demo is deleted and the app tree carries no plugin code; the one
+> package beside the app is the extension's own standard VSIX — the submodule's
+> `npm run package` output, which `prepare.mjs` copies to
+> `target/studio/bundled/app-resources/extensions/git-graph-rs.vsix` (the engine
+> `git-graph.node` rides inside it; the `git-graph-backend` host sidecar installs beside
+> the main binary through `tauri.conf.json`'s `externalBin`). The Extensions view's detail
+> pages are built.
 >
 > **The app installs no plugin by default.** Two packages ship beside the app — the
 > integrated git-graph-rs (`extensions/git-graph-rs.ggx` — `prepare.mjs` builds

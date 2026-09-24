@@ -1,6 +1,6 @@
 [package]
 name = "git-graph-studio"
-version = "0.1.4"
+version = "0.1.5"
 description = "Git Graph Studio - a standalone Git repository viewer with an explorer, source control panel, terminal and the git-graph-rs engine"
 edition = "2021"
 # The floor is big-code-analysis (module 17's richer-metrics engine): it is Rust
@@ -25,32 +25,26 @@ name = "git-graph-studio"
 path = "src/main.rs"
 required-features = ["desktop"]
 
-# Every `.ggx` plugin's own folder under plugins/, one binary target each (scripts/build-*.bat
-# builds them independently of the app). The git-graph-rs engine backend: the `.ggx` process
-# backend `cmd_graph/engine_impl.rs` compiles into (`engine` feature only — this binary, never
-# `git-graph-studio`, links `git-graph-core`). Read-only: no `desktop` feature, no window, no
-# write path (writes stay in the app, over the `git` CLI). `scripts/build-ggx.mjs` packs it
-# into `git-graph-rs.ggx`.
+# The engine host (`src/engine_host/`): the app-bundled sidecar that serves the Git Graph
+# VSIX's engine `.node` (`engine` feature only). It links no engine crate — it loads the
+# package's own `git-graph.node` over its C ABI (`engine.rs`), the same single engine binary
+# the editor's Node runtime loads. Read-only: no `desktop` feature, no window, no write path
+# (writes stay in the host, over the `git` CLI).
 [[bin]]
 name = "git-graph-backend"
-path = "../plugins/git-graph-rs/src/main.rs"
+path = "src/bin/git_graph_backend.rs"
 required-features = ["engine"]
-
-# The reference `ggx/2` process plugin — the format's worked example, shipped as the
-# installer's bundled sample (plugins/ggs-ext-demo/build.mjs packs it; the Extensions view
-# offers it as the one-click-installable GGX Demo).
-[[bin]]
-name = "ggs-ext-demo"
-path = "../plugins/ggs-ext-demo/src/main.rs"
 
 [features]
 default = ["desktop"]
-# The engine: reachable only through `git-graph-backend`'s `required-features`, never part of
-# `desktop` or the default set — `git-graph-studio` never links `git-graph-core` (plan §3.8,
-# §8.2's "the backend is the only engine"). `cargo test --all-features` turns it on alongside
-# `desktop`, compiling and exercising both `cmd_graph.rs`'s always-on proxy functions and
-# `cmd_graph/engine_impl.rs`'s real implementation in one pass.
-engine = ["dep:git-graph-core", "dep:base64", "dep:sha1", "dep:hex", "dep:ureq"]
+# The engine host's load of the package's engine `.node`: reachable only through
+# `git-graph-backend`'s `required-features`, never part of `desktop` or the default set. No
+# binary in this tree links `git-graph-core` anymore (plan §3.8 strengthened, 2026-09-24): the
+# engine ships inside the package as the one `git-graph.node` — the file the editor's Node
+# runtime `require`s and this host `LoadLibrary`s over its C ABI — so the two hosts answer
+# identically by construction. (sha1/hex/ureq are the host library's own needs, not engine
+# ones: the gerrit operations the backend answers over the `git` CLI.)
+engine = ["dep:libloading", "dep:base64", "dep:sha1", "dep:hex", "dep:ureq"]
 desktop = [
     "dep:tauri",
     "dep:tauri-plugin-dialog",
@@ -111,10 +105,10 @@ tauri-plugin-clipboard-manager = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 portable-pty = { version = "0.9", optional = true }
-# The engine, from the vscode-git-graph-rs submodule: linked only into `git-graph-backend`
-# (the `engine` feature), never into `git-graph-studio` — `cmd_graph.rs` and its `engine_impl`
-# submodule are the only modules that name it; build.rs enforces the seam.
-git-graph-core = { path = "../vscode-git-graph-rs/native/core", optional = true }
+# The engine host's load of the package's engine `.node` (`src/engine_host/engine.rs`,
+# the `engine` feature): a plain `LoadLibrary` of the C ABI exports the addon also serves the
+# Node runtime from the same file. Nothing in this tree links an engine crate.
+libloading = { version = "0.8", optional = true }
 ureq = { version = "3", features = ["rustls"], optional = true }
 sha1 = { version = "0.10", optional = true }
 hex = { version = "0.4", optional = true }

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { ExtensionHost, type ExtInfo } from '../src/extHost';
+import { ExtensionHost, type ExtInfo, type GalleryEntry } from '../src/extHost';
 import { extensionSettingDefs, registerContextProvider, resolvedMenuEntries } from '../src/contributions';
 import { ExtensionsPanel } from '../src/extensionsPanel';
 import { commandForBinding, commands } from '../src/commands';
@@ -19,8 +19,8 @@ import { saveExtSetting } from '../src/state';
 import { click, flush, key, menuItem, menuLabels, notificationButton, notifications, rightClick, type } from './helpers';
 import { Explorer } from '../src/explorer';
 
-const BUILTIN: ExtInfo = { id: 'neophack.git-graph-rs', name: 'git-graph-rs', displayName: 'Git Graph', publisher: 'neophack', version: '1.0.23', description: 'Git Graph', builtin: true, icon: null, path: '', categories: ['SCM Providers'], keywords: ['git'], repository: 'https://github.com/neophack/git-graph-rs', license: 'MIT', enginesVscode: '^1.80.0', extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'bundled', ggx: null };
-const USER: ExtInfo = { id: 'acme.demo', name: 'demo', displayName: null, publisher: 'acme', version: '2.0.0', description: 'A demo', builtin: false, icon: null, path: '/ext/acme.demo-2.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: ['acme.base'], extensionPack: [], readme: null, changelog: null, format: 'vsix', ggx: null };
+const BUILTIN: ExtInfo = { id: 'neophack.git-graph-rs', name: 'git-graph-rs', displayName: 'Git Graph', publisher: 'neophack', version: '1.0.23', description: 'Git Graph', builtin: true, icon: null, path: '', categories: ['SCM Providers'], keywords: ['git'], repository: 'https://github.com/neophack/git-graph-rs', license: 'MIT', enginesVscode: '^1.80.0', extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'bundled', capabilities: null };
+const USER: ExtInfo = { id: 'acme.demo', name: 'demo', displayName: null, publisher: 'acme', version: '2.0.0', description: 'A demo', builtin: false, icon: null, path: '/ext/acme.demo-2.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: ['acme.base'], extensionPack: [], readme: null, changelog: null, format: 'vsix', capabilities: null };
 
 function withExtensions(...extensions: ExtInfo[]): void {
 	backend.on('ext_list', () => extensions);
@@ -52,8 +52,8 @@ describe('ExtensionsPanel', () => {
 	it('installs the bundled git-graph-rs package from the integrated entry, as a standard package', async () => {
 		let listed: ExtInfo[] = [BUILTIN, USER];
 		backend.on('ext_list', () => listed);
-		const installedGgx: ExtInfo = { ...BUILTIN, builtin: false, format: 'ggx', version: '1.0.25', path: '/ext/neophack.git-graph-rs-1.0.25' };
-		backend.on('ext_install_bundled', () => installedGgx);
+		const installedBundled: ExtInfo = { ...BUILTIN, builtin: false, format: 'ggs', version: '1.0.25', path: '/ext/neophack.git-graph-rs-1.0.25' };
+		backend.on('ext_install_bundled', () => installedBundled);
 		const panel = mountedPanel();
 		await panel.refresh();
 		document.querySelectorAll<HTMLElement>('.ext-row')[0]!.querySelector<HTMLElement>('.action-btn')!.click();
@@ -61,7 +61,7 @@ describe('ExtensionsPanel', () => {
 		expect(backend.callsTo('ext_install_bundled')).toEqual([{ extId: 'neophack.git-graph-rs' }]);
 		expect(notifications().join()).toContain('neophack.git-graph-rs v1.0.25');
 		// Once installed it is a standard package: the button becomes the ordinary uninstall.
-		listed = [installedGgx, USER];
+		listed = [installedBundled, USER];
 		await panel.refresh();
 		const integrated = document.querySelectorAll<HTMLElement>('.ext-row')[0]!.querySelector<HTMLElement>('.action-btn')!;
 		expect(integrated.title).toContain('Uninstall neophack.git-graph-rs');
@@ -71,10 +71,10 @@ describe('ExtensionsPanel', () => {
 		// What cmd_ext.rs's listing composes when no demo package is installed: the embedded
 		// manifest stands in, `format: 'bundled'` (the install offer), `builtin: false` (it is
 		// a sample, nothing of it is built into the app).
-		const SAMPLE: ExtInfo = { id: 'ggs.ext-demo', name: 'ext-demo', displayName: 'GGX Demo', publisher: 'ggs', version: '0.2.0', description: 'The worked example', builtin: false, icon: null, path: '', categories: ['Examples'], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'bundled', ggx: null };
+		const SAMPLE: ExtInfo = { id: 'ggs.ext-demo', name: 'ext-demo', displayName: 'Demo', publisher: 'ggs', version: '0.2.0', description: 'The worked example', builtin: false, icon: null, path: '', categories: ['Examples'], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'bundled', capabilities: null };
 		let listed: ExtInfo[] = [BUILTIN, SAMPLE, USER];
 		backend.on('ext_list', () => listed);
-		const installed: ExtInfo = { ...SAMPLE, format: 'ggx', path: '/ext/ggs.ext-demo-0.2.0', ggx: { format: 'ggx/2', id: 'ggs.ext-demo', version: '0.2.0', pages: { main: { page: 'web/view.html' } }, backend: { kind: 'process', command: 'bin/win32-x64/ggs-ext-demo.exe' }, permissions: ['clipboard'] } };
+		const installed: ExtInfo = { ...SAMPLE, format: 'ggs', path: '/ext/ggs.ext-demo-0.2.0', capabilities: { format: 'ggs/2', id: 'ggs.ext-demo', version: '0.2.0', pages: { main: { page: 'web/view.html' } }, backend: { kind: 'process', command: 'bin/win32-x64/ggs-ext-demo.exe' }, permissions: ['clipboard'] } };
 		backend.on('ext_install_bundled', ({ extId }) => (extId === 'ggs.ext-demo' ? installed : BUILTIN));
 		const panel = mountedPanel();
 		await panel.refresh();
@@ -97,8 +97,8 @@ describe('ExtensionsPanel', () => {
 
 	it('shows a process package\'s backend state and restarts it', async () => {
 		const PROC: ExtInfo = {
-			...USER, id: 'acme.proc', displayName: 'Proc', format: 'ggx',
-			ggx: { format: 'ggx/2', id: 'acme.proc', version: '2.0.0', pages: {}, backend: { kind: 'process', command: 'bin/main' }, permissions: [] }
+			...USER, id: 'acme.proc', displayName: 'Proc', format: 'ggs',
+			capabilities: { format: 'ggs/2', id: 'acme.proc', version: '2.0.0', pages: {}, backend: { kind: 'process', command: 'bin/main' }, permissions: [] }
 		};
 		backend.on('ext_list', () => [BUILTIN, PROC]);
 		backend.on('ext_process_status', () => [
@@ -134,18 +134,115 @@ describe('ExtensionsPanel', () => {
 		expect(document.querySelector('.ext-detail')).toBeNull();
 	});
 
+	/* ---------- The marketplace search (Open VSX, over the backend gallery commands) ---------- */
+
+	const PRETTIER: GalleryEntry = {
+		id: 'esbenp.prettier-vscode', name: 'prettier-vscode', namespace: 'esbenp',
+		displayName: 'Prettier - Code formatter', description: 'Code formatter using prettier',
+		version: '11.0.0', downloadCount: 12345678, averageRating: 4.5, verified: true,
+		timestamp: '2026-01-02T03:04:05Z', iconUrl: null,
+		downloadUrl: 'https://open-vsx.org/api/esbenp/prettier-vscode/11.0.0/file/esbenp.prettier-vscode-11.0.0.vsix'
+	};
+	const DEMO_NEWER: GalleryEntry = {
+		id: 'acme.demo', name: 'demo', namespace: 'acme', displayName: null, description: 'A demo',
+		version: '3.0.0', downloadCount: 12, averageRating: null, verified: false,
+		timestamp: '2026-01-02T03:04:05Z', iconUrl: null,
+		downloadUrl: 'https://open-vsx.org/api/acme/demo/3.0.0/file/acme.demo-3.0.0.vsix'
+	};
+	/** The panel with the market scripted: a search answer and the installed list it reports. */
+	function withMarket(entries: GalleryEntry[], totalSize = entries.length): { listAnswer: () => ExtInfo[] } {
+		backend.on('ext_gallery_search', () => ({ totalSize, entries }));
+		// The install pass re-reads package.json (the activation reload): a minimal manifest
+		// keeps the frame's boot quiet instead of notifying a load failure.
+		backend.on('ext_read_file', ({ relPath }: { relPath: string }) => (relPath === 'package.json' ? '{}' : ''));
+		const state = { list: [BUILTIN, USER] as ExtInfo[] };
+		backend.on('ext_list', () => state.list);
+		return { listAnswer: () => state.list };
+	}
+
+	it('searches the marketplace, shows Install or Update by the installed version, and installs', async () => {
+		const market = withMarket([PRETTIER, DEMO_NEWER], 42);
+		const installedPrettier: ExtInfo = { ...USER, id: 'esbenp.prettier-vscode', name: 'prettier-vscode', publisher: 'esbenp', displayName: 'Prettier - Code formatter', version: '11.0.0', path: '/ext/esbenp.prettier-vscode-11.0.0' };
+		backend.on('ext_gallery_install', () => installedPrettier);
+		const panel = mountedPanel();
+		await panel.refresh();
+		const input = document.querySelector<HTMLInputElement>('.ext-search-input')!;
+		type(input, 'prettier');
+		key(input, 'Enter');
+		await flush();
+		expect(backend.callsTo('ext_gallery_search')).toEqual([{ gallery: 'https://open-vsx.org', query: 'prettier' }]);
+		// The installed list gave way to the results; the count line names the registry's total.
+		expect(document.querySelector('.ext-gallery-count')!.textContent).toContain('42');
+		const rows = document.querySelectorAll('.gallery-row');
+		expect(rows.length).toBe(2);
+		expect(rows[0]!.textContent).toContain('Prettier - Code formatter');
+		expect(rows[0]!.querySelector('.ext-verified')!.textContent).toContain('verified');
+		expect(rows[0]!.querySelector('.ext-gallery-stats')!.textContent).toContain('downloads');
+		// The installed acme.demo v2.0.0 against the market's 3.0.0: an Update offer, not Install.
+		const update = rows[1]!.querySelector<HTMLElement>('.action-btn')!;
+		expect(update.title).toContain('Update to 3.0.0');
+		// Installing the not-installed one: the download URL crosses, the notification lands,
+		// and the refreshed row knows it is installed now.
+		click(rows[0]!.querySelector<HTMLElement>('.action-btn')!);
+		await flush();
+		expect(backend.callsTo('ext_gallery_install')).toEqual([{ gallery: 'https://open-vsx.org', downloadUrl: PRETTIER.downloadUrl }]);
+		expect(notifications().join()).toContain('esbenp.prettier-vscode v11.0.0');
+		market.listAnswer().push(installedPrettier);
+		await panel.refresh();
+		const done = document.querySelectorAll('.gallery-row')[0]!;
+		expect(done.querySelector('.ext-installed-tag')!.textContent).toContain('Installed');
+		expect(done.querySelector('.action-btn')).toBeNull();
+	});
+
+	it('an entry matching the installed version shows the installed tag, not an offer', async () => {
+		const DEMO_SAME = { ...DEMO_NEWER, version: '2.0.0' };
+		withMarket([DEMO_SAME]);
+		const panel = mountedPanel();
+		await panel.refresh();
+		const input = document.querySelector<HTMLInputElement>('.ext-search-input')!;
+		type(input, 'acme');
+		key(input, 'Enter');
+		await flush();
+		const row = document.querySelector('.gallery-row')!;
+		expect(row.querySelector('.ext-installed-tag')!.textContent).toContain('Installed');
+		expect(row.querySelector('.action-btn')).toBeNull();
+	});
+
+	it('a failed search surfaces its error and keeps the installed list; Escape restores it', async () => {
+		backend.on('ext_gallery_search', () => { throw new Error('offline'); });
+		const panel = mountedPanel();
+		await panel.refresh();
+		const input = document.querySelector<HTMLInputElement>('.ext-search-input')!;
+		type(input, 'theme');
+		key(input, 'Enter');
+		await flush();
+		expect(notifications().join()).toContain('Marketplace search failed');
+		// The search failed before any result: the installed list is what stays on screen.
+		expect(document.querySelectorAll('.ext-row').length).toBe(2);
+		expect(document.querySelector('.gallery-row')).toBeNull();
+		// And a finished search clears back to the installed list on Escape.
+		backend.on('ext_gallery_search', () => ({ totalSize: 0, entries: [] }));
+		key(input, 'Enter');
+		await flush();
+		expect(document.querySelector('.ext-gallery-count')).toBeNull();
+		expect(document.querySelector('.ext-list .empty')!.textContent).toContain('No extensions match');
+		key(input, 'Escape');
+		expect(document.querySelectorAll('.gallery-row').length).toBe(0);
+		expect(document.querySelectorAll('.ext-row').length).toBe(2);
+	});
+
 	it('the detail page shows the facts and renders the package\'s README', async () => {
 		const PROC: ExtInfo = {
-			...USER, id: 'acme.proc', displayName: 'Proc', format: 'ggx', path: '/ext/acme.proc-2.0.0', readme: 'README.md',
-			ggx: {
-				format: 'ggx/2', id: 'acme.proc', version: '2.0.0', pages: {},
-				backend: { kind: 'process', command: 'bin/main', protocol: 'ggx-rpc/1' },
+			...USER, id: 'acme.proc', displayName: 'Proc', format: 'ggs', path: '/ext/acme.proc-2.0.0', readme: 'README.md',
+			capabilities: {
+				format: 'ggs/2', id: 'acme.proc', version: '2.0.0', pages: {},
+				backend: { kind: 'process', command: 'bin/main' },
 				permissions: ['repo:read', 'network']
 			}
 		};
 		backend.on('ext_list', () => [BUILTIN, PROC]);
 		backend.on('ext_process_status', () => [
-			{ extensionId: 'acme.proc', pid: 4321, commands: [], protocolVersion: 'ggx-rpc/1', startCount: 1, lastError: null }
+			{ extensionId: 'acme.proc', pid: 4321, commands: [], protocolVersion: 'ggs-ext/1', startCount: 1, lastError: null }
 		]);
 		backend.on('ext_read_file', () => '# Proc\n\nThe readme.');
 		// jsdom loads no vendor script: a tiny markdown-it stand-in renders the README.
@@ -166,7 +263,7 @@ describe('ExtensionsPanel', () => {
 		// permissions.
 		expect(page.textContent).toContain('acme.proc');
 		expect(page.textContent).toContain('/ext/acme.proc-2.0.0');
-		expect(page.textContent).toContain('ggx-rpc/1');
+		expect(page.textContent).toContain('ggs-ext/1');
 		expect(page.textContent).toContain('bin/main');
 		expect(page.textContent).toContain('repo:read, network');
 		await flush(4);
@@ -181,16 +278,16 @@ describe('ExtensionsPanel', () => {
 		expect(builtinPane.textContent).toContain('Install the package to read its README');
 	});
 
-	it('installs from a picked .ggx package and refreshes', async () => {
-		backend.dialog.openResult = 'C:\\downloads\\acme.demo-2.1.0.ggx';
-		const installed: ExtInfo = { ...USER, version: '2.1.0', format: 'ggx' };
-		backend.on('ext_install_from_ggx', () => installed);
+	it('installs from a picked .vsix package and refreshes (the one package format)', async () => {
+		backend.dialog.openResult = 'C:\\downloads\\acme.demo-2.1.0.vsix';
+		const installed: ExtInfo = { ...USER, version: '2.1.0', format: 'vsix' };
+		backend.on('ext_install_from_vsix', () => installed);
 		let listed = [BUILTIN, USER];
 		backend.on('ext_list', () => listed);
 		const panel = mountedPanel();
 		await panel.refresh();
-		await panel.installFromGgxCommand();
-		expect(backend.callsTo('ext_install_from_ggx')).toEqual([{ path: 'C:\\downloads\\acme.demo-2.1.0.ggx' }]);
+		await panel.installFromVsixCommand();
+		expect(backend.callsTo('ext_install_from_vsix')).toEqual([{ path: 'C:\\downloads\\acme.demo-2.1.0.vsix' }]);
 		expect(notifications().join()).toContain('acme.demo v2.1.0');
 		listed = [BUILTIN, installed];
 		await panel.refresh();
@@ -208,24 +305,24 @@ describe('ExtensionsPanel', () => {
 		await panel.installFromVsixCommand();
 		expect(backend.callsTo('ext_install_from_vsix')).toEqual([{ path: 'C:\\downloads\\acme.demo-2.1.0.vsix' }]);
 		expect(notifications().join()).toContain('acme.demo v2.1.0');
-		// The panel's header carries both install actions: the GGX one and the VSIX one.
+		// The panel's header carries the install action.
 		expect([...document.querySelectorAll('.pane-header .action-btn')].some((b) => b.title.includes('Install from VSIX'))).toBe(true);
 	});
 
 	it('surfaces the error when a same-version package is installed again', async () => {
-		backend.dialog.openResult = 'C:\\downloads\\git-graph-rs-1.0.24.ggx';
-		backend.on('ext_install_from_ggx', () => { throw 'neophack.git-graph-rs 1.0.24 is already installed'; });
+		backend.dialog.openResult = 'C:\\downloads\\git-graph-rs-1.0.24.vsix';
+		backend.on('ext_install_from_vsix', () => { throw 'neophack.git-graph-rs 1.0.24 is already installed'; });
 		const panel = mountedPanel();
 		await panel.refresh();
-		await panel.installFromGgxCommand();
+		await panel.installFromVsixCommand();
 		expect(notifications().join()).toContain('already installed');
 	});
 
 	it('surfaces install errors (a downgrade, for instance)', async () => {
-		backend.dialog.openResult = 'old.ggx';
-		backend.on('ext_install_from_ggx', () => { throw 'acme.demo 2.0.0 is already installed; acme.demo 1.0.0 is older'; });
+		backend.dialog.openResult = 'old.vsix';
+		backend.on('ext_install_from_vsix', () => { throw 'acme.demo 2.0.0 is already installed; acme.demo 1.0.0 is older'; });
 		const panel = mountedPanel();
-		await panel.installFromGgxCommand();
+		await panel.installFromVsixCommand();
 		expect(notifications().join()).toContain('older');
 	});
 
@@ -323,16 +420,19 @@ describe('the vscode API shim', () => {
 		expect(updates).toEqual([['acme.demo', 'demo.greeting', 'hey']]);
 	});
 
-	it('throws a clear error for unsupported APIs', () => {
+	it('serves what it can and degrades the rest (nothing throws a foreign extension dead)', () => {
 		const api = createVscodeApi(
-			{ extensionId: 'x', extensionPath: '/x', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggx://localhost/x-1.0.0/', state: { global: {}, workspace: {} } },
+			{ extensionId: 'x', extensionPath: '/x', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggs://localhost/x-1.0.0/', state: { global: {}, workspace: {} } },
 			{ request: async () => undefined, registerCommandHandler: () => undefined }
 		);
-		expect(() => api.window.registerWebviewViewProvider('view', {} as never)).toThrow('not supported');
-		expect(() => api.window.createTreeView('files', { treeDataProvider: {} as never }).message).toThrow('not supported');
-		// Webview panels and tree views ARE supported now (rounds one and two).
+		// Webview views ARE served now; every provider registration returns a Disposable and
+		// none of the load-time surfaces throws — an activation must survive whatever it
+		// registers (the Open VSX compatibility posture).
+		expect(typeof api.window.registerWebviewViewProvider).toBe('function');
+		expect(typeof api.window.createTreeView('files', { treeDataProvider: {} as never }).message).toBe('undefined');
 		expect(typeof api.window.createWebviewPanel).toBe('function');
 		expect(typeof api.window.createTreeView('files', { treeDataProvider: {} as never }).visible).toBe('boolean');
+		expect(typeof api.languages.registerHoverProvider(() => undefined, {} as never).dispose).toBe('function');
 	});
 });
 
@@ -343,7 +443,7 @@ describe('the VS Code API surface, round one (messages, picks, progress, status 
 		const answers = new Map<string, unknown>([['notify', 'Retry'], ['showQuickPick', 'second']]);
 		let nextId = 0;
 		const api = createVscodeApi(
-			{ extensionId: 'acme.demo', extensionPath: '/ext/acme.demo-2.0.0', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggx://localhost/acme.demo-2.0.0/', state: { global: {}, workspace: {} } },
+			{ extensionId: 'acme.demo', extensionPath: '/ext/acme.demo-2.0.0', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggs://localhost/acme.demo-2.0.0/', state: { global: {}, workspace: {} } },
 			{ request: async (method, args) => { requests.push({ method, args }); if (method === 'progress.begin') return ++nextId; return answers.get(method); }, registerCommandHandler: () => undefined }
 		);
 		return { api, requests };
@@ -409,8 +509,8 @@ describe('the VS Code API surface, round one (messages, picks, progress, status 
 		await expect(panel.webview.postMessage({ hello: 1 })).resolves.toBe(true);
 		// asWebviewUri composes the preloaded base with the extension-relative path, both for
 		// an absolute path inside the install and a ./-relative one.
-		expect(panel.webview.asWebviewUri('/ext/acme.demo-2.0.0/media/logo.png').toString()).toBe('ggx://localhost/acme.demo-2.0.0/media/logo.png');
-		expect(panel.webview.asWebviewUri('./media/logo.png').toString()).toBe('ggx://localhost/acme.demo-2.0.0/media/logo.png');
+		expect(panel.webview.asWebviewUri('/ext/acme.demo-2.0.0/media/logo.png').toString()).toBe('ggs://localhost/acme.demo-2.0.0/media/logo.png');
+		expect(panel.webview.asWebviewUri('./media/logo.png').toString()).toBe('ggs://localhost/acme.demo-2.0.0/media/logo.png');
 		expect(panel.visible).toBe(true);
 
 		// The panel's messages arrive as host events and reach onDidReceiveMessage.
@@ -536,7 +636,7 @@ describe('the extension host command wiring', () => {
 				configuration: { title: 'Acme', properties: { 'acme.colour': { type: 'string', default: 'red' } } }
 			}
 		};
-		const installed: ExtInfo = { id: 'acme.ggxdemo', name: 'ggxdemo', displayName: 'Acme GGX', publisher: 'acme', version: '1.0.0', description: '', builtin: false, icon: null, path: '/ext/acme.ggxdemo-1.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggx', ggx: { format: 'ggx/2', id: 'acme.ggxdemo', version: '1.0.0', pages: {}, backend: { kind: 'process', command: 'bin/tool.exe' } } };
+		const installed: ExtInfo = { id: 'acme.ggxdemo', name: 'ggxdemo', displayName: 'Acme GGX', publisher: 'acme', version: '1.0.0', description: '', builtin: false, icon: null, path: '/ext/acme.ggxdemo-1.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggs', capabilities: { format: 'ggs/2', id: 'acme.ggxdemo', version: '1.0.0', pages: {}, backend: { kind: 'process', command: 'bin/tool.exe' } } };
 		backend.on('ext_list', () => [installed]);
 		backend.on('ext_read_file', ({ relPath }) => relPath === 'package.json' ? JSON.stringify(manifest) : (() => { throw new Error('no such file'); })());
 		const host = new ExtensionHost();
@@ -573,7 +673,7 @@ describe('the extension host command wiring', () => {
 				}
 			}
 		};
-		const installed: ExtInfo = { id: 'acme.ggxdemo', name: 'ggxdemo', displayName: 'Acme GGX', publisher: 'acme', version: '1.0.0', description: '', builtin: false, icon: null, path: '/ext/acme.ggxdemo-1.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggx', ggx: { format: 'ggx/2', id: 'acme.ggxdemo', version: '1.0.0', pages: {}, backend: { kind: 'process', command: 'bin/tool.exe' } } };
+		const installed: ExtInfo = { id: 'acme.ggxdemo', name: 'ggxdemo', displayName: 'Acme GGX', publisher: 'acme', version: '1.0.0', description: '', builtin: false, icon: null, path: '/ext/acme.ggxdemo-1.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggs', capabilities: { format: 'ggs/2', id: 'acme.ggxdemo', version: '1.0.0', pages: {}, backend: { kind: 'process', command: 'bin/tool.exe' } } };
 		backend.on('ext_list', () => [installed]);
 		backend.on('ext_read_file', ({ relPath }) => relPath === 'package.json' ? JSON.stringify(manifest) : (() => { throw new Error('no such file'); })());
 		const host = new ExtensionHost();
@@ -591,7 +691,7 @@ describe('the extension host command wiring', () => {
 		// VS Code hands a menu's own argument to the command (the right-clicked file, the
 		// repository a title button stands for); the process dispatch forwards it.
 		const manifest = { contributes: { commands: [{ command: 'acme.ggxdemo.filter', title: 'Filter' }] } };
-		const installed: ExtInfo = { id: 'acme.ggxdemo', name: 'ggxdemo', displayName: 'Acme GGX', publisher: 'acme', version: '1.0.0', description: '', builtin: false, icon: null, path: '/ext/acme.ggxdemo-1.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggx', ggx: { format: 'ggx/2', id: 'acme.ggxdemo', version: '1.0.0', pages: {}, backend: { kind: 'process', command: 'bin/tool.exe' } } };
+		const installed: ExtInfo = { id: 'acme.ggxdemo', name: 'ggxdemo', displayName: 'Acme GGX', publisher: 'acme', version: '1.0.0', description: '', builtin: false, icon: null, path: '/ext/acme.ggxdemo-1.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggs', capabilities: { format: 'ggs/2', id: 'acme.ggxdemo', version: '1.0.0', pages: {}, backend: { kind: 'process', command: 'bin/tool.exe' } } };
 		backend.on('ext_list', () => [installed]);
 		backend.on('ext_read_file', ({ relPath }) => relPath === 'package.json' ? JSON.stringify(manifest) : (() => { throw new Error('no such file'); })());
 		backend.on('ext_process_run', ({ command, args }) => ({ command, args }));
@@ -681,7 +781,7 @@ describe('the extension host frame (src/extHostBoot.ts)', () => {
 		window.dispatchEvent(new MessageEvent('message', {
 			data: {
 				type: '__studioExtInit',
-				context: { extensionId: 'acme.demo', extensionPath: '/ext/acme.demo-2.0.0', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggx://localhost/acme.demo-2.0.0/', state: { global: {}, workspace: {} } },
+				context: { extensionId: 'acme.demo', extensionPath: '/ext/acme.demo-2.0.0', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggs://localhost/acme.demo-2.0.0/', state: { global: {}, workspace: {} } },
 				code
 			}
 		}));
@@ -753,30 +853,52 @@ describe('calls into an extension frame that goes away', () => {
 	});
 });
 
-describe('ggx/2 packages: the page registry and the process backend', () => {
+describe('ggs/2 packages: the page registry and the process backend', () => {
 	const GGX2: ExtInfo = {
-		id: 'acme.proc', name: 'proc', displayName: 'Proc Demo', publisher: 'acme', version: '1.0.0', description: 'A ggx/2 package',
+		id: 'acme.proc', name: 'proc', displayName: 'Proc Demo', publisher: 'acme', version: '1.0.0', description: 'A ggs/2 package',
 		builtin: false, icon: null, path: '/ext/acme.proc-1.0.0', categories: [], keywords: [], repository: null, license: null,
-		enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggx',
-		ggx: {
-			format: 'ggx/2', id: 'acme.proc', version: '1.0.0',
+		enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggs',
+		capabilities: {
+			format: 'ggs/2', id: 'acme.proc', version: '1.0.0',
 			pages: { main: { page: 'web/view.html', title: 'Demo Page' } },
 			backend: { kind: 'process', command: 'bin/main' },
 			permissions: []
 		}
 	};
 
-	it('dispatches a process-backed declared command to its backend and opens the page its result names', async () => {
+	it('composes page URLs without percent-encoding the separator (Tauri\'s convertFileSrc encodes its argument as one segment)', async () => {
+		// The live WebView2 path: __TAURI_INTERNALS__.convertFileSrc percent-encodes whatever it
+		// is given as a single path segment — a trailing slash in the argument became %2F and
+		// the whole page URL reached the network stack malformed (the view frame never loaded).
+		// jsdom has no internals (the plain-scheme fallback), so this stub reproduces the live
+		// conversion and pins the contract: the separator is appended after the conversion.
+		const w = window as unknown as { __TAURI_INTERNALS__?: { convertFileSrc?: (path: string, protocol: string) => string } };
+		const previous = w.__TAURI_INTERNALS__;
+		w.__TAURI_INTERNALS__ = { convertFileSrc: (path, protocol) => `http://${protocol}.localhost/${encodeURIComponent(path)}` };
+		try {
+			const host = await import('../src/extHost');
+			const url = host.extAssetUrl(GGX2, 'web/view.html');
+			expect(url).toBe('http://ggs.localhost/acme.proc-1.0.0/web/view.html');
+			expect(url).not.toContain('%2F');
+		} finally {
+			w.__TAURI_INTERNALS__ = previous;
+		}
+		// Without Tauri's internals (jsdom, probes): the plain scheme shape.
+		const host = await import('../src/extHost');
+		expect(host.extAssetUrl(GGX2, 'web/view.html')).toBe('ggs://localhost/acme.proc-1.0.0/web/view.html');
+	});
+
+	it('dispatches a main-less process package\'s declared command to its backend and opens the page its result names', async () => {
 		withExtensions(GGX2);
 		backend.on('ext_read_file', ({ relPath }) => {
 			if (relPath === 'package.json') return JSON.stringify({
-				main: './main.js',
+				// No `main`: the package's program IS its backend — its declared commands
+				// dispatch there (a backend package WITH a main is a frame-host program).
 				contributes: { commands: [
 					{ command: 'acme.proc.hello', title: 'Hello' },
 					{ command: 'acme.proc.open', title: 'Open' }
 				] }
 			});
-			if (relPath === 'main.js') return 'exports.activate = function () {};';
 			throw new Error('no such file');
 		});
 		backend.on('ext_process_run', ({ command }) => (command === 'acme.proc.open' ? { openPage: 'main', params: { by: 'command' } } : { greeting: 'hi' }));
@@ -803,11 +925,11 @@ describe('ggx/2 packages: the page registry and the process backend', () => {
 	});
 
 	it('resolves pages through the registry (ggx/1 frontend pages included) and mounts them sandboxed', async () => {
-		const FRONTEND_ONLY: ExtInfo = { ...GGX2, id: 'acme.front', ggx: { format: 'ggx/1', id: 'acme.front', version: '1.0.0', frontend: { page: 'web/view.html' } } };
+		const FRONTEND_ONLY: ExtInfo = { ...GGX2, id: 'acme.front', capabilities: { format: 'ggx/1', id: 'acme.front', version: '1.0.0', frontend: { page: 'web/view.html' } } };
 		withExtensions(GGX2, FRONTEND_ONLY);
 		const host = new ExtensionHost();
 		await host.list();
-		// The ggx/2 registry names its page; a ggx/1 package's single frontend page is the
+		// The ggs/2 registry names its page; a ggx/1 package's single frontend page is the
 		// page named "view".
 		expect(host.pageEntry('acme.proc', 'main')!.page).toBe('web/view.html');
 		expect(host.pageEntry('acme.front', 'view')!.page).toBe('web/view.html');
@@ -826,18 +948,18 @@ describe('ggx/2 packages: the page registry and the process backend', () => {
 		expect(frame).not.toBeNull();
 		expect(frame.getAttribute('sandbox')).toBe('allow-scripts');
 		expect(frame.src).toContain('acme.proc-1.0.0/web/view.html');
-		expect(frame.src.startsWith('ggx://localhost/') || frame.src.startsWith('http://ggx.localhost/')).toBe(true);
+		expect(frame.src.startsWith('ggs://localhost/') || frame.src.startsWith('http://ggs.localhost/')).toBe(true);
 
 		// A page's backend.run routes to the process command with the page's extension.
 		backend.on('ext_process_run', () => ({ greeting: 'from the page' }));
 		const replies: unknown[] = [];
 		frame.contentWindow!.addEventListener('message', (event: MessageEvent) => {
-			const data = event.data as { __ggxHost?: boolean; type?: string; result?: unknown };
-			if (data?.__ggxHost && data.type === 'rpcResult') replies.push(data.result);
+			const data = event.data as { __ggsHost?: boolean; type?: string; result?: unknown };
+			if (data?.__ggsHost && data.type === 'rpcResult') replies.push(data.result);
 		});
 		window.dispatchEvent(new MessageEvent('message', {
 			source: frame.contentWindow,
-			data: { __ggxPage: true, kind: 'rpc', id: 9, method: 'backend.run', args: ['acme.proc.hello', ['page']] }
+			data: { __ggsPage: true, kind: 'rpc', id: 9, method: 'backend.run', args: ['acme.proc.hello', ['page']] }
 		}));
 		await flush();
 		expect(backend.callsTo('ext_process_run')).toContainEqual({ extId: 'acme.proc', command: 'acme.proc.hello', args: ['page'] });
@@ -846,12 +968,12 @@ describe('ggx/2 packages: the page registry and the process backend', () => {
 		// Pages may not register commands — that is a package.json (or backend) concern.
 		const errors: unknown[] = [];
 		frame.contentWindow!.addEventListener('message', (event: MessageEvent) => {
-			const data = event.data as { __ggxHost?: boolean; type?: string; ok?: boolean; result?: unknown };
-			if (data?.__ggxHost && data.type === 'rpcResult' && data.ok === false) errors.push(data.result);
+			const data = event.data as { __ggsHost?: boolean; type?: string; ok?: boolean; result?: unknown };
+			if (data?.__ggsHost && data.type === 'rpcResult' && data.ok === false) errors.push(data.result);
 		});
 		window.dispatchEvent(new MessageEvent('message', {
 			source: frame.contentWindow,
-			data: { __ggxPage: true, kind: 'rpc', id: 10, method: 'commands.register', args: ['nope'] }
+			data: { __ggsPage: true, kind: 'rpc', id: 10, method: 'commands.register', args: ['nope'] }
 		}));
 		await flush();
 		expect(errors.join()).toContain('cannot register commands');
@@ -873,7 +995,7 @@ describe('ggx/2 packages: the page registry and the process backend', () => {
 	it('starts a process package\'s backend as soon as it is installed', async () => {
 		// Install means run: the reload that follows an install brings the declared backend up,
 		// without waiting for a first command — the same detect-and-run the boot pass does.
-		backend.on('ext_install_from_ggx', () => GGX2);
+		backend.on('ext_install_from_vsix', () => GGX2);
 		backend.on('ext_list', () => [GGX2]);
 		backend.on('ext_read_file', ({ relPath }) => {
 			if (relPath === 'package.json') return JSON.stringify({
@@ -886,15 +1008,15 @@ describe('ggx/2 packages: the page registry and the process backend', () => {
 		backend.on('ext_process_stop', () => null);
 		backend.on('ext_process_start', () => null);
 		const host = new ExtensionHost();
-		await host.installFromGgx('C:\\pkgs\\acme.proc-1.0.0.ggx');
+		await host.installFromVsix('C:\\pkgs\\acme.proc-1.0.0.vsix');
 		expect(backend.callsTo('ext_process_start')).toEqual([{ extId: 'acme.proc' }]);
 	});
 
 	it('never frame-activates embedded offers or process packages — no entry needs a frame it has', async () => {
 		// The builtin-format entries (git-graph-rs without its package, the bundled sample)
-		// have no files on disk, and a ggx/2 process package's manifest is its whole program:
+		// have no files on disk, and a ggs/2 process package's manifest is its whole program:
 		// a frame boot for either would only read a missing extension.js and warn.
-		const SAMPLE: ExtInfo = { id: 'ggs.ext-demo', name: 'ext-demo', displayName: 'GGX Demo', publisher: 'ggs', version: '0.2.0', description: 'sample', builtin: false, icon: null, path: '', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'bundled', ggx: null };
+		const SAMPLE: ExtInfo = { id: 'ggs.ext-demo', name: 'ext-demo', displayName: 'Demo', publisher: 'ggs', version: '0.2.0', description: 'sample', builtin: false, icon: null, path: '', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'bundled', capabilities: null };
 		const PROC: ExtInfo = { ...GGX2, path: '/ext/acme.proc-1.0.0' };
 		withExtensions(SAMPLE, PROC);
 		backend.on('ext_read_file', ({ relPath }) => {
@@ -912,13 +1034,57 @@ describe('ggx/2 packages: the page registry and the process backend', () => {
 		// The process package's declared command is still runnable, straight from the manifest.
 		expect(commands.get('acme.proc.hello')).toBeDefined();
 	});
+
+	it('frame-activates a backend package WITH a main — the frame owns the commands, the backend serves its native calls', async () => {
+		// The VS Code semantics the frame host runs by: a package's `main` is its program, a
+		// declared backend (an engine `.node` above all) is an implementation detail its code
+		// reaches — never a replacement for that code.
+		const ENGINE: ExtInfo = {
+			...GGX2, id: 'acme.engine',
+			capabilities: { format: 'ggs/2', id: 'acme.engine', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'git-graph-backend', command: 'native/win32-x64/engine.node' }, permissions: [] }
+		};
+		withExtensions(ENGINE);
+		backend.on('ext_read_file', ({ relPath }) => {
+			if (relPath === 'package.json') return JSON.stringify({
+				main: './main.js',
+				contributes: { commands: [{ command: 'acme.engine.go', title: 'Go' }] }
+			});
+			if (relPath === 'main.js') return 'exports.activate = function () {};';
+			throw new Error('no such file');
+		});
+		backend.on('ext_process_run', () => ({ version: 'from the backend' }));
+		const host = new ExtensionHost();
+		await host.activateInstalled();
+		// A program first: its frame booted, and its declared command was NOT pre-routed to
+		// the backend (it runs the handler the frame registers once it activates).
+		expect(host['frames'].size).toBe(1);
+		expect(backend.callsTo('ext_process_run')).toEqual([]);
+		// A native-module call from inside the frame crosses verbatim: the module path is
+		// the frame's concern, the command and arguments are forwarded untouched — the host
+		// neither knows nor shapes the package's protocol. (The reply's object-form
+		// targetOrigin is a browser spelling jsdom rejects, so the frame's mailbox records
+		// here instead of receiving.)
+		const frame = [...host['frames'].values()][0]!.frame;
+		const replies: unknown[] = [];
+		frame.contentWindow!.postMessage = ((message: unknown) => { replies.push(message); }) as typeof frame.contentWindow.postMessage;
+		window.dispatchEvent(new MessageEvent('message', {
+			source: frame.contentWindow,
+			data: { type: '__studioExtRpc', id: 51, method: 'native.call', args: ['native/win32-x64/engine.node', 'request', ['C:\\repo', '{"method":"engineVersion","params":{}}']] }
+		}));
+		await flush();
+		expect(backend.callsTo('ext_process_run')).toContainEqual({
+			extId: 'acme.engine', command: 'request',
+			args: ['C:\\repo', '{"method":"engineVersion","params":{}}']
+		});
+		expect(replies).toContainEqual(expect.objectContaining({ type: '__studioExtRpcResult', ok: true }));
+	});
 });
 
-describe('an installed ggx/2 package in the workbench surfaces (the full feature matrix)', () => {
+describe('an installed ggs/2 package in the workbench surfaces (the full feature matrix)', () => {
 	/** The package.json the acme.proc fixture reads back: two commands, a keybinding and an
-	 *  explorer/context menu entry — everything a plugin can contribute to the workbench. */
+	 *  explorer/context menu entry — everything a plugin can contribute to the workbench.
+	 *  No `main`: this package's program is its backend process. */
 	const PROC_MANIFEST = {
-		main: './main.js',
 		contributes: {
 			commands: [
 				{ command: 'acme.proc.hello', title: 'Hello' },
@@ -929,11 +1095,11 @@ describe('an installed ggx/2 package in the workbench surfaces (the full feature
 		}
 	};
 	const PROC: ExtInfo = {
-		id: 'acme.proc', name: 'proc', displayName: 'Proc Demo', publisher: 'acme', version: '1.0.0', description: 'A ggx/2 package',
+		id: 'acme.proc', name: 'proc', displayName: 'Proc Demo', publisher: 'acme', version: '1.0.0', description: 'A ggs/2 package',
 		builtin: false, icon: null, path: '/ext/acme.proc-1.0.0', categories: [], keywords: [], repository: null, license: null,
-		enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggx',
-		ggx: {
-			format: 'ggx/2', id: 'acme.proc', version: '1.0.0',
+		enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggs',
+		capabilities: {
+			format: 'ggs/2', id: 'acme.proc', version: '1.0.0',
 			pages: { main: { page: 'web/view.html', title: 'Demo Page' } },
 			backend: { kind: 'process', command: 'bin/main' },
 			permissions: []
@@ -944,7 +1110,6 @@ describe('an installed ggx/2 package in the workbench surfaces (the full feature
 		withExtensions(...listed);
 		backend.on('ext_read_file', ({ relPath }) => {
 			if (relPath === 'package.json') return JSON.stringify(PROC_MANIFEST);
-			if (relPath === 'main.js') return 'exports.activate = function () {};';
 			throw new Error('no such file');
 		});
 		backend.on('ext_process_run', () => ({ openPage: 'main', params: { by: 'menu' } }));
@@ -1102,7 +1267,7 @@ describe('tree views and activation events (round two)', () => {
 		window.dispatchEvent(new MessageEvent('message', {
 			data: {
 				type: '__studioExtInit',
-				context: { extensionId: 'acme.demo', extensionPath: '/ext/acme.demo-2.0.0', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggx://localhost/acme.demo-2.0.0/', state: { global: {}, workspace: {} } },
+				context: { extensionId: 'acme.demo', extensionPath: '/ext/acme.demo-2.0.0', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggs://localhost/acme.demo-2.0.0/', state: { global: {}, workspace: {} } },
 				code
 			}
 		}));
@@ -1235,7 +1400,7 @@ describe('round three: languages, snippets, themes, workspace.fs and the editor 
 	it('workspace.fs and findFiles cross the fs.op bridge with base64 bytes', async () => {
 		const ops: { op: string; args: unknown[] }[] = [];
 		const api = createVscodeApi(
-			{ extensionId: 'acme.demo', extensionPath: '/ext', workspaceFolders: [{ uri: { scheme: 'file', path: 'C:/ws', fsPath: 'C:/ws', toString: () => 'file:C:/ws' }, name: 'ws', index: 0 }], settings: {}, language: 'en', webviewResourceBase: 'ggx://localhost/x/', state: { global: {}, workspace: {} } },
+			{ extensionId: 'acme.demo', extensionPath: '/ext', workspaceFolders: [{ uri: { scheme: 'file', path: 'C:/ws', fsPath: 'C:/ws', toString: () => 'file:C:/ws' }, name: 'ws', index: 0 }], settings: {}, language: 'en', webviewResourceBase: 'ggs://localhost/x/', state: { global: {}, workspace: {} } },
 			{
 				request: async (method, args) => {
 					ops.push({ op: method, args });
@@ -1270,7 +1435,7 @@ describe('round three: languages, snippets, themes, workspace.fs and the editor 
 	it('workspace.applyEdit edits open editors through the bridge and closed files through fs', async () => {
 		const calls: { method: string; args: unknown[] }[] = [];
 		const api = createVscodeApi(
-			{ extensionId: 'acme.demo', extensionPath: '/ext', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggx://localhost/x/', state: { global: {}, workspace: {} } },
+			{ extensionId: 'acme.demo', extensionPath: '/ext', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggs://localhost/x/', state: { global: {}, workspace: {} } },
 			{
 				request: async (method, args) => {
 					calls.push({ method, args });
@@ -1293,7 +1458,7 @@ describe('round three: languages, snippets, themes, workspace.fs and the editor 
 
 	it('activeTextEditor mirrors the host pushes and fires change events', () => {
 		const api = createVscodeApi(
-			{ extensionId: 'acme.demo', extensionPath: '/ext', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggx://localhost/x/', state: { global: {}, workspace: {} } },
+			{ extensionId: 'acme.demo', extensionPath: '/ext', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggs://localhost/x/', state: { global: {}, workspace: {} } },
 			{ request: async () => undefined, registerCommandHandler: () => undefined }
 		);
 		expect(api.window.activeTextEditor).toBeUndefined();
@@ -1319,7 +1484,7 @@ describe('round three: languages, snippets, themes, workspace.fs and the editor 
 	it('TextEditor.edit hands the in-frame-built batch to the host applier', async () => {
 		const applied: unknown[][] = [];
 		const api = createVscodeApi(
-			{ extensionId: 'acme.demo', extensionPath: '/ext', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggx://localhost/x/', state: { global: {}, workspace: {} } },
+			{ extensionId: 'acme.demo', extensionPath: '/ext', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggs://localhost/x/', state: { global: {}, workspace: {} } },
 			{ request: async (_method, args) => { applied.push(args); return true; }, registerCommandHandler: () => undefined }
 		);
 		api.handleHostEvent({ event: 'activeEditorChanged', editor: { path: 'C:/ws/a.rs', languageId: 'rust', text: 'x', line: 1, column: 1 } });
@@ -1336,7 +1501,7 @@ describe('round three: languages, snippets, themes, workspace.fs and the editor 
 
 	it('onDidSaveTextDocument fires with the saved document', () => {
 		const api = createVscodeApi(
-			{ extensionId: 'acme.demo', extensionPath: '/ext', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggx://localhost/x/', state: { global: {}, workspace: {} } },
+			{ extensionId: 'acme.demo', extensionPath: '/ext', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggs://localhost/x/', state: { global: {}, workspace: {} } },
 			{ request: async () => undefined, registerCommandHandler: () => undefined }
 		);
 		const saved: string[] = [];
@@ -1376,5 +1541,179 @@ describe('extension page frames (shell.css)', () => {
 		expect(rule).not.toBeNull();
 		const selectors = rule![1].split(',').map((selector) => selector.trim());
 		expect(selectors).toEqual(expect.arrayContaining(['.ext-page-frame', '.webview-panel-frame', '.editor-pane iframe']));
+	});
+});
+
+describe('the Node compatibility layer (multi-file CommonJS packages)', () => {
+	// The frame's replies to host calls (the same collector the frame describe uses).
+	const posts = new Map<number, { ok: boolean; result: unknown }>();
+	window.addEventListener('message', (event) => {
+		const data = event.data as { type?: string; id?: number; ok?: boolean; result?: unknown };
+		if (data?.type === '__studioExtCallResult') posts.set(data.id!, { ok: data.ok!, result: data.result });
+	});
+
+	/** Boot the frame the way the host's map-carrying __studioExtInit does. */
+	const bootPackage = (files: Record<string, string>): void => {
+		window.dispatchEvent(new MessageEvent('message', {
+			data: {
+				type: '__studioExtInit',
+				context: { extensionId: 'acme.multi', extensionPath: '/ext/acme.multi-1.0.0', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggs://localhost/acme.multi-1.0.0/', state: { global: {}, workspace: {} } },
+				files
+			}
+		}));
+	};
+
+	it('resolves requires across the package: relative siblings and node_modules', async () => {
+		bootPackage({
+			'package.json': '{"name":"multi","main":"./out/extension.js"}',
+			'out/extension.js': "const util = require('./util'); const dep = require('dep'); exports.activate = () => { const vscode = require('vscode'); vscode.commands.registerCommand('multi.sum', () => util.double(20) + dep.quarter(100)); };",
+			'out/util.js': 'exports.double = (x) => x * 2;',
+			'node_modules/dep/package.json': '{"name":"dep","main":"lib/dep.js"}',
+			'node_modules/dep/lib/dep.js': 'exports.quarter = (x) => x / 4;'
+		});
+		await flush();
+		// The frame posted __studioExtActivated (activation ran the whole chain).
+		// Now run the registered handler through the host call path.
+		window.dispatchEvent(new MessageEvent('message', { data: { type: '__studioExtCall', id: 71, method: 'runCommand', args: ['multi.sum'] } }));
+		await flush();
+		const call = posts.get(71);
+		expect(call).toBeDefined();
+		expect(call!.ok).toBe(true);
+		expect(call!.result).toBe(65); // double(20) + quarter(100)
+	});
+
+	it('serves the Node builtins: path, Buffer, process, os, util, and the node: prefix', async () => {
+		bootPackage({
+			'package.json': '{"main":"./extension.js"}',
+			'extension.js': [
+				"const path = require('path');",
+				"const os = require('os');",
+				"const util = require('util');",
+				"const nodePath = require('node:path');",
+				"exports.activate = () => { require('vscode').commands.registerCommand('multi.builtins', () => [",
+				"  path.join('a', 'b', 'c'),",
+				"  Buffer.from('hi').toString('base64'),",
+				"  typeof process.platform,",
+				"  typeof os.homedir,",
+				"  util.format('%d things', 3),",
+				"  nodePath.sep === path.sep",
+				"].join('|')); };"
+			].join('\n')
+		});
+		await flush();
+		window.dispatchEvent(new MessageEvent('message', { data: { type: '__studioExtCall', id: 72, method: 'runCommand', args: ['multi.builtins'] } }));
+		await flush();
+		const call = posts.get(72);
+		expect(call).toBeDefined();
+		expect(call!.ok).toBe(true);
+		const [joined, base64, platformType, homedirType, formatted, sameSep] = (call!.result as string).split('|');
+		expect(joined).toBe(['a', 'b', 'c'].join(require('node:path').sep));
+		expect(base64).toBe('aGk=');
+		expect(platformType).toBe('string');
+		expect(homedirType).toBe('function');
+		expect(formatted).toBe('3 things');
+		expect(sameSep).toBe('true');
+	});
+
+	it('a require the map cannot answer fails with MODULE_NOT_FOUND, catchable in-package', async () => {
+		bootPackage({
+			'package.json': '{"main":"./extension.js"}',
+			'extension.js': "exports.activate = () => { try { require('does-not-exist'); } catch (e) { require('vscode').commands.registerCommand('multi.err', () => e.code); } };"
+		});
+		await flush();
+		window.dispatchEvent(new MessageEvent('message', { data: { type: '__studioExtCall', id: 73, method: 'runCommand', args: ['multi.err'] } }));
+		await flush();
+		const call = posts.get(73);
+		expect(call).toBeDefined();
+		expect(call!.ok).toBe(true);
+		expect(call!.result).toBe('MODULE_NOT_FOUND');
+	});
+});
+
+describe('the shim degrades instead of throwing (Open VSX compatibility posture)', () => {
+	function shimApi(): ReturnType<typeof createVscodeApi> {
+		const requests: { method: string; args: unknown[] }[] = [];
+		const api = createVscodeApi(
+			{ extensionId: 'acme.demo', extensionPath: '/ext/acme.demo-2.0.0', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggs://localhost/x/', state: { global: {}, workspace: {} } },
+			{ request: (method, args) => { requests.push({ method, args }); return Promise.resolve(undefined); }, registerCommandHandler: () => undefined }
+		);
+		(api as { __requests?: unknown[] }).__requests = requests;
+		return api;
+	}
+
+	it('an unsupported provider registration returns a Disposable, never throws', () => {
+		const api = shimApi();
+		expect(() => api.languages.registerHoverProvider(() => undefined, {})).not.toThrow();
+		expect(() => api.window.registerCustomEditorProvider('x', {})).not.toThrow();
+		expect(() => api.tasks.registerTaskProvider('x', {})).not.toThrow();
+	});
+
+	it('showQuickPick with canPickMany resolves undefined instead of rejecting', async () => {
+		const api = shimApi();
+		await expect(api.window.showQuickPick(['a', 'b'], { canPickMany: true })).resolves.toBeUndefined();
+	});
+
+	it('the new value types and enums construct (a load-time destructure must not hit undefined)', () => {
+		const api = shimApi();
+		expect(new api.Position(1, 2).line).toBe(1);
+		expect(new api.Range(new api.Position(0, 0), new api.Position(1, 1)).isEmpty).toBe(false);
+		const snippet = new api.SnippetString().appendText('x').appendPlaceholder('y', 1);
+		expect(snippet.value).toContain('${1:y}');
+		expect(api.MarkdownString).toBeDefined();
+		expect(api.CodeActionKind.Refactor.append('Inline').value).toBe('refactor.Inline');
+		expect(api.FileType.Directory).toBe(2);
+		expect(api.DiagnosticSeverity.Warning).toBe(1);
+		const item = new api.TreeItem(api.TreeItemCollapsibleState.Collapsed);
+		expect(item.collapsibleState).toBe(1);
+	});
+
+	it('webview view registration is served: register, resolve at first visibility, setHtml', async () => {
+		const api = shimApi();
+		const requests = (api as unknown as { __requests: { method: string; args: unknown[] }[] }).__requests;
+		api.window.registerWebviewViewProvider('acme.panel', {
+			resolveWebviewView: (view) => {
+				(view as { webview: { html: string } }).webview.html = '<p>panel</p>';
+			}
+		});
+		expect(requests.some((request) => request.method === 'webviewView.register')).toBe(true);
+		// The host resolves the view at its first visibility (extHostBoot routes the call here).
+		await api.__serveWebviewView.resolve('acme.panel');
+		expect(requests.some((request) => request.method === 'webviewView.setHtml')).toBe(true);
+		// A second resolve is idempotent (resolved once, like VS Code).
+		await api.__serveWebviewView.resolve('acme.panel');
+		const setHtmlCalls = requests.filter((request) => request.method === 'webviewView.setHtml');
+		expect(setHtmlCalls).toHaveLength(1);
+	});
+
+	it('a webviewViewMessage host event reaches the registered view', async () => {
+		const api = shimApi();
+		let received: unknown = null;
+		api.window.registerWebviewViewProvider('acme.events', {
+			resolveWebviewView: (view) => {
+				(view as { webview: { onDidReceiveMessage(listener: (message: unknown) => void): void } }).webview.onDidReceiveMessage((message) => { received = message; });
+			}
+		});
+		await api.__serveWebviewView.resolve('acme.events');
+		api.handleHostEvent({ event: 'webviewViewMessage', viewId: 'acme.events', message: { ping: true } });
+		expect(received).toEqual({ ping: true });
+	});
+});
+
+describe('implicit activation events (VS Code 1.74 semantics)', () => {
+	it('a contributes.languages entry implies onLanguage when activationEvents omit it', async () => {
+		let activated = false;
+		const host = new ExtensionHost();
+		host['installedExts'] = [{ ...USER, format: 'vsix' }];
+		(host as unknown as { activate: (ext: ExtInfo) => Promise<void> }).activate = async () => { activated = true; };
+		backend.on('ext_read_file', ({ relPath }: { relPath: string }) => {
+			if (relPath === 'package.json') {
+				return JSON.stringify({ contributes: { languages: [{ id: 'bell', extensions: ['.bell'] }] } });
+			}
+			return '';
+		});
+		await host['applyContributions']({ ...USER, format: 'vsix' });
+		host.noteLanguageOpened('main.bell');
+		await flush();
+		expect(activated).toBe(true);
 	});
 });

@@ -657,7 +657,7 @@ describe('navigation history across renames', () => {
 	});
 });
 
-describe('extension page tabs (module 12, ggx/2)', () => {
+describe('extension page tabs (module 12, ggs/2)', () => {
 	it('opens each extension page open as its own tab, and closing runs its disposer', async () => {
 		const group = new EditorGroup(document.getElementById('editorGroup')!);
 		let disposed = 0;

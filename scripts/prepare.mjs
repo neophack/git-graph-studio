@@ -8,11 +8,12 @@
 //   target/studio/cargo/    the Cargo target dir (src-tauri/.cargo/config.toml)
 //   target/studio/dist/     the Vite build output (vite.config.ts)
 //
-// The bundled `.ggx` packages the installer carries are each plugin's own packer's output —
-// prepare.mjs only builds their backends and delegates (it never reaches into a plugin's
-// sources, and never into the vscode-git-graph-rs submodule: only git-graph-rs's packer does).
+// The bundled VSIX packages the installer carries are the extension's own standard build's
+// output (vscode-git-graph-rs `npm run package` — the same VSIX the VS Code Marketplace
+// serves; this file only builds the engine and calls it, and reaches into the submodule for
+// nothing else).
 import { checkSeams } from './check-seams.mjs';
-import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 
 // The seam rules first: nothing under src/ or static/ may name the git-graph-rs extension's
 // artifacts (it is a plugin; the app's only interface to it is the extension platform), so a
@@ -71,12 +72,15 @@ if (!existsSync(join(appIcons, 'icon.ico')) || !existsSync(join(appIcons, '32x32
 	}
 }
 
-/* 3. The plugin backends. The git-graph-rs engine backend (`git-graph-backend`, the `engine`
- *    Cargo feature) is the only binary that links `git-graph-core`; the app itself never does
- *    (src-tauri/build.rs's seam check). Release, so the shipped package carries the same
- *    size-optimised binary `tauri build` produces for the app itself; cargo's incremental
- *    cache keeps repeat builds (dev iteration) fast after the first. The sample plugin's own
- *    backend is a plain no-default-features build of its [[bin]]. */
+/* 3. The plugin binaries and the engine. `git-graph-backend` (the `engine` feature) is the
+ *    engine HOST: it links no engine — it loads the package's own `git-graph.node` over its
+ *    C ABI — and ships beside the app as a sidecar (tauri.conf.json's bundle.externalBin
+ *    installs it next to the main binary on every platform), not inside any package. Release,
+ *    so the shipped binary is as size-optimised as `tauri build`'s own; cargo's incremental
+ *    cache keeps repeat builds (dev iteration) fast after the first. The engine `.node`
+ *    itself is built by the submodule's addon script (`@napi-rs/cli`): one binary that serves
+ *    the editor's Node runtime and the app's host alike — the VSIX carries it and nothing
+ *    else. The sample plugin's backend is a plain no-default-features build of its [[bin]]. */
 const srcTauri = join(appDir, 'src-tauri');
 function buildBackend(bin, features) {
 	const exe = process.platform === 'win32' ? `${bin}.exe` : bin;
@@ -85,31 +89,79 @@ function buildBackend(bin, features) {
 		['build', '--release', '--bin', bin, ...(features ? ['--no-default-features', '--features', features] : ['--no-default-features'])],
 		{ cwd: srcTauri, stdio: 'inherit', shell: process.platform === 'win32' }
 	);
-	if (built.status === 0) {
-		const path = join(out, 'cargo', 'release', exe);
-		if (existsSync(path)) return path;
-		console.warn(`${path} was not produced; packing ${bin} without its backend`);
-		return undefined;
-	}
-	console.warn(`Building ${bin} failed; packing without its backend`);
-	return undefined;
+	// The sidecars an installer serves (the engine host above all) are part of the product,
+	// not optional extras: a build without them is broken, so it fails with the reason
+	// instead of shipping an app whose engine packages cannot start.
+	const path = join(out, 'cargo', 'release', exe);
+	if (built.status === 0 && existsSync(path)) return path;
+	console.error(`Building ${bin} failed (${built.status ?? 'spawn failed'}; looked at ${path}) — refusing to pack without it`);
+	process.exit(1);
 }
-const backendPath = buildBackend('git-graph-backend', 'engine');
-const demoBin = buildBackend('ggs-ext-demo', null);
+const hostBin = buildBackend('git-graph-backend', 'engine');
 
-/* 4. The bundled `.ggx` packages — the app ships extensions as packages beside the app, not
+/* The sidecar copy Tauri bundles: externalBin wants `<name>-<target-triple>[.exe]`, which the
+ * installer drops next to the main binary (that is where ext_process's engine-host lookup and
+ * the .node-loading convention find it). */
+if (hostBin) {
+	const TRIPLES = {
+		'win32-x64': 'x86_64-pc-windows-msvc',
+		'win32-arm64': 'aarch64-pc-windows-msvc',
+		'linux-x64': 'x86_64-unknown-linux-gnu',
+		'linux-arm64': 'aarch64-unknown-linux-gnu',
+		'darwin-x64': 'x86_64-apple-darwin',
+		'darwin-arm64': 'aarch64-apple-darwin'
+	};
+	const triple = TRIPLES[`${process.platform}-${process.arch}`] ?? `${process.platform}-${process.arch}`;
+	const sidecarDir = join(out, 'bundled', 'binaries');
+	mkdirSync(sidecarDir, { recursive: true });
+	copyFileSync(hostBin, join(sidecarDir, `git-graph-backend-${triple}${process.platform === 'win32' ? '.exe' : ''}`));
+}
+
+/* The engine `.node`: the submodule's addon build, cached by cargo underneath. The VSIX
+ * carries this one file as its whole engine; the app's bundled host loads it over the C ABI. */
+const engineNode = (() => {
+	const addon = spawnSync('node', ['scripts/build-addon.mjs', '--release'], {
+		cwd: root,
+		stdio: 'inherit'
+	});
+	const directories = {
+		'win32-x64': 'win32-x64-msvc',
+		'win32-arm64': 'win32-arm64-msvc',
+		'linux-x64': 'linux-x64-gnu',
+		'linux-arm64': 'linux-arm64-gnu',
+		'darwin-x64': 'darwin-x64',
+		'darwin-arm64': 'darwin-arm64'
+	};
+	const path = join(root, 'native', directories[`${process.platform}-${process.arch}`] ?? `${process.platform}-${process.arch}`, 'git-graph.node');
+	if (addon.status === 0 && existsSync(path)) return path;
+	// An installer whose Git Graph VSIX has no engine is an installer whose flagship view
+	// cannot run — that is a broken build, not a degraded one, so it fails here with the
+	// reason instead of quietly shipping a frontend-only package.
+	console.error(`The engine .node was not produced (${addon.status ?? 'spawn failed'}; looked at ${path}) — refusing to pack a VSIX without its engine`);
+	process.exit(1);
+})();
+
+/* 4. The bundled packages — the app ships extensions as packages beside the app, not
  *    as embedded built-ins: tauri.conf.json's bundle.resources packs the fixed-name copies
  *    under app-resources/extensions/ so the installer carries them, and the app lists and
  *    installs them by scanning that directory (cmd_ext.rs — it names no id). Each package is
- *    its own plugin's packer's output; this file never reaches into a plugin's sources for
- *    packaging. */
-const { buildGgx } = await import('../plugins/git-graph-rs/build.mjs');
-const { target: ggxPath } = await buildGgx({ backend: backendPath });
-const { buildDemo } = await import('../plugins/ggs-ext-demo/build.mjs');
-const { target: demoGgxPath } = await buildDemo({ bin: demoBin });
+ *    its own extension's packer's output; this file never packs any plugin's content itself.
+ *    The one bundled package is git-graph-rs, shipped as the standard VSIX its own build
+ *    produces (`npm run package` — vsce, exactly what the VS Code Marketplace would serve);
+ *    the `ggs` key in its package.json (which VS Code ignores and the app reads on install)
+ *    is the only GGS-specific thing inside it. */
+const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+const packaged = spawnSync('npm', ['run', 'package'], {
+	cwd: root,
+	stdio: 'inherit',
+	shell: process.platform === 'win32'
+});
+const vsixPath = requireArtifact(
+	join(root, `git-graph-rs-${pkg.version}.vsix`),
+	`npm run package in vscode-git-graph-rs/ failed (${packaged.status ?? 'spawn failed'})`
+);
 const bundledDir = join(out, 'bundled', 'app-resources', 'extensions');
 mkdirSync(bundledDir, { recursive: true });
-copyFileSync(ggxPath, join(bundledDir, 'git-graph-rs.ggx'));
-copyFileSync(demoGgxPath, join(bundledDir, 'ggs-ext-demo.ggx'));
+copyFileSync(vsixPath, join(bundledDir, 'git-graph-rs.vsix'));
 
 console.log(`Prepared ${out}`);

@@ -2,19 +2,25 @@
 //!
 //! The app knows no plugin by name: its own git reads and writes run the `git` CLI in this
 //! process (`git.rs`), and every plugin that declares a process backend is started by
-//! `ext_process.rs` and spoken to over its pipe (`ggs-ext/1` or `ggx-rpc/1`) — this binary
-//! never links `git-graph-core`. The Git Graph view's engine, write path and pages all
-//! belong to the git-graph-rs plugin (`plugins/git-graph-rs/`), and the extension store
-//! serves the VSIX / `.ggx` extensions installed from the Extensions view.
+//! `ext_process.rs` and spoken to over the one wire protocol (`ggs-ext/1`) — this binary
+//! never links `git-graph-core`. The Git Graph view's engine, write path and webview all
+//! belong to the git-graph-rs VSIX (the extension's own standard build, inside the
+//! vscode-git-graph-rs submodule), and the extension store
+//! serves the VSIX extensions installed from the Extensions view.
 
 //! The crate is a library plus the binaries `Cargo.toml` declares: `git-graph-studio` (the
-//! Tauri app, the `desktop` feature) and the plugin backends under `plugins/` —
-//! `git-graph-backend` (the `engine` feature, the only linker of `git-graph-core`) and
-//! `ggs-ext-demo`. The modules that need no window — the wire protocols and the git
+//! Tauri app, the `desktop` feature) and `git-graph-backend` (the `engine` feature, the
+//! generic engine-node host — it links no engine crate, it loads a package's `.node` over
+//! its C ABI). The modules that need no window — the wire protocols and the git
 //! runner `git` — are always compiled; everything that needs a window is behind `desktop`.
 
-pub mod backend_rpc;
-pub mod ggx_protocol;
+pub mod ext_protocol;
+
+/// The engine host (the `git-graph-backend` sidecar): loads a package's engine `.node` over
+/// its C ABI and serves the Git Graph view's protocol. Behind the `engine` feature — the
+/// app binary itself never compiles it in.
+#[cfg(feature = "engine")]
+pub mod engine_host;
 pub mod git;
 pub mod test_support;
 
@@ -28,6 +34,8 @@ pub mod cmd_analysis;
 pub mod cmd_assoc;
 #[cfg(feature = "desktop")]
 pub mod cmd_ext;
+#[cfg(feature = "desktop")]
+pub mod ext_gallery;
 #[cfg(feature = "desktop")]
 pub mod cmd_fs;
 #[cfg(feature = "desktop")]
@@ -89,7 +97,7 @@ pub use desktop::{find_repo_root, run, AppState};
 mod desktop {
     use crate::{
         can_log, cmd_analysis, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_scm, cmd_search,
-        cmd_symbols, ext_process, git, mcp, measure, pty, viewer, watcher,
+        cmd_symbols, ext_gallery, ext_process, git, mcp, measure, pty, viewer, watcher,
     };
     use std::sync::{Arc, Mutex};
 
@@ -1341,7 +1349,7 @@ mod desktop {
             // The `ggx` protocol serves an installed package's own files to its sandboxed
             // page iframes (cmd_ext.rs confines every request to the extensions home) — the
             // extension-platform counterpart of the public dir the Git Graph page loads from.
-            .register_uri_scheme_protocol("ggx", |_ctx, request| cmd_ext::serve_ggx_asset(&request))
+            .register_uri_scheme_protocol("ggs", |_ctx, request| cmd_ext::serve_ext_asset(&request))
             .setup(|app| {
                 // Git's output reaches the panel's "Git" channel as it happens.
                 use tauri::Emitter;
@@ -1365,9 +1373,9 @@ mod desktop {
                 // never hold the window back — and best-effort: a package that fails to start
                 // holds the error in its status, not the boot. Nothing installs by default:
                 // the bundled packages are offers the Extensions view lists (cmd_ext scans
-                // the installer's extensions/ directory), not boot-time installs; a
-                // deliberate uninstall stays uninstalled (its `<id>.uninstalled` marker is
-                // honoured by the Extensions view's one-click install that clears it).
+                // the installer's extensions/ directory), not boot-time installs; the
+                // refresh only brings installed ones current, so a deliberate uninstall
+                // stays uninstalled.
                 {
                     let handle = app.handle().clone();
                     std::thread::spawn(move || {
@@ -1375,8 +1383,10 @@ mod desktop {
                         let Ok(dir) = cmd_ext::extensions_dir(&handle) else {
                             return;
                         };
-                        // An install of the same version as the bundled package, but from
-                        // an older build of it, is refreshed before anything starts from it.
+                        // An installed bundled package is brought current before anything
+                        // starts from it: a newer bundled version upgrades it forward-only,
+                        // the same version from an older build is refreshed by its recorded
+                        // build stamp.
                         for refreshed in cmd_ext::refresh_bundled_installs(&handle) {
                             match refreshed {
                                 Ok(line) => cmd_ext::log_extensions(&line),
@@ -1535,12 +1545,15 @@ mod desktop {
                 cmd_ext::ext_read_file,
                 cmd_ext::ext_read_file_base64,
                 cmd_ext::ext_fs,
-                cmd_ext::ext_install_from_ggx,
+                cmd_ext::ext_load_code,
+                cmd_ext::ext_node_env,
                 cmd_ext::ext_install_from_vsix,
                 cmd_ext::ext_install_bundled,
+                ext_gallery::ext_gallery_search,
+                ext_gallery::ext_gallery_asset,
+                ext_gallery::ext_gallery_install,
                 ext_process::ext_process_start,
                 ext_process::ext_process_run,
-                ext_process::ext_process_message,
                 ext_process::ext_process_stop,
                 ext_process::ext_process_status,
                 cmd_search::search_workspace,

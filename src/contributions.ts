@@ -146,18 +146,23 @@ export function localize(text: string | undefined, nls: Record<string, string>):
 export interface ManifestContributes {
 	commands?: { command: string; title?: string; category?: string; icon?: { light?: string; dark?: string } }[];
 	menus?: Record<string, MenuPlacement[] | undefined>;
-	keybindings?: { command: string; key: string; when?: string }[];
-	/** VS Code's `contributes.configuration`: the settings an extension declares (M3 3.9). */
+	/** VS Code's own shape allows a single binding object as well as the array; the single
+	 *  form is normalized to the array on read. */
+	keybindings?: { command: string; key: string; when?: string } | { command: string; key: string; when?: string }[];
+	/** VS Code's `contributes.configuration`: the settings an extension declares (M3 3.9).
+	 *  VS Code accepts one object OR an array of them — the array form is normalized on
+	 *  read (a package with several configuration blocks keeps every property). */
 	configuration?: {
 		title?: string;
 		properties?: Record<string, { type?: string; default?: unknown; description?: string }>;
-	};
+	} | { title?: string; properties?: Record<string, { type?: string; default?: unknown; description?: string }> }[];
 	/** VS Code's `contributes.viewsContainers`: activity-bar containers an extension adds —
 	 *  each becomes its own sidebar view holding the views that name it in `views`. */
 	viewsContainers?: { activitybar?: { id: string; title: string; icon?: string }[] };
 	/** VS Code's `contributes.views`, by container id: the tree views the extension shows
-	 *  (`window.createTreeView` of the same id feeds them their content). */
-	views?: Record<string, { id: string; name: string; when?: string }[] | undefined>;
+	 *  (`window.createTreeView` of the same id feeds them their content); a view with
+	 *  `type: "webview"` is a webview view (`registerWebviewViewProvider` serves it). */
+	views?: Record<string, { id: string; name: string; when?: string; type?: string }[] | undefined>;
 	/** VS Code's `contributes.languages`: a language id with the file extensions and aliases
 	 *  that identify it (feeds the editor's language naming and snippets scoping). */
 	languages?: { id: string; aliases?: string[]; extensions?: string[] }[];
@@ -179,15 +184,16 @@ export interface ExtensionSettingDef {
 	description: string;
 }
 
-/** One extension's declared sidebar surface: its activity-bar containers and the tree views
- *  placed in them (or in a built-in container — `explorer` and `scm` are accepted ids, the
- *  view then rides that container's sidebar view as a stacked section). */
+/** One extension's declared sidebar surface: its activity-bar containers and the tree
+ *  views placed in them (or in a built-in container — `explorer` and `scm` are accepted
+ *  ids, the view then rides that container's sidebar view as a stacked section). */
 export interface ExtensionViewContribution {
 	extId: string;
 	containers: { id: string; title: string; icon?: string }[];
 	/** `container` is the manifest's container id; `viewId` is the view's own id (the
-	 *  `createTreeView` id). */
-	views: { viewId: string; name: string; container: string }[];
+	 *  `createTreeView` id); `type: "webview"` marks a webview view
+	 *  (`registerWebviewViewProvider`), which the workbench hosts as an iframe section. */
+	views: { viewId: string; name: string; container: string; type?: 'tree' | 'webview' }[];
 }
 
 const viewContributions = new Map<string, ExtensionViewContribution>();
@@ -201,7 +207,7 @@ function applyExtensionViews(extId: string, contributes: ManifestContributes | u
 	}));
 	const views: ExtensionViewContribution['views'] = [];
 	for (const [container, entries] of Object.entries(contributes?.views ?? {})) {
-		for (const view of entries ?? []) views.push({ viewId: view.id, name: localize(view.name, nls) || view.id, container });
+		for (const view of entries ?? []) views.push({ viewId: view.id, name: localize(view.name, nls) || view.id, container, type: view.type === 'webview' ? 'webview' : 'tree' });
 	}
 	if (containers.length > 0 || views.length > 0) viewContributions.set(extId, { extId, containers, views });
 	else viewContributions.delete(extId);
@@ -332,12 +338,17 @@ export function extensionSettingDefs(): ExtensionSettingDef[] {
 
 /** Register one extension's declared settings only - the slice the async builtin-settings
  *  pass (extHost.ts) applies: the first-paint baked data carries commands and menus, the
- *  schema and its localised descriptions arrive with the Settings dialog's chunk. */
+ *  schema and its localised descriptions arrive with the Settings dialog's chunk. The
+ *  configuration contribution accepts VS Code's two spellings — one object or an array of
+ *  them — and every block's properties join one settings list. */
 export function applyExtensionSettings(extId: string, configuration: ManifestContributes['configuration'], nls: Record<string, string>): void {
+	const blocks = Array.isArray(configuration) ? configuration : [configuration];
 	const defs: ExtensionSettingDef[] = [];
-	for (const [id, property] of Object.entries(configuration?.properties ?? {})) {
-		const type = property.type === 'boolean' || property.type === 'number' ? property.type : 'string';
-		defs.push({ extId, id, type, default: property.default ?? (type === 'boolean' ? false : type === 'number' ? 0 : ''), description: localize(property.description, nls) });
+	for (const block of blocks) {
+		for (const [id, property] of Object.entries(block?.properties ?? {})) {
+			const type = property.type === 'boolean' || property.type === 'number' ? property.type : 'string';
+			defs.push({ extId, id, type, default: property.default ?? (type === 'boolean' ? false : type === 'number' ? 0 : ''), description: localize(property.description, nls) });
+		}
 	}
 	if (defs.length > 0) extensionSettings.set(extId, defs);
 	else extensionSettings.delete(extId);
@@ -361,7 +372,11 @@ export function applyContributions(extId: string, contributes: ManifestContribut
 	const registered: ExtensionContributions = { commands: new Map(), menus: {}, dispatch };
 	byExtension.set(extId, registered);
 
-	const keybindings = new Map((contributes.keybindings ?? []).map((binding) => [binding.command, binding]));
+	const keybindings = new Map(
+		(Array.isArray(contributes.keybindings) ? contributes.keybindings : [contributes.keybindings])
+			.filter((binding): binding is { command: string; key: string; when?: string } => binding !== undefined)
+			.map((binding) => [binding.command, binding])
+	);
 	// VS Code's `commandPalette` placements: an entry whose `when` currently fails hides the
 	// command from the palette only — its menu entries keep their own clauses. This is how a
 	// locale-twin pair (`x` / `x.zhCn`, each palette-excluded abroad) shows exactly one

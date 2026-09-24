@@ -130,14 +130,14 @@ describe('the boot sequence', () => {
 
 describe('an installed package\'s activity-bar launcher', () => {
 	it('renders the manifest-declared icon and runs the package\'s command on click', async () => {
-		const launcher: import('../src/extHost').ExtInfo = { id: 'acme.viewer', name: 'viewer', displayName: 'Acme Viewer', publisher: 'acme', version: '1.0.0', description: '', builtin: false, icon: null, path: '/ext/acme.viewer-1.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggx', ggx: { format: 'ggx/2', id: 'acme.viewer', version: '1.0.0', pages: { view: { page: 'web/view.html', singleton: true } }, backend: { kind: 'process', command: 'bin/viewer.exe' }, activitybar: { command: 'acme.viewer.show', title: 'Acme Viewer', icon: 'resources/icon.svg' } } };
+		const launcher: import('../src/extHost').ExtInfo = { id: 'acme.viewer', name: 'viewer', displayName: 'Acme Viewer', publisher: 'acme', version: '1.0.0', description: '', builtin: false, icon: null, path: '/ext/acme.viewer-1.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggs', capabilities: { format: 'ggs/2', id: 'acme.viewer', version: '1.0.0', pages: { view: { page: 'web/view.html', singleton: true } }, backend: { kind: 'process', command: 'bin/viewer.exe' }, activitybar: { command: 'acme.viewer.show', title: 'Acme Viewer', icon: 'resources/icon.svg' } } };
 		workbench.dispose();
 		backend.handlers.set('ext_list', () => [launcher]);
 		backend.handlers.set('ext_read_file', ({ relPath }) => {
 			if (relPath === 'package.json') return JSON.stringify({ contributes: { commands: [{ command: 'acme.viewer.show', title: 'Show Acme Viewer' }] } });
 			throw new Error('no such file');
 		});
-		// The command answers the ggx/2 result convention: open the package's `view` page.
+		// The command answers the ggs/2 result convention: open the package's `view` page.
 		backend.handlers.set('ext_process_run', () => ({ openPage: 'view' }));
 		backend.handlers.set('ext_read_file_base64', () => btoa('<svg xmlns="http://www.w3.org/2000/svg"/>'));
 		workbench = new Workbench();
@@ -164,7 +164,7 @@ describe('an extension page tab\'s icon', () => {
 	it('falls back to the package\'s own icon when neither the page nor a launcher declares one', async () => {
 		// The GGX Demo's shape: pages without icons, no activity-bar launcher, but package.json
 		// names an icon (the one the Extensions view shows).
-		const demo: import('../src/extHost').ExtInfo = { id: 'acme.demo', name: 'demo', displayName: 'Acme Demo', publisher: 'acme', version: '1.0.0', description: '', builtin: false, icon: 'C:\\ext\\acme.demo-1.0.0\\resources\\icon.svg', path: 'C:\\ext\\acme.demo-1.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggx', ggx: { format: 'ggx/2', id: 'acme.demo', version: '1.0.0', pages: { main: { page: 'web/view.html', title: 'Demo Page' } }, backend: { kind: 'process', command: 'bin/demo.exe' } } };
+		const demo: import('../src/extHost').ExtInfo = { id: 'acme.demo', name: 'demo', displayName: 'Acme Demo', publisher: 'acme', version: '1.0.0', description: '', builtin: false, icon: 'C:\\ext\\acme.demo-1.0.0\\resources\\icon.svg', path: 'C:\\ext\\acme.demo-1.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggs', capabilities: { format: 'ggs/2', id: 'acme.demo', version: '1.0.0', pages: { main: { page: 'web/view.html', title: 'Demo Page' } }, backend: { kind: 'process', command: 'bin/demo.exe' } } };
 		workbench.dispose();
 		backend.handlers.set('ext_list', () => [demo]);
 		backend.handlers.set('ext_read_file', ({ relPath }) => {

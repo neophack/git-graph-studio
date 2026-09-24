@@ -292,7 +292,7 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 .editors { flex: 1; min-height: 0; position: relative; display: flex; }
 .editor-pane { position: absolute; inset: 0; display: flex; flex-direction: column; }
 .editor-pane[hidden] { display: none; }
-/* An extension page (module 12): the ggx package's own document, sandboxed, filling its tab. */
+/* An extension page (module 12): the extension package's own document, sandboxed, filling its tab. */
 .editor-pane.ext-page { display: block; }
 /* The extension detail page is a document, not a frame: it grows past the tab's height, so the
    pane is its scroll container (the markdown-preview pattern). A scroll container also clips,
@@ -749,6 +749,15 @@ body.resizing iframe { pointer-events: none; }
 .ext-process { font-size: 11px; color: var(--vscode-descriptionForeground, #999); }
 .ext-process.running { color: var(--vscode-statusBar-foreground, #ccc); }
 .ext-process.running::before { content: "\25CF"; margin-right: 4px; color: var(--vscode-charts-green, #89d185); font-size: 9px; }
+
+/* The marketplace search box (the Extensions view's top row) and its result rows. */
+.ext-search { padding: 6px 12px 4px; }
+.ext-search-input { height: 24px; font-size: 12px; }
+.ext-gallery-count { padding: 2px 12px; font-size: 11px; color: var(--vscode-descriptionForeground, #999); }
+.ext-verified { margin-left: 6px; padding: 0 4px; border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35)); border-radius: 3px; font-size: 10px; text-transform: uppercase; }
+.ext-gallery-stats { font-size: 11px; color: var(--vscode-descriptionForeground, #999); }
+.ext-installed-tag { font-size: 11px; color: var(--vscode-descriptionForeground, #999); align-self: center; white-space: nowrap; }
+.ext-installed-tag.busy { color: var(--vscode-statusBar-foreground, #ccc); }
 
 /* ---------- The extension detail editor (VS Code's extension editor look) ---------- */
 
@@ -1405,3 +1414,128 @@ body.resizing iframe { pointer-events: none; }
 .an-cycle .an-arrow { color: var(--vscode-descriptionForeground); flex: none; }
 .an-cycle-step { color: var(--vscode-descriptionForeground); }
 
+
+/* ---------- Module Self-Tests (module 14) ---------- */
+
+/* The pane wrapper editor.ts mounts the page into: a flex child of .editor-pane, it needs
+   the constrained height — without it .selftest's height:100% resolves against a
+   content-driven parent, the report grows past the pane and there is nothing to scroll. */
+.selftest-page {
+	flex: 1;
+	min-height: 0;
+}
+.selftest {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	overflow: auto;
+	padding: 16px 20px;
+	font-size: 13px;
+}
+.selftest-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	margin-bottom: 12px;
+}
+.selftest-titles h2 {
+	margin: 0 0 2px;
+	font-size: 15px;
+	font-weight: 600;
+	color: var(--vscode-editor-foreground);
+}
+.selftest-summary {
+	color: var(--vscode-descriptionForeground);
+	font-family: var(--monaco-monospace-font, monospace);
+	font-size: 12px;
+}
+.selftest-actions {
+	display: flex;
+	gap: 8px;
+	flex: none;
+}
+.selftest-actions button {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font: inherit;
+	color: var(--vscode-button-foreground);
+	background: var(--vscode-button-background);
+	border: none;
+	border-radius: 4px;
+	padding: 4px 10px;
+	cursor: pointer;
+}
+.selftest-actions button:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+.selftest-actions .action-btn {
+	background: transparent;
+	color: var(--vscode-foreground);
+	border: 1px solid var(--vscode-widget-border, transparent);
+}
+.selftest-group {
+	border: 1px solid var(--vscode-widget-border, transparent);
+	border-radius: 6px;
+	margin-bottom: 10px;
+	overflow: hidden;
+}
+.selftest-group-header {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 6px 10px;
+	background: var(--vscode-sideBarSectionHeader-background, transparent);
+}
+.selftest-group-header .name {
+	font-weight: 600;
+	flex: 1;
+}
+.selftest-group-header .count {
+	color: var(--vscode-descriptionForeground);
+	font-family: var(--monaco-monospace-font, monospace);
+	font-size: 12px;
+}
+.selftest-row {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	padding: 3px 10px;
+}
+.selftest-row .status {
+	flex: none;
+	width: 14px;
+	display: inline-flex;
+}
+.selftest-row.pass .status {
+	color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+}
+.selftest-row.fail .status {
+	color: var(--vscode-testing-iconFailed, var(--vscode-charts-red));
+}
+.selftest-row.skip .status,
+.selftest-row.pending .status {
+	color: var(--vscode-descriptionForeground);
+}
+.selftest-row .name {
+	flex: 1;
+}
+.selftest-row .ms {
+	flex: none;
+	color: var(--vscode-descriptionForeground);
+	font-family: var(--monaco-monospace-font, monospace);
+	font-size: 11.5px;
+}
+.selftest-row .message {
+	color: var(--vscode-errorForeground);
+	font-family: var(--monaco-monospace-font, monospace);
+	font-size: 11.5px;
+	word-break: break-all;
+}
+.selftest-row.skip .message {
+	color: var(--vscode-descriptionForeground);
+}
+.selftest-row.pending {
+	opacity: 0.55;
+}

@@ -500,6 +500,20 @@ describe('submodule sections', () => {
 		expect(backend.callsTo('git_stage')).toEqual([{ paths: ['lib.rs'], repo: SUB }]);
 	});
 
+	it('right-clicks a submodule\'s uncommitted file to the same context menu as the main repository\'s row', async () => {
+		const { view, setSubChanges } = setup();
+		setSubChanges([change('lib.rs', { unstaged: 'modified' })]);
+		view.setRepo(REPO);
+		await view.refresh();
+
+		const subSection = document.querySelector('.scm-repo')!;
+		rightClick(subSection.querySelector('.row'));
+		expect(menuLabels()).toEqual(['Open File', 'Open Changes', 'Stage Changes', 'Discard Changes']);
+		click(menuItem('Stage Changes'));
+		await flush();
+		expect(backend.callsTo('git_stage')).toEqual([{ paths: ['lib.rs'], repo: SUB }]);
+	});
+
 	it('commits within a submodule, passing its own repo path', async () => {
 		const { view } = setup(); // the default fixture's lib.rs is already staged
 		view.setRepo(REPO);

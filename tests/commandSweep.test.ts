@@ -292,11 +292,14 @@ describe('the commands no other harness drives', () => {
 	it('Compare Two Folders... opens a Folder Compare tab from the two picked folders', async () => {
 		backend.dialog.openResult = 'C:\\left';
 		await commands.execute('workbench.compareFolders');
-		// The registry fires the command's two dialog round-trips without awaiting them,
-		// so under a loaded worker the tab lands later than any fixed flush count: poll
-		// for the end state, then let any late activation settle before reading it.
-		await until(() => workbench.editors.activeInput?.kind === 'folders');
-		await flush(2);
+		// The registry fires the command's two dialog round-trips without awaiting them, so
+		// under a loaded worker the tab lands later than any fixed flush count: poll for the
+		// exact end state (until's poll rounds are the budget — it returns silently on
+		// timeout), then read it.
+		await until(() => {
+			const input = workbench.editors.activeInput;
+			return input?.kind === 'folders' && input.id === 'C:\\left::C:\\left';
+		}, 120);
 		expect(workbench.editors.activeInput).toEqual({ kind: 'folders', id: 'C:\\left::C:\\left', left: 'C:\\left', right: 'C:\\left' });
 		// A cancelled picker opens nothing.
 		backend.dialog.openResult = null;
@@ -306,12 +309,12 @@ describe('the commands no other harness drives', () => {
 		expect(workbench.editors.activeInput?.kind).not.toBe('folders');
 	});
 
-	it('Install Extension from GGX... shows the Extensions view and asks for the package', async () => {
-		await commands.execute('extensions.installFromGgx');
+	it('Install Extension from VSIX... shows the Extensions view and asks for the package', async () => {
+		await commands.execute('extensions.installFromVsix');
 		await flush(4);
 		expect(workbench.activeSidebarView).toBe('extensions');
 		// The picker was cancelled: nothing installs, nothing complains.
-		expect(backend.callsTo('ext_install_from_ggx')).toEqual([]);
+		expect(backend.callsTo('ext_install_from_vsix')).toEqual([]);
 		expect(notifications()).toEqual([]);
 	});
 });

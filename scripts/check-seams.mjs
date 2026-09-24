@@ -1,7 +1,8 @@
 // The seam rules of the app, enforced at build time: nothing under src/ or static/ may name
 // the git-graph-rs extension's artifacts or protocols — the extension is a plugin (everything
-// of it lives in plugins/git-graph-rs/), and the app's only interface to it is the generic
-// extension platform. The Rust counterpart of this check lives in src-tauri/build.rs.
+// of it lives in its standard VSIX, packed by the extension's own build inside the
+// vscode-git-graph-rs submodule), and the app's only interface to it is the generic extension
+// platform. The Rust counterpart of this check lives in src-tauri/build.rs.
 //
 // Wired into every path that compiles the frontend: scripts/prepare.mjs runs it first, the
 // Vite plugin (vite.config.ts) runs it on every dev-server start and production build, and
@@ -16,10 +17,10 @@ const appDir = join(dirname(fileURLToPath(import.meta.url)), '..');
  *  names the pattern fails the build. */
 const RULES = [
 	// The app consumes no extension artifact at all anymore (everything of git-graph-rs lives
-	// in its plugin: plugins/git-graph-rs/). These patterns fail the build anywhere under src/
+	// in its VSIX, packed by the extension's own studio packer). These patterns fail the build anywhere under src/
 	// or static/ — the seam is the extension platform itself, not a file of the app.
 	{ pattern: /graph_request/, paths: [], because: 'the graph protocol belongs to the git-graph-rs plugin (its bridge speaks it); the app never names it' },
-	{ pattern: /gitgraph\//, paths: [], because: 'the extension assets live inside its .ggx; nothing of the app names their paths' },
+	{ pattern: /gitgraph\//, paths: [], because: 'the extension assets live inside its VSIX; nothing of the app names their paths' },
 	{ pattern: /GitGraphStudioConfig/, paths: [], because: 'the config bundle is the plugin page own (web/config.js); the app never reads it' },
 	{ pattern: /out\.min/, paths: [], because: 'the webview bundle is the plugin page own; the app never references it' },
 	{ pattern: /web[\\/]styles/, paths: [], because: 'the extension CSS sources are consumed only through its plugin packer — never referenced by the app' }

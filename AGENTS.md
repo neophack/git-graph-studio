@@ -22,12 +22,12 @@ repository. Read it once in full; consult the [Module map](#module-map) and
 **Git Graph Studio** is a standalone desktop application (Tauri 2 + TypeScript + Rust) that
 hosts the `git-graph-rs` engine in a VS Code-class workbench: a File Explorer with git status
 decoration, Source Control, a tabbed Editor Suite with split groups, an Integrated Terminal,
-the Git Graph view, a `.ggx` Extension Platform, and a CAN Trace Analyzer.
+the Git Graph view, a VSIX Extension Platform, and a CAN Trace Analyzer.
 
 | Document | Role |
 | -------- | ---- |
 | `README.md` | What ships: features, repository layout, build instructions |
-| `docs/crabcode-development-plan.md` | The authoritative plan. §3 *Architecture principles* binds every change; §5 lists milestones; §9 defines the quality bar |
+| `docs/ggs-development-plan.md` | The authoritative plan. §3 *Architecture principles* binds every change; §5 lists milestones; §9 defines the quality bar |
 | `AGENTS.md` (this file) | How to change the code without breaking its structure |
 
 When this file and the plan disagree, the plan wins; fix this file in the same change.
@@ -80,12 +80,13 @@ Two processes joined by Tauri IPC, with one library at the core:
 │ The app's own git reads and writes run the git CLI (git.rs); generic plugin surfaces       │
 │ (ext_*, ext_process) list and speak to whatever is installed — naming no plugin.           │
 └──────────────────────────────────────────┬────────────────────────────────────────────────┘
-                                           │ the extension platform (ext_process, ggx:// pages)
+                                           │ the extension platform (ext_process, ggs:// pages)
 ┌──────────────────────────────────────────┴────────────────────────────────────────────────┐
-│ Plugins (plugins/*/): each a self-contained .ggx — its own pages (served over ggx://), its │
-│ own process backend, its own packer. git-graph-rs links git-graph-core (native/core) from  │
-│ vscode-git-graph-rs/ and runs the Git Graph view's whole server side; the app binary never │
-│ links the engine and names no plugin.                                                      │
+│ The extension (vscode-git-graph-rs/, a submodule that packs itself — studio/build.mjs):   │
+│ the store-format .vsix — pages (ggs://), the engine .node (loaded over its C ABI by the   │
+│ app-bundled engine host) — no executable inside. The app tree carries no plugin code;     │
+│ git-graph-rs links git-graph-core (native/core) and runs the Git Graph view's whole       │
+│ server side; the app binary never links the engine and names no plugin.                   │
 └───────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -97,8 +98,9 @@ The principles below are the plan's §3, condensed. They apply to every change.
 2. **The app works without any plugin.** Its own git reads (status, file-at-revision, file
    history, submodules) and writes (stage, commit, fetch, push, …) run the `git` CLI, and
    only through `src-tauri/src/git.rs`. A plugin that declares a process backend is a warm
-   sibling reached over its pipe (the Git Graph view's `ggx-rpc/1`); the app binary never
-   links `git-graph-core` and names no plugin id anywhere under `src/`.
+   sibling reached over the one wire protocol, `ggs-ext/1` — the Git Graph view's engine
+   backend speaks; the app binary never links
+   `git-graph-core` and names no plugin id anywhere under `src/`.
 3. **No frontend framework.** Hand-written DOM via `el()`; new views are built from the
    `ui.ts` primitives (quick input, context menu, notifications, codicons).
 4. **Heavy work runs in the backend and streams.** Search, indexing, folder compare and hex
@@ -134,9 +136,9 @@ Extensions view would call it), a mission line, and a test file.
 | 9 | Source Control | Stage / commit / history / git commands |
 | 10 | Git Graph Engine | The graph view and the engine seam |
 | 11 | Integrated Terminal | Shells inside the panel |
-| 12 | Extension Platform | `.ggx` installs and the extension host |
+| 12 | Extension Platform | VSIX installs and the extension host |
 | 13 | CAN Trace Analyzer | CANoe-style `.blf` / `.asc` analysis |
-| 14 | Performance Lab | Measurement, metrics and the perf gate |
+| 14 | Performance Lab | Measurement, metrics, the perf gate and the module self-tests |
 | 15 | Build & Release Pipeline | Asset preparation, packaging, installers, CI |
 | 16 | Symbol MCP Server | The `ggs --mcp` AI bridge over the symbol index |
 | 17 | Code Analysis | tree-sitter parsing and the five analysis tools |
@@ -280,34 +282,49 @@ commit-msg hook, `refs/for/` push).
 
 ### 10. Git Graph Engine (the git-graph-rs plugin)
 
-The Git Graph view is a plugin: `plugins/git-graph-rs/` packages everything of it — the
-extension's own webview page, the config/compare page bundles, the in-page bridges, the
-engine, the write path — into one self-contained `.ggx`, installed from the Extensions
+The Git Graph view is an extension package: the extension packs itself —
+`vscode-git-graph-rs/studio/build.mjs`, inside the submodule, builds everything of it
+(the extension's own webview page, the config/compare page bundles, the in-page bridges, the
+engine, the write path) into one self-contained `.vsix` (the store's own format; the
+Studio-specific capabilities ride inside it under `package.json`'s `ggs` key, which VS Code
+ignores and the app turns into the runtime `manifest.json` on install —
+2026-09-24, before this the package was a bespoke zip), installed from the Extensions
 view's one-click offer (or by hand). The page plays the extension host's own role in-page:
-`web/bridge.js` (the view) and `web/compare-bridge.js` (the comparison pages) generate the
-extension's own pages, compose the theme and `acquireVsCodeApi`, serve the shell's own
-requests through the generic page services, and forward everything else to the package's
-backend process over `backend.message`. **The app binary never links `git-graph-core`
+the submodule's `studio/bridge.js` (the view) and `studio/compare-bridge.js` (the comparison
+pages) generate the extension's own pages, compose the theme and `acquireVsCodeApi`, serve
+the shell's own requests through the generic page services, and translate the view's protocol
+onto the engine's dispatch surface before forwarding over `backend.run` — the one channel any
+plugin's page uses (unified 2026-09-23: the old `backend.message`/`ggx-rpc/1` pair is gone;
+the compare bridge gained the same translation layer 2026-09-24 — before it, every one of its
+reads named a method the engine does not serve and the comparison pages opened empty).
+**The app binary never links `git-graph-core`
 and names no plugin id** (moved out of the app 2026-09-23; nothing under `src/` may name
 the extension's artifacts — `scripts/check-seams.mjs` fails the build on any reference).
 
-- Plugin: `plugins/git-graph-rs/src/` (`main.rs` the `ggx-rpc/1` dispatch:
-  `runCommand` for the manifest's commands, `workspaceChanged` for the app's open folders,
-  the page bridge's `__` reads, and everything else to the engine; `engine_impl.rs` every
-  call that names `git-graph-core` plus the Gerrit cache; `writes.rs` the view's write
-  dispatch over the `git` CLI; `gerrit.rs` the refresh pipeline; `writes_tests.rs` their
-  tests — the `engine` Cargo feature's `git-graph-backend`, the only binary that links
-  `git-graph-core` from `vscode-git-graph-rs/native/core`), `plugins/git-graph-rs/web/`
-  (`view.html`/`compare.html`/`binarycompare.html` the authored shells,
-  `bridge.js`/`compare-bridge.js` the in-page extension host), `plugins/git-graph-rs/
-  bundle.mjs` (the page bundles, relative URLs), `plugins/git-graph-rs/build.mjs` the
-  packer (the only script reading the submodule), `config-stdin.js` the config bundle's entry
+- The engine host (the app's sidecar, `src-tauri/src/engine_host/`): `mod.rs` the `ggs-ext/1`
+  dispatch — a pure pass-through: a page's `backend.run(command, [message, settings])`
+  becomes the engine call `{method: command, params: message}` and the engine's JSON answer
+  crosses back untouched (the package's own bridge shapes either end); `runCommand` answers
+  the manifest's launcher command first, `initialize` declares the command list and carries
+  the app's open folders, `workspaceChanged` keeps them current; `engine.rs` the engine
+  load — `libloading` of the package's `git-graph.node` over its C ABI
+  (`git_graph_capi_request`), the ONE engine binary the editor's Node runtime also loads,
+  answered as the addon's single dispatch surface (`{"method","params"}` → the method's
+  JSON, errors in band `"Kind: message"`). Nothing of any plugin's protocol lives in the
+  host — the `engine` Cargo feature's `git-graph-backend`, an app sidecar
+  (tauri.conf.json's `externalBin` installs it beside the main binary) that links no
+  engine crate. `src-tauri/src/bin/git_graph_backend.rs` is its one-line shell.
+- The package's own web side (`vscode-git-graph-rs/studio/`: `bridge.js`/
+  `compare-bridge.js` the in-page extension hosts, `bundle.mjs` the page bundles with
+  relative URLs, `config-stdin.js` the config bundle's entry, `vsix.mjs` the zip writer,
+  `stubs/` the `vscode` / Node / `fs` shims the bundles build against)
 - Host side (generic): `src-tauri/src/ext_process.rs` (spawns every installed backend, the
-  start handshake carries the open folders, `notify_workspace` pushes changes),
-  `src-tauri/src/backend_rpc.rs` (the `ggx-rpc/1` wire protocol: thread-per-request,
-  because the view's opening burst needs concurrent reads), `src/extHost.ts` (the page
-  services: `theme.stylesheet`, `backend.message`, `workbench.*`, singleton pages,
-  theme/workspace pushes)
+  start handshake carries the open folders, `notify_workspace` pushes changes, a manifest
+  still naming the retired `ggx-rpc/1` fails its start with an upgrade hint),
+  `src-tauri/src/ext_protocol.rs` (the one wire protocol, `ggs-ext/1`: JSON-RPC 2.0 over
+  stdio, `serve_plugin` dispatching every request onto its own thread — the view's opening
+  burst of reads never serializes), `src/extHost.ts` (the page services:
+  `theme.stylesheet`, `backend.run`, `workbench.*`, singleton pages, theme/workspace pushes)
 
 ### 11. Integrated Terminal
 
@@ -319,87 +336,107 @@ terminal list.
 
 ### 12. Extension Platform
 
-The extension store (`~/.ggs/extensions/`): Studio's own `.ggx` format (`ext_install_from_ggx`)
-plus `.vsix` as the VS Code compatibility path (restored 2026-09-22 after that day's
-ggx-only removal; same store, same forward-only upgrades, a `.ggx` and a `.vsix` of one id
-are one extension — the higher version wins). `ggx/2` adds the named page registry (every
-page a package can show, opened as editor tabs over the `ggx://` protocol) and the process
-backend (a binary, speaking the `ggs-ext/1` line-JSON-RPC protocol over stdin/stdout — any
-language that can write lines to stdout qualifies; the app embeds no runtime) — plus the
-Extensions view with detail pages, backend status and restart. VSIX extensions activate in
-the frame host (`extHost.ts` + `vscodeApi.ts`) with a growing `vscode` API surface:
-commands, configuration (with `onDidChangeConfiguration` pushed in), message toasts with
-MessageItem, quick picks (string and object items), `withProgress` toasts, output channels
-(the Output view's channel dropdown), status bar items (`window.createStatusBarItem` /
-`setStatusBarMessage`, rendered by the status bar), webview panels
-(`window.createWebviewPanel` — a sandboxed srcdoc iframe in an editor tab, with
-`acquireVsCodeApi()` composed in, `asWebviewUri` mapping onto `ggx://`), persisted
-`globalState`/`workspaceState` mementos, and `env.clipboard`. **Nothing installs by
-default.** Two packages ship beside the installer (`extensions/`, packed by `prepare.mjs`):
-git-graph-rs, whose integrated entry offers it as a **one-click install**
-(`ext_install_bundled`) that lands it as a standard, uninstallable package — its engine
-linked in its backend process and its view assets the extension's own — and the **GGX
-Demo**, the format's worked example and the template new plugins (human- or AI-authored)
-start from, offered the same one-click way as a pure sample (`plugins/ggs-ext-demo/`, its
-README the authoring guide). With no install of either (the default), each listing falls
-back to the manifest embedded at build time. **Install means run**: the boot pass starts
-every installed package that declares a backend (`ext_process::start_all_installed`, off the
-window's thread), an install starts its backend at once, and the first command remains the
-lazy fallback. Multiple app instances are independent — each spawns and owns only its own
-backends (`GGS_INSTANCE_ID` marks the owner), every backend this instance spawned is stopped
-on exit, and an uninstall stops the backend before removing its directory (a directory
-another window's backend still holds refuses with a close-that-window hint). A completed
-uninstall also writes an `<id>.uninstalled` marker beside the version directories: the boot
-pass's every-launch auto-install of the bundled git-graph-rs honours it, so a deliberate
-uninstall survives the next launch (any explicit install of the id clears the marker and
-revives the auto-upgrade).
+The extension store (`~/.ggs/extensions/`): **one package format, the store's own `.vsix`**
+(since 2026-09-24 the only one — the custom `.ggx` package format was removed; an install
+made from one before that still runs and uninstalls, nothing new installs from one). A
+VSIX's `package.json` may declare the `ggs/2` capabilities under a `ggs` key — VS Code
+ignores it, and the install generates the runtime `manifest.json` from it (`ext_install_
+from_vsix`); a VSIX without the key is the store's ordinary fare — a compiled bundle that
+activates in the frame host, or a static-contribution package (themes, snippets, grammars)
+that installs for its contributions alone. `ggs/2` adds the named page registry (every page
+a package can show, opened as editor tabs over the `ggs://` protocol) and the backends: a
+process binary (speaking the `ggs-ext/1` line-JSON-RPC protocol over stdin/stdout — any
+language that can write lines to stdout qualifies; the app embeds no runtime) or an engine
+`.node` served by the app-bundled host over its C ABI (`kind: "node"` — the same single
+engine binary the editor's Node runtime loads) — plus the Extensions view with detail
+pages, backend status and restart, and the **marketplace** (2026-09-24): the view's search
+box queries Open VSX — the open-source registry the VS Code ecosystem publishes to, the
+same service code-server and Theia point at — over `ext_gallery.rs`'s three commands
+(search, icon, download-and-install), every URL confined to the gallery's own origin, and
+a marketplace package installs through exactly the path a picked `.vsix` takes (forward-
+only upgrades, the unhostable-`.node` door). Frame-host extensions run under `extHost.ts` +
+`vscodeApi.ts` with a growing `vscode` API surface: commands, configuration (with
+`onDidChangeConfiguration` pushed in), message toasts with MessageItem, quick picks (string
+and object items), `withProgress` toasts, output channels (the Output view's channel
+dropdown), status bar items (`window.createStatusBarItem` / `setStatusBarMessage`, rendered
+by the status bar), webview panels (`window.createWebviewPanel` — a sandboxed srcdoc iframe
+in an editor tab, with `acquireVsCodeApi()` composed in, `asWebviewUri` mapping onto
+`ggs://`), persisted `globalState`/`workspaceState` mementos, and `env.clipboard`.
+**Nothing installs by default.** One package ships beside the installer (`extensions/`,
+packed by `prepare.mjs`): git-graph-rs, whose integrated entry offers it as a **one-click
+install** (`ext_install_bundled`) that lands it as a standard, uninstallable package — its
+engine the one `git-graph.node` inside the VSIX (the app's sidecar engine host loads it
+over the C ABI; the editor's Node runtime loads the same file) and its view assets the
+extension's own. With no install (the default), the listing falls back to the manifest
+embedded at build time. **Install means run**: the boot pass starts every installed package
+that declares a backend (`ext_process::start_all_installed`, off the window's thread), an
+install starts its backend at once, and the first command remains the lazy fallback.
+Multiple app instances are independent — each spawns and owns only its own backends
+(`GGS_INSTANCE_ID` marks the owner), every backend this instance spawned is stopped on
+exit, and an uninstall stops the backend before removing its directory (a directory another
+window's backend still holds refuses with a close-that-window hint). A completed uninstall
+stays uninstalled: the boot pass brings only *installed* packages current — a bundled build
+newer than an install upgrades it forward-only (the install hides the Extensions view's
+bundled offer, so this is the id's only update channel), and the same version unpacked
+from an older build is refreshed by its recorded build stamp — but nothing installs from
+nothing.
 
-- Frontend: `src/extensionsPanel.ts`, `src/extHost.ts` (the frame host for VSIX/`.ggx`
-  extensions, the page host, the process-command dispatch of `ggx/2`, and the host services
-  behind the `vscode` API — webview panels, status bar items, output channels, progress
-  toasts, memento persistence, tree views, activationEvents) + `ext-host.html` +
+- Frontend: `src/extensionsPanel.ts` (the Extensions view: the installed list with detail
+  pages and backend status, and the marketplace search box — Open VSX results with
+  one-click Install / Update by the installed version), `src/extHost.ts` (the frame host for VSIX extensions,
+  the page host, the process-command dispatch of `ggs/2`, and the host services behind the
+  `vscode` API — webview panels, webview views, status bar items, output channels, progress
+  toasts, memento persistence, tree views, activationEvents; the activation policy also
+  derives the implicit `onLanguage` events VS Code 1.74 reads off `contributes.languages` /
+  `contributes.grammars`) + `ext-host.html` +
   `src/extHostBoot.ts` (one sandboxed frame per extension), `src/vscodeApi.ts` (the `vscode`
-  shim the frames require), `src/treeView.ts` (the generic tree view host — the sidebar
+  shim the frames require; unsupported surfaces degrade to inert registrations instead of
+  throwing — an activation must survive whatever a foreign package registers — and every
+  value type a load-time destructure touches (`Position`, `Range`, `SnippetString`,
+  `CodeActionKind`, …) constructs), `src/extModuleLoader.ts` (the frame's CommonJS resolver
+  over the activation preload `ext_load_code` — un-bundled multi-file packages and their
+  `node_modules` load exactly as in Node: relative siblings, package.json `main`, cache,
+  circular partials, `MODULE_NOT_FOUND`), `src/nodeShims.ts` (the Node builtins — `path`,
+  `os`, `events`, `util`, `fs` over the preload and the workspace-confined bridge, `Buffer`,
+  `process`; real implementations for what a frame can serve, call-time failures for what it
+  cannot (`child_process`, `net`), so a `require` of them never kills an activation),
+  `src/treeView.ts` (the generic tree view host — the sidebar
   surface `contributes.views` declares and `createTreeView` feeds),
-  `src/contributions.ts` (manifest contributions merged into the workbench); the surfaces it
+  `src/contributions.ts` (manifest contributions merged into the workbench; the manifest
+  shapes VS Code accepts — `configuration` as object or array, `keybindings` as object or
+  array, views with `type: "webview"` — normalize on read); the surfaces it
   reaches into: `src/statusbar.ts` (extension items), `src/panel.ts` (the Output view's
   channel dropdown), `src/ui.ts` (`progressToast`)
-- Backend: `src-tauri/src/cmd_ext.rs` (install / upgrade / uninstall, `.ggx` and `.vsix`
-  unpack (the VS Code compatibility path), the
-  bundled-package registry — git-graph-rs and the GGX Demo, `ext_install_bundled`'s ids — the
-  `ggx://` protocol that serves an installed package's files — composing the page bootstrap
-  into every HTML page, and `ext_fs` — the workspace-confined file services behind
-  `vscode.workspace.fs`, `findFiles` and `workspaceContains` activations),
+- Backend: `src-tauri/src/cmd_ext.rs` (install / upgrade / uninstall, `.vsix` unpack, the
+  bundled-package registry — git-graph-rs, `ext_install_bundled`'s id — the `ggs://`
+  protocol that serves an installed package's files — composing the page bootstrap into
+  every HTML page, `ext_fs` — the workspace-confined file services behind
+  `vscode.workspace.fs`, `findFiles` and `workspaceContains` activations — `ext_load_code`
+  (the package's bounded loadable-code map the frame's CommonJS loader resolves against)
+  and `ext_node_env` (the Node environment facts the frame's `os`/`process` shims carry)),
+  manifests read as JSONC — comments and trailing commas, the tolerance VS Code's own
+  reader applies,
+  `src-tauri/src/ext_gallery.rs` (the marketplace: Open VSX search, icon fetch and
+  download-and-install over ureq, origin-confined, a marketplace package installing
+  through `cmd_ext`'s ordinary VSIX path),
   `src-tauri/src/ext_grammar.rs` (the TextMate-grammar loader: `.tmLanguage` plists and
   `.json` grammars converted to Sublime syntax and added to the rope viewer's syntect set), `src-tauri/src/ext_process.rs` (the process extension host: eager
   start at boot and install, lazy start on first command as the fallback, `initialize`
   handshake, `runCommand`, crash isolation, remembered status (start count, last error),
-  stop on uninstall and at app exit), `src-tauri/src/ggx_protocol.rs` (the `ggs-ext/1` wire
+  stop on uninstall and at app exit), `src-tauri/src/ext_protocol.rs` (the `ggs-ext/1` wire
   protocol, shared with plugin binaries), `src-tauri/src/ext_page_boot.js` (the
-  `acquireGgsApi()` bootstrap the protocol composes into served pages),
-  `plugins/ggs-ext-demo/src/main.rs` (the reference plugin binary — the shipped sample's
-  backend, every `ggs-ext/1` capability once)
-- Every `.ggx`-producing plugin's own folder under `plugins/` (its manifest fields, page
-  files, backend source and packer together, not scattered): `plugins/ggs-ext-demo/`
-  (`package.json`, `web/view.html` + `web/params.html` + `web/files.html`,
-  `resources/icon.svg`, `src/main.rs`, `build.mjs` its own packer, `README.md` the plugin
-  authoring guide) and
-  `plugins/git-graph-rs/` (`src/main.rs`
-  the backend, `build.mjs` its own packer — the only script that reads the
-  `vscode-git-graph-rs` submodule for packaging — plus `package.json`/`README.md` as the
-  folder's own metadata; its frontend is that submodule, which cannot move). Each is its own
-  Cargo `[[bin]]` in `src-tauri/Cargo.toml`, pointing at that folder.
-- Build: `scripts/build-ggx.mjs` (the shared packing infrastructure — `writeGgx`, `hostPlatformKey`,
-  `filesUnder` — every plugin packer builds on it), `plugins/git-graph-rs/build.mjs`
-  (git-graph-rs's self-contained packer: the pages, the bundles, the bridges and the backend
-  in one `.ggx`; the only script that reads the submodule), `plugins/ggs-ext-demo/build.mjs`
-  (the GGX Demo's own packer: the format's worked example, three pages + the process backend —
-  run by `prepare.mjs` as part of every app build, so the installer carries the sample),
-  `scripts/build-plugins.bat` (builds every `.ggx` under `plugins/` independently of the app
-  build — one command for all of them)
+  `acquireGgsApi()` bootstrap the protocol composes into served pages)
+- The packer lives in the extension's own repository (`vscode-git-graph-rs/studio/` —
+  `build.mjs` the packer, `bundle.mjs` the page-bundle builder, `config-stdin.js`,
+  `vsix.mjs` the zip writer, `stubs/` the bundle stubs, plus the two in-page bridges); the
+  app tree carries no plugin code, and `scripts/prepare.mjs` only builds the engine and
+  calls the packer. The extension's own frontend is that submodule, which cannot move.
+- Build: `scripts/prepare.mjs` (delegates the bundled package to the extension's own
+  `vscode-git-graph-rs/studio/build.mjs`), `scripts/build-plugins.bat` (builds the plugin's
+  VSIX independently of the app build, through the same packer)
 - Tests: `tests/extensions.test.ts` (pages, the process dispatch), `tests/editor.test.ts`
-  (the extpage tab), `src-tauri/tests/ext_process_host.rs` (the real
-  install→activate→command→stop chain over the demo binary)
+  (the extpage tab), `src-tauri/tests/graph_backend.rs` (the real
+  install→handshake→command→stop chain over the engine host and its `.node`)
 
 ### 13. CAN Trace Analyzer
 
@@ -416,6 +453,22 @@ Measurement is a feature. Sizes, boot stages, open-folder phases and theme contr
 measured and written to `metrics.json`. Size budgets are gone (removed 2026-09-15); the
 performance gate lives in `src-tauri/tests/perf.rs`.
 
+The **Module Self-Tests** are the in-app half of the test story: one click (Help → Run
+Module Self-Tests, or the `help.selfTest` command) opens a report page that runs every
+module's declared checks — grouped in module-map order — and streams pass / skip / fail per
+check. Structural checks (a button exists, its menu entry and palette row construct, its
+enablement answers) always run; live execution is limited to an explicit safe set (view
+switches, toggles, pure helpers) so a click in a real session never writes, spawns or
+dialogs. The runner (`src/selftest.ts`) times and streams each check with a per-check
+timeout; the suites (`src/selfTestSuites.ts`, a lazy chunk) declare the 17 module groups;
+the page (`src/selfTestPage.ts`) renders and copies the report. The same suites run in CI
+against the scripted backend (`tests/selfTest.test.ts`), so the in-app click and CI assert
+the identical checks.
+
+- Frontend: `src/selftest.ts` (the self-test runner: classification, timing, per-check
+  timeout, the Markdown report), `src/selfTestSuites.ts` (the 17 module groups' checks, a
+  lazy chunk), `src/selfTestPage.ts` (the report page: streaming rows, per-module re-run,
+  copy report)
 - Backend: `src-tauri/src/measure.rs` (headless `--measure` probes),
   `src-tauri/src/stage_bench.rs` (launch-stage timing), `src-tauri/tests/perf.rs`
   (synthetic repository benchmark; `GGS_PERF_FILES` sets the size, CI runs 20 000)
@@ -497,15 +550,14 @@ not a frontend framework — the rest of the page stays hand-written DOM.
 Everything that turns the source tree into installers: asset assembly into
 `target/studio/`, the seam checks, CI, and the Linux build containers.
 
-- Assets: `scripts/prepare.mjs` (assembles `target/studio/` and delegates every bundled
-  package to its plugin's own packer), `plugins/git-graph-rs/bundle.mjs` (the plugin's page
-  bundles), `scripts/*-stub.cjs` (the `vscode` / Node stubs the page bundles build against;
-  `hex-fs-stub.cjs` lazily proxies the hex machinery's `fs` calls to the page bridge's
-  adapters), `vite.config.ts`
+- Assets: `scripts/prepare.mjs` (assembles `target/studio/` and delegates the bundled
+  package to the extension's own packer, `vscode-git-graph-rs/studio/build.mjs` — the page
+  bundles and their `vscode` / Node / `fs` stubs live there too, in the submodule),
+  `vite.config.ts`
 - Seam checks: `scripts/check-seams.mjs` (TypeScript / CSS) and `src-tauri/build.rs` (Rust)
 - Packaging: `scripts/build-studio.bat` (Windows, one command; builds `git-graph-backend`
   through `prepare.mjs` as part of that). `scripts/build-plugins.bat` builds every plugin's
-  `.ggx` under `plugins/` on its own, without the app installer — useful when only a plugin
+  VSIX on its own, without the app installer — useful when only the plugin package
   changed. Linux installers are built
   in floor containers — the base image IS the compatibility floor: `ubuntu:22.04`
   (glibc 2.35) for the deb, `fedora:38` (glibc 2.37) for the rpm. CI (`studio.yml`) runs
@@ -535,7 +587,7 @@ Everything that turns the source tree into installers: asset assembly into
    three or more modules usually means a missing command or backend service — design that
    first.
 2. Read the module's existing files and its test file; match their structure and naming.
-3. Check `docs/crabcode-development-plan.md` §3 for a principle that constrains the approach, and
+3. Check `docs/ggs-development-plan.md` §3 for a principle that constrains the approach, and
    §5 for a milestone that already scopes the work.
 
 ### While changing
@@ -578,7 +630,7 @@ contained. The build enforces the first two; reviewers enforce the rest.
 The app names nothing of any extension: the patterns `graph_request`, `gitgraph/`,
 `GitGraphStudioConfig`, `out.min` and `web/styles` may not appear anywhere under
 `src/` or `static/` (moved 2026-09-23: the two seam files were deleted with the native
-graph host). The Git Graph view is the plugin's own page, served over `ggx://` and hosted by
+graph host). The Git Graph view is the plugin's own page, served over `ggs://` and hosted by
 the generic extension platform; the app's only interface is the page/commands surface of
 `extHost.ts`. The check runs on every `prepare.mjs`, every Vite build and dev-server
 start, and as vitest's global setup.
@@ -587,19 +639,25 @@ start, and as vitest's global setup.
 Nothing under `src-tauri/src/` may name the `git-graph-core` crate — `build.rs` scans
 everything under `src/` and fails the build on any reference. The engine, the view's write
 path and the Gerrit pipeline live in the plugin's own binary sources
-(`plugins/git-graph-rs/src/`, behind the `engine` Cargo feature). Engine work belongs in
-the plugin's modules (`engine_impl.rs` for `git-graph-core` calls, `writes.rs`/`gerrit.rs`
-for the git-CLI halves) — never back in the app's `src/`.
+(`src-tauri/src/engine_host/`, behind the `engine` Cargo feature). Engine work belongs in
+that module (`engine.rs`/`engine_impl.rs` for the C ABI into the package's
+`git-graph.node`, `writes.rs`/`gerrit.rs` for the git-CLI halves) — never back in the app's
+other `src/` modules.
 
-**The engine runs as its own process; `git-graph-studio` never links it.**
-`git-graph-core` is reachable only via the `engine` Cargo feature, which only
-`git-graph-backend`'s (`plugins/git-graph-rs/`) `required-features` turns on — the
-app's own binary (`desktop` feature) never enables it (verify with `cargo tree -e normal` on
-a default build). Reads still never spawn a process per call — the backend is a long-lived,
-warm sibling process (`ext_process.rs` keeps every declared backend running; `backend_rpc.rs`'s
-`ggx-rpc/1`, thread-per-request), reached over a pipe, not launched fresh each time. Writes
-still never spawn `git` anywhere except `src-tauri/src/git.rs`; the panel's Git channel is fed
-from that single runner, and the write path stays entirely in the app process.
+**The engine runs as its own process; no binary in this tree links it.**
+Since 2026-09-24 the engine ships one way only: the package's `git-graph.node` — the single
+engine binary the editor's Node runtime `require`s and the app's engine host loads over its C
+ABI (`git_graph_capi_request`, the addon's single JSON dispatch surface). The VSIX carries that
+one file; `git-graph-backend` (the `engine` Cargo feature, an app sidecar beside the main
+binary) is the host that serves it — it links no engine crate, and neither does anything else
+(`cargo tree -e normal` finds `git-graph-core` nowhere). A package declares it with
+`backend: { "kind": "node", "host": "git-graph-backend", "command": "native/<platform>/git-graph.node" }`;
+`ext_process.rs` spawns the sidecar with the `.node` as its first argument. Reads still never
+spawn a process per call — the backend is a long-lived, warm sibling process
+(`ext_process.rs` keeps every declared backend running; `ext_protocol.rs`'s `ggs-ext/1`,
+thread-per-request), reached over a pipe, not launched fresh each time. Writes still never
+spawn `git` anywhere except `src-tauri/src/git.rs`; the panel's Git channel is fed from that
+single runner, and the write path stays entirely in the app process.
 
 **One module, one responsibility.**
 A source file belongs to exactly one module and the map is the contract. If a file does not
@@ -642,8 +700,8 @@ Tests mirror the modules.
 Conventions:
 
 - A new module adds `tests/<module>.test.ts`; a changed module extends its existing file.
-- Module stubs `scripts/empty-stub.cjs`, `scripts/path-stub.cjs`, `scripts/vscode-stub.cjs`
-  stand in for Node and `vscode` in the bundles the tests and build load.
+- The extension's page-bundle stubs (`vscode` / Node / `fs` shims) live with its packer, in
+  the submodule's `vscode-git-graph-rs/studio/stubs/`.
 - Backend tests must not depend on the developer's global git configuration or on network
   access; use `test_support.rs`.
 - Do not weaken a sweep or budget test to make a change pass. If a `tests/perf.rs` budget
@@ -690,13 +748,13 @@ Conventions:
 
 | Topic | Where |
 | ----- | ----- |
-| Architecture principles | `docs/crabcode-development-plan.md` §3 |
-| Hard acceptance targets for 1.0 | `docs/crabcode-development-plan.md` §4 |
-| Milestones and task breakdown | `docs/crabcode-development-plan.md` §5 |
-| Size playbook / performance budgets | `docs/crabcode-development-plan.md` §6–7, `scripts/measure.mjs` |
-| `.ggx` package format and extension host | `docs/crabcode-development-plan.md` §8, `README.md` → *Extensions* |
-| Quality and release process | `docs/crabcode-development-plan.md` §9 |
-| `~/.ggs/` layout | `docs/crabcode-development-plan.md` Appendix B |
+| Architecture principles | `docs/ggs-development-plan.md` §3 |
+| Hard acceptance targets for 1.0 | `docs/ggs-development-plan.md` §4 |
+| Milestones and task breakdown | `docs/ggs-development-plan.md` §5 |
+| Size playbook / performance budgets | `docs/ggs-development-plan.md` §6–7, `scripts/measure.mjs` |
+| VSIX package format and extension host | `README.md` → *Extensions* |
+| Quality and release process | `docs/ggs-development-plan.md` §9 |
+| `~/.ggs/` layout | `docs/ggs-development-plan.md` Appendix B |
 | Repository layout | `README.md` → *Layout* |
 | Seam rules, as code | `scripts/check-seams.mjs`, `src-tauri/build.rs` |
 | Engine API contract | `vscode-git-graph-rs/native/core/src/api.rs` (`git_graph_core::Engine`) |

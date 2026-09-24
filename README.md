@@ -3,15 +3,17 @@
 A standalone desktop app in the shape of a small VS Code-like shell: an Explorer file tree
 with git status colouring, a Source Control panel (stage / unstage / discard / commit), an
 editor with tabs, a built-in terminal (ConPTY on Windows) — and an extension platform whose
-packages arrive as self-contained `.ggx` files (pages plus an optional process backend),
-installed from the Extensions view, contributing commands to the palette and menus, running
-their backends as warm sibling processes. The shell names no plugin: everything of the Git
+packages are the store's own `.vsix` files (whose `package.json` may declare the Studio
+capabilities under a `ggs` key: pages, a process backend, or an engine `.node` served over
+its C ABI) — installed from the Extensions view (which also searches the **marketplace**:
+Open VSX, the open-source registry the VS Code ecosystem publishes to — one-click install
+and update, every package going through the same install rules a picked `.vsix` takes),
+contributing commands to the palette and
+menus, running their backends as warm sibling processes. The shell names no plugin: everything of the Git
 Graph view — the engine (the `vscode-git-graph-rs/` submodule's `native/core`), the view's
 write path, its webview page and its comparison pages — lives in the **git-graph-rs** plugin
-(`plugins/git-graph-rs/`, one-click installable from the Extensions view), and the app's own
-git reads and writes run the `git` CLI with no plugin installed. The **GGX Demo** ships
-beside it — the format's worked example, the template new plugins (human- or AI-authored)
-start from (`plugins/ggs-ext-demo/`, its README is the authoring guide).
+(its own standard VSIX build, one-click installable from the Extensions view), and the app's own
+git reads and writes run the `git` CLI with no plugin installed.
 
 Code navigation rides a persistent symbol index (Source Insight's model): the workspace's
 declarations and their occurrences indexed once under `~/.ggs/index/`, resumed on open and
@@ -81,7 +83,7 @@ git-graph-studio/
 │       ├── boot-bench.mjs       end-to-end startup latency of the release exe
 │       └── cdp-*.mjs            live inspection over WebView2's CDP port
 │
-├── docs/                    crabcode-development-plan.md — the development plan
+├── docs/                    ggs-development-plan.md — the development plan
 ├── .github/workflows/       studio.yml (CI) · release.yml (tag → GitHub Release)
 └── vscode-git-graph-rs/     the git-graph-rs VS Code extension, a git submodule tracking its
                              repository's main branch: the engine crate the app links

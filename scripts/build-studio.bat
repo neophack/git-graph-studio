@@ -1,15 +1,15 @@
 @echo off
 setlocal
 rem Build Git Graph Studio (the Tauri app this repository is) plus its extension package:
-rem the app installer and the git-graph-rs .ggx the installer carries as a resource (the app
+rem the app installer and the git-graph-rs VSIX the installer carries as a resource (the app
 rem installs that package on first launch, like VS Code ships its bundled extensions). The
-rem engine (git-graph-core) links only into git-graph-backend, plugins\git-graph-rs\ -
-rem never into the app itself - and rides inside the .ggx as its process backend;
+rem engine host links nothing - it loads the package's git-graph.node over its C ABI -
+rem never into the app itself - and rides inside the VSIX as its engine .node;
 rem scripts\prepare.mjs (step 3 below) builds that binary and packs it in. To build every
-rem plugin's .ggx on its own, without the app installer, use scripts\build-plugins.bat instead.
+rem plugin's VSIX on its own, without the app installer, use scripts\build-plugins.bat instead.
 rem Usage:
 rem   scripts\build-studio.bat          release build, installers in target\studio\cargo\release\bundle
-rem                                      plugin package in target\studio\bundled\ (git-graph-rs-<v>.ggx)
+rem                                      plugin package in target\studio\bundled\app-resources\extensions\ (git-graph-rs.vsix)
 rem   scripts\build-studio.bat dev      run the app in dev mode
 rem   scripts\build-studio.bat debug    cargo debug build of the Tauri backend
 
@@ -42,12 +42,12 @@ if errorlevel 1 goto :fail
 if "%~1"=="dev" goto :devmode
 if "%~1"=="debug" goto :debugmode
 
-echo [4/4] Building release installers (the git-graph-rs .ggx rides along as a resource)
+echo [4/4] Building release installers (the git-graph-rs VSIX rides along as a resource)
 call npx tauri build
 if errorlevel 1 goto :fail
 echo.
 echo Done. Installers are in target\studio\cargo\release\bundle\
-echo       The git-graph-rs plugin package: target\studio\bundled\git-graph-rs-*.ggx
+echo       The git-graph-rs plugin package: target\studio\bundled\app-resources\extensions\git-graph-rs.vsix
 echo       (also installable by hand from the Extensions view)
 goto :end
 

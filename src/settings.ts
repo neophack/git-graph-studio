@@ -69,7 +69,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	minimap: true, stickyScroll: false, bracketColors: true,
 	mouseWheelScrollSensitivity: 1, fastScrollSensitivity: 4,
 	fontSize: 14, tabSize: 4, wordWrap: false, snippetSuggestions: true, pathCompletion: true,
-	fileAssociations: ['blf', 'asc', 'ggx', 'bin', 'hex'],
+	fileAssociations: ['blf', 'asc', 'bin', 'hex'],
 	explorerContextMenu: true,
 	linuxDmabuf: 'auto',
 	density: 'comfortable',

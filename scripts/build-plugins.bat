@@ -1,18 +1,14 @@
 @echo off
 setlocal
-rem Builds every .ggx plugin under plugins/ independently of the app build: each plugin's own
-rem Cargo [[bin]] (src-tauri/Cargo.toml), then its own packer. `ggs` (this script, and
-rem scripts/prepare.mjs) never reaches into a plugin's sources directly - git-graph-rs's
-rem packer (plugins/git-graph-rs/build.mjs) is the only thing that reads the
-rem vscode-git-graph-rs submodule; this script only calls it. Needs the app's own webview
-rem assets prepared first (git-graph-rs's packer reads target\studio\public\gitgraph\, which
-rem only scripts\prepare.mjs assembles), so this script runs that too.
+rem Builds the extension's VSIX independently of the app build. The package is the
+rem extension's own standard build (vscode-git-graph-rs "npm run package" - the same VSIX
+rem the VS Code Marketplace serves; the app carries no plugin code); this script reaches it
+rem through prepare.mjs, which builds the engine host and the engine .node first.
 rem
 rem Usage:
-rem   scripts\build-plugins.bat     builds git-graph-rs + ggs-ext-demo, packs both .ggx
+rem   scripts\build-plugins.bat     builds git-graph-rs and packs its VSIX
 rem
-rem Output: target\studio\bundled\git-graph-rs-<version>.ggx
-rem         target\studio\bundled\ggs-ext-demo-<version>.ggx
+rem Output: target\studio\bundled\app-resources\extensions\git-graph-rs.vsix
 
 rem The script lives in scripts\; everything else expects the repository root.
 cd /d "%~dp0.."
@@ -22,27 +18,15 @@ if errorlevel 1 goto :nocargo
 where node >nul 2>nul
 if errorlevel 1 goto :nonode
 
-echo [1/3] Preparing the app's webview assets (target\studio) - also builds plugins\git-graph-rs
-echo       and packs it (scripts\prepare.mjs does both, via plugins\git-graph-rs\build.mjs)
+echo [1/1] Preparing target\studio - builds the engine host and the engine .node, then
+echo       packs the standard VSIX via the extension's own build (prepare.mjs calls it)
 if not exist node_modules call npm install
 if errorlevel 1 goto :fail
 call npm run prepare:assets
 if errorlevel 1 goto :fail
 
-echo [2/3] Building plugins\ggs-ext-demo
-cd src-tauri
-cargo build --release --bin ggs-ext-demo --no-default-features
-if errorlevel 1 goto :fail
-cd ..
-
-echo [3/3] Packing plugins\ggs-ext-demo\ into ggs-ext-demo.ggx
-node plugins\ggs-ext-demo\build.mjs --bin target\studio\cargo\release\ggs-ext-demo.exe
-if errorlevel 1 goto :fail
-
 echo.
-echo Done. Plugin packages are in target\studio\bundled\
-echo       git-graph-rs-*.ggx   (plugins\git-graph-rs\, packed via prepare.mjs)
-echo       ggs-ext-demo-*.ggx   (plugins\ggs-ext-demo\)
+echo Done. The extension package is in target\studio\bundled\app-resources\extensions\git-graph-rs.vsix
 goto :end
 
 :nocargo

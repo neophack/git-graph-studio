@@ -171,6 +171,7 @@ export type EditorInput =
 	| { kind: 'symboldb'; id: string }
 	| { kind: 'analysis'; id: string; tool: import('./analysisTools').AnalysisToolId }
 	| { kind: 'help'; help: 'welcome' | 'shortcuts' }
+	| { kind: 'selftest'; id: string }
 	| { kind: 'markdown'; path: string }
 	| { kind: 'history'; path: string }
 	| { kind: 'hex'; path: string }
@@ -245,6 +246,7 @@ function inputId(input: EditorInput): string {
 		case 'extdetail': return input.id;
 		case 'calltree': return 'calltree:' + input.id;
 		case 'help': return 'help:' + input.help;
+		case 'selftest': return input.id;
 		case 'markdown': return 'markdown:' + input.path;
 		case 'history': return 'history:' + input.path;
 		case 'hex': return 'hex:' + input.path;
@@ -385,6 +387,8 @@ export class EditorGroup {
 	}
 	/** Fills a help page's pane (the welcome page, the keyboard shortcuts reference). */
 	renderHelp: ((help: 'welcome' | 'shortcuts', container: HTMLElement) => void) | null = null;
+	/** Fills the Module Self-Tests pane (the report page mounts itself, lazily). */
+	renderSelfTest: ((container: HTMLElement) => void) | null = null;
 	/** A tab was activated or the group was clicked: the editor area focuses it (M3 3.1). */
 	onFocus: (() => void) | null = null;
 	/** The tab strip's preview button was clicked: the editor area opens the preview beside
@@ -1811,6 +1815,29 @@ export class EditorGroup {
 		this.add(editor);
 	}
 
+	/** The Module Self-Tests report (module 14): one tab, re-activated when open, whose pane
+	 *  the workbench fills through `renderSelfTest` (the page itself is a lazy chunk). */
+	openSelfTest(): void {
+		const id = 'selftest';
+		const existing = this.open.find((e) => e.id === id);
+		if (existing) {
+			this.activate(existing);
+			return;
+		}
+		const editor: Editor = {
+			input: { kind: 'selftest', id },
+			id,
+			label: 'Module Self-Tests',
+			iconClass: 'checklist',
+			pane: el('div', 'editor-pane'),
+			dirty: false
+		};
+		const page = el('div', 'selftest-page');
+		editor.pane.appendChild(page);
+		this.renderSelfTest?.(page);
+		this.add(editor);
+	}
+
 	private add(editor: Editor, activate = true): void {
 		// A parallel open of the same target passed the "already open" check while this one
 		// was still awaiting its reads: the tab that landed first wins, and the latecomer's
@@ -1951,7 +1978,7 @@ export class EditorGroup {
 		this.add(editor);
 	}
 
-	/** An extension page tab (module 12): a `ggx` package's page in a sandboxed iframe, the
+	/** An extension page tab (module 12): a `ggs` package's page in a sandboxed iframe, the
 	 *  counterpart of VS Code's webview panels. Each open is its own instance (the caller's
 	 *  id carries a serial); `mount` builds the content and returns its disposer, run on
 	 *  close — the extension host owns the frame, the editor owns the tab's lifetime. */
