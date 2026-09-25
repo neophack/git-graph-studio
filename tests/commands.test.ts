@@ -149,8 +149,20 @@ describe('every command of the workbench', () => {
 		// The baked-in git-graph-rs manifest declares commands the app does not host natively
 		// (fetch, addGitRepository, ...): like every extension-declared command without a
 		// running handler, they stay disabled - expected skips, not coverage the sweep lost.
-		const swept = skipped.filter((id) => !id.startsWith('git-graph-rs.'));
-		expect(swept.length, `skipped: ${swept.join(', ')}`).toBeLessThan(6);
+		// Six workbench commands are legitimately disabled in this exact workspace - a clean
+		// plain-text file (save/saveAll have nothing dirty, markdown preview needs markdown,
+		// gotoSymbolInFile needs an outline) plus initRepository (a repository is open):
+		// VS Code disables them here too. Everything else must be swept.
+		const contextual = new Set([
+			'workbench.save',
+			'workbench.saveAll',
+			'markdown.showPreview',
+			'markdown.showPreviewToSide',
+			'workbench.gotoSymbolInFile',
+			'git.initRepository'
+		]);
+		const swept = skipped.filter((id) => !id.startsWith('git-graph-rs.') && !contextual.has(id));
+		expect(swept, `skipped: ${swept.join(', ')}`).toEqual([]);
 	});
 
 	it('menus name registered commands only, and keybindings are unique', async () => {
