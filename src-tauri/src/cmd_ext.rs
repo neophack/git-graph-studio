@@ -122,8 +122,8 @@ pub struct StudioPage {
 #[serde(rename_all = "camelCase")]
 pub struct BackendDecl {
     /// `process` — the package's own binary, spawned directly — or `node` — the package's
-    /// engine `.node` (the same single engine binary the editor's Node runtime loads), served
-    /// by the app-bundled engine host the `host` field names, which loads it over its C ABI.
+    /// engine `.node` (the same single engine binary the editor's Node runtime loads),
+    /// hosted by `ggs-node`, whose N-API host loads it in-process.
     pub kind: String,
     /// The binary to run, relative to the package root (absolute is allowed: it is how the
     /// tests aim at a helper binary). Always present, even when `binaries` is too: it is the
@@ -132,15 +132,6 @@ pub struct BackendDecl {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
-    /// `kind: "node"` only: the app-bundled host exe to spawn — `git-graph-backend` (the
-    /// engine `.node` over its C ABI) or `ggs-node` (the pretend Node runtime that runs the
-    /// package's own JS entry). Absent, the command's shape decides: a `.node` is the
-    /// engine's to serve, anything else is a JS entry for `ggs-node`. The name comes from
-    /// the package when declared, never from this app's own code — and only a host that
-    /// ships beside the app ever runs, so a package cannot smuggle an executable in
-    /// through this field.
-    #[serde(default)]
-    pub host: Option<String>,
     /// The wire protocol the backend speaks. Only `ggs-ext/1` exists — the one protocol,
     /// concurrent on the plugin side (`ext_protocol.rs`), so a command-style plugin and a
     /// burst-answering engine plug in identically. The field is still read so a package
@@ -1819,7 +1810,7 @@ fn resolve_node_binaries(
                 kind: "node".to_owned(),
                 command: node.clone(),
                 args: Vec::new(),
-                host: Some("ggs-node".to_owned()),
+
                 protocol: None,
                 binaries: Some(std::collections::BTreeMap::from([(platform, node)])),
             }));
@@ -1843,7 +1834,7 @@ fn resolve_node_binaries(
         kind: "node".to_owned(),
         command: main.to_owned(),
         args: Vec::new(),
-        host: Some("ggs-node".to_owned()),
+
         protocol: None,
         binaries: None,
     }))
@@ -2674,14 +2665,15 @@ mod install_tests {
         let capabilities = info.capabilities.expect("the derived manifest");
         let backend = capabilities.backend.expect("the derived backend");
         assert_eq!(backend.kind, "node");
-        assert_eq!(backend.host.as_deref(), Some("ggs-node"));
         assert_eq!(backend.command, "./out/ext.js");
     }
 
     #[test]
     fn an_engine_package_declaring_its_node_installs_despite_the_binaries() {
         // The opt-in path: the `.node` declared under ggs.backend (kind "node") is the
-        // engine C ABI channel, and the recognition must not refuse exactly that package.
+        // engine binary the host serves, and the recognition must not refuse exactly that
+        // package. The retired `host` spelling stays in the fixture on purpose: older
+        // packed manifests still name it, and unknown fields are ignored on read.
         let node = engine_node_fixture();
         let tmp = tempfile::tempdir().unwrap();
         let exts = tmp.path().join("extensions");
@@ -2855,7 +2847,7 @@ mod install_tests {
             kind: "process".to_owned(),
             command: "bin/main".to_owned(),
             args: Vec::new(),
-            host: None,
+
             protocol: None,
             binaries: None,
         };
@@ -3511,7 +3503,6 @@ mod backend_derivation_tests {
             .unwrap()
             .expect("a backend");
         assert_eq!(derived.kind, "node");
-        assert_eq!(derived.host.as_deref(), Some("ggs-node"));
         assert_eq!(
             derived.command_for(&host_platform_key()),
             "native/win32-x64-msvc/git-graph.node"
@@ -3540,7 +3531,6 @@ mod backend_derivation_tests {
             .unwrap()
             .expect("a backend");
         assert_eq!(derived.command, "./out/extension.js");
-        assert_eq!(derived.host.as_deref(), Some("ggs-node"));
         assert!(derived.binaries.is_none());
     }
 

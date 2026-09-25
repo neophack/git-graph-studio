@@ -9,10 +9,11 @@
 //! serves the VSIX extensions installed from the Extensions view.
 
 //! The crate is a library plus the binaries `Cargo.toml` declares: `git-graph-studio` (the
-//! Tauri app, the `desktop` feature) and `git-graph-backend` (the `engine` feature, the
-//! generic engine-node host — it links no engine crate, it loads a package's `.node` over
-//! its C ABI). The modules that need no window — the wire protocols and the git
-//! runner `git` — are always compiled; everything that needs a window is behind `desktop`.
+//! Tauri app, the `desktop` feature) and `ggs-node` (the `node-runtime` feature, the
+//! pretend Node runtime that hosts a package's JS entry — and, over its N-API host, the
+//! package's `.node` addon). The modules that need no window — the wire protocols and the
+//! git runner `git` — are always compiled; everything that needs a window is behind
+//! `desktop`.
 
 pub mod ext_protocol;
 

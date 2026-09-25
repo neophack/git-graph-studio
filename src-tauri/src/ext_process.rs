@@ -851,13 +851,13 @@ fn synthesize_extension_host_backend_with(
         kind: "node".to_owned(),
         command: main.to_owned(),
         args: Vec::new(),
-        host: None,
+
         protocol: None,
         binaries: None,
     })
 }
 
-/// The app-bundled engine host a `node` backend names (`git-graph-backend`): beside the app's
+/// The app-bundled `node`-backend host (`ggs-node`): beside the app's
 /// own binary first (the installer resources place the two together, and cargo's output
 /// directory holds both during a build), one profile up second (a dev run executes from
 /// `debug/` while `prepare.mjs` builds the host into `release/`), and exactly where
@@ -916,12 +916,11 @@ mod engine_host_tests {
     };
     use crate::cmd_ext::BackendDecl;
 
-    fn node_backend(host: Option<&str>) -> BackendDecl {
+    fn node_backend() -> BackendDecl {
         BackendDecl {
             kind: "node".to_owned(),
             command: "out/main.js".to_owned(),
             args: Vec::new(),
-            host: host.map(str::to_owned),
             protocol: None,
             binaries: None,
         }
@@ -941,11 +940,8 @@ mod engine_host_tests {
     /// `host.env` listener exists. A process backend (no vscode program) boots as always.
     #[test]
     fn a_node_backend_starts_with_the_workbench_on_either_host() {
-        assert!(deferred_to_the_workbench(&node_backend(None)));
-        // The explicit `ggs-node` spelling is the same default.
-        assert!(deferred_to_the_workbench(&node_backend(Some("ggs-node"))));
-        // A process backend never defers.
-        let mut process = node_backend(Some("git-graph-backend"));
+        assert!(deferred_to_the_workbench(&node_backend()));
+        let mut process = node_backend();
         process.kind = "process".to_owned();
         assert!(!deferred_to_the_workbench(&process));
     }
@@ -967,7 +963,6 @@ mod engine_host_tests {
         let backend = synthesize_extension_host_backend_with(tmp.path(), true, true).unwrap();
         assert_eq!(backend.kind, "node");
         assert_eq!(backend.command, "./out/extension.js");
-        assert_eq!(backend.host, None);
         // A package without a `main` falls to Node's own default entry.
         std::fs::write(tmp.path().join("package.json"), br#"{"name":"x"}"#).unwrap();
         let fallback = synthesize_extension_host_backend_with(tmp.path(), true, true).unwrap();

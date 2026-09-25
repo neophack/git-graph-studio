@@ -99,7 +99,7 @@ export interface StudioManifest {
 	 *  `protocol` names the one wire protocol (`ggs-ext/1` when absent; anything else fails
 	 *  the start with an upgrade hint); `binaries` is the per-platform command map, when the
 	 *  package carries more than one platform's binary. */
-	backend?: { kind: string; command: string; args?: string[]; host?: string; protocol?: string; binaries?: Record<string, string> } | null;
+	backend?: { kind: string; command: string; args?: string[]; protocol?: string; binaries?: Record<string, string> } | null;
 	/** `ggs/2`: an activity-bar launcher — an icon (package-relative) whose click runs one of
 	 *  the package's declared commands (typically its view page's opener). */
 	activitybar?: { command: string; title?: string | null; icon?: string | null } | null;

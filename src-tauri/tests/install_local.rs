@@ -50,14 +50,7 @@ fn install_the_local_test_vsix_files_into_the_real_extensions_dir() {
                     .capabilities
                     .as_ref()
                     .and_then(|capabilities| capabilities.backend.as_ref())
-                    .map(|backend| {
-                        format!(
-                            "{} -> {} (host {})",
-                            backend.kind,
-                            backend.command,
-                            backend.host.as_deref().unwrap_or("<default>")
-                        )
-                    })
+                    .map(|backend| format!("{} -> {}", backend.kind, backend.command))
                     .unwrap_or_else(|| "no backend".to_owned());
                 eprintln!("installed {}: {backend}", info.id);
             }

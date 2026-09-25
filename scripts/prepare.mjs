@@ -172,7 +172,7 @@ if (nodeRuntimeBin) {
 }
 
 /* The engine `.node`: the submodule's addon build, cached by cargo underneath. The VSIX
- * carries this one file as its whole engine; the app's bundled host loads it over the C ABI.
+ * carries this one file as its whole engine; ggs-node's N-API host loads it in-process.
  * Skipped under `--vsix` — the substituted package carries its own engine. */
 const externalVsix = (() => {
 	const flag = process.argv.indexOf('--vsix');
