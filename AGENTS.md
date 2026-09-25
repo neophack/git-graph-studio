@@ -424,7 +424,8 @@ nothing.
   it cannot (`net`), so a `require` of them never kills an activation),
   `src/editorDiagnostics.ts` (the diagnostics store: the host's
   `languages.createDiagnosticCollection` entries land as CodeMirror squiggles in the open
-  editors),
+  editors) + `src/editorDiagnosticsView.ts` (the CodeMirror half, loaded with the editor
+  suite so the lint library stays off the first-paint bundle),
   `src/treeView.ts` (the generic tree view host — the sidebar
   surface `contributes.views` declares and `createTreeView` feeds),
   `src/contributions.ts` (manifest contributions merged into the workbench; the manifest

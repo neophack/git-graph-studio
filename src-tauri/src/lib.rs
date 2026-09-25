@@ -1365,10 +1365,15 @@ mod desktop {
                 stamp("setup entered");
                 // The `ggs` launcher's reachability: append the install directory to the
                 // user PATH (idempotent, no length limits - the NSIS hooks no longer write
-                // PATH; see cmd_assoc::user_path_apply for the wipe they caused).
-                if let Err(reason) = cmd_assoc::user_path_apply() {
-                    eprintln!("[boot] user PATH apply: {reason}");
-                }
+                // PATH; see cmd_assoc::user_path_apply for the wipe they caused). It runs
+                // on the boot thread, off the window's critical path: its WM_SETTINGCHANGE
+                // broadcast waits on every top-level window in the session, which on a
+                // loaded desktop stalls the setup for hundreds of milliseconds.
+                std::thread::spawn(|| {
+                    if let Err(reason) = cmd_assoc::user_path_apply() {
+                        eprintln!("[boot] user PATH apply: {reason}");
+                    }
+                });
 
                 // "Install means run" (plan §8.2): every installed package that declares a
                 // backend comes up with the app, without waiting for its first command, and

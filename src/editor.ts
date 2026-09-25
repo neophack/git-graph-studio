@@ -9,7 +9,7 @@ import type { MergeView } from '@codemirror/merge';
 import { invoke } from '@tauri-apps/api/core';
 
 import { hasBookmark, toggleBookmark } from './bookmarks';
-import { diagnosticsExtension } from './editorDiagnostics';
+import { diagnosticsExtension } from './editorDiagnosticsView';
 import { loadAnalysisPages, loadCanViews, loadCallTree, loadFastView, loadFileHistory, loadFolderCompare, loadHexCompare, loadHexView, loadMerge, loadMergeEditor, loadSnippetRegistry, loadSymbolDbView, loadTextEditor } from './lazy';
 // The hex and CAN views are async chunks (lazy.ts): a binary or a CAN trace is the exception
 // among opens, and their code would otherwise ride in the first-paint bundle. The fast

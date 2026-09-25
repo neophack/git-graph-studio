@@ -93,16 +93,18 @@ function launch(exe) {
 }
 
 /** A compile or a test run elsewhere on the machine would be measured as app latency: wait
- *  until no such process is running and the CPU has been quiet for two samples. */
+ *  until no such process is running and the CPU has been quiet for two samples. Only real
+ *  compilers count as busy processes — a standing dev server's idle esbuild service lives
+ *  for days and would wait forever; the CPU check covers active work regardless of name. */
 async function waitForQuietMachine() {
 	if (process.platform !== 'win32') return;
-	const busyNames = ['rustc.exe', 'cargo.exe', 'link.exe', 'lld-link.exe', 'vitest', 'tsc', 'esbuild.exe'];
+	const busyNames = ['rustc', 'cargo', 'link', 'lld-link'];
 	let quietSamples = 0;
 	let waited = 0;
 	while (quietSamples < 2 && waited < 30 * 60_000) {
-		const out = spawnSync('powershell', ['-NoProfile', '-Command', '$load = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average; $names = (Get-Process | Select-Object -ExpandProperty ProcessName) -join ","; "$load|$names"'], { encoding: 'utf8' });
-		const [load, names] = (out.stdout ?? '0|').trim().split('|');
-		const busy = busyNames.some((name) => names.split(',').includes(name.replace(/\.exe$/, '')));
+		const out = spawnSync('powershell', ['-NoProfile', '-Command', '$load = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average; $names = ((Get-Process | Select-Object -ExpandProperty ProcessName -ErrorAction SilentlyContinue) -join ","); "$load|$names"'], { encoding: 'utf8' });
+		const [load, names = ''] = (out.stdout ?? '0|').trim().split('|');
+		const busy = busyNames.some((name) => names.split(',').includes(name));
 		if (!busy && Number(load) < 30) {
 			quietSamples++;
 			await new Promise((r) => setTimeout(r, 1000));
