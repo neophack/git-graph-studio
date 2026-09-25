@@ -1374,12 +1374,12 @@ mod desktop {
                 // the whole set is told the app's open folders — a backend that keeps
                 // per-workspace state (the graph engine's warm repository handle) acts on it,
                 // the rest answer and forget. Off the main thread — a slow handshake must
-                // never hold the window back — and best-effort: a package that fails to start
-                // holds the error in its status, not the boot. Nothing installs by default:
-                // the bundled packages are offers the Extensions view lists (cmd_ext scans
-                // the installer's extensions/ directory), not boot-time installs; the
-                // refresh only brings installed ones current, so a deliberate uninstall
-                // stays uninstalled.
+                // never hold the window back — and best-effort: a failure is held in the
+                // status, not the boot.
+                // The bundled package auto-installs on first launch:
+                // the installer carries it, the first run makes it a standard uninstallable
+                // install; its Extensions-view entry remains for reinstalls, and a
+                // deliberate uninstall is remembered and never undone.
                 {
                     let handle = app.handle().clone();
                     std::thread::spawn(move || {
@@ -1387,6 +1387,19 @@ mod desktop {
                         let Ok(dir) = cmd_ext::extensions_dir(&handle) else {
                             return;
                         };
+                        // The bundled package installs on first launch — VS Code's
+                        // bundled-extensions behavior: the installer carries it, the first
+                        // run makes it a standard (uninstallable) install. A deliberate
+                        // uninstall left a dismissal marker and stays uninstalled; an
+                        // existing install is only brought current by the refresh below.
+                        for installed in cmd_ext::install_missing_bundled(&handle) {
+                            match installed {
+                                Ok(line) => cmd_ext::log_extensions(&line),
+                                Err(reason) => {
+                                    cmd_ext::log_extensions(&format!("bundled install failed: {reason}"))
+                                }
+                            }
+                        }
                         // An installed bundled package is brought current before anything
                         // starts from it: a newer bundled version upgrades it forward-only,
                         // the same version from an older build is refreshed by its recorded
@@ -1571,6 +1584,7 @@ mod desktop {
                 ext_child::ext_child_write,
                 ext_child::ext_child_end_stdin,
                 ext_child::ext_child_kill,
+                ext_child::ext_node_runtime_path,
                 ext_child::ext_child_stop_for,
                 cmd_search::search_workspace,
                 cmd_search::search_cancel,

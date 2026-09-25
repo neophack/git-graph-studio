@@ -71,8 +71,9 @@ shim.__ggsVscodeShimInstall = function (args: InstallArgs): InstalledVscode {
 				if (!handler) throw new Error(`no handler registered for ${command}`);
 				// A menu's context crosses the line as Uri-shaped data; the handler receives
 				// full Uris, the argument shape VS Code's own command dispatch guarantees.
-				const result = handler(...(rehydrateUris(Array.isArray(commandArgs) ? commandArgs : [commandArgs]) as unknown[]));
-				void result;
+				// The result returns — the runtime's dispatch settles it into the runCommand
+				// answer, a thenable included (an async handler's value waits, as in a frame).
+				return handler(...(rehydrateUris(Array.isArray(commandArgs) ? commandArgs : [commandArgs]) as unknown[]));
 			});
 		},
 		registerDocProvider: (scheme, provider) => docProviders.set(scheme, provider),

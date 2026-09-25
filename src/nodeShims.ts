@@ -185,6 +185,12 @@ const BufferHelper = {
 Object.assign(BufferImpl, {
 	from: (input: string | ArrayLike<number> | ArrayBuffer | Uint8Array | { data: number[]; type?: string }, encoding = 'utf8'): Buffer => {
 		if (typeof input === 'string') return BufferHelper.make(encodeString(input, encoding));
+		// A typed array from another realm (a Node TextEncoder's Uint8Array reaching code
+		// evaluated under jsdom) fails `instanceof` — duck-type the one thing a byte view
+		// is: numeric length plus `set`.
+		if (input && typeof input === 'object' && typeof (input as { length?: unknown }).length === 'number' && typeof (input as { set?: unknown }).set === 'function') {
+			return BufferHelper.make(input as unknown as Uint8Array);
+		}
 		if (input instanceof Uint8Array) return BufferHelper.make(input);
 		if (input instanceof ArrayBuffer) return BufferHelper.make(new Uint8Array(input));
 		if (Array.isArray(input)) return BufferHelper.make(new Uint8Array(input));
@@ -592,6 +598,26 @@ function inspectValue(value: unknown, depth = 2): string {
 
 const promisifyCustom = Symbol('util.promisify.custom');
 
+/** The errno names every shim surface that exposes constants answers (`constants`,
+ *  `os.constants.errno`): packages probe a name (`EBADF`) far more often than they trust
+ *  a number, and the numbers follow the errno convention where a number is read. */
+const ERRNO_TABLE: Record<string, number> = {
+	E2BIG: 7, EACCES: 13, EADDRINUSE: 98, EADDRNOTAVAIL: 99, EAFNOSUPPORT: 97, EAGAIN: 11,
+	EALREADY: 114, EBADF: 9, EBADMSG: 74, EBUSY: 16, ECANCELED: 125, ECHILD: 10,
+	ECONNABORTED: 103, ECONNREFUSED: 111, ECONNRESET: 104, EDEADLK: 35, EDESTADDRREQ: 89,
+	EDOM: 33, EDQUOT: 122, EEXIST: 17, EFAULT: 14, EFBIG: 27, EHOSTUNREACH: 113,
+	EIDRM: 43, EILSEQ: 84, EINPROGRESS: 115, EINTR: 4, EINVAL: 22, EIO: 5,
+	EISCONN: 106, EISDIR: 21, ELOOP: 40, EMFILE: 24, EMLINK: 31, EMSGSIZE: 90,
+	EMULTIHOP: 72, ENAMETOOLONG: 36, ENETDOWN: 100, ENETRESET: 102, ENETUNREACH: 101,
+	ENFILE: 23, ENOBUFS: 105, ENODATA: 61, ENODEV: 19, ENOENT: 2, ENOEXEC: 8,
+	ENOLCK: 37, ENOLINK: 67, ENOMEM: 12, ENOMSG: 42, ENOPROTOOPT: 92, ENOSPC: 28,
+	ENOSR: 63, ENOSTR: 60, ENOSYS: 38, ENOTCONN: 107, ENOTDIR: 20, ENOTEMPTY: 39,
+	ENOTSOCK: 88, ENOTSUP: 95, ENOTTY: 25, ENXIO: 6, EOPNOTSUPP: 95, EOVERFLOW: 75,
+	EPERM: 1, EPIPE: 32, EPROTO: 71, EPROTONOSUPPORT: 93, EPROTOTYPE: 91, ERANGE: 34,
+	EROFS: 30, ESPIPE: 29, ESRCH: 3, ESTALE: 116, ETIME: 62, ETIMEDOUT: 110,
+	ETXTBSY: 26, EWOULDBLOCK: 11, EXDEV: 18
+};
+
 const utilShim = {
 	format(format?: unknown, ...values: unknown[]): string {
 		if (typeof format !== 'string') return [format, ...values].map((value) => inspectValue(value)).join(' ');
@@ -608,6 +634,15 @@ const utilShim = {
 		}) + (at < values.length ? (values.length - at ? ' ' : '') + values.slice(at).map((value) => inspectValue(value)).join(' ') : '');
 	},
 	inspect: (value: unknown, options?: { depth?: number }) => inspectValue(value, options?.depth ?? 2),
+	// The legacy prototype chain helper: packages compiled against old TypeScript or
+	// relying on `util.inherits` at module-eval time (ms-python's tree sitter layer) call it
+	// eagerly, so it must exist, not throw.
+	inherits(ctor: { prototype: unknown; super_?: unknown }, superCtor: { prototype: unknown }): void {
+		if (ctor === undefined || ctor === null) throw new TypeError('The constructor to `inherits` must not be null or undefined.');
+		if (superCtor === undefined || superCtor === null) throw new TypeError('The super constructor to `inherits` must not be null or undefined.');
+		Object.setPrototypeOf(ctor.prototype as object, superCtor.prototype as object);
+		ctor.super_ = superCtor;
+	},
 	isArray: Array.isArray,
 	isBoolean: (v: unknown) => typeof v === 'boolean',
 	isNull: (v: unknown) => v === null,
@@ -837,6 +872,35 @@ function makeFs(host: ShimHost) {
 		const rel = extensionRelative(path, host);
 		return rel === null ? undefined : host.blobs?.[rel];
 	};
+	// `realpath`: the code map carries no symlinks, so the honest resolution of a package
+	// path is its own absolute spelling; anything else is Node's ENOENT. `.native` is the
+	// same function — there is no libuv binding here to differ from it, and
+	// `fs.realpath.native(...)` must answer (ms-python's path discovery reads it).
+	const realpathValue = (path: string): string => {
+		const rel = extensionRelative(path, host);
+		if (rel !== null && (rel === '' || host.files[rel] !== undefined || isBinary(rel, host) || host.blobs?.[rel] !== undefined || directoryEntries(rel, host) !== undefined)) {
+			return host.extensionPath.replace(/[\\/]+$/, '') + (rel === '' ? '' : '/' + rel);
+		}
+		throw fsError('ENOENT', `no such file or directory, realpath '${path}'`);
+	};
+	const realpath = ((path: string, cb?: (error: Error | null, resolved?: string) => void): unknown => {
+		if (typeof cb === 'function') {
+			try {
+				cb(null, realpathValue(path));
+			} catch (error) {
+				cb(error as Error);
+			}
+			return undefined;
+		}
+		return new Promise<string>((resolve, reject) => {
+			try {
+				resolve(realpathValue(path));
+			} catch (error) {
+				reject(error);
+			}
+		});
+	}) as never;
+	(realpath as { native: unknown }).native = realpath;
 
 	const fs = {
 		readFileSync: (path: string, encoding?: string | { encoding?: string }): string | Buffer => {
@@ -885,6 +949,8 @@ function makeFs(host: ShimHost) {
 			return stats;
 		},
 		lstatSync: (path: string) => fs.statSync(path),
+		realpathSync: (path: string): string => realpathValue(path),
+		realpath,
 		readdirSync: (path: string): string[] => {
 			const rel = extensionRelative(path, host);
 			const names = rel === null ? undefined : directoryEntries(rel, host);
@@ -905,6 +971,12 @@ function makeFs(host: ShimHost) {
 				(answer) => cb(null, ((answer as { name: string }[]) ?? []).map((entry) => entry.name)),
 				(error) => cb(fsError('ENOENT', String(error)))
 			);
+		},
+		lstat: (path: string, cb: (error: Error | null, stats?: unknown) => void) => fs.stat(path, cb),
+		access: (path: string, modeOrCb: number | ((error: Error | null) => void), maybeCb?: (error: Error | null) => void) => {
+			const cb = typeof modeOrCb === 'function' ? modeOrCb : maybeCb;
+			if (!cb) return;
+			fs.stat(path, (error) => cb(error ?? null));
 		},
 		stat: (path: string, cb: (error: Error | null, stats?: unknown) => void) => {
 			try {
@@ -986,6 +1058,19 @@ function makeFs(host: ShimHost) {
 		},
 		unlink: (path: string, cb: (error: Error | null) => void) => void host.bridge.request('fs.op', ['delete', path]).then(() => cb(null), (error) => cb(error as Error)),
 		rmdir: (path: string, cb: (error: Error | null) => void) => void host.bridge.request('fs.op', ['delete', path]).then(() => cb(null), (error) => cb(error as Error)),
+		/** `rm`/`rmdirSync`/`rmSync`: the modern removal spellings — `rmdirSync` is read
+		 *  off the fs object and `.bind`-ed at module-eval time (ms-python's temp layer),
+		 *  so the names must exist as functions even before any call. */
+		rm: (path: string, optionsOrCb?: { recursive?: boolean; force?: boolean } | ((error: Error | null) => void), maybeCb?: (error: Error | null) => void) => {
+			const cb = typeof optionsOrCb === 'function' ? optionsOrCb : maybeCb ?? (() => undefined);
+			void host.bridge.request('fs.op', ['delete', path]).then(() => cb(null), (error) => cb(error as Error));
+		},
+		rmSync: (path: string, _options?: { recursive?: boolean; force?: boolean }): void => {
+			void host.bridge.request('fs.op', ['delete', path]);
+		},
+		rmdirSync: (path: string): void => {
+			void host.bridge.request('fs.op', ['delete', path]);
+		},
 		copyFile: (from: string, to: string, cb: (error: Error | null) => void) => {
 			const text = mapFile(from);
 			if (text === undefined) return void cb(fsError('ENOENT', `no such file or directory, copy '${from}'`));
@@ -1023,10 +1108,34 @@ function makeFs(host: ShimHost) {
 			};
 		})() as never,
 		unwatchFile: (): void => undefined,
-		constants: { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1 },
+		constants: {
+			F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1,
+			O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, O_CREAT: 64, O_EXCL: 128, O_TRUNC: 512,
+			O_APPEND: 1024, O_SYNC: 4096, O_DIRECTORY: 65536, O_NOFOLLOW: 131072
+		},
 		promises: null as unknown
 	};
+	(fs.realpathSync as unknown as { native: unknown }).native = fs.realpathSync;
 	fs.promises = {
+		access: (path: string, _mode?: number) =>
+			new Promise<void>((resolve, reject) => {
+				fs.stat(path, (error) => (error ? reject(error) : resolve()));
+			}),
+		lstat: (path: string) =>
+			new Promise<unknown>((resolve, reject) => {
+				try {
+					resolve(fs.lstatSync(path));
+				} catch (error) {
+					reject(error);
+				}
+			}),
+		realpath: (path: string) => new Promise<string>((resolve, reject) => {
+			try {
+				resolve(realpathValue(path));
+			} catch (error) {
+				reject(error);
+			}
+		}),
 		readFile: (path: string, encoding?: string) => new Promise<unknown>((resolve, reject) => fs.readFile(path, encoding, (error, data) => (error ? reject(error) : resolve(data)))),
 		writeFile: (path: string, data: unknown) => new Promise<void>((resolve, reject) => fs.writeFile(path, data, (error) => (error ? reject(error) : resolve()))),
 		stat: (path: string) => new Promise<unknown>((resolve, reject) => {
@@ -1352,7 +1461,9 @@ function makeOs(host: ShimHost) {
 				STDIN_FILENO: 0, 
 				STDOUT_FILENO: 1, 
 				STDERR_FILENO: 2 
-			} 
+			},
+			errno: ERRNO_TABLE,
+			signals: { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGILL: 4, SIGABRT: 6, SIGFPE: 8, SIGKILL: 9, SIGSEGV: 11, SIGPIPE: 13, SIGTERM: 15 }
 		}
 	};
 }
@@ -1501,7 +1612,10 @@ export function createNodeBuiltins(host: ShimHost): Record<string, unknown> {
 		inspector: { open: () => undefined, close: () => undefined, url: '' },
 		'diagnostics_channel': { channel: () => ({ subscribe: () => undefined, publish: () => undefined }) },
 		trace_events: { createTracing: () => ({ enable: () => undefined, disable: () => undefined }) },
-		constants: {},
+			// `require('constants')`: os errno + fs access/permission flags. Packages probe
+			// `constants.EBADF` (ms-python's stdio layer) at module-eval time — the names
+			// must exist; the numbers follow the errno convention.
+			constants: { ...ERRNO_TABLE, F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1 },
 		sys: utilShim,
 		module: undefined as unknown  // filled by installNodeGlobals (needs the loader's require)
 	};

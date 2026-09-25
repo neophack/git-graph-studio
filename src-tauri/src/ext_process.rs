@@ -560,7 +560,10 @@ impl ReaderState {
                     // A dropped line is a lost request or answer: say so where a developer
                     // looks, not only in the in-memory log.
                     let head: String = line.chars().take(200).collect();
-                    eprintln!("[ext] {}: unparsable backend line ({error}): {head}", self.ext_id);
+                    eprintln!(
+                        "[ext] {}: unparsable backend line ({error}): {head}",
+                        self.ext_id
+                    );
                     push_log(&self.log, format!("unparsable line: {line}"));
                     continue;
                 }
@@ -598,12 +601,18 @@ impl ReaderState {
                             if let Err(error) = app.emit(HOST_REQUEST_EVENT, payload) {
                                 // The workbench never sees it: answer in band so the host's
                                 // request fails now instead of timing out.
-                                eprintln!("[ext] {}: host request {id} not delivered: {error}", self.ext_id);
+                                eprintln!(
+                                    "[ext] {}: host request {id} not delivered: {error}",
+                                    self.ext_id
+                                );
                                 let reply = proto::response(
                                     id,
-                                    Err(format!("the workbench did not receive the request: {error}")),
+                                    Err(format!(
+                                        "the workbench did not receive the request: {error}"
+                                    )),
                                 );
-                                let _ = write_line(&self.procs.lock().unwrap(), &self.ext_id, &reply);
+                                let _ =
+                                    write_line(&self.procs.lock().unwrap(), &self.ext_id, &reply);
                             }
                         }
                         None => {

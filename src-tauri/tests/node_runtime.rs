@@ -7,7 +7,6 @@
 //! host exactly as the app does: install → spawn the bundled `ggs-node` sidecar →
 //! handshake → command → stop.
 
-
 #![cfg(feature = "node-runtime")]
 
 // The N-API host's exported surface must be in this image for the /EXPORT directives
@@ -620,7 +619,7 @@ fn the_installed_git_graph_extension_activates_under_ggs_node() {
     };
 
     // 1. The handshake - inside it, the whole frame-program bootstrap runs.
-    let mut handshake = None;
+    let handshake;
     loop {
         let line = read_line();
         let Ok(wire) = serde_json::from_str::<Value>(&line) else {
@@ -638,14 +637,12 @@ fn the_installed_git_graph_extension_activates_under_ggs_node() {
             continue;
         }
         if wire["id"].as_u64() == Some(next_id) {
-            handshake = Some(wire);
+            handshake = wire;
             break;
         }
     }
-    let handshake = handshake.unwrap();
     assert_eq!(
-        handshake["result"]["protocolVersion"],
-        "ggs-ext/1",
+        handshake["result"]["protocolVersion"], "ggs-ext/1",
         "{handshake:?}"
     );
 
@@ -802,6 +799,8 @@ ggs.onRequest(async (command) => {
         &json!(["data:git version", "exit:0"]),
         "stdout crosses before the exit"
     );
-    let undefined = answers[4].as_ref().expect("a result with undefined members answers");
+    let undefined = answers[4]
+        .as_ref()
+        .expect("a result with undefined members answers");
     assert_eq!(undefined, &json!({ "kept": 1, "list": [null, 2] }));
 }

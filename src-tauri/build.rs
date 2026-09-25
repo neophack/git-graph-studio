@@ -113,7 +113,6 @@ fn export_napi_host_symbols() {
         Ok("windows") => {
             for name in &names {
                 println!("cargo:rustc-link-arg=/EXPORT:{name}");
-                
             }
         }
         Ok("linux") | Ok("freebsd") | Ok("openbsd") => {

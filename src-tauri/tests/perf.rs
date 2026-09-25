@@ -10,7 +10,6 @@
 //!
 //! Run the plan's full-size line with `GGS_PERF_FILES=100000` (a few minutes, mostly git).
 
-
 // The N-API host's exported surface must be in this image for the /EXPORT directives
 // to resolve; this suite never loads an addon itself, so this test holds the reference
 // the linker needs (a const cannot — it folds away).

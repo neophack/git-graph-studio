@@ -245,7 +245,24 @@ try {
 		check('commit details load (full hash and changed file)', details.includes(beta) && details.includes('file1.txt'), beta);
 	}
 
-	/* 5. The extension's own account of the loads. */
+	/* 5. A file click opens the diff (the vscode.diff bridge, provider registered by the
+	 * extension's own code on its host — ggs-node by default). */
+	if (view) {
+		const clicked = await view.evaluate(`(function(){
+			const file = document.querySelector('.fileTreeFile.gitDiffPossible, .fileTreeFile');
+			if (!file) return 'no file row';
+			file.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+			return 'clicked';
+		})()`);
+		let tabs = '';
+		for (let attempt = 0; attempt < 15 && !/↔/.test(tabs); attempt++) {
+			await sleep(1000);
+			tabs = await workbench.evaluate(`JSON.stringify([...document.querySelectorAll('.tabs-container .tab')].map((t) => t.textContent.trim()))`);
+		}
+		check(`a file click opens the diff tab (${clicked})`, /↔/.test(String(tabs)), String(tabs).slice(0, 200));
+	}
+
+	/* 6. The extension's own account of the loads. */
 	await sleep(1000);
 	const output = (await workbench.evaluate('window.__probeOutput')) ?? [];
 	for (const line of output) log(`[extension] ${line}`);
@@ -257,8 +274,7 @@ try {
 	/* 6. The workbench console. */
 	const exceptions = workbench.consoleEntries.filter((entry) => entry.level === 'exception');
 	for (const entry of exceptions.slice(0, 10)) log(`[console:exception] ${entry.text.slice(0, 300)}`);
-	check('no exception in the workbench console', exceptions.length === 0, `${exceptions.length} entries`);
-	view?.close();
+	check('no exception in the workbench console', exceptions.length === 0, `${exceptions.length} entries`);	view?.close();
 } finally {
 	workbench.close();
 	killTree(child.pid);

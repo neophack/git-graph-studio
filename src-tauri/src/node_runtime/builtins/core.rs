@@ -40,8 +40,8 @@ pub(super) fn digest_hex(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let algorithm = string_arg(args, 0, context);
-    let data = bytes_arg(args.get_or_undefined(1), context)
-        .ok_or_else(|| error("digest needs bytes"))?;
+    let data =
+        bytes_arg(args.get_or_undefined(1), context).ok_or_else(|| error("digest needs bytes"))?;
     let hex = match algorithm.as_str() {
         "md5" => {
             use md5::Digest as _;

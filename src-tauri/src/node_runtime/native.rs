@@ -152,7 +152,7 @@ mod tests {
                     )
                     .ok()
             })
-            .unwrap_or_else(|| boa_engine::JsValue::undefined());
+            .unwrap_or_else(boa_engine::JsValue::undefined);
         assert!(promise.is_object(), "the async export answered a promise");
         // Attach the collector once, then drain the threadsafe queue and settle jobs
         // until the worker's completion resolves the promise.

@@ -350,6 +350,21 @@ function composeWebview(html: string, theme: { kind: 'vscode-dark' | 'vscode-lig
 	return boot + html;
 }
 
+/** Load a webview frame's composed document. Assigning `srcdoc` to a frame whose subtree
+ *  is not yet connected to the document (an editor pane still being assembled offscreen)
+ *  silently drops the navigation in Chromium — the panel then sits blank until something
+ *  reloads it. The guard waits for connection, bounded, before assigning. */
+function loadFrameDoc(frame: HTMLIFrameElement, html: string, theme: { kind: 'vscode-dark' | 'vscode-light'; css: string } | null): void {
+	const assign = () => { frame.srcdoc = composeWebview(html, theme); };
+	if (frame.isConnected) return assign();
+	let waits = 0;
+	const tick = () => {
+		if (frame.isConnected || ++waits > 120) return assign();
+		requestAnimationFrame(tick);
+	};
+	requestAnimationFrame(tick);
+}
+
 export class ExtensionHost {
 	private readonly frames = new Map<string, FrameHandle>();
 	/** The command ids of each extension's manifest contributions (dropped from the workbench
@@ -1270,11 +1285,13 @@ export class ExtensionHost {
 		frame.className = 'ext-page-frame';
 		frame.title = view?.title ?? 'webview';
 		frame.setAttribute('sandbox', 'allow-scripts');
+		// Insert first, load through loadFrameDoc: a detached frame (or one inside a pane
+		// still being assembled offscreen) drops a srcdoc navigation silently.
+		container.appendChild(frame);
 		if (view) {
 			view.frame = frame;
-			frame.srcdoc = composeWebview(view.html, this.webviewTheme);
+			loadFrameDoc(frame, view.html, this.webviewTheme);
 		}
-		container.appendChild(frame);
 		return () => this.webviewClosed(panelId);
 	}
 
@@ -1301,9 +1318,10 @@ export class ExtensionHost {
 		frame.className = 'ext-page-frame';
 		frame.title = `${extId}: ${viewId}`;
 		frame.setAttribute('sandbox', 'allow-scripts');
-		record.frame = frame;
-		if (record.html !== '') frame.srcdoc = composeWebview(record.html, this.webviewTheme);
+		// Insert first, load through loadFrameDoc — the same detached-subtree drop.
 		container.appendChild(frame);
+		record.frame = frame;
+		if (record.html !== '') loadFrameDoc(frame, record.html, this.webviewTheme);
 		return () => {
 			if (this.webviewViews.get(viewId)?.frame === frame) {
 				record.frame = null;
@@ -1318,7 +1336,7 @@ export class ExtensionHost {
 		const record = this.webviewViews.get(viewId);
 		if (!record) return;
 		record.html = html;
-		if (record.frame) record.frame.srcdoc = composeWebview(html, this.webviewTheme);
+		if (record.frame) loadFrameDoc(record.frame, html, this.webviewTheme);
 	}
 
 	/** A webview view's message crossed from its iframe: route it into the owning frame. */
@@ -1563,6 +1581,11 @@ export class ExtensionHost {
 				return invoke('ext_child_end_stdin', { handle: args[0] });
 			case 'childProcess.kill':
 				return invoke('ext_child_kill', { handle: args[0] });
+			case 'childProcess.nodeRuntime':
+				// The `fork` bridge's runtime: the machine's node (a real language-server
+				// process), or null when the machine has none — the frame answers Node's
+				// fork-shaped `'error'` event.
+				return invoke<string | null>('ext_node_runtime_path');
 			case 'editor.applyEdits': {
 				// A null path addresses the active file editor; false (not open) tells the
 				// frame's applyEdit to fall back to file-level edits.
@@ -1608,7 +1631,7 @@ export class ExtensionHost {
 				if (view) {
 					// Setting html reloads the document, exactly as VS Code's webviews do.
 					view.html = html;
-					if (view.frame) view.frame.srcdoc = composeWebview(html, this.webviewTheme);
+					if (view.frame) loadFrameDoc(view.frame, html, this.webviewTheme);
 				}
 				return Promise.resolve(undefined);
 			}
@@ -1894,8 +1917,14 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 			// Same document: strip the text — the frame already holds it.
 			push = { type: '__studioExtEvent', event: 'activeEditorChanged', editor: { ...info, text: undefined } };
 		} else {
-			this.lastPushedDocument = info.path;
-			push = { type: '__studioExtEvent', event: 'activeEditorChanged', editor: { ...info, text: this.activeText?.() ?? undefined } };
+			// The text crosses only when it exists: a push that raced the document's own
+			// load must not record the path as pushed, or the text-bearing re-emission (the
+			// editor's first status update after mount) is stripped as a "same document"
+			// push and the frame never holds the content — a language client's didOpen
+			// then syncs an empty body and no diagnostic ever lands.
+			const text = this.activeText?.() ?? undefined;
+			if (text !== undefined) this.lastPushedDocument = info.path;
+			push = { type: '__studioExtEvent', event: 'activeEditorChanged', editor: { ...info, text } };
 		}
 		for (const handle of this.frames.values()) handle.send?.(push);
 	}
@@ -2005,8 +2034,7 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 	}
 
 	private onMessage(event: MessageEvent): void {
-		const data = event.data as { type?: string; id?: number; method?: string; args?: unknown[]; ok?: boolean; result?: unknown; extensionId?: string; error?: string; text?: string; kind?: string };
-		console.info('[compat-msg]', String(data.type ?? ''), event.source === window ? '(win)' : '(other)');
+		const data = event.data as { type?: string; id?: number; method?: string; args?: unknown[]; ok?: boolean; result?: unknown; extensionId?: string; error?: string; stack?: string; text?: string; kind?: string };
 		if (!data || typeof data !== 'object') return;
 
 		// An extension page's RPC (the composed bootstrap's acquireGgsApi): routed by the
@@ -2070,8 +2098,10 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 		}
 		if (data.type === '__studioExtActivateFailed') {
 			// The failure surfaces as a notification; a lazy activation waiting on it settles
-			// rather than hanging its trigger.
+			// rather than hanging its trigger. The stack (when the frame captured one) is the
+			// only way to point at the line in a foreign package that tripped.
 			console.info(`[ggs-ext] activation failed ${data.extensionId}: ${String(data.error ?? 'unknown').slice(0, 200)}`);
+			if (typeof data.stack === 'string' && data.stack.length > 0) console.info(`[ggs-ext]   at ${data.stack.split('\n').slice(1).join('\n    at ').slice(0, 2000)}`);
 			this.activationWaiters.get(data.extensionId ?? '')?.();
 			this.activationWaiters.delete(data.extensionId ?? '');
 			notify('warning', `Extension ${data.extensionId} failed to activate: ${data.error ?? 'unknown error'}`);
@@ -2079,9 +2109,6 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 		}
 
 		if (data.type === '__studioExtRpc') {
-			console.info('[compat-rpc] branch reached:', data.method);
-			const handle0 = this.frameFor(event.source);
-			console.info('[compat-rpc-host]', data.method, 'matched=', Boolean(handle0), 'sourceIsWin=', event.source === window, 'frames=', [...this.frames.keys()].join(','));
 			const handle = this.frameFor(event.source);
 			if (!handle) return;
 			const extId = this.extIdFor(handle);

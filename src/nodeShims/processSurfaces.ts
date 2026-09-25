@@ -218,6 +218,145 @@ export function makeChildProcess(host: ShimHost, Buffer: BufferFactory): Record<
 		return child;
 	}
 
+	/** `fork`: the package's own server process (a language server, most often) over a
+	 *  real Node runtime the host reports. Node pairs fork's ends over an IPC file
+	 *  descriptor, which a sandboxed frame cannot hold — so the child runs `--stdio` and
+	 *  the LSP base protocol's Content-Length framing carries what `.send()` and
+	 *  `'message'` would: the same JSON messages, framed differently. Without a Node
+	 *  runtime the child answers Node's fork-shaped `'error'` event. */
+	function fork(first: unknown, second?: unknown, third?: unknown): EventEmitter {
+		const modulePath = String(first);
+		const forkArgs = (Array.isArray(second) ? second : []).map((a) => String(a));
+		const options = (Array.isArray(second) ? third : second) as Record<string, unknown> | undefined ?? {};
+		const absolute = /^[A-Za-z]:[\\/]/.test(modulePath) || modulePath.startsWith('/') ? modulePath : host.extensionPath.replace(/[\\/]+$/, '') + '/' + modulePath.replace(/^[\\/]+/, '');
+		const outer = new EventEmitter() as EventEmitter & {
+			stdin: Record<string, unknown>; stdout: EventEmitter; stderr: EventEmitter;
+			pid: number | null; killed: boolean; exitCode: number | null; exitSignal: null;
+			stdio: unknown[]; connected: boolean;
+			send: (message: unknown, _chunk?: unknown, callback?: (error: Error | null) => void) => boolean;
+			disconnect: () => void; kill: () => boolean;
+		};
+		outer.stdout = new EventEmitter();
+		outer.stderr = new EventEmitter();
+		outer.pid = null;
+		outer.killed = false;
+		outer.exitCode = null;
+		outer.exitSignal = null;
+		outer.stdio = [null, outer.stdout, outer.stderr];
+		// Node's fork reports the channel connected the moment fork returns (the client
+		// checks this synchronously before its first send); the wiring below only fills in
+		// where the bytes then go. Any send in that window queues in order.
+		outer.connected = true;
+		outer.disconnect = () => {
+			outer.connected = false;
+		};
+		let wired: { send: (message: unknown) => boolean; kill: () => boolean } | null = null;
+		// The client sends its `initialize` the moment fork returns — long before the
+		// runtime lookup and spawn cross the bridge. Node's IPC channel queues that send;
+		// this one queues it here and flushes in order once wired.
+		const sendQueue: { message: unknown; callback?: (error: Error | null) => void }[] = [];
+		const drainQueue = (): void => {
+			for (const pending of sendQueue.splice(0)) wired!.send(pending.message);
+		};
+		outer.send = (message: unknown, _chunk?: unknown, callback?: (error: Error | null) => void): boolean => {
+			if (!wired) {
+				sendQueue.push({ message, callback });
+				return true;
+			}
+			if (!outer.connected) {
+				if (typeof callback === 'function') processNextTick(() => callback(new Error('channel closed')));
+				return false;
+			}
+			return wired.send(message);
+		};
+
+		// The LSP base-protocol deframer: headers are ASCII, the body is exactly
+		// `Content-Length` bytes, so byte-wise slicing never splits a character's frame.
+		let buffered = new Uint8Array(0);
+		let contentLength: number | null = null;
+		const utf8 = new TextDecoder();
+		const utf8Encode = new TextEncoder();
+		const SEP = [13, 10, 13, 10];
+		const indexOfSep = (data: Uint8Array): number => {
+			scan: for (let at = 0; at <= data.length - SEP.length; at += 1) {
+				for (let offset = 0; offset < SEP.length; offset += 1) {
+					if (data[at + offset] !== SEP[offset]) continue scan;
+				}
+				return at;
+			}
+			return -1;
+		};
+		const pushFrameBytes = (chunk: Uint8Array): void => {
+			const merged = new Uint8Array(buffered.length + chunk.length);
+			merged.set(buffered);
+			merged.set(chunk, buffered.length);
+			buffered = merged;
+			for (;;) {
+				if (contentLength === null) {
+					const sep = indexOfSep(buffered);
+					if (sep === -1) return;
+					const headers = utf8.decode(buffered.slice(0, sep));
+					const match = /content-length: (\d+)/i.exec(headers);
+					if (!match) {
+						buffered = new Uint8Array(0);
+						return;
+					}
+					contentLength = Number(match[1]);
+					buffered = buffered.slice(sep + SEP.length);
+				}
+				if (buffered.length < contentLength) return;
+				const body = utf8.decode(buffered.slice(0, contentLength));
+				buffered = buffered.slice(contentLength);
+				contentLength = null;
+				try {
+					outer.emit('message', JSON.parse(body));
+				} catch {
+					// A body that does not parse ends this conversation's stream — Node would
+					// crash the child; here the reader stops, the child keeps running.
+					return;
+				}
+			}
+		};
+
+		void (async () => {
+			const nodePath = (await host.bridge.request('childProcess.nodeRuntime', [])) as string | null;
+			if (!nodePath) throw new Error(`fork ${modulePath}: no Node runtime on this machine to run the server process with`);
+			const inner = spawn(nodePath, [absolute, '--stdio', ...forkArgs], options);
+			outer.pid = inner.pid;
+			outer.killed = inner.killed;
+			outer.kill = () => inner.kill();
+			outer.stdin = inner.stdin;
+			inner.stderr.on('data', (chunk: unknown) => outer.stderr.emit('data', chunk));
+			inner.stdout.on('data', (chunk: unknown) => pushFrameBytes(chunk as Uint8Array));
+			inner.on('exit', (codeArg: unknown, signalArg: unknown) => {
+				const code = codeArg as number | null;
+				const signal = signalArg as string | null;
+				outer.exitCode = code ?? inner.exitCode;
+				outer.exitSignal = (signal ?? null) as null;
+				outer.connected = false;
+				outer.emit('exit', outer.exitCode, outer.exitSignal);
+				outer.emit('close', outer.exitCode, outer.exitSignal);
+			});
+			wired = {
+				send: (message: unknown): boolean => {
+					const payload = utf8Encode.encode(JSON.stringify(message));
+					const header = utf8Encode.encode(`Content-Length: ${payload.length}\r\n\r\n`);
+					(outer.stdin as { write: (chunk: Uint8Array) => boolean }).write(header);
+					(outer.stdin as { write: (chunk: Uint8Array) => boolean }).write(payload);
+					return true;
+				},
+				kill: () => inner.kill()
+			};
+			drainQueue();
+		})().catch((error) => {
+			processNextTick(() => {
+				outer.emit('error', error instanceof Error ? error : new Error(String(error)));
+				outer.emit('close', null);
+			});
+		});
+		return outer;
+	}
+
 	return {
 		spawn,
 		exec,
@@ -225,7 +364,7 @@ export function makeChildProcess(host: ShimHost, Buffer: BufferFactory): Record<
 		spawnSync: callThrowsFn('child_process.spawnSync (a sandboxed frame cannot block its event loop; use the async forms)'),
 		execSync: callThrowsFn('child_process.execSync (a sandboxed frame cannot block its event loop; use the async forms)'),
 		execFileSync: callThrowsFn('child_process.execFileSync (a sandboxed frame cannot block its event loop; use the async forms)'),
-		fork: callThrowsFn('child_process.fork'),
+		fork,
 		ChildProcess: class ChildProcess {}
 	};
 }

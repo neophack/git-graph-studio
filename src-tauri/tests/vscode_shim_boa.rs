@@ -2,7 +2,6 @@
 //! around, and how far the vscode shim gets inside Boa: bundle eval, installer call,
 //! and a minimal extension require + activate. The panic boundary is the deliverable.
 
-
 // The N-API host's exported surface must be in this image for the /EXPORT directives
 // to resolve; this suite never loads an addon itself, so this test holds the reference
 // the linker needs (a const cannot — it folds away).
@@ -62,11 +61,7 @@ fn the_function_constructor_module_poison_panics_later_closures() {
             "globalThis.__handler = null; globalThis.__register = (h) => { globalThis.__handler = h; };",
         ))
         .unwrap();
-    let constructor = context
-        .intrinsics()
-        .constructors()
-        .function()
-        .constructor();
+    let constructor = context.intrinsics().constructors().function().constructor();
     let args: Vec<boa_engine::JsValue> = vec![
         boa_engine::JsValue::from(boa_engine::JsString::from("exports")),
         boa_engine::JsValue::from(boa_engine::JsString::from(
@@ -128,7 +123,9 @@ fn the_direct_eval_module_compiler_holds_every_load_context() {
         let wrapper = helper
             .call(
                 &boa_engine::JsValue::undefined(),
-                &[boa_engine::JsValue::from(boa_engine::JsString::from(source))],
+                &[boa_engine::JsValue::from(boa_engine::JsString::from(
+                    source,
+                ))],
                 context,
             )?
             .as_object()
@@ -198,8 +195,7 @@ fn the_direct_eval_module_compiler_holds_every_load_context() {
     // by a nested arrow, plus module-level lexical bindings of its own.
     let module_source = "const anchor = 1;\n\
          globalThis.__handler = () => { let x = anchor; return new Promise((r) => { x; __noop(() => r(7), 5, false, []); }); };";
-    compile_module_and_call(&mut context, module_source)
-        .expect("the top-level module loads");
+    compile_module_and_call(&mut context, module_source).expect("the top-level module loads");
     let handler = context
         .global_object()
         .get(boa_engine::JsString::from("__handler"), &mut context)

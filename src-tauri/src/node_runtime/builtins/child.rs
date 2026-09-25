@@ -179,10 +179,20 @@ pub(super) fn proc_spawn(
     }
     let mut readers = Vec::new();
     if let Some(source) = stdout {
-        readers.push(pump_reader(0, source, handle, with_state(|state| state.pump())));
+        readers.push(pump_reader(
+            0,
+            source,
+            handle,
+            with_state(|state| state.pump()),
+        ));
     }
     if let Some(source) = stderr {
-        readers.push(pump_reader(1, source, handle, with_state(|state| state.pump())));
+        readers.push(pump_reader(
+            1,
+            source,
+            handle,
+            with_state(|state| state.pump()),
+        ));
     }
     // The exit watcher polls the child through the process-wide table (the only thing a
     // foreign thread can reach): reap and report; the JS thread answers the events.

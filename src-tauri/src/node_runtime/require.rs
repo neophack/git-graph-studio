@@ -12,9 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use boa_engine::{
-    Context, JsError, JsNativeError, JsObject, JsResult, JsValue, NativeFunction,
-};
+use boa_engine::{Context, JsError, JsNativeError, JsObject, JsResult, JsValue, NativeFunction};
 
 use crate::node_runtime::{key, text, with_state};
 use boa_engine::JsArgs;

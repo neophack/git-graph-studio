@@ -272,6 +272,10 @@ class ModuleLoader {
 			);
 		} catch (error) {
 			this.cache.delete(resolved);
+			// Name the module: a bundle's eval stack points at `<anonymous>` offsets no file
+			// on disk answers, and the one fact that locates a failure is which `require`
+			// was being evaluated when it threw.
+			if (error instanceof Error && !error.message.startsWith('[')) error.message = `[${resolved || 'entry'}] ${error.message}`;
 			throw error;
 		}
 		module.loaded = true;

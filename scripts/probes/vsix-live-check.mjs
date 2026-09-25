@@ -39,14 +39,23 @@ if (folder === join(appDir, 'target', 'studio', 'testws')) folder = probeWorkspa
 if (!existsSync(join(folder, '.git'))) {
 	mkdirSync(folder, { recursive: true });
 	writeFileSync(join(folder, 'main.py'), 'import sys\n\ndef main():\n    print("hello from python")\n\nif __name__ == "__main__":\n    main()\n');
+	// A deliberate misspelling for the Code Spell Checker stage: the squiggle this file
+	// must earn is the visible end of cspell's whole language-server chain (fork bridge
+	// included) landing as editor diagnostics.
+	writeFileSync(join(folder, 'notes.txt'), 'this sentence holds one obviuos mispelled wrd for the checker to find\n');
 	const init = spawnSync('git', ['-C', folder, 'init', '-b', 'main'], { encoding: 'utf8' });
 	if (init.status !== 0) {
 		console.error(`could not init the probe workspace ${folder}: ${init.stderr}`);
 		process.exit(2);
 	}
-	spawnSync('git', ['-C', folder, 'add', 'main.py']);
+	spawnSync('git', ['-C', folder, 'add', 'main.py', 'notes.txt']);
 	spawnSync('git', ['-C', folder, '-c', 'user.name=probe', '-c', 'user.email=probe@example.com', 'commit', '-m', 'first']);
 }
+// The workspace persists across runs: refresh both probe files so the squiggle stage
+// always has its misspelling to find (main.py's content is stage 3's expectation).
+writeFileSync(join(folder, 'main.py'), 'import sys\n\ndef main():\n    print("hello from python")\n\nif __name__ == "__main__":\n    main()\n');
+writeFileSync(join(folder, 'notes.txt'), 'this sentence holds one obviuos mispelled wrd for the checker to find\n');
+spawnSync('git', ['-C', folder, 'add', 'notes.txt']);
 if (!existsSync(exe)) {
 	console.error(`usage: node scripts/probes/vsix-live-check.mjs [--exe <exe>] (not found: ${exe})`);
 	process.exit(2);
@@ -90,8 +99,6 @@ let nextId = 1;
 const pending = new Map();
 const consoleEntries = [];
 const contexts = new Map();
-/** The view's own execution context once stage 2 identifies it (stage 5 drives it). */
-let viewContextId = null;
 function send(method, params = {}) {
 	return new Promise((resolve, reject) => {
 		const id = nextId++;
@@ -196,6 +203,48 @@ const closePalette = () => evaluate(`(function(){
 	return true;
 })()`);
 
+/* The Git Graph view is a sandboxed srcdoc iframe — an out-of-process CDP target the
+ * workbench page can neither read nor evaluate into (the old execution-context sweep saw
+ * nothing but the workbench and ext-host frames). Stage 2 attaches to the iframe target
+ * directly, the way scripts/probes/git-graph-live-check.mjs drives it, and every view
+ * read afterwards goes through this session. */
+let view = null;
+async function viewSession() {
+	if (view) return view;
+	const list = await fetch(`http://127.0.0.1:${port}/json`).then((r) => r.json()).catch(() => []);
+	const target = list.find((t) => t.type === 'iframe' && t.url.startsWith('about:srcdoc'));
+	if (!target) return null;
+	const vws = new WebSocket(target.webSocketDebuggerUrl);
+	let vid = 1;
+	const vpending = new Map();
+	vws.onmessage = (event) => {
+		const msg = JSON.parse(event.data);
+		if (msg.id && vpending.has(msg.id)) {
+			const { resolve, reject } = vpending.get(msg.id);
+			vpending.delete(msg.id);
+			msg.error ? reject(new Error(JSON.stringify(msg.error))) : resolve(msg.result);
+		}
+	};
+	await new Promise((resolve, reject) => {
+		vws.onopen = resolve;
+		vws.onerror = reject;
+	});
+	await vws.send(JSON.stringify({ id: vid++, method: 'Runtime.enable', params: {} }));
+	view = {
+		evaluate: async (expression) => {
+			const result = await new Promise((resolve, reject) => {
+				const id = vid++;
+				vpending.set(id, { resolve, reject });
+				vws.send(JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression, returnByValue: true, awaitPromise: true } }));
+			});
+			if (result?.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text);
+			return result?.result?.value ?? null;
+		},
+		close: () => vws.close()
+	};
+	return view;
+}
+
 /* ---------- stage 1: the extensions list + the derived backend ---------- */
 // Click the activity bar's Extensions item (a synthetic Ctrl+Shift+X keydown is not a
 // trusted event the keybinding layer answers; a real click always switches).
@@ -256,21 +305,9 @@ if (palette.picked === 'clicked') {
 	const text = String(webview);
 	check('stage 2: the Git Graph webview tab opened', /Git Graph RS/.test(text), text.slice(0, 120));
 	// The view's own UI mounts inside its sandboxed iframe and loads commits over the
-	// extension's CLI backend — give the handshake its time and look for commit rows.
+	// extension's CLI backend — give the handshake its time before the attach below.
 	await sleep(12000);
-	// The view iframe is a sandboxed document the parent cannot read: sweep every
-	// execution context through CDP and collect what each one renders.
-	const graphText = await evaluate(`(async function(){
-		const texts = [];
-		for (const frame of document.querySelectorAll('iframe')) {
-			try {
-				const text = (frame.contentDocument?.body?.innerText || '').replace(/\s+/g, ' ');
-				if (text) texts.push(text.slice(0, 200));
-			} catch { /* cross-origin sandbox: read from its own context below */ }
-		}
-		return JSON.stringify(texts);
-	})()`, true);
-	// The extension-host process the command woke: the real-Node host is up and warm.
+	// The extension-host process the command woke: the ggs-node host is up and warm.
 	const status = await evaluate(`(async function(){
 		const mod = await import('/@id/@tauri-apps/api/core').catch(() => import('/node_modules/.vite/deps/@tauri-apps_api_core.js'));
 		const st = await mod.invoke('ext_process_status', {});
@@ -278,13 +315,28 @@ if (palette.picked === 'clicked') {
 	})()`, true);
 	check('stage 2: the node-host process is running after the command', /"pid":\d+/i.test(String(status)) && !/"pid":0/.test(String(status)), status);
 
-	// The sandboxed frames' own contexts: evaluate the body text in each and keep any that
-	// mention commits or graph UI; for extension-host frames, also report the process env
-	// the frame actually sees (tool discovery reads it).
+	// The sandboxed view iframe: attach to its own CDP target and wait for the commits to
+	// render there (the git-graph-rs 1.0.25 CLI fallback path — extension.js spawns real
+	// `git` through the frame host's child_process).
+	let graphText = '';
+	for (let i = 0; i < 20 && !graphText; i++) {
+		const session = await viewSession();
+		if (!session) {
+			await sleep(1500);
+			continue;
+		}
+		const text = await session.evaluate('(document.body ? document.body.innerText : "")').catch(() => '');
+		if (typeof text === 'string' && /first|commit|提交|图形|作者/i.test(text)) graphText = text.replace(/\s+/g, ' ').slice(0, 400);
+		else await sleep(1500);
+	}
+
+	// The ext-host frames' contexts: report the process env each frame actually sees
+	// (tool discovery reads it) — informational, alongside the view text.
 	const contextTexts = [];
 	for (const [contextId, info] of contexts) {
 		try {
 			const isExtHost = (info.url ?? '').includes('ext-host');
+			if (!isExtHost) continue;
 			const expression = `(function(){
 				const envLine = (typeof process !== 'undefined' && process.env && process.env.ProgramW6432 !== undefined)
 					? ' ENV[ProgramW6432]=' + String(process.env.ProgramW6432).slice(0, 30) + ' PATH.len=' + String(process.env.PATH ?? '').length
@@ -298,15 +350,11 @@ if (palette.picked === 'clicked') {
 			});
 			const value = result?.result?.value;
 			if (typeof value === 'string' && value.length > 3) {
-				const line = `${isExtHost ? '[ext-host]' : ''} ${value}`;
+				const line = `[ext-host] ${value}`;
 				contextTexts.push(line);
 				log(`[ctx] ${line}`);
-				// The view's own context: the one rendering commit text. Stage 5 drives it.
-				if (viewContextId === null && !isExtHost && /first|commit|提交|图形|作者/i.test(value)) {
-					viewContextId = contextId;
-				}
 			}
-		} catch { /* a context that cannot evaluate is not the view */ }
+		} catch { /* a context that cannot evaluate is not reportable */ }
 	}
 	log(`[graph] view text: ${graphText}`);
 	for (const line of contextTexts) log(`[ctx] ${line}`);
@@ -383,9 +431,55 @@ for (const extension of three) {
 	await closePalette();
 }
 
+/* ---------- stage 4½: the cspell squiggle — diagnostics as an editor surface ---------- */
+// Open the deliberately-misspelled notes.txt and wait for CodeMirror lint marks: the
+// visible end of cspell's whole chain (fork bridge → language server → diagnostics →
+// editor squiggle). The server analyzes asynchronously, so the wait is generous.
+await evaluate(`(function(){
+	window.__rpcLog = [];
+	window.addEventListener('message', (event) => {
+		const data = event.data;
+		if (data && data.type === '__studioExtRpc' && window.__rpcLog.length < 400) {
+			window.__rpcLog.push(String(data.method) + (data.method === 'output.append' ? ':' + String(data.args?.[1] ?? '').replace(/\\s+/g, ' ').slice(0, 90) : ''));
+		}
+	}, true);
+	const key = 'ggstudio.extSettings.streetsidesoftware.code-spell-checker';
+	const settings = JSON.parse(localStorage.getItem(key) || '{}');
+	settings['cSpell.logLevel'] = 'Diagnostic';
+	settings['cSpell.logFile'] = 'C:/Users/penghongxia/AppData/Local/Temp/cspell-server.log';
+	localStorage.setItem(key, JSON.stringify(settings));
+	document.dispatchEvent(new CustomEvent('ggs-ext-settings', { detail: 'streetsidesoftware.code-spell-checker' }));
+	return true;
+})()`);
+const notesPick = await runPaletteCommand('notes', 'notes');
+log(`[stage4b] notes pick: ${JSON.stringify(notesPick).slice(0, 200)}`);
+await sleep(4000);
+await closePalette();
+let squiggles = '';
+for (let attempt = 0; attempt < 30; attempt += 1) {
+	await sleep(2000);
+	squiggles = String(await evaluate(`(function(){
+		const marks = document.querySelectorAll('.editors .cm-lintRange, .editors [class*="lintRange"], .editors [class*="cm-lint"]').length;
+		const active = [...document.querySelectorAll('.tabs-container .tab')].some((t) => /notes\\.txt/.test(t.textContent));
+		return JSON.stringify({ active, marks });
+	})()`));
+	try {
+		if (JSON.parse(squiggles).marks > 0) break;
+	} catch { /* unparsable — keep waiting */ }
+}
+log(`[stage4b] squiggle state: ${squiggles}`);
+const rpcLog = String(await evaluate(`JSON.stringify({ methods: [...new Set(window.__rpcLog || [])], counts: (window.__rpcLog || []).length })`));
+log(`[stage4b] frame RPCs since open: ${rpcLog}`);
+try {
+	const state = JSON.parse(squiggles);
+	check('stage 4b: the cspell server landed squiggles in the editor', state.marks > 0, `${state.marks} lint marks (notes.txt open: ${state.active})`);
+} catch {
+	check('stage 4b: the cspell server landed squiggles in the editor', false, squiggles);
+}
+
 /* ---------- stage 5: the compatibility surface — watcher refresh and the diff bridge ---------- */
-if (viewContextId !== null) {
-	const inView = (expression) => send('Runtime.evaluate', { expression, returnByValue: true, contextId: viewContextId }).then((r) => r?.result?.value ?? '');
+if (view !== null) {
+	const inView = (expression) => view.evaluate(expression).catch(() => '');
 	// An external commit (the probe's own git, outside the app): the extension's
 	// repoFileWatcher hears it through the host's fs-event bridge and the view refetches —
 	// the marker subject is the visible end of createFileSystemWatcher + fsChanged.
@@ -470,7 +564,7 @@ if (viewContextId !== null) {
 	} catch { /* unparsable counts as unpainted */ }
 	check('stage 5: the dropdown menu paints an opaque background (the theme injection)', menuPainted, menuPaint);
 } else {
-	log('[stage5] skipped: the view context was not identified');
+	log('[stage5] skipped: the view iframe target was not found');
 }
 
 /* ---------- console hygiene ---------- */

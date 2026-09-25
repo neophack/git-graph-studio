@@ -206,6 +206,15 @@ function boot(message: InitMessage): void {
 		...message.context,
 		workspaceFolders: message.context.workspaceFolders.map((folder) => ({ ...folder, uri: Uri.file(folder.uri.path) }))
 	};
+	// The package's own manifest, parsed here for `context.extension.packageJSON` — the
+	// host message carries only the code map, and the entry choice already reads this text.
+	if (message.files !== undefined && context.packageJSON === undefined) {
+		try {
+			context.packageJSON = JSON.parse(message.files['package.json'] ?? '{}') as Record<string, unknown>;
+		} catch {
+			context.packageJSON = {};
+		}
+	}
 	const api = createVscodeApi(context, {
 		request: hostRequest,
 		registerCommandHandler: (id, handler) => registered.set(id, handler),
@@ -242,19 +251,33 @@ function boot(message: InitMessage): void {
 		builtin: (id) => (id in builtins ? builtins[id] : undefined)
 	});
 	installNodeGlobals(shimHost, builtins, require);
+	// The stack crosses with the message: a foreign package's activation failure is
+	// diagnosable only with the frames between its entry and the throwing line.
+	const failure = (error: unknown) => parent.postMessage({
+		type: '__studioExtActivateFailed',
+		extensionId: context.extensionId,
+		error: String(error),
+		stack: error instanceof Error ? (error.stack ?? null) : null
+	}, '*');
 	try {
 		// The entry the manifest names (`main`), resolved the way `require()` resolves it:
 		// extensionless spellings gain `.js`, directories resolve through their package.json
 		// or index files. A bare `code` message (no map, no manifest) runs as 'extension.js'.
-		const pkg = files['package.json'] !== undefined ? JSON.parse(files['package.json']) as { main?: string } : {};
-		const main = message.files !== undefined ? (pkg.main ?? 'extension.js') : 'extension.js';
+		// An ESM main (`"type": "module"`) cannot run through the CommonJS wrapper; when the
+		// packager shipped a string `browser` bundle — its own answer to a host with no
+		// Node — that bundle runs instead, the same art VS Code's web host executes.
+		const pkg = files['package.json'] !== undefined ? JSON.parse(files['package.json']) as { main?: string; browser?: string | Record<string, string>; type?: string } : {};
+		const esmMain = pkg.type === 'module';
+		const main = message.files !== undefined
+			? ((esmMain && typeof pkg.browser === 'string' && pkg.browser !== '' ? pkg.browser : (pkg.main ?? 'extension.js')))
+			: 'extension.js';
 		module_ = runEntry(main) as { exports: { activate?: (context: unknown) => unknown; deactivate?: () => unknown } };
 		Promise.resolve(module_.exports.activate?.(activationContext(context, api))).then(
 			() => parent.postMessage({ type: '__studioExtActivated', extensionId: context.extensionId }, '*'),
-			(error) => parent.postMessage({ type: '__studioExtActivateFailed', extensionId: context.extensionId, error: String(error) }, '*')
+			failure
 		);
 	} catch (error) {
-		parent.postMessage({ type: '__studioExtActivateFailed', extensionId: context.extensionId, error: String(error) }, '*');
+		failure(error);
 	}
 }
 

@@ -185,6 +185,10 @@ pub(crate) struct State {
     procs: HashMap<u64, ProcEntry>,
     next_proc: u64,
     main_exports: Option<JsValue>,
+    /// The entry is a native addon (a `.node`): its `request` export speaks the NAPI
+    /// convention — `request(method, paramsJson)` answering a JSON string — not the JS
+    /// `(command, messageObject)` convention JS entries use. The dispatch adapts.
+    native_entry: bool,
     /// The entry is a real VS Code extension `main` (it `require`s `vscode`): bootstrap
     /// evaluates the shim bundle and `initialize` installs the API, requires the entry and
     /// runs its activation — the package's own program, hosted.
@@ -229,6 +233,7 @@ impl State {
             procs: HashMap::new(),
             next_proc: 0,
             main_exports: None,
+            native_entry: false,
             frame_program: false,
             vscode_api: None,
             job_source: None,
@@ -605,6 +610,9 @@ fn bootstrap(context: &mut Context, entry: &Path) -> Result<(), String> {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
+    if entry.extension().and_then(|e| e.to_str()) == Some("node") {
+        with_state(|state| state.native_entry = true);
+    }
     match require::require(&parent, &specifier, context) {
         Ok(exports) => {
             if let Some(exports) = exports.as_object() {
@@ -890,7 +898,7 @@ fn run_command(context: &mut Context, command: &str, args: &Value) -> Result<Val
         }
     }
 
-    // 2. The registered handler: `ggs.onRequest(fn)` — the package's own code answering.: `ggs.onRequest(fn)` — the package's own code answering.
+    // 2. The registered handler: `ggs.onRequest(fn)` — the package's own code answering.
     let handler = with_state(|state| state.on_request.clone());
     if let Some(handler) = handler.and_then(|value| value.as_object().cloned()) {
         let command_value = text(command);
@@ -903,8 +911,57 @@ fn run_command(context: &mut Context, command: &str, args: &Value) -> Result<Val
         return js_to_json(context, settled);
     }
 
-    // 4. The entry module's own `dispatch` / `request` export: `(command, message)`.
+    // 4. The entry module's own `dispatch` / `request` export: `(command, message)`. A
+    //    native-addon entry (the engine `.node`) speaks the NAPI convention —
+    //    `request(method, paramsJson)` answering a JSON string — and the process host's
+    //    `runCommand` envelope (`{command, args: [params]}`) names one engine method to
+    //    translate onto it: `loadCommits` minus its `command` field is the params.
     let main_exports = with_state(|state| state.main_exports.clone());
+    let native_entry = with_state(|state| state.native_entry);
+    if native_entry {
+        if let Some(exports) = main_exports
+            .as_ref()
+            .and_then(|value| value.as_object().cloned())
+        {
+            if let Ok(function) = exports.get(key("request"), context) {
+                if let Some(function) = function.as_object() {
+                    let mut method = command.to_string();
+                    let mut params = args.first().cloned().unwrap_or(Value::Null);
+                    if command == "runCommand" {
+                        if let Some(payload) = params.get("command").and_then(Value::as_str) {
+                            method = payload.to_string();
+                            if let Some(object) = params.as_object_mut() {
+                                object.remove("command");
+                            }
+                        }
+                    }
+                    // The addon's `request(repo, envelopeJson)` convention: the repo (empty
+                    // for engine-level calls) first, then the whole
+                    // `{method, params}` envelope as a JSON string.
+                    let repo_arg = params
+                        .get("repo")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let envelope = json!({ "method": method, "params": params }).to_string();
+                    let result = function
+                        .call(
+                            &JsValue::undefined(),
+                            &[text(repo_arg), text(envelope)],
+                            context,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    let settled = settle(context, result)?;
+                    if let Some(string) = settled.as_string() {
+                        let parsed: Value = serde_json::from_str(&string.to_std_string_escaped())
+                            .unwrap_or(Value::Null);
+                        return Ok(parsed);
+                    }
+                    return js_to_json(context, settled);
+                }
+            }
+        }
+    }
     if let Some(exports) = main_exports.and_then(|value| value.as_object().cloned()) {
         for name in ["dispatch", "request"] {
             let Ok(function) = exports.get(key(name), context) else {
@@ -998,7 +1055,7 @@ fn settle(context: &mut Context, value: JsValue) -> Result<JsValue, String> {
     let trace = std::env::var("GGS_TRACE_BOOT").is_ok();
     let mut waited = 0usize;
     loop {
-        if trace && waited % 50 == 0 {
+        if trace && waited.is_multiple_of(50) {
             eprintln!("[settle] pending (iteration {waited})");
         }
         waited += 1;
@@ -1076,10 +1133,7 @@ pub(crate) fn json_of(context: &mut Context, value: &JsValue) -> Result<Value, S
     if value.is_undefined() {
         return Ok(Value::Null);
     }
-    let json = context
-        .intrinsics()
-        .objects()
-        .json();
+    let json = context.intrinsics().objects().json();
     let stringify = json
         .get(key("stringify"), context)
         .map_err(|e| e.to_string())?;
@@ -1090,7 +1144,9 @@ pub(crate) fn json_of(context: &mut Context, value: &JsValue) -> Result<Value, S
         .call(&json.clone().into(), std::slice::from_ref(value), context)
         .map_err(|e| e.to_string())?;
     match text.as_string() {
-        Some(text) => serde_json::from_str(&text.to_std_string_escaped()).map_err(|e| e.to_string()),
+        Some(text) => {
+            serde_json::from_str(&text.to_std_string_escaped()).map_err(|e| e.to_string())
+        }
         // A function or symbol at the top: nothing to serialize.
         None => Ok(Value::Null),
     }

@@ -494,6 +494,9 @@ nothing.
   for the ggs-node `vscode` shim),
   `tests/vsixCompat.test.ts` (a real marketplace-shaped VSIX booted through the frame host
   from its installed files; skips without the install),
+  `tests/installedCompat.test.ts` (every frame-hosted install under `~/.ggs/extensions`
+  boots and activates through the same frame path, with the frame's stack-bearing failure
+  reports; skips without installs),
   `scripts/probes/vsix-live-check.mjs` (the live five-package check over CDP),
   `scripts/probes/git-graph-live-check.mjs` (the live git-graph-rs check: ggs-node with
   the engine `.node` loaded, the view rendering, settings pushing through)

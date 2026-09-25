@@ -4,7 +4,6 @@
 //! if they had been installed through the Extensions view. Skipped unless both files exist
 //! and `--ignored` is passed.
 
-
 #![cfg(feature = "desktop")]
 
 // The N-API host's exported surface must be in this image for the /EXPORT directives

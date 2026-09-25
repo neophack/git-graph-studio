@@ -564,6 +564,119 @@ pub fn refresh_bundled_installs(app: &tauri::AppHandle) -> Vec<Result<String, St
     refresh_bundled_installs_in(&dir, &bundled_packages(app))
 }
 
+/// The store id ("publisher.name") a package installs under — read straight off its
+/// manifest, before any install exists to answer it.
+fn manifest_id(manifest: &VsixManifest) -> Option<String> {
+    let publisher = manifest.publisher.trim();
+    let name = manifest.name.trim();
+    if publisher.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some(format!("{publisher}.{name}"))
+}
+
+/// The dismiss marker of a deliberate uninstall: when the user removes a bundled package,
+/// this file (not the package directory) is what a later boot reads — auto-install must
+/// never resurrect an uninstall the user asked for.
+fn bundled_dismissed_marker(dir: &Path, ext_id: &str) -> PathBuf {
+    dir.join(format!(".bundled-dismissed-{ext_id}"))
+}
+
+/// First-launch auto-install: a bundled package the store carries but nothing installed —
+/// exactly the state right after the installer ran — installs here, the way VS Code's
+/// bundled extensions are simply there on first run. A dismissal marker (written at
+/// uninstall) or an existing install skips; the refresh pass keeps an install current.
+pub fn install_missing_bundled(app: &tauri::AppHandle) -> Vec<Result<String, String>> {
+    let Ok(dir) = extensions_dir(app) else {
+        return Vec::new();
+    };
+    let packages: Vec<std::path::PathBuf> = bundled_vsix_packages(app);
+    install_missing_bundled_in(&dir, &packages)
+}
+
+/// The auto-install works on raw package paths, not the scanned `BundledPackage` offers:
+/// the bundled `.vsix` carries no `ggs` key (the submodule's own package.json never
+/// declared one), and the ordinary install path derives its backend exactly as a hand
+/// install of a marketplace package derives it.
+fn install_missing_bundled_in(
+    dir: &Path,
+    packages: &[std::path::PathBuf],
+) -> Vec<Result<String, String>> {
+    let mut outcomes = Vec::new();
+    for path in packages {
+        let Ok(manifest) = read_vsix_manifest(path) else {
+            eprintln!("[ai] manifest unreadable for {path:?}");
+            let dbg = read_vsix_manifest(path).unwrap_err();
+            eprintln!("[ai] reason: {dbg}");
+            continue;
+        };
+        let Some(id) = manifest_id(&manifest) else {
+            eprintln!("[ai] id none for {path:?}");
+            continue;
+        };
+        if find_installed(dir, &id)
+            .map(|versions| !versions.is_empty())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if bundled_dismissed_marker(dir, &id).is_file() {
+            continue;
+        }
+        outcomes.push(install_from_vsix_into(dir, path, false).map(|info| {
+            record_bundled_stamp(
+                &dir.join(format!("{}-{}", info.id, info.version)),
+                path,
+            );
+            format!(
+                "{} {} installed from the bundled package (first launch)",
+                info.id, info.version
+            )
+        }));
+    }
+    outcomes
+}
+
+/// Every `.vsix` the installer (or a dev tree) carries beside the app, deduplicated by
+/// file name — the auto-install scans packages, not offers, so a ggs-key-less marketplace
+/// shape installs too.
+fn bundled_vsix_packages(app: &tauri::AppHandle) -> Vec<std::path::PathBuf> {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        roots.push(resource_dir.join("extensions"));
+    }
+    for base in [
+        "target/studio/bundled/app-resources/extensions",
+        "target/studio/bundled",
+        "../target/studio/bundled/app-resources/extensions",
+        "../target/studio/bundled",
+    ] {
+        roots.push(std::path::PathBuf::from(base));
+    }
+    let mut found: Vec<std::path::PathBuf> = Vec::new();
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("vsix") {
+                continue;
+            }
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            if let Some(name) = name {
+                if !found
+                    .iter()
+                    .any(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()) == Some(name.clone()))
+                {
+                    found.push(path);
+                }
+            }
+        }
+    }
+    found
+}
+
 fn refresh_bundled_installs_in(
     dir: &Path,
     packages: &[BundledPackage],
@@ -744,7 +857,12 @@ pub fn ext_uninstall(
     ext_id: String,
 ) -> Result<(), String> {
     let dir = extensions_dir(&app)?;
-    uninstall_stopping(&dir, &ext_id, &state)
+    uninstall_stopping(&dir, &ext_id, &state)?;
+    // A deliberate uninstall of a bundled package is remembered: the boot pass
+    // auto-installs only what the user never removed (the marker file, not the package
+    // directory, is what a later boot reads).
+    let _ = std::fs::write(dir.join(format!(".bundled-dismissed-{ext_id}")), b"uninstalled\n");
+    Ok(())
 }
 
 /// Read a file inside an installed extension's directory (the extension host loads the
@@ -1510,8 +1628,25 @@ fn generated_studio_manifest(manifest: &VsixManifest, ggs: StudioManifest) -> St
 fn parse_jsonc_manifest(bytes: &[u8]) -> Result<VsixManifest, String> {
     let text = String::from_utf8_lossy(bytes);
     let stripped = strip_trailing_commas(&strip_jsonc_comments(&text));
-    let value: serde_json::Value =
+    let mut value: serde_json::Value =
         serde_json::from_str(&stripped).map_err(|e| format!("invalid package.json: {e}"))?;
+    // Normalize the `ggs` identity: the store id and version are the package.json's own,
+    // and packagers forget to repeat them inside the key (the shipped git-graph-rs VSIX
+    // did exactly that) — a strict read then fails on `missing field id` and the package
+    // becomes uninstallable everywhere. Missing fields are filled; wrong ones win.
+    {
+        let name = value.get("name").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+        let publisher = value.get("publisher").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+        let version = value.get("version").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+        if let Some(ggs) = value.get_mut("ggs").and_then(|ggs| ggs.as_object_mut()) {
+            if ggs.get("id").is_none() && !publisher.is_empty() && !name.is_empty() {
+                ggs.insert("id".into(), serde_json::json!(format!("{publisher}.{name}")));
+            }
+            if ggs.get("version").is_none() && !version.is_empty() {
+                ggs.insert("version".into(), serde_json::json!(version));
+            }
+        }
+    }
     serde_json::from_value(value).map_err(|e| format!("invalid package.json: {e}"))
 }
 
@@ -2854,6 +2989,64 @@ mod ext_asset_tests {
 mod vsix_tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn the_real_bundled_vsix_auto_installs() {
+        // The packed git-graph-rs VSIX (no ggs key, an engine .node + a main): the exact
+        // package the installer ships, through the exact auto-install entry.
+        let packed = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/studio/bundled/app-resources/extensions/git-graph-rs.vsix");
+        if !packed.is_file() {
+            eprintln!("skipping: no packed bundled vsix");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        let outcomes = install_missing_bundled_in(&exts, &[packed]);
+        assert_eq!(outcomes.len(), 1);
+        let outcome = &outcomes[0];
+        assert!(outcome.is_ok(), "auto-install failed: {outcome:?}");
+        // The install exists and its derived manifest carries a backend.
+        let versions = find_installed(&exts, "neophack.git-graph-rs").unwrap();
+        assert!(!versions.is_empty(), "the install landed");
+        let manifest: StudioManifest = serde_json::from_str(
+            &std::fs::read_to_string(exts.join(format!("neophack.git-graph-rs-{}", versions[0])).join("manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(manifest.backend.is_some(), "the derived manifest declares a backend");
+    }
+
+    #[test]
+    fn the_bundled_package_auto_installs_once_and_respects_a_dismissal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        let vsix = make_vsix(tmp.path(), "demo", "acme", "1.0.0");
+        let packages = vec![vsix.clone()];
+
+        // First launch: the package installs.
+        let outcomes = install_missing_bundled_in(&exts, &packages);
+        assert_eq!(outcomes.len(), 1);
+        assert!(outcomes[0].is_ok(), "{outcomes:?}");
+        assert!(find_installed(&exts, "acme.demo")
+            .map(|versions| !versions.is_empty())
+            .unwrap_or(false));
+
+        // The second boot is a no-op — the install already exists.
+        let again = install_missing_bundled_in(&exts, &packages);
+        assert!(again.is_empty(), "already-installed must skip: {again:?}");
+
+        // A deliberate uninstall drops the dismissal marker; the boot pass reads it and
+        // never resurrects the package.
+        let marker = bundled_dismissed_marker(&exts, "acme.demo");
+        std::fs::write(&marker, b"uninstalled\n").unwrap();
+        let _ = std::fs::remove_dir_all(exts.join("acme.demo-1.0.0"));
+        let outcomes = install_missing_bundled_in(&exts, &packages);
+        assert!(outcomes.is_empty(), "dismissed stays dismissed: {outcomes:?}");
+        assert!(!find_installed(&exts, "acme.demo")
+            .map(|versions| !versions.is_empty())
+            .unwrap_or(false));
+    }
 
     /// A `.vsix` carrying `extension/package.json` + a compiled entry bundle, plus the OPC
     /// root files real packages ship (which the extractor must skip).

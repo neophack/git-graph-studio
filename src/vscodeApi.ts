@@ -76,6 +76,10 @@ export interface HostContext {
 	/** The active colour theme's `ThemeKind` (1 light, 2 dark). Optional for the same
 	 *  reason; the shim defaults to dark. */
 	themeKind?: number;
+	/** The extension's own parsed `package.json`: `context.extension.packageJSON` and
+	 *  `extensions.getExtension(id).packageJSON` report it. Optional — an older bridge
+	 *  sends none and the shim answers an empty object. */
+	packageJSON?: Record<string, unknown>;
 	/** Where a webview panel loads package-local files from (the `ggs://` URL of the install
 	 *  directory, trailing slash included) — `asWebviewUri` composes synchronously from it. */
 	webviewResourceBase: string;
@@ -176,40 +180,37 @@ export class Location {
 	constructor(readonly uri: Uri, readonly range: Range) {}
 }
 
-export interface Uri {
-	scheme: string;
-	path: string;
-	fsPath: string;
-	query: string;
-	fragment: string;
-	toString(): string;
-	with(change: Partial<Uri>): Uri;
-}
-
-function makeUri(scheme: string, path: string, query = '', fragment = ''): Uri {
-	const fsPath = path;
-	const uri: Uri = {
-		scheme,
-		path,
-		fsPath,
-		query,
-		fragment,
-		toString: () => `${scheme}:${path}${query ? '?' + query : ''}${fragment ? '#' + fragment : ''}`,
-		with: (change) => makeUri(change.scheme ?? scheme, change.path ?? path, change.query ?? query, change.fragment ?? fragment)
-	};
-	// Functions cannot cross the structured clone of a postMessage: an RPC carrying a Uri
-	// (vscode.diff's sides above all) would throw DataCloneError and never reach the host.
-	// Non-enumerable members are skipped by the clone — the data crosses, the methods stay
-	// callable in the frame.
-	Object.defineProperty(uri, 'toString', { enumerable: false, writable: true, configurable: true });
-	Object.defineProperty(uri, 'with', { enumerable: false, writable: true, configurable: true });
-	return uri;
-}
-
-export const Uri = {
-	file: (path: string) => makeUri('file', path),
-	joinPath: (base: Uri, ...segments: string[]) => makeUri(base.scheme, [base.path.replace(/\/$/, ''), ...segments].join('/')),
-	parse: (value: string) => {
+/** `Uri`: a real class, because extensions `instanceof vscode.Uri` on every boundary
+ *  (ms-python's configuration watcher alone does it a dozen times) — a factory object
+ *  answering `is not callable` there kills the whole configuration pipeline. The methods
+ *  live on the prototype, so a structured clone still copies only the data fields: an RPC
+ *  carrying a Uri crosses as plain data and `rehydrateUris` rebuilds the methods. */
+export class Uri {
+	readonly scheme: string;
+	readonly path: string;
+	readonly fsPath: string;
+	readonly query: string;
+	readonly fragment: string;
+	constructor(scheme: string, path: string, query = '', fragment = '') {
+		this.scheme = scheme;
+		this.path = path;
+		this.fsPath = path;
+		this.query = query;
+		this.fragment = fragment;
+	}
+	toString(): string {
+		return `${this.scheme}:${this.path}${this.query ? '?' + this.query : ''}${this.fragment ? '#' + this.fragment : ''}`;
+	}
+	with(change: Partial<Uri>): Uri {
+		return makeUri(change.scheme ?? this.scheme, change.path ?? this.path, change.query ?? this.query, change.fragment ?? this.fragment);
+	}
+	static file(path: string): Uri {
+		return makeUri('file', path);
+	}
+	static joinPath(base: Uri, ...segments: string[]): Uri {
+		return makeUri(base.scheme, [base.path.replace(/\/$/, ''), ...segments].join('/'));
+	}
+	static parse(value: string): Uri {
 		const index = value.indexOf(':');
 		if (index === -1) return makeUri('untitled', value);
 		const scheme = value.slice(0, index);
@@ -221,7 +222,11 @@ export const Uri = {
 		const cut = Math.min(...[queryAt, hashAt].filter((at) => at !== -1).concat(rest.length));
 		return makeUri(scheme, rest.slice(0, cut), queryAt !== -1 ? rest.slice(queryAt + 1, hashAt === -1 ? undefined : hashAt) : '', hashAt !== -1 ? rest.slice(hashAt + 1) : '');
 	}
-} as const;
+}
+
+function makeUri(scheme: string, path: string, query = '', fragment = ''): Uri {
+	return new Uri(scheme, path, query, fragment);
+}
 
 /** Reconstitute the Uris an inbound host call's arguments carry. A command argument
  *  crosses postMessage (or the ggs-ext/1 line) as plain data — the Uri methods are
@@ -304,6 +309,11 @@ export enum ExtensionKind { UI = 1, Workspace = 2 }
 export enum FileType { Unknown = 0, File = 1, Directory = 2, SymbolicLink = 64 }
 export enum EndOfLine { LF = 1, CRLF = 2 }
 export enum OverviewRulerLane { Left = 1, Center = 2, Right = 4, Full = 7 }
+/** `DecorationRangeBehavior`: how a decoration's ranges grow as the document is edited
+ *  (cspell's spell-issue decorations construct with `ClosedClosed`). */
+export enum DecorationRangeBehavior { OpenOpen = 0, ClosedClosed = 1, OpenClosed = 2, ClosedOpen = 3 }
+/** `LanguageStatusSeverity`: the `LanguageStatusItem.severity` values. */
+export enum LanguageStatusSeverity { Information = 0, Warning = 1, Error = 2 }
 export enum TextEditorRevealType { Default = 0, InCenter = 1, InCenterIfOutsideViewport = 2, AtTop = 3, InCenterIfOutsideViewportPreserveScroll = 4 }
 export enum QuickPickItemKind { Separator = -1, Default = 0 }
 export enum DiagnosticSeverity { Error = 0, Warning = 1, Information = 2, Hint = 3 }
@@ -427,6 +437,141 @@ export class TextEdit {
 export class RelativePattern {
 	constructor(public base: string | Uri, public pattern: string) {}
 }
+/** `WorkspaceEdit` over its `changes`/`documentChanges` maps: a package builds one as a
+ *  value and hands it to `applyEdit` or a CodeAction — the host walks it as plain data. */
+export class WorkspaceEdit {
+	readonly _changes = new Map<string, TextEdit[]>();
+	createUri(_uri: string): Uri {
+		return Uri.file(_uri);
+	}
+	replace(uri: Uri, range: Range, newText: string): void {
+		const key = uri.toString();
+		this._changes.set(key, [...(this._changes.get(key) ?? []), new TextEdit(range, newText)]);
+	}
+	insert(uri: Uri, position: Position, newText: string): void {
+		this.replace(uri, new Range(position, position), newText);
+	}
+	delete(uri: Uri, range: Range): void {
+		this.replace(uri, range, '');
+	}
+	get(uri: Uri): readonly TextEdit[] {
+		return this._changes.get(uri.toString()) ?? [];
+	}
+	get size(): number {
+		return this._changes.size;
+	}
+	entries(): [Uri, TextEdit[]][] {
+		return [...this._changes].map(([key, edits]) => [Uri.parse(key), edits]);
+	}
+}
+/** `Diagnostic`: a squiggle — the shape `languages.createDiagnosticCollection` entries
+ *  carry and editorDiagnostics renders. */
+export enum DiagnosticTag { Unnecessary = 1, Deprecated = 2 }
+export class DiagnosticRelatedInformation {
+	constructor(public location: Location, public message: string) {}
+}
+export class Diagnostic {
+	severity!: DiagnosticSeverity;
+	source?: string;
+	code?: string | number;
+	relatedInformation?: DiagnosticRelatedInformation[];
+	tags?: DiagnosticTag[];
+	constructor(public range: Range, public message: string, severity?: DiagnosticSeverity) {
+		this.severity = severity ?? DiagnosticSeverity.Error;
+	}
+}
+/** `CompletionItem` and the rest of the language-feature value types: packages extend
+ *  these at module-eval time (vscode-languageclient's converters do `class extends
+ *  CompletionItem`), so each must be a real class, not a factory. */
+export class CompletionItem {
+	label: string | { label: string; detail?: string; description?: string };
+	kind?: CompletionItemKind;
+	tags?: readonly unknown[];
+	detail?: string;
+	documentation?: string | MarkdownString;
+	deprecated?: boolean;
+	preselect?: boolean;
+	sortText?: string;
+	filterText?: string;
+	insertText?: string | SnippetString;
+	range?: Range | { inserting: Range; replacing: Range };
+	command?: unknown;
+	textEdit?: TextEdit;
+	additionalTextEdits?: TextEdit[];
+	commitCharacters?: string[];
+	keepWhitespace?: boolean;
+	constructor(label: string | { label: string; detail?: string; description?: string }, kind?: CompletionItemKind) {
+		this.label = label;
+		this.kind = kind;
+	}
+}
+export class CodeLens {
+	command?: unknown;
+	data?: unknown;
+	constructor(public range: Range, command?: unknown) {
+		this.command = command;
+	}
+}
+export class DocumentLink {
+	tooltip?: string;
+	constructor(public range: Range, public target?: Uri) {}
+}
+export class CodeAction {
+	edit?: WorkspaceEdit;
+	diagnostics?: Diagnostic[];
+	command?: unknown;
+	isPreferred?: boolean;
+	disabled?: { reason: string };
+	constructor(public title: string, public kind?: CodeActionKind) {}
+}
+export class SymbolInformation {
+	tags?: readonly unknown[];
+	containerName?: string;
+	constructor(public name: string, public kind: SymbolKind, rangeOrContainer?: Range | string, locationOrUri?: Location | Uri) {
+		// `Uri` values are plain records (the const factory builds them), not class
+		// instances — the same scheme/fsPath shape test rehydrateUris applies tells a
+		// Uri from a Location here; `instanceof Uri` cannot compile against the const.
+		const uriData = locationOrUri as { scheme?: unknown; fsPath?: unknown } | undefined;
+		if (rangeOrContainer instanceof Range && uriData !== undefined && typeof uriData.scheme === 'string' && typeof uriData.fsPath === 'string') this.location = new Location(locationOrUri as Uri, rangeOrContainer);
+		else if (typeof rangeOrContainer === 'string' && locationOrUri instanceof Location) {
+			this.containerName = rangeOrContainer;
+			this.location = locationOrUri;
+		}
+	}
+	location!: Location;
+}
+export class CallHierarchyItem {
+	tags?: readonly unknown[];
+	constructor(public kind: SymbolKind, public name: string, public detail: string, public uri: Uri, public range: Range, public selectionRange: Range) {}
+}
+export class TypeHierarchyItem {
+	tags?: readonly unknown[];
+	constructor(public kind: SymbolKind, public name: string, public detail: string, public uri: Uri, public range: Range, public selectionRange: Range) {}
+}
+export enum InlayHintKind { Type = 1, Parameter = 2 }
+export class InlayHint {
+	kind?: InlayHintKind;
+	tooltip?: string | MarkdownString;
+	paddingLeft?: boolean;
+	paddingRight?: boolean;
+	textEdits?: TextEdit[];
+	constructor(public position: Position, public label: string | InlayHintLabelPart[], kind?: InlayHintKind) {
+		this.kind = kind;
+	}
+}
+export interface InlayHintLabelPart {
+	label: string;
+	tooltip?: string | MarkdownString;
+	location?: Location;
+	command?: unknown;
+}
+/** `CancellationError`: the token's `throwIfCancellationRequested` answer. */
+export class CancellationError extends Error {
+	constructor() {
+		super('Canceled');
+		this.name = 'Canceled';
+	}
+}
 /** `Selection`: a Range whose ends are also anchor/active. */
 export class Selection extends Range {
 	readonly anchor: Position;
@@ -450,6 +595,12 @@ export class FileSystemError extends Error {
 	}
 	static FileExists(messageOrUri: string | Uri): FileSystemError {
 		return new FileSystemError(String(messageOrUri), 'FileExists');
+	}
+	static FileNotADirectory(messageOrUri: string | Uri): FileSystemError {
+		return new FileSystemError(String(messageOrUri), 'FileNotADirectory');
+	}
+	static FileIsADirectory(messageOrUri: string | Uri): FileSystemError {
+		return new FileSystemError(String(messageOrUri), 'FileIsADirectory');
 	}
 	static NoPermissions(messageOrUri: string | Uri): FileSystemError {
 		return new FileSystemError(String(messageOrUri), 'NoPermissions');
@@ -614,7 +765,11 @@ class WebviewPanel {
 			onDidReceiveMessage: this.messages.event,
 			asWebviewUri: (local: Uri | string): Uri => {
 				const path = typeof local === 'string' ? local : local.fsPath;
-				const root = this.ctx.extensionPath.replace(/[\\/]+$/, '');
+				// The extension path crosses with the host platform's separators (backslashes
+				// on Windows) while the incoming path is forward-slash normalized — normalize
+				// both or the root-prefix test fails and the whole absolute path is appended
+				// to the resource base, a URL nothing serves.
+				const root = this.ctx.extensionPath.replace(/[\\/]+$/, '').replace(/\\/g, '/');
 				const rel = path.replace(/\\/g, '/').startsWith(root + '/')
 					? path.replace(/\\/g, '/').slice(root.length + 1)
 					: path.replace(/\\/g, '/').replace(/^\.\//, '');
@@ -707,7 +862,11 @@ class WebviewView {
 			onDidReceiveMessage: this.messages.event,
 			asWebviewUri: (local: Uri | string): Uri => {
 				const path = typeof local === 'string' ? local : local.fsPath;
-				const root = this.ctx.extensionPath.replace(/[\\/]+$/, '');
+				// The extension path crosses with the host platform's separators (backslashes
+				// on Windows) while the incoming path is forward-slash normalized — normalize
+				// both or the root-prefix test fails and the whole absolute path is appended
+				// to the resource base, a URL nothing serves.
+				const root = this.ctx.extensionPath.replace(/[\\/]+$/, '').replace(/\\/g, '/');
 				const rel = path.replace(/\\/g, '/').startsWith(root + '/')
 					? path.replace(/\\/g, '/').slice(root.length + 1)
 					: path.replace(/\\/g, '/').replace(/^\.\//, '');
@@ -902,6 +1061,77 @@ function inert(name: string): Disposable {
 	return new Disposable(() => undefined);
 }
 
+/** The Test API's item and collection shapes: a package's tree stores real items (VS Code's
+ *  TestItem is a plain mutable value), the collection iterates like Node's maps. */
+export class TestTag {
+	constructor(public id: string) {}
+}
+export class TestMessage {
+	output?: string;
+	expectedOutput?: string;
+	actualOutput?: string;
+	location?: Location;
+	static output(value: string): TestMessage {
+		const message = new TestMessage(value);
+		message.output = value;
+		return message;
+	}
+	constructor(public message?: string | unknown) {}
+}
+export class TestRunRequest {
+	constructor(public include?: unknown[] | undefined, public exclude?: unknown[] | undefined, public profile?: unknown, public continuous?: boolean) {}
+}
+function makeTestItem(id: string, label: string, uri?: Uri, parent?: unknown): Record<string, unknown> {
+	const children = new Map<string, unknown>();
+	const item: Record<string, unknown> = {
+		id,
+		label,
+		uri,
+		parent,
+		tags: [] as unknown[],
+		sortText: undefined,
+		description: undefined,
+		detail: undefined,
+		error: undefined,
+		busy: false,
+		range: undefined,
+		canResolveChildren: false,
+		invalidateResults: () => undefined
+	};
+	item.children = makeTestItemCollection(children);
+	return item;
+}
+function makeTestItemCollection(items: Map<string, unknown>): Record<string, unknown> {
+	const collection: Record<string, unknown> = {
+		add: (item: { id: string }) => {
+			items.set(item.id, item);
+			return item;
+		},
+		delete: (id: string) => {
+			items.delete(id);
+		},
+		get: (id: string) => items.get(id),
+		replace: (descriptions: unknown[]) => {
+			items.clear();
+			for (const description of descriptions) {
+				const item = description as { id: string };
+				items.set(item.id, item);
+			}
+		},
+		forEach: (callback: (item: unknown, collection: unknown) => void) => {
+			for (const item of [...items.values()]) callback(item, collection);
+		},
+		get size() {
+			return items.size;
+		},
+		toJSON: () => [...items.values()]
+	};
+	(collection as unknown as { [Symbol.iterator]: () => IterableIterator<unknown> })[Symbol.iterator] = function* () {
+		yield* items.values();
+	};
+	return collection;
+}
+
 export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 	/** The webview panels this frame created, by panel id (host events route through them). */
 	const webviewPanels = new Map<number, WebviewPanel>();
@@ -924,15 +1154,28 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 	/** The host's watcher batches — what `createFileSystemWatcher` serves its events from. */
 	const fsChanged = new EventEmitter<{ root: string; paths: string[]; gitChanged: boolean; truncated: boolean }>();
 	const activeEditorChangedEmitter = new EventEmitter<void>();
-	const visibleEditorsChanged = new EventEmitter<void>();
-	const selectionChanged = new EventEmitter<void>();
+	const visibleEditorsChanged = new EventEmitter<unknown[]>();
+	const selectionChanged = new EventEmitter<{ textEditor: unknown; selections: unknown[]; kind?: number }>();
 	const editorVisibleRangesChanged = new EventEmitter<void>();
 	const editorOptionsChanged = new EventEmitter<void>();
 	const themeChangedEmitter = new EventEmitter<unknown>();
 	const extensionsChanged = new EventEmitter<void>();
+	/** The Tabs API's change event (VS Code 1.68): the frame hears no host tab pushes yet,
+	 *  so the event registers and simply never fires — an issue viewer's listener attaches
+	 *  (cspell's does) and its UI updates on its own timers instead. */
+	const tabsChanged = new EventEmitter<unknown>();
+	/** The diagnostics registry: every `createDiagnosticCollection` stores here, so
+	 *  `languages.getDiagnostics` aggregates and `onDidChangeDiagnostics` fires for real. */
+	const diagnosticEntries = new Map<string, Map<string, unknown[]>>();
+	const diagnosticsChanged = new EventEmitter<unknown>();
 	/** The host's view of the active text editor, as the last `activeEditorChanged` push left
 	 *  it (text rides along whenever the document itself changed). */
 	let activeEditor: HostEvent['editor'] = null;
+	/** The paths `onDidOpenTextDocument` already fired for. A document "opens" once per
+	 *  session — and only when its text is in hand: the first active-editor push for a
+	 *  file can race the text load, and a didOpen with an empty body makes a language
+	 *  server analyse nothing (cspell's squiggles never arrived that way). */
+	const openedDocuments = new Set<string>();
 	/** The theme kind as the context carried it in / the last themeChanged push left it. */
 	let themeKind = ctx.themeKind ?? 2;
 	/** The tree views this frame registered, by view id (host calls and events route through). */
@@ -1023,6 +1266,13 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 	 *  active-editor push's copy when this is the active document, else empty). */
 	function makeTextDocument(path: string): Record<string, unknown> {
 		const active = activeEditor?.path === path ? activeEditor : null;
+		const text = active?.text ?? '';
+		const lines = text.split('\n');
+		const clampPosition = (position?: { line: number; character: number }): Position => {
+			const line = Math.max(0, Math.min(Number(position?.line) || 0, lines.length - 1));
+			const character = Math.max(0, Math.min(Number(position?.character) || 0, lines[line]!.length));
+			return new Position(line, character);
+		};
 		return {
 			uri: Uri.file(path),
 			fileName: path,
@@ -1031,7 +1281,47 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			isDirty: false,
 			isUntitled: false,
 			isClosed: false,
-			getText: () => active?.text ?? '',
+			getText: () => text,
+			lineCount: lines.length,
+			// `positionAt`/`offsetAt`/`validate*`: the offset↔position pair and the clamps
+			// every diagnostics refresh walks its findings through (cspell's re-check loop
+			// calls positionAt + validateRange per finding) — computed against the held
+			// text, \n line splitting, VS Code's zero-based line/character.
+			positionAt: (offset: number) => {
+				const at = Math.max(0, Math.min(Number(offset) || 0, text.length));
+				let line = 0;
+				let lineStart = 0;
+				for (let index = 0; index < at; index += 1) {
+					if (text.charCodeAt(index) === 10) {
+						line += 1;
+						lineStart = index + 1;
+					}
+				}
+				return new Position(line, at - lineStart);
+			},
+			offsetAt: (position: { line: number; character: number }) => {
+				const line = Math.max(0, Math.min(Number(position?.line) || 0, lines.length - 1));
+				let offset = 0;
+				for (let index = 0; index < line; index += 1) offset += lines[index]!.length + 1;
+				offset += Math.max(0, Math.min(Number(position?.character) || 0, lines[line]!.length));
+				return offset;
+			},
+			validatePosition: clampPosition,
+			validateRange: (range?: { start?: { line: number; character: number }; end?: { line: number; character: number } }) =>
+				new Range(clampPosition(range?.start), clampPosition(range?.end)),
+			// `lineAt`: the zero-based line reader a checker's per-line walk uses.
+			lineAt: (line: number) => {
+				const index = Math.max(0, Math.min(Number(line) || 0, lines.length - 1));
+				const lineText = lines[index]!;
+				return {
+					lineNumber: index + 1,
+					text: lineText,
+					range: new Range(new Position(index, 0), new Position(index, lineText.length)),
+					rangeIncludingLineBreak: new Range(new Position(index, 0), new Position(index + 1, 0)),
+					firstNonWhitespaceCharacterIndex: lineText.search(/\S|$/),
+					isEmptyOrWhitespace: lineText.trim().length === 0
+				};
+			},
 			save: async () => true
 		};
 	}
@@ -1090,7 +1380,10 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 	}
 
 	const api = {
-		version: '1.61.0-studio',
+		// The API surface this shim targets, spelled the way `vscode.version` spells it:
+		// packages version-gate on it (vscode-languageclient refuses a host below its
+		// `engines.vscode` floor), so a studio-local suffix would wrongly read as an old host.
+		version: '1.91.0',
 
 		commands: {
 			registerCommand: (id: string, handler: (...args: unknown[]) => unknown) => {
@@ -1150,6 +1443,15 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 					dispose: () => undefined
 				};
 			},
+			/** The Tabs API (`window.tabGroups`, VS Code 1.68): an issue viewer or a
+			 *  tab-aware feature registers `onDidChangeTabs` at activation. The frame sees
+			 *  one extension's own editors, so the group list stays empty and the event
+			 *  never fires — a registration must survive, a live feed is not promised. */
+			tabGroups: {
+				all: [] as unknown[],
+				onDidChangeTabs: tabsChanged.event as never,
+				close: async (_group: unknown, _preserveFocus?: boolean) => true
+			},
 			createOutputChannel: (name: string, _options?: { log?: boolean }) => {
 				// The `{ log: true }` form VS Code's LogOutputChannel takes: the level-named
 				// methods a logging extension binds at activation (`channel.info.bind(channel)`
@@ -1160,6 +1462,8 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 					void bridge.request('output.append', [name, `[${level}] ${message}${args.length > 0 ? ' ' + args.map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg))).join(' ') : ''}\n`]);
 				return {
 					name,
+					logLevel: 4 as never,
+					onDidChangeLogLevel: (() => new Disposable(() => undefined)) as never,
 					trace: (message: string, ...args: unknown[]) => logLine('trace', message, ...args),
 					debug: (message: string, ...args: unknown[]) => logLine('debug', message, ...args),
 					info: (message: string, ...args: unknown[]) => logLine('info', message, ...args),
@@ -1274,12 +1578,47 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 				// `document` exists — the window simply reports focused there.
 				return { focused: typeof document === 'undefined' ? true : document.hasFocus() };
 			},
-			onDidChangeWindowState: (() => new Disposable(() => undefined)) as never
+			onDidChangeWindowState: (() => new Disposable(() => undefined)) as never,
+			/** The notebook events (VS Code's notebook editor set): no notebook UI exists
+			 *  here, so the registrations attach and never fire — the honest degradation
+			 *  that lets a feature like cspell's issue viewers finish activating. */
+			onDidChangeActiveNotebookEditor: (() => new Disposable(() => undefined)) as never,
+			onDidChangeNotebookEditorSelection: (() => new Disposable(() => undefined)) as never,
+			onDidChangeNotebookEditorVisibleRanges: (() => new Disposable(() => undefined)) as never,
+			onDidOpenNotebookDocument: (() => new Disposable(() => undefined)) as never,
+			onDidCloseNotebookDocument: (() => new Disposable(() => undefined)) as never,
+			onDidSaveNotebookDocument: (() => new Disposable(() => undefined)) as never,
+			/** The terminal events: a package watching for terminals attaches at activation
+			 *  (ms-python's terminal layer does). Terminals `createTerminal` makes do open
+			 *  in the integrated panel, but the open/close pushes are not wired back yet —
+			 *  the registration survives and never fires. */
+			onDidOpenTerminal: (() => new Disposable(() => undefined)) as never,
+			onDidCloseTerminal: (() => new Disposable(() => undefined)) as never,
+			onDidChangeActiveTerminal: (() => new Disposable(() => undefined)) as never,
+			onDidChangeTerminalState: (() => new Disposable(() => undefined)) as never,
+			onDidStartTerminalShellExecution: (() => new Disposable(() => undefined)) as never,
+			onDidEndTerminalShellExecution: (() => new Disposable(() => undefined)) as never,
+			onDidChangeTerminalShellIntegration: (() => new Disposable(() => undefined)) as never,
+			/** `registerTerminalLinkProvider` / `registerTerminalProfileProvider`: the
+			 *  registrations survive inertly — the terminal renders no link hits and adds
+			 *  no profile entries yet. */
+			registerTerminalLinkProvider: () => new Disposable(() => undefined),
+			registerTerminalProfileProvider: () => new Disposable(() => undefined),
+			get activeNotebookEditor(): undefined {
+				return undefined;
+			},
+			get notebookEditors(): unknown[] {
+				return [];
+			}
 		},
 
 		workspace: {
 			workspaceFolders: ctx.workspaceFolders,
 			onDidChangeWorkspaceFolders: workspaceFoldersChanged.event,
+			/** Workspace-trust events: the frame holds no trust model, the event registers
+			 *  and never fires, and `isTrusted` answers true (everything the frame runs is
+			 *  the user's own installed package). */
+			onDidGrantWorkspaceTrust: (() => new Disposable(() => undefined)) as never,
 			getWorkspaceFolder: (uriOrPath?: Uri | string) => {
 				const path = typeof uriOrPath === 'string' ? uriOrPath : uriOrPath?.fsPath;
 				if (path === undefined) return ctx.workspaceFolders[0] ?? null;
@@ -1438,9 +1777,15 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			get fs() {
 				const op = (name: string, uri: Uri | string, to?: Uri | string, data?: string) =>
 					bridge.request('fs.op', [name, typeof uri === 'string' ? uri : uri.fsPath, to === undefined ? undefined : typeof to === 'string' ? to : to.fsPath, data]);
-				return {
-					readFile: async (uri: Uri | string) => decodeBase64(((await op('read', uri)) as { data: string }).data),
-					readDirectory: async (uri: Uri | string) => (((await op('list', uri)) as { name: string; kind: number }[]).map((entry) => [entry.name, entry.kind])) as [string, number][],
+			return {
+				readFile: async (uri: Uri | string) => decodeBase64(((await op('read', uri)) as { data: string }).data),
+				// `access`: F_OK semantics — a readable stat answers, a missing path rejects
+				// (the exact contract `workspace.fs.access(uri, fs.constants.F_OK)` has).
+				access: async (uri: Uri | string) => {
+					await op('stat', uri);
+					return undefined;
+				},
+				readDirectory: async (uri: Uri | string) => (((await op('list', uri)) as { name: string; kind: number }[]).map((entry) => [entry.name, entry.kind])) as [string, number][],
 					createDirectory: (uri: Uri | string) => op('mkdir', uri).then(() => undefined),
 					delete: (uri: Uri | string) => op('delete', uri).then(() => undefined),
 					rename: (uri: Uri | string, to: Uri | string) => op('rename', uri, to).then(() => undefined),
@@ -1459,15 +1804,66 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 
 		languages: {
 			getLanguages: async () => ['bat', 'c', 'cpp', 'csharp', 'css', 'go', 'html', 'java', 'javascript', 'json', 'kotlin', 'lua', 'markdown', 'plaintext', 'powershell', 'python', 'ruby', 'rust', 'shellscript', 'sql', 'swift', 'typescript', 'xml', 'yaml'],
-			match: (selector: unknown, document: { languageId?: string }) => {
-				const wanted = typeof selector === 'string' ? [selector] : Array.isArray(selector) ? selector.map((entry) => typeof entry === 'string' ? entry : (entry as { language?: string })?.language) : [(selector as { language?: string })?.language];
-				return wanted.includes(document?.languageId) ? 10 : 0;
+			/** `createLanguageStatusItem` (VS Code 1.53): a package's language status entry
+			 *  (cspell's word-count row). The item is a plain mutable value; no status bar
+			 *  surface renders it yet — constructing and updating must survive. */
+			createLanguageStatusItem: (id: string, _selector: unknown) => ({
+				id,
+				name: undefined as string | undefined,
+				selector: _selector,
+				text: '',
+				detail: undefined as string | undefined,
+				kind: 1 as never,
+				command: undefined as unknown,
+				busy: false,
+				severity: 0 as never,
+				accessibilityInformation: undefined as unknown,
+				dispose: () => undefined
+			}),
+			onDidChangeDiagnostics: diagnosticsChanged.event as never,
+			/** The aggregate read: with a Uri, that document's diagnostics (or undefined);
+			 *  without, every `[Uri, diagnostics]` pair across all collections. */
+			getDiagnostics: (uri?: Uri | string): unknown => {
+				if (uri !== undefined) {
+					const path = (typeof uri === 'string' ? uri : uri.fsPath ?? uri.toString()).replace(/\\/g, '/');
+					for (const entries of diagnosticEntries.values()) {
+						const found = entries.get(path);
+						if (found !== undefined) return found;
+					}
+					return undefined;
+				}
+				const all: unknown[] = [];
+				for (const entries of diagnosticEntries.values()) {
+					for (const [path, diagnostics] of entries) all.push([Uri.parse(path), diagnostics]);
+				}
+				return all;
+			},
+			match: (selector: unknown, document: { languageId?: string; uri?: Uri } | undefined) => {
+				// VS Code's selector scoring: a string matches the language; a filter object
+				// scores each property it declares — a scheme-only selector (`{scheme:'file'}`,
+				// how language clients declare their document sync) matches any language of
+				// that scheme. An array takes the best score; no match scores 0.
+				const doc = document ?? undefined;
+				const scoreOne = (entry: unknown): number => {
+					if (typeof entry === 'string') return entry === '*' ? 5 : entry === doc?.languageId ? 10 : 0;
+					if (entry !== null && typeof entry === 'object') {
+						const filter = entry as { language?: string; scheme?: string; notebook?: unknown };
+						if (filter.language !== undefined && filter.language !== '*' && filter.language !== doc?.languageId) return 0;
+						const scheme = doc?.uri?.scheme ?? 'file';
+						if (filter.scheme !== undefined && filter.scheme !== scheme) return 0;
+						return filter.language !== undefined ? 10 : 5;
+					}
+					return 0;
+				};
+				const selectors = Array.isArray(selector) ? selector : [selector];
+				return Math.max(0, ...selectors.map(scoreOne));
 			},
 			/** A diagnostic collection that keeps its entries in memory: set/get/delete/clear
-			 *  work as data structures (extensions read their own diagnostics back); no editor
-			 *  surface renders them yet. */
+			 *  work as data structures (extensions read their own diagnostics back); the
+			 *  editor renders them through the host's `diagnostics.set`. */
 			createDiagnosticCollection: (name?: string) => {
 				const entries = new Map<string, unknown[]>();
+				diagnosticEntries.set(name ?? `collection-${diagnosticEntries.size}`, entries);
 				// The key the editor matches on: the file's own path spelling.
 				const keyOf = (uri: Uri | string): string => {
 					const path = typeof uri === 'string' ? uri : uri.fsPath ?? uri.toString();
@@ -1476,6 +1872,7 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 				const push = (path: string): void => {
 					const diagnostics = (entries.get(path) ?? []) as SerializableDiagnostic[];
 					void bridge.request('diagnostics.set', [ctx.extensionId, path, diagnostics]).catch(() => undefined);
+					diagnosticsChanged.fire(undefined as unknown as never);
 				};
 				return {
 					name: name ?? 'collection',
@@ -1539,6 +1936,33 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			setLanguageConfiguration: () => inert('languages.setLanguageConfiguration')
 		},
 
+		/** The Language Model + Chat namespaces (VS Code 1.90+): a package registers its AI
+		 *  tools (ms-python's environment tools) at activation. The registrations survive;
+		 *  no chat surface exists to call them from, so `selectChatModels` answers empty. */
+		lm: {
+			registerTool: (name: string, _tool: unknown) => {
+				console.info(`[ggs] lm.registerTool(${name}) is inert in this host (no chat surface)`);
+				return new Disposable(() => undefined);
+			},
+			selectChatModels: async () => [] as never[],
+			onDidChangeChatModels: (() => new Disposable(() => undefined)) as never,
+			fileCompression: undefined
+		},
+		chat: {
+			registerChatParticipant: () => new Disposable(() => undefined),
+			registerChatVariableResolver: () => new Disposable(() => undefined),
+			registerChatCommand: () => new Disposable(() => undefined),
+			createChatParticipant: (id: string) => ({
+				id,
+				iconPath: undefined,
+				followupProvider: undefined,
+				participantName: id,
+				onDidReceiveFeedback: (() => new Disposable(() => undefined)) as never,
+				requestHandler: undefined as unknown,
+				dispose: () => undefined
+			})
+		},
+
 		tasks: {
 			task: (definition: unknown, scope: unknown, name: string, source: string, execution: unknown, problemMatchers?: string[]) => ({ definition, scope, name, source, execution, problemMatchers }),
 			registerTaskProvider: () => inert('tasks.registerTaskProvider'),
@@ -1555,6 +1979,51 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			onDidStartTaskProcess: (() => new Disposable(() => undefined)) as never,
 			onDidEndTaskProcess: (() => new Disposable(() => undefined)) as never,
 			Task, ShellExecution, ProcessExecution, TaskGroup, TaskScope, TaskRevealKind, TaskPanelKind, CustomExecution
+		},
+
+		/** The Test Controller API (VS Code 1.59): a package builds its test tree at
+		 *  activation (ms-python does, before any run). The controller, its items and the
+		 *  run handles are real, iterable objects over local state; a `createTestRun`
+		 *  answers a handle whose marks record locally, since no test UI renders yet —
+		 *  constructing an activation survives, a run report has no surface to reach. */
+		tests: {
+			createTestController: (id: string, label?: string) => {
+				const items = new Map<string, unknown>();
+				const collection = makeTestItemCollection(items);
+				const profiles: unknown[] = [];
+				const controller: Record<string, unknown> = {
+					id,
+					label,
+					items: collection,
+					event: new EventEmitter<unknown>().event,
+					refreshHandler: undefined,
+					resolveHandler: undefined as unknown,
+					updateContinuousHandler: undefined as unknown,
+					invalidateTestResults: () => undefined,
+					createTestItem: (itemId: string, itemLabel: string, uri?: Uri) => makeTestItem(itemId, itemLabel, uri),
+					createRunProfile: (profileLabel: string, kind: unknown, runHandler: unknown, isDefault?: boolean, tag?: unknown) => {
+						const profile: Record<string, unknown> = { profileLabel, kind, runHandler, isDefault, tag, configureHandler: undefined, dispose: () => undefined };
+						profiles.push(profile);
+						return profile;
+					},
+					createTestRun: (_request: unknown, name?: string, _persist?: boolean) => ({
+						name,
+						token: { isCancellationRequested: false, onCancellationRequested: () => new Disposable(() => undefined) },
+						started: () => undefined,
+						passed: () => undefined,
+						failed: () => undefined,
+						skipped: () => undefined,
+						errored: () => undefined,
+						enqueued: () => undefined,
+						appendOutput: () => undefined,
+						ended: false,
+						end: () => undefined
+					}),
+					dispose: () => undefined
+				};
+				return controller;
+			},
+			TestTag, TestMessage, TestRunRequest
 		},
 
 		debug: {
@@ -1653,19 +2122,23 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			 *  frame boundary, and another extension's API surface is not reachable. */
 			getExtension: (extensionId: string) => {
 				if (extensionId !== ctx.extensionId) return undefined;
-				return {
-					id: ctx.extensionId,
-					extensionPath: ctx.extensionPath,
-					isActive: true,
-					exports: undefined,
-					packageJSON: {},
-					activate: async () => undefined
-				};
+				return extensionEntry(ctx);
 			},
 			onDidChange: extensionsChanged.event as never,
 			all: [{ id: ctx.extensionId, extensionPath: ctx.extensionPath, isActive: true, exports: undefined, packageJSON: {}, activate: async () => undefined }] as never[]
 		},
 
+		/** The log-level enum VS Code 1.74 added with LogOutputChannel: a language client maps
+		 *  its trace settings onto it at `createClient` time (cspell's does). */
+		LogLevel: { Off: 1, Trace: 2, Debug: 3, Info: 4, Warning: 5, Error: 6 },
+		/** `IndentAction`: the onEnter auto-indent rules an onLanguage package's providers
+		 *  return (ms-python's python extension constructs them at eval time). */
+		IndentAction: { None: 0, Indent: 1, IndentOutdent: 2, Outdent: 3 },
+		/** `ColorThemeKind`: what `window.activeColorTheme.kind` answers and a package's
+		 *  theme-aware features branch on (cspell's config watcher defaults from it). */
+		ColorThemeKind: { Light: 1, Dark: 2, HighContrast: 3, HighContrastLight: 4 },
+		/** The Test API's run-profile kinds (`createRunProfile`'s second argument). */
+		TestRunProfileKind: { Run: 1, Debug: 2, Coverage: 3 },
 		Uri,
 		Position,
 		Range,
@@ -1685,6 +2158,8 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 		FileType,
 		EndOfLine,
 		OverviewRulerLane,
+		DecorationRangeBehavior,
+		LanguageStatusSeverity,
 		TextEditorRevealType,
 		QuickPickItemKind,
 		DiagnosticSeverity,
@@ -1700,6 +2175,20 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 		TextEdit,
 		RelativePattern,
 		FileSystemError,
+		WorkspaceEdit,
+		Diagnostic,
+		DiagnosticTag,
+		DiagnosticRelatedInformation,
+		CompletionItem,
+		CodeLens,
+		DocumentLink,
+		CodeAction,
+		SymbolInformation,
+		CallHierarchyItem,
+		TypeHierarchyItem,
+		InlayHint,
+		InlayHintKind,
+		CancellationError,
 
 		/** Not part of VS Code's `vscode` module: the mementos `ExtensionContext.globalState` /
 		 *  `workspaceState` are built from (extHostBoot wires them into the context). */
@@ -1790,9 +2279,29 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 				: incoming;
 			if (before !== activeEditor?.path) {
 				activeEditorChangedEmitter.fire(undefined);
-				visibleEditorsChanged.fire(undefined);
+				// The change events carry real payloads — a language client's selection
+				// handler reads `event.textEditor`, the visible-editors handler filters
+				// `event.textEditors` — firing `undefined` crashed every subscriber.
+				// VS Code's payload for this event is the editors array itself.
+				visibleEditorsChanged.fire(activeEditor !== null ? [makeTextEditorProxy()] : []);
 			}
-			selectionChanged.fire(undefined);
+			selectionChanged.fire({
+				textEditor: makeTextEditorProxy(),
+				selections: [makeTextEditorProxy().selection],
+				kind: 2 // TextEditorSelectionChangeKind.Keyboard — no mouse/command tracking
+			});
+			// A document becoming active with its text in hand is VS Code's
+			// onDidOpenTextDocument (once per path per session). When the arrival push
+			// raced the text load, this fires on the later push that carries the content —
+			// the shape a language client's didOpen needs.
+			if (activeEditor !== null && activeEditor.text !== undefined && !openedDocuments.has(activeEditor.path)) {
+				openedDocuments.add(activeEditor.path);
+				// Gated tracing: `localStorage.ggs-ext-debug = 1` before opening the file.
+				if (typeof localStorage !== 'undefined' && localStorage.getItem('ggs-ext-debug')) {
+					console.info(`[ggs-ext-debug] onDidOpenTextDocument ${activeEditor.path} (${String(activeEditor.text).length} chars)`);
+				}
+				documentOpened.fire(makeTextDocument(activeEditor.path) as { fileName: string } & Record<string, unknown>);
+			}
 			return;
 		}
 		if (event.event === 'documentSaved' && event.path !== undefined) {
@@ -1810,17 +2319,32 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 
 export type VscodeApi = ReturnType<typeof createVscodeApi>;
 
+/** The extension's own `Extension<T>` entry — `context.extension` and
+ *  `extensions.getExtension(id)` answer the same object, as in VS Code, so a package
+ *  reading its own `packageJSON` off either (cspell's activate does) sees one shape. */
+export function extensionEntry(context: HostContext): Record<string, unknown> {
+	return {
+		id: context.extensionId,
+		extensionPath: context.extensionPath,
+		isActive: true,
+		exports: undefined,
+		packageJSON: context.packageJSON ?? {},
+		activate: async () => undefined
+	};
+}
+
 /** The ExtensionContext VS Code hands to activate(): the mementos are the shim's persisted
  *  ones (`globalState` survives restarts, `workspaceState` per install), and `extension` is
  *  the extension's own API entry, as `vscode.extensions.getExtension(id)` reports it.
  *  Shared by both hosts that run extension code: the sandboxed frame (extHostBoot) and the
  *  real-Node extension host (nodeHost) — one definition, so the two cannot drift. */
 export function activationContext(context: HostContext, api: VscodeApi): Record<string, unknown> {
-	const asUri = (path: string) => ({ scheme: 'file', path, fsPath: path, toString: () => 'file:' + path });
+	const asUri = (path: string) => Uri.file(path);
 	return {
 		subscriptions: [] as Disposable[],
 		extensionPath: context.extensionPath,
 		extensionUri: asUri(context.extensionPath),
+		extension: extensionEntry(context),
 		globalState: api.__mementos.global,
 		workspaceState: api.__mementos.workspace,
 		storagePath: context.extensionPath,

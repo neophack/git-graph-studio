@@ -225,6 +225,15 @@ pub fn ext_child_kill(handle: u64) -> Result<(), String> {
     killed.map_err(|e| format!("kill child {handle}: {e}"))
 }
 
+/// The Node runtime a frame's `child_process.fork` may run a package's own server with
+/// (`node <server> --stdio`): the ungated lookup — forking an extension's language server
+/// is the package's own runtime story, not the app's backend-host gate, and `None` is the
+/// honest answer the frame turns into Node's fork `'error'` event.
+#[tauri::command]
+pub fn ext_node_runtime_path() -> Result<Option<String>, String> {
+    Ok(crate::ext_process::find_node_runtime().map(|path| path.to_string_lossy().into_owned()))
+}
+
 /// Kill every child an extension owns — what an extension reload/uninstall calls so a
 /// frame's tools do not outlive it.
 #[tauri::command]
