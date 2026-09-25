@@ -251,10 +251,7 @@ pub async fn ext_gallery_search(
 /// One marketplace asset (an extension's icon), base64-encoded — the same shape
 /// `ext_read_file_base64` serves installed packages' icons in.
 #[tauri::command]
-pub async fn ext_gallery_asset(
-    gallery: Option<String>,
-    url: String,
-) -> Result<String, String> {
+pub async fn ext_gallery_asset(gallery: Option<String>, url: String) -> Result<String, String> {
     let base = gallery_url(gallery)?;
     tauri::async_runtime::spawn_blocking(move || {
         let bytes = get(&base, &url)?;
@@ -283,13 +280,14 @@ pub async fn ext_gallery_install(
     let base = gallery_url(gallery)?;
     // Download and read the manifest off the UI thread; the backend stop and the install
     // follow once the id is known (the two things that touch shared state).
-    let (package, ext_id) = tauri::async_runtime::spawn_blocking(move || -> Result<(PathBuf, String), String> {
-        let package = download_vsix(&base, &download_url)?;
-        let manifest = crate::cmd_ext::read_vsix_manifest(&package)?;
-        Ok((package, manifest.extension_id()))
-    })
-    .await
-    .map_err(|e| format!("the download was cancelled: {e}"))??;
+    let (package, ext_id) =
+        tauri::async_runtime::spawn_blocking(move || -> Result<(PathBuf, String), String> {
+            let package = download_vsix(&base, &download_url)?;
+            let manifest = crate::cmd_ext::read_vsix_manifest(&package)?;
+            Ok((package, manifest.extension_id()))
+        })
+        .await
+        .map_err(|e| format!("the download was cancelled: {e}"))??;
     // The old install's backend cannot outlive the directory its exe lives in.
     let _ = state.stop(&ext_id);
     let dir = crate::cmd_ext::extensions_dir(&app)?;
@@ -336,7 +334,11 @@ mod tests {
         assert_eq!(first.version, "6.5.2");
         assert_eq!(first.download_count, 28367);
         assert!(first.verified);
-        assert!(first.icon_url.as_deref().unwrap_or_default().ends_with("logo.png"));
+        assert!(first
+            .icon_url
+            .as_deref()
+            .unwrap_or_default()
+            .ends_with("logo.png"));
         assert!(first.download_url.ends_with(".vsix"));
         assert!(answer.entries[1].icon_url.is_none());
         assert!(!answer.entries[1].verified);
@@ -377,7 +379,11 @@ mod tests {
     fn only_the_gallery_origin_is_reachable() {
         let base = "https://open-vsx.org";
         assert_eq!(
-            confined(base, "https://open-vsx.org/api/acme/demo/1.0.0/file/demo.vsix").unwrap(),
+            confined(
+                base,
+                "https://open-vsx.org/api/acme/demo/1.0.0/file/demo.vsix"
+            )
+            .unwrap(),
             "https://open-vsx.org/api/acme/demo/1.0.0/file/demo.vsix"
         );
         assert!(confined(base, "https://evil.example/demo.vsix").is_err());

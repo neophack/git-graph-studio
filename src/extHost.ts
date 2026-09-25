@@ -10,12 +10,14 @@
 // its commands dispatch to its own frame (a VSIX) or its own backend process (a `ggs/2`
 // package), and its pages mount as sandboxed frames over the `ggs://` protocol.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, Channel } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { commands } from './commands';
 import { applyContributions, applyExtensionSettings, declaredCommand, extensionThemeList, extensionViewContributions, languageIdFor, localize, registerContextProvider, registerExtensionSnippets, registerExtensionThemes, removeContributions, type ExtensionThemeDef, type ManifestContributes } from './contributions';
+import { setFileDiagnostics, type SerializableDiagnostic } from './editorDiagnostics';
 import { syncExtensionThemes, themeById } from './settings';
 import { locale, registerZhCnText, t, tf } from './i18n';
 import * as state from './state';
@@ -81,6 +83,9 @@ export interface GalleryEntry {
  *  registry the VS Code ecosystem publishes to (the same service code-server and Theia
  *  point at). The backend confines every gallery request to this origin. */
 export const MARKETPLACE_URL = 'https://open-vsx.org';
+/** The Tauri event a real-Node extension host's `ggs.hostRequest` arrives on (the Rust
+ *  reader forwards it; see ext_process.rs's HOST_REQUEST_EVENT). */
+export const HOST_REQUEST_EVENT = 'ext-host-request';
 
 /** The `manifest.json` of an extension package. */
 export interface StudioManifest {
@@ -151,8 +156,8 @@ export interface PageDiffRequest {
 	title: string;
 	repo?: string;
 	binaryNotice?: boolean;
-	left: { revision: string; path: string; label: string; exists: boolean };
-	right: { revision: string; path: string; label: string; exists: boolean };
+	left: { revision: string; path: string; label: string; exists: boolean; local?: boolean; content?: string };
+	right: { revision: string; path: string; label: string; exists: boolean; local?: boolean; content?: string };
 }
 
 /** The theme of the moment, as a page's 'theme.stylesheet' request answers it and the theme
@@ -195,9 +200,15 @@ export function extAssetUrl(ext: ExtInfo | undefined, rel: string): string {
 }
 
 interface FrameHandle {
-	frame: HTMLIFrameElement;
+	/** The host iframe. Absent on a remote handle: an extension whose program runs in a
+	 *  real-Node host process (nodeHost.ts) has no frame — its calls and pushes cross the
+	 *  ggs-ext/1 stdio channel instead (see `call` / `send`). */
+	frame?: HTMLIFrameElement;
 	/** Posts into the frame (set once it loaded its extension). */
 	send?: (message: unknown) => void;
+	/** A remote handle's call transport: the host's `__studioExtCall` vocabulary over the
+	 *  backend's ggs-ext/1 channel instead of the frame's window messages. */
+	call?: (method: string, args: unknown[]) => Promise<unknown>;
 	/** Command ids this extension registered; unregistered when it goes away. */
 	commandIds: Set<string>;
 	/** The calls into the frame still waiting for their result: settled (rejected) when the
@@ -240,6 +251,11 @@ export interface ActivationPolicy {
 	workspaceContains: string[];
 }
 
+/** How long a lazy `ensureActive` waits for the frame's activation to settle before the
+ *  waiter is released with a warning — a hung `activate` in a package's own code must not
+ *  wedge its commands into an unanswerable wait. */
+export const ACTIVATION_TIMEOUT = 30_000;
+
 /** Parse VS Code's `activationEvents` into the policy the host activates by. Events this
  *  model does not carry (`onFileSystem:`, `onUri`, `onDebugResolve`, …) leave the extension
  *  eager — never un-activatable. The implicit activation events VS Code derives from the
@@ -273,8 +289,11 @@ export function parseActivationPolicy(events: string[] | undefined, contributes?
 /** The bootstrap composed into a webview panel's HTML: `acquireVsCodeApi()` — one per page,
  *  VS Code's own rule — whose `postMessage` reaches the owning extension frame, plus the
  *  message listener the host relays through. State stays inside the frame (as much of it as
- *  a sandboxed srcdoc document can keep). */
-const WEBVIEW_BOOT = `<script>
+ *  a sandboxed srcdoc document can keep). The boot script wears the extension's own CSP
+ *  nonce when its html declares one — VS Code's own convention, and the only way the boot
+ *  survives a `script-src 'nonce-…'` policy the package shipped. */
+function webviewBoot(nonce: string | null): string {
+	return `<script${nonce ? ` nonce="${nonce}"` : ''}>
 (function () {
 	var api = null;
 	var state = null;
@@ -291,24 +310,44 @@ const WEBVIEW_BOOT = `<script>
 		var data = event.data;
 		if (!data || data.__ggsWebviewHost !== true) return;
 		if (data.type === 'message') window.dispatchEvent(new MessageEvent('message', { data: data.message }));
+		if (data.type === 'theme') {
+			// VS Code defines the --vscode-* variables (and the kind class) in every webview
+			// document itself; the host pushes its theme here for the same effect.
+			var style = document.getElementById('__ggsTheme');
+			if (style && typeof data.css === 'string') style.textContent = data.css;
+			document.documentElement.classList.remove('vscode-dark', 'vscode-light');
+			document.documentElement.classList.add(data.kind === 'vscode-light' ? 'vscode-light' : 'vscode-dark');
+		}
 	});
 })();
-</script>`;
+</script>`;}
 
-/** Compose the bootstrap into a webview document (the `compose_page` rule: inside `<head>`
- *  when there is one, else after `<html>`, else at the very start). */
-function composeWebview(html: string): string {
+/** Compose the theme (the active theme's variable definitions and its kind class) and the
+ *  bootstrap into a webview document (the `compose_page` rule: inside `<head>` when there
+ *  is one, else after `<html>`, else at the very start). VS Code defines `--vscode-*` in
+ *  every webview document itself — without the same injection here, every `var(--vscode-…)`
+ *  in a package's own CSS is undefined, and widgets (dropdown menus above all) render with
+ *  no background at all. */
+function composeWebview(html: string, theme: { kind: 'vscode-dark' | 'vscode-light'; css: string } | null): string {
+	// The extension's own CSP nonce (VS Code's convention: the html declares one nonce and
+	// the injected api script reuses it) — without it a `script-src 'nonce-…'` policy
+	// blocks the boot and the webview can never speak.
+	const nonce = /nonce="([A-Za-z0-9+/=_-]+)"/.exec(html)?.[1] ?? null;
+	const themeHead = theme === null
+		? ''
+		: `<style id="__ggsTheme">${theme.css}</style><script${nonce ? ` nonce="${nonce}"` : ''}>document.documentElement.classList.add('${theme.kind}');</script>`;
+	const boot = themeHead + webviewBoot(nonce);
 	for (const marker of ['</head>', '</HEAD>']) {
 		const at = html.indexOf(marker);
-		if (at !== -1) return `${html.slice(0, at)}${WEBVIEW_BOOT}${html.slice(at)}`;
+		if (at !== -1) return `${html.slice(0, at)}${boot}${html.slice(at)}`;
 	}
 	const at = html.indexOf('<html');
 	if (at !== -1) {
 		const end = html.indexOf('>', at);
 		const cut = end === -1 ? html.length : end + 1;
-		return `${html.slice(0, cut)}${WEBVIEW_BOOT}${html.slice(cut)}`;
+		return `${html.slice(0, cut)}${boot}${html.slice(cut)}`;
 	}
-	return WEBVIEW_BOOT + html;
+	return boot + html;
 }
 
 export class ExtensionHost {
@@ -316,6 +355,9 @@ export class ExtensionHost {
 	/** The command ids of each extension's manifest contributions (dropped from the workbench
 	 *  registry on uninstall; the frame's own registrations are tracked per frame handle). */
 	private readonly declaredCommandIds = new Map<string, string[]>();
+	/** The document formatting providers frames registered (`languages.registerFormatting`):
+	 *  extId -> the provider id, its language selectors, and the frame holding the handler. */
+	private readonly formattingProviders = new Map<string, { id: string; selectors: { language?: string }[]; handle: FrameHandle }>();
 	/** The backend-carrying packages whose commands dispatch to the backend process rather
 	 *  than a frame — a package without a `main`, whose `package.json` is its whole program.
 	 *  A backend package WITH a `main` runs its code in a frame like any VSIX (VS Code
@@ -352,11 +394,28 @@ export class ExtensionHost {
 	onRunInTerminal: ((command: string) => void) | null = null;
 	onRepoChanged: (() => void) | null = null;
 	onForwardKey: ((key: { key: string; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean }) => void) | null = null;
+	/** Workbench hook: open an extension-supplied text document (a content provider's
+	 *  answer to `vscode.open` of a provider-scheme Uri) in a read-only tab. */
+	onOpenContent: ((title: string, path: string, text: string) => void) | null = null;
 	/** Extensions whose commands dispatch to a `ggs/2` process backend, not a frame. */
 	private readonly processBacked = new Set<string>();
+	/** The packages whose manifest carries a `main` (the real-Node host's candidates). */
+	private readonly extHasMain = new Map<string, boolean>();
 	/** The declared commands of the process-backed extensions — runnable with no frame, the
 	 *  manifest alone (the backend spawns lazily on first execution). */
 	private readonly processCommandIds = new Set<string>();
+	/** The text-document content providers extensions registered
+	 *  (`workspace.registerTextDocumentContentProvider`), by scheme: the owning frame answers
+	 *  a provider-scheme Uri's text when the host opens one (`vscode.open` / `vscode.diff`).
+	 *  The host decodes nothing of any package's private schemes — asking back is the whole
+	 *  mechanism. */
+	private readonly docProviders = new Map<string, FrameHandle>();
+	/** The serial of extension-opened diff/content tabs, for their reuse keys. */
+	private nextExtDocSerial = 1;
+	/** The theme as webview documents wear it (its variable definitions and kind class):
+	 *  cached so `composeWebview` can inline it for a correct first paint, and pushed to
+	 *  the live documents when the theme changes. */
+	private webviewTheme: { kind: 'vscode-dark' | 'vscode-light'; css: string } | null = null;
 
 	/** The webview panels frame extensions created, by panel id (VS Code's numeric ids are
 	 *  per-frame, so the frame's `(panelId, extension)` pair is unambiguous here). */
@@ -416,16 +475,105 @@ export class ExtensionHost {
 	private readonly pendingActivations = new Map<string, Promise<void>>();
 	/** Resolved when a frame reports `__studioExtActivated` (lazy activation waits for it). */
 	private readonly activationWaiters = new Map<string, () => void>();
+	/** The real Node runtime this machine offers (`ext_node_runtime`), or null — null
+	 *  unless `GGS_REAL_NODE` opts the real-Node host in, so a main-only package activates
+	 *  in a sandboxed frame exactly as before. A manifest `node` backend is NOT tied to
+	 *  this: it hosts in its backend process on ggs-node either way (`backendHosted`). */
+	private nodeHostExe: string | null = null;
+	/** The remote frame handles created per backend-hosted extension (one, reused across
+	 *  the backend's restarts — its registrations re-land on the same handle). */
+	private readonly remoteHandles = new Map<string, FrameHandle>();
+
+	/** Whether this package's program runs in its backend process instead of a sandboxed
+	 *  frame: a manifest-declared `node` backend always does — the bundled ggs-node (Boa)
+	 *  hosts it, the machine's own Node is never consulted — and a main-only package joins
+	 *  it only under the opted-in real-Node host (`GGS_REAL_NODE`, when a runtime exists). */
+	private backendHosted(extId: string): boolean {
+		const ext = this.installedExts.find((candidate) => candidate.id === extId);
+		return ext?.capabilities?.backend?.kind === 'node' || (this.nodeHostExe !== null && this.extHasMain.has(extId));
+	}
+
+	/** A remote frame handle: the host-call vocabulary crosses `ext_process_run` /
+	 *  `ext_process_invoke`, the event pushes cross `ext_process_push_event` — the same
+	 *  `serve` path and the same push sites a frame's handle flows through. */
+	private remoteHandle(extId: string): FrameHandle {
+		const existing = this.remoteHandles.get(extId);
+		if (existing) return existing;
+		const handle: FrameHandle = { commandIds: new Set(), pendingCalls: new Set() };
+		handle.send = (message) => {
+			const data = message as { type?: string };
+			// `__studioExtEvent` pushes translate one-to-one; the frame-only channels (the
+			// child-process events of the frame's own spawns) do not apply — a real-Node
+			// extension spawns real processes itself.
+			if (data?.type !== '__studioExtEvent') return;
+			void invoke('ext_process_push_event', { extId, event: message }).catch(() => undefined);
+		};
+		handle.call = (method, args) => {
+			if (method === 'runCommand') {
+				const [command, commandArgs] = args as [string, unknown[] | undefined];
+				return invoke<unknown>('ext_process_run', { extId, command, args: commandArgs ?? [] });
+			}
+			return invoke<unknown>('ext_process_invoke', { extId, method, args });
+		};
+		this.remoteHandles.set(extId, handle);
+		return handle;
+	}
+
+	/** Boot (or reuse) an extension's host process — ggs-node by default, a real Node under
+	 *  `GGS_REAL_NODE`: the remote handle registers before `start` so the activation's
+	 *  forwarded registrations (`commands.register`, webviews, providers) find their owner.
+	 *  The handshake answers after activation, so a settled `start` is a settled
+	 *  activation. */
+	private async ensureNodeHost(extId: string): Promise<void> {
+		this.frames.set(extId, this.remoteHandle(extId));
+		try {
+			await invoke('ext_process_start', { extId });
+			console.info(`[ggs-ext] node host up: ${extId}`);
+		} catch (error) {
+			this.frames.delete(extId);
+			notify('warning', `Extension ${extId} failed to start (node host): ${String(error)}`);
+			throw error;
+		}
+	}
 
 	
 	constructor() {
 		window.addEventListener('message', (event) => this.onMessage(event));
+		// A real-Node extension host's `ggs.hostRequest`s arrive as backend events: served
+		// through the same `serve` path a frame's RPC takes, answered over the backend's
+		// stdin. The remote frame handle must exist already — `ensureNodeHost` registers
+		// it before starting the process — so an unknown extension's request fails honestly.
+		void listen<{ extId: string; id: number; method: string; args: unknown[] }>(HOST_REQUEST_EVENT, (event) => {
+			const { extId, id, method, args } = event.payload;
+			const handle = this.frames.get(extId);
+			const respond = (ok: boolean, result: unknown) => {
+				void invoke('ext_process_host_respond', { extId, id, ok, result })
+					.catch((error) => console.info(`[ggs-nodehost] respond failed: ${String(error)}`));
+			};
+			if (!handle) return respond(false, `no extension host frame for ${extId}`);
+			this.serve(method, args ?? [], extId, handle).then(
+				(result) => respond(true, result === undefined ? null : result),
+				(error) => respond(false, String(error))
+			);
+		}).catch((error) => console.info(`[ggs-nodehost] listen failed: ${String(error)}`));
 		// An extension's own settings change (its update(), or the Settings dialog writing the
 		// same key) reaches its frame as a configChanged event — `onDidChangeConfiguration`.
 		document.addEventListener(state.EXT_SETTINGS_EVENT, (event) => {
 			const extId = (event as CustomEvent<string>).detail;
 			this.frames.get(extId)?.send?.({ type: '__studioExtEvent', event: 'configChanged', settings: state.extSettings(extId) });
 		});
+		// The backend watcher's batches reach every frame as fsChanged events — the half of
+		// `workspace.createFileSystemWatcher` that makes an extension's view refresh on
+		// external changes (and on commits made in the app's own Source Control). The event
+		// name is main.rs's `FS_CHANGED_EVENT` ('studio://fs-changed'); the constant lives
+		// with the workbench, which this module must not import (it imports this one).
+		void listen<{ root: string; paths: string[]; gitChanged: boolean; truncated: boolean }>('studio://fs-changed', (event) => {
+			for (const handle of this.frames.values()) {
+				handle.send?.({ type: '__studioExtEvent', event: 'fsChanged', fs: event.payload });
+			}
+		}).catch(() => undefined);
+		// The theme cache for webview documents: the first `composeWebview` needs it ready.
+		void this.refreshWebviewTheme().catch(() => undefined);
 	}
 
 	/** List the installed extensions (the Extensions view renders these). */
@@ -516,6 +664,7 @@ export class ExtensionHost {
 	/** Restart a plugin's process backend: stop, then start (the handshake runs again). */
 	async restartProcess(extId: string): Promise<void> {
 		await invoke('ext_process_stop', { extId }).catch(() => undefined);
+		await invoke('ext_child_stop_for', { extId }).catch(() => undefined);
 		await invoke('ext_process_start', { extId });
 	}
 
@@ -551,6 +700,10 @@ export class ExtensionHost {
 		} catch {
 			return; // the panel surfaces the error; activation just stays silent
 		}
+		// The real-Node runtime fact, asked once per boot: with one, every program-carrying
+		// package activates in its own Node host process (`.node` NAPI addons, ESM, workers
+		// and `node_modules` native); without one, the sandboxed frames serve as always.
+		this.nodeHostExe = await invoke<string | null>('ext_node_runtime').catch(() => null);
 		// Every extension's manifest contributions (commands, context menu entries,
 		// keybindings) join the workbench, the natively-hosted built-in included: its commands
 		// dispatch through onNativeCommand instead of a frame. The built-ins were already
@@ -563,19 +716,20 @@ export class ExtensionHost {
 		// Each extension gets its own frame, so activations are independent — run them in
 		// parallel instead of serializing every iframe boot behind the slowest bundle read.
 		// Skipped for entries with nothing to boot: a `bundled`-format entry (an offer of a
-		// package the installer ships but nothing installed) and a backend-carrying package
-		// WITHOUT a `main` (its package.json is its whole program; its commands dispatch to
-		// the backend). A backend package WITH a `main` activates its frame like any VSIX —
+		// package the installer ships but nothing installed) and a `process`-backend package
+		// without a `main` (the boot pass already started it; its commands dispatch to the
+		// backend). A `node`-backend package hosts its program in the backend process —
+		// `backendHosted` decides frame or process below.
 		// Activation follows `activationEvents`: eager extensions boot here, the lazy ones
 		// wait for their first command / language / view (a `workspaceContains` match boots
 		// them too).
 		const toActivate: ExtInfo[] = [];
 		for (const ext of installed) {
-			if (ext.format === 'bundled' || this.processOnly.has(ext.id) || this.frames.has(ext.id)) continue;
+			if (ext.format === 'bundled' || (ext.capabilities?.backend?.kind !== 'node' && this.processOnly.has(ext.id)) || this.frames.has(ext.id)) continue;
 			const policy = this.activationPolicies.get(ext.id);
 			if ((policy?.eager ?? true) || (await this.matchesWorkspaceContains(policy?.workspaceContains ?? []))) toActivate.push(ext);
 		}
-		await Promise.all(toActivate.map((ext) => this.activate(ext)));
+		await Promise.all(toActivate.map((ext) => (this.backendHosted(ext.id) ? this.ensureActive(ext.id) : this.activate(ext))));
 		this.onContributionsApplied?.();
 		this.onViewsChanged?.();
 	}
@@ -596,6 +750,7 @@ export class ExtensionHost {
 			return; // unreadable manifest: nothing to contribute
 		}
 		this.activationPolicies.set(ext.id, parseActivationPolicy(manifest?.activationEvents, manifest?.contributes));
+		this.extHasMain.set(ext.id, typeof manifest?.main === 'string');
 		this.registerContributions(ext.id, manifest?.contributes, nls, nlsZhCn);
 		// The locale context key a manifest's own code would set on activation (VS Code's
 		// setContext): `<ext id>:interfaceZhCn` gates its locale-twin commands and menus (the
@@ -676,7 +831,7 @@ export class ExtensionHost {
 	private registerContributions(extId: string, contributes: ManifestContributes | null | undefined, nls: Record<string, string>, nlsZhCn: Record<string, string> = {}): void {
 		this.declaredCommandIds.set(extId, (contributes?.commands ?? []).map((declared) => declared.command));
 		const dispatch = (command: string, args: unknown[] = []) => {
-			if (this.processOnly.has(extId)) return void this.runProcessCommand(extId, command, args);
+			if (this.nodeHostExe === null && this.processOnly.has(extId)) return void this.runProcessCommand(extId, command, args);
 			// A lazily-activating extension wakes here: runRegistered activates it first, then
 			// runs the handler its activation registered.
 			void this.runRegistered(command, args);
@@ -716,8 +871,11 @@ export class ExtensionHost {
 		if (ext) {
 			await this.applyContributions(ext);
 			// A main-less process package activates through its backend, not a frame (see
-			// activateInstalled); anything else gets a fresh frame for its new files.
-			if (!this.processOnly.has(extId)) await this.activate(ext);
+			// activateInstalled); anything else gets a fresh frame for its new files. A
+			// backend-hosted package (`node` backend, or main-only under the opted-in
+			// real-Node host) re-hosts in its process instead, `main` or not.
+			if (this.backendHosted(extId)) await this.ensureActive(extId).catch(() => undefined);
+			else if (!this.processOnly.has(extId)) await this.activate(ext);
 		}
 		// Install means run: a package that declares a backend comes up at once — the same
 		// "detect and run" the boot pass does, without waiting for a first command. A start
@@ -743,15 +901,17 @@ export class ExtensionHost {
 		let files: Record<string, string> | undefined;
 		let truncated = false;
 		let binaries: string[] = [];
+		let blobFiles: Record<string, string> | undefined;
 		let code: string | undefined;
 		let main = 'extension.js';
 		try {
 			const manifest = JSON.parse(await invoke<string>('ext_read_file', { extId: ext.id, relPath: 'package.json' })) as { main?: string };
 			main = (manifest.main ?? 'extension.js').replace(/^\.\//, '');
-			const bundle = await invoke<{ files: Record<string, string>; truncated: boolean; binaries?: string[] }>('ext_load_code', { extId: ext.id });
+			const bundle = await invoke<{ files: Record<string, string>; truncated: boolean; binaries?: string[]; blobFiles?: Record<string, string> }>('ext_load_code', { extId: ext.id });
 			files = bundle.files;
 			truncated = bundle.truncated;
 			binaries = bundle.binaries ?? [];
+			blobFiles = bundle.blobFiles ?? {};
 		} catch {
 			// The fallback: the manifest's `main` alone, resolved the way `require()` would
 			// (the bare Node spelling "./out/extension" gains its ".js").
@@ -799,7 +959,7 @@ export class ExtensionHost {
 				// The Node environment facts (`os`/`process` shims) and the loadable code map —
 				// both top-level message fields, beside the context (one backend call, cached).
 				nodeEnv: await cachedNodeEnv(),
-				...(files !== undefined ? { files, truncated, binaries } : { code: code ?? '' })
+				...(files !== undefined ? { files, truncated, binaries, blobs: blobFiles } : { code: code ?? '' })
 			});
 		});
 		document.body.appendChild(frame);
@@ -818,7 +978,7 @@ export class ExtensionHost {
 			unregisterCommand(id);
 		}
 		this.frames.delete(extId);
-		handle.frame.remove();
+		handle.frame?.remove();
 		// Whatever was still running in the frame (the deactivate itself included) has no
 		// frame left to answer from.
 		for (const cancel of [...handle.pendingCalls]) cancel(new Error(`extension ${extId} was deactivated`));
@@ -1024,6 +1184,56 @@ export class ExtensionHost {
 		}
 	}
 
+	/* ---------- VS Code's built-in document commands (vscode.open / vscode.diff) ---------- */
+
+	/** One side of a `vscode.diff` (or the document of a `vscode.open`): a file Uri reads
+	 *  from disk, a provider-scheme Uri's text is answered by the frame that registered the
+	 *  scheme's provider — the host never decodes a package's private URI shape. */
+	private async resolveVscodeUri(uri: unknown): Promise<{ scheme: string; name: string; fsPath: string; label: string; content?: string; local?: boolean }> {
+		const value = (uri ?? {}) as { scheme?: unknown; path?: unknown; fsPath?: unknown; query?: unknown };
+		const scheme = typeof value.scheme === 'string' && value.scheme !== '' ? value.scheme : 'file';
+		const path = typeof value.path === 'string' ? value.path : '';
+		if (scheme === 'file') {
+			const fsPath = typeof value.fsPath === 'string' && value.fsPath !== '' ? value.fsPath : path;
+			return { scheme, name: fsPath.split(/[\\/]/).pop() || fsPath, fsPath, label: fsPath, local: true };
+		}
+		const handle = this.docProviders.get(scheme);
+		if (!handle) throw new Error(`no text-document content provider is registered for the ${scheme} scheme`);
+		const text = await this.callFrame(handle, 'docProvider.provide', [value]) as string | null | undefined;
+		return { scheme, name: path.split('/').pop() || scheme, fsPath: path, label: path, content: text ?? '' };
+	}
+
+	/** `vscode.diff(left, right, title?)`: the diff editor over both sides' text — a
+	 *  provider side carries its content, a file side stays a file the editor reads. */
+	private async openVscodeDiff(left: unknown, right: unknown, title: unknown): Promise<void> {
+		if (!left || !right) return;
+		const [l, r] = await Promise.all([this.resolveVscodeUri(left), this.resolveVscodeUri(right)]);
+		const serial = this.nextExtDocSerial++;
+		this.onOpenDiff?.({
+			id: `ext-diff-${serial}`,
+			title: typeof title === 'string' && title !== '' ? title : `${r.name} (${l.scheme === 'file' ? l.name : l.label} → ${r.scheme === 'file' ? r.name : r.label})`,
+			left: l.local === true
+				? { revision: '', path: l.fsPath, label: l.name, exists: true, local: true }
+				: { revision: '', path: l.label, label: l.name, exists: true, content: l.content ?? '' },
+			right: r.local === true
+				? { revision: '', path: r.fsPath, label: r.name, exists: true, local: true }
+				: { revision: '', path: r.label, label: r.name, exists: true, content: r.content ?? '' }
+		});
+	}
+
+	/** `vscode.open(uri)`: a file opens in the editor; a provider-scheme document opens in a
+	 *  read-only tab over the provider's text. */
+	private async openVscodeDocument(uri: unknown): Promise<void> {
+		if (!uri) return;
+		const resolved = await this.resolveVscodeUri(uri);
+		if (resolved.local === true) {
+			this.onOpenFile?.(resolved.fsPath);
+			return;
+		}
+		const serial = this.nextExtDocSerial++;
+		this.onOpenContent?.(resolved.name || `document-${serial}`, resolved.label, resolved.content ?? '');
+	}
+
 	/** Run one command in a `ggs/2` process package's backend — the first execution spawns
 	 *  it (lazy activation). A result naming one of the package's pages opens it, and one
 	 *  naming a notification shows it: the convention a backend uses to surface UI, the way a
@@ -1062,7 +1272,7 @@ export class ExtensionHost {
 		frame.setAttribute('sandbox', 'allow-scripts');
 		if (view) {
 			view.frame = frame;
-			frame.srcdoc = composeWebview(view.html);
+			frame.srcdoc = composeWebview(view.html, this.webviewTheme);
 		}
 		container.appendChild(frame);
 		return () => this.webviewClosed(panelId);
@@ -1092,7 +1302,7 @@ export class ExtensionHost {
 		frame.title = `${extId}: ${viewId}`;
 		frame.setAttribute('sandbox', 'allow-scripts');
 		record.frame = frame;
-		if (record.html !== '') frame.srcdoc = composeWebview(record.html);
+		if (record.html !== '') frame.srcdoc = composeWebview(record.html, this.webviewTheme);
 		container.appendChild(frame);
 		return () => {
 			if (this.webviewViews.get(viewId)?.frame === frame) {
@@ -1108,7 +1318,7 @@ export class ExtensionHost {
 		const record = this.webviewViews.get(viewId);
 		if (!record) return;
 		record.html = html;
-		if (record.frame) record.frame.srcdoc = composeWebview(html);
+		if (record.frame) record.frame.srcdoc = composeWebview(html, this.webviewTheme);
 	}
 
 	/** A webview view's message crossed from its iframe: route it into the owning frame. */
@@ -1182,6 +1392,30 @@ export class ExtensionHost {
 				return this.executeCommand(args[0] as string, (args[1] as unknown[] | undefined) ?? []);
 			case 'commands.list':
 				return Promise.resolve(commands.all().map((c) => c.id));
+			case 'docProvider.register': {
+				// `workspace.registerTextDocumentContentProvider(scheme, provider)`: the
+				// provider object stays in the frame; the host remembers which frame answers
+				// the scheme, for `vscode.open` / `vscode.diff` of its Uris.
+				const scheme = args[0];
+				if (typeof scheme !== 'string' || scheme === '') throw new Error('docProvider.register needs a scheme');
+				this.docProviders.set(scheme, handle);
+				return Promise.resolve(undefined);
+			}
+			case 'docProvider.unregister': {
+				const scheme = args[0] as string;
+				if (this.docProviders.get(scheme) === handle) this.docProviders.delete(scheme);
+				return Promise.resolve(undefined);
+			}
+			case 'terminal.send': {
+				// `window.createTerminal().sendText(text)`: the text runs in the integrated
+				// terminal (VS Code's semantics — the panel comes up with the run).
+				this.onRunInTerminal?.(String(args[0] ?? ''));
+				return Promise.resolve(undefined);
+			}
+			case 'terminal.show': {
+				this.onRevealTerminal?.();
+				return Promise.resolve(undefined);
+			}
 			case 'notify': {
 				const [kind, message, items] = args as ['info' | 'warning' | 'error', string, string[]];
 				return new Promise((resolve) => {
@@ -1207,6 +1441,20 @@ export class ExtensionHost {
 				const [scope, key, value] = args as ['global' | 'workspace', string, unknown];
 				state.saveExtMemento(extId, scope, key, value);
 				return Promise.resolve(undefined);
+			}
+			case 'host.env': {
+				// The real-Node host's first request, before its activation: the facts a
+				// frame gets in its `__studioExtInit` message — settings, mementos, display
+				// language, theme kind, the package's `ggs://` asset base.
+				const ext = this.installedExts.find((candidate) => candidate.id === extId);
+				return Promise.resolve({
+					settings: state.extSettings(extId),
+					language: locale(),
+					appVersion: __APP_VERSION__,
+					themeKind: themeById().kind === 'vscode-light' ? 1 : 2,
+					webviewResourceBase: ext ? extAssetBase(ext) : `ggs://localhost/${extId}/`,
+					state: { global: state.extMemento(extId, 'global'), workspace: state.extMemento(extId, 'workspace') }
+				});
 			}
 			case 'openExternal':
 				return openUrl(args[0] as string).then(() => true);
@@ -1278,15 +1526,43 @@ export class ExtensionHost {
 				const [op, path, to, data] = args as [string, string, string?, string?];
 				return invoke('ext_fs', { op, roots: ExtensionHost.workspaceFolders, path, to, data });
 			}
-			case 'native.call': {
-				// A call on one of the package's native modules (a `require` of a `.node` the
-				// module loader answered with the host-served proxy): `[path, method, args]`,
-				// forwarded to the package's backend verbatim — the process that loaded the
-				// binary serves the call; the host neither knows nor shapes the protocol.
-				const [rel, method, callArgs] = args as [string, string, unknown[]?];
-				if (typeof rel !== 'string' || typeof method !== 'string') throw new Error('native.call needs a module path and a method');
-				return invoke('ext_process_run', { extId, command: method, args: callArgs ?? [] });
+			case 'diagnostics.set': {
+				// A frame pushed its diagnostic collection changes: they land in the editor
+				// diagnostics store, which re-renders every open editor for that file.
+				const [diagExtId, diagPath, diagList] = args as [string, string, SerializableDiagnostic[]];
+				setFileDiagnostics(diagPath, diagList ?? []);
+				return Promise.resolve(undefined);
 			}
+			case 'languages.registerFormatting': {
+				// The frame registered a document formatting provider: `{ id, selectors }`.
+				// `editor.formatDocument` routes to the first provider whose selector's
+				// language matches the document being formatted.
+				const [declaration] = args as [{ id: string; selectors: { language?: string }[] }];
+				this.formattingProviders.set(extId, { id: declaration.id, selectors: declaration.selectors ?? [], handle });
+				return Promise.resolve(undefined);
+			}
+			case 'languages.unregisterFormatting': {
+				const [declaration] = args as [{ id: string }];
+				if (this.formattingProviders.get(extId)?.id === declaration.id) this.formattingProviders.delete(extId);
+				return Promise.resolve(undefined);
+			}
+			case 'childProcess.spawn': {
+				// The frame's child_process (nodeShims maps the Node API shapes onto this):
+				// one spawn, one Channel of streamed stdout/stderr chunks and the exit —
+				// routed back into the owning frame as `__studioExtHostEvent` pushes.
+				const [spec] = args as [{ file: string; args?: string[]; cwd?: string; env?: Record<string, string> | null; shell?: boolean }];
+				const onEvent = new Channel<{ handle: number; event: string; data?: string; code?: number | null }>();
+				onEvent.onmessage = (message) => {
+					this.frames.get(extId)?.frame?.contentWindow?.postMessage({ type: '__studioExtHostEvent', kind: 'childProcess', message }, '*');
+				};
+				return invoke('ext_child_spawn', { extId, spec, onEvent });
+			}
+			case 'childProcess.write':
+				return invoke('ext_child_write', { handle: args[0], data: args[1] });
+			case 'childProcess.end':
+				return invoke('ext_child_end_stdin', { handle: args[0] });
+			case 'childProcess.kill':
+				return invoke('ext_child_kill', { handle: args[0] });
 			case 'editor.applyEdits': {
 				// A null path addresses the active file editor; false (not open) tells the
 				// frame's applyEdit to fall back to file-level edits.
@@ -1332,7 +1608,7 @@ export class ExtensionHost {
 				if (view) {
 					// Setting html reloads the document, exactly as VS Code's webviews do.
 					view.html = html;
-					if (view.frame) view.frame.srcdoc = composeWebview(html);
+					if (view.frame) view.frame.srcdoc = composeWebview(html, this.webviewTheme);
 				}
 				return Promise.resolve(undefined);
 			}
@@ -1409,26 +1685,83 @@ export class ExtensionHost {
 	 *  workbench routes extension status bar items' clicks through it. A declared command of
 	 *  a not-yet-active extension wakes it first (activationEvents' `onCommand`). */
 	executeCommand(id: string, args: unknown[] = []): Promise<unknown> {
+		// VS Code's own built-in commands — the surfaces an extension reaches from inside a
+		// frame the way it reaches any command, answered here before any registry lookup.
+		if (id === 'vscode.diff') return this.openVscodeDiff(args[0], args[1], args[2]).then(() => undefined);
+		if (id === 'vscode.open') return this.openVscodeDocument(args[0]).then(() => undefined);
+		if (id === 'setContext') {
+			const [key, value] = args as [string, unknown];
+			if (typeof key === 'string') registerContextProvider(key, () => Boolean(value));
+			return Promise.resolve(undefined);
+		}
+		if (id === 'workbench.view.scm' || id === 'workbench.view.explorer' || id === 'workbench.view.search' || id === 'workbench.view.extensions') {
+			this.onShowView?.(id.slice('workbench.view.'.length));
+			return Promise.resolve(undefined);
+		}
+		if (id === 'workbench.action.openSettings' || id === 'workbench.action.openSettingsJson' || id === 'workbench.action.openGlobalSettings') {
+			return commands.execute('workbench.openSettings');
+		}
 		const entry = commandsRegistered.get(id);
 		if (entry) return this.callFrame(entry.handle, 'runCommand', [id, args]);
 		const extId = this.declaringExtension(id);
-		if (extId && this.processBacked.has(extId)) {
-			// A process command keeps the caller's arguments (VS Code passes the menu's own —
-			// a right-clicked file, a repository) into its backend dispatch.
-			return this.runProcessCommand(extId, id, args);
-		}
-		if (extId && !this.processBacked.has(extId)) {
-			return this.ensureActive(extId).then(() => {
-				const late = commandsRegistered.get(id);
-				return late ? this.callFrame(late.handle, 'runCommand', [id, args]) : commands.execute(id);
-			});
-		}
-		return commands.execute(id);
+		if (!extId) return commands.execute(id);
+		// A backend-only package (no `main`, no frame) dispatches its declared commands
+		// straight to the backend; it keeps the caller's arguments (VS Code passes the
+		// menu's own — a right-clicked file, a repository) into its backend dispatch.
+		// With a real-Node runtime there are no frame-less packages — the host process
+		// activates and registers like a frame — so the normal wake path serves.
+		if (this.nodeHostExe === null && this.processOnly.has(extId)) return this.runProcessCommand(extId, id, args);
+		// A package WITH a `main` is a frame program even when it also declares a backend
+		// (VS Code semantics): the declared command's first run wakes the frame, and the
+		// handler its activation registers answers. Only when activation registered
+		// nothing does the backend dispatch take it (the launcher/openPage convention) —
+		// routing there first was failing every lazily-activated command of a
+		// backend-and-main package with "no handler registered".
+		return this.ensureActive(extId).then(() => {
+			const late = commandsRegistered.get(id);
+			if (late) return this.callFrame(late.handle, 'runCommand', [id, args]);
+			if (this.processBacked.has(extId)) return this.runProcessCommand(extId, id, args);
+			return commands.execute(id);
+		});
 	}
 
 	/** Run a command an extension registered: the handler lives in its frame. A declared
 	 *  command whose frame is not up yet belongs to a lazily-activating extension — wake it,
 	 *  then run what its activation registered. */
+	/** Run the formatting providers matching `languageId` over `text` and apply the edits
+	 *  to the open editor. Answers true when a formatter produced edits. */
+	async formatDocument(path: string, languageId: string, text: string, tabSize: number, insertSpaces: boolean): Promise<boolean> {
+		let lastError: string | null = null;
+		for (const [extId, registration] of this.formattingProviders) {
+			console.info('[compat-fmt] probe', extId, JSON.stringify(registration.selectors), languageId);
+			const matches = registration.selectors.length === 0 || registration.selectors.some((selector) => selector.language === languageId);
+			if (!matches) continue;
+			await this.ensureActive(extId).catch((error) => { lastError = String(error); });
+			try {
+				const edits = await this.callFrame(registration.handle, 'formatDocument.run', [registration.id, { path, languageId, text }, { tabSize, insertSpaces }]) as { range?: unknown; newText?: string }[] | undefined;
+				if (edits && edits.length > 0) {
+					const converted = edits.map((edit) => {
+						const range = edit.range as { start?: { line: number; character: number }; end?: { line: number; character: number } } | undefined;
+						return {
+							startLine: (range?.start?.line ?? 0) + 1,
+							startCharacter: range?.start?.character ?? 0,
+							endLine: (range?.end?.line ?? 0) + 1,
+							endCharacter: range?.end?.character ?? 0,
+							newText: edit.newText ?? ''
+						};
+					});
+					console.info('[compat-fmt] applying', converted.length, 'edits');
+				this.onApplyEdits?.(path, converted);
+					return true;
+				}
+			} catch (error) {
+				lastError = String(error);
+			}
+		}
+		if (lastError !== null) console.info(`[ggs-ext] formatDocument failed: ${lastError}`);
+		return false;
+	}
+
 	private async runRegistered(id: string, args: unknown[] = []): Promise<void> {
 		const entry = commandsRegistered.get(id);
 		if (entry) {
@@ -1436,11 +1769,18 @@ export class ExtensionHost {
 			return;
 		}
 		const extId = this.declaringExtension(id);
-		if (extId && !this.processBacked.has(extId)) {
-			await this.ensureActive(extId);
-			const late = commandsRegistered.get(id);
-			if (late) await this.callFrame(late.handle, 'runCommand', [id, args]);
+		if (!extId) return;
+		if (this.nodeHostExe === null && this.processOnly.has(extId)) {
+			await this.runProcessCommand(extId, id, args);
+			return;
 		}
+		// A frame program first, backend dispatch as the fallthrough — the same order
+		// executeCommand runs in, so a declared command answers identically from either
+		// caller (the workbench's menus or the palette).
+		await this.ensureActive(extId);
+		const late = commandsRegistered.get(id);
+		if (late) await this.callFrame(late.handle, 'runCommand', [id, args]);
+		else if (this.processBacked.has(extId)) await this.runProcessCommand(extId, id, args);
 	}
 
 	/** The extension whose manifest declares `command`, if any. */
@@ -1460,9 +1800,35 @@ export class ExtensionHost {
 		let activation = this.pendingActivations.get(extId);
 		if (activation) return activation;
 		const ext = this.installedExts.find((candidate) => candidate.id === extId);
-		if (!ext || ext.format === 'bundled' || this.processBacked.has(extId)) return Promise.resolve();
+if (!ext || ext.format === 'bundled') return Promise.resolve();
+		// A backend-hosted package (a manifest `node` backend — on ggs-node by default, on
+		// a real Node when opted in) activates in its host process instead of a frame: the
+		// handshake answers after activation, so a settled start is a settled activation,
+		// and the forwarded registrations have already landed through the remote handle.
+		if (this.backendHosted(extId)) {
+			activation = this.ensureNodeHost(extId).then(() => undefined, () => undefined);
+			this.pendingActivations.set(extId, activation);
+			void activation.then(() => this.pendingActivations.delete(extId), () => this.pendingActivations.delete(extId));
+			return activation;
+		}
+		// A package whose program is only its backend (no `main`) has no frame to activate —
+		// its commands dispatch to the backend. A package WITH a `main` activates here even
+		// though it also declares a backend (VS Code semantics: the frame owns the commands,
+		// the backend serves its native calls) — skipping that was leaving every declared
+		// command of a backend-and-main package silently doing nothing.
+		if (this.processOnly.has(extId)) return Promise.resolve();
 		activation = new Promise<void>((resolve) => {
-			this.activationWaiters.set(extId, resolve);
+			// A package whose `activate` never settles (a hung handshake in its own code)
+			// must not wedge every later command into the same forever-wait: the safety
+			// valve releases the caller; the real failure still surfaces via its channel.
+			const timer = setTimeout(() => {
+				notify('warning', tf('extensions.activationTimeout', extId, String(Math.round(ACTIVATION_TIMEOUT / 1000))));
+				resolve();
+			}, ACTIVATION_TIMEOUT);
+			this.activationWaiters.set(extId, () => {
+				clearTimeout(timer);
+				resolve();
+			});
 			void this.activate(ext);
 		});
 		this.pendingActivations.set(extId, activation);
@@ -1543,6 +1909,20 @@ export class ExtensionHost {
 			page.frame.contentWindow?.postMessage({ __ggsHost: true, type: 'event', event: { kind: 'theme' } }, '*');
 		}
 		for (const handle of this.frames.values()) handle.send?.({ type: '__studioExtEvent', event: 'themeChanged', kind });
+		void this.refreshWebviewTheme();
+	}
+
+	/** Re-read the theme for webview documents and push it into the live ones (the cached
+	 *  copy is what the next `composeWebview` inlines). */
+	private async refreshWebviewTheme(): Promise<void> {
+		const theme = await this.pageTheme();
+		this.webviewTheme = { kind: theme.kind, css: theme.css };
+		for (const view of this.webviews.values()) {
+			view.frame?.contentWindow?.postMessage({ __ggsWebviewHost: true, type: 'theme', css: theme.css, kind: theme.kind }, '*');
+		}
+		for (const view of this.webviewViews.values()) {
+			view.frame?.contentWindow?.postMessage({ __ggsWebviewHost: true, type: 'theme', css: theme.css, kind: theme.kind }, '*');
+		}
 	}
 
 	/** The app's open folders changed: every open page learns it (a page keyed to the
@@ -1588,6 +1968,18 @@ export class ExtensionHost {
 	}
 
 	private callFrame(handle: FrameHandle, method: string, args: unknown[]): Promise<unknown> {
+		// A remote handle (the real-Node extension host): the call crosses ggs-ext/1, and
+		// the backend process dying fails it the way a closed frame would.
+		if (handle.call) {
+			return new Promise((resolve, reject) => {
+				const cancel = (error: Error) => {
+					handle.pendingCalls.delete(cancel);
+					reject(error);
+				};
+				handle.pendingCalls.add(cancel);
+				void handle.call!(method, args).then(resolve, (error) => cancel(error instanceof Error ? error : new Error(String(error))));
+			});
+		}
 		return new Promise((resolve, reject) => {
 			const id = this.nextCallId++;
 			const send = handle.send;
@@ -1613,7 +2005,8 @@ export class ExtensionHost {
 	}
 
 	private onMessage(event: MessageEvent): void {
-		const data = event.data as { type?: string; id?: number; method?: string; args?: unknown[]; ok?: boolean; result?: unknown; extensionId?: string; error?: string };
+		const data = event.data as { type?: string; id?: number; method?: string; args?: unknown[]; ok?: boolean; result?: unknown; extensionId?: string; error?: string; text?: string; kind?: string };
+		console.info('[compat-msg]', String(data.type ?? ''), event.source === window ? '(win)' : '(other)');
 		if (!data || typeof data !== 'object') return;
 
 		// An extension page's RPC (the composed bootstrap's acquireGgsApi): routed by the
@@ -1649,10 +2042,10 @@ export class ExtensionHost {
 		// A webview panel's or webview view's message (the composed acquireVsCodeApi
 		// bootstrap): it belongs to the panel or view whose frame sent it, and crosses to
 		// the owning extension's frame.
-		if ((data as { __ggsWebview?: boolean }).__ggsWebview === true) {
-			const message = data as { kind?: string; message?: unknown };
-			if (message.kind !== 'message') return;
-			const view = this.webviewFor(event.source);
+			if ((data as { __ggsWebview?: boolean }).__ggsWebview === true) {
+				const message = data as { kind?: string; message?: unknown };
+				if (message.kind !== 'message') return;
+				const view = this.webviewFor(event.source);
 			if (view) {
 				this.frames.get(view.extId)?.send?.({ type: '__studioExtEvent', event: 'webviewMessage', panelId: view.panelId, message: message.message });
 				return;
@@ -1662,8 +2055,15 @@ export class ExtensionHost {
 			return;
 		}
 
+		if (data.type === '__studioExtBootLog') {
+			// The frames' own console, mirrored across the sandbox (their entries never reach
+			// the workbench's console otherwise) — the live probe reads these.
+			console.info(`[frame-log] ${String(data.text ?? '').slice(0, 380)}`);
+			return;
+		}
 		if (data.type === '__studioExtActivated') {
 			// Lazy activation waits for exactly this; eager activation never set a waiter.
+			console.info(`[ggs-ext] activated ${data.extensionId}`);
 			this.activationWaiters.get(data.extensionId ?? '')?.();
 			this.activationWaiters.delete(data.extensionId ?? '');
 			return; // activation succeeded; nothing to surface
@@ -1671,6 +2071,7 @@ export class ExtensionHost {
 		if (data.type === '__studioExtActivateFailed') {
 			// The failure surfaces as a notification; a lazy activation waiting on it settles
 			// rather than hanging its trigger.
+			console.info(`[ggs-ext] activation failed ${data.extensionId}: ${String(data.error ?? 'unknown').slice(0, 200)}`);
 			this.activationWaiters.get(data.extensionId ?? '')?.();
 			this.activationWaiters.delete(data.extensionId ?? '');
 			notify('warning', `Extension ${data.extensionId} failed to activate: ${data.error ?? 'unknown error'}`);
@@ -1678,6 +2079,9 @@ export class ExtensionHost {
 		}
 
 		if (data.type === '__studioExtRpc') {
+			console.info('[compat-rpc] branch reached:', data.method);
+			const handle0 = this.frameFor(event.source);
+			console.info('[compat-rpc-host]', data.method, 'matched=', Boolean(handle0), 'sourceIsWin=', event.source === window, 'frames=', [...this.frames.keys()].join(','));
 			const handle = this.frameFor(event.source);
 			if (!handle) return;
 			const extId = this.extIdFor(handle);
@@ -1690,7 +2094,7 @@ export class ExtensionHost {
 
 	private frameFor(source: MessageEventSource | null): FrameHandle | null {
 		for (const handle of this.frames.values()) {
-			if (handle.frame.contentWindow === source) return handle;
+			if (handle.frame && handle.frame.contentWindow === source) return handle;
 		}
 		return null;
 	}

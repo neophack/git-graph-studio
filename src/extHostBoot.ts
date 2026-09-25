@@ -13,8 +13,9 @@
 //   Call (host -> frame): running a command handler the extension registered, deactivate,
 //                         tree view walks, webview view resolutions.
 
-import { createVscodeApi, Disposable, Uri, type HostContext, type VscodeApi } from './vscodeApi';
-import { createNativeModule, createNodeRequire, type NodeEnv } from './extModuleLoader';
+console.info('[frame-log] boot module executing');
+import { activationContext, createVscodeApi, Disposable, rehydrateUris, Uri, type HostContext, type VscodeApi } from './vscodeApi';
+import { createNodeRequire, type NodeEnv } from './extModuleLoader';
 import { createNodeBuiltins, installNodeGlobals } from './nodeShims';
 
 /** The context as it actually crosses `postMessage`: `workspaceFolders[].uri` is bare data
@@ -36,6 +37,9 @@ interface InitMessage {
 	/** The package's binary native modules (`.node`), as package-relative paths — a
 	 *  `require` of one answers the host-served native proxy. */
 	binaries?: string[];
+	/** Binary files the package reads with `fs.readFileSync` (`.wasm` payloads),
+	 *  base64-encoded, keyed package-relative. */
+	blobs?: Record<string, string>;
 	/** `true` when the code map hit its bounds - a require beyond it fails naming this. */
 	truncated?: boolean;
 	/** The Node environment facts (`ext_node_env`): platform words, home and temp dirs. */
@@ -73,6 +77,10 @@ interface CallResponse {
 let nextRpcId = 1;
 const pendingRpc = new Map<number, { resolve: (value: unknown) => void; reject: (error: unknown) => void }>();
 
+/** The subscribers to the host's child-process events (one per live spawn): the main
+ *  window's Channel callback crosses back as `__studioExtHostEvent` pushes. */
+const childEventHandlers = new Set<(message: { handle: number; event: string; data?: string; code?: number | null }) => void>();
+
 /** A request to the main window (host services: commands, notifications, settings, ...). */
 function hostRequest(method: string, args: unknown[]): Promise<unknown> {
 	return new Promise((resolve, reject) => {
@@ -85,11 +93,23 @@ function hostRequest(method: string, args: unknown[]): Promise<unknown> {
 /** The command handlers the extension's shim registered (the handlers stay in the frame). */
 const registered = new Map<string, (...args: unknown[]) => unknown>();
 
+/** The text-document content providers the extension's shim parked (they stay in the
+ *  frame): the host's `vscode.open` / `vscode.diff` of a provider-scheme Uri calls back
+ *  into the scheme's provider for the text. */
+const docProviders = new Map<string, { provideTextDocumentContent?: (uri: unknown) => unknown }>();
+
 function handleCall(method: string, args: unknown[]): unknown {
 	if (method === 'runCommand') {
 		const handler = registered.get(args[0] as string);
 		if (!handler) throw new Error(`command ${args[0]} is no longer registered`);
-		return handler(...((args[1] as unknown[] | undefined) ?? []));
+		// The workbench dispatches a menu's context as Uri-shaped data (the methods cannot
+		// cross the clone); the handler receives them as full Uris, as VS Code delivers.
+		return handler(...(rehydrateUris((args[1] as unknown[] | undefined) ?? []) as unknown[]));
+	}
+	if (method === 'docProvider.provide') {
+		const provider = docProviders.get(String((args[0] as { scheme?: unknown } | undefined)?.scheme ?? ''));
+		if (!provider) throw new Error('no content provider registered for the scheme');
+		return provider.provideTextDocumentContent?.(args[0]);
 	}
 	if (method === 'deactivate') {
 		module_?.exports.deactivate?.();
@@ -104,7 +124,13 @@ function handleCall(method: string, args: unknown[]): unknown {
 	}
 	// A webview view's first visibility: its provider's resolveWebviewView runs here, the
 	// way VS Code defers resolution to the view's first show.
-	if (method === 'webviewView.resolve') return api_?.__serveWebviewView.resolve(args[0] as string);
+	if (method === 'formatDocument.run') {
+				// The document formatting provider the frame registered runs over the host's
+				// current text; the edits cross back to the host's open-editor applier.
+				const [id, doc, options] = args as [string, { path: string; languageId: string; text: string }, { tabSize: number; insertSpaces: boolean }];
+				return api_?.__runFormatter(id, doc, options);
+			}
+			if (method === 'webviewView.resolve') return api_?.__serveWebviewView.resolve(args[0] as string);
 	if (method === 'webviewView.setVisible') {
 		api_?.__serveWebviewView.setVisible(args[0] as string, args[1] as boolean);
 		return undefined;
@@ -116,8 +142,22 @@ let module_: { exports: { activate?: (context: unknown) => unknown; deactivate?:
 /** The shim of the extension that booted (null until `__studioExtInit` lands). */
 let api_: VscodeApi | null = null;
 
+for (const level of ['log', 'info', 'warn', 'error'] as const) {
+	const original = console[level].bind(console);
+	console[level] = (...args: unknown[]) => {
+		original(...args);
+		const text = args.map((a) => String(a)).join(' ');
+		// Host-side logs ([frame-log]/[compat-msg]/[ggs-ext]) re-enter this wrapper under a
+		// shared console (the jsdom tests host frame and workbench on one window) — without
+		// this guard they mirror each other forever.
+		if (text.startsWith('[frame-log]') || text.startsWith('[compat-msg]') || text.startsWith('[ggs-ext]') || text.startsWith('[compat-test]')) return;
+		try {
+			parent.postMessage({ type: '__studioExtBootLog', level, text: text.slice(0, 400) }, '*');
+		} catch { /* logging must never throw */ }
+	};
+}
 window.addEventListener('message', (event) => {
-	const data = event.data as { type?: string; id?: number; ok?: boolean; result?: unknown; context?: HostContext; code?: string; event?: string };
+	const data = event.data as { type?: string; id?: number; ok?: boolean; result?: unknown; context?: HostContext; code?: string; event?: string; kind?: string; message?: { handle: number; event: string; data?: string; code?: number | null } };
 	if (!data || typeof data !== 'object') return;
 	if (data.type === '__studioExtRpcResult') {
 		const id = data.id as number;
@@ -147,7 +187,18 @@ window.addEventListener('message', (event) => {
 		api_?.handleHostEvent(data as Parameters<NonNullable<typeof api_>['handleHostEvent']>[0]);
 		return;
 	}
-	if (data.type === '__studioExtInit') boot(data as InitMessage);
+	// A child-process event of the frame's own spawned tools (stdout/stderr chunk, exit):
+	// routed to the handle's subscriber inside the child_process shim.
+	if (data.type === '__studioExtHostEvent' && data.kind === 'childProcess') {
+		const message = data.message;
+		if (message && typeof message.handle === 'number') {
+			for (const handler of [...childEventHandlers]) handler(message);
+		}
+		return;
+	}
+	if (data.type === '__studioExtInit') {
+		boot(data as InitMessage);
+	}
 });
 
 function boot(message: InitMessage): void {
@@ -157,7 +208,9 @@ function boot(message: InitMessage): void {
 	};
 	const api = createVscodeApi(context, {
 		request: hostRequest,
-		registerCommandHandler: (id, handler) => registered.set(id, handler)
+		registerCommandHandler: (id, handler) => registered.set(id, handler),
+		registerDocProvider: (scheme, provider) => docProviders.set(scheme, provider),
+		unregisterDocProvider: (scheme) => docProviders.delete(scheme)
 	});
 	api_ = api;
 	// The Node compatibility layer: the code map (the host's preload, or this message's
@@ -169,19 +222,24 @@ function boot(message: InitMessage): void {
 		platform: 'win32', arch: 'x64', homedir: '', tmpdir: '', hostname: 'studio',
 		release: '', eol: '\r\n', separator: '\\', delimiter: ';'
 	};
-	const shimHost = { nodeEnv, extensionPath: context.extensionPath, files, binaries, bridge: { request: hostRequest } };
+	const shimHost = {
+		nodeEnv, extensionPath: context.extensionPath, files, binaries: message.binaries ?? [],
+		blobs: message.blobs ?? {},
+		bridge: {
+			request: hostRequest,
+			onChildEvent: (handler: (message: { handle: number; event: string; data?: string; code?: number | null }) => void) => {
+				childEventHandlers.add(handler);
+				return () => childEventHandlers.delete(handler);
+			}
+		}
+	};
 	const builtins = createNodeBuiltins(shimHost);
 	const { require, runEntry } = createNodeRequire({
 		files,
-		binaries,
 		truncated: message.truncated ?? false,
 		extensionPath: context.extensionPath,
 		vscode: api,
-		builtin: (id) => (id in builtins ? builtins[id] : undefined),
-		// The host-served native module of one `.node`: every call crosses as
-		// `native.call(path, method, args)`, which the host forwards to the package's
-		// backend — the process that loaded the binary.
-		native: (rel) => createNativeModule(rel, (method, args) => hostRequest('native.call', [rel, method, args]))
+		builtin: (id) => (id in builtins ? builtins[id] : undefined)
 	});
 	installNodeGlobals(shimHost, builtins, require);
 	try {
@@ -198,29 +256,6 @@ function boot(message: InitMessage): void {
 	} catch (error) {
 		parent.postMessage({ type: '__studioExtActivateFailed', extensionId: context.extensionId, error: String(error) }, '*');
 	}
-}
-
-/** The ExtensionContext VS Code hands to activate(): the mementos are the shim's persisted
- *  ones (`globalState` survives restarts, `workspaceState` per install), and `extension` is
- *  the extension's own API entry, as `vscode.extensions.getExtension(id)` reports it. */
-function activationContext(context: HostContext, api: VscodeApi): Record<string, unknown> {
-	return {
-		subscriptions: [] as Disposable[],
-		extensionPath: context.extensionPath,
-		extensionUri: { scheme: 'file', path: context.extensionPath, fsPath: context.extensionPath, toString: () => 'file:' + context.extensionPath },
-		globalState: api.__mementos.global,
-		workspaceState: api.__mementos.workspace,
-		storagePath: context.extensionPath,
-		globalStoragePath: context.extensionPath,
-		globalStorageUri: { scheme: 'file', path: context.extensionPath, fsPath: context.extensionPath, toString: () => 'file:' + context.extensionPath },
-		storageUri: { scheme: 'file', path: context.extensionPath, fsPath: context.extensionPath, toString: () => 'file:' + context.extensionPath },
-		logUri: { scheme: 'file', path: context.extensionPath, fsPath: context.extensionPath, toString: () => 'file:' + context.extensionPath },
-		logPath: context.extensionPath,
-		extensionMode: 3, // ExtensionMode.Production — the frame host has no dev mode
-		asAbsolutePath: (relative: string) => context.extensionPath + '/' + relative,
-		environmentVariableCollection: undefined,
-		outputChannel: { append: () => undefined, appendLine: () => undefined, show: () => undefined, dispose: () => undefined }
-	};
 }
 
 // Tell the main window the frame is ready to receive an extension.

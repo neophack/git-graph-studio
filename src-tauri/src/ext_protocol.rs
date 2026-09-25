@@ -5,13 +5,17 @@
 //! binary, Python behind a declared interpreter.
 //!
 //! The host sends `initialize` and `runCommand` requests and a `shutdown` notification; the
-//! plugin answers requests and may send `$/log` notifications. stderr is the plugin's own log
-//! channel, captured (capped) by the host. Requests are dispatched the moment they are read,
-//! each onto its own thread — a backend that answers bursts of concurrent reads (the git-graph
-//! engine's opening fan) is never serialized behind a slow one, and a command-style plugin is
-//! free to ignore the freedom. The helpers here are deliberately dependency-light so a
-//! plugin's backend (`plugins/ggs-ext-demo/src/main.rs`) can link them without pulling the
-//! app in.
+//! plugin answers requests and may send `$/log` notifications. A backend that needs the
+//! workbench's services (the real-Node extension host, `nodeHost.ts`) sends `ggs.hostRequest`
+//! requests — the app forwards them to the workbench and writes the answers back as plain
+//! response lines. Because both directions share the one channel, their id spaces must stay
+//! disjoint: the app numbers its requests from 1, so a backend's own requests number from
+//! 1 000 000 000. stderr is the plugin's own log channel, captured (capped) by the host.
+//! Requests are dispatched the moment they are read, each onto its own thread on the plugin
+//! side, so a command-style plugin and a concurrent engine (the git-graph backend's opening
+//! fan of reads) plug in through the same handshake, the same envelope and the same reader.
+//! A manifest that still names a retired protocol fails `start` with an upgrade hint rather
+//! than a hung handshake.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -82,6 +86,9 @@ fn line(value: Value) -> String {
 /// The plugin side's push channel: an `Emitter` hands a handler a thread-safe way to write
 /// notification lines (`$/log` and friends) while requests are being answered on other
 /// threads — writing stdout directly from a handler would race the loop's own responses.
+/// `Clone` so a backend that funnels requests onto one worker thread can carry the first
+/// request's emitter there (the pretend Node runtime's `ggs.log` does exactly that).
+#[derive(Clone)]
 pub struct Emitter {
     out: Arc<Mutex<dyn Write + Send>>,
 }
@@ -92,6 +99,15 @@ impl Emitter {
     pub fn notification(&self, method: &str, params: Value) {
         let mut out = self.out.lock().unwrap();
         let _ = out.write_all(notification(method, params).as_bytes());
+        let _ = out.flush();
+    }
+
+    /// Write one request line — the backend asking the workbench something
+    /// (`ggs.hostRequest`, the real-Node host's and the vscode shim's channel). The answer
+    /// arrives on the reader as a `Wire::Response` with the same id.
+    pub fn request(&self, id: u64, method: &str, params: Value) {
+        let mut out = self.out.lock().unwrap();
+        let _ = out.write_all(request(id, method, params).as_bytes());
         let _ = out.flush();
     }
 }
@@ -120,12 +136,43 @@ where
     W: Write + Send + 'static,
     F: Fn(&str, &Value, &Emitter) -> Option<Result<Value, String>> + Send + Sync + 'static,
 {
+    serve_plugin_on_with_responses(reader, writer, handle, |_id, _answer| {});
+}
+
+/// [`serve_plugin_on`] plus a hook for response lines — what a backend that asks the
+/// workbench things (`ggs.hostRequest`) uses to route the answers it blocked on. The ids a
+/// backend numbers its own requests with must never collide with the app's (the app starts
+/// at 1; backends start at 1 000 000 000), or an answer would resolve the wrong request.
+pub fn serve_plugin_on_with_responses<R, W, F, G>(reader: R, writer: W, handle: F, on_response: G)
+where
+    R: BufRead,
+    W: Write + Send + 'static,
+    F: Fn(&str, &Value, &Emitter) -> Option<Result<Value, String>> + Send + Sync + 'static,
+    G: Fn(u64, Result<Value, String>) + Send + Sync + 'static,
+{
     let handle = Arc::new(handle);
     let out: Arc<Mutex<dyn Write + Send>> = Arc::new(Mutex::new(writer));
     let emitter = Emitter {
         out: Arc::clone(&out),
     };
+    let on_response = Arc::new(on_response);
     let mut threads = Vec::new();
+    // Notifications run on one worker thread, in arrival order — never on this reader. A
+    // handler may block until the backend's JS thread takes the notification, and that
+    // thread may itself be blocked on a host request whose answer is the next line here:
+    // run inline, a pushed event (`ggs.hostEvent`) that crossed just before the answer
+    // deadlocked the pair until the host request timed out (a webview's `create` answer
+    // lost behind the tab's own view-state push).
+    let (notify_tx, notify_rx) = std::sync::mpsc::channel::<(String, Value)>();
+    let notifier = {
+        let handle = Arc::clone(&handle);
+        let emitter = emitter.clone();
+        std::thread::spawn(move || {
+            for (method, params) in notify_rx {
+                handle(&method, &params, &emitter);
+            }
+        })
+    };
     for line in reader.lines() {
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
@@ -158,12 +205,19 @@ where
                 if method == "exit" {
                     break;
                 }
-                handle(&method, &params, &emitter);
+                let _ = notify_tx.send((method, params));
             }
-            // The plugin makes no requests in ggs-ext/1, so it never sees a response.
-            Wire::Response { .. } => {}
+            Wire::Response { id, result, error } => {
+                let answer = match error {
+                    Some(e) => Err(e.message),
+                    None => Ok(result.unwrap_or(Value::Null)),
+                };
+                on_response(id, answer);
+            }
         }
     }
+    drop(notify_tx);
+    let _ = notifier.join();
     for thread in threads {
         let _ = thread.join();
     }
@@ -301,5 +355,44 @@ mod tests {
         let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(lines[0].contains("$/log"), "{lines:?}");
+    }
+
+    /// The ggs-node deadlock, pinned: a notification whose handler cannot finish until a
+    /// LATER response line has been read (the backend's JS thread, blocked on a host request,
+    /// is what would take the notification). Handled on the reader thread, the response was
+    /// never read and the pair hung; on the notification worker the reader reaches it.
+    #[test]
+    fn a_blocked_notification_handler_never_holds_back_a_response() {
+        let (answered_tx, answered_rx) = std::sync::mpsc::channel::<()>();
+        let answered_rx = Mutex::new(answered_rx);
+        let input = format!(
+            "{}{}",
+            notification("ggs.hostEvent", json!({ "event": "webviewVisible" })),
+            response(1_000_000_000, Ok(json!(1))),
+        );
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            serve_plugin_on_with_responses(
+                std::io::Cursor::new(input.into_bytes()),
+                SharedBuf(Arc::new(Mutex::new(Vec::new()))),
+                move |_method, _params, _emitter| {
+                    // Waits for the response the reader has not reached yet.
+                    let _ = answered_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(std::time::Duration::from_secs(5));
+                    None
+                },
+                move |id, _answer| {
+                    assert_eq!(id, 1_000_000_000);
+                    let _ = answered_tx.send(());
+                },
+            );
+            let _ = done_tx.send(());
+        });
+        // Well under the handler's own 5 s fallback: the response is routed at once.
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the response behind a blocked notification was routed");
     }
 }

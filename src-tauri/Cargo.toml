@@ -25,26 +25,23 @@ name = "git-graph-studio"
 path = "src/main.rs"
 required-features = ["desktop"]
 
-# The engine host (`src/engine_host/`): the app-bundled sidecar that serves the Git Graph
-# VSIX's engine `.node` (`engine` feature only). It links no engine crate — it loads the
-# package's own `git-graph.node` over its C ABI (`engine.rs`), the same single engine binary
-# the editor's Node runtime loads. Read-only: no `desktop` feature, no window, no write path
-# (writes stay in the host, over the `git` CLI).
+# The pretend Node runtime (`src/node_runtime/`, the `node-runtime` feature): the
+# app-bundled sidecar that runs a `ggs/2` package's own JS entry — CommonJS `require` and
+# the file/os/process builtins — speaking `ggs-ext/1` on stdio like every backend. The
+# default `node`-backend host; its N-API host loads a package's `.node` too. Read-only: no
+# `desktop` feature, no window.
 [[bin]]
-name = "git-graph-backend"
-path = "src/bin/git_graph_backend.rs"
-required-features = ["engine"]
+name = "ggs-node"
+path = "src/bin/ggs_node.rs"
+required-features = ["node-runtime"]
 
 [features]
 default = ["desktop"]
-# The engine host's load of the package's engine `.node`: reachable only through
-# `git-graph-backend`'s `required-features`, never part of `desktop` or the default set. No
-# binary in this tree links `git-graph-core` anymore (plan §3.8 strengthened, 2026-09-24): the
-# engine ships inside the package as the one `git-graph.node` — the file the editor's Node
-# runtime `require`s and this host `LoadLibrary`s over its C ABI — so the two hosts answer
-# identically by construction. (sha1/hex/ureq are the host library's own needs, not engine
-# ones: the gerrit operations the backend answers over the `git` CLI.)
-engine = ["dep:libloading", "dep:base64", "dep:sha1", "dep:hex", "dep:ureq"]
+# The pretend Node runtime's JS engine (`src/node_runtime/`): Boa is pure Rust (plan §3.1 —
+# no C bindings at all). The runtime is the default host for `node` backends (`GGS_REAL_NODE=1`
+# opts a system Node in); a package's `.node` loads right here through the N-API host.
+# base64/hex are the fs module's own encodings (`readFileSync(path, 'base64' | 'hex')`).
+node-runtime = ["dep:boa_engine", "dep:base64", "dep:hex", "dep:libloading", "dep:sha1", "dep:md-5", "dep:sha2"]
 desktop = [
     "dep:tauri",
     "dep:tauri-plugin-dialog",
@@ -105,12 +102,20 @@ tauri-plugin-clipboard-manager = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 portable-pty = { version = "0.9", optional = true }
-# The engine host's load of the package's engine `.node` (`src/engine_host/engine.rs`,
-# the `engine` feature): a plain `LoadLibrary` of the C ABI exports the addon also serves the
-# Node runtime from the same file. Nothing in this tree links an engine crate.
+# The pretend Node runtime's JS engine (`src/node_runtime/`, the `node-runtime` feature):
+# pure Rust, so the sidecar stays free of C bindings (plan §3.1). It runs a package's own
+# `main` as its backend: CommonJS `require` and the file/os/process builtins. A package's
+# engine-layout `.node` loads over its C-ABI JSON channel (`native.rs`); a NAPI-only
+# addon needs a real Node runtime (nodeHost.ts, the `GGS_REAL_NODE` opt-in).
+boa_engine = { version = "0.20", optional = true }
+# The `.node` loader (`node_runtime/native.rs`): dlopen and the `git_graph_capi_*`
+# symbols of an engine-layout addon — the sanctioned C-ABI seam, not a N-API runtime.
 libloading = { version = "0.8", optional = true }
 ureq = { version = "3", features = ["rustls"], optional = true }
 sha1 = { version = "0.10", optional = true }
+# The `crypto` builtin's digests (md5 / sha256; sha1 above serves the desktop features too).
+md-5 = { version = "0.10", optional = true }
+sha2 = { version = "0.10", optional = true }
 hex = { version = "0.4", optional = true }
 ropey = { version = "1.6", optional = true }
 # Quick Open's file list is walked across all cores instead of one (cmd_fs::walk_files).

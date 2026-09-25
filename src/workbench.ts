@@ -13,7 +13,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { AnalysisView, type AnalysisStatus } from './analysisView';
 import type { AnalysisToolId } from './analysisTools';
 import { commandForBinding, commands, effectiveBinding, setKeybindingResolver, UNSHIFTED_GLYPHS } from './commands';
-import { registerContextProvider } from './contributions';
+import { languageIdFor, registerContextProvider } from './contributions';
 import { EditorArea } from './editorArea';
 import { ENCODING_LABELS } from './editor';
 import { Explorer } from './explorer';
@@ -34,7 +34,7 @@ import { TitleBar } from './titlebar';
 import { basename, busy, el, icon, notify, quickInput, quickPick, relativeTo, toPosix, tooltip, type MenuEntry, type QuickPickItem, type QuickPickSource } from './ui';
 import { FilePickSource } from './filePicker';
 import { ExtensionTreeView } from './treeView';
-import { extensionViewContributions } from './contributions';
+import { evaluateWhen, extensionViewContributions } from './contributions';
 import { extFileDataUrl } from './extHost';
 
 type ViewId = 'explorer' | 'search' | 'scm' | 'extensions' | 'analysis';
@@ -190,6 +190,7 @@ export class Workbench {
 		// opens diffs and revisions, shows the SCM view, runs the terminal, and nudges the
 		// workbench after its own writes — the delegate the graph page acts through).
 		this.extensionHost.onOpenDiff = (diff: PageDiffRequest) => void this.editors.openDiff({ kind: 'diff', ...diff });
+		this.extensionHost.onOpenContent = (title, path, text) => void this.editors.openContent({ kind: 'content', id: `ext-content:${title}`, title, path, text });
 		this.extensionHost.onOpenFileAtRevision = (revision, path, title, repo) => void this.editors.openRevision(revision, path, title, repo);
 		this.extensionHost.onShowView = (id) => this.showView(id as never);
 		this.extensionHost.onRevealTerminal = () => this.panel.show('terminal');
@@ -298,6 +299,7 @@ export class Workbench {
 		register({ id: 'editor.findReferences', title: 'Find References', category: 'Go', keybinding: 'Shift+F12', enabled: () => this.editors.activeView !== null, run: () => void this.editors.findReferences() });
 		register({ id: 'symbols.rebuild', title: 'Rebuild Symbol Index', category: 'Go', enabled: hasRepo, run: () => void this.rebuildSymbolIndex() });
 		register({ id: 'editor.callTree', title: 'Show Call Tree', category: 'Go', enabled: () => this.editors.activeView !== null, run: () => void this.editors.openCallTreeAtCursor() });
+		register({ id: 'editor.formatDocument', title: 'Format Document', category: 'Editor', keybinding: 'Ctrl+Shift+I', enabled: () => this.editors.activeView !== null, run: () => void this.formatActiveDocument() });
 		register({ id: 'editor.toggleBookmark', title: 'Toggle Bookmark', category: 'Edit', keybinding: 'Ctrl+Alt+B', enabled: () => this.editors.activeInput?.kind === 'file', run: () => void this.toggleBookmark() });
 		register({ id: 'editor.listBookmarks', title: 'List Bookmarks', category: 'Edit', keybinding: 'Ctrl+Alt+K', run: () => void this.listBookmarks() });
 		register({ id: 'extensions.installFromVsix', title: 'Install Extension from VSIX...', category: 'Extensions', run: () => { this.showView('extensions'); void this.extensions.installFromVsixCommand(); } });
@@ -696,15 +698,22 @@ export class Workbench {
 		};
 
 		for (const contribution of extensionViewContributions()) {
+			// A view's `when` hides it exactly as a menu entry's hides the item (VS Code's own
+			// rule — Code Spell Checker's "Regular Expressions" view is off unless its
+			// experimental setting is), and a container left with no visible view goes away
+			// entirely. Evaluated here, at build time: a clause keyed to settings or context
+			// keys re-evaluates on the next install/uninstall pass, not on every keystroke.
+			const visibleViews = contribution.views.filter((view) => evaluateWhen(contribution.extId, view.when));
 			for (const container of contribution.containers) {
 				const key = `ext-container:${contribution.extId}.${container.id}`;
 				const element = el('div', 'view ext-container-view');
 				element.style.display = 'none';
 				const viewIds: string[] = [];
-				for (const declared of contribution.views.filter((view) => view.container === container.id)) {
+				for (const declared of visibleViews.filter((view) => view.container === container.id)) {
 					makeSection(declared.viewId, declared.name, contribution.extId, declared.type ?? 'tree', element);
 					viewIds.push(declared.viewId);
 				}
+				if (viewIds.length === 0) continue;
 				this.sidebar.appendChild(element);
 				this.extContainers.set(key, { element, viewIds });
 				const item = el('div', 'activity-item', [icon('list-tree')]);
@@ -727,7 +736,7 @@ export class Workbench {
 			}
 			// Views a manifest placed in a built-in container ride that sidebar view's tail —
 			// the Explorer / Source Control trees manage their own DOM, never the tail.
-			for (const declared of contribution.views) {
+			for (const declared of visibleViews) {
 				const host = declared.container === 'scm' ? this.views.scm : declared.container === 'explorer' ? this.views.explorer : null;
 				if (host) makeSection(declared.viewId, declared.name, contribution.extId, declared.type ?? 'tree', host);
 			}
@@ -780,6 +789,20 @@ export class Workbench {
 	 *  extension's own HTML in an editor tab, over the same mounting path the extension pages
 	 *  take. The extension host owns the panel record and the iframe; the workbench owns
 	 *  the tab, and closing it tells the extension (`onDidDispose`). */
+
+	/** Format Document: run the registered extension formatters over the active document
+	 *  (`vscode.languages.registerDocumentFormattingEditProvider`) and apply their edits. */
+	private async formatActiveDocument(): Promise<void> {
+		const input = this.editors.activeInput;
+		if (input?.kind !== 'file') return;
+		const path = input.path;
+		const text = this.editors.activeText();
+		if (text === null) return;
+		const languageId = languageIdFor(path) ?? 'plaintext';
+		const formatted = await this.extensionHost.formatDocument(path, languageId, text, 4, true);
+		if (!formatted) notify('info', t('editor.noFormatter'));
+	}
+
 	private openWebviewPanel(panelId: number, title: string, extId: string): void {
 		// The panel's tab wears the extension's own icon, like its extension pages do.
 		const iconPath = this.extensionHost.packageIcon(extId);

@@ -67,7 +67,7 @@ into the source tree.
 
 ## Architecture
 
-Two processes joined by Tauri IPC, with one library at the core:
+The app process plus one extension-host process per installed package, joined by Tauri IPC:
 
 ```text
 ┌──────────────────────── Frontend (src/, TypeScript, no framework) ────────────────────────┐
@@ -83,10 +83,9 @@ Two processes joined by Tauri IPC, with one library at the core:
                                            │ the extension platform (ext_process, ggs:// pages)
 ┌──────────────────────────────────────────┴────────────────────────────────────────────────┐
 │ The extension (vscode-git-graph-rs/, a submodule that packs itself — studio/build.mjs):   │
-│ the store-format .vsix — pages (ggs://), the engine .node (loaded over its C ABI by the   │
-│ app-bundled engine host) — no executable inside. The app tree carries no plugin code;     │
-│ git-graph-rs links git-graph-core (native/core) and runs the Git Graph view's whole       │
-│ server side; the app binary never links the engine and names no plugin.                   │
+│ the store-format .vsix — pages (ggs://) and the engine .node, loaded natively by the      │
+│ real-Node extension host (nodeHost.ts) — no executable inside. The app tree carries no    │
+│ plugin code; the app binary never links the engine and names no plugin.                   │
 └───────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -301,19 +300,18 @@ reads named a method the engine does not serve and the comparison pages opened e
 and names no plugin id** (moved out of the app 2026-09-23; nothing under `src/` may name
 the extension's artifacts — `scripts/check-seams.mjs` fails the build on any reference).
 
-- The engine host (the app's sidecar, `src-tauri/src/engine_host/`): `mod.rs` the `ggs-ext/1`
-  dispatch — a pure pass-through: a page's `backend.run(command, [message, settings])`
-  becomes the engine call `{method: command, params: message}` and the engine's JSON answer
-  crosses back untouched (the package's own bridge shapes either end); `runCommand` answers
-  the manifest's launcher command first, `initialize` declares the command list and carries
-  the app's open folders, `workspaceChanged` keeps them current; `engine.rs` the engine
-  load — `libloading` of the package's `git-graph.node` over its C ABI
-  (`git_graph_capi_request`), the ONE engine binary the editor's Node runtime also loads,
-  answered as the addon's single dispatch surface (`{"method","params"}` → the method's
-  JSON, errors in band `"Kind: message"`). Nothing of any plugin's protocol lives in the
-  host — the `engine` Cargo feature's `git-graph-backend`, an app sidecar
-  (tauri.conf.json's `externalBin` installs it beside the main binary) that links no
-  engine crate. `src-tauri/src/bin/git_graph_backend.rs` is its one-line shell.
+- The real-Node extension host (2026-09-25, replaces the deleted C-ABI engine host; the
+  explicit `GGS_REAL_NODE=1` opt-in — the default host for every `node` backend is
+  ggs-node, module 12): a system Node runtime (`ext_node_runtime` — `GGS_NODE_EXE`, a
+  `node` beside the app, or the `PATH`) runs `node node-host.cjs <extension-dir> <entry>`
+  — VS Code's own architecture,
+  where an extension host is a node process and a package's `.node` loads as the NAPI addon
+  it is. The bundle (`src/nodeHost.ts`, built by `prepare.mjs` into `node-host.cjs`) carries
+  the same `vscode` shim the frames use over the ggs-ext/1 stdio channel: extension→host
+  services cross as `ggs.hostRequest` requests (forwarded to the workbench, which answers
+  through the same `serve` path a frame's RPC takes), host pushes arrive as
+  `ggs.hostEvent` notifications, and only `require('vscode')` is intercepted — a package's
+  ESM, workers, `node_modules` and `.node` all behave natively.
 - The package's own web side (`vscode-git-graph-rs/studio/`: `bridge.js`/
   `compare-bridge.js` the in-page extension hosts, `bundle.mjs` the page bundles with
   relative URLs, `config-stdin.js` the config bundle's entry, `vsix.mjs` the zip writer,
@@ -346,9 +344,21 @@ activates in the frame host, or a static-contribution package (themes, snippets,
 that installs for its contributions alone. `ggs/2` adds the named page registry (every page
 a package can show, opened as editor tabs over the `ggs://` protocol) and the backends: a
 process binary (speaking the `ggs-ext/1` line-JSON-RPC protocol over stdin/stdout — any
-language that can write lines to stdout qualifies; the app embeds no runtime) or an engine
-`.node` served by the app-bundled host over its C ABI (`kind: "node"` — the same single
-engine binary the editor's Node runtime loads) — plus the Extensions view with detail
+language that can write lines to stdout qualifies) or a `node` backend (`kind: "node"`) —
+the package's own JS entry. **ggs-node is the default host** (2026-09-25, the owner's
+direction): every `node` backend runs on the bundled pretend Node runtime (`ggs-node`,
+Boa + CommonJS + the file/os/process builtins, whose `initialize` installs the compiled
+`vscode` shim and activates the program, and whose own N-API host (`node_runtime/napi_host.rs`
+— the `napi_*` surface bound to the sidecar image) loads a package's `.node` addon right
+there: when the extension's activation `require`s the engine `git-graph.node`, it registers
+into Boa and serves the reads (an integration test and the live check assert the ggs-node
+process carries it). A main-only package with no native binaries installs no backend at
+all — the sandboxed frame host owns it. The real-Node extension host (`node node-host.cjs <extension-dir> <entry>`,
+VS Code's own architecture, where `.node` NAPI addons, ESM, workers and `node_modules`
+behave natively) is an explicit opt-in — `GGS_REAL_NODE=1`. A plain VSIX with the packers'
+engine layout derives, at install, the engine `.node` as its backend only under that
+opt-in; by default its JS `main` is the derived backend (`resolve_node_binaries`);
+plus the Extensions view with detail
 pages, backend status and restart, and the **marketplace** (2026-09-24): the view's search
 box queries Open VSX — the open-source registry the VS Code ecosystem publishes to, the
 same service code-server and Theia point at — over `ext_gallery.rs`'s three commands
@@ -361,13 +371,20 @@ and object items), `withProgress` toasts, output channels (the Output view's cha
 dropdown), status bar items (`window.createStatusBarItem` / `setStatusBarMessage`, rendered
 by the status bar), webview panels (`window.createWebviewPanel` — a sandboxed srcdoc iframe
 in an editor tab, with `acquireVsCodeApi()` composed in, `asWebviewUri` mapping onto
-`ggs://`), persisted `globalState`/`workspaceState` mementos, and `env.clipboard`.
+`ggs://`), persisted `globalState`/`workspaceState` mementos, and `env.clipboard`; VS Code's
+own built-in commands (`vscode.diff` / `vscode.open` over a registered text-document content
+provider's scheme — the host asks the registering frame for the text and opens the diff
+editor or a read-only content tab, decoding nothing of any package's private schemes;
+`setContext`; `workbench.view.*` / `openSettings`); `workspace.createFileSystemWatcher`
+served from the backend watcher's real batches (`fsChanged` events into every frame, the
+`.git` flag firing a `.git/HEAD` change); `window.createTerminal` (`sendText` runs in the
+integrated terminal); and `crypto.createHash` (md5 / sha1 / sha256, pure TypeScript — the
+gravatar-class digests, synchronous like Node's).
 **Nothing installs by default.** One package ships beside the installer (`extensions/`,
 packed by `prepare.mjs`): git-graph-rs, whose integrated entry offers it as a **one-click
 install** (`ext_install_bundled`) that lands it as a standard, uninstallable package — its
-engine the one `git-graph.node` inside the VSIX (the app's sidecar engine host loads it
-over the C ABI; the editor's Node runtime loads the same file) and its view assets the
-extension's own. With no install (the default), the listing falls back to the manifest
+engine the one `git-graph.node` inside the VSIX (loaded natively by the real-Node extension
+host) and its view assets the extension's own. With no install (the default), the listing falls back to the manifest
 embedded at build time. **Install means run**: the boot pass starts every installed package
 that declares a backend (`ext_process::start_all_installed`, off the window's thread), an
 install starts its backend at once, and the first command remains the lazy fallback.
@@ -383,7 +400,11 @@ nothing.
 
 - Frontend: `src/extensionsPanel.ts` (the Extensions view: the installed list with detail
   pages and backend status, and the marketplace search box — Open VSX results with
-  one-click Install / Update by the installed version), `src/extHost.ts` (the frame host for VSIX extensions,
+  one-click Install / Update by the installed version), `src/nodeHost.ts` (the real-Node
+  extension host's entry, compiled to `node-host.cjs`: stdio ggs-ext/1 server, the shared
+  `vscode` shim over a stdio bridge, `require('vscode')` interception, ESM fallback —
+  VS Code's own extension-host shape), `src/extHost.ts` (the extension host for VSIX
+  extensions — frames without a Node runtime, remote handles over ggs-ext/1 with one;
   the page host, the process-command dispatch of `ggs/2`, and the host services behind the
   `vscode` API — webview panels, webview views, status bar items, output channels, progress
   toasts, memento persistence, tree views, activationEvents; the activation policy also
@@ -396,10 +417,14 @@ nothing.
   `CodeActionKind`, …) constructs), `src/extModuleLoader.ts` (the frame's CommonJS resolver
   over the activation preload `ext_load_code` — un-bundled multi-file packages and their
   `node_modules` load exactly as in Node: relative siblings, package.json `main`, cache,
-  circular partials, `MODULE_NOT_FOUND`), `src/nodeShims.ts` (the Node builtins — `path`,
+  circular partials, `MODULE_NOT_FOUND`), `src/ggsVscodeShim.ts` (the same `vscode` shim bundled as the IIFE ggs-node evaluates when a package's entry is a frame program — ggs-node's own frame-program host), `src/nodeShims.ts` (the Node builtins — `path`,
   `os`, `events`, `util`, `fs` over the preload and the workspace-confined bridge, `Buffer`,
-  `process`; real implementations for what a frame can serve, call-time failures for what it
-  cannot (`child_process`, `net`), so a `require` of them never kills an activation),
+  `process`; real implementations for what a frame can serve — `child_process` through the
+  host bridge, `nodeShims/processSurfaces.ts` + `shared.ts` — call-time failures for what
+  it cannot (`net`), so a `require` of them never kills an activation),
+  `src/editorDiagnostics.ts` (the diagnostics store: the host's
+  `languages.createDiagnosticCollection` entries land as CodeMirror squiggles in the open
+  editors),
   `src/treeView.ts` (the generic tree view host — the sidebar
   surface `contributes.views` declares and `createTreeView` feeds),
   `src/contributions.ts` (manifest contributions merged into the workbench; the manifest
@@ -423,20 +448,55 @@ nothing.
   `.json` grammars converted to Sublime syntax and added to the rope viewer's syntect set), `src-tauri/src/ext_process.rs` (the process extension host: eager
   start at boot and install, lazy start on first command as the fallback, `initialize`
   handshake, `runCommand`, crash isolation, remembered status (start count, last error),
-  stop on uninstall and at app exit), `src-tauri/src/ext_protocol.rs` (the `ggs-ext/1` wire
+  stop on uninstall and at app exit; a `node` backend runs on the bundled `ggs-node` (the
+  default) — off the main thread, with the backend's own `ggs.hostRequest`s forwarded to
+  the workbench as `ext-host-request` events — or, under the `GGS_REAL_NODE=1` opt-in, on
+  the real Node runtime plus `node-host.cjs`; `resolve_node_binaries` (cmd_ext) derives a
+  backend from a package's engine `.node` (real-Node host) or its `package.json` `main`
+  when native binaries are present),
+  `src-tauri/src/node_runtime/` (`ggs-node`, the `node-runtime` feature's
+  pretend Node runtime sidecar — the default `node`-backend host: Boa on one JS thread fed
+  by a job queue — protocol requests, timers, child-process events — a CommonJS `require`
+  confined to the package root (`require.rs`), real `fs`/`path`/`os`/`child_process`
+  builtins over std (`builtins/`: `mod` the registry, `fs`, `path`, `os`, `child`, `core`
+  the prelude natives, `support` the shared helpers), the JS prelude's
+  Buffer/EventEmitter/util/`vscode`-stub (`prelude.js`), the N-API host a package's
+  `.node` loads through (`native.rs` the loader, `napi_host.rs` the `napi_*` surface) —
+  and the dispatch: launcher → `ggs.onRequest` → `exports.dispatch`; stdout is the
+  protocol, package code writes through `ggs.log` only),
+  `src-tauri/src/ext_protocol.rs` (the `ggs-ext/1` wire
   protocol, shared with plugin binaries), `src-tauri/src/ext_page_boot.js` (the
-  `acquireGgsApi()` bootstrap the protocol composes into served pages)
+  `acquireGgsApi()` bootstrap the protocol composes into served pages),
+  `src-tauri/src/ext_child.rs` (the frame host's child processes: one `ext_child_spawn` +
+  stdin/kill follow-ups per spawned tool, stdout/stderr streamed as base64 `Channel` events,
+  every handle killed at app exit and on extension reload — the real process surface a
+  sandboxed frame cannot have, which `nodeShims.ts` maps onto the Node `child_process`
+  shapes; the sync variants stay call-time failures, a frame cannot block its loop)
 - The packer lives in the extension's own repository (`vscode-git-graph-rs/studio/` —
   `build.mjs` the packer, `bundle.mjs` the page-bundle builder, `config-stdin.js`,
   `vsix.mjs` the zip writer, `stubs/` the bundle stubs, plus the two in-page bridges); the
   app tree carries no plugin code, and `scripts/prepare.mjs` only builds the engine and
   calls the packer. The extension's own frontend is that submodule, which cannot move.
 - Build: `scripts/prepare.mjs` (delegates the bundled package to the extension's own
-  `vscode-git-graph-rs/studio/build.mjs`), `scripts/build-plugins.bat` (builds the plugin's
+  `vscode-git-graph-rs/studio/build.mjs`; `--vsix <path>` / `GGS_BUNDLED_VSIX` bundles a
+  ready-built VSIX as-is and skips every submodule compile),
+  `scripts/build-plugins.bat` (builds the plugin's
   VSIX independently of the app build, through the same packer)
-- Tests: `tests/extensions.test.ts` (pages, the process dispatch), `tests/editor.test.ts`
-  (the extpage tab), `src-tauri/tests/graph_backend.rs` (the real
-  install→handshake→command→stop chain over the engine host and its `.node`)
+- Tests: `tests/extensions.test.ts` (pages, the process dispatch, the real-Node remote
+  handle routing), `tests/editor.test.ts` (the extpage tab),
+  `tests/editorServices.test.ts` (the diagnostics store and the document-formatting
+  registry, booted through the frame bootstrap),
+  `src-tauri/tests/node_runtime.rs` (the pretend Node runtime: a package's JS entry served
+  over `ggs-ext/1`, the process-host chain over the bundled `ggs-node` sidecar, a NAPI
+  addon answering under ggs-node, the installed extension's whole activation),
+  `src-tauri/tests/install_local.rs` (the local-only installer probe into the real
+  `~/.ggs/extensions`), `src-tauri/tests/vscode_shim_boa.rs` (the Boa define-op repro bed
+  for the ggs-node `vscode` shim),
+  `tests/vsixCompat.test.ts` (a real marketplace-shaped VSIX booted through the frame host
+  from its installed files; skips without the install),
+  `scripts/probes/vsix-live-check.mjs` (the live five-package check over CDP),
+  `scripts/probes/git-graph-live-check.mjs` (the live git-graph-rs check: ggs-node with
+  the engine `.node` loaded, the view rendering, settings pushing through)
 
 ### 13. CAN Trace Analyzer
 
@@ -555,8 +615,8 @@ Everything that turns the source tree into installers: asset assembly into
   bundles and their `vscode` / Node / `fs` stubs live there too, in the submodule),
   `vite.config.ts`
 - Seam checks: `scripts/check-seams.mjs` (TypeScript / CSS) and `src-tauri/build.rs` (Rust)
-- Packaging: `scripts/build-studio.bat` (Windows, one command; builds `git-graph-backend`
-  through `prepare.mjs` as part of that). `scripts/build-plugins.bat` builds every plugin's
+- Packaging: `scripts/build-studio.bat` (Windows, one command; builds `ggs-node` and
+  `node-host.cjs` through `prepare.mjs` as part of that). `scripts/build-plugins.bat` builds every plugin's
   VSIX on its own, without the app installer — useful when only the plugin package
   changed. Linux installers are built
   in floor containers — the base image IS the compatibility floor: `ubuntu:22.04`
@@ -637,22 +697,22 @@ start, and as vitest's global setup.
 
 **Seam rule — Rust (enforced by `src-tauri/build.rs`).**
 Nothing under `src-tauri/src/` may name the `git-graph-core` crate — `build.rs` scans
-everything under `src/` and fails the build on any reference. The engine, the view's write
-path and the Gerrit pipeline live in the plugin's own binary sources
-(`src-tauri/src/engine_host/`, behind the `engine` Cargo feature). Engine work belongs in
-that module (`engine.rs`/`engine_impl.rs` for the C ABI into the package's
-`git-graph.node`, `writes.rs`/`gerrit.rs` for the git-CLI halves) — never back in the app's
-other `src/` modules.
+everything under `src/` and fails the build on any reference. The engine lives only inside
+the package as its `.node`; no module of this tree links or loads it directly (the
+extension-host sidecars load it: ggs-node's N-API host by default, a real Node runtime
+under the opt-in).
 
-**The engine runs as its own process; no binary in this tree links it.**
-Since 2026-09-24 the engine ships one way only: the package's `git-graph.node` — the single
-engine binary the editor's Node runtime `require`s and the app's engine host loads over its C
-ABI (`git_graph_capi_request`, the addon's single JSON dispatch surface). The VSIX carries that
-one file; `git-graph-backend` (the `engine` Cargo feature, an app sidecar beside the main
-binary) is the host that serves it — it links no engine crate, and neither does anything else
-(`cargo tree -e normal` finds `git-graph-core` nowhere). A package declares it with
-`backend: { "kind": "node", "host": "git-graph-backend", "command": "native/<platform>/git-graph.node" }`;
-`ext_process.rs` spawns the sidecar with the `.node` as its first argument. Reads still never
+**Extensions run like VS Code: one extension-host process per package.**
+Every `node` backend hosts on the bundled pretend Node runtime (`ggs-node`, the
+`node-runtime` feature) — the app never depends on, or spawns, a system Node, and ggs-node
+is itself the N-API host a package's `.node` addon (the engine `git-graph.node`) loads
+through. The real-Node extension host (`node node-host.cjs`, `src/nodeHost.ts` — `.node`,
+ESM, workers and `node_modules` behave natively, the `vscode` API crossing ggs-ext/1 as
+`ggs.hostRequest`s the workbench serves) is the explicit `GGS_REAL_NODE=1` opt-in; the
+sandboxed frames host main-only packages with no backend, and the deleted C-ABI hosts
+(`git-graph-backend`) are gone.
+Nothing links an engine crate (`cargo tree -e normal` finds `git-graph-core` nowhere).
+Reads still never
 spawn a process per call — the backend is a long-lived, warm sibling process
 (`ext_process.rs` keeps every declared backend running; `ext_protocol.rs`'s `ggs-ext/1`,
 thread-per-request), reached over a pipe, not launched fresh each time. Writes still never
@@ -757,4 +817,5 @@ Conventions:
 | `~/.ggs/` layout | `docs/ggs-development-plan.md` Appendix B |
 | Repository layout | `README.md` → *Layout* |
 | Seam rules, as code | `scripts/check-seams.mjs`, `src-tauri/build.rs` |
+| Extension Platform feature surface | `docs/extension-platform-features.md` |
 | Engine API contract | `vscode-git-graph-rs/native/core/src/api.rs` (`git_graph_core::Engine`) |

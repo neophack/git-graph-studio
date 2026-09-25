@@ -95,8 +95,10 @@ function whenText(when: string | boolean | undefined): string | undefined {
 	return when === undefined ? undefined : String(when);
 }
 
-/** Evaluate a `when` clause - see the module doc for exactly which shapes this understands. */
-function evaluateWhen(extId: string, when: string | undefined): boolean {
+/** Evaluate a `when` clause - see the module doc for exactly which shapes this understands.
+ *  Exported for the workbench's view visibility (a `contributes.views` entry's `when`
+ *  hides the view exactly as a menu entry's hides the item). */
+export function evaluateWhen(extId: string, when: string | undefined): boolean {
 	if (when === undefined) return true;
 	return when.split('&&').every((raw) => {
 		const clause = raw.trim();
@@ -184,6 +186,15 @@ export interface ExtensionSettingDef {
 	description: string;
 }
 
+/** The Uri-shaped argument VS Code hands a menu's command for a clicked resource: the
+ *  Explorer's context locations, the editor's resource, a resource state's `resourceUri`,
+ *  a repository's `rootUri`. A plain `{ scheme, path, fsPath }` object — the frame-side
+ *  shim (`vscodeApi`'s `rehydrateUris`) rebuilds the Uri methods on arrival, so an
+ *  extension's `uri.fsPath`, `uri.toString()` and `uri.with()` all work. */
+export function contextUri(path: string): { scheme: string; path: string; fsPath: string; query: string; fragment: string } {
+	return { scheme: 'file', path, fsPath: path, query: '', fragment: '' };
+}
+
 /** One extension's declared sidebar surface: its activity-bar containers and the tree
  *  views placed in them (or in a built-in container — `explorer` and `scm` are accepted
  *  ids, the view then rides that container's sidebar view as a stacked section). */
@@ -192,8 +203,9 @@ export interface ExtensionViewContribution {
 	containers: { id: string; title: string; icon?: string }[];
 	/** `container` is the manifest's container id; `viewId` is the view's own id (the
 	 *  `createTreeView` id); `type: "webview"` marks a webview view
-	 *  (`registerWebviewViewProvider`), which the workbench hosts as an iframe section. */
-	views: { viewId: string; name: string; container: string; type?: 'tree' | 'webview' }[];
+	 *  (`registerWebviewViewProvider`), which the workbench hosts as an iframe section;
+	 *  `when` is the manifest's visibility clause, evaluated like a menu's. */
+	views: { viewId: string; name: string; container: string; type?: 'tree' | 'webview'; when?: string }[];
 }
 
 const viewContributions = new Map<string, ExtensionViewContribution>();
@@ -207,7 +219,7 @@ function applyExtensionViews(extId: string, contributes: ManifestContributes | u
 	}));
 	const views: ExtensionViewContribution['views'] = [];
 	for (const [container, entries] of Object.entries(contributes?.views ?? {})) {
-		for (const view of entries ?? []) views.push({ viewId: view.id, name: localize(view.name, nls) || view.id, container, type: view.type === 'webview' ? 'webview' : 'tree' });
+		for (const view of entries ?? []) views.push({ viewId: view.id, name: localize(view.name, nls) || view.id, container, type: view.type === 'webview' ? 'webview' : 'tree', when: view.when });
 	}
 	if (containers.length > 0 || views.length > 0) viewContributions.set(extId, { extId, containers, views });
 	else viewContributions.delete(extId);

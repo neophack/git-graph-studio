@@ -7,7 +7,7 @@ import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { fileIcon, fileIconColor } from './editor';
-import { menuSection } from './contributions';
+import { contextUri, menuSection } from './contributions';
 import { actionButton, basename, confirmDialog, el, icon, joinPath, notify, relativeTo, showContextMenu, toPosix, type MenuEntry } from './ui';
 
 interface DirEntryInfo {
@@ -597,9 +597,9 @@ export class Explorer {
 			{ label: 'Rename...', keybinding: 'F2', disabled: isRoot, run: () => void this.renameInline(path) },
 			{ label: 'Delete', keybinding: 'Delete', disabled: isRoot, run: () => void this.delete(path) },
 			// Extensions' `contributes.menus["explorer/context"]` entries, handed VS Code's
-			// arguments: the clicked path, then every selected path (the clicked one alone when
-			// it is outside the selection).
-			...menuSection('explorer/context', [path, this.selection.includes(path) ? this.selectedPaths : [path]])
+			// arguments: the clicked resource as a Uri, then the whole selection as Uris (the
+			// clicked one alone when it is outside the selection).
+			...menuSection('explorer/context', [contextUri(path), (this.selection.includes(path) ? this.selectedPaths : [path]).map(contextUri)])
 		]);
 	}
 

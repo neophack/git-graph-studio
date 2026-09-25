@@ -10,7 +10,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 
 import type { CommandRegistry } from './commands';
-import { resolvedMenuEntries } from './contributions';
+import { contextUri, resolvedMenuEntries } from './contributions';
 import { extFileDataUrl } from './extHost';
 import type { DiffSide } from './editor';
 import { fileIcon, fileIconColor } from './editor';
@@ -821,10 +821,11 @@ export class SourceControlView {
 					{ label: 'Unstage Changes', run: () => void this.run('git_unstage', { paths: [file.path] }) }
 				];
 			// Every scm/resourceState/context contribution an installed extension's manifest
-			// declares: the right-clicked resource rides along as the command's argument (VS
-			// Code's own menu argument), so a "Show File History in Git Graph" filters to it.
+			// declares: the right-clicked resource rides along as VS Code's own menu argument —
+			// a SourceControlResourceState, whose `resourceUri` is what a "filter by this
+			// file" command reads.
 			for (const entry of resolvedMenuEntries('scm/resourceState/context')) {
-				entries.push('separator', { label: entry.label, run: () => this.onExtensionCommand?.(entry.command, [this.absolute(file.path)]) });
+				entries.push('separator', { label: entry.label, run: () => this.onExtensionCommand?.(entry.command, [{ resourceUri: contextUri(this.absolute(file.path)) }]) });
 			}
 			showContextMenu(event.clientX, event.clientY, entries);
 		});
@@ -833,13 +834,15 @@ export class SourceControlView {
 
 	/** The scm/title entries an installed extension's manifest places in the `navigation`
 	 *  group, as inline header buttons: the manifest's own command icon (resolved from the
-	 *  package, then cached) and title, dispatched with the repository as the argument — an
-	 *  extension whose view keys to a repository (a submodule section's header) gets it. */
+	 *  package, then cached) and title, dispatched with the repository as VS Code's own
+	 *  menu argument — the `SourceControl` object, whose `rootUri` is what a "view this
+	 *  repository" command reads (a submodule section's header hands its own repository,
+	 *  which is how the section's button switches the Git Graph view's repo). */
 	private extensionTitleButtons(repoPath: string): HTMLElement[] {
 		const buttons: HTMLElement[] = [];
 		for (const entry of resolvedMenuEntries('scm/title')) {
 			if (entry.group !== 'navigation') continue;
-			const button = actionButton('', entry.label, () => this.onExtensionCommand?.(entry.command, [repoPath]));
+			const button = actionButton('', entry.label, () => this.onExtensionCommand?.(entry.command, [{ rootUri: contextUri(repoPath) }]));
 			const image = el('img');
 			image.alt = '';
 			image.width = 16;
@@ -1198,9 +1201,9 @@ export class SourceControlView {
 					{ label: 'Unstage Changes', run: () => void this.subRun(sub, 'git_unstage', { paths: [file.path] }) }
 				];
 			// Same extension contribution the main repository's rows offer (fileRow), scoped
-			// to this submodule's absolute path.
+			// to this submodule's absolute path as the resource state's `resourceUri`.
 			for (const entry of resolvedMenuEntries('scm/resourceState/context')) {
-				entries.push('separator', { label: entry.label, run: () => this.onExtensionCommand?.(entry.command, [this.subAbsolute(sub, file.path)]) });
+				entries.push('separator', { label: entry.label, run: () => this.onExtensionCommand?.(entry.command, [{ resourceUri: contextUri(this.subAbsolute(sub, file.path)) }]) });
 			}
 			showContextMenu(event.clientX, event.clientY, entries);
 		});

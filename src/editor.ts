@@ -9,6 +9,7 @@ import type { MergeView } from '@codemirror/merge';
 import { invoke } from '@tauri-apps/api/core';
 
 import { hasBookmark, toggleBookmark } from './bookmarks';
+import { diagnosticsExtension } from './editorDiagnostics';
 import { loadAnalysisPages, loadCanViews, loadCallTree, loadFastView, loadFileHistory, loadFolderCompare, loadHexCompare, loadHexView, loadMerge, loadMergeEditor, loadSnippetRegistry, loadSymbolDbView, loadTextEditor } from './lazy';
 // The hex and CAN views are async chunks (lazy.ts): a binary or a CAN trace is the exception
 // among opens, and their code would otherwise ride in the first-paint bundle. The fast
@@ -25,7 +26,7 @@ import type { BlameLine, FileHistoryView } from './fileHistory';
 import type * as TextEditor from './textEditor';
 import type { CallTreeView, WsSymbol } from './callTree';
 import { commands } from './commands';
-import { declaredLanguageName, menuSection } from './contributions';
+import { contextUri, declaredLanguageName, menuSection } from './contributions';
 import type { FolderCompareView } from './folderCompare';
 import type { MergeToolbar } from './mergeEditor';
 import { t } from './i18n';
@@ -161,11 +162,15 @@ export interface DiffSide {
 	/** Set when `path` is an absolute filesystem path, not a repo-relative one at a revision -
 	 *  a Beyond Compare-style compare of two files on disk reads it directly. */
 	local?: boolean;
+	/** The side's text, supplied by whoever opened the diff (an extension's text-document
+	 *  content provider) instead of being read from a repository or disk. */
+	content?: string;
 }
 
 export type EditorInput =
 	| { kind: 'file'; path: string }
 	| { kind: 'diff'; id: string; title: string; repo?: string; binaryNotice?: boolean; left: DiffSide; right: DiffSide }
+	| { kind: 'content'; id: string; title: string; path: string; text: string }
 	| { kind: 'folders'; id: string; left: string; right: string }
 	| { kind: 'calltree'; id: string; symbol: WsSymbol }
 	| { kind: 'symboldb'; id: string }
@@ -239,6 +244,7 @@ function inputId(input: EditorInput): string {
 	switch (input.kind) {
 		case 'file': return 'file:' + input.path;
 		case 'diff': return 'diff:' + input.id;
+		case 'content': return 'content:' + input.id;
 		case 'folders': return 'folders:' + input.id;
 		case 'symboldb': return input.id;
 		case 'analysis': return 'analysis:' + input.tool;
@@ -493,8 +499,43 @@ export class EditorGroup {
 	 *
 	 *  Every text file opens directly in the editable CodeMirror editor; binary or unreadable
 	 *  files fall back to the read-and-notice path. */
-	async openFile(path: string, options: { line?: number; column?: number; inactive?: boolean } = {}): Promise<void> {
-		const existing = this.open.find((e) => e.input.kind === 'file' && e.input.path === path);
+	/** An extension-supplied text document (module 12: a registered text-document content
+	 *  provider's answer) in a read-only tab — VS Code's `vscode.open` of a provider-scheme
+	 *  Uri. `path` names the document for its icon and language; the text is already in
+	 *  hand, so nothing is read here. */
+	async openContent(input: Extract<EditorInput, { kind: 'content' }>): Promise<void> {
+		const existing = this.open.find((e) => e.input.kind === 'content' && e.input.id === input.id);
+		if (existing) {
+			this.activate(existing);
+			return;
+		}
+		const editor: Editor = {
+			input,
+			id: 'content:' + input.id,
+			label: input.title,
+			iconClass: fileIcon(input.path || input.title),
+			pane: el('div', 'editor-pane'),
+			dirty: false
+		};
+		const { EditorView, EditorState, baseExtensions, languageSlot, loadLanguage } = await textEditor();
+		editor.languageName = 'Plain Text';
+		editor.view = new EditorView({
+			state: EditorState.create({
+				doc: input.text,
+				extensions: [baseExtensions(true, input.path || input.title), languageSlot.of([])]
+			}),
+			parent: editor.pane
+		});
+		const view = editor.view;
+		void loadLanguage(input.path || input.title).then((language) => {
+			if (editor.view !== view || !language) return;
+			editor.languageName = language.name;
+			view.dispatch({ effects: languageSlot.reconfigure(language.support) });
+		});
+		this.add(editor, true);
+	}
+
+	async openFile(path: string, options: { line?: number; column?: number; inactive?: boolean } = {}): Promise<void> {		const existing = this.open.find((e) => e.input.kind === 'file' && e.input.path === path);
 		if (existing) {
 			this.activate(existing);
 			if (options.line !== undefined) {
@@ -1361,6 +1402,7 @@ export class EditorGroup {
 				extensions: [
 					...baseExtensions(false, editor.input.kind === 'file' ? editor.input.path : editor.label),
 					...completionExtension(editor.input.kind === 'file' ? editor.input.path : editor.label),
+					...(editor.input.kind === 'file' ? [diagnosticsExtension(editor.input.path)] : []),
 					bookmarkGutter(editor.input.kind === 'file' ? editor.input.path : ''),
 					languageSlot.of([]),
 					blameSlot.of([]),
@@ -1441,9 +1483,10 @@ export class EditorGroup {
 				return;
 			}
 		}
-		const read = async (side: DiffSide): Promise<FileContents> => {
-			if (!side.exists) return { contents: '', binary: false, size: 0 };
-			if (side.local) return readFileRaw(side.path);
+	const read = async (side: DiffSide): Promise<FileContents> => {
+		if (!side.exists) return { contents: '', binary: false, size: 0 };
+		if (side.content !== undefined) return { contents: side.content, binary: false, size: side.content.length };
+		if (side.local) return readFileRaw(side.path);
 			try {
 				return await invoke<FileContents>('read_file_at', { revision: side.revision, path: side.path, repo: input.repo });
 			} catch (error) {
@@ -2517,7 +2560,7 @@ export class EditorGroup {
 				{ label: 'Copy Path', keybinding: 'Shift+Alt+C', run: () => void writeText(path) },
 				{ label: 'Copy Relative Path', keybinding: 'Ctrl+K Ctrl+Shift+C', run: () => void writeText(this.rootPath ? relativeTo(this.rootPath, path) : path) });
 		}
-		entries.push(...menuSection('editor/title/context', editor.input.kind === 'file' ? [editor.input.path, [editor.input.path]] : undefined));
+		entries.push(...menuSection('editor/title/context', editor.input.kind === 'file' ? [contextUri(editor.input.path), [contextUri(editor.input.path)]] : undefined));
 		return entries;
 	}
 
@@ -2593,7 +2636,7 @@ export class EditorGroup {
 			{ label: 'Command Palette...', keybinding: 'Ctrl+Shift+P', run: () => void commands.execute('workbench.commandPalette') },
 			// Extensions' `contributes.menus["editor/context"]` entries, handed the file the
 			// editor shows (VS Code's resource argument) when it shows one.
-			...menuSection('editor/context', editor.input.kind === 'file' ? [editor.input.path, [editor.input.path]] : undefined)
+			...menuSection('editor/context', editor.input.kind === 'file' ? [contextUri(editor.input.path), [contextUri(editor.input.path)]] : undefined)
 		];
 	}
 

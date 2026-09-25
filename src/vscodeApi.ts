@@ -11,11 +11,55 @@
 // channels - crosses the `HostBridge` to the main window. Events the host pushes back
 // (configuration changes, webview messages, disposals) arrive through `handleHostEvent`.
 
+import type { SerializableDiagnostic } from './editorDiagnostics';
+
 export interface HostBridge {
 	/** Call a host service; resolves with its result, rejects with the host's error. */
 	request(method: string, args: unknown[]): Promise<unknown>;
 	/** Park a command handler in the frame (functions cannot cross the message boundary). */
 	registerCommandHandler(id: string, handler: (...args: unknown[]) => unknown): void;
+	/** Park a text-document content provider in the frame — the host's `vscode.open` /
+	 *  `vscode.diff` call back into it (`docProvider.provide`) for a scheme's text. */
+	registerDocProvider?(scheme: string, provider: { provideTextDocumentContent?: (uri: unknown) => unknown }): void;
+	/** Forget a parked content provider (its Disposable ran). */
+	unregisterDocProvider?(scheme: string): void;
+}
+
+/** One watcher pattern against one base-relative path (forward slashes, `**` crossing
+ *  segment boundaries, `*` / `?` within one) — the subset VS Code's glob patterns use. */
+export function watcherGlobMatches(pattern: string, path: string): boolean {
+	const segments = pattern.replace(/\\/g, '/').replace(/^\.\//, '').split('/');
+	const parts = path.split('/');
+	const segmentMatches = (segment: string, part: string): boolean => {
+		if (segment === part) return true;
+		let s = 0;
+		let p = 0;
+		while (s < segment.length) {
+			const char = segment[s]!;
+			if (char === '*') {
+				for (let rest = p; rest <= part.length; rest++) {
+					if (segmentMatches(segment.slice(s + 1), part.slice(rest))) return true;
+				}
+				return false;
+			}
+			if (p >= part.length || (char !== '?' && char !== part[p])) return false;
+			s++;
+			p++;
+		}
+		return p === part.length;
+	};
+	const matches = (segmentAt: number, partAt: number): boolean => {
+		if (segmentAt === segments.length) return partAt === parts.length;
+		const segment = segments[segmentAt]!;
+		if (segment === '**') {
+			for (let skip = partAt; skip <= parts.length; skip++) {
+				if (matches(segmentAt + 1, skip)) return true;
+			}
+			return false;
+		}
+		return partAt < parts.length && segmentMatches(segment, parts[partAt]!) && matches(segmentAt + 1, partAt + 1);
+	};
+	return matches(0, 0);
 }
 
 export interface HostContext {
@@ -45,7 +89,7 @@ export interface HostContext {
  *  (with its document text when the document changed), a document being saved, a message
  *  from one of its webview views (sidebar), a view's visibility, or a theme change. */
 export interface HostEvent {
-	event: 'configChanged' | 'webviewMessage' | 'webviewDisposed' | 'activeEditorChanged' | 'documentSaved' | 'webviewViewMessage' | 'webviewViewVisible' | 'themeChanged';
+	event: 'configChanged' | 'webviewMessage' | 'webviewDisposed' | 'activeEditorChanged' | 'documentSaved' | 'webviewViewMessage' | 'webviewViewVisible' | 'themeChanged' | 'fsChanged';
 	settings?: Record<string, unknown>;
 	panelId?: number;
 	message?: unknown;
@@ -58,6 +102,9 @@ export interface HostEvent {
 	visible?: boolean;
 	/** A theme change's `ThemeKind` (1 light, 2 dark). */
 	kind?: number;
+	/** A watcher batch (fsChanged): the changed working-tree paths under `root`, and
+	 *  whether something under `.git/` changed (the ref/index half the batch never lists). */
+	fs?: { root: string; paths: string[]; gitChanged: boolean; truncated: boolean };
 }
 
 /** One edit as it crosses the bridge: 1-based line / 0-based character positions, the shape
@@ -141,7 +188,7 @@ export interface Uri {
 
 function makeUri(scheme: string, path: string, query = '', fragment = ''): Uri {
 	const fsPath = path;
-	return {
+	const uri: Uri = {
 		scheme,
 		path,
 		fsPath,
@@ -150,6 +197,13 @@ function makeUri(scheme: string, path: string, query = '', fragment = ''): Uri {
 		toString: () => `${scheme}:${path}${query ? '?' + query : ''}${fragment ? '#' + fragment : ''}`,
 		with: (change) => makeUri(change.scheme ?? scheme, change.path ?? path, change.query ?? query, change.fragment ?? fragment)
 	};
+	// Functions cannot cross the structured clone of a postMessage: an RPC carrying a Uri
+	// (vscode.diff's sides above all) would throw DataCloneError and never reach the host.
+	// Non-enumerable members are skipped by the clone — the data crosses, the methods stay
+	// callable in the frame.
+	Object.defineProperty(uri, 'toString', { enumerable: false, writable: true, configurable: true });
+	Object.defineProperty(uri, 'with', { enumerable: false, writable: true, configurable: true });
+	return uri;
 }
 
 export const Uri = {
@@ -168,6 +222,30 @@ export const Uri = {
 		return makeUri(scheme, rest.slice(0, cut), queryAt !== -1 ? rest.slice(queryAt + 1, hashAt === -1 ? undefined : hashAt) : '', hashAt !== -1 ? rest.slice(hashAt + 1) : '');
 	}
 } as const;
+
+/** Reconstitute the Uris an inbound host call's arguments carry. A command argument
+ *  crosses postMessage (or the ggs-ext/1 line) as plain data — the Uri methods are
+ *  non-enumerable precisely so the data survives the structured clone — so the menu
+ *  context the workbench dispatches (VS Code hands a menu's command the clicked `Uri`)
+ *  arrives as `{ scheme, path, fsPath }` without its methods. Anything shaped like that
+ *  data half, at any depth of the argument list, becomes a full Uri again: an extension's
+ *  `uri.fsPath` reads work either way, but `uri.toString()` / `uri.with()` only do once
+ *  rehydrated — the argument shape VS Code's own command dispatch guarantees. */
+export function rehydrateUris(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(rehydrateUris);
+	if (value === null || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) return value;
+	const data = value as Record<string, unknown>;
+	if (typeof data.scheme === 'string' && typeof data.fsPath === 'string') {
+		// An own toString means the methods are already there — a full Uri (or something
+		// carrying its own) passes through untouched, never copied method-less.
+		if (Object.prototype.hasOwnProperty.call(data, 'toString')) return value;
+		const path = typeof data.path === 'string' ? data.path : (data.fsPath as string);
+		return makeUri(data.scheme, path, typeof data.query === 'string' ? data.query : '', typeof data.fragment === 'string' ? data.fragment : '');
+	}
+	const out: Record<string, unknown> = {};
+	for (const [key, item] of Object.entries(value)) out[key] = rehydrateUris(item);
+	return out;
+}
 
 export class Disposable {
 	constructor(readonly dispose: () => void) {}
@@ -430,6 +508,27 @@ export interface QuickPickItem {
 }
 
 /* ---------- Configuration ---------- */
+
+
+/** `vscode.ConfigurationChangeEvent`: which settings a change touched. */
+export interface ConfigurationChangeEvent {
+	affectsConfiguration(section: string, scope?: unknown): boolean;
+}
+
+/** The keys whose values differ between two settings maps (added, removed or changed). */
+export function changedSettingKeys(before: Record<string, unknown>, after: Record<string, unknown>): string[] {
+	const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+	return [...keys].filter((key) => JSON.stringify(before[key]) !== JSON.stringify(after[key]));
+}
+
+/** VS Code's section semantics: a change to `a.b.c` affects `a`, `a.b` and `a.b.c`, and a
+ *  change to a whole section (`a.b`) affects every key under it. */
+export function configurationChangeEvent(changed: string[]): ConfigurationChangeEvent {
+	return {
+		affectsConfiguration: (section: string) =>
+			changed.some((key) => key === section || key.startsWith(`${section}.`) || section.startsWith(`${key}.`))
+	};
+}
 
 class WorkspaceConfiguration {
 	constructor(private readonly ctx: HostContext, private readonly bridge: HostBridge, private readonly section: string) {}
@@ -817,11 +916,13 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 	/** Set below the literal — the literal's `handleHostEvent` forwards into it. */
 	let dispatchHostEvent: (event: HostEvent) => void = () => undefined;
 	const workspaceFoldersChanged = new EventEmitter<void>();
-	const configurationChanged = new EventEmitter<void>();
+	const configurationChanged = new EventEmitter<ConfigurationChangeEvent>();
 	const documentSaved = new EventEmitter<{ fileName: string } & Record<string, unknown>>();
 	const documentChanged = new EventEmitter<{ fileName: string; languageId: string } & Record<string, unknown>>();
 	const documentOpened = new EventEmitter<{ fileName: string } & Record<string, unknown>>();
 	const documentClosed = new EventEmitter<{ fileName: string } & Record<string, unknown>>();
+	/** The host's watcher batches — what `createFileSystemWatcher` serves its events from. */
+	const fsChanged = new EventEmitter<{ root: string; paths: string[]; gitChanged: boolean; truncated: boolean }>();
 	const activeEditorChangedEmitter = new EventEmitter<void>();
 	const visibleEditorsChanged = new EventEmitter<void>();
 	const selectionChanged = new EventEmitter<void>();
@@ -836,6 +937,47 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 	let themeKind = ctx.themeKind ?? 2;
 	/** The tree views this frame registered, by view id (host calls and events route through). */
 	const treeRegistrations = new Map<string, TreeViewRegistration>();
+	/** Document formatting providers this frame registered, by id — the host routes
+	 *  `editor.formatDocument` to whichever one matches the document's language. */
+	const formattingProviders = new Map<string, {
+		selectors: unknown[];
+		provider: { provideDocumentFormattingEdits: (document: unknown, options: unknown, token: unknown) => unknown };
+	}>();
+	let formatterSeq = 0;
+
+	/** A TextDocument view over text the host supplies for one formatting request. */
+	function formatterDocument(path: string, languageId: string, text: string): Record<string, unknown> {
+		const lines = text.split('\n');
+		return {
+			uri: Uri.file(path),
+			fileName: path,
+			languageId,
+			version: 1,
+			isDirty: false,
+			isUntitled: false,
+			isClosed: false,
+			lineCount: lines.length,
+			getText: () => text,
+			offsetAt: (position: { line: number; character: number }): number => {
+				const lineNumber = Math.max(1, Math.min(position.line + 1, lines.length));
+				let offset = 0;
+				for (let index = 0; index < lineNumber - 1; index += 1) offset += lines[index]!.length + 1;
+				return Math.min(offset + Math.max(0, position.character), text.length);
+			},
+			positionAt: (offset: number): { line: number; character: number } => {
+				let remaining = Math.max(0, offset);
+				for (let index = 0; index < lines.length; index += 1) {
+					const lineLength = lines[index]!.length;
+					if (remaining <= lineLength) return { line: index, character: remaining };
+					remaining -= lineLength + 1;
+				}
+				return { line: lines.length - 1, character: lines[lines.length - 1]!.length };
+			},
+			save: async () => true,
+			validateRange: (range: unknown) => range,
+			validatePosition: (position: unknown) => position
+		};
+	}
 
 	function registerTree(viewId: string, provider: TreeDataProvider<unknown>): TreeViewRegistration {
 		const existing = treeRegistrations.get(viewId);
@@ -991,16 +1133,47 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 					void bridge.request('progress.end', [id]);
 				}
 			},
-			createOutputChannel: (name: string) => ({
-				name,
-				append: (value: string) => void bridge.request('output.append', [name, value]),
-				appendLine: (value: string) => void bridge.request('output.append', [name, value + '\n']),
-				clear: () => void bridge.request('output.clear', [name]),
-				show: () => void bridge.request('output.show', [name]),
-				hide: () => undefined,
-				replace: (value: string) => void bridge.request('output.append', [name, value]),
-				dispose: () => void bridge.request('output.dispose', [name])
-			}),
+			/** `window.createTerminal`: the integrated terminal serves the text — the run-in-
+			 *  terminal actions extensions open (a git command the user asked to see). The
+			 *  panel's own session policy applies (its shell, its cwd); the terminal's
+			 *  per-instance options are advisory, as VS Code's own terminal fallthrough is. */
+			createTerminal: (options?: string | { name?: string; cwd?: string | Uri; env?: Record<string, string | null> | null; shellPath?: string; shellArgs?: string[] }) => {
+				const name = typeof options === 'string' ? options : options?.name ?? '';
+				return {
+					name,
+					creationOptions: typeof options === 'object' ? options : undefined,
+					processId: Promise.resolve(undefined),
+					exitStatus: undefined as { code: number } | undefined,
+					sendText: (text: string, _shouldExecute?: boolean) => bridge.request('terminal.send', [text]) as Promise<void>,
+					show: (_preserveFocus?: boolean) => bridge.request('terminal.show', []) as Promise<void>,
+					hide: () => undefined,
+					dispose: () => undefined
+				};
+			},
+			createOutputChannel: (name: string, _options?: { log?: boolean }) => {
+				// The `{ log: true }` form VS Code's LogOutputChannel takes: the level-named
+				// methods a logging extension binds at activation (`channel.info.bind(channel)`
+				// and friends — cspell's logger wrapper above all). VS Code filters them by the
+				// log level; here every level lands in the channel with its prefix — the
+				// surface the extension needs is that calling them never throws.
+				const logLine = (level: string, message: string, ...args: unknown[]) =>
+					void bridge.request('output.append', [name, `[${level}] ${message}${args.length > 0 ? ' ' + args.map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg))).join(' ') : ''}\n`]);
+				return {
+					name,
+					trace: (message: string, ...args: unknown[]) => logLine('trace', message, ...args),
+					debug: (message: string, ...args: unknown[]) => logLine('debug', message, ...args),
+					info: (message: string, ...args: unknown[]) => logLine('info', message, ...args),
+					warn: (message: string, ...args: unknown[]) => logLine('warn', message, ...args),
+					error: (message: string, ...args: unknown[]) => logLine('error', message, ...args),
+					append: (value: string) => void bridge.request('output.append', [name, value]),
+					appendLine: (value: string) => void bridge.request('output.append', [name, value + '\n']),
+					clear: () => void bridge.request('output.clear', [name]),
+					show: () => void bridge.request('output.show', [name]),
+					hide: () => undefined,
+					replace: (value: string) => void bridge.request('output.append', [name, value]),
+					dispose: () => void bridge.request('output.dispose', [name])
+				};
+			},
 			createStatusBarItem: (arg1?: number | string, arg2?: number) => {
 				const alignment = typeof arg1 === 'number' ? arg1 : arg2 ?? StatusBarAlignment.Left;
 				const item = new StatusBarItem(bridge, `${ctx.extensionId}:${++statusSeq}`, alignment);
@@ -1012,8 +1185,8 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 				void bridge.request('statusbar.create', [item.id, StatusBarAlignment.Left]);
 				item.text = text;
 				item.show();
-				if (timeout === undefined) window.setTimeout(() => item.dispose(), 5000);
-				else if (timeout > 0) window.setTimeout(() => item.dispose(), timeout);
+			if (timeout === undefined) setTimeout(() => item.dispose(), 5000);
+			else if (timeout > 0) setTimeout(() => item.dispose(), timeout);
 				return new Disposable(() => item.dispose());
 			},
 			createWebviewPanel: (viewType: string, title: string, _showOptions?: unknown, options?: Record<string, unknown>) => {
@@ -1097,7 +1270,9 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 				};
 			},
 			get state(): { focused: boolean } {
-				return { focused: document.hasFocus() };
+				// The shim also runs in the real-Node extension host (nodeHost.ts), where no
+				// `document` exists — the window simply reports focused there.
+				return { focused: typeof document === 'undefined' ? true : document.hasFocus() };
 			},
 			onDidChangeWindowState: (() => new Disposable(() => undefined)) as never
 		},
@@ -1123,7 +1298,17 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			/** A text-document content provider registers (its `activate()` must survive the
 			 *  call); this host's diff surface resolves virtual documents through the app's
 			 *  own diff editors, so the provider is remembered, never consulted. */
-			registerTextDocumentContentProvider: (_scheme: string, _provider: unknown) => new Disposable(() => undefined),
+			registerTextDocumentContentProvider: (scheme: string, provider: unknown) => {
+				// The provider object stays in the frame; the host remembers which frame
+				// answers the scheme, and its `vscode.open` / `vscode.diff` call back here
+				// for the text (the host decodes nothing of any package's private schemes).
+				bridge.registerDocProvider?.(scheme, provider as { provideTextDocumentContent?: (uri: unknown) => unknown });
+				void bridge.request('docProvider.register', [scheme]).catch(() => undefined);
+				return new Disposable(() => {
+					bridge.unregisterDocProvider?.(scheme);
+					void bridge.request('docProvider.unregister', [scheme]).catch(() => undefined);
+				});
+			},
 			onDidSaveTextDocument: documentSaved.event,
 			onDidChangeTextDocument: documentChanged.event,
 			/** The save push arrives after the write; `waitUntil` accepts and ignores (this
@@ -1185,17 +1370,57 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 				if (root !== undefined && path.toLowerCase().startsWith(root)) return path.slice(root.length).replace(/^\//, '');
 				return path;
 			},
-			createFileSystemWatcher: (_pattern: unknown) => {
+			createFileSystemWatcher: (pattern: unknown) => {
+				// A string pattern watches the first workspace folder; a RelativePattern
+				// carries its own base (the repository a view watches, typically).
+				const asObject = pattern !== null && typeof pattern === 'object' ? pattern as { base?: unknown; pattern?: unknown } : null;
+				const baseRaw = asObject !== null
+					? (typeof asObject.base === 'string' ? asObject.base : String((asObject.base as Uri | undefined)?.fsPath ?? ''))
+					: (ctx.workspaceFolders[0]?.uri.fsPath ?? '');
+				const base = baseRaw.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+				const glob = String((asObject !== null ? asObject.pattern : pattern) ?? '**');
 				const changed = new EventEmitter<{ type: number; fileName: string } & Record<string, unknown>>();
-				// The one file event this frame learns is a save; it feeds the change event,
-				// and create/delete stay silent (never a false fire).
-				documentSaved.event((document) => changed.fire({ type: 2, fileName: (document as { fileName: string }).fileName, ...document as Record<string, unknown> }));
-				return {
-					onDidChange: changed.event,
-					onDidCreate: (() => new Disposable(() => undefined)) as never,
-					onDidDelete: (() => new Disposable(() => undefined)) as never,
-					dispose: () => changed.dispose()
+				const created = new EventEmitter<{ type: number; fileName: string } & Record<string, unknown>>();
+				const deleted = new EventEmitter<{ type: number; fileName: string } & Record<string, unknown>>();
+				// VS Code's watcher events carry the Uri itself — the consumers reach for
+				// `uri.fsPath`, never a wrapper.
+				const fire = (emitter: EventEmitter<{ type: number; fileName: string } & Record<string, unknown>>, absolute: string) => {
+					const uri = Uri.file(absolute);
+					emitter.fire(uri as unknown as { type: number; fileName: string } & Record<string, unknown>);
 				};
+				// The frame's own saves still count (VS Code's watcher sees them too).
+				const saveSub = documentSaved.event((document) => {
+					const fileName = (document as { fileName: string }).fileName;
+					const normalized = fileName.replace(/\\/g, '/').toLowerCase();
+					if (normalized.startsWith(base + '/') && watcherGlobMatches(glob, normalized.slice(base.length + 1))) {
+						fire(changed, fileName);
+					}
+				});
+				// The host's watcher batches: every changed working-tree path under the
+				// pattern's base fires; a `.git/` change fires the pattern-matched HEAD
+				// event (the batch itself never lists `.git/` paths). Create and delete
+				// cannot be told apart from change in a batch — they stay silent, and the
+				// debounced consumers refetch on change alone.
+				const fsSub = fsChanged.event((batch) => {
+					const root = batch.root.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+					if (!base.startsWith(root)) return;
+					for (const relative of batch.paths) {
+						const full = root + '/' + relative;
+						if (!full.startsWith(base === '' ? root : base + '/')) continue;
+						const rest = full.slice(base === '' ? root.length + 1 : base.length + 1);
+						if (watcherGlobMatches(glob, rest)) fire(changed, root + '/' + relative);
+					}
+					if (batch.gitChanged && watcherGlobMatches(glob, '.git/HEAD')) fire(changed, batch.root + '/.git/HEAD');
+				});
+				const events = { onDidChange: changed.event, onDidCreate: created.event, onDidDelete: deleted.event };
+				const dispose = () => {
+					saveSub.dispose();
+					fsSub.dispose();
+					changed.dispose();
+					created.dispose();
+					deleted.dispose();
+				};
+				return { ...events, dispose };
 			},
 			findFiles: async (include: string, _exclude?: string | null, _maxResults?: number) => {
 				const root = ctx.workspaceFolders[0]?.uri.fsPath ?? '';
@@ -1243,14 +1468,49 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			 *  surface renders them yet. */
 			createDiagnosticCollection: (name?: string) => {
 				const entries = new Map<string, unknown[]>();
+				// The key the editor matches on: the file's own path spelling.
+				const keyOf = (uri: Uri | string): string => {
+					const path = typeof uri === 'string' ? uri : uri.fsPath ?? uri.toString();
+					return path.replace(/\\/g, '/');
+				};
+				const push = (path: string): void => {
+					const diagnostics = (entries.get(path) ?? []) as SerializableDiagnostic[];
+					void bridge.request('diagnostics.set', [ctx.extensionId, path, diagnostics]).catch(() => undefined);
+				};
 				return {
 					name: name ?? 'collection',
-					set: (uri: Uri | string, diagnostics: unknown[]) => entries.set(typeof uri === 'string' ? uri : uri.toString(), diagnostics ?? []),
-					delete: (uri: Uri | string) => entries.delete(typeof uri === 'string' ? uri : uri.toString()),
-					clear: () => entries.clear(),
+					set: (uri: Uri | string, diagnostics: unknown[]) => {
+						const path = keyOf(uri);
+						entries.set(path, diagnostics ?? []);
+						push(path);
+					},
+					delete: (uri: Uri | string) => {
+						const path = keyOf(uri);
+						entries.delete(path);
+						push(path);
+					},
+					clear: () => {
+						for (const path of [...entries.keys()]) push(path);
+						entries.clear();
+					},
 					forEach: (callback: (diagnostics: unknown[], uri: Uri) => void) => entries.forEach((diagnostics, key) => callback(diagnostics, Uri.parse(key))),
 					get: (uri: Uri | string) => entries.get(typeof uri === 'string' ? uri : uri.toString()),
 					dispose: () => entries.clear()
+				};
+			},
+			registerDocumentFormattingEditProvider: (selector: unknown, provider: { provideDocumentFormattingEdits: (document: unknown, options: unknown, token: unknown) => unknown }) => {
+				// VS Code selectors arrive as strings (`'python'`) or document filters
+				// (`{ language, scheme }`) — normalize to `{ language }` for the host match.
+				const selectors = (Array.isArray(selector) ? selector : [selector]).map((entry) => (typeof entry === 'string' ? { language: entry } : entry));
+				const id = `fmt-${++formatterSeq}`;
+				const entry = { id, selectors, provider };
+				formattingProviders.set(id, entry);
+				void bridge.request('languages.registerFormatting', [{ id, selectors }]).catch(() => undefined);
+				return {
+					dispose: () => {
+						formattingProviders.delete(id);
+						void bridge.request('languages.unregisterFormatting', [{ id }]).catch(() => undefined);
+					}
 				};
 			},
 			registerCompletionItemProvider: () => inert('languages.registerCompletionItemProvider'),
@@ -1263,8 +1523,6 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			registerWorkspaceSymbolProvider: () => inert('languages.registerWorkspaceSymbolProvider'),
 			registerCodeLensProvider: () => inert('languages.registerCodeLensProvider'),
 			registerCodeActionsProvider: () => inert('languages.registerCodeActionsProvider'),
-			registerDocumentFormattingEditProvider: () => inert('languages.registerDocumentFormattingEditProvider'),
-			registerDocumentRangeFormattingEditProvider: () => inert('languages.registerDocumentRangeFormattingEditProvider'),
 			registerOnTypeFormattingEditProvider: () => inert('languages.registerOnTypeFormattingEditProvider'),
 			registerRenameProvider: () => inert('languages.registerRenameProvider'),
 			registerDocumentLinkProvider: () => inert('languages.registerDocumentLinkProvider'),
@@ -1371,6 +1629,19 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			shell: 'cmd.exe',
 			getLanguage: () => ctx.language,
 			openExternal: (uri: Uri) => bridge.request('openExternal', [uri.toString()]) as Promise<boolean>,
+			// VS Code's telemetry entry point — extensions call it during activation (cspell
+			// logs its first usage event there), so an absent method kills the activation.
+			// This host collects nothing: an inert logger that accepts every call.
+			createTelemetryLogger: (_sender?: unknown, _configuration?: unknown) => {
+				console.info('[ggs] telemetry is not collected in this host');
+				return {
+					logUsage: () => undefined,
+					logError: () => undefined,
+					sendEventData: () => undefined,
+					sendErrorData: () => undefined,
+					dispose: () => undefined
+				};
+			},
 			clipboard: {
 				writeText: (text: string) => bridge.request('clipboard.writeText', [text]) as Promise<void>,
 				readText: () => bridge.request('clipboard.readText', []) as Promise<string>
@@ -1442,6 +1713,16 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			setVisible: (viewId: string, visible: boolean): void => treeRegistrations.get(viewId)?.setVisible(visible)
 		},
 
+		/** Not part of VS Code's `vscode` module either: the host's answer to
+		 *  `editor.formatDocument` runs the registered provider over the host's text. */
+		__runFormatter: async (id: string, document: { path: string; languageId: string; text: string }, options: { tabSize: number; insertSpaces: boolean }): Promise<unknown[]> => {
+			const entry = formattingProviders.get(id);
+			if (!entry) throw new Error(`no formatting provider ${id}`);
+			const doc = formatterDocument(document.path, document.languageId, document.text);
+			const edits = await Promise.resolve(entry.provider.provideDocumentFormattingEdits(doc, options, undefined));
+			return (edits ?? []) as unknown[];
+		},
+
 		/** Not part of VS Code's `vscode` module either: the webview view plumbing — the
 		 *  frame's answer to the host calls `webviewView.resolve` (the view's first show)
 		 *  and `webviewView.setVisible` (the sidebar's view switching). */
@@ -1468,9 +1749,12 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 
 	dispatchHostEvent = (event: HostEvent): void => {
 		if (event.event === 'configChanged' && event.settings) {
+			const changed = changedSettingKeys(ctx.settings, event.settings);
 			for (const key of Object.keys(ctx.settings)) delete ctx.settings[key];
 			Object.assign(ctx.settings, event.settings);
-			configurationChanged.fire(undefined);
+			// VS Code's listeners read the event (`affectsConfiguration(section)`); firing
+			// undefined threw inside every such handler, so no setting change ever applied.
+			if (changed.length > 0) configurationChanged.fire(configurationChangeEvent(changed));
 			return;
 		}
 		if (event.event === 'webviewMessage' && event.panelId !== undefined) {
@@ -1516,9 +1800,38 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			// saved one) may be stale — the next active-editor push re-sends it.
 			documentSaved.fire(makeTextDocument(event.path) as { fileName: string } & Record<string, unknown>);
 		}
+		if (event.event === 'fsChanged' && event.fs) {
+			fsChanged.fire(event.fs);
+		}
 	};
 
 	return api;
 }
 
 export type VscodeApi = ReturnType<typeof createVscodeApi>;
+
+/** The ExtensionContext VS Code hands to activate(): the mementos are the shim's persisted
+ *  ones (`globalState` survives restarts, `workspaceState` per install), and `extension` is
+ *  the extension's own API entry, as `vscode.extensions.getExtension(id)` reports it.
+ *  Shared by both hosts that run extension code: the sandboxed frame (extHostBoot) and the
+ *  real-Node extension host (nodeHost) — one definition, so the two cannot drift. */
+export function activationContext(context: HostContext, api: VscodeApi): Record<string, unknown> {
+	const asUri = (path: string) => ({ scheme: 'file', path, fsPath: path, toString: () => 'file:' + path });
+	return {
+		subscriptions: [] as Disposable[],
+		extensionPath: context.extensionPath,
+		extensionUri: asUri(context.extensionPath),
+		globalState: api.__mementos.global,
+		workspaceState: api.__mementos.workspace,
+		storagePath: context.extensionPath,
+		globalStoragePath: context.extensionPath,
+		globalStorageUri: asUri(context.extensionPath),
+		storageUri: asUri(context.extensionPath),
+		logUri: asUri(context.extensionPath),
+		logPath: context.extensionPath,
+		extensionMode: 3, // ExtensionMode.Production — neither host has a dev mode
+		asAbsolutePath: (relative: string) => context.extensionPath + '/' + relative,
+		environmentVariableCollection: undefined,
+		outputChannel: { append: () => undefined, appendLine: () => undefined, show: () => undefined, dispose: () => undefined }
+	};
+}

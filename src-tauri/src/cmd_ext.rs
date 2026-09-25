@@ -132,10 +132,12 @@ pub struct BackendDecl {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
-    /// `kind: "node"` only: the app-bundled engine host exe to spawn (`git-graph-backend`),
-    /// handed the package's `.node` as its first argument. The name comes from the package
-    /// (its packer decides which host serves it), never from this app's own code — and only a
-    /// host that ships beside the app ever runs, so a package cannot smuggle an executable in
+    /// `kind: "node"` only: the app-bundled host exe to spawn — `git-graph-backend` (the
+    /// engine `.node` over its C ABI) or `ggs-node` (the pretend Node runtime that runs the
+    /// package's own JS entry). Absent, the command's shape decides: a `.node` is the
+    /// engine's to serve, anything else is a JS entry for `ggs-node`. The name comes from
+    /// the package when declared, never from this app's own code — and only a host that
+    /// ships beside the app ever runs, so a package cannot smuggle an executable in
     /// through this field.
     #[serde(default)]
     pub host: Option<String>,
@@ -777,6 +779,9 @@ pub fn ext_read_file(
 pub struct ExtCodeBundle {
     /// Package-relative paths with `/` separators, keyed as the loader normalizes them.
     pub files: std::collections::BTreeMap<String, String>,
+    /// Binary files the package reads with `fs.readFileSync` (`.wasm` payloads above all),
+    /// base64-encoded: the frame's `fs` serves them synchronously from this preload.
+    pub blob_files: std::collections::BTreeMap<String, String>,
     /// The bounds below were hit: code beyond them did not cross, and a `require` of it fails
     /// with the reason (the frame surfaces that error rather than a mystery).
     pub truncated: bool,
@@ -807,10 +812,14 @@ fn read_code_file(root: &Path, rel: &Path) -> Option<String> {
 /// and total size — an unbounded eager preload of a heavy package would balloon the IPC
 /// message. The `node_modules` subtree is included on purpose: an un-bundled extension's
 /// `require('dep')` walks into it exactly like Node's.
+///
+/// The bounds are generous on purpose (a 2026-era marketplace bundle ships a multi-megabyte
+/// `out/client/extension.js` and megabyte-scale unicode tables it genuinely `require`s);
+/// the cost is one activation-time IPC crossing, paid by the packages that need it.
 pub(crate) fn load_code_from(root: &Path) -> Result<ExtCodeBundle, String> {
-    const MAX_FILES: usize = 600;
-    const MAX_TOTAL_BYTES: u64 = 12 * 1024 * 1024;
-    const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+    const MAX_FILES: usize = 1200;
+    const MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+    const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
     const MAX_DEPTH: usize = 12;
 
     struct Bounds {
@@ -821,21 +830,24 @@ pub(crate) fn load_code_from(root: &Path) -> Result<ExtCodeBundle, String> {
         total: u64,
         truncated: bool,
     }
+    struct Acc<'a> {
+        files: &'a mut std::collections::BTreeMap<String, String>,
+        binaries: &'a mut Vec<String>,
+        blob_files: &'a mut std::collections::BTreeMap<String, String>,
+        bounds: &'a mut Bounds,
+    }
     fn walk(
         root: &Path,
         dir: &Path,
         prefix: &str,
         depth: usize,
-        files: &mut std::collections::BTreeMap<String, String>,
-        binaries: &mut Vec<String>,
-        bounds: &mut Bounds,
+        acc: &mut Acc,
     ) -> Result<(), String> {
-        if depth > bounds.max_depth {
-            bounds.truncated = true;
+        if depth > acc.bounds.max_depth {
+            acc.bounds.truncated = true;
             return Ok(());
         }
-        let entries =
-            std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
+        let entries = std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
         for entry in entries.flatten() {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
@@ -849,29 +861,42 @@ pub(crate) fn load_code_from(root: &Path) -> Result<ExtCodeBundle, String> {
             };
             let Ok(meta) = entry.metadata() else { continue };
             if meta.is_dir() {
-                walk(root, &entry.path(), &rel, depth + 1, files, binaries, bounds)?;
+                walk(root, &entry.path(), &rel, depth + 1, acc)?;
                 continue;
             }
             // The binary native modules cross as paths, not text: the frame cannot run their
             // bytes, but `require` of one answers the host-served proxy and `fs` sees the file.
             if rel.to_ascii_lowercase().ends_with(".node") {
-                binaries.push(rel);
+                acc.binaries.push(rel);
+                continue;
+            }
+            // `.wasm` payloads a package instantiates: preloaded base64 so the frame's
+            // synchronous `readFileSync` answers without a round trip.
+            if rel.to_ascii_lowercase().ends_with(".wasm") {
+                let bytes = std::fs::read(entry.path()).unwrap_or_default();
+                use base64::Engine as _;
+                acc.blob_files.insert(
+                    rel,
+                    base64::engine::general_purpose::STANDARD.encode(&bytes),
+                );
                 continue;
             }
             // One oversized file is skipped while the walk continues — a bundled `.js` the
             // map can live without must not hide the package's small modules.
-            if meta.len() > bounds.max_file_bytes {
-                bounds.truncated = true;
+            if meta.len() > acc.bounds.max_file_bytes {
+                acc.bounds.truncated = true;
                 continue;
             }
             // The capacity bounds end the walk: nothing further would fit anyway.
-            if files.len() >= bounds.max_files || bounds.total >= bounds.max_total_bytes {
-                bounds.truncated = true;
+            if acc.files.len() >= acc.bounds.max_files
+                || acc.bounds.total >= acc.bounds.max_total_bytes
+            {
+                acc.bounds.truncated = true;
                 return Ok(());
             }
             if let Some(text) = read_code_file(root, Path::new(&rel)) {
-                bounds.total += text.len() as u64;
-                files.insert(rel, text);
+                acc.bounds.total += text.len() as u64;
+                acc.files.insert(rel, text);
             }
         }
         Ok(())
@@ -879,6 +904,7 @@ pub(crate) fn load_code_from(root: &Path) -> Result<ExtCodeBundle, String> {
 
     let mut files = std::collections::BTreeMap::new();
     let mut binaries = Vec::new();
+    let mut blob_files = std::collections::BTreeMap::new();
     let mut bounds = Bounds {
         max_files: MAX_FILES,
         max_total_bytes: MAX_TOTAL_BYTES,
@@ -887,9 +913,22 @@ pub(crate) fn load_code_from(root: &Path) -> Result<ExtCodeBundle, String> {
         total: 0,
         truncated: false,
     };
-    walk(root, root, "", 0, &mut files, &mut binaries, &mut bounds)?;
+    {
+        let mut acc = Acc {
+            files: &mut files,
+            binaries: &mut binaries,
+            blob_files: &mut blob_files,
+            bounds: &mut bounds,
+        };
+        walk(root, root, "", 0, &mut acc)?;
+    }
+    // A frame keeps a package's `.node` files out of sight entirely: a frame cannot run a
+    // NAPI addon (that is the real-Node extension host's job — nodeHost.ts), and hiding
+    // the files makes the package's own native-or-CLI fallback — which probes
+    // `fs.existsSync` on the binary — honestly answer "absent" and engage.
     Ok(ExtCodeBundle {
         files,
+        blob_files,
         truncated: bounds.truncated,
         binaries,
     })
@@ -902,7 +941,10 @@ pub fn ext_node_env() -> ExtNodeEnv {
     ExtNodeEnv {
         platform: node_platform(),
         arch: node_arch(),
-        homedir: home_dir().unwrap_or_default().to_string_lossy().into_owned(),
+        homedir: home_dir()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
         tmpdir: std::env::temp_dir().to_string_lossy().into_owned(),
         hostname: std::env::var("COMPUTERNAME")
             .or_else(|_| std::env::var("HOSTNAME"))
@@ -911,6 +953,7 @@ pub fn ext_node_env() -> ExtNodeEnv {
         eol: if cfg!(windows) { "\r\n" } else { "\n" }.to_owned(),
         separator: std::path::MAIN_SEPARATOR.to_string(),
         delimiter: (if cfg!(windows) { ";" } else { ":" }).to_owned(),
+        env: std::env::vars().collect(),
     }
 }
 
@@ -927,6 +970,11 @@ pub struct ExtNodeEnv {
     pub eol: String,
     pub separator: String,
     pub delimiter: String,
+    /// The host's real environment (`process.env`). Extensions probe `PATH`,
+    /// `ProgramFiles`, `LOCALAPPDATA` and friends to find the tools they drive — an empty
+    /// env sent every discovery down a failure path (git not found, interpreters missing).
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 /// Node's own word for this OS, the word extension code branches on
@@ -964,10 +1012,7 @@ fn os_version() -> String {
 
 /// The extension's loadable code map — what the host hands the frame at activation.
 #[tauri::command]
-pub fn ext_load_code(
-    app: tauri::AppHandle,
-    ext_id: String,
-) -> Result<ExtCodeBundle, String> {
+pub fn ext_load_code(app: tauri::AppHandle, ext_id: String) -> Result<ExtCodeBundle, String> {
     let dir = extensions_dir(&app)?;
     let root = installed_dir(&dir, &ext_id)?;
     load_code_from(&root)
@@ -1231,6 +1276,24 @@ fn ext_fs_core(
                 .map_err(|e| format!("mkdir {}: {e}", target.display()))?;
             Ok(serde_json::json!(()))
         }
+        // The executable bit extensions set on git hooks and helper scripts they ship —
+        // a no-op on Windows, where the mode does not exist.
+        "chmod" => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = to
+                    .and_then(|mode| u32::from_str_radix(mode, 8).ok())
+                    .unwrap_or(0o755);
+                let mut permissions = std::fs::metadata(&target)
+                    .map_err(|e| format!("chmod {}: {e}", target.display()))?
+                    .permissions();
+                permissions.set_mode(mode);
+                std::fs::set_permissions(&target, permissions)
+                    .map_err(|e| format!("chmod {}: {e}", target.display()))?;
+            }
+            Ok(serde_json::json!(()))
+        }
         "delete" => {
             if target.is_dir() {
                 std::fs::remove_dir_all(&target)
@@ -1258,7 +1321,7 @@ fn ext_fs_core(
 // Core logic (dir-based, so the unit tests run without a Tauri app handle)
 // ---------------------------------------------------------------------------
 
-fn list_installed(dir: &Path) -> Result<Vec<ExtInfo>, String> {
+pub(crate) fn list_installed(dir: &Path) -> Result<Vec<ExtInfo>, String> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -1332,13 +1395,12 @@ fn list_installed(dir: &Path) -> Result<Vec<ExtInfo>, String> {
 /// counts as just another install of the same extension).
 pub fn install_from_vsix_into(dir: &Path, vsix: &Path, builtin: bool) -> Result<ExtInfo, String> {
     let manifest = read_vsix_manifest(vsix)?;
-    // A `.node` inside a VSIX is a native Node binary — in VS Code the extension's own
-    // bundle loads it over the Node runtime. This app has none: its one native channel is
-    // the engine C ABI, which serves exactly the `.node` files built for it (the exports a
-    // host loads) and a package declares under `ggs.backend` (kind "node"). Any other
-    // `.node` cannot run here, so the install says so now — a named failure at the door
-    // beats a package that installs and silently never works.
-    reject_unhostable_node_binaries(&manifest, vsix)?;
+    // A `.node` inside a VSIX runs only where something can load it: a declared backend
+    // (the package's own runtime story), or — since the pretend Node runtime — a derived
+    // `ggs-node` backend for a plain VSIX with a `main` and native binaries. Anything else
+    // is the named failure at the door, not a package that installs and never works.
+    let derived_backend =
+        resolve_node_binaries(&manifest, vsix, crate::ext_process::real_node_allowed())?;
     let id = format!("{}.{}", manifest.publisher, manifest.name);
     let target = dir.join(format!("{id}-{}", manifest.version));
     for existing in find_installed(dir, &id)? {
@@ -1388,6 +1450,25 @@ pub fn install_from_vsix_into(dir: &Path, vsix: &Path, builtin: bool) -> Result<
                 }
             }
         }
+    } else if let Some(backend) = derived_backend {
+        // A plain VSIX whose native binaries the pretend Node runtime can serve: the
+        // derived backend becomes its whole `manifest.json` — the warm backend, nothing
+        // else (no pages, no launcher: the package never declared any).
+        let capabilities = StudioManifest {
+            format: STUDIO_FORMAT.to_owned(),
+            id: format!("{}.{}", manifest.publisher, manifest.name),
+            version: manifest.version.clone(),
+            frontend: None,
+            pages: None,
+            backend: Some(backend),
+            activitybar: None,
+            permissions: Vec::new(),
+        };
+        std::fs::write(
+            target.join("manifest.json"),
+            serde_json::to_vec(&capabilities).unwrap(),
+        )
+        .map_err(|e| format!("write manifest.json: {e}"))?;
     }
     let meta = StudioExtMeta {
         builtin,
@@ -1527,7 +1608,7 @@ pub(crate) fn read_vsix_manifest(vsix: &Path) -> Result<VsixManifest, String> {
     }
     // Compatibility is the point of the VSIX path: the store's format is accepted as-is,
     // whatever the package carries — a compiled bundle (`main`, hosted in a frame), a
-    // process or engine backend (`ggs.backend`), or neither (themes, snippets, grammars:
+    // process or node backend (`ggs.backend`), or neither (themes, snippets, grammars:
     // installed for their contributions alone). The one thing checked at install time is
     // the backend declaration's shape, so a broken package fails here with its reason
     // instead of at its first (never-starting) backend start.
@@ -1541,16 +1622,9 @@ pub(crate) fn read_vsix_manifest(vsix: &Path) -> Result<VsixManifest, String> {
         if backend.command.trim().is_empty() {
             return Err("a declared backend needs a command".to_owned());
         }
-        if backend.kind == "node"
-            && backend
-                .host
-                .as_deref()
-                .unwrap_or_default()
-                .trim()
-                .is_empty()
-        {
-            return Err("a node backend needs the host that serves it".to_owned());
-        }
+        // The host is optional on a node backend: the command's shape picks the default
+        // (a `.node` goes to the engine host, a JS entry to the pretend Node runtime);
+        // a package may still name its host explicitly.
     }
     Ok(manifest)
 }
@@ -1573,31 +1647,98 @@ fn native_node_files(vsix: &Path) -> Result<Vec<String>, String> {
     Ok(found)
 }
 
-/// Refuse a VSIX whose `.node` binaries nothing here can load. An engine package (`ggs.
-/// backend` of kind "node") declares its one `.node` and is served over the C ABI — that
-/// path stands; every other native binary is VS Code's Node runtime's to load, and this
-/// app has none. The error names the files and the reason, for the install dialog to show.
-fn reject_unhostable_node_binaries(manifest: &VsixManifest, vsix: &Path) -> Result<(), String> {
-    let declared_engine = manifest
+/// Whether a VSIX's native `.node` binaries have something here to run them, and the
+/// backend to derive when the package declared none. A declared backend (process or node —
+/// the package owns its runtime story either way) installs as-is. A plain VSIX with the
+/// packers' engine layout (`native/<platform>/`) derives that `.node` as its backend only
+/// under the real-Node host (`GGS_REAL_NODE`: there the `.node` IS the backend command,
+/// nodeHost.ts loading it as the NAPI addon it is). On the default host the package's JS
+/// `main` is the derived backend, and its activation `require`s the engine `.node` right
+/// inside ggs-node (the N-API host) — the package's own fallback logic engages only if
+/// that load fails. A package with native binaries but no
+/// `main` is the named failure at the door — a package that installs and silently never
+/// works is the one outcome this refuses to produce.
+fn resolve_node_binaries(
+    manifest: &VsixManifest,
+    vsix: &Path,
+    real_node: bool,
+) -> Result<Option<BackendDecl>, String> {
+    if manifest
         .ggs
         .as_ref()
         .and_then(|ggs| ggs.backend.as_ref())
-        .is_some_and(|backend| backend.kind == "node");
-    if declared_engine {
-        return Ok(());
+        .is_some()
+    {
+        return Ok(None);
     }
     let nodes = native_node_files(vsix)?;
     if nodes.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
-    let listed = nodes
+    let platform = host_platform_key();
+    if real_node {
+        if let Some(node) = platform_engine_node(&nodes, &platform) {
+            // The `.node` IS the backend: a real Node runtime loads it as the NAPI addon
+            // it is (nodeHost.ts).
+            return Ok(Some(BackendDecl {
+                kind: "node".to_owned(),
+                command: node.clone(),
+                args: Vec::new(),
+                host: Some("ggs-node".to_owned()),
+                protocol: None,
+                binaries: Some(std::collections::BTreeMap::from([(platform, node)])),
+            }));
+        }
+    }
+    let Some(main) = manifest
+        .main
+        .as_deref()
+        .filter(|main| !main.trim().is_empty())
+    else {
+        let listed = nodes
+            .iter()
+            .map(|n| format!("`{n}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "this extension carries native Node binaries ({listed}) but declares no \"main\"              to run and opts out of \"ggs.backend\" — declare the entry there (kind \"node\")              or ship a main"
+        ));
+    };
+    Ok(Some(BackendDecl {
+        kind: "node".to_owned(),
+        command: main.to_owned(),
+        args: Vec::new(),
+        host: Some("ggs-node".to_owned()),
+        protocol: None,
+        binaries: None,
+    }))
+}
+
+/// The platform directory names the packers lay engine binaries under, keyed by the host
+/// platform key (`{os}-{arch}`) — the same table prepare.mjs builds the bundled engine
+/// with, because the VSIX layout is the packer's decision, not the installer's.
+fn platform_engine_directory(platform: &str) -> Option<&'static str> {
+    match platform {
+        "win32-x64" => Some("win32-x64-msvc"),
+        "win32-arm64" => Some("win32-arm64-msvc"),
+        "linux-x64" => Some("linux-x64-gnu"),
+        "linux-arm64" => Some("linux-arm64-gnu"),
+        "darwin-x64" => Some("darwin-x64"),
+        "darwin-arm64" => Some("darwin-arm64"),
+        _ => None,
+    }
+}
+
+/// The package's engine `.node` for `platform`: the one under `native/<directory>/`, the
+/// layout the packers lay engines in. Any other `.node` a package carries is a dependency
+/// addon of its own `main`, never a backend.
+fn platform_engine_node(nodes: &[String], platform: &str) -> Option<String> {
+    let directory = platform_engine_directory(platform)?;
+    let needle = format!("native/{directory}/");
+    nodes
         .iter()
-        .map(|n| format!("`{n}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(format!(
-        "this extension carries native Node binaries ({listed}) that Git Graph Studio cannot run:          it hosts extensions without a Node runtime — its one native channel is the engine C          ABI, which a package opts into by declaring its `.node` under \"ggs.backend\"          (kind \"node\") with the C ABI exports a host loads",
-    ))
+        .find(|node| node.replace('\\', "/").contains(&needle))
+        .cloned()
 }
 
 /// Unpack a `.vsix`: everything under `extension/` lands at the install root; the OPC
@@ -1874,6 +2015,11 @@ pub(crate) struct VsixManifest {
     name: String,
     publisher: String,
     version: String,
+    /// The package's own JS entry (VS Code's extension-host entry). The frame host runs it
+    /// for the `vscode` API; the pretend Node runtime runs it as the package's backend when
+    /// the install derives one (native binaries with no declared backend).
+    #[serde(default)]
+    main: Option<String>,
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
@@ -2336,14 +2482,43 @@ mod install_tests {
     }
 
     #[test]
-    fn a_vsix_with_node_binaries_and_no_engine_declaration_is_refused() {
+    fn a_vsix_with_node_binaries_and_no_entry_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let exts = tmp.path().join("extensions");
         std::fs::create_dir_all(&exts).unwrap();
 
-        // The store's ordinary native extension: a bundle plus a compiled `.node` — VS
-        // Code's Node runtime loads it, this app has none, and nothing declared it as an
-        // engine package. The install names the file and the reason.
+        // The store's ordinary native extension without a `main`: a compiled `.node` no
+        // host here can load and no entry to derive a backend from. The install names the
+        // file and the reason.
+        let vsix = tmp.path().join("native.vsix");
+        let file = std::fs::File::create(&vsix).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("extension/package.json", options).unwrap();
+        zip.write_all(br#"{"name":"native","publisher":"acme","version":"1.0.0"}"#)
+            .unwrap();
+        zip.start_file("extension/native/dep.node", options)
+            .unwrap();
+        zip.write_all(b"MZ").unwrap();
+        zip.finish().unwrap();
+
+        let error = install_from_vsix_into(&exts, &vsix, false).unwrap_err();
+        assert!(error.contains("native Node binaries"), "{error}");
+        assert!(error.contains("`native/dep.node`"), "{error}");
+        assert!(error.contains("declares no"), "{error}");
+        assert!(!exts.join("acme.native-1.0.0").exists(), "nothing installs");
+    }
+
+    #[test]
+    fn a_vsix_with_node_binaries_and_a_main_installs_with_a_derived_runtime_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+
+        // The store's ordinary native extension WITH a main: the pretend Node runtime
+        // derives from it — the install goes through, and the generated manifest carries
+        // the ggs-node backend so the boot pass starts it and the frame host's native-call
+        // proxy reaches the loaded addon exactly as for a declared package.
         let vsix = tmp.path().join("native.vsix");
         let file = std::fs::File::create(&vsix).unwrap();
         let mut zip = zip::ZipWriter::new(file);
@@ -2360,11 +2535,12 @@ mod install_tests {
         zip.write_all(b"MZ").unwrap();
         zip.finish().unwrap();
 
-        let error = install_from_vsix_into(&exts, &vsix, false).unwrap_err();
-        assert!(error.contains("native Node binaries"), "{error}");
-        assert!(error.contains("`native/dep.node`"), "{error}");
-        assert!(error.contains("cannot run"), "{error}");
-        assert!(!exts.join("acme.native-1.0.0").exists(), "nothing installs");
+        let info = install_from_vsix_into(&exts, &vsix, false).unwrap();
+        let capabilities = info.capabilities.expect("the derived manifest");
+        let backend = capabilities.backend.expect("the derived backend");
+        assert_eq!(backend.kind, "node");
+        assert_eq!(backend.host.as_deref(), Some("ggs-node"));
+        assert_eq!(backend.command, "./out/ext.js");
     }
 
     #[test]
@@ -2887,7 +3063,10 @@ mod vsix_tests {
             .as_slice(),
         )
         .unwrap();
-        assert_eq!((manifest.name.as_str(), manifest.publisher.as_str()), ("jsonc", "acme"));
+        assert_eq!(
+            (manifest.name.as_str(), manifest.publisher.as_str()),
+            ("jsonc", "acme")
+        );
         assert_eq!(manifest.display_name.as_deref(), Some("JSONC Demo"));
 
         // Strict JSON still parses, and garbage still fails with the reason.
@@ -2912,15 +3091,21 @@ mod vsix_tests {
         let options = zip::write::SimpleFileOptions::default();
         zip.start_file("extension/package.json", options).unwrap();
         zip.write_all(br#"{"name":"bundle","publisher":"acme","version":"1.0.0","main":"./out/extension.js"}"#).unwrap();
-        zip.start_file("extension/out/extension.js", options).unwrap();
+        zip.start_file("extension/out/extension.js", options)
+            .unwrap();
         zip.write_all(b"module.exports = 1;").unwrap();
-        zip.start_file("extension/node_modules/dep/package.json", options).unwrap();
-        zip.write_all(br#"{"name":"dep","main":"lib/dep.js"}"#).unwrap();
-        zip.start_file("extension/node_modules/dep/lib/dep.js", options).unwrap();
+        zip.start_file("extension/node_modules/dep/package.json", options)
+            .unwrap();
+        zip.write_all(br#"{"name":"dep","main":"lib/dep.js"}"#)
+            .unwrap();
+        zip.start_file("extension/node_modules/dep/lib/dep.js", options)
+            .unwrap();
         zip.write_all(b"module.exports = 2;").unwrap();
-        zip.start_file("extension/assets/logo.png", options).unwrap();
+        zip.start_file("extension/assets/logo.png", options)
+            .unwrap();
         zip.write_all(b"not code").unwrap();
-        zip.start_file("extension/out/extension.js.map", options).unwrap();
+        zip.start_file("extension/out/extension.js.map", options)
+            .unwrap();
         zip.write_all(b"{}").unwrap();
         zip.finish().unwrap();
         install_from_vsix_into(&exts, &vsix, false).unwrap();
@@ -2949,7 +3134,7 @@ mod vsix_tests {
         let root = tmp.path().join("ext");
         std::fs::create_dir_all(root.join("deep/nested/dir")).unwrap();
         // One oversized file: over the per-file bound, so the bundle is truncated without it.
-        std::fs::write(root.join("deep/big.js"), vec![b'x'; 3 * 1024 * 1024]).unwrap();
+        std::fs::write(root.join("deep/big.js"), vec![b'x'; 9 * 1024 * 1024]).unwrap();
         std::fs::write(root.join("main.js"), b"module.exports = 1;").unwrap();
         let bundle = load_code_from(&root).unwrap();
         assert!(bundle.truncated);
@@ -2960,7 +3145,10 @@ mod vsix_tests {
     #[test]
     fn the_node_env_reports_node_words_for_this_host() {
         let env = ext_node_env();
-        assert!(matches!(env.platform.as_str(), "win32" | "darwin" | "linux"));
+        assert!(matches!(
+            env.platform.as_str(),
+            "win32" | "darwin" | "linux"
+        ));
         assert!(matches!(env.arch.as_str(), "x64" | "arm64" | _ if !env.arch.is_empty()));
         assert_eq!(env.eol, if cfg!(windows) { "\r\n" } else { "\n" });
         assert!(!env.homedir.is_empty());
@@ -3078,5 +3266,130 @@ mod ext_fs_tests {
         assert!(glob_match("a?c", "abc"));
         assert!(!glob_match("a?c", "abbc"));
         assert!(glob_match("*.json", "package.json"));
+    }
+}
+
+/// The backend the install DERIVES for a plain VSIX (no `ggs` key): under the real-Node
+/// host (`GGS_REAL_NODE`) the platform's engine `.node` becomes the backend, loaded
+/// natively; otherwise the package's JS `main` is the derived entry.
+#[cfg(test)]
+mod backend_derivation_tests {
+    use super::*;
+    use std::io::Write as _;
+
+    /// A plain VSIX: a package.json with `main`, plus the named `.node` binaries.
+    fn make_plain_vsix_with_nodes(dir: &Path, nodes: &[(&str, &Path)]) -> PathBuf {
+        let vsix = dir.join("acme.engine-1.0.0.vsix");
+        let file = std::fs::File::create(&vsix).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file("extension/package.json", options).unwrap();
+        zip.write_all(
+            br#"{"name":"engine","publisher":"acme","version":"1.0.0","main":"./out/extension.js"}"#,
+        )
+        .unwrap();
+        zip.start_file("extension/out/extension.js", options)
+            .unwrap();
+        zip.write_all(b"// the package's main\n").unwrap();
+        for (relative, source) in nodes {
+            zip.start_file(format!("extension/{relative}"), options)
+                .unwrap();
+            let bytes = std::fs::read(source).unwrap();
+            zip.write_all(&bytes).unwrap();
+        }
+        zip.finish().unwrap();
+        vsix
+    }
+
+    #[test]
+    fn the_derived_backend_is_the_platform_engine_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Any bytes stand in for the binary: the derivation reads names, and a real Node
+        // runtime (nodeHost.ts) loads the addon as the NAPI module it is.
+        let node = tmp.path().join("engine.node");
+        std::fs::write(&node, b"engine-node-fixture").unwrap();
+        let vsix = make_plain_vsix_with_nodes(
+            tmp.path(),
+            &[("native/win32-x64-msvc/git-graph.node", &node)],
+        );
+        let manifest = read_vsix_manifest(&vsix).unwrap();
+        let derived = resolve_node_binaries(&manifest, &vsix, true)
+            .unwrap()
+            .expect("a backend");
+        assert_eq!(derived.kind, "node");
+        assert_eq!(derived.host.as_deref(), Some("ggs-node"));
+        assert_eq!(
+            derived.command_for(&host_platform_key()),
+            "native/win32-x64-msvc/git-graph.node"
+        );
+        assert!(derived.binaries.is_some());
+        // Under the default host (ggs-node, Boa) the engine `.node` cannot load: the
+        // package's own JS `main` is the backend instead, and its fallback logic runs.
+        let derived = resolve_node_binaries(&manifest, &vsix, false)
+            .unwrap()
+            .expect("a backend");
+        assert_eq!(derived.command, "./out/extension.js");
+        assert!(derived.binaries.is_none());
+    }
+
+    #[test]
+    fn an_engine_node_for_another_platform_leaves_the_main_as_the_derived_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node = tmp.path().join("linux.node");
+        std::fs::write(&node, b"linux-engine-fixture").unwrap();
+        let vsix = make_plain_vsix_with_nodes(
+            tmp.path(),
+            &[("native/linux-x64-gnu/git-graph.node", &node)],
+        );
+        let manifest = read_vsix_manifest(&vsix).unwrap();
+        let derived = resolve_node_binaries(&manifest, &vsix, true)
+            .unwrap()
+            .expect("a backend");
+        assert_eq!(derived.command, "./out/extension.js");
+        assert_eq!(derived.host.as_deref(), Some("ggs-node"));
+        assert!(derived.binaries.is_none());
+    }
+
+    #[test]
+    fn the_engine_node_picks_the_platform_directory_only() {
+        let nodes = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+        // The platform directory the packers lay engines under is the pick; anything else
+        // is a dependency addon of the package's own main.
+        assert_eq!(
+            platform_engine_node(
+                &nodes(&[
+                    "native/win32-x64-msvc/git-graph.node",
+                    "native/linux-x64-gnu/git-graph.node"
+                ]),
+                "linux-x64",
+            )
+            .as_deref(),
+            Some("native/linux-x64-gnu/git-graph.node")
+        );
+        assert_eq!(
+            platform_engine_node(
+                &nodes(&["native/darwin-arm64/git-graph.node"]),
+                "darwin-arm64"
+            )
+            .as_deref(),
+            Some("native/darwin-arm64/git-graph.node")
+        );
+        // A binary outside the platform layout is a dependency, never the engine.
+        assert_eq!(
+            platform_engine_node(&nodes(&["bin/engine.node"]), "win32-x64").as_deref(),
+            None
+        );
+        // Two binaries, neither for this platform: no pick (the main stays the backend).
+        assert_eq!(
+            platform_engine_node(
+                &nodes(&[
+                    "native/win32-x64-msvc/git-graph.node",
+                    "native/linux-x64-gnu/git-graph.node"
+                ]),
+                "darwin-x64",
+            ),
+            None
+        );
     }
 }

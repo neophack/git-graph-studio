@@ -85,6 +85,12 @@ export default defineConfig({
 	server: {
 		port: 5173,
 		strictPort: true,
+		// The extension host frames are sandboxed without `allow-same-origin`, so their
+		// documents sit on an opaque origin and every module fetch they make is CORS-mode:
+		// without these headers the frame scripts never load and no extension ever
+		// activates under `tauri dev` (the packaged app serves same-origin assets, where
+		// the tauri protocol's own permissive headers cover it).
+		cors: true,
 		watch: {
 			ignored: ['**/src-tauri/**', '**/target/**']
 		}

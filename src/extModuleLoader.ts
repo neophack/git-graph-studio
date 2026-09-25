@@ -8,7 +8,8 @@
 // on circular requires, `__dirname`/`__filename`, `.json` parsing, package.json `main`).
 //
 // `require('vscode')` still answers the API shim; the Node builtins answer the shims of
-// nodeShims.ts; a `.node` binary answers the host-served native proxy (its bytes never
+// nodeShims.ts; a `.node` binary cannot run in a frame (NAPI needs a real Node runtime —
+// a package carrying one is hosted by the real-Node extension host instead)
 // cross — the package's backend loads the file, and every call on the proxy is one
 // request over the frame bridge). Nothing here reads a file lazily — a `postMessage`
 // read cannot answer a synchronous `require`, so the whole loadable surface crossed
@@ -25,6 +26,8 @@ export interface NodeEnv {
 	eol: string;
 	separator: string;
 	delimiter: string;
+	/** The host's real environment (`process.env`) — tool discovery reads it. */
+	env?: Record<string, string>;
 }
 
 /** What the loader needs from its host: the preloaded code, the environment, and the two
@@ -32,9 +35,6 @@ export interface NodeEnv {
 export interface LoaderHost {
 	/** Package-relative paths with `/` separators -> file text (`ext_load_code`'s map). */
 	files: Record<string, string>;
-	/** The package's binary native modules (`.node`), as package-relative paths — present in
-	 *  the install, loadable only through the host-served proxy, never as text. */
-	binaries: string[];
 	/** The preload hit its bounds; requires beyond the map fail naming the reason. */
 	truncated: boolean;
 	/** The install's absolute path — the root every package-relative key resolves under. */
@@ -44,10 +44,6 @@ export interface LoaderHost {
 	/** A Node builtin shim by bare name (`'path'`, `'node:fs'` already stripped), or
 	 *  `undefined` when the name is not a builtin. */
 	builtin: (id: string) => unknown | undefined;
-	/** The host-served native module for one `.node` of the package (package-relative path):
-	 *  a proxy whose function calls cross to the package's backend. Null when the package
-	 *  declares none — the `require` then fails with Node's own shape. */
-	native: (rel: string) => unknown | null;
 }
 
 /** Node's `require` surface: a callable plus the loader facts extension code reads. */
@@ -95,16 +91,12 @@ class ModuleLoader {
 	/** Lowercase key index — the install sits on a case-insensitive filesystem on Windows,
 	 *  and a `require` spelled with different case must still hit. */
 	private readonly byLower = new Map<string, string>();
-	/** The package's `.node` binaries, lowercased — resolvable, loadable only as the
-	 *  host-served native proxy. */
-	private readonly binarySet: Set<string>;
 	readonly require: NodeRequire;
 	/** The entry module once it ran (null until then) — `require.main`. */
 	main: NodeModule | null = null;
 
 	constructor(private readonly host: LoaderHost) {
 		for (const key of Object.keys(host.files)) this.byLower.set(key.toLowerCase(), key);
-		this.binarySet = new Set(host.binaries.map((rel) => rel.toLowerCase()));
 		const self = this;
 		const require = ((request: string): unknown => {
 			if (request === 'vscode') return host.vscode;
@@ -172,12 +164,6 @@ class ModuleLoader {
 
 	/** Node's `require.resolve` core: a relative or bare request, resolved from `fromDir`. */
 	resolve(request: string, fromDir: string): string | undefined {
-		// A native module resolves by name alone: it is never text in the map, so the file
-		// walk cannot see it — the binaries list is its whole existence.
-		if (request.toLowerCase().endsWith('.node')) {
-			const rel = this.toRelative(request) ?? normalizePath(request);
-			return this.binarySet.has(rel.toLowerCase()) ? rel : undefined;
-		}
 		const asAbsolute = this.toRelative(request);
 		const base = asAbsolute !== null
 			? asAbsolute
@@ -244,15 +230,6 @@ class ModuleLoader {
 	private loadModule(resolved: string): NodeModule {
 		const cached = this.cache.get(resolved);
 		if (cached !== undefined) return cached;
-		// A `.node` never has text to run: its exports are the host-served proxy (the
-		// package's backend loads the binary; every call crosses as one request).
-		if (resolved.toLowerCase().endsWith('.node')) {
-			const native = this.host.native(resolved);
-			if (native === null) throw this.notFound(resolved);
-			const module: NodeModule = { exports: native, id: resolved, filename: resolved, loaded: true, children: [], paths: [] };
-			this.cache.set(resolved, module);
-			return module;
-		}
 		const text = this.file(resolved);
 		if (text === undefined) throw this.notFound(resolved);
 		if (resolved.endsWith('.json')) {
@@ -330,17 +307,3 @@ export function createNodeRequire(host: LoaderHost): { require: NodeRequire; run
 	return { require: loader.require, runEntry: (main) => loader.runEntry(main) };
 }
 
-/** The host-served native module for one `.node` of the package: a proxy whose every
- *  function call crosses to the package's backend as one request (`native.call`) — the
- *  backend loaded the binary, the call's answer (or error) is the result. Every member is
- *  a function, the way a native addon's exports are; the bundler probes (`then`, `default`,
- *  `__esModule`) read as absent so an accidental `await` does not hang. */
-export function createNativeModule(rel: string, call: (method: string, args: unknown[]) => Promise<unknown>): unknown {
-	return new Proxy({}, {
-		get: (_target: object, member: string | symbol) => {
-			if (member === 'then' || member === 'default' || member === '__esModule') return undefined;
-			if (member === Symbol.toPrimitive || member === 'toString') return () => `[native module ${rel}]`;
-			return (...args: unknown[]) => call(String(member), args);
-		}
-	});
-}

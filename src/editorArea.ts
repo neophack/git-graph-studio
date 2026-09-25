@@ -653,6 +653,7 @@ export class EditorArea {
 	/** Everything else concerns the focused group's active editor. */
 	openFile = (path: string, options?: { line?: number; column?: number }) => this.activeGroup.openFile(path, options);
 	openDiff = (input: Extract<EditorInput, { kind: 'diff' }>) => this.activeGroup.openDiff(input);
+	openContent = (input: Extract<EditorInput, { kind: 'content' }>) => this.activeGroup.openContent(input);
 	openRevision = (revision: string, path: string, title: string, repo?: string) => this.activeGroup.openRevision(revision, path, title, repo);
 	openHelp = (help: 'welcome' | 'shortcuts') => this.activeGroup.openHelp(help);
 	openSelfTest = () => this.activeGroup.openSelfTest();

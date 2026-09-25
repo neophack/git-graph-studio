@@ -16,12 +16,14 @@
 
 pub mod ext_protocol;
 
-/// The engine host (the `git-graph-backend` sidecar): loads a package's engine `.node` over
-/// its C ABI and serves the Git Graph view's protocol. Behind the `engine` feature — the
-/// app binary itself never compiles it in.
-#[cfg(feature = "engine")]
-pub mod engine_host;
 pub mod git;
+/// The pretend Node runtime (the `ggs-node` sidecar): runs a package's own JS entry —
+/// CommonJS and the builtins — speaking `ggs-ext/1` on stdio. The default host for every
+/// `node` backend; its N-API host loads a package's `.node` too. A system Node hosts the
+/// entries only under the `GGS_REAL_NODE=1` opt-in (nodeHost.ts). Behind the
+/// `node-runtime` feature, like every sidecar.
+#[cfg(feature = "node-runtime")]
+pub mod node_runtime;
 pub mod test_support;
 
 #[cfg(feature = "desktop")]
@@ -35,8 +37,6 @@ pub mod cmd_assoc;
 #[cfg(feature = "desktop")]
 pub mod cmd_ext;
 #[cfg(feature = "desktop")]
-pub mod ext_gallery;
-#[cfg(feature = "desktop")]
 pub mod cmd_fs;
 #[cfg(feature = "desktop")]
 pub mod cmd_fuzzy;
@@ -48,6 +48,12 @@ pub mod cmd_search;
 pub mod cmd_symbols;
 #[cfg(feature = "desktop")]
 pub mod encoding;
+/// The frame host's child processes (`nodeShims.ts` maps them onto the Node API): one real
+/// process surface a sandboxed frame cannot have on its own.
+#[cfg(feature = "desktop")]
+pub mod ext_child;
+#[cfg(feature = "desktop")]
+pub mod ext_gallery;
 #[cfg(feature = "desktop")]
 pub mod ext_grammar;
 #[cfg(feature = "desktop")]
@@ -58,9 +64,7 @@ pub mod mcp;
 pub mod measure;
 #[cfg(feature = "desktop")]
 pub mod pty;
-// The git-graph-rs backend (the `engine` feature, built headless) runs the amend / reset /
-// Gerrit commands through the same operations the app's own menus use.
-#[cfg(any(feature = "desktop", feature = "engine"))]
+#[cfg(feature = "desktop")]
 pub mod scm_ops;
 #[cfg(all(test, feature = "desktop"))]
 mod stage_bench;
@@ -97,7 +101,7 @@ pub use desktop::{find_repo_root, run, AppState};
 mod desktop {
     use crate::{
         can_log, cmd_analysis, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_scm, cmd_search,
-        cmd_symbols, ext_gallery, ext_process, git, mcp, measure, pty, viewer, watcher,
+        cmd_symbols, ext_child, ext_gallery, ext_process, git, mcp, measure, pty, viewer, watcher,
     };
     use std::sync::{Arc, Mutex};
 
@@ -1396,6 +1400,9 @@ mod desktop {
                             }
                         }
                         let host = handle.state::<ext_process::ProcessHostState>();
+                        // The reader threads forward a real-Node extension host's
+                        // `ggs.hostRequest`s through the app's event emitter.
+                        host.attach_app(handle.clone());
                         for started in host.start_all_installed(&dir) {
                             if let Err(reason) = started {
                                 eprintln!("[extensions] backend failed to start: {reason}");
@@ -1556,6 +1563,15 @@ mod desktop {
                 ext_process::ext_process_run,
                 ext_process::ext_process_stop,
                 ext_process::ext_process_status,
+                ext_process::ext_process_host_respond,
+                ext_process::ext_process_invoke,
+                ext_process::ext_process_push_event,
+                ext_process::ext_node_runtime,
+                ext_child::ext_child_spawn,
+                ext_child::ext_child_write,
+                ext_child::ext_child_end_stdin,
+                ext_child::ext_child_kill,
+                ext_child::ext_child_stop_for,
                 cmd_search::search_workspace,
                 cmd_search::search_cancel,
                 cmd_search::replace_in_files,
@@ -1582,10 +1598,12 @@ mod desktop {
             .expect("error while building Git Graph Studio")
             .run(|app, event| {
                 // No backend outlives its window: on exit every process this instance spawned
-                // is stopped (another instance's backends are not ours to stop).
+                // is stopped (another instance's backends are not ours to stop) — the warm
+                // extension backends and a frame's child processes alike.
                 if let tauri::RunEvent::Exit = event {
                     use tauri::Manager;
                     app.state::<ext_process::ProcessHostState>().stop_all();
+                    ext_child::stop_all();
                 }
             });
     }

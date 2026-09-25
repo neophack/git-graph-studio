@@ -36,6 +36,11 @@ use serde_json::{json, Value};
 use crate::cmd_ext;
 use crate::ext_protocol::{self as proto, Wire};
 
+/// The Tauri event a backend's `ggs.hostRequest` crosses to the workbench on: the payload
+/// carries `{extId, id, method, args}`; the workbench serves it through the same `serve`
+/// path a frame's RPC takes and answers via [`ext_process_host_respond`].
+pub const HOST_REQUEST_EVENT: &str = "ext-host-request";
+
 /// How long `initialize` may take before the backend is declared unresponsive and killed.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Lines of stderr and `$/log` kept per process, for the status view and crash reports.
@@ -60,6 +65,11 @@ pub struct ProcessHostState {
     /// What survives a backend's death: how often it came up, and why it is not running now.
     /// The status surface reads it so a dead backend can say more than "absent".
     history: Arc<Mutex<HashMap<String, ProcHistory>>>,
+    /// The app handle the reader threads forward `ggs.hostRequest`s through (a real-Node
+    /// extension host asks the workbench for settings, commands, webviews the way a frame
+    /// does). `None` until a command or the boot pass attaches one — pure test readers and
+    /// headless starts run without it.
+    app: Arc<Mutex<Option<tauri::AppHandle>>>,
 }
 
 /// The process-wide handle onto the running backends — see the struct doc. Mirrors
@@ -68,6 +78,17 @@ pub struct ProcessHostState {
 pub fn global() -> &'static ProcessHostState {
     static STATE: OnceLock<ProcessHostState> = OnceLock::new();
     STATE.get_or_init(ProcessHostState::default)
+}
+
+impl ProcessHostState {
+    /// Attach the app handle the reader threads forward `ggs.hostRequest`s through.
+    /// Idempotent: the first handle wins (they all belong to the same app instance).
+    pub fn attach_app(&self, app: tauri::AppHandle) {
+        let mut app_slot = self.app.lock().unwrap();
+        if app_slot.is_none() {
+            *app_slot = Some(app);
+        }
+    }
 }
 
 struct ProcHandle {
@@ -154,16 +175,26 @@ impl ProcessHostState {
             return Ok(handle.info(ext_id, self.history.lock().unwrap().get(ext_id)));
         }
         let ext_dir = cmd_ext::installed_dir(exts_dir, ext_id)?;
-        let manifest: cmd_ext::StudioManifest =
-            std::fs::read_to_string(ext_dir.join("manifest.json"))
-                .map_err(|e| format!("read {} manifest.json: {e}", ext_dir.display()))
-                .and_then(|text| {
-                    serde_json::from_str(&text).map_err(|e| format!("invalid manifest.json: {e}"))
-                })?;
-        let backend = manifest
-            .backend
-            .as_ref()
-            .ok_or_else(|| format!("{ext_id} declares no backend"))?;
+        // The runtime manifest exists only for packages installed with the `ggs` key; a
+        // plain VS Code extension (a marketplace `main` package) has none — its whole
+        // contract is package.json. Both are startable here when a real Node runtime can
+        // host them; a manifest that is present but unreadable is still an error.
+        let manifest: Option<cmd_ext::StudioManifest> =
+            match std::fs::read_to_string(ext_dir.join("manifest.json")) {
+                Ok(text) => Some(
+                    serde_json::from_str(&text)
+                        .map_err(|e| format!("invalid manifest.json: {e}"))?,
+                ),
+                Err(_) => None,
+            };
+        // A package with only a `main` (no `ggs` backend at all) still gets VS Code's shape
+        // when a real Node runtime is here to serve it: one extension-host process per
+        // package, the manifest's `main` its entry. Without a Node runtime the synthesized
+        // backend reports the historical error and the frame host owns the package instead.
+        let backend = match manifest.as_ref().and_then(|m| m.backend.as_ref()) {
+            Some(backend) => backend.clone(),
+            None => synthesize_extension_host_backend(&ext_dir)?,
+        };
         if backend.kind != "process" && backend.kind != "node" {
             return Err(format!(
                 "{ext_id} declares backend kind {}; this app speaks process and node",
@@ -181,31 +212,48 @@ impl ProcessHostState {
                 ));
             }
         }
-        // A `node` backend is the package's engine `.node` (the one engine binary the editor's
-        // Node runtime also loads), served by the app-bundled engine host the manifest names:
-        // the same ggs-ext/1 handshake, crash isolation and warm restarts, with the engine
-        // loaded over its C ABI instead of linked into a package-owned executable.
-        let (program, engine_node) = if backend.kind == "node" {
-            let host = backend.host.clone().unwrap_or_default();
-            let node =
+        // A `node` backend runs on one of two hosts. The default is the app-bundled
+        // pretend Node runtime (`ggs-node`, Boa): every `node` backend hosts there — the
+        // app never depends on, or spawns, a system Node. Only `GGS_REAL_NODE=1` opts a
+        // machine's own runtime in as the extension host (`node node-host.cjs
+        // <extension-dir> <entry>`, VS Code's own shape, where the package's `.node` NAPI
+        // addons behave natively). (The manifest's retired `host:` field named the deleted
+        // C-ABI engine hosts; it reads as `ggs-node` now.)
+        let (program, extra_args, pretend_entry) = if backend.kind == "node" {
+            let entry =
                 resolve_command(&ext_dir, backend.command_for(&cmd_ext::host_platform_key()))?;
-            (resolve_engine_host(&host)?, Some(node))
+            match if real_node_allowed() {
+                (find_node_runtime(), find_node_host_script())
+            } else {
+                (None, None)
+            } {
+                // The directory carries package.json (contributes, version); the entry
+                // overrides its `main` — a derived backend whose command IS the engine
+                // `.node` hosts that one binary instead of the manifest's main.
+                (Some(node), Some(script)) => (node, vec![script, ext_dir.clone(), entry], false),
+                (_, _) => (resolve_engine_host("ggs-node")?, vec![entry], true),
+            }
         } else {
             (
                 resolve_command(&ext_dir, backend.command_for(&cmd_ext::host_platform_key()))?,
-                None,
+                Vec::new(),
+                false,
             )
         };
         let mut command = Command::new(&program);
         command
-            .args(&backend.args)
             .current_dir(&ext_dir)
             .env("GGS_INSTANCE_ID", instance_id())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if let Some(node) = engine_node.as_deref() {
-            command.arg(node);
+        if pretend_entry {
+            // The manifest's own spawn arguments are the pretend runtime's contract; a
+            // real-Node host takes none of them.
+            command.args(&backend.args);
+        }
+        for argument in &extra_args {
+            command.arg(argument);
         }
         #[cfg(windows)]
         {
@@ -227,16 +275,18 @@ impl ProcessHostState {
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
-        // The stdout reader: resolves responses, records notifications, and — on EOF — fails
-        // everything waiting on the backend, forgets the handle and reaps the child. The
-        // pending map is drained before the map is touched, so a process that dies during its
-        // handshake unblocks `start` even while `start` still holds the map lock.
+        // The stdout reader: resolves responses, records notifications, forwards a real-Node
+        // host's `ggs.hostRequest`s into the workbench, and — on EOF — fails everything
+        // waiting on the backend, forgets the handle and reaps the child. The pending map is
+        // drained before the map is touched, so a process that dies during its handshake
+        // unblocks `start` even while `start` still holds the map lock.
         let reader = ReaderState {
             pending: Arc::clone(&pending),
             log: Arc::clone(&log),
             procs: Arc::clone(&self.procs),
             history: Arc::clone(&self.history),
             ext_id: ext_id.to_owned(),
+            app: self.app.lock().unwrap().clone(),
         };
         std::thread::spawn(move || reader.serve(BufReader::new(stdout)));
         let stderr_log = Arc::clone(&log);
@@ -277,16 +327,21 @@ impl ProcessHostState {
             let _ = drop_handle(&mut procs, ext_id);
             return Err(e);
         }
+        // The map lock is released across the handshake wait: a real-Node host asks the
+        // workbench for its activation facts (`host.env`) mid-handshake, and the workbench's
+        // answer writes through the same map — holding the lock here would deadlock the
+        // handshake against its own first request until this very timeout fired.
+        drop(procs);
         let handshake_result = match rx.recv_timeout(HANDSHAKE_TIMEOUT) {
             Ok(Ok(value)) => value,
             Ok(Err(message)) => {
-                let _ = drop_handle(&mut procs, ext_id);
+                let _ = drop_handle(&mut self.procs.lock().unwrap(), ext_id);
                 return Err(format!(
                     "{ext_id} failed its initialize handshake: {message}"
                 ));
             }
             Err(_) => {
-                let _ = drop_handle(&mut procs, ext_id);
+                let _ = drop_handle(&mut self.procs.lock().unwrap(), ext_id);
                 return Err(format!(
                     "{ext_id} did not answer initialize within {} s",
                     HANDSHAKE_TIMEOUT.as_secs()
@@ -305,6 +360,9 @@ impl ProcessHostState {
             })
             .unwrap_or_default();
         let info = {
+            // Re-lock after the wait: a concurrent start took the lock for its own
+            // idempotency check during the gap and saw this handle already inserted.
+            let mut procs = self.procs.lock().unwrap();
             let handle = procs
                 .get_mut(ext_id)
                 .expect("inserted above and only the reader removes, after draining pending");
@@ -413,10 +471,27 @@ impl ProcessHostState {
     /// Start the backend of every installed package that declares one — the boot pass's
     /// "detect and run": what is installed comes up with the app, without waiting for a
     /// command. One package's failure is remembered in its status, not the others' problem.
+    /// A `node` backend is deferred: its program's activation `hostRequest`s need the
+    /// workbench listening, and its activation belongs to the workbench's policy (the
+    /// eager pass in the frontend starts it the moment the window is up).
     pub fn start_all_installed(&self, exts_dir: &Path) -> Vec<Result<ProcessInfo, String>> {
-        cmd_ext::process_backed_ids(exts_dir)
+        cmd_ext::list_installed(exts_dir)
+            .unwrap_or_default()
             .into_iter()
-            .map(|ext_id| self.start(exts_dir, &ext_id))
+            .filter(|ext| {
+                ext.capabilities.as_ref().is_some_and(|g| {
+                    g.backend
+                        .as_ref()
+                        .is_some_and(|b| b.kind == "process" || b.kind == "node")
+                })
+            })
+            .filter(|ext| {
+                ext.capabilities
+                    .as_ref()
+                    .and_then(|g| g.backend.as_ref())
+                    .is_none_or(|backend| !deferred_to_the_workbench(backend))
+            })
+            .map(|ext| self.start(exts_dir, &ext.id))
             .collect()
     }
 
@@ -467,6 +542,9 @@ struct ReaderState {
     procs: Arc<Mutex<HashMap<String, ProcHandle>>>,
     history: Arc<Mutex<HashMap<String, ProcHistory>>>,
     ext_id: String,
+    /// Forwarding channel for a real-Node host's `ggs.hostRequest`s (`None` in the pure
+    /// test readers, which get the in-band error instead).
+    app: Option<tauri::AppHandle>,
 }
 
 impl ReaderState {
@@ -476,9 +554,16 @@ impl ReaderState {
             if line.trim().is_empty() {
                 continue;
             }
-            let Ok(wire) = serde_json::from_str::<Wire>(&line) else {
-                push_log(&self.log, format!("unparsable line: {line}"));
-                continue;
+            let wire = match serde_json::from_str::<Wire>(&line) {
+                Ok(wire) => wire,
+                Err(error) => {
+                    // A dropped line is a lost request or answer: say so where a developer
+                    // looks, not only in the in-memory log.
+                    let head: String = line.chars().take(200).collect();
+                    eprintln!("[ext] {}: unparsable backend line ({error}): {head}", self.ext_id);
+                    push_log(&self.log, format!("unparsable line: {line}"));
+                    continue;
+                }
             };
             match wire {
                 Wire::Response { id, result, error } => {
@@ -489,10 +574,48 @@ impl ReaderState {
                         .get("message")
                         .and_then(Value::as_str)
                         .unwrap_or("`message` missing");
+                    // The backend's own log channel (`$/log`: its console, the shim's caught
+                    // activation and command errors) — echoed to the app's stderr so a
+                    // failing extension is diagnosable without a status view.
+                    eprintln!("[ext] {} [{method}] {message}", self.ext_id);
                     push_log(&self.log, format!("[{method}] {message}"));
                 }
-                // The host makes the requests; a backend's stray one is logged, not answered
-                // (there is no request path back into the plugin's stdin here).
+                // The one request a backend may make: `ggs.hostRequest`, the real-Node
+                // extension host's way of reaching the workbench services a frame reaches
+                // by postMessage (settings, mementos, webviews, command registration).
+                // Forwarded verbatim; the workbench answers through
+                // [`ext_process_host_respond`], written straight to this stdin.
+                Wire::Request { id, method, params } if method == "ggs.hostRequest" => {
+                    match &self.app {
+                        Some(app) => {
+                            use tauri::Emitter;
+                            let payload = json!({
+                                "extId": self.ext_id,
+                                "id": id,
+                                "method": params.get("method").cloned().unwrap_or(Value::Null),
+                                "args": params.get("args").cloned().unwrap_or_else(|| json!([])),
+                            });
+                            if let Err(error) = app.emit(HOST_REQUEST_EVENT, payload) {
+                                // The workbench never sees it: answer in band so the host's
+                                // request fails now instead of timing out.
+                                eprintln!("[ext] {}: host request {id} not delivered: {error}", self.ext_id);
+                                let reply = proto::response(
+                                    id,
+                                    Err(format!("the workbench did not receive the request: {error}")),
+                                );
+                                let _ = write_line(&self.procs.lock().unwrap(), &self.ext_id, &reply);
+                            }
+                        }
+                        None => {
+                            // No workbench is attached (a headless start): fail the request
+                            // in band so the host's promise rejects instead of hanging.
+                            let reply =
+                                proto::response(id, Err("the app has no host attached".into()));
+                            let _ = write_line(&self.procs.lock().unwrap(), &self.ext_id, &reply);
+                        }
+                    }
+                }
+                // The host makes every other request; a backend's stray one is logged.
                 Wire::Request { method, .. } => {
                     push_log(&self.log, format!("unexpected request: {method}"));
                 }
@@ -570,7 +693,9 @@ fn drop_handle(procs: &mut HashMap<String, ProcHandle>, ext_id: &str) -> Result<
 }
 
 /// The backend command of a package: absolute as-is (how the tests point at a helper binary),
-/// relative confined to the package directory, like every other path out of a package.
+/// relative confined to the package directory, like every other path out of a package. A
+/// JavaScript entry may be written extensionlessly (a manifest `main` of `out/extension`),
+/// so the exact path falls back to the `.js` and `.cjs` spellings Node itself would try.
 fn resolve_command(ext_dir: &Path, command: &str) -> Result<PathBuf, String> {
     let as_path = Path::new(command);
     if !as_path.is_absolute() && command.split(['/', '\\']).any(|segment| segment == "..") {
@@ -583,13 +708,144 @@ fn resolve_command(ext_dir: &Path, command: &str) -> Result<PathBuf, String> {
     } else {
         ext_dir.join(as_path)
     };
-    if !resolved.is_file() {
-        return Err(format!(
-            "backend command {command} not found (looked at {})",
-            resolved.display()
-        ));
+    if resolved.is_file() {
+        return Ok(resolved);
     }
-    Ok(resolved)
+    for extension in [".js", ".cjs"] {
+        let with_extension = PathBuf::from(format!("{}{extension}", resolved.display()));
+        if with_extension.is_file() {
+            return Ok(with_extension);
+        }
+    }
+    Err(format!(
+        "backend command {command} not found (looked at {})",
+        resolved.display()
+    ))
+}
+
+/// Whether the real-Node extension host may be used at all. **Off by default** (the
+/// owner's direction, 2026-09-25): every `node` backend hosts on the bundled `ggs-node`
+/// (Boa) — the app never depends on, or spawns, a system Node. `GGS_REAL_NODE=1` opts the
+/// real-Node host back in for comparisons and probes.
+pub fn real_node_allowed() -> bool {
+    std::env::var("GGS_REAL_NODE")
+        .map(|value| !value.is_empty() && value != "0")
+        .unwrap_or(false)
+}
+
+/// The real Node runtime a `node` backend runs on when one exists: `GGS_NODE_EXE` first,
+/// then a `node` beside the app (a drop-in the packager or the user may place), then the
+/// `PATH`. Only consulted under `GGS_REAL_NODE`; `None` (or the gate itself) means every
+/// `node` backend runs on the bundled pretend runtime — the shape that needs nothing from
+/// the machine.
+pub fn find_node_runtime() -> Option<PathBuf> {
+    if let Ok(named) = std::env::var("GGS_NODE_EXE") {
+        let path = PathBuf::from(named);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let exe_name = if cfg!(windows) { "node.exe" } else { "node" };
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let beside = dir.join(exe_name);
+            if beside.is_file() {
+                return Some(beside);
+            }
+            let drop_in = dir.join("node").join(exe_name);
+            if drop_in.is_file() {
+                return Some(drop_in);
+            }
+        }
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(exe_name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// The real-Node extension host bundle (`node-host.cjs`, built by `prepare.mjs`): beside
+/// the app (the installer resources place it there), one profile up second (a dev run
+/// executes from `debug/` while `prepare.mjs` writes the bundle into `release/`'s
+/// siblings), the dev target layout third (`target/studio/node-host.cjs`), the resource
+/// copy fourth, `GGS_NODE_HOST_SCRIPT` last — the dev and test override.
+pub fn find_node_host_script() -> Option<PathBuf> {
+    if let Ok(named) = std::env::var("GGS_NODE_HOST_SCRIPT") {
+        let path = PathBuf::from(named);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("node-host.cjs"));
+            candidates.push(dir.join("..").join("release").join("node-host.cjs"));
+            // The dev target layout: `target/studio/cargo/debug` is two levels under
+            // `target/studio`, where `prepare.mjs` writes the bundle and its resource copy.
+            candidates.push(dir.join("..").join("..").join("node-host.cjs"));
+            candidates.push(
+                dir.join("..")
+                    .join("..")
+                    .join("bundled")
+                    .join("app-resources")
+                    .join("node-host.cjs"),
+            );
+        }
+    }
+    candidates.into_iter().find(|candidate| candidate.is_file())
+}
+
+/// Whether this backend starts with the workbench instead of at the boot pass. A `node`
+/// backend is an extension program (on ggs-node its `initialize` installs the frame
+/// program and activates it; on the real-Node host the same): its activation's
+/// `ggs.hostRequest`s need the workbench listening, and its activation belongs to the
+/// workbench's policy — so the boot pass leaves it to the frontend's eager pass, which
+/// starts it the moment the window is up. `process` backends (no vscode program) start at
+/// boot as always.
+fn deferred_to_the_workbench(backend: &cmd_ext::BackendDecl) -> bool {
+    backend.kind == "node"
+}
+
+/// The backend a main-only package (a plain VS Code extension with no `ggs` key) gets
+/// when the real-Node extension host is opted in (`GGS_REAL_NODE`): the manifest's `main`
+/// as a `node` entry — one extension-host process per package, exactly VS Code's shape.
+/// Under the default (ggs-node everywhere) a main-only package gets no backend at all:
+/// the sandboxed frame host owns it, as it always did before a system Node existed.
+fn synthesize_extension_host_backend(ext_dir: &Path) -> Result<cmd_ext::BackendDecl, String> {
+    let allowed = real_node_allowed();
+    synthesize_extension_host_backend_with(
+        ext_dir,
+        allowed && find_node_runtime().is_some(),
+        allowed && find_node_host_script().is_some(),
+    )
+}
+
+/// [`synthesize_extension_host_backend`]'s pure core, the runtime halves injectable.
+fn synthesize_extension_host_backend_with(
+    ext_dir: &Path,
+    node: bool,
+    script: bool,
+) -> Result<cmd_ext::BackendDecl, String> {
+    if !node || !script {
+        return Err("declares no backend".to_owned());
+    }
+    let package = std::fs::read_to_string(ext_dir.join("package.json"))
+        .map_err(|e| format!("read {} package.json: {e}", ext_dir.display()))
+        .and_then(|text| {
+            serde_json::from_str::<Value>(&text).map_err(|e| format!("invalid package.json: {e}"))
+        })?;
+    let main = package
+        .get("main")
+        .and_then(Value::as_str)
+        .unwrap_or("index.js");
+    Ok(cmd_ext::BackendDecl {
+        kind: "node".to_owned(),
+        command: main.to_owned(),
+        args: Vec::new(),
+        host: None,
+        protocol: None,
+        binaries: None,
+    })
 }
 
 /// The app-bundled engine host a `node` backend names (`git-graph-backend`): beside the app's
@@ -625,6 +881,8 @@ fn resolve_engine_host(name: &str) -> Result<PathBuf, String> {
     {
         candidates.push(exe_dir.join(&file_name));
         candidates.push(exe_dir.join("..").join("release").join(&file_name));
+        // The cargo test layout: `debug/deps/` — the built sidecar sits one level up.
+        candidates.push(exe_dir.join("..").join(&file_name));
     }
     candidates
         .iter()
@@ -644,7 +902,21 @@ fn resolve_engine_host(name: &str) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod engine_host_tests {
-    use super::resolve_engine_host;
+    use super::{
+        deferred_to_the_workbench, resolve_engine_host, synthesize_extension_host_backend_with,
+    };
+    use crate::cmd_ext::BackendDecl;
+
+    fn node_backend(host: Option<&str>) -> BackendDecl {
+        BackendDecl {
+            kind: "node".to_owned(),
+            command: "out/main.js".to_owned(),
+            args: Vec::new(),
+            host: host.map(str::to_owned),
+            protocol: None,
+            binaries: None,
+        }
+    }
 
     /// A host name that is a path is refused outright — the field names an app-bundled
     /// binary, never a location.
@@ -653,6 +925,45 @@ mod engine_host_tests {
         assert!(resolve_engine_host("../evil").is_err());
         assert!(resolve_engine_host("some/dir").is_err());
     }
+
+    /// A `node` backend is an extension program, so it starts with the workbench — on
+    /// ggs-node (the default) its `initialize` activates the program and speaks to the
+    /// workbench, exactly as the real-Node host does — never at the boot pass, before the
+    /// `host.env` listener exists. A process backend (no vscode program) boots as always.
+    #[test]
+    fn a_node_backend_starts_with_the_workbench_on_either_host() {
+        assert!(deferred_to_the_workbench(&node_backend(None)));
+        // The explicit `ggs-node` spelling is the same default.
+        assert!(deferred_to_the_workbench(&node_backend(Some("ggs-node"))));
+        // A process backend never defers.
+        let mut process = node_backend(Some("git-graph-backend"));
+        process.kind = "process".to_owned();
+        assert!(!deferred_to_the_workbench(&process));
+    }
+
+    /// A main-only package gets no synthesized backend unless the real-Node host is opted
+    /// in (its error is the honest "declares no backend"; the sandboxed frame host owns
+    /// the package). With the host, the manifest's `main` becomes a default-host `node`
+    /// backend.
+    #[test]
+    fn a_main_only_package_synthesizes_an_extension_host_backend_only_with_a_real_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("package.json"),
+            br#"{"main":"./out/extension.js"}"#,
+        )
+        .unwrap();
+        let without = synthesize_extension_host_backend_with(tmp.path(), false, false).unwrap_err();
+        assert_eq!(without, "declares no backend");
+        let backend = synthesize_extension_host_backend_with(tmp.path(), true, true).unwrap();
+        assert_eq!(backend.kind, "node");
+        assert_eq!(backend.command, "./out/extension.js");
+        assert_eq!(backend.host, None);
+        // A package without a `main` falls to Node's own default entry.
+        std::fs::write(tmp.path().join("package.json"), br#"{"name":"x"}"#).unwrap();
+        let fallback = synthesize_extension_host_backend_with(tmp.path(), true, true).unwrap();
+        assert_eq!(fallback.command, "index.js");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -660,28 +971,107 @@ mod engine_host_tests {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn ext_process_start(
+pub async fn ext_process_start(
     app: tauri::AppHandle,
     state: tauri::State<'_, ProcessHostState>,
     ext_id: String,
 ) -> Result<ProcessInfo, String> {
-    state.start(&cmd_ext::extensions_dir(&app)?, &ext_id)
+    state.attach_app(app.clone());
+    let dir = cmd_ext::extensions_dir(&app)?;
+    let state = state.inner().clone();
+    // The handshake waits for the backend's activation — that wait must stay off the main
+    // thread, or every other command and event delivery queues behind it until the
+    // handshake's own timeout fires.
+    tauri::async_runtime::spawn_blocking(move || state.start(&dir, &ext_id))
+        .await
+        .map_err(|e| format!("start task: {e}"))?
 }
 
 #[tauri::command]
-pub fn ext_process_run(
+pub async fn ext_process_run(
     app: tauri::AppHandle,
     state: tauri::State<'_, ProcessHostState>,
     ext_id: String,
     command: String,
     args: Option<Value>,
 ) -> Result<Value, String> {
-    state.run(
-        &cmd_ext::extensions_dir(&app)?,
-        &ext_id,
-        &command,
-        args.unwrap_or_else(|| json!([])),
-    )
+    state.attach_app(app.clone());
+    let dir = cmd_ext::extensions_dir(&app)?;
+    let state = state.inner().clone();
+    let args = args.unwrap_or_else(|| json!([]));
+    tauri::async_runtime::spawn_blocking(move || state.run(&dir, &ext_id, &command, args))
+        .await
+        .map_err(|e| format!("run task: {e}"))?
+}
+
+/// The workbench's answer to a real-Node host's `ggs.hostRequest` (`ext-host-request`
+/// event): the result crosses back over the backend's stdin as the protocol response.
+#[tauri::command]
+pub fn ext_process_host_respond(
+    state: tauri::State<'_, ProcessHostState>,
+    ext_id: String,
+    id: u64,
+    ok: bool,
+    result: Value,
+) -> Result<(), String> {
+    let procs = state.procs.lock().unwrap();
+    let reply = if ok {
+        proto::response(id, Ok(result))
+    } else {
+        let message = result
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| result.to_string());
+        proto::response(id, Err(message))
+    };
+    write_line(&procs, &ext_id, &reply)
+}
+
+/// The workbench's call into a real-Node host beyond `runCommand` (the frame vocabulary:
+/// `docProvider.provide`, the tree plumbing, `deactivate`). The params carry the frame
+/// call's `args` array; the host normalizes.
+#[tauri::command]
+pub async fn ext_process_invoke(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ProcessHostState>,
+    ext_id: String,
+    method: String,
+    args: Option<Value>,
+) -> Result<Value, String> {
+    state.attach_app(app.clone());
+    let dir = cmd_ext::extensions_dir(&app)?;
+    let state = state.inner().clone();
+    let params = json!({ "args": args.unwrap_or_else(|| json!([])) });
+    tauri::async_runtime::spawn_blocking(move || state.call(&dir, &ext_id, &method, params))
+        .await
+        .map_err(|e| format!("invoke task: {e}"))?
+}
+
+/// Push one host event into a backend (`ggs.hostEvent`): the same event objects a frame
+/// gets as `__studioExtEvent` pushes — theme changes, configuration, webview messages,
+/// watcher batches.
+#[tauri::command]
+pub fn ext_process_push_event(
+    state: tauri::State<'_, ProcessHostState>,
+    ext_id: String,
+    event: Value,
+) -> Result<(), String> {
+    let procs = state.procs.lock().unwrap();
+    let line = proto::notification("ggs.hostEvent", event);
+    write_line(&procs, &ext_id, &line)
+}
+
+/// The real Node runtime this app would serve `node` backends with, when one exists AND
+/// `GGS_REAL_NODE` opts the real-Node host in (`None` otherwise: the bundled pretend
+/// runtime serves them all, the default since 2026-09-25). The workbench decides from
+/// this whether main-only packages run as real-Node hosts or as sandboxed frames; a
+/// manifest-declared `node` backend hosts on ggs-node either way.
+#[tauri::command]
+pub fn ext_node_runtime() -> Result<Option<String>, String> {
+    if !real_node_allowed() {
+        return Ok(None);
+    }
+    Ok(find_node_runtime().and_then(|path| path.into_os_string().into_string().ok()))
 }
 
 #[tauri::command]
@@ -712,7 +1102,24 @@ mod tests {
             procs: Arc::new(Mutex::new(HashMap::new())),
             history: Arc::new(Mutex::new(HashMap::new())),
             ext_id: "acme.demo".to_owned(),
+            app: None,
         }
+    }
+
+    /// A real-Node host's `ggs.hostRequest` with no workbench attached fails in band (the
+    /// host's promise rejects) instead of hanging — and never kills the reader.
+    #[test]
+    fn a_host_request_without_an_attached_app_fails_in_band() {
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let reader = make_reader(&pending);
+        // The procs map holds no handle, so the in-band reply has nowhere to go and is
+        // dropped — the assertion is that `serve` survives the request line at all.
+        reader.serve(Cursor::new(proto::request(
+            9,
+            "ggs.hostRequest",
+            json!({ "method": "host.env", "args": [] }),
+        )));
+        assert!(pending.lock().unwrap().is_empty());
     }
 
     #[test]

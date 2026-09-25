@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { commands } from '../src/commands';
-import { applyContributions, menuItems, menuSection, normalizeKeybinding, removeContributions, type ManifestContributes } from '../src/contributions';
+import { applyContributions, contextUri, evaluateWhen, extensionViewContributions, menuItems, menuSection, normalizeKeybinding, removeContributions, type ManifestContributes } from '../src/contributions';
+import { saveExtSetting } from '../src/state';
 
 const manifest: ManifestContributes = {
 	commands: [
@@ -83,5 +84,47 @@ describe('manifest contributions', () => {
 		applyContributions('neophack.git-graph-rs', manifest, nls, () => undefined, () => true);
 		removeContributions('neophack.git-graph-rs');
 		expect(menuItems('explorer/context')).toHaveLength(0);
+	});
+});
+
+describe('contextUri: the resource argument a menu command receives', () => {
+	it('is the data half of a Uri — the shape that crosses the wire into a frame', () => {
+		const uri = contextUri('C:\\repo\\a.txt');
+		expect(uri.scheme).toBe('file');
+		expect(uri.fsPath).toBe('C:\\repo\\a.txt');
+		expect(uri.path).toBe('C:\\repo\\a.txt');
+		expect(uri.query).toBe('');
+		expect(uri.fragment).toBe('');
+		// No methods on the payload itself: they cannot cross a structured clone, and the
+		// frame's shim (vscodeApi's rehydrateUris) rebuilds them on arrival.
+		expect(Object.prototype.hasOwnProperty.call(uri, 'toString')).toBe(false);
+	});
+});
+
+describe('a view\'s when clause', () => {
+	beforeEach(() => {
+		removeContributions('acme.views');
+	});
+
+	it('rides the view contribution for the workbench\'s visibility filter', () => {
+		applyContributions('acme.views', {
+			commands: [],
+			viewsContainers: { activitybar: [{ id: 'acme.side', title: 'Acme' }] },
+			views: {
+				'acme.side': [
+					{ id: 'acme.tree', name: 'Tree' },
+					{ id: 'acme.gated', name: 'Gated', when: 'config.acme.showGated' }
+				]
+			},
+			configuration: { properties: { 'acme.showGated': { type: 'boolean', default: false } } }
+		}, {}, () => undefined, () => true);
+		const contribution = extensionViewContributions().find((entry) => entry.extId === 'acme.views')!;
+		expect(contribution.views.map((view) => view.viewId)).toEqual(['acme.tree', 'acme.gated']);
+		// The clause the workbench evaluates: off by the declared default, on when the
+		// stored setting turns it on — Code Spell Checker's experimental regexp view shape.
+		expect(evaluateWhen('acme.views', contribution.views[1]!.when)).toBe(false);
+		saveExtSetting('acme.views', 'acme.showGated', true);
+		expect(evaluateWhen('acme.views', contribution.views[1]!.when)).toBe(true);
+		saveExtSetting('acme.views', 'acme.showGated', false);
 	});
 });

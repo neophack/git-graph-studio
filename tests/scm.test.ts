@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { CommandRegistry } from '../src/commands';
-import { applyContributions, removeContributions } from '../src/contributions';
+import { applyContributions, contextUri, removeContributions } from '../src/contributions';
 import { registerGitCommands, type GitCommandHost } from '../src/gitCommands';
 import { buildChangeTree, DiffRequest, SourceControlView, sortChanges } from '../src/scm';
 import { backend } from './tauriMock';
@@ -291,7 +291,7 @@ describe('source control view', () => {
 		expect(menuLabels()).toContain('View Test');
 		removeContributions('test-view-ext');
 	});
-	it('runs a scm/resourceState/context entry with the resource as the command argument', async () => {
+	it('runs a scm/resourceState/context entry with the resource state VS Code hands the command', async () => {
 		const { view } = setup();
 		applyContributions('test-history-ext', {
 			commands: [{ command: 'test.filterByFile', title: 'Show File History in Test' }],
@@ -304,7 +304,8 @@ describe('source control view', () => {
 		rightClick(document.querySelector('.scm-group .row'));
 		expect(menuLabels()).toEqual(['Open File', 'Open Changes', 'Unstage Changes', 'Show File History in Test']);
 		click(menuItem('Show File History in Test'));
-		expect(dispatched).toEqual([['test.filterByFile', [REPO + '\\src\\main.ts']]]);
+		// VS Code's menu argument: a SourceControlResourceState whose `resourceUri` is a Uri.
+		expect(dispatched).toEqual([['test.filterByFile', [{ resourceUri: contextUri(REPO + '\\src\\main.ts') }]]]);
 		removeContributions('test-history-ext');
 	});
 	it('keeps the button gray with a clean, synced tree, and turns it into Push with unpushed commits', async () => {
@@ -468,7 +469,7 @@ describe('submodule sections', () => {
 		expect(document.querySelector('.scm-rows')!.nextElementSibling).toBe(document.querySelector('.scm-repo'));
 	});
 
-	it('dispatches the scm/title button with the section\'s repository as the argument', async () => {
+	it('dispatches the scm/title button with the section\'s repository as VS Code\'s SourceControl argument', async () => {
 		const { view } = setup();
 		const dispatched: [string, unknown[] | undefined][] = [];
 		view.onExtensionCommand = (command, args) => dispatched.push([command, args]);
@@ -482,10 +483,12 @@ describe('submodule sections', () => {
 		view.render();
 		const subIcon = document.querySelector<HTMLButtonElement>('.scm-repo-header .action-btn')!;
 		click(subIcon);
-		expect(dispatched).toEqual([['test.view', [SUB]]]);
+		// VS Code's scm/title argument: the SourceControl object, whose `rootUri` is what a
+		// "view this repository" command reads to switch the repository it shows.
+		expect(dispatched).toEqual([['test.view', [{ rootUri: contextUri(SUB) }]]]);
 		const mainIcon = document.querySelector<HTMLButtonElement>('.scm-main-header .action-btn')!;
 		click(mainIcon);
-		expect(dispatched).toEqual([['test.view', [SUB]], ['test.view', [REPO]]]);
+		expect(dispatched).toEqual([['test.view', [{ rootUri: contextUri(SUB) }]], ['test.view', [{ rootUri: contextUri(REPO) }]]]);
 		removeContributions('test-view-ext');
 	});
 	it('stages a change within a submodule, passing its own repo path', async () => {

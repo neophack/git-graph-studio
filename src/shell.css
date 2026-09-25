@@ -498,6 +498,10 @@ body.resizing iframe { pointer-events: none; }
 /* An extension-contributed tree view (`contributes.views` + createTreeView): rows with a
  * twistie, a dimmed description and a lazy-children click, stacked in a sidebar section. */
 .ext-view-section { display: flex; flex-direction: column; min-height: 0; }
+/* A webview view's iframe needs a definite height of its own — the sidebar's stacked
+ * sections are content-sized, and a `height: 100%` iframe inside an auto-height pane
+ * collapses to nothing (the view reads as empty however much it rendered). */
+.ext-webview-view-pane { flex: 1 1 auto; min-height: 220px; }
 .ext-tree .ext-tree-row { display: flex; align-items: center; gap: 4px; height: 22px; line-height: 22px; white-space: nowrap; cursor: pointer; user-select: none; }
 .ext-tree .ext-tree-row:hover { background: var(--vscode-list-hoverBackground); }
 .ext-tree .ext-tree-row .label { overflow: hidden; text-overflow: ellipsis; }

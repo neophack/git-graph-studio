@@ -7,7 +7,8 @@ import { ExtensionHost, type ExtInfo, type GalleryEntry } from '../src/extHost';
 import { extensionSettingDefs, registerContextProvider, resolvedMenuEntries } from '../src/contributions';
 import { ExtensionsPanel } from '../src/extensionsPanel';
 import { commandForBinding, commands } from '../src/commands';
-import { createVscodeApi, applyTextEditsToText, Position, Range } from '../src/vscodeApi';
+import { createVscodeApi, applyTextEditsToText, Position, rehydrateUris, Range, RelativePattern, Uri, watcherGlobMatches } from '../src/vscodeApi';
+import { createNodeBuiltins } from '../src/nodeShims';
 import { registerDeclaredLanguages, declaredLanguageName, registerExtensionSnippets, registerExtensionThemes, extensionThemeList, languageIdFor } from '../src/contributions';
 import { snippetsFor } from '../src/snippetRegistry';
 import { THEMES, syncExtensionThemes, updateSetting } from '../src/settings';
@@ -434,6 +435,53 @@ describe('the vscode API shim', () => {
 		expect(typeof api.window.createTreeView('files', { treeDataProvider: {} as never }).visible).toBe('boolean');
 		expect(typeof api.languages.registerHoverProvider(() => undefined, {} as never).dispose).toBe('function');
 	});
+
+	it('serves an output channel with the LogOutputChannel methods a logging extension binds at activation', () => {
+		const appended: unknown[][] = [];
+		const api = createVscodeApi(
+			{ extensionId: 'x', extensionPath: '/x', workspaceFolders: [], settings: {}, language: 'en' },
+			{ request: async (method, args) => { if (method === 'output.append') appended.push(args); return undefined; }, registerCommandHandler: () => undefined }
+		);
+		const channel = api.window.createOutputChannel('Code Spell Checker', { log: true });
+		// The bind-at-activation pattern a logging extension uses (cspell's logger wrapper):
+		// every level-named method must exist and be bindable before anything else runs.
+		expect(() => {
+			channel.debug!.bind(channel);
+			channel.info!.bind(channel);
+			channel.warn!.bind(channel);
+			channel.error!.bind(channel);
+		}).not.toThrow();
+		channel.info('client created');
+		expect(appended.at(-1)).toEqual(['Code Spell Checker', '[info] client created\n']);
+	});
+
+	it('serves env.createTelemetryLogger as an inert logger (never a missing method an activation calls)', () => {
+		const api = createVscodeApi(
+			{ extensionId: 'x', extensionPath: '/x', workspaceFolders: [], settings: {}, language: 'en' },
+			{ request: async () => undefined, registerCommandHandler: () => undefined }
+		);
+		const logger = api.env.createTelemetryLogger({ sendEventData: () => undefined });
+		expect(() => {
+			logger.logUsage('activate');
+			logger.logError(new Error('x'));
+			logger.dispose();
+		}).not.toThrow();
+	});
+
+	it('rehydrates Uri-shaped data into full Uris, at any depth of an argument list', () => {
+		const data = { scheme: 'file', path: 'C:\\repo\\a.txt', fsPath: 'C:\\repo\\a.txt', query: '', fragment: '' };
+		const revived = rehydrateUris([data, [{ rootUri: data }]]) as [ReturnType<typeof Uri.file>, { rootUri: ReturnType<typeof Uri.file> }[]];
+		const first = revived[0];
+		// The data half reads the same either way; the methods only exist once rehydrated.
+		expect(first.fsPath).toBe('C:\\repo\\a.txt');
+		expect(first.toString()).toBe('file:C:\\repo\\a.txt');
+		expect(first.with({ scheme: 'https' }).scheme).toBe('https');
+		expect(revived[1]![0]!.rootUri.toString()).toBe('file:C:\\repo\\a.txt');
+		// A full Uri (or anything else) passes through untouched.
+		const full = Uri.file('/keep');
+		expect(rehydrateUris(full)).toBe(full);
+		expect(rehydrateUris([{ scheme: 'file', fsPath: 'a', toString: () => 'own' }])).toEqual([{ scheme: 'file', fsPath: 'a', toString: expect.any(Function) }]);
+	});
 });
 
 describe('the VS Code API surface, round one (messages, picks, progress, status bar, webviews)', () => {
@@ -537,6 +585,27 @@ describe('the VS Code API surface, round one (messages, picks, progress, status 
 		api.handleHostEvent({ event: 'configChanged', settings: { 'demo.level': 3 } });
 		expect(fired).toEqual(['changed']);
 		expect(api.workspace.getConfiguration('demo').get('level')).toBe(3);
+	});
+
+	it('onDidChangeConfiguration carries a ConfigurationChangeEvent over the changed keys', async () => {
+		// VS Code listeners read the event — `event.affectsConfiguration('git-graph-rs')` is
+		// git-graph-rs's own first line; an undefined event threw inside every such handler.
+		const { api } = shim();
+		const events: { affectsConfiguration(section: string): boolean }[] = [];
+		api.workspace.onDidChangeConfiguration((event: { affectsConfiguration(section: string): boolean }) => events.push(event));
+		api.handleHostEvent({ event: 'configChanged', settings: { 'git-graph-rs.enableLog': true, 'other.key': 1 } });
+		expect(events).toHaveLength(1);
+		expect(events[0]!.affectsConfiguration('git-graph-rs')).toBe(true);
+		expect(events[0]!.affectsConfiguration('git-graph-rs.enableLog')).toBe(true);
+		expect(events[0]!.affectsConfiguration('git-graph-rs.date')).toBe(false);
+		expect(events[0]!.affectsConfiguration('git')).toBe(false);
+		// Only what changed counts: the same settings again fire nothing.
+		api.handleHostEvent({ event: 'configChanged', settings: { 'git-graph-rs.enableLog': true, 'other.key': 1 } });
+		expect(events).toHaveLength(1);
+		api.handleHostEvent({ event: 'configChanged', settings: { 'git-graph-rs.enableLog': true, 'other.key': 2 } });
+		expect(events).toHaveLength(2);
+		expect(events[1]!.affectsConfiguration('other')).toBe(true);
+		expect(events[1]!.affectsConfiguration('git-graph-rs')).toBe(false);
 	});
 });
 
@@ -702,6 +771,52 @@ describe('the extension host command wiring', () => {
 			{ extId: 'acme.ggxdemo', command: 'acme.ggxdemo.filter', args: ['C:\\repo\\file.rs'] }
 		]);
 	});
+	it('a backend-and-main package\'s declared command wakes the frame before the backend answers', async () => {
+		// The first click on a lazily-activated command used to route straight to the
+		// backend, whose "no handler registered" toast is what the user saw. A package
+		// with a `main` is a frame program (VS Code semantics): activation runs first and
+		// the handler it registers answers; the backend is only the fallthrough.
+		const manifest = { main: './out/extension.js', contributes: { commands: [{ command: 'acme.ggxdemo.view', title: 'View' }] } };
+		const installed: ExtInfo = { id: 'acme.ggxdemo', name: 'ggxdemo', displayName: 'Acme GGX', publisher: 'acme', version: '1.0.0', description: '', builtin: false, icon: null, path: '/ext/acme.ggxdemo-1.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'vsix', capabilities: { format: 'ggs/2', id: 'acme.ggxdemo', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'ggs-node', command: 'native/win32-x64-msvc/git-graph.node' } } };
+		backend.on('ext_list', () => [installed]);
+		backend.on('ext_read_file', ({ relPath }) => relPath === 'package.json' ? JSON.stringify(manifest) : (() => { throw new Error('no such file'); })());
+		backend.on('ext_process_run', ({ command }) => ({ command }));
+		const host = new ExtensionHost();
+		await host.activateInstalled();
+		let woken = 0;
+		(host as unknown as { ensureActive: (extId: string) => Promise<void> }).ensureActive = (extId) => {
+			woken += 1;
+			expect(extId).toBe('acme.ggxdemo');
+			return Promise.resolve();
+		};
+		await host.executeCommand('acme.ggxdemo.view', []);
+		expect(woken).toBe(1);
+		// Activation registered nothing in this stubbed run, so the backend convention
+		// (the launcher/openPage answer) is what the command reaches — after the wake.
+		expect(backend.callsTo('ext_process_run')).toEqual([
+			{ extId: 'acme.ggxdemo', command: 'acme.ggxdemo.view', args: [] }
+		]);
+	});
+	it('a backend-only package\'s declared command dispatches to the backend without waking a frame', async () => {
+		// No `main`, no frame to activate: the backend owns the commands outright.
+		const manifest = { contributes: { commands: [{ command: 'acme.ggxdemo.act', title: 'Act' }] } };
+		const installed: ExtInfo = { id: 'acme.ggxdemo', name: 'ggxdemo', displayName: 'Acme GGX', publisher: 'acme', version: '1.0.0', description: '', builtin: false, icon: null, path: '/ext/acme.ggxdemo-1.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'ggs', capabilities: { format: 'ggs/2', id: 'acme.ggxdemo', version: '1.0.0', pages: {}, backend: { kind: 'process', command: 'bin/tool.exe' } } };
+		backend.on('ext_list', () => [installed]);
+		backend.on('ext_read_file', ({ relPath }) => relPath === 'package.json' ? JSON.stringify(manifest) : (() => { throw new Error('no such file'); })());
+		backend.on('ext_process_run', ({ command }) => ({ command }));
+		const host = new ExtensionHost();
+		await host.activateInstalled();
+		let woken = 0;
+		(host as unknown as { ensureActive: (extId: string) => Promise<void> }).ensureActive = () => {
+			woken += 1;
+			return Promise.resolve();
+		};
+		await host.executeCommand('acme.ggxdemo.act', []);
+		expect(woken).toBe(0);
+		expect(backend.callsTo('ext_process_run')).toEqual([
+			{ extId: 'acme.ggxdemo', command: 'acme.ggxdemo.act', args: [] }
+		]);
+	});
 	it('serves commands.register by adding to the workbench registry', async () => {
 		withExtensions();
 		const host = new ExtensionHost();
@@ -797,6 +912,23 @@ describe('the extension host frame (src/extHostBoot.ts)', () => {
 		expect(call).toBeDefined();
 		expect(call!.ok).toBe(true);
 		expect(call!.result).toBe(0); // the handler ran, with zero arguments
+	});
+
+	it('hands a menu-dispatched command its Uri context as a full Uri (a "filter by this file" command)', async () => {
+		// The handler answers with the shape it was handed: the fsPath read a menu command
+		// filters by, and the toString() only a rehydrated Uri has.
+		bootExtension("const vscode = require('vscode'); exports.activate = () => { vscode.commands.registerCommand('demo.filterByFile', (arg) => typeof arg === 'object' && arg.uri ? [arg.uri.fsPath, typeof arg.uri.toString] : ['none', 'none']); };");
+		await flush();
+		window.dispatchEvent(new MessageEvent('message', { data: {
+			type: '__studioExtCall', id: 43, method: 'runCommand',
+			// What the workbench's explorer/context dispatch now sends: the clicked resource
+			// and the selection, as Uri-shaped data (the methods cannot cross the clone).
+			args: ['demo.filterByFile', [{ uri: { scheme: 'file', path: 'C:\\repo\\a.txt', fsPath: 'C:\\repo\\a.txt', query: '', fragment: '' } }, []]]
+		} }));
+		await flush();
+		const call = callResults.get(43);
+		expect(call!.ok).toBe(true);
+		expect(call!.result).toEqual(['C:\\repo\\a.txt', 'function']);
 	});
 
 	it('executeCommand forwards its arguments to the handler living in the frame', async () => {
@@ -1035,13 +1167,14 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 		expect(commands.get('acme.proc.hello')).toBeDefined();
 	});
 
-	it('frame-activates a backend package WITH a main — the frame owns the commands, the backend serves its native calls', async () => {
-		// The VS Code semantics the frame host runs by: a package's `main` is its program, a
-		// declared backend (an engine `.node` above all) is an implementation detail its code
-		// reaches — never a replacement for that code.
+	it('hosts a backend package WITH a main in its backend process — the program runs there, no sandboxed frame', async () => {
+		// The host-selection rule since ggs-node became the default: a manifest `node`
+		// backend means the package's own program runs IN the backend process (on
+		// ggs-node), not in a sandboxed frame — the backend is never merely an
+		// implementation detail of a frame copy of the same program.
 		const ENGINE: ExtInfo = {
 			...GGX2, id: 'acme.engine',
-			capabilities: { format: 'ggs/2', id: 'acme.engine', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'git-graph-backend', command: 'native/win32-x64/engine.node' }, permissions: [] }
+			capabilities: { format: 'ggs/2', id: 'acme.engine', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'ggs-node', command: 'out/main.js' }, permissions: [] }
 		};
 		withExtensions(ENGINE);
 		backend.on('ext_read_file', ({ relPath }) => {
@@ -1052,31 +1185,42 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 			if (relPath === 'main.js') return 'exports.activate = function () {};';
 			throw new Error('no such file');
 		});
-		backend.on('ext_process_run', () => ({ version: 'from the backend' }));
+		backend.on('ext_process_start', () => ({ extensionId: 'acme.engine', pid: 4242, commands: [], protocolVersion: 'ggs-ext/1', startCount: 1, lastError: null }));
 		const host = new ExtensionHost();
 		await host.activateInstalled();
-		// A program first: its frame booted, and its declared command was NOT pre-routed to
-		// the backend (it runs the handler the frame registers once it activates).
-		expect(host['frames'].size).toBe(1);
-		expect(backend.callsTo('ext_process_run')).toEqual([]);
-		// A native-module call from inside the frame crosses verbatim: the module path is
-		// the frame's concern, the command and arguments are forwarded untouched — the host
-		// neither knows nor shapes the package's protocol. (The reply's object-form
-		// targetOrigin is a browser spelling jsdom rejects, so the frame's mailbox records
-		// here instead of receiving.)
-		const frame = [...host['frames'].values()][0]!.frame;
-		const replies: unknown[] = [];
-		frame.contentWindow!.postMessage = ((message: unknown) => { replies.push(message); }) as typeof frame.contentWindow.postMessage;
-		window.dispatchEvent(new MessageEvent('message', {
-			source: frame.contentWindow,
-			data: { type: '__studioExtRpc', id: 51, method: 'native.call', args: ['native/win32-x64/engine.node', 'request', ['C:\\repo', '{"method":"engineVersion","params":{}}']] }
-		}));
+		// The remote handle is the frame of record — a sandboxed frame never booted.
+		const handle = [...host['frames'].values()][0]!;
+		expect(handle.frame).toBeUndefined();
+		expect(backend.callsTo('ext_process_start')).toContainEqual({ extId: 'acme.engine' });
+	});
+
+	it('a backend-hosted program\'s forwarded registrations land, and its commands dispatch over the process', async () => {
+		// A backend-hosted package (the manifest `node` backend; ggs-node by default, a
+		// real Node under `GGS_REAL_NODE` — `ext_node_runtime` reports one here) runs in
+		// its own host process, not a frame: the start is awaited, the host's forwarded
+		// `commands.register` lands through the ext-host-request event, and the palette
+		// command dispatches over `ext_process_run`.
+		const ENGINE: ExtInfo = {
+			...GGX2, id: 'acme.engine',
+			capabilities: { format: 'ggs/2', id: 'acme.engine', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'ggs-node', command: 'out/main.js' }, permissions: [] }
+		};
+		withExtensions(ENGINE);
+		backend.on('ext_node_runtime', () => 'C:/node/node.exe');
+		backend.on('ext_process_start', () => ({ extensionId: 'acme.engine', pid: 4242, commands: ['acme.engine.go'], protocolVersion: 'ggs-ext/1', startCount: 1, lastError: null }));
+		backend.on('ext_process_run', () => ({ ran: 'in the node host' }));
+		backend.on('ext_process_status', () => []);
+		const host = new ExtensionHost();
+		await host.activateInstalled();
+		// No frame: the process is the extension host.
+		const handle = [...host['frames'].values()][0]!;
+		expect(handle.frame).toBeUndefined();
+		expect(backend.callsTo('ext_process_start')).toContainEqual({ extId: 'acme.engine' });
+		// The node host registers its handler mid-activation; the forwarded request reaches
+		// the same serve path a frame's RPC takes, then the palette dispatch rides run.
+		backend.emit('ext-host-request', { extId: 'acme.engine', id: 1000000001, method: 'commands.register', args: ['acme.engine.go'] });
 		await flush();
-		expect(backend.callsTo('ext_process_run')).toContainEqual({
-			extId: 'acme.engine', command: 'request',
-			args: ['C:\\repo', '{"method":"engineVersion","params":{}}']
-		});
-		expect(replies).toContainEqual(expect.objectContaining({ type: '__studioExtRpcResult', ok: true }));
+		await host.executeCommand('acme.engine.go', []);
+		expect(backend.callsTo('ext_process_run')).toContainEqual({ extId: 'acme.engine', command: 'acme.engine.go', args: [] });
 	});
 });
 
@@ -1143,10 +1287,11 @@ describe('an installed ggs/2 package in the workbench surfaces (the full feature
 		expect(menuLabels()).toContain('Hello');
 
 		// Clicking the entry runs its backend command — with VS Code's menu arguments, the
-		// clicked path and the selection — and opens the page it names.
+		// clicked resource and the selection as Uris — and opens the page it names.
 		click(menuItem('Hello'));
 		await flush();
-		expect(backend.callsTo('ext_process_run')).toEqual([{ extId: 'acme.proc', command: 'acme.proc.hello', args: ['C:\\repo\\README.md', ['C:\\repo\\README.md']] }]);
+		const uri = { scheme: 'file', path: 'C:\\repo\\README.md', fsPath: 'C:\\repo\\README.md', query: '', fragment: '' };
+		expect(backend.callsTo('ext_process_run')).toEqual([{ extId: 'acme.proc', command: 'acme.proc.hello', args: [uri, [uri]] }]);
 		expect(opened).toEqual([['acme.proc', 'main', { by: 'menu' }]]);
 	});
 	it('binds the plugin keybinding, and uninstalling releases it, drops the menu entry and stops the backend', async () => {
@@ -1715,5 +1860,138 @@ describe('implicit activation events (VS Code 1.74 semantics)', () => {
 		host.noteLanguageOpened('main.bell');
 		await flush();
 		expect(activated).toBe(true);
+	});
+});
+
+describe('the compatibility surface this round: digests, watchers, provider-backed diffs', () => {
+	it('crypto.createHash answers the md5/sha1/sha256 digests Node would', () => {
+		const builtins = createNodeBuiltins({
+			nodeEnv: { platform: 'win32', arch: 'x64', homedir: '', tmpdir: '', hostname: 't', release: '', eol: '\r\n', separator: '\\', delimiter: ';' },
+			extensionPath: '/x',
+			files: {},
+			binaries: [],
+			blobs: {},
+			bridge: { request: async () => undefined }
+		} as never);
+		const crypto = builtins['crypto']! as { createHash: (algorithm: string) => { update(data: string): unknown; digest(encoding?: string): unknown } };
+		expect(crypto.createHash('md5').update('hello').digest('hex')).toBe('5d41402abc4b2a76b9719d911017c592');
+		expect(crypto.createHash('md5').update('Gravatar emails are trimmed and lowercased').update(' then hashed').digest('hex'))
+			.toBe(crypto.createHash('md5').update('Gravatar emails are trimmed and lowercased then hashed').digest('hex'));
+		expect(crypto.createHash('sha1').update('hello').digest('hex')).toBe('aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d');
+		expect(crypto.createHash('sha256').update('hello').digest('hex')).toBe('2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824');
+		expect(crypto.createHash('sha256').update('hello').digest('base64')).toBe('LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=');
+	});
+
+	it("fs.stat answers a null bridge answer with Node's ENOENT callback, never a throw", () => {
+		const builtins = createNodeBuiltins({
+			nodeEnv: { platform: 'win32', arch: 'x64', homedir: '', tmpdir: '', hostname: 't', release: '', eol: '\r\n', separator: '\\', delimiter: ';' },
+			extensionPath: '/x',
+			files: {},
+			binaries: [],
+			blobs: {},
+			// `undefined` is what an unhandled fs.op carries back — a package statting an
+			// absent workspace path used to die reading `.type` off it, an unhandled
+			// rejection whose callback never fired.
+			bridge: { request: async () => undefined }
+		} as never);
+		const fs = builtins['fs']! as { stat: (path: string, cb: (error: Error | null, stats?: unknown) => void) => void };
+		void fs.stat('C:/ws/missing.txt', (error, stats) => {
+			expect(error).toBeInstanceOf(Error);
+			expect(String(error)).toContain('ENOENT');
+			expect(stats).toBeUndefined();
+		});
+	});
+
+	it('watcherGlobMatches covers the patterns createFileSystemWatcher serves', () => {
+		expect(watcherGlobMatches('**', 'src/main.rs')).toBe(true);
+		expect(watcherGlobMatches('.git/**', '.git/HEAD')).toBe(true);
+		expect(watcherGlobMatches('**/*.rs', 'src/deep/util.rs')).toBe(true);
+		expect(watcherGlobMatches('**/*.rs', 'main.rs')).toBe(true);
+		expect(watcherGlobMatches('src/*.rs', 'src/deep/util.rs')).toBe(false);
+		expect(watcherGlobMatches('src/*.rs', 'src/util.rs')).toBe(true);
+		expect(watcherGlobMatches('a?c/*.txt', 'abc/x.txt')).toBe(true);
+		expect(watcherGlobMatches('a?c/*.txt', 'abbc/x.txt')).toBe(false);
+	});
+
+	it('a Uri crosses the structured clone of a postMessage (vscode.diff arguments ride in one)', () => {
+		const uri = Uri.file('/ws/repo/src/main.rs').with({ query: 'eHg=' });
+		// A Uri carrying own enumerable function members used to throw DataCloneError the
+		// moment an executeCommand RPC posted it — vscode.diff died silently at the bridge.
+		const clone = structuredClone(uri) as { scheme: string; query: string };
+		expect(clone.scheme).toBe('file');
+		expect(clone.query).toBe('eHg=');
+		expect(Object.keys(clone)).not.toContain('toString');
+		expect(Object.keys(clone)).not.toContain('with');
+	});
+
+	it("createFileSystemWatcher serves the host's watcher batches (paths and the .git flag)", async () => {
+		const requests: { method: string; args: unknown[] }[] = [];
+		const api = createVscodeApi(
+			{ extensionId: 'x', extensionPath: '/x', workspaceFolders: [{ uri: Uri.file('/ws/repo'), name: 'repo', index: 0 }], settings: {}, language: 'en' },
+			{ request: async (method: string, args: unknown[]) => { requests.push({ method, args }); return undefined; }, registerCommandHandler: () => undefined }
+		);
+		const seen: string[] = [];
+		const watcher = api.workspace.createFileSystemWatcher(new RelativePattern(Uri.file('/ws/repo'), '**'));
+		watcher.onDidChange((uri) => seen.push((uri as { fsPath: string }).fsPath));
+		api.handleHostEvent({ event: 'fsChanged', fs: { root: '/ws/repo', paths: ['src/main.rs', 'docs/guide.md'], gitChanged: true, truncated: false } });
+		await flush();
+		expect(seen).toContain('/ws/repo/src/main.rs');
+		expect(seen).toContain('/ws/repo/docs/guide.md');
+		expect(seen).toContain('/ws/repo/.git/HEAD');
+		// A batch from another root never fires (the stale-folder half of the contract).
+		seen.length = 0;
+		api.handleHostEvent({ event: 'fsChanged', fs: { root: '/other', paths: ['x'], gitChanged: false, truncated: false } });
+		await flush();
+		expect(seen).toEqual([]);
+		watcher.dispose();
+	});
+
+	it('vscode.diff resolves provider-scheme sides through the registering frame and opens the diff editor', async () => {
+		const host = new ExtensionHost();
+		const handle = { frame: document.createElement('iframe'), commandIds: new Set<string>(), pendingCalls: new Set<(error: Error) => void>() };
+		document.body.appendChild(handle.frame);
+		host['frames'].set('acme.demo', handle);
+		await host['serve']('docProvider.register', ['acme-scheme'], 'acme.demo', handle);
+		const provided: unknown[] = [];
+		(host as unknown as { callFrame: (h: unknown, method: string, args: unknown[]) => Promise<unknown> }).callFrame =
+			async (_h, method, args) => {
+				if (method !== 'docProvider.provide') throw new Error('unexpected frame call');
+				provided.push(args[0]);
+				return 'the content at the revision';
+			};
+		const opened: unknown[] = [];
+		host.onOpenDiff = (diff) => opened.push(diff);
+		const uri = { scheme: 'acme-scheme', path: '/repo/src/main.rs', fsPath: '/repo/src/main.rs', query: 'eHg=', fragment: '', toString: () => 'acme-scheme:/repo/src/main.rs?eHg=', with: () => uri };
+		const fileUri = { scheme: 'file', path: '/repo/src/main.rs', fsPath: 'C:\\repo\\src\\main.rs', query: '', fragment: '', toString: () => 'file:///repo/src/main.rs', with: () => fileUri };
+		await host.executeCommand('vscode.diff', [uri, fileUri, 'main.rs (HEAD → working tree)']);
+		expect(provided).toEqual([uri]);
+		expect(opened).toHaveLength(1);
+		const diff = opened[0] as { title: string; left: { content?: string; local?: boolean }; right: { local?: boolean; path: string } };
+		expect(diff.title).toBe('main.rs (HEAD → working tree)');
+		expect(diff.left.content).toBe('the content at the revision');
+		expect(diff.left.local).toBeUndefined();
+		expect(diff.right.local).toBe(true);
+		expect(diff.right.path).toBe('C:\\repo\\src\\main.rs');
+		// The unregistered scheme is a clear error, never a silent nothing.
+		await expect(host.executeCommand('vscode.diff', [{ ...uri, scheme: 'nobody' }, uri])).rejects.toThrow(/no text-document content provider/);
+	});
+
+	it('vscode.open opens a provider-scheme document in a read-only content tab', async () => {
+		const host = new ExtensionHost();
+		const handle = { frame: document.createElement('iframe'), commandIds: new Set<string>(), pendingCalls: new Set<(error: Error) => void>() };
+		document.body.appendChild(handle.frame);
+		host['frames'].set('acme.demo', handle);
+		await host['serve']('docProvider.register', ['acme-scheme'], 'acme.demo', handle);
+		(host as unknown as { callFrame: (h: unknown, method: string, args: unknown[]) => Promise<unknown> }).callFrame =
+			async () => 'line one\nline two';
+		const opened: { title: string; path: string; text: string }[] = [];
+		host.onOpenContent = (title, path, text) => opened.push({ title, path, text });
+		const uri = { scheme: 'acme-scheme', path: '/repo/src/util.ts', fsPath: '/repo/src/util.ts', query: '', fragment: '', toString: () => 'acme-scheme:/repo/src/util.ts', with: () => uri };
+		await host.executeCommand('vscode.open', [uri]);
+		expect(opened).toEqual([{ title: 'util.ts', path: '/repo/src/util.ts', text: 'line one\nline two' }]);
+		const files: string[] = [];
+		host.onOpenFile = (path) => files.push(path);
+		await host.executeCommand('vscode.open', [{ scheme: 'file', path: '/ws/repo/main.py', fsPath: '/ws/repo/main.py', query: '', fragment: '', toString: () => 'file:///ws/repo/main.py', with: () => null }]);
+		expect(files).toEqual(['/ws/repo/main.py']);
 	});
 });
