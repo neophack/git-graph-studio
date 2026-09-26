@@ -60,27 +60,47 @@ shim.__ggsVscodeShimInstall = function (args: InstallArgs): InstalledVscode {
 	};
 	const handlers = new Map<string, (...callArgs: unknown[]) => unknown>();
 	const docProviders = new Map<string, { provideTextDocumentContent?: (uri: unknown) => unknown }>();
+	/** The runtime's dispatch consults `ggs.onRequest` before the exports-dispatch
+	 *  fallback: one dispatcher for the host-call vocabulary — registered commands, and a
+	 *  content provider's text the host asks for when a diff or a read-only content tab
+	 *  renders a provider-scheme document. The maps it reads are shared, so every
+	 *  registration (re)installing this same function stays one live dispatcher. */
+	const dispatchHostCall = (command: string, commandArgs: unknown[]) => {
+		if (command === 'docProvider.provide') {
+			// The host asks this extension for a provider-scheme document's text. The
+			// provider is found by the Uri's scheme - the key it registered under.
+			const [uri] = rehydrateUris(Array.isArray(commandArgs) ? commandArgs : [commandArgs]) as [{ scheme?: string }];
+			const provider = docProviders.get(String(uri?.scheme ?? ''));
+			if (!provider?.provideTextDocumentContent) {
+				throw new Error(`no text-document content provider is registered for the ${uri?.scheme} scheme`);
+			}
+			return provider.provideTextDocumentContent(uri);
+		}
+		const handler = handlers.get(command);
+		if (!handler) throw new Error(`no handler registered for ${command}`);
+		// A menu's context crosses the line as Uri-shaped data; the handler receives full
+		// Uris, the argument shape VS Code's own command dispatch guarantees. The result
+		// returns — the runtime's dispatch settles it into the runCommand answer, a
+		// thenable included (an async handler's value waits, as in a frame).
+		return handler(...(rehydrateUris(Array.isArray(commandArgs) ? commandArgs : [commandArgs]) as unknown[]));
+	};
 	const bridge: HostBridge = {
 		request: (method, requestArgs) => Promise.resolve(hostRequest(method, requestArgs as unknown[])),
 		registerCommandHandler: (id, handler) => {
 			handlers.set(id, handler);
-			// The runtime's dispatch consults `ggs.onRequest` before the exports-dispatch
-			// fallback: one dispatcher, reading the same map the frame's mailbox would.
-			shim.ggs.onRequest((command, commandArgs) => {
-				const handler = handlers.get(command);
-				if (!handler) throw new Error(`no handler registered for ${command}`);
-				// A menu's context crosses the line as Uri-shaped data; the handler receives
-				// full Uris, the argument shape VS Code's own command dispatch guarantees.
-				// The result returns — the runtime's dispatch settles it into the runCommand
-				// answer, a thenable included (an async handler's value waits, as in a frame).
-				return handler(...(rehydrateUris(Array.isArray(commandArgs) ? commandArgs : [commandArgs]) as unknown[]));
-			});
+			shim.ggs.onRequest(dispatchHostCall);
 		},
-		registerDocProvider: (scheme, provider) => docProviders.set(scheme, provider),
+		registerDocProvider: (scheme, provider) => {
+			docProviders.set(scheme, provider);
+			shim.ggs.onRequest(dispatchHostCall);
+		},
 		unregisterDocProvider: (scheme) => docProviders.delete(scheme)
 	};
 	const api = createVscodeApi(context, bridge);
 	shim.vscode = api;
+	// The dispatcher installs eagerly: a package that registers only a content provider -
+	// never a command - must still answer the host's provide call.
+	shim.ggs.onRequest(dispatchHostCall);
 	return {
 		api,
 		activate: (moduleExports) => Promise.resolve(moduleExports?.activate?.(activationContext(context, api)))
