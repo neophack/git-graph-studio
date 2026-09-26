@@ -318,16 +318,27 @@ export function makeChildProcess(host: ShimHost, Buffer: BufferFactory): Record<
 			}
 		};
 
-		void (async () => {
-			const nodePath = (await host.bridge.request('childProcess.nodeRuntime', [])) as string | null;
-			if (!nodePath) throw new Error(`fork ${modulePath}: no Node runtime on this machine to run the server process with`);
-			const inner = spawn(nodePath, [absolute, '--stdio', ...forkArgs], options);
-			outer.pid = inner.pid;
-			outer.killed = inner.killed;
-			outer.kill = () => inner.kill();
-			outer.stdin = inner.stdin;
-			inner.stderr.on('data', (chunk: unknown) => outer.stderr.emit('data', chunk));
-			inner.stdout.on('data', (chunk: unknown) => pushFrameBytes(chunk as Uint8Array));
+			void (async () => {
+				const nodePath = (await host.bridge.request('childProcess.nodeRuntime', [])) as string | null;
+				if (!nodePath) throw new Error(`fork ${modulePath}: no Node runtime on this machine to run the server process with`);
+				const inner = spawn(nodePath, [absolute, '--stdio', ...forkArgs], options);
+				outer.pid = inner.pid;
+				outer.killed = inner.killed;
+				outer.kill = () => inner.kill();
+				outer.stdin = inner.stdin;
+				inner.stderr.on('data', (chunk: unknown) => {
+					outer.stderr.emit('data', chunk);
+					try { console.error('[ggs-fork][server-stderr]', String(Buffer.from(chunk as Uint8Array).toString('utf8')).slice(0, 300)); } catch { /* trace */ }
+				});
+				inner.stdout.on('data', (chunk: unknown) => {
+					// Terse wire tracing: the notification/request method per arriving frame —
+					// the conversation a language client runs is otherwise invisible.
+					try {
+						const method = /"method":"([^"]+)/.exec(String(Buffer.from(chunk as Uint8Array).toString('utf8')));
+						if (method) console.info('[ggs-fork] recv', method[1]);
+					} catch { /* trace */ }
+					pushFrameBytes(chunk as Uint8Array);
+				});
 			inner.on('exit', (codeArg: unknown, signalArg: unknown) => {
 				const code = codeArg as number | null;
 				const signal = signalArg as string | null;
@@ -343,6 +354,7 @@ export function makeChildProcess(host: ShimHost, Buffer: BufferFactory): Record<
 					const header = utf8Encode.encode(`Content-Length: ${payload.length}\r\n\r\n`);
 					(outer.stdin as { write: (chunk: Uint8Array) => boolean }).write(header);
 					(outer.stdin as { write: (chunk: Uint8Array) => boolean }).write(payload);
+					try { console.info('[ggs-fork] send', String(JSON.stringify(message).match(/"method":"[^"]+/) ?? [''])[0]); } catch { /* trace */ }
 					return true;
 				},
 				kill: () => inner.kill()
