@@ -14,6 +14,8 @@
 import type { NodeEnv } from './extModuleLoader';
 import { makeChildProcess } from './nodeShims/processSurfaces';
 import { makeHttpLike, makeReadline, makeReadlinePromises } from './nodeShims/processSurfaces';
+import { callThrowsFn, unavailableModule } from './nodeShims/shared';
+import { makeStreamModule } from './nodeShims/stream';
 
 /** What the shims need: the environment facts, the preloaded code map, and the bridge. */
 export interface ShimHost {
@@ -835,6 +837,33 @@ function extensionRelative(path: string, host: ShimHost): string | null {
 	return null;
 }
 
+/** Node's optional-options calling convention: the callback is the last function argument,
+ *  the options (an encoding string or an object) whatever sits before it. Every callback
+ *  flavour of `fs` accepts `(path, cb)` and `(path, options, cb)` alike. */
+function optionsAndCallback<T extends (...args: never[]) => unknown>(args: unknown[]): { options: Record<string, unknown>; callback: T | undefined } {
+	const callbackAt = args.findIndex((arg) => typeof arg === 'function');
+	const callback = callbackAt === -1 ? undefined : (args[callbackAt] as T);
+	const raw = callbackAt === -1 ? args[0] : args[callbackAt - 1];
+	const options = typeof raw === 'string' ? { encoding: raw } : raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+	return { options, callback };
+}
+
+/** A `fs.Dirent` (`readdir(path, { withFileTypes: true })`). */
+function makeDirent(name: string, isDirectory: boolean, parentPath: string): Record<string, unknown> {
+	return {
+		name,
+		parentPath,
+		path: parentPath,
+		isFile: () => !isDirectory,
+		isDirectory: () => isDirectory,
+		isSymbolicLink: () => false,
+		isBlockDevice: () => false,
+		isCharacterDevice: () => false,
+		isFIFO: () => false,
+		isSocket: () => false
+	};
+}
+
 /** Every map key under a directory (the directory listing a synchronous `readdir` answers). */
 function directoryEntries(dir: string, host: ShimHost): string[] | undefined {
 	const prefix = dir === '' ? '' : dir.replace(/\/+$/, '') + '/';
@@ -951,34 +980,43 @@ function makeFs(host: ShimHost) {
 		lstatSync: (path: string) => fs.statSync(path),
 		realpathSync: (path: string): string => realpathValue(path),
 		realpath,
-		readdirSync: (path: string): string[] => {
+		readdirSync: (path: string, options?: string | { withFileTypes?: boolean }): unknown[] => {
 			const rel = extensionRelative(path, host);
 			const names = rel === null ? undefined : directoryEntries(rel, host);
 			if (names === undefined) throw fsError('ENOENT', `no such file or directory, scandir '${path}'`);
+			if (typeof options === 'object' && options?.withFileTypes) {
+				const base = rel === '' ? '' : `${rel}/`;
+				return names.map((name) => makeDirent(name, directoryEntries(`${base}${name}`, host) !== undefined, path));
+			}
 			return names;
 		},
 		/** The callback flavours: a package file answers synchronously from the map; a
 		 *  workspace path goes through the bridge (confined there, as VS Code confines
-		 *  `workspace.fs` to the open folders). */
-		readdir: (path: string, cb: (error: Error | null, names?: string[]) => void) => {
+		 *  `workspace.fs` to the open folders). `(path, cb)` and `(path, options, cb)`. */
+		readdir: (path: string, ...rest: unknown[]) => {
+			const { options, callback } = optionsAndCallback<(error: Error | null, names?: unknown[]) => void>(rest);
+			const cb = callback ?? (() => undefined);
 			const rel = extensionRelative(path, host);
-			const names = rel === null ? undefined : directoryEntries(rel, host);
-			if (names !== undefined) {
-				cb(null, names);
+			if (rel !== null && directoryEntries(rel, host) !== undefined) {
+				cb(null, fs.readdirSync(path, options as { withFileTypes?: boolean }));
 				return;
 			}
 			void host.bridge.request('fs.op', ['list', path]).then(
-				(answer) => cb(null, ((answer as { name: string }[]) ?? []).map((entry) => entry.name)),
+				(answer) => {
+					const entries = (answer as { name: string; kind: number }[]) ?? [];
+					cb(null, options.withFileTypes ? entries.map((entry) => makeDirent(entry.name, entry.kind === 2, path)) : entries.map((entry) => entry.name));
+				},
 				(error) => cb(fsError('ENOENT', String(error)))
 			);
 		},
-		lstat: (path: string, cb: (error: Error | null, stats?: unknown) => void) => fs.stat(path, cb),
+		lstat: (path: string, ...rest: unknown[]) => fs.stat(path, ...rest),
 		access: (path: string, modeOrCb: number | ((error: Error | null) => void), maybeCb?: (error: Error | null) => void) => {
 			const cb = typeof modeOrCb === 'function' ? modeOrCb : maybeCb;
 			if (!cb) return;
-			fs.stat(path, (error) => cb(error ?? null));
+			fs.stat(path, (error: Error | null) => cb(error ?? null));
 		},
-		stat: (path: string, cb: (error: Error | null, stats?: unknown) => void) => {
+		stat: (path: string, ...rest: unknown[]) => {
+			const cb = optionsAndCallback<(error: Error | null, stats?: unknown) => void>(rest).callback ?? (() => undefined);
 			try {
 				cb(null, fs.statSync(path));
 			} catch {
@@ -1007,28 +1045,39 @@ function makeFs(host: ShimHost) {
 				);
 			}
 		},
-		readFile: (path: string, encodingOrCallback?: string | ((error: Error | null, data?: unknown) => void), maybeCallback?: (error: Error | null, data?: unknown) => void) => {
-			const cb = (typeof encodingOrCallback === 'function' ? encodingOrCallback : maybeCallback)!;
-			const encoding = typeof encodingOrCallback === 'string' ? encodingOrCallback : undefined;
+		readFile: (path: string, ...rest: unknown[]) => {
+			// The encoding arrives as a string or as `{ encoding }` (Node takes both).
+			const { options, callback } = optionsAndCallback<(error: Error | null, data?: unknown) => void>(rest);
+			const cb = callback ?? (() => undefined);
+			const encoding = typeof options.encoding === 'string' ? options.encoding : undefined;
 			const text = mapFile(path);
 			if (text === undefined) {
 				// Not in the map: an extension-dir file the preload skipped, or a workspace
 				// file — the host bridge reads workspace files (confined there, as in VS Code).
 				void host.bridge.request('fs.op', ['read', path]).then(
-					(answer) => cb(null, decodeBase64ToBuffer((answer as { data: string }).data, encoding)),
+					(answer) => {
+						// No answer (a bridge without the op, a vanished file) is Node's ENOENT.
+						const data = (answer as { data?: string } | null | undefined)?.data;
+						if (typeof data !== 'string') cb(fsError('ENOENT', `no such file or directory, open '${path}'`));
+						else cb(null, decodeBase64ToBuffer(data, encoding));
+					},
 					(error) => cb(fsError('ENOENT', String(error)))
 				);
 				return;
 			}
 			cb(null, encoding === undefined ? Buffer.from(encoder.encode(text)) : text);
 		},
-		writeFile: (path: string, data: unknown, cb: (error: Error | null) => void) => {
+		writeFile: (path: string, data: unknown, ...rest: unknown[]) => {
+			const cb = optionsAndCallback<(error: Error | null) => void>(rest).callback ?? (() => undefined);
 			void host.bridge.request('fs.op', ['write', path, undefined, bufferToBase64(data)]).then(
 				() => cb(null),
 				(error) => cb(fsError('EACCES', `cannot write '${path}' here: ${String(error)}`))
 			);
 		},
-		mkdir: (path: string, cb: (error: Error | null) => void) => void host.bridge.request('fs.op', ['mkdir', path]).then(() => cb(null), (error) => cb(error as Error)),
+		mkdir: (path: string, ...rest: unknown[]) => {
+			const cb = optionsAndCallback<(error: Error | null) => void>(rest).callback ?? (() => undefined);
+			void host.bridge.request('fs.op', ['mkdir', path]).then(() => cb(null), (error) => cb(fsError('EACCES', String(error))));
+		},
 		// The executable bit git hooks and shipped helper scripts need; the backend sets it
 		// inside the workspace (and answers silently on platforms without a mode).
 		chmod: (path: string, mode: number, cb?: (error: Error | null) => void) => {
@@ -1051,10 +1100,22 @@ function makeFs(host: ShimHost) {
 			if (options?.recursive === true) return;
 			throw fsError('EACCES', `cannot create directory '${path}' in the Git Graph Studio extension host`);
 		},
-		appendFile: (path: string, data: unknown, cb: (error: Error | null) => void) => {
+		appendFile: (path: string, data: unknown, ...rest: unknown[]) => {
+			const cb = optionsAndCallback<(error: Error | null) => void>(rest).callback ?? (() => undefined);
+			// The current contents (the map's copy, else the workspace file), then the data.
 			const existing = mapFile(path);
-			const text = existing === undefined ? '' : existing;
-			void host.bridge.request('fs.op', ['write', path, undefined, bufferToBase64(text + String(data))]).then(() => cb(null), (error) => cb(error as Error));
+			const write = (text: string) => void host.bridge.request('fs.op', ['write', path, undefined, bufferToBase64(text + (typeof data === 'string' ? data : new TextDecoder().decode(data as Uint8Array)))]).then(() => cb(null), (error) => cb(fsError('EACCES', String(error))));
+			if (existing !== undefined) {
+				write(existing);
+				return;
+			}
+			void host.bridge.request('fs.op', ['read', path]).then(
+				(answer) => {
+					const data = (answer as { data?: string } | null | undefined)?.data;
+					write(typeof data === 'string' ? new TextDecoder().decode(Uint8Array.from(atob(data), (char) => char.charCodeAt(0))) : '');
+				},
+				() => write('')
+			);
 		},
 		unlink: (path: string, cb: (error: Error | null) => void) => void host.bridge.request('fs.op', ['delete', path]).then(() => cb(null), (error) => cb(error as Error)),
 		rmdir: (path: string, cb: (error: Error | null) => void) => void host.bridge.request('fs.op', ['delete', path]).then(() => cb(null), (error) => cb(error as Error)),
@@ -1119,15 +1180,7 @@ function makeFs(host: ShimHost) {
 	fs.promises = {
 		access: (path: string, _mode?: number) =>
 			new Promise<void>((resolve, reject) => {
-				fs.stat(path, (error) => (error ? reject(error) : resolve()));
-			}),
-		lstat: (path: string) =>
-			new Promise<unknown>((resolve, reject) => {
-				try {
-					resolve(fs.lstatSync(path));
-				} catch (error) {
-					reject(error);
-				}
+				fs.stat(path, (error: Error | null) => (error ? reject(error) : resolve()));
 			}),
 		realpath: (path: string) => new Promise<string>((resolve, reject) => {
 			try {
@@ -1136,23 +1189,16 @@ function makeFs(host: ShimHost) {
 				reject(error);
 			}
 		}),
-		readFile: (path: string, encoding?: string) => new Promise<unknown>((resolve, reject) => fs.readFile(path, encoding, (error, data) => (error ? reject(error) : resolve(data)))),
-		writeFile: (path: string, data: unknown) => new Promise<void>((resolve, reject) => fs.writeFile(path, data, (error) => (error ? reject(error) : resolve()))),
-		stat: (path: string) => new Promise<unknown>((resolve, reject) => {
-			try {
-				resolve(fs.statSync(path));
-			} catch (error) {
-				reject(error);
-			}
-		}),
-		readdir: (path: string) => new Promise<unknown>((resolve, reject) => {
-			try {
-				resolve(fs.readdirSync(path));
-			} catch (error) {
-				reject(error);
-			}
-		}),
-		mkdir: (path: string) => new Promise<void>((resolve, reject) => fs.mkdir(path, (error) => (error ? reject(error) : resolve()))),
+		readFile: (path: string, options?: string | { encoding?: string }) => new Promise<unknown>((resolve, reject) => fs.readFile(path, options ?? {}, (error: Error | null, data?: unknown) => (error ? reject(error) : resolve(data)))),
+		writeFile: (path: string, data: unknown, _options?: unknown) => new Promise<void>((resolve, reject) => fs.writeFile(path, data, (error: Error | null) => (error ? reject(error) : resolve()))),
+		appendFile: (path: string, data: unknown, _options?: unknown) => new Promise<void>((resolve, reject) => fs.appendFile(path, data, (error: Error | null) => (error ? reject(error) : resolve()))),
+		// Package files answer from the map, workspace paths through the bridge — the same
+		// two-tier lookup as the callback flavours (the promise forms read the map alone
+		// before, so a workspace directory or file always rejected).
+		stat: (path: string, _options?: unknown) => new Promise<unknown>((resolve, reject) => fs.stat(path, (error: Error | null, stats?: unknown) => (error ? reject(error) : resolve(stats)))),
+		lstat: (path: string, _options?: unknown) => new Promise<unknown>((resolve, reject) => fs.stat(path, (error: Error | null, stats?: unknown) => (error ? reject(error) : resolve(stats)))),
+		readdir: (path: string, options?: string | { withFileTypes?: boolean }) => new Promise<unknown>((resolve, reject) => fs.readdir(path, options ?? {}, (error: Error | null, names?: unknown[]) => (error ? reject(error) : resolve(names)))),
+		mkdir: (path: string, _options?: unknown) => new Promise<void>((resolve, reject) => fs.mkdir(path, (error: Error | null) => (error ? reject(error) : resolve()))),
 		unlink: (path: string) => new Promise<void>((resolve, reject) => fs.unlink(path, (error) => (error ? reject(error) : resolve())))
 	};
 	return fs;
@@ -1186,16 +1232,39 @@ function decodeBase64ToBuffer(base64: string, encoding?: string): unknown {
 
 /* ---------- crypto: what can be real (random bytes), and honest failures elsewhere ---------- */
 
+/** Fill a byte view from Web Crypto in 64 KiB slices (its per-call ceiling). */
+function fillRandom(bytes: Uint8Array): Uint8Array {
+	for (let at = 0; at < bytes.length; at += 65536) crypto.getRandomValues(bytes.subarray(at, Math.min(bytes.length, at + 65536)));
+	return bytes;
+}
+
 const cryptoShim = {
 	getRandomValues: (array: Uint8Array) => crypto.getRandomValues(array),
-	randomBytes: (size: number): Buffer => {
-		const bytes = new Uint8Array(size);
-		crypto.getRandomValues(bytes);
+	// Node's randomBytes: sync or with a callback, any size (Web Crypto caps one draw at
+	// 64 KiB, so larger requests fill in slices).
+	randomBytes: (size: number, callback?: (error: Error | null, bytes: Buffer) => void): Buffer | undefined => {
+		const bytes = fillRandom(new Uint8Array(Math.max(0, Number(size) || 0)));
+		if (typeof callback === 'function') {
+			queueMicrotask(() => callback(null, new Buffer(bytes)));
+			return undefined;
+		}
 		return new Buffer(bytes);
 	},
-	randomFillSync: (buffer: Uint8Array): Uint8Array => {
-		crypto.getRandomValues(buffer);
-		return buffer;
+	randomFillSync: (buffer: Uint8Array): Uint8Array => fillRandom(new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)) && buffer,
+	randomInt: (min: number, max?: number): number => {
+		const [low, high] = max === undefined ? [0, min] : [min, max];
+		const word = new Uint32Array(1);
+		crypto.getRandomValues(word);
+		return low + (word[0]! % Math.max(1, high - low));
+	},
+	/** RFC 4122 v4 — built here: an opaque-origin sandboxed frame is not a secure context,
+	 *  where the browser's own `crypto.randomUUID` is absent. */
+	randomUUID: (): string => {
+		const b = fillRandom(new Uint8Array(16));
+		b[6] = (b[6]! & 0x0f) | 0x40;
+		b[8] = (b[8]! & 0x3f) | 0x80;
+		const hex = [...b].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+		return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 	},
 	timingSafeEqual: (a: Uint8Array, b: Uint8Array): boolean => {
 		if (a.length !== b.length) throw new RangeError('Buffers must be the same length');
@@ -1411,30 +1480,6 @@ function sha256(message: Uint8Array, sha224 = false): Uint8Array {
 	return out;
 }
 
-/* ---------- The modules that exist only to fail at call time ---------- */
-
-/** A function whose every call fails with a clear reason — the require succeeds, the use
- *  does not (a spawn an extension never performs must not kill its activation). */
-function callThrowsFn(name: string): () => never {
-	return () => {
-		throw new Error(`${name} is not supported by the Git Graph Studio extension host (extensions run in a sandboxed frame; a package that needs real processes declares a ggs backend)`);
-	};
-}
-
-/** An object whose every property is a call-time failure — `require('child_process')`
- *  answers it, and any use of any member says why. Promise/bundler protocol members
- *  (`then`, `default`, `__esModule`) read as absent so an accidental `await` or interop
- *  probe does not trip the failure. */
-function unavailableModule(name: string): Record<string, never> {
-	return new Proxy({}, {
-		get: (_target, member) => {
-			if (member === 'then' || member === 'default' || member === '__esModule') return undefined;
-			if (member === Symbol.toPrimitive || member === 'toString') return () => `[${name}]`;
-			return callThrowsFn(`${name}.${String(member)}`);
-		}
-	}) as Record<string, never>;
-}
-
 /* ---------- os and the process global ---------- */
 
 function makeOs(host: ShimHost) {
@@ -1572,6 +1617,9 @@ export function createNodeBuiltins(host: ShimHost): Record<string, unknown> {
 	const posixOnly = defaultPath('linux');
 	const win32Only = defaultPath('win32');
 	const fs = makeFs(host);
+	// Streams extend the frame's own `events` class (`instanceof EventEmitter` holds) and
+	// decode chunks through the Buffer shim's codecs.
+	const streamModule = makeStreamModule(EventEmitter as never, (chunk, encoding) => (typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString((encoding ?? 'utf8') as never)));
 	const builtins: Record<string, unknown> = {
 		path,
 		'path/posix': posixOnly,
@@ -1605,7 +1653,8 @@ export function createNodeBuiltins(host: ShimHost): Record<string, unknown> {
 		cluster: unavailableModule('cluster'),
 		repl: unavailableModule('repl'),
 		vm: unavailableModule('vm'),
-		stream: { PassThrough: class {}, Transform: class {}, Readable: class {}, Writable: class {}, Duplex: class {}, finished: callThrowsFn('stream.finished'), pipeline: callThrowsFn('stream.pipeline') },
+		stream: streamModule,
+		'stream/promises': (streamModule as { promises: unknown }).promises,
 		worker_threads: { isMainThread: true, threadId: 0, parentPort: null, workerData: null, Worker: callThrowsFn('worker_threads.Worker') },
 		async_hooks: { createHook: () => ({ enable: () => undefined, disable: () => undefined }), executionAsyncId: () => 0, triggerAsyncId: () => 0 },
 		v8: { getHeapStatistics: () => ({}), setFlagsFromString: () => undefined },

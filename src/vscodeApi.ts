@@ -86,6 +86,20 @@ export interface HostContext {
 	/** The persisted memento values (`extHost` loads them from localStorage before the frame
 	 *  boots; updates write through the `state.update` bridge). */
 	state: { global: Record<string, unknown>; workspace: Record<string, unknown> };
+	/** The configuration defaults visible to `getConfiguration` — the extension's own
+	 *  `contributes.configuration` defaults and the workbench's core sections (`editor.*`,
+	 *  `files.*`, …). `settings` (the stored overrides) wins over these. Optional: an
+	 *  older bridge sends none. */
+	defaults?: Record<string, unknown>;
+	/** `process.platform` of the host the shim runs for (`Uri.fsPath` spelling). */
+	platform?: string;
+	/** The extension-host log threshold: the shim skips shipping lines below it. */
+	logLevel?: ShimLogLevel;
+	/** The extension's storage directories under `~/.ggs/` (`globalStorageUri`,
+	 *  `storageUri`, `logUri`); absent from an older bridge (the install dir stands in). */
+	storage?: { global: string; workspace?: string | null; log: string };
+	/** The installed extensions as `extensions.all` / `getExtension` report them. */
+	extensions?: { id: string; extensionPath: string; packageJSON: Record<string, unknown>; isActive: boolean }[];
 }
 
 /** An event the host pushed into the frame: a configuration change for this extension, a
@@ -93,7 +107,13 @@ export interface HostContext {
  *  (with its document text when the document changed), a document being saved, a message
  *  from one of its webview views (sidebar), a view's visibility, or a theme change. */
 export interface HostEvent {
-	event: 'configChanged' | 'webviewMessage' | 'webviewDisposed' | 'activeEditorChanged' | 'documentSaved' | 'webviewViewMessage' | 'webviewViewVisible' | 'themeChanged' | 'fsChanged';
+	event: 'configChanged' | 'webviewMessage' | 'webviewDisposed' | 'activeEditorChanged' | 'documentSaved' | 'webviewViewMessage' | 'webviewViewVisible' | 'themeChanged' | 'fsChanged' | 'documentChanged' | 'documentClosed' | 'workspaceFoldersChanged' | 'webviewViewState';
+	/** A document edit (documentChanged): the document's whole new text. */
+	text?: string;
+	/** The open folders after a change (workspaceFoldersChanged). */
+	folders?: string[];
+	/** A webview panel's view state (webviewViewState). */
+	active?: boolean;
 	settings?: Record<string, unknown>;
 	panelId?: number;
 	message?: unknown;
@@ -157,85 +177,329 @@ function encodeBase64(bytes: Uint8Array): string {
 	return btoa(binary);
 }
 
+/* ---------- The shim's log line out ---------- */
+
+export type ShimLogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error';
+const LOG_RANK: Record<ShimLogLevel, number> = { trace: 0, debug: 1, info: 2, warn: 3, error: 4 };
+
+/** Where the shim reports an anomaly: an unsupported API reached for, a listener or
+ *  provider that threw, a host request that failed. `createVscodeApi` points it at the
+ *  bridge's `log` request (the host's extension-host log records it); until then — and
+ *  if the bridge itself fails — the console keeps the line. */
+let shimLogSink: (level: ShimLogLevel, message: string, detail?: string) => void = (level, message, detail) => {
+	const line = `[ggs-ext] ${message}${detail ? `\n${detail}` : ''}`;
+	if (level === 'error') console.error(line);
+	else if (level === 'warn') console.warn(line);
+};
+let shimLogThreshold: ShimLogLevel = 'info';
+const shimLoggedOnce = new Set<string>();
+
+function detailText(detail: unknown): string | undefined {
+	if (detail === undefined || detail === null) return undefined;
+	if (detail instanceof Error) return detail.stack ?? `${detail.name}: ${detail.message}`;
+	if (typeof detail === 'string') return detail;
+	try {
+		return JSON.stringify(detail);
+	} catch {
+		return String(detail);
+	}
+}
+
+/** Record one shim anomaly (never throws — logging must not add a failure). */
+export function shimLog(level: ShimLogLevel, message: string, detail?: unknown): void {
+	try {
+		if (LOG_RANK[level] < LOG_RANK[shimLogThreshold]) return;
+		shimLogSink(level, message, detailText(detail));
+	} catch {
+		// see the doc comment
+	}
+}
+
+/** `shimLog` at most once per key (an unsupported API polled in a loop logs one line). */
+export function shimLogOnce(key: string, level: ShimLogLevel, message: string, detail?: unknown): void {
+	if (shimLoggedOnce.has(key)) return;
+	shimLoggedOnce.add(key);
+	shimLog(level, message, detail);
+}
+
+/** Run an extension callback; a throw is logged (with the stack) and swallowed, the way
+ *  VS Code's event dispatch isolates one listener's failure from the others. */
+function guarded<T>(what: string, run: () => T): T | undefined {
+	try {
+		const result = run();
+		if (result !== null && typeof result === 'object' && typeof (result as { then?: unknown }).then === 'function') {
+			(result as unknown as Promise<unknown>).then(undefined, (error: unknown) => shimLog('error', `${what} rejected: ${String(error)}`, error));
+		}
+		return result;
+	} catch (error) {
+		shimLog('error', `${what} threw: ${String(error)}`, error);
+		return undefined;
+	}
+}
+
 /* ---------- The small value types VS Code's API is built from ---------- */
 
+function isPositionLike(value: unknown): value is { line: number; character: number } {
+	return value !== null && typeof value === 'object' && typeof (value as { line?: unknown }).line === 'number' && typeof (value as { character?: unknown }).character === 'number';
+}
+
 export class Position {
-	constructor(readonly line: number, readonly character: number) {}
-	compareTo(other: Position): number {
+	readonly line: number;
+	readonly character: number;
+	constructor(line: number, character: number) {
+		if (!(line >= 0) || !(character >= 0)) throw new Error(`Illegal argument: Position(${line}, ${character}) must be non-negative`);
+		this.line = line;
+		this.character = character;
+	}
+	static isPosition(value: unknown): value is Position {
+		return value instanceof Position || isPositionLike(value);
+	}
+	/** A plain `{ line, character }` (a Position that crossed a bridge) as a real one. */
+	static of(value: { line: number; character: number }): Position {
+		return value instanceof Position ? value : new Position(value.line, value.character);
+	}
+	compareTo(other: { line: number; character: number }): number {
 		return this.line !== other.line ? this.line - other.line : this.character - other.character;
+	}
+	isBefore(other: { line: number; character: number }): boolean {
+		return this.compareTo(other) < 0;
+	}
+	isBeforeOrEqual(other: { line: number; character: number }): boolean {
+		return this.compareTo(other) <= 0;
+	}
+	isAfter(other: { line: number; character: number }): boolean {
+		return this.compareTo(other) > 0;
+	}
+	isAfterOrEqual(other: { line: number; character: number }): boolean {
+		return this.compareTo(other) >= 0;
+	}
+	isEqual(other: { line: number; character: number }): boolean {
+		return this.compareTo(other) === 0;
+	}
+	translate(lineDelta: number | { lineDelta?: number; characterDelta?: number } = 0, characterDelta = 0): Position {
+		if (typeof lineDelta === 'object') return new Position(this.line + (lineDelta.lineDelta ?? 0), this.character + (lineDelta.characterDelta ?? 0));
+		return new Position(this.line + lineDelta, this.character + characterDelta);
+	}
+	with(line: number | { line?: number; character?: number } = this.line, character = this.character): Position {
+		if (typeof line === 'object') return new Position(line.line ?? this.line, line.character ?? this.character);
+		return new Position(line, character);
 	}
 }
 
 export class Range {
-	constructor(readonly start: Position, readonly end: Position) {}
-	with(start = this.start, end = this.end): Range {
-		return new Range(start, end);
+	readonly start: Position;
+	readonly end: Position;
+	/** `new Range(start, end)` or `new Range(startLine, startCharacter, endLine, endCharacter)`
+	 *  — both of VS Code's spellings; the ends are ordered (start never after end). */
+	constructor(startLine: number | { line: number; character: number }, startCharacter: number | { line: number; character: number }, endLine?: number, endCharacter?: number) {
+		let start: Position;
+		let end: Position;
+		if (typeof startLine === 'number' && typeof startCharacter === 'number' && typeof endLine === 'number' && typeof endCharacter === 'number') {
+			start = new Position(startLine, startCharacter);
+			end = new Position(endLine, endCharacter);
+		} else if (isPositionLike(startLine) && isPositionLike(startCharacter)) {
+			start = Position.of(startLine);
+			end = Position.of(startCharacter);
+		} else {
+			throw new Error('Illegal argument: Range takes (Position, Position) or (line, character, line, character)');
+		}
+		if (start.isAfter(end)) [start, end] = [end, start];
+		this.start = start;
+		this.end = end;
+	}
+	static isRange(value: unknown): value is Range {
+		return value instanceof Range || (value !== null && typeof value === 'object' && isPositionLike((value as Range).start) && isPositionLike((value as Range).end));
 	}
 	get isEmpty(): boolean {
-		return this.start.line === this.end.line && this.start.character === this.end.character;
+		return this.start.isEqual(this.end);
+	}
+	get isSingleLine(): boolean {
+		return this.start.line === this.end.line;
+	}
+	contains(positionOrRange: { line: number; character: number } | { start: { line: number; character: number }; end: { line: number; character: number } }): boolean {
+		if (isPositionLike(positionOrRange)) return this.start.isBeforeOrEqual(positionOrRange) && this.end.isAfterOrEqual(positionOrRange);
+		return this.contains(positionOrRange.start) && this.contains(positionOrRange.end);
+	}
+	isEqual(other: { start: { line: number; character: number }; end: { line: number; character: number } }): boolean {
+		return this.start.isEqual(other.start) && this.end.isEqual(other.end);
+	}
+	intersection(other: { start: { line: number; character: number }; end: { line: number; character: number } }): Range | undefined {
+		const start = this.start.isAfter(other.start) ? this.start : Position.of(other.start);
+		const end = this.end.isBefore(other.end) ? this.end : Position.of(other.end);
+		return start.isAfter(end) ? undefined : new Range(start, end);
+	}
+	union(other: { start: { line: number; character: number }; end: { line: number; character: number } }): Range {
+		const start = this.start.isBefore(other.start) ? this.start : Position.of(other.start);
+		const end = this.end.isAfter(other.end) ? this.end : Position.of(other.end);
+		return new Range(start, end);
+	}
+	with(start: { line: number; character: number } | { start?: { line: number; character: number }; end?: { line: number; character: number } } = this.start, end: { line: number; character: number } = this.end): Range {
+		if (!isPositionLike(start)) return new Range((start as { start?: Position }).start ?? this.start, (start as { end?: Position }).end ?? this.end);
+		return new Range(start, end);
 	}
 }
 
 export class Location {
-	constructor(readonly uri: Uri, readonly range: Range) {}
+	readonly range: Range;
+	constructor(readonly uri: Uri, rangeOrPosition: Range | Position) {
+		this.range = rangeOrPosition instanceof Range ? rangeOrPosition : new Range(rangeOrPosition, rangeOrPosition);
+	}
+}
+
+/** Whether `Uri.fsPath` answers Windows spelling (drive letter, backslashes) — VS Code
+ *  derives it from the platform its extension host runs on. Each host sets it from the
+ *  context it boots with (`HostContext.platform`); the default reads the browser/Node
+ *  platform. */
+let uriWin32 = (() => {
+	try {
+		if (typeof process !== 'undefined' && typeof process.platform === 'string') return process.platform === 'win32';
+	} catch {
+		// no process global
+	}
+	return typeof navigator !== 'undefined' && /^win/i.test(navigator.platform ?? '');
+})();
+
+/** Pin the platform `Uri.fsPath` spells paths for (the hosts call it once at boot). */
+export function setUriPlatform(platform: string | undefined): void {
+	if (platform) uriWin32 = platform === 'win32';
+}
+
+const URI_PATTERN = /^(([^:/?#]+?):)?(\/\/([^/?#]*))?([^?#]*)(\?([^#]*))?(#(.*))?/;
+
+function decodeComponent(text: string): string {
+	if (!/%[0-9A-Fa-f]{2}/.test(text)) return text;
+	try {
+		return decodeURIComponent(text);
+	} catch {
+		return text.replace(/(%[0-9A-Fa-f]{2})+/g, (run) => {
+			try {
+				return decodeURIComponent(run);
+			} catch {
+				return run;
+			}
+		});
+	}
+}
+
+/** VS Code's component encoding: unreserved characters stay, `/` stays in a path, every
+ *  other character is percent-encoded (UTF-8). `minimal` (toString(true)) only escapes
+ *  the delimiters that would change how the string parses back. */
+function encodeComponent(text: string, isPath: boolean, minimal: boolean): string {
+	if (minimal) return text.replace(/[#?]/g, (char) => (char === '#' ? '%23' : '%3F'));
+	let out = '';
+	for (const char of text) {
+		if (/[A-Za-z0-9\-._~]/.test(char) || (isPath && char === '/')) out += char;
+		else out += encodeURIComponent(char).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+	}
+	return out;
 }
 
 /** `Uri`: a real class, because extensions `instanceof vscode.Uri` on every boundary
  *  (ms-python's configuration watcher alone does it a dozen times) — a factory object
- *  answering `is not callable` there kills the whole configuration pipeline. The methods
- *  live on the prototype, so a structured clone still copies only the data fields: an RPC
- *  carrying a Uri crosses as plain data and `rehydrateUris` rebuilds the methods. */
+ *  answering `is not callable` there kills the whole configuration pipeline. Every field
+ *  (fsPath included) is an own data field and the methods live on the prototype, so a
+ *  structured clone copies exactly the data: an RPC carrying a Uri crosses as plain data
+ *  and `rehydrateUris` rebuilds the methods. The semantics are VS Code's: `authority`,
+ *  `Uri.file` normalizing a Windows path to `/C:/…`, `fsPath` in the platform's spelling
+ *  and an encoded `toString()` — the form language servers expect. */
 export class Uri {
 	readonly scheme: string;
+	readonly authority: string;
 	readonly path: string;
-	readonly fsPath: string;
 	readonly query: string;
 	readonly fragment: string;
-	constructor(scheme: string, path: string, query = '', fragment = '') {
-		this.scheme = scheme;
-		this.path = path;
-		this.fsPath = path;
+	readonly fsPath: string;
+	constructor(scheme: string, authority = '', path = '', query = '', fragment = '') {
+		this.scheme = scheme || 'file';
+		this.authority = authority;
+		// A hierarchical scheme's path is absolute once it has an authority (RFC 3986 §3.3).
+		this.path = this.authority !== '' && path !== '' && !path.startsWith('/') ? `/${path}` : path;
 		this.query = query;
 		this.fragment = fragment;
+		this.fsPath = uriToFsPath(this);
 	}
-	toString(): string {
-		return `${this.scheme}:${this.path}${this.query ? '?' + this.query : ''}${this.fragment ? '#' + this.fragment : ''}`;
+	toString(skipEncoding = false): string {
+		const minimal = skipEncoding === true;
+		let out = `${this.scheme}:`;
+		if (this.authority !== '' || this.scheme === 'file') out += `//${encodeComponent(this.authority.toLowerCase(), false, minimal)}`;
+		let path = this.path;
+		// VS Code lowercases a file path's drive letter and encodes its colon.
+		const drive = /^\/([A-Za-z]):/.exec(path);
+		if (drive) path = `/${drive[1]!.toLowerCase()}:${path.slice(3)}`;
+		out += encodeComponent(path, true, minimal);
+		if (this.query !== '') out += `?${encodeComponent(this.query, false, minimal)}`;
+		if (this.fragment !== '') out += `#${encodeComponent(this.fragment, false, minimal)}`;
+		return out;
 	}
-	with(change: Partial<Uri>): Uri {
-		return makeUri(change.scheme ?? this.scheme, change.path ?? this.path, change.query ?? this.query, change.fragment ?? this.fragment);
+	toJSON(): Record<string, string> {
+		return { scheme: this.scheme, authority: this.authority, path: this.path, query: this.query, fragment: this.fragment, fsPath: this.fsPath, external: this.toString() };
+	}
+	with(change: { scheme?: string; authority?: string | null; path?: string | null; query?: string | null; fragment?: string | null }): Uri {
+		return new Uri(change.scheme ?? this.scheme, change.authority ?? this.authority, change.path ?? this.path, change.query ?? this.query, change.fragment ?? this.fragment);
 	}
 	static file(path: string): Uri {
-		return makeUri('file', path);
+		let normalized = String(path ?? '');
+		if (uriWin32 || /^[A-Za-z]:\\/.test(normalized) || normalized.startsWith('\\\\')) normalized = normalized.replace(/\\/g, '/');
+		let authority = '';
+		if (normalized.startsWith('//')) {
+			const slash = normalized.indexOf('/', 2);
+			authority = slash === -1 ? normalized.slice(2) : normalized.slice(2, slash);
+			normalized = slash === -1 ? '/' : normalized.slice(slash);
+		}
+		if (/^[A-Za-z]:/.test(normalized)) normalized = `/${normalized}`;
+		else if (!normalized.startsWith('/')) normalized = `/${normalized}`;
+		return new Uri('file', authority, normalized);
+	}
+	static parse(value: string, _strict = false): Uri {
+		const match = URI_PATTERN.exec(String(value ?? ''));
+		if (!match) return new Uri('file', '', '');
+		return new Uri(match[2] || 'file', decodeComponent(match[4] ?? ''), decodeComponent(match[5] ?? ''), decodeComponent(match[7] ?? ''), decodeComponent(match[9] ?? ''));
+	}
+	static from(components: { scheme: string; authority?: string; path?: string; query?: string; fragment?: string }): Uri {
+		return new Uri(components.scheme, components.authority ?? '', components.path ?? '', components.query ?? '', components.fragment ?? '');
 	}
 	static joinPath(base: Uri, ...segments: string[]): Uri {
-		return makeUri(base.scheme, [base.path.replace(/\/$/, ''), ...segments].join('/'));
+		const parts = base.path.split('/');
+		for (const segment of segments.join('/').split('/')) {
+			if (segment === '' || segment === '.') continue;
+			if (segment === '..') {
+				if (parts.length > 1) parts.pop();
+			} else {
+				parts.push(segment);
+			}
+		}
+		let joined = parts.join('/');
+		if (!joined.startsWith('/') && base.path.startsWith('/')) joined = `/${joined}`;
+		return base.with({ path: joined.replace(/\/{2,}/g, '/') });
 	}
-	static parse(value: string): Uri {
-		const index = value.indexOf(':');
-		if (index === -1) return makeUri('untitled', value);
-		const scheme = value.slice(0, index);
-		// The rest keeps its authority (`//host/path`) inside the path — a scheme-delimited
-		// URL like the webview base round-trips through toString() exactly as it came in.
-		const rest = value.slice(index + 1);
-		const queryAt = rest.indexOf('?');
-		const hashAt = rest.indexOf('#');
-		const cut = Math.min(...[queryAt, hashAt].filter((at) => at !== -1).concat(rest.length));
-		return makeUri(scheme, rest.slice(0, cut), queryAt !== -1 ? rest.slice(queryAt + 1, hashAt === -1 ? undefined : hashAt) : '', hashAt !== -1 ? rest.slice(hashAt + 1) : '');
+	static isUri(value: unknown): value is Uri {
+		return value instanceof Uri || (value !== null && typeof value === 'object' && typeof (value as Uri).scheme === 'string' && typeof (value as Uri).path === 'string' && typeof (value as Uri).with === 'function');
 	}
 }
 
-function makeUri(scheme: string, path: string, query = '', fragment = ''): Uri {
-	return new Uri(scheme, path, query, fragment);
+/** VS Code's `uriToFsPath`: a UNC authority, a drive letter, the platform's separators. */
+function uriToFsPath(uri: { scheme: string; authority: string; path: string }): string {
+	let value: string;
+	if (uri.authority !== '' && uri.path.length > 1 && uri.scheme === 'file') value = `//${uri.authority}${uri.path}`;
+	else if (/^\/[A-Za-z]:/.test(uri.path)) value = uri.path.slice(1);
+	else value = uri.path;
+	return uriWin32 ? value.replace(/\//g, '\\') : value;
+}
+
+/** A path, Uri or Uri-shaped value as the host's path spelling (the fsPath). */
+function pathOf(value: Uri | string | { fsPath?: string; path?: string } | undefined | null): string {
+	if (value === undefined || value === null) return '';
+	if (typeof value === 'string') return value;
+	return value.fsPath ?? value.path ?? '';
 }
 
 /** Reconstitute the Uris an inbound host call's arguments carry. A command argument
- *  crosses postMessage (or the ggs-ext/1 line) as plain data — the Uri methods are
- *  non-enumerable precisely so the data survives the structured clone — so the menu
- *  context the workbench dispatches (VS Code hands a menu's command the clicked `Uri`)
- *  arrives as `{ scheme, path, fsPath }` without its methods. Anything shaped like that
- *  data half, at any depth of the argument list, becomes a full Uri again: an extension's
- *  `uri.fsPath` reads work either way, but `uri.toString()` / `uri.with()` only do once
- *  rehydrated — the argument shape VS Code's own command dispatch guarantees. */
+ *  crosses postMessage (or the ggs-ext/1 line) as plain data — the Uri methods live on the
+ *  prototype precisely so the data survives the structured clone — so the menu context
+ *  the workbench dispatches (VS Code hands a menu's command the clicked `Uri`) arrives as
+ *  `{ scheme, path, fsPath }` without its methods. Anything shaped like that data half, at
+ *  any depth of the argument list, becomes a full Uri again: a file Uri from its fsPath
+ *  (the host's own spelling), any other scheme from its components. */
 export function rehydrateUris(value: unknown): unknown {
 	if (Array.isArray(value)) return value.map(rehydrateUris);
 	if (value === null || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) return value;
@@ -244,8 +508,12 @@ export function rehydrateUris(value: unknown): unknown {
 		// An own toString means the methods are already there — a full Uri (or something
 		// carrying its own) passes through untouched, never copied method-less.
 		if (Object.prototype.hasOwnProperty.call(data, 'toString')) return value;
-		const path = typeof data.path === 'string' ? data.path : (data.fsPath as string);
-		return makeUri(data.scheme, path, typeof data.query === 'string' ? data.query : '', typeof data.fragment === 'string' ? data.fragment : '');
+		const text = (key: string) => (typeof data[key] === 'string' ? (data[key] as string) : '');
+		if (data.scheme === 'file' && data.fsPath !== '') {
+			const uri = Uri.file(data.fsPath);
+			return text('query') !== '' || text('fragment') !== '' ? uri.with({ query: text('query'), fragment: text('fragment') }) : uri;
+		}
+		return new Uri(data.scheme, text('authority'), text('path') || (data.fsPath as string), text('query'), text('fragment'));
 	}
 	const out: Record<string, unknown> = {};
 	for (const [key, item] of Object.entries(value)) out[key] = rehydrateUris(item);
@@ -253,30 +521,65 @@ export function rehydrateUris(value: unknown): unknown {
 }
 
 export class Disposable {
-	constructor(readonly dispose: () => void) {}
-	static from(...disposables: { dispose(): void }[]): Disposable {
-		return new Disposable(() => disposables.forEach((d) => d.dispose()));
+	private disposed = false;
+	private readonly callOnDispose: () => unknown;
+	constructor(callOnDispose: () => unknown) {
+		this.callOnDispose = callOnDispose;
+	}
+	/** Runs the cleanup once; a second dispose is a no-op (VS Code's contract). */
+	dispose(): unknown {
+		if (this.disposed) return undefined;
+		this.disposed = true;
+		return guarded('Disposable.dispose', () => this.callOnDispose());
+	}
+	static from(...disposables: ({ dispose(): unknown } | undefined | null)[]): Disposable {
+		return new Disposable(() => {
+			for (const disposable of disposables) if (disposable && typeof disposable.dispose === 'function') guarded('Disposable.from member', () => disposable.dispose());
+		});
 	}
 }
 
+/** VS Code's event signature: `event(listener, thisArgs?, disposables?)`. */
+export type Event<T> = (listener: (e: T) => unknown, thisArgs?: unknown, disposables?: { dispose(): unknown }[]) => Disposable;
+
 export class EventEmitter<T> {
-	private readonly listeners = new Set<(e: T) => any>();
-	readonly event = (listener: (e: T) => any) => {
-		this.listeners.add(listener);
-		return new Disposable(() => this.listeners.delete(listener));
+	private readonly listeners = new Set<{ fn: (e: T) => unknown; thisArgs: unknown }>();
+	private disposed = false;
+	/** Subscribe: `thisArgs` binds the listener (the `onDidX(this.handler, this, …)` idiom)
+	 *  and a `disposables` array collects the subscription, as VS Code's Event does. */
+	readonly event: Event<T> = (listener, thisArgs, disposables) => {
+		const entry = { fn: listener, thisArgs };
+		if (!this.disposed) this.listeners.add(entry);
+		const subscription = new Disposable(() => this.listeners.delete(entry));
+		if (Array.isArray(disposables)) disposables.push(subscription);
+		return subscription;
 	};
+	/** Deliver to every listener; one listener's throw is logged and the rest still run. */
 	fire(event: T): void {
-		for (const listener of this.listeners) listener(event);
+		for (const entry of [...this.listeners]) {
+			if (!this.listeners.has(entry)) continue;
+			guarded('event listener', () => entry.fn.call(entry.thisArgs, event));
+		}
 	}
 	dispose(): void {
+		this.disposed = true;
 		this.listeners.clear();
 	}
+}
+
+/** An event that never fires: the registration survives and disposes, nothing arrives. */
+function silentEvent<T = unknown>(): Event<T> {
+	return (_listener, _thisArgs, disposables) => {
+		const subscription = new Disposable(() => undefined);
+		if (Array.isArray(disposables)) disposables.push(subscription);
+		return subscription;
+	};
 }
 
 /** VS Code's cancellation shape: the token reports and notifies, the source cancels. */
 export class CancellationTokenSource {
 	private readonly emitter = new EventEmitter<void>();
-	readonly token = {
+	readonly token: CancellationToken = {
 		isCancellationRequested: false,
 		onCancellationRequested: this.emitter.event
 	};
@@ -285,14 +588,18 @@ export class CancellationTokenSource {
 		this.token.isCancellationRequested = true;
 		this.emitter.fire(undefined);
 	}
-	dispose(): void {
+	dispose(cancel = false): void {
+		if (cancel) this.cancel();
 		this.emitter.dispose();
 	}
 }
 export interface CancellationToken {
 	isCancellationRequested: boolean;
-	onCancellationRequested: (listener: () => unknown) => Disposable;
+	onCancellationRequested: Event<void>;
 }
+/** `CancellationToken.None` / `.Cancelled`: the two static tokens packages pass around. */
+const CancellationTokenNone: CancellationToken = Object.freeze({ isCancellationRequested: false, onCancellationRequested: silentEvent<void>() });
+const CancellationTokenCancelled: CancellationToken = Object.freeze({ isCancellationRequested: true, onCancellationRequested: silentEvent<void>() });
 
 export const ViewColumn = { Active: -1, Beside: -2, One: 1, Two: 2, Three: 3, Four: 4, Five: 5, Six: 6, Seven: 7, Eight: 8, Nine: 9 } as const;
 export type ViewColumn = (typeof ViewColumn)[keyof typeof ViewColumn];
@@ -301,6 +608,29 @@ export enum ConfigurationTarget { Global = 1, Workspace = 2, WorkspaceFolder = 3
 export enum TreeItemCollapsibleState { None = 0, Collapsed = 1, Expanded = 2 }
 export enum ProgressLocation { SourceControl = 1, Window = 10, Notification = 15 }
 export enum UIKind { Desktop = 1, Web = 2 }
+export enum TextEditorSelectionChangeKind { Keyboard = 1, Mouse = 2, Command = 3 }
+export enum TextDocumentSaveReason { Manual = 1, AfterDelay = 2, FocusOut = 3 }
+export enum TextDocumentChangeReason { Undo = 1, Redo = 2 }
+export enum FileChangeType { Changed = 1, Created = 2, Deleted = 3 }
+export enum TreeItemCheckboxState { Unchecked = 0, Checked = 1 }
+export enum DocumentHighlightKind { Text = 0, Read = 1, Write = 2 }
+export enum FoldingRangeKind { Comment = 1, Imports = 2, Region = 3 }
+export enum SignatureHelpTriggerKind { Invoke = 1, TriggerCharacter = 2, ContentChange = 3 }
+export enum CompletionTriggerKind { Invoke = 0, TriggerCharacter = 1, TriggerForIncompleteCompletions = 2 }
+export enum CodeActionTriggerKind { Invoke = 1, Automatic = 2 }
+export enum InlineCompletionTriggerKind { Invoke = 0, Automatic = 1 }
+export enum CompletionItemTag { Deprecated = 1 }
+export enum SymbolTag { Deprecated = 1 }
+export enum TextEditorCursorStyle { Line = 1, Block = 2, Underline = 3, LineThin = 4, BlockOutline = 5, UnderlineThin = 6 }
+export enum TextEditorLineNumbersStyle { Off = 0, On = 1, Relative = 2, Interval = 3 }
+export enum EnvironmentVariableMutatorType { Replace = 1, Append = 2, Prepend = 3 }
+export enum NotebookCellKind { Markup = 1, Code = 2 }
+export enum CommentMode { Editing = 0, Preview = 1 }
+export enum TerminalLocation { Panel = 1, Editor = 2 }
+export enum TerminalExitReason { Unknown = 0, Shutdown = 1, Process = 2, User = 3, Extension = 4 }
+export enum InputBoxValidationSeverity { Info = 1, Warning = 2, Error = 3 }
+export enum DebugConsoleMode { Separate = 0, MergeWithParent = 1 }
+export enum ColorFormat { RGB = 0, HEX = 1, HSL = 2 }
 /** The enums and value classes extension code constructs at load time (a destructure off
  *  `require('vscode')` followed by `new`), each with VS Code's own shape — absent exports
  *  would be `undefined` and the `new` would kill the activation. */
@@ -371,17 +701,27 @@ export class ThemeIcon {
 export class ThemeColor {
 	constructor(readonly id: string) {}
 }
-/** `TreeItem`: what a tree view provider's `getTreeItem` returns — the shape, inert here
- *  (the serializer reads it, `treeView.ts`). */
+/** `TreeItem`: what a tree view provider's `getTreeItem` returns — `new TreeItem(label,
+ *  state)` or `new TreeItem(resourceUri, state)`, VS Code's two constructors (the
+ *  serializer, `TreeViewRegistration.children`, reads every field below). */
 export class TreeItem {
 	label?: string | { label: string; highlights?: [number, number][] };
+	resourceUri?: Uri;
+	id?: string;
 	description?: string | boolean;
 	tooltip?: string | MarkdownString | undefined;
 	iconPath?: string | Uri | { light: string | Uri; dark: string | Uri } | ThemeIcon;
 	contextValue?: string;
 	command?: { command: string; title: string; arguments?: unknown[] };
+	checkboxState?: TreeItemCheckboxState | { state: TreeItemCheckboxState; tooltip?: string };
 	accessibilityInformation?: { label: string; role?: string };
-	constructor(public collapsibleState?: TreeItemCollapsibleState) {}
+	collapsibleState?: TreeItemCollapsibleState;
+	constructor(labelOrUri?: string | { label: string; highlights?: [number, number][] } | Uri, collapsibleState?: TreeItemCollapsibleState) {
+		if (labelOrUri instanceof Uri) this.resourceUri = labelOrUri;
+		else if (typeof labelOrUri === 'number') this.collapsibleState = labelOrUri; // the old one-argument misuse
+		else if (labelOrUri !== undefined) this.label = labelOrUri;
+		if (collapsibleState !== undefined) this.collapsibleState = collapsibleState;
+	}
 }
 /** `SnippetString`: the snippet builder's value object. */
 export class SnippetString {
@@ -427,41 +767,105 @@ export class TextEdit {
 	static delete(range: Range): TextEdit {
 		return new TextEdit(range, '');
 	}
+	static setEndOfLine(eol: EndOfLine): TextEdit {
+		const edit = new TextEdit(new Range(new Position(0, 0), new Position(0, 0)), '');
+		edit.newEol = eol;
+		return edit;
+	}
+	newEol?: EndOfLine;
 	replace(range: Range, newText: string): TextEdit {
 		this.range = range;
 		this.newText = newText;
 		return this;
 	}
 }
-/** `RelativePattern`: a base (folder or Uri) and a glob. */
-export class RelativePattern {
-	constructor(public base: string | Uri, public pattern: string) {}
+/** `SnippetTextEdit`: an edit whose text is a snippet — applied here as its plain text
+ *  (placeholders keep their default text, tab stops vanish; no snippet session). */
+export class SnippetTextEdit {
+	constructor(public range: Range, public snippet: SnippetString) {}
+	static replace(range: Range, snippet: SnippetString): SnippetTextEdit {
+		return new SnippetTextEdit(range, snippet);
+	}
+	static insert(position: Position, snippet: SnippetString): SnippetTextEdit {
+		return new SnippetTextEdit(new Range(position, position), snippet);
+	}
 }
-/** `WorkspaceEdit` over its `changes`/`documentChanges` maps: a package builds one as a
- *  value and hands it to `applyEdit` or a CodeAction — the host walks it as plain data. */
+/** A snippet's plain text: `${1:default}` keeps `default`, `$1` / `${1}` vanish. */
+export function snippetPlainText(snippet: string): string {
+	return snippet
+		.replace(/\$\{\d+:([^}]*)\}/g, '$1')
+		.replace(/\$\{\d+\|([^,|]*)[^}]*\}/g, '$1')
+		.replace(/\$\{?\d+\}?/g, '')
+		.replace(/\\([$}\\])/g, '$1');
+}
+/** `RelativePattern`: a base (folder path, Uri or WorkspaceFolder) and a glob. */
+export class RelativePattern {
+	base: string;
+	baseUri: Uri;
+	constructor(base: string | Uri | { uri: Uri }, public pattern: string) {
+		this.baseUri = typeof base === 'string' ? Uri.file(base) : base instanceof Uri || Uri.isUri(base) ? (base as Uri) : (base as { uri: Uri }).uri;
+		this.base = this.baseUri.fsPath;
+	}
+}
+/** One operation of a WorkspaceEdit, in the order the package recorded it. */
+export type WorkspaceEditOperation =
+	| { kind: 'text'; uri: Uri; edit: TextEdit | SnippetTextEdit }
+	| { kind: 'create'; uri: Uri; options?: { overwrite?: boolean; ignoreIfExists?: boolean; contents?: Uint8Array } }
+	| { kind: 'delete'; uri: Uri; options?: { recursive?: boolean; ignoreIfNotExists?: boolean } }
+	| { kind: 'rename'; uri: Uri; newUri: Uri; options?: { overwrite?: boolean; ignoreIfExists?: boolean } };
+
+/** `WorkspaceEdit`: text edits and file operations across documents, applied in the order
+ *  they were recorded by `workspace.applyEdit` (or carried by a CodeAction). */
 export class WorkspaceEdit {
-	readonly _changes = new Map<string, TextEdit[]>();
-	createUri(_uri: string): Uri {
-		return Uri.file(_uri);
+	readonly _operations: WorkspaceEditOperation[] = [];
+	replace(uri: Uri, range: Range, newText: string, _metadata?: unknown): void {
+		this._operations.push({ kind: 'text', uri, edit: new TextEdit(range, newText) });
 	}
-	replace(uri: Uri, range: Range, newText: string): void {
-		const key = uri.toString();
-		this._changes.set(key, [...(this._changes.get(key) ?? []), new TextEdit(range, newText)]);
-	}
-	insert(uri: Uri, position: Position, newText: string): void {
+	insert(uri: Uri, position: Position, newText: string, _metadata?: unknown): void {
 		this.replace(uri, new Range(position, position), newText);
 	}
-	delete(uri: Uri, range: Range): void {
+	delete(uri: Uri, range: Range, _metadata?: unknown): void {
 		this.replace(uri, range, '');
 	}
-	get(uri: Uri): readonly TextEdit[] {
-		return this._changes.get(uri.toString()) ?? [];
+	has(uri: Uri): boolean {
+		return this._operations.some((operation) => operation.kind === 'text' && operation.uri.toString() === uri.toString());
 	}
+	/** Replace every text edit of one document (`null` / `[]` clears them). The entries may
+	 *  be edits or `[edit, metadata]` pairs, both VS Code spellings. */
+	set(uri: Uri, edits: readonly (TextEdit | SnippetTextEdit | [TextEdit | SnippetTextEdit, unknown])[] | null | undefined): void {
+		const key = uri.toString();
+		for (let at = this._operations.length - 1; at >= 0; at--) {
+			const operation = this._operations[at]!;
+			if (operation.kind === 'text' && operation.uri.toString() === key) this._operations.splice(at, 1);
+		}
+		for (const entry of edits ?? []) this._operations.push({ kind: 'text', uri, edit: Array.isArray(entry) ? entry[0] : entry });
+	}
+	get(uri: Uri): TextEdit[] {
+		const key = uri.toString();
+		return this._operations.flatMap((operation) => (operation.kind === 'text' && operation.uri.toString() === key && operation.edit instanceof TextEdit ? [operation.edit] : []));
+	}
+	createFile(uri: Uri, options?: { overwrite?: boolean; ignoreIfExists?: boolean; contents?: Uint8Array }): void {
+		this._operations.push({ kind: 'create', uri, options });
+	}
+	deleteFile(uri: Uri, options?: { recursive?: boolean; ignoreIfNotExists?: boolean }): void {
+		this._operations.push({ kind: 'delete', uri, options });
+	}
+	renameFile(oldUri: Uri, newUri: Uri, options?: { overwrite?: boolean; ignoreIfExists?: boolean }): void {
+		this._operations.push({ kind: 'rename', uri: oldUri, newUri, options });
+	}
+	/** How many resources the edit touches. */
 	get size(): number {
-		return this._changes.size;
+		return new Set(this._operations.map((operation) => operation.uri.toString())).size;
 	}
 	entries(): [Uri, TextEdit[]][] {
-		return [...this._changes].map(([key, edits]) => [Uri.parse(key), edits]);
+		const byUri = new Map<string, [Uri, TextEdit[]]>();
+		for (const operation of this._operations) {
+			if (operation.kind !== 'text' || !(operation.edit instanceof TextEdit)) continue;
+			const key = operation.uri.toString();
+			if (!byUri.has(key)) byUri.set(key, [operation.uri, []]);
+			byUri.get(key)![1].push(operation.edit);
+		}
+		return [...byUri.values()];
 	}
 }
 /** `Diagnostic`: a squiggle — the shape `languages.createDiagnosticCollection` entries
@@ -527,13 +931,12 @@ export class CodeAction {
 export class SymbolInformation {
 	tags?: readonly unknown[];
 	containerName?: string;
-	constructor(public name: string, public kind: SymbolKind, rangeOrContainer?: Range | string, locationOrUri?: Location | Uri) {
-		// `Uri` values are plain records (the const factory builds them), not class
-		// instances — the same scheme/fsPath shape test rehydrateUris applies tells a
-		// Uri from a Location here; `instanceof Uri` cannot compile against the const.
-		const uriData = locationOrUri as { scheme?: unknown; fsPath?: unknown } | undefined;
-		if (rangeOrContainer instanceof Range && uriData !== undefined && typeof uriData.scheme === 'string' && typeof uriData.fsPath === 'string') this.location = new Location(locationOrUri as Uri, rangeOrContainer);
-		else if (typeof rangeOrContainer === 'string' && locationOrUri instanceof Location) {
+	/** `(name, kind, containerName, location)` or `(name, kind, range, uri?, containerName?)`. */
+	constructor(public name: string, public kind: SymbolKind, rangeOrContainer?: Range | string, locationOrUri?: Location | Uri, containerName?: string) {
+		if (rangeOrContainer instanceof Range) {
+			this.location = new Location(locationOrUri instanceof Uri ? locationOrUri : Uri.parse('untitled:'), rangeOrContainer);
+			this.containerName = containerName;
+		} else if (typeof rangeOrContainer === 'string' && locationOrUri instanceof Location) {
 			this.containerName = rangeOrContainer;
 			this.location = locationOrUri;
 		}
@@ -559,11 +962,14 @@ export class InlayHint {
 		this.kind = kind;
 	}
 }
-export interface InlayHintLabelPart {
-	label: string;
+export class InlayHintLabelPart {
 	tooltip?: string | MarkdownString;
 	location?: Location;
 	command?: unknown;
+	constructor(public value: string) {}
+	get label(): string {
+		return this.value;
+	}
 }
 /** `CancellationError`: the token's `throwIfCancellationRequested` answer. */
 export class CancellationError extends Error {
@@ -576,7 +982,10 @@ export class CancellationError extends Error {
 export class Selection extends Range {
 	readonly anchor: Position;
 	readonly active: Position;
-	constructor(anchor: Position, active: Position) {
+	/** `(anchor, active)` or `(anchorLine, anchorCharacter, activeLine, activeCharacter)`. */
+	constructor(anchorLine: number | { line: number; character: number }, anchorCharacter: number | { line: number; character: number }, activeLine?: number, activeCharacter?: number) {
+		const anchor = typeof anchorLine === 'number' ? new Position(anchorLine, anchorCharacter as number) : Position.of(anchorLine);
+		const active = typeof anchorLine === 'number' ? new Position(activeLine ?? 0, activeCharacter ?? 0) : Position.of(anchorCharacter as { line: number; character: number });
 		super(anchor, active);
 		this.anchor = anchor;
 		this.active = active;
@@ -609,6 +1018,232 @@ export class FileSystemError extends Error {
 		return new FileSystemError(String(messageOrUri), 'Unavailable');
 	}
 }
+
+/* ---------- Language-feature value classes ----------
+ * Providers construct these (and language clients `extends` them at module load), so each
+ * is a real class with VS Code's constructor shape — the provider hosts that would consume
+ * them are not in this host, which logs the registration as unsupported. */
+
+export class Hover {
+	contents: (MarkdownString | string | { language: string; value: string })[];
+	constructor(contents: MarkdownString | string | { language: string; value: string } | (MarkdownString | string | { language: string; value: string })[], public range?: Range) {
+		this.contents = Array.isArray(contents) ? contents : [contents];
+	}
+}
+export class ParameterInformation {
+	constructor(public label: string | [number, number], public documentation?: string | MarkdownString) {}
+}
+export class SignatureInformation {
+	parameters: ParameterInformation[] = [];
+	activeParameter?: number;
+	constructor(public label: string, public documentation?: string | MarkdownString) {}
+}
+export class SignatureHelp {
+	signatures: SignatureInformation[] = [];
+	activeSignature = 0;
+	activeParameter = 0;
+}
+export class FoldingRange {
+	constructor(public start: number, public end: number, public kind?: FoldingRangeKind) {}
+}
+export class DocumentSymbol {
+	children: DocumentSymbol[] = [];
+	tags?: readonly SymbolTag[];
+	constructor(public name: string, public detail: string, public kind: SymbolKind, public range: Range, public selectionRange: Range) {}
+}
+export class DocumentHighlight {
+	constructor(public range: Range, public kind: DocumentHighlightKind = DocumentHighlightKind.Text) {}
+}
+export class SelectionRange {
+	constructor(public range: Range, public parent?: SelectionRange) {}
+}
+export class CompletionList {
+	constructor(public items: CompletionItem[] = [], public isIncomplete = false) {}
+}
+export class CallHierarchyIncomingCall {
+	constructor(public from: CallHierarchyItem, public fromRanges: Range[]) {}
+}
+export class CallHierarchyOutgoingCall {
+	constructor(public to: CallHierarchyItem, public fromRanges: Range[]) {}
+}
+export class LinkedEditingRanges {
+	constructor(public ranges: Range[], public wordPattern?: RegExp) {}
+}
+export class EvaluatableExpression {
+	constructor(public range: Range, public expression?: string) {}
+}
+export class InlineValueText {
+	constructor(public range: Range, public text: string) {}
+}
+export class InlineValueVariableLookup {
+	constructor(public range: Range, public variableName?: string, public caseSensitiveLookup = true) {}
+}
+export class InlineValueEvaluatableExpression {
+	constructor(public range: Range, public expression?: string) {}
+}
+export class InlineCompletionItem {
+	constructor(public insertText: string | SnippetString, public range?: Range, public command?: unknown) {}
+}
+export class InlineCompletionList {
+	constructor(public items: InlineCompletionItem[]) {}
+}
+export class Color {
+	constructor(readonly red: number, readonly green: number, readonly blue: number, readonly alpha: number) {}
+}
+export class ColorInformation {
+	constructor(public range: Range, public color: Color) {}
+}
+export class ColorPresentation {
+	textEdit?: TextEdit;
+	additionalTextEdits?: TextEdit[];
+	constructor(public label: string) {}
+}
+export class SemanticTokensLegend {
+	constructor(readonly tokenTypes: string[], readonly tokenModifiers: string[] = []) {}
+}
+export class SemanticTokens {
+	constructor(readonly data: Uint32Array, readonly resultId?: string) {}
+}
+export class SemanticTokensEdit {
+	constructor(readonly start: number, readonly deleteCount: number, readonly data?: Uint32Array) {}
+}
+export class SemanticTokensEdits {
+	constructor(readonly edits: SemanticTokensEdit[], readonly resultId?: string) {}
+}
+/** `SemanticTokensBuilder`: the relative-encoding builder VS Code ships (tokens pushed in
+ *  document order become the delta-encoded `Uint32Array`). */
+export class SemanticTokensBuilder {
+	private readonly data: number[] = [];
+	private previousLine = 0;
+	private previousCharacter = 0;
+	constructor(private readonly legend?: SemanticTokensLegend) {}
+	push(lineOrRange: number | Range, characterOrType: number | string, lengthOrModifiers?: number | string[], tokenType?: number, tokenModifiers = 0): void {
+		let line: number;
+		let character: number;
+		let length: number;
+		let type: number;
+		let modifiers: number;
+		if (typeof lineOrRange === 'number') {
+			line = lineOrRange;
+			character = characterOrType as number;
+			length = lengthOrModifiers as number;
+			type = tokenType ?? 0;
+			modifiers = tokenModifiers;
+		} else {
+			line = lineOrRange.start.line;
+			character = lineOrRange.start.character;
+			length = lineOrRange.end.character - lineOrRange.start.character;
+			type = Math.max(0, this.legend?.tokenTypes.indexOf(String(characterOrType)) ?? 0);
+			modifiers = 0;
+			for (const modifier of (lengthOrModifiers as string[] | undefined) ?? []) {
+				const bit = this.legend?.tokenModifiers.indexOf(modifier) ?? -1;
+				if (bit >= 0) modifiers |= 1 << bit;
+			}
+		}
+		const deltaLine = line - this.previousLine;
+		const deltaCharacter = deltaLine === 0 ? character - this.previousCharacter : character;
+		this.data.push(deltaLine, deltaCharacter, length, type, modifiers);
+		this.previousLine = line;
+		this.previousCharacter = character;
+	}
+	build(resultId?: string): SemanticTokens {
+		return new SemanticTokens(new Uint32Array(this.data), resultId);
+	}
+}
+export class DocumentDropEdit {
+	constructor(public insertText: string | SnippetString) {}
+}
+export class FileDecoration {
+	constructor(public badge?: string, public tooltip?: string, public color?: ThemeColor) {}
+	propagate?: boolean;
+}
+export class TerminalLink {
+	constructor(public startIndex: number, public length: number, public tooltip?: string) {}
+}
+export class TerminalProfile {
+	constructor(public options: unknown) {}
+}
+export class DataTransferItem {
+	constructor(readonly value: unknown) {}
+	async asString(): Promise<string> {
+		return typeof this.value === 'string' ? this.value : JSON.stringify(this.value);
+	}
+	asFile(): undefined {
+		return undefined;
+	}
+}
+export class DataTransfer {
+	private readonly items = new Map<string, DataTransferItem>();
+	get(mimeType: string): DataTransferItem | undefined {
+		return this.items.get(mimeType.toLowerCase());
+	}
+	set(mimeType: string, value: DataTransferItem): void {
+		this.items.set(mimeType.toLowerCase(), value);
+	}
+	forEach(callback: (item: DataTransferItem, mimeType: string, transfer: DataTransfer) => void): void {
+		for (const [mime, item] of this.items) callback(item, mime, this);
+	}
+	*[Symbol.iterator](): IterableIterator<[string, DataTransferItem]> {
+		yield* this.items;
+	}
+}
+/** The Tabs API's input shapes (`tab.input instanceof TabInputText`). */
+export class TabInputText {
+	constructor(readonly uri: Uri) {}
+}
+export class TabInputTextDiff {
+	constructor(readonly original: Uri, readonly modified: Uri) {}
+}
+export class TabInputWebview {
+	constructor(readonly viewType: string) {}
+}
+export class TabInputCustom {
+	constructor(readonly uri: Uri, readonly viewType: string) {}
+}
+export class TabInputTerminal {}
+export class NotebookCellData {
+	outputs?: unknown[];
+	metadata?: Record<string, unknown>;
+	constructor(public kind: NotebookCellKind, public value: string, public languageId: string) {}
+}
+export class NotebookData {
+	metadata?: Record<string, unknown>;
+	constructor(public cells: NotebookCellData[]) {}
+}
+export class NotebookRange {
+	constructor(readonly start: number, readonly end: number) {}
+	get isEmpty(): boolean {
+		return this.start === this.end;
+	}
+}
+export class Breakpoint {
+	readonly id = `bp-${Math.random().toString(36).slice(2)}`;
+	constructor(readonly enabled = true, readonly condition?: string, readonly hitCondition?: string, readonly logMessage?: string) {}
+}
+export class SourceBreakpoint extends Breakpoint {
+	constructor(readonly location: Location, enabled?: boolean, condition?: string, hitCondition?: string, logMessage?: string) {
+		super(enabled, condition, hitCondition, logMessage);
+	}
+}
+export class FunctionBreakpoint extends Breakpoint {
+	constructor(readonly functionName: string, enabled?: boolean, condition?: string, hitCondition?: string, logMessage?: string) {
+		super(enabled, condition, hitCondition, logMessage);
+	}
+}
+export class DebugAdapterExecutable {
+	constructor(readonly command: string, readonly args: string[] = [], readonly options?: unknown) {}
+}
+export class DebugAdapterServer {
+	constructor(readonly port: number, readonly host?: string) {}
+}
+export class DebugAdapterNamedPipeServer {
+	constructor(readonly path: string) {}
+}
+export class DebugAdapterInlineImplementation {
+	constructor(readonly implementation: unknown) {}
+}
+export class CommentThreadState {}
+export class LanguageModelError extends Error {}
 
 /* ---------- The tasks value classes (the `tasks` namespace serves them inertly) ---------- */
 
@@ -681,29 +1316,84 @@ export function configurationChangeEvent(changed: string[]): ConfigurationChange
 	};
 }
 
+/** VS Code's `WorkspaceConfiguration`: a section's view over the defaults (the declared
+ *  `contributes.configuration` values and the workbench's core sections) and the stored
+ *  overrides. A key that names a whole sub-section (`get('format')` when `x.format.a`
+ *  and `x.format.b` are defined) answers the object assembled from its leaves, as VS Code
+ *  does; the section's own keys also read as properties (`config.enable`). */
 class WorkspaceConfiguration {
-	constructor(private readonly ctx: HostContext, private readonly bridge: HostBridge, private readonly section: string) {}
+	[key: string]: unknown;
+	constructor(private readonly ctx: HostContext, private readonly bridge: HostBridge, private readonly section: string) {
+		// VS Code's configuration object carries the section's values as properties too.
+		for (const leaf of this.leafKeys(this.section)) {
+			const rest = this.section === '' ? leaf : leaf.slice(this.section.length + 1);
+			const head = rest.split('.')[0]!;
+			if (head === '' || head in this || ['get', 'has', 'update', 'inspect'].includes(head)) continue;
+			Object.defineProperty(this, head, { enumerable: true, configurable: true, get: () => this.get(head) });
+		}
+	}
 
 	private key(setting: string): string {
-		return this.section === '' ? setting : `${this.section}.${setting}`;
+		return this.section === '' ? setting : setting === '' ? this.section : `${this.section}.${setting}`;
+	}
+
+	/** Every defined key under a prefix (defaults and overrides alike). */
+	private leafKeys(prefix: string): string[] {
+		const keys = new Set([...Object.keys(this.ctx.defaults ?? {}), ...Object.keys(this.ctx.settings)]);
+		return [...keys].filter((key) => prefix === '' || key === prefix || key.startsWith(`${prefix}.`));
+	}
+
+	private valueOf(full: string): unknown {
+		if (full in this.ctx.settings) return this.ctx.settings[full];
+		if (this.ctx.defaults && full in this.ctx.defaults) return this.ctx.defaults[full];
+		// A sub-section: assemble it from its leaves (deep copies — VS Code's are frozen).
+		const leaves = this.leafKeys(full).filter((key) => key !== full);
+		if (leaves.length === 0) return undefined;
+		const out: Record<string, unknown> = {};
+		for (const leaf of leaves) {
+			const path = leaf.slice(full.length + 1).split('.');
+			let node = out;
+			for (const part of path.slice(0, -1)) node = (node[part] = typeof node[part] === 'object' && node[part] !== null ? node[part] : {}) as Record<string, unknown>;
+			node[path[path.length - 1]!] = structuredCopy(this.valueOf(leaf));
+		}
+		return out;
 	}
 
 	get<T = unknown>(setting: string, defaultValue?: T): T {
-		const value = this.ctx.settings[this.key(setting)];
-		return (value as T | undefined) ?? (defaultValue as T);
+		const value = this.valueOf(this.key(setting));
+		return (value === undefined ? defaultValue : structuredCopy(value)) as T;
 	}
 
 	has(setting: string): boolean {
-		return this.key(setting) in this.ctx.settings;
+		return this.valueOf(this.key(setting)) !== undefined;
 	}
 
-	async update(setting: string, value: unknown, _target?: ConfigurationTarget): Promise<void> {
-		this.ctx.settings[this.key(setting)] = value;
-		await this.bridge.request('settings.update', [this.ctx.extensionId, this.key(setting), value]);
+	async update(setting: string, value: unknown, _target?: ConfigurationTarget | boolean | null, _overrideInLanguage?: boolean): Promise<void> {
+		const key = this.key(setting);
+		if (value === undefined) delete this.ctx.settings[key];
+		else this.ctx.settings[key] = value;
+		await this.bridge.request('settings.update', [this.ctx.extensionId, key, value]);
 	}
 
-	inspect(_setting: string): undefined {
-		return undefined;
+	/** Where a value comes from: its default and the (single, global-scope) override. */
+	inspect<T = unknown>(setting: string): { key: string; defaultValue?: T; globalValue?: T; workspaceValue?: T; workspaceFolderValue?: T; defaultLanguageValue?: T; globalLanguageValue?: T; workspaceLanguageValue?: T; workspaceFolderLanguageValue?: T; languageIds?: string[] } | undefined {
+		// Always an object: a package reads `inspect(key).globalValue` for keys it declared
+		// (ms-python migrates settings that way), and a key this host has no default for yet
+		// must read as "unset", not crash the activation.
+		const key = this.key(setting);
+		const defaultValue = this.ctx.defaults?.[key] as T | undefined;
+		const globalValue = this.ctx.settings[key] as T | undefined;
+		return { key, defaultValue: structuredCopy(defaultValue), globalValue: structuredCopy(globalValue), workspaceValue: undefined, workspaceFolderValue: undefined };
+	}
+}
+
+/** A deep copy of a JSON-shaped value (a configuration object an extension may mutate). */
+function structuredCopy<T>(value: T): T {
+	if (value === null || typeof value !== 'object') return value;
+	try {
+		return JSON.parse(JSON.stringify(value)) as T;
+	} catch {
+		return value;
 	}
 }
 
@@ -727,6 +1417,78 @@ class Memento {
 	keys(): string[] {
 		return Object.keys(this.ctx.state[this.scope]);
 	}
+
+	/** Settings Sync's key list (VS Code 1.52): there is no sync service, so the list is
+	 *  accepted and has no further effect. */
+	setKeysForSync(_keys: readonly string[]): void {}
+}
+
+/** `ExtensionContext.secrets`: values kept by the host per extension (the workbench's
+ *  storage — not an OS keychain; noted in the log the first time a secret is stored). */
+class SecretStorage {
+	private readonly changed = new EventEmitter<{ key: string }>();
+	readonly onDidChange = this.changed.event;
+	constructor(private readonly bridge: HostBridge) {}
+	async get(key: string): Promise<string | undefined> {
+		const value = await this.bridge.request('secrets.get', [key]);
+		return typeof value === 'string' ? value : undefined;
+	}
+	async store(key: string, value: string): Promise<void> {
+		await this.bridge.request('secrets.store', [key, String(value)]);
+		this.changed.fire({ key });
+	}
+	async delete(key: string): Promise<void> {
+		await this.bridge.request('secrets.delete', [key]);
+		this.changed.fire({ key });
+	}
+	async keys(): Promise<string[]> {
+		const keys = await this.bridge.request('secrets.keys', []);
+		return Array.isArray(keys) ? (keys as string[]) : [];
+	}
+}
+
+/** `ExtensionContext.environmentVariableCollection`: the mutations an extension wants in
+ *  the terminals it did not create. The integrated terminal has no per-extension env
+ *  layer, so the collection keeps its state (reads back what was written) and the first
+ *  mutation is logged as not applied. */
+class EnvironmentVariableCollection {
+	private readonly mutators = new Map<string, { value: string; type: EnvironmentVariableMutatorType; options: Record<string, unknown> }>();
+	persistent = true;
+	description: string | MarkdownString | undefined;
+	constructor(private readonly extensionId: string) {}
+	private note(): void {
+		shimLogOnce(`envcollection:${this.extensionId}`, 'warn', 'environmentVariableCollection mutations are kept but not applied to terminals in this host');
+	}
+	replace(variable: string, value: string, options: Record<string, unknown> = {}): void {
+		this.note();
+		this.mutators.set(variable, { value, type: EnvironmentVariableMutatorType.Replace, options });
+	}
+	append(variable: string, value: string, options: Record<string, unknown> = {}): void {
+		this.note();
+		this.mutators.set(variable, { value, type: EnvironmentVariableMutatorType.Append, options });
+	}
+	prepend(variable: string, value: string, options: Record<string, unknown> = {}): void {
+		this.note();
+		this.mutators.set(variable, { value, type: EnvironmentVariableMutatorType.Prepend, options });
+	}
+	get(variable: string): { value: string; type: EnvironmentVariableMutatorType; options: Record<string, unknown> } | undefined {
+		return this.mutators.get(variable);
+	}
+	forEach(callback: (variable: string, mutator: { value: string; type: EnvironmentVariableMutatorType; options: Record<string, unknown> }, collection: EnvironmentVariableCollection) => unknown): void {
+		for (const [variable, mutator] of this.mutators) callback(variable, mutator, this);
+	}
+	delete(variable: string): void {
+		this.mutators.delete(variable);
+	}
+	clear(): void {
+		this.mutators.clear();
+	}
+	getScoped(_scope: unknown): EnvironmentVariableCollection {
+		return this;
+	}
+	*[Symbol.iterator](): IterableIterator<[string, { value: string; type: EnvironmentVariableMutatorType; options: Record<string, unknown> }]> {
+		yield* this.mutators;
+	}
 }
 
 /** A live webview panel the extension created; the host owns the tab and the iframe, the
@@ -736,7 +1498,7 @@ class WebviewPanel {
 	private htmlValue = '';
 	private readonly disposed = new EventEmitter<void>();
 	private readonly messages = new EventEmitter<unknown>();
-	private readonly viewState = new EventEmitter<void>();
+	private readonly viewState = new EventEmitter<{ webviewPanel: unknown }>();
 	gone = false;
 	/** Built in the constructor body: it closes over the constructor's parameters, which
 	 *  field initializers cannot (parameter properties initialize after them). */
@@ -788,13 +1550,26 @@ class WebviewPanel {
 		void this.bridge.request('webview.setTitle', [this.panelId, value]);
 	}
 
+	private activeValue = true;
+
 	get visible(): boolean {
 		return !this.gone;
 	}
 
 	get active(): boolean {
-		return !this.gone;
+		return !this.gone && this.activeValue;
 	}
+
+	/** The panel's tab became (in)active — VS Code's `onDidChangeViewState`. */
+	setActive(active: boolean): void {
+		if (this.gone || this.activeValue === active) return;
+		this.activeValue = active;
+		this.viewState.fire({ webviewPanel: this });
+	}
+
+	/** The tab icon an extension assigns (accepted; tabs show the package icon). */
+	iconPath: Uri | { light: Uri; dark: Uri } | undefined;
+	viewColumn: number | undefined = ViewColumn.One;
 
 	readonly onDidDispose = this.disposed.event;
 	readonly onDidChangeViewState = this.viewState.event;
@@ -932,11 +1707,32 @@ class WebviewView {
 class StatusBarItem {
 	private textValue = '';
 	private tooltipValue: string | { value?: string } | undefined;
-	private commandValue: string | undefined;
+	private commandValue: string | { command: string; title?: string; arguments?: unknown[] } | undefined;
 	private visible = false;
 	private nameValue: string | undefined;
+	private colorValue: string | ThemeColor | undefined;
+	private backgroundValue: ThemeColor | undefined;
+	accessibilityInformation: { label: string; role?: string } | undefined;
 
-	constructor(private readonly bridge: HostBridge, readonly id: string, readonly alignment: StatusBarAlignment) {}
+	constructor(private readonly bridge: HostBridge, readonly id: string, readonly alignment: StatusBarAlignment, readonly priority?: number) {}
+
+	get color(): string | ThemeColor | undefined {
+		return this.colorValue;
+	}
+
+	set color(value: string | ThemeColor | undefined) {
+		this.colorValue = value;
+		this.push();
+	}
+
+	get backgroundColor(): ThemeColor | undefined {
+		return this.backgroundValue;
+	}
+
+	set backgroundColor(value: ThemeColor | undefined) {
+		this.backgroundValue = value;
+		this.push();
+	}
 
 	get text(): string {
 		return this.textValue;
@@ -956,11 +1752,12 @@ class StatusBarItem {
 		this.push();
 	}
 
-	get command(): string | undefined {
+	/** A command id or VS Code's `Command` object (`{ command, arguments }`). */
+	get command(): string | { command: string; title?: string; arguments?: unknown[] } | undefined {
 		return this.commandValue;
 	}
 
-	set command(value: string | undefined) {
+	set command(value: string | { command: string; title?: string; arguments?: unknown[] } | undefined) {
 		this.commandValue = value;
 		this.push();
 	}
@@ -990,7 +1787,10 @@ class StatusBarItem {
 
 	private push(): void {
 		const tooltip = typeof this.tooltipValue === 'string' ? this.tooltipValue : this.tooltipValue?.value ?? '';
-		void this.bridge.request('statusbar.set', [this.id, { alignment: this.alignment, text: this.textValue, tooltip, command: this.commandValue, visible: this.visible }]);
+		const command = typeof this.commandValue === 'string' ? this.commandValue : this.commandValue?.command;
+		const commandArgs = typeof this.commandValue === 'object' ? (this.commandValue.arguments ?? []) : undefined;
+		const color = typeof this.colorValue === 'string' ? this.colorValue : this.colorValue?.id;
+		void this.bridge.request('statusbar.set', [this.id, { alignment: this.alignment, priority: this.priority, text: this.textValue, tooltip, command, commandArgs, color, backgroundColor: this.backgroundValue?.id, visible: this.visible }]);
 	}
 }
 
@@ -1003,18 +1803,69 @@ export interface TreeDataProvider<T> {
 	getParent?(element: T): T | undefined;
 }
 
+/** An icon path (string, Uri, light/dark pair) as the path the host resolves: an
+ *  extension-relative or absolute file path. */
+function iconPathText(value: unknown): string | undefined {
+	if (typeof value === 'string') return value;
+	if (value instanceof Uri) return value.fsPath;
+	if (value !== null && typeof value === 'object') {
+		const pair = value as { light?: unknown; dark?: unknown; fsPath?: unknown };
+		if (typeof pair.fsPath === 'string') return pair.fsPath;
+		return iconPathText(pair.dark) ?? iconPathText(pair.light);
+	}
+	return undefined;
+}
+
+/** One `TreeItem` as plain data for the sidebar: the label (or the resource's file name),
+ *  a codicon for a ThemeIcon or a file path for an image, the contextValue the
+ *  `view/item/context` menus match on, the checkbox and the command with its arguments. */
+function serializeTreeItem(handle: string, raw: Record<string, unknown>): Record<string, unknown> {
+	const resourceUri = raw.resourceUri as Uri | undefined;
+	const rawLabel = raw.label as string | { label?: string } | undefined;
+	const label = typeof rawLabel === 'string' ? rawLabel : rawLabel?.label ?? (resourceUri ? resourceUri.path.split('/').pop() ?? '' : '');
+	const icon = raw.iconPath;
+	const themeIcon = icon instanceof ThemeIcon || (icon !== null && typeof icon === 'object' && typeof (icon as { id?: unknown }).id === 'string' && !('light' in (icon as object))) ? (icon as ThemeIcon).id : undefined;
+	const tooltip = raw.tooltip as string | { value?: string } | undefined;
+	const checkbox = raw.checkboxState as number | { state?: number } | undefined;
+	const description = raw.description === true && resourceUri ? resourceUri.fsPath : typeof raw.description === 'string' ? raw.description : undefined;
+	return {
+		handle,
+		id: typeof raw.id === 'string' ? raw.id : undefined,
+		label,
+		description,
+		tooltip: typeof tooltip === 'string' ? tooltip : tooltip?.value,
+		// The extension-relative path crosses the wire; the host resolves it into a data
+		// URL before the sidebar renders (the field stays `iconUrl` end to end).
+		iconUrl: themeIcon === undefined ? iconPathText(icon) : undefined,
+		codicon: themeIcon,
+		contextValue: typeof raw.contextValue === 'string' ? raw.contextValue : undefined,
+		resourcePath: resourceUri?.fsPath,
+		checkbox: checkbox === undefined ? undefined : typeof checkbox === 'number' ? checkbox : checkbox.state,
+		collapsibleState: typeof raw.collapsibleState === 'number' ? raw.collapsibleState : 0,
+		command: raw.command as { command: string; title?: string; arguments?: unknown[] } | undefined
+	};
+}
+
 /** One registered tree view: the provider, its element handles (host calls walk by handle),
  *  and the visibility events the host pushes. */
 class TreeViewRegistration {
 	visible = false;
+	/** Handle -> element, and back: an element keeps its handle across refreshes (keyed by
+	 *  its TreeItem id when it has one), so the host's expansion state survives a refresh
+	 *  and the maps do not grow with every re-fetch. */
 	readonly handles = new Map<string, unknown>();
+	private readonly handleOf = new Map<unknown, string>();
 	private nextHandle = 1;
+	selection: unknown[] = [];
 	readonly visibilityChanged = new EventEmitter<{ visible: boolean }>();
-	readonly selectionChanged = new EventEmitter<unknown[]>();
+	readonly selectionChanged = new EventEmitter<{ selection: unknown[] }>();
+	readonly expanded = new EventEmitter<{ element: unknown }>();
+	readonly collapsed = new EventEmitter<{ element: unknown }>();
+	readonly checkboxChanged = new EventEmitter<{ items: [unknown, number][] }>();
 
 	constructor(readonly viewId: string, private readonly provider: TreeDataProvider<unknown>, private readonly bridge: HostBridge) {
-		void bridge.request('treeView.register', [viewId]);
-		provider.onDidChangeTreeData?.(() => void bridge.request('treeView.changed', [viewId]));
+		void Promise.resolve(bridge.request('treeView.register', [viewId])).catch((error) => shimLog('warn', `tree view ${viewId}: register failed: ${String(error)}`));
+		provider.onDidChangeTreeData?.(() => void Promise.resolve(bridge.request('treeView.changed', [viewId])).catch(() => undefined));
 	}
 
 	/** The host asks for one level's children: elements become handles, `getTreeItem`
@@ -1025,21 +1876,14 @@ class TreeViewRegistration {
 		const items: unknown[] = [];
 		for (const child of children ?? []) {
 			const raw = await Promise.resolve(this.provider.getTreeItem(child) as Promise<Record<string, unknown>>);
-			const handle = String(this.nextHandle++);
+			const key = typeof raw?.id === 'string' ? `id:${raw.id}` : child;
+			let handle = this.handleOf.get(key);
+			if (handle === undefined) {
+				handle = String(this.nextHandle++);
+				this.handleOf.set(key, handle);
+			}
 			this.handles.set(handle, child);
-			const label = typeof raw.label === 'string' ? raw.label : (raw.label as { label?: string } | undefined)?.label ?? '';
-			const iconPath = raw.iconPath as string | { light?: string; dark?: string } | undefined;
-			items.push({
-				handle,
-				label,
-				description: typeof raw.description === 'string' ? raw.description : undefined,
-				tooltip: typeof raw.tooltip === 'string' ? raw.tooltip : undefined,
-				// The extension-relative path crosses the wire; the host resolves it into a
-				// data URL before the sidebar renders (the field stays `iconUrl` end to end).
-				iconUrl: typeof iconPath === 'string' ? iconPath : iconPath?.light ?? iconPath?.dark,
-				collapsibleState: typeof raw.collapsibleState === 'number' ? raw.collapsibleState : 0,
-				command: raw.command as { command: string; title?: string; arguments?: unknown[] } | undefined
-			});
+			items.push(serializeTreeItem(handle, raw ?? {}));
 		}
 		return items;
 	}
@@ -1049,6 +1893,25 @@ class TreeViewRegistration {
 		this.visible = visible;
 		this.visibilityChanged.fire({ visible });
 	}
+
+	/** The user selected rows (the host pushes their handles). */
+	select(handles: string[]): void {
+		this.selection = handles.map((handle) => this.handles.get(handle)).filter((element) => element !== undefined);
+		this.selectionChanged.fire({ selection: this.selection });
+	}
+
+	/** A row was expanded or collapsed in the sidebar. */
+	expand(handle: string, expanded: boolean): void {
+		const element = this.handles.get(handle);
+		if (element === undefined) return;
+		(expanded ? this.expanded : this.collapsed).fire({ element });
+	}
+
+	/** A row's checkbox was toggled. */
+	check(handle: string, state: number): void {
+		const element = this.handles.get(handle);
+		if (element !== undefined) this.checkboxChanged.fire({ items: [[element, state]] });
+	}
 }
 
 /* ---------- The API ---------- */
@@ -1057,7 +1920,7 @@ class TreeViewRegistration {
  *  there — VS Code ignores what it does not know, and an activation that reaches for a
  *  surface this host lacks must survive to run everything else it registered. */
 function inert(name: string): Disposable {
-	console.info(`[ggs] '${name}' is registered but inert in the Git Graph Studio extension host`);
+	shimLogOnce(`inert:${name}`, 'warn', `unsupported API ${name}: the registration is accepted but this host does not serve it`);
 	return new Disposable(() => undefined);
 }
 
@@ -1132,7 +1995,133 @@ function makeTestItemCollection(items: Map<string, unknown>): Record<string, unk
 	return collection;
 }
 
+/** A document the shim knows the text of: the active editor's (pushed by the host),
+ *  one `openTextDocument` read, or an in-memory `{ content }` document. */
+interface DocumentState {
+	path: string;
+	uri: Uri;
+	text: string;
+	languageId: string;
+	version: number;
+}
+
+/** The key the shim's document table uses: slashes unified, the drive letter lowercased
+ *  (Windows paths are case-insensitive there, and the host's and the extension's
+ *  spellings of one file must meet). */
+function documentKey(path: string): string {
+	return path.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_all, drive: string) => `${drive.toLowerCase()}:`);
+}
+
+/** Is `path` the folder itself or inside it (a separator boundary, not a name prefix)? */
+function isInsideFolder(path: string, folder: string): boolean {
+	const child = documentKey(path).toLowerCase().replace(/\/+$/, '');
+	const parent = documentKey(folder).toLowerCase().replace(/\/+$/, '');
+	return child === parent || child.startsWith(`${parent}/`);
+}
+
+/** A `vscode.TextDocument` over a text snapshot — line / offset / word arithmetic on the
+ *  held text, VS Code's zero-based lines and characters, `\r\n` counted as one break. */
+function documentView(state: DocumentState, save: () => Promise<boolean>): Record<string, unknown> {
+	const text = state.text;
+	const lines = text.split('\n');
+	const lineText = (index: number) => lines[index]!.replace(/\r$/, '');
+	const clampPosition = (position?: { line: number; character: number }): Position => {
+		const line = Math.max(0, Math.min(Number(position?.line) || 0, lines.length - 1));
+		const character = Math.max(0, Math.min(Number(position?.character) || 0, lineText(line).length));
+		return new Position(line, character);
+	};
+	const offsetAt = (position: { line: number; character: number }): number => {
+		const clamped = clampPosition(position);
+		let offset = 0;
+		for (let index = 0; index < clamped.line; index += 1) offset += lines[index]!.length + 1;
+		return offset + clamped.character;
+	};
+	const positionAt = (offset: number): Position => {
+		let remaining = Math.max(0, Math.min(Number(offset) || 0, text.length));
+		for (let index = 0; index < lines.length; index += 1) {
+			const length = lines[index]!.length;
+			if (remaining <= length) return new Position(index, Math.min(remaining, lineText(index).length));
+			remaining -= length + 1;
+		}
+		return new Position(lines.length - 1, lineText(lines.length - 1).length);
+	};
+	const lineAt = (lineOrPosition: number | { line: number }) => {
+		const requested = typeof lineOrPosition === 'number' ? lineOrPosition : lineOrPosition.line;
+		const index = Math.max(0, Math.min(Number(requested) || 0, lines.length - 1));
+		const content = lineText(index);
+		return {
+			lineNumber: index,
+			text: content,
+			range: new Range(index, 0, index, content.length),
+			rangeIncludingLineBreak: index < lines.length - 1 ? new Range(index, 0, index + 1, 0) : new Range(index, 0, index, content.length),
+			firstNonWhitespaceCharacterIndex: content.search(/\S|$/),
+			isEmptyOrWhitespace: content.trim().length === 0
+		};
+	};
+	return {
+		uri: state.uri,
+		fileName: state.uri.scheme === 'file' ? state.uri.fsPath : state.path,
+		languageId: state.languageId,
+		version: state.version,
+		isDirty: false,
+		isUntitled: state.uri.scheme === 'untitled',
+		isClosed: false,
+		eol: text.includes('\r\n') ? EndOfLine.CRLF : EndOfLine.LF,
+		encoding: 'utf8',
+		lineCount: lines.length,
+		getText: (range?: { start: { line: number; character: number }; end: { line: number; character: number } }) =>
+			range ? text.slice(offsetAt(range.start), offsetAt(range.end)) : text,
+		positionAt,
+		offsetAt,
+		lineAt,
+		validatePosition: clampPosition,
+		validateRange: (range?: { start?: { line: number; character: number }; end?: { line: number; character: number } }) =>
+			new Range(clampPosition(range?.start), clampPosition(range?.end)),
+		getWordRangeAtPosition: (position: { line: number; character: number }, regex?: RegExp) => {
+			const at = clampPosition(position);
+			const content = lineText(at.line);
+			const pattern = new RegExp((regex ?? /(-?\d*\.\d\w*)|([^`~!@#$%^&*()\-=+[{\]}\\|;:'",.<>/?\s]+)/g).source, 'g');
+			for (let match = pattern.exec(content); match !== null; match = pattern.exec(content)) {
+				if (match[0].length === 0) {
+					pattern.lastIndex += 1;
+					continue;
+				}
+				if (match.index <= at.character && match.index + match[0].length >= at.character) return new Range(at.line, match.index, at.line, match.index + match[0].length);
+			}
+			return undefined;
+		},
+		save
+	};
+}
+
 export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
+	// The host's platform spells `Uri.fsPath`; the log threshold filters here, before a
+	// line costs a bridge crossing; anomalies go to the host's extension-host log.
+	setUriPlatform(ctx.platform);
+	if (ctx.logLevel !== undefined && ctx.logLevel in LOG_RANK) shimLogThreshold = ctx.logLevel;
+	// One API per extension context: its "logged once" notices start fresh.
+	shimLoggedOnce.clear();
+	shimLogSink = (level, message, detail) => {
+		try {
+			void Promise.resolve(bridge.request('log', [level, message, detail ?? null])).catch(() => console.warn(`[ggs-ext] ${message}`));
+		} catch {
+			console.warn(`[ggs-ext] ${message}`);
+		}
+	};
+	/** A fire-and-forget host request whose failure is logged, never an unhandled rejection. */
+	const send = (method: string, args: unknown[]): void => {
+		try {
+			void Promise.resolve(bridge.request(method, args)).catch((error) => shimLog('warn', `host request ${method} failed: ${String(error)}`, error));
+		} catch (error) {
+			shimLog('warn', `host request ${method} failed: ${String(error)}`, error);
+		}
+	};
+	/** An unsupported surface was used (not just registered): one warning per name. */
+	const unsupported = (name: string, what = 'is not supported by this host'): void => {
+		shimLogOnce(`unsupported:${name}`, 'warn', `unsupported API ${name}: ${what}`);
+	};
+	const isZh = /^zh/i.test(ctx.language);
+
 	/** The webview panels this frame created, by panel id (host events route through them). */
 	const webviewPanels = new Map<number, WebviewPanel>();
 	/** The webview views this frame registered, by view id (`registerWebviewViewProvider`). */
@@ -1143,39 +2132,35 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 	const workspaceState = new Memento(ctx, bridge, 'workspace');
 	let webviewSeq = 0;
 	let statusSeq = 0;
+	let untitledSeq = 0;
 	/** Set below the literal — the literal's `handleHostEvent` forwards into it. */
 	let dispatchHostEvent: (event: HostEvent) => void = () => undefined;
-	const workspaceFoldersChanged = new EventEmitter<void>();
+	const workspaceFoldersChanged = new EventEmitter<{ added: unknown[]; removed: unknown[] }>();
 	const configurationChanged = new EventEmitter<ConfigurationChangeEvent>();
-	const documentSaved = new EventEmitter<{ fileName: string } & Record<string, unknown>>();
-	const documentChanged = new EventEmitter<{ fileName: string; languageId: string } & Record<string, unknown>>();
-	const documentOpened = new EventEmitter<{ fileName: string } & Record<string, unknown>>();
-	const documentClosed = new EventEmitter<{ fileName: string } & Record<string, unknown>>();
+	const documentSaved = new EventEmitter<Record<string, unknown>>();
+	const documentChanged = new EventEmitter<{ document: Record<string, unknown>; contentChanges: unknown[]; reason: undefined }>();
+	const documentOpened = new EventEmitter<Record<string, unknown>>();
+	const documentClosed = new EventEmitter<Record<string, unknown>>();
 	/** The host's watcher batches — what `createFileSystemWatcher` serves its events from. */
 	const fsChanged = new EventEmitter<{ root: string; paths: string[]; gitChanged: boolean; truncated: boolean }>();
-	const activeEditorChangedEmitter = new EventEmitter<void>();
+	const activeEditorChangedEmitter = new EventEmitter<unknown>();
 	const visibleEditorsChanged = new EventEmitter<unknown[]>();
 	const selectionChanged = new EventEmitter<{ textEditor: unknown; selections: unknown[]; kind?: number }>();
-	const editorVisibleRangesChanged = new EventEmitter<void>();
-	const editorOptionsChanged = new EventEmitter<void>();
 	const themeChangedEmitter = new EventEmitter<unknown>();
-	const extensionsChanged = new EventEmitter<void>();
-	/** The Tabs API's change event (VS Code 1.68): the frame hears no host tab pushes yet,
-	 *  so the event registers and simply never fires — an issue viewer's listener attaches
-	 *  (cspell's does) and its UI updates on its own timers instead. */
-	const tabsChanged = new EventEmitter<unknown>();
 	/** The diagnostics registry: every `createDiagnosticCollection` stores here, so
 	 *  `languages.getDiagnostics` aggregates and `onDidChangeDiagnostics` fires for real. */
-	const diagnosticEntries = new Map<string, Map<string, unknown[]>>();
-	const diagnosticsChanged = new EventEmitter<unknown>();
+	const diagnosticCollections = new Set<Map<string, { uri: Uri; diagnostics: unknown[] }>>();
+	const diagnosticsChanged = new EventEmitter<{ uris: Uri[] }>();
 	/** The host's view of the active text editor, as the last `activeEditorChanged` push left
 	 *  it (text rides along whenever the document itself changed). */
 	let activeEditor: HostEvent['editor'] = null;
-	/** The paths `onDidOpenTextDocument` already fired for. A document "opens" once per
-	 *  session — and only when its text is in hand: the first active-editor push for a
-	 *  file can race the text load, and a didOpen with an empty body makes a language
-	 *  server analyse nothing (cspell's squiggles never arrived that way). */
-	const openedDocuments = new Set<string>();
+	/** The documents whose text the shim holds, by `documentKey`. A document "opens" once
+	 *  per session — and only with its text in hand: the first active-editor push for a file
+	 *  can race the text load, and a didOpen with an empty body makes a language server
+	 *  analyse nothing (cspell's squiggles never arrived that way). */
+	const documents = new Map<string, DocumentState>();
+	/** The live workspace folders (the host pushes changes). */
+	let workspaceFolders = ctx.workspaceFolders.map((folder) => ({ ...folder, uri: folder.uri instanceof Uri ? folder.uri : Uri.file(pathOf(folder.uri)) }));
 	/** The theme kind as the context carried it in / the last themeChanged push left it. */
 	let themeKind = ctx.themeKind ?? 2;
 	/** The tree views this frame registered, by view id (host calls and events route through). */
@@ -1184,42 +2169,56 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 	 *  `editor.formatDocument` to whichever one matches the document's language. */
 	const formattingProviders = new Map<string, {
 		selectors: unknown[];
-		provider: { provideDocumentFormattingEdits: (document: unknown, options: unknown, token: unknown) => unknown };
+		run: (document: Record<string, unknown>, options: unknown, token: CancellationToken) => unknown;
 	}>();
 	let formatterSeq = 0;
 
-	/** A TextDocument view over text the host supplies for one formatting request. */
-	function formatterDocument(path: string, languageId: string, text: string): Record<string, unknown> {
-		const lines = text.split('\n');
-		return {
+	/** The document table entry for a path (created on first sight when `text` is given). */
+	function rememberDocument(path: string, text: string, languageId: string, uri?: Uri): { state: DocumentState; opened: boolean; changed: boolean; previous: string } {
+		const key = documentKey(path);
+		const existing = documents.get(key);
+		if (existing) {
+			const previous = existing.text;
+			const changed = previous !== text;
+			if (changed) {
+				existing.text = text;
+				existing.version += 1;
+			}
+			if (languageId) existing.languageId = languageId;
+			return { state: existing, opened: false, changed, previous };
+		}
+		const state: DocumentState = { path, uri: uri ?? Uri.file(path), text, languageId: languageId || 'plaintext', version: 1 };
+		documents.set(key, state);
+		return { state, opened: true, changed: false, previous: text };
+	}
+
+	function saveDocument(path: string): Promise<boolean> {
+		return Promise.resolve(bridge.request('editor.save', [path])).then((saved) => saved === true, (error) => {
+			shimLog('warn', `TextDocument.save(${path}) failed: ${String(error)}`, error);
+			return false;
+		});
+	}
+
+	/** A TextDocument for a path, from the shim's last knowledge of its text. */
+	function makeTextDocument(path: string): Record<string, unknown> {
+		const state = documents.get(documentKey(path)) ?? {
+			path,
 			uri: Uri.file(path),
-			fileName: path,
-			languageId,
-			version: 1,
-			isDirty: false,
-			isUntitled: false,
-			isClosed: false,
-			lineCount: lines.length,
-			getText: () => text,
-			offsetAt: (position: { line: number; character: number }): number => {
-				const lineNumber = Math.max(1, Math.min(position.line + 1, lines.length));
-				let offset = 0;
-				for (let index = 0; index < lineNumber - 1; index += 1) offset += lines[index]!.length + 1;
-				return Math.min(offset + Math.max(0, position.character), text.length);
-			},
-			positionAt: (offset: number): { line: number; character: number } => {
-				let remaining = Math.max(0, offset);
-				for (let index = 0; index < lines.length; index += 1) {
-					const lineLength = lines[index]!.length;
-					if (remaining <= lineLength) return { line: index, character: remaining };
-					remaining -= lineLength + 1;
-				}
-				return { line: lines.length - 1, character: lines[lines.length - 1]!.length };
-			},
-			save: async () => true,
-			validateRange: (range: unknown) => range,
-			validatePosition: (position: unknown) => position
+			text: activeEditor?.path === path ? activeEditor.text ?? '' : '',
+			languageId: activeEditor?.path === path ? activeEditor.languageId : '',
+			version: 1
 		};
+		return documentView(state, () => saveDocument(state.path));
+	}
+
+	/** Translate a tree-item marker (a `view/item/context` menu's argument) back into the
+	 *  element the provider returned — the element never crosses the frame boundary. */
+	function resolveTreeArgs(args: unknown[]): unknown[] {
+		return args.map((arg) => {
+			const marker = arg as { $treeViewId?: unknown; $treeItemHandle?: unknown } | null;
+			if (marker === null || typeof marker !== 'object' || typeof marker.$treeViewId !== 'string' || typeof marker.$treeItemHandle !== 'string') return arg;
+			return treeRegistrations.get(marker.$treeViewId)?.handles.get(marker.$treeItemHandle) ?? arg;
+		});
 	}
 
 	function registerTree(viewId: string, provider: TreeDataProvider<unknown>): TreeViewRegistration {
@@ -1234,150 +2233,444 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 	 *  leading MessageOptions object; the picked entry comes back in the shape it was given. */
 	function showMessage(kind: 'info' | 'warning' | 'error', message: string, ...rest: unknown[]): Promise<string | MessageItem | undefined> {
 		const items = rest.filter((item): item is string | MessageItem => item !== undefined && item !== null && (typeof item === 'string' || typeof (item as MessageItem).title === 'string'));
-		return bridge.request('notify', [kind, message, items.map((item) => (typeof item === 'string' ? item : item.title))]).then((picked) => {
+		const options = rest[0] !== null && typeof rest[0] === 'object' && typeof (rest[0] as MessageItem).title !== 'string' ? rest[0] as { modal?: boolean; detail?: string } : undefined;
+		const text = options?.detail ? `${message} — ${options.detail}` : message;
+		return Promise.resolve(bridge.request('notify', [kind, text, items.map((item) => (typeof item === 'string' ? item : item.title))])).then((picked) => {
 			const title = picked as string | undefined;
-			if (title === undefined) return undefined;
-			const item = items.find((candidate) => (typeof candidate === 'string' ? candidate === title : candidate.title === title));
-			return item ?? undefined;
+			if (title === undefined || title === null) return undefined;
+			return items.find((candidate) => (typeof candidate === 'string' ? candidate === title : candidate.title === title)) ?? undefined;
 		}) as Promise<string | MessageItem | undefined>;
 	}
 
-	/** Quick picks accept string or object items; the host answers with the picked label and
-	 *  the original item comes back. Multi-select degrades to a cancel (the quick input UI
-	 *  has no checkboxes) rather than throwing — a picker the host cannot serve reads as
-	 *  "the user closed it", the safest lie for compatibility. */
-	async function showQuickPick(items: unknown, options?: { placeHolder?: string; canPickMany?: boolean; [key: string]: unknown }): Promise<unknown> {
-		const list = await Promise.resolve(items as unknown[]);
-		if (options?.canPickMany) {
-			console.info('[ggs] showQuickPick with canPickMany is not served by this host; resolving undefined');
-			return undefined;
+	type PickEntry = { id: string; label: string; description?: string; detail?: string; picked?: boolean; item: unknown };
+
+	/** The picker entries for a quick pick's items (separators dropped: the host list has
+	 *  no separator rows), each with a stable id so duplicate labels stay distinct. */
+	function pickEntries(items: unknown[]): PickEntry[] {
+		return items
+			.filter((item) => typeof item === 'string' || (item !== null && typeof item === 'object' && (item as { kind?: number }).kind !== QuickPickItemKind.Separator))
+			.map((item, index) => typeof item === 'string'
+				? { id: String(index), label: item, item }
+				: { id: String(index), label: String((item as QuickPickItem).label ?? ''), description: (item as QuickPickItem).description, detail: (item as QuickPickItem).detail, picked: (item as QuickPickItem).picked, item });
+	}
+
+	/** The picked entry of one host pick (by id; an older host answers the label). */
+	function entryFor(entries: PickEntry[], answer: unknown): PickEntry | undefined {
+		if (answer === undefined || answer === null) return undefined;
+		return entries.find((entry) => entry.id === answer) ?? entries.find((entry) => entry.label === answer);
+	}
+
+	/** One single-choice pick through the host's quick input. */
+	async function pickOne(entries: PickEntry[], placeholder: string): Promise<PickEntry | undefined> {
+		const answer = await bridge.request('showQuickPick', [entries.map(({ id, label, description, detail }) => ({ id, label, description, detail })), placeholder]);
+		return entryFor(entries, answer);
+	}
+
+	/** A multi-select pick: the host's quick input has no checkboxes, so each round toggles
+	 *  one item (the list shows ☑/☐) until the user takes the OK row or dismisses. */
+	async function pickMany(entries: PickEntry[], placeholder: string): Promise<PickEntry[] | undefined> {
+		const chosen = new Set(entries.filter((entry) => entry.picked).map((entry) => entry.id));
+		const done = { id: '__ggs_done', label: isZh ? '✔ 确定' : '✔ OK' };
+		for (;;) {
+			const rows = [done, ...entries.map((entry) => ({ id: entry.id, label: `${chosen.has(entry.id) ? '☑' : '☐'} ${entry.label}`, description: entry.description, detail: entry.detail }))];
+			const answer = await bridge.request('showQuickPick', [rows, placeholder]);
+			if (answer === undefined || answer === null) return undefined;
+			if (answer === done.id || answer === done.label) return entries.filter((entry) => chosen.has(entry.id));
+			const row = rows.find((candidate) => candidate.id === answer || candidate.label === answer);
+			if (!row) return undefined;
+			if (chosen.has(row.id)) chosen.delete(row.id);
+			else chosen.add(row.id);
 		}
-		const entries = (Array.isArray(list) ? list : [list]).map((item) =>
-			typeof item === 'string' ? { label: item, item } : { label: String((item as QuickPickItem)?.label ?? item), description: (item as QuickPickItem)?.description, detail: (item as QuickPickItem)?.detail, item }
-		);
-		return await bridge.request('showQuickPick', [entries.map(({ label, description, detail }) => ({ label, description, detail })), options?.placeHolder ?? '']).then((picked) => {
-			const label = picked as string | null | undefined;
-			if (label === undefined || label === null) return undefined;
-			return entries.find((entry) => entry.label === label)?.item;
-		});
 	}
 
-	/** A TextDocument for a path, from the host's last knowledge of it (the text is the
-	 *  active-editor push's copy when this is the active document, else empty). */
-	function makeTextDocument(path: string): Record<string, unknown> {
-		const active = activeEditor?.path === path ? activeEditor : null;
-		const text = active?.text ?? '';
-		const lines = text.split('\n');
-		const clampPosition = (position?: { line: number; character: number }): Position => {
-			const line = Math.max(0, Math.min(Number(position?.line) || 0, lines.length - 1));
-			const character = Math.max(0, Math.min(Number(position?.character) || 0, lines[line]!.length));
-			return new Position(line, character);
-		};
-		return {
-			uri: Uri.file(path),
-			fileName: path,
-			languageId: active?.languageId ?? '',
-			version: 1,
-			isDirty: false,
-			isUntitled: false,
-			isClosed: false,
-			getText: () => text,
-			lineCount: lines.length,
-			// `positionAt`/`offsetAt`/`validate*`: the offset↔position pair and the clamps
-			// every diagnostics refresh walks its findings through (cspell's re-check loop
-			// calls positionAt + validateRange per finding) — computed against the held
-			// text, \n line splitting, VS Code's zero-based line/character.
-			positionAt: (offset: number) => {
-				const at = Math.max(0, Math.min(Number(offset) || 0, text.length));
-				let line = 0;
-				let lineStart = 0;
-				for (let index = 0; index < at; index += 1) {
-					if (text.charCodeAt(index) === 10) {
-						line += 1;
-						lineStart = index + 1;
+	/** `window.showQuickPick`: string or object items (or a promise of them); single or
+	 *  multi-select; `onDidSelectItem` fires for the pick. */
+	async function showQuickPick(items: unknown, options?: { placeHolder?: string; title?: string; canPickMany?: boolean; onDidSelectItem?: (item: unknown) => unknown }, _token?: CancellationToken): Promise<unknown> {
+		const list = await Promise.resolve(items as unknown[] | PromiseLike<unknown[]>);
+		const entries = pickEntries(Array.isArray(list) ? list : [list]);
+		const placeholder = options?.placeHolder ?? options?.title ?? '';
+		if (options?.canPickMany) {
+			const picked = await pickMany(entries, placeholder);
+			return picked?.map((entry) => entry.item);
+		}
+		const picked = await pickOne(entries, placeholder);
+		if (picked && options?.onDidSelectItem) guarded('showQuickPick onDidSelectItem', () => options.onDidSelectItem!(picked.item));
+		return picked?.item;
+	}
+
+	/** `window.showInputBox`: the host prompt, re-asked with the message while
+	 *  `validateInput` (sync or async) rejects the value. */
+	async function showInputBox(options: { prompt?: string; value?: string; placeHolder?: string; password?: boolean; title?: string; validateInput?: (value: string) => unknown } = {}): Promise<string | undefined> {
+		let value = options.value ?? '';
+		let prompt = options.prompt ?? options.title ?? '';
+		for (;;) {
+			const answer = await bridge.request('showInputBox', [prompt, value, { placeHolder: options.placeHolder, password: options.password === true }]);
+			if (answer === undefined || answer === null) return undefined;
+			const text = String(answer);
+			if (!options.validateInput) return text;
+			const verdict = await Promise.resolve(guarded('showInputBox validateInput', () => options.validateInput!(text)));
+			const message = typeof verdict === 'string' ? verdict : (verdict as { message?: string; severity?: number } | null | undefined)?.message;
+			const severity = typeof verdict === 'object' && verdict !== null ? (verdict as { severity?: number }).severity : InputBoxValidationSeverity.Error;
+			if (!message || severity === InputBoxValidationSeverity.Info || severity === InputBoxValidationSeverity.Warning) return text;
+			value = text;
+			prompt = `${options.prompt ?? options.title ?? ''}${options.prompt || options.title ? ' — ' : ''}${message}`;
+		}
+	}
+
+	/** `window.createQuickPick()`: the object form — items (often filled after `show()`,
+	 *  with `busy` set meanwhile), selection and the accept / hide events. The host's
+	 *  quick input is modal, so `show()` opens it once the items are in hand. */
+	function createQuickPick(): Record<string, unknown> {
+		const accept = new EventEmitter<void>();
+		const hide = new EventEmitter<void>();
+		const selection = new EventEmitter<unknown[]>();
+		const active = new EventEmitter<unknown[]>();
+		const valueChanged = new EventEmitter<string>();
+		let items: unknown[] = [];
+		let itemsArrived: (() => void) | null = null;
+		let open = false;
+		const pick: Record<string, unknown> = {
+			title: undefined, step: undefined, totalSteps: undefined, enabled: true, busy: false,
+			ignoreFocusOut: false, placeholder: undefined, canSelectMany: false, matchOnDescription: false,
+			matchOnDetail: false, keepScrollPosition: false, value: '', buttons: [], selectedItems: [], activeItems: [],
+			get items() {
+				return items;
+			},
+			set items(value: unknown[]) {
+				items = value ?? [];
+				itemsArrived?.();
+				itemsArrived = null;
+			},
+			onDidAccept: accept.event,
+			onDidHide: hide.event,
+			onDidChangeSelection: selection.event,
+			onDidChangeActive: active.event,
+			onDidChangeValue: valueChanged.event,
+			onDidTriggerButton: silentEvent(),
+			onDidTriggerItemButton: silentEvent(),
+			show: () => {
+				if (open) return;
+				open = true;
+				setTimeout(async () => {
+					// Wait (bounded) for the items a busy pick is still loading.
+					if (items.length === 0) await new Promise<void>((resolve) => {
+						itemsArrived = resolve;
+						setTimeout(resolve, 15000);
+					});
+					if (!open) return;
+					const entries = pickEntries(items);
+					const placeholder = String(pick.placeholder ?? pick.title ?? '');
+					const picked = pick.canSelectMany ? await pickMany(entries, placeholder) : await pickOne(entries, placeholder).then((entry) => (entry ? [entry] : undefined));
+					if (!open) return;
+					if (picked === undefined) {
+						open = false;
+						hide.fire(undefined);
+						return;
 					}
-				}
-				return new Position(line, at - lineStart);
+					pick.selectedItems = picked.map((entry) => entry.item);
+					pick.activeItems = pick.selectedItems;
+					active.fire(pick.activeItems as unknown[]);
+					selection.fire(pick.selectedItems as unknown[]);
+					accept.fire(undefined);
+				}, 0);
 			},
-			offsetAt: (position: { line: number; character: number }) => {
-				const line = Math.max(0, Math.min(Number(position?.line) || 0, lines.length - 1));
-				let offset = 0;
-				for (let index = 0; index < line; index += 1) offset += lines[index]!.length + 1;
-				offset += Math.max(0, Math.min(Number(position?.character) || 0, lines[line]!.length));
-				return offset;
+			hide: () => {
+				if (!open) return;
+				open = false;
+				hide.fire(undefined);
 			},
-			validatePosition: clampPosition,
-			validateRange: (range?: { start?: { line: number; character: number }; end?: { line: number; character: number } }) =>
-				new Range(clampPosition(range?.start), clampPosition(range?.end)),
-			// `lineAt`: the zero-based line reader a checker's per-line walk uses.
-			lineAt: (line: number) => {
-				const index = Math.max(0, Math.min(Number(line) || 0, lines.length - 1));
-				const lineText = lines[index]!;
-				return {
-					lineNumber: index + 1,
-					text: lineText,
-					range: new Range(new Position(index, 0), new Position(index, lineText.length)),
-					rangeIncludingLineBreak: new Range(new Position(index, 0), new Position(index + 1, 0)),
-					firstNonWhitespaceCharacterIndex: lineText.search(/\S|$/),
-					isEmptyOrWhitespace: lineText.trim().length === 0
-				};
+			dispose: () => {
+				open = false;
+				accept.dispose();
+				hide.dispose();
+				selection.dispose();
+				active.dispose();
+				valueChanged.dispose();
+			}
+		};
+		return pick;
+	}
+
+	/** `window.createInputBox()`: the object form over the same host prompt. */
+	function createInputBox(): Record<string, unknown> {
+		const accept = new EventEmitter<void>();
+		const hide = new EventEmitter<void>();
+		const valueChanged = new EventEmitter<string>();
+		let open = false;
+		const box: Record<string, unknown> = {
+			title: undefined, step: undefined, totalSteps: undefined, enabled: true, busy: false, ignoreFocusOut: false,
+			value: '', valueSelection: undefined, placeholder: undefined, password: false, prompt: undefined,
+			validationMessage: undefined, buttons: [],
+			onDidAccept: accept.event,
+			onDidHide: hide.event,
+			onDidChangeValue: valueChanged.event,
+			onDidTriggerButton: silentEvent(),
+			show: () => {
+				if (open) return;
+				open = true;
+				setTimeout(async () => {
+					const answer = await bridge.request('showInputBox', [String(box.prompt ?? box.title ?? ''), String(box.value ?? ''), { placeHolder: box.placeholder, password: box.password === true }]);
+					if (!open) return;
+					if (answer === undefined || answer === null) {
+						open = false;
+						hide.fire(undefined);
+						return;
+					}
+					box.value = String(answer);
+					valueChanged.fire(box.value as string);
+					accept.fire(undefined);
+				}, 0);
 			},
-			save: async () => true
+			hide: () => {
+				if (!open) return;
+				open = false;
+				hide.fire(undefined);
+			},
+			dispose: () => {
+				open = false;
+				accept.dispose();
+				hide.dispose();
+				valueChanged.dispose();
+			}
+		};
+		return box;
+	}
+
+	/** The selection the host pushed for the active editor: an anchor/active pair on one
+	 *  line (the host reports the cursor and how many characters are selected). */
+	function hostSelection(): Selection {
+		const line = Math.max(1, activeEditor?.line ?? 1);
+		const column = Math.max(1, activeEditor?.column ?? 1);
+		return new Selection(line - 1, column - 1, line - 1, column - 1 + (activeEditor?.selected ?? 0));
+	}
+
+	/** Serialize an edit batch for the host applier (1-based lines, 0-based characters). */
+	function serializeEdits(edits: readonly unknown[]): SerializableTextEdit[] {
+		const out: SerializableTextEdit[] = [];
+		for (const raw of edits) {
+			if (raw === null || typeof raw !== 'object') continue;
+			const edit = raw as { startLine?: number; range?: { start: { line: number; character: number }; end: { line: number; character: number } }; newText?: string; snippet?: SnippetString | { value?: string } };
+			if (typeof edit.startLine === 'number') {
+				out.push(raw as SerializableTextEdit);
+				continue;
+			}
+			if (!edit.range) continue;
+			const newText = edit.snippet !== undefined ? snippetPlainText(String(edit.snippet.value ?? '')) : String(edit.newText ?? '');
+			out.push({ startLine: edit.range.start.line + 1, startCharacter: edit.range.start.character, endLine: edit.range.end.line + 1, endCharacter: edit.range.end.character, newText });
+		}
+		return out;
+	}
+
+	/** An edit builder (`TextEditor.edit` / `registerTextEditorCommand`) collecting edits. */
+	function editBuilder(edits: SerializableTextEdit[]) {
+		const push = (start: { line: number; character: number }, end: { line: number; character: number }, newText: string) => edits.push({ startLine: start.line + 1, startCharacter: start.character, endLine: end.line + 1, endCharacter: end.character, newText });
+		return {
+			replace: (location: Range | Position, newText: string) => (location instanceof Range || Range.isRange(location) ? push((location as Range).start, (location as Range).end, newText) : push(location as Position, location as Position, newText)),
+			insert: (position: Position, newText: string) => push(position, position, newText),
+			delete: (range: Range) => push(range.start, range.end, ''),
+			setEndOfLine: (_eol: EndOfLine) => unsupported('TextEditorEdit.setEndOfLine', 'the line endings are kept')
 		};
 	}
 
-	/** The active-editor proxy: `activeTextEditor` (undefined with no text editor open). Its
-	 *  selection is the host's push (a single range), its `edit` builds a TextEdit batch in
-	 *  the frame and hands it to the host's open-editor applier. */
-	function makeTextEditorProxy(): Record<string, unknown> {
-		const selectionRange = () => {
-			const line = Math.max(1, activeEditor?.line ?? 1);
-			const column = Math.max(1, activeEditor?.column ?? 1);
-			const start = new Position(line - 1, column - 1);
-			return new Range(start, new Position(start.line, start.character + (activeEditor?.selected ?? 0)));
-		};
+	/** A TextEditor for a path: its document from the shim's table, its selection from the
+	 *  host's active-editor push (when it is the active one), its edits through the host's
+	 *  open-editor applier. */
+	function makeTextEditorProxy(path = activeEditor?.path ?? ''): Record<string, unknown> {
+		const isActive = () => activeEditor?.path === path;
+		const tabSize = Number(ctx.defaults?.['editor.tabSize'] ?? 4) || 4;
+		const applyEdits = (edits: SerializableTextEdit[]) =>
+			Promise.resolve(bridge.request('editor.applyEdits', [isActive() ? null : path, edits])).then((applied) => applied === true, (error) => {
+				shimLog('warn', `TextEditor edit failed: ${String(error)}`, error);
+				return false;
+			});
 		return {
 			get document() {
-				return activeEditor ? makeTextDocument(activeEditor!.path) : makeTextDocument('');
+				return makeTextDocument(path);
 			},
 			get selection() {
-				return selectionRange();
+				return isActive() ? hostSelection() : new Selection(0, 0, 0, 0);
+			},
+			set selection(value: Selection) {
+				if (value?.active) send('workspace.openFile', [path, value.active.line + 1, value.active.character + 1]);
 			},
 			get selections() {
-				return [selectionRange()];
+				return [isActive() ? hostSelection() : new Selection(0, 0, 0, 0)];
+			},
+			set selections(value: Selection[]) {
+				const first = value?.[0];
+				if (first?.active) send('workspace.openFile', [path, first.active.line + 1, first.active.character + 1]);
 			},
 			get visibleRanges() {
-				const start = new Position(Math.max(0, (activeEditor?.line ?? 1) - 1), 0);
-				return [new Range(start, start)];
+				const line = Math.max(0, (activeEditor?.line ?? 1) - 1);
+				return [new Range(line, 0, line, 0)];
 			},
 			viewColumn: ViewColumn.One,
-			options: {},
-			setDecorations: (_decorationType: unknown, _rangesOrOptions: unknown) => undefined, // decorations are inert in this host
-			edit: (callback: (builder: { replace(range: Range, newText: string): void; insert(position: Position, newText: string): void; delete(range: Range): void }) => void) => {
+			options: { tabSize, insertSpaces: ctx.defaults?.['editor.insertSpaces'] !== false, cursorStyle: TextEditorCursorStyle.Line, lineNumbers: TextEditorLineNumbersStyle.On },
+			setDecorations: (_decorationType: unknown, _rangesOrOptions: unknown) => unsupported('TextEditor.setDecorations', 'editor decorations are not rendered'),
+			revealRange: (range: Range) => {
+				if (range?.start) send('workspace.openFile', [path, range.start.line + 1, range.start.character + 1]);
+			},
+			show: () => send('workspace.openFile', [path]),
+			hide: () => unsupported('TextEditor.hide'),
+			edit: async (callback: (builder: ReturnType<typeof editBuilder>) => void, _options?: unknown) => {
 				const edits: SerializableTextEdit[] = [];
-				const push = (start: Position, end: Position, newText: string) => edits.push({ startLine: start.line + 1, startCharacter: start.character, endLine: end.line + 1, endCharacter: end.character, newText });
-				callback({
-					replace: (range: Range, newText: string) => push(range.start, range.end, newText),
-					insert: (position: Position, newText: string) => push(position, position, newText),
-					delete: (range: Range) => push(range.start, range.end, '')
-				});
-				// A null path addresses the ACTIVE editor (the host resolves it there).
-				return bridge.request('editor.applyEdits', [null, edits]).then((applied) => applied === true) as Promise<boolean>;
+				guarded('TextEditor.edit callback', () => callback(editBuilder(edits)));
+				return applyEdits(edits);
+			},
+			/** A snippet inserts as its plain text (no snippet session with tab stops). */
+			insertSnippet: async (snippet: SnippetString | string, location?: Position | Range | readonly (Position | Range)[]) => {
+				const text = snippetPlainText(typeof snippet === 'string' ? snippet : snippet.value);
+				const targets = location === undefined ? [isActive() ? hostSelection() : new Selection(0, 0, 0, 0)] : Array.isArray(location) ? location : [location];
+				const edits: SerializableTextEdit[] = [];
+				const builder = editBuilder(edits);
+				for (const target of targets as (Position | Range)[]) builder.replace(target, text);
+				return applyEdits(edits);
 			}
 		};
 	}
 
-	/** The `edit` argument a `registerTextEditorCommand` handler receives: the same builder
-	 *  an editor's `edit` takes, applied to the active editor on return. */
-	function editorEditBuilder(): { replace(range: Range, newText: string): void; insert(position: Position, newText: string): void; delete(range: Range): void } {
-		const edits: SerializableTextEdit[] = [];
-		const push = (start: Position, end: Position, newText: string) => edits.push({ startLine: start.line + 1, startCharacter: start.character, endLine: end.line + 1, endCharacter: end.character, newText });
-		return {
-			replace: (range, newText) => push(range.start, range.end, newText),
-			insert: (position, newText) => push(position, position, newText),
-			delete: (range) => push(range.start, range.end, '')
-		};
+	/** Every document text the host path spelling for `fs.op` / `editor.*` requests. */
+	const hostPathOf = (uri: Uri | string): string => (typeof uri === 'string' ? uri : uri.scheme === 'file' ? uri.fsPath : uri.toString());
+
+	/** Map a host fs failure onto VS Code's `FileSystemError` codes (extensions test
+	 *  `error.code === 'FileNotFound'`). */
+	function fsError(error: unknown, uri: Uri | string): FileSystemError {
+		const text = String(error);
+		const target = typeof uri === 'string' ? uri : uri.toString();
+		if (/not found|cannot find|no such file|os error 2\b|os error 3\b/i.test(text)) return FileSystemError.FileNotFound(target);
+		if (/already exists|os error 80\b|os error 183\b/i.test(text)) return FileSystemError.FileExists(target);
+		if (/is a directory|os error 21\b/i.test(text)) return FileSystemError.FileIsADirectory(target);
+		if (/not a directory|os error 20\b|os error 267\b/i.test(text)) return FileSystemError.FileNotADirectory(target);
+		if (/denied|permission|outside the workspace|os error 5\b|os error 13\b/i.test(text)) return FileSystemError.NoPermissions(`${target}: ${text}`);
+		return FileSystemError.Unavailable(`${target}: ${text}`);
 	}
+
+	const fsOp = async (name: string, uri: Uri | string, to?: Uri | string, data?: string): Promise<unknown> => {
+		try {
+			return await bridge.request('fs.op', [name, hostPathOf(uri), to === undefined ? undefined : hostPathOf(to), data]);
+		} catch (error) {
+			const mapped = fsError(error, uri);
+			// A missing file is an ordinary answer (extensions probe for configs); anything
+			// else is an anomaly worth the log.
+			if (mapped.code !== 'FileNotFound') shimLog('warn', `workspace.fs.${name}(${hostPathOf(uri)}) failed: ${String(error)}`);
+			throw mapped;
+		}
+	};
+
+	const fileSystem = {
+		readFile: async (uri: Uri | string) => decodeBase64(((await fsOp('read', uri)) as { data: string }).data),
+		writeFile: async (uri: Uri | string, content: Uint8Array) => {
+			await fsOp('write', uri, undefined, encodeBase64(content instanceof Uint8Array ? content : new Uint8Array(content ?? [])));
+		},
+		// `access`: F_OK semantics — a readable stat answers, a missing path rejects.
+		access: async (uri: Uri | string) => {
+			await fsOp('stat', uri);
+			return undefined;
+		},
+		readDirectory: async (uri: Uri | string) => (((await fsOp('list', uri)) as { name: string; kind: number }[]).map((entry) => [entry.name, entry.kind])) as [string, number][],
+		createDirectory: (uri: Uri | string) => fsOp('mkdir', uri).then(() => undefined),
+		delete: (uri: Uri | string, _options?: { recursive?: boolean; useTrash?: boolean }) => fsOp('delete', uri).then(() => undefined),
+		rename: (uri: Uri | string, to: Uri | string, _options?: { overwrite?: boolean }) => fsOp('rename', uri, to).then(() => undefined),
+		copy: async (uri: Uri | string, to: Uri | string, _options?: { overwrite?: boolean }) => {
+			const data = (await fsOp('read', uri)) as { data: string };
+			await fsOp('write', to, undefined, data.data);
+		},
+		isWritableFileSystem: (scheme: string) => scheme === 'file',
+		stat: async (uri: Uri | string) => {
+			const stat = (await fsOp('stat', uri)) as { type: number; size: number; mtime: number; ctime?: number };
+			return { type: stat.type, ctime: stat.ctime ?? stat.mtime, mtime: stat.mtime, size: stat.size, permissions: undefined };
+		}
+	};
+
+	/** One WorkspaceEdit (the class, or the plain `{ changes }` / LSP `documentChanges`
+	 *  shapes a converted edit arrives in) as an ordered operation list. */
+	function workspaceEditOperations(edit: unknown): ({ kind: 'text'; path: string; edits: SerializableTextEdit[] } | { kind: 'create' | 'delete'; path: string; options?: Record<string, unknown> } | { kind: 'rename'; path: string; to: string; options?: Record<string, unknown> })[] {
+		const out: ReturnType<typeof workspaceEditOperations> = [];
+		const pushText = (path: string, edits: SerializableTextEdit[]) => {
+			const last = out[out.length - 1];
+			if (last?.kind === 'text' && last.path === path) last.edits.push(...edits);
+			else if (edits.length > 0) out.push({ kind: 'text', path, edits });
+		};
+		const uriPath = (value: unknown): string => {
+			if (typeof value === 'string') return hostPathOf(Uri.parse(value));
+			return hostPathOf(value instanceof Uri ? value : (rehydrateUris(value) as Uri));
+		};
+		if (edit instanceof WorkspaceEdit) {
+			for (const operation of edit._operations) {
+				if (operation.kind === 'text') pushText(hostPathOf(operation.uri), serializeEdits([operation.edit]));
+				else if (operation.kind === 'rename') out.push({ kind: 'rename', path: hostPathOf(operation.uri), to: hostPathOf(operation.newUri), options: operation.options });
+				else out.push({ kind: operation.kind, path: hostPathOf(operation.uri), options: operation.options as Record<string, unknown> | undefined });
+			}
+			return out;
+		}
+		const plain = (edit ?? {}) as { changes?: Record<string, unknown[]>; documentChanges?: unknown[] };
+		for (const change of plain.documentChanges ?? []) {
+			const entry = change as { textDocument?: { uri?: unknown }; edits?: unknown[]; kind?: string; uri?: unknown; oldUri?: unknown; newUri?: unknown; options?: Record<string, unknown> };
+			if (entry.textDocument) pushText(uriPath(entry.textDocument.uri), serializeEdits(entry.edits ?? []));
+			else if (entry.kind === 'rename') out.push({ kind: 'rename', path: uriPath(entry.oldUri), to: uriPath(entry.newUri), options: entry.options });
+			else if (entry.kind === 'create' || entry.kind === 'delete') out.push({ kind: entry.kind, path: uriPath(entry.uri), options: entry.options });
+		}
+		for (const [uri, edits] of Object.entries(plain.changes ?? {})) pushText(uriPath(uri), serializeEdits(edits ?? []));
+		return out;
+	}
+
+	/** `workspace.applyEdit`: every operation in order — open editors take their text edits
+	 *  through CodeMirror; closed files are read, spliced and written back through
+	 *  `workspace.fs`; file operations run through the same confined filesystem. The answer
+	 *  is whether every operation applied (a failure is logged with its cause). */
+	async function applyWorkspaceEdit(edit: unknown): Promise<boolean> {
+		try {
+			for (const operation of workspaceEditOperations(edit)) {
+				if (operation.kind === 'text') {
+					const applied = await bridge.request('editor.applyEdits', [operation.path, operation.edits]);
+					if (applied === true) continue;
+					const read = (await fsOp('read', operation.path)) as { data: string };
+					const after = applyTextEditsToText(new TextDecoder().decode(decodeBase64(read.data)), operation.edits);
+					await fsOp('write', operation.path, undefined, encodeBase64(new TextEncoder().encode(after)));
+					const known = documents.get(documentKey(operation.path));
+					if (known) rememberDocument(operation.path, after, known.languageId);
+				} else if (operation.kind === 'create') {
+					const exists = await fsOp('stat', operation.path).then(() => true, () => false);
+					if (exists && operation.options?.ignoreIfExists) continue;
+					if (exists && !operation.options?.overwrite) throw FileSystemError.FileExists(operation.path);
+					const contents = operation.options?.contents instanceof Uint8Array ? operation.options.contents : new Uint8Array();
+					await fsOp('write', operation.path, undefined, encodeBase64(contents));
+				} else if (operation.kind === 'delete') {
+					const exists = await fsOp('stat', operation.path).then(() => true, () => false);
+					if (!exists && operation.options?.ignoreIfNotExists) continue;
+					await fsOp('delete', operation.path);
+				} else if ('to' in operation) {
+					await fsOp('rename', operation.path, operation.to);
+				}
+			}
+			return true;
+		} catch (error) {
+			shimLog('error', `workspace.applyEdit failed: ${String(error)}`, error);
+			return false;
+		}
+	}
+
+	/** The folder list as a WorkspaceFolder array (VS Code answers undefined for none). */
+	const foldersOrUndefined = () => (workspaceFolders.length > 0 ? workspaceFolders : undefined);
+	const folderFor = (uriOrPath?: Uri | string) => {
+		const path = uriOrPath === undefined ? undefined : pathOf(uriOrPath as Uri | string);
+		if (path === undefined || path === '') return undefined;
+		// The deepest containing folder wins (nested folders in a multi-root workspace).
+		return [...workspaceFolders].sort((a, b) => b.uri.fsPath.length - a.uri.fsPath.length).find((folder) => isInsideFolder(path, folder.uri.fsPath));
+	};
+
+	/** A tree view's element's handle as the menu argument marker (see `resolveTreeArgs`). */
+	const wrapHandler = (name: string, handler: (...args: unknown[]) => unknown, thisArg?: unknown) => (...args: unknown[]) => {
+		try {
+			return handler.apply(thisArg, resolveTreeArgs(args));
+		} catch (error) {
+			shimLog('error', `command ${name} threw: ${String(error)}`, error);
+			throw error;
+		}
+	};
+
+	/** A language-feature provider registration this host has no consumer for. */
+	const provider = (name: string) => (..._args: unknown[]) => inert(`languages.${name}`);
 
 	const api = {
 		// The API surface this shim targets, spelled the way `vscode.version` spells it:
@@ -1386,142 +2679,199 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 		version: '1.91.0',
 
 		commands: {
-			registerCommand: (id: string, handler: (...args: unknown[]) => unknown) => {
+			registerCommand: (id: string, handler: (...args: unknown[]) => unknown, thisArg?: unknown) => {
 				const full = id.includes('.') ? id : `${ctx.extensionId}.${id}`;
-				bridge.registerCommandHandler(full, handler);
-				void bridge.request('commands.register', [full]);
-				return new Disposable(() => void bridge.request('commands.unregister', [full]));
+				bridge.registerCommandHandler(full, wrapHandler(full, handler, thisArg));
+				send('commands.register', [full]);
+				return new Disposable(() => send('commands.unregister', [full]));
 			},
-			registerTextEditorCommand: (id: string, handler: (editor: unknown, edit: unknown, ...args: unknown[]) => unknown) => {
+			registerTextEditorCommand: (id: string, handler: (editor: unknown, edit: unknown, ...args: unknown[]) => unknown, thisArg?: unknown) => {
 				const full = id.includes('.') ? id : `${ctx.extensionId}.${id}`;
-				bridge.registerCommandHandler(full, (...args: unknown[]) => {
-					const editor = activeEditor ? makeTextEditorProxy() : undefined;
-					return editor ? handler(editor, editorEditBuilder(), ...args) : undefined;
-				});
-				void bridge.request('commands.register', [full]);
-				return new Disposable(() => void bridge.request('commands.unregister', [full]));
+				bridge.registerCommandHandler(full, wrapHandler(full, async (...args: unknown[]) => {
+					if (!activeEditor) {
+						shimLog('info', `text editor command ${full} ran with no active text editor`);
+						return undefined;
+					}
+					const editor = makeTextEditorProxy();
+					const edits: SerializableTextEdit[] = [];
+					const result = await handler.call(thisArg, editor, editBuilder(edits), ...args);
+					if (edits.length > 0) await bridge.request('editor.applyEdits', [null, edits]);
+					return result;
+				}));
+				send('commands.register', [full]);
+				return new Disposable(() => send('commands.unregister', [full]));
 			},
 			executeCommand: (id: string, ...args: unknown[]) => bridge.request('commands.execute', [id, args]) as Promise<unknown>,
-			getCommands: async () => (await bridge.request('commands.list', [])) as string[]
+			getCommands: async (_filterInternal?: boolean) => (await bridge.request('commands.list', [])) as string[]
 		},
 
 		window: {
 			showInformationMessage: (message: string, ...rest: unknown[]) => showMessage('info', message, ...rest),
 			showWarningMessage: (message: string, ...rest: unknown[]) => showMessage('warning', message, ...rest),
 			showErrorMessage: (message: string, ...rest: unknown[]) => showMessage('error', message, ...rest),
-			showInputBox: (options?: { prompt?: string; value?: string; placeholder?: string; password?: boolean; ignoreFocusOut?: boolean }) =>
-				bridge.request('showInputBox', [options?.prompt ?? '', options?.value ?? '']) as Promise<string | undefined>,
+			showInputBox,
 			showQuickPick,
-			withProgress: async <T>(options: { title?: string; location?: unknown; cancellable?: boolean }, task: (progress: { report: (value: { message?: string; increment?: number }) => void }) => T | Promise<T>) => {
+			createQuickPick,
+			createInputBox,
+			showWorkspaceFolderPick: async (options?: { placeHolder?: string }) => {
+				const picked = await pickOne(pickEntries(workspaceFolders.map((folder) => ({ label: folder.name, description: folder.uri.fsPath, folder }))), options?.placeHolder ?? '');
+				return (picked?.item as { folder?: unknown } | undefined)?.folder;
+			},
+			withProgress: async <T>(options: { title?: string; location?: unknown; cancellable?: boolean }, task: (progress: { report: (value: { message?: string; increment?: number }) => void }, token: CancellationToken) => T | Promise<T>) => {
 				const id = (await bridge.request('progress.begin', [options?.title ?? ctx.extensionId])) as number;
 				let fraction = 0;
+				// The toast has no cancel button: the token exists (tasks read it) and never
+				// cancels.
+				const source = new CancellationTokenSource();
 				try {
 					return await task({
 						report: (value) => {
-							fraction = Math.min(1, fraction + (value.increment ?? 0) / 100);
-							void bridge.request('progress.report', [id, Math.round(fraction * 100), value.message ?? '']);
+							fraction = Math.min(1, fraction + (value?.increment ?? 0) / 100);
+							send('progress.report', [id, Math.round(fraction * 100), value?.message ?? '']);
 						}
-					});
+					}, source.token);
+				} catch (error) {
+					shimLog('warn', `withProgress task "${options?.title ?? ''}" failed: ${String(error)}`, error);
+					throw error;
 				} finally {
-					void bridge.request('progress.end', [id]);
+					source.dispose();
+					send('progress.end', [id]);
 				}
 			},
 			/** `window.createTerminal`: the integrated terminal serves the text — the run-in-
-			 *  terminal actions extensions open (a git command the user asked to see). The
-			 *  panel's own session policy applies (its shell, its cwd); the terminal's
-			 *  per-instance options are advisory, as VS Code's own terminal fallthrough is. */
-			createTerminal: (options?: string | { name?: string; cwd?: string | Uri; env?: Record<string, string | null> | null; shellPath?: string; shellArgs?: string[] }) => {
-				const name = typeof options === 'string' ? options : options?.name ?? '';
+			 *  terminal actions extensions open. The panel's own session policy applies (its
+			 *  shell, its cwd); a Pseudoterminal (`pty`) has no renderer here. */
+			createTerminal: (nameOrOptions?: string | { name?: string; cwd?: string | Uri; env?: Record<string, string | null> | null; shellPath?: string; shellArgs?: string[] | string; pty?: unknown }, _shellPath?: string, _shellArgs?: string[]) => {
+				const options = typeof nameOrOptions === 'object' && nameOrOptions !== null ? nameOrOptions : undefined;
+				const name = typeof nameOrOptions === 'string' ? nameOrOptions : options?.name ?? '';
+				if (options?.pty !== undefined) unsupported('window.createTerminal({ pty })', 'extension pseudoterminals have no renderer; the terminal stays empty');
+				if (options?.cwd !== undefined || options?.env || options?.shellPath) shimLogOnce(`terminal-options:${ctx.extensionId}`, 'info', 'createTerminal options (cwd/env/shellPath) are advisory: the integrated terminal uses its own session');
 				return {
 					name,
-					creationOptions: typeof options === 'object' ? options : undefined,
+					creationOptions: options ?? {},
 					processId: Promise.resolve(undefined),
 					exitStatus: undefined as { code: number } | undefined,
-					sendText: (text: string, _shouldExecute?: boolean) => bridge.request('terminal.send', [text]) as Promise<void>,
-					show: (_preserveFocus?: boolean) => bridge.request('terminal.show', []) as Promise<void>,
+					state: { isInteractedWith: false },
+					shellIntegration: undefined,
+					sendText: (text: string, addNewLine = true) => {
+						send('terminal.send', [addNewLine === false ? text : text]);
+					},
+					show: (_preserveFocus?: boolean) => send('terminal.show', []),
 					hide: () => undefined,
 					dispose: () => undefined
 				};
 			},
-			/** The Tabs API (`window.tabGroups`, VS Code 1.68): an issue viewer or a
-			 *  tab-aware feature registers `onDidChangeTabs` at activation. The frame sees
-			 *  one extension's own editors, so the group list stays empty and the event
-			 *  never fires — a registration must survive, a live feed is not promised. */
-			tabGroups: {
-				all: [] as unknown[],
-				onDidChangeTabs: tabsChanged.event as never,
-				close: async (_group: unknown, _preserveFocus?: boolean) => true
+			get terminals(): unknown[] {
+				return [];
 			},
-			createOutputChannel: (name: string, _options?: { log?: boolean }) => {
-				// The `{ log: true }` form VS Code's LogOutputChannel takes: the level-named
-				// methods a logging extension binds at activation (`channel.info.bind(channel)`
-				// and friends — cspell's logger wrapper above all). VS Code filters them by the
-				// log level; here every level lands in the channel with its prefix — the
-				// surface the extension needs is that calling them never throws.
-				const logLine = (level: string, message: string, ...args: unknown[]) =>
-					void bridge.request('output.append', [name, `[${level}] ${message}${args.length > 0 ? ' ' + args.map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg))).join(' ') : ''}\n`]);
+			activeTerminal: undefined,
+			/** The Tabs API (`window.tabGroups`, VS Code 1.68): one group whose tab list the
+			 *  frame cannot see — the shape a tab-aware feature reads is complete, and the
+			 *  events register and never fire. */
+			tabGroups: {
+				all: [{ isActive: true, viewColumn: 1, activeTab: undefined, tabs: [] as unknown[] }],
+				get activeTabGroup() {
+					return this.all[0];
+				},
+				onDidChangeTabs: silentEvent(),
+				onDidChangeTabGroups: silentEvent(),
+				close: async (_tabOrGroup: unknown, _preserveFocus?: boolean) => {
+					unsupported('window.tabGroups.close');
+					return false;
+				}
+			},
+			createOutputChannel: (name: string, options?: string | { log?: boolean }) => {
+				// The `{ log: true }` form (LogOutputChannel): the level-named methods a logging
+				// extension binds at activation (`channel.info.bind(channel)`, cspell's logger
+				// wrapper above all); every level lands in the channel with its prefix.
+				const isLog = typeof options === 'object' && options?.log === true;
+				const format = (message: unknown, args: unknown[]) => `${message instanceof Error ? (message.stack ?? message.message) : String(message)}${args.length > 0 ? ' ' + args.map((arg) => (typeof arg === 'string' ? arg : arg instanceof Error ? (arg.stack ?? arg.message) : JSON.stringify(arg))).join(' ') : ''}`;
+				const logLine = (level: string, message: unknown, ...args: unknown[]) => send('output.append', [name, `${isLog ? `${new Date().toISOString()} ` : ''}[${level}] ${format(message, args)}\n`]);
 				return {
 					name,
-					logLevel: 4 as never,
-					onDidChangeLogLevel: (() => new Disposable(() => undefined)) as never,
-					trace: (message: string, ...args: unknown[]) => logLine('trace', message, ...args),
-					debug: (message: string, ...args: unknown[]) => logLine('debug', message, ...args),
-					info: (message: string, ...args: unknown[]) => logLine('info', message, ...args),
-					warn: (message: string, ...args: unknown[]) => logLine('warn', message, ...args),
-					error: (message: string, ...args: unknown[]) => logLine('error', message, ...args),
-					append: (value: string) => void bridge.request('output.append', [name, value]),
-					appendLine: (value: string) => void bridge.request('output.append', [name, value + '\n']),
-					clear: () => void bridge.request('output.clear', [name]),
-					show: () => void bridge.request('output.show', [name]),
+					logLevel: 3 as never,
+					onDidChangeLogLevel: silentEvent() as never,
+					trace: (message: unknown, ...args: unknown[]) => logLine('trace', message, ...args),
+					debug: (message: unknown, ...args: unknown[]) => logLine('debug', message, ...args),
+					info: (message: unknown, ...args: unknown[]) => logLine('info', message, ...args),
+					warn: (message: unknown, ...args: unknown[]) => logLine('warning', message, ...args),
+					error: (message: unknown, ...args: unknown[]) => logLine('error', message, ...args),
+					append: (value: string) => send('output.append', [name, String(value)]),
+					appendLine: (value: string) => send('output.append', [name, String(value) + '\n']),
+					clear: () => send('output.clear', [name]),
+					show: (_columnOrPreserveFocus?: unknown, _preserveFocus?: boolean) => send('output.show', [name]),
 					hide: () => undefined,
-					replace: (value: string) => void bridge.request('output.append', [name, value]),
-					dispose: () => void bridge.request('output.dispose', [name])
+					replace: (value: string) => {
+						send('output.clear', [name]);
+						send('output.append', [name, String(value)]);
+					},
+					dispose: () => send('output.dispose', [name])
 				};
 			},
-			createStatusBarItem: (arg1?: number | string, arg2?: number) => {
-				const alignment = typeof arg1 === 'number' ? arg1 : arg2 ?? StatusBarAlignment.Left;
-				const item = new StatusBarItem(bridge, `${ctx.extensionId}:${++statusSeq}`, alignment);
-				void bridge.request('statusbar.create', [item.id, alignment]);
+			/** `(alignment?, priority?)` or VS Code 1.57's `(id, alignment?, priority?)`. */
+			createStatusBarItem: (arg1?: number | string, arg2?: number, arg3?: number) => {
+				const alignment = (typeof arg1 === 'number' ? arg1 : arg2) ?? StatusBarAlignment.Left;
+				const priority = typeof arg1 === 'number' ? arg2 : arg3;
+				const item = new StatusBarItem(bridge, `${ctx.extensionId}:${++statusSeq}`, alignment, priority);
+				send('statusbar.create', [item.id, alignment]);
 				return item;
 			},
-			setStatusBarMessage: (text: string, timeout?: number) => {
+			/** A transient message: until the timeout, until the thenable settles, or — with
+			 *  neither — until the returned Disposable runs (VS Code's three forms). */
+			setStatusBarMessage: (text: string, hideAfter?: number | PromiseLike<unknown>) => {
 				const item = new StatusBarItem(bridge, `${ctx.extensionId}:${++statusSeq}:msg`, StatusBarAlignment.Left);
-				void bridge.request('statusbar.create', [item.id, StatusBarAlignment.Left]);
+				send('statusbar.create', [item.id, StatusBarAlignment.Left]);
 				item.text = text;
 				item.show();
-			if (timeout === undefined) setTimeout(() => item.dispose(), 5000);
-			else if (timeout > 0) setTimeout(() => item.dispose(), timeout);
-				return new Disposable(() => item.dispose());
+				let gone = false;
+				const dispose = () => {
+					if (gone) return;
+					gone = true;
+					item.dispose();
+				};
+				if (typeof hideAfter === 'number') setTimeout(dispose, Math.max(0, hideAfter));
+				else if (hideAfter && typeof (hideAfter as PromiseLike<unknown>).then === 'function') (hideAfter as PromiseLike<unknown>).then(dispose, dispose);
+				return new Disposable(dispose);
 			},
 			createWebviewPanel: (viewType: string, title: string, _showOptions?: unknown, options?: Record<string, unknown>) => {
 				const panelId = ++webviewSeq;
 				const panel = new WebviewPanel(bridge, ctx, viewType, title, options ?? {}, panelId);
 				webviewPanels.set(panelId, panel);
-				void bridge.request('webview.create', [panelId, viewType, title]);
+				send('webview.create', [panelId, viewType, title]);
 				return panel;
 			},
 			registerWebviewViewProvider: (viewId: string, provider: { resolveWebviewView: (view: unknown, context: unknown, token: unknown) => unknown }, _options?: unknown) => {
 				webviewViewProviders.set(viewId, provider);
-				void bridge.request('webviewView.register', [viewId]);
+				send('webviewView.register', [viewId]);
 				return new Disposable(() => {
 					webviewViewProviders.delete(viewId);
-					void bridge.request('webviewView.dispose', [viewId]);
+					send('webviewView.dispose', [viewId]);
 				});
 			},
-			registerCustomEditorProvider: (_viewType: string, _provider: unknown) => inert('window.registerCustomEditorProvider'),
+			registerWebviewPanelSerializer: (viewType: string, _serializer: unknown) => inert(`window.registerWebviewPanelSerializer(${viewType})`),
+			registerCustomEditorProvider: (viewType: string, _provider: unknown) => inert(`window.registerCustomEditorProvider(${viewType})`),
+			registerUriHandler: (_handler: unknown) => inert('window.registerUriHandler'),
+			registerFileDecorationProvider: (_provider: unknown) => inert('window.registerFileDecorationProvider'),
+			registerTerminalLinkProvider: (_provider: unknown) => inert('window.registerTerminalLinkProvider'),
+			registerTerminalProfileProvider: (_id: string, _provider: unknown) => inert('window.registerTerminalProfileProvider'),
 			registerTreeDataProvider: (viewId: string, treeDataProvider: TreeDataProvider<unknown>) => {
 				registerTree(viewId, treeDataProvider);
-				return new Disposable(() => void bridge.request('treeView.dispose', [viewId]));
+				return new Disposable(() => send('treeView.dispose', [viewId]));
 			},
 			createTextEditorDecorationType: (_options?: unknown) => {
+				unsupported('window.createTextEditorDecorationType', 'editor decorations are not rendered');
 				const key = `${ctx.extensionId}:${++statusSeq}:deco`;
-				console.info(`[ggs] decoration type ${key} registered; decorations are inert in this host`);
 				return { key, dispose: () => undefined } as { key: string; dispose(): void };
 			},
-			showOpenDialog: (options?: { canSelectMany?: boolean; defaultUri?: Uri; filters?: Record<string, string[]>; title?: string }) =>
-				bridge.request('dialog.open', [options ?? {}]) as Promise<Uri[] | undefined>,
-			showSaveDialog: (options?: { defaultUri?: Uri; filters?: Record<string, string[]>; title?: string }) =>
-				bridge.request('dialog.save', [options ?? {}]) as Promise<Uri | undefined>,
+			showOpenDialog: async (options?: { canSelectMany?: boolean; defaultUri?: Uri; filters?: Record<string, string[]>; title?: string; canSelectFolders?: boolean }) => {
+				const picked = await bridge.request('dialog.open', [options ?? {}]) as (string | { fsPath?: string })[] | string | null | undefined;
+				const paths = picked === null || picked === undefined ? [] : Array.isArray(picked) ? picked : [picked];
+				return paths.length > 0 ? paths.map((entry) => Uri.file(pathOf(entry))) : undefined;
+			},
+			showSaveDialog: async (options?: { defaultUri?: Uri; filters?: Record<string, string[]>; title?: string }) => {
+				const picked = await bridge.request('dialog.save', [options ?? {}]) as string | { fsPath?: string } | null | undefined;
+				return picked ? Uri.file(pathOf(picked)) : undefined;
+			},
 			get activeTextEditor(): Record<string, unknown> | undefined {
 				return activeEditor ? makeTextEditorProxy() : undefined;
 			},
@@ -1531,484 +2881,522 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			onDidChangeActiveTextEditor: activeEditorChangedEmitter.event,
 			onDidChangeVisibleTextEditors: visibleEditorsChanged.event,
 			onDidChangeTextEditorSelection: selectionChanged.event,
-			onDidChangeTextEditorVisibleRanges: editorVisibleRangesChanged.event,
-			onDidChangeTextEditorOptions: editorOptionsChanged.event,
+			onDidChangeTextEditorVisibleRanges: silentEvent(),
+			onDidChangeTextEditorOptions: silentEvent(),
+			onDidChangeTextEditorViewColumn: silentEvent(),
 			get activeColorTheme(): { kind: number } {
 				return { kind: themeKind };
 			},
 			onDidChangeActiveColorTheme: themeChangedEmitter.event,
-			showTextDocument: async (documentOrUri: Record<string, unknown> | Uri | string) => {
-				const path = typeof documentOrUri === 'string' ? documentOrUri : documentOrUri instanceof Object && 'fsPath' in (documentOrUri as Uri) ? (documentOrUri as Uri).fsPath : String((documentOrUri as { fileName?: string }).fileName ?? '');
-				await bridge.request('workspace.openFile', [path]);
-				return makeTextEditorProxy();
+			showTextDocument: async (documentOrUri: Record<string, unknown> | Uri | string, columnOrOptions?: number | { selection?: Range; preview?: boolean; preserveFocus?: boolean; viewColumn?: number }) => {
+				const target = documentOrUri as { uri?: Uri; fileName?: string };
+				const path = typeof documentOrUri === 'string' ? documentOrUri : documentOrUri instanceof Uri ? hostPathOf(documentOrUri) : target.uri instanceof Uri ? hostPathOf(target.uri) : String(target.fileName ?? '');
+				const selection = typeof columnOrOptions === 'object' ? columnOrOptions?.selection : undefined;
+				await bridge.request('workspace.openFile', selection ? [path, selection.start.line + 1, selection.start.character + 1] : [path]);
+				return makeTextEditorProxy(path);
 			},
-			createTreeView: (viewId: string, options: { treeDataProvider: TreeDataProvider<unknown> }) => {
+			createTreeView: (viewId: string, options: { treeDataProvider: TreeDataProvider<unknown>; showCollapseAll?: boolean; canSelectMany?: boolean }) => {
 				const registration = registerTree(viewId, options.treeDataProvider);
+				const meta: { title?: string; description?: string; message?: string; badge?: { value: number; tooltip?: string } } = {};
+				const pushMeta = () => send('treeView.meta', [viewId, meta]);
 				return {
 					get visible(): boolean {
 						return registration.visible;
 					},
-					get title(): string {
-						return viewId;
+					get selection(): unknown[] {
+						return registration.selection;
 					},
-					set title(_value: string) {
-						console.info(`[ggs] TreeView.title is inert in this host (${viewId})`);
+					get title(): string | undefined {
+						return meta.title;
 					},
-					set description(_value: string) {
-						console.info(`[ggs] TreeView.description is inert in this host (${viewId})`);
+					set title(value: string | undefined) {
+						meta.title = value;
+						pushMeta();
 					},
-					set message(_value: string) {
-						console.info(`[ggs] TreeView.message is inert in this host (${viewId})`);
+					get description(): string | undefined {
+						return meta.description;
 					},
-					set badge(_value: { text: string; tooltip?: string } | undefined) {
-						console.info(`[ggs] TreeView.badge is inert in this host (${viewId})`);
+					set description(value: string | undefined) {
+						meta.description = value;
+						pushMeta();
+					},
+					get message(): string | undefined {
+						return meta.message;
+					},
+					set message(value: string | undefined) {
+						meta.message = value;
+						pushMeta();
+					},
+					get badge(): { value: number; tooltip?: string } | undefined {
+						return meta.badge;
+					},
+					set badge(value: { value: number; tooltip?: string } | undefined) {
+						meta.badge = value;
+						pushMeta();
 					},
 					onDidChangeVisibility: registration.visibilityChanged.event,
 					onDidChangeSelection: registration.selectionChanged.event,
-					reveal: () => undefined, // the host has no reveal: the view is already the section
+					onDidExpandElement: registration.expanded.event,
+					onDidCollapseElement: registration.collapsed.event,
+					onDidChangeCheckboxState: registration.checkboxChanged.event,
+					/** The view shows itself (its section is revealed); the element is not
+					 *  scrolled to or selected — the tree has no reveal-by-element yet. */
+					reveal: async (_element: unknown, _options?: unknown) => {
+						send('treeView.reveal', [viewId]);
+					},
 					dispose: () => {
-						void bridge.request('treeView.dispose', [viewId]);
+						send('treeView.dispose', [viewId]);
+						treeRegistrations.delete(viewId);
 						registration.visibilityChanged.dispose();
 						registration.selectionChanged.dispose();
 					}
 				};
 			},
-			get state(): { focused: boolean } {
+			get state(): { focused: boolean; active: boolean } {
 				// The shim also runs in the real-Node extension host (nodeHost.ts), where no
 				// `document` exists — the window simply reports focused there.
-				return { focused: typeof document === 'undefined' ? true : document.hasFocus() };
+				const focused = typeof document === 'undefined' ? true : document.hasFocus();
+				return { focused, active: focused };
 			},
-			onDidChangeWindowState: (() => new Disposable(() => undefined)) as never,
-			/** The notebook events (VS Code's notebook editor set): no notebook UI exists
-			 *  here, so the registrations attach and never fire — the honest degradation
-			 *  that lets a feature like cspell's issue viewers finish activating. */
-			onDidChangeActiveNotebookEditor: (() => new Disposable(() => undefined)) as never,
-			onDidChangeNotebookEditorSelection: (() => new Disposable(() => undefined)) as never,
-			onDidChangeNotebookEditorVisibleRanges: (() => new Disposable(() => undefined)) as never,
-			onDidOpenNotebookDocument: (() => new Disposable(() => undefined)) as never,
-			onDidCloseNotebookDocument: (() => new Disposable(() => undefined)) as never,
-			onDidSaveNotebookDocument: (() => new Disposable(() => undefined)) as never,
-			/** The terminal events: a package watching for terminals attaches at activation
-			 *  (ms-python's terminal layer does). Terminals `createTerminal` makes do open
-			 *  in the integrated panel, but the open/close pushes are not wired back yet —
-			 *  the registration survives and never fires. */
-			onDidOpenTerminal: (() => new Disposable(() => undefined)) as never,
-			onDidCloseTerminal: (() => new Disposable(() => undefined)) as never,
-			onDidChangeActiveTerminal: (() => new Disposable(() => undefined)) as never,
-			onDidChangeTerminalState: (() => new Disposable(() => undefined)) as never,
-			onDidStartTerminalShellExecution: (() => new Disposable(() => undefined)) as never,
-			onDidEndTerminalShellExecution: (() => new Disposable(() => undefined)) as never,
-			onDidChangeTerminalShellIntegration: (() => new Disposable(() => undefined)) as never,
-			/** `registerTerminalLinkProvider` / `registerTerminalProfileProvider`: the
-			 *  registrations survive inertly — the terminal renders no link hits and adds
-			 *  no profile entries yet. */
-			registerTerminalLinkProvider: () => new Disposable(() => undefined),
-			registerTerminalProfileProvider: () => new Disposable(() => undefined),
+			onDidChangeWindowState: silentEvent() as never,
+			/** The notebook events: no notebook UI exists here, so the registrations attach and
+			 *  never fire — the honest degradation that lets an activation finish. */
+			onDidChangeActiveNotebookEditor: silentEvent() as never,
+			onDidChangeNotebookEditorSelection: silentEvent() as never,
+			onDidChangeNotebookEditorVisibleRanges: silentEvent() as never,
+			onDidChangeVisibleNotebookEditors: silentEvent() as never,
+			/** The terminal events: terminals `createTerminal` makes open in the integrated
+			 *  panel, but the open/close pushes are not wired back — they never fire. */
+			onDidOpenTerminal: silentEvent() as never,
+			onDidCloseTerminal: silentEvent() as never,
+			onDidChangeActiveTerminal: silentEvent() as never,
+			onDidChangeTerminalState: silentEvent() as never,
+			onDidStartTerminalShellExecution: silentEvent() as never,
+			onDidEndTerminalShellExecution: silentEvent() as never,
+			onDidChangeTerminalShellIntegration: silentEvent() as never,
 			get activeNotebookEditor(): undefined {
 				return undefined;
 			},
+			get visibleNotebookEditors(): unknown[] {
+				return [];
+			},
 			get notebookEditors(): unknown[] {
 				return [];
+			},
+			showNotebookDocument: async () => {
+				unsupported('window.showNotebookDocument', 'there is no notebook editor');
+				throw new Error('notebooks are not supported by the Git Graph Studio extension host');
 			}
 		},
 
 		workspace: {
-			workspaceFolders: ctx.workspaceFolders,
+			get workspaceFolders() {
+				return foldersOrUndefined();
+			},
 			onDidChangeWorkspaceFolders: workspaceFoldersChanged.event,
-			/** Workspace-trust events: the frame holds no trust model, the event registers
-			 *  and never fires, and `isTrusted` answers true (everything the frame runs is
-			 *  the user's own installed package). */
-			onDidGrantWorkspaceTrust: (() => new Disposable(() => undefined)) as never,
-			getWorkspaceFolder: (uriOrPath?: Uri | string) => {
-				const path = typeof uriOrPath === 'string' ? uriOrPath : uriOrPath?.fsPath;
-				if (path === undefined) return ctx.workspaceFolders[0] ?? null;
-				const normalized = path.replace(/\\/g, '/').toLowerCase();
-				const folder = ctx.workspaceFolders.find((candidate) => normalized.startsWith(candidate.uri.fsPath.replace(/\\/g, '/').toLowerCase()));
-				return folder ?? null;
+			/** Workspace trust: everything the frame runs is the user's own installed package. */
+			isTrusted: true,
+			onDidGrantWorkspaceTrust: silentEvent() as never,
+			workspaceFile: undefined,
+			getWorkspaceFolder: (uriOrPath?: Uri | string) => folderFor(uriOrPath),
+			get rootPath(): string | undefined {
+				return workspaceFolders[0]?.uri.fsPath;
 			},
-			get rootPath(): string | null {
-				return ctx.workspaceFolders[0]?.uri.fsPath ?? null;
+			get name(): string | undefined {
+				return workspaceFolders.length === 0 ? undefined : workspaceFolders.length > 1 ? `${workspaceFolders[0]!.name} (Workspace)` : workspaceFolders[0]!.name;
 			},
-			get name(): string | null {
-				return ctx.workspaceFolders.length > 1 ? ctx.workspaceFolders[ctx.workspaceFolders.length - 1]!.name : ctx.workspaceFolders[0]?.name ?? null;
+			updateWorkspaceFolders: (_start: number, _deleteCount: number | undefined | null, ..._folders: unknown[]) => {
+				unsupported('workspace.updateWorkspaceFolders', 'open folders from the File menu');
+				return false;
 			},
-			getConfiguration: (section = '') => new WorkspaceConfiguration(ctx, bridge, section),
+			getConfiguration: (section = '', _scope?: unknown) => new WorkspaceConfiguration(ctx, bridge, section ?? ''),
 			onDidChangeConfiguration: configurationChanged.event,
-			/** A text-document content provider registers (its `activate()` must survive the
-			 *  call); this host's diff surface resolves virtual documents through the app's
-			 *  own diff editors, so the provider is remembered, never consulted. */
+			/** The provider object stays in the frame; the host remembers which frame answers the
+			 *  scheme, and its `vscode.open` / `vscode.diff` call back here for the text. */
 			registerTextDocumentContentProvider: (scheme: string, provider: unknown) => {
-				// The provider object stays in the frame; the host remembers which frame
-				// answers the scheme, and its `vscode.open` / `vscode.diff` call back here
-				// for the text (the host decodes nothing of any package's private schemes).
 				bridge.registerDocProvider?.(scheme, provider as { provideTextDocumentContent?: (uri: unknown) => unknown });
-				void bridge.request('docProvider.register', [scheme]).catch(() => undefined);
+				send('docProvider.register', [scheme]);
 				return new Disposable(() => {
 					bridge.unregisterDocProvider?.(scheme);
-					void bridge.request('docProvider.unregister', [scheme]).catch(() => undefined);
+					send('docProvider.unregister', [scheme]);
 				});
 			},
+			registerFileSystemProvider: (scheme: string, _provider: unknown, _options?: unknown) => inert(`workspace.registerFileSystemProvider(${scheme})`),
+			registerNotebookSerializer: (notebookType: string, _serializer: unknown) => inert(`workspace.registerNotebookSerializer(${notebookType})`),
+			registerTaskProvider: (type: string, _provider: unknown) => inert(`workspace.registerTaskProvider(${type})`),
 			onDidSaveTextDocument: documentSaved.event,
 			onDidChangeTextDocument: documentChanged.event,
-			/** The save push arrives after the write; `waitUntil` accepts and ignores (this
-			 *  host has no pre-save interception point). */
-			onWillSaveTextDocument: (listener: (event: { document: unknown; reason: number; waitUntil(thenable: unknown): void }) => unknown) => {
-				return documentSaved.event((document) => {
-					listener({ document, reason: 1, waitUntil: () => undefined });
-				});
+			/** No pre-save interception point exists: the registration is accepted and never
+			 *  fires (firing after the save would let a formatter-on-save dirty the file
+			 *  again), and the first registration says so in the log. */
+			onWillSaveTextDocument: (listener: unknown, thisArgs?: unknown, disposables?: { dispose(): unknown }[]) => {
+				unsupported('workspace.onWillSaveTextDocument', 'there is no pre-save hook; edits-on-save do not run');
+				return silentEvent()(listener as never, thisArgs, disposables);
 			},
 			onDidOpenTextDocument: documentOpened.event,
 			onDidCloseTextDocument: documentClosed.event,
-			onDidCreateFiles: workspaceFoldersChanged.event as never,
-			onDidDeleteFiles: workspaceFoldersChanged.event as never,
-			onDidRenameFiles: workspaceFoldersChanged.event as never,
-			/** Open a file in the editor area (the host half opens and reveals it); the
-			 *  returned document mirrors what the host knows — text arrives with the
-			 *  active-editor push an open produces. The content variant
-			 *  (`openTextDocument({ content })`) answers an in-memory document, as VS Code does. */
-			openTextDocument: async (uriOrPathOrOptions?: Uri | string | { content?: string; language?: string }) => {
-				if (uriOrPathOrOptions !== null && typeof uriOrPathOrOptions === 'object' && !(uriOrPathOrOptions as Uri).fsPath) {
-					const options = uriOrPathOrOptions as { content?: string; language?: string };
-					return {
-						uri: Uri.parse('untitled:Untitled-1'),
-						fileName: 'Untitled-1',
-						languageId: options.language ?? 'plaintext',
-						version: 1,
-						isDirty: false,
-						isUntitled: true,
-						isClosed: false,
-						getText: () => options.content ?? '',
-						save: async () => false
-					};
+			onDidCreateFiles: silentEvent() as never,
+			onDidDeleteFiles: silentEvent() as never,
+			onDidRenameFiles: silentEvent() as never,
+			onWillCreateFiles: silentEvent() as never,
+			onWillDeleteFiles: silentEvent() as never,
+			onWillRenameFiles: silentEvent() as never,
+			onDidOpenNotebookDocument: silentEvent() as never,
+			onDidCloseNotebookDocument: silentEvent() as never,
+			onDidSaveNotebookDocument: silentEvent() as never,
+			onDidChangeNotebookDocument: silentEvent() as never,
+			/** The document for a Uri / path — read without opening an editor (VS Code's
+			 *  contract: `showTextDocument` opens one). The in-memory `{ content }` form
+			 *  answers an untitled document. */
+			openTextDocument: async (uriPathOrOptions?: Uri | string | { content?: string; language?: string }) => {
+				if (uriPathOrOptions === undefined || (uriPathOrOptions !== null && typeof uriPathOrOptions === 'object' && !(uriPathOrOptions instanceof Uri) && !Uri.isUri(uriPathOrOptions) && typeof (uriPathOrOptions as { fsPath?: unknown }).fsPath !== 'string')) {
+					const options = (uriPathOrOptions ?? {}) as { content?: string; language?: string };
+					const name = `Untitled-${++untitledSeq}`;
+					const { state } = rememberDocument(name, options.content ?? '', options.language ?? 'plaintext', Uri.from({ scheme: 'untitled', path: name }));
+					documentOpened.fire(documentView(state, async () => false));
+					return documentView(state, async () => false);
 				}
-				const path = typeof uriOrPathOrOptions === 'string' ? uriOrPathOrOptions : (uriOrPathOrOptions as Uri | undefined)?.fsPath ?? '';
-				await bridge.request('workspace.openFile', [path]);
+				const uri = typeof uriPathOrOptions === 'string' ? Uri.file(uriPathOrOptions) : (rehydrateUris(uriPathOrOptions) as Uri);
+				if (uri.scheme !== 'file') {
+					// A provider scheme: the host asks the registering frame for the text.
+					const text = await bridge.request('docProvider.read', [uri]).catch((error) => {
+						shimLog('warn', `openTextDocument(${uri.toString()}) failed: ${String(error)}`, error);
+						throw error;
+					});
+					const { state } = rememberDocument(uri.toString(), String(text ?? ''), 'plaintext', uri);
+					return documentView(state, async () => false);
+				}
+				const path = hostPathOf(uri);
+				const known = documents.get(documentKey(path));
+				if (known) return makeTextDocument(path);
+				let read: { text?: string; languageId?: string } | null = null;
+				try {
+					read = (await bridge.request('workspace.readText', [path])) as { text?: string; languageId?: string } | null;
+				} catch (error) {
+					shimLog('warn', `openTextDocument(${path}) failed: ${String(error)}`, error);
+					throw fsError(error, uri);
+				}
+				const { state, opened } = rememberDocument(path, read?.text ?? '', read?.languageId ?? '');
+				if (opened) documentOpened.fire(documentView(state, () => saveDocument(path)));
 				return makeTextDocument(path);
 			},
-			/** A WorkspaceEdit over its `changes`: open editors take their edits through the
-			 *  CodeMirror document; closed files are read, spliced and written back through
-			 *  `workspace.fs` — the same confinement the fs ops carry. */
-			applyEdit: async (edit: { changes?: Record<string, SerializableTextEdit[]>; documentChanges?: unknown[] }) => {
-				if (edit.documentChanges) {
-					console.info('[ggs] workspace.applyEdit with documentChanges: only its changes entries are served');
-				}
-				const changes = edit.changes ?? {};
-				for (const [uriString, edits] of Object.entries(changes)) {
-					const path = uriString.startsWith('file:') ? uriString.slice('file:'.length) : uriString;
-					const applied = await bridge.request('editor.applyEdits', [path, edits]);
-					if (applied === true) continue;
-					const read = (await bridge.request('fs.op', ['read', path])) as { data: string };
-					const after = applyTextEditsToText(new TextDecoder().decode(decodeBase64(read.data)), edits);
-					await bridge.request('fs.op', ['write', path, undefined, encodeBase64(new TextEncoder().encode(after))]);
-				}
-				return true;
-			},
+			applyEdit: (edit: unknown, _metadata?: unknown) => applyWorkspaceEdit(edit),
 			asRelativePath: (pathOrUri: string | Uri, includeWorkspaceFolder?: boolean) => {
-				const path = (typeof pathOrUri === 'string' ? pathOrUri : pathOrUri.fsPath).replace(/\\/g, '/');
-				const root = ctx.workspaceFolders[0]?.uri.fsPath.replace(/\\/g, '/').toLowerCase();
-				if (root !== undefined && path.toLowerCase().startsWith(root)) return path.slice(root.length).replace(/^\//, '');
-				return path;
+				const path = typeof pathOrUri === 'string' ? pathOrUri : pathOrUri.fsPath;
+				const folder = folderFor(path);
+				if (!folder) return path;
+				const relative = documentKey(path).slice(documentKey(folder.uri.fsPath).replace(/\/+$/, '').length).replace(/^\//, '');
+				const withFolder = includeWorkspaceFolder ?? workspaceFolders.length > 1;
+				return withFolder && workspaceFolders.length > 1 ? `${folder.name}/${relative}` : relative;
 			},
-			createFileSystemWatcher: (pattern: unknown) => {
-				// A string pattern watches the first workspace folder; a RelativePattern
-				// carries its own base (the repository a view watches, typically).
-				const asObject = pattern !== null && typeof pattern === 'object' ? pattern as { base?: unknown; pattern?: unknown } : null;
-				const baseRaw = asObject !== null
-					? (typeof asObject.base === 'string' ? asObject.base : String((asObject.base as Uri | undefined)?.fsPath ?? ''))
-					: (ctx.workspaceFolders[0]?.uri.fsPath ?? '');
-				const base = baseRaw.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-				const glob = String((asObject !== null ? asObject.pattern : pattern) ?? '**');
-				const changed = new EventEmitter<{ type: number; fileName: string } & Record<string, unknown>>();
-				const created = new EventEmitter<{ type: number; fileName: string } & Record<string, unknown>>();
-				const deleted = new EventEmitter<{ type: number; fileName: string } & Record<string, unknown>>();
-				// VS Code's watcher events carry the Uri itself — the consumers reach for
-				// `uri.fsPath`, never a wrapper.
-				const fire = (emitter: EventEmitter<{ type: number; fileName: string } & Record<string, unknown>>, absolute: string) => {
-					const uri = Uri.file(absolute);
-					emitter.fire(uri as unknown as { type: number; fileName: string } & Record<string, unknown>);
-				};
-				// The frame's own saves still count (VS Code's watcher sees them too).
+			createFileSystemWatcher: (pattern: unknown, ignoreCreate = false, ignoreChange = false, ignoreDelete = false) => {
+				// A string pattern watches the first workspace folder (an absolute one carries
+				// its own base); a RelativePattern carries its base (a repository, typically).
+				const asObject = pattern !== null && typeof pattern === 'object' ? pattern as { baseUri?: Uri; base?: unknown; pattern?: unknown } : null;
+				let baseRaw = asObject !== null
+					? (asObject.baseUri ? asObject.baseUri.fsPath : typeof asObject.base === 'string' ? asObject.base : pathOf(asObject.base as Uri))
+					: (workspaceFolders[0]?.uri.fsPath ?? '');
+				let glob = String((asObject !== null ? asObject.pattern : pattern) ?? '**');
+				if (asObject === null && /^([A-Za-z]:)?[\\/]/.test(glob)) {
+					// An absolute string pattern: split at the first wildcard segment.
+					const segments = glob.replace(/\\/g, '/').split('/');
+					const firstWild = segments.findIndex((segment) => /[*?{[]/.test(segment));
+					const cut = firstWild === -1 ? segments.length - 1 : firstWild;
+					baseRaw = segments.slice(0, cut).join('/');
+					glob = segments.slice(cut).join('/') || '**';
+				}
+				const base = documentKey(baseRaw).replace(/\/+$/, '').toLowerCase();
+				const changed = new EventEmitter<Uri>();
+				const created = new EventEmitter<Uri>();
+				const deleted = new EventEmitter<Uri>();
+				const fire = (emitter: EventEmitter<Uri>, absolute: string) => emitter.fire(Uri.file(absolute));
+				// The frame's own saves count too (VS Code's watcher sees them).
 				const saveSub = documentSaved.event((document) => {
-					const fileName = (document as { fileName: string }).fileName;
-					const normalized = fileName.replace(/\\/g, '/').toLowerCase();
-					if (normalized.startsWith(base + '/') && watcherGlobMatches(glob, normalized.slice(base.length + 1))) {
-						fire(changed, fileName);
-					}
+					if (ignoreChange) return;
+					const fileName = String((document as { fileName?: string }).fileName ?? '');
+					const normalized = documentKey(fileName).toLowerCase();
+					if (normalized.startsWith(base + '/') && watcherGlobMatches(glob, normalized.slice(base.length + 1))) fire(changed, fileName);
 				});
-				// The host's watcher batches: every changed working-tree path under the
-				// pattern's base fires; a `.git/` change fires the pattern-matched HEAD
-				// event (the batch itself never lists `.git/` paths). Create and delete
-				// cannot be told apart from change in a batch — they stay silent, and the
-				// debounced consumers refetch on change alone.
+				// The host's watcher batches: every changed working-tree path under the base
+				// fires; a `.git/` change fires the pattern-matched HEAD event. A batch cannot
+				// tell create or delete from change, so those fire as changes.
 				const fsSub = fsChanged.event((batch) => {
-					const root = batch.root.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-					if (!base.startsWith(root)) return;
+					if (ignoreChange) return;
+					const root = documentKey(batch.root).replace(/\/+$/, '').toLowerCase();
+					if (!base.startsWith(root) && !root.startsWith(base)) return;
 					for (const relative of batch.paths) {
-						const full = root + '/' + relative;
-						if (!full.startsWith(base === '' ? root : base + '/')) continue;
+						const full = `${root}/${relative}`;
+						if (base !== '' && !full.startsWith(base + '/')) continue;
 						const rest = full.slice(base === '' ? root.length + 1 : base.length + 1);
-						if (watcherGlobMatches(glob, rest)) fire(changed, root + '/' + relative);
+						if (watcherGlobMatches(glob, rest)) fire(changed, `${batch.root.replace(/[\\/]+$/, '')}/${relative}`);
 					}
-					if (batch.gitChanged && watcherGlobMatches(glob, '.git/HEAD')) fire(changed, batch.root + '/.git/HEAD');
+					if (batch.gitChanged && watcherGlobMatches(glob, '.git/HEAD')) fire(changed, `${batch.root.replace(/[\\/]+$/, '')}/.git/HEAD`);
 				});
-				const events = { onDidChange: changed.event, onDidCreate: created.event, onDidDelete: deleted.event };
-				const dispose = () => {
-					saveSub.dispose();
-					fsSub.dispose();
-					changed.dispose();
-					created.dispose();
-					deleted.dispose();
+				if (!ignoreCreate || !ignoreDelete) shimLogOnce(`watcher-kinds:${ctx.extensionId}`, 'debug', 'file watchers report creations and deletions as changes (the host batches do not tell them apart)');
+				return {
+					ignoreCreateEvents: ignoreCreate,
+					ignoreChangeEvents: ignoreChange,
+					ignoreDeleteEvents: ignoreDelete,
+					onDidChange: changed.event,
+					onDidCreate: created.event,
+					onDidDelete: deleted.event,
+					dispose: () => {
+						saveSub.dispose();
+						fsSub.dispose();
+						changed.dispose();
+						created.dispose();
+						deleted.dispose();
+					}
 				};
-				return { ...events, dispose };
 			},
-			findFiles: async (include: string, _exclude?: string | null, _maxResults?: number) => {
-				const root = ctx.workspaceFolders[0]?.uri.fsPath ?? '';
-				const found = (await bridge.request('fs.op', ['find', include])) as string[];
-				return found.map((relative) => Uri.file(root === '' ? relative : root.replace(/[\\/]+$/, '') + '/' + relative));
+			/** `findFiles(include, exclude?, maxResults?)`: a glob or a RelativePattern, over
+			 *  every open folder (or the pattern's base), the exclude glob applied here. */
+			findFiles: async (include: string | RelativePattern | { baseUri?: Uri; base?: unknown; pattern?: string }, exclude?: string | RelativePattern | null, maxResults?: number, _token?: CancellationToken) => {
+				const relative = include !== null && typeof include === 'object';
+				const glob = relative ? String((include as { pattern?: string }).pattern ?? '**') : String(include ?? '**');
+				const base = relative ? ((include as { baseUri?: Uri }).baseUri?.fsPath ?? pathOf((include as { base?: Uri }).base)) : undefined;
+				const found = (await bridge.request('fs.op', ['find', glob, base])) as (string | { root: string; path: string })[];
+				const excludeGlob = exclude === null || exclude === undefined ? undefined : typeof exclude === 'string' ? exclude : exclude.pattern;
+				const firstRoot = workspaceFolders[0]?.uri.fsPath ?? '';
+				const out: Uri[] = [];
+				for (const entry of found ?? []) {
+					const root = typeof entry === 'string' ? firstRoot : entry.root;
+					const rel = typeof entry === 'string' ? entry : entry.path;
+					if (excludeGlob && watcherGlobMatches(excludeGlob.replace(/^\*\*\//, '**/'), rel)) continue;
+					out.push(Uri.file(root === '' ? rel : `${root.replace(/[\\/]+$/, '')}/${rel}`));
+					if (maxResults !== undefined && out.length >= maxResults) break;
+				}
+				return out;
 			},
-			save: async () => false,
-			saveAll: async (_includeUntitled?: boolean) => false,
+			save: async (uri: Uri) => ((await saveDocument(hostPathOf(uri))) ? uri : undefined),
+			saveAs: async (_uri: Uri) => {
+				unsupported('workspace.saveAs');
+				return undefined;
+			},
+			saveAll: async (_includeUntitled?: boolean) => {
+				let all = true;
+				for (const state of documents.values()) if (state.uri.scheme === 'file') all = (await saveDocument(state.path)) && all;
+				return all;
+			},
 			get textDocuments(): Record<string, unknown>[] {
-				return activeEditor ? [makeTextDocument(activeEditor.path)] : [];
+				return [...documents.values()].map((state) => documentView(state, () => saveDocument(state.path)));
 			},
 			notebookDocuments: [] as never[],
-			/** The workspace-confined file services, over the host's `ext_fs` command (bytes
-			 *  cross as base64; every path is confined to the open folders there). */
-			get fs() {
-				const op = (name: string, uri: Uri | string, to?: Uri | string, data?: string) =>
-					bridge.request('fs.op', [name, typeof uri === 'string' ? uri : uri.fsPath, to === undefined ? undefined : typeof to === 'string' ? to : to.fsPath, data]);
-			return {
-				readFile: async (uri: Uri | string) => decodeBase64(((await op('read', uri)) as { data: string }).data),
-				// `access`: F_OK semantics — a readable stat answers, a missing path rejects
-				// (the exact contract `workspace.fs.access(uri, fs.constants.F_OK)` has).
-				access: async (uri: Uri | string) => {
-					await op('stat', uri);
-					return undefined;
-				},
-				readDirectory: async (uri: Uri | string) => (((await op('list', uri)) as { name: string; kind: number }[]).map((entry) => [entry.name, entry.kind])) as [string, number][],
-					createDirectory: (uri: Uri | string) => op('mkdir', uri).then(() => undefined),
-					delete: (uri: Uri | string) => op('delete', uri).then(() => undefined),
-					rename: (uri: Uri | string, to: Uri | string) => op('rename', uri, to).then(() => undefined),
-					copy: async (uri: Uri | string, to: Uri | string) => {
-						const data = (await op('read', uri)) as { data: string };
-						await op('write', to, undefined, data.data);
-					},
-					isWritableFileSystem: (_scheme: string) => true,
-					stat: async (uri: Uri | string) => {
-						const stat = (await op('stat', uri)) as { type: number; size: number; mtime: number };
-						return { type: stat.type, ctime: 0, mtime: stat.mtime, size: stat.size };
+			decode: async (content: Uint8Array) => new TextDecoder().decode(content),
+			encode: async (content: string) => new TextEncoder().encode(content),
+			/** The file services over the host's `ext_fs` command (bytes cross as base64;
+			 *  every path is confined to the open folders, the extension's own directory and
+			 *  its storage there). */
+			fs: fileSystem
+		},
+
+		languages: {
+			getLanguages: async () => ['bat', 'c', 'cpp', 'csharp', 'css', 'go', 'html', 'java', 'javascript', 'json', 'jsonc', 'kotlin', 'lua', 'markdown', 'php', 'plaintext', 'powershell', 'python', 'ruby', 'rust', 'scss', 'shellscript', 'sql', 'swift', 'typescript', 'typescriptreact', 'javascriptreact', 'xml', 'yaml'],
+			setTextDocumentLanguage: async (document: { uri?: Uri; fileName?: string }, languageId: string) => {
+				const path = document.uri ? hostPathOf(document.uri) : String(document.fileName ?? '');
+				const state = documents.get(documentKey(path));
+				if (state) state.languageId = languageId;
+				return makeTextDocument(path);
+			},
+			/** `createLanguageStatusItem`: a mutable value; no status surface renders it. */
+			createLanguageStatusItem: (id: string, selector: unknown) => {
+				unsupported('languages.createLanguageStatusItem', 'language status items are not rendered');
+				return {
+					id, name: undefined as string | undefined, selector, text: '', detail: undefined as string | undefined,
+					kind: 1 as never, command: undefined as unknown, busy: false, severity: 0 as never,
+					accessibilityInformation: undefined as unknown, dispose: () => undefined
+				};
+			},
+			onDidChangeDiagnostics: diagnosticsChanged.event,
+			/** With a Uri, that document's diagnostics across every collection (empty when
+			 *  none); without, every `[Uri, diagnostics]` pair. */
+			getDiagnostics: (uri?: Uri | string): unknown => {
+				if (uri !== undefined) {
+					const key = (typeof uri === 'string' ? Uri.file(uri) : uri).toString();
+					return [...diagnosticCollections].flatMap((collection) => collection.get(key)?.diagnostics ?? []);
+				}
+				const byUri = new Map<string, [Uri, unknown[]]>();
+				for (const collection of diagnosticCollections) {
+					for (const [key, entry] of collection) {
+						if (!byUri.has(key)) byUri.set(key, [entry.uri, []]);
+						byUri.get(key)![1].push(...entry.diagnostics);
 					}
+				}
+				return [...byUri.values()];
+			},
+			match: (selector: unknown, document: { languageId?: string; uri?: Uri; fileName?: string } | undefined) => selectorScore(selector, document),
+			/** A diagnostic collection keyed by the document Uri; every change re-renders the
+			 *  document's squiggles through the host's `diagnostics.set`. */
+			createDiagnosticCollection: (name?: string) => {
+				const entries = new Map<string, { uri: Uri; diagnostics: unknown[] }>();
+				diagnosticCollections.add(entries);
+				const toUri = (value: Uri | string) => (typeof value === 'string' ? Uri.file(value) : value instanceof Uri ? value : (rehydrateUris(value) as Uri));
+				const push = (uri: Uri) => {
+					const diagnostics = entries.get(uri.toString())?.diagnostics ?? [];
+					send('diagnostics.set', [ctx.extensionId, hostPathOf(uri), diagnostics.map(serializeDiagnostic)]);
+				};
+				const changed = (uris: Uri[]) => diagnosticsChanged.fire({ uris });
+				const collection = {
+					name: name ?? 'collection',
+					set: (uriOrEntries: Uri | string | readonly [Uri, readonly unknown[] | undefined][], diagnostics?: readonly unknown[] | null) => {
+						const touched: Uri[] = [];
+						if (Array.isArray(uriOrEntries)) {
+							for (const [uri, list] of uriOrEntries as [Uri, readonly unknown[] | undefined][]) {
+								const target = toUri(uri);
+								if (list === undefined) entries.delete(target.toString());
+								else entries.set(target.toString(), { uri: target, diagnostics: [...(entries.get(target.toString())?.diagnostics ?? []), ...list] });
+								touched.push(target);
+							}
+						} else {
+							const target = toUri(uriOrEntries as Uri | string);
+							if (diagnostics === undefined || diagnostics === null) entries.delete(target.toString());
+							else entries.set(target.toString(), { uri: target, diagnostics: [...diagnostics] });
+							touched.push(target);
+						}
+						for (const uri of touched) push(uri);
+						changed(touched);
+					},
+					delete: (uri: Uri | string) => {
+						const target = toUri(uri);
+						entries.delete(target.toString());
+						push(target);
+						changed([target]);
+					},
+					clear: () => {
+						const uris = [...entries.values()].map((entry) => entry.uri);
+						entries.clear();
+						for (const uri of uris) push(uri);
+						changed(uris);
+					},
+					/** VS Code's callback order: `(uri, diagnostics, collection)`. */
+					forEach: (callback: (uri: Uri, diagnostics: readonly unknown[], collection: unknown) => unknown, thisArg?: unknown) => {
+						for (const entry of [...entries.values()]) callback.call(thisArg, entry.uri, entry.diagnostics, collection);
+					},
+					// VS Code answers an empty list (never undefined) for a document with none.
+					get: (uri: Uri | string) => [...(entries.get(toUri(uri).toString())?.diagnostics ?? [])],
+					has: (uri: Uri | string) => entries.has(toUri(uri).toString()),
+					dispose: () => {
+						collection.clear();
+						diagnosticCollections.delete(entries);
+					},
+					[Symbol.iterator]: function* () {
+						for (const entry of entries.values()) yield [entry.uri, entry.diagnostics] as [Uri, unknown[]];
+					}
+				};
+				return collection;
+			},
+			registerDocumentFormattingEditProvider: (selector: unknown, formatter: { provideDocumentFormattingEdits: (document: unknown, options: unknown, token: unknown) => unknown }) =>
+				registerFormatter(selector, (document, options, token) => formatter.provideDocumentFormattingEdits(document, options, token)),
+			/** A range formatter serves whole-document formatting over the full range (the
+			 *  host's Format Document is the only formatting entry point). */
+			registerDocumentRangeFormattingEditProvider: (selector: unknown, formatter: { provideDocumentRangeFormattingEdits: (document: unknown, range: Range, options: unknown, token: unknown) => unknown }) =>
+				registerFormatter(selector, (document, options, token) => {
+					const lineCount = Number(document.lineCount) || 1;
+					const last = (document.lineAt as (line: number) => { text: string })(lineCount - 1);
+					return formatter.provideDocumentRangeFormattingEdits(document, new Range(0, 0, lineCount - 1, last.text.length), options, token);
+				}),
+			registerCompletionItemProvider: provider('registerCompletionItemProvider'),
+			registerInlineCompletionItemProvider: provider('registerInlineCompletionItemProvider'),
+			registerHoverProvider: provider('registerHoverProvider'),
+			registerDefinitionProvider: provider('registerDefinitionProvider'),
+			registerDeclarationProvider: provider('registerDeclarationProvider'),
+			registerTypeDefinitionProvider: provider('registerTypeDefinitionProvider'),
+			registerImplementationProvider: provider('registerImplementationProvider'),
+			registerReferenceProvider: provider('registerReferenceProvider'),
+			registerDocumentSymbolProvider: provider('registerDocumentSymbolProvider'),
+			registerWorkspaceSymbolProvider: provider('registerWorkspaceSymbolProvider'),
+			registerCodeLensProvider: provider('registerCodeLensProvider'),
+			registerCodeActionsProvider: provider('registerCodeActionsProvider'),
+			registerOnTypeFormattingEditProvider: provider('registerOnTypeFormattingEditProvider'),
+			registerRenameProvider: provider('registerRenameProvider'),
+			registerSignatureHelpProvider: provider('registerSignatureHelpProvider'),
+			registerDocumentLinkProvider: provider('registerDocumentLinkProvider'),
+			registerDocumentHighlightProvider: provider('registerDocumentHighlightProvider'),
+			registerMultiDocumentHighlightProvider: provider('registerMultiDocumentHighlightProvider'),
+			registerDocumentSemanticTokensProvider: provider('registerDocumentSemanticTokensProvider'),
+			registerDocumentRangeSemanticTokensProvider: provider('registerDocumentRangeSemanticTokensProvider'),
+			registerFoldingRangeProvider: provider('registerFoldingRangeProvider'),
+			registerSelectionRangeProvider: provider('registerSelectionRangeProvider'),
+			registerCallHierarchyProvider: provider('registerCallHierarchyProvider'),
+			registerTypeHierarchyProvider: provider('registerTypeHierarchyProvider'),
+			registerLinkedEditingRangeProvider: provider('registerLinkedEditingRangeProvider'),
+			registerInlayHintsProvider: provider('registerInlayHintsProvider'),
+			registerColorProvider: provider('registerColorProvider'),
+			registerInlineValuesProvider: provider('registerInlineValuesProvider'),
+			registerDocumentDropEditProvider: provider('registerDocumentDropEditProvider'),
+			registerDocumentPasteEditProvider: provider('registerDocumentPasteEditProvider'),
+			registerEvaluatableExpressionProvider: provider('registerEvaluatableExpressionProvider'),
+			setLanguageConfiguration: provider('setLanguageConfiguration')
+		},
+
+		/** The Language Model + Chat namespaces (VS Code 1.90+): registrations survive; no
+		 *  chat surface exists to call them from, so `selectChatModels` answers empty. */
+		lm: {
+			registerTool: (name: string, _tool: unknown) => inert(`lm.registerTool(${name})`),
+			registerChatModelProvider: (id: string, _provider: unknown) => inert(`lm.registerChatModelProvider(${id})`),
+			invokeTool: async (name: string) => {
+				unsupported(`lm.invokeTool(${name})`, 'there is no language model surface');
+				throw new LanguageModelError(`tool ${name} is not available in this host`);
+			},
+			tools: [] as never[],
+			selectChatModels: async () => [] as never[],
+			onDidChangeChatModels: silentEvent() as never,
+			fileCompression: undefined
+		},
+		chat: {
+			registerChatParticipant: () => inert('chat.registerChatParticipant'),
+			registerChatVariableResolver: () => inert('chat.registerChatVariableResolver'),
+			registerChatCommand: () => inert('chat.registerChatCommand'),
+			createChatParticipant: (id: string, handler?: unknown) => {
+				unsupported('chat.createChatParticipant', 'there is no chat surface');
+				return {
+					id, iconPath: undefined, followupProvider: undefined, participantName: id,
+					onDidReceiveFeedback: silentEvent() as never, requestHandler: handler as unknown, dispose: () => undefined
 				};
 			}
 		},
 
-		languages: {
-			getLanguages: async () => ['bat', 'c', 'cpp', 'csharp', 'css', 'go', 'html', 'java', 'javascript', 'json', 'kotlin', 'lua', 'markdown', 'plaintext', 'powershell', 'python', 'ruby', 'rust', 'shellscript', 'sql', 'swift', 'typescript', 'xml', 'yaml'],
-			/** `createLanguageStatusItem` (VS Code 1.53): a package's language status entry
-			 *  (cspell's word-count row). The item is a plain mutable value; no status bar
-			 *  surface renders it yet — constructing and updating must survive. */
-			createLanguageStatusItem: (id: string, _selector: unknown) => ({
-				id,
-				name: undefined as string | undefined,
-				selector: _selector,
-				text: '',
-				detail: undefined as string | undefined,
-				kind: 1 as never,
-				command: undefined as unknown,
-				busy: false,
-				severity: 0 as never,
-				accessibilityInformation: undefined as unknown,
-				dispose: () => undefined
-			}),
-			onDidChangeDiagnostics: diagnosticsChanged.event as never,
-			/** The aggregate read: with a Uri, that document's diagnostics (or undefined);
-			 *  without, every `[Uri, diagnostics]` pair across all collections. */
-			getDiagnostics: (uri?: Uri | string): unknown => {
-				if (uri !== undefined) {
-					const path = (typeof uri === 'string' ? uri : uri.fsPath ?? uri.toString()).replace(/\\/g, '/');
-					for (const entries of diagnosticEntries.values()) {
-						const found = entries.get(path);
-						if (found !== undefined) return found;
-					}
-					return undefined;
-				}
-				const all: unknown[] = [];
-				for (const entries of diagnosticEntries.values()) {
-					for (const [path, diagnostics] of entries) all.push([Uri.parse(path), diagnostics]);
-				}
-				return all;
-			},
-			match: (selector: unknown, document: { languageId?: string; uri?: Uri } | undefined) => {
-				// VS Code's selector scoring: a string matches the language; a filter object
-				// scores each property it declares — a scheme-only selector (`{scheme:'file'}`,
-				// how language clients declare their document sync) matches any language of
-				// that scheme. An array takes the best score; no match scores 0.
-				const doc = document ?? undefined;
-				const scoreOne = (entry: unknown): number => {
-					if (typeof entry === 'string') return entry === '*' ? 5 : entry === doc?.languageId ? 10 : 0;
-					if (entry !== null && typeof entry === 'object') {
-						const filter = entry as { language?: string; scheme?: string; notebook?: unknown };
-						if (filter.language !== undefined && filter.language !== '*' && filter.language !== doc?.languageId) return 0;
-						const scheme = doc?.uri?.scheme ?? 'file';
-						if (filter.scheme !== undefined && filter.scheme !== scheme) return 0;
-						return filter.language !== undefined ? 10 : 5;
-					}
-					return 0;
-				};
-				const selectors = Array.isArray(selector) ? selector : [selector];
-				return Math.max(0, ...selectors.map(scoreOne));
-			},
-			/** A diagnostic collection that keeps its entries in memory: set/get/delete/clear
-			 *  work as data structures (extensions read their own diagnostics back); the
-			 *  editor renders them through the host's `diagnostics.set`. */
-			createDiagnosticCollection: (name?: string) => {
-				const entries = new Map<string, unknown[]>();
-				diagnosticEntries.set(name ?? `collection-${diagnosticEntries.size}`, entries);
-				// The key the editor matches on: the file's own path spelling.
-				const keyOf = (uri: Uri | string): string => {
-					const path = typeof uri === 'string' ? uri : uri.fsPath ?? uri.toString();
-					return path.replace(/\\/g, '/');
-				};
-				const push = (path: string): void => {
-					const diagnostics = (entries.get(path) ?? []) as SerializableDiagnostic[];
-					void bridge.request('diagnostics.set', [ctx.extensionId, path, diagnostics]).catch(() => undefined);
-					diagnosticsChanged.fire(undefined as unknown as never);
-				};
-				return {
-					name: name ?? 'collection',
-					set: (uri: Uri | string, diagnostics: unknown[]) => {
-						const path = keyOf(uri);
-						entries.set(path, diagnostics ?? []);
-						push(path);
-					},
-					delete: (uri: Uri | string) => {
-						const path = keyOf(uri);
-						entries.delete(path);
-						push(path);
-					},
-					clear: () => {
-						for (const path of [...entries.keys()]) push(path);
-						entries.clear();
-					},
-					forEach: (callback: (diagnostics: unknown[], uri: Uri) => void) => entries.forEach((diagnostics, key) => callback(diagnostics, Uri.parse(key))),
-					get: (uri: Uri | string) => entries.get(typeof uri === 'string' ? uri : uri.toString()),
-					dispose: () => entries.clear()
-				};
-			},
-			registerDocumentFormattingEditProvider: (selector: unknown, provider: { provideDocumentFormattingEdits: (document: unknown, options: unknown, token: unknown) => unknown }) => {
-				// VS Code selectors arrive as strings (`'python'`) or document filters
-				// (`{ language, scheme }`) — normalize to `{ language }` for the host match.
-				const selectors = (Array.isArray(selector) ? selector : [selector]).map((entry) => (typeof entry === 'string' ? { language: entry } : entry));
-				const id = `fmt-${++formatterSeq}`;
-				const entry = { id, selectors, provider };
-				formattingProviders.set(id, entry);
-				void bridge.request('languages.registerFormatting', [{ id, selectors }]).catch(() => undefined);
-				return {
-					dispose: () => {
-						formattingProviders.delete(id);
-						void bridge.request('languages.unregisterFormatting', [{ id }]).catch(() => undefined);
-					}
-				};
-			},
-			registerCompletionItemProvider: () => inert('languages.registerCompletionItemProvider'),
-			registerHoverProvider: () => inert('languages.registerHoverProvider'),
-			registerDefinitionProvider: () => inert('languages.registerDefinitionProvider'),
-			registerTypeDefinitionProvider: () => inert('languages.registerTypeDefinitionProvider'),
-			registerImplementationProvider: () => inert('languages.registerImplementationProvider'),
-			registerReferenceProvider: () => inert('languages.registerReferenceProvider'),
-			registerDocumentSymbolProvider: () => inert('languages.registerDocumentSymbolProvider'),
-			registerWorkspaceSymbolProvider: () => inert('languages.registerWorkspaceSymbolProvider'),
-			registerCodeLensProvider: () => inert('languages.registerCodeLensProvider'),
-			registerCodeActionsProvider: () => inert('languages.registerCodeActionsProvider'),
-			registerOnTypeFormattingEditProvider: () => inert('languages.registerOnTypeFormattingEditProvider'),
-			registerRenameProvider: () => inert('languages.registerRenameProvider'),
-			registerDocumentLinkProvider: () => inert('languages.registerDocumentLinkProvider'),
-			registerDocumentHighlightProvider: () => inert('languages.registerDocumentHighlightProvider'),
-			registerDocumentSemanticTokensProvider: () => inert('languages.registerDocumentSemanticTokensProvider'),
-			registerDocumentRangeSemanticTokensProvider: () => inert('languages.registerDocumentRangeSemanticTokensProvider'),
-			registerFoldingRangeProvider: () => inert('languages.registerFoldingRangeProvider'),
-			registerSelectionRangeProvider: () => inert('languages.registerSelectionRangeProvider'),
-			registerCallHierarchyProvider: () => inert('languages.registerCallHierarchyProvider'),
-			registerLinkedEditingRangeProvider: () => inert('languages.registerLinkedEditingRangeProvider'),
-			registerInlayHintsProvider: () => inert('languages.registerInlayHintsProvider'),
-			registerDocumentDropEditProvider: () => inert('languages.registerDocumentDropEditProvider'),
-			registerEvaluatableExpressionProvider: () => inert('languages.registerEvaluatableExpressionProvider'),
-			setLanguageConfiguration: () => inert('languages.setLanguageConfiguration')
-		},
-
-		/** The Language Model + Chat namespaces (VS Code 1.90+): a package registers its AI
-		 *  tools (ms-python's environment tools) at activation. The registrations survive;
-		 *  no chat surface exists to call them from, so `selectChatModels` answers empty. */
-		lm: {
-			registerTool: (name: string, _tool: unknown) => {
-				console.info(`[ggs] lm.registerTool(${name}) is inert in this host (no chat surface)`);
-				return new Disposable(() => undefined);
-			},
-			selectChatModels: async () => [] as never[],
-			onDidChangeChatModels: (() => new Disposable(() => undefined)) as never,
-			fileCompression: undefined
-		},
-		chat: {
-			registerChatParticipant: () => new Disposable(() => undefined),
-			registerChatVariableResolver: () => new Disposable(() => undefined),
-			registerChatCommand: () => new Disposable(() => undefined),
-			createChatParticipant: (id: string) => ({
-				id,
-				iconPath: undefined,
-				followupProvider: undefined,
-				participantName: id,
-				onDidReceiveFeedback: (() => new Disposable(() => undefined)) as never,
-				requestHandler: undefined as unknown,
-				dispose: () => undefined
-			})
-		},
-
 		tasks: {
-			task: (definition: unknown, scope: unknown, name: string, source: string, execution: unknown, problemMatchers?: string[]) => ({ definition, scope, name, source, execution, problemMatchers }),
-			registerTaskProvider: () => inert('tasks.registerTaskProvider'),
-			fetchTasks: async () => [] as never[],
+			registerTaskProvider: (type: string, _provider: unknown) => inert(`tasks.registerTaskProvider(${type})`),
+			fetchTasks: async (_filter?: unknown) => [] as never[],
+			/** A run the host cannot perform rejects (a fake TaskExecution would leave the
+			 *  caller waiting for an end event that never comes). */
 			executeTask: async (task: unknown) => {
-				console.info(`[ggs] tasks.executeTask(${String((task as { name?: string })?.name)}) is inert in this host`);
-				return undefined;
+				const name = String((task as { name?: string })?.name ?? '');
+				unsupported('tasks.executeTask', 'tasks do not run in this host');
+				shimLog('warn', `tasks.executeTask(${name}) refused: tasks are not supported`);
+				throw new Error(`tasks are not supported by the Git Graph Studio extension host (${name})`);
 			},
 			get taskExecutions(): never[] {
 				return [];
 			},
-			onDidStartTask: (() => new Disposable(() => undefined)) as never,
-			onDidEndTask: (() => new Disposable(() => undefined)) as never,
-			onDidStartTaskProcess: (() => new Disposable(() => undefined)) as never,
-			onDidEndTaskProcess: (() => new Disposable(() => undefined)) as never,
-			Task, ShellExecution, ProcessExecution, TaskGroup, TaskScope, TaskRevealKind, TaskPanelKind, CustomExecution
+			onDidStartTask: silentEvent() as never,
+			onDidEndTask: silentEvent() as never,
+			onDidStartTaskProcess: silentEvent() as never,
+			onDidEndTaskProcess: silentEvent() as never
 		},
 
-		/** The Test Controller API (VS Code 1.59): a package builds its test tree at
-		 *  activation (ms-python does, before any run). The controller, its items and the
-		 *  run handles are real, iterable objects over local state; a `createTestRun`
-		 *  answers a handle whose marks record locally, since no test UI renders yet —
-		 *  constructing an activation survives, a run report has no surface to reach. */
+		/** The Test Controller API (VS Code 1.59): the controller, its items and the run
+		 *  handles are real objects over local state; no test UI renders them. */
 		tests: {
 			createTestController: (id: string, label?: string) => {
+				unsupported('tests.createTestController', 'test results are not rendered');
 				const items = new Map<string, unknown>();
 				const collection = makeTestItemCollection(items);
-				const profiles: unknown[] = [];
 				const controller: Record<string, unknown> = {
 					id,
 					label,
 					items: collection,
-					event: new EventEmitter<unknown>().event,
 					refreshHandler: undefined,
 					resolveHandler: undefined as unknown,
-					updateContinuousHandler: undefined as unknown,
 					invalidateTestResults: () => undefined,
 					createTestItem: (itemId: string, itemLabel: string, uri?: Uri) => makeTestItem(itemId, itemLabel, uri),
-					createRunProfile: (profileLabel: string, kind: unknown, runHandler: unknown, isDefault?: boolean, tag?: unknown) => {
-						const profile: Record<string, unknown> = { profileLabel, kind, runHandler, isDefault, tag, configureHandler: undefined, dispose: () => undefined };
-						profiles.push(profile);
-						return profile;
-					},
+					createRunProfile: (profileLabel: string, kind: unknown, runHandler: unknown, isDefault?: boolean, tag?: unknown) => ({ label: profileLabel, kind, runHandler, isDefault, tag, configureHandler: undefined, onDidChangeDefault: silentEvent(), dispose: () => undefined }),
 					createTestRun: (_request: unknown, name?: string, _persist?: boolean) => ({
 						name,
-						token: { isCancellationRequested: false, onCancellationRequested: () => new Disposable(() => undefined) },
+						token: CancellationTokenNone,
+						isPersisted: false,
+						onDidDispose: silentEvent(),
 						started: () => undefined,
 						passed: () => undefined,
 						failed: () => undefined,
@@ -2016,68 +3404,112 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 						errored: () => undefined,
 						enqueued: () => undefined,
 						appendOutput: () => undefined,
-						ended: false,
+						addCoverage: () => undefined,
 						end: () => undefined
 					}),
 					dispose: () => undefined
 				};
 				return controller;
-			},
-			TestTag, TestMessage, TestRunRequest
+			}
 		},
 
 		debug: {
 			activeDebugSession: undefined,
+			activeStackItem: undefined,
 			activeDebugConsole: { append: () => undefined, appendLine: () => undefined },
 			breakpoints: [] as never[],
-			registerDebugConfigurationProvider: () => inert('debug.registerDebugConfigurationProvider'),
-			registerDebugAdapterDescriptorFactory: () => inert('debug.registerDebugAdapterDescriptorFactory'),
-			registerDebugAdapterTrackerFactory: () => inert('debug.registerDebugAdapterTrackerFactory'),
+			registerDebugConfigurationProvider: (type: string) => inert(`debug.registerDebugConfigurationProvider(${type})`),
+			registerDebugAdapterDescriptorFactory: (type: string) => inert(`debug.registerDebugAdapterDescriptorFactory(${type})`),
+			registerDebugAdapterTrackerFactory: (type: string) => inert(`debug.registerDebugAdapterTrackerFactory(${type})`),
+			registerDebugVisualizationProvider: (id: string) => inert(`debug.registerDebugVisualizationProvider(${id})`),
 			startDebugging: async () => {
-				console.info('[ggs] debug.startDebugging is not served by this host');
+				unsupported('debug.startDebugging', 'there is no debugger in this host');
 				return false;
 			},
-			addBreakpoints: () => undefined,
-			removeBreakpoints: () => undefined,
-			onDidStartDebugSession: (() => new Disposable(() => undefined)) as never,
-			onDidTerminateDebugSession: (() => new Disposable(() => undefined)) as never,
-			onDidChangeActiveDebugSession: (() => new Disposable(() => undefined)) as never,
-			onDidReceiveDebugSessionCustomEvent: (() => new Disposable(() => undefined)) as never
+			stopDebugging: async () => undefined,
+			addBreakpoints: () => unsupported('debug.addBreakpoints'),
+			removeBreakpoints: () => unsupported('debug.removeBreakpoints'),
+			asDebugSourceUri: (source: { path?: string }) => Uri.file(String(source?.path ?? '')),
+			onDidStartDebugSession: silentEvent() as never,
+			onDidTerminateDebugSession: silentEvent() as never,
+			onDidChangeActiveDebugSession: silentEvent() as never,
+			onDidReceiveDebugSessionCustomEvent: silentEvent() as never,
+			onDidChangeBreakpoints: silentEvent() as never,
+			onDidChangeActiveStackItem: silentEvent() as never
+		},
+
+		/** The Source Control API: a provider's objects are real and mutable (extensions
+		 *  write their resource states into them); the Source Control view is the app's own
+		 *  git view and renders none of them. */
+		scm: {
+			inputBox: { value: '', placeholder: '', enabled: true, visible: true },
+			createSourceControl: (id: string, label: string, rootUri?: Uri) => {
+				unsupported('scm.createSourceControl', 'the Source Control view shows the app\'s own git provider only');
+				const groups: unknown[] = [];
+				return {
+					id, label, rootUri,
+					inputBox: { value: '', placeholder: '', enabled: true, visible: true, validateInput: undefined },
+					count: undefined, quickDiffProvider: undefined, commitTemplate: undefined,
+					acceptInputCommand: undefined, statusBarCommands: undefined,
+					createResourceGroup: (groupId: string, groupLabel: string) => {
+						const group = { id: groupId, label: groupLabel, hideWhenEmpty: false, resourceStates: [] as unknown[], dispose: () => undefined };
+						groups.push(group);
+						return group;
+					},
+					dispose: () => undefined
+				};
+			}
+		},
+
+		notebooks: {
+			createNotebookController: (id: string, notebookType: string, label: string) => {
+				unsupported('notebooks.createNotebookController', 'there is no notebook editor');
+				return {
+					id, notebookType, label, supportedLanguages: [] as string[], supportsExecutionOrder: false,
+					executeHandler: undefined as unknown, interruptHandler: undefined as unknown,
+					onDidChangeSelectedNotebooks: silentEvent(),
+					createNotebookCellExecution: () => { throw new Error('notebooks are not supported by the Git Graph Studio extension host'); },
+					updateNotebookAffinity: () => undefined,
+					dispose: () => undefined
+				};
+			},
+			registerNotebookCellStatusBarItemProvider: (notebookType: string) => inert(`notebooks.registerNotebookCellStatusBarItemProvider(${notebookType})`),
+			createRendererMessaging: (rendererId: string) => {
+				unsupported(`notebooks.createRendererMessaging(${rendererId})`);
+				return { onDidReceiveMessage: silentEvent(), postMessage: async () => false };
+			}
 		},
 
 		authentication: {
-			registerAuthenticationProvider: () => inert('authentication.registerAuthenticationProvider'),
-			getSession: async (_providerId: string, _scopes: string[], _options?: unknown) => {
-				console.info('[ggs] authentication.getSession resolved undefined (no providers in this host)');
+			registerAuthenticationProvider: (id: string) => inert(`authentication.registerAuthenticationProvider(${id})`),
+			getSession: async (providerId: string, _scopes: readonly string[], options?: { createIfNone?: boolean; forceNewSession?: unknown }) => {
+				unsupported(`authentication.getSession(${providerId})`, 'no authentication providers exist; resolved undefined');
+				if (options?.createIfNone || options?.forceNewSession) throw new Error(`no authentication provider ${providerId} in this host`);
 				return undefined;
 			},
 			getAccounts: async () => [] as never[],
-			onDidChangeSessions: (() => new Disposable(() => undefined)) as never
+			onDidChangeSessions: silentEvent() as never
 		},
 
 		l10n: {
-			t: (message: string, ...args: unknown[]): string => {
-				if (args.length === 1 && args[0] !== null && typeof args[0] === 'object') {
-					let out = message;
-					for (const [key, value] of Object.entries(args[0] as Record<string, unknown>)) out = out.replace(`{${key}}`, String(value));
-					return out;
-				}
-				return message.replace(/\{(\d+)\}/g, (_all, index: string) => String(args[Number(index)] ?? ''));
+			/** `t(message, ...args)`, `t(message, { named })` and the `{ message, args }` form. */
+			t: (message: string | { message: string; args?: unknown[] | Record<string, unknown>; comment?: string | string[] }, ...args: unknown[]): string => {
+				let text = typeof message === 'string' ? message : message.message;
+				const values = typeof message === 'string' ? (args.length === 1 && args[0] !== null && typeof args[0] === 'object' && !Array.isArray(args[0]) ? args[0] : args) : message.args ?? [];
+				if (Array.isArray(values)) return text.replace(/\{(\d+)\}/g, (all, index: string) => (values[Number(index)] === undefined ? all : String(values[Number(index)])));
+				for (const [key, value] of Object.entries(values as Record<string, unknown>)) text = text.split(`{${key}}`).join(String(value));
+				return text;
 			},
 			bundle: undefined,
 			uri: undefined
 		},
 
 		comments: {
-			createCommentController: (_id: string, _label: string) => {
-				console.info('[ggs] comments.createCommentController is inert in this host');
+			createCommentController: (id: string, label: string) => {
+				unsupported('comments.createCommentController', 'comment threads are not rendered');
 				return {
-					commentingRangeProvider: undefined,
-					options: {},
-					get comments(): never[] {
-						return [];
-					},
-					createCommentThread: () => ({ comments: [], collapsibleState: 0, dispose: () => undefined, canReply: false }),
+					id, label, commentingRangeProvider: undefined, options: {}, reactionHandler: undefined,
+					createCommentThread: (uri: Uri, range: Range, comments: unknown[]) => ({ uri, range, comments, collapsibleState: 0, canReply: false, contextValue: undefined, label: undefined, state: undefined, dispose: () => undefined }),
 					dispose: () => undefined
 				};
 			}
@@ -2086,31 +3518,39 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 		env: {
 			language: ctx.language,
 			appName: 'Git Graph Studio',
+			appRoot: '',
 			appHost: 'desktop',
 			appVersion: ctx.appVersion ?? '1.0.0',
 			uriScheme: 'ggs',
 			uiKind: UIKind.Desktop,
 			machineId: 'studio',
-			sessionId: ctx.extensionId,
+			sessionId: `${ctx.extensionId}-${Date.now().toString(36)}`,
 			remoteName: undefined,
 			isNewAppInstall: false,
 			isTelemetryEnabled: false,
-			shell: 'cmd.exe',
-			getLanguage: () => ctx.language,
-			openExternal: (uri: Uri) => bridge.request('openExternal', [uri.toString()]) as Promise<boolean>,
-			// VS Code's telemetry entry point — extensions call it during activation (cspell
-			// logs its first usage event there), so an absent method kills the activation.
-			// This host collects nothing: an inert logger that accepts every call.
-			createTelemetryLogger: (_sender?: unknown, _configuration?: unknown) => {
-				console.info('[ggs] telemetry is not collected in this host');
-				return {
-					logUsage: () => undefined,
-					logError: () => undefined,
-					sendEventData: () => undefined,
-					sendErrorData: () => undefined,
-					dispose: () => undefined
-				};
+			logLevel: 3,
+			onDidChangeLogLevel: silentEvent() as never,
+			onDidChangeTelemetryEnabled: silentEvent() as never,
+			onDidChangeShell: silentEvent() as never,
+			get shell(): string {
+				return (ctx.platform ?? (uriWin32 ? 'win32' : 'linux')) === 'win32' ? 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' : '/bin/bash';
 			},
+			getLanguage: () => ctx.language,
+			openExternal: (uri: Uri | string) => bridge.request('openExternal', [typeof uri === 'string' ? uri : uri.toString(true)]) as Promise<boolean>,
+			/** Nothing is forwarded or tunnelled: a URI is already reachable as-is here. */
+			asExternalUri: async (uri: Uri) => uri,
+			// VS Code's telemetry entry point — extensions call it during activation (cspell
+			// logs its first usage event there). This host collects nothing.
+			createTelemetryLogger: (_sender?: unknown, _configuration?: unknown) => ({
+				logUsage: () => undefined,
+				logError: () => undefined,
+				sendEventData: () => undefined,
+				sendErrorData: () => undefined,
+				isUsageEnabled: false,
+				isErrorsEnabled: false,
+				onDidChangeEnableStates: silentEvent(),
+				dispose: () => undefined
+			}),
 			clipboard: {
 				writeText: (text: string) => bridge.request('clipboard.writeText', [text]) as Promise<void>,
 				readText: () => bridge.request('clipboard.readText', []) as Promise<string>
@@ -2118,88 +3558,89 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 		},
 
 		extensions: {
-			/** Only the extension itself is known to the frame — its exports never cross the
-			 *  frame boundary, and another extension's API surface is not reachable. */
+			/** Every installed extension the host listed; `exports` of another extension do
+			 *  not cross hosts (each runs in its own), and reading them is logged. */
 			getExtension: (extensionId: string) => {
-				if (extensionId !== ctx.extensionId) return undefined;
-				return extensionEntry(ctx);
+				if (typeof extensionId !== 'string') return undefined;
+				if (extensionId.toLowerCase() === ctx.extensionId.toLowerCase()) return extensionEntry(ctx);
+				const other = (ctx.extensions ?? []).find((entry) => entry.id.toLowerCase() === extensionId.toLowerCase());
+				if (!other) {
+					shimLog('debug', `extensions.getExtension(${extensionId}): not installed`);
+					return undefined;
+				}
+				return foreignExtension(other);
 			},
-			onDidChange: extensionsChanged.event as never,
-			all: [{ id: ctx.extensionId, extensionPath: ctx.extensionPath, isActive: true, exports: undefined, packageJSON: {}, activate: async () => undefined }] as never[]
+			get all(): unknown[] {
+				const others = (ctx.extensions ?? []).filter((entry) => entry.id.toLowerCase() !== ctx.extensionId.toLowerCase()).map(foreignExtension);
+				return [extensionEntry(ctx), ...others];
+			},
+			get allAcrossExtensionHosts(): unknown[] {
+				return this.all;
+			},
+			onDidChange: silentEvent() as never
 		},
 
-		/** The log-level enum VS Code 1.74 added with LogOutputChannel: a language client maps
-		 *  its trace settings onto it at `createClient` time (cspell's does). */
-		LogLevel: { Off: 1, Trace: 2, Debug: 3, Info: 4, Warning: 5, Error: 6 },
-		/** `IndentAction`: the onEnter auto-indent rules an onLanguage package's providers
-		 *  return (ms-python's python extension constructs them at eval time). */
+		/** The log-level enum VS Code 1.74 added with LogOutputChannel. */
+		LogLevel: { Off: 0, Trace: 1, Debug: 2, Info: 3, Warning: 4, Error: 5 },
+		/** `IndentAction`: the onEnter auto-indent rules (ms-python constructs them at eval). */
 		IndentAction: { None: 0, Indent: 1, IndentOutdent: 2, Outdent: 3 },
-		/** `ColorThemeKind`: what `window.activeColorTheme.kind` answers and a package's
-		 *  theme-aware features branch on (cspell's config watcher defaults from it). */
 		ColorThemeKind: { Light: 1, Dark: 2, HighContrast: 3, HighContrastLight: 4 },
-		/** The Test API's run-profile kinds (`createRunProfile`'s second argument). */
 		TestRunProfileKind: { Run: 1, Debug: 2, Coverage: 3 },
-		Uri,
-		Position,
-		Range,
-		Selection,
-		Location,
-		Disposable,
-		EventEmitter,
-		CancellationTokenSource,
-		ViewColumn,
-		StatusBarAlignment,
-		ConfigurationTarget,
-		TreeItemCollapsibleState,
-		ProgressLocation,
-		UIKind,
-		ExtensionMode,
-		ExtensionKind,
-		FileType,
-		EndOfLine,
-		OverviewRulerLane,
-		DecorationRangeBehavior,
-		LanguageStatusSeverity,
-		TextEditorRevealType,
-		QuickPickItemKind,
-		DiagnosticSeverity,
-		CompletionItemKind,
-		SymbolKind,
-		CommentThreadCollapsibleState,
-		CodeActionKind,
-		MarkdownString,
-		ThemeIcon,
-		ThemeColor,
-		TreeItem,
-		SnippetString,
-		TextEdit,
-		RelativePattern,
-		FileSystemError,
-		WorkspaceEdit,
-		Diagnostic,
-		DiagnosticTag,
-		DiagnosticRelatedInformation,
-		CompletionItem,
-		CodeLens,
-		DocumentLink,
-		CodeAction,
-		SymbolInformation,
-		CallHierarchyItem,
-		TypeHierarchyItem,
-		InlayHint,
-		InlayHintKind,
-		CancellationError,
+		TestResultState: { Queued: 1, Running: 2, Passed: 3, Failed: 4, Skipped: 5, Errored: 6 },
+		QuickInputButtons: { Back: { iconPath: new ThemeIcon('arrow-left') } },
+		CancellationToken: { None: CancellationTokenNone, Cancelled: CancellationTokenCancelled },
+		ExtensionRuntime: { Node: 1, Webworker: 2 },
+		LanguageModelChatMessageRole: { User: 1, Assistant: 2 },
+		Uri, Position, Range, Selection, Location, Disposable, EventEmitter, CancellationTokenSource,
+		ViewColumn, StatusBarAlignment, ConfigurationTarget, TreeItemCollapsibleState, ProgressLocation,
+		UIKind, ExtensionMode, ExtensionKind, FileType, EndOfLine, OverviewRulerLane, DecorationRangeBehavior,
+		LanguageStatusSeverity, TextEditorRevealType, QuickPickItemKind, DiagnosticSeverity, CompletionItemKind,
+		SymbolKind, CommentThreadCollapsibleState, CodeActionKind, MarkdownString, ThemeIcon, ThemeColor,
+		TreeItem, SnippetString, TextEdit, SnippetTextEdit, RelativePattern, FileSystemError, WorkspaceEdit,
+		Diagnostic, DiagnosticTag, DiagnosticRelatedInformation, CompletionItem, CompletionList, CodeLens,
+		DocumentLink, CodeAction, SymbolInformation, DocumentSymbol, CallHierarchyItem, CallHierarchyIncomingCall,
+		CallHierarchyOutgoingCall, TypeHierarchyItem, InlayHint, InlayHintKind, InlayHintLabelPart, CancellationError,
+		Hover, SignatureHelp, SignatureInformation, ParameterInformation, FoldingRange, FoldingRangeKind,
+		DocumentHighlight, DocumentHighlightKind, SelectionRange, LinkedEditingRanges, EvaluatableExpression,
+		InlineValueText, InlineValueVariableLookup, InlineValueEvaluatableExpression, InlineCompletionItem,
+		InlineCompletionList, InlineCompletionTriggerKind, Color, ColorInformation, ColorPresentation,
+		SemanticTokensLegend, SemanticTokens, SemanticTokensEdit, SemanticTokensEdits, SemanticTokensBuilder,
+		DocumentDropEdit, FileDecoration, TerminalLink, TerminalProfile, DataTransfer, DataTransferItem,
+		TabInputText, TabInputTextDiff, TabInputWebview, TabInputCustom, TabInputTerminal,
+		NotebookCellData, NotebookData, NotebookRange, NotebookCellKind, Breakpoint, SourceBreakpoint,
+		FunctionBreakpoint, DebugAdapterExecutable, DebugAdapterServer, DebugAdapterNamedPipeServer,
+		DebugAdapterInlineImplementation, DebugConsoleMode, TextEditorSelectionChangeKind, TextDocumentSaveReason,
+		TextDocumentChangeReason, FileChangeType, TreeItemCheckboxState, SignatureHelpTriggerKind,
+		CompletionTriggerKind, CodeActionTriggerKind, CompletionItemTag, SymbolTag, TextEditorCursorStyle,
+		TextEditorLineNumbersStyle, EnvironmentVariableMutatorType, CommentMode, TerminalLocation,
+		TerminalExitReason, InputBoxValidationSeverity, ColorFormat, LanguageModelError,
+		Task, ShellExecution, ProcessExecution, CustomExecution, TaskGroup, TaskScope, TaskRevealKind, TaskPanelKind,
+		TestTag, TestMessage, TestRunRequest,
 
-		/** Not part of VS Code's `vscode` module: the mementos `ExtensionContext.globalState` /
-		 *  `workspaceState` are built from (extHostBoot wires them into the context). */
+		/** Not part of VS Code's `vscode` module: the mementos and secrets the
+		 *  ExtensionContext is built from (extHostBoot / nodeHost wire them in). */
 		__mementos: { global: globalState, workspace: workspaceState },
+		__secrets: new SecretStorage(bridge),
+		__environment: new EnvironmentVariableCollection(ctx.extensionId),
 
 		/** Not part of VS Code's `vscode` module either: the host's tree plumbing — the
-		 *  frame's answer to the host calls `tree.getChildren` and `treeView.setVisible`
-		 *  (extHostBoot routes them here). */
+		 *  frame's answer to the host calls `tree.getChildren` / `treeView.setVisible` /
+		 *  `treeView.select` / `treeView.expand` / `treeView.checkbox`. */
 		__serveTree: {
-			children: async (viewId: string, handle: string | null): Promise<unknown[]> => (await treeRegistrations.get(viewId)?.children(handle)) ?? [],
-			setVisible: (viewId: string, visible: boolean): void => treeRegistrations.get(viewId)?.setVisible(visible)
+			children: async (viewId: string, handle: string | null): Promise<unknown[]> => {
+				const registration = treeRegistrations.get(viewId);
+				if (!registration) return [];
+				try {
+					return await registration.children(handle);
+				} catch (error) {
+					shimLog('error', `tree view ${viewId}: getChildren/getTreeItem failed: ${String(error)}`, error);
+					return [];
+				}
+			},
+			setVisible: (viewId: string, visible: boolean): void => treeRegistrations.get(viewId)?.setVisible(visible),
+			select: (viewId: string, handles: string[]): void => treeRegistrations.get(viewId)?.select(handles),
+			expand: (viewId: string, handle: string, expanded: boolean): void => treeRegistrations.get(viewId)?.expand(handle, expanded),
+			checkbox: (viewId: string, handle: string, state: number): void => treeRegistrations.get(viewId)?.check(handle, state)
 		},
 
 		/** Not part of VS Code's `vscode` module either: the host's answer to
@@ -2207,9 +3648,18 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 		__runFormatter: async (id: string, document: { path: string; languageId: string; text: string }, options: { tabSize: number; insertSpaces: boolean }): Promise<unknown[]> => {
 			const entry = formattingProviders.get(id);
 			if (!entry) throw new Error(`no formatting provider ${id}`);
-			const doc = formatterDocument(document.path, document.languageId, document.text);
-			const edits = await Promise.resolve(entry.provider.provideDocumentFormattingEdits(doc, options, undefined));
-			return (edits ?? []) as unknown[];
+			const { state } = rememberDocument(document.path, document.text, document.languageId);
+			const view = documentView(state, () => saveDocument(document.path));
+			try {
+				const edits = await Promise.resolve(entry.run(view, options, CancellationTokenNone));
+				return (Array.isArray(edits) ? edits : []).map((edit) => {
+					const value = edit as { range?: Range; newText?: string };
+					return { range: value.range ? { start: { line: value.range.start.line, character: value.range.start.character }, end: { line: value.range.end.line, character: value.range.end.character } } : undefined, newText: value.newText ?? '' };
+				});
+			} catch (error) {
+				shimLog('error', `formatting provider ${id} failed on ${document.path}: ${String(error)}`, error);
+				throw error;
+			}
 		},
 
 		/** Not part of VS Code's `vscode` module either: the webview view plumbing — the
@@ -2217,8 +3667,11 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 		 *  and `webviewView.setVisible` (the sidebar's view switching). */
 		__serveWebviewView: {
 			resolve: async (viewId: string): Promise<void> => {
-				const provider = webviewViewProviders.get(viewId);
-				if (provider === undefined) return;
+				const viewProvider = webviewViewProviders.get(viewId);
+				if (viewProvider === undefined) {
+					shimLog('warn', `webview view ${viewId} was shown but no provider is registered for it`);
+					return;
+				}
 				let view = webviewViews.get(viewId);
 				if (view === undefined) {
 					view = new WebviewView(bridge, ctx, viewId, {});
@@ -2226,23 +3679,47 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 				}
 				if (view.resolved) return;
 				view.resolved = true;
-				await Promise.resolve(provider.resolveWebviewView(view, { extensionId: ctx.extensionId, extensionPath: ctx.extensionPath, globalState, workspaceState }, { isCancellationRequested: false, onCancellationRequested: () => new Disposable(() => undefined) }));
+				try {
+					await Promise.resolve(viewProvider.resolveWebviewView(view, { state: undefined }, CancellationTokenNone));
+				} catch (error) {
+					shimLog('error', `resolveWebviewView(${viewId}) failed: ${String(error)}`, error);
+					throw error;
+				}
 			},
 			setVisible: (viewId: string, visible: boolean): void => webviewViews.get(viewId)?.setVisible(visible)
 		},
 
 		/** Deliver an event the host pushed in (see `HostEvent`); the frame's single message
 		 *  listener routes here — the shim needs no other channel into itself. */
-		handleHostEvent: (event: HostEvent) => dispatchHostEvent(event)
+		handleHostEvent: (event: HostEvent) => {
+			try {
+				dispatchHostEvent(event);
+			} catch (error) {
+				shimLog('error', `host event ${event?.event} failed: ${String(error)}`, error);
+			}
+		}
 	};
+
+	/** One registered formatter (document or range) behind an id the host routes by. */
+	function registerFormatter(selector: unknown, run: (document: Record<string, unknown>, options: unknown, token: CancellationToken) => unknown): Disposable {
+		// VS Code selectors arrive as strings (`'python'`) or document filters
+		// (`{ language, scheme, pattern }`) — normalized to filter objects for the host match.
+		const selectors = (Array.isArray(selector) ? selector : [selector]).map((entry) => (typeof entry === 'string' ? { language: entry } : entry));
+		const id = `fmt-${++formatterSeq}`;
+		formattingProviders.set(id, { selectors, run });
+		send('languages.registerFormatting', [{ id, selectors: selectors.map(plainSelector) }]);
+		return new Disposable(() => {
+			formattingProviders.delete(id);
+			send('languages.unregisterFormatting', [{ id }]);
+		});
+	}
 
 	dispatchHostEvent = (event: HostEvent): void => {
 		if (event.event === 'configChanged' && event.settings) {
 			const changed = changedSettingKeys(ctx.settings, event.settings);
 			for (const key of Object.keys(ctx.settings)) delete ctx.settings[key];
 			Object.assign(ctx.settings, event.settings);
-			// VS Code's listeners read the event (`affectsConfiguration(section)`); firing
-			// undefined threw inside every such handler, so no setting change ever applied.
+			// VS Code's listeners read the event (`affectsConfiguration(section)`).
 			if (changed.length > 0) configurationChanged.fire(configurationChangeEvent(changed));
 			return;
 		}
@@ -2254,6 +3731,10 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			const panel = webviewPanels.get(event.panelId);
 			webviewPanels.delete(event.panelId);
 			panel?.close();
+			return;
+		}
+		if (event.event === 'webviewViewState' && event.panelId !== undefined) {
+			webviewPanels.get(event.panelId)?.setActive(event.active === true);
 			return;
 		}
 		if (event.event === 'webviewViewMessage' && event.viewId !== undefined) {
@@ -2269,6 +3750,17 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			themeChangedEmitter.fire({ kind: themeKind });
 			return;
 		}
+		if (event.event === 'workspaceFoldersChanged' && Array.isArray(event.folders)) {
+			const before = workspaceFolders;
+			workspaceFolders = event.folders.map((path, index) => ({ uri: Uri.file(path), name: path.split(/[\\/]/).filter(Boolean).pop() ?? path, index }));
+			const keys = (list: typeof workspaceFolders) => new Set(list.map((folder) => documentKey(folder.uri.fsPath)));
+			const beforeKeys = keys(before);
+			const afterKeys = keys(workspaceFolders);
+			const added = workspaceFolders.filter((folder) => !beforeKeys.has(documentKey(folder.uri.fsPath)));
+			const removed = before.filter((folder) => !afterKeys.has(documentKey(folder.uri.fsPath)));
+			if (added.length > 0 || removed.length > 0) workspaceFoldersChanged.fire({ added, removed });
+			return;
+		}
 		if (event.event === 'activeEditorChanged') {
 			const before = activeEditor?.path;
 			const incoming = event.editor ?? null;
@@ -2277,53 +3769,172 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			activeEditor = incoming !== null && incoming.text === undefined && held !== null && before === incoming.path
 				? { ...incoming, text: held.text }
 				: incoming;
+			// The document table learns the text; a changed text is an edit VS Code reports.
+			let opened = false;
+			if (activeEditor !== null && activeEditor.text !== undefined) {
+				const remembered = rememberDocument(activeEditor.path, activeEditor.text, activeEditor.languageId);
+				opened = remembered.opened;
+				if (remembered.changed) fireDocumentChange(remembered.state, remembered.previous);
+			}
 			if (before !== activeEditor?.path) {
-				activeEditorChangedEmitter.fire(undefined);
-				// The change events carry real payloads — a language client's selection
-				// handler reads `event.textEditor`, the visible-editors handler filters
-				// `event.textEditors` — firing `undefined` crashed every subscriber.
+				activeEditorChangedEmitter.fire(activeEditor !== null ? makeTextEditorProxy() : undefined);
 				// VS Code's payload for this event is the editors array itself.
 				visibleEditorsChanged.fire(activeEditor !== null ? [makeTextEditorProxy()] : []);
 			}
-			selectionChanged.fire({
-				textEditor: makeTextEditorProxy(),
-				selections: [makeTextEditorProxy().selection],
-				kind: 2 // TextEditorSelectionChangeKind.Keyboard — no mouse/command tracking
-			});
+			if (activeEditor !== null) {
+				const editor = makeTextEditorProxy();
+				selectionChanged.fire({ textEditor: editor, selections: editor.selections as unknown[], kind: TextEditorSelectionChangeKind.Keyboard });
+			}
 			// A document becoming active with its text in hand is VS Code's
-			// onDidOpenTextDocument (once per path per session). When the arrival push
-			// raced the text load, this fires on the later push that carries the content —
-			// the shape a language client's didOpen needs.
-			if (activeEditor !== null && activeEditor.text !== undefined && !openedDocuments.has(activeEditor.path)) {
-				openedDocuments.add(activeEditor.path);
-				// Gated tracing (`localStorage.ggs-ext-debug = 1` in the workbench): the read
-				// itself must be guarded — a sandboxed frame's opaque origin throws
-				// SecurityError on the localStorage access, `typeof` alone does not help.
-				try {
-					if (localStorage.getItem('ggs-ext-debug')) {
-						console.info(`[ggs-ext-debug] onDidOpenTextDocument ${activeEditor.path} (${String(activeEditor.text).length} chars)`);
-					}
-				} catch {
-					// opaque-origin frame: no storage, no tracing
-				}
-				documentOpened.fire(makeTextDocument(activeEditor.path) as { fileName: string } & Record<string, unknown>);
+			// onDidOpenTextDocument (once per path per session).
+			if (opened && activeEditor !== null) {
+				shimLog('trace', `onDidOpenTextDocument ${activeEditor.path} (${String(activeEditor.text).length} chars)`);
+				documentOpened.fire(makeTextDocument(activeEditor.path));
+			}
+			return;
+		}
+		if (event.event === 'documentChanged' && event.path !== undefined && typeof event.text === 'string') {
+			const remembered = rememberDocument(event.path, event.text, event.languageId ?? '');
+			if (activeEditor?.path === event.path) activeEditor = { ...activeEditor, text: event.text };
+			if (remembered.opened) documentOpened.fire(makeTextDocument(event.path));
+			else if (remembered.changed) fireDocumentChange(remembered.state, remembered.previous);
+			return;
+		}
+		if (event.event === 'documentClosed' && event.path !== undefined) {
+			const key = documentKey(event.path);
+			const state = documents.get(key);
+			if (state) {
+				documents.delete(key);
+				documentClosed.fire({ ...documentView(state, async () => false), isClosed: true });
 			}
 			return;
 		}
 		if (event.event === 'documentSaved' && event.path !== undefined) {
-			// The save refreshed the file on disk; the active-document copy (if it is the
-			// saved one) may be stale — the next active-editor push re-sends it.
-			documentSaved.fire(makeTextDocument(event.path) as { fileName: string } & Record<string, unknown>);
+			documentSaved.fire(makeTextDocument(event.path));
+			return;
 		}
 		if (event.event === 'fsChanged' && event.fs) {
 			fsChanged.fire(event.fs);
 		}
 	};
 
+	/** `onDidChangeTextDocument` for a whole-text replacement (the host sends the new text,
+	 *  not the delta — one content change spanning the old document, VS Code's shape). */
+	function fireDocumentChange(state: DocumentState, before: string): void {
+		const lines = before.split('\n');
+		const lastLine = lines.length - 1;
+		const range = new Range(0, 0, lastLine, lines[lastLine]!.replace(/\r$/, '').length);
+		documentChanged.fire({
+			document: documentView(state, () => saveDocument(state.path)),
+			contentChanges: [{ range, rangeOffset: 0, rangeLength: before.length, text: state.text }],
+			reason: undefined
+		});
+	}
 	return api;
 }
 
+/** A document selector's score for a document — VS Code's rules: a string matches the
+ *  language (`*` everything); a filter's `language`, `scheme` and `pattern` must all match
+ *  where declared; an array takes the best entry. */
+export function selectorScore(selector: unknown, document: { languageId?: string; uri?: Uri; fileName?: string } | undefined): number {
+	const scoreOne = (entry: unknown): number => {
+		if (typeof entry === 'string') return entry === '*' ? 5 : entry === document?.languageId ? 10 : 0;
+		if (entry === null || typeof entry !== 'object') return 0;
+		const filter = entry as { language?: string; scheme?: string; pattern?: string | { pattern?: string; baseUri?: Uri; base?: string } };
+		let score = 0;
+		if (filter.language !== undefined) {
+			if (filter.language === '*') score = Math.max(score, 5);
+			else if (filter.language === document?.languageId) score = 10;
+			else return 0;
+		}
+		if (filter.scheme !== undefined) {
+			const scheme = document?.uri?.scheme ?? 'file';
+			if (filter.scheme === '*') score = Math.max(score, 5);
+			else if (filter.scheme === scheme) score = Math.max(score, 10);
+			else return 0;
+		}
+		if (filter.pattern !== undefined) {
+			const path = documentKey(document?.uri?.fsPath ?? document?.fileName ?? '');
+			const pattern = typeof filter.pattern === 'string' ? filter.pattern : filter.pattern.pattern ?? '';
+			const base = typeof filter.pattern === 'string' ? '' : documentKey(filter.pattern.baseUri?.fsPath ?? filter.pattern.base ?? '');
+			const relative = base !== '' && path.toLowerCase().startsWith(base.toLowerCase() + '/') ? path.slice(base.length + 1) : path;
+			const matches = watcherGlobMatches(pattern, relative) || watcherGlobMatches(pattern.startsWith('**/') ? pattern : `**/${pattern}`, relative.replace(/^\//, ''));
+			if (!matches) return 0;
+			score = Math.max(score, 10);
+		}
+		return score;
+	};
+	const selectors = Array.isArray(selector) ? selector : [selector];
+	return Math.max(0, ...selectors.map(scoreOne));
+}
+
+/** A document filter as plain data for the host (a RelativePattern becomes its glob and
+ *  base path). */
+function plainSelector(entry: unknown): unknown {
+	if (entry === null || typeof entry !== 'object') return entry;
+	const filter = entry as { language?: string; scheme?: string; pattern?: unknown; notebookType?: string };
+	const pattern = filter.pattern;
+	return {
+		language: filter.language,
+		scheme: filter.scheme,
+		pattern: typeof pattern === 'string' ? pattern : pattern !== null && typeof pattern === 'object' ? (pattern as { pattern?: string }).pattern : undefined,
+		base: pattern !== null && typeof pattern === 'object' ? ((pattern as { baseUri?: Uri }).baseUri?.fsPath ?? pathOf((pattern as { base?: string }).base)) : undefined
+	};
+}
+
+/** A Diagnostic as the plain shape the editor's diagnostics store renders. */
+function serializeDiagnostic(value: unknown): SerializableDiagnostic {
+	const diagnostic = value as { range?: Range; severity?: number; message?: string; source?: string; code?: unknown };
+	const code = diagnostic.code !== null && typeof diagnostic.code === 'object' ? (diagnostic.code as { value?: string | number }).value : diagnostic.code as string | number | undefined;
+	const range = diagnostic.range ?? new Range(0, 0, 0, 0);
+	return {
+		range: { start: { line: range.start.line, character: range.start.character }, end: { line: range.end.line, character: range.end.character } },
+		severity: diagnostic.severity,
+		message: String(diagnostic.message ?? ''),
+		source: diagnostic.source,
+		code
+	};
+}
+
 export type VscodeApi = ReturnType<typeof createVscodeApi>;
+
+/** The answer `serveHostCall` gives for a method it does not serve. */
+export const UNSERVED_HOST_CALL = Symbol('unserved host call');
+
+/** The host → extension call vocabulary every extension host serves the same way (the
+ *  sandboxed frame, the real-Node host and ggs-node): tree view walks and pushes, the
+ *  formatter run and the webview view resolution. One table, so no host lags the others
+ *  (ggs-node answered none of these before, and its tree views stayed empty). */
+export function serveHostCall(api: VscodeApi | null, method: string, args: unknown[]): unknown {
+	if (api === null) return UNSERVED_HOST_CALL;
+	switch (method) {
+		case 'tree.getChildren':
+			return api.__serveTree.children(args[0] as string, (args[1] as string | null) ?? null);
+		case 'treeView.setVisible':
+			api.__serveTree.setVisible(args[0] as string, args[1] as boolean);
+			return undefined;
+		case 'treeView.select':
+			api.__serveTree.select(args[0] as string, (args[1] as string[]) ?? []);
+			return undefined;
+		case 'treeView.expand':
+			api.__serveTree.expand(args[0] as string, args[1] as string, args[2] as boolean);
+			return undefined;
+		case 'treeView.checkbox':
+			api.__serveTree.checkbox(args[0] as string, args[1] as string, args[2] as number);
+			return undefined;
+		case 'formatDocument.run': {
+			const [id, doc, options] = args as [string, { path: string; languageId: string; text: string }, { tabSize: number; insertSpaces: boolean }];
+			return api.__runFormatter(id, doc, options);
+		}
+		case 'webviewView.resolve':
+			return api.__serveWebviewView.resolve(args[0] as string);
+		case 'webviewView.setVisible':
+			api.__serveWebviewView.setVisible(args[0] as string, args[1] as boolean);
+			return undefined;
+		default:
+			return UNSERVED_HOST_CALL;
+	}
+}
 
 /** The extension's own `Extension<T>` entry — `context.extension` and
  *  `extensions.getExtension(id)` answer the same object, as in VS Code, so a package
@@ -2332,6 +3943,8 @@ export function extensionEntry(context: HostContext): Record<string, unknown> {
 	return {
 		id: context.extensionId,
 		extensionPath: context.extensionPath,
+		extensionUri: Uri.file(context.extensionPath),
+		extensionKind: ExtensionKind.Workspace,
 		isActive: true,
 		exports: undefined,
 		packageJSON: context.packageJSON ?? {},
@@ -2339,29 +3952,56 @@ export function extensionEntry(context: HostContext): Record<string, unknown> {
 	};
 }
 
+/** Another installed extension as `extensions.getExtension` reports it: its manifest
+ *  and path are real; its `exports` live in its own host and cannot be reached from here
+ *  (reading them is logged), and `activate()` asks the workbench to wake it. */
+function foreignExtension(entry: { id: string; extensionPath: string; packageJSON: Record<string, unknown>; isActive: boolean }): Record<string, unknown> {
+	return {
+		id: entry.id,
+		extensionPath: entry.extensionPath,
+		extensionUri: Uri.file(entry.extensionPath),
+		extensionKind: ExtensionKind.Workspace,
+		packageJSON: entry.packageJSON,
+		isActive: entry.isActive,
+		get exports(): undefined {
+			shimLogOnce(`exports:${entry.id}`, 'warn', `the exports of ${entry.id} are not reachable: every extension runs in its own host here`);
+			return undefined;
+		},
+		activate: async () => {
+			shimLogOnce(`activate:${entry.id}`, 'warn', `the exports of ${entry.id} are not reachable: every extension runs in its own host here`);
+			return undefined;
+		}
+	};
+}
+
 /** The ExtensionContext VS Code hands to activate(): the mementos are the shim's persisted
- *  ones (`globalState` survives restarts, `workspaceState` per install), and `extension` is
- *  the extension's own API entry, as `vscode.extensions.getExtension(id)` reports it.
+ *  ones, the storage directories live under `~/.ggs/` (never inside the install directory
+ *  an upgrade replaces), `secrets` and `environmentVariableCollection` are real objects.
  *  Shared by both hosts that run extension code: the sandboxed frame (extHostBoot) and the
  *  real-Node extension host (nodeHost) — one definition, so the two cannot drift. */
 export function activationContext(context: HostContext, api: VscodeApi): Record<string, unknown> {
-	const asUri = (path: string) => Uri.file(path);
+	const globalPath = context.storage?.global ?? context.extensionPath;
+	const workspacePath = context.storage ? context.storage.workspace ?? undefined : context.extensionPath;
+	const logPath = context.storage?.log ?? context.extensionPath;
+	const asAbsolutePath = (relative: string) => `${context.extensionPath.replace(/[\\/]+$/, '')}/${relative.replace(/^\.?[\\/]/, '')}`;
 	return {
 		subscriptions: [] as Disposable[],
 		extensionPath: context.extensionPath,
-		extensionUri: asUri(context.extensionPath),
+		extensionUri: Uri.file(context.extensionPath),
 		extension: extensionEntry(context),
+		extensionMode: ExtensionMode.Production, // neither host has a dev mode
+		extensionRuntime: 1,
 		globalState: api.__mementos.global,
 		workspaceState: api.__mementos.workspace,
-		storagePath: context.extensionPath,
-		globalStoragePath: context.extensionPath,
-		globalStorageUri: asUri(context.extensionPath),
-		storageUri: asUri(context.extensionPath),
-		logUri: asUri(context.extensionPath),
-		logPath: context.extensionPath,
-		extensionMode: 3, // ExtensionMode.Production — neither host has a dev mode
-		asAbsolutePath: (relative: string) => context.extensionPath + '/' + relative,
-		environmentVariableCollection: undefined,
-		outputChannel: { append: () => undefined, appendLine: () => undefined, show: () => undefined, dispose: () => undefined }
+		secrets: api.__secrets,
+		environmentVariableCollection: api.__environment,
+		storagePath: workspacePath,
+		storageUri: workspacePath === undefined ? undefined : Uri.file(workspacePath),
+		globalStoragePath: globalPath,
+		globalStorageUri: Uri.file(globalPath),
+		logPath,
+		logUri: Uri.file(logPath),
+		languageModelAccessInformation: { onDidChange: silentEvent(), canSendRequest: () => undefined },
+		asAbsolutePath
 	};
 }

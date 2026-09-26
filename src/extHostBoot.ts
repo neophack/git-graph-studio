@@ -13,8 +13,8 @@
 //   Call (host -> frame): running a command handler the extension registered, deactivate,
 //                         tree view walks, webview view resolutions.
 
-console.info('[frame-log] boot module executing');
-import { activationContext, createVscodeApi, Disposable, rehydrateUris, Uri, type HostContext, type VscodeApi } from './vscodeApi';
+import { activationContext, createVscodeApi, Disposable, rehydrateUris, serveHostCall, setUriPlatform, shimLog, UNSERVED_HOST_CALL, Uri, type HostContext, type VscodeApi } from './vscodeApi';
+import { setShimFailureReporter } from './nodeShims/shared';
 import { createNodeRequire, type NodeEnv } from './extModuleLoader';
 import { createNodeBuiltins, installNodeGlobals } from './nodeShims';
 
@@ -115,26 +115,9 @@ function handleCall(method: string, args: unknown[]): unknown {
 		module_?.exports.deactivate?.();
 		return undefined;
 	}
-	// The tree views: one level's children (serialized in-frame through getTreeItem), and
-	// the visibility pushes the sidebar's view switching produces.
-	if (method === 'tree.getChildren') return api_?.__serveTree.children(args[0] as string, args[1] as string | null) ?? [];
-	if (method === 'treeView.setVisible') {
-		api_?.__serveTree.setVisible(args[0] as string, args[1] as boolean);
-		return undefined;
-	}
-	// A webview view's first visibility: its provider's resolveWebviewView runs here, the
-	// way VS Code defers resolution to the view's first show.
-	if (method === 'formatDocument.run') {
-				// The document formatting provider the frame registered runs over the host's
-				// current text; the edits cross back to the host's open-editor applier.
-				const [id, doc, options] = args as [string, { path: string; languageId: string; text: string }, { tabSize: number; insertSpaces: boolean }];
-				return api_?.__runFormatter(id, doc, options);
-			}
-			if (method === 'webviewView.resolve') return api_?.__serveWebviewView.resolve(args[0] as string);
-	if (method === 'webviewView.setVisible') {
-		api_?.__serveWebviewView.setVisible(args[0] as string, args[1] as boolean);
-		return undefined;
-	}
+	// Tree views, the formatter run and webview views: the shared host-call table.
+	const served = serveHostCall(api_, method, args);
+	if (served !== UNSERVED_HOST_CALL) return served;
 	throw new Error(`unknown extension host call: ${method}`);
 }
 
@@ -150,7 +133,7 @@ for (const level of ['log', 'info', 'warn', 'error'] as const) {
 		// Host-side logs ([frame-log]/[compat-msg]/[ggs-ext]) re-enter this wrapper under a
 		// shared console (the jsdom tests host frame and workbench on one window) — without
 		// this guard they mirror each other forever.
-		if (text.startsWith('[frame-log]') || text.startsWith('[compat-msg]') || text.startsWith('[ggs-ext]') || text.startsWith('[compat-test]')) return;
+		if (text.startsWith('[ext-host]') || text.startsWith('[frame-log]') || text.startsWith('[compat-msg]') || text.startsWith('[ggs-ext]') || text.startsWith('[compat-test]')) return;
 		try {
 			parent.postMessage({ type: '__studioExtBootLog', level, text: text.slice(0, 400) }, '*');
 		} catch { /* logging must never throw */ }
@@ -202,9 +185,13 @@ window.addEventListener('message', (event) => {
 });
 
 function boot(message: InitMessage): void {
+	// The platform spells every `Uri.fsPath` from here on — pinned before the first Uri.
+	const platform = message.context.platform ?? message.nodeEnv?.platform;
+	setUriPlatform(platform);
 	const context: HostContext = {
 		...message.context,
-		workspaceFolders: message.context.workspaceFolders.map((folder) => ({ ...folder, uri: Uri.file(folder.uri.path) }))
+		platform,
+		workspaceFolders: message.context.workspaceFolders.map((folder) => ({ ...folder, uri: Uri.file(folder.uri.fsPath || folder.uri.path) }))
 	};
 	// The package's own manifest, parsed here for `context.extension.packageJSON` — the
 	// host message carries only the code map, and the entry choice already reads this text.
@@ -222,6 +209,9 @@ function boot(message: InitMessage): void {
 		unregisterDocProvider: (scheme) => docProviders.delete(scheme)
 	});
 	api_ = api;
+	// A Node surface the frame cannot serve (a sync spawn, a socket) is logged before it
+	// throws — a package that catches the error and carries on still leaves the trace.
+	setShimFailureReporter((text, level = 'warn') => shimLog(level, text));
 	// The Node compatibility layer: the code map (the host's preload, or this message's
 	// bare entry code standing in for it), the builtin shims over it, and the globals
 	// extension code assumes (`process`, `Buffer`, `global`, `setImmediate`).

@@ -12,6 +12,9 @@ import { el, notify } from './ui';
 export type AutoSave = 'off' | 'afterDelay' | 'onFocusChange' | 'onWindowChange';
 export type LinuxDmabuf = 'auto' | 'disable' | 'keep';
 export type WorkbenchDensity = 'comfortable' | 'compact';
+/** The extension host log's threshold (`extLog.ts`): what reaches the Output channel and
+ *  `~/.ggs/logs/ext-host.log`. */
+export type ExtensionLogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error';
 
 export interface AppSettings {
 	theme: string;
@@ -62,6 +65,10 @@ export interface AppSettings {
 	 *  exactly, an all-lowercase query ignores case. The Match Case toggle shows the state
 	 *  the query's case picked — and can still override it — in every search field. */
 	searchSmartCase: boolean;
+	/** The extension host log's level: warnings and errors (activation failures, handler
+	 *  exceptions, unsupported API use) always reach the log at `info`; `debug` adds every
+	 *  host request an extension makes, `trace` their answers. */
+	extensionLogLevel: ExtensionLogLevel;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -73,7 +80,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	explorerContextMenu: true,
 	linuxDmabuf: 'auto',
 	density: 'comfortable',
-	searchSmartCase: true
+	searchSmartCase: true,
+	extensionLogLevel: 'info'
 };
 
 /** Any settings write persists the whole object, so a store from an older release pins the
@@ -124,6 +132,7 @@ export const SETTING_DEFS: SettingDef[] = [
 		{ value: 'disable', label: 'settings.linuxDmabuf.disable' },
 		{ value: 'keep', label: 'settings.linuxDmabuf.keep' }
 	] },
+	{ key: 'extensionLogLevel', category: 'general', kind: 'enum', options: (['trace', 'debug', 'info', 'warn', 'error'] as const).map((value) => ({ value, label: `settings.extensionLogLevel.${value}` })) },
 	{ key: 'theme', category: 'appearance', kind: 'theme' },
 	{ key: 'density', category: 'appearance', kind: 'enum', options: [
 		{ value: 'comfortable', label: 'settings.density.comfortable' },

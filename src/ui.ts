@@ -22,6 +22,20 @@ export function icon(name: string, className = ''): HTMLElement {
 	return el('span', `codicon codicon-${name}${className ? ' ' + className : ''}`);
 }
 
+/** A label in VS Code's icon syntax — `$(sync~spin) Indexing` — as text and codicon nodes
+ *  (status bar items, tree labels and title actions all spell icons this way). */
+export function labelWithIcons(text: string): (string | HTMLElement)[] {
+	const out: (string | HTMLElement)[] = [];
+	let at = 0;
+	for (const match of text.matchAll(/\$\(([\w-]+)(~spin)?\)/g)) {
+		if (match.index! > at) out.push(text.slice(at, match.index));
+		out.push(icon(match[1]!, match[2] ? 'codicon-modifier-spin' : ''));
+		at = match.index! + match[0].length;
+	}
+	if (at < text.length) out.push(text.slice(at));
+	return out;
+}
+
 /** A 22px toolbar button: a codicon with a title, as VS Code's view title actions. */
 export function actionButton(iconName: string, title: string, onClick: (event: MouseEvent) => void): HTMLButtonElement {
 	const button = el('button', 'action-btn', [icon(iconName)]);
@@ -428,6 +442,8 @@ export interface QuickInputOptions {
 	items?: QuickPickItem[] | ((query: string) => QuickPickItem[]) | QuickPickSource;
 	/** With a pick list: Enter on free text (no match) resolves with the text itself. */
 	allowFreeText?: boolean;
+	/** Mask the typed text (`showInputBox({ password: true })`). */
+	password?: boolean;
 }
 
 const MAX_PICK_ROWS = 60;
@@ -464,7 +480,7 @@ export function quickInput(options: QuickInputOptions): Promise<string | null> {
 	return new Promise((resolve) => {
 		const box = el('div', 'quick-input');
 		const input = el('input', 'input');
-		input.type = 'text';
+		input.type = options.password === true ? 'password' : 'text';
 		input.placeholder = options.placeholder ?? '';
 		input.value = options.value ?? '';
 		input.spellcheck = false;

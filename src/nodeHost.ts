@@ -29,7 +29,7 @@ import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { join, resolve } from 'node:path';
 import Module from 'node:module';
-import { activationContext, createVscodeApi, rehydrateUris, Uri, type HostBridge, type HostContext, type HostEvent, type VscodeApi } from './vscodeApi';
+import { activationContext, createVscodeApi, rehydrateUris, serveHostCall, UNSERVED_HOST_CALL, Uri, type HostBridge, type HostContext, type HostEvent, type VscodeApi } from './vscodeApi';
 
 /* ---------- the wire: newline JSON-RPC on stdio, both directions ---------- */
 
@@ -102,20 +102,9 @@ function handleCall(method: string, args: unknown[]): unknown {
 		loaded_?.deactivate?.();
 		return undefined;
 	}
-	if (method === 'tree.getChildren') return api_?.__serveTree.children(args[0] as string, args[1] as string | null) ?? [];
-	if (method === 'treeView.setVisible') {
-		api_?.__serveTree.setVisible(args[0] as string, args[1] as boolean);
-		return undefined;
-	}
-	if (method === 'formatDocument.run') {
-		const [id, doc, options] = args as [string, { path: string; languageId: string; text: string }, { tabSize: number; insertSpaces: boolean }];
-		return api_?.__runFormatter(id, doc, options);
-	}
-	if (method === 'webviewView.resolve') return api_?.__serveWebviewView.resolve(args[0] as string);
-	if (method === 'webviewView.setVisible') {
-		api_?.__serveWebviewView.setVisible(args[0] as string, args[1] as boolean);
-		return undefined;
-	}
+	// Tree views, the formatter run and webview views: the shared host-call table.
+	const served = serveHostCall(api_, method, args);
+	if (served !== UNSERVED_HOST_CALL) return served;
 	throw new Error(`unknown extension host call: ${method}`);
 }
 
@@ -150,7 +139,7 @@ function ensureActivated(): Promise<void> {
 		// The workbench facts the frame gets in its init message: settings, mementos,
 		// display language, theme, the package's `ggs://` asset base.
 		const env = await hostRequest('host.env', [])
-			.then((value) => value as { settings?: Record<string, unknown>; language?: string; appVersion?: string; themeKind?: number; webviewResourceBase?: string; state?: { global: Record<string, unknown>; workspace: Record<string, unknown> } })
+			.then((value) => value as Partial<HostContext> & { settings?: Record<string, unknown>; state?: { global: Record<string, unknown>; workspace: Record<string, unknown> } })
 			.catch(() => undefined);
 		const folderPaths = params.workspaceFolders ?? [];
 		const workspaceFolders = folderPaths.map((uri, index) => ({ uri: Uri.file(uri), name: uri.split(/[\\/]/).pop() ?? uri, index }));
@@ -163,7 +152,14 @@ function ensureActivated(): Promise<void> {
 			appVersion: env?.appVersion,
 			themeKind: env?.themeKind,
 			webviewResourceBase: env?.webviewResourceBase ?? `ggs://localhost/${params.extensionId}-${pkg.version ?? '0.0.0'}/`,
-			state: { global: { ...(env?.state?.global ?? {}) }, workspace: { ...(env?.state?.workspace ?? {}) } }
+			state: { global: { ...(env?.state?.global ?? {}) }, workspace: { ...(env?.state?.workspace ?? {}) } },
+			// The context the frame host gets too: defaults, storage under ~/.ggs, the
+			// installed list, the log threshold — and this process's own platform.
+			defaults: env?.defaults,
+			storage: env?.storage,
+			extensions: env?.extensions,
+			logLevel: env?.logLevel,
+			platform: process.platform
 		};
 		context_ = context;
 		const api = createVscodeApi(context, bridge);

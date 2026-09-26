@@ -41,7 +41,7 @@ default = ["desktop"]
 # no C bindings at all). The runtime is the default host for `node` backends (`GGS_REAL_NODE=1`
 # opts a system Node in); a package's `.node` loads right here through the N-API host.
 # base64/hex are the fs module's own encodings (`readFileSync(path, 'base64' | 'hex')`).
-node-runtime = ["dep:boa_engine", "dep:base64", "dep:hex", "dep:libloading", "dep:sha1", "dep:md-5", "dep:sha2"]
+node-runtime = ["dep:boa_engine", "dep:base64", "dep:hex", "dep:libloading", "dep:sha1", "dep:md-5", "dep:sha2", "dep:getrandom"]
 desktop = [
     "dep:tauri",
     "dep:tauri-plugin-dialog",
@@ -116,6 +116,8 @@ sha1 = { version = "0.10", optional = true }
 # The `crypto` builtin's digests (md5 / sha256; sha1 above serves the desktop features too).
 md-5 = { version = "0.10", optional = true }
 sha2 = { version = "0.10", optional = true }
+# The `crypto` builtin's randomBytes / randomUUID / getRandomValues: the OS generator.
+getrandom = { version = "0.2", optional = true }
 hex = { version = "0.4", optional = true }
 ropey = { version = "1.6", optional = true }
 # Quick Open's file list is walked across all cores instead of one (cmd_fs::walk_files).

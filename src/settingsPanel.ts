@@ -7,11 +7,12 @@
 
 import { invoke } from '@tauri-apps/api/core';
 
-import { LOCALES, t } from './i18n';
+import { LOCALES, t, tf } from './i18n';
 import { SETTINGS_EVENT, SETTING_DEFS, THEMES, isSettingModified, settings, updateSetting, type SettingDef } from './settings';
 import { extensionSettingDefs } from './contributions';
 import { saveExtSetting, extSettings } from './state';
-import { el, icon } from './ui';
+import { el, icon, notify } from './ui';
+import { extLog } from './extLog';
 
 type CategoryId = 'general' | 'appearance' | 'editor' | 'search' | 'extensions';
 
@@ -171,9 +172,34 @@ export function openSettingsPanel(): void {
 					if (query !== '' && !`${def.extId} ${def.id} ${def.description}`.toLowerCase().includes(query)) continue;
 					const stored = extSettings(def.extId);
 					const value = def.id in stored ? stored[def.id] : def.default;
+					const described = `${def.extId} — ${def.description || t('settings.noDescription')}`;
+					const modified = JSON.stringify(value) !== JSON.stringify(def.default);
 					if (def.type === 'boolean') {
 						const box = checkbox(value === true, (next) => saveExtSetting(def.extId, def.id, next));
-						content.appendChild(settingRow(def.id, `${def.extId} — ${def.description || t('settings.noDescription')}`, box, value !== def.default));
+						content.appendChild(settingRow(def.id, described, box, modified));
+					} else if (def.type === 'enum') {
+						// The declared value list as a select; the stored value keeps its type
+						// (an enum of numbers stays numbers).
+						const values = def.enumValues ?? [];
+						const control = select(String(value), values.map((entry) => ({ value: String(entry), label: String(entry) })), (next) => {
+							saveExtSetting(def.extId, def.id, values.find((entry) => String(entry) === next) ?? next);
+						});
+						content.appendChild(settingRow(def.id, described, control, modified));
+					} else if (def.type === 'json') {
+						// Arrays, objects and multi-type values edit as JSON text; an invalid
+						// value is refused (and logged) rather than stored as a string.
+						const input = el('input', 'settings-input') as HTMLInputElement;
+						input.type = 'text';
+						input.value = JSON.stringify(value ?? null);
+						input.addEventListener('change', () => {
+							try {
+								saveExtSetting(def.extId, def.id, JSON.parse(input.value));
+							} catch (error) {
+								notify('warning', tf('extensions.invalidJsonSetting', def.id, String(error)));
+								extLog('warn', def.extId, `setting ${def.id} rejected: not valid JSON`, String(error));
+							}
+						});
+						content.appendChild(settingRow(def.id, described, input, modified));
 					} else {
 						const input = el('input', 'settings-input') as HTMLInputElement;
 						input.type = def.type === 'number' ? 'number' : 'text';
@@ -182,7 +208,7 @@ export function openSettingsPanel(): void {
 							const raw = def.type === 'number' ? Number(input.value) : input.value;
 							saveExtSetting(def.extId, def.id, raw);
 						});
-						content.appendChild(settingRow(def.id, `${def.extId} — ${def.description || t('settings.noDescription')}`, input, String(value) !== String(def.default)));
+						content.appendChild(settingRow(def.id, described, input, modified));
 					}
 				}
 			} else if (category === 'extensions' && query === '') {

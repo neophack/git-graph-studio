@@ -75,7 +75,8 @@ describe('document formatting through the frame', () => {
 		await flush();
 		// The registration RPC is a macrotask (postMessage): let it land.
 		await new Promise((resolve) => setTimeout(resolve, 20));
-		expect(host['formattingProviders'].has('acme.formatter')).toBe(true);
+		// Keyed per provider (an extension may register one per language), owned by the extension.
+		expect([...host['formattingProviders'].values()].some((registration) => registration.extId === 'acme.formatter')).toBe(true);
 
 		const applied: { startLine: number; newText: string }[] = [];
 		host.onApplyEdits = (_path, edits) => {

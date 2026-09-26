@@ -324,6 +324,16 @@ ggs.onRequest((command, args) => {
         return new Promise((resolve) => setTimeout(() => resolve({ ticked: true }), 10));
     }
     if (command === 'async') return Promise.resolve({ later: true });
+    if (command === 'dateLocale') {
+        // Boa leaves Date's toLocale* family unimplemented; the prelude replaces each with
+        // the shape of its non-locale sibling. A package formatting timestamps (git-graph-rs's
+        // commit search) must get a string, never the native `Function Unimplemented` throw.
+        return {
+            full: new Date(1790394575000).toLocaleString(),
+            date: new Date(1790394575000).toLocaleDateString(),
+            time: new Date(1790394575000).toLocaleTimeString()
+        };
+    }
     return { unknown: command };
 });
 "#,
@@ -341,10 +351,11 @@ ggs.onRequest((command, args) => {
             run_command("readSelf", json!([])),
             run_command("timer", json!([])),
             run_command("async", json!([])),
+            run_command("dateLocale", json!([])),
             run_command("nobody", json!([])),
         ],
     );
-    assert_eq!(answers.len(), 6, "{answers:?}");
+    assert_eq!(answers.len(), 7, "{answers:?}");
     let handshake = answers[0].as_ref().unwrap();
     assert_eq!(handshake["protocolVersion"], "ggs-ext/1");
     assert_eq!(handshake["capabilities"]["commands"], json!([]));
@@ -357,7 +368,15 @@ ggs.onRequest((command, args) => {
     // A promise settled by a timer: the runtime pumped microtasks and timers to answer.
     assert_eq!(answers[3].as_ref().unwrap()["ticked"], json!(true));
     assert_eq!(answers[4].as_ref().unwrap()["later"], json!(true));
-    assert_eq!(answers[5].as_ref().unwrap()["unknown"], json!("nobody"));
+    let locale = answers[5].as_ref().unwrap();
+    for key in ["full", "date", "time"] {
+        let text = locale[key].as_str().unwrap_or_else(|| panic!("{key} is not a string"));
+        assert!(
+            text.chars().any(|c| c.is_ascii_digit()) && !text.contains("Unimplemented"),
+            "the {key} locale shape must be a real timestamp: {text}"
+        );
+    }
+    assert_eq!(answers[6].as_ref().unwrap()["unknown"], json!("nobody"));
 }
 
 #[test]
@@ -890,12 +909,15 @@ ggs.onRequest(async (command) => {
     }
     if (command === 'buffer') {
         const bytes = new Uint8Array([104, 105, 33]).buffer;
-        return { whole: Buffer.from(bytes).toString(), sliced: Buffer.from(bytes, 1, 1).toString() };
+        const copied = Buffer.alloc(5);
+        const written = Buffer.from('hi!').copy(copied, 1);
+        return { whole: Buffer.from(bytes).toString(), sliced: Buffer.from(bytes, 1, 1).toString(), copied: copied.toString(), written };
     }
     if (command === 'child') {
         return new Promise((resolve) => {
             const events = [];
             const child = cp.spawn('git', ['--version']);
+            child.stderr.resume();
             child.stdout.on('data', (chunk) => events.push('data:' + String(chunk).trim().slice(0, 11)));
             child.on('exit', (code) => events.push('exit:' + code));
             child.on('close', () => resolve(events));
@@ -932,7 +954,7 @@ ggs.onRequest(async (command) => {
     assert_eq!(fs["streamed"], json!(["hel", "lo ", "wor", "ld"]), "{fs}");
     assert_eq!(fs["realpath"], json!(true), "{fs}");
     let buffer = answers[2].as_ref().expect("buffer answered");
-    assert_eq!(buffer, &json!({ "whole": "hi!", "sliced": "i" }));
+    assert_eq!(buffer, &json!({ "whole": "hi!", "sliced": "i", "copied": " hi! ", "written": 3 }));
     let child = answers[3].as_ref().expect("child answered");
     assert_eq!(
         child,

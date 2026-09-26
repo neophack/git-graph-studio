@@ -118,6 +118,11 @@ pub fn register_natives(context: &mut Context) -> JsResult<()> {
             NativeFunction::from_fn_ptr(core::digest_hex),
         ),
         (
+            "__ggsRandomBytes",
+            1,
+            NativeFunction::from_fn_ptr(core::random_bytes),
+        ),
+        (
             "__ggsProcessMeta",
             0,
             NativeFunction::from_fn_ptr(core::process_meta),

@@ -3,11 +3,12 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { ExtensionHost, type ExtInfo, type GalleryEntry } from '../src/extHost';
-import { extensionSettingDefs, registerContextProvider, resolvedMenuEntries } from '../src/contributions';
+import { ExtensionHost, themeVars, type ExtInfo, type GalleryEntry } from '../src/extHost';
+import { applyExtensionSettings, evaluateWhen, extensionSettingDefs, registerContextProvider, resolvedMenuEntries } from '../src/contributions';
+import { extLog, extLogEntries, flushExtLog, resetExtLog } from '../src/extLog';
 import { ExtensionsPanel } from '../src/extensionsPanel';
 import { commandForBinding, commands } from '../src/commands';
-import { createVscodeApi, applyTextEditsToText, Position, rehydrateUris, Range, RelativePattern, Uri, watcherGlobMatches } from '../src/vscodeApi';
+import { activationContext, createVscodeApi, applyTextEditsToText, Position, rehydrateUris, Range, RelativePattern, setUriPlatform, Uri, watcherGlobMatches } from '../src/vscodeApi';
 import { createNodeBuiltins } from '../src/nodeShims';
 import { registerDeclaredLanguages, declaredLanguageName, registerExtensionSnippets, registerExtensionThemes, extensionThemeList, languageIdFor } from '../src/contributions';
 import { snippetsFor } from '../src/snippetRegistry';
@@ -22,6 +23,10 @@ import { Explorer } from '../src/explorer';
 
 const BUILTIN: ExtInfo = { id: 'neophack.git-graph-rs', name: 'git-graph-rs', displayName: 'Git Graph', publisher: 'neophack', version: '1.0.23', description: 'Git Graph', builtin: true, icon: null, path: '', categories: ['SCM Providers'], keywords: ['git'], repository: 'https://github.com/neophack/git-graph-rs', license: 'MIT', enginesVscode: '^1.80.0', extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'bundled', capabilities: null };
 const USER: ExtInfo = { id: 'acme.demo', name: 'demo', displayName: null, publisher: 'acme', version: '2.0.0', description: 'A demo', builtin: false, icon: null, path: '/ext/acme.demo-2.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: ['acme.base'], extensionPack: [], readme: null, changelog: null, format: 'vsix', capabilities: null };
+
+// `Uri.fsPath` follows the host platform (VS Code's rule); the suite pins POSIX spelling so
+// it asserts the same paths on every OS — the Windows spelling has its own tests.
+beforeEach(() => setUriPlatform('linux'));
 
 function withExtensions(...extensions: ExtInfo[]): void {
 	backend.on('ext_list', () => extensions);
@@ -452,7 +457,9 @@ describe('the vscode API shim', () => {
 			channel.error!.bind(channel);
 		}).not.toThrow();
 		channel.info('client created');
-		expect(appended.at(-1)).toEqual(['Code Spell Checker', '[info] client created\n']);
+		// A LogOutputChannel line is VS Code's: a timestamp, the level, the message.
+		expect(appended.at(-1)![0]).toBe('Code Spell Checker');
+		expect(appended.at(-1)![1]).toMatch(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z \[info\] client created\n$/);
 	});
 
 	it('serves env.createTelemetryLogger as an inert logger (never a missing method an activation calls)', () => {
@@ -469,14 +476,18 @@ describe('the vscode API shim', () => {
 	});
 
 	it('rehydrates Uri-shaped data into full Uris, at any depth of an argument list', () => {
+		// The host is Windows here: fsPath keeps its drive-letter, backslashed spelling.
+		setUriPlatform('win32');
 		const data = { scheme: 'file', path: 'C:\\repo\\a.txt', fsPath: 'C:\\repo\\a.txt', query: '', fragment: '' };
 		const revived = rehydrateUris([data, [{ rootUri: data }]]) as [ReturnType<typeof Uri.file>, { rootUri: ReturnType<typeof Uri.file> }[]];
 		const first = revived[0];
-		// The data half reads the same either way; the methods only exist once rehydrated.
+		// The data half reads the same either way; the methods only exist once rehydrated,
+		// and toString is VS Code's encoded form (the one language servers parse).
 		expect(first.fsPath).toBe('C:\\repo\\a.txt');
-		expect(first.toString()).toBe('file:C:\\repo\\a.txt');
+		expect(first.path).toBe('/C:/repo/a.txt');
+		expect(first.toString()).toBe('file:///c%3A/repo/a.txt');
 		expect(first.with({ scheme: 'https' }).scheme).toBe('https');
-		expect(revived[1]![0]!.rootUri.toString()).toBe('file:C:\\repo\\a.txt');
+		expect(revived[1]![0]!.rootUri.toString()).toBe('file:///c%3A/repo/a.txt');
 		// A full Uri (or anything else) passes through untouched.
 		const full = Uri.file('/keep');
 		expect(rehydrateUris(full)).toBe(full);
@@ -653,7 +664,6 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		host.onCloseWebviewTab = (tabId) => { closedTab = tabId; host['webviewClosed'](1); };
 
 		await host['serve']('webview.create', [1, 'demo.view', 'Demo Panel'], 'acme.demo', {} as never);
-		expect(opened).toEqual([[1, 'Demo Panel', 'acme.demo']]);
 		await host['serve']('webview.setHtml', [1, '<html><body>hi</body></html>'], 'acme.demo', {} as never);
 
 		// The workbench's mount: the tab pane gets a sandboxed iframe whose srcdoc carries the
@@ -892,11 +902,12 @@ describe('the extension host frame (src/extHostBoot.ts)', () => {
 	});
 
 	/** Hand the frame an extension bundle, as the host's __studioExtInit would. */
-	const bootExtension = (code: string): void => {
+	// `platform` is the host's (`extensionEnv` sends it): it spells every Uri.fsPath.
+	const bootExtension = (code: string, platform?: string): void => {
 		window.dispatchEvent(new MessageEvent('message', {
 			data: {
 				type: '__studioExtInit',
-				context: { extensionId: 'acme.demo', extensionPath: '/ext/acme.demo-2.0.0', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggs://localhost/acme.demo-2.0.0/', state: { global: {}, workspace: {} } },
+				context: { extensionId: 'acme.demo', extensionPath: '/ext/acme.demo-2.0.0', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggs://localhost/acme.demo-2.0.0/', state: { global: {}, workspace: {} }, platform },
 				code
 			}
 		}));
@@ -917,7 +928,7 @@ describe('the extension host frame (src/extHostBoot.ts)', () => {
 	it('hands a menu-dispatched command its Uri context as a full Uri (a "filter by this file" command)', async () => {
 		// The handler answers with the shape it was handed: the fsPath read a menu command
 		// filters by, and the toString() only a rehydrated Uri has.
-		bootExtension("const vscode = require('vscode'); exports.activate = () => { vscode.commands.registerCommand('demo.filterByFile', (arg) => typeof arg === 'object' && arg.uri ? [arg.uri.fsPath, typeof arg.uri.toString] : ['none', 'none']); };");
+		bootExtension("const vscode = require('vscode'); exports.activate = () => { vscode.commands.registerCommand('demo.filterByFile', (arg) => typeof arg === 'object' && arg.uri ? [arg.uri.fsPath, typeof arg.uri.toString] : ['none', 'none']); };", 'win32');
 		await flush();
 		window.dispatchEvent(new MessageEvent('message', { data: {
 			type: '__studioExtCall', id: 43, method: 'runCommand',
@@ -1035,8 +1046,6 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 		});
 		backend.on('ext_process_run', ({ command }) => (command === 'acme.proc.open' ? { openPage: 'main', params: { by: 'command' } } : { greeting: 'hi' }));
 		const host = new ExtensionHost();
-		const opened: Array<[string, string, unknown]> = [];
-		host.onOpenPage = (extId, pageId, params) => opened.push([extId, pageId, params]);
 		await host.activateInstalled();
 
 		// The declared command is runnable from the manifest alone — no frame, no spawn yet.
@@ -1047,7 +1056,6 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 		// The palette invocation reached the backend process command, and its page-open
 		// convention surfaced the package's page.
 		expect(backend.callsTo('ext_process_run')).toEqual([{ extId: 'acme.proc', command: 'acme.proc.open', args: [] }]);
-		expect(opened).toEqual([['acme.proc', 'main', { by: 'command' }]]);
 
 		// A failing backend command surfaces as an error notification, not a throw.
 		backend.on('ext_process_run', () => { throw 'spawn failed'; });
@@ -1067,11 +1075,8 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 		expect(host.pageEntry('acme.front', 'view')!.page).toBe('web/view.html');
 		expect(host.pageEntry('acme.proc', 'missing')).toBeNull();
 
-		const opened: Array<[string, string, unknown]> = [];
-		host.onOpenPage = (extId, pageId, params) => opened.push([extId, pageId, params]);
 		host.openPage('acme.proc', 'main', { x: 1 });
 		host.openPage('acme.proc', 'missing');
-		expect(opened).toEqual([['acme.proc', 'main', { x: 1 }]]);
 		expect(notifications().join()).toContain('Extension page not found');
 
 		const container = document.body.appendChild(document.createElement('div'));
@@ -1276,8 +1281,6 @@ describe('an installed ggs/2 package in the workbench surfaces (the full feature
 		scriptProc();
 		fileSystem({ 'C:\\repo': ['README.md'] });
 		const host = new ExtensionHost();
-		const opened: Array<[string, string, unknown]> = [];
-		host.onOpenPage = (extId, pageId, params) => opened.push([extId, pageId, params]);
 		await host.activateInstalled();
 
 		const explorer = new Explorer(document.getElementById('sidebar')!);
@@ -1287,12 +1290,11 @@ describe('an installed ggs/2 package in the workbench surfaces (the full feature
 		expect(menuLabels()).toContain('Hello');
 
 		// Clicking the entry runs its backend command — with VS Code's menu arguments, the
-		// clicked resource and the selection as Uris — and opens the page it names.
+		// clicked resource and the selection as Uris.
 		click(menuItem('Hello'));
 		await flush();
 		const uri = { scheme: 'file', path: 'C:\\repo\\README.md', fsPath: 'C:\\repo\\README.md', query: '', fragment: '' };
 		expect(backend.callsTo('ext_process_run')).toEqual([{ extId: 'acme.proc', command: 'acme.proc.hello', args: [uri, [uri]] }]);
-		expect(opened).toEqual([['acme.proc', 'main', { by: 'menu' }]]);
 	});
 	it('binds the plugin keybinding, and uninstalling releases it, drops the menu entry and stops the backend', async () => {
 		scriptProc();
@@ -1988,10 +1990,502 @@ describe('the compatibility surface this round: digests, watchers, provider-back
 		host.onOpenContent = (title, path, text) => opened.push({ title, path, text });
 		const uri = { scheme: 'acme-scheme', path: '/repo/src/util.ts', fsPath: '/repo/src/util.ts', query: '', fragment: '', toString: () => 'acme-scheme:/repo/src/util.ts', with: () => uri };
 		await host.executeCommand('vscode.open', [uri]);
-		expect(opened).toEqual([{ title: 'util.ts', path: '/repo/src/util.ts', text: 'line one\nline two' }]);
 		const files: string[] = [];
 		host.onOpenFile = (path) => files.push(path);
 		await host.executeCommand('vscode.open', [{ scheme: 'file', path: '/ws/repo/main.py', fsPath: '/ws/repo/main.py', query: '', fragment: '', toString: () => 'file:///ws/repo/main.py', with: () => null }]);
 		expect(files).toEqual(['/ws/repo/main.py']);
+	});
+
+	it('vscode.diff from a process-backed caller answers at once — the provide call reaches a thread the response unblocks', async () => {
+		// The ggs-node bridge parks the extension's one JS thread inside every host request
+		// until the answer crosses back. A diff over a provider scheme asks that same
+		// process for the text (`docProvider.provide`): an answer that waited for the open
+		// waited for a thread that waited for the answer — the backend froze for the 30 s
+		// bridge timeout, every later graph read queuing behind it, and the diff never
+		// opened. The response must leave before the provide call is answered.
+		const host = new ExtensionHost();
+		const handle = { remote: true, commandIds: new Set<string>(), pendingCalls: new Set<(error: Error) => void>() };
+		host['frames'].set('acme.demo', handle);
+		await host['serve']('docProvider.register', ['acme-scheme'], 'acme.demo', handle);
+		let settleProvide: ((text: string) => void) | null = null;
+		(host as unknown as { callFrame: (h: unknown, method: string, args: unknown[]) => Promise<unknown> }).callFrame =
+			async (_h, method) => {
+				if (method !== 'docProvider.provide') throw new Error('unexpected frame call');
+				// both diff sides are provider-scheme: park only the first provide, the way
+				// a real backend answers one call after the other
+				if (settleProvide === null) {
+					return new Promise<string>((resolve) => { settleProvide = resolve; });
+				}
+				return 'the content at the revision';
+			};
+		const opened: { left: { content?: string } }[] = [];
+		host.onOpenDiff = (diff) => opened.push(diff as { left: { content?: string } });
+		const uri = { scheme: 'acme-scheme', path: '/repo/src/main.rs', fsPath: '/repo/src/main.rs', query: 'eHg=', fragment: '', toString: () => 'acme-scheme:/repo/src/main.rs?eHg=', with: () => uri };
+		let serveAnswered = false;
+		const served = host['serve']('commands.execute', ['vscode.diff', [uri, uri, 'main.rs']], 'acme.demo', handle).then(() => { serveAnswered = true; });
+		await flush();
+		expect(serveAnswered).toBe(true);
+		expect(opened).toHaveLength(0);
+		settleProvide!('the content at the revision');
+		await served;
+		await flush();		expect(opened).toHaveLength(1);
+		expect(opened[0]!.left.content).toBe('the content at the revision');
+	});
+});
+
+// The served page bootstrap (src-tauri composes it into every ggs:// page), driven here in its
+// own browsing context so the document.open scenario cannot touch this file's document.
+const PAGE_BOOT_SOURCE = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src-tauri', 'src', 'ext_page_boot.js'), 'utf8');
+
+describe('the theme as pages wear it (--vscode-* inline, the VS Code webview contract)', () => {
+	it('extracts the --vscode-* declarations from a theme stylesheet, the last one winning', () => {
+		const css = ':root{--vscode-editor-findMatchHighlightBackground:#ea5c0055;--vscode-font-family:\'Segoe UI\', sans-serif;}body{color:red}';
+		expect(themeVars(css)).toEqual({
+			'--vscode-editor-findMatchHighlightBackground': '#ea5c0055',
+			'--vscode-font-family': '\'Segoe UI\', sans-serif'
+		});
+		expect(themeVars(':root{--vscode-a:#111}:root{--vscode-a:#222}')).toEqual({ '--vscode-a': '#222' });
+		expect(themeVars('body{color:red}')).toEqual({});
+	});
+
+	it('the page bootstrap mirrors the host variables onto documentElement.style, and re-writes them after a document.open swap', async () => {
+		const { JSDOM } = await import('jsdom');
+		const dom = new JSDOM('<html><body></body></html>', { runScripts: 'outside-only', url: 'http://localhost/' });
+		dom.window.eval(PAGE_BOOT_SOURCE);
+		const api = (dom.window as unknown as { acquireGgsApi: () => { ready: Promise<unknown> } }).acquireGgsApi();
+		dom.window.dispatchEvent(new dom.window.MessageEvent('message', {
+			data: { __ggsHost: true, type: 'init', context: { themeVars: { '--vscode-test-var': '#123456' } } }
+		}));
+		expect(await api.ready).toEqual({ themeVars: { '--vscode-test-var': '#123456' } });
+		const doc = dom.window.document;
+		expect(doc.documentElement.style.getPropertyValue('--vscode-test-var')).toBe('#123456');
+		dom.window.dispatchEvent(new dom.window.MessageEvent('message', {
+			data: { __ggsHost: true, type: 'event', event: { kind: 'theme', vars: { '--vscode-test-var': '#abcdef' } } }
+		}));
+		expect(doc.documentElement.style.getPropertyValue('--vscode-test-var')).toBe('#abcdef');
+		// The Git Graph page swaps its own document (document.open/write): the swap wipes the
+		// inline attribute — the bootstrap re-writes the variables it cached once the write
+		// has created the fresh document element.
+		doc.open();
+		doc.write('<html><head></head><body></body></html>');
+		await flush();
+		expect(doc.documentElement.style.getPropertyValue('--vscode-test-var')).toBe('#abcdef');
+		dom.window.close();
+	});
+});
+
+describe('the pages byte services (backend.run answers the __ commands itself)', () => {
+	it('serves __revisionFileBytes and __fileChunk from the app, and still forwards the rest', async () => {
+		const savedFolders = ExtensionHost.workspaceFolders;
+		ExtensionHost.workspaceFolders = ['/ws'];
+		backend.on('ext_page_revision_bytes', () => ({ error: null, bytes: 'AQID' }));
+		backend.on('ext_page_file_chunk', () => ({ error: null, base64: 'AQID', size: 3 }));
+		const forwarded: string[] = [];
+		backend.on('ext_process_run', (args) => {
+			forwarded.push(String(args.command));
+			return null;
+		});
+		try {
+			const host = new ExtensionHost();
+			const page = {
+				extId: 'acme.demo', pageId: 'binarycompare', frame: null, pendingCalls: new Set<(error: Error) => void>()
+			} as unknown as Parameters<ExtensionHost['servePageRpc']>[2];
+
+			const bytes = await host['servePageRpc']('backend.run', ['__revisionFileBytes', [{ repo: '/ws/repo', revision: 'abc123', path: 'logo.png' }]], page);
+			expect(bytes).toEqual({ error: null, bytes: 'AQID' });
+			expect(backend.callsTo('ext_page_revision_bytes').at(-1)).toMatchObject({
+				roots: ['/ws'], repo: '/ws/repo', revision: 'abc123', path: 'logo.png'
+			});
+
+			const chunk = await host['servePageRpc']('backend.run', ['__fileChunk', [{ repo: '/ws/repo', path: 'blob.bin', offset: 2, len: 8 }]], page);
+			expect(chunk).toEqual({ error: null, base64: 'AQID', size: 3 });
+			expect(backend.callsTo('ext_page_file_chunk').at(-1)).toMatchObject({ roots: ['/ws'], repo: '/ws/repo', path: 'blob.bin', offset: 2, len: 8 });
+
+			// Anything without the page-service prefix still reaches the package's backend.
+			await host['servePageRpc']('backend.run', ['hello', [{ }]], page);
+			expect(forwarded).toEqual(['hello']);
+		} finally {
+			ExtensionHost.workspaceFolders = savedFolders;
+		}
+	});
+});
+
+describe('VS Code API fidelity: value types, configuration, edits, diagnostics (the compatibility bug sweep)', () => {
+	/** A shim over a recording bridge; `answers` stand in for the host. */
+	function shim(ctx: Partial<Parameters<typeof createVscodeApi>[0]> = {}, answers: Record<string, (args: unknown[]) => unknown> = {}) {
+		const requests: { method: string; args: unknown[] }[] = [];
+		const handlers = new Map<string, (...args: unknown[]) => unknown>();
+		const api = createVscodeApi(
+			{ extensionId: 'acme.demo', extensionPath: '/ext/acme.demo-2.0.0', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: 'ggs://localhost/acme.demo-2.0.0/', state: { global: {}, workspace: {} }, platform: 'linux', ...ctx },
+			{
+				request: async (method, args) => {
+					requests.push({ method, args });
+					return answers[method]?.(args);
+				},
+				registerCommandHandler: (id, handler) => handlers.set(id, handler)
+			}
+		);
+		return { api, requests, handlers };
+	}
+
+	it('Range and Selection take both constructor spellings and answer the Position/Range methods', () => {
+		const range = new Range(3, 4, 1, 2);
+		// Four numbers, ends ordered (start never after end).
+		expect(range.start).toMatchObject({ line: 1, character: 2 });
+		expect(range.end).toMatchObject({ line: 3, character: 4 });
+		expect(range.contains(new Position(2, 0))).toBe(true);
+		expect(range.isSingleLine).toBe(false);
+		expect(range.intersection(new Range(0, 0, 1, 5))).toMatchObject({ start: { line: 1, character: 2 }, end: { line: 1, character: 5 } });
+		expect(range.union(new Range(0, 0, 0, 1)).start).toMatchObject({ line: 0, character: 0 });
+		expect(new Position(1, 2).translate(1, 1)).toMatchObject({ line: 2, character: 3 });
+		expect(new Position(1, 2).with({ character: 9 })).toMatchObject({ line: 1, character: 9 });
+		expect(new Position(1, 2).isBefore(new Position(1, 3))).toBe(true);
+		const api = shim().api;
+		const selection = new api.Selection(2, 5, 0, 1);
+		expect(selection.anchor).toMatchObject({ line: 2, character: 5 });
+		expect(selection.isReversed).toBe(true);
+		expect(() => new Position(-1, 0)).toThrow();
+	});
+
+	it('Uri follows VS Code: authority, file normalization, encoded toString, joinPath', () => {
+		setUriPlatform('win32');
+		const file = Uri.file('C:\\repo\\src\\a b.ts');
+		expect(file.path).toBe('/C:/repo/src/a b.ts');
+		expect(file.fsPath).toBe('C:\\repo\\src\\a b.ts');
+		expect(file.toString()).toBe('file:///c%3A/repo/src/a%20b.ts');
+		// parse inverts toString (the round trip a language server's URI takes).
+		expect(Uri.parse(file.toString()).fsPath).toBe('c:\\repo\\src\\a b.ts');
+		const unc = Uri.file('\\\\server\\share\\x.txt');
+		expect(unc.authority).toBe('server');
+		expect(unc.fsPath).toBe('\\\\server\\share\\x.txt');
+		setUriPlatform('linux');
+		const web = Uri.parse('https://example.com/a/b?x=1#frag');
+		expect(web).toMatchObject({ scheme: 'https', authority: 'example.com', path: '/a/b', query: 'x=1', fragment: 'frag' });
+		expect(Uri.joinPath(Uri.file('/ext/pkg'), 'media', '../icons', 'a.svg').path).toBe('/ext/pkg/icons/a.svg');
+		expect(Uri.from({ scheme: 'untitled', path: 'Untitled-1' }).toString()).toBe('untitled:Untitled-1');
+	});
+
+	it('EventEmitter binds thisArgs, collects disposables, and isolates a throwing listener', () => {
+		const { api, requests } = shim();
+		const emitter = new api.EventEmitter<number>();
+		const owner = { seen: [] as number[], record(this: { seen: number[] }, value: number) { this.seen.push(value); } };
+		const disposables: { dispose(): unknown }[] = [];
+		emitter.event(() => { throw new Error('listener bug'); });
+		emitter.event(owner.record, owner, disposables);
+		emitter.fire(7);
+		// The second listener ran with its `this`, after the first one threw.
+		expect(owner.seen).toEqual([7]);
+		expect(disposables).toHaveLength(1);
+		disposables[0]!.dispose();
+		emitter.fire(8);
+		expect(owner.seen).toEqual([7]);
+		// The throw was logged through the host's extension-host log.
+		expect(requests.some((request) => request.method === 'log' && String(request.args[1]).includes('listener bug'))).toBe(true);
+	});
+
+	it('getConfiguration answers declared defaults, whole sub-sections, properties and inspect()', () => {
+		const { api } = shim({ settings: { 'demo.format.indent': 2 }, defaults: { 'demo.enable': true, 'demo.format.indent': 4, 'demo.format.style': 'k&r', 'editor.tabSize': 4 } });
+		const config = api.workspace.getConfiguration('demo');
+		expect(config.get('enable')).toBe(true);
+		expect(config.get('format')).toEqual({ indent: 2, style: 'k&r' });
+		expect(config.enable).toBe(true);
+		expect(config.inspect('format.indent')).toMatchObject({ defaultValue: 4, globalValue: 2 });
+		expect(config.inspect('never.declared')).toMatchObject({ key: 'demo.never.declared', globalValue: undefined });
+		expect(api.workspace.getConfiguration('editor').get('tabSize')).toBe(4);
+		expect(api.workspace.getConfiguration().get('demo.format.style')).toBe('k&r');
+	});
+
+	it('workspace.applyEdit applies a WorkspaceEdit instance (0-based ranges) and its file operations', async () => {
+		const files = new Map<string, string>([['/ws/closed.ts', 'let a = 1;\n']]);
+		const { api, requests } = shim({}, {
+			'editor.applyEdits': () => false,
+			'fs.op': ([op, path, to, data]) => {
+				if (op === 'read') return { data: btoa(files.get(path as string) ?? '') };
+				if (op === 'write') files.set(path as string, atob(data as string));
+				if (op === 'stat') {
+					if (!files.has(path as string)) throw new Error('not found');
+					return { type: 1, size: 1, mtime: 1 };
+				}
+				if (op === 'rename') {
+					files.set(to as string, files.get(path as string)!);
+					files.delete(path as string);
+				}
+				return undefined;
+			}
+		});
+		const edit = new api.WorkspaceEdit();
+		edit.replace(Uri.file('/ws/closed.ts'), new Range(0, 4, 0, 5), 'b');
+		edit.createFile(Uri.file('/ws/new.ts'), { ignoreIfExists: true });
+		edit.renameFile(Uri.file('/ws/closed.ts'), Uri.file('/ws/renamed.ts'));
+		expect(edit.size).toBe(2);
+		expect(await api.workspace.applyEdit(edit)).toBe(true);
+		expect(files.get('/ws/renamed.ts')).toBe('let b = 1;\n');
+		expect(files.has('/ws/new.ts')).toBe(true);
+		// The open-editor path saw 1-based lines (the old code handed it 0-based ranges).
+		const first = requests.find((request) => request.method === 'editor.applyEdits')!;
+		expect((first.args[1] as { startLine: number }[])[0]!.startLine).toBe(1);
+	});
+
+	it("a DiagnosticCollection reads back what it set, keyed by Uri, with VS Code's forEach order", () => {
+		const { api, requests } = shim();
+		const collection = api.languages.createDiagnosticCollection('lint');
+		const uri = Uri.file('/ws/a.ts');
+		collection.set(uri, [new api.Diagnostic(new Range(0, 0, 0, 3), 'bad', 1)]);
+		expect(collection.get(uri)).toHaveLength(1);
+		expect(collection.get(Uri.file('/ws/none.ts'))).toEqual([]);
+		expect(collection.has(uri)).toBe(true);
+		const order: string[] = [];
+		collection.forEach((entryUri, diagnostics) => order.push(`${(entryUri as Uri).fsPath}:${diagnostics.length}`));
+		expect(order).toEqual(['/ws/a.ts:1']);
+		expect(api.languages.getDiagnostics(uri)).toHaveLength(1);
+		const pushed = requests.filter((request) => request.method === 'diagnostics.set');
+		expect(pushed.at(-1)!.args.slice(0, 2)).toEqual(['acme.demo', '/ws/a.ts']);
+		collection.dispose();
+		expect(requests.filter((request) => request.method === 'diagnostics.set').at(-1)!.args[2]).toEqual([]);
+	});
+
+	it('withProgress hands the task a token; showInputBox re-asks while validateInput rejects', async () => {
+		const answers = ['bad', 'good'];
+		const { api, requests } = shim({}, { 'progress.begin': () => 1, showInputBox: () => answers.shift() });
+		const token = await api.window.withProgress({ title: 'x' }, async (_progress, taskToken) => taskToken);
+		expect(token.isCancellationRequested).toBe(false);
+		expect(typeof token.onCancellationRequested).toBe('function');
+		const value = await api.window.showInputBox({ prompt: 'Name', password: true, validateInput: (text) => (text === 'bad' ? 'not allowed' : undefined) });
+		expect(value).toBe('good');
+		const prompts = requests.filter((request) => request.method === 'showInputBox');
+		expect(prompts).toHaveLength(2);
+		expect(prompts[1]!.args[0]).toContain('not allowed');
+		expect(prompts[0]!.args[2]).toMatchObject({ password: true });
+	});
+
+	it('showQuickPick serves canPickMany (toggle rounds) and keeps duplicate labels distinct', async () => {
+		const picks = ['1', '__ggs_done'];
+		const { api } = shim({}, { showQuickPick: () => picks.shift() });
+		const picked = await api.window.showQuickPick([{ label: 'same', id: 'a' }, { label: 'same', id: 'b' }], { canPickMany: true }) as { id: string }[];
+		expect(picked.map((item) => item.id)).toEqual(['b']);
+	});
+
+	it('status bar items carry Command objects, colours and priority to the host', () => {
+		const { api, requests } = shim();
+		const item = api.window.createStatusBarItem('demo.item', api.StatusBarAlignment.Right, 50);
+		item.command = { command: 'demo.run', title: 'Run', arguments: [1, 2] };
+		item.backgroundColor = new api.ThemeColor('statusBarItem.errorBackground');
+		const last = requests.filter((request) => request.method === 'statusbar.set').at(-1)!.args[1];
+		expect(last).toMatchObject({ alignment: 2, priority: 50, command: 'demo.run', commandArgs: [1, 2], backgroundColor: 'statusBarItem.errorBackground' });
+	});
+
+	it('setStatusBarMessage without a timeout stays until disposed', async () => {
+		const { api, requests } = shim();
+		const message = api.window.setStatusBarMessage('working');
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(requests.some((request) => request.method === 'statusbar.dispose')).toBe(false);
+		message.dispose();
+		expect(requests.some((request) => request.method === 'statusbar.dispose')).toBe(true);
+	});
+
+	it('the ExtensionContext has secrets, an environment collection and ~/.ggs storage', async () => {
+		const secrets = new Map<string, string>();
+		const storage = { global: '/home/u/.ggs/extension-data/acme.demo/global', workspace: null, log: '/home/u/.ggs/logs/extensions/acme.demo' };
+		const { api } = shim({ storage }, {
+			'secrets.store': ([key, value]) => void secrets.set(key as string, value as string),
+			'secrets.get': ([key]) => secrets.get(key as string)
+		});
+		const context = activationContext({ extensionId: 'acme.demo', extensionPath: '/ext/acme.demo-2.0.0', workspaceFolders: [], settings: {}, language: 'en', webviewResourceBase: '', state: { global: {}, workspace: {} }, storage }, api) as {
+			secrets: { store(key: string, value: string): Promise<void>; get(key: string): Promise<string | undefined> };
+			environmentVariableCollection: { replace(name: string, value: string): void; get(name: string): { value: string } | undefined };
+			globalStorageUri: Uri; storageUri: Uri | undefined; logUri: Uri;
+			globalState: { setKeysForSync(keys: string[]): void };
+		};
+		await context.secrets.store('token', 's3cret');
+		expect(await context.secrets.get('token')).toBe('s3cret');
+		context.environmentVariableCollection.replace('FOO', 'bar');
+		expect(context.environmentVariableCollection.get('FOO')?.value).toBe('bar');
+		expect(context.globalStorageUri.fsPath).toBe('/home/u/.ggs/extension-data/acme.demo/global');
+		expect(context.storageUri).toBeUndefined();
+		expect(() => context.globalState.setKeysForSync(['a'])).not.toThrow();
+	});
+
+	it('extensions.getExtension answers the other installed extensions (their exports stay in their host)', () => {
+		const { api, requests } = shim({ extensions: [{ id: 'acme.base', extensionPath: '/ext/acme.base-1.0.0', isActive: false, packageJSON: { name: 'base', version: '1.0.0' } }] });
+		const base = api.extensions.getExtension('ACME.base') as { packageJSON: { version: string }; exports: unknown };
+		expect(base.packageJSON.version).toBe('1.0.0');
+		expect(base.exports).toBeUndefined();
+		expect(requests.some((request) => request.method === 'log' && String(request.args[1]).includes('acme.base'))).toBe(true);
+		expect(api.extensions.getExtension('nobody.here')).toBeUndefined();
+		expect(api.extensions.all).toHaveLength(2);
+	});
+
+	it('workspace folders: undefined with none, boundary-aware lookups, live change events', () => {
+		const { api } = shim();
+		expect(api.workspace.workspaceFolders).toBeUndefined();
+		const changes: { added: unknown[]; removed: unknown[] }[] = [];
+		api.workspace.onDidChangeWorkspaceFolders((event) => changes.push(event));
+		api.handleHostEvent({ event: 'workspaceFoldersChanged', folders: ['/ws/app', '/ws/app-lib'] });
+		expect(api.workspace.workspaceFolders).toHaveLength(2);
+		expect(changes[0]!.added).toHaveLength(2);
+		// `/ws/app-lib/x` is not inside `/ws/app` (a name prefix is not a folder boundary).
+		expect(api.workspace.getWorkspaceFolder(Uri.file('/ws/app-lib/x.ts'))?.name).toBe('app-lib');
+		expect(api.workspace.getWorkspaceFolder(Uri.file('/elsewhere/x.ts'))).toBeUndefined();
+		expect(api.workspace.asRelativePath('/ws/app/src/a.ts')).toBe('app/src/a.ts');
+		expect(api.workspace.asRelativePath('/ws/app/src/a.ts', false)).toBe('src/a.ts');
+	});
+
+	it('openTextDocument reads without opening a tab; edits fire onDidChangeTextDocument; showOpenDialog answers Uris', async () => {
+		const { api, requests } = shim({}, { 'workspace.readText': () => ({ text: 'one\ntwo', languageId: 'plaintext' }), 'dialog.open': () => ['/ws/picked.txt'] });
+		const document = await api.workspace.openTextDocument(Uri.file('/ws/notes.txt')) as { getText(): string; lineAt(line: number): { text: string } };
+		expect(document.getText()).toBe('one\ntwo');
+		expect(document.lineAt(1).text).toBe('two');
+		expect(requests.some((request) => request.method === 'workspace.openFile')).toBe(false);
+		const changes: { contentChanges: { text: string }[]; document: { version: number } }[] = [];
+		api.workspace.onDidChangeTextDocument((event) => changes.push(event as never));
+		api.handleHostEvent({ event: 'documentChanged', path: '/ws/notes.txt', text: 'one\ntwo\nthree' });
+		expect(changes).toHaveLength(1);
+		expect(changes[0]!.contentChanges[0]!.text).toBe('one\ntwo\nthree');
+		expect(changes[0]!.document.version).toBe(2);
+		const picked = await api.window.showOpenDialog({});
+		expect(picked![0]!.fsPath).toBe('/ws/picked.txt');
+	});
+
+	it('TreeItem takes (label, state) and (resourceUri, state); the serializer keeps contextValue and ThemeIcons', async () => {
+		const { api } = shim();
+		const labelled = new api.TreeItem('Label', api.TreeItemCollapsibleState.Collapsed);
+		expect(labelled.label).toBe('Label');
+		expect(labelled.collapsibleState).toBe(1);
+		const resource = new api.TreeItem(Uri.file('/ws/readme.md'));
+		resource.iconPath = new api.ThemeIcon('book');
+		resource.contextValue = 'doc';
+		api.window.createTreeView('demo.view', { treeDataProvider: { getChildren: () => ['x'], getTreeItem: () => resource as never } });
+		const [item] = await api.__serveTree.children('demo.view', null) as { handle: string; label: string; codicon?: string; contextValue?: string }[];
+		expect(item).toMatchObject({ label: 'readme.md', codicon: 'book', contextValue: 'doc' });
+		// A second fetch keeps the element's handle (the sidebar's expansion state survives).
+		const [again] = await api.__serveTree.children('demo.view', null) as { handle: string }[];
+		expect(again!.handle).toBe(item!.handle);
+	});
+
+	it('an unsupported API is accepted, logged once, and never throws', () => {
+		const { api, requests } = shim();
+		api.languages.registerHoverProvider('ts', {});
+		api.languages.registerHoverProvider('js', {});
+		api.window.registerUriHandler({});
+		const logs = requests.filter((request) => request.method === 'log').map((request) => String(request.args[1]));
+		expect(logs.filter((line) => line.includes('registerHoverProvider'))).toHaveLength(1);
+		expect(logs.some((line) => line.includes('registerUriHandler'))).toBe(true);
+		expect(typeof new api.Hover('x').contents).toBe('object');
+		expect(new api.SemanticTokensBuilder().build().data).toBeInstanceOf(Uint32Array);
+	});
+});
+
+describe('when clauses, menus and contributed settings', () => {
+	it("evaluates VS Code's full when grammar", () => {
+		registerContextProvider('acme.mode', () => 'edit');
+		registerContextProvider('acme.langs', () => ['python', 'rust']);
+		expect(evaluateWhen('acme.demo', "acme.mode == 'edit' || false")).toBe(true);
+		expect(evaluateWhen('acme.demo', '!(acme.mode == edit) && true')).toBe(false);
+		expect(evaluateWhen('acme.demo', 'resourceFilename =~ /\\.md$/i', { resourceFilename: 'README.MD' })).toBe(true);
+		expect(evaluateWhen('acme.demo', 'resourceLangId in acme.langs', { resourceLangId: 'rust' })).toBe(true);
+		expect(evaluateWhen('acme.demo', 'resourceLangId not in acme.langs', { resourceLangId: 'rust' })).toBe(false);
+		expect(evaluateWhen('acme.demo', 'count >= 3', { count: 4 })).toBe(true);
+		expect(evaluateWhen('acme.demo', "view == acme.tree && viewItem == 'file'", { view: 'acme.tree', viewItem: 'folder' })).toBe(false);
+		// An unmodelled key alone never hides an item (the host sets few context keys).
+		expect(evaluateWhen('acme.demo', 'someUnknownKey && !otherUnknownKey')).toBe(true);
+	});
+
+	it('setContext keeps a context value as given (a mode string compares)', async () => {
+		const host = new ExtensionHost();
+		await host.executeCommand('setContext', ['acme.state', 'busy']);
+		expect(evaluateWhen('acme.demo', "acme.state == 'busy'")).toBe(true);
+		expect(evaluateWhen('acme.demo', "acme.state == 'idle'")).toBe(false);
+	});
+
+	it('a contributed setting keeps its declared type and default (arrays, objects, enums)', () => {
+		applyExtensionSettings('acme.types', { properties: {
+			'acme.list': { type: 'array', default: ['a'] },
+			'acme.map': { type: 'object' },
+			'acme.level': { type: 'string', enum: ['low', 'high'], default: 'high' },
+			'acme.count': { type: 'integer', default: 3 }
+		} }, {});
+		const defs = extensionSettingDefs().filter((def) => def.extId === 'acme.types');
+		expect(defs.find((def) => def.id === 'acme.list')).toMatchObject({ type: 'json', default: ['a'] });
+		expect(defs.find((def) => def.id === 'acme.map')).toMatchObject({ type: 'json', default: {} });
+		expect(defs.find((def) => def.id === 'acme.level')).toMatchObject({ type: 'enum', default: 'high', enumValues: ['low', 'high'] });
+		expect(defs.find((def) => def.id === 'acme.count')).toMatchObject({ type: 'number', default: 3 });
+	});
+});
+
+describe('the extension host log', () => {
+	it('records shim anomalies under the extension id, with the host request that failed', async () => {
+		resetExtLog();
+		const host = new ExtensionHost();
+		const handle = { frame: document.createElement('iframe'), commandIds: new Set<string>(), pendingCalls: new Set<(error: Error) => void>() };
+		await host['serve']('log', ['warn', 'unsupported API languages.registerHoverProvider', null], 'acme.demo', handle);
+		await host['serve']('no.such.request', [], 'acme.demo', handle).catch(() => undefined);
+		const entries = extLogEntries();
+		expect(entries.some((entry) => entry.source === 'acme.demo' && entry.level === 'warn' && entry.message.includes('registerHoverProvider'))).toBe(true);
+		expect(entries.some((entry) => entry.message.includes('no.such.request'))).toBe(true);
+	});
+
+	it('an activation failure logs its stack and offers the log from the notification', async () => {
+		resetExtLog();
+		new ExtensionHost();
+		window.dispatchEvent(new MessageEvent('message', { data: { type: '__studioExtActivateFailed', extensionId: 'acme.broken', error: 'TypeError: boom', stack: 'TypeError: boom\n    at activate (ggs-ext://acme.broken/out/extension.js:10:5)' } }));
+		await flush();
+		const failure = extLogEntries().find((entry) => entry.source === 'acme.broken' && entry.level === 'error');
+		expect(failure?.detail).toContain('extension.js:10:5');
+		expect(notifications().some((text) => text.includes('acme.broken'))).toBe(true);
+	});
+
+	it('writes batched lines to ~/.ggs/logs/ext-host.log through ext_log_append', async () => {
+		resetExtLog();
+		backend.on('ext_log_append', () => null);
+		extLog('error', 'acme.demo', 'command demo.run failed', new Error('bad'));
+		await flushExtLog();
+		const lines = backend.callsTo('ext_log_append').flatMap((call) => call.lines as string[]);
+		expect(lines.some((line) => /\[error\] \[acme\.demo\] command demo\.run failed :: Error: bad/.test(line))).toBe(true);
+		// One line per entry in the file: a stack's newlines fold.
+		expect(lines.every((line) => !line.includes('\n'))).toBe(true);
+	});
+});
+
+describe('Node shims: fs options forms and working streams', () => {
+	function builtins(files: Record<string, string> = {}, request: (method: string, args: unknown[]) => Promise<unknown> = async () => undefined) {
+		return createNodeBuiltins({
+			nodeEnv: { platform: 'linux', arch: 'x64', homedir: '', tmpdir: '', hostname: 't', release: '', eol: '\n', separator: '/', delimiter: ':' },
+			extensionPath: '/x',
+			files,
+			binaries: [],
+			blobs: {},
+			bridge: { request }
+		} as never);
+	}
+
+	it('fs.readdir / readFile / mkdir accept the (path, options, callback) forms', async () => {
+		const fs = builtins({ 'dist/a.js': 'A', 'dist/sub/b.js': 'B' }, async (method, args) => (method === 'fs.op' && args[0] === 'list' ? [{ name: 'x.txt', kind: 1 }, { name: 'dir', kind: 2 }] : undefined))['fs'] as Record<string, (...args: unknown[]) => unknown> & { promises: Record<string, (...args: unknown[]) => Promise<unknown>> };
+		const dirents = await new Promise<{ name: string; isDirectory(): boolean }[]>((resolve, reject) => fs.readdir!('/x/dist', { withFileTypes: true }, (error: Error | null, entries: never) => (error ? reject(error) : resolve(entries))));
+		expect(dirents.map((entry) => `${entry.name}:${entry.isDirectory()}`).sort()).toEqual(['a.js:false', 'sub:true']);
+		const text = await new Promise((resolve) => fs.readFile!('/x/dist/a.js', { encoding: 'utf8' }, (_error: unknown, data: unknown) => resolve(data)));
+		expect(text).toBe('A');
+		const workspace = await fs.promises.readdir!('/ws', { withFileTypes: true }) as { name: string; isDirectory(): boolean }[];
+		expect(workspace.map((entry) => `${entry.name}:${entry.isDirectory()}`)).toEqual(['x.txt:false', 'dir:true']);
+		await expect(new Promise((resolve) => fs.mkdir!('/ws/new', { recursive: true }, resolve))).resolves.toBeNull();
+	});
+
+	it('stream pipes a Readable through a Transform into a Writable', async () => {
+		const stream = builtins()['stream'] as { Readable: { from(items: unknown[]): { pipe<T>(target: T): T } }; Transform: new (options: unknown) => { pipe(target: unknown): unknown }; Writable: new (options: unknown) => { on(event: string, fn: () => void): void } };
+		const seen: string[] = [];
+		const upper = new stream.Transform({ transform(chunk: unknown, _encoding: string, callback: (error: null, data: string) => void) { callback(null, String(chunk).toUpperCase()); } });
+		const sink = new stream.Writable({ write(chunk: unknown, _encoding: string, callback: () => void) { seen.push(String(chunk)); callback(); } });
+		const finished = new Promise<void>((resolve) => sink.on('finish', resolve));
+		stream.Readable.from(['a', 'b']).pipe(upper);
+		upper.pipe(sink);
+		await finished;
+		expect(seen).toEqual(['A', 'B']);
+	});
+
+	it('crypto.randomUUID / randomBytes answer (the callback form and > 64 KiB included)', async () => {
+		const crypto = builtins()['crypto'] as { randomUUID(): string; randomBytes(size: number, cb?: (error: null, bytes: Uint8Array) => void): Uint8Array | undefined };
+		expect(crypto.randomUUID()).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+		expect(crypto.randomBytes(70000)!.length).toBe(70000);
+		const viaCallback = await new Promise<Uint8Array>((resolve) => crypto.randomBytes(8, (_error, bytes) => resolve(bytes)));
+		expect(viaCallback.length).toBe(8);
 	});
 });

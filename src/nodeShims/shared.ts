@@ -105,11 +105,37 @@ export class EventEmitter {
 
 /* ---------- The modules that exist only to fail at call time ---------- */
 
+/** Where a deliberate call-time failure is reported before it throws: the frame boot
+ *  wires it to the extension-host log, so a package that catches the error and carries on
+ *  silently still leaves a line saying which Node surface it reached for. */
+let shimFailureReporter: ((message: string, level?: 'trace' | 'debug' | 'info' | 'warn' | 'error') => void) | null = null;
+
+export function setShimFailureReporter(reporter: ((message: string, level?: 'trace' | 'debug' | 'info' | 'warn' | 'error') => void) | null): void {
+	shimFailureReporter = reporter;
+}
+
+/** Report one unsupported-surface use (never throws — logging must not add a failure). */
+export function reportShimFailure(message: string): void {
+	traceShim('warn', message);
+}
+
+/** One line into the extension host log at a level (the fork bridge's wire trace, a
+ *  server's stderr) — silent when no host wired the reporter. */
+export function traceShim(level: 'trace' | 'debug' | 'info' | 'warn' | 'error', message: string): void {
+	try {
+		shimFailureReporter?.(message, level);
+	} catch {
+		// the reporter's own failure is not the extension's problem
+	}
+}
+
 /** A function whose every call fails with a clear reason — the require succeeds, the use
  *  does not (a spawn an extension never performs must not kill its activation). */
 export function callThrowsFn(name: string): () => never {
 	return () => {
-		throw new Error(`${name} is not supported by the Git Graph Studio extension host (extensions run in a sandboxed frame; a package that needs real processes declares a ggs backend)`);
+		const message = `${name} is not supported by the Git Graph Studio extension host (extensions run in a sandboxed frame; a package that needs real processes declares a ggs backend)`;
+		reportShimFailure(message);
+		throw new Error(message);
 	};
 }
 

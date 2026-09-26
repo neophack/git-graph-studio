@@ -11,7 +11,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { ENCODING_LABELS } from './editor';
 import { t, tf } from './i18n';
 import { SETTINGS_EVENT, settings } from './settings';
-import { clearAllNotifications, clearNotification, el, icon, notificationEntries, onNotificationsChange, tooltip, type CentreEntry } from './ui';
+import { clearAllNotifications, clearNotification, el, icon, labelWithIcons, notificationEntries, onNotificationsChange, tooltip, type CentreEntry } from './ui';
 
 /** How long ago an entry landed, in VS Code's wording ("just now", "5m ago"). */
 function ago(at: number): string {
@@ -29,6 +29,20 @@ export interface HeadInfo {
 	ahead: number;
 	behind: number;
 	upstream: string | null;
+}
+
+/** One extension status bar item as the extension host pushes it. */
+export interface ExtensionStatusItem {
+	id: string;
+	alignment: number;
+	priority?: number;
+	text: string;
+	tooltip: string;
+	command?: string;
+	commandArgs?: unknown[];
+	color?: string;
+	backgroundColor?: string;
+	visible: boolean;
 }
 
 export class StatusBar {
@@ -66,10 +80,11 @@ export class StatusBar {
 	 *  own left cluster, right items before its right one, as VS Code places them. */
 	private readonly extLeft: HTMLElement;
 	private readonly extRight: HTMLElement;
-	private extItems: { id: string; alignment: number; text: string; tooltip: string; command?: string; visible: boolean }[] = [];
+	private extItems: ExtensionStatusItem[] = [];
 	/** An extension item was clicked - the workbench routes the command (through the
-	 *  extension host, which knows whether its handler lives in a frame). */
-	onExtensionCommand: ((command: string) => void) | null = null;
+	 *  extension host, which knows whether its handler lives in a frame) with the
+	 *  arguments of a `Command`-object item. */
+	onExtensionCommand: ((command: string, args?: unknown[]) => void) | null = null;
 
 	onRepoClick: (() => void) | null = null;
 	onBranchClick: (() => void) | null = null;
@@ -196,7 +211,7 @@ export class StatusBar {
 
 	/** Replace the extension-owned items (the extension host pushes the current set on every
 	 *  change — create, field write, dispose). A click runs the item's declared command. */
-	setExtensionItems(items: { id: string; alignment: number; text: string; tooltip: string; command?: string; visible: boolean }[]): void {
+	setExtensionItems(items: ExtensionStatusItem[]): void {
 		this.extItems = items;
 		this.renderExtensionItems();
 	}
@@ -204,11 +219,23 @@ export class StatusBar {
 	private renderExtensionItems(): void {
 		this.extLeft.replaceChildren();
 		this.extRight.replaceChildren();
-		for (const item of this.extItems) {
+		// VS Code's order: a higher priority sits further left within its side; equal
+		// priorities keep creation order (a stable sort).
+		const ordered = this.extItems.map((item, index) => ({ item, index })).sort((a, b) => (b.item.priority ?? 0) - (a.item.priority ?? 0) || a.index - b.index);
+		for (const { item } of ordered) {
 			if (!item.visible || item.text === '') continue;
-			const entry = el('div', 'status-item', [item.text]);
+			// `$(icon)` references render as codicons, as VS Code's status bar does.
+			const entry = el('div', 'status-item', labelWithIcons(item.text));
 			if (item.tooltip) entry.title = item.tooltip;
-			if (item.command) entry.addEventListener('click', () => this.onExtensionCommand?.(item.command!));
+			// The two background colours VS Code allows map onto theme classes; a foreground
+			// is the extension's own colour (a literal, or a theme colour's variable).
+			if (item.backgroundColor === 'statusBarItem.errorBackground') entry.classList.add('ext-status-error');
+			else if (item.backgroundColor === 'statusBarItem.warningBackground') entry.classList.add('ext-status-warning');
+			if (item.color) entry.style.color = /^[a-z]+(\.[A-Za-z]+)+$/.test(item.color) ? `var(--vscode-${item.color.replace(/\./g, '-')})` : item.color;
+			if (item.command) {
+				entry.classList.add('clickable');
+				entry.addEventListener('click', () => this.onExtensionCommand?.(item.command!, item.commandArgs));
+			}
 			(item.alignment === 2 ? this.extRight : this.extLeft).appendChild(entry);
 		}
 	}

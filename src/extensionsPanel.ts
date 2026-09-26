@@ -240,6 +240,9 @@ export class ExtensionsPanel {
 		try {
 			const info = await this.host.installFromGallery(entry);
 			notify('info', tf('extensions.installedOk', info.id, info.version));
+			// What the package declares it needs arrives with it (VS Code installs a
+			// package's dependencies and pack members at the same time).
+			await this.host.installDependencies(info);
 			this.onChanged?.();
 		} catch (error) {
 			notify('error', tf('extensions.marketplaceInstallFailed', String(error)));
@@ -314,13 +317,12 @@ export class ExtensionsPanel {
 	}
 
 	/** Identifier, install location, declared backend (and its live process), repository,
-	 *  license, permissions — the fields a row's summary line has no room for. */
+	 *  license — the fields a row's summary line has no room for. */
 	private detailFacts(ext: ExtInfo, processInfo: ExtProcessInfo | null): HTMLElement {
 		const backend = ext.capabilities?.backend ?? null;
 		const backendLine = backend
 			? tf('extensions.backendSummary', backend.kind, backend.protocol ?? 'ggs-ext/1', backend.command)
 			: t('extensions.backendNone');
-		const permissions = ext.capabilities?.permissions ?? [];
 		const row = (label: string, value: string) => el('div', 'ext-detail-row', [
 			el('span', 'ext-detail-label', [label]),
 			el('span', 'ext-detail-value', [value])
@@ -333,7 +335,6 @@ export class ExtensionsPanel {
 		if (backend && processInfo) rows.push(row('', `${processInfo.protocolVersion}, pid ${processInfo.pid || '–'}`));
 		if (ext.repository) rows.push(row(t('extensions.repository'), ext.repository));
 		if (ext.license) rows.push(row(t('extensions.license'), ext.license));
-		rows.push(row(t('extensions.permissions'), permissions.length > 0 ? permissions.join(', ') : t('extensions.permissionsNone')));
 		return el('div', 'ext-detail-facts', rows);
 	}
 
@@ -362,7 +363,11 @@ export class ExtensionsPanel {
 	}
 
 	private async pickVsix(): Promise<void> {
-		await this.pickPackage(t('extensions.installPickTitleVsix'), [{ name: 'VS Code extension', extensions: ['vsix'] }], (path) => this.host.installFromVsix(path));
+		await this.pickPackage(t('extensions.installPickTitleVsix'), [{ name: 'VS Code extension', extensions: ['vsix'] }], async (path) => {
+			const info = await this.host.installFromVsix(path);
+			await this.host.installDependencies(info);
+			return info;
+		});
 	}
 
 	private async pickPackage(title: string, filters: { name: string; extensions: string[] }[], install: (path: string) => Promise<{ id: string; version: string }>): Promise<void> {

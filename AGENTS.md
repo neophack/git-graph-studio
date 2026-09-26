@@ -420,8 +420,17 @@ nothing.
   circular partials, `MODULE_NOT_FOUND`), `src/ggsVscodeShim.ts` (the same `vscode` shim bundled as the IIFE ggs-node evaluates when a package's entry is a frame program — ggs-node's own frame-program host), `src/nodeShims.ts` (the Node builtins — `path`,
   `os`, `events`, `util`, `fs` over the preload and the workspace-confined bridge, `Buffer`,
   `process`; real implementations for what a frame can serve — `child_process` through the
-  host bridge, `nodeShims/processSurfaces.ts` + `shared.ts` — call-time failures for what
-  it cannot (`net`), so a `require` of them never kills an activation),
+  host bridge, `nodeShims/processSurfaces.ts` + `shared.ts`, and `stream` —
+  `nodeShims/stream.ts`, Readable / Writable / Duplex / Transform / PassThrough with
+  `pipe`, `pipeline` and async iteration — call-time failures for what it cannot
+  (`net`), each reported to the extension host log, so a `require` of them never kills
+  an activation),
+  `src/extLog.ts` (the extension host log: one record of every extension-platform
+  anomaly — activation failures with their stacks, command / provider / listener
+  exceptions, failed host requests, each unsupported VS Code API a package reaches for —
+  into the Output view's "Extension Host" channel and `~/.ggs/logs/ext-host.log`, at the
+  `extensionLogLevel` setting's threshold; the `extensions.showLog` /
+  `extensions.openLogFile` commands),
   `src/editorDiagnostics.ts` (the diagnostics store: the host's
   `languages.createDiagnosticCollection` entries land as CodeMirror squiggles in the open
   editors) + `src/editorDiagnosticsView.ts` (the CodeMirror half, loaded with the editor
@@ -437,7 +446,10 @@ nothing.
   bundled-package registry — git-graph-rs, `ext_install_bundled`'s id — the `ggs://`
   protocol that serves an installed package's files — composing the page bootstrap into
   every HTML page, `ext_fs` — the workspace-confined file services behind
-  `vscode.workspace.fs`, `findFiles` and `workspaceContains` activations — `ext_load_code`
+  `vscode.workspace.fs`, `findFiles` and `workspaceContains` activations, confined to
+  the open folders plus the extension's own install and storage directories —
+  `ext_log_append` / `ext_log_path` (the extension host log file, rotated) and
+  `ext_storage_paths` (an extension's `~/.ggs/extension-data/<id>` storage) — `ext_load_code`
   (the package's bounded loadable-code map the frame's CommonJS loader resolves against)
   and `ext_node_env` (the Node environment facts the frame's `os`/`process` shims carry)),
   manifests read as JSONC — comments and trailing commas, the tolerance VS Code's own
@@ -500,7 +512,11 @@ nothing.
   reports; skips without installs),
   `scripts/probes/vsix-live-check.mjs` (the live five-package check over CDP),
   `scripts/probes/git-graph-live-check.mjs` (the live git-graph-rs check: ggs-node with
-  the engine `.node` loaded, the view rendering, settings pushing through)
+  the engine `.node` loaded, the view rendering, settings pushing through),
+  `scripts/probes/git-graph-menus-live-check.mjs` (the live git-graph-rs menu check: every
+  contributed menu placement — the SCM header button, the "..." entries, the Pull, Push
+  submenu, the explorer/editor/tab/change-row context menus — plus every palette command
+  run with its observable result)
 
 ### 13. CAN Trace Analyzer
 

@@ -265,7 +265,11 @@ class ModuleLoader {
 			// The CommonJS wrapper Node itself runs module code through; the absolute
 			// `__filename`/`__dirname` spell the install path with OS separators.
 			const absolute = this.host.extensionPath.replace(/[\\/]+$/, '') + (dirname === '' ? '' : '/' + dirname);
-			new Function('require', 'module', 'exports', '__filename', '__dirname', text)(
+			// The sourceURL names the module in every stack its code throws — the extension
+			// host log then points at `<package>/out/extension.js:line:col` (asynchronous
+			// failures too, which the catch below never sees), not an anonymous eval.
+			const sourceUrl = `ggs-ext://${this.host.extensionPath.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? 'extension'}/${resolved || 'entry.js'}`;
+			new Function('require', 'module', 'exports', '__filename', '__dirname', `${text}\n//# sourceURL=${sourceUrl}`)(
 				localRequire, module, module.exports,
 				this.host.extensionPath.replace(/[\\/]+$/, '') + '/' + resolved,
 				absolute

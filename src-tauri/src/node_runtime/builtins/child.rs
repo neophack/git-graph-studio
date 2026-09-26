@@ -110,6 +110,22 @@ fn make_emitter(context: &mut Context) -> JsResult<JsObject> {
         .ok_or_else(|| error("the prelude's emitter maker did not answer an object"))
 }
 
+/// Node's readable-stream flow-control surface (`pause` / `resume` / `destroy`), chainable
+/// like the real streams. Extension code calls these without checking — the hex scan drains
+/// a child's stderr through `resume()` — and on a bare emitter that call died with a
+/// TypeError, which silently ate the scan and left the binary comparison "analysing" forever.
+fn stream_chainable(this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    Ok(this.clone())
+}
+
+fn attach_readable_stream(stream: &JsObject, context: &mut Context) -> JsResult<()> {
+    for name in ["pause", "resume", "destroy"] {
+        let function = native_callable(context, name, boa_engine::NativeFunction::from_fn_ptr(stream_chainable));
+        stream.set(key(name), function, false, context)?;
+    }
+    Ok(())
+}
+
 /// `spawn(file, args, options)`: a real child process, its stdout/stderr piped through
 /// reader threads back into the JS thread as `data` events, its exit as `exit`/`close`.
 /// The returned object IS an `EventEmitter` (so `.on` works) with `pid`, `stdout`,
@@ -136,6 +152,8 @@ pub(super) fn proc_spawn(
     let emitter = make_emitter(context)?;
     let stdout_stream = make_emitter(context)?;
     let stderr_stream = make_emitter(context)?;
+    attach_readable_stream(&stdout_stream, context)?;
+    attach_readable_stream(&stderr_stream, context)?;
 
     let child = Arc::new(Mutex::new(child));
     let handle = with_state(|state| {

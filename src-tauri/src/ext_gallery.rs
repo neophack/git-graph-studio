@@ -144,12 +144,32 @@ fn encode_query(value: &str) -> String {
     out
 }
 
-/// The search endpoint URL. `target=universal` keeps results to host-anywhere packages —
-/// this app has no Node runtime, so a platform-target VSIX's native binaries would be
-/// rejected at the install door anyway; the search should not offer them.
+/// The Open VSX target platform of this machine (`win32-x64`, `linux-arm64`, …) — the
+/// spelling `vsce package --target` and the registry share. None on a platform the
+/// registry has no target for; the search then asks for universal packages only.
+pub fn host_target_platform() -> Option<&'static str> {
+    use std::env::consts::{ARCH, OS};
+    Some(match (OS, ARCH) {
+        ("windows", "x86_64") => "win32-x64",
+        ("windows", "aarch64") => "win32-arm64",
+        ("linux", "x86_64") => "linux-x64",
+        ("linux", "aarch64") => "linux-arm64",
+        ("linux", "arm") => "linux-armhf",
+        ("macos", "x86_64") => "darwin-x64",
+        ("macos", "aarch64") => "darwin-arm64",
+        _ => return None,
+    })
+}
+
+/// The search endpoint URL. `targetPlatform` asks the registry for the universal
+/// packages plus the builds of THIS machine's platform — ggs-node hosts a package's
+/// N-API `.node` addon, so a platform build (a language server, a native engine) is
+/// installable here; an other-platform build would carry binaries this machine cannot
+/// load, and the search does not offer it.
 fn search_url(base: &str, query: &str) -> String {
+    let target = host_target_platform().unwrap_or("universal");
     format!(
-        "{base}/api/-/search?query={}&size={SEARCH_SIZE}&target=universal",
+        "{base}/api/-/search?query={}&size={SEARCH_SIZE}&targetPlatform={target}",
         encode_query(query)
     )
 }
@@ -361,7 +381,8 @@ mod tests {
         let url = search_url("https://open-vsx.org", "c++ theme");
         assert!(url.starts_with("https://open-vsx.org/api/-/search?query=c%2B%2B%20theme&"));
         assert!(url.contains("size=20"));
-        assert!(url.contains("target=universal"));
+        let target = host_target_platform().unwrap_or("universal");
+        assert!(url.contains(&format!("targetPlatform={target}")));
     }
 
     #[test]

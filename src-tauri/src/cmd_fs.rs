@@ -368,8 +368,9 @@ pub async fn write_file(
 /// A file's raw bytes at one revision, over the git CLI: `git cat-file` of `<rev>:<path>`,
 /// where `:index` (the staged copy) reads the index's stage-0 entry. `Ok(None)` when the path
 /// does not exist at that revision (the missing side of an added or deleted file); binary
-/// content passes through undecoded.
-fn revision_file_bytes(git: &Git, revision: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
+/// content passes through undecoded. `pub(crate)`: the extension pages' byte services
+/// (`cmd_ext`'s `ext_page_revision_bytes`) read revision sides through it too.
+pub(crate) fn revision_file_bytes(git: &Git, revision: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
     let spec = format!(
         "{}:{path}",
         if revision == ":index" { "" } else { revision }

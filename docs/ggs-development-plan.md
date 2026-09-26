@@ -874,10 +874,17 @@ About 5 months to 1.0. M1 ∥ M2 and M5 ∥ M6 can run in parallel with two deve
 ```
 ~/.ggs/
   extensions/            installed extensions (exists today)
+  extension-data/<id>/   an extension's globalStorageUri (global/) and storageUri
+                         (workspace/<hash>/) — outside the install, so upgrades keep it
   index/<repo-hash>/     files.bin, symbols.bin, refs.bin       (M2 / M4)
   workspaceStorage/<hash>/state.json                             (M2)
   backups/               hot-exit buffers                        (M2)
   compare-sessions.json                                          (M5)
   settings.json, keybindings.json, snippets/                     (M3)
   logs/                                                          (M8)
+    ext-host.log         the extension host log (activation failures, exceptions,
+                         unsupported API use), rotated at 4 MB to ext-host.log.1
+    extensions.log       the extension store's boot pass
+    extensions/<id>/     an extension's logUri
+    mcp.log              the MCP server's calls
 ```

@@ -56,6 +56,10 @@ export class EditorArea {
 	/** Any group's set of tabs changed: the workbench snapshots the session. */
 	onTabsChange: (() => void) | null = null;
 	onFileSaved: ((path: string) => void) | null = null;
+	/** A file editor's text changed, from whichever group (see EditorGroup). */
+	onDocumentEdited: ((path: string, text: () => string) => void) | null = null;
+	/** A file's last editor across every group closed. */
+	onDocumentClosed: ((path: string) => void) | null = null;
 	/** A windowed editor's save streamed a progress report (`null` clears it), from whichever
 	 *  group it belongs to; the workbench forwards this to the status bar's save item. */
 	onSaveProgress: ((progress: { written: number; total: number } | null) => void) | null = null;
@@ -116,6 +120,23 @@ export class EditorArea {
 
 	/** The active editor's whole text, when a file editor is active — module 12 pushes it to
 	 *  extension frames on active-editor changes (only when the document changed). */
+	/** An open file editor's current text (unsaved edits included), from any group. */
+	documentText(path: string): string | null {
+		for (const group of this.groups()) {
+			const view = group.fileViewFor(path);
+			if (view) return view.state.doc.toString();
+		}
+		return null;
+	}
+
+	/** Save a file's open editor, from whichever group holds it. */
+	async saveFile(path: string): Promise<boolean> {
+		for (const group of this.groups()) {
+			if (group.fileViewFor(path)) return await group.saveByPath(path);
+		}
+		return false;
+	}
+
 	activeText(): string | null {
 		if (this.activeInput?.kind !== 'file') return null;
 		return this.activeView?.state.doc.toString() ?? null;
@@ -478,6 +499,10 @@ export class EditorArea {
 			this.onTabsChange?.();
 		};
 		group.onFileSaved = (path) => this.onFileSaved?.(path);
+		group.onDocumentEdited = (path, text) => this.onDocumentEdited?.(path, text);
+		group.onDocumentClosed = (path) => {
+			if (!this.groups().some((candidate) => candidate.fileViewFor(path) !== null)) this.onDocumentClosed?.(path);
+		};
 		group.onSaveProgress = (progress) => this.onSaveProgress?.(progress);
 		group.onMergeResolved = () => this.onMergeResolved?.();
 		group.onExternalFileChange = () => this.onExternalFileChange?.();

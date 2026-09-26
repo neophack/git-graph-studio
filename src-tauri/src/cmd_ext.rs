@@ -45,75 +45,21 @@ fn default_format() -> String {
     "vsix".to_owned()
 }
 
-/// The `manifest.json` at the root of the retired custom package package.
+/// The runtime `manifest.json` every installed package carries. There is no package format
+/// of its own any more: a VSIX is a VS Code extension, and everything it declares is the
+/// standard `package.json` the frame host reads. The manifest is this host's own record of
+/// the store identity plus the backend it derived for the package (when it runs one).
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct StudioManifest {
-    /// `ggs/2`: the named page registry and the backend declaration.
-    pub format: String,
-    /// `{publisher}.{name}`; must match `package.json`.
+    /// `{publisher}.{name}`; matches `package.json`.
     pub id: String,
     pub version: String,
-    #[serde(default)]
-    pub frontend: Option<LegacyFrontend>,
-    /// `ggs/2`: the named page registry — every page the package can show, by id.
-    #[serde(default)]
-    pub pages: Option<std::collections::BTreeMap<String, StudioPage>>,
-    /// `ggs/2`: the backend declaration (`ext_process.rs` spawns it on demand).
+    /// The backend derived at install (`resolve_node_binaries`: the package's `main` as a
+    /// Node program, or its engine `.node` where a real Node runtime loads it). Absent for
+    /// a package that needs no backend.
     #[serde(default)]
     pub backend: Option<BackendDecl>,
-    /// `ggs/2`: an activity-bar launcher — one icon in the workbench's activity bar that runs
-    /// one of the package's commands (a view page's opener), the way a built-in view has one.
-    #[serde(default)]
-    pub activitybar: Option<ActivityBar>,
-    #[serde(default)]
-    pub permissions: Vec<String>,
-}
-
-/// A package's activity-bar launcher: the icon (package-relative), its tooltip, and
-/// the declared command a click runs.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct ActivityBar {
-    pub command: String,
-    /// The page the command opens — the engine host's one command convention: a launcher
-    /// click answers `{openPage: page}` from this field, so no host names any package's
-    /// page wiring itself.
-    #[serde(default)]
-    pub page: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub icon: Option<String>,
-}
-
-/// Where the package's webview lives (paths inside the package).
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct LegacyFrontend {
-    pub page: String,
-    #[serde(default)]
-    pub config: Option<String>,
-    #[serde(default)]
-    pub compare: Option<String>,
-}
-
-/// One page of a package: an HTML document inside the package, opened as an editor
-/// tab over the `ggs://` protocol (which composes the page bootstrap into it).
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct StudioPage {
-    /// The HTML document, relative to the package root.
-    pub page: String,
-    #[serde(default)]
-    pub title: Option<String>,
-    /// One tab at most: a second open reveals the existing tab (its params arrive as an event).
-    #[serde(default)]
-    pub singleton: bool,
-    /// The page's tab icon, package-relative; absent, the tab wears the package's activity-bar
-    /// icon (or the generic one).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub icon: Option<String>,
 }
 
 /// The backend of a package: a process the extension host spawns on demand — any
@@ -179,9 +125,6 @@ pub fn host_platform_key() -> String {
     };
     format!("{os}-{arch}")
 }
-
-/// The format that adds the named page registry and the process backend.
-pub const STUDIO_FORMAT: &str = "ggs/2";
 
 /// The list format of a bundled offer: a package the installer carries but nothing installed —
 /// the Extensions view's one-click Install cue. The app knows no bundled id: whatever packages
@@ -398,18 +341,25 @@ fn bundled_packages(app: &tauri::AppHandle) -> Vec<BundledPackage> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            // The store's own package format sits beside the installer: a plain `.vsix`
-            // whose `ggs` declaration makes it a first-class package here.
+            // Any `.vsix` beside the installer is a bundled offer — a package is exactly a
+            // VS Code extension, and its backend (when it runs one) derives from its own
+            // `main` and native binaries. A package whose binaries have no `main` to run
+            // them is skipped rather than fatal: discovery must never blind the view.
             if path.extension().and_then(|e| e.to_str()) != Some("vsix") {
                 continue;
             }
             let Ok(manifest) = read_vsix_manifest(&path) else {
                 continue;
             };
-            let Some(ggs) = manifest.ggs.clone() else {
-                continue;
+            let backend =
+                resolve_node_binaries(&manifest, &path, crate::ext_process::real_node_allowed())
+                    .ok()
+                    .flatten();
+            let capabilities = StudioManifest {
+                id: format!("{}.{}", manifest.publisher, manifest.name),
+                version: manifest.version.clone(),
+                backend,
             };
-            let (capabilities, manifest) = (generated_studio_manifest(&manifest, ggs), manifest);
             // Same id seen again: the higher version wins, and an exact tie is broken by
             // recency — the later root wins, so the fixed-name copies the installer actually
             // ships (app-resources, the last roots) outrank same-version leftovers a dev
@@ -598,7 +548,7 @@ fn install_missing_bundled_in(
         let Ok(manifest) = read_vsix_manifest(path) else {
             continue;
         };
-        let Some(id) = manifest_id(&manifest) else {
+        let Some(id) = manifest_id(&manifest) else {
             continue;
         };
         if find_installed(dir, &id)
@@ -775,33 +725,154 @@ fn replace_install(
 /// pass did to installs, readable after the fact — a GUI app has no console for stderr.
 pub fn log_extensions(line: &str) {
     eprintln!("[extensions] {line}");
-    let Ok(store) = extensions_home_dir() else {
+    let Some(logs) = ggs_logs_dir() else {
         return;
     };
-    let Some(home) = store.parent() else {
-        return;
-    };
-    let logs = home.join("logs");
-    if std::fs::create_dir_all(&logs).is_err() {
-        return;
-    }
-    let path = logs.join("extensions.log");
-    // Bounded like mcp.log: past 1 MB the log starts over.
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1024 * 1024) {
-        let _ = std::fs::remove_file(&path);
-    }
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or_default();
+    append_bounded_log(
+        &logs.join("extensions.log"),
+        &[format!("{stamp} {line}")],
+        1024 * 1024,
+    );
+}
+
+/// `~/.ggs/logs`, created on demand (None when the home directory is unusable).
+fn ggs_logs_dir() -> Option<PathBuf> {
+    let store = extensions_home_dir().ok()?;
+    let logs = store.parent()?.join("logs");
+    std::fs::create_dir_all(&logs).ok()?;
+    Some(logs)
+}
+
+/// Append lines to a bounded log: past `limit` bytes the file rotates to `<name>.1` (one
+/// previous generation kept, so the lines leading up to a rotation stay readable).
+fn append_bounded_log(path: &Path, lines: &[String], limit: u64) {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > limit) {
+        let mut previous = path.as_os_str().to_owned();
+        previous.push(".1");
+        let _ = std::fs::remove_file(&previous);
+        let _ = std::fs::rename(path, &previous);
+    }
     use std::io::Write;
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
     {
-        let _ = writeln!(file, "{stamp} {line}");
+        for line in lines {
+            let _ = writeln!(file, "{line}");
+        }
     }
+}
+
+/// The extension host's log size bound (then one rotated generation beside it).
+const EXT_HOST_LOG_LIMIT: u64 = 4 * 1024 * 1024;
+
+/// Append the workbench's buffered extension-host log lines (`src/extLog.ts`) to
+/// `~/.ggs/logs/ext-host.log`: activation failures, handler exceptions, unsupported API
+/// calls, bridge errors — everything a foreign package trips over, readable after the
+/// fact. Each line arrives already formatted (timestamp, level, source, message).
+#[tauri::command]
+pub fn ext_log_append(lines: Vec<String>) -> Result<(), String> {
+    let logs = ggs_logs_dir().ok_or_else(|| "no ~/.ggs/logs directory".to_owned())?;
+    // A single line never carries a newline into the file (a stack is joined with " | "
+    // by the writer); a runaway line is capped so one message cannot flood the log.
+    let lines: Vec<String> = lines
+        .into_iter()
+        .map(|line| {
+            let flat = line.replace(['\r', '\n'], " | ");
+            if flat.len() > 8192 {
+                let mut cut = 8192;
+                while !flat.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                format!("{}…", &flat[..cut])
+            } else {
+                flat
+            }
+        })
+        .collect();
+    append_bounded_log(&logs.join("ext-host.log"), &lines, EXT_HOST_LOG_LIMIT);
+    Ok(())
+}
+
+/// Where the extension host's log file lives (the "Open Extension Host Log" command).
+#[tauri::command]
+pub fn ext_log_path() -> Result<String, String> {
+    let logs = ggs_logs_dir().ok_or_else(|| "no ~/.ggs/logs directory".to_owned())?;
+    Ok(logs.join("ext-host.log").to_string_lossy().into_owned())
+}
+
+/// An extension's own storage directories — VS Code's `globalStorageUri`, `storageUri`
+/// and `logUri`. They live under `~/.ggs/` (the user-data invariant), never inside the
+/// install directory an upgrade or uninstall replaces.
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtStoragePaths {
+    pub global: String,
+    /// Per workspace (keyed by a stable hash of the first folder); absent with no folder
+    /// open — VS Code's `storageUri` is undefined then too.
+    pub workspace: Option<String>,
+    pub log: String,
+}
+
+/// FNV-1a over the workspace path: a stable directory key across runs and Rust versions.
+fn workspace_key(workspace: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in workspace.replace('\\', "/").to_lowercase().bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// The storage layout under a `~/.ggs` home, created on demand.
+fn ext_storage_paths_in(
+    home: &Path,
+    ext_id: &str,
+    workspace: Option<&str>,
+) -> Result<ExtStoragePaths, String> {
+    if ext_id.is_empty()
+        || ext_id.contains(['/', '\\', ':'])
+        || ext_id.contains("..")
+        || ext_id == "."
+    {
+        return Err(format!("invalid extension id {ext_id:?}"));
+    }
+    let data = home.join("extension-data").join(ext_id);
+    let global = data.join("global");
+    let log = home.join("logs").join("extensions").join(ext_id);
+    let workspace = workspace
+        .filter(|path| !path.is_empty())
+        .map(|path| data.join("workspace").join(workspace_key(path)));
+    for dir in [Some(&global), Some(&log), workspace.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    }
+    let text = |path: &Path| path.to_string_lossy().into_owned();
+    Ok(ExtStoragePaths {
+        global: text(&global),
+        workspace: workspace.as_deref().map(text),
+        log: text(&log),
+    })
+}
+
+/// `ext_storage_paths`: the extension's storage directories for the current workspace.
+#[tauri::command]
+pub fn ext_storage_paths(
+    ext_id: String,
+    workspace: Option<String>,
+) -> Result<ExtStoragePaths, String> {
+    let store = extensions_home_dir()?;
+    let home = store
+        .parent()
+        .ok_or_else(|| "the extension store has no parent".to_owned())?;
+    ext_storage_paths_in(home, &ext_id, workspace.as_deref())
 }
 
 /// The uninstall every caller runs: this app's own backend for the extension dies first — its
@@ -1423,6 +1494,168 @@ fn ext_fs_core(
 }
 
 // ---------------------------------------------------------------------------
+// The pages' byte services (`backend.run`'s `__`-prefixed commands): a page's own hex and
+// picture machinery reads revision sides and working-tree windows through these — the app's
+// own git and file reads, confined to the open workspace folders exactly like `ext_fs`. No
+// backend serves these commands; they are the host's, and the answer shapes (`bytes`,
+// `base64` + `size`) are what the machinery's adapters were written against.
+// ---------------------------------------------------------------------------
+
+/// One byte service's answer. A soft `error` keeps a missing side data rather than a
+/// rejection — the hex view renders the empty side itself; `size` carries the whole file's
+/// length where the read is windowed (the streaming consumers stop at it).
+#[derive(Serialize)]
+pub struct ExtPageBytes {
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+/// The repo a page names must sit inside the open folders (empty names the first one), and
+/// the file path resolves under that repo. Answers the canonical repo root and the confined
+/// file target.
+fn confine_page_path(roots: &[String], repo: &str, path: &str) -> Result<(PathBuf, PathBuf), String> {
+    let root = confine_to_roots(roots, repo)?;
+    let target = confine_to_roots(&[root.to_string_lossy().into_owned()], path)?;
+    Ok((root, target))
+}
+
+/// A file's bytes from `offset`, at most `len` (negative: to the end), with the whole size.
+fn read_file_window(target: &Path, offset: u64, len: i64) -> Result<(Vec<u8>, u64), String> {
+    use std::io::{Read, Seek};
+    let mut file = std::fs::File::open(target).map_err(|e| format!("{}: {e}", target.display()))?;
+    let size = file
+        .metadata()
+        .map_err(|e| format!("{}: {e}", target.display()))?
+        .len();
+    let start = offset.min(size);
+    file.seek(std::io::SeekFrom::Start(start))
+        .map_err(|e| format!("{}: {e}", target.display()))?;
+    let want = if len < 0 {
+        size - start
+    } else {
+        (len as u64).min(size - start)
+    };
+    let mut bytes = vec![0u8; want as usize];
+    let mut read = 0usize;
+    while read < bytes.len() {
+        let n = file
+            .read(&mut bytes[read..])
+            .map_err(|e| format!("{}: {e}", target.display()))?;
+        if n == 0 {
+            bytes.truncate(read);
+            break;
+        }
+        read += n;
+    }
+    Ok((bytes, size))
+}
+
+/// The core `ext_page_revision_bytes` delegates to (and the tests call directly).
+fn ext_page_revision_bytes_core(
+    roots: &[String],
+    repo: &str,
+    revision: &str,
+    path: &str,
+    encode: impl Fn(&[u8]) -> String,
+) -> Result<ExtPageBytes, String> {
+    let (root, target) = confine_page_path(roots, repo, path)?;
+    if revision == "*" {
+        let (bytes, size) = read_file_window(&target, 0, -1)?;
+        return Ok(ExtPageBytes {
+            error: None,
+            bytes: Some(encode(&bytes)),
+            base64: None,
+            size: Some(size),
+        });
+    }
+    let relative = target
+        .strip_prefix(&root)
+        .map_err(|_| format!("{} is not under {}", target.display(), root.display()))?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let git = crate::git::Git::new(root.to_string_lossy().into_owned());
+    match crate::cmd_fs::revision_file_bytes(&git, revision, &relative)? {
+        Some(bytes) => Ok(ExtPageBytes {
+            error: None,
+            bytes: Some(encode(&bytes)),
+            base64: None,
+            size: Some(bytes.len() as u64),
+        }),
+        // A path missing at the revision (the deleted side of a binary change) is data,
+        // not an error: the machinery draws the empty side from exactly this answer.
+        None => Ok(ExtPageBytes {
+            error: None,
+            bytes: None,
+            base64: None,
+            size: None,
+        }),
+    }
+}
+
+/// The core `ext_page_file_chunk` delegates to (and the tests call directly).
+fn ext_page_file_chunk_core(
+    roots: &[String],
+    repo: &str,
+    path: &str,
+    offset: i64,
+    len: i64,
+    encode: impl Fn(&[u8]) -> String,
+) -> Result<ExtPageBytes, String> {
+    let (_, target) = confine_page_path(roots, repo, path)?;
+    let (bytes, size) = read_file_window(&target, offset.max(0) as u64, len)?;
+    Ok(ExtPageBytes {
+        error: None,
+        bytes: None,
+        base64: Some(encode(&bytes)),
+        size: Some(size),
+    })
+}
+
+/// `__revisionFileBytes`: a file's whole bytes at one revision (`git cat-file blob`),
+/// base64 — the working-tree sentinel `*` reads the file on disk instead.
+#[tauri::command]
+pub async fn ext_page_revision_bytes(
+    roots: Vec<String>,
+    repo: String,
+    revision: String,
+    path: String,
+) -> Result<ExtPageBytes, String> {
+    use base64::Engine;
+    tauri::async_runtime::spawn_blocking(move || {
+        ext_page_revision_bytes_core(&roots, &repo, &revision, &path, |bytes| {
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// `__fileChunk`: a working-tree file's window — `offset`, at most `len` bytes — base64,
+/// with the file's whole size (`stat` and the stream end both read it).
+#[tauri::command]
+pub async fn ext_page_file_chunk(
+    roots: Vec<String>,
+    repo: String,
+    path: String,
+    offset: i64,
+    len: i64,
+) -> Result<ExtPageBytes, String> {
+    use base64::Engine;
+    tauri::async_runtime::spawn_blocking(move || {
+        ext_page_file_chunk_core(&roots, &repo, &path, offset, len, |bytes| {
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---------------------------------------------------------------------------
 // Core logic (dir-based, so the unit tests run without a Tauri app handle)
 // ---------------------------------------------------------------------------
 
@@ -1484,7 +1717,6 @@ pub(crate) fn list_installed(dir: &Path) -> Result<Vec<ExtInfo>, String> {
                 changelog: None,
                 format: match stored_meta {
                     Some(ref read_meta) => read_meta.format.clone(),
-                    None if capabilities.is_some() => "ggs".to_owned(),
                     None => meta.format,
                 },
                 capabilities,
@@ -1526,72 +1758,21 @@ pub fn install_from_vsix_into(dir: &Path, vsix: &Path, builtin: bool) -> Result<
         }
     }
     extract_vsix(vsix, &target)?;
-    // The Studio capabilities a VSIX declared become its runtime `manifest.json`: from here
-    // on — the warm backend, the pages, the permissions — one runtime serves every package.
-    if let Some(ggs) = manifest.ggs.clone() {
-        let mut capabilities = generated_studio_manifest(&manifest, ggs);
-        // A declared backend that IS the engine `.node` serves the typed dispatch but
-        // hosts nothing a user can open: no pages, no commands, no view. When the package
-        // also ships a JS `main`, the entry is the backend instead — its activation loads
-        // the `.node` through ggs-node's N-API host and creates the view itself (the
-        // architecture every live-verified package runs on). A package that declares
-        // pages for an engine-served surface keeps its declaration.
-        if let Some(backend) = capabilities.backend.as_mut() {
-            let no_surface = capabilities.pages.as_ref().is_none_or(|p| p.is_empty())
-                && capabilities.activitybar.is_none();
-            if backend.command.ends_with(".node")
-                && no_surface
-                && manifest.main.as_deref().is_some_and(|main| !main.trim().is_empty())
-            {
-                backend.command = manifest.main.clone().unwrap_or_default();
-                backend.binaries = None;
-            }
-        }
-        std::fs::write(
-            target.join("manifest.json"),
-            serde_json::to_vec(&capabilities).unwrap(),
-        )
-        .map_err(|e| format!("write manifest.json: {e}"))?;
-        // A process package's backend binary needs its execute bit where the platform has
-        // one — a zip extraction carries no permissions, so the binary this host would
-        // actually run (`command_for`: the per-platform entry when listed, else `command`)
-        // gets it explicitly.
-        #[cfg(unix)]
-        if let Some(backend) = capabilities.backend.as_ref() {
-            if backend.kind == "process" {
-                use std::os::unix::fs::PermissionsExt;
-                let resolved = backend.command_for(&host_platform_key()).to_owned();
-                let bin = target.join(&resolved);
-                if !resolved.is_empty()
-                    && !Path::new(&resolved).is_absolute()
-                    && std::fs::metadata(&bin).is_ok()
-                {
-                    let mut perms = std::fs::metadata(&bin).unwrap().permissions();
-                    perms.set_mode(0o755);
-                    let _ = std::fs::set_permissions(&bin, perms);
-                }
-            }
-        }
-    } else if let Some(backend) = derived_backend {
-        // A plain VSIX whose native binaries the pretend Node runtime can serve: the
-        // derived backend becomes its whole `manifest.json` — the warm backend, nothing
-        // else (no pages, no launcher: the package never declared any).
-        let capabilities = StudioManifest {
-            format: STUDIO_FORMAT.to_owned(),
-            id: format!("{}.{}", manifest.publisher, manifest.name),
-            version: manifest.version.clone(),
-            frontend: None,
-            pages: None,
-            backend: Some(backend),
-            activitybar: None,
-            permissions: Vec::new(),
-        };
-        std::fs::write(
-            target.join("manifest.json"),
-            serde_json::to_vec(&capabilities).unwrap(),
-        )
-        .map_err(|e| format!("write manifest.json: {e}"))?;
-    }
+    // The package's runtime manifest: identity plus the backend derived from its own
+    // `main` and native binaries. The extension runs where VS Code would run it — its
+    // own entry, under this host's Node runtime when it carries native binaries; a
+    // package with neither entry nor binaries needs no backend at all (the frame host
+    // serves it whole).
+    let capabilities = StudioManifest {
+        id: format!("{}.{}", manifest.publisher, manifest.name),
+        version: manifest.version.clone(),
+        backend: derived_backend,
+    };
+    std::fs::write(
+        target.join("manifest.json"),
+        serde_json::to_vec(&capabilities).unwrap(),
+    )
+    .map_err(|e| format!("write manifest.json: {e}"))?;
     let meta = StudioExtMeta {
         builtin,
         format: "vsix".to_owned(),
@@ -1609,22 +1790,6 @@ pub fn install_from_vsix_into(dir: &Path, vsix: &Path, builtin: bool) -> Result<
         .ok_or_else(|| "installed extension not listed after install".to_string())
 }
 
-/// The `manifest.json` a VSIX's `ggs` declaration becomes: the format and identity are the
-/// package's own, so the generated manifest can never drift from the `package.json` it sits
-/// beside in the store.
-fn generated_studio_manifest(manifest: &VsixManifest, ggs: StudioManifest) -> StudioManifest {
-    StudioManifest {
-        format: STUDIO_FORMAT.to_owned(),
-        id: format!("{}.{}", manifest.publisher, manifest.name),
-        version: manifest.version.clone(),
-        frontend: None,
-        pages: ggs.pages,
-        backend: ggs.backend,
-        activitybar: ggs.activitybar,
-        permissions: ggs.permissions,
-    }
-}
-
 /// Parse `package.json` the way VS Code reads extension manifests: as JSONC — `//` and
 /// `/* */` comments plus trailing commas are tolerated (hand-authored packages in the wild
 /// carry both; a strict parser refuses a package VS Code itself would run). Stripped before
@@ -1632,25 +1797,8 @@ fn generated_studio_manifest(manifest: &VsixManifest, ggs: StudioManifest) -> St
 fn parse_jsonc_manifest(bytes: &[u8]) -> Result<VsixManifest, String> {
     let text = String::from_utf8_lossy(bytes);
     let stripped = strip_trailing_commas(&strip_jsonc_comments(&text));
-    let mut value: serde_json::Value =
+    let value: serde_json::Value =
         serde_json::from_str(&stripped).map_err(|e| format!("invalid package.json: {e}"))?;
-    // Normalize the `ggs` identity: the store id and version are the package.json's own,
-    // and packagers forget to repeat them inside the key (the shipped git-graph-rs VSIX
-    // did exactly that) — a strict read then fails on `missing field id` and the package
-    // becomes uninstallable everywhere. Missing fields are filled; wrong ones win.
-    {
-        let name = value.get("name").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
-        let publisher = value.get("publisher").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
-        let version = value.get("version").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
-        if let Some(ggs) = value.get_mut("ggs").and_then(|ggs| ggs.as_object_mut()) {
-            if ggs.get("id").is_none() && !publisher.is_empty() && !name.is_empty() {
-                ggs.insert("id".into(), serde_json::json!(format!("{publisher}.{name}")));
-            }
-            if ggs.get("version").is_none() && !version.is_empty() {
-                ggs.insert("version".into(), serde_json::json!(version));
-            }
-        }
-    }
     serde_json::from_value(value).map_err(|e| format!("invalid package.json: {e}"))
 }
 
@@ -1747,24 +1895,8 @@ pub(crate) fn read_vsix_manifest(vsix: &Path) -> Result<VsixManifest, String> {
     }
     // Compatibility is the point of the VSIX path: the store's format is accepted as-is,
     // whatever the package carries — a compiled bundle (`main`, hosted in a frame), a
-    // process or node backend (`ggs.backend`), or neither (themes, snippets, grammars:
-    // installed for their contributions alone). The one thing checked at install time is
-    // the backend declaration's shape, so a broken package fails here with its reason
-    // instead of at its first (never-starting) backend start.
-    if let Some(backend) = manifest.ggs.as_ref().and_then(|ggs| ggs.backend.as_ref()) {
-        if backend.kind != "process" && backend.kind != "node" {
-            return Err(format!(
-                "unsupported backend kind {} (this app speaks process and node)",
-                backend.kind
-            ));
-        }
-        if backend.command.trim().is_empty() {
-            return Err("a declared backend needs a command".to_owned());
-        }
-        // The host is optional on a node backend: the command's shape picks the default
-        // (a `.node` goes to the engine host, a JS entry to the pretend Node runtime);
-        // a package may still name its host explicitly.
-    }
+    // native engine (its `.node` under this host's Node runtime), or neither (themes,
+    // snippets, grammars: installed for their contributions alone).
     Ok(manifest)
 }
 
@@ -1802,14 +1934,6 @@ fn resolve_node_binaries(
     vsix: &Path,
     real_node: bool,
 ) -> Result<Option<BackendDecl>, String> {
-    if manifest
-        .ggs
-        .as_ref()
-        .and_then(|ggs| ggs.backend.as_ref())
-        .is_some()
-    {
-        return Ok(None);
-    }
     let nodes = native_node_files(vsix)?;
     if nodes.is_empty() {
         return Ok(None);
@@ -1840,7 +1964,7 @@ fn resolve_node_binaries(
             .collect::<Vec<_>>()
             .join(", ");
         return Err(format!(
-            "this extension carries native Node binaries ({listed}) but declares no \"main\"              to run and opts out of \"ggs.backend\" — declare the entry there (kind \"node\")              or ship a main"
+            "this extension carries native Node binaries ({listed}) but declares no \"main\" entry to run them with — ship a \"main\" in its package.json"
         ));
     };
     Ok(Some(BackendDecl {
@@ -2179,14 +2303,6 @@ pub(crate) struct VsixManifest {
     extension_dependencies: Vec<String>,
     #[serde(default, rename = "extensionPack")]
     extension_pack: Vec<String>,
-    /// A VSIX may carry the Studio-specific capabilities the retired custom package manifest would — the
-    /// process backend, the named pages, the activity-bar launcher, the permissions — under
-    /// this `package.json` key, which VS Code ignores. A VSIX that declares them installs
-    /// with a generated `manifest.json`, so the whole runtime (the warm backend
-    /// process, the `ggs://` pages, the permission gates) serves a VSIX exactly as it serves
-    /// the retired custom package: one store, one runtime, two package formats.
-    #[serde(default)]
-    ggs: Option<StudioManifest>,
 }
 
 /// `repository` is either a URL string or `{ "type": "git", "url": "..." }`.
@@ -2296,11 +2412,17 @@ mod install_tests {
     /// the refresh build from every package, in the shape the tests assert on.
     pub(super) fn bundled_of(vsix: &Path) -> Result<(StudioManifest, VsixManifest), String> {
         let manifest = read_vsix_manifest(vsix)?;
-        let ggs = manifest
-            .ggs
-            .clone()
-            .ok_or_else(|| "the test package declares no ggs key".to_owned())?;
-        Ok((generated_studio_manifest(&manifest, ggs), manifest))
+        let backend = resolve_node_binaries(&manifest, vsix, crate::ext_process::real_node_allowed())
+            .ok()
+            .flatten();
+        Ok((
+            StudioManifest {
+                id: format!("{}.{}", manifest.publisher, manifest.name),
+                version: manifest.version.clone(),
+                backend,
+            },
+            manifest,
+        ))
     }
 
     #[test]
@@ -2357,10 +2479,11 @@ mod install_tests {
         .unwrap();
         zip.finish().unwrap();
         let info = install_from_vsix_into(&exts, &stale, false).unwrap();
+        // Every install carries the runtime manifest (identity plus the derived backend).
         assert!(Path::new(&info.path)
             .join("manifest.json")
             .metadata()
-            .is_err());
+            .is_ok());
 
         // The app now ships a rebuilt 1.0.0 that declares a page and a backend: the boot
         // pass replaces the install, and the generated manifest.json arrives with it.
@@ -2378,8 +2501,7 @@ mod install_tests {
         zip.start_file("extension/web/view.html", options).unwrap();
         zip.write_all(b"<html></html>").unwrap();
         zip.finish().unwrap();
-        let manifest = read_vsix_manifest(&rebuilt).unwrap();
-        let capabilities = generated_studio_manifest(&manifest, manifest.ggs.clone().unwrap());
+        let (capabilities, manifest) = bundled_of(&rebuilt).unwrap();
         let packages = [BundledPackage {
             id: capabilities.id.clone(),
             path: rebuilt.clone(),
@@ -2393,7 +2515,8 @@ mod install_tests {
         let refreshed: StudioManifest =
             serde_json::from_str(&std::fs::read_to_string(target.join("manifest.json")).unwrap())
                 .unwrap();
-        assert!(refreshed.backend.is_some());
+        // The rebuilt package declares no native binaries: no backend is derived for it.
+        assert!(refreshed.backend.is_none());
         // The next boot leaves it alone (the build is recorded).
         assert!(refresh_bundled_installs_in(&exts, &packages).is_empty());
     }
@@ -2590,10 +2713,6 @@ mod install_tests {
             ),
             ("acme.demo", "1.0.0", "vsix", true)
         );
-        assert_eq!(
-            info.capabilities.as_ref().unwrap().pages.as_ref().unwrap()["main"].page,
-            "web/view.html"
-        );
         assert!(exts
             .join("acme.demo-1.0.0")
             .join("web")
@@ -2682,11 +2801,10 @@ mod install_tests {
     }
 
     #[test]
-    fn an_engine_package_declaring_its_node_installs_despite_the_binaries() {
-        // The opt-in path: the `.node` declared under ggs.backend (kind "node") is the
-        // engine binary the host serves, and the recognition must not refuse exactly that
-        // package. The retired `host` spelling stays in the fixture on purpose: older
-        // packed manifests still name it, and unknown fields are ignored on read.
+    fn an_engine_node_needs_a_main_and_one_with_it_installs_the_main_backend() {
+        // The engine `.node` is native binary: it needs the package's own `main` to run it
+        // (the JS entry loads it through the Node runtime's N-API host). Without a `main`
+        // the install is refused with the named reason; with one, the backend is that entry.
         let node = engine_node_fixture();
         let tmp = tempfile::tempdir().unwrap();
         let exts = tmp.path().join("extensions");
@@ -2707,14 +2825,30 @@ mod install_tests {
         zip.write_all(&node).unwrap();
         zip.finish().unwrap();
 
-        let info = install_from_vsix_into(&exts, &vsix, false).unwrap();
-        assert_eq!(info.id, "acme.engine");
-        assert!(exts
-            .join("acme.engine-1.0.0")
-            .join("native")
-            .join("win32-x64")
-            .join("engine.node")
-            .is_file());
+        let error = install_from_vsix_into(&exts, &vsix, false)
+            .unwrap_err();
+        assert!(error.contains("no \"main\""), "{error}");
+
+        // The same package with a `main`: the entry becomes the backend.
+        let vsix_main = tmp.path().join("engine-main.vsix");
+        let file = std::fs::File::create(&vsix_main).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("extension/package.json", options).unwrap();
+        zip.write_all(
+            br#"{"name":"engine","publisher":"acme","version":"1.0.0","main":"./out/extension.js"}"#,
+        )
+        .unwrap();
+        zip.start_file("extension/out/extension.js", options).unwrap();
+        zip.write_all(b"module.exports = {};").unwrap();
+        zip.start_file("extension/native/win32-x64/engine.node", options)
+            .unwrap();
+        zip.write_all(&node).unwrap();
+        zip.finish().unwrap();
+        let info = install_from_vsix_into(&exts, &vsix_main, false).unwrap();
+        let backend = info.capabilities.as_ref().unwrap().backend.as_ref().unwrap();
+        assert_eq!(backend.kind, "node");
+        assert_eq!(backend.command, "./out/extension.js");
     }
 
     /// A byte blob that scans as a `.node` by name — the recognition reads names, never
@@ -2755,7 +2889,7 @@ mod install_tests {
     }
 
     #[test]
-    fn a_package_carries_its_pages_and_backend() {
+    fn a_vsix_installs_whatever_its_package_json_carries_without_a_backend() {
         let tmp = tempfile::tempdir().unwrap();
         let exts = tmp.path().join("extensions");
         std::fs::create_dir_all(&exts).unwrap();
@@ -2776,14 +2910,13 @@ mod install_tests {
         zip.finish().unwrap();
 
         let info = install_from_vsix_into(&exts, &ggx, false).unwrap();
+        // Anything extra a package.json carries is its own business: the install reads the
+        // standard manifest alone — identity from it, and no backend (the JS entry is the
+        // frame program's; the stray `bin/main.exe` is no native binary this host serves).
         let header = info.capabilities.as_ref().unwrap();
-        assert_eq!(header.format, "ggs/2");
-        let main = &header.pages.as_ref().unwrap()["main"];
-        assert_eq!(main.page, "web/view.html");
-        assert_eq!(main.title.as_deref(), Some("Demo"));
-        let backend = header.backend.as_ref().unwrap();
-        assert_eq!(backend.kind, "process");
-        assert_eq!(backend.command, "bin/main.exe");
+        assert_eq!(header.id, "acme.demo");
+        assert_eq!(header.version, "1.0.0");
+        assert!(header.backend.is_none());
         // The install lands where the process host and the ggs:// protocol will look.
         assert_eq!(
             installed_dir(&exts, "acme.demo").unwrap(),
@@ -2791,41 +2924,26 @@ mod install_tests {
         );
     }
 
-    #[test]
-    fn a_backend_with_a_platform_map_resolves_and_falls_back() {
-        let tmp = tempfile::tempdir().unwrap();
-        let exts = tmp.path().join("extensions");
-        std::fs::create_dir_all(&exts).unwrap();
-        let ggx = tmp.path().join("multi.vsix");
-        let file = std::fs::File::create(&ggx).unwrap();
-        let mut zip = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default();
-        zip.start_file("extension/package.json", options).unwrap();
-        zip.write_all(
-            br#"{"name":"engine","publisher":"acme","version":"1.0.0","ggs":{"format":"ggs/2","id":"acme.engine","version":"1.0.0",
-                "backend":{"kind":"process","command":"backend/win32-x64/main.exe","protocol":"ggx-rpc/1",
-                "binaries":{"win32-x64":"backend/win32-x64/main.exe","darwin-arm64":"backend/darwin-arm64/main"}}}}"#,
-        )
-        .unwrap();
-        zip.start_file("extension/backend/win32-x64/main.exe", options)
-            .unwrap();
-        zip.write_all(b"MZ").unwrap();
-        zip.start_file("extension/backend/darwin-arm64/main", options)
-            .unwrap();
-        zip.write_all(b"\x7fELF").unwrap();
-        zip.finish().unwrap();
+        #[test]
+    fn a_backend_platform_map_resolves_and_falls_back_to_the_command() {
+        let binaries = std::collections::BTreeMap::from([
+            (
+                "win32-x64".to_owned(),
+                "backend/win32-x64/main.exe".to_owned(),
+            ),
+            (
+                "darwin-arm64".to_owned(),
+                "backend/darwin-arm64/main".to_owned(),
+            ),
+        ]);
+        let backend = BackendDecl {
+            kind: "node".to_owned(),
+            command: "backend/win32-x64/main.exe".to_owned(),
+            args: Vec::new(),
 
-        let info = install_from_vsix_into(&exts, &ggx, false).unwrap();
-        let backend = info
-            .capabilities
-            .as_ref()
-            .unwrap()
-            .backend
-            .as_ref()
-            .unwrap();
-        // The retired protocol name is still parsed off a packed manifest (the field is
-        // kept for that read); the process host is what rejects it at start.
-        assert_eq!(backend.protocol.as_deref(), Some("ggx-rpc/1"));
+            protocol: Some("ggx-rpc/1".to_owned()),
+            binaries: Some(binaries),
+        };
         assert_eq!(
             backend.command_for("win32-x64"),
             "backend/win32-x64/main.exe"
@@ -2839,19 +2957,9 @@ mod install_tests {
             backend.command_for("linux-x64"),
             "backend/win32-x64/main.exe"
         );
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let resolved = backend.command_for(&host_platform_key()).to_owned();
-            let bin = installed_dir(&exts, "acme.engine").unwrap().join(&resolved);
-            let mode = std::fs::metadata(&bin).unwrap().permissions().mode();
-            assert_eq!(
-                mode & 0o111,
-                0o111,
-                "the resolved binary should be executable"
-            );
-        }
+        // The retired protocol name is still parsed off a packed manifest (the field is
+        // kept for that read); the process host is what rejects it at start.
+        assert_eq!(backend.protocol.as_deref(), Some("ggx-rpc/1"));
     }
 
     #[test]
@@ -2884,8 +2992,10 @@ mod install_tests {
         .unwrap();
         zip.finish().unwrap();
 
-        let error = install_from_vsix_into(&exts, &ggx, false).unwrap_err();
-        assert!(error.contains("unsupported backend kind"), "{error}");
+        // A foreign key the host never reads cannot break an install: the package is a
+        // plain VS Code extension, and no backend is derived for it.
+        let info = install_from_vsix_into(&exts, &ggx, false).unwrap();
+        assert!(info.capabilities.as_ref().unwrap().backend.is_none());
     }
 }
 
@@ -3018,7 +3128,7 @@ mod vsix_tests {
             &std::fs::read_to_string(exts.join(format!("neophack.git-graph-rs-{}", versions[0])).join("manifest.json")).unwrap(),
         )
         .unwrap();
-        assert!(manifest.backend.is_some(), "the derived manifest declares a backend");
+        assert!(manifest.backend.is_some(), "the derived manifest declares a backend");
     }
 
     #[test]
@@ -3102,11 +3212,10 @@ mod vsix_tests {
     }
 
     #[test]
-    fn a_vsix_with_ggs_capabilities_installs_with_a_generated_manifest() {
-        // The git-graph-rs shape: a store-format VSIX whose `ggs` key carries the Studio
-        // capabilities. The install turns the key into the same `manifest.json` the retired custom package
-        // ships — identity forced to the package's own, so it cannot drift — and from there
-        // the whole ggs/2 runtime (warm backend, ggs:// pages) serves the VSIX.
+    fn a_vsix_installs_with_its_own_identity_ignoring_any_extra_keys() {
+        // Redundant or foreign keys in `package.json` (VS Code ignores them too) cannot
+        // drift the install: the runtime manifest's identity is the package's own, and the
+        // backend derives from the package's `main` and native binaries alone.
         let tmp = tempfile::tempdir().unwrap();
         let exts = tmp.path().join("extensions");
         std::fs::create_dir_all(&exts).unwrap();
@@ -3133,14 +3242,10 @@ mod vsix_tests {
             &std::fs::read_to_string(Path::new(&info.path).join("manifest.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(ggx.format, STUDIO_FORMAT);
-        // The identity is the package's own, not what the key redundantly claimed.
+        // The identity is the package's own, not what the foreign key claimed.
         assert_eq!(ggx.id, "acme.pages");
         assert_eq!(ggx.version, "2.0.0");
-        assert_eq!(ggx.pages.as_ref().unwrap().len(), 1);
-        assert!(ggx.backend.is_some());
-        assert_eq!(ggx.activitybar.as_ref().unwrap().command, "acme.pages.open");
-        assert_eq!(ggx.permissions, vec!["repo:read".to_owned()]);
+        assert!(ggx.backend.is_none());
         // list_installed surfaces the generated capabilities.
         let listed = list_installed(&exts).unwrap().remove(0);
         assert!(listed.capabilities.is_some());
@@ -3314,6 +3419,9 @@ mod vsix_tests {
         assert_eq!(
             keys,
             vec![
+                // The runtime manifest rides in the map too: it is a `.json` beside the
+                // package's own files.
+                "manifest.json",
                 "node_modules/dep/lib/dep.js",
                 "node_modules/dep/package.json",
                 "out/extension.js",
@@ -3587,5 +3695,104 @@ mod backend_derivation_tests {
             ),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod page_bytes_tests {
+    use base64::Engine as _;
+    use crate::test_support::Scratch;
+
+    use super::*;
+
+    fn encode(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn revision_bytes_answer_a_committed_file_and_mark_a_missing_side() {
+        let scratch = Scratch::new("page-revision-bytes");
+        let repo_path = scratch.path("repo");
+        let git = scratch.repo("repo");
+        let binary: &[u8] = &[0x89, 0x50, 0x4e, 0x47, 0x00, 0x0d, 0x0a];
+        std::fs::write(repo_path.join("logo.bin"), binary).unwrap();
+        git.output(&["add", "logo.bin"]).unwrap();
+        git.output(&["commit", "-m", "binary"]).unwrap();
+        let hash = crate::test_support::rev(&git, "HEAD");
+
+        let root = repo_path.to_string_lossy().into_owned();
+        let roots = [root.clone()];
+        let answer = ext_page_revision_bytes_core(&roots, &root, &hash, "logo.bin", encode).unwrap();
+        assert_eq!(answer.error, None);
+        assert_eq!(answer.bytes.as_deref(), Some(base64::engine::general_purpose::STANDARD.encode(binary).as_str()));
+        assert_eq!(answer.size, Some(binary.len() as u64));
+
+        // A path missing at the revision is the deleted side's data, not an error.
+        let missing = ext_page_revision_bytes_core(&roots, &root, &hash, "gone.bin", encode).unwrap();
+        assert_eq!(missing.error, None);
+        assert_eq!(missing.bytes, None);
+
+        // A path that leaves the repo is refused — the services are workspace-confined.
+        assert!(ext_page_revision_bytes_core(&roots, &root, &hash, "../../outside.bin", encode).is_err());
+    }
+
+    #[test]
+    fn file_chunk_answers_windows_and_the_whole_size() {
+        let scratch = Scratch::new("page-file-chunk");
+        let dir = scratch.path("repo");
+        std::fs::create_dir_all(&dir).unwrap();
+        let data: Vec<u8> = (0..=255u8).collect();
+        std::fs::write(dir.join("blob.bin"), &data).unwrap();
+        let root = dir.to_string_lossy().into_owned();
+        let roots = [root.clone()];
+
+        let window = ext_page_file_chunk_core(&roots, &root, "blob.bin", 250, 10, encode).unwrap();
+        assert_eq!(window.error, None);
+        assert_eq!(window.base64.as_deref(), Some(encode(&data[250..]).as_str()));
+        assert_eq!(window.size, Some(256));
+
+        let to_end = ext_page_file_chunk_core(&roots, &root, "blob.bin", 200, -1, encode).unwrap();
+        assert_eq!(to_end.base64.as_deref(), Some(encode(&data[200..]).as_str()));
+    }
+}
+
+#[cfg(test)]
+mod ext_log_and_storage_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_log_appends_and_rotates_one_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("ext-host.log");
+        append_bounded_log(&path, &["one".to_owned(), "two".to_owned()], 1024);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\ntwo\n");
+        // Past the bound the current file becomes `.1` and a fresh one starts.
+        append_bounded_log(&path, &["x".repeat(2048)], 1024);
+        append_bounded_log(&path, &["after".to_owned()], 1024);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "after\n");
+        let previous = std::fs::read_to_string(tmp.path().join("ext-host.log.1")).unwrap();
+        assert!(previous.starts_with("one\ntwo\n"));
+    }
+
+    #[test]
+    fn storage_paths_live_under_the_home_and_key_the_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ext_storage_paths_in(tmp.path(), "acme.demo", Some(r"C:\Repo")).unwrap();
+        assert!(Path::new(&paths.global).ends_with("extension-data/acme.demo/global"));
+        assert!(Path::new(&paths.log).ends_with("logs/extensions/acme.demo"));
+        let workspace = paths.workspace.clone().unwrap();
+        assert!(Path::new(&workspace).is_dir());
+        // The key ignores separator and case spelling: one workspace, one directory.
+        let again = ext_storage_paths_in(tmp.path(), "acme.demo", Some("c:/repo")).unwrap();
+        assert_eq!(again.workspace, paths.workspace);
+        assert_eq!(ext_storage_paths_in(tmp.path(), "acme.demo", None).unwrap().workspace, None);
+    }
+
+    #[test]
+    fn storage_paths_refuse_ids_that_would_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        for bad in ["", ".", "..", "a/b", "a\\b", "c:x", "acme..x"] {
+            assert!(ext_storage_paths_in(tmp.path(), bad, None).is_err(), "{bad} should be refused");
+        }
     }
 }

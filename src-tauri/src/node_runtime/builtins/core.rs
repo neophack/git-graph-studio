@@ -31,6 +31,23 @@ pub(super) fn utf8_decode(
     Ok(text(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
+/// The `crypto` builtin's random source: `(count) → bytes` from the OS generator — what
+/// `randomBytes`, `randomUUID` and `getRandomValues` draw from (uuid-class libraries call
+/// them at module load, so a throw here used to kill the whole activation).
+pub(super) fn random_bytes(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let count = args.get_or_undefined(0).to_number(context)?;
+    if !(0.0..=65536.0).contains(&count) || count.fract() != 0.0 {
+        return Err(error("random bytes: the count must be an integer in 0..=65536"));
+    }
+    let mut bytes = vec![0u8; count as usize];
+    getrandom::getrandom(&mut bytes).map_err(|e| error(format!("random bytes: {e}")))?;
+    JsArrayBuffer::from_byte_block(bytes, context).map(JsValue::from)
+}
+
 /// The `crypto` builtin's one native: `(algorithm, bytes) → hex digest`. The JS side's
 /// `createHash` accumulates the bytes (the `update` calls) and hands them over here —
 /// md5 / sha1 / sha256, the gravatar-class digests the frame host serves too.

@@ -1,5 +1,5 @@
 import type { Buffer, BufferFactory, ShimHost } from '../nodeShims';
-import { EventEmitter, callThrowsFn, processNextTick } from './shared';
+import { EventEmitter, callThrowsFn, processNextTick, traceShim } from './shared';
 
 // The frame's child_process: real spawned tools through the host bridge. The shim keeps
 // Node's API shapes — spawn's streamed events, execFile's collected callback, the sync
@@ -328,14 +328,15 @@ export function makeChildProcess(host: ShimHost, Buffer: BufferFactory): Record<
 				outer.stdin = inner.stdin;
 				inner.stderr.on('data', (chunk: unknown) => {
 					outer.stderr.emit('data', chunk);
-					try { console.error('[ggs-fork][server-stderr]', String(Buffer.from(chunk as Uint8Array).toString('utf8')).slice(0, 300)); } catch { /* trace */ }
+					// A language server writes its diagnostics to stderr: the log keeps them.
+					try { traceShim('debug', `fork ${modulePath}: stderr: ${String(Buffer.from(chunk as Uint8Array).toString('utf8')).slice(0, 2000)}`); } catch { /* trace */ }
 				});
 				inner.stdout.on('data', (chunk: unknown) => {
 					// Terse wire tracing: the notification/request method per arriving frame —
 					// the conversation a language client runs is otherwise invisible.
 					try {
 						const method = /"method":"([^"]+)/.exec(String(Buffer.from(chunk as Uint8Array).toString('utf8')));
-						if (method) console.info('[ggs-fork] recv', method[1]);
+						if (method) traceShim('trace', `fork ${modulePath}: recv ${method[1]}`);
 					} catch { /* trace */ }
 					pushFrameBytes(chunk as Uint8Array);
 				});
@@ -354,7 +355,7 @@ export function makeChildProcess(host: ShimHost, Buffer: BufferFactory): Record<
 					const header = utf8Encode.encode(`Content-Length: ${payload.length}\r\n\r\n`);
 					(outer.stdin as { write: (chunk: Uint8Array) => boolean }).write(header);
 					(outer.stdin as { write: (chunk: Uint8Array) => boolean }).write(payload);
-					try { console.info('[ggs-fork] send', String(JSON.stringify(message).match(/"method":"[^"]+/) ?? [''])[0]); } catch { /* trace */ }
+					try { traceShim('trace', `fork ${modulePath}: send ${String(JSON.stringify(message).match(/"method":"[^"]+/) ?? [''])[0]}`); } catch { /* trace */ }
 					return true;
 				},
 				kill: () => inner.kill()

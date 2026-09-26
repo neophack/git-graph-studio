@@ -16,9 +16,10 @@ import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { commands } from './commands';
-import { applyContributions, applyExtensionSettings, declaredCommand, extensionThemeList, extensionViewContributions, languageIdFor, localize, registerContextProvider, registerExtensionSnippets, registerExtensionThemes, removeContributions, type ExtensionThemeDef, type ManifestContributes } from './contributions';
+import { applyContributions, applyExtensionSettings, declaredCommand, extensionSettingDefs, extensionThemeList, extensionViewContributions, languageIdFor, localize, registerContextProvider, registerExtensionSnippets, registerExtensionThemes, removeContributions, type ExtensionThemeDef, type ManifestContributes } from './contributions';
+import { describeDetail, extLog, extLogEnabled, extLogLevel, extLogOnce, flushExtLog, levelForConsole, setExtLogOutput, type ExtLogLevel } from './extLog';
 import { setFileDiagnostics, type SerializableDiagnostic } from './editorDiagnostics';
-import { syncExtensionThemes, themeById } from './settings';
+import { settings as appSettings, syncExtensionThemes, themeById } from './settings';
 import { locale, registerZhCnText, t, tf } from './i18n';
 import * as state from './state';
 import { notify, progressToast, quickInput, type ProgressToast } from './ui';
@@ -92,18 +93,11 @@ export interface StudioManifest {
 	format: string;
 	id: string;
 	version: string;
-	frontend?: { page: string; config?: string; compare?: string } | null;
-	/** `ggs/2`: every page the package can show, by id (the named page registry). */
-	pages?: Record<string, { page: string; title?: string; singleton?: boolean; icon?: string | null }> | null;
-	/** `ggs/2`: the process backend declaration — `ext_process.rs` spawns it on demand.
-	 *  `protocol` names the one wire protocol (`ggs-ext/1` when absent; anything else fails
-	 *  the start with an upgrade hint); `binaries` is the per-platform command map, when the
-	 *  package carries more than one platform's binary. */
+	/** The process backend declaration the install derived for this package — `ext_process.rs`
+	 *  spawns it on demand. `protocol` names the one wire protocol (`ggs-ext/1` when absent;
+	 *  anything else fails the start with an upgrade hint); `binaries` is the per-platform
+	 *  command map, when the package carries more than one platform's binary. */
 	backend?: { kind: string; command: string; args?: string[]; protocol?: string; binaries?: Record<string, string> } | null;
-	/** `ggs/2`: an activity-bar launcher — an icon (package-relative) whose click runs one of
-	 *  the package's declared commands (typically its view page's opener). */
-	activitybar?: { command: string; title?: string | null; icon?: string | null } | null;
-	permissions?: string[];
 }
 
 /** The icon path as `ext_read_file_base64` expects it: relative to the extension's install
@@ -161,11 +155,34 @@ export interface PageDiffRequest {
 }
 
 /** The theme of the moment, as a page's 'theme.stylesheet' request answers it and the theme
- *  event pushes carry it: the active theme's vscode-* class and its stylesheet text. */
+ *  event pushes carry it: the active theme's vscode-* class, its stylesheet text, and the
+ *  --vscode-* declarations parsed out of it. */
 export interface PageTheme {
 	kind: 'vscode-dark' | 'vscode-light';
 	label: string;
 	css: string;
+	vars: Record<string, string>;
+}
+
+/** Extract a theme stylesheet's `--vscode-*` custom-property declarations (file order; the
+ *  last declaration of a name wins). VS Code's webview host writes every theme variable into
+ *  the document's *inline* style — `document.documentElement.style` — and package script
+ *  reads them back that way (`getPropertyValue` on the element style sees stylesheets
+ *  never), so the pages and webviews this host serves mirror the variables inline too:
+ *  delivered with the page's init context and on every theme push, applied by the page
+ *  bootstrap and by the webview boot script. */
+export function themeVars(css: string): Record<string, string> {
+	const vars: Record<string, string> = {};
+	for (const match of css.matchAll(/(--vscode-[a-zA-Z0-9-]+)\s*:\s*([^;{}]+)/g)) {
+		vars[match[1]] = match[2].trim();
+	}
+	return vars;
+}
+
+/** JSON for embedding into a generated `<script>`: `<` escaped so a `</script>` sequence in
+ *  a value (an extension-contributed theme's text) can never close the tag early. */
+function jsonForScript(value: unknown): string {
+	return JSON.stringify(value).replace(/</g, "\\u003c");
 }
 
 /** One open extension page: a sandboxed iframe in an editor tab, speaking the page RPC the
@@ -204,6 +221,11 @@ interface FrameHandle {
 	 *  real-Node host process (nodeHost.ts) has no frame — its calls and pushes cross the
 	 *  ggs-ext/1 stdio channel instead (see `call` / `send`). */
 	frame?: HTMLIFrameElement;
+	/** True on a remote handle: the extension's program runs in a backend process whose
+	 *  single JS thread parks inside every host request until this side's answer crosses
+	 *  back over stdio. Anything this answer waits on must never call that process back —
+	 *  the caller could not answer it. */
+	remote?: boolean;
 	/** Posts into the frame (set once it loaded its extension). */
 	send?: (message: unknown) => void;
 	/** A remote handle's call transport: the host's `__studioExtCall` vocabulary over the
@@ -233,10 +255,50 @@ interface WebviewHandle {
 export interface ExtStatusBarItem {
 	id: string;
 	alignment: number;
+	/** VS Code's priority: higher sits further left within its alignment. */
+	priority?: number;
 	text: string;
 	tooltip: string;
 	command?: string;
+	/** The arguments of a `Command`-object command (`{ command, arguments }`). */
+	commandArgs?: unknown[];
+	/** A colour or a theme colour id (`statusBarItem.errorForeground`, …). */
+	color?: string;
+	backgroundColor?: string;
 	visible: boolean;
+}
+
+/** The output channel the extension host log writes to (`extLog.ts`). */
+export const EXT_HOST_LOG_OWNER = 'ggs.extension-host';
+
+/** The core configuration sections VS Code defines and extensions read through
+ *  `getConfiguration` (`editor.tabSize`, `files.exclude`, `http.proxy`, …) — mirrored
+ *  from the workbench's own settings where one exists. */
+function coreConfigurationDefaults(): Record<string, unknown> {
+	return {
+		'editor.tabSize': appSettings.tabSize,
+		'editor.insertSpaces': true,
+		'editor.fontSize': appSettings.fontSize,
+		'editor.wordWrap': appSettings.wordWrap ? 'on' : 'off',
+		'editor.minimap.enabled': appSettings.minimap,
+		'editor.formatOnSave': false,
+		'editor.detectIndentation': true,
+		'files.autoSave': appSettings.autoSave,
+		'files.autoSaveDelay': appSettings.autoSaveDelay,
+		'files.encoding': 'utf8',
+		'files.eol': 'auto',
+		'files.exclude': { '**/.git': true, '**/.svn': true, '**/.hg': true, '**/CVS': true, '**/.DS_Store': true, '**/Thumbs.db': true },
+		'files.watcherExclude': { '**/.git/objects/**': true, '**/.git/subtree-cache/**': true, '**/node_modules/*/**': true },
+		'search.exclude': { '**/node_modules': true, '**/bower_components': true, '**/*.code-search': true },
+		'http.proxy': '',
+		'http.proxyStrictSSL': true,
+		'http.proxySupport': 'override',
+		'git.enabled': true,
+		'git.path': null,
+		'workbench.colorTheme': themeById().label ?? appSettings.theme,
+		'terminal.integrated.defaultProfile.windows': null,
+		'telemetry.telemetryLevel': 'off'
+	};
 }
 
 /** What wakes an extension, parsed from `activationEvents`: an extension with no events (or
@@ -312,9 +374,15 @@ function webviewBoot(nonce: string | null): string {
 		if (data.type === 'message') window.dispatchEvent(new MessageEvent('message', { data: data.message }));
 		if (data.type === 'theme') {
 			// VS Code defines the --vscode-* variables (and the kind class) in every webview
-			// document itself; the host pushes its theme here for the same effect.
+			// document itself; the host pushes its theme here for the same effect. The
+			// variables land on the document's inline style too — VS Code writes them there,
+			// and package script reads them back through documentElement.style.
 			var style = document.getElementById('__ggsTheme');
 			if (style && typeof data.css === 'string') style.textContent = data.css;
+			if (data.vars) {
+				var inline = document.documentElement.style;
+				for (var name in data.vars) inline.setProperty(name, data.vars[name]);
+			}
 			document.documentElement.classList.remove('vscode-dark', 'vscode-light');
 			document.documentElement.classList.add(data.kind === 'vscode-light' ? 'vscode-light' : 'vscode-dark');
 		}
@@ -328,14 +396,14 @@ function webviewBoot(nonce: string | null): string {
  *  every webview document itself — without the same injection here, every `var(--vscode-…)`
  *  in a package's own CSS is undefined, and widgets (dropdown menus above all) render with
  *  no background at all. */
-function composeWebview(html: string, theme: { kind: 'vscode-dark' | 'vscode-light'; css: string } | null): string {
+function composeWebview(html: string, theme: { kind: 'vscode-dark' | 'vscode-light'; css: string; vars: Record<string, string> } | null): string {
 	// The extension's own CSP nonce (VS Code's convention: the html declares one nonce and
 	// the injected api script reuses it) — without it a `script-src 'nonce-…'` policy
 	// blocks the boot and the webview can never speak.
 	const nonce = /nonce="([A-Za-z0-9+/=_-]+)"/.exec(html)?.[1] ?? null;
 	const themeHead = theme === null
 		? ''
-		: `<style id="__ggsTheme">${theme.css}</style><script${nonce ? ` nonce="${nonce}"` : ''}>document.documentElement.classList.add('${theme.kind}');</script>`;
+		: `<style id="__ggsTheme">${theme.css}</style><script${nonce ? ` nonce="${nonce}"` : ''}>document.documentElement.classList.add('${theme.kind}');var s=document.documentElement.style,v=${jsonForScript(theme.vars)};for(var k in v)s.setProperty(k,v[k]);</script>`;
 	const boot = themeHead + webviewBoot(nonce);
 	for (const marker of ['</head>', '</HEAD>']) {
 		const at = html.indexOf(marker);
@@ -354,7 +422,7 @@ function composeWebview(html: string, theme: { kind: 'vscode-dark' | 'vscode-lig
  *  is not yet connected to the document (an editor pane still being assembled offscreen)
  *  silently drops the navigation in Chromium — the panel then sits blank until something
  *  reloads it. The guard waits for connection, bounded, before assigning. */
-function loadFrameDoc(frame: HTMLIFrameElement, html: string, theme: { kind: 'vscode-dark' | 'vscode-light'; css: string } | null): void {
+function loadFrameDoc(frame: HTMLIFrameElement, html: string, theme: { kind: 'vscode-dark' | 'vscode-light'; css: string; vars: Record<string, string> } | null): void {
 	const assign = () => { frame.srcdoc = composeWebview(html, theme); };
 	if (frame.isConnected) return assign();
 	let waits = 0;
@@ -371,8 +439,14 @@ export class ExtensionHost {
 	 *  registry on uninstall; the frame's own registrations are tracked per frame handle). */
 	private readonly declaredCommandIds = new Map<string, string[]>();
 	/** The document formatting providers frames registered (`languages.registerFormatting`):
-	 *  extId -> the provider id, its language selectors, and the frame holding the handler. */
-	private readonly formattingProviders = new Map<string, { id: string; selectors: { language?: string }[]; handle: FrameHandle }>();
+	 *  `extId/providerId` -> the owning extension, its document selectors and the frame
+	 *  holding the handler. Keyed per provider: an extension registering one formatter per
+	 *  language keeps every one of them. */
+	private readonly formattingProviders = new Map<string, { extId: string; id: string; selectors: FormatterSelector[]; handle: FrameHandle }>();
+	/** The extensions whose missing `extensionDependencies` were already reported. */
+	private readonly dependencyWarned = new Set<string>();
+	/** Debounced document-change pushes, by path (`noteDocumentChanged`). */
+	private readonly documentChangeTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	/** The backend-carrying packages whose commands dispatch to the backend process rather
 	 *  than a frame — a package without a `main`, whose `package.json` is its whole program.
 	 *  A backend package WITH a `main` runs its code in a frame like any VSIX (VS Code
@@ -387,19 +461,11 @@ export class ExtensionHost {
 	/** Called after a registration pass added contributions asynchronously (installed
 	 *  extensions): the workbench re-renders the views that had already built their menus. */
 	onContributionsApplied: (() => void) | null = null;
-	/** Workbench hook: open one of an extension's pages in an editor tab — wired the same
-	 *  way `onNativeCommand` is (the workbench owns the editor area, the host owns pages). */
-	onOpenPage: ((extId: string, pageId: string, params?: unknown, title?: string) => void) | null = null;
-	/** The installed extensions the host has listed; pages and backends resolve through it. */
+	/** The installed extensions the host has listed; backends resolve through it. */
 	private installedExts: ExtInfo[] = [];
 	/** The open page frames, by serial (their iframes live in editor tabs). */
 	private readonly pageFrames = new Map<number, PageFrameHandle>();
-	/** The serial of each singleton page's open frame, by `${extId}/${pageId}` (a second open
-	 *  reveals that tab and delivers its params as an event, instead of a duplicate tab). */
-	private readonly singletonPages = new Map<string, number>();
 	private nextPageSerial = 1;
-	/** Workbench hook: reveal a singleton page's tab (wired like `onOpenPage`). */
-	onRevealPage: ((extId: string, pageId: string) => void) | null = null;
 	/** Workbench hooks behind the page services: the diff/revision editors, the SCM view, the
 	 *  terminal, and the repo-changed nudge a page's own writes owe the workbench. */
 	onOpenDiff: ((diff: PageDiffRequest) => void) | null = null;
@@ -429,8 +495,9 @@ export class ExtensionHost {
 	private nextExtDocSerial = 1;
 	/** The theme as webview documents wear it (its variable definitions and kind class):
 	 *  cached so `composeWebview` can inline it for a correct first paint, and pushed to
-	 *  the live documents when the theme changes. */
-	private webviewTheme: { kind: 'vscode-dark' | 'vscode-light'; css: string } | null = null;
+	 *  the live documents when the theme changes. `vars` is the same theme's parsed
+	 *  `--vscode-*` map, what pages receive in their init context. */
+	private webviewTheme: { kind: 'vscode-dark' | 'vscode-light'; css: string; vars: Record<string, string> } | null = null;
 
 	/** The webview panels frame extensions created, by panel id (VS Code's numeric ids are
 	 *  per-frame, so the frame's `(panelId, extension)` pair is unambiguous here). */
@@ -466,7 +533,14 @@ export class ExtensionHost {
 	/** Workbench hooks behind the editor-facing vscode API: text-edit application (into an
 	 *  open CodeMirror editor), file opening, and the active editor's text. */
 	onApplyEdits: ((path: string | null, edits: { startLine: number; startCharacter: number; endLine: number; endCharacter: number; newText: string }[]) => boolean) | null = null;
-	onOpenFile: ((path: string) => void) | null = null;
+	/** Open (or reveal) a file, optionally at a 1-based line/column. */
+	onOpenFile: ((path: string, line?: number, column?: number) => void) | null = null;
+	/** An open editor's current text for a path (unsaved edits included), or null. */
+	documentText: ((path: string) => string | null) | null = null;
+	/** Save an open editor's document; answers whether it saved. */
+	onSaveFile: ((path: string) => Promise<boolean>) | null = null;
+	/** A tree view's title / description / message / badge changed. */
+	onTreeMeta: ((viewId: string, meta: { title?: string; description?: string; message?: string; badge?: { value: number; tooltip?: string } }) => void) | null = null;
 	/** The active file editor's whole text, or null — pushed to frames when the active
 	 *  document changed, so `TextDocument.getText()` is synchronous inside the frame. */
 	activeText: (() => string | null) | null = null;
@@ -514,7 +588,7 @@ export class ExtensionHost {
 	private remoteHandle(extId: string): FrameHandle {
 		const existing = this.remoteHandles.get(extId);
 		if (existing) return existing;
-		const handle: FrameHandle = { commandIds: new Set(), pendingCalls: new Set() };
+		const handle: FrameHandle = { remote: true, commandIds: new Set(), pendingCalls: new Set() };
 		handle.send = (message) => {
 			const data = message as { type?: string };
 			// `__studioExtEvent` pushes translate one-to-one; the frame-only channels (the
@@ -543,10 +617,10 @@ export class ExtensionHost {
 		this.frames.set(extId, this.remoteHandle(extId));
 		try {
 			await invoke('ext_process_start', { extId });
-			console.info(`[ggs-ext] node host up: ${extId}`);
+			extLog('info', extId, 'extension host process started');
 		} catch (error) {
 			this.frames.delete(extId);
-			notify('warning', `Extension ${extId} failed to start (node host): ${String(error)}`);
+			this.reportActivationFailure(extId, String(error), describeDetail(error));
 			throw error;
 		}
 	}
@@ -554,6 +628,10 @@ export class ExtensionHost {
 	
 	constructor() {
 		window.addEventListener('message', (event) => this.onMessage(event));
+		// The extension host log's Output channel ("Extension Host"), and its two commands.
+		setExtLogOutput((line) => this.appendOutput(EXT_HOST_LOG_OWNER, t('extensions.logChannel'), line));
+		commands.register({ id: 'extensions.showLog', title: 'Show Extension Host Log', category: 'Extensions', run: () => this.showLog() });
+		commands.register({ id: 'extensions.openLogFile', title: 'Open Extension Host Log File', category: 'Extensions', run: () => void this.openLogFile() });
 		// A real-Node extension host's `ggs.hostRequest`s arrive as backend events: served
 		// through the same `serve` path a frame's RPC takes, answered over the backend's
 		// stdin. The remote frame handle must exist already — `ensureNodeHost` registers
@@ -563,20 +641,21 @@ export class ExtensionHost {
 			const handle = this.frames.get(extId);
 			const respond = (ok: boolean, result: unknown) => {
 				void invoke('ext_process_host_respond', { extId, id, ok, result })
-					.catch((error) => console.info(`[ggs-nodehost] respond failed: ${String(error)}`));
+					.catch((error) => extLog('warn', extId, `host request ${method}: the answer could not be delivered: ${String(error)}`));
 			};
 			if (!handle) return respond(false, `no extension host frame for ${extId}`);
 			this.serve(method, args ?? [], extId, handle).then(
 				(result) => respond(true, result === undefined ? null : result),
 				(error) => respond(false, String(error))
 			);
-		}).catch((error) => console.info(`[ggs-nodehost] listen failed: ${String(error)}`));
+		}).catch((error) => extLog('warn', 'host', `the extension-host request channel is unavailable: ${String(error)}`));
 		// An extension's own settings change (its update(), or the Settings dialog writing the
 		// same key) reaches its frame as a configChanged event — `onDidChangeConfiguration`.
 		document.addEventListener(state.EXT_SETTINGS_EVENT, (event) => {
 			const extId = (event as CustomEvent<string>).detail;
 			this.frames.get(extId)?.send?.({ type: '__studioExtEvent', event: 'configChanged', settings: state.extSettings(extId) });
 		});
+		window.addEventListener('beforeunload', () => void flushExtLog());
 		// The backend watcher's batches reach every frame as fsChanged events — the half of
 		// `workspace.createFileSystemWatcher` that makes an extension's view refresh on
 		// external changes (and on commits made in the app's own Source Control). The event
@@ -598,13 +677,6 @@ export class ExtensionHost {
 		return installed;
 	}
 
-	/** The installed packages' activity-bar launchers (`manifest.json`'s `activitybar`), in
-	 *  install-list order — the workbench renders one activity item per entry. */
-	activityLaunchers(): { extId: string; command: string; title: string; icon: string | null }[] {
-		return this.installedExts
-			.filter((ext) => ext.format !== 'bundled' && ext.capabilities?.activitybar?.command)
-			.map((ext) => ({ extId: ext.id, command: ext.capabilities!.activitybar!.command, title: ext.capabilities!.activitybar!.title ?? extTitle(ext), icon: ext.capabilities!.activitybar!.icon ?? null }));
-	}
 
 	/** Read a text file inside an installed extension (README, CHANGELOG, manifest). */
 	async readFile(extId: string, relPath: string): Promise<string> {
@@ -657,6 +729,35 @@ export class ExtensionHost {
 		const info = await invoke<ExtInfo>('ext_gallery_install', { gallery: MARKETPLACE_URL, downloadUrl: entry.downloadUrl });
 		await this.reload(info.id);
 		return info;
+	}
+
+	/** Install what an installed package declares it needs — its `extensionDependencies`
+	 *  and the members of an `extensionPack` — from the marketplace, recursively (VS Code
+	 *  does the same at install). `vscode.*` built-ins have no package; a dependency the
+	 *  marketplace does not carry is reported (log + notification), the rest still install. */
+	async installDependencies(info: ExtInfo, seen = new Set<string>()): Promise<ExtInfo[]> {
+		seen.add(info.id.toLowerCase());
+		const installed: ExtInfo[] = [];
+		const wanted = [...(info.extensionDependencies ?? []), ...(info.extensionPack ?? [])];
+		for (const dependency of wanted) {
+			const key = dependency.toLowerCase();
+			if (seen.has(key) || key.startsWith('vscode.')) continue;
+			seen.add(key);
+			if (this.installedExts.some((ext) => ext.id.toLowerCase() === key && ext.format !== 'bundled')) continue;
+			try {
+				const found = await this.searchGallery(dependency);
+				const entry = found.entries.find((candidate) => candidate.id.toLowerCase() === key);
+				if (!entry) throw new Error('not found in the marketplace');
+				const added = await this.installFromGallery(entry);
+				extLog('info', info.id, `installed dependency ${added.id} ${added.version}`);
+				notify('info', tf('extensions.dependencyInstalled', added.id, info.id));
+				installed.push(added, ...(await this.installDependencies(added, seen)));
+			} catch (error) {
+				extLog('warn', info.id, `dependency ${dependency} could not be installed: ${String(error)}`);
+				notify('warning', tf('extensions.dependencyInstallFailed', dependency, info.id, String(error)));
+			}
+		}
+		return installed;
 	}
 
 	/** Install one of the bundled packages the installer carries — the one-click Install on
@@ -849,7 +950,7 @@ export class ExtensionHost {
 			if (this.nodeHostExe === null && this.processOnly.has(extId)) return void this.runProcessCommand(extId, command, args);
 			// A lazily-activating extension wakes here: runRegistered activates it first, then
 			// runs the handler its activation registered.
-			void this.runRegistered(command, args);
+			void this.runRegistered(command, args).catch(() => undefined); // logged and surfaced there
 		};
 		const canRun = (command: string) => this.canRunCommand(command);
 		applyContributions(extId, contributes ?? undefined, nls, dispatch, canRun);
@@ -858,7 +959,8 @@ export class ExtensionHost {
 		// relabel without re-registering (i18n.ts's registerZhCnText).
 		const zhPairs: Record<string, string> = {};
 		for (const declared of contributes?.commands ?? []) {
-			for (const text of [declared.title, declared.category]) {
+			for (const raw of [declared.title, declared.category]) {
+				const text = typeof raw === 'string' ? raw : raw?.value ?? raw?.original;
 				if (!text) continue;
 				const zh = localize(text, nlsZhCn);
 				if (zh !== text && zh !== localize(text, nls)) zhPairs[localize(text, nls)] = zh;
@@ -899,7 +1001,8 @@ export class ExtensionHost {
 		// now, on screen, instead of dying quietly into the Extensions view's status row.
 		if (this.processBacked.has(extId)) {
 			await invoke('ext_process_start', { extId }).catch((error) => {
-				notify('error', tf('extensions.backendStartFailed', extId, String(error)));
+				extLog('error', extId, `backend failed to start: ${String(error)}`, error);
+				notify('error', tf('extensions.backendStartFailed', extId, String(error)), [{ label: t('extensions.showLog'), run: () => this.showLog() }]);
 			});
 		}
 		// The install (or upgrade) may have changed what the workbench shows of it — the
@@ -909,6 +1012,7 @@ export class ExtensionHost {
 	}
 
 	private async activate(ext: ExtInfo): Promise<void> {
+		this.checkDependencies(ext);
 		// The whole loadable surface of the package crosses at activation (`ext_load_code`):
 		// the frame's CommonJS loader resolves every `require` against it synchronously —
 		// a postMessage read cannot answer one. A host that cannot load it (a backend
@@ -960,16 +1064,9 @@ export class ExtensionHost {
 					// function here throws a DataCloneError - the frame rebuilds a real Uri
 					// (with its own toString) from the bare path once it receives this.
 					workspaceFolders: ExtensionHost.workspaceFolders.map((uri, index) => ({ uri: { scheme: 'file', path: uri, fsPath: uri }, name: uri.split(/[\\/]/).pop() ?? uri, index })),
-					settings: state.extSettings(ext.id),
-					// The extension's view of the display language follows the workbench locale.
-					language: locale(),
-					// `env.appVersion` and the theme the extension sees at activation.
-					appVersion: __APP_VERSION__,
-					themeKind: themeById().kind === 'vscode-light' ? 1 : 2,
-					// Where the extension's webview panels load package-local files from, and its
-					// persisted mementos (both preloaded so the shim is synchronous from here on).
-					webviewResourceBase: extAssetBase(ext),
-					state: { global: state.extMemento(ext.id, 'global'), workspace: state.extMemento(ext.id, 'workspace') }
+					// The settings, defaults, theme, mementos, storage directories, installed
+					// list and log threshold — the same facts `host.env` answers a process host.
+					...(await this.extensionEnv(ext.id))
 				},
 				// The Node environment facts (`os`/`process` shims) and the loadable code map —
 				// both top-level message fields, beside the context (one backend call, cached).
@@ -1018,19 +1115,12 @@ export class ExtensionHost {
 		this.emitOutputChannels();
 	}
 
-	/** The pages of an installed package: the `ggs/2` named registry, with a legacy
-	 *  package's single frontend page synthesized in as the page named "view". */
-	pageEntry(extId: string, pageId: string): { page: string; title?: string; singleton?: boolean; icon?: string | null } | null {
-		const manifest = this.installedExts.find((ext) => ext.id === extId)?.capabilities;
-		if (!manifest) return null;
-		const pages: Record<string, { page: string; title?: string; singleton?: boolean; icon?: string | null }> = {};
-		if (manifest.frontend?.page) pages.view = { page: manifest.frontend.page };
-		Object.assign(pages, manifest.pages ?? {});
-		const entry = pages[pageId];
-		if (!entry) return null;
-		// A page without its own tab icon wears the package's activity-bar icon, else the
-		// package's own icon (package.json's `icon`, the one the Extensions view shows).
-		return { ...entry, icon: entry.icon ?? manifest.activitybar?.icon ?? this.packageIcon(extId) };
+	/** The active theme as the pages need it: its vscode-* class and its stylesheet text
+	 *  (fetched from the app's own theme asset — a sandboxed page cannot link it). */
+	private async pageTheme(): Promise<PageTheme> {
+		const theme = themeById();
+		const css = await fetch(theme.css).then((response) => response.text(), () => '');
+		return { kind: theme.kind, label: theme.label, css, vars: themeVars(css) };
 	}
 
 	/** An installed extension's own icon, package-relative (for `extFileDataUrl`), or null. */
@@ -1039,93 +1129,12 @@ export class ExtensionHost {
 		return ext?.icon ? extIconRelPath(ext) : null;
 	}
 
-	/** Open one of an extension's pages in an editor tab (the workbench's `onOpenPage` does
-	 *  the opening; this validates and hands over, the way a command's result may). */
-	openPage(extId: string, pageId: string, params?: unknown, title?: string): void {
-		const entry = this.pageEntry(extId, pageId);
-		if (!entry) {
-			notify('warning', `${t('extensions.pageMissing')}: ${extId} / ${pageId}`);
-			return;
-		}
-		if (entry.singleton) {
-			const serial = this.singletonPages.get(`${extId}/${pageId}`);
-			const frame = serial !== undefined ? this.pageFrames.get(serial) : undefined;
-			if (frame) {
-				// A singleton's second open reveals its tab and hands the page the params as an
-				// event (a page that cannot use them simply ignores the event).
-				this.onRevealPage?.(extId, pageId);
-				frame.frame.contentWindow?.postMessage({ __ggsHost: true, type: 'event', event: { kind: 'params', params: params ?? null } }, '*');
-				return;
-			}
-		}
-		this.onOpenPage?.(extId, pageId, params, title);
-	}
-
-	/** Mount one page into a container (its editor tab's pane) and return the disposer the
-	 *  tab runs on close. The iframe loads the package's own document through the `ggs`
-	 *  protocol — the backend composes the page bootstrap into it, so the page gets
-	 *  `acquireGgsApi()` and needs nothing else from the host to boot. */
-	mountPage(extId: string, pageId: string, params: unknown, container: HTMLElement): () => void {
-		const entry = this.pageEntry(extId, pageId);
-		const serial = this.nextPageSerial++;
-		if (entry?.singleton) this.singletonPages.set(`${extId}/${pageId}`, serial);
-		const frame = document.createElement('iframe');
-		frame.className = 'ext-page-frame';
-		frame.title = `${extId}: ${pageId}`;
-		frame.setAttribute('sandbox', 'allow-scripts');
-		if (entry) frame.src = extAssetUrl(this.installedExts.find((ext) => ext.id === extId), entry.page);
-		const handle: PageFrameHandle = { extId, pageId, frame, pendingCalls: new Set() };
-		this.pageFrames.set(serial, handle);
-		frame.addEventListener('load', () => {
-			frame.contentWindow?.postMessage({
-				__ggsHost: true,
-				type: 'init',
-				// Everything a self-contained page boots from: its identity and open params, the
-				// display language, its extension's settings, its persisted mementos and the
-				// workspace folders — the page plays its own extension host from these.
-				context: {
-					extensionId: extId, pageId, params: params ?? null, language: locale(),
-					settings: state.extSettings(extId),
-					state: { global: state.extMemento(extId, 'global'), workspace: state.extMemento(extId, 'workspace') },
-					folders: ExtensionHost.workspaceFolders
-				}
-			}, '*');
-		});
-		container.appendChild(frame);
-		return () => {
-			this.pageFrames.delete(serial);
-			if (this.singletonPages.get(`${extId}/${pageId}`) === serial) this.singletonPages.delete(`${extId}/${pageId}`);
-			for (const cancel of [...handle.pendingCalls]) cancel(new Error(`page ${extId}/${pageId} was closed`));
-			frame.remove();
-		};
-	}
-
-	/** The active theme as the pages need it: its vscode-* class and its stylesheet text
-	 *  (fetched from the app's own theme asset — a sandboxed page cannot link it). */
-	private async pageTheme(): Promise<PageTheme> {
-		const theme = themeById();
-		const css = await fetch(theme.css).then((response) => response.text(), () => '');
-		return { kind: theme.kind, label: theme.label, css };
-	}
-
-	/** The manifest permissions of a page's package, for the surface a page may use. */
-	private pagePermissions(page: PageFrameHandle): Set<string> {
-		return new Set(this.installedExts.find((ext) => ext.id === page.extId)?.capabilities?.permissions ?? []);
-	}
-
 	/** A page's request of the host: the same surface the extension frames get (commands,
 	 *  notifications, quick input, clipboard…), plus the page's own — opening another page of
 	 *  its extension, speaking its backend's own protocol, the theme, and the workbench
 	 *  surface (editors, views, the terminal, dialogs) a self-contained page acts through. */
 	private async servePageRpc(method: string, args: unknown[], page: PageFrameHandle): Promise<unknown> {
 		switch (method) {
-			case 'pages.open': {
-				// `pages.open(pageId, params, { title })`: the optional title names this open's
-				// tab (a comparison page titles itself by the commits it shows).
-				const options = (args[2] ?? {}) as { title?: unknown };
-				this.openPage(page.extId, args[0] as string, args[1], typeof options.title === 'string' ? options.title : undefined);
-				return undefined;
-			}
 			case 'backend.run': {
 				// The one channel to a package's backend: `backend.run(command, args)` — a
 				// manifest command from a page (like the palette's own dispatch), or the
@@ -1136,6 +1145,30 @@ export class ExtensionHost {
 				// errored / answered), which the frame's own console cannot say across the
 				// process boundary.
 				const [command, commandArgs] = args as [string, unknown[]?];
+				// The `__`-prefixed page services never reach a backend — they are the
+				// host's: a page's own hex and picture machinery reads revision sides and
+				// working-tree windows through them, over the app's own git and file reads
+				// confined to the open folders (the byte services in cmd_ext.rs). A page's
+				// binary-file comparison lives entirely on these.
+				if (command === '__revisionFileBytes' || command === '__fileChunk') {
+					const params = (commandArgs?.[0] ?? {}) as {
+						repo?: string; revision?: string; path?: string; offset?: number; len?: number;
+					};
+					return command === '__revisionFileBytes'
+						? await invoke('ext_page_revision_bytes', {
+							roots: ExtensionHost.workspaceFolders,
+							repo: params.repo ?? '',
+							revision: params.revision ?? '',
+							path: params.path ?? ''
+						})
+						: await invoke('ext_page_file_chunk', {
+							roots: ExtensionHost.workspaceFolders,
+							repo: params.repo ?? '',
+							path: params.path ?? '',
+							offset: Number(params.offset) || 0,
+							len: Number(params.len) || 0
+						});
+				}
 				const started = performance.now();
 				console.debug(`[ggs] backend.run ${page.extId} ${String(command)} …`);
 				try {
@@ -1144,6 +1177,7 @@ export class ExtensionHost {
 					return answer;
 				} catch (error) {
 					console.warn(`[ggs] backend.run ${String(command)} errored after ${Math.round(performance.now() - started)} ms: ${String(error)}`);
+					extLog('warn', page.extId, `page request backend.run ${String(command)} failed after ${Math.round(performance.now() - started)} ms: ${String(error)}`);
 					throw error;
 				}
 			}
@@ -1168,7 +1202,6 @@ export class ExtensionHost {
 				return undefined;
 			case 'workbench.runInTerminal': {
 				// Typing into the user's shell is gated on the package's declared permission.
-				if (!this.pagePermissions(page).has('terminal')) throw new Error('the package does not declare the terminal permission');
 				this.onRunInTerminal?.(args[0] as string);
 				return undefined;
 			}
@@ -1177,7 +1210,6 @@ export class ExtensionHost {
 				return await saveDialog({ title, defaultPath, filters });
 			}
 			case 'workbench.writeFile': {
-				if (!this.pagePermissions(page).has('fs')) throw new Error('the package does not declare the fs permission');
 				const [path, contents] = args as [string, string];
 				return await invoke('write_file', { path, contents });
 			}
@@ -1249,19 +1281,16 @@ export class ExtensionHost {
 		this.onOpenContent?.(resolved.name || `document-${serial}`, resolved.label, resolved.content ?? '');
 	}
 
-	/** Run one command in a `ggs/2` process package's backend — the first execution spawns
-	 *  it (lazy activation). A result naming one of the package's pages opens it, and one
-	 *  naming a notification shows it: the convention a backend uses to surface UI, the way a
-	 *  VS Code command shows a webview or a message. */
+	/** Run one command in a process package's backend — the first execution spawns it
+	 *  (lazy activation). A result naming a notification shows it: the convention a backend
+	 *  uses to surface a message, the way a VS Code command can show one. */
 	private async runProcessCommand(extId: string, command: string, args: unknown[] = []): Promise<void> {
 		try {
 			const result = await invoke<unknown>('ext_process_run', { extId, command, args });
 			if (result && typeof result === 'object') {
-				const { openPage: pageId, params, title, notify: toast } = result as {
-					openPage?: string; params?: unknown; title?: unknown; notify?: { kind: 'info' | 'warning' | 'error'; message: string };
+				const { notify: toast } = result as {
+					notify?: { kind: 'info' | 'warning' | 'error'; message: string };
 				};
-				// `title` names this open's tab, like pages.open's `{ title }` option.
-				if (typeof pageId === 'string') this.openPage(extId, pageId, params, typeof title === 'string' ? title : undefined);
 				if (toast && typeof toast.message === 'string') notify(toast.kind ?? 'info', toast.message);
 			}
 		} catch (error) {
@@ -1384,8 +1413,114 @@ export class ExtensionHost {
 		this.onOutputChannels?.(channels);
 	}
 
-	/** A request the frame made of the host; also resolves the frame's command registrations. */
+	/** A request an extension made of the host: logged at `debug` (its answer at `trace`),
+	 *  a failure logged at `warn` with the method and the cause, then served. */
 	private async serve(method: string, args: unknown[], extId: string, handle: FrameHandle): Promise<unknown> {
+		const quiet = method === 'log' || method === 'output.append';
+		if (!quiet && extLogEnabled('debug')) extLog('debug', extId, `→ ${method}`, extLogEnabled('trace') ? summarize(args) : undefined);
+		try {
+			const result = await this.serveRequest(method, args, extId, handle);
+			if (!quiet && extLogEnabled('trace')) extLog('trace', extId, `← ${method}`, summarize(result));
+			return result;
+		} catch (error) {
+			if (!quiet) extLog('warn', extId, `host request ${method} failed: ${String(error)}`, error instanceof Error ? error : undefined);
+			throw error;
+		}
+	}
+
+	/** The extension-facing facts every host boots from: stored settings, the declared and
+	 *  core configuration defaults, display language, theme, asset base, mementos, the
+	 *  `~/.ggs` storage directories, the installed list and the log threshold. */
+	private async extensionEnv(extId: string): Promise<Record<string, unknown>> {
+		const ext = this.installedExts.find((candidate) => candidate.id === extId);
+		const defaults: Record<string, unknown> = coreConfigurationDefaults();
+		for (const def of extensionSettingDefs()) defaults[def.id] = def.default;
+		const storage = await invoke<{ global: string; workspace?: string | null; log: string } | null>('ext_storage_paths', { extId, workspace: ExtensionHost.workspaceFolders[0] ?? null })
+			.catch((error) => {
+				extLog('warn', extId, `storage directories unavailable (the install directory stands in): ${String(error)}`);
+				return null;
+			});
+		if (storage) this.storageRoots.set(extId, [storage.global, storage.log, ...(storage.workspace ? [storage.workspace] : [])]);
+		const env = await cachedNodeEnv();
+		return {
+			settings: state.extSettings(extId),
+			defaults,
+			// The extension's view of the display language follows the workbench locale.
+			language: locale(),
+			appVersion: __APP_VERSION__,
+			themeKind: themeById().kind === 'vscode-light' ? 1 : 2,
+			// Where the extension's webview panels load package-local files from, and its
+			// persisted mementos (both preloaded so the shim is synchronous from here on).
+			webviewResourceBase: ext ? extAssetBase(ext) : `ggs://localhost/${extId}/`,
+			state: { global: state.extMemento(extId, 'global'), workspace: state.extMemento(extId, 'workspace') },
+			storage: storage ?? undefined,
+			platform: env.platform,
+			logLevel: extLogLevel(),
+			extensions: this.installedExts.filter((entry) => entry.format !== 'bundled').map((entry) => ({
+				id: entry.id,
+				extensionPath: entry.path,
+				isActive: this.frames.has(entry.id),
+				packageJSON: {
+					name: entry.name, publisher: entry.publisher, version: entry.version, displayName: entry.displayName ?? entry.name,
+					description: entry.description, categories: entry.categories, keywords: entry.keywords,
+					extensionDependencies: entry.extensionDependencies, extensionPack: entry.extensionPack,
+					engines: entry.enginesVscode ? { vscode: entry.enginesVscode } : {}
+				}
+			}))
+		};
+	}
+
+	/** The directories `vscode.workspace.fs` reaches for one extension: the open folders,
+	 *  the extension's own install directory (its bundled files, read through
+	 *  `context.extensionUri`) and its `~/.ggs` storage directories. */
+	private fsRoots(extId: string): string[] {
+		const ext = this.installedExts.find((candidate) => candidate.id === extId);
+		return [...ExtensionHost.workspaceFolders, ...(ext ? [ext.path] : []), ...(this.storageRoots.get(extId) ?? [])];
+	}
+
+	/** Each extension's `~/.ggs` storage directories (filled by `extensionEnv`). */
+	private readonly storageRoots = new Map<string, string[]>();
+
+	/** Reveal the "Extension Host" Output channel (the `extensions.showLog` command). */
+	showLog(): void {
+		extLog('info', 'host', `extension host log level: ${extLogLevel()}`);
+		this.onOutputReveal?.(EXT_HOST_LOG_OWNER, t('extensions.logChannel'));
+	}
+
+	/** Open `~/.ggs/logs/ext-host.log` in an editor tab (the `extensions.openLogFile` command). */
+	async openLogFile(): Promise<void> {
+		await flushExtLog();
+		try {
+			const path = await invoke<string>('ext_log_path');
+			if (typeof path !== 'string' || path === '') throw new Error('no log path');
+			this.onOpenFile?.(path);
+		} catch (error) {
+			notify('warning', tf('extensions.logFileMissing', String(error)));
+		}
+	}
+
+	/** An activation (or host start) failed: the log gets the error and its stack, the
+	 *  user a notification that opens the log. */
+	private reportActivationFailure(extId: string, error: string, stack?: string | null): void {
+		extLog('error', extId, `activation failed: ${error}`, stack ?? undefined);
+		notify('warning', tf('extensions.activationFailed', extId, error), [{ label: t('extensions.showLog'), run: () => this.showLog() }]);
+	}
+
+	/** Report an extension's missing `extensionDependencies` once (VS Code refuses to
+	 *  activate it; here it activates and the gap is named). */
+	private checkDependencies(ext: ExtInfo): void {
+		if (this.dependencyWarned.has(ext.id)) return;
+		const installed = new Set(this.installedExts.filter((entry) => entry.format !== 'bundled').map((entry) => entry.id.toLowerCase()));
+		// VS Code's own built-in extensions (`vscode.*`) have no install to find.
+		const missing = (ext.extensionDependencies ?? []).filter((dep) => !dep.toLowerCase().startsWith('vscode.') && !installed.has(dep.toLowerCase()));
+		if (missing.length === 0) return;
+		this.dependencyWarned.add(ext.id);
+		extLog('warn', ext.id, `missing extension dependencies: ${missing.join(', ')}`);
+		notify('warning', tf('extensions.dependencyMissing', extTitle(ext), missing.join(', ')), [{ label: t('extensions.showLog'), run: () => this.showLog() }]);
+	}
+
+	/** The requests the frames and process hosts make of the workbench. */
+	private async serveRequest(method: string, args: unknown[], extId: string, handle: FrameHandle): Promise<unknown> {
 		switch (method) {
 			case 'commands.register': {
 				const id = args[0] as string;
@@ -1407,7 +1542,7 @@ export class ExtensionHost {
 				return Promise.resolve(undefined);
 			}
 			case 'commands.execute':
-				return this.executeCommand(args[0] as string, (args[1] as unknown[] | undefined) ?? []);
+				return this.executeCommand(args[0] as string, (args[1] as unknown[] | undefined) ?? [], handle);
 			case 'commands.list':
 				return Promise.resolve(commands.all().map((c) => c.id));
 			case 'docProvider.register': {
@@ -1440,14 +1575,17 @@ export class ExtensionHost {
 					notify(kind, message, (items ?? []).map((label) => ({ label, run: () => resolve(label) })), () => resolve(undefined));
 				});
 			}
-			case 'showInputBox':
+			case 'showInputBox': {
 				// quickInput resolves null on Escape; the API contract is undefined.
-				return quickInput({ title: args[0] as string, value: args[1] as string, allowFreeText: true }).then((value) => value ?? undefined);
+				const options = (args[2] ?? {}) as { placeHolder?: string; password?: boolean };
+				return quickInput({ title: args[0] as string, value: args[1] as string, placeholder: options.placeHolder, password: options.password === true, allowFreeText: true }).then((value) => value ?? undefined);
+			}
 			case 'showQuickPick': {
-				// The shim sends `{label, description?, detail?}` entries (string items included);
-				// the picked label goes back and the shim maps it to the original item.
-				const entries = (args[0] as { label: string; description?: string; detail?: string }[]) ?? [];
-				const items = entries.map((entry) => ({ label: entry.label, description: entry.description, detail: entry.detail, value: entry.label }));
+				// The shim sends `{id?, label, description?, detail?}` entries; the picked
+				// entry's id goes back (its label for an older shim), so duplicate labels stay
+				// distinct and the shim maps it to the original item.
+				const entries = (args[0] as { id?: string; label: string; description?: string; detail?: string }[]) ?? [];
+				const items = entries.map((entry) => ({ label: entry.label, description: entry.description, detail: entry.detail, value: entry.id ?? entry.label }));
 				return quickInput({ items, placeholder: args[1] as string }).then((value) => value ?? undefined);
 			}
 			case 'settings.update': {
@@ -1460,32 +1598,64 @@ export class ExtensionHost {
 				state.saveExtMemento(extId, scope, key, value);
 				return Promise.resolve(undefined);
 			}
-			case 'host.env': {
-				// The real-Node host's first request, before its activation: the facts a
-				// frame gets in its `__studioExtInit` message — settings, mementos, display
-				// language, theme kind, the package's `ggs://` asset base.
-				const ext = this.installedExts.find((candidate) => candidate.id === extId);
-				return Promise.resolve({
-					settings: state.extSettings(extId),
-					language: locale(),
-					appVersion: __APP_VERSION__,
-					themeKind: themeById().kind === 'vscode-light' ? 1 : 2,
-					webviewResourceBase: ext ? extAssetBase(ext) : `ggs://localhost/${extId}/`,
-					state: { global: state.extMemento(extId, 'global'), workspace: state.extMemento(extId, 'workspace') }
-				});
-			}
+			case 'host.env':
+				// A process host's first request, before its activation: the facts a frame
+				// gets in its `__studioExtInit` message.
+				return this.extensionEnv(extId);
 			case 'openExternal':
 				return openUrl(args[0] as string).then(() => true);
 			case 'clipboard.writeText':
 				return writeText(args[0] as string);
 			case 'clipboard.readText':
 				return readText();
-			case 'log':
-				// The frame's createOutputChannel routes through 'output.append' below; this is
-				// the bare shim logger (activationContext.outputChannel and diagnostics), which
-				// keeps the console.
-				console.log(`[${args[0]}] ${args[1]}`);
+			case 'log': {
+				// The shim's anomaly log (unsupported APIs, listener/provider exceptions,
+				// failed host requests): into the extension host log under the extension's id.
+				const [level, message, detail] = args as [string, string, string | null | undefined];
+				const known: ExtLogLevel[] = ['trace', 'debug', 'info', 'warn', 'error'];
+				extLog(known.includes(level as ExtLogLevel) ? level as ExtLogLevel : 'info', extId, String(message ?? ''), detail ?? undefined);
 				return Promise.resolve(undefined);
+			}
+			case 'secrets.get':
+				return Promise.resolve(state.extSecrets(extId)[String(args[0])]);
+			case 'secrets.store': {
+				extLogOnce(`secrets:${extId}`, 'info', extId, 'secrets are kept in the workbench\'s local storage (not an OS keychain)');
+				state.saveExtSecret(extId, String(args[0]), String(args[1] ?? ''));
+				return Promise.resolve(undefined);
+			}
+			case 'secrets.delete':
+				state.saveExtSecret(extId, String(args[0]), undefined);
+				return Promise.resolve(undefined);
+			case 'secrets.keys':
+				return Promise.resolve(Object.keys(state.extSecrets(extId)));
+			case 'workspace.readText': {
+				// `openTextDocument`: an open editor's text (unsaved edits included), else the
+				// file from disk through the same confined filesystem `workspace.fs` uses.
+				const path = String(args[0] ?? '');
+				const open = this.documentText?.(path) ?? null;
+				if (open !== null) return { text: open, languageId: languageIdFor(path) || 'plaintext' };
+				const read = await invoke<{ data: string }>('ext_fs', { op: 'read', roots: this.fsRoots(extId), path, to: undefined, data: undefined });
+				const bytes = Uint8Array.from(atob(read.data), (char) => char.charCodeAt(0));
+				return { text: new TextDecoder().decode(bytes), languageId: languageIdFor(path) || 'plaintext' };
+			}
+			case 'editor.save': {
+				const path = String(args[0] ?? '');
+				return this.onSaveFile ? await this.onSaveFile(path) : false;
+			}
+			case 'docProvider.read':
+				// `openTextDocument` of a provider-scheme Uri: the registering frame answers.
+				return (await this.resolveVscodeUri(args[0])).content ?? '';
+			case 'extensions.activate':
+				return this.ensureActive(String(args[0] ?? '')).then(() => undefined);
+			case 'treeView.meta': {
+				const [viewId, meta] = args as [string, { title?: string; description?: string; message?: string; badge?: { value: number; tooltip?: string } }];
+				this.onTreeMeta?.(viewId, meta ?? {});
+				return Promise.resolve(undefined);
+			}
+			case 'treeView.reveal': {
+				this.onRevealWebviewView?.(String(args[0] ?? ''));
+				return Promise.resolve(undefined);
+			}
 			case 'progress.begin': {
 				const id = this.nextProgressId++;
 				this.progress.set(id, progressToast(String(args[0] ?? extId)));
@@ -1539,10 +1709,22 @@ export class ExtensionHost {
 				return Promise.resolve(undefined);
 			}
 			case 'fs.op': {
-				// vscode.workspace.fs / findFiles: one command, workspace-confined on the Rust
-				// side (every path resolves inside the open folders or is refused there).
+				// vscode.workspace.fs / findFiles: one command, confined on the Rust side to the
+				// open folders, the extension's own directory and its ~/.ggs storage.
 				const [op, path, to, data] = args as [string, string, string?, string?];
-				return invoke('ext_fs', { op, roots: ExtensionHost.workspaceFolders, path, to, data });
+				if (op === 'find') {
+					// A glob over each open folder (or the RelativePattern's base), answered as
+					// `{ root, path }` so a multi-root result keeps its folder.
+					const base = typeof to === 'string' && to !== '' ? to : undefined;
+					const roots = base !== undefined ? [base] : ExtensionHost.workspaceFolders;
+					const found: { root: string; path: string }[] = [];
+					for (const root of roots) {
+						const paths = await invoke<string[]>('ext_fs', { op: 'find', roots: [root], path, to: undefined, data: undefined });
+						for (const relative of paths ?? []) found.push({ root, path: relative });
+					}
+					return found;
+				}
+				return invoke('ext_fs', { op, roots: this.fsRoots(extId), path, to, data });
 			}
 			case 'diagnostics.set': {
 				// A frame pushed its diagnostic collection changes: they land in the editor
@@ -1553,15 +1735,14 @@ export class ExtensionHost {
 			}
 			case 'languages.registerFormatting': {
 				// The frame registered a document formatting provider: `{ id, selectors }`.
-				// `editor.formatDocument` routes to the first provider whose selector's
-				// language matches the document being formatted.
-				const [declaration] = args as [{ id: string; selectors: { language?: string }[] }];
-				this.formattingProviders.set(extId, { id: declaration.id, selectors: declaration.selectors ?? [], handle });
+				// `editor.formatDocument` routes to the best-scoring provider for the document.
+				const [declaration] = args as [{ id: string; selectors: FormatterSelector[] }];
+				this.formattingProviders.set(`${extId}/${declaration.id}`, { extId, id: declaration.id, selectors: declaration.selectors ?? [], handle });
 				return Promise.resolve(undefined);
 			}
 			case 'languages.unregisterFormatting': {
 				const [declaration] = args as [{ id: string }];
-				if (this.formattingProviders.get(extId)?.id === declaration.id) this.formattingProviders.delete(extId);
+				this.formattingProviders.delete(`${extId}/${declaration.id}`);
 				return Promise.resolve(undefined);
 			}
 			case 'childProcess.spawn': {
@@ -1593,8 +1774,9 @@ export class ExtensionHost {
 				return Promise.resolve(this.onApplyEdits ? this.onApplyEdits(path, edits) : false);
 			}
 			case 'workspace.openFile': {
-				const path = args[0] as string;
-				this.onOpenFile?.(path);
+				// `showTextDocument` / `revealRange`: the file, at a 1-based line/column when given.
+				const [path, line, column] = args as [string, number?, number?];
+				this.onOpenFile?.(path, line, column);
 				return Promise.resolve(undefined);
 			}
 			case 'treeView.register': {
@@ -1666,7 +1848,7 @@ export class ExtensionHost {
 			case 'webviewView.setDescription':
 				// The sidebar sections carry their manifest names; a runtime title or
 				// description change is accepted and noted (no re-render surface yet).
-				console.info(`[ggs] ${method}(${args[0]})`);
+				extLogOnce(`${method}:${extId}`, 'info', extId, `${method} is accepted but the sidebar keeps the manifest's name`);
 				return Promise.resolve(undefined);
 			case 'webviewView.postMessage': {
 				const [viewId, message] = args as [string, unknown];
@@ -1698,6 +1880,7 @@ export class ExtensionHost {
 				return (await saveDialog({ title: options.title, defaultPath: options.defaultUri?.fsPath, filters: dialogFilters(options.filters) })) ?? undefined;
 			}
 			default:
+				extLogOnce(`host-request:${method}`, 'warn', extId, `unsupported host request ${method} (the extension's shim is newer than this host)`);
 				return Promise.reject(new Error(`unsupported host request: ${method}`));
 		}
 	}
@@ -1706,15 +1889,35 @@ export class ExtensionHost {
 	 *  in its frame, and the handler's result comes back (CommandRegistry.execute takes no
 	 *  arguments, so only the workbench's own commands go through it). Public because the
 	 *  workbench routes extension status bar items' clicks through it. A declared command of
-	 *  a not-yet-active extension wakes it first (activationEvents' `onCommand`). */
-	executeCommand(id: string, args: unknown[] = []): Promise<unknown> {
+	 *  a not-yet-active extension wakes it first (activationEvents' `onCommand`).
+	 *  `caller` is the handle the request arrived from: a remote (process-backed) caller's
+	 *  JS thread is parked inside this very host request, so an answer that must call that
+	 *  process back can never be reached — the built-in document commands detach instead. */
+	executeCommand(id: string, args: unknown[] = [], caller?: FrameHandle): Promise<unknown> {
 		// VS Code's own built-in commands — the surfaces an extension reaches from inside a
 		// frame the way it reaches any command, answered here before any registry lookup.
-		if (id === 'vscode.diff') return this.openVscodeDiff(args[0], args[1], args[2]).then(() => undefined);
-		if (id === 'vscode.open') return this.openVscodeDocument(args[0]).then(() => undefined);
+		if (id === 'vscode.diff' || id === 'vscode.open') {
+			// Both resolve a provider-scheme side by asking the registering extension back
+			// (`docProvider.provide`). A remote caller is parked waiting for THIS answer, and
+			// the provide call would wait for that parked thread — a deadlock until the
+			// 30 s bridge timeout, with the whole backend frozen behind it. The open runs
+			// detached: the immediate response unblocks the very thread the provide call
+			// needs. A frame caller has no such re-entry; its await keeps the old contract
+			// (errors reach the extension, the result lands before the promise settles).
+			const open = id === 'vscode.diff'
+				? this.openVscodeDiff(args[0], args[1], args[2])
+				: this.openVscodeDocument(args[0]);
+			const done = open.then(() => undefined);
+			if (caller?.remote === true) {
+				void done.catch((error) => notify('error', `${t('extensions.openFailed')}: ${String(error)}`));
+				return Promise.resolve(undefined);
+			}
+			return done;
+		}
 		if (id === 'setContext') {
 			const [key, value] = args as [string, unknown];
-			if (typeof key === 'string') registerContextProvider(key, () => Boolean(value));
+			// The value is kept as given: a mode string compares in `==`, an array serves `in`.
+			if (typeof key === 'string') registerContextProvider(key, () => value);
 			return Promise.resolve(undefined);
 		}
 		if (id === 'workbench.view.scm' || id === 'workbench.view.explorer' || id === 'workbench.view.search' || id === 'workbench.view.extensions') {
@@ -1725,9 +1928,17 @@ export class ExtensionHost {
 			return commands.execute('workbench.openSettings');
 		}
 		const entry = commandsRegistered.get(id);
-		if (entry) return this.callFrame(entry.handle, 'runCommand', [id, args]);
+		if (entry) return this.callFrame(entry.handle, 'runCommand', [id, args]).catch((error) => {
+			extLog('error', entry.extId, `command ${id} failed: ${String(error)}`, error instanceof Error ? error : undefined);
+			throw error;
+		});
 		const extId = this.declaringExtension(id);
-		if (!extId) return commands.execute(id);
+		if (!extId) {
+			if (!commands.all().some((command) => command.id === id)) {
+				extLogOnce(`unknown-command:${id}`, 'warn', caller ? this.extIdForHandle(caller) : 'host', `executeCommand(${id}): no such command in this workbench`);
+			}
+			return commands.execute(id);
+		}
 		// A backend-only package (no `main`, no frame) dispatches its declared commands
 		// straight to the backend; it keeps the caller's arguments (VS Code passes the
 		// menu's own — a right-clicked file, a repository) into its backend dispatch.
@@ -1755,10 +1966,15 @@ export class ExtensionHost {
 	 *  to the open editor. Answers true when a formatter produced edits. */
 	async formatDocument(path: string, languageId: string, text: string, tabSize: number, insertSpaces: boolean): Promise<boolean> {
 		let lastError: string | null = null;
-		for (const [extId, registration] of this.formattingProviders) {
-			console.info('[compat-fmt] probe', extId, JSON.stringify(registration.selectors), languageId);
-			const matches = registration.selectors.length === 0 || registration.selectors.some((selector) => selector.language === languageId);
-			if (!matches) continue;
+		// The providers ranked by their selector's score for this document (VS Code's
+		// language / scheme / pattern rules); the best-matching one formats first.
+		const ranked = [...this.formattingProviders.values()]
+			.map((registration) => ({ registration, score: formatterScore(registration.selectors, path, languageId) }))
+			.filter((entry) => entry.score > 0)
+			.sort((a, b) => b.score - a.score);
+		if (ranked.length === 0) extLog('info', 'host', `format document: no formatter matches ${languageId || 'this file'} (${path})`);
+		for (const { registration } of ranked) {
+			const extId = registration.extId;
 			await this.ensureActive(extId).catch((error) => { lastError = String(error); });
 			try {
 				const edits = await this.callFrame(registration.handle, 'formatDocument.run', [registration.id, { path, languageId, text }, { tabSize, insertSpaces }]) as { range?: unknown; newText?: string }[] | undefined;
@@ -1773,19 +1989,36 @@ export class ExtensionHost {
 							newText: edit.newText ?? ''
 						};
 					});
-					console.info('[compat-fmt] applying', converted.length, 'edits');
-				this.onApplyEdits?.(path, converted);
+					extLog('debug', extId, `formatter ${registration.id}: ${converted.length} edits for ${path}`);
+					this.onApplyEdits?.(path, converted);
 					return true;
 				}
 			} catch (error) {
 				lastError = String(error);
+				extLog('error', extId, `formatter ${registration.id} failed on ${path}: ${lastError}`, error instanceof Error ? error : undefined);
 			}
 		}
-		if (lastError !== null) console.info(`[ggs-ext] formatDocument failed: ${lastError}`);
+		if (lastError !== null) notify('warning', tf('extensions.commandFailed', 'editor.formatDocument', lastError), [{ label: t('extensions.showLog'), run: () => this.showLog() }]);
 		return false;
 	}
 
 	private async runRegistered(id: string, args: unknown[] = []): Promise<void> {
+		try {
+			await this.runRegisteredUnguarded(id, args);
+		} catch (error) {
+			// A palette / menu / keybinding run has no caller to hand the error to: the log
+			// records it with the stack, the user sees which command failed.
+			const owner = commandsRegistered.get(id)?.extId ?? this.declaringExtension(id) ?? 'host';
+			// A run cut short by its extension's own deactivation (an uninstall, a reload)
+			// is expected: logged, not surfaced.
+			const deactivated = /was deactivated|was closed/.test(String(error));
+			extLog(deactivated ? 'info' : 'error', owner, `command ${id} failed: ${String(error)}`, error instanceof Error ? error : String(error));
+			if (!deactivated) notify('error', tf('extensions.commandFailed', id, String(error)), [{ label: t('extensions.showLog'), run: () => this.showLog() }]);
+			throw error;
+		}
+	}
+
+	private async runRegisteredUnguarded(id: string, args: unknown[] = []): Promise<void> {
 		const entry = commandsRegistered.get(id);
 		if (entry) {
 			await this.callFrame(entry.handle, 'runCommand', [id, args]);
@@ -1866,13 +2099,24 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 		const extId = this.treeProviders.get(viewId);
 		const frame = extId ? this.frames.get(extId) : undefined;
 		if (!frame) return [];
-		const items = (await this.callFrame(frame, 'tree.getChildren', [viewId, handle]).catch(() => [])) as SerializedTreeItem[];
+		const items = (await this.callFrame(frame, 'tree.getChildren', [viewId, handle]).catch((error) => {
+			extLog('error', extId ?? 'host', `tree view ${viewId}: children could not be read: ${String(error)}`);
+			return [];
+		})) as SerializedTreeItem[];
 		if (extId) {
-			await Promise.all(items.map(async (item) => {
+			await Promise.all((items ?? []).map(async (item) => {
 				if (item.iconUrl) item.iconUrl = (await extFileDataUrl(extId, item.iconUrl!)) ?? '';
 			}));
 		}
-		return items;
+		return items ?? [];
+	}
+
+	/** A tree view interaction the extension hears about: a selection, an expansion or a
+	 *  checkbox toggle (`onDidChangeSelection` / `onDidExpandElement` / …). */
+	treeInteraction(viewId: string, method: 'treeView.select' | 'treeView.expand' | 'treeView.checkbox', args: unknown[]): void {
+		const extId = this.treeProviders.get(viewId);
+		const frame = extId ? this.frames.get(extId) : undefined;
+		if (frame) void this.callFrame(frame, method, [viewId, ...args]).catch((error) => extLog('warn', extId ?? 'host', `tree view ${viewId}: ${method} failed: ${String(error)}`));
 	}
 
 	/** The workbench reports a declared view's visibility (its container selected or the
@@ -1942,15 +2186,20 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 	}
 
 	/** Re-read the theme for webview documents and push it into the live ones (the cached
-	 *  copy is what the next `composeWebview` inlines). */
+	 *  copy is what the next `composeWebview` inlines). Pages get the parsed `--vscode-*`
+	 *  map with a theme event — the bootstrap mirrors it onto the document's inline style,
+	 *  the same surface VS Code's webview host writes for package script to read. */
 	private async refreshWebviewTheme(): Promise<void> {
 		const theme = await this.pageTheme();
-		this.webviewTheme = { kind: theme.kind, css: theme.css };
+		this.webviewTheme = { kind: theme.kind, css: theme.css, vars: theme.vars };
+		for (const page of this.pageFrames.values()) {
+			page.frame.contentWindow?.postMessage({ __ggsHost: true, type: 'event', event: { kind: 'theme', vars: theme.vars } }, '*');
+		}
 		for (const view of this.webviews.values()) {
-			view.frame?.contentWindow?.postMessage({ __ggsWebviewHost: true, type: 'theme', css: theme.css, kind: theme.kind }, '*');
+			view.frame?.contentWindow?.postMessage({ __ggsWebviewHost: true, type: 'theme', css: theme.css, kind: theme.kind, vars: theme.vars }, '*');
 		}
 		for (const view of this.webviewViews.values()) {
-			view.frame?.contentWindow?.postMessage({ __ggsWebviewHost: true, type: 'theme', css: theme.css, kind: theme.kind }, '*');
+			view.frame?.contentWindow?.postMessage({ __ggsWebviewHost: true, type: 'theme', css: theme.css, kind: theme.kind, vars: theme.vars }, '*');
 		}
 	}
 
@@ -1961,6 +2210,30 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 		for (const page of this.pageFrames.values()) {
 			page.frame.contentWindow?.postMessage({ __ggsHost: true, type: 'event', event: { kind: 'workspace', folders } }, '*');
 		}
+		// `workspace.workspaceFolders` / `onDidChangeWorkspaceFolders` in every extension.
+		for (const handle of this.frames.values()) handle.send?.({ type: '__studioExtEvent', event: 'workspaceFoldersChanged', folders });
+	}
+
+	/** An open document was edited: its new text reaches every extension (debounced per
+	 *  path) as `onDidChangeTextDocument`. Nothing is read while no extension runs. */
+	noteDocumentChanged(path: string, text: () => string): void {
+		if (this.frames.size === 0) return;
+		const pending = this.documentChangeTimers.get(path);
+		if (pending !== undefined) clearTimeout(pending);
+		this.documentChangeTimers.set(path, setTimeout(() => {
+			this.documentChangeTimers.delete(path);
+			const push = { type: '__studioExtEvent', event: 'documentChanged', path, languageId: languageIdFor(path), text: text() };
+			for (const handle of this.frames.values()) handle.send?.(push);
+		}, DOCUMENT_CHANGE_DEBOUNCE_MS));
+	}
+
+	/** A document's last editor closed: `onDidCloseTextDocument` in every extension. */
+	noteDocumentClosed(path: string): void {
+		const pending = this.documentChangeTimers.get(path);
+		if (pending !== undefined) clearTimeout(pending);
+		this.documentChangeTimers.delete(path);
+		if (this.lastPushedDocument === path) this.lastPushedDocument = null;
+		for (const handle of this.frames.values()) handle.send?.({ type: '__studioExtEvent', event: 'documentClosed', path });
 	}
 
 	/** A document was saved: every frame's `onDidSaveTextDocument` fires. */
@@ -2085,13 +2358,16 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 
 		if (data.type === '__studioExtBootLog') {
 			// The frames' own console, mirrored across the sandbox (their entries never reach
-			// the workbench's console otherwise) — the live probe reads these.
-			console.info(`[frame-log] ${String(data.text ?? '').slice(0, 380)}`);
+			// the workbench's console otherwise): a package's errors and warnings are
+			// anomalies the log keeps; its chatter is debug.
+			const handle = this.frameFor(event.source);
+			const level = levelForConsole(String((data as { level?: string }).level ?? 'log'));
+			extLog(level, handle ? this.extIdFor(handle) : 'frame', `console: ${String(data.text ?? '').slice(0, 2000)}`);
 			return;
 		}
 		if (data.type === '__studioExtActivated') {
 			// Lazy activation waits for exactly this; eager activation never set a waiter.
-			console.info(`[ggs-ext] activated ${data.extensionId}`);
+			extLog('info', data.extensionId ?? 'extension', 'activated');
 			this.activationWaiters.get(data.extensionId ?? '')?.();
 			this.activationWaiters.delete(data.extensionId ?? '');
 			return; // activation succeeded; nothing to surface
@@ -2100,11 +2376,9 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 			// The failure surfaces as a notification; a lazy activation waiting on it settles
 			// rather than hanging its trigger. The stack (when the frame captured one) is the
 			// only way to point at the line in a foreign package that tripped.
-			console.info(`[ggs-ext] activation failed ${data.extensionId}: ${String(data.error ?? 'unknown').slice(0, 200)}`);
-			if (typeof data.stack === 'string' && data.stack.length > 0) console.info(`[ggs-ext]   at ${data.stack.split('\n').slice(1).join('\n    at ').slice(0, 2000)}`);
 			this.activationWaiters.get(data.extensionId ?? '')?.();
 			this.activationWaiters.delete(data.extensionId ?? '');
-			notify('warning', `Extension ${data.extensionId} failed to activate: ${data.error ?? 'unknown error'}`);
+			this.reportActivationFailure(data.extensionId ?? 'extension', String(data.error ?? 'unknown error'), typeof data.stack === 'string' ? data.stack : null);
 			return;
 		}
 
@@ -2144,6 +2418,11 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 		for (const [id, h] of this.frames) if (h === handle) return id;
 		return 'extension';
 	}
+
+	/** The extension id a request handle belongs to (for log lines). */
+	private extIdForHandle(handle: FrameHandle): string {
+		return this.extIdFor(handle);
+	}
 }
 
 /** Live command registrations: command id -> the frame holding its handler. */
@@ -2173,4 +2452,77 @@ function unregisterCommand(id: string): void {
 	// The registry has no remove(); re-registering a disabled command stands in until it grows
 	// one. Palette entries filter on `enabled`, so the command disappears from the UI.
 	commands.register({ id, title: id, enabled: () => false, run: () => undefined });
+}
+
+/** How long an editor's burst of keystrokes coalesces before its text reaches extensions. */
+const DOCUMENT_CHANGE_DEBOUNCE_MS = 300;
+
+/** A formatter's document filter as the shim sends it (plain data). */
+export interface FormatterSelector {
+	language?: string;
+	scheme?: string;
+	pattern?: string;
+	base?: string;
+}
+
+/** A glob against a forward-slash path (`**` across segments, `*` / `?` within one). */
+function globMatches(pattern: string, path: string): boolean {
+	let regex = '';
+	for (let at = 0; at < pattern.length; at++) {
+		const char = pattern[at]!;
+		if (char === '*' && pattern[at + 1] === '*') {
+			regex += '.*';
+			at++;
+			if (pattern[at + 1] === '/') at++;
+		} else if (char === '*') regex += '[^/]*';
+		else if (char === '?') regex += '[^/]';
+		else if (char === '{') regex += '(?:';
+		else if (char === '}') regex += ')';
+		else if (char === ',') regex += '|';
+		else regex += char.replace(/[.+^$()|[\]\\]/g, '\\$&');
+	}
+	try {
+		return new RegExp(`^${regex}$`, 'i').test(path);
+	} catch {
+		return false;
+	}
+}
+
+/** VS Code's selector score for a file document: `language`, `scheme` and `pattern` must
+ *  each match where declared (`*` scores lower than an exact language). */
+export function formatterScore(selectors: FormatterSelector[], path: string, languageId: string): number {
+	if (selectors.length === 0) return 1;
+	const normalized = path.replace(/\\/g, '/');
+	let best = 0;
+	for (const selector of selectors) {
+		let score = 0;
+		if (selector.language !== undefined) {
+			if (selector.language === '*') score = 5;
+			else if (selector.language === languageId) score = 10;
+			else continue;
+		}
+		if (selector.scheme !== undefined) {
+			if (selector.scheme !== 'file' && selector.scheme !== '*') continue;
+			score = Math.max(score, 5);
+		}
+		if (selector.pattern !== undefined && selector.pattern !== '') {
+			const base = selector.base?.replace(/\\/g, '/').replace(/\/+$/, '');
+			const relative = base && normalized.toLowerCase().startsWith(base.toLowerCase() + '/') ? normalized.slice(base.length + 1) : normalized;
+			const pattern = selector.pattern.replace(/\\/g, '/');
+			if (!globMatches(pattern, relative) && !globMatches(`**/${pattern.replace(/^\*\*\//, '')}`, relative)) continue;
+			score = Math.max(score, 10);
+		}
+		best = Math.max(best, score);
+	}
+	return best;
+}
+
+/** A request's arguments or answer, shortened for a trace line. */
+function summarize(value: unknown): string {
+	try {
+		const text = JSON.stringify(value);
+		return text === undefined ? String(value) : text.length > 600 ? `${text.slice(0, 600)}…` : text;
+	} catch {
+		return String(value);
+	}
 }

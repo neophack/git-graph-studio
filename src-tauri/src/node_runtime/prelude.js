@@ -28,6 +28,31 @@
 	};
 })();
 
+/* ---------- the standard-library gaps Boa leaves: Date's locale methods ---------- */
+/* Boa 0.20 answers Date's toLocale* family with a `Function Unimplemented` throw, and
+   package code written against Node calls them freely (git-graph-rs formats its commit
+   search's pick details with `new Date(...).toLocaleString()`). Each one the native
+   implementation cannot serve is replaced by the shape of the non-locale method Boa does
+   implement — not a localised rendering, but a string where the throw was. */
+(() => {
+	const day = (date) => date.toDateString();
+	const clock = (date) => date.toTimeString().slice(0, 8);
+	const shapes = {
+		toLocaleString: (date) => `${day(date)}, ${clock(date)}`,
+		toLocaleDateString: day,
+		toLocaleTimeString: clock
+	};
+	for (const [name, shape] of Object.entries(shapes)) {
+		try {
+			new Date(0)[name]();
+		} catch {
+			Date.prototype[name] = function () {
+				return shape(this);
+			};
+		}
+	}
+})();
+
 /* ---------- util: format, inspect, promisify, inherits ---------- */
 (() => {
 	const formatValue = (value) => {
@@ -267,14 +292,45 @@
 				}
 			};
 		},
-		// The random surfaces an offline runtime cannot honestly serve.
-		randomBytes(size) {
-			throw new Error('crypto.randomBytes is not available in the ggs-node runtime');
+		// The random surfaces, over the OS generator (`__ggsRandomBytes`): Node's
+		// randomBytes (sync, or with a callback), randomUUID (RFC 4122 v4) and the Web
+		// Crypto getRandomValues — uuid-class libraries call them at module load.
+		randomBytes(size, callback) {
+			const bytes = new globalThis.__ggsBufferClass(new Uint8Array(__ggsRandomBytes(Number(size) || 0)));
+			if (typeof callback === 'function') {
+				Promise.resolve().then(() => callback(null, bytes));
+				return undefined;
+			}
+			return bytes;
 		},
-		getRandomValues() {
-			throw new Error('crypto.getRandomValues is not available in the ggs-node runtime');
+		randomFillSync(target) {
+			const view = new Uint8Array(target.buffer, target.byteOffset, target.byteLength);
+			view.set(new Uint8Array(__ggsRandomBytes(view.length)));
+			return target;
+		},
+		randomInt(min, max) {
+			if (max === undefined) {
+				max = min;
+				min = 0;
+			}
+			const word = new Uint32Array(new Uint8Array(__ggsRandomBytes(4)).buffer)[0];
+			return min + (word % Math.max(1, max - min));
+		},
+		randomUUID() {
+			const b = new Uint8Array(__ggsRandomBytes(16));
+			b[6] = (b[6] & 0x0f) | 0x40;
+			b[8] = (b[8] & 0x3f) | 0x80;
+			let hex = '';
+			for (const byte of b) hex += HEX[byte >> 4] + HEX[byte & 15];
+			return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+		},
+		getRandomValues(target) {
+			if (!ArrayBuffer.isView(target)) throw new TypeError('crypto.getRandomValues needs a typed array');
+			if (target.byteLength > 65536) throw new RangeError('crypto.getRandomValues: at most 65536 bytes per call');
+			return this.randomFillSync(target);
 		}
 	};
+	globalThis.crypto.webcrypto = { getRandomValues: (target) => globalThis.crypto.getRandomValues(target) };
 })();
 
 /* ---------- url: the URL class and the classic resolve, parsing-only ---------- */
@@ -526,6 +582,22 @@
 		}
 		equals(other) {
 			return this.length === other.length && this.every((b, i) => b === other[i]);
+		}
+		/* Node's `buf.copy(target[, targetStart[, sourceStart[, sourceEnd]]])`: the bytes
+		 * copied are the answer; streaming consumers (the extension machinery's chunk
+		 * capture) call it on every `data` chunk. */
+		copy(target, targetStart = 0, sourceStart = 0, sourceEnd = this.length) {
+			if (!target || target.set === undefined) throw new TypeError('Buffer.copy: target must be a Buffer or Uint8Array');
+			let at = Number(targetStart) || 0;
+			let from = Number(sourceStart) || 0;
+			let to = sourceEnd === undefined || sourceEnd === null ? this.length : Number(sourceEnd);
+			if (from < 0) from = 0;
+			if (to > this.length) to = this.length;
+			if (at < 0 || at >= target.length || from >= to) return 0;
+			const count = Math.min(to - from, target.length - at);
+			if (count <= 0) return 0;
+			target.set(this.subarray(from, from + count), at);
+			return count;
 		}
 	}
 	globalThis.Buffer = Buffer;

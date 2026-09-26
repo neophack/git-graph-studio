@@ -31,6 +31,16 @@ export function normalizePathKey(path: string): string {
     return path.replace(/\\/g, '/');
 }
 
+/** Do two spellings name the same file? Slashes unify, and a Windows drive path compares
+ *  without case (an extension's `C:\x\a.ts` is the editor's `c:/x/a.ts`). */
+export function samePath(a: string, b: string): boolean {
+    if (a === b) return true;
+    const left = normalizePathKey(a);
+    const right = normalizePathKey(b);
+    if (left === right) return true;
+    return /^[A-Za-z]:\//.test(left) && left.toLowerCase() === right.toLowerCase();
+}
+
 /** Called once by the editor chunk: pushes for a file reach its open editors through
  *  this callback. */
 export function setDiagnosticsRenderer(refresh: ((key: string) => void) | null): void {

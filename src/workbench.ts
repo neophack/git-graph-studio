@@ -150,9 +150,6 @@ export class Workbench {
 			// menus build lazily at open time and the palette reads the registry on open.
 			void this.scm.refresh();
 		};
-		// An extension page opens in an editor tab (module 12's extension pages — VS Code's webview
-		// panels): the host resolves and mounts the frame, the workbench owns the tab.
-		this.extensionHost.onOpenPage = (extId, pageId, params, title) => this.openExtPage(extId, pageId, params, title);
 		// A theme switch re-reaches every open extension page (each re-reads its stylesheet).
 		document.addEventListener(THEME_EVENT, () => this.extensionHost.noteThemeChanged());
 		this.extensions = new ExtensionsPanel(this.views.extensions, this.extensionHost);
@@ -169,7 +166,7 @@ export class Workbench {
 		this.extensionHost.onCloseWebviewTab = (tabId) => this.editors.closeById(tabId);
 		this.extensionHost.onRevealWebviewTab = (tabId) => this.editors.revealById(tabId);
 		this.extensionHost.onStatusBarItems = (items) => this.statusBar.setExtensionItems(items);
-		this.statusBar.onExtensionCommand = (command) => void this.extensionHost.executeCommand(command);
+		this.statusBar.onExtensionCommand = (command, args) => void this.extensionHost.executeCommand(command, args ?? []);
 		this.extensionHost.onOutputChannels = (channels) => this.panel.output.setExtensionChannels(channels);
 		this.extensionHost.onOutputAppend = (extId, name, line) => this.panel.output.appendLine(name, line);
 		this.extensionHost.onOutputClearChannel = (_extId, name) => this.panel.output.clearChannel(name);
@@ -184,8 +181,15 @@ export class Workbench {
 		// The editor-facing vscode API: text edits land in an open CodeMirror editor, opens
 		// go through the editor area, and the host pushes active-editor and save events.
 		this.extensionHost.onApplyEdits = (path, edits) => this.editors.applyTextEdits(path, edits);
-		this.extensionHost.onOpenFile = (path) => void this.editors.openFile(path);
+		this.extensionHost.onOpenFile = (path, line, column) => void this.editors.openFile(path, line !== undefined ? { line, column } : undefined);
 		this.extensionHost.activeText = () => this.editors.activeText();
+		// `openTextDocument` reads an open editor's buffer, `TextDocument.save()` saves it,
+		// and edits / closes reach the extensions as document events.
+		this.extensionHost.documentText = (path) => this.editors.documentText(path);
+		this.extensionHost.onSaveFile = (path) => this.editors.saveFile(path);
+		this.editors.onDocumentEdited = (path, text) => this.extensionHost.noteDocumentChanged(path, text);
+		this.editors.onDocumentClosed = (path) => this.extensionHost.noteDocumentClosed(path);
+		this.extensionHost.onTreeMeta = (viewId, meta) => this.extTreeViews.get(viewId)?.setMeta(meta);
 		// The page services a self-contained extension page acts through (the graph view's bridge
 		// opens diffs and revisions, shows the SCM view, runs the terminal, and nudges the
 		// workbench after its own writes — the delegate the graph page acts through).
@@ -197,10 +201,6 @@ export class Workbench {
 		this.extensionHost.onRunInTerminal = (command) => void this.panel.runInTerminal(command);
 		this.extensionHost.onRepoChanged = () => this.scheduleRefresh(0);
 		this.extensionHost.onForwardKey = (key) => document.dispatchEvent(new KeyboardEvent('keydown', key));
-		this.extensionHost.onRevealPage = (extId, pageId) => {
-			const tabId = this.extPageTabs.get(extId + '/' + pageId);
-			if (tabId !== undefined) this.editors.revealById(tabId);
-		};
 
 		// The user's keybindings (~/.ggs/keybindings.json) override the registry's defaults
 		// everywhere a binding is matched or shown (M3 3.10).
@@ -688,8 +688,12 @@ export class Workbench {
 				this.extWebviewViewDisposers.push(this.extensionHost.mountWebviewView(viewId, extId, pane));
 			} else {
 				const tree = new ExtensionTreeView(section, name, {
+					viewId,
 					fetchChildren: (handle) => this.extensionHost.treeChildren(viewId, handle),
-					onCommand: (command, args) => void this.extensionHost.executeCommand(command, args)
+					onCommand: (command, args) => void this.extensionHost.executeCommand(command, args),
+					onSelect: (handles) => this.extensionHost.treeInteraction(viewId, 'treeView.select', [handles]),
+					onExpand: (handle, expanded) => this.extensionHost.treeInteraction(viewId, 'treeView.expand', [handle, expanded]),
+					onCheckbox: (handle, state) => this.extensionHost.treeInteraction(viewId, 'treeView.checkbox', [handle, state])
 				});
 				this.extTreeViews.set(viewId, tree);
 			}
@@ -741,49 +745,8 @@ export class Workbench {
 				if (host) makeSection(declared.viewId, declared.name, contribution.extId, declared.type ?? 'tree', host);
 			}
 		}
-		// A package's activity-bar launcher (`manifest.json`'s `activitybar`): an icon that
-		// runs the package's own command (a view page's opener) — the app names no plugin.
-		for (const launcher of this.extensionHost.activityLaunchers()) {
-			const key = `ext-launcher:${launcher.extId}`;
-			const item = el('div', 'activity-item', [icon('extensions')]);
-			item.title = launcher.title;
-			item.setAttribute('role', 'button');
-			item.tabIndex = 0;
-			tooltip(item, () => launcher.title);
-			item.addEventListener('click', () => void this.extensionHost.executeCommand(launcher.command, []));
-			this.activityItems[key] = item;
-			this.activityBar.insertBefore(item, this.activitySpacer);
-			if (launcher.icon) {
-				void extFileDataUrl(launcher.extId, launcher.icon).then((url) => {
-					if (!url) return;
-					const image = el('img');
-					image.src = url;
-					image.alt = '';
-					item.replaceChildren(image);
-				});
-			}
-		}
 	}
 
-
-	/** An extension page (module 12): one of an installed `ggs` package's pages in an editor
-	 *  tab — the workbench's half of the extension host's `onOpenPage`, VS Code's webview
-	 *  panel counterpart. Every open is its own tab (the serial keeps them apart). */
-	openExtPage(extId: string, pageId: string, params?: unknown, title?: string): void {
-		const entry = this.extensionHost.pageEntry(extId, pageId);
-		if (!entry) return; // the host already warned; nothing to open
-		const serial = ++Workbench.extPageSerial;
-		const tabId = `extpage:${extId}:${pageId}:${serial}`;
-		if (entry.singleton) this.extPageTabs.set(`${extId}/${pageId}`, tabId);
-		// The tab wears the package's own icon (the page's, else its activity-bar launcher's);
-		// a read failure keeps the generic one rather than holding the tab back.
-		const icon = entry.icon ? extFileDataUrl(extId, entry.icon).catch(() => null) : Promise.resolve(null);
-		void icon.then((iconSrc) => this.editors.openExtPage(
-			{ kind: 'extpage', id: tabId, title: title ?? entry.title ?? pageId, extId, pageId, params },
-			(pane) => this.extensionHost.mountPage(extId, pageId, params, pane),
-			iconSrc
-		));
-	}
 
 	/** A webview panel (module 12): what `vscode.window.createWebviewPanel` opens — a VSIX
 	 *  extension's own HTML in an editor tab, over the same mounting path the extension pages

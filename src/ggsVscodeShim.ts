@@ -10,7 +10,7 @@
 // answers over the reader thread, and the extension's own activation is sequential by
 // nature. Data crosses as JSON strings at the bridge; everything inside is typed objects.
 
-import { activationContext, createVscodeApi, rehydrateUris, Uri, type HostBridge, type HostContext, type VscodeApi } from './vscodeApi';
+import { activationContext, createVscodeApi, rehydrateUris, serveHostCall, UNSERVED_HOST_CALL, Uri, type HostBridge, type HostContext, type VscodeApi } from './vscodeApi';
 
 interface ShimGlobal {
 	__ggsHostRequest: (method: string, argsJson: string) => string | null;
@@ -39,12 +39,8 @@ shim.__ggsVscodeShimInstall = function (args: InstallArgs): InstalledVscode {
 		const raw = shim.__ggsHostRequest(method, JSON.stringify(requestArgs ?? []));
 		return raw === null || raw === undefined ? null : JSON.parse(raw);
 	};
-	const env = (hostRequest('host.env', []) ?? {}) as {
+	const env = (hostRequest('host.env', []) ?? {}) as Partial<HostContext> & {
 		settings?: Record<string, unknown>;
-		language?: string;
-		appVersion?: string;
-		themeKind?: number;
-		webviewResourceBase?: string;
 		state?: { global: Record<string, unknown>; workspace: Record<string, unknown> };
 	};
 	const context: HostContext = {
@@ -56,7 +52,14 @@ shim.__ggsVscodeShimInstall = function (args: InstallArgs): InstalledVscode {
 		appVersion: env.appVersion,
 		themeKind: env.themeKind,
 		webviewResourceBase: env.webviewResourceBase ?? `ggs://localhost/${args.extensionId}/`,
-		state: { global: { ...(env.state?.global ?? {}) }, workspace: { ...(env.state?.workspace ?? {}) } }
+		state: { global: { ...(env.state?.global ?? {}) }, workspace: { ...(env.state?.workspace ?? {}) } },
+		// The same context extras the frame host gets (defaults, ~/.ggs storage, the
+		// installed list, the log threshold, the platform the host runs on).
+		defaults: env.defaults,
+		storage: env.storage,
+		extensions: env.extensions,
+		logLevel: env.logLevel,
+		platform: env.platform
 	};
 	const handlers = new Map<string, (...callArgs: unknown[]) => unknown>();
 	const docProviders = new Map<string, { provideTextDocumentContent?: (uri: unknown) => unknown }>();
@@ -65,7 +68,12 @@ shim.__ggsVscodeShimInstall = function (args: InstallArgs): InstalledVscode {
 	 *  content provider's text the host asks for when a diff or a read-only content tab
 	 *  renders a provider-scheme document. The maps it reads are shared, so every
 	 *  registration (re)installing this same function stays one live dispatcher. */
+	let installed: VscodeApi | null = null;
 	const dispatchHostCall = (command: string, commandArgs: unknown[]) => {
+		// Tree views, the formatter run and webview views: the shared host-call table (a
+		// ggs-node-hosted package's sidebar trees answered nothing before).
+		const served = serveHostCall(installed, command, Array.isArray(commandArgs) ? commandArgs : [commandArgs]);
+		if (served !== UNSERVED_HOST_CALL) return served;
 		if (command === 'docProvider.provide') {
 			// The host asks this extension for a provider-scheme document's text. The
 			// provider is found by the Uri's scheme - the key it registered under.
@@ -97,6 +105,7 @@ shim.__ggsVscodeShimInstall = function (args: InstallArgs): InstalledVscode {
 		unregisterDocProvider: (scheme) => docProviders.delete(scheme)
 	};
 	const api = createVscodeApi(context, bridge);
+	installed = api;
 	shim.vscode = api;
 	// The dispatcher installs eagerly: a package that registers only a content provider -
 	// never a command - must still answer the host's provide call.

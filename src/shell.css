@@ -508,6 +508,18 @@ body.resizing iframe { pointer-events: none; }
 .ext-tree .ext-tree-row .description { color: var(--vscode-list-deemphasizedForeground, var(--vscode-descriptionForeground, #8b8b8b)); font-size: 12px; margin-left: 6px; overflow: hidden; text-overflow: ellipsis; }
 .ext-tree .ext-tree-row .twistie-placeholder { width: 16px; display: inline-block; }
 .ext-tree .ext-tree-icon { width: 16px; height: 16px; flex: none; }
+.ext-tree .ext-tree-row.selected { background: var(--vscode-list-inactiveSelectionBackground, var(--vscode-list-hoverBackground)); }
+.ext-tree .ext-tree-codicon { flex: none; font-size: 16px; }
+.ext-tree .ext-tree-checkbox { margin: 0 2px 0 0; flex: none; }
+.ext-tree .ext-tree-inline-actions { margin-left: auto; display: none; padding-right: 4px; }
+.ext-tree .ext-tree-row:hover .ext-tree-inline-actions, .ext-tree .ext-tree-row.selected .ext-tree-inline-actions { display: inline-flex; }
+.ext-tree-title-description { color: var(--vscode-descriptionForeground, #8b8b8b); font-size: 11px; margin-left: 6px; text-transform: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ext-tree-badge { margin-left: 6px; min-width: 16px; padding: 0 4px; border-radius: 8px; font-size: 10px; line-height: 16px; text-align: center; background: var(--vscode-badge-background, #4d4d4d); color: var(--vscode-badge-foreground, #fff); }
+.ext-tree-title-actions { display: inline-flex; margin-left: auto; }
+.ext-tree-message { margin: 0; padding: 4px 8px; color: var(--vscode-descriptionForeground, #8b8b8b); white-space: normal; }
+.status-item.ext-status-error { background: var(--vscode-statusBarItem-errorBackground, #c72e0f); color: var(--vscode-statusBarItem-errorForeground, #ffffff); }
+.status-item.ext-status-warning { background: var(--vscode-statusBarItem-warningBackground, #7a6400); color: var(--vscode-statusBarItem-warningForeground, #ffffff); }
+.tab-actions .ext-editor-action { font-size: 12px; }
 .ext-tree .empty { color: var(--vscode-list-deemphasizedForeground, var(--vscode-descriptionForeground, #8b8b8b)); padding: 4px 8px; margin: 0; }
 .ext-container-view { flex-direction: column; overflow: auto; }
 .status-left { display: flex; align-items: center; padding-left: 4px; overflow: hidden; }

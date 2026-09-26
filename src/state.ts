@@ -143,3 +143,20 @@ export function saveExtMemento(extId: string, scope: 'global' | 'workspace', key
 	save(`extMemento.${scope}.${extId}`, values);
 }
 
+
+/* ---------- Extension secrets (ExtensionContext.secrets) ---------- */
+
+/** One extension's stored secrets. Kept in the workbench's own storage, apart from its
+ *  settings and mementos — not an OS keychain (the extension host log says so the first
+ *  time an extension stores one). */
+export function extSecrets(extId: string): Record<string, string> {
+	return load<Record<string, string>>(`extSecrets.${extId}`, {});
+}
+
+/** Store (or, with undefined, delete) one secret. */
+export function saveExtSecret(extId: string, key: string, value: string | undefined): void {
+	const secrets = extSecrets(extId);
+	if (value === undefined) delete secrets[key];
+	else secrets[key] = value;
+	save(`extSecrets.${extId}`, secrets);
+}

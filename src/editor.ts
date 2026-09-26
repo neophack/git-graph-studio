@@ -10,6 +10,7 @@ import { invoke } from '@tauri-apps/api/core';
 
 import { hasBookmark, toggleBookmark } from './bookmarks';
 import { diagnosticsExtension } from './editorDiagnosticsView';
+import { samePath } from './editorDiagnostics';
 import { loadAnalysisPages, loadCanViews, loadCallTree, loadFastView, loadFileHistory, loadFolderCompare, loadHexCompare, loadHexView, loadMerge, loadMergeEditor, loadSnippetRegistry, loadSymbolDbView, loadTextEditor } from './lazy';
 // The hex and CAN views are async chunks (lazy.ts): a binary or a CAN trace is the exception
 // among opens, and their code would otherwise ride in the first-paint bundle. The fast
@@ -26,12 +27,12 @@ import type { BlameLine, FileHistoryView } from './fileHistory';
 import type * as TextEditor from './textEditor';
 import type { CallTreeView, WsSymbol } from './callTree';
 import { commands } from './commands';
-import { contextUri, declaredLanguageName, menuSection } from './contributions';
+import { codiconOf, contextUri, declaredLanguageName, menuSection, resolvedMenuEntries, resourceContext, runMenuEntry } from './contributions';
 import type { FolderCompareView } from './folderCompare';
 import type { MergeToolbar } from './mergeEditor';
 import { t } from './i18n';
 import { SETTINGS_EVENT, settings } from './settings';
-import { basename, dirname, el, icon, joinPath, notify, quickPick, relativeTo, showContextMenu, toPosix, type MenuEntry } from './ui';
+import { basename, dirname, el, icon, joinPath, notify, quickPick, relativeTo, showContextMenu, showMenuBelow, toPosix, type MenuEntry } from './ui';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 /** The text editor module once it has been loaded (`textEditor()`): CodeMirror lives in an
@@ -370,6 +371,11 @@ export class EditorGroup {
 	/** The set or order of open tabs changed (an open, a close, a rename): the workbench snapshots it. */
 	onTabsChange: (() => void) | null = null;
 	onFileSaved: ((path: string) => void) | null = null;
+	/** A file editor's text changed (every edit, uncoalesced — the listener debounces): the
+	 *  path and a reader of the current text (read only when the listener needs it). */
+	onDocumentEdited: ((path: string, text: () => string) => void) | null = null;
+	/** A file editor closed (its document may still be open in another group). */
+	onDocumentClosed: ((path: string) => void) | null = null;
 	/** A windowed editor's save streamed a progress report (`null` clears it); the workbench
 	 *  forwards this to the status bar's save item. */
 	onSaveProgress: ((progress: { written: number; total: number } | null) => void) | null = null;
@@ -535,7 +541,10 @@ export class EditorGroup {
 		this.add(editor, true);
 	}
 
-	async openFile(path: string, options: { line?: number; column?: number; inactive?: boolean } = {}): Promise<void> {		const existing = this.open.find((e) => e.input.kind === 'file' && e.input.path === path);
+	async openFile(path: string, options: { line?: number; column?: number; inactive?: boolean } = {}): Promise<void> {
+		// Any spelling of an open file reveals its tab (an extension's backslashed path is
+		// the Explorer's forward-slashed one).
+		const existing = this.open.find((e) => e.input.kind === 'file' && samePath(e.input.path, path));
 		if (existing) {
 			this.activate(existing);
 			if (options.line !== undefined) {
@@ -1253,6 +1262,10 @@ export class EditorGroup {
 		if (editor.input.kind !== 'file') return;
 		const path = editor.input.path;
 		this.refreshPreviews(path);
+		if (editor.view) {
+			const view = editor.view;
+			this.onDocumentEdited?.(path, () => view.state.doc.toString());
+		}
 		const backup = this.backupTimers.get(editor.id);
 		if (backup !== undefined) window.clearTimeout(backup);
 		// Backing a large document up is one whole-document `toString()` plus one whole-file
@@ -2234,7 +2247,16 @@ export class EditorGroup {
 	/** The open file editor's CodeMirror view for `path`, when this group holds it — module
 	 *  12's workspace.applyEdit applies text edits through it. */
 	fileViewFor(path: string): EditorView | null {
-		return this.open.find((candidate) => candidate.input.kind === 'file' && candidate.input.path === path)?.view ?? null;
+		return this.open.find((candidate) => candidate.input.kind === 'file' && samePath(candidate.input.path, path))?.view ?? null;
+	}
+
+	/** Save this group's editor of a path (the extension API's `TextDocument.save()`):
+	 *  answers whether the document is saved afterwards; false when it is not open here. */
+	async saveByPath(path: string): Promise<boolean> {
+		const editor = this.open.find((candidate) => candidate.input.kind === 'file' && samePath(candidate.input.path, path));
+		if (!editor) return false;
+		await this.save(editor);
+		return !editor.dirty;
 	}
 
 	/** Close the tab with this input id (the extension host closes a webview panel's tab
@@ -2269,6 +2291,7 @@ export class EditorGroup {
 		editor.pane.remove();
 		this.forget(editor);
 		this.activateSuccessor(editor, index);
+		if (editor.input.kind === 'file') this.onDocumentClosed?.(editor.input.path);
 	}
 
 	/** The dirty editors' labels (the area's one "save these N files?" prompt lists them). */
@@ -2560,7 +2583,7 @@ export class EditorGroup {
 				{ label: 'Copy Path', keybinding: 'Shift+Alt+C', run: () => void writeText(path) },
 				{ label: 'Copy Relative Path', keybinding: 'Ctrl+K Ctrl+Shift+C', run: () => void writeText(this.rootPath ? relativeTo(this.rootPath, path) : path) });
 		}
-		entries.push(...menuSection('editor/title/context', editor.input.kind === 'file' ? [contextUri(editor.input.path), [contextUri(editor.input.path)]] : undefined));
+		entries.push(...menuSection('editor/title/context', editor.input.kind === 'file' ? [contextUri(editor.input.path), [contextUri(editor.input.path)]] : undefined, editor.input.kind === 'file' ? resourceContext(editor.input.path) : undefined));
 		return entries;
 	}
 
@@ -2636,7 +2659,7 @@ export class EditorGroup {
 			{ label: 'Command Palette...', keybinding: 'Ctrl+Shift+P', run: () => void commands.execute('workbench.commandPalette') },
 			// Extensions' `contributes.menus["editor/context"]` entries, handed the file the
 			// editor shows (VS Code's resource argument) when it shows one.
-			...menuSection('editor/context', editor.input.kind === 'file' ? [contextUri(editor.input.path), [contextUri(editor.input.path)]] : undefined)
+			...menuSection('editor/context', editor.input.kind === 'file' ? [contextUri(editor.input.path), [contextUri(editor.input.path)]] : undefined, editor.input.kind === 'file' ? { ...resourceContext(editor.input.path), editorTextFocus: true, editorHasSelection: !editor.view?.state.selection.main.empty } : undefined)
 		];
 	}
 
@@ -2937,6 +2960,38 @@ export class EditorGroup {
 				this.onOpenPreviewToSide?.(active.input.kind === 'file' ? active.input.path : '');
 			});
 			this.tabs.appendChild(el('div', 'tab-actions', [button]));
+		}
+		// The extensions' `editor/title` actions for the active file: the `navigation`
+		// group as buttons (a codicon, else the title), the rest behind "…", each run with
+		// the file's Uri as VS Code passes it.
+		if (active?.input.kind === 'file') {
+			const path = active.input.path;
+			const entries = resolvedMenuEntries('editor/title', resourceContext(path));
+			if (entries.length > 0) {
+				const args = [contextUri(path), [contextUri(path)]];
+				const actions: HTMLElement[] = [];
+				for (const entry of entries.filter((candidate) => candidate.group === 'navigation')) {
+					const codicon = codiconOf(entry.icon);
+					const button = el('button', 'markdown-preview-button ext-editor-action', codicon ? [icon(codicon)] : [entry.label]);
+					button.title = entry.label;
+					button.addEventListener('click', (event) => {
+						event.stopPropagation();
+						runMenuEntry(entry, args);
+					});
+					actions.push(button);
+				}
+				const rest = entries.filter((candidate) => candidate.group !== 'navigation');
+				if (rest.length > 0) {
+					const more = el('button', 'markdown-preview-button ext-editor-action', [icon('ellipsis')]);
+					more.title = '…';
+					more.addEventListener('click', (event) => {
+						event.stopPropagation();
+						showMenuBelow(more, rest.map((entry) => ({ label: entry.label, run: () => runMenuEntry(entry, args) })));
+					});
+					actions.push(more);
+				}
+				this.tabs.appendChild(el('div', 'tab-actions', actions));
+			}
 		}
 	}
 

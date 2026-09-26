@@ -584,7 +584,7 @@ if (view !== null) {
 
 /* ---------- console hygiene ---------- */
 for (const entry of consoleEntries) {
-	if (/\[ggs-debug\]|\[frame-log\]|\[probe\]|\[ggs-ext\]|\[ggs-wvmsg\]|\[ggs-diff\]|\[ggs-fswatch\]|\[ggs-diff-frame\]/.test(String(entry.text ?? ''))) {
+	if (/\[ext-host\]|\[ggs-debug\]|\[frame-log\]|\[probe\]|\[ggs-ext\]|\[ggs-wvmsg\]|\[ggs-diff\]|\[ggs-fswatch\]|\[ggs-diff-frame\]/.test(String(entry.text ?? ''))) {
 		const ctx = contexts.get(entry.contextId);
 		log(`[debug] (${ctx && ctx.url ? ctx.url.slice(0, 60) : 'ctx' + entry.contextId}) ${String(entry.text ?? '').slice(0, 250)}`);
 	}
