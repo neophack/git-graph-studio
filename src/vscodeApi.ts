@@ -1210,6 +1210,54 @@ export class NotebookData {
 	metadata?: Record<string, unknown>;
 	constructor(public cells: NotebookCellData[]) {}
 }
+/** An output item of a notebook cell. Value types are inert here — the notebooks the
+ *  host does not render natively still let packages construct and pass them. */
+export class NotebookCellOutputItem {
+	constructor(public data: Uint8Array, public mime: string) {}
+	static bytes(data: Uint8Array, mime: string): NotebookCellOutputItem {
+		return new NotebookCellOutputItem(data, mime);
+	}
+	static stdout(text: string): NotebookCellOutputItem {
+		return NotebookCellOutputItem.bytes(new TextEncoder().encode(text), 'application/vnd.code.notebook.stdout');
+	}
+	static stderr(text: string): NotebookCellOutputItem {
+		return NotebookCellOutputItem.bytes(new TextEncoder().encode(text), 'application/vnd.code.notebook.stderr');
+	}
+	static error(err: Error): NotebookCellOutputItem {
+		return NotebookCellOutputItem.bytes(
+			new TextEncoder().encode(JSON.stringify({ name: err.name, message: err.message, stack: err.stack ?? '' })),
+			'application/vnd.code.notebook.error',
+		);
+	}
+	static json(value: unknown, mime2?: string): NotebookCellOutputItem {
+		return NotebookCellOutputItem.bytes(
+			Buffer.from(JSON.stringify(value, undefined, '\t')),
+			mime2 ?? 'text/x-json',
+		);
+	}
+	static text(text: string, mime2: string): NotebookCellOutputItem {
+		return NotebookCellOutputItem.bytes(new TextEncoder().encode(text), mime2);
+	}
+}
+export class NotebookEdit {
+	constructor(public index: number, public cells: NotebookCellData[]) {}
+	static replaceCells(index: number, cells: NotebookCellData[]): NotebookEdit {
+		return new NotebookEdit(index, cells);
+	}
+	static insertCells(index: number, cells: NotebookCellData[]): NotebookEdit {
+		return new NotebookEdit(index, cells);
+	}
+	static deleteCells(index: number, count: number): NotebookEdit {
+		void count;
+		return new NotebookEdit(index, []);
+	}
+	static updateCellMetadata(index: number, newCellMetadata: Record<string, unknown>): NotebookEdit {
+		const edit = new NotebookEdit(index, []);
+		edit.newCellMetadata = newCellMetadata;
+		return edit;
+	}
+	newCellMetadata?: Record<string, unknown>;
+}
 export class NotebookRange {
 	constructor(readonly start: number, readonly end: number) {}
 	get isEmpty(): boolean {
@@ -1323,7 +1371,7 @@ export function configurationChangeEvent(changed: string[]): ConfigurationChange
  *  does; the section's own keys also read as properties (`config.enable`). */
 class WorkspaceConfiguration {
 	[key: string]: unknown;
-	constructor(private readonly ctx: HostContext, private readonly bridge: HostBridge, private readonly section: string) {
+	constructor(private readonly ctx: HostContext, private readonly bridge: HostBridge, private readonly section: string, private readonly onChanged?: (keys: string[]) => void) {
 		// VS Code's configuration object carries the section's values as properties too.
 		for (const leaf of this.leafKeys(this.section)) {
 			const rest = this.section === '' ? leaf : leaf.slice(this.section.length + 1);
@@ -1370,9 +1418,15 @@ class WorkspaceConfiguration {
 
 	async update(setting: string, value: unknown, _target?: ConfigurationTarget | boolean | null, _overrideInLanguage?: boolean): Promise<void> {
 		const key = this.key(setting);
+		const changed = JSON.stringify(this.ctx.settings[key]) !== JSON.stringify(value);
 		if (value === undefined) delete this.ctx.settings[key];
 		else this.ctx.settings[key] = value;
 		await this.bridge.request('settings.update', [this.ctx.extensionId, key, value]);
+		// VS Code fires `onDidChangeConfiguration` for the extension's own update too. The
+		// host's `configChanged` push that follows diffs against the value written above and
+		// finds nothing, so the event fires here or never (git-graph-rs's `enableLog`
+		// toggle never reached its logger before).
+		if (changed) this.onChanged?.([key]);
 	}
 
 	/** Where a value comes from: its default and the (single, global-scope) override. */
@@ -3009,7 +3063,7 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 				unsupported('workspace.updateWorkspaceFolders', 'open folders from the File menu');
 				return false;
 			},
-			getConfiguration: (section = '', _scope?: unknown) => new WorkspaceConfiguration(ctx, bridge, section ?? ''),
+			getConfiguration: (section = '', _scope?: unknown) => new WorkspaceConfiguration(ctx, bridge, section ?? '', (keys) => configurationChanged.fire(configurationChangeEvent(keys))),
 			onDidChangeConfiguration: configurationChanged.event,
 			/** The provider object stays in the frame; the host remembers which frame answers the
 			 *  scheme, and its `vscode.open` / `vscode.diff` call back here for the text. */
@@ -3607,7 +3661,7 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 		SemanticTokensLegend, SemanticTokens, SemanticTokensEdit, SemanticTokensEdits, SemanticTokensBuilder,
 		DocumentDropEdit, FileDecoration, TerminalLink, TerminalProfile, DataTransfer, DataTransferItem,
 		TabInputText, TabInputTextDiff, TabInputWebview, TabInputCustom, TabInputTerminal,
-		NotebookCellData, NotebookData, NotebookRange, NotebookCellKind, Breakpoint, SourceBreakpoint,
+		NotebookCellData, NotebookData, NotebookRange, NotebookCellKind, NotebookCellOutputItem, NotebookEdit, Breakpoint, SourceBreakpoint,
 		FunctionBreakpoint, DebugAdapterExecutable, DebugAdapterServer, DebugAdapterNamedPipeServer,
 		DebugAdapterInlineImplementation, DebugConsoleMode, TextEditorSelectionChangeKind, TextDocumentSaveReason,
 		TextDocumentChangeReason, FileChangeType, TreeItemCheckboxState, SignatureHelpTriggerKind,

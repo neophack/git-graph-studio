@@ -191,7 +191,10 @@ function ensureActivated(): Promise<void> {
 			loaded_ = loaded ?? null;
 			await Promise.resolve(loaded?.activate?.(activationContext(context, api)));
 		} catch (error) {
-			activationError = String(error);
+			activationError =
+				error instanceof Error && error.stack
+					? error.stack.split('\n').slice(0, 6).join('\n')
+					: String(error);
 			log('error', `activation failed: ${activationError}`);
 		}
 	})();
