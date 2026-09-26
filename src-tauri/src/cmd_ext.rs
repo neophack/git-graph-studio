@@ -596,13 +596,9 @@ fn install_missing_bundled_in(
     let mut outcomes = Vec::new();
     for path in packages {
         let Ok(manifest) = read_vsix_manifest(path) else {
-            eprintln!("[ai] manifest unreadable for {path:?}");
-            let dbg = read_vsix_manifest(path).unwrap_err();
-            eprintln!("[ai] reason: {dbg}");
             continue;
         };
-        let Some(id) = manifest_id(&manifest) else {
-            eprintln!("[ai] id none for {path:?}");
+        let Some(id) = manifest_id(&manifest) else {
             continue;
         };
         if find_installed(dir, &id)
@@ -1533,7 +1529,24 @@ pub fn install_from_vsix_into(dir: &Path, vsix: &Path, builtin: bool) -> Result<
     // The Studio capabilities a VSIX declared become its runtime `manifest.json`: from here
     // on — the warm backend, the pages, the permissions — one runtime serves every package.
     if let Some(ggs) = manifest.ggs.clone() {
-        let capabilities = generated_studio_manifest(&manifest, ggs);
+        let mut capabilities = generated_studio_manifest(&manifest, ggs);
+        // A declared backend that IS the engine `.node` serves the typed dispatch but
+        // hosts nothing a user can open: no pages, no commands, no view. When the package
+        // also ships a JS `main`, the entry is the backend instead — its activation loads
+        // the `.node` through ggs-node's N-API host and creates the view itself (the
+        // architecture every live-verified package runs on). A package that declares
+        // pages for an engine-served surface keeps its declaration.
+        if let Some(backend) = capabilities.backend.as_mut() {
+            let no_surface = capabilities.pages.as_ref().is_none_or(|p| p.is_empty())
+                && capabilities.activitybar.is_none();
+            if backend.command.ends_with(".node")
+                && no_surface
+                && manifest.main.as_deref().is_some_and(|main| !main.trim().is_empty())
+            {
+                backend.command = manifest.main.clone().unwrap_or_default();
+                backend.binaries = None;
+            }
+        }
         std::fs::write(
             target.join("manifest.json"),
             serde_json::to_vec(&capabilities).unwrap(),
@@ -3005,7 +3018,7 @@ mod vsix_tests {
             &std::fs::read_to_string(exts.join(format!("neophack.git-graph-rs-{}", versions[0])).join("manifest.json")).unwrap(),
         )
         .unwrap();
-        assert!(manifest.backend.is_some(), "the derived manifest declares a backend");
+        assert!(manifest.backend.is_some(), "the derived manifest declares a backend");
     }
 
     #[test]

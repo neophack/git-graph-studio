@@ -205,7 +205,7 @@ try {
 			await pause(250);
 			const rows = [...document.querySelectorAll('#overlays .quick-input .row')];
 			// The view command's title in either display language.
-			const row = rows.find((r) => /(打开 Git Graph|View Git Graph)\\s*$/.test(r.textContent.trim()));
+			const row = rows.find((r) => /(打开 Git Graph|View Git Graph)/.test(r.textContent.trim()));
 			if (row) {
 				row.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
 				return 'clicked';

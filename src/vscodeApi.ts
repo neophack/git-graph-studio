@@ -2296,9 +2296,17 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			// the shape a language client's didOpen needs.
 			if (activeEditor !== null && activeEditor.text !== undefined && !openedDocuments.has(activeEditor.path)) {
 				openedDocuments.add(activeEditor.path);
-				// Gated tracing: `localStorage.ggs-ext-debug = 1` before opening the file.
-				if (typeof localStorage !== 'undefined' && localStorage.getItem('ggs-ext-debug')) {
-					console.info(`[ggs-ext-debug] onDidOpenTextDocument ${activeEditor.path} (${String(activeEditor.text).length} chars)`);
+				// Gated tracing: `localStorage.ggs-ext-debug = 1` in the workbench before
+				// opening the file. The read itself needs the guard — a sandboxed frame's
+				// opaque origin throws SecurityError on the localStorage access, and an
+				// uncaught throw here used to kill the documentOpened fire (and with it
+				// every language client's didOpen) on exactly the frames that matter.
+				try {
+					if (localStorage.getItem('ggs-ext-debug')) {
+						console.info(`[ggs-ext-debug] onDidOpenTextDocument ${activeEditor.path} (${String(activeEditor.text).length} chars)`);
+					}
+				} catch {
+					// opaque-origin frame: no storage, no tracing
 				}
 				documentOpened.fire(makeTextDocument(activeEditor.path) as { fileName: string } & Record<string, unknown>);
 			}
