@@ -124,7 +124,7 @@ export class ExtensionsPanel {
 				ext.format === 'bundled'
 					? actionButton('package', t(ext.builtin ? 'extensions.installBundled' : 'extensions.installSample'), () => void this.installBundled(ext))
 					: ext.builtin ? null : actionButton('trash', tf('extensions.uninstall', ext.id), () => void this.uninstall(ext)),
-				isProcessPackage ? actionButton('refresh', t('extensions.restart'), () => void this.restart(ext)) : null
+				isProcessPackage ? actionButton('refresh', this.restartLabel(ext), () => void this.restart(ext)) : null
 			]);
 			row.title = ext.builtin
 				? tf('extensions.builtInTooltip', ext.id, ext.version)
@@ -281,12 +281,19 @@ export class ExtensionsPanel {
 			});
 	}
 
+	/** The restart affordance's label follows what the backend process is: a `node` kind
+	 *  restarts the extension's own host process (VS Code's "Restart Extension Host"), a
+	 *  `process` kind restarts the package's own binary. */
+	private restartLabel(ext: ExtInfo): string {
+		return ext.capabilities?.backend?.kind === 'node' ? t('extensions.restartHost') : t('extensions.restart');
+	}
+
 	/** The page's header: the icon, the identity lines, and the actions a row also carries. */
 	private detailHeader(ext: ExtInfo, processInfo: ExtProcessInfo | null): HTMLElement {
 		const backend = ext.capabilities?.backend ?? null;
 		const uninstall = el('button', 'button secondary', [t('extensions.uninstallAction')]);
 		uninstall.addEventListener('click', () => void this.uninstall(ext));
-		const restart = el('button', 'button secondary', [t('extensions.restart')]);
+		const restart = el('button', 'button secondary', [this.restartLabel(ext)]);
 		restart.addEventListener('click', () => void this.restart(ext));
 		const install = el('button', 'button', [t(ext.builtin ? 'extensions.installBundled' : 'extensions.installSample')]);
 		install.addEventListener('click', () => void this.installBundled(ext));
