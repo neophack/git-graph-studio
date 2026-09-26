@@ -23,7 +23,7 @@ describe('the Rust-backed completion paths', () => {
 		const source = new FilePickSource(() => Promise.resolve([]));
 		const items = await source.query('main', () => undefined, () => false);
 		expect(items).toHaveLength(1);
-		expect(items[0]).toMatchObject({ label: 'main.rs', description: 'src/main.rs', value: 'file:src/main.rs', highlights: [[0, 4]] });
+		expect(items[0]).toMatchObject({ label: 'main.rs', description: 'src', value: 'file:src/main.rs', highlights: [[0, 4]] });
 		// A cancelled query (a newer keystroke won) drops the rows that land late.
 		expect(await source.query('main', () => undefined, () => true)).toEqual([]);
 	});

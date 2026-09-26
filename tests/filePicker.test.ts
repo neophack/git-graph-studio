@@ -19,7 +19,12 @@ describe('FilePickSource', () => {
 
 		const hits = await picks.query('main', () => undefined, () => false);
 		expect(hits.map((item) => item.value)).toEqual(['file:src/main.ts']);
-		expect(hits[0]!.description).toBe('src/main.ts');
+		// The row's second line is the file's folder - a root-level file's folder is empty,
+		// and repeating the label there read as duplicated text ("notes.txt notes.txt").
+		expect(hits[0]!.description).toBe('src');
+
+		const rootHits = await picks.query('README', () => undefined, () => false);
+		expect(rootHits[0]!.description, 'a root file shows no folder description').toBeUndefined();
 	});
 
 	it('loads on first query and keeps the index across queries', async () => {

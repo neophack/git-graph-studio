@@ -22,10 +22,17 @@ function toEntry(path: string): FileEntry {
 	return { path, label, labelLower: label.toLowerCase(), pathLower: path.toLowerCase() };
 }
 
+/** The row's second line: the file's folder, VS Code-style — a root-level file's folder is
+ *  the empty string, and repeating the label there read as duplicated text. */
+function descriptionOf(path: string): string | undefined {
+	const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+	return cut === -1 ? undefined : path.slice(0, cut);
+}
+
 function toItem(match: FileMatch): QuickPickItem {
 	return {
 		label: match.entry.label,
-		description: match.entry.path,
+		description: descriptionOf(match.entry.path),
 		icon: 'file',
 		value: 'file:' + match.entry.path,
 		highlights: match.labelRanges
@@ -34,7 +41,7 @@ function toItem(match: FileMatch): QuickPickItem {
 
 /** The un-ranked empty-query rows: the first files as walked, nothing highlighted. */
 function entryToItem(entry: FileEntry): QuickPickItem {
-	return { label: entry.label, description: entry.path, icon: 'file', value: 'file:' + entry.path };
+	return { label: entry.label, description: descriptionOf(entry.path), icon: 'file', value: 'file:' + entry.path };
 }
 
 /** Keep `list` the best `limit` matches, sorted best-first, without re-sorting per chunk. */
@@ -105,7 +112,7 @@ export class FilePickSource implements QuickPickSource {
 				if (isCancelled()) return [];
 				return hits.map((hit) => ({
 					label: hit.label,
-					description: hit.path,
+					description: descriptionOf(hit.path),
 					icon: 'file',
 					value: 'file:' + hit.path,
 					highlights: hit.ranges
