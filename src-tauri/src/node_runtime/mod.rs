@@ -736,7 +736,15 @@ fn handle_request(context: &mut Context, method: &str, params: &Value) -> Result
             }
             Ok(Value::Null)
         }
-        other => Err(format!("unsupported method: {other}")),
+        // Any other method is host vocabulary the shim's dispatcher serves — a content
+        // provider's `docProvider.provide` above all: the host asks the registering
+        // extension for a provider-scheme document's text when a diff or a content tab
+        // renders it. The same dispatch a frame's mailbox runs, with the method as the
+        // command name and the params' `args` as the arguments.
+        other => {
+            let args = params.get("args").cloned().unwrap_or_else(|| json!([]));
+            run_command(context, other, &args)
+        }
     }
 }
 

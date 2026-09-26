@@ -514,14 +514,29 @@ if (view !== null) {
 	await sleep(3500);
 	const detailsOpen = await inView(`(function(){ return document.getElementById('cdv') !== null || document.querySelector('[class*="cdv"]') !== null ? 'yes' : 'no'; })()`);
 	log(`[stage5] commit clicked: ${commitClicked}, details pane: ${detailsOpen}`);
-	const fileClicked = await inView(`(function(){
-		const file = document.querySelector('.fileTreeFile');
-		if (!file) return 'no element';
-		let fired = false;
-		file.addEventListener('click', () => { fired = true; }, { once: true });
-		file.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-		return (fired ? 'listener-fired' : 'listener-missed') + ' classes=' + file.className.slice(0, 80);
-	})()`);
+	// The details' file list loads asynchronously after the pane opens — wait for the row
+	// instead of racing it.
+	let fileClicked = 'no element';
+	for (let attempt = 0; attempt < 15 && fileClicked === 'no element'; attempt++) {
+		fileClicked = await inView(`(function(){
+			const file = document.querySelector('.fileTreeFile');
+			if (!file) return 'no element';
+			let fired = false;
+			file.addEventListener('click', () => { fired = true; }, { once: true });
+			file.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+			return (fired ? 'listener-fired' : 'listener-missed') + ' classes=' + file.className.slice(0, 80);
+		})()`);
+		if (fileClicked === 'no element') {
+			if (attempt === 4) {
+				const paneText = await inView(`(function(){
+					const pane = document.getElementById('cdv') || document.querySelector('[class*="cdv"]');
+					return pane ? pane.innerText.replace(/\\s+/g, ' ').slice(0, 260) : '(no pane element)';
+				})()`);
+				log(`[stage5] details pane text: ${paneText}`);
+			}
+			await sleep(1000);
+		}
+	}
 	await sleep(4500);
 	// The diff's own tab (whatever opened it earlier in the session, a diff-shaped title is
 	// what the vscode.diff bridge produces): compare the label SETS, not the counts.

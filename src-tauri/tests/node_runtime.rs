@@ -165,6 +165,146 @@ fn run_command(command: &str, args: Value) -> Value {
 }
 
 #[test]
+fn a_frame_program_serves_its_content_provider_at_the_hosts_provide_call() {
+    // The shim file the bootstrap evaluates for a frame program (the dev layout prepare
+    // writes); a CI checkout without a built shim skips this suite.
+    let shim = std::env::var("GGS_VSCODE_SHIM")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("../target/studio/vscode-shim.cjs"));
+    if !shim.is_file() {
+        eprintln!("skipping: no vscode-shim.cjs built");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[
+            ("package.json", r#"{"name":"provider","publisher":"acme","version":"1.0.0","main":"main.js"}"#),
+            ("main.js", r#"
+const vscode = require('vscode');
+vscode.workspace.registerTextDocumentContentProvider('ggsfix', {
+    provideTextDocumentContent(uri) { return 'CONTENT:' + uri.path; }
+});
+"#),
+        ],
+    )
+    .join("main.js");
+
+    let (requests_tx, requests_rx) = std::sync::mpsc::channel::<String>();
+    let (output_tx, output_rx) = std::sync::mpsc::channel::<String>();
+    let serve = std::thread::spawn(move || {
+        git_graph_studio_lib::node_runtime::serve_on(
+            entry,
+            ChannelReader::from(requests_rx),
+            ChannelWriter(output_tx),
+        );
+    });
+
+    let mut next_id = 1u64;
+    requests_tx
+        .send(git_graph_studio_lib::ext_protocol::request(
+            next_id,
+            "initialize",
+            json!({
+                "protocolVersion": "ggs-ext/1",
+                "extensionId": "acme.provider",
+                "extensionPath": tmp.path().join("pkg").display().to_string(),
+                "workspaceFolders": [],
+            }),
+        ))
+        .unwrap();
+
+    let answer_host_request = |inner: &str| -> Value {
+        match inner {
+            "host.env" => json!({
+                "settings": {},
+                "language": "en",
+                "appVersion": "0.1.5-test",
+                "themeKind": 2,
+                "state": { "global": {}, "workspace": {} }
+            }),
+            _ => Value::Null,
+        }
+    };
+    let read_line = || -> String {
+        let raw = match output_rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(line) => line,
+            Err(_) => panic!("the backend fell silent (activation never finished)"),
+        };
+        eprintln!("[wire-in] {}", raw.trim());
+        raw
+    };
+
+    // 1. The handshake: the bootstrap installs the shim, the entry registers the provider,
+    //    and activation settles.
+    let handshake;
+    loop {
+        let line = read_line();
+        let Ok(wire) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
+            let id = wire["id"].as_u64().unwrap_or_default();
+            let inner = wire["params"]["method"].as_str().unwrap_or_default();
+            requests_tx
+                .send(git_graph_studio_lib::ext_protocol::response(
+                    id,
+                    Ok(answer_host_request(inner)),
+                ))
+                .unwrap();
+            continue;
+        }
+        if wire["id"].as_u64() == Some(next_id) {
+            handshake = wire;
+            break;
+        }
+    }
+    assert_eq!(
+        handshake["result"]["protocolVersion"], "ggs-ext/1",
+        "{handshake:?}"
+    );
+
+    // 2. The host's provide call: the registered provider's text crosses whole.
+    next_id += 1;
+    let requested = next_id;
+    requests_tx
+        .send(git_graph_studio_lib::ext_protocol::request(
+            requested,
+            "docProvider.provide",
+            json!({ "args": [{ "scheme": "ggsfix", "path": "x", "fsPath": "x" }] }),
+        ))
+        .unwrap();
+    let answered;
+    loop {
+        let line = read_line();
+        let Ok(wire) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
+            let id = wire["id"].as_u64().unwrap_or_default();
+            requests_tx
+                .send(git_graph_studio_lib::ext_protocol::response(
+                    id,
+                    Ok(Value::Null),
+                ))
+                .unwrap();
+            continue;
+        }
+        if wire["id"].as_u64() == Some(requested) {
+            answered = Some(wire);
+            break;
+        }
+    }
+    let answer = answered.unwrap();
+    assert_eq!(
+        answer["result"],
+        json!("CONTENT:x"),
+        "the provider's text crosses whole"
+    );
+    let _ = serve.join();
+}
+
+#[test]
 fn a_package_main_answers_commands_through_ggs_on_request() {
     let tmp = tempfile::tempdir().unwrap();
     let entry = make_package(
