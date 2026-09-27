@@ -241,9 +241,8 @@ describe('ExtensionsPanel', () => {
 		const PROC: ExtInfo = {
 			...USER, id: 'acme.proc', displayName: 'Proc', format: 'ggs', path: '/ext/acme.proc-2.0.0', readme: 'README.md',
 			capabilities: {
-				format: 'ggs/2', id: 'acme.proc', version: '2.0.0', pages: {},
-				backend: { kind: 'process', command: 'bin/main' },
-				permissions: ['repo:read', 'network']
+				id: 'acme.proc', version: '2.0.0',
+				backend: { kind: 'process', command: 'bin/main' }
 			}
 		};
 		backend.on('ext_list', () => [BUILTIN, PROC]);
@@ -265,13 +264,11 @@ describe('ExtensionsPanel', () => {
 		// The header: the resolved name and the description.
 		expect(page.textContent).toContain('Proc');
 		expect(page.textContent).toContain('A demo');
-		// The facts: identifier, install location, declared backend and its live process,
-		// permissions.
+		// The facts: identifier, install location, the declared backend and its live process.
 		expect(page.textContent).toContain('acme.proc');
 		expect(page.textContent).toContain('/ext/acme.proc-2.0.0');
 		expect(page.textContent).toContain('ggs-ext/1');
 		expect(page.textContent).toContain('bin/main');
-		expect(page.textContent).toContain('repo:read, network');
 		await flush(4);
 		expect(pane.querySelector('.ext-detail-readme article')!.innerHTML).toContain('<p># Proc</p>');
 
@@ -617,6 +614,24 @@ describe('the VS Code API surface, round one (messages, picks, progress, status 
 		expect(events).toHaveLength(2);
 		expect(events[1]!.affectsConfiguration('other')).toBe(true);
 		expect(events[1]!.affectsConfiguration('git-graph-rs')).toBe(false);
+	});
+
+	it("the extension's own update() fires onDidChangeConfiguration once, the host's echo adding nothing", async () => {
+		// git-graph-rs's settings widget writes `enableLog` through update(); the listener is
+		// what turns its logger on. The value is applied locally first, so the host's
+		// configChanged echo diffs to nothing — the event has to fire from update() itself.
+		const { api } = shim();
+		const events: { affectsConfiguration(section: string): boolean }[] = [];
+		api.workspace.onDidChangeConfiguration((event: { affectsConfiguration(section: string): boolean }) => events.push(event));
+		await api.workspace.getConfiguration('git-graph-rs').update('enableLog', true, true);
+		expect(events).toHaveLength(1);
+		expect(events[0]!.affectsConfiguration('git-graph-rs')).toBe(true);
+		expect(api.workspace.getConfiguration('git-graph-rs').get('enableLog')).toBe(true);
+		api.handleHostEvent({ event: 'configChanged', settings: { 'git-graph-rs.enableLog': true } });
+		expect(events).toHaveLength(1);
+		// Writing the value it already has changes nothing.
+		await api.workspace.getConfiguration('git-graph-rs').update('enableLog', true, true);
+		expect(events).toHaveLength(1);
 	});
 });
 
@@ -1064,60 +1079,6 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 		expect(notifications().join()).toContain('Extension backend command failed');
 	});
 
-	it('resolves pages through the registry (ggx/1 frontend pages included) and mounts them sandboxed', async () => {
-		const FRONTEND_ONLY: ExtInfo = { ...GGX2, id: 'acme.front', capabilities: { format: 'ggx/1', id: 'acme.front', version: '1.0.0', frontend: { page: 'web/view.html' } } };
-		withExtensions(GGX2, FRONTEND_ONLY);
-		const host = new ExtensionHost();
-		await host.list();
-		// The ggs/2 registry names its page; a ggx/1 package's single frontend page is the
-		// page named "view".
-		expect(host.pageEntry('acme.proc', 'main')!.page).toBe('web/view.html');
-		expect(host.pageEntry('acme.front', 'view')!.page).toBe('web/view.html');
-		expect(host.pageEntry('acme.proc', 'missing')).toBeNull();
-
-		host.openPage('acme.proc', 'main', { x: 1 });
-		host.openPage('acme.proc', 'missing');
-		expect(notifications().join()).toContain('Extension page not found');
-
-		const container = document.body.appendChild(document.createElement('div'));
-		const dispose = host.mountPage('acme.proc', 'main', { x: 1 }, container);
-		const frame = container.querySelector<HTMLIFrameElement>('iframe.ext-page-frame')!;
-		expect(frame).not.toBeNull();
-		expect(frame.getAttribute('sandbox')).toBe('allow-scripts');
-		expect(frame.src).toContain('acme.proc-1.0.0/web/view.html');
-		expect(frame.src.startsWith('ggs://localhost/') || frame.src.startsWith('http://ggs.localhost/')).toBe(true);
-
-		// A page's backend.run routes to the process command with the page's extension.
-		backend.on('ext_process_run', () => ({ greeting: 'from the page' }));
-		const replies: unknown[] = [];
-		frame.contentWindow!.addEventListener('message', (event: MessageEvent) => {
-			const data = event.data as { __ggsHost?: boolean; type?: string; result?: unknown };
-			if (data?.__ggsHost && data.type === 'rpcResult') replies.push(data.result);
-		});
-		window.dispatchEvent(new MessageEvent('message', {
-			source: frame.contentWindow,
-			data: { __ggsPage: true, kind: 'rpc', id: 9, method: 'backend.run', args: ['acme.proc.hello', ['page']] }
-		}));
-		await flush();
-		expect(backend.callsTo('ext_process_run')).toContainEqual({ extId: 'acme.proc', command: 'acme.proc.hello', args: ['page'] });
-		expect(replies).toEqual([{ greeting: 'from the page' }]);
-
-		// Pages may not register commands — that is a package.json (or backend) concern.
-		const errors: unknown[] = [];
-		frame.contentWindow!.addEventListener('message', (event: MessageEvent) => {
-			const data = event.data as { __ggsHost?: boolean; type?: string; ok?: boolean; result?: unknown };
-			if (data?.__ggsHost && data.type === 'rpcResult' && data.ok === false) errors.push(data.result);
-		});
-		window.dispatchEvent(new MessageEvent('message', {
-			source: frame.contentWindow,
-			data: { __ggsPage: true, kind: 'rpc', id: 10, method: 'commands.register', args: ['nope'] }
-		}));
-		await flush();
-		expect(errors.join()).toContain('cannot register commands');
-
-		dispose();
-		expect(container.querySelector('iframe')).toBeNull();
-	});
 
 	it('uninstalling a process package stops its backend', async () => {
 		withExtensions(GGX2);

@@ -17,7 +17,7 @@ pub(super) fn utf8_encode(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let text = string_arg(args, 0, context);
-    JsArrayBuffer::from_byte_block(text.into_bytes(), context).map(JsValue::from)
+    JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(text.into_bytes()), context).map(JsValue::from)
 }
 
 /// UTF-8 bytes → text with lossy replacement, the mirror of [`utf8_encode`].
@@ -45,7 +45,7 @@ pub(super) fn random_bytes(
     }
     let mut bytes = vec![0u8; count as usize];
     getrandom::getrandom(&mut bytes).map_err(|e| error(format!("random bytes: {e}")))?;
-    JsArrayBuffer::from_byte_block(bytes, context).map(JsValue::from)
+    JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(bytes), context).map(JsValue::from)
 }
 
 /// The `crypto` builtin's one native: `(algorithm, bytes) → hex digest`. The JS side's
@@ -166,7 +166,6 @@ pub(super) fn set_timeout(
     let function = args
         .get_or_undefined(0)
         .as_callable()
-        .cloned()
         .ok_or_else(|| error("setTimeout needs a function"))?;
     let millis = args.get_or_undefined(1).as_number().unwrap_or(0.0).max(0.0);
     let repeat = args.get_or_undefined(2).as_boolean().unwrap_or(false);
@@ -225,7 +224,6 @@ pub(super) fn on_request(
     let function = args
         .get_or_undefined(0)
         .as_callable()
-        .cloned()
         .ok_or_else(|| error("ggs.onRequest needs a function"))?;
     with_state(|state| state.on_request = Some(function.into()));
     Ok(JsValue::undefined())
@@ -239,7 +237,6 @@ pub(super) fn on_workspace_changed(
     let function = args
         .get_or_undefined(0)
         .as_callable()
-        .cloned()
         .ok_or_else(|| error("ggs.onWorkspaceChanged needs a function"))?;
     with_state(|state| state.on_workspace = Some(function.into()));
     Ok(JsValue::undefined())

@@ -434,8 +434,8 @@ fn a_manifest_launcher_answers_open_page_through_the_runtime() {
     );
 }
 
-/// The whole chain as the app drives it: install a VSIX declaring the ggs-node backend,
-/// let the process host spawn the bundled sidecar, shake hands, run a command, stop.
+/// The whole chain as the app drives it: install a VSIX whose JS entry and native binary
+/// derive a backend, let the process host spawn the bundled sidecar, shake hands, run a command, stop.
 #[test]
 fn the_process_host_runs_a_ggs_node_backend_end_to_end() {
     // The host the `node` backend resolves beside the app's binary: cargo built this test
@@ -451,13 +451,9 @@ fn the_process_host_runs_a_ggs_node_backend_end_to_end() {
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default();
     zip.start_file("extension/package.json", options).unwrap();
-    zip.write_all(
-        format!(
-            r#"{{"name":"js-demo","publisher":"acme","version":"1.0.0","main":"out/main.js","ggs":{{"format":"ggs/2","id":"{ID}","version":"1.0.0","pages":{{"view":{{"page":"web/view.html"}}}},"activitybar":{{"command":"acme.js-demo.view","page":"view"}},"backend":{{"kind":"node","command":"out/main.js"}}}}}}"#
-        )
-        .as_bytes(),
-    )
-    .unwrap();
+    zip.write_all(br#"{"name":"js-demo","publisher":"acme","version":"1.0.0","main":"out/main.js","native":{"win32-x64-msvc":"engine.node"},"contributes":{"commands":[{"command":"acme.js-demo.view","title":"View"}]}}"#).unwrap();
+    zip.start_file("extension/engine.node", options).unwrap();
+    zip.write_all(b"engine-node-fixture").unwrap();
     zip.start_file("extension/out/main.js", options).unwrap();
     zip.write_all(
         br#"
@@ -483,7 +479,8 @@ ggs.onRequest((command, args) => {
     let state = ProcessHostState::default();
     let started = state.start(&exts, ID).unwrap();
     assert_eq!(started.protocol_version, "ggs-ext/1");
-    // The host declared the backend; the launcher convention survives it untouched.
+    // No special manifest fields any more: the backend's command list comes from the
+    // package's standard `contributes.commands`.
     assert_eq!(
         started.commands,
         vec!["acme.js-demo.view".to_owned()],
@@ -491,17 +488,7 @@ ggs.onRequest((command, args) => {
     );
     let _ = info;
 
-    // The manifest's launcher outranks every handler — the one command convention every
-    // host speaks, runtime parity included.
-    let opened = state
-        .run(&exts, ID, "acme.js-demo.view", json!([{ "repo": "/r" }]))
-        .unwrap();
-    assert_eq!(
-        opened,
-        json!({ "openPage": "view", "params": { "repo": "/r" } })
-    );
-
-    // The package's own handler answers what the launcher does not declare.
+    // The package's own handler answers its declared commands.
     let read = state.run(&exts, ID, "readSelf", json!([])).unwrap();
     assert_eq!(read["text"], json!("served by the pretend runtime"));
 
@@ -965,4 +952,473 @@ ggs.onRequest(async (command) => {
         .as_ref()
         .expect("a result with undefined members answers");
     assert_eq!(undefined, &json!({ "kept": 1, "list": [null, 2] }));
+}
+
+/// ES modules load the way node.exe loads them: a `"type": "module"` entry with named and
+/// default builtin imports (`node:` prefixed and bare), a CommonJS dependency imported
+/// with its named exports, a package `exports` map answering `import` and `require` from
+/// their own conditions, a `#` subpath import, a dynamic `import()` of a relative `.mjs`,
+/// `import.meta.url`, top-level `await`, `createRequire`, and `require` of an ES module
+/// answering its namespace.
+#[test]
+fn es_modules_load_the_way_node_loads_them() {
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[
+            (
+                "package.json",
+                r##"{ "type": "module", "imports": { "#util": "./lib/util.mjs" } }"##,
+            ),
+            (
+                "main.js",
+                r#"
+import path, { join } from 'node:path';
+import { EventEmitter } from 'events';
+import assert from 'assert';
+import { createRequire } from 'module';
+import { fileURLToPath } from 'url';
+import cjs, { answer } from './lib/cjs.cjs';
+import dual from 'dual';
+import { twice } from '#util';
+import data from './data.json';
+const waited = await new Promise((resolve) => setTimeout(() => resolve('tla'), 5));
+const require = createRequire(import.meta.url);
+const viaRequire = require('dual');
+const esmViaRequire = require('./lib/util.mjs');
+assert.ok(new EventEmitter());
+ggs.onRequest(async (command) => {
+    if (command !== 'esm') return null;
+    const lazy = await import('./lib/lazy.mjs');
+    return {
+        joined: join('a', 'b') === path.join('a', 'b'),
+        cjs: cjs.answer === answer && answer === 42,
+        importCondition: dual,
+        requireCondition: viaRequire.which,
+        subpathImport: twice(4),
+        json: data.name,
+        tla: waited,
+        lazy: lazy.default,
+        metaUrl: import.meta.url.startsWith('file://') && fileURLToPath(import.meta.url).endsWith('main.js'),
+        metaDirname: typeof import.meta.dirname === 'string',
+        requireEsm: esmViaRequire.twice(5),
+    };
+});
+"#,
+            ),
+            ("lib/cjs.cjs", "exports.answer = 42;"),
+            ("lib/util.mjs", "export const twice = (n) => n * 2;"),
+            ("lib/lazy.mjs", "export default 'lazy-loaded';"),
+            ("data.json", r#"{ "name": "json-module" }"#),
+            (
+                "node_modules/dual/package.json",
+                r#"{ "name": "dual", "exports": { ".": { "import": "./esm.mjs", "require": "./cjs.js" } } }"#,
+            ),
+            ("node_modules/dual/esm.mjs", "export default 'import';"),
+            ("node_modules/dual/cjs.js", "exports.which = 'require';"),
+        ],
+    )
+    .join("main.js");
+    let answers = serve(entry, &[initialize(), run_command("esm", json!([]))]);
+    let esm = answers[1].as_ref().expect("the ES-module entry answered");
+    assert_eq!(
+        esm,
+        &json!({
+            "joined": true,
+            "cjs": true,
+            "importCondition": "import",
+            "requireCondition": "require",
+            "subpathImport": 8,
+            "json": "json-module",
+            "tla": "tla",
+            "lazy": "lazy-loaded",
+            "metaUrl": true,
+            "metaDirname": true,
+            "requireEsm": 10,
+        })
+    );
+}
+
+/// The two compile semantics the claude-code bundle leans on, driven through the real
+/// runtime (the prelude's compiler, the natives, the protocol loop): a class
+/// constructor with default parameters instantiating cleanly, and a short-circuit
+/// logical assignment on a non-lexical binding keeping its value across calls (the
+/// esbuild helper shape — the vendored Boa fixes both).
+#[test]
+fn the_claude_code_bundle_semantics_run_under_the_runtime() {
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[(
+            "main.js",
+            r#"
+var cache;
+function remember($, value) {
+    var holder = cache ??= new WeakMap;
+    holder.set($);
+    holder.set($, value);
+    return holder.get($);
+}
+class Workspace { constructor(a = 1, b = 2) { this.a = a; this.b = b; } }
+ggs.onRequest((command) => {
+    if (command === 'logical') {
+        remember({}, 'first');
+        // The second call takes the ??= short circuit: the map already exists, and the
+        // assignment must still yield it (the stale-locator bug made this undefined).
+        return { second: remember({}, 'second') };
+    }
+    if (command === 'ctor') {
+        const built = new Workspace(7, 8);
+        return { a: built.a, b: built.b };
+    }
+    return null;
+});
+"#,
+        )],
+    )
+    .join("main.js");
+    let answers = serve(
+        entry,
+        &[
+            initialize(),
+            run_command("logical", json!([])),
+            run_command("ctor", json!([])),
+        ],
+    );
+    let logical = answers[1].as_ref().expect("the logical assignment answered");
+    assert_eq!(logical, &json!({ "second": "second" }), "{logical}");
+    let ctor = answers[2].as_ref().expect("the constructor answered");
+    assert_eq!(ctor, &json!({ "a": 7, "b": 8 }), "{ctor}");
+}
+
+/// The core-library surfaces common npm packages lean on, beyond the ones the git-graph-rs
+/// extension already pinned: the pre-class `EventEmitter.call(this)` + `util.inherits`
+/// subclassing, `stream` piping through a Transform, `string_decoder` holding back a split
+/// multi-byte character, the web globals (TextEncoder/TextDecoder, AbortController,
+/// structuredClone, URL), `assert`, `path.posix`, a `url` path round trip and `readline`
+/// over a stream.
+#[test]
+fn the_core_library_surfaces_common_packages_use_behave_like_node() {
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[(
+            "main.js",
+            r#"
+const EventEmitter = require('events');
+const util = require('util');
+const { Readable, Transform, PassThrough, pipeline } = require('stream');
+const { StringDecoder } = require('string_decoder');
+const assert = require('assert');
+const path = require('path');
+const url = require('url');
+const readline = require('readline');
+function Legacy() { EventEmitter.call(this); }
+util.inherits(Legacy, EventEmitter);
+ggs.onRequest(async (command) => {
+    if (command !== 'core') return null;
+    const legacy = new Legacy();
+    let heard = null;
+    legacy.on('ping', (value) => { heard = value; });
+    legacy.emit('ping', 'pong');
+    const upper = new Transform({ transform(chunk, _enc, cb) { cb(null, String(chunk).toUpperCase()); } });
+    const sink = new PassThrough();
+    const collected = [];
+    sink.on('data', (chunk) => collected.push(String(chunk)));
+    await new Promise((resolve, reject) => pipeline(Readable.from(['ab', 'cd']), upper, sink, (error) => (error ? reject(error) : resolve())));
+    const euro = Buffer.from('€');
+    const decoder = new StringDecoder('utf8');
+    const decoded = decoder.write(euro.subarray(0, 1)) + '|' + decoder.write(euro.subarray(1)) + decoder.end();
+    const controller = new AbortController();
+    let aborted = false;
+    controller.signal.addEventListener('abort', () => { aborted = true; });
+    controller.abort();
+    const cloned = structuredClone({ at: new Map([['k', 1]]) });
+    let assertion = null;
+    try { assert.strictEqual(1, 2); } catch (error) { assertion = error.code; }
+    const lines = [];
+    const input = new PassThrough();
+    const rl = readline.createInterface({ input });
+    rl.on('line', (line) => lines.push(line));
+    input.write('one\ntw');
+    input.end('o\n');
+    await new Promise((resolve) => rl.once('close', resolve));
+    const file = path.join(__dirname, 'a b', 'c#d.txt');
+    return {
+        legacy: heard,
+        superCtor: Legacy.super_ === EventEmitter,
+        piped: collected.join(''),
+        decoded,
+        textCodec: new TextDecoder().decode(new TextEncoder().encode('héllo')),
+        aborted: aborted && controller.signal.aborted,
+        cloned: cloned.at instanceof Map && cloned.at.get('k') === 1,
+        assertion,
+        posixJoin: path.posix.join('a', 'b', '../c'),
+        roundTrip: url.fileURLToPath(url.pathToFileURL(file)) === file,
+        encoded: url.pathToFileURL(file).href.includes('a%20b/c%23d.txt'),
+        globalUrl: new URL('../x/./y.mjs', 'file:///root/a/b.mjs').href,
+        lines,
+    };
+});
+"#,
+        )],
+    )
+    .join("main.js");
+    let answers = serve(entry, &[initialize(), run_command("core", json!([]))]);
+    let core = answers[1].as_ref().expect("the core surfaces answered");
+    assert_eq!(
+        core,
+        &json!({
+            "legacy": "pong",
+            "superCtor": true,
+            "piped": "ABCD",
+            "decoded": "|€",
+            "textCodec": "héllo",
+            "aborted": true,
+            "cloned": true,
+            "assertion": "ERR_ASSERTION",
+            "posixJoin": "a/c",
+            "roundTrip": true,
+            "encoded": true,
+            "globalUrl": "file:///root/x/y.mjs",
+            "lines": ["one", "two"],
+        })
+    );
+}
+
+/// One hosted extension over the wire, the process host's side of it: requests go in,
+/// every `ggs.hostRequest` the extension makes is recorded and answered by `answer`, and a
+/// request's own response is waited for.
+/// The canned host answer one test drives its runtime with.
+type HostAnswer = Box<dyn Fn(&str, &Value) -> Value>;
+
+struct HostedExtension {
+    requests: std::sync::mpsc::Sender<String>,
+    output: std::sync::mpsc::Receiver<String>,
+    next_id: u64,
+    host_requests: Vec<Value>,
+    answer: HostAnswer,
+    serve: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HostedExtension {
+    fn start(entry: PathBuf, answer: HostAnswer) -> Self {
+        let (requests, requests_rx) = std::sync::mpsc::channel::<String>();
+        let (output_tx, output) = std::sync::mpsc::channel::<String>();
+        let serve = std::thread::spawn(move || {
+            git_graph_studio_lib::node_runtime::serve_on(
+                entry,
+                ChannelReader::from(requests_rx),
+                ChannelWriter(output_tx),
+            );
+        });
+        HostedExtension {
+            requests,
+            output,
+            next_id: 0,
+            host_requests: Vec::new(),
+            answer,
+            serve: Some(serve),
+        }
+    }
+
+    /// Send one request and serve host requests until its response crosses.
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.requests
+            .send(git_graph_studio_lib::ext_protocol::request(id, method, params))
+            .unwrap();
+        loop {
+            let line = self
+                .output
+                .recv_timeout(std::time::Duration::from_secs(120))
+                .unwrap_or_else(|_| panic!("the backend fell silent answering {method}"));
+            if std::env::var("GGS_TRACE_WIRE").is_ok() {
+                eprintln!("[wire] {}", line.chars().take(400).collect::<String>());
+            }
+            let Ok(wire) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
+                let host_id = wire["id"].as_u64().unwrap_or_default();
+                let inner = wire["params"]["method"].as_str().unwrap_or_default();
+                let reply = (self.answer)(inner, &wire["params"]["args"]);
+                self.host_requests.push(wire["params"].clone());
+                self.requests
+                    .send(git_graph_studio_lib::ext_protocol::response(host_id, Ok(reply)))
+                    .unwrap();
+                continue;
+            }
+            if wire["id"].as_u64() == Some(id) {
+                return wire;
+            }
+        }
+    }
+}
+
+impl Drop for HostedExtension {
+    fn drop(&mut self) {
+        let (closed, _) = std::sync::mpsc::channel();
+        drop(std::mem::replace(&mut self.requests, closed));
+        // A failed assertion must not wait on a runtime that may still be mid-request.
+        if std::thread::panicking() {
+            return;
+        }
+        if let Some(serve) = self.serve.take() {
+            let _ = serve.join();
+        }
+    }
+}
+
+/// The installed extension directory whose name starts with `prefix`, when there is one.
+fn installed_extension(prefix: &str) -> Option<PathBuf> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()?;
+    std::fs::read_dir(PathBuf::from(home).join(".ggs/extensions"))
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(prefix))
+        })
+}
+
+/// Prettier - Code formatter, its own Node `main` hosted by ggs-node: an ES-module entry
+/// (`"type": "module"`) that imports its bundled `prettier` package dynamically — the
+/// `exports` map's `import` condition, `index.mjs`, `createRequire(import.meta.url)`,
+/// the language plugins as further dynamic `import()`s — registers its formatter during
+/// activation, and formats a document through the host's `formatDocument.run` call.
+#[test]
+fn the_installed_prettier_extension_formats_under_ggs_node() {
+    let Some(package) = installed_extension("esbenp.prettier-vscode") else {
+        eprintln!("skipping: no installed prettier-vscode package");
+        return;
+    };
+    let shim = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/studio/vscode-shim.cjs");
+    if !shim.is_file() {
+        eprintln!("skipping: no compiled vscode shim at {}", shim.display());
+        return;
+    }
+    std::env::set_var("GGS_VSCODE_SHIM", &shim);
+    let workspace = tempfile::tempdir().unwrap();
+    let file = workspace.path().join("ugly.js");
+    std::fs::write(&file, "const   a = {b:1,\n  c : [1,2 ,3]}\n").unwrap();
+
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(package.join("package.json")).unwrap())
+            .unwrap();
+    // The configuration defaults the workbench hands every host (`prettier.enable` above
+    // all - without it the activation declines to register anything).
+    let mut defaults = serde_json::Map::new();
+    let configuration = &manifest["contributes"]["configuration"];
+    let sections = match configuration {
+        Value::Array(list) => list.clone(),
+        other => vec![other.clone()],
+    };
+    for section in sections {
+        if let Some(properties) = section["properties"].as_object() {
+            for (name, schema) in properties {
+                if let Some(default) = schema.get("default") {
+                    defaults.insert(name.clone(), default.clone());
+                }
+            }
+        }
+    }
+    let env = json!({
+        "settings": {},
+        "defaults": defaults,
+        "language": "en",
+        "appVersion": "0.1.5-test",
+        "themeKind": 2,
+        "state": { "global": {}, "workspace": {} }
+    });
+    let answer = move |method: &str, _args: &Value| -> Value {
+        match method {
+            "host.env" => env.clone(),
+            _ => Value::Null,
+        }
+    };
+    let entry = package.join(manifest["main"].as_str().unwrap().trim_start_matches("./"));
+    let mut host = HostedExtension::start(entry, Box::new(answer));
+    let handshake = host.request(
+        "initialize",
+        json!({
+            "protocolVersion": "ggs-ext/1",
+            "extensionId": "esbenp.prettier-vscode",
+            "extensionPath": package.display().to_string(),
+            "workspaceFolders": [workspace.path().display().to_string()],
+        }),
+    );
+    assert_eq!(
+        handshake["result"]["protocolVersion"], "ggs-ext/1",
+        "{handshake:?}"
+    );
+
+    // The activation registered its whole-document formatter for JavaScript.
+    let formatter = host
+        .host_requests
+        .iter()
+        .filter(|request| request["method"] == "languages.registerFormatting")
+        .map(|request| &request["args"][0])
+        .find(|registration| {
+            registration["selectors"]
+                .as_array()
+                .is_some_and(|selectors| selectors.iter().any(|s| s["language"] == "javascript"))
+        })
+        .map(|registration| registration["id"].as_str().unwrap().to_owned())
+        .unwrap_or_else(|| {
+            let methods: Vec<&Value> = host.host_requests.iter().map(|r| &r["method"]).collect();
+            panic!("no JavaScript formatter was registered; the host saw {methods:?}")
+        });
+
+    let formatted = host.request(
+        "formatDocument.run",
+        json!({ "args": [
+            formatter,
+            {
+                "path": file.display().to_string(),
+                "languageId": "javascript",
+                "text": std::fs::read_to_string(&file).unwrap(),
+            },
+            { "tabSize": 2, "insertSpaces": true },
+        ]}),
+    );
+    let edits = formatted["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the formatter answered edits: {formatted:?}"));
+    let new_text = edits
+        .iter()
+        .map(|edit| edit["newText"].as_str().unwrap_or_default())
+        .collect::<String>();
+    assert_eq!(new_text, "const a = { b: 1, c: [1, 2, 3] };\n", "{formatted:?}");
+}
+
+#[test]
+#[ignore]
+fn debug_prettier_steps() {
+    let Some(package) = installed_extension("esbenp.prettier-vscode") else { return; };
+    let prettier = package.join("node_modules/prettier/index.mjs").display().to_string().replace('\\', "/");
+    let tmp = tempfile::tempdir().unwrap();
+    let main = format!(r#"
+import {{ pathToFileURL }} from 'url';
+const steps = [];
+ggs.onRequest(async () => {{
+    let p;
+    try {{ p = await import(pathToFileURL('{prettier}').href); steps.push('import ok ' + Object.keys(p).join(',')); }} catch (e) {{ steps.push('import: ' + e + ' ' + (e && e.stack)); return steps; }}
+    const api = p.default?.version ? p.default : p;
+    try {{ steps.push('version ' + api.version); }} catch (e) {{ steps.push('version: ' + e); }}
+    try {{ const info = await api.getSupportInfo(); steps.push('support ' + info.languages.length); }} catch (e) {{ steps.push('support: ' + e + ' ' + (e && e.stack)); }}
+    try {{ const out = await api.format('const   a = {{b:1}}', {{ parser: 'babel' }}); steps.push('format ' + JSON.stringify(out)); }} catch (e) {{ steps.push('format: ' + e + ' ' + (e && e.stack)); }}
+    return steps;
+}});
+"#);
+    let entry = make_package(tmp.path(), &[("package.json", r#"{"type":"module"}"#), ("main.js", &main)]).join("main.js");
+    let answers = serve(entry, &[initialize(), run_command("x", json!([]))]);
+    eprintln!("{:#?}", answers[1]);
 }

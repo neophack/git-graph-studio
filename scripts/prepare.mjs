@@ -85,15 +85,18 @@ if (!existsSync(join(appIcons, 'icon.ico')) || !existsSync(join(appIcons, '32x32
 const srcTauri = join(appDir, 'src-tauri');
 function buildBackend(bin, features) {
 	const exe = process.platform === 'win32' ? `${bin}.exe` : bin;
+	// The sidecar's own profile: the release size diet with unwinding panics, because it
+	// runs third-party JS whose poisoned closures must degrade, not abort the backend.
+	const profile = 'ggs-node';
 	const built = spawnSync(
 		'cargo',
-		['build', '--release', '--bin', bin, ...(features ? ['--no-default-features', '--features', features] : ['--no-default-features'])],
+		['build', '--profile', profile, '--bin', bin, ...(features ? ['--no-default-features', '--features', features] : ['--no-default-features'])],
 		{ cwd: srcTauri, stdio: 'inherit', shell: process.platform === 'win32' }
 	);
 	// The sidecars an installer serves are part of the product, not optional extras: a
 	// build without them is broken, so it fails with the reason instead of shipping an
 	// app whose extension packages cannot start.
-	const path = join(out, 'cargo', 'release', exe);
+	const path = join(out, 'cargo', profile, exe);
 	if (built.status === 0 && existsSync(path)) return path;
 	console.error(`Building ${bin} failed (${built.status ?? 'spawn failed'}; looked at ${path}) — refusing to pack without it`);
 	process.exit(1);

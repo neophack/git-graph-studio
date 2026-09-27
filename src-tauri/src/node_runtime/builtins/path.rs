@@ -128,11 +128,18 @@ fn path_join(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
 }
 
 fn path_resolve(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let mut parts = path_parts(args, context);
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    parts.push(cwd);
+    // Node's order: the rightmost absolute argument is the start, everything before it is
+    // discarded, and with none absolute the working directory leads.
+    let parts = path_parts(args, context);
+    let parts = match parts.iter().rposition(|part| is_absolute_path(part.trim())) {
+        Some(at) => parts[at..].to_vec(),
+        None => {
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            std::iter::once(cwd).chain(parts).collect()
+        }
+    };
     Ok(text(normalize_lexical(&join_parts(&parts))))
 }
 

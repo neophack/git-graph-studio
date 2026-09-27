@@ -1313,7 +1313,10 @@ export class ExtensionHost {
 		const frame = document.createElement('iframe');
 		frame.className = 'ext-page-frame';
 		frame.title = view?.title ?? 'webview';
-		frame.setAttribute('sandbox', 'allow-scripts');
+		// allow-same-origin: the webview keeps its own storage — a sandbox without it
+		// throws SecurityError on the localStorage access every real webview app makes
+		// (claude-code's React shell died on exactly that).
+		frame.setAttribute('sandbox', 'allow-scripts allow-same-origin');
 		// Insert first, load through loadFrameDoc: a detached frame (or one inside a pane
 		// still being assembled offscreen) drops a srcdoc navigation silently.
 		container.appendChild(frame);
@@ -1346,7 +1349,8 @@ export class ExtensionHost {
 		const frame = document.createElement('iframe');
 		frame.className = 'ext-page-frame';
 		frame.title = `${extId}: ${viewId}`;
-		frame.setAttribute('sandbox', 'allow-scripts');
+		// allow-same-origin: same storage posture as the webview panels.
+		frame.setAttribute('sandbox', 'allow-scripts allow-same-origin');
 		// Insert first, load through loadFrameDoc — the same detached-subtree drop.
 		container.appendChild(frame);
 		record.frame = frame;

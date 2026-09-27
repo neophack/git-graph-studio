@@ -222,7 +222,6 @@ pub(crate) fn load_and_register(
         match unsafe { value_of(returned) } {
             Some(value) => value
                 .as_object()
-                .cloned()
                 .ok_or("the addon's registration did not answer an object")?,
             None => exports,
         }
@@ -783,7 +782,7 @@ napi_fn!(napi_get_value_string_utf16(env: *mut c_void, value: *mut c_void, buffe
 /* ----- properties ----- */
 
 unsafe fn object_of(handle: *mut c_void) -> Option<JsObject> {
-    value_of(handle)?.as_object().cloned()
+    value_of(handle)?.as_object()
 }
 
 napi_fn!(napi_set_named_property(env: *mut c_void, object: *mut c_void, name: *const c_char, value: *mut c_void) -> u32 {
@@ -1225,7 +1224,6 @@ napi_fn!(napi_is_error(_env: *mut c_void, value: *mut c_void, result: *mut bool)
     let Some(value) = value_of(value) else { return NAPI_INVALID_ARG };
     let truthy = value
         .as_object()
-        .cloned()
         .and_then(|object| {
             let name = object.get(crate::node_runtime::key("name"), context()).ok()?;
             name.as_string().map(|text| text.to_std_string_escaped())
@@ -1306,7 +1304,6 @@ napi_fn!(napi_is_promise(env: *mut c_void, value: *mut c_void, result: *mut bool
     // An object whose constructor name says Promise — what a registration-time probe asks.
     let truthy = value
         .as_object()
-        .cloned()
         .and_then(|object| {
             let constructor = object.get(crate::node_runtime::key("constructor"), context()).ok()?;
             constructor

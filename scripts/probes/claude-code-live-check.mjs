@@ -140,6 +140,7 @@ for (let attempt = 0; attempt < 3; attempt++) {
 		await mod.listen('ext-host-request', (event) => {
 			if (event.payload.extId === 'Anthropic.claude-code') {
 				window.__probeRequests.push(event.payload.method + ' ' + JSON.stringify(event.payload.args ?? []).slice(0, 100));
+		if (event.payload.method === 'webview.setHtml') { window.__setHtmlPayload = String(event.payload.args[1] ?? ''); }
 			}
 		});
 		return true;
@@ -209,11 +210,31 @@ try {
 	 * below through the DOM-visible tab). The iframe itself is sandboxed cross-origin:
 	 * CDP content probing of it is unreliable, so the tab + assets + extension logs are
 	 * the evidence. */
+	const setHtmlPayload = await workbench.evaluate('window.__setHtmlPayload ?? ""');
+	if (setHtmlPayload) { writeFileSync('target/studio/claude-sethtml.html', setHtmlPayload); log('[setHtml] saved ' + setHtmlPayload.length + ' chars'); }
 	const tabState = await workbench.evaluate(`(() => ({
 		tabs: [...document.querySelectorAll('.tab')].map((t) => t.textContent.trim()),
 		iframes: document.querySelectorAll('iframe').length
 	}))()`);
 	check('the chat webview tab exists ("Claude Code")', tabState.tabs.some((t) => /Claude Code/i.test(t)), JSON.stringify(tabState));
+
+	/* 4½. Probe inside the webview frame: the sandboxed srcdoc iframe's own execution
+	 * context (flat-attached sessions or same-process contexts) — root mounted + content
+	 * means the chat UI actually booted; a blank frame means it crashed on load. */
+	let webviewOk = false;
+	let webviewDetail = String.fromCharCode(45,45);
+	const frameProbeExpression = `(() => ({ root: Boolean(document.querySelector('#root, #app')), children: document.body ? document.body.childElementCount : 0, text: document.body ? document.body.innerText.replace(/\\s+/g, ' ').slice(0, 60) : '' }))()`;
+	let frameReport = [];
+	for (const frame of workbench.frames) {
+		try {
+			const probe = frame.sessionId !== null
+				? await workbench.send('Runtime.evaluate', { expression: frameProbeExpression, returnByValue: true }, frame.sessionId).then((r) => r?.result?.value ?? { root: false, children: 0 })
+				: await workbench.evaluate(frameProbeExpression, frame.contextId);
+			frameReport.push(probe);
+			if (probe.root && probe.children > 0) { webviewOk = true; }
+			log(String.fromCharCode(91,102,114,97,109,101,93) + " " + JSON.stringify(probe));
+		} catch { /* a frame whose context is gone skips */ }
+	}
 
 	/* 5. The extension's host requests prove the webview lifecycle (create + setHtml +
 	 * postMessage flowing), and its Output channel + the served assets show the machinery

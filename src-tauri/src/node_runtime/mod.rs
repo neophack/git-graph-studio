@@ -20,6 +20,7 @@
 //! 3. `module.exports.dispatch` / `.request` of the entry module.
 
 mod builtins;
+mod esm;
 mod napi_host;
 
 /// Pull the N-API host's exported surface into a binary that would otherwise link none
@@ -182,6 +183,9 @@ pub(crate) struct State {
     package_root: PathBuf,
     launcher: Option<(String, String)>,
     module_cache: HashMap<PathBuf, JsValue>,
+    /// The parsed ES-module records by path (builtins under their `ggs-builtin:` key) —
+    /// `esm.rs`'s cache; Boa heap values, dropped with the rest of this state.
+    esm_cache: HashMap<PathBuf, boa_engine::Module>,
     procs: HashMap<u64, ProcEntry>,
     next_proc: u64,
     main_exports: Option<JsValue>,
@@ -230,6 +234,7 @@ impl State {
             package_root,
             launcher: None,
             module_cache: HashMap::new(),
+            esm_cache: HashMap::new(),
             procs: HashMap::new(),
             next_proc: 0,
             main_exports: None,
@@ -336,6 +341,11 @@ impl State {
 use std::io::Write as _;
 
 /* ---------- the Boa shorthands every file in this module shares ---------- */
+
+/// Bytes as the 64-byte-aligned block an `ArrayBuffer` owns (Boa 0.21's backing store).
+pub(crate) fn byte_block(bytes: Vec<u8>) -> boa_engine::builtins::array_buffer::AlignedVec<u8> {
+    boa_engine::builtins::array_buffer::AlignedVec::from_slice(64, &bytes)
+}
 
 /// A property key from a plain string — Boa's keys are interned `JsString`s.
 pub(crate) fn key(name: &str) -> boa_engine::property::PropertyKey {
@@ -448,7 +458,14 @@ fn js_main(rx: mpsc::Receiver<Job>, wake: Arc<(Mutex<bool>, Condvar)>, entry: Pa
     napi_host::set_wake(Arc::clone(&wake));
     let jobs = Arc::new(Mutex::new(rx));
     with_state(|state| state.job_source = Some(Arc::clone(&jobs)));
-    let mut context = Context::default();
+    // The module loader is Node's resolution over Boa's module machinery (`esm.rs`).
+    let mut context = Context::builder()
+        .module_loader(std::rc::Rc::new(esm::NodeModuleLoader))
+        .build()
+        .expect("a Boa context builds");
+    if std::env::var("GGS_VM_TRACE").is_ok() {
+        context.set_trace(true);
+    }
     if let Err(error) = bootstrap(&mut context, &entry) {
         with_state(|state| state.log("error", &format!("bootstrap failed: {error}")));
         // The backend must still answer its handshake (a failed preload is not a dead
@@ -478,7 +495,7 @@ fn js_main(rx: mpsc::Receiver<Job>, wake: Arc<(Mutex<bool>, Condvar)>, entry: Pa
         //    worker threads and woken here): delivered before the microtasks they settle.
         napi_host::drain_threadsafe_calls(&mut context);
         // 4. Settled promise jobs (microtasks).
-        context.run_jobs();
+        let _ = context.run_jobs();
         // 4. Sleep until a job, a timer deadline, or the idle tick.
         let deadline = with_state(|state| state.next_deadline());
         let (flag, condvar) = &*wake;
@@ -576,9 +593,14 @@ fn bootstrap(context: &mut Context, entry: &Path) -> Result<(), String> {
     // now, and `initialize` — which carries the extension id and the open folders —
     // installs it, requires the entry and runs its activation. Without the shim bundle on
     // disk the old honest skip stands.
+    // Both module systems count: `require('vscode')` and an ES module's
+    // `import … from "vscode"` (prettier-vscode's `main` is ESM).
     let frame_program = std::fs::read_to_string(entry)
         .map(|source| {
-            source.contains("require(\"vscode\")") || source.contains("require('vscode')")
+            source.contains("require(\"vscode\")")
+                || source.contains("require('vscode')")
+                || source.contains("from \"vscode\"")
+                || source.contains("from 'vscode'")
         })
         .unwrap_or(false);
     if frame_program {
@@ -703,7 +725,7 @@ fn handle_request(context: &mut Context, method: &str, params: &Value) -> Result
                 &json!({ "workspaceFolders": params.get("folders").cloned().unwrap_or(Value::Null) }),
             );
             let handler = with_state(|state| state.on_workspace.clone());
-            if let Some(handler) = handler.and_then(|value| value.as_object().cloned()) {
+            if let Some(handler) = handler.and_then(|value| value.as_object()) {
                 let folders =
                     JsValue::from_json(params.get("folders").unwrap_or(&Value::Null), context)
                         .map_err(|e| e.to_string())?;
@@ -725,7 +747,7 @@ fn handle_request(context: &mut Context, method: &str, params: &Value) -> Result
         // event objects a frame's `__studioExtEvent` carries, into the shim's emitters.
         "ggs.hostEvent" => {
             let api = with_state(|state| state.vscode_api.clone());
-            if let Some(api) = api.and_then(|value| value.as_object().cloned()) {
+            if let Some(api) = api.and_then(|value| value.as_object()) {
                 if let Ok(handler) = api.get(key("handleHostEvent"), context) {
                     if let Some(handler) = handler.as_object() {
                         let event =
@@ -908,7 +930,7 @@ fn run_command(context: &mut Context, command: &str, args: &Value) -> Result<Val
 
     // 2. The registered handler: `ggs.onRequest(fn)` — the package's own code answering.
     let handler = with_state(|state| state.on_request.clone());
-    if let Some(handler) = handler.and_then(|value| value.as_object().cloned()) {
+    if let Some(handler) = handler.and_then(|value| value.as_object()) {
         let command_value = text(command);
         let args_value =
             JsValue::from_json(&Value::Array(args.clone()), context).map_err(|e| e.to_string())?;
@@ -929,7 +951,7 @@ fn run_command(context: &mut Context, command: &str, args: &Value) -> Result<Val
     if native_entry {
         if let Some(exports) = main_exports
             .as_ref()
-            .and_then(|value| value.as_object().cloned())
+            .and_then(|value| value.as_object())
         {
             if let Ok(function) = exports.get(key("request"), context) {
                 if let Some(function) = function.as_object() {
@@ -970,7 +992,7 @@ fn run_command(context: &mut Context, command: &str, args: &Value) -> Result<Val
             }
         }
     }
-    if let Some(exports) = main_exports.and_then(|value| value.as_object().cloned()) {
+    if let Some(exports) = main_exports.and_then(|value| value.as_object()) {
         for name in ["dispatch", "request"] {
             let Ok(function) = exports.get(key(name), context) else {
                 continue;
@@ -1042,7 +1064,7 @@ fn deliver_child_jobs(context: &mut Context) {
 /// Settle a handler result: a plain value passes through; a thenable is adopted into a
 /// promise and pumped (microtasks and timers) until it settles or the timeout says the
 /// handler never will.
-fn settle(context: &mut Context, value: JsValue) -> Result<JsValue, String> {
+pub(crate) fn settle(context: &mut Context, value: JsValue) -> Result<JsValue, String> {
     let thenable = value
         .as_object()
         .map(|object| {
@@ -1111,7 +1133,7 @@ fn settle(context: &mut Context, value: JsValue) -> Result<JsValue, String> {
                 if trace {
                     eprintln!("[settle] running jobs");
                 }
-                context.run_jobs();
+                let _ = context.run_jobs();
                 if trace {
                     eprintln!("[settle] sleeping");
                 }
@@ -1169,7 +1191,7 @@ fn proc_data(context: &mut Context, handle: u64, stream: u8, bytes: Vec<u8>) {
             _ => entry.stderr.clone(),
         })
     });
-    let Some(target) = target.and_then(|value| value.as_object().cloned()) else {
+    let Some(target) = target.and_then(|value| value.as_object()) else {
         return;
     };
     let Ok(data) = builtins_buffer(context, bytes) else {
@@ -1189,15 +1211,15 @@ fn proc_exit(context: &mut Context, handle: u64, code: Option<i32>) {
         None => JsValue::null(),
     };
     if let Some(emitter) = entry.emitter.as_ref().and_then(JsValue::as_object) {
-        emit_on(context, emitter, "exit", std::slice::from_ref(&code_value));
-        emit_on(context, emitter, "close", &[code_value]);
+        emit_on(context, &emitter, "exit", std::slice::from_ref(&code_value));
+        emit_on(context, &emitter, "close", &[code_value]);
     }
     for stream in [&entry.stdout, &entry.stderr] {
         if let Some(stream) = stream.as_ref().and_then(JsValue::as_object) {
             // Node closes each stdio stream after the data: 'end' for the readers, then
             // 'close' when the fd is gone — resolveSpawnOutput-style collectors wait on it.
-            emit_on(context, stream, "end", &[]);
-            emit_on(context, stream, "close", &[]);
+            emit_on(context, &stream, "end", &[]);
+            emit_on(context, &stream, "close", &[]);
         }
     }
 }
@@ -1213,7 +1235,7 @@ fn builtins_buffer(context: &mut Context, bytes: Vec<u8>) -> Result<JsValue, ()>
         .get(key("from"), context)
         .map_err(|_| ())?;
     let from = from.as_object().ok_or(())?;
-    let bytes = boa_engine::object::builtins::JsArrayBuffer::from_byte_block(bytes, context)
+    let bytes = boa_engine::object::builtins::JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(bytes), context)
         .map_err(|_| ())?;
     from.call(&buffer, &[bytes.into()], context).map_err(|_| ())
 }

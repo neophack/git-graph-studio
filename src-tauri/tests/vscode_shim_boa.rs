@@ -13,48 +13,36 @@ fn the_napi_surface_links() {
 
 use boa_engine::{Context, Source};
 
+/// The claude-code bundle's grammar Boa 0.21.1 must swallow (the extension's own code
+/// uses a class named `of` and private members named `$`): each snippet is legal
+/// ECMAScript that V8 accepts, and a parse failure here is a Boa bug to fix, not a
+/// package problem to work around.
 #[test]
-fn the_shim_bundle_installs_inside_boa() {
-    let shim = std::env::var("GGS_VSCODE_SHIM")
-        .unwrap_or_else(|_| "target/studio/vscode-shim.cjs".to_owned());
-    let Ok(source) = std::fs::read_to_string(&shim) else {
-        eprintln!("skipping: no shim bundle at {shim}");
-        return;
-    };
-    let mut context = Context::default();
-    context
-        .eval(Source::from_bytes("__ggsHostRequest = (m, a) => JSON.stringify({ env: true }); ggs = { onRequest: (h) => {} };"))
-        .unwrap();
-    context
-        .eval(Source::from_bytes(source.as_bytes()))
-        .expect("the shim bundle evaluates");
-    let installed = context
-        .eval(Source::from_bytes(
-            r#"
-            (function () {
-                const installed = __ggsVscodeShimInstall({
-                    extensionId: "acme.x",
-                    extensionPath: "C:/ext",
-                    workspaceFolders: ["C:/ws"]
-                });
-                return typeof installed.api.commands;
-            })()
-        "#,
-        ))
-        .expect("install runs in Boa");
-    eprintln!("install ran; api.commands = {installed:?}");
+fn grammar_the_claude_code_bundle_needs() {
+    let cases: &[(&str, &str)] = &[
+        ("class named of", "class of extends Error { name = \"x\"; constructor() { super(\"y\"); } }"),
+        ("of variable", "var of = 1; of = class of {};"),
+        ("of method", "class A { of($) { return $; } }"),
+        ("private dollar", "class B { #$; #J = null; constructor($) { this.#$ = $; } of($) { return this.#$; } }"),
+        ("for of", "for (const z of [1, 2]) { void z; }"),
+    ];
+    for (name, source) in cases {
+        let mut context = Context::default();
+        if let Err(error) = context.eval(Source::from_bytes(source.as_bytes())) {
+            panic!("Boa cannot parse {name}: {error}");
+        }
+    }
 }
 
-/// The Boa 0.20 bug `require.rs` works around, pinned as the ban's reason: a module
-/// compiled with the `Function` constructor runs, but the closures it defined panic
-/// (`PutLexicalValue`, "must be declarative environment") the moment one runs later —
-/// a handler answering a request with `new Promise((resolve) =>
-/// setTimeout(() => resolve(…)))` is enough, because the Promise executor's captured
-/// parameter is exactly the binding whose locator the constructor miscompiled. If
-/// this ever turns green, the `Function`-constructor ban in `require.rs` can be
-/// lifted.
+/// The Boa 0.20/0.21 bug behind `require.rs`'s `Function`-constructor ban: a module
+/// compiled with the `Function` constructor runs, but the closures it defined used to
+/// panic (`PutLexicalValue`, "must be declarative environment") the moment one ran
+/// later. The vendored engine degrades that miscompiled initialization instead — the
+/// closure completes, the skipped binding stays unset, and the runtime survives — so
+/// this pins the NEW contract: no panic reaches the runtime. The compile-path ban in
+/// `require.rs` stays regardless (a degraded closure still misbehaves silently).
 #[test]
-fn the_function_constructor_module_poison_panics_later_closures() {
+fn the_function_constructor_poison_degrades_instead_of_panicking() {
     let mut context = Context::default();
     context
         .eval(Source::from_bytes(
@@ -78,16 +66,14 @@ fn the_function_constructor_module_poison_panics_later_closures() {
         .global_object()
         .get(boa_engine::JsString::from("__handler"), &mut context)
         .ok()
-        .and_then(|value| value.as_object().cloned())
+        .and_then(|value| value.as_object())
         .expect("the handler registered");
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         handler.call(&boa_engine::JsValue::undefined(), &[], &mut context)
     }));
-    assert!(
-        outcome.is_err(),
-        "the Function-constructor module's closure ran without the known panic — \
-         the ban in require.rs can be lifted"
-    );
+    let value = outcome
+        .expect("the poisoned closure runs without panicking — the VM degrades it");
+    assert!(value.is_ok(), "the degraded closure answers: {value:?}");
 }
 
 /// The fix shape `require.rs` ships: the prelude's `__ggsCompileModule` helper, whose
@@ -118,7 +104,6 @@ fn the_direct_eval_module_compiler_holds_every_load_context() {
             .global_object()
             .get(boa_engine::JsString::from("__ggsCompileModule"), context)?
             .as_object()
-            .cloned()
             .expect("the compile helper exists");
         let wrapper = helper
             .call(
@@ -129,7 +114,6 @@ fn the_direct_eval_module_compiler_holds_every_load_context() {
                 context,
             )?
             .as_object()
-            .cloned()
             .expect("the helper answered a function");
         let exports = boa_engine::JsObject::with_object_proto(context.intrinsics());
         let module = boa_engine::JsObject::with_object_proto(context.intrinsics());
@@ -200,7 +184,7 @@ fn the_direct_eval_module_compiler_holds_every_load_context() {
         .global_object()
         .get(boa_engine::JsString::from("__handler"), &mut context)
         .ok()
-        .and_then(|value| value.as_object().cloned())
+        .and_then(|value| value.as_object())
         .expect("the handler registered");
     handler
         .call(&boa_engine::JsValue::undefined(), &[], &mut context)
@@ -221,7 +205,7 @@ fn the_direct_eval_module_compiler_holds_every_load_context() {
         .global_object()
         .get(boa_engine::JsString::from("__outer"), &mut context)
         .ok()
-        .and_then(|value| value.as_object().cloned())
+        .and_then(|value| value.as_object())
         .expect("__outer defined");
     outer
         .call(&boa_engine::JsValue::undefined(), &[], &mut context)
@@ -230,7 +214,7 @@ fn the_direct_eval_module_compiler_holds_every_load_context() {
         .global_object()
         .get(boa_engine::JsString::from("__handler"), &mut context)
         .ok()
-        .and_then(|value| value.as_object().cloned())
+        .and_then(|value| value.as_object())
         .expect("the nested handler registered");
     handler
         .call(&boa_engine::JsValue::undefined(), &[], &mut context)

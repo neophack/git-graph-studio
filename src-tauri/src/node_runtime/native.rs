@@ -162,7 +162,7 @@ mod tests {
                 object
                     .get(crate::node_runtime::key("then"), &mut context)
                     .ok()
-                    .and_then(|then| then.as_object().cloned())
+                    .and_then(|then| then.as_object())
             })
             .expect("a promise carries then");
         then.call(
@@ -171,10 +171,10 @@ mod tests {
             &mut context,
         )
         .expect("the collector attaches");
-        context.run_jobs();
+        let _ = context.run_jobs();
         for _ in 0..50 {
             napi_host::drain_threadsafe_calls(&mut context);
-            context.run_jobs();
+            let _ = context.run_jobs();
             let answer = context
                 .eval(boa_engine::Source::from_bytes(
                     "typeof globalThis.__ggsAnswer === 'undefined' ? '' : globalThis.__ggsAnswer",

@@ -15,6 +15,18 @@ default-run = "git-graph-studio"
 # own CI job, which installs those libraries first.
 [workspace]
 
+# The pretend Node runtime's parser, carrying one upstream gap fix: Boa's class-expression
+# parser dropped a contextual-keyword name, so legal code real packages ship —
+# `var e = class of extends Error {}`, claude-code's MaxBufferError — failed to parse
+# (the class-declaration parser already had the branch; the expression parser missed it).
+# The diff against the crates.io 0.21.1 source is one match arm in
+# `src/parser/expression/primary/class_expression/mod.rs`, marked with a GGS patch
+# comment; retire the vendored copy when upstream carries the fix.
+[patch.crates-io]
+boa_parser = { path = "vendor/boa-parser" }
+boa_ast = { path = "vendor/boa-ast" }
+boa_engine = { path = "vendor/boa-engine", features = ["trace"] }
+
 [lib]
 name = "git_graph_studio_lib"
 path = "src/lib.rs"
@@ -107,7 +119,7 @@ portable-pty = { version = "0.9", optional = true }
 # `main` as its backend: CommonJS `require` and the file/os/process builtins. A package's
 # engine-layout `.node` loads over its C-ABI JSON channel (`native.rs`); a NAPI-only
 # addon needs a real Node runtime (nodeHost.ts, the `GGS_REAL_NODE` opt-in).
-boa_engine = { version = "0.20", optional = true }
+boa_engine = { version = "0.21", optional = true, features = ["annex-b", "trace"] }
 # The `.node` loader (`node_runtime/native.rs`): dlopen and the `git_graph_capi_*`
 # symbols of an engine-layout addon — the sanctioned C-ABI seam, not a N-API runtime.
 libloading = { version = "0.8", optional = true }
@@ -210,3 +222,11 @@ codegen-units = 1
 panic = "abort"
 strip = true
 debug = false
+
+# The `ggs-node` sidecar builds on the same size diet but with unwinding panics: it runs
+# third-party JS, and a miscompiled closure (Boa's known `Function`-constructor compile
+# bug) must degrade its own initialization — the VM's `PutLexicalValue` degrades under
+# `catch_unwind` — instead of aborting the whole backend mid-handshake.
+[profile.ggs-node]
+inherits = "release"
+panic = "unwind"

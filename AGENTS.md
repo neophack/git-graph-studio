@@ -477,6 +477,22 @@ nothing.
   `.node` loads through (`native.rs` the loader, `napi_host.rs` the `napi_*` surface) —
   and the dispatch: launcher → `ggs.onRequest` → `exports.dispatch`; stdout is the
   protocol, package code writes through `ggs.log` only),
+  `src-tauri/vendor/` (the three patched Boa 0.21.1 crates the sidecar's parser and
+  compiler run through, wired by `[patch.crates-io]` in `src-tauri/Cargo.toml`; the
+  diffs against crates.io are one match arm each, marked with GGS-patch comments:
+  `boa-parser` lets a contextual keyword name a class expression —
+  `var e = class of extends Error {}` ships inside real bundles and the stock parser
+  dropped the name; `boa-ast` makes the scope-index visitor count a class constructor's
+  function scope, without which `constructor(a = 1)` aims parameter locators one
+  environment short and `new` panics; `boa-engine` balances the logical-assignment
+  locator pair — a short-circuit `x ??= v` stranded its pushed locator and the next
+  locator write hit the wrong binding — and degrades a poisoned `PutLexicalValue`
+  (the known `Function`-constructor miscompile) instead of killing the JS thread; the
+  grammar and semantics are pinned in `tests/vscode_shim_boa.rs`, the compile semantics
+  end-to-end in `tests/node_runtime.rs`; retire the fork when upstream carries the
+  fixes), and the sidecar builds through its own `[profile.ggs-node]` — the release size
+  diet with unwinding panics, because third-party JS must degrade its own miscompiled
+  closures, never abort the backend (`scripts/prepare.mjs` builds it that way),
   `src-tauri/src/ext_protocol.rs` (the `ggs-ext/1` wire
   protocol, shared with plugin binaries), `src-tauri/src/ext_page_boot.js` (the
   `acquireGgsApi()` bootstrap the protocol composes into served pages),

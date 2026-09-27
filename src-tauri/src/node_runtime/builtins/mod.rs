@@ -49,7 +49,9 @@ pub fn builtin_module(name: &str, context: &mut Context) -> JsResult<Option<JsVa
     ];
     let normalized = name.strip_prefix("node:").unwrap_or(name);
     if !NAMES.contains(&normalized) {
-        return Ok(None);
+        // The smaller core modules are assembled in the prelude (`module`, `assert`,
+        // `stream`, …) and registered by name in its `__ggsBuiltins` table.
+        return prelude_builtin(normalized, context);
     }
     let cache_key = format!("ggs-builtin:{normalized}");
     if let Some(cached) = with_state(|state| state.module_cache.get(Path::new(&cache_key)).cloned())
@@ -86,6 +88,22 @@ pub fn builtin_module(name: &str, context: &mut Context) -> JsResult<Option<JsVa
             .insert(PathBuf::from(cache_key), value.clone());
     });
     Ok(Some(value))
+}
+
+/// A core module the prelude registered in `__ggsBuiltins` — relative paths and package
+/// names never match (the table holds core names only), so this answers `None` for them.
+fn prelude_builtin(name: &str, context: &mut Context) -> JsResult<Option<JsValue>> {
+    if name.starts_with('.') || name.starts_with('/') || name.contains(':') {
+        return Ok(None);
+    }
+    let table = global_object(context, "__ggsBuiltins")?;
+    let Some(table) = table.as_object() else {
+        return Ok(None);
+    };
+    if !table.has_own_property(key(name), context)? {
+        return Ok(None);
+    }
+    Ok(Some(table.get(key(name), context)?))
 }
 
 fn global_object(context: &mut Context, name: &str) -> JsResult<JsValue> {

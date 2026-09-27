@@ -78,7 +78,7 @@ pub(super) fn bytes_arg(value: &JsValue, context: &mut Context) -> Option<Vec<u8
 
 /// A Buffer for bytes crossing back into JS, built through the prelude's `Buffer.from`.
 pub(super) fn buffer_value(bytes: Vec<u8>, context: &mut Context) -> JsResult<JsValue> {
-    let array_buffer = JsArrayBuffer::from_byte_block(bytes, context)?;
+    let array_buffer = JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(bytes), context)?;
     let global = context.global_object();
     let buffer = global.get(key("Buffer"), context)?;
     let from = buffer

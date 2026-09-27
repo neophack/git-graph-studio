@@ -101,12 +101,10 @@ fn make_emitter(context: &mut Context) -> JsResult<JsObject> {
         .global_object()
         .get(key("__ggsNewEmitter"), context)?
         .as_callable()
-        .cloned()
         .ok_or_else(|| error("the prelude's emitter maker is missing"))?;
     maker
         .call(&JsValue::undefined(), &[], context)?
         .as_object()
-        .cloned()
         .ok_or_else(|| error("the prelude's emitter maker did not answer an object"))
 }
 

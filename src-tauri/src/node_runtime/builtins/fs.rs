@@ -172,7 +172,7 @@ fn fs_read_file_bytes(
 ) -> JsResult<JsValue> {
     let path = string_arg(args, 0, context);
     let bytes = std::fs::read(&path).map_err(|e| io_error(&path, &e))?;
-    JsArrayBuffer::from_byte_block(bytes, context).map(JsValue::from)
+    JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(bytes), context).map(JsValue::from)
 }
 
 /// `readRangeBytes(path, position, length)`: at most `length` bytes from `position` — the
@@ -194,7 +194,7 @@ fn fs_read_range_bytes(
     file.take(length)
         .read_to_end(&mut bytes)
         .map_err(|e| io_error(&path, &e))?;
-    JsArrayBuffer::from_byte_block(bytes, context).map(JsValue::from)
+    JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(bytes), context).map(JsValue::from)
 }
 
 fn fs_write_file_sync(

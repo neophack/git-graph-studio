@@ -54,8 +54,20 @@ pub fn require(parent: &Path, specifier: &str, context: &mut Context) -> JsResul
                 serde_json::from_str(&text).map_err(|e| parse_error(&resolved, e))?;
             JsValue::from_json(&value, context)
         }
+        // An ES module answers its namespace (Node 22's `require(esm)`), evaluated to
+        // settlement by the ESM half.
+        Some(Kind::Js) if super::esm::is_esm(&resolved) => {
+            let namespace = super::esm::require_esm(&resolved, context)?;
+            with_state(|state| {
+                state.module_cache.insert(resolved, namespace.clone());
+            });
+            Ok(namespace)
+        }
         Some(Kind::Js) => {
             let source = std::fs::read_to_string(&resolved).map_err(fs_error(&resolved))?;
+            if std::env::var("GGS_TRACE_BOOT").is_ok() {
+                std::eprintln!("[boot] evaluate_module {} ({} bytes, head: {})", resolved.display(), source.len(), source.chars().take(60).collect::<String>().replace(char::is_whitespace, " "));
+            }
             evaluate_module(&resolved, &source, context)
         }
         Some(Kind::Node) => {
@@ -74,10 +86,28 @@ pub fn require(parent: &Path, specifier: &str, context: &mut Context) -> JsResul
     }
 }
 
+/// The conditions a `require` resolves `exports` under, in Node's own set.
+pub(crate) const REQUIRE_CONDITIONS: &[&str] = &["node", "require", "default"];
+
 /// The `require.resolve(specifier)` half: the resolution only, as a string.
 pub fn resolve(parent: &Path, specifier: &str) -> Result<PathBuf, String> {
+    resolve_with(parent, specifier, REQUIRE_CONDITIONS)
+}
+
+/// One resolver for both module systems, differing only in the `exports` / `imports`
+/// conditions: relative and absolute specifiers against `parent`, `#` specifiers through
+/// the enclosing package's `imports`, bare names through the `node_modules` walk — a
+/// package with an `exports` map answers from the map alone (Node's encapsulation), one
+/// without falls back to the `main` / `index` / extension guesses.
+pub(crate) fn resolve_with(
+    parent: &Path,
+    specifier: &str,
+    conditions: &[&str],
+) -> Result<PathBuf, String> {
     let looks_relative = specifier.starts_with("./")
         || specifier.starts_with("../")
+        || specifier == "."
+        || specifier == ".."
         || specifier.starts_with('/')
         || specifier.starts_with('\\')
         || Path::new(specifier)
@@ -93,11 +123,24 @@ pub fn resolve(parent: &Path, specifier: &str) -> Result<PathBuf, String> {
         let target = normalize(&parent.join(specifier));
         return resolve_path(&target).ok_or_else(|| not_found(specifier));
     }
+    if specifier.starts_with('#') {
+        return resolve_package_import(parent, specifier, conditions)
+            .ok_or_else(|| not_found(specifier));
+    }
+    let (name, subpath) = split_package_specifier(specifier);
     let root = with_state(|state| state.package_root.clone());
     let mut dir = Some(parent.to_path_buf());
     while let Some(current) = dir {
         let modules = current.join("node_modules");
         if modules.is_dir() {
+            let package = modules.join(name);
+            if let Some(exports) = read_manifest(&package).and_then(|m| m.get("exports").cloned())
+            {
+                // The map is the package's whole public surface: a subpath it does not
+                // list is not found, however the files lie.
+                return resolve_exports(&package, &exports, &subpath, conditions)
+                    .ok_or_else(|| not_found(specifier));
+            }
             if let Some(path) = resolve_path(&normalize(&modules.join(specifier))) {
                 return Ok(path);
             }
@@ -108,6 +151,151 @@ pub fn resolve(parent: &Path, specifier: &str) -> Result<PathBuf, String> {
         dir = current.parent().map(Path::to_path_buf);
     }
     Err(not_found(specifier))
+}
+
+/// `@scope/name/sub/path` → (`@scope/name`, `./sub/path`); `name` → (`name`, `.`).
+fn split_package_specifier(specifier: &str) -> (&str, String) {
+    let needed = if specifier.starts_with('@') { 2 } else { 1 };
+    let cut = specifier
+        .match_indices('/')
+        .nth(needed - 1)
+        .map(|(at, _)| at)
+        .unwrap_or(specifier.len());
+    let (name, rest) = specifier.split_at(cut);
+    let subpath = if rest.is_empty() {
+        ".".to_owned()
+    } else {
+        format!(".{rest}")
+    };
+    (name, subpath)
+}
+
+fn read_manifest(package: &Path) -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(package.join("package.json")).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// A `package.json` `exports` map resolved for one subpath: the sugar forms (a string, an
+/// array, a bare conditions object) mean the `.` entry; exact keys win, then the `*`
+/// pattern with the longest prefix, then the legacy trailing-slash folders.
+fn resolve_exports(
+    package: &Path,
+    exports: &serde_json::Value,
+    subpath: &str,
+    conditions: &[&str],
+) -> Option<PathBuf> {
+    let is_subpath_map = exports
+        .as_object()
+        .is_some_and(|map| map.keys().next().is_some_and(|k| k.starts_with('.')));
+    if !is_subpath_map {
+        return if subpath == "." {
+            resolve_target(package, exports, None, conditions)
+        } else {
+            None
+        };
+    }
+    let map = exports.as_object()?;
+    if let Some(target) = map.get(subpath) {
+        return resolve_target(package, target, None, conditions);
+    }
+    let mut best: Option<(usize, &serde_json::Value, String)> = None;
+    for (pattern, target) in map {
+        if let Some(star) = pattern.find('*') {
+            let (prefix, suffix) = (&pattern[..star], &pattern[star + 1..]);
+            if subpath.len() >= prefix.len() + suffix.len()
+                && subpath.starts_with(prefix)
+                && subpath.ends_with(suffix)
+                && best.as_ref().is_none_or(|(len, _, _)| prefix.len() > *len)
+            {
+                let matched = subpath[prefix.len()..subpath.len() - suffix.len()].to_owned();
+                best = Some((prefix.len(), target, matched));
+            }
+        } else if pattern.ends_with('/') && subpath.starts_with(pattern.as_str()) {
+            if let serde_json::Value::String(folder) = target {
+                let rest = &subpath[pattern.len()..];
+                return resolve_path(&normalize(&package.join(folder).join(rest)));
+            }
+        }
+    }
+    let (_, target, matched) = best?;
+    resolve_target(package, target, Some(&matched), conditions)
+}
+
+/// One `exports` / `imports` target: a path (with its `*` filled), the first resolvable
+/// entry of an array, or the first matching condition of an object in its own key order.
+fn resolve_target(
+    package: &Path,
+    target: &serde_json::Value,
+    star: Option<&str>,
+    conditions: &[&str],
+) -> Option<PathBuf> {
+    match target {
+        serde_json::Value::String(path) => {
+            let filled = match star {
+                Some(star) => path.replace('*', star),
+                None => path.clone(),
+            };
+            if !filled.starts_with("./") {
+                // Package-relative targets only (a bare `imports` target is handled by
+                // the caller; `exports` may never name another package).
+                return None;
+            }
+            let full = normalize(&package.join(&filled));
+            if full.is_file() {
+                Some(full)
+            } else {
+                resolve_path(&full)
+            }
+        }
+        serde_json::Value::Array(options) => options
+            .iter()
+            .find_map(|option| resolve_target(package, option, star, conditions)),
+        serde_json::Value::Object(map) => map.iter().find_map(|(condition, nested)| {
+            (condition == "default" || conditions.contains(&condition.as_str()))
+                .then(|| resolve_target(package, nested, star, conditions))
+                .flatten()
+        }),
+        _ => None,
+    }
+}
+
+/// A `#name` specifier through the nearest enclosing package's `imports` map.
+fn resolve_package_import(
+    parent: &Path,
+    specifier: &str,
+    conditions: &[&str],
+) -> Option<PathBuf> {
+    let mut dir = Some(parent);
+    while let Some(current) = dir {
+        if let Some(manifest) = read_manifest(current) {
+            let imports = manifest.get("imports")?.as_object()?;
+            let (target, matched) = match imports.get(specifier) {
+                Some(target) => (target, None),
+                None => imports.iter().find_map(|(pattern, target)| {
+                    let star = pattern.find('*')?;
+                    let (prefix, suffix) = (&pattern[..star], &pattern[star + 1..]);
+                    (specifier.len() >= prefix.len() + suffix.len()
+                        && specifier.starts_with(prefix)
+                        && specifier.ends_with(suffix))
+                    .then(|| {
+                        let matched = &specifier[prefix.len()..specifier.len() - suffix.len()];
+                        (target, Some(matched.to_owned()))
+                    })
+                })?,
+            };
+            // A bare target names a dependency: resolved from this package as an import.
+            if let Some(bare) = target.as_str().filter(|t| !t.starts_with("./")) {
+                let bare = match &matched {
+                    Some(star) => bare.replace('*', star),
+                    None => bare.to_owned(),
+                };
+                return resolve_with(current, &bare, conditions).ok();
+            }
+            return resolve_target(current, target, matched.as_deref(), conditions);
+        }
+        dir = current.parent();
+    }
+    None
 }
 
 fn not_found(specifier: &str) -> String {
@@ -144,9 +332,13 @@ fn resolve_path(target: &Path) -> Option<PathBuf> {
     }
     // The extension-append guesses never reach `.node`: a native addon's specifier
     // carries its extension (`require('./native/<platform>/git-graph.node')`).
-    for extension in ["js", "json"] {
-        let mut with_extension = target.to_path_buf();
-        with_extension.set_extension(extension);
+    for extension in ["js", "json", "mjs", "cjs"] {
+        // Appended, never substituted: `./chunk.min` gains `.js`, it does not become
+        // `./chunk.js`.
+        let mut with_extension = target.as_os_str().to_owned();
+        with_extension.push(".");
+        with_extension.push(extension);
+        let with_extension = PathBuf::from(with_extension);
         if with_extension.is_file() {
             return Some(with_extension);
         }
@@ -224,7 +416,6 @@ fn evaluate_module(path: &Path, source: &str, context: &mut Context) -> JsResult
     let function = compiler
         .call(&JsValue::undefined(), &[text(source)], context)?
         .as_object()
-        .cloned()
         .ok_or_else(|| internal("the module compiler answered no function"))?;
     let exports = JsObject::with_object_proto(context.intrinsics());
     let module = JsObject::with_object_proto(context.intrinsics());
@@ -272,7 +463,6 @@ fn make_require_function(parent: &Path, context: &mut Context) -> JsResult<JsObj
     let function = maker.call(&JsValue::undefined(), &[parent_value], context)?;
     function
         .as_object()
-        .cloned()
         .ok_or_else(|| internal("the prelude's require maker did not answer a function"))
 }
 
