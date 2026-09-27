@@ -7,7 +7,7 @@
 // everything that concerns "the" editor, the whole area answers what spans groups (saving,
 // closing, path renames).
 
-import { EditorGroup, askToSaveMany, tabDrag, type EditorInput } from './editor';
+import { EditorGroup, askToSaveMany, tabDrag, type EditorInput, type EditorPlacement } from './editor';
 import type { EditorGridCell } from './state';
 import { el } from './ui';
 import type { EditorView } from '@codemirror/view';
@@ -223,6 +223,45 @@ export class EditorArea {
 		this.render();
 		this.focus(fresh.box);
 		return fresh.box.group;
+	}
+
+	/** The group the last `'beside'` open landed in, while it still lives: clicking inside
+	 *  a webview (the extension chat that links to its outputs) never refocuses its editor
+	 *  group, so the focused group alone cannot name "the other view" — repeated placed
+	 *  opens keep landing in the same side layer this way instead of cascading splits. */
+	private besideGroup: EditorGroup | null = null;
+
+	/** The group a placed open lands in: `'beside'` answers the side layer — the last one
+	 *  a placed open took, while it lives, else the focused group's right neighbour (a
+	 *  fresh right split when it has none) — so the view the user reads from (an
+	 *  extension's chat panel, typically) keeps its half of the area and the opened
+	 *  editor takes the other; a 1-based index answers that group, splitting right until
+	 *  it exists (VS Code creates missing columns); `undefined` is the focused group. */
+	private groupForPlacement(placement?: EditorPlacement): EditorGroup {
+		if (placement === undefined) return this.activeGroup;
+		if (placement === 'beside') {
+			// The remembered side layer is the destination while it lives — even when the
+			// focus moved into it (clicking inside a webview never refocuses its group).
+			if (this.besideGroup !== null && this.groups().includes(this.besideGroup)) return this.besideGroup;
+			const active = this.activeGroup;
+			// An empty focused group is where the content belongs — nothing is open to sit
+			// beside (the caller's surface is a sidebar view, not an editor tab).
+			if (active.openEditorIds().length === 0 || this.groupCount >= 8) return active;
+			const source = this.leafOfBox(this.focused) ?? this.leaves()[0]!;
+			const target = this.neighbor(source, 'right') ?? this.insertBeside(source, 'right');
+			this.render();
+			this.besideGroup = target.box.group;
+			return target.box.group;
+		}
+		const wanted = Math.max(1, Math.floor(placement));
+		while (this.leaves().length < wanted && this.groupCount < 8) {
+			const before = this.leaves().length;
+			this.split('right');
+			if (this.leaves().length === before) break; // the group cap stopped the split
+		}
+		const leaf = this.leaves()[Math.min(wanted, this.leaves().length) - 1]!;
+		this.focus(leaf.box);
+		return leaf.box.group;
 	}
 
 	/** The nearest leaf in a direction, as VS Code's grid neighbour lookup: walk up from the
@@ -675,10 +714,11 @@ export class EditorArea {
 		for (const group of this.groups()) await group.reloadIfClean(path);
 	}
 
-	/** Everything else concerns the focused group's active editor. */
-	openFile = (path: string, options?: { line?: number; column?: number }) => this.activeGroup.openFile(path, options);
-	openDiff = (input: Extract<EditorInput, { kind: 'diff' }>) => this.activeGroup.openDiff(input);
-	openContent = (input: Extract<EditorInput, { kind: 'content' }>) => this.activeGroup.openContent(input);
+	/** Everything else concerns the focused group's active editor; a placement moves the
+	 *  open into the group `groupForPlacement` picks (an extension's `ViewColumn`). */
+	openFile = (path: string, options?: { line?: number; column?: number; inactive?: boolean }, placement?: EditorPlacement) => this.groupForPlacement(placement).openFile(path, options);
+	openDiff = (input: Extract<EditorInput, { kind: 'diff' }>, placement?: EditorPlacement) => this.groupForPlacement(placement).openDiff(input);
+	openContent = (input: Extract<EditorInput, { kind: 'content' }>, placement?: EditorPlacement) => this.groupForPlacement(placement).openContent(input);
 	openRevision = (revision: string, path: string, title: string, repo?: string) => this.activeGroup.openRevision(revision, path, title, repo);
 	openHelp = (help: 'welcome' | 'shortcuts') => this.activeGroup.openHelp(help);
 	openSelfTest = () => this.activeGroup.openSelfTest();

@@ -23,6 +23,24 @@ export interface HostBridge {
 	registerDocProvider?(scheme: string, provider: { provideTextDocumentContent?: (uri: unknown) => unknown }): void;
 	/** Forget a parked content provider (its Disposable ran). */
 	unregisterDocProvider?(scheme: string): void;
+	/** This side's own answer for a provider-scheme document it registered — the text, or
+	 *  `null` when the scheme is not registered here (another extension may own it; the
+	 *  host's global lookup is that case's fallback). Serving the read locally keeps
+	 *  `openTextDocument` off the host round-trip, whose answer would call back into a
+	 *  ggs-node process whose one JS thread is blocked waiting for exactly that answer —
+	 *  the `vscode.diff` reentry deadlock class, 30 s to nothing. */
+	readDocProvider?(uri: Uri): string | PromiseLike<string> | null;
+}
+
+/** The bridge-side half of a local provider read: this side's own registration answers
+ *  from its parked map — `null` when the scheme is not registered here, so the host's
+ *  global lookup stays the fallback (another extension may own the scheme). Every host
+ *  bridge (`docProvider.provide`'s own lookup) serves the same shape. */
+export function readLocalDocProvider(docProviders: Map<string, { provideTextDocumentContent?: (uri: unknown) => unknown }>, uri: Uri): string | PromiseLike<string> | null {
+	const provider = docProviders.get(uri.scheme);
+	if (!provider?.provideTextDocumentContent) return null;
+	const text = provider.provideTextDocumentContent(uri);
+	return text === undefined || text === null ? '' : (text as string | PromiseLike<string>);
 }
 
 /** One watcher pattern against one base-relative path (forward slashes, `**` crossing
@@ -2971,10 +2989,42 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			},
 			onDidChangeActiveColorTheme: themeChangedEmitter.event,
 			showTextDocument: async (documentOrUri: Record<string, unknown> | Uri | string, columnOrOptions?: number | { selection?: Range; preview?: boolean; preserveFocus?: boolean; viewColumn?: number }) => {
+				const options = typeof columnOrOptions === 'object' && columnOrOptions !== null ? columnOrOptions : {};
+				const column = typeof columnOrOptions === 'number' ? columnOrOptions : options.viewColumn;
+				// A ViewColumn as a placement the host understands: Beside (-2) and the
+				// 1-based columns; Active (-1) and the default stay undefined (the active group).
+				const placement = column === ViewColumn.Beside ? 'beside' : typeof column === 'number' && column >= 1 ? column : undefined;
 				const target = documentOrUri as { uri?: Uri; fileName?: string };
-				const path = typeof documentOrUri === 'string' ? documentOrUri : documentOrUri instanceof Uri ? hostPathOf(documentOrUri) : target.uri instanceof Uri ? hostPathOf(target.uri) : String(target.fileName ?? '');
-				const selection = typeof columnOrOptions === 'object' ? columnOrOptions?.selection : undefined;
-				await bridge.request('workspace.openFile', selection ? [path, selection.start.line + 1, selection.start.character + 1] : [path]);
+				const uri = documentOrUri instanceof Uri ? documentOrUri : target.uri instanceof Uri ? target.uri : Uri.isUri(target.uri) ? target.uri : undefined;
+				if (uri !== undefined && uri.scheme !== 'file' && uri.scheme !== 'untitled') {
+					// A provider-scheme document — a package's virtual text (a chat view
+					// opening its tool outputs and code blocks this way): the read-only
+					// content tab. The shim holds the provider's text from `openTextDocument`;
+					// the tab defaults to beside, so the view the link was clicked in (the
+					// chat panel) keeps its half of the editor area.
+					const remembered = documents.get(documentKey(uri.toString()));
+					let text: string;
+					if (remembered !== undefined) {
+						text = remembered.text;
+					} else {
+						// The same local-first read `openTextDocument` takes — the host
+						// round-trip's answer would call back into a ggs-node process
+						// parked on this very call.
+						const own = bridge.readDocProvider?.(uri) ?? null;
+						text = own !== null
+							? String((await own) ?? '')
+							: String(await bridge.request('docProvider.read', [uri]).catch((error) => {
+								shimLog('warn', `showTextDocument(${uri.toString()}) provider read failed: ${String(error)}`, error);
+								return '';
+							}) ?? '');
+					}
+					const title = uri.path.split(/[\\/]/).filter((part) => part !== '').pop() || uri.toString();
+					await bridge.request('workspace.openContentTab', [title, uri.path, text, placement ?? 'beside']);
+					return makeTextEditorProxy(uri.toString());
+				}
+				const path = typeof documentOrUri === 'string' ? documentOrUri : uri !== undefined ? hostPathOf(uri) : String(target.fileName ?? '');
+				const selection = options.selection;
+				await bridge.request('workspace.openFile', selection ? [path, selection.start.line + 1, selection.start.character + 1, placement] : [path, undefined, undefined, placement]);
 				return makeTextEditorProxy(path);
 			},
 			createTreeView: (viewId: string, options: { treeDataProvider: TreeDataProvider<unknown>; showCollapseAll?: boolean; canSelectMany?: boolean }) => {
@@ -3140,11 +3190,19 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 				}
 				const uri = typeof uriPathOrOptions === 'string' ? Uri.file(uriPathOrOptions) : (rehydrateUris(uriPathOrOptions) as Uri);
 				if (uri.scheme !== 'file') {
-					// A provider scheme: the host asks the registering frame for the text.
-					const text = await bridge.request('docProvider.read', [uri]).catch((error) => {
+					// A provider scheme. This side's own registration answers first — a
+					// ggs-node package's blocking bridge must not take the host round-trip,
+					// whose answer calls back into this same parked JS thread (the
+					// `vscode.diff` reentry deadlock class). Another extension's scheme
+					// falls to the host's global provider lookup, as before.
+					const own = bridge.readDocProvider?.(uri) ?? null;
+					let text: unknown;
+					try {
+						text = own !== null ? await own : await bridge.request('docProvider.read', [uri]);
+					} catch (error) {
 						shimLog('warn', `openTextDocument(${uri.toString()}) failed: ${String(error)}`, error);
 						throw error;
-					});
+					}
 					const { state } = rememberDocument(uri.toString(), String(text ?? ''), 'plaintext', uri);
 					return documentView(state, async () => false);
 				}

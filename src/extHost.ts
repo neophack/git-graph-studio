@@ -18,6 +18,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { commands } from './commands';
 import { applyContributions, applyExtensionSettings, declaredCommand, extensionSettingDefs, extensionThemeList, extensionViewContributions, languageIdFor, localize, registerContextProvider, registerExtensionSnippets, registerExtensionThemes, removeContributions, type ExtensionThemeDef, type ManifestContributes } from './contributions';
 import { describeDetail, extLog, extLogEnabled, extLogLevel, extLogOnce, flushExtLog, levelForConsole, setExtLogOutput, type ExtLogLevel } from './extLog';
+import type { EditorPlacement } from './editor';
 import { setFileDiagnostics, type SerializableDiagnostic } from './editorDiagnostics';
 import { settings as appSettings, syncExtensionThemes, themeById } from './settings';
 import { locale, registerZhCnText, t, tf } from './i18n';
@@ -468,7 +469,7 @@ export class ExtensionHost {
 	private nextPageSerial = 1;
 	/** Workbench hooks behind the page services: the diff/revision editors, the SCM view, the
 	 *  terminal, and the repo-changed nudge a page's own writes owe the workbench. */
-	onOpenDiff: ((diff: PageDiffRequest) => void) | null = null;
+	onOpenDiff: ((diff: PageDiffRequest, placement?: EditorPlacement) => void) | null = null;
 	onOpenFileAtRevision: ((revision: string, path: string, title: string, repo?: string) => void) | null = null;
 	onShowView: ((id: string) => void) | null = null;
 	onRevealTerminal: (() => void) | null = null;
@@ -477,7 +478,7 @@ export class ExtensionHost {
 	onForwardKey: ((key: { key: string; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean }) => void) | null = null;
 	/** Workbench hook: open an extension-supplied text document (a content provider's
 	 *  answer to `vscode.open` of a provider-scheme Uri) in a read-only tab. */
-	onOpenContent: ((title: string, path: string, text: string) => void) | null = null;
+	onOpenContent: ((title: string, path: string, text: string, placement?: EditorPlacement) => void) | null = null;
 	/** Extensions whose commands dispatch to a `ggs/2` process backend, not a frame. */
 	private readonly processBacked = new Set<string>();
 	/** The packages whose manifest carries a `main` (the real-Node host's candidates). */
@@ -533,8 +534,9 @@ export class ExtensionHost {
 	/** Workbench hooks behind the editor-facing vscode API: text-edit application (into an
 	 *  open CodeMirror editor), file opening, and the active editor's text. */
 	onApplyEdits: ((path: string | null, edits: { startLine: number; startCharacter: number; endLine: number; endCharacter: number; newText: string }[]) => boolean) | null = null;
-	/** Open (or reveal) a file, optionally at a 1-based line/column. */
-	onOpenFile: ((path: string, line?: number, column?: number) => void) | null = null;
+	/** Open (or reveal) a file, optionally at a 1-based line/column, in the group a
+	 *  placement picks (an extension's `ViewColumn`). */
+	onOpenFile: ((path: string, line?: number, column?: number, placement?: EditorPlacement) => void) | null = null;
 	/** An open editor's current text for a path (unsaved edits included), or null. */
 	documentText: ((path: string) => string | null) | null = null;
 	/** Save an open editor's document; answers whether it saved. */
@@ -1264,9 +1266,19 @@ export class ExtensionHost {
 		return { scheme, name: path.split('/').pop() || scheme, fsPath: path, label: path, content: text ?? '' };
 	}
 
-	/** `vscode.diff(left, right, title?)`: the diff editor over both sides' text — a
-	 *  provider side carries its content, a file side stays a file the editor reads. */
-	private async openVscodeDiff(left: unknown, right: unknown, title: unknown): Promise<void> {
+	/** A `ViewColumn` argument (a bare number or `{ viewColumn }`) as an editor placement:
+	 *  Beside answers `'beside'`, a column number its 1-based group index; Active and
+	 *  anything else stay undefined (the focused group, VS Code's default). */
+	private static placementOf(column: unknown): EditorPlacement | undefined {
+		const value = typeof column === 'number' ? column : (column as { viewColumn?: unknown } | null | undefined)?.viewColumn;
+		if (value === -2) return 'beside'; // ViewColumn.Beside
+		if (typeof value === 'number' && Number.isFinite(value) && value >= 1) return Math.floor(value);
+		return undefined;
+	}
+
+	/** `vscode.diff(left, right, title?, columnOrOptions?)`: the diff editor over both sides' text —
+	 *  a provider side carries its content, a file side stays a file the editor reads. */
+	private async openVscodeDiff(left: unknown, right: unknown, title: unknown, column: unknown): Promise<void> {
 		if (!left || !right) return;
 		const [l, r] = await Promise.all([this.resolveVscodeUri(left), this.resolveVscodeUri(right)]);
 		const serial = this.nextExtDocSerial++;
@@ -1279,20 +1291,21 @@ export class ExtensionHost {
 			right: r.local === true
 				? { revision: '', path: r.fsPath, label: r.name, exists: true, local: true }
 				: { revision: '', path: r.label, label: r.name, exists: true, content: r.content ?? '' }
-		});
+		}, ExtensionHost.placementOf(column));
 	}
 
-	/** `vscode.open(uri)`: a file opens in the editor; a provider-scheme document opens in a
-	 *  read-only tab over the provider's text. */
-	private async openVscodeDocument(uri: unknown): Promise<void> {
+	/** `vscode.open(uri, columnOrOptions?)`: a file opens in the editor; a provider-scheme
+	 *  document opens in a read-only tab over the provider's text. */
+	private async openVscodeDocument(uri: unknown, column: unknown): Promise<void> {
 		if (!uri) return;
+		const placement = ExtensionHost.placementOf(column);
 		const resolved = await this.resolveVscodeUri(uri);
 		if (resolved.local === true) {
-			this.onOpenFile?.(resolved.fsPath);
+			this.onOpenFile?.(resolved.fsPath, undefined, undefined, placement);
 			return;
 		}
 		const serial = this.nextExtDocSerial++;
-		this.onOpenContent?.(resolved.name || `document-${serial}`, resolved.label, resolved.content ?? '');
+		this.onOpenContent?.(resolved.name || `document-${serial}`, resolved.label, resolved.content ?? '', placement);
 	}
 
 	/** Run one command in a process package's backend — the first execution spawns it
@@ -1792,9 +1805,19 @@ export class ExtensionHost {
 				return Promise.resolve(this.onApplyEdits ? this.onApplyEdits(path, edits) : false);
 			}
 			case 'workspace.openFile': {
-				// `showTextDocument` / `revealRange`: the file, at a 1-based line/column when given.
-				const [path, line, column] = args as [string, number?, number?];
-				this.onOpenFile?.(path, line, column);
+				// `showTextDocument` / `revealRange`: the file, at a 1-based line/column when
+				// given, in the group the caller's ViewColumn picks.
+				const [path, line, column, placement] = args as [string, number?, number?, EditorPlacement?];
+				this.onOpenFile?.(path, line, column, placement);
+				return Promise.resolve(undefined);
+			}
+			case 'workspace.openContentTab': {
+				// `showTextDocument` of a provider-scheme document (a chat view opening its
+				// tool outputs and code blocks this way): a read-only content tab. The text
+				// comes from the shim — it read the provider in `openTextDocument` — so this
+				// never calls the frame back while its request is in flight.
+				const [title, path, text, placement] = args as [string, string, string, EditorPlacement?];
+				this.onOpenContent?.(String(title ?? ''), String(path ?? ''), String(text ?? ''), placement);
 				return Promise.resolve(undefined);
 			}
 			case 'treeView.register': {
@@ -1923,8 +1946,8 @@ export class ExtensionHost {
 			// needs. A frame caller has no such re-entry; its await keeps the old contract
 			// (errors reach the extension, the result lands before the promise settles).
 			const open = id === 'vscode.diff'
-				? this.openVscodeDiff(args[0], args[1], args[2])
-				: this.openVscodeDocument(args[0]);
+				? this.openVscodeDiff(args[0], args[1], args[2], args[3])
+				: this.openVscodeDocument(args[0], args[1]);
 			const done = open.then(() => undefined);
 			if (caller?.remote === true) {
 				void done.catch((error) => notify('error', `${t('extensions.openFailed')}: ${String(error)}`));

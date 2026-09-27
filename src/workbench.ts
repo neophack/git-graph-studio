@@ -187,7 +187,7 @@ export class Workbench {
 		// The editor-facing vscode API: text edits land in an open CodeMirror editor, opens
 		// go through the editor area, and the host pushes active-editor and save events.
 		this.extensionHost.onApplyEdits = (path, edits) => this.editors.applyTextEdits(path, edits);
-		this.extensionHost.onOpenFile = (path, line, column) => void this.editors.openFile(path, line !== undefined ? { line, column } : undefined);
+		this.extensionHost.onOpenFile = (path, line, column, placement) => void this.editors.openFile(path, line !== undefined ? { line, column } : undefined, placement);
 		this.extensionHost.activeText = () => this.editors.activeText();
 		// `openTextDocument` reads an open editor's buffer, `TextDocument.save()` saves it,
 		// and edits / closes reach the extensions as document events.
@@ -199,8 +199,8 @@ export class Workbench {
 		// The page services a self-contained extension page acts through (the graph view's bridge
 		// opens diffs and revisions, shows the SCM view, runs the terminal, and nudges the
 		// workbench after its own writes — the delegate the graph page acts through).
-		this.extensionHost.onOpenDiff = (diff: PageDiffRequest) => void this.editors.openDiff({ kind: 'diff', ...diff });
-		this.extensionHost.onOpenContent = (title, path, text) => void this.editors.openContent({ kind: 'content', id: `ext-content:${title}`, title, path, text });
+		this.extensionHost.onOpenDiff = (diff: PageDiffRequest, placement) => void this.editors.openDiff({ kind: 'diff', ...diff }, placement);
+		this.extensionHost.onOpenContent = (title, path, text, placement) => void this.editors.openContent({ kind: 'content', id: `ext-content:${title}`, title, path, text }, placement);
 		this.extensionHost.onOpenFileAtRevision = (revision, path, title, repo) => void this.editors.openRevision(revision, path, title, repo);
 		this.extensionHost.onShowView = (id) => this.showView(id as never);
 		this.extensionHost.onRevealTerminal = () => this.panel.show('terminal');

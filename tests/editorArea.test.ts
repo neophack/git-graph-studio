@@ -125,6 +125,32 @@ describe('editor area (M3 3.1)', () => {
 		expect(area.groupCount).toBe(3);
 	});
 
+	it('opens a placed editor beside the focused group and keeps landing in that side layer', async () => {
+		files({ 'C:\\repo\\a.ts': 'a\n', 'C:\\repo\\b.ts': 'b\n' });
+		const area = new EditorArea(document.getElementById('editorGroup')!);
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
+
+		// 'beside' splits a right layer when there is none — the claude-code shape: the
+		// chat panel keeps its half of the area, the clicked output takes the other. The
+		// opened tab takes the focus (a group's activation focuses it, as a tab click does).
+		await area.openContent({ kind: 'content', id: 'ext-content:Claude Code (ab12cd)', title: 'Claude Code (ab12cd)', path: '/temp/readonly/Claude Code (ab12cd)', text: 'the tool output\n' }, 'beside');
+		expect(area.groupCount).toBe(2);
+		expect(groupTabs()).toEqual([['a.ts'], ['Claude Code (ab12cd)']]);
+		expect(area.focusedIndex).toBe(1);
+
+		// A later placed open lands in the same side layer — never a third split, even
+		// though the focus now sits inside it (clicking inside a webview never refocuses
+		// its editor group, so the focused group alone cannot name "the other view").
+		await area.openFile('C:\\repo\\b.ts', undefined, 'beside');
+		expect(area.groupCount).toBe(2);
+		expect(groupTabs()).toEqual([['a.ts'], ['Claude Code (ab12cd)', 'b.ts']]);
+
+		// A ViewColumn number is a group index: One answers — and focuses — the first.
+		await area.openFile('C:\\repo\\a.ts', { line: 1 }, 1);
+		expect(area.focusedIndex).toBe(0);
+	});
+
 	it('reports the focused group as the area, spanning groups for closeAll and dirty state', async () => {
 		files({ 'C:\\repo\\a.ts': 'a\n', 'C:\\repo\\b.ts': 'b\n' });
 		const area = new EditorArea(document.getElementById('editorGroup')!);

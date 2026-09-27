@@ -8,7 +8,7 @@ import { applyExtensionSettings, evaluateWhen, extensionSettingDefs, registerCon
 import { extLog, extLogEntries, flushExtLog, resetExtLog } from '../src/extLog';
 import { ExtensionsPanel } from '../src/extensionsPanel';
 import { commandForBinding, commands } from '../src/commands';
-import { activationContext, createVscodeApi, applyTextEditsToText, Position, rehydrateUris, Range, RelativePattern, setUriPlatform, Uri, watcherGlobMatches } from '../src/vscodeApi';
+import { activationContext, createVscodeApi, applyTextEditsToText, Position, rehydrateUris, Range, readLocalDocProvider, RelativePattern, setUriPlatform, Uri, ViewColumn, watcherGlobMatches } from '../src/vscodeApi';
 import { createNodeBuiltins } from '../src/nodeShims';
 import { registerDeclaredLanguages, declaredLanguageName, registerExtensionSnippets, registerExtensionThemes, extensionThemeList, languageIdFor } from '../src/contributions';
 import { snippetsFor } from '../src/snippetRegistry';
@@ -435,6 +435,68 @@ describe('the vscode API shim', () => {
 		api.commands.registerCommand('sayHi', (...args: unknown[]) => `hi ${args[0]}`);
 		expect(registeredIds).toEqual(['acme.demo.sayHi', 'queued']);
 		expect(handler!('world')).toBe('hi world');
+	});
+
+	it('showTextDocument opens a provider-scheme document as a beside content tab, a file with the caller\'s column', async () => {
+		// claude-code's chat opens its tool outputs and code blocks as virtual documents
+		// under a provider scheme (`_claude_vscode_fs_readonly:/temp/...`): the tab is the
+		// read-only content one, placed beside so the chat keeps its view. A plain file
+		// keeps going through `workspace.openFile`, carrying the ViewColumn as placement.
+		const requests: { method: string; args: unknown[] }[] = [];
+		const api = createVscodeApi(
+			{ extensionId: 'acme.demo', extensionPath: '/ext', workspaceFolders: [], settings: {}, language: 'en' },
+			{
+				request: async (method, args) => {
+					requests.push({ method, args: args ?? [] });
+					if (method === 'docProvider.read') return 'the provider text';
+					return undefined;
+				},
+				registerCommandHandler: () => undefined
+			}
+		);
+		const uri = Uri.from({ scheme: '_claude_vscode_fs_readonly', path: '/temp/readonly/Claude Code (ab12cd)' });
+		const doc = await api.workspace.openTextDocument(uri);
+		await api.window.showTextDocument(doc, { preview: true });
+		await api.window.showTextDocument(Uri.file('/repo/src/main.ts'), ViewColumn.Beside);
+		expect(requests).toEqual([
+			{ method: 'docProvider.read', args: [uri] },
+			{ method: 'workspace.openContentTab', args: ['Claude Code (ab12cd)', '/temp/readonly/Claude Code (ab12cd)', 'the provider text', 'beside'] },
+			{ method: 'workspace.openFile', args: ['/repo/src/main.ts', undefined, undefined, 'beside'] }
+		]);
+	});
+
+	it('an own provider scheme reads locally - openTextDocument never round-trips through the host', async () => {
+		// The ggs-node reentry guard: claude-code's chat reads its own readonly scheme on
+		// click, and the blocking bridge parks the one JS thread inside every host request
+		// until its answer crosses back - an answer that is itself a call back into this
+		// same parked thread (`docProvider.provide`). The bridge's own registration answers
+		// first; a scheme another extension registered keeps the host lookup (the test above).
+		const requests: { method: string; args: unknown[] }[] = [];
+		const parked = new Map<string, { provideTextDocumentContent?: (uri: unknown) => unknown }>();
+		const api = createVscodeApi(
+			{ extensionId: 'acme.demo', extensionPath: '/ext', workspaceFolders: [], settings: {}, language: 'en' },
+			{
+				request: async (method, args) => {
+					requests.push({ method, args: args ?? [] });
+					return undefined;
+				},
+				registerCommandHandler: () => undefined,
+				registerDocProvider: (scheme, provider) => parked.set(scheme, provider),
+				unregisterDocProvider: (scheme) => parked.delete(scheme),
+				readDocProvider: (uri) => readLocalDocProvider(parked, uri)
+			}
+		);
+		api.workspace.registerTextDocumentContentProvider('chatout', {
+			provideTextDocumentContent: (uri) => `CONTENT:${(uri as { path?: string }).path}`
+		});
+		const uri = Uri.from({ scheme: 'chatout', path: '/temp/readonly/Bash tool output (ab12cd)' });
+		const doc = await api.workspace.openTextDocument(uri);
+		expect(doc.getText()).toBe('CONTENT:/temp/readonly/Bash tool output (ab12cd)');
+		await api.window.showTextDocument(doc, { preview: true });
+		expect(requests).toEqual([
+			{ method: 'docProvider.register', args: ['chatout'] },
+			{ method: 'workspace.openContentTab', args: ['Bash tool output (ab12cd)', '/temp/readonly/Bash tool output (ab12cd)', 'CONTENT:/temp/readonly/Bash tool output (ab12cd)', 'beside'] }
+		]);
 	});
 
 	it('reads and persists configuration through the settings bridge', async () => {
@@ -2045,6 +2107,44 @@ describe('the compatibility surface this round: digests, watchers, provider-back
 		host.onOpenFile = (path) => files.push(path);
 		await host.executeCommand('vscode.open', [{ scheme: 'file', path: '/ws/repo/main.py', fsPath: '/ws/repo/main.py', query: '', fragment: '', toString: () => 'file:///ws/repo/main.py', with: () => null }]);
 		expect(files).toEqual(['/ws/repo/main.py']);
+	});
+
+	it('vscode.open honors a ViewColumn: Beside and a column number become the tab placement', async () => {
+		const host = new ExtensionHost();
+		const handle = { frame: document.createElement('iframe'), commandIds: new Set<string>(), pendingCalls: new Set<(error: Error) => void>() };
+		document.body.appendChild(handle.frame);
+		host['frames'].set('acme.demo', handle);
+		await host['serve']('docProvider.register', ['acme-scheme'], 'acme.demo', handle);
+		(host as unknown as { callFrame: (h: unknown, method: string, args: unknown[]) => Promise<unknown> }).callFrame =
+			async () => 'the output text';
+		const contentPlacements: (string | number | undefined)[] = [];
+		host.onOpenContent = (_title, _path, _text, placement) => contentPlacements.push(placement);
+		const filePlacements: { path: string; placement?: string | number }[] = [];
+		host.onOpenFile = (path, _line, _column, placement) => filePlacements.push({ path, placement });
+		const uri = { scheme: 'acme-scheme', path: '/temp/readonly/Claude Code (ab12cd)', fsPath: '', query: '', fragment: '', toString: () => 'acme-scheme:/temp/readonly/Claude%20Code%20(ab12cd)', with: () => uri };
+		// ViewColumn.Beside (-2) — claude-code's shape for opening beside the chat panel.
+		await host.executeCommand('vscode.open', [uri, -2]);
+		// A numbered column; and Active (-1) stays the host's default (no placement).
+		await host.executeCommand('vscode.open', [{ ...uri, scheme: 'file', path: '/ws/repo/main.py', fsPath: '/ws/repo/main.py' }, 2]);
+		await host.executeCommand('vscode.open', [{ ...uri, scheme: 'file', path: '/ws/repo/other.py', fsPath: '/ws/repo/other.py' }, -1]);
+		expect(contentPlacements).toEqual(['beside']);
+		expect(filePlacements).toEqual([{ path: '/ws/repo/main.py', placement: 2 }, { path: '/ws/repo/other.py', placement: undefined }]);
+	});
+
+	it('workspace.openContentTab opens a provider document showTextDocument already read, placed beside', async () => {
+		// claude-code's chat opens its tool outputs and code blocks through this door: the
+		// text crossed with the request (the shim read the provider in `openTextDocument`),
+		// so the host never calls the frame back while its request is still in flight.
+		const host = new ExtensionHost();
+		const opened: { title: string; path: string; text: string; placement?: string | number }[] = [];
+		host.onOpenContent = (title, path, text, placement) => opened.push({ title, path, text, placement });
+		await host['serve']('workspace.openContentTab', ['Claude Code (ab12cd)', '/temp/readonly/Claude Code (ab12cd)', 'the tool output\n', 'beside'], 'acme.demo', { frame: null, commandIds: new Set(), pendingCalls: new Set() });
+		expect(opened).toEqual([{ title: 'Claude Code (ab12cd)', path: '/temp/readonly/Claude Code (ab12cd)', text: 'the tool output\n', placement: 'beside' }]);
+		// `workspace.openFile` carries the placement through the same way.
+		const files: { path: string; line?: number; placement?: string | number }[] = [];
+		host.onOpenFile = (path, line, _column, placement) => files.push({ path, line, placement });
+		await host['serve']('workspace.openFile', ['/ws/repo/main.py', 3, 4, 'beside'], 'acme.demo', { frame: null, commandIds: new Set(), pendingCalls: new Set() });
+		expect(files).toEqual([{ path: '/ws/repo/main.py', line: 3, placement: 'beside' }]);
 	});
 
 	it('vscode.diff from a process-backed caller answers at once — the provide call reaches a thread the response unblocks', async () => {

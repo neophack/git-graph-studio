@@ -13,7 +13,7 @@
 //   Call (host -> frame): running a command handler the extension registered, deactivate,
 //                         tree view walks, webview view resolutions.
 
-import { activationContext, createVscodeApi, Disposable, rehydrateUris, serveHostCall, setUriPlatform, shimLog, UNSERVED_HOST_CALL, Uri, type HostContext, type VscodeApi } from './vscodeApi';
+import { activationContext, createVscodeApi, Disposable, readLocalDocProvider, rehydrateUris, serveHostCall, setUriPlatform, shimLog, UNSERVED_HOST_CALL, Uri, type HostContext, type VscodeApi } from './vscodeApi';
 import { setShimFailureReporter } from './nodeShims/shared';
 import { createNodeRequire, type NodeEnv } from './extModuleLoader';
 import { createNodeBuiltins, installNodeGlobals } from './nodeShims';
@@ -206,7 +206,10 @@ function boot(message: InitMessage): void {
 		request: hostRequest,
 		registerCommandHandler: (id, handler) => registered.set(id, handler),
 		registerDocProvider: (scheme, provider) => docProviders.set(scheme, provider),
-		unregisterDocProvider: (scheme) => docProviders.delete(scheme)
+		unregisterDocProvider: (scheme) => docProviders.delete(scheme),
+		// The frame's own registration answers locally — one postMessage round-trip fewer
+		// for the common case, on the same contract the process hosts serve.
+		readDocProvider: (uri) => readLocalDocProvider(docProviders, uri)
 	});
 	api_ = api;
 	// A Node surface the frame cannot serve (a sync spawn, a socket) is logged before it

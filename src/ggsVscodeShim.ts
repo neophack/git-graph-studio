@@ -10,7 +10,7 @@
 // answers over the reader thread, and the extension's own activation is sequential by
 // nature. Data crosses as JSON strings at the bridge; everything inside is typed objects.
 
-import { activationContext, createVscodeApi, rehydrateUris, serveHostCall, UNSERVED_HOST_CALL, Uri, type HostBridge, type HostContext, type VscodeApi } from './vscodeApi';
+import { activationContext, createVscodeApi, readLocalDocProvider, rehydrateUris, serveHostCall, UNSERVED_HOST_CALL, Uri, type HostBridge, type HostContext, type VscodeApi } from './vscodeApi';
 
 interface ShimGlobal {
 	__ggsHostRequest: (method: string, argsJson: string) => string | null;
@@ -102,7 +102,12 @@ shim.__ggsVscodeShimInstall = function (args: InstallArgs): InstalledVscode {
 			docProviders.set(scheme, provider);
 			shim.ggs.onRequest(dispatchHostCall);
 		},
-		unregisterDocProvider: (scheme) => docProviders.delete(scheme)
+		unregisterDocProvider: (scheme) => docProviders.delete(scheme),
+		// The local answer: this process registered the scheme, so its text never crosses
+		// the blocking bridge — the host's `docProvider.read` round-trip would call back
+		// into this same parked JS thread and deadlock it for the full host-request
+		// timeout (the `vscode.diff` reentry class).
+		readDocProvider: (uri) => readLocalDocProvider(docProviders, uri)
 	};
 	const api = createVscodeApi(context, bridge);
 	installed = api;

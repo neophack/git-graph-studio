@@ -168,6 +168,12 @@ export interface DiffSide {
 	content?: string;
 }
 
+/** Where a programmatically opened editor lands: `'beside'` answers the focused group's
+ *  right neighbour (a fresh right split when it has none — VS Code's `ViewColumn.Beside`),
+ *  a 1-based number that group index (`ViewColumn.One`…, created by splitting when it does
+ *  not exist yet). `undefined` is the focused group, VS Code's default. */
+export type EditorPlacement = 'beside' | number;
+
 export type EditorInput =
 	| { kind: 'file'; path: string }
 	| { kind: 'diff'; id: string; title: string; repo?: string; binaryNotice?: boolean; left: DiffSide; right: DiffSide }

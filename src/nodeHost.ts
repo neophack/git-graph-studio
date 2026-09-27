@@ -29,7 +29,7 @@ import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { join, resolve } from 'node:path';
 import Module from 'node:module';
-import { activationContext, createVscodeApi, rehydrateUris, serveHostCall, UNSERVED_HOST_CALL, Uri, type HostBridge, type HostContext, type HostEvent, type VscodeApi } from './vscodeApi';
+import { activationContext, createVscodeApi, readLocalDocProvider, rehydrateUris, serveHostCall, UNSERVED_HOST_CALL, Uri, type HostBridge, type HostContext, type HostEvent, type VscodeApi } from './vscodeApi';
 
 /* ---------- the wire: newline JSON-RPC on stdio, both directions ---------- */
 
@@ -76,7 +76,11 @@ const bridge: HostBridge = {
 	request: (method, args) => hostRequest(method, args as unknown[]),
 	registerCommandHandler: (id, handler) => registeredCommands.set(id, handler),
 	registerDocProvider: (scheme, provider) => docProviders.set(scheme, provider),
-	unregisterDocProvider: (scheme) => docProviders.delete(scheme)
+	unregisterDocProvider: (scheme) => docProviders.delete(scheme),
+	// This process's own registration answers locally; the host round-trip stays the
+	// fallback for a scheme another extension registered (where the ggs-node side cannot
+	// take the round-trip at all — its answer would reenter the blocked JS thread).
+	readDocProvider: (uri) => readLocalDocProvider(docProviders, uri)
 };
 
 let api_: VscodeApi | null = null;
