@@ -445,15 +445,13 @@ fn fs_realpath_sync(
 
 /// `readlink`: the link's own target, as written. A path that is not a link fails - Node's
 /// EINVAL, which callers (claude-code's settings writer) take as "write the path itself".
-fn fs_readlink_sync(
-    _this: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
+fn fs_readlink_sync(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = string_arg(args, 0, context);
     let metadata = std::fs::symlink_metadata(&path).map_err(|e| io_error(&path, &e))?;
     if !metadata.is_symlink() {
-        return Err(error(format!("EINVAL: invalid argument, readlink '{path}'")));
+        return Err(error(format!(
+            "EINVAL: invalid argument, readlink '{path}'"
+        )));
     }
     let target = std::fs::read_link(&path).map_err(|e| io_error(&path, &e))?;
     Ok(text(target.display().to_string()))

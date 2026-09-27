@@ -483,9 +483,12 @@ where
                     "multiple expressions in parenthesized expression",
                 ));
             }
-            if let InnerExpression::Expression(expression) = &expressions[0] {
+            // GGS-patch: move the sole expression out instead of deep-cloning it — a
+            // parenthesized subtree is often a whole IIFE or `(0, fn)` call target in a
+            // minified bundle, and the clone was a measurable share of the parse.
+            if let Some(InnerExpression::Expression(expression)) = expressions.pop() {
                 return Ok(ast::Expression::Parenthesized(Parenthesized::new(
-                    expression.clone(),
+                    expression,
                     Span::new(span_start.start(), span.end()),
                 )));
             }

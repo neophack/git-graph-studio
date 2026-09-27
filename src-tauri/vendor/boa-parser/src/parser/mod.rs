@@ -123,14 +123,32 @@ pub struct Parser<'a, R> {
     path: Option<&'a Path>,
     /// Cursor of the parser, pointing to the lexer and used to get tokens for the parser.
     cursor: Cursor<R>,
+    /// GGS-patch: analyze a script with every binding escaping (see
+    /// `boa_ast::Script::analyze_scope_all_escaping`).
+    all_bindings_escaping: bool,
+    /// GGS-patch: the source's size in code units when the `Source` constructor knew it —
+    /// handed to the cursor before the first character, so the source collector is sized
+    /// once instead of doubling (see `Source::len_hint`).
+    len_hint: Option<usize>,
 }
 
 impl<'a, R: ReadChar> Parser<'a, R> {
     /// Create a new `Parser` with a `Source` as the input to parse.
     pub fn new(source: Source<'a, R>) -> Self {
+        let len_hint = source.len_hint;
         Self {
             path: source.path,
             cursor: Cursor::new(source.reader),
+            all_bindings_escaping: false,
+            len_hint,
+        }
+    }
+
+    /// GGS-patch: size the cursor's source collector for the whole input before parsing
+    /// begins (see `Parser::len_hint`).
+    fn presize_source(&mut self) {
+        if let Some(hint) = self.len_hint.take() {
+            self.cursor.presize_source(hint);
         }
     }
 
@@ -164,8 +182,24 @@ impl<'a, R: ReadChar> Parser<'a, R> {
         interner: &mut Interner,
     ) -> ParseResult<ScriptParseOutput> {
         self.cursor.set_goal(InputElement::HashbangOrRegExp);
+        self.presize_source();
+        // GGS-patch: phase timing behind GGS_PHASE_TRACE (see boa-engine's Script::parse).
+        let ggs_lex = std::time::Instant::now();
         let (mut ast, source) = ScriptParser::new(false).parse(&mut self.cursor, interner)?;
-        if let Err(reason) = ast.analyze_scope(scope, interner) {
+        if std::env::var_os("GGS_PHASE_TRACE").is_some() {
+            eprintln!("[phase]   lexer+parser {:?}", ggs_lex.elapsed());
+        }
+        // GGS-patch: phase timing behind GGS_PHASE_TRACE (see boa-engine's Script::parse).
+        let ggs_analyze = std::time::Instant::now();
+        let analyzed = if self.all_bindings_escaping {
+            ast.analyze_scope_all_escaping(scope, interner)
+        } else {
+            ast.analyze_scope(scope, interner)
+        };
+        if std::env::var_os("GGS_PHASE_TRACE").is_some() {
+            eprintln!("[phase]   scope analysis {:?}", ggs_analyze.elapsed());
+        }
+        if let Err(reason) = analyzed {
             return Err(Error::general(
                 format!("invalid scope analysis: {reason}"),
                 Position::new(1, 1),
@@ -210,6 +244,7 @@ impl<'a, R: ReadChar> Parser<'a, R> {
         R: ReadChar,
     {
         self.cursor.set_goal(InputElement::HashbangOrRegExp);
+        self.presize_source();
         let (mut module, source) = ModuleParser.parse(&mut self.cursor, interner)?;
         if let Err(reason) = module.analyze_scope(scope, interner) {
             return Err(Error::general(
@@ -235,6 +270,7 @@ impl<'a, R: ReadChar> Parser<'a, R> {
         interner: &mut Interner,
     ) -> ParseResult<ScriptParseOutput> {
         self.cursor.set_goal(InputElement::HashbangOrRegExp);
+        self.presize_source();
         ScriptParser::new(direct).parse(&mut self.cursor, interner)
     }
 
@@ -288,6 +324,12 @@ impl<R> Parser<'_, R> {
         R: ReadChar,
     {
         self.cursor.set_json_parse(true);
+    }
+
+    /// GGS-patch: keep every binding of the parsed script in its environment (see
+    /// `boa_ast::Script::analyze_scope_all_escaping`).
+    pub fn set_all_bindings_escaping(&mut self) {
+        self.all_bindings_escaping = true;
     }
 
     /// Set the unique identifier for the parser.

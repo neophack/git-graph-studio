@@ -41,6 +41,9 @@ use super::{declaration::VarDeclaration, expression::Expression};
 /// See the [module level documentation][self] for more information.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+// GGS-patch: `ForInLoop`, `ForOfLoop` and `Try` are boxed (upstream holds them inline):
+// at 184-200 bytes they set every `Statement`'s size, and statements are returned by value
+// through the parser (see the matching note on `Expression`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Statement {
     /// See [`Block`].
@@ -77,10 +80,10 @@ pub enum Statement {
     ForLoop(ForLoop),
 
     /// See [`ForInLoop`].
-    ForInLoop(ForInLoop),
+    ForInLoop(Box<ForInLoop>),
 
     /// See [`ForOfLoop`].
-    ForOfLoop(ForOfLoop),
+    ForOfLoop(Box<ForOfLoop>),
 
     /// See[`Switch`].
     Switch(Switch),
@@ -101,7 +104,7 @@ pub enum Statement {
     Throw(Throw),
 
     /// See [`Try`].
-    Try(Try),
+    Try(Box<Try>),
 
     /// See [`With`].
     With(With),

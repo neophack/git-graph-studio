@@ -43,9 +43,12 @@ pub const HOST_REQUEST_EVENT: &str = "ext-host-request";
 
 /// How long `initialize` may take before the backend is declared unresponsive and killed.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-/// The same for a `node` backend, whose handshake answers only after the package's whole
-/// `activate` ran (VS Code puts no deadline on activation): Claude Code's 3 MB bundle on a
-/// cold first start after an install overran the 10 s a bare process binary gets.
+/// The same for a `node` backend: its activation — on ggs-node a multi-megabyte bundle's
+/// parse-and-compile — runs as a job after the handshake (ggs-node answers `initialize`
+/// the moment the protocol loop can; the real-Node host's handshake still settles only
+/// after the whole `activate`, VS Code's own no-deadline shape), so this deadline guards
+/// the greeting itself, not the activation behind it. Claude Code's bundle on a cold first
+/// start after an install once overran the 10 s a bare process binary gets.
 const NODE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(90);
 /// Lines of stderr and `$/log` kept per process, for the status view and crash reports.
 const LOG_CAP: usize = 200;
@@ -944,8 +947,9 @@ mod engine_host_tests {
     }
 
     /// A `node` backend is an extension program, so it starts with the workbench — on
-    /// ggs-node (the default) its `initialize` activates the program and speaks to the
-    /// workbench, exactly as the real-Node host does — never at the boot pass, before the
+    /// ggs-node (the default) its `initialize` answers at once and the activation runs as
+    /// the next job, speaking to the workbench from behind it, exactly as the real-Node
+    /// host's settled handshake does — never at the boot pass, before the
     /// `host.env` listener exists. A process backend (no vscode program) boots as always.
     #[test]
     fn a_node_backend_starts_with_the_workbench_on_either_host() {

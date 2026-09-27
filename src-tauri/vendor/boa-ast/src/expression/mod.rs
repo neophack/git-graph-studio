@@ -67,6 +67,11 @@ pub mod operator;
 /// See the [module level documentation][self] for more information.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+// GGS-patch: the function-expression variants and `TaggedTemplate` are boxed (upstream
+// holds them inline, like `ClassExpression` already is not). At 176-192 bytes they made
+// every `Expression` 192 bytes, and the recursive-descent parser returns each expression
+// by value through ~17 precedence levels — `memcpy` was an eighth of parsing a large
+// bundle. Boxed, the largest inline variant is 56 bytes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
     /// The ECMAScript `this` keyword refers to the object it belongs to.
@@ -102,22 +107,22 @@ pub enum Expression {
     Spread(Spread),
 
     /// See [`FunctionExpression`].
-    FunctionExpression(FunctionExpression),
+    FunctionExpression(Box<FunctionExpression>),
 
     /// See [`ArrowFunction`].
-    ArrowFunction(ArrowFunction),
+    ArrowFunction(Box<ArrowFunction>),
 
     /// See [`AsyncArrowFunction`].
-    AsyncArrowFunction(AsyncArrowFunction),
+    AsyncArrowFunction(Box<AsyncArrowFunction>),
 
     /// See [`GeneratorExpression`].
-    GeneratorExpression(GeneratorExpression),
+    GeneratorExpression(Box<GeneratorExpression>),
 
     /// See [`AsyncFunctionExpression`].
-    AsyncFunctionExpression(AsyncFunctionExpression),
+    AsyncFunctionExpression(Box<AsyncFunctionExpression>),
 
     /// See [`AsyncGeneratorExpression`].
-    AsyncGeneratorExpression(AsyncGeneratorExpression),
+    AsyncGeneratorExpression(Box<AsyncGeneratorExpression>),
 
     /// See [`ClassExpression`].
     ClassExpression(Box<ClassExpression>),
@@ -144,7 +149,7 @@ pub enum Expression {
     Optional(Optional),
 
     /// See [`TaggedTemplate`].
-    TaggedTemplate(TaggedTemplate),
+    TaggedTemplate(Box<TaggedTemplate>),
 
     /// The `new.target` pseudo-property expression.
     NewTarget(NewTarget),

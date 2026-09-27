@@ -68,6 +68,12 @@ where
         self.buffered_lexer.set_goal(elm);
     }
 
+    /// GGS-patch: reserve the source collector for `hint` code units (see
+    /// `Source::len_hint`) — the whole input, when its size was known at construction.
+    pub(super) fn presize_source(&mut self, hint: usize) {
+        self.buffered_lexer.presize_source(hint);
+    }
+
     /// Lexes the next tokens as a regex assuming that the starting '/' has already been consumed.
     /// If `init_with_eq` is `true`, then assuming that the starting '/=' has already been consumed.
     pub(super) fn lex_regex(

@@ -58,8 +58,32 @@ impl Script {
         scope: &Scope,
         interner: &Interner,
     ) -> Result<(), &'static str> {
+        let _memo = crate::JsStringMemo::enter();
         collect_bindings(self, self.strict(), false, scope, interner)?;
         analyze_binding_escapes(self, false, scope.clone(), interner)?;
+        optimize_scope_indicies(self, scope);
+        Ok(())
+    }
+
+    /// GGS-patch: [`Script::analyze_scope`] with every binding kept in its environment —
+    /// the escape analysis runs as eval code's does (as if a direct eval could see every
+    /// scope), so no binding is demoted to a register local. The register-local path
+    /// cannot hold a module-sized function in 0.21.1 (thousands of top-level names put the
+    /// register file past the VM stack limit; loading Claude Code's bundle it read an
+    /// uninitialized slot), and module code compiled through indirect eval — ggs-node's
+    /// loader until 2026-09-27 — never took it; this keeps that analysis on the script
+    /// route. Pinned in the app's `tests/vscode_shim_boa.rs`.
+    ///
+    /// # Errors
+    /// Any scope or binding errors that happened during the analysis.
+    pub fn analyze_scope_all_escaping(
+        &mut self,
+        scope: &Scope,
+        interner: &Interner,
+    ) -> Result<(), &'static str> {
+        let _memo = crate::JsStringMemo::enter();
+        collect_bindings(self, self.strict(), false, scope, interner)?;
+        analyze_binding_escapes(self, true, scope.clone(), interner)?;
         optimize_scope_indicies(self, scope);
         Ok(())
     }
@@ -77,6 +101,7 @@ impl Script {
         annex_b_function_names: &[Sym],
         interner: &Interner,
     ) -> Result<EvalDeclarationBindings, String> {
+        let _memo = crate::JsStringMemo::enter();
         let bindings = eval_declaration_instantiation_scope(
             self,
             strict,
@@ -93,13 +118,6 @@ impl Script {
             return Err(format!("Failed to analyze scope: {reason}"));
         }
 
-        if std::env::var("GGS_SCOPE_TRACE").is_ok() {
-            std::eprintln!(
-                "[ggs-scope] EVAL-COMPILE base var={} lex={} strict={strict}",
-                variable_scope.scope_index(),
-                lexical_scope.scope_index()
-            );
-        }
         variable_scope.escape_all_bindings();
         lexical_scope.escape_all_bindings();
         variable_scope.reorder_binding_indices();
@@ -193,6 +211,7 @@ impl Module {
         scope: &Scope,
         interner: &Interner,
     ) -> Result<(), &'static str> {
+        let _memo = crate::JsStringMemo::enter();
         collect_bindings(self, true, false, scope, interner)?;
         analyze_binding_escapes(self, false, scope.clone(), interner)?;
         optimize_scope_indicies(self, &self.scope.clone());

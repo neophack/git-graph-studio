@@ -35,7 +35,12 @@ impl Identifier {
     /// [spec]: https://tc39.es/ecma262/#sec-names-and-keywords
     pub(super) fn is_identifier_start(ch: u32) -> bool {
         const ID_START: CodePointSetDataBorrowed<'static> = CodePointSetData::new::<IdStart>();
-        matches!(ch, 0x0024 /* $ */ | 0x005F /* _ */) || ID_START.contains32(ch)
+        // GGS-patch: ASCII answers without the Unicode set lookup (ID_Start ∩ ASCII is the
+        // letters) — nearly every character of real source code takes this branch.
+        if ch < 0x80 {
+            return matches!(ch as u8, b'a'..=b'z' | b'A'..=b'Z' | b'$' | b'_');
+        }
+        ID_START.contains32(ch)
     }
 
     /// Checks if a character is `IdentifierPart` as per ECMAScript standards.
@@ -47,6 +52,11 @@ impl Identifier {
     fn is_identifier_part(ch: u32) -> bool {
         const ID_CONTINUE: CodePointSetDataBorrowed<'static> =
             CodePointSetData::new::<IdContinue>();
+        // GGS-patch: ASCII answers without the Unicode set lookup (ID_Continue ∩ ASCII is
+        // the letters, the digits and `_`).
+        if ch < 0x80 {
+            return matches!(ch as u8, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'$' | b'_');
+        }
         matches!(
             ch,
             0x0024 /* $ */ | 0x005F /* _ */ | 0x200C /* <ZWNJ> */ | 0x200D /* <ZWJ> */

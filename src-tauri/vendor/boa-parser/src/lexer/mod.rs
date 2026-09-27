@@ -70,6 +70,12 @@ pub struct Lexer<R> {
 }
 
 impl<R> Lexer<R> {
+    /// GGS-patch: reserve the source collector for `hint` code units (see
+    /// `Source::len_hint`) — forwarded by the parser cursor and buffered lexer.
+    pub(crate) fn presize_source(&mut self, hint: usize) {
+        self.cursor.presize_source(hint);
+    }
+
     /// Sets the goal symbol for the lexer.
     pub(crate) fn set_goal(&mut self, elm: InputElement) {
         self.goal_symbol = elm;

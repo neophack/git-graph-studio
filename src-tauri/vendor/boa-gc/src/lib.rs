@@ -5,8 +5,8 @@
 //! for garbage collected values.
 #![doc = include_str!("../ABOUT.md")]
 #![doc(
-    html_logo_url = "https://raw.githubusercontent.com/boa-dev/boa/main/assets/logo.svg",
-    html_favicon_url = "https://raw.githubusercontent.com/boa-dev/boa/main/assets/logo.svg"
+    html_logo_url = "https://raw.githubusercontent.com/boa-dev/boa/main/assets/logo_black.svg",
+    html_favicon_url = "https://raw.githubusercontent.com/boa-dev/boa/main/assets/logo_black.svg"
 )]
 #![cfg_attr(not(test), forbid(clippy::unwrap_used))]
 #![allow(
@@ -23,7 +23,6 @@ mod trace;
 
 pub(crate) mod internals;
 
-use boa_profiler::Profiler;
 use internals::{EphemeronBox, ErasedEphemeronBox, ErasedWeakMapBox, WeakMapBox};
 use pointers::{NonTraceable, RawWeakMap};
 use std::{
@@ -36,7 +35,7 @@ pub use crate::trace::{Finalize, Trace, Tracer};
 pub use boa_macros::{Finalize, Trace};
 pub use cell::{GcRef, GcRefCell, GcRefMut};
 pub use internals::GcBox;
-pub use pointers::{Ephemeron, Gc, WeakGc, WeakMap};
+pub use pointers::{Ephemeron, Gc, GcErased, WeakGc, WeakMap};
 
 type GcErasedPointer = NonNull<GcBox<NonTraceable>>;
 type EphemeronPointer = NonNull<dyn ErasedEphemeronBox>;
@@ -65,8 +64,12 @@ struct GcConfig {
 impl Default for GcConfig {
     fn default() -> Self {
         Self {
-            // Start at 1MB, the nursary size for V8 is ~1-8MB and SM can be up to 16MB
-            threshold: 1_048_576,
+            // GGS-patch: start at 64 MB (upstream: 1 MB). The collector is a full,
+            // non-generational mark-sweep, so every collection marks the whole live heap;
+            // loading Claude Code's 3 MB bundle builds ~26 MB of live GC boxes, and at 1 MB
+            // the load ran over a dozen full collections (~11% of the activation), at 32 MB
+            // still two (~85 ms). At 64 MB the activation completes before the first.
+            threshold: 64 * 1_048_576,
             used_space_percentage: 70,
         }
     }
@@ -130,7 +133,6 @@ struct Allocator;
 impl Allocator {
     /// Allocate a new garbage collected value to the Garbage Collector's heap.
     fn alloc_gc<T: Trace>(value: GcBox<T>) -> NonNull<GcBox<T>> {
-        let _timer = Profiler::global().start_event("New GcBox", "BoaAlloc");
         let element_size = size_of_val::<GcBox<T>>(&value);
         BOA_GC.with(|st| {
             let mut gc = st.borrow_mut();
@@ -150,7 +152,6 @@ impl Allocator {
     fn alloc_ephemeron<K: Trace + ?Sized, V: Trace>(
         value: EphemeronBox<K, V>,
     ) -> NonNull<EphemeronBox<K, V>> {
-        let _timer = Profiler::global().start_event("New EphemeronBox", "BoaAlloc");
         let element_size = size_of_val::<EphemeronBox<K, V>>(&value);
         BOA_GC.with(|st| {
             let mut gc = st.borrow_mut();
@@ -168,8 +169,6 @@ impl Allocator {
     }
 
     fn alloc_weak_map<K: Trace + ?Sized, V: Trace + Clone>() -> WeakMap<K, V> {
-        let _timer = Profiler::global().start_event("New WeakMap", "BoaAlloc");
-
         let weak_map = WeakMap {
             inner: Gc::new(GcRefCell::new(RawWeakMap::new())),
         };
@@ -192,15 +191,31 @@ impl Allocator {
 
     fn manage_state(gc: &mut BoaGc) {
         if gc.runtime.bytes_allocated > gc.config.threshold {
+            // GGS-patch: collection timing behind GGS_PHASE_TRACE (read once).
+            static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            let traced = *TRACE.get_or_init(|| std::env::var_os("GGS_PHASE_TRACE").is_some());
+            let before = gc.runtime.bytes_allocated;
+            let started = traced.then(std::time::Instant::now);
             Collector::collect(gc);
+            if let Some(started) = started {
+                std::eprintln!(
+                    "[gc] collection {}: {} -> {} KiB in {:?}",
+                    gc.runtime.collections,
+                    before / 1024,
+                    gc.runtime.bytes_allocated / 1024,
+                    started.elapsed()
+                );
+            }
 
             // Post collection check
             // If the allocated bytes are still above the threshold, increase the threshold.
             if gc.runtime.bytes_allocated
                 > gc.config.threshold / 100 * gc.config.used_space_percentage
             {
-                gc.config.threshold =
-                    gc.runtime.bytes_allocated / gc.config.used_space_percentage * 100;
+                // GGS-patch: grow to twice the survivors (upstream: survivors / 0.7) —
+                // the GOGC=100 pacing, so a steadily growing heap is marked a logarithmic
+                // number of times with a 2x base instead of a 1.43x one.
+                gc.config.threshold = gc.runtime.bytes_allocated.saturating_mul(2);
             }
         }
     }
@@ -228,7 +243,6 @@ struct Collector;
 impl Collector {
     /// Run a collection on the full heap.
     fn collect(gc: &mut BoaGc) {
-        let _timer = Profiler::global().start_event("Gc Full Collection", "gc");
         gc.runtime.collections += 1;
 
         Self::trace_non_roots(gc);
@@ -310,8 +324,6 @@ impl Collector {
         weaks: &[EphemeronPointer],
         weak_maps: &[ErasedWeakMapBoxPointer],
     ) -> Unreachables {
-        let _timer = Profiler::global().start_event("Gc Marking", "gc");
-
         // Walk the list, tracing and marking the nodes
         let mut strong_dead = Vec::new();
         let mut pending_ephemerons = Vec::new();
@@ -325,23 +337,9 @@ impl Collector {
             if node_ref.is_rooted() {
                 tracer.enqueue(*node);
 
-                while let Some(node) = tracer.next() {
-                    // SAFETY: the gc heap object should be alive if there is a root.
-                    let node_ref = unsafe { node.as_ref() };
-
-                    if !node_ref.header.is_marked() {
-                        node_ref.header.mark();
-
-                        // SAFETY: if `GcBox::trace_inner()` has been called, then,
-                        // this box must have been deemed as reachable via tracing
-                        // from a root, which by extension means that value has not
-                        // been dropped either.
-
-                        let trace_fn = node_ref.trace_fn();
-
-                        // SAFETY: The function pointer is appropriate for this node type because we extract it from it's VTable.
-                        unsafe { trace_fn(node, tracer) }
-                    }
+                // SAFETY: all nodes must be valid as this phase cannot drop any node.
+                unsafe {
+                    tracer.trace_until_empty();
                 }
             } else if !node_ref.is_marked() {
                 strong_dead.push(*node);
@@ -378,14 +376,9 @@ impl Collector {
                 pending_ephemerons.push(*eph);
             }
 
-            while let Some(node) = tracer.next() {
-                // SAFETY: node must be valid as this phase cannot drop any node.
-                let trace_fn = unsafe { node.as_ref() }.trace_fn();
-
-                // SAFETY: The function pointer is appropriate for this node type because we extract it from it's VTable.
-                unsafe {
-                    trace_fn(node, tracer);
-                }
+            // SAFETY: all nodes must be valid as this phase cannot drop any node.
+            unsafe {
+                tracer.trace_until_empty();
             }
         }
 
@@ -397,14 +390,9 @@ impl Collector {
             // SAFETY: The garbage collector ensures that all nodes are valid.
             unsafe { node_ref.trace(tracer) };
 
-            while let Some(node) = tracer.next() {
-                // SAFETY: node must be valid as this phase cannot drop any node.
-                let trace_fn = unsafe { node.as_ref() }.trace_fn();
-
-                // SAFETY: The function pointer is appropriate for this node type because we extract it from it's VTable.
-                unsafe {
-                    trace_fn(node, tracer);
-                }
+            // SAFETY: all nodes must be valid as this phase cannot drop any node.
+            unsafe {
+                tracer.trace_until_empty();
             }
         }
 
@@ -419,14 +407,9 @@ impl Collector {
                 // SAFETY: the garbage collector ensures `eph_ref` always points to valid data.
                 let is_key_marked = unsafe { !eph_ref.trace(tracer) };
 
-                while let Some(node) = tracer.next() {
-                    // SAFETY: node must be valid as this phase cannot drop any node.
-                    let trace_fn = unsafe { node.as_ref() }.trace_fn();
-
-                    // SAFETY: The function pointer is appropriate for this node type because we extract it from it's VTable.
-                    unsafe {
-                        trace_fn(node, tracer);
-                    }
+                // SAFETY: all nodes must be valid as this phase cannot drop any node.
+                unsafe {
+                    tracer.trace_until_empty();
                 }
 
                 is_key_marked
@@ -457,7 +440,6 @@ impl Collector {
     ///
     /// Passing a `strong` or a `weak` vec with invalid pointers will result in Undefined Behaviour.
     unsafe fn finalize(unreachables: Unreachables) {
-        let _timer = Profiler::global().start_event("Gc Finalization", "gc");
         for node in unreachables.strong {
             // SAFETY: The caller must ensure all pointers inside `unreachables.strong` are valid.
             let node_ref = unsafe { node.as_ref() };
@@ -486,7 +468,6 @@ impl Collector {
         weak: &mut Vec<EphemeronPointer>,
         total_allocated: &mut usize,
     ) {
-        let _timer = Profiler::global().start_event("Gc Sweeping", "gc");
         let _guard = DropGuard::new();
 
         strong.retain(|node| {

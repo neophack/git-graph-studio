@@ -4366,23 +4366,6 @@ for (const name of ['dispose', 'asyncDispose']) {
 
 globalThis.global = globalThis;
 
-/* The module compiler the Rust loader calls: the CommonJS wrapper as a direct eval in
- * THIS function's frame. Direct eval compiles the wrapper against this scope and the
- * wrapper captures that same chain, so every binding locator stays consistent no
- * matter where the load happens. The two alternatives are both Boa 0.20 bugs (see
- * require.rs): the `Function` constructor compiles nested functions with locators
- * that panic when the module's own closures run later, and a Rust-side `eval` during
- * a running frame hands the wrapper the caller's environment chain. */
-globalThis.__ggsCompileModule = function (text) {
-	// Indirect eval on purpose: the module wrapper compiles in the global scope, the
-	// same way node.exe compiles a module - a standalone function over its own
-	// parameters, not an extension of the calling scope. A direct eval here would run
-	// the caller-scope escape/reorder machinery over the shared helper scopes on every
-	// require, and at real-bundle scale (hundreds of modules, deep closure chains) the
-	// reordered slots diverge from the frames compiled before the reorder.
-	return (0, eval)('(function (exports, require, module, __filename, __dirname) {\n' + text + '\n})');
-};
-
 /* The per-module `require` factory the Rust loader calls: the parent directory is bound
  * into a closure, so a function a module exports and runs later still requires from home.
  * `cache` is per-runtime (the Rust side holds the real one) and kept for shape. */

@@ -119,18 +119,74 @@ pub(crate) trait ToJsString {
 }
 
 impl ToJsString for Sym {
-    #[allow(clippy::cast_possible_truncation)]
     fn to_js_string(&self, interner: &Interner) -> JsString {
-        // TODO: Identify latin1 encodeable strings during parsing to avoid this check.
-        let string = interner.resolve_expect(*self).utf16();
-        for c in string {
-            if u8::try_from(*c).is_err() {
-                return JsString::from(string);
-            }
-        }
-        let string = string.iter().map(|c| *c as u8).collect::<Vec<_>>();
-        JsString::from(JsStr::latin1(&string))
+        sym_to_js_string(*self, interner)
     }
+}
+
+thread_local! {
+    // GGS-patch: the memo behind `sym_to_js_string` — (open `JsStringMemo` scopes, entries).
+    static JS_STRING_MEMO: std::cell::RefCell<(usize, rustc_hash::FxHashMap<Sym, JsString>)> =
+        std::cell::RefCell::new((0, rustc_hash::FxHashMap::default()));
+}
+
+/// GGS-patch: a scope in which [`sym_to_js_string`] memoizes. Scope analysis and bytecode
+/// generation turn every identifier occurrence into a `JsString` — an interner resolve, a
+/// scan, and a fresh heap string, over and over for the same few thousand names of a
+/// bundle. Inside one analysis or one compile every `Sym` belongs to one interner, so the
+/// memo is sound there; the last scope to close empties it, and outside any scope nothing
+/// is cached (a `Sym` means nothing without its interner).
+#[derive(Debug)]
+pub struct JsStringMemo(());
+
+impl JsStringMemo {
+    /// Open a memo scope for work over a single interner.
+    #[must_use]
+    pub fn enter() -> Self {
+        JS_STRING_MEMO.with(|memo| memo.borrow_mut().0 += 1);
+        Self(())
+    }
+}
+
+impl Drop for JsStringMemo {
+    fn drop(&mut self) {
+        let released = JS_STRING_MEMO.with(|memo| {
+            let mut memo = memo.borrow_mut();
+            memo.0 -= 1;
+            (memo.0 == 0).then(|| std::mem::take(&mut memo.1))
+        });
+        drop(released);
+    }
+}
+
+/// GGS-patch: `sym` as a `JsString` (Latin-1 when it fits), memoized inside a
+/// [`JsStringMemo`] scope.
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+pub fn sym_to_js_string(sym: Sym, interner: &Interner) -> JsString {
+    let memoized = JS_STRING_MEMO.with(|memo| {
+        let memo = memo.borrow();
+        if memo.0 == 0 {
+            Err(false)
+        } else {
+            memo.1.get(&sym).cloned().ok_or(true)
+        }
+    });
+    let remember = match memoized {
+        Ok(string) => return string,
+        Err(remember) => remember,
+    };
+    let string = interner.resolve_expect(sym).utf16();
+    let string = if string.iter().all(|c| u8::try_from(*c).is_ok()) {
+        let latin1 = string.iter().map(|c| *c as u8).collect::<Vec<_>>();
+        JsString::from(JsStr::latin1(&latin1))
+    } else {
+        JsString::from(string)
+    };
+    if remember {
+        JS_STRING_MEMO.with(|memo| memo.borrow_mut().1.insert(sym, string.clone()));
+    }
+    string
 }
 
 impl ToJsString for Identifier {

@@ -30,7 +30,7 @@ use crate::{
     visitor::{NodeRef, NodeRefMut, VisitorMut},
 };
 use boa_interner::{Interner, Sym};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::ops::ControlFlow;
 
 /// Collect bindings and fill the scopes with them.
@@ -1698,16 +1698,6 @@ impl ScopeIndexVisitor {
             scope.set_index(self.index);
         }
 
-        if std::env::var("GGS_SCOPE_TRACE").is_ok() {
-            if std::env::var("GGS_SCOPE_TRACE").is_ok() {
-                std::eprintln!(
-                    "[ggs-scope] INDEX-visit direct_eval={contains_direct_eval} all_local={} req={} force={force_function_scope} arrow={arrow} index_before={}",
-                    scopes.function_scope().all_bindings_local(),
-                    scopes.requires_function_scope,
-                    self.index
-                );
-            }
-        }
         if force_function_scope || contains_direct_eval || !scopes.function_scope().all_bindings_local() {
             scopes.requires_function_scope = true;
             self.index += 1;
@@ -1935,7 +1925,9 @@ fn function_declaration_instantiation(
     let lexical_names = lexically_declared_names(body);
 
     // 12. Let functionNames be a new empty List.
-    let mut function_names = Vec::new();
+    // GGS-patch: a hash set — only membership is ever asked of it, and the per-declaration
+    // test was quadratic in the number of function declarations.
+    let mut function_names = FxHashSet::default();
 
     // 13. Let functionsToInitialize be a new empty List.
     // let mut functions_to_initialize = Vec::new();
@@ -1954,13 +1946,9 @@ fn function_declaration_instantiation(
         };
 
         // a.iii. If functionNames does not contain fn, then
-        if !function_names.contains(&name.sym()) {
-            // 1. Insert fn as the first element of functionNames.
-            function_names.push(name.sym());
-        }
+        // 1. Insert fn as the first element of functionNames.
+        function_names.insert(name.sym());
     }
-
-    function_names.reverse();
 
     // 15. Let argumentsObjectNeeded be true.
     let mut arguments_object_needed = true;
@@ -2081,14 +2069,15 @@ fn function_declaration_instantiation(
         // c. Set the VariableEnvironment of calleeContext to varEnv.
 
         // d. Let instantiatedVarNames be a new empty List.
-        let mut instantiated_var_names = Vec::new();
+        // GGS-patch: a hash set, not a Vec — the membership test below ran once per var
+        // name against every name before it, quadratic in a bundle's top level.
+        let mut instantiated_var_names = FxHashSet::default();
 
         // e. For each element n of varNames, do
         for n in var_names {
             // i. If instantiatedVarNames does not contain n, then
-            if !instantiated_var_names.contains(&n) {
+            if instantiated_var_names.insert(n) {
                 // 1. Append n to instantiatedVarNames.
-                instantiated_var_names.push(n);
 
                 let n_string = n.to_js_string(interner);
 
@@ -2101,14 +2090,14 @@ fn function_declaration_instantiation(
     } else {
         // a. NOTE: Only a single Environment Record is needed for the parameters and top-level vars.
         // b. Let instantiatedVarNames be a copy of the List parameterBindings.
-        let mut instantiated_var_names = parameter_bindings;
+        // GGS-patch: as a hash set (see the branch above).
+        let mut instantiated_var_names: FxHashSet<Sym> = parameter_bindings.into_iter().collect();
 
         // c. For each element n of varNames, do
         for n in var_names {
             // i. If instantiatedVarNames does not contain n, then
-            if !instantiated_var_names.contains(&n) {
+            if instantiated_var_names.insert(n) {
                 // 1. Append n to instantiatedVarNames.
-                instantiated_var_names.push(n);
 
                 let n = n.to_js_string(interner);
 
@@ -2146,7 +2135,7 @@ fn function_declaration_instantiation(
                     drop(var_env.create_mutable_binding(f_string, false));
 
                     // c. Append F to instantiatedVarNames.
-                    instantiated_var_names.push(f);
+                    instantiated_var_names.insert(f);
                 }
             }
         }
@@ -2461,7 +2450,7 @@ pub(crate) fn eval_declaration_instantiation_scope(
         };
 
         // a.i. For each String vn of the BoundNames of d, do
-        for name in bound_names(&declaration) {
+        for name in bound_names(declaration) {
             // 1. If declaredFunctionNames does not contain vn, then
             if !declared_function_names.contains(&name) {
                 // a. If varEnv is a Global Environment Record, then

@@ -289,6 +289,222 @@ fn the_direct_eval_module_compiler_holds_every_load_context() {
         .call(&boa_engine::JsValue::undefined(), &[], &mut context)
         .expect("the nested module's handler answers without the env panic");
 }
+/// The shape `require.rs` ships since 2026-09-27: the CommonJS wrapper compiled as a
+/// `Script` from Rust, in every load context the direct-eval helper above holds — a
+/// top-level load, its handler called later, a load nested inside a running frame (a
+/// module's own `require`), and that module's handler called later. The nested case is
+/// the vendored `Script::evaluate` patch: upstream ran the script over the caller's
+/// environment chain, so the wrapper saw the caller's locals and its global-depth
+/// locators aimed into the caller's frames. Here the nested module must see no
+/// caller local, and its closures must run clean after the caller returned.
+#[test]
+fn the_script_module_compiler_holds_every_load_context() {
+    fn noop_native(
+        _this: &boa_engine::JsValue,
+        _args: &[boa_engine::JsValue],
+        _context: &mut Context,
+    ) -> boa_engine::JsResult<boa_engine::JsValue> {
+        Ok(boa_engine::JsValue::from(1.0))
+    }
+    fn compile_module_and_call(
+        context: &mut Context,
+        source: &str,
+    ) -> boa_engine::JsResult<boa_engine::JsObject> {
+        let wrapper = format!(
+            "(function (exports, require, module, __filename, __dirname) {{
+{source}
+}})"
+        );
+        let function = boa_engine::Script::parse_all_bindings_escaping(
+            Source::from_bytes(wrapper.as_bytes())
+                .with_path(std::path::Path::new("C:/pkg/module.js")),
+            None,
+            context,
+        )?
+        .evaluate(context)?
+        .as_object()
+        .expect("the wrapper evaluates to a function");
+        let exports = boa_engine::JsObject::with_object_proto(context.intrinsics());
+        let module = boa_engine::JsObject::with_object_proto(context.intrinsics());
+        module
+            .set(
+                boa_engine::JsString::from("exports"),
+                exports.clone(),
+                false,
+                context,
+            )
+            .unwrap();
+        function.call(
+            &boa_engine::JsValue::undefined(),
+            &[
+                exports.clone().into(),
+                boa_engine::JsValue::undefined(),
+                module.into(),
+                boa_engine::JsValue::undefined(),
+                boa_engine::JsValue::undefined(),
+            ],
+            context,
+        )?;
+        Ok(exports)
+    }
+    fn nested_native(
+        _this: &boa_engine::JsValue,
+        _args: &[boa_engine::JsValue],
+        context: &mut Context,
+    ) -> boa_engine::JsResult<boa_engine::JsValue> {
+        let source = context
+            .global_object()
+            .get(boa_engine::JsString::from("__nestedSource"), context)?
+            .as_string()
+            .map(|s| s.to_std_string_escaped())
+            .unwrap_or_default();
+        compile_module_and_call(context, &source).map(|_| boa_engine::JsValue::undefined())
+    }
+    fn global_value(context: &mut Context, name: &str) -> boa_engine::JsValue {
+        context
+            .global_object()
+            .get(boa_engine::JsString::from(name), context)
+            .unwrap()
+    }
+    let mut context = Context::default();
+    context
+        .register_global_callable(
+            boa_engine::JsString::from("__noop"),
+            1,
+            boa_engine::NativeFunction::from_fn_ptr(noop_native),
+        )
+        .unwrap();
+    context
+        .register_global_callable(
+            boa_engine::JsString::from("__requireNested"),
+            0,
+            boa_engine::NativeFunction::from_fn_ptr(nested_native),
+        )
+        .unwrap();
+    // The requiring module's frame: a local of its own, a closure over it, and the
+    // nested require while that frame is live.
+    context
+        .eval(Source::from_bytes(
+            "globalThis.__outer = function () { const own = 3; let inner = 4;              globalThis.__capture = () => own + inner; __requireNested(); return own + inner; };",
+        ))
+        .unwrap();
+    let module_source = "const anchor = 1;
+         globalThis.__handler = () => { let x = anchor; return new Promise((r) => { x; __noop(() => r(7), 5, false, []); }); };";
+    compile_module_and_call(&mut context, module_source).expect("the top-level module loads");
+    let handler = global_value(&mut context, "__handler")
+        .as_object()
+        .expect("the handler registered");
+    handler
+        .call(&boa_engine::JsValue::undefined(), &[], &mut context)
+        .expect("the top-level module's handler answers");
+
+    context
+        .eval(Source::from_bytes(&format!(
+            "globalThis.__nestedSource = {};",
+            serde_json::to_string(
+                "const mine = 5; globalThis.__sawCallerLocal = typeof own !== 'undefined' || typeof inner !== 'undefined';
+                 globalThis.__handler = () => { let y = mine; return new Promise((r) => { y; __noop(() => r(8), 5, false, []); }); };
+                 globalThis.__mine = () => mine;"
+            )
+            .unwrap()
+        )))
+        .unwrap();
+    let outer = global_value(&mut context, "__outer")
+        .as_object()
+        .expect("__outer defined");
+    let returned = outer
+        .call(&boa_engine::JsValue::undefined(), &[], &mut context)
+        .expect("the nested module loads inside a running frame");
+    assert_eq!(
+        returned.as_number(),
+        Some(7.0),
+        "the caller's frame is intact after the nested load"
+    );
+    assert_eq!(
+        global_value(&mut context, "__sawCallerLocal").as_boolean(),
+        Some(false),
+        "the nested module compiles in the global scope, not the caller's"
+    );
+    let handler = global_value(&mut context, "__handler")
+        .as_object()
+        .expect("the nested handler registered");
+    handler
+        .call(&boa_engine::JsValue::undefined(), &[], &mut context)
+        .expect("the nested module's handler answers");
+    let mine = global_value(&mut context, "__mine")
+        .as_object()
+        .expect("the nested module's closure registered");
+    assert_eq!(
+        mine.call(&boa_engine::JsValue::undefined(), &[], &mut context)
+            .unwrap()
+            .as_number(),
+        Some(5.0),
+        "the nested module's closure reads its own module-level binding"
+    );
+    let capture = global_value(&mut context, "__capture")
+        .as_object()
+        .expect("the caller's closure registered");
+    assert_eq!(
+        capture
+            .call(&boa_engine::JsValue::undefined(), &[], &mut context)
+            .unwrap()
+            .as_number(),
+        Some(7.0),
+        "the caller's own closure still reads the caller's bindings"
+    );
+}
+
+/// Why the module loader compiles with every binding escaping: Boa 0.21.1's register-local
+/// path cannot hold a module-sized function. A CommonJS wrapper whose body declares
+/// thousands of top-level names — every real bundle — puts each non-escaping one in a
+/// register, the register file lands on the VM stack, and the call fails before a line of
+/// the module runs ("exceeded maximum call stack length" here; loading Claude Code's
+/// bundle it surfaced as "access of uninitialized binding" instead). The escaping analysis
+/// — what the indirect-eval loader always ran, and what `parse_all_bindings_escaping`
+/// keeps on the script route — runs the same wrapper clean. The register-path failure is
+/// pinned too: when an upstream Boa holds it, this test says so and the loader can
+/// reconsider register locals.
+#[test]
+fn a_module_sized_wrapper_runs_with_every_binding_escaping() {
+    let names: Vec<String> = (0..16_000).map(|i| format!("p{i} = {i}")).collect();
+    let source = format!(
+        "(function () {{ var {};
+         var dJ0 = [\"command\", \"args\"], iJ0 = new Set([\"http\", \"sse\"]);
+         var check = ($) => {{ let J = (X, Y) => {{ $.issues.push({{ path: X, message: Y }}); }};
+           for (let X of dJ0) if (Object.hasOwn($.value, X)) J([X], `\"${{X}}\" is not allowed`);
+           if (!iJ0.has($.value.type)) J([\"type\"], 'only http or sse');
+           let Q = $.value.url; if (typeof Q !== \"string\") J([\"url\"], 'no url');
+           return $.issues.length; }};
+         return check({{ issues: [], value: {{ type: \"stdio\", command: \"x\" }} }});
+         }})()",
+        names.join(", ")
+    );
+
+    let mut context = Context::default();
+    let escaping = boa_engine::Script::parse_all_bindings_escaping(
+        Source::from_bytes(source.as_bytes()),
+        None,
+        &mut context,
+    )
+    .expect("the wrapper parses")
+    .evaluate(&mut context)
+    .expect("the module-sized wrapper runs with every binding escaping");
+    assert_eq!(
+        escaping.as_number(),
+        Some(3.0),
+        "command, type and url each reported once"
+    );
+
+    let mut context = Context::default();
+    let registers = boa_engine::Script::parse(Source::from_bytes(source.as_bytes()), None, &mut context)
+        .expect("the wrapper parses")
+        .evaluate(&mut context);
+    assert!(
+        registers.is_err(),
+        "Boa's register-local path now runs a module-sized function — the loader's          all-escaping analysis may be reconsidered (see require.rs)"
+    );
+}
+
 #[test]
 fn the_git_graph_extension_entry_evaluates_in_boa() {
     let entry = std::path::Path::new(&std::env::var("USERPROFILE").unwrap())

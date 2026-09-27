@@ -24,7 +24,7 @@ use boa_ast::{
     self as ast, Expression, Punctuator, Span, Spanned, StatementList,
     declaration::Variable,
     function::{FormalParameter, FormalParameterList},
-    operations::{ContainsSymbol, contains},
+    operations::{ContainsSymbol, contains, contains_invalid_object_literal},
     statement::Return,
 };
 use boa_interner::Interner;
@@ -196,6 +196,16 @@ where
             FunctionBody::new(false, false, "arrow function").parse(cursor, interner)?
         } else {
             let expression = ExpressionBody::new(self.allow_in, false).parse(cursor, interner)?;
+            // GGS-patch: a concise body is the one function body that never passes
+            // through `FunctionStatementList`, so it runs the invalid-object-literal check
+            // itself — `contains_invalid_object_literal` no longer walks into nested
+            // function bodies (see there).
+            if contains_invalid_object_literal(&expression) {
+                return Err(Error::lex(LexError::Syntax(
+                    "invalid object literal in arrow function body".into(),
+                    boa_ast::Position::new(1, 1),
+                )));
+            }
             let span = expression.span();
             ast::function::FunctionBody::new(
                 StatementList::new(

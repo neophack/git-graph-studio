@@ -19,6 +19,7 @@
 //! 2. the handler the package registered with `ggs.onRequest(fn)`;
 //! 3. `module.exports.dispatch` / `.request` of the entry module.
 
+pub mod alloc;
 mod builtins;
 mod esm;
 mod napi_host;
@@ -144,6 +145,16 @@ pub(crate) enum Job {
         event: &'static str,
         data: Value,
         bytes: Option<Vec<u8>>,
+    },
+    /// The frame program's activation, detached from the `initialize` handshake: the
+    /// handshake answers the moment the protocol loop can (a bundle's parse-and-compile
+    /// is seconds on the interpreter — VS Code's own `onStartupFinished` runs after the
+    /// window, not inside the host's greeting), and this job runs the shim install, the
+    /// entry `require` and the `activate` call on this same JS thread. The queue is FIFO,
+    /// so every request that arrives while the activation runs orders behind it — a
+    /// command dispatched early waits for readiness exactly as a frame's does.
+    ActivateFrame {
+        params: Value,
     },
     Quit,
 }
@@ -460,6 +471,9 @@ pub fn serve_on<R: std::io::BufRead, W: std::io::Write + Send + 'static>(
 /* ---------- the JS thread: bootstrap, then the one event loop ---------- */
 
 fn js_main(rx: mpsc::Receiver<Job>, wake: Arc<(Mutex<bool>, Condvar)>, entry: PathBuf) {
+    // This thread does all the heavy lifting (every parse, compile and run): its small
+    // allocations skip the shared pool's lock (a no-op where `GgsAlloc` is not installed).
+    alloc::enable_thread_cache();
     // The addons' threadsafe functions wake THIS loop: the handle is per JS thread.
     napi_host::set_wake(Arc::clone(&wake));
     let jobs = Arc::new(Mutex::new(rx));
@@ -469,6 +483,10 @@ fn js_main(rx: mpsc::Receiver<Job>, wake: Arc<(Mutex<bool>, Condvar)>, entry: Pa
         .module_loader(std::rc::Rc::new(esm::NodeModuleLoader))
         .build()
         .expect("a Boa context builds");
+    // No AST optimizer: its one pass (constant folding) is a full extra walk over every
+    // script's tree — a tenth of a multi-megabyte bundle's parse — to fold the literal
+    // arithmetic a minifier already folded.
+    context.set_optimizer_options(boa_engine::optimizer::OptimizerOptions::empty());
     if std::env::var("GGS_VM_TRACE").is_ok() {
         context.set_trace(true);
     }
@@ -502,7 +520,11 @@ fn js_main(rx: mpsc::Receiver<Job>, wake: Arc<(Mutex<bool>, Condvar)>, entry: Pa
         napi_host::drain_threadsafe_calls(&mut context);
         // 4. Settled promise jobs (microtasks).
         let _ = context.run_jobs();
-        // 4. Sleep until a job, a timer deadline, or the idle tick.
+        // 5. Idle housekeeping (the queue was drained above): a large module's parse tree,
+        //    parked by the compiler so tearing it down — millions of frees — never delayed
+        //    the module's first run. A no-op when nothing is parked.
+        boa_engine::script::free_released_sources();
+        // 6. Sleep until a job, a timer deadline, or the idle tick.
         let deadline = with_state(|state| state.next_deadline());
         let (flag, condvar) = &*wake;
         let mut guard = flag.lock().unwrap();
@@ -582,6 +604,16 @@ fn execute_job(context: &mut Context, job: Job) -> bool {
             proc_exit(context, handle, code);
             false
         }
+        Job::ActivateFrame { params } => {
+            // A failed activation no longer fails a handshake that already answered:
+            // the failure surfaces through the extension host log instead (the emitter
+            // the initialize request carried is live by now), the shape VS Code's own
+            // async activations take.
+            if let Err(error) = install_frame_program(context, &params) {
+                with_state(|state| state.log("error", &format!("activation failed: {error}")));
+            }
+            false
+        }
         Job::Native {
             id,
             event,
@@ -604,10 +636,10 @@ fn bootstrap(context: &mut Context, entry: &Path) -> Result<(), String> {
         .eval(Source::from_bytes(PRELUDE))
         .map_err(|e| format!("the prelude failed: {e}"))?;
     // A VS Code extension's main is a real frame program: it `require`s 'vscode' and runs
-    // on the API. The compiled shim bundle (the same API the frames serve) is evaluated
-    // now, and `initialize` — which carries the extension id and the open folders —
-    // installs it, requires the entry and runs its activation. Without the shim bundle on
-    // disk the old honest skip stands.
+    // on the API. Only the fact is established here — the shim bundle's evaluation waits
+    // for the activation job (`initialize`'s), so a handshake that must turn around in
+    // milliseconds never pays it. Without the shim bundle on disk the activation job logs
+    // the honest skip.
     // Both module systems count: `require('vscode')` and an ES module's
     // `import … from "vscode"` (prettier-vscode's `main` is ESM).
     let frame_program = std::fs::read_to_string(entry)
@@ -619,27 +651,7 @@ fn bootstrap(context: &mut Context, entry: &Path) -> Result<(), String> {
         })
         .unwrap_or(false);
     if frame_program {
-        match find_vscode_shim().map(|path| std::fs::read_to_string(&path)) {
-            Some(Ok(source)) => {
-                context
-                    .eval(Source::from_bytes(source.as_bytes()))
-                    .map_err(|e| format!("the vscode shim failed: {e}"))?;
-                with_state(|state| state.frame_program = true);
-            }
-            Some(Err(e)) => with_state(|state| {
-                state.log(
-                    "info",
-                    &format!("the vscode shim is unreadable ({e}); the frame program is skipped"),
-                );
-            }),
-            None => with_state(|state| {
-                state.log(
-                    "info",
-                    "the entry is a workbench frame program and no vscode shim ships with this \
-                     host; the frame program is skipped",
-                );
-            }),
-        }
+        with_state(|state| state.frame_program = true);
         return Ok(());
     }
     let specifier = entry.display().to_string();
@@ -712,13 +724,18 @@ fn handle_request(context: &mut Context, method: &str, params: &Value) -> Result
                 state.launcher = read_launcher(&state.package_root);
             });
             merge_env(context, params);
-            // A frame program hosts now, on the handshake: the shim installer builds the
-            // API (a blocking `host.env` fetch, the extension id and folders), the entry
-            // `require`s `vscode` and activates — all inside this request, so the app's
-            // handshake answer lands after activation, exactly the real-Node host's shape.
+            // A frame program activates as the very next job, not inside the handshake: a
+            // real bundle's parse-and-compile is seconds on the interpreter, and the
+            // handshake — the app's `ext_process_start`, the Extensions view's status —
+            // answers in the time the protocol loop needs to turn around. The single JS
+            // thread keeps every later request ordered behind the activation (FIFO), so a
+            // command that beats readiness waits for it, never races it.
             let frame_program = with_state(|state| state.frame_program);
             if frame_program {
-                install_frame_program(context, params)?;
+                let pump = with_state(|state| state.pump());
+                pump.send_job(Job::ActivateFrame {
+                    params: params.clone(),
+                });
             }
             let (launcher, package_root) = with_state(|state| {
                 (
@@ -790,11 +807,35 @@ fn handle_request(context: &mut Context, method: &str, params: &Value) -> Result
     }
 }
 
-/// Install the hosted frame program, on the first handshake: the shim installer builds the
-/// `vscode` API around the blocking host-request bridge, the entry `require`s `vscode` from
-/// it, and its `activate` runs to settlement — the package's own program, hosted.
+/// Install the hosted frame program — the activation job the (already answered) handshake
+/// queued: the compiled shim bundle evaluates first (deferred from bootstrap so the
+/// handshake stays milliseconds), the shim installer builds the `vscode` API around the
+/// blocking host-request bridge, the entry `require`s `vscode` from it, and its `activate`
+/// runs to settlement — the package's own program, hosted.
 fn install_frame_program(context: &mut Context, params: &Value) -> Result<(), String> {
     let trace = std::env::var("GGS_TRACE_BOOT").is_ok();
+    match find_vscode_shim().map(|path| std::fs::read_to_string(&path)) {
+        Some(Ok(source)) => {
+            if trace {
+                eprintln!(
+                    "[boot] evaluating the vscode shim bundle ({} bytes)",
+                    source.len()
+                );
+            }
+            context
+                .eval(Source::from_bytes(source.as_bytes()))
+                .map_err(|e| format!("the vscode shim failed: {e}"))?;
+        }
+        Some(Err(e)) => {
+            return Err(format!("the vscode shim is unreadable ({e})"));
+        }
+        None => {
+            return Err(
+                "the entry is a workbench frame program and no vscode shim ships with this host"
+                    .to_owned(),
+            );
+        }
+    }
     let extension_id = params
         .get("extensionId")
         .and_then(Value::as_str)
@@ -1370,5 +1411,53 @@ mod tests {
         // A package without a manifest answers with the entry's own directory.
         let bare = tmp.path().join("bare.js");
         assert_eq!(find_package_root(&bare), tmp.path());
+    }
+
+    /// The compile-path benchmark: `GGS_COMPILE_PROBE=<file.js>` compiles the file's
+    /// CommonJS wrapper through BOTH compilation routes — the script route
+    /// (`Context::eval` → `Script::parse`, the module loader's) and the indirect-eval
+    /// route it used before (`(0, eval)(src)`) — and prints both totals. Run it against a
+    /// real bundle under the optimized profile: `GGS_COMPILE_PROBE=<extension.js> cargo
+    /// test --profile ggs-node --features node-runtime --lib compile_paths -- --nocapture
+    /// --exact`. The diagnosis instrument of the slow-big-bundle investigation
+    /// (2026-09-27): the eval route re-read the bundle as a UTF-16 JS string before its
+    /// parse began, and the script route won; whatever wins here is what a load pays.
+    #[test]
+    fn compile_paths_probe() {
+        let Ok(path) = std::env::var("GGS_COMPILE_PROBE") else {
+            return; // an ordinary test run has nothing to benchmark
+        };
+        let source = std::fs::read_to_string(&path).expect("GGS_COMPILE_PROBE is readable");
+        let wrapper = format!(
+            "(function (exports, require, module, __filename, __dirname) {{\n{source}\n}})"
+        );
+        let mut context = Context::default();
+        // The script route, twice: the second is the steady-state number (allocator warm).
+        for round in 1..=2 {
+            let started = std::time::Instant::now();
+            let value = context
+                .eval(Source::from_bytes(wrapper.as_bytes()))
+                .expect("the script route compiles");
+            eprintln!(
+                "[probe] script route round {round}: {:?} ({})",
+                started.elapsed(),
+                value.type_of()
+            );
+        }
+        // The indirect-eval route (the loader's), through a global so the string literal
+        // never re-parses the bundle as script source.
+        let quoted = serde_json::to_string(&wrapper).unwrap();
+        let script = format!("var __probeSource = {quoted}; (0, eval)(__probeSource)");
+        for round in 1..=2 {
+            let started = std::time::Instant::now();
+            let value = context
+                .eval(Source::from_bytes(script.as_bytes()))
+                .expect("the eval route compiles");
+            eprintln!(
+                "[probe] eval route round {round}: {:?} ({})",
+                started.elapsed(),
+                value.type_of()
+            );
+        }
     }
 }

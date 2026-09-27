@@ -19,7 +19,7 @@ use std::{
 };
 
 use crate::{
-    JsBigInt, JsStr, JsString, SourceText, SpannedSourceText,
+    JsBigInt, JsString, SourceText, SpannedSourceText,
     builtins::function::{ThisMode, arguments::MappedArguments},
     js_string,
     vm::{
@@ -68,15 +68,8 @@ pub(crate) trait ToJsString {
 
 impl ToJsString for Sym {
     fn to_js_string(&self, interner: &Interner) -> JsString {
-        // TODO: Identify latin1 encodeable strings during parsing to avoid this check.
-        let string = interner.resolve_expect(*self).utf16();
-        for c in string {
-            if u8::try_from(*c).is_err() {
-                return js_string!(string);
-            }
-        }
-        let string = string.iter().map(|c| *c as u8).collect::<Vec<_>>();
-        js_string!(JsStr::latin1(&string))
+        // GGS-patch: memoized inside a `boa_ast::JsStringMemo` scope (see there).
+        boa_ast::sym_to_js_string(*self, interner)
     }
 }
 

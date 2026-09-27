@@ -307,6 +307,383 @@ vscode.workspace.registerTextDocumentContentProvider('ggsfix', {
         json!("CONTENT:x"),
         "the provider's text crosses whole"
     );
+    // EOF by hangup, not by the reader's 60 s idle timeout.
+    drop(requests_tx);
+    let _ = serve.join();
+}
+
+/// A package reading its own provider-scheme document (claude-code's chat opening a tool
+/// output: `openTextDocument` then `showTextDocument` on its `_claude_vscode_fs_readonly`
+/// Uri) never crosses the host bridge for the text. The ggs-node bridge parks the one JS
+/// thread inside every host request until its answer crosses back, and the workbench's
+/// answer for `docProvider.read` is a `docProvider.provide` call back into this same
+/// process - a request that can only run on the parked thread (the `vscode.diff`
+/// reentry deadlock class). The local read breaks the circle: the text comes from this
+/// side's own registration, and the tab open rides `workspace.openContentTab` with the
+/// text in its arguments, which the host answers without calling back.
+#[test]
+fn an_own_scheme_read_opens_the_content_tab_without_the_host_round_trip() {
+    // The shim file the bootstrap evaluates for a frame program (the dev layout prepare
+    // writes); a CI checkout without a built shim skips this suite.
+    let shim = std::env::var("GGS_VSCODE_SHIM")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("../target/studio/vscode-shim.cjs"));
+    if !shim.is_file() {
+        eprintln!("skipping: no vscode-shim.cjs built");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[
+            (
+                "package.json",
+                r#"{"name":"chatview","publisher":"acme","version":"1.0.0","main":"main.js"}"#,
+            ),
+            (
+                "main.js",
+                r#"
+const vscode = require('vscode');
+vscode.workspace.registerTextDocumentContentProvider('chatout', {
+    provideTextDocumentContent(uri) { return 'the tool output\n'; }
+});
+vscode.commands.registerCommand('chat.openOutput', async () => {
+    const uri = vscode.Uri.from({ scheme: 'chatout', path: '/temp/readonly/Bash tool output (ab12cd)' });
+    const doc = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(doc, { preview: true });
+    return doc.getText();
+});
+"#,
+            ),
+        ],
+    )
+    .join("main.js");
+
+    let (requests_tx, requests_rx) = std::sync::mpsc::channel::<String>();
+    let (output_tx, output_rx) = std::sync::mpsc::channel::<String>();
+    let serve = std::thread::spawn(move || {
+        git_graph_studio_lib::node_runtime::serve_on(
+            entry,
+            ChannelReader::from(requests_rx),
+            ChannelWriter(output_tx),
+        );
+    });
+
+    let mut next_id = 1u64;
+    requests_tx
+        .send(git_graph_studio_lib::ext_protocol::request(
+            next_id,
+            "initialize",
+            json!({
+                "protocolVersion": "ggs-ext/1",
+                "extensionId": "acme.chatview",
+                "extensionPath": tmp.path().join("pkg").display().to_string(),
+                "workspaceFolders": [],
+            }),
+        ))
+        .unwrap();
+
+    let mut opened_tab: Option<Value> = None;
+    let read_line = || -> String {
+        let raw = match output_rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(line) => line,
+            Err(_) => panic!("the backend fell silent (the flow never finished)"),
+        };
+        eprintln!("[wire-in] {}", raw.trim());
+        raw
+    };
+    // Every `ggs.hostRequest` the flow crosses is answered here - and `docProvider.read`
+    // never may be among them: the workbench's answer for it is a call back into this
+    // same parked JS thread.
+    let answer_host_request =
+        |wire: &Value, opened_tab: &mut Option<Value>| -> Result<Value, String> {
+            let inner = wire["params"]["method"].as_str().unwrap_or_default();
+            assert_ne!(
+                inner, "docProvider.read",
+                "an own-scheme read must be answered by this side's own registration, not the host round-trip whose answer reenters the parked JS thread"
+            );
+            match inner {
+                "host.env" => Ok(json!({
+                    "settings": {},
+                    "language": "en",
+                    "appVersion": "0.1.5-test",
+                    "themeKind": 2,
+                    "state": { "global": {}, "workspace": {} }
+                })),
+                "workspace.openContentTab" => {
+                    *opened_tab = Some(wire["params"]["args"].clone());
+                    Ok(Value::Null)
+                }
+                _ => Ok(Value::Null),
+            }
+        };
+
+    // 1. The handshake: the bootstrap installs the shim, the entry registers the provider
+    //    and the command, and activation settles.
+    loop {
+        let line = read_line();
+        let Ok(wire) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
+            let id = wire["id"].as_u64().unwrap_or_default();
+            let answer = answer_host_request(&wire, &mut opened_tab);
+            requests_tx
+                .send(git_graph_studio_lib::ext_protocol::response(id, answer))
+                .unwrap();
+            continue;
+        }
+        if wire["id"].as_u64() == Some(next_id) {
+            assert_eq!(wire["result"]["protocolVersion"], "ggs-ext/1", "{wire:?}");
+            break;
+        }
+    }
+
+    // 2. The click's flow: the command opens the package's own provider scheme and shows
+    //    it - locally read, and the tab request carries the text and the beside
+    //    placement in its arguments.
+    next_id += 1;
+    let clicked = next_id;
+    requests_tx
+        .send(git_graph_studio_lib::ext_protocol::request(
+            clicked,
+            "runCommand",
+            json!({ "command": "chat.openOutput", "args": [] }),
+        ))
+        .unwrap();
+    let command_answer = loop {
+        let line = read_line();
+        let Ok(wire) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
+            let id = wire["id"].as_u64().unwrap_or_default();
+            let answer = answer_host_request(&wire, &mut opened_tab);
+            requests_tx
+                .send(git_graph_studio_lib::ext_protocol::response(id, answer))
+                .unwrap();
+            continue;
+        }
+        if wire["id"].as_u64() == Some(clicked) {
+            break wire["error"]["message"]
+                .as_str()
+                .map(str::to_owned)
+                .map(Err)
+                .unwrap_or(Ok(wire.get("result").cloned().unwrap_or(Value::Null)));
+        }
+    };
+    assert_eq!(
+        command_answer,
+        Ok(json!("the tool output\n")),
+        "the document was read from this side's own registration"
+    );
+    assert_eq!(
+        opened_tab,
+        Some(json!([
+            "Bash tool output (ab12cd)",
+            "/temp/readonly/Bash tool output (ab12cd)",
+            "the tool output\n",
+            "beside"
+        ])),
+        "the content tab carries the provider's text and the beside placement"
+    );
+    // EOF by hangup, not by the reader's 60 s idle timeout.
+    drop(requests_tx);
+    let _ = serve.join();
+}
+
+/// The handshake no longer waits out a frame program's activation (a multi-megabyte
+/// bundle's parse-and-compile is seconds on the interpreter): `initialize` answers the
+/// moment the protocol loop can, the activation runs as the next job on the same JS
+/// thread, and every request that arrives meanwhile orders behind it. The entry's
+/// activation here parks on a `commands.execute` host request the test holds — the
+/// handshake must cross while the activation is parked (it cannot settle before the held
+/// answer), a command sent during the park stays unanswered, and it answers the moment
+/// the release lets the activation register its handler.
+#[test]
+fn the_handshake_answers_before_the_frame_programs_activation_settles() {
+    // The shim file the activation job evaluates for a frame program (the dev layout
+    // prepare writes); a CI checkout without a built shim skips this suite.
+    let shim = std::env::var("GGS_VSCODE_SHIM")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("../target/studio/vscode-shim.cjs"));
+    if !shim.is_file() {
+        eprintln!("skipping: no vscode-shim.cjs built");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[
+            (
+                "package.json",
+                r#"{"name":"hold","publisher":"acme","version":"1.0.0","main":"main.js"}"#,
+            ),
+            (
+                "main.js",
+                r#"
+const vscode = require('vscode');
+module.exports.activate = function () {
+    return vscode.commands.executeCommand('probe.hold').then(() => {
+        vscode.commands.registerCommand('probe.ready', () => 'READY');
+    });
+};
+"#,
+            ),
+        ],
+    )
+    .join("main.js");
+
+    let (requests_tx, requests_rx) = std::sync::mpsc::channel::<String>();
+    let (output_tx, output_rx) = std::sync::mpsc::channel::<String>();
+    let serve = std::thread::spawn(move || {
+        git_graph_studio_lib::node_runtime::serve_on(
+            entry,
+            ChannelReader::from(requests_rx),
+            ChannelWriter(output_tx),
+        );
+    });
+
+    let mut next_id = 1u64;
+    requests_tx
+        .send(git_graph_studio_lib::ext_protocol::request(
+            next_id,
+            "initialize",
+            json!({
+                "protocolVersion": "ggs-ext/1",
+                "extensionId": "acme.hold",
+                "extensionPath": tmp.path().join("pkg").display().to_string(),
+                "workspaceFolders": [],
+            }),
+        ))
+        .unwrap();
+
+    let read_line = || -> String {
+        match output_rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(line) => line,
+            Err(_) => panic!("the backend fell silent (the held activation never finished)"),
+        }
+    };
+
+    // Phase 1 — the handshake crosses BEFORE the activation can settle: the entry's
+    // activation is parked on the probe.hold request this test holds unanswered until
+    // phase 4, so a handshake-blocking activation could never have answered here.
+    let handshake;
+    loop {
+        let line = read_line();
+        let Ok(wire) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
+            let id = wire["id"].as_u64().unwrap_or_default();
+            let answer = match wire["params"]["method"].as_str().unwrap_or_default() {
+                "host.env" => json!({
+                    "settings": {},
+                    "language": "en",
+                    "state": { "global": {}, "workspace": {} }
+                }),
+                _ => Value::Null,
+            };
+            requests_tx
+                .send(git_graph_studio_lib::ext_protocol::response(id, Ok(answer)))
+                .unwrap();
+            continue;
+        }
+        if wire["id"].as_u64() == Some(next_id) {
+            handshake = wire;
+            break;
+        }
+    }
+    assert_eq!(
+        handshake["result"]["protocolVersion"], "ggs-ext/1",
+        "the handshake answered while the activation was still parked: {handshake:?}"
+    );
+
+    // Phase 2 — the parked activation announces itself: the probe.hold host request
+    // arrives (the activation job runs), and this test is what holds it.
+    let held;
+    loop {
+        let line = read_line();
+        let Ok(wire) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
+            let id = wire["id"].as_u64().unwrap_or_default();
+            let inner = wire["params"]["method"].as_str().unwrap_or_default();
+            if inner == "commands.execute"
+                && wire["params"]["args"][0].as_str() == Some("probe.hold")
+            {
+                held = id;
+                break;
+            }
+            requests_tx
+                .send(git_graph_studio_lib::ext_protocol::response(
+                    id,
+                    Ok(Value::Null),
+                ))
+                .unwrap();
+            continue;
+        }
+    }
+
+    // A command dispatched during the park: it queues behind the activation job and must
+    // not answer until the release registers its handler.
+    next_id += 1;
+    let ready_id = next_id;
+    requests_tx
+        .send(git_graph_studio_lib::ext_protocol::request(
+            ready_id,
+            "runCommand",
+            json!({ "command": "probe.ready", "args": [] }),
+        ))
+        .unwrap();
+    // Silence while parked is the expected outcome; any line that does cross must not be
+    // the queued command's answer.
+    if let Ok(line) = output_rx.recv_timeout(std::time::Duration::from_millis(500)) {
+        let wire: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
+        assert_ne!(
+            wire["id"].as_u64(),
+            Some(ready_id),
+            "the command answered before the activation settled: {wire:?}"
+        );
+    }
+
+    // The release: the activation settles, registers probe.ready, and the queued command
+    // answers through it.
+    requests_tx
+        .send(git_graph_studio_lib::ext_protocol::response(
+            held,
+            Ok(Value::Null),
+        ))
+        .unwrap();
+    let answered;
+    loop {
+        let line = read_line();
+        let Ok(wire) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
+            let id = wire["id"].as_u64().unwrap_or_default();
+            requests_tx
+                .send(git_graph_studio_lib::ext_protocol::response(
+                    id,
+                    Ok(Value::Null),
+                ))
+                .unwrap();
+            continue;
+        }
+        if wire["id"].as_u64() == Some(ready_id) {
+            answered = wire;
+            break;
+        }
+    }
+    assert_eq!(
+        answered["result"],
+        json!("READY"),
+        "the queued command ran through the handler the release registered"
+    );
+    // EOF by hangup, not by the reader's 60 s idle timeout.
+    drop(requests_tx);
     let _ = serve.join();
 }
 

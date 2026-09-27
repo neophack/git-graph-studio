@@ -18,6 +18,7 @@ use boa_ast::{
     visitor::NodeRef,
 };
 use boa_interner::{JStrRef, Sym};
+use rustc_hash::FxHashSet;
 
 #[cfg(feature = "annex-b")]
 use boa_ast::operations::annex_b_function_declarations_names;
@@ -109,7 +110,7 @@ pub(crate) fn global_declaration_instantiation_context(
         };
 
         // i. For each String vn of the BoundNames of d, do
-        for name in bound_names(&declaration) {
+        for name in bound_names(declaration) {
             // 1. If declaredFunctionNames does not contain vn, then
             if !declared_function_names.contains(&name) {
                 // SKIP: a. Let vnDefinable be ? env.CanDeclareGlobalVar(vn).
@@ -460,7 +461,7 @@ impl ByteCompiler<'_> {
             };
 
             // i. For each String vn of the BoundNames of d, do
-            for name in bound_names(&declaration) {
+            for name in bound_names(declaration) {
                 // 1. If declaredFunctionNames does not contain vn, then
                 if !declared_function_names.contains(&name) {
                     // a. Let vnDefinable be ? env.CanDeclareGlobalVar(vn).
@@ -734,7 +735,7 @@ impl ByteCompiler<'_> {
             };
 
             // a.i. For each String vn of the BoundNames of d, do
-            for name in bound_names(&declaration) {
+            for name in bound_names(declaration) {
                 // 1. If declaredFunctionNames does not contain vn, then
                 if !declared_function_names.contains(&name) {
                     // a. If varEnv is a Global Environment Record, then
@@ -951,7 +952,9 @@ impl ByteCompiler<'_> {
         let lexical_names = lexically_declared_names(body);
 
         // 12. Let functionNames be a new empty List.
-        let mut function_names = Vec::new();
+        // GGS-patch: a hash set — only membership is ever asked of it, and the per-
+        // declaration test was quadratic in the number of function declarations.
+        let mut function_names = FxHashSet::default();
 
         // 13. Let functionsToInitialize be a new empty List.
         let mut functions_to_initialize = Vec::new();
@@ -961,7 +964,7 @@ impl ByteCompiler<'_> {
             // a. If d is neither a VariableDeclaration nor a ForBinding nor a BindingIdentifier, then
             // a.i. Assert: d is either a FunctionDeclaration, a GeneratorDeclaration, an AsyncFunctionDeclaration, or an AsyncGeneratorDeclaration.
             // a.ii. Let fn be the sole element of the BoundNames of d.
-            let (name, function) = match declaration {
+            let (name, function) = match *declaration {
                 VarScopedDeclaration::FunctionDeclaration(f) => (f.name(), FunctionSpec::from(f)),
                 VarScopedDeclaration::GeneratorDeclaration(f) => (f.name(), FunctionSpec::from(f)),
                 VarScopedDeclaration::AsyncFunctionDeclaration(f) => {
@@ -974,9 +977,8 @@ impl ByteCompiler<'_> {
             };
 
             // a.iii. If functionNames does not contain fn, then
-            if !function_names.contains(&name.sym()) {
+            if function_names.insert(name.sym()) {
                 // 1. Insert fn as the first element of functionNames.
-                function_names.push(name.sym());
 
                 // 2. NOTE: If there are multiple function declarations for the same name, the last declaration is used.
                 // 3. Insert d as the first element of functionsToInitialize.
@@ -984,7 +986,6 @@ impl ByteCompiler<'_> {
             }
         }
 
-        function_names.reverse();
         functions_to_initialize.reverse();
 
         // 15. Let argumentsObjectNeeded be true.
@@ -1118,14 +1119,15 @@ impl ByteCompiler<'_> {
                 let mut variable_scope = self.lexical_scope.clone();
 
                 // d. Let instantiatedVarNames be a new empty List.
-                let mut instantiated_var_names = Vec::new();
+                // GGS-patch: a hash set, not a Vec — the membership test below ran once per
+                // var name against every name before it, quadratic in a bundle's top level.
+                let mut instantiated_var_names = FxHashSet::default();
 
                 // e. For each element n of varNames, do
                 for n in var_names {
                     // i. If instantiatedVarNames does not contain n, then
-                    if !instantiated_var_names.contains(&n) {
+                    if instantiated_var_names.insert(n) {
                         // 1. Append n to instantiatedVarNames.
-                        instantiated_var_names.push(n);
 
                         let n_string = n.to_js_string(self.interner());
 
@@ -1167,14 +1169,15 @@ impl ByteCompiler<'_> {
             } else {
                 // a. NOTE: Only a single Environment Record is needed for the parameters and top-level vars.
                 // b. Let instantiatedVarNames be a copy of the List parameterBindings.
-                let mut instantiated_var_names = parameter_bindings;
+                // GGS-patch: as a hash set (see the branch above).
+                let mut instantiated_var_names: FxHashSet<Sym> =
+                    parameter_bindings.into_iter().collect();
 
                 // c. For each element n of varNames, do
                 for n in var_names {
                     // i. If instantiatedVarNames does not contain n, then
-                    if !instantiated_var_names.contains(&n) {
+                    if instantiated_var_names.insert(n) {
                         // 1. Append n to instantiatedVarNames.
-                        instantiated_var_names.push(n);
 
                         let n = n.to_js_string(self.interner());
 
@@ -1224,7 +1227,7 @@ impl ByteCompiler<'_> {
                         self.register_allocator.dealloc(value);
 
                         // c. Append F to instantiatedVarNames.
-                        instantiated_var_names.push(f);
+                        instantiated_var_names.insert(f);
                     }
 
                     // 3. When the FunctionDeclaration f is evaluated, perform the following steps

@@ -12,7 +12,9 @@
 
 use std::path::{Path, PathBuf};
 
-use boa_engine::{Context, JsError, JsNativeError, JsObject, JsResult, JsValue, NativeFunction};
+use boa_engine::{
+    Context, JsError, JsNativeError, JsObject, JsResult, JsValue, NativeFunction, Script, Source,
+};
 
 use crate::node_runtime::{key, text, with_state};
 use boa_engine::JsArgs;
@@ -400,27 +402,39 @@ fn string_arg(args: &[JsValue], at: usize, context: &mut Context) -> String {
 /// the partial `exports`.
 fn evaluate_module(path: &Path, source: &str, context: &mut Context) -> JsResult<JsValue> {
     let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-    // The wrapper is compiled by the prelude's `__ggsCompileModule` — a DIRECT eval inside
-    // the helper's own frame — never the `Function` constructor and never a Rust-side
-    // `context.eval`. Both of those are Boa 0.20 environment bugs (pinned in
-    // `tests/vscode_shim_boa.rs`): the `Function` constructor compiles the module's nested
-    // functions with binding locators that panic (`PutLexicalValue`, "must be declarative
-    // environment") the moment one of the module's closures runs later — e.g. a handler
-    // answering a request with `new Promise((resolve) => setTimeout(() => resolve(…)))` —
-    // and a script `eval` from inside a running frame (a nested `require`) hands the
-    // wrapper the caller's environment chain, whose depth the wrapper's own locators
-    // never assumed. The direct eval compiles against the helper's scope and the wrapper
-    // captures that same chain, so the locators are consistent wherever the load runs.
-    let compiler = context
-        .global_object()
-        .get(key("__ggsCompileModule"), context)?;
-    let compiler = compiler.as_callable().ok_or_else(|| {
-        internal("the prelude's module compiler is missing (the prelude did not run)")
-    })?;
-    let function = compiler
-        .call(&JsValue::undefined(), &[text(source)], context)?
+    // The wrapper compiles as a script — Node's own shape, a standalone function over its
+    // five parameters in the global scope — parsed straight from the UTF-8 source and
+    // tagged with the module's path (its stack frames name the file). Every binding stays
+    // in its environment (`parse_all_bindings_escaping`): Boa 0.21.1's register-local
+    // path miscompiles real bundle code, and the eval route this replaces never took it. The vendored Boa's
+    // `Script::evaluate` runs on the realm's global environment whatever frame is live
+    // (GGS-patch; upstream used the caller's chain, which is why the loader once went
+    // through the prelude's indirect eval): a nested `require` from inside a running
+    // module compiles exactly as a top-level one, pinned in `tests/vscode_shim_boa.rs`.
+    // The indirect-eval route it replaces paid for a multi-megabyte JS string, a
+    // concatenation and a UTF-16 re-read of every bundle before its parse began.
+    let phase_trace = std::env::var("GGS_TRACE_BOOT").is_ok();
+    let compile_started = std::time::Instant::now();
+    let wrapper =
+        format!("(function (exports, require, module, __filename, __dirname) {{\n{source}\n}})");
+    let script = Script::parse_all_bindings_escaping(
+        Source::from_bytes(wrapper.as_bytes()).with_path(path),
+        None,
+        context,
+    )?;
+    drop(wrapper);
+    let function = script
+        .evaluate(context)?
         .as_object()
-        .ok_or_else(|| internal("the module compiler answered no function"))?;
+        .ok_or_else(|| internal("the module wrapper evaluated to no function"))?;
+    if phase_trace {
+        eprintln!(
+            "[perf] {} compiled in {} ms ({} bytes)",
+            path.display(),
+            compile_started.elapsed().as_millis(),
+            source.len()
+        );
+    }
     let exports = JsObject::with_object_proto(context.intrinsics());
     let module = JsObject::with_object_proto(context.intrinsics());
     module.set(key("exports"), exports.clone(), false, context)?;
@@ -430,6 +444,7 @@ fn evaluate_module(path: &Path, source: &str, context: &mut Context) -> JsResult
             .module_cache
             .insert(path.to_path_buf(), exports.clone().into());
     });
+    let exec_started = std::time::Instant::now();
     let result = function.call(
         &JsValue::undefined(),
         &[
@@ -442,6 +457,13 @@ fn evaluate_module(path: &Path, source: &str, context: &mut Context) -> JsResult
         context,
     );
     result?;
+    if phase_trace {
+        eprintln!(
+            "[perf] {} executed in {} ms",
+            path.display(),
+            exec_started.elapsed().as_millis()
+        );
+    }
     // The module may have replaced `module.exports` wholesale — that is what the cache and
     // the caller take.
     let final_exports = module.get(key("exports"), context)?;

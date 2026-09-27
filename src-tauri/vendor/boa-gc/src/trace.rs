@@ -6,8 +6,8 @@ use std::{
     hash::{BuildHasher, Hash},
     marker::PhantomData,
     num::{
-        NonZeroI128, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI8, NonZeroIsize, NonZeroU128,
-        NonZeroU16, NonZeroU32, NonZeroU64, NonZeroU8, NonZeroUsize,
+        NonZeroI8, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI128, NonZeroIsize, NonZeroU8,
+        NonZeroU16, NonZeroU32, NonZeroU64, NonZeroU128, NonZeroUsize,
     },
     path::{Path, PathBuf},
     rc::Rc,
@@ -34,8 +34,24 @@ impl Tracer {
         self.queue.push_back(node);
     }
 
-    pub(crate) fn next(&mut self) -> Option<GcErasedPointer> {
-        self.queue.pop_front()
+    /// Traces through all the queued nodes until the queue is empty.
+    ///
+    /// # Safety
+    ///
+    /// All the pointers inside of the queue must point to valid memory.
+    pub(crate) unsafe fn trace_until_empty(&mut self) {
+        while let Some(node) = self.queue.pop_front() {
+            let node_ref = unsafe { node.as_ref() };
+            if node_ref.is_marked() {
+                continue;
+            }
+            node_ref.header.mark();
+            let trace_fn = node_ref.trace_fn();
+
+            // SAFETY: The function pointer is appropriate for this node type because we extract it from it's VTable.
+            // Additionally, the node pointer is valid per the caller's guarantee.
+            unsafe { trace_fn(node, self) }
+        }
     }
 
     pub(crate) fn is_empty(&mut self) -> bool {
@@ -473,7 +489,7 @@ where
     T::Owned: Trace,
 {
     custom_trace!(this, mark, {
-        if let Cow::Owned(ref v) = this {
+        if let Cow::Owned(v) = this {
             mark(v);
         }
     });
@@ -503,7 +519,7 @@ unsafe impl<T: Trace> Trace for OnceCell<T> {
 
 #[cfg(feature = "icu")]
 mod icu {
-    use icu_locid::{LanguageIdentifier, Locale};
+    use icu_locale_core::{LanguageIdentifier, Locale};
 
     use crate::{Finalize, Trace};
 
@@ -532,4 +548,20 @@ mod boa_string_trace {
     }
 
     impl Finalize for boa_string::JsString {}
+}
+
+#[cfg(feature = "either")]
+mod either_trace {
+    use crate::{Finalize, Trace};
+
+    impl<L: Trace, R: Trace> Finalize for either::Either<L, R> {}
+
+    unsafe impl<L: Trace, R: Trace> Trace for either::Either<L, R> {
+        custom_trace!(this, mark, {
+            match this {
+                either::Either::Left(l) => mark(l),
+                either::Either::Right(r) => mark(r),
+            }
+        });
+    }
 }

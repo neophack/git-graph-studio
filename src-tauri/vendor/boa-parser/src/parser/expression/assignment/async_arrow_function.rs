@@ -21,7 +21,10 @@ use crate::{
 };
 use ast::{
     Keyword,
-    operations::{ContainsSymbol, bound_names, contains, lexically_declared_names},
+    operations::{
+        ContainsSymbol, bound_names, contains, contains_invalid_object_literal,
+        lexically_declared_names,
+    },
 };
 use boa_ast::{
     self as ast, Punctuator, Span, Spanned, StatementList,
@@ -189,6 +192,16 @@ where
             FunctionBody::new(false, true, "async arrow function").parse(cursor, interner)?
         } else {
             let expression = ExpressionBody::new(self.allow_in, true).parse(cursor, interner)?;
+            // GGS-patch: a concise body is the one function body that never passes
+            // through `FunctionStatementList`, so it runs the invalid-object-literal check
+            // itself — `contains_invalid_object_literal` no longer walks into nested
+            // function bodies (see there).
+            if contains_invalid_object_literal(&expression) {
+                return Err(Error::lex(LexError::Syntax(
+                    "invalid object literal in async arrow function body".into(),
+                    boa_ast::Position::new(1, 1),
+                )));
+            }
             let span = expression.span();
             ast::function::FunctionBody::new(
                 StatementList::new(

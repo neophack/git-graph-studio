@@ -10,10 +10,10 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2021"
-rust-version = "1.82.0"
+edition = "2024"
+rust-version = "1.88.0"
 name = "boa_gc"
-version = "0.20.0"
+version = "0.21.1"
 authors = ["boa-dev"]
 build = false
 autolib = false
@@ -32,40 +32,43 @@ keywords = [
 categories = ["command-line-utilities"]
 license = "Unlicense OR MIT"
 repository = "https://github.com/boa-dev/boa"
+resolver = "2"
 
 [package.metadata.docs.rs]
 all-features = true
+
+[features]
+boa_string = ["dep:boa_string"]
+either = ["dep:either"]
+icu = ["dep:icu_locale_core"]
+thin-vec = ["dep:thin-vec"]
 
 [lib]
 name = "boa_gc"
 path = "src/lib.rs"
 
 [dependencies.boa_macros]
-version = "~0.20.0"
-
-[dependencies.boa_profiler]
-version = "~0.20.0"
+version = "~0.21.1"
 
 [dependencies.boa_string]
-version = "~0.20.0"
+version = "~0.21.1"
+optional = true
+
+[dependencies.either]
+version = "1.15.0"
 optional = true
 
 [dependencies.hashbrown]
-version = "0.15.2"
+version = "0.16.0"
 
-[dependencies.icu_locid]
-version = "~1.5.0"
+[dependencies.icu_locale_core]
+version = "~2.0.0"
 optional = true
 default-features = false
 
 [dependencies.thin-vec]
-version = "0.2.13"
+version = "0.2.14"
 optional = true
-
-[features]
-boa_string = ["dep:boa_string"]
-icu = ["dep:icu_locid"]
-thin-vec = ["dep:thin-vec"]
 
 [lints.clippy]
 dbg_macro = "warn"

@@ -20,6 +20,11 @@ mod utf8;
 pub struct Source<'path, R> {
     pub(crate) reader: R,
     pub(crate) path: Option<&'path Path>,
+    /// GGS-patch: the reader's input size in code units, when the constructor knows it
+    /// (`from_bytes`, `from_utf16`). The parser hands it to the lexer cursor, whose
+    /// source collector otherwise grows by doubling — every growth a full memcpy of the
+    /// text collected so far, ~a dozen of them for a multi-megabyte bundle.
+    pub(crate) len_hint: Option<usize>,
 }
 
 impl<'bytes> Source<'static, UTF8Input<&'bytes [u8]>> {
@@ -40,6 +45,8 @@ impl<'bytes> Source<'static, UTF8Input<&'bytes [u8]>> {
         Self {
             reader: UTF8Input::new(source.as_ref()),
             path: None,
+            // UTF-8 bytes are an upper bound on the UTF-16 code units the collector gathers.
+            len_hint: Some(source.as_ref().len()),
         }
     }
 }
@@ -62,6 +69,7 @@ impl<'input> Source<'static, UTF16Input<'input>> {
         Self {
             reader: UTF16Input::new(input),
             path: None,
+            len_hint: Some(input.len()),
         }
     }
 }
@@ -89,6 +97,7 @@ impl<'path> Source<'path, UTF8Input<BufReader<File>>> {
         Ok(Self {
             reader: UTF8Input::new(BufReader::new(reader)),
             path: Some(source),
+            len_hint: None,
         })
     }
 }
@@ -116,6 +125,7 @@ impl<'path, R: Read> Source<'path, UTF8Input<R>> {
         Self {
             reader: UTF8Input::new(reader),
             path,
+            len_hint: None,
         }
     }
 }
@@ -126,6 +136,7 @@ impl<'path, R> Source<'path, R> {
         Source {
             reader: self.reader,
             path: Some(new_path),
+            len_hint: self.len_hint,
         }
     }
 

@@ -17,6 +17,15 @@ impl<R: Read> UTF8Input<R> {
     }
 }
 
+impl<'a> UTF8Input<&'a [u8]> {
+    /// GGS-patch: from a byte slice directly — the reader `Source::from_bytes` wraps,
+    /// for embedders that measure the raw input layer.
+    #[must_use]
+    pub fn from_slice(bytes: &'a [u8]) -> Self {
+        Self::new(bytes)
+    }
+}
+
 impl<R: Read> UTF8Input<R> {
     /// Retrieves the next byte
     fn next_byte(&mut self) -> io::Result<Option<u8>> {

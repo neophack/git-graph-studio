@@ -307,7 +307,7 @@ impl ToIndentedString for FunctionExpression {
 impl From<FunctionExpression> for Expression {
     #[inline]
     fn from(expr: FunctionExpression) -> Self {
-        Self::FunctionExpression(expr)
+        Self::FunctionExpression(Box::new(expr))
     }
 }
 

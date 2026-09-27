@@ -886,11 +886,11 @@ impl<'ast> Visitor<'ast> for VarDeclaredNamesVisitor<'_> {
             Statement::DoWhileLoop(node) => self.visit(node),
             Statement::WhileLoop(node) => self.visit(node),
             Statement::ForLoop(node) => self.visit(node),
-            Statement::ForInLoop(node) => self.visit(node),
-            Statement::ForOfLoop(node) => self.visit(node),
+            Statement::ForInLoop(node) => self.visit(node.as_ref()),
+            Statement::ForOfLoop(node) => self.visit(node.as_ref()),
             Statement::Switch(node) => self.visit(node),
             Statement::Labelled(node) => self.visit(node),
-            Statement::Try(node) => self.visit(node),
+            Statement::Try(node) => self.visit(node.as_ref()),
             Statement::With(node) => self.visit(node),
         }
     }
@@ -1730,6 +1730,101 @@ where
     impl<'ast> Visitor<'ast> for ContainsInvalidObjectLiteral {
         type BreakTy = ();
 
+        // GGS-patch: stop at function bodies. Every body was already checked when it was
+        // parsed — each one but a concise arrow body goes through `FunctionStatementList`,
+        // whose parse runs this check, and `ConciseBody` checks its expression — so walking
+        // into them again made the parser's checks O(source size × nesting depth). The
+        // parameters (default-value initializers) and computed method names are not part
+        // of any body and are still visited.
+        fn visit_function_expression(
+            &mut self,
+            node: &'ast FunctionExpression,
+        ) -> ControlFlow<Self::BreakTy> {
+            self.visit_formal_parameter_list(node.parameters())
+        }
+
+        fn visit_function_declaration(
+            &mut self,
+            node: &'ast FunctionDeclaration,
+        ) -> ControlFlow<Self::BreakTy> {
+            self.visit_formal_parameter_list(node.parameters())
+        }
+
+        fn visit_generator_expression(
+            &mut self,
+            node: &'ast GeneratorExpression,
+        ) -> ControlFlow<Self::BreakTy> {
+            self.visit_formal_parameter_list(node.parameters())
+        }
+
+        fn visit_generator_declaration(
+            &mut self,
+            node: &'ast GeneratorDeclaration,
+        ) -> ControlFlow<Self::BreakTy> {
+            self.visit_formal_parameter_list(node.parameters())
+        }
+
+        fn visit_async_function_expression(
+            &mut self,
+            node: &'ast AsyncFunctionExpression,
+        ) -> ControlFlow<Self::BreakTy> {
+            self.visit_formal_parameter_list(node.parameters())
+        }
+
+        fn visit_async_function_declaration(
+            &mut self,
+            node: &'ast AsyncFunctionDeclaration,
+        ) -> ControlFlow<Self::BreakTy> {
+            self.visit_formal_parameter_list(node.parameters())
+        }
+
+        fn visit_async_generator_expression(
+            &mut self,
+            node: &'ast AsyncGeneratorExpression,
+        ) -> ControlFlow<Self::BreakTy> {
+            self.visit_formal_parameter_list(node.parameters())
+        }
+
+        fn visit_async_generator_declaration(
+            &mut self,
+            node: &'ast AsyncGeneratorDeclaration,
+        ) -> ControlFlow<Self::BreakTy> {
+            self.visit_formal_parameter_list(node.parameters())
+        }
+
+        fn visit_arrow_function(&mut self, node: &'ast ArrowFunction) -> ControlFlow<Self::BreakTy> {
+            self.visit_formal_parameter_list(node.parameters())
+        }
+
+        fn visit_async_arrow_function(
+            &mut self,
+            node: &'ast AsyncArrowFunction,
+        ) -> ControlFlow<Self::BreakTy> {
+            self.visit_formal_parameter_list(node.parameters())
+        }
+
+        fn visit_object_method_definition(
+            &mut self,
+            node: &'ast crate::expression::literal::ObjectMethodDefinition,
+        ) -> ControlFlow<Self::BreakTy> {
+            self.visit_property_name(node.name())?;
+            self.visit_formal_parameter_list(node.parameters())
+        }
+
+        fn visit_class_element(&mut self, node: &'ast ClassElement) -> ControlFlow<Self::BreakTy> {
+            match node {
+                ClassElement::MethodDefinition(m) => {
+                    if let ClassElementName::PropertyName(name) = m.name() {
+                        self.visit_property_name(name)?;
+                    }
+                    self.visit_formal_parameter_list(m.parameters())
+                }
+                // Checked by the class parser when the block was parsed.
+                ClassElement::StaticBlock(_) => ControlFlow::Continue(()),
+                _ => node.visit_with(self),
+            }
+        }
+
         fn visit_object_literal(
             &mut self,
             node: &'ast crate::expression::literal::ObjectLiteral,
@@ -1999,29 +2094,34 @@ impl<'ast> Visitor<'ast> for TopLevelLexicallyScopedDeclarationsVisitor<'_, 'ast
 }
 
 /// The type of a var scoped declaration.
-#[derive(Clone, Debug)]
-pub enum VarScopedDeclaration {
+///
+/// GGS-patch: the variants borrow the declarations instead of owning clones (the
+/// `LexicallyScopedDeclaration` shape) — every declaration instantiation deep-cloned each
+/// top-level function's whole AST and each `var`'s initializer, a large share of a
+/// multi-megabyte bundle's compile time.
+#[derive(Copy, Clone, Debug)]
+pub enum VarScopedDeclaration<'a> {
     /// See [`VarDeclaration`]
-    VariableDeclaration(Variable),
+    VariableDeclaration(&'a Variable),
 
     /// See [`FunctionDeclaration`]
-    FunctionDeclaration(FunctionDeclaration),
+    FunctionDeclaration(&'a FunctionDeclaration),
 
     /// See [`GeneratorDeclaration`]
-    GeneratorDeclaration(GeneratorDeclaration),
+    GeneratorDeclaration(&'a GeneratorDeclaration),
 
     /// See [`AsyncFunctionDeclaration`]
-    AsyncFunctionDeclaration(AsyncFunctionDeclaration),
+    AsyncFunctionDeclaration(&'a AsyncFunctionDeclaration),
 
     /// See [`AsyncGeneratorDeclaration`]
-    AsyncGeneratorDeclaration(AsyncGeneratorDeclaration),
+    AsyncGeneratorDeclaration(&'a AsyncGeneratorDeclaration),
 }
 
-impl VarScopedDeclaration {
+impl VarScopedDeclaration<'_> {
     /// Return the bound names of the declaration.
     #[must_use]
     pub fn bound_names(&self) -> Vec<Sym> {
-        match self {
+        match *self {
             Self::VariableDeclaration(v) => bound_names(v),
             Self::FunctionDeclaration(f) => bound_names(f),
             Self::GeneratorDeclaration(g) => bound_names(g),
@@ -2049,7 +2149,7 @@ impl VarScopedDeclaration {
 ///
 /// [spec]: https://tc39.es/ecma262/#sec-static-semantics-varscopeddeclarations
 #[must_use]
-pub fn var_scoped_declarations<'a, N>(node: &'a N) -> Vec<VarScopedDeclaration>
+pub fn var_scoped_declarations<'a, N>(node: &'a N) -> Vec<VarScopedDeclaration<'a>>
 where
     &'a N: Into<NodeRef<'a>>,
 {
@@ -2060,9 +2160,9 @@ where
 
 /// The [`Visitor`] used to obtain the var scoped declarations of a node.
 #[derive(Debug)]
-struct VarScopedDeclarationsVisitor<'a>(&'a mut Vec<VarScopedDeclaration>);
+struct VarScopedDeclarationsVisitor<'a, 'ast>(&'a mut Vec<VarScopedDeclaration<'ast>>);
 
-impl<'ast> Visitor<'ast> for VarScopedDeclarationsVisitor<'_> {
+impl<'ast> Visitor<'ast> for VarScopedDeclarationsVisitor<'_, 'ast> {
     type BreakTy = Infallible;
 
     // ScriptBody : StatementList
@@ -2084,11 +2184,11 @@ impl<'ast> Visitor<'ast> for VarScopedDeclarationsVisitor<'_> {
             Statement::DoWhileLoop(s) => self.visit(s),
             Statement::WhileLoop(s) => self.visit(s),
             Statement::ForLoop(s) => self.visit(s),
-            Statement::ForInLoop(s) => self.visit(s),
-            Statement::ForOfLoop(s) => self.visit(s),
+            Statement::ForInLoop(s) => self.visit(s.as_ref()),
+            Statement::ForOfLoop(s) => self.visit(s.as_ref()),
             Statement::Switch(s) => self.visit(s),
             Statement::Labelled(s) => self.visit(s),
-            Statement::Try(s) => self.visit(s),
+            Statement::Try(s) => self.visit(s.as_ref()),
             Statement::With(s) => self.visit(s),
             Statement::Empty
             | Statement::Expression(_)
@@ -2112,7 +2212,7 @@ impl<'ast> Visitor<'ast> for VarScopedDeclarationsVisitor<'_> {
     fn visit_var_declaration(&mut self, node: &'ast VarDeclaration) -> ControlFlow<Self::BreakTy> {
         for var in node.0.as_ref() {
             self.0
-                .push(VarScopedDeclaration::VariableDeclaration(var.clone()));
+                .push(VarScopedDeclaration::VariableDeclaration(var));
         }
         ControlFlow::Continue(())
     }
@@ -2158,7 +2258,7 @@ impl<'ast> Visitor<'ast> for VarScopedDeclarationsVisitor<'_> {
     ) -> ControlFlow<Self::BreakTy> {
         if let IterableLoopInitializer::Var(var) = node.initializer() {
             self.0
-                .push(VarScopedDeclaration::VariableDeclaration(var.clone()));
+                .push(VarScopedDeclaration::VariableDeclaration(var));
         }
         self.visit(node.body())?;
         ControlFlow::Continue(())
@@ -2170,7 +2270,7 @@ impl<'ast> Visitor<'ast> for VarScopedDeclarationsVisitor<'_> {
     ) -> ControlFlow<Self::BreakTy> {
         if let IterableLoopInitializer::Var(var) = node.initializer() {
             self.0
-                .push(VarScopedDeclaration::VariableDeclaration(var.clone()));
+                .push(VarScopedDeclaration::VariableDeclaration(var));
         }
         self.visit(node.body())?;
         ControlFlow::Continue(())
@@ -2236,9 +2336,9 @@ impl<'ast> Visitor<'ast> for VarScopedDeclarationsVisitor<'_> {
 ///
 /// [spec]: https://tc39.es/ecma262/#sec-static-semantics-toplevelvarscopeddeclarations
 #[derive(Debug)]
-struct TopLevelVarScopedDeclarationsVisitor<'a>(&'a mut Vec<VarScopedDeclaration>);
+struct TopLevelVarScopedDeclarationsVisitor<'a, 'ast>(&'a mut Vec<VarScopedDeclaration<'ast>>);
 
-impl<'ast> Visitor<'ast> for TopLevelVarScopedDeclarationsVisitor<'_> {
+impl<'ast> Visitor<'ast> for TopLevelVarScopedDeclarationsVisitor<'_, 'ast> {
     type BreakTy = Infallible;
 
     fn visit_statement_list_item(
@@ -2250,19 +2350,19 @@ impl<'ast> Visitor<'ast> for TopLevelVarScopedDeclarationsVisitor<'_> {
                 match d.as_ref() {
                     Declaration::FunctionDeclaration(f) => {
                         self.0
-                            .push(VarScopedDeclaration::FunctionDeclaration(f.clone()));
+                            .push(VarScopedDeclaration::FunctionDeclaration(f));
                     }
                     Declaration::GeneratorDeclaration(f) => {
                         self.0
-                            .push(VarScopedDeclaration::GeneratorDeclaration(f.clone()));
+                            .push(VarScopedDeclaration::GeneratorDeclaration(f));
                     }
                     Declaration::AsyncFunctionDeclaration(f) => {
                         self.0
-                            .push(VarScopedDeclaration::AsyncFunctionDeclaration(f.clone()));
+                            .push(VarScopedDeclaration::AsyncFunctionDeclaration(f));
                     }
                     Declaration::AsyncGeneratorDeclaration(f) => {
                         self.0
-                            .push(VarScopedDeclaration::AsyncGeneratorDeclaration(f.clone()));
+                            .push(VarScopedDeclaration::AsyncGeneratorDeclaration(f));
                     }
                     _ => {}
                 }
@@ -2287,7 +2387,7 @@ impl<'ast> Visitor<'ast> for TopLevelVarScopedDeclarationsVisitor<'_> {
             }
             LabelledItem::FunctionDeclaration(f) => {
                 self.0
-                    .push(VarScopedDeclaration::FunctionDeclaration(f.clone()));
+                    .push(VarScopedDeclaration::FunctionDeclaration(f));
                 ControlFlow::Continue(())
             }
         }
@@ -2340,11 +2440,11 @@ impl<'ast> Visitor<'ast> for AnnexBFunctionDeclarationNamesVisitor<'_> {
             Statement::DoWhileLoop(node) => self.visit(node),
             Statement::WhileLoop(node) => self.visit(node),
             Statement::ForLoop(node) => self.visit(node),
-            Statement::ForInLoop(node) => self.visit(node),
-            Statement::ForOfLoop(node) => self.visit(node),
+            Statement::ForInLoop(node) => self.visit(node.as_ref()),
+            Statement::ForOfLoop(node) => self.visit(node.as_ref()),
             Statement::Switch(node) => self.visit(node),
             Statement::Labelled(node) => self.visit(node),
-            Statement::Try(node) => self.visit(node),
+            Statement::Try(node) => self.visit(node.as_ref()),
             Statement::With(node) => self.visit(node),
             _ => ControlFlow::Continue(()),
         }

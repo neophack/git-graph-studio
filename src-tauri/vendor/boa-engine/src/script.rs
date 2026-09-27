@@ -42,11 +42,41 @@ impl std::fmt::Debug for Script {
     }
 }
 
+/// GGS-patch: scripts whose source exceeds this many code units hand their compiled-out AST
+/// to [`free_released_sources`] instead of dropping it inline.
+const DEFERRED_RELEASE_THRESHOLD: usize = 256 * 1024;
+
+thread_local! {
+    // GGS-patch: compiled-out ASTs of large scripts, waiting for the embedder's idle time.
+    static RELEASED_SOURCES: std::cell::RefCell<Vec<boa_ast::Script>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// GGS-patch: drop the ASTs large scripts released after compiling. Tearing down a
+/// multi-megabyte bundle's tree is millions of frees — a tenth of its compile — and none
+/// of it has to happen before the script runs, so [`Script::codeblock`] parks the tree
+/// here and the embedder frees it when its thread is idle. Answers whether anything was
+/// freed. Anything never freed goes with the thread.
+pub fn free_released_sources() -> bool {
+    let released = RELEASED_SOURCES.with(|released_sources| {
+        std::mem::take(&mut *released_sources.borrow_mut())
+    });
+    let freed = !released.is_empty();
+    drop(released);
+    freed
+}
+
 #[derive(Trace, Finalize)]
 struct Inner {
     realm: Realm,
+    // GGS-patch: behind a RefCell so the AST can be released once compiled — every
+    // function the script creates keeps the script alive (its `ScriptOrModule`), and a
+    // multi-megabyte bundle's AST is hundreds of megabytes nothing reads after codegen.
     #[unsafe_ignore_trace]
-    source: boa_ast::Script,
+    source: std::cell::RefCell<boa_ast::Script>,
+    // GGS-patch: a large script's AST is released through `free_released_sources` (see
+    // there) instead of dropped inside `codeblock`.
+    defer_release: bool,
     source_text: SourceText,
     codeblock: GcRefCell<Option<Gc<CodeBlock>>>,
     loaded_modules: GcRefCell<FxHashMap<JsString, Module>>,
@@ -84,24 +114,59 @@ impl Script {
         realm: Option<Realm>,
         context: &mut Context,
     ) -> JsResult<Self> {
+        Self::parse_inner(src, realm, false, context)
+    }
+
+    /// GGS-patch: [`Script::parse`] with every binding kept in its environment — no
+    /// register locals (see `boa_ast::Script::analyze_scope_all_escaping` for the
+    /// miscompile this avoids). ggs-node compiles CommonJS module wrappers this way.
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if an error happens during parsing.
+    pub fn parse_all_bindings_escaping<R: ReadChar>(
+        src: Source<'_, R>,
+        realm: Option<Realm>,
+        context: &mut Context,
+    ) -> JsResult<Self> {
+        Self::parse_inner(src, realm, true, context)
+    }
+
+    fn parse_inner<R: ReadChar>(
+        src: Source<'_, R>,
+        realm: Option<Realm>,
+        all_bindings_escaping: bool,
+        context: &mut Context,
+    ) -> JsResult<Self> {
         let path = src.path().map(Path::to_path_buf);
         let mut parser = Parser::new(src);
+        if all_bindings_escaping {
+            parser.set_all_bindings_escaping();
+        }
         parser.set_identifier(context.next_parser_identifier());
         if context.is_strict() {
             parser.set_strict();
         }
         let scope = context.realm().scope().clone();
+        // GGS-patch: phase timing behind GGS_PHASE_TRACE — the compile-side diagnosis of
+        // slow big-bundle loads (see node_runtime's activation profiling).
+        let ggs_parse_started = std::time::Instant::now();
         let (mut code, source) = parser.parse_script_with_source(&scope, context.interner_mut())?;
+        if std::env::var_os("GGS_PHASE_TRACE").is_some() {
+            eprintln!("[phase] parse_script_with_source {:?}", ggs_parse_started.elapsed());
+        }
         if !context.optimizer_options().is_empty() {
             context.optimize_statement_list(code.statements_mut());
         }
 
+        let defer_release = source.cur_linear_position().pos() > DEFERRED_RELEASE_THRESHOLD;
         let source_text = SourceText::new(source);
 
         Ok(Self {
             inner: Gc::new(Inner {
                 realm: realm.unwrap_or_else(|| context.realm().clone()),
-                source: code,
+                source: std::cell::RefCell::new(code),
+                defer_release,
                 source_text,
                 codeblock: GcRefCell::default(),
                 loaded_modules: GcRefCell::default(),
@@ -122,10 +187,15 @@ impl Script {
         }
 
         let mut annex_b_function_names = Vec::new();
+        // GGS-patch: phase timing behind GGS_PHASE_TRACE (see Script::parse above).
+        let ggs_compile_started = std::time::Instant::now();
 
+        // GGS-patch: identifier strings memoized for this one compile (one interner).
+        let memo = boa_ast::JsStringMemo::enter();
+        let source = self.inner.source.borrow();
         global_declaration_instantiation_context(
             &mut annex_b_function_names,
-            &self.inner.source,
+            &source,
             self.inner.realm.scope(),
             context,
         )?;
@@ -133,7 +203,7 @@ impl Script {
         let spanned_source_text = SpannedSourceText::new_source_only(self.get_source());
         let mut compiler = ByteCompiler::new(
             js_string!("<main>"),
-            self.inner.source.strict(),
+            source.strict(),
             false,
             self.inner.realm.scope().clone(),
             self.inner.realm.scope().clone(),
@@ -151,10 +221,22 @@ impl Script {
         }
 
         // TODO: move to `Script::evaluate` to make this operation infallible.
-        compiler.global_declaration_instantiation(&self.inner.source);
-        compiler.compile_statement_list(self.inner.source.statements(), true, false);
+        compiler.global_declaration_instantiation(&source);
+        compiler.compile_statement_list(source.statements(), true, false);
 
         let cb = Gc::new(compiler.finish());
+        drop(memo);
+        drop(source);
+        // GGS-patch: the bytecode is all a script runs from now on (see `Inner::source`).
+        let released = self.inner.source.take();
+        if self.inner.defer_release && std::env::var_os("GGS_NO_DEFER").is_none() {
+            RELEASED_SOURCES.with(|released_sources| released_sources.borrow_mut().push(released));
+        } else {
+            drop(released);
+        }
+        if std::env::var_os("GGS_PHASE_TRACE").is_some() {
+            eprintln!("[phase] codeblock compile {:?}", ggs_compile_started.elapsed());
+        }
 
         *codeblock = Some(cb.clone());
 
@@ -168,11 +250,24 @@ impl Script {
     ///
     /// [`JobExecutor::run_jobs`]: crate::job::JobExecutor::run_jobs
     pub fn evaluate(&self, context: &mut Context) -> JsResult<JsValue> {
-        self.prepare_run(context)?;
-        let record = context.run();
-
-        context.vm.pop_frame();
-        record.consume()
+        // GGS-patch: script code runs in the realm's global environment (ScriptEvaluation),
+        // never on top of whatever frame happens to be running. Upstream builds the frame
+        // over the caller's environment stack, so a script evaluated from inside a native
+        // call made by JS (ggs-node's nested `require`) ran its global-depth locators
+        // against the caller's chain. Indirect eval's own discipline: pop to the global
+        // environment for the run, restore the caller's stack after.
+        let saved = context.vm.environments.pop_to_global();
+        let result = match self.prepare_run(context) {
+            Ok(()) => {
+                let record = context.run();
+                context.vm.pop_frame();
+                record.consume()
+            }
+            Err(error) => Err(error),
+        };
+        context.vm.environments.truncate(0);
+        context.vm.environments.extend(saved);
+        result
     }
 
     /// Evaluates this script and returns its result, periodically yielding to the executor

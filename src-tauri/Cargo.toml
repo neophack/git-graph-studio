@@ -23,9 +23,12 @@ default-run = "git-graph-studio"
 # `src/parser/expression/primary/class_expression/mod.rs`, marked with a GGS patch
 # comment; retire the vendored copy when upstream carries the fix.
 [patch.crates-io]
+# Features live in [dependencies] — a [patch] entry's "features" field is ignored
+# (cargo warns about it), and the boa_engine dependency above already asks for "trace".
 boa_parser = { path = "vendor/boa-parser" }
 boa_ast = { path = "vendor/boa-ast" }
-boa_engine = { path = "vendor/boa-engine", features = ["trace"] }
+boa_engine = { path = "vendor/boa-engine" }
+boa_gc = { path = "vendor/boa-gc" }
 
 [lib]
 name = "git_graph_studio_lib"
@@ -224,10 +227,15 @@ panic = "abort"
 strip = true
 debug = false
 
-# The `ggs-node` sidecar builds on the same size diet but with unwinding panics: it runs
+# The `ggs-node` sidecar builds on the release profile (fat LTO, one codegen unit,
+# stripped) but optimizes for speed, and it keeps unwinding panics: it runs
 # third-party JS, and a miscompiled closure (Boa's known `Function`-constructor compile
 # bug) must degrade its own initialization — the VM's `PutLexicalValue` degrades under
 # `catch_unwind` — instead of aborting the whole backend mid-handshake.
 [profile.ggs-node]
 inherits = "release"
 panic = "unwind"
+# Speed, not size: the sidecar's job is parsing, compiling and interpreting megabytes of
+# third-party JS, and at "z" Boa's parser and VM ran ~25% slower (the size budgets that
+# motivated "z" were removed, 2026-09-15).
+opt-level = 3

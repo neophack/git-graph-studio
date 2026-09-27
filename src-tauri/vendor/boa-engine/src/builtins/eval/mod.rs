@@ -130,7 +130,13 @@ impl Eval {
         if strict {
             parser.set_strict();
         }
+        // GGS-patch: phase timing behind GGS_PHASE_TRACE — the compile-side diagnosis of
+        // slow big-bundle loads (see node_runtime's activation profiling).
+        let ggs_t_parse = std::time::Instant::now();
         let (mut body, source) = parser.parse_eval(direct, context.interner_mut())?;
+        if std::env::var_os("GGS_PHASE_TRACE").is_some() {
+            eprintln!("[phase] eval parse {:?}", ggs_t_parse.elapsed());
+        }
 
         // 6. Let inFunction be false.
         // 7. Let inMethod be false.
@@ -299,6 +305,7 @@ impl Eval {
                 .clone_from(&annex_b_function_names);
         }
 
+        let ggs_t_analyze = std::time::Instant::now();
         let bindings = body
             .analyze_scope_eval(
                 strict,
@@ -308,12 +315,19 @@ impl Eval {
                 compiler.interner(),
             )
             .map_err(|e| JsNativeError::syntax().with_message(e))?;
+        if std::env::var_os("GGS_PHASE_TRACE").is_some() {
+            eprintln!("[phase] eval analyze_scope_eval {:?}", ggs_t_analyze.elapsed());
+        }
+        let ggs_t_compile = std::time::Instant::now();
 
         compiler.eval_declaration_instantiation(&body, strict, &variable_scope, bindings);
 
         compiler.compile_statement_list(body.statements(), true, false);
 
         let code_block = Gc::new(compiler.finish());
+        if std::env::var_os("GGS_PHASE_TRACE").is_some() {
+            eprintln!("[phase] eval bytecode compile {:?}", ggs_t_compile.elapsed());
+        }
 
         // Strict calls don't need extensions, since all strict eval calls push a new
         // function environment before evaluating.

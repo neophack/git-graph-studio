@@ -16,6 +16,15 @@ impl SourceText {
         }
     }
 
+    /// GGS-patch: reserve room for `additional` more code units now. The lexer's cursor
+    /// collects every code point it reads into this text one push at a time; without a
+    /// reservation a multi-megabyte bundle pays the doubling reallocations — each one a
+    /// full memcpy of everything collected so far — that the source's known length makes
+    /// unnecessary (see `boa_parser::Source::len_hint`).
+    pub fn reserve(&mut self, additional: usize) {
+        self.source_text.reserve(additional);
+    }
+
     /// Get current `LinearPosition`.
     #[must_use]
     pub fn cur_linear_position(&self) -> LinearPosition {

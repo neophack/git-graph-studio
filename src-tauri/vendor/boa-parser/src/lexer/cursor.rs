@@ -39,6 +39,13 @@ impl<R> Cursor<R> {
         std::mem::replace(&mut self.source_collector, replace_with)
     }
 
+    /// GGS-patch: reserve the whole source up front, when its size is known — the
+    /// collector otherwise grows by doubling, and a multi-megabyte bundle pays for every
+    /// growth with a full memcpy of the text gathered so far (see `Source::len_hint`).
+    pub(super) fn presize_source(&mut self, hint: usize) {
+        self.source_collector.reserve(hint);
+    }
+
     /// Advances the position to the next column.
     fn next_column(&mut self) {
         let current_line = self.pos.line_number();

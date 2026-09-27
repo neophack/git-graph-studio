@@ -81,6 +81,12 @@ where
         self.lexer.set_goal(elm);
     }
 
+    /// GGS-patch: reserve the lexer's source collector for `hint` code units (see
+    /// `Source::len_hint`).
+    pub(super) fn presize_source(&mut self, hint: usize) {
+        self.lexer.presize_source(hint);
+    }
+
     /// Lexes the next tokens as a regex assuming that the starting '/' has already been consumed.
     /// If `init_with_eq` is `true`, then assuming that the starting '/=' has already been consumed.
     pub(super) fn lex_regex(

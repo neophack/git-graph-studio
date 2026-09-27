@@ -347,8 +347,12 @@ process binary (speaking the `ggs-ext/1` line-JSON-RPC protocol over stdin/stdou
 language that can write lines to stdout qualifies) or a `node` backend (`kind: "node"`) —
 the package's own JS entry. **ggs-node is the default host** (2026-09-25, the owner's
 direction): every `node` backend runs on the bundled pretend Node runtime (`ggs-node`,
-Boa + CommonJS + the file/os/process builtins, whose `initialize` installs the compiled
-`vscode` shim and activates the program, and whose own N-API host (`node_runtime/napi_host.rs`
+Boa + CommonJS + the file/os/process builtins, whose `initialize` answers in milliseconds
+and queues the activation — shim install, entry `require`, `activate` — as the next job on
+the one JS thread (2026-09-27: a multi-megabyte bundle's parse-and-compile is seconds on
+the interpreter, and the handshake — the app's `ext_process_start`, the Extensions view's
+status — no longer waits it out; requests arriving meanwhile order behind the activation,
+the FIFO job queue being the gate), and whose own N-API host (`node_runtime/napi_host.rs`
 — the `napi_*` surface bound to the sidecar image) loads a package's `.node` addon right
 there: when the extension's activation `require`s the engine `git-graph.node`, it registers
 into Boa and serves the reads (an integration test and the live check assert the ggs-node
@@ -378,7 +382,13 @@ in an editor tab, with `acquireVsCodeApi()` composed in, `asWebviewUri` mapping 
 own built-in commands (`vscode.diff` / `vscode.open` over a registered text-document content
 provider's scheme — the host asks the registering frame for the text and opens the diff
 editor or a read-only content tab, decoding nothing of any package's private schemes;
-`setContext`; `workbench.view.*` / `openSettings`); `workspace.createFileSystemWatcher`
+`setContext`; `workbench.view.*` / `openSettings`); `window.showTextDocument` of a
+provider-scheme document (claude-code's chat opens its tool outputs and code blocks this
+way, as `_claude_vscode_fs_readonly:` Uris) opens the read-only content tab too, and
+every placed open — `showTextDocument`'s and `vscode.open`/`vscode.diff`'s `ViewColumn` —
+lands where `editorArea.ts`'s `EditorPlacement` says: `Beside` in the side editor group
+(a fresh right split when there is none, the same layer reused after — the chat keeps
+its half of the area), a column number in that group; `workspace.createFileSystemWatcher`
 served from the backend watcher's real batches (`fsChanged` events into every frame, the
 `.git` flag firing a `.git/HEAD` change); `window.createTerminal` (`sendText` runs in the
 integrated terminal); and `crypto.createHash` (md5 / sha1 / sha256, pure TypeScript — the
@@ -474,19 +484,24 @@ nothing.
   when native binaries are present),
   `src-tauri/src/node_runtime/` (`ggs-node`, the `node-runtime` feature's
   pretend Node runtime sidecar — the default `node`-backend host: Boa on one JS thread fed
-  by a job queue — protocol requests, timers, child-process events — a CommonJS `require`
+  by a job queue — protocol requests, timers, child-process events, the activation — a CommonJS `require`
   confined to the package root (`require.rs`), real `fs`/`path`/`os`/`child_process`
   builtins over std (`builtins/`: `mod` the registry, `fs`, `path`, `os`, `child`, `net`
   the TCP sockets and the HTTP(S) client under the prelude's `net` / `http` / `fetch`,
-  `core` the prelude natives, `support` the shared helpers), the JS prelude's
+  `core` the prelude natives, `support` the shared helpers), `alloc.rs` the size-class
+  free-list global allocator the `ggs-node` binary installs (a bundle load is millions of
+  small allocations, a third of its parse+compile time in Windows `HeapAlloc` round trips
+  alone; the JS thread keeps lock-free per-thread lists, other threads share one guarded
+  pool), the JS prelude's
   Buffer/EventEmitter/util/`vscode`-stub (`prelude.js`), the N-API host a package's
   `.node` loads through (`native.rs` the loader, `napi_host.rs` the `napi_*` surface) —
   and the dispatch: launcher → `ggs.onRequest` → `exports.dispatch`; stdout is the
-  protocol, package code writes through `ggs.log` only),
-  `src-tauri/vendor/` (the three patched Boa 0.21.1 crates the sidecar's parser and
+  protocol, package code writes through `ggs.log` only; `examples/boa_bench.rs` the
+  scratch parse/compile benchmark — `boa_bench <bundle.js> [parse|compile|lexer|read]`),
+  `src-tauri/vendor/` (the patched Boa 0.21.1 crates the sidecar's parser and
   compiler run through, wired by `[patch.crates-io]` in `src-tauri/Cargo.toml`; the
-  diffs against crates.io are one match arm each, marked with GGS-patch comments:
-  `boa-parser` lets a contextual keyword name a class expression —
+  semantic diffs against crates.io are one match arm each, marked with GGS-patch
+  comments: `boa-parser` lets a contextual keyword name a class expression —
   `var e = class of extends Error {}` ships inside real bundles and the stock parser
   dropped the name; `boa-ast` makes the scope-index visitor count a class constructor's
   function scope, without which `constructor(a = 1)` aims parameter locators one
@@ -496,7 +511,29 @@ nothing.
   (the known `Function`-constructor miscompile) instead of killing the JS thread; the
   grammar and semantics are pinned in `tests/vscode_shim_boa.rs`, the compile semantics
   end-to-end in `tests/node_runtime.rs`; retire the fork when upstream carries the
-  fixes), and the sidecar builds through its own `[profile.ggs-node]` — the release size
+  fixes. Performance patches ride along (2026-09-27, same marking), taking Claude
+  Code's 3 MB bundle from 13.2 s of activation to under a second end to end:
+  `boa-ast`'s `Scope` carries a name→index map (with a negative-cache sentinel for
+  free variables) beside its binding vector — every by-name lookup was a linear scan,
+  and a real bundle's scope analysis and bytecode generation resolve identifiers
+  millions of times; `boa-ast`'s `SourceText` grew `reserve` and `boa-parser`'s
+  `Source` carries a `len_hint` (`from_bytes`/`from_utf16`) that the parser hands to
+  the lexer cursor before the first character — the source collector otherwise grows
+  by doubling, every growth a full memcpy of the text gathered so far; `boa-engine`'s
+  `Script` compiles the module wrapper through `parse_all_bindings_escaping` (no
+  register locals — Boa 0.21.1's register path miscompiles real bundle code; ggs-node's
+  `require` loads every module this way) and parks a large script's compiled-out AST in
+  `free_released_sources` instead of dropping it inline (tearing down a bundle's tree
+  is millions of frees; the embedder frees it at idle), memoizes `Sym`→`JsString`
+  inside a `JsStringMemo` scope (scope analysis and codegen resolve the same few
+  thousand names millions of times), and `bytecompiler`'s declaration sets are hash
+  sets (the membership tests were quadratic in a bundle's top level); node_runtime
+  runs with the AST optimizer off (its one constant-folding pass is a full extra tree
+  walk for what a minifier already folded) and installs `node_runtime/alloc.rs` as the
+  sidecar's global allocator. `GGS_PHASE_TRACE=1` (phase timing, including the
+  lexer/parser vs scope-analysis split), `GGS_TRACE_BOOT=1` (activation milestones)
+  and `boa_bench` measure it all; keep the scope index fed if any binding-creating
+  path changes), and the sidecar builds through its own `[profile.ggs-node]` — the release size
   diet with unwinding panics, because third-party JS must degrade its own miscompiled
   closures, never abort the backend (`scripts/prepare.mjs` builds it that way),
   `src-tauri/src/ext_protocol.rs` (the `ggs-ext/1` wire
