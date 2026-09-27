@@ -91,3 +91,25 @@ fn install_the_probe_extension() {
         Err(error) => panic!("install: {error}"),
     }
 }
+
+#[test]
+#[ignore = "local-only: installs the owner's Downloads claude-code VSIX into the real ~/.ggs/extensions"]
+fn install_the_local_claude_code_vsix_into_the_real_extensions_dir() {
+    let vsix = PathBuf::from("C:/Users/penghongxia/Downloads/Anthropic.claude-code-2.1.283@win32-x64.vsix");
+    let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap();
+    let exts = PathBuf::from(&home).join(".ggs").join("extensions");
+    std::fs::create_dir_all(&exts).unwrap();
+    let _ = cmd_ext::uninstall_stopping(&exts, "anthropic.claude-code", &Default::default());
+    match cmd_ext::install_from_vsix_into(&exts, &vsix, false) {
+        Ok(info) => eprintln!(
+            "installed {}: version={} backend={:?}",
+            info.id,
+            info.version,
+            info.capabilities
+                .as_ref()
+                .map(|c| c.backend.as_ref().map(|b| (b.kind.clone(), b.command.clone())))
+        ),
+        Err(error) if error.contains("already installed") => eprintln!("already installed: {error}"),
+        Err(error) => panic!("install: {error}"),
+    }
+}
