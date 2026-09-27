@@ -4,12 +4,16 @@
 // process backends' status (running pid / why not, restart). A row's click opens the
 // extension's detail page — VS Code's extension editor: the header's facts and actions, then
 // the README rendered — in an editor tab through `onOpenDetail` (the workbench wires it).
-// The search box at the top queries the marketplace (Open VSX, over the backend's
-// gallery commands) and offers one-click Install / Update — a marketplace package installs
-// through exactly the path a picked VSIX takes.
+// There is no marketplace search: the view offers exactly the featured packages the backend
+// names (ext_gallery.rs's FEATURED — the owner's direction, 2026-09-27), each row merging its
+// Open VSX entry (this machine's platform build) with its installed state: Install when
+// absent, Update when the registry is ahead, the installed tag when current. A marketplace
+// package installs through exactly the path a picked VSIX takes. Anything else installed
+// (a picked VSIX, an older install) lists under "Other installed", so it stays removable.
 // Nothing is installed by default: the packages the installer ships beside the app (the Git
 // Graph engine view) lists from its manifest until one-click installed
-// (installBundled), after which each is a standard, uninstallable package.
+// (installBundled), after which each is a standard, uninstallable package — and that
+// offline offer is what a featured row falls back to when the marketplace is unreachable.
 
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
@@ -19,22 +23,23 @@ import { renderMarkdown } from './markdown';
 import { t, tf } from './i18n';
 import { actionButton, confirmDialog, el, icon, notify } from './ui';
 
+/** One featured id's marketplace half: in flight, its entry, or why there is none. */
+type MarketState = { status: 'loading' } | { status: 'ok'; entry: GalleryEntry } | { status: 'error'; error: string };
+
 export class ExtensionsPanel {
 	private readonly body: HTMLElement;
 	private readonly list: HTMLElement;
 	private extensions: ExtInfo[] = [];
 	private processes = new Map<string, ExtProcessInfo>();
 	private readonly host: ExtensionHost;
-	private installedIds = new Set<string>();
-	/** The marketplace search box; Enter searches, Escape restores the installed list. */
-	private readonly searchInput: HTMLInputElement;
-	/** The last search's entries, or null while no search is showing (the installed list). */
-	private galleryResults: GalleryEntry[] | null = null;
-	/** The last search's total match count on the registry (the count line above the rows). */
-	private galleryTotal = 0;
-	private searching = false;
+	/** The featured ids in display order, or null until the backend has named them. */
+	private featured: string[] | null = null;
+	/** Each featured id's marketplace state, keyed by the lower-cased id. */
+	private readonly market = new Map<string, MarketState>();
 	/** Gallery entry ids with an install in flight (their rows show the busy state). */
 	private readonly installing = new Set<string>();
+	/** The in-flight marketplace pass, so overlapping refreshes share one. */
+	private marketPass: Promise<void> | null = null;
 
 	/** Signals the workbench so it can refresh what the activation state changed. */
 	onChanged: (() => void) | null = null;
@@ -45,17 +50,9 @@ export class ExtensionsPanel {
 		this.host = host;
 		container.appendChild(el('div', 'sidebar-title', [el('span', 'label', [t('extensions.title')])]));
 		const pane = el('div', 'view-pane');
-		this.searchInput = el('input', 'input ext-search-input') as HTMLInputElement;
-		this.searchInput.type = 'search';
-		this.searchInput.placeholder = t('extensions.searchPlaceholder');
-		this.searchInput.setAttribute('aria-label', t('extensions.searchPlaceholder'));
-		this.searchInput.addEventListener('keydown', (event) => {
-			if (event.key === 'Enter') void this.searchMarketplace(this.searchInput.value);
-			if (event.key === 'Escape') this.clearSearch();
-		});
-		pane.appendChild(el('div', 'ext-search', [this.searchInput]));
 		const header = el('div', 'pane-header');
-		header.appendChild(el('span', 'label', [t('extensions.installed')]));
+		header.appendChild(el('span', 'label', [t('extensions.featured')]));
+		header.appendChild(actionButton('refresh', t('extensions.checkForUpdates'), () => void this.checkForUpdates()));
 		header.appendChild(actionButton('package', t('extensions.installFromVsix'), () => void this.pickVsix()));
 		this.body = el('div', 'pane-body list');
 		this.body.tabIndex = 0;
@@ -66,74 +63,147 @@ export class ExtensionsPanel {
 		this.render();
 	}
 
-	/** Focus the marketplace search box (the palette command's entry point). */
-	focusSearch(): void {
-		this.searchInput.focus();
-	}
-
+	/** Re-list the installed packages and the backends' state; the first refresh also asks
+	 *  the marketplace (later ones reuse its answer — `checkForUpdates` asks again). */
 	async refresh(): Promise<void> {
 		try {
 			this.extensions = await this.host.list();
-			this.installedIds = new Set(this.extensions.map((e) => e.id));
 		} catch (error) {
 			this.extensions = [];
 			notify('error', tf('extensions.listFailed', String(error)));
 		}
 		// The backends' state rides the same refresh, so a restart's effect shows at once.
-		this.processes = new Map((await this.host.processStatus()).map((info) => [info.extensionId, info]));
+		try {
+			this.processes = new Map((await this.host.processStatus()).map((info) => [info.extensionId, info]));
+		} catch {
+			this.processes = new Map();
+		}
+		if (this.featured === null) {
+			try {
+				this.featured = await this.host.featuredGallery();
+			} catch {
+				this.featured = [];
+			}
+		}
 		this.render();
+		// The marketplace answers asynchronously: the rows are already up (installed state,
+		// the bundled offer), each fills in as its lookup lands.
+		if (this.market.size === 0) void this.loadMarket();
+	}
+
+	/** Ask the marketplace for every featured id again (the header's refresh action and the
+	 *  palette's Check for Extension Updates), then re-render with the answers. */
+	async checkForUpdates(): Promise<void> {
+		this.market.clear();
+		await this.refresh();
+		await this.marketPass;
+	}
+
+	/** Look every featured id up, in parallel; each answer re-renders on its own. */
+	private loadMarket(): Promise<void> {
+		if (this.marketPass) return this.marketPass;
+		const ids = this.featured ?? [];
+		for (const id of ids) this.market.set(id.toLowerCase(), { status: 'loading' });
+		this.render();
+		this.marketPass = Promise.all(ids.map(async (id) => {
+			let state: MarketState;
+			try {
+				state = { status: 'ok', entry: await this.host.lookupGallery(id) };
+			} catch (error) {
+				state = { status: 'error', error: String(error) };
+			}
+			this.market.set(id.toLowerCase(), state);
+			this.render();
+		})).then(() => undefined).finally(() => { this.marketPass = null; });
+		return this.marketPass;
+	}
+
+	/** The installed (or bundled-offer) listing of an id, matched as VS Code does: ignoring case. */
+	private installedOf(id: string): ExtInfo | undefined {
+		const key = id.toLowerCase();
+		return this.extensions.find((ext) => ext.id.toLowerCase() === key);
 	}
 
 	private render(): void {
 		this.list.replaceChildren();
-		// A search in flight replaces the list with its busy line; a finished search shows
-		// its results until cleared (Escape, or emptying the box and pressing Enter again).
-		if (this.searching) {
-			this.list.appendChild(el('p', 'empty', [t('extensions.searchingMarketplace')]));
-			return;
+		const featured = this.featured ?? [];
+		const featuredKeys = new Set(featured.map((id) => id.toLowerCase()));
+		for (const id of featured) this.list.appendChild(this.featuredRow(id));
+		// Whatever else is installed (a picked VSIX, an install from before the featured
+		// list): listed so it stays visible and removable. Bundled offers outside the
+		// featured list are not offered.
+		const others = this.extensions.filter((ext) => !featuredKeys.has(ext.id.toLowerCase()) && ext.format !== 'bundled');
+		if (others.length > 0) {
+			this.list.appendChild(el('div', 'ext-section-label', [t('extensions.otherInstalled')]));
+			for (const ext of others) this.list.appendChild(this.installedRow(ext, null));
 		}
-		if (this.galleryResults !== null) {
-			this.renderGallery();
-			return;
-		}
-		if (this.extensions.length === 0) {
+		if (featured.length === 0 && others.length === 0) {
 			this.list.appendChild(el('p', 'empty', [t('extensions.empty')]));
-			return;
 		}
-		for (const ext of this.extensions) {
-			const processInfo = this.processes.get(ext.id) ?? null;
-			// Both backend kinds run as a process the Extensions view shows status for: the
-			// package's own binary (`process`) and an engine `.node` (`node`).
-			const isProcessPackage = ext.capabilities?.backend?.kind === 'process' || ext.capabilities?.backend?.kind === 'node';
-			const row = el('div', 'ext-row', [
-				this.iconBox(ext),
-				el('div', 'ext-main', [
-					el('div', 'ext-name', [extTitle(ext), ' ', el('span', 'ext-version', [`v${ext.version}`])]),
-					el('div', 'ext-publisher', [
-						ext.publisher,
-						ext.builtin ? el('span', 'ext-builtin', [t('extensions.builtIn')])
-							: ext.format === 'bundled' ? el('span', 'ext-builtin', [t('extensions.sample')]) : null
-					]),
-					ext.description ? el('div', 'ext-description', [ext.description]) : null,
-					this.processLine(ext, isProcessPackage, processInfo)
+	}
+
+	/** One featured id's row. Installed: the installed row, with an Update offer when the
+	 *  marketplace is ahead. Not installed: the marketplace entry with Install — or, when
+	 *  the marketplace cannot answer, the installer's bundled offer, or the lookup's state
+	 *  (checking… / the error with a retry). */
+	private featuredRow(id: string): HTMLElement {
+		const ext = this.installedOf(id);
+		const state = this.market.get(id.toLowerCase()) ?? { status: 'loading' };
+		const entry = state.status === 'ok' ? state.entry : null;
+		if (ext && ext.format !== 'bundled') return this.installedRow(ext, entry);
+		if (entry) return this.galleryRow(entry);
+		if (ext) return this.installedRow(ext, null);
+		const row = el('div', 'ext-row gallery-row', [
+			el('div', 'ext-icon-box', [icon('extensions', 'ext-icon')]),
+			el('div', 'ext-main', [
+				el('div', 'ext-name', [id]),
+				state.status === 'error'
+					? el('div', 'ext-process', [tf('extensions.marketplaceUnavailable', state.error)])
+					: el('div', 'ext-gallery-stats', [t('extensions.checkingMarketplace')])
+			]),
+			state.status === 'error' ? actionButton('refresh', t('extensions.retry'), () => void this.checkForUpdates()) : null
+		]);
+		row.title = id;
+		return row;
+	}
+
+	/** An installed package's row (or a bundled offer's): identity, backend status, and its
+	 *  actions — plus Update when `entry` (its marketplace listing) is a newer version. */
+	private installedRow(ext: ExtInfo, entry: GalleryEntry | null): HTMLElement {
+		const processInfo = this.processes.get(ext.id) ?? null;
+		// Both backend kinds run as a process the Extensions view shows status for: the
+		// package's own binary (`process`) and an engine `.node` (`node`).
+		const isProcessPackage = ext.capabilities?.backend?.kind === 'process' || ext.capabilities?.backend?.kind === 'node';
+		const row = el('div', 'ext-row', [
+			this.iconBox(ext),
+			el('div', 'ext-main', [
+				el('div', 'ext-name', [extTitle(ext), ' ', el('span', 'ext-version', [`v${ext.version}`])]),
+				el('div', 'ext-publisher', [
+					ext.publisher,
+					ext.builtin ? el('span', 'ext-builtin', [t('extensions.builtIn')])
+						: ext.format === 'bundled' ? el('span', 'ext-builtin', [t('extensions.sample')]) : null
 				]),
-				// A bundled entry that is not yet installed (an embedded-manifest offer): the
-				// bundled package is one click away. Installed entries: uninstall (a process
-				// package's backend dies with it — the Rust side stops it before removing the
-				// directory).
-				ext.format === 'bundled'
-					? actionButton('package', t(ext.builtin ? 'extensions.installBundled' : 'extensions.installSample'), () => void this.installBundled(ext))
-					: ext.builtin ? null : actionButton('trash', tf('extensions.uninstall', ext.id), () => void this.uninstall(ext)),
-				isProcessPackage ? actionButton('refresh', this.restartLabel(ext), () => void this.restart(ext)) : null
-			]);
-			row.title = ext.builtin
-				? tf('extensions.builtInTooltip', ext.id, ext.version)
-				: `${ext.id} v${ext.version}`;
-			// actionButton()'s own click handler stops propagation, so this never fires for the
-			// row's buttons (install/uninstall/restart): the row itself opens the detail page.
-			row.addEventListener('click', () => this.onOpenDetail?.(ext));
-			this.list.appendChild(row);
-		}
+				ext.description ? el('div', 'ext-description', [ext.description]) : null,
+				this.processLine(ext, isProcessPackage, processInfo)
+			]),
+			// The marketplace is ahead of the install: the Update offer (or its busy state).
+			entry && compareVersions(ext.version, entry.version) < 0 ? this.galleryAction(entry, true) : null,
+			// A bundled entry that is not yet installed (an embedded-manifest offer): the
+			// bundled package is one click away. Installed entries: uninstall (a process
+			// package's backend dies with it — the Rust side stops it before removing the
+			// directory).
+			ext.format === 'bundled'
+				? actionButton('package', t(ext.builtin ? 'extensions.installBundled' : 'extensions.installSample'), () => void this.installBundled(ext))
+				: ext.builtin ? null : actionButton('trash', tf('extensions.uninstall', ext.id), () => void this.uninstall(ext)),
+			isProcessPackage ? actionButton('refresh', this.restartLabel(ext), () => void this.restart(ext)) : null
+		]);
+		row.title = ext.builtin
+			? tf('extensions.builtInTooltip', ext.id, ext.version)
+			: `${ext.id} v${ext.version}`;
+		// actionButton()'s own click handler stops propagation, so this never fires for the
+		// row's buttons (install/uninstall/restart): the row itself opens the detail page.
+		row.addEventListener('click', () => this.onOpenDetail?.(ext));
+		return row;
 	}
 
 	/** The extension's icon box: the codicon placeholder until its real icon image loads
@@ -148,63 +218,25 @@ export class ExtensionsPanel {
 		return box;
 	}
 
-	/* ---------- The marketplace search (Open VSX, over the backend gallery commands) ---------- */
+	/* ---------- The marketplace half (Open VSX, over the backend gallery commands) ---------- */
 
-	/** Run the search the box names: results replace the installed list until cleared. */
-	async searchMarketplace(query: string): Promise<void> {
-		const trimmed = query.trim();
-		if (trimmed === '') {
-			this.clearSearch();
-			return;
-		}
-		this.searching = true;
-		this.render();
-		try {
-			const answer = await this.host.searchGallery(trimmed);
-			this.galleryTotal = answer.totalSize;
-			this.galleryResults = answer.entries;
-		} catch (error) {
-			notify('error', tf('extensions.searchFailed', String(error)));
-			this.galleryResults = null;
-		} finally {
-			this.searching = false;
-			this.render();
-		}
+	/** A featured package that is not installed: its marketplace identity and Install. */
+	private galleryRow(entry: GalleryEntry): HTMLElement {
+		const row = el('div', 'ext-row gallery-row', [
+			this.galleryIconBox(entry),
+			el('div', 'ext-main', [
+				el('div', 'ext-name', [entry.displayName ?? entry.name, ' ', el('span', 'ext-version', [`v${entry.version}`])]),
+				el('div', 'ext-publisher', [entry.namespace, entry.verified ? el('span', 'ext-verified', [t('extensions.verified')]) : null]),
+				entry.description ? el('div', 'ext-description', [entry.description]) : null,
+				el('div', 'ext-gallery-stats', [tf('extensions.downloads', entry.downloadCount.toLocaleString())])
+			]),
+			this.galleryAction(entry, false)
+		]);
+		row.title = `${entry.id} v${entry.version}`;
+		return row;
 	}
 
-	/** Drop the search and restore the installed list. */
-	clearSearch(): void {
-		this.galleryResults = null;
-		this.searchInput.value = '';
-		this.render();
-	}
-
-	/** The last search's rows: icon, name, publisher, description, downloads — and the
-	 *  action its install state names (Install / Update to vX / the installed tag). */
-	private renderGallery(): void {
-		const entries = this.galleryResults!;
-		if (entries.length === 0) {
-			this.list.appendChild(el('p', 'empty', [t('extensions.searchNone')]));
-			return;
-		}
-		this.list.appendChild(el('p', 'ext-gallery-count', [tf('extensions.searchCount', String(entries.length), String(this.galleryTotal))]));
-		for (const entry of entries) {
-			const row = el('div', 'ext-row gallery-row', [
-				this.galleryIconBox(entry),
-				el('div', 'ext-main', [
-					el('div', 'ext-name', [entry.displayName ?? entry.name, ' ', el('span', 'ext-version', [`v${entry.version}`])]),
-					el('div', 'ext-publisher', [entry.namespace, entry.verified ? el('span', 'ext-verified', [t('extensions.verified')]) : null]),
-					entry.description ? el('div', 'ext-description', [entry.description]) : null,
-					el('div', 'ext-gallery-stats', [tf('extensions.downloads', entry.downloadCount.toLocaleString())])
-				]),
-				this.galleryAction(entry)
-			]);
-			row.title = `${entry.id} v${entry.version}`;
-			this.list.appendChild(row);
-		}
-	}
-
-	/** A marketplace result's icon box: the codicon placeholder until the gallery's icon
+	/** A marketplace entry's icon box: the codicon placeholder until the gallery's icon
 	 *  lands (base64 over the backend, the same data-URL bridge installed icons use). */
 	private galleryIconBox(entry: GalleryEntry): HTMLElement {
 		const box = el('div', 'ext-icon-box', [icon('extensions', 'ext-icon')]);
@@ -216,26 +248,25 @@ export class ExtensionsPanel {
 		return box;
 	}
 
-	/** The action a result's install state names: a busy line while installing, Install or
-	 *  Update to the marketplace's version when an older one is installed, and the plain
-	 *  installed tag when the install is current (or ahead of the registry). */
-	private galleryAction(entry: GalleryEntry): HTMLElement {
-		if (this.installing.has(entry.id)) {
+	/** Install (or, over an older install, Update to the marketplace's version) — a busy
+	 *  line while that install is in flight. */
+	private galleryAction(entry: GalleryEntry, update: boolean): HTMLElement {
+		if (this.installing.has(entry.id.toLowerCase())) {
 			const busy = el('span', 'ext-installed-tag', [t('extensions.marketplaceInstalling')]);
 			busy.classList.add('busy');
 			return busy;
 		}
-		const installed = this.extensions.find((ext) => ext.id === entry.id);
-		if (!installed) return actionButton('cloud-download', t('extensions.installFromMarketplace'), () => void this.installGallery(entry));
-		if (compareVersions(installed.version, entry.version) >= 0) return el('span', 'ext-installed-tag', [t('extensions.marketplaceInstalled')]);
-		return actionButton('cloud-download', tf('extensions.updateTo', entry.version), () => void this.installGallery(entry));
+		return update
+			? actionButton('cloud-download', tf('extensions.updateTo', entry.version), () => void this.installGallery(entry))
+			: actionButton('cloud-download', t('extensions.installFromMarketplace'), () => void this.installGallery(entry));
 	}
 
 	/** Download and install one marketplace entry: the busy state on its row, the ordinary
 	 *  install notification on success, and the list refreshed either way (a finished
-	 *  install changes the row's action, and the installed list behind the search). */
+	 *  install changes the row's action). A second click while one is in flight is a no-op. */
 	private async installGallery(entry: GalleryEntry): Promise<void> {
-		this.installing.add(entry.id);
+		if (this.installing.has(entry.id.toLowerCase())) return;
+		this.installing.add(entry.id.toLowerCase());
 		this.render();
 		try {
 			const info = await this.host.installFromGallery(entry);
@@ -247,7 +278,7 @@ export class ExtensionsPanel {
 		} catch (error) {
 			notify('error', tf('extensions.marketplaceInstallFailed', String(error)));
 		} finally {
-			this.installing.delete(entry.id);
+			this.installing.delete(entry.id.toLowerCase());
 		}
 		await this.refresh();
 	}

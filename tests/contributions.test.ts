@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { commands } from '../src/commands';
-import { applyContributions, contextUri, evaluateWhen, extensionViewContributions, menuItems, menuSection, normalizeKeybinding, removeContributions, type ManifestContributes } from '../src/contributions';
+import { applyContributions, contextUri, evaluateWhen, extensionViewContributions, menuItems, menuSection, normalizeKeybinding, registerContextProvider, removeContributions, type ManifestContributes } from '../src/contributions';
 import { saveExtSetting } from '../src/state';
 
 const manifest: ManifestContributes = {
@@ -126,5 +126,20 @@ describe('a view\'s when clause', () => {
 		saveExtSetting('acme.views', 'acme.showGated', true);
 		expect(evaluateWhen('acme.views', contribution.views[1]!.when)).toBe(true);
 		saveExtSetting('acme.views', 'acme.showGated', false);
+	});
+
+	it('an unset key in the extension\'s own namespace reads false; a foreign unset key still never narrows', () => {
+		// Claude Code's shape: the package is `claude-code`, its commands `claude-vscode.*`,
+		// and it sets `claude-code:doesNotSupportSecondarySidebar` only on an old host.
+		applyContributions('acme.views', {
+			commands: [{ command: 'acme-vscode.open', title: 'Open' }],
+			views: { side: [{ id: 'chat', name: 'Chat', when: 'views:oldHost' }, { id: 'list', name: 'List', when: 'acme-vscode.listEnabled' }] }
+		}, {}, () => undefined, () => true);
+		expect(evaluateWhen('acme.views', 'views:oldHost')).toBe(false);
+		expect(evaluateWhen('acme.views', '!views:oldHost')).toBe(true);
+		expect(evaluateWhen('acme.views', 'acme-vscode.listEnabled')).toBe(false);
+		expect(evaluateWhen('acme.views', 'someOtherTool.flag')).toBe(true);
+		registerContextProvider('acme-vscode.listEnabled', () => true);
+		expect(evaluateWhen('acme.views', 'acme-vscode.listEnabled')).toBe(true);
 	});
 });

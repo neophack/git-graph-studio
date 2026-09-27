@@ -1401,9 +1401,9 @@ mod desktop {
                         for installed in cmd_ext::install_missing_bundled(&handle) {
                             match installed {
                                 Ok(line) => cmd_ext::log_extensions(&line),
-                                Err(reason) => {
-                                    cmd_ext::log_extensions(&format!("bundled install failed: {reason}"))
-                                }
+                                Err(reason) => cmd_ext::log_extensions(&format!(
+                                    "bundled install failed: {reason}"
+                                )),
                             }
                         }
                         // An installed bundled package is brought current before anything
@@ -1580,6 +1580,8 @@ mod desktop {
                 cmd_ext::ext_node_env,
                 cmd_ext::ext_install_from_vsix,
                 cmd_ext::ext_install_bundled,
+                ext_gallery::ext_gallery_featured,
+                ext_gallery::ext_gallery_lookup,
                 ext_gallery::ext_gallery_search,
                 ext_gallery::ext_gallery_asset,
                 ext_gallery::ext_gallery_install,

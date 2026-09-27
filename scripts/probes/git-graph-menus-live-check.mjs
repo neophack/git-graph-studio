@@ -138,7 +138,7 @@ async function session(target) {
 		if (result?.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text);
 		return result?.result?.value ?? null;
 	};
-	return { evaluate, consoleEntries, close: () => ws.close() };
+	return { evaluate, send, consoleEntries, close: () => ws.close() };
 }
 
 const targets = async () => (await (await fetch(`http://127.0.0.1:${port}/json`)).json());
@@ -147,14 +147,40 @@ const targets = async () => (await (await fetch(`http://127.0.0.1:${port}/json`)
  *  host frames may be others); callers pick the one whose text they expect. */
 async function srcdocSessions() {
 	const views = (await targets()).filter((target) => target.type === 'iframe' && target.url.startsWith('about:srcdoc'));
-	return Promise.all(views.map((target) => session(target).catch(() => null)));
+	const remote = await Promise.all(views.map((target) => session(target).catch(() => null)));
+	// Same-process page frames have no target of their own: reach each through the
+	// workbench's frame tree and an isolated world in it.
+	const tree = await workbench.send('Page.getFrameTree').catch(() => null);
+	const frames = [];
+	const walk = (node) => {
+		for (const child of node?.childFrames ?? []) {
+			frames.push(child.frame);
+			walk(child);
+		}
+	};
+	walk(tree?.frameTree);
+	const local = await Promise.all(frames.filter((frame) => /ggs|srcdoc/.test(frame.url)).map(async (frame) => {
+		const world = await workbench.send('Page.createIsolatedWorld', { frameId: frame.id, worldName: 'probe' }).catch(() => null);
+		if (!world) return null;
+		return {
+			evaluate: async (expression) => {
+				const result = await workbench.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true, contextId: world.executionContextId });
+				if (result?.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text);
+				return result?.result?.value ?? null;
+			},
+			close: () => undefined
+		};
+	}));
+	return [...remote, ...local];
 }
 
 function killTree(pid) {
 	spawnSync('taskkill', ['/T', '/F', '/PID', String(pid)], { encoding: 'utf8' });
 }
 
-const tauri = `(await import('/@id/@tauri-apps/api/core').catch(() => import('/node_modules/.vite/deps/@tauri-apps_api_core.js')))`;
+// Tauri's own IPC surface — present in dev and release builds alike (the Vite module
+// paths exist only under the dev server).
+const tauri = `window.__TAURI_INTERNALS__`;
 
 /* ---------- launch ---------- */
 

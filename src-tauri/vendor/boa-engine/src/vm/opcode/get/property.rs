@@ -50,6 +50,11 @@ impl GetPropertyByName {
             return Ok(());
         }
 
+        // GGS-patch: the slot describes the shape the lookup SAW — a getter it runs may
+        // reshape the object (a lazy property redefining itself as data), and caching the
+        // post-getter shape with the pre-getter slot poisons every later read of that
+        // layout ("not a callable function" on a plain value).
+        let shape_seen = object_borrowed.shape().clone();
         drop(object_borrowed);
 
         let key: PropertyKey = ic.name.clone().into();
@@ -61,9 +66,7 @@ impl GetPropertyByName {
         let slot = *context.slot();
         if slot.is_cachable() {
             let ic = &context.vm.frame().code_block.ic[usize::from(index)];
-            let object_borrowed = object.borrow();
-            let shape = object_borrowed.shape();
-            ic.set(shape, slot);
+            ic.set(&shape_seen, slot);
         }
 
         context.vm.set_register(dst.into(), result);

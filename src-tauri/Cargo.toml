@@ -53,7 +53,8 @@ default = ["desktop"]
 # no C bindings at all). The runtime is the default host for `node` backends (`GGS_REAL_NODE=1`
 # opts a system Node in); a package's `.node` loads right here through the N-API host.
 # base64/hex are the fs module's own encodings (`readFileSync(path, 'base64' | 'hex')`).
-node-runtime = ["dep:boa_engine", "dep:base64", "dep:hex", "dep:libloading", "dep:sha1", "dep:md-5", "dep:sha2", "dep:getrandom"]
+# ureq is the HTTP(S) client under `fetch` and `http(s).request` (rustls, the app's own client).
+node-runtime = ["dep:boa_engine", "dep:base64", "dep:hex", "dep:libloading", "dep:sha1", "dep:md-5", "dep:sha2", "dep:getrandom", "dep:ureq"]
 desktop = [
     "dep:tauri",
     "dep:tauri-plugin-dialog",

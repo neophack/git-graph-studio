@@ -109,7 +109,7 @@ async function session(target) {
 		if (result?.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text);
 		return result?.result?.value ?? null;
 	};
-	return { evaluate, consoleEntries, close: () => ws.close() };
+	return { evaluate, send, consoleEntries, close: () => ws.close() };
 }
 
 const targets = async () => (await (await fetch(`http://127.0.0.1:${port}/json`)).json());
@@ -117,7 +117,26 @@ const targets = async () => (await (await fetch(`http://127.0.0.1:${port}/json`)
 /** The view's document: a sandboxed srcdoc frame, its own (out-of-process) CDP target. */
 async function viewSession() {
 	const view = (await targets()).find((target) => target.type === 'iframe' && target.url.startsWith('about:srcdoc'));
-	return view ? session(view) : null;
+	if (view) return session(view);
+	// The page frame is in-process (same-process extension pages have no target of their
+	// own): reach it through the workbench's frame tree and an isolated world in it.
+	const tree = await workbench.send('Page.getFrameTree').catch(() => null);
+	const frames = [];
+	const walk = (node) => { for (const child of node?.childFrames ?? []) { frames.push(child.frame); walk(child); } };
+	walk(tree?.frameTree);
+	const frame = frames.find((f) => /ggs|srcdoc/.test(f.url)) ?? null;
+	if (!frame) return null;
+	const world = await workbench.send('Page.createIsolatedWorld', { frameId: frame.id, worldName: 'probe' }).catch(() => null);
+	if (!world) return null;
+	return {
+		evaluate: async (expression) => {
+			const result = await workbench.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true, contextId: world.executionContextId });
+			if (result?.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text);
+			return result?.result?.value ?? null;
+		},
+		consoleEntries: [],
+		close: () => undefined
+	};
 }
 
 function killTree(pid) {
@@ -131,8 +150,10 @@ function processFacts(pid) {
 	return { image: image.split(',')[0]?.replace(/"/g, '') ?? '', engineLoaded: /git-graph\.node/i.test(modules) };
 }
 
-const tauri = `(await import('/@id/@tauri-apps/api/core').catch(() => import('/node_modules/.vite/deps/@tauri-apps_api_core.js')))`;
-const tauriEvent = `(await import('/@id/@tauri-apps/api/event').catch(() => import('/node_modules/.vite/deps/@tauri-apps_api_event.js')))`;
+// Tauri's own IPC surface — present in dev and release builds alike (the Vite module
+// paths exist only under the dev server).
+const tauri = `window.__TAURI_INTERNALS__`;
+const tauriEvent = `({ listen: (event, handler) => window.__TAURI_INTERNALS__.invoke('plugin:event|listen', { event, target: { kind: 'Any' }, handler: window.__TAURI_INTERNALS__.transformCallback(handler) }) })`;
 
 /* ---------- launch ---------- */
 
@@ -255,11 +276,14 @@ try {
 			return 'clicked';
 		})()`);
 		let tabs = '';
-		for (let attempt = 0; attempt < 15 && !/↔/.test(tabs); attempt++) {
+		// A two-sided diff titles "a ↔ b"; a file the commit added opens its one side, titled
+		// "(Added in <hash>)" — either language.
+		const diffTab = /↔|\((Added in|新增于) /;
+		for (let attempt = 0; attempt < 15 && !diffTab.test(tabs); attempt++) {
 			await sleep(1000);
 			tabs = await workbench.evaluate(`JSON.stringify([...document.querySelectorAll('.tabs-container .tab')].map((t) => t.textContent.trim()))`);
 		}
-		check(`a file click opens the diff tab (${clicked})`, /↔/.test(String(tabs)), String(tabs).slice(0, 200));
+		check(`a file click opens the diff tab (${clicked})`, diffTab.test(String(tabs)), String(tabs).slice(0, 200));
 	}
 
 	/* 6. The extension's own account of the loads. */

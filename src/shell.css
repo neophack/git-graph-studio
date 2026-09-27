@@ -521,7 +521,11 @@ body.resizing iframe { pointer-events: none; }
 .status-item.ext-status-warning { background: var(--vscode-statusBarItem-warningBackground, #7a6400); color: var(--vscode-statusBarItem-warningForeground, #ffffff); }
 .tab-actions .ext-editor-action { font-size: 12px; }
 .ext-tree .empty { color: var(--vscode-list-deemphasizedForeground, var(--vscode-descriptionForeground, #8b8b8b)); padding: 4px 8px; margin: 0; }
-.ext-container-view { flex-direction: column; overflow: auto; }
+.ext-container-view { flex: 1; min-height: 0; flex-direction: column; overflow: auto; }
+/* In an extension's own container a webview view takes the height the sidebar has (VS Code
+ * sizes a lone view to the whole container) - content-sized, Claude Code's sessions list sat
+ * in a 220px strip. Tree sections stay content-sized; stacked webviews share the rest. */
+.ext-container-view > .ext-webview-view-section { flex: 1 1 0; }
 .status-left { display: flex; align-items: center; padding-left: 4px; overflow: hidden; }
 .status-right { display: flex; align-items: center; margin-left: auto; padding-right: 4px; }
 
@@ -767,9 +771,7 @@ body.resizing iframe { pointer-events: none; }
 .ext-process.running::before { content: "\25CF"; margin-right: 4px; color: var(--vscode-charts-green, #89d185); font-size: 9px; }
 
 /* The marketplace search box (the Extensions view's top row) and its result rows. */
-.ext-search { padding: 6px 12px 4px; }
-.ext-search-input { height: 24px; font-size: 12px; }
-.ext-gallery-count { padding: 2px 12px; font-size: 11px; color: var(--vscode-descriptionForeground, #999); }
+.ext-section-label { padding: 10px 12px 2px; font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--vscode-descriptionForeground, #999); }
 .ext-verified { margin-left: 6px; padding: 0 4px; border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35)); border-radius: 3px; font-size: 10px; text-transform: uppercase; }
 .ext-gallery-stats { font-size: 11px; color: var(--vscode-descriptionForeground, #999); }
 .ext-installed-tag { font-size: 11px; color: var(--vscode-descriptionForeground, #999); align-self: center; white-space: nowrap; }

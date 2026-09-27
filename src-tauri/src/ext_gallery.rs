@@ -1,11 +1,14 @@
-//! The extension marketplace: search and one-click install over Open VSX's public REST
-//! API — the registry the open-source VS Code ecosystem runs on (code-server and Theia
-//! point here too), so a VSIX published anywhere in that ecosystem installs with the same
-//! rules as a local file. Three commands, all network-confined: `ext_gallery_search`
-//! queries, `ext_gallery_asset` fetches a result's icon (base64, capped), and
-//! `ext_gallery_install` downloads the `.vsix` and hands it to [`crate::cmd_ext`]'s
-//! ordinary install path — the same manifest validation, forward-only upgrades and
-//! unhostable-`.node` rejection a picked file meets.
+//! The extension marketplace: the featured packages and one-click install over Open VSX's
+//! public REST API — the registry the open-source VS Code ecosystem runs on (code-server
+//! and Theia point here too), so a VSIX published anywhere in that ecosystem installs with
+//! the same rules as a local file. The Extensions view offers exactly the [`FEATURED`]
+//! packages (no free-text search — the owner's direction, 2026-09-27), each looked up by
+//! exact id for THIS machine's target platform. The commands, all network-confined:
+//! `ext_gallery_featured` / `ext_gallery_lookup` resolve ids to entries,
+//! `ext_gallery_search` queries, `ext_gallery_asset` fetches an entry's icon (base64,
+//! capped), and `ext_gallery_install` downloads the `.vsix` and hands it to
+//! [`crate::cmd_ext`]'s ordinary install path — the same manifest validation,
+//! forward-only upgrades and unhostable-`.node` rejection a picked file meets.
 //!
 //! Every URL a command touches is confined to the gallery's own origin (same scheme,
 //! same host): the commands can neither fetch nor install from anywhere else, so a
@@ -21,6 +24,10 @@ use crate::cmd_ext::ExtInfo;
 
 /// The default marketplace: the public Open VSX registry.
 pub const DEFAULT_GALLERY: &str = "https://open-vsx.org";
+/// The packages the Extensions view offers, in display order — the only marketplace
+/// entries it shows. Named here, beside `cmd_ext`'s bundled-package registry, so the
+/// frontend names no plugin id (plan §3.2).
+pub const FEATURED: &[&str] = &["Anthropic.claude-code", "neophack.git-graph-rs"];
 /// The search page size — enough to fill the Extensions view without a second page.
 const SEARCH_SIZE: u32 = 20;
 /// One gallery request's ceiling: a search or an icon is small; a `.vsix` download is
@@ -149,7 +156,12 @@ fn encode_query(value: &str) -> String {
 /// registry has no target for; the search then asks for universal packages only.
 pub fn host_target_platform() -> Option<&'static str> {
     use std::env::consts::{ARCH, OS};
+    // A musl build runs on Alpine, whose packages the registry keeps apart (a glibc
+    // `linux-x64` binary does not load there).
+    let musl = cfg!(target_env = "musl");
     Some(match (OS, ARCH) {
+        ("linux", "x86_64") if musl => "alpine-x64",
+        ("linux", "aarch64") if musl => "alpine-arm64",
         ("windows", "x86_64") => "win32-x64",
         ("windows", "aarch64") => "win32-arm64",
         ("linux", "x86_64") => "linux-x64",
@@ -194,33 +206,32 @@ fn get(base: &str, url: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("read the marketplace answer: {e}"))
 }
 
-/// The registry's answer as the view's entries. A listing without a `files.download` is
-/// not installable here — it is skipped, not surfaced as a dead row.
+/// One registry listing as the view's entry. A listing without a `files.download` is not
+/// installable here — None, never a dead row.
+fn entry_of(extension: OvsxExtension) -> Option<GalleryEntry> {
+    let download = extension.files.download?;
+    if extension.name.is_empty() || extension.namespace.is_empty() {
+        return None;
+    }
+    Some(GalleryEntry {
+        id: format!("{}.{}", extension.namespace, extension.name),
+        name: extension.name,
+        namespace: extension.namespace,
+        display_name: extension.display_name,
+        description: extension.description,
+        version: extension.version,
+        download_count: extension.download_count,
+        average_rating: extension.average_rating,
+        verified: extension.verified,
+        timestamp: extension.timestamp,
+        icon_url: extension.files.icon,
+        download_url: download,
+    })
+}
+
+/// The registry's answer as the view's entries (listings without a download skipped).
 fn search_map(parsed: OvsxSearch) -> GallerySearch {
-    let entries = parsed
-        .extensions
-        .into_iter()
-        .filter_map(|extension| {
-            let download = extension.files.download?;
-            if extension.name.is_empty() || extension.namespace.is_empty() {
-                return None;
-            }
-            Some(GalleryEntry {
-                id: format!("{}.{}", extension.namespace, extension.name),
-                name: extension.name,
-                namespace: extension.namespace,
-                display_name: extension.display_name,
-                description: extension.description,
-                version: extension.version,
-                download_count: extension.download_count,
-                average_rating: extension.average_rating,
-                verified: extension.verified,
-                timestamp: extension.timestamp,
-                icon_url: extension.files.icon,
-                download_url: download,
-            })
-        })
-        .collect();
+    let entries = parsed.extensions.into_iter().filter_map(entry_of).collect();
     GallerySearch {
         total_size: parsed.total_size,
         entries,
@@ -242,6 +253,64 @@ fn search(base: &str, query: &str) -> Result<GallerySearch, String> {
     Ok(search_map(parsed))
 }
 
+/// `{namespace}.{name}` split at its first dot, both halves non-empty and made only of
+/// what a URL path segment carries literally.
+fn split_id(id: &str) -> Result<(&str, &str), String> {
+    let (namespace, name) = id
+        .trim()
+        .split_once('.')
+        .ok_or_else(|| format!("not an extension id: {id}"))?;
+    let segment_ok = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+    };
+    if !segment_ok(namespace) || !segment_ok(name) {
+        return Err(format!("not an extension id: {id}"));
+    }
+    Ok((namespace, name))
+}
+
+/// The per-platform listing URLs to try for one id, most specific first: this machine's
+/// target build, then the universal one. The bare `/api/{ns}/{name}` is never asked — it
+/// answers with whichever platform the registry picks (for a platform-split package, e.g.
+/// an `alpine-arm64` build on a Windows machine), whose binaries cannot load here.
+fn lookup_urls(base: &str, namespace: &str, name: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    if let Some(target) = host_target_platform() {
+        urls.push(format!("{base}/api/{namespace}/{name}/{target}"));
+    }
+    urls.push(format!("{base}/api/{namespace}/{name}/universal"));
+    urls
+}
+
+/// Resolve one exact id to its entry for this machine. A 404 on the target build falls
+/// through to the universal one; any other failure (offline, 5xx) is the answer — trying
+/// on would mask it as "not found".
+fn lookup(base: &str, id: &str) -> Result<GalleryEntry, String> {
+    let (namespace, name) = split_id(id)?;
+    for url in lookup_urls(base, namespace, name) {
+        let url = confined(base, &url)?;
+        let bytes = match agent().get(&url).call() {
+            Ok(mut response) => response
+                .body_mut()
+                .read_to_vec()
+                .map_err(|e| format!("read the marketplace answer: {e}"))?,
+            Err(ureq::Error::StatusCode(404)) => continue,
+            Err(e) => return Err(format!("request to the marketplace failed: {e}")),
+        };
+        let parsed: OvsxExtension = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("the marketplace's answer is not valid JSON: {e}"))?;
+        return entry_of(parsed)
+            .ok_or_else(|| format!("{id} has no downloadable package in the marketplace"));
+    }
+    Err(format!(
+        "{id} is not in the marketplace for {}",
+        host_target_platform().unwrap_or("this platform")
+    ))
+}
+
 /// Download the `.vsix` `download_url` names into a temp file (confined to the gallery
 /// origin — nothing else on the network is reachable through this path).
 fn download_vsix(base: &str, download_url: &str) -> Result<PathBuf, String> {
@@ -256,7 +325,28 @@ fn download_vsix(base: &str, download_url: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// Search the marketplace for `query` — the Extensions view's search box.
+/// The featured ids, in display order — no network: the view lays its rows out at once
+/// (installed state included) and fills each one in as its `ext_gallery_lookup` lands.
+#[tauri::command]
+pub fn ext_gallery_featured() -> Vec<String> {
+    FEATURED.iter().map(|id| (*id).to_owned()).collect()
+}
+
+/// One exact id's entry for this machine's platform — a featured row's marketplace half,
+/// and how a package's declared dependencies resolve (a search ranks, and can miss, the
+/// exact id).
+#[tauri::command]
+pub async fn ext_gallery_lookup(
+    gallery: Option<String>,
+    id: String,
+) -> Result<GalleryEntry, String> {
+    let base = gallery_url(gallery)?;
+    tauri::async_runtime::spawn_blocking(move || lookup(&base, &id))
+        .await
+        .map_err(|e| format!("the lookup was cancelled: {e}"))?
+}
+
+/// Search the marketplace for `query`.
 #[tauri::command]
 pub async fn ext_gallery_search(
     gallery: Option<String>,
@@ -383,6 +473,85 @@ mod tests {
         assert!(url.contains("size=20"));
         let target = host_target_platform().unwrap_or("universal");
         assert!(url.contains(&format!("targetPlatform={target}")));
+    }
+
+    /// A real (trimmed) single-extension answer for one target platform.
+    const SAMPLE_LOOKUP: &str = r#"{"namespace":"Anthropic","name":"claude-code","version":"2.1.283",
+        "targetPlatform":"win32-x64","displayName":"Claude Code for VS Code","downloadCount":1000,
+        "verified":true,"timestamp":"2026-09-20T00:00:00Z",
+        "files":{"download":"https://open-vsx.org/api/Anthropic/claude-code/win32-x64/2.1.283/file/Anthropic.claude-code-2.1.283@win32-x64.vsix",
+                 "icon":"https://open-vsx.org/api/Anthropic/claude-code/win32-x64/2.1.283/file/claude-logo.png"}}"#;
+
+    #[test]
+    fn maps_a_single_extension_answer() {
+        let parsed: OvsxExtension = serde_json::from_str(SAMPLE_LOOKUP).unwrap();
+        let entry = entry_of(parsed).unwrap();
+        assert_eq!(entry.id, "Anthropic.claude-code");
+        assert_eq!(entry.version, "2.1.283");
+        assert!(entry.download_url.ends_with("@win32-x64.vsix"));
+    }
+
+    #[test]
+    fn a_lookup_asks_for_this_platform_then_universal_never_the_bare_listing() {
+        let urls = lookup_urls("https://open-vsx.org", "Anthropic", "claude-code");
+        assert_eq!(
+            urls.last().unwrap(),
+            "https://open-vsx.org/api/Anthropic/claude-code/universal"
+        );
+        if let Some(target) = host_target_platform() {
+            assert_eq!(urls.len(), 2);
+            assert_eq!(
+                urls[0],
+                format!("https://open-vsx.org/api/Anthropic/claude-code/{target}")
+            );
+        }
+        assert!(!urls
+            .iter()
+            .any(|u| u == "https://open-vsx.org/api/Anthropic/claude-code"));
+    }
+
+    #[test]
+    fn ids_split_into_url_safe_segments() {
+        assert_eq!(
+            split_id("neophack.git-graph-rs").unwrap(),
+            ("neophack", "git-graph-rs")
+        );
+        assert!(split_id("nodot").is_err());
+        assert!(split_id(".name").is_err());
+        assert!(split_id("ns.").is_err());
+        assert!(split_id("ns.a/../b").is_err());
+        assert!(split_id("ns.a?b").is_err());
+    }
+
+    /// The live registry: each featured id resolves to THIS platform's build (network —
+    /// run with `cargo test --all-features -- --ignored featured_ids_resolve_live`).
+    #[test]
+    #[ignore]
+    fn featured_ids_resolve_live() {
+        for id in FEATURED {
+            let entry = lookup(DEFAULT_GALLERY, id).unwrap();
+            assert!(entry.id.eq_ignore_ascii_case(id));
+            assert!(entry.download_url.ends_with(".vsix"));
+            if let Some(target) = host_target_platform() {
+                assert!(
+                    entry.download_url.contains(&format!("@{target}.vsix")),
+                    "{id}: {} is not the {target} build",
+                    entry.download_url
+                );
+            }
+        }
+        assert!(lookup(DEFAULT_GALLERY, "neophack.no-such-extension-xyz").is_err());
+    }
+
+    #[test]
+    fn the_featured_list_names_exactly_the_two_packages() {
+        assert_eq!(
+            FEATURED,
+            &["Anthropic.claude-code", "neophack.git-graph-rs"]
+        );
+        for id in FEATURED {
+            split_id(id).unwrap();
+        }
     }
 
     #[test]

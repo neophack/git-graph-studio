@@ -1069,12 +1069,6 @@ pub(crate) fn create_function_object(
 
     let is_async = code.is_async();
     let is_generator = code.is_generator();
-    if std::env::var("GGS_SCOPE_TRACE").is_ok() {
-        let n = code.name().to_std_string_escaped();
-        if n == "l4" || n == "get" {
-            std::eprintln!("[ggs-scope] CREATE fn={n} capture_len={}", context.vm.environments.len());
-        }
-    }
     let function = OrdinaryFunction::new(
         code,
         context.vm.environments.clone(),

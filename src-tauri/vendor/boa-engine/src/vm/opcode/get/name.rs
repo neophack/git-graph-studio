@@ -81,6 +81,9 @@ impl GetNameGlobal {
                 return Ok(());
             }
 
+            // GGS-patch: cache against the shape the lookup saw (see GetPropertyByName) —
+            // a global getter may reshape the global object while it runs.
+            let shape_seen = object_borrowed.shape().clone();
             drop(object_borrowed);
 
             let key: PropertyKey = ic.name.clone().into();
@@ -97,9 +100,7 @@ impl GetNameGlobal {
             let slot = *context.slot();
             if slot.is_cachable() {
                 let ic = &context.vm.frame().code_block.ic[usize::from(ic_index)];
-                let object_borrowed = object.borrow();
-                let shape = object_borrowed.shape();
-                ic.set(shape, slot);
+                ic.set(&shape_seen, slot);
             }
 
             context.vm.set_register(dst.into(), result);
@@ -170,9 +171,6 @@ impl GetNameAndLocator {
             JsNativeError::reference().with_message(format!("{name} is not defined"))
         })?;
 
-        if std::env::var("GGS_COALESCE_TRACE").is_ok() {
-            std::eprintln!("[ggs-boa] GetNameAndLocator {} -> {} (binding_stack depth {})", binding_locator.name().to_std_string_escaped(), result.type_of(), context.vm.frame().binding_stack.len());
-        }
         context.vm.frame_mut().binding_stack.push(binding_locator);
         context.vm.set_register(value.into(), result);
         Ok(())

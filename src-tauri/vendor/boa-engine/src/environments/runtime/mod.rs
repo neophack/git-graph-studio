@@ -519,41 +519,7 @@ impl Context {
                 Ok(env.get(locator.binding_index()))
             }
             BindingLocatorScope::Stack(index) => match self.environment_expect(index) {
-                Environment::Declarative(env) => {
-                    let value_kind = match env.get(locator.binding_index()) {
-                        Some(v) => v.type_of().to_string(),
-                        None => "-".to_owned(),
-                    };
-                    // Reverse audit: which environment REALLY holds Q, vs where this
-                    // locator thinks it lives.
-                    if std::env::var("GGS_BINDING_TRACE").is_ok()
-                        && locator.name() == &boa_engine::JsString::from("Q")
-                    {
-                        for i in 0..self.vm.environments.len() {
-                            if let Environment::Declarative(denv) = self.environment_expect(i as u32) {
-                                if let Some(fn_env) = denv.kind().as_function() {
-                                    if let Some(b) = fn_env.compile().get_binding(locator.name()) {
-                                        let value_kind = match denv.get(b.binding_index()) {
-                                            Some(v) => v.type_of().to_string(),
-                                            None => "-".to_owned(),
-                                        };
-                                        std::eprintln!(
-                                            "[ggs-boa] Q-audit env={i} slot={} value={value_kind}",
-                                            b.binding_index()
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        std::eprintln!(
-                            "[ggs-boa] Q-read landed scope={:?} slot={} stack_len={} value_kind={value_kind}",
-                            locator.scope(),
-                            locator.binding_index(),
-                            self.vm.environments.len()
-                        );
-                    }
-                    Ok(env.get(locator.binding_index()))
-                }
+                Environment::Declarative(env) => Ok(env.get(locator.binding_index())),
                 Environment::Object(obj) => {
                     let key = locator.name().clone();
                     let obj = obj.clone();

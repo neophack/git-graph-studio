@@ -1007,12 +1007,6 @@ pub(crate) fn function_call(
     drop(function);
 
     let env_fp = environments.len() as u32;
-    if std::env::var("GGS_SCOPE_TRACE").is_ok() {
-        let n = code.name().to_std_string_escaped();
-        if n == "l4" || n == "get" {
-            std::eprintln!("[ggs-scope] CALL fn={n} captured_len={}", environments.len());
-        }
-    }
 
     let frame = CallFrame::new(code.clone(), script_or_module, environments, realm)
         .with_argument_count(argument_count as u32)

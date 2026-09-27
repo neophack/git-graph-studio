@@ -1187,17 +1187,6 @@ fn non_existant_call(
     _argument_count: usize,
     context: &mut InternalMethodCallContext<'_>,
 ) -> JsResult<CallValue> {
-    // GGS diagnostic: dump the whole JS frame chain at the bad call.
-    if std::env::var("GGS_CALL_TRACE").is_ok() {
-        for frame in context.vm.frames.iter().rev().take(8) {
-            let name = frame.code_block.name().to_std_string_escaped();
-            let position = frame.code_block.source_info().map().find(frame.pc);
-            std::eprintln!(
-                "[ggs-boa] bad-call frame `{name}` pc {} {position:?}",
-                frame.pc
-            );
-        }
-    }
     Err(JsNativeError::typ()
         .with_message("not a callable function")
         .with_realm(context.realm().clone())

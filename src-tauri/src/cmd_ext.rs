@@ -561,10 +561,7 @@ fn install_missing_bundled_in(
             continue;
         }
         outcomes.push(install_from_vsix_into(dir, path, false).map(|info| {
-            record_bundled_stamp(
-                &dir.join(format!("{}-{}", info.id, info.version)),
-                path,
-            );
+            record_bundled_stamp(&dir.join(format!("{}-{}", info.id, info.version)), path);
             format!(
                 "{} {} installed from the bundled package (first launch)",
                 info.id, info.version
@@ -602,10 +599,9 @@ fn bundled_vsix_packages(app: &tauri::AppHandle) -> Vec<std::path::PathBuf> {
             }
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
             if let Some(name) = name {
-                if !found
-                    .iter()
-                    .any(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()) == Some(name.clone()))
-                {
+                if !found.iter().any(|p| {
+                    p.file_name().map(|n| n.to_string_lossy().into_owned()) == Some(name.clone())
+                }) {
                     found.push(path);
                 }
             }
@@ -919,7 +915,10 @@ pub fn ext_uninstall(
     // A deliberate uninstall of a bundled package is remembered: the boot pass
     // auto-installs only what the user never removed (the marker file, not the package
     // directory, is what a later boot reads).
-    let _ = std::fs::write(dir.join(format!(".bundled-dismissed-{ext_id}")), b"uninstalled\n");
+    let _ = std::fs::write(
+        dir.join(format!(".bundled-dismissed-{ext_id}")),
+        b"uninstalled\n",
+    );
     Ok(())
 }
 
@@ -1518,7 +1517,11 @@ pub struct ExtPageBytes {
 /// The repo a page names must sit inside the open folders (empty names the first one), and
 /// the file path resolves under that repo. Answers the canonical repo root and the confined
 /// file target.
-fn confine_page_path(roots: &[String], repo: &str, path: &str) -> Result<(PathBuf, PathBuf), String> {
+fn confine_page_path(
+    roots: &[String],
+    repo: &str,
+    path: &str,
+) -> Result<(PathBuf, PathBuf), String> {
     let root = confine_to_roots(roots, repo)?;
     let target = confine_to_roots(&[root.to_string_lossy().into_owned()], path)?;
     Ok((root, target))
@@ -2022,9 +2025,23 @@ fn extract_vsix(vsix: &Path, target: &Path) -> Result<(), String> {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
+        #[cfg(unix)]
+        let mode = entry.unix_mode();
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
         std::fs::write(&dest, &bytes).map_err(|e| format!("write {}: {e}", dest.display()))?;
+        // The executable bit the archive recorded — a package's own CLI (claude-code's
+        // `resources/native-binary/claude`) loses it otherwise, and its spawn fails with
+        // EACCES on Linux and macOS. VS Code's extractor applies the same mode.
+        #[cfg(unix)]
+        if let Some(mode) = mode.filter(|mode| mode & 0o111 != 0) {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &dest,
+                std::fs::Permissions::from_mode((mode & 0o777) | 0o600),
+            )
+            .map_err(|e| format!("chmod {}: {e}", dest.display()))?;
+        }
     }
     Ok(())
 }
@@ -2173,6 +2190,11 @@ fn serve_ext_asset_from(
     };
     tauri::http::Response::builder()
         .header(tauri::http::header::CONTENT_TYPE, content_type(&file))
+        // The webview pages load these as type=module scripts (and fetch() their data) -
+        // module scripts are CORS-checked even same-site, so the response must carry the
+        // allow-origin header or the browser blocks the load and the page mounts nothing
+        // (the blank-webview failure mode).
+        .header(tauri::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .body(content)
         .expect("a response with a valid header value")
 }
@@ -2375,6 +2397,37 @@ mod install_tests {
     use super::*;
     use std::io::Write;
 
+    /// A package's own executable (claude-code's `resources/native-binary/claude`) keeps
+    /// the mode its archive recorded — without it, the spawn fails with EACCES — while a
+    /// plain data file stays non-executable.
+    #[cfg(unix)]
+    #[test]
+    fn extraction_keeps_the_archives_executable_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let vsix = tmp.path().join("modes.vsix");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&vsix).unwrap());
+        let exec = zip::write::SimpleFileOptions::default().unix_permissions(0o755);
+        let data = zip::write::SimpleFileOptions::default().unix_permissions(0o644);
+        zip.start_file("extension/resources/native-binary/tool", exec)
+            .unwrap();
+        zip.write_all(b"#!/bin/sh\necho hi\n").unwrap();
+        zip.start_file("extension/README.md", data).unwrap();
+        zip.write_all(b"readme").unwrap();
+        zip.finish().unwrap();
+        let target = tmp.path().join("out");
+        extract_vsix(&vsix, &target).unwrap();
+        let mode = |rel: &str| {
+            std::fs::metadata(target.join(rel))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode("resources/native-binary/tool"), 0o755);
+        assert_eq!(mode("README.md") & 0o111, 0);
+    }
+
     /// A `.vsix` with a package.json and a web page (an extra data file,
     /// optionally, to prove every entry lands). Visible to `vsix_tests`, which builds a
     /// same-id pair to prove upgrades share one install slot.
@@ -2412,9 +2465,10 @@ mod install_tests {
     /// the refresh build from every package, in the shape the tests assert on.
     pub(super) fn bundled_of(vsix: &Path) -> Result<(StudioManifest, VsixManifest), String> {
         let manifest = read_vsix_manifest(vsix)?;
-        let backend = resolve_node_binaries(&manifest, vsix, crate::ext_process::real_node_allowed())
-            .ok()
-            .flatten();
+        let backend =
+            resolve_node_binaries(&manifest, vsix, crate::ext_process::real_node_allowed())
+                .ok()
+                .flatten();
         Ok((
             StudioManifest {
                 id: format!("{}.{}", manifest.publisher, manifest.name),
@@ -2825,8 +2879,7 @@ mod install_tests {
         zip.write_all(&node).unwrap();
         zip.finish().unwrap();
 
-        let error = install_from_vsix_into(&exts, &vsix, false)
-            .unwrap_err();
+        let error = install_from_vsix_into(&exts, &vsix, false).unwrap_err();
         assert!(error.contains("no \"main\""), "{error}");
 
         // The same package with a `main`: the entry becomes the backend.
@@ -2839,14 +2892,21 @@ mod install_tests {
             br#"{"name":"engine","publisher":"acme","version":"1.0.0","main":"./out/extension.js"}"#,
         )
         .unwrap();
-        zip.start_file("extension/out/extension.js", options).unwrap();
+        zip.start_file("extension/out/extension.js", options)
+            .unwrap();
         zip.write_all(b"module.exports = {};").unwrap();
         zip.start_file("extension/native/win32-x64/engine.node", options)
             .unwrap();
         zip.write_all(&node).unwrap();
         zip.finish().unwrap();
         let info = install_from_vsix_into(&exts, &vsix_main, false).unwrap();
-        let backend = info.capabilities.as_ref().unwrap().backend.as_ref().unwrap();
+        let backend = info
+            .capabilities
+            .as_ref()
+            .unwrap()
+            .backend
+            .as_ref()
+            .unwrap();
         assert_eq!(backend.kind, "node");
         assert_eq!(backend.command, "./out/extension.js");
     }
@@ -2924,7 +2984,7 @@ mod install_tests {
         );
     }
 
-        #[test]
+    #[test]
     fn a_backend_platform_map_resolves_and_falls_back_to_the_command() {
         let binaries = std::collections::BTreeMap::from([
             (
@@ -3109,7 +3169,8 @@ mod vsix_tests {
     fn the_real_bundled_vsix_auto_installs() {
         // The packed git-graph-rs VSIX (no ggs key, an engine .node + a main): the exact
         // package the installer ships, through the exact auto-install entry.
-        let packed = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/studio/bundled/app-resources/extensions/git-graph-rs.vsix");
+        let packed = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/studio/bundled/app-resources/extensions/git-graph-rs.vsix");
         if !packed.is_file() {
             eprintln!("skipping: no packed bundled vsix");
             return;
@@ -3125,10 +3186,17 @@ mod vsix_tests {
         let versions = find_installed(&exts, "neophack.git-graph-rs").unwrap();
         assert!(!versions.is_empty(), "the install landed");
         let manifest: StudioManifest = serde_json::from_str(
-            &std::fs::read_to_string(exts.join(format!("neophack.git-graph-rs-{}", versions[0])).join("manifest.json")).unwrap(),
+            &std::fs::read_to_string(
+                exts.join(format!("neophack.git-graph-rs-{}", versions[0]))
+                    .join("manifest.json"),
+            )
+            .unwrap(),
         )
         .unwrap();
-        assert!(manifest.backend.is_some(), "the derived manifest declares a backend");
+        assert!(
+            manifest.backend.is_some(),
+            "the derived manifest declares a backend"
+        );
     }
 
     #[test]
@@ -3157,7 +3225,10 @@ mod vsix_tests {
         std::fs::write(&marker, b"uninstalled\n").unwrap();
         let _ = std::fs::remove_dir_all(exts.join("acme.demo-1.0.0"));
         let outcomes = install_missing_bundled_in(&exts, &packages);
-        assert!(outcomes.is_empty(), "dismissed stays dismissed: {outcomes:?}");
+        assert!(
+            outcomes.is_empty(),
+            "dismissed stays dismissed: {outcomes:?}"
+        );
         assert!(!find_installed(&exts, "acme.demo")
             .map(|versions| !versions.is_empty())
             .unwrap_or(false));
@@ -3700,8 +3771,8 @@ mod backend_derivation_tests {
 
 #[cfg(test)]
 mod page_bytes_tests {
-    use base64::Engine as _;
     use crate::test_support::Scratch;
+    use base64::Engine as _;
 
     use super::*;
 
@@ -3722,18 +3793,30 @@ mod page_bytes_tests {
 
         let root = repo_path.to_string_lossy().into_owned();
         let roots = [root.clone()];
-        let answer = ext_page_revision_bytes_core(&roots, &root, &hash, "logo.bin", encode).unwrap();
+        let answer =
+            ext_page_revision_bytes_core(&roots, &root, &hash, "logo.bin", encode).unwrap();
         assert_eq!(answer.error, None);
-        assert_eq!(answer.bytes.as_deref(), Some(base64::engine::general_purpose::STANDARD.encode(binary).as_str()));
+        assert_eq!(
+            answer.bytes.as_deref(),
+            Some(
+                base64::engine::general_purpose::STANDARD
+                    .encode(binary)
+                    .as_str()
+            )
+        );
         assert_eq!(answer.size, Some(binary.len() as u64));
 
         // A path missing at the revision is the deleted side's data, not an error.
-        let missing = ext_page_revision_bytes_core(&roots, &root, &hash, "gone.bin", encode).unwrap();
+        let missing =
+            ext_page_revision_bytes_core(&roots, &root, &hash, "gone.bin", encode).unwrap();
         assert_eq!(missing.error, None);
         assert_eq!(missing.bytes, None);
 
         // A path that leaves the repo is refused — the services are workspace-confined.
-        assert!(ext_page_revision_bytes_core(&roots, &root, &hash, "../../outside.bin", encode).is_err());
+        assert!(
+            ext_page_revision_bytes_core(&roots, &root, &hash, "../../outside.bin", encode)
+                .is_err()
+        );
     }
 
     #[test]
@@ -3748,11 +3831,17 @@ mod page_bytes_tests {
 
         let window = ext_page_file_chunk_core(&roots, &root, "blob.bin", 250, 10, encode).unwrap();
         assert_eq!(window.error, None);
-        assert_eq!(window.base64.as_deref(), Some(encode(&data[250..]).as_str()));
+        assert_eq!(
+            window.base64.as_deref(),
+            Some(encode(&data[250..]).as_str())
+        );
         assert_eq!(window.size, Some(256));
 
         let to_end = ext_page_file_chunk_core(&roots, &root, "blob.bin", 200, -1, encode).unwrap();
-        assert_eq!(to_end.base64.as_deref(), Some(encode(&data[200..]).as_str()));
+        assert_eq!(
+            to_end.base64.as_deref(),
+            Some(encode(&data[200..]).as_str())
+        );
     }
 }
 
@@ -3785,14 +3874,22 @@ mod ext_log_and_storage_tests {
         // The key ignores separator and case spelling: one workspace, one directory.
         let again = ext_storage_paths_in(tmp.path(), "acme.demo", Some("c:/repo")).unwrap();
         assert_eq!(again.workspace, paths.workspace);
-        assert_eq!(ext_storage_paths_in(tmp.path(), "acme.demo", None).unwrap().workspace, None);
+        assert_eq!(
+            ext_storage_paths_in(tmp.path(), "acme.demo", None)
+                .unwrap()
+                .workspace,
+            None
+        );
     }
 
     #[test]
     fn storage_paths_refuse_ids_that_would_escape() {
         let tmp = tempfile::tempdir().unwrap();
         for bad in ["", ".", "..", "a/b", "a\\b", "c:x", "acme..x"] {
-            assert!(ext_storage_paths_in(tmp.path(), bad, None).is_err(), "{bad} should be refused");
+            assert!(
+                ext_storage_paths_in(tmp.path(), bad, None).is_err(),
+                "{bad} should be refused"
+            );
         }
     }
 }

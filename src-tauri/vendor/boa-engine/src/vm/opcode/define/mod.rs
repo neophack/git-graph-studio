@@ -1,5 +1,4 @@
 use super::VaryingOperand;
-use boa_ast::scope::BindingLocatorScope;
 use crate::{Context, JsResult, JsValue, vm::opcode::Operation};
 
 pub(crate) mod class;
@@ -90,16 +89,6 @@ impl PutLexicalValue {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             environments.put_lexical_value(scope, binding_index, value.clone());
         }));
-        if std::env::var("GGS_SCOPE_TRACE").is_ok() {
-            let n = binding_locator.name().to_std_string_escaped();
-            if n == "Q" {
-                let scope_desc = match scope {
-                    BindingLocatorScope::Stack(i) => format!("Stack({i})"),
-                    other => format!("{other:?}"),
-                };
-                std::eprintln!("[ggs-scope] PutLexicalValue Q -> {scope_desc} slot={binding_index} value={:?}", value.type_of());
-            }
-        }
         if outcome.is_err() {
             let name = context.vm.frame().code_block.name().to_std_string_escaped();
             std::eprintln!(

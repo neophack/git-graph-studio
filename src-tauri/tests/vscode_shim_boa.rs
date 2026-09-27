@@ -20,10 +20,16 @@ use boa_engine::{Context, Source};
 #[test]
 fn grammar_the_claude_code_bundle_needs() {
     let cases: &[(&str, &str)] = &[
-        ("class named of", "class of extends Error { name = \"x\"; constructor() { super(\"y\"); } }"),
+        (
+            "class named of",
+            "class of extends Error { name = \"x\"; constructor() { super(\"y\"); } }",
+        ),
         ("of variable", "var of = 1; of = class of {};"),
         ("of method", "class A { of($) { return $; } }"),
-        ("private dollar", "class B { #$; #J = null; constructor($) { this.#$ = $; } of($) { return this.#$; } }"),
+        (
+            "private dollar",
+            "class B { #$; #J = null; constructor($) { this.#$ = $; } of($) { return this.#$; } }",
+        ),
         ("for of", "for (const z of [1, 2]) { void z; }"),
     ];
     for (name, source) in cases {
@@ -32,6 +38,70 @@ fn grammar_the_claude_code_bundle_needs() {
             panic!("Boa cannot parse {name}: {error}");
         }
     }
+}
+
+/// The inline-cache poisoning zod v4 hits inside claude-code: a lazy getter that
+/// redefines its own property as data (`Object.defineProperty(this, k, { value })`)
+/// reshapes the object DURING the cached lookup. Stock Boa 0.21.1 then cached the
+/// post-getter (data) shape with the pre-getter (accessor) slot, so the next read of any
+/// object of that data shape "called" the plain value: `TypeError: not a callable
+/// function` on `def.shape`, and claude-code never activated. The vendored engine caches
+/// against the shape the lookup saw (GGS-patch in `vm/opcode/get/property.rs`,
+/// `get/name.rs`, `set/property.rs`). The setter half: a setter that reshapes its
+/// receiver must not leave a cached accessor slot on the reshaped layout either.
+#[test]
+fn a_getter_that_reshapes_its_object_does_not_poison_the_inline_cache() {
+    let mut context = Context::default();
+    let result = context
+        .eval(Source::from_bytes(
+            r#"
+            const make = () => {
+                const d = { type: "object" };
+                Object.defineProperty(d, "shape", {
+                    get() { const v = { a: 1 }; Object.defineProperty(this, "shape", { value: v }); return v; },
+                    set(_) {},
+                    enumerable: true,
+                    configurable: true,
+                });
+                return d;
+            };
+            const read = (J) => J.shape;
+            const first = read(make());            // the lookup that runs the getter
+            const second = make(); second.shape;   // reshaped to data elsewhere
+            const third = read(second);            // a cached read of the data layout
+            globalThis.lazyShape = { a: 1 };
+            Object.defineProperty(globalThis, "lazyGlobal", {
+                get() { Object.defineProperty(globalThis, "lazyGlobal", { value: { g: 1 }, configurable: true }); return globalThis.lazyGlobal; },
+                configurable: true,
+            });
+            const readGlobal = () => lazyGlobal;
+            const g1 = readGlobal();
+            const g2 = readGlobal();
+            const makeSet = () => {
+                const s = { kind: 1 };
+                Object.defineProperty(s, "slot", {
+                    get() { return 0; },
+                    set(v) { Object.defineProperty(this, "slot", { value: v, writable: true }); },
+                    enumerable: true,
+                    configurable: true,
+                });
+                return s;
+            };
+            const write = (o, v) => { o.slot = v; };
+            const s1 = makeSet(); write(s1, 1);
+            const s2 = makeSet(); s2.slot = 2;
+            write(s2, 3);
+            [first.a, third.a, g1.g, g2.g, s1.slot, s2.slot].join(",")
+            "#,
+        ))
+        .unwrap();
+    assert_eq!(
+        result
+            .to_string(&mut context)
+            .unwrap()
+            .to_std_string_escaped(),
+        "1,1,1,1,1,3"
+    );
 }
 
 /// The Boa 0.20/0.21 bug behind `require.rs`'s `Function`-constructor ban: a module
@@ -71,8 +141,7 @@ fn the_function_constructor_poison_degrades_instead_of_panicking() {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         handler.call(&boa_engine::JsValue::undefined(), &[], &mut context)
     }));
-    let value = outcome
-        .expect("the poisoned closure runs without panicking — the VM degrades it");
+    let value = outcome.expect("the poisoned closure runs without panicking — the VM degrades it");
     assert!(value.is_ok(), "the degraded closure answers: {value:?}");
 }
 

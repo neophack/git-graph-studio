@@ -73,10 +73,7 @@ impl ModuleLoader for NodeModuleLoader {
         if let Some(init) = init.as_callable() {
             let _ = init.call(
                 &JsValue::undefined(),
-                &[
-                    import_meta.clone().into(),
-                    text(path.display().to_string()),
-                ],
+                &[import_meta.clone().into(), text(path.display().to_string())],
                 context,
             );
         }
@@ -124,9 +121,8 @@ fn load(base: &Path, specifier: &str, context: &mut Context) -> JsResult<Module>
         with_state(|state| state.esm_cache.insert(cache_key, module.clone()));
         return Ok(module);
     }
-    let resolved = resolve_import(base, specifier).map_err(|message| {
-        JsError::from_native(JsNativeError::error().with_message(message))
-    })?;
+    let resolved = resolve_import(base, specifier)
+        .map_err(|message| JsError::from_native(JsNativeError::error().with_message(message)))?;
     load_path(&resolved, context)
 }
 
@@ -145,8 +141,7 @@ fn load_path(path: &Path, context: &mut Context) -> JsResult<Module> {
         Module::parse(Source::from_bytes(&source).with_path(path), None, context).map_err(
             |error| {
                 JsError::from_native(
-                    JsNativeError::syntax()
-                        .with_message(format!("{}: {error}", path.display())),
+                    JsNativeError::syntax().with_message(format!("{}: {error}", path.display())),
                 )
             },
         )?
@@ -155,11 +150,7 @@ fn load_path(path: &Path, context: &mut Context) -> JsResult<Module> {
         let exports = require::require(&parent, &path.display().to_string(), context)?;
         synthetic(exports, Some(path.to_path_buf()), context)?
     };
-    with_state(|state| {
-        state
-            .esm_cache
-            .insert(path.to_path_buf(), module.clone())
-    });
+    with_state(|state| state.esm_cache.insert(path.to_path_buf(), module.clone()));
     Ok(module)
 }
 
@@ -219,7 +210,8 @@ fn synthetic(value: JsValue, path: Option<PathBuf>, context: &mut Context) -> Js
             .transpose()?
             .unwrap_or_default();
         if let Some(keys_fn) = keys_fn.as_callable() {
-            #[allow(clippy::cloned_ref_to_slice_refs)] // a one-element hand slice reads clearer here
+            #[allow(clippy::cloned_ref_to_slice_refs)]
+            // a one-element hand slice reads clearer here
             let listed = keys_fn.call(&JsValue::undefined(), &[value.clone()], context)?;
             if let Some(listed) = listed.as_object() {
                 let length = listed.get(key("length"), context)?.to_length(context)?;

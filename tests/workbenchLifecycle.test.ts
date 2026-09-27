@@ -5,6 +5,7 @@
 
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
+import { applyContributions, removeContributions } from '../src/contributions';
 import { ExtensionHost } from '../src/extHost';
 import * as state from '../src/state';
 import { FS_CHANGED_EVENT, Workbench } from '../src/workbench';
@@ -481,5 +482,33 @@ describe('command-line launch actions', () => {
 		// The shell boots to the welcome page now — the Git Graph view is the plugin's own
 		// page, opened by its command, not part of the app's boot.
 		expect(workbench.editors.activeInput?.kind ?? 'welcome').toBe('welcome');
+	});
+});
+
+describe('extension view containers follow setContext', () => {
+	it('a setContext that changes the visible views rebuilds the sidebar; one that does not leaves it be', async () => {
+		// Claude Code's shape: the chat view is gated on a key only an old host sets, the
+		// sessions list on a key its activation sets.
+		applyContributions('acme.side', {
+			commands: [{ command: 'acme-vscode.open', title: 'Open' }],
+			viewsContainers: { activitybar: [{ id: 'acme-chat', title: 'Acme Chat' }, { id: 'acme-list', title: 'Acme List' }] },
+			views: {
+				'acme-chat': [{ id: 'acmeChat', name: 'Chat', when: 'side:oldHost' }],
+				'acme-list': [{ id: 'acmeList', name: 'List', when: 'acme-vscode.listEnabled' }]
+			}
+		}, {}, () => undefined, () => true);
+		const entries = () => [...document.querySelectorAll<HTMLElement>('#activitybar .activity-item')].map((item) => item.getAttribute('aria-label') ?? '').filter((label) => label.startsWith('Acme'));
+		workbench.extensionHost.onViewsChanged!();
+		expect(entries()).toEqual([]);
+
+		await workbench.extensionHost.executeCommand('setContext', ['acme-vscode.listEnabled', true]);
+		expect(entries()).toEqual(['Acme List']);
+		const listItem = document.querySelector<HTMLElement>('#activitybar .activity-item[aria-label="Acme List"]');
+
+		// A key no view reads changes nothing: the live sections are not remounted.
+		await workbench.extensionHost.executeCommand('setContext', ['acme-vscode.busy', true]);
+		expect(document.querySelector('#activitybar .activity-item[aria-label="Acme List"]')).toBe(listItem);
+		removeContributions('acme.side');
+		workbench.extensionHost.onViewsChanged!();
 	});
 });

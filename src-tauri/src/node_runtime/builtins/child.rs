@@ -11,6 +11,9 @@ use serde_json::{json, Value};
 use super::support::*;
 use crate::node_runtime::{children, key, native_callable, with_state, Job, ProcEntry};
 
+/// The next child handle, unique across every runtime in the process.
+static NEXT_PROC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 struct SpawnRequest {
     file: String,
     args: Vec<String>,
@@ -112,13 +115,21 @@ fn make_emitter(context: &mut Context) -> JsResult<JsObject> {
 /// like the real streams. Extension code calls these without checking — the hex scan drains
 /// a child's stderr through `resume()` — and on a bare emitter that call died with a
 /// TypeError, which silently ate the scan and left the binary comparison "analysing" forever.
-fn stream_chainable(this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+fn stream_chainable(
+    this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
     Ok(this.clone())
 }
 
 fn attach_readable_stream(stream: &JsObject, context: &mut Context) -> JsResult<()> {
     for name in ["pause", "resume", "destroy"] {
-        let function = native_callable(context, name, boa_engine::NativeFunction::from_fn_ptr(stream_chainable));
+        let function = native_callable(
+            context,
+            name,
+            boa_engine::NativeFunction::from_fn_ptr(stream_chainable),
+        );
         stream.set(key(name), function, false, context)?;
     }
     Ok(())
@@ -155,8 +166,9 @@ pub(super) fn proc_spawn(
 
     let child = Arc::new(Mutex::new(child));
     let handle = with_state(|state| {
-        state.next_proc += 1;
-        let handle = state.next_proc;
+        // Process-wide, like the CHILDREN table the watchers share: two runtimes in one
+        // process (the integration tests) must never reuse each other's handle.
+        let handle = NEXT_PROC.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         state.procs.insert(
             handle,
             ProcEntry {

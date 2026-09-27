@@ -137,6 +137,14 @@ pub(crate) enum Job {
         handle: u64,
         code: Option<i32>,
     },
+    /// An event of a native resource (a socket, a listener, a client request — see
+    /// `builtins/net.rs`), routed by id to the prelude's `__ggsNativeEvent`.
+    Native {
+        id: u64,
+        event: &'static str,
+        data: Value,
+        bytes: Option<Vec<u8>>,
+    },
     Quit,
 }
 
@@ -187,7 +195,6 @@ pub(crate) struct State {
     /// `esm.rs`'s cache; Boa heap values, dropped with the rest of this state.
     esm_cache: HashMap<PathBuf, boa_engine::Module>,
     procs: HashMap<u64, ProcEntry>,
-    next_proc: u64,
     main_exports: Option<JsValue>,
     /// The entry is a native addon (a `.node`): its `request` export speaks the NAPI
     /// convention — `request(method, paramsJson)` answering a JSON string — not the JS
@@ -236,7 +243,6 @@ impl State {
             module_cache: HashMap::new(),
             esm_cache: HashMap::new(),
             procs: HashMap::new(),
-            next_proc: 0,
             main_exports: None,
             native_entry: false,
             frame_program: false,
@@ -576,6 +582,15 @@ fn execute_job(context: &mut Context, job: Job) -> bool {
             proc_exit(context, handle, code);
             false
         }
+        Job::Native {
+            id,
+            event,
+            data,
+            bytes,
+        } => {
+            native_event(context, id, event, &data, bytes);
+            false
+        }
     }
 }
 
@@ -705,13 +720,18 @@ fn handle_request(context: &mut Context, method: &str, params: &Value) -> Result
             if frame_program {
                 install_frame_program(context, params)?;
             }
-            let commands = with_state(|state| {
-                state
-                    .launcher
-                    .as_ref()
-                    .map(|(command, _)| vec![command.clone()])
-                    .unwrap_or_default()
+            let (launcher, package_root) = with_state(|state| {
+                (
+                    state.launcher.as_ref().map(|(command, _)| command.clone()),
+                    state.package_root.clone(),
+                )
             });
+            let mut commands: Vec<String> = launcher.into_iter().collect();
+            for command in contributed_commands(&package_root) {
+                if !commands.contains(&command) {
+                    commands.push(command);
+                }
+            }
             Ok(json!({
                 "protocolVersion": proto::PROTOCOL_VERSION,
                 "capabilities": { "commands": commands }
@@ -913,6 +933,29 @@ fn read_launcher(package_root: &Path) -> Option<(String, String)> {
     ))
 }
 
+/// The package's standard `contributes.commands` ids — the command surface the handshake
+/// reports (no Studio-specific manifest field needed). Empty when package.json is absent
+/// or unreadable: the report is informational, the workbench routes by the manifest.
+fn contributed_commands(package_root: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(package_root.join("package.json")) else {
+        return Vec::new();
+    };
+    let Ok(manifest) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    manifest
+        .pointer("/contributes/commands")
+        .and_then(Value::as_array)
+        .map(|declared| {
+            declared
+                .iter()
+                .filter_map(|entry| entry.get("command").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn run_command(context: &mut Context, command: &str, args: &Value) -> Result<Value, String> {
     let args = args.as_array().cloned().unwrap_or_default();
 
@@ -949,10 +992,7 @@ fn run_command(context: &mut Context, command: &str, args: &Value) -> Result<Val
     let main_exports = with_state(|state| state.main_exports.clone());
     let native_entry = with_state(|state| state.native_entry);
     if native_entry {
-        if let Some(exports) = main_exports
-            .as_ref()
-            .and_then(|value| value.as_object())
-        {
+        if let Some(exports) = main_exports.as_ref().and_then(|value| value.as_object()) {
             if let Ok(function) = exports.get(key("request"), context) {
                 if let Some(function) = function.as_object() {
                     let mut method = command.to_string();
@@ -1049,6 +1089,12 @@ fn deliver_child_jobs(context: &mut Context) {
                 bytes,
             } => proc_data(context, handle, stream, bytes),
             Job::ProcExit { handle, code } => proc_exit(context, handle, code),
+            Job::Native {
+                id,
+                event,
+                data,
+                bytes,
+            } => native_event(context, id, event, &data, bytes),
             other => backlog.push(other),
         }
     }
@@ -1224,6 +1270,37 @@ fn proc_exit(context: &mut Context, handle: u64, code: Option<i32>) {
     }
 }
 
+/// Hand one native resource event to the prelude's router: `(id, event, data, bytes)`,
+/// `bytes` a Buffer when the event carries a payload. A throw from the package's own
+/// listener is logged, never allowed to take the runtime down.
+fn native_event(context: &mut Context, id: u64, event: &str, data: &Value, bytes: Option<Vec<u8>>) {
+    let global = context.global_object();
+    let Ok(router) = global.get(key("__ggsNativeEvent"), context) else {
+        return;
+    };
+    let Some(router) = router.as_callable() else {
+        return;
+    };
+    let payload = match bytes {
+        Some(bytes) => match builtins_buffer(context, bytes) {
+            Ok(buffer) => buffer,
+            Err(()) => return,
+        },
+        None => JsValue::undefined(),
+    };
+    let data = JsValue::from_json(data, context).unwrap_or_default();
+    let args = [
+        JsValue::from(id as f64),
+        JsValue::from(boa_engine::JsString::from(event)),
+        data,
+        payload,
+    ];
+    if let Err(error) = router.call(&JsValue::undefined(), &args, context) {
+        with_state(|state| state.log("warn", &format!("a {event} listener threw: {error}")));
+    }
+    let _ = context.run_jobs();
+}
+
 fn builtins_buffer(context: &mut Context, bytes: Vec<u8>) -> Result<JsValue, ()> {
     // The same Buffer the prelude built, through its `from` (kept local so the byte
     // shaping for pipe data does not round-trip through the natives table).
@@ -1235,8 +1312,11 @@ fn builtins_buffer(context: &mut Context, bytes: Vec<u8>) -> Result<JsValue, ()>
         .get(key("from"), context)
         .map_err(|_| ())?;
     let from = from.as_object().ok_or(())?;
-    let bytes = boa_engine::object::builtins::JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(bytes), context)
-        .map_err(|_| ())?;
+    let bytes = boa_engine::object::builtins::JsArrayBuffer::from_byte_block(
+        crate::node_runtime::byte_block(bytes),
+        context,
+    )
+    .map_err(|_| ())?;
     from.call(&buffer, &[bytes.into()], context).map_err(|_| ())
 }
 

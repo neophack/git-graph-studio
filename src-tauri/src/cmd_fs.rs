@@ -370,7 +370,11 @@ pub async fn write_file(
 /// does not exist at that revision (the missing side of an added or deleted file); binary
 /// content passes through undecoded. `pub(crate)`: the extension pages' byte services
 /// (`cmd_ext`'s `ext_page_revision_bytes`) read revision sides through it too.
-pub(crate) fn revision_file_bytes(git: &Git, revision: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn revision_file_bytes(
+    git: &Git,
+    revision: &str,
+    path: &str,
+) -> Result<Option<Vec<u8>>, String> {
     let spec = format!(
         "{}:{path}",
         if revision == ":index" { "" } else { revision }

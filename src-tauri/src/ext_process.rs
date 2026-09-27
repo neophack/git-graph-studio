@@ -43,6 +43,10 @@ pub const HOST_REQUEST_EVENT: &str = "ext-host-request";
 
 /// How long `initialize` may take before the backend is declared unresponsive and killed.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// The same for a `node` backend, whose handshake answers only after the package's whole
+/// `activate` ran (VS Code puts no deadline on activation): Claude Code's 3 MB bundle on a
+/// cold first start after an install overran the 10 s a bare process binary gets.
+const NODE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(90);
 /// Lines of stderr and `$/log` kept per process, for the status view and crash reports.
 const LOG_CAP: usize = 200;
 
@@ -332,7 +336,12 @@ impl ProcessHostState {
         // answer writes through the same map — holding the lock here would deadlock the
         // handshake against its own first request until this very timeout fired.
         drop(procs);
-        let handshake_result = match rx.recv_timeout(HANDSHAKE_TIMEOUT) {
+        let handshake_timeout = if backend.kind == "node" {
+            NODE_HANDSHAKE_TIMEOUT
+        } else {
+            HANDSHAKE_TIMEOUT
+        };
+        let handshake_result = match rx.recv_timeout(handshake_timeout) {
             Ok(Ok(value)) => value,
             Ok(Err(message)) => {
                 let _ = drop_handle(&mut self.procs.lock().unwrap(), ext_id);
@@ -344,7 +353,7 @@ impl ProcessHostState {
                 let _ = drop_handle(&mut self.procs.lock().unwrap(), ext_id);
                 return Err(format!(
                     "{ext_id} did not answer initialize within {} s",
-                    HANDSHAKE_TIMEOUT.as_secs()
+                    handshake_timeout.as_secs()
                 ));
             }
         };

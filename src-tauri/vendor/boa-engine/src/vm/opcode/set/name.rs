@@ -56,16 +56,6 @@ impl SetName {
         let strict = code_block.strict();
 
         context.find_runtime_binding(&mut binding_locator)?;
-        if std::env::var("GGS_BINDING_TRACE").is_ok()
-            && locator_name_is(&binding_locator, "Q")
-        {
-            std::eprintln!(
-                "[ggs-boa] SetName Q: scope={:?} slot={} value_kind={}",
-                binding_locator.scope(),
-                binding_locator.binding_index(),
-                value.type_of()
-            );
-        }
 
         verify_initialized(&binding_locator, context)?;
 
@@ -148,8 +138,4 @@ fn verify_initialized(locator: &BindingLocator, context: &mut Context) -> JsResu
     }
 
     Ok(())
-}
-
-fn locator_name_is(locator: &boa_ast::scope::BindingLocator, want: &str) -> bool {
-    std::env::var("GGS_BINDING_TRACE").is_ok() && locator.name().to_std_string_escaped() == want
 }

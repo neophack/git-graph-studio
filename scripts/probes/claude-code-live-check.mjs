@@ -1,20 +1,28 @@
 // The Claude Code live check: drives the real app (release exe + WebView2 CDP) and proves
-// the Anthropic claude-code extension runs on the real-Node host (GGS_REAL_NODE=1):
-//   1. the extension's backend is running, and its process image is node.exe (the
-//      real-Node host — node node-host.cjs — not the bundled Boa runtime);
+// the Anthropic claude-code extension runs on the chosen extension host — the default
+// ggs-node (the bundled Boa runtime, what every install gets), or the real-Node opt-in
+// (`--host real-node`, GGS_REAL_NODE=1):
+//   1. the extension's backend is running, and its process image is that host
+//      (ggs-node.exe, or node.exe running node-host.cjs);
 //   2. the extension's commands land in the workbench palette ("Claude Code: …");
-//   3. running "Claude Code: Open in New Tab" opens the chat webview, and claude's own
-//      webview bundle (webview/index.js, served over ggs://) actually loads in it;
-//   4. no exception-level console entry in the workbench during all of it.
+//   3. running "Claude Code: Open in New Tab" opens the chat webview, claude's own
+//      webview bundle (webview/index.js, served over ggs://) loads in it, and the chat UI
+//      mounts inside the frame;
+//   4. the extension's MCP server (the IDE link the Claude CLI connects to) is running;
+//   5. the layout is VS Code 1.106's: the activity bar carries one Claude Code entry (the
+//      sessions list — the chat never pins into the narrow sidebar) and every webview view
+//      resolved without an error in the extension host log;
+//   6. no exception-level console entry in the workbench during all of it.
 //
-//   node scripts/probes/claude-code-live-check.mjs [--port 9233] [--exe <path>]
+//   node scripts/probes/claude-code-live-check.mjs [--port 9233] [--exe <path>] [--host ggs-node|real-node]
+//     [--screenshot <file.png>]  (the workbench with the chat tab open, for a human to look at)
 //
 // Login (the OAuth browser round) and a real conversation stay interactive steps — the
 // probe proves the extension runs, not that the user's account is signed in.
 
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -23,6 +31,7 @@ const args = process.argv.slice(2);
 const flag = (name, fallback) => (args.indexOf(name) === -1 ? fallback : args[args.indexOf(name) + 1]);
 const port = flag('--port', '9233');
 const exe = flag('--exe', [
+	join(appDir, 'target', 'studio', 'cargo', 'release', 'ggs.exe'),
 	join(appDir, 'target', 'studio', 'cargo', 'release', 'git-graph-studio.exe'),
 	join(appDir, 'target', 'studio', 'cargo', 'debug', 'git-graph-studio.exe')
 ].find((p) => existsSync(p)));
@@ -31,6 +40,12 @@ if (!exe || !existsSync(exe)) {
 	process.exit(2);
 }
 const EXT_ID = 'Anthropic.claude-code';
+const host = flag('--host', 'ggs-node');
+const screenshot = flag('--screenshot', null);
+if (host !== 'ggs-node' && host !== 'real-node') {
+	console.error('--host is ggs-node or real-node');
+	process.exit(2);
+}
 
 const workspace = join(tmpdir(), 'ggs-claude-live-check');
 rmSync(workspace, { recursive: true, force: true });
@@ -44,6 +59,12 @@ const log = (line) => {
 	appendFileSync(logFile, line + '\n');
 };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// The extension host log's own local timestamp format: only this run's lines are judged.
+const startedAt = (() => {
+	const d = new Date();
+	const pad = (n) => String(n).padStart(2, '0');
+	return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+})();
 
 let failures = 0;
 const check = (name, ok, detail = '') => {
@@ -103,13 +124,13 @@ function killTree(pid) {
 	spawnSync('taskkill', ['/T', '/F', '/PID', String(pid)], { encoding: 'utf8' });
 }
 
-/* ---------- launch (the real-Node host opt-in) ---------- */
+/* ---------- launch (the real-Node host only under its opt-in) ---------- */
 const child = spawn(exe, [workspace], {
 	cwd: appDir,
 	stdio: ['ignore', 'ignore', 'pipe'],
 	env: {
 		...process.env,
-		GGS_REAL_NODE: '1',
+		...(host === 'real-node' ? { GGS_REAL_NODE: '1' } : {}),
 		WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`
 	}
 });
@@ -135,9 +156,12 @@ const workbench = await session(page);
 // release workbench resolves the Tauri event API through its own bundled modules.
 for (let attempt = 0; attempt < 3; attempt++) {
 	const attached = await workbench.evaluate(`(async () => {
-		const mod = await import('/@id/@tauri-apps/api/event').catch(() => import('/node_modules/.vite/deps/@tauri-apps_api_event.js'));
+		// Tauri's own IPC surface: present in dev and release builds alike (the Vite module
+		// paths exist only under the dev server).
+		const tauri = window.__TAURI_INTERNALS__;
 		window.__probeRequests = window.__probeRequests ?? [];
-		await mod.listen('ext-host-request', (event) => {
+		const listen = (name, handler) => tauri.invoke('plugin:event|listen', { event: name, target: { kind: 'Any' }, handler: tauri.transformCallback(handler) });
+		await listen('ext-host-request', (event) => {
 			if (event.payload.extId === 'Anthropic.claude-code') {
 				window.__probeRequests.push(event.payload.method + ' ' + JSON.stringify(event.payload.args ?? []).slice(0, 100));
 		if (event.payload.method === 'webview.setHtml') { window.__setHtmlPayload = String(event.payload.args[1] ?? ''); }
@@ -150,11 +174,11 @@ for (let attempt = 0; attempt < 3; attempt++) {
 }
 
 try {
-	/* 1. The backend: running, on the real-Node host. */
+	/* 1. The backend: running, on the chosen host. */
 	let status = null;
 	for (let attempt = 0; attempt < 60; attempt++) {
 		await sleep(500);
-		const tauriImport = `(async () => (await import('/@id/@tauri-apps/api/core').catch(() => import('/node_modules/.vite/deps/@tauri-apps_api_core.js'))).invoke('ext_process_status'))()`;
+		const tauriImport = `window.__TAURI_INTERNALS__.invoke('ext_process_status')`;
 		const all = await workbench.evaluate(tauriImport).catch(() => null);
 		status = (all ?? []).find((entry) => entry.extensionId === EXT_ID) ?? null;
 		if (status && status.pid > 0) break;
@@ -163,7 +187,8 @@ try {
 	if (status && status.pid > 0) {
 		const image = spawnSync('tasklist', ['/FI', `PID eq ${status.pid}`, '/FO', 'CSV', '/NH'], { encoding: 'utf8' }).stdout.trim();
 		const imageName = image.split(',')[0]?.replace(/"/g, '') ?? '';
-		check('the backend process is node.exe (the real-Node host)', /node/i.test(imageName), imageName);
+		if (host === 'real-node') check('the backend process is node.exe (the real-Node host)', /^node(.exe)?$/i.test(imageName), imageName);
+		else check('the backend process is ggs-node (the bundled runtime)', /^ggs-node/i.test(imageName), imageName);
 	}
 
 	/* 2. The extension's commands land in the palette. */
@@ -179,6 +204,27 @@ try {
 		return [...document.querySelectorAll('#overlays .quick-input .row')].map((r) => r.textContent.trim());
 	})()`) ?? [];
 	check('claude-code commands land in the palette', rows.some((text) => /Claude Code/.test(text)), rows.slice(0, 3).join(' | '));
+
+	/* 2½. The layout: the sessions list alone in the activity bar, every view resolved. */
+	// The container lands once the activation's setContext names the sessions list: wait
+	// for it, then let any stray rebuild settle before counting.
+	const countClaudeEntries = () => workbench.evaluate(`[...document.querySelectorAll('#activitybar .activity-item')].filter((item) => item.getAttribute('aria-label') === 'Claude Code').length`);
+	for (let attempt = 0; attempt < 40 && (await countClaudeEntries()) === 0; attempt++) await sleep(500);
+	await sleep(2000);
+	const claudeEntries = await countClaudeEntries();
+	check('one Claude Code activity-bar entry (the sessions list, no chat in the sidebar)', claudeEntries === 1, `entries=${claudeEntries}`);
+	await workbench.evaluate(`[...document.querySelectorAll('#activitybar .activity-item')].find((item) => item.getAttribute('aria-label') === 'Claude Code')?.click()`);
+	await sleep(3000);
+	const heights = await workbench.evaluate(`(() => {
+		const pane = [...document.querySelectorAll('.ext-webview-view-pane')].find((p) => p.offsetParent !== null);
+		return { pane: pane ? pane.getBoundingClientRect().height : 0, sidebar: document.getElementById('sidebar').getBoundingClientRect().height };
+	})()`);
+	check('the sessions list fills the sidebar height', heights.pane >= heights.sidebar * 0.8, JSON.stringify(heights));
+	const hostLog = join(homedir(), '.ggs', 'logs', 'ext-host.log');
+	const failedResolves = existsSync(hostLog)
+		? readFileSync(hostLog, 'utf8').split('\n').filter((line) => line >= startedAt && /\[Anthropic\.claude-code\] resolveWebviewView\(.*failed/.test(line))
+		: [];
+	check('every Claude Code webview view resolved', failedResolves.length === 0, failedResolves.slice(0, 1).join(''));
 
 	/* 3. Open the chat webview from the palette. */
 	const opened = await workbench.evaluate(`(async () => {
@@ -229,12 +275,40 @@ try {
 		try {
 			const probe = frame.sessionId !== null
 				? await workbench.send('Runtime.evaluate', { expression: frameProbeExpression, returnByValue: true }, frame.sessionId).then((r) => r?.result?.value ?? { root: false, children: 0 })
-				: await workbench.evaluate(frameProbeExpression, frame.contextId);
+				: await workbench.send('Runtime.evaluate', { expression: frameProbeExpression, returnByValue: true, contextId: frame.contextId }).then((r) => r?.result?.value ?? { root: false, children: 0 });
 			frameReport.push(probe);
-			if (probe.root && probe.children > 0) { webviewOk = true; }
+			if (probe.root && probe.children > 0) { webviewOk = true; webviewDetail = JSON.stringify(probe); }
 			log(String.fromCharCode(91,102,114,97,109,101,93) + " " + JSON.stringify(probe));
 		} catch { /* a frame whose context is gone skips */ }
 	}
+
+	if (screenshot) {
+		const shot = await workbench.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
+		if (shot?.data) {
+			writeFileSync(screenshot, Buffer.from(shot.data, 'base64'));
+			log(`[screenshot] ${screenshot}`);
+		}
+	}
+	check('the chat UI mounted inside the webview frame', webviewOk, webviewOk ? webviewDetail : JSON.stringify(frameReport.slice(0, 4)));
+
+	/* 4¾. "New session" in the chat tab opens another editor tab (the tab-hosted chat's
+	 * openNewInTab path: new_conversation_tab → claude-vscode.editor.open → a new panel). */
+	const tabsBefore = await workbench.evaluate(`[...document.querySelectorAll('.tab')].filter((t) => /Claude Code/i.test(t.textContent)).length`);
+	const clickedNew = await workbench.evaluate(`(() => {
+		for (const frame of document.querySelectorAll('iframe')) {
+			let doc = null;
+			try { doc = frame.contentDocument; } catch { continue; }
+			const button = doc?.querySelector('[aria-label="New session"]');
+			if (button) { button.click(); return true; }
+		}
+		return false;
+	})()`);
+	let tabsAfter = tabsBefore;
+	for (let attempt = 0; attempt < 30 && tabsAfter <= tabsBefore; attempt++) {
+		await sleep(500);
+		tabsAfter = await workbench.evaluate(`[...document.querySelectorAll('.tab')].filter((t) => /Claude Code/i.test(t.textContent)).length`);
+	}
+	check('"New session" in the chat tab opens a new editor tab', clickedNew === true && tabsAfter === tabsBefore + 1, `clicked=${clickedNew} tabs ${tabsBefore} -> ${tabsAfter}`);
 
 	/* 5. The extension's host requests prove the webview lifecycle (create + setHtml +
 	 * postMessage flowing), and its Output channel + the served assets show the machinery
@@ -251,10 +325,12 @@ try {
 	check('the chat UI assets were served over ggs://', assetsServed);
 	const machinery = probeRequests.filter((r) => /OAuth tokens|AuthManager|MCP Server/.test(r));
 	check("the extension's OAuth/MCP machinery is alive", machinery.length > 0, JSON.stringify(machinery.slice(0, 2)));
+	const mcp = probeRequests.find((r) => /MCP Server running on port/.test(r));
+	check('the IDE MCP server is running (the Claude CLI link)', Boolean(mcp), mcp ?? 'no "MCP Server running" line');
 
-	/* 6. No exception-level console entries in the workbench. */
+	/* 7. No exception-level console entries in the workbench. */
 	const exceptions = workbench.consoleEntries.filter((entry) => entry.level === 'exception');
-	check('no exception-level console entries', exceptions.length === 0, exceptions.slice(0, 2).map((e) => e.text.slice(0, 120)).join(' | '));
+	check('no exception-level console entries', exceptions.length === 0, exceptions.slice(0, 2).map((e) => e.text.slice(0, 400)).join(' | '));
 } finally {
 	log(`[done] failures=${failures}`);
 	killTree(child.pid);

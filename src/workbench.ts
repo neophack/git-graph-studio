@@ -91,6 +91,9 @@ export class Workbench {
 	/** The extension-contributed containers (`contributes.viewsContainers`): sidebar view
 	 *  element + the view ids it stacks, keyed `ext-container:{extId}.{containerId}`. */
 	private readonly extContainers = new Map<string, { element: HTMLElement; viewIds: string[] }>();
+	/** Which declared views the last `applyExtensionViews` pass showed — a `setContext`
+	 *  rebuilds the sidebar only when its `when` clauses now pick a different set. */
+	private extViewsShown = '';
 	/** The extension tree views by view id (their sections live in a container's element or
 	 *  a built-in sidebar view's tail). */
 	private readonly extTreeViews = new Map<string, ExtensionTreeView>();
@@ -177,6 +180,9 @@ export class Workbench {
 		// The extension-contributed sidebar surface: containers / views rebuild on every
 		// install / uninstall, and a view's `onDidChangeTreeData` re-fetches just that tree.
 		this.extensionHost.onViewsChanged = () => this.applyExtensionViews();
+		this.extensionHost.onContextChanged = () => {
+			if (this.visibleExtensionViews() !== this.extViewsShown) this.applyExtensionViews();
+		};
 		this.extensionHost.onTreeRefresh = (viewId) => this.extTreeViews.get(viewId)?.refresh();
 		// The editor-facing vscode API: text edits land in an open CodeMirror editor, opens
 		// go through the editor area, and the host pushes active-editor and save events.
@@ -303,7 +309,7 @@ export class Workbench {
 		register({ id: 'editor.toggleBookmark', title: 'Toggle Bookmark', category: 'Edit', keybinding: 'Ctrl+Alt+B', enabled: () => this.editors.activeInput?.kind === 'file', run: () => void this.toggleBookmark() });
 		register({ id: 'editor.listBookmarks', title: 'List Bookmarks', category: 'Edit', keybinding: 'Ctrl+Alt+K', run: () => void this.listBookmarks() });
 		register({ id: 'extensions.installFromVsix', title: 'Install Extension from VSIX...', category: 'Extensions', run: () => { this.showView('extensions'); void this.extensions.installFromVsixCommand(); } });
-		register({ id: 'extensions.searchMarketplace', title: 'Search Extensions in the Marketplace', category: 'Extensions', run: () => { this.showView('extensions'); this.extensions.focusSearch(); } });
+		register({ id: 'extensions.checkForUpdates', title: 'Check for Extension Updates', category: 'Extensions', run: () => { this.showView('extensions'); void this.extensions.checkForUpdates(); } });
 		register({ id: 'git.initRepository', title: 'Initialize Repository', category: 'Git', enabled: () => this.repoPath !== null && !this.isRepo, run: () => void this.initializeRepository() });
 		register({ id: 'workbench.toggleSidebar', title: 'Toggle Primary Side Bar', category: 'View', keybinding: 'Ctrl+B', run: () => this.toggleSidebar() });
 		register({ id: 'workbench.togglePanel', title: 'Toggle Panel', category: 'View', keybinding: 'Ctrl+J', run: () => this.panel.toggle() });
@@ -661,7 +667,15 @@ export class Workbench {
 	 *  `views`): one activity-bar entry and stacked view sections per container, and views
 	 *  declared for a built-in container (explorer / scm) as sections at that view's tail.
 	 *  Idempotent — install and uninstall both end here. */
+	/** The declared views whose `when` holds right now, as one comparable string. */
+	private visibleExtensionViews(): string {
+		return extensionViewContributions()
+			.flatMap((contribution) => contribution.views.filter((view) => evaluateWhen(contribution.extId, view.when)).map((view) => `${contribution.extId}/${view.viewId}`))
+			.join('\n');
+	}
+
 	private applyExtensionViews(): void {
+		this.extViewsShown = this.visibleExtensionViews();
 		for (const id of Object.keys(this.activityItems)) {
 			if (!this.isExtensionView(id) && !id.startsWith('ext-launcher:')) continue;
 			this.activityItems[id]!.remove();
@@ -680,7 +694,7 @@ export class Workbench {
 		// tree host (its provider feeds it); a `type: "webview"` view mounts the extension
 		// host's iframe (its provider's resolveWebviewView fills it at first visibility).
 		const makeSection = (viewId: string, name: string, extId: string, type: 'tree' | 'webview', into: HTMLElement): void => {
-			const section = el('div', 'ext-view-section');
+			const section = el('div', type === 'webview' ? 'ext-view-section ext-webview-view-section' : 'ext-view-section');
 			if (type === 'webview') {
 				section.appendChild(el('div', 'sidebar-title', [el('span', 'label', [name])]));
 				const pane = el('div', 'view-pane ext-webview-view-pane');

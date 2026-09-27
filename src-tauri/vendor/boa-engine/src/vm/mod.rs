@@ -707,6 +707,16 @@ impl Context {
             return ControlFlow::Break(CompletionRecord::Throw(err));
         }
 
+        // GGS-patch: an engine-thrown error caught in this same frame still gets its
+        // stack (the capture below, in handle_throw, only runs across frames).
+        if err.backtrace.is_none() && err.as_native().is_some() {
+            err.backtrace = Some(
+                self.vm
+                    .shadow_stack
+                    .take(self.vm.runtime_limits.backtrace_limit(), self.vm.frame.pc),
+            );
+        }
+
         // Note: -1 because we increment after fetching the opcode.
         let pc = self.vm.frame().pc.saturating_sub(1);
         if self.vm.handle_exception_at(pc) {

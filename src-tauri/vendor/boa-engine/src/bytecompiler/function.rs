@@ -127,18 +127,6 @@ impl FunctionCompiler {
 
         let length = parameters.length();
 
-        // GGS diagnostic: the function-scope decision, for the scope-index trace.
-        let trace_name = self.name.to_std_string_escaped();
-        if std::env::var("GGS_SCOPE_TRACE").is_ok() && trace_name == "l4" {
-            std::eprintln!(
-                "[ggs-scope] COMPILER fn=l4 direct_eval={contains_direct_eval} fn_all_local={} req={} force={} scope_index={}",
-                scopes.function_scope().all_bindings_local(),
-                scopes.requires_function_scope(),
-                self.force_function_scope,
-                scopes.function_scope().scope_index()
-            );
-        }
-
         let mut compiler = ByteCompiler::new(
             self.name,
             self.strict,

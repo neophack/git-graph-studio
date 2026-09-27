@@ -210,9 +210,6 @@ impl Eval {
 
             // Set the compile time environment to the current running environment and save the number of current environments.
             let environments_len = context.vm.environments.len();
-            if std::env::var("GGS_SCOPE_TRACE").is_ok() {
-                std::eprintln!("[ggs-scope] EVAL direct: runtime_len={environments_len}");
-            }
 
             // Pop any added runtime environments that were not removed during the eval execution.
             EnvStackAction::Truncate(environments_len)

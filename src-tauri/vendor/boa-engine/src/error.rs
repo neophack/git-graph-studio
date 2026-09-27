@@ -374,7 +374,18 @@ impl JsError {
     /// ```
     pub fn to_opaque(&self, context: &mut Context) -> JsValue {
         match &self.inner {
-            Repr::Native(e) => e.to_opaque(context).into(),
+            Repr::Native(e) => {
+                let object = e.to_opaque(context);
+                // GGS-patch: an engine-thrown error carries the stack it was thrown on,
+                // so its `stack` names the failing frame like V8's does.
+                if let Some(backtrace) = &self.backtrace
+                    && let Some(mut error) = object.downcast_mut::<Error>()
+                    && error.backtrace.0.is_none()
+                {
+                    error.backtrace = IgnoreEq(Some(backtrace.clone()));
+                }
+                object.into()
+            }
             Repr::Opaque(v) => v.clone(),
         }
     }

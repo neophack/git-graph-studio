@@ -60,9 +60,6 @@ impl Coalesce {
     #[inline(always)]
     pub(crate) fn operation((exit, lhs): (u32, VaryingOperand), context: &mut Context) {
         let lhs = context.vm.get_register(lhs.into());
-        if std::env::var("GGS_COALESCE_TRACE").is_ok() {
-            std::eprintln!("[ggs-boa] Coalesce lhs={} jump={} exit_pc={} pc_before={}", lhs.type_of(), !lhs.is_null_or_undefined(), exit, context.vm.frame().pc);
-        }
         if !lhs.is_null_or_undefined() {
             context.vm.frame_mut().pc = exit;
         }

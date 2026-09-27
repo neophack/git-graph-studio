@@ -12,7 +12,9 @@
 // location's own keys (`view`, `viewItem`, `resourceLangId`, … — passed by the caller), and a
 // few platform facts. An identifier nothing defines is treated as satisfied when it stands
 // alone (Studio sets far fewer context keys than VS Code, so an unmodelled key must not hide
-// an item — it just stops narrowing it); compared against a literal it is `undefined`.
+// an item — it just stops narrowing it); compared against a literal it is `undefined`. The
+// exception is a key in the extension's own namespace (its package name, its command-id
+// prefixes): the extension runs here and sets those itself, so unset reads false.
 
 import { extSettings } from './state';
 import { commands } from './commands';
@@ -104,7 +106,26 @@ function resolveIdentifier(extId: string, name: string, extra?: Record<string, u
 	if (contextProviders.has(name)) return contextProviders.get(name)!();
 	const platform = platformContext();
 	if (name in platform) return platform[name];
+	// A key in the extension's own namespace is the extension's to set, and it is running
+	// here: unset means false, as in VS Code (Claude Code keeps its chat out of the sidebar
+	// by never setting `claude-code:doesNotSupportSecondarySidebar`).
+	if (ownNamespaces(extId).has(contextNamespace(name))) return false;
 	return undefined; // not modelled: never narrows the item away (see module doc)
+}
+
+/** A context key's namespace: the text before its first `:` or `.`. */
+function contextNamespace(key: string): string {
+	return /^[^:.]*/.exec(key)![0];
+}
+
+/** The namespaces an extension's own context keys live in: its package name and the
+ *  prefixes of the commands it contributes (`claude-vscode.*` next to `claude-code`). */
+function ownNamespaces(extId: string): Set<string> {
+	const namespaces = new Set<string>([extId.slice(extId.indexOf('.') + 1)]);
+	for (const id of byExtension.get(extId)?.commands.keys() ?? []) {
+		if (/[:.]/.test(id)) namespaces.add(contextNamespace(id));
+	}
+	return namespaces;
 }
 
 /* ---------- The `when` clause grammar ---------- */

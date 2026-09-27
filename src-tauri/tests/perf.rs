@@ -40,18 +40,38 @@ fn install_engine_backend(exts: &Path, node: &Path) {
     let file = std::fs::File::create(&vsix).unwrap();
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default();
-    // The store's own shape: one package.json whose `ggs` key declares the engine backend.
+    // The store's own package shape, as the real git-graph-rs ships it: the engine `.node`
+    // inside the VSIX and a `main` — the install derives the ggs-node backend from exactly
+    // that pair. The main forwards each view-protocol message onto the addon's
+    // `request(repo, {method, params})` convention, the translation the extension's own
+    // host layer performs.
     zip.start_file("extension/package.json", options).unwrap();
     zip.write_all(
-        format!(
-            r#"{{"name":"git-graph-rs","publisher":"perf","version":"1.0.0","ggs":{{"format":"ggs/2","id":"{ENGINE_ID}","version":"1.0.0","pages":{{"view":{{"page":"web/view.html"}}}},"backend":{{"kind":"node","command":{}}}}}}}"#,
-            serde_json::to_string(&node.display().to_string()).unwrap()
-        )
-        .as_bytes(),
+        r#"{"name":"git-graph-rs","publisher":"perf","version":"1.0.0","main":"./main.js"}"#
+            .as_bytes(),
     )
     .unwrap();
-    zip.start_file("extension/web/view.html", options).unwrap();
-    zip.write_all(b"<html></html>").unwrap();
+    zip.start_file("extension/main.js", options).unwrap();
+    zip.write_all(
+        br#"
+const addon = require('./native/git-graph.node');
+ggs.onRequest((command, args) => {
+    const params = { ...((args && args[0]) || {}) };
+    delete params.command;
+    return addon
+        .request(params.repo || '', JSON.stringify({ method: command, params }))
+        .then((answer) => (typeof answer === 'string' ? JSON.parse(answer) : answer));
+});
+"#,
+    )
+    .unwrap();
+    // Stored, not deflated: the engine is tens of megabytes and the test only needs it on disk.
+    zip.start_file(
+        "extension/native/git-graph.node",
+        options.compression_method(zip::CompressionMethod::Stored),
+    )
+    .unwrap();
+    zip.write_all(&std::fs::read(node).unwrap()).unwrap();
     zip.finish().unwrap();
     cmd_ext::install_from_vsix_into(exts, &vsix, false).unwrap();
 }

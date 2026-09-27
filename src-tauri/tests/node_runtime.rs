@@ -179,13 +179,19 @@ fn a_frame_program_serves_its_content_provider_at_the_hosts_provide_call() {
     let entry = make_package(
         tmp.path(),
         &[
-            ("package.json", r#"{"name":"provider","publisher":"acme","version":"1.0.0","main":"main.js"}"#),
-            ("main.js", r#"
+            (
+                "package.json",
+                r#"{"name":"provider","publisher":"acme","version":"1.0.0","main":"main.js"}"#,
+            ),
+            (
+                "main.js",
+                r#"
 const vscode = require('vscode');
 vscode.workspace.registerTextDocumentContentProvider('ggsfix', {
     provideTextDocumentContent(uri) { return 'CONTENT:' + uri.path; }
 });
-"#),
+"#,
+            ),
         ],
     )
     .join("main.js");
@@ -370,7 +376,9 @@ ggs.onRequest((command, args) => {
     assert_eq!(answers[4].as_ref().unwrap()["later"], json!(true));
     let locale = answers[5].as_ref().unwrap();
     for key in ["full", "date", "time"] {
-        let text = locale[key].as_str().unwrap_or_else(|| panic!("{key} is not a string"));
+        let text = locale[key]
+            .as_str()
+            .unwrap_or_else(|| panic!("{key} is not a string"));
         assert!(
             text.chars().any(|c| c.is_ascii_digit()) && !text.contains("Unimplemented"),
             "the {key} locale shape must be a real timestamp: {text}"
@@ -894,6 +902,68 @@ ggs.onRequest(async (command) => {
         const realpath = await new Promise((resolve) => fs.realpath.native(data, (error, resolved) => resolve(!error && typeof resolved === 'string')));
         return { isFile: stat.isFile(), isDirectory: stat.isDirectory(), size: stat.size, viaCallback, missing, rejected, read, head: head.toString(), streamed, realpath };
     }
+    if (command === 'transcript') {
+        // claude-code's transcript probe (Yx0) and hardened append, verbatim in shape:
+        // bigint lstat, open with O_* bits, the handle's stat identity, readline over the
+        // handle's read stream, then an O_WRONLY|O_APPEND positional write.
+        const c = fs.constants;
+        const file = path.join(__dirname, 'session.jsonl');
+        const before = await fs.promises.lstat(file, { bigint: true });
+        const handle = await fs.promises.open(file, c.O_RDONLY | (c.O_NOFOLLOW ?? 0));
+        const own = await handle.stat({ bigint: true });
+        const lines = [];
+        let verdict = 'none';
+        const rl = require('readline').createInterface({ input: handle.createReadStream() });
+        for await (const line of rl) {
+            lines.push(line);
+            if (line.includes('"type":"user"')) { verdict = 'has'; rl.close(); break; }
+        }
+        await handle.close();
+        const appender = await fs.promises.open(file, c.O_WRONLY | c.O_APPEND);
+        const size = (await appender.stat()).size;
+        const { bytesWritten } = await appender.write(Buffer.from('{"type":"x"}\n'), 0, 13, size);
+        await appender.close();
+        const missing = await fs.promises.open(path.join(__dirname, 'nope'), c.O_RDONLY).catch((error) => error.code);
+        // The bundler's lowered `using`: the helper resolves Symbol.dispose (or its registry
+        // fallback) on an object literal written with the well-known symbol.
+        const disposeKey = Symbol.dispose || Symbol.for('Symbol.dispose');
+        const span = { [Symbol.dispose]() {} };
+        const disposable = typeof span[disposeKey] === 'function' && typeof Symbol.asyncDispose === 'symbol';
+        // readFile with no encoding answers a Buffer; the parser walks its bytes.
+        const bytes = await fs.promises.readFile(file);
+        const firstLine = bytes.toString('utf-8', 0, bytes.indexOf(10)).trim();
+        // claude-code's atomic settings writer: readlink of a plain file (EINVAL), an
+        // exclusive staged temp (EEXIST on a second 'wx'), handle chmod, rename over.
+        const target = path.join(__dirname, 'settings.json');
+        fs.writeFileSync(target, '{}');
+        const notLink = await fs.promises.readlink(target).catch((error) => error.code);
+        const staged = target + '.tmp.1';
+        const temp = await fs.promises.open(staged, 'wx', 0o644);
+        await temp.writeFile('{"model":"sonnet"}', { encoding: 'utf8' });
+        await temp.chmod(0o644);
+        await temp.sync();
+        await temp.close();
+        const exclusive = await fs.promises.writeFile(staged, 'x', { flag: 'wx' }).catch((error) => error.code);
+        await fs.promises.rename(staged, target);
+        const settings = JSON.parse(fs.readFileSync(target, 'utf8'));
+        return {
+            bigint: typeof before.size === 'bigint' && typeof own.ino === 'bigint',
+            sameFile: own.dev === before.dev && own.ino === before.ino && own.isFile(),
+            verdict,
+            lines: lines.length,
+            bytesWritten,
+            tail: fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).pop(),
+            missing,
+            quiet: fs.statSync(path.join(__dirname, 'nope'), { throwIfNoEntry: false }) === undefined,
+            disposable,
+            isBuffer: Buffer.isBuffer(bytes),
+            firstLine,
+            notLink,
+            exclusive,
+            model: settings.model,
+            staged: fs.existsSync(staged)
+        };
+    }
     if (command === 'buffer') {
         const bytes = new Uint8Array([104, 105, 33]).buffer;
         const copied = Buffer.alloc(5);
@@ -916,6 +986,10 @@ ggs.onRequest(async (command) => {
 "#,
             ),
             ("data.txt", "hello world"),
+            (
+                "session.jsonl",
+                "{\"type\":\"summary\"}\r\n{\"type\":\"user\",\"n\":1}\n{\"type\":\"assistant\"}\n",
+            ),
         ],
     )
     .join("main.js");
@@ -924,6 +998,7 @@ ggs.onRequest(async (command) => {
         &[
             initialize(),
             run_command("fs", json!([])),
+            run_command("transcript", json!([])),
             run_command("buffer", json!([])),
             run_command("child", json!([])),
             run_command("undefined", json!([])),
@@ -940,15 +1015,40 @@ ggs.onRequest(async (command) => {
     assert_eq!(fs["head"], json!(" wor"), "{fs}");
     assert_eq!(fs["streamed"], json!(["hel", "lo ", "wor", "ld"]), "{fs}");
     assert_eq!(fs["realpath"], json!(true), "{fs}");
-    let buffer = answers[2].as_ref().expect("buffer answered");
-    assert_eq!(buffer, &json!({ "whole": "hi!", "sliced": "i", "copied": " hi! ", "written": 3 }));
-    let child = answers[3].as_ref().expect("child answered");
+    let transcript = answers[2].as_ref().expect("transcript probe answered");
+    assert_eq!(
+        transcript,
+        &json!({
+            "bigint": true,
+            "sameFile": true,
+            "verdict": "has",
+            "lines": 2,
+            "bytesWritten": 13,
+            "tail": "{\"type\":\"x\"}",
+            "missing": "ENOENT",
+            "quiet": true,
+            "disposable": true,
+            "isBuffer": true,
+            "firstLine": "{\"type\":\"summary\"}",
+            "notLink": "EINVAL",
+            "exclusive": "EEXIST",
+            "model": "sonnet",
+            "staged": false
+        }),
+        "claude-code's transcript probe reads a session the way node.exe does"
+    );
+    let buffer = answers[3].as_ref().expect("buffer answered");
+    assert_eq!(
+        buffer,
+        &json!({ "whole": "hi!", "sliced": "i", "copied": " hi! ", "written": 3 })
+    );
+    let child = answers[4].as_ref().expect("child answered");
     assert_eq!(
         child,
         &json!(["data:git version", "exit:0"]),
         "stdout crosses before the exit"
     );
-    let undefined = answers[4]
+    let undefined = answers[5]
         .as_ref()
         .expect("a result with undefined members answers");
     assert_eq!(undefined, &json!({ "kept": 1, "list": [null, 2] }));
@@ -1085,7 +1185,9 @@ ggs.onRequest((command) => {
             run_command("ctor", json!([])),
         ],
     );
-    let logical = answers[1].as_ref().expect("the logical assignment answered");
+    let logical = answers[1]
+        .as_ref()
+        .expect("the logical assignment answered");
     assert_eq!(logical, &json!({ "second": "second" }), "{logical}");
     let ctor = answers[2].as_ref().expect("the constructor answered");
     assert_eq!(ctor, &json!({ "a": 7, "b": 8 }), "{ctor}");
@@ -1186,239 +1288,316 @@ ggs.onRequest(async (command) => {
     );
 }
 
-/// One hosted extension over the wire, the process host's side of it: requests go in,
-/// every `ggs.hostRequest` the extension makes is recorded and answered by `answer`, and a
-/// request's own response is waited for.
-/// The canned host answer one test drives its runtime with.
-type HostAnswer = Box<dyn Fn(&str, &Value) -> Value>;
-
-struct HostedExtension {
-    requests: std::sync::mpsc::Sender<String>,
-    output: std::sync::mpsc::Receiver<String>,
-    next_id: u64,
-    host_requests: Vec<Value>,
-    answer: HostAnswer,
-    serve: Option<std::thread::JoinHandle<()>>,
-}
-
-impl HostedExtension {
-    fn start(entry: PathBuf, answer: HostAnswer) -> Self {
-        let (requests, requests_rx) = std::sync::mpsc::channel::<String>();
-        let (output_tx, output) = std::sync::mpsc::channel::<String>();
-        let serve = std::thread::spawn(move || {
-            git_graph_studio_lib::node_runtime::serve_on(
-                entry,
-                ChannelReader::from(requests_rx),
-                ChannelWriter(output_tx),
-            );
-        });
-        HostedExtension {
-            requests,
-            output,
-            next_id: 0,
-            host_requests: Vec::new(),
-            answer,
-            serve: Some(serve),
-        }
-    }
-
-    /// Send one request and serve host requests until its response crosses.
-    fn request(&mut self, method: &str, params: Value) -> Value {
-        self.next_id += 1;
-        let id = self.next_id;
-        self.requests
-            .send(git_graph_studio_lib::ext_protocol::request(id, method, params))
-            .unwrap();
-        loop {
-            let line = self
-                .output
-                .recv_timeout(std::time::Duration::from_secs(120))
-                .unwrap_or_else(|_| panic!("the backend fell silent answering {method}"));
-            if std::env::var("GGS_TRACE_WIRE").is_ok() {
-                eprintln!("[wire] {}", line.chars().take(400).collect::<String>());
-            }
-            let Ok(wire) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
-                let host_id = wire["id"].as_u64().unwrap_or_default();
-                let inner = wire["params"]["method"].as_str().unwrap_or_default();
-                let reply = (self.answer)(inner, &wire["params"]["args"]);
-                self.host_requests.push(wire["params"].clone());
-                self.requests
-                    .send(git_graph_studio_lib::ext_protocol::response(host_id, Ok(reply)))
-                    .unwrap();
-                continue;
-            }
-            if wire["id"].as_u64() == Some(id) {
-                return wire;
-            }
-        }
-    }
-}
-
-impl Drop for HostedExtension {
-    fn drop(&mut self) {
-        let (closed, _) = std::sync::mpsc::channel();
-        drop(std::mem::replace(&mut self.requests, closed));
-        // A failed assertion must not wait on a runtime that may still be mid-request.
-        if std::thread::panicking() {
-            return;
-        }
-        if let Some(serve) = self.serve.take() {
-            let _ = serve.join();
-        }
-    }
-}
-
-/// The installed extension directory whose name starts with `prefix`, when there is one.
-fn installed_extension(prefix: &str) -> Option<PathBuf> {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .ok()?;
-    std::fs::read_dir(PathBuf::from(home).join(".ggs/extensions"))
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.is_dir()
-                && path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(prefix))
-        })
-}
-
-/// Prettier - Code formatter, its own Node `main` hosted by ggs-node: an ES-module entry
-/// (`"type": "module"`) that imports its bundled `prettier` package dynamically — the
-/// `exports` map's `import` condition, `index.mjs`, `createRequire(import.meta.url)`,
-/// the language plugins as further dynamic `import()`s — registers its formatter during
-/// activation, and formats a document through the host's `formatDocument.run` call.
+/// Real sockets under the runtime (builtins/net.rs + the prelude's net / http / fetch):
+/// an http server on an ephemeral port answers a keep-alive `http.request`, a chunked
+/// POST, a streamed `fetch` and a `net` client; an `Upgrade` request reaches the server's
+/// `upgrade` listener with the raw socket, which then speaks both ways — the handshake
+/// shape a WebSocket server (claude-code's IDE link, `ws`) builds on.
 #[test]
-fn the_installed_prettier_extension_formats_under_ggs_node() {
-    let Some(package) = installed_extension("esbenp.prettier-vscode") else {
-        eprintln!("skipping: no installed prettier-vscode package");
-        return;
-    };
-    let shim = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/studio/vscode-shim.cjs");
-    if !shim.is_file() {
-        eprintln!("skipping: no compiled vscode shim at {}", shim.display());
-        return;
-    }
-    std::env::set_var("GGS_VSCODE_SHIM", &shim);
-    let workspace = tempfile::tempdir().unwrap();
-    let file = workspace.path().join("ugly.js");
-    std::fs::write(&file, "const   a = {b:1,\n  c : [1,2 ,3]}\n").unwrap();
-
-    let manifest: Value =
-        serde_json::from_str(&std::fs::read_to_string(package.join("package.json")).unwrap())
-            .unwrap();
-    // The configuration defaults the workbench hands every host (`prettier.enable` above
-    // all - without it the activation declines to register anything).
-    let mut defaults = serde_json::Map::new();
-    let configuration = &manifest["contributes"]["configuration"];
-    let sections = match configuration {
-        Value::Array(list) => list.clone(),
-        other => vec![other.clone()],
-    };
-    for section in sections {
-        if let Some(properties) = section["properties"].as_object() {
-            for (name, schema) in properties {
-                if let Some(default) = schema.get("default") {
-                    defaults.insert(name.clone(), default.clone());
-                }
-            }
-        }
-    }
-    let env = json!({
-        "settings": {},
-        "defaults": defaults,
-        "language": "en",
-        "appVersion": "0.1.5-test",
-        "themeKind": 2,
-        "state": { "global": {}, "workspace": {} }
-    });
-    let answer = move |method: &str, _args: &Value| -> Value {
-        match method {
-            "host.env" => env.clone(),
-            _ => Value::Null,
-        }
-    };
-    let entry = package.join(manifest["main"].as_str().unwrap().trim_start_matches("./"));
-    let mut host = HostedExtension::start(entry, Box::new(answer));
-    let handshake = host.request(
-        "initialize",
-        json!({
-            "protocolVersion": "ggs-ext/1",
-            "extensionId": "esbenp.prettier-vscode",
-            "extensionPath": package.display().to_string(),
-            "workspaceFolders": [workspace.path().display().to_string()],
-        }),
-    );
-    assert_eq!(
-        handshake["result"]["protocolVersion"], "ggs-ext/1",
-        "{handshake:?}"
-    );
-
-    // The activation registered its whole-document formatter for JavaScript.
-    let formatter = host
-        .host_requests
-        .iter()
-        .filter(|request| request["method"] == "languages.registerFormatting")
-        .map(|request| &request["args"][0])
-        .find(|registration| {
-            registration["selectors"]
-                .as_array()
-                .is_some_and(|selectors| selectors.iter().any(|s| s["language"] == "javascript"))
-        })
-        .map(|registration| registration["id"].as_str().unwrap().to_owned())
-        .unwrap_or_else(|| {
-            let methods: Vec<&Value> = host.host_requests.iter().map(|r| &r["method"]).collect();
-            panic!("no JavaScript formatter was registered; the host saw {methods:?}")
-        });
-
-    let formatted = host.request(
-        "formatDocument.run",
-        json!({ "args": [
-            formatter,
-            {
-                "path": file.display().to_string(),
-                "languageId": "javascript",
-                "text": std::fs::read_to_string(&file).unwrap(),
-            },
-            { "tabSize": 2, "insertSpaces": true },
-        ]}),
-    );
-    let edits = formatted["result"]
-        .as_array()
-        .unwrap_or_else(|| panic!("the formatter answered edits: {formatted:?}"));
-    let new_text = edits
-        .iter()
-        .map(|edit| edit["newText"].as_str().unwrap_or_default())
-        .collect::<String>();
-    assert_eq!(new_text, "const a = { b: 1, c: [1, 2, 3] };\n", "{formatted:?}");
-}
-
-#[test]
-#[ignore]
-fn debug_prettier_steps() {
-    let Some(package) = installed_extension("esbenp.prettier-vscode") else { return; };
-    let prettier = package.join("node_modules/prettier/index.mjs").display().to_string().replace('\\', "/");
+fn sockets_http_and_fetch_work_end_to_end() {
     let tmp = tempfile::tempdir().unwrap();
-    let main = format!(r#"
-import {{ pathToFileURL }} from 'url';
-const steps = [];
-ggs.onRequest(async () => {{
-    let p;
-    try {{ p = await import(pathToFileURL('{prettier}').href); steps.push('import ok ' + Object.keys(p).join(',')); }} catch (e) {{ steps.push('import: ' + e + ' ' + (e && e.stack)); return steps; }}
-    const api = p.default?.version ? p.default : p;
-    try {{ steps.push('version ' + api.version); }} catch (e) {{ steps.push('version: ' + e); }}
-    try {{ const info = await api.getSupportInfo(); steps.push('support ' + info.languages.length); }} catch (e) {{ steps.push('support: ' + e + ' ' + (e && e.stack)); }}
-    try {{ const out = await api.format('const   a = {{b:1}}', {{ parser: 'babel' }}); steps.push('format ' + JSON.stringify(out)); }} catch (e) {{ steps.push('format: ' + e + ' ' + (e && e.stack)); }}
-    return steps;
-}});
-"#);
-    let entry = make_package(tmp.path(), &[("package.json", r#"{"type":"module"}"#), ("main.js", &main)]).join("main.js");
-    let answers = serve(entry, &[initialize(), run_command("x", json!([]))]);
-    eprintln!("{:#?}", answers[1]);
+    let entry = make_package(
+        tmp.path(),
+        &[(
+            "main.js",
+            r#"
+const http = require('http');
+const net = require('net');
+ggs.onRequest(async (command) => {
+    if (command !== 'net') return null;
+    const server = http.createServer((req, res) => {
+        let body = '';
+        req.setEncoding('utf8');
+        req.on('data', (chunk) => { body += chunk; });
+        req.on('end', () => {
+            if (req.url === '/stream') {
+                res.writeHead(200, { 'content-type': 'text/plain' });
+                res.write('one,');
+                setTimeout(() => res.end('two'), 20);
+                return;
+            }
+            res.setHeader('x-echo-method', req.method);
+            res.end(JSON.stringify({ url: req.url, body, te: req.headers['transfer-encoding'] ?? null }));
+        });
+    });
+    server.on('upgrade', (req, socket, head) => {
+        socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: probe\r\nConnection: Upgrade\r\n\r\n');
+        if (head.length) socket.write('head:' + head.toString());
+        socket.on('data', (chunk) => socket.write('echo:' + chunk.toString()));
+    });
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+    const port = server.address().port;
+    const base = `http://127.0.0.1:${port}`;
+
+    // 1. http.request, twice (the server keeps the connection alive between them).
+    const get = (path) => new Promise((resolve, reject) => {
+        http.get(`${base}${path}`, (res) => {
+            let text = '';
+            res.on('data', (chunk) => { text += chunk; });
+            res.on('end', () => resolve({ status: res.statusCode, header: res.headers['x-echo-method'], text }));
+        }).on('error', reject);
+    });
+    const first = await get('/a?x=1');
+    const second = await get('/b');
+
+    // 2. A POST with a body, through the client's own framing.
+    const posted = await new Promise((resolve, reject) => {
+        const req = http.request(`${base}/post`, { method: 'POST', headers: { 'content-type': 'text/plain' } }, (res) => {
+            let text = '';
+            res.on('data', (chunk) => { text += chunk; });
+            res.on('end', () => resolve(JSON.parse(text)));
+        });
+        req.on('error', reject);
+        req.write('hello ');
+        req.end('world');
+    });
+
+    // 3. fetch, the body read as a stream and as text.
+    const streamed = await fetch(`${base}/stream`);
+    const reader = streamed.body.getReader();
+    let streamedText = '';
+    while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        streamedText += Buffer.from(value).toString();
+    }
+    const fetched = await (await fetch(`${base}/f`, { method: 'PUT', body: 'payload' })).json();
+
+    // 4. A raw client socket speaking an Upgrade, then both ways over the same socket.
+    const upgraded = await new Promise((resolve, reject) => {
+        const socket = net.connect(port, '127.0.0.1');
+        let text = '';
+        socket.on('error', reject);
+        socket.on('connect', () => socket.write('GET /ws HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: probe\r\n\r\nearly'));
+        socket.on('data', (chunk) => {
+            text += chunk.toString();
+            if (text.includes('head:early') && !text.includes('echo:')) socket.write('ping');
+            if (text.includes('echo:ping')) {
+                socket.end();
+                resolve(text);
+            }
+        });
+    });
+
+    // 5. A refused connection is an error event, not a hang.
+    const refused = await new Promise((resolve) => {
+        const probe = net.createServer();
+        probe.listen(0, '127.0.0.1', () => {
+            const dead = probe.address().port;
+            probe.close(() => {
+                const socket = net.connect(dead, '127.0.0.1');
+                socket.on('error', (error) => resolve(error.code));
+            });
+        });
+    });
+
+    await new Promise((resolve) => server.close(resolve));
+    return {
+        first, second, posted,
+        streamedText, streamedStatus: streamed.status, fetched,
+        upgraded: upgraded.startsWith('HTTP/1.1 101') && upgraded.includes('head:early') && upgraded.includes('echo:ping'),
+        refused,
+        listening: server.listening
+    };
+});
+"#,
+        )],
+    )
+    .join("main.js");
+
+    let answers = serve(entry, &[initialize(), run_command("net", json!([]))]);
+    let result = answers[1].as_ref().expect("the net command answers");
+    assert_eq!(result["first"]["status"], json!(200), "{result}");
+    assert_eq!(result["first"]["header"], json!("GET"));
+    assert_eq!(
+        serde_json::from_str::<Value>(result["first"]["text"].as_str().unwrap()).unwrap()["url"],
+        json!("/a?x=1")
+    );
+    assert_eq!(result["second"]["status"], json!(200));
+    assert_eq!(result["posted"]["body"], json!("hello world"), "{result}");
+    assert_eq!(result["posted"]["url"], json!("/post"));
+    assert_eq!(result["streamedStatus"], json!(200));
+    assert_eq!(result["streamedText"], json!("one,two"));
+    assert_eq!(result["fetched"]["body"], json!("payload"));
+    assert_eq!(result["upgraded"], json!(true), "{result}");
+    assert_eq!(result["refused"], json!("ECONNREFUSED"));
+    assert_eq!(result["listening"], json!(false));
+}
+
+/// The prelude's Buffer against Node: the numeric read/write family (what `ws` frames
+/// WebSocket traffic with), view-returning `slice`, base64url both ways (PKCE / JWT),
+/// utf16le, string `indexOf`, case-insensitive encodings, `write`, and Node's bounds
+/// error — every expected value below was produced by Node 24 running this same function.
+#[test]
+fn buffer_behaves_like_node() {
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[(
+            "main.js",
+            r#"
+function bufferCase() {
+    const b = Buffer.alloc(16);
+    b.writeUInt16BE(0xABCD, 0);
+    b.writeUInt32LE(0xDEADBEEF, 2);
+    b.writeInt8(-2, 6);
+    b.writeDoubleBE(1.5, 7);
+    const wide = Buffer.alloc(8);
+    wide.writeBigUInt64BE(2n ** 40n + 5n, 0);
+    const v = Buffer.alloc(6);
+    v.writeUIntBE(0x123456789A, 0, 5);
+    const view = Buffer.from('hello world');
+    view.slice(0, 5).fill('J');
+    const u16 = Buffer.from('hé', 'utf16le');
+    const crypto = require('crypto');
+    return {
+        hex: b.toString('hex'),
+        r16: b.readUInt16BE(0), r32: b.readUInt32LE(2), r8: b.readInt8(6), rd: b.readDoubleBE(7),
+        big: String(wide.readBigUInt64BE(0)), uint: v.readUIntBE(0, 5), intLE: Buffer.from([0xff, 0xff]).readIntLE(0, 2),
+        view: view.toString(),
+        b64url: Buffer.from([0xfb, 0xff, 0xfe]).toString('base64url'),
+        b64urlBack: Buffer.from('-__-', 'base64url').toString('hex'),
+        u16: u16.toString('hex'), u16back: u16.toString('utf16le'),
+        indexOf: Buffer.from('abc\r\n\r\nxyz').indexOf('\r\n\r\n'),
+        includes: Buffer.from('abcdef').includes(Buffer.from('cd')),
+        upper: Buffer.from('hi', 'UTF8').toString('HEX'),
+        cmp: Buffer.compare(Buffer.from('a'), Buffer.from('b')),
+        pkce: crypto.createHash('sha256').update('verifier').digest('base64url'),
+        write: (() => { const w = Buffer.alloc(4); return w.write('xyz', 1) + ':' + w.toString('hex'); })(),
+        range: (() => { try { Buffer.alloc(2).readUInt32BE(0); return 'no throw'; } catch (e) { return e.code; } })()
+    };
+}
+ggs.onRequest((command) => (command === 'buffer' ? bufferCase() : null));
+"#,
+        )],
+    )
+    .join("main.js");
+    let answers = serve(entry, &[initialize(), run_command("buffer", json!([]))]);
+    let expected: Value = serde_json::from_str(r#"{"hex":"abcdefbeaddefe3ff800000000000000","r16":43981,"r32":3735928559,"r8":-2,"rd":1.5,"big":"1099511627781","uint":78187493530,"intLE":-1,"view":"JJJJJ world","b64url":"-__-","b64urlBack":"fbfffe","u16":"6800e900","u16back":"hé","indexOf":3,"includes":true,"upper":"6869","cmp":-1,"pkce":"iMnq5o6zALKXGivsnlom_0F5_WYda32GHkxlV7mq7hQ","write":"3:0078797a","range":"ERR_BUFFER_OUT_OF_BOUNDS"}"#).unwrap();
+    assert_eq!(answers[1].as_ref().unwrap(), &expected);
+}
+
+/// `child_process` with Node's shapes: `spawn` answers a ChildProcess whose stdin is a
+/// Writable (`.on("error")` included) and whose stdout is a Readable a `readline`
+/// reads line by line; `spawn` / `exit` / `close` arrive in Node's order; a missing
+/// program is an async ENOENT `error`, never a throw; `execFile` is asynchronous and
+/// `util.promisify(execFile)` resolves `{ stdout, stderr }`; `execFileSync` throws on a
+/// failed exit; and `Error.captureStackTrace` / `err.stack` carry real frames.
+#[test]
+fn child_processes_and_error_stacks_behave_like_node() {
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[(
+            "main.js",
+            r#"
+const cp = require('child_process');
+const readline = require('readline');
+const util = require('util');
+const node = process.platform === 'win32';
+// A tiny line-echo program that exists on every OS: the platform shell.
+const echoLines = node
+    ? ['cmd.exe', ['/d', '/s', '/c', 'more']]
+    : ['/bin/sh', ['-c', 'cat']];
+ggs.onRequest(async (command) => {
+    if (command !== 'cp') return null;
+    const events = [];
+    const child = cp.spawn(echoLines[0], echoLines[1]);
+    child.on('spawn', () => events.push('spawn'));
+    child.stdin.on('error', () => events.push('stdin-error'));
+    const lines = [];
+    const rl = readline.createInterface({ input: child.stdout });
+    // Windows' `more` ends with a blank line (real Node reads the same); only content counts.
+    rl.on('line', (line) => { if (line.trim()) lines.push(line.trim()); });
+    const closed = new Promise((resolve) => child.on('close', (code) => { events.push('close'); resolve(code); }));
+    child.on('exit', () => events.push('exit'));
+    child.stdin.write('alpha\n');
+    child.stdin.end('beta\n');
+    const code = await closed;
+
+    const missing = await new Promise((resolve) => {
+        const ghost = cp.spawn('ggs-no-such-program-xyz', []);
+        ghost.stdout.on('data', () => undefined);
+        ghost.on('error', (error) => resolve(error.code));
+    });
+
+    let order = 'sync';
+    const done = new Promise((resolve) => {
+        const returned = cp.execFile(echoLines[0], node ? ['/d', '/s', '/c', 'echo exec-ok'] : ['-c', 'echo exec-ok'], (error, stdout) => resolve({ error, stdout: stdout.trim(), order, isChild: returned instanceof cp.ChildProcess }));
+        order = 'async';
+    });
+    const execFile = await done;
+    const promised = await util.promisify(cp.execFile)(echoLines[0], node ? ['/d', '/s', '/c', 'echo p-ok'] : ['-c', 'echo p-ok']);
+    let syncThrow = null;
+    try {
+        cp.execFileSync(echoLines[0], node ? ['/d', '/s', '/c', 'exit 3'] : ['-c', 'exit 3']);
+    } catch (error) {
+        syncThrow = error.status;
+    }
+
+    class MyError extends Error {
+        constructor(message) {
+            super(message);
+            this.name = 'MyError';
+            Error.captureStackTrace(this, MyError);
+        }
+    }
+    function thrower() { throw new MyError('boom'); }
+    let captured = '';
+    try { thrower(); } catch (error) { captured = error.stack; }
+    let engine = '';
+    try { null.x(); } catch (error) { engine = error.stack; }
+    const plain = new Error('plain').stack;
+    return {
+        lines, code, events, missing, execFile: { ...execFile, error: execFile.error && String(execFile.error) },
+        promised: promised.stdout.trim(), syncThrow,
+        captured: captured.split('\n').slice(0, 2),
+        engineHasFrames: /\n    at /.test(engine),
+        engineHead: engine.split('\n')[0],
+        plainHead: plain.split('\n')[0],
+        plainHasFrames: /\n    at /.test(plain),
+        limit: Error.stackTraceLimit
+    };
+});
+"#,
+        )],
+    )
+    .join("main.js");
+    let answers = serve(entry, &[initialize(), run_command("cp", json!([]))]);
+    let result = answers[1].as_ref().expect("the cp command answers");
+    assert_eq!(result["lines"], json!(["alpha", "beta"]), "{result}");
+    assert_eq!(result["code"], json!(0));
+    assert_eq!(
+        result["events"],
+        json!(["spawn", "exit", "close"]),
+        "{result}"
+    );
+    assert_eq!(result["missing"], json!("ENOENT"));
+    assert_eq!(result["execFile"]["order"], json!("async"), "{result}");
+    assert_eq!(result["execFile"]["stdout"], json!("exec-ok"));
+    assert_eq!(result["execFile"]["isChild"], json!(true));
+    assert_eq!(result["execFile"]["error"], Value::Null);
+    assert_eq!(result["promised"], json!("p-ok"));
+    assert_eq!(result["syncThrow"], json!(3));
+    // captureStackTrace: the header uses the current name; the frames start at the
+    // caller of the constructor (`thrower`), the constructor itself left out.
+    assert_eq!(result["captured"][0], json!("MyError: boom"), "{result}");
+    assert!(
+        result["captured"][1]
+            .as_str()
+            .unwrap()
+            .contains("at thrower"),
+        "{result}"
+    );
+    assert_eq!(result["engineHasFrames"], json!(true), "{result}");
+    assert!(
+        result["engineHead"]
+            .as_str()
+            .unwrap()
+            .starts_with("TypeError"),
+        "{result}"
+    );
+    assert_eq!(result["plainHead"], json!("Error: plain"));
+    assert_eq!(result["plainHasFrames"], json!(true), "{result}");
+    assert_eq!(result["limit"], json!(10));
 }

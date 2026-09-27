@@ -17,6 +17,68 @@ impl Backtrace {
     pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &ShadowEntry> {
         self.stack.iter()
     }
+
+    /// GGS-patch: drop the newest entry when it is a native function — the `Error`
+    /// constructor or `captureStackTrace` itself, which V8's stacks never show.
+    pub(crate) fn without_newest_native(mut self) -> Self {
+        if matches!(self.stack.last(), Some(ShadowEntry::Native { .. })) {
+            self.stack.pop();
+        }
+        self
+    }
+
+    /// GGS-patch: `captureStackTrace(target, fn)` — drop the newest frame named `name` and
+    /// everything newer than it (V8 omits the frames above `fn`); unchanged when no frame
+    /// carries the name.
+    pub(crate) fn above_frame_named(mut self, name: &JsString) -> Self {
+        let position = self.stack.iter().rposition(|entry| match entry {
+            ShadowEntry::Bytecode { source_info, .. } => source_info.function_name() == name,
+            ShadowEntry::Native { function_name, .. } => function_name.as_ref() == Some(name),
+        });
+        if let Some(position) = position {
+            self.stack.truncate(position);
+        }
+        self
+    }
+
+    /// GGS-patch: the frames as V8's `Error.stack` renders them — `\n    at name (path:
+    /// line:col)` per frame, most recent first, at most `limit` frames.
+    pub(crate) fn v8_frames(&self, limit: usize) -> String {
+        let mut out = String::new();
+        for entry in self.stack.iter().rev().take(limit) {
+            out.push_str("\n    at ");
+            match entry {
+                ShadowEntry::Native { function_name, .. } => {
+                    match function_name {
+                        Some(name) if !name.is_empty() => {
+                            out.push_str(&name.to_std_string_escaped());
+                        }
+                        _ => out.push_str("<anonymous>"),
+                    }
+                    out.push_str(" (native)");
+                }
+                ShadowEntry::Bytecode { pc, source_info } => {
+                    let name = source_info.function_name();
+                    if name.is_empty() {
+                        out.push_str("<anonymous>");
+                    } else {
+                        out.push_str(&name.to_std_string_escaped());
+                    }
+                    let _ = write!(out, " ({}", source_info.map().path());
+                    if let Some(position) = source_info.map().find(*pc) {
+                        let _ = write!(
+                            out,
+                            ":{}:{}",
+                            position.line_number(),
+                            position.column_number()
+                        );
+                    }
+                    out.push(')');
+                }
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone)]

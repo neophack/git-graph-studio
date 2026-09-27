@@ -69,6 +69,11 @@ impl SetPropertyByName {
             }
             return Ok(());
         }
+        // GGS-patch: an accessor slot means a setter ran during `__set__`, and it may have
+        // reshaped the object — that slot belongs to the shape the lookup saw, not the one
+        // after (see GetPropertyByName). A data slot keeps the post-set shape: an added
+        // property's slot is only valid there.
+        let shape_seen = object_borrowed.shape().clone();
         drop(object_borrowed);
 
         let name: PropertyKey = ic.name.clone().into();
@@ -85,9 +90,12 @@ impl SetPropertyByName {
         let slot = *context.slot();
         if succeeded && slot.is_cachable() {
             let ic = &context.vm.frame().code_block.ic[usize::from(index)];
-            let object_borrowed = object.borrow();
-            let shape = object_borrowed.shape();
-            ic.set(shape, slot);
+            if slot.attributes.is_accessor_descriptor() {
+                ic.set(&shape_seen, slot);
+            } else {
+                let object_borrowed = object.borrow();
+                ic.set(object_borrowed.shape(), slot);
+            }
         }
 
         Ok(())

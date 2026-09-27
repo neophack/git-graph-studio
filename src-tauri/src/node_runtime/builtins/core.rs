@@ -17,7 +17,8 @@ pub(super) fn utf8_encode(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let text = string_arg(args, 0, context);
-    JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(text.into_bytes()), context).map(JsValue::from)
+    JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(text.into_bytes()), context)
+        .map(JsValue::from)
 }
 
 /// UTF-8 bytes → text with lossy replacement, the mirror of [`utf8_encode`].
@@ -41,11 +42,14 @@ pub(super) fn random_bytes(
 ) -> JsResult<JsValue> {
     let count = args.get_or_undefined(0).to_number(context)?;
     if !(0.0..=65536.0).contains(&count) || count.fract() != 0.0 {
-        return Err(error("random bytes: the count must be an integer in 0..=65536"));
+        return Err(error(
+            "random bytes: the count must be an integer in 0..=65536",
+        ));
     }
     let mut bytes = vec![0u8; count as usize];
     getrandom::getrandom(&mut bytes).map_err(|e| error(format!("random bytes: {e}")))?;
-    JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(bytes), context).map(JsValue::from)
+    JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(bytes), context)
+        .map(JsValue::from)
 }
 
 /// The `crypto` builtin's one native: `(algorithm, bytes) → hex digest`. The JS side's

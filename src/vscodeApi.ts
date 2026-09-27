@@ -1663,6 +1663,7 @@ class WebviewView {
 	private htmlValue = '';
 	private readonly messages = new EventEmitter<unknown>();
 	private readonly visibilityChanged = new EventEmitter<{ visible: boolean }>();
+	private readonly disposed = new EventEmitter<void>();
 	private visibleValue = false;
 	/** Set once the provider resolved it (a resolve is deferred to the first show). */
 	resolved = false;
@@ -1732,6 +1733,10 @@ class WebviewView {
 
 	readonly onDidChangeVisibility = this.visibilityChanged.event;
 
+	/** VS Code's WebviewView carries it like a panel does; a provider that wires its cleanup
+	 *  here (Claude Code's sessions list) threw "not a callable function" without it. */
+	readonly onDidDispose = this.disposed.event;
+
 	show(): void {
 		// The section lives in the sidebar already; VS Code's show reveals it there.
 		void this.bridge.request('webviewView.show', [this.viewType]);
@@ -1741,8 +1746,10 @@ class WebviewView {
 		if (this.gone) return;
 		this.gone = true;
 		void this.bridge.request('webviewView.dispose', [this.viewType]);
+		this.disposed.fire();
 		this.messages.dispose();
 		this.visibilityChanged.dispose();
+		this.disposed.dispose();
 	}
 
 	/** The host pushed the view's visibility (its sidebar section selected or not). */
@@ -2723,6 +2730,10 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 		}
 	};
 
+	/** The commands this extension registered (`registerCommand`), by full id — the ones
+	 *  its own `executeCommand` runs locally. */
+	const ownCommands = new Map<string, (...args: unknown[]) => unknown>();
+
 	/** A language-feature provider registration this host has no consumer for. */
 	const provider = (name: string) => (..._args: unknown[]) => inert(`languages.${name}`);
 
@@ -2730,14 +2741,22 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 		// The API surface this shim targets, spelled the way `vscode.version` spells it:
 		// packages version-gate on it (vscode-languageclient refuses a host below its
 		// `engines.vscode` floor), so a studio-local suffix would wrongly read as an old host.
-		version: '1.91.0',
+		// 1.106 is the release whose layout packages now assume: Claude Code below it pins its
+		// chat into the primary sidebar (`doesNotSupportSecondarySidebar`); at it, the sidebar
+		// keeps the sessions list and every conversation opens as an editor tab.
+		version: '1.106.0',
 
 		commands: {
 			registerCommand: (id: string, handler: (...args: unknown[]) => unknown, thisArg?: unknown) => {
 				const full = id.includes('.') ? id : `${ctx.extensionId}.${id}`;
-				bridge.registerCommandHandler(full, wrapHandler(full, handler, thisArg));
+				const wrapped = wrapHandler(full, handler, thisArg);
+				ownCommands.set(full, wrapped);
+				bridge.registerCommandHandler(full, wrapped);
 				send('commands.register', [full]);
-				return new Disposable(() => send('commands.unregister', [full]));
+				return new Disposable(() => {
+					if (ownCommands.get(full) === wrapped) ownCommands.delete(full);
+					send('commands.unregister', [full]);
+				});
 			},
 			registerTextEditorCommand: (id: string, handler: (editor: unknown, edit: unknown, ...args: unknown[]) => unknown, thisArg?: unknown) => {
 				const full = id.includes('.') ? id : `${ctx.extensionId}.${id}`;
@@ -2755,7 +2774,16 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 				send('commands.register', [full]);
 				return new Disposable(() => send('commands.unregister', [full]));
 			},
-			executeCommand: (id: string, ...args: unknown[]) => bridge.request('commands.execute', [id, args]) as Promise<unknown>,
+			// A command this extension registered runs right here, as in VS Code's own host:
+			// through the workbench it would re-enter this host — which, under ggs-node, is
+			// blocked waiting on that very request (Claude Code's "New session" executes its
+			// own `claude-vscode.editor.open` and stalled for the 30-second timeout). Local
+			// dispatch also keeps `undefined` arguments, which the wire turns into null.
+			executeCommand: (id: string, ...args: unknown[]) => {
+				const own = ownCommands.get(id);
+				if (own) return Promise.resolve().then(() => own(...args));
+				return bridge.request('commands.execute', [id, args]) as Promise<unknown>;
+			},
 			getCommands: async (_filterInternal?: boolean) => (await bridge.request('commands.list', [])) as string[]
 		},
 

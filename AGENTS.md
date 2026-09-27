@@ -359,10 +359,13 @@ behave natively) is an explicit opt-in — `GGS_REAL_NODE=1`. A plain VSIX with 
 engine layout derives, at install, the engine `.node` as its backend only under that
 opt-in; by default its JS `main` is the derived backend (`resolve_node_binaries`);
 plus the Extensions view with detail
-pages, backend status and restart, and the **marketplace** (2026-09-24): the view's search
-box queries Open VSX — the open-source registry the VS Code ecosystem publishes to, the
-same service code-server and Theia point at — over `ext_gallery.rs`'s three commands
-(search, icon, download-and-install), every URL confined to the gallery's own origin, and
+pages, backend status and restart, and the **marketplace** (2026-09-24): Open VSX — the
+open-source registry the VS Code ecosystem publishes to, the same service code-server and
+Theia point at. The view offers exactly the featured packages `ext_gallery.rs` names
+(`FEATURED`: claude-code and git-graph-rs — no free-text search, 2026-09-27), each looked
+up by exact id as THIS machine's platform build (the registry's bare listing answers an
+arbitrary platform), over `ext_gallery.rs`'s commands (featured ids, lookup, icon,
+download-and-install), every URL confined to the gallery's own origin, and
 a marketplace package installs through exactly the path a picked `.vsix` takes (forward-
 only upgrades, the unhostable-`.node` door). Frame-host extensions run under `extHost.ts` +
 `vscodeApi.ts` with a growing `vscode` API surface: commands, configuration (with
@@ -399,8 +402,10 @@ from an older build is refreshed by its recorded build stamp — but nothing ins
 nothing.
 
 - Frontend: `src/extensionsPanel.ts` (the Extensions view: the installed list with detail
-  pages and backend status, and the marketplace search box — Open VSX results with
-  one-click Install / Update by the installed version), `src/nodeHost.ts` (the real-Node
+  pages and backend status: the featured packages' rows, each its Open VSX entry merged
+  with its installed state — one-click Install / Update by the installed version, the
+  bundled offer as the offline fallback — and anything else installed under "Other
+  installed"), `src/nodeHost.ts` (the real-Node
   extension host's entry, compiled to `node-host.cjs`: stdio ggs-ext/1 server, the shared
   `vscode` shim over a stdio bridge, `require('vscode')` interception, ESM fallback —
   VS Code's own extension-host shape), `src/extHost.ts` (the extension host for VSIX
@@ -471,8 +476,9 @@ nothing.
   pretend Node runtime sidecar — the default `node`-backend host: Boa on one JS thread fed
   by a job queue — protocol requests, timers, child-process events — a CommonJS `require`
   confined to the package root (`require.rs`), real `fs`/`path`/`os`/`child_process`
-  builtins over std (`builtins/`: `mod` the registry, `fs`, `path`, `os`, `child`, `core`
-  the prelude natives, `support` the shared helpers), the JS prelude's
+  builtins over std (`builtins/`: `mod` the registry, `fs`, `path`, `os`, `child`, `net`
+  the TCP sockets and the HTTP(S) client under the prelude's `net` / `http` / `fetch`,
+  `core` the prelude natives, `support` the shared helpers), the JS prelude's
   Buffer/EventEmitter/util/`vscode`-stub (`prelude.js`), the N-API host a package's
   `.node` loads through (`native.rs` the loader, `napi_host.rs` the `napi_*` surface) —
   and the dispatch: launcher → `ggs.onRequest` → `exports.dispatch`; stdout is the
@@ -518,15 +524,11 @@ nothing.
   `src-tauri/tests/node_runtime.rs` (the pretend Node runtime: a package's JS entry served
   over `ggs-ext/1`, the process-host chain over the bundled `ggs-node` sidecar, a NAPI
   addon answering under ggs-node, the installed extension's whole activation),
-  `src-tauri/tests/install_local.rs` (the local-only installer probe into the real
-  `~/.ggs/extensions`), `src-tauri/tests/vscode_shim_boa.rs` (the Boa define-op repro bed
+  `src-tauri/tests/vscode_shim_boa.rs` (the Boa define-op repro bed
   for the ggs-node `vscode` shim),
-  `tests/vsixCompat.test.ts` (a real marketplace-shaped VSIX booted through the frame host
-  from its installed files; skips without the install),
-  `tests/installedCompat.test.ts` (every frame-hosted install under `~/.ggs/extensions`
-  boots and activates through the same frame path, with the frame's stack-bearing failure
-  reports; skips without installs),
-  `scripts/probes/vsix-live-check.mjs` (the live five-package check over CDP),
+  `scripts/probes/claude-code-live-check.mjs` (the live claude-code check: the backend on
+  ggs-node (or `--host real-node`), its commands, the chat webview mounted, the IDE MCP
+  server up; `--screenshot` saves the workbench),
   `scripts/probes/git-graph-live-check.mjs` (the live git-graph-rs check: ggs-node with
   the engine `.node` loaded, the view rendering, settings pushing through),
   `scripts/probes/git-graph-menus-live-check.mjs` (the live git-graph-rs menu check: every

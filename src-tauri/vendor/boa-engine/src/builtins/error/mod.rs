@@ -17,10 +17,10 @@ use crate::{
     error::{IgnoreEq, JsNativeError},
     js_string,
     object::{JsObject, internal_methods::get_prototype_from_constructor},
-    property::Attribute,
+    property::{Attribute, PropertyDescriptor},
     realm::Realm,
     string::StaticJsStrings,
-    vm::shadow_stack::ShadowEntry,
+    vm::shadow_stack::{Backtrace, ShadowEntry},
 };
 use boa_gc::{Finalize, Trace};
 use boa_macros::js_str;
@@ -137,7 +137,15 @@ pub struct Error {
     // The position of where the Error was created does not affect equality check.
     #[unsafe_ignore_trace]
     pub(crate) position: IgnoreEq<Option<ShadowEntry>>,
+
+    // GGS-patch: the call stack at creation (V8's `Error.stack`), formatted on read by
+    // the `Error.prototype.stack` accessor. None for errors built without a VM frame.
+    #[unsafe_ignore_trace]
+    pub(crate) backtrace: IgnoreEq<Option<Backtrace>>,
 }
+
+/// GGS-patch: the default `Error.stackTraceLimit` (V8's).
+const DEFAULT_STACK_TRACE_LIMIT: usize = 10;
 
 impl Error {
     /// Create a new [`Error`].
@@ -147,6 +155,7 @@ impl Error {
         Self {
             tag,
             position: IgnoreEq(None),
+            backtrace: IgnoreEq(None),
         }
     }
 
@@ -155,25 +164,160 @@ impl Error {
         Self {
             tag,
             position: IgnoreEq(entry),
+            backtrace: IgnoreEq(None),
         }
     }
 
-    /// Get the position from the last called function.
+    /// Get the position from the last called function — and (GGS-patch) the call stack
+    /// the error is created on, minus the constructor's own native frame.
     pub(crate) fn with_caller_position(tag: ErrorKind, context: &Context) -> Self {
         Self {
             tag,
             position: IgnoreEq(context.vm.shadow_stack.caller_position()),
+            backtrace: IgnoreEq(Some(Self::current_backtrace(context))),
         }
+    }
+
+    /// GGS-patch: the live call stack, the newest native frame (the caller of this — a
+    /// constructor or `captureStackTrace`) left out.
+    pub(crate) fn current_backtrace(context: &Context) -> Backtrace {
+        context
+            .vm
+            .shadow_stack
+            .take(context.vm.runtime_limits.backtrace_limit(), context.vm.frame.pc)
+            .without_newest_native()
+    }
+
+    /// GGS-patch: `Error.stackTraceLimit`, read off the constructor (V8 reads it the same
+    /// way); a non-number or a negative one falls back to the default.
+    fn stack_trace_limit(context: &mut Context) -> usize {
+        let constructor = context.intrinsics().constructors().error().constructor();
+        match constructor.get(js_string!("stackTraceLimit"), context) {
+            Ok(value) => match value.as_number() {
+                Some(limit) if limit >= 0.0 => limit.min(1_000.0) as usize,
+                _ => DEFAULT_STACK_TRACE_LIMIT,
+            },
+            Err(_) => DEFAULT_STACK_TRACE_LIMIT,
+        }
+    }
+
+    /// GGS-patch: the header (`Error.prototype.toString`) + the frames — V8's `stack`.
+    fn stack_string(
+        this: &JsValue,
+        backtrace: &Backtrace,
+        context: &mut Context,
+    ) -> JsResult<JsString> {
+        let header = Self::to_string(this, &[], context)?.to_string(context)?;
+        let frames = backtrace.v8_frames(Self::stack_trace_limit(context));
+        Ok(js_string!(&header, &JsString::from(frames.as_str())))
+    }
+
+    /// GGS-patch: `get Error.prototype.stack` — the creation-time stack, rendered with the
+    /// error's current name and message (a subclass setting `this.name` after `super()`
+    /// shows it, as in V8). Undefined on anything that is not an Error object.
+    pub(crate) fn get_stack(
+        this: &JsValue,
+        _: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        let Some(object) = this.as_object() else {
+            return Ok(JsValue::undefined());
+        };
+        let backtrace = match object.downcast_ref::<Self>() {
+            Some(error) => error.backtrace.0.clone().unwrap_or_default(),
+            None => return Ok(JsValue::undefined()),
+        };
+        Ok(Self::stack_string(this, &backtrace, context)?.into())
+    }
+
+    /// GGS-patch: `set Error.prototype.stack` — an own data property on the receiver, the
+    /// way assigning `err.stack = …` behaves in V8.
+    pub(crate) fn set_stack(
+        this: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        if let Some(object) = this.as_object() {
+            object.define_property_or_throw(
+                js_string!("stack"),
+                PropertyDescriptor::builder()
+                    .value(args.get_or_undefined(0).clone())
+                    .writable(true)
+                    .enumerable(false)
+                    .configurable(true),
+                context,
+            )?;
+        }
+        Ok(JsValue::undefined())
+    }
+
+    /// GGS-patch: `Error.captureStackTrace(targetObject[, constructorOpt])` — V8's API,
+    /// which Node packages call unguarded in their error classes: an own `stack` on the
+    /// target, the frames above `constructorOpt` left out.
+    pub(crate) fn capture_stack_trace(
+        _: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        let target = args.get_or_undefined(0);
+        let Some(object) = target.as_object() else {
+            return Err(JsNativeError::typ()
+                .with_message("The \"targetObject\" argument must be of type object")
+                .into());
+        };
+        let mut backtrace = Self::current_backtrace(context);
+        if let Some(constructor) = args.get_or_undefined(1).as_object() {
+            let name = constructor.get(js_string!("name"), context)?;
+            if let Some(name) = name.as_string().filter(|name| !name.is_empty()) {
+                backtrace = backtrace.above_frame_named(&name);
+            }
+        }
+        let stack = Self::stack_string(target, &backtrace, context)?;
+        object.define_property_or_throw(
+            js_string!("stack"),
+            PropertyDescriptor::builder()
+                .value(stack)
+                .writable(true)
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )?;
+        Ok(JsValue::undefined())
     }
 }
 
 impl IntrinsicObject for Error {
     fn init(realm: &Realm) {
         let attribute = Attribute::WRITABLE | Attribute::NON_ENUMERABLE | Attribute::CONFIGURABLE;
+        // GGS-patch: V8's stack surface — the `stack` accessor, `captureStackTrace` and
+        // `stackTraceLimit` (Node packages lean on all three).
+        let get_stack = BuiltInBuilder::callable(realm, Self::get_stack)
+            .name(js_string!("get stack"))
+            .build();
+        let set_stack = BuiltInBuilder::callable(realm, Self::set_stack)
+            .name(js_string!("set stack"))
+            .length(1)
+            .build();
         let builder = BuiltInBuilder::from_standard_constructor::<Self>(realm)
             .property(js_string!("name"), Self::NAME, attribute)
             .property(js_string!("message"), js_string!(), attribute)
-            .method(Self::to_string, js_string!("toString"), 0);
+            .method(Self::to_string, js_string!("toString"), 0)
+            .accessor(
+                js_string!("stack"),
+                Some(get_stack),
+                Some(set_stack),
+                Attribute::NON_ENUMERABLE | Attribute::CONFIGURABLE,
+            )
+            .static_method(
+                Self::capture_stack_trace,
+                js_string!("captureStackTrace"),
+                2,
+            )
+            .static_property(
+                js_string!("stackTraceLimit"),
+                DEFAULT_STACK_TRACE_LIMIT as i32,
+                Attribute::WRITABLE | Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
+            );
 
         #[cfg(feature = "experimental")]
         let builder = builder.static_method(Error::is_error, js_string!("isError"), 1);
@@ -192,8 +336,9 @@ impl BuiltInObject for Error {
 
 impl BuiltInConstructor for Error {
     const CONSTRUCTOR_ARGUMENTS: usize = 1;
-    const PROTOTYPE_STORAGE_SLOTS: usize = 3;
-    const CONSTRUCTOR_STORAGE_SLOTS: usize = 1;
+    // GGS-patch: + the `stack` accessor (2 slots), captureStackTrace and stackTraceLimit.
+    const PROTOTYPE_STORAGE_SLOTS: usize = 5;
+    const CONSTRUCTOR_STORAGE_SLOTS: usize = 3;
 
     const STANDARD_CONSTRUCTOR: fn(&StandardConstructors) -> &StandardConstructor =
         StandardConstructors::error;

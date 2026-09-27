@@ -38,7 +38,13 @@ function mountedPanel(host = new ExtensionHost()): ExtensionsPanel {
 }
 
 describe('ExtensionsPanel', () => {
-	beforeEach(() => withExtensions(BUILTIN, USER));
+	// The default market: git-graph-rs featured, the registry unreachable — so its row is
+	// the installer's bundled offer and everything else lists under "Other installed".
+	beforeEach(() => {
+		withExtensions(BUILTIN, USER);
+		backend.on('ext_gallery_featured', () => ['neophack.git-graph-rs']);
+		backend.on('ext_gallery_lookup', () => { throw new Error('offline'); });
+	});
 
 	it('lists installed extensions with versions and the built-in marker', async () => {
 		const panel = mountedPanel();
@@ -82,6 +88,8 @@ describe('ExtensionsPanel', () => {
 		backend.on('ext_list', () => listed);
 		const installed: ExtInfo = { ...SAMPLE, format: 'ggs', path: '/ext/ggs.ext-demo-0.2.0', capabilities: { format: 'ggs/2', id: 'ggs.ext-demo', version: '0.2.0', pages: { main: { page: 'web/view.html' } }, backend: { kind: 'process', command: 'bin/win32-x64/ggs-ext-demo.exe' }, permissions: ['clipboard'] } };
 		backend.on('ext_install_bundled', ({ extId }) => (extId === 'ggs.ext-demo' ? installed : BUILTIN));
+		// A bundled offer shows on a featured row only (outside the list it is not offered).
+		backend.on('ext_gallery_featured', () => ['neophack.git-graph-rs', 'ggs.ext-demo']);
 		const panel = mountedPanel();
 		await panel.refresh();
 		// The sample row: its badge and its one-click install button.
@@ -140,101 +148,122 @@ describe('ExtensionsPanel', () => {
 		expect(document.querySelector('.ext-detail')).toBeNull();
 	});
 
-	/* ---------- The marketplace search (Open VSX, over the backend gallery commands) ---------- */
+	/* ---------- The featured packages (Open VSX, over the backend gallery commands) ---------- */
 
-	const PRETTIER: GalleryEntry = {
-		id: 'esbenp.prettier-vscode', name: 'prettier-vscode', namespace: 'esbenp',
-		displayName: 'Prettier - Code formatter', description: 'Code formatter using prettier',
-		version: '11.0.0', downloadCount: 12345678, averageRating: 4.5, verified: true,
-		timestamp: '2026-01-02T03:04:05Z', iconUrl: null,
-		downloadUrl: 'https://open-vsx.org/api/esbenp/prettier-vscode/11.0.0/file/esbenp.prettier-vscode-11.0.0.vsix'
+	const CLAUDE: GalleryEntry = {
+		id: 'Anthropic.claude-code', name: 'claude-code', namespace: 'Anthropic',
+		displayName: 'Claude Code for VS Code', description: 'Claude Code in the editor',
+		version: '2.1.283', downloadCount: 12345678, averageRating: 4.5, verified: true,
+		timestamp: '2026-09-20T03:04:05Z', iconUrl: null,
+		downloadUrl: 'https://open-vsx.org/api/Anthropic/claude-code/win32-x64/2.1.283/file/Anthropic.claude-code-2.1.283@win32-x64.vsix'
 	};
-	const DEMO_NEWER: GalleryEntry = {
-		id: 'acme.demo', name: 'demo', namespace: 'acme', displayName: null, description: 'A demo',
-		version: '3.0.0', downloadCount: 12, averageRating: null, verified: false,
-		timestamp: '2026-01-02T03:04:05Z', iconUrl: null,
-		downloadUrl: 'https://open-vsx.org/api/acme/demo/3.0.0/file/acme.demo-3.0.0.vsix'
+	const GRAPH: GalleryEntry = {
+		id: 'neophack.git-graph-rs', name: 'git-graph-rs', namespace: 'neophack', displayName: 'Git Graph (Rust)',
+		description: 'Git Graph', version: '1.0.25', downloadCount: 12, averageRating: null, verified: false,
+		timestamp: '2026-09-20T03:04:05Z', iconUrl: null,
+		downloadUrl: 'https://open-vsx.org/api/neophack/git-graph-rs/win32-x64/1.0.25/file/neophack.git-graph-rs-1.0.25@win32-x64.vsix'
 	};
-	/** The panel with the market scripted: a search answer and the installed list it reports. */
-	function withMarket(entries: GalleryEntry[], totalSize = entries.length): { listAnswer: () => ExtInfo[] } {
-		backend.on('ext_gallery_search', () => ({ totalSize, entries }));
+	const GRAPH_INSTALLED: ExtInfo = { ...BUILTIN, builtin: false, format: 'vsix', version: '1.0.23', path: '/ext/neophack.git-graph-rs-1.0.23' };
+
+	/** The panel with both featured packages on the market; `list` is what ext_list reports. */
+	function withFeatured(list: ExtInfo[]): { state: { list: ExtInfo[] } } {
+		backend.on('ext_gallery_featured', () => ['Anthropic.claude-code', 'neophack.git-graph-rs']);
+		backend.on('ext_gallery_lookup', ({ id }: { id: string }) => (id === CLAUDE.id ? CLAUDE : GRAPH));
 		// The install pass re-reads package.json (the activation reload): a minimal manifest
 		// keeps the frame's boot quiet instead of notifying a load failure.
 		backend.on('ext_read_file', ({ relPath }: { relPath: string }) => (relPath === 'package.json' ? '{}' : ''));
-		const state = { list: [BUILTIN, USER] as ExtInfo[] };
+		const state = { list };
 		backend.on('ext_list', () => state.list);
-		return { listAnswer: () => state.list };
+		return { state };
 	}
 
-	it('searches the marketplace, shows Install or Update by the installed version, and installs', async () => {
-		const market = withMarket([PRETTIER, DEMO_NEWER], 42);
-		const installedPrettier: ExtInfo = { ...USER, id: 'esbenp.prettier-vscode', name: 'prettier-vscode', publisher: 'esbenp', displayName: 'Prettier - Code formatter', version: '11.0.0', path: '/ext/esbenp.prettier-vscode-11.0.0' };
-		backend.on('ext_gallery_install', () => installedPrettier);
+	it('shows exactly the featured packages, with no search box', async () => {
+		withFeatured([GRAPH_INSTALLED]);
 		const panel = mountedPanel();
 		await panel.refresh();
-		const input = document.querySelector<HTMLInputElement>('.ext-search-input')!;
-		type(input, 'prettier');
-		key(input, 'Enter');
 		await flush();
-		expect(backend.callsTo('ext_gallery_search')).toEqual([{ gallery: 'https://open-vsx.org', query: 'prettier' }]);
-		// The installed list gave way to the results; the count line names the registry's total.
-		expect(document.querySelector('.ext-gallery-count')!.textContent).toContain('42');
-		const rows = document.querySelectorAll('.gallery-row');
+		expect(document.querySelector('input[type="search"]')).toBeNull();
+		// Each featured id is looked up exactly, through the one marketplace origin.
+		expect(backend.callsTo('ext_gallery_lookup')).toEqual([
+			{ gallery: 'https://open-vsx.org', id: 'Anthropic.claude-code' },
+			{ gallery: 'https://open-vsx.org', id: 'neophack.git-graph-rs' }
+		]);
+		const rows = document.querySelectorAll('.ext-row');
 		expect(rows.length).toBe(2);
-		expect(rows[0]!.textContent).toContain('Prettier - Code formatter');
+		expect(rows[0]!.textContent).toContain('Claude Code for VS Code');
 		expect(rows[0]!.querySelector('.ext-verified')!.textContent).toContain('verified');
-		expect(rows[0]!.querySelector('.ext-gallery-stats')!.textContent).toContain('downloads');
-		// The installed acme.demo v2.0.0 against the market's 3.0.0: an Update offer, not Install.
-		const update = rows[1]!.querySelector<HTMLElement>('.action-btn')!;
-		expect(update.title).toContain('Update to 3.0.0');
-		// Installing the not-installed one: the download URL crosses, the notification lands,
-		// and the refreshed row knows it is installed now.
+		expect(rows[1]!.textContent).toContain('Git Graph');
+		expect(document.querySelector('.ext-section-label')).toBeNull();
+	});
+
+	it('installs a featured package that is absent, and offers Update over an older install', async () => {
+		const { state } = withFeatured([GRAPH_INSTALLED]);
+		const installedClaude: ExtInfo = { ...USER, id: 'Anthropic.claude-code', name: 'claude-code', publisher: 'Anthropic', displayName: 'Claude Code for VS Code', version: '2.1.283', path: '/ext/Anthropic.claude-code-2.1.283', extensionDependencies: [] };
+		backend.on('ext_gallery_install', () => installedClaude);
+		const panel = mountedPanel();
+		await panel.refresh();
+		await flush();
+		const rows = document.querySelectorAll<HTMLElement>('.ext-row');
+		// git-graph-rs v1.0.23 installed against the market's 1.0.25: Update, beside Uninstall.
+		const graphActions = [...rows[1]!.querySelectorAll<HTMLElement>('.action-btn')].map((b) => b.title);
+		expect(graphActions.join('|')).toContain('Update to 1.0.25');
+		expect(graphActions.join('|')).toContain('Uninstall neophack.git-graph-rs');
+		// claude-code is absent: Install downloads this platform's build.
 		click(rows[0]!.querySelector<HTMLElement>('.action-btn')!);
 		await flush();
-		expect(backend.callsTo('ext_gallery_install')).toEqual([{ gallery: 'https://open-vsx.org', downloadUrl: PRETTIER.downloadUrl }]);
-		expect(notifications().join()).toContain('esbenp.prettier-vscode v11.0.0');
-		market.listAnswer().push(installedPrettier);
+		expect(backend.callsTo('ext_gallery_install')).toEqual([{ gallery: 'https://open-vsx.org', downloadUrl: CLAUDE.downloadUrl }]);
+		expect(notifications().join()).toContain('Anthropic.claude-code v2.1.283');
+		state.list = [installedClaude, GRAPH_INSTALLED];
 		await panel.refresh();
-		const done = document.querySelectorAll('.gallery-row')[0]!;
-		expect(done.querySelector('.ext-installed-tag')!.textContent).toContain('Installed');
-		expect(done.querySelector('.action-btn')).toBeNull();
+		// Installed and current: the ordinary installed row — no Install, no Update.
+		const claudeRow = document.querySelectorAll<HTMLElement>('.ext-row')[0]!;
+		const titles = [...claudeRow.querySelectorAll<HTMLElement>('.action-btn')].map((b) => b.title).join('|');
+		expect(titles).toContain('Uninstall Anthropic.claude-code');
+		expect(titles).not.toContain('Update');
+		expect(titles).not.toContain('Install from the Marketplace');
 	});
 
-	it('an entry matching the installed version shows the installed tag, not an offer', async () => {
-		const DEMO_SAME = { ...DEMO_NEWER, version: '2.0.0' };
-		withMarket([DEMO_SAME]);
+	it('matches an installed id ignoring case, as VS Code does', async () => {
+		withFeatured([{ ...GRAPH_INSTALLED, id: 'NeoPhack.Git-Graph-RS', version: '1.0.25' }]);
 		const panel = mountedPanel();
 		await panel.refresh();
-		const input = document.querySelector<HTMLInputElement>('.ext-search-input')!;
-		type(input, 'acme');
-		key(input, 'Enter');
 		await flush();
-		const row = document.querySelector('.gallery-row')!;
-		expect(row.querySelector('.ext-installed-tag')!.textContent).toContain('Installed');
-		expect(row.querySelector('.action-btn')).toBeNull();
+		const rows = document.querySelectorAll<HTMLElement>('.ext-row');
+		expect(rows.length).toBe(2);
+		expect(rows[1]!.querySelector('.action-btn')!.title).toContain('Uninstall');
 	});
 
-	it('a failed search surfaces its error and keeps the installed list; Escape restores it', async () => {
-		backend.on('ext_gallery_search', () => { throw new Error('offline'); });
+	it('an unreachable marketplace falls back to the bundled offer and says so where there is none', async () => {
+		withFeatured([BUILTIN]);
+		backend.on('ext_gallery_lookup', () => { throw new Error('offline'); });
 		const panel = mountedPanel();
 		await panel.refresh();
-		const input = document.querySelector<HTMLInputElement>('.ext-search-input')!;
-		type(input, 'theme');
-		key(input, 'Enter');
 		await flush();
-		expect(notifications().join()).toContain('Marketplace search failed');
-		// The search failed before any result: the installed list is what stays on screen.
-		expect(document.querySelectorAll('.ext-row').length).toBe(2);
-		expect(document.querySelector('.gallery-row')).toBeNull();
-		// And a finished search clears back to the installed list on Escape.
-		backend.on('ext_gallery_search', () => ({ totalSize: 0, entries: [] }));
-		key(input, 'Enter');
+		const rows = document.querySelectorAll<HTMLElement>('.ext-row');
+		expect(rows[0]!.textContent).toContain('The Marketplace is unavailable');
+		expect(rows[0]!.textContent).toContain('offline');
+		// git-graph-rs still installs offline, from the package the installer carries.
+		expect(rows[1]!.querySelector('.action-btn')!.title).toContain('Install the bundled');
+		// Retry asks the marketplace again, and the answer fills the row in.
+		backend.on('ext_gallery_lookup', ({ id }: { id: string }) => (id === CLAUDE.id ? CLAUDE : GRAPH));
+		click(rows[0]!.querySelector<HTMLElement>('.action-btn')!);
 		await flush();
-		expect(document.querySelector('.ext-gallery-count')).toBeNull();
-		expect(document.querySelector('.ext-list .empty')!.textContent).toContain('No extensions match');
-		key(input, 'Escape');
-		expect(document.querySelectorAll('.gallery-row').length).toBe(0);
-		expect(document.querySelectorAll('.ext-row').length).toBe(2);
+		expect(backend.callsTo('ext_gallery_lookup').length).toBe(4);
+		expect(document.querySelectorAll('.ext-row')[0]!.textContent).toContain('Claude Code for VS Code');
+		expect(document.querySelectorAll('.ext-row')[0]!.querySelector('.action-btn')!.title).toContain('Install from the Marketplace');
+	});
+
+	it('lists other installed packages apart, and hides bundled offers outside the featured list', async () => {
+		const SAMPLE: ExtInfo = { ...USER, id: 'ggs.ext-demo', displayName: 'Sample Offer', path: '', format: 'bundled' };
+		withFeatured([GRAPH_INSTALLED, USER, SAMPLE]);
+		const panel = mountedPanel();
+		await panel.refresh();
+		await flush();
+		expect(document.querySelector('.ext-section-label')!.textContent).toBe('Other installed');
+		const rows = document.querySelectorAll<HTMLElement>('.ext-row');
+		expect(rows.length).toBe(3);
+		expect(rows[2]!.querySelector('.action-btn')!.title).toContain('Uninstall acme.demo');
+		expect(document.body.textContent).not.toContain('Sample Offer');
 	});
 
 	it('the detail page shows the facts and renders the package\'s README', async () => {
@@ -686,7 +715,7 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		const pane = document.body.appendChild(document.createElement('div'));
 		const dispose = host.mountWebview(1, pane);
 		const frame = pane.querySelector('iframe')!;
-		expect(frame.getAttribute('sandbox')).toBe('allow-scripts');
+		expect(frame.getAttribute('sandbox')).toBe('allow-scripts allow-same-origin'); // its own storage (localStorage) works
 		expect(frame.getAttribute('srcdoc')).toContain('acquireVsCodeApi');
 		expect(frame.getAttribute('srcdoc')).toContain('<body>hi</body>');
 		// A later setHtml reloads the document, as VS Code's webviews do.
@@ -1187,6 +1216,32 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 		await flush();
 		await host.executeCommand('acme.engine.go', []);
 		expect(backend.callsTo('ext_process_run')).toContainEqual({ extId: 'acme.engine', command: 'acme.engine.go', args: [] });
+	});
+
+	it('a restart after a failed start re-registers the remote handle before the process starts', async () => {
+		// The installed-app failure: the first start timed out (its handle was dropped), and
+		// the Extensions view's restart then started the process bare — the activation's
+		// `host.env` request answered "no extension host frame".
+		const ENGINE: ExtInfo = {
+			...GGX2, id: 'acme.engine',
+			capabilities: { format: 'ggs/2', id: 'acme.engine', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'ggs-node', command: 'out/main.js' }, permissions: [] }
+		};
+		withExtensions(ENGINE);
+		backend.on('ext_read_file', () => { throw new Error('no such file'); });
+		let starts = 0;
+		const host = new ExtensionHost();
+		let handleAtStart = false;
+		backend.on('ext_process_start', () => {
+			starts++;
+			if (starts === 1) throw new Error('acme.engine did not answer initialize within 10 s');
+			handleAtStart = host['frames'].has('acme.engine');
+			return { extensionId: 'acme.engine', pid: 4242, commands: [], protocolVersion: 'ggs-ext/1', startCount: 2, lastError: null };
+		});
+		await host.activateInstalled();
+		expect(host['frames'].has('acme.engine')).toBe(false);
+		await host.restartProcess('acme.engine');
+		expect(handleAtStart).toBe(true);
+		expect(host['frames'].has('acme.engine')).toBe(true);
 	});
 });
 
@@ -1804,6 +1859,41 @@ describe('the shim degrades instead of throwing (Open VSX compatibility posture)
 		await api.__serveWebviewView.resolve('acme.events');
 		api.handleHostEvent({ event: 'webviewViewMessage', viewId: 'acme.events', message: { ping: true } });
 		expect(received).toEqual({ ping: true });
+	});
+
+	it('a webview view carries onDidDispose, fired once on dispose (Claude Code wires cleanup there)', async () => {
+		const api = shimApi();
+		let disposals = 0;
+		let view: { onDidDispose(listener: () => void): void; dispose(): void } | null = null;
+		api.window.registerWebviewViewProvider('acme.list', {
+			resolveWebviewView: (resolved) => {
+				view = resolved as typeof view;
+				view!.onDidDispose(() => { disposals++; });
+			}
+		});
+		await api.__serveWebviewView.resolve('acme.list');
+		view!.dispose();
+		view!.dispose();
+		expect(disposals).toBe(1);
+	});
+
+	it('executeCommand of the extension\'s own command runs locally, undefined arguments intact', async () => {
+		const api = shimApi();
+		const requests = (api as unknown as { __requests: { method: string; args: unknown[] }[] }).__requests;
+		let received: unknown[] | null = null;
+		api.commands.registerCommand('acme.open', (...args: unknown[]) => { received = args; return 'opened'; });
+		const result = await api.commands.executeCommand('acme.open', undefined, 1);
+		expect(result).toBe('opened');
+		expect(received).toEqual([undefined, 1]);
+		expect(requests.some((request) => request.method === 'commands.execute')).toBe(false);
+		// Another extension's (or the workbench's) command still crosses to the host.
+		void api.commands.executeCommand('workbench.action.files.save');
+		expect(requests.some((request) => request.method === 'commands.execute')).toBe(true);
+	});
+
+	it('reports a VS Code version at or past 1.106, the secondary-sidebar layout packages gate on', () => {
+		const [major, minor] = shimApi().version.split('.').map(Number);
+		expect(major! > 1 || minor! >= 106).toBe(true);
 	});
 });
 

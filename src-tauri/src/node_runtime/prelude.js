@@ -5,6 +5,19 @@
 // in the same global object; nothing here is the package's protocol (that is `ggs`, also
 // assembled below over its natives).
 
+/* ---------- Symbol.dispose / Symbol.asyncDispose ----------
+ * Explicit resource management's well-known symbols, which Boa does not define. Bundlers
+ * lower `using` to a helper that looks up `Symbol.dispose || Symbol.for("Symbol.dispose")`
+ * while the disposables themselves are written `{ [Symbol.dispose]() {} }`: without the
+ * symbol those land under the key "undefined" and every `using` throws "Object not
+ * disposable" (claude-code's transcript reads did). The registry symbols are the ones the
+ * helpers already fall back to, so both sides agree. */
+for (const name of ['dispose', 'asyncDispose']) {
+	if (typeof Symbol[name] !== 'symbol') {
+		Object.defineProperty(Symbol, name, { value: Symbol.for(`Symbol.${name}`), writable: false, enumerable: false, configurable: false });
+	}
+}
+
 /* ---------- console: everything is stderr (stdout is the ggs-ext/1 protocol) ---------- */
 (() => {
 	const emit = (level, args) => {
@@ -95,6 +108,9 @@
 		format,
 		inspect: (value) => formatValue(value),
 		promisify(fn) {
+			// A function's own promisified form wins (`exec` resolving `{ stdout, stderr }`).
+			const own = fn?.[Symbol.for('nodejs.util.promisify.custom')];
+			if (typeof own === 'function') return own;
 			const promisified = (...args) =>
 				new Promise((resolve, reject) => {
 					fn(...args, (error, result) => (error ? reject(error) : resolve(result)));
@@ -333,9 +349,11 @@
 					if (encoding === 'binary' || encoding === 'latin1') {
 						return hex.match(/../g).map((pair) => String.fromCharCode(parseInt(pair, 16))).join('');
 					}
-					// 'buffer' and undefined: the digest bytes as a Buffer, Node's default.
+					// 'buffer' and undefined: the digest bytes as a Buffer, Node's default; any
+					// other encoding (base64url — PKCE challenges) is the Buffer's own rendering.
 					const bytes = new Uint8Array(hex.match(/../g).map((pair) => parseInt(pair, 16)));
-					return new globalThis.__ggsBufferClass(bytes);
+					const digest = new globalThis.__ggsBufferClass(bytes);
+					return encoding === undefined || encoding === 'buffer' ? digest : digest.toString(encoding);
 				}
 			};
 		},
@@ -573,7 +591,7 @@
 			return 0;
 		}
 		static _fromString(text, encoding) {
-			switch (encoding) {
+			switch (String(encoding).toLowerCase()) {
 				case 'utf8': case 'utf-8': {
 					// The Rust side owns multi-byte correctness (Boa strings are UTF-16).
 					return new Buffer(new Uint8Array(__ggsUtf8Encode(text)));
@@ -588,8 +606,18 @@
 					for (let i = 0; i < out.length; i += 1) out[i] = parseInt(text.slice(i * 2, i * 2 + 2), 16);
 					return out;
 				}
+				case 'ucs2': case 'ucs-2': case 'utf16le': case 'utf-16le': {
+					const out = new Buffer(text.length * 2);
+					for (let i = 0; i < text.length; i += 1) {
+						const unit = text.charCodeAt(i);
+						out[i * 2] = unit & 0xff;
+						out[i * 2 + 1] = unit >> 8;
+					}
+					return out;
+				}
 				case 'base64': case 'base64url': {
-					const clean = text.replace(/[^A-Za-z0-9+/]/g, '');
+					// Both alphabets decode, as in Node: base64url's - and _ are + and /.
+					const clean = text.replace(/-/g, '+').replace(/_/g, '/').replace(/[^A-Za-z0-9+/]/g, '');
 					const out = new Buffer(Math.floor(clean.length * 3 / 4));
 					let bits = 0;
 					let acc = 0;
@@ -611,7 +639,13 @@
 		}
 		toString(encoding = 'utf8', start = 0, end = this.length) {
 			const bytes = this.subarray(start, end);
+			encoding = String(encoding ?? 'utf8').toLowerCase();
 			switch (encoding) {
+				case 'ucs2': case 'ucs-2': case 'utf16le': case 'utf-16le': {
+					let out = '';
+					for (let i = 0; i + 1 < bytes.length; i += 2) out += String.fromCharCode(bytes[i] | (bytes[i + 1] << 8));
+					return out;
+				}
 				case 'utf8': case 'utf-8':
 					// Lossy decode on the Rust side — exact Node `from_utf8_lossy` parity.
 					return __ggsUtf8Decode(bytes);
@@ -636,7 +670,8 @@
 						out += b2 === undefined ? (encoding === 'base64url' ? '' : '=') : B64[((b2 & 15) << 2) | ((b3 ?? 0) >> 6)];
 						out += b3 === undefined ? (encoding === 'base64url' ? '' : '=') : B64[b3 & 63];
 					}
-					return out;
+					// base64url is its own alphabet (RFC 4648 §5) — PKCE challenges and JWTs.
+					return encoding === 'base64url' ? out.replace(/\+/g, '-').replace(/\//g, '_') : out;
 				}
 				default:
 					throw new TypeError(`Unknown encoding: ${encoding}`);
@@ -664,6 +699,197 @@
 			target.set(this.subarray(from, from + count), at);
 			return count;
 		}
+		/* Node's `slice` is a view (`subarray`), never the TypedArray copy. */
+		slice(start, end) {
+			return this.subarray(start, end);
+		}
+		/* `buf.write(string[, offset[, length]][, encoding])` → bytes written. */
+		write(string, offset, length, encoding) {
+			if (typeof offset === 'string') {
+				encoding = offset;
+				offset = 0;
+				length = undefined;
+			} else if (typeof length === 'string') {
+				encoding = length;
+				length = undefined;
+			}
+			const at = Number(offset) || 0;
+			const bytes = Buffer._fromString(String(string), encoding ?? 'utf8');
+			const count = Math.max(0, Math.min(bytes.length, this.length - at, length === undefined ? Infinity : Number(length)));
+			this.set(bytes.subarray(0, count), at);
+			return count;
+		}
+		fill(value, offset = 0, end = this.length, encoding) {
+			if (typeof offset === 'string') {
+				encoding = offset;
+				offset = 0;
+				end = this.length;
+			}
+			if (typeof value === 'string') {
+				const pattern = value.length === 1 && (encoding === undefined || encoding === 'utf8') && value.charCodeAt(0) < 128 ? null : Buffer._fromString(value, encoding ?? 'utf8');
+				if (pattern === null) return Uint8Array.prototype.fill.call(this, value.charCodeAt(0), offset, end);
+				if (pattern.length === 0) return Uint8Array.prototype.fill.call(this, 0, offset, end);
+				for (let at = offset; at < end; at += 1) this[at] = pattern[(at - offset) % pattern.length];
+				return this;
+			}
+			if (ArrayBuffer.isView(value)) {
+				const pattern = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+				for (let at = offset; at < end; at += 1) this[at] = pattern[(at - offset) % pattern.length];
+				return this;
+			}
+			return Uint8Array.prototype.fill.call(this, Number(value) & 255, offset, end);
+		}
+		/* indexOf / lastIndexOf / includes take a byte, a string or a Buffer, like Node. */
+		indexOf(value, byteOffset = 0, encoding) {
+			if (typeof value === 'number') return Uint8Array.prototype.indexOf.call(this, value & 255, byteOffset);
+			const needle = typeof value === 'string' ? Buffer._fromString(value, encoding ?? 'utf8') : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+			let from = Number(byteOffset) || 0;
+			if (from < 0) from = Math.max(0, this.length + from);
+			if (needle.length === 0) return Math.min(from, this.length);
+			outer: for (let at = from; at + needle.length <= this.length; at += 1) {
+				for (let k = 0; k < needle.length; k += 1) if (this[at + k] !== needle[k]) continue outer;
+				return at;
+			}
+			return -1;
+		}
+		lastIndexOf(value, byteOffset = this.length - 1, encoding) {
+			if (typeof value === 'number') return Uint8Array.prototype.lastIndexOf.call(this, value & 255, byteOffset);
+			const needle = typeof value === 'string' ? Buffer._fromString(value, encoding ?? 'utf8') : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+			for (let at = Math.min(Number(byteOffset), this.length - needle.length); at >= 0; at -= 1) {
+				let match = true;
+				for (let k = 0; k < needle.length && match; k += 1) match = this[at + k] === needle[k];
+				if (match) return at;
+			}
+			return -1;
+		}
+		includes(value, byteOffset, encoding) {
+			return this.indexOf(value, byteOffset, encoding) !== -1;
+		}
+		compare(target, targetStart = 0, targetEnd = target.length, sourceStart = 0, sourceEnd = this.length) {
+			const a = this.subarray(sourceStart, sourceEnd);
+			const b = target.subarray(targetStart, targetEnd);
+			for (let at = 0; at < Math.min(a.length, b.length); at += 1) if (a[at] !== b[at]) return a[at] < b[at] ? -1 : 1;
+			return a.length === b.length ? 0 : a.length < b.length ? -1 : 1;
+		}
+		static compare(a, b) {
+			return Buffer.prototype.compare.call(a, b);
+		}
+		static isEncoding(encoding) {
+			return ['utf8', 'utf-8', 'hex', 'base64', 'base64url', 'ascii', 'latin1', 'binary', 'ucs2', 'ucs-2', 'utf16le', 'utf-16le'].includes(String(encoding).toLowerCase());
+		}
+		static allocUnsafeSlow(size) {
+			return Buffer.alloc(size);
+		}
+		swap16() {
+			for (let at = 0; at + 1 < this.length; at += 2) [this[at], this[at + 1]] = [this[at + 1], this[at]];
+			return this;
+		}
+		swap32() {
+			for (let at = 0; at + 3 < this.length; at += 4) this.subarray(at, at + 4).reverse();
+			return this;
+		}
+		swap64() {
+			for (let at = 0; at + 7 < this.length; at += 8) this.subarray(at, at + 8).reverse();
+			return this;
+		}
+		__view() {
+			return new DataView(this.buffer, this.byteOffset, this.byteLength);
+		}
+		/* Variable-width integers (1–6 bytes), Node's readUIntBE / writeIntLE family. */
+		readUIntBE(offset, byteLength) {
+			let value = 0;
+			for (let at = 0; at < byteLength; at += 1) value = value * 256 + this.__byte(offset + at);
+			return value;
+		}
+		readUIntLE(offset, byteLength) {
+			let value = 0;
+			for (let at = byteLength - 1; at >= 0; at -= 1) value = value * 256 + this.__byte(offset + at);
+			return value;
+		}
+		readIntBE(offset, byteLength) {
+			const value = this.readUIntBE(offset, byteLength);
+			const limit = 2 ** (8 * byteLength - 1);
+			return value >= limit ? value - limit * 2 : value;
+		}
+		readIntLE(offset, byteLength) {
+			const value = this.readUIntLE(offset, byteLength);
+			const limit = 2 ** (8 * byteLength - 1);
+			return value >= limit ? value - limit * 2 : value;
+		}
+		writeUIntBE(value, offset, byteLength) {
+			let rest = Number(value);
+			for (let at = byteLength - 1; at >= 0; at -= 1) {
+				this.__put(offset + at, rest % 256);
+				rest = Math.floor(rest / 256);
+			}
+			return offset + byteLength;
+		}
+		writeUIntLE(value, offset, byteLength) {
+			let rest = Number(value);
+			for (let at = 0; at < byteLength; at += 1) {
+				this.__put(offset + at, rest % 256);
+				rest = Math.floor(rest / 256);
+			}
+			return offset + byteLength;
+		}
+		writeIntBE(value, offset, byteLength) {
+			return this.writeUIntBE(value < 0 ? value + 2 ** (8 * byteLength) : value, offset, byteLength);
+		}
+		writeIntLE(value, offset, byteLength) {
+			return this.writeUIntLE(value < 0 ? value + 2 ** (8 * byteLength) : value, offset, byteLength);
+		}
+		__byte(at) {
+			if (at < 0 || at >= this.length) throw Object.assign(new RangeError(`The value of "offset" is out of range. It must be >= 0 and <= ${this.length - 1}. Received ${at}`), { code: 'ERR_OUT_OF_RANGE' });
+			return this[at];
+		}
+		__put(at, byte) {
+			if (at < 0 || at >= this.length) throw Object.assign(new RangeError(`The value of "offset" is out of range. It must be >= 0 and <= ${this.length - 1}. Received ${at}`), { code: 'ERR_OUT_OF_RANGE' });
+			this[at] = byte;
+		}
+	}
+	/* The fixed-width reads and writes, generated over DataView: readUInt8 … readDoubleBE,
+	 * the BigInt 64-bit pair, and the lower-case `readUint…` aliases Node also carries. */
+	{
+		const kinds = [
+			['UInt8', 'Uint8', 1], ['Int8', 'Int8', 1],
+			['UInt16', 'Uint16', 2], ['Int16', 'Int16', 2],
+			['UInt32', 'Uint32', 4], ['Int32', 'Int32', 4],
+			['Float', 'Float32', 4], ['Double', 'Float64', 8],
+			['BigUInt64', 'BigUint64', 8], ['BigInt64', 'BigInt64', 8]
+		];
+		const range = (buffer, offset, width) => {
+			if (buffer.length < width) {
+				throw Object.assign(new RangeError('Attempt to access memory outside buffer bounds'), { code: 'ERR_BUFFER_OUT_OF_BOUNDS' });
+			}
+			if (!Number.isInteger(offset) || offset < 0 || offset + width > buffer.length) {
+				throw Object.assign(new RangeError(`The value of "offset" is out of range. It must be >= 0 and <= ${buffer.length - width}. Received ${offset}`), { code: 'ERR_OUT_OF_RANGE' });
+			}
+		};
+		for (const [name, view, width] of kinds) {
+			const endians = width === 1 ? [['', false]] : [['BE', false], ['LE', true]];
+			for (const [suffix, little] of endians) {
+				const read = function (offset = 0) {
+					range(this, offset, width);
+					return this.__view()[`get${view}`](offset, little);
+				};
+				const write = function (value, offset = 0) {
+					range(this, offset, width);
+					this.__view()[`set${view}`](offset, view.startsWith('Big') ? BigInt(value) : Number(value), little);
+					return offset + width;
+				};
+				Buffer.prototype[`read${name}${suffix}`] = read;
+				Buffer.prototype[`write${name}${suffix}`] = write;
+				if (name.startsWith('UInt') || name.startsWith('BigUInt')) {
+					const alias = name.replace('UInt', 'Uint');
+					Buffer.prototype[`read${alias}${suffix}`] = read;
+					Buffer.prototype[`write${alias}${suffix}`] = write;
+				}
+			}
+		}
+		Buffer.prototype.readUintBE = Buffer.prototype.readUIntBE;
+		Buffer.prototype.readUintLE = Buffer.prototype.readUIntLE;
+		Buffer.prototype.writeUintBE = Buffer.prototype.writeUIntBE;
+		Buffer.prototype.writeUintLE = Buffer.prototype.writeUIntLE;
 	}
 	globalThis.Buffer = Buffer;
 	globalThis.__ggsBufferClass = Buffer;
@@ -699,20 +925,29 @@
 			throw withCode(error);
 		}
 	};
-	/* A Stats object: the fields plus the predicate methods Node code calls. */
-	const toStats = (raw) => {
+	/* A Stats object: the fields plus the predicate methods Node code calls. `{ bigint: true }`
+	 * answers the numeric fields as BigInts, as Node does; `dev` / `ino` are a constant pair
+	 * (std has no stable file identity on Windows), so a path's lstat and its open handle's
+	 * stat compare equal - the identity check claude-code's transcript probe makes. */
+	const toStats = (raw, options) => {
 		const kind = raw.kind;
+		const n = options && options.bigint ? (value) => BigInt(Math.trunc(value)) : (value) => value;
 		return {
-			size: raw.size,
-			mtimeMs: raw.mtimeMs,
-			ctimeMs: raw.ctimeMs,
-			birthtimeMs: raw.birthtimeMs,
-			atimeMs: raw.mtimeMs,
+			dev: n(0),
+			ino: n(0),
+			nlink: n(1),
+			uid: n(0),
+			gid: n(0),
+			size: n(raw.size),
+			mtimeMs: n(raw.mtimeMs),
+			ctimeMs: n(raw.ctimeMs),
+			birthtimeMs: n(raw.birthtimeMs),
+			atimeMs: n(raw.mtimeMs),
 			mtime: new Date(raw.mtimeMs),
 			ctime: new Date(raw.ctimeMs),
 			birthtime: new Date(raw.birthtimeMs),
 			atime: new Date(raw.mtimeMs),
-			mode: kind === 'dir' ? 0o40755 : 0o100644,
+			mode: n(kind === 'dir' ? 0o40755 : kind === 'symlink' ? 0o120777 : 0o100644),
 			isFile: () => kind === 'file',
 			isDirectory: () => kind === 'dir',
 			isSymbolicLink: () => kind === 'symlink',
@@ -722,16 +957,52 @@
 			isSocket: () => false
 		};
 	};
+	/* Stats reads honour Node's `throwIfNoEntry: false`: a missing path answers undefined. */
+	const statOf = (path, options, lstat) => {
+		try {
+			return toStats(raw.stat(path, lstat), options);
+		} catch (error) {
+			withCode(error);
+			if (options && options.throwIfNoEntry === false && error.code === 'ENOENT') return undefined;
+			throw error;
+		}
+	};
 	const fs = {
-		constants: raw.constants,
+		/* The open flags carry win32's values (Node's own there); O_NOFOLLOW / O_NONBLOCK are
+		 * absent, as on win32, so a caller's `?? 0` leaves them out. */
+		constants: {
+			...raw.constants,
+			O_RDONLY: 0,
+			O_WRONLY: 1,
+			O_RDWR: 2,
+			O_APPEND: 8,
+			O_CREAT: 256,
+			O_TRUNC: 512,
+			O_EXCL: 1024
+		},
+		/* No encoding answers a Buffer, as Node does - claude-code's transcript parser walks
+		 * the bytes (`indexOf(10)`, `toString('utf-8', from, to)`) and read none from a
+		 * string. */
 		readFileSync(path, options) {
-			const encoding = encodingOf(options, 'utf8');
+			const encoding = encodingOf(options, 'buffer');
 			const binary = encoding === 'buffer' || encoding === null;
 			const result = binary ? asBuffer(raw.readFileSyncBytes(path)) : raw.readFileSync(path, encoding);
 			return result;
 		},
+		/* `flag` as Node reads it: 'wx' / 'ax' refuse an existing path (EEXIST - the
+		 * exclusive create atomic writers stage their temp files with), 'a' appends. */
 		writeFileSync(path, data, options) {
 			const encoding = encodingOf(options, 'utf8');
+			const flag = options && typeof options === 'object' && typeof options.flag === 'string' ? options.flag : 'w';
+			if (flag.includes('x') && raw.existsSync(path)) {
+				throw Object.assign(new Error(`EEXIST: file already exists, open '${path}'`), { code: 'EEXIST' });
+			}
+			if (flag[0] === 'a') {
+				if (!raw.existsSync(path)) raw.writeFileSync(path, '', 'utf8');
+				const bytes = typeof data === 'string' ? globalThis.__ggsBufferClass.from(data, encoding) : data;
+				raw.writeRangeBytes(path, bytes, null);
+				return;
+			}
 			if (typeof data === 'string') return raw.writeFileSync(path, data, encoding);
 			return raw.writeFileSyncBytes(path, ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : data);
 		},
@@ -755,14 +1026,15 @@
 				}))
 				: entries;
 		},
-		statSync: (path) => toStats(raw.stat(path)),
-		lstatSync: (path) => toStats(raw.stat(path)),
+		statSync: (path, options) => statOf(path, options, false),
+		lstatSync: (path, options) => statOf(path, options, true),
 		rmSync: (path, options) => raw.rmSync(path, Boolean(options && options.recursive), Boolean(options && options.force)),
 		rmdirSync: (path) => raw.rmSync(path, true, false),
 		unlinkSync: (path) => raw.unlinkSync(path),
 		renameSync: (from, to) => raw.renameSync(from, to),
 		copyFileSync: (from, to) => raw.copyFileSync(from, to),
 		realpathSync: (path) => raw.realpathSync(path),
+		readlinkSync: (path) => raw.readlinkSync(path),
 		// Permission bits mean nothing to the platform surfaces this runtime serves; the
 		// callback-style no-op keeps the extension's own activation flow (the askpass
 		// helper scripts, never executed here) running.
@@ -779,35 +1051,99 @@
 	}
 	fs.realpathSync.native = fs.realpathSync;
 
-	/* fd-based reads (hex views page through big files): an fd names a path, every read is
-	 * a ranged native read, so a file is never loaded whole. */
+	/* fd-based I/O (hex views page through big files, claude-code probes and appends its
+	 * transcripts): an fd names a path plus its open mode, every read or write is a ranged
+	 * native call, so a file is never loaded whole. A read without a position continues
+	 * where the last one ended, as on a real descriptor. */
 	const descriptors = new Map();
 	let nextDescriptor = 100;
-	const pathOf = (fd) => {
-		const path = descriptors.get(fd);
-		if (path === undefined) throw Object.assign(new Error('bad file descriptor'), { code: 'EBADF' });
-		return path;
+	const descriptorOf = (fd) => {
+		const entry = descriptors.get(fd);
+		if (entry === undefined) throw Object.assign(new Error('bad file descriptor'), { code: 'EBADF' });
+		return entry;
+	};
+	const pathOf = (fd) => descriptorOf(fd).path;
+	/* Node's flags, as a string ('r', 'a+', 'wx', ...) or O_* bits, to what the open means. */
+	const openMode = (flags) => {
+		const c = fs.constants;
+		if (typeof flags === 'number') {
+			const access = flags & 3;
+			return {
+				readable: access !== c.O_WRONLY,
+				writable: access !== c.O_RDONLY,
+				append: (flags & c.O_APPEND) !== 0,
+				create: (flags & c.O_CREAT) !== 0,
+				truncate: (flags & c.O_TRUNC) !== 0,
+				exclusive: (flags & c.O_EXCL) !== 0
+			};
+		}
+		const mode = flags === undefined || flags === null ? 'r' : String(flags);
+		const kind = mode[0];
+		if (kind !== 'r' && kind !== 'w' && kind !== 'a') {
+			throw Object.assign(new Error(`EINVAL: invalid flags '${mode}'`), { code: 'EINVAL' });
+		}
+		const plus = mode.includes('+');
+		return {
+			readable: kind === 'r' || plus,
+			writable: kind !== 'r' || plus,
+			append: kind === 'a',
+			create: kind !== 'r',
+			truncate: kind === 'w',
+			exclusive: mode.includes('x')
+		};
 	};
 	fs.openSync = coded((path, flags) => {
-		const mode = flags === undefined ? 'r' : String(flags);
-		if (!mode.startsWith('r')) throw new Error(`${path}: only read-mode descriptors are supported by the ggs-node runtime`);
-		raw.accessSync(path);
+		const mode = openMode(flags);
+		const exists = raw.existsSync(path);
+		if (exists && mode.exclusive && mode.create) {
+			throw Object.assign(new Error(`EEXIST: file already exists, open '${path}'`), { code: 'EEXIST' });
+		}
+		if (!exists && !mode.create) raw.accessSync(path);
+		if ((!exists && mode.create) || (exists && mode.truncate && mode.writable)) raw.writeFileSync(path, '', 'utf8');
+		if (exists && raw.stat(path, false).kind === 'dir' && mode.writable) {
+			throw Object.assign(new Error(`EISDIR: illegal operation on a directory, open '${path}'`), { code: 'EISDIR' });
+		}
 		const fd = nextDescriptor++;
-		descriptors.set(fd, path);
+		descriptors.set(fd, { path, ...mode, position: 0 });
 		return fd;
 	});
 	fs.closeSync = (fd) => {
 		descriptors.delete(fd);
 	};
 	fs.readSync = coded((fd, buffer, offset, length, position) => {
-		const path = pathOf(fd);
+		const entry = descriptorOf(fd);
+		if (!entry.readable) throw Object.assign(new Error('EBADF: bad file descriptor, read'), { code: 'EBADF' });
+		// Node's options-object form: readSync(fd, buffer, { offset, length, position }).
+		if (offset !== null && typeof offset === 'object') ({ offset, length, position } = offset);
 		const at = offset ?? 0;
 		const count = length ?? (buffer.length - at);
-		const bytes = new Uint8Array(raw.readRangeBytes(path, position ?? 0, count));
+		const from = typeof position === 'number' || typeof position === 'bigint' ? Number(position) : entry.position;
+		const bytes = new Uint8Array(raw.readRangeBytes(entry.path, from, count));
 		buffer.set(bytes, at);
+		if (!(typeof position === 'number' || typeof position === 'bigint')) entry.position = from + bytes.length;
 		return bytes.length;
 	});
-	fs.fstatSync = coded((fd) => fs.statSync(pathOf(fd)));
+	/* writeSync(fd, buffer[, offset[, length[, position]]]) or writeSync(fd, string[, position[, encoding]]). */
+	fs.writeSync = coded((fd, data, offset, length, position) => {
+		const entry = descriptorOf(fd);
+		if (!entry.writable) throw Object.assign(new Error('EBADF: bad file descriptor, write'), { code: 'EBADF' });
+		let bytes;
+		if (typeof data === 'string') {
+			position = offset;
+			bytes = globalThis.__ggsBufferClass.from(data, typeof length === 'string' ? length : 'utf8');
+		} else {
+			const view = ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : new Uint8Array(data);
+			const at = offset ?? 0;
+			bytes = view.subarray(at, at + (length ?? (view.length - at)));
+		}
+		// Append mode writes at the end whatever the position, as O_APPEND does.
+		const explicit = typeof position === 'number' || typeof position === 'bigint';
+		const target = entry.append ? null : explicit ? Number(position) : entry.position;
+		const written = raw.writeRangeBytes(entry.path, bytes, target);
+		if (!entry.append && !explicit) entry.position += written;
+		return written;
+	});
+	fs.fstatSync = coded((fd, options) => fs.statSync(pathOf(fd), options));
 
 	/* createReadStream: an EventEmitter paging the file through ranged reads, one chunk per
 	 * macrotask, honouring start/end/highWaterMark, pause/resume and destroy. */
@@ -891,7 +1227,7 @@
 		queueMicrotask(() => callback(null, result));
 	};
 	for (const name of ['readFile', 'writeFile', 'appendFile', 'stat', 'lstat', 'fstat', 'readdir', 'mkdir',
-		'unlink', 'rename', 'copyFile', 'rm', 'rmdir', 'realpath', 'access', 'open', 'close']) {
+		'unlink', 'rename', 'copyFile', 'rm', 'rmdir', 'realpath', 'readlink', 'access', 'open', 'close']) {
 		fs[name] = callbackForm(fs[`${name}Sync`]);
 	}
 	fs.realpath.native = fs.realpath;
@@ -903,6 +1239,15 @@
 			queueMicrotask(() => callback(error, 0, buffer));
 		}
 	};
+	fs.write = (fd, data, ...rest) => {
+		const callback = typeof rest[rest.length - 1] === 'function' ? rest.pop() : () => { };
+		try {
+			const count = fs.writeSync(fd, data, ...rest);
+			queueMicrotask(() => callback(null, count, data));
+		} catch (error) {
+			queueMicrotask(() => callback(error, 0, data));
+		}
+	};
 	fs.exists = (path, callback) => {
 		const present = raw.existsSync(path);
 		queueMicrotask(() => callback(present));
@@ -910,7 +1255,7 @@
 	const promise = {};
 	/* Promise forms: a synchronous throw becomes the rejection, never an escape. */
 	const promised = (sync) => (...args) => new Promise((resolve) => resolve(sync(...args)));
-	for (const name of ['mkdir', 'stat', 'lstat', 'unlink', 'rename', 'realpath']) {
+	for (const name of ['mkdir', 'stat', 'lstat', 'unlink', 'rename', 'realpath', 'readlink', 'chmod']) {
 		promise[name] = promised(fs[`${name}Sync`]);
 	}
 	promise.readFile = promised(fs.readFileSync);
@@ -930,57 +1275,402 @@
 	promise.mkdtemp = () => {
 		throw new Error('mkdtemp is not supported by the ggs-node runtime');
 	};
+	/* FileHandle — `fs.promises.open`'s answer over the descriptors above: stat, positional
+	 * read / write, readFile / writeFile / appendFile, a read stream (readline iterates it)
+	 * and close. */
+	class FileHandle {
+		constructor(fd) {
+			this.fd = fd;
+		}
+		stat(options) {
+			return promised(fs.fstatSync)(this.fd, options);
+		}
+		read(buffer, offset, length, position) {
+			return promised(() => {
+				if (buffer === undefined || (buffer !== null && typeof buffer === 'object' && !ArrayBuffer.isView(buffer))) {
+					const options = buffer ?? {};
+					buffer = options.buffer ?? globalThis.__ggsBufferClass.alloc(16384);
+					({ offset, length, position } = options);
+				}
+				const bytesRead = fs.readSync(this.fd, buffer, offset, length, position);
+				return { bytesRead, buffer };
+			})();
+		}
+		write(data, ...rest) {
+			return promised(() => ({ bytesWritten: fs.writeSync(this.fd, data, ...rest), buffer: data }))();
+		}
+		readFile(options) {
+			return promised(() => fs.readFileSync(pathOf(this.fd), options))();
+		}
+		writeFile(data, options) {
+			return promised(() => fs.writeFileSync(pathOf(this.fd), data, options))();
+		}
+		appendFile(data, options) {
+			return promised(() => {
+				const bytes = typeof data === 'string' ? globalThis.__ggsBufferClass.from(data, encodingOf(options, 'utf8')) : data;
+				raw.writeRangeBytes(pathOf(this.fd), bytes, null);
+			})();
+		}
+		/* Permission bits, ownership and times mean nothing to the platform surfaces this
+		 * runtime serves (the module's chmod is the same no-op); an atomic writer
+		 * re-applying a mode must not fail on them. */
+		chmod() {
+			return Promise.resolve();
+		}
+		chown() {
+			return Promise.resolve();
+		}
+		utimes() {
+			return Promise.resolve();
+		}
+		truncate(length) {
+			return promised(() => {
+				if (length) throw new Error('truncate to a non-zero length is not supported by the ggs-node runtime');
+				raw.writeFileSync(pathOf(this.fd), '', 'utf8');
+			})();
+		}
+		sync() {
+			return Promise.resolve();
+		}
+		datasync() {
+			return Promise.resolve();
+		}
+		createReadStream(options) {
+			return fs.createReadStream(pathOf(this.fd), options);
+		}
+		close() {
+			fs.closeSync(this.fd);
+			return Promise.resolve();
+		}
+	}
+	if (Symbol.asyncDispose) FileHandle.prototype[Symbol.asyncDispose] = FileHandle.prototype.close;
+	promise.open = (path, flags) => promised(() => new FileHandle(fs.openSync(path, flags ?? 'r')))();
+	promise.constants = fs.constants;
 	fs.promises = promise;
 	globalThis.fs = fs;
 	delete globalThis.__ggsFs;
 })();
 
-/* ---------- child_process over the Rust spawner ---------- */
+/* ---------- child_process over the Rust spawner ----------
+ * Node's shapes over the native spawn: a ChildProcess EventEmitter whose stdin is a real
+ * Writable and whose stdout / stderr are real Readables (pipe, readline, async iteration,
+ * `stdin.on('error')` — what SDKs driving a CLI over stdio lean on), `spawn` / `exit` /
+ * `close` in Node's order (close after both output streams ended), a failed spawn as an
+ * async `error` with Node's code (ENOENT) rather than a throw, and exec / execFile
+ * asynchronous on top of it — never blocking the runtime's one JS thread. The *Sync
+ * forms stay synchronous, and throw on a failed exit as Node's do. */
 (() => {
-	const CP = {
+	const native = {
 		spawn: globalThis.__ggsChildProcessSpawn,
 		spawnSync: globalThis.__ggsChildProcessSpawnSync
 	};
+	const streams = () => globalThis.__ggsBuiltins.stream;
 	const shellWords = (command) =>
 		process.platform === 'win32' ? ['cmd.exe', '/d', '/s', '/c', command] : ['/bin/sh', '-c', command];
+	const stdioModes = (options) => {
+		const stdio = options?.stdio;
+		const list = typeof stdio === 'string' ? [stdio, stdio, stdio] : Array.isArray(stdio) ? stdio : [];
+		return [0, 1, 2].map((at) => (list[at] === undefined || list[at] === null ? 'pipe' : list[at]));
+	};
+	const errorCode = (text) => {
+		if (/os error 2\b|not found|cannot find|no such file|系统找不到/i.test(text)) return 'ENOENT';
+		if (/os error (5|13)\b|denied|拒绝访问/i.test(text)) return 'EACCES';
+		return 'EIO';
+	};
+	const spawnFailure = (error, file, spawnargs) => {
+		const code = errorCode(String(error?.message ?? error));
+		return Object.assign(new Error(`spawn ${file} ${code}`), { code, errno: code === 'ENOENT' ? -2 : -13, syscall: `spawn ${file}`, path: file, spawnargs: spawnargs.slice(1) });
+	};
+	const toBytes = (chunk, encoding) => (typeof chunk === 'string' ? Buffer.from(chunk, encoding || 'utf8') : chunk);
+
+	class ChildProcess extends EventEmitter {
+		constructor() {
+			super();
+			this.pid = undefined;
+			this.stdin = null;
+			this.stdout = null;
+			this.stderr = null;
+			this.stdio = [null, null, null];
+			this.exitCode = null;
+			this.signalCode = null;
+			this.killed = false;
+			this.connected = false;
+			this.spawnfile = undefined;
+			this.spawnargs = [];
+			this.__raw = null;
+			this.__signal = null;
+		}
+		kill(signal = 'SIGTERM') {
+			if (this.__raw === null || this.exitCode !== null || this.signalCode !== null) return false;
+			this.__signal = typeof signal === 'string' ? signal : 'SIGTERM';
+			try {
+				this.__raw.kill(signal);
+			} catch {
+				return false;
+			}
+			this.killed = true;
+			return true;
+		}
+		ref() {
+			return this;
+		}
+		unref() {
+			return this;
+		}
+		disconnect() { }
+		send() {
+			return false;
+		}
+	}
+
+	function spawn(file, args, options) {
+		if (!Array.isArray(args)) {
+			options = args;
+			args = [];
+		}
+		options = options ?? {};
+		const { Readable, Writable } = streams();
+		const child = new ChildProcess();
+		let command = String(file);
+		let argv = args.map(String);
+		child.spawnfile = command;
+		child.spawnargs = [command, ...argv];
+		if (options.shell) {
+			const line = [command, ...argv].join(' ');
+			const words = typeof options.shell === 'string'
+				? [options.shell, ...(process.platform === 'win32' ? ['/d', '/s', '/c'] : ['-c']), line]
+				: shellWords(line);
+			command = words[0];
+			argv = words.slice(1);
+		}
+		const [inMode, outMode, errMode] = stdioModes(options);
+		const piped = (mode) => mode === 'pipe' || mode === 'overlapped';
+		const stdout = new Readable({ read() { } });
+		const stderr = new Readable({ read() { } });
+		let raw;
+		try {
+			raw = native.spawn(command, argv, { ...options, shell: false });
+		} catch (error) {
+			// Node reports a failed spawn asynchronously, on the child — the streams exist
+			// (so `child.stdout.on(...)` right after spawn works) and end at once.
+			const failure = spawnFailure(error, String(file), child.spawnargs);
+			child.stdout = piped(outMode) ? stdout : null;
+			child.stderr = piped(errMode) ? stderr : null;
+			child.stdin = piped(inMode) ? new Writable({ write: (_chunk, _encoding, callback) => callback() }) : null;
+			child.stdio = [child.stdin, child.stdout, child.stderr];
+			queueMicrotask(() => {
+				child.emit('error', failure);
+				stdout.push(null);
+				stderr.push(null);
+				child.emit('close', -2, null);
+			});
+			return child;
+		}
+		child.__raw = raw;
+		child.pid = raw.pid;
+		raw.stdout.on('data', (chunk) => stdout.push(chunk));
+		raw.stderr.on('data', (chunk) => stderr.push(chunk));
+		const ended = [stdout, stderr].map((stream) => new Promise((resolve) => stream.once('end', resolve)));
+		const stdin = new Writable({
+			write(chunk, encoding, callback) {
+				try {
+					raw.stdin.write(toBytes(chunk, encoding));
+					callback();
+				} catch (error) {
+					callback(Object.assign(new Error(`write EPIPE: ${error?.message ?? error}`), { code: 'EPIPE', errno: -32, syscall: 'write' }));
+				}
+			},
+			final(callback) {
+				try {
+					raw.stdin.end();
+				} catch { }
+				callback();
+			}
+		});
+		child.stdin = piped(inMode) ? stdin : null;
+		if (!piped(inMode)) {
+			try {
+				raw.stdin.end();
+			} catch { }
+		}
+		// Output a caller did not pipe still drains (the pipe must not fill and stall
+		// the child); it is just not surfaced.
+		child.stdout = piped(outMode) ? stdout : null;
+		child.stderr = piped(errMode) ? stderr : null;
+		if (!piped(outMode)) stdout.resume();
+		if (!piped(errMode)) stderr.resume();
+		child.stdio = [child.stdin, child.stdout, child.stderr];
+		raw.on('exit', (code) => {
+			child.exitCode = code;
+			if (code === null) child.signalCode = child.__signal ?? 'SIGTERM';
+			stdout.push(null);
+			stderr.push(null);
+			child.emit('exit', child.exitCode, child.signalCode);
+			Promise.all(ended).then(() => child.emit('close', child.exitCode, child.signalCode));
+		});
+		let timer = null;
+		if (Number(options.timeout) > 0) {
+			timer = setTimeout(() => child.kill(options.killSignal ?? 'SIGTERM'), Number(options.timeout));
+			child.once('exit', () => clearTimeout(timer));
+		}
+		const signal = options.signal;
+		if (signal) {
+			const onAbort = () => {
+				child.kill(options.killSignal ?? 'SIGTERM');
+				child.emit('error', Object.assign(new Error('The operation was aborted'), { name: 'AbortError', code: 'ABORT_ERR', cause: signal.reason }));
+			};
+			if (signal.aborted) queueMicrotask(onAbort);
+			else {
+				signal.addEventListener?.('abort', onAbort, { once: true });
+				child.once('exit', () => signal.removeEventListener?.('abort', onAbort));
+			}
+		}
+		queueMicrotask(() => child.emit('spawn'));
+		return child;
+	}
+
+	/** Node's exec / execFile: output collected, `callback(error, stdout, stderr)` on close,
+	 *  the ChildProcess returned at once. */
+	function execFile(file, args, options, callback) {
+		if (typeof args === 'function') {
+			callback = args;
+			args = [];
+			options = undefined;
+		} else if (!Array.isArray(args)) {
+			callback = typeof options === 'function' ? options : callback;
+			options = args;
+			args = [];
+		} else if (typeof options === 'function') {
+			callback = options;
+			options = undefined;
+		}
+		options = options ?? {};
+		const encoding = options.encoding === undefined ? 'utf8' : options.encoding;
+		const maxBuffer = options.maxBuffer ?? 1024 * 1024;
+		const child = spawn(file, args, { ...options, stdio: 'pipe' });
+		const out = [];
+		const err = [];
+		let size = 0;
+		let failure = null;
+		const collect = (target) => (chunk) => {
+			size += chunk.length;
+			if (size > maxBuffer && failure === null) {
+				failure = Object.assign(new RangeError('stdout maxBuffer length exceeded'), { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' });
+				child.kill();
+				return;
+			}
+			target.push(chunk);
+		};
+		child.stdout.on('data', collect(out));
+		child.stderr.on('data', collect(err));
+		child.on('error', (error) => {
+			if (failure === null) failure = error;
+		});
+		child.on('close', (code, signal) => {
+			const render = (bytes) => (encoding === 'buffer' || encoding === null ? bytes : bytes.toString(encoding));
+			const stdout = render(Buffer.concat(out));
+			const stderr = render(Buffer.concat(err));
+			let error = failure;
+			const cmd = [file, ...args].join(' ');
+			if (error === null && (code !== 0 || signal !== null)) {
+				error = Object.assign(new Error(`Command failed: ${cmd}\n${Buffer.concat(err).toString()}`), { code, killed: child.killed, signal, cmd });
+			}
+			if (error !== null) {
+				error.stdout = stdout;
+				error.stderr = stderr;
+				error.cmd ??= cmd;
+			}
+			if (typeof callback === 'function') callback(error, stdout, stderr);
+		});
+		return child;
+	}
+	function exec(command, options, callback) {
+		if (typeof options === 'function') {
+			callback = options;
+			options = undefined;
+		}
+		const words = typeof options?.shell === 'string'
+			? [options.shell, ...(process.platform === 'win32' ? ['/d', '/s', '/c'] : ['-c']), String(command)]
+			: shellWords(String(command));
+		const child = execFile(words[0], words.slice(1), { ...(options ?? {}), shell: false }, callback);
+		child.spawnargs = [words[0], ...words.slice(1)];
+		return child;
+	}
+	// util.promisify(exec / execFile) resolves `{ stdout, stderr }`, as Node defines it.
+	const custom = Symbol.for('nodejs.util.promisify.custom');
+	const promisified = (run) => (...args) => {
+		let child;
+		const promise = new Promise((resolve, reject) => {
+			child = run(...args, (error, stdout, stderr) => (error ? reject(Object.assign(error, { stdout, stderr })) : resolve({ stdout, stderr })));
+		});
+		promise.child = child;
+		return promise;
+	};
+	Object.defineProperty(execFile, custom, { value: promisified(execFile) });
+	Object.defineProperty(exec, custom, { value: promisified(exec) });
+
+	function spawnSync(file, args, options) {
+		if (!Array.isArray(args)) {
+			options = args;
+			args = [];
+		}
+		options = options ?? {};
+		let command = String(file);
+		let argv = args.map(String);
+		if (options.shell) {
+			const words = shellWords([command, ...argv].join(' '));
+			command = words[0];
+			argv = words.slice(1);
+		}
+		const encoding = options.encoding;
+		let done;
+		try {
+			done = native.spawnSync(command, argv, { ...options, shell: false });
+		} catch (error) {
+			// Node answers a failed spawnSync with `error`, never a throw.
+			done = { status: null, signal: null, stdoutBytes: [], stderrBytes: [], error: spawnFailure(error, String(file), [String(file), ...argv]) };
+		}
+		const render = (bytes) => {
+			const buffer = Buffer.from(bytes ?? []);
+			return encoding && encoding !== 'buffer' ? buffer.toString(encoding) : buffer;
+		};
+		done.stdout = render(done.stdoutBytes);
+		done.stderr = render(done.stderrBytes);
+		done.output = [null, done.stdout, done.stderr];
+		done.pid = done.pid ?? 0;
+		done.signal = done.signal ?? null;
+		delete done.stdoutBytes;
+		delete done.stderrBytes;
+		if (done.error === null) delete done.error;
+		return done;
+	}
+	function execFileSync(file, args, options) {
+		if (!Array.isArray(args)) {
+			options = args;
+			args = [];
+		}
+		const done = spawnSync(file, args, options);
+		if (done.error) throw done.error;
+		if (done.status !== 0) {
+			const cmd = [file, ...args].join(' ');
+			throw Object.assign(new Error(`Command failed: ${cmd}\n${Buffer.from(done.stderr ?? '').toString()}`), { status: done.status, signal: done.signal, stdout: done.stdout, stderr: done.stderr, output: done.output, pid: done.pid, cmd });
+		}
+		return done.stdout;
+	}
+	function execSync(command, options) {
+		const words = shellWords(String(command));
+		return execFileSync(words[0], words.slice(1), options);
+	}
 	const childProcess = {
-		spawn(file, args, options) {
-			return CP.spawn(file, Array.isArray(args) ? args : [], options ?? {});
-		},
-		spawnSync(file, args, options) {
-			const done = CP.spawnSync(file, Array.isArray(args) ? args : [], options ?? {});
-			done.stdout = Buffer.from(done.stdoutBytes ?? []);
-			done.stderr = Buffer.from(done.stderrBytes ?? []);
-			delete done.stdoutBytes;
-			delete done.stderrBytes;
-			return done;
-		},
-		execFile(file, args, options, callback) {
-			if (typeof options === 'function') {
-				callback = options;
-				options = undefined;
-			}
-			const done = childProcess.spawnSync(file, args ?? [], options ?? {});
-			const error = done.status !== 0
-				? new Error(String(done.stderr || `execFile ${file} exited with ${done.status}`))
-				: null;
-			callback?.(error, done.stdout.toString('utf8'), done.stderr.toString('utf8'));
-			return done;
-		},
-		exec(command, options, callback) {
-			if (typeof options === 'function') {
-				callback = options;
-				options = undefined;
-			}
-			const words = shellWords(command);
-			return childProcess.execFile(words[0], words.slice(1), options, callback);
-		},
-		execSync(command, options) {
-			const words = shellWords(command);
-			return childProcess.execFileSync(words[0], words.slice(1), options);
-		},
-		execFileSync(file, args, options) {
-			return childProcess.spawnSync(file, args ?? [], options ?? {}).stdout;
+		ChildProcess,
+		spawn,
+		spawnSync,
+		exec,
+		execFile,
+		execSync,
+		execFileSync,
+		fork() {
+			throw Object.assign(new Error('child_process.fork is not available in the ggs-node runtime'), { code: 'ERR_NOT_SUPPORTED' });
 		}
 	};
 	globalThis.child_process = childProcess;
@@ -1193,6 +1883,55 @@
 	define('Event', Event);
 	define('AbortSignal', AbortSignal);
 	define('AbortController', AbortController);
+
+	// DOMException (Node has it global; Boa does not): the name, the message, the legacy
+	// code table, and `instanceof Error` — AbortError is what cancellable APIs reject with.
+	const DOM_CODES = { IndexSizeError: 1, HierarchyRequestError: 3, WrongDocumentError: 4, InvalidCharacterError: 5, NoModificationAllowedError: 7, NotFoundError: 8, NotSupportedError: 9, InvalidStateError: 11, SyntaxError: 12, InvalidModificationError: 13, NamespaceError: 14, InvalidAccessError: 15, TypeMismatchError: 17, SecurityError: 18, NetworkError: 19, AbortError: 20, URLMismatchError: 21, QuotaExceededError: 22, TimeoutError: 23, InvalidNodeTypeError: 24, DataCloneError: 25 };
+	class DOMException extends Error {
+		#name;
+		constructor(message = '', options = 'Error') {
+			super(String(message));
+			const named = typeof options === 'object' && options !== null;
+			this.#name = named ? String(options.name ?? 'Error') : String(options);
+			if (named && 'cause' in options) Object.defineProperty(this, 'cause', { value: options.cause, writable: true, configurable: true });
+		}
+		get name() {
+			return this.#name;
+		}
+		get code() {
+			return DOM_CODES[this.#name] ?? 0;
+		}
+	}
+	define('DOMException', DOMException);
+
+	// FinalizationRegistry (Boa 0.21 has none; claude-code constructs one at load to drop
+	// abort listeners of collected signals). The spec lets an implementation never run
+	// cleanup callbacks — this one never does, but keeps the observable contract: the
+	// argument checks, and `unregister` answering whether a token had registrations.
+	const canBeHeldWeakly = (value) =>
+		(typeof value === 'object' && value !== null) || typeof value === 'function' || typeof value === 'symbol';
+	class FinalizationRegistry {
+		#tokens = new WeakMap();
+		constructor(cleanup) {
+			if (typeof cleanup !== 'function') throw new TypeError('FinalizationRegistry: cleanup must be callable');
+		}
+		register(target, heldValue, unregisterToken) {
+			if (!canBeHeldWeakly(target)) throw new TypeError('FinalizationRegistry.prototype.register: invalid target');
+			if (Object.is(target, heldValue)) throw new TypeError('FinalizationRegistry.prototype.register: target and holdings must not be same');
+			if (unregisterToken !== undefined) {
+				if (!canBeHeldWeakly(unregisterToken) || typeof unregisterToken === 'symbol') throw new TypeError('FinalizationRegistry.prototype.register: invalid unregister token');
+				this.#tokens.set(unregisterToken, true);
+			}
+		}
+		unregister(unregisterToken) {
+			if (!canBeHeldWeakly(unregisterToken) || typeof unregisterToken === 'symbol') throw new TypeError('FinalizationRegistry.prototype.unregister: invalid unregister token');
+			return this.#tokens.delete(unregisterToken);
+		}
+		get [Symbol.toStringTag]() {
+			return 'FinalizationRegistry';
+		}
+	}
+	define('FinalizationRegistry', FinalizationRegistry);
 
 	const started = __ggsProcessNow();
 	define('performance', {
@@ -1918,6 +2657,9 @@
 			this.__reading = false;
 			if (options.read) this._read = options.read;
 			if (options.destroy) this._destroy = options.destroy;
+			// Node's autoDestroy (the default since v14): a finished Readable destroys itself
+			// after 'end', so 'close' follows — consumers wait on it (stdout collectors).
+			this.__autoDestroy = options.autoDestroy !== false;
 		}
 		_read() { }
 		push(chunk, encoding) {
@@ -1989,13 +2731,21 @@
 		destroy(error) {
 			if (this.destroyed) return this;
 			this.destroyed = true;
-			this._destroy(error ?? null, (finalError) => {
-				tick(() => {
-					if (finalError) this.emit('error', finalError);
-					this.emit('close');
-				});
+			// Boa drops the `tick` a callback nested here closes over (the scheduled close
+			// never ran — stdout collectors waiting on 'close' hung): the close is its own
+			// method, reached through an explicit receiver.
+			const stream = this;
+			this._destroy(error ?? null, function (finalError) {
+				stream.__emitClose(finalError);
 			});
 			return this;
+		}
+		__emitClose(finalError) {
+			const stream = this;
+			Promise.resolve().then(function () {
+				if (finalError) stream.emit('error', finalError);
+				stream.emit('close');
+			});
 		}
 		_destroy(error, callback) {
 			callback(error);
@@ -2057,7 +2807,11 @@
 			if (this.__ended && this.__queue.length === 0 && !this.readableEnded) {
 				this.readableEnded = true;
 				this.readable = false;
-				tick(() => this.emit('end'));
+				tick(() => {
+					this.emit('end');
+					// A Duplex closes on its own terms (its write side may still be open).
+					if (this.__autoDestroy && !this.__isWritable) this.destroy();
+				});
 			}
 		}
 		__pull() {
@@ -2104,6 +2858,7 @@
 	};
 	const installWritable = (target, options) => {
 		target.writable = true;
+		target.__isWritable = true;
 		target.writableEnded = false;
 		target.writableFinished = false;
 		target.writableObjectMode = Boolean(options.objectMode ?? options.writableObjectMode);
@@ -2233,6 +2988,1322 @@
 	Object.assign(Stream, { Stream, Readable, Writable, Duplex, Transform, PassThrough, finished, pipeline, promises: streamPromises });
 	builtins.stream = Stream;
 	builtins['stream/promises'] = streamPromises;
+
+	/* ---------- net / http / https / fetch over real sockets (builtins/net.rs) ----------
+	 * Real TCP: a listener's accept thread and each socket's reader and writer threads
+	 * report through `__ggsNativeEvent(id, event, data, bytes)`, routed here by id. The
+	 * http server is HTTP/1.1 over those sockets — keep-alive, chunked bodies, `upgrade`
+	 * handed to the owner with the raw socket (what `ws` builds a WebSocket server on).
+	 * The client side (`http(s).request`, `fetch`) rides the native ureq client: TLS and
+	 * the system proxy included, the body streamed as it arrives. */
+	const nativeRoutes = new Map();
+	globalThis.__ggsNativeEvent = (id, event, data, bytes) => {
+		const route = nativeRoutes.get(id);
+		if (route) route(event, data, bytes);
+	};
+	const netError = (info) => Object.assign(new Error(info?.message ?? 'socket error'), { code: info?.code ?? 'EIO', syscall: info?.syscall, errno: -1 });
+	const nativeThrow = (error) => {
+		// `listen` throws "CODE|message" (see net.rs) — back into a Node-shaped error.
+		const text = String(error?.message ?? error);
+		const bar = text.indexOf('|');
+		return bar > 0 ? netError({ code: text.slice(0, bar), message: text.slice(bar + 1) }) : netError({ message: text });
+	};
+	const toBytes = (chunk, encoding) => {
+		if (typeof chunk === 'string') return Buffer.from(chunk, encoding || 'utf8');
+		if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk);
+		if (ArrayBuffer.isView(chunk)) return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+		return Buffer.from(String(chunk));
+	};
+
+	class Socket extends Duplex {
+		constructor(options = {}) {
+			super({});
+			this.__id = null;
+			this.__closedOnce = false;
+			this.__timeoutMs = 0;
+			this.__timer = null;
+			this.connecting = false;
+			this.pending = true;
+			this.allowHalfOpen = Boolean(options.allowHalfOpen);
+			this.bytesRead = 0;
+			this.bytesWritten = 0;
+			this.remoteAddress = undefined;
+			this.remotePort = undefined;
+			this.remoteFamily = undefined;
+			this.localAddress = undefined;
+			this.localPort = undefined;
+			// A socket's finish is its half-close, never its close: close comes from the
+			// reader thread once the connection is really gone.
+			this.__finishOnce = () => {
+				if (this.writableFinished) return;
+				this._final(() => {
+					this.writableFinished = true;
+					tick(() => this.emit('finish'));
+				});
+			};
+		}
+		get readyState() {
+			if (this.connecting) return 'opening';
+			if (this.readable && this.writable && !this.writableEnded) return 'open';
+			if (this.readable) return 'readOnly';
+			return this.writable && !this.writableEnded ? 'writeOnly' : 'closed';
+		}
+		__attach(id, info) {
+			this.__id = id;
+			this.__endpoints(info);
+			this.pending = false;
+			nativeRoutes.set(id, (event, data, bytes) => this.__onNative(event, data, bytes));
+		}
+		__endpoints(info) {
+			if (!info) return;
+			for (const name of ['remoteAddress', 'remotePort', 'remoteFamily', 'localAddress', 'localPort']) {
+				if (info[name] !== undefined && info[name] !== null) this[name] = info[name];
+			}
+		}
+		__onNative(event, data, bytes) {
+			switch (event) {
+				case 'connect':
+					this.connecting = false;
+					this.pending = false;
+					this.__endpoints(data);
+					this.__touch();
+					this.emit('connect');
+					this.emit('ready');
+					break;
+				case 'data':
+					this.bytesRead += bytes.length;
+					this.__touch();
+					this.push(bytes);
+					break;
+				case 'end':
+					this.push(null);
+					if (!this.allowHalfOpen && !this.writableEnded) this.end();
+					break;
+				case 'error':
+					this.destroy(netError(data));
+					break;
+				case 'close':
+					nativeRoutes.delete(this.__id);
+					this.__closed(Boolean(data?.hadError));
+					break;
+			}
+		}
+		__closed(hadError) {
+			if (this.__closedOnce) return;
+			this.__closedOnce = true;
+			this.destroyed = true;
+			this.readable = false;
+			this.writable = false;
+			this.__clearTimer();
+			tick(() => this.emit('close', hadError));
+		}
+		connect(...args) {
+			let options = {};
+			let listener;
+			if (typeof args[0] === 'object' && args[0] !== null) {
+				options = args[0];
+				listener = args[1];
+			} else {
+				options = { port: args[0], host: typeof args[1] === 'string' ? args[1] : undefined };
+				listener = typeof args[1] === 'function' ? args[1] : args[2];
+			}
+			if (typeof listener === 'function') this.once('connect', listener);
+			if (options.path !== undefined) {
+				tick(() => this.destroy(netError({ code: 'ENOTSUP', message: `connect ENOTSUP ${options.path}: IPC sockets are not available in the ggs-node runtime` })));
+				return this;
+			}
+			this.connecting = true;
+			if (options.timeout) this.setTimeout(options.timeout);
+			const id = __ggsNetConnect(String(options.host ?? 'localhost'), Number(options.port));
+			this.__attach(id, null);
+			this.pending = true;
+			return this;
+		}
+		_write(chunk, encoding, callback) {
+			if (this.destroyed) return callback(netError({ code: 'EPIPE', message: 'This socket has been ended by the other party' }));
+			const bytes = toBytes(chunk, encoding);
+			this.bytesWritten += bytes.length;
+			this.__touch();
+			if (this.__id !== null) __ggsNetWrite(this.__id, bytes);
+			callback();
+		}
+		_final(callback) {
+			if (this.__id !== null) __ggsNetEnd(this.__id);
+			callback();
+		}
+		destroy(error) {
+			if (this.destroyed) return this;
+			this.destroyed = true;
+			const attached = this.__id !== null;
+			if (attached) __ggsNetDestroy(this.__id);
+			if (error) tick(() => this.emit('error', error));
+			// A connected socket's reader reports the close; one that never got a
+			// connection (or is still dialing) closes here.
+			if (!attached || this.connecting) {
+				if (attached) nativeRoutes.delete(this.__id);
+				this.__closed(Boolean(error));
+			}
+			return this;
+		}
+		destroySoon() {
+			this.end();
+		}
+		resetAndDestroy() {
+			return this.destroy();
+		}
+		setNoDelay(flag = true) {
+			if (this.__id !== null) __ggsNetSetNoDelay(this.__id, Boolean(flag));
+			return this;
+		}
+		setKeepAlive() {
+			return this;
+		}
+		setTimeout(ms, callback) {
+			this.__timeoutMs = Number(ms) || 0;
+			if (typeof callback === 'function') {
+				if (this.__timeoutMs === 0) this.removeListener('timeout', callback);
+				else this.once('timeout', callback);
+			}
+			this.__touch();
+			return this;
+		}
+		__clearTimer() {
+			if (this.__timer !== null) clearTimeout(this.__timer);
+			this.__timer = null;
+		}
+		__touch() {
+			this.__clearTimer();
+			if (this.__timeoutMs > 0 && !this.destroyed) this.__timer = setTimeout(() => this.emit('timeout'), this.__timeoutMs);
+		}
+		address() {
+			return this.localPort === undefined ? {} : { address: this.localAddress, family: this.remoteFamily ?? 'IPv4', port: this.localPort };
+		}
+		ref() {
+			return this;
+		}
+		unref() {
+			return this;
+		}
+	}
+
+	class Server extends EventEmitter {
+		constructor(options, listener) {
+			super();
+			if (typeof options === 'function') listener = options;
+			if (typeof listener === 'function') this.on('connection', listener);
+			this.__id = null;
+			this.__address = null;
+			this.__sockets = new Set();
+			this.maxConnections = undefined;
+		}
+		get listening() {
+			return this.__id !== null;
+		}
+		listen(...args) {
+			let port = 0;
+			let host;
+			let callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined;
+			if (typeof args[0] === 'object' && args[0] !== null) {
+				port = args[0].port ?? 0;
+				host = args[0].host;
+				if (args[0].path !== undefined) {
+					tick(() => this.emit('error', netError({ code: 'ENOTSUP', message: `listen ENOTSUP ${args[0].path}: IPC servers are not available in the ggs-node runtime` })));
+					return this;
+				}
+			} else if (typeof args[0] === 'string' && !/^\d+$/.test(args[0])) {
+				tick(() => this.emit('error', netError({ code: 'ENOTSUP', message: `listen ENOTSUP ${args[0]}: IPC servers are not available in the ggs-node runtime` })));
+				return this;
+			} else {
+				port = args[0] ?? 0;
+				if (typeof args[1] === 'string') host = args[1];
+			}
+			if (callback) this.once('listening', callback);
+			let info;
+			try {
+				info = __ggsNetListen(host === undefined ? '0.0.0.0' : String(host), Number(port) || 0);
+			} catch (error) {
+				tick(() => this.emit('error', nativeThrow(error)));
+				return this;
+			}
+			this.__id = info.id;
+			this.__address = { address: info.address, family: info.family, port: info.port };
+			nativeRoutes.set(info.id, (event, data) => {
+				if (event !== 'connection') return;
+				const socket = new Socket();
+				socket.__attach(data.socket, data);
+				this.__sockets.add(socket);
+				socket.once('close', () => this.__sockets.delete(socket));
+				this.emit('connection', socket);
+			});
+			tick(() => this.emit('listening'));
+			return this;
+		}
+		address() {
+			return this.__address;
+		}
+		close(callback) {
+			if (this.__id === null) {
+				if (typeof callback === 'function') tick(() => callback(Object.assign(new Error('Server is not running.'), { code: 'ERR_SERVER_NOT_RUNNING' })));
+				return this;
+			}
+			nativeRoutes.delete(this.__id);
+			__ggsNetCloseServer(this.__id);
+			this.__id = null;
+			if (typeof callback === 'function') this.once('close', callback);
+			tick(() => this.emit('close'));
+			return this;
+		}
+		getConnections(callback) {
+			tick(() => callback(null, this.__sockets.size));
+			return this;
+		}
+		ref() {
+			return this;
+		}
+		unref() {
+			return this;
+		}
+	}
+
+	const net = builtins.net;
+	const createConnection = (...args) => new Socket(typeof args[0] === 'object' && args[0] !== null ? args[0] : {}).connect(...args);
+	Object.assign(net, {
+		Socket,
+		Stream: Socket,
+		Server,
+		createServer: (options, listener) => new Server(options, listener),
+		connect: createConnection,
+		createConnection
+	});
+
+	/* http — the server over net.Server; the client over the native request. */
+	const STATUS_CODES = {
+		100: 'Continue', 101: 'Switching Protocols', 200: 'OK', 201: 'Created', 202: 'Accepted', 204: 'No Content',
+		206: 'Partial Content', 301: 'Moved Permanently', 302: 'Found', 303: 'See Other', 304: 'Not Modified',
+		307: 'Temporary Redirect', 308: 'Permanent Redirect', 400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden',
+		404: 'Not Found', 405: 'Method Not Allowed', 406: 'Not Acceptable', 408: 'Request Timeout', 409: 'Conflict',
+		410: 'Gone', 411: 'Length Required', 413: 'Payload Too Large', 415: 'Unsupported Media Type', 426: 'Upgrade Required',
+		429: 'Too Many Requests', 500: 'Internal Server Error', 501: 'Not Implemented', 502: 'Bad Gateway',
+		503: 'Service Unavailable', 504: 'Gateway Timeout'
+	};
+	const METHODS = ['DELETE', 'GET', 'HEAD', 'OPTIONS', 'PATCH', 'POST', 'PUT', 'CONNECT', 'TRACE'];
+	/** Raw header pairs → Node's `headers` object: lower-cased names, `set-cookie` an
+	 *  array, other repeats joined with ", ". */
+	const headerObject = (pairs) => {
+		const headers = {};
+		for (const [rawName, value] of pairs) {
+			const name = rawName.toLowerCase();
+			if (name === 'set-cookie') (headers[name] ??= []).push(value);
+			else if (headers[name] === undefined) headers[name] = value;
+			else headers[name] += ', ' + value;
+		}
+		return headers;
+	};
+
+	class IncomingMessage extends Readable {
+		constructor(socket) {
+			super({});
+			this.socket = socket;
+			this.connection = socket;
+			this.headers = {};
+			this.rawHeaders = [];
+			this.trailers = {};
+			this.rawTrailers = [];
+			this.method = undefined;
+			this.url = '';
+			this.statusCode = undefined;
+			this.statusMessage = undefined;
+			this.httpVersion = '1.1';
+			this.httpVersionMajor = 1;
+			this.httpVersionMinor = 1;
+			this.complete = false;
+			this.aborted = false;
+		}
+		setTimeout(ms, callback) {
+			this.socket?.setTimeout?.(ms, callback);
+			return this;
+		}
+	}
+
+	/** Find `\r\n\r\n` (or `\r\n` when `double` is false) in `bytes` from `from`. */
+	const findBreak = (bytes, from, double) => {
+		for (let at = from; at + (double ? 3 : 1) < bytes.length; at += 1) {
+			if (bytes[at] === 13 && bytes[at + 1] === 10 && (!double || (bytes[at + 2] === 13 && bytes[at + 3] === 10))) return at;
+		}
+		return -1;
+	};
+	const joinBytes = (a, b) => {
+		if (a.length === 0) return b;
+		const out = new Buffer(a.length + b.length);
+		out.set(a, 0);
+		out.set(b, a.length);
+		return out;
+	};
+
+	class ServerResponse extends Writable {
+		constructor(req, socket, keepAlive) {
+			super({});
+			this.req = req;
+			this.socket = socket;
+			this.connection = socket;
+			this.statusCode = 200;
+			this.statusMessage = undefined;
+			this.headersSent = false;
+			this.finished = false;
+			this.sendDate = true;
+			this.__headers = new Map();
+			this.__keepAlive = keepAlive;
+			this.__chunked = false;
+			this.__noBody = false;
+		}
+		setHeader(name, value) {
+			if (this.headersSent) throw Object.assign(new Error('Cannot set headers after they are sent to the client'), { code: 'ERR_HTTP_HEADERS_SENT' });
+			this.__headers.set(String(name).toLowerCase(), [String(name), value]);
+			return this;
+		}
+		appendHeader(name, value) {
+			const current = this.getHeader(name);
+			if (current === undefined) return this.setHeader(name, value);
+			return this.setHeader(name, [].concat(current, value));
+		}
+		getHeader(name) {
+			return this.__headers.get(String(name).toLowerCase())?.[1];
+		}
+		getHeaders() {
+			const out = {};
+			for (const [key, [, value]] of this.__headers) out[key] = value;
+			return out;
+		}
+		getHeaderNames() {
+			return [...this.__headers.keys()];
+		}
+		hasHeader(name) {
+			return this.__headers.has(String(name).toLowerCase());
+		}
+		removeHeader(name) {
+			this.__headers.delete(String(name).toLowerCase());
+		}
+		writeHead(status, message, headers) {
+			if (typeof message !== 'string') {
+				headers = message;
+				message = undefined;
+			}
+			this.statusCode = Number(status);
+			if (message !== undefined) this.statusMessage = message;
+			if (Array.isArray(headers)) {
+				if (Array.isArray(headers[0])) for (const [name, value] of headers) this.setHeader(name, value);
+				else for (let at = 0; at + 1 < headers.length; at += 2) this.setHeader(headers[at], headers[at + 1]);
+			} else if (headers) {
+				for (const [name, value] of Object.entries(headers)) if (value !== undefined) this.setHeader(name, value);
+			}
+			this.__sendHead();
+			return this;
+		}
+		flushHeaders() {
+			this.__sendHead();
+		}
+		writeContinue() {
+			this.socket.write('HTTP/1.1 100 Continue\r\n\r\n', 'latin1');
+		}
+		addTrailers() { }
+		setTimeout(ms, callback) {
+			this.socket?.setTimeout?.(ms, callback);
+			return this;
+		}
+		__sendHead(bodyLength) {
+			if (this.headersSent) return;
+			this.headersSent = true;
+			const headers = this.__headers;
+			const status = this.statusCode;
+			const noBody = status === 204 || status === 304 || (status >= 100 && status < 200);
+			if (this.sendDate && !headers.has('date')) headers.set('date', ['Date', new Date().toUTCString()]);
+			const encoding = String(headers.get('transfer-encoding')?.[1] ?? '');
+			if (/chunked/i.test(encoding)) this.__chunked = true;
+			else if (!noBody && !headers.has('content-length')) {
+				if (bodyLength !== undefined) headers.set('content-length', ['Content-Length', String(bodyLength)]);
+				else {
+					headers.set('transfer-encoding', ['Transfer-Encoding', 'chunked']);
+					this.__chunked = true;
+				}
+			}
+			const connection = headers.get('connection')?.[1];
+			if (connection === undefined) {
+				if (status !== 101) headers.set('connection', ['Connection', this.__keepAlive ? 'keep-alive' : 'close']);
+			} else if (/close/i.test(String(connection))) this.__keepAlive = false;
+			let head = `HTTP/1.1 ${status} ${this.statusMessage ?? STATUS_CODES[status] ?? 'Unknown'}\r\n`;
+			for (const [, [name, value]] of headers) {
+				for (const one of Array.isArray(value) ? value : [value]) head += `${name}: ${one}\r\n`;
+			}
+			this.socket.write(head + '\r\n', 'utf8');
+			this.__noBody = noBody || this.req?.method === 'HEAD';
+		}
+		write(chunk, encoding, callback) {
+			const done = typeof encoding === 'function' ? encoding : callback;
+			if (this.finished) {
+				const error = Object.assign(new Error('write after end'), { code: 'ERR_STREAM_WRITE_AFTER_END' });
+				tick(() => (done ? done(error) : this.emit('error', error)));
+				return false;
+			}
+			this.__sendHead();
+			const bytes = toBytes(chunk, typeof encoding === 'string' ? encoding : undefined);
+			if (!this.__noBody && bytes.length > 0) {
+				if (this.__chunked) {
+					this.socket.write(bytes.length.toString(16) + '\r\n', 'latin1');
+					this.socket.write(bytes);
+					this.socket.write('\r\n', 'latin1');
+				} else this.socket.write(bytes);
+			}
+			if (done) tick(() => done(null));
+			return true;
+		}
+		end(chunk, encoding, callback) {
+			if (typeof chunk === 'function') {
+				callback = chunk;
+				chunk = undefined;
+			} else if (typeof encoding === 'function') {
+				callback = encoding;
+				encoding = undefined;
+			}
+			if (this.finished) {
+				if (typeof callback === 'function') tick(callback);
+				return this;
+			}
+			if (!this.headersSent) {
+				const bytes = chunk === undefined || chunk === null ? new Uint8Array(0) : toBytes(chunk, encoding);
+				this.__sendHead(bytes.length);
+				if (!this.__noBody && bytes.length > 0) {
+					if (this.__chunked) this.write(bytes);
+					else this.socket.write(bytes);
+				}
+			} else if (chunk !== undefined && chunk !== null) this.write(chunk, encoding);
+			if (this.__chunked && !this.__noBody) this.socket.write('0\r\n\r\n', 'latin1');
+			this.finished = true;
+			this.writableEnded = true;
+			tick(() => {
+				this.writableFinished = true;
+				this.emit('finish');
+				if (typeof callback === 'function') callback();
+				this.emit('close');
+			});
+			return this;
+		}
+	}
+
+	/** One connection's HTTP/1.1 server loop: parse a request head, frame its body
+	 *  (Content-Length or chunked), answer in order (the next request waits for the
+	 *  current response to finish), and hand an Upgrade over with the raw socket. */
+	const serveHttp = (server, socket) => {
+		let buffer = new Uint8Array(0);
+		let busy = false;
+		let body = null; // { req, remaining, chunked, chunkLeft, trailer }
+		const onData = (chunk) => {
+			buffer = joinBytes(buffer, chunk);
+			pump();
+		};
+		const fail = (status) => {
+			try {
+				socket.write(`HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`, 'latin1');
+			} catch { }
+			socket.end();
+		};
+		const pump = () => {
+			while (true) {
+				if (body !== null) {
+					if (!pumpBody()) return;
+					continue;
+				}
+				if (busy) return;
+				const end = findBreak(buffer, 0, true);
+				if (end < 0) {
+					if (buffer.length > 80 * 1024) fail(431);
+					return;
+				}
+				const head = Buffer.from(buffer.subarray(0, end)).toString('latin1');
+				buffer = buffer.subarray(end + 4);
+				const lines = head.split('\r\n');
+				const requestLine = /^([A-Z]+) (\S+) HTTP\/(\d)\.(\d)$/.exec(lines[0]);
+				if (!requestLine) return fail(400);
+				const req = new IncomingMessage(socket);
+				req.method = requestLine[1];
+				req.url = requestLine[2];
+				req.httpVersionMajor = Number(requestLine[3]);
+				req.httpVersionMinor = Number(requestLine[4]);
+				req.httpVersion = `${req.httpVersionMajor}.${req.httpVersionMinor}`;
+				const pairs = [];
+				for (const line of lines.slice(1)) {
+					const colon = line.indexOf(':');
+					if (colon <= 0) continue;
+					const name = line.slice(0, colon).trim();
+					const value = line.slice(colon + 1).trim();
+					pairs.push([name, value]);
+					req.rawHeaders.push(name, value);
+				}
+				req.headers = headerObject(pairs);
+				const connection = String(req.headers.connection ?? '');
+				const upgrade = req.headers.upgrade !== undefined && /\bupgrade\b/i.test(connection);
+				const event = req.method === 'CONNECT' ? 'connect' : upgrade ? 'upgrade' : null;
+				if (event !== null && server.listenerCount(event) > 0) {
+					// The socket is the owner's now (a WebSocket server takes it over).
+					socket.removeListener('data', onData);
+					const rest = Buffer.from(buffer);
+					buffer = new Uint8Array(0);
+					req.complete = true;
+					req.push(null);
+					server.emit(event, req, socket, rest);
+					return;
+				}
+				const keepAlive = req.httpVersionMinor >= 1 ? !/\bclose\b/i.test(connection) : /\bkeep-alive\b/i.test(connection);
+				const res = new ServerResponse(req, socket, keepAlive);
+				busy = true;
+				res.once('finish', () => {
+					busy = false;
+					if (!res.__keepAlive) socket.end();
+					else tick(pump);
+				});
+				const chunked = /\bchunked\b/i.test(String(req.headers['transfer-encoding'] ?? ''));
+				const length = Number(req.headers['content-length'] ?? 0) || 0;
+				if (chunked || length > 0) body = { req, remaining: length, chunked, chunkLeft: -1, trailer: false };
+				else {
+					req.complete = true;
+					req.push(null);
+				}
+				if (/100-continue/i.test(String(req.headers.expect ?? '')) && server.listenerCount('checkContinue') > 0) server.emit('checkContinue', req, res);
+				else {
+					if (/100-continue/i.test(String(req.headers.expect ?? ''))) res.writeContinue();
+					server.emit('request', req, res);
+				}
+			}
+		};
+		/** Feed the current request's body; true when it completed (the loop continues). */
+		const pumpBody = () => {
+			const { req } = body;
+			if (!body.chunked) {
+				if (buffer.length === 0) return false;
+				const take = Math.min(body.remaining, buffer.length);
+				req.push(Buffer.from(buffer.subarray(0, take)));
+				buffer = buffer.subarray(take);
+				body.remaining -= take;
+				if (body.remaining > 0) return false;
+			} else {
+				while (true) {
+					if (body.trailer) {
+						const end = findBreak(buffer, 0, false);
+						if (end < 0) return false;
+						const line = Buffer.from(buffer.subarray(0, end)).toString('latin1');
+						buffer = buffer.subarray(end + 2);
+						if (line === '') break;
+						continue;
+					}
+					if (body.chunkLeft < 0) {
+						const end = findBreak(buffer, 0, false);
+						if (end < 0) return false;
+						const size = parseInt(Buffer.from(buffer.subarray(0, end)).toString('latin1'), 16);
+						buffer = buffer.subarray(end + 2);
+						if (!Number.isFinite(size)) {
+							fail(400);
+							return false;
+						}
+						if (size === 0) {
+							body.trailer = true;
+							continue;
+						}
+						body.chunkLeft = size;
+					}
+					if (body.chunkLeft > 0) {
+						if (buffer.length === 0) return false;
+						const take = Math.min(body.chunkLeft, buffer.length);
+						req.push(Buffer.from(buffer.subarray(0, take)));
+						buffer = buffer.subarray(take);
+						body.chunkLeft -= take;
+						if (body.chunkLeft > 0) return false;
+					}
+					if (buffer.length < 2) return false;
+					buffer = buffer.subarray(2); // the chunk's CRLF
+					body.chunkLeft = -1;
+				}
+			}
+			req.complete = true;
+			req.push(null);
+			body = null;
+			return true;
+		};
+		socket.on('data', onData);
+		socket.on('error', (error) => server.emit('clientError', error, socket));
+	};
+
+	class HttpServer extends Server {
+		constructor(options, listener) {
+			if (typeof options === 'function') {
+				listener = options;
+				options = {};
+			}
+			super();
+			this.timeout = 0;
+			this.keepAliveTimeout = 5000;
+			this.headersTimeout = 60000;
+			this.requestTimeout = 300000;
+			this.maxHeadersCount = null;
+			if (typeof listener === 'function') this.on('request', listener);
+			this.on('connection', (socket) => serveHttp(this, socket));
+		}
+		setTimeout(ms, callback) {
+			this.timeout = Number(ms) || 0;
+			if (typeof callback === 'function') this.on('timeout', callback);
+			return this;
+		}
+		closeAllConnections() {
+			for (const socket of this.__sockets) socket.destroy();
+		}
+		closeIdleConnections() { }
+	}
+
+	/* The client: `http(s).request` / `get` over `__ggsHttpRequest`. The request body
+	 * is collected and sent at `end()`; the response streams. */
+	class Agent extends EventEmitter {
+		constructor(options = {}) {
+			super();
+			this.options = options;
+			this.keepAlive = Boolean(options.keepAlive);
+			this.maxSockets = options.maxSockets ?? Infinity;
+			this.sockets = {};
+			this.requests = {};
+			this.freeSockets = {};
+		}
+		destroy() { }
+	}
+	const requestSpec = (defaultProtocol, args) => {
+		let url;
+		let options = {};
+		let callback;
+		for (const arg of args) {
+			if (typeof arg === 'function') callback = arg;
+			else if (typeof arg === 'string' || arg instanceof URL) url = String(arg);
+			else if (arg && typeof arg === 'object') options = { ...options, ...arg };
+		}
+		if (url === undefined) {
+			const protocol = options.protocol ?? defaultProtocol;
+			const host = options.hostname ?? (options.host ? String(options.host).replace(/:\d+$/, '') : 'localhost');
+			const port = options.port ? `:${options.port}` : '';
+			url = `${protocol}//${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}${port}${options.path ?? '/'}`;
+		}
+		return { url, options, callback };
+	};
+	class ClientRequest extends Writable {
+		constructor(defaultProtocol, args) {
+			super({});
+			const { url, options, callback } = requestSpec(defaultProtocol, args);
+			this.__url = url;
+			this.method = String(options.method ?? 'GET').toUpperCase();
+			this.path = options.path ?? new URL(url).pathname;
+			this.host = options.hostname ?? options.host;
+			this.protocol = defaultProtocol;
+			this.__headers = new Map();
+			this.__chunks = [];
+			this.__id = null;
+			this.__timeoutMs = options.timeout ?? 0;
+			this.__timer = null;
+			this.__signal = options.signal;
+			this.aborted = false;
+			this.destroyed = false;
+			this.finished = false;
+			this.headersSent = false;
+			this.reusedSocket = false;
+			const headers = options.headers;
+			if (Array.isArray(headers)) for (let at = 0; at + 1 < headers.length; at += 2) this.setHeader(headers[at], headers[at + 1]);
+			else if (headers) for (const [name, value] of Object.entries(headers)) if (value !== undefined) this.setHeader(name, value);
+			if (options.auth && !this.hasHeader('authorization')) this.setHeader('Authorization', 'Basic ' + Buffer.from(String(options.auth)).toString('base64'));
+			if (typeof callback === 'function') this.once('response', callback);
+			if (this.__signal) {
+				if (this.__signal.aborted) tick(() => this.destroy(this.__abortError()));
+				else this.__signal.addEventListener?.('abort', () => this.destroy(this.__abortError()));
+			}
+			// Libraries wait for 'socket' to arm their own timeouts; the native client
+			// has no socket object, so a stand-in carries the calls they make on it.
+			this.socket = Object.assign(new EventEmitter(), {
+				setTimeout: (ms, cb) => this.setTimeout(ms, cb),
+				setNoDelay: () => undefined,
+				setKeepAlive: () => undefined,
+				destroy: (error) => this.destroy(error),
+				ref: () => undefined,
+				unref: () => undefined,
+				remoteAddress: undefined
+			});
+			this.connection = this.socket;
+			tick(() => this.emit('socket', this.socket));
+		}
+		__abortError() {
+			return Object.assign(new Error('The operation was aborted'), { name: 'AbortError', code: 'ABORT_ERR' });
+		}
+		setHeader(name, value) {
+			this.__headers.set(String(name).toLowerCase(), [String(name), value]);
+			return this;
+		}
+		getHeader(name) {
+			return this.__headers.get(String(name).toLowerCase())?.[1];
+		}
+		getHeaders() {
+			const out = {};
+			for (const [key, [, value]] of this.__headers) out[key] = value;
+			return out;
+		}
+		getHeaderNames() {
+			return [...this.__headers.keys()];
+		}
+		hasHeader(name) {
+			return this.__headers.has(String(name).toLowerCase());
+		}
+		removeHeader(name) {
+			this.__headers.delete(String(name).toLowerCase());
+		}
+		flushHeaders() { }
+		setNoDelay() { }
+		setSocketKeepAlive() { }
+		setTimeout(ms, callback) {
+			this.__timeoutMs = Number(ms) || 0;
+			if (typeof callback === 'function') this.once('timeout', callback);
+			this.__arm();
+			return this;
+		}
+		__arm() {
+			if (this.__timer !== null) clearTimeout(this.__timer);
+			this.__timer = null;
+			if (this.__timeoutMs > 0 && this.__id !== null && !this.destroyed) this.__timer = setTimeout(() => this.emit('timeout'), this.__timeoutMs);
+		}
+		write(chunk, encoding, callback) {
+			const done = typeof encoding === 'function' ? encoding : callback;
+			this.__chunks.push(toBytes(chunk, typeof encoding === 'string' ? encoding : undefined));
+			if (done) tick(() => done(null));
+			return true;
+		}
+		end(chunk, encoding, callback) {
+			if (typeof chunk === 'function') {
+				callback = chunk;
+				chunk = undefined;
+			} else if (typeof encoding === 'function') {
+				callback = encoding;
+				encoding = undefined;
+			}
+			if (this.finished) return this;
+			if (chunk !== undefined && chunk !== null) this.write(chunk, encoding);
+			this.finished = true;
+			this.writableEnded = true;
+			this.headersSent = true;
+			if (typeof callback === 'function') this.once('finish', callback);
+			if (this.destroyed) return this;
+			let total = 0;
+			for (const part of this.__chunks) total += part.length;
+			const body = new Buffer(total);
+			let at = 0;
+			for (const part of this.__chunks) {
+				body.set(part, at);
+				at += part.length;
+			}
+			const headers = [];
+			for (const [, [name, value]] of this.__headers) for (const one of Array.isArray(value) ? value : [value]) headers.push([name, String(one)]);
+			let response = null;
+			this.__id = __ggsHttpRequest({ method: this.method, url: this.__url, headers }, total > 0 || !['GET', 'HEAD'].includes(this.method) ? body : undefined);
+			this.__arm();
+			nativeRoutes.set(this.__id, (event, data, bytes) => {
+				this.__arm();
+				if (event === 'response') {
+					response = new IncomingMessage(this.socket);
+					response.statusCode = data.status;
+					response.statusMessage = data.statusText || STATUS_CODES[data.status] || '';
+					response.headers = headerObject(data.headers);
+					response.rawHeaders = data.headers.flat();
+					response.req = this;
+					this.res = response;
+					this.emit('response', response);
+				} else if (event === 'data') {
+					response?.push(bytes);
+				} else if (event === 'end') {
+					nativeRoutes.delete(this.__id);
+					this.__timeoutMs = 0;
+					this.__arm();
+					if (response) {
+						response.complete = true;
+						response.push(null);
+					}
+					tick(() => this.emit('close'));
+				} else if (event === 'error') {
+					nativeRoutes.delete(this.__id);
+					this.__timeoutMs = 0;
+					this.__arm();
+					this.destroy(netError(data));
+				}
+			});
+			tick(() => this.emit('finish'));
+			return this;
+		}
+		abort() {
+			if (this.aborted) return;
+			this.aborted = true;
+			this.emit('abort');
+			this.destroy();
+		}
+		destroy(error) {
+			if (this.destroyed) return this;
+			this.destroyed = true;
+			if (this.__id !== null) {
+				__ggsHttpAbort(this.__id);
+				nativeRoutes.delete(this.__id);
+			}
+			if (this.__timer !== null) clearTimeout(this.__timer);
+			const response = this.res;
+			tick(() => {
+				if (error) {
+					if (response && !response.complete) {
+						response.aborted = true;
+						response.destroy(error);
+					} else this.emit('error', error);
+				} else if (response && !response.complete) {
+					response.aborted = true;
+					response.emit('aborted');
+					response.destroy();
+				}
+				this.emit('close');
+			});
+			return this;
+		}
+	}
+	const httpModule = (protocol) => {
+		const request = (...args) => new ClientRequest(protocol, args);
+		const get = (...args) => {
+			const req = request(...args);
+			req.end();
+			return req;
+		};
+		const globalAgent = new Agent({ keepAlive: true });
+		const createServer = protocol === 'https:'
+			? () => {
+				const server = new HttpServer();
+				server.listen = () => {
+					tick(() => server.emit('error', Object.assign(new Error('TLS servers are not available in the ggs-node runtime'), { code: 'ERR_NOT_SUPPORTED' })));
+					return server;
+				};
+				return server;
+			}
+			: (options, listener) => new HttpServer(options, listener);
+		return {
+			Agent,
+			globalAgent,
+			ClientRequest,
+			IncomingMessage,
+			OutgoingMessage: Writable,
+			Server: HttpServer,
+			ServerResponse,
+			STATUS_CODES,
+			METHODS,
+			maxHeaderSize: 16384,
+			createServer,
+			request,
+			get,
+			validateHeaderName: (name) => {
+				if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(String(name))) throw Object.assign(new TypeError(`Header name must be a valid HTTP token ["${name}"]`), { code: 'ERR_INVALID_HTTP_TOKEN' });
+			},
+			validateHeaderValue: (name, value) => {
+				if (value === undefined) throw Object.assign(new TypeError(`Invalid value "undefined" for header "${name}"`), { code: 'ERR_HTTP_INVALID_HEADER_VALUE' });
+			}
+		};
+	};
+	globalThis.http = httpModule('http:');
+	globalThis.https = httpModule('https:');
+
+	/* fetch — WHATWG's shape over the same native client: Headers, Request, Response and a
+	 * streaming body (a ReadableStream where the engine has none of its own). */
+	if (typeof globalThis.ReadableStream === 'undefined') {
+		class ReadableStreamDefaultReader {
+			constructor(stream) {
+				this.__stream = stream;
+				stream.__locked = true;
+				this.closed = stream.__closed.promise;
+			}
+			read() {
+				return this.__stream.__read();
+			}
+			releaseLock() {
+				this.__stream.__locked = false;
+			}
+			cancel(reason) {
+				return this.__stream.cancel(reason);
+			}
+		}
+		class ReadableStream {
+			constructor(source = {}) {
+				this.__queue = [];
+				this.__waiters = [];
+				this.__done = false;
+				this.__error = null;
+				this.__locked = false;
+				this.__source = source;
+				let settle;
+				this.__closed = { promise: new Promise((resolve) => (settle = resolve)), settle };
+				const controller = {
+					enqueue: (chunk) => {
+						if (this.__done) return;
+						const waiter = this.__waiters.shift();
+						if (waiter) waiter.resolve({ value: chunk, done: false });
+						else this.__queue.push(chunk);
+					},
+					close: () => {
+						if (this.__done) return;
+						this.__done = true;
+						for (const waiter of this.__waiters.splice(0)) waiter.resolve({ value: undefined, done: true });
+						this.__closed.settle();
+					},
+					error: (error) => {
+						if (this.__done) return;
+						this.__done = true;
+						this.__error = error;
+						for (const waiter of this.__waiters.splice(0)) waiter.reject(error);
+						this.__closed.settle();
+					},
+					get desiredSize() {
+						return 1;
+					}
+				};
+				this.__controller = controller;
+				try {
+					const started = source.start?.(controller);
+					if (started && typeof started.then === 'function') started.catch((error) => controller.error(error));
+				} catch (error) {
+					controller.error(error);
+				}
+			}
+			get locked() {
+				return this.__locked;
+			}
+			__read() {
+				if (this.__queue.length > 0) return Promise.resolve({ value: this.__queue.shift(), done: false });
+				if (this.__error !== null) return Promise.reject(this.__error);
+				if (this.__done) return Promise.resolve({ value: undefined, done: true });
+				const pending = new Promise((resolve, reject) => this.__waiters.push({ resolve, reject }));
+				if (this.__source.pull) {
+					try {
+						const pulled = this.__source.pull(this.__controller);
+						if (pulled && typeof pulled.then === 'function') pulled.catch((error) => this.__controller.error(error));
+					} catch (error) {
+						this.__controller.error(error);
+					}
+				}
+				return pending;
+			}
+			getReader() {
+				if (this.__locked) throw new TypeError('ReadableStream is locked');
+				return new ReadableStreamDefaultReader(this);
+			}
+			cancel(reason) {
+				this.__queue.length = 0;
+				this.__controller.close();
+				return Promise.resolve(this.__source.cancel?.(reason));
+			}
+			async *[Symbol.asyncIterator]() {
+				const reader = this.getReader();
+				try {
+					while (true) {
+						const { value, done } = await reader.read();
+						if (done) return;
+						yield value;
+					}
+				} finally {
+					reader.releaseLock();
+				}
+			}
+			async pipeTo(destination) {
+				const writer = destination.getWriter ? destination.getWriter() : destination;
+				for await (const chunk of this) await writer.write(chunk);
+				await writer.close?.();
+			}
+			tee() {
+				const chunks = [];
+				const reader = this.getReader();
+				const branch = () => {
+					let at = 0;
+					return new ReadableStream({
+						pull: async (controller) => {
+							while (at >= chunks.length) {
+								const { value, done } = await reader.read();
+								if (done) return controller.close();
+								chunks.push(value);
+							}
+							controller.enqueue(chunks[at++]);
+						}
+					});
+				};
+				return [branch(), branch()];
+			}
+			static from(iterable) {
+				const iterator = (iterable[Symbol.asyncIterator] ?? iterable[Symbol.iterator]).call(iterable);
+				return new ReadableStream({
+					pull: async (controller) => {
+						const { value, done } = await iterator.next();
+						if (done) controller.close();
+						else controller.enqueue(value);
+					}
+				});
+			}
+		}
+		globalThis.ReadableStream = ReadableStream;
+		globalThis.ReadableStreamDefaultReader = ReadableStreamDefaultReader;
+	}
+	if (typeof globalThis.Headers === 'undefined') {
+		class Headers {
+			constructor(init) {
+				this.__map = new Map();
+				if (init instanceof Headers) init.forEach((value, name) => this.append(name, value));
+				else if (Array.isArray(init)) for (const [name, value] of init) this.append(name, value);
+				else if (init && typeof init === 'object') {
+					if (typeof init[Symbol.iterator] === 'function') for (const [name, value] of init) this.append(name, value);
+					else for (const [name, value] of Object.entries(init)) this.append(name, value);
+				}
+			}
+			append(name, value) {
+				const key = String(name).toLowerCase();
+				const list = this.__map.get(key);
+				if (list) list.push(String(value));
+				else this.__map.set(key, [String(value)]);
+			}
+			set(name, value) {
+				this.__map.set(String(name).toLowerCase(), [String(value)]);
+			}
+			get(name) {
+				const list = this.__map.get(String(name).toLowerCase());
+				if (!list) return null;
+				return String(name).toLowerCase() === 'set-cookie' ? list.join(', ') : list.join(', ');
+			}
+			getSetCookie() {
+				return [...(this.__map.get('set-cookie') ?? [])];
+			}
+			has(name) {
+				return this.__map.has(String(name).toLowerCase());
+			}
+			delete(name) {
+				this.__map.delete(String(name).toLowerCase());
+			}
+			forEach(visitor, self) {
+				for (const [name, value] of this.entries()) visitor.call(self, value, name, this);
+			}
+			*entries() {
+				for (const key of [...this.__map.keys()].sort()) yield [key, this.get(key)];
+			}
+			*keys() {
+				for (const [key] of this.entries()) yield key;
+			}
+			*values() {
+				for (const [, value] of this.entries()) yield value;
+			}
+			[Symbol.iterator]() {
+				return this.entries();
+			}
+		}
+		globalThis.Headers = Headers;
+	}
+	const bodyBytes = async (body) => {
+		if (body === undefined || body === null) return undefined;
+		if (typeof body === 'string') return Buffer.from(body, 'utf8');
+		if (body instanceof URLSearchParams) return Buffer.from(body.toString(), 'utf8');
+		if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) return toBytes(body);
+		if (typeof body.arrayBuffer === 'function') return new Uint8Array(await body.arrayBuffer());
+		if (typeof body.getReader === 'function' || typeof body[Symbol.asyncIterator] === 'function') {
+			const parts = [];
+			for await (const chunk of body) parts.push(toBytes(chunk));
+			return Buffer.concat(parts);
+		}
+		return Buffer.from(String(body), 'utf8');
+	};
+	const bodyContentType = (body) => {
+		if (typeof body === 'string') return 'text/plain;charset=UTF-8';
+		if (body instanceof URLSearchParams) return 'application/x-www-form-urlencoded;charset=UTF-8';
+		return null;
+	};
+	class Body {
+		__initBody(body) {
+			this.__body = body;
+			this.bodyUsed = false;
+		}
+		get body() {
+			if (this.__body === null || this.__body === undefined) return null;
+			if (this.__body instanceof ReadableStream) return this.__body;
+			const bytes = this.__body;
+			this.__body = new ReadableStream({
+				start: async (controller) => {
+					controller.enqueue(await bodyBytes(bytes));
+					controller.close();
+				}
+			});
+			return this.__body;
+		}
+		async arrayBuffer() {
+			const bytes = await this.__consume();
+			return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+		}
+		async bytes() {
+			return new Uint8Array(await this.__consume());
+		}
+		async text() {
+			return Buffer.from(await this.__consume()).toString('utf8');
+		}
+		async json() {
+			return JSON.parse(await this.text());
+		}
+		async blob() {
+			const bytes = await this.__consume();
+			if (typeof Blob === 'function') return new Blob([bytes], { type: this.headers.get('content-type') ?? '' });
+			return { size: bytes.length, type: this.headers.get('content-type') ?? '', arrayBuffer: async () => bytes.buffer, text: async () => Buffer.from(bytes).toString('utf8') };
+		}
+		async formData() {
+			throw new TypeError('Response.formData is not available in the ggs-node runtime');
+		}
+		async __consume() {
+			if (this.bodyUsed) throw new TypeError('Body is unusable: Body has already been read');
+			this.bodyUsed = true;
+			const body = this.__body;
+			if (body === null || body === undefined) return new Uint8Array(0);
+			if (!(body instanceof ReadableStream)) return (await bodyBytes(body)) ?? new Uint8Array(0);
+			const parts = [];
+			const reader = body.getReader();
+			while (true) {
+				const { value, done } = await reader.read();
+				if (done) break;
+				parts.push(toBytes(value));
+			}
+			return Buffer.concat(parts);
+		}
+	}
+	if (typeof globalThis.Request === 'undefined') {
+		class Request extends Body {
+			constructor(input, init = {}) {
+				super();
+				const base = input instanceof Request ? input : null;
+				this.url = base ? base.url : String(input);
+				this.method = String(init.method ?? base?.method ?? 'GET').toUpperCase();
+				this.headers = new Headers(init.headers ?? base?.headers);
+				this.signal = init.signal ?? base?.signal ?? null;
+				this.redirect = init.redirect ?? base?.redirect ?? 'follow';
+				this.credentials = init.credentials ?? 'same-origin';
+				this.mode = init.mode ?? 'cors';
+				this.cache = init.cache ?? 'default';
+				this.keepalive = Boolean(init.keepalive);
+				this.__initBody(init.body ?? base?.__body ?? null);
+				const type = bodyContentType(init.body);
+				if (type && !this.headers.has('content-type')) this.headers.set('content-type', type);
+			}
+			clone() {
+				return new Request(this);
+			}
+		}
+		globalThis.Request = Request;
+	}
+	if (typeof globalThis.Response === 'undefined') {
+		class Response extends Body {
+			constructor(body = null, init = {}) {
+				super();
+				this.status = init.status ?? 200;
+				this.statusText = init.statusText ?? '';
+				this.headers = new Headers(init.headers);
+				this.url = init.url ?? '';
+				this.redirected = false;
+				this.type = 'default';
+				this.__initBody(body);
+				const type = bodyContentType(body);
+				if (type && !this.headers.has('content-type')) this.headers.set('content-type', type);
+			}
+			get ok() {
+				return this.status >= 200 && this.status < 300;
+			}
+			clone() {
+				if (this.bodyUsed) throw new TypeError('Response.clone: Body has already been consumed');
+				const body = this.body;
+				let copy = null;
+				if (body) {
+					const [a, b] = body.tee();
+					this.__body = a;
+					copy = b;
+				}
+				return new Response(copy, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url });
+			}
+			static json(value, init = {}) {
+				const headers = new Headers(init.headers);
+				if (!headers.has('content-type')) headers.set('content-type', 'application/json');
+				return new Response(JSON.stringify(value), { ...init, headers });
+			}
+			static error() {
+				const response = new Response(null, { status: 0 });
+				response.type = 'error';
+				return response;
+			}
+			static redirect(url, status = 302) {
+				return new Response(null, { status, headers: { location: String(url) } });
+			}
+		}
+		globalThis.Response = Response;
+	}
+	if (typeof globalThis.fetch === 'undefined') {
+		globalThis.fetch = (input, init = {}) => new Promise((resolve, reject) => {
+			let request;
+			try {
+				request = input instanceof Request && Object.keys(init).length === 0 ? input : new Request(input instanceof Request ? input : String(input instanceof URL ? input.href : input), init);
+			} catch (error) {
+				reject(new TypeError(String(error?.message ?? error)));
+				return;
+			}
+			const signal = request.signal;
+			const abortError = () => (signal?.reason instanceof Error ? signal.reason : new DOMException('This operation was aborted', 'AbortError'));
+			if (signal?.aborted) {
+				reject(abortError());
+				return;
+			}
+			bodyBytes(request.__body).then((body) => {
+				const headers = [];
+				request.headers.forEach((value, name) => headers.push([name, value]));
+				if (!request.headers.has('user-agent')) headers.push(['user-agent', 'node']);
+				if (!request.headers.has('accept')) headers.push(['accept', '*/*']);
+				let controller = null;
+				let settled = false;
+				const id = __ggsHttpRequest({ method: request.method, url: request.url, headers, redirect: request.redirect }, body);
+				const onAbort = () => {
+					__ggsHttpAbort(id);
+					nativeRoutes.delete(id);
+					const error = abortError();
+					if (!settled) {
+						settled = true;
+						reject(error);
+					} else controller?.error(error);
+				};
+				signal?.addEventListener?.('abort', onAbort, { once: true });
+				nativeRoutes.set(id, (event, data, bytes) => {
+					if (event === 'response') {
+						const stream = new ReadableStream({
+							start: (c) => {
+								controller = c;
+							},
+							cancel: () => {
+								__ggsHttpAbort(id);
+								nativeRoutes.delete(id);
+							}
+						});
+						const response = new Response(request.method === 'HEAD' || [101, 204, 205, 304].includes(data.status) ? null : stream, { status: data.status, statusText: data.statusText, headers: data.headers, url: data.url });
+						settled = true;
+						resolve(response);
+					} else if (event === 'data') {
+						controller?.enqueue(new Uint8Array(bytes));
+					} else if (event === 'end') {
+						nativeRoutes.delete(id);
+						signal?.removeEventListener?.('abort', onAbort);
+						controller?.close();
+					} else if (event === 'error') {
+						nativeRoutes.delete(id);
+						signal?.removeEventListener?.('abort', onAbort);
+						const error = new TypeError('fetch failed', { cause: netError(data) });
+						if (!settled) {
+							settled = true;
+							reject(error);
+						} else controller?.error(error);
+					}
+				});
+			}, reject);
+		});
+	}
 
 	/* path/posix and path/win32 — the one honest platform implementation. */
 	builtins['path/posix'] = path.posix;

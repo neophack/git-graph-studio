@@ -13,6 +13,7 @@
 mod child;
 mod core;
 mod fs;
+mod net;
 mod os;
 mod path;
 mod support;
@@ -190,6 +191,43 @@ pub fn register_natives(context: &mut Context) -> JsResult<()> {
             "__ggsChildProcessSpawnSync",
             3,
             NativeFunction::from_fn_ptr(child::proc_spawn_sync),
+        ),
+        (
+            "__ggsNetListen",
+            2,
+            NativeFunction::from_fn_ptr(net::listen),
+        ),
+        (
+            "__ggsNetCloseServer",
+            1,
+            NativeFunction::from_fn_ptr(net::close_server),
+        ),
+        (
+            "__ggsNetConnect",
+            2,
+            NativeFunction::from_fn_ptr(net::connect),
+        ),
+        ("__ggsNetWrite", 2, NativeFunction::from_fn_ptr(net::write)),
+        ("__ggsNetEnd", 1, NativeFunction::from_fn_ptr(net::end)),
+        (
+            "__ggsNetDestroy",
+            1,
+            NativeFunction::from_fn_ptr(net::destroy),
+        ),
+        (
+            "__ggsNetSetNoDelay",
+            2,
+            NativeFunction::from_fn_ptr(net::set_no_delay),
+        ),
+        (
+            "__ggsHttpRequest",
+            2,
+            NativeFunction::from_fn_ptr(net::http_request),
+        ),
+        (
+            "__ggsHttpAbort",
+            1,
+            NativeFunction::from_fn_ptr(net::http_abort),
         ),
     ];
     for (name, length, function) in natives {

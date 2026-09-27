@@ -62,7 +62,7 @@ export interface ExtProcessInfo {
 	lastError: string | null;
 }
 
-/** One marketplace search result (`ext_gallery_search`), as the Extensions view renders it. */
+/** One marketplace entry (`ext_gallery_lookup`), as the Extensions view renders it. */
 export interface GalleryEntry {
 	/** `{namespace}.{name}` — the same shape as an installed extension's id. */
 	id: string;
@@ -80,7 +80,7 @@ export interface GalleryEntry {
 	downloadUrl: string;
 }
 
-/** The marketplace the Extensions view searches and installs from: Open VSX, the open-source
+/** The marketplace the Extensions view installs its featured packages from: Open VSX, the open-source
  *  registry the VS Code ecosystem publishes to (the same service code-server and Theia
  *  point at). The backend confines every gallery request to this origin. */
 export const MARKETPLACE_URL = 'https://open-vsx.org';
@@ -558,6 +558,9 @@ export class ExtensionHost {
 	 *  changed (install / uninstall — the workbench rebuilds its sidebar sections). */
 	onTreeRefresh: ((viewId: string) => void) | null = null;
 	onViewsChanged: (() => void) | null = null;
+	/** Workbench hook: an extension's `setContext` changed a key (a view's `when` may now
+	 *  read differently — the workbench rebuilds only if the visible set moved). */
+	onContextChanged: (() => void) | null = null;
 	/** Activation policy per extension, parsed from its `activationEvents`. */
 	private readonly activationPolicies = new Map<string, ActivationPolicy>();
 	/** The activation pass of a lazily-woken extension, in flight (idempotency). */
@@ -615,9 +618,12 @@ export class ExtensionHost {
 	 *  activation. */
 	private async ensureNodeHost(extId: string): Promise<void> {
 		this.frames.set(extId, this.remoteHandle(extId));
+		const startedAt = performance.now();
 		try {
 			await invoke('ext_process_start', { extId });
-			extLog('info', extId, 'extension host process started');
+			// The duration is the whole activation (the handshake answers after it) — the
+			// number to read against the backend's handshake deadline.
+			extLog('info', extId, `extension host process started (${Math.round(performance.now() - startedAt)} ms)`);
 		} catch (error) {
 			this.frames.delete(extId);
 			this.reportActivationFailure(extId, String(error), describeDetail(error));
@@ -706,9 +712,16 @@ export class ExtensionHost {
 		return info;
 	}
 
-	/** Search the marketplace (Open VSX) — the Extensions view's search box. */
-	async searchGallery(query: string): Promise<{ totalSize: number; entries: GalleryEntry[] }> {
-		return await invoke<{ totalSize: number; entries: GalleryEntry[] }>('ext_gallery_search', { gallery: MARKETPLACE_URL, query });
+	/** The packages the Extensions view offers, in display order (the backend names them;
+	 *  no network — the rows lay out at once and fill in as their lookups land). */
+	async featuredGallery(): Promise<string[]> {
+		return await invoke<string[]>('ext_gallery_featured');
+	}
+
+	/** One exact id's marketplace entry, the build for this machine's platform (the
+	 *  universal build when the registry has no platform one). */
+	async lookupGallery(id: string): Promise<GalleryEntry> {
+		return await invoke<GalleryEntry>('ext_gallery_lookup', { gallery: MARKETPLACE_URL, id });
 	}
 
 	/** One marketplace icon as a data URL (null when it cannot be read), cached per URL. */
@@ -745,10 +758,7 @@ export class ExtensionHost {
 			seen.add(key);
 			if (this.installedExts.some((ext) => ext.id.toLowerCase() === key && ext.format !== 'bundled')) continue;
 			try {
-				const found = await this.searchGallery(dependency);
-				const entry = found.entries.find((candidate) => candidate.id.toLowerCase() === key);
-				if (!entry) throw new Error('not found in the marketplace');
-				const added = await this.installFromGallery(entry);
+				const added = await this.installFromGallery(await this.lookupGallery(dependency));
 				extLog('info', info.id, `installed dependency ${added.id} ${added.version}`);
 				notify('info', tf('extensions.dependencyInstalled', added.id, info.id));
 				installed.push(added, ...(await this.installDependencies(added, seen)));
@@ -781,6 +791,10 @@ export class ExtensionHost {
 	async restartProcess(extId: string): Promise<void> {
 		await invoke('ext_process_stop', { extId }).catch(() => undefined);
 		await invoke('ext_child_stop_for', { extId }).catch(() => undefined);
+		// A backend-hosted package re-activates in the new process: its remote handle must be
+		// registered first, or the activation's first `host.env` request finds no owner (a
+		// restart after a failed start - whose handle was dropped - failed exactly that way).
+		if (this.backendHosted(extId)) return this.ensureNodeHost(extId);
 		await invoke('ext_process_start', { extId });
 	}
 
@@ -1921,7 +1935,10 @@ export class ExtensionHost {
 		if (id === 'setContext') {
 			const [key, value] = args as [string, unknown];
 			// The value is kept as given: a mode string compares in `==`, an array serves `in`.
-			if (typeof key === 'string') registerContextProvider(key, () => value);
+			if (typeof key === 'string') {
+				registerContextProvider(key, () => value);
+				this.onContextChanged?.();
+			}
 			return Promise.resolve(undefined);
 		}
 		if (id === 'workbench.view.scm' || id === 'workbench.view.explorer' || id === 'workbench.view.search' || id === 'workbench.view.extensions') {

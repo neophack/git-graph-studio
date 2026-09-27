@@ -52,6 +52,11 @@ pub(super) fn fs_module(context: &mut Context) -> JsResult<JsObject> {
             NativeFunction::from_fn_ptr(fs_write_file_sync),
         ),
         (
+            "writeRangeBytes",
+            3,
+            NativeFunction::from_fn_ptr(fs_write_range_bytes),
+        ),
+        (
             "writeFileSyncBytes",
             2,
             NativeFunction::from_fn_ptr(fs_write_file_bytes),
@@ -70,7 +75,7 @@ pub(super) fn fs_module(context: &mut Context) -> JsResult<JsObject> {
             1,
             NativeFunction::from_fn_ptr(fs_readdir_dirents),
         ),
-        ("stat", 1, NativeFunction::from_fn_ptr(fs_stat)),
+        ("stat", 2, NativeFunction::from_fn_ptr(fs_stat)),
         ("rmSync", 3, NativeFunction::from_fn_ptr(fs_rm_sync)),
         ("unlinkSync", 1, NativeFunction::from_fn_ptr(fs_unlink_sync)),
         ("renameSync", 2, NativeFunction::from_fn_ptr(fs_rename_sync)),
@@ -78,6 +83,11 @@ pub(super) fn fs_module(context: &mut Context) -> JsResult<JsObject> {
             "copyFileSync",
             2,
             NativeFunction::from_fn_ptr(fs_copy_file_sync),
+        ),
+        (
+            "readlinkSync",
+            1,
+            NativeFunction::from_fn_ptr(fs_readlink_sync),
         ),
         (
             "realpathSync",
@@ -172,7 +182,8 @@ fn fs_read_file_bytes(
 ) -> JsResult<JsValue> {
     let path = string_arg(args, 0, context);
     let bytes = std::fs::read(&path).map_err(|e| io_error(&path, &e))?;
-    JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(bytes), context).map(JsValue::from)
+    JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(bytes), context)
+        .map(JsValue::from)
 }
 
 /// `readRangeBytes(path, position, length)`: at most `length` bytes from `position` — the
@@ -194,7 +205,36 @@ fn fs_read_range_bytes(
     file.take(length)
         .read_to_end(&mut bytes)
         .map_err(|e| io_error(&path, &e))?;
-    JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(bytes), context).map(JsValue::from)
+    JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(bytes), context)
+        .map(JsValue::from)
+}
+
+/// The write half of the prelude's descriptors: `bytes` at `position`, or at the end when
+/// the position is null / undefined (an append-mode handle). The file must exist - the
+/// prelude's open created or truncated it per the flags. Answers the bytes written.
+fn fs_write_range_bytes(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    use std::io::{Seek as _, SeekFrom};
+    let path = string_arg(args, 0, context);
+    let bytes = bytes_arg(args.get_or_undefined(1), context)
+        .ok_or_else(|| error("writeRangeBytes needs a Buffer or Uint8Array"))?;
+    let position = args.get_or_undefined(2);
+    let mut file = if position.is_null_or_undefined() {
+        std::fs::OpenOptions::new().append(true).open(&path)
+    } else {
+        std::fs::OpenOptions::new().write(true).open(&path)
+    }
+    .map_err(|e| io_error(&path, &e))?;
+    if !position.is_null_or_undefined() {
+        let at = position.to_number(context)?.max(0.0) as u64;
+        file.seek(SeekFrom::Start(at))
+            .map_err(|e| io_error(&path, &e))?;
+    }
+    file.write_all(&bytes).map_err(|e| io_error(&path, &e))?;
+    Ok(JsValue::from(bytes.len() as f64))
 }
 
 fn fs_write_file_sync(
@@ -311,11 +351,18 @@ fn fs_readdir_dirents(
 
 fn fs_stat(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let path = string_arg(args, 0, context);
-    let metadata = std::fs::metadata(&path).map_err(|e| io_error(&path, &e))?;
-    let kind = if metadata.is_dir() {
-        "dir"
-    } else if metadata.is_symlink() {
+    // The second argument asks for lstat: the link itself, never its target - a caller
+    // guarding against a planted symlink (claude-code's transcript probe) must see one.
+    let metadata = if args.get_or_undefined(1).to_boolean() {
+        std::fs::symlink_metadata(&path)
+    } else {
+        std::fs::metadata(&path)
+    }
+    .map_err(|e| io_error(&path, &e))?;
+    let kind = if metadata.is_symlink() {
         "symlink"
+    } else if metadata.is_dir() {
+        "dir"
     } else {
         "file"
     };
@@ -394,4 +441,20 @@ fn fs_realpath_sync(
         .map(str::to_owned)
         .unwrap_or(canonical_text);
     Ok(text(stripped))
+}
+
+/// `readlink`: the link's own target, as written. A path that is not a link fails - Node's
+/// EINVAL, which callers (claude-code's settings writer) take as "write the path itself".
+fn fs_readlink_sync(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let path = string_arg(args, 0, context);
+    let metadata = std::fs::symlink_metadata(&path).map_err(|e| io_error(&path, &e))?;
+    if !metadata.is_symlink() {
+        return Err(error(format!("EINVAL: invalid argument, readlink '{path}'")));
+    }
+    let target = std::fs::read_link(&path).map_err(|e| io_error(&path, &e))?;
+    Ok(text(target.display().to_string()))
 }

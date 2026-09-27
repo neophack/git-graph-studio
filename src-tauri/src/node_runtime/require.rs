@@ -66,7 +66,16 @@ pub fn require(parent: &Path, specifier: &str, context: &mut Context) -> JsResul
         Some(Kind::Js) => {
             let source = std::fs::read_to_string(&resolved).map_err(fs_error(&resolved))?;
             if std::env::var("GGS_TRACE_BOOT").is_ok() {
-                std::eprintln!("[boot] evaluate_module {} ({} bytes, head: {})", resolved.display(), source.len(), source.chars().take(60).collect::<String>().replace(char::is_whitespace, " "));
+                std::eprintln!(
+                    "[boot] evaluate_module {} ({} bytes, head: {})",
+                    resolved.display(),
+                    source.len(),
+                    source
+                        .chars()
+                        .take(60)
+                        .collect::<String>()
+                        .replace(char::is_whitespace, " ")
+                );
             }
             evaluate_module(&resolved, &source, context)
         }
@@ -134,8 +143,7 @@ pub(crate) fn resolve_with(
         let modules = current.join("node_modules");
         if modules.is_dir() {
             let package = modules.join(name);
-            if let Some(exports) = read_manifest(&package).and_then(|m| m.get("exports").cloned())
-            {
+            if let Some(exports) = read_manifest(&package).and_then(|m| m.get("exports").cloned()) {
                 // The map is the package's whole public surface: a subpath it does not
                 // list is not found, however the files lie.
                 return resolve_exports(&package, &exports, &subpath, conditions)
@@ -260,11 +268,7 @@ fn resolve_target(
 }
 
 /// A `#name` specifier through the nearest enclosing package's `imports` map.
-fn resolve_package_import(
-    parent: &Path,
-    specifier: &str,
-    conditions: &[&str],
-) -> Option<PathBuf> {
+fn resolve_package_import(parent: &Path, specifier: &str, conditions: &[&str]) -> Option<PathBuf> {
     let mut dir = Some(parent);
     while let Some(current) = dir {
         if let Some(manifest) = read_manifest(current) {
