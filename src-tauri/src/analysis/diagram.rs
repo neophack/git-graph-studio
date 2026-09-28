@@ -3,7 +3,8 @@
 //! analysis belongs in Rust, plan §3.4). The backend decides WHAT the diagram is —
 //! the model follows gitdiagram's own schema and caps (at most 10 groups — deeper
 //! areas roll up to the depth that fits, the overflow draws unboxed, its
-//! `groupId: null` — 34 blocks, 48 arrows), the busiest files become two-line cards
+//! `groupId: null` — 34 blocks, 48 arrows, no block fanning past eight), the busiest
+//! files become two-line cards
 //! (the name over the bracketed directory, gitdiagram's `Component<br/>[file.ts]`
 //! shape) each carrying its area's tone class — and emits the diagram as mermaid
 //! `flowchart TD` source with gitdiagram's tone classDefs verbatim. The page feeds
@@ -22,6 +23,11 @@ use super::modules::{module_of, CallSiteRow, FileDep, ModuleGraph};
 const MAX_GROUPS: usize = 10;
 const MAX_NODES: usize = 34;
 const MAX_EDGES: usize = 48;
+/// How many arrows one block may fan out and take in — a call-volume hub would
+/// otherwise hang twenty off a single card and the structure reads as one bundle
+/// (gitdiagram's curated graphs top out around eight per node).
+const MAX_FAN_OUT: u32 = 8;
+const MAX_FAN_IN: u32 = 8;
 
 /// How deep a group box's directory path may run before the roll-up starts folding
 /// areas into their parents.
@@ -200,14 +206,6 @@ pub fn module_diagram(graph: &ModuleGraph, focus: Option<&str>, filter: &str) ->
     let both_kept = |dep: &FileDep| {
         kept_set.contains(&dep.from.as_str()) && kept_set.contains(&dep.to.as_str())
     };
-    let drawn: Vec<&FileDep> = deps
-        .iter()
-        .copied()
-        .filter(|dep| both_kept(dep))
-        .take(MAX_EDGES)
-        .collect();
-    let dropped_files = total_files - kept.len();
-    let dropped_edges = deps.iter().copied().filter(|dep| both_kept(dep)).count() - drawn.len();
 
     let keys = group_keys(&kept_set);
     // The areas in name order, one tone each; the ungrouped overflow shares the
@@ -237,7 +235,85 @@ pub fn module_diagram(graph: &ModuleGraph, focus: Option<&str>, filter: &str) ->
         .enumerate()
         .map(|(index, node)| (node.path.as_str(), index))
         .collect();
-    let mut edges: Vec<DiagramEdge> = drawn
+
+    // The arrows: weight order (the graph's own calls-first order), but a block
+    // fans out at most `MAX_FAN_OUT` and takes in at most `MAX_FAN_IN` — the rest
+    // of a hub's traffic stays in the counts and the tree, off the drawing. The
+    // pairs that close a cycle stay off too: the forward edges already tell the
+    // story, a DAG layers cleanly (no arrow routing around the whole canvas), and
+    // the cycles themselves are the Import Graph page's subject.
+    let candidates: Vec<(&FileDep, bool)> = {
+        let kept_pairs: Vec<&FileDep> = deps.iter().copied().filter(|dep| both_kept(dep)).collect();
+        let mut slot: HashMap<&str, usize> = HashMap::new();
+        for dep in &kept_pairs {
+            for path in [dep.from.as_str(), dep.to.as_str()] {
+                let next = slot.len();
+                slot.entry(path).or_insert(next);
+            }
+        }
+        let mut back = vec![false; kept_pairs.len()];
+        {
+            let mut edge_adj: Vec<Vec<usize>> = vec![Vec::new(); kept_pairs.len() * 2];
+            for (at, dep) in kept_pairs.iter().enumerate() {
+                let from = slot[dep.from.as_str()];
+                edge_adj[from].push(at);
+            }
+            let mut state = vec![0u8; kept_pairs.len() * 2];
+            fn mark(
+                edge_adj: &[Vec<usize>],
+                kept_pairs: &[&FileDep],
+                slot: &HashMap<&str, usize>,
+                state: &mut [u8],
+                back: &mut [bool],
+                node: usize,
+            ) {
+                state[node] = 1;
+                for &edge in &edge_adj[node] {
+                    let to = slot[kept_pairs[edge].to.as_str()];
+                    match state[to] {
+                        1 => back[edge] = true,
+                        0 => mark(edge_adj, kept_pairs, slot, state, back, to),
+                        _ => {}
+                    }
+                }
+                state[node] = 2;
+            }
+            for node in 0..kept_pairs.len() * 2 {
+                if state[node] == 0 {
+                    mark(&edge_adj, &kept_pairs, &slot, &mut state, &mut back, node);
+                }
+            }
+        }
+        kept_pairs
+            .iter()
+            .enumerate()
+            .map(|(at, &dep)| (dep, back[at]))
+            .collect()
+    };
+    let mut fan_out: HashMap<&str, u32> = HashMap::new();
+    let mut fan_in: HashMap<&str, u32> = HashMap::new();
+    let mut drawn: Vec<&FileDep> = Vec::new();
+    let mut considered = 0usize;
+    for (dep, dashed) in candidates.iter().copied() {
+        if dashed {
+            continue;
+        }
+        considered += 1;
+        if drawn.len() >= MAX_EDGES {
+            continue;
+        }
+        let out = fan_out.get(dep.from.as_str()).copied().unwrap_or(0);
+        let inn = fan_in.get(dep.to.as_str()).copied().unwrap_or(0);
+        if out >= MAX_FAN_OUT || inn >= MAX_FAN_IN {
+            continue;
+        }
+        *fan_out.entry(dep.from.as_str()).or_default() += 1;
+        *fan_in.entry(dep.to.as_str()).or_default() += 1;
+        drawn.push(dep);
+    }
+    let dropped_files = total_files - kept.len();
+    let dropped_edges = considered - drawn.len();
+    let edges: Vec<DiagramEdge> = drawn
         .iter()
         .map(|dep| DiagramEdge {
             id: format!("{}→{}", dep.from, dep.to),
@@ -247,38 +323,6 @@ pub fn module_diagram(graph: &ModuleGraph, focus: Option<&str>, filter: &str) ->
             dashed: false,
         })
         .collect();
-    // The cycle's back edges draw dashed (gitdiagram's `-.->`): a DFS marks the
-    // pairs that close a cycle, and their arrows flip in the mermaid source below.
-    {
-        let mut adj: HashMap<&str, Vec<usize>> = HashMap::new();
-        for (at, dep) in drawn.iter().enumerate() {
-            adj.entry(dep.from.as_str()).or_default().push(at);
-        }
-        let mut state: HashMap<&str, u8> = HashMap::new();
-        fn mark_back<'g>(
-            adj: &HashMap<&'g str, Vec<usize>>,
-            drawn: &[&'g FileDep],
-            state: &mut HashMap<&'g str, u8>,
-            edges: &mut [DiagramEdge],
-            from: &'g str,
-        ) {
-            state.insert(from, 1);
-            for &at in adj.get(from).map(Vec::as_slice).unwrap_or(&[]) {
-                let to = drawn[at].to.as_str();
-                match state.get(to).copied().unwrap_or(0) {
-                    1 => edges[at].dashed = true,
-                    0 => mark_back(adj, drawn, state, edges, to),
-                    _ => {}
-                }
-            }
-            state.insert(from, 2);
-        }
-        for dep in drawn.iter() {
-            if state.get(dep.from.as_str()).copied().unwrap_or(0) == 0 {
-                mark_back(&adj, &drawn, &mut state, &mut edges, dep.from.as_str());
-            }
-        }
-    }
     let mermaid = mermaid_source(&nodes, &index_of, &edges);
     ModuleDiagram {
         nodes,
@@ -351,6 +395,14 @@ fn mermaid_source(
         out.push_str("  end\n");
     }
     for edge in edges {
+        if !index_of.contains_key(edge.from.as_str()) || !index_of.contains_key(edge.to.as_str()) {
+            eprintln!(
+                "[ggs] missing endpoint: {} -> {} (nodes: {})",
+                edge.from,
+                edge.to,
+                nodes.len()
+            );
+        }
         let from = index_of[edge.from.as_str()];
         let to = index_of[edge.to.as_str()];
         let arrow = if edge.dashed { "-.->" } else { "-->" };
@@ -444,7 +496,10 @@ mod tests {
     }
 
     #[test]
-    fn the_cycle_back_edges_carry_the_dashed_arrow() {
+    fn the_cycles_back_edge_stays_off_the_drawing() {
+        // a.rs → b.rs → c.rs → a.rs: the first two arrows tell the story; the pair
+        // that closes the cycle would route around the whole layout, so it stays
+        // off (the Import Graph page is where cycles are the subject).
         let diagram = module_diagram(
             &graph(
                 &[("", 3, 3)],
@@ -457,14 +512,15 @@ mod tests {
             None,
             "",
         );
-        let dashed: Vec<&str> = diagram
-            .edges
-            .iter()
-            .filter(|edge| edge.dashed)
-            .map(|edge| edge.id.as_str())
-            .collect();
-        assert_eq!(dashed, ["c.rs→a.rs"], "exactly the cycle's back edge");
-        assert!(diagram.mermaid.contains("N2 -.->|\"1 calls\"| N0"));
+        let ids: Vec<&str> = diagram.edges.iter().map(|edge| edge.id.as_str()).collect();
+        assert_eq!(ids, ["a.rs→b.rs", "b.rs→c.rs"]);
+        // The back edge is policy-excluded, not cap-dropped — the dropped count
+        // stays about what the caps squeezed out.
+        assert_eq!(diagram.dropped_edges, 0);
+        assert!(
+            !diagram.mermaid.contains("-.->"),
+            "no dashed arrows in the source"
+        );
     }
 
     #[test]
@@ -477,8 +533,57 @@ mod tests {
         assert_eq!(diagram.nodes.len(), MAX_NODES);
         assert_eq!(diagram.dropped_files, 61 - MAX_NODES);
         assert!(diagram.nodes.iter().any(|node| node.path == "hub.rs"));
-        assert_eq!(diagram.edges.len(), MAX_NODES - 1);
-        assert_eq!(diagram.dropped_edges, 0);
+        // The star's hub takes at most MAX_FAN_IN arrows — the rest of its traffic
+        // stays in the counts (dropped_edges) and the tree, off the drawing.
+        assert_eq!(diagram.edges.len(), MAX_FAN_IN as usize);
+        assert_eq!(diagram.dropped_edges, (MAX_NODES - 1) - MAX_FAN_IN as usize);
+        let ins: u32 = diagram.edges.iter().map(|edge| edge.calls).sum();
+        assert_eq!(ins, MAX_FAN_IN as usize as u32);
+    }
+
+    #[test]
+    fn the_fan_out_cap_keeps_a_hub_legible_and_keeps_the_heaviest() {
+        // One file calling twenty others: only its top-eight calls draw, and they
+        // are the highest-call ones (the candidates arrive calls-first).
+        let mut file_edges = Vec::new();
+        for target in 0..20 {
+            file_edges.push(dep(
+                "hub.rs",
+                &format!("t{target:02}.rs"),
+                (20 - target) as u32,
+                &[],
+            ));
+        }
+        let diagram = module_diagram(&graph(&[("", 21, 21)], file_edges), None, "");
+        assert_eq!(diagram.edges.len(), MAX_FAN_OUT as usize);
+        let targets: Vec<&str> = diagram.edges.iter().map(|edge| edge.to.as_str()).collect();
+        assert_eq!(
+            targets,
+            ["t00.rs", "t01.rs", "t02.rs", "t03.rs", "t04.rs", "t05.rs", "t06.rs", "t07.rs"]
+        );
+        assert_eq!(diagram.dropped_edges, 20 - MAX_FAN_OUT as usize);
+    }
+
+    #[test]
+    fn no_block_exceeds_the_degree_caps() {
+        let mut file_edges = Vec::new();
+        // A dense committee: every file calls every other.
+        for a in 0..12 {
+            for b in 0..12 {
+                if a != b {
+                    file_edges.push(dep(&format!("f{a:02}.rs"), &format!("f{b:02}.rs"), 1, &[]));
+                }
+            }
+        }
+        let diagram = module_diagram(&graph(&[("", 12, 12)], file_edges), None, "");
+        let mut out: HashMap<String, u32> = HashMap::new();
+        let mut inn: HashMap<String, u32> = HashMap::new();
+        for edge in &diagram.edges {
+            *out.entry(edge.from.clone()).or_default() += 1;
+            *inn.entry(edge.to.clone()).or_default() += 1;
+        }
+        assert!(out.values().all(|&degree| degree <= MAX_FAN_OUT));
+        assert!(inn.values().all(|&degree| degree <= MAX_FAN_IN));
     }
 
     #[test]
