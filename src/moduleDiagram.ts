@@ -113,6 +113,10 @@ function ensureMermaid(): Promise<MermaidRenderer> {
 			theme: 'base',
 			htmlLabels: false,
 			layout: 'elk',
+			// gitdiagram's comment holds here too: mermaid 12 defaults to the neo look
+			// and a 120 px wrap, which splits file paths mid-name — keep the classic
+			// look and the old 200 px wrap.
+			look: 'classic',
 			flowchart: {
 				wrappingWidth: 200,
 				curve: 'linear',
@@ -540,8 +544,6 @@ export class DiagramView {
 		this.content.style.transformOrigin = '0 0';
 		this.content.style.transform = `translate3d(${view.x}px, ${view.y}px, 0) scale(${view.scale})`;
 		this.zoomLevel.textContent = `${Math.round((view.scale / view.fitScale) * 100)}%`;
-		// The call-count labels are noise below readable size — a map's label LOD.
-		this.content.classList.toggle('labels-off', view.scale < Math.max(0.85, view.fitScale));
 	}
 
 	/** Zoom by `factor` around a viewport point (the cursor, or the centre), clamped

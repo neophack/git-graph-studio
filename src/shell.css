@@ -1438,17 +1438,22 @@ body.resizing iframe { pointer-events: none; }
 .an-mermaid svg { display: block; }
 .an-mermaid g.node, .an-mermaid g.edgeLabel, .an-mermaid [id^="L_N"] { cursor: pointer; }
 .an-mermaid g.node rect { transition: stroke-width 120ms; }
-.an-mermaid g.node:hover rect { stroke-width: 2.5px; }
+/* gitdiagram's themeCSS, ported: the card under the pointer grows 5 % and dims a
+   touch, 160 ms on its cubic — and prefers-reduced-motion keeps it still. */
+.an-mermaid g.node rect {
+	transition: stroke-width 120ms, transform 160ms cubic-bezier(0.23, 1, 0.32, 1), filter 160ms cubic-bezier(0.23, 1, 0.32, 1);
+	transform-box: fill-box; transform-origin: center;
+}
+.an-mermaid g.node:hover rect { transform: scale(1.05); filter: brightness(0.85); }
+@media (prefers-reduced-motion: reduce) {
+	.an-mermaid g.node rect { transition: none; }
+	.an-mermaid g.node:hover rect { transform: none; }
+}
 .an-mermaid g.node.selected rect { stroke-width: 3px; }
 .an-mermaid g.node.related rect { stroke-width: 2.5px; }
 .an-mermaid g.node.dim, .an-mermaid g.edgeLabel.dim, .an-mermaid path.dim { opacity: 0.22; }
 .an-mermaid path.dim, .an-mermaid g.edgePaths path.dim { opacity: 0.22; }
 .an-mermaid path.selected, .an-mermaid g.edgePaths path.selected { stroke: var(--dg-accent) !important; }
-/* Below readable size the call counts fold away except on the arrow under
-   attention — progressive disclosure instead of a wall of unreadable specks. */
-.an-mermaid.labels-off g.edgeLabel { display: none; }
-.an-mermaid.labels-off g.edgeLabel.selected { display: block; }
-
 /* The toolbar rides the lavender canvas as gitdiagram's own pill: white glass,
    slate glyphs (fixed colours, like the canvas). */
 .an-zoombar {
