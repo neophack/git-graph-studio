@@ -395,28 +395,29 @@ vscode.commands.registerCommand('chat.openOutput', async () => {
     // Every `ggs.hostRequest` the flow crosses is answered here - and `docProvider.read`
     // never may be among them: the workbench's answer for it is a call back into this
     // same parked JS thread.
-    let answer_host_request =
-        |wire: &Value, opened_tab: &mut Option<Value>| -> Result<Value, String> {
-            let inner = wire["params"]["method"].as_str().unwrap_or_default();
-            assert_ne!(
+    let answer_host_request = |wire: &Value,
+                               opened_tab: &mut Option<Value>|
+     -> Result<Value, String> {
+        let inner = wire["params"]["method"].as_str().unwrap_or_default();
+        assert_ne!(
                 inner, "docProvider.read",
                 "an own-scheme read must be answered by this side's own registration, not the host round-trip whose answer reenters the parked JS thread"
             );
-            match inner {
-                "host.env" => Ok(json!({
-                    "settings": {},
-                    "language": "en",
-                    "appVersion": "0.1.5-test",
-                    "themeKind": 2,
-                    "state": { "global": {}, "workspace": {} }
-                })),
-                "workspace.openContentTab" => {
-                    *opened_tab = Some(wire["params"]["args"].clone());
-                    Ok(Value::Null)
-                }
-                _ => Ok(Value::Null),
+        match inner {
+            "host.env" => Ok(json!({
+                "settings": {},
+                "language": "en",
+                "appVersion": "0.1.5-test",
+                "themeKind": 2,
+                "state": { "global": {}, "workspace": {} }
+            })),
+            "workspace.openContentTab" => {
+                *opened_tab = Some(wire["params"]["args"].clone());
+                Ok(Value::Null)
             }
-        };
+            _ => Ok(Value::Null),
+        }
+    };
 
     // 1. The handshake: the bootstrap installs the shim, the entry registers the provider
     //    and the command, and activation settles.

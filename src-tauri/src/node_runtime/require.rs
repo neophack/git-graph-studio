@@ -16,7 +16,6 @@ use boa_engine::{
     Context, JsError, JsNativeError, JsObject, JsResult, JsValue, NativeFunction, Script, Source,
 };
 
-
 use crate::node_runtime::{key, text, with_state};
 use boa_engine::JsArgs;
 
@@ -435,7 +434,11 @@ pub(crate) fn evaluate_cached_script(
     if script.max_register_count(context) > REGISTER_LOCALS_LIMIT
         || Script::tripped_uninitialized_local()
     {
-        script = Script::parse_all_bindings_escaping(Source::from_bytes(source.as_bytes()), None, context)?;
+        script = Script::parse_all_bindings_escaping(
+            Source::from_bytes(source.as_bytes()),
+            None,
+            context,
+        )?;
     }
     if let Ok(compiled) = script.codeblock(context) {
         if let Some(cache_path) = bytecode_cache_path(&cache_key) {
@@ -650,7 +653,12 @@ fn bytecode_cache_path(cache_key: &str) -> Option<std::path::PathBuf> {
         .or_else(|| {
             std::env::var_os("USERPROFILE")
                 .or_else(|| std::env::var_os("HOME"))
-                .map(|home| std::path::PathBuf::from(home).join(".ggs").join("cache").join("bytecode"))
+                .map(|home| {
+                    std::path::PathBuf::from(home)
+                        .join(".ggs")
+                        .join("cache")
+                        .join("bytecode")
+                })
         })?;
     let _ = std::fs::create_dir_all(&root);
     Some(root.join(format!("{cache_key}.gcbc")))
@@ -741,7 +749,11 @@ mod tests {
 
         let mut first = Context::default();
         evaluate_cached_script("probe", source, &mut first).expect("the first load compiles");
-        assert_eq!(probe(&mut first), 18, "the first (compiled) load sets the probe");
+        assert_eq!(
+            probe(&mut first),
+            18,
+            "the first (compiled) load sets the probe"
+        );
 
         let mut blobs = std::fs::read_dir(&root)
             .expect("the cache root lists")
@@ -750,8 +762,13 @@ mod tests {
         assert!(blobs.next().is_some(), "the compiled blob was written");
 
         let mut second = Context::default();
-        evaluate_cached_script("probe", source, &mut second).expect("the second load reads the cache");
-        assert_eq!(probe(&mut second), 18, "the cached load sets the same probe");
+        evaluate_cached_script("probe", source, &mut second)
+            .expect("the second load reads the cache");
+        assert_eq!(
+            probe(&mut second),
+            18,
+            "the cached load sets the same probe"
+        );
 
         std::env::remove_var("GGS_BYTECODE_CACHE");
         let _ = std::fs::remove_dir_all(&root);

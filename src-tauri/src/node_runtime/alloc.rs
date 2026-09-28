@@ -146,7 +146,10 @@ fn with_pool<R>(f: impl FnOnce(&mut Pool) -> R) -> R {
         return result;
     }
     let f = f.take().expect("not run on the local pool");
-    let mut pool = SHARED.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut pool = SHARED
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     f(&mut pool)
 }
 
@@ -267,7 +270,11 @@ mod tests {
             let (align, fill) = (tag & 0xff, (tag >> 8) as u8);
             for offset in 0..size {
                 // SAFETY: the block is live and `size` bytes long.
-                assert_eq!(unsafe { *(block as *const u8).add(offset) }, fill, "no block was overwritten");
+                assert_eq!(
+                    unsafe { *(block as *const u8).add(offset) },
+                    fill,
+                    "no block was overwritten"
+                );
             }
             let layout = Layout::from_size_align(size, align).unwrap();
             // SAFETY: returned with the layout it was served for.
@@ -318,7 +325,10 @@ mod tests {
                 block = alloc.realloc(block, Layout::from_size_align(size, 8).unwrap(), new_size);
                 assert!(!block.is_null());
                 let kept = size.min(new_size).min(8);
-                assert_eq!(std::slice::from_raw_parts(block, kept), &b"ggs-node"[..kept]);
+                assert_eq!(
+                    std::slice::from_raw_parts(block, kept),
+                    &b"ggs-node"[..kept]
+                );
                 size = new_size;
             }
             alloc.dealloc(block, Layout::from_size_align(size, 8).unwrap());
@@ -335,7 +345,9 @@ mod tests {
             ptr::write_bytes(dirty, 0xAB, 64);
             alloc.dealloc(dirty, layout);
             let clean = alloc.alloc_zeroed(layout);
-            assert!(std::slice::from_raw_parts(clean, 64).iter().all(|&b| b == 0));
+            assert!(std::slice::from_raw_parts(clean, 64)
+                .iter()
+                .all(|&b| b == 0));
             alloc.dealloc(clean, layout);
         }
     }

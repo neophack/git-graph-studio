@@ -16,51 +16,153 @@ fn main() {
         use boa_engine::ast::*;
         eprintln!("Expression {}", std::mem::size_of::<Expression>());
         eprintln!("Statement {}", std::mem::size_of::<Statement>());
-        eprintln!("StatementListItem {}", std::mem::size_of::<StatementListItem>());
+        eprintln!(
+            "StatementListItem {}",
+            std::mem::size_of::<StatementListItem>()
+        );
         eprintln!("Declaration {}", std::mem::size_of::<Declaration>());
-        eprintln!("PropertyAccess {}", std::mem::size_of::<expression::access::PropertyAccess>());
+        eprintln!(
+            "PropertyAccess {}",
+            std::mem::size_of::<expression::access::PropertyAccess>()
+        );
         eprintln!("Call {}", std::mem::size_of::<expression::Call>());
-        eprintln!("FunctionExpression {}", std::mem::size_of::<function::FunctionExpression>());
+        eprintln!(
+            "FunctionExpression {}",
+            std::mem::size_of::<function::FunctionExpression>()
+        );
         eprintln!("If {}", std::mem::size_of::<statement::If>());
-        eprintln!("Token {}", std::mem::size_of::<boa_engine::parser::lexer::Token>());
-        eprintln!("Identifier {}", std::mem::size_of::<expression::Identifier>());
-        eprintln!("Literal {}", std::mem::size_of::<expression::literal::Literal>());
-        eprintln!("RegExpLiteral {}", std::mem::size_of::<expression::RegExpLiteral>());
-        eprintln!("ArrayLiteral {}", std::mem::size_of::<expression::literal::ArrayLiteral>());
-        eprintln!("ObjectLiteral {}", std::mem::size_of::<expression::literal::ObjectLiteral>());
+        eprintln!(
+            "Token {}",
+            std::mem::size_of::<boa_engine::parser::lexer::Token>()
+        );
+        eprintln!(
+            "Identifier {}",
+            std::mem::size_of::<expression::Identifier>()
+        );
+        eprintln!(
+            "Literal {}",
+            std::mem::size_of::<expression::literal::Literal>()
+        );
+        eprintln!(
+            "RegExpLiteral {}",
+            std::mem::size_of::<expression::RegExpLiteral>()
+        );
+        eprintln!(
+            "ArrayLiteral {}",
+            std::mem::size_of::<expression::literal::ArrayLiteral>()
+        );
+        eprintln!(
+            "ObjectLiteral {}",
+            std::mem::size_of::<expression::literal::ObjectLiteral>()
+        );
         eprintln!("Spread {}", std::mem::size_of::<expression::Spread>());
-        eprintln!("FunctionExpression {}", std::mem::size_of::<function::FunctionExpression>());
-        eprintln!("ArrowFunction {}", std::mem::size_of::<function::ArrowFunction>());
-        eprintln!("AsyncArrowFunction {}", std::mem::size_of::<function::AsyncArrowFunction>());
-        eprintln!("GeneratorExpression {}", std::mem::size_of::<function::GeneratorExpression>());
-        eprintln!("AsyncFunctionExpression {}", std::mem::size_of::<function::AsyncFunctionExpression>());
-        eprintln!("AsyncGeneratorExpression {}", std::mem::size_of::<function::AsyncGeneratorExpression>());
-        eprintln!("TemplateLiteral {}", std::mem::size_of::<expression::literal::TemplateLiteral>());
+        eprintln!(
+            "FunctionExpression {}",
+            std::mem::size_of::<function::FunctionExpression>()
+        );
+        eprintln!(
+            "ArrowFunction {}",
+            std::mem::size_of::<function::ArrowFunction>()
+        );
+        eprintln!(
+            "AsyncArrowFunction {}",
+            std::mem::size_of::<function::AsyncArrowFunction>()
+        );
+        eprintln!(
+            "GeneratorExpression {}",
+            std::mem::size_of::<function::GeneratorExpression>()
+        );
+        eprintln!(
+            "AsyncFunctionExpression {}",
+            std::mem::size_of::<function::AsyncFunctionExpression>()
+        );
+        eprintln!(
+            "AsyncGeneratorExpression {}",
+            std::mem::size_of::<function::AsyncGeneratorExpression>()
+        );
+        eprintln!(
+            "TemplateLiteral {}",
+            std::mem::size_of::<expression::literal::TemplateLiteral>()
+        );
         eprintln!("New {}", std::mem::size_of::<expression::New>());
         eprintln!("SuperCall {}", std::mem::size_of::<expression::SuperCall>());
-        eprintln!("ImportCall {}", std::mem::size_of::<expression::ImportCall>());
+        eprintln!(
+            "ImportCall {}",
+            std::mem::size_of::<expression::ImportCall>()
+        );
         eprintln!("Optional {}", std::mem::size_of::<expression::Optional>());
-        eprintln!("TaggedTemplate {}", std::mem::size_of::<expression::TaggedTemplate>());
-        eprintln!("Assign {}", std::mem::size_of::<expression::operator::Assign>());
-        eprintln!("Unary {}", std::mem::size_of::<expression::operator::Unary>());
-        eprintln!("Update {}", std::mem::size_of::<expression::operator::Update>());
-        eprintln!("Binary {}", std::mem::size_of::<expression::operator::Binary>());
-        eprintln!("BinaryInPrivate {}", std::mem::size_of::<expression::operator::BinaryInPrivate>());
-        eprintln!("Conditional {}", std::mem::size_of::<expression::operator::Conditional>());
+        eprintln!(
+            "TaggedTemplate {}",
+            std::mem::size_of::<expression::TaggedTemplate>()
+        );
+        eprintln!(
+            "Assign {}",
+            std::mem::size_of::<expression::operator::Assign>()
+        );
+        eprintln!(
+            "Unary {}",
+            std::mem::size_of::<expression::operator::Unary>()
+        );
+        eprintln!(
+            "Update {}",
+            std::mem::size_of::<expression::operator::Update>()
+        );
+        eprintln!(
+            "Binary {}",
+            std::mem::size_of::<expression::operator::Binary>()
+        );
+        eprintln!(
+            "BinaryInPrivate {}",
+            std::mem::size_of::<expression::operator::BinaryInPrivate>()
+        );
+        eprintln!(
+            "Conditional {}",
+            std::mem::size_of::<expression::operator::Conditional>()
+        );
         eprintln!("Await {}", std::mem::size_of::<expression::Await>());
         eprintln!("Yield {}", std::mem::size_of::<expression::Yield>());
-        eprintln!("Parenthesized {}", std::mem::size_of::<expression::Parenthesized>());
-        eprintln!("FormalParameterList {}", std::mem::size_of::<function::FormalParameterList>());
+        eprintln!(
+            "Parenthesized {}",
+            std::mem::size_of::<expression::Parenthesized>()
+        );
+        eprintln!(
+            "FormalParameterList {}",
+            std::mem::size_of::<function::FormalParameterList>()
+        );
         eprintln!("Block {}", std::mem::size_of::<statement::Block>());
-        eprintln!("VarDeclaration {}", std::mem::size_of::<declaration::VarDeclaration>());
-        eprintln!("DoWhileLoop {}", std::mem::size_of::<statement::iteration::DoWhileLoop>());
-        eprintln!("WhileLoop {}", std::mem::size_of::<statement::iteration::WhileLoop>());
-        eprintln!("ForLoop {}", std::mem::size_of::<statement::iteration::ForLoop>());
-        eprintln!("ForInLoop {}", std::mem::size_of::<statement::iteration::ForInLoop>());
-        eprintln!("ForOfLoop {}", std::mem::size_of::<statement::iteration::ForOfLoop>());
+        eprintln!(
+            "VarDeclaration {}",
+            std::mem::size_of::<declaration::VarDeclaration>()
+        );
+        eprintln!(
+            "DoWhileLoop {}",
+            std::mem::size_of::<statement::iteration::DoWhileLoop>()
+        );
+        eprintln!(
+            "WhileLoop {}",
+            std::mem::size_of::<statement::iteration::WhileLoop>()
+        );
+        eprintln!(
+            "ForLoop {}",
+            std::mem::size_of::<statement::iteration::ForLoop>()
+        );
+        eprintln!(
+            "ForInLoop {}",
+            std::mem::size_of::<statement::iteration::ForInLoop>()
+        );
+        eprintln!(
+            "ForOfLoop {}",
+            std::mem::size_of::<statement::iteration::ForOfLoop>()
+        );
         eprintln!("Switch {}", std::mem::size_of::<statement::Switch>());
-        eprintln!("Continue {}", std::mem::size_of::<statement::iteration::Continue>());
-        eprintln!("Break {}", std::mem::size_of::<statement::iteration::Break>());
+        eprintln!(
+            "Continue {}",
+            std::mem::size_of::<statement::iteration::Continue>()
+        );
+        eprintln!(
+            "Break {}",
+            std::mem::size_of::<statement::iteration::Break>()
+        );
         eprintln!("Return {}", std::mem::size_of::<statement::Return>());
         eprintln!("Labelled {}", std::mem::size_of::<statement::Labelled>());
         eprintln!("Throw {}", std::mem::size_of::<statement::Throw>());
@@ -108,7 +210,10 @@ fn main() {
             while lexer.next(&mut interner).unwrap().is_some() {
                 tokens += 1;
             }
-            eprintln!("[bench] iter {i}: lexer-only {tokens} tokens {:?}", t.elapsed());
+            eprintln!(
+                "[bench] iter {i}: lexer-only {tokens} tokens {:?}",
+                t.elapsed()
+            );
             continue;
         }
         let mut context = Context::default();
@@ -127,7 +232,9 @@ fn main() {
         let total = t.elapsed();
         drop(script);
         let dropped = t.elapsed();
-        eprintln!("[bench] iter {i}: parse+analyze {parsed:?}, +compile {total:?}, +drop {dropped:?}");
+        eprintln!(
+            "[bench] iter {i}: parse+analyze {parsed:?}, +compile {total:?}, +drop {dropped:?}"
+        );
     }
     eprintln!("[bench] done");
     if std::env::var_os("BENCH_HOLD").is_some() {
@@ -142,7 +249,11 @@ pub fn run_both(path: &str) {
     for escaping in [false, true] {
         let mut context = Context::default();
         let parsed = if escaping {
-            Script::parse_all_bindings_escaping(Source::from_bytes(src.as_bytes()), None, &mut context)
+            Script::parse_all_bindings_escaping(
+                Source::from_bytes(src.as_bytes()),
+                None,
+                &mut context,
+            )
         } else {
             Script::parse(Source::from_bytes(src.as_bytes()), None, &mut context)
         };

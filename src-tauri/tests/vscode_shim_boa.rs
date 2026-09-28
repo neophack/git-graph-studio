@@ -496,9 +496,10 @@ fn a_module_sized_wrapper_runs_with_every_binding_escaping() {
     );
 
     let mut context = Context::default();
-    let registers = boa_engine::Script::parse(Source::from_bytes(source.as_bytes()), None, &mut context)
-        .expect("the wrapper parses")
-        .evaluate(&mut context);
+    let registers =
+        boa_engine::Script::parse(Source::from_bytes(source.as_bytes()), None, &mut context)
+            .expect("the wrapper parses")
+            .evaluate(&mut context);
     assert!(
         registers.is_err(),
         "Boa's register-local path now runs a module-sized function — the loader's          all-escaping analysis may be reconsidered (see require.rs)"
@@ -606,26 +607,27 @@ fn the_module_bytecode_cache_roundtrips_and_runs_identically() {
             )
             .expect("the wrapper runs");
         let run_fn = module
-            .get(boa_engine::property::PropertyKey::from(
-                boa_engine::js_string!("exports"),
-            ), context)
+            .get(
+                boa_engine::property::PropertyKey::from(boa_engine::js_string!("exports")),
+                context,
+            )
             .expect("final exports")
             .as_object()
             .expect("exports object")
-            .get(boa_engine::property::PropertyKey::from(
-                boa_engine::js_string!("run"),
-            ), context)
+            .get(
+                boa_engine::property::PropertyKey::from(boa_engine::js_string!("run")),
+                context,
+            )
             .expect("run");
         let result = run_fn
             .as_object()
             .expect("run function")
-            .call(
-                &JsValue::undefined(),
-                &[JsValue::from(7)],
-                context,
-            )
+            .call(&JsValue::undefined(), &[JsValue::from(7)], context)
             .expect("run() answers");
-        result.to_string(context).expect("string").to_std_string_escaped()
+        result
+            .to_string(context)
+            .expect("string")
+            .to_std_string_escaped()
     };
 
     // The direct path: parse, compile, run.
@@ -758,16 +760,30 @@ fn register_locals_run_clean_modules_identically() {
             )
             .expect("module.exports");
         function
-            .call(&JsValue::undefined(), &[JsValue::undefined(), JsValue::undefined(), module.clone().into()], context)
+            .call(
+                &JsValue::undefined(),
+                &[
+                    JsValue::undefined(),
+                    JsValue::undefined(),
+                    module.clone().into(),
+                ],
+                context,
+            )
             .expect("the wrapper runs");
         let exports = module
-            .get(boa_engine::property::PropertyKey::from(boa_engine::js_string!("exports")), context)
+            .get(
+                boa_engine::property::PropertyKey::from(boa_engine::js_string!("exports")),
+                context,
+            )
             .expect("exports")
             .as_object()
             .expect("an object");
         let field = |context: &mut Context, name: &str| {
             exports
-                .get(boa_engine::property::PropertyKey::from(boa_engine::js_string!(name)), context)
+                .get(
+                    boa_engine::property::PropertyKey::from(boa_engine::js_string!(name)),
+                    context,
+                )
                 .expect(name)
                 .to_string(context)
                 .expect("string")
@@ -784,7 +800,10 @@ fn register_locals_run_clean_modules_identically() {
     let mut context = Context::default();
     Script::reset_uninitialized_local_trip();
     let direct = run(&mut context);
-    assert_eq!(direct, "12,0,1,2,12", "the register path computes the values");
+    assert_eq!(
+        direct, "12,0,1,2,12",
+        "the register path computes the values"
+    );
 }
 
 /// The fallback half of the register-local path: a use of a block-scoped binding before
@@ -806,8 +825,8 @@ fn a_use_before_declaration_trips_the_register_guard_and_the_fallback_runs() {
 
     let mut context = Context::default();
     Script::reset_uninitialized_local_trip();
-    let script = Script::parse(Source::from_bytes(wrapper.as_bytes()), None, &mut context)
-        .expect("parses");
+    let script =
+        Script::parse(Source::from_bytes(wrapper.as_bytes()), None, &mut context).expect("parses");
     // The compile read the binding inside the block before the class declaration point.
     let _ = script.max_register_count(&mut context);
     assert!(
@@ -816,8 +835,12 @@ fn a_use_before_declaration_trips_the_register_guard_and_the_fallback_runs() {
     );
 
     // The loader's fallback: the same source through the all-escaping analysis.
-    let script = Script::parse_all_bindings_escaping(Source::from_bytes(wrapper.as_bytes()), None, &mut context)
-        .expect("parses escaping");
+    let script = Script::parse_all_bindings_escaping(
+        Source::from_bytes(wrapper.as_bytes()),
+        None,
+        &mut context,
+    )
+    .expect("parses escaping");
     let function = script
         .evaluate(&mut context)
         .expect("evaluates")
@@ -834,14 +857,28 @@ fn a_use_before_declaration_trips_the_register_guard_and_the_fallback_runs() {
         )
         .expect("module.exports");
     function
-        .call(&JsValue::undefined(), &[JsValue::undefined(), JsValue::undefined(), module.clone().into()], &mut context)
+        .call(
+            &JsValue::undefined(),
+            &[
+                JsValue::undefined(),
+                JsValue::undefined(),
+                module.clone().into(),
+            ],
+            &mut context,
+        )
         .expect("the fallback wrapper runs");
     let n = module
-        .get(boa_engine::property::PropertyKey::from(boa_engine::js_string!("exports")), &mut context)
+        .get(
+            boa_engine::property::PropertyKey::from(boa_engine::js_string!("exports")),
+            &mut context,
+        )
         .expect("exports")
         .as_object()
         .expect("an object")
-        .get(boa_engine::property::PropertyKey::from(boa_engine::js_string!("n")), &mut context)
+        .get(
+            boa_engine::property::PropertyKey::from(boa_engine::js_string!("n")),
+            &mut context,
+        )
         .expect("n");
     assert_eq!(n.to_number(&mut context).expect("number") as i64, 10);
 }
