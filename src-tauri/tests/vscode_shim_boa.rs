@@ -507,7 +507,13 @@ fn a_module_sized_wrapper_runs_with_every_binding_escaping() {
 
 #[test]
 fn the_git_graph_extension_entry_evaluates_in_boa() {
-    let entry = std::path::Path::new(&std::env::var("USERPROFILE").unwrap())
+    // The dev-machine install is optional (the skip below) — but the home variable is not:
+    // USERPROFILE is Windows-only, and the bare unwrap panicked on CI's Linux runner
+    // before the skip could fire.
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+    let entry = std::path::Path::new(&home)
         .join(".ggs/extensions/neophack.git-graph-rs-1.0.25/out/extension.js");
     let Ok(source) = std::fs::read_to_string(&entry) else {
         eprintln!("skipping: no git-graph-rs install");
