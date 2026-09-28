@@ -14,6 +14,7 @@
 
 pub mod bca;
 pub mod deadcode;
+pub mod diagram;
 pub mod imports;
 pub mod metrics;
 pub mod modules;

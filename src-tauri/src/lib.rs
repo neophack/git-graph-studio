@@ -1615,6 +1615,7 @@ mod desktop {
                 cmd_analysis::analysis_status,
                 cmd_analysis::analysis_rebuild,
                 cmd_analysis::analysis_module_graph,
+                cmd_analysis::analysis_module_diagram,
                 cmd_analysis::analysis_metrics,
                 cmd_analysis::analysis_dead_code,
                 cmd_analysis::analysis_security,

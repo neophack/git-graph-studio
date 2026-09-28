@@ -16,6 +16,7 @@ use tauri::State;
 use rayon::prelude::*;
 
 use crate::analysis::bca;
+use crate::analysis::diagram::{self, ModuleDiagram};
 use crate::analysis::imports::ImportGraph;
 use crate::analysis::metrics::MetricRow;
 use crate::analysis::modules::{self, ModuleGraph};
@@ -371,6 +372,27 @@ pub async fn analysis_module_graph(
     let data = analysis_of(&state, repo)?;
     let data = data.lock().unwrap();
     Ok(modules::module_graph(&data))
+}
+
+/// The Module Analysis drawing (the gitdiagram-style architecture diagram): the
+/// module graph laid out in the backend — group boxes, blocks, arrows, the mermaid
+/// source and what the caps dropped — geometry ready to set (see `analysis::diagram`).
+/// The filter and the optional focus narrow the pairs the same way the page's tree
+/// does; the page refetches on either changing.
+#[tauri::command]
+pub async fn analysis_module_diagram(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+    focus: Option<String>,
+    filter: Option<String>,
+) -> Result<ModuleDiagram, String> {
+    let data = analysis_of(&state, repo)?;
+    let data = data.lock().unwrap();
+    Ok(diagram::module_diagram(
+        &modules::module_graph(&data),
+        focus.as_deref(),
+        filter.as_deref().unwrap_or(""),
+    ))
 }
 
 /// Every function and method with its measured shape, streamed in batches. The hotspot
