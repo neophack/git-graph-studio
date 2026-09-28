@@ -30,6 +30,30 @@ export interface NodeEnv {
 	env?: Record<string, string>;
 }
 
+/** The Node environment facts when no host carried them in — a bridge older than
+ *  `ext_node_env`, or the backend call failing. The platform word is read from whatever
+ *  environment is observable (a real `process.platform` when one is in scope, else the
+ *  browser's `navigator.platform` — the same read `Uri`'s win32 default takes), and the
+ *  fields that word decides follow it. The word was once hardcoded `win32`, which made
+ *  every non-Windows host's shims spell Windows paths — CI's Linux runner met it as
+ *  `path.join` answering `a\b\c`. */
+export function defaultNodeEnv(): NodeEnv {
+	const platform = (() => {
+		try {
+			if (typeof process !== 'undefined' && typeof process.platform === 'string') return process.platform;
+		} catch {
+			// no process global — the navigator read below stands
+		}
+		const word = typeof navigator !== 'undefined' ? navigator.platform.toLowerCase() : '';
+		return word.includes('win') ? 'win32' : word.includes('mac') ? 'darwin' : 'linux';
+	})();
+	const windows = platform === 'win32';
+	return {
+		platform, arch: 'x64', homedir: '', tmpdir: '', hostname: 'studio', release: '',
+		eol: windows ? '\r\n' : '\n', separator: windows ? '\\' : '/', delimiter: windows ? ';' : ':'
+	};
+}
+
 /** What the loader needs from its host: the preloaded code, the environment, and the two
  *  module worlds outside the package (the `vscode` shim and the Node builtin shims). */
 export interface LoaderHost {

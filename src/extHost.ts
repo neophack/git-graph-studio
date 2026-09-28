@@ -18,6 +18,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { commands } from './commands';
 import { applyContributions, applyExtensionSettings, declaredCommand, extensionSettingDefs, extensionThemeList, extensionViewContributions, languageIdFor, localize, registerContextProvider, registerExtensionSnippets, registerExtensionThemes, removeContributions, type ExtensionThemeDef, type ManifestContributes } from './contributions';
 import { describeDetail, extLog, extLogEnabled, extLogLevel, extLogOnce, flushExtLog, levelForConsole, setExtLogOutput, type ExtLogLevel } from './extLog';
+import { defaultNodeEnv, type NodeEnv } from './extModuleLoader';
 import type { EditorPlacement } from './editor';
 import { setFileDiagnostics, type SerializableDiagnostic } from './editorDiagnostics';
 import { settings as appSettings, syncExtensionThemes, themeById } from './settings';
@@ -2537,14 +2538,13 @@ function dialogFilters(filters: Record<string, string[]> | undefined): { name: s
 }
 
 /** The Node environment facts every frame's `os`/`process` shims read (`ext_node_env`) —
- *  one backend call, cached for the session. */
-let nodeEnvCache: Promise<Record<string, string>> | null = null;
-function cachedNodeEnv(): Promise<Record<string, string>> {
+ *  one backend call, cached for the session. A failed call answers the observable
+ *  platform's derivation, never a hardcoded OS word (CI's Linux runner once met `win32`
+ *  here and every shim spelled Windows paths). */
+let nodeEnvCache: Promise<NodeEnv> | null = null;
+function cachedNodeEnv(): Promise<NodeEnv> {
 	if (nodeEnvCache === null) {
-		nodeEnvCache = invoke<Record<string, string>>('ext_node_env').catch(() => ({
-			platform: 'win32', arch: 'x64', homedir: '', tmpdir: '', hostname: 'studio',
-			release: '', eol: '\r\n', separator: '\\', delimiter: ';'
-		}));
+		nodeEnvCache = invoke<NodeEnv>('ext_node_env').catch(() => defaultNodeEnv());
 	}
 	return nodeEnvCache;
 }

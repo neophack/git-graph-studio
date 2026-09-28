@@ -15,7 +15,7 @@
 
 import { activationContext, createVscodeApi, Disposable, readLocalDocProvider, rehydrateUris, serveHostCall, setUriPlatform, shimLog, UNSERVED_HOST_CALL, Uri, type HostContext, type VscodeApi } from './vscodeApi';
 import { setShimFailureReporter } from './nodeShims/shared';
-import { createNodeRequire, type NodeEnv } from './extModuleLoader';
+import { createNodeRequire, defaultNodeEnv, type NodeEnv } from './extModuleLoader';
 import { createNodeBuiltins, installNodeGlobals } from './nodeShims';
 
 /** The context as it actually crosses `postMessage`: `workspaceFolders[].uri` is bare data
@@ -185,8 +185,11 @@ window.addEventListener('message', (event) => {
 });
 
 function boot(message: InitMessage): void {
+	// The environment facts a host older than `ext_node_env` never sent: derived from the
+	// observable platform, and the same derivation then pins `Uri.fsPath`'s spelling.
+	const fallbackEnv = defaultNodeEnv();
 	// The platform spells every `Uri.fsPath` from here on — pinned before the first Uri.
-	const platform = message.context.platform ?? message.nodeEnv?.platform;
+	const platform = message.context.platform ?? message.nodeEnv?.platform ?? fallbackEnv.platform;
 	setUriPlatform(platform);
 	const context: HostContext = {
 		...message.context,
@@ -220,10 +223,7 @@ function boot(message: InitMessage): void {
 	// extension code assumes (`process`, `Buffer`, `global`, `setImmediate`).
 	const files = message.files ?? (message.code !== undefined ? { 'extension.js': message.code } : {});
 	const binaries = message.binaries ?? [];
-	const nodeEnv: NodeEnv = message.nodeEnv ?? {
-		platform: 'win32', arch: 'x64', homedir: '', tmpdir: '', hostname: 'studio',
-		release: '', eol: '\r\n', separator: '\\', delimiter: ';'
-	};
+	const nodeEnv: NodeEnv = message.nodeEnv ?? fallbackEnv;
 	const shimHost = {
 		nodeEnv, extensionPath: context.extensionPath, files, binaries: message.binaries ?? [],
 		blobs: message.blobs ?? {},
