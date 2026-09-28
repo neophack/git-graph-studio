@@ -83,7 +83,13 @@ pub(crate) fn host_request(emitter: &Emitter, method: &str, args: Value) -> Resu
         "ggs.hostRequest",
         json!({ "method": method, "args": args }),
     );
+    if std::env::var("GGS_TRACE_BOOT").is_ok() {
+        eprintln!("[host-request] {method} ({id}) waiting");
+    }
     let answer = rx.recv_timeout(HOST_REQUEST_TIMEOUT);
+    if std::env::var("GGS_TRACE_BOOT").is_ok() {
+        eprintln!("[host-request] {method} ({id}) woke: {}", answer.is_ok());
+    }
     let _ = host_requests().lock().unwrap().remove(&id);
     answer.map_err(|_| "the workbench did not answer the host request".to_owned())?
 }
@@ -459,8 +465,13 @@ pub fn serve_on<R: std::io::BufRead, W: std::io::Write + Send + 'static>(
             // An answer to this backend's own `ggs.hostRequest`: wake the JS thread that
             // blocked on it.
             if id >= HOST_REQUEST_BASE {
+                if std::env::var("GGS_TRACE_BOOT").is_ok() {
+                    eprintln!("[host-request] answer for {id} routed");
+                }
                 if let Some(tx) = host_requests().lock().unwrap().remove(&id) {
                     let _ = tx.send(answer);
+                } else if std::env::var("GGS_TRACE_BOOT").is_ok() {
+                    eprintln!("[host-request] answer for {id} had no waiter");
                 }
                 let _ = responses_pump;
             }

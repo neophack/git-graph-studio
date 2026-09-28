@@ -254,6 +254,27 @@ impl ProcessHostState {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if backend.kind == "node" {
+            // The packaged layout puts the shim bundle and the real-Node host script in the
+            // bundle's resource directory (macOS `Contents/Resources/`, Linux share/, the
+            // install root on Windows) — never beside the sidecar, which is what the
+            // finders inside ggs-node probe (they cover the dev target layouts). The app
+            // knows its resource directory, so it names the packaged copies here; a
+            // frame-program activation without its shim dies with "no vscode shim ships
+            // with this host" and every backend command lands on "no handler registered".
+            if let Some(app) = self.app.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+                if let Ok(resource_dir) = tauri::Manager::path(&app).resource_dir() {
+                    let shim = resource_dir.join("vscode-shim.cjs");
+                    if shim.is_file() {
+                        command.env("GGS_VSCODE_SHIM", &shim);
+                    }
+                    let host_script = resource_dir.join("node-host.cjs");
+                    if host_script.is_file() {
+                        command.env("GGS_NODE_HOST_SCRIPT", &host_script);
+                    }
+                }
+            }
+        }
         if pretend_entry {
             // The manifest's own spawn arguments are the pretend runtime's contract; a
             // real-Node host takes none of them.
@@ -594,6 +615,22 @@ impl ReaderState {
                     // failing extension is diagnosable without a status view.
                     eprintln!("[ext] {} [{method}] {message}", self.ext_id);
                     push_log(&self.log, format!("[{method}] {message}"));
+                    // The same line into the extension host log, the sink a developer
+                    // actually reads: an activation that fails after the handshake (a
+                    // missing shim, a dead addon) reports only through here — the packaged
+                    // app has no stderr to look at. Levels pass through; the backend logs
+                    // sparingly (its errors and warnings), so no threshold applies.
+                    if method == "$/log" || method == "ggs.log" {
+                        let level = params
+                            .get("level")
+                            .and_then(Value::as_str)
+                            .unwrap_or("info");
+                        cmd_ext::ext_log_append(vec![format!(
+                            "[{level}] [{}] {message}",
+                            self.ext_id
+                        )])
+                        .unwrap_or(());
+                    }
                 }
                 // The one request a backend may make: `ggs.hostRequest`, the real-Node
                 // extension host's way of reaching the workbench services a frame reaches

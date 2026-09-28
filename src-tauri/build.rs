@@ -118,7 +118,19 @@ fn export_napi_host_symbols() {
         Ok("linux") | Ok("freebsd") | Ok("openbsd") => {
             println!("cargo:rustc-link-arg=-rdynamic");
         }
-        _ => {} // macOS: dlopen resolves exe symbols through the flat namespace already
+        // macOS: two flags per symbol family. `-u` forces each definition out of the rlib
+        // and past `-dead_strip` (nothing in the binary references them — the addon calls
+        // them), the way `/INCLUDE:` does on Windows; `-export_dynamic` then keeps the
+        // linked definitions in the executable's dynamic symbol table, where an addon's
+        // `-undefined dynamic_lookup` imports resolve them. Without the pair the symbols
+        // bind to NULL and the engine's registration jumped through address zero.
+        Ok("macos") => {
+            for name in &names {
+                println!("cargo:rustc-link-arg=-Wl,-u,_{name}");
+            }
+            println!("cargo:rustc-link-arg=-Wl,-export_dynamic");
+        }
+        _ => {}
     }
 }
 
