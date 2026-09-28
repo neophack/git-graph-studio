@@ -240,7 +240,12 @@ describe('the keyboard routing', () => {
 
 describe('dispose', () => {
 	it('unwires every listener the workbench registered', async () => {
-		await flush(2);
+		// The boot's first `scm_status` rides an animation frame (the workbench defers it
+		// past first paint), and flush()'s zero-delay rounds cannot wait a frame timer out:
+		// on a loaded CI runner the straggler landed after the count was taken and grew it
+		// by one. Settle real time first, then the promise chains it armed.
+		await new Promise((resolve) => setTimeout(resolve, 40));
+		await flush(8);
 		const scmCallsBefore = backend.callsTo('scm_status').length;
 		const fsListenersBefore = (backend.listeners.get(FS_CHANGED_EVENT) ?? []).length;
 		expect(closeHandlers).toHaveLength(1);
