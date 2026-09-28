@@ -11,8 +11,7 @@ import { registerSelfTestSuites } from '../src/selfTestSuites';
 import { backend } from './tauriMock';
 import { flush } from './helpers';
 
-// jsdom has no canvas (the analysis page's G6), and the version probe has no Tauri runtime.
-vi.mock('@antv/g6', () => import('./g6Stub'));
+// The version probe has no Tauri runtime; the suites script its answers.
 vi.mock('@tauri-apps/api/app', () => ({ getVersion: async () => '0.1.5' }));
 
 const REPO = 'C:\\repo';

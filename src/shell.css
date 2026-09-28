@@ -1380,8 +1380,8 @@ body.resizing iframe { pointer-events: none; }
 .an-l1 { padding-left: 44px; }
 .an-l2 { padding-left: 64px; }
 
-/* The Module Analysis drawing: the view toggle and the layout picker it owns (the
-   picker steps aside in the tree view), then the @antv/G6 canvas filling the body. */
+/* The Module Analysis page's view toggle, and the sort picker the metrics page
+   shares the header row with. */
 .an-toggles { display: inline-flex; gap: 0; }
 .an-toggle {
 	height: 24px; padding: 0 10px; font-size: 11px; border: 1px solid var(--vscode-input-border, transparent);
@@ -1390,30 +1390,112 @@ body.resizing iframe { pointer-events: none; }
 .an-toggle:first-child { border-radius: 4px 0 0 4px; }
 .an-toggle:last-of-type { border-radius: 0 4px 4px 0; }
 .an-toggle.on { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
-.an-layout, .an-sort { height: 24px; font-size: 11px; border-radius: 4px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); }
-.an-page.an-tree .an-layout { display: none; }
-.an-g6 { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+.an-sort { height: 24px; font-size: 11px; border-radius: 4px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); }
 
-/* The overlays on the drawing: the module colour legend in the top corner (plain
-   information, so it never takes pointer events from the canvas) and the
-   selection / focus chips in the bottom corner, each with its clear action. */
-.an-legend {
-	position: absolute; top: 6px; left: 8px; z-index: 2;
-	display: flex; flex-wrap: wrap; gap: 2px 14px; max-width: calc(100% - 16px);
-	padding: 4px 10px; border-radius: 6px;
-	background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-widget-border, transparent);
-	font-size: 11px; color: var(--vscode-descriptionForeground); pointer-events: none;
+/* The Module Analysis drawing (module 17): the backend-laid-out diagram as SVG —
+   module group boxes tinted by their palette slot, blocks stroked in their group's
+   colour, call-count-labelled arrows — with wheel zoom / drag pan, the zoom toolbar
+   in the top corner and the selection / focus chips in the bottom one. Every colour
+   is a CSS variable (`--gstroke` per palette slot), so the theme follows for free
+   and no re-render is ever needed for it. */
+.an-diagram { flex: 1; min-height: 0; position: relative; overflow: hidden; cursor: grab; touch-action: none; outline: none; }
+.an-diagram.dragging { cursor: grabbing; }
+.an-diagram.empty .an-zoombar { display: none; }
+.an-svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+/* The toolbar rides the lavender canvas as gitdiagram's own pill: white glass,
+   slate glyphs (fixed colours, like the canvas). */
+.an-zoombar {
+	position: absolute; top: 10px; right: 10px; z-index: 2; display: flex; gap: 6px; align-items: center;
+	--tb-bg: rgba(255, 255, 255, 0.85); --tb-line: rgba(51, 65, 85, 0.18); --tb-text: #334155;
 }
-.an-legend:empty { display: none; }
-.an-legend-item { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
-.an-legend-item .dot { width: 8px; height: 8px; border-radius: 2px; }
+.an-zoombar .pill {
+	display: flex; align-items: center; overflow: hidden; border-radius: 999px;
+	background: var(--tb-bg); border: 1px solid var(--tb-line);
+}
+.an-zoombar .pill .action-btn { border-radius: 0; }
+.an-zoombar .action-btn { color: var(--tb-text); }
+.an-zoombar .action-btn:hover { background: rgba(51, 65, 85, 0.08); }
+.an-zoom-level {
+	min-width: 46px; text-align: center; font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
+	color: var(--tb-text); border-left: 1px solid var(--tb-line);
+	border-right: 1px solid var(--tb-line); padding: 0 8px; align-self: stretch; line-height: 22px;
+}
+.an-zoombar > .action-btn {
+	height: 24px; border-radius: 999px; padding: 0 10px;
+	background: var(--tb-bg); border: 1px solid var(--tb-line);
+}
+/* The diagram is gitdiagram's rendering, verbatim (gitdiagram.com's light canvas):
+   a lavender sheet the drawing sits on, each area one pastel card from its classDefs
+   (light fill, same-hue saturated stroke, dark text), near-white group boxes with
+   slate titles, thin slate edges whose counts ride small slate labels. Fixed
+   colours — an embedded gitdiagram looks the same in either app theme. */
+.an-diagram {
+	background: #ede3fd;
+	--dg-edge: #475569;
+	--dg-label: #334155;
+	--dg-halo: #ede3fd;
+	--dg-group-fill: rgba(255, 255, 255, 0.5);
+	--dg-group-border: rgba(51, 65, 85, 0.16);
+	--dg-title: #334155;
+	--dg-accent: #2563eb;
+}
+.an-node.t0 rect { fill: #dbeafe; stroke: #2563eb; }
+.an-node.t0 text { fill: #172554; }
+.an-node.t1 rect { fill: #fef3c7; stroke: #d97706; }
+.an-node.t1 text { fill: #78350f; }
+.an-node.t2 rect { fill: #dcfce7; stroke: #16a34a; }
+.an-node.t2 text { fill: #14532d; }
+.an-node.t3 rect { fill: #ffe4e6; stroke: #e11d48; }
+.an-node.t3 text { fill: #881337; }
+.an-node.t4 rect { fill: #e0e7ff; stroke: #4f46e5; }
+.an-node.t4 text { fill: #312e81; }
+.an-node.t5 rect { fill: #ccfbf1; stroke: #0f766e; }
+.an-node.t5 text { fill: #134e4a; }
+.an-node.t6 rect { fill: #f8fafc; stroke: #334155; }
+.an-node.t6 text { fill: #0f172a; }
+.an-group rect { fill: var(--dg-group-fill); stroke: var(--dg-group-border); stroke-width: 1.2; }
+.an-group text { fill: var(--dg-title); font-size: 12px; font-weight: 700; }
+
+.an-node { cursor: pointer; }
+.an-node rect {
+	stroke-width: 1.5;
+	transition: stroke-width 120ms, transform 160ms cubic-bezier(0.23, 1, 0.32, 1);
+	transform-box: fill-box; transform-origin: center;
+}
+.an-node text { font-weight: 600; }
+.an-node text .sub { font-size: 9.5px; opacity: 0.75; font-weight: 400; }
+.an-node:hover rect { stroke-width: 2.5px; transform: scale(1.05); filter: brightness(0.85); }
+@media (prefers-reduced-motion: reduce) {
+	.an-node rect { transition: none; }
+	.an-node:hover rect { transform: none; }
+}
+.an-edge { cursor: pointer; opacity: 0.8; transition: opacity 120ms; }
+.an-edge:hover, .an-edge.selected { opacity: 1; }
+.an-edge .hit { stroke: transparent; stroke-width: 12px; fill: none; pointer-events: stroke; }
+.an-edge .line { stroke: var(--dg-edge); fill: none; pointer-events: none; }
+.an-edge .head { fill: var(--dg-edge); pointer-events: none; }
+.an-edge.dashed .line { stroke-dasharray: 5 4; }
+.an-edge text {
+	fill: var(--dg-label); font-size: 11px; font-weight: 600; text-anchor: middle;
+	paint-order: stroke; stroke: var(--dg-halo); stroke-width: 3.5px;
+	pointer-events: none;
+}
+/* Below readable size the call counts fold away except on the edge under attention —
+   progressive disclosure instead of a wall of unreadable specks. */
+.an-svg.labels-off .an-edge text { display: none; }
+.an-svg.labels-off .an-edge.selected text, .an-svg.labels-off .an-edge:hover text { display: block; }
+.an-node.selected rect { stroke: var(--dg-accent) !important; stroke-width: 3px; }
+.an-node.related rect { stroke-width: 2.5px; }
+.an-edge.selected .line { stroke: var(--dg-accent); }
+.an-edge.selected .head { fill: var(--dg-accent); }
+.an-node.dim, .an-edge.dim { opacity: 0.22; }
 .an-graphbar { position: absolute; left: 8px; bottom: 6px; z-index: 2; display: flex; gap: 6px; align-items: center; }
 .an-graphbar:empty { display: none; }
 .an-graphbar .chip {
 	display: inline-flex; align-items: center; gap: 4px; max-width: 60vw;
-	padding: 2px 4px 2px 8px; border-radius: 6px;
-	background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-widget-border, transparent);
-	font-size: 11px; color: var(--vscode-descriptionForeground);
+	padding: 2px 4px 2px 8px; border-radius: 999px;
+	background: rgba(255, 255, 255, 0.9); border: 1px solid rgba(51, 65, 85, 0.18);
+	font-size: 11px; color: #334155;
 }
 .an-graphbar .chip > span:not(.codicon) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 

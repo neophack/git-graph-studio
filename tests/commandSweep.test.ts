@@ -13,8 +13,6 @@ import * as state from '../src/state';
 import { backend } from './tauriMock';
 import { flush, key, notifications, texts, until } from './helpers';
 
-// jsdom has no canvas: the module analysis drawing runs on the G6 stub.
-vi.mock('@antv/g6', () => import('./g6Stub'));
 
 const REPO = 'C:\\repo';
 const NOTES = `${REPO}\\notes.txt`;
@@ -66,6 +64,7 @@ beforeEach(async () => {
 		['analysis_status', () => ({ state: 'ready', done: 2, total: 2, files: 2, symbols: 3, calls: 2 })],
 		['analysis_rebuild', () => ({ state: 'ready', done: 2, total: 2, files: 2, symbols: 3, calls: 2 })],
 		['analysis_module_graph', () => ({ modules: [], edges: [], fileEdges: [], totalCalls: 0, totalFileEdges: 0 })],
+		['analysis_module_diagram', () => ({ nodes: [], edges: [], groups: [], width: 0, height: 0, droppedFiles: 0, droppedEdges: 0, mermaid: 'flowchart LR\n' })],
 		['mcp_tools', () => [{ name: 'symbol_lookup', description: 'look up a symbol' }]],
 		['mcp_log', () => []],
 		['analysis_metrics', ({ onEvent }) => {

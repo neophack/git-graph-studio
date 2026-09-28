@@ -26,8 +26,6 @@ import { commonHandlers, type Handler } from './scenarioFixtures';
 import { backend } from './tauriMock';
 import { click, flush, hover, key, rightClick, type } from './helpers';
 
-// jsdom has no canvas: the module analysis drawing runs on the G6 stub.
-vi.mock('@antv/g6', () => import('./g6Stub'));
 
 const REPO = 'C:\\repo';
 const NOTES = `${REPO}\\notes.txt`;
@@ -115,6 +113,20 @@ function richHandlers(): Map<string, Handler> {
 		],
 		totalCalls: 3,
 		totalFileEdges: 2
+	}));
+	map.set('analysis_module_diagram', () => ({
+		nodes: [
+			{ path: 'src/main.rs', label: 'main.rs', module: 'src', callsIn: 1, callsOut: 2, tone: 1, x: 20, y: 20, w: 100, h: 44 },
+			{ path: 'notes.txt', label: 'notes.txt', module: '', callsIn: 2, callsOut: 1, tone: 0, x: 220, y: 20, w: 100, h: 44 }
+		],
+		edges: [{ id: 'src/main.rs→notes.txt', from: 'src/main.rs', to: 'notes.txt', calls: 2, width: 2, dashed: false, path: 'M 70 64 L 270 64', head: '270,64 261,59.5 261,68.5', labelX: 170, labelY: 64 }],
+		groups: [
+			{ name: '', tone: 0, x: 206, y: 0, w: 128, h: 84 },
+			{ name: 'src', tone: 1, x: 6, y: 0, w: 128, h: 84 }
+		],
+		width: 340, height: 70,
+		droppedFiles: 0, droppedEdges: 0,
+		mermaid: 'flowchart LR\n'
 	}));
 	map.set('analysis_metrics', ({ onEvent }) => {
 		const channel = onEvent as { onmessage: (e: unknown) => void };
@@ -593,14 +605,9 @@ describe('the full UI sweep', () => {
 					count();
 					await flush(4);
 				}
-				// The module drawing's layout picker rebuilds the G6 graph.
-				const layout = page.querySelector<HTMLSelectElement>('.an-layout');
-				if (layout) {
-					layout.value = 'circular';
-					layout.dispatchEvent(new Event('change', { bubbles: true }));
-					count();
-					await flush(4);
-				}
+				// The module drawing's zoom toolbar pans and zooms the laid-out SVG.
+				const zoom = page.querySelector<HTMLElement>('.an-zoombar');
+				if (zoom) await clickAll(zoom, '.action-btn', count);
 			}
 			await showView('explorer');
 		});

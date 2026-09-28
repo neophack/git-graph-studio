@@ -14,8 +14,6 @@ import { SCENARIOS, handlersFor, type Scenario } from './scenarioFixtures';
 import { backend } from './tauriMock';
 import { click, flush, texts } from './helpers';
 
-// jsdom has no canvas: the module analysis drawing runs on the G6 stub.
-vi.mock('@antv/g6', () => import('./g6Stub'));
 
 const REPO = 'C:\\repo';
 

@@ -1,7 +1,8 @@
 // The Code Analysis module's vitest (module 17): the sidebar (tool rows, index state,
 // rebuild) and the five result pages — the streaming reports over their batch/done
-// channels, the module analysis drawing (the @antv/G6 stub verifying the mapping, the
-// layout switch and the block double-click) beside its tree, and the import graph's
+// channels, the module analysis drawing (the backend-laid-out diagram the SVG viewport
+// renders: group boxes, blocks, arrows, the selection highlight, the right-click
+// navigation, the mermaid copy, pan and zoom) beside its tree, and the import graph's
 // cycles. Everything runs against the scripted `tauriMock` backend like every other
 // view suite.
 
@@ -9,9 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { flush } from './helpers';
 
 import { backend, Channel } from './tauriMock';
-import { created as g6Graphs } from './g6Stub';
 
-vi.mock('@antv/g6', () => import('./g6Stub'));
 
 let AnalysisView: typeof import('../src/analysisView').AnalysisView;
 let createAnalysisPage: typeof import('../src/analysisPages').createAnalysisPage;
@@ -59,10 +58,6 @@ function moduleGraphAnswer(): Record<string, unknown> {
 		totalFileEdges: 3
 	};
 }
-
-beforeEach(() => {
-	g6Graphs.length = 0;
-});
 
 describe('the Analysis sidebar', () => {
 	it('lists the five tools and opens their pages on click', async () => {
@@ -252,96 +247,88 @@ describe('the report pages', () => {
 });
 
 describe('the graph pages', () => {
-	it('module analysis opens on the drawing and opens a file on block double-click', async () => {
+	/** The module diagram fixture the drawing tests share — the placed answer
+	 *  `analysis_module_diagram` returns for the module graph fixture above. */
+	function diagramAnswer(): Record<string, unknown> {
+		return {
+			nodes: [
+				{ path: 'src/a.ts', label: 'a.ts', module: 'src', callsIn: 2, callsOut: 5, tone: 1, x: 100, y: 180, w: 80, h: 44 },
+				{ path: 'src/ui.ts', label: 'ui.ts', module: 'src', callsIn: 6, callsOut: 0, tone: 1, x: 270, y: 360, w: 80, h: 44 },
+				{ path: 'top.rs', label: 'top.rs', module: '', callsIn: 0, callsOut: 2, tone: 0, x: 100, y: 20, w: 90, h: 44 },
+				{ path: 'src/b.ts', label: 'b.ts', module: 'src', callsIn: 0, callsOut: 1, tone: 1, x: 260, y: 180, w: 80, h: 44 }
+			],
+			edges: [
+				{ id: 'src/a.ts→src/ui.ts', from: 'src/a.ts', to: 'src/ui.ts', calls: 5, width: 3, dashed: false, path: 'M 140.0 224.0 L 310.0 360.0', head: '310.0,360.0 301.0,355.5 301.0,364.5', labelX: 225, labelY: 292 },
+				{ id: 'src/b.ts→src/ui.ts', from: 'src/b.ts', to: 'src/ui.ts', calls: 1, width: 1, dashed: false, path: 'M 300.0 224.0 L 310.0 360.0', head: '310.0,360.0 301.0,355.5 301.0,364.5', labelX: 305, labelY: 292 },
+				{ id: 'top.rs→src/a.ts', from: 'top.rs', to: 'src/a.ts', calls: 2, width: 2, dashed: false, path: 'M 145.0 64.0 L 140.0 180.0', head: '140.0,180.0 135.5,171.0 144.5,171.0', labelX: 142, labelY: 122 }
+			],
+			groups: [
+				{ name: '', tone: 0, x: 86, y: 0, w: 118, h: 96 },
+				{ name: 'src', tone: 1, x: 86, y: 146, w: 264, h: 282 }
+			],
+			width: 350, height: 280,
+			droppedFiles: 0, droppedEdges: 0,
+			mermaid: 'flowchart LR\n  subgraph G0["(root)"]\n    N2["top.rs"]\n  end\n  subgraph G1["src"]\n    N0["a.ts"]\n    N1["ui.ts"]\n  end\n  N0 -->|"5 calls"| N1\n'
+		};
+	}
+
+	function nodeEl(root: HTMLElement, path: string): HTMLElement {
+		return root.querySelector(`.an-node[data-path="${path}"]`)!;
+	}
+
+	it('module analysis renders the backend diagram and opens a file on block double-click', async () => {
 		await modules();
 		backend.on('analysis_module_graph', moduleGraphAnswer);
+		backend.on('analysis_module_diagram', () => diagramAnswer());
 		const root = host();
 		const page = createAnalysisPage('modules', root);
 		const opened: string[] = [];
 		page.onOpen = (path, line) => opened.push(`${path}:${line}`);
 		await flush(8);
-		// The page opens on the drawing: one G6 graph over the files, rendered once.
-		expect(g6Graphs.length).toBe(1);
-		const graph = g6Graphs[0]!;
-		const options = graph.options as {
-			data: { nodes: { id: string; data: { module: string } }[]; edges: { source: string; target: string }[] };
-			layout: { type: string };
-			behaviors: string[];
-		};
-		expect(graph.rendered).toBe(1);
-		// The busiest files lead the blocks: a.ts (5 out + 2 in) before ui.ts (6 in).
-		expect(options.data.nodes.map((node) => node.id)).toEqual(['src/a.ts', 'src/ui.ts', 'top.rs', 'src/b.ts']);
-		expect(options.data.nodes[0].data.module).toBe('src');
-		// Every block carries its real rectangle in data.size — the collision source the
-		// layouts read, so no block ever sits on another.
-		const firstNode = options.data.nodes[0] as { data: { size: [number, number] } };
-		expect(firstNode.data.size[1]).toBe(30);
-		expect(firstNode.data.size[0]).toBeGreaterThanOrEqual(72);
-		expect(options.data.edges.map((edge) => `${edge.source}→${edge.target}`)).toEqual([
-			'src/a.ts→src/ui.ts',
-			'src/b.ts→src/ui.ts',
-			'top.rs→src/a.ts'
-		]);
-		// The default layout is circular — the blocks on a ring whose radius fits their
-		// combined widths; without a force simulation, blocks drag alone.
-		expect(options.layout.type).toBe('circular');
-		expect((options.layout as { radius?: number }).radius).toBeGreaterThanOrEqual(260);
-		expect(options.behaviors).toContain('drag-element');
-		expect(options.behaviors).not.toContain('drag-element-force');
-		expect(options.behaviors).toContain('zoom-canvas');
+		// The drawing is one backend fetch: the laid-out diagram, filter and focus empty.
+		const diagramCalls = backend.callsTo('analysis_module_diagram');
+		expect(diagramCalls.length).toBe(1);
+		expect(diagramCalls[0]).toMatchObject({ focus: null, filter: '' });
+		// The SVG viewport renders what shipped: the blocks in the answer's order, the
+		// module group boxes titled beside them, the arrows with their call counts.
+		expect([...root.querySelectorAll<HTMLElement>('.an-node')].map((node) => node.dataset.path))
+			.toEqual(['src/a.ts', 'src/ui.ts', 'top.rs', 'src/b.ts']);
+		expect(texts('.an-group-label', root)).toEqual(['(root)', 'src']);
+		expect(root.querySelectorAll('.an-edge').length).toBe(3);
+		expect(texts('.an-edge text', root)[0]).toContain('5 calls');
+		expect(root.querySelector('.an-edge .line')!.getAttribute('d')).toContain(' L ');
+		// gitdiagram's card: the area's tone class, the two-line label.
+		expect(nodeEl(root, 'src/a.ts').classList.contains('t1')).toBe(true);
+		const lines = texts('.an-node[data-path="src/a.ts"] tspan', root);
+		expect(lines).toEqual(['a.ts', '[src]']);
+		expect(texts('.an-node[data-path="top.rs"] tspan', root)).toEqual(['top.rs'], 'a root file keeps one line');
+		expect(root.querySelector('.an-edge .head')!.getAttribute('points')).toBeTruthy();
 		// A double-clicked block opens the file.
-		graph.emit('node:dblclick', { target: { id: 'src/a.ts' } });
+		nodeEl(root, 'src/a.ts').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
 		expect(opened).toEqual(['src/a.ts:1']);
 	});
 
-	it('module analysis switches layouts, capping the drawing at 400 blocks', async () => {
+	it('module analysis says how many files the diagram cap dropped', async () => {
 		await modules();
-		const fileEdges = Array.from({ length: 401 }, (_, i) => ({
-			from: `f${String(i).padStart(3, '0')}.rs`,
-			to: 'hub.rs',
-			calls: 1,
-			sites: []
-		}));
-		backend.on('analysis_module_graph', () => ({
-			modules: [{ name: '', files: 402, symbols: 500 }],
-			edges: [{ from: '', to: '', calls: 401, files: 401 }],
-			fileEdges,
-			totalCalls: 401,
-			totalFileEdges: 401
-		}));
+		backend.on('analysis_module_graph', moduleGraphAnswer);
+		backend.on('analysis_module_diagram', () => ({ ...diagramAnswer(), droppedFiles: 354 }));
 		const root = host();
 		createAnalysisPage('modules', root);
 		await flush(8);
-		const first = g6Graphs.at(-1)!;
-		const firstData = (first.options as { data: { nodes: unknown[] } }).data;
-		expect(firstData.nodes.length).toBe(400, 'the drawing caps at 400 blocks');
-		expect(texts('.an-more', root)[0]).toContain('2 more files');
-		// The layout picker rebuilds the drawing with the chosen algorithm — the layered
-		// layout runs left-to-right with spacing wide enough for the blocks.
-		const select = root.querySelector<HTMLSelectElement>('.an-layout')!;
-		select.value = 'dagre';
-		select.dispatchEvent(new Event('change', { bubbles: true }));
-		await flush(4);
-		const second = g6Graphs.at(-1)!;
-		expect(second).not.toBe(first);
-		const layout = (second.options as { layout: { type: string; rankdir?: string; nodesep?: number; ranksep?: number } }).layout;
-		expect(layout.type).toBe('dagre');
-		expect(layout.rankdir).toBe('LR');
-		expect(layout.nodesep).toBeGreaterThanOrEqual(20);
-		expect(layout.ranksep).toBeGreaterThanOrEqual(50);
-		expect((second.options as { behaviors: string[] }).behaviors).toContain('drag-element');
+		expect(texts('.an-more', root)[0]).toContain('354 more files');
 	});
 
 	it('module analysis toggles to the tree and expands to files and call sites', async () => {
 		await modules();
 		backend.on('analysis_module_graph', moduleGraphAnswer);
+		backend.on('analysis_module_diagram', () => diagramAnswer());
 		const root = host();
 		const page = createAnalysisPage('modules', root);
 		const opened: string[] = [];
 		page.onOpen = (path, line) => opened.push(`${path}:${line}`);
 		await flush(8);
 		expect(texts('.an-title', root)[0]).toBe('2 modules · 3 file dependencies · 8 cross-file calls');
-		// The Tree toggle flips the view; the layout picker steps aside.
+		// The Tree toggle flips the view; the drawing's host steps aside.
 		const toggles = [...root.querySelectorAll<HTMLElement>('.an-toggle')];
 		expect(toggles[0].classList.contains('on')).toBe(true);
 		toggles[1].click();
@@ -396,6 +383,7 @@ describe('the graph pages', () => {
 			totalCalls: 3,
 			totalFileEdges: 2
 		}));
+		backend.on('analysis_module_diagram', () => diagramAnswer());
 		const root = host();
 		createAnalysisPage('modules', root);
 		await flush(8);
@@ -412,53 +400,50 @@ describe('the graph pages', () => {
 			totalCalls: 0,
 			totalFileEdges: 0
 		}));
+		backend.on('analysis_module_diagram', () => ({ ...diagramAnswer(), nodes: [], edges: [], groups: [] }));
 		const root = host();
 		createAnalysisPage('modules', root);
 		await flush(8);
 		expect(texts('.an-empty', root)[0]).toContain('No cross-file calls');
-		expect(g6Graphs.length).toBe(0, 'nothing to draw');
+		expect(root.querySelectorAll('.an-node').length).toBe(0, 'nothing to draw');
 	});
 
 	it('module analysis highlights the clicked block\'s dependencies and dims the rest', async () => {
 		await modules();
 		backend.on('analysis_module_graph', moduleGraphAnswer);
+		backend.on('analysis_module_diagram', () => diagramAnswer());
 		const root = host();
 		createAnalysisPage('modules', root);
 		await flush(8);
-		const graph = g6Graphs[0]!;
-		graph.emit('node:click', { target: { id: 'src/a.ts' } });
-		await flush(2);
+		nodeEl(root, 'src/a.ts').dispatchEvent(new MouseEvent('click', { bubbles: true }));
 		// The clicked block takes the selection, its neighbours thicken, every arrow it
 		// touches is selected too, and everything else fades back.
-		const states = graph.stateCalls[0] as Record<string, string[]>;
-		expect(states['src/a.ts']).toEqual(['selected']);
-		expect(states['src/ui.ts']).toEqual(['related']);
-		expect(states['top.rs']).toEqual(['related']);
-		expect(states['src/b.ts']).toEqual(['dim']);
-		expect(states['src/a.ts→src/ui.ts']).toEqual(['selected']);
-		expect(states['top.rs→src/a.ts']).toEqual(['selected']);
-		expect(states['src/b.ts→src/ui.ts']).toEqual(['dim']);
-		// The chip over the canvas states what is selected.
+		expect(nodeEl(root, 'src/a.ts').classList.contains('selected')).toBe(true);
+		expect(nodeEl(root, 'src/ui.ts').classList.contains('related')).toBe(true);
+		expect(nodeEl(root, 'top.rs').classList.contains('related')).toBe(true);
+		expect(nodeEl(root, 'src/b.ts').classList.contains('dim')).toBe(true);
+		expect(root.querySelector('.an-edge[data-id="src/a.ts→src/ui.ts"]')!.classList.contains('selected')).toBe(true);
+		expect(root.querySelector('.an-edge[data-id="top.rs→src/a.ts"]')!.classList.contains('selected')).toBe(true);
+		expect(root.querySelector('.an-edge[data-id="src/b.ts→src/ui.ts"]')!.classList.contains('dim')).toBe(true);
+		// The chip over the drawing states what is selected.
 		expect(texts('.an-graphbar .chip', root)[0]).toContain('src/a.ts');
-		// A click on empty canvas returns the drawing to neutral.
-		graph.emit('canvas:click', {});
-		await flush(2);
-		const cleared = graph.stateCalls[1] as Record<string, string[]>;
-		expect(cleared['src/a.ts']).toEqual([]);
-		expect(cleared['src/b.ts→src/ui.ts']).toEqual([]);
+		// A click on empty drawing returns it to neutral.
+		root.querySelector('.an-svg')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		expect(nodeEl(root, 'src/a.ts').classList.contains('selected')).toBe(false);
+		expect(root.querySelector('.an-edge[data-id="src/b.ts→src/ui.ts"]')!.classList.contains('dim')).toBe(false);
 		expect(root.querySelectorAll('.an-graphbar .chip').length).toBe(0);
 	});
 
 	it('module analysis right-clicks a block into a navigation menu', async () => {
 		await modules();
 		backend.on('analysis_module_graph', moduleGraphAnswer);
+		backend.on('analysis_module_diagram', () => diagramAnswer());
 		const root = host();
 		const page = createAnalysisPage('modules', root);
 		const opened: string[] = [];
 		page.onOpen = (path, line) => opened.push(`${path}:${line}`);
 		await flush(8);
-		const graph = g6Graphs[0]!;
-		graph.emit('node:contextmenu', { target: { id: 'src/a.ts' }, clientX: 40, clientY: 40 });
+		nodeEl(root, 'src/a.ts').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
 		await flush(2);
 		const items = () => [...document.querySelectorAll<HTMLElement>('.context-menu .item')];
 		expect(items().map((item) => item.textContent)).toContain('Open File');
@@ -466,27 +451,25 @@ describe('the graph pages', () => {
 		items().find((item) => item.textContent === 'Open File')!.click();
 		expect(opened).toEqual(['src/a.ts:1']);
 		// The Calls submenu lists the related blocks; picking one selects and centres it.
-		graph.emit('node:contextmenu', { target: { id: 'src/a.ts' }, clientX: 40, clientY: 40 });
+		nodeEl(root, 'src/a.ts').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
 		await flush(2);
 		items().find((item) => item.textContent === 'Calls (1)')!.dispatchEvent(new MouseEvent('mouseenter'));
 		await flush(2);
-		const neighbour = items().find((item) => item.textContent?.includes('src/ui.ts'))!;
-		neighbour.click();
-		expect(graph.focused).toEqual(['src/ui.ts']);
-		const states = graph.stateCalls.at(-1) as Record<string, string[]>;
-		expect(states['src/ui.ts']).toEqual(['selected']);
+		items().find((item) => item.textContent?.includes('src/ui.ts'))!.click();
+		expect(nodeEl(root, 'src/ui.ts').classList.contains('selected')).toBe(true);
 	});
 
 	it('module analysis right-clicks an arrow into its call sites', async () => {
 		await modules();
 		backend.on('analysis_module_graph', moduleGraphAnswer);
+		backend.on('analysis_module_diagram', () => diagramAnswer());
 		const root = host();
 		const page = createAnalysisPage('modules', root);
 		const opened: string[] = [];
 		page.onOpen = (path, line) => opened.push(`${path}:${line}`);
 		await flush(8);
-		const graph = g6Graphs[0]!;
-		graph.emit('edge:contextmenu', { target: { id: 'src/a.ts→src/ui.ts' }, clientX: 40, clientY: 40 });
+		root.querySelector('.an-edge[data-id="src/a.ts→src/ui.ts"]')!
+			.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
 		await flush(2);
 		const items = () => [...document.querySelectorAll<HTMLElement>('.context-menu .item')];
 		expect(items().some((item) => item.textContent === 'src/a.ts → src/ui.ts')).toBe(true);
@@ -499,36 +482,96 @@ describe('the graph pages', () => {
 	it('module analysis focuses a block\'s neighbourhood from the menu', async () => {
 		await modules();
 		backend.on('analysis_module_graph', moduleGraphAnswer);
+		const focusedAnswer = () => ({
+			...diagramAnswer(),
+			nodes: diagramAnswer().nodes.filter((node) => (node as { path: string }).path !== 'top.rs'),
+			edges: diagramAnswer().edges.filter((edge) => (edge as { from: string }).from !== 'top.rs')
+		});
+		backend.on('analysis_module_diagram', ({ focus }: { focus: string | null }) => (focus ? focusedAnswer() : diagramAnswer()));
 		const root = host();
 		createAnalysisPage('modules', root);
 		await flush(8);
-		const graph = g6Graphs[0]!;
-		graph.emit('node:contextmenu', { target: { id: 'src/ui.ts' }, clientX: 40, clientY: 40 });
+		nodeEl(root, 'src/ui.ts').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
 		await flush(2);
 		[...document.querySelectorAll<HTMLElement>('.context-menu .item')]
 			.find((item) => item.textContent === 'Show Only Related Files')!.click();
-		await flush(6);
-		// The drawing rebuilds around the block: itself and the two files that call it.
-		const focused = g6Graphs.at(-1)!;
-		expect(focused).not.toBe(graph);
-		const ids = (focused.options as { data: { nodes: { id: string }[] } }).data.nodes.map((node) => node.id);
-		expect(ids).toEqual(['src/ui.ts', 'src/a.ts', 'src/b.ts']);
+		await flush(8);
+		// The drawing refetches around the block: itself and the files that call it.
+		const calls = () => backend.callsTo('analysis_module_diagram');
+		expect(calls()).toHaveLength(2);
+		expect(calls()[1]).toMatchObject({ focus: 'src/ui.ts' });
+		expect(root.querySelectorAll('.an-node').length).toBe(3);
 		// The chip names the focus and clears it — back to every file.
 		expect(texts('.an-graphbar .chip', root)[0]).toContain('src/ui.ts');
 		(root.querySelector('.an-graphbar .chip .action-btn') as HTMLElement).click();
-		await flush(6);
-		const restored = g6Graphs.at(-1)!;
-		expect((restored.options as { data: { nodes: unknown[] } }).data.nodes.length).toBe(4);
+		await flush(8);
+		expect(calls()).toHaveLength(3);
+		expect(calls()[2]).toMatchObject({ focus: null });
+		expect(root.querySelectorAll('.an-node').length).toBe(4);
 	});
 
-	it('module analysis draws a legend of the modules on the canvas', async () => {
+	it('module analysis copies the diagram as mermaid source', async () => {
 		await modules();
 		backend.on('analysis_module_graph', moduleGraphAnswer);
+		backend.on('analysis_module_diagram', () => diagramAnswer());
 		const root = host();
 		createAnalysisPage('modules', root);
 		await flush(8);
-		// Busiest module first, the workspace root included under its label.
-		expect(texts('.an-legend-item', root)).toEqual(['src', '(root)']);
+		const copy = [...root.querySelectorAll<HTMLElement>('.an-header .actions .action-btn')]
+			.find((button) => button.title === 'Copy Mermaid Source')!;
+		copy.click();
+		expect(backend.clipboard.at(-1)).toContain('flowchart LR');
+		expect(backend.clipboard.at(-1)).toContain('subgraph G1["src"]');
+	});
+
+	it('module analysis zooms from the toolbar, the wheel and the keyboard', async () => {
+		await modules();
+		backend.on('analysis_module_graph', moduleGraphAnswer);
+		backend.on('analysis_module_diagram', () => diagramAnswer());
+		const root = host();
+		createAnalysisPage('modules', root);
+		await flush(8);
+		const hostEl = root.querySelector<HTMLElement>('.an-diagram')!;
+		const level = () => texts('.an-zoom-level', root)[0];
+		// The toolbar's zoom and fit glide over 160 ms — the assertions wait it out.
+		const settle = () => new Promise((resolve) => setTimeout(resolve, 220));
+		expect(level()).toBe('100%');
+		const zoomButton = (title: string) =>
+			[...root.querySelectorAll<HTMLElement>('.an-zoombar .action-btn')].find((button) => button.title === title)!;
+		zoomButton('Zoom in').click();
+		await settle();
+		expect(level()).toBe('118%');
+		zoomButton('Zoom out').click();
+		await settle();
+		expect(level()).toBe('100%');
+		// A mouse wheel (whole-line notches) zooms at the cursor; a trackpad's
+		// fractional pixel scroll pans instead; ctrl+wheel is always pinch-zoom.
+		// The zoom percentage reads against the fit level, so `0` fits to 100%.
+		const wheelAt = async (init: Record<number, unknown>) => {
+			const wheel = new Event('wheel', { bubbles: true, cancelable: true });
+			Object.assign(wheel, { clientX: 8, clientY: 8, ...init });
+			hostEl.dispatchEvent(wheel);
+			// The view state lands on the next animation frame.
+			await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+		};
+		await wheelAt({ deltaY: -120 });
+		expect(Number(level().replace('%', ''))).toBeGreaterThan(118, 'the mouse wheel zoomed');
+		hostEl.dispatchEvent(new KeyboardEvent('keydown', { key: '0' }));
+		await settle();
+		expect(level()).toBe('100%');
+		// ctrl+wheel zooms regardless of the delta's shape (no animation — direct).
+		await wheelAt({ deltaY: -4, ctrlKey: true });
+		expect(Number(level().replace('%', ''))).toBeGreaterThan(100);
+		hostEl.dispatchEvent(new KeyboardEvent('keydown', { key: '0' }));
+		await settle();
+		// A fractional-Y pixel delta latches the trackpad mode: pan, not zoom.
+		wheelAt({ deltaY: 12.5, deltaX: 2 });
+		expect(level()).toBe('100%', 'the trackpad scroll panned, the zoom held');
+		// The arrow keys pan by 40 px; Home fits like `0`.
+		hostEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
+		hostEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home' }));
+		await settle();
+		expect(level()).toBe('100%');
 	});
 
 	it('the MCP page lists setup, the catalogue and the call log', async () => {
