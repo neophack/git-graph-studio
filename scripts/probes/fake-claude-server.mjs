@@ -37,6 +37,7 @@ const marker = flag('--marker', 'FAKE-CLAUDE');
  * Code tried to call (the 404s show which surfaces still phone the real cloud). */
 const requests = [];
 let report = null;
+let diagnostics = null;
 const logRequest = (entry) => {
 	requests.push(entry);
 	const line = JSON.stringify(entry);
@@ -100,6 +101,12 @@ const server = http.createServer(async (req, res) => {
 		return finish(200, 'application/json', report ?? { none: true });
 	}
 	if (path === '/requests') return finish(200, 'application/json', requests);
+	// The probe's page-diagnostic landing (lib.rs's GGS_DEV_HARNESS_DIAG hook posts here):
+	// stored for GET /diag — a 404 here used to pollute the request log and look like a bug.
+	if (path === '/diag') {
+		if (req.method === 'POST') { diagnostics = JSON.parse(body || 'null'); return finish(200, 'application/json', { stored: true }); }
+		return finish(200, 'application/json', diagnostics ?? { none: true });
+	}
 	if (path === '/v1/messages/count_tokens') return finish(200, 'application/json', { input_tokens: 17 });
 	if (path === '/v1/models') {
 		return finish(200, 'application/json', { data: [

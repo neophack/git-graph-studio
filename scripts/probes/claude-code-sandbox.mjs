@@ -33,7 +33,7 @@
 // Darwin/Linux only (ps/pkill; Windows' packaged pass is claude-code-live-check.mjs).
 
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -131,7 +131,7 @@ const buildRemote = async () => {
 	for (let attempt = 0; attempt < 5 && !remote.url; attempt++) {
 		const port = 20000 + Math.floor(Math.random() * 20000);
 		const daemon = spawn('git', ['daemon', '--export-all', '--enable=receive-pack', '--informative-errors',
-			'--reuseaddr', '--base-path=' + remoteDir, '--port=' + port, '--verbose'], { stdio: ['ignore', 'ignore', 'pipe'] });
+			'--reuseaddr', '--base-path=' + remoteDir, '--port=' + port, '--verbose'], { stdio: ['ignore', 'ignore', 'pipe'], detached: true });
 		daemon.stderr.on('data', (chunk) => appendFileSync(daemonLog, chunk));
 		const url = `git://127.0.0.1:${port}/origin.git`;
 		for (let probe = 0; probe < 8 && daemon.exitCode === null; probe++) {
@@ -195,6 +195,7 @@ const fetchMovedOrigin = () => {
 
 /* ---------- the fake server ---------- */
 const server = { child: null, port: serverPort };
+let appRef = null; // the app's process-group leader, for the exit handler's teardown
 const startServer = async () => {
 	server.child = spawn(process.execPath, [join(appDir, 'scripts', 'probes', 'fake-claude-server.mjs'),
 		'--port', String(serverPort), '--log', serverLog, '--marker', MARKER], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -280,9 +281,13 @@ const writeReport = (preflightOut, harnessReport) => {
 	const bucketStats = () => {
 		const names = [...new Set(samples.flatMap((sample) => Object.keys(sample.buckets)))];
 		return names.map((name) => {
-			const series = samples.map((sample) => sample.buckets[name] ?? 0);
-			return { name, samples: series.length, avgMb: Math.round(series.reduce((a, b) => a + b, 0) / Math.max(1, series.length) / 1024),
-				peakMb: Math.round(Math.max(...series) / 1024), finalMb: Math.round((series[series.length - 1] ?? 0) / 1024) };
+			// Only the samples where the process existed count: zero-filling the stretch
+			// before it spawned (the app builds for minutes) dragged averages to nonsense
+			// ("app avg 2 MB, peak 90 MB").
+			const series = samples.map((sample) => sample.buckets[name]).filter((kb) => Number.isFinite(kb) && kb > 0);
+			if (!series.length) return { name, samples: 0, avgMb: 0, peakMb: 0, finalMb: 0 };
+			return { name, samples: series.length, avgMb: Math.round(series.reduce((a, b) => a + b, 0) / series.length / 1024),
+				peakMb: Math.round(Math.max(...series) / 1024), finalMb: Math.round(series[series.length - 1] / 1024) };
 		});
 	};
 	const requestSummary = (() => {
@@ -377,7 +382,8 @@ const run = async () => {
 		// load — the only window into a WKWebView with no CDP.
 		...(noHarness ? {} : {
 			GGS_DEV_HARNESS: harnessPage,
-			GGS_DEV_HARNESS_DIAG: `${join(sandboxDir, 'harness-diag.json')}|http://127.0.0.1:${server.port}/diag`
+			GGS_DEV_HARNESS_DIAG: `${join(sandboxDir, 'harness-diag.json')}|http://127.0.0.1:${server.port}/diag`,
+			GGS_DEV_HARNESS_HEARTBEAT: join(sandboxDir, 'harness-heartbeat.txt')
 		})
 	};
 	const tauriArgs = ['tauri', 'dev', '--no-watch', '--', workspaceDir];
@@ -385,7 +391,11 @@ const run = async () => {
 	// The harness's waits are page timers; macOS must not nap the display mid-run (the app
 	// side also asserts an activity and floats its window — lib.rs's probe hook).
 	const caffeinate = spawn('caffeinate', ['-d', '-i'], { stdio: 'ignore' });
-	const app = spawn('npx', tauriArgs, { cwd: appDir, stdio: ['ignore', 'pipe', 'pipe'], env: appEnv });
+	// detached: the run's whole tree (npx → tauri → vite/cargo → the app → backends) becomes
+	// one process group, which stopApp kills with one signal — no name-based sweeps that
+	// could reach into another run.
+	const app = spawn('npx', tauriArgs, { cwd: appDir, stdio: ['ignore', 'pipe', 'pipe'], env: appEnv, detached: true });
+	appRef = app;
 	app.stdout.on('data', (chunk) => appendFileSync(tauriLog, chunk));
 	app.stderr.on('data', (chunk) => appendFileSync(tauriLog, chunk));
 
@@ -394,19 +404,13 @@ const run = async () => {
 			app.kill('SIGINT'); // tauri dev forwards to the app, which stops its backends
 			await sleep(4000);
 		}
-		// Whatever survived an unclean exit (the beforeDevCommand's vite orphans and keeps
-		// 5173 — strictPort — which then fails the NEXT run's port guard) — swept by name;
-		// every pattern is this probe's own processes (paths under this repository).
-		for (const killer of [
-			['pkill', ['-f', 'tauri dev --no-watch']],
-			['pkill', ['-f', `cargo  run ${workspaceDir}`]],
-			['pkill', ['-f', 'cargo/debug/git-graph-studio']],
-			['pkill', ['-f', 'git-graph-studio/node_modules/.bin/vite']],
-			['pkill', ['-f', 'git-graph-studio.*npm run dev:vite']]
-		]) {
-			try { spawnSync(killer[0], killer[1]); } catch { /* not present */ }
-		}
-		await sleep(1000);
+		// Kill this run's whole process GROUP (the app spawned detached: npx → tauri → vite/
+		// cargo → the app → its backends are all one group). Never sweep by name: a global
+		// pkill pattern once murdered a LATER run's vite tree mid-pass when an earlier,
+		// timed-out probe got around to its cleanup — the mystery stalls were exactly that.
+		try { process.kill(-app.pid, 'SIGTERM'); } catch { /* group already gone */ }
+		await sleep(1500);
+		try { process.kill(-app.pid, 'SIGKILL'); } catch { /* group already gone */ }
 	};
 	// One exit path: the report is (re)written, the tree and the server die unless --keep.
 	let preflightRef = preflightOut;
@@ -414,7 +418,7 @@ const run = async () => {
 	const finish = async (code) => {
 		writeReport(preflightRef, harnessRef);
 		if (!keep) { await stopApp(); server.child?.kill(); caffeinate.kill(); }
-		else log(keep ? '[keep] the app and the fake server stay up — Ctrl-C this probe when done' : '');
+		else log('[keep] the app and the fake server stay up — Ctrl-C this probe when done');
 		return code;
 	};
 
@@ -441,6 +445,7 @@ const run = async () => {
 	let lastMessageCount = 0;
 	let diagShown = false;
 	let fetchSeen = false;
+	let heartbeatAge = -1;
 	while (Date.now() < deadline) {
 		await sleep(3000);
 		if (app.exitCode !== null) { log('[fatal] tauri dev exited early — tail of its log:'); for (const line of readFileSync(tauriLog, 'utf8').split('\n').slice(-12)) log('  ' + line); break; }
@@ -448,6 +453,16 @@ const run = async () => {
 		if (!diagShown && existsSync(join(sandboxDir, 'harness-diag.json'))) {
 			diagShown = true;
 			log('[diag] ' + readFileSync(join(sandboxDir, 'harness-diag.json'), 'utf8').slice(0, 1200));
+		}
+		// The page's pulse: the native hook writes a timestamp every 3 s through the IPC
+		// bridge. Fresh → the page's JS runs (a stalled pass is harness logic); stale → the
+		// page or the bridge is dead at the WebKit level, and no harness fix applies.
+		if (existsSync(join(sandboxDir, 'harness-heartbeat.txt'))) {
+			const age = Math.round((Date.now() - statSync(join(sandboxDir, 'harness-heartbeat.txt')).mtimeMs) / 1000);
+			if (heartbeatAge === -1) log('[heartbeat] the page pulse is live');
+			if (age > 15 && heartbeatAge <= 15) log(`[heartbeat] the page pulse went STALE (${age} s old) — the webview stopped executing JS`);
+			if (age <= 15 && heartbeatAge > 15) log('[heartbeat] the page pulse recovered');
+			heartbeatAge = age;
 		}
 		try {
 			// The harness streams its rows into the report file over Tauri IPC (write_file) —
@@ -480,9 +495,13 @@ const run = async () => {
 	harnessRef = harnessReport;
 
 	// The git-graph-rs fetch verdict, from the workspace itself: origin/main reaching the
-	// seeded head means the plugin's fetch crossed the fake remote inside the app.
+	// seeded head means the plugin's fetch crossed the fake remote inside the app. The
+	// fetch command's promise may outlive the row on a fresh engine — give the ref update
+	// a landing window before ruling.
 	if (remote.seededHead) {
-		log(`[git] fetch through git-graph-rs: ${fetchMovedOrigin() ? 'verified — origin/main reached the seeded head' : 'not verified (no fetch ran, or it did not move origin/main)'}`);
+		let verified = fetchMovedOrigin();
+		for (let i = 0; i < 10 && !verified; i++) { await sleep(3000); verified = fetchMovedOrigin(); }
+		log(`[git] fetch through git-graph-rs: ${verified ? 'verified — origin/main reached the seeded head' : 'not verified (no fetch ran, or it did not move origin/main)'}`);
 	}
 	if (!harnessReport) {
 		log('[done] no harness report arrived — the report file carries what was collected');
@@ -502,9 +521,14 @@ process.exit(exitCode);
 // Every exit path kills the fake server and the git daemon — a crash between startServer and
 // finish() must not leak loopback listeners (the earlier runs did, and the port-check below
 // then refuses).
+// Every exit path tears this run's own tree down — the server, the daemon and the app's
+// process group (finish() handles the orderly paths; this handler catches the throws).
 process.on('exit', () => {
 	if (server.child && server.child.exitCode === null) server.child.kill();
-	if (remote.daemon && remote.daemon.exitCode === null) remote.daemon.kill();
+	// The daemon spawned detached (its own group) — kill the group, so even a probe killed
+	// with SIGKILL cannot leave a `git daemon` serving the sandbox to init.
+	if (remote.daemon && remote.daemon.exitCode === null) { try { process.kill(-remote.daemon.pid, 'SIGTERM'); } catch { try { remote.daemon.kill(); } catch { /* gone */ } } }
+	if (typeof appRef !== 'undefined' && appRef && appRef.exitCode === null) { try { process.kill(-appRef.pid, 'SIGTERM'); } catch { /* gone */ } }
 });
 process.on('SIGINT', () => process.exit(130));
 process.on('SIGTERM', () => process.exit(143));
