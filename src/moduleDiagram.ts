@@ -1,18 +1,21 @@
-// The Module Analysis drawing's viewport (module 17): everything the page does with
-// the laid-out diagram the backend's `analysis_module_diagram` hands it — the SVG
-// (module group boxes, call-count-labelled arrows, file blocks) rendered from the
-// shipped geometry. The viewport is a port of gitdiagram's own viewer (its
-// use-mermaid-viewport / use-diagram-wheel-gestures source): the view state carries
-// the fit scale and the zoom bounds and the percentage are relative to it (100% =
-// the fit level, 0.6×–12× the range); a mouse wheel zooms at the cursor while a
-// trackpad's two-finger scroll pans (the gesture latches per 180 ms burst, ctrl/cmd
-// wheel is always pinch-zoom, WKWebView gesture events too); panning clamps to the
-// 32–160 px gutter band; toolbar zoom and fit animate over 160 ms (skipped under
-// prefers-reduced-motion); the keyboard pans by arrow and fits on 0/Home. No layout
-// math and no canvas engine live here — the geometry is the backend's, the drawing
-// is DOM and CSS variables, so the theme follows for free.
+// The Module Analysis drawing (module 17): the diagram the backend's
+// `analysis_module_diagram` hands over as mermaid `flowchart TD` source, rendered by
+// mermaid itself — the same renderer, the same ELK layered layout, spacing and
+// classic look gitdiagram initializes (its mermaid-diagram.tsx), so the blocks can
+// never overlap and the look is gitdiagram's by construction. The viewer around the
+// SVG is a port of gitdiagram's own viewport (its use-mermaid-viewport /
+// use-diagram-wheel-gestures): the zoom bounds and the percentage read against the
+// fit level (100 % = fitted, 0.6×–12×), a mouse wheel zooms at the cursor while a
+// trackpad's two-finger scroll pans (per-burst gesture latch, ctrl/cmd always
+// pinch-zoom, WKWebView gesture events too), panning clamps to the 32–160 px gutter
+// band, the toolbar's zoom and fit glide over 160 ms (skipped under
+// prefers-reduced-motion), the keyboard pans by arrow and fits on 0/Home. The
+// interactions the page owns — click highlight, double-click open, the right-click
+// menus — are delegated onto mermaid's own node and edge elements and resolved
+// live, so a rebuilt SVG never orphans them. mermaid loads lazily on the first
+// drawing (a chunk the reports never pay for).
 
-import { t, tf } from './i18n';
+import { t } from './i18n';
 import { actionButton, el } from './ui';
 
 /* ---------- The backend shapes (`analysis_module_diagram`) ---------- */
@@ -20,17 +23,13 @@ import { actionButton, el } from './ui';
 export interface DiagramNode {
 	path: string;
 	label: string;
-	/** The area whose group box holds the block; "" is the root, null the unboxed
+	/** The area whose subgraph holds the block; "" is the root, null the unboxed
 	 *  overflow of a workspace with more areas than gitdiagram's group cap. */
 	module: string | null;
+	/** The area's pastel tone slot — the `t<n>` class in the mermaid source. */
+	tone: number;
 	callsIn: number;
 	callsOut: number;
-	/** The area's pastel tone slot (gitdiagram's toneBlue &c.); 6 is the neutral. */
-	tone: number;
-	x: number;
-	y: number;
-	w: number;
-	h: number;
 }
 
 export interface DiagramEdge {
@@ -38,34 +37,17 @@ export interface DiagramEdge {
 	from: string;
 	to: string;
 	calls: number;
-	width: number;
-	/** A cycle's back edge — dashed around the side (gitdiagram's `-.->`). */
+	/** A cycle's back edge — mermaid's dashed `-.->`. */
 	dashed: boolean;
-	/** The ready-to-set SVG geometry the backend computed. */
-	path: string;
-	head: string;
-	labelX: number;
-	labelY: number;
-}
-
-export interface DiagramGroup {
-	name: string;
-	tone: number;
-	x: number;
-	y: number;
-	w: number;
-	h: number;
 }
 
 export interface ModuleDiagram {
 	nodes: DiagramNode[];
 	edges: DiagramEdge[];
-	groups: DiagramGroup[];
-	width: number;
-	height: number;
 	droppedFiles: number;
 	droppedEdges: number;
-	/** The diagram as mermaid `flowchart LR` source — the copy-the-source export. */
+	/** The diagram as mermaid source — what this view renders and what the page's
+	 *  copy action exports. */
 	mermaid: string;
 }
 
@@ -80,15 +62,7 @@ export function moduleLabel(name: string): string {
 	return name || t('analysis.modules.root');
 }
 
-/* ---------- The SVG kit ---------- */
-
-const SVG_NS = 'http://www.w3.org/2000/svg';
-
-function svgEl<K extends keyof SVGElementTagNameMap>(tag: K, className?: string): SVGElementTagNameMap[K] {
-	const element = document.createElementNS(SVG_NS, tag);
-	if (className) element.setAttribute('class', className);
-	return element;
-}
+/* ---------- the viewer constants (gitdiagram's own) ---------- */
 
 /** The zoom step the toolbar and the keyboard move by (gitdiagram's 1.18). */
 const ZOOM_STEP = 1.18;
@@ -97,19 +71,68 @@ const FIT_PADDING = 24;
 /** The zoom range relative to the fit scale (gitdiagram's 0.6×–12×). */
 const ZOOM_MIN_RELATIVE = 0.6;
 const ZOOM_MAX_RELATIVE = 12;
-/** Arrow-key pan distance, and the animated transition's length and ease. */
+/** Arrow-key pan distance, and the animated transition's length. */
 const ARROW_PAN = 40;
 const ANIMATE_MS = 160;
+/** Pointer travel (px) after which a press stops being a click and becomes a pan. */
+const DRAG_THRESHOLD = 4;
+/** A wheel burst's gesture latch (gitdiagram's 180 ms). */
+const WHEEL_LATCH_MS = 180;
+
 /** The pan/zoom gutter: how much of the diagram may leave the viewport (clamped to
  *  gitdiagram's 32–160 px band, 12 % of the axis). */
 function gutter(container: number): number {
 	return Math.max(32, Math.min(160, container * 0.12));
 }
-/** Pointer travel (px) after which a press stops being a click and becomes a pan. */
-const DRAG_THRESHOLD = 4;
-/** A wheel burst's gesture latch: acceleration/momentum must not split one scroll
- *  into a pan and a zoom (gitdiagram's 180 ms). */
-const WHEEL_LATCH_MS = 180;
+
+/* ---------- mermaid, loaded once with gitdiagram's config ---------- */
+
+type MermaidRenderer = {
+	registerLayoutLoaders: (...loaders: unknown[]) => Promise<void> | void;
+	initialize: (config: Record<string, unknown>) => void;
+	render: (id: string, text: string, container?: HTMLElement) => Promise<{ svg: string }>;
+};
+
+let mermaidReady: Promise<MermaidRenderer> | null = null;
+
+/** mermaid + its ELK layout, initialized once with gitdiagram's own configuration
+ *  (its mermaid-diagram.tsx baseConfig): ELK layered layout, classic look, linear
+ *  curves, htmlLabels off with the 200 px wrap, its spacing, and its light theme
+ *  variables over our fixed light canvas. */
+function ensureMermaid(): Promise<MermaidRenderer> {
+	return (mermaidReady ??= (async () => {
+		const [{ default: mermaid }, layout] = await Promise.all([
+			import('mermaid'),
+			import('@mermaid-js/layout-elk')
+		]);
+		await mermaid.registerLayoutLoaders(layout.default);
+		mermaid.initialize({
+			startOnLoad: false,
+			suppressErrorRendering: true,
+			securityLevel: 'strict',
+			theme: 'base',
+			htmlLabels: false,
+			layout: 'elk',
+			flowchart: {
+				wrappingWidth: 200,
+				curve: 'linear',
+				nodeSpacing: 50,
+				rankSpacing: 50,
+				padding: 15
+			},
+			themeVariables: {
+				background: 'transparent',
+				primaryColor: '#f7f7f7',
+				primaryBorderColor: '#334155',
+				primaryTextColor: '#171717',
+				lineColor: '#334155',
+				secondaryColor: '#f0f0f0',
+				tertiaryColor: '#f7f7f7'
+			}
+		});
+		return mermaid as MermaidRenderer;
+	})());
+}
 
 export interface DiagramViewCallbacks {
 	/** A block was double-clicked — the file opens. */
@@ -120,34 +143,42 @@ export interface DiagramViewCallbacks {
 	onEdgeContext: (x: number, y: number, id: string) => void;
 }
 
-/** The diagram viewport: one host element the page places, one SVG it owns. The
- *  pan/zoom state is a translate+scale on the viewport group — CSS variables colour
- *  everything, so a theme switch is instant and nothing here re-renders. */
+interface ViewState {
+	fitScale: number;
+	width: number;
+	height: number;
+	scale: number;
+	x: number;
+	y: number;
+}
+
+/** The diagram viewport: one host element the page places, mermaid's SVG inside a
+ *  content div the pan/zoom transform drives (gitdiagram's diagramRef), and the
+ *  delegated interactions over mermaid's own node and edge elements. */
 export class DiagramView {
 	readonly host: HTMLElement;
-	private readonly svg: SVGSVGElement;
-	private readonly viewport: SVGGElement;
+	private readonly content: HTMLElement;
 	private readonly zoomLevel: HTMLElement;
-	private readonly nodeElements = new Map<string, SVGGElement>();
-	private readonly edgeElements = new Map<string, SVGGElement>();
 	private resizeObserver: ResizeObserver | null = null;
-	private diagram: ModuleDiagram | null = null;
-	/** The view state, gitdiagram's shape: the fit scale the zoom reads against, the
-	 *  content extent, and the translate+scale currently applied. */
-	private view: { fitScale: number; width: number; height: number; scale: number; x: number; y: number } | null = null;
+	/** Relabels whenever mermaid's tree grows — the markers always match the SVG
+	 *  that is on screen. */
+	private labelObserver: MutationObserver | null = null;
+	private view: ViewState | null = null;
+	/** Bumps on every render; an in-flight mermaid render whose token went stale
+	 *  discards itself before touching the DOM. */
+	private renderToken = 0;
 	/** The user has zoomed or panned by hand — the auto refit stands aside. */
 	private userMoved = false;
 	/** The last pan moved far enough that the click after it must not land. */
 	private dragMoved = false;
 	private drag: { x: number; y: number } | null = null;
-	/** The pinch pair: the two pointers a two-finger gesture tracks. */
-	private pinch: { startDistance: number; startView: { x: number; y: number; scale: number }; start: { x: number; y: number } } | null = null;
 	private readonly pointers = new Map<number, { x: number; y: number }>();
-	/** The wheel burst's latched mode, its last event time, and WKWebView's pinch. */
+	private pinch: { startDistance: number; startView: { x: number; y: number; scale: number }; start: { x: number; y: number } } | null = null;
 	private wheelMode: 'pan' | 'zoom' | null = null;
 	private lastWheelTime = -Infinity;
 	private viewFrame: number | null = null;
 	private animationFrame: number | null = null;
+	private gestureScale: number | null = null;
 
 	constructor(private readonly callbacks: DiagramViewCallbacks) {
 		this.host = el('div', 'an-diagram');
@@ -165,11 +196,32 @@ export class DiagramView {
 			]),
 			actionButton('screen-full', t('analysis.modules.fit'), () => this.fit(true))
 		]));
-		this.svg = svgEl('svg', 'an-svg');
-		this.viewport = svgEl('g', 'an-viewport');
-		this.svg.append(this.viewport);
-		this.host.append(this.svg);
-		this.svg.addEventListener('click', () => this.callbacks.onSelect(null));
+		this.content = el('div', 'an-mermaid');
+		this.host.append(this.content);
+		// The delegated interactions: one set of listeners on the content survives
+		// mermaid rebuilding the SVG under us; the payload markers they resolve are
+		// stamped onto whatever tree is on screen.
+		this.content.addEventListener('click', (event) => {
+			const hit = DiagramView.hitOf(event);
+			if (!hit) return; // empty canvas — the svg-root listener clears
+			event.stopPropagation();
+			this.callbacks.onSelect(hit.id);
+		});
+		this.content.addEventListener('dblclick', (event) => {
+			const hit = DiagramView.hitOf(event);
+			if (!hit || hit.kind !== 'node') return;
+			event.stopPropagation();
+			this.callbacks.onOpenNode(hit.id);
+		});
+		this.content.addEventListener('contextmenu', (event) => {
+			event.preventDefault();
+			const hit = DiagramView.hitOf(event);
+			if (!hit) return;
+			event.stopPropagation();
+			const point = event as MouseEvent;
+			if (hit.kind === 'node') this.callbacks.onNodeContext(point.clientX, point.clientY, hit.id);
+			else this.callbacks.onEdgeContext(point.clientX, point.clientY, hit.id);
+		});
 		this.host.addEventListener('wheel', (event) => this.onWheel(event), { passive: false });
 		this.host.addEventListener('gesturestart', (event) => this.onGestureStart(event), { passive: false } as AddEventListenerOptions);
 		this.host.addEventListener('gesturechange', (event) => this.onGestureChange(event), { passive: false } as AddEventListenerOptions);
@@ -188,77 +240,206 @@ export class DiagramView {
 			this.dragMoved = false;
 			event.stopPropagation();
 		}, true);
-		// A container resize (a view switch back, a panel open) refits an untouched
-		// viewport and re-clamps a hand-moved one around its centre — the source's
-		// resize branch. jsdom has no ResizeObserver; the fit there is the identity.
 		if (typeof ResizeObserver !== 'undefined') {
 			this.resizeObserver = new ResizeObserver(() => this.onHostResized());
 			this.resizeObserver.observe(this.host);
 		}
 	}
 
-	/** Render a new diagram (null: nothing to draw). A fresh diagram resets the
-	 *  viewport to the fit level — the source's prepareForRender + fitDiagram; the
-	 *  zoom percentage reads against the new fit afterwards. */
+	/** The element a pointer event landed on, as the page knows it: a block (its
+	 *  `data-path`) or an arrow (its `data-id`) — whichever marked ancestor the
+	 *  event resolves to. */
+	private static hitOf(event: Event): { kind: 'node' | 'edge'; id: string } | null {
+		const target = event.target;
+		if (!(target instanceof Element)) return null;
+		const marked = target.closest('[data-path], [data-id]');
+		if (!marked) return null;
+		const path = marked.getAttribute('data-path');
+		if (path) return { kind: 'node', id: path };
+		const id = marked.getAttribute('data-id');
+		return id ? { kind: 'edge', id } : null;
+	}
+
+	/** Render a new diagram (null: nothing to draw). mermaid loads and lays the
+	 *  source out (ELK), the markers land on its elements, and the viewport resets
+	 *  to the fit level — gitdiagram's render → fitDiagram sequence. */
 	setDiagram(diagram: ModuleDiagram | null): void {
-		this.diagram = diagram;
-		this.nodeElements.clear();
-		this.edgeElements.clear();
-		this.viewport.textContent = '';
+		const token = ++this.renderToken;
+		this.labelObserver?.disconnect();
+		this.labelObserver = null;
+		this.content.textContent = '';
+		this.userMoved = false;
 		this.host.classList.toggle('empty', !diagram || diagram.nodes.length === 0);
-		this.cancelAnimation();
-		if (!diagram || diagram.nodes.length === 0) {
-			this.view = null;
+		if (!diagram || diagram.nodes.length === 0) return;
+		void this.render(diagram, token);
+	}
+
+	private async render(diagram: ModuleDiagram, token: number): Promise<void> {
+		let svg: string;
+		try {
+			const mermaid = await ensureMermaid();
+			// A hidden render target the width of the viewport — the wrap width the
+			// labels measure against (gitdiagram's createHiddenRenderTarget).
+			const target = el('div');
+			target.style.position = 'absolute';
+			target.style.visibility = 'hidden';
+			target.style.pointerEvents = 'none';
+			target.style.left = '0';
+			target.style.top = '0';
+			target.style.zIndex = '-1';
+			target.style.width = `${Math.max(this.host.clientWidth || 800, 1)}px`;
+			document.body.append(target);
+			try {
+				({ svg } = await mermaid.render(`ggs-diagram-${token}`, diagram.mermaid, target));
+			} finally {
+				target.remove();
+			}
+		} catch {
+			// A newer render took over, or mermaid refused the source — the page's
+			// empty/error state already stands.
 			return;
 		}
-		for (const group of diagram.groups) this.viewport.append(this.renderGroup(group));
-		for (const edge of diagram.edges) this.viewport.append(this.renderEdge(edge));
-		for (const node of diagram.nodes) this.viewport.append(this.renderNode(node));
-		this.userMoved = false;
+		if (token !== this.renderToken) return;
+		// Parse as XML and import the whole tree: the HTML parser can truncate an
+		// SVG document mid-stream (a jsdom quirk we hit head-on), DOMParser cannot.
+		try {
+			const parsed = new DOMParser().parseFromString(svg, 'image/svg+xml');
+			if (parsed.getElementsByTagName('parsererror').length > 0) throw new Error('parse error');
+			const tree = document.importNode(parsed.documentElement, true);
+			this.content.textContent = '';
+			this.content.append(tree);
+		} catch {
+			this.content.innerHTML = svg; // a browser parses innerHTML fine — the quirk is jsdom's
+		}
+		this.labelElements(diagram);
+		this.labelObserver?.disconnect();
+		if (typeof MutationObserver !== 'undefined') {
+			this.labelObserver = new MutationObserver(() => {
+				if (token === this.renderToken) this.labelElements(diagram);
+			});
+			this.labelObserver.observe(this.content, { childList: true, subtree: true });
+		}
+		this.measureAndFit();
+		// A click on empty canvas (the root or a cluster's blank area) clears.
+		this.content.querySelector('svg')?.addEventListener('click', () => {
+			if (token === this.renderToken) this.callbacks.onSelect(null);
+		});
+	}
+
+	/** Every element under `root`, DOM-core (getElementsByTagName) — jsdom's
+	 *  selector engine can lag on a freshly parsed SVG subtree, and the marker
+	 *  passes must see the tree as it serializes. */
+	private static walk(root: Element): Element[] {
+		return [...root.getElementsByTagName('*')] as Element[];
+	}
+
+	/** Stamp mermaid's elements with the payload's markers: nodes carry
+	 *  `flowchart-N<index>-<n>` ids and edges `L_N<from>_N<to>_<n>`, parsed back onto
+	 *  the payload's paths (the ids are ours — the backend writes them). Idempotent,
+	 *  so the late pass only fills what is missing. */
+	private labelElements(diagram: ModuleDiagram): void {
+		const svg = this.content.querySelector('svg');
+		if (!svg) return;
+		const paths = new Map(diagram.nodes.map((node, index) => [`N${index}`, node.path]));
+		const edges = new Map<string, string>();
+		for (const edge of diagram.edges) {
+			const from = diagram.nodes.findIndex((node) => node.path === edge.from);
+			const to = diagram.nodes.findIndex((node) => node.path === edge.to);
+			if (from !== -1 && to !== -1) edges.set(`N${from}_N${to}`, edge.id);
+		}
+		for (const element of DiagramView.walk(svg)) {
+			const id = element.getAttribute('id') ?? '';
+			if (element.getAttribute('data-path') || element.getAttribute('data-id')) continue;
+			const node = /flowchart-(N\d+)-\d+$/.exec(id);
+			if (node) {
+				const path = paths.get(node[1]);
+				if (path) element.setAttribute('data-path', path);
+				continue;
+			}
+			const edge = /^L_(N\d+_N\d+)_?\d*$/.exec(id);
+			if (edge) {
+				const edgeId = edges.get(edge[1]);
+				if (edgeId) element.setAttribute('data-id', edgeId);
+			}
+		}
+	}
+
+	/** The SVG's viewBox is the content extent; the element itself is sized to it
+	 *  (gitdiagram's render effect) and the viewport fits to that. */
+	private measureAndFit(): void {
+		const svg = this.content.querySelector('svg');
+		if (!svg) return;
+		svg.style.maxWidth = 'none';
+		const box = svg.viewBox?.baseVal;
+		const width = box && box.width > 0 ? box.width : 600;
+		const height = box && box.height > 0 ? box.height : 400;
+		svg.style.width = `${width}px`;
+		svg.style.height = `${height}px`;
 		this.fit();
 	}
 
 	/** One batched state pass: the classes the page's selection computed (`selected`,
-	 *  `related`, `dim`) over the blocks and arrows of the current diagram. */
+	 *  `related`, `dim`) over the marked elements on screen. */
 	setStates(states: Record<string, string[]>): void {
-		for (const [id, element] of this.nodeElements) this.applyState(element, states[id]);
-		for (const [id, element] of this.edgeElements) this.applyState(element, states[id]);
+		const svg = this.content.querySelector('svg');
+		if (!svg) return;
+		for (const element of DiagramView.walk(svg)) {
+			const id = element.getAttribute('data-path') ?? element.getAttribute('data-id');
+			if (!id) continue;
+			for (const state of ['selected', 'related', 'dim']) {
+				element.classList.toggle(state, states[id]?.includes(state) ?? false);
+			}
+		}
 	}
 
 	/** Bring one block to the viewport's centre without changing the zoom — the menu
 	 *  jumps land where the eye already is. */
 	focusElement(id: string): void {
-		const node = this.diagram?.nodes.find((candidate) => candidate.path === id);
 		const view = this.view;
-		if (!node || !view) return;
-		this.userMoved = true;
-		this.commitView({ ...view, ...this.clamp({ ...view,
-			x: this.host.clientWidth / 2 - (node.x + node.w / 2) * view.scale,
-			y: this.host.clientHeight / 2 - (node.y + node.h / 2) * view.scale
-		})});
+		if (!view) return;
+		const svg = this.content.querySelector('svg');
+		for (const element of svg ? DiagramView.walk(svg) : []) {
+			if (element.getAttribute('data-path') !== id) continue;
+			if (!(element instanceof SVGGraphicsElement)) continue;
+			try {
+				// The node's own transform places it in the untransformed content box.
+				const matrix = element.transform?.baseVal.consolidate()?.matrix;
+				if (!matrix) continue;
+				this.userMoved = true;
+				const next = { ...view,
+					x: this.host.clientWidth / 2 - matrix.e * view.scale,
+					y: this.host.clientHeight / 2 - matrix.f * view.scale };
+				this.commitView({ ...next, ...this.clamp(next) });
+				return;
+			} catch {
+				// no transform support — the selection still lands
+			}
+		}
 	}
 
 	/** Fit the whole diagram into the host (also `0`/Home and the toolbar's fit);
-	 *  a host that cannot be measured yet (jsdom, a hidden view) keeps the identity
-	 *  view so the toolbar still answers. */
+	 *  a host that cannot be measured yet keeps a plain identity view. */
 	fit(animate = false): void {
-		const diagram = this.diagram;
+		const svg = this.content.querySelector('svg');
+		const box = svg?.viewBox?.baseVal;
+		const width = box && box.width > 0 ? box.width : 600;
+		const height = box && box.height > 0 ? box.height : 400;
 		const cw = this.host.clientWidth;
 		const ch = this.host.clientHeight;
 		this.userMoved = false;
-		if (!diagram || diagram.width <= 0 || diagram.height <= 0 || cw <= 0 || ch <= 0) {
-			this.commitView({ fitScale: 1, width: diagram?.width ?? 0, height: diagram?.height ?? 0, scale: 1, x: 0, y: 0 });
+		if (cw <= 0 || ch <= 0) {
+			this.commitView({ fitScale: 1, width, height, scale: 1, x: 0, y: 0 });
 			return;
 		}
-		const fitScale = Math.min((cw - FIT_PADDING * 2) / diagram.width, (ch - FIT_PADDING * 2) / diagram.height);
+		const fitScale = Math.min((cw - FIT_PADDING * 2) / width, (ch - FIT_PADDING * 2) / height);
 		const scale = Number.isFinite(fitScale) && fitScale > 0 ? fitScale : 1;
 		this.animateOrCommit({
 			fitScale,
-			width: diagram.width,
-			height: diagram.height,
+			width,
+			height,
 			scale,
-			x: (cw - diagram.width * scale) / 2,
-			y: (ch - diagram.height * scale) / 2
+			x: (cw - width * scale) / 2,
+			y: (ch - height * scale) / 2
 		}, animate);
 	}
 
@@ -269,6 +450,9 @@ export class DiagramView {
 	}
 
 	destroy(): void {
+		this.renderToken++;
+		this.labelObserver?.disconnect();
+		this.labelObserver = null;
 		this.cancelAnimation();
 		if (this.viewFrame !== null) cancelAnimationFrame(this.viewFrame);
 		this.resizeObserver?.disconnect();
@@ -277,9 +461,7 @@ export class DiagramView {
 
 	/* ---------- the view state (the ported viewer core) ---------- */
 
-	/** Clamp a panned/zoomed view: content smaller than the viewport centres; larger
-	 *  content keeps the gutter band on screen (gitdiagram's clampViewState). */
-	private clamp(view: { fitScale: number; width: number; height: number; scale: number; x: number; y: number }): { x: number; y: number } {
+	private clamp(view: ViewState): { x: number; y: number } {
 		const cw = this.host.clientWidth;
 		const ch = this.host.clientHeight;
 		const scaledWidth = view.width * view.scale;
@@ -292,15 +474,14 @@ export class DiagramView {
 		};
 	}
 
-	private commitView(view: NonNullable<typeof this.view>): void {
+	private commitView(view: ViewState): void {
 		this.cancelAnimation();
 		this.view = view;
 		this.applyTransform();
 	}
 
-	/** Batch transform writes per frame; the zoom label rides along (gitdiagram's
-	 *  scheduleViewState). */
-	private scheduleView(view: NonNullable<typeof this.view>): void {
+	/** Batch transform writes per frame (gitdiagram's scheduleViewState). */
+	private scheduleView(view: ViewState): void {
 		this.view = view;
 		if (this.viewFrame !== null) return;
 		this.viewFrame = requestAnimationFrame(() => {
@@ -311,7 +492,7 @@ export class DiagramView {
 
 	/** The 160 ms eased glide the toolbar zoom and the fit move with (gitdiagram's
 	 *  animateViewState; prefers-reduced-motion, or an unmeasurable host, jumps). */
-	private animateOrCommit(target: NonNullable<typeof this.view>, animate: boolean): void {
+	private animateOrCommit(target: ViewState, animate: boolean): void {
 		const from = this.view;
 		if (!animate || !from || this.prefersReducedMotion()) {
 			this.commitView(target);
@@ -352,11 +533,15 @@ export class DiagramView {
 	private applyTransform(): void {
 		const view = this.view;
 		if (!view) return;
-		this.viewport.setAttribute('transform', `translate(${view.x} ${view.y}) scale(${view.scale})`);
-		// The percentage reads against the fit level — 100 % is the fit, always.
+		// gitdiagram's applyViewState: translate3d + scale on the content element.
+		this.content.style.left = '0';
+		this.content.style.top = '0';
+		this.content.style.position = 'absolute';
+		this.content.style.transformOrigin = '0 0';
+		this.content.style.transform = `translate3d(${view.x}px, ${view.y}px, 0) scale(${view.scale})`;
 		this.zoomLevel.textContent = `${Math.round((view.scale / view.fitScale) * 100)}%`;
 		// The call-count labels are noise below readable size — a map's label LOD.
-		this.svg.classList.toggle('labels-off', view.scale < Math.max(0.85, view.fitScale));
+		this.content.classList.toggle('labels-off', view.scale < Math.max(0.85, view.fitScale));
 	}
 
 	/** Zoom by `factor` around a viewport point (the cursor, or the centre), clamped
@@ -402,7 +587,7 @@ export class DiagramView {
 		event.preventDefault();
 		if (event.ctrlKey || event.metaKey) {
 			this.wheelMode = null;
-			this.zoomAt(Math.exp(-Math.max(-240, Math.min(240, event.deltaY)) * (0.01)), event.clientX, event.clientY);
+			this.zoomAt(Math.exp(-Math.max(-240, Math.min(240, event.deltaY)) * 0.01), event.clientX, event.clientY);
 			return;
 		}
 		if (!this.wheelMode || event.timeStamp - this.lastWheelTime > WHEEL_LATCH_MS) {
@@ -421,8 +606,6 @@ export class DiagramView {
 	}
 
 	/* WKWebView's Safari-style pinch (macOS trackpads reach the app through it). */
-	private gestureScale: number | null = null;
-
 	private onGestureStart(event: Event): void {
 		event.preventDefault();
 		this.gestureScale = 1;
@@ -431,18 +614,17 @@ export class DiagramView {
 	private onGestureChange(event: Event): void {
 		if (this.gestureScale === null) return;
 		event.preventDefault();
-		const scale = (event as unknown as { scale?: number }).scale;
+		const gesture = event as unknown as { scale?: number; clientX?: number; clientY?: number };
+		const scale = gesture.scale;
 		if (typeof scale !== 'number' || !Number.isFinite(scale) || scale <= 0) return;
 		const rect = this.host.getBoundingClientRect();
 		this.zoomAt(
 			scale / this.gestureScale,
-			(event as unknown as { clientX?: number }).clientX ?? rect.left + this.host.clientWidth / 2,
-			(event as unknown as { clientY?: number }).clientY ?? rect.top + this.host.clientHeight / 2
+			gesture.clientX ?? rect.left + this.host.clientWidth / 2,
+			gesture.clientY ?? rect.top + this.host.clientHeight / 2
 		);
 		this.gestureScale = scale;
 	}
-
-	/* ---------- pan by pointer ---------- */
 
 	private onHostResized(): void {
 		const view = this.view;
@@ -501,7 +683,8 @@ export class DiagramView {
 			const contentX = (startLocalX - base.startView.x) / base.startView.scale;
 			const contentY = (startLocalY - base.startView.y) / base.startView.scale;
 			this.userMoved = true;
-			this.scheduleView(this.clampInto({ ...view, scale: nextScale, x: midpoint.x - rect.left - contentX * nextScale, y: midpoint.y - rect.top - contentY * nextScale }));
+			const next = { ...view, scale: nextScale, x: midpoint.x - rect.left - contentX * nextScale, y: midpoint.y - rect.top - contentY * nextScale };
+			this.scheduleView({ ...next, ...this.clamp(next) });
 			return;
 		}
 		const drag = this.drag;
@@ -528,22 +711,6 @@ export class DiagramView {
 		this.host.classList.remove('dragging');
 	}
 
-	/** Clamp with the viewport rect already subtracted (the pinch path works in
-	 *  local coordinates; `clamp` reads fresh bounds for the pan path). */
-	private clampInto(view: NonNullable<typeof this.view>): NonNullable<typeof this.view> {
-		const cw = this.host.clientWidth;
-		const ch = this.host.clientHeight;
-		const scaledWidth = view.width * view.scale;
-		const scaledHeight = view.height * view.scale;
-		const gx = gutter(cw);
-		const gy = gutter(ch);
-		return {
-			...view,
-			x: scaledWidth <= cw ? (cw - scaledWidth) / 2 : Math.max(cw - scaledWidth - gx, Math.min(gx, view.x)),
-			y: scaledHeight <= ch ? (ch - scaledHeight) / 2 : Math.max(ch - scaledHeight - gy, Math.min(gy, view.y))
-		};
-	}
-
 	private onKeyDown(event: KeyboardEvent): void {
 		if (event.ctrlKey || event.metaKey || event.altKey) return;
 		if (event.key === '+' || event.key === '=') this.stepZoom(ZOOM_STEP);
@@ -556,109 +723,4 @@ export class DiagramView {
 		else return;
 		event.preventDefault();
 	}
-
-	/* ---------- the pieces ---------- */
-
-	private renderGroup(group: DiagramGroup): SVGGElement {
-		const element = svgEl('g', `an-group t${group.tone % 6}`);
-		const rect = svgEl('rect');
-		rect.setAttribute('x', String(group.x));
-		rect.setAttribute('y', String(group.y));
-		rect.setAttribute('width', String(group.w));
-		rect.setAttribute('height', String(group.h));
-		rect.setAttribute('rx', '10');
-		const label = svgEl('text', 'an-group-label');
-		label.setAttribute('x', String(group.x + group.w / 2));
-		label.setAttribute('y', String(group.y + 19));
-		label.setAttribute('text-anchor', 'middle');
-		// A narrow run's title truncates to the box width — a long directory name must
-		// not spill into the neighbouring box; the full name rides the hover tooltip.
-		const full = moduleLabel(group.name);
-		const maxChars = Math.max(4, Math.floor((group.w - 16) / 6.6));
-		label.textContent = full.length > maxChars ? `${full.slice(0, Math.max(1, maxChars - 1))}…` : full;
-		const title = svgEl('title');
-		title.textContent = full;
-		element.append(rect, label, title);
-		return element;
-	}
-
-	private renderNode(node: DiagramNode): SVGGElement {
-		const element = svgEl('g', `an-node t${node.tone % 7}`);
-		element.dataset.path = node.path;
-		element.setAttribute('transform', `translate(${node.x} ${node.y})`);
-		const rect = svgEl('rect');
-		rect.setAttribute('width', String(node.w));
-		rect.setAttribute('height', String(node.h));
-		rect.setAttribute('rx', '8');
-		// gitdiagram's two-line card: the name over the bracketed directory.
-		const text = svgEl('text');
-		text.setAttribute('text-anchor', 'middle');
-		const name = svgEl('tspan');
-		name.setAttribute('x', String(node.w / 2));
-		name.setAttribute('y', String(18));
-		name.textContent = node.label;
-		text.append(name);
-		const dir = moduleOf(node.path);
-		if (dir) {
-			const shown = dir.length > 24 ? `${dir.slice(0, 23)}…` : dir;
-			const sub = svgEl('tspan', 'sub');
-			sub.setAttribute('x', String(node.w / 2));
-			sub.setAttribute('y', String(33));
-			sub.textContent = `[${shown}]`;
-			text.append(sub);
-		}
-		const title = svgEl('title');
-		title.textContent = node.path;
-		element.append(rect, text, title);
-		element.addEventListener('click', (event) => {
-			event.stopPropagation();
-			this.callbacks.onSelect(node.path);
-		});
-		element.addEventListener('dblclick', (event) => {
-			event.stopPropagation();
-			this.callbacks.onOpenNode(node.path);
-		});
-		element.addEventListener('contextmenu', (event) => {
-			event.preventDefault();
-			event.stopPropagation();
-			this.callbacks.onNodeContext(event.clientX, event.clientY, node.path);
-		});
-		this.nodeElements.set(node.path, element);
-		return element;
-	}
-
-	private renderEdge(edge: DiagramEdge): SVGGElement {
-		const element = svgEl('g', edge.dashed ? 'an-edge dashed' : 'an-edge');
-		element.dataset.id = edge.id;
-		const hit = svgEl('path', 'hit');
-		hit.setAttribute('d', edge.path);
-		const line = svgEl('path', 'line');
-		line.setAttribute('d', edge.path);
-		line.style.strokeWidth = String(edge.width);
-		const head = svgEl('polygon', 'head');
-		head.setAttribute('points', edge.head);
-		const label = svgEl('text');
-		label.setAttribute('x', String(edge.labelX));
-		label.setAttribute('y', String(edge.labelY + 4));
-		label.textContent = tf('analysis.modules.calls', edge.calls);
-		element.append(hit, line, head, label);
-		element.addEventListener('click', (event) => {
-			event.stopPropagation();
-			this.callbacks.onSelect(edge.id);
-		});
-		element.addEventListener('contextmenu', (event) => {
-			event.preventDefault();
-			event.stopPropagation();
-			this.callbacks.onEdgeContext(event.clientX, event.clientY, edge.id);
-		});
-		this.edgeElements.set(edge.id, element);
-		return element;
-	}
-
-	private applyState(element: Element, states: string[] | undefined): void {
-		for (const state of ['selected', 'related', 'dim']) {
-			element.classList.toggle(state, states?.includes(state) ?? false);
-		}
-	}
-
 }

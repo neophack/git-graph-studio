@@ -14,6 +14,8 @@
 // lists what was driven, so a surface that silently lost its controls shows up as a shrinking
 // count.
 
+vi.mock('mermaid', () => import('./mermaidStub'));
+vi.mock('@mermaid-js/layout-elk', () => ({ default: {} }));
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';

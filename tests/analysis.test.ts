@@ -6,6 +6,8 @@
 // cycles. Everything runs against the scripted `tauriMock` backend like every other
 // view suite.
 
+vi.mock('mermaid', () => import('./mermaidStub'));
+vi.mock('@mermaid-js/layout-elk', () => ({ default: {} }));
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { flush } from './helpers';
 
@@ -247,33 +249,49 @@ describe('the report pages', () => {
 });
 
 describe('the graph pages', () => {
-	/** The module diagram fixture the drawing tests share — the placed answer
-	 *  `analysis_module_diagram` returns for the module graph fixture above. */
+	/** The module diagram fixture the drawing tests share — the model answer
+	 *  `analysis_module_diagram` returns for the module graph fixture above; the
+	 *  drawing itself is the mermaid source, which the stubbed renderer parses into
+	 *  the element shapes the assertions drive. */
+	const FIXTURE_MERMAID = 'flowchart TD\n  subgraph G0["src"]\n    N0["a.ts<br/>[src]"]\n    N1["ui.ts<br/>[src]"]\n    N3["b.ts<br/>[src]"]\n  end\n  N2["top.rs"]\n  N2 -->|"2 calls"| N0\n  N0 -->|"5 calls"| N1\n  N3 -->|"1 calls"| N1\n';
+
 	function diagramAnswer(): Record<string, unknown> {
 		return {
 			nodes: [
-				{ path: 'src/a.ts', label: 'a.ts', module: 'src', callsIn: 2, callsOut: 5, tone: 1, x: 100, y: 180, w: 80, h: 44 },
-				{ path: 'src/ui.ts', label: 'ui.ts', module: 'src', callsIn: 6, callsOut: 0, tone: 1, x: 270, y: 360, w: 80, h: 44 },
-				{ path: 'top.rs', label: 'top.rs', module: '', callsIn: 0, callsOut: 2, tone: 0, x: 100, y: 20, w: 90, h: 44 },
-				{ path: 'src/b.ts', label: 'b.ts', module: 'src', callsIn: 0, callsOut: 1, tone: 1, x: 260, y: 180, w: 80, h: 44 }
+				{ path: 'src/a.ts', label: 'a.ts', module: 'src', tone: 1, callsIn: 2, callsOut: 5 },
+				{ path: 'src/ui.ts', label: 'ui.ts', module: 'src', tone: 1, callsIn: 6, callsOut: 0 },
+				{ path: 'top.rs', label: 'top.rs', module: '', tone: 0, callsIn: 0, callsOut: 2 },
+				{ path: 'src/b.ts', label: 'b.ts', module: 'src', tone: 1, callsIn: 0, callsOut: 1 }
 			],
 			edges: [
-				{ id: 'src/a.ts→src/ui.ts', from: 'src/a.ts', to: 'src/ui.ts', calls: 5, width: 3, dashed: false, path: 'M 140.0 224.0 L 310.0 360.0', head: '310.0,360.0 301.0,355.5 301.0,364.5', labelX: 225, labelY: 292 },
-				{ id: 'src/b.ts→src/ui.ts', from: 'src/b.ts', to: 'src/ui.ts', calls: 1, width: 1, dashed: false, path: 'M 300.0 224.0 L 310.0 360.0', head: '310.0,360.0 301.0,355.5 301.0,364.5', labelX: 305, labelY: 292 },
-				{ id: 'top.rs→src/a.ts', from: 'top.rs', to: 'src/a.ts', calls: 2, width: 2, dashed: false, path: 'M 145.0 64.0 L 140.0 180.0', head: '140.0,180.0 135.5,171.0 144.5,171.0', labelX: 142, labelY: 122 }
+				{ id: 'src/a.ts→src/ui.ts', from: 'src/a.ts', to: 'src/ui.ts', calls: 5, dashed: false },
+				{ id: 'src/b.ts→src/ui.ts', from: 'src/b.ts', to: 'src/ui.ts', calls: 1, dashed: false },
+				{ id: 'top.rs→src/a.ts', from: 'top.rs', to: 'src/a.ts', calls: 2, dashed: false }
 			],
-			groups: [
-				{ name: '', tone: 0, x: 86, y: 0, w: 118, h: 96 },
-				{ name: 'src', tone: 1, x: 86, y: 146, w: 264, h: 282 }
-			],
-			width: 350, height: 280,
 			droppedFiles: 0, droppedEdges: 0,
-			mermaid: 'flowchart LR\n  subgraph G0["(root)"]\n    N2["top.rs"]\n  end\n  subgraph G1["src"]\n    N0["a.ts"]\n    N1["ui.ts"]\n  end\n  N0 -->|"5 calls"| N1\n'
+			mermaid: FIXTURE_MERMAID
 		};
 	}
 
 	function nodeEl(root: HTMLElement, path: string): HTMLElement {
-		return root.querySelector(`.an-node[data-path="${path}"]`)!;
+		return root.querySelector(`g.node[data-path="${path}"]`)!;
+	}
+
+	/** The drawing lands asynchronously (mermaid's render, even stubbed): wait for
+	 *  the blocks to appear instead of betting on the flush count. */
+	async function untilDrawn(root: HTMLElement, count = 1): Promise<void> {
+		await vi.waitFor(() => {
+			if (root.querySelectorAll('[data-path]').length < count) throw new Error('the diagram has not rendered yet');
+		}, { timeout: 3000 });
+	}
+
+	/** Wait for the drawing to hold exactly `count` marked blocks — a refetch's
+	 *  stale tree (its own marker count) must not satisfy the wait. */
+	async function untilCount(root: HTMLElement, count: number): Promise<void> {
+		await vi.waitFor(() => {
+			const marked = root.querySelectorAll('[data-path]').length;
+			if (marked !== count) throw new Error(`the drawing holds ${marked} blocks, not ${count} yet`);
+		}, { timeout: 3000 });
 	}
 
 	it('module analysis renders the backend diagram and opens a file on block double-click', async () => {
@@ -285,24 +303,22 @@ describe('the graph pages', () => {
 		const opened: string[] = [];
 		page.onOpen = (path, line) => opened.push(`${path}:${line}`);
 		await flush(8);
+		await untilDrawn(root);
 		// The drawing is one backend fetch: the laid-out diagram, filter and focus empty.
 		const diagramCalls = backend.callsTo('analysis_module_diagram');
 		expect(diagramCalls.length).toBe(1);
 		expect(diagramCalls[0]).toMatchObject({ focus: null, filter: '' });
-		// The SVG viewport renders what shipped: the blocks in the answer's order, the
-		// module group boxes titled beside them, the arrows with their call counts.
-		expect([...root.querySelectorAll<HTMLElement>('.an-node')].map((node) => node.dataset.path))
-			.toEqual(['src/a.ts', 'src/ui.ts', 'top.rs', 'src/b.ts']);
-		expect(texts('.an-group-label', root)).toEqual(['(root)', 'src']);
-		expect(root.querySelectorAll('.an-edge').length).toBe(3);
-		expect(texts('.an-edge text', root)[0]).toContain('5 calls');
-		expect(root.querySelector('.an-edge .line')!.getAttribute('d')).toContain(' L ');
-		// gitdiagram's card: the area's tone class, the two-line label.
-		expect(nodeEl(root, 'src/a.ts').classList.contains('t1')).toBe(true);
-		const lines = texts('.an-node[data-path="src/a.ts"] tspan', root);
-		expect(lines).toEqual(['a.ts', '[src]']);
-		expect(texts('.an-node[data-path="top.rs"] tspan', root)).toEqual(['top.rs'], 'a root file keeps one line');
-		expect(root.querySelector('.an-edge .head')!.getAttribute('points')).toBeTruthy();
+		// mermaid renders the source: the cards in the answer's order, the subgraph
+		// cluster, the arrows with their call counts (the stub parses the source into
+		// mermaid's own element shapes).
+		console.log('IDS', [...root.querySelectorAll('g.node')].map((n) => `${n.getAttribute('id')}=>${(n as SVGElement).dataset?.path ?? n.getAttribute('data-path')}`));
+		expect([...root.querySelectorAll<HTMLElement>('g.node')].map((node) => node.dataset.path))
+			.toEqual(['src/a.ts', 'src/ui.ts', 'src/b.ts', 'top.rs'], 'the subgraph cards precede the ungrouped');
+		expect(root.querySelectorAll('[data-id]').length).toBeGreaterThanOrEqual(3, 'every arrow is marked');
+		// gitdiagram's two-line card: the name over the bracketed directory.
+		expect(nodeEl(root, 'src/a.ts').textContent).toContain('a.ts');
+		expect(nodeEl(root, 'src/a.ts').textContent).toContain('[src]');
+		expect(nodeEl(root, 'top.rs').textContent).toBe('top.rs', 'a root file keeps one line');
 		// A double-clicked block opens the file.
 		nodeEl(root, 'src/a.ts').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
 		expect(opened).toEqual(['src/a.ts:1']);
@@ -405,7 +421,7 @@ describe('the graph pages', () => {
 		createAnalysisPage('modules', root);
 		await flush(8);
 		expect(texts('.an-empty', root)[0]).toContain('No cross-file calls');
-		expect(root.querySelectorAll('.an-node').length).toBe(0, 'nothing to draw');
+		expect(root.querySelectorAll('[data-path]').length).toBe(0, 'nothing to draw');
 	});
 
 	it('module analysis highlights the clicked block\'s dependencies and dims the rest', async () => {
@@ -415,6 +431,7 @@ describe('the graph pages', () => {
 		const root = host();
 		createAnalysisPage('modules', root);
 		await flush(8);
+		await untilDrawn(root);
 		nodeEl(root, 'src/a.ts').dispatchEvent(new MouseEvent('click', { bubbles: true }));
 		// The clicked block takes the selection, its neighbours thicken, every arrow it
 		// touches is selected too, and everything else fades back.
@@ -422,15 +439,15 @@ describe('the graph pages', () => {
 		expect(nodeEl(root, 'src/ui.ts').classList.contains('related')).toBe(true);
 		expect(nodeEl(root, 'top.rs').classList.contains('related')).toBe(true);
 		expect(nodeEl(root, 'src/b.ts').classList.contains('dim')).toBe(true);
-		expect(root.querySelector('.an-edge[data-id="src/a.ts→src/ui.ts"]')!.classList.contains('selected')).toBe(true);
-		expect(root.querySelector('.an-edge[data-id="top.rs→src/a.ts"]')!.classList.contains('selected')).toBe(true);
-		expect(root.querySelector('.an-edge[data-id="src/b.ts→src/ui.ts"]')!.classList.contains('dim')).toBe(true);
+		expect(root.querySelector('[data-id="src/a.ts→src/ui.ts"]')!.classList.contains('selected')).toBe(true);
+		expect(root.querySelector('[data-id="top.rs→src/a.ts"]')!.classList.contains('selected')).toBe(true);
+		expect(root.querySelector('[data-id="src/b.ts→src/ui.ts"]')!.classList.contains('dim')).toBe(true);
 		// The chip over the drawing states what is selected.
 		expect(texts('.an-graphbar .chip', root)[0]).toContain('src/a.ts');
 		// A click on empty drawing returns it to neutral.
-		root.querySelector('.an-svg')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		root.querySelector('.an-mermaid svg')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 		expect(nodeEl(root, 'src/a.ts').classList.contains('selected')).toBe(false);
-		expect(root.querySelector('.an-edge[data-id="src/b.ts→src/ui.ts"]')!.classList.contains('dim')).toBe(false);
+		expect(root.querySelector('[data-id="src/b.ts→src/ui.ts"]')!.classList.contains('dim')).toBe(false);
 		expect(root.querySelectorAll('.an-graphbar .chip').length).toBe(0);
 	});
 
@@ -443,6 +460,7 @@ describe('the graph pages', () => {
 		const opened: string[] = [];
 		page.onOpen = (path, line) => opened.push(`${path}:${line}`);
 		await flush(8);
+		await untilDrawn(root);
 		nodeEl(root, 'src/a.ts').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
 		await flush(2);
 		const items = () => [...document.querySelectorAll<HTMLElement>('.context-menu .item')];
@@ -468,7 +486,8 @@ describe('the graph pages', () => {
 		const opened: string[] = [];
 		page.onOpen = (path, line) => opened.push(`${path}:${line}`);
 		await flush(8);
-		root.querySelector('.an-edge[data-id="src/a.ts→src/ui.ts"]')!
+		await untilDrawn(root);
+		root.querySelector('[data-id="src/a.ts→src/ui.ts"]')!
 			.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
 		await flush(2);
 		const items = () => [...document.querySelectorAll<HTMLElement>('.context-menu .item')];
@@ -485,29 +504,33 @@ describe('the graph pages', () => {
 		const focusedAnswer = () => ({
 			...diagramAnswer(),
 			nodes: diagramAnswer().nodes.filter((node) => (node as { path: string }).path !== 'top.rs'),
-			edges: diagramAnswer().edges.filter((edge) => (edge as { from: string }).from !== 'top.rs')
+			edges: diagramAnswer().edges.filter((edge) => (edge as { from: string }).from !== 'top.rs'),
+			mermaid: 'flowchart TD\n  subgraph G0["src"]\n    N0["a.ts<br/>[src]"]\n    N1["ui.ts<br/>[src]"]\n    N2["b.ts<br/>[src]"]\n  end\n  N0 -->|"5 calls"| N1\n  N2 -->|"1 calls"| N1\n'
 		});
 		backend.on('analysis_module_diagram', ({ focus }: { focus: string | null }) => (focus ? focusedAnswer() : diagramAnswer()));
 		const root = host();
 		createAnalysisPage('modules', root);
 		await flush(8);
+		await untilDrawn(root);
 		nodeEl(root, 'src/ui.ts').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
 		await flush(2);
 		[...document.querySelectorAll<HTMLElement>('.context-menu .item')]
 			.find((item) => item.textContent === 'Show Only Related Files')!.click();
 		await flush(8);
+		await untilCount(root, 3);
 		// The drawing refetches around the block: itself and the files that call it.
 		const calls = () => backend.callsTo('analysis_module_diagram');
 		expect(calls()).toHaveLength(2);
 		expect(calls()[1]).toMatchObject({ focus: 'src/ui.ts' });
-		expect(root.querySelectorAll('.an-node').length).toBe(3);
+		expect(root.querySelectorAll('[data-path]').length).toBe(3);
 		// The chip names the focus and clears it — back to every file.
 		expect(texts('.an-graphbar .chip', root)[0]).toContain('src/ui.ts');
 		(root.querySelector('.an-graphbar .chip .action-btn') as HTMLElement).click();
 		await flush(8);
+		await untilCount(root, 4);
 		expect(calls()).toHaveLength(3);
 		expect(calls()[2]).toMatchObject({ focus: null });
-		expect(root.querySelectorAll('.an-node').length).toBe(4);
+		expect(root.querySelectorAll('[data-path]').length).toBe(4);
 	});
 
 	it('module analysis copies the diagram as mermaid source', async () => {
@@ -520,8 +543,8 @@ describe('the graph pages', () => {
 		const copy = [...root.querySelectorAll<HTMLElement>('.an-header .actions .action-btn')]
 			.find((button) => button.title === 'Copy Mermaid Source')!;
 		copy.click();
-		expect(backend.clipboard.at(-1)).toContain('flowchart LR');
-		expect(backend.clipboard.at(-1)).toContain('subgraph G1["src"]');
+		expect(backend.clipboard.at(-1)).toContain('flowchart TD');
+		expect(backend.clipboard.at(-1)).toContain('subgraph G0["src"]');
 	});
 
 	it('module analysis zooms from the toolbar, the wheel and the keyboard', async () => {

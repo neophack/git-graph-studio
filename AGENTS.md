@@ -717,25 +717,24 @@ stderr is logs; stdout is protocol only.
 The Code Analysis workbench: an activity bar entry (`Ctrl+Shift+A`) with a sidebar of
 five analysis tools plus module 16's MCP Server entry — Module Analysis (the
 workspace's cross-file calls as a gitdiagram-style architecture diagram and a tree: the
-diagram is computed in the backend — `analysis_module_diagram` keeps the busiest files
+backend decides WHAT the diagram is — `analysis_module_diagram` keeps the busiest files
 as two-line cards (the name over the bracketed directory, gitdiagram's
-`Component<br/>[file.ts]` shape) inside their area's group box, each area one of
-gitdiagram's six pastel tones, every kept dependency a thin straight arrow labelled by
-its call count and the cycle's back edges dashed around the side (its `-.->`); the
-flow runs top-down (`flowchart TD`), laid out by a compact layered pass (cycle break,
-longest-path layering, barycenter ordering, rows that wrap at eight cards) with
-gitdiagram's airy spacing; the model follows gitdiagram's own schema and caps (10
-groups — deeper areas roll up to the depth that fits, the overflow draws unboxed, its
-`groupId: null` — 34 blocks, 48 arrows), and the geometry and the mermaid source
-(tone classDefs included, verbatim) ship ready to draw; the page renders it on the
-hand-written SVG viewport of
-`moduleDiagram.ts` — a port of gitdiagram's own viewer (its use-mermaid-viewport /
-use-diagram-wheel-gestures): the zoom bounds and the percentage read against the fit
-level (0.6×–12×, 100 % = fitted), a mouse wheel zooms at the cursor while a trackpad's
-two-finger scroll pans (per-burst gesture latch, ctrl/cmd always pinch-zoom, WKWebView
-gesture events included), panning clamps to the 32–160 px gutter band, the toolbar's
-zoom and fit glide over 160 ms (skipped under prefers-reduced-motion), the keyboard
-pans by arrow and fits on 0/Home, and a click highlighting the clicked element with the
+`Component<br/>[file.ts]` shape) inside their area's subgraph, each area one of
+gitdiagram's six pastel tones, every kept dependency an arrow labelled by its call
+count and the cycle's back edges dashed (its `-.->`); the flow is mermaid
+`flowchart TD` with gitdiagram's tone classDefs verbatim, under its schema and caps
+(10 groups — deeper areas roll up to the depth that fits, the overflow draws unboxed,
+its `groupId: null` — 34 blocks, 48 arrows); the page renders that source with
+mermaid itself — the same renderer, the same ELK layered layout and spacing
+gitdiagram initializes — so the blocks cannot overlap and the look is gitdiagram's by
+construction (`moduleDiagram.ts`); the viewer around the SVG is a port of gitdiagram's
+own (its use-mermaid-viewport / use-diagram-wheel-gestures): the zoom bounds and the
+percentage read against the fit level (0.6×–12×, 100 % = fitted), a mouse wheel zooms
+at the cursor while a trackpad's two-finger scroll pans (per-burst gesture latch,
+ctrl/cmd always pinch-zoom, WKWebView gesture events included), panning clamps to the
+32–160 px gutter band, the toolbar's zoom and fit glide over 160 ms (skipped under
+prefers-reduced-motion), the keyboard pans by arrow and fits on 0/Home, and a click
+highlighting the clicked element with the
 dependencies it touches (the rest dims; a background click or the chip clears), the
 right-click menu opening the file, jumping to a related block through the
 Calls / Called-by submenus, isolating the neighbourhood or listing an arrow's call
@@ -748,23 +747,23 @@ Import Graph (with cycles) — each opening a streamed result page in the editor
 engine resolves calls by name with receiver hints (no type inference); its honest limits
 are stated on the pages themselves. The per-symbol call graph walk and the shortest call
 chain remain engine services served to the MCP server (module 16), not a page. The
-Module Analysis drawing is hand-written SVG over backend geometry — the gitdiagram look
-without mermaid or a canvas engine: `moduleDiagram.ts` owns only the viewport (pan,
-zoom, states), every colour a CSS variable, so a theme switch costs nothing and no
-layout math ever runs on the UI thread.
+Module Analysis drawing is mermaid's own output (ELK layout) over a backend-built
+model: the page never lays anything out, it renders the source and ports gitdiagram's
+viewport (pan, zoom, states) around it.
 
 - Frontend: `src/analysisView.ts` (the sidebar), `src/analysisTools.ts` (the shared tool
   registry), `src/analysisPages.ts` (the lazy result pages: the streaming reports, the
-  Import Graph list, and the Module Analysis page — the backend-laid-out diagram on the
-  SVG viewport beside its tree), `src/moduleDiagram.ts` (the Module Analysis drawing's
-  viewport: the SVG rendering of `analysis_module_diagram`'s placed geometry — group
-  boxes, arrows, blocks — plus pan/zoom, the zoom toolbar and the selection states)
+  Import Graph list, and the Module Analysis page — the backend-built mermaid source
+  on the mermaid viewport beside its tree), `src/moduleDiagram.ts` (the Module
+  Analysis drawing: mermaid + ELK rendering of `analysis_module_diagram`'s source,
+  gitdiagram's viewport around it — pan/zoom, the zoom toolbar, the delegated
+  selection states)
 - Backend: `src-tauri/src/cmd_analysis.rs` (the per-root `AnalysisIndex`, the streaming
   tool commands), `src-tauri/src/analysis/` (`mod.rs` the engine and the per-symbol call
   graph, `metrics.rs`, `deadcode.rs`, `security.rs`, `modules.rs` the Module Analysis
   aggregation, `diagram.rs` the Module Analysis drawing — gitdiagram's caps, tone
-  palette and group roll-up, the top-down layered layout, the straight-arrow geometry
-  and the mermaid source behind `analysis_module_diagram`,
+  palette, group roll-up and the mermaid source (classDefs included) behind
+  `analysis_module_diagram`,
   `imports.rs`, `bca.rs` the big-code-analysis
   bridge whose report-time columns — cognitive complexity, Halstead volume, logical SLOC,
   the maintainability index — enrich the Complexity & Hotspots rows); parsing comes from

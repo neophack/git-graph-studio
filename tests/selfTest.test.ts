@@ -12,6 +12,8 @@ import { backend } from './tauriMock';
 import { flush } from './helpers';
 
 // The version probe has no Tauri runtime; the suites script its answers.
+vi.mock('mermaid', () => import('./mermaidStub'));
+vi.mock('@mermaid-js/layout-elk', () => ({ default: {} }));
 vi.mock('@tauri-apps/api/app', () => ({ getVersion: async () => '0.1.5' }));
 
 const REPO = 'C:\\repo';

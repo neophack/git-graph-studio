@@ -4,6 +4,8 @@
 // must visibly do), then the sweep proper: every registered command executes without throwing
 // and leaves the shell usable (the next command still runs, no quick input or menu lingers).
 
+vi.mock('mermaid', () => import('./mermaidStub'));
+vi.mock('@mermaid-js/layout-elk', () => ({ default: {} }));
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Workbench } from '../src/workbench';

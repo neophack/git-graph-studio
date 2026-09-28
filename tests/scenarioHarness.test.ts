@@ -3,6 +3,8 @@
 // becomes visible - the SCM groups, the status bar, the graph tab, the conflict toolbar, a
 // file open. After the run, a markdown report lands in target/studio/scenario-report.md.
 
+vi.mock('mermaid', () => import('./mermaidStub'));
+vi.mock('@mermaid-js/layout-elk', () => ({ default: {} }));
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
