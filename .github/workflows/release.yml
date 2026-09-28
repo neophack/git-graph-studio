@@ -88,10 +88,14 @@ jobs:
 
   # Everything studio.yml does: the test suite, then the installers for every platform,
   # stamped with the release version. A release is only made when all of it passes.
+  # secrets: inherit is what carries the signing secrets (APPLE_* / WINDOWS_* /
+  # GPG_PRIVATE_KEY) into the called workflow — without it the installers build ad-hoc /
+  # unsigned even with every secret configured.
   build-and-test:
     name: Build the installers
     needs: resolve-tag
     uses: ./.github/workflows/studio.yml
+    secrets: inherit
     with:
       full: ${{ inputs.full == true }}
       studio-version: ${{ needs.resolve-tag.outputs.version }}
@@ -125,6 +129,23 @@ jobs:
           cd flat
           sha256sum * > SHA256SUMS
           ls -l
+
+      # A detached GPG signature over the checksums (verify: `gpg --verify SHA256SUMS.asc
+      # SHA256SUMS`) — the one signature every platform's download can be checked
+      # against, the Linux packages included (deb/rpm carry no Authenticode-style
+      # signature of their own). Wired only when the GPG_PRIVATE_KEY secret exists;
+      # without it the release ships the checksums alone, exactly as before.
+      - name: Sign the checksums
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        if: env.GPG_PRIVATE_KEY != ''
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          KEYID="$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/{print $5; exit}')"
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" \
+            --local-user "$KEYID" --detach-sign --armor flat/SHA256SUMS
+          ls -l flat/
 
       - name: Create the release
         uses: softprops/action-gh-release@v2

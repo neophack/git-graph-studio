@@ -326,6 +326,14 @@ export class Workbench {
 		register({ id: 'help.repository', title: 'Report Issue / Project Page', category: 'Help', run: () => void openUrl('https://github.com/neophack/git-graph-studio') });
 		register({ id: 'help.about', title: 'About', category: 'Help', run: () => notify('info', `Git Graph Studio ${__APP_VERSION__} - a standalone workbench whose views arrive as plugins.`) });
 		register({ id: 'help.openDevTools', title: 'Open Developer Tools', category: 'Help', run: () => void invoke('open_devtools').catch((e) => console.error('open_devtools failed:', e)) });
+		// Dev builds only (vite strips the branch from the bundle; vitest is excluded so the
+		// command sweep never navigates): the dev harness page — the full functional pass
+		// (?full=1) runs every module's self-tests plus the two marketplace extensions end
+		// to end against THIS window's real backend, the only mode that catches
+		// packaged-only regressions on any platform.
+		if (import.meta.env.DEV && !import.meta.env.VITEST) {
+			register({ id: 'help.devHarness', title: 'Open Dev Harness (Full Test)', category: 'Help', run: () => { window.location.href = '/dev/dev-harness.html?full=1&run=' + Date.now(); } });
+		}
 
 		registerGitCommands(commands, {
 			repoPath: () => this.repoPath,
@@ -372,7 +380,7 @@ export class Workbench {
 			] },
 			{ label: t('menu.go'), entries: (): MenuEntry[] => [item('workbench.quickOpen'), 'separator', item('workbench.gotoSymbolInFile'), item('workbench.gotoSymbolInWorkspace'), item('editor.gotoDefinition'), item('editor.findReferences'), item('editor.callTree'), item('workbench.gotoLine'), item('symbols.rebuild'), 'separator', item('workbench.goBack'), item('workbench.goForward'), 'separator', item('workbench.nextEditor'), item('workbench.previousEditor')] },
 			{ label: t('menu.terminal'), entries: (): MenuEntry[] => [item('terminal.new'), item('terminal.toggle'), 'separator', item('terminal.kill')] },
-			{ label: t('menu.help'), entries: (): MenuEntry[] => [item('help.welcome'), item('help.shortcuts'), item('help.selfTest'), 'separator', item('help.repository'), 'separator', item('help.openDevTools'), 'separator', item('help.about')] }
+			{ label: t('menu.help'), entries: (): MenuEntry[] => [item('help.welcome'), item('help.shortcuts'), item('help.selfTest'), ...((import.meta.env.DEV && !import.meta.env.VITEST) ? [item('help.devHarness')] : []), 'separator', item('help.repository'), 'separator', item('help.openDevTools'), 'separator', item('help.about')] }
 		];
 	}
 
@@ -785,8 +793,8 @@ export class Workbench {
 		const iconPath = this.extensionHost.packageIcon(extId);
 		const icon = iconPath ? extFileDataUrl(extId, iconPath).catch(() => null) : Promise.resolve(null);
 		void icon.then((iconSrc) => this.editors.openExtPage(
-			{ kind: 'extpage', id: this.extensionHost.webviewTabId(panelId), title, extId, pageId: 'webview' },
-			(pane) => this.extensionHost.mountWebview(panelId, pane),
+			{ kind: 'extpage', id: this.extensionHost.webviewTabId(extId, panelId), title, extId, pageId: 'webview' },
+			(pane) => this.extensionHost.mountWebview(extId, panelId, pane),
 			iconSrc
 		));
 	}
@@ -1843,6 +1851,12 @@ function compareTitle(fromHash: string, toHash: string, singleCommit: boolean): 
 	return singleCommit ? `Commit ${abbrev(toHash)}` : `Compare ${abbrev(fromHash)} ↔ ${abbrev(toHash)}`;
 }
 
+/** The booted instance — the dev harness reaches the self-test suites through it
+ *  (`registerSelfTestSuites` wants the live workbench; a second boot is not one). */
+export let currentWorkbench: Workbench | null = null;
+
 export function bootWorkbench(): Promise<void> {
-	return new Workbench().boot();
+	const workbench = new Workbench();
+	currentWorkbench = workbench;
+	return workbench.boot();
 }

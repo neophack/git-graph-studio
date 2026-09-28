@@ -100,6 +100,12 @@
 				'pty_kill': function () { return null; },
 				'git_output_log': function () { return []; },
 				'ext_list': function () { return []; },
+				// The boot round trip the workbench opens with (a null answer here crashes
+				// boot()'s context read — the plain-browser mode answers the plain launch).
+				'boot_context': function () { return { file: null, actions: [], repo: null, opened: null, openedFor: null }; },
+				'workspace_symbols': function () { return []; },
+				'analysis_status': function () { return { state: 'idle' }; },
+				'version': function () { return '0.1.5'; },
 				'settings_read': function () { return null; },
 				'keybindings_read': function () { return null; }
 			};
@@ -747,6 +753,290 @@
 				'</table>';
 			document.body.appendChild(panel);
 		}
-	</script>
-</body>
+		</script>
+		<script type="module">
+			// The full mode (?full=1): the harness's complete functional pass — every module's
+			// own self-test checks (the "all buttons" sweep the Help menu's Run Module
+			// Self-Tests page runs, executed here against the live workbench), then the two
+			// marketplace extensions end to end: git-graph-rs (install state, backend,
+			// every declared command, every contributed menu placement, the view rendering
+			// commits, the safe command set run with observable results) and claude-code
+			// (install state, backend, its command surface, the chat webview mounting, the
+			// activity-bar entry, a clean extension-host log). The extension phases need the
+			// real backend — under the scripted mock they skip (the banner says why); open
+			// this page under `tauri dev` (Help -> Open Dev Harness) for the full pass.
+			// Commands that would mutate the open repository (amend, reset-to-remote, the
+			// Gerrit writes) are structurally checked only — their execution belongs to the
+			// temp-repo live checks (scripts/probes/git-graph-menus-live-check.mjs).
+			if (new URLSearchParams(location.search).has('full')) {
+				// A clean boot per distinct query string, the scroll mode's rule.
+				if (sessionStorage.getItem('full-clean') !== location.search) {
+					sessionStorage.setItem('full-clean', location.search);
+					localStorage.clear();
+					location.reload();
+				}
+				const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+				const waitFor = async (ready, ms = 20000) => {
+					const end = Date.now() + ms;
+					while (Date.now() < end) {
+						if (ready()) return true;
+						await sleep(100);
+					}
+					return ready();
+				};
+				const withTimeout = (promise, ms, label) => Promise.race([
+					promise,
+					sleep(ms).then(() => { throw new Error(label + ' timed out after ' + ms + ' ms'); })
+				]);
+				const escapeOverlays = () => {
+					for (const target of [document.querySelector('.quick-input'), document.activeElement, document.body]) {
+						if (!target) continue;
+						target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+					}
+				};
+				const report = [];
+				let panel = null;
+				const renderPanel = () => {
+					if (!panel) {
+						panel = document.createElement('div');
+						panel.id = 'full-report';
+						panel.style.cssText = 'position:fixed;left:8px;bottom:34px;z-index:9998;max-width:760px;max-height:65vh;overflow:auto;' +
+							'font:11px monospace;color:#eee;background:rgba(20,20,20,0.96);border:1px solid #555;padding:8px;';
+						document.body.appendChild(panel);
+					}
+					const failed = report.filter((r) => r.status === 'fail').length;
+					panel.innerHTML = '<b>FULL HARNESS (' + (window.__harness.mocked ? 'MOCKED — extension phases skip' : 'REAL BACKEND') + ') - ' +
+						(failed === 0 ? 'ALL PASS' : failed + ' FAILING') + '</b>' +
+						'<table style="border-collapse:collapse;margin-top:4px">' +
+						report.map((r) => '<tr><td style="padding:1px 8px;color:' +
+							(r.status === 'fail' ? '#f48771' : r.status === 'skip' ? '#ccc' : '#73c991') + '">' + r.status.toUpperCase() +
+							'</td><td style="padding:1px 8px">' + r.group + '</td><td style="padding:1px 8px">' + r.name +
+							'</td><td style="padding:1px 8px;color:#aaa">' + (r.detail || '') + '</td></tr>').join('') +
+						'</table>';
+				};
+				const check = async (group, name, fn) => {
+					const started = performance.now();
+					let row;
+					try {
+						const detail = await fn();
+						row = { group, name, status: 'pass', ms: Math.round(performance.now() - started), detail: typeof detail === 'string' ? detail : '' };
+					} catch (error) {
+						row = { group, name, status: 'fail', ms: Math.round(performance.now() - started), detail: error instanceof Error ? error.message : String(error) };
+					}
+					report.push(row);
+					renderPanel();
+					console.log('[full:' + row.status + '] ' + group + ' — ' + name + (row.detail ? ' — ' + row.detail : ''));
+				};
+				const skip = (group, name, reason) => {
+					report.push({ group, name, status: 'skip', ms: 0, detail: reason });
+					renderPanel();
+					console.log('[full:skip] ' + group + ' — ' + name + ' — ' + reason);
+				};
+				const invoke = (command, args) => import('@tauri-apps/api/core').then((core) => core.invoke(command, args));
+
+				// Wait for the workbench: the status bar is populated last-ish and always exists.
+				await waitFor(() => document.querySelectorAll('#statusbar .status-item').length > 0, 30000);
+
+				/* ---------- Phase 1: every module's self-tests (the all-buttons sweep) ---------- */
+				const workbenchModule = await import('/src/workbench.ts');
+				const workbench = workbenchModule.currentWorkbench;
+				if (!workbench) throw new Error('the workbench instance is gone (bootWorkbench did not run?)');
+				const suites = await import('/src/selfTestSuites.ts');
+				suites.registerSelfTestSuites(workbench);
+				const { runSelfTests, summarize, reportMarkdown } = await import('/src/selftest.ts');
+				const selfOutcomes = await runSelfTests((outcome) => {
+					report.push({ group: outcome.module, name: outcome.name, status: outcome.status, ms: outcome.ms, detail: outcome.message || '' });
+					renderPanel();
+				});
+				const selfSummary = summarize(selfOutcomes);
+				console.log('[full] module self-tests: ' + selfSummary.pass + ' pass, ' + selfSummary.fail + ' fail, ' + selfSummary.skip + ' skip');
+
+				/* ---------- Phase 2: git-graph-rs ---------- */
+				const GG = 'neophack.git-graph-rs';
+				const { commands } = await import('/src/commands.ts');
+				const { resolvedMenuEntries } = await import('/src/contributions.ts');
+				const { saveExtSetting, extSettings } = await import('/src/state.ts');
+				const { extLogEntries } = await import('/src/extLog.ts');
+				const logErrorsBefore = extLogEntries().filter((e) => e.level === 'error').length;
+				const extList = window.__harness.mocked ? [] : await invoke('ext_list').catch(() => []);
+				if (window.__harness.mocked) {
+					skip(GG, 'everything', 'the scripted mock backend has no extension host — run under tauri dev');
+				} else {
+					const gg = extList.find((e) => e.id === GG);
+					await check(GG, 'installed', async () => {
+						if (!gg) throw new Error('not in ext_list (it rides in every build — the install is broken)');
+						return gg.version;
+					});
+					if (gg) {
+						await check(GG, 'backend running', async () => {
+							const procs = await invoke('ext_process_status');
+							const own = (procs || []).find((p) => p.extId === GG);
+							if (!own || !own.pid) throw new Error('process status: ' + JSON.stringify(own));
+							return 'pid ' + own.pid + (own.lastError ? ' (last error: ' + own.lastError + ')' : '');
+						});
+						// Every command the package declares must be in the registry under a title.
+						const GG_COMMANDS = ['git-graph-rs.view', 'git-graph-rs.filterByFile', 'git-graph-rs.addGitRepository',
+							'git-graph-rs.removeGitRepository', 'git-graph-rs.clearAvatarCache', 'git-graph-rs.fetch',
+							'git-graph-rs.endAllWorkspaceCodeReviews', 'git-graph-rs.endSpecificWorkspaceCodeReview',
+							'git-graph-rs.resumeWorkspaceCodeReview', 'git-graph-rs.version', 'git-graph-rs.searchCommits',
+							'git-graph-rs.openFile', 'git-graph-rs.amendLastCommit', 'git-graph-rs.resetCurrentBranchToRemote',
+							'git-graph-rs.gerritPushRef', 'git-graph-rs.gerritFetchCommitMsgHook'];
+						for (const id of GG_COMMANDS) {
+							await check(GG, 'command registered: ' + id, async () => {
+								const command = commands.get(id);
+								if (!command) throw new Error('absent from the palette registry');
+								if (!command.title) throw new Error('registered without a title');
+								return command.title;
+							});
+						}
+						// The contributed menu placements (the scm header button, the "..." group,
+						// the pull/push submenu, the explorer/editor/tab/change-row filters).
+						await check(GG, 'menu: the Source Control header button', async () => {
+							const entries = resolvedMenuEntries('scm/title', { scmProvider: 'git' });
+							const own = entries.filter((e) => e.command.startsWith('git-graph-rs.'));
+							const nav = own.find((e) => e.command === 'git-graph-rs.view');
+							if (!nav) throw new Error('scm/title navigation carries no git-graph-rs.view (own entries: ' + own.length + ')');
+							return 'navigation group, ' + own.length + ' own entries';
+						});
+						await check(GG, 'menu: the "..." entries (amend / reset / gerrit hook)', async () => {
+							const entries = resolvedMenuEntries('scm/title', { scmProvider: 'git' });
+							const grouped = entries.filter((e) => e.command.startsWith('git-graph-rs.') && e.command !== 'git-graph-rs.view');
+							if (grouped.length < 3) throw new Error('expected the amend/reset/gerrit group, got ' + grouped.length);
+							return grouped.map((e) => e.command).join(', ');
+						});
+						await check(GG, 'menu: the change-row file-history filter', async () => {
+							const entries = resolvedMenuEntries('scm/resourceState/context', { scmProvider: 'git' });
+							if (!entries.some((e) => e.command === 'git-graph-rs.filterByFile')) throw new Error('filterByFile missing from scm/resourceState/context');
+							return 'present';
+						});
+						for (const location of ['explorer/context', 'editor/context', 'editor/title/context']) {
+							await check(GG, 'menu: ' + location + ' file-history filter', async () => {
+								const entries = resolvedMenuEntries(location, {});
+								if (!entries.some((e) => e.command === 'git-graph-rs.filterByFile')) throw new Error('filterByFile missing');
+								return 'present';
+							});
+						}
+						// The view itself: the command opens the tab, the page loads, commits render.
+						await check(GG, 'the view opens and renders commits', async () => {
+							await withTimeout(commands.run('git-graph-rs.view'), 10000, 'git-graph-rs.view');
+							const frameOk = await waitFor(() => {
+								const frame = document.querySelector('#editorPart iframe.ext-page-frame');
+								return frame && frame.contentDocument && frame.contentDocument.body && frame.contentDocument.body.childElementCount > 0;
+							}, 20000);
+							if (!frameOk) throw new Error('the webview panel never mounted its document');
+							const doc = document.querySelector('#editorPart iframe.ext-page-frame').contentDocument;
+							const rendered = await waitFor(() => doc.querySelectorAll('svg').length > 0 && (doc.body.textContent || '').length > 100, 15000);
+							if (!rendered) throw new Error('the page loaded but no graph rendered (svg ' + doc.querySelectorAll('svg').length + ', text ' + (doc.body.textContent || '').length + ')');
+							return 'svg graph + ' + (doc.body.textContent || '').length + ' chars rendered';
+						});
+						// The safe runnable command set, with observable results.
+						await check(GG, 'run: version (a toast)', async () => {
+							await withTimeout(commands.run('git-graph-rs.version'), 8000, 'version');
+							await sleep(300);
+							return 'ran';
+						});
+						for (const id of ['git-graph-rs.clearAvatarCache', 'git-graph-rs.endAllWorkspaceCodeReviews']) {
+							await check(GG, 'run: ' + id, async () => {
+								await withTimeout(commands.run(id), 8000, id);
+								return 'ran';
+							});
+						}
+						for (const id of ['git-graph-rs.endSpecificWorkspaceCodeReview', 'git-graph-rs.resumeWorkspaceCodeReview', 'git-graph-rs.searchCommits']) {
+							await check(GG, 'run: ' + id + ' (quick input, dismissed)', async () => {
+								await withTimeout(commands.run(id), 4000, id).catch(() => undefined);
+								await sleep(300);
+								escapeOverlays();
+								await sleep(200);
+								return 'opened and dismissed';
+							});
+						}
+						for (const id of ['git-graph-rs.amendLastCommit', 'git-graph-rs.resetCurrentBranchToRemote', 'git-graph-rs.gerritPushRef', 'git-graph-rs.gerritFetchCommitMsgHook', 'git-graph-rs.fetch', 'git-graph-rs.addGitRepository', 'git-graph-rs.removeGitRepository', 'git-graph-rs.filterByFile', 'git-graph-rs.openFile']) {
+							skip(GG, 'run: ' + id, 'mutates the open repository / needs a picker or file target — executed by scripts/probes/git-graph-menus-live-check.mjs against a temp repo');
+						}
+						await check(GG, 'settings: a write reaches the extension settings store', async () => {
+							saveExtSetting(GG, 'git-graph-rs.enableLog', true);
+							const read = extSettings(GG)['git-graph-rs.enableLog'];
+							saveExtSetting(GG, 'git-graph-rs.enableLog', false);
+							if (read !== true) throw new Error('read back ' + String(read));
+							return 'written and read back';
+						});
+					}
+				}
+
+				/* ---------- Phase 3: claude-code ---------- */
+				const CLAUDE = 'Anthropic.claude-code';
+				if (window.__harness.mocked) {
+					skip(CLAUDE, 'everything', 'the scripted mock backend has no extension host — run under tauri dev');
+				} else {
+					const cc = extList.find((e) => e.id === CLAUDE);
+					if (!cc) {
+						skip(CLAUDE, 'everything', 'not installed (the Extensions view marketplace row installs it)');
+					} else {
+						await check(CLAUDE, 'installed', async () => cc.version);
+						await check(CLAUDE, 'backend running', async () => {
+							const procs = await invoke('ext_process_status');
+							const own = (procs || []).find((p) => p.extId === CLAUDE);
+							if (!own || !own.pid) throw new Error('process status: ' + JSON.stringify(own));
+							return 'pid ' + own.pid + (own.lastError ? ' (last error: ' + own.lastError + ')' : '');
+						});
+						const CLAUDE_COMMANDS = ['claude-vscode.window.open', 'claude-vscode.sidebar.open', 'claude-vscode.newConversation',
+							'claude-vscode.reopenClosedSession', 'claude-vscode.focus', 'claude-vscode.focusLastMessage', 'claude-vscode.blur',
+							'claude-vscode.editor.openLast', 'claude-vscode.update', 'claude-vscode.logout',
+							'claude-vscode.terminal.open', 'claude-vscode.insertAtMention'];
+						for (const id of CLAUDE_COMMANDS) {
+							await check(CLAUDE, 'command registered: ' + id, async () => {
+								const command = commands.get(id);
+								if (!command) throw new Error('absent from the palette registry');
+								return command.title;
+							});
+						}
+						await check(CLAUDE, 'the activity bar carries the sessions entry', async () => {
+							const found = [...document.querySelectorAll('#activitybar [title], #activitybar [aria-label]')]
+								.some((el) => ((el.getAttribute('title') || '') + (el.getAttribute('aria-label') || '')).toLowerCase().includes('claude'));
+							if (!found) throw new Error('no Claude entry in the activity bar');
+							return 'present';
+						});
+						await check(CLAUDE, 'the chat webview opens and mounts', async () => {
+							await withTimeout(commands.run('claude-vscode.window.open'), 10000, 'claude-vscode.window.open').catch(async () => {
+								await withTimeout(commands.run('claude-vscode.sidebar.open'), 10000, 'claude-vscode.sidebar.open');
+							});
+							const mounted = await waitFor(() => {
+								const frame = document.querySelector('#editorPart iframe.ext-page-frame, #sidebar iframe.ext-page-frame');
+								if (!frame || !frame.contentDocument) return false;
+								const doc = frame.contentDocument;
+								return doc.body && doc.body.childElementCount > 0 && (doc.body.textContent || '').length > 50;
+							}, 30000);
+							if (!mounted) throw new Error('the chat webview never mounted its UI (the multi-MB bundle gets 30 s)');
+							return 'chat UI mounted';
+						});
+						// The conversation itself (a login / a real API round) stays interactive —
+						// the probe proves the extension runs, not that an account is signed in.
+						skip(CLAUDE, 'a real conversation', 'needs a signed-in account — stays interactive');
+					}
+				}
+
+				/* ---------- Phase 4: the workbench itself ---------- */
+				await check('workbench', 'no page errors during the run', async () => {
+					if ((window.__pageErrors || []).length > 0) throw new Error(window.__pageErrors.slice(0, 3).join(' | '));
+					return 'clean console';
+				});
+				await check('workbench', 'no new error-level extension host log entries', async () => {
+					const added = extLogEntries().filter((e) => e.level === 'error').length - logErrorsBefore;
+					if (added > 0) throw new Error(added + ' new error entries');
+					return 'clean';
+				});
+
+				window.__fullReport = report;
+				const failed = report.filter((r) => r.status === 'fail').length;
+				const passed = report.filter((r) => r.status === 'pass').length;
+				console.log('[full-harness] ' + passed + ' pass, ' + failed + ' fail, ' + report.filter((r) => r.status === 'skip').length + ' skip');
+				window.__fullMarkdown = '# Full harness\n\n' + reportMarkdown(selfOutcomes) + '\n\n## Extension pass\n' +
+					report.filter((r) => r.group === GG || r.group === CLAUDE || r.group === 'workbench')
+						.map((r) => '- ' + r.status.toUpperCase() + ': ' + r.name + (r.detail ? ' — ' + r.detail : '')).join('\n');
+				renderPanel();
+				// A fail exits non-zero for the headless driver (run-full-harness.mjs reads the flag).
+				window.__fullFailed = failed;
+			}
+		</script>
+	</body>
 </html>

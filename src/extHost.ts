@@ -436,41 +436,109 @@ function composeWebview(html: string, theme: { kind: 'vscode-dark' | 'vscode-lig
 
 /** Load a webview frame's composed document. Assigning `srcdoc` to a frame whose subtree
  *  is not yet connected to the document (an editor pane still being assembled offscreen)
- *  silently drops the navigation in Chromium — the panel then sits blank until something
- *  reloads it. The guard waits for connection, bounded, before assigning. */
-function loadFrameDoc(frame: HTMLIFrameElement, html: string, theme: { kind: 'vscode-dark' | 'vscode-light'; css: string; vars: Record<string, string> } | null): void {
+ *  silently drops the navigation — the panel then sits blank until something reloads it.
+ *  The wait for connection is NOT paint-gated: a requestAnimationFrame retry never fires
+ *  for a window the platform occludes (observed as the intermittent blank Git Graph and
+ *  claude pages on macOS, 2026-09-28), so a MutationObserver attaches the load the
+ *  moment the pane joins the document, with a generous timer as the bound. Every step
+ *  lands in the extension host log — the intermittent-blank causal chain is read from
+ *  there, not guessed. */
+function loadFrameDoc(frame: HTMLIFrameElement, html: string, theme: { kind: 'vscode-dark' | 'vscode-light'; css: string; vars: Record<string, string> } | null, owner: string): void {
 	const composed = composeWebview(html, theme);
-	const assign = () => { frame.srcdoc = composed; armLoadWatchdog(frame, composed); };
-	if (frame.isConnected) { assign(); return; }
-	let waits = 0;
-	const tick = () => {
-		if (frame.isConnected || ++waits > 120) { assign(); return; }
-		requestAnimationFrame(tick);
+	const started = performance.now();
+	let done = false;
+	const finish = (path: string) => {
+		if (done) return;
+		done = true;
+		extLog('info', 'host', `webview ${owner}: document ${path} (${Math.round(performance.now() - started)} ms, ${composed.length} chars)`);
 	};
-	requestAnimationFrame(tick);
+	const assign = () => {
+		finish(frame.isConnected ? 'assigned' : 'ASSIGNED INTO A DETACHED FRAME (the navigation will drop)');
+		frame.srcdoc = composed;
+		armLoadWatchdog(frame, composed, owner, started);
+	};
+	if (frame.isConnected) { assign(); return; }
+	extLog('info', 'host', `webview ${owner}: mount frame not connected yet — waiting for the pane to attach`);
+	const observer = new MutationObserver(() => {
+		if (!frame.isConnected) return;
+		observer.disconnect();
+		clearTimeout(bound);
+		assign();
+	});
+	observer.observe(document.documentElement, { childList: true, subtree: true });
+	const bound = setTimeout(() => {
+		observer.disconnect();
+		extLog('warn', 'host', `webview ${owner}: the pane never attached within 30 s — assigning anyway`);
+		assign();
+	}, 30_000);
 }
 
 /** A srcdoc navigation occasionally wedges in WebView2: the document reaches
  *  `interactive` (its head styles load) and the loader never finishes — observed
  *  stalling forever on a multi-megabyte module script that the same load normally pulls
  *  in ~35 ms. The page then sits blank until something restarts the navigation, so the
- *  watchdog does exactly that: if the frame's `load` never fired and the document is
- *  still unfinished after a few seconds, re-assign the srcdoc (clearing first — an equal
- *  value does not re-navigate), up to three tries. */
-function armLoadWatchdog(frame: HTMLIFrameElement, composed: string, attempt = 1): void {
-	if (attempt > 3) return;
+ *  watchdog does exactly that — but never a load that is still MOVING: a cold first
+ *  parse of a multi-megabyte bundle (claude-code's chat) runs past the check interval
+ *  while making progress, and restarting it each tick meant it could never finish —
+ *  the intermittent blank chat page. A snapshot that changed since the arm (readyState,
+ *  element and script counts) re-arms instead of restarting; only an unchanged,
+ *  unfinished document — the wedge, or the dropped navigation's empty about:blank —
+ *  restarts, up to three tries. Every decision is logged. */
+function armLoadWatchdog(frame: HTMLIFrameElement, composed: string, owner: string, startedAt: number, attempt = 1): void {
+	if (attempt > 3) {
+		extLog('warn', 'host', `webview ${owner}: the navigation never settled after 3 watchdog restarts (${Math.round(performance.now() - startedAt)} ms) — the page may sit blank`);
+		return;
+	}
 	let loaded = false;
-	frame.addEventListener('load', () => { loaded = true; }, { once: true });
+	frame.addEventListener('load', () => {
+		loaded = true;
+		extLog('info', 'host', `webview ${owner}: load event fired (${Math.round(performance.now() - startedAt)} ms)`);
+	}, { once: true });
+	const snapshot = (): string | null => {
+		try {
+			const doc = frame.contentDocument;
+			if (doc === null) return null;
+			return `${doc.readyState}:${doc.documentElement?.childElementCount ?? 0}:${doc.querySelectorAll('script, style, link').length}`;
+		} catch { return null; } // cross-origin document: nothing to inspect
+	};
+	const baseline = snapshot();
 	setTimeout(() => {
 		if (loaded) return;
-		let state = '';
-		try { state = frame.contentDocument?.readyState ?? ''; } catch { return; }
-		if (state === 'complete') return;
+		const now = snapshot();
+		if (now === null || now !== baseline) {
+			// Gone, or a slow load that moved since the arm: keep waiting on the same
+			// attempt (the cap below only counts real restarts).
+			if (now !== null) {
+				extLog('info', 'host', `webview ${owner}: load still moving (${baseline} -> ${now}) — waiting on`);
+				armLoadWatchdog(frame, composed, owner, startedAt, attempt);
+			}
+			return;
+		}
+		// A completed load of OUR document is done. The document of a dropped navigation
+		// — a srcdoc assigned into a detached frame — stays the initial empty about:blank
+		// (readyState 'complete', nothing in it), and must re-navigate, not pass as
+		// healthy. The composed document always carries the boot script (and its theme
+		// style), which an empty about:blank never has.
+		let settled = false;
+		try {
+			const doc = frame.contentDocument;
+			settled = doc !== null && doc.readyState === 'complete' && doc.querySelector('script, style, link') !== null;
+		} catch {
+			extLog('warn', 'host', `webview ${owner}: the loaded document is cross-origin to the host — the watchdog cannot inspect it`);
+			return;
+		}
+		if (settled) {
+			extLog('info', 'host', `webview ${owner}: document settled without a load event (${Math.round(performance.now() - startedAt)} ms)`);
+			return;
+		}
+		extLog('warn', 'host', `webview ${owner}: navigation wedged (snapshot ${baseline} unchanged, attempt ${attempt}) — restarting it`);
 		frame.srcdoc = '';
-		requestAnimationFrame(() => {
+		// The re-assign crosses on a timer, not requestAnimationFrame: the retry must
+		// not inherit a suspended paint callback from a hidden or occluded pane.
+		setTimeout(() => {
 			frame.srcdoc = composed;
-			armLoadWatchdog(frame, composed, attempt + 1);
-		});
+			armLoadWatchdog(frame, composed, owner, startedAt, attempt + 1);
+		}, 0);
 	}, 4000 * attempt);
 }
 
@@ -540,9 +608,19 @@ export class ExtensionHost {
 	 *  `--vscode-*` map, what pages receive in their init context. */
 	private webviewTheme: { kind: 'vscode-dark' | 'vscode-light'; css: string; vars: Record<string, string> } | null = null;
 
-	/** The webview panels frame extensions created, by panel id (VS Code's numeric ids are
-	 *  per-frame, so the frame's `(panelId, extension)` pair is unambiguous here). */
-	private readonly webviews = new Map<number, WebviewHandle>();
+	/** The webview panels extensions created, keyed `${extId}#${panelId}`: the panel
+	 *  sequence a backend numbers its panels with is PER PROCESS (every extension's first
+	 *  panel is 1), so the bare id collides the moment two extensions have panels live —
+	 *  git-graph's view and claude-code's chat are both panel 1 — one overwrote the
+	 *  other's record and the loser's html landed nowhere (the intermittent blank and
+	 *  unopenable pages, 2026-09-28). The pair is unambiguous. */
+	private readonly webviews = new Map<string, WebviewHandle>();
+
+	/** The webviews map's key: one extension's own panel id. */
+	private webviewKey(extId: string, panelId: number): string {
+		return `${extId}#${panelId}`;
+	}
+
 	private nextWebviewPanelId = 1;
 	/** The sidebar webview views (`contributes.views` with `type: "webview"`, served by
 	 *  `registerWebviewViewProvider`), by view id: the section's iframe lives in the
@@ -1153,8 +1231,8 @@ export class ExtensionHost {
 		// The extension's UI goes with it: webview tabs close (their disposers re-enter
 		// `webviewClosed`, harmless without a frame), its sidebar webview views unmount, and
 		// its status bar items and output channels drop.
-		for (const panelId of [...this.webviews.keys()]) {
-			if (this.webviews.get(panelId)?.extId === extId) this.closeWebview(panelId);
+		for (const view of [...this.webviews.values()]) {
+			if (view.extId === extId) this.closeWebview(view.extId, view.panelId);
 		}
 		for (const [viewId, record] of [...this.webviewViews]) {
 			if (record.extId === extId) {
@@ -1367,16 +1445,18 @@ export class ExtensionHost {
 
 	/* ---------- Webview panels (window.createWebviewPanel) ---------- */
 
-	/** The editor-tab id of a webview panel — what the workbench opens and closes by. */
-	webviewTabId(panelId: number): string {
-		return `webview:${panelId}`;
+	/** The editor-tab id of a webview panel — what the workbench opens and closes by. The
+	 *  extension id namespaces it: panel ids restart at 1 in every backend process. */
+	webviewTabId(extId: string, panelId: number): string {
+		return `webview:${extId}:${panelId}`;
 	}
 
 	/** Mount a webview panel into its tab's pane (the workbench's mount callback; the editor
 	 *  tab owns the iframe, the disposer runs on close). The document is a srcdoc composed
 	 *  with the acquireVsCodeApi bootstrap — `setHtml` reloads it, as VS Code's webviews do. */
-	mountWebview(panelId: number, container: HTMLElement): () => void {
-		const view = this.webviews.get(panelId);
+	mountWebview(extId: string, panelId: number, container: HTMLElement): () => void {
+		const view = this.webviews.get(this.webviewKey(extId, panelId));
+		if (!view) extLog('warn', 'host', `webview ${extId}#${panelId}: mounted with no panel record — the tab will sit empty until the extension creates it`);
 		const frame = document.createElement('iframe');
 		frame.className = 'ext-page-frame';
 		frame.title = view?.title ?? 'webview';
@@ -1389,18 +1469,20 @@ export class ExtensionHost {
 		container.appendChild(frame);
 		if (view) {
 			view.frame = frame;
-			loadFrameDoc(frame, view.html, this.webviewTheme);
+			extLog('info', 'host', `webview ${extId}#${panelId}: mounted (${frame.isConnected ? 'connected' : 'detached'})`);
+			loadFrameDoc(frame, view.html, this.webviewTheme, `${extId}#${panelId}`);
 		}
-		return () => this.webviewClosed(panelId);
+		return () => this.webviewClosed(extId, panelId);
 	}
 
 	/** The tab went away (either way): drop the record and tell the extension's frame, whose
 	 *  panel proxy fires `onDidDispose`. */
-	private webviewClosed(panelId: number): void {
-		const view = this.webviews.get(panelId);
+	private webviewClosed(extId: string, panelId: number): void {
+		const view = this.webviews.get(this.webviewKey(extId, panelId));
 		if (!view) return;
-		this.webviews.delete(panelId);
+		this.webviews.delete(this.webviewKey(extId, panelId));
 		view.frame = null;
+		extLog('info', 'host', `webview ${extId}#${panelId}: closed`);
 		this.frames.get(view.extId)?.send?.({ type: '__studioExtEvent', event: 'webviewDisposed', panelId });
 	}
 
@@ -1421,7 +1503,7 @@ export class ExtensionHost {
 		// Insert first, load through loadFrameDoc — the same detached-subtree drop.
 		container.appendChild(frame);
 		record.frame = frame;
-		if (record.html !== '') loadFrameDoc(frame, record.html, this.webviewTheme);
+		if (record.html !== '') loadFrameDoc(frame, record.html, this.webviewTheme, `view:${record.extId}/${viewId}`);
 		return () => {
 			if (this.webviewViews.get(viewId)?.frame === frame) {
 				record.frame = null;
@@ -1434,9 +1516,12 @@ export class ExtensionHost {
 	/** Apply a webview view's html: to its mounted iframe, or held for its mount. */
 	private setWebviewViewHtml(viewId: string, html: string): void {
 		const record = this.webviewViews.get(viewId);
-		if (!record) return;
+		if (!record) {
+			extLog('warn', 'host', `webview view ${viewId}: setHtml (${html.length} chars) with no record — DROPPED`);
+			return;
+		}
 		record.html = html;
-		if (record.frame) loadFrameDoc(record.frame, html, this.webviewTheme);
+		if (record.frame) loadFrameDoc(record.frame, html, this.webviewTheme, `view:${record.extId}/${viewId}`);
 	}
 
 	/** A webview view's message crossed from its iframe: route it into the owning frame. */
@@ -1449,13 +1534,13 @@ export class ExtensionHost {
 
 	/** The extension disposed its panel: close its tab (the tab's disposer finishes the job),
 	 *  or — if no tab ever mounted — just run the same teardown. */
-	private closeWebview(panelId: number): void {
-		if (!this.webviews.has(panelId)) return;
+	private closeWebview(extId: string, panelId: number): void {
+		if (!this.webviews.has(this.webviewKey(extId, panelId))) return;
 		if (this.onCloseWebviewTab) {
-			this.onCloseWebviewTab(this.webviewTabId(panelId));
-			if (!this.webviews.has(panelId)) return; // the tab's disposer already ran
+			this.onCloseWebviewTab(this.webviewTabId(extId, panelId));
+			if (!this.webviews.has(this.webviewKey(extId, panelId))) return; // the tab's disposer already ran
 		}
-		this.webviewClosed(panelId);
+		this.webviewClosed(extId, panelId);
 	}
 
 	/* ---------- Status bar items and output channels ---------- */
@@ -1897,38 +1982,58 @@ export class ExtensionHost {
 				if (!this.frames.has(extId)) throw new Error('webview panels need a running extension frame');
 				const [framePanelId, , title] = args as [number | null, string, string];
 				const panelId = framePanelId ?? this.nextWebviewPanelId++;
-				this.webviews.set(panelId, { panelId, extId, title, html: '', frame: null });
+				// A backend restart resets its panel sequence (a live backend's ids only
+				// grow), so a create reusing this extension's live panel id means every
+				// panel of the previous process is dead: close them, or their tabs strand
+				// as blank shells no setHtml can reach anymore.
+				if (framePanelId !== null && this.webviews.has(this.webviewKey(extId, framePanelId))) {
+					const stale = [...this.webviews.values()].filter((view) => view.extId === extId);
+					extLog('warn', 'host', `webview ${extId}#${panelId}: created reusing a live panel id — the backend restarted; closing ${stale.length} dead panel(s) of the previous process`);
+					for (const view of stale) this.closeWebview(view.extId, view.panelId);
+				}
+				this.webviews.set(this.webviewKey(extId, panelId), { panelId, extId, title, html: '', frame: null });
+				extLog('info', 'host', `webview ${extId}#${panelId}: created ("${title}")`);
 				this.onOpenWebview?.(panelId, title, extId);
 				return Promise.resolve(panelId);
 			}
 			case 'webview.setTitle': {
 				const [panelId, title] = args as [number, string];
-				const view = this.webviews.get(panelId);
+				const view = this.webviews.get(this.webviewKey(extId, panelId));
+				if (!view) extLog('warn', 'host', `webview ${extId}#${panelId}: setTitle with no panel record — dropped`);
 				if (view) view.title = title;
 				return Promise.resolve(undefined);
 			}
 			case 'webview.setHtml': {
 				const [panelId, html] = args as [number, string];
-				const view = this.webviews.get(panelId);
-				if (view) {
-					// Setting html reloads the document, exactly as VS Code's webviews do.
-					view.html = html;
-					if (view.frame) loadFrameDoc(view.frame, html, this.webviewTheme);
+				const view = this.webviews.get(this.webviewKey(extId, panelId));
+				if (!view) {
+					// The one silence that reads as a blank page: the extension delivered
+					// its document and no panel existed to receive it.
+					extLog('warn', 'host', `webview ${extId}#${panelId}: setHtml (${html.length} chars) with no panel record — DROPPED`);
+					return Promise.resolve(undefined);
 				}
+				// Setting html reloads the document, exactly as VS Code's webviews do.
+				view.html = html;
+				if (view.frame) loadFrameDoc(view.frame, html, this.webviewTheme, `${extId}#${panelId}`);
+				else extLog('info', 'host', `webview ${extId}#${panelId}: setHtml (${html.length} chars) held — the tab has not mounted yet`);
 				return Promise.resolve(undefined);
 			}
 			case 'webview.postMessage': {
 				const [panelId, message] = args as [number, unknown];
-				this.webviews.get(panelId)?.frame?.contentWindow?.postMessage({ __ggsWebviewHost: true, type: 'message', message }, '*');
+				const view = this.webviews.get(this.webviewKey(extId, panelId));
+				if (!view) extLog('warn', 'host', `webview ${extId}#${panelId}: postMessage with no panel record — dropped`);
+				view?.frame?.contentWindow?.postMessage({ __ggsWebviewHost: true, type: 'message', message }, '*');
 				return Promise.resolve(undefined);
 			}
 			case 'webview.reveal': {
 				const panelId = args[0] as number;
-				if (this.webviews.has(panelId)) this.onRevealWebviewTab?.(this.webviewTabId(panelId));
+				if (this.webviews.has(this.webviewKey(extId, panelId))) this.onRevealWebviewTab?.(this.webviewTabId(extId, panelId));
+				else extLog('warn', 'host', `webview ${extId}#${panelId}: reveal with no panel record — nothing to show`);
 				return Promise.resolve(undefined);
 			}
 			case 'webview.dispose': {
-				this.closeWebview(args[0] as number);
+				const [panelId] = args as [number];
+				this.closeWebview(extId, panelId);
 				return Promise.resolve(undefined);
 			}
 			case 'webviewView.register': {
@@ -2455,7 +2560,13 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 				return;
 			}
 			const webView = this.webviewViewFor(event.source);
-			if (webView) this.frames.get(webView.extId)?.send?.({ type: '__studioExtEvent', event: 'webviewViewMessage', viewId: webView.viewId, message: message.message });
+			if (webView) {
+				this.frames.get(webView.extId)?.send?.({ type: '__studioExtEvent', event: 'webviewViewMessage', viewId: webView.viewId, message: message.message });
+				return;
+			}
+			// A page that speaks but belongs to no panel: its replies go nowhere and the
+			// page usually waits forever — one of the blank-page shapes.
+			extLog('warn', 'host', `a webview page sent ${String((message.message as { command?: string } | null)?.command ?? 'a message')} but no panel or view owns its frame — dropped`);
 			return;
 		}
 

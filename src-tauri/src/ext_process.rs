@@ -182,6 +182,10 @@ impl ProcessHostState {
             return Ok(handle.info(ext_id, self.history.lock().unwrap().get(ext_id)));
         }
         let ext_dir = cmd_ext::installed_dir(exts_dir, ext_id)?;
+        // An install unpacked before the extractor kept the archive's exec bits carries a
+        // native CLI nobody can spawn (claude-code's `claude` at 0644); the start path is
+        // the one hook every installed backend crosses at every boot — repair it here.
+        cmd_ext::repair_exec_bits(&ext_dir);
         // The runtime manifest exists only for packages installed with the `ggs` key; a
         // plain VS Code extension (a marketplace `main` package) has none — its whole
         // contract is package.json. Both are startable here when a real Node runtime can

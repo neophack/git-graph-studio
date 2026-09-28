@@ -647,6 +647,14 @@ the identical checks.
   first text, drag latency), `scripts/probes/run-scroll-harness.mjs` (the harness's
   `?scroll=1` scenario — every scrolling surface through the wheel, the page keys and the
   drawn scrollbar — in headless Edge over CDP, against the dev server),
+  `scripts/probes/run-full-harness.mjs` (the harness's `?full=1` scenario — every
+  module's self-test checks plus the git-graph-rs and claude-code passes: install state,
+  backends, every declared command, the contributed menu placements, the Git Graph view
+  rendering, the claude chat mounting; headless over the dev server the extension phases
+  skip under the mock — the full pass runs in-app under `tauri dev` through the dev-only
+  Help → Open Dev Harness entry, the any-platform equivalent of the Windows CDP live
+  checks; repository-mutating commands stay structural there, their execution belongs to
+  the temp-repo probes),
   `dev/dev-harness.html` (the two-mode harness: real Tauri IPC under `tauri dev`, or the
   scripted fake backend under `npm run dev:vite`)
 
@@ -725,7 +733,16 @@ Everything that turns the source tree into installers: asset assembly into
   cannot serve fails the build), `vite.config.ts`
 - Seam checks: `scripts/check-seams.mjs` (TypeScript / CSS) and `src-tauri/build.rs` (Rust)
 - Packaging: `scripts/build-studio.bat` (Windows, one command; builds `ggs-node` and
-  `node-host.cjs` through `prepare.mjs` as part of that). Linux installers are built
+  `node-host.cjs` through `prepare.mjs` as part of that) and its shell counterpart
+  `scripts/build-studio.sh` (macOS/Linux, the same release / dev / debug forms; not the
+  distributable deb/rpm — those need the floor containers below). The macOS build carries the
+  DMG safety net `scripts/recover-dmg.mjs`: tauri's bundle_dmg.sh loses the occasional
+  Finder/Spotlight detach race (`资源忙`/EBUSY on the scratch volume, exit 16, the
+  `error running bundle_dmg.sh` failure) and leaks the mounted scratch — `--clean-only`
+  (before every macOS build) detaches stale scratch volumes and sweeps leaked `rw.*` images,
+  and the recover form (when `tauri build` failed) re-runs the same script with tauri's own
+  argv, falling back to `--skip-jenkins`, tauri's Finder-less form, which cannot race.
+  Linux installers are built
   in floor containers — the base image IS the compatibility floor: `ubuntu:22.04`
   (glibc 2.35) for the deb, `fedora:38` (glibc 2.37) for the rpm. CI (`studio.yml`) runs
   the same containers `scripts/build-studio-linux.bat` +
@@ -740,11 +757,26 @@ Everything that turns the source tree into installers: asset assembly into
   and the deb/rpm packages install it as `/usr/bin/ggs`. Installer-level file associations for the default
   extension set come from `bundle.fileAssociations` in `tauri.conf.json`; the NSIS hooks also
   remove the runtime-registered ProgIds and the RegisteredApplications entry on uninstall
+- Signing: installer signing is decided from CI secrets, never in the sources —
+  `scripts/signing.mjs` writes the `tauri build --config` merge file each build reads
+  (the ad-hoc bundle seal when no secrets are configured; a macOS bundle with no signature
+  of its own is assessed by Gatekeeper as damaged once downloaded — the 0.1.5 dmg shipped
+  in exactly that state), and `scripts/gen-signing-secrets.mjs` turns the local
+  certificate files into exactly the secret values GitHub expects (`--apply` pushes them
+  with `gh secret set`). macOS: Developer ID certificate (`APPLE_CERTIFICATE` /
+  `APPLE_CERTIFICATE_PASSWORD` / `APPLE_SIGNING_IDENTITY`) plus notarization through the
+  App Store Connect key (`APPLE_API_KEY_ID` / `APPLE_API_ISSUER` / `APPLE_API_KEY`, the
+  .p8's content). Windows: Authenticode from `WINDOWS_CERTIFICATE` (base64 PFX) +
+  `WINDOWS_CERTIFICATE_PASSWORD` — SHA-256 digests, RFC 3161 timestamp. Linux: the
+  packages carry no signature of their own; `release.yml` GPG-signs `SHA256SUMS`
+  (`GPG_PRIVATE_KEY` / `GPG_PASSPHRASE`) as the check every download verifies against,
+  and its `secrets: inherit` is what carries the signing secrets into studio.yml.
 - CI: `.github/workflows/studio.yml` (PRs: typecheck + vitest; `main`: also `cargo clippy
   -D warnings`, `cargo test`, installers for Windows and Linux, the perf gate — the tests
   gate the installer build, and each Linux package format compiles in its own floor
   container);
-  `.github/workflows/release.yml` (a pushed `v*` tag publishes installers with `SHA256SUMS`)
+  `.github/workflows/release.yml` (a pushed `v*` tag publishes installers with `SHA256SUMS`
+  and its GPG signature)
 
 ## Development workflow
 

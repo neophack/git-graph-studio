@@ -202,8 +202,36 @@ jobs:
         env:
           GGS_PERF_FILES: '20000'
 
+      # Code signing from secrets, as in the macOS job: with WINDOWS_CERTIFICATE (base64
+      # PFX) + its password the certificate is imported into the runner's user store and
+      # the bundler Authenticode-signs the installers (SHA-256, RFC 3161 timestamp);
+      # without them the merge file is an inert no-op and the installers build unsigned.
+      - name: Wire the code signing
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $merge = @{ bundle = @{ windows = @{} } }
+          if ($env:WINDOWS_CERTIFICATE -and $env:WINDOWS_CERTIFICATE_PASSWORD) {
+            $pfxPath = Join-Path $env:RUNNER_TEMP 'ggs-signing.pfx'
+            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+            $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $certificate = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+            Write-Host "Imported $($certificate.Subject) ($($certificate.Thumbprint))"
+            $merge.bundle.windows = @{
+              certificateThumbprint = $certificate.Thumbprint
+              digestAlgorithm = 'sha256'
+              timestampUrl = 'http://timestamp.digicert.com'
+            }
+          } else {
+            Write-Host 'No Windows signing secrets - building the installers unsigned'
+          }
+          New-Item -ItemType Directory -Force -Path target/studio | Out-Null
+          [IO.File]::WriteAllText((Join-Path (Get-Location) 'target/studio/signing.json'), ($merge | ConvertTo-Json -Depth 5))
+
       - name: Build the installers (NSIS + MSI)
-        run: npx tauri build
+        run: npx tauri build --config target/studio/signing.json
 
       # Size and performance measurement (docs/ggs-development-plan.md M1.7; the budgets
       # were removed 2026-09-15 — sizes are recorded, not gated): the artefact sizes plus
@@ -430,8 +458,26 @@ jobs:
             fs.writeFileSync(cargo, fs.readFileSync(cargo, 'utf8').replace(/^version = \"[^\"]*\"/m, 'version = \"' + process.argv[1] + '\"'));
           " "$VERSION"
 
+      # Code signing is decided here, from secrets — never in the sources (see
+      # scripts/signing.mjs, which writes the --config merge file the build reads). With
+      # the Apple signing secrets the bundler imports the Developer ID certificate, signs
+      # the bundle, notarizes and staples; without them the build still gets its ad-hoc
+      # bundle seal — a macOS bundle with no signature of its own is assessed by
+      # Gatekeeper as damaged (the un-bypassable verdict the 0.1.5 dmg shipped with),
+      # a sealed ad-hoc one merely as unverified. Only non-empty credentials reach the
+      # build: an env var set to "" reads as present to the bundler's detection.
+      - name: Wire the code signing
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: node scripts/signing.mjs macos
+
       - name: Build the installers (dmg)
-        run: npx tauri build
+        run: npx tauri build --config target/studio/signing.json
 
       - name: Measure sizes and performance
         run: node scripts/measure.mjs --repo .

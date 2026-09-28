@@ -2046,6 +2046,39 @@ fn extract_vsix(vsix: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Re-apply the executable bit to an installed package's native CLI binaries —
+/// claude-code's `resources/native-binary/`, the one exec-carrying layout this
+/// store's packages use. Installs unpacked before the extractor kept the
+/// archive's modes (2026-09-27) landed 0644, and claude-code rides in no build
+/// since 2026-09-28, so the boot stamp-refresh never re-extracts them: without
+/// this repair the binary's spawn fails with EACCES (the SDK reports it as a
+/// libc mismatch) forever. Called at every backend start — the one hook every
+/// installed package crosses at every boot. Idempotent; a no-op where the
+/// package or platform has no such binaries.
+#[cfg(unix)]
+pub fn repair_exec_bits(ext_dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = ext_dir.join("resources").join("native-binary");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::metadata(&path) else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let mode = meta.permissions().mode();
+        if mode & 0o111 == 0 {
+            let _ = std::fs::set_permissions(
+                &path,
+                std::fs::Permissions::from_mode((mode & 0o777) | 0o111),
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn repair_exec_bits(_ext_dir: &Path) {}
+
 fn uninstall(dir: &Path, ext_id: &str) -> Result<(), String> {
     let versions = find_installed(dir, ext_id)?;
     if versions.is_empty() {
@@ -2480,6 +2513,34 @@ mod install_tests {
         };
         assert_eq!(mode("resources/native-binary/tool"), 0o755);
         assert_eq!(mode("README.md") & 0o111, 0);
+    }
+
+    /// The start-path repair for pre-extractor-fix installs: a native CLI that landed 0644
+    /// (the claude-code installs unpacked before the mode-keeping extractor) gets its exec
+    /// bit back at its next backend start, stays put once correct, and a package without
+    /// the layout is untouched.
+    #[cfg(unix)]
+    #[test]
+    fn repair_exec_bits_restores_a_stale_install() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("resources/native-binary/claude");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644)).unwrap();
+        repair_exec_bits(tmp.path());
+        let mode = std::fs::metadata(&bin).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
+        // Idempotent: a correct install crosses the same hook at every boot untouched.
+        repair_exec_bits(tmp.path());
+        assert_eq!(std::fs::metadata(&bin).unwrap().permissions().mode() & 0o777, 0o755);
+        // A package without the native-binary layout (or a foreign path) is a no-op.
+        let plain = tmp.path().join("out/extension.js");
+        std::fs::create_dir_all(plain.parent().unwrap()).unwrap();
+        std::fs::write(&plain, b"activate").unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+        repair_exec_bits(plain.parent().unwrap());
+        assert_eq!(std::fs::metadata(&plain).unwrap().permissions().mode() & 0o777, 0o644);
     }
 
     /// A `.vsix` with a package.json and a web page (an extra data file,

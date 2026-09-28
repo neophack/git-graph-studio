@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { ExtensionHost, themeVars, type ExtInfo, type GalleryEntry } from '../src/extHost';
+import { EditorGroup } from '../src/editor';
 import { applyExtensionSettings, evaluateWhen, extensionSettingDefs, registerContextProvider, resolvedMenuEntries } from '../src/contributions';
 import { extLog, extLogEntries, flushExtLog, resetExtLog } from '../src/extLog';
 import { ExtensionsPanel } from '../src/extensionsPanel';
@@ -783,7 +784,7 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		const opened: [number, string, string][] = [];
 		let closedTab = '';
 		host.onOpenWebview = (panelId, title, extId) => opened.push([panelId, title, extId]);
-		host.onCloseWebviewTab = (tabId) => { closedTab = tabId; host['webviewClosed'](1); };
+		host.onCloseWebviewTab = (tabId) => { closedTab = tabId; host['webviewClosed']('acme.demo', 1); };
 
 		await host['serve']('webview.create', [1, 'demo.view', 'Demo Panel'], 'acme.demo', {} as never);
 		await host['serve']('webview.setHtml', [1, '<html><body>hi</body></html>'], 'acme.demo', {} as never);
@@ -791,7 +792,7 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		// The workbench's mount: the tab pane gets a sandboxed iframe whose srcdoc carries the
 		// composed acquireVsCodeApi bootstrap and the extension's document.
 		const pane = document.body.appendChild(document.createElement('div'));
-		const dispose = host.mountWebview(1, pane);
+		const dispose = host.mountWebview('acme.demo', 1, pane);
 		const frame = pane.querySelector('iframe')!;
 		expect(frame.getAttribute('sandbox')).toBe('allow-scripts allow-same-origin'); // its own storage (localStorage) works
 		expect(frame.getAttribute('srcdoc')).toContain('acquireVsCodeApi');
@@ -802,12 +803,156 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 
 		// The extension's dispose closes the tab; the frame is told the panel is gone.
 		await host['serve']('webview.dispose', [1], 'acme.demo', {} as never);
-		expect(closedTab).toBe('webview:1');
+		expect(closedTab).toBe('webview:acme.demo:1');
 		expect(sent.filter((m) => (m as { type?: string }).type === '__studioExtEvent' && (m as { event?: string }).event === 'webviewDisposed')).toHaveLength(1);
 
 		// The tab closing on its own (user close) runs the disposer: same notification, once.
 		dispose();
 		expect(sent.filter((m) => (m as { type?: string }).type === '__studioExtEvent' && (m as { event?: string }).event === 'webviewDisposed')).toHaveLength(1);
+	});
+
+	it('a webview mounted into a still-offscreen pane loads once the pane joins the document', async () => {
+		const { host } = hostWithFrame();
+		await host['serve']('webview.create', [1, 'demo.view', 'Demo Panel'], 'acme.demo', {} as never);
+		await host['serve']('webview.setHtml', [1, '<html><body>hi</body></html>'], 'acme.demo', {} as never);
+		// The pane is assembled offscreen (a Beside split mounts its pane detached before
+		// the grid attaches it). A srcdoc assigned into the detached frame is silently
+		// dropped — the intermittent blank panel — so the load must wait for connection.
+		const detached = document.createElement('div');
+		const dispose = host.mountWebview('acme.demo', 1, detached);
+		const frame = detached.querySelector('iframe')!;
+		expect(frame.getAttribute('srcdoc')).toBe(null);
+		// The pane joins the document (the editor grid attaching its offscreen assembly):
+		// the observer loads the composed document at that moment.
+		document.body.appendChild(detached);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(frame.getAttribute('srcdoc')).toContain('acquireVsCodeApi');
+		expect(frame.getAttribute('srcdoc')).toContain('<body>hi</body>');
+		dispose();
+	});
+
+	it('the load watchdog re-navigates a dropped srcdoc navigation, not a settled page', async () => {
+		vi.useFakeTimers();
+		// The frame never fires its load (the dropped navigation never navigates): keep
+		// the watchdog's load listener from registering so the timer path runs.
+		const originalAdd = HTMLIFrameElement.prototype.addEventListener;
+		const addEventListener = vi.spyOn(HTMLIFrameElement.prototype, 'addEventListener')
+			.mockImplementation(function (this: HTMLIFrameElement, type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) {
+				if (type === 'load') return;
+				return originalAdd.call(this, type, listener, options);
+			});
+		// Every srcdoc assignment crosses this recorder: the initial load, and the
+		// watchdog's clear-and-re-navigate pair.
+		const sets: string[] = [];
+		const srcdocDescriptor = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'srcdoc')!;
+		Object.defineProperty(HTMLIFrameElement.prototype, 'srcdoc', {
+			get: srcdocDescriptor.get,
+			set(this: HTMLIFrameElement, value: string) { sets.push(value); srcdocDescriptor.set!.call(this, value); }
+		});
+		let dispose: () => void = () => undefined;
+		try {
+			const { host } = hostWithFrame();
+			await host['serve']('webview.create', [1, 'demo.view', 'Demo Panel'], 'acme.demo', {} as never);
+			await host['serve']('webview.setHtml', [1, '<html><body>hi</body></html>'], 'acme.demo', {} as never);
+			const pane = document.body.appendChild(document.createElement('div'));
+			dispose = host.mountWebview('acme.demo', 1, pane);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(sets).toHaveLength(1); // the initial assign — a healthy load ends here
+			// The dropped navigation: the frame's document stays the initial empty
+			// about:blank, so the watchdog clears and re-assigns instead of passing it.
+			await vi.advanceTimersByTimeAsync(4000);
+			expect(sets[1]).toBe('');
+			await vi.advanceTimersByTimeAsync(10);
+			expect(sets.length).toBeGreaterThanOrEqual(3);
+			expect(sets[2]).toContain('acquireVsCodeApi');
+		} finally {
+			dispose();
+			Object.defineProperty(HTMLIFrameElement.prototype, 'srcdoc', srcdocDescriptor);
+			addEventListener.mockRestore();
+			vi.useRealTimers();
+		}
+	});
+
+	it('a webview panel reopens after every tab was closed, and a restarted backend\'s colliding panel id replaces the dead tab', async () => {
+		const { host } = hostWithFrame();
+		// A real editor group stands in for the workbench's tab host: the panel's tab opens
+		// exactly the way workbench.openWebviewPanel plugs it.
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		host.onOpenWebview = (panelId, title) => {
+			void group.openExtPage({ kind: 'extpage', id: host['webviewTabId']('acme.demo', panelId), title, extId: 'acme.demo', pageId: 'webview' }, (pane) => host.mountWebview('acme.demo', panelId, pane));
+		};
+		host.onCloseWebviewTab = (tabId) => { if (group.closeById(tabId)) host['webviewClosed']('acme.demo', Number(tabId.split(':').at(-1))); };
+		const frameInGroup = () => document.querySelector('#editorGroup iframe');
+
+		// First open: the tab lands and its iframe loads the composed document (the pane
+		// attaches only after the mount — the offscreen-pane path).
+		await host['serve']('webview.create', [1, 'demo.view', 'Demo Panel'], 'acme.demo', {} as never);
+		await host['serve']('webview.setHtml', [1, '<html><body>one</body></html>'], 'acme.demo', {} as never);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(frameInGroup()?.getAttribute('srcdoc')).toContain('<body>one</body>');
+
+		// The user closes every page; a fresh open must produce a tab again.
+		await group.closeAll();
+		await host['serve']('webview.create', [2, 'demo.view', 'Demo Panel'], 'acme.demo', {} as never);
+		await host['serve']('webview.setHtml', [2, '<html><body>two</body></html>'], 'acme.demo', {} as never);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(frameInGroup()?.getAttribute('srcdoc')).toContain('<body>two</body>');
+
+		// A second live panel, then the backend restarts: its reset sequence reuses panel 2
+		// while panels 2 and 3 are live. The previous process's panels are all dead — the
+		// reuse must sweep them (their tabs would strand as blank shells) and the new panel
+		// owns the one tab left, showing its own document.
+		await host['serve']('webview.create', [3, 'demo.view', 'Second Panel'], 'acme.demo', {} as never);
+		await host['serve']('webview.setHtml', [3, '<html><body>three</body></html>'], 'acme.demo', {} as never);
+		await host['serve']('webview.create', [2, 'demo.view', 'Demo Panel'], 'acme.demo', {} as never);
+		await host['serve']('webview.setHtml', [2, '<html><body>fresh</body></html>'], 'acme.demo', {} as never);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		const frames = [...document.querySelectorAll('#editorGroup iframe')];
+		expect(frames).toHaveLength(1);
+		expect(frames[0]!.getAttribute('srcdoc')).toContain('<body>fresh</body>');
+	});
+
+	it('the load watchdog never restarts a page that is still making progress', async () => {
+		vi.useFakeTimers();
+		const originalAdd = HTMLIFrameElement.prototype.addEventListener;
+		const addEventListener = vi.spyOn(HTMLIFrameElement.prototype, 'addEventListener')
+			.mockImplementation(function (this: HTMLIFrameElement, type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) {
+				if (type === 'load') return;
+				return originalAdd.call(this, type, listener, options);
+			});
+		const sets: string[] = [];
+		const srcdocDescriptor = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'srcdoc')!;
+		Object.defineProperty(HTMLIFrameElement.prototype, 'srcdoc', {
+			get: srcdocDescriptor.get,
+			set(this: HTMLIFrameElement, value: string) { sets.push(value); srcdocDescriptor.set!.call(this, value); }
+		});
+		let dispose: () => void = () => undefined;
+		try {
+			const { host } = hostWithFrame();
+			await host['serve']('webview.create', [1, 'demo.view', 'Demo Panel'], 'acme.demo', {} as never);
+			await host['serve']('webview.setHtml', [1, '<html><body>hi</body></html>'], 'acme.demo', {} as never);
+			const pane = document.body.appendChild(document.createElement('div'));
+			dispose = host.mountWebview('acme.demo', 1, pane);
+			const frame = pane.querySelector('iframe')!;
+			expect(sets).toHaveLength(1);
+			// A cold multi-megabyte load (claude-code's chat bundle) grows its document
+			// past the check interval while parsing: every check sees a changed document.
+			const doc = frame.contentDocument!;
+			const progress = (ms: number) => {
+				void vi.advanceTimersByTimeAsync(ms - 1000);
+				doc.head.appendChild(doc.createElement('script'));
+				return vi.advanceTimersByTimeAsync(1000);
+			};
+			for (let i = 0; i < 4; i++) await progress(4000);
+			// Still moving: the navigation was never restarted — a cold multi-megabyte
+			// load runs past every check without being killed mid-parse.
+			expect(sets).toHaveLength(1);
+		} finally {
+			dispose();
+			Object.defineProperty(HTMLIFrameElement.prototype, 'srcdoc', srcdocDescriptor);
+			addEventListener.mockRestore();
+			vi.useRealTimers();
+		}
 	});
 
 	it('a settings change reaches the frame as a configChanged event', async () => {
