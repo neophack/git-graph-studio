@@ -91,6 +91,20 @@ function buildBackend(bin, features) {
 	// The sidecar's own profile: the release size diet with unwinding panics, because it
 	// runs third-party JS whose poisoned closures must degrade, not abort the backend.
 	const profile = 'ggs-node';
+	// Where cargo actually puts artifacts: `.cargo/config.toml` says `../target/studio/cargo`,
+	// but a caller's CARGO_TARGET_DIR env overrides the config — the Linux container pass
+	// exports one onto its cache volume, and the sidecar was once looked for where it never
+	// landed (build exit 0, binary missing, "refusing to pack"). `cargo metadata` resolves
+	// the same precedence cargo itself builds with.
+	const meta = spawnSync('cargo', ['metadata', '--format-version', '1', '--no-deps'],
+		{ cwd: srcTauri, encoding: 'utf8', shell: process.platform === 'win32' });
+	let targetDir = join(out, 'cargo');
+	try {
+		const resolved = JSON.parse(meta.stdout ?? '').target_directory;
+		if (typeof resolved === 'string' && resolved !== '') targetDir = resolved;
+	} catch {
+		// unparseable metadata — the configured guess above stands
+	}
 	const built = spawnSync(
 		'cargo',
 		['build', '--profile', profile, '--bin', bin, ...(features ? ['--no-default-features', '--features', features] : ['--no-default-features'])],
@@ -99,7 +113,7 @@ function buildBackend(bin, features) {
 	// The sidecars an installer serves are part of the product, not optional extras: a
 	// build without them is broken, so it fails with the reason instead of shipping an
 	// app whose extension packages cannot start.
-	const path = join(out, 'cargo', profile, exe);
+	const path = join(targetDir, profile, exe);
 	if (built.status === 0 && existsSync(path)) return path;
 	console.error(`Building ${bin} failed (${built.status ?? 'spawn failed'}; looked at ${path}) — refusing to pack without it`);
 	process.exit(1);
