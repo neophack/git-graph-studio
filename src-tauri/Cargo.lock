@@ -1959,6 +1959,7 @@ dependencies = [
  "md-5",
  "memchr",
  "notify",
+ "objc2-foundation",
  "plist",
  "portable-pty",
  "rayon",

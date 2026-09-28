@@ -1044,6 +1044,21 @@ mod desktop {
         );
     }
 
+    /// The automated harness runs' App Nap guard (macOS): an occluded or napping WKWebView
+    /// stops firing page timers, so the dev harness's bounded waits — and their timeouts —
+    /// stall for wall-clock minutes (the sandbox probe froze exactly there, at 0% CPU).
+    /// An NSProcessInfo activity assertion plus an always-on-top window keeps the run
+    /// alive to completion. Debug builds only, and only when a probe asked for the harness.
+    #[cfg(all(debug_assertions, target_os = "macos"))]
+    fn keep_awake_for_probe_runs(window: &tauri::WebviewWindow) {
+        use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+        let reason = NSString::from_str("ggs dev-harness probe run (GGS_DEV_HARNESS)");
+        let activity = NSProcessInfo::processInfo()
+            .beginActivityWithOptions_reason(NSActivityOptions::UserInitiated, &reason);
+        std::mem::forget(activity); // held for the process lifetime — endActivity never comes
+        let _ = window.set_always_on_top(true);
+    }
+
     /// The Help menu's "Open Developer Tools" entry: the webview's own context menu is
     /// suppressed (it otherwise shows the host browser's chrome - back/refresh/save as/print),
     /// so this is the only way left to reach devtools once installed.
@@ -1445,14 +1460,61 @@ mod desktop {
                     .first()
                     .cloned()
                     .expect("tauri.conf.json declares the main window");
-                tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
+                let window = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
                     .on_web_resource_request(revalidate_assets)
                     .build()?;
+                // The automated harness run needs its timers firing: keep this window awake.
+                #[cfg(all(debug_assertions, target_os = "macos"))]
+                if std::env::var_os("GGS_DEV_HARNESS").is_some() {
+                    keep_awake_for_probe_runs(&window);
+                }
                 stamp("window + webview created");
                 Ok(())
             })
-            .on_page_load(|_webview, payload| {
+            .on_page_load(|webview, payload| {
                 stamp(&format!("page load event ({:?})", payload.event()));
+                // The dev-only probe hook (scripts/probes/claude-code-sandbox.mjs): a
+                // GGS_DEV_HARNESS value names the dev harness page the window opens at boot —
+                // the same navigation the Help menu's dev-only entry performs, driven from
+                // outside for automated runs. The second load (the harness page) additionally
+                // dumps a diagnostic (its URL, the page errors, the harness state) through
+                // GGS_DEV_HARNESS_DIAG ("<file>|<url>") — the probe's way to see inside a
+                // WKWebView that has no CDP. Debug builds only, so no probe surface ships.
+                static LOADS: std::sync::atomic::AtomicU32 =
+                    std::sync::atomic::AtomicU32::new(0);
+                if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
+                    && cfg!(debug_assertions)
+                {
+                    let load = LOADS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if load == 0 {
+                        match std::env::var("GGS_DEV_HARNESS") {
+                            Ok(page) => {
+                                stamp(&format!("dev harness hook navigating to: {page}"));
+                                if let Ok(literal) = serde_json::to_string(&page) {
+                                    let _ = webview.eval(format!("window.location.href = {literal};"));
+                                }
+                            }
+                            Err(_) => stamp("dev harness hook: no GGS_DEV_HARNESS in this run"),
+                        }
+                    } else if load == 1 {
+                        if let Ok(diag) = std::env::var("GGS_DEV_HARNESS_DIAG") {
+                            if let Some((file, url)) = diag.split_once('|') {
+                                stamp("dev harness hook: dumping the page diagnostic");
+                                let js = format!(
+                                    "(() => {{ const payload = JSON.stringify({{ url: location.href, \
+                                     pageErrors: (window.__pageErrors ?? []).slice(0, 30), \
+                                     harness: Boolean(window.__harness), \
+                                     rows: window.__fullReport ? window.__fullReport.length : null }}); \
+                                     try {{ window.__TAURI_INTERNALS__.invoke('write_file', {{ path: {file}, contents: payload }}); }} catch (e) {{}} \
+                                     try {{ fetch({url}, {{ method: 'POST', body: payload }}); }} catch (e) {{}} }})();",
+                                    file = serde_json::to_string(file).unwrap_or_default(),
+                                    url = serde_json::to_string(url).unwrap_or_default()
+                                );
+                                let _ = webview.eval(&js);
+                            }
+                        }
+                    }
+                }
             })
             .invoke_handler(tauri::generate_handler![
                 open_folder,

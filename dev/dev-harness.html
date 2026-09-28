@@ -763,11 +763,24 @@
 			// commits, the safe command set run with observable results) and claude-code
 			// (install state, backend, its command surface, the chat webview mounting, the
 			// activity-bar entry, a clean extension-host log). The extension phases need the
-			// real backend — under the scripted mock they skip (the banner says why); open
-			// this page under `tauri dev` (Help -> Open Dev Harness) for the full pass.
-			// Commands that would mutate the open repository (amend, reset-to-remote, the
-			// Gerrit writes) are structurally checked only — their execution belongs to the
-			// temp-repo live checks (scripts/probes/git-graph-menus-live-check.mjs).
+				// real backend — under the scripted mock they skip (the banner says why); open
+				// this page under `tauri dev` (Help -> Open Dev Harness) for the full pass.
+				// The sandbox mode (?sandbox=1, run by scripts/probes/claude-code-sandbox.mjs)
+				// adds a measured claude-code conversation against the local fake Claude
+				// server and posts the finished report out over ?report=<url>.
+				// Commands that would mutate the open repository (amend, reset-to-remote, the
+				// Gerrit writes) are structurally checked only — their execution belongs to the
+				// temp-repo live checks (scripts/probes/git-graph-menus-live-check.mjs).
+			// The page-boot beacon: written the instant the harness page loads with a reportFile,
+			// before anything else — a probe can then tell "the window never opened the harness
+			// page" (no beacon file) from "the page loaded but the pass broke" (beacon, no rows).
+			{
+				const beaconFile = new URLSearchParams(location.search).get('reportFile');
+				if (beaconFile) {
+					import('@tauri-apps/api/core').then((core) => core.invoke('write_file', { path: beaconFile,
+						contents: JSON.stringify({ probe: 'dev-harness', partial: true, beacon: 'page-boot', postedAt: new Date().toISOString(), report: [] }) })).catch(() => {});
+				}
+			}
 			if (new URLSearchParams(location.search).has('full')) {
 				// A clean boot per distinct query string, the scroll mode's rule.
 				if (sessionStorage.getItem('full-clean') !== location.search) {
@@ -821,35 +834,93 @@
 						const detail = await fn();
 						row = { group, name, status: 'pass', ms: Math.round(performance.now() - started), detail: typeof detail === 'string' ? detail : '' };
 					} catch (error) {
-						row = { group, name, status: 'fail', ms: Math.round(performance.now() - started), detail: error instanceof Error ? error.message : String(error) };
+						// A check may throw a flagged skip (an error.harnessSkip) — a real answer
+						// this platform cannot give, not a failure.
+						row = { group, name, status: error && error.harnessSkip ? 'skip' : 'fail', ms: Math.round(performance.now() - started), detail: error instanceof Error ? error.message : String(error) };
 					}
 					report.push(row);
 					renderPanel();
+					postReport(false);
 					console.log('[full:' + row.status + '] ' + group + ' — ' + name + (row.detail ? ' — ' + row.detail : ''));
 				};
 				const skip = (group, name, reason) => {
 					report.push({ group, name, status: 'skip', ms: 0, detail: reason });
 					renderPanel();
+					postReport(false);
 					console.log('[full:skip] ' + group + ' — ' + name + ' — ' + reason);
 				};
 				const invoke = (command, args) => import('@tauri-apps/api/core').then((core) => core.invoke(command, args));
+
+				// The sandbox mode (?sandbox=1, launched by scripts/probes/claude-code-sandbox.mjs):
+				// the app runs with a fake login (a fake API key against the local fake Claude
+				// server), so a real conversation — normally the interactive step — becomes a
+				// measured, hermetic check. ?report=<url> streams every row back to the probe as
+				// it lands (macOS WKWebView has no CDP to read it through — the posts ARE the
+				// observability), and one final post with the verdict ends the run.
+				const fullParams = new URLSearchParams(location.search);
+				const sandboxMode = fullParams.has('sandbox'); // the claude-code sandbox run: fake login, fake Claude server, fake git remote
+				const reportUrl = fullParams.get('report');
+				// The report's way home. The file channel is the primary: an invoke('write_file')
+				// straight to the probe's scratch file — no network, so no WKWebView fetch policy
+				// can eat it (the HTTP POST to the fake Claude server stays as a secondary).
+				const reportFile = fullParams.get('reportFile');
+				// Posts are chained one after another: the write_file commands run on the
+				// backend's async pool, and the last streaming post racing the final post to the
+				// same file left the stale partial as the last writer — the probe then waits on
+				// a "final" that already happened.
+				let postChain = Promise.resolve();
+				const postReport = (final) => {
+					if (!reportUrl && !reportFile) return;
+					const body = JSON.stringify({ probe: 'dev-harness', partial: !final, failed: final ? window.__fullFailed : null,
+						run: fullParams.get('run') ?? '', postedAt: new Date().toISOString(),
+						report, markdown: final ? window.__fullMarkdown : '' });
+					postChain = postChain.then(async () => {
+						if (reportFile) {
+							try { await invoke('write_file', { path: reportFile, contents: body }); }
+							catch (e) { console.log('[full] the report file write failed: ' + e); }
+						}
+						if (reportUrl) {
+							try { await fetch(reportUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body }); }
+							catch (e) { console.log('[full] the report post failed: ' + e); }
+						}
+					});
+				};
+
+				// The mounted claude chat frames and their composer — the conversation check and
+				// the speed rows share these.
+				const chatFrames = () => [...document.querySelectorAll('#editorPart iframe.ext-page-frame, #sidebar iframe.ext-page-frame')]
+					.filter((node) => node.contentDocument && node.contentDocument.body && node.contentDocument.body.childElementCount > 0);
+				const chatComposer = (doc) => doc.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
 
 				// Wait for the workbench: the status bar is populated last-ish and always exists.
 				await waitFor(() => document.querySelectorAll('#statusbar .status-item').length > 0, 30000);
 
 				/* ---------- Phase 1: every module's self-tests (the all-buttons sweep) ---------- */
-				const workbenchModule = await import('/src/workbench.ts');
-				const workbench = workbenchModule.currentWorkbench;
-				if (!workbench) throw new Error('the workbench instance is gone (bootWorkbench did not run?)');
-				const suites = await import('/src/selfTestSuites.ts');
-				suites.registerSelfTestSuites(workbench);
-				const { runSelfTests, summarize, reportMarkdown } = await import('/src/selftest.ts');
-				const selfOutcomes = await runSelfTests((outcome) => {
-					report.push({ group: outcome.module, name: outcome.name, status: outcome.status, ms: outcome.ms, detail: outcome.message || '' });
-					renderPanel();
-				});
-				const selfSummary = summarize(selfOutcomes);
-				console.log('[full] module self-tests: ' + selfSummary.pass + ' pass, ' + selfSummary.fail + ' fail, ' + selfSummary.skip + ' skip');
+				// quick mode (?quick=1, the claude-code sandbox run): the sweep is skipped and the
+				// pass goes straight to the extension phases — the sandbox measures claude-code,
+				// not the shell's buttons (and the sweep's live-command scan is where an
+				// in-development workbench freezes, which must not block the sandbox numbers).
+				const quick = fullParams.has('quick');
+				let selfOutcomes = [];
+				let selfSummary = { pass: 0, fail: 0, skip: 0 };
+				const { reportMarkdown } = await import('/src/selftest.ts');
+				if (quick) {
+					skip('self-tests', 'the all-buttons sweep', 'quick mode — the claude-code sandbox pass only');
+				} else {
+					const workbenchModule = await import('/src/workbench.ts');
+					const workbench = workbenchModule.currentWorkbench;
+					if (!workbench) throw new Error('the workbench instance is gone (bootWorkbench did not run?)');
+					const suites = await import('/src/selfTestSuites.ts');
+					suites.registerSelfTestSuites(workbench);
+					const { runSelfTests, summarize } = await import('/src/selftest.ts');
+					selfOutcomes = await runSelfTests((outcome) => {
+						report.push({ group: outcome.module, name: outcome.name, status: outcome.status, ms: outcome.ms, detail: outcome.message || '' });
+						renderPanel();
+						postReport(false);
+					});
+					selfSummary = summarize(selfOutcomes);
+					console.log('[full] module self-tests: ' + selfSummary.pass + ' pass, ' + selfSummary.fail + ' fail, ' + selfSummary.skip + ' skip');
+				}
 
 				/* ---------- Phase 2: git-graph-rs ---------- */
 				const GG = 'neophack.git-graph-rs';
@@ -859,8 +930,115 @@
 				const { extLogEntries } = await import('/src/extLog.ts');
 				const logErrorsBefore = extLogEntries().filter((e) => e.level === 'error').length;
 				const extList = window.__harness.mocked ? [] : await invoke('ext_list').catch(() => []);
+				// The sandbox's per-button pass — run AFTER the claude phase (phase 3½), never
+				// before it: a cold GG backend's unanswered commands would stall the very invokes
+				// the claude phase needs. EVERY command the registry carries under the plugin
+				// prefix gets exactly one row, classified here: a real run with an observable
+				// result (safe ones, and — the sandbox's fake remote makes them hermetic — the
+				// repository-writing ones), an open-and-dismiss of its picker/quick input, or a
+				// pointer to the earlier check that already exercised it. A command with no
+				// classification FAILS, so a future extension version's new buttons cannot slip
+				// through untested.
+				const openDismiss = (id) => async () => {
+					await withTimeout(commands.execute(id), 6000, id).catch(() => undefined);
+					await sleep(300);
+					escapeOverlays();
+					await sleep(200);
+					return 'picker opened and dismissed';
+				};
+				const runsClean = (id, ms, label) => async () => {
+					await withTimeout(commands.execute(id), ms, id);
+					await sleep(400);
+					escapeOverlays();
+					return label;
+				};
+				const ggViewRenders = async () => {
+					await withTimeout(commands.execute('git-graph-rs.view'), 10000, 'git-graph-rs.view');
+					const mounted = await waitFor(() => {
+						const frame = document.querySelector('#editorPart iframe.ext-page-frame');
+						return frame && frame.contentDocument && frame.contentDocument.body && frame.contentDocument.body.childElementCount > 0;
+					}, 45000);
+					if (!mounted) throw new Error('the webview panel never mounted its document');
+					const doc = document.querySelector('#editorPart iframe.ext-page-frame').contentDocument;
+					const rendered = await waitFor(() => doc.querySelectorAll('svg').length > 0 && (doc.body.textContent || '').length > 100, 30000);
+					if (!rendered) throw new Error('the page loaded but no graph rendered (svg ' + doc.querySelectorAll('svg').length + ')');
+					return 'svg graph, ' + (doc.body.textContent || '').length + ' chars of the seeded history';
+				};
+				const GG_SANDBOX_BEHAVIORS = {
+					'git-graph-rs.view': ggViewRenders,
+					'git-graph-rs.version': runsClean('git-graph-rs.version', 8000, 'ran (a toast)'),
+					'git-graph-rs.clearAvatarCache': runsClean('git-graph-rs.clearAvatarCache', 8000, 'ran'),
+					'git-graph-rs.endAllWorkspaceCodeReviews': runsClean('git-graph-rs.endAllWorkspaceCodeReviews', 8000, 'ran (nothing to end in the sandbox)'),
+					'git-graph-rs.fetch': async () => {
+						await withTimeout(commands.execute('git-graph-rs.fetch'), 20000, 'git-graph-rs.fetch');
+						await sleep(1500); // the ref update lands on disk before the probe's next poll
+						return 'ran against the fake origin (the probe verifies origin/main moved)';
+					},
+					// The writers — hermetic here: the clone's ahead commit is expendable, and
+					// reset/Gerrit land on the fake remote. A picker is dismissed; the disk state
+					// is the probe's verification.
+					'git-graph-rs.amendLastCommit': async () => {
+						await withTimeout(commands.execute('git-graph-rs.amendLastCommit'), 15000, 'amend').catch(() => undefined);
+						await sleep(800);
+						escapeOverlays();
+						return 'ran against the sandbox clone (the probe verifies the repo on disk)';
+					},
+					'git-graph-rs.resetCurrentBranchToRemote': async () => {
+						await withTimeout(commands.execute('git-graph-rs.resetCurrentBranchToRemote'), 15000, 'reset').catch(() => undefined);
+						await sleep(800);
+						escapeOverlays();
+						return 'ran; main tracks the fake origin/main';
+					},
+					'git-graph-rs.endSpecificWorkspaceCodeReview': openDismiss('git-graph-rs.endSpecificWorkspaceCodeReview'),
+					'git-graph-rs.resumeWorkspaceCodeReview': openDismiss('git-graph-rs.resumeWorkspaceCodeReview'),
+					'git-graph-rs.searchCommits': openDismiss('git-graph-rs.searchCommits'),
+					'git-graph-rs.addGitRepository': openDismiss('git-graph-rs.addGitRepository'),
+					'git-graph-rs.removeGitRepository': openDismiss('git-graph-rs.removeGitRepository'),
+					'git-graph-rs.filterByFile': openDismiss('git-graph-rs.filterByFile'),
+					'git-graph-rs.openFile': openDismiss('git-graph-rs.openFile'),
+					'git-graph-rs.gerritPushRef': openDismiss('git-graph-rs.gerritPushRef'),
+					'git-graph-rs.gerritFetchCommitMsgHook': openDismiss('git-graph-rs.gerritFetchCommitMsgHook')
+				};
+				const runPluginButtons = async (pluginId, behaviors, order) => {
+					const declared = commands.all().map((c) => c.id).filter((id) => id.startsWith(pluginId + '.'));
+					// Dependency order first (a command needing the chat mounted runs after the one
+					// mounting it), then any straggler alphabetically.
+					const ids = [...(order || []).filter((id) => declared.includes(id)),
+						...declared.filter((id) => !(order || []).includes(id)).sort()];
+					if (ids.length === 0) { skip(pluginId, 'the per-button pass', 'no commands in the registry'); return; }
+					for (const id of ids) {
+						const behavior = behaviors[id];
+						if (!behavior) {
+							await check(pluginId, 'button UNCLASSIFIED: ' + id, async () => {
+								throw new Error('no behavior for this command in dev/dev-harness.html — classify it so every button is tested');
+							});
+							continue;
+						}
+						await check(pluginId, 'button: ' + id, behavior);
+					}
+					await check(pluginId, 'coverage: every registry command has a behavior row (' + ids.length + ' commands)', async () => declared.length + ' declared, ' + ids.length + ' rows');
+				};
+				const runGgSandboxPass = async () => {
+					const gg = extList.find((e) => e.id === GG);
+					if (!gg) { skip(GG, 'the sandbox pass', 'not installed'); return; }
+					await check(GG, 'installed (sandbox pass)', async () => gg.version);
+					await check(GG, 'backend running (cold start waited out)', async () => {
+						let own = null;
+						for (let i = 0; i < 40 && !(own && own.pid); i++) {
+							const procs = await withTimeout(invoke('ext_process_status'), 8000, 'ext_process_status').catch(() => null);
+							own = (procs || []).find((p) => p.extId === GG);
+							if (!(own && own.pid)) await sleep(1500);
+						}
+						if (!own || !own.pid) throw new Error('process status: ' + JSON.stringify(own));
+						return 'pid ' + own.pid;
+					});
+					await runPluginButtons(GG, GG_SANDBOX_BEHAVIORS);
+				};
 				if (window.__harness.mocked) {
 					skip(GG, 'everything', 'the scripted mock backend has no extension host — run under tauri dev');
+				} else if (quick) {
+					if (!sandboxMode) skip(GG, 'everything', 'quick mode — the claude-code sandbox pass only');
+					// The sandbox's own GG pass runs as phase 3½, after the claude phase.
 				} else {
 					const gg = extList.find((e) => e.id === GG);
 					await check(GG, 'installed', async () => {
@@ -889,6 +1067,14 @@
 								return command.title;
 							});
 						}
+						// Coverage: the registry is the source of truth — a command the extension
+						// version declares must sit in the list above, or this pass never tests it.
+						await check(GG, 'coverage: every registry command is in the declared list', async () => {
+							const declared = commands.all().map((c) => c.id).filter((id) => id.startsWith(GG + '.')).sort();
+							const missing = declared.filter((id) => !GG_COMMANDS.includes(id));
+							if (missing.length) throw new Error('untested buttons: ' + missing.join(', '));
+							return declared.length + ' commands, all exercised by this pass';
+						});
 						// The contributed menu placements (the scm header button, the "..." group,
 						// the pull/push submenu, the explorer/editor/tab/change-row filters).
 						await check(GG, 'menu: the Source Control header button', async () => {
@@ -918,7 +1104,7 @@
 						}
 						// The view itself: the command opens the tab, the page loads, commits render.
 						await check(GG, 'the view opens and renders commits', async () => {
-							await withTimeout(commands.run('git-graph-rs.view'), 10000, 'git-graph-rs.view');
+							await withTimeout(commands.execute('git-graph-rs.view'), 10000, 'git-graph-rs.view');
 							const frameOk = await waitFor(() => {
 								const frame = document.querySelector('#editorPart iframe.ext-page-frame');
 								return frame && frame.contentDocument && frame.contentDocument.body && frame.contentDocument.body.childElementCount > 0;
@@ -931,19 +1117,19 @@
 						});
 						// The safe runnable command set, with observable results.
 						await check(GG, 'run: version (a toast)', async () => {
-							await withTimeout(commands.run('git-graph-rs.version'), 8000, 'version');
+							await withTimeout(commands.execute('git-graph-rs.version'), 8000, 'version');
 							await sleep(300);
 							return 'ran';
 						});
 						for (const id of ['git-graph-rs.clearAvatarCache', 'git-graph-rs.endAllWorkspaceCodeReviews']) {
 							await check(GG, 'run: ' + id, async () => {
-								await withTimeout(commands.run(id), 8000, id);
+								await withTimeout(commands.execute(id), 8000, id);
 								return 'ran';
 							});
 						}
 						for (const id of ['git-graph-rs.endSpecificWorkspaceCodeReview', 'git-graph-rs.resumeWorkspaceCodeReview', 'git-graph-rs.searchCommits']) {
 							await check(GG, 'run: ' + id + ' (quick input, dismissed)', async () => {
-								await withTimeout(commands.run(id), 4000, id).catch(() => undefined);
+								await withTimeout(commands.execute(id), 4000, id).catch(() => undefined);
 								await sleep(300);
 								escapeOverlays();
 								await sleep(200);
@@ -974,8 +1160,15 @@
 					} else {
 						await check(CLAUDE, 'installed', async () => cc.version);
 						await check(CLAUDE, 'backend running', async () => {
-							const procs = await invoke('ext_process_status');
-							const own = (procs || []).find((p) => p.extId === CLAUDE);
+							// The backend starts at boot, but quick mode reaches this check seconds
+							// after the window opened — wait for the pid instead of sampling once.
+							// Each poll is bounded: one stuck invoke must not hang the phase.
+							let own = null;
+							for (let i = 0; i < 40 && !(own && own.pid); i++) {
+								const procs = await withTimeout(invoke('ext_process_status'), 8000, 'ext_process_status').catch(() => null);
+								own = (procs || []).find((p) => p.extId === CLAUDE);
+								if (!(own && own.pid)) await sleep(1500);
+							}
 							if (!own || !own.pid) throw new Error('process status: ' + JSON.stringify(own));
 							return 'pid ' + own.pid + (own.lastError ? ' (last error: ' + own.lastError + ')' : '');
 						});
@@ -983,22 +1176,33 @@
 							'claude-vscode.reopenClosedSession', 'claude-vscode.focus', 'claude-vscode.focusLastMessage', 'claude-vscode.blur',
 							'claude-vscode.editor.openLast', 'claude-vscode.update', 'claude-vscode.logout',
 							'claude-vscode.terminal.open', 'claude-vscode.insertAtMention'];
-						for (const id of CLAUDE_COMMANDS) {
-							await check(CLAUDE, 'command registered: ' + id, async () => {
-								const command = commands.get(id);
-								if (!command) throw new Error('absent from the palette registry');
-								return command.title;
-							});
-						}
-						await check(CLAUDE, 'the activity bar carries the sessions entry', async () => {
-							const found = [...document.querySelectorAll('#activitybar [title], #activitybar [aria-label]')]
+					for (const id of CLAUDE_COMMANDS) {
+						await check(CLAUDE, 'command registered: ' + id, async () => {
+							const command = commands.get(id);
+							if (!command) throw new Error('absent from the palette registry');
+							return command.title;
+						});
+					}
+					// Coverage: a command the extension declares must sit in the list above (or,
+					// in the sandbox, in its per-button table) — otherwise this pass never tests it.
+					await check(CLAUDE, 'coverage: every registry command is in the declared list', async () => {
+						const declared = commands.all().map((c) => c.id).filter((id) => id.startsWith(CLAUDE + '.')).sort();
+						const missing = declared.filter((id) => !CLAUDE_COMMANDS.includes(id));
+						if (missing.length && !sandboxMode) throw new Error('untested buttons: ' + missing.join(', '));
+						return declared.length + ' commands declared';
+					});
+					await check(CLAUDE, 'the activity bar carries the sessions entry', async () => {
+							// The entry lands when the activation's setContext names the sessions
+							// list — right after the backend handshake, not instantly.
+							const findEntry = () => [...document.querySelectorAll('#activitybar [title], #activitybar [aria-label]')]
 								.some((el) => ((el.getAttribute('title') || '') + (el.getAttribute('aria-label') || '')).toLowerCase().includes('claude'));
+							const found = await waitFor(findEntry, 30000);
 							if (!found) throw new Error('no Claude entry in the activity bar');
 							return 'present';
 						});
 						await check(CLAUDE, 'the chat webview opens and mounts', async () => {
-							await withTimeout(commands.run('claude-vscode.window.open'), 10000, 'claude-vscode.window.open').catch(async () => {
-								await withTimeout(commands.run('claude-vscode.sidebar.open'), 10000, 'claude-vscode.sidebar.open');
+							await withTimeout(commands.execute('claude-vscode.window.open'), 10000, 'claude-vscode.window.open').catch(async () => {
+								await withTimeout(commands.execute('claude-vscode.sidebar.open'), 10000, 'claude-vscode.sidebar.open');
 							});
 							const mounted = await waitFor(() => {
 								const frame = document.querySelector('#editorPart iframe.ext-page-frame, #sidebar iframe.ext-page-frame');
@@ -1009,9 +1213,196 @@
 							if (!mounted) throw new Error('the chat webview never mounted its UI (the multi-MB bundle gets 30 s)');
 							return 'chat UI mounted';
 						});
-						// The conversation itself (a login / a real API round) stays interactive —
-						// the probe proves the extension runs, not that an account is signed in.
-						skip(CLAUDE, 'a real conversation', 'needs a signed-in account — stays interactive');
+						await check(CLAUDE, 'a new session opens a populated page — the blank-session regression', async () => {
+							const framesBefore = document.querySelectorAll('#editorPart iframe.ext-page-frame, #sidebar iframe.ext-page-frame').length;
+							// The user's path: the "New session" button inside the mounted chat opens a new
+							// tab-hosted panel — the exact surface the mount race blanked (the extension's
+							// initial postMessage crossed before the tab mounted and vanished).
+							const clicked = [...document.querySelectorAll('#editorPart iframe.ext-page-frame, #sidebar iframe.ext-page-frame')].some((node) => {
+								const button = node.contentDocument?.querySelector('[aria-label="New session"]');
+								if (button) { button.click(); return true; }
+								return false;
+							});
+							if (!clicked) throw new Error('no "New session" button in the mounted chat');
+							const fresh = await waitFor(() => {
+								const frames = [...document.querySelectorAll('#editorPart iframe.ext-page-frame, #sidebar iframe.ext-page-frame')];
+								if (frames.length <= framesBefore) return false;
+								return frames.slice(framesBefore).every((frame) => {
+									const doc = frame.contentDocument;
+									if (!doc || !doc.body) return false;
+									return doc.body.childElementCount > 0 && (doc.body.textContent || '').length > 50;
+								});
+							}, 30000);
+							if (!fresh) throw new Error('the new session page stayed empty — its initial state was lost in the mount race');
+							return 'new session page rendered';
+						});
+						// The conversation itself: interactive (a real account) unless the sandbox
+						// runs it — the fake login + the local fake Claude server make it a
+						// measured, hermetic round trip: type into the mounted chat, send, and
+						// time send → the fake reply's first token and its settled render.
+						if (!sandboxMode) {
+							skip(CLAUDE, 'a real conversation', 'needs a signed-in account — stays interactive (scripts/probes/claude-code-sandbox.mjs runs one against the local fake server)');
+						} else {
+							await check(CLAUDE, 'a conversation round-trips the fake Claude server', async () => {
+								const frame = chatFrames()[chatFrames().length - 1];
+								if (!frame) throw new Error('no mounted chat frame');
+								const doc = frame.contentDocument;
+								const composer = chatComposer(doc);
+								if (!composer) {
+									const labels = [...doc.querySelectorAll('button[aria-label]')].map((b) => b.getAttribute('aria-label')).slice(0, 12).join(', ');
+									throw new Error('no composer (textarea / contenteditable) — body "' + (doc.body.textContent || '').replace(/\s+/g, ' ').slice(0, 200) + '" buttons: ' + labels);
+								}
+								composer.focus();
+								const prompt = 'harness sandbox ping ' + Date.now();
+								doc.execCommand('insertText', false, prompt);
+								const t0 = performance.now();
+								composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+								// Some builds gate synthetic Enter (isTrusted) — the Send button is the fallback.
+								await sleep(1200);
+								const bodyText = () => (doc.body.textContent || '');
+								if (!bodyText().includes('FAKE-CLAUDE')) {
+									const send = [...doc.querySelectorAll('button[aria-label]')].find((b) => /send/i.test(b.getAttribute('aria-label') || ''));
+									if (send) send.click();
+								}
+								let firstToken = 0;
+								const arrived = await waitFor(() => {
+									if (bodyText().includes('FAKE-CLAUDE')) { if (!firstToken) firstToken = Math.round(performance.now() - t0); return true; }
+									return false;
+								}, 90000);
+								if (!arrived) throw new Error('no FAKE-CLAUDE reply within 90 s — body "' + bodyText().replace(/\s+/g, ' ').slice(0, 240) + '"');
+								// Let the streamed reply settle (its length stops growing), then read the settled time.
+								let settled = 0;
+								let lastLen = -1;
+								for (let i = 0; i < 100; i++) {
+									await sleep(300);
+									const len = bodyText().length;
+									if (len === lastLen) { settled = Math.round(performance.now() - t0); break; }
+									lastLen = len;
+								}
+								return `send → first token ${firstToken} ms, settled ${settled || firstToken} ms (streamed by the local fake server)`;
+							});
+						}
+						// The per-button pass (sandbox only): every claude-vscode command the registry
+						// carries, one row each. The account-destructive ones are exactly why this is
+						// sandbox-gated — logout tears down the FAKE login, update's version check
+						// would phone the real CDN; here both are hermetic. window.open and the
+						// new-session flow are already exercised above and just get classified.
+						if (sandboxMode) {
+							const runsOnChat = (id, label) => async () => {
+								if (!chatFrames().length) throw new Error('no mounted chat frame (the open check above failed?)');
+								await withTimeout(commands.execute(id), 10000, id);
+								await sleep(300);
+								return label;
+							};
+							const CLAUDE_SANDBOX_BEHAVIORS = {
+								'claude-vscode.window.open': async () => 'covered by "the chat webview opens and mounts" above',
+								'claude-vscode.newConversation': async () => 'covered by "a new session opens a populated page" above',
+								'claude-vscode.focus': runsOnChat('claude-vscode.focus', 'focused the chat tab'),
+								'claude-vscode.focusLastMessage': runsOnChat('claude-vscode.focusLastMessage', 'scrolled to the last message'),
+								'claude-vscode.insertAtMention': runsOnChat('claude-vscode.insertAtMention', 'inserted the @-mention into the composer'),
+								'claude-vscode.editor.openLast': runsOnChat('claude-vscode.editor.openLast', 'opened the last tool output / code block'),
+								'claude-vscode.reopenClosedSession': runsOnChat('claude-vscode.reopenClosedSession', 'reopened the last session'),
+								'claude-vscode.terminal.open': runsOnChat('claude-vscode.terminal.open', 'opened the claude terminal'),
+								'claude-vscode.blur': runsOnChat('claude-vscode.blur', 'blurred the chat'),
+								'claude-vscode.sidebar.open': runsOnChat('claude-vscode.sidebar.open', 'opened the sessions sidebar'),
+								'claude-vscode.update': async () => {
+									await withTimeout(commands.execute('claude-vscode.update'), 20000, 'update').catch(() => undefined);
+									await sleep(400);
+									escapeOverlays();
+									return 'ran; the version check resolves against the sandbox\'s blocked network';
+								},
+								// Last on purpose: it destroys the fake login everything above used.
+								'claude-vscode.logout': async () => {
+									await withTimeout(commands.execute('claude-vscode.logout'), 10000, 'logout').catch(() => undefined);
+									await sleep(500);
+									escapeOverlays();
+									return 'logged the FAKE account out (the sandbox login is expendable)';
+								}
+							};
+							const CLAUDE_BUTTON_ORDER = ['claude-vscode.window.open', 'claude-vscode.focus', 'claude-vscode.focusLastMessage',
+								'claude-vscode.insertAtMention', 'claude-vscode.newConversation', 'claude-vscode.editor.openLast',
+								'claude-vscode.reopenClosedSession', 'claude-vscode.terminal.open', 'claude-vscode.blur',
+								'claude-vscode.sidebar.open', 'claude-vscode.update', 'claude-vscode.logout'];
+							await runPluginButtons(CLAUDE, CLAUDE_SANDBOX_BEHAVIORS, CLAUDE_BUTTON_ORDER);
+						}
+					}
+				}
+
+				/* ---------- Phase 3½: git-graph-rs against the sandbox's fake remote ---------- */
+				if (!window.__harness.mocked && quick && sandboxMode) await runGgSandboxPass();
+
+				/* ---------- Phase S: speed — the open latencies the user feels ---------- */
+				if (window.__harness.mocked) {
+					skip('speed', 'everything', 'the scripted mock has no real webviews — run under tauri dev');
+				} else {
+					const webviewFrame = () => document.querySelector('#editorPart iframe.ext-page-frame');
+					const mounted = (minText) => {
+						const frame = webviewFrame();
+						if (!frame || !frame.contentDocument || !frame.contentDocument.body) return false;
+						return frame.contentDocument.body.childElementCount > 0 && (frame.contentDocument.body.textContent || '').length >= minText;
+					};
+					const ggInstalled = !quick && extList.some((e) => e.id === GG);
+					if (ggInstalled) {
+						await check('speed', 'git-graph view: command -> graph rendered', async () => {
+							const t = performance.now();
+							await withTimeout(commands.execute('git-graph-rs.view'), 10000, 'view');
+							const ok = await waitFor(() => mounted(100), 20000);
+							if (!ok) throw new Error('never rendered');
+							return Math.round(performance.now() - t) + ' ms';
+						});
+					}
+					if (extList.some((e) => e.id === CLAUDE)) {
+						await check('speed', 'claude chat open: command -> chat mounted', async () => {
+							const t = performance.now();
+							await withTimeout(commands.execute('claude-vscode.window.open'), 10000, 'open').catch(async () => {
+								await withTimeout(commands.execute('claude-vscode.sidebar.open'), 10000, 'sidebar.open');
+							});
+							const ok = await waitFor(() => mounted(0), 30000);
+							if (!ok) throw new Error('never mounted');
+							return Math.round(performance.now() - t) + ' ms';
+						});
+						await check('speed', 'claude chat reopen (warm): close -> command -> mounted', async () => {
+							await withTimeout(commands.execute('workbench.closeEditor'), 5000, 'close');
+							await sleep(500);
+							const t = performance.now();
+							await withTimeout(commands.execute('claude-vscode.window.open'), 10000, 'reopen').catch(async () => {
+								await withTimeout(commands.execute('claude-vscode.sidebar.open'), 10000, 'sidebar.open');
+							});
+							const ok = await waitFor(() => mounted(0), 30000);
+							if (!ok) throw new Error('never mounted');
+							return Math.round(performance.now() - t) + ' ms (warm)';
+						});
+						// The user's "open another claude page" path: the in-chat New session
+						// button → a fresh populated tab-hosted page (not the blank mount race).
+						await check('speed', 'claude new session: button click -> populated page', async () => {
+							const before = chatFrames().length;
+							const button = chatFrames().map((f) => f.contentDocument.querySelector('[aria-label="New session"]')).find(Boolean);
+							if (!button) throw new Error('no "New session" button in the mounted chat');
+							const t = performance.now();
+							button.click();
+							const ok = await waitFor(() => {
+								const frames = chatFrames();
+								if (frames.length <= before) return false;
+								return frames.slice(before).every((frame) => (frame.contentDocument.body.textContent || '').length > 50);
+							}, 30000);
+							if (!ok) throw new Error('the new session page never populated');
+							return Math.round(performance.now() - t) + ' ms';
+						});
+						await check('speed', 'ggs:// transport: fetch claude\'s 5.4 MB index.js', async () => {
+							let res;
+							const t = performance.now();
+							try {
+								res = await fetch('ggs://localhost/' + CLAUDE + '/webview/index.js');
+							} catch (e) {
+								// WKWebView cannot fetch custom schemes from page script (WebView2 can) —
+								// the transport itself is proven by the webview frames loading over ggs://.
+								const skip = new Error('this platform\'s webview cannot fetch ggs:// from script (' + e + ')');
+								skip.harnessSkip = true;
+								throw skip;
+							}
+							const len = (await res.text()).length;
+							return len + ' chars in ' + Math.round(performance.now() - t) + ' ms';
+						});
 					}
 				}
 
@@ -1036,6 +1427,10 @@
 				renderPanel();
 				// A fail exits non-zero for the headless driver (run-full-harness.mjs reads the flag).
 				window.__fullFailed = failed;
+				// The sandbox run's way home: macOS WKWebView has no CDP, so the report crosses
+				// as a POST to the probe's fake Claude server (CORS-open on purpose).
+				postReport(true);
+				if (reportUrl) console.log('[full] the final report was posted to ' + reportUrl);
 			}
 		</script>
 	</body>

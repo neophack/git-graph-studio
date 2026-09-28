@@ -596,6 +596,27 @@ nothing.
   `scripts/probes/claude-code-live-check.mjs` (the live claude-code check: the backend on
   ggs-node (or `--host real-node`), its commands, the chat webview mounted, the IDE MCP
   server up; `--screenshot` saves the workbench),
+  `scripts/probes/claude-code-sandbox.mjs` + `scripts/probes/fake-claude-server.mjs`
+  (the logged-in claude-code sandbox, no account and no real network: the fake server
+  answers `/v1/messages` (streaming), `/api/hello` and `count_tokens` on the loopback,
+  the "login" is a fake API key, and `CLAUDE_CONFIG_DIR` relocates every bit of Claude
+  Code's state into `target/studio/claude-sandbox/` — `~/.claude`, `~/.claude.json` and
+  the keychain are never touched; the workspace is a clone of a **fake git remote** — a
+  seeded bare repository (a merge, a remote-only branch, tags) served by `git daemon` on
+  the loopback with receive-pack on, so git-graph-rs's remote branches, tracking state
+  and fetch are all testable and all hermetic; the clone sits one commit ahead and two
+  behind, and the probe verifies the plugin's fetch moved origin/main to the seeded head;
+  the probe pre-flights the bundled CLI against the fake server, then boots the app under
+  `tauri dev` straight into the dev harness's sandbox pass (lib.rs's dev-only
+  `GGS_DEV_HARNESS` boot hook does the navigation; the harness streams its rows back over
+  `write_file`, WKWebView having no CDP) and writes
+  `target/studio/claude-sandbox-report.{md,json}`: the measured rows (chat open, warm
+  reopen, new-session page, a real conversation send→reply against the fake server, the
+  git-graph view over the seeded history, the fetch) plus the process tree's memory.
+  `--keep` leaves the app open for interactive testing — chat freely, every reply is
+  local, fetch and push land on the fake origin; `--no-harness` opens the plain workbench
+  (unbounded until Ctrl-C — the fake remote must not die mid-testing); `--cli-only` stops
+  after the pre-flights),
   `scripts/probes/git-graph-live-check.mjs` (the live git-graph-rs check: ggs-node with
   the engine `.node` loaded, the view rendering, settings pushing through),
   `scripts/probes/git-graph-menus-live-check.mjs` (the live git-graph-rs menu check: every
@@ -656,7 +677,14 @@ the identical checks.
   checks; repository-mutating commands stay structural there, their execution belongs to
   the temp-repo probes),
   `dev/dev-harness.html` (the two-mode harness: real Tauri IPC under `tauri dev`, or the
-  scripted fake backend under `npm run dev:vite`)
+  scripted fake backend under `npm run dev:vite`; the `?full=1` pass gained a sandbox
+  mode — `?sandbox=1` runs a measured claude-code conversation against the local fake
+  Claude server, `?quick=1` skips the module sweep and the git-graph pass for a
+  claude-only run, and `?reportFile=`/`?report=` stream every row out as it lands, over
+  `write_file` (the primary channel — no webview fetch policy can eat it) and an HTTP
+  POST; `scripts/probes/claude-code-sandbox.mjs` drives it through lib.rs's dev-only
+  `GGS_DEV_HARNESS` boot hook, which navigates the window there and keeps it awake —
+  macOS suspends an occluded WKWebView's timers, which stalls the pass's bounded waits)
 
 ### 16. Symbol MCP Server
 
