@@ -1,8 +1,9 @@
 # Git Graph Studio's CI: the frontend test suite plus the per-platform installer builds.
 #
-# The app is self-contained except for the vscode-git-graph-rs/ submodule: its compiled
-# webview assets (media/, out/) feed prepare.mjs, so every job checks the submodule out and
-# the installer jobs compile it first.
+# The app is self-contained: every extension package an installer carries arrives as the
+# marketplace's per-architecture VSIX (Open VSX, fetched by scripts/
+# fetch-marketplace-extensions.mjs inside prepare.mjs) — no plugin source or build lives in
+# this tree, so no job checks anything beyond this repository out.
 #
 # Tests gate the installers: every installer job runs clippy and the backend test suite
 # first, and `tauri build` only starts after the last test passed. The dependency graph is
@@ -36,12 +37,13 @@
 # when release.yml calls this workflow with `studio-version` to stamp the version being
 # published (`full` adds the niche macOS x64 platform).
 #
-# Which extension packages are packed INTO the installers is the release form's choice
-# (`bundle-git-graph` checked by default, `bundle-claude-code` unchecked by default — the
-# Extensions view's marketplace row installs an unpacked package on demand). The checkboxes
-# reach the build as GGS_BUNDLE_GIT_GRAPH / GGS_BUNDLE_CLAUDE_CODE (scripts/
-# fetch-marketplace-extensions.mjs); a pushed tag or a plain push to main takes the same
-# defaults. Local builds (build-studio.bat / build-studio-linux.bat) pack both.
+# Which extension packages are packed INTO the installers is one policy everywhere
+# (2026-09-28, the owner's direction): git-graph-rs rides in every build, claude-code in
+# none by default — the Extensions view's marketplace row installs it on demand. The
+# release form's checkboxes reach the build as GGS_BUNDLE_GIT_GRAPH /
+# GGS_BUNDLE_CLAUDE_CODE (scripts/fetch-marketplace-extensions.mjs), and a pushed tag or
+# a plain push to main takes the same defaults (`GGS_BUNDLE_CLAUDE_CODE=1` opts a build
+# back in).
 
 name: Studio
 
@@ -104,23 +106,19 @@ concurrency:
 
 jobs:
   # The app's frontend: typecheck plus the vitest suite from tests/, which runs against a
-  # mocked Tauri backend (tests/tauriMock.ts), so neither Rust nor the compiled extension
-  # assets are needed here - only the submodule manifest the baked contributions read.
+  # mocked Tauri backend (tests/tauriMock.ts), so neither Rust nor any extension package
+  # is needed here.
   studio-test:
     name: Studio tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            vscode-git-graph-rs/package-lock.json
+          cache-dependency-path: package-lock.json
 
       - name: Install app dependencies
         run: npm ci || npm install
@@ -146,8 +144,6 @@ jobs:
       GGS_BUNDLE_CLAUDE_CODE: ${{ inputs.bundle-claude-code == true && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
       # src-tauri redirects cargo's target dir to ../target/studio/cargo (its
@@ -164,17 +160,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            vscode-git-graph-rs/package-lock.json
-
-      # The app consumes the extension's own build products (media/out.min.js, out/config.js,
-      # resources/), so the submodule must be compiled before prepare.mjs runs.
-      - name: Build the vscode-git-graph-rs submodule
-        working-directory: vscode-git-graph-rs
-        run: |
-          npm ci || npm install
-          npm run compile
+          cache-dependency-path: package-lock.json
 
       - name: Install app dependencies
         run: npm ci || npm install
@@ -205,10 +191,9 @@ jobs:
       - name: Prepare the app assets
         run: node scripts/prepare.mjs
 
-      # The app crate is its own workspace (see src-tauri/Cargo.toml), so the submodule
-      # repository's `cargo test --workspace` never reaches it: its tests, the backend
-      # binary's protocol test against the real executable, and clippy run here - before
-      # the installer build, which only starts if every test passed.
+      # The app crate is its own workspace (see src-tauri/Cargo.toml), so its tests, the
+      # backend binary's protocol test against the real executable, and clippy run here -
+      # before the installer build, which only starts if every test passed.
       - name: Test and lint the app backend
         working-directory: src-tauri
         run: |
@@ -222,10 +207,10 @@ jobs:
 
       # Size and performance measurement (docs/ggs-development-plan.md M1.7; the budgets
       # were removed 2026-09-15 — sizes are recorded, not gated): the artefact sizes plus
-      # the backend's headless probes on the submodule repository. The metrics land in
+      # the backend's headless probes on this repository itself. The metrics land in
       # target/studio/metrics.json and are published with the bundles.
       - name: Measure sizes and performance
-        run: node scripts/measure.mjs --repo vscode-git-graph-rs
+        run: node scripts/measure.mjs --repo .
 
       # Only the installers themselves are artefacts: bundle/ also keeps each bundler's
       # work files, which must never reach the release page.
@@ -240,11 +225,11 @@ jobs:
 
   # The Linux installers, built in floor containers (see the header note): one pass per
   # package format, each on the oldest base that keeps the binary loadable on
-  # still-supported distros of that family. The extension assets are compiled on the
-  # runner (node is already there) and reach the container through the repository mount.
-  # The deb leg also runs the backend test gate natively (the Windows job runs the same
-  # suite on Windows); the rpm leg compiles the same sources inside its container, and a
-  # failed workflow run never reaches release.yml.
+  # still-supported distros of that family. The container fetches the marketplace
+  # extension packages itself (through the repository mount's prepare.mjs run). The deb
+  # leg also runs the backend test gate natively (the Windows job runs the same suite on
+  # Windows); the rpm leg compiles the same sources inside its container, and a failed
+  # workflow run never reaches release.yml.
   studio-linux:
     name: Studio installers (${{ matrix.artifact }})
     runs-on: ubuntu-latest
@@ -271,22 +256,12 @@ jobs:
             artifact: studio-linux-rpm
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            vscode-git-graph-rs/package-lock.json
-
-      - name: Build the vscode-git-graph-rs submodule
-        working-directory: vscode-git-graph-rs
-        run: |
-          npm ci || npm install
-          npm run compile
+          cache-dependency-path: package-lock.json
 
       - name: Install app dependencies
         run: npm ci || npm install
@@ -380,7 +355,7 @@ jobs:
         run: |
           mkdir -p target/studio/cargo/release
           cp -r target/studio/bundle-linux target/studio/cargo/release/bundle
-          node scripts/measure.mjs --repo vscode-git-graph-rs
+          node scripts/measure.mjs --repo .
 
       # Only the packages themselves are artefacts: beside each package the bundler leaves
       # its work tree (deb: control/, data.tar.gz, debian-binary, md5sums, the staged
@@ -421,8 +396,6 @@ jobs:
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
       # Same target-dir mapping as the Windows job (see its comment).
@@ -436,15 +409,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            vscode-git-graph-rs/package-lock.json
-
-      - name: Build the vscode-git-graph-rs submodule
-        working-directory: vscode-git-graph-rs
-        run: |
-          npm ci || npm install
-          npm run compile
+          cache-dependency-path: package-lock.json
 
       - name: Install app dependencies
         run: npm ci || npm install
@@ -469,7 +434,7 @@ jobs:
         run: npx tauri build
 
       - name: Measure sizes and performance
-        run: node scripts/measure.mjs --repo vscode-git-graph-rs
+        run: node scripts/measure.mjs --repo .
 
       # Only the dmg is an artefact: bundle/dmg/ also keeps the create-dmg staging
       # (bundle_dmg.sh, template.applescript, eula-resources-template.xml, Info.plist,

@@ -10,14 +10,16 @@ Open VSX, the open-source registry the VS Code ecosystem publishes to — one-cl
 and update, every package going through the same install rules a picked `.vsix` takes),
 contributing commands to the palette and
 menus, running their backends as warm sibling processes. The shell names no plugin: everything of the Git
-Graph view — the engine (the `vscode-git-graph-rs/` submodule's `native/core`), the view's
+Graph view — the engine (the extension's `native/core`, in its own repository outside this
+tree), the view's
 write path, its webview page and its comparison pages — lives in the **git-graph-rs** plugin
 (its own standard VSIX build), and the app's own
 git reads and writes run the `git` CLI with no plugin installed. The installers carry the
-marketplace's per-architecture builds of the extension packages a release chose to pack —
-**git-graph-rs** by default (installed on first launch, like VS Code's bundled
-extensions), **claude-code** behind a release-form checkbox that is unchecked by default
-(an unpacked package installs from the Extensions view's marketplace row).
+marketplace's per-architecture builds of the extension packages a release chose to pack:
+**git-graph-rs** rides in every build (installed on first launch, like VS Code's bundled
+extensions); **claude-code** rides in none by default — it installs from the Extensions
+view's marketplace row on demand (a release form checkbox or `GGS_BUNDLE_CLAUDE_CODE=1`
+can pack it).
 
 Code navigation rides a persistent symbol index (Source Insight's model): the workspace's
 declarations and their occurrences indexed once under `~/.ggs/index/`, resumed on open and
@@ -74,11 +76,11 @@ git-graph-studio/
 │
 ├── scripts/                 the build pipeline — every generated file lands in target/studio/
 │   ├── prepare.mjs          assembles the public dir the app serves and packs the bundled
-│   │                        plugin packages (delegating to each plugin's own packer)
+│   │                        extension packages (the marketplace's builds, fetched from Open VSX)
 │   ├── check-seams.mjs      the compile-time seam rules (the app names no extension artifact)
 │   ├── measure.mjs          exe/installer/dist size measurement + the backend probes
 │   ├── *-stub.cjs           the vscode/Node stubs the config and compare bundles build against
-│   ├── build-studio.bat     one-command Windows build (submodule → assets → tauri build)
+│   ├── build-studio.bat     one-command Windows build (assets → tauri build)
 │   ├── build-studio-linux.bat   the Linux installers through Docker (deb | rpm | shell)
 │   ├── docker/              the Linux build containers
 │   │   ├── Dockerfile.studio-linux    base image = the compatibility floor (see its header)
@@ -88,24 +90,18 @@ git-graph-studio/
 │       └── cdp-*.mjs            live inspection over WebView2's CDP port
 │
 ├── docs/                    ggs-development-plan.md — the development plan
-├── .github/workflows/       studio.yml (CI) · release.yml (tag → GitHub Release)
-└── vscode-git-graph-rs/     the git-graph-rs VS Code extension, a git submodule tracking its
-                             repository's main branch: the engine crate the app links
-                             (native/core) and the webview assets it compiles (npm run
-                             compile → out/, media/)
+└── .github/workflows/       studio.yml (CI) · release.yml (tag → GitHub Release)
 ```
 
 Everything generated — the Vite public dir and dist, the Cargo target, the installers, the
 coverage and the metrics — lives under `target/studio/` (gitignored), never in the source
-tree; `node_modules/` and the submodule's own build products stay where npm/cargo put them.
+tree; `node_modules/` stays where npm put it.
 
 ## Build
 
-Prerequisites: Rust 1.94+, Node.js, and the submodule compiled once:
+Prerequisites: Rust 1.94+ and Node.js 20+:
 
 ```sh
-git submodule update --init      # checks out vscode-git-graph-rs/ (the extension)
-cd vscode-git-graph-rs && npm install && npm run compile && cd ..   # out/config.js and media/
 npm install
 npx tauri dev           # run the app
 npx tauri build         # produce the installers for THIS platform
@@ -230,6 +226,6 @@ version; the tag is then created at that commit.
 The repository's own code is MIT ([LICENSE](LICENSE)). The built installers are more restricted
 than that: they embed the Git Graph webview and the app icon, ported from Git Graph by mhutchie,
 whose license does not permit distributing derivative works — read the *Git Graph webview and
-built products* section of the [LICENSE](LICENSE) and
-`vscode-git-graph-rs/licenses/LICENSE_GIT_GRAPH` before redistributing anything produced by
+built products* section of the [LICENSE](LICENSE) and the extension repository's
+`licenses/LICENSE_GIT_GRAPH` before redistributing anything produced by
 `npx tauri build`.

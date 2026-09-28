@@ -28,10 +28,9 @@ echo "[container] app dependencies (adds the linux esbuild/tauri-cli binaries)"
 npm install --no-audit --no-fund
 
 echo "[container] building the installers ($BUNDLES; Rust release build + bundling)"
-# tauri build runs prepare.mjs and the Vite build itself (beforeBuildCommand); the extension
-# assets it copies (vscode-git-graph-rs/out/, vscode-git-graph-rs/media/) were compiled on
-# the host by build-studio-linux.bat, into the submodule checkout mounted at
-# /repo/vscode-git-graph-rs.
+# tauri build runs prepare.mjs and the Vite build itself (beforeBuildCommand); the
+# marketplace extension packages it packs are fetched right here, from the registry or
+# the target/studio/marketplace-cache on the repository mount.
 npx tauri build --bundles "$BUNDLES"
 
 echo "[container] copying the bundles and binaries into the repository"

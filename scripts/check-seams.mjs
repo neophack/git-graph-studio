@@ -1,8 +1,8 @@
 // The seam rules of the app, enforced at build time: nothing under src/ or static/ may name
 // the git-graph-rs extension's artifacts or protocols — the extension is a plugin (everything
-// of it lives in its standard VSIX, packed by the extension's own build inside the
-// vscode-git-graph-rs submodule), and the app's only interface to it is the generic extension
-// platform. The Rust counterpart of this check lives in src-tauri/build.rs.
+// of it lives in its standard VSIX, built in its own repository outside this tree), and the
+// app's only interface to it is the generic extension platform. The Rust counterpart of this
+// check lives in src-tauri/build.rs.
 //
 // Wired into every path that compiles the frontend: scripts/prepare.mjs runs it first, the
 // Vite plugin (vite.config.ts) runs it on every dev-server start and production build, and

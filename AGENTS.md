@@ -39,11 +39,8 @@ big-code-analysis, module 17's metrics engine), Node.js 20+, and a
 `git` executable on `PATH`.
 
 ```sh
-# 1. The engine submodule — checked out and compiled once
-git submodule update --init
-cd vscode-git-graph-rs && npm install && npm run compile && cd ..
-
-# 2. The app
+# The app — self-contained: no submodule, no plugin source; every extension package a
+# build carries is fetched from the marketplace (Open VSX) by prepare.mjs
 npm install
 npx tauri dev            # run with the real backend (the only mode that catches packaged regressions)
 ```
@@ -59,7 +56,7 @@ Everyday commands, from the repository root:
 | `cargo clippy --all-targets --all-features -- -D warnings` (in `src-tauri/`) | Backend lint, warnings are errors in CI |
 | `npx tauri build` | Installers into `target/studio/cargo/release/bundle/` |
 | `npm run dev:vite` | Frontend only, against the scripted fake backend; open `dev/dev-harness.html` |
-| `node scripts/measure.mjs --repo vscode-git-graph-rs` | Size and performance measurement — recorded to `target/studio/metrics.json` (no budgets; see principle 6) |
+| `node scripts/measure.mjs --repo .` | Size and performance measurement (this repository as the probe repo) — recorded to `target/studio/metrics.json` (no budgets; see principle 6) |
 
 All generated output — the Vite public dir and dist, the Cargo target, installers, coverage,
 `metrics.json` — lands under `target/studio/` (gitignored). Nothing generated is ever written
@@ -82,7 +79,7 @@ The app process plus one extension-host process per installed package, joined by
 └──────────────────────────────────────────┬────────────────────────────────────────────────┘
                                            │ the extension platform (ext_process, ggs:// pages)
 ┌──────────────────────────────────────────┴────────────────────────────────────────────────┐
-│ The extension (vscode-git-graph-rs/, a submodule that packs itself — studio/build.mjs):   │
+│ The extension (git-graph-rs, in its own repository — its studio/ packer ships the         │
 │ the store-format .vsix — pages (ggs://) and the engine .node, loaded natively by the      │
 │ real-Node extension host (nodeHost.ts) — no executable inside. The app tree carries no    │
 │ plugin code; the app binary never links the engine and names no plugin.                   │
@@ -281,15 +278,15 @@ commit-msg hook, `refs/for/` push).
 
 ### 10. Git Graph Engine (the git-graph-rs plugin)
 
-The Git Graph view is an extension package: the extension packs itself —
-`vscode-git-graph-rs/studio/build.mjs`, inside the submodule, builds everything of it
+The Git Graph view is an extension package: the extension packs itself — its own
+`studio/build.mjs`, in the extension's repository outside this tree, builds everything of it
 (the extension's own webview page, the config/compare page bundles, the in-page bridges, the
 engine, the write path) into one self-contained `.vsix` (the store's own format; the
 Studio-specific capabilities ride inside it under `package.json`'s `ggs` key, which VS Code
 ignores and the app turns into the runtime `manifest.json` on install —
 2026-09-24, before this the package was a bespoke zip), installed from the Extensions
 view's one-click offer (or by hand). The page plays the extension host's own role in-page:
-the submodule's `studio/bridge.js` (the view) and `studio/compare-bridge.js` (the comparison
+its own `studio/bridge.js` (the view) and `studio/compare-bridge.js` (the comparison
 pages) generate the extension's own pages, compose the theme and `acquireVsCodeApi`, serve
 the shell's own requests through the generic page services, and translate the view's protocol
 onto the engine's dispatch surface before forwarding over `backend.run` — the one channel any
@@ -312,7 +309,7 @@ the extension's artifacts — `scripts/check-seams.mjs` fails the build on any r
   through the same `serve` path a frame's RPC takes), host pushes arrive as
   `ggs.hostEvent` notifications, and only `require('vscode')` is intercepted — a package's
   ESM, workers, `node_modules` and `.node` all behave natively.
-- The package's own web side (`vscode-git-graph-rs/studio/`: `bridge.js`/
+- The package's own web side (the extension repository's `studio/`: `bridge.js`/
   `compare-bridge.js` the in-page extension hosts, `bundle.mjs` the page bundles with
   relative URLs, `config-stdin.js` the config bundle's entry, `vsix.mjs` the zip writer,
   `stubs/` the `vscode` / Node / `fs` shims the bundles build against)
@@ -395,15 +392,17 @@ integrated terminal); and `crypto.createHash` (md5 / sha1 / sha256, pure TypeScr
 gravatar-class digests, synchronous like Node's).
 **Which extension packages the installer carries is the build's choice** (never a
 per-install one): `prepare.mjs` packs the marketplace builds — Open VSX, per architecture,
-downloaded by `scripts/fetch-marketplace-extensions.mjs` (offline the git-graph-rs package
-is the submodule's own build, and claude-code is simply not packed) — into `extensions/`
+downloaded by `scripts/fetch-marketplace-extensions.mjs` (there is no local source for any
+package; a selected package the fetch cannot serve from cache leaves the build unpacked,
+or fails it in require mode) — into `extensions/`
 beside the app, and the first launch installs whatever sits there like VS Code's bundled
 extensions (`cmd_ext::install_missing_bundled`; a deliberate uninstall stays
-uninstalled). CI's release form picks per package (`bundle-git-graph` checked by default,
-`bundle-claude-code` unchecked — a pushed tag takes the same defaults; the
-`GGS_BUNDLE_GIT_GRAPH` / `GGS_BUNDLE_CLAUDE_CODE` env are the same switches, and the
-local build scripts pack both). A package a build left out still installs from the
-Extensions view's marketplace row. **Install means run**: the boot
+uninstalled). Which packages ride is one policy everywhere (2026-09-28, the owner's
+direction): git-graph-rs in every build, claude-code in none by default — the Extensions
+view's marketplace row installs it online on demand. The `GGS_BUNDLE_GIT_GRAPH` /
+`GGS_BUNDLE_CLAUDE_CODE` env are the switches (CI's release form forwards its checkboxes;
+`GGS_BUNDLE_CLAUDE_CODE=1` opts a build back in). A package a build left out still
+installs from the Extensions view's marketplace row. **Install means run**: the boot
 pass starts every installed package that declares a backend
 (`ext_process::start_all_installed`, off the window's thread), an install starts its
 backend at once, and the first command remains the lazy fallback.
@@ -577,16 +576,14 @@ nothing.
   every handle killed at app exit and on extension reload — the real process surface a
   sandboxed frame cannot have, which `nodeShims.ts` maps onto the Node `child_process`
   shapes; the sync variants stay call-time failures, a frame cannot block its loop)
-- The packer lives in the extension's own repository (`vscode-git-graph-rs/studio/` —
+- The packer lives in the extension's own repository (its `studio/` —
   `build.mjs` the packer, `bundle.mjs` the page-bundle builder, `config-stdin.js`,
   `vsix.mjs` the zip writer, `stubs/` the bundle stubs, plus the two in-page bridges); the
-  app tree carries no plugin code, and `scripts/prepare.mjs` only builds the engine and
-  calls the packer. The extension's own frontend is that submodule, which cannot move.
-- Build: `scripts/prepare.mjs` (delegates the bundled package to the extension's own
-  `vscode-git-graph-rs/studio/build.mjs`; `--vsix <path>` / `GGS_BUNDLED_VSIX` bundles a
-  ready-built VSIX as-is and skips every submodule compile),
-  `scripts/build-plugins.bat` (builds the plugin's
-  VSIX independently of the app build, through the same packer)
+  app tree carries no plugin code, and no build step of this repository runs the packer —
+  the package arrives here as the marketplace's VSIX (or a hand-picked `--vsix`).
+- Build: `scripts/prepare.mjs` (fetches the bundled packages from the marketplace —
+  Open VSX per architecture; `--vsix <path>` / `GGS_BUNDLED_VSIX` bundles a ready-built
+  VSIX as-is, outranking the registry for git-graph-rs)
 - Tests: `tests/extensions.test.ts` (pages, the process dispatch, the real-Node remote
   handle routing), `tests/editor.test.ts` (the extpage tab),
   `tests/editorServices.test.ts` (the diagnostics store and the document-formatting
@@ -722,14 +719,13 @@ Everything that turns the source tree into installers: asset assembly into
   marketplace builds — `scripts/fetch-marketplace-extensions.mjs` downloads them from
   Open VSX per architecture and packs exactly what the build selected:
   `GGS_BUNDLE_GIT_GRAPH` / `GGS_BUNDLE_CLAUDE_CODE`, the release form's checkboxes in CI —
-  git-graph-rs default-packed, claude-code default-unpacked there, both packed by the
-  local build scripts; offline the git-graph-rs package is the submodule's own standard
-  `npm run package` VSIX), `vite.config.ts`
+  git-graph-rs packed in every build, claude-code in none by default (the Extensions view's
+  marketplace row installs it online; `GGS_BUNDLE_CLAUDE_CODE=1` opts a build back in);
+  there is no local source for either package — in require mode a fetch a selected package
+  cannot serve fails the build), `vite.config.ts`
 - Seam checks: `scripts/check-seams.mjs` (TypeScript / CSS) and `src-tauri/build.rs` (Rust)
 - Packaging: `scripts/build-studio.bat` (Windows, one command; builds `ggs-node` and
-  `node-host.cjs` through `prepare.mjs` as part of that). `scripts/build-plugins.bat` builds every plugin's
-  VSIX on its own, without the app installer — useful when only the plugin package
-  changed. Linux installers are built
+  `node-host.cjs` through `prepare.mjs` as part of that). Linux installers are built
   in floor containers — the base image IS the compatibility floor: `ubuntu:22.04`
   (glibc 2.35) for the deb, `fedora:38` (glibc 2.37) for the rpm. CI (`studio.yml`) runs
   the same containers `scripts/build-studio-linux.bat` +
@@ -786,7 +782,7 @@ A change is complete only when every line below holds. Report anything you could
 - [ ] Every new or moved source file is listed in the [Module map](#module-map) under its
       module.
 - [ ] No new user-visible string bypasses `t(key)`.
-- [ ] No generated file, `target/` output, or edit inside `vscode-git-graph-rs/` is staged.
+- [ ] No generated file or `target/` output is staged.
 - [ ] Version bump (if any) touched `package.json`, `src-tauri/tauri.conf.json` and
       `src-tauri/Cargo.toml` together.
 - [ ] A packaged regression was ruled out by running under `npx tauri dev` when the change
@@ -871,8 +867,8 @@ Tests mirror the modules.
 Conventions:
 
 - A new module adds `tests/<module>.test.ts`; a changed module extends its existing file.
-- The extension's page-bundle stubs (`vscode` / Node / `fs` shims) live with its packer, in
-  the submodule's `vscode-git-graph-rs/studio/stubs/`.
+- The extension's page-bundle stubs (`vscode` / Node / `fs` shims) live with its packer,
+  in the extension repository's `studio/stubs/`.
 - Backend tests must not depend on the developer's global git configuration or on network
   access; use `test_support.rs`.
 - Do not weaken a sweep or budget test to make a change pass. If a `tests/perf.rs` budget
@@ -906,9 +902,7 @@ Conventions:
   `fix(tauri): …`, `build(ci): …`).
 - One logical change per commit; the subject says what changed for the user or the build,
   the body says why and names the invariant or plan section that motivated it.
-- **Never commit**: `target/`, `out/`, anything `prepare.mjs` regenerates, `metrics.json`,
-  or edits inside `vscode-git-graph-rs/` — that directory is the submodule's own repository
-  and is advanced by updating the gitlink, not by editing files in place.
+- **Never commit**: `target/`, `out/`, anything `prepare.mjs` regenerates, `metrics.json`.
 - Branch model (plan §9): `main` is always releasable; milestone branches are `ggs/mN-*`;
   one PR per task. A PR is mergeable when the checks in
   [Definition of done](#definition-of-done) pass and CI is green.
@@ -929,4 +923,4 @@ Conventions:
 | Repository layout | `README.md` → *Layout* |
 | Seam rules, as code | `scripts/check-seams.mjs`, `src-tauri/build.rs` |
 | Extension Platform feature surface | `docs/extension-platform-features.md` |
-| Engine API contract | `vscode-git-graph-rs/native/core/src/api.rs` (`git_graph_core::Engine`) |
+| Engine API contract | the extension repository's `native/core/src/api.rs` (`git_graph_core::Engine`) |

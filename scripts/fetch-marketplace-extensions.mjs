@@ -13,10 +13,12 @@
 // checkboxes (release.yml / studio.yml forward them as env):
 //
 //   GGS_BUNDLE_GIT_GRAPH      default 1 — pack git-graph-rs
-//   GGS_BUNDLE_CLAUDE_CODE    default 1 — pack claude-code (CI's release form
-//                             defaults this to UNchecked, so a pushed tag ships
-//                             without it; the Extensions view's marketplace row
-//                             installs it on demand)
+//   GGS_BUNDLE_CLAUDE_CODE    default 0 — claude-code never rides in an
+//                             installer by default (2026-09-28, the owner's
+//                             direction: it is a 100+ MB download the Extensions
+//                             view serves on demand); CI's release form can
+//                             still check it back in, and a local build opts
+//                             in with GGS_BUNDLE_CLAUDE_CODE=1
 //   ... =1/true to pack, =0/false to leave the package out of the installer
 //
 // Caching: downloads land under <target>/studio/marketplace-cache/ keyed by
@@ -39,21 +41,23 @@ export const DEFAULT_GALLERY = process.env.GGS_MARKETPLACE_URL || 'https://open-
 // The packages the installer can carry, by slug (the stable file name prepare
 // gives the packed copy). `engineRequired` gates the package on the native
 // binary a complete package carries — an engine-less git-graph-rs VSIX would
-// ship a flagship view that cannot run. `localFallback` says the build can
-// still be completed without the registry: git-graph-rs also builds from the
-// submodule, so its fetch never fails a build (prepare.mjs downgrades to the
-// locally packed VSIX); claude-code has no local source, so in require mode a
-// failed fetch of a SELECTED package IS a failed build.
+// ship a flagship view that cannot run. No package has a local source (each
+// lives in its own repository, outside this tree), so in require mode a failed
+// fetch of a SELECTED package IS a failed build; without require it is a warn
+// and the package rides out of the installer (the Extensions view's marketplace
+// row installs it on demand).
 export const MARKETPLACE_PACKAGES = [
-	{ slug: 'git-graph-rs', env: 'GGS_BUNDLE_GIT_GRAPH', namespace: 'neophack', name: 'git-graph-rs', engineRequired: true, localFallback: true },
-	{ slug: 'claude-code', env: 'GGS_BUNDLE_CLAUDE_CODE', namespace: 'Anthropic', name: 'claude-code', engineRequired: false, localFallback: false }
+	{ slug: 'git-graph-rs', env: 'GGS_BUNDLE_GIT_GRAPH', namespace: 'neophack', name: 'git-graph-rs', engineRequired: true, defaultSelected: true },
+	{ slug: 'claude-code', env: 'GGS_BUNDLE_CLAUDE_CODE', namespace: 'Anthropic', name: 'claude-code', engineRequired: false, defaultSelected: false }
 ];
 
-/// The package's `env` switch as a boolean; unset means packed — the local
-/// builds and hand-run `tauri build`s carry both, and CI passes the release
-/// form's answer (its claude-code checkbox defaults to unchecked) explicitly.
-export function bundleSelected(envName, env = process.env) {
-	const value = env[envName];
+/// The package's `env` switch as a boolean, on its spec's default. git-graph-rs
+/// rides in every installer unless told not to; claude-code never does unless a
+/// build explicitly asks for it (the Extensions view's marketplace row installs
+/// it on demand, so the 100+ MB package stays out of the default download).
+export function bundleSelected(spec, env = process.env) {
+	const value = env[spec.env];
+	if (value === undefined || value === '') return spec.defaultSelected ?? true;
 	return value !== '0' && value !== 'false' && value !== 'no';
 }
 
@@ -85,7 +89,7 @@ export async function fetchMarketplacePackages({
 	skip = process.env.GGS_SKIP_MARKETPLACE_FETCH === '1',
 	select
 } = {}) {
-	const chosen = select ?? Object.fromEntries(MARKETPLACE_PACKAGES.map((spec) => [spec.slug, bundleSelected(spec.env)]));
+	const chosen = select ?? Object.fromEntries(MARKETPLACE_PACKAGES.map((spec) => [spec.slug, bundleSelected(spec)]));
 	const results = {};
 	for (const spec of MARKETPLACE_PACKAGES) {
 		if (chosen[spec.slug] === false) {
@@ -98,9 +102,6 @@ export async function fetchMarketplacePackages({
 }
 
 async function fetchOne(spec, { base, cacheDir, targetPlatform, ttlHours, require, skip }) {
-	// The local-fallback package never fails the build — the caller completes it
-	// from source; only the no-local-source package carries require's teeth.
-	require = require && !spec.localFallback;
 	if (!targetPlatform) {
 		return outcome(`unknown target platform for ${spec.slug} on this build host`, { require, slug: spec.slug });
 	}

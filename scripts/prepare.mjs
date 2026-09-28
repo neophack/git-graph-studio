@@ -1,22 +1,24 @@
 // Assembles everything the app build consumes under <project>/target/studio/, so no generated
 // file ever lands in the source tree:
 //
-//   target/studio/public/   the Vite public dir: static/** plus the extension README renderer's
-//                           markdown-it vendor copy — nothing of any plugin (each plugin's
-//                           packer, under plugins/, builds its own package contents)
+//   target/studio/public/   the Vite public dir: static/** (the theme files, the README
+//                           renderer's vendored markdown-it, the chrome icon) — nothing of
+//                           any plugin (each package builds its own contents, elsewhere)
 //   target/studio/icons/    the app icons `tauri icon` derives from the app's own icon source
 //   target/studio/cargo/    the Cargo target dir (src-tauri/.cargo/config.toml)
 //   target/studio/dist/     the Vite build output (vite.config.ts)
 //
 // The bundled VSIX packages the installer carries are the marketplace's per-architecture
-// builds (Open VSX — fetched by scripts/fetch-marketplace-extensions.mjs; offline the
-// git-graph-rs package is the submodule's own `npm run package` VSIX). Which packages ride
-// in the installer is a build-time choice (GGS_BUNDLE_GIT_GRAPH / GGS_BUNDLE_CLAUDE_CODE —
-// CI's release form forwards its checkboxes); the first launch installs whatever was
-// packed, like VS Code's bundled extensions.
+// builds (Open VSX — fetched by scripts/fetch-marketplace-extensions.mjs; there is no local
+// source anymore, so a fetch that cannot be served from cache leaves the package unpacked —
+// or fails the build in require mode). Which packages ride in the installer is a build-time
+// choice (GGS_BUNDLE_GIT_GRAPH / GGS_BUNDLE_CLAUDE_CODE — CI's release form forwards its
+// checkboxes): git-graph-rs rides in every build, claude-code in none by default (the
+// Extensions view installs it from the marketplace on demand). The first launch installs
+// whatever was packed, like VS Code's bundled extensions.
 import { checkSeams } from './check-seams.mjs';
 import { fetchMarketplacePackages } from './fetch-marketplace-extensions.mjs';
-import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 
 // The seam rules first: nothing under src/ or static/ may name the git-graph-rs extension's
 // artifacts (it is a plugin; the app's only interface to it is the extension platform), so a
@@ -27,8 +29,6 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const appDir = join(dirname(fileURLToPath(import.meta.url)), '..');
-// The git-graph-rs extension lives in its own repository, checked out as the vscode-git-graph-rs/ submodule.
-const root = join(appDir, 'vscode-git-graph-rs');
 const out = join(appDir, 'target', 'studio');
 const publicDir = join(out, 'public');
 
@@ -47,25 +47,17 @@ rmSync(publicDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200
 mkdirSync(publicDir, { recursive: true });
 cpSync(join(appDir, 'static'), publicDir, { recursive: true });
 
-const vendorDir = join(publicDir, 'vendor');
-mkdirSync(vendorDir, { recursive: true });
-copyFileSync(
-	requireArtifact(join(root, 'media', 'vendor', 'markdown-it.min.js'), 'run `npm run compile` in vscode-git-graph-rs/ first'),
-	join(vendorDir, 'markdown-it.min.js')
-);
-
-// The app's own chrome icon (the title bar's logo) — one asset copy from the icon set the
-// extension ships, the same source the installer icon derives from below.
-const iconsDir = join(publicDir, 'icons');
-mkdirSync(iconsDir, { recursive: true });
-copyFileSync(requireArtifact(join(root, 'resources', 'icon.png'), 'the submodule is checked out'), join(iconsDir, 'icon.png'));
+// The app's own chrome icon (the title bar's logo, served at /icons/icon.png) doubles as
+// the source every installer icon derives from below — an app asset since the extension
+// left this tree, carried in static/ like every other public file.
+const iconSource = requireArtifact(join(appDir, 'static', 'icons', 'icon.png'), 'static/icons/icon.png is missing from the source tree');
 
 /* 2. The app icons, once. */
 const appIcons = join(out, 'icons');
 if (!existsSync(join(appIcons, 'icon.ico')) || !existsSync(join(appIcons, '32x32.png'))) {
 	mkdirSync(appIcons, { recursive: true });
 	const tauri = join(appDir, 'node_modules', '.bin', process.platform === 'win32' ? 'tauri.cmd' : 'tauri');
-	const result = spawnSync(tauri, ['icon', join(root, 'resources', 'icon.png'), '-o', appIcons], {
+	const result = spawnSync(tauri, ['icon', iconSource, '-o', appIcons], {
 		stdio: 'inherit',
 		shell: process.platform === 'win32'
 	});
@@ -82,9 +74,8 @@ if (!existsSync(join(appIcons, 'icon.ico')) || !existsSync(join(appIcons, '32x32
  *    inside it (the N-API host); a real Node runtime hosts the entries only under
  *    `GGS_REAL_NODE=1` (node-host.cjs, built in step 3½). Release, so the shipped binary
  *    is as size-optimised as `tauri build`'s own; cargo's incremental cache keeps repeat
- *    builds (dev iteration) fast after the first. The engine `.node` itself is built by
- *    the submodule's addon script (`@napi-rs/cli`): one NAPI binary — the VSIX carries it
- *    and nothing else. */
+ *    builds (dev iteration) fast after the first. A package's own `.node` addon arrives
+ *    inside its VSIX — nothing of any plugin compiles here anymore. */
 const srcTauri = join(appDir, 'src-tauri');
 function buildBackend(bin, features) {
 	const exe = process.platform === 'win32' ? `${bin}.exe` : bin;
@@ -195,49 +186,18 @@ if (nodeRuntimeBin) {
  * scripts/fetch-marketplace-extensions.mjs). Which packages are packed is the build's
  * choice (the GGS_BUNDLE_* env, the release form's checkboxes in CI); `--vsix`/
  * GGS_BUNDLED_VSIX still outranks the registry for git-graph-rs — a developer
- * substituting a specific build means it. A fetch failure downgrades here: git-graph-rs
- * falls back to the locally packed VSIX (built below); claude-code is simply not packed
- * (in CI a required miss fails the fetch itself). */
+ * substituting a specific build means it. There is no local source anymore (the
+ * extension lives in its own repository, outside this tree): a selected package that the
+ * fetch cannot serve fails the build in require mode (CI, build-studio.bat) and is
+ * simply not packed otherwise. */
 const externalVsix = (() => {
 	const flag = process.argv.indexOf('--vsix');
 	return flag >= 0 ? process.argv[flag + 1] : process.env.GGS_BUNDLED_VSIX;
 })();
 const marketplace = await fetchMarketplacePackages({ cacheDir: join(out, 'marketplace-cache') });
 const gitGraphMarketplace = marketplace['git-graph-rs'];
-// Nothing of an unselected package ships: not the registry's build, not the local one.
+// Nothing of an unselected package ships.
 const packGitGraph = Boolean(externalVsix) || gitGraphMarketplace?.selected !== false;
-
-/* The engine `.node`: the submodule's addon build, cached by cargo underneath — it runs
- * whenever git-graph-rs is packed, whatever the payload's source: besides the locally
- * packed VSIX carrying it, the build is what keeps the submodule's
- * `native/<platform>/git-graph.node` on the machine, the fixture node_runtime's N-API
- * roundtrip test resolves first (without it the test would fall back to — or skip on —
- * whatever engine happens to be installed, and CI, which installs nothing, would skip it
- * entirely). Skipped under `--vsix` (the substituted package carries its own engine and
- * the submodule compiles nothing) and when git-graph-rs is not packed at all. */
-const engineNode = externalVsix || !packGitGraph
-	? null
-	: (() => {
-		const addon = spawnSync('node', ['scripts/build-addon.mjs', '--release'], {
-			cwd: root,
-			stdio: 'inherit'
-		});
-		const directories = {
-			'win32-x64': 'win32-x64-msvc',
-			'win32-arm64': 'win32-arm64-msvc',
-			'linux-x64': 'linux-x64-gnu',
-			'linux-arm64': 'linux-arm64-gnu',
-			'darwin-x64': 'darwin-x64',
-			'darwin-arm64': 'darwin-arm64'
-		};
-		const path = join(root, 'native', directories[`${process.platform}-${process.arch}`] ?? `${process.platform}-${process.arch}`, 'git-graph.node');
-		if (addon.status === 0 && existsSync(path)) return path;
-		// An installer whose Git Graph VSIX has no engine is an installer whose flagship view
-		// cannot run — that is a broken build, not a degraded one, so it fails here with the
-		// reason instead of quietly shipping a frontend-only package.
-		console.error(`The engine .node was not produced (${addon.status ?? 'spawn failed'}; looked at ${path}) — refusing to pack a VSIX without its engine`);
-		process.exit(1);
-	})();
 
 /* 4. The bundled packages — the app ships extensions as packages beside the app, not
  *    as embedded built-ins: tauri.conf.json's bundle.resources packs this whole directory
@@ -245,15 +205,15 @@ const engineNode = externalVsix || !packGitGraph
  *    selection leaves no file behind) and the app's first-launch pass installs exactly
  *    what sits at its top level (cmd_ext::install_missing_bundled — it names no id).
  *
- *      extensions/git-graph-rs.vsix   the marketplace's build (or, offline / under
- *                                     --vsix, the extension's own standard build)
- *      extensions/claude-code.vsix    the marketplace's build, when the build chose
- *                                     to pack it
+ *      extensions/git-graph-rs.vsix   the marketplace's build (or the --vsix
+ *                                     substitution, verbatim)
+ *      extensions/claude-code.vsix    the marketplace's build, only when a build
+ *                                     explicitly selected it
  *
  *    The directory is rebuilt from nothing every run (a stale file here would ship: the
  *    mapping packs whatever sits in it). `--vsix <path>` (or GGS_BUNDLED_VSIX) substitutes
  *    a ready-built package for git-graph-rs: the named VSIX is bundled as-is — its
- *    engine, its manifest, its code — and nothing in the submodule compiles. */
+ *    engine, its manifest, its code. */
 const bundledDir = join(out, 'bundled', 'app-resources', 'extensions');
 rmSync(bundledDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 mkdirSync(bundledDir, { recursive: true });
@@ -265,23 +225,13 @@ if (externalVsix) {
 	copyFileSync(gitGraphMarketplace.path, join(bundledDir, 'git-graph-rs.vsix'));
 	console.log(`Packed git-graph-rs ${gitGraphMarketplace.version} @${gitGraphMarketplace.targetPlatform} from the marketplace`);
 } else {
-	console.warn('git-graph-rs: marketplace fetch unavailable — packing the submodule build instead');
-	const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
-	const packaged = spawnSync('npm', ['run', 'package'], {
-		cwd: root,
-		stdio: 'inherit',
-		shell: process.platform === 'win32'
-	});
-	const vsixPath = requireArtifact(
-		join(root, `git-graph-rs-${pkg.version}.vsix`),
-		`npm run package in vscode-git-graph-rs/ failed (${packaged.status ?? 'spawn failed'})`
-	);
-	copyFileSync(vsixPath, join(bundledDir, 'git-graph-rs.vsix'));
+	console.warn('git-graph-rs: marketplace fetch unavailable — not packed (the Extensions view installs it from the marketplace)');
 }
 
-/* claude-code is packed or left out by the same build-time choice (the release form's
- * checkbox — unchecked by default there, so a tag release ships without it; local builds
- * pack it unless GGS_BUNDLE_CLAUDE_CODE=0). */
+/* claude-code is left out by the same build-time choice, and its default is out
+ * (2026-09-28, the owner's direction: the Extensions view's marketplace row
+ * installs it on demand, so the default download stays small); only
+ * GGS_BUNDLE_CLAUDE_CODE=1 — or CI's release form checking its box — packs it. */
 const claudeCode = marketplace['claude-code'];
 if (claudeCode?.path) {
 	copyFileSync(claudeCode.path, join(bundledDir, 'claude-code.vsix'));

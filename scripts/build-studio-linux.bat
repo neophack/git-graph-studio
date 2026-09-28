@@ -20,8 +20,8 @@ rem                Debian 12/13, Mint 21+, Pop!_OS 22.04+
 rem    rpm         fedora:38    -> rpm, glibc 2.37: Fedora 38+, openSUSE Leap
 rem                15.6+ / Tumbleweed
 rem
-rem  Prerequisites: Docker Desktop running, plus node on the host (only for the
-rem  extension assets the app embeds). First run builds the ~2 GB image and
+rem  Prerequisites: Docker Desktop running (the container fetches the marketplace
+rem  extension packages itself). First run builds the ~2 GB image and
 rem  compiles ~500 crates; later runs are incremental (docker volume
 rem  ggs-studio-linux-cache holds the cargo target and registry).
 rem
@@ -50,22 +50,8 @@ where docker >nul 2>nul
 if errorlevel 1 goto :nodocker
 docker info >nul 2>nul
 if errorlevel 1 goto :dockeroff
-where node >nul 2>nul
-if errorlevel 1 goto :nonode
 
-echo [1/3] Preparing the vscode-git-graph-rs submodule assets the app embeds (host build)
-if not exist vscode-git-graph-rs\package.json git submodule update --init vscode-git-graph-rs
-if errorlevel 1 goto :fail
-cd vscode-git-graph-rs
-if not exist node_modules call npm install
-if errorlevel 1 goto :fail
-if not exist out\config.js call npm run compile
-if errorlevel 1 goto :fail
-if not exist media\out.min.js call npm run compile
-if errorlevel 1 goto :fail
-cd ..
-
-echo [2/3] Building the Linux builder image (cached after the first run)
+echo [1/2] Building the Linux builder image (cached after the first run)
 docker build --build-arg BASE_IMAGE=%BASE% -t %TAG% -f scripts\docker\Dockerfile.studio-linux scripts\docker
 if errorlevel 1 goto :fail
 
@@ -74,12 +60,13 @@ if "%~1"=="shell" (
     goto :end
 )
 
-echo [3/3] Building the %BUNDLES% installers in the %BASE% container
+echo [2/2] Building the %BUNDLES% installers in the %BASE% container
 rem GGS_REQUIRE_MARKETPLACE: the installer packs the marketplace extension packages (Open
-rem VSX downloads, scripts/fetch-marketplace-extensions.mjs) - both by default: git-graph-rs
-rem downgrades to the locally packed VSIX when the registry is unreachable, claude-code
-rem fails the build. GGS_BUNDLE_CLAUDE_CODE=0 leaves claude-code unpacked; pass
-rem GGS_SKIP_MARKETPLACE_FETCH=1 through to build fully offline.
+rem VSX downloads, scripts/fetch-marketplace-extensions.mjs): git-graph-rs rides in every
+rem build, claude-code does not (the Extensions view installs it from the marketplace on
+rem demand; pass GGS_BUNDLE_CLAUDE_CODE=1 through to pack it). A selected package the
+rem fetch cannot serve fails the build. GGS_SKIP_MARKETPLACE_FETCH=1 builds fully
+rem offline without either package.
 set MARKETPLACE_REQUIRE=GGS_REQUIRE_MARKETPLACE=1
 if defined GGS_SKIP_MARKETPLACE_FETCH set MARKETPLACE_REQUIRE=GGS_SKIP_MARKETPLACE_FETCH=1
 docker run --rm -v "%cd%:/repo" -v ggs-studio-linux-cache:/cache -e BUNDLES=%BUNDLES% -e OUT_DIR=%OUT_DIR% -e %MARKETPLACE_REQUIRE% %TAG% bash /repo/scripts/docker/studio-linux-build.sh
@@ -95,10 +82,6 @@ exit /b 1
 
 :dockeroff
 echo [error] Docker is not running. Start Docker Desktop first.
-exit /b 1
-
-:nonode
-echo [error] node not found in PATH. Install Node.js first.
 exit /b 1
 
 :fail
