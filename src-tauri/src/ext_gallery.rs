@@ -30,9 +30,19 @@ pub const DEFAULT_GALLERY: &str = "https://open-vsx.org";
 pub const FEATURED: &[&str] = &["Anthropic.claude-code", "neophack.git-graph-rs"];
 /// The search page size — enough to fill the Extensions view without a second page.
 const SEARCH_SIZE: u32 = 20;
-/// One gallery request's ceiling: a search or an icon is small; a `.vsix` download is
-/// not bounded here (it lands on disk as it streams, not in memory).
+/// One metadata request's ceiling — a search, a lookup, an icon: answers small enough
+/// that twenty seconds means the link is down. A `.vsix` download does not share it; it
+/// runs on the download ceilings below.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// A `.vsix` body's own budget: a platform build runs past a hundred megabytes
+/// (claude-code's win32-x64 package is 115 MB — 41 s at full speed, but minutes on a
+/// slow link) and the metadata ceiling once killed its install mid-body ("read the
+/// marketplace answer: timeout").
+const DOWNLOAD_BODY_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// The download's end-to-end backstop (DNS through the last byte), beyond the body
+/// budget so the body keeps every minute it was given while a dead connect still fails
+/// at its own 20 s.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// The icon cap: an extension icon is a few KB; anything megabyte-sized is not an icon.
 const ASSET_CAP: usize = 2 * 1024 * 1024;
 
@@ -193,6 +203,18 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
+/// The `.vsix` download's agent: a connect that still fails fast, a body budget sized
+/// for a hundred-megabyte package on a slow link, and an end-to-end backstop — never
+/// the metadata requests' 20 s global ceiling.
+fn download_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(REQUEST_TIMEOUT))
+        .timeout_recv_body(Some(DOWNLOAD_BODY_TIMEOUT))
+        .timeout_global(Some(DOWNLOAD_TIMEOUT))
+        .build()
+        .into()
+}
+
 /// GET `url` (confined to the gallery origin) and return its body.
 fn get(base: &str, url: &str) -> Result<Vec<u8>, String> {
     let url = confined(base, url)?;
@@ -312,16 +334,27 @@ fn lookup(base: &str, id: &str) -> Result<GalleryEntry, String> {
 }
 
 /// Download the `.vsix` `download_url` names into a temp file (confined to the gallery
-/// origin — nothing else on the network is reachable through this path).
+/// origin — nothing else on the network is reachable through this path). The body
+/// streams to disk under the download ceilings, never whole in memory; a failed read
+/// leaves no half-written package behind.
 fn download_vsix(base: &str, download_url: &str) -> Result<PathBuf, String> {
-    let bytes = get(base, download_url)?;
+    let url = confined(base, download_url)?;
     let name = download_url
         .rsplit('/')
         .next()
         .filter(|stem| stem.ends_with(".vsix"))
         .unwrap_or("extension.vsix");
     let path = std::env::temp_dir().join(format!("ggs-gallery-{}-{name}", std::process::id()));
-    std::fs::write(&path, &bytes).map_err(|e| format!("write the downloaded package: {e}"))?;
+    let mut response = download_agent()
+        .get(&url)
+        .call()
+        .map_err(|e| format!("request to the marketplace failed: {e}"))?;
+    let mut file =
+        std::fs::File::create(&path).map_err(|e| format!("write the downloaded package: {e}"))?;
+    if let Err(e) = std::io::copy(&mut response.body_mut().as_reader(), &mut file) {
+        let _ = std::fs::remove_file(&path);
+        return Err(format!("read the marketplace answer: {e}"));
+    }
     Ok(path)
 }
 
@@ -393,7 +426,9 @@ pub async fn ext_gallery_install(
     let (package, ext_id) =
         tauri::async_runtime::spawn_blocking(move || -> Result<(PathBuf, String), String> {
             let package = download_vsix(&base, &download_url)?;
-            let manifest = crate::cmd_ext::read_vsix_manifest(&package)?;
+            let manifest = crate::cmd_ext::read_vsix_manifest(&package).inspect_err(|_| {
+                let _ = std::fs::remove_file(&package); // an unreadable package leaves no temp copy
+            })?;
             Ok((package, manifest.extension_id()))
         })
         .await
@@ -543,6 +578,26 @@ mod tests {
         assert!(lookup(DEFAULT_GALLERY, "neophack.no-such-extension-xyz").is_err());
     }
 
+    /// The live download of the largest featured package — claude-code's multi-megabyte
+    /// `.vsix` — under the download ceilings (network — run with
+    /// `cargo test --all-features -- --ignored claude_code_vsix_downloads_live`). This
+    /// is the path a shared 20 s global timeout once killed mid-body.
+    #[test]
+    #[ignore]
+    fn claude_code_vsix_downloads_live() {
+        let entry = lookup(DEFAULT_GALLERY, "Anthropic.claude-code").unwrap();
+        let started = std::time::Instant::now();
+        let package = download_vsix(DEFAULT_GALLERY, &entry.download_url).unwrap();
+        let size = package.metadata().unwrap().len();
+        let _ = std::fs::remove_file(&package);
+        assert!(size > 1024 * 1024, "claude-code's package is {size} bytes");
+        eprintln!(
+            "claude-code's .vsix: {} KB in {:.1}s",
+            size / 1024,
+            started.elapsed().as_secs_f32()
+        );
+    }
+
     #[test]
     fn the_featured_list_names_exactly_the_two_packages() {
         assert_eq!(
@@ -579,5 +634,21 @@ mod tests {
         assert!(confined(base, "https://evil.example/demo.vsix").is_err());
         assert!(confined(base, "http://open-vsx.org/demo.vsix").is_err());
         assert!(confined(base, "not a url").is_err());
+    }
+
+    /// The download runs on its own ceilings, not the metadata requests' 20 s global
+    /// one — that shared ceiling killed claude-code's install mid-body over a slow link.
+    /// Read back off the agents so the wiring, not just the constants, is pinned.
+    #[test]
+    fn downloads_run_on_their_own_timeouts() {
+        let meta = agent().config().timeouts();
+        assert_eq!(meta.global, Some(REQUEST_TIMEOUT));
+
+        let download = download_agent().config().timeouts();
+        assert_eq!(download.connect, Some(REQUEST_TIMEOUT));
+        assert_eq!(download.recv_body, Some(DOWNLOAD_BODY_TIMEOUT));
+        assert_eq!(download.global, Some(DOWNLOAD_TIMEOUT));
+        assert!(download.recv_body.unwrap() > REQUEST_TIMEOUT * 10);
+        assert!(download.global.unwrap() > download.recv_body.unwrap());
     }
 }
