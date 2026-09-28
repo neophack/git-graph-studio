@@ -57,7 +57,7 @@ default = ["desktop"]
 # opts a system Node in); a package's `.node` loads right here through the N-API host.
 # base64/hex are the fs module's own encodings (`readFileSync(path, 'base64' | 'hex')`).
 # ureq is the HTTP(S) client under `fetch` and `http(s).request` (rustls, the app's own client).
-node-runtime = ["dep:boa_engine", "dep:base64", "dep:hex", "dep:libloading", "dep:sha1", "dep:md-5", "dep:sha2", "dep:getrandom", "dep:ureq"]
+node-runtime = ["dep:boa_engine", "dep:base64", "dep:hex", "dep:libloading", "dep:sha1", "dep:md-5", "dep:sha2", "dep:getrandom", "dep:ureq", "dep:bincode"]
 desktop = [
     "dep:tauri",
     "dep:tauri-plugin-dialog",
@@ -132,6 +132,8 @@ sha1 = { version = "0.10", optional = true }
 # The `crypto` builtin's digests (md5 / sha256; sha1 above serves the desktop features too).
 md-5 = { version = "0.10", optional = true }
 sha2 = { version = "0.10", optional = true }
+# The module bytecode cache (ggs-node's require): the compiled tree crosses as bincode.
+bincode = { version = "1.3", optional = true }
 # The `crypto` builtin's randomBytes / randomUUID / getRandomValues: the OS generator.
 getrandom = { version = "0.2", optional = true }
 hex = { version = "0.4", optional = true }

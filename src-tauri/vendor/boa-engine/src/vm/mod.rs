@@ -42,12 +42,14 @@ pub use {
 };
 
 mod call_frame;
+pub mod bytecode_cache;
 mod code_block;
 mod completion_record;
 mod inline_cache;
 mod runtime_limits;
 
 pub(crate) mod opcode;
+pub mod opcode_stats;
 pub(crate) mod shadow_stack;
 pub(crate) mod source_info;
 
@@ -653,6 +655,13 @@ impl Context {
     where
         F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,
     {
+        // GGS-patch: per-opcode execution counts under GGS_OPCODE_STATS — the diagnosis of
+        // the interpreter's share of a bundle load (see node_runtime's exit print). Off by
+        // default, and then just one boolean check.
+        if opcode_stats::enabled() {
+            opcode_stats::count(opcode);
+        }
+
         #[cfg(feature = "fuzz")]
         {
             if self.instructions_remaining == 0 {

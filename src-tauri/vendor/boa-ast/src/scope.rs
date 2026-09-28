@@ -182,6 +182,79 @@ impl Scope {
         self.inner.this_escaped.get()
     }
 
+    /// GGS-patch: this scope's depth id (0 for the global scope) — the bytecode cache
+    /// serializes it together with the binding locators that cite it.
+    #[must_use]
+    pub fn unique_id(&self) -> u32 {
+        self.inner.unique_id
+    }
+
+    /// GGS-patch: the scope's allocation address — the bytecode cache's dedup key. Two
+    /// constants citing one scope share the `Rc`; identity, not contents, decides the
+    /// table entry (see `boa_engine::vm::bytecode_cache`).
+    #[must_use]
+    pub fn ptr(&self) -> usize {
+        std::rc::Rc::as_ptr(&self.inner) as usize
+    }
+
+    /// GGS-patch: the scope's nesting index (the bytecode cache's mirror reads it).
+    #[must_use]
+    pub fn index(&self) -> u32 {
+        self.inner.index.get()
+    }
+
+    /// GGS-patch: the scope's bindings as plain data — the bytecode cache's mirror reads
+    /// them (name, binding index, flags bits).
+    #[must_use]
+    pub fn binding_records(&self) -> Vec<(JsString, u32, u8)> {
+        self.inner
+            .bindings
+            .borrow()
+            .iter()
+            .map(|binding| (binding.name.clone(), binding.index, binding.flags.bits()))
+            .collect()
+    }
+
+    /// GGS-patch: restore a serialized binding (the bytecode cache's mirror), keeping the
+    /// name index in step with the bindings vector.
+    pub fn restore_binding(&self, name: JsString, index: u32, flags_bits: u8) {
+        let mut bindings = self.inner.bindings.borrow_mut();
+        let mut indices = self.inner.indices.borrow_mut();
+        indices.insert(name.clone(), bindings.len());
+        bindings.push(Binding {
+            name,
+            index,
+            flags: BindingFlags::from_bits_truncate(flags_bits),
+        });
+    }
+
+    /// GGS-patch: restore the this-escape mark (the bytecode cache's mirror).
+    pub fn restore_this_escaped(&self, escaped: bool) {
+        self.inner.this_escaped.set(escaped);
+    }
+
+    /// GGS-patch: build a scope over an explicit outer (the bytecode cache's mirror —
+    /// `Scope::new`'s chain, with the mirror's own depth id and index).
+    #[must_use]
+    pub fn restore(
+        outer: Option<&Scope>,
+        unique_id: u32,
+        index: u32,
+        function: bool,
+    ) -> Self {
+        Self {
+            inner: Rc::new(Inner {
+                unique_id,
+                outer: outer.cloned(),
+                index: Cell::new(index),
+                bindings: RefCell::default(),
+                indices: RefCell::default(),
+                function,
+                this_escaped: Cell::new(false),
+            }),
+        }
+    }
+
     /// Check if the scope has a lexical binding with the given name.
     #[must_use]
     pub fn has_lex_binding(&self, name: &JsString) -> bool {
@@ -643,6 +716,37 @@ impl BindingLocator {
     #[must_use]
     pub const fn binding_index(&self) -> u32 {
         self.binding_index
+    }
+
+    /// GGS-patch: the raw scope index (see [`Self::scope`] for its meaning) — the
+    /// bytecode cache encoder needs the whole locator as data.
+    #[must_use]
+    pub const fn scope_index(&self) -> u32 {
+        self.scope
+    }
+
+    /// GGS-patch: the unique id of the scope the binding lives in (see
+    /// [`Scope::unique_id`]).
+    #[must_use]
+    pub const fn unique_scope_id(&self) -> u32 {
+        self.unique_scope_id
+    }
+
+    /// GGS-patch: rebuild a locator from its cached parts (see
+    /// `boa_engine::vm::bytecode_cache`).
+    #[must_use]
+    pub const fn from_parts(
+        name: JsString,
+        scope: u32,
+        binding_index: u32,
+        unique_scope_id: u32,
+    ) -> Self {
+        Self {
+            name,
+            scope,
+            binding_index,
+            unique_scope_id,
+        }
     }
 
     /// Sets the binding index of the binding.

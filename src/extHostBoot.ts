@@ -266,7 +266,12 @@ function boot(message: InitMessage): void {
 			: 'extension.js';
 		module_ = runEntry(main) as { exports: { activate?: (context: unknown) => unknown; deactivate?: () => unknown } };
 		Promise.resolve(module_.exports.activate?.(activationContext(context, api))).then(
-			() => parent.postMessage({ type: '__studioExtActivated', extensionId: context.extensionId }, '*'),
+			() => {
+				// The activation's queued command registrations cross as one batch now (see
+				// vscodeApi's flushCommandRegistrations).
+				(globalThis as { __ggsFlushRegistrations?: () => void }).__ggsFlushRegistrations?.();
+				parent.postMessage({ type: '__studioExtActivated', extensionId: context.extensionId }, '*');
+			},
 			failure
 		);
 	} catch (error) {

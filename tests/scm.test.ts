@@ -270,12 +270,27 @@ describe('source control view', () => {
 		// actions — nothing of any extension is hardcoded into the app.
 		expect(document.querySelector('.scm-main-header .actions img[alt=""]')).toBeNull();
 
+		// An icon-less navigation command renders its title text — the button VS Code draws
+		// when the manifest declares no icon; no empty image placeholder.
 		applyContributions('test-view-ext', {
 			commands: [{ command: 'test.view', title: 'View Test' }],
 			menus: { 'scm/title': [{ command: 'test.view', group: 'navigation' }] }
 		}, {}, () => undefined, () => true);
 		view.setRepo(REPO); // re-render
 		await view.refresh();
+		expect([...document.querySelectorAll('.scm-main-header .actions .action-btn')].some((button) => button.textContent === 'View Test')).toBe(true);
+		expect(document.querySelector('.scm-main-header .actions img[alt=""]')).toBeNull();
+
+		// A manifest path-pair icon loads out of the package into the same button.
+		removeContributions('test-view-ext');
+		backend.on('ext_read_file_base64', () => 'aGk=');
+		applyContributions('test-view-ext', {
+			commands: [{ command: 'test.view', title: 'View Test', icon: { light: 'resources/light.svg', dark: 'resources/dark.svg' } }],
+			menus: { 'scm/title': [{ command: 'test.view', group: 'navigation' }] }
+		}, {}, () => undefined, () => true);
+		view.setRepo(REPO);
+		await view.refresh();
+		await flush();
 		expect(document.querySelector('.scm-main-header .actions img[alt=""]')).not.toBeNull();
 
 		// A non-navigation group ("inline", "More Actions") tucks the entry into "..." instead.

@@ -18,7 +18,7 @@
 
 import { extSettings } from './state';
 import { commands } from './commands';
-import type { MenuEntry, MenuItem } from './ui';
+import { el, icon, type MenuEntry, type MenuItem } from './ui';
 
 /** The menu locations Studio surfaces. `git.pullpush` is VS Code's SCM sync menu — where
  * a Gerrit `refs/for/` push goes — rendered inside the Source Control "..."
@@ -43,6 +43,29 @@ interface DeclaredCommand {
 export function codiconOf(icon: DeclaredCommand['icon']): string | undefined {
 	if (typeof icon !== 'string') return undefined;
 	return /^\$\(([\w-]+)(?:~[\w-]+)?\)$/.exec(icon.trim())?.[1];
+}
+
+/** A title-bar navigation button's content for one resolved menu entry: a `$(codicon)`
+ *  renders from the icon font; a package-relative icon path (a bare string or the
+ *  light/dark pair) loads out of the extension through `loadFileIcon` (the
+ *  `extFileDataUrl` bridge) into an image — VS Code renders these in place of the title
+ *  for `editor/title` / `scm/title` / `view/title` navigation entries. Nothing declared,
+ *  the label text stays, as in VS Code; a failed read falls back to it too. */
+export function commandIconContent(entry: ResolvedMenuEntry, fallbackLabel: string, loadFileIcon: (extId: string, relPath: string) => Promise<string | null>): (HTMLElement | Text)[] {
+	const codicon = codiconOf(entry.icon);
+	if (codicon) return [icon(codicon)];
+	const label = (): (HTMLElement | Text)[] => [document.createTextNode(fallbackLabel)];
+	const iconPath = typeof entry.icon === 'string' ? entry.icon : entry.icon ? (entry.icon.dark ?? entry.icon.light) : undefined;
+	if (!entry.extId || !iconPath) return label();
+	const image = el('img');
+	image.alt = '';
+	image.width = 16;
+	image.height = 16;
+	void loadFileIcon(entry.extId, iconPath).then((url) => {
+		if (url) image.src = url;
+		else image.replaceWith(...label());
+	});
+	return [image];
 }
 
 interface MenuPlacement {

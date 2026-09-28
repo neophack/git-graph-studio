@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { commands } from '../src/commands';
-import { applyContributions, contextUri, evaluateWhen, extensionViewContributions, menuItems, menuSection, normalizeKeybinding, registerContextProvider, removeContributions, type ManifestContributes } from '../src/contributions';
+import { applyContributions, commandIconContent, contextUri, evaluateWhen, extensionViewContributions, menuItems, menuSection, normalizeKeybinding, registerContextProvider, removeContributions, type ManifestContributes } from '../src/contributions';
 import { saveExtSetting } from '../src/state';
 
 const manifest: ManifestContributes = {
@@ -141,5 +141,42 @@ describe('a view\'s when clause', () => {
 		expect(evaluateWhen('acme.views', 'someOtherTool.flag')).toBe(true);
 		registerContextProvider('acme-vscode.listEnabled', () => true);
 		expect(evaluateWhen('acme.views', 'acme-vscode.listEnabled')).toBe(true);
+	});
+});
+
+describe('commandIconContent: the icon a title-bar navigation button carries', () => {
+	const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+	it('renders a $(codicon) from the icon font', () => {
+		const [glyph] = commandIconContent({ command: 'c', label: 'Open', group: 'navigation', icon: '$(check)' }, 'Open', async () => null);
+		expect(glyph!.className).toBe('codicon codicon-check');
+	});
+
+	it('loads a light/dark path pair out of the package as an image (dark wins)', async () => {
+		const loaded: [string, string][] = [];
+		const holder = document.createElement('button');
+		holder.append(...commandIconContent(
+			{ command: 'c', label: 'Claude Code: Open', group: 'navigation', extId: 'Anthropic.claude-code', icon: { light: 'resources/claude-logo-light.svg', dark: 'resources/claude-logo.svg' } },
+			'Claude Code: Open',
+			async (extId, relPath) => { loaded.push([extId, relPath]); return 'data:image/svg+xml;base64,PHN2Zy8+'; }
+		));
+		expect(loaded).toEqual([['Anthropic.claude-code', 'resources/claude-logo.svg']]);
+		const image = holder.querySelector('img')!;
+		expect(image.getAttribute('width')).toBe('16');
+		expect(image.getAttribute('height')).toBe('16');
+		await flush();
+		expect(image.getAttribute('src')).toContain('base64');
+		expect(holder.textContent).toBe('');
+	});
+
+	it('keeps the label text when no icon is declared, and falls back to it when the read fails', async () => {
+		const none = commandIconContent({ command: 'c', label: 'Open', group: 'navigation' }, 'Open', async () => null);
+		expect(none.map((node) => node.textContent)).toEqual(['Open']);
+		const holder = document.createElement('button');
+		holder.append(...commandIconContent({ command: 'c', label: 'Open', group: 'navigation', extId: 'x.y', icon: { light: 'missing.svg' } }, 'Open', async () => null));
+		expect(holder.querySelector('img')).not.toBeNull();
+		await flush();
+		expect(holder.textContent).toBe('Open');
+		expect(holder.querySelector('img')).toBeNull();
 	});
 });

@@ -422,18 +422,27 @@ describe('the vscode API shim', () => {
 	it('registers commands through the bridge and keeps the handler callable', async () => {
 		const registeredIds: string[] = [];
 		let handler: ((...args: unknown[]) => unknown) | null = null;
+		const batches: string[][] = [];
 		const api = createVscodeApi(
 			{ extensionId: 'acme.demo', extensionPath: '/ext/acme.demo-2.0.0', workspaceFolders: [], settings: {}, language: 'en' },
 			{
-				request: async (method) => {
-					if (method === 'commands.register') registeredIds.push('queued');
+				request: async (method, args) => {
+					if (method === 'commands.registerBatch') {
+						batches.push(args[0] as string[]);
+						for (const id of args[0] as string[]) registeredIds.push('queued');
+					}
 					return undefined;
 				},
 				registerCommandHandler: (id, fn) => { registeredIds.push(id); handler = fn; }
 			}
 		);
 		api.commands.registerCommand('sayHi', (...args: unknown[]) => `hi ${args[0]}`);
+		// Registrations queue (one pipe round trip for the lot, not one per command) and
+		// cross when the activation settles — the flush hook the API layer exposes.
+		expect(registeredIds).toEqual(['acme.demo.sayHi']);
+		(globalThis as { __ggsFlushRegistrations?: () => void }).__ggsFlushRegistrations?.();
 		expect(registeredIds).toEqual(['acme.demo.sayHi', 'queued']);
+		expect(batches).toEqual([['acme.demo.sayHi']]);
 		expect(handler!('world')).toBe('hi world');
 	});
 
@@ -533,7 +542,13 @@ describe('the vscode API shim', () => {
 		const appended: unknown[][] = [];
 		const api = createVscodeApi(
 			{ extensionId: 'x', extensionPath: '/x', workspaceFolders: [], settings: {}, language: 'en' },
-			{ request: async (method, args) => { if (method === 'output.append') appended.push(args); return undefined; }, registerCommandHandler: () => undefined }
+			{ request: async (method, args) => {
+				// Lines queue and cross as one batch (see flushCommandRegistrations); the
+				// capture flattens both the batched and the direct shapes.
+				if (method === 'output.append') appended.push(args);
+				if (method === 'output.appendBatch') for (const line of args[0] as unknown[][]) appended.push(line);
+				return undefined;
+			}, registerCommandHandler: () => undefined }
 		);
 		const channel = api.window.createOutputChannel('Code Spell Checker', { log: true });
 		// The bind-at-activation pattern a logging extension uses (cspell's logger wrapper):
@@ -545,6 +560,7 @@ describe('the vscode API shim', () => {
 			channel.error!.bind(channel);
 		}).not.toThrow();
 		channel.info('client created');
+		(globalThis as { __ggsFlushRegistrations?: () => void }).__ggsFlushRegistrations?.();
 		// A LogOutputChannel line is VS Code's: a timestamp, the level, the message.
 		expect(appended.at(-1)![0]).toBe('Code Spell Checker');
 		expect(appended.at(-1)![1]).toMatch(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z \[info\] client created\n$/);

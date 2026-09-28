@@ -529,3 +529,313 @@ fn the_git_graph_extension_entry_evaluates_in_boa() {
         Err(error) => eprintln!("the extension entry FAILED to evaluate: {error}"),
     }
 }
+
+/// The module bytecode cache (2026-09-28): a compiled wrapper serialized through
+/// `vm::bytecode_cache::encode_codeblock` and rebuilt through `decode_codeblock` +
+/// `Script::from_compiled` must run identically to the freshly compiled one — classes
+/// with private fields, closures over block scopes, try/catch handlers, a BigInt
+/// constant and a rest-parameter call site cover every `Constant` variant and the
+/// handler/IC tables. `Function.prototype.toString` must also survive, since error
+/// positions and stack frames read the cached source text.
+#[test]
+#[cfg(feature = "node-runtime")]
+fn the_module_bytecode_cache_roundtrips_and_runs_identically() {
+    use boa_engine::{JsValue, Script, Source};
+
+    let wrapper = r#"(function (exports, require, module, __filename, __dirname) {
+        const scale = 2n;
+        let total = 0;
+        class Counter {
+            #n = 0;
+            bump(step) { this.#n += Number(step); return this.#n; }
+        }
+        const counter = new Counter();
+        function addAll(...values) {
+            try {
+                for (const v of values) { total += v; }
+            } catch (err) {
+                return -1;
+            }
+            return total;
+        }
+        {
+            let blockScoped = 10;
+            addAll(blockScoped);
+        }
+        exports.run = function (step) {
+            const big = BigInt(step) * scale;
+            return [counter.bump(step), addAll(step), String(big), addAll.length, typeof module];
+        };
+    })"#;
+
+    let run = |context: &mut Context, script: &Script| -> String {
+        let function = script
+            .evaluate(context)
+            .expect("the wrapper evaluates")
+            .as_object()
+            .expect("a function");
+        // Call the wrapper the way `evaluate_module` does: fresh exports/module and a
+        // five-argument invocation, then read what the module exported.
+        let exports = boa_engine::JsObject::with_object_proto(context.intrinsics());
+        let module = boa_engine::JsObject::with_object_proto(context.intrinsics());
+        module
+            .set(
+                boa_engine::property::PropertyKey::from(boa_engine::js_string!("exports")),
+                JsValue::from(exports.clone()),
+                false,
+                context,
+            )
+            .expect("module.exports");
+        function
+            .call(
+                &JsValue::undefined(),
+                &[
+                    exports.clone().into(),
+                    JsValue::undefined(),
+                    module.clone().into(),
+                    JsValue::from(boa_engine::js_string!("/test/entry.js")),
+                    JsValue::from(boa_engine::js_string!("/test")),
+                ],
+                context,
+            )
+            .expect("the wrapper runs");
+        let run_fn = module
+            .get(boa_engine::property::PropertyKey::from(
+                boa_engine::js_string!("exports"),
+            ), context)
+            .expect("final exports")
+            .as_object()
+            .expect("exports object")
+            .get(boa_engine::property::PropertyKey::from(
+                boa_engine::js_string!("run"),
+            ), context)
+            .expect("run");
+        let result = run_fn
+            .as_object()
+            .expect("run function")
+            .call(
+                &JsValue::undefined(),
+                &[JsValue::from(7)],
+                context,
+            )
+            .expect("run() answers");
+        result.to_string(context).expect("string").to_std_string_escaped()
+    };
+
+    // The direct path: parse, compile, run.
+    let mut context = Context::default();
+    let direct_script = Script::parse_all_bindings_escaping(
+        Source::from_bytes(wrapper.as_bytes()),
+        None,
+        &mut context,
+    )
+    .expect("parses");
+    let direct = run(&mut context, &direct_script);
+
+    // The cached path: compile, serialize, rebuild, run — in a FRESH context, so the
+    // rebuilt scopes tie into a different realm exactly as a second process start does.
+    let mut compile_context = Context::default();
+    let compiled = {
+        let script = Script::parse_all_bindings_escaping(
+            Source::from_bytes(wrapper.as_bytes()),
+            None,
+            &mut compile_context,
+        )
+        .expect("parses");
+        script.codeblock(&mut compile_context).expect("compiles")
+    };
+    let blob = bincode::serialize(&boa_engine::vm::bytecode_cache::to_mirror(&compiled))
+        .expect("serializes");
+
+    let mut cached_context = Context::default();
+    let decoded = {
+        let mirror: boa_engine::vm::bytecode_cache::CacheBlob =
+            bincode::deserialize(&blob).expect("deserializes");
+        boa_engine::vm::bytecode_cache::from_mirror(mirror, wrapper, cached_context.realm().scope())
+            .expect("rebuilds")
+    };
+    let cached_script = Script::from_compiled(
+        boa_engine::gc::Gc::new(*decoded),
+        None,
+        cached_context.realm().clone(),
+    );
+    let cached = run(&mut cached_context, &cached_script);
+
+    assert_eq!(direct, cached, "the cached tree must run identically");
+    // The values themselves: bump(7)=7, the accumulated addAll(7)=17, 7n*2n=14n, a rest
+    // function's length of 0, and the module parameter object.
+    assert_eq!(direct, "7,17,14,0,object", "sanity: the computed values");
+    // And the blob round-trips the source text the stack traces need.
+    let mut context_for_tostring = Context::default();
+    let mirror2: boa_engine::vm::bytecode_cache::CacheBlob =
+        bincode::deserialize(&blob).expect("deserializes again");
+    let decoded2 = boa_engine::vm::bytecode_cache::from_mirror(
+        mirror2,
+        wrapper,
+        context_for_tostring.realm().scope(),
+    )
+    .expect("rebuilds again");
+    let script2 = Script::from_compiled(
+        boa_engine::gc::Gc::new(*decoded2),
+        None,
+        context_for_tostring.realm().clone(),
+    );
+    let function2 = script2
+        .evaluate(&mut context_for_tostring)
+        .expect("evaluates")
+        .as_object()
+        .expect("a function");
+    let as_string = function2
+        .get(
+            boa_engine::property::PropertyKey::from(boa_engine::js_string!("toString")),
+            &mut context_for_tostring,
+        )
+        .expect("toString exists")
+        .as_object()
+        .expect("callable")
+        .call(&function2.clone().into(), &[], &mut context_for_tostring)
+        .expect("toString answers")
+        .to_string(&mut context_for_tostring)
+        .expect("string")
+        .to_std_string_escaped();
+    assert!(
+        as_string.contains("__dirname"),
+        "the cached wrapper keeps its source text: {as_string}"
+    );
+}
+
+/// The register-local path (2026-09-28): a module whose bindings are clean under the real
+/// escape analysis compiles locals to register `Move`s — no per-iteration environments in
+/// `for (let …)` loops, no environment stores for uncaptured names — and must compute
+/// identical values to the escaping path. Pinned together with the two compile-time
+/// guards ggs-node's `require` uses (see the next test): the register count stays under
+/// the loader's limit and no binding was used before its declaration point.
+#[test]
+#[cfg(feature = "node-runtime")]
+fn register_locals_run_clean_modules_identically() {
+    use boa_engine::{Context, JsValue, Script, Source};
+
+    let wrapper = r#"(function (exports, require, module, __filename, __dirname) {
+        let sum = 0;
+        for (let i = 0; i < 4; i++) { sum += i * 2; }
+        let captured = [];
+        for (let j = 0; j < 3; j++) captured.push(() => j);
+        class Boxed { #v; constructor(v) { this.#v = v; } read() { return this.#v; } }
+        const box = new Boxed(sum);
+        module.exports = { sum, captured: captured.map(f => f()), boxed: box.read() };
+    })"#;
+
+    let run = |context: &mut Context| -> String {
+        let script = Script::parse(Source::from_bytes(wrapper.as_bytes()), None, context)
+            .expect("parses under the real escape analysis");
+        assert!(
+            !Script::tripped_uninitialized_local(),
+            "a clean module must not trip the use-before-declaration guard"
+        );
+        assert!(
+            script.max_register_count(context) <= 4096,
+            "a normal module's register file stays far under the loader limit"
+        );
+        let function = script
+            .evaluate(context)
+            .expect("evaluates")
+            .as_object()
+            .expect("a function");
+        let exports = boa_engine::JsObject::with_object_proto(context.intrinsics());
+        let module = boa_engine::JsObject::with_object_proto(context.intrinsics());
+        module
+            .set(
+                boa_engine::property::PropertyKey::from(boa_engine::js_string!("exports")),
+                JsValue::from(exports.clone()),
+                false,
+                context,
+            )
+            .expect("module.exports");
+        function
+            .call(&JsValue::undefined(), &[JsValue::undefined(), JsValue::undefined(), module.clone().into()], context)
+            .expect("the wrapper runs");
+        let exports = module
+            .get(boa_engine::property::PropertyKey::from(boa_engine::js_string!("exports")), context)
+            .expect("exports")
+            .as_object()
+            .expect("an object");
+        let field = |context: &mut Context, name: &str| {
+            exports
+                .get(boa_engine::property::PropertyKey::from(boa_engine::js_string!(name)), context)
+                .expect(name)
+                .to_string(context)
+                .expect("string")
+                .to_std_string_escaped()
+        };
+        format!(
+            "{},{},{}",
+            field(context, "sum"),
+            field(context, "captured"),
+            field(context, "boxed")
+        )
+    };
+
+    let mut context = Context::default();
+    Script::reset_uninitialized_local_trip();
+    let direct = run(&mut context);
+    assert_eq!(direct, "12,0,1,2,12", "the register path computes the values");
+}
+
+/// The fallback half of the register-local path: a use of a block-scoped binding before
+/// its declaration (boa 0.21.1 would bake a static TDZ throw into the site — wrong for
+/// every use that runs after initialization) trips the compile-time guard, and the
+/// module recompiled with every binding escaping evaluates correctly — the dead branch
+/// never executes, so nothing throws.
+#[test]
+#[cfg(feature = "node-runtime")]
+fn a_use_before_declaration_trips_the_register_guard_and_the_fallback_runs() {
+    use boa_engine::{Context, JsValue, Script, Source};
+
+    let wrapper = r#"(function (exports, require, module, __filename, __dirname) {
+        if (false) { let probe = typeof Later; class Later {} }
+        let n = 0;
+        for (let i = 0; i < 5; i++) { n += i; }
+        module.exports = { n };
+    })"#;
+
+    let mut context = Context::default();
+    Script::reset_uninitialized_local_trip();
+    let script = Script::parse(Source::from_bytes(wrapper.as_bytes()), None, &mut context)
+        .expect("parses");
+    // The compile read the binding inside the block before the class declaration point.
+    let _ = script.max_register_count(&mut context);
+    assert!(
+        Script::tripped_uninitialized_local(),
+        "the use-before-declaration site must trip the guard"
+    );
+
+    // The loader's fallback: the same source through the all-escaping analysis.
+    let script = Script::parse_all_bindings_escaping(Source::from_bytes(wrapper.as_bytes()), None, &mut context)
+        .expect("parses escaping");
+    let function = script
+        .evaluate(&mut context)
+        .expect("evaluates")
+        .as_object()
+        .expect("a function");
+    let exports = boa_engine::JsObject::with_object_proto(context.intrinsics());
+    let module = boa_engine::JsObject::with_object_proto(context.intrinsics());
+    module
+        .set(
+            boa_engine::property::PropertyKey::from(boa_engine::js_string!("exports")),
+            JsValue::from(exports),
+            false,
+            &mut context,
+        )
+        .expect("module.exports");
+    function
+        .call(&JsValue::undefined(), &[JsValue::undefined(), JsValue::undefined(), module.clone().into()], &mut context)
+        .expect("the fallback wrapper runs");
+    let n = module
+        .get(boa_engine::property::PropertyKey::from(boa_engine::js_string!("exports")), &mut context)
+        .expect("exports")
+        .as_object()
+        .expect("an object")
+        .get(boa_engine::property::PropertyKey::from(boa_engine::js_string!("n")), &mut context)
+        .expect("n");
+    assert_eq!(n.to_number(&mut context).expect("number") as i64, 10);
+}

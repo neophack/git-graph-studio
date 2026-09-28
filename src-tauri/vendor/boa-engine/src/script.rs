@@ -132,6 +132,31 @@ impl Script {
         Self::parse_inner(src, realm, true, context)
     }
 
+    /// GGS-patch: the deepest register file this script's compiled tree can ask for
+    /// (`CodeBlock::max_register_count`). Compiles if needed; `0` if compilation fails.
+    #[must_use]
+    pub fn max_register_count(&self, context: &mut Context) -> u32 {
+        self.codeblock(context)
+            .map(|cb| cb.max_register_count())
+            .unwrap_or(0)
+    }
+
+    /// GGS-patch: reset the engine-wide "used a register-local before its declaration
+    /// point" flag (see `ByteCompiler::get_binding`). Call before a module compile whose
+    /// fallback decision reads it.
+    pub fn reset_uninitialized_local_trip() {
+        crate::bytecompiler::tripped::reset();
+    }
+
+    /// GGS-patch: whether any compilation since the last reset used a register-local
+    /// binding before its declaration point — the loader's signal to fall that module
+    /// back to the all-escaping analysis (boa 0.21.1 would otherwise bake a static TDZ
+    /// throw into the site).
+    #[must_use]
+    pub fn tripped_uninitialized_local() -> bool {
+        crate::bytecompiler::tripped::get()
+    }
+
     fn parse_inner<R: ReadChar>(
         src: Source<'_, R>,
         realm: Option<Realm>,
@@ -241,6 +266,38 @@ impl Script {
         *codeblock = Some(cb.clone());
 
         Ok(cb)
+    }
+
+    /// GGS-patch: a script rebuilt from the module bytecode cache (see
+    /// `vm::bytecode_cache`). The compiled tree and its source text arrive from disk; the
+    /// parsed AST stays empty, so `codeblock()` finds the cached block and never
+    /// recompiles. Scripts with top-level declarations must not take this path —
+    /// global declaration instantiation runs inside `codeblock()`'s compile and a cached
+    /// block would skip it — which is exactly ggs-node's case: it caches only the CommonJS
+    /// module wrapper, a function expression over its five parameters.
+    #[must_use]
+    pub fn from_compiled(
+        codeblock: Gc<CodeBlock>,
+        path: Option<std::path::PathBuf>,
+        realm: Realm,
+    ) -> Self {
+        // The source text rides inside the block's source info — the cache serialized it
+        // so `Function.prototype.toString` and error positions work from a cached load.
+        let source_text = codeblock.source_info.text_spanned().source_text();
+        Self {
+            inner: Gc::new(Inner {
+                realm,
+                // No parsed AST behind a cached block; the deferred-release slot stays
+                // empty (nothing to park, nothing to free at idle).
+                source: std::cell::RefCell::new(boa_ast::Script::default()),
+                defer_release: false,
+                source_text,
+                codeblock: GcRefCell::new(Some(codeblock)),
+                path,
+                loaded_modules: GcRefCell::default(),
+                host_defined: crate::HostDefined::default(),
+            }),
+        }
     }
 
     /// Evaluates this script and returns its result.

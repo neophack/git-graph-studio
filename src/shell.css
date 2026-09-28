@@ -136,6 +136,7 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 	border: none; border-radius: 5px; background: transparent; color: var(--vscode-icon-foreground); padding: 0;
 }
 .action-btn .codicon { font-size: 16px; }
+.markdown-preview-button img, .action-btn img { display: block; width: 16px; height: 16px; }
 .action-btn:hover { background: var(--vscode-toolbar-hoverBackground); }
 .action-btn:active { background: var(--vscode-toolbar-activeBackground); }
 .action-btn[disabled] { opacity: 0.4; pointer-events: none; }

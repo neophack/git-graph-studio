@@ -1609,7 +1609,10 @@ class WebviewPanel {
 					: path.replace(/\\/g, '/').replace(/^\.\//, '');
 				return Uri.parse(this.ctx.webviewResourceBase + rel);
 			},
-			cspSource: this.ctx.webviewResourceBase
+			// `${cspSource}` composes the page's own CSP directives, so `data:` rides along: a
+			// page inlining its icon font as a data: URL (claude-code's codicons) dies under
+			// its own `font-src ${cspSource}` without it. (Both webview kinds carry it.)
+			cspSource: this.ctx.webviewResourceBase + ' data:'
 		};
 	}
 
@@ -1720,7 +1723,10 @@ class WebviewView {
 					: path.replace(/\\/g, '/').replace(/^\.\//, '');
 				return Uri.parse(this.ctx.webviewResourceBase + rel);
 			},
-			cspSource: this.ctx.webviewResourceBase
+			// `${cspSource}` composes the page's own CSP directives, so `data:` rides along: a
+			// page inlining its icon font as a data: URL (claude-code's codicons) dies under
+			// its own `font-src ${cspSource}` without it. (Both webview kinds carry it.)
+			cspSource: this.ctx.webviewResourceBase + ' data:'
 		};
 	}
 
@@ -2752,6 +2758,34 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 	 *  its own `executeCommand` runs locally. */
 	const ownCommands = new Map<string, (...args: unknown[]) => unknown>();
 
+	/** Workbench-side command registrations waiting to cross, flushed as ONE host request:
+	 *  each registration is otherwise a full pipe round trip (~2-4 ms), and an activation
+	 *  registers dozens (claude-code: 31) — minutes of nothing on a slow disk, a visible
+	 *  slice of every activation here. The workbench sees every command the moment the
+	 *  queue flushes, which the hosts do as soon as the activation settles
+	 *  (`__ggsFlushRegistrations`, called by ggs-node's frame-program installer, the frame
+	 *  boot and the real-Node host) and before any `executeCommand`. */
+	let pendingCommandRegistrations: string[] = [];
+	const flushCommandRegistrations = (): void => {
+		const batch = pendingCommandRegistrations;
+		pendingCommandRegistrations = [];
+		if (batch.length > 0) send('commands.registerBatch', [batch]);
+	};
+	/** Output-channel lines waiting to cross, for the same reason: an activation logs
+	 *  dozens of lines (claude-code: ~15 on activate) and each was its own round trip.
+	 *  Flushed by the same activation-settled hook, and before any `show`/`clear` of the
+	 *  channel (their order semantics must not jump the queued lines). */
+	let pendingOutputLines: [string, string][] = [];
+	const flushOutputLines = (): void => {
+		const batch = pendingOutputLines;
+		pendingOutputLines = [];
+		if (batch.length > 0) send('output.appendBatch', [batch]);
+	};
+	(globalThis as { __ggsFlushRegistrations?: () => void }).__ggsFlushRegistrations = () => {
+		flushCommandRegistrations();
+		flushOutputLines();
+	};
+
 	/** A language-feature provider registration this host has no consumer for. */
 	const provider = (name: string) => (..._args: unknown[]) => inert(`languages.${name}`);
 
@@ -2770,10 +2804,14 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 				const wrapped = wrapHandler(full, handler, thisArg);
 				ownCommands.set(full, wrapped);
 				bridge.registerCommandHandler(full, wrapped);
-				send('commands.register', [full]);
+				pendingCommandRegistrations.push(full);
 				return new Disposable(() => {
 					if (ownCommands.get(full) === wrapped) ownCommands.delete(full);
-					send('commands.unregister', [full]);
+					// Not flushed yet: leave the queue (a registration the workbench never saw
+					// needs no unregistering); flushed: tell the workbench it went away.
+					const queued = pendingCommandRegistrations.indexOf(full);
+					if (queued !== -1) pendingCommandRegistrations.splice(queued, 1);
+					else send('commands.unregister', [full]);
 				});
 			},
 			registerTextEditorCommand: (id: string, handler: (editor: unknown, edit: unknown, ...args: unknown[]) => unknown, thisArg?: unknown) => {
@@ -2789,8 +2827,12 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 					if (edits.length > 0) await bridge.request('editor.applyEdits', [null, edits]);
 					return result;
 				}));
-				send('commands.register', [full]);
-				return new Disposable(() => send('commands.unregister', [full]));
+				pendingCommandRegistrations.push(full);
+				return new Disposable(() => {
+					const queued = pendingCommandRegistrations.indexOf(full);
+					if (queued !== -1) pendingCommandRegistrations.splice(queued, 1);
+					else send('commands.unregister', [full]);
+				});
 			},
 			// A command this extension registered runs right here, as in VS Code's own host:
 			// through the workbench it would re-enter this host — which, under ggs-node, is
@@ -2800,6 +2842,9 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			executeCommand: (id: string, ...args: unknown[]) => {
 				const own = ownCommands.get(id);
 				if (own) return Promise.resolve().then(() => own(...args));
+				// A foreign command can only exist for the workbench once this activation's
+				// queued registrations arrived — keep the ordering.
+				flushCommandRegistrations();
 				return bridge.request('commands.execute', [id, args]) as Promise<unknown>;
 			},
 			getCommands: async (_filterInternal?: boolean) => (await bridge.request('commands.list', [])) as string[]
@@ -2886,7 +2931,7 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 				// wrapper above all); every level lands in the channel with its prefix.
 				const isLog = typeof options === 'object' && options?.log === true;
 				const format = (message: unknown, args: unknown[]) => `${message instanceof Error ? (message.stack ?? message.message) : String(message)}${args.length > 0 ? ' ' + args.map((arg) => (typeof arg === 'string' ? arg : arg instanceof Error ? (arg.stack ?? arg.message) : JSON.stringify(arg))).join(' ') : ''}`;
-				const logLine = (level: string, message: unknown, ...args: unknown[]) => send('output.append', [name, `${isLog ? `${new Date().toISOString()} ` : ''}[${level}] ${format(message, args)}\n`]);
+				const logLine = (level: string, message: unknown, ...args: unknown[]) => pendingOutputLines.push([name, `${isLog ? `${new Date().toISOString()} ` : ''}[${level}] ${format(message, args)}\n`]);
 				return {
 					name,
 					logLevel: 3 as never,
@@ -2896,14 +2941,15 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 					info: (message: unknown, ...args: unknown[]) => logLine('info', message, ...args),
 					warn: (message: unknown, ...args: unknown[]) => logLine('warning', message, ...args),
 					error: (message: unknown, ...args: unknown[]) => logLine('error', message, ...args),
-					append: (value: string) => send('output.append', [name, String(value)]),
-					appendLine: (value: string) => send('output.append', [name, String(value) + '\n']),
-					clear: () => send('output.clear', [name]),
-					show: (_columnOrPreserveFocus?: unknown, _preserveFocus?: boolean) => send('output.show', [name]),
+					append: (value: string) => pendingOutputLines.push([name, String(value)]),
+					appendLine: (value: string) => pendingOutputLines.push([name, String(value) + '\n']),
+					clear: () => { flushOutputLines(); send('output.clear', [name]); },
+					show: (_columnOrPreserveFocus?: unknown, _preserveFocus?: boolean) => { flushOutputLines(); send('output.show', [name]); },
 					hide: () => undefined,
 					replace: (value: string) => {
+						flushOutputLines();
 						send('output.clear', [name]);
-						send('output.append', [name, String(value)]);
+						pendingOutputLines.push([name, String(value)]);
 					},
 					dispose: () => send('output.dispose', [name])
 				};

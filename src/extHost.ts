@@ -217,6 +217,20 @@ export function extAssetUrl(ext: ExtInfo | undefined, rel: string): string {
 	return extAssetBase(ext) + rel.replace(/\\/g, '/');
 }
 
+/** The extension host frame's document URL. The frame is sandboxed without `allow-same-origin`,
+ *  so its document sits on an opaque origin and the `type=module` scripts it references load
+ *  CORS-checked — the tauri protocol answers those with the app's own origin, never `null`,
+ *  and the load dies (no frame extension would ever activate in the packaged app). The `ggs`
+ *  protocol answers `*`, so in production the document and its hashed assets are served
+ *  through it out of the binary's embedded assets (the reserved names `serve_app_asset`
+ *  answers in cmd_ext.rs); under the dev server the plain path stands, the server sending
+ *  `*` itself (vite.config's `cors`). */
+function extHostFrameUrl(): string {
+	if (!import.meta.env.PROD) return '/ext-host.html';
+	const internals = (window as { __TAURI_INTERNALS__?: { convertFileSrc?: (path: string, protocol: string) => string } }).__TAURI_INTERNALS__;
+	return internals?.convertFileSrc ? internals.convertFileSrc('ext-host.html', 'ggs') : 'ggs://localhost/ext-host.html';
+}
+
 interface FrameHandle {
 	/** The host iframe. Absent on a remote handle: an extension whose program runs in a
 	 *  real-Node host process (nodeHost.ts) has no frame — its calls and pushes cross the
@@ -424,14 +438,39 @@ function composeWebview(html: string, theme: { kind: 'vscode-dark' | 'vscode-lig
  *  silently drops the navigation in Chromium — the panel then sits blank until something
  *  reloads it. The guard waits for connection, bounded, before assigning. */
 function loadFrameDoc(frame: HTMLIFrameElement, html: string, theme: { kind: 'vscode-dark' | 'vscode-light'; css: string; vars: Record<string, string> } | null): void {
-	const assign = () => { frame.srcdoc = composeWebview(html, theme); };
-	if (frame.isConnected) return assign();
+	const composed = composeWebview(html, theme);
+	const assign = () => { frame.srcdoc = composed; armLoadWatchdog(frame, composed); };
+	if (frame.isConnected) { assign(); return; }
 	let waits = 0;
 	const tick = () => {
-		if (frame.isConnected || ++waits > 120) return assign();
+		if (frame.isConnected || ++waits > 120) { assign(); return; }
 		requestAnimationFrame(tick);
 	};
 	requestAnimationFrame(tick);
+}
+
+/** A srcdoc navigation occasionally wedges in WebView2: the document reaches
+ *  `interactive` (its head styles load) and the loader never finishes — observed
+ *  stalling forever on a multi-megabyte module script that the same load normally pulls
+ *  in ~35 ms. The page then sits blank until something restarts the navigation, so the
+ *  watchdog does exactly that: if the frame's `load` never fired and the document is
+ *  still unfinished after a few seconds, re-assign the srcdoc (clearing first — an equal
+ *  value does not re-navigate), up to three tries. */
+function armLoadWatchdog(frame: HTMLIFrameElement, composed: string, attempt = 1): void {
+	if (attempt > 3) return;
+	let loaded = false;
+	frame.addEventListener('load', () => { loaded = true; }, { once: true });
+	setTimeout(() => {
+		if (loaded) return;
+		let state = '';
+		try { state = frame.contentDocument?.readyState ?? ''; } catch { return; }
+		if (state === 'complete') return;
+		frame.srcdoc = '';
+		requestAnimationFrame(() => {
+			frame.srcdoc = composed;
+			armLoadWatchdog(frame, composed, attempt + 1);
+		});
+	}, 4000 * attempt);
 }
 
 export class ExtensionHost {
@@ -1059,7 +1098,7 @@ export class ExtensionHost {
 		}
 
 		const frame = document.createElement('iframe');
-		frame.src = '/ext-host.html';
+		frame.src = extHostFrameUrl();
 		frame.title = `Extension host: ${ext.id}`;
 		frame.style.display = 'none';
 		frame.setAttribute('sandbox', 'allow-scripts');
@@ -1565,6 +1604,20 @@ export class ExtensionHost {
 				commands.register({ id, title: declared?.title ?? id, category: declared?.category ?? extId, enabled: () => true, run: () => this.runRegistered(id) });
 				return Promise.resolve(undefined);
 			}
+			case 'commands.registerBatch': {
+				// An activation's whole registration queue in one request — each separate
+				// registration would pay its own pipe round trip (~2-4 ms; claude-code
+				// registers 31 on activate). Same contract as `commands.register`, per entry.
+				const ids = args[0] as string[];
+				for (const id of ids) {
+					if (commandsRegistered.has(id) && commandsRegistered.get(id)!.handle !== handle) throw new Error(`command ${id} is already registered`);
+					handle.commandIds.add(id);
+					commandsRegistered.set(id, { extId, handle });
+					const declared = declaredCommand(id);
+					commands.register({ id, title: declared?.title ?? id, category: declared?.category ?? extId, enabled: () => true, run: () => this.runRegistered(id) });
+				}
+				return Promise.resolve(undefined);
+			}
 			case 'commands.unregister': {
 				const id = args[0] as string;
 				handle.commandIds.delete(id);
@@ -1706,6 +1759,11 @@ export class ExtensionHost {
 			case 'output.append': {
 				const [name, line] = args as [string, string];
 				this.appendOutput(extId, name, line);
+				return Promise.resolve(undefined);
+			}
+			case 'output.appendBatch': {
+				// An activation's log lines in one request (same shape as `commands.registerBatch`).
+				for (const [name, line] of args[0] as [string, string][]) this.appendOutput(extId, name, line);
 				return Promise.resolve(undefined);
 			}
 			case 'output.clear': {

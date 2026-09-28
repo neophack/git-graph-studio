@@ -11,7 +11,8 @@
 // The header carries the view's `view/title` actions, its description and badge; the
 // view's `message` shows above the rows.
 
-import { codiconOf, menuSection, resolvedMenuEntries, runMenuEntry, type ResolvedMenuEntry } from './contributions';
+import { commandIconContent, menuSection, resolvedMenuEntries, runMenuEntry, type ResolvedMenuEntry } from './contributions';
+import { extFileDataUrl } from './extHost';
 import { el, icon, labelWithIcons, showContextMenu, showMenuBelow } from './ui';
 
 /** One node as the extension's frame serialized it (`getTreeItem` already applied). The
@@ -128,10 +129,10 @@ export class ExtensionTreeView {
 		}
 	}
 
-	/** One action as a button: its codicon, or its label when it has none. */
+	/** One action as a button: its manifest icon (a codicon, or the package image), else
+	 *  its label. */
 	private actionButton(entry: ResolvedMenuEntry, args: unknown[]): HTMLElement {
-		const codicon = codiconOf(entry.icon);
-		const button = el('button', 'action-btn', codicon ? [icon(codicon)] : [entry.label]);
+		const button = el('button', 'action-btn', commandIconContent(entry, entry.label, extFileDataUrl));
 		button.title = entry.label;
 		button.setAttribute('aria-label', entry.label);
 		button.addEventListener('click', (event) => {

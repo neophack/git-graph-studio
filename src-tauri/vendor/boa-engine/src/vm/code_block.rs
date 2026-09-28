@@ -331,6 +331,21 @@ impl CodeBlock {
 
 /// ---- `CodeBlock` private API ----
 impl CodeBlock {
+    /// GGS-patch: the deepest register file this compiled tree can ask for — the deepest
+    /// single frame, this block's or any nested function constant's. The loader guards a
+    /// module wrapper against the VM stack limit with it (one huge frame of register
+    /// locals otherwise silently reads past the limit's checking point; see ggs-node's
+    /// `require`).
+    pub(crate) fn max_register_count(&self) -> u32 {
+        let mut max = self.register_count;
+        for constant in &self.constants {
+            if let Constant::Function(function) = constant {
+                max = max.max(function.max_register_count());
+            }
+        }
+        max
+    }
+
     /// Get the operands after the `Opcode` pointed to by `pc` as a `String`.
     /// Modifies the `pc` to point to the next instruction.
     ///

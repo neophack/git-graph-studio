@@ -39,7 +39,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use boa_engine::{Context, JsValue, Source};
+use boa_engine::{Context, JsValue};
 use serde_json::{json, Value};
 
 use crate::ext_protocol::{self as proto, Emitter};
@@ -409,6 +409,8 @@ pub fn run() {
         std::io::BufReader::new(std::io::stdin()),
         std::io::stdout(),
     );
+    // The interpreter's instruction ranking (see boa-engine's opcode_stats), when asked for.
+    boa_engine::vm::opcode_stats::print_totals();
     eprintln!("[ggs-node] stopped");
 }
 
@@ -632,8 +634,10 @@ fn execute_job(context: &mut Context, job: Job) -> bool {
 fn bootstrap(context: &mut Context, entry: &Path) -> Result<(), String> {
     builtins::register_natives(context).map_err(|e| e.to_string())?;
     napi_host::install(context as *mut Context);
-    context
-        .eval(Source::from_bytes(PRELUDE))
+    // The prelude is declarations-free (IIFEs and `globalThis` assignments), so it rides
+    // the module bytecode cache like any bundle: parse and compile once per machine, a
+    // blob read on every start (see `require::evaluate_cached_script`).
+    require::evaluate_cached_script("prelude", PRELUDE, context)
         .map_err(|e| format!("the prelude failed: {e}"))?;
     // A VS Code extension's main is a real frame program: it `require`s 'vscode' and runs
     // on the API. Only the fact is established here — the shim bundle's evaluation waits
@@ -822,8 +826,9 @@ fn install_frame_program(context: &mut Context, params: &Value) -> Result<(), St
                     source.len()
                 );
             }
-            context
-                .eval(Source::from_bytes(source.as_bytes()))
+            // The shim is a strict-mode IIFE with no top-level declarations — the
+            // bytecode cache applies (see `require::evaluate_cached_script`).
+            require::evaluate_cached_script("vscode-shim", &source, context)
                 .map_err(|e| format!("the vscode shim failed: {e}"))?;
         }
         Some(Err(e)) => {
@@ -911,6 +916,18 @@ fn install_frame_program(context: &mut Context, params: &Value) -> Result<(), St
     settle(context, settled).map_err(|e| e.to_string())?;
     if trace {
         eprintln!("[boot] activation settled");
+    }
+    // The shim queued the activation's command registrations (one pipe round trip for the
+    // lot, not one per command): the flush hook the API layer left on globalThis runs now
+    // that the workbench can afford the single batch.
+    if let Ok(flush) = context
+        .global_object()
+        .get(key("__ggsFlushRegistrations"), context)
+        .map_err(|e| e.to_string())
+    {
+        if let Some(flush) = flush.as_object() {
+            let _ = flush.call(&JsValue::undefined(), &[], context);
+        }
     }
     Ok(())
 }
@@ -1436,7 +1453,7 @@ mod tests {
         for round in 1..=2 {
             let started = std::time::Instant::now();
             let value = context
-                .eval(Source::from_bytes(wrapper.as_bytes()))
+                .eval(boa_engine::Source::from_bytes(wrapper.as_bytes()))
                 .expect("the script route compiles");
             eprintln!(
                 "[probe] script route round {round}: {:?} ({})",
@@ -1451,7 +1468,7 @@ mod tests {
         for round in 1..=2 {
             let started = std::time::Instant::now();
             let value = context
-                .eval(Source::from_bytes(script.as_bytes()))
+                .eval(boa_engine::Source::from_bytes(script.as_bytes()))
                 .expect("the eval route compiles");
             eprintln!(
                 "[probe] eval route round {round}: {:?} ({})",

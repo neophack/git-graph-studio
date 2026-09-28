@@ -1354,7 +1354,9 @@ mod desktop {
             // The `ggx` protocol serves an installed package's own files to its sandboxed
             // page iframes (cmd_ext.rs confines every request to the extensions home) — the
             // extension-platform counterpart of the public dir the Git Graph page loads from.
-            .register_uri_scheme_protocol("ggs", |_ctx, request| cmd_ext::serve_ext_asset(&request))
+            .register_uri_scheme_protocol("ggs", |ctx, request| {
+                cmd_ext::serve_ext_asset(&request, &ctx.app_handle().asset_resolver())
+            })
             .setup(|app| {
                 // Git's output reaches the panel's "Git" channel as it happens.
                 use tauri::Emitter;

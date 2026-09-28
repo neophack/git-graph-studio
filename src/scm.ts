@@ -10,7 +10,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 
 import type { CommandRegistry } from './commands';
-import { codiconOf, contextUri, resolvedMenuEntries } from './contributions';
+import { commandIconContent, contextUri, resolvedMenuEntries } from './contributions';
 import { extFileDataUrl } from './extHost';
 import type { DiffSide } from './editor';
 import { fileIcon, fileIconColor } from './editor';
@@ -844,22 +844,9 @@ export class SourceControlView {
 			if (entry.group !== 'navigation') continue;
 			const button = actionButton('', entry.label, () => this.onExtensionCommand?.(entry.command, [{ rootUri: contextUri(repoPath) }]));
 			buttons.push(button);
-			// A `$(codicon)` icon renders from the icon font; a path pair loads the image.
-			const codicon = codiconOf(entry.icon);
-			if (codicon) {
-				button.replaceChildren(icon(codicon));
-				continue;
-			}
-			const image = el('img');
-			image.alt = '';
-			image.width = 16;
-			image.height = 16;
-			button.replaceChildren(image);
-			if (entry.extId && entry.icon && typeof entry.icon === 'object') {
-				// The manifest carries light/dark icon paths into the package; either loads.
-				const iconPath = entry.icon.dark ?? entry.icon.light;
-				if (iconPath) void extFileDataUrl(entry.extId, iconPath).then((url) => { if (url) image.src = url; });
-			}
+			// The manifest's own icon (a `$(codicon)`, else the package image), the title
+			// text staying when neither resolves.
+			button.replaceChildren(...commandIconContent(entry, entry.label, extFileDataUrl));
 		}
 		return buttons;
 	}

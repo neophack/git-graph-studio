@@ -62,6 +62,78 @@ pub(crate) use function::FunctionCompiler;
 pub(crate) use jump_control::JumpControlInfo;
 pub(crate) use register::*;
 
+/// GGS-patch: set when a compilation used a register-local binding before its declaration
+/// point (see `ByteCompiler::get_binding`) — the loader's compile-time self-check for the
+/// register path. Thread-local: one thread compiles one Context (ggs-node compiles every
+/// module on its one JS thread), and parallel test Contexts must not read each other's
+/// trips. Reset before a module compile, read after; a trip falls the module back to the
+/// all-escaping analysis.
+pub(crate) mod tripped {
+    use std::cell::Cell;
+
+    thread_local! {
+        static TRIPPED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn reset() {
+        TRIPPED.with(|flag| flag.set(false));
+    }
+
+    pub(crate) fn set() {
+        TRIPPED.with(|flag| flag.set(true));
+    }
+
+    pub(crate) fn get() -> bool {
+        TRIPPED.with(|flag| flag.get())
+    }
+}
+
+/// GGS-diag: where each local binding's register was inserted, and the compile position
+/// of every use-before-insert trip — printed once per process from ggs-node's exit path,
+/// behind `GGS_COMPILE_DIAG=1` (any profile).
+pub(crate) mod diag_positions {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+
+    thread_local! {
+        static INSERTS: RefCell<HashMap<String, String>> =
+            RefCell::new(HashMap::new());
+    }
+
+    fn enabled() -> bool {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var_os("GGS_COMPILE_DIAG").is_some())
+    }
+
+    /// The map-key debug of a local binding's register insert.
+    pub(crate) fn record_insert(name: &crate::JsString, key: String) {
+        if !enabled() {
+            return;
+        }
+        INSERTS.with(|map| {
+            map.borrow_mut().insert(name.to_std_string_escaped(), key);
+        });
+    }
+
+    /// The map-key debug of a use that missed the register map.
+    pub(crate) fn record_trip(name: &crate::JsString, key: String) {
+        if !enabled() {
+            return;
+        }
+        let inserts = INSERTS.with(|map| map.borrow().clone());
+        eprintln!(
+            "[ggs-diag] trip '{}' use-key {} vs decl-key {:?}",
+            name.to_std_string_escaped(),
+            key,
+            inserts.get(&name.to_std_string_escaped())
+        );
+    }
+
+    pub fn print() {}
+}
+use diag_positions as DIAGPositions;
+
 pub(crate) trait ToJsString {
     fn to_js_string(&self, interner: &Interner) -> JsString;
 }
@@ -686,7 +758,18 @@ impl<'ctx> ByteCompiler<'ctx> {
         }
 
         if binding.local() {
-            return BindingKind::Local(self.local_binding_registers.get(binding).copied());
+            let kind = BindingKind::Local(self.local_binding_registers.get(binding).copied());
+            if let BindingKind::Local(None) = kind {
+                // GGS-patch: a use of a register-local binding compiling before its
+                // declaration point (boa 0.21.1 emits a static TDZ throw there — wrong
+                // for every use that executes after initialization, and real bundles
+                // carry such sites). The flag is the loader's compile-time self-check:
+                // ggs-node recompiles such a module with every binding escaping instead
+                // of running code with a baked-in throw.
+                tripped::set();
+                DIAGPositions::record_trip(binding.locator().name(), format!("{binding:?}"));
+            }
+            return kind;
         }
 
         if let Some(index) = self.bindings_map.get(&binding.locator()) {
@@ -713,6 +796,7 @@ impl<'ctx> ByteCompiler<'ctx> {
         }
 
         if binding.local() {
+            DIAGPositions::record_insert(binding.locator().name(), format!("{binding:?}"));
             return BindingKind::Local(Some(
                 *self
                     .local_binding_registers

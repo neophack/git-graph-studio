@@ -80,6 +80,30 @@ impl SpannedSourceText {
         self.source_text.clone()
     }
 
+    /// GGS-patch: the collected code units (the bytecode cache serializes them so
+    /// `Function.prototype.toString` works from a cached load).
+    pub(crate) fn source_text_codes(&self) -> Vec<u16> {
+        self.source_text
+            .inner()
+            .map(|text| text.get_code_points_from_pos(boa_ast::LinearPosition::new(0)).to_vec())
+            .unwrap_or_default()
+    }
+
+    /// GGS-patch: the function's source range, if this is a function's text.
+    pub(crate) fn span(&self) -> Option<LinearSpan> {
+        self.span
+    }
+
+    /// GGS-patch: rebuild from the bytecode cache's parts. The source text is the
+    /// blob's ONE shared instance (an `Rc` clone per block — the cache writes the full
+    /// text a single time and each block reads its own span out of it).
+    pub(crate) fn from_parts(source_text: SourceText, span: Option<LinearSpan>) -> Self {
+        Self {
+            source_text,
+            span,
+        }
+    }
+
     /// Test if the span is empty.
     #[inline]
     #[must_use]

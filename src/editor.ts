@@ -27,7 +27,8 @@ import type { BlameLine, FileHistoryView } from './fileHistory';
 import type * as TextEditor from './textEditor';
 import type { CallTreeView, WsSymbol } from './callTree';
 import { commands } from './commands';
-import { codiconOf, contextUri, declaredLanguageName, menuSection, resolvedMenuEntries, resourceContext, runMenuEntry } from './contributions';
+import { commandIconContent, contextUri, declaredLanguageName, menuSection, resolvedMenuEntries, resourceContext, runMenuEntry } from './contributions';
+import { extFileDataUrl } from './extHost';
 import type { FolderCompareView } from './folderCompare';
 import type { MergeToolbar } from './mergeEditor';
 import { t } from './i18n';
@@ -2968,8 +2969,8 @@ export class EditorGroup {
 			this.tabs.appendChild(el('div', 'tab-actions', [button]));
 		}
 		// The extensions' `editor/title` actions for the active file: the `navigation`
-		// group as buttons (a codicon, else the title), the rest behind "…", each run with
-		// the file's Uri as VS Code passes it.
+		// group as buttons (the manifest's own icon — codicon or package image — else the
+		// title), the rest behind "…", each run with the file's Uri as VS Code passes it.
 		if (active?.input.kind === 'file') {
 			const path = active.input.path;
 			const entries = resolvedMenuEntries('editor/title', resourceContext(path));
@@ -2977,8 +2978,7 @@ export class EditorGroup {
 				const args = [contextUri(path), [contextUri(path)]];
 				const actions: HTMLElement[] = [];
 				for (const entry of entries.filter((candidate) => candidate.group === 'navigation')) {
-					const codicon = codiconOf(entry.icon);
-					const button = el('button', 'markdown-preview-button ext-editor-action', codicon ? [icon(codicon)] : [entry.label]);
+					const button = el('button', 'markdown-preview-button ext-editor-action', commandIconContent(entry, entry.label, extFileDataUrl));
 					button.title = entry.label;
 					button.addEventListener('click', (event) => {
 						event.stopPropagation();

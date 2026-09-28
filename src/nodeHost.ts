@@ -194,6 +194,9 @@ function ensureActivated(): Promise<void> {
 			}
 			loaded_ = loaded ?? null;
 			await Promise.resolve(loaded?.activate?.(activationContext(context, api)));
+			// The activation's queued command registrations cross as one batch now (see
+			// vscodeApi's flushCommandRegistrations).
+			(globalThis as { __ggsFlushRegistrations?: () => void }).__ggsFlushRegistrations?.();
 		} catch (error) {
 			activationError =
 				error instanceof Error && error.stack

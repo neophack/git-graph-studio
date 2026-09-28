@@ -67,6 +67,12 @@ impl SourceMapBuilder {
         self.stack.push(index);
     }
 
+    /// GGS-diag: the position of the most recently pushed source scope, open or closed —
+    /// the best available "where is the compiler right now" (see `ByteCompiler::get_binding`).
+    pub(crate) fn last_position(&self) -> Option<Position> {
+        self.entries.last().and_then(|entry| entry.position)
+    }
+
     // TODO: document implementation range flattening.
     pub(crate) fn pop_source_position(&mut self, current_start_pc: u32) {
         let Some(index) = self.stack.pop().map(|index| index as usize) else {

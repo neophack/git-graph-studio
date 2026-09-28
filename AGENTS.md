@@ -520,20 +520,47 @@ nothing.
   `Source` carries a `len_hint` (`from_bytes`/`from_utf16`) that the parser hands to
   the lexer cursor before the first character — the source collector otherwise grows
   by doubling, every growth a full memcpy of the text gathered so far; `boa-engine`'s
-  `Script` compiles the module wrapper through `parse_all_bindings_escaping` (no
-  register locals — Boa 0.21.1's register path miscompiles real bundle code; ggs-node's
-  `require` loads every module this way) and parks a large script's compiled-out AST in
+  `Script` compiles the module wrapper through the real escape analysis FIRST — register
+  locals are plain register `Move`s, and a `for (let …)` loop stops allocating a
+  per-iteration environment (2026-09-28: a microbench loop -40%, calls -34%) — with two
+  compile-time guards falling the module back to `parse_all_bindings_escaping` (every
+  binding in its environment, the mode ggs-node used before): a binding used before its
+  declaration point (`TRIPPED_UNINITIALIZED_LOCAL` — Boa 0.21.1 bakes a static TDZ throw
+  into such a site, wrong for every use that runs after initialization; claude-code's
+  bundle trips it, real bundles carry those sites) or a register file deeper than
+  `REGISTER_LOCALS_LIMIT` (4096; the VM stack limit is 10 240 slots shared by every frame
+  and one huge frame reads past the checking point) — and parks a large script's compiled-out AST in
   `free_released_sources` instead of dropping it inline (tearing down a bundle's tree
   is millions of frees; the embedder frees it at idle), memoizes `Sym`→`JsString`
   inside a `JsStringMemo` scope (scope analysis and codegen resolve the same few
   thousand names millions of times), and `bytecompiler`'s declaration sets are hash
-  sets (the membership tests were quadratic in a bundle's top level); node_runtime
+  sets (the membership tests were quadratic in a bundle's top level); `boa-parser`'s
+  lexer cursor peeks through a ring (the old array `rotate_left`ed on every consumed
+  character — ~30% of the lexer's time over a bundle); `boa-engine` also carries the
+  module bytecode cache (`vm/bytecode_cache.rs`): a compiled wrapper's whole tree
+  crosses as a bincode mirror whose scopes are one FLAT table — each distinct scope
+  once, `Rc`-deduped, ancestors first (a recursive mirror expanded claude-code's
+  25 thousand shared chains into a serialize that never finished) — and whose source
+  text is written ONCE (every block's `SpannedSourceText` is an `Rc` clone over it
+  with its own span; the naive per-block copy was the full 3 MB per function), and
+  `Script::from_compiled` runs the rebuilt tree without parsing; ggs-node's `require`
+  keys the blob by the source's SHA-256 under `~/.ggs/cache/bytecode/` (claude-code:
+  parse 257 ms + compile 65 ms become one 29 MB read at 57 ms — cold activation
+  0.79 s, warm 0.41 s; any decode failure falls back to a normal compile);
+  node_runtime
   runs with the AST optimizer off (its one constant-folding pass is a full extra tree
   walk for what a minifier already folded) and installs `node_runtime/alloc.rs` as the
-  sidecar's global allocator. `GGS_PHASE_TRACE=1` (phase timing, including the
-  lexer/parser vs scope-analysis split), `GGS_TRACE_BOOT=1` (activation milestones)
-  and `boa_bench` measure it all; keep the scope index fed if any binding-creating
-  path changes), and the sidecar builds through its own `[profile.ggs-node]` — the release size
+  sidecar's global allocator. Command registrations cross as one batch —
+  `vscodeApi` queues an activation's `registerCommand` calls and every host flushes
+  once the activation settles (`__ggsFlushRegistrations`; `extHost.ts`'s
+  `commands.registerBatch` serves it) — each separate registration paid its own pipe
+  round trip, and claude-code registers 31 on activate. `GGS_PHASE_TRACE=1` (phase
+  timing, including the lexer/parser vs scope-analysis split), `GGS_TRACE_BOOT=1`
+  (activation milestones), `GGS_OPCODE_STATS=1` / `=time` (per-opcode instruction counts,
+  and per-opcode owned time — the interpreter-side diagnosis; claude-code's activation
+  spends its execution in `Call` frames, property paths and the per-instruction dispatch
+  floor) and `boa_bench` measure it all; keep the scope index fed
+  if any binding-creating path changes), and the sidecar builds through its own `[profile.ggs-node]` — the release size
   diet with unwinding panics, because third-party JS must degrade its own miscompiled
   closures, never abort the backend (`scripts/prepare.mjs` builds it that way),
   `src-tauri/src/ext_protocol.rs` (the `ggs-ext/1` wire

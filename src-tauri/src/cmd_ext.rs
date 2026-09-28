@@ -2147,16 +2147,59 @@ pub fn ext_read_file_base64(
 /// are both confined (no `..`), the root is the extensions home. An HTML page is composed
 /// with the page bootstrap (`ext_page_boot.js`) the way graphPreload composes the Git Graph
 /// page — the host environment joins the extension's own document, never a copy of it.
-pub fn serve_ext_asset(request: &tauri::http::Request<Vec<u8>>) -> tauri::http::Response<Vec<u8>> {
+///
+/// Two reserved names (`ext-host.html`, `assets/…`) are answered from the app's own
+/// embedded frontend assets instead — the extension host frame's document (see
+/// [`is_app_asset_path`]).
+pub fn serve_ext_asset(
+    request: &tauri::http::Request<Vec<u8>>,
+    assets: &tauri::AssetResolver<tauri::Wry>,
+) -> tauri::http::Response<Vec<u8>> {
     // Diagnostics for the page-loading seam: every asset request and its status, so a frame
     // that never renders can be attributed (never reached the handler / 404 / served).
     let uri = request.uri().to_string();
-    let response = match extensions_home_dir() {
-        Ok(home) => serve_ext_asset_from(&home, request),
-        Err(_) => ext_not_found(request.uri().path()),
+    let path = percent_decode(request.uri().path().trim_start_matches('/'));
+    let response = if is_app_asset_path(&path) {
+        serve_app_asset(assets, &path).unwrap_or_else(|| ext_not_found(&path))
+    } else {
+        match extensions_home_dir() {
+            Ok(home) => serve_ext_asset_from(&home, request),
+            Err(_) => ext_not_found(&path),
+        }
     };
     eprintln!("[ext-asset] {} {uri}", response.status().as_u16());
     response
+}
+
+/// The extension host frame's document (`ext-host.html`) and its hashed assets
+/// (`assets/…`) ride this protocol too. The frame is sandboxed without `allow-same-origin`,
+/// so its document sits on an opaque origin and the `type=module` scripts it references
+/// load CORS-checked — the tauri protocol answers those with the app's own origin, never
+/// `null`, and the load dies (no frame extension would ever activate in the packaged app).
+/// This protocol answers `*`, which an opaque origin passes. The names are reserved: an
+/// installed package's directory always spells `{id}-{version}`, so neither can be one.
+fn is_app_asset_path(path: &str) -> bool {
+    path == "ext-host.html" || path.starts_with("assets/")
+}
+
+fn serve_app_asset(
+    assets: &tauri::AssetResolver<tauri::Wry>,
+    path: &str,
+) -> Option<tauri::http::Response<Vec<u8>>> {
+    let bytes = assets.get(path.to_owned())?.bytes;
+    Some(app_asset_response(path, &bytes))
+}
+
+/// The response shape an opaque-origin frame needs: the permissive allow-origin beside the
+/// exact content-length (the same Content-Length contract `serve_ext_asset_from` states).
+fn app_asset_response(path: &str, bytes: &[u8]) -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder()
+        .header(tauri::http::header::CONTENT_TYPE, content_type(Path::new(path)))
+        .header(tauri::http::header::CONTENT_LENGTH, bytes.len())
+        .header(tauri::http::header::CACHE_CONTROL, "max-age=3600")
+        .header(tauri::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(bytes.to_vec())
+        .expect("a response with a valid header value")
 }
 
 /// The serving core over an explicit extensions home, so the tests can point it at a
@@ -2190,6 +2233,14 @@ fn serve_ext_asset_from(
     };
     tauri::http::Response::builder()
         .header(tauri::http::header::CONTENT_TYPE, content_type(&file))
+        // Content-Length is load-bearing on WebView2: a custom-scheme response without it
+        // leaves the loader waiting for a stream end that never comes, and a multi-megabyte
+        // bundle (claude-code's 5.4 MB webview/index.js) never finishes loading — the page
+        // stays blank forever (a cold cache makes it deterministic; a warm one masked it).
+        .header(tauri::http::header::CONTENT_LENGTH, content.len())
+        // The pages are static per installed version; caching shaves the re-fetch of a
+        // multi-megabyte bundle off every newly opened webview.
+        .header(tauri::http::header::CACHE_CONTROL, "max-age=3600")
         // The webview pages load these as type=module scripts (and fetch() their data) -
         // module scripts are CORS-checked even same-site, so the response must carry the
         // allow-origin header or the browser blocks the load and the page mounts nothing
@@ -3141,6 +3192,47 @@ mod ext_asset_tests {
         let response =
             serve_ext_asset_from(tmp.path(), &request_for("/acme.demo-1.0.0/web%2Fview.html"));
         assert_eq!(response.status(), tauri::http::StatusCode::OK);
+    }
+
+    #[test]
+    fn the_frame_document_names_are_reserved_for_the_app_assets() {
+        // The routing predicate: an installed directory always spells `{id}-{version}`, so
+        // the frame document and the vite asset root can never be one and the reserved
+        // names are answered from the embedded app assets unconditionally.
+        assert!(is_app_asset_path("ext-host.html"));
+        assert!(is_app_asset_path("assets/extHost-CKH6j0OT.js"));
+        assert!(!is_app_asset_path("acme.demo-1.0.0/web/view.html"));
+        assert!(!is_app_asset_path(""));
+        // The response shape an opaque-origin frame needs: `*` allow-origin (the tauri
+        // protocol answers with the app origin, which a `null`-origin frame can never
+        // pass), an exact content-length, and the vite build's content types.
+        let response = app_asset_response("ext-host.html", b"<html></html>");
+        assert_eq!(response.status(), tauri::http::StatusCode::OK);
+        let header = |name| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert_eq!(
+            header(tauri::http::header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            "*"
+        );
+        assert_eq!(header(tauri::http::header::CONTENT_LENGTH), "13");
+        assert_eq!(
+            header(tauri::http::header::CONTENT_TYPE),
+            "text/html; charset=utf-8"
+        );
+        let script = app_asset_response("assets/extHost-CKH6j0OT.js", b";");
+        assert_eq!(
+            script
+                .headers()
+                .get(tauri::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/javascript; charset=utf-8")
+        );
     }
 
     #[test]

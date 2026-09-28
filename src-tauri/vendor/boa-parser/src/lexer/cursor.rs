@@ -11,7 +11,12 @@ pub(super) struct Cursor<R> {
     pos: Position,
     module: bool,
     strict: bool,
+    /// The peeked characters as a ring: `peek_head` is the oldest entry, `peek_len` the
+    /// count. The previous layout kept slot 0 as the oldest and `rotate_left` the array on
+    /// every consumed peek — a 4-element shift per character of a multi-megabyte parse.
     peeked: [Option<u32>; 4],
+    peek_head: usize,
+    peek_len: usize,
     source_collector: SourceText,
 }
 
@@ -90,32 +95,38 @@ impl<R: ReadChar> Cursor<R> {
             strict: false,
             module: false,
             peeked: [None; 4],
+            peek_head: 0,
+            peek_len: 0,
             source_collector: SourceText::default(),
         }
     }
 
     /// Peeks the next n bytes, the maximum number of peeked bytes is 4 (n <= 4).
-    pub(super) fn peek_n(&mut self, n: u8) -> Result<&[Option<u32>; 4], Error> {
-        let peeked = self.peeked.iter().filter(|c| c.is_some()).count();
-        let needs_peek = n as usize - peeked;
-
-        for i in 0..needs_peek {
+    pub(super) fn peek_n(&mut self, n: u8) -> Result<[Option<u32>; 4], Error> {
+        while (self.peek_len as u8) < n {
             let next = self.iter.next_char()?;
-            self.peeked[i + peeked] = next;
+            self.peeked[(self.peek_head + self.peek_len) % 4] = next;
+            self.peek_len += 1;
         }
 
-        Ok(&self.peeked)
+        // Exposed by absolute position (slot `i` = the `i`th character ahead), which the
+        // ring layout only has after unfolding.
+        let mut out = [None; 4];
+        for i in 0..self.peek_len {
+            out[i] = self.peeked[(self.peek_head + i) % 4];
+        }
+        Ok(out)
     }
 
     /// Peeks the next UTF-8 character in u32 code point.
     pub(super) fn peek_char(&mut self) -> Result<Option<u32>, Error> {
-        if let Some(c) = self.peeked[0] {
-            return Ok(Some(c));
+        if self.peek_len == 0 {
+            let next = self.iter.next_char()?;
+            self.peeked[0] = next;
+            self.peek_head = 0;
+            self.peek_len = 1;
         }
-
-        let next = self.iter.next_char()?;
-        self.peeked[0] = next;
-        Ok(next)
+        Ok(self.peeked[self.peek_head])
     }
 
     pub(super) fn next_if(&mut self, c: u32) -> io::Result<bool> {
@@ -191,10 +202,11 @@ impl<R: ReadChar> Cursor<R> {
 
     /// Retrieves the next UTF-8 character.
     pub(crate) fn next_char(&mut self) -> Result<Option<u32>, Error> {
-        let ch = if let Some(c) = self.peeked[0] {
-            self.peeked[0] = None;
-            self.peeked.rotate_left(1);
-            Some(c)
+        let ch = if self.peek_len > 0 {
+            let c = self.peeked[self.peek_head];
+            self.peek_head = (self.peek_head + 1) % 4;
+            self.peek_len -= 1;
+            c
         } else {
             self.iter.next_char()?
         };
@@ -208,8 +220,8 @@ impl<R: ReadChar> Cursor<R> {
                 // Try to take a newline if it's next, for windows "\r\n" newlines
                 // Otherwise, treat as a Mac OS9 bare '\r' newline
                 if self.peek_char()? == Some(0xA) {
-                    self.peeked[0] = None;
-                    self.peeked.rotate_left(1);
+                    self.peek_head = (self.peek_head + 1) % 4;
+                    self.peek_len -= 1;
                     self.source_collector.collect_code_point(0xA);
                 }
                 self.next_line();
