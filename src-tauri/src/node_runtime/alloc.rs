@@ -9,8 +9,9 @@
 //! Blocks up to [`MAX_SMALL`] bytes (alignment up to 16) are served from 16-byte size
 //! classes carved out of large chunks; anything bigger, or more aligned, goes straight to
 //! the system heap. The JS thread — the one that does all the heavy work — keeps its own
-//! lock-free lists ([`enable_thread_cache`]); every other thread shares one mutex-guarded
-//! pool, so a short-lived helper thread leaves nothing stranded behind when it exits. A
+//! lock-free lists ([`enable_thread_cache`]); every other thread shares one spin-lock
+//!-guarded pool, so a short-lived helper thread leaves nothing stranded behind when it
+//! exits. A
 //! block may be freed on a different thread than it was allocated on: every small block of
 //! a class is interchangeable, so it simply joins the freeing side's list. Chunks are never
 //! handed back to the system — the lists keep the peak for reuse, the usual trade of a
@@ -21,7 +22,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, UnsafeCell};
 use std::ptr;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The largest size served from the size classes.
 pub const MAX_SMALL: usize = 512;
@@ -102,13 +103,26 @@ thread_local! {
     };
 }
 
-/// The pool every thread without its own cache shares.
-struct SharedPool(Mutex<Pool>);
+/// The pool every thread without its own cache shares, behind a spin lock. The lock must
+/// never be a `std::sync` lock: std 1.98's pthread `Mutex` lazily Box-allocates its OS
+/// mutex on first lock (`sys::sync::once_box::OnceBox`), and that allocation re-enters
+/// this allocator, whose shared path takes exactly that still-uninitialized lock — the
+/// two call each other until the stack is gone (the release-profile sidecar died at its
+/// first small allocation, 2026-09-28). A spin lock allocates nothing and reaches nothing
+/// outside this module.
+struct SharedPool {
+    locked: AtomicBool,
+    pool: UnsafeCell<Pool>,
+}
 
-// SAFETY: the raw pointers are plain addresses of heap blocks, only touched under the lock.
-unsafe impl Send for Pool {}
+// SAFETY: the raw pointers are plain addresses of heap blocks, only touched behind the
+// spin lock (the `Sync` impl is what makes the static shareable across threads).
+unsafe impl Sync for SharedPool {}
 
-static SHARED: SharedPool = SharedPool(Mutex::new(Pool::new()));
+static SHARED: SharedPool = SharedPool {
+    locked: AtomicBool::new(false),
+    pool: UnsafeCell::new(Pool::new()),
+};
 
 /// Serve this thread's small allocations from a lock-free thread-local pool from now on —
 /// the JS thread calls it before it builds its context. Blocks the thread frees afterwards
@@ -146,11 +160,20 @@ fn with_pool<R>(f: impl FnOnce(&mut Pool) -> R) -> R {
         return result;
     }
     let f = f.take().expect("not run on the local pool");
-    let mut pool = SHARED
-        .0
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    f(&mut pool)
+    // The pool work itself never allocates, so the spin lock is held across no re-entrant
+    // path; waiting threads only burn `spin_loop` until the holder's pointer arithmetic is
+    // done (pool operations are a linked-list pop and a bump-pointer carve).
+    while SHARED
+        .locked
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        std::hint::spin_loop();
+    }
+    // SAFETY: the spin lock above is the one writer gate on the shared pool.
+    let result = f(unsafe { &mut *SHARED.pool.get() });
+    SHARED.locked.store(false, Ordering::Release);
+    result
 }
 
 /// The allocator `ggs-node` installs as `#[global_allocator]`.
@@ -226,6 +249,54 @@ unsafe impl GlobalAlloc for GgsAlloc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The allocator's own source must reach for no `std` lock or lazy initializer: the
+    /// binary installs this module as the global allocator, and std 1.98's `Mutex` (and
+    /// friends) Box-allocate their OS state on first use through the global allocator —
+    /// a lock here re-entered the allocator and the two spun into a stack overflow
+    /// (2026-09-28; the shared pool now guards itself with a bare `AtomicBool`). The
+    /// allocator's unit tests below cannot catch this — they run under the test harness's
+    /// own allocator — so the invariant is pinned at the source level.
+    #[test]
+    fn the_allocator_takes_no_std_locks() {
+        // The patterns are concatenated so this test's own source never contains them,
+        // and matched on word boundaries (`std::sync::atomic` stays legal — atomics
+        // allocate nothing).
+        let forbidden = [
+            concat!("Mu", "tex"),
+            concat!("Rw", "Lock"),
+            concat!("Once", "Lock"),
+            concat!("Lazy", "Lock"),
+            concat!("Once", "Box"),
+            concat!("once_", "box"),
+            concat!("Cond", "var"),
+            concat!("mp", "sc"),
+        ];
+        let source = include_str!("alloc.rs");
+        let code = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let standalone = |at: usize, pattern: &str| -> bool {
+            let before = code[..at].chars().next_back();
+            let after = code[at + pattern.len()..].chars().next();
+            let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+            !word(before) && !word(after)
+        };
+        for pattern in forbidden {
+            let hits = code
+                .match_indices(pattern)
+                .filter(|(at, _)| standalone(*at, pattern))
+                .count();
+            assert!(
+                hits == 0,
+                "alloc.rs must not use {pattern}: a global allocator may not take a \
+                 std lock or lazy initializer (std's lazy OS-mutex init allocates \
+                 through the global allocator and re-enters this module)"
+            );
+        }
+    }
 
     /// Allocate, fill, verify and free a spread of layouts through one allocator value,
     /// on a cached thread and on a shared-pool thread, with blocks crossing between them.
