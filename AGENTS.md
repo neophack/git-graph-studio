@@ -393,14 +393,20 @@ served from the backend watcher's real batches (`fsChanged` events into every fr
 `.git` flag firing a `.git/HEAD` change); `window.createTerminal` (`sendText` runs in the
 integrated terminal); and `crypto.createHash` (md5 / sha1 / sha256, pure TypeScript — the
 gravatar-class digests, synchronous like Node's).
-**Nothing installs by default.** One package ships beside the installer (`extensions/`,
-packed by `prepare.mjs`): git-graph-rs, whose integrated entry offers it as a **one-click
-install** (`ext_install_bundled`) that lands it as a standard, uninstallable package — its
-engine the one `git-graph.node` inside the VSIX (loaded natively by the real-Node extension
-host) and its view assets the extension's own. With no install (the default), the listing falls back to the manifest
-embedded at build time. **Install means run**: the boot pass starts every installed package
-that declares a backend (`ext_process::start_all_installed`, off the window's thread), an
-install starts its backend at once, and the first command remains the lazy fallback.
+**Which extension packages the installer carries is the build's choice** (never a
+per-install one): `prepare.mjs` packs the marketplace builds — Open VSX, per architecture,
+downloaded by `scripts/fetch-marketplace-extensions.mjs` (offline the git-graph-rs package
+is the submodule's own build, and claude-code is simply not packed) — into `extensions/`
+beside the app, and the first launch installs whatever sits there like VS Code's bundled
+extensions (`cmd_ext::install_missing_bundled`; a deliberate uninstall stays
+uninstalled). CI's release form picks per package (`bundle-git-graph` checked by default,
+`bundle-claude-code` unchecked — a pushed tag takes the same defaults; the
+`GGS_BUNDLE_GIT_GRAPH` / `GGS_BUNDLE_CLAUDE_CODE` env are the same switches, and the
+local build scripts pack both). A package a build left out still installs from the
+Extensions view's marketplace row. **Install means run**: the boot
+pass starts every installed package that declares a backend
+(`ext_process::start_all_installed`, off the window's thread), an install starts its
+backend at once, and the first command remains the lazy fallback.
 Multiple app instances are independent — each spawns and owns only its own backends
 (`GGS_INSTANCE_ID` marks the owner), every backend this instance spawned is stopped on
 exit, and an uninstall stops the backend before removing its directory (a directory another
@@ -712,10 +718,13 @@ not a frontend framework — the rest of the page stays hand-written DOM.
 Everything that turns the source tree into installers: asset assembly into
 `target/studio/`, the seam checks, CI, and the Linux build containers.
 
-- Assets: `scripts/prepare.mjs` (assembles `target/studio/` and delegates the bundled
-  package to the extension's own packer, `vscode-git-graph-rs/studio/build.mjs` — the page
-  bundles and their `vscode` / Node / `fs` stubs live there too, in the submodule),
-  `vite.config.ts`
+- Assets: `scripts/prepare.mjs` (assembles `target/studio/`; the bundled packages are the
+  marketplace builds — `scripts/fetch-marketplace-extensions.mjs` downloads them from
+  Open VSX per architecture and packs exactly what the build selected:
+  `GGS_BUNDLE_GIT_GRAPH` / `GGS_BUNDLE_CLAUDE_CODE`, the release form's checkboxes in CI —
+  git-graph-rs default-packed, claude-code default-unpacked there, both packed by the
+  local build scripts; offline the git-graph-rs package is the submodule's own standard
+  `npm run package` VSIX), `vite.config.ts`
 - Seam checks: `scripts/check-seams.mjs` (TypeScript / CSS) and `src-tauri/build.rs` (Rust)
 - Packaging: `scripts/build-studio.bat` (Windows, one command; builds `ggs-node` and
   `node-host.cjs` through `prepare.mjs` as part of that). `scripts/build-plugins.bat` builds every plugin's

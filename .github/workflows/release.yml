@@ -10,6 +10,12 @@
 # v-prefixed; empty = package.json's version) - the tag is then created at the workflow's
 # commit. Check `full` to also build the macOS x64 dmg.
 #
+# The extension checkboxes decide which packages are packed INTO the installers
+# (studio.yml's GGS_BUNDLE_* env): `bundle-git-graph` checked by default,
+# `bundle-claude-code` unchecked by default (its 100+ MB platform VSIX stays out of the
+# installers; the Extensions view's marketplace row installs it on demand). A pushed tag
+# takes the same defaults.
+#
 # Artifacts per release: windows NSIS setup exe + MSI, deb (Ubuntu 22.04-26.04 / Debian
 # 12/13), rpm (Fedora 38+ / openSUSE Leap 15.6+), macOS arm64 dmg (+ x64 on `full`), each
 # with its SHA256 in SHA256SUMS, plus the build's metrics.json - nothing else (no
@@ -32,6 +38,16 @@ on:
         type: string
       full:
         description: 'Also build macOS x64'
+        required: false
+        default: false
+        type: boolean
+      bundle-git-graph:
+        description: 'Pack git-graph-rs into the installers'
+        required: false
+        default: true
+        type: boolean
+      bundle-claude-code:
+        description: 'Pack claude-code into the installers'
         required: false
         default: false
         type: boolean
@@ -79,6 +95,10 @@ jobs:
     with:
       full: ${{ inputs.full == true }}
       studio-version: ${{ needs.resolve-tag.outputs.version }}
+      # `!= false` / `== true` so a tag push (no dispatch inputs at all) falls through
+      # to studio.yml's own defaults: git-graph-rs packed, claude-code not.
+      bundle-git-graph: ${{ inputs.bundle-git-graph != false }}
+      bundle-claude-code: ${{ inputs.bundle-claude-code == true }}
 
   release:
     name: Publish the GitHub Release

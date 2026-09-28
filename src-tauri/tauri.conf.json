@@ -38,7 +38,7 @@
       "../target/studio/bundled/binaries/ggs-node"
     ],
     "resources": {
-      "../target/studio/bundled/app-resources/extensions/git-graph-rs.vsix": "extensions/git-graph-rs.vsix",
+      "../target/studio/bundled/app-resources/extensions/": "extensions/",
       "../target/studio/bundled/app-resources/node-host.cjs": "node-host.cjs",
       "../target/studio/bundled/app-resources/vscode-shim.cjs": "vscode-shim.cjs"
     },

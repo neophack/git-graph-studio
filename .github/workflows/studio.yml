@@ -35,6 +35,13 @@
 # Pull requests run the tests only; the installers build on push to main, on dispatch, and
 # when release.yml calls this workflow with `studio-version` to stamp the version being
 # published (`full` adds the niche macOS x64 platform).
+#
+# Which extension packages are packed INTO the installers is the release form's choice
+# (`bundle-git-graph` checked by default, `bundle-claude-code` unchecked by default — the
+# Extensions view's marketplace row installs an unpacked package on demand). The checkboxes
+# reach the build as GGS_BUNDLE_GIT_GRAPH / GGS_BUNDLE_CLAUDE_CODE (scripts/
+# fetch-marketplace-extensions.mjs); a pushed tag or a plain push to main takes the same
+# defaults. Local builds (build-studio.bat / build-studio-linux.bat) pack both.
 
 name: Studio
 
@@ -50,10 +57,20 @@ on:
         default: false
         type: boolean
       studio-version:
-        description: 'Version to stamp into the build (empty = keep the sources version)'
+        description: 'Version to stamp the build (empty = keep the sources version)'
         required: false
         default: ''
         type: string
+      bundle-git-graph:
+        description: 'Pack git-graph-rs into the installers'
+        required: false
+        default: true
+        type: boolean
+      bundle-claude-code:
+        description: 'Pack claude-code into the installers'
+        required: false
+        default: false
+        type: boolean
   workflow_call:
     inputs:
       full:
@@ -64,6 +81,14 @@ on:
         required: false
         default: ''
         type: string
+      bundle-git-graph:
+        required: false
+        default: true
+        type: boolean
+      bundle-claude-code:
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -114,6 +139,11 @@ jobs:
     # a real hang instead of burning GitHub's 6 h default.
     timeout-minutes: 180
     if: github.event_name != 'pull_request'
+    env:
+      # The release form's checkboxes (see the header note): GGS_BUNDLE_* answers "is
+      # this package packed into the installers" for every prepare.mjs run below.
+      GGS_BUNDLE_GIT_GRAPH: ${{ inputs.bundle-git-graph == false && '0' || '1' }}
+      GGS_BUNDLE_CLAUDE_CODE: ${{ inputs.bundle-claude-code == true && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -220,6 +250,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     if: github.event_name != 'pull_request'
+    env:
+      # The release form's checkboxes, as in the Windows job (the deb leg's native
+      # prepare and the container build read the same answer).
+      GGS_BUNDLE_GIT_GRAPH: ${{ inputs.bundle-git-graph == false && '0' || '1' }}
+      GGS_BUNDLE_CLAUDE_CODE: ${{ inputs.bundle-claude-code == true && '1' || '0' }}
     strategy:
       fail-fast: false
       matrix:
@@ -330,6 +365,9 @@ jobs:
             -v "$HOME/.ggs-linux-cache:/cache" \
             -e BUNDLES=${{ matrix.bundles }} \
             -e OUT_DIR=${{ matrix.out }} \
+            -e GGS_REQUIRE_MARKETPLACE=1 \
+            -e GGS_BUNDLE_GIT_GRAPH \
+            -e GGS_BUNDLE_CLAUDE_CODE \
             ggs-linux-builder-${{ matrix.cache }} \
             bash /repo/scripts/docker/studio-linux-build.sh
 
@@ -371,6 +409,10 @@ jobs:
   studio-macos:
     name: Studio installers (${{ matrix.artifact }})
     if: github.event_name != 'pull_request'
+    env:
+      # The release form's checkboxes, as in the Windows job.
+      GGS_BUNDLE_GIT_GRAPH: ${{ inputs.bundle-git-graph == false && '0' || '1' }}
+      GGS_BUNDLE_CLAUDE_CODE: ${{ inputs.bundle-claude-code == true && '1' || '0' }}
     strategy:
       fail-fast: false
       matrix:

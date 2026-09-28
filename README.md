@@ -12,8 +12,12 @@ contributing commands to the palette and
 menus, running their backends as warm sibling processes. The shell names no plugin: everything of the Git
 Graph view — the engine (the `vscode-git-graph-rs/` submodule's `native/core`), the view's
 write path, its webview page and its comparison pages — lives in the **git-graph-rs** plugin
-(its own standard VSIX build, one-click installable from the Extensions view), and the app's own
-git reads and writes run the `git` CLI with no plugin installed.
+(its own standard VSIX build), and the app's own
+git reads and writes run the `git` CLI with no plugin installed. The installers carry the
+marketplace's per-architecture builds of the extension packages a release chose to pack —
+**git-graph-rs** by default (installed on first launch, like VS Code's bundled
+extensions), **claude-code** behind a release-form checkbox that is unchecked by default
+(an unpacked package installs from the Extensions view's marketplace row).
 
 Code navigation rides a persistent symbol index (Source Insight's model): the workspace's
 declarations and their occurrences indexed once under `~/.ggs/index/`, resumed on open and

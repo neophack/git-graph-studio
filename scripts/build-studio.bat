@@ -21,6 +21,13 @@ if errorlevel 1 goto :nocargo
 where node >nul 2>nul
 if errorlevel 1 goto :nonode
 
+rem The installer packs the marketplace extension packages (Open VSX downloads,
+rem scripts\fetch-marketplace-extensions.mjs) - both by default: git-graph-rs downgrades
+rem to the locally packed VSIX when the registry is unreachable, claude-code fails the
+rem build. Set GGS_BUNDLE_CLAUDE_CODE=0 to leave claude-code out of this build, or
+rem GGS_SKIP_MARKETPLACE_FETCH=1 to build fully offline without it.
+if not defined GGS_SKIP_MARKETPLACE_FETCH set GGS_REQUIRE_MARKETPLACE=1
+
 echo [1/4] Compiling the vscode-git-graph-rs submodule (the extension assets the app embeds)
 if not exist vscode-git-graph-rs\package.json git submodule update --init vscode-git-graph-rs
 if errorlevel 1 goto :fail

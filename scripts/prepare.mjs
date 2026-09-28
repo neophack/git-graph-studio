@@ -8,11 +8,14 @@
 //   target/studio/cargo/    the Cargo target dir (src-tauri/.cargo/config.toml)
 //   target/studio/dist/     the Vite build output (vite.config.ts)
 //
-// The bundled VSIX packages the installer carries are the extension's own standard build's
-// output (vscode-git-graph-rs `npm run package` — the same VSIX the VS Code Marketplace
-// serves; this file only builds the engine and calls it, and reaches into the submodule for
-// nothing else).
+// The bundled VSIX packages the installer carries are the marketplace's per-architecture
+// builds (Open VSX — fetched by scripts/fetch-marketplace-extensions.mjs; offline the
+// git-graph-rs package is the submodule's own `npm run package` VSIX). Which packages ride
+// in the installer is a build-time choice (GGS_BUNDLE_GIT_GRAPH / GGS_BUNDLE_CLAUDE_CODE —
+// CI's release form forwards its checkboxes); the first launch installs whatever was
+// packed, like VS Code's bundled extensions.
 import { checkSeams } from './check-seams.mjs';
+import { fetchMarketplacePackages } from './fetch-marketplace-extensions.mjs';
 import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 
 // The seam rules first: nothing under src/ or static/ may name the git-graph-rs extension's
@@ -174,14 +177,31 @@ if (nodeRuntimeBin) {
 	copyFileSync(join(out, 'bundled', 'app-resources', 'vscode-shim.cjs'), join(out, 'vscode-shim.cjs'));
 }
 
-/* The engine `.node`: the submodule's addon build, cached by cargo underneath. The VSIX
- * carries this one file as its whole engine; ggs-node's N-API host loads it in-process.
- * Skipped under `--vsix` — the substituted package carries its own engine. */
+/* The marketplace packages the installer carries (Open VSX, per architecture — see
+ * scripts/fetch-marketplace-extensions.mjs). Which packages are packed is the build's
+ * choice (the GGS_BUNDLE_* env, the release form's checkboxes in CI); `--vsix`/
+ * GGS_BUNDLED_VSIX still outranks the registry for git-graph-rs — a developer
+ * substituting a specific build means it. A fetch failure downgrades here: git-graph-rs
+ * falls back to the locally packed VSIX (built below); claude-code is simply not packed
+ * (in CI a required miss fails the fetch itself). */
 const externalVsix = (() => {
 	const flag = process.argv.indexOf('--vsix');
 	return flag >= 0 ? process.argv[flag + 1] : process.env.GGS_BUNDLED_VSIX;
 })();
-const engineNode = externalVsix
+const marketplace = await fetchMarketplacePackages({ cacheDir: join(out, 'marketplace-cache') });
+const gitGraphMarketplace = marketplace['git-graph-rs'];
+// Nothing of an unselected package ships: not the registry's build, not the local one.
+const packGitGraph = Boolean(externalVsix) || gitGraphMarketplace?.selected !== false;
+
+/* The engine `.node`: the submodule's addon build, cached by cargo underneath — it runs
+ * whenever git-graph-rs is packed, whatever the payload's source: besides the locally
+ * packed VSIX carrying it, the build is what keeps the submodule's
+ * `native/<platform>/git-graph.node` on the machine, the fixture node_runtime's N-API
+ * roundtrip test resolves first (without it the test would fall back to — or skip on —
+ * whatever engine happens to be installed, and CI, which installs nothing, would skip it
+ * entirely). Skipped under `--vsix` (the substituted package carries its own engine and
+ * the submodule compiles nothing) and when git-graph-rs is not packed at all. */
+const engineNode = externalVsix || !packGitGraph
 	? null
 	: (() => {
 		const addon = spawnSync('node', ['scripts/build-addon.mjs', '--release'], {
@@ -206,21 +226,32 @@ const engineNode = externalVsix
 	})();
 
 /* 4. The bundled packages — the app ships extensions as packages beside the app, not
- *    as embedded built-ins: tauri.conf.json's bundle.resources packs the fixed-name copies
- *    under app-resources/extensions/ so the installer carries them, and the app lists and
- *    installs them by scanning that directory (cmd_ext.rs — it names no id). Each package is
- *    its own extension's packer's output; this file never packs any plugin's content itself.
- *    The one bundled package is git-graph-rs, shipped as the standard VSIX its own build
- *    produces (`npm run package` — vsce, exactly what the VS Code Marketplace would serve);
- *    the `ggs` key in its package.json (which VS Code ignores and the app reads on install)
- *    is the only GGS-specific thing inside it. `--vsix <path>` (or GGS_BUNDLED_VSIX)
- *    substitutes a ready-built package for that build: the named VSIX is bundled as-is —
- *    its engine, its manifest, its code — and nothing in the submodule compiles. */
+ *    as embedded built-ins: tauri.conf.json's bundle.resources packs this whole directory
+ *    (a directory mapping, so the file set is the build's to decide — an unpacked
+ *    selection leaves no file behind) and the app's first-launch pass installs exactly
+ *    what sits at its top level (cmd_ext::install_missing_bundled — it names no id).
+ *
+ *      extensions/git-graph-rs.vsix   the marketplace's build (or, offline / under
+ *                                     --vsix, the extension's own standard build)
+ *      extensions/claude-code.vsix    the marketplace's build, when the build chose
+ *                                     to pack it
+ *
+ *    The directory is rebuilt from nothing every run (a stale file here would ship: the
+ *    mapping packs whatever sits in it). `--vsix <path>` (or GGS_BUNDLED_VSIX) substitutes
+ *    a ready-built package for git-graph-rs: the named VSIX is bundled as-is — its
+ *    engine, its manifest, its code — and nothing in the submodule compiles. */
 const bundledDir = join(out, 'bundled', 'app-resources', 'extensions');
+rmSync(bundledDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 mkdirSync(bundledDir, { recursive: true });
 if (externalVsix) {
 	copyFileSync(requireArtifact(externalVsix, 'the --vsix path names a file that does not exist'), join(bundledDir, 'git-graph-rs.vsix'));
+} else if (!packGitGraph) {
+	console.log('git-graph-rs: not selected for this build — not packed (the Extensions view installs it from the marketplace)');
+} else if (gitGraphMarketplace?.path) {
+	copyFileSync(gitGraphMarketplace.path, join(bundledDir, 'git-graph-rs.vsix'));
+	console.log(`Packed git-graph-rs ${gitGraphMarketplace.version} @${gitGraphMarketplace.targetPlatform} from the marketplace`);
 } else {
+	console.warn('git-graph-rs: marketplace fetch unavailable — packing the submodule build instead');
 	const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 	const packaged = spawnSync('npm', ['run', 'package'], {
 		cwd: root,
@@ -232,6 +263,19 @@ if (externalVsix) {
 		`npm run package in vscode-git-graph-rs/ failed (${packaged.status ?? 'spawn failed'})`
 	);
 	copyFileSync(vsixPath, join(bundledDir, 'git-graph-rs.vsix'));
+}
+
+/* claude-code is packed or left out by the same build-time choice (the release form's
+ * checkbox — unchecked by default there, so a tag release ships without it; local builds
+ * pack it unless GGS_BUNDLE_CLAUDE_CODE=0). */
+const claudeCode = marketplace['claude-code'];
+if (claudeCode?.path) {
+	copyFileSync(claudeCode.path, join(bundledDir, 'claude-code.vsix'));
+	console.log(`Packed claude-code ${claudeCode.version} @${claudeCode.targetPlatform} from the marketplace`);
+} else if (claudeCode?.selected === false) {
+	console.log('claude-code: not selected for this build — not packed (the Extensions view installs it from the marketplace)');
+} else {
+	console.warn('claude-code: the marketplace fetch failed — not packed (a required build would have failed already)');
 }
 
 console.log(`Prepared ${out}`);

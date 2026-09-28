@@ -75,7 +75,14 @@ if "%~1"=="shell" (
 )
 
 echo [3/3] Building the %BUNDLES% installers in the %BASE% container
-docker run --rm -v "%cd%:/repo" -v ggs-studio-linux-cache:/cache -e BUNDLES=%BUNDLES% -e OUT_DIR=%OUT_DIR% %TAG% bash /repo/scripts/docker/studio-linux-build.sh
+rem GGS_REQUIRE_MARKETPLACE: the installer packs the marketplace extension packages (Open
+rem VSX downloads, scripts/fetch-marketplace-extensions.mjs) - both by default: git-graph-rs
+rem downgrades to the locally packed VSIX when the registry is unreachable, claude-code
+rem fails the build. GGS_BUNDLE_CLAUDE_CODE=0 leaves claude-code unpacked; pass
+rem GGS_SKIP_MARKETPLACE_FETCH=1 through to build fully offline.
+set MARKETPLACE_REQUIRE=GGS_REQUIRE_MARKETPLACE=1
+if defined GGS_SKIP_MARKETPLACE_FETCH set MARKETPLACE_REQUIRE=GGS_SKIP_MARKETPLACE_FETCH=1
+docker run --rm -v "%cd%:/repo" -v ggs-studio-linux-cache:/cache -e BUNDLES=%BUNDLES% -e OUT_DIR=%OUT_DIR% -e %MARKETPLACE_REQUIRE% %TAG% bash /repo/scripts/docker/studio-linux-build.sh
 if errorlevel 1 goto :fail
 
 echo.
