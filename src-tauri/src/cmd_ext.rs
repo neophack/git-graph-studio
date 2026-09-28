@@ -2194,7 +2194,10 @@ fn serve_app_asset(
 /// exact content-length (the same Content-Length contract `serve_ext_asset_from` states).
 fn app_asset_response(path: &str, bytes: &[u8]) -> tauri::http::Response<Vec<u8>> {
     tauri::http::Response::builder()
-        .header(tauri::http::header::CONTENT_TYPE, content_type(Path::new(path)))
+        .header(
+            tauri::http::header::CONTENT_TYPE,
+            content_type(Path::new(path)),
+        )
         .header(tauri::http::header::CONTENT_LENGTH, bytes.len())
         .header(tauri::http::header::CACHE_CONTROL, "max-age=3600")
         .header(tauri::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
@@ -3775,22 +3778,23 @@ mod backend_derivation_tests {
     fn the_derived_backend_is_the_platform_engine_node() {
         let tmp = tempfile::tempdir().unwrap();
         // Any bytes stand in for the binary: the derivation reads names, and a real Node
-        // runtime (nodeHost.ts) loads the addon as the NAPI module it is.
+        // runtime (nodeHost.ts) loads the addon as the NAPI module it is. The fixture rides
+        // the HOST platform's directory — CI runs this on Linux and Windows alike, and the
+        // packers' name comes from the same table the derivation matches with.
+        let relative = format!(
+            "native/{}/git-graph.node",
+            platform_engine_directory(&host_platform_key())
+                .expect("the host platform is one the packers lay engines under")
+        );
         let node = tmp.path().join("engine.node");
         std::fs::write(&node, b"engine-node-fixture").unwrap();
-        let vsix = make_plain_vsix_with_nodes(
-            tmp.path(),
-            &[("native/win32-x64-msvc/git-graph.node", &node)],
-        );
+        let vsix = make_plain_vsix_with_nodes(tmp.path(), &[(&relative, &node)]);
         let manifest = read_vsix_manifest(&vsix).unwrap();
         let derived = resolve_node_binaries(&manifest, &vsix, true)
             .unwrap()
             .expect("a backend");
         assert_eq!(derived.kind, "node");
-        assert_eq!(
-            derived.command_for(&host_platform_key()),
-            "native/win32-x64-msvc/git-graph.node"
-        );
+        assert_eq!(derived.command_for(&host_platform_key()), relative);
         assert!(derived.binaries.is_some());
         // Under the default host (ggs-node, Boa) the engine `.node` cannot load: the
         // package's own JS `main` is the backend instead, and its fallback logic runs.
@@ -3804,12 +3808,18 @@ mod backend_derivation_tests {
     #[test]
     fn an_engine_node_for_another_platform_leaves_the_main_as_the_derived_backend() {
         let tmp = tempfile::tempdir().unwrap();
-        let node = tmp.path().join("linux.node");
-        std::fs::write(&node, b"linux-engine-fixture").unwrap();
-        let vsix = make_plain_vsix_with_nodes(
-            tmp.path(),
-            &[("native/linux-x64-gnu/git-graph.node", &node)],
-        );
+        // A directory the host never matches — the host's own OS flipped, so the same test
+        // says "foreign platform" on every runner (CI's Linux host met the hardcoded
+        // linux-x64-gnu name as its own).
+        let other = if cfg!(target_os = "windows") {
+            "linux-x64-gnu"
+        } else {
+            "win32-x64-msvc"
+        };
+        let relative = format!("native/{other}/git-graph.node");
+        let node = tmp.path().join("other.node");
+        std::fs::write(&node, b"other-engine-fixture").unwrap();
+        let vsix = make_plain_vsix_with_nodes(tmp.path(), &[(&relative, &node)]);
         let manifest = read_vsix_manifest(&vsix).unwrap();
         let derived = resolve_node_binaries(&manifest, &vsix, true)
             .unwrap()
