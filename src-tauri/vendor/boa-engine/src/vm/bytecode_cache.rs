@@ -519,9 +519,14 @@ fn unmirror_block(
             #[cfg(not(windows))]
             {
                 super::source_info::SourcePath::Path(std::rc::Rc::from(
-                    std::path::PathBuf::from(std::ffi::OsString::from_encoded_bytes_unchecked(
-                        raw.to_vec(),
-                    )),
+                    std::path::PathBuf::from(
+                        // SAFETY: the encode side (above) wrote these very bytes off
+                        // `OsStr::as_encoded_bytes` — the documented round trip of this
+                        // constructor, sound on every platform it compiles for.
+                        unsafe {
+                            std::ffi::OsString::from_encoded_bytes_unchecked(raw.to_vec())
+                        },
+                    ),
                 ))
             }
         }
