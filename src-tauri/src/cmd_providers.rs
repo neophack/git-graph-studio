@@ -18,6 +18,11 @@
 //! Switching provider (or editing the active profile) restarts the bridged backend, the
 //! same deliberate restart the Extensions view's button performs — a running backend
 //! keeps the environment it was spawned with.
+//!
+//! Coupling is one-directional: this module may stop and start the bridged backends,
+//! but the spawn path never names this store — [`backend_env`] is registered onto
+//! `ext_process`'s spawn-env sources by the composition root (`lib.rs`'s `run`), the
+//! only place the two modules meet.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -882,6 +887,45 @@ mod tests {
         bad_id.id = "../escape".to_owned();
         bad_id.base_url = Some("https://ok.example".to_owned());
         assert!(apply_save(&home, &mut store, &bad_id).is_err());
+    }
+
+    /// The IPC boundary never carries a secret: a store whose profiles hold sealed
+    /// keys answers `hasKey` flags and hints, and the serialized answer contains
+    /// neither the plaintext nor the ciphertext.
+    #[test]
+    fn the_list_answer_never_carries_a_key_in_any_form() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        let mut store = third_party_store();
+        store.profiles[1].api_key_enc = Some(seal(&home, "sk-live-key").unwrap());
+        let answer = list_answer(&store);
+        let json = serde_json::to_string(&answer).unwrap();
+        assert!(!json.contains("sk-live-key"), "the plaintext leaked: {json}");
+        assert!(
+            !json.contains("apiKeyEnc") && !json.contains("api_key_enc"),
+            "the ciphertext leaked: {json}"
+        );
+        let deepseek = answer.profiles.iter().find(|p| p.id == "deepseek").unwrap();
+        assert!(deepseek.has_key, "the UI still needs to know a key exists");
+    }
+
+    /// A save naming an unknown preset errors — the preset is the profile's shape,
+    /// and an unknown shape has no validation rules to apply.
+    #[test]
+    fn an_unknown_preset_is_rejected() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        let mut store = seeded_store();
+        let input = ProviderInput {
+            id: "x".to_owned(),
+            preset: "no-such-preset".to_owned(),
+            label: "X".to_owned(),
+            base_url: Some("https://ok.example".to_owned()),
+            model: None,
+            small_model: None,
+            api_key: None,
+        };
+        assert!(apply_save(&home, &mut store, &input).is_err());
     }
 
     /// The seeded store lists the official service as active with the built-in

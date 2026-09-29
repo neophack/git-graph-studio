@@ -154,6 +154,20 @@ describe('the Model Providers page', () => {
 		expect([...document.querySelectorAll('.an-row')][0]!.querySelector('[title="Activate"]')).not.toBeNull();
 	});
 
+	it('reports a failed switch and keeps the page as it was', async () => {
+		backend.on('provider_activate', () => {
+			throw new Error('the backend refused to stop');
+		});
+		mountProvidersPage(host());
+		await flush();
+		click(actionByTitle('Activate'));
+		await flush();
+		expect(backend.callsTo('provider_activate')).toEqual([{ id: 'deepseek' }]);
+		expect(notifications()[0]).toContain('Could not switch the provider');
+		// Nothing announced: the official row is still the active one.
+		expect(texts('.an-row .tail')[0]).toContain('Active');
+	});
+
 	it('deletes a profile behind a confirmation', async () => {
 		backend.on('provider_delete', () => ({ ...providerListAnswer(), profiles: providerListAnswer().profiles.slice(0, 1) }));
 		mountProvidersPage(host());

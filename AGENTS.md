@@ -422,7 +422,11 @@ model provider — the official Claude service or any Anthropic-compatible endpo
 `~/.ggs/ai-providers.json` — never Claude's own `~/.claude`: `cmd_providers.rs` seals
 every API key with AES-256-GCM under a per-install master key
 (`~/.ggs/keys/ai-providers.key`, 0600) and decrypts one only when `ext_process` spawns
-the bridged backend. That spawn always carries `CLAUDE_CONFIG_DIR=<~/.ggs/claude>` (the
+the bridged backend — through the spawn-env source the composition root registers
+(`lib.rs`'s `run` wires `cmd_providers::backend_env` onto
+`ext_process::add_spawn_env_source`), so `ext_process` names no provider knowledge and
+the coupling stays one-directional (providers restart backends; the spawn path is
+provider-agnostic). That spawn always carries `CLAUDE_CONFIG_DIR=<~/.ggs/claude>` (the
 extension's own state — login, history — never touches `~/.claude`; an explicit
 `CLAUDE_CONFIG_DIR` in the app's own environment wins — the sandbox probe's hermetic
 config dir rides on it), and the active
@@ -504,7 +508,9 @@ restart.
   `src-tauri/src/cmd_providers.rs` (the AI provider bridge: the provider store under
   `~/.ggs/ai-providers.json`, the AES-256-GCM key sealing under `~/.ggs/keys/`, the
   built-in presets — official / DeepSeek / Zhipu GLM / Moonshot Kimi / custom — and the
-  spawn-time environment `ext_process` injects into the bridged backend),
+  spawn-time environment `ext_process` injects into the bridged backend through its
+  registered spawn-env sources — the composition root's wiring, so the two modules do
+  not name each other),
   `src-tauri/src/ext_grammar.rs` (the TextMate-grammar loader: `.tmLanguage` plists and
   `.json` grammars converted to Sublime syntax and added to the rope viewer's syntect set), `src-tauri/src/ext_process.rs` (the process extension host: eager
   start at boot and install, lazy start on first command as the fallback, `initialize`

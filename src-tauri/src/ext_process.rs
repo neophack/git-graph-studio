@@ -87,6 +87,32 @@ pub fn global() -> &'static ProcessHostState {
     STATE.get_or_init(ProcessHostState::default)
 }
 
+/// The spawn-time environment sources: every backend start asks each registered source
+/// for the extra environment an extension id runs with. The composition root (`lib.rs`)
+/// wires the AI provider bridge's source here, so this module never names the provider
+/// store — the coupling stays one-directional (providers may stop and start backends
+/// through [`ProcessHostState`]; the spawn path itself is provider-agnostic).
+type SpawnEnvSource = fn(&str) -> Vec<(String, String)>;
+
+static SPAWN_ENV_SOURCES: Mutex<Vec<SpawnEnvSource>> = Mutex::new(Vec::new());
+
+/// Register a spawn-time environment source. Called at the head of the app's `run`,
+/// before any backend can start; sources answer in registration order.
+pub fn add_spawn_env_source(source: SpawnEnvSource) {
+    SPAWN_ENV_SOURCES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(source);
+}
+
+/// The extra environment every registered source asks for `ext_id`.
+fn spawn_env(ext_id: &str) -> Vec<(String, String)> {
+    let sources = SPAWN_ENV_SOURCES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    sources.iter().flat_map(|source| source(ext_id)).collect()
+}
+
 impl ProcessHostState {
     /// Attach the app handle the reader threads forward `ggs.hostRequest`s through.
     /// Idempotent: the first handle wins (they all belong to the same app instance).
@@ -258,12 +284,12 @@ impl ProcessHostState {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // The AI provider bridge (`cmd_providers`): a bridged extension's backend runs
-        // under the active provider — its own state redirected under ~/.ggs, and a
-        // third-party profile's endpoint and decrypted key in the environment the
-        // backend (and its CLI children, by inheritance) run with. A store that cannot
-        // be read reads as "the official service" and never blocks a start.
-        for (key, value) in crate::cmd_providers::backend_env(ext_id) {
+        // The registered spawn-time environment sources (`add_spawn_env_source`): a
+        // bridged extension's backend runs under its provider — its own state
+        // redirected under ~/.ggs, a third-party profile's endpoint and decrypted key
+        // in the environment the backend (and its CLI children, by inheritance) run
+        // with. No source registered (the tests, the headless runs) means no extras.
+        for (key, value) in spawn_env(ext_id) {
             command.env(key, value);
         }
         if backend.kind == "node" {
@@ -1218,6 +1244,7 @@ mod tests {
         );
     }
 
+    /// A backend log notification is logged, not dropped as unparsable.
     #[test]
     fn a_backend_log_notification_is_logged_not_dropped_as_unparsable() {
         let pending = Arc::new(Mutex::new(HashMap::new()));
@@ -1229,6 +1256,26 @@ mod tests {
         )));
         let lines = log.lock().unwrap().clone();
         assert!(lines.iter().any(|l| l.contains("git fetch")), "{lines:?}");
+    }
+
+    /// A registered spawn-env source answers the spawn environment per extension id —
+    /// the composition-root seam the provider bridge wires (`lib.rs`), unknown ids
+    /// answered with nothing.
+    #[test]
+    fn a_registered_spawn_env_source_reaches_the_spawn_environment() {
+        fn source(ext_id: &str) -> Vec<(String, String)> {
+            if ext_id == "acme.probe" {
+                vec![("PROBE_VAR".to_owned(), "on".to_owned())]
+            } else {
+                Vec::new()
+            }
+        }
+        add_spawn_env_source(source);
+        assert_eq!(
+            spawn_env("acme.probe"),
+            vec![("PROBE_VAR".to_owned(), "on".to_owned())]
+        );
+        assert!(spawn_env("acme.other").is_empty());
     }
 
     #[test]

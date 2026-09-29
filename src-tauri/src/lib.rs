@@ -1262,6 +1262,11 @@ mod desktop {
     /// The app's entry point (`main.rs` is a one-line stub around it).
     pub fn run() {
         apply_webkit_compat();
+        // The spawn-env seam: the provider bridge's environment (the bridged backend's
+        // config dir, the active provider's endpoint and key) rides into every backend
+        // start through this registered source — ext_process itself names no provider
+        // knowledge, so the two modules meet only here, in the composition root.
+        ext_process::add_spawn_env_source(cmd_providers::backend_env);
         let _boot = boot_started();
         // `ggs --help` / `ggs -h` prints every launch form; no window is created.
         let args: Vec<String> = std::env::args().collect();
