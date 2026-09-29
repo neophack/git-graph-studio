@@ -802,7 +802,8 @@
 					const end = Date.now() + ms;
 					let ticks = 0;
 					while (Date.now() < end) {
-						if (ready()) return true;
+						const value = ready();
+						if (value) return value; // the sentinel ('reply' / 'wizard') survives — callers match on it
 						ticks++;
 						if (onTick && ticks % 600 === 0) onTick(); // roughly every minute at 100 ms ticks
 						await sleep(100);
@@ -1306,7 +1307,11 @@
 								skip.harnessSkip = true;
 								throw skip;
 							}
-							if (!fresh) throw new Error('the new session page stayed empty — its initial state was lost in the mount race');
+							if (!fresh) {
+								const panelLog = extLogEntries().filter((e) => /webview Anthropic\.claude-code/.test(e.message || '')).slice(-8)
+									.map((e) => (e.message || '').replace(/^webview /, '').slice(0, 90));
+								throw new Error('the new session page stayed empty — its initial state was lost in the mount race — host log: ' + panelLog.join(' | '));
+							}
 							return 'new session page rendered';
 						});
 						// The conversation itself: interactive (a real account) unless the sandbox
@@ -1379,6 +1384,9 @@
 								composer.focus();
 								const prompt = 'harness sandbox ping ' + Date.now();
 								doc.execCommand('insertText', false, prompt);
+								// The reply marker may already sit in the frame (an earlier turn's
+								// reply) — the first token is a NEW occurrence over this snapshot.
+								const markersBefore = ((doc.body.textContent || '').match(/FAKE-CLAUDE/g) || []).length;
 								const t0 = performance.now();
 								composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
 								// Some builds gate synthetic Enter (isTrusted) — the Send button is the
@@ -1396,7 +1404,7 @@
 									// The wizard can render late (after the send found the composer) —
 									// the moment it owns the surface, the row's honest answer is skip.
 									if (wizardUp()) return 'wizard';
-									if (bodyText().includes('FAKE-CLAUDE')) { if (!firstToken) firstToken = Math.round(performance.now() - t0); return 'reply'; }
+									if (((doc.body.textContent || '').match(/FAKE-CLAUDE/g) || []).length > markersBefore) { if (!firstToken) firstToken = Math.round(performance.now() - t0); return 'reply'; }
 									return false;
 								}, 90000);
 								if (arrived === 'wizard') {
@@ -1414,7 +1422,8 @@
 									if (len === lastLen) { settled = Math.round(performance.now() - t0); break; }
 									lastLen = len;
 								}
-								return `send → first token ${firstToken} ms, settled ${settled || firstToken} ms (streamed by the local fake server)`;
+								const markersAfter = ((doc.body.textContent || '').match(/FAKE-CLAUDE/g) || []).length;
+								return `send → first token ${firstToken} ms (markers ${markersBefore}→${markersAfter}), settled ${settled || firstToken} ms (streamed by the local fake server)`;
 							});
 						}
 						// The per-button pass (sandbox only): every claude-vscode command the registry

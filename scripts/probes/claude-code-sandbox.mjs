@@ -152,6 +152,13 @@ const buildRemote = async () => {
 const buildSandbox = async () => {
 	rmSync(claudeConfigDir, { recursive: true, force: true });
 	rmSync(workspaceDir, { recursive: true, force: true });
+	// The dev webview's own caches: WKWebView heuristically caches vite's unversioned
+	// html-proxy modules, and a stale harness module then runs for every later run while
+	// the fixes sit on disk (this cost a whole debugging session). The dev data store is
+	// the dev app's alone — the installed releases keep theirs.
+	for (const store of [join(homedir(), 'Library', 'WebKit', 'git-graph-studio'), join(homedir(), 'Library', 'Caches', 'git-graph-studio')]) {
+		if (existsSync(store)) rmSync(store, { recursive: true, force: true });
+	}
 	mkdirSync(claudeConfigDir, { recursive: true });
 	const { scratch } = await buildRemote();
 	// The workspace: a real clone of the fake remote — the app opens it, git-graph-rs draws

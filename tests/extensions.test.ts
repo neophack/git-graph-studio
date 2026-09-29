@@ -797,8 +797,10 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		expect(frame.getAttribute('sandbox')).toBe('allow-scripts allow-same-origin'); // its own storage (localStorage) works
 		expect(frame.getAttribute('srcdoc')).toContain('acquireVsCodeApi');
 		expect(frame.getAttribute('srcdoc')).toContain('<body>hi</body>');
-		// A later setHtml reloads the document, as VS Code's webviews do.
+		// A later setHtml reloads the document, as VS Code's webviews do (the first paint's
+		// coalescing window — the shell→document pair — has settled by the second setHtml).
 		await host['serve']('webview.setHtml', [1, '<html><body>again</body></html>'], 'acme.demo', {} as never);
+		await new Promise((resolve) => setTimeout(resolve, 300));
 		expect(frame.getAttribute('srcdoc')).toContain('<body>again</body>');
 
 		// The extension's dispose closes the tab; the frame is told the panel is gone.
@@ -953,6 +955,112 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 			addEventListener.mockRestore();
 			vi.useRealTimers();
 		}
+	});
+
+	it('messages pushed before the page can receive them are queued and delivered on load', async () => {
+		const { host } = hostWithFrame();
+		await host['serve']('webview.create', [1, 'demo.view', 'Demo Panel'], 'acme.demo', {} as never);
+		await host['serve']('webview.setHtml', [1, '<html><body>hi</body></html>'], 'acme.demo', {} as never);
+		// The backend's first pushes race the tab's mount (the icon read delays it on a
+		// first open) — the page's initial state among them. They must not vanish.
+		await host['serve']('webview.postMessage', [1, { type: 'init-state' }], 'acme.demo', {} as never);
+		await host['serve']('webview.postMessage', [1, { type: 'visibility', value: true }], 'acme.demo', {} as never);
+		const queueOf = () => host['webviews'].get(host['webviewKey']('acme.demo', 1))?.pending ?? null;
+		expect(queueOf()).toEqual([{ type: 'init-state' }, { type: 'visibility', value: true }]);
+
+		const pane = document.body.appendChild(document.createElement('div'));
+		const dispose = host.mountWebview('acme.demo', 1, pane);
+		// The queue survives the mount and flushes only when the page's own listeners can
+		// exist (the load event). Vitest's jsdom never fires an iframe's load for a srcdoc
+		// navigation, so the flush is driven by dispatching the event itself — the real
+		// browser fires it on its own.
+		expect(queueOf()).toEqual([{ type: 'init-state' }, { type: 'visibility', value: true }]);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		pane.querySelector('iframe')!.dispatchEvent(new Event('load'));
+		// The load arms a short grace (a setHtml reload may still follow — the shell→document
+		// pair); the queue drains when the grace closes without one.
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		expect(queueOf()).toEqual([]);
+		// The direct path (post-load) delivers straight through the frame's window.
+		const frame = pane.querySelector('iframe')!;
+		const posted: unknown[] = [];
+		vi.spyOn(frame.contentWindow!, 'postMessage').mockImplementation(((message: unknown) => { posted.push(message); }) as never);
+		await host['serve']('webview.postMessage', [1, { type: 'after-load' }], 'acme.demo', {} as never);
+		expect(posted).toEqual([{ __ggsWebviewHost: true, type: 'message', message: { type: 'after-load' } }]);
+		expect(queueOf()).toEqual([]);
+		dispose();
+	});
+
+	it('a sidebar webview view holds its pushes the same way (the sidebar chat is the same claude-code page)', async () => {
+		const { host } = hostWithFrame();
+		await host['serve']('webviewView.register', ['acme.chat'], 'acme.demo', {} as never);
+		await host['serve']('webviewView.setHtml', ['acme.chat', '<html><body>chat</body></html>'], 'acme.demo', {} as never);
+		// The provider's first pushes race the sidebar section's mount — the section mounts
+		// when the view first becomes visible, long after resolve ran. They must not vanish.
+		await host['serve']('webviewView.postMessage', ['acme.chat', { state: 'initial' }], 'acme.demo', {} as never);
+		const record = host['webviewViews'].get('acme.chat')!;
+		expect(record.pending).toEqual([{ state: 'initial' }]);
+
+		const section = document.body.appendChild(document.createElement('div'));
+		const dispose = host.mountWebviewView('acme.chat', 'acme.demo', section);
+		expect(record.pending).toEqual([{ state: 'initial' }]); // the mount alone does not deliver
+		const frame = section.querySelector('iframe')!;
+		const posted: unknown[] = [];
+		vi.spyOn(frame.contentWindow!, 'postMessage').mockImplementation(((message: unknown) => { posted.push(message); }) as never);
+		frame.dispatchEvent(new Event('load'));
+		await new Promise((resolve) => setTimeout(resolve, 200)); // the load grace closes, then the queue drains
+		expect(posted).toEqual([{ __ggsWebviewHost: true, type: 'message', message: { state: 'initial' } }]);
+		expect(record.pending).toEqual([]);
+		// After the load, a push crosses directly.
+		await host['serve']('webviewView.postMessage', ['acme.chat', { state: 'live' }], 'acme.demo', {} as never);
+		expect(posted[1]).toEqual({ __ggsWebviewHost: true, type: 'message', message: { state: 'live' } });
+		dispose();
+	});
+
+	it('a page that settled without ever firing load still gets its messages (the watchdog\'s settle quirk)', async () => {
+		const { host } = hostWithFrame();
+		await host['serve']('webview.create', [1, 'demo.view', 'Demo Panel'], 'acme.demo', {} as never);
+		await host['serve']('webview.setHtml', [1, '<html><body>hi</body></html>'], 'acme.demo', {} as never);
+		await host['serve']('webview.postMessage', [1, { type: 'held' }], 'acme.demo', {} as never);
+		const pane = document.body.appendChild(document.createElement('div'));
+		const dispose = host.mountWebview('acme.demo', 1, pane);
+		const frame = pane.querySelector('iframe')!;
+		const posted: unknown[] = [];
+		vi.spyOn(frame.contentWindow!, 'postMessage').mockImplementation(((message: unknown) => { posted.push(message); }) as never);
+		// The WebView2 shape the watchdog's settle probe knows: readyState complete, the
+		// boot script in the document — but `load` never fires. No drain would ever run;
+		// the push that finds the document settled is the drain.
+		const doc = frame.contentDocument!;
+		Object.defineProperty(doc, 'readyState', { value: 'complete', configurable: true });
+		(doc.documentElement ?? doc).appendChild(doc.createElement('script'));
+		await host['serve']('webview.postMessage', [1, { type: 'fresh' }], 'acme.demo', {} as never);
+		expect(posted.map((m) => (m as { message?: unknown }).message)).toEqual([{ type: 'held' }, { type: 'fresh' }]);
+		expect(host['webviews'].get(host['webviewKey']('acme.demo', 1))!.pending).toEqual([]);
+		dispose();
+	});
+
+	it('a setHtml reload re-arms the gate: pushes during the reload deliver on the new load', async () => {
+		const { host } = hostWithFrame();
+		await host['serve']('webview.create', [1, 'demo.view', 'Demo Panel'], 'acme.demo', {} as never);
+		await host['serve']('webview.setHtml', [1, '<html><body>one</body></html>'], 'acme.demo', {} as never);
+		const pane = document.body.appendChild(document.createElement('div'));
+		const dispose = host.mountWebview('acme.demo', 1, pane);
+		const frame = pane.querySelector('iframe')!;
+		frame.dispatchEvent(new Event('load')); // the first document is live
+		await new Promise((resolve) => setTimeout(resolve, 200)); // its grace closes, the gate opens
+		const posted: unknown[] = [];
+		vi.spyOn(frame.contentWindow!, 'postMessage').mockImplementation(((message: unknown) => { posted.push(message); }) as never);
+		await host['serve']('webview.postMessage', [1, { n: 1 }], 'acme.demo', {} as never);
+		expect(posted).toHaveLength(1); // the direct path
+		// The reload: the page's listeners are gone until the new document loads — a push
+		// in that window must queue, not land in a document about to be replaced.
+		await host['serve']('webview.setHtml', [1, '<html><body>two</body></html>'], 'acme.demo', {} as never);
+		await host['serve']('webview.postMessage', [1, { n: 2 }], 'acme.demo', {} as never);
+		expect(posted).toHaveLength(1);
+		frame.dispatchEvent(new Event('load'));
+		await new Promise((resolve) => setTimeout(resolve, 200)); // the reload's grace closes, the queue drains
+		expect(posted.map((m) => (m as { message?: { n?: number } }).message)).toEqual([{ n: 1 }, { n: 2 }]);
+		dispose();
 	});
 
 	it('a settings change reaches the frame as a configChanged event', async () => {

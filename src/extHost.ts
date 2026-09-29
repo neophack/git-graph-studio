@@ -255,16 +255,56 @@ interface FrameHandle {
 	pendingCalls: Set<(error: Error) => void>;
 }
 
+/** The delivery-gate half every webview surface carries — a tabbed panel's record and a
+ *  sidebar view's alike: the frame hosting the page, the messages held until the page can
+ *  receive them, and whether the frame's current document finished loading. */
+interface WebviewDelivery {
+	/** Set once the surface mounted it (the first `setHtml` may arrive first — it queues on
+	 *  the surface's own `html`). */
+	frame: HTMLIFrameElement | null;
+	/** Messages the extension pushed while the page could not receive them — the page's
+	 *  initial state rides the first pushes, and losing them is the blank-but-loaded
+	 *  page: the mount (behind the tab icon's read on a first open) and the backend's
+	 *  first postMessage race, and the loser used to vanish silently. Queued until the
+	 *  page's own listeners exist (the frame's load event), then delivered in order. */
+	pending: unknown[];
+	/** The surface's current document (the latest setHtml, painted or pending). */
+	html: string;
+	/** Whether the frame's current document finished loading — a message posted before
+	 *  that replaces the not-yet-navigated document (or precedes the page's listeners)
+	 *  and vanishes; it queues instead. */
+	loaded: boolean;
+	/** The load event's grace timer: a document that just loaded holds its gate closed for
+	 *  a moment, because the extension's next act is often either a push (must wait for the
+	 *  gate — delivering into a fresh document early is fine, but a setHtml reload right
+	 *  after the push would orphan the state into the replaced document) or the real
+	 *  document's setHtml itself (the shell→document pair). */
+	loadGrace: number | null;
+	/** The first paint's coalescing timer: extensions deliver a shell document and the real
+	 *  one in rapid pairs (claude-code: 24k then 27k chars within milliseconds), and painting
+	 *  the shell boots the page just to be discarded by the second setHtml's reload — worse,
+	 *  the shell's load event opens the message gate, so the page's initial state can be
+	 *  delivered into the doomed shell document and the real one boots blank forever (the
+	 *  intermittent empty new-session page). Holding the first paint ~80 ms paints one
+	 *  document — the latest — and the state queues behind its load, where it belongs. */
+	firstPaintTimer: number | null;
+}
+
 /** One webview panel a frame extension created (`window.createWebviewPanel`): the tab-side
  *  record. The workbench opens the tab (`onOpenWebview`); the iframe lives in it and this
  *  host half feeds it HTML and relays messages both ways. */
-interface WebviewHandle {
+interface WebviewHandle extends WebviewDelivery {
 	panelId: number;
 	extId: string;
 	title: string;
-	html: string;
-	/** Set once the tab mounted it (the first `setHtml` may arrive first — it queues here). */
-	frame: HTMLIFrameElement | null;
+}
+
+/** One sidebar webview view (`window.registerWebviewViewProvider`): the section-side
+ *  record — the same delivery gate a panel crosses, on the section's mount instead of a
+ *  tab's (the sidebar chat is the same claude-code page a tab hosts, and blanks the same
+ *  way when its first pushes cross before the section mounts). */
+interface WebviewViewRecord extends WebviewDelivery {
+	extId: string;
 }
 
 /** One extension-owned status bar item (`window.createStatusBarItem`), as the bar renders it. */
@@ -542,6 +582,19 @@ function armLoadWatchdog(frame: HTMLIFrameElement, composed: string, owner: stri
 	}, 4000 * attempt);
 }
 
+/** The frame's document is one of OURS and finished: `complete`, and carrying the composed
+ *  boot script an empty about:blank never has. Some navigations settle without ever firing
+ *  `load` — the watchdog's settle probe exists for that quirk — and the message queue's
+ *  delivery gate asks the same question, or such a page would hold its messages forever. */
+function frameDocumentSettled(frame: HTMLIFrameElement): boolean {
+	try {
+		const doc = frame.contentDocument;
+		return doc !== null && doc.readyState === 'complete' && doc.querySelector('script, style, link') !== null;
+	} catch {
+		return false; // cross-origin to the host: nothing to inspect
+	}
+}
+
 export class ExtensionHost {
 	private readonly frames = new Map<string, FrameHandle>();
 	/** The command ids of each extension's manifest contributions (dropped from the workbench
@@ -625,7 +678,7 @@ export class ExtensionHost {
 	/** The sidebar webview views (`contributes.views` with `type: "webview"`, served by
 	 *  `registerWebviewViewProvider`), by view id: the section's iframe lives in the
 	 *  sidebar (the workbench mounts it), this host half relays both directions. */
-	private readonly webviewViews = new Map<string, { extId: string; html: string; frame: HTMLIFrameElement | null }>();
+	private readonly webviewViews = new Map<string, WebviewViewRecord>();
 	/** View ids whose provider the host already asked the frame to resolve. */
 	private readonly resolvedWebviewViews = new Set<string>();
 	/** Workbench hook: open a webview panel's tab (wired like `onOpenPage`). */
@@ -801,6 +854,28 @@ export class ExtensionHost {
 		const installed = await invoke<ExtInfo[]>('ext_list');
 		this.installedExts = installed;
 		return installed;
+	}
+
+	/** Page-bundle prewarms already fired (one per extension per host lifetime). */
+	private readonly prewarmedExts = new Set<string>();
+
+	/** Warm the packer's page bundle (`webview/index.js` — claude-code's is 5.4 MB) into the
+	 *  WebView's HTTP cache the moment an activation settles: a page's first open then pays
+	 *  only the parse, not fetch + parse, and the dialog shows that much earlier. The
+	 *  packer's convention names the file for every VSIX-packed page; a 404 just means this
+	 *  package ships none — silent, so the app log stays a diagnostic, not a warning wall. */
+	private prewarmPageAssets(extId: string): void {
+		if (this.prewarmedExts.has(extId)) return;
+		this.prewarmedExts.add(extId);
+		const ext = this.installedExts.find((candidate) => candidate.id === extId);
+		const url = `${ext ? extAssetBase(ext) : `ggs://localhost/${extId}/`}webview/index.js`;
+		const started = performance.now();
+		void fetch(url)
+			.then((response) => (response.ok ? response.arrayBuffer() : null))
+			.then((bytes) => {
+				if (bytes) extLog('info', extId, `page bundle prewarmed (${Math.round(bytes.byteLength / 1024)} KB in ${Math.round(performance.now() - started)} ms)`);
+			})
+			.catch(() => undefined);
 	}
 
 
@@ -1451,6 +1526,48 @@ export class ExtensionHost {
 		return `webview:${extId}:${panelId}`;
 	}
 
+	/** Drain the messages held while the page could not receive them, in order — the load
+	 *  event and the push that finds the document settled both come here. */
+	private deliverPendingWebviewMessages(view: WebviewDelivery, owner: string): void {
+		if (view.pending.length === 0 || !view.frame) return;
+		const queued = view.pending.splice(0);
+		extLog('info', 'host', `webview ${owner}: delivering ${queued.length} message(s) held from before the load`);
+		for (const message of queued) view.frame.contentWindow?.postMessage({ __ggsWebviewHost: true, type: 'message', message }, '*');
+	}
+
+	/** The delivery gate every extension→page message crosses. A page that cannot receive
+	 *  it yet — its tab or sidebar section still mounting (no frame), or its document still
+	 *  loading (the page's own listeners attach as its bundle runs, before the load event) —
+	 *  holds the message instead of losing it; the load event drains the queue, and so does
+	 *  the push that finds the document already settled (some navigations never fire
+	 *  `load`). A page's initial state rides its first pushes; losing them is the
+	 *  blank-but-loaded page — the intermittent empty claude-code session, 2026-09-28. */
+	private gateWebviewMessage(view: WebviewDelivery, message: unknown, owner: string): void {
+		// The load grace queues first: a document that just loaded may still be replaced by
+		// the pair's real setHtml, and a push delivered now would burn with it.
+		if (view.loadGrace !== null) {
+			view.pending.push(message);
+			extLog('info', 'host', `webview ${owner}: postMessage held — the load grace is open (${view.pending.length} queued)`);
+			return;
+		}
+		if (view.firstPaintTimer !== null) this.flushFirstPaint(view, owner);
+		if (!view.frame) {
+			view.pending.push(message);
+			extLog('info', 'host', `webview ${owner}: postMessage held — the page has not mounted yet (${view.pending.length} queued)`);
+			return;
+		}
+		if (!view.loaded) {
+			if (!frameDocumentSettled(view.frame)) {
+				view.pending.push(message);
+				extLog('info', 'host', `webview ${owner}: postMessage held — the document is still loading (${view.pending.length} queued)`);
+				return;
+			}
+			view.loaded = true; // settled without a load event: this push is the drain
+			this.deliverPendingWebviewMessages(view, owner);
+		}
+		view.frame.contentWindow?.postMessage({ __ggsWebviewHost: true, type: 'message', message }, '*');
+	}
+
 	/** Mount a webview panel into its tab's pane (the workbench's mount callback; the editor
 	 *  tab owns the iframe, the disposer runs on close). The document is a srcdoc composed
 	 *  with the acquireVsCodeApi bootstrap — `setHtml` reloads it, as VS Code's webviews do. */
@@ -1470,6 +1587,10 @@ export class ExtensionHost {
 		if (view) {
 			view.frame = frame;
 			extLog('info', 'host', `webview ${extId}#${panelId}: mounted (${frame.isConnected ? 'connected' : 'detached'})`);
+			// The messages that arrived while the tab was still mounting (the initial state
+			// among them) deliver once the page's own listeners exist — the load event —
+			// never before, or the not-yet-navigated document swallows them.
+			frame.addEventListener('load', () => this.armLoadGrace(view, `${extId}#${panelId}`));
 			loadFrameDoc(frame, view.html, this.webviewTheme, `${extId}#${panelId}`);
 		}
 		return () => this.webviewClosed(extId, panelId);
@@ -1481,6 +1602,8 @@ export class ExtensionHost {
 		const view = this.webviews.get(this.webviewKey(extId, panelId));
 		if (!view) return;
 		this.webviews.delete(this.webviewKey(extId, panelId));
+		if (view.loadGrace !== null) clearTimeout(view.loadGrace);
+		if (view.firstPaintTimer !== null) clearTimeout(view.firstPaintTimer);
 		view.frame = null;
 		extLog('info', 'host', `webview ${extId}#${panelId}: closed`);
 		this.frames.get(view.extId)?.send?.({ type: '__studioExtEvent', event: 'webviewDisposed', panelId });
@@ -1493,7 +1616,7 @@ export class ExtensionHost {
 	 *  panel's does). An html that arrived before the mount (or after the provider's
 	 *  resolve, which the first visibility triggers) applies here. */
 	mountWebviewView(viewId: string, extId: string, container: HTMLElement): () => void {
-		const record = this.webviewViews.get(viewId) ?? { extId, html: '', frame: null };
+		const record = this.webviewViews.get(viewId) ?? { extId, html: '', frame: null, pending: [], loaded: false, loadGrace: null, firstPaintTimer: null };
 		this.webviewViews.set(viewId, record);
 		const frame = document.createElement('iframe');
 		frame.className = 'ext-page-frame';
@@ -1503,6 +1626,9 @@ export class ExtensionHost {
 		// Insert first, load through loadFrameDoc — the same detached-subtree drop.
 		container.appendChild(frame);
 		record.frame = frame;
+		// The same delivery gate as a panel's: the section's mount races the provider's
+		// first pushes exactly the way a tab's mount does.
+		frame.addEventListener('load', () => this.armLoadGrace(record, `view:${record.extId}/${viewId}`));
 		if (record.html !== '') loadFrameDoc(frame, record.html, this.webviewTheme, `view:${record.extId}/${viewId}`);
 		return () => {
 			if (this.webviewViews.get(viewId)?.frame === frame) {
@@ -1521,7 +1647,47 @@ export class ExtensionHost {
 			return;
 		}
 		record.html = html;
-		if (record.frame) loadFrameDoc(record.frame, html, this.webviewTheme, `view:${record.extId}/${viewId}`);
+		if (!record.frame) return; // the section mounts later and loads record.html then
+		const owner = `view:${record.extId}/${viewId}`;
+		const grace = record.loadGrace;
+		if (grace !== null) clearTimeout(grace);
+		record.loadGrace = null;
+		const inGrace = grace !== null;
+		if (record.loaded || inGrace) {
+			// A settled document (or one inside its load grace) reloads now.
+			record.loaded = false;
+			loadFrameDoc(record.frame, html, this.webviewTheme, owner);
+			return;
+		}
+		// First paint pending: the same pair-coalescing a panel gets — one boot of the
+		// latest document, the initial state queued behind its load.
+		if (record.firstPaintTimer !== null) clearTimeout(record.firstPaintTimer);
+		record.firstPaintTimer = window.setTimeout(() => this.flushFirstPaint(record, owner), 200);
+	}
+
+	/** Open a document's delivery gate after its load, with a short grace: pushes land in
+	 *  the queue for a moment so a setHtml reload that follows immediately (the shell→document
+	 *  pair) cannot orphan them into the replaced document. No reload inside the window —
+	 *  the gate opens and the queue drains. */
+	private armLoadGrace(view: WebviewDelivery, owner: string): void {
+		if (view.loadGrace !== null) clearTimeout(view.loadGrace);
+		view.loadGrace = window.setTimeout(() => {
+			view.loadGrace = null;
+			view.loaded = true;
+			this.deliverPendingWebviewMessages(view, owner);
+		}, 150);
+	}
+
+	/** Paint a surface's pending first document now: the latest html loads once, and every
+	 *  message queued behind the missing load delivers into that document. Fired by the
+	 *  coalescing window's expiry and by the first message push (the state the page is
+	 *  waiting for must not cross into a document that is about to be replaced). */
+	private flushFirstPaint(record: WebviewDelivery, owner: string): void {
+		if (record.firstPaintTimer === null) return;
+		record.firstPaintTimer = null;
+		if (!record.frame || record.loaded) return;
+		record.loaded = false;
+		loadFrameDoc(record.frame, record.html, this.webviewTheme, owner);
 	}
 
 	/** A webview view's message crossed from its iframe: route it into the owning frame. */
@@ -1702,6 +1868,9 @@ export class ExtensionHost {
 					const declared = declaredCommand(id);
 					commands.register({ id, title: declared?.title ?? id, category: declared?.category ?? extId, enabled: () => true, run: () => this.runRegistered(id) });
 				}
+				// The activation settled: warm the page bundle into the WebView's cache now,
+				// so the user's first open of a page pays only the parse, not the fetch.
+				this.prewarmPageAssets(extId);
 				return Promise.resolve(undefined);
 			}
 			case 'commands.unregister': {
@@ -1991,7 +2160,7 @@ export class ExtensionHost {
 					extLog('warn', 'host', `webview ${extId}#${panelId}: created reusing a live panel id — the backend restarted; closing ${stale.length} dead panel(s) of the previous process`);
 					for (const view of stale) this.closeWebview(view.extId, view.panelId);
 				}
-				this.webviews.set(this.webviewKey(extId, panelId), { panelId, extId, title, html: '', frame: null });
+				this.webviews.set(this.webviewKey(extId, panelId), { panelId, extId, title, html: '', frame: null, pending: [], loaded: false, loadGrace: null, firstPaintTimer: null });
 				extLog('info', 'host', `webview ${extId}#${panelId}: created ("${title}")`);
 				this.onOpenWebview?.(panelId, title, extId);
 				return Promise.resolve(panelId);
@@ -2014,15 +2183,38 @@ export class ExtensionHost {
 				}
 				// Setting html reloads the document, exactly as VS Code's webviews do.
 				view.html = html;
-				if (view.frame) loadFrameDoc(view.frame, html, this.webviewTheme, `${extId}#${panelId}`);
-				else extLog('info', 'host', `webview ${extId}#${panelId}: setHtml (${html.length} chars) held — the tab has not mounted yet`);
+				if (!view.frame) {
+					extLog('info', 'host', `webview ${extId}#${panelId}: setHtml (${html.length} chars) held — the tab has not mounted yet`);
+					return Promise.resolve(undefined);
+				}
+				const owner = `${extId}#${panelId}`;
+				const grace = view.loadGrace;
+				if (grace !== null) clearTimeout(grace);
+				view.loadGrace = null;
+				const inGrace = grace !== null;
+				if (view.loaded || inGrace) {
+					// A settled document (or one inside its load grace — the pair's real
+					// document) reloads now — the extension asked for a replacement, and the
+					// grace's queued messages deliver into this fresh load.
+					view.loaded = false; // the reload drops the old listeners; messages queue until the new load
+					loadFrameDoc(view.frame, html, this.webviewTheme, owner);
+					return Promise.resolve(undefined);
+				}
+				// First paint still pending: hold it and coalesce the pair — the latest
+				// document paints once, and the page's initial state queues behind its load
+				// instead of crossing into a shell that is about to be replaced.
+				if (view.firstPaintTimer !== null) clearTimeout(view.firstPaintTimer);
+				view.firstPaintTimer = window.setTimeout(() => this.flushFirstPaint(view, owner), 200);
 				return Promise.resolve(undefined);
 			}
 			case 'webview.postMessage': {
 				const [panelId, message] = args as [number, unknown];
 				const view = this.webviews.get(this.webviewKey(extId, panelId));
-				if (!view) extLog('warn', 'host', `webview ${extId}#${panelId}: postMessage with no panel record — dropped`);
-				view?.frame?.contentWindow?.postMessage({ __ggsWebviewHost: true, type: 'message', message }, '*');
+				if (!view) {
+					extLog('warn', 'host', `webview ${extId}#${panelId}: postMessage with no panel record — dropped`);
+					return Promise.resolve(undefined);
+				}
+				this.gateWebviewMessage(view, message, `${extId}#${panelId}`);
 				return Promise.resolve(undefined);
 			}
 			case 'webview.reveal': {
@@ -2041,7 +2233,7 @@ export class ExtensionHost {
 				// section itself renders from the manifest (the workbench's view pass); the
 				// provider's resolve waits for the view's first visibility.
 				const viewId = args[0] as string;
-				if (!this.webviewViews.has(viewId)) this.webviewViews.set(viewId, { extId, html: '', frame: null });
+				if (!this.webviewViews.has(viewId)) this.webviewViews.set(viewId, { extId, html: '', frame: null, pending: [], loaded: false, loadGrace: null, firstPaintTimer: null });
 				else this.webviewViews.get(viewId)!.extId = extId;
 				return Promise.resolve(undefined);
 			}
@@ -2057,7 +2249,12 @@ export class ExtensionHost {
 				return Promise.resolve(undefined);
 			case 'webviewView.postMessage': {
 				const [viewId, message] = args as [string, unknown];
-				this.webviewViews.get(viewId)?.frame?.contentWindow?.postMessage({ __ggsWebviewHost: true, type: 'message', message }, '*');
+				const record = this.webviewViews.get(viewId);
+				if (!record) {
+					extLog('warn', 'host', `webview view ${viewId}: postMessage with no view record — dropped`);
+					return Promise.resolve(undefined);
+				}
+				this.gateWebviewMessage(record, message, `view:${record.extId}/${viewId}`);
 				return Promise.resolve(undefined);
 			}
 			case 'webviewView.show': {

@@ -91,6 +91,11 @@ export default defineConfig({
 		// activates under `tauri dev` (the packaged app serves same-origin assets, where
 		// the tauri protocol's own permissive headers cover it).
 		cors: true,
+		// Dev never wants a cached module: the webviews heuristically cache vite's
+		// unversioned html-proxy URLs, and a stale harness module then runs for every
+		// later probe run while the edits sit on disk (the sandbox run lost an hour to
+		// exactly that). no-store on everything in dev; the build is unaffected.
+		headers: { 'Cache-Control': 'no-store' },
 		watch: {
 			ignored: ['**/src-tauri/**', '**/target/**']
 		}
