@@ -22,9 +22,12 @@ view's marketplace row on demand (a release form checkbox or `GGS_BUNDLE_CLAUDE_
 can pack it). The Claude sidebar carries an **AI provider switcher**: run the official
 Claude service or any Anthropic-compatible endpoint — DeepSeek, Zhipu GLM, Moonshot Kimi,
 a custom gateway — with the API key AES-256-GCM sealed at rest under `~/.ggs/` and
-decrypted only when the Claude backend starts (whose own state is redirected to
-`~/.ggs/claude`, never `~/.claude`); switching provider is one click on the view's
-header chip or the **Model Providers** page, which also probes the endpoint (Test
+decrypted only when the active provider is applied to Claude's redirected settings
+`~/.ggs/claude` (whose own state — login, history — never touches `~/.claude`);
+switching provider is one click on the view's
+header chip or the **Model Providers** page, writes the choice into Claude's
+redirected settings so the next new session uses it (a running conversation is never
+interrupted), and the page also probes the endpoint (Test
 Connection), pulls the gateway's model catalogue (NewAPI / OneAPI `/v1/models`), and
 imports an existing **cc-switch** configuration (keys sealed on import, the one
 cc-switch points at becoming active).

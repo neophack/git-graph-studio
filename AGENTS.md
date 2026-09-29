@@ -425,7 +425,8 @@ every API key with AES-256-GCM under a per-install master key
 the bridged backend — through the spawn-env source the composition root registers
 (`lib.rs`'s `run` wires `cmd_providers::backend_env` onto
 `ext_process::add_spawn_env_source`), so `ext_process` names no provider knowledge and
-the coupling stays one-directional (providers restart backends; the spawn path is
+the coupling stays one-directional (providers reach the spawn path only through the
+composition-root-registered environment source; the spawn path is
 provider-agnostic). That spawn always carries `CLAUDE_CONFIG_DIR=<~/.ggs/claude>` (the
 extension's own state — login, history — never touches `~/.claude`; an explicit
 `CLAUDE_CONFIG_DIR` in the app's own environment wins — the sandbox probe's hermetic
@@ -437,8 +438,15 @@ local server). The UI is the sidebar chip on the Claude view's section header
 (`aiProviders.ts` — mounted only for the ids the backend's `bridgedExtIds` names, so
 `src/` names no extension id), its quick pick, and the Model Providers page
 (`providersPage.ts`, the `ai.providers` command); switching provider (or editing the
-active profile) restarts the bridged backend, exactly the Extensions view's deliberate
-restart. Commercial finish (2026-09-30): a **NewAPI gateway** preset beside
+active profile) writes the provider environment into the redirected Claude settings
+(`apply_claude_provider_env` — the `env` map Claude Code applies at every session
+start, the mechanism cc-switch uses), so the switch lands on the next chat without
+restarting anything and a conversation in flight keeps its provider; the spawn
+environment carries only `CLAUDE_CONFIG_DIR` — one source of provider truth, the two
+can never disagree. Writing the settings clears this bridge's keys when the official
+profile is active (a stale endpoint would shadow the login), preserves the user's own
+env keys, and lands the file at 0600 when it carries a key. Commercial finish
+(2026-09-30): a **NewAPI gateway** preset beside
 DeepSeek / GLM / Kimi, a **Test Connection** probe (a 1-token `/v1/messages` round
 trip whose every HTTP answer is a diagnosis — key rejected, wrong base URL, throttled)
 and a **Fetch Models** catalogue read (`/v1/models`, the OpenAI-compatible shape every

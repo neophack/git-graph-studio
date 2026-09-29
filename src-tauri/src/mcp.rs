@@ -43,6 +43,13 @@ const TREE_LINE_BUDGET: usize = 4000;
 const REPORT_LINE_BUDGET: usize = 400;
 /// Lines one `read_file` answer may carry.
 const READ_LINE_BUDGET: usize = 4000;
+/// `read_file`'s default window when the caller gives no line range — a first look's
+/// worth, not the whole file (token economy: the answer says how to continue, and an
+/// explicit `startLine`/`endLine` window still serves up to `READ_LINE_BUDGET`).
+const READ_DEFAULT_LINES: usize = 400;
+/// `symbol_references`' answer cap: every hit of a common name could be thousands of
+/// lines of context; the cap names the remainder and how to narrow.
+const REFERENCES_HIT_BUDGET: usize = 400;
 /// The largest file `read_file` serves whole — bigger ones belong to the app's viewers.
 const MAX_READ_BYTES: usize = 2_000_000;
 /// Past this size the call log is trimmed to its newest [`LOG_KEEP_BYTES`], so a
@@ -236,18 +243,40 @@ impl McpServer {
 
     fn tool_references(&self, args: &Value) -> Result<String, (i64, String)> {
         let name = Self::arg_str(args, "name")?;
+        let prefix = args
+            .get("pathPrefix")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .replace('\\', "/");
         let narrow = self.index.files_containing(&self.root, &name);
         let files = scan_references(&self.root, &name, narrow)
             .map_err(|error| (-32603, format!("reference scan failed: {error}")))?;
-        let total: usize = files.iter().map(|file| file.matches.len()).sum();
+        let total: usize = files
+            .iter()
+            .filter(|file| prefix.is_empty() || file.path.starts_with(&prefix))
+            .map(|file| file.matches.len())
+            .sum();
         if total == 0 {
             return Ok(format!(
-                "No whole-word occurrences of '{name}' in the workspace's code files."
+                "No whole-word occurrences of '{name}'{} in the workspace's code files.",
+                if prefix.is_empty() { String::new() } else { format!(" under '{prefix}'") }
             ));
         }
         let mut out = format!("{total} occurrence(s) of '{name}':");
+        let mut shown = 0usize;
         for file in files {
+            if !prefix.is_empty() && !file.path.starts_with(&prefix) {
+                continue;
+            }
             for hit in &file.matches {
+                if shown >= REFERENCES_HIT_BUDGET {
+                    out.push_str(&format!(
+                        "{n}… truncated at {REFERENCES_HIT_BUDGET} — {remaining} more; narrow with pathPrefix (or search_text) to keep the answer small",
+                        n = '\n',
+                        remaining = total - shown
+                    ));
+                    return Ok(out);
+                }
                 out.push_str(&format!(
                     "{n}{path}:{line}:{column}",
                     n = '\n',
@@ -255,6 +284,7 @@ impl McpServer {
                     line = hit.line,
                     column = hit.column
                 ));
+                shown += 1;
             }
         }
         Ok(out)
@@ -362,6 +392,12 @@ impl McpServer {
             .get("endLine")
             .and_then(Value::as_u64)
             .map(|v| v.max(1) as usize);
+        // Token economy: a read without any line range takes a look, not the whole
+        // file — the default window is the first look's worth, and the answer says how
+        // to continue. An explicit startLine (open-ended) or window still serves up to
+        // READ_LINE_BUDGET.
+        let no_range = end.is_none() && args.get("startLine").is_none();
+        let window_cap = if no_range { READ_DEFAULT_LINES } else { READ_LINE_BUDGET };
         let Ok(root) = std::path::Path::new(&self.root).canonicalize() else {
             return Ok(format!(
                 "The served folder '{}' is not readable.",
@@ -394,7 +430,7 @@ impl McpServer {
         let window: Vec<&str> = lines[begin - 1..stop]
             .iter()
             .copied()
-            .take(READ_LINE_BUDGET)
+            .take(window_cap)
             .collect();
         let last = begin + window.len() - 1;
         let mut out = format!("{path} — lines {begin}–{last} of {total}:");
@@ -402,9 +438,11 @@ impl McpServer {
             out.push('\n');
             out.push_str(line.trim_end_matches('\r'));
         }
+        // The window was cut short by the cap (not by the caller's own endLine): say
+        // so, and where to continue.
         if last < stop {
             out.push_str(&format!(
-                "{n}… truncated at {READ_LINE_BUDGET} lines; continue with startLine = {}",
+                "{n}… truncated — {last} of {total} lines shown; continue with startLine = {}",
                 last + 1,
                 n = '\n'
             ));
@@ -931,8 +969,8 @@ fn tool_catalogue() -> Value {
         },
         {
             "name": "symbol_references",
-            "description": "Every whole-word occurrence of this symbol name across the repository's code files, as file:line:column — the Find References of the app.",
-            "inputSchema": { "type": "object", "properties": { "name": { "type": "string", "description": "The exact symbol name" } }, "required": ["name"] }
+            "description": "Every whole-word occurrence of this symbol name across the repository's code files, as file:line:column — the Find References of the app. Answers cap at 400 hits; narrow with `pathPrefix` first for common names.",
+            "inputSchema": { "type": "object", "properties": { "name": { "type": "string", "description": "The exact symbol name" }, "pathPrefix": { "type": "string", "description": "Repo-relative path prefix to narrow to, e.g. \"src/\"" } }, "required": ["name"] }
         },
         {
             "name": "symbol_tree",
@@ -946,7 +984,7 @@ fn tool_catalogue() -> Value {
         },
         {
             "name": "read_file",
-            "description": "One repository file's text (UTF-8, up to 2 MB), optionally a line window: startLine/endLine are 1-based and inclusive. Answers cap at 4000 lines.",
+            "description": "One repository file's text (UTF-8, up to 2 MB). Without a line range the first 400 lines answer (enough for a first look); pass startLine/endLine (1-based, inclusive) for more — windows cap at 4000 lines.",
             "inputSchema": { "type": "object", "properties": { "path": { "type": "string", "description": "Repo-relative file path" }, "startLine": { "type": "number", "description": "First line to show (1-based)" }, "endLine": { "type": "number", "description": "Last line to show (inclusive)" } }, "required": ["path"] }
         },
         {
@@ -1120,6 +1158,11 @@ mod tests {
         assert_eq!(response["result"]["protocolVersion"], "2025-03-26");
         assert_eq!(response["result"]["serverInfo"]["name"], "git-graph-studio");
         assert!(response["result"]["capabilities"]["tools"].is_object());
+        // The workflow guidance rides the handshake — the lever that turns the tool
+        // catalogue from available to used well.
+        let instructions = response["result"]["instructions"].as_str().unwrap_or_default();
+        assert!(instructions.contains("BEFORE editing"), "{instructions}");
+        assert!(instructions.contains("analysis_dead_code"), "{instructions}");
     }
 
     #[test]
@@ -1376,5 +1419,74 @@ mod tests {
 
         let cycles = call(&server, "analysis_import_cycles", json!({}));
         assert!(cycles.contains("No import cycles"), "{cycles}");
+    }
+
+    /// Token economy: a read without a line range takes a look (400 lines), not the
+    /// whole file, and the answer says how to continue; an explicit startLine serves
+    /// the rest (its own window capped at the read budget).
+    #[test]
+    fn read_file_defaults_to_a_look_not_the_whole_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("big.rs");
+        let body: String = (1..=1000)
+            .map(|line| format!("// line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&file, &body).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let index = Arc::new(SymbolIndex::with_home(home.path().to_owned()));
+        let root = dir.path().display().to_string();
+        index.build_blocking(None, &root, None).unwrap();
+        let analysis = Arc::new(AnalysisIndex::new());
+        let log = tempfile::tempdir().unwrap();
+        let server = McpServer::with_parts(&root, index, analysis, log.path().join("mcp.log"));
+
+        let look = call(&server, "read_file", json!({ "path": "big.rs" }));
+        assert!(look.contains("lines 1–400 of 1000"), "{}", &look[..200]);
+        assert!(look.contains("continue with startLine = 401"), "{look}");
+        assert!(!look.contains("line 401\n"), "the default window stops at 400");
+
+        let rest = call(
+            &server,
+            "read_file",
+            json!({ "path": "big.rs", "startLine": 401 }),
+        );
+        assert!(rest.contains("lines 401–1000 of 1000"), "{rest}");
+        assert!(rest.contains("line 1000"), "{rest}");
+    }
+
+    /// `symbol_references` caps a common name's flood at 400 hits — naming the
+    /// remainder and the `pathPrefix` escape hatch — and the prefix narrows both the
+    /// count and the hits.
+    #[test]
+    fn symbol_references_caps_the_flood_and_narrows_by_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hot = String::new();
+        for line in 1..=420 {
+            hot.push_str(&format!("pub fn caller{line}() {{ alpha(); }}\n"));
+        }
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src").join("hot.rs"), &hot).unwrap();
+        std::fs::write(dir.path().join("quiet.rs"), "fn quiet() { alpha(); }\n").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let index = Arc::new(SymbolIndex::with_home(home.path().to_owned()));
+        let root = dir.path().display().to_string();
+        index.build_blocking(None, &root, None).unwrap();
+        let analysis = Arc::new(AnalysisIndex::new());
+        let log = tempfile::tempdir().unwrap();
+        let server = McpServer::with_parts(&root, index, analysis, log.path().join("mcp.log"));
+
+        let flooded = call(&server, "symbol_references", json!({ "name": "alpha" }));
+        assert!(flooded.starts_with("421 occurrence(s)"), "{}", &flooded[..120]);
+        assert!(flooded.contains("truncated at 400 — 21 more"), "{flooded}");
+
+        let narrowed = call(
+            &server,
+            "symbol_references",
+            json!({ "name": "alpha", "pathPrefix": "src/" }),
+        );
+        assert!(narrowed.starts_with("420 occurrence(s)"), "{}", &narrowed[..120]);
+        assert!(narrowed.contains("src/hot.rs:"), "{narrowed}");
+        assert!(!narrowed.contains("quiet.rs"), "{narrowed}");
     }
 }

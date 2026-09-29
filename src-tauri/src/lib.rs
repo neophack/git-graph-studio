@@ -318,7 +318,7 @@ mod desktop {
         }
         if !already_open {
             ext_process::global().notify_workspace(std::slice::from_ref(&root));
-            cmd_providers::apply_claude_mcp(std::slice::from_ref(&root));
+            cmd_providers::apply_claude_integration(std::slice::from_ref(&root));
         }
         // Warm Quick Open's file list in the background: by the time the user hits Ctrl+P the
         // walk has usually finished and the picker opens on a cache hit. This walk is the one
@@ -676,7 +676,7 @@ mod desktop {
         state.watcher.lock().unwrap().clear();
         *state.repos.lock().unwrap() = roots.iter().map(|root| root.root.clone()).collect();
         ext_process::global().notify_workspace(&[]);
-        cmd_providers::apply_claude_mcp(&[]);
+        cmd_providers::apply_claude_integration(&[]);
 
         // The Quick Open prefetch stays on the open path (cheap, and the first Ctrl+P can come
         // at any moment); the index builds and the watchers wait for the first painted frame,
@@ -864,7 +864,7 @@ mod desktop {
         state.deferred_services.clear();
         *state.single_file.lock().unwrap() = Some(path);
         ext_process::global().notify_workspace(&[]);
-        cmd_providers::apply_claude_mcp(&[]);
+        cmd_providers::apply_claude_integration(&[]);
         Ok(())
     }
 
@@ -881,7 +881,7 @@ mod desktop {
         state.repos.lock().unwrap().clear();
         state.deferred_services.clear();
         ext_process::global().notify_workspace(&[]);
-        cmd_providers::apply_claude_mcp(&[]);
+        cmd_providers::apply_claude_integration(&[]);
     }
 
     /// The path a launch should open: the last argument that is neither a flag nor a flag's
@@ -1458,7 +1458,7 @@ mod desktop {
                         }
                         let folders = handle.state::<AppState>().repos.lock().unwrap().clone();
                         ext_process::global().notify_workspace(&folders);
-                        cmd_providers::apply_claude_mcp(&folders);
+                        cmd_providers::apply_claude_integration(&folders);
                     });
                 }
                 // The main window is declared in tauri.conf.json but built here (`create: false`)

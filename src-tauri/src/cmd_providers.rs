@@ -33,8 +33,6 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-use crate::ext_process;
-
 /// The extension whose backend the active provider configures. The marketplace id
 /// (`ext_gallery.rs`'s `FEATURED` names it too); the frontend learns it from
 /// `provider_list`'s `bridgedExtIds` and names no id itself.
@@ -399,23 +397,14 @@ fn apply_save(
 /// The environment a bridged extension's backend is spawned with. Pure over the store
 /// and the home, so the exact bytes a backend sees are testable. The decrypted key
 /// exists only inside this vector's lifetime — the command's answer never carries it.
-pub fn backend_env_for(ext_id: &str, store: &ProviderStore, home: &Path) -> Vec<(String, String)> {
+/// The active profile's provider environment: endpoint, decrypted key and model ids —
+/// the values `claude_provider_settings` writes into the redirected Claude settings.
+/// A key that does not open (a copied store from another install) is skipped, never
+/// fatal: the endpoint still applies and the extension's own login remains the
+/// fallback. Decryption happens here and only here; the values exist to be written
+/// into Claude's own config file and are never returned over IPC.
+pub fn provider_env_vars(active: &ProviderProfile, home: &Path) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = Vec::new();
-    if !BRIDGED_EXT_IDS.contains(&ext_id) {
-        return env;
-    }
-    // Always: the extension's own state lives under ~/.ggs/claude, never ~/.claude.
-    env.push((
-        "CLAUDE_CONFIG_DIR".to_owned(),
-        home.join("claude").to_string_lossy().into_owned(),
-    ));
-    let Some(active) = store
-        .active_id
-        .as_deref()
-        .and_then(|id| store.profiles.iter().find(|p| p.id == id))
-    else {
-        return env;
-    };
     if active.preset == "official" {
         return env;
     }
@@ -423,9 +412,6 @@ pub fn backend_env_for(ext_id: &str, store: &ProviderStore, home: &Path) -> Vec<
         env.push(("ANTHROPIC_BASE_URL".to_owned(), base_url.to_owned()));
     }
     if let Some(sealed) = active.api_key_enc.as_deref() {
-        // A key that does not open (a copied store from another install) must not take
-        // the backend down with it: the endpoint vars still apply, and the extension's
-        // own login remains the fallback.
         if let Ok(key) = unseal(home, sealed) {
             env.push(("ANTHROPIC_AUTH_TOKEN".to_owned(), key.clone()));
             env.push(("ANTHROPIC_API_KEY".to_owned(), key));
@@ -438,6 +424,22 @@ pub fn backend_env_for(ext_id: &str, store: &ProviderStore, home: &Path) -> Vec<
         env.push(("ANTHROPIC_SMALL_FAST_MODEL".to_owned(), model.to_owned()));
     }
     env
+}
+
+/// The spawn environment a bridged extension's backend runs with. Pure over the home,
+/// so the exact bytes a backend sees are testable. Only the state redirect rides the
+/// process environment: the provider's endpoint and key live in the redirected Claude
+/// settings (`claude_provider_settings`), which Claude Code applies at every session
+/// start — so switching a provider never requires restarting the backend, and the two
+/// sources can never disagree mid-flight.
+pub fn backend_env_for(ext_id: &str, home: &Path) -> Vec<(String, String)> {
+    if !BRIDGED_EXT_IDS.contains(&ext_id) {
+        return Vec::new();
+    }
+    vec![(
+        "CLAUDE_CONFIG_DIR".to_owned(),
+        home.join("claude").to_string_lossy().into_owned(),
+    )]
 }
 
 /* ---------- The gateway probes (NewAPI / OneAPI / any Anthropic-compatible origin) ---------- */
@@ -827,8 +829,7 @@ pub fn backend_env(ext_id: &str) -> Vec<(String, String)> {
     let Ok(home) = ggs_home() else {
         return Vec::new();
     };
-    let store = read_store(&home).unwrap_or_default();
-    let mut env = backend_env_for(ext_id, &store, &home);
+    let mut env = backend_env_for(ext_id, &home);
     if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         let dir = Path::new(&dir).to_string_lossy().into_owned();
         for (key, value) in env.iter_mut() {
@@ -840,37 +841,111 @@ pub fn backend_env(ext_id: &str) -> Vec<(String, String)> {
     env
 }
 
-/* ---------- The backend restart ---------- */
+/* ---------- The provider → Claude settings application ---------- */
 
-/// Stop and start again every bridged backend that is running — the Extensions view's
-/// deliberate restart, driven by a provider change. The start's handshake waits out a
-/// node activation, so it runs off the command's thread.
-fn restart_bridged_backends(app: &tauri::AppHandle) {
-    let host = ext_process::global();
-    host.attach_app(app.clone());
-    for ext_id in BRIDGED_EXT_IDS.iter().copied() {
-        let running = host
-            .status()
-            .iter()
-            .any(|info| info.extension_id == ext_id && info.pid != 0);
-        if !running {
-            continue;
-        }
-        if host.stop(ext_id).is_err() {
-            continue;
-        }
-        let Ok(dir) = crate::cmd_ext::extensions_dir(app) else {
-            continue;
-        };
-        let ext_id = ext_id.to_owned();
-        std::thread::spawn(move || {
-            if let Err(error) = host.start(&dir, &ext_id) {
-                crate::cmd_ext::log_extensions(&format!(
-                    "provider switch: {ext_id} backend did not come back: {error}"
-                ));
-            }
-        });
+/// The provider environment keys this bridge owns in Claude's settings — everything a
+/// third-party endpoint needs, and everything that must be *absent* for the official
+/// service (a stale endpoint here would shadow the user's login).
+pub const PROVIDER_ENV_KEYS: &[&str] = &[
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+];
+
+/// Claude's redirected settings with the active provider's environment applied — the
+/// composition core of a provider switch. Claude Code applies the settings' `env` map
+/// at every session start (the mechanism cc-switch uses), so writing it makes the next
+/// chat run on the new provider without restarting anything; a running conversation is
+/// never touched. The user's own env keys and every other setting are preserved
+/// verbatim; switching to the official profile removes exactly this bridge's keys (a
+/// stale endpoint here would shadow the official login). An unchanged file answers
+/// None; an unparseable one fails rather than being replaced.
+pub fn claude_provider_settings(
+    existing: Option<&str>,
+    env: &[(String, String)],
+) -> Result<Option<String>, String> {
+    let mut settings: serde_json::Value = match existing {
+        Some(text) if text.trim().is_empty() => serde_json::json!({}),
+        Some(text) => serde_json::from_str(text)
+            .map_err(|e| format!("the existing Claude settings are not valid JSON — not overwriting them: {e}"))?,
+        None => serde_json::json!({}),
+    };
+    if !settings.is_object() {
+        return Err("the existing Claude settings are not a JSON object — not overwriting them".to_owned());
     }
+    let object = settings.as_object_mut().expect("checked above");
+    let map = object
+        .entry("env")
+        .or_insert_with(|| serde_json::json!({}));
+    if !map.is_object() {
+        return Err("the existing env entry is not a JSON object — not overwriting it".to_owned());
+    }
+    let env_map = map.as_object_mut().expect("checked above");
+    // This bridge's keys are replaced wholesale — set what the active profile carries,
+    // remove the rest, so a previous provider never leaks through.
+    for key in PROVIDER_ENV_KEYS {
+        env_map.remove(*key);
+    }
+    for (key, value) in env {
+        env_map.insert(key.clone(), serde_json::Value::String(value.clone()));
+    }
+    if env_map.is_empty() {
+        object.remove("env");
+    }
+    let text = serde_json::to_string_pretty(&settings)
+        .map_err(|e| format!("serialize the Claude settings: {e}"))?
+        + "\n";
+    if Some(text.as_str()) == existing {
+        return Ok(None);
+    }
+    Ok(Some(text))
+}
+
+/// Apply the active provider to Claude's redirected settings — what a switch, a save
+/// of the active profile, an import or the boot pass all run through. Never restarts
+/// the backend: the next Claude session picks the change up from its own config read,
+/// and a conversation in flight keeps its provider. Errors are logged, never thrown
+/// into the command's answer — a failed write is diagnosable, not fatal.
+pub fn apply_claude_provider_env() {
+    let result = apply_claude_provider_env_inner();
+    if let Err(error) = result {
+        eprintln!("[providers] claude provider env: {error}");
+        crate::cmd_ext::log_extensions(&format!("claude provider env: {error}"));
+    }
+}
+
+/// [`apply_claude_provider_env`]'s IO body. The settings file lands 0600 when it
+/// carries a key (the same at-rest posture the sealed store has — the plaintext here
+/// is Claude Code's own configuration format, exactly what cc-switch writes).
+fn apply_claude_provider_env_inner() -> Result<(), String> {
+    let home = ggs_home()?;
+    let store = read_store(&home)?;
+    let env = store
+        .active_id
+        .as_deref()
+        .and_then(|id| store.profiles.iter().find(|p| p.id == id))
+        .map(|active| provider_env_vars(active, &home))
+        .unwrap_or_default();
+    let dir = home.join("claude");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let path = dir.join("settings.json");
+    let existing = std::fs::read_to_string(&path).ok();
+    if let Some(text) = claude_provider_settings(existing.as_deref(), &env)? {
+        std::fs::write(&path, &text).map_err(|e| format!("write {}: {e}", path.display()))?;
+        // The plaintext key is Claude Code's own configuration format here (exactly
+        // what cc-switch writes); the file gets the sealed store's at-rest posture.
+        if !env.is_empty() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|e| format!("restrict {}: {e}", path.display()))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /* ---------- The IPC answer ---------- */
@@ -945,14 +1020,17 @@ pub fn provider_save(
     let _guard = STORE_LOCK.lock().unwrap();
     let home = ggs_home()?;
     let mut store = read_store(&home)?;
-    let before = backend_env_for(CLAUDE_CODE_EXT_ID, &store, &home);
+    let before = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
     apply_save(&home, &mut store, &profile)?;
     write_store(&home, &store)?;
     drop(_guard);
-    let after = backend_env_for(CLAUDE_CODE_EXT_ID, &store, &home);
+    let after = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
     let answer = list_answer(&store);
     if before != after {
-        restart_bridged_backends(&app);
+        // No restart: the provider reaches Claude through its redirected settings
+        // (applied at every session start), so the switch lands on the next chat and
+        // a conversation in flight is untouched.
+        apply_claude_provider_env();
         let _ = tauri::Emitter::emit(&app, PROVIDERS_EVENT, ());
     }
     Ok(answer)
@@ -994,14 +1072,17 @@ pub fn provider_delete(app: tauri::AppHandle, id: String) -> Result<ProviderList
     let _guard = STORE_LOCK.lock().unwrap();
     let home = ggs_home()?;
     let mut store = read_store(&home)?;
-    let before = backend_env_for(CLAUDE_CODE_EXT_ID, &store, &home);
+    let before = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
     remove_profile(&mut store, &id)?;
     write_store(&home, &store)?;
     drop(_guard);
-    let after = backend_env_for(CLAUDE_CODE_EXT_ID, &store, &home);
+    let after = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
     let answer = list_answer(&store);
     if before != after {
-        restart_bridged_backends(&app);
+        // No restart: the provider reaches Claude through its redirected settings
+        // (applied at every session start), so the switch lands on the next chat and
+        // a conversation in flight is untouched.
+        apply_claude_provider_env();
         let _ = tauri::Emitter::emit(&app, PROVIDERS_EVENT, ());
     }
     Ok(answer)
@@ -1015,14 +1096,17 @@ pub fn provider_activate(app: tauri::AppHandle, id: String) -> Result<ProviderLi
     let _guard = STORE_LOCK.lock().unwrap();
     let home = ggs_home()?;
     let mut store = read_store(&home)?;
-    let before = backend_env_for(CLAUDE_CODE_EXT_ID, &store, &home);
+    let before = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
     set_active(&mut store, &id)?;
     write_store(&home, &store)?;
     drop(_guard);
-    let after = backend_env_for(CLAUDE_CODE_EXT_ID, &store, &home);
+    let after = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
     let answer = list_answer(&store);
     if before != after {
-        restart_bridged_backends(&app);
+        // No restart: the provider reaches Claude through its redirected settings
+        // (applied at every session start), so the switch lands on the next chat and
+        // a conversation in flight is untouched.
+        apply_claude_provider_env();
         let _ = tauri::Emitter::emit(&app, PROVIDERS_EVENT, ());
     }
     Ok(answer)
@@ -1103,7 +1187,7 @@ pub fn provider_import_ccswitch(
     let _guard = STORE_LOCK.lock().unwrap();
     let home = ggs_home()?;
     let mut store = read_store(&home)?;
-    let before = backend_env_for(CLAUDE_CODE_EXT_ID, &store, &home);
+    let before = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
     let (imported, activate) = import_ccswitch_entries(&home, &mut store, &names)?;
     if imported == 0 {
         return Err("none of the named configurations was found to import".to_owned());
@@ -1113,10 +1197,13 @@ pub fn provider_import_ccswitch(
     }
     write_store(&home, &store)?;
     drop(_guard);
-    let after = backend_env_for(CLAUDE_CODE_EXT_ID, &store, &home);
+    let after = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
     let answer = list_answer(&store);
     if before != after {
-        restart_bridged_backends(&app);
+        // No restart: the provider reaches Claude through its redirected settings
+        // (applied at every session start), so the switch lands on the next chat and
+        // a conversation in flight is untouched.
+        apply_claude_provider_env();
         let _ = tauri::Emitter::emit(&app, PROVIDERS_EVENT, ());
     }
     Ok(answer)
@@ -1190,18 +1277,19 @@ pub fn claude_mcp_settings(
     ))
 }
 
-/// Keep Claude's MCP configuration pointing at this app's analysis server for the open
-/// folder: written at boot and on every folder open/close beside `notify_workspace`
-/// (the composition root's wiring), so every new Claude session lists `ggs` under
-/// `/mcp` with the symbol index and the five analysis tools. Nothing here touches
-/// Claude's login state — `settings.json` only, and only our own server entry.
-pub fn apply_claude_mcp(folders: &[String]) {
-    let result = apply_claude_mcp_inner(folders, std::env::current_exe().ok().as_deref());
+/// Keep Claude's redirected settings current with everything this bridge owns: the
+/// MCP server registration (the analysis server for the open folder) and the active
+/// provider's environment. Written at boot and on every folder open/close beside
+/// `notify_workspace` (the composition root's wiring), so every new Claude session
+/// lists `ggs` under `/mcp` and runs on the chosen provider. Nothing here touches
+/// Claude's login state — `settings.json` only, and only our own entries.
+pub fn apply_claude_integration(folders: &[String]) {
+    let result = apply_claude_integration_inner(folders, std::env::current_exe().ok().as_deref());
     if let Err(error) = result {
         // The bridge must never keep a folder open or close from succeeding; the
         // extension host log is where a missing registration is diagnosable.
-        eprintln!("[providers] claude mcp registration: {error}");
-        crate::cmd_ext::log_extensions(&format!("claude mcp registration: {error}"));
+        eprintln!("[providers] claude integration: {error}");
+        crate::cmd_ext::log_extensions(&format!("claude integration: {error}"));
     }
 }
 
@@ -1220,6 +1308,14 @@ fn apply_claude_mcp_inner(folders: &[String], command: Option<&Path>) -> Result<
         std::fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))?;
     }
     Ok(())
+}
+
+/// [`apply_claude_integration`]'s injectable core (the executable path is a test seam):
+/// the MCP registration first, then the active provider's environment — two passes over
+/// one file, each a no-op when the file already agrees.
+fn apply_claude_integration_inner(folders: &[String], command: Option<&Path>) -> Result<(), String> {
+    apply_claude_mcp_inner(folders, command)?;
+    apply_claude_provider_env_inner()
 }
 
 /// What the MCP Server page reports about the automatic Claude integration.
@@ -1387,17 +1483,18 @@ mod tests {
         let home = ggs_home().unwrap();
         let mut store = third_party_store();
         store.active_id = Some("official".to_owned());
-        let env = backend_env_for(CLAUDE_CODE_EXT_ID, &store, &home);
+        let env = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
         let map = env_map(&env);
         assert_eq!(map.len(), 1, "official adds no endpoint vars: {env:?}");
         let dir = map["CLAUDE_CONFIG_DIR"];
         assert_eq!(dir, home.join("claude").to_str().unwrap());
         // And nothing at all for an extension the bridge does not serve.
-        assert!(backend_env_for("some.other.ext", &store, &home).is_empty());
+        assert!(backend_env_for("some.other.ext", &home).is_empty());
     }
 
-    /// The active third-party profile carries the endpoint, the decrypted key and the
-    /// model ids — the takeover the sandbox probe proves against a local server.
+    /// The active third-party profile's provider environment carries the endpoint, the
+    /// decrypted key and the model ids — the values the switch writes into Claude's
+    /// settings (the takeover the sandbox probe proves against a local server).
     #[test]
     fn a_third_party_provider_carries_endpoint_key_and_models() {
         let _guard = ProviderHome::pin();
@@ -1405,23 +1502,26 @@ mod tests {
         let mut store = third_party_store();
         store.profiles[1].api_key_enc = Some(seal(&home, "sk-live-key").unwrap());
         store.profiles[1].api_key_hint = Some("-key".to_owned());
-        let env = backend_env_for(CLAUDE_CODE_EXT_ID, &store, &home);
+        let active = store.profiles[1].clone();
+        let env = provider_env_vars(&active, &home);
         let map = env_map(&env);
-        assert_eq!(map["CLAUDE_CONFIG_DIR"], home.join("claude").to_str().unwrap());
         assert_eq!(map["ANTHROPIC_BASE_URL"], "https://api.deepseek.com/anthropic");
         assert_eq!(map["ANTHROPIC_AUTH_TOKEN"], "sk-live-key");
         assert_eq!(map["ANTHROPIC_API_KEY"], "sk-live-key");
         assert_eq!(map["ANTHROPIC_MODEL"], "deepseek-chat");
         assert_eq!(map["ANTHROPIC_SMALL_FAST_MODEL"], "deepseek-chat");
-        assert_eq!(map.len(), 6, "{env:?}");
-        // No active provider (an empty store): the config dir alone.
-        let mut empty = store.clone();
-        empty.active_id = None;
-        assert_eq!(backend_env_for(CLAUDE_CODE_EXT_ID, &empty, &home).len(), 1);
+        assert_eq!(map.len(), 5, "{env:?}");
+        // The official profile carries none of them — its keys must leave the settings
+        // so the user's own login is never shadowed.
+        assert!(provider_env_vars(&official_profile(), &home).is_empty());
+        // And the spawn environment stays the config redirect alone (one source of
+        // provider truth: the settings file).
+        let spawn = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
+        assert_eq!(env_map(&spawn).len(), 1, "{spawn:?}");
     }
 
-    /// A key sealed under another install's master key does not take the backend down:
-    /// the endpoint vars still apply, the key vars are skipped.
+    /// A key sealed under another install's master key is skipped, not fatal: the
+    /// endpoint vars still apply, the key vars are absent.
     #[test]
     fn a_key_from_another_install_is_skipped_not_fatal() {
         let guard_a = ProviderHome::pin();
@@ -1430,9 +1530,9 @@ mod tests {
 
         let _guard = ProviderHome::pin();
         let home = ggs_home().unwrap();
-        let mut store = third_party_store();
-        store.profiles[1].api_key_enc = Some(sealed_elsewhere);
-        let env = backend_env_for(CLAUDE_CODE_EXT_ID, &store, &home);
+        let mut profile = deepseek_profile();
+        profile.api_key_enc = Some(sealed_elsewhere);
+        let env = provider_env_vars(&profile, &home);
         let map = env_map(&env);
         assert_eq!(
             map.get("ANTHROPIC_BASE_URL").copied(),
@@ -1440,6 +1540,65 @@ mod tests {
         );
         assert!(!map.contains_key("ANTHROPIC_AUTH_TOKEN"));
         assert!(!map.contains_key("ANTHROPIC_API_KEY"));
+    }
+
+    /// The switch's write path: a third-party profile lands its env in Claude's
+    /// settings, the official one removes exactly this bridge's keys (a stale endpoint
+    /// would shadow the login), the user's own env keys survive, an unchanged file is
+    /// a no-op, and an unparseable one is failed on.
+    #[test]
+    fn claude_provider_settings_merges_clears_and_preserves() {
+        let third_party = vec![
+            ("ANTHROPIC_BASE_URL".to_owned(), "https://api.deepseek.com/anthropic".to_owned()),
+            ("ANTHROPIC_AUTH_TOKEN".to_owned(), "sk-live".to_owned()),
+            ("ANTHROPIC_MODEL".to_owned(), "deepseek-chat".to_owned()),
+        ];
+        let written = claude_provider_settings(
+            Some(r#"{"env": {"MY_VAR": "keep-me", "ANTHROPIC_BASE_URL": "https://stale"}}"#),
+            &third_party,
+        )
+        .unwrap()
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(json.pointer("/env/MY_VAR").and_then(|v| v.as_str()), Some("keep-me"));
+        assert_eq!(json.pointer("/env/ANTHROPIC_BASE_URL").and_then(|v| v.as_str()), Some("https://api.deepseek.com/anthropic"));
+        assert_eq!(json.pointer("/env/ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()), Some("sk-live"));
+
+        // Applying the same env again is a no-op; switching to official clears only
+        // this bridge's keys.
+        assert_eq!(claude_provider_settings(Some(&written), &third_party).unwrap(), None);
+        let cleared = claude_provider_settings(Some(&written), &[]).unwrap().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&cleared).unwrap();
+        assert_eq!(json.pointer("/env/MY_VAR").and_then(|v| v.as_str()), Some("keep-me"));
+        assert!(json.pointer("/env/ANTHROPIC_BASE_URL").is_none());
+
+        assert!(claude_provider_settings(Some("{not json"), &third_party).is_err());
+    }
+
+    /// The switch's IO: activate writes the third-party env into the redirected
+    /// settings (0600 — it carries the plaintext key, Claude Code's own configuration
+    /// format), and switching back to official clears the keys again.
+    #[test]
+    fn the_provider_switch_writes_and_clears_the_settings_env() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        let mut store = third_party_store();
+        store.profiles[1].api_key_enc = Some(seal(&home, "sk-live-key").unwrap());
+        let path = home.join("claude").join("settings.json");
+
+        let active = store.profiles[1].clone();
+        let env = provider_env_vars(&active, &home);
+        let text = claude_provider_settings(None, &env).unwrap().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &text).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json.pointer("/env/ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()), Some("sk-live-key"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
     }
 
     /// Saving keeps, replaces and clears the stored key as `apiKey` says, and the store
@@ -1839,11 +1998,13 @@ mod tests {
             .expect("the imported profile is in the store");
         let sealed = profile.api_key_enc.as_deref().expect("the key was sealed");
         assert_eq!(unseal(&home, sealed).unwrap(), "sk-cc-deepseek");
-        // The imported current one drives the environment now.
-        let env = backend_env_for(CLAUDE_CODE_EXT_ID, &store, &home);
+        // The imported current one drives the provider environment now (the settings
+        // writer's source); the spawn environment stays the config redirect alone.
+        let env = provider_env_vars(profile, &home);
         let map = env_map(&env);
         assert_eq!(map["ANTHROPIC_BASE_URL"], "https://api.deepseek.com/anthropic");
         assert_eq!(map["ANTHROPIC_AUTH_TOKEN"], "sk-cc-deepseek");
+        assert_eq!(env_map(&backend_env_for(CLAUDE_CODE_EXT_ID, &home)).len(), 1);
 
         // Unknown names are skipped, an empty import answers zero.
         let (imported, _) = import_ccswitch_entries(&home, &mut store, &["no-such".to_owned()]).unwrap();

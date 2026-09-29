@@ -453,7 +453,7 @@ const en = {
 	'providers.saveFailed': 'Could not save the provider: ',
 	'providers.deleteFailed': 'Could not delete the provider: ',
 	'providers.activateFailed': 'Could not switch the provider: ',
-	'providers.switched': 'Switched to {0}',
+	'providers.switched': 'Switched to {0} — new Claude sessions use it',
 	'providers.retry': 'Retry',
 	'providers.noKey': 'no API key',
 	'providers.preset.official': 'Official Claude',
@@ -479,7 +479,7 @@ const en = {
 	'providers.official.description': 'Anthropic\'s official service — sign in inside the Claude view',
 	'providers.note.state': 'Provider settings live under ~/.ggs — Claude\'s own state (login, history) is kept in ~/.ggs/claude and ~/.claude is never written.',
 	'providers.note.key': 'API keys are sealed with AES-256-GCM under this install\'s master key and decrypted only when the Claude backend starts.',
-	'providers.note.restart': 'Switching provider restarts the Claude backend so the new endpoint takes effect.'
+	'providers.note.restart': 'Switching writes the provider into Claude\'s redirected settings — the next new session uses it, and a conversation in flight is never interrupted. No backend restart needed.'
 };
 
 const zhCn: typeof en = {
@@ -930,7 +930,7 @@ const zhCn: typeof en = {
 	'providers.saveFailed': '无法保存供应商：',
 	'providers.deleteFailed': '无法删除供应商：',
 	'providers.activateFailed': '无法切换供应商：',
-	'providers.switched': '已切换到 {0}',
+	'providers.switched': '已切换到 {0} — 新的 Claude 会话即生效',
 	'providers.retry': '重试',
 	'providers.noKey': '未配置密钥',
 	'providers.preset.official': 'Claude 官方',
@@ -956,7 +956,7 @@ const zhCn: typeof en = {
 	'providers.official.description': 'Anthropic 官方服务 — 在 Claude 视图内登录',
 	'providers.note.state': '供应商配置保存在 ~/.ggs 下 — Claude 自身的状态（登录、历史）保存在 ~/.ggs/claude，绝不写入 ~/.claude。',
 	'providers.note.key': 'API 密钥以 AES-256-GCM 加密保存在本机专属主密钥之下，仅在 Claude 后端启动时解密。',
-	'providers.note.restart': '切换供应商会重启 Claude 后端，使新服务立即生效。'
+	'providers.note.restart': '切换会把供应商写入 Claude 的重定向配置 — 下一个新会话即生效，进行中的对话不受影响，无需重启后端。'
 };
 
 const TABLES: Record<Locale, typeof en> = { en, 'zh-cn': zhCn };
