@@ -639,8 +639,8 @@ body.resizing iframe { pointer-events: none; }
 
 .cm-editor { font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); background: var(--vscode-editor-background); color: var(--vscode-editor-foreground); }
 /* The scroller carries its own `font-family: monospace` in CodeMirror's base theme, which would
-   override the editor font by inheritance; VS Code's own defaults are restored here (Consolas,
-   14px / 19px line height, no ligatures). */
+   override the editor font by inheritance; VS Code's own defaults are restored here (the theme's
+   per-platform code font stack, 14px / 19px line height, no ligatures). */
 .cm-editor .cm-scroller {
 	font-family: var(--vscode-editor-font-family);
 	font-size: var(--vscode-editor-font-size);
@@ -1048,9 +1048,12 @@ body.resizing iframe { pointer-events: none; }
 .editor-sash:hover, .editor-sash.active { background: var(--vscode-sash-hoverBorder); }
 
 /* ---------- Editor decorations (M3 3.2): brackets, sticky scroll, minimap ---------- */
-.cm-bracket-0, .cm-bracket-0 * { color: #ffd700 !important; }
-.cm-bracket-1, .cm-bracket-1 * { color: #da70d6 !important; }
-.cm-bracket-2, .cm-bracket-2 * { color: #179fff !important; }
+/* VS Code's bracket-colorization trio, per theme via editorBracketHighlight tokens - the dark
+   trio is illegible on a white page, so the light theme carries darkened hues of the same
+   colors (gold #8f6400, orchid #b044ad, blue #0068d6). */
+.cm-bracket-0, .cm-bracket-0 * { color: var(--vscode-editorBracketHighlight-foreground1, #ffd700) !important; }
+.cm-bracket-1, .cm-bracket-1 * { color: var(--vscode-editorBracketHighlight-foreground2, #da70d6) !important; }
+.cm-bracket-2, .cm-bracket-2 * { color: var(--vscode-editorBracketHighlight-foreground3, #179fff) !important; }
 
 .cm-sticky {
 	position: absolute; top: 0; left: 0; right: 0; z-index: 6;

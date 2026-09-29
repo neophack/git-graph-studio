@@ -5,11 +5,11 @@
  * light Dark+ token colors.
  */
 :root {
-	/* Fonts - what VS Code publishes on Windows; each has a cross-platform fallback. */
+	/* Fonts - VS Code's per-platform defaults merged into one stack: each platform resolves its own code font first (macOS Menlo, Windows Consolas, Linux Droid Sans Mono); Courier New is the last shared fallback. */
 	--vscode-font-family: "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", sans-serif;
 	--vscode-font-weight: normal;
 	--vscode-font-size: 13px;
-	--vscode-editor-font-family: Consolas, "Courier New", "Droid Sans Mono", monospace;
+	--vscode-editor-font-family: Menlo, Consolas, Monaco, "Courier New", "Droid Sans Mono", monospace;
 	--vscode-editor-font-weight: normal;
 	--vscode-editor-font-size: 14px;
 	--monaco-monospace-font: var(--vscode-editor-font-family);
@@ -264,6 +264,10 @@
 	--syntax-regexp: #811f3f;
 	--syntax-constant: #0070c1;
 	--syntax-angle: #767676;
+	/* Bracket pair colouring - the dark trio's hues darkened for the white page, read by shell.css. */
+	--vscode-editorBracketHighlight-foreground1: #8f6400;
+	--vscode-editorBracketHighlight-foreground2: #b044ad;
+	--vscode-editorBracketHighlight-foreground3: #0068d6;
 }
 
 /* The webview base styles VS Code applies before an extension's own stylesheet. */

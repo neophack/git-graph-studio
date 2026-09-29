@@ -141,7 +141,7 @@ export class TerminalView {
 		const { Terminal, FitAddon } = await loadXterm();
 		const id = this.nextId++;
 		const term = new Terminal({
-			fontFamily: cssVar('--vscode-editor-font-family') || 'Consolas, monospace',
+			fontFamily: cssVar('--vscode-editor-font-family') || 'Menlo, Consolas, monospace',
 			fontSize: 14,
 			lineHeight: 1,
 			cursorBlink: true,

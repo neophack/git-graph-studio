@@ -8,7 +8,7 @@
 	--vscode-font-family: "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", sans-serif;
 	--vscode-font-weight: normal;
 	--vscode-font-size: 13px;
-	--vscode-editor-font-family: Consolas, "Courier New", "Droid Sans Mono", monospace;
+	--vscode-editor-font-family: Menlo, Consolas, Monaco, "Courier New", "Droid Sans Mono", monospace;
 	--vscode-editor-font-weight: normal;
 	--vscode-editor-font-size: 14px;
 	--monaco-monospace-font: var(--vscode-editor-font-family);
@@ -263,6 +263,10 @@
 	--syntax-regexp: #d16969;
 	--syntax-constant: #4fc1ff;
 	--syntax-angle: #808080;
+	/* Bracket pair colouring (VS Code's colorization trio), read by shell.css. */
+	--vscode-editorBracketHighlight-foreground1: #ffd700;
+	--vscode-editorBracketHighlight-foreground2: #da70d6;
+	--vscode-editorBracketHighlight-foreground3: #179fff;
 }
 
 /* The webview base styles VS Code applies before an extension's own stylesheet. */
