@@ -294,6 +294,7 @@ try {
 	/* 4¾. "New session" in the chat tab opens another editor tab (the tab-hosted chat's
 	 * openNewInTab path: new_conversation_tab → claude-vscode.editor.open → a new panel). */
 	const tabsBefore = await workbench.evaluate(`[...document.querySelectorAll('.tab')].filter((t) => /Claude Code/i.test(t.textContent)).length`);
+	const framesBefore = workbench.frames.length; // the new panel's own frame session lands after this
 	const clickedNew = await workbench.evaluate(`(() => {
 		for (const frame of document.querySelectorAll('iframe')) {
 			let doc = null;
@@ -309,6 +310,30 @@ try {
 		tabsAfter = await workbench.evaluate(`[...document.querySelectorAll('.tab')].filter((t) => /Claude Code/i.test(t.textContent)).length`);
 	}
 	check('"New session" in the chat tab opens a new editor tab', clickedNew === true && tabsAfter === tabsBefore + 1, `clicked=${clickedNew} tabs ${tabsBefore} -> ${tabsAfter}`);
+
+	/* 4⅞. The new session's own page rendered — a tab that opened but stayed empty was
+	 * exactly the mount race (the extension's initial postMessage crossed before the tab
+	 * mounted, and the old host dropped it). The tab-count check above cannot see it:
+	 * this probes the frame that attached since the click for real content — root
+	 * mounted, children, and non-empty text (a blank-but-loaded page has none). */
+	let newSessionOk = false;
+	let newSessionDetail = String.fromCharCode(45, 45);
+	for (let attempt = 0; attempt < 30 && !newSessionOk; attempt++) {
+		await sleep(500);
+		for (const frame of workbench.frames.slice(framesBefore)) {
+			if (frame.sessionId === null) continue;
+			try {
+				const probe = await workbench.send('Runtime.evaluate', { expression: frameProbeExpression, returnByValue: true }, frame.sessionId)
+					.then((r) => r?.result?.value ?? { root: false, children: 0, text: '' });
+				if (probe.root && probe.children > 0 && (probe.text || '').trim().length > 0) {
+					newSessionOk = true;
+					newSessionDetail = JSON.stringify(probe);
+					break;
+				}
+			} catch { /* a frame whose context is gone skips */ }
+		}
+	}
+	check('the new session page rendered inside its frame (not the blank mount race)', newSessionOk, newSessionDetail);
 
 	/* 5. The extension's host requests prove the webview lifecycle (create + setHtml +
 	 * postMessage flowing), and its Output channel + the served assets show the machinery

@@ -2059,10 +2059,14 @@ fn extract_vsix(vsix: &Path, target: &Path) -> Result<(), String> {
 pub fn repair_exec_bits(ext_dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let dir = ext_dir.join("resources").join("native-binary");
-    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
-        let Ok(meta) = std::fs::metadata(&path) else { continue };
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
         if !meta.is_file() {
             continue;
         }
@@ -2533,14 +2537,20 @@ mod install_tests {
         assert_eq!(mode, 0o755);
         // Idempotent: a correct install crosses the same hook at every boot untouched.
         repair_exec_bits(tmp.path());
-        assert_eq!(std::fs::metadata(&bin).unwrap().permissions().mode() & 0o777, 0o755);
+        assert_eq!(
+            std::fs::metadata(&bin).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
         // A package without the native-binary layout (or a foreign path) is a no-op.
         let plain = tmp.path().join("out/extension.js");
         std::fs::create_dir_all(plain.parent().unwrap()).unwrap();
         std::fs::write(&plain, b"activate").unwrap();
         std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
         repair_exec_bits(plain.parent().unwrap());
-        assert_eq!(std::fs::metadata(&plain).unwrap().permissions().mode() & 0o777, 0o644);
+        assert_eq!(
+            std::fs::metadata(&plain).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
     }
 
     /// A `.vsix` with a package.json and a web page (an extra data file,

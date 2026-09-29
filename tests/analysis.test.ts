@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { flush } from './helpers';
 
 import { backend, Channel } from './tauriMock';
+import { initializations, rendered } from './mermaidStub';
 
 
 let AnalysisView: typeof import('../src/analysisView').AnalysisView;
@@ -293,6 +294,72 @@ describe('the graph pages', () => {
 			if (marked !== count) throw new Error(`the drawing holds ${marked} blocks, not ${count} yet`);
 		}, { timeout: 3000 });
 	}
+
+	it('renders through gitdiagram mermaid configuration, verbatim', async () => {
+		await modules();
+		backend.on('analysis_module_graph', moduleGraphAnswer);
+		backend.on('analysis_module_diagram', () => diagramAnswer());
+		createAnalysisPage('modules', host());
+		await flush(8);
+		// The one initialize() the page made is gitdiagram's own baseConfig — the
+		// display is its pipeline by construction, not by approximation.
+		expect(initializations.length).toBeGreaterThanOrEqual(1);
+		const config = initializations.at(-1)!;
+		expect(config).toMatchObject({
+			startOnLoad: false,
+			securityLevel: 'strict',
+			theme: 'base',
+			htmlLabels: false,
+			layout: 'elk',
+			look: 'classic'
+		});
+		expect(config.flowchart).toEqual({
+			wrappingWidth: 200,
+			curve: 'linear',
+			nodeSpacing: 50,
+			rankSpacing: 50,
+			padding: 15
+		});
+		// Nothing beyond their config — extra ELK tweaks would fork the look.
+		expect(config.elk).toBeUndefined();
+	});
+
+	it('renders gitdiagram’s dark palette under a dark theme, and re-renders when the theme flips', async () => {
+		await modules();
+		backend.on('analysis_module_graph', moduleGraphAnswer);
+		backend.on('analysis_module_diagram', () => diagramAnswer());
+		const root = host();
+		createAnalysisPage('modules', root);
+		await untilDrawn(root);
+		// jsdom's document carries no theme kind — the drawing opens in
+		// gitdiagram's light variable set.
+		const light = initializations.at(-1)!.themeVariables as Record<string, string>;
+		expect(light.lineColor).toBe('#334155');
+		expect(light.primaryTextColor).toBe('#171717');
+		// A dark theme flips the pick — settings marks the kind on <html> and
+		// dispatches THEME_EVENT once the stylesheet has loaded; the drawing
+		// re-renders through gitdiagram's dark variables.
+		document.documentElement.classList.add('vscode-dark');
+		const rendersBefore = rendered.length;
+		try {
+			document.dispatchEvent(new CustomEvent('app:theme-applied', { bubbles: true }));
+			await flush(8);
+			const dark = initializations.at(-1)!.themeVariables as Record<string, string>;
+			expect(dark.lineColor).toBe('#ffd486');
+			expect(dark.primaryTextColor).toBe('#e8edf5');
+			expect(dark.secondaryColor).toBe('#26303f');
+			expect(rendered.length).toBeGreaterThan(rendersBefore);
+			expect(initializations.at(-1)!.flowchart).toEqual({
+				wrappingWidth: 200,
+				curve: 'linear',
+				nodeSpacing: 50,
+				rankSpacing: 50,
+				padding: 15
+			});
+		} finally {
+			document.documentElement.classList.remove('vscode-dark');
+		}
+	});
 
 	it('module analysis renders the backend diagram and opens a file on block double-click', async () => {
 		await modules();

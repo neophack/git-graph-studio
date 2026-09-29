@@ -1392,21 +1392,26 @@ body.resizing iframe { pointer-events: none; }
 .an-toggle.on { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
 .an-sort { height: 24px; font-size: 11px; border-radius: 4px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); }
 
-/* The Module Analysis drawing (module 17): the backend-laid-out diagram as SVG —
-   module group boxes tinted by their palette slot, blocks stroked in their group's
-   colour, call-count-labelled arrows — with wheel zoom / drag pan, the zoom toolbar
-   in the top corner and the selection / focus chips in the bottom one. Every colour
-   is a CSS variable (`--gstroke` per palette slot), so the theme follows for free
-   and no re-render is ever needed for it. */
+/* The Module Analysis drawing (module 17): the backend-curated mermaid source
+   rendered by mermaid itself (ELK layout, classic look) — the tone cards and
+   clusters carry their styles inside the SVG (the classDefs ride the source),
+   while everything around it reads the workbench theme's --vscode-* tokens: the
+   sheet is the editor surface, the toolbar and the chips are editor widgets, so
+   a theme switch recolours them with no re-render at all. */
 .an-diagram { flex: 1; min-height: 0; position: relative; overflow: hidden; cursor: grab; touch-action: none; outline: none; }
 .an-diagram.dragging { cursor: grabbing; }
 .an-diagram.empty .an-zoombar { display: none; }
-.an-svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-/* The toolbar rides the lavender canvas as gitdiagram's own pill: white glass,
-   slate glyphs (fixed colours, like the canvas). */
+.an-diagram {
+	background: var(--vscode-editor-background);
+	--dg-accent: var(--vscode-focusBorder, var(--vscode-editor-foreground));
+}
+/* The toolbar rides the canvas as gitdiagram's own pill, in the theme's
+   editor-widget colours. */
 .an-zoombar {
 	position: absolute; top: 10px; right: 10px; z-index: 2; display: flex; gap: 6px; align-items: center;
-	--tb-bg: rgba(255, 255, 255, 0.85); --tb-line: rgba(51, 65, 85, 0.18); --tb-text: #334155;
+	--tb-bg: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.15));
+	--tb-line: var(--vscode-widget-border, rgba(128, 128, 128, 0.35));
+	--tb-text: var(--vscode-editorWidget-foreground, var(--vscode-editor-foreground));
 }
 .an-zoombar .pill {
 	display: flex; align-items: center; overflow: hidden; border-radius: 999px;
@@ -1414,7 +1419,7 @@ body.resizing iframe { pointer-events: none; }
 }
 .an-zoombar .pill .action-btn { border-radius: 0; }
 .an-zoombar .action-btn { color: var(--tb-text); }
-.an-zoombar .action-btn:hover { background: rgba(51, 65, 85, 0.08); }
+.an-zoombar .action-btn:hover { background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.2)); }
 .an-zoom-level {
 	min-width: 46px; text-align: center; font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
 	color: var(--tb-text); border-left: 1px solid var(--tb-line);
@@ -1425,15 +1430,11 @@ body.resizing iframe { pointer-events: none; }
 	background: var(--tb-bg); border: 1px solid var(--tb-line);
 }
 /* The diagram is gitdiagram's rendering, verbatim: mermaid draws it (ELK layout,
-   classic look) over the fixed lavender sheet, so the tone cards and clusters carry
-   their styles inside the SVG itself (the classDefs ride the source). What lives
-   here is everything around the SVG — the sheet, the state classes the page's
+   classic look) over the themed editor surface, so the tone cards and clusters carry
+   their styles inside the SVG itself (the classDefs ride the source — the drawing's
+   own light/dark variable set follows the theme kind, moduleDiagram.ts). What lives
+   here is everything around the SVG — the state classes the page's
    selection computes over mermaid's own elements, and the label LOD. */
-.an-diagram {
-	background: #ede3fd;
-	--dg-edge: #475569;
-	--dg-accent: #2563eb;
-}
 .an-mermaid { position: absolute; }
 .an-mermaid svg { display: block; }
 .an-mermaid g.node, .an-mermaid g.edgeLabel, .an-mermaid [id^="L_N"] { cursor: pointer; }
@@ -1454,35 +1455,14 @@ body.resizing iframe { pointer-events: none; }
 .an-mermaid g.node.dim, .an-mermaid g.edgeLabel.dim, .an-mermaid path.dim { opacity: 0.22; }
 .an-mermaid path.dim, .an-mermaid g.edgePaths path.dim { opacity: 0.22; }
 .an-mermaid path.selected, .an-mermaid g.edgePaths path.selected { stroke: var(--dg-accent) !important; }
-/* The toolbar rides the lavender canvas as gitdiagram's own pill: white glass,
-   slate glyphs (fixed colours, like the canvas). */
-.an-zoombar {
-	position: absolute; top: 10px; right: 10px; z-index: 2; display: flex; gap: 6px; align-items: center;
-	--tb-bg: rgba(255, 255, 255, 0.85); --tb-line: rgba(51, 65, 85, 0.18); --tb-text: #334155;
-}
-.an-zoombar .pill {
-	display: flex; align-items: center; overflow: hidden; border-radius: 999px;
-	background: var(--tb-bg); border: 1px solid var(--tb-line);
-}
-.an-zoombar .pill .action-btn { border-radius: 0; }
-.an-zoombar .action-btn { color: var(--tb-text); }
-.an-zoombar .action-btn:hover { background: rgba(51, 65, 85, 0.08); }
-.an-zoom-level {
-	min-width: 46px; text-align: center; font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
-	color: var(--tb-text); border-left: 1px solid var(--tb-line);
-	border-right: 1px solid var(--tb-line); padding: 0 8px; align-self: stretch; line-height: 22px;
-}
-.an-zoombar > .action-btn {
-	height: 24px; border-radius: 999px; padding: 0 10px;
-	background: var(--tb-bg); border: 1px solid var(--tb-line);
-}
 .an-graphbar { position: absolute; left: 8px; bottom: 6px; z-index: 2; display: flex; gap: 6px; align-items: center; }
 .an-graphbar:empty { display: none; }
 .an-graphbar .chip {
 	display: inline-flex; align-items: center; gap: 4px; max-width: 60vw;
 	padding: 2px 4px 2px 8px; border-radius: 999px;
-	background: rgba(255, 255, 255, 0.9); border: 1px solid rgba(51, 65, 85, 0.18);
-	font-size: 11px; color: #334155;
+	background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.15));
+	border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.35));
+	font-size: 11px; color: var(--vscode-editorWidget-foreground, var(--vscode-editor-foreground));
 }
 .an-graphbar .chip > span:not(.codicon) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 

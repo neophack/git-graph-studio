@@ -412,13 +412,15 @@ const FILTER_DEBOUNCE_MS = 250;
 
 /** The Module Analysis page: the workspace's cross-file calls as a gitdiagram-style
  *  architecture diagram — the busiest files as blocks inside their module's group box,
- *  every kept dependency an arrow labelled by its call count, the geometry, the caps
+ *  every kept dependency an arrow labelled with its call count, the geometry, the caps
  *  and the mermaid source all the backend's (`analysis_module_diagram`) — drawn on the
  *  SVG viewport of moduleDiagram.ts (wheel zoom at the cursor, drag pan, a zoom toolbar
  *  with fit, a click highlighting a block's dependencies, the right-click menu jumping
  *  between the related files, double-click opening) beside a collapsible tree (module
- *  dependencies → file pairs → call sites). The filter and the focus narrow the pairs
- *  at the source and refetch; the tree renders lazily, so the page stays responsive on
+ *  dependencies → file pairs → call sites). The drawing's filter narrows to the files
+ *  whose path spells the query (it shrinks with every keystroke — a pair survives only
+ *  between matching files), the focus isolates one file's neighbourhood, and the tree
+ *  matches symbols too; the tree renders lazily, so the page stays responsive on
  *  any workspace. */
 class ModulePage implements AnalysisPageView {
 	private data: ModuleGraphData | null = null;

@@ -13,6 +13,9 @@ export interface RenderCall {
 
 const calls: RenderCall[] = [];
 
+/** Every initialize() the pages made — the config-parity assertions read these. */
+const initializations: Record<string, unknown>[] = [];
+
 /** Parse the flowchart source into mermaid's element shapes. */
 function fakeSvg(text: string): string {
 	const nodes: string[] = [];
@@ -52,8 +55,8 @@ const mermaid = {
 	registerLayoutLoaders: async (): Promise<void> => {
 		/* the stub lays nothing out — the ids it mints are the contract */
 	},
-	initialize: (): void => {
-		/* recorded through the render calls */
+	initialize: (config: Record<string, unknown>): void => {
+		initializations.push(config);
 	},
 	render: async (id: string, text: string): Promise<{ svg: string }> => {
 		calls.push({ id, text });
@@ -64,4 +67,4 @@ const mermaid = {
 export default mermaid;
 
 /** Every render the stubbed pages made, oldest first. */
-export { calls as rendered };
+export { calls as rendered, initializations };

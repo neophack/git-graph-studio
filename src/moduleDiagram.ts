@@ -2,12 +2,15 @@
 // `analysis_module_diagram` hands over as mermaid `flowchart TD` source, rendered by
 // mermaid itself — the same renderer, the same ELK layered layout, spacing and
 // classic look gitdiagram initializes (its mermaid-diagram.tsx), so the blocks can
-// never overlap and the look is gitdiagram's by construction. The viewer around the
-// SVG is a port of gitdiagram's own viewport (its use-mermaid-viewport /
+// never overlap and the look is gitdiagram's by construction; its light or dark
+// themeVariables follow the workbench theme's kind. The viewer around the
+// SVG is a port of gitdiagram's own (its use-mermaid-viewport /
 // use-diagram-wheel-gestures): the zoom bounds and the percentage read against the
-// fit level (100 % = fitted, 0.6×–12×), a mouse wheel zooms at the cursor while a
-// trackpad's two-finger scroll pans (per-burst gesture latch, ctrl/cmd always
-// pinch-zoom, WKWebView gesture events too), panning clamps to the 32–160 px gutter
+// fit level (100 % = fitted, 0.6×–12×), the wheel always zooms at the cursor —
+// a mouse wheel and a trackpad's two-finger scroll alike; panning is the drag and
+// the arrow keys (gitdiagram's per-burst trackpad/mouse latch misread real mice on
+// WKWebView) — ctrl/cmd and WKWebView gesture events pinch-zoom,
+// panning clamps to the 32–160 px gutter
 // band, the toolbar's zoom and fit glide over 160 ms (skipped under
 // prefers-reduced-motion), the keyboard pans by arrow and fits on 0/Home. The
 // interactions the page owns — click highlight, double-click open, the right-click
@@ -16,6 +19,7 @@
 // drawing (a chunk the reports never pay for).
 
 import { t } from './i18n';
+import { THEME_EVENT } from './settings';
 import { actionButton, el } from './ui';
 
 /* ---------- The backend shapes (`analysis_module_diagram`) ---------- */
@@ -76,8 +80,6 @@ const ARROW_PAN = 40;
 const ANIMATE_MS = 160;
 /** Pointer travel (px) after which a press stops being a click and becomes a pan. */
 const DRAG_THRESHOLD = 4;
-/** A wheel burst's gesture latch (gitdiagram's 180 ms). */
-const WHEEL_LATCH_MS = 180;
 
 /** The pan/zoom gutter: how much of the diagram may leave the viewport (clamped to
  *  gitdiagram's 32–160 px band, 12 % of the axis). */
@@ -85,7 +87,7 @@ function gutter(container: number): number {
 	return Math.max(32, Math.min(160, container * 0.12));
 }
 
-/* ---------- mermaid, loaded once with gitdiagram's config ---------- */
+/* ---------- mermaid, loaded once, configured per render ---------- */
 
 type MermaidRenderer = {
 	registerLayoutLoaders: (...loaders: unknown[]) => Promise<void> | void;
@@ -95,10 +97,56 @@ type MermaidRenderer = {
 
 let mermaidReady: Promise<MermaidRenderer> | null = null;
 
-/** mermaid + its ELK layout, initialized once with gitdiagram's own configuration
- *  (its mermaid-diagram.tsx baseConfig): ELK layered layout, classic look, linear
- *  curves, htmlLabels off with the 200 px wrap, its spacing, and its light theme
- *  variables over our fixed light canvas. */
+/** gitdiagram's own baseConfig (its mermaid-diagram.tsx): ELK layered layout,
+ *  classic look, linear curves, htmlLabels off with the 200 px wrap, its spacing —
+ *  and its light or dark themeVariables, picked by the workbench theme's kind at
+ *  the moment of the render (its two palettes, verbatim; the canvas stays
+ *  transparent so the themed sheet shows through). */
+function mermaidConfig(): Record<string, unknown> {
+	const dark = document.documentElement.classList.contains('vscode-dark');
+	return {
+		startOnLoad: false,
+		suppressErrorRendering: true,
+		securityLevel: 'strict',
+		theme: 'base',
+		htmlLabels: false,
+		layout: 'elk',
+		// gitdiagram's comment holds here too: mermaid 12 defaults to the neo look
+		// and a 120 px wrap, which splits file paths mid-name — keep the classic
+		// look and the old 200 px wrap.
+		look: 'classic',
+		flowchart: {
+			wrappingWidth: 200,
+			curve: 'linear',
+			nodeSpacing: 50,
+			rankSpacing: 50,
+			padding: 15
+		},
+		themeVariables: dark
+			? {
+					background: 'transparent',
+					primaryColor: '#2c3544',
+					primaryBorderColor: '#6dd4e9',
+					primaryTextColor: '#e8edf5',
+					lineColor: '#ffd486',
+					secondaryColor: '#26303f',
+					tertiaryColor: '#323d4d'
+				}
+			: {
+					background: 'transparent',
+					primaryColor: '#f7f7f7',
+					primaryBorderColor: '#334155',
+					primaryTextColor: '#171717',
+					lineColor: '#334155',
+					secondaryColor: '#f0f0f0',
+					tertiaryColor: '#f7f7f7'
+				}
+	};
+}
+
+/** mermaid + its ELK layout, loaded once; every render re-initializes with the
+ *  config the current theme kind picks, so a theme switch recolours the next
+ *  drawing (gitdiagram re-initializes on its own isDark flip the same way). */
 function ensureMermaid(): Promise<MermaidRenderer> {
 	return (mermaidReady ??= (async () => {
 		const [{ default: mermaid }, layout] = await Promise.all([
@@ -106,34 +154,6 @@ function ensureMermaid(): Promise<MermaidRenderer> {
 			import('@mermaid-js/layout-elk')
 		]);
 		await mermaid.registerLayoutLoaders(layout.default);
-		mermaid.initialize({
-			startOnLoad: false,
-			suppressErrorRendering: true,
-			securityLevel: 'strict',
-			theme: 'base',
-			htmlLabels: false,
-			layout: 'elk',
-			// gitdiagram's comment holds here too: mermaid 12 defaults to the neo look
-			// and a 120 px wrap, which splits file paths mid-name — keep the classic
-			// look and the old 200 px wrap.
-			look: 'classic',
-			flowchart: {
-				wrappingWidth: 200,
-				curve: 'linear',
-				nodeSpacing: 50,
-				rankSpacing: 50,
-				padding: 15
-			},
-			themeVariables: {
-				background: 'transparent',
-				primaryColor: '#f7f7f7',
-				primaryBorderColor: '#334155',
-				primaryTextColor: '#171717',
-				lineColor: '#334155',
-				secondaryColor: '#f0f0f0',
-				tertiaryColor: '#f7f7f7'
-			}
-		});
 		return mermaid as MermaidRenderer;
 	})());
 }
@@ -171,6 +191,12 @@ export class DiagramView {
 	/** Bumps on every render; an in-flight mermaid render whose token went stale
 	 *  discards itself before touching the DOM. */
 	private renderToken = 0;
+	/** The diagram on screen — a theme switch re-renders it in the new palette. */
+	private current: ModuleDiagram | null = null;
+	/** The workbench's theme-applied notification, kept for teardown. */
+	private readonly onThemeApplied = (): void => {
+		if (this.current) void this.render(this.current, ++this.renderToken);
+	};
 	/** The user has zoomed or panned by hand — the auto refit stands aside. */
 	private userMoved = false;
 	/** The last pan moved far enough that the click after it must not land. */
@@ -178,8 +204,6 @@ export class DiagramView {
 	private drag: { x: number; y: number } | null = null;
 	private readonly pointers = new Map<number, { x: number; y: number }>();
 	private pinch: { startDistance: number; startView: { x: number; y: number; scale: number }; start: { x: number; y: number } } | null = null;
-	private wheelMode: 'pan' | 'zoom' | null = null;
-	private lastWheelTime = -Infinity;
 	private viewFrame: number | null = null;
 	private animationFrame: number | null = null;
 	private gestureScale: number | null = null;
@@ -229,7 +253,7 @@ export class DiagramView {
 		this.host.addEventListener('wheel', (event) => this.onWheel(event), { passive: false });
 		this.host.addEventListener('gesturestart', (event) => this.onGestureStart(event), { passive: false } as AddEventListenerOptions);
 		this.host.addEventListener('gesturechange', (event) => this.onGestureChange(event), { passive: false } as AddEventListenerOptions);
-		this.host.addEventListener('gestureend', () => { this.wheelMode = null; });
+		this.host.addEventListener('gestureend', () => { this.gestureScale = null; });
 		this.host.addEventListener('pointerdown', (event) => this.onPointerDown(event));
 		this.host.addEventListener('pointermove', (event) => this.onPointerMove(event));
 		this.host.addEventListener('pointerup', (event) => this.onPointerUp(event));
@@ -248,6 +272,10 @@ export class DiagramView {
 			this.resizeObserver = new ResizeObserver(() => this.onHostResized());
 			this.resizeObserver.observe(this.host);
 		}
+		// A theme switch re-renders the drawing in the new palette (settings
+		// dispatches THEME_EVENT once the new stylesheet has loaded, so the
+		// canvas and the toolbar have already recoloured when this fires).
+		document.addEventListener(THEME_EVENT, this.onThemeApplied);
 	}
 
 	/** The element a pointer event landed on, as the page knows it: a block (its
@@ -273,7 +301,8 @@ export class DiagramView {
 		this.labelObserver = null;
 		this.content.textContent = '';
 		this.userMoved = false;
-		this.host.classList.toggle('empty', !diagram || diagram.nodes.length === 0);
+		this.current = diagram && diagram.nodes.length > 0 ? diagram : null;
+		this.host.classList.toggle('empty', !this.current);
 		if (!diagram || diagram.nodes.length === 0) return;
 		void this.render(diagram, token);
 	}
@@ -282,6 +311,8 @@ export class DiagramView {
 		let svg: string;
 		try {
 			const mermaid = await ensureMermaid();
+			// The palette is picked per render — the theme kind at this moment.
+			mermaid.initialize(mermaidConfig());
 			// A hidden render target the width of the viewport — the wrap width the
 			// labels measure against (gitdiagram's createHiddenRenderTarget).
 			const target = el('div');
@@ -455,6 +486,8 @@ export class DiagramView {
 
 	destroy(): void {
 		this.renderToken++;
+		this.current = null;
+		document.removeEventListener(THEME_EVENT, this.onThemeApplied);
 		this.labelObserver?.disconnect();
 		this.labelObserver = null;
 		this.cancelAnimation();
@@ -580,31 +613,18 @@ export class DiagramView {
 		this.scheduleView({ ...current, ...clamped });
 	}
 
-	/** The wheel, gitdiagram's split: ctrl/cmd is pinch-zoom; otherwise the burst's
-	 *  first event latches the mode — a trackpad's two-finger scroll (pixel deltas,
-	 *  any horizontal component, fractional Y) pans, a mouse wheel's notched line
-	 *  zooms. */
+	/** The wheel zooms, always, at the cursor — a mouse wheel's notches and a
+	 *  trackpad's two-finger scroll alike (Excalidraw's model). gitdiagram's
+	 *  gesture latch — guess trackpad vs wheel from the delta shape and pan one,
+	 *  zoom the other — misreads real mice on WKWebView (their notches arrive as
+	 *  small pixel deltas), which read as pan exactly when the user reached for
+	 *  zoom; panning stays on the drag and the arrow keys, which never guess. */
 	private onWheel(event: WheelEvent): void {
 		if (event.deltaX === 0 && event.deltaY === 0) return;
 		event.preventDefault();
-		if (event.ctrlKey || event.metaKey) {
-			this.wheelMode = null;
-			this.zoomAt(Math.exp(-Math.max(-240, Math.min(240, event.deltaY)) * 0.01), event.clientX, event.clientY);
-			return;
-		}
-		if (!this.wheelMode || event.timeStamp - this.lastWheelTime > WHEEL_LATCH_MS) {
-			this.wheelMode = DiagramView.isTrackpadScroll(event) ? 'pan' : 'zoom';
-		}
-		this.lastWheelTime = event.timeStamp;
-		if (this.wheelMode === 'pan') this.panBy(-event.deltaX, -event.deltaY);
-		else this.zoomAt(Math.exp(-Math.max(-240, Math.min(240, event.deltaY)) * 0.0015), event.clientX, event.clientY);
-	}
-
-	/** gitdiagram's isLikelyTrackpadGesture: pixel-mode deltas with horizontal drift
-	 *  or fractional Y are a trackpad; whole-line notches are a mouse wheel. */
-	private static isTrackpadScroll(event: WheelEvent): boolean {
-		if (event.deltaMode !== WheelEvent.DOM_DELTA_PIXEL) return false;
-		return Math.abs(event.deltaX) > 0 || Math.abs(event.deltaY) < 40 || !Number.isInteger(event.deltaY);
+		// ctrl/cmd rides a pinch gesture (larger deltas) or an explicit chord.
+		const rate = event.ctrlKey || event.metaKey ? 0.01 : 0.0015;
+		this.zoomAt(Math.exp(-Math.max(-240, Math.min(240, event.deltaY)) * rate), event.clientX, event.clientY);
 	}
 
 	/* WKWebView's Safari-style pinch (macOS trackpads reach the app through it). */

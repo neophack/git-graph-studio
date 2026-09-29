@@ -1513,22 +1513,6 @@ mod desktop {
                                 let _ = webview.eval(&js);
                             }
                         }
-                        // The heartbeat: the probe's decisive instrument for the mid-run
-                        // stalls. A native thread pokes the page every 3 s; every poke makes
-                        // the page write a timestamp through the IPC bridge. Timestamps keep
-                        // landing → the page's JS runs and a stalled pass is the harness's
-                        // own logic; they stop → the page or the bridge died (WebKit-level).
-                        // The poke itself also wakes the page, which is half a keep-alive.
-                        if let Ok(heartbeat) = std::env::var("GGS_DEV_HARNESS_HEARTBEAT") {
-                            let window_handle = webview.clone();
-                            std::thread::spawn(move || loop {
-                                std::thread::sleep(std::time::Duration::from_secs(3));
-                                let _ = window_handle.eval(format!(
-                                    "window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke('write_file', {{ path: {}, contents: new Date().toISOString() }});",
-                                    serde_json::to_string(&heartbeat).unwrap_or_default()
-                                ));
-                            });
-                        }
                     }
                 }
             })

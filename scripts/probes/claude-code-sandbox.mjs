@@ -152,13 +152,6 @@ const buildRemote = async () => {
 const buildSandbox = async () => {
 	rmSync(claudeConfigDir, { recursive: true, force: true });
 	rmSync(workspaceDir, { recursive: true, force: true });
-	// The dev webview's own caches: WKWebView heuristically caches vite's unversioned
-	// html-proxy modules, and a stale harness module then runs for every later run while
-	// the fixes sit on disk (this cost a whole debugging session). The dev data store is
-	// the dev app's alone — the installed releases keep theirs.
-	for (const store of [join(homedir(), 'Library', 'WebKit', 'git-graph-studio'), join(homedir(), 'Library', 'Caches', 'git-graph-studio')]) {
-		if (existsSync(store)) rmSync(store, { recursive: true, force: true });
-	}
 	mkdirSync(claudeConfigDir, { recursive: true });
 	const { scratch } = await buildRemote();
 	// The workspace: a real clone of the fake remote — the app opens it, git-graph-rs draws
@@ -373,7 +366,7 @@ const run = async () => {
 	// sweep's live-command scan freezes under the real backend at the moment — the module-17
 	// WIP — and it is not what the sandbox measures). --full-sweep opts back in.
 	const sweep = args.includes('--full-sweep') ? '' : '&quick=1';
-	const harnessPage = `dev/dev-harness.html?full=1&sandbox=1${sweep}&run=${runId}&reportFile=${encodeURIComponent(harnessReportFile)}&report=${encodeURIComponent(`http://127.0.0.1:${server.port}/report`)}`;
+	const harnessPage = `dev/dev-harness.html?full=1&sandbox=1${sweep}&run=${runId}&reportFile=${encodeURIComponent(harnessReportFile)}&heartbeat=${encodeURIComponent(join(sandboxDir, 'harness-heartbeat.txt'))}&report=${encodeURIComponent(`http://127.0.0.1:${server.port}/report`)}&workspace=${encodeURIComponent(workspaceDir)}`;
 
 	const appEnv = {
 		...process.env,
@@ -389,11 +382,13 @@ const run = async () => {
 		// load — the only window into a WKWebView with no CDP.
 		...(noHarness ? {} : {
 			GGS_DEV_HARNESS: harnessPage,
-			GGS_DEV_HARNESS_DIAG: `${join(sandboxDir, 'harness-diag.json')}|http://127.0.0.1:${server.port}/diag`,
-			GGS_DEV_HARNESS_HEARTBEAT: join(sandboxDir, 'harness-heartbeat.txt')
+			GGS_DEV_HARNESS_DIAG: `${join(sandboxDir, 'harness-diag.json')}|http://127.0.0.1:${server.port}/diag`
 		})
 	};
-	const tauriArgs = ['tauri', 'dev', '--no-watch', '--', workspaceDir];
+	// Two `--`: the tauri CLI's runner args come first, the app's after the second —
+	// one `--` fed the workspace to cargo as its package path and the app booted with
+	// no folder (the binary's own launch_path_of never saw it).
+	const tauriArgs = ['tauri', 'dev', '--no-watch', '--', '--', workspaceDir];
 	log(`[app] npx ${tauriArgs.join(' ')}${noHarness ? ' (plain workbench — interactive mode)' : ''} — log: ${tauriLog}`);
 	// The harness's waits are page timers; macOS must not nap the display mid-run (the app
 	// side also asserts an activity and floats its window — lib.rs's probe hook).

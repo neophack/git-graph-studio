@@ -717,21 +717,32 @@ stderr is logs; stdout is protocol only.
 The Code Analysis workbench: an activity bar entry (`Ctrl+Shift+A`) with a sidebar of
 five analysis tools plus module 16's MCP Server entry — Module Analysis (the
 workspace's cross-file calls as a gitdiagram-style architecture diagram and a tree: the
-backend decides WHAT the diagram is — `analysis_module_diagram` keeps the busiest files
-as two-line cards (the name over the bracketed directory, gitdiagram's
-`Component<br/>[file.ts]` shape) inside their area's subgraph, each area one of
-gitdiagram's six pastel tones, every kept dependency an arrow labelled by its call
-count and the cycle's back edges dashed (its `-.->`); the flow is mermaid
-`flowchart TD` with gitdiagram's tone classDefs verbatim, under its schema and caps
-(10 groups — deeper areas roll up to the depth that fits, the overflow draws unboxed,
-its `groupId: null` — 34 blocks, 48 arrows); the page renders that source with
+backend decides WHAT the diagram is — `analysis_module_diagram` curates the
+architecture (vendored, test, example and bench trees stay off the drawing — they
+build or verify the project, they are not its components; a focus overrides the
+rule) and keeps the busiest remaining files
+as two-line cards (the name over the bracketed directory the box does not already
+name, gitdiagram's `Component<br/>[file.ts]` shape) inside their area's subgraph,
+each area one of
+gitdiagram's six pastel tones (root files and anything the caps leave without a
+box draw unboxed, its `groupId: null`), every kept dependency an arrow labelled by
+its call count (a cycle's back edges stay off — the Import Graph page owns cycles);
+the flow is mermaid
+`flowchart TD` with gitdiagram's tone classDefs verbatim under its own class names,
+its schema and caps
+(10 groups — deeper areas roll up to the depth that fits and an area too small to
+be a subsystem folds into its parent box — 34 blocks, 48 arrows, no block fanning
+past eight); the page renders that source with
 mermaid itself — the same renderer, the same ELK layered layout and spacing
 gitdiagram initializes — so the blocks cannot overlap and the look is gitdiagram's by
-construction (`moduleDiagram.ts`); the viewer around the SVG is a port of gitdiagram's
+construction (`moduleDiagram.ts`), in its light or dark variable set by the workbench
+theme's kind (the canvas, the zoom toolbar and the chips read the theme's `--vscode-*`
+tokens; a theme switch re-renders the drawing in the other palette); the viewer around the SVG is a port of gitdiagram's
 own (its use-mermaid-viewport / use-diagram-wheel-gestures): the zoom bounds and the
-percentage read against the fit level (0.6×–12×, 100 % = fitted), a mouse wheel zooms
-at the cursor while a trackpad's two-finger scroll pans (per-burst gesture latch,
-ctrl/cmd always pinch-zoom, WKWebView gesture events included), panning clamps to the
+percentage read against the fit level (0.6×–12×, 100 % = fitted), the wheel always zooms
+at the cursor — mouse wheel and trackpad scroll alike (gitdiagram's per-burst
+trackpad/mouse latch misread real mice on WKWebView; panning is the drag and the arrow
+keys, ctrl/cmd and WKWebView gesture events pinch-zoom), panning clamps to the
 32–160 px gutter band, the toolbar's zoom and fit glide over 160 ms (skipped under
 prefers-reduced-motion), the keyboard pans by arrow and fits on 0/Home, and a click
 highlighting the clicked element with the
@@ -739,7 +750,9 @@ dependencies it touches (the rest dims; a background click or the chip clears), 
 right-click menu opening the file, jumping to a related block through the
 Calls / Called-by submenus, isolating the neighbourhood or listing an arrow's call
 sites, double-click opening the file, the header action copying the mermaid source; the
-filter and the focus narrow the pairs at the backend and refetch; the tree collapses
+drawing's filter narrows to the files whose path spells the query (a pair survives only
+between matching files, so the drawing shrinks with the filter), the focus isolates one
+file's neighbourhood, and the tree matches call-site symbols too; the tree collapses
 the same data into
 module dependencies → file pairs → call sites, children rendering only while expanded),
 Complexity & Hotspots, Dead Code, Security Scan (rule-based, no taint tracking) and the
@@ -761,8 +774,9 @@ viewport (pan, zoom, states) around it.
 - Backend: `src-tauri/src/cmd_analysis.rs` (the per-root `AnalysisIndex`, the streaming
   tool commands), `src-tauri/src/analysis/` (`mod.rs` the engine and the per-symbol call
   graph, `metrics.rs`, `deadcode.rs`, `security.rs`, `modules.rs` the Module Analysis
-  aggregation, `diagram.rs` the Module Analysis drawing — gitdiagram's caps, tone
-  palette, group roll-up and the mermaid source (classDefs included) behind
+  aggregation, `diagram.rs` the Module Analysis drawing — the architecture-only
+  curation, gitdiagram's caps, tone
+  palette, group roll-up and fold, and the mermaid source (classDefs included) behind
   `analysis_module_diagram`,
   `imports.rs`, `bca.rs` the big-code-analysis
   bridge whose report-time columns — cognitive complexity, Halstead volume, logical SLOC,

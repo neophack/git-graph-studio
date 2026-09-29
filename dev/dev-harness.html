@@ -775,6 +775,18 @@
 			// before anything else — a probe can then tell "the window never opened the harness
 			// page" (no beacon file) from "the page loaded but the pass broke" (beacon, no rows).
 			{
+				const heartbeatFile = new URLSearchParams(location.search).get('heartbeat');
+				if (heartbeatFile) {
+					// The page pulse (the probe's liveness instrument): written from the page's
+					// own timer — never from a native eval, whose re-entry into JSC during a
+					// module evaluation segfaulted WebKit's renderer (crash reports 0x46, every
+					// sandbox run of 2026-09-29). A stale pulse = this page stopped executing.
+					setInterval(() => {
+						import('@tauri-apps/api/core').then((core) => core.invoke('write_file', { path: heartbeatFile, contents: new Date().toISOString() })).catch(() => {});
+					}, 3000);
+				}
+			}
+			{
 				const beaconFile = new URLSearchParams(location.search).get('reportFile');
 				if (beaconFile) {
 					import('@tauri-apps/api/core').then((core) => core.invoke('write_file', { path: beaconFile,
@@ -908,6 +920,21 @@
 				// Wait for the workbench: the status bar is populated last-ish and always exists.
 				await waitFor(() => document.querySelectorAll('#statusbar .status-item').length > 0, 30000);
 
+				// The sandbox workspace must actually be open: the probe passes it as a tauri dev
+				// argument, which the tauri CLI can eat as cargo's own manifest argument — the app
+				// binary then boots with no folder and half the module sweep reports 'No folder is
+				// open'. Open it programmatically, as a visible row — a silent failure here read
+				// as five unrelated module failures downstream.
+				if (fullParams.get('workspace') && !window.__harness.mocked) {
+					await check('workbench', 'the sandbox workspace is open', async () => {
+						const wb = (await import('/src/workbench.ts')).currentWorkbench;
+						if (!wb || typeof wb.openFolder !== 'function') throw new Error('the workbench instance exposes no openFolder');
+						await wb.openFolder(fullParams.get('workspace'));
+						await waitFor(() => document.querySelectorAll('#explorer *').length > 0, 15000);
+						return fullParams.get('workspace').split('/').pop() + ' opened programmatically';
+					});
+				}
+
 				/* ---------- Phase 1: every module's self-tests (the all-buttons sweep) ---------- */
 				// quick mode (?quick=1, the claude-code sandbox run): the sweep is skipped and the
 				// pass goes straight to the extension phases — the sandbox measures claude-code,
@@ -992,9 +1019,26 @@
 					'git-graph-rs.clearAvatarCache': runsTolerant('git-graph-rs.clearAvatarCache', 20000, 'ran (the fresh engine may answer after the row)'),
 					'git-graph-rs.endAllWorkspaceCodeReviews': runsTolerant('git-graph-rs.endAllWorkspaceCodeReviews', 20000, 'ran (nothing to end in the sandbox)'),
 					'git-graph-rs.fetch': async () => {
+						// Verified in-row and on disk: the fetch must move the clone's origin/main
+						// (a fresh fetch writes the loose ref) — a button that fires without moving
+						// anything is a red row, not a tolerant pass.
+						const refPath = fullParams.get('workspace') + '/.git/refs/remotes/origin/main';
+						const readRef = async () => {
+							const unwrap = (file) => String((file && file.contents) ?? '').trim();
+							try {
+								return unwrap(await withTimeout(invoke('read_file', { path: refPath, encoding: 'utf8' }), 8000, 'read ref'));
+							} catch {
+								const packed = unwrap(await withTimeout(invoke('read_file', { path: fullParams.get('workspace') + '/.git/packed-refs', encoding: 'utf8' }), 8000, 'packed-refs').catch(() => null));
+								return packed.split('\n').find((l) => l.includes(' refs/remotes/origin/main'))?.split(' ')[0]?.trim() ?? '';
+							}
+						};
+						const before = await readRef();
 						await withTimeout(commands.execute('git-graph-rs.fetch'), 45000, 'git-graph-rs.fetch').catch(() => undefined);
-						await sleep(1500); // the ref update lands on disk before the probe's next poll
-						return 'ran against the fake origin (the probe verifies origin/main moved)';
+						await sleep(2000);
+						const after = await readRef();
+						if (!after) throw new Error('the origin/main ref is unreadable after the fetch');
+						if (before === after) throw new Error(`fetch did not move origin/main (${before.slice(0, 10) || 'unreadable'}) — the fetch against the fake remote silently did nothing`);
+						return `origin/main moved ${before.slice(0, 8)} → ${after.slice(0, 8)}`;
 					},
 					// The writers — hermetic here: the clone's ahead commit is expendable, and
 					// reset/Gerrit land on the fake remote. A picker is dismissed; the disk state
@@ -1105,13 +1149,27 @@
 						if (!own || !own.pid) throw new Error('process status: ' + JSON.stringify(own));
 						return 'pid ' + own.pid + (own.lastError ? ' (last error: ' + own.lastError + ')' : '');
 					});
+					// A pid is not a warm engine: the engine .node's first load answers nothing
+					// for its first minute — wait until a command actually answers before the
+					// checks that assume a live backend.
+					await check(GG, 'the engine answers a command (cold start waited out)', async () => {
+						for (let i = 0; i < 40; i++) {
+							const answered = await withTimeout(commands.execute('git-graph-rs.version'), 8000, 'version').then(() => true, () => false);
+							if (answered) return 'answered on try ' + (i + 1);
+							await sleep(2000);
+						}
+						throw new Error('the engine never answered git-graph-rs.version within ~2 min');
+					});
 						// Every command the package declares must be in the registry under a title.
 						const GG_COMMANDS = ['git-graph-rs.view', 'git-graph-rs.filterByFile', 'git-graph-rs.addGitRepository',
 							'git-graph-rs.removeGitRepository', 'git-graph-rs.clearAvatarCache', 'git-graph-rs.fetch',
 							'git-graph-rs.endAllWorkspaceCodeReviews', 'git-graph-rs.endSpecificWorkspaceCodeReview',
 							'git-graph-rs.resumeWorkspaceCodeReview', 'git-graph-rs.version', 'git-graph-rs.searchCommits',
 							'git-graph-rs.openFile', 'git-graph-rs.amendLastCommit', 'git-graph-rs.resetCurrentBranchToRemote',
-							'git-graph-rs.gerritPushRef', 'git-graph-rs.gerritFetchCommitMsgHook'];
+							'git-graph-rs.gerritPushRef', 'git-graph-rs.gerritFetchCommitMsgHook',
+							// The localized duplicates the extension registers beside the base commands.
+							'git-graph-rs.amendLastCommit.zhCn', 'git-graph-rs.resetCurrentBranchToRemote.zhCn',
+							'git-graph-rs.gerritPushRef.zhCn', 'git-graph-rs.gerritFetchCommitMsgHook.zhCn'];
 						for (const id of GG_COMMANDS) {
 							await check(GG, 'command registered: ' + id, async () => {
 								const command = commands.get(id);
@@ -1163,7 +1221,7 @@
 							const frameOk = await waitFor(() => {
 								const frame = document.querySelector('#editorPart iframe.ext-page-frame');
 								return frame && frame.contentDocument && frame.contentDocument.body && frame.contentDocument.body.childElementCount > 0;
-							}, 45000);
+							}, 90000);
 							if (!frameOk) throw new Error('the webview panel never mounted its document');
 							const doc = document.querySelector('#editorPart iframe.ext-page-frame').contentDocument;
 							const rendered = await waitFor(() => doc.querySelectorAll('svg').length > 0 && (doc.body.textContent || '').length > 100, 30000);
@@ -1254,7 +1312,7 @@
 							// list — right after the backend handshake, not instantly.
 							const findEntry = () => [...document.querySelectorAll('#activitybar [title], #activitybar [aria-label]')]
 								.some((el) => ((el.getAttribute('title') || '') + (el.getAttribute('aria-label') || '')).toLowerCase().includes('claude'));
-							const found = await waitFor(findEntry, 30000);
+							const found = await waitFor(findEntry, 120000);
 							if (!found) throw new Error('no Claude entry in the activity bar');
 							return 'present';
 						});
@@ -1504,7 +1562,7 @@
 				}
 
 				/* ---------- Phase 3½: git-graph-rs against the sandbox's fake remote ---------- */
-				if (!window.__harness.mocked && quick && sandboxMode) await runGgSandboxPass();
+				if (!window.__harness.mocked && sandboxMode) await runGgSandboxPass();
 
 				/* ---------- Phase S: speed — the open latencies the user feels ---------- */
 				if (window.__harness.mocked) {
