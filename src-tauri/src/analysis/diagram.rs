@@ -54,9 +54,23 @@ const MIN_PER_AREA: usize = 3;
 /// app; they are not its architecture, and their dense internal traffic crowds
 /// the project's own modules off the canvas (gitdiagram's curation picks the
 /// repository's components — a vendored tree is nobody's component).
-const VENDOR_DIRS: [&str; 5] = ["vendor", "vendors", "node_modules", "third_party", "thirdparty"];
+const VENDOR_DIRS: [&str; 5] = [
+    "vendor",
+    "vendors",
+    "node_modules",
+    "third_party",
+    "thirdparty",
+];
 /// Directory components that hold code about the project rather than of it.
-const ANCILLARY_DIRS: [&str; 7] = ["tests", "__tests__", "spec", "specs", "examples", "benches", "fixtures"];
+const ANCILLARY_DIRS: [&str; 7] = [
+    "tests",
+    "__tests__",
+    "spec",
+    "specs",
+    "examples",
+    "benches",
+    "fixtures",
+];
 
 /// Whether a file belongs to the architecture the drawing curates: nothing under
 /// a vendored, test, example or bench tree, and no test module by name. The
@@ -266,12 +280,10 @@ pub fn module_diagram(graph: &ModuleGraph, focus: Option<&str>, filter: &str) ->
     // call site naming the query) stay the tree page's filter: there they list
     // their sites, here they would refill the canvas with every pair that rides
     // on one, and a filtered drawing that does not shrink reads as unfiltered.
-    let strict_matches = |dep: &FileDep| {
-        path_matches(&dep.from, &filter) && path_matches(&dep.to, &filter)
-    };
-    let loose_matches = |dep: &FileDep| {
-        path_matches(&dep.from, &filter) || path_matches(&dep.to, &filter)
-    };
+    let strict_matches =
+        |dep: &FileDep| path_matches(&dep.from, &filter) && path_matches(&dep.to, &filter);
+    let loose_matches =
+        |dep: &FileDep| path_matches(&dep.from, &filter) || path_matches(&dep.to, &filter);
     let pick = |pair_matches: &dyn Fn(&FileDep) -> bool| {
         graph
             .file_edges
@@ -504,13 +516,7 @@ pub fn module_diagram(graph: &ModuleGraph, focus: Option<&str>, filter: &str) ->
     let area_distance = |dep: &FileDep| -> u32 {
         match (area_of.get(dep.from.as_str()), area_of.get(dep.to.as_str())) {
             (Some(&from), Some(&to)) if from == to => 0,
-            (Some(&from), Some(&to))
-                if adjacent
-                    .get(from)
-                    .is_some_and(|set| set.contains(to)) =>
-            {
-                1
-            }
+            (Some(&from), Some(&to)) if adjacent.get(from).is_some_and(|set| set.contains(to)) => 1,
             _ => 2,
         }
     };
@@ -611,7 +617,11 @@ fn mermaid_source(
         let dir = module_of(&node.path);
         let below = match node.module.as_deref() {
             Some(area) if dir == area => None,
-            Some(area) if dir.strip_prefix(area).is_some_and(|rest| rest.starts_with('/')) => {
+            Some(area)
+                if dir
+                    .strip_prefix(area)
+                    .is_some_and(|rest| rest.starts_with('/')) =>
+            {
                 Some(dir[area.len() + 1..].to_owned())
             }
             _ => (!dir.is_empty()).then(|| dir.to_owned()),
@@ -772,7 +782,11 @@ mod tests {
             dep("lib/x.rs", "lib/y.rs", 5, &[]),
             dep("lib/y.rs", "lib/z.rs", 5, &[]),
         ];
-        let diagram = module_diagram(&graph(&[("", 1, 1), ("src", 5, 5), ("lib", 3, 3)], file_edges), None, "");
+        let diagram = module_diagram(
+            &graph(&[("", 1, 1), ("src", 5, 5), ("lib", 3, 3)], file_edges),
+            None,
+            "",
+        );
         let mut boxed: Vec<&str> = diagram
             .nodes
             .iter()
@@ -897,7 +911,11 @@ mod tests {
                 file_edges.push(dep(&format!("m/a{a}.rs"), &format!("n/b{b}.rs"), 1, &[]));
             }
         }
-        let diagram = module_diagram(&graph(&[("m", 10, 10), ("n", 10, 10)], file_edges), None, "");
+        let diagram = module_diagram(
+            &graph(&[("m", 10, 10), ("n", 10, 10)], file_edges),
+            None,
+            "",
+        );
         assert_eq!(diagram.nodes.len(), MAX_PER_AREA * 2);
         let considered = MAX_PER_AREA * MAX_PER_AREA;
         assert_eq!(diagram.edges.len(), MAX_EDGES);
@@ -918,7 +936,10 @@ mod tests {
             dep("lib/m.rs", "lib/n.rs", 3, &[]),
         ];
         let diagram = module_diagram(
-            &graph(&[("src", 5, 5), ("src/ui", 2, 2), ("lib", 3, 3)], file_edges),
+            &graph(
+                &[("src", 5, 5), ("src/ui", 2, 2), ("lib", 3, 3)],
+                file_edges,
+            ),
             None,
             "",
         );
@@ -993,7 +1014,11 @@ mod tests {
         let paths: Vec<&str> = by_path.nodes.iter().map(|n| n.path.as_str()).collect();
         assert_eq!(paths, ["src/a.rs", "src/ui.rs"]);
         assert_eq!(
-            by_path.edges.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            by_path
+                .edges
+                .iter()
+                .map(|e| e.id.as_str())
+                .collect::<Vec<_>>(),
             ["src/a.rs→src/ui.rs"]
         );
         // A query no other file spells falls back to that file's neighbourhood
@@ -1067,7 +1092,9 @@ mod tests {
         // The drawing curates the architecture: vendored crates, minified
         // bundles and test trees build or verify the project, they are not its
         // components, and their traffic never reaches the canvas.
-        assert!(!is_architecture_code("src-tauri/vendor/boa-engine/src/lib.rs"));
+        assert!(!is_architecture_code(
+            "src-tauri/vendor/boa-engine/src/lib.rs"
+        ));
         assert!(!is_architecture_code("static/vendor/markdown-it.min.js"));
         assert!(!is_architecture_code("src-tauri/tests/node_runtime.rs"));
         assert!(!is_architecture_code("tests/mermaidStub.ts"));
@@ -1080,12 +1107,19 @@ mod tests {
             dep("src/app.rs", "src/core.rs", 5, &[]),
             dep("src/app.rs", "tests/it.rs", 7, &[]),
         ];
-        let graph = graph(&[("src", 2, 2), ("vendor/dep", 1, 1), ("tests", 1, 1)], file_edges);
+        let graph = graph(
+            &[("src", 2, 2), ("vendor/dep", 1, 1), ("tests", 1, 1)],
+            file_edges,
+        );
         let diagram = module_diagram(&graph, None, "");
         let paths: Vec<&str> = diagram.nodes.iter().map(|n| n.path.as_str()).collect();
         assert_eq!(paths, ["src/app.rs", "src/core.rs"]);
         assert_eq!(
-            diagram.edges.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            diagram
+                .edges
+                .iter()
+                .map(|e| e.id.as_str())
+                .collect::<Vec<_>>(),
             ["src/app.rs→src/core.rs"]
         );
         // A focus overrides the rule: the file the user named decides its own
