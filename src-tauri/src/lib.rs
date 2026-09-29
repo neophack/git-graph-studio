@@ -1460,6 +1460,9 @@ mod desktop {
                     .first()
                     .cloned()
                     .expect("tauri.conf.json declares the main window");
+                // Only the macOS debug harness hook reads the handle; every other
+                // target would flag the binding unused.
+                #[cfg_attr(not(all(debug_assertions, target_os = "macos")), allow(unused_variables))]
                 let window = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
                     .on_web_resource_request(revalidate_assets)
                     .build()?;

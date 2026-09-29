@@ -442,7 +442,10 @@ fn utf8_or_latin1(ptr: *const c_char, length: isize) -> Option<String> {
         if length == -1 {
             Some(CStr::from_ptr(ptr).to_string_lossy().into_owned())
         } else {
-            let bytes = std::slice::from_raw_parts(ptr as *const u8, length as usize);
+            // `.cast`, not `as`: c_char is u8 on arm64/riscv Linux and i8 elsewhere, so an
+            // `as *const u8` is a real conversion on one target and a clippy-fatal no-op
+            // on the other (the aarch64-linux clippy run of 2026-09-29).
+            let bytes = std::slice::from_raw_parts(ptr.cast::<u8>(), length as usize);
             Some(String::from_utf8_lossy(bytes).into_owned())
         }
     }
@@ -757,7 +760,7 @@ unsafe fn read_value_string(
         } else {
             let bytes = text.as_bytes();
             let copied = bytes.len().min(capacity);
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer as *mut u8, copied);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.cast::<u8>(), copied);
             *buffer.add(copied) = 0;
             if !written.is_null() {
                 *written = copied;
