@@ -369,6 +369,11 @@ export class EditorGroup {
 	/** True while a back/forward jump itself activates an editor: those moves walk the history
 	 *  instead of extending it. */
 	private navigating = false;
+	/** The user's opens and activations, counted. An async open takes a ticket when the user
+	 *  triggers it; when its reads land it may only activate if its ticket is still the
+	 *  newest — the last click wins. A slow earlier open (the hex view's mount, the SCM
+	 *  diff's reads) used to land after a newer click and yank the view back to its own tab. */
+	private openIntent = 0;
 	/** Whether an empty group shows the welcome page: the area keeps that to its first group,
 	 *  so an empty split shows an empty editor (VS Code's behaviour), not a second welcome. */
 	showWelcome = true;
@@ -517,6 +522,7 @@ export class EditorGroup {
 	 *  Uri. `path` names the document for its icon and language; the text is already in
 	 *  hand, so nothing is read here. */
 	async openContent(input: Extract<EditorInput, { kind: 'content' }>): Promise<void> {
+		const intent = this.beginOpen();
 		const existing = this.open.find((e) => e.input.kind === 'content' && e.input.id === input.id);
 		if (existing) {
 			this.activate(existing);
@@ -545,10 +551,11 @@ export class EditorGroup {
 			editor.languageName = language.name;
 			view.dispatch({ effects: languageSlot.reconfigure(language.support) });
 		});
-		this.add(editor, true);
+		this.add(editor, true, intent);
 	}
 
 	async openFile(path: string, options: { line?: number; column?: number; inactive?: boolean } = {}): Promise<void> {
+		const intent = this.beginOpen();
 		// Any spelling of an open file reveals its tab (an extension's backslashed path is
 		// the Explorer's forward-slashed one).
 		const existing = this.open.find((e) => e.input.kind === 'file' && samePath(e.input.path, path));
@@ -571,10 +578,13 @@ export class EditorGroup {
 			pane: el('div', 'editor-pane'),
 			dirty: false
 		};
+		// `show` folds the ticket in: a stale open still adds its tab, but neither shows nor
+		// reveals it — the user's last pick keeps the view.
+		const show = () => !options.inactive && this.holdsIntent(intent);
 		// An image opens in the image preview rather than as bytes in a text editor.
 		if (imageMime(name)) {
 			await this.mountImagePreview(editor);
-			this.add(editor, !options.inactive);
+			this.add(editor, show(), intent);
 			return;
 		}
 		// A CAN trace (.blf / .asc) opens in the raw frame view: the backend parses in the
@@ -587,8 +597,9 @@ export class EditorGroup {
 				editor.languageName = 'Plain Text';
 				editor.pane.classList.add('can-log');
 				await this.mountCanTextForm(editor);
-				this.add(editor, !options.inactive);
-				if (options.inactive) return;
+				const showNow = show();
+				this.add(editor, showNow, intent);
+				if (!showNow) return;
 				this.revealIn(editor, options.line, options.column ?? 1);
 				// The activation recorded the new editor at 1:1; note where it actually landed.
 				if (this.navIndex >= 0 && this.navHistory[this.navIndex]!.input === editor.input) {
@@ -606,7 +617,7 @@ export class EditorGroup {
 			editor.pane.classList.add('can-log');
 			editor.pane.appendChild(editor.canraw.root);
 			editor.onClose = () => editor.canraw?.dispose();
-			this.add(editor, !options.inactive);
+			this.add(editor, show(), intent);
 			return;
 		}
 		// One small probe (the size and a binary sniff of the first bytes) routes the open
@@ -621,7 +632,7 @@ export class EditorGroup {
 		}
 		if (probe?.binary) {
 			await this.mountHexView(editor);
-			this.add(editor, !options.inactive);
+			this.add(editor, show(), intent);
 			return;
 		}
 		// A large text file edits in the windowed editor — no size wall: the document lives
@@ -634,8 +645,9 @@ export class EditorGroup {
 		if (probe !== null && probe.size > WINDOWED_EDIT_BYTES) {
 			const offerWholeEditor = () => void this.swapFastToWholeEditor(editor);
 			if (!probe.longLines && (await this.tryMountDocEdit(editor))) {
-				this.add(editor, !options.inactive);
-				if (options.inactive) return;
+				const showNow = show();
+				this.add(editor, showNow, intent);
+				if (!showNow) return;
 				if (options.line !== undefined) {
 					this.revealIn(editor, options.line, options.column ?? 1);
 					// The activation recorded the new editor at 1:1; note where it actually landed.
@@ -647,8 +659,9 @@ export class EditorGroup {
 			}
 			if (await this.tryMountFastView(editor, editor.pane, true, offerWholeEditor)) {
 				if (!probe.longLines) notify('info', t('viewer.readOnlyFallback') + basename(path));
-				this.add(editor, !options.inactive);
-				if (options.inactive) return;
+				const showNow = show();
+				this.add(editor, showNow, intent);
+				if (!showNow) return;
 				if (options.line !== undefined) this.revealIn(editor, options.line, options.column ?? 1);
 				return;
 			}
@@ -670,8 +683,9 @@ export class EditorGroup {
 			this.attachMergeSupport(editor);
 			this.updateOutline(editor);
 		}
-		this.add(editor, !options.inactive);
-		if (options.inactive) return;
+		const showNow = show();
+		this.add(editor, showNow, intent);
+		if (!showNow) return;
 		if (options.line !== undefined) {
 			this.revealIn(editor, options.line, options.column ?? 1);
 			// The activation recorded the new editor at 1:1; note where it actually landed.
@@ -892,6 +906,7 @@ export class EditorGroup {
 			this.activate(existing);
 			return;
 		}
+		const intent = this.beginOpen();
 		const editor: Editor = {
 			input: { kind: 'hex', path },
 			id,
@@ -901,7 +916,7 @@ export class EditorGroup {
 			dirty: false
 		};
 		await this.mountHexView(editor);
-		this.add(editor);
+		this.add(editor, true, intent);
 	}
 
 	/** A CAN log's statistics analysis as its own tab (the raw view's Statistics button):
@@ -1037,6 +1052,7 @@ export class EditorGroup {
 			this.activate(existing);
 			return;
 		}
+		const intent = this.beginOpen();
 		const editor: Editor = {
 			input: { kind: 'markdown', path },
 			id,
@@ -1138,7 +1154,7 @@ export class EditorGroup {
 		};
 		await editor.render();
 		markdownPreviews.add(editor);
-		this.add(editor);
+		this.add(editor, true, intent);
 	}
 
 	/** The file history tab of a file (Git: Open File History). */
@@ -1150,6 +1166,7 @@ export class EditorGroup {
 			this.activate(existing);
 			return;
 		}
+		const intent = this.beginOpen();
 		const { FileHistoryView } = await loadFileHistory();
 		const editor: Editor = {
 			input: { kind: 'history', path },
@@ -1162,7 +1179,7 @@ export class EditorGroup {
 		editor.history = new FileHistoryView(editor.pane, this.rootPath, relativeTo(this.rootPath, path));
 		editor.history.onOpenDiff = (diff) => void this.openDiff({ kind: 'diff', ...diff });
 		editor.history.onOpenRevision = (revision, relative, title) => void this.openRevision(revision, relative, title);
-		this.add(editor);
+		this.add(editor, true, intent);
 	}
 
 	/** Toggle the blame gutter of the active file (Git: Toggle Blame, Ctrl+K Ctrl+B). */
@@ -1467,7 +1484,7 @@ export class EditorGroup {
 	/** A Git Graph request whose sides turned out binary: the extension opens the native diff
 	 *  editor and VS Code shows binary sides as placeholders - the shell's diff editor answers
 	 *  with the same notice, substituting no other view for it. */
-	private openBinaryNoticeDiff(input: Extract<EditorInput, { kind: 'diff' }>): void {
+	private openBinaryNoticeDiff(input: Extract<EditorInput, { kind: 'diff' }>, intent?: number): void {
 		const existing = this.open.find((e) => e.input.kind === 'diff' && e.input.id === input.id);
 		if (existing) {
 			this.activate(existing);
@@ -1482,11 +1499,12 @@ export class EditorGroup {
 			dirty: false
 		};
 		editor.pane.appendChild(el('div', 'diff-binary-notice', [t('diff.binaryNotice')]));
-		this.add(editor);
+		this.add(editor, true, intent);
 	}
 
 	/** A diff of two revisions of a file, as the SCM view and the Git Graph view request them. */
 	async openDiff(input: Extract<EditorInput, { kind: 'diff' }>): Promise<void> {
+		const intent = this.beginOpen();
 		const existing = this.open.find((e) => e.input.kind === 'diff' && e.input.id === input.id);
 		if (existing) {
 			this.activate(existing);
@@ -1499,7 +1517,7 @@ export class EditorGroup {
 			const binary = (path: string) => invoke<FileProbe>('file_probe', { path }).then((probe) => probe.binary).catch(() => false);
 			const [leftBinary, rightBinary] = await Promise.all([binary(input.left.path), binary(input.right.path)]);
 			if (leftBinary || rightBinary) {
-				await this.openHexCompare(input);
+				await this.openHexCompare(input, undefined, intent);
 				return;
 			}
 		}
@@ -1530,14 +1548,14 @@ export class EditorGroup {
 		// comparison, the bytes materialized to temp files it can stream.
 		if (left.binary || right.binary) {
 			if (input.binaryNotice === true) {
-				this.openBinaryNoticeDiff(input);
+				this.openBinaryNoticeDiff(input, intent);
 				return;
 			}
 			const resolve = (side: DiffSide): Promise<string> =>
 				side.local ? Promise.resolve(side.path) : invoke<string>('materialize_revision_file', { repo: input.repo ?? '', revision: side.revision, path: side.path });
 			try {
 				const [leftPath, rightPath] = await Promise.all([resolve(input.left), resolve(input.right)]);
-				await this.openHexCompare(input, { left: leftPath, right: rightPath });
+				await this.openHexCompare(input, { left: leftPath, right: rightPath }, intent);
 			} catch (error) {
 				notify('error', String(error));
 			}
@@ -1755,7 +1773,7 @@ export class EditorGroup {
 			if (editor.view) editor.view.dispatch({ effects: effect });
 			this.emitActive();
 		});
-		this.add(editor);
+		this.add(editor, true, intent);
 	}
 
 	/** The hex comparison of two files on disk, asked for as hex (the CLI's `ggs hex-compare`):
@@ -1774,7 +1792,8 @@ export class EditorGroup {
 			this.activate(existing);
 			return;
 		}
-		await this.openHexCompare(input);
+		const intent = this.beginOpen();
+		await this.openHexCompare(input, undefined, intent);
 	}
 
 	/** Two binary files, the address-aligned hex comparison streamed in chunks so the pair's
@@ -1782,7 +1801,7 @@ export class EditorGroup {
 	 *  side has no disk path of its own, so `openDiff` materializes its blob to a temp file
 	 *  first and passes that in here instead of `input.left.path`/`input.right.path`, which
 	 *  stay the repo-relative identity the tab and its labels are built from. */
-	private async openHexCompare(input: Extract<EditorInput, { kind: 'diff' }>, paths?: { left: string; right: string }): Promise<void> {
+	private async openHexCompare(input: Extract<EditorInput, { kind: 'diff' }>, paths?: { left: string; right: string }, intent?: number): Promise<void> {
 		const editor: Editor = {
 			input,
 			id: 'diff:' + input.id,
@@ -1797,7 +1816,7 @@ export class EditorGroup {
 		editor.hexCompare = view;
 		editor.pane.appendChild(view.root);
 		editor.onClose = () => view.destroy();
-		this.add(editor);
+		this.add(editor, true, intent);
 		void view.load().then(() => view.scan());
 	}
 
@@ -1811,6 +1830,7 @@ export class EditorGroup {
 			this.activate(existing);
 			return;
 		}
+		const intent = this.beginOpen();
 		let file: FileContents;
 		try {
 			file = await invoke<FileContents>('read_file_at', { revision, path, repo });
@@ -1853,7 +1873,7 @@ export class EditorGroup {
 			});
 			this.attachTextServices(editor);
 		}
-		this.add(editor);
+		this.add(editor, true, intent);
 	}
 
 	/** A help page as an editor tab: the Welcome page or the Keyboard Shortcuts reference. */
@@ -1901,7 +1921,18 @@ export class EditorGroup {
 		this.add(editor);
 	}
 
-	private add(editor: Editor, activate = true): void {
+	/** Ticket an async open took at its entry (see `openIntent`): `undefined` for the
+	 *  synchronous opens, which need no gate. */
+	private beginOpen(): number {
+		return ++this.openIntent;
+	}
+
+	/** True when an open may still activate: no open or activation newer than its ticket. */
+	private holdsIntent(intent: number | undefined): boolean {
+		return intent === undefined || intent === this.openIntent;
+	}
+
+	private add(editor: Editor, activate = true, intent?: number): void {
 		// A parallel open of the same target passed the "already open" check while this one
 		// was still awaiting its reads: the tab that landed first wins, and the latecomer's
 		// views are released unshown instead of duplicating the tab.
@@ -1912,16 +1943,17 @@ export class EditorGroup {
 			editor.diffObserver?.disconnect();
 			editor.fast?.dispose();
 			editor.onClose?.();
-			if (activate) this.activate(duplicate);
+			if (activate && this.holdsIntent(intent)) this.activate(duplicate);
 			return;
 		}
 		this.open.push(editor);
 		this.editors.appendChild(editor.pane);
-		if (activate) {
+		if (activate && this.holdsIntent(intent)) {
 			this.activate(editor);
 		} else {
 			// An inactive open keeps whatever is showing (the session restore opens in
-			// parallel and activates its pick afterwards); the pane waits hidden.
+			// parallel and activates its pick afterwards); the pane waits hidden. A stale
+			// open behaves the same: the tab joins the bar, the user's last pick stays up.
 			editor.pane.hidden = true;
 			this.update();
 		}
@@ -1956,6 +1988,7 @@ export class EditorGroup {
 			this.activate(existing);
 			return;
 		}
+		const intent = this.beginOpen();
 		const { FolderCompareView } = await loadFolderCompare();
 		const editor: Editor = {
 			input,
@@ -1967,7 +2000,7 @@ export class EditorGroup {
 		};
 		editor.folderCompare = new FolderCompareView(editor.pane, { left: input.left, right: input.right });
 		editor.folderCompare.onFilesChanged = () => this.onExternalFileChange?.();
-		this.add(editor);
+		this.add(editor, true, intent);
 	}
 
 	/** The Symbol Database tab of this repository (M4): the whole index as a tree. */
@@ -1978,6 +2011,7 @@ export class EditorGroup {
 			this.activate(existing);
 			return;
 		}
+		const intent = this.beginOpen();
 		const { SymbolDatabaseView } = await loadSymbolDbView();
 		const editor: Editor = {
 			input: { kind: 'symboldb', id },
@@ -1989,7 +2023,7 @@ export class EditorGroup {
 		};
 		editor.symbolDatabase = new SymbolDatabaseView(editor.pane);
 		editor.symbolDatabase.onOpen = (path, line) => void this.openFile(joinPath(this.rootPath ?? '', path), { line });
-		this.add(editor);
+		this.add(editor, true, intent);
 	}
 
 	/** A Code Analysis tab (module 17): one per tool — the streaming reports and the graph
@@ -2026,6 +2060,7 @@ export class EditorGroup {
 			this.activate(existing);
 			return;
 		}
+		const intent = this.beginOpen();
 		const { CallTreeView } = await loadCallTree();
 		const editor: Editor = {
 			input: { kind: 'calltree', id, symbol },
@@ -2038,7 +2073,7 @@ export class EditorGroup {
 		CallTreeView.repoRoot = this.rootPath;
 		editor.callTree = new CallTreeView(editor.pane, symbol);
 		editor.callTree.onOpen = (path, line) => void this.openFile(path, { line });
-		this.add(editor);
+		this.add(editor, true, intent);
 	}
 
 	/** An extension page tab (module 12): a `ggs` package's page in a sandboxed iframe, the
@@ -2094,6 +2129,9 @@ export class EditorGroup {
 	/* ---------- Activation, closing, saving ---------- */
 
 	private activate(editor: Editor): void {
+		// A fresh activation revokes every in-flight open's right to activate (its ticket is
+		// no longer the newest): the editor the user just chose keeps the view.
+		this.openIntent++;
 		if (!this.navigating) {
 			// Leaving an editor updates its history stop with the position the cursor reached;
 			// arriving at a different editor starts a new stop (dropping any forward stops).

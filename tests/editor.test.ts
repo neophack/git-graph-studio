@@ -279,6 +279,30 @@ describe('editor group', () => {
 		expect(texts('.tab .label')).toEqual(['a.txt']);
 	});
 
+	it('a slow open landing after a newer click adds its tab but does not steal the view', async () => {
+		files({ 'C:\\repo\\slow.txt': 'slow\n', 'C:\\repo\\quick.txt': 'quick\n' });
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		// The first file's probe hangs until released — its open is still in flight when
+		// the user clicks the second file.
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => { release = resolve; });
+		backend.on('file_probe', ({ path }) => {
+			if (String(path).endsWith('slow.txt')) return gate.then(() => ({ binary: false, size: 5 }));
+			return { binary: false, size: 6 };
+		});
+		const slow = group.openFile('C:\\repo\\slow.txt');
+		await flush(2);
+		await group.openFile('C:\\repo\\quick.txt');
+		expect(document.querySelector('.tab.active .label')!.textContent).toBe('quick.txt');
+		release();
+		await slow;
+		await flush(2);
+		// The latecomer's tab joined the bar, but the user's last pick kept the view.
+		expect(texts('.tab .label')).toEqual(['quick.txt', 'slow.txt']);
+		expect(document.querySelector('.tab.active .label')!.textContent).toBe('quick.txt');
+	});
+
 	it('parallel opens of the same hex / preview / diff / revision target produce one tab each', async () => {
 		backend.on('read_file', () => ({ contents: '# T\n', binary: false, size: 4, encoding: 'utf8', eol: 'lf' }));
 		backend.on('read_file_chunk', () => ({ size: 4, base64: Buffer.from([1, 2, 3, 4]).toString('base64') }));
