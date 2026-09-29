@@ -12,6 +12,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 
 import { AnalysisView, type AnalysisStatus } from './analysisView';
 import type { AnalysisToolId } from './analysisTools';
+import { mountProviderSwitcher } from './aiProviders';
 import { commandForBinding, commands, effectiveBinding, setKeybindingResolver, UNSHIFTED_GLYPHS } from './commands';
 import { languageIdFor, registerContextProvider } from './contributions';
 import { EditorArea } from './editorArea';
@@ -324,6 +325,7 @@ export class Workbench {
 		register({ id: 'help.welcome', title: 'Welcome', category: 'Help', run: () => this.editors.openHelp('welcome') });
 		register({ id: 'help.shortcuts', title: 'Keyboard Shortcuts', category: 'Help', keybinding: 'Ctrl+K Ctrl+S', run: () => this.editors.openHelp('shortcuts') });
 		register({ id: 'help.selfTest', title: 'Run Module Self-Tests', category: 'Help', run: () => this.editors.openSelfTest() });
+		register({ id: 'ai.providers', title: 'Manage Model Providers', category: 'AI', run: () => this.editors.openProviders() });
 		register({ id: 'help.repository', title: 'Report Issue / Project Page', category: 'Help', run: () => void openUrl('https://github.com/neophack/git-graph-studio') });
 		register({ id: 'help.about', title: 'About', category: 'Help', run: () => notify('info', `Git Graph Studio ${__APP_VERSION__} - a standalone workbench whose views arrive as plugins.`) });
 		register({ id: 'help.openDevTools', title: 'Open Developer Tools', category: 'Help', run: () => void invoke('open_devtools').catch((e) => console.error('open_devtools failed:', e)) });
@@ -705,10 +707,15 @@ export class Workbench {
 		const makeSection = (viewId: string, name: string, extId: string, type: 'tree' | 'webview', into: HTMLElement): void => {
 			const section = el('div', type === 'webview' ? 'ext-view-section ext-webview-view-section' : 'ext-view-section');
 			if (type === 'webview') {
-				section.appendChild(el('div', 'sidebar-title', [el('span', 'label', [name])]));
+				// The AI provider switcher rides a bridged extension's section header
+				// (`cmd_providers` says whose — `bridgedExtIds` — so the app names no
+				// extension id here); every other extension's slot stays empty.
+				const chipSlot = el('span', 'provider-chip-slot');
+				section.appendChild(el('div', 'sidebar-title', [el('span', 'label', [name]), chipSlot]));
 				const pane = el('div', 'view-pane ext-webview-view-pane');
 				section.appendChild(pane);
 				this.extWebviewViewDisposers.push(this.extensionHost.mountWebviewView(viewId, extId, pane));
+				this.extWebviewViewDisposers.push(mountProviderSwitcher(extId, chipSlot));
 			} else {
 				const tree = new ExtensionTreeView(section, name, {
 					viewId,
@@ -983,6 +990,10 @@ export class Workbench {
 		// mounts it on open, and the first open starts the run by itself.
 		this.editors.renderSelfTest = (container) => {
 			void import('./selfTestPage').then((page) => page.mountSelfTestPage(container, this));
+		};
+		// The Model Providers page is a lazy chunk of the same shape.
+		this.editors.renderProviders = (container) => {
+			void import('./providersPage').then((page) => page.mountProvidersPage(container));
 		};
 
 		this.panel.terminal.onCommandEntered = () => this.scheduleRefresh(300);

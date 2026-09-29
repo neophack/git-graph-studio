@@ -67,6 +67,7 @@ beforeEach(async () => {
 		['mcp_log', () => []],
 		['ext_list', () => [{ id: 'neophack.git-graph-rs', format: 'vsix' }]],
 		['ext_process_status', () => [{ extensionId: 'neophack.git-graph-rs', pid: 4321, commands: [], protocolVersion: 'ggs-ext/1', startCount: 1, lastError: null }]],
+		['provider_list', () => ({ activeId: 'official', profiles: [{ id: 'official', preset: 'official', label: 'Official Claude', baseUrl: null, model: null, smallModel: null, hasKey: false, keyHint: null }], presets: [], bridgedExtIds: ['Anthropic.claude-code'] })],
 		['settings_read', () => null],
 		['keybindings_read', () => null],
 		['backup_list', () => []],

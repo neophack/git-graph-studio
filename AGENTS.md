@@ -416,11 +416,35 @@ bundled offer, so this is the id's only update channel), and the same version un
 from an older build is refreshed by its recorded build stamp — but nothing installs from
 nothing.
 
+**The AI provider bridge** (2026-09-29): the claude-code backend runs under a chosen
+model provider — the official Claude service or any Anthropic-compatible endpoint
+(DeepSeek, Zhipu GLM, Moonshot Kimi, a custom gateway). The store lives at
+`~/.ggs/ai-providers.json` — never Claude's own `~/.claude`: `cmd_providers.rs` seals
+every API key with AES-256-GCM under a per-install master key
+(`~/.ggs/keys/ai-providers.key`, 0600) and decrypts one only when `ext_process` spawns
+the bridged backend. That spawn always carries `CLAUDE_CONFIG_DIR=<~/.ggs/claude>` (the
+extension's own state — login, history — never touches `~/.claude`; an explicit
+`CLAUDE_CONFIG_DIR` in the app's own environment wins — the sandbox probe's hermetic
+config dir rides on it), and the active
+third-party profile adds `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` /
+`ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` / `ANTHROPIC_SMALL_FAST_MODEL`, inherited by the
+extension's CLI children (the same takeover `claude-code-sandbox.mjs` proves against a
+local server). The UI is the sidebar chip on the Claude view's section header
+(`aiProviders.ts` — mounted only for the ids the backend's `bridgedExtIds` names, so
+`src/` names no extension id), its quick pick, and the Model Providers page
+(`providersPage.ts`, the `ai.providers` command); switching provider (or editing the
+active profile) restarts the bridged backend, exactly the Extensions view's deliberate
+restart.
+
 - Frontend: `src/extensionsPanel.ts` (the Extensions view: the installed list with detail
   pages and backend status: the featured packages' rows, each its Open VSX entry merged
   with its installed state — one-click Install / Update by the installed version, the
   bundled offer as the offline fallback — and anything else installed under "Other
-  installed"), `src/nodeHost.ts` (the real-Node
+  installed"), `src/aiProviders.ts` (the AI provider bridge's store client and the
+  sidebar switcher chip — the active provider's name on the Claude section header, the
+  quick pick that switches or opens the page), `src/providersPage.ts` (the Model
+  Providers page — the profiles, the add/edit form whose key field travels once into
+  the backend's seal, activate and delete), `src/nodeHost.ts` (the real-Node
   extension host's entry, compiled to `node-host.cjs`: stdio ggs-ext/1 server, the shared
   `vscode` shim over a stdio bridge, `require('vscode')` interception, ESM fallback —
   VS Code's own extension-host shape), `src/extHost.ts` (the extension host for VSIX
@@ -477,6 +501,10 @@ nothing.
   `src-tauri/src/ext_gallery.rs` (the marketplace: Open VSX search, icon fetch and
   download-and-install over ureq, origin-confined, a marketplace package installing
   through `cmd_ext`'s ordinary VSIX path),
+  `src-tauri/src/cmd_providers.rs` (the AI provider bridge: the provider store under
+  `~/.ggs/ai-providers.json`, the AES-256-GCM key sealing under `~/.ggs/keys/`, the
+  built-in presets — official / DeepSeek / Zhipu GLM / Moonshot Kimi / custom — and the
+  spawn-time environment `ext_process` injects into the bridged backend),
   `src-tauri/src/ext_grammar.rs` (the TextMate-grammar loader: `.tmLanguage` plists and
   `.json` grammars converted to Sublime syntax and added to the rope viewer's syntect set), `src-tauri/src/ext_process.rs` (the process extension host: eager
   start at boot and install, lazy start on first command as the fallback, `initialize`
@@ -585,7 +613,10 @@ nothing.
   Open VSX per architecture; `--vsix <path>` / `GGS_BUNDLED_VSIX` bundles a ready-built
   VSIX as-is, outranking the registry for git-graph-rs)
 - Tests: `tests/extensions.test.ts` (pages, the process dispatch, the real-Node remote
-  handle routing), `tests/editor.test.ts` (the extpage tab),
+  handle routing), `tests/providers.test.ts` (the provider bridge's frontend half: the
+  store client's seam contract — the key travels only inside `provider_save`, never
+  back in a `provider_list` — the sidebar chip and its quick pick, the Model Providers
+  page), `tests/editor.test.ts` (the extpage tab),
   `tests/editorServices.test.ts` (the diagnostics store and the document-formatting
   registry, booted through the frame bootstrap),
   `src-tauri/tests/node_runtime.rs` (the pretend Node runtime: a package's JS entry served

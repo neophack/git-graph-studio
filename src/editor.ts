@@ -185,6 +185,7 @@ export type EditorInput =
 	| { kind: 'analysis'; id: string; tool: import('./analysisTools').AnalysisToolId; folders?: string[] }
 	| { kind: 'help'; help: 'welcome' | 'shortcuts' }
 	| { kind: 'selftest'; id: string }
+	| { kind: 'providers'; id: string }
 	| { kind: 'markdown'; path: string }
 	| { kind: 'history'; path: string }
 	| { kind: 'hex'; path: string }
@@ -261,6 +262,7 @@ function inputId(input: EditorInput): string {
 		case 'calltree': return 'calltree:' + input.id;
 		case 'help': return 'help:' + input.help;
 		case 'selftest': return input.id;
+		case 'providers': return input.id;
 		case 'markdown': return 'markdown:' + input.path;
 		case 'history': return 'history:' + input.path;
 		case 'hex': return 'hex:' + input.path;
@@ -413,6 +415,9 @@ export class EditorGroup {
 	renderHelp: ((help: 'welcome' | 'shortcuts', container: HTMLElement) => void) | null = null;
 	/** Fills the Module Self-Tests pane (the report page mounts itself, lazily). */
 	renderSelfTest: ((container: HTMLElement) => void) | null = null;
+	/** Fills the Model Providers pane (the provider bridge's page mounts itself, lazily);
+	 *  the returned disposer, when there is one, runs when the tab closes. */
+	renderProviders: ((container: HTMLElement) => void | (() => void)) | null = null;
 	/** A tab was activated or the group was clicked: the editor area focuses it (M3 3.1). */
 	onFocus: (() => void) | null = null;
 	/** The tab strip's preview button was clicked: the editor area opens the preview beside
@@ -1918,6 +1923,30 @@ export class EditorGroup {
 		const page = el('div', 'selftest-page');
 		editor.pane.appendChild(page);
 		this.renderSelfTest?.(page);
+		this.add(editor);
+	}
+
+	/** The Model Providers page (module 12): one tab, re-activated when open, whose pane
+	 *  the workbench fills through `renderProviders` (the page is a lazy chunk). */
+	openProviders(): void {
+		const id = 'providers';
+		const existing = this.open.find((e) => e.id === id);
+		if (existing) {
+			this.activate(existing);
+			return;
+		}
+		const editor: Editor = {
+			input: { kind: 'providers', id },
+			id,
+			label: t('providers.title'),
+			iconClass: 'cloud',
+			pane: el('div', 'editor-pane'),
+			dirty: false
+		};
+		const page = el('div', 'providers-page');
+		editor.pane.appendChild(page);
+		const dispose = this.renderProviders?.(page);
+		if (typeof dispose === 'function') editor.onClose = dispose;
 		this.add(editor);
 	}
 

@@ -461,6 +461,15 @@ export function registerSelfTestSuites(workbench: Workbench): void {
 					await live('workbench.showExtensions');
 					await settle();
 				}
+			},
+			{
+				id: 'providers',
+				name: 'the AI provider store answers profiles and names its bridged extension',
+				run: async () => {
+					const list = await invoke<{ profiles: unknown[]; bridgedExtIds: string[] } | null>('provider_list');
+					if (!list || !Array.isArray(list.profiles) || list.profiles.length === 0) throw new Error('provider_list answered no profiles');
+					if (!Array.isArray(list.bridgedExtIds) || list.bridgedExtIds.length === 0) throw new Error('provider_list named no bridged extension');
+				}
 			}
 		]
 	});

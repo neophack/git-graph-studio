@@ -258,6 +258,14 @@ impl ProcessHostState {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // The AI provider bridge (`cmd_providers`): a bridged extension's backend runs
+        // under the active provider — its own state redirected under ~/.ggs, and a
+        // third-party profile's endpoint and decrypted key in the environment the
+        // backend (and its CLI children, by inheritance) run with. A store that cannot
+        // be read reads as "the official service" and never blocks a start.
+        for (key, value) in crate::cmd_providers::backend_env(ext_id) {
+            command.env(key, value);
+        }
         if backend.kind == "node" {
             // The packaged layout puts the shim bundle and the real-Node host script in the
             // bundle's resource directory (macOS `Contents/Resources/`, Linux share/, the

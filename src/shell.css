@@ -1610,3 +1610,27 @@ body.resizing iframe { pointer-events: none; }
 .selftest-row.pending {
 	opacity: 0.55;
 }
+
+/* ---------- The AI provider bridge (module 12): the sidebar chip and the page ---------- */
+
+/* The switcher chip a bridged extension's sidebar section header carries — the active
+ * provider's name, one click from the quick pick. */
+.provider-chip-slot { flex: none; display: inline-flex; align-items: center; }
+.provider-chip {
+	display: inline-flex; align-items: center; gap: 4px; flex: none;
+	height: 20px; padding: 0 8px; border: none; border-radius: 10px;
+	font-size: 11px; font-family: inherit; cursor: pointer;
+	color: var(--vscode-descriptionForeground);
+	background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 8%, transparent);
+}
+.provider-chip:hover { background: var(--vscode-toolbar-hoverBackground); color: var(--vscode-sideBar-foreground); }
+.provider-chip .codicon { font-size: 13px; }
+.provider-chip .label { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The Model Providers page's rows and form (the analysis page kit hosts the page). */
+.provider-row-active .label { color: var(--vscode-textLink-foreground); }
+.providers-form { padding: 4px 20px 16px; max-width: 560px; display: flex; flex-direction: column; gap: 8px; }
+.providers-field { display: flex; flex-direction: column; gap: 3px; }
+.providers-field label { font-size: 11px; color: var(--vscode-descriptionForeground); }
+.providers-form .input { width: 100%; }
+.providers-form-actions { display: flex; gap: 8px; }

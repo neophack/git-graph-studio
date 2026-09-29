@@ -19,7 +19,12 @@ marketplace's per-architecture builds of the extension packages a release chose 
 **git-graph-rs** rides in every build (installed on first launch, like VS Code's bundled
 extensions); **claude-code** rides in none by default — it installs from the Extensions
 view's marketplace row on demand (a release form checkbox or `GGS_BUNDLE_CLAUDE_CODE=1`
-can pack it).
+can pack it). The Claude sidebar carries an **AI provider switcher**: run the official
+Claude service or any Anthropic-compatible endpoint — DeepSeek, Zhipu GLM, Moonshot Kimi,
+a custom gateway — with the API key AES-256-GCM sealed at rest under `~/.ggs/` and
+decrypted only when the Claude backend starts (whose own state is redirected to
+`~/.ggs/claude`, never `~/.claude`); switching provider is one click on the view's
+header chip or the **Model Providers** page.
 
 Code navigation rides a persistent symbol index (Source Insight's model): the workspace's
 declarations and their occurrences indexed once under `~/.ggs/index/`, resumed on open and

@@ -80,6 +80,8 @@ desktop = [
     "dep:encoding_rs",
     "dep:trash",
     "dep:flate2",
+    "dep:aes-gcm",
+    "dep:getrandom",
     "dep:tree-sitter",
     "dep:big-code-analysis",
     "grammar-rust",
@@ -136,6 +138,10 @@ sha2 = { version = "0.10", optional = true }
 bincode = { version = "1.3", optional = true }
 # The `crypto` builtin's randomBytes / randomUUID / getRandomValues: the OS generator.
 getrandom = { version = "0.2", optional = true }
+# The AI provider store's key sealing (cmd_providers): AES-256-GCM, pure Rust (plan §3.1) —
+# a provider's API key is encrypted at rest under a per-install master key and decrypted
+# only when the bridged backend is spawned.
+aes-gcm = { version = "0.10", optional = true }
 hex = { version = "0.4", optional = true }
 ropey = { version = "1.6", optional = true }
 # Quick Open's file list is walked across all cores instead of one (cmd_fs::walk_files).

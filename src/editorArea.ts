@@ -79,6 +79,7 @@ export class EditorArea {
 	}
 	renderHelp: ((help: 'welcome' | 'shortcuts', container: HTMLElement) => void) | null = null;
 	renderSelfTest: ((container: HTMLElement) => void) | null = null;
+	renderProviders: ((container: HTMLElement) => void | (() => void)) | null = null;
 
 	constructor(container: HTMLElement) {
 		this.container = container;
@@ -557,7 +558,8 @@ export class EditorArea {
 		group.onOpenPreviewToSide = (path) => void this.openMarkdownPreviewToSide(path);
 		group.renderWelcome = (container) => this.renderWelcome?.(container);
 		group.renderHelp = (help, container) => this.renderHelp?.(help, container);
-	group.renderSelfTest = (container) => this.renderSelfTest?.(container);
+		group.renderSelfTest = (container) => this.renderSelfTest?.(container);
+		group.renderProviders = (container) => this.renderProviders?.(container);
 		// A tab dragged from another group drops here (the payload lives in `tabDrag`).
 		boxEl.addEventListener('dragover', (event) => {
 			if (tabDrag.editor && tabDrag.groupId !== group.groupId) {
@@ -731,6 +733,7 @@ export class EditorArea {
 	openRevision = (revision: string, path: string, title: string, repo?: string) => this.activeGroup.openRevision(revision, path, title, repo);
 	openHelp = (help: 'welcome' | 'shortcuts') => this.activeGroup.openHelp(help);
 	openSelfTest = () => this.activeGroup.openSelfTest();
+	openProviders = () => this.activeGroup.openProviders();
 	openHex = (path?: string) => this.activeGroup.openHex(path);
 	openLocalHexCompare = (left: string, right: string) => this.activeGroup.openLocalHexCompare(left, right);
 	openMarkdownPreview = (path?: string) => this.activeGroup.openMarkdownPreview(path);

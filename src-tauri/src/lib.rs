@@ -42,6 +42,8 @@ pub mod cmd_fs;
 #[cfg(feature = "desktop")]
 pub mod cmd_fuzzy;
 #[cfg(feature = "desktop")]
+pub mod cmd_providers;
+#[cfg(feature = "desktop")]
 pub mod cmd_scm;
 #[cfg(feature = "desktop")]
 pub mod cmd_search;
@@ -101,8 +103,9 @@ pub use desktop::{find_repo_root, run, AppState};
 #[cfg(feature = "desktop")]
 mod desktop {
     use crate::{
-        can_log, cmd_analysis, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_scm, cmd_search,
-        cmd_symbols, ext_child, ext_gallery, ext_process, git, mcp, measure, pty, viewer, watcher,
+        can_log, cmd_analysis, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_providers, cmd_scm,
+        cmd_search, cmd_symbols, ext_child, ext_gallery, ext_process, git, mcp, measure, pty,
+        viewer, watcher,
     };
     use std::sync::{Arc, Mutex};
 
@@ -1647,6 +1650,10 @@ mod desktop {
                 cmd_ext::ext_node_env,
                 cmd_ext::ext_install_from_vsix,
                 cmd_ext::ext_install_bundled,
+                cmd_providers::provider_list,
+                cmd_providers::provider_save,
+                cmd_providers::provider_delete,
+                cmd_providers::provider_activate,
                 ext_gallery::ext_gallery_featured,
                 ext_gallery::ext_gallery_lookup,
                 ext_gallery::ext_gallery_search,
