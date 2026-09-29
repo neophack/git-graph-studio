@@ -118,6 +118,15 @@ export class EditorArea {
 		return false;
 	}
 
+	/** Rename the tab with this input id in whichever group holds it (the extension host
+	 *  applies a webview panel's `setTitle` — a chat tab's session summary — this way). */
+	renameById(id: string, title: string): boolean {
+		for (const group of this.groups()) {
+			if (group.renameById(id, title)) return true;
+		}
+		return false;
+	}
+
 	/** The active editor's whole text, when a file editor is active — module 12 pushes it to
 	 *  extension frames on active-editor changes (only when the document changed). */
 	/** An open file editor's current text (unsaved edits included), from any group. */

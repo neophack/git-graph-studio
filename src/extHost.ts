@@ -131,6 +131,12 @@ const dataUrlCache = new Map<string, Promise<string | null>>();
 /** Cached marketplace icon reads, as data URLs (the same bridge `dataUrlCache` uses). */
 const galleryIconCache = new Map<string, Promise<string | null>>();
 
+/** How long a relayed `open_in_editor`'s session stays the pending signal a following
+ *  `webview.create` matches against — the create normally follows within the round trip
+ *  to the extension; the TTL only bounds a signal left unused (the extension's map was
+ *  healthy and it revealed instead of creating). */
+const WEBVIEW_OPEN_PENDING_MS = 15_000;
+
 /** An extension file as a data URL (icons and README images cross the bridge this way), or null
  *  when the file cannot be read. Cached per extension id + path. */
 export function extFileDataUrl(extId: string, relPath: string): Promise<string | null> {
@@ -675,6 +681,16 @@ export class ExtensionHost {
 	}
 
 	private nextWebviewPanelId = 1;
+	/** The session each webview panel hosts, by panel key — learned from the panel's own
+	 *  `update_session_state` reports crossing the relay (a chat panel names the session it
+	 *  binds on every state change; farewell flags name the one it left). The session ids
+	 *  identify a conversation; the panel titles never do. */
+	private readonly webviewSessions = new Map<string, string>();
+	/** The session a just-relayed `open_in_editor` asked to open, by extension id: the next
+	 *  `webview.create` of that extension is that session's new surface (the one signal
+	 *  distinguishing a re-open from a brand-new conversation, whose requests carry no
+	 *  session id and clear the pending one instead). */
+	private readonly pendingWebviewOpens = new Map<string, { sessionId: string; at: number }>();
 	/** The sidebar webview views (`contributes.views` with `type: "webview"`, served by
 	 *  `registerWebviewViewProvider`), by view id: the section's iframe lives in the
 	 *  sidebar (the workbench mounts it), this host half relays both directions. */
@@ -687,6 +703,9 @@ export class ExtensionHost {
 	onCloseWebviewTab: ((tabId: string) => void) | null = null;
 	/** Workbench hook: focus a webview panel's tab (`panel.reveal()`). */
 	onRevealWebviewTab: ((tabId: string) => void) | null = null;
+	/** Workbench hook: retitle a webview panel's tab in place (`webview.setTitle` — a chat
+	 *  tab wearing its session's summary). */
+	onRenameWebviewTab: ((tabId: string, title: string) => void) | null = null;
 	/** Workbench hook: reveal a webview view's sidebar container (`webviewView.show()`). */
 	onRevealWebviewView: ((viewId: string) => void) | null = null;
 
@@ -1602,6 +1621,7 @@ export class ExtensionHost {
 		const view = this.webviews.get(this.webviewKey(extId, panelId));
 		if (!view) return;
 		this.webviews.delete(this.webviewKey(extId, panelId));
+		this.webviewSessions.delete(this.webviewKey(extId, panelId));
 		if (view.loadGrace !== null) clearTimeout(view.loadGrace);
 		if (view.firstPaintTimer !== null) clearTimeout(view.firstPaintTimer);
 		view.frame = null;
@@ -2160,6 +2180,25 @@ export class ExtensionHost {
 					extLog('warn', 'host', `webview ${extId}#${panelId}: created reusing a live panel id — the backend restarted; closing ${stale.length} dead panel(s) of the previous process`);
 					for (const view of stale) this.closeWebview(view.extId, view.panelId);
 				}
+				// One tab per session: a create whose session a live panel of this extension
+				// already hosts is a re-open of that session (the extension's own session→panel
+				// map lost the binding — a backend restart, a missed binding report — so its
+				// reveal-and-reuse never fired and every click of the same history row opened
+				// another tab). The new panel takes the surface; the stale tab closes, and the
+				// `webviewDisposed` it pushes settles the old panel object. A session no live
+				// panel hosts — another conversation, a brand-new one — opens its own tab, as
+				// VS Code's one-tab-per-conversation does. The create args cannot tell these
+				// apart (claude-code creates every conversation panel as the same
+				// ("claudeVSCodePanel", "Claude Code")); the relayed session traffic can.
+				const pending = this.pendingWebviewOpens.get(extId);
+				this.pendingWebviewOpens.delete(extId);
+				if (pending && Date.now() - pending.at <= WEBVIEW_OPEN_PENDING_MS) {
+					const hosted = [...this.webviews.values()].filter((view) => view.extId === extId && this.webviewSessions.get(this.webviewKey(extId, view.panelId)) === pending.sessionId);
+					for (const view of hosted) {
+						extLog('info', extId, `webview ${extId}#${view.panelId}: re-opening session ${pending.sessionId} it already hosts — closing the stale tab for the new panel`);
+						this.closeWebview(view.extId, view.panelId);
+					}
+				}
 				this.webviews.set(this.webviewKey(extId, panelId), { panelId, extId, title, html: '', frame: null, pending: [], loaded: false, loadGrace: null, firstPaintTimer: null });
 				extLog('info', 'host', `webview ${extId}#${panelId}: created ("${title}")`);
 				this.onOpenWebview?.(panelId, title, extId);
@@ -2169,7 +2208,13 @@ export class ExtensionHost {
 				const [panelId, title] = args as [number, string];
 				const view = this.webviews.get(this.webviewKey(extId, panelId));
 				if (!view) extLog('warn', 'host', `webview ${extId}#${panelId}: setTitle with no panel record — dropped`);
-				if (view) view.title = title;
+				if (view) {
+					view.title = title;
+					// The tab wears the new title: claude-code renames its chat tab to the
+					// session's summary as soon as the conversation binds — the summary IS the
+					// label the user navigates their conversation tabs by.
+					this.onRenameWebviewTab?.(this.webviewTabId(extId, panelId), title);
+				}
 				return Promise.resolve(undefined);
 			}
 			case 'webview.setHtml': {
@@ -2749,18 +2794,20 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 		// bootstrap): it belongs to the panel or view whose frame sent it, and crosses to
 		// the owning extension's frame.
 			if ((data as { __ggsWebview?: boolean }).__ggsWebview === true) {
-				const message = data as { kind?: string; message?: unknown };
-				if (message.kind !== 'message') return;
-				const view = this.webviewFor(event.source);
-			if (view) {
-				this.frames.get(view.extId)?.send?.({ type: '__studioExtEvent', event: 'webviewMessage', panelId: view.panelId, message: message.message });
-				return;
-			}
-			const webView = this.webviewViewFor(event.source);
-			if (webView) {
-				this.frames.get(webView.extId)?.send?.({ type: '__studioExtEvent', event: 'webviewViewMessage', viewId: webView.viewId, message: message.message });
-				return;
-			}
+					const message = data as { kind?: string; message?: unknown };
+					if (message.kind !== 'message') return;
+					const view = this.webviewFor(event.source);
+				if (view) {
+					this.noteWebviewSessionTraffic(view.extId, view.panelId, message.message);
+					this.frames.get(view.extId)?.send?.({ type: '__studioExtEvent', event: 'webviewMessage', panelId: view.panelId, message: message.message });
+					return;
+				}
+				const webView = this.webviewViewFor(event.source);
+				if (webView) {
+					this.noteWebviewSessionTraffic(webView.extId, null, message.message);
+					this.frames.get(webView.extId)?.send?.({ type: '__studioExtEvent', event: 'webviewViewMessage', viewId: webView.viewId, message: message.message });
+					return;
+				}
 			// A page that speaks but belongs to no panel: its replies go nowhere and the
 			// page usually waits forever — one of the blank-page shapes.
 			extLog('warn', 'host', `a webview page sent ${String((message.message as { command?: string } | null)?.command ?? 'a message')} but no panel or view owns its frame — dropped`);
@@ -2816,6 +2863,30 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 			if (page.frame.contentWindow === source) return page;
 		}
 		return null;
+	}
+
+	/** Learn what the relay can tell a `webview.create` apart by: which session a panel
+	 *  hosts (`update_session_state` reports; the farewell flags name the session it
+	 *  left), which session an `open_in_editor` just asked for (the pending signal a
+	 *  re-open's create carries), and — a request with no session id — that the next
+	 *  create is a brand-new conversation, clearing any stale pending signal. */
+	private noteWebviewSessionTraffic(extId: string, panelId: number | null, message: unknown): void {
+		const envelope = message as { request?: { type?: unknown; sessionId?: unknown; isFarewell?: unknown; panelNoLongerHosts?: unknown }; type?: unknown } | null;
+		const request = envelope?.request;
+		const type = typeof request?.type === 'string' ? request.type : typeof envelope?.type === 'string' ? envelope.type : '';
+		if (type === 'open_in_editor' || type === 'new_conversation_tab') {
+			if (typeof request?.sessionId === 'string' && request.sessionId) this.pendingWebviewOpens.set(extId, { sessionId: request.sessionId, at: Date.now() });
+			else this.pendingWebviewOpens.delete(extId);
+			return;
+		}
+		if (type === 'update_session_state' && panelId !== null && typeof request?.sessionId === 'string' && request.sessionId) {
+			const key = this.webviewKey(extId, panelId);
+			if (request.isFarewell === true || request.panelNoLongerHosts === true) {
+				if (this.webviewSessions.get(key) === request.sessionId) this.webviewSessions.delete(key);
+			} else {
+				this.webviewSessions.set(key, request.sessionId);
+			}
+		}
 	}
 
 	private webviewFor(source: MessageEventSource | null): WebviewHandle | null {

@@ -168,6 +168,7 @@ export class Workbench {
 		this.extensionHost.onOpenWebview = (panelId, title, extId) => this.openWebviewPanel(panelId, title, extId);
 		this.extensionHost.onCloseWebviewTab = (tabId) => this.editors.closeById(tabId);
 		this.extensionHost.onRevealWebviewTab = (tabId) => this.editors.revealById(tabId);
+		this.extensionHost.onRenameWebviewTab = (tabId, title) => this.editors.renameById(tabId, title);
 		this.extensionHost.onStatusBarItems = (items) => this.statusBar.setExtensionItems(items);
 		this.statusBar.onExtensionCommand = (command, args) => void this.extensionHost.executeCommand(command, args ?? []);
 		this.extensionHost.onOutputChannels = (channels) => this.panel.output.setExtensionChannels(channels);

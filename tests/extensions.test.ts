@@ -914,6 +914,64 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		expect(frames[0]!.getAttribute('srcdoc')).toContain('<body>fresh</body>');
 	});
 
+	it('a re-opened session replaces its own tab; other sessions keep theirs', async () => {
+		const { host, sent } = hostWithFrame();
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		host.onOpenWebview = (panelId, title) => {
+			void group.openExtPage({ kind: 'extpage', id: host['webviewTabId']('acme.demo', panelId), title, extId: 'acme.demo', pageId: 'webview' }, (pane) => host.mountWebview('acme.demo', panelId, pane));
+		};
+		host.onCloseWebviewTab = (tabId) => { if (group.closeById(tabId)) host['webviewClosed']('acme.demo', Number(tabId.split(':').at(-1))); };
+		host.onRenameWebviewTab = (tabId, title) => group.renameById(tabId, title);
+		const disposedPanels = () => sent.filter((m) => (m as { type?: string }).type === '__studioExtEvent' && (m as { event?: string }).event === 'webviewDisposed').map((m) => (m as { panelId?: number }).panelId);
+		// A panel's webview speaks to its extension through the host's relay: the envelope
+		// the composed acquireVsCodeApi bootstrap posts, from the frame the tab mounts.
+		const fromPanel = (source: Window | null, request: Record<string, unknown>) => window.dispatchEvent(new MessageEvent('message', {
+			source: source as MessageEventSource,
+			data: { __ggsWebview: true, kind: 'message', message: { type: 'request', request } }
+		}));
+		const waitFrames = () => new Promise((resolve) => setTimeout(resolve, 20));
+		const chatFrames = () => [...document.querySelectorAll('#editorGroup iframe')];
+
+		// The chat panel opens ("Claude Code") and binds session-a: its binding report and
+		// its summary rename both cross the host's relay.
+		await host['serve']('webview.create', [1, 'chat.view', 'Claude Code'], 'acme.demo', {} as never);
+		await host['serve']('webview.setHtml', [1, '<html><body>one</body></html>'], 'acme.demo', {} as never);
+		await waitFrames();
+		fromPanel(chatFrames()[0]!.contentWindow, { type: 'update_session_state', sessionId: 'session-a', state: 'idle' });
+		await host['serve']('webview.setTitle', [1, 'Fix the login bug'], 'acme.demo', {} as never);
+		expect(group.activeInput?.title).toBe('Fix the login bug');
+		expect(chatFrames()).toHaveLength(1);
+
+		// The same history row clicked again: the panel asks to open the session it is
+		// showing, the extension's session→panel map has lost the binding, and a fresh
+		// create arrives for session-a. The stale tab closes beneath the new panel —
+		// still one tab for the session, the old object told it is gone.
+		fromPanel(chatFrames()[0]!.contentWindow, { type: 'open_in_editor', sessionId: 'session-a' });
+		await host['serve']('webview.create', [2, 'chat.view', 'Claude Code'], 'acme.demo', {} as never);
+		await host['serve']('webview.setHtml', [2, '<html><body>two</body></html>'], 'acme.demo', {} as never);
+		await waitFrames();
+		expect(chatFrames()).toHaveLength(1);
+		expect(chatFrames()[0]!.getAttribute('srcdoc')).toContain('<body>two</body>');
+		expect(group.activeInput?.title).toBe('Claude Code');
+		expect(disposedPanels()).toEqual([1]);
+
+		// Another history row: session-b is hosted by nobody, so its panel opens a second
+		// tab — different conversations stay different tabs.
+		fromPanel(chatFrames()[0]!.contentWindow, { type: 'open_in_editor', sessionId: 'session-b' });
+		await host['serve']('webview.create', [3, 'chat.view', 'Claude Code'], 'acme.demo', {} as never);
+		await waitFrames();
+		expect(chatFrames()).toHaveLength(2);
+		expect(disposedPanels()).toEqual([1]);
+
+		// A brand-new conversation carries no session id: it clears the pending signal and
+		// opens its own tab, never displacing a session's.
+		fromPanel(chatFrames()[1]!.contentWindow, { type: 'new_conversation_tab', sessionId: undefined });
+		await host['serve']('webview.create', [4, 'chat.view', 'Claude Code'], 'acme.demo', {} as never);
+		await waitFrames();
+		expect(chatFrames()).toHaveLength(3);
+		expect(disposedPanels()).toEqual([1]);
+	});
+
 	it('the load watchdog never restarts a page that is still making progress', async () => {
 		vi.useFakeTimers();
 		const originalAdd = HTMLIFrameElement.prototype.addEventListener;

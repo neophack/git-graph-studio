@@ -2245,6 +2245,18 @@ export class EditorGroup {
 		if (editor) this.activate(editor);
 	}
 
+	/** Rename an already-open editor's tab in place — the extension host applies a webview
+	 *  panel's `setTitle` this way (claude-code's chat tab wears its session's summary as
+	 *  soon as the conversation binds). Answers whether a tab here carries the id. */
+	renameById(id: string, title: string): boolean {
+		const editor = this.open.find((e) => e.id === id);
+		if (!editor || editor.label === title) return false;
+		editor.label = title;
+		if (editor.input.kind === 'extpage') editor.input.title = title;
+		this.update();
+		return true;
+	}
+
 	/** Whether a tab with this input id is open here (the editor area's revealById scans
 	 *  the groups with it). */
 	hasEditor(id: string): boolean {
