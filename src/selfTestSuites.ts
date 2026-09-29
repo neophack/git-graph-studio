@@ -469,6 +469,10 @@ export function registerSelfTestSuites(workbench: Workbench): void {
 					const list = await invoke<{ profiles: unknown[]; bridgedExtIds: string[] } | null>('provider_list');
 					if (!list || !Array.isArray(list.profiles) || list.profiles.length === 0) throw new Error('provider_list answered no profiles');
 					if (!Array.isArray(list.bridgedExtIds) || list.bridgedExtIds.length === 0) throw new Error('provider_list named no bridged extension');
+					// The cc-switch import's scan answers a list (empty where neither
+					// cc-switch nor a live Claude configuration exists) — no keys in it.
+					const candidates = await invoke<{ hasKey?: boolean }[] | null>('provider_ccswitch_scan');
+					if (!Array.isArray(candidates ?? [])) throw new Error('provider_ccswitch_scan answered no list');
 				}
 			}
 		]

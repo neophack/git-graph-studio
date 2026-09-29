@@ -8,7 +8,7 @@
 // chunk, like the self-test and analysis pages.
 
 import { t, tf } from './i18n';
-import { actionButton, confirmDialog, el, icon, notify } from './ui';
+import { actionButton, confirmDialog, el, icon, notify, quickPick } from './ui';
 import {
 	PROVIDERS_CHANGED_EVENT,
 	activateProvider,
@@ -16,8 +16,13 @@ import {
 	deleteProvider,
 	describeProvider,
 	draftFromPreset,
+	fetchGatewayModels,
+	importCcSwitch,
 	loadProviders,
 	saveProvider,
+	scanCcSwitch,
+	testGatewayConnection,
+	type ConnectionReport,
 	type ProviderDraft,
 	type ProviderList,
 	type ProviderPreset,
@@ -31,6 +36,7 @@ const PRESET_LABELS: Record<string, () => string> = {
 	deepseek: () => t('providers.preset.deepseek'),
 	glm: () => t('providers.preset.glm'),
 	kimi: () => t('providers.preset.kimi'),
+	newapi: () => t('providers.preset.newapi'),
 	custom: () => t('providers.preset.custom')
 };
 
@@ -53,6 +59,11 @@ class ProvidersPage {
 	 *  (`null` over the seam), touched sends what it holds (an empty string clears). */
 	private keyValue = '';
 	private keyTouched = false;
+	/** The gateway probe's last answer (the form's result line). */
+	private testResult: ConnectionReport | 'testing' | 'error' | null = null;
+	private testError = '';
+	/** The model catalogue a Fetch brought in (the model fields' placeholder). */
+	private fetchedModels: string[] = [];
 
 	/** The store changed under us (a switch from the sidebar chip, another window):
 	 *  follow it while the tab lives; the disposer ends the listening. */
@@ -66,7 +77,10 @@ class ProvidersPage {
 		container.appendChild(el('div', 'an-header', [
 			icon('cloud'),
 			el('span', 'an-title', [t('providers.title')]),
-			el('div', 'actions', [actionButton('add', t('providers.add'), () => this.startAdd())])
+			el('div', 'actions', [
+				actionButton('cloud-download', t('providers.import'), () => void this.importCcSwitch()),
+				actionButton('add', t('providers.add'), () => this.startAdd())
+			])
 		]));
 		this.body = el('div', 'an-list');
 		container.appendChild(this.body);
@@ -90,21 +104,28 @@ class ProvidersPage {
 		this.render();
 	}
 
+	/** A fresh form carries none of the previous form's probe state. */
+	private resetFormProbeState(): void {
+		this.keyValue = '';
+		this.keyTouched = false;
+		this.testResult = null;
+		this.testError = '';
+		this.fetchedModels = [];
+	}
+
 	private startAdd(): void {
 		const presets = this.list?.presets ?? [];
 		const preset = presets.find((candidate) => !candidate.official && candidate.id !== 'custom')
 			?? presets.find((candidate) => candidate.id === 'custom')
 			?? presets[0];
 		if (!preset) return;
-		this.keyValue = '';
-		this.keyTouched = false;
+		this.resetFormProbeState();
 		this.editing = draftFromPreset(preset, new Set((this.list?.profiles ?? []).map((profile) => profile.id)));
 		this.render();
 	}
 
 	private startEdit(profile: ProviderProfile): void {
-		this.keyValue = '';
-		this.keyTouched = false;
+		this.resetFormProbeState();
 		this.editing = {
 			id: profile.id,
 			preset: profile.preset,
@@ -121,6 +142,77 @@ class ProvidersPage {
 		if (!(await confirmDialog(tf('providers.deleteConfirm', profile.label), t('providers.delete')))) return;
 		const list = await deleteProvider(profile.id);
 		if (list !== null) notify('info', tf('providers.deleted', profile.label));
+	}
+
+	/** The cc-switch migration: scan (keys stay in the backend), confirm, import. The
+	 *  candidate cc-switch points at is activated by the import itself. */
+	private async importCcSwitch(): Promise<void> {
+		let candidates;
+		try {
+			candidates = await scanCcSwitch();
+		} catch (error) {
+			notify('error', t('providers.scanFailed') + String(error));
+			return;
+		}
+		if (candidates.length === 0) {
+			notify('info', t('providers.ccswitch.none'));
+			return;
+		}
+		const names = candidates.map((candidate) => candidate.label).join(' · ');
+		if (!(await confirmDialog(tf('providers.ccswitch.confirm', String(candidates.length), names), t('providers.import')))) return;
+		const list = await importCcSwitch(candidates.map((candidate) => candidate.id));
+		if (list !== null) notify('info', tf('providers.ccswitch.imported', String(candidates.length)));
+	}
+
+	/** The probes' key arguments: an empty apiKey makes the backend fall back to the
+	 *  named profile's stored key — an edit of an existing provider tests with the
+	 *  key it already has. */
+	private probeArgs(): { apiKey: string; profileId: string | null } {
+		return { apiKey: this.keyTouched ? this.keyValue : '', profileId: this.editing?.id ?? null };
+	}
+
+	/** Test Connection: the probe's report rendered on the form's result line. */
+	private async runTest(): Promise<void> {
+		if (this.editing === null) return;
+		this.testResult = 'testing';
+		this.render();
+		const { apiKey, profileId } = this.probeArgs();
+		try {
+			this.testResult = await testGatewayConnection(this.editing.baseUrl, apiKey, this.editing.model, profileId);
+		} catch (error) {
+			this.testResult = 'error';
+			this.testError = String(error);
+		}
+		this.render();
+	}
+
+	/** Fetch Models: the gateway's catalogue becomes the model fields' suggestions,
+	 *  and a quick pick lands the main model in one click. */
+	private async runFetchModels(): Promise<void> {
+		if (this.editing === null) return;
+		const { apiKey, profileId } = this.probeArgs();
+		let models: string[];
+		try {
+			models = await fetchGatewayModels(this.editing.baseUrl, apiKey, profileId);
+		} catch (error) {
+			notify('error', t('providers.models.failed') + String(error));
+			return;
+		}
+		if (models.length === 0) {
+			notify('info', t('providers.models.empty'));
+			return;
+		}
+		this.fetchedModels = models;
+		const picked = await quickPick(
+			models.map((id) => ({ label: id, value: id })),
+			t('providers.models.pick'),
+			t('providers.model')
+		);
+		if (picked !== null && this.editing !== null) {
+			this.editing.model = picked;
+			if (!this.editing.smallModel) this.editing.smallModel = picked;
+			this.render();
+		}
 	}
 
 	private async submit(): Promise<void> {
@@ -201,8 +293,7 @@ class ProvidersPage {
 		presetSelect.addEventListener('change', () => {
 			const next = presets.find((preset) => preset.id === presetSelect.value);
 			if (!next) return;
-			this.keyValue = '';
-			this.keyTouched = false;
+			this.resetFormProbeState();
 			const refilled = draftFromPreset(next, new Set());
 			this.editing = { ...refilled, id: draft.id, label: draft.label };
 			this.render();
@@ -216,8 +307,8 @@ class ProvidersPage {
 		if (!official) {
 			form.appendChild(this.field('providers.baseUrl', draft.baseUrl, (value) => {
 				draft.baseUrl = value;
-			}, 'https://api.example.com/anthropic'));
-			const models = presets.find((preset) => preset.id === draft.preset)?.models ?? [];
+			}, draft.preset === 'newapi' ? 'https://your-newapi.example.com' : 'https://api.example.com/anthropic'));
+			const models = presets.find((preset) => preset.id === draft.preset)?.models ?? this.fetchedModels;
 			const hint = models.length > 0 ? models.join('  ·  ') : undefined;
 			form.appendChild(this.field('providers.model', draft.model, (value) => {
 				draft.model = value;
@@ -225,6 +316,14 @@ class ProvidersPage {
 			form.appendChild(this.field('providers.smallModel', draft.smallModel, (value) => {
 				draft.smallModel = value;
 			}, hint));
+
+			// The gateway tools: one probe (its report on the result line below) and the
+			// catalogue fetch. Both ride the form's endpoint, not the stored profile's.
+			const tools = el('div', 'providers-form-actions');
+			tools.appendChild(actionButton('plug', t('providers.test'), () => void this.runTest()));
+			tools.appendChild(actionButton('list-tree', t('providers.fetchModels'), () => void this.runFetchModels()));
+			form.appendChild(tools);
+			form.appendChild(this.renderTestResult());
 
 			const keyRow = el('div', 'providers-field', [el('label', '', [t('providers.apiKey')])]);
 			const existing = this.list?.profiles.find((profile) => profile.id === draft.id);
@@ -268,5 +367,26 @@ class ProvidersPage {
 		input.addEventListener('input', () => onInput(input.value));
 		row.appendChild(input);
 		return row;
+	}
+
+	/** The Test Connection line: the probe's report, or the transport error, or
+	 *  nothing yet. */
+	private renderTestResult(): HTMLElement {
+		const line = el('div', 'providers-test-result');
+		if (this.testResult === 'testing') {
+			line.textContent = `${t('providers.testing')}…`;
+		} else if (this.testResult === 'error') {
+			line.textContent = this.testError;
+			line.classList.add('providers-test-bad');
+		} else if (this.testResult !== null) {
+			const report = this.testResult;
+			line.textContent = report.ok
+				? tf('providers.test.ok', String(report.ms))
+				: `${t('providers.test.problem')} ${report.message}`;
+			line.classList.add(report.ok ? 'providers-test-ok' : 'providers-test-bad');
+		} else {
+			line.hidden = true;
+		}
+		return line;
 	}
 }

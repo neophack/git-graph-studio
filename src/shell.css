@@ -1634,3 +1634,6 @@ body.resizing iframe { pointer-events: none; }
 .providers-field label { font-size: 11px; color: var(--vscode-descriptionForeground); }
 .providers-form .input { width: 100%; }
 .providers-form-actions { display: flex; gap: 8px; }
+.providers-test-result { min-height: 16px; font-size: 11px; }
+.providers-test-ok { color: var(--vscode-charts-green, var(--vscode-descriptionForeground)); }
+.providers-test-bad { color: var(--vscode-errorForeground); }

@@ -154,8 +154,7 @@ describe('the Model Providers page', () => {
 		expect([...document.querySelectorAll('.an-row')][0]!.querySelector('[title="Activate"]')).not.toBeNull();
 	});
 
-	it('reports a failed switch and keeps the page as it was', async () => {
-		backend.on('provider_activate', () => {
+	it('reports a failed switch and keeps the page as it was', async () => {		backend.on('provider_activate', () => {
 			throw new Error('the backend refused to stop');
 		});
 		mountProvidersPage(host());
@@ -181,8 +180,7 @@ describe('the Model Providers page', () => {
 		expect(texts('.an-row .label')).toEqual(['Official Claude']);
 	});
 
-	it('shows a load failure with a retry that recovers', async () => {
-		let broken = true;
+	it('shows a load failure with a retry that recovers', async () => {		let broken = true;
 		backend.on('provider_list', () => {
 			if (broken) throw new Error('the store is unreadable');
 			return providerListAnswer();
@@ -306,5 +304,93 @@ describe('the sidebar provider chip', () => {
 		await flush();
 		expect(backend.callsTo('provider_activate')).toEqual([]);
 		dispose();
+	});
+});
+
+describe('the gateway tools and the cc-switch import', () => {
+	beforeEach(async () => {
+		await modules();
+		resetProviderCacheForTests();
+		backend.on('provider_list', () => providerListAnswer());
+	});
+
+	function openEditForm(): void {
+		click(actionByTitle('Edit', [...document.querySelectorAll('.an-row')][1]!));
+	}
+
+	it('tests the connection and renders the probe report on the form', async () => {
+		backend.on('provider_test_connection', ({ baseUrl, apiKey, model, profileId }) => {
+			expect(baseUrl).toBe('https://api.deepseek.com/anthropic');
+			// An untouched key field falls back to the profile's stored key, backend-side.
+			expect(apiKey).toBe('');
+			expect(profileId).toBe('deepseek');
+			expect(model).toBe('deepseek-chat');
+			return { ok: true, status: 200, ms: 42, message: 'reachable' };
+		});
+		mountProvidersPage(host());
+		await flush();
+		openEditForm();
+		await flush();
+		click(actionByTitle('Test Connection'));
+		await flush();
+		const line = document.querySelector('.providers-test-result')!;
+		expect(line.classList.contains('providers-test-ok')).toBe(true);
+		expect(line.textContent).toContain('42');
+		// A diagnosed failure renders as the problem it is.
+		backend.on('provider_test_connection', () => ({ ok: false, status: 401, ms: 7, message: 'the gateway rejected the API key (HTTP 401)' }));
+		click(actionByTitle('Test Connection'));
+		await flush();
+		const bad = document.querySelector('.providers-test-result')!;
+		expect(bad.classList.contains('providers-test-bad')).toBe(true);
+		expect(bad.textContent).toContain('401');
+	});
+
+	it('fetches the model catalogue and lands a pick in the model field', async () => {
+		backend.on('provider_fetch_models', () => ['glm-4.6', 'claude-sonnet-4-5', 'deepseek-r1']);
+		mountProvidersPage(host());
+		await flush();
+		openEditForm();
+		await flush();
+		click(actionByTitle('Fetch Models'));
+		await flush();
+		const rows = [...document.querySelectorAll('.quick-input .row')];
+		expect(rows.map((row) => row.querySelector('.label')!.textContent)).toEqual(
+			['glm-4.6', 'claude-sonnet-4-5', 'deepseek-r1']);
+		click(rows[2]!);
+		await flush();
+		const model = [...document.querySelectorAll('.providers-form input.input')][2]!;
+		expect(model.value).toBe('deepseek-r1');
+	});
+
+	it('imports the cc-switch configuration after a confirmation, keys never round-tripping', async () => {
+		const candidates = [
+			{ id: 'deepseek', label: 'DeepSeek 官方', baseUrl: 'https://api.deepseek.com/anthropic', model: 'deepseek-chat', hasKey: true, current: true, source: 'cc-switch' }
+		];
+		backend.on('provider_ccswitch_scan', () => candidates);
+		let importNames: unknown = null;
+		backend.on('provider_import_ccswitch', ({ names }) => {
+			importNames = names;
+			return { ...providerListAnswer(), activeId: 'deepseek' };
+		});
+		mountProvidersPage(host());
+		await flush();
+		click(actionByTitle('Import from cc-switch'));
+		await flush();
+		// The confirm carries the count and names; nothing imported before it.
+		expect(backend.callsTo('provider_import_ccswitch')).toEqual([]);
+		click(notificationButton('Import from cc-switch'));
+		await flush();
+		expect(importNames).toEqual(['deepseek']);
+		expect(notifications().some((message) => message.includes('Imported 1'))).toBe(true);
+	});
+
+	it('says so when there is nothing to import', async () => {
+		backend.on('provider_ccswitch_scan', () => []);
+		mountProvidersPage(host());
+		await flush();
+		click(actionByTitle('Import from cc-switch'));
+		await flush();
+		expect(notifications()[0]).toContain('No importable configuration');
+		expect(backend.callsTo('provider_import_ccswitch')).toEqual([]);
 	});
 });

@@ -157,6 +157,14 @@ pub fn presets() -> Vec<ProviderPreset> {
             models: vec!["kimi-k2", "kimi-k2-turbo"],
         },
         ProviderPreset {
+            id: "newapi".to_owned(),
+            label: "NewAPI Gateway".to_owned(),
+            official: false,
+            // A NewAPI / OneAPI deployment has no fixed origin — the user's own gateway.
+            base_url: None,
+            models: vec![],
+        },
+        ProviderPreset {
             id: "custom".to_owned(),
             label: "Custom (Anthropic-compatible)".to_owned(),
             official: false,
@@ -172,7 +180,9 @@ pub fn presets() -> Vec<ProviderPreset> {
 fn seeded_store() -> ProviderStore {
     let mut store = ProviderStore { version: 1, active_id: Some("official".to_owned()), profiles: Vec::new() };
     for preset in presets() {
-        if preset.id == "custom" {
+        // The gateway and custom presets have no fixed shape to seed — the Add flow
+        // creates their profiles once the user names an endpoint.
+        if preset.id == "custom" || preset.id == "newapi" {
             continue;
         }
         store.profiles.push(ProviderProfile {
@@ -430,6 +440,384 @@ pub fn backend_env_for(ext_id: &str, store: &ProviderStore, home: &Path) -> Vec<
     env
 }
 
+/* ---------- The gateway probes (NewAPI / OneAPI / any Anthropic-compatible origin) ---------- */
+
+/// The gateway probes' ceiling: a test or a model listing that takes longer than this
+/// is an answer the user cannot wait for anyway.
+const GATEWAY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn gateway_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(GATEWAY_TIMEOUT))
+        .build()
+        .into()
+}
+
+/// A provider input's base URL as the gateway probes ask it: trimmed, slash-normalized,
+/// http(s). The same normalization a save applies, so probing an unsaved form field and
+/// probing the stored profile behave identically.
+fn gateway_base_url(base_url: &str) -> Result<String, String> {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.starts_with("https://") || base.starts_with("http://") {
+        Ok(base.to_owned())
+    } else {
+        Err(format!(
+            "the base URL must start with https:// (or http:// for a local server): {base}"
+        ))
+    }
+}
+
+/// The gateway's model catalogue (`GET {base}/v1/models` with the key) — what NewAPI /
+/// OneAPI and every OpenAI-compatible origin answer with `{ "data": [ { "id": … } ] }`.
+/// The ids come back in the gateway's own order, deduplicated.
+pub fn fetch_gateway_models(base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
+    let url = format!("{}/v1/models", gateway_base_url(base_url)?);
+    let key = api_key.trim();
+    let result = gateway_agent()
+        .get(&url)
+        .header("Authorization", &format!("Bearer {key}"))
+        .header("x-api-key", key)
+        .header("Accept", "application/json")
+        .call();
+    // ureq answers a non-2xx as an Err(status): the same diagnosis the probe renders.
+    let mut response = match result {
+        Ok(response) => response,
+        Err(ureq::Error::StatusCode(status)) => return Err(gateway_status_message(status, &url)),
+        Err(e) => return Err(format!("could not reach {url}: {e}")),
+    };
+    let status = response.status().as_u16();
+    let body = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("read the model catalogue: {e}"))?;
+    if !(200..300).contains(&status) {
+        return Err(gateway_status_message(status, &url));
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("the model catalogue is not valid JSON: {e}"))?;
+    let entries = parsed
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "the model catalogue has no \"data\" array — is this an OpenAI-compatible gateway?".to_owned())?;
+    let mut models: Vec<String> = Vec::new();
+    for entry in entries {
+        if let Some(id) = entry.get("id").and_then(serde_json::Value::as_str) {
+            if !id.is_empty() && !models.iter().any(|known| known == id) {
+                models.push(id.to_owned());
+            }
+        }
+    }
+    Ok(models)
+}
+
+/// A gateway probe's answer: reachability, the HTTP status, the round-trip time and a
+/// user-readable diagnosis (the UI renders `message` verbatim).
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionReport {
+    pub ok: bool,
+    pub status: u16,
+    pub ms: u64,
+    pub message: String,
+}
+
+/// A non-2xx from the gateway as the diagnosis the test connection renders.
+fn gateway_status_message(status: u16, url: &str) -> String {
+    match status {
+        401 | 403 => format!("the gateway rejected the API key (HTTP {status})"),
+        404 => format!(
+            "nothing answers /v1/messages at {url} — the base URL may need the provider's \
+             Anthropic suffix (e.g. /anthropic)"
+        ),
+        429 => "the gateway rate-limited the probe (HTTP 429) — the key works, but is throttled".to_owned(),
+        other => format!("the gateway answered HTTP {other}"),
+    }
+}
+
+/// One Anthropic-compatible probe: a 1-token `/v1/messages` round trip. Any HTTP answer
+/// is a diagnosis (401 — key rejected, 404 — wrong base URL, …); only a transport
+/// failure is an `Err`. NewAPI gateways route by model id, so the form's model rides
+/// along (a wrong one still proves reachability — the gateway answers, just unhappy).
+pub fn test_gateway_connection(base_url: &str, api_key: &str, model: &str) -> Result<ConnectionReport, String> {
+    let url = format!("{}/v1/messages", gateway_base_url(base_url)?);
+    let key = api_key.trim();
+    let body = serde_json::json!({
+        "model": if model.trim().is_empty() { "claude-3-5-haiku-20241022" } else { model.trim() },
+        "max_tokens": 1,
+        "messages": [{ "role": "user", "content": "ping" }]
+    });
+    let started = std::time::Instant::now();
+    let body_text = serde_json::to_string(&body).map_err(|e| format!("serialize the probe: {e}"))?;
+    let sent = gateway_agent()
+        .post(&url)
+        .header("x-api-key", key)
+        .header("Authorization", &format!("Bearer {key}"))
+        .header("anthropic-version", "2023-06-01")
+        .header("Content-Type", "application/json")
+        .send(body_text.as_bytes());
+    let ms = started.elapsed().as_millis() as u64;
+    match sent {
+        Ok(mut response) => {
+            let status = response.status().as_u16();
+            let _ = response.body_mut().read_to_string();
+            let (ok, message) = if (200..300).contains(&status) {
+                (true, format!("reachable — the gateway answered in {ms} ms"))
+            } else {
+                (false, gateway_status_message(status, &url))
+            };
+            Ok(ConnectionReport { ok, status, ms, message })
+        }
+        Err(ureq::Error::StatusCode(status)) => {
+            let (ok, message) = if (200..300).contains(&status) {
+                (true, format!("reachable — the gateway answered in {ms} ms"))
+            } else {
+                (false, gateway_status_message(status, &url))
+            };
+            Ok(ConnectionReport { ok, status, ms, message })
+        }
+        Err(e) => Err(format!("could not reach {url}: {e}")),
+    }
+}
+
+/* ---------- The cc-switch import ---------- */
+
+/// One provider configuration found on this machine's cc-switch (or live Claude)
+/// configuration — what the scan answers. No secret crosses this: `hasKey` stands in
+/// for the key the import seals backend-side.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CcSwitchCandidate {
+    pub id: String,
+    pub label: String,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub has_key: bool,
+    /// The configuration cc-switch (or Claude Code itself) currently points at.
+    pub current: bool,
+    /// Where it was found: `cc-switch` or `claude`.
+    pub source: String,
+}
+
+/// One candidate as the import consumes it: the public scan plus the key itself, which
+/// exists only in this process (the scan command's answer strips it).
+struct CcSwitchEntry {
+    candidate: CcSwitchCandidate,
+    api_key: Option<String>,
+}
+
+fn ccswitch_config_path(home: &Path) -> PathBuf {
+    home.join(".cc-switch").join("config.json")
+}
+
+fn claude_settings_path(home: &Path) -> PathBuf {
+    home.join(".claude").join("settings.json")
+}
+
+/// A label as a profile id: ASCII word characters survive, the rest folds to `-`; a
+/// slug that comes out empty (a CJK-only label) becomes the numbered fallback.
+fn slugify(label: &str, fallback: &str) -> String {
+    let slug: String = label
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    let slug = slug.trim_matches('-').to_owned();
+    if slug.is_empty() {
+        fallback.to_owned()
+    } else {
+        slug
+    }
+}
+
+/// One provider-shaped JSON entry as cc-switch's config carries it (the tolerant read:
+/// `name`/`label`, the env map under `settingsConfig.env` / `env` / `config.env`).
+fn ccswitch_entry_object(
+    entry: &serde_json::Value,
+    id_hint: Option<&str>,
+    source: &str,
+) -> Option<CcSwitchEntry> {
+    let env = entry
+        .pointer("/settingsConfig/env")
+        .or_else(|| entry.get("env"))
+        .or_else(|| entry.pointer("/config/env"))?
+        .as_object()?;
+    let text = |key: &str| {
+        env.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let base_url = text("ANTHROPIC_BASE_URL");
+    let api_key = text("ANTHROPIC_AUTH_TOKEN").or_else(|| text("ANTHROPIC_API_KEY"));
+    let model = text("ANTHROPIC_MODEL").or_else(|| {
+        entry
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    });
+    // A provider entry with neither an endpoint nor a key configures nothing this
+    // bridge could run — the official service needs no import either.
+    if base_url.is_none() && api_key.is_none() {
+        return None;
+    }
+    let label = entry
+        .get("name")
+        .or_else(|| entry.get("label"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| id_hint.unwrap_or("imported"))
+        .to_owned();
+    let id = slugify(&label, id_hint.unwrap_or("ccswitch"));
+    let current = entry
+        .get("current")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    Some(CcSwitchEntry {
+        candidate: CcSwitchCandidate {
+            id,
+            label,
+            base_url,
+            model,
+            has_key: api_key.is_some(),
+            current,
+            source: source.to_owned(),
+        },
+        api_key,
+    })
+}
+
+/// cc-switch's own configuration file: the provider list under `claude.providers` — a
+/// JSON array (one shape) or an id→entry map (the other) — plus `claude.current` naming
+/// the active one (by its raw key, which is not the slug the profile id becomes).
+/// Tolerant on purpose: the community CLIs and the desktop releases disagree on the
+/// shapes, and an unreadable future format imports nothing rather than half of something.
+fn scan_ccswitch_config(json: &serde_json::Value) -> Vec<CcSwitchEntry> {
+    let mut entries: Vec<CcSwitchEntry> = Vec::new();
+    let claude = json.get("claude").unwrap_or(json);
+    let current = claude
+        .get("current")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let providers = claude.get("providers");
+    let shaped: Vec<(Option<String>, CcSwitchEntry)> = match providers {
+        Some(serde_json::Value::Array(list)) => list
+            .iter()
+            .filter_map(|entry| ccswitch_entry_object(entry, None, "cc-switch").map(|e| (None, e)))
+            .collect(),
+        Some(serde_json::Value::Object(map)) => map
+            .iter()
+            .filter_map(|(id, entry)| {
+                ccswitch_entry_object(entry, Some(id), "cc-switch").map(|e| (Some(id.to_owned()), e))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    for (raw_id, mut entry) in shaped {
+        if !entry.candidate.current {
+            entry.candidate.current = raw_id.is_some() && current.as_deref() == raw_id.as_deref();
+        }
+        entries.push(entry);
+    }
+    entries
+}
+
+/// The live Claude configuration (`~/.claude/settings.json`'s `env` map) as one
+/// candidate: whatever cc-switch last switched to, or a hand-set environment — the
+/// configuration this machine's Claude Code actually runs on right now, so it is
+/// current by definition.
+fn scan_claude_settings(json: &serde_json::Value) -> Option<CcSwitchEntry> {
+    let mut entry = ccswitch_entry_object(json, Some("current"), "claude")?;
+    entry.candidate.current = true;
+    Some(entry)
+}
+
+/// Everything importable on this machine, keys included (the command's answer strips
+/// them): cc-switch's list first, then the live Claude configuration, deduplicated by
+/// endpoint+key so the provider cc-switch currently points at does not import twice —
+/// and its current flag folds into the kept entry.
+fn scan_ccswitch_entries(home: &Path) -> Vec<CcSwitchEntry> {
+    let mut entries: Vec<CcSwitchEntry> = Vec::new();
+    for (path, scan) in [
+        (ccswitch_config_path(home), scan_ccswitch_config as fn(&serde_json::Value) -> Vec<CcSwitchEntry>),
+        (claude_settings_path(home), |json: &serde_json::Value| {
+            scan_claude_settings(json).into_iter().collect()
+        }),
+    ] {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue; // not installed, or the file went away between scan and import
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue; // a half-written foreign file imports nothing, never errors out
+        };
+        for entry in scan(&json) {
+            // Same endpoint and same key is the same provider, whatever either tool
+            // named it; a different key on one endpoint is a second account and stays.
+            if let Some(known) = entries.iter_mut().find(|known| {
+                known.candidate.base_url == entry.candidate.base_url && known.api_key == entry.api_key
+            }) {
+                known.candidate.current |= entry.candidate.current;
+                continue;
+            }
+            entries.push(entry);
+        }
+    }
+    entries
+}
+
+/// The scan the UI sees: ids made unique (a duplicate label gains a numeric suffix),
+/// keys stripped.
+fn scan_ccswitch_candidates(home: &Path) -> Vec<CcSwitchCandidate> {
+    let mut candidates: Vec<CcSwitchCandidate> = Vec::new();
+    let mut taken: Vec<String> = Vec::new();
+    for mut entry in scan_ccswitch_entries(home) {
+        let mut id = entry.candidate.id.clone();
+        let mut suffix = 2;
+        while taken.contains(&id) {
+            id = format!("{}-{}", entry.candidate.id, suffix);
+            suffix += 1;
+        }
+        entry.candidate.id = id.clone();
+        taken.push(id);
+        candidates.push(entry.candidate);
+    }
+    candidates
+}
+
+/// Import the named candidates into the store (keys sealed here, never crossing back),
+/// returning how many landed and the id of the currently-marked one, if any. Unknown
+/// names are skipped; an existing profile of the same id is replaced.
+fn import_ccswitch_entries(
+    home: &Path,
+    store: &mut ProviderStore,
+    names: &[String],
+) -> Result<(usize, Option<String>), String> {
+    let mut imported = 0usize;
+    let mut activate: Option<String> = None;
+    for entry in scan_ccswitch_entries(home) {
+        if !names.contains(&entry.candidate.id) {
+            continue;
+        }
+        let input = ProviderInput {
+            id: entry.candidate.id.clone(),
+            preset: "custom".to_owned(),
+            label: entry.candidate.label.clone(),
+            base_url: entry.candidate.base_url.clone(),
+            model: entry.candidate.model.clone(),
+            small_model: None,
+            api_key: entry.api_key,
+        };
+        apply_save(home, store, &input)?;
+        if entry.candidate.current {
+            activate = Some(entry.candidate.id.clone());
+        }
+        imported += 1;
+    }
+    Ok((imported, activate))
+}
+
 /// [`backend_env_for`] as `ext_process` calls it at spawn time. A store that cannot be
 /// read reads as "the official service": a broken provider file must never keep a
 /// backend from starting. An explicit `CLAUDE_CONFIG_DIR` in the app's own environment
@@ -540,8 +928,7 @@ fn list_answer(store: &ProviderStore) -> ProviderList {
 /// The store for the UI: profiles (keys masked), the built-in presets, and the bridged
 /// extension ids. A missing file answers the seeded store, not an error.
 #[tauri::command]
-pub fn provider_list() -> Result<ProviderList, String> {
-    let _guard = STORE_LOCK.lock().unwrap();
+pub fn provider_list() -> Result<ProviderList, String> {    let _guard = STORE_LOCK.lock().unwrap();
     let home = ggs_home()?;
     let store = read_store(&home)?;
     Ok(list_answer(&store))
@@ -630,6 +1017,100 @@ pub fn provider_activate(app: tauri::AppHandle, id: String) -> Result<ProviderLi
     let mut store = read_store(&home)?;
     let before = backend_env_for(CLAUDE_CODE_EXT_ID, &store, &home);
     set_active(&mut store, &id)?;
+    write_store(&home, &store)?;
+    drop(_guard);
+    let after = backend_env_for(CLAUDE_CODE_EXT_ID, &store, &home);
+    let answer = list_answer(&store);
+    if before != after {
+        restart_bridged_backends(&app);
+        let _ = tauri::Emitter::emit(&app, PROVIDERS_EVENT, ());
+    }
+    Ok(answer)
+}
+
+/* ---------- The gateway and import commands ---------- */
+
+/// The key the probes run with: what the form holds (a typed key), else the named
+/// profile's stored one, decrypted here and never returned — an edit of an existing
+/// provider probes with the key it already has.
+fn probe_key(home: &Path, store: &ProviderStore, api_key: &str, profile_id: Option<&str>) -> String {
+    let typed = api_key.trim();
+    if !typed.is_empty() {
+        return typed.to_owned();
+    }
+    let Some(id) = profile_id else {
+        return String::new();
+    };
+    store
+        .profiles
+        .iter()
+        .find(|profile| profile.id == id)
+        .and_then(|profile| profile.api_key_enc.as_deref())
+        .and_then(|sealed| unseal(home, sealed).ok())
+        .unwrap_or_default()
+}
+
+/// A gateway's model catalogue for the form's suggestions (NewAPI / OneAPI and every
+/// OpenAI-compatible origin). An empty `apiKey` falls back to the named profile's
+/// stored key.
+#[tauri::command]
+pub fn provider_fetch_models(
+    base_url: String,
+    api_key: String,
+    profile_id: Option<String>,
+) -> Result<Vec<String>, String> {
+    let home = ggs_home()?;
+    let store = read_store(&home)?;
+    let key = probe_key(&home, &store, &api_key, profile_id.as_deref());
+    fetch_gateway_models(&base_url, &key)
+}
+
+/// The one-shot connectivity probe the form's Test Connection renders. An empty
+/// `apiKey` falls back to the named profile's stored key.
+#[tauri::command]
+pub fn provider_test_connection(
+    base_url: String,
+    api_key: String,
+    model: String,
+    profile_id: Option<String>,
+) -> Result<ConnectionReport, String> {
+    let home = ggs_home()?;
+    let store = read_store(&home)?;
+    let key = probe_key(&home, &store, &api_key, profile_id.as_deref());
+    test_gateway_connection(&base_url, &key, &model)
+}
+
+/// What a cc-switch (or live Claude) configuration on this machine would contribute —
+/// the import preview, keys stripped. Missing files answer an empty list, never an
+/// error: the app may run where neither cc-switch nor Claude Code exists.
+#[tauri::command]
+pub fn provider_ccswitch_scan() -> Result<Vec<CcSwitchCandidate>, String> {
+    let home = crate::cmd_ext::extensions_home_dir()?
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "no user home directory".to_owned())?;
+    Ok(scan_ccswitch_candidates(&home))
+}
+
+/// Import the named candidates, sealing their keys into the store. A candidate marked
+/// current (what cc-switch points at) is activated — the one deliberate opinion of the
+/// import, so the bridge takes over the configuration the machine already runs on.
+#[tauri::command]
+pub fn provider_import_ccswitch(
+    app: tauri::AppHandle,
+    names: Vec<String>,
+) -> Result<ProviderList, String> {
+    let _guard = STORE_LOCK.lock().unwrap();
+    let home = ggs_home()?;
+    let mut store = read_store(&home)?;
+    let before = backend_env_for(CLAUDE_CODE_EXT_ID, &store, &home);
+    let (imported, activate) = import_ccswitch_entries(&home, &mut store, &names)?;
+    if imported == 0 {
+        return Err("none of the named configurations was found to import".to_owned());
+    }
+    if let Some(id) = activate {
+        set_active(&mut store, &id)?;
+    }
     write_store(&home, &store)?;
     drop(_guard);
     let after = backend_env_for(CLAUDE_CODE_EXT_ID, &store, &home);
@@ -909,8 +1390,8 @@ mod tests {
         assert!(deepseek.has_key, "the UI still needs to know a key exists");
     }
 
-    /// A save naming an unknown preset errors — the preset is the profile's shape,
-    /// and an unknown shape has no validation rules to apply.
+    /// An unknown preset is rejected — the preset is the profile's shape, and an
+    /// unknown shape has no validation rules to apply.
     #[test]
     fn an_unknown_preset_is_rejected() {
         let _guard = ProviderHome::pin();
@@ -1017,5 +1498,202 @@ mod tests {
         assert_eq!(unseal(&home, sealed).unwrap(), "密钥-secret-Δ");
         // The multibyte tail survives the hint's char arithmetic.
         assert_eq!(profile.api_key_hint.as_deref(), Some("et-Δ"));
+    }
+
+    /* ---------- The gateway probes ---------- */
+
+    /// One loopback HTTP answer for the gateway probes: the server reads until the
+    /// request goes quiet, replies with the canned bytes, and hands back what it saw.
+    fn serve(response: String) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(300)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => request.extend_from_slice(&chunk[..n]),
+                }
+            }
+            let _ = stream.write_all(response.as_bytes());
+            String::from_utf8_lossy(&request).into_owned()
+        });
+        (url, handle)
+    }
+
+    fn http_response(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// The model catalogue comes off the gateway with the key, ids deduplicated in the
+    /// gateway's order; a rejection is a readable error, not an empty list.
+    #[test]
+    fn fetch_gateway_models_reads_the_catalogue_with_the_key() {
+        let (url, server) = serve(http_response(
+            "200 OK",
+            r#"{"data":[{"id":"glm-4.6"},{"id":"claude-sonnet-4-5"},{"id":"glm-4.6"}]}"#,
+        ));
+        let models = fetch_gateway_models(&url, "sk-gw-key").unwrap();
+        let request = server.join().unwrap();
+        assert_eq!(models, vec!["glm-4.6", "claude-sonnet-4-5"]);
+        assert!(request.contains("GET /v1/models"), "{request}");
+        // ureq spells its header names lowercase; the value's case is the scheme's own.
+        let lowered = request.to_lowercase();
+        assert!(lowered.contains("authorization: bearer sk-gw-key"), "{request}");
+
+        let (url, server) = serve(http_response("401 Unauthorized", r#"{"error":"bad key"}"#));
+        let error = fetch_gateway_models(&url, "sk-wrong").unwrap_err();
+        server.join().unwrap();
+        assert!(error.contains("rejected"), "{error}");
+    }
+
+    /// The probe maps outcomes: a 200 is reachable, a 401 is a key diagnosis with the
+    /// round-trip time still reported, and a dead endpoint is an error.
+    #[test]
+    fn the_connection_probe_diagnoses_reachability_and_rejection() {
+        let (url, server) = serve(http_response(
+            "200 OK",
+            r#"{"content":[{"type":"text","text":"hi"}]}"#,
+        ));
+        let report = test_gateway_connection(&url, "sk-live", "glm-4.6").unwrap();
+        let request = server.join().unwrap();
+        assert!(report.ok && report.status == 200 && report.message.contains("reachable"));
+        assert!(request.contains("POST /v1/messages"), "{request}");
+        assert!(request.contains("anthropic-version: 2023-06-01"), "{request}");
+        assert!(request.contains(r#""model":"glm-4.6""#), "{request}");
+
+        let (url, server) = serve(http_response("401 Unauthorized", r#"{"error":{"type":"authentication_error"}}"#));
+        let report = test_gateway_connection(&url, "sk-wrong", "").unwrap();
+        server.join().unwrap();
+        assert!(!report.ok && report.status == 401);
+        assert!(report.message.contains("rejected"), "{}", report.message);
+
+        // A port nobody listens on: the transport failure is the error half.
+        let error = test_gateway_connection("http://127.0.0.1:1", "k", "m").unwrap_err();
+        assert!(error.contains("could not reach"), "{error}");
+    }
+
+    /// A base URL without its scheme is refused before any request is made.
+    #[test]
+    fn the_gateway_probes_validate_the_base_url_shape() {
+        assert!(fetch_gateway_models("my-gateway.example", "k").is_err());
+        assert!(test_gateway_connection("ftp://nope", "k", "m").is_err());
+    }
+
+    /* ---------- The cc-switch import ---------- */
+
+    fn write_ccswitch_fixtures(home: &Path) {
+        std::fs::create_dir_all(home.join(".cc-switch")).unwrap();
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        // The map shape (id → entry) with `claude.current` naming the active one.
+        std::fs::write(
+            ccswitch_config_path(home),
+            r#"{
+  "claude": {
+    "current": "deepseek-official",
+    "providers": {
+      "deepseek-official": {
+        "name": "DeepSeek 官方",
+        "settingsConfig": { "env": {
+          "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+          "ANTHROPIC_AUTH_TOKEN": "sk-cc-deepseek"
+        }}
+      },
+      "newapi-gw": {
+        "name": "My NewAPI",
+        "env": {
+          "ANTHROPIC_BASE_URL": "https://gw.example.com",
+          "ANTHROPIC_AUTH_TOKEN": "sk-cc-gw",
+          "ANTHROPIC_MODEL": "glm-4.6"
+        }
+      },
+      "empty-entry": { "name": "sign-in only", "env": {} }
+    }
+  }
+}"#,
+        )
+        .unwrap();
+        // The live configuration: what the machine's Claude Code runs on right now —
+        // the same provider cc-switch's `current` names (how a switched machine looks).
+        std::fs::write(
+            claude_settings_path(home),
+            r#"{"env": {"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic", "ANTHROPIC_AUTH_TOKEN": "sk-cc-deepseek"}}"#,
+        )
+        .unwrap();
+    }
+
+    /// The scan reads cc-switch's list and the live Claude configuration, strips the
+    /// keys, marks what is current, and folds the duplicate (the live config being the
+    /// same NewAPI gateway cc-switch points at).
+    #[test]
+    fn the_scan_answers_candidates_without_keys_and_marks_the_current_one() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        write_ccswitch_fixtures(&home);
+        let candidates = scan_ccswitch_candidates(&home);
+        let json = serde_json::to_string(&candidates).unwrap();
+        assert!(!json.contains("sk-cc-"), "a key leaked in the scan: {json}");
+
+        assert_eq!(candidates.len(), 2, "{candidates:?}");
+        let deepseek = candidates.iter().find(|c| c.label == "DeepSeek 官方").unwrap();
+        assert!(
+            deepseek.has_key && deepseek.current && deepseek.source == "cc-switch",
+            "current names it in cc-switch AND the live config folds into it: {candidates:?}"
+        );
+        let gateway = candidates.iter().find(|c| c.label == "My NewAPI").unwrap();
+        assert_eq!(gateway.model.as_deref(), Some("glm-4.6"));
+        assert!(!gateway.current);
+        assert!(candidates.iter().all(|c| c.label != "sign-in only"), "an env-less entry configures nothing");
+
+        // Neither configuration present: an empty answer, never an error.
+        {
+            let _fresh = ProviderHome::pin();
+            let fresh_home = ggs_home().unwrap();
+            assert!(scan_ccswitch_candidates(&fresh_home).is_empty());
+        }
+    }
+
+    /// The import seals the candidates' keys into the store, replaces same-id profiles
+    /// forward-only, and activates the one cc-switch points at — so the bridge takes
+    /// over exactly the configuration the machine already runs on.
+    #[test]
+    fn the_import_seals_keys_and_activates_the_current_configuration() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        write_ccswitch_fixtures(&home);
+        let mut store = seeded_store();
+
+        let candidates = scan_ccswitch_candidates(&home);
+        let names: Vec<String> = candidates.iter().map(|c| c.id.clone()).collect();
+        let (imported, activate) = import_ccswitch_entries(&home, &mut store, &names).unwrap();
+        assert_eq!(imported, 2, "{candidates:?}");
+        assert_eq!(activate.as_deref(), Some(candidates.iter().find(|c| c.current).unwrap().id.as_str()));
+        set_active(&mut store, &activate.unwrap()).unwrap();
+
+        let profile = store
+            .profiles
+            .iter()
+            .find(|p| p.label == "DeepSeek 官方")
+            .expect("the imported profile is in the store");
+        let sealed = profile.api_key_enc.as_deref().expect("the key was sealed");
+        assert_eq!(unseal(&home, sealed).unwrap(), "sk-cc-deepseek");
+        // The imported current one drives the environment now.
+        let env = backend_env_for(CLAUDE_CODE_EXT_ID, &store, &home);
+        let map = env_map(&env);
+        assert_eq!(map["ANTHROPIC_BASE_URL"], "https://api.deepseek.com/anthropic");
+        assert_eq!(map["ANTHROPIC_AUTH_TOKEN"], "sk-cc-deepseek");
+
+        // Unknown names are skipped, an empty import answers zero.
+        let (imported, _) = import_ccswitch_entries(&home, &mut store, &["no-such".to_owned()]).unwrap();
+        assert_eq!(imported, 0);
     }
 }

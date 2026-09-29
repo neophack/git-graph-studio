@@ -24,7 +24,10 @@ Claude service or any Anthropic-compatible endpoint — DeepSeek, Zhipu GLM, Moo
 a custom gateway — with the API key AES-256-GCM sealed at rest under `~/.ggs/` and
 decrypted only when the Claude backend starts (whose own state is redirected to
 `~/.ggs/claude`, never `~/.claude`); switching provider is one click on the view's
-header chip or the **Model Providers** page.
+header chip or the **Model Providers** page, which also probes the endpoint (Test
+Connection), pulls the gateway's model catalogue (NewAPI / OneAPI `/v1/models`), and
+imports an existing **cc-switch** configuration (keys sealed on import, the one
+cc-switch points at becoming active).
 
 Code navigation rides a persistent symbol index (Source Insight's model): the workspace's
 declarations and their occurrences indexed once under `~/.ggs/index/`, resumed on open and

@@ -198,6 +198,66 @@ export function draftFromPreset(preset: ProviderPreset, takenIds: Set<string>): 
 	};
 }
 
+/* ---------- The gateway probes and the cc-switch import ---------- */
+
+/** One provider configuration found on this machine's cc-switch (or live Claude)
+ *  configuration — the scan's answer, keys stripped (a `hasKey` flag stands in for
+ *  what the import seals backend-side). */
+export interface CcSwitchCandidate {
+	id: string;
+	label: string;
+	baseUrl: string | null;
+	model: string | null;
+	hasKey: boolean;
+	/** The configuration cc-switch (or Claude Code itself) currently points at. */
+	current: boolean;
+	/** Where it was found: `cc-switch` or `claude`. */
+	source: string;
+}
+
+/** The connectivity probe's answer: reachability, the HTTP status, the round trip and
+ *  a diagnosis the page renders verbatim. */
+export interface ConnectionReport {
+	ok: boolean;
+	status: number;
+	ms: number;
+	message: string;
+}
+
+/** What a cc-switch (or live Claude) configuration on this machine would contribute.
+ *  Missing files answer empty — the app may run where neither exists. */
+export async function scanCcSwitch(): Promise<CcSwitchCandidate[]> {
+	return (await invoke<CcSwitchCandidate[] | null>('provider_ccswitch_scan')) ?? [];
+}
+
+/** Import the named candidates (their keys are sealed in the backend, never crossing
+ *  back). The candidate cc-switch points at is activated, which may restart the
+ *  bridged backend; the changed store announces itself. */
+export async function importCcSwitch(names: string[]): Promise<ProviderList | null> {
+	try {
+		const list = await invoke<ProviderList | null>('provider_import_ccswitch', { names });
+		announce(providersOrEmpty(list));
+		return cache;
+	} catch (error) {
+		notify('error', t('providers.ccswitch.importFailed') + String(error));
+		return null;
+	}
+}
+
+/** The gateway's model catalogue (`/v1/models`) for the form's suggestions. An empty
+ *  `apiKey` makes the backend fall back to the named profile's stored key. Throws —
+ *  the caller renders the failure inline, next to the button that asked. */
+export async function fetchGatewayModels(baseUrl: string, apiKey: string, profileId: string | null): Promise<string[]> {
+	const models = await invoke<string[] | null>('provider_fetch_models', { baseUrl, apiKey, profileId });
+	return models ?? [];
+}
+
+/** The one-shot `/v1/messages` probe. Any HTTP answer is a report (a 401 is a
+ *  diagnosis, not a crash); only a transport failure throws. */
+export async function testGatewayConnection(baseUrl: string, apiKey: string, model: string, profileId: string | null): Promise<ConnectionReport> {
+	return await invoke<ConnectionReport>('provider_test_connection', { baseUrl, apiKey, model, profileId });
+}
+
 /* ---------- The sidebar switcher ---------- */
 
 /** The provider chip a bridged extension's sidebar section header carries: the active
