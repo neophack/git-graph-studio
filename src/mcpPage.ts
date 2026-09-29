@@ -15,6 +15,14 @@ import type { AnalysisPageView } from './analysisPages';
 interface McpToolInfo { name: string; description: string }
 interface McpLogEntry { time: number; tool: string; ok: boolean; ms: number; args: string }
 
+/** The automatic Claude integration's state (`cmd_providers::claude_mcp_status`):
+ *  whether the redirected Claude configuration carries the GGS analysis server. */
+interface ClaudeMcpStatus {
+	registered: boolean;
+	folder: string | null;
+	command: string | null;
+}
+
 /** The stdio snippet every MCP client understands (ZCode: the `mcp.servers` field of
  *  ~/.zcode/cli/config.json; Claude Desktop / Cursor: the same shape under
  *  `mcpServers`). */
@@ -34,6 +42,7 @@ const COMMAND_SNIPPET = 'ggs --mcp D:\\your\\project';
 export class McpPage implements AnalysisPageView {
 	private tools: McpToolInfo[] = [];
 	private log: McpLogEntry[] = [];
+	private claude: ClaudeMcpStatus | null = null;
 	private error: string | null = null;
 	private loading = true;
 	private readonly body: HTMLElement;
@@ -62,14 +71,16 @@ export class McpPage implements AnalysisPageView {
 		this.error = null;
 		this.render();
 		try {
-			const [tools, log] = await Promise.all([
+			const [tools, log, claude] = await Promise.all([
 				invoke<McpToolInfo[]>('mcp_tools'),
-				invoke<McpLogEntry[]>('mcp_log')
+				invoke<McpLogEntry[]>('mcp_log'),
+				invoke<ClaudeMcpStatus | null>('claude_mcp_status')
 			]);
 			// A defaulting test layer (or a degraded backend) answers null — an empty
 			// catalogue and log, not a render crash.
 			this.tools = tools ?? [];
 			this.log = log ?? [];
+			this.claude = claude;
 		} catch (error) {
 			this.error = String(error);
 		}
@@ -125,6 +136,27 @@ export class McpPage implements AnalysisPageView {
 			el('code', 'an-code', [CONFIG_SNIPPET]),
 			el('div', 'an-empty an-note', [t('mcp.setup.hint')])
 		);
+
+		this.body.appendChild(el('div', 'an-section', [t('mcp.claude.title')]));
+		const claude = this.claude;
+		if (claude === null) {
+			this.body.appendChild(el('div', 'an-empty', [t('mcp.claude.unknown')]));
+		} else if (claude.registered && claude.folder) {
+			const row = el('div', 'an-row');
+			row.title = t('mcp.claude.registered.hint');
+			row.append(
+				icon('check'),
+				el('span', 'label', [t('mcp.claude.registered')]),
+				el('span', 'description', [claude.folder]),
+				el('span', 'tail', [t('mcp.claude.serverName')])
+			);
+			this.body.appendChild(row);
+			this.body.appendChild(el('div', 'an-empty an-note', [t('mcp.claude.registered.note')]));
+		} else {
+			const row = el('div', 'an-empty');
+			row.append(icon('info'), el('span', '', [' ', t('mcp.claude.notRegistered')]));
+			this.body.appendChild(row);
+		}
 
 		this.body.appendChild(el('div', 'an-section', [tf('mcp.tools', this.tools.length)]));
 		for (const tool of this.tools) {

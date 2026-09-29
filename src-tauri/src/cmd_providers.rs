@@ -1122,6 +1122,150 @@ pub fn provider_import_ccswitch(
     Ok(answer)
 }
 
+/* ---------- The GGS analysis MCP inside Claude (module 16 served to the extension) ---------- */
+
+/// The MCP server name Claude's `/mcp` lists the analysis bridge under.
+pub const CLAUDE_MCP_SERVER_NAME: &str = "ggs";
+
+/// Claude's redirected settings with (or without) the GGS analysis server, as JSON —
+/// the composition core. `existing` is the file's current text (None when absent);
+/// the answer is the new text to write, or None when the file already says the right
+/// thing (a no-op apply must not touch Claude's own mtime-ordered state). A user
+/// entry this app did not write is preserved verbatim; an unparseable one fails
+/// rather than being replaced.
+pub fn claude_mcp_settings(
+    existing: Option<&str>,
+    folders: &[String],
+    command: &str,
+) -> Result<Option<String>, String> {
+    let mut settings: serde_json::Value = match existing {
+        Some(text) if text.trim().is_empty() => serde_json::json!({}),
+        Some(text) => serde_json::from_str(text)
+            .map_err(|e| format!("the existing Claude settings are not valid JSON — not overwriting them: {e}"))?,
+        None => serde_json::json!({}),
+    };
+    if !settings.is_object() {
+        return Err("the existing Claude settings are not a JSON object — not overwriting them".to_owned());
+    }
+    let servers = settings
+        .as_object_mut()
+        .expect("checked above")
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    if !servers.is_object() {
+        return Err("the existing mcpServers entry is not a JSON object — not overwriting it".to_owned());
+    }
+    let wanted = folders.first().map(|folder| {
+        serde_json::json!({
+            "command": command,
+            "args": ["--mcp", folder],
+        })
+    });
+    let map = servers.as_object_mut().expect("checked above");
+    match wanted {
+        Some(entry) => match map.get(CLAUDE_MCP_SERVER_NAME) {
+            Some(current) if *current == entry => return Ok(None),
+            _ => {
+                map.insert(CLAUDE_MCP_SERVER_NAME.to_owned(), entry);
+            }
+        },
+        None => {
+            if map.remove(CLAUDE_MCP_SERVER_NAME).is_none() {
+                return Ok(None);
+            }
+        }
+    }
+    let mut out = settings;
+    {
+        let map = out
+            .get_mut("mcpServers")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("checked above");
+        if map.is_empty() {
+            out.as_object_mut().expect("checked above").remove("mcpServers");
+        }
+    }
+    Ok(Some(
+        serde_json::to_string_pretty(&out).map_err(|e| format!("serialize the Claude settings: {e}"))? + "\n",
+    ))
+}
+
+/// Keep Claude's MCP configuration pointing at this app's analysis server for the open
+/// folder: written at boot and on every folder open/close beside `notify_workspace`
+/// (the composition root's wiring), so every new Claude session lists `ggs` under
+/// `/mcp` with the symbol index and the five analysis tools. Nothing here touches
+/// Claude's login state — `settings.json` only, and only our own server entry.
+pub fn apply_claude_mcp(folders: &[String]) {
+    let result = apply_claude_mcp_inner(folders, std::env::current_exe().ok().as_deref());
+    if let Err(error) = result {
+        // The bridge must never keep a folder open or close from succeeding; the
+        // extension host log is where a missing registration is diagnosable.
+        eprintln!("[providers] claude mcp registration: {error}");
+        crate::cmd_ext::log_extensions(&format!("claude mcp registration: {error}"));
+    }
+}
+
+/// [`apply_claude_mcp`]'s injectable core (the executable path is a test seam).
+fn apply_claude_mcp_inner(folders: &[String], command: Option<&Path>) -> Result<(), String> {
+    let home = ggs_home()?;
+    let dir = home.join("claude");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let path = dir.join("settings.json");
+    let existing = std::fs::read_to_string(&path).ok();
+    let command = command
+        .map(Path::to_string_lossy)
+        .map(|c| c.into_owned())
+        .ok_or_else(|| "the app's own executable path is unknown".to_owned())?;
+    if let Some(text) = claude_mcp_settings(existing.as_deref(), folders, &command)? {
+        std::fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// What the MCP Server page reports about the automatic Claude integration.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeMcpStatus {
+    pub registered: bool,
+    pub folder: Option<String>,
+    pub command: Option<String>,
+}
+
+#[tauri::command]
+pub fn claude_mcp_status() -> Result<ClaudeMcpStatus, String> {
+    let home = ggs_home()?;
+    let path = home.join("claude").join("settings.json");
+    let server = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|json| json.pointer(&format!("/mcpServers/{CLAUDE_MCP_SERVER_NAME}")).cloned());
+    let text_in = |pointer: &str| {
+        server
+            .as_ref()
+            .and_then(|entry| entry.pointer(pointer))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let command = text_in("/command");
+    // The repository rides the args as the value after `--mcp`.
+    let folder = server
+        .as_ref()
+        .and_then(|entry| entry.pointer("/args"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|args| {
+            args.iter()
+                .zip(args.iter().skip(1))
+                .find(|(flag, _)| flag.as_str() == Some("--mcp"))
+                .and_then(|(_, value)| value.as_str())
+                .map(str::to_owned)
+        });
+    Ok(ClaudeMcpStatus {
+        registered: command.is_some(),
+        folder,
+        command,
+    })
+}
+
 /* ---------- The tests ---------- */
 
 #[cfg(test)]
@@ -1132,7 +1276,11 @@ mod tests {
     /// One test's isolated `~/.ggs`: pinned for the guard's lifetime, restored (and the
     /// temp directory cleaned) on drop. Keep the guard in its own binding — a shadowed
     /// guard unpins immediately and the test would touch the developer's real home.
+    /// The static home is process-wide and cargo runs a module's tests in parallel, so
+    /// every guard also holds a serializing lock: a pinned home stays pinned until its
+    /// own test is done. Never nest two pins — the lock is not reentrant.
     struct ProviderHome {
+        _serial: std::sync::MutexGuard<'static, ()>,
         /// Held (not read) for the guard's lifetime: dropping it cleans the temp dir.
         _dir: tempfile::TempDir,
         previous: Option<PathBuf>,
@@ -1140,10 +1288,12 @@ mod tests {
 
     impl ProviderHome {
         fn pin() -> Self {
+            static SERIAL: Mutex<()> = Mutex::new(());
+            let serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
             let previous = TEST_HOME.lock().unwrap().clone();
             let dir = tempfile::tempdir().unwrap();
             *TEST_HOME.lock().unwrap() = Some(dir.path().to_path_buf());
-            ProviderHome { _dir: dir, previous }
+            ProviderHome { _serial: serial, _dir: dir, previous }
         }
     }
 
@@ -1202,12 +1352,14 @@ mod tests {
         assert_eq!(unseal(&home_a, &sealed).unwrap(), "sk-secret-1234");
         // A different nonce per seal — the same secret seals to different bytes.
         assert_ne!(sealed, seal(&home_a, "sk-secret-1234").unwrap());
+        drop(guard_a);
 
+        // A different install's master key does not open it (sequential, never a
+        // nested pin — the homes' serializing lock is not reentrant).
         let guard_b = ProviderHome::pin();
         let home_b = ggs_home().unwrap();
         assert!(unseal(&home_b, &sealed).is_err());
         drop(guard_b);
-        drop(guard_a);
     }
 
     /// The master key file lands once, 32 bytes, and user-readable only (unix).
@@ -1653,13 +1805,14 @@ mod tests {
         assert_eq!(gateway.model.as_deref(), Some("glm-4.6"));
         assert!(!gateway.current);
         assert!(candidates.iter().all(|c| c.label != "sign-in only"), "an env-less entry configures nothing");
+    }
 
-        // Neither configuration present: an empty answer, never an error.
-        {
-            let _fresh = ProviderHome::pin();
-            let fresh_home = ggs_home().unwrap();
-            assert!(scan_ccswitch_candidates(&fresh_home).is_empty());
-        }
+    /// Neither configuration present: an empty answer, never an error.
+    #[test]
+    fn the_scan_answers_empty_without_any_configuration() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        assert!(scan_ccswitch_candidates(&home).is_empty());
     }
 
     /// The import seals the candidates' keys into the store, replaces same-id profiles
@@ -1695,5 +1848,111 @@ mod tests {
         // Unknown names are skipped, an empty import answers zero.
         let (imported, _) = import_ccswitch_entries(&home, &mut store, &["no-such".to_owned()]).unwrap();
         assert_eq!(imported, 0);
+    }
+
+    /* ---------- The Claude MCP registration ---------- */
+
+    const COMMAND: &str = "/opt/ggs/ggs";
+
+    /// The registration composes into whatever else Claude's settings carry: the
+    /// user's own env map and other MCP servers survive untouched.
+    #[test]
+    fn the_registration_composes_into_existing_claude_settings() {
+        let existing = r#"{
+  "env": { "ANTHROPIC_BASE_URL": "https://gw.example.com" },
+  "mcpServers": { "other": { "command": "other-srv" } }
+}"#;
+        let text = claude_mcp_settings(
+            Some(existing),
+            &["/repo".to_owned()],
+            COMMAND,
+        )
+        .unwrap()
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json.pointer("/env/ANTHROPIC_BASE_URL").and_then(|v| v.as_str()), Some("https://gw.example.com"));
+        assert_eq!(json.pointer("/mcpServers/other/command").and_then(|v| v.as_str()), Some("other-srv"));
+        assert_eq!(json.pointer("/mcpServers/ggs/command").and_then(|v| v.as_str()), Some(COMMAND));
+        assert_eq!(json.pointer("/mcpServers/ggs/args/0").and_then(|v| v.as_str()), Some("--mcp"));
+        assert_eq!(json.pointer("/mcpServers/ggs/args/1").and_then(|v| v.as_str()), Some("/repo"));
+    }
+
+    /// Applying the same registration twice is a no-op (None — Claude's own file is
+    /// not rewritten), and a folder change or a moved executable replaces our entry,
+    /// still leaving the rest of the file alone.
+    #[test]
+    fn re_applying_the_same_registration_is_a_no_op_and_a_change_replaces_it() {
+        let first = claude_mcp_settings(None, &["/repo".to_owned()], COMMAND).unwrap().unwrap();
+        assert_eq!(claude_mcp_settings(Some(&first), &["/repo".to_owned()], COMMAND).unwrap(), None);
+        // A different folder, a different binary: rewritten.
+        let second = claude_mcp_settings(Some(&first), &["/other".to_owned()], COMMAND).unwrap().unwrap();
+        assert_ne!(first, second);
+        let json: serde_json::Value = serde_json::from_str(&second).unwrap();
+        assert_eq!(json.pointer("/mcpServers/ggs/args/1").and_then(|v| v.as_str()), Some("/other"));
+        let third = claude_mcp_settings(Some(&second), &["/other".to_owned()], "/new/place/ggs").unwrap().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&third).unwrap();
+        assert_eq!(json.pointer("/mcpServers/ggs/command").and_then(|v| v.as_str()), Some("/new/place/ggs"));
+    }
+
+    /// With no folder open the GGS entry goes away — a repo-scoped server makes no
+    /// sense without a repository — and other servers survive; when ours was the only
+    /// one, the empty mcpServers map goes with it. A file that never had our entry is
+    /// a no-op (None), not a rewrite.
+    #[test]
+    fn closing_the_folder_unregisters_the_server_and_cleans_up() {
+        // Ours plus another server: ours goes, theirs stays.
+        let ours_and_other = claude_mcp_settings(
+            Some(r#"{"mcpServers":{"other":{"command":"x"}}}"#),
+            &["/repo".to_owned()],
+            COMMAND,
+        )
+        .unwrap()
+        .unwrap();
+        let cleaned = claude_mcp_settings(Some(&ours_and_other), &[], COMMAND).unwrap().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&cleaned).unwrap();
+        assert!(json.pointer("/mcpServers/ggs").is_none());
+        assert!(json.pointer("/mcpServers/other").is_some());
+
+        // Ours was the only server: the empty mcpServers map goes with it.
+        let alone = claude_mcp_settings(None, &["/repo".to_owned()], COMMAND).unwrap().unwrap();
+        let cleaned = claude_mcp_settings(Some(&alone), &[], COMMAND).unwrap().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&cleaned).unwrap();
+        assert!(json.get("mcpServers").is_none(), "{json}");
+
+        // Nothing of ours in the file at all: still a no-op.
+        assert_eq!(claude_mcp_settings(Some("{}"), &[], COMMAND).unwrap(), None);
+    }
+
+    /// A settings file we cannot parse is failed on, never replaced — it is Claude's
+    /// own configuration, and a registration is not worth destroying state over.
+    #[test]
+    fn an_unparseable_settings_file_is_failed_on_not_replaced() {
+        assert!(claude_mcp_settings(Some("{not json"), &["/repo".to_owned()], COMMAND).is_err());
+        assert!(claude_mcp_settings(Some("[1,2]"), &["/repo".to_owned()], COMMAND).is_err());
+    }
+
+    /// The IO path end to end against the pinned home: boot writes the registration,
+    /// an open-folder change updates it, close removes it, and the status command
+    /// reads back what Claude will see.
+    #[test]
+    fn the_apply_status_round_trip_tracks_the_open_folder() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        let exe = home.join("app").join("ggs");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        let command = exe.to_str().unwrap();
+
+        apply_claude_mcp_inner(&["/repo".to_owned()], Some(Path::new(command))).unwrap();
+        let status = claude_mcp_status().unwrap();
+        assert!(status.registered);
+        assert_eq!(status.folder.as_deref(), Some("/repo"));
+        assert_eq!(status.command.as_deref(), Some(command));
+
+        apply_claude_mcp_inner(&["/two".to_owned()], Some(Path::new(command))).unwrap();
+        assert_eq!(claude_mcp_status().unwrap().folder.as_deref(), Some("/two"));
+
+        apply_claude_mcp_inner(&[], Some(Path::new(command))).unwrap();
+        let status = claude_mcp_status().unwrap();
+        assert!(!status.registered && status.folder.is_none() && status.command.is_none());
     }
 }

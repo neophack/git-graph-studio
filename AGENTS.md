@@ -447,7 +447,18 @@ profile's decrypted one; and a **cc-switch import**: `provider_ccswitch_scan` re
 `~/.cc-switch/config.json` (both the array and id→map shapes, `claude.current` by its
 raw key) plus the live `~/.claude/settings.json` env — keys stripped from the answer,
 deduplicated by endpoint+key — and `provider_import_ccswitch` seals the named ones
-into the store and activates the one cc-switch points at.
+into the store and activates the one cc-switch points at. **The analysis rides into
+Claude itself** (2026-09-30): `apply_claude_mcp` — wired at the composition root beside
+every `notify_workspace` call — keeps an `mcpServers.ggs` entry in the redirected
+Claude configuration (`~/.ggs/claude/settings.json`), pointing at the app binary's own
+`ggs --mcp <folder>` headless mode for the open folder (removed when no folder is
+open, other servers and settings preserved verbatim, an unparseable file failed on
+rather than replaced). Every new Claude session therefore lists the `ggs` MCP server
+under `/mcp` — the persistent symbol index and the analysis tools, with the
+`initialize` handshake's `instructions` teaching the model the workflow (map a name's
+blast radius before editing, chase cycles while refactoring, self-check dead code and
+secrets after). The MCP Server page shows the integration's state
+(`claude_mcp_status`).
 
 - Frontend: `src/extensionsPanel.ts` (the Extensions view: the installed list with detail
   pages and backend status: the featured packages' rows, each its Open VSX entry merged

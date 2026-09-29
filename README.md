@@ -171,6 +171,15 @@ shaped like:
 }
 ```
 
+Inside Git Graph Studio, the bundled Claude Code extension gets this without any
+configuration: the app registers the same server (named `ggs`) into its redirected
+Claude configuration (`~/.ggs/claude/settings.json`) for the open folder — removed
+when no folder is open, your other servers and settings untouched — so `/mcp` in any
+new session lists the symbol index and the analysis tools, and the server's
+instructions teach the model the workflow (map a symbol's references and a change's
+blast radius before editing, find hotspots and cycles while planning, self-check dead
+code and secrets after). The MCP Server page shows the integration's state.
+
 The bundled binary itself is named `ggs` (`mainBinaryName` in
 `src-tauri/tauri.conf.json`). The NSIS installer adds the install directory to
 the user's `PATH` (`src-tauri/nsis-hooks.nsh`, removed again on uninstall); the

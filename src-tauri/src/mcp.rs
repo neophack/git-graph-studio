@@ -157,7 +157,8 @@ impl McpServer {
                     .and_then(Value::as_str)
                     .unwrap_or(PROTOCOL_VERSION),
                 "capabilities": { "tools": { "listChanged": false } },
-                "serverInfo": { "name": "git-graph-studio", "version": env!("CARGO_PKG_VERSION") }
+                "serverInfo": { "name": "git-graph-studio", "version": env!("CARGO_PKG_VERSION") },
+                "instructions": MCP_INSTRUCTIONS
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tool_catalogue() })),
@@ -1004,6 +1005,27 @@ fn tool_catalogue() -> Value {
 fn error_response(id: Value, code: i64, message: &str) -> String {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }).to_string()
 }
+
+/// The workflow guidance the initialize handshake hands the model: what this server
+/// indexes and which tool serves which step of a code task. This is the lever that
+/// turns the tool catalogue from available to actually used well.
+const MCP_INSTRUCTIONS: &str = "\
+Git Graph Studio's symbol index and analysis engine over this repository. The index is \
+persistent and already warm — the desktop app shares it — so lookups answer in \
+milliseconds; prefer these tools over reading files blind or grepping.\n\n\
+Suggested workflow:\n\
+- BEFORE editing: `symbol_lookup` / `symbol_references` to map a name's declarations \
+and every use; `analysis_call_graph` (callers/callees) to see the blast radius of a \
+change; `analysis_metrics` to find the file's hotspots before touching them.\n\
+- Planning a refactor: `analysis_module_graph` for the module dependencies a move \
+would cut across, `analysis_import_cycles` for the tangles worth breaking while \
+you are there.\n\
+- AFTER editing: re-run `analysis_metrics` on your changed functions, `\
+analysis_dead_code` for what your change orphaned, `analysis_security` for secrets \
+and dangerous APIs you may have introduced.\n\
+- Navigation beats guessing: `search_symbols` for fuzzy names, `read_file` with a \
+line window to confirm a site before editing it. Resolution is name-based with \
+receiver hints — same-named declarations fan out, so confirm the file before you edit.";
 
 /// The `--mcp` entry: read lines from stdin, answer on stdout, log to stderr. Returns the
 /// process exit code (0 once stdin ends).

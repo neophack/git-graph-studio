@@ -703,14 +703,16 @@ describe('the graph pages', () => {
 			{ time: 1760000095000, tool: 'symbol_lookup', ok: false, ms: 12, args: '{"name":"missing"}' },
 			{ time: 1760000000000, tool: '(start)', ok: true, ms: 0, args: '{"root":"D:\\repo"}' }
 		]);
+		backend.on('claude_mcp_status', () => ({ registered: true, folder: 'D:\\repo', command: 'C:\\apps\\ggs.exe' }));
 		const root = host();
 		createAnalysisPage('mcp', root);
 		await flush(8);
 		const sections = texts('.an-section', root);
-		expect(sections.length).toBe(3);
+		expect(sections.length).toBe(4);
+		expect(sections[1]).toContain('Claude Integration');
 		expect(sections[0]).toContain('Connecting');
-		expect(sections[1]).toContain('Tool catalogue (2)');
-		expect(sections[2]).toContain('Recent calls (2)');
+		expect(sections[2]).toContain('Tool catalogue (2)');
+		expect(sections[3]).toContain('Recent calls (2)');
 		// The command line and the stdio snippet, each with its copy action.
 		const snippets = texts('.an-code', root);
 		expect(snippets[0]).toContain('ggs --mcp');
@@ -722,6 +724,18 @@ describe('the graph pages', () => {
 		expect(failed.textContent).toContain('symbol_lookup');
 		expect(failed.textContent).toContain('12 ms');
 		expect((failed as HTMLElement).title).toContain('"name":"missing"');
+	});
+
+	it('the MCP page shows the Claude integration unregistered when no folder is wired', async () => {
+		await modules();
+		backend.on('mcp_tools', () => []);
+		backend.on('mcp_log', () => []);
+		backend.on('claude_mcp_status', () => ({ registered: false, folder: null, command: null }));
+		const root = host();
+		createAnalysisPage('mcp', root);
+		await flush(8);
+		expect(texts('.an-section', root)[1]).toContain('Claude Integration');
+		expect(texts('.an-empty', root).join(' ')).toContain('Not registered');
 	});
 
 	it('import graph lists cycles before dependencies', async () => {
