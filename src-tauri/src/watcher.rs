@@ -127,9 +127,27 @@ impl FolderWatcher {
             .map_err(|e| format!("Could not watch {root}: {e}"))?;
 
         let root_path = PathBuf::from(root);
+        // FSEvents reports every path in its canonical form (`/private/var/…` for a
+        // `/var/…` root), so when the opened folder's spelling differs — a symlink on the
+        // way — folding against the opened path alone drops every event and the watch
+        // goes silent. The canonical spelling joins the fold as a second accepted prefix;
+        // the batch still reports the root as opened, the spelling the workbench matches
+        // on. (inotify / ReadDirectoryChangesW report paths under the watch root as it was
+        // passed, so the opened spelling stays the primary one.)
+        let canonical = std::fs::canonicalize(root).ok();
+        let root_label = root.to_owned();
         std::thread::Builder::new()
             .name("fs-watcher".into())
-            .spawn(move || debounce_loop(&root_path, &raw_rx, &stopped, on_change))
+            .spawn(move || {
+                debounce_loop(
+                    &root_path,
+                    canonical.as_deref(),
+                    &root_label,
+                    &raw_rx,
+                    &stopped,
+                    on_change,
+                )
+            })
             .map_err(|e| format!("Could not start the watcher thread: {e}"))?;
         Ok(FolderWatcher {
             _watcher: watcher,
@@ -145,13 +163,25 @@ impl Drop for FolderWatcher {
 }
 
 /// Collect raw paths until the stream has been quiet for `DEBOUNCE`, then report the batch.
-/// Ends when the watcher is dropped (the raw sender closes) or `stopped` fires.
+/// Ends when the watcher is dropped (the raw sender closes) or `stopped` fires. Events fold
+/// against the opened root and — when its canonical spelling differs — against that too;
+/// the batch reports the root as opened (`root_label`), the spelling consumers match on.
 fn debounce_loop(
     root: &Path,
+    canonical: Option<&Path>,
+    root_label: &str,
     raw: &mpsc::Receiver<PathBuf>,
     stopped: &mpsc::Receiver<()>,
     on_change: impl Fn(FsChange),
 ) {
+    let fold = |batch: &mut FsChange, path: &Path| {
+        fold_path(batch, root, path);
+        if let Some(canonical) = canonical {
+            if canonical != root {
+                fold_path(batch, canonical, path);
+            }
+        }
+    };
     loop {
         // Idle: block until the first event of a burst.
         let first = match raw.recv() {
@@ -162,13 +192,13 @@ fn debounce_loop(
             return;
         }
         let mut batch = FsChange::default();
-        fold_path(&mut batch, root, &first);
+        fold(&mut batch, &first);
         // Burst: keep folding until the stream is quiet for the debounce window.
         let mut quiet_since = Instant::now();
         loop {
             match raw.recv_timeout(DEBOUNCE.saturating_sub(quiet_since.elapsed())) {
                 Ok(path) => {
-                    fold_path(&mut batch, root, &path);
+                    fold(&mut batch, &path);
                     quiet_since = Instant::now();
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
@@ -176,7 +206,7 @@ fn debounce_loop(
             }
         }
         if !batch.paths.is_empty() || batch.git_changed || batch.truncated {
-            batch.root = root.to_string_lossy().into_owned();
+            batch.root = root_label.to_owned();
             on_change(batch);
         }
     }
@@ -282,6 +312,35 @@ mod tests {
             batch.paths
         );
         assert!(!batch.git_changed);
+        drop(watcher);
+    }
+
+    /// The macOS shape of the silent-watch bug: FSEvents reports canonical paths, so a
+    /// folder reached through a symlink (`/tmp/…`, `/var/…`, an alias) once delivered
+    /// nothing — every event stripped against a prefix the paths never carried. Watching
+    /// through the link must still report, under the link's own spelling.
+    #[cfg(unix)]
+    #[test]
+    fn a_watch_through_a_symlinked_root_still_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = tempfile::tempdir_in(dir.path().parent().unwrap()).unwrap();
+        let link_path = link.path().join("linked");
+        std::os::unix::fs::symlink(dir.path(), &link_path).unwrap();
+        let root = link_path.display().to_string();
+        let (tx, rx) = mpsc::channel();
+        let watcher = FolderWatcher::new(&root, move |change| {
+            let _ = tx.send(change);
+        })
+        .unwrap();
+        // The OS watch is registered asynchronously on some platforms; give it a moment.
+        std::thread::sleep(Duration::from_millis(200));
+        std::fs::write(dir.path().join("through-link.txt"), b"#").unwrap();
+
+        let batch = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a change batch within 5 s");
+        assert_eq!(batch.root, root);
+        assert_eq!(batch.paths, ["through-link.txt"]);
         drop(watcher);
     }
 }
