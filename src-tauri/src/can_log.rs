@@ -1032,23 +1032,33 @@ fn walk_blf_objects(buf: &[u8], sink: &mut dyn FrameSink) {
                     let dlc = buf[body + 1];
                     let valid_bytes = buf[body + 2] as usize;
                     let id = u32_at(buf, body + 4);
-                    let obj_flags = u32_at(buf, body + 12);
+                    // This object carries the FD flags as a word, not the short
+                    // CAN_FD_MESSAGE's byte: bit 12 EDL, 13 BRS, 14 ESI, 4 remote (the
+                    // convention python-can and vector-blf both read); the direction is
+                    // the `dir` byte at +34, the extended marker the id's bit 31. Without
+                    // the BRS bit a modern CANoe log prices every FD frame at the
+                    // arbitration rate and the data bitrate never enters the load.
+                    let fd_flags = u32_at(buf, body + 12);
                     let data = &buf[body + 40..end.min(body + 40 + valid_bytes)];
                     let len = fd_dlc_bytes(dlc)
                         .min(valid_bytes as u64)
                         .min(data.len() as u64)
                         .min(64) as u8;
-                    sink.frame(RawFrame::data_frame(
+                    let mut frame = RawFrame::data_frame(
                         t_ns,
                         channel,
                         id & 0x1fff_ffff,
-                        obj_flags & 0x6000_0000 != 0,
+                        id & 0x8000_0000 != 0 || fd_flags & 0x6000_0000 != 0,
                         true,
                         dlc,
                         len,
                         data,
-                        obj_flags & 0x0100_0000 != 0,
-                    ));
+                        buf[body + 34] != 0,
+                    );
+                    frame.brs = fd_flags & 0x2000 != 0;
+                    frame.esi = fd_flags & 0x4000 != 0;
+                    frame.remote = fd_flags & 0x0010 != 0;
+                    sink.frame(frame);
                 }
                 _ => sink.other(),
             }
@@ -4640,6 +4650,69 @@ base hex timestamps relative
         let frames = collect_frames(&blf_with(&fd64_object(48, 64)));
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].len, 8);
+    }
+
+    /// One CAN_FD_MESSAGE_64 object with every flag the 64-object carries in its own
+    /// places: the BRS/ESI/remote bits of the object-flags word (13/14/4 — not the short
+    /// CAN_FD_MESSAGE's one-byte field), the extended marker on the id's bit 31 and the
+    /// direction on the `dir` byte at +34. A BRS frame whose flags go unread prices its
+    /// whole self at the arbitration rate, so the load ignores the data bitrate — this is
+    /// the regression the fix guards.
+    #[test]
+    fn blf_fd64_brs_esi_direction_and_extended_read_the_64_object_layout() {
+        let fd64_object = |id: u32, fd_flags: u32, dir: u8| {
+            let size = (16 + 16 + 48) as u32;
+            let mut o = Vec::new();
+            o.extend_from_slice(b"LOBJ");
+            o.extend_from_slice(&32u16.to_le_bytes());
+            o.extend_from_slice(&1u16.to_le_bytes());
+            o.extend_from_slice(&size.to_le_bytes());
+            o.extend_from_slice(&OBJ_CAN_FD_MESSAGE_64.to_le_bytes());
+            o.extend_from_slice(&2u32.to_le_bytes()); // nanoseconds
+            o.extend_from_slice(&0u16.to_le_bytes());
+            o.extend_from_slice(&0u16.to_le_bytes());
+            o.extend_from_slice(&0u64.to_le_bytes());
+            o.push(1); // channel
+            o.push(9); // DLC 9 = a 12-byte payload
+            o.push(8); // valid bytes
+            o.push(0); // tx count
+            o.extend_from_slice(&id.to_le_bytes());
+            o.extend_from_slice(&0u32.to_le_bytes()); // frame length
+            o.extend_from_slice(&fd_flags.to_le_bytes()); // object flags
+            o.extend_from_slice(&0u32.to_le_bytes()); // btrCfgArb
+            o.extend_from_slice(&0u32.to_le_bytes()); // btrCfgData
+            o.extend_from_slice(&0u32.to_le_bytes()); // timeOffsetBrsNs
+            o.extend_from_slice(&0u32.to_le_bytes()); // timeOffsetCrcDelNs
+            o.extend_from_slice(&0u16.to_le_bytes()); // bit count
+            o.push(dir);
+            o.push(0); // ext data offset
+            o.extend_from_slice(&0u32.to_le_bytes()); // crc
+            o.extend_from_slice(&[0x55; 8]); // the payload present
+            o
+        };
+        // EDL | BRS | ESI on the word, an extended id, a Tx direction.
+        let frames = collect_frames(&blf_with(&fd64_object(
+            0x18ff_0001 | 0x8000_0000,
+            0x1000 | 0x2000 | 0x4000,
+            1,
+        )));
+        assert_eq!(frames.len(), 1);
+        let frame = &frames[0];
+        assert!(frame.fd);
+        assert!(frame.brs);
+        assert!(frame.esi);
+        assert!(frame.extended);
+        assert!(frame.tx);
+        // The same bits through the statistics: a switching frame's payload lands in the
+        // data phase (priced at the data bitrate), a plain FD frame's does not.
+        let switching = stats_of_blf(&blf_with(&fd64_object(0x200, 0x1000 | 0x2000, 0)));
+        assert!(switching.channels[0].data_bits > 0.0);
+        let no_switch = stats_of_blf(&blf_with(&fd64_object(0x200, 0x1000, 0)));
+        assert_eq!(no_switch.channels[0].data_bits, 0.0);
+        assert!(
+            switching.channels[0].arb_bits < no_switch.channels[0].arb_bits,
+            "the BRS frame's payload must leave the arbitration phase"
+        );
     }
 
     /// A 10-microsecond-mode timestamp near u64::MAX must saturate, not overflow — the

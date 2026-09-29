@@ -298,6 +298,19 @@ describe('CAN log views', () => {
 		arb.value = '1000000';
 		arb.dispatchEvent(new Event('change'));
 		expect(document.querySelector(`${STATS_VIEW} .can-channels .can-table-row .can-load`)!.textContent).toBe('0.75 %');
+
+		// Switching the data rate re-prices the BRS frames' data phase — the load figure
+		// and the load chart both redraw without a second backend walk: 56160 arb bits at
+		// 1 Mbit/s, 37440 data bits now at 5 Mbit/s, over 10 s.
+		const walks = backend.callsTo('can_log_stats').length;
+		const loadLine = () => document.querySelector(`${STATS_VIEW} .can-section-load path.can-chart-line`)!.getAttribute('d');
+		const lineBefore = loadLine();
+		const data = document.querySelector<HTMLSelectElement>(`${STATS_VIEW} .can-channels .can-table-row .can-rate-data`)!;
+		data.value = '5000000';
+		data.dispatchEvent(new Event('change'));
+		expect(document.querySelector(`${STATS_VIEW} .can-channels .can-table-row .can-load`)!.textContent).toBe('0.64 %');
+		expect(loadLine()).not.toBe(lineBefore);
+		expect(backend.callsTo('can_log_stats').length).toBe(walks);
 	});
 
 	it('the raw view filters by id, channel, direction and type, numbering rows in log order', async () => {
