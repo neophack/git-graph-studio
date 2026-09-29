@@ -794,7 +794,7 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		const pane = document.body.appendChild(document.createElement('div'));
 		const dispose = host.mountWebview('acme.demo', 1, pane);
 		const frame = pane.querySelector('iframe')!;
-		expect(frame.getAttribute('sandbox')).toBe('allow-scripts allow-same-origin'); // its own storage (localStorage) works
+		expect(frame.getAttribute('sandbox')).toBe('allow-scripts allow-same-origin allow-forms'); // its own storage (localStorage) works; a submit button (Claude Code's Send) needs forms
 		expect(frame.getAttribute('srcdoc')).toContain('acquireVsCodeApi');
 		expect(frame.getAttribute('srcdoc')).toContain('<body>hi</body>');
 		// A later setHtml reloads the document, as VS Code's webviews do (the first paint's
