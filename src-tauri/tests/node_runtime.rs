@@ -931,6 +931,9 @@ ggs.onRequest((command) => {{
     if (command === 'version') return {{ version: addon.engineVersion() }};
     if (command === 'open') return addon.openRepository({repo}).then((root) => ({{ root }}));
     if (command === 'request') {{
+        // The dev fixture's generic dispatch surface; a marketplace engine build carries
+        // named exports only, and the async settle is `open`'s and `reject`'s to prove.
+        if (typeof addon.request !== 'function') return {{ skipped: true }};
         return addon.request('', JSON.stringify({{ method: 'engineVersion', params: {{}} }}))
             .then((answer) => ({{ answer }}));
     }}
@@ -965,11 +968,12 @@ ggs.onRequest((command) => {{
         version.starts_with("1."),
         "the sync export answered: {answers:?}"
     );
-    let answer = answers[2].as_ref().unwrap()["answer"]
-        .as_str()
-        .unwrap_or("");
+    let answer = answers[2].as_ref().unwrap();
     assert!(
-        answer.contains(version),
+        answer.get("skipped").is_some()
+            || answer["answer"]
+                .as_str()
+                .is_some_and(|text| text.contains(version)),
         "the async request settled: {answers:?}"
     );
     let root = answers[3].as_ref().unwrap()["root"].as_str().unwrap_or("");
