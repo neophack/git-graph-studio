@@ -875,6 +875,119 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		}
 	});
 
+	/** Load-event harness for the delivery-gate tests: jsdom fires iframe loads on its own
+	 *  schedule, which races the fake timers — capture the frame's load listeners instead
+	 *  and fire them exactly when the scenario says the navigation settles. */
+	function captureLoads() {
+		const originalAdd = HTMLIFrameElement.prototype.addEventListener;
+		const listeners: { listener: EventListenerOrEventListenerObject; once: boolean }[] = [];
+		const addEventListener = vi.spyOn(HTMLIFrameElement.prototype, 'addEventListener')
+			.mockImplementation(function (this: HTMLIFrameElement, type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) {
+				if (type === 'load') {
+					listeners.push({ listener, once: typeof options === 'object' ? options.once === true : options === true });
+					return;
+				}
+				return originalAdd.call(this, type, listener, options);
+			});
+		const srcdocDescriptor = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'srcdoc')!;
+		const sets: string[] = [];
+		Object.defineProperty(HTMLIFrameElement.prototype, 'srcdoc', {
+			get: srcdocDescriptor.get,
+			set(this: HTMLIFrameElement, value: string) { sets.push(value); srcdocDescriptor.set!.call(this, value); }
+		});
+		const fireLoad = (frame: HTMLIFrameElement) => {
+			const event = new Event('load');
+			for (let i = listeners.length - 1; i >= 0; i--) {
+				const entry = listeners[i]!;
+				if (entry.once) listeners.splice(i, 1);
+				(entry.listener as (this: HTMLIFrameElement, event: Event) => void).call(frame, event);
+			}
+		};
+		const restore = () => {
+			Object.defineProperty(HTMLIFrameElement.prototype, 'srcdoc', srcdocDescriptor);
+			addEventListener.mockRestore();
+		};
+		return { sets, fireLoad, restore };
+	}
+
+	it('the mount paints nothing before the first setHtml — one boot of the real document', async () => {
+		vi.useFakeTimers();
+		const { sets, fireLoad, restore } = captureLoads();
+		let dispose: () => void = () => undefined;
+		try {
+			const { host } = hostWithFrame();
+			await host['serve']('webview.create', [1, 'demo.view', 'Demo Panel'], 'acme.demo', {} as never);
+			const pane = document.body.appendChild(document.createElement('div'));
+			dispose = host.mountWebview('acme.demo', 1, pane);
+			const frame = pane.querySelector('iframe')!;
+			await vi.advanceTimersByTimeAsync(0);
+			// The tab won the mount race against the extension's setHtml: painting the bare
+			// bootstrap document here booted a page whose load opened the gate for a document
+			// the first setHtml was about to replace — and its grace expiring ahead of the
+			// coalescing window left the real document unpainted (the blank page).
+			expect(frame.getAttribute('srcdoc')).toBe(null);
+			// The extension's document arrives into the coalescing window, and a push with it.
+			await host['serve']('webview.setHtml', [1, '<html><body>hi</body></html>'], 'acme.demo', {} as never);
+			const posted: unknown[] = [];
+			const postMessage = vi.spyOn(frame.contentWindow!, 'postMessage').mockImplementation(((data: unknown) => { posted.push(data); }) as typeof frame.contentWindow.postMessage);
+			await host['serve']('webview.postMessage', [1, { hello: 1 }], 'acme.demo', {} as never);
+			await vi.advanceTimersByTimeAsync(200); // the coalescing window paints the latest html
+			expect(sets).toHaveLength(1);
+			expect(sets[0]).toContain('<body>hi</body>');
+			expect(posted).toHaveLength(0); // the push waits for the fresh load's gate
+			fireLoad(frame);
+			await vi.advanceTimersByTimeAsync(150); // the load grace opens, then delivers
+			expect(posted).toHaveLength(1);
+			expect((posted[0] as { message?: unknown }).message).toEqual({ hello: 1 });
+			postMessage.mockRestore();
+		} finally {
+			dispose();
+			restore();
+			vi.useRealTimers();
+		}
+	});
+
+	it('the load grace yields to a pending first paint — the queue waits for the replacing document', async () => {
+		vi.useFakeTimers();
+		const { sets, fireLoad, restore } = captureLoads();
+		let dispose: () => void = () => undefined;
+		try {
+			const { host } = hostWithFrame();
+			await host['serve']('webview.create', [1, 'demo.view', 'Demo Panel'], 'acme.demo', {} as never);
+			await host['serve']('webview.setHtml', [1, '<html><body>one</body></html>'], 'acme.demo', {} as never);
+			const pane = document.body.appendChild(document.createElement('div'));
+			dispose = host.mountWebview('acme.demo', 1, pane);
+			const frame = pane.querySelector('iframe')!;
+			const posted: unknown[] = [];
+			vi.spyOn(frame.contentWindow!, 'postMessage').mockImplementation(((data: unknown) => { posted.push(data); }) as typeof frame.contentWindow.postMessage);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(sets).toHaveLength(1);
+			// The shell→document pair, sliced the dangerous way: the second setHtml lands
+			// while the first document is still loading (the coalescing window arms), and
+			// the first document's load grace expires inside that window. The old gate
+			// opened there — the initial state crossed into the doomed shell and the real
+			// document's paint was skipped as "already loaded": the blank page.
+			await host['serve']('webview.setHtml', [1, '<html><body>two</body></html>'], 'acme.demo', {} as never);
+			fireLoad(frame); // the first document's load; its grace opens
+			await vi.advanceTimersByTimeAsync(100);
+			await host['serve']('webview.postMessage', [1, { state: 1 }], 'acme.demo', {} as never); // queued inside the grace
+			await vi.advanceTimersByTimeAsync(50); // the grace expires with the paint still pending
+			expect(posted).toHaveLength(0); // …and must not deliver into the document about to be replaced
+			await vi.advanceTimersByTimeAsync(50); // the coalescing window paints the latest html
+			expect(sets).toHaveLength(2);
+			expect(sets[1]).toContain('<body>two</body>');
+			expect(posted).toHaveLength(0);
+			fireLoad(frame); // the replacing document's load; its grace delivers
+			await vi.advanceTimersByTimeAsync(150);
+			expect(posted).toHaveLength(1);
+			expect((posted[0] as { message?: unknown }).message).toEqual({ state: 1 });
+		} finally {
+			dispose();
+			restore();
+			vi.useRealTimers();
+		}
+	});
+
 	it('a webview panel reopens after every tab was closed, and a restarted backend\'s colliding panel id replaces the dead tab', async () => {
 		const { host } = hostWithFrame();
 		// A real editor group stands in for the workbench's tab host: the panel's tab opens
