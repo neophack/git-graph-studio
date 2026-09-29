@@ -65,10 +65,12 @@ export interface AnalysisPageView {
 	onOpen: ((path: string, line: number) => void) | null;
 }
 
-/** The editor's `openAnalysisPage` entry: build the page a tool's tab hosts. */
-export function createAnalysisPage(tool: AnalysisToolId, container: HTMLElement): AnalysisPageView {
+/** The editor's `openAnalysisPage` entry: build the page a tool's tab hosts. The
+ *  Module Analysis tool takes a folder scope — the folders the Explorer's pick
+ *  named; empty is the whole workspace. */
+export function createAnalysisPage(tool: AnalysisToolId, container: HTMLElement, folders?: string[]): AnalysisPageView {
 	switch (tool) {
-		case 'modules': return new ModulePage(container);
+		case 'modules': return new ModulePage(container, folders ?? []);
 		case 'metrics': return new MetricsPage(container);
 		case 'deadcode': return new DeadCodePage(container);
 		case 'security': return new SecurityPage(container);
@@ -454,7 +456,14 @@ class ModulePage implements AnalysisPageView {
 
 	onOpen: ((path: string, line: number) => void) | null = null;
 
-	constructor(container: HTMLElement) {
+	/** The folders the page reports on, repo-relative — the Explorer pick's scope.
+	 *  Empty is the whole workspace. Both backend reads carry it; it rides the
+	 *  graphbar as a chip with no way out (the scope is the tab's identity — the
+	 *  whole-workspace page is its own tab). */
+	private readonly folders: string[];
+
+	constructor(container: HTMLElement, folders: string[]) {
+		this.folders = folders;
 		container.classList.add('an-page', 'an-graph');
 		this.title = el('span', 'an-title');
 		this.filterInput = el('input', 'an-filter') as HTMLInputElement;
@@ -524,7 +533,7 @@ class ModulePage implements AnalysisPageView {
 		this.loadId++;
 		this.render();
 		try {
-			this.data = await invoke<ModuleGraphData>('analysis_module_graph');
+			this.data = await invoke<ModuleGraphData>('analysis_module_graph', { folders: this.folders });
 		} catch (error) {
 			this.data = null;
 			this.error = String(error);
@@ -616,7 +625,8 @@ class ModulePage implements AnalysisPageView {
 		try {
 			const diagram = await invoke<ModuleDiagram>('analysis_module_diagram', {
 				focus: this.focusNode,
-				filter: this.graphFilter
+				filter: this.graphFilter,
+				folders: this.folders
 			});
 			if (key !== this.graphKey) return;
 			this.diagram = diagram;
@@ -706,10 +716,16 @@ class ModulePage implements AnalysisPageView {
 		);
 	}
 
-	/** The chips over the drawing's bottom corner: what is selected, what the drawing is
-	 *  focused on — each with its way out. */
+	/** The chips over the drawing's bottom corner: the scope the tab reports on,
+	 *  what is selected, what the drawing is focused on — the scope has no way
+	 *  out (it is the tab's identity), the rest each with theirs. */
 	private updateGraphbar(): void {
 		this.graphbar.textContent = '';
+		if (this.folders.length > 0) {
+			const chip = el('span', 'chip scope', [icon('folder'), el('span', undefined, [tf('analysis.modules.scopeChip', this.folders.join(', '))])]);
+			chip.title = this.folders.join('\n');
+			this.graphbar.appendChild(chip);
+		}
 		if (this.focusNode) {
 			this.graphbar.appendChild(this.graphbarChip(
 				tf('analysis.modules.focusChip', this.focusNode), 'filter',

@@ -764,7 +764,7 @@ export class EditorArea {
 	findReferences = () => this.activeGroup.findReferences();
 	openCallTreeAtCursor = () => this.activeGroup.openCallTreeAtCursor();
 	openSymbolDatabase = () => this.activeGroup.openSymbolDatabase();
-	openAnalysisPage = (tool: import('./analysisTools').AnalysisToolId) => this.activeGroup.openAnalysisPage(tool);
+	openAnalysisPage = (tool: import('./analysisTools').AnalysisToolId, folders?: string[]) => this.activeGroup.openAnalysisPage(tool, folders);
 	/** An extension page tab (module 12): mounts through the active group, like every other
 	 *  custom editor kind. */
 	openExtPage = (input: import('./editor').EditorInput & { kind: 'extpage' }, mount: (pane: HTMLElement) => (() => void) | void, iconSrc?: string | null) => this.activeGroup.openExtPage(input, mount, iconSrc);

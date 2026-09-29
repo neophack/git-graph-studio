@@ -75,10 +75,18 @@ pub struct ModuleGraph {
     pub total_file_edges: usize,
 }
 
-/// Build the module graph of an analysis.
-pub fn module_graph(data: &AnalysisData) -> ModuleGraph {
+/// Build the module graph of an analysis. An empty `scope` aggregates the whole
+/// workspace; otherwise only the files under the scope's folders (and the pairs
+/// with both ends under them) aggregate — a folder-picked report counts exactly
+/// what those folders carry, and the listing caps prune inside the scope
+/// instead of the scope's edges being crowded out by the rest of the workspace.
+pub fn module_graph(data: &AnalysisData, scope: &[String]) -> ModuleGraph {
     let mut modules: HashMap<String, (u32, u32)> = HashMap::new();
-    for file in data.files() {
+    for file in data
+        .files()
+        .iter()
+        .filter(|file| in_scope(&file.path, scope))
+    {
         let entry = modules.entry(module_of(&file.path).to_owned()).or_default();
         entry.0 += 1;
         entry.1 += file.symbols.len() as u32;
@@ -97,9 +105,13 @@ pub fn module_graph(data: &AnalysisData) -> ModuleGraph {
     };
     // Group every cross-file call under its file pair, then lift the pairs to modules —
     // the module aggregation runs over the full pairs so its counts never depend on the
-    // listing caps.
+    // listing caps. A scope keeps only the pairs it covers on both ends: a pair that
+    // leaves the folders belongs to the workspace's story, not the folders' report.
     let mut pairs: HashMap<(String, String), Vec<CallSiteRow>> = HashMap::new();
     for call in data.cross_file_calls() {
+        if !(in_scope(&call.from_file, scope) && in_scope(&call.to_file, scope)) {
+            continue;
+        }
         pairs
             .entry((call.from_file, call.to_file))
             .or_default()
@@ -175,6 +187,44 @@ pub fn module_of(path: &str) -> &str {
     }
 }
 
+/// The folders a scoped report runs over, spelled repo-relative with forward
+/// slashes: trimmed, backslashes folded to slashes, `./` prefixes and trailing
+/// slashes dropped, empties discarded — then a folder another selected folder
+/// already covers folds into it (analyzing `src` and `src/editor` is analyzing
+/// `src`). The explorer hands Windows-style relatives in; the page hands what
+/// it got back verbatim.
+pub fn normalize_scope(folders: &[String]) -> Vec<String> {
+    let mut cleaned: Vec<String> = folders
+        .iter()
+        .map(|raw| {
+            raw.trim()
+                .replace('\\', "/")
+                .trim_start_matches("./")
+                .trim_end_matches('/')
+                .to_owned()
+        })
+        .filter(|folder| !folder.is_empty() && folder != ".")
+        .collect();
+    cleaned.sort();
+    cleaned.dedup();
+    let folded = cleaned.clone();
+    cleaned.retain(|folder| {
+        !folded
+            .iter()
+            .any(|other| other != folder && folder.starts_with(&format!("{other}/")))
+    });
+    cleaned
+}
+
+/// Whether a repo-relative file sits inside the scope: an empty scope is the
+/// whole workspace; otherwise the file must live under one of the folders.
+pub fn in_scope(path: &str, folders: &[String]) -> bool {
+    folders.is_empty()
+        || folders
+            .iter()
+            .any(|folder| path.starts_with(&format!("{folder}/")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,7 +255,7 @@ mod tests {
         write(dir.path(), "src/util.rs", "pub fn helper() {}\n");
         write(dir.path(), "top.rs", "fn boot() { main(); }\n");
         let data = built(dir.path());
-        let graph = module_graph(&data);
+        let graph = module_graph(&data, &[]);
 
         // render→paint stays inside ui.rs — the report is the cross-file view.
         let mut names: Vec<&str> = graph.modules.iter().map(|m| m.name.as_str()).collect();
@@ -269,7 +319,7 @@ mod tests {
         write(dir.path(), "paint.rs", &text);
         write(dir.path(), "help.rs", "pub fn helper() {}\n");
         let data = built(dir.path());
-        let graph = module_graph(&data);
+        let graph = module_graph(&data, &[]);
         let dep = &graph.file_edges[0];
         assert_eq!(
             (dep.from.as_str(), dep.to.as_str()),
@@ -282,5 +332,69 @@ mod tests {
             "methods print as container.name"
         );
         assert_eq!(dep.sites[0].to, "helper");
+    }
+
+    #[test]
+    fn a_scope_covers_only_its_folders_and_the_pairs_inside() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "src/a.rs",
+            "fn main() { render(); helper(); }\n",
+        );
+        write(dir.path(), "src/ui.rs", "pub fn render() {}\n");
+        write(dir.path(), "src/util.rs", "pub fn helper() {}\n");
+        write(dir.path(), "top.rs", "fn boot() { main(); }\n");
+        write(dir.path(), "lib/other.rs", "pub fn away() { helper(); }\n");
+        let data = built(dir.path());
+
+        // The scope normalizes: backslashes, `./`, a trailing slash, and the
+        // nested `src/ui` folding into the `src` that already covers it.
+        assert_eq!(
+            normalize_scope(&[".\\src\\".to_owned(), "src/ui/".to_owned(), "".to_owned()]),
+            ["src".to_owned()]
+        );
+
+        // Everything outside the folder — and every pair with an end outside —
+        // drops; the totals count the scope, not the workspace.
+        let graph = module_graph(&data, &["src".to_owned()]);
+        let names: Vec<&str> = graph.modules.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["src"]);
+        assert_eq!(
+            graph.edges,
+            vec![ModuleEdge {
+                from: "src".to_owned(),
+                to: "src".to_owned(),
+                calls: 2,
+                files: 2
+            }]
+        );
+        assert_eq!(
+            graph
+                .file_edges
+                .iter()
+                .map(|dep| (dep.from.as_str(), dep.to.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("src/a.rs", "src/ui.rs"), ("src/a.rs", "src/util.rs")]
+        );
+        assert_eq!(graph.total_file_edges, 2);
+        assert_eq!(graph.total_calls, 2);
+
+        // Two folders union: `lib` joins, and with it the pair lib carries
+        // into src (both ends now inside the scope).
+        let graph = module_graph(&data, &["src".to_owned(), "lib".to_owned()]);
+        assert_eq!(
+            graph
+                .file_edges
+                .iter()
+                .map(|dep| (dep.from.as_str(), dep.to.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("lib/other.rs", "src/util.rs"),
+                ("src/a.rs", "src/ui.rs"),
+                ("src/a.rs", "src/util.rs")
+            ]
+        );
+        assert_eq!(graph.total_file_edges, 3);
     }
 }

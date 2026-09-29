@@ -10,8 +10,8 @@ fn main() {
     let root = std::env::args().nth(1).unwrap_or_else(|| ".".to_owned());
     let filter = std::env::args().nth(2).unwrap_or_default();
     let data = AnalysisData::build(&root, 8, &|_, _| {}, &|| false).expect("the analysis built");
-    let graph = module_graph(&data);
-    let diagram = module_diagram(&graph, None, &filter);
+    let graph = module_graph(&data, &[]);
+    let diagram = module_diagram(&graph, None, &filter, &[]);
     eprintln!(
         "nodes: {}, edges: {}, dropped: {}/{}",
         diagram.nodes.len(),

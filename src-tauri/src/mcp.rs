@@ -467,7 +467,7 @@ impl McpServer {
         let data = self.analysis_data()?;
         let graph: ModuleGraph = {
             let data = data.lock().unwrap();
-            module_graph(&data)
+            module_graph(&data, &[])
         };
         if graph.edges.is_empty() {
             return Ok("No cross-file calls in the analysis.".to_owned());

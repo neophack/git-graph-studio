@@ -64,11 +64,15 @@ export class Explorer {
 	onOpenFolder: (() => void) | null = null;
 	onPathRenamed: ((from: string, to: string) => void) | null = null;
 	onPathDeleted: ((path: string) => void) | null = null;
-	/** Two selected entries of the same kind asked for a compare (the left one was selected
-	 *  first): a Beyond Compare-style file or folder comparison in an editor tab. */
-	onCompare: ((left: string, right: string, isDir: boolean) => void) | null = null;
-	/** "Open in Integrated Terminal": the shell is asked to cd into the folder. */
-	onOpenInTerminal: ((folder: string) => void) | null = null;
+/** Two selected entries of the same kind asked for a compare (the left one was selected
+ *  first): a Beyond Compare-style file or folder comparison in an editor tab. */
+onCompare: ((left: string, right: string, isDir: boolean) => void) | null = null;
+/** "Open in Integrated Terminal": the shell is asked to cd into the folder. */
+onOpenInTerminal: ((folder: string) => void) | null = null;
+/** "Module Analysis" over the picked folder(s): every folder in the selection
+ *  (the clicked one alone when it sits outside it), handed repo-relative with
+ *  forward slashes — the Module Analysis page's scope. */
+onModuleAnalysis: ((folders: string[]) => void) | null = null;
 
 	constructor(container: HTMLElement) {
 		container.appendChild(el('div', 'sidebar-title', [el('span', 'label', ['Explorer'])]));
@@ -510,6 +514,20 @@ export class Explorer {
 			: null;
 	}
 
+	/** The folders a folder-scoped Module Analysis runs over, repo-relative: the
+	 *  selection's folders when the right-clicked one is among them (files in the
+	 *  selection are passed over), else the clicked folder itself - the same rule
+	 *  the extension entries' arguments follow. The workspace root's empty
+	 *  relative drops out, so analyzing the root is the whole-workspace page. */
+	private selectedFolders(path: string): string[] {
+		const picked = this.selection.includes(path)
+			? this.selection.filter((p) => this.rowFor(p)?.dataset['dir'] === '1')
+			: [path];
+		return picked
+			.map((folder) => toPosix(relativeTo(this.rootPath!, folder)))
+			.filter((relative) => relative !== '');
+	}
+
 	/** The folder a "new file" lands in: the selected folder, the selected file's folder, or root. */
 	private targetFolder(): string {
 		if (!this.selected) return this.rootPath!;
@@ -589,7 +607,10 @@ export class Explorer {
 			{ label: 'New Folder...', run: () => void this.createInline(folder, true) },
 			'separator',
 			{ label: 'Reveal in File Explorer', run: () => void revealItemInDir(path).catch((e) => notify('error', String(e))) },
-			...(isDir ? [{ label: 'Open in Integrated Terminal', run: () => this.onOpenInTerminal?.(path) }] : []),
+			...(isDir ? [
+				{ label: 'Module Analysis', run: () => this.onModuleAnalysis?.(this.selectedFolders(path)) },
+				{ label: 'Open in Integrated Terminal', run: () => this.onOpenInTerminal?.(path) }
+			] : []),
 			'separator',
 			{ label: 'Copy Path', keybinding: 'Shift+Alt+C', run: () => void writeText(path) },
 			{ label: 'Copy Relative Path', keybinding: 'Ctrl+K Ctrl+Shift+C', run: () => void writeText(relativeTo(this.rootPath!, path)) },

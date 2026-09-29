@@ -363,35 +363,44 @@ pub async fn analysis_rebuild(
 
 /// The workspace's module graph: which module (directory) depends on which, the file
 /// pairs that carry the calls and the call sites under each — the Module Analysis
-/// page's whole model, in one answer (see `analysis::modules`).
+/// page's whole model, in one answer (see `analysis::modules`). `folders` scopes the
+/// answer to a folder pick (empty or absent: the whole workspace).
 #[tauri::command]
 pub async fn analysis_module_graph(
     state: State<'_, AppState>,
     repo: Option<String>,
+    folders: Option<Vec<String>>,
 ) -> Result<ModuleGraph, String> {
     let data = analysis_of(&state, repo)?;
     let data = data.lock().unwrap();
-    Ok(modules::module_graph(&data))
+    Ok(modules::module_graph(
+        &data,
+        &modules::normalize_scope(&folders.unwrap_or_default()),
+    ))
 }
 
 /// The Module Analysis drawing (the gitdiagram-style architecture diagram): the
 /// module graph laid out in the backend — group boxes, blocks, arrows, the mermaid
 /// source and what the caps dropped — geometry ready to set (see `analysis::diagram`).
 /// The filter and the optional focus narrow the pairs the same way the page's tree
-/// does; the page refetches on either changing.
+/// does; the page refetches on either changing. `folders` scopes the whole drawing
+/// to a folder pick (empty or absent: the whole workspace).
 #[tauri::command]
 pub async fn analysis_module_diagram(
     state: State<'_, AppState>,
     repo: Option<String>,
     focus: Option<String>,
     filter: Option<String>,
+    folders: Option<Vec<String>>,
 ) -> Result<ModuleDiagram, String> {
     let data = analysis_of(&state, repo)?;
     let data = data.lock().unwrap();
+    let scope = modules::normalize_scope(&folders.unwrap_or_default());
     Ok(diagram::module_diagram(
-        &modules::module_graph(&data),
+        &modules::module_graph(&data, &scope),
         focus.as_deref(),
         filter.as_deref().unwrap_or(""),
+        &scope,
     ))
 }
 
@@ -621,7 +630,7 @@ mod tests {
         );
 
         // The whole seed sits in one file, so the module graph has no cross-file edge.
-        let modules = modules::module_graph(&data.lock().unwrap());
+        let modules = modules::module_graph(&data.lock().unwrap(), &[]);
         assert!(modules.edges.is_empty());
         assert_eq!(modules.modules.len(), 1);
 

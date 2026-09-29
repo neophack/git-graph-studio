@@ -716,10 +716,16 @@ stderr is logs; stdout is protocol only.
 
 The Code Analysis workbench: an activity bar entry (`Ctrl+Shift+A`) with a sidebar of
 five analysis tools plus module 16's MCP Server entry — Module Analysis (the
-workspace's cross-file calls as a gitdiagram-style architecture diagram and a tree: the
+workspace's cross-file calls as a gitdiagram-style architecture diagram and a tree:
+opened workspace-wide from the sidebar or the palette, or folder-scoped from the
+File Explorer — a "Module Analysis" entry on every folder's context menu that
+analyzes the picked folder(s) (`analysis_module_graph` / `analysis_module_diagram`
+take `folders`; one tab per folder set, the scope riding the graphbar as a chip),
+a multi-selection of folders unioned and its files passed over (2026-09-29); the
 backend decides WHAT the diagram is — `analysis_module_diagram` curates the
 architecture (vendored, test, example and bench trees stay off the drawing — they
-build or verify the project, they are not its components; a focus overrides the
+build or verify the project, they are not its components; a focus or a folder
+scope overrides the
 rule) and keeps the busiest remaining files
 as two-line cards (the name over the bracketed directory the box does not already
 name, gitdiagram's `Component<br/>[file.ts]` shape) inside their area's subgraph,
@@ -729,12 +735,16 @@ box draw unboxed, its `groupId: null`), every kept dependency an arrow labelled 
 its call count (a cycle's back edges stay off — the Import Graph page owns cycles);
 the flow is mermaid
 `flowchart TD` with gitdiagram's tone classDefs verbatim under its own class names,
-its schema and caps
-(10 groups — deeper areas roll up to the depth that fits and an area too small to
-be a subsystem folds into its parent box — 34 blocks, 48 arrows, no block fanning
+its schema with the caps raised on the owner's ask (2026-09-29, "too few
+modules": gitdiagram's 10/34/48 became 16 groups — deeper areas still roll up to
+the depth that fits and an area too small to
+be a subsystem folds into its parent box — 54 blocks, 72 arrows, no block fanning
 past eight); the page renders that source with
 mermaid itself — the same renderer, the same ELK layered layout and spacing
-gitdiagram initializes — so the blocks cannot overlap and the look is gitdiagram's by
+gitdiagram initializes, with one placement deviation on the owner's ask when the
+arrows wound far around distant boxes (2026-09-29: ELK node placement runs
+NETWORK_SIMPLEX instead of Brandes-Koepf, measured −24…−32 % total edge length) —
+so the blocks cannot overlap and the look is gitdiagram's by
 construction (`moduleDiagram.ts`), in its light or dark variable set by the workbench
 theme's kind (the canvas, the zoom toolbar and the chips read the theme's `--vscode-*`
 tokens; a theme switch re-renders the drawing in the other palette); the viewer around the SVG is a port of gitdiagram's
@@ -866,6 +876,48 @@ Everything that turns the source tree into installers: asset assembly into
   every string, and — if configurable — a `SETTING_DEFS` entry so it appears in Settings.
 - Streaming backend work must be cancellable and deliver a first batch quickly; check how
   `cmd_search.rs` does it before inventing a new pattern.
+
+### The per-change method (the open-source skill packs)
+
+What to touch is above; how to work is standardized here, adapted from the open-source
+skill packs that set the 2026 professional baseline for agent-driven development — all
+MIT, all plain `SKILL.md` markdown under the Agent Skills spec GitHub Copilot has spoken
+natively since 2025-12. Install the packs where the harness hosts them
+(`npx skills add addyosmani/agent-skills` serves 70+ agents; Claude Code:
+`/plugin install superpowers@claude-plugins-official`); where it cannot, this section
+carries the standard itself:
+
+| Pack | What it standardizes | Adoption |
+| ---- | -------------------- | -------- |
+| `obra/superpowers` | The development method — brainstorm → write plan → execute → test-first → systematic debugging → review, as mandatory auto-triggering workflows | the most-adopted development-methodology pack (≈293k ★, 2026-09) |
+| `addyosmani/agent-skills` | The engineering depth — spec-driven development, five-axis code review, OWASP hardening, measure-first performance, ADRs | ≈100k ★ |
+| `anthropics/skills` | The format itself — the Agent Skills spec, the skill template, the document and webapp-testing skills | ≈179k ★ |
+
+Bound on every change:
+
+1. **Design before code.** A non-trivial change opens with one screen of design notes:
+   the module it belongs to, the existing command / setting / backend service it
+   extends, and the test that will prove it. If the shape is unclear, brainstorm it to
+   a decision first — the module map decides where a file goes, not the cursor's
+   position.
+2. **Plan in verifiable steps.** Break the change into steps that each end green
+   (`npm run typecheck`, `npm test`, `cargo test`); the steps are the session's todo
+   list, and a step that cannot be verified is not a step.
+3. **Red-green where it bites.** A bug fix begins with the failing test — the module's
+   `tests/<module>.test.ts` or the Rust test beside the command — red, then the fix,
+   then green. A refactor keeps the tests green throughout; behaviour never moves
+   without a test that pins it.
+4. **Debug systematically, never by trial.** Reproduce → isolate (the smallest failing
+   case; `dev/dev-harness.html` scenarios and `scripts/probes/` exist for this) → root
+   cause → fix → keep the reproducing test. No fix ships without a check that fails
+   without it.
+5. **Review before declaring done.** Walk [Definition of done](#definition-of-done)
+   plus the seam rules, the i18n keys and the module map. Security-relevant surfaces
+   (IPC commands, the extension host, `ext_fs` confinement, `cmd_assoc`'s registry and
+   PATH writes) get an extra OWASP pass; perf-relevant changes cite the measured
+   number — module 14 measures, numbers not adjectives.
+6. **Verify, then report honestly.** Claim done only what the checks prove; anything
+   skipped or unverified is named in the commit body, never implied away.
 
 ### Definition of done
 
@@ -1017,6 +1069,7 @@ Conventions:
 | Size playbook / performance budgets | `docs/ggs-development-plan.md` §6–7, `scripts/measure.mjs` |
 | VSIX package format and extension host | `README.md` → *Extensions* |
 | Quality and release process | `docs/ggs-development-plan.md` §9 |
+| Agent skill packs (the per-change method) | [obra/superpowers](https://github.com/obra/superpowers), [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills); the format itself — [anthropics/skills](https://github.com/anthropics/skills) |
 | `~/.ggs/` layout | `docs/ggs-development-plan.md` Appendix B |
 | Repository layout | `README.md` → *Layout* |
 | Seam rules, as code | `scripts/check-seams.mjs`, `src-tauri/build.rs` |

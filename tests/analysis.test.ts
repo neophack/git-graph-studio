@@ -320,8 +320,10 @@ describe('the graph pages', () => {
 			rankSpacing: 50,
 			padding: 15
 		});
-		// Nothing beyond their config — extra ELK tweaks would fork the look.
-		expect(config.elk).toBeUndefined();
+		// The one ELK tweak past gitdiagram's config, on the owner's ask: simplex
+		// node placement, so cross-group arrows pull short instead of winding
+		// around distant boxes.
+		expect(config.elk).toEqual({ nodePlacementStrategy: 'NETWORK_SIMPLEX' });
 	});
 
 	it('renders gitdiagram’s dark palette under a dark theme, and re-renders when the theme flips', async () => {
@@ -598,6 +600,33 @@ describe('the graph pages', () => {
 		expect(calls()).toHaveLength(3);
 		expect(calls()[2]).toMatchObject({ focus: null });
 		expect(root.querySelectorAll('[data-path]').length).toBe(4);
+	});
+
+	it('module analysis scopes to folders, and the scope rides both reads and the chip', async () => {
+		await modules();
+		backend.on('analysis_module_graph', moduleGraphAnswer);
+		backend.on('analysis_module_diagram', () => diagramAnswer());
+		const root = host();
+		createAnalysisPage('modules', root, ['src/editor', 'src/scroll']);
+		await flush(8);
+		await untilDrawn(root);
+		// Both backend reads carry the folder pick — the tree and the drawing
+		// report the same folders.
+		expect(backend.callsTo('analysis_module_graph')[0]).toEqual({ folders: ['src/editor', 'src/scroll'] });
+		expect(backend.callsTo('analysis_module_diagram')[0]).toMatchObject({ focus: null, filter: '', folders: ['src/editor', 'src/scroll'] });
+		// The graphbar names the scope with a chip that has no way out — the
+		// scope is the page's identity, not a view state.
+		const chip = root.querySelector('.an-graphbar .chip.scope')!;
+		expect(chip.textContent).toContain('src/editor, src/scroll');
+		expect(chip.querySelector('.action-btn')).toBeNull();
+
+		// The unscoped page keeps its whole-workspace reads (an empty scope).
+		const whole = host();
+		createAnalysisPage('modules', whole);
+		await flush(8);
+		await untilDrawn(whole);
+		expect(backend.callsTo('analysis_module_graph')[1]).toEqual({ folders: [] });
+		expect(whole.querySelector('.an-graphbar .chip.scope')).toBeNull();
 	});
 
 	it('module analysis copies the diagram as mermaid source', async () => {

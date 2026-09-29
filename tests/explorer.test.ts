@@ -188,6 +188,43 @@ describe('explorer', () => {
 		expect(settled).toBe('settled');
 		expect(backend.callsTo('create_file')).toHaveLength(0);
 	});
+
+	it('runs Module Analysis over one folder or a multi-folder selection', async () => {
+		fileSystem({ [ROOT]: ['src/', 'lib/', 'README.md'], [`${ROOT}\\src`]: ['a.ts'], [`${ROOT}\\lib`]: ['b.ts'] });
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		const scopes: string[][] = [];
+		explorer.onModuleAnalysis = (folders) => scopes.push(folders);
+		explorer.setRoot(ROOT);
+		await flush();
+
+		// One folder: the entry is there for folders only, and hands the folder's
+		// repo-relative posix path over.
+		const rows = document.querySelectorAll<HTMLElement>('.tree .row');
+		rightClick(rows[0]);
+		expect(menuLabels()).toContain('Module Analysis');
+		click(menuItem('Module Analysis'));
+		expect(scopes).toEqual([['src']]);
+		rightClick(rows[2]);
+		expect(menuLabels()).not.toContain('Module Analysis');
+
+		// Two folders picked together (Ctrl+click): both scope one report — the
+		// README check left it selected, so it rides along and is passed over.
+		scopes.length = 0;
+		rows[0].dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
+		rows[1].dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
+		rightClick(rows[1]);
+		click(menuItem('Module Analysis'));
+		expect(scopes).toEqual([['src', 'lib']]);
+
+		// The file's own menu keeps the entry off, and the mixed selection's
+		// report still covers exactly the folders.
+		scopes.length = 0;
+		rightClick(rows[2]);
+		expect(menuLabels()).not.toContain('Module Analysis');
+		rightClick(rows[1]);
+		click(menuItem('Module Analysis'));
+		expect(scopes).toEqual([['src', 'lib']]);
+	});
 });
 
 describe('explorer renames and refreshes', () => {

@@ -918,6 +918,9 @@ export class Workbench {
 		this.explorer.onPathRenamed = (from, to) => this.editors.pathRenamed(from, to);
 		this.explorer.onPathDeleted = (path) => this.editors.pathDeleted(path);
 		this.explorer.onOpenInTerminal = (folder) => void this.panel.runInTerminal(`cd ${quoteShellPath(folder)}`);
+		// "Module Analysis" over the picked folder(s): a scoped Module Analysis tab,
+		// one per folder set (the blank-area pick on the root is the workspace page).
+		this.explorer.onModuleAnalysis = (folders) => void this.editors.openAnalysisPage('modules', folders);
 		// Two selected files (or folders) compare in an editor tab: files as a text diff of
 		// their on-disk contents, folders in the Folder Compare view.
 		this.explorer.onCompare = (left, right, isDir) => {

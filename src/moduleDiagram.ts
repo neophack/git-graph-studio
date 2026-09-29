@@ -101,7 +101,16 @@ let mermaidReady: Promise<MermaidRenderer> | null = null;
  *  classic look, linear curves, htmlLabels off with the 200 px wrap, its spacing —
  *  and its light or dark themeVariables, picked by the workbench theme's kind at
  *  the moment of the render (its two palettes, verbatim; the canvas stays
- *  transparent so the themed sheet shows through). */
+ *  transparent so the themed sheet shows through).
+ *
+ *  One deliberate deviation past gitdiagram's config, on the owner's ask when
+ *  the arrows were winding far around distant group boxes (2026-09-29): the ELK
+ *  node placement runs NETWORK_SIMPLEX instead of the default Brandes-Koepf —
+ *  the simplex positions blocks to pull cross-group arrows short (measured on
+ *  the raised-cap drawing shape: total edge length −24…−32 %, longest arrow
+ *  −23…−25 %, stable across seeds). Brandes-Koepf trades that for within-layer
+ *  compactness, which is exactly what sent a long arrow around the far side of
+ *  a box it could have gone over. */
 function mermaidConfig(): Record<string, unknown> {
 	const dark = document.documentElement.classList.contains('vscode-dark');
 	return {
@@ -115,6 +124,9 @@ function mermaidConfig(): Record<string, unknown> {
 		// and a 120 px wrap, which splits file paths mid-name — keep the classic
 		// look and the old 200 px wrap.
 		look: 'classic',
+		elk: {
+			nodePlacementStrategy: 'NETWORK_SIMPLEX'
+		},
 		flowchart: {
 			wrappingWidth: 200,
 			curve: 'linear',

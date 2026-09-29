@@ -1,10 +1,11 @@
 //! The Module Analysis drawing (module 17) — the workspace's cross-file calls as a
 //! gitdiagram-style architecture diagram, computed here in the backend (the heavy
 //! analysis belongs in Rust, plan §3.4). The backend decides WHAT the diagram is —
-//! the model follows gitdiagram's own schema and caps (at most 10 groups — deeper
+//! the model follows gitdiagram's own schema, its caps raised on the owner's ask
+//! when ten boxes read as too few (2026-09-29: at most 16 groups — deeper
 //! areas roll up to the depth that fits, an area too small to be a subsystem folds
 //! into its parent, and what still does not fit draws unboxed, its `groupId:
-//! null` — 34 blocks, 48 arrows, no block fanning past eight), the busiest
+//! null` — 54 blocks, 72 arrows, no block fanning past eight), the busiest
 //! architecture files become two-line cards
 //! (the name over the bracketed directory below its box, gitdiagram's
 //! `Component<br/>[file.ts]` shape) each carrying its area's tone class — and
@@ -21,24 +22,26 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use super::modules::{module_of, FileDep, ModuleGraph};
+use super::modules::{in_scope, module_of, FileDep, ModuleGraph};
 
-/// The three caps of gitdiagram's diagram schema: groups (its `MAX_GRAPH_GROUPS`),
-/// blocks (`MAX_GRAPH_NODES`) and arrows (`MAX_GRAPH_EDGES`).
-const MAX_GROUPS: usize = 10;
-const MAX_NODES: usize = 34;
-const MAX_EDGES: usize = 48;
+/// The three caps of gitdiagram's diagram schema, raised past its own numbers on
+/// the owner's ask (2026-09-29 — "too few modules"): groups (its
+/// `MAX_GRAPH_GROUPS`), blocks (`MAX_GRAPH_NODES`) and arrows (`MAX_GRAPH_EDGES`).
+const MAX_GROUPS: usize = 16;
+const MAX_NODES: usize = 54;
+const MAX_EDGES: usize = 72;
 /// How many arrows one block may fan out and take in — a call-volume hub would
 /// otherwise hang twenty off a single card and the structure reads as one bundle
 /// (gitdiagram's curated graphs top out around eight per node).
 const MAX_FAN_OUT: u32 = 8;
 const MAX_FAN_IN: u32 = 8;
-/// Blocks one area may contribute — gitdiagram's groups hold four to nine
-/// components; without the balance one deep directory floods the canvas.
-const MAX_PER_AREA: usize = 9;
+/// Blocks one area may contribute — without the balance one deep directory
+/// floods the canvas (gitdiagram's boxes hold four to nine; the wider canvas
+/// the raised group cap buys carries twelve).
+const MAX_PER_AREA: usize = 12;
 /// The candidate pool the curation scores over (the busiest files by traffic,
 /// before locality rebalancing picks the final blocks).
-const CANDIDATE_POOL: usize = 120;
+const CANDIDATE_POOL: usize = 180;
 
 /// How deep a group box's directory path may run before the roll-up starts folding
 /// areas into their parents.
@@ -264,12 +267,18 @@ fn path_matches(path: &str, filter: &str) -> bool {
     filter.is_empty() || path.to_lowercase().contains(filter)
 }
 
-/// Build the Module Analysis diagram of a module graph: the filter and the focus
-/// (a file whose neighbourhood the drawing isolates) narrow the pairs first, then
-/// the busiest files become blocks, their dependencies arrows, and the layered
-/// pass places everything. Pure function — the same graph, focus and filter always
+/// Build the Module Analysis diagram of a module graph: the scope (the folders a
+/// folder-picked report covers), the filter and the focus (a file whose
+/// neighbourhood the drawing isolates) narrow the pairs first, then the busiest
+/// files become blocks, their dependencies arrows, and the layered pass places
+/// everything. Pure function — the same graph, scope, focus and filter always
 /// lay out identically.
-pub fn module_diagram(graph: &ModuleGraph, focus: Option<&str>, filter: &str) -> ModuleDiagram {
+pub fn module_diagram(
+    graph: &ModuleGraph,
+    focus: Option<&str>,
+    filter: &str,
+    scope: &[String],
+) -> ModuleDiagram {
     let filter = filter.trim().to_lowercase();
     let focus = focus.filter(|path| !path.is_empty());
     // The drawing's filter narrows to the files that spell the query: a pair
@@ -295,11 +304,16 @@ pub fn module_diagram(graph: &ModuleGraph, focus: Option<&str>, filter: &str) ->
             })
             // The drawing curates the architecture: vendored and test trees stay
             // off it (their calls remain in the tree page and the counts). A
-            // named focus overrides the rule — the user picked the
-            // neighbourhood, wherever it lives.
+            // named focus or a named scope overrides the rule — the user picked
+            // the neighbourhood, wherever it lives, and a selected vendor or
+            // test folder is a deliberate pick, not a default view.
             .filter(|dep| {
                 focus.is_some()
+                    || !scope.is_empty()
                     || (is_architecture_code(&dep.from) && is_architecture_code(&dep.to))
+            })
+            .filter(|dep| {
+                scope.is_empty() || (in_scope(&dep.from, scope) && in_scope(&dep.to, scope))
             })
             .collect::<Vec<&FileDep>>()
     };
@@ -742,7 +756,7 @@ mod tests {
 
     #[test]
     fn the_model_ranks_traffic_and_small_workspaces_draw_unboxed() {
-        let diagram = module_diagram(&chain_graph(), None, "");
+        let diagram = module_diagram(&chain_graph(), None, "", &[]);
         // The busiest files lead: a.rs (7 calls of traffic) before ui.rs (5) before top.rs (2).
         let order: Vec<&str> = diagram.nodes.iter().map(|n| n.path.as_str()).collect();
         assert_eq!(order, ["src/a.rs", "src/ui.rs", "top.rs"]);
@@ -786,6 +800,7 @@ mod tests {
             &graph(&[("", 1, 1), ("src", 5, 5), ("lib", 3, 3)], file_edges),
             None,
             "",
+            &[],
         );
         let mut boxed: Vec<&str> = diagram
             .nodes
@@ -826,6 +841,7 @@ mod tests {
             ),
             None,
             "",
+            &[],
         );
         let ids: Vec<&str> = diagram.edges.iter().map(|edge| edge.id.as_str()).collect();
         assert_eq!(ids, ["a.rs→b.rs", "b.rs→c.rs"]);
@@ -844,7 +860,7 @@ mod tests {
         for index in 0..60 {
             file_edges.push(dep(&format!("f{index:02}.rs"), "hub.rs", 1, &[]));
         }
-        let diagram = module_diagram(&graph(&[("", 61, 61)], file_edges), None, "");
+        let diagram = module_diagram(&graph(&[("", 61, 61)], file_edges), None, "", &[]);
         assert_eq!(diagram.nodes.len(), MAX_NODES);
         assert_eq!(diagram.dropped_files, 61 - MAX_NODES);
         assert!(diagram.nodes.iter().any(|node| node.path == "hub.rs"));
@@ -869,7 +885,7 @@ mod tests {
                 &[],
             ));
         }
-        let diagram = module_diagram(&graph(&[("", 21, 21)], file_edges), None, "");
+        let diagram = module_diagram(&graph(&[("", 21, 21)], file_edges), None, "", &[]);
         assert_eq!(diagram.edges.len(), MAX_FAN_OUT as usize);
         let targets: Vec<&str> = diagram.edges.iter().map(|edge| edge.to.as_str()).collect();
         assert_eq!(
@@ -890,7 +906,7 @@ mod tests {
                 }
             }
         }
-        let diagram = module_diagram(&graph(&[("", 12, 12)], file_edges), None, "");
+        let diagram = module_diagram(&graph(&[("", 12, 12)], file_edges), None, "", &[]);
         let mut out: HashMap<String, u32> = HashMap::new();
         let mut inn: HashMap<String, u32> = HashMap::new();
         for edge in &diagram.edges {
@@ -904,17 +920,18 @@ mod tests {
     #[test]
     fn the_edge_cap_counts_what_it_leaves_out() {
         // Two areas, every card of one calling every card of the other: the caps
-        // (nine cards per box, forty-eight arrows) leave the rest counted.
+        // (twelve cards per box, the arrow cap) leave the rest counted.
         let mut file_edges = Vec::new();
-        for a in 0..10 {
-            for b in 0..10 {
+        for a in 0..14 {
+            for b in 0..14 {
                 file_edges.push(dep(&format!("m/a{a}.rs"), &format!("n/b{b}.rs"), 1, &[]));
             }
         }
         let diagram = module_diagram(
-            &graph(&[("m", 10, 10), ("n", 10, 10)], file_edges),
+            &graph(&[("m", 14, 14), ("n", 14, 14)], file_edges),
             None,
             "",
+            &[],
         );
         assert_eq!(diagram.nodes.len(), MAX_PER_AREA * 2);
         let considered = MAX_PER_AREA * MAX_PER_AREA;
@@ -942,6 +959,7 @@ mod tests {
             ),
             None,
             "",
+            &[],
         );
         assert!(
             !diagram.mermaid.contains("[\"src/ui\"]"),
@@ -961,15 +979,15 @@ mod tests {
 
     #[test]
     fn areas_roll_up_until_they_fit_the_group_cap() {
-        // Twelve areas of six files each, the last two the busiest: the deepest
-        // cut names twelve subgraphs, the roll-up folds to one segment per area,
-        // and the two that still do not fit the ten-group cap draw unboxed
+        // Twenty areas of six files each, the last four the busiest: the deepest
+        // cut names twenty subgraphs, the roll-up folds to one segment per area,
+        // and the four that still do not fit the group cap draw unboxed
         // (gitdiagram's `groupId: null`) — while every box that remains is big
         // enough to be a subsystem.
         let mut file_edges = Vec::new();
-        for area in 0..12 {
+        for area in 0..20 {
             let dir = format!("a{area:02}/deep");
-            let calls = if area >= 10 { 5 } else { 1 };
+            let calls = if area >= 16 { 5 } else { 1 };
             for from in 0..6 {
                 for to in (from + 1)..6 {
                     file_edges.push(dep(
@@ -981,7 +999,7 @@ mod tests {
                 }
             }
         }
-        let diagram = module_diagram(&graph(&[], file_edges), None, "");
+        let diagram = module_diagram(&graph(&[], file_edges), None, "", &[]);
         let subgraphs = diagram.mermaid.matches("subgraph G").count();
         assert!(subgraphs <= MAX_GROUPS, "rolled up to {subgraphs} groups");
         let mut per_area: HashMap<&str, usize> = HashMap::new();
@@ -1004,13 +1022,13 @@ mod tests {
     #[test]
     fn focus_and_filter_narrow_the_pairs() {
         // Focus keeps only the pairs the file touches.
-        let focused = module_diagram(&chain_graph(), Some("src/a.rs"), "");
+        let focused = module_diagram(&chain_graph(), Some("src/a.rs"), "", &[]);
         let mut paths: Vec<&str> = focused.nodes.iter().map(|n| n.path.as_str()).collect();
         paths.sort_unstable();
         assert_eq!(paths, ["src/a.rs", "src/ui.rs", "top.rs"]);
         // The drawing's filter narrows to the files that spell the query — the
         // pair that crosses out of the matching set drops with its endpoint.
-        let by_path = module_diagram(&chain_graph(), None, "src");
+        let by_path = module_diagram(&chain_graph(), None, "src", &[]);
         let paths: Vec<&str> = by_path.nodes.iter().map(|n| n.path.as_str()).collect();
         assert_eq!(paths, ["src/a.rs", "src/ui.rs"]);
         assert_eq!(
@@ -1023,7 +1041,7 @@ mod tests {
         );
         // A query no other file spells falls back to that file's neighbourhood
         // (the focus's view, on the filter's terms) instead of drawing nothing.
-        let lone = module_diagram(&chain_graph(), None, "top");
+        let lone = module_diagram(&chain_graph(), None, "top", &[]);
         let mut paths: Vec<&str> = lone.nodes.iter().map(|n| n.path.as_str()).collect();
         paths.sort_unstable();
         assert_eq!(paths, ["src/a.rs", "top.rs"]);
@@ -1033,9 +1051,38 @@ mod tests {
         );
         // A symbol-named query matches no path — the tree is where symbols list
         // their sites; nothing matches: the empty diagram, mermaid header only.
-        let none = module_diagram(&chain_graph(), None, "zzz");
+        let none = module_diagram(&chain_graph(), None, "zzz", &[]);
         assert!(none.nodes.is_empty());
         assert_eq!(none.mermaid, "flowchart TD\n");
+    }
+
+    #[test]
+    fn a_scope_narrows_the_pairs_and_overrides_the_curation() {
+        // The scope keeps only the pairs both of whose ends live under it — the
+        // pair that crosses out of the folders drops with its outside end.
+        let scoped = module_diagram(&chain_graph(), None, "", &["src".to_owned()]);
+        let mut paths: Vec<&str> = scoped.nodes.iter().map(|n| n.path.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(paths, ["src/a.rs", "src/ui.rs"]);
+        assert_eq!(
+            scoped
+                .edges
+                .iter()
+                .map(|e| e.id.as_str())
+                .collect::<Vec<_>>(),
+            ["src/a.rs→src/ui.rs"]
+        );
+        // A selected vendor or test folder overrides the architecture curation,
+        // the way a named focus does — the pick is deliberate.
+        let file_edges = vec![
+            dep("src/app.rs", "src/core.rs", 2, &[]),
+            dep("vendor/dep/x.rs", "vendor/dep/y.rs", 1, &[]),
+            dep("src/app.rs", "vendor/dep/x.rs", 1, &[]),
+        ];
+        let graph = graph(&[("src", 2, 2), ("vendor/dep", 2, 2)], file_edges);
+        let scoped = module_diagram(&graph, None, "", &["vendor/dep".to_owned()]);
+        let paths: Vec<&str> = scoped.nodes.iter().map(|n| n.path.as_str()).collect();
+        assert_eq!(paths, ["vendor/dep/x.rs", "vendor/dep/y.rs"]);
     }
 
     #[test]
@@ -1056,6 +1103,7 @@ mod tests {
             &graph(&[("", 1, 1), ("src", 3, 3), ("lib", 3, 3)], file_edges),
             None,
             "",
+            &[],
         );
         let mermaid = &diagram.mermaid;
         assert!(mermaid.starts_with("flowchart TD\n"));
@@ -1111,7 +1159,7 @@ mod tests {
             &[("src", 2, 2), ("vendor/dep", 1, 1), ("tests", 1, 1)],
             file_edges,
         );
-        let diagram = module_diagram(&graph, None, "");
+        let diagram = module_diagram(&graph, None, "", &[]);
         let paths: Vec<&str> = diagram.nodes.iter().map(|n| n.path.as_str()).collect();
         assert_eq!(paths, ["src/app.rs", "src/core.rs"]);
         assert_eq!(
@@ -1124,7 +1172,7 @@ mod tests {
         );
         // A focus overrides the rule: the file the user named decides its own
         // neighbourhood, wherever it lives.
-        let focused = module_diagram(&graph, Some("vendor/dep/x.rs"), "");
+        let focused = module_diagram(&graph, Some("vendor/dep/x.rs"), "", &[]);
         let mut paths: Vec<&str> = focused.nodes.iter().map(|n| n.path.as_str()).collect();
         paths.sort_unstable();
         assert_eq!(paths, ["src/app.rs", "vendor/dep/x.rs"]);
@@ -1132,8 +1180,8 @@ mod tests {
 
     #[test]
     fn the_same_inputs_build_identically() {
-        let first = module_diagram(&chain_graph(), None, "");
-        let second = module_diagram(&chain_graph(), None, "");
+        let first = module_diagram(&chain_graph(), None, "", &[]);
+        let second = module_diagram(&chain_graph(), None, "", &[]);
         assert_eq!(first, second);
     }
 }

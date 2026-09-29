@@ -182,7 +182,7 @@ export type EditorInput =
 	| { kind: 'folders'; id: string; left: string; right: string }
 	| { kind: 'calltree'; id: string; symbol: WsSymbol }
 	| { kind: 'symboldb'; id: string }
-	| { kind: 'analysis'; id: string; tool: import('./analysisTools').AnalysisToolId }
+	| { kind: 'analysis'; id: string; tool: import('./analysisTools').AnalysisToolId; folders?: string[] }
 	| { kind: 'help'; help: 'welcome' | 'shortcuts' }
 	| { kind: 'selftest'; id: string }
 	| { kind: 'markdown'; path: string }
@@ -255,7 +255,7 @@ function inputId(input: EditorInput): string {
 		case 'content': return 'content:' + input.id;
 		case 'folders': return 'folders:' + input.id;
 		case 'symboldb': return input.id;
-		case 'analysis': return 'analysis:' + input.tool;
+		case 'analysis': return 'analysis:' + input.tool + (input.folders?.length ? ':' + input.folders.join(',') : '');
 		case 'extpage': return input.id;
 		case 'extdetail': return input.id;
 		case 'calltree': return 'calltree:' + input.id;
@@ -2026,19 +2026,31 @@ export class EditorGroup {
 		this.add(editor, true, intent);
 	}
 
-	/** A Code Analysis tab (module 17): one per tool — the streaming reports and the graph
-	 *  drawings the lazy analysisPages chunk mounts, like the CAN views after it. */
-	async openAnalysisPage(tool: import('./analysisTools').AnalysisToolId): Promise<void> {
-		const id = `analysis:${tool}`;
+	/** A Code Analysis tab (module 17): one per tool — and, for the Module Analysis
+	 *  tool, one per folder scope (the Explorer's "Module Analysis" pick) — the
+	 *  streaming reports and the graph drawings the lazy analysisPages chunk
+	 *  mounts, like the CAN views after it. */
+	async openAnalysisPage(
+		tool: import('./analysisTools').AnalysisToolId,
+		folders?: string[]
+	): Promise<void> {
+		const scope = folders?.filter((folder) => folder !== '') ?? [];
+		const id = `analysis:${tool}${scope.length > 0 ? `:${scope.join(',')}` : ''}`;
 		const existing = this.open.find((e) => e.input.kind === 'analysis' && e.input.id === id);
 		if (existing) {
 			this.activate(existing);
 			return;
 		}
+		// The tab's label names the scope the way the compare tabs name their
+		// sides — English, like every tab label; the pages' own text goes
+		// through `t()`.
+		const scopeSuffix = scope.length === 0
+			? ''
+			: ` (${scope.slice(0, 3).map((folder) => basename(folder) || folder).join(', ')}${scope.length > 3 ? ` +${scope.length - 3}` : ''})`;
 		const editor: Editor = {
-			input: { kind: 'analysis', id, tool },
+			input: { kind: 'analysis', id, tool, folders: scope },
 			id,
-			label: ANALYSIS_PAGE_LABELS[tool],
+			label: ANALYSIS_PAGE_LABELS[tool] + scopeSuffix,
 			iconClass: ANALYSIS_PAGE_ICONS[tool],
 			pane: el('div', 'editor-pane'),
 			dirty: false
@@ -2048,7 +2060,7 @@ export class EditorGroup {
 		const { createAnalysisPage } = await loadAnalysisPages();
 		if (!this.open.includes(editor)) return; // the tab closed while the chunk loaded
 		editor.pane.textContent = '';
-		editor.analysis = createAnalysisPage(tool, editor.pane);
+		editor.analysis = createAnalysisPage(tool, editor.pane, scope);
 		editor.analysis.onOpen = (path, line) => void this.openFile(joinPath(this.rootPath ?? '', path), { line });
 	}
 
