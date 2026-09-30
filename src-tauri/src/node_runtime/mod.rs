@@ -642,6 +642,32 @@ fn execute_job(context: &mut Context, job: Job) -> bool {
 /// Register the natives, run the prelude, then `require` the package's entry — best
 /// effort: a failed preload is logged and the backend stays up (its default dispatch and
 /// its `.node`s remain servable).
+/// GGS-patch: Node's own `main` resolution (2026-10-01). A VSIX's `package.json` `main`
+/// is frequently extension-less — `./out/extension` meaning `out/extension.js` — and
+/// VS Code loads those exactly as Node loads a directory's main: try the path as given,
+/// then with the JavaScript extensions, then its `index.js`. Without this the bare
+/// path failed the first file read, the entry fell back to the non-frame-program
+/// CommonJS route (no `vscode` shim), and the package reported "cannot find module" —
+/// a whole class of popular extensions (`vscodevim.vim`, `todo-tree`,
+/// `indent-rainbow`, …) never even activated. Resolved once, at bootstrap, before the
+/// frame-program detection reads the file.
+fn resolve_entry(entry: &Path) -> PathBuf {
+    if entry.is_file() {
+        return entry.to_path_buf();
+    }
+    let mut candidates: Vec<PathBuf> = vec![];
+    let as_string = entry.to_string_lossy().to_string();
+    for extension in ["js", "cjs", "mjs", "node"] {
+        candidates.push(PathBuf::from(format!("{as_string}.{extension}")));
+    }
+    candidates.push(entry.join("index.js"));
+    candidates.push(entry.join("index.cjs"));
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| entry.to_path_buf())
+}
+
 fn bootstrap(context: &mut Context, entry: &Path) -> Result<(), String> {
     builtins::register_natives(context).map_err(|e| e.to_string())?;
     napi_host::install(context as *mut Context);
@@ -657,7 +683,8 @@ fn bootstrap(context: &mut Context, entry: &Path) -> Result<(), String> {
     // the honest skip.
     // Both module systems count: `require('vscode')` and an ES module's
     // `import … from "vscode"` (prettier-vscode's `main` is ESM).
-    let frame_program = std::fs::read_to_string(entry)
+    let entry = resolve_entry(entry);
+    let frame_program = std::fs::read_to_string(&entry)
         .map(|source| {
             source.contains("require(\"vscode\")")
                 || source.contains("require('vscode')")

@@ -14,6 +14,8 @@ import { AnalysisView, type AnalysisStatus } from './analysisView';
 import type { AnalysisToolId } from './analysisTools';
 import { mountProviderSwitcher } from './aiProviders';
 import { commandForBinding, commands, effectiveBinding, setKeybindingResolver, UNSHIFTED_GLYPHS } from './commands';
+import { registerDecorationType } from './editorDecorations';
+import { setExtensionCompletionProvider } from './editorCompletions';
 import { languageIdFor, registerContextProvider } from './contributions';
 import { EditorArea } from './editorArea';
 import { ENCODING_LABELS } from './editor';
@@ -189,6 +191,13 @@ export class Workbench {
 		// The editor-facing vscode API: text edits land in an open CodeMirror editor, opens
 		// go through the editor area, and the host pushes active-editor and save events.
 		this.extensionHost.onApplyEdits = (path, edits) => this.editors.applyTextEdits(path, edits);
+		// GGS-patch: extension decorations (editorDecorations.ts) — types register their
+		// render options, setDecorations routes per document (null = the active editor).
+		this.extensionHost.onDecorateType = (key, options) => registerDecorationType(key, options);
+		this.extensionHost.onSetDecorations = (path, key, ranges) => this.editors.setExtensionDecorations(path, key, ranges);
+		// GGS-patch: the extensions' completion providers feed the editor's completion UI
+		// through the module bridge (see editorCompletions.ts).
+		setExtensionCompletionProvider((path, languageId, text, line, character, triggerCharacter) => this.extensionHost.extensionCompletions(path, languageId, text, line, character, triggerCharacter));
 		this.extensionHost.onOpenFile = (path, line, column, placement) => void this.editors.openFile(path, line !== undefined ? { line, column } : undefined, placement);
 		this.extensionHost.activeText = () => this.editors.activeText();
 		// `openTextDocument` reads an open editor's buffer, `TextDocument.save()` saves it,

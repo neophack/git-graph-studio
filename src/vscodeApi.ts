@@ -2257,6 +2257,12 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 		run: (document: Record<string, unknown>, options: unknown, token: CancellationToken) => unknown;
 	}>();
 	let formatterSeq = 0;
+	/** GGS-patch: the registered completion providers (see registerCompletionItemProvider). */
+	const completionProviders = new Map<string, {
+		selectors: unknown[];
+		triggerCharacters: string[];
+		run: (document: unknown, position: unknown, token: unknown, context: unknown) => unknown;
+	}>();
 
 	/** The document table entry for a path (created on first sight when `text` is given). */
 	function rememberDocument(path: string, text: string, languageId: string, uri?: Uri): { state: DocumentState; opened: boolean; changed: boolean; previous: string } {
@@ -2591,7 +2597,15 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			},
 			viewColumn: ViewColumn.One,
 			options: { tabSize, insertSpaces: ctx.defaults?.['editor.insertSpaces'] !== false, cursorStyle: TextEditorCursorStyle.Line, lineNumbers: TextEditorLineNumbersStyle.On },
-			setDecorations: (_decorationType: unknown, _rangesOrOptions: unknown) => unsupported('TextEditor.setDecorations', 'editor decorations are not rendered'),
+			setDecorations: (decorationType: unknown, rangesOrOptions: unknown) => {
+				// GGS-patch: REPLACE the type's ranges on this editor's document (VS Code's
+				// semantics; an empty array clears). A null path addresses the active file,
+				// the same convention `editor.applyEdits` uses.
+				const key = (decorationType as { key?: string } | null | undefined)?.key;
+				if (!key) return unsupported('TextEditor.setDecorations', 'the decoration type is not from this host');
+				const ranges = plainDecorationRanges(rangesOrOptions);
+				void bridge.request('editor.setDecorations', [isActive() ? null : path, key, ranges]).catch(() => undefined);
+			},
 			revealRange: (range: Range) => {
 				if (range?.start) send('workspace.openFile', [path, range.start.line + 1, range.start.character + 1]);
 			},
@@ -3004,10 +3018,18 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 				registerTree(viewId, treeDataProvider);
 				return new Disposable(() => send('treeView.dispose', [viewId]));
 			},
-			createTextEditorDecorationType: (_options?: unknown) => {
-				unsupported('window.createTextEditorDecorationType', 'editor decorations are not rendered');
-				const key = `${ctx.extensionId}:${++statusSeq}:deco`;
-				return { key, dispose: () => undefined } as { key: string; dispose(): void };
+			createTextEditorDecorationType: (options?: Record<string, unknown>) => {
+				// GGS-patch: real decoration types. The renderable subset of the options
+				// crosses to the workbench at creation (see editorDecorations.ts); the rest
+				// of the options object is accepted and ignored, as the API shape promises.
+				const key = `${ctx.extensionId}/${++statusSeq}/deco`;
+				void bridge.request('decoration.type', [{ key, options: plainDecorationOptions(options) }]).catch(() => undefined);
+				return {
+					key,
+					dispose: () => {
+						void bridge.request('decoration.dispose', [{ key }]).catch(() => undefined);
+					}
+				} as { key: string; dispose(): void };
 			},
 			showOpenDialog: async (options?: { canSelectMany?: boolean; defaultUri?: Uri; filters?: Record<string, string[]>; title?: string; canSelectFolders?: boolean }) => {
 				const picked = await bridge.request('dialog.open', [options ?? {}]) as (string | { fsPath?: string })[] | string | null | undefined;
@@ -3481,7 +3503,21 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 					const last = (document.lineAt as (line: number) => { text: string })(lineCount - 1);
 					return formatter.provideDocumentRangeFormattingEdits(document, new Range(0, 0, lineCount - 1, last.text.length), options, token);
 				}),
-			registerCompletionItemProvider: provider('registerCompletionItemProvider'),
+			registerCompletionItemProvider: (selector: unknown, provider: { provideCompletionItems: (document: unknown, position: unknown, token: unknown, context: unknown) => unknown }, ...triggerCharacters: string[]) => {
+				// GGS-patch: real completion providers. The workbench's completion UI calls
+				// over at every trigger (see editorCompletions.ts); the frame answers with
+				// serialized items. Trigger characters register with the declaration, as
+				// VS Code's signature carries them.
+				const selectors = (Array.isArray(selector) ? selector : [selector]).map((entry) => (typeof entry === 'string' ? { language: entry } : entry));
+				const id = `cmp-${++formatterSeq}`;
+				const triggers = triggerCharacters.filter((c) => typeof c === 'string');
+				completionProviders.set(id, { selectors, triggerCharacters: triggers, run: provider.provideCompletionItems.bind(provider) });
+				send('languages.registerCompletion', [{ id, selectors: selectors.map(plainSelector), triggerCharacters: triggers }]);
+				return new Disposable(() => {
+					completionProviders.delete(id);
+					send('languages.unregisterCompletion', [{ id }]);
+				});
+			},
 			registerInlineCompletionItemProvider: provider('registerInlineCompletionItemProvider'),
 			registerHoverProvider: provider('registerHoverProvider'),
 			registerDefinitionProvider: provider('registerDefinitionProvider'),
@@ -3848,6 +3884,36 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			}
 		},
 
+		/** GGS-patch: not part of VS Code's `vscode` module either — the completion
+		 *  answer side (the host's completion UI calls this at every trigger, ranked to
+		 *  the best provider for the document). Items cross serialized: the label,
+		 *  kind, texts and the (optional) replacement range. */
+		__serveCompletions: async (id: string, document: { path: string; languageId: string; text: string }, position: { line: number; character: number }, context: { triggerCharacter?: string }): Promise<unknown[]> => {
+			const entry = completionProviders.get(id);
+			if (!entry) throw new Error(`no completion provider ${id}`);
+			const { state } = rememberDocument(document.path, document.text, document.languageId);
+			const view = documentView(state, () => saveDocument(document.path));
+			try {
+				const items = await Promise.resolve(entry.run(view, new Position(position.line, position.character), CancellationTokenNone, { triggerCharacter: context.triggerCharacter, triggerKind: context.triggerCharacter !== undefined ? 1 : 0 }));
+				return (Array.isArray(items) ? items : (items as { items?: unknown[] })?.items ?? []).map((item) => {
+					const value = item as { label?: unknown; kind?: unknown; detail?: unknown; documentation?: unknown; insertText?: unknown; sortText?: unknown; filterText?: unknown; range?: Range };
+					return {
+						label: typeof value.label === 'object' && value.label !== null ? (value.label as { label: string }).label : value.label,
+						kind: typeof value.kind === 'number' ? value.kind : undefined,
+						detail: typeof value.detail === 'string' ? value.detail : undefined,
+						documentation: typeof value.documentation === 'string' ? value.documentation : undefined,
+						insertText: typeof value.insertText === 'string' ? value.insertText : undefined,
+						sortText: typeof value.sortText === 'string' ? value.sortText : undefined,
+						filterText: typeof value.filterText === 'string' ? value.filterText : undefined,
+						range: value.range ? { start: { line: value.range.start.line, character: value.range.start.character }, end: { line: value.range.end.line, character: value.range.end.character } } : undefined
+					};
+				});
+			} catch (error) {
+				shimLog('error', `completion provider ${id} failed on ${document.path}: ${String(error)}`, error);
+				return [];
+			}
+		},
+
 		/** Not part of VS Code's `vscode` module either: the webview view plumbing — the
 		 *  frame's answer to the host calls `webviewView.resolve` (the view's first show)
 		 *  and `webviewView.setVisible` (the sidebar's view switching). */
@@ -4056,6 +4122,39 @@ export function selectorScore(selector: unknown, document: { languageId?: string
 
 /** A document filter as plain data for the host (a RelativePattern becomes its glob and
  *  base path). */
+/** GGS-patch: the renderable subset of a DecorationRenderOptions object (see
+ *  editorDecorations.ts); everything else is accepted and ignored. */
+function plainDecorationOptions(options: Record<string, unknown> | undefined): Record<string, string | boolean> {
+	const out: Record<string, string | boolean> = {};
+	if (!options) return out;
+	for (const [key, value] of Object.entries(options)) {
+		if (typeof value !== 'string' && typeof value !== 'boolean') continue;
+		if (key === 'backgroundColor' || key === 'border' || key === 'borderColor' || key === 'borderRadius'
+			|| key === 'color' || key === 'fontWeight' || key === 'fontStyle' || key === 'textDecoration'
+			|| key === 'cursor' || key === 'isWholeLine') {
+			out[key] = value;
+		}
+	}
+	return out;
+}
+
+/** GGS-patch: a DecorationOptions[] | Range[] argument — VS Code's setDecorations
+ *  accepts either — flattened to the wire's line/character pairs. */
+function plainDecorationRanges(rangesOrOptions: unknown): { startLine: number; startCharacter: number; endLine: number; endCharacter: number }[] {
+	const list = Array.isArray(rangesOrOptions) ? rangesOrOptions : [];
+	return list.map((entry) => {
+		const range = (entry && typeof entry === 'object' && 'range' in (entry as Record<string, unknown>)
+			? (entry as { range: unknown }).range
+			: entry) as { start?: { line?: number; character?: number }; end?: { line?: number; character?: number } } | undefined;
+		return {
+			startLine: range?.start?.line ?? 0,
+			startCharacter: range?.start?.character ?? 0,
+			endLine: range?.end?.line ?? 0,
+			endCharacter: range?.end?.character ?? 0
+		};
+	});
+}
+
 function plainSelector(entry: unknown): unknown {
 	if (entry === null || typeof entry !== 'object') return entry;
 	const filter = entry as { language?: string; scheme?: string; pattern?: unknown; notebookType?: string };

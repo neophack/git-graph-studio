@@ -622,6 +622,8 @@ export class ExtensionHost {
 	 *  holding the handler. Keyed per provider: an extension registering one formatter per
 	 *  language keeps every one of them. */
 	private readonly formattingProviders = new Map<string, { extId: string; id: string; selectors: FormatterSelector[]; handle: FrameHandle }>();
+	/** GGS-patch: the frames' registered completion providers (see editorCompletions.ts). */
+	private readonly completionProviders = new Map<string, { extId: string; id: string; selectors: FormatterSelector[]; handle: FrameHandle; triggerCharacters: string[] }>();
 	/** The extensions whose missing `extensionDependencies` were already reported. */
 	private readonly dependencyWarned = new Set<string>();
 	/** Debounced document-change pushes, by path (`noteDocumentChanged`). */
@@ -735,6 +737,12 @@ export class ExtensionHost {
 	/** Workbench hooks behind the editor-facing vscode API: text-edit application (into an
 	 *  open CodeMirror editor), file opening, and the active editor's text. */
 	onApplyEdits: ((path: string | null, edits: { startLine: number; startCharacter: number; endLine: number; endCharacter: number; newText: string }[]) => boolean) | null = null;
+	/** GGS-patch: the editor-decoration channel (see editorDecorations.ts): a type was
+	 *  created, or a type's ranges were set on one document (null = the active editor).
+	 *  `decorTypesByExt` remembers each frame's types so its teardown clears its marks. */
+	onDecorateType: ((key: string, options: Record<string, string | boolean>) => void) | null = null;
+	onSetDecorations: ((path: string | null, key: string, ranges: { startLine: number; startCharacter: number; endLine: number; endCharacter: number }[]) => void) | null = null;
+	private decorTypesByExt = new Map<string, Set<string>>();
 	/** Open (or reveal) a file, optionally at a 1-based line/column, in the group a
 	 *  placement picks (an extension's `ViewColumn`). */
 	onOpenFile: ((path: string, line?: number, column?: number, placement?: EditorPlacement) => void) | null = null;
@@ -1348,6 +1356,12 @@ export class ExtensionHost {
 		// Whatever was still running in the frame (the deactivate itself included) has no
 		// frame left to answer from.
 		for (const cancel of [...handle.pendingCalls]) cancel(new Error(`extension ${extId} was deactivated`));
+		for (const [key, registration] of [...this.completionProviders]) {
+			if (registration.extId === extId) this.completionProviders.delete(key);
+		}
+		// The frame's decoration marks leave the editors with it.
+		for (const key of this.decorTypesByExt.get(extId) ?? []) this.onSetDecorations?.(null, key, []);
+		this.decorTypesByExt.delete(extId);
 		// The extension's UI goes with it: webview tabs close (their disposers re-enter
 		// `webviewClosed`, harmless without a frame), its sidebar webview views unmount, and
 		// its status bar items and output channels drop.
@@ -2182,6 +2196,18 @@ export class ExtensionHost {
 				setFileDiagnostics(diagPath, diagList ?? []);
 				return Promise.resolve(undefined);
 			}
+			case 'languages.registerCompletion': {
+				// GGS-patch: the frame registered a completion provider (see
+				// editorCompletions.ts): `{ id, selectors, triggerCharacters }`.
+				const [declaration] = args as [{ id: string; selectors: FormatterSelector[]; triggerCharacters?: string[] }];
+				this.completionProviders.set(`${extId}/${declaration.id}`, { extId, id: declaration.id, selectors: declaration.selectors ?? [], handle, triggerCharacters: declaration.triggerCharacters ?? [] });
+				return Promise.resolve(undefined);
+			}
+			case 'languages.unregisterCompletion': {
+				const [declaration] = args as [{ id: string }];
+				this.completionProviders.delete(`${extId}/${declaration.id}`);
+				return Promise.resolve(undefined);
+			}
 			case 'languages.registerFormatting': {
 				// The frame registered a document formatting provider: `{ id, selectors }`.
 				// `editor.formatDocument` routes to the best-scoring provider for the document.
@@ -2216,6 +2242,24 @@ export class ExtensionHost {
 				// process), or null when the machine has none — the frame answers Node's
 				// fork-shaped `'error'` event.
 				return invoke<string | null>('ext_node_runtime_path');
+			case 'decoration.type': {
+				// GGS-patch: the frame created a decoration type (see editorDecorations.ts).
+				const [declaration] = args as [{ key: string; options: Record<string, string | boolean> }];
+				this.decorTypesByExt.get(extId)?.add(declaration.key);
+				this.onDecorateType?.(declaration.key, declaration.options ?? {});
+				return Promise.resolve(undefined);
+			}
+			case 'decoration.dispose': {
+				const [{ key }] = args as [{ key: string }];
+				this.decorTypesByExt.get(extId)?.delete(key);
+				this.onSetDecorations?.(null, key, []);
+				return Promise.resolve(undefined);
+			}
+			case 'editor.setDecorations': {
+				const [path, key, ranges] = args as [string | null, string, { startLine: number; startCharacter: number; endLine: number; endCharacter: number }[]];
+				this.onSetDecorations?.(path, key, ranges ?? []);
+				return Promise.resolve(undefined);
+			}
 			case 'editor.applyEdits': {
 				// A null path addresses the active file editor; false (not open) tells the
 				// frame's applyEdit to fall back to file-level edits.
@@ -2502,6 +2546,27 @@ export class ExtensionHost {
 	 *  then run what its activation registered. */
 	/** Run the formatting providers matching `languageId` over `text` and apply the edits
 	 *  to the open editor. Answers true when a formatter produced edits. */
+	/** GGS-patch: the extensions' completion answer for one trigger position (see
+	 *  editorCompletions.ts): the best-scoring provider for the document runs, its items
+	 *  cross serialized. A provider's failure is its own empty answer — completions are
+	 *  advisory, one extension's throw must not shadow another's. */
+	async extensionCompletions(path: string, languageId: string, text: string, line: number, character: number, triggerCharacter?: string): Promise<{ label: string; kind?: number; detail?: string; documentation?: string; insertText?: string; sortText?: string; filterText?: string; range?: { start: { line: number; character: number }; end: { line: number; character: number } } }[]> {
+		const ranked = [...this.completionProviders.values()]
+			.map((registration) => ({ registration, score: formatterScore(registration.selectors, path, languageId) }))
+			.filter((entry) => entry.score > 0)
+			.sort((a, b) => b.score - a.score);
+		for (const { registration } of ranked) {
+			await this.ensureActive(registration.extId).catch(() => undefined);
+			try {
+				const items = await this.callFrame(registration.handle, 'completion.run', [registration.id, { path, languageId, text }, { line, character }, { triggerCharacter }]) as { label: string; kind?: number; detail?: string; documentation?: string; insertText?: string; sortText?: string; filterText?: string; range?: { start: { line: number; character: number }; end: { line: number; character: number } } }[] | undefined;
+				if (items && items.length > 0) return items;
+			} catch {
+				// the next provider tries (an extension's dead frame yields to the rest)
+			}
+		}
+		return [];
+	}
+
 	async formatDocument(path: string, languageId: string, text: string, tabSize: number, insertSpaces: boolean): Promise<boolean> {
 		let lastError: string | null = null;
 		// The providers ranked by their selector's score for this document (VS Code's

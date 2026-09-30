@@ -8,6 +8,7 @@ import { Facet, type Extension } from '@codemirror/state';
 import { invoke } from '@tauri-apps/api/core';
 
 import { languageOf, resolveVariables, snippetsFor } from './snippetRegistry';
+import { extensionCompletionsFor, hasExtensionCompletions, type ExtensionCompletion } from './editorCompletions';
 import { settings } from './settings';
 
 /** The open file's name, so the snippet set and the path root can follow the language. */
@@ -125,6 +126,73 @@ export async function pathCompletion(context: CompletionContext): Promise<Comple
 	return { from: token.from, options, validFor: /^[\w$./\\-]*$/ };
 }
 
+/** GGS-patch: the extensions' completion providers as a source (see
+ *  editorCompletions.ts): the document crosses for the provider to see, the items come
+ *  back serialized. Inert until an extension registers one — no host round trip
+ *  otherwise. */
+async function extensionCompletionSource(context: CompletionContext): Promise<CompletionResult | null> {
+	if (!hasExtensionCompletions()) return null;
+	const state = context.state;
+	const path = state.facet(fileNameFacet);
+	if (!path) return null;
+	const line = state.doc.lineAt(context.pos);
+	const character = context.pos - line.from;
+	const items = await extensionCompletionsFor(path, languageIdOf(state as unknown as { language?: { name?: string } }), state.doc.toString(), line.number - 1, character);
+	if (items.length === 0) return null;
+	const word = context.matchBefore(/[\w$.:-]*/);
+	const from = Math.max(word?.from ?? context.pos, positionOf(context, items));
+	return {
+		from,
+		options: items.map((item) => completionOf(item, from)),
+		validFor: /^[\w$.:\-]*$/
+	};
+}
+
+/** VS Code's CompletionItem kind numbers → CodeMirror's type names (the ones both UIs
+ *  render distinctly; everything else lands as the plain default). */
+function completionOf(item: ExtensionCompletion, from: number): Completion {
+	return {
+		label: item.label,
+		type: kindName(item.kind),
+		detail: item.detail,
+		info: item.documentation,
+		// The provider's own insertText wins (a prefix like "./" for a path item);
+		// sortText steers the ordering when the extension asked for one.
+		apply: item.insertText ?? item.label,
+		boost: item.sortText ? -Number.MAX_SAFE_INTEGER + (Number.parseInt(item.sortText, 36) || 0) : 0
+	};
+}
+
+function positionOf(context: CompletionContext, items: ExtensionCompletion[]): number {
+	for (const item of items) {
+		if (item.range) {
+			const line = context.state.doc.line(Math.max(1, Math.min(item.range.start.line + 1, context.state.doc.lines)));
+			return Math.min(line.from + Math.max(0, item.range.start.character), line.to);
+		}
+	}
+	return context.pos;
+}
+
+function languageIdOf(state: { language?: { name?: string } }): string {
+	// CodeMirror's language name approximates VS Code's id (typescript vs
+	// typescript's 'ts' among them); a selector keyed exactly on the id the editor
+	// does not carry simply does not match — the same provider set serving `*`
+	// (path-intellisense and most others) is who this source exists for.
+	return state.language?.name ?? '';
+}
+
+const KIND_NAMES: Record<number, string> = {
+	1: 'text', 2: 'method', 3: 'function', 4: 'constructor', 5: 'field', 6: 'variable',
+	7: 'class', 8: 'interface', 9: 'namespace', 10: 'property', 11: 'constant',
+	12: 'enum', 13: 'enum', 14: 'keyword', 15: 'method', 16: 'text', 17: 'text',
+	18: 'text', 19: 'text', 20: 'text', 21: 'text', 22: 'text', 23: 'text',
+	24: 'text', 25: 'class'
+};
+
+function kindName(kind: number | undefined): string | undefined {
+	return kind === undefined ? undefined : KIND_NAMES[kind];
+}
+
 /* ---------- The bundle ---------- */
 
 /** The completion bundle every editable editor gets. The completion keymaps (Ctrl+Space among
@@ -135,6 +203,6 @@ export function completionExtension(fileName: string): Extension[] {
 		closeBrackets(),
 		// Tab / Shift-Tab walk an active snippet's fields (the autocompletion bundle wires
 		// the snippet keymap; it defers to the base keymap when no snippet is active).
-		autocompletion({ override: [snippetCompletionSource, wordCompletion, pathCompletion] })
+		autocompletion({ override: [snippetCompletionSource, wordCompletion, pathCompletion, extensionCompletionSource] })
 	];
 }

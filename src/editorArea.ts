@@ -8,6 +8,7 @@
 // closing, path renames).
 
 import { EditorGroup, askToSaveMany, tabDrag, type Editor, type EditorInput, type EditorPlacement } from './editor';
+import { setDecorationRanges } from './editorDecorations';
 import type { EditorGridCell } from './state';
 import { el, icon } from './ui';
 import type { EditorView } from '@codemirror/view';
@@ -241,6 +242,16 @@ export class EditorArea {
 	 *  module 12's `vscode.workspace.applyEdit` / `TextEditor.edit`. A null path addresses
 	 *  the active file editor; false means the file is not open (the caller falls back to
 	 *  file-level edits through the extension filesystem). */
+/** GGS-patch: extension decoration marks for one document (null = the active file
+ *  editor); the ranges REPLACE the type's previous set (see editorDecorations.ts). */
+	setExtensionDecorations(path: string | null, key: string, ranges: { startLine: number; startCharacter: number; endLine: number; endCharacter: number }[]): void {
+		const target = path === null
+			? (this.activeInput?.kind === 'file' ? this.activeInput.path : null)
+			: path;
+		if (!target) return;
+		setDecorationRanges(target, key, ranges);
+	}
+
 	applyTextEdits(path: string | null, edits: { startLine: number; startCharacter: number; endLine: number; endCharacter: number; newText: string }[]): boolean {
 		const view = path === null
 			? (this.activeInput?.kind === 'file' ? this.activeView : null)
