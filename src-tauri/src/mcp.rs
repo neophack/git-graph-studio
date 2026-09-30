@@ -1684,6 +1684,24 @@ mod tests {
         (dir, server)
     }
 
+    #[test]
+    fn the_call_log_survives_a_multibyte_brief() {
+        // The brief used to truncate at a raw byte: a long CJK argument put the cut
+        // inside a multi-byte character, String::truncate PANICKED, and the panic
+        // unwound out of `run` — the whole MCP server died mid-session.
+        let (dir, server) = scratch_server();
+        let query = "仓颉".repeat(40); // 240 bytes — the 120-byte cut lands inside a char
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"search_text","arguments":{{"query":"{query}"}}}}}}"#
+        );
+        let answer = reply(&server, &line);
+        // Whatever the tool answered, the server lived — and the log records the call.
+        assert!(answer["result"].is_object() || answer["error"].is_object(), "{answer}");
+        let log = std::fs::read_to_string(&server.log_path).expect("the call log");
+        assert!(log.contains("search_text"), "{log}");
+        let _ = &dir;
+    }
+
     fn reply(server: &McpServer, line: &str) -> Value {
         serde_json::from_str(&server.handle_line(line).expect("a request answers")).unwrap()
     }

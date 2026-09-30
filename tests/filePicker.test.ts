@@ -47,6 +47,18 @@ describe('FilePickSource', () => {
 		expect(load).toHaveBeenCalledTimes(1);
 	});
 
+	it('an empty first walk still marks the source loaded', async () => {
+		// An empty folder's walk arrives as the same empty list the source starts with;
+		// skipping the rebuild must not skip `loaded` — the old order left the source
+		// pending forever and re-walked the tree on every keystroke.
+		const load = vi.fn(() => Promise.resolve([]));
+		const picks = new FilePickSource(load);
+		await picks.query('', () => undefined, () => false);
+		expect(load).toHaveBeenCalledTimes(1);
+		await picks.query('a', () => undefined, () => false);
+		expect(load).toHaveBeenCalledTimes(1); // no re-walk: the empty index is final
+	});
+
 	it('rebuilds only when the walked list actually changed', async () => {
 		let files = ['a.txt'];
 		const picks = new FilePickSource(() => Promise.resolve(files));

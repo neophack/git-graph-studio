@@ -101,31 +101,24 @@ pub fn pty_create(app: TauriAppHandle, id: u32, cols: u16, rows: u16) -> Result<
     let event_app = app.clone();
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
-        // Carry the tail of a split multi-byte UTF-8 sequence into the next read: a
-        // per-read lossy decode turns a sequence the kernel split at 8 KiB into U+FFFD
-        // garbage in the terminal (a CJK filename in `ls`, a localized git message).
         let mut carry: Vec<u8> = Vec::new();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    carry.extend_from_slice(&buf[..n]);
-                    // Flush up to the last complete boundary; keep the tail bytes.
-                    let complete = match std::str::from_utf8(&carry) {
-                        Ok(_) => carry.len(),
-                        Err(error) => error.valid_up_to(),
-                    };
-                    if complete > 0 {
-                        let payload = String::from_utf8_lossy(&carry[..complete]).into_owned();
+                    let payload = decode_pty_chunk(&mut carry, &buf[..n]);
+                    if !payload.is_empty() {
                         let _ = event_app.emit(format!("studio://pty-output-{id}").as_str(), payload);
-                        carry.drain(..complete);
                     }
                 }
             }
         }
         if !carry.is_empty() {
-            let payload = String::from_utf8_lossy(&carry).into_owned();
-            let _ = event_app.emit(format!("studio://pty-output-{id}").as_str(), payload);
+            // Stream end: whatever incomplete sequence remains is terminal damage —
+            // flush it lossily (one U+FFFD) rather than dropping it.
+            let tail = String::from_utf8_lossy(&carry).into_owned();
+            carry.clear();
+            let _ = event_app.emit(format!("studio://pty-output-{id}").as_str(), tail);
         }
         let _ = event_app.emit(format!("studio://pty-exit-{id}").as_str(), ());
         if let Some(state) = event_app.try_state::<Mutex<PtyState>>() {
@@ -194,8 +187,50 @@ fn with_session<T>(
     }
 }
 
+/// GGS-patch: one terminal-output chunk, carrying the tail of a multi-byte UTF-8
+/// sequence that this read split (the kernel splits at arbitrary boundaries; a per-read
+/// lossy decode rendered the split sequence as U+FFFD garbage — a CJK filename in `ls`,
+/// a localized git message). `carry` keeps the tail bytes across calls; a final call
+/// with an empty chunk flushes the tail lossily.
+fn decode_pty_chunk(carry: &mut Vec<u8>, chunk: &[u8]) -> String {
+    carry.extend_from_slice(chunk);
+    let complete = match std::str::from_utf8(carry) {
+        Ok(_) => carry.len(),
+        Err(error) => error.valid_up_to(),
+    };
+    let payload = String::from_utf8_lossy(&carry[..complete]).into_owned();
+    carry.drain(..complete);
+    payload
+}
+
 #[cfg(test)]
 mod tests {
+    use super::decode_pty_chunk;
+
+    #[test]
+    fn a_split_multibyte_sequence_decides_whole() {
+        // "你" is three bytes; a kernel split after the first lands it in the next
+        // chunk — the output must carry the whole character, no U+FFFD.
+        let mut carry = Vec::new();
+        let bytes = "你".as_bytes();
+        let first = decode_pty_chunk(&mut carry, &bytes[..1]);
+        assert_eq!(first, "", "the incomplete sequence holds");
+        let second = decode_pty_chunk(&mut carry, &bytes[1..]);
+        assert_eq!(second, "你");
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn a_trailing_incomplete_byte_stays_carried_for_the_stream_end_flush() {
+        // The stream-end path (the reader loop's tail) flushes the carry lossily; the
+        // decoder's job is to keep the incomplete byte out of the per-chunk output.
+        let mut carry = Vec::new();
+        let _ = decode_pty_chunk(&mut carry, "ok".as_bytes());
+        let _ = decode_pty_chunk(&mut carry, &[0xF0]);
+        assert_eq!(carry, vec![0xF0]);
+        assert_eq!(String::from_utf8_lossy(&carry), "\u{FFFD}");
+    }
+
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     use std::io::Read;
 

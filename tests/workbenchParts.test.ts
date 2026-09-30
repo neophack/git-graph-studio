@@ -423,6 +423,27 @@ describe('terminal resizing', () => {
 		expect(backend.callsTo('pty_resize')).toHaveLength(1);
 	});
 
+	it('a disposed extension channel loses its buffer, and a same-named new channel starts empty', async () => {
+		const panel = new Panel(document.getElementById('panel')!);
+		panel.show('output');
+		panel.output.appendLine('Build', 'old line 1');
+		panel.output.appendLine('Build', 'old line 2');
+		// The extension (and its channel) goes away.
+		panel.output.setExtensionChannels([]);
+		// A new extension creates a channel with the same name: it must start empty —
+		// the old cleanup was dead code and resurrected the disposed buffer.
+		panel.output.setExtensionChannels([{ extId: 'acme.new', name: 'Build' }]);
+		panel.output.showChannel('Build');
+		await flush();
+		const log = document.querySelector('.output-log')!;
+		expect(log.textContent).not.toContain('old line 1');
+		// The git channel survives the sweep regardless of the incoming set.
+		panel.output.setExtensionChannels([]);
+		const picker = document.querySelector('select.output-channel-picker')!;
+		const options = [...(picker as unknown as HTMLSelectElement).options].map((option) => option.value);
+		expect(options).toContain('Git');
+	});
+
 	it('answers VS Code\'s terminal clipboard keys: Ctrl+Shift+C / Ctrl+C-with-selection copy, Ctrl+Shift+V pastes', async () => {
 		backend.on('pty_create', () => 'powershell');
 		backend.on('pty_write', () => null);

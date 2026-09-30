@@ -4827,6 +4827,36 @@ base hex timestamps relative
         assert!((extended.median_cycle_s - 0.04).abs() < 1e-9);
     }
 
+    fn counting_sink(frames: &mut usize) -> impl FrameSink + '_ {
+        struct Count<'a>(&'a mut usize);
+        impl FrameSink for Count<'_> {
+            fn frame(&mut self, _frame: RawFrame) {
+                *self.0 += 1;
+            }
+        }
+        Count(frames)
+    }
+
+    /// The "top N shown" note counts identifiers, never frames: past the tracking cap the
+    /// overflow is frames on untracked ids, and adding those would mix the units.
+    #[test]
+    fn a_truncated_inner_object_is_skipped_not_indexed_out_of_bounds() {
+        // A LOBJ whose header claims fields the buffer does not carry (a truncated
+        // container): the walk's own bound only guarantees 16 bytes, and the header
+        // reader reaches 32 — the old code indexed out of bounds and panicked the
+        // parse instead of skipping the damage.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"LOBJ");
+        buf.extend_from_slice(&16u16.to_le_bytes()); // header size
+        buf.extend_from_slice(&1u16.to_le_bytes()); // header version 1 (hsize 16)
+        buf.extend_from_slice(&20u32.to_le_bytes()); // object size: 20 bytes total
+        buf.extend_from_slice(&0u32.to_le_bytes()); // object type (uninteresting)
+        buf.extend_from_slice(&[0u8; 8]); // 8 more bytes — 24 total, short of 32
+        let mut frames = 0usize;
+        walk_blf_objects(&buf, &mut counting_sink(&mut frames));
+        assert_eq!(frames, 0, "the damaged object contributes nothing");
+    }
+
     /// The "top N shown" note counts identifiers, never frames: past the tracking cap the
     /// overflow is frames on untracked ids, and adding those would mix the units.
     #[test]

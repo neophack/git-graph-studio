@@ -136,7 +136,24 @@ fn serve(entry: PathBuf, requests: &[Value]) -> Vec<Result<Value, String>> {
         let Ok(wire) = serde_json::from_str::<Value>(line) else {
             continue;
         };
+        if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
+            // A frame program's host asks (host.env at activation): answer null — enough
+            // for the shim to proceed — and keep the responses out of the answers table
+            // (their ids live in the host-request id space, above the request ids).
+            let host_id = wire["id"].as_u64().unwrap_or_default();
+            let mut output = output.0.lock().unwrap();
+            use std::io::Write as _;
+            let _ = writeln!(
+                output,
+                "{}",
+                git_graph_studio_lib::ext_protocol::response(host_id, Ok(Value::Null))
+            );
+            continue;
+        }
         let Some(id) = wire.get("id").and_then(Value::as_u64) else {
+            if std::env::var("GGS_TEST_LOGS").is_ok() {
+                eprintln!("[log] {}", wire);
+            }
             continue; // a `$/log` notification
         };
         let error = wire["error"]["message"].as_str().map(str::to_owned);
@@ -162,6 +179,175 @@ fn initialize() -> Value {
 
 fn run_command(command: &str, args: Value) -> Value {
     json!({ "method": "runCommand", "params": { "command": command, "args": args } })
+}
+
+#[test]
+fn an_extensionless_main_activates_as_a_frame_program() {
+    // VSIX `main` is frequently extension-less (`./out/extension`) — Node and VS Code
+    // resolve it with the JavaScript extensions. The bare path failed the frame-program
+    // detection's first file read and the package fell back to the non-frame route (no
+    // `vscode` shim), so the class of extensions shipping that shape never activated.
+    //
+    // The shim file the frame program evaluates (the dev layout prepare writes); a
+    // checkout without a built shim skips this suite.
+    let shim = std::env::var("GGS_VSCODE_SHIM")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("../target/studio/vscode-shim.cjs"));
+    if !shim.is_file() {
+        eprintln!("skipping: no vscode-shim.cjs built");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[
+            ("package.json", r#"{"name":"bare","publisher":"acme","version":"1.0.0","main":"./out/extension"}"#),
+            (
+                "out/extension.js",
+                r#"
+const vscode = require('vscode');
+module.exports.activate = function () {
+    vscode.commands.registerCommand('bare.probe', () => 'FRAME');
+};
+"#,
+            ),
+        ],
+    )
+    .join("out/extension"); // the manifest's bare main, exactly as the host receives it
+
+    let (requests_tx, requests_rx) = std::sync::mpsc::channel::<String>();
+    let (output_tx, output_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        git_graph_studio_lib::node_runtime::serve_on(
+            entry,
+            ChannelReader::from(requests_rx),
+            ChannelWriter(output_tx),
+        );
+    });
+    let read_line = || -> String {
+        match output_rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(line) => line,
+            Err(_) => panic!("the backend fell silent (activation never finished)"),
+        }
+    };
+
+    let mut next_id = 1u64;
+    requests_tx
+        .send(git_graph_studio_lib::ext_protocol::request(
+            next_id,
+            "initialize",
+            json!({
+                "protocolVersion": "ggs-ext/1",
+                "extensionId": "acme.bare",
+                "extensionPath": tmp.path().join("pkg").display().to_string(),
+                "workspaceFolders": [],
+            }),
+        ))
+        .unwrap();
+
+    // Answers to the activation's own host asks (host.env and friends) keep the frame
+    // program running; the handshake's reply is what the loop waits for.
+    let handshake;
+    loop {
+        let line = read_line();
+        let Ok(wire) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
+            let id = wire["id"].as_u64().unwrap_or_default();
+            let inner = wire["params"]["method"].as_str().unwrap_or_default();
+            let answer = if inner == "host.env" {
+                json!({ "settings": {}, "language": "en", "state": { "global": {}, "workspace": {} } })
+            } else {
+                Value::Null
+            };
+            requests_tx
+                .send(git_graph_studio_lib::ext_protocol::response(id, Ok(answer)))
+                .unwrap();
+            continue;
+        }
+        if wire["id"].as_u64() == Some(next_id) {
+            handshake = wire;
+            break;
+        }
+    }
+    assert_eq!(handshake["result"]["protocolVersion"], "ggs-ext/1");
+
+    // The first command orders behind the queued activation (FIFO): its answer is the
+    // activation's settlement — and the registered command's handler answering proves
+    // the bare main took the frame-program route (the vscode shim came up).
+    next_id += 1;
+    requests_tx
+        .send(git_graph_studio_lib::ext_protocol::request(
+            next_id,
+            "runCommand",
+            json!({ "command": "bare.probe", "args": [] }),
+        ))
+        .unwrap();
+    let answer;
+    loop {
+        let line = read_line();
+        let Ok(wire) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
+            let id = wire["id"].as_u64().unwrap_or_default();
+            requests_tx
+                .send(git_graph_studio_lib::ext_protocol::response(id, Ok(Value::Null)))
+                .unwrap();
+            continue;
+        }
+        if wire["id"].as_u64() == Some(next_id) {
+            answer = wire;
+            break;
+        }
+    }
+    assert_eq!(
+        answer["result"], "FRAME",
+        "the extensionless main activated as a frame program: {answer:?}"
+    );
+}
+
+#[test]
+fn a_module_that_throws_is_removed_from_the_require_cache() {
+    // Node's loader: a module that throws mid-evaluation is NOT cached — the standard
+    // `try { require('dep') } catch {}` availability probe must be able to retry, and a
+    // retry must throw again instead of answering the pre-evaluation partial exports.
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[
+            ("package.json", r#"{"name":"probe","publisher":"acme","version":"1.0.0","main":"main.js"}"#),
+            (
+                "main.js",
+                r#"
+let first = 'no-throw';
+try { require('./flaky'); } catch (e) { first = 'threw'; }
+let second;
+try {
+    const m = require('./flaky');
+    second = 'cached:' + JSON.stringify(m);
+} catch (e) { second = 'threw'; }
+module.exports = { dispatch: (command) => (command === 'probe' ? { first, second } : null) };
+"#,
+            ),
+            ("package2.json", r#"{}"#),
+            ("flaky/package.json", r#"{"name":"flaky","main":"index.js"}"#),
+            ("flaky/index.js", "exports.started = true; throw new Error('boom');"),
+        ],
+    )
+    .join("main.js");
+
+    let answers = serve(
+        entry,
+        &[initialize(), run_command("probe", json!([]))],
+    );
+    let result = answers[1].clone().expect("the probe answers");
+    assert_eq!(result["first"], "threw", "the first require throws");
+    assert_eq!(
+        result["second"], "threw",
+        "the retry throws again instead of answering the cached partial exports"
+    );
 }
 
 #[test]

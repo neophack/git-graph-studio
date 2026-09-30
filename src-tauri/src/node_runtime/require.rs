@@ -544,7 +544,14 @@ fn evaluate_module(path: &Path, source: &str, context: &mut Context) -> JsResult
             ],
             context,
         );
-        result?;
+        if result.is_err() {
+            // Node's loader removes a module that threw mid-evaluation — the
+            // cached-compile branch owes the same removal the plain branch does.
+            with_state(|state| {
+                state.module_cache.remove(&path.to_path_buf());
+            });
+            result?;
+        }
         if phase_trace {
             eprintln!(
                 "[perf] {} executed in {} ms",
@@ -758,6 +765,30 @@ mod tests {
     /// identically from the bytecode cache — the second load runs in a fresh `Context`
     /// from the stored blob, exactly as a second process start does — and the blob lands
     /// under the cache root the test points at.
+    #[test]
+    fn resolve_path_survives_a_dot_main() {
+        // `"main": "."` is legal Node (the package resolves to its own directory) — the
+        // old resolver recursed verbatim until the stack overflow killed the ggs-node
+        // host. It resolves to the directory's index file instead.
+        let dir = tempfile::tempdir().unwrap();
+        let package = dir.path().join("dep");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            r#"{ "name": "dep", "main": "." }"#,
+        )
+        .unwrap();
+        std::fs::write(package.join("index.js"), "module.exports = 42;").unwrap();
+
+        let resolved = resolve_path(&package).expect("the dot-main resolves to the index");
+        assert_eq!(resolved, package.join("index.js"));
+        // And a directory with neither main nor index answers None, not a hang.
+        let empty = dir.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(resolve_path(&empty), None);
+    }
+
+
     #[test]
     fn cached_scripts_evaluate_identically_on_the_second_load() {
         use boa_engine::js_string;

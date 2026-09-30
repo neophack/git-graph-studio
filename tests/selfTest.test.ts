@@ -101,6 +101,31 @@ describe('the self-test runner', () => {
 		expect(summary).toMatchObject({ pass: 1, fail: 1, skip: 1 });
 	});
 
+	it('a stop request ends the sweep after the check in flight', async () => {
+		// The Stop button used to only filter the display — the runner kept executing
+		// every remaining check. The runner now takes the page's stop flag.
+		const group = {
+			module: 'stop-probe',
+			tests: [
+				{ id: 'first', name: 'first', run: async () => {} },
+				{ id: 'second', name: 'second', run: async () => {} },
+				{ id: 'third', name: 'third', run: async () => {} }
+			]
+		};
+		const streamed: string[] = [];
+		let seen = 0;
+		const outcomes = await selftest.runSelfTests(
+			(outcome) => {
+				streamed.push(outcome.id);
+				seen += 1;
+			},
+			[group],
+			() => seen >= 1 // stop once the first check landed
+		);
+		expect(streamed).toEqual(['first']);
+		expect(outcomes).toHaveLength(1);
+	});
+
 	it('re-registering a module replaces its group instead of duplicating it', () => {
 		const before = selftest.selfTestGroups().length;
 		selftest.registerSelfTests({ module: 're-register-probe', tests: [{ id: 'a', name: 'a', run: async () => {} }] });

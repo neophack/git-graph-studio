@@ -3735,6 +3735,19 @@ mod vsix_tests {
     }
 
     #[test]
+    fn the_asset_path_decoder_keeps_a_literal_plus() {
+        // URI path semantics: `+` is a plus (form/query encoding is where it means a
+        // space). Decoding it as a space 404'd every package asset named with a `+`.
+        assert_eq!(percent_decode("scripts/c++/parser.js"), "scripts/c++/parser.js");
+        assert_eq!(percent_decode("a%2Bb.js"), "a+b.js");
+        assert_eq!(percent_decode("a%20b.js"), "a b.js");
+        assert_eq!(percent_decode("unicode%20%E4%BD%A0.js"), "unicode 你.js");
+        // A dangling percent survives as itself (never a panic).
+        assert_eq!(percent_decode("trail%"), "trail%");
+        assert_eq!(percent_decode("trail%2"), "trail%2");
+    }
+
+    #[test]
     fn strip_trailing_commas_is_string_aware() {
         // A comma inside a string literal followed by `}` is content: `"\d{2,}"` keeps
         // its comma (the old stripper deleted it and silently rewrote the regex).
