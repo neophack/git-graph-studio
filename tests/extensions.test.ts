@@ -1233,6 +1233,51 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		}
 	});
 
+	it('a provider switch\'s backend restart re-resolves the settled chat view (the login page un-sticks)', async () => {
+		const { host, sent } = hostWithFrame();
+		applyContributions('acme.demo', {
+			viewsContainers: { activitybar: [{ id: 'acmeSide', title: 'Acme' }] },
+			views: { acmeSide: [{ id: 'acme.chat', name: 'Chat', type: 'webview' }] }
+		}, {}, () => undefined, () => true);
+		try {
+			// Answer the frame calls the host places (resolve dispatches would otherwise hang).
+			const answer = (event: MessageEvent): void => {
+				const data = event.data as { type?: string; id?: number };
+				if (data?.type !== '__studioExtCall') return;
+				window.dispatchEvent(new MessageEvent('message', { data: { type: '__studioExtCallResult', id: data.id, ok: true, result: undefined } }));
+			};
+			window.addEventListener('message', answer);
+			const resolves = () => sent.filter((message) => (message as { type?: string; method?: string }).method === 'webviewView.resolve');
+
+			// The chat settles on the page the (old) process rendered — the official
+			// provider's login screen.
+			await host['serve']('webviewView.register', ['acme.chat'], 'acme.demo', {} as never);
+			await host['serve']('webviewView.setHtml', ['acme.chat', '<html><body>login</body></html>'], 'acme.demo', {} as never);
+			const section = document.body.appendChild(document.createElement('div'));
+			const dispose = host.mountWebviewView('acme.chat', 'acme.demo', section);
+			host.noteViewVisible('acme.chat', true);
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(resolves()).toHaveLength(1); // resolved once, settled
+
+			// The provider switch restarts the extension's backend; the fresh process's
+			// activation settled and the Rust side announced it. The settled view must
+			// re-resolve — nothing else would ever re-ask, and the sidebar would keep the
+			// old provider's login page forever.
+			backend.emit('ext-backend-restarted', 'acme.demo');
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(resolves()).toHaveLength(2);
+
+			// The fresh provider's page really lands: its setHtml reloads the mounted frame.
+			await host['serve']('webviewView.setHtml', ['acme.chat', '<html><body>chat</body></html>'], 'acme.demo', {} as never);
+			await new Promise((resolve) => setTimeout(resolve, 300));
+			expect(section.querySelector('iframe')!.getAttribute('srcdoc')).toContain('<body>chat</body>');
+			dispose();
+			window.removeEventListener('message', answer);
+		} finally {
+			removeContributions('acme.demo');
+		}
+	});
+
 	it('a page that settled without ever firing load still gets its messages (the watchdog\'s settle quirk)', async () => {
 		const { host } = hostWithFrame();
 		await host['serve']('webview.create', [1, 'demo.view', 'Demo Panel'], 'acme.demo', {} as never);

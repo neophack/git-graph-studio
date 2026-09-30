@@ -89,6 +89,12 @@ export const MARKETPLACE_URL = 'https://open-vsx.org';
 /** The Tauri event a real-Node extension host's `ggs.hostRequest` arrives on (the Rust
  *  reader forwards it; see ext_process.rs's HOST_REQUEST_EVENT). */
 export const HOST_REQUEST_EVENT = 'ext-host-request';
+/** The Tauri event a provider switch's backend restart announces (cmd_providers emits
+ *  it once the fresh process's activation settled; payload: the extension id). The
+ *  host resets that extension's settled webview views on it — their pages were set by
+ *  the old process and would keep showing what it rendered (the login page of the
+ *  provider it booted under). */
+export const BACKEND_RESTARTED_EVENT = 'ext-backend-restarted';
 
 /** The `manifest.json` of an extension package. */
 export interface StudioManifest {
@@ -852,6 +858,14 @@ export class ExtensionHost {
 				(error) => respond(false, String(error))
 			);
 		}).catch((error) => extLog('warn', 'host', `the extension-host request channel is unavailable: ${String(error)}`));
+		// A provider switch restarted a bridged extension's backend (cmd_providers): the
+		// fresh process re-activated, but its sidebar views stay marked resolved with the
+		// old process's page — the claude chat would keep showing the login state it
+		// rendered before the switch. Reset them and ask the fresh provider to resolve
+		// again.
+		void listen<string>(BACKEND_RESTARTED_EVENT, (event) => {
+			this.resetViewsAfterBackendRestart(event.payload);
+		}).catch((error) => extLog('warn', 'host', `the backend-restart channel is unavailable: ${String(error)}`));
 		// An extension's own settings change (its update(), or the Settings dialog writing the
 		// same key) reaches its frame as a configChanged event — `onDidChangeConfiguration`.
 		document.addEventListener(state.EXT_SETTINGS_EVENT, (event) => {
@@ -1691,6 +1705,23 @@ export class ExtensionHost {
 			}
 			frame.remove();
 		};
+	}
+
+	/** A restarted backend's extension re-activated in a fresh process ([`BACKEND_RESTARTED_EVENT`]):
+	 *  every webview view it owns still shows the page the old process set — and stays
+	 *  marked resolved, so no later visibility would ever re-ask. Drop the resolved mark
+	 *  and re-resolve the mounted ones through the (persisted) frame handle now: the
+	 *  provider's resolve sets its html, which reloads the mounted iframe with the fresh
+	 *  process's page. Unmounted views simply resolve at their next visibility. */
+	private resetViewsAfterBackendRestart(extId: string): void {
+		const frame = this.frames.get(extId);
+		for (const [viewId, record] of [...this.webviewViews]) {
+			if (record.extId !== extId) continue;
+			this.resolvedWebviewViews.delete(viewId);
+			if (!record.frame || !frame) continue;
+			this.resolvedWebviewViews.add(viewId);
+			void this.callFrame(frame, 'webviewView.resolve', [viewId]).catch(() => this.resolvedWebviewViews.delete(viewId));
+		}
 	}
 
 	/** Apply a webview view's html: to its mounted iframe, or held for its mount. */

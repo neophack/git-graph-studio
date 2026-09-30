@@ -18,14 +18,19 @@
 //!   `claude-*` id to a provider that serves none) — the same takeover the claude-code
 //!   sandbox probe proves end to end against a local stand-in server.
 //!
-//! Switching provider (or editing the active profile) never restarts the bridged
-//! backend: the switch's whole effect is a rewrite of the redirected Claude settings'
-//! `env` map, which Claude Code applies at every session start — a new chat runs on the
-//! new provider, a conversation in flight keeps its own — and of the settings' top-level
-//! `model` pin, which would otherwise outrank that env (a `/model` tier pick persists
-//! there, and its `claude-*` id would be shown and sent on an endpoint that serves
-//! none). [`provider_change`] is the gate every store-writing command runs to decide
-//! that rewrite (and the push the windows' switcher chips re-read on).
+//! Switching provider (or editing the active profile) rewrites the redirected Claude
+//! settings' `env` map — which Claude Code applies at every session start, the mechanism
+//! cc-switch uses — and restarts the running bridged backend. The restart is not
+//! optional (2026-09-30, the stuck-login-page bug): the extension process applies that
+//! env map once, at its own start, and a long-running one keeps answering with the
+//! provider it booted under — the chat's login state included, so without the restart
+//! the sidebar never followed a switch. The fresh process reads the rewritten settings
+//! and announces itself as [`BACKEND_RESTARTED_EVENT`], on which the extension host
+//! re-resolves the extension's settled webview views. The settings' top-level `model`
+//! pin is rewritten alongside (it would otherwise outrank that env: a `/model` tier pick
+//! persists there, and its `claude-*` id would be shown and sent on an endpoint that
+//! serves none). [`provider_change`] is the gate every store-writing command runs to
+//! decide that rewrite (and the push the windows' switcher chips re-read on).
 //!
 //! Coupling is one-directional: this module may stop and start the bridged backends,
 //! but the spawn path never names this store — [`backend_env`] is registered onto
@@ -524,9 +529,10 @@ pub fn provider_env_vars(active: &ProviderProfile, home: &Path) -> Vec<(String, 
 /// The spawn environment a bridged extension's backend runs with. Pure over the home,
 /// so the exact bytes a backend sees are testable. Only the state redirect rides the
 /// process environment: the provider's endpoint and key live in the redirected Claude
-/// settings (`claude_provider_settings`), which Claude Code applies at every session
-/// start — so switching a provider never requires restarting the backend, and the two
-/// sources can never disagree mid-flight.
+/// settings (`claude_provider_settings`), which the process applies at its own start —
+/// one source of provider truth, the two can never disagree mid-flight. It is also why
+/// a provider switch restarts the running backend: the settings write alone would land
+/// on a process that already applied the previous provider's env.
 pub fn backend_env_for(ext_id: &str, home: &Path) -> Vec<(String, String)> {
     if !BRIDGED_EXT_IDS.contains(&ext_id) {
         return Vec::new();
@@ -982,8 +988,9 @@ fn active_provider_env(store: &ProviderStore, home: &Path) -> Vec<(String, Strin
 }
 
 /// What a store-writing command's tail must run, decided by comparing the store before
-/// and after the mutation: `env_changed` rewrites the redirected Claude settings (the
-/// next session picks the new provider up; a conversation in flight is never touched),
+/// and after the mutation: `env_changed` rewrites the redirected Claude settings and
+/// restarts the running bridged backend on top (the fresh process applies the env map
+/// at its own start — the running one keeps the provider it booted under);
 /// `store_changed` pushes the event the windows' switcher chips re-read on.
 ///
 /// The env comparison is over the *provider environment*, never the spawn environment:
@@ -1089,7 +1096,10 @@ pub fn claude_provider_settings(
             if let Some(pin) = object.get("model").and_then(|value| value.as_str()) {
                 let base = pin.split('[').next().unwrap_or(pin);
                 let claude_owned = pin.starts_with("claude")
-                    || matches!(base, "default" | "opus" | "fable" | "sonnet" | "haiku" | "opusplan");
+                    || matches!(
+                        base,
+                        "default" | "opus" | "fable" | "sonnet" | "haiku" | "opusplan"
+                    );
                 if !claude_owned {
                     object.remove("model");
                 }
@@ -1106,10 +1116,12 @@ pub fn claude_provider_settings(
 }
 
 /// Apply the active provider to Claude's redirected settings — what a switch, a save
-/// of the active profile, an import or the boot pass all run through. Never restarts
-/// the backend: the next Claude session picks the change up from its own config read,
-/// and a conversation in flight keeps its provider. Errors are logged, never thrown
-/// into the command's answer — a failed write is diagnosable, not fatal.
+/// of the active profile, an import or the boot pass all run through. The settings
+/// write alone (the boot pass's case — nothing is running yet, every later start reads
+/// the file) is followed by the store-writing commands with
+/// [`restart_bridged_backends`], because a backend already running applied the previous
+/// provider's env at its own start and would keep serving it. Errors are logged, never
+/// thrown into the command's answer — a failed write is diagnosable, not fatal.
 pub fn apply_claude_provider_env() {
     let result = apply_claude_provider_env_inner();
     if let Err(error) = result {
@@ -1143,6 +1155,58 @@ fn apply_claude_provider_env_inner() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The Tauri event pushed when a provider switch restarted a bridged backend (payload:
+/// the extension id). The extension host hears it and re-resolves that extension's
+/// settled webview views — their pages were set by the old process and would otherwise
+/// keep showing what it rendered (the login page of the provider it booted under).
+pub const BACKEND_RESTARTED_EVENT: &str = "ext-backend-restarted";
+
+/// The bridged backends a restart pass touches: the ones actually running. A backend
+/// that is not (not installed, or stopped — `pid` 0 is the remembered history of a dead
+/// one) needs nothing; its next start reads the rewritten settings on its own. Pure
+/// over the host's status answer, so the selection policy is testable.
+fn bridged_running(status: &[crate::ext_process::ProcessInfo]) -> Vec<String> {
+    status
+        .iter()
+        .filter(|info| info.pid != 0 && BRIDGED_EXT_IDS.contains(&info.extension_id.as_str()))
+        .map(|info| info.extension_id.clone())
+        .collect()
+}
+
+/// Restart the bridged backends after the provider environment changed — the
+/// settings-writing half of a switch. The running extension process applied the
+/// redirected settings' env map at its own start, so it keeps answering with the
+/// provider it booted under (the chat's login state included); the fresh process reads
+/// the rewritten settings and comes up on the new provider. The start runs on its own
+/// thread (the activation handshake takes its time; the command's answer must not wait
+/// it out) and its completion is announced as [`BACKEND_RESTARTED_EVENT`].
+fn restart_bridged_backends(app: &tauri::AppHandle) {
+    let host = crate::ext_process::global();
+    host.attach_app(app.clone());
+    for ext_id in bridged_running(&host.status()) {
+        // The backend's own children (the chat's CLI sessions) go with it — the same
+        // cleanup the Extensions view's restart runs.
+        let _ = crate::ext_child::ext_child_stop_for(ext_id.clone());
+        if host.stop(&ext_id).is_err() {
+            continue;
+        }
+        let Ok(dir) = crate::cmd_ext::extensions_dir(app) else {
+            continue;
+        };
+        let app = app.clone();
+        std::thread::spawn(move || match host.start(&dir, &ext_id) {
+            Ok(_) => {
+                let _ = tauri::Emitter::emit(&app, BACKEND_RESTARTED_EVENT, ext_id.clone());
+            }
+            Err(error) => {
+                crate::cmd_ext::log_extensions(&format!(
+                    "provider switch: {ext_id} backend did not come back: {error}"
+                ));
+            }
+        });
+    }
 }
 
 /* ---------- The IPC answer ---------- */
@@ -1227,6 +1291,7 @@ pub fn provider_save(
     let change = provider_change(&before, &store, &home);
     if change.env_changed {
         apply_claude_provider_env();
+        restart_bridged_backends(&app);
     }
     if change.store_changed {
         let _ = tauri::Emitter::emit(&app, PROVIDERS_EVENT, ());
@@ -1278,6 +1343,7 @@ pub fn provider_delete(app: tauri::AppHandle, id: String) -> Result<ProviderList
     let change = provider_change(&before, &store, &home);
     if change.env_changed {
         apply_claude_provider_env();
+        restart_bridged_backends(&app);
     }
     if change.store_changed {
         let _ = tauri::Emitter::emit(&app, PROVIDERS_EVENT, ());
@@ -1285,11 +1351,12 @@ pub fn provider_delete(app: tauri::AppHandle, id: String) -> Result<ProviderList
     Ok(answer)
 }
 
-/// Make one profile the provider the bridged backend runs under. Never restarts the
-/// backend: the switch rewrites the redirected Claude settings' env map, which Claude
-/// Code applies at every session start — a new chat runs on the new provider, a
-/// conversation in flight keeps its own. The official profile is always present, so
-/// switching back is one click.
+/// Make one profile the provider the bridged backend runs under. The switch rewrites
+/// the redirected Claude settings' env map and restarts the running bridged backend on
+/// top: the fresh process applies the env at its own start, so the sidebar's chat
+/// follows the switch at once (the running process would keep the provider — and the
+/// login page — it booted under). The official profile is always present, so switching
+/// back is one click.
 #[tauri::command]
 pub fn provider_activate(app: tauri::AppHandle, id: String) -> Result<ProviderList, String> {
     let _guard = STORE_LOCK.lock().unwrap();
@@ -1303,6 +1370,7 @@ pub fn provider_activate(app: tauri::AppHandle, id: String) -> Result<ProviderLi
     let change = provider_change(&before, &store, &home);
     if change.env_changed {
         apply_claude_provider_env();
+        restart_bridged_backends(&app);
     }
     if change.store_changed {
         let _ = tauri::Emitter::emit(&app, PROVIDERS_EVENT, ());
@@ -1404,6 +1472,7 @@ pub fn provider_import_ccswitch(
     let change = provider_change(&before, &store, &home);
     if change.env_changed {
         apply_claude_provider_env();
+        restart_bridged_backends(&app);
     }
     if change.store_changed {
         let _ = tauri::Emitter::emit(&app, PROVIDERS_EVENT, ());
@@ -2487,6 +2556,30 @@ mod tests {
         let untouched = store.clone();
         set_active(&mut store, "deepseek").unwrap();
         assert_eq!(store, untouched);
+    }
+
+    /// A restart pass touches exactly the running bridged backends: a dead one
+    /// (`pid` 0 — remembered history, nothing to restart; its next start reads the
+    /// rewritten settings) and another extension's backend are never the bridge's to
+    /// stop. The stuck-login-page fix rides this selection: only a live claude-code
+    /// process carries the provider it must be rid of.
+    #[test]
+    fn a_restart_pass_touches_only_running_bridged_backends() {
+        let info = |id: &str, pid: u32| crate::ext_process::ProcessInfo {
+            extension_id: id.to_owned(),
+            pid,
+            commands: Vec::new(),
+            protocol_version: "ggs-ext/1".to_owned(),
+            start_count: 1,
+            last_error: None,
+        };
+        assert_eq!(
+            bridged_running(&[info(CLAUDE_CODE_EXT_ID, 42)]),
+            vec![CLAUDE_CODE_EXT_ID.to_owned()]
+        );
+        assert!(bridged_running(&[info(CLAUDE_CODE_EXT_ID, 0)]).is_empty());
+        assert!(bridged_running(&[info("acme.other", 7)]).is_empty());
+        assert!(bridged_running(&[]).is_empty());
     }
 
     /// The whole path: a save seals the key, the store file is written, a fresh read

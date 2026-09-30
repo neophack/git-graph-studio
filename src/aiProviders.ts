@@ -61,8 +61,9 @@ export interface ProviderDraft {
  *  landed, here or in another window through the backend event). */
 export const PROVIDERS_CHANGED_EVENT = 'ggs:providers-changed';
 
-/** The backend's push of the same (`cmd_providers` emits it after a switch restarted
- *  the bridged backend): a switch in one window updates the chip in another. */
+/** The backend's push of the same (`cmd_providers` emits it whenever the store visibly
+ *  changed — a switch, an edit, a delete; a switch restarts the bridged backend beside
+ *  it): a switch in one window updates the chip in another. */
 const BACKEND_PROVIDERS_EVENT = 'providers-changed';
 
 /** A defaulting test layer (or a degraded backend) answers null — an empty store, not
@@ -147,8 +148,10 @@ export async function deleteProvider(id: string): Promise<ProviderList | null> {
 	}
 }
 
-/** Make one profile the provider the bridged backend runs under. The backend restarts
- *  the bridged extension's process so the new endpoint takes effect. */
+/** Make one profile the provider the bridged backend runs under. The backend rewrites
+ *  Claude's redirected settings and restarts the bridged extension's process — the
+ *  sidebar's chat re-renders on the fresh provider (the running process would keep the
+ *  provider, and the login page, it booted under). */
 export async function activateProvider(id: string): Promise<ProviderList | null> {
 	try {
 		const list = await invoke<ProviderList | null>('provider_activate', { id });

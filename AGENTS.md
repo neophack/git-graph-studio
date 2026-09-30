@@ -454,8 +454,14 @@ local server). The UI is the sidebar chip on the Claude view's section header
 (`providersPage.ts`, the `ai.providers` command); switching provider (or editing the
 active profile) writes the provider environment into the redirected Claude settings
 (`apply_claude_provider_env` — the `env` map Claude Code applies at every session
-start, the mechanism cc-switch uses), so the switch lands on the next chat without
-restarting anything and a conversation in flight keeps its provider; the spawn
+start, the mechanism cc-switch uses) **and restarts the running bridged backend**
+(`restart_bridged_backends`, 2026-09-30 — the never-restart cut shipped that morning
+and left the sidebar on the old provider's login page forever: the extension process
+applies the env map once, at its own start, so a running one keeps answering with the
+provider it booted under; the fresh process reads the rewritten settings, and its
+settled activation is announced as the `ext-backend-restarted` event, on which the
+extension host re-resolves the extension's webview views — the chat page reloads with
+the new provider, a conversation in flight restarting on it); the spawn
 environment carries only `CLAUDE_CONFIG_DIR` — one source of provider truth, the two
 can never disagree. Writing the settings clears this bridge's keys when the official
 profile is active (a stale endpoint would shadow the login), preserves the user's own
