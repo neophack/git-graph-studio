@@ -3,7 +3,10 @@
 //! every listener has an accept thread, every socket a reader thread (data / end / error /
 //! close) and a writer thread (writes in order, `end` a half-close after them), and every
 //! client request its own thread; all of them report through [`Job::Native`] events,
-//! which the prelude's `__ggsNativeEvent` routes to the object that owns the id.
+//! which the prelude's `__ggsNativeEvent` routes to the object that owns the id. The one
+//! bounded exception is the server close, which waits for the accept thread to drop the
+//! listener (see [`close_server`]): a port that still accepts during the teardown answers
+//! a reconnect with ECONNRESET where Node answers ECONNREFUSED.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -29,6 +32,9 @@ enum Entry {
     Listener {
         stop: Arc<AtomicBool>,
         local: SocketAddr,
+        /// Fires once the accept thread has dropped the listener — the proof
+        /// [`close_server`] waits for before answering the JS.
+        closed: mpsc::Receiver<()>,
     },
     Socket {
         /// None until an outgoing connection is established.
@@ -190,11 +196,13 @@ pub(super) fn listen(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
         .map_err(|e| error(format!("EIO|listen: {e}")))?;
     let id = next_id();
     let stop = Arc::new(AtomicBool::new(false));
+    let (dropped_tx, dropped_rx) = mpsc::channel::<()>();
     table().lock().unwrap().insert(
         id,
         Entry::Listener {
             stop: Arc::clone(&stop),
             local,
+            closed: dropped_rx,
         },
     );
     let pump = pump();
@@ -230,6 +238,10 @@ pub(super) fn listen(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
                 }
             }
         }
+        // Drop the listener before the ack: `close_server`'s wait proves the port is
+        // refusing connections once it returns, the way Node's close does.
+        drop(listener);
+        let _ = dropped_tx.send(());
     });
     JsValue::from_json(
         &json!({ "id": id, "address": local.ip().to_string(), "port": local.port(), "family": family(&local) }),
@@ -238,7 +250,12 @@ pub(super) fn listen(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
 }
 
 /// `__ggsNetCloseServer(id)`: stop accepting (the accept thread is woken by a throwaway
-/// connection to itself); live sockets stay open, as in Node.
+/// connection to itself); live sockets stay open, as in Node. The call then waits —
+/// bounded, the wake round trip plus scheduling — for the accept thread to actually drop
+/// the listener: Node's close leaves the port refusing connections before the server's
+/// 'close' event, while a connect racing this teardown (the accept thread still holding
+/// the listener) lands in its backlog and reads ECONNRESET instead of ECONNREFUSED —
+/// the Linux CI failure of `sockets_http_and_fetch_work_end_to_end`.
 pub(super) fn close_server(
     _: &JsValue,
     args: &[JsValue],
@@ -246,7 +263,12 @@ pub(super) fn close_server(
 ) -> JsResult<JsValue> {
     let id = args.get_or_undefined(0).to_number(context).unwrap_or(0.0) as u64;
     let removed = table().lock().unwrap().remove(&id);
-    if let Some(Entry::Listener { stop, local }) = removed {
+    if let Some(Entry::Listener {
+        stop,
+        local,
+        closed,
+    }) = removed
+    {
         stop.store(true, Ordering::SeqCst);
         let wake = if local.ip().is_unspecified() {
             SocketAddr::new(
@@ -261,6 +283,9 @@ pub(super) fn close_server(
             local
         };
         let _ = TcpStream::connect_timeout(&wake, Duration::from_millis(500));
+        // A timeout only means the accept thread was not scheduled in time; the drop
+        // still lands on its own, exactly as before the wait existed.
+        let _ = closed.recv_timeout(Duration::from_secs(2));
     }
     Ok(JsValue::undefined())
 }
