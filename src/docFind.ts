@@ -201,6 +201,13 @@ export class DocFindController {
 		this.generation++;
 		if (this.timer !== undefined) window.clearTimeout(this.timer);
 		this.timer = undefined;
+		// Closing a find clears its highlights (VS Code's behavior — the CodeMirror
+		// panel already does): without this the last query's matches stayed painted on
+		// the document indefinitely, and the fast view kept re-rendering them into any
+		// refetched row.
+		this.matches = [];
+		this.current = -1;
+		this.host.paintMatches([], null);
 		this.host.focusEditor();
 	}
 

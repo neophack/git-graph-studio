@@ -167,7 +167,7 @@ export class Workbench {
 			void this.scm.refresh();
 		};
 		// A theme switch re-reaches every open extension page (each re-reads its stylesheet).
-		document.addEventListener(THEME_EVENT, () => this.extensionHost.noteThemeChanged());
+		document.addEventListener(THEME_EVENT, this.onThemeChangedBound);
 		this.extensions = new ExtensionsPanel(this.views.extensions, this.extensionHost);
 		// A row's click opens the extension's detail page (VS Code's extension editor) in an
 		// editor tab — the panel owns the page's content, the workbench owns the tab.
@@ -536,7 +536,12 @@ export class Workbench {
 			onEvent.onmessage = (event) => {
 				if (event.kind === 'progress') this.statusBar.setSymbols({ state: 'building', done: event.done, total: event.total, files: 0, symbols: 0 });
 			};
-			await invoke<SymbolIndexStatus | null>('symbols_rebuild', { onEvent });
+			// The rebuild's resolved status is the answer — take it over the last progress
+			// event: the channel's events carry done/total only, so leaving the item at
+			// its last "building N/N" stranded the counter until some later event happened
+			// to repaint it.
+			const status = await invoke<SymbolIndexStatus | null>('symbols_rebuild', { onEvent });
+			if (status) this.statusBar.setSymbols(status);
 			notify('info', t('symbols.rebuildDone'));
 		} catch (error) {
 			notify('error', String(error));
@@ -742,7 +747,18 @@ export class Workbench {
 		this.extTreeViews.clear();
 		this.extBuiltinSections.length = 0;
 		this.extWebviewViewDisposers.length = 0;
-		if (this.isExtensionView(this.activeView)) this.activeView = 'explorer';
+		// The stale-active-view guard runs AFTER the rebuild, and only when the key is
+		// really gone: resetting first — then rebuilding the same container key — left
+		// every sidebar section hidden with nothing re-shown (any install/uninstall/
+		// activation while the user was viewing an extension's sidebar blanked the bar).
+		if (this.isExtensionView(this.activeView) && !this.extContainers.has(this.activeView)) {
+			this.activeView = 'explorer';
+			this.showView('explorer');
+		} else if (this.isExtensionView(this.activeView)) {
+			// The container survived the rebuild: its section element is brand new, so
+			// re-apply the visibility the old one had.
+			this.showView(this.activeView);
+		}
 
 		// One sidebar section per declared view: a tree view renders through the generic
 		// tree host (its provider feeds it); a `type: "webview"` view mounts the extension
@@ -1130,6 +1146,7 @@ export class Workbench {
 	/** The Context Window's debounce (M4 4.7): the symbol under the cursor settles for this
 	 *  long before its definition is resolved - a pass over the code must not spam the panel. */
 	private contextTimer: number | null = null;
+	private readonly onThemeChangedBound = () => this.extensionHost.noteThemeChanged();
 	private contextGeneration = 0;
 
 	private followContextSymbol(editor: { kind: string; path?: string; line: number; column: number } | null): void {
@@ -1266,6 +1283,11 @@ export class Workbench {
 			window.clearTimeout(this.refreshTimer);
 			this.refreshTimer = null;
 		}
+		if (this.contextTimer !== null) {
+			window.clearTimeout(this.contextTimer);
+			this.contextTimer = null;
+		}
+		document.removeEventListener(THEME_EVENT, this.onThemeChangedBound);
 	}
 
 	onKeyDown(event: KeyboardEvent): void {

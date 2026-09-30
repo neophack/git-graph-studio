@@ -717,8 +717,10 @@ export class CanLogView {
 			this.analysisHost.replaceChildren(el('div', 'can-error', [`${t('can.analysis.failed')}: ${String(error)}`]));
 			return;
 		}
-		// A late answer for a selection the user has already moved off is dropped.
-		if (!this.selected || this.selected.channel !== m.channel || this.selected.id !== m.id) return;
+		// A late answer for a selection the user has already moved off is dropped — the
+		// extended flag too: a standard and an extended frame share the numeric id and
+		// are distinct rows (the cache key above compares it).
+		if (!this.selected || this.selected.channel !== m.channel || this.selected.id !== m.id || this.selected.extended !== m.extended) return;
 		this.intervals = intervals;
 		this.renderAnalysis();
 	}

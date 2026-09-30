@@ -81,6 +81,9 @@ export class ExtensionTreeView {
 	private selected: string | null = null;
 	private rows: Row[] = [];
 	private refreshing = false;
+	/** One refresh pass's bound (see `refresh`): generous for a real provider, finite
+	 *  for a wedged one. */
+	private static readonly TREE_PASS_TIMEOUT_MS = 15_000;
 	private refreshQueued = false;
 
 	constructor(container: HTMLElement, private readonly title: string, private readonly host: TreeViewHost) {
@@ -161,15 +164,28 @@ export class ExtensionTreeView {
 			return;
 		}
 		this.refreshing = true;
-		void this.buildVisible(null, 0, []).then((rows) => {
-			this.rows = rows;
-			this.render();
-			this.renderTitleActions();
-			this.refreshing = false;
-			if (this.refreshQueued) {
-				this.refreshQueued = false;
-				this.refresh();
-			}
+		// The liveness of this loop depends on the frame's provider settling — an
+		// extension whose getChildren hangs (its own host request lost, a hung backend
+		// call) would hold `refreshing` forever and wedge the view on stale rows. A pass
+		// is bounded: a provider that has not answered within it yields an empty level
+		// and the loop lives on for the next `onDidChangeTreeData`.
+		const pass = this.buildVisible(null, 0, []);
+		void Promise.race([
+			pass,
+			new Promise<Row[]>((resolve) => setTimeout(() => resolve([]), ExtensionTreeView.TREE_PASS_TIMEOUT_MS))
+		]).finally(() => {
+			void pass.then((rows) => {
+				if (rows.length > 0 || !this.refreshing) {
+					this.rows = rows;
+					this.render();
+					this.renderTitleActions();
+				}
+				this.refreshing = false;
+				if (this.refreshQueued) {
+					this.refreshQueued = false;
+					this.refresh();
+				}
+			});
 		});
 	}
 

@@ -104,12 +104,16 @@ export class SelfTestPage {
 		this.runButton.replaceChildren(icon('debug-stop'), t('selftest.stop'));
 		this.outcomes = [];
 		this.renderGroups();
-		await runSelfTests((outcome) => {
-			if (this.stopRequested) return;
-			this.outcomes.push(outcome);
-			this.paintRow(outcome);
-			this.paintSummary();
-		});
+		await runSelfTests(
+			(outcome) => {
+				if (this.stopRequested) return;
+				this.outcomes.push(outcome);
+				this.paintRow(outcome);
+				this.paintSummary();
+			},
+			undefined,
+			() => this.stopRequested
+		);
 		this.finish();
 	}
 
@@ -135,7 +139,8 @@ export class SelfTestPage {
 				this.paintRow(outcome);
 				this.paintSummary();
 			},
-			groups
+			groups,
+			() => this.stopRequested
 		);
 		this.finish();
 	}

@@ -72,7 +72,12 @@ export class OutputView {
 
 	/** An extension channel list arrived (the extension host pushes the full set). */
 	setExtensionChannels(channels: { extId: string; name: string }[]): void {
-		const known = new Set(this.channels.keys());
+		// `known` seeds from the SURVIVING labels only (the git channel plus everything
+		// the incoming set provides). Seeding it from the existing map keys — as it once
+		// did — made the deletion loop below dead code: every existing buffer was its own
+		// witness, a disposed channel's stale lines stayed forever, and a later channel
+		// reusing the name resurrected them.
+		const known = new Set<string>([GIT_CHANNEL]);
 		const used = new Set<string>([GIT_CHANNEL]);
 		this.picker.textContent = '';
 		this.picker.appendChild(new Option(GIT_CHANNEL, GIT_CHANNEL, true, this.activeChannel() === GIT_CHANNEL));

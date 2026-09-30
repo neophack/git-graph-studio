@@ -303,10 +303,15 @@ export class FastView {
 		invoke<LinesResult>(this.linesCommand, { docId, start, end })
 			.then((result) => {
 				this.fetchInFlight = false;
+				// Release the WHOLE requested range before placing rows: a backend building
+				// in the background answers a straddling window SHORT (only the head part —
+				// the tail is still landing), and releasing only the returned lines left
+				// the rest in `fetching` forever — those viewport rows stayed blank for
+				// the tab's life. (`refetch` below already re-asks for anything missing.)
+				for (let line = start; line <= end; line++) this.fetching.delete(line);
 				if (!this.disposed && this.open?.docId === docId) {
 					result.lines.forEach(([text, tokens], index) => {
 						const line = result.startLine + index;
-						this.fetching.delete(line);
 						// A fetch lands after the viewport moved on (a scaled drag covers
 						// millions of lines in one bound): a row outside the current window
 						// is dropped, not placed — its viewport-relative offset would mean

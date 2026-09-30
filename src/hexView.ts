@@ -36,6 +36,9 @@ import { el, icon, notify, quickInput, showContextMenu, type MenuEntry } from '.
 
 /** Rows are requested in slabs so scrolling doesn't fire a read per row. */
 const SLAB_BYTES = 64 * 1024;
+// 64 decoded slabs (4 MiB) — enough that normal paging never re-reads, small enough
+// that a scroll across a multi-gigabyte file cannot grow the renderer without bound.
+const SLAB_CACHE_LIMIT = 64;
 /** Search reads the file in these many bytes at a time. */
 const SEARCH_CHUNK = 1024 * 1024;
 /** The largest selection Copy reads at once and Paste writes at once - a clipboard
@@ -323,6 +326,9 @@ export class HexView {
 	 *  steps to the next hit instead of rescanning. */
 	private searchedText = '';
 	private searchToken = 0;
+	/** A scan is in flight for the current needle — the counter shows "Searching…" until
+	 *  it lands, instead of "No results" while the chunks are still streaming in. */
+	private searchRunning = false;
 	private hits: number[] = [];
 	private hitIndex = -1;
 	/* ---------- Editing ---------- */
@@ -617,8 +623,17 @@ export class HexView {
 				.then((chunk) => {
 					this.size = chunk.size;
 					const bytes = decodeBase64(chunk.base64);
-					// Kept decoded so byte edits can read neighbours synchronously.
+					// Kept decoded so byte edits can read neighbours synchronously —
+					// but bounded, like hexCompare's slab cache: paging a
+					// multi-gigabyte binary must not park the whole file in the
+					// webview. Beyond the limit the least-recently INSERTED slab
+					// drops (Map order); a dropped slab reloads on demand.
 					this.slabValues.set(slabIndex, bytes);
+					while (this.slabValues.size > SLAB_CACHE_LIMIT) {
+						const oldest = this.slabValues.keys().next().value;
+						if (oldest === undefined) break;
+						this.slabValues.delete(oldest);
+					}
 					return bytes;
 				})
 				.catch(() => null);
@@ -755,7 +770,13 @@ export class HexView {
 
 	private updateCount(): void {
 		const label = this.root.querySelector('.hex-search-count')!;
-		label.textContent = this.searchNeedle ? (this.hits.length ? `${this.hitIndex + 1} of ${this.hits.length}` : this.hits.length === 0 ? 'No results' : 'Searching…') : '';
+		if (!this.searchNeedle) {
+			label.textContent = '';
+		} else if (this.searchRunning) {
+			label.textContent = this.hits.length ? `${this.hits.length} found…` : 'Searching…';
+		} else {
+			label.textContent = this.hits.length ? `${this.hitIndex + 1} of ${this.hits.length}` : 'No results';
+		}
 	}
 
 	private clearSearch(): void {
@@ -784,6 +805,7 @@ export class HexView {
 		this.searchedText = this.searchBox.value;
 		this.hits = [];
 		this.hitIndex = -1;
+		this.searchRunning = true;
 		this.updateCount();
 		this.sizer.querySelector('.hex-body')?.remove();
 		this.draw();
@@ -795,6 +817,7 @@ export class HexView {
 				try {
 					chunk = decodeBase64((await invoke<FileChunk>('read_file_chunk', { path: this.path, offset, len: SEARCH_CHUNK })).base64);
 				} catch {
+					if (token === this.searchToken) this.searchRunning = false;
 					return;
 				}
 				if (token !== this.searchToken) return;
@@ -810,6 +833,7 @@ export class HexView {
 				this.updateCount();
 			}
 			if (token !== this.searchToken) return;
+			this.searchRunning = false;
 			this.updateCount();
 			// Land on the first hit - unless the user already stepped through the
 			// partial results while the scan was still running.
@@ -1025,7 +1049,7 @@ export class HexView {
 		if (applied < bytes.length) {
 			notify('warning', tf('hex.paste.truncated', applied.toLocaleString(), bytes.length.toLocaleString(), hexAddress(this.size - 1, this.offsetDigits)));
 		}
-		this.applyBytes(offset, bytes.subarray(0, applied));
+		void this.applyBytes(offset, bytes.subarray(0, applied));
 		this.selAnchor = -1;
 		this.selHead = -1;
 		// The changed bytes can span every visible row, so the body is rebuilt whole (and
@@ -1037,8 +1061,18 @@ export class HexView {
 	}
 
 	/** Writes bytes over the file as edits (one undo entry per byte, the way typing
-	 *  builds them); typing the on-disk byte back removes that offset's edit again. */
-	private applyBytes(offset: number, values: Uint8Array): void {
+	 *  builds them); typing the on-disk byte back removes that offset's edit again.
+	 *  Async on purpose: the slab behind the edit must be resident before `diskByte`
+	 *  reads it — a Go-To or selection jump starts the slab fetch and typing can
+	 *  commit before the rows fill, and a cache miss would read 0 as the on-disk
+	 *  byte (swallowing a real `00` keystroke, or writing a wrong undo `from`). */
+	private async applyBytes(offset: number, values: Uint8Array): Promise<void> {
+		const touched = new Set<number>();
+		for (let i = 0; i < values.length; i++) touched.add(Math.floor((offset + i) / SLAB_BYTES));
+		// Only a COLD slab defers the commit (async): the resident path runs
+		// synchronously, so typing keeps its immediate-commit behavior.
+		const missing = [...touched].filter((index) => !this.slabValues.has(index));
+		if (missing.length > 0) await Promise.all(missing.map((index) => this.slab(index).catch(() => null)));
 		for (let i = 0; i < values.length; i++) {
 			const at = offset + i;
 			const value = values[i]!;
@@ -1304,7 +1338,7 @@ export class HexView {
 	 *  `from` is the byte's current effective value (an earlier edit's, else the disk's),
 	 *  and typing the on-disk byte back removes the edit - that offset is clean again. */
 	private commitByte(offset: number, value: number): void {
-		this.applyBytes(offset, Uint8Array.of(value));
+		void this.applyBytes(offset, Uint8Array.of(value));
 	}
 
 	/** The byte as it is on disk - from the slab cache, so an edit can be un-done. */

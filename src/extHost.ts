@@ -772,8 +772,10 @@ export class ExtensionHost {
 	 *  a big document on selection-only changes). */
 	private lastPushedDocument: string | null = null;
 
-	/** The withProgress toasts, by progress id. */
-	private readonly progress = new Map<number, ProgressToast>();
+	/** The withProgress toasts, by progress id — each remembering its owner, so a
+	 *  deactivated extension's outstanding toast ends with it (the frame's
+	 *  `progress.end` never arrives once `deactivate` cancels its pending calls). */
+	private readonly progress = new Map<number, { toast: ProgressToast; extId: string }>();
 	private nextProgressId = 1;
 
 	/** The tree views frame extensions registered (`createTreeView`), view id -> ext id. */
@@ -1372,6 +1374,14 @@ export class ExtensionHost {
 		// Whatever was still running in the frame (the deactivate itself included) has no
 		// frame left to answer from.
 		for (const cancel of [...handle.pendingCalls]) cancel(new Error(`extension ${extId} was deactivated`));
+		// An outstanding withProgress toast belongs to this frame — its `progress.end`
+		// will never arrive now, and a spinning notification must not outlive it.
+		for (const [id, record] of [...this.progress]) {
+			if (record.extId === extId) {
+				record.toast.done();
+				this.progress.delete(id);
+			}
+		}
 		for (const [key, registration] of [...this.completionProviders]) {
 			if (registration.extId === extId) this.completionProviders.delete(key);
 		}
@@ -2132,17 +2142,17 @@ export class ExtensionHost {
 			}
 			case 'progress.begin': {
 				const id = this.nextProgressId++;
-				this.progress.set(id, progressToast(String(args[0] ?? extId)));
+				this.progress.set(id, { toast: progressToast(String(args[0] ?? extId)), extId });
 				return Promise.resolve(id);
 			}
 			case 'progress.report': {
 				const [id, percent, message] = args as [number, number | null, string?];
-				this.progress.get(id)?.update(percent ?? null, message);
+				this.progress.get(id)?.toast.update(percent ?? null, message);
 				return Promise.resolve(undefined);
 			}
 			case 'progress.end': {
 				const id = args[0] as number;
-				this.progress.get(id)?.done();
+				this.progress.get(id)?.toast.done();
 				this.progress.delete(id);
 				return Promise.resolve(undefined);
 			}

@@ -64,7 +64,11 @@ function numberInput(value: number, onChange: (value: number) => void, min: numb
 	input.addEventListener('change', () => {
 		const parsed = Number(input.value);
 		if (Number.isNaN(parsed)) return;
-		onChange(Math.max(min, Math.min(max, Math.round(parsed))));
+		// Round to the setting's own step, not to an integer: a `step: 0.1` sensitivity
+		// input took 1.5 and stored 2 — the model and the control desynced.
+		const snapped = Math.round(parsed / step) * step;
+		const digits = (String(step).split('.')[1] ?? '').length;
+		onChange(Math.max(min, Math.min(max, Number(snapped.toFixed(digits)))));
 	});
 	return input;
 }

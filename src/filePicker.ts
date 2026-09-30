@@ -81,9 +81,13 @@ export class FilePickSource implements QuickPickSource {
 	/** Adopt a freshly walked file list; the pre-lowered entries are rebuilt only when the list
 	 *  actually changed, so a warm open costs one array comparison, not 20,000 allocations. */
 	setFiles(files: string[]): void {
+		// Mark loaded BEFORE the equality short-circuit: an empty walk arrives as the
+		// same empty list the picker starts with, and skipping the rebuild there also
+		// skipped the flag — the source stayed "pending" forever and every keystroke
+		// re-walked the tree on an empty folder.
+		this.loaded = true;
 		if (this.entries.length === files.length && this.entries.every((entry, i) => entry.path === files[i])) return;
 		this.entries = files.map(toEntry);
-		this.loaded = true;
 	}
 
 	/** Read the file list in the background; concurrent callers share the in-flight load. */

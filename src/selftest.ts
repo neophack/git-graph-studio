@@ -64,11 +64,14 @@ const CHECK_TIMEOUT_MS = 30_000;
  *  report. */
 export async function runSelfTests(
 	onOutcome: (outcome: SelfTestOutcome) => void,
-	groupsToRun: SelfTestGroup[] = groups
+	groupsToRun: SelfTestGroup[] = groups,
+	shouldStop: () => boolean = () => false
 ): Promise<SelfTestOutcome[]> {
 	const outcomes: SelfTestOutcome[] = [];
 	for (const group of groupsToRun) {
+		if (shouldStop()) break;
 		for (const test of group.tests) {
+			if (shouldStop()) break;
 			const started = performance.now();
 			let outcome: SelfTestOutcome;
 			try {

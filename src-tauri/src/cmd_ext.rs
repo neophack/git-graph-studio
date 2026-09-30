@@ -443,12 +443,20 @@ pub fn ext_install_from_vsix(
 /// A standard install either way: forward-only like any package, uninstallable like any
 /// package.
 #[tauri::command]
-pub fn ext_install_bundled(app: tauri::AppHandle, ext_id: String) -> Result<ExtInfo, String> {
+pub fn ext_install_bundled(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::ext_process::ProcessHostState>,
+    ext_id: String,
+) -> Result<ExtInfo, String> {
     let dir = extensions_dir(&app)?;
     let package = bundled_packages(&app)
         .into_iter()
         .find(|package| package.id == ext_id)
         .ok_or_else(|| format!("{ext_id} has no bundled package"))?;
+    // The old install's backend cannot outlive the directory its exe lives in —
+    // the same stop-first the VSIX and gallery installs enforce (a live backend
+    // running from unlinked files answers RPCs for code no longer on disk).
+    let _ = state.stop(&ext_id);
     let info = install_from_vsix_into(&dir, &package.path, false)?;
     record_bundled_stamp(
         &dir.join(format!("{ext_id}-{}", info.version)),
