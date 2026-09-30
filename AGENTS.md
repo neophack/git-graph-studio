@@ -150,7 +150,14 @@ guarantees the window is never a blank dark rectangle.
   the Git channel), `src/ui.ts` (shared DOM kit: codicons, notifications, context menus,
   quick input), `src/lazy.ts` (async-chunk loaders), `src/state.ts` (localStorage
   persistence), `src/shell.css`
-- Backend: `src-tauri/src/lib.rs` / `main.rs` (crate inventory and app entry)
+- Backend: `src-tauri/src/lib.rs` / `main.rs` (crate inventory and app entry),
+  `src-tauri/src/cmd_app.rs` (the app-instance domain: File → New Window's
+  `app_new_instance` spawns a sibling process — the multi-open entry every platform
+  shares; a packaged macOS run reaches Launch Services through `open -n <bundle>`,
+  since activating a bundled app's icon only focuses the running instance. On macOS the
+  Dock icon's right-click menu offers the same: `dock_menu` injects
+  `applicationDockMenu:` into tao's application-delegate class at boot, additively via
+  `class_addMethod`, the item's label following the persisted display language)
 
 ### 2. Command System
 

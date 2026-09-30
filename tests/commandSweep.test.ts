@@ -13,7 +13,7 @@ import { commands } from '../src/commands';
 import { bookmarksFor } from '../src/bookmarks';
 import * as state from '../src/state';
 import { backend } from './tauriMock';
-import { flush, key, notifications, texts, until } from './helpers';
+import { click, flush, key, menuItem, menuLabels, notifications, texts, until } from './helpers';
 
 
 const REPO = 'C:\\repo';
@@ -110,6 +110,24 @@ async function dismissOverlays(): Promise<void> {
 }
 
 describe('the commands no other harness drives', () => {
+	it('New Window asks the backend to spawn another instance (multi-open on every platform)', async () => {
+		// The File menu's first entry reaches the backend's spawn command; the mock records
+		// the ask (a real backend starts a sibling process there — macOS most importantly,
+		// where activating the app's icon only focuses the running window).
+		expect(commands.isEnabled('workbench.newWindow')).toBe(true);
+		await commands.execute('workbench.newWindow');
+		await flush(2);
+		expect(backend.callsTo('app_new_instance')).toEqual([{}]);
+		expect(workbench.currentRepo).toBe(REPO); // this window is untouched by the new one
+		// And it is discoverable: the File menu carries it as its first entry (VS Code's
+		// placement), and clicking that menu item reaches the same backend command.
+		document.querySelector<HTMLElement>('.menubar-item')!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+		expect(menuLabels()[0]).toBe('New Window');
+		click(menuItem('New Window'));
+		await flush(2);
+		expect(backend.callsTo('app_new_instance')).toHaveLength(2);
+	});
+
 	it('New File... opens the Explorer\'s inline input', async () => {
 		// The command settles with the inline input (Enter or Escape), like the Explorer's own.
 		void commands.execute('workbench.newFile');

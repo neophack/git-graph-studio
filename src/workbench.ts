@@ -250,6 +250,12 @@ export class Workbench {
 		const register = commands.register.bind(commands);
 
 		register({ id: 'workbench.openFolder', title: 'Open Folder...', category: 'File', keybinding: 'Ctrl+O', run: () => this.pickFolder() });
+		// A second workbench is a second instance (no single-instance plugin — every launch
+		// its own process, backends and watcher), so "New Window" asks the backend to spawn
+		// one; the new window boots like a fresh launch. On Windows and Linux a second launch
+		// of the app already is a new instance; on macOS this is the discoverable way to
+		// multi-open, where clicking the app's icon again only focuses the running window.
+		register({ id: 'workbench.newWindow', title: 'New Window', category: 'File', keybinding: 'Ctrl+Shift+N', run: () => void invoke('app_new_instance').catch((error) => notify('error', `Could not open a new window: ${String(error)}`)) });
 		register({ id: 'workbench.openWorkspace', title: 'Open Workspace...', category: 'File', run: () => this.pickWorkspace() });
 		register({ id: 'workbench.openFileStandalone', title: 'Open File...', category: 'File', run: () => this.pickSingleFile() });
 		register({ id: 'workbench.closeFolder', title: 'Close Folder', category: 'File', enabled: hasRepo, run: () => this.closeFolder() });
@@ -367,7 +373,7 @@ export class Workbench {
 		const item = (id: string) => commands.menuItem(id);
 		return [
 			{ label: t('menu.file'), entries: (): MenuEntry[] => [
-				item('workbench.newFile'), 'separator',
+				item('workbench.newWindow'), item('workbench.newFile'), 'separator',
 				item('workbench.openFolder'), item('workbench.openFileStandalone'), item('workbench.openWorkspace'),
 				{ label: 'Open Recent', submenu: [
 					...state.recentFolders().map((folder) => ({ label: basename(folder), keybinding: folder, run: () => void this.openRecent(folder) })),

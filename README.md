@@ -150,7 +150,13 @@ wrong count, a missing path or the wrong kind is reported on stderr (exit code 2
 window appears.
 
 Every launch is its own window (the app is multi-instance): `ggs <path>` and the
-comparison subcommands open in the window they started.
+comparison subcommands open in the window they started. Inside the app, **File → New
+Window** (Ctrl/Cmd+Shift+N) opens another instance on every platform — the discoverable
+way on macOS, where clicking the app's icon again only focuses the running window
+(`open -n -a "Git Graph Studio"` does the same from the terminal). On macOS the **Dock
+icon's right-click menu** carries a New Window entry too. Instances are independent:
+each spawns and owns its own extension backends, and the shared `~/.ggs` user data is
+written atomically so concurrent instances cannot corrupt it.
 
 ### MCP server (`ggs --mcp`)
 

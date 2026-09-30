@@ -209,11 +209,14 @@ big-code-analysis = { version = "2.2", default-features = false, optional = true
 winreg = "0.52"
 
 # The probe runs' App Nap guard (lib.rs's GGS_DEV_HARNESS hook): an occluded macOS
-# WKWebView stops firing page timers, and the dev harness's bounded waits stall for
+# WKWebView stops firing page timers, so the dev harness's bounded waits stall for
 # wall-clock minutes. objc2-foundation is already in the tree via arboard; the same
-# version keeps one copy.
+# version keeps one copy. objc2/objc2-app-kit (the Dock menu's NSMenu injection,
+# cmd_app::dock_menu) are the same story via wry.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString"] }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSMenu", "NSMenuItem"] }
 
 [dev-dependencies]
 # The performance test's raw parallel read baseline (rayon is optional for the app itself).

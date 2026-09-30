@@ -33,6 +33,11 @@ pub mod analysis;
 pub mod can_log;
 #[cfg(feature = "desktop")]
 pub mod cmd_analysis;
+/// The app-instance domain: "New Window" spawns another GGS — the multi-open entry every
+/// platform shares (macOS needs it most: activating a bundled app's icon only focuses the
+/// running instance, so the new one goes through `open -n`).
+#[cfg(feature = "desktop")]
+pub mod cmd_app;
 #[cfg(feature = "desktop")]
 pub mod cmd_assoc;
 #[cfg(feature = "desktop")]
@@ -103,9 +108,9 @@ pub use desktop::{find_repo_root, run, AppState};
 #[cfg(feature = "desktop")]
 mod desktop {
     use crate::{
-        can_log, cmd_analysis, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_providers, cmd_scm,
-        cmd_search, cmd_symbols, ext_child, ext_gallery, ext_process, git, mcp, measure, pty,
-        viewer, watcher,
+        can_log, cmd_analysis, cmd_app, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_providers,
+        cmd_scm, cmd_search, cmd_symbols, ext_child, ext_gallery, ext_process, git, mcp, measure,
+        pty, viewer, watcher,
     };
     use std::sync::{Arc, Mutex};
 
@@ -1392,6 +1397,11 @@ mod desktop {
                     let _ = handle.emit("studio://git-output", line);
                 });
                 stamp("setup entered");
+                // The Dock icon's right-click menu ("New Window", macOS only): AppKit
+                // asks the application delegate for it, so the selectors are injected
+                // into tao's delegate class here, on the main thread, at every boot.
+                #[cfg(target_os = "macos")]
+                cmd_app::dock_menu::install();
                 // The `ggs` launcher's reachability: append the install directory to the
                 // user PATH (idempotent, no length limits - the NSIS hooks no longer write
                 // PATH; see cmd_assoc::user_path_apply for the wipe they caused). It runs
@@ -1537,6 +1547,7 @@ mod desktop {
                 close_folder,
                 boot_stage,
                 open_devtools,
+                cmd_app::app_new_instance,
                 cmd_fs::list_dir,
                 cmd_fs::read_file,
                 cmd_fs::read_file_raw,

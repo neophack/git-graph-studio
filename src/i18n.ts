@@ -1005,6 +1005,7 @@ const zhCnText: Record<string, string> = {
 	'Clear Recently Opened': '清除最近打开的文件夹',
 	'Close Folder': '关闭文件夹',
 	'New File...': '新建文件...',
+	'New Window': '新建窗口',
 	Save: '保存',
 	'Save All': '全部保存',
 	'Close Editor': '关闭编辑器',
