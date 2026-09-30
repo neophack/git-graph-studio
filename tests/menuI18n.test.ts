@@ -19,8 +19,9 @@ import { flush, hover, menuLabels, texts } from './helpers';
 const REPO = 'C:\\repo';
 
 /** Labels that stay Roman in Chinese by design: product names and VS Code's own "Git" category
- *  (the extension's "Git Graph RS" category is a manifest literal, untranslated in VS Code too). */
-const BRANDS = new Set(['Git Graph', 'Git', 'Git Graph RS']);
+ *  (the extension's "Git Graph RS" category is a manifest literal, untranslated in VS Code too).
+ *  "AI" is the same class — the acronym every Chinese UI keeps Latin. */
+const BRANDS = new Set(['Git Graph', 'Git', 'Git Graph RS', 'AI']);
 
 function hasCJK(text: string): boolean {
 	return /[\u4e00-\u9fff]/.test(text);
