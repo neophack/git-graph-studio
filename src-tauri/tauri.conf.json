@@ -2,12 +2,12 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Git Graph Studio",
   "mainBinaryName": "ggs",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "identifier": "com.gitgraph.studio",
   "build": {
     "beforeDevCommand": "node scripts/prepare.mjs && npm run dev:vite",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "node scripts/prepare.mjs && npm run build:vite",
+    "beforeBuildCommand": "node scripts/prepare.mjs --build && npm run build:vite",
     "frontendDist": "../target/studio/dist"
   },
   "app": {

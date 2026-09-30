@@ -194,7 +194,16 @@ const externalVsix = (() => {
 	const flag = process.argv.indexOf('--vsix');
 	return flag >= 0 ? process.argv[flag + 1] : process.env.GGS_BUNDLED_VSIX;
 })();
-const marketplace = await fetchMarketplacePackages({ cacheDir: join(out, 'marketplace-cache') });
+// A build pass (--build, tauri.conf.json's beforeBuildCommand) re-checks the registry
+// even when the cache is fresh (2026-09-30, the owner's direction: an installer must
+// carry open-vsx.org's latest extension builds). The re-check is a lookup, not a
+// re-download — a same-version answer reuses the cached file; a dev iteration keeps
+// the TTL and never phones home.
+const buildPass = process.argv.includes('--build');
+const marketplace = await fetchMarketplacePackages({
+	cacheDir: join(out, 'marketplace-cache'),
+	ttlHours: buildPass ? 0 : undefined
+});
 const gitGraphMarketplace = marketplace['git-graph-rs'];
 // Nothing of an unselected package ships.
 const packGitGraph = Boolean(externalVsix) || gitGraphMarketplace?.selected !== false;

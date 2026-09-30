@@ -24,8 +24,13 @@
 // Caching: downloads land under <target>/studio/marketplace-cache/ keyed by
 // version + target platform, and a cache younger than the TTL serves without
 // any network round trip (a `tauri dev` iteration must not phone home; the
-// lookup alone would). A stale cache is a fallback of last resort when the
-// registry is unreachable. Other environment:
+// lookup alone would). A BUILD pass re-checks the registry regardless of the
+// cache's age (2026-09-30, the owner's direction: an installer must carry
+// open-vsx.org's latest extension builds) — prepare.mjs --build, which
+// tauri.conf.json's beforeBuildCommand passes, sets ttlHours 0; the re-check
+// is a lookup, and a same-version answer reuses the cached file without
+// paying for the download twice. A stale cache is a fallback of last resort
+// when the registry is unreachable. Other environment:
 //
 //   GGS_MARKETPLACE_URL        override the registry origin (tests, mirrors)
 //   GGS_MARKETPLACE_CACHE_HOURS  TTL of the cache in hours (default 12; 0 = always re-check)

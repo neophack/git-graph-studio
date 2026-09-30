@@ -13,10 +13,10 @@
 //! - the active third-party profile adds `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` /
 //!   `ANTHROPIC_API_KEY` (the decrypted key), `ANTHROPIC_MODEL` /
 //!   `ANTHROPIC_SMALL_FAST_MODEL` and the tier-alias remap
-//!   `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` (the flagship tier takes the main
-//!   model, the everyday tiers the small one — so a tier pick never sends a `claude-*`
-//!   id to a provider that serves none) — the same takeover the claude-code sandbox
-//!   probe proves end to end against a local stand-in server.
+//!   `ANTHROPIC_DEFAULT_{OPUS,FABLE,SONNET,HAIKU}_MODEL` (the flagship tiers take the
+//!   main model, the everyday tiers the small one — so a tier pick never sends a
+//!   `claude-*` id to a provider that serves none) — the same takeover the claude-code
+//!   sandbox probe proves end to end against a local stand-in server.
 //!
 //! Switching provider (or editing the active profile) never restarts the bridged
 //! backend: the switch's whole effect is a rewrite of the redirected Claude settings'
@@ -495,15 +495,17 @@ pub fn provider_env_vars(active: &ProviderProfile, home: &Path) -> Vec<(String, 
         // Claude Code's tier aliases resolve through these: without the remap a tier
         // pick in /model sends a `claude-*` id to the provider's endpoint and the
         // model display names Claude models the provider does not serve. The flagship
-        // tier takes the profile's main model, the everyday tiers its small model
-        // (GLM: opus → glm-5.3, sonnet and haiku → glm-5.3-flash) — falling back to
-        // the main model when the profile configures no small one.
+        // tiers (opus, fable) take the profile's main model, the everyday tiers its
+        // small model (GLM: opus and fable → glm-5.3, sonnet and haiku →
+        // glm-5.3-flash) — falling back to the main model when the profile configures
+        // no small one.
         let everyday = active
             .small_model
             .as_deref()
             .filter(|m| !m.is_empty())
             .unwrap_or(model);
         env.push(("ANTHROPIC_DEFAULT_OPUS_MODEL".to_owned(), model.to_owned()));
+        env.push(("ANTHROPIC_DEFAULT_FABLE_MODEL".to_owned(), model.to_owned()));
         env.push((
             "ANTHROPIC_DEFAULT_SONNET_MODEL".to_owned(),
             everyday.to_owned(),
@@ -1020,6 +1022,7 @@ pub const PROVIDER_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_MODEL",
     "ANTHROPIC_SMALL_FAST_MODEL",
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
 ];
@@ -1086,7 +1089,7 @@ pub fn claude_provider_settings(
             if let Some(pin) = object.get("model").and_then(|value| value.as_str()) {
                 let base = pin.split('[').next().unwrap_or(pin);
                 let claude_owned = pin.starts_with("claude")
-                    || matches!(base, "default" | "opus" | "sonnet" | "haiku" | "opusplan");
+                    || matches!(base, "default" | "opus" | "fable" | "sonnet" | "haiku" | "opusplan");
                 if !claude_owned {
                     object.remove("model");
                 }
@@ -1907,9 +1910,10 @@ mod tests {
         assert_eq!(map["ANTHROPIC_MODEL"], "deepseek-chat");
         assert_eq!(map["ANTHROPIC_SMALL_FAST_MODEL"], "deepseek-chat");
         assert_eq!(map["ANTHROPIC_DEFAULT_OPUS_MODEL"], "deepseek-chat");
+        assert_eq!(map["ANTHROPIC_DEFAULT_FABLE_MODEL"], "deepseek-chat");
         assert_eq!(map["ANTHROPIC_DEFAULT_SONNET_MODEL"], "deepseek-chat");
         assert_eq!(map["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "deepseek-chat");
-        assert_eq!(map.len(), 8, "{env:?}");
+        assert_eq!(map.len(), 9, "{env:?}");
         // The official profile carries none of them — its keys must leave the settings
         // so the user's own login is never shadowed.
         assert!(provider_env_vars(&official_profile(), &home).is_empty());
@@ -1919,13 +1923,13 @@ mod tests {
         assert_eq!(env_map(&spawn).len(), 1, "{spawn:?}");
     }
 
-    /// The tier-alias remap: Claude Code's /model picker resolves opus / sonnet /
-    /// haiku through `ANTHROPIC_DEFAULT_*_MODEL`, and without the remap a tier pick
-    /// sends a `claude-*` id to the provider's endpoint — the display then names
-    /// Claude models the provider does not serve. The flagship tier takes the main
-    /// model, the everyday tiers the small one (GLM: opus → glm-5.3, sonnet and
-    /// haiku → glm-5.3-flash); a profile with no small model falls the everyday
-    /// tiers back to the main one.
+    /// The tier-alias remap: Claude Code's /model picker resolves opus / fable /
+    /// sonnet / haiku through `ANTHROPIC_DEFAULT_*_MODEL`, and without the remap a
+    /// tier pick sends a `claude-*` id to the provider's endpoint — the display then
+    /// names Claude models the provider does not serve. The flagship tiers (opus,
+    /// fable) take the main model, the everyday tiers the small one (GLM: opus and
+    /// fable → glm-5.3, sonnet and haiku → glm-5.3-flash); a profile with no small
+    /// model falls the everyday tiers back to the main one.
     #[test]
     fn the_tier_aliases_remap_to_the_providers_own_models() {
         let _guard = ProviderHome::pin();
@@ -1940,6 +1944,7 @@ mod tests {
         let glm_env = provider_env_vars(&glm, &home);
         let map = env_map(&glm_env);
         assert_eq!(map["ANTHROPIC_DEFAULT_OPUS_MODEL"], "glm-5.3");
+        assert_eq!(map["ANTHROPIC_DEFAULT_FABLE_MODEL"], "glm-5.3");
         assert_eq!(map["ANTHROPIC_DEFAULT_SONNET_MODEL"], "glm-5.3-flash");
         assert_eq!(map["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "glm-5.3-flash");
         assert!(
@@ -1952,6 +1957,7 @@ mod tests {
         no_small.small_model = None;
         let no_small_env = provider_env_vars(&no_small, &home);
         let map = env_map(&no_small_env);
+        assert_eq!(map["ANTHROPIC_DEFAULT_FABLE_MODEL"], "glm-5.3");
         assert_eq!(map["ANTHROPIC_DEFAULT_SONNET_MODEL"], "glm-5.3");
         assert_eq!(map["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "glm-5.3");
 
@@ -2007,7 +2013,7 @@ mod tests {
             ("ANTHROPIC_MODEL".to_owned(), "deepseek-chat".to_owned()),
         ];
         let written = claude_provider_settings(
-            Some(r#"{"model": "claude-fable-5-1[1m]", "env": {"MY_VAR": "keep-me", "ANTHROPIC_BASE_URL": "https://stale", "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-5"}}"#),
+            Some(r#"{"model": "claude-fable-5-1[1m]", "env": {"MY_VAR": "keep-me", "ANTHROPIC_BASE_URL": "https://stale", "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-5", "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5-1"}}"#),
             &third_party,
         )
         .unwrap()
@@ -2030,6 +2036,10 @@ mod tests {
         assert!(
             json.pointer("/env/ANTHROPIC_DEFAULT_SONNET_MODEL")
                 .is_none(),
+            "{json}"
+        );
+        assert!(
+            json.pointer("/env/ANTHROPIC_DEFAULT_FABLE_MODEL").is_none(),
             "{json}"
         );
         assert_eq!(
@@ -2063,9 +2073,11 @@ mod tests {
         assert!(json.pointer("/model").is_none(), "{json}");
 
         // The user's own pins are never touched on official: a `claude-*` id from the
-        // tier list, and a bare tier alias with its context suffix. (The answer can
-        // differ from a hand-written input's whitespace alone — compare the JSON.)
-        for pin in ["claude-fable-5-1[1m]", "sonnet[1m]"] {
+        // tier list, and a bare tier alias with its context suffix — fable included,
+        // the newest tier, whose bare alias is only recognized as Claude's own because
+        // the takeover's alias table names it. (The answer can differ from a
+        // hand-written input's whitespace alone — compare the JSON.)
+        for pin in ["claude-fable-5-1[1m]", "fable[1m]", "sonnet[1m]"] {
             let existing = format!(r#"{{"model": "{pin}"}}"#);
             let answer = claude_provider_settings(Some(&existing), &[]).unwrap();
             let text = answer.as_deref().unwrap_or(&existing);
@@ -2223,6 +2235,11 @@ mod tests {
         );
         assert_eq!(
             json.pointer("/env/ANTHROPIC_DEFAULT_OPUS_MODEL")
+                .and_then(|v| v.as_str()),
+            Some("deepseek-chat")
+        );
+        assert_eq!(
+            json.pointer("/env/ANTHROPIC_DEFAULT_FABLE_MODEL")
                 .and_then(|v| v.as_str()),
             Some("deepseek-chat")
         );

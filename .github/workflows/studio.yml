@@ -187,9 +187,11 @@ jobs:
 
       # `tauri::generate_context!()` embeds the window icons from tauri.conf.json at compile
       # time, and prepare.mjs is what derives them into target/studio/icons/ - `tauri build`
-      # runs it as its beforeBuildCommand, but the test step below compiles first.
+      # runs it as its beforeBuildCommand, but the test step below compiles first. --build:
+      # this is a build pipeline run - the marketplace fetch re-checks open-vsx.org for the
+      # latest extension builds instead of riding the dev-iteration cache TTL.
       - name: Prepare the app assets
-        run: node scripts/prepare.mjs
+        run: node scripts/prepare.mjs --build
 
       # The app crate is its own workspace (see src-tauri/Cargo.toml), so its tests, the
       # backend binary's protocol test against the real executable, and clippy run here -
@@ -327,10 +329,11 @@ jobs:
           key: studio-linux-native
           cache-on-failure: true
 
-      # The window icons generate_context!() embeds, as in the Windows job.
+      # The window icons generate_context!() embeds, as in the Windows job. --build as in
+      # the Windows job: a build pipeline run re-checks open-vsx.org for the latest builds.
       - name: Prepare the app assets
         if: matrix.bundles == 'deb'
-        run: node scripts/prepare.mjs
+        run: node scripts/prepare.mjs --build
 
       - name: Test and lint the app backend
         if: matrix.bundles == 'deb'

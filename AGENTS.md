@@ -433,10 +433,12 @@ extension's own state — login, history — never touches `~/.claude`; an expli
 config dir rides on it), and the active
 third-party profile adds `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` /
 `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` / `ANTHROPIC_SMALL_FAST_MODEL` plus the tier-alias
-remap `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` (the flagship tier takes the profile's
-main model, the everyday tiers its small one — GLM: opus → glm-5.3, sonnet and haiku →
-glm-5.3-flash — so a tier pick in Claude's `/model` never sends or shows a `claude-*` id a
-provider does not serve; switching back to official clears the trio with the rest),
+remap `ANTHROPIC_DEFAULT_{OPUS,FABLE,SONNET,HAIKU}_MODEL` (the flagship tiers — opus and
+fable — take the profile's
+main model, the everyday tiers its small one — GLM: opus and fable → glm-5.3, sonnet and
+haiku → glm-5.3-flash — so a tier pick in Claude's `/model` never sends or shows a
+`claude-*` id a
+provider does not serve; switching back to official clears the four with the rest),
 inherited by the
 extension's CLI children (the same takeover `claude-code-sandbox.mjs` proves against a
 local server). The UI is the sidebar chip on the Claude view's section header
@@ -897,7 +899,12 @@ Everything that turns the source tree into installers: asset assembly into
   git-graph-rs packed in every build, claude-code in none by default (the Extensions view's
   marketplace row installs it online; `GGS_BUNDLE_CLAUDE_CODE=1` opts a build back in);
   there is no local source for either package — in require mode a fetch a selected package
-  cannot serve fails the build), `vite.config.ts`
+  cannot serve fails the build. A build pass re-checks the registry even when the cache is
+  fresh: `prepare.mjs --build` — which `tauri.conf.json`'s `beforeBuildCommand` and CI's
+  direct prepare runs pass — sets the fetch TTL to 0 (2026-09-30, the owner's direction: an
+  installer must carry open-vsx.org's latest extension builds); the re-check is a lookup, a
+  same-version answer reuses the cached file, and a `tauri dev` iteration keeps the TTL and
+  never phones home), `vite.config.ts`
 - Seam checks: `scripts/check-seams.mjs` (TypeScript / CSS) and `src-tauri/build.rs` (Rust)
 - Packaging: `scripts/build-studio.bat` (Windows, one command; builds `ggs-node` and
   `node-host.cjs` through `prepare.mjs` as part of that) and its shell counterpart
@@ -944,6 +951,9 @@ Everything that turns the source tree into installers: asset assembly into
   container);
   `.github/workflows/release.yml` (a pushed `v*` tag publishes installers with `SHA256SUMS`
   and its GPG signature)
+- Tests: `tests/marketplace.test.ts` (the marketplace fetch's cache contract — the dev
+  iteration's TTL serves offline, the build pass's forced registry re-check, the newer-build
+  download, the stale-cache fallback — and the `--build` wiring in `tauri.conf.json`)
 
 ## Development workflow
 
