@@ -755,16 +755,26 @@ the identical checks.
 
 The `ggs --mcp <repository>` mode: the persistent symbol index and the Code Analysis
 engine served to AI assistants over the Model Context Protocol (newline-delimited
-JSON-RPC 2.0 on stdio; headless — no window is ever created). The navigation tools —
-`symbol_lookup`, `symbol_references` (the occurrence-narrowed scan), `symbol_tree` (the
-same per-file outline the Symbol Database page renders), `search_symbols`, `read_file`
-(a line-windowed file reader, path-confined to the repository), `search_text` (the
+JSON-RPC 2.0 on stdio; headless — no window is ever created). The tool surface is a
+progressive-disclosure ladder built for token economy (redesigned 2026-09-30): a model
+must understand a project it cannot load without ever being handed a flood.
+`project_overview` draws the whole picture in one bounded answer — totals, the language
+and kind mixes, the top directories with file/symbol counts, the hub files and hub
+names, the heaviest module edges, the dead-code count; `directory_tree` walks the
+folder hierarchy with per-directory counts, children ranked by symbols and each level
+capped at `top` rows; `file_outline` opens one file's declarations with the containers
+the flat listings never showed (it replaced the flat `symbol_tree`, whose 4000-line
+dump was the flood the redesign removed). The point tools stay — `symbol_lookup`,
+`symbol_references` (the occurrence-narrowed scan), `search_symbols`, `read_file` (a
+line-windowed file reader, path-confined to the repository), `search_text` (the
 workspace text search), `index_status` — plus module 17's analysis tools
 (`analysis_module_graph`, `analysis_call_graph`, `analysis_call_path`,
 `analysis_metrics`, `analysis_dead_code`, `analysis_security`, `analysis_import_graph`,
-`analysis_import_cycles`). Every call is logged as one JSON line to
-`~/.ggs/logs/mcp.log` (rotated past 1 MB), which the in-app MCP Server page shows.
-stderr is logs; stdout is protocol only.
+`analysis_import_cycles`). Every list-shaped tool speaks one paging contract: `limit` +
+`offset`, the exact total in the header, a trailer naming the continuation; the filters
+(`path`, `kind`, `severity`, `pathPrefix`) narrow before totals are computed. Every call
+is logged as one JSON line to `~/.ggs/logs/mcp.log` (rotated past 1 MB), which the
+in-app MCP Server page shows. stderr is logs; stdout is protocol only.
 
 - Frontend: `src/mcpPage.ts` (the MCP Server page — the connection snippets with copy
   buttons, the tool catalogue, the recent-call log; listed by module 17's tool registry

@@ -111,6 +111,20 @@ pub struct BuildStats {
     pub names: usize,
 }
 
+/// One row of a single file's outline — the MCP server's `file_outline` reads it. The
+/// container (the enclosing type the index has carried since format v2) rides along:
+/// the flat catalogue never showed it, and a method without its class is half a name.
+pub struct FileOutlineRow {
+    pub kind: &'static str,
+    pub name: String,
+    pub container: Option<String>,
+    /// 0-based, the index's own coordinate.
+    pub line: usize,
+    /// How many files contain the name (the occurrence list length); untrusted lists
+    /// report 0, the same honesty `symbols_with_refs` keeps.
+    pub refs: usize,
+}
+
 /// What one file on disk currently is: its fingerprint, or nothing when it is gone.
 struct Stat {
     mtime_ms: u64,
@@ -183,9 +197,9 @@ impl SymbolStore {
             .collect()
     }
 
-    /// How many files contain each trusted name: the Symbol Database page's "n refs" chips
-    /// and the MCP server's `symbol_tree` read it (an untrusted name reports nothing, the
-    /// same way its references fall back to a full scan).
+    /// How many files contain each trusted name: the Symbol Database page's "n refs"
+    /// chips read it (an untrusted name reports nothing, the same way its references
+    /// fall back to a full scan).
     pub fn occurrence_counts(&self) -> std::collections::HashMap<&str, usize> {
         let mut counts = std::collections::HashMap::with_capacity(self.names.len());
         for (id, files) in self.refs.iter().enumerate() {
@@ -194,6 +208,27 @@ impl SymbolStore {
             }
         }
         counts
+    }
+
+    /// The `n` names the most files contain (the occurrence list lengths), most first —
+    /// the MCP server's overview ranks the workspace's hub names with it. Untrusted
+    /// lists report nothing, the same honesty `occurrence_counts` keeps; only the
+    /// winners' names are cloned.
+    pub fn top_names_by_refs(&self, n: usize) -> Vec<(String, usize)> {
+        let mut rows: Vec<(usize, usize)> = self
+            .refs
+            .iter()
+            .enumerate()
+            .filter_map(|(id, files)| files.as_ref().map(|files| (id, files.len())))
+            .collect();
+        rows.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| self.names[a.0].cmp(&self.names[b.0]))
+        });
+        rows.truncate(n);
+        rows.into_iter()
+            .map(|(id, count)| (self.names[id].clone(), count))
+            .collect()
     }
 
     /// The files whose text contains `name` as a word, or `None` when the occurrence list is
@@ -205,6 +240,68 @@ impl SymbolStore {
             files
                 .iter()
                 .map(|&file| self.files[file as usize].path.clone())
+                .collect(),
+        )
+    }
+
+    /* ---------- Aggregates (the MCP server's progressive disclosure) ---------- */
+
+    /// Every indexed file with its declaration count, path-sorted — one pass, no symbol
+    /// clones. The MCP server's directory rollups, hub-file ranking and language mix
+    /// read it; an AI's first look at a large workspace must not pay for every name.
+    pub fn files_with_counts(&self) -> Vec<(String, usize)> {
+        self.files
+            .iter()
+            .map(|file| (file.path.clone(), file.symbols.len()))
+            .collect()
+    }
+
+    /// How many declarations each kind carries, most first — the overview's kind mix.
+    pub fn kind_counts(&self) -> Vec<(&'static str, usize)> {
+        let mut counts = vec![0usize; KINDS.len()];
+        for file in &self.files {
+            for symbol in &file.symbols {
+                if let Some(count) = counts.get_mut(symbol.kind as usize) {
+                    *count += 1;
+                }
+            }
+        }
+        let mut rows: Vec<(&'static str, usize)> = KINDS
+            .iter()
+            .zip(counts)
+            .filter(|(_, count)| *count > 0)
+            .map(|(kind, count)| (*kind, count))
+            .collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.cmp(b)));
+        rows
+    }
+
+    /// One file's declarations in line order with their occurrence counts, or `None`
+    /// when no indexed file sits at `path` (the files stay path-sorted, so this is a
+    /// binary search, not a scan).
+    pub fn file_symbols(&self, path: &str) -> Option<Vec<FileOutlineRow>> {
+        let file = self
+            .files
+            .binary_search_by(|file| file.path.as_str().cmp(path))
+            .ok()
+            .map(|at| &self.files[at])?;
+        let refs_of = |name_id: u32| {
+            self.refs
+                .get(name_id as usize)
+                .and_then(|files| files.as_ref())
+                .map_or(0, |files| files.len())
+        };
+        Some(
+            file.symbols
+                .iter()
+                .map(|symbol| FileOutlineRow {
+                    kind: kind_name(symbol.kind),
+                    name: self.names[symbol.name_id as usize].clone(),
+                    container: (symbol.container_id != NO_CONTAINER)
+                        .then(|| self.names[symbol.container_id as usize].clone()),
+                    line: symbol.line as usize,
+                    refs: refs_of(symbol.name_id),
+                })
                 .collect(),
         )
     }
@@ -1090,5 +1187,53 @@ mod tests {
         for name in ["yankee", "zulu"] {
             assert!(store.files_containing(name).is_some(), "{name} is findable");
         }
+    }
+
+    /// The aggregates the MCP server's progressive disclosure reads: per-file counts,
+    /// the kind mix, and one file's outline with the container the flat catalogue
+    /// never showed.
+    #[test]
+    fn aggregates_serve_counts_kinds_and_one_files_outline() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "src/lib.rs",
+            "pub fn alpha() {}\nimpl Thing {\n    pub fn beta(&self) { alpha(); }\n}\n",
+        );
+        write(dir.path(), "src/other.rs", "fn alpha2() { alpha(); }\n");
+        let root = dir.path().display().to_string();
+        let store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+
+        // files_with_counts: path-sorted, one row per file, declaration counts.
+        assert_eq!(
+            store.files_with_counts(),
+            vec![("src/lib.rs".to_owned(), 2), ("src/other.rs".to_owned(), 1)]
+        );
+
+        // kind_counts: most first, kinds with nothing stay off.
+        assert_eq!(store.kind_counts(), vec![("function", 2), ("method", 1)]);
+
+        // file_symbols: line order, containers carried, refs = files containing the name.
+        let rows = store
+            .file_symbols("src/lib.rs")
+            .expect("the file is indexed");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            (
+                rows[0].name.as_str(),
+                rows[0].kind,
+                rows[0].line,
+                rows[0].container.as_deref()
+            ),
+            ("alpha", "function", 0, None)
+        );
+        assert_eq!(rows[0].refs, 2, "alpha occurs in both files");
+        assert_eq!(
+            (rows[1].name.as_str(), rows[1].kind, rows[1].line),
+            ("beta", "method", 2)
+        );
+        assert_eq!(rows[1].container.as_deref(), Some("Thing"));
+        assert_eq!(rows[1].refs, 1, "beta occurs only where it is declared");
+        assert!(store.file_symbols("missing.rs").is_none());
     }
 }

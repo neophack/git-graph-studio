@@ -16,7 +16,7 @@ use tauri::ipc::Channel;
 use tauri::State;
 
 use crate::cmd_search::{build_matcher, read_searchable, scan_text, FileMatches, WorkspaceSymbol};
-use crate::symbols::store::{BuildStats, SymbolStore};
+use crate::symbols::store::{BuildStats, FileOutlineRow, SymbolStore};
 use crate::AppState;
 use rayon::prelude::*;
 
@@ -150,8 +150,8 @@ impl SymbolIndex {
     }
 
     /// The index of a root with its per-name occurrence counts, when one has landed — the
-    /// Symbol Database page (`symbol_tree`) and the MCP server read the pair. Cloned out
-    /// (a query must not hold the build's lock).
+    /// Symbol Database page (`symbol_tree`) reads the pair. Cloned out (a query must not
+    /// hold the build's lock).
     pub fn symbols_with_refs(
         &self,
         root: &str,
@@ -188,6 +188,40 @@ impl SymbolIndex {
         let store = self.store(root)?;
         let files = store.lock().unwrap().files_containing(name);
         files
+    }
+
+    /// Every indexed file with its declaration count, path-sorted — the MCP server's
+    /// directory rollups, hub-file ranking and language mix read it. Cloned out (a query
+    /// must not hold the build's lock).
+    pub fn files_with_counts(&self, root: &str) -> Option<Vec<(String, usize)>> {
+        let store = self.store(root)?;
+        let files = store.lock().unwrap().files_with_counts();
+        Some(files)
+    }
+
+    /// How many declarations each kind carries, most first — the MCP server's overview
+    /// reads it.
+    pub fn kind_counts(&self, root: &str) -> Option<Vec<(&'static str, usize)>> {
+        let store = self.store(root)?;
+        let kinds = store.lock().unwrap().kind_counts();
+        Some(kinds)
+    }
+
+    /// The `n` names the most indexed files contain, most first — the MCP server's
+    /// overview ranks the workspace's hub names with it.
+    pub fn top_names_by_refs(&self, root: &str, n: usize) -> Option<Vec<(String, usize)>> {
+        let store = self.store(root)?;
+        let names = store.lock().unwrap().top_names_by_refs(n);
+        Some(names)
+    }
+
+    /// One file's outline rows (line order, containers carried, per-name occurrence
+    /// counts), or `None` when nothing is indexed for the root or no file sits at
+    /// `path` — the MCP server's `file_outline` reads it.
+    pub fn file_symbols(&self, root: &str, path: &str) -> Option<Vec<FileOutlineRow>> {
+        let store = self.store(root)?;
+        let guard = store.lock().unwrap();
+        guard.file_symbols(path)
     }
 
     /// Kick off the background build of a root (a folder open): resume from the saved index
@@ -291,7 +325,9 @@ impl SymbolIndex {
             }
         };
         let stats = store.stats();
-        println!(
+        // A log line, so stderr: the `--mcp` headless mode owns stdout for protocol
+        // JSON only, and one stray line there can fail the client's parser.
+        eprintln!(
             "[index] {} files, {} symbols in {:.0} ms ({} threads)",
             stats.files,
             stats.symbols,
@@ -494,7 +530,7 @@ fn tree_from(symbols: Vec<WorkspaceSymbol>, refs_of: impl Fn(&str) -> usize) -> 
 }
 
 /// The whole index as a per-file outline — the Symbol Database page renders it as a
-/// collapsible tree and the MCP server's `symbol_tree` tool serves the same shape.
+/// collapsible tree (the MCP server drills per file through `file_symbols` instead).
 #[tauri::command]
 pub async fn symbol_tree(
     state: State<'_, AppState>,
