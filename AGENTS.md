@@ -946,9 +946,13 @@ Everything that turns the source tree into installers: asset assembly into
   remove the runtime-registered ProgIds and the RegisteredApplications entry on uninstall
 - Signing: installer signing is decided from CI secrets, never in the sources —
   `scripts/signing.mjs` writes the `tauri build --config` merge file each build reads
-  (the ad-hoc bundle seal when no secrets are configured; a macOS bundle with no signature
-  of its own is assessed by Gatekeeper as damaged once downloaded — the 0.1.5 dmg shipped
-  in exactly that state), and `scripts/gen-signing-secrets.mjs` turns the local
+  (the ad-hoc bundle seal when no secrets are configured; a quarantined download of it
+  meets Gatekeeper's un-bypassable "damaged" verdict on Sequoia — the 0.1.5 dmg, with no
+  seal at all, shipped exactly that way — so `scripts/install-macos.sh` (2026-09-30) is
+  the account-less macOS install channel: a curl download sets no quarantine attribute,
+  so what it installs opens on the first click; Homebrew is no way round it either,
+  brew stamping its own quarantine onto every cask), and `scripts/gen-signing-secrets.mjs`
+  turns the local
   certificate files into exactly the secret values GitHub expects (`--apply` pushes them
   with `gh secret set`). macOS: Developer ID certificate (`APPLE_CERTIFICATE` /
   `APPLE_CERTIFICATE_PASSWORD` / `APPLE_SIGNING_IDENTITY`) plus notarization through the

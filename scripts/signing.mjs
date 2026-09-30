@@ -14,8 +14,11 @@
 //   bundle seal (signingIdentity "-"). The seal matters: a macOS bundle with no signature
 //   of its own — the linker-only state tauri-bundler leaves behind when no identity is
 //   configured, which is what the 0.1.5 dmg shipped — is assessed by Gatekeeper as
-//   DAMAGED (the un-bypassable "move it to the Trash" dialog), while a sealed ad-hoc
-//   bundle is merely unverified (right-click → Open).
+//   DAMAGED (the un-bypassable "move it to the Trash" dialog) — and on macOS 15
+//   (Sequoia) the sealed ad-hoc bundle meets it too: right-click → Open is gone, and
+//   "Open Anyway" only ever applied to apps a Developer ID has signed. The
+//   account-less install channel while no secrets exist is scripts/install-macos.sh —
+//   curl sets no quarantine attribute, so what it installs opens on the first click.
 //
 //   The exports go through this script because of the empty-string trap: an env var set
 //   to "" reads as PRESENT to the bundler's credential detection and fails the build, so
