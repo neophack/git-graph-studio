@@ -126,7 +126,10 @@ pub struct ProviderInput {
 }
 
 /// One built-in shape the Add flow offers. The label is the English fallback; the UI
-/// labels the built-ins through its own i18n tables by preset id.
+/// labels the built-ins through its own i18n tables by preset id. `requires_key`
+/// names the endpoints that cannot run without one — the chat pane's set-key gate
+/// keys on it (a custom or NewAPI gateway may be a keyless local proxy, and gating
+/// those would hide a working chat).
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderPreset {
@@ -140,6 +143,9 @@ pub struct ProviderPreset {
     /// lists move faster than apps.
     #[serde(default)]
     pub models: Vec<&'static str>,
+    /// Whether a profile of this shape is usable without an API key.
+    #[serde(default)]
+    pub requires_key: bool,
 }
 
 /// The Anthropic-compatible endpoints the bridge knows out of the box.
@@ -151,48 +157,53 @@ pub fn presets() -> Vec<ProviderPreset> {
             official: true,
             base_url: None,
             models: vec![],
+            requires_key: false,
         },
         ProviderPreset {
             id: "deepseek".to_owned(),
             label: "DeepSeek".to_owned(),
             official: false,
             base_url: Some("https://api.deepseek.com/anthropic"),
-            // 2026-09: the lineup is V4 — deepseek-flash (the default, V4.1, vision)
-            // and deepseek-v4-pro (the heavyweight, no vision); the old
-            // deepseek-chat / deepseek-reasoner aliases still resolve (both to
-            // V4 Flash), so configs saved on them keep working.
-            models: vec![
-                "deepseek-v4-pro",
-                "deepseek-flash",
-                "deepseek-chat",
-                "deepseek-reasoner",
-            ],
+            // 2026-09-30 (against api-docs.deepseek.com): the lineup is V4 —
+            // deepseek-v4-pro (the heavyweight, no vision) and deepseek-flash
+            // (V4.1, the default, vision, 1M context). deepseek-flash /
+            // deepseek-reasoner left the lineup with V4; the legacy names still
+            // accepted are deepseek-v4-flash / deepseek-v4-flash-vision-exp,
+            // both routing to flash at flash pricing.
+            models: vec!["deepseek-v4-pro", "deepseek-flash"],
+            requires_key: true,
         },
         ProviderPreset {
             id: "glm".to_owned(),
             label: "Zhipu GLM".to_owned(),
             official: false,
             base_url: Some("https://open.bigmodel.cn/api/anthropic"),
-            // 2026-09: every Coding Plan tier serves GLM-5.3 and GLM-5.3-Flash; the
-            // older ids still resolve (glm-5.2/-5.1 forward to 5.3, glm-5-turbo and
-            // glm-4.7 to 5.3-Flash), so configs saved on them keep working.
-            models: vec!["glm-5.3", "glm-5.3-flash", "glm-4.7", "glm-4.6"],
+            // 2026-09-30 (against docs.bigmodel.cn): GLM-5.3 is the flagship (1M
+            // context), GLM-5.3-Flash the everyday tier and GLM-5.3-FlashX the
+            // faster flash variant (~200 tokens/s); glm-4.x left the suggestions
+            // two generations back — glm-5.2/-5.1 still resolve on the open API,
+            // so configs saved on them keep working.
+            models: vec!["glm-5.3", "glm-5.3-flash", "glm-5.3-flashx"],
+            requires_key: true,
         },
         ProviderPreset {
             id: "kimi".to_owned(),
             label: "Moonshot Kimi".to_owned(),
             official: false,
             base_url: Some("https://api.moonshot.cn/anthropic"),
-            // 2026-09: kimi-k3 is the flagship (1M context, vision) and
-            // kimi-k2.7-code-highspeed the fast coding tier; kimi-k2.5 (and every
-            // moonshot-v1 variant) was retired 2026-08-31 — kimi-k2 still resolves,
-            // so configs saved on it keep working.
+            // 2026-09-30 (against platform.kimi.com/.ai): kimi-k3 is the flagship
+            // (1M context as `kimi-k3[1m]`), kimi-k2.7-code the coding tier Kimi's
+            // own Claude Code guide puts in the HAIKU slot, kimi-k2.7-code-highspeed
+            // its 2x-price speed variant, kimi-k2.6 the latency tier; kimi-k2 left
+            // the lineup (kimi-k2.5 and every moonshot-v1 variant went 2026-08-31).
+            // The international endpoint is https://api.moonshot.ai/anthropic.
             models: vec![
                 "kimi-k3",
+                "kimi-k2.7-code",
                 "kimi-k2.7-code-highspeed",
                 "kimi-k2.6",
-                "kimi-k2",
             ],
+            requires_key: true,
         },
         ProviderPreset {
             id: "newapi".to_owned(),
@@ -201,6 +212,7 @@ pub fn presets() -> Vec<ProviderPreset> {
             // A NewAPI / OneAPI deployment has no fixed origin — the user's own gateway.
             base_url: None,
             models: vec![],
+            requires_key: false,
         },
         ProviderPreset {
             id: "custom".to_owned(),
@@ -208,6 +220,7 @@ pub fn presets() -> Vec<ProviderPreset> {
             official: false,
             base_url: None,
             models: vec![],
+            requires_key: false,
         },
     ]
 }
@@ -495,10 +508,7 @@ pub fn provider_env_vars(active: &ProviderProfile, home: &Path) -> Vec<(String, 
     // prompt stops hashing equal and prompt-cache reuse drops — a miss is billed at full
     // price. The official endpoint's prefix cache ignores headers, so official keeps the
     // default and writes no key at all.
-    env.push((
-        "CLAUDE_CODE_ATTRIBUTION_HEADER".to_owned(),
-        "0".to_owned(),
-    ));
+    env.push(("CLAUDE_CODE_ATTRIBUTION_HEADER".to_owned(), "0".to_owned()));
     if let Some(base_url) = active.base_url.as_deref().filter(|url| !url.is_empty()) {
         env.push(("ANTHROPIC_BASE_URL".to_owned(), base_url.to_owned()));
     }
@@ -1498,6 +1508,233 @@ pub fn provider_import_ccswitch(
     Ok(answer)
 }
 
+/* ---------- The usage curve (the bridged extension's token history) ---------- */
+
+/// One hour's aggregated token usage over the redirected Claude state — the numbers
+/// behind the chat pane's usage curve. Hours are UTC (`startMs` is the hour's epoch
+/// milliseconds); the frontend re-buckets them into its own local "today / 7 days /
+/// 30 days" ranges. Tokens only, never money or durations — the bridge bills nothing.
+#[derive(Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUsageHour {
+    pub start_ms: u64,
+    /// The prompt tokens served from the provider's cache (`cache_read_input_tokens`).
+    pub cache_read: u64,
+    /// The prompt tokens written into the cache this turn (`cache_creation_input_tokens`).
+    pub cache_creation: u64,
+    /// The prompt tokens that hit no cache (`input_tokens`).
+    pub input: u64,
+    /// The completion tokens (`output_tokens`).
+    pub output: u64,
+}
+
+/// The accumulator behind [`ProviderUsageHour`] (the map's value while scanning).
+#[derive(Clone, Copy, Debug, Default)]
+struct UsageTotals {
+    cache_read: u64,
+    cache_creation: u64,
+    input: u64,
+    output: u64,
+}
+
+impl UsageTotals {
+    fn add(&mut self, other: Self) {
+        self.cache_read += other.cache_read;
+        self.cache_creation += other.cache_creation;
+        self.input += other.input;
+        self.output += other.output;
+    }
+}
+
+/// Parse a transcript timestamp — Claude Code writes ISO-8601 UTC (`2026-09-30T09:51:39.977Z`).
+/// Fractional seconds and an explicit `+00:00`/`-00:00` offset are tolerated; anything
+/// else (a missing suffix, a non-zero offset, garbage) answers `None` and the entry is
+/// skipped, never guessed at. Pure calendar math (Howard Hinnant's `days_from_civil`)
+/// — the bridge carries no date crate for one parse.
+fn parse_iso_utc(text: &str) -> Option<u64> {
+    let bytes = text.as_bytes();
+    // Y Y Y Y - M M - D D T h h : m m : s s
+    if bytes.len() < 19
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return None;
+    }
+    let digits = |range: std::ops::Range<usize>| -> Option<u64> {
+        let mut value: u64 = 0;
+        for &byte in &bytes[range] {
+            if !byte.is_ascii_digit() {
+                return None;
+            }
+            value = value * 10 + u64::from(byte - b'0');
+        }
+        Some(value)
+    };
+    let year = digits(0..4)? as i64;
+    let month = digits(5..7)?;
+    let day = digits(8..10)?;
+    let hour = digits(11..13)?;
+    let minute = digits(14..16)?;
+    let second = digits(17..19)?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    let rest = &text[19..];
+    let rest = match rest.strip_prefix('.') {
+        Some(after) => {
+            // Skip the fraction — bucketing is per hour.
+            let end = after
+                .char_indices()
+                .find(|(_, c)| !c.is_ascii_digit())
+                .map_or(after.len(), |(index, _)| index);
+            &after[end..]
+        }
+        None => rest,
+    };
+    if rest != "Z" && rest != "+00:00" && rest != "-00:00" {
+        return None;
+    }
+    // days_from_civil: the era-based civil-to-days conversion, valid over the range a
+    // timestamp will ever carry.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe as i64 - 719_468;
+    Some((days * 86_400 + (hour * 3_600 + minute * 60 + second) as i64) as u64)
+}
+
+/// One transcript line's contribution, when it carries usage: an assistant turn with a
+/// timestamp. User turns, tool results and malformed lines answer `None`.
+fn usage_from_entry(entry: &serde_json::Value) -> Option<(u64, UsageTotals)> {
+    if entry.get("type").and_then(|value| value.as_str()) != Some("assistant") {
+        return None;
+    }
+    let timestamp = parse_iso_utc(entry.get("timestamp")?.as_str()?)?;
+    let usage = entry.pointer("/message/usage")?;
+    let field = |key: &str| {
+        usage
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    Some((
+        timestamp,
+        UsageTotals {
+            cache_read: field("cache_read_input_tokens"),
+            cache_creation: field("cache_creation_input_tokens"),
+            input: field("input_tokens"),
+            output: field("output_tokens"),
+        },
+    ))
+}
+
+/// How far back the usage scan reads: 31 days covers the curve's 30-day range with a
+/// day of slack for timezone re-bucketing.
+const USAGE_WINDOW: u64 = 31 * 86_400;
+
+/// One session transcript's lines into the hour map (a malformed line is skipped, not
+/// fatal — a half-written last line is normal in a live transcript).
+fn aggregate_usage_text(text: &str, hours: &mut std::collections::BTreeMap<u64, UsageTotals>) {
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some((timestamp, totals)) = usage_from_entry(&entry) {
+            hours.entry(timestamp / 3_600).or_default().add(totals);
+        }
+    }
+}
+
+/// Walk the redirected Claude state's `projects/` tree, aggregating every session
+/// transcript whose last modification falls inside the window (a file untouched for
+/// the window's span cannot carry a bucket in it; the hour filter below bounds the
+/// answer anyway). Pure over the directory — the test seam.
+fn collect_usage(
+    dir: &Path,
+    min_mtime_secs: u64,
+    hours: &mut std::collections::BTreeMap<u64, UsageTotals>,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("read {}: {e}", dir.display()))?;
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            collect_usage(&path, min_mtime_secs, hours)?;
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        // A transcript untouched inside the window cannot carry a bucket in it.
+        let fresh = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|mtime| mtime.as_secs() >= min_mtime_secs)
+            .unwrap_or(false);
+        if !fresh {
+            continue;
+        }
+        aggregate_usage_text(&std::fs::read_to_string(&path).unwrap_or_default(), hours);
+    }
+    Ok(())
+}
+
+/// The usage scan's answer: every non-empty UTC hour inside the window, oldest first.
+/// A missing `projects/` tree (the extension never ran here) answers empty, never an
+/// error — the curve's empty state is a state, not a failure.
+fn usage_answer(home: &Path, now: std::time::SystemTime) -> Vec<ProviderUsageHour> {
+    let now_secs = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|age| age.as_secs())
+        .unwrap_or(0);
+    let cutoff_secs = now_secs.saturating_sub(USAGE_WINDOW);
+    let mut hours: std::collections::BTreeMap<u64, UsageTotals> = Default::default();
+    let projects = home.join("claude").join("projects");
+    if projects.is_dir() {
+        let _ = collect_usage(&projects, now_secs.saturating_sub(USAGE_WINDOW), &mut hours);
+    }
+    hours
+        .into_iter()
+        .filter(|(hour, _)| hour * 3_600 + 3_599 >= cutoff_secs)
+        .map(|(hour, totals)| ProviderUsageHour {
+            start_ms: hour * 3_600_000,
+            cache_read: totals.cache_read,
+            cache_creation: totals.cache_creation,
+            input: totals.input,
+            output: totals.output,
+        })
+        .collect()
+}
+
+/// The token usage curve's data: the redirected Claude state's session transcripts
+/// (`~/.ggs/claude/projects/**/*.jsonl`), aggregated per UTC hour over the last 31
+/// days. The chat pane's usage strip and the Model Providers page's chart read this;
+/// tokens only — no money, no durations.
+#[tauri::command]
+pub fn provider_usage() -> Result<Vec<ProviderUsageHour>, String> {
+    let home = ggs_home()?;
+    Ok(usage_answer(&home, std::time::SystemTime::now()))
+}
+
 /* ---------- The GGS analysis MCP inside Claude (module 16 served to the extension) ---------- */
 
 /// The MCP server name Claude's `/mcp` lists the analysis bridge under.
@@ -1901,8 +2138,8 @@ mod tests {
             preset: "deepseek".to_owned(),
             label: "DeepSeek".to_owned(),
             base_url: Some("https://api.deepseek.com/anthropic".to_owned()),
-            model: Some("deepseek-chat".to_owned()),
-            small_model: Some("deepseek-chat".to_owned()),
+            model: Some("deepseek-flash".to_owned()),
+            small_model: Some("deepseek-flash".to_owned()),
             api_key_enc: None,
             api_key_hint: None,
         }
@@ -1994,12 +2231,12 @@ mod tests {
         );
         assert_eq!(map["ANTHROPIC_AUTH_TOKEN"], "sk-live-key");
         assert_eq!(map["ANTHROPIC_API_KEY"], "sk-live-key");
-        assert_eq!(map["ANTHROPIC_MODEL"], "deepseek-chat");
-        assert_eq!(map["ANTHROPIC_SMALL_FAST_MODEL"], "deepseek-chat");
-        assert_eq!(map["ANTHROPIC_DEFAULT_OPUS_MODEL"], "deepseek-chat");
-        assert_eq!(map["ANTHROPIC_DEFAULT_FABLE_MODEL"], "deepseek-chat");
-        assert_eq!(map["ANTHROPIC_DEFAULT_SONNET_MODEL"], "deepseek-chat");
-        assert_eq!(map["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "deepseek-chat");
+        assert_eq!(map["ANTHROPIC_MODEL"], "deepseek-flash");
+        assert_eq!(map["ANTHROPIC_SMALL_FAST_MODEL"], "deepseek-flash");
+        assert_eq!(map["ANTHROPIC_DEFAULT_OPUS_MODEL"], "deepseek-flash");
+        assert_eq!(map["ANTHROPIC_DEFAULT_FABLE_MODEL"], "deepseek-flash");
+        assert_eq!(map["ANTHROPIC_DEFAULT_SONNET_MODEL"], "deepseek-flash");
+        assert_eq!(map["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "deepseek-flash");
         assert_eq!(map.len(), 10, "{env:?}");
         // The attribution header is off on a third-party endpoint: gateways fold it into
         // their request identity and prompt-cache reuse drops.
@@ -2100,7 +2337,7 @@ mod tests {
                 "https://api.deepseek.com/anthropic".to_owned(),
             ),
             ("ANTHROPIC_AUTH_TOKEN".to_owned(), "sk-live".to_owned()),
-            ("ANTHROPIC_MODEL".to_owned(), "deepseek-chat".to_owned()),
+            ("ANTHROPIC_MODEL".to_owned(), "deepseek-flash".to_owned()),
             ("CLAUDE_CODE_ATTRIBUTION_HEADER".to_owned(), "0".to_owned()),
         ];
         let written = claude_provider_settings(
@@ -2115,7 +2352,7 @@ mod tests {
         // so `claude-fable-5-1[1m]` would have been displayed and sent on DeepSeek.
         assert_eq!(
             json.pointer("/model").and_then(|v| v.as_str()),
-            Some("deepseek-chat"),
+            Some("deepseek-flash"),
             "{json}"
         );
         assert_eq!(
@@ -2168,11 +2405,12 @@ mod tests {
         );
         assert!(json.pointer("/env/ANTHROPIC_BASE_URL").is_none());
         assert!(
-            json.pointer("/env/CLAUDE_CODE_ATTRIBUTION_HEADER").is_none(),
+            json.pointer("/env/CLAUDE_CODE_ATTRIBUTION_HEADER")
+                .is_none(),
             "official keeps Claude Code's default (header on): {json}"
         );
         // Back on the official service the pin this bridge wrote is cleared with the
-        // env keys — a stale `deepseek-chat` would shadow the login the same way.
+        // env keys — a stale `deepseek-flash` would shadow the login the same way.
         assert!(json.pointer("/model").is_none(), "{json}");
 
         // The user's own pins are never touched on official: a `claude-*` id from the
@@ -2318,7 +2556,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             json.pointer("/model").and_then(|v| v.as_str()),
-            Some("deepseek-chat"),
+            Some("deepseek-flash"),
             "{json}"
         );
         assert_eq!(
@@ -2334,22 +2572,22 @@ mod tests {
         assert_eq!(
             json.pointer("/env/ANTHROPIC_MODEL")
                 .and_then(|v| v.as_str()),
-            Some("deepseek-chat")
+            Some("deepseek-flash")
         );
         assert_eq!(
             json.pointer("/env/ANTHROPIC_DEFAULT_OPUS_MODEL")
                 .and_then(|v| v.as_str()),
-            Some("deepseek-chat")
+            Some("deepseek-flash")
         );
         assert_eq!(
             json.pointer("/env/ANTHROPIC_DEFAULT_FABLE_MODEL")
                 .and_then(|v| v.as_str()),
-            Some("deepseek-chat")
+            Some("deepseek-flash")
         );
         assert_eq!(
             json.pointer("/env/ANTHROPIC_DEFAULT_HAIKU_MODEL")
                 .and_then(|v| v.as_str()),
-            Some("deepseek-chat")
+            Some("deepseek-flash")
         );
     }
 
@@ -2366,7 +2604,7 @@ mod tests {
             preset: "deepseek".to_owned(),
             label: "DeepSeek".to_owned(),
             base_url: Some("https://api.deepseek.com/anthropic/".to_owned()),
-            model: Some("deepseek-chat".to_owned()),
+            model: Some("deepseek-flash".to_owned()),
             small_model: None,
             api_key: Some("sk-first-key".to_owned()),
         };
@@ -2538,10 +2776,7 @@ mod tests {
             .find(|p| p.id == "kimi")
             .expect("the kimi profile is seeded");
         assert_eq!(kimi.model.as_deref(), Some("kimi-k3"));
-        assert_eq!(
-            kimi.small_model.as_deref(),
-            Some("kimi-k2.7-code-highspeed")
-        );
+        assert_eq!(kimi.small_model.as_deref(), Some("kimi-k2.7-code"));
         // The frontend never learns a ciphertext: the list answer masks the key.
         let answer = list_answer(&store);
         assert!(answer.profiles.iter().all(|p| !p.has_key));
@@ -3161,5 +3396,184 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("Bash(ls:*)")
         );
+    }
+
+    /* ---------- The usage curve's aggregation ---------- */
+
+    /// The epoch an ISO timestamp in the transcripts' format parses to.
+    #[test]
+    fn iso_timestamps_parse_to_utc_epoch_seconds() {
+        assert_eq!(parse_iso_utc("1970-01-01T00:00:00Z"), Some(0));
+        // The shape the transcripts really carry: milliseconds and a Z suffix.
+        assert_eq!(
+            parse_iso_utc("2026-09-30T09:51:39.977Z"),
+            Some(1_790_761_899)
+        );
+        assert_eq!(parse_iso_utc("2026-09-30T09:51:39Z"), Some(1_790_761_899));
+        assert_eq!(
+            parse_iso_utc("2026-09-30T09:51:39+00:00"),
+            Some(1_790_761_899)
+        );
+        // A non-UTC offset, a missing suffix, a month out of range, garbage: all skipped.
+        assert_eq!(parse_iso_utc("2026-09-30T09:51:39+02:00"), None);
+        assert_eq!(parse_iso_utc("2026-09-30 09:51:39"), None);
+        assert_eq!(parse_iso_utc("2026-13-30T09:51:39Z"), None);
+        assert_eq!(parse_iso_utc("not a timestamp"), None);
+    }
+
+    fn assistant_line(timestamp: &str, usage: serde_json::Value) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "timestamp": timestamp,
+            "message": { "role": "assistant", "usage": usage },
+        })
+        .to_string()
+    }
+
+    /// The helper the aggregation tests build their fixtures' timestamps from — the
+    /// epoch formatted back into the transcripts' shape.
+    fn iso_at(epoch_secs: u64) -> String {
+        let days = epoch_secs / 86_400;
+        let secs_of_day = epoch_secs % 86_400;
+        // civil_from_days: the inverse of days_from_civil above.
+        let z = days as i64 + 719_468;
+        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = if m <= 2 { y + 1 } else { y };
+        format!(
+            "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+            secs_of_day / 3_600,
+            (secs_of_day % 3_600) / 60,
+            secs_of_day % 60
+        )
+    }
+
+    fn usage_numbers(hour: &ProviderUsageHour) -> [u64; 4] {
+        [
+            hour.cache_read,
+            hour.cache_creation,
+            hour.input,
+            hour.output,
+        ]
+    }
+
+    /// Transcripts aggregate per UTC hour: assistant turns count, user turns and
+    /// malformed lines do not, hours outside the window do not, and a file untouched
+    /// inside the window is never read at all.
+    #[test]
+    fn usage_aggregates_transcript_hours_inside_the_window() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        let now = std::time::SystemTime::now();
+        let now_secs = now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        // Both same-hour entries anchor to the current hour's start — wherever "now"
+        // sits inside its hour, the two land in the one bucket.
+        let hour_start = now_secs / 3_600 * 3_600;
+        let projects = home.join("claude").join("projects").join("-repo");
+        std::fs::create_dir_all(&projects).unwrap();
+        let usage = |input: u64, cache_read: u64, cache_creation: u64, output: u64| {
+            serde_json::json!({
+                "input_tokens": input,
+                "cache_read_input_tokens": cache_read,
+                "cache_creation_input_tokens": cache_creation,
+                "output_tokens": output
+            })
+        };
+        std::fs::write(
+            projects.join("session-a.jsonl"),
+            [
+                assistant_line(&iso_at(hour_start + 60), usage(10, 1_000, 0, 22)),
+                // Same hour: the bucket sums.
+                assistant_line(&iso_at(hour_start + 120), usage(5, 200, 7, 3)),
+                // A user turn carries no usage — skipped.
+                r#"{"type":"user","timestamp":"2026-09-30T09:00:00Z","message":{"role":"user"}}"#
+                    .to_owned(),
+                // A malformed trailing line — skipped, not fatal.
+                "{not json".to_owned(),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        // An older hour in its own session file.
+        std::fs::write(
+            projects.join("session-b.jsonl"),
+            assistant_line(&iso_at(now_secs - 2 * 86_400), usage(1, 2, 3, 4)) + "\n",
+        )
+        .unwrap();
+        // An assistant turn older than the window — excluded from the answer.
+        std::fs::write(
+            projects.join("session-old.jsonl"),
+            assistant_line(&iso_at(now_secs - 60 * 86_400), usage(9, 9, 9, 9)) + "\n",
+        )
+        .unwrap();
+        // A transcript untouched inside the window — never read, so its fresh-stamped
+        // entry counts for nothing.
+        let stale_path = projects.join("session-stale.jsonl");
+        std::fs::write(
+            &stale_path,
+            assistant_line(&iso_at(now_secs - 600), usage(8, 8, 8, 8)) + "\n",
+        )
+        .unwrap();
+        let stale_mtime =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(USAGE_WINDOW + 86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(&stale_path)
+            .unwrap()
+            .set_modified(stale_mtime)
+            .unwrap();
+
+        let answer = usage_answer(&home, now);
+        assert_eq!(answer.len(), 2, "{answer:?}");
+        // Oldest first: the two-days-ago hour, then the current one.
+        assert_eq!(usage_numbers(&answer[0]), [2, 3, 1, 4]);
+        assert_eq!(usage_numbers(&answer[1]), [1_200, 7, 15, 25]);
+        // A missing projects/ tree (the extension never ran) answers empty, not an error.
+        let empty_home = tempfile::tempdir().unwrap();
+        assert!(usage_answer(empty_home.path(), now).is_empty());
+    }
+
+    /// The aggregation reads the real redirected state's shape: every field it needs
+    /// from a transcript entry, tolerating the optional fields a provider may omit.
+    #[test]
+    fn usage_entries_carry_the_four_token_fields() {
+        let entry = serde_json::from_str::<serde_json::Value>(&assistant_line(
+            "2026-09-30T09:51:39.977Z",
+            serde_json::json!({
+                "input_tokens": 10,
+                "cache_read_input_tokens": 4_096,
+                "cache_creation_input_tokens": 512,
+                "output_tokens": 22,
+                "output_tokens_details": { "thinking_tokens": 0 }
+            }),
+        ))
+        .unwrap();
+        let (timestamp, totals) = usage_from_entry(&entry).unwrap();
+        assert_eq!(timestamp, 1_790_761_899);
+        assert_eq!(
+            usage_numbers(&ProviderUsageHour {
+                start_ms: 0,
+                cache_read: totals.cache_read,
+                cache_creation: totals.cache_creation,
+                input: totals.input,
+                output: totals.output,
+            }),
+            [4_096, 512, 10, 22]
+        );
+        // A usage object with fields missing parses — the absent ones count zero.
+        let sparse = serde_json::from_str::<serde_json::Value>(&assistant_line(
+            "2026-09-30T09:51:39Z",
+            serde_json::json!({ "output_tokens": 7 }),
+        ))
+        .unwrap();
+        let (_, sparse) = usage_from_entry(&sparse).unwrap();
+        assert_eq!((sparse.cache_read, sparse.input, sparse.output), (0, 0, 7));
     }
 }
