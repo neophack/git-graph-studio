@@ -26,6 +26,13 @@ use boa_engine::JsArgs;
 /// only a mega bundle wrapper ever approaches this.
 const REGISTER_LOCALS_LIMIT: u32 = 4096;
 
+/// The bytecode cache's wire-format version — part of every cache key, so a change to
+/// the bytecode encoding OR to the opcode numbering (fixed-width u32 operands and the
+/// `CallRegister` fusion, 2026-09-30) never decodes an older blob as the new format:
+/// the old entries simply miss and recompile once. Any change that re-lays an
+/// instruction or re-numbers an opcode must bump this.
+const BYTECODE_CACHE_FORMAT: &str = "v4-";
+
 /// The extension→kind table `require` dispatches on, in Node's own order. A `.node` is a
 /// native addon: it loads through its NAPI registration (`native.rs` + `napi_host.rs` —
 /// this process is the N-API host), never by evaluation — the module that answers is the
@@ -416,7 +423,10 @@ pub(crate) fn evaluate_cached_script(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     use sha2::Digest as _;
-    let cache_key = format!("{tag}{:x}", sha2::Sha256::digest(source.as_bytes()));
+    let cache_key = format!(
+        "{BYTECODE_CACHE_FORMAT}{tag}{:x}",
+        sha2::Sha256::digest(source.as_bytes())
+    );
     let cached_block = read_bytecode_cache(&cache_key).and_then(|blob| {
         let blob: boa_engine::vm::bytecode_cache::CacheBlob = bincode::deserialize(&blob).ok()?;
         boa_engine::vm::bytecode_cache::from_mirror(blob, source, context.realm().scope())
@@ -478,9 +488,13 @@ fn evaluate_module(path: &Path, source: &str, context: &mut Context) -> JsResult
     // generation are a third of a cold activation — is read back instead of rebuilt. The
     // key is the source's SHA-256 under a wire-format version; any decode failure falls
     // back to the normal compile below, and a hit answers through the exact same
-    // `Script::evaluate` path.
+    // `Script::evaluate` path. The version prefix moves with the bytecode encoding: the
+    // operands went fixed-width u32 (2026-09-30), which re-lays every instruction.
     use sha2::Digest as _;
-    let cache_key = format!("{:x}", sha2::Sha256::digest(source.as_bytes()));
+    let cache_key = format!(
+        "{BYTECODE_CACHE_FORMAT}{:x}",
+        sha2::Sha256::digest(source.as_bytes())
+    );
     let cached_block = read_bytecode_cache(&cache_key).and_then(|blob| {
         let blob: boa_engine::vm::bytecode_cache::CacheBlob = bincode::deserialize(&blob).ok()?;
         boa_engine::vm::bytecode_cache::from_mirror(blob, &wrapper, context.realm().scope())

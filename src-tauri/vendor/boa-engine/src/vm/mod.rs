@@ -86,6 +86,12 @@ pub struct Vm {
     ///
     /// This is also used to eliminates [`crate::JsNativeError`] to opaque conversion if not needed.
     pub(crate) pending_exception: Option<JsError>,
+
+    /// GGS-patch: the completion record an opcode stashed when its handler returned
+    /// `Break(())`. The handlers return the one-word `ControlFlow<()>` — a register
+    /// return, not the memory round trip the 24-byte `ControlFlow<CompletionRecord>`
+    /// paid per instruction — and the payload crosses here only on the rare break.
+    pub(crate) completion_out: Option<CompletionRecord>,
     pub(crate) environments: EnvironmentStack,
     pub(crate) runtime_limits: RuntimeLimits,
 
@@ -426,6 +432,7 @@ impl Vm {
             return_value: JsValue::undefined(),
             environments: EnvironmentStack::new(realm.environment().clone()),
             pending_exception: None,
+            completion_out: None,
             runtime_limits: RuntimeLimits::default(),
             native_active_function: None,
             realm,
@@ -590,9 +597,9 @@ impl Context {
         &mut self,
         f: F,
         opcode: Opcode,
-    ) -> ControlFlow<CompletionRecord>
+    ) -> ControlFlow<()>
     where
-        F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,
+        F: FnOnce(&mut Context, Opcode) -> ControlFlow<()>,
     {
         let frame = self.vm.frame();
         let (instruction, _) = frame
@@ -643,37 +650,51 @@ impl Context {
     }
 }
 
+/// GGS-patch: stash a breaking completion record and return the one-word `Break(())`
+/// the handlers speak (see `Vm::completion_out`). Only the fuzz budget's abort uses it
+/// outside the generated `stash_flow`.
+#[cfg(feature = "fuzz")]
+#[inline(always)]
+fn stash_break(record: CompletionRecord, context: &mut Context) -> ControlFlow<()> {
+    context.vm.completion_out = Some(record);
+    ControlFlow::Break(())
+}
+
 impl Context {
-    fn execute_instruction<F>(&mut self, f: F, opcode: Opcode) -> ControlFlow<CompletionRecord>
+    fn execute_instruction<F>(&mut self, f: F, opcode: Opcode) -> ControlFlow<()>
     where
-        F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,
+        F: FnOnce(&mut Context, Opcode) -> ControlFlow<()>,
     {
         f(self, opcode)
     }
 
-    fn execute_one<F>(&mut self, f: F, opcode: Opcode) -> ControlFlow<CompletionRecord>
+    fn execute_one<F>(&mut self, f: F, opcode: Opcode) -> ControlFlow<()>
     where
-        F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,
+        F: FnOnce(&mut Context, Opcode) -> ControlFlow<()>,
     {
-        // GGS-patch: per-opcode execution counts under GGS_OPCODE_STATS — the diagnosis of
-        // the interpreter's share of a bundle load (see node_runtime's exit print). Off by
-        // default, and then just one boolean check.
-        if opcode_stats::enabled() {
-            opcode_stats::count(opcode);
-        }
+        // GGS-patch: the per-opcode stats check moved OUT of here into the two run loops
+        // (2026-09-30): `enabled()`'s OnceLock read sat between the fetch and the dispatch
+        // of every instruction — an acquire-ordered load that forbade the reordering the
+        // dispatch depends on. The loops read it once, before the first fetch; the
+        // environment cannot change under a running frame.
 
         #[cfg(feature = "fuzz")]
         {
             if self.instructions_remaining == 0 {
-                return ControlFlow::Break(CompletionRecord::Throw(JsError::from_native(
-                    JsNativeError::no_instructions_remain(),
-                )));
+                return stash_break(
+                    CompletionRecord::Throw(JsError::from_native(
+                        JsNativeError::no_instructions_remain(),
+                    )),
+                    self,
+                );
             }
             self.instructions_remaining -= 1;
         }
 
+        // GGS-patch: the traceable flag is frozen on the frame (see `CallFrame`), so the
+        // gate is two plain loads, not a walk to the code block's flags cell.
         #[cfg(feature = "trace")]
-        if self.vm.trace || self.vm.frame().code_block.traceable() {
+        if self.vm.trace || self.vm.frame().traceable {
             self.trace_execute_instruction(f, opcode)
         } else {
             self.execute_instruction(f, opcode)
@@ -828,16 +849,16 @@ impl Context {
         }
 
         let mut runtime_budget: u32 = budget;
+        // GGS-patch: the stats gate read once per frame run, not per instruction.
+        let opcode_stats_on = opcode_stats::enabled();
 
-        while let Some(byte) = self
-            .vm
-            .frame
-            .code_block
-            .bytecode
-            .bytecode
-            .get(self.vm.frame.pc as usize)
-        {
+        // GGS-patch: the frame's cached bytecode slice — the fetch was three dependent
+        // loads per instruction (`frame.code_block.bytecode.bytecode.get(..)`).
+        while let Some(byte) = self.vm.frame.bytecode().get(self.vm.frame.pc as usize) {
             let opcode = Opcode::decode(*byte);
+            if opcode_stats_on {
+                opcode_stats::count(opcode);
+            }
 
             match self.execute_one(
                 |context, opcode| {
@@ -846,7 +867,13 @@ impl Context {
                 opcode,
             ) {
                 ControlFlow::Continue(()) => {}
-                ControlFlow::Break(value) => return value,
+                ControlFlow::Break(()) => {
+                    return self
+                        .vm
+                        .completion_out
+                        .take()
+                        .expect("a breaking handler stashed its completion record");
+                }
             }
 
             if runtime_budget == 0 {
@@ -864,19 +891,25 @@ impl Context {
             self.trace_call_frame();
         }
 
-        while let Some(byte) = self
-            .vm
-            .frame
-            .code_block
-            .bytecode
-            .bytecode
-            .get(self.vm.frame.pc as usize)
-        {
+        // GGS-patch: the stats gate read once per frame run, not per instruction.
+        let opcode_stats_on = opcode_stats::enabled();
+
+        // GGS-patch: the frame's cached bytecode slice (see `run_async_with_budget`).
+        while let Some(byte) = self.vm.frame.bytecode().get(self.vm.frame.pc as usize) {
             let opcode = Opcode::decode(*byte);
+            if opcode_stats_on {
+                opcode_stats::count(opcode);
+            }
 
             match self.execute_one(Self::execute_bytecode_instruction, opcode) {
                 ControlFlow::Continue(()) => {}
-                ControlFlow::Break(value) => return value,
+                ControlFlow::Break(()) => {
+                    return self
+                        .vm
+                        .completion_out
+                        .take()
+                        .expect("a breaking handler stashed its completion record");
+                }
             }
         }
 

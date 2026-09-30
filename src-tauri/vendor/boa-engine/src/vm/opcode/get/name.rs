@@ -1,5 +1,8 @@
+use boa_ast::scope::BindingLocatorScope;
+
 use crate::{
     Context, JsResult, JsValue,
+    environments::Environment,
     error::JsNativeError,
     object::{internal_methods::InternalMethodPropertyContext, shape::slot::SlotAttributes},
     property::PropertyKey,
@@ -19,6 +22,43 @@ impl GetName {
         (value, index): (VaryingOperand, VaryingOperand),
         context: &mut Context,
     ) -> JsResult<()> {
+        // GGS-patch: the no-clone fast path. Reading the locator by its two copyable
+        // coordinates — scope and binding index — skips the `BindingLocator` clone
+        // (its `JsString` name paid two atomic reference-count round trips on every
+        // module-scope variable access, the currency of a bundled extension's top
+        // level). The gate is exactly `find_runtime_binding`'s own fast-path condition:
+        // a clean innermost declarative environment means the compile-time locator
+        // already points at the binding. Everything else — object environments,
+        // poisoned scopes, the global object — takes the original path below.
+        let (scope, binding_index) = {
+            let locator = &context.vm.frame().code_block.bindings[usize::from(index)];
+            (locator.scope(), locator.binding_index())
+        };
+        if context
+            .vm
+            .environments
+            .current_declarative_ref()
+            .is_some_and(|env| !env.with() && !env.poisoned())
+        {
+            match scope {
+                BindingLocatorScope::Stack(env_index) => {
+                    if let Environment::Declarative(env) = context.environment_expect(env_index)
+                        && let Some(result) = env.get(binding_index)
+                    {
+                        context.vm.set_register(value.into(), result);
+                        return Ok(());
+                    }
+                }
+                BindingLocatorScope::GlobalDeclarative => {
+                    let env = context.vm.environments.global();
+                    if let Some(result) = env.get(binding_index) {
+                        context.vm.set_register(value.into(), result);
+                        return Ok(());
+                    }
+                }
+                BindingLocatorScope::GlobalObject => {}
+            }
+        }
         let mut binding_locator =
             context.vm.frame().code_block.bindings[usize::from(index)].clone();
         context.find_runtime_binding(&mut binding_locator)?;

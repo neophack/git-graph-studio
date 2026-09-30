@@ -43,6 +43,21 @@ pub struct CallFrameLocation {
 #[derive(Clone, Debug, Finalize, Trace)]
 pub struct CallFrame {
     pub(crate) code_block: Gc<CodeBlock>,
+    /// GGS-patch: this frame's live bytecode, cached as a raw slice. The dispatch loop
+    /// and every opcode handler re-derived it through `code_block.bytecode.bytecode` —
+    /// three dependent loads per instruction on the hottest path in the engine. boa_gc
+    /// never moves a box and this frame's `code_block` Gc owns the box the slice points
+    /// into, so the pointer is live exactly as long as the frame is. Updated in exactly
+    /// one place, [`CallFrame::new`], beside the `code_block` it is derived from.
+    #[unsafe_ignore_trace]
+    pub(crate) bytecode: *const [u8],
+    /// GGS-patch: the code block's traceable flag, frozen at frame creation — the
+    /// per-instruction trace gate read it through the Gc and the flags cell every
+    /// instruction. `CodeBlock::set_traceable` is an embedder-only API no host of this
+    /// engine calls on a live block; a block that is traceable at creation stays
+    /// traceable for the frame's lifetime.
+    #[unsafe_ignore_trace]
+    pub(crate) traceable: bool,
     pub(crate) pc: u32,
     /// The register pointer, points to the first register in the stack.
     // TODO: Check if storing the frame pointer instead of argument count and computing the
@@ -62,6 +77,7 @@ pub struct CallFrame {
 
     /// How many iterations a loop has done.
     pub(crate) loop_iteration_count: u64,
+
 
     /// `[[ScriptOrModule]]`
     pub(crate) active_runnable: Option<ActiveRunnable>,
@@ -117,6 +133,12 @@ impl CallFrame {
         environments: EnvironmentStack,
         realm: Realm,
     ) -> Self {
+        // GGS-patch: freeze the derived bytecode slice and the traceable flag beside the
+        // `code_block` they come from (see the field docs).
+        let source = &code_block.bytecode.bytecode;
+        let bytecode: *const [u8] =
+            core::ptr::slice_from_raw_parts(source.as_ptr(), source.len());
+        let traceable = code_block.traceable();
         Self {
             pc: 0,
             rp: 0,
@@ -124,6 +146,8 @@ impl CallFrame {
             argument_count: 0,
             iterators: ThinVec::new(),
             binding_stack: Vec::new(),
+            bytecode,
+            traceable,
             code_block,
             loop_iteration_count: 0,
             active_runnable,
@@ -131,6 +155,12 @@ impl CallFrame {
             realm,
             flags: CallFrameFlags::empty(),
         }
+    }
+
+    /// GGS-patch: this frame's live bytecode (see the `bytecode` field).
+    #[inline]
+    pub(crate) fn bytecode(&self) -> &[u8] {
+        unsafe { &*self.bytecode }
     }
 
     /// Updates a `CallFrame`'s `argument_count` field with the value provided.

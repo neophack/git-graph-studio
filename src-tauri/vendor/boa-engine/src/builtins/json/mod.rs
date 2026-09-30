@@ -15,14 +15,12 @@
 
 use std::{borrow::Cow, iter::once};
 
-use boa_ast::scope::Scope;
 use boa_macros::utf16;
 use itertools::Itertools;
 
 use crate::{
-    Context, JsArgs, JsBigInt, JsResult, JsString, JsValue, SpannedSourceText,
+    Context, JsArgs, JsBigInt, JsResult, JsString, JsValue,
     builtins::BuiltInObject,
-    bytecompiler::ByteCompiler,
     context::intrinsics::Intrinsics,
     error::JsNativeError,
     js_string,
@@ -32,12 +30,12 @@ use crate::{
     string::{CodePoint, StaticJsStrings},
     symbol::JsSymbol,
     value::IntegerOrInfinity,
-    vm::{CallFrame, CallFrameFlags, source_info::SourcePath},
 };
-use boa_gc::Gc;
-use boa_parser::{Parser, Source};
 
 use super::{BuiltInBuilder, IntrinsicObject};
+
+mod parse;
+mod serialize;
 
 #[cfg(test)]
 mod tests;
@@ -90,68 +88,13 @@ impl Json {
             .to_std_string()
             .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
 
-        // 2. Parse ! StringToCodePoints(jsonString) as a JSON text as specified in ECMA-404.
-        //    Throw a SyntaxError exception if it is not a valid JSON text as defined in that specification.
-        if let Err(e) = serde_json::from_str::<serde_json::Value>(&json_string) {
-            return Err(JsNativeError::syntax().with_message(e.to_string()).into());
-        }
-
-        // 3. Let scriptString be the string-concatenation of "(", jsonString, and ");".
-        // TODO: fix script read for eval
-        let script_string = format!("({json_string});");
-
-        // 4. Let script be ParseText(! StringToCodePoints(scriptString), Script).
-        // 5. NOTE: The early error rules defined in 13.2.5.1 have special handling for the above invocation of ParseText.
-        // 6. Assert: script is a Parse Node.
-        // 7. Let completion be the result of evaluating script.
-        // 8. NOTE: The PropertyDefinitionEvaluation semantics defined in 13.2.5.5 have special handling for the above evaluation.
-        // 9. Let unfiltered be completion.[[Value]].
-        // 10. Assert: unfiltered is either a String, Number, Boolean, Null, or an Object that is defined by either an ArrayLiteral or an ObjectLiteral.
-        let source = Source::from_bytes(&script_string);
-
-        let mut parser = Parser::new(source);
-        parser.set_json_parse();
-        // In json we don't need the source: there no way to pass an object that needs a source text
-        // But if it's incorrect, just call `parser.parse_script_with_source` here
-        let script = parser.parse_script(&Scope::new_global(), context.interner_mut())?;
-        let code_block = {
-            let in_with = context.vm.environments.has_object_environment();
-            // If the source is needed then call `parser.parse_script_with_source` and pass `source_text` here.
-            let spanned_source_text = SpannedSourceText::new_empty();
-            let mut compiler = ByteCompiler::new(
-                js_string!("<json>"),
-                script.strict(),
-                true,
-                context.realm().scope().clone(),
-                context.realm().scope().clone(),
-                false,
-                false,
-                context.interner_mut(),
-                in_with,
-                spanned_source_text,
-                // TODO: Could give more information from previous shadow stack.
-                SourcePath::Json,
-            );
-            compiler.compile_statement_list(script.statements(), true, false);
-            Gc::new(compiler.finish())
-        };
-
-        let realm = context.realm().clone();
-
-        let env_fp = context.vm.environments.len() as u32;
-        context.vm.push_frame_with_stack(
-            CallFrame::new(code_block, None, context.vm.environments.clone(), realm)
-                .with_env_fp(env_fp)
-                .with_flags(CallFrameFlags::EXIT_EARLY),
-            JsValue::undefined(),
-            JsValue::null(),
-        );
-
-        context.realm().resize_global_env();
-        let record = context.run();
-        context.vm.pop_frame();
-
-        let unfiltered = record.consume()?;
+        // GGS-patch: the direct parser (see `parse.rs`) replaces upstream's route —
+        // validating the text with `serde_json` and then re-parsing the whole string as
+        // a parenthesised script through the full lexer, parser, `ByteCompiler` and VM,
+        // one `DefineOwnPropertyByName` opcode per property. This walks the text once
+        // and builds the tree with exactly the values that route produced (see the
+        // module docs for the semantics, ordering and edge cases).
+        let unfiltered = parse::parse_json_text(&json_string, context)?;
 
         // 11. If IsCallable(reviver) is true, then
         if let Some(obj) = args.get_or_undefined(1).as_callable() {
@@ -387,6 +330,19 @@ impl Json {
             // a. Let gap be the empty String.
             js_string!()
         };
+
+        // GGS-patch: the fast writer (see `serialize.rs`) takes the plain-data case —
+        // no replacer, no property list, no indentation — reading own storage into one
+        // output buffer instead of walking the generic `Get` machinery per property.
+        // Anything unusual (accessors, exotics, cycles, a `toJSON` on a standard
+        // prototype) falls back to the spec-shaped route below, untouched.
+        if property_list.is_none() && replacer_function.is_none() && gap.is_empty() {
+            if let Some(fast) =
+                serialize::fast_stringify(args.get_or_undefined(0), context)
+            {
+                return Ok(fast.map(Into::into).unwrap_or_default());
+            }
+        }
 
         // 9. Let wrapper be ! OrdinaryObjectCreate(%Object.prototype%).
         let wrapper = JsObject::with_object_proto(context.intrinsics());

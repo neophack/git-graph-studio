@@ -307,11 +307,123 @@ fn json_fields_should_be_enumerable() {
     ]);
 }
 
+// GGS-patch: the direct parser's compatibility pins — every edge a claude-shaped
+// payload (or an upgraded one) can present, held by the suite so an engine change that
+// diverges from V8-visible behavior fails here instead of in the field.
+#[test]
+fn json_parse_direct_parser_edges() {
+    run_test_actions([
+        // Insertion-ordered keys, integer keys ascending first — Object.keys' order.
+        TestAction::assert(indoc! {r#"
+            JSON.stringify(Object.keys(JSON.parse('{"b":1,"a":2,"1":3}')))
+                === '["1","b","a"]'
+        "#}),
+        // `__proto__` is an ordinary data property (JSON never assigns prototypes).
+        TestAction::assert(indoc! {r#"
+            var o = JSON.parse('{"__proto__": 5, "x": 1}');
+            Object.getPrototypeOf(o) === Object.prototype
+                && o["__proto__"] === 5
+                && Object.keys(o).join() === "__proto__,x"
+        "#}),
+        // Duplicate keys: the last value wins, the position stays at the first.
+        TestAction::assert(indoc! {r#"
+            var o = JSON.parse('{"x":1,"x":2}');
+            o.x === 2 && Object.keys(o).length === 1
+        "#}),
+        // Number edges: -0 keeps its sign, out-of-range exponents are Infinity.
+        TestAction::assert(indoc! {r#"
+            Object.is(JSON.parse('-0'), -0) && JSON.parse('1e999') === Infinity
+                && JSON.parse('2e-3') === 0.002
+        "#}),
+        // Escapes: a surrogate pair combines; a lone surrogate is preserved.
+        TestAction::assert(indoc! {r#"
+            JSON.parse('"\uD83D\uDE00"') === String.fromCodePoint(0x1F600)
+        "#}),
+        TestAction::assert(indoc! {r#"
+            JSON.parse('"' + String.fromCharCode(92) + 'uD800"').length === 1
+        "#}),
+        // Malformed texts are SyntaxErrors (never a crash, never a value).
+        TestAction::assert_native_error(
+            r#"JSON.parse('{"a":}');"#,
+            JsNativeErrorKind::Syntax,
+            "unexpected token at position 5",
+        ),
+        TestAction::assert_native_error(
+            r"JSON.parse('[1,]');",
+            JsNativeErrorKind::Syntax,
+            "unexpected token at position 3",
+        ),
+        TestAction::assert_native_error(
+            r"JSON.parse('01');",
+            JsNativeErrorKind::Syntax,
+            "unexpected token after JSON value at position 1",
+        ),
+        // Pathological nesting answers a SyntaxError (the parser's depth cap), not a
+        // stack overflow — the recursion is bounded on purpose.
+        TestAction::assert_native_error(
+            r#"JSON.parse('['.repeat(100000) + ']'.repeat(100000));"#,
+            JsNativeErrorKind::Syntax,
+            "maximum JSON nesting depth exceeded at position 512",
+        ),
+        TestAction::assert(indoc! {r#"
+            var v = JSON.parse('['.repeat(400) + ']'.repeat(400));
+            var depth = 0;
+            while (Array.isArray(v)) { depth++; v = v[0]; }
+            depth === 400
+        "#}),
+        // The reviver still runs over the direct parser's tree.
+        TestAction::assert(indoc! {r#"
+            JSON.parse('{"a":1,"b":{"c":2}}', function (k, v) {
+                return typeof v === 'number' ? v * 10 : v;
+            }).b.c === 20
+        "#}),
+    ]);
+}
+
+// GGS-patch: the fast writer's compatibility pins — the plain-data case must be
+// byte-identical to the generic serializer's output, and every bail-out keeps the spec
+// shape (dates, cycles, prototype `toJSON`).
+#[test]
+fn json_stringify_fast_writer_edges() {
+    run_test_actions([
+        TestAction::assert(indoc! {r#"
+            JSON.stringify({b: 1, a: 2, 1: 'x', '-3': true, 0.5: null})
+                === '{"1":"x","b":1,"a":2,"-3":true,"0.5":null}'
+        "#}),
+        TestAction::assert(indoc! {r#"
+            JSON.stringify({u: undefined, f: function(){}, s: 1}) === '{"s":1}'
+                && JSON.stringify([undefined, function(){}, 1]) === '[null,null,1]'
+        "#}),
+        TestAction::assert(indoc! {r#"
+            JSON.stringify({n: NaN, i: Infinity, z: -0}) === '{"n":null,"i":null,"z":0}'
+        "#}),
+        TestAction::assert(indoc! {r#"
+            JSON.stringify('\u0007') === '"\\u0007"'
+        "#}),
+        // A `toJSON` on a standard prototype pulls the whole call to the generic path.
+        TestAction::assert(indoc! {r#"
+            var out;
+            try {
+                Object.prototype.toJSON = function () { return 'P'; };
+                out = JSON.stringify({a: 1});
+            } finally {
+                delete Object.prototype.toJSON;
+            }
+            out === '"P"'
+        "#}),
+        TestAction::assert(indoc! {r#"
+            JSON.stringify(new Date(0)) === '"1970-01-01T00:00:00.000Z"'
+        "#}),
+    ]);
+}
+
 #[test]
 fn json_parse_with_no_args_throws_syntax_error() {
+    // GGS-patch: the direct parser's message replaces `serde_json`'s ("expected value
+    // at line 1 column 1"); the kind is the contract, the wording is the engine's own.
     run_test_actions([TestAction::assert_native_error(
         "JSON.parse();",
         JsNativeErrorKind::Syntax,
-        "expected value at line 1 column 1",
+        "unexpected token at position 0",
     )]);
 }

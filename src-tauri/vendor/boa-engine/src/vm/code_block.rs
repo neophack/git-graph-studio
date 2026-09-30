@@ -490,6 +490,16 @@ impl CodeBlock {
             | Instruction::SuperCall { argument_count } => {
                 format!("argument_count:{argument_count}")
             }
+            // GGS-patch: the register-staged call (display only).
+            Instruction::CallRegister { dst, this, func, args } => {
+                format!(
+                    "dst:{}, this:{}, func:{}, args:{}",
+                    u32::from(*dst),
+                    u32::from(*this),
+                    u32::from(*func),
+                    (0..args.len()).map(|i| args.get(i).to_string()).collect::<Vec<_>>().join(",")
+                )
+            }
             Instruction::DefVar { binding_index } | Instruction::GetLocator { binding_index } => {
                 format!("binding_index:{binding_index}")
             }
@@ -918,8 +928,7 @@ impl CodeBlock {
             | Instruction::Reserved59
             | Instruction::Reserved60
             | Instruction::Reserved61
-            | Instruction::Reserved62
-            | Instruction::Reserved63 => unreachable!("Reserved opcodes are unreachable"),
+            | Instruction::Reserved62 => unreachable!("Reserved opcodes are unreachable"),
         }
     }
 }

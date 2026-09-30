@@ -2017,26 +2017,51 @@ impl<'ctx> ByteCompiler<'ctx> {
             Callable::New(new) => (new.call(), CallKind::New),
         };
 
+        let contains_spread = call
+            .args()
+            .iter()
+            .any(|arg| matches!(arg, Expression::Spread(_)));
+
+        // GGS-patch: the `CallRegister` fusion. A plain call without spreads stages its
+        // `this`, function and every argument in REGISTERS and emits one opcode that
+        // moves the whole calling-convention region over and routes the return value
+        // into `dst`, where the stock protocol paid one `PushFromRegister` per staged
+        // value, the `Call`, and a trailing `PopIntoRegister`. `eval`, `new` and spread
+        // arguments keep the stock protocol below.
+        let mut fused_this: Option<Register> = None;
+        let mut fused_func: Option<Register> = None;
+
         match call.function().flatten() {
             Expression::PropertyAccess(access) if kind == CallKind::Call => {
                 let this = self.register_allocator.alloc();
-                let dst = self.register_allocator.alloc();
-                self.compile_access_preserve_this(access, &this, &dst);
-                self.push_from_register(&this);
-                self.push_from_register(&dst);
-                self.register_allocator.dealloc(this);
-                self.register_allocator.dealloc(dst);
+                let func = self.register_allocator.alloc();
+                self.compile_access_preserve_this(access, &this, &func);
+                if !contains_spread {
+                    fused_this = Some(this);
+                    fused_func = Some(func);
+                } else {
+                    self.push_from_register(&this);
+                    self.push_from_register(&func);
+                    self.register_allocator.dealloc(this);
+                    self.register_allocator.dealloc(func);
+                }
             }
             Expression::Optional(opt) if kind == CallKind::Call => {
                 let this = self.register_allocator.alloc();
-                let dst = self.register_allocator.alloc();
-                self.compile_optional_preserve_this(opt, &this, &dst);
-                self.push_from_register(&this);
-                self.push_from_register(&dst);
-                self.register_allocator.dealloc(this);
-                self.register_allocator.dealloc(dst);
+                let func = self.register_allocator.alloc();
+                self.compile_optional_preserve_this(opt, &this, &func);
+                if !contains_spread {
+                    fused_this = Some(this);
+                    fused_func = Some(func);
+                } else {
+                    self.push_from_register(&this);
+                    self.push_from_register(&func);
+                    self.register_allocator.dealloc(this);
+                    self.register_allocator.dealloc(func);
+                }
             }
             expr if kind == CallKind::Call => {
+                let this = self.register_allocator.alloc();
                 if let Expression::Identifier(ident) = expr {
                     if ident.sym() == Sym::EVAL {
                         kind = CallKind::CallEval;
@@ -2052,28 +2077,27 @@ impl<'ctx> ByteCompiler<'ctx> {
                                 unreachable!("with binding cannot be local")
                             }
                         };
-                        let value = self.register_allocator.alloc();
                         self.bytecode
-                            .emit_this_for_object_environment_name(value.variable(), index.into());
-                        self.push_from_register(&value);
-                        self.register_allocator.dealloc(value);
+                            .emit_this_for_object_environment_name(this.variable(), index.into());
                     } else {
-                        let value = self.register_allocator.alloc();
-                        self.bytecode.emit_push_undefined(value.variable());
-                        self.push_from_register(&value);
-                        self.register_allocator.dealloc(value);
+                        self.bytecode.emit_push_undefined(this.variable());
                     }
                 } else {
-                    let value = self.register_allocator.alloc();
-                    self.bytecode.emit_push_undefined(value.variable());
-                    self.push_from_register(&value);
-                    self.register_allocator.dealloc(value);
+                    self.bytecode.emit_push_undefined(this.variable());
                 }
 
-                let value = self.register_allocator.alloc();
-                self.compile_expr(expr, &value);
-                self.push_from_register(&value);
-                self.register_allocator.dealloc(value);
+                let func = self.register_allocator.alloc();
+                self.compile_expr(expr, &func);
+
+                if kind == CallKind::Call && !contains_spread {
+                    fused_this = Some(this);
+                    fused_func = Some(func);
+                } else {
+                    self.push_from_register(&this);
+                    self.push_from_register(&func);
+                    self.register_allocator.dealloc(this);
+                    self.register_allocator.dealloc(func);
+                }
             }
             expr => {
                 let this = self.register_allocator.alloc();
@@ -2089,10 +2113,38 @@ impl<'ctx> ByteCompiler<'ctx> {
 
         let mut compiler = self.position_guard(call);
 
-        let contains_spread = call
-            .args()
-            .iter()
-            .any(|arg| matches!(arg, Expression::Spread(_)));
+        // The fused path: the arguments live concurrently in their own registers and one
+        // opcode carries `this`, the function and the arguments over, delivering the
+        // result into `dst` (the opcode records the destination on the caller's frame).
+        if let (Some(this), Some(func)) = (fused_this, fused_func) {
+            let argument_registers: Vec<Register> = call
+                .args()
+                .iter()
+                .map(|_| compiler.register_allocator.alloc())
+                .collect();
+            for (arg, register) in call.args().iter().zip(&argument_registers) {
+                compiler.compile_expr(arg, register);
+            }
+            let argument_variables: Vec<u32> = argument_registers
+                .iter()
+                .map(|register| u32::from(register.variable()))
+                .collect();
+            compiler.bytecode.emit_call_register(
+                VaryingOperand::from(dst.variable()),
+                VaryingOperand::from(this.variable()),
+                VaryingOperand::from(func.variable()),
+                crate::vm::opcode::CallArgs::from_slice(&argument_variables),
+            );
+            for register in argument_registers {
+                compiler.register_allocator.dealloc(register);
+            }
+            compiler.register_allocator.dealloc(this);
+            compiler.register_allocator.dealloc(func);
+            // The result lands on the stack like `Call`'s; the `PopIntoRegister` also
+            // keeps the frame's pc inside the call's source-map range (positions).
+            compiler.pop_into_register(dst);
+            return;
+        }
 
         if contains_spread {
             let array = compiler.register_allocator.alloc();

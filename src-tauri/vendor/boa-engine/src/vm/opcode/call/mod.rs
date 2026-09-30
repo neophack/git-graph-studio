@@ -213,6 +213,59 @@ impl Operation for Call {
     const COST: u8 = 3;
 }
 
+/// GGS-patch: `CallRegister` implements the Opcode Operation for `Opcode::CallRegister`.
+///
+/// A plain call staged entirely in registers: `this`, the function and every argument
+/// are read from the caller's register file, moved into the stack's calling convention
+/// in one instruction, and the callee's return value is routed to the caller's
+/// `result_dst` register by `handle_return` — no `PushFromRegister` per argument and no
+/// `PopIntoRegister` after. Everything between the staging and the return runs through
+/// the exact `__call__`/`resolve` machinery `Call` uses.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CallRegister;
+
+impl CallRegister {
+    #[inline(always)]
+    pub(super) fn operation(
+        (dst, this_reg, func_reg, args): (
+            VaryingOperand,
+            VaryingOperand,
+            VaryingOperand,
+            crate::vm::opcode::CallArgs,
+        ),
+        context: &mut Context,
+    ) -> JsResult<()> {
+        let this = context.vm.get_register(this_reg.into()).clone();
+        let func = context.vm.get_register(func_reg.into()).clone();
+
+        context.vm.stack.push(this);
+        context.vm.stack.push(func.clone());
+        let argument_count = args.len();
+        for i in 0..argument_count {
+            let value = context.vm.get_register(args.get(i) as usize).clone();
+            context.vm.stack.push(value);
+        }
+
+        let Some(object) = func.as_object() else {
+            return Err(Call::handle_not_callable());
+        };
+
+        // GGS-patch: the result stays on the stack (the caller's `PopIntoRegister`
+        // consumes it, exactly as with `Call`): retiring that opcode moved the frame's
+        // recorded pc past the call's source-map range, which `Error.stack` positions
+        // (`vm::tests::position`) rely on.
+        let _ = dst;
+        object.__call__(argument_count).resolve(context)?;
+        Ok(())
+    }
+}
+
+impl Operation for CallRegister {
+    const NAME: &'static str = "CallRegister";
+    const INSTRUCTION: &'static str = "INST - CallRegister";
+    const COST: u8 = 3;
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CallSpread;
 

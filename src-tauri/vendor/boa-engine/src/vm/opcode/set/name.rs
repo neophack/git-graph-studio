@@ -51,6 +51,42 @@ impl SetName {
         context: &mut Context,
     ) -> JsResult<()> {
         let value = context.vm.get_register(value.into()).clone();
+
+        // GGS-patch: the no-clone fast path (see `GetName`): a clean innermost
+        // declarative environment means the compile-time locator stands, and a
+        // Stack or GlobalDeclarative binding writes by index — no locator clone, no
+        // environment walk, no separate initialized check (the read IS the check).
+        let (scope, binding_index) = {
+            let code_block = context.vm.frame().code_block();
+            let locator = &code_block.bindings[usize::from(index)];
+            (locator.scope(), locator.binding_index())
+        };
+        if context
+            .vm
+            .environments
+            .current_declarative_ref()
+            .is_some_and(|env| !env.with() && !env.poisoned())
+        {
+            match scope {
+                BindingLocatorScope::Stack(env_index) => {
+                    if let Environment::Declarative(env) = context.environment_expect(env_index)
+                        && env.get(binding_index).is_some()
+                    {
+                        env.set(binding_index, value);
+                        return Ok(());
+                    }
+                }
+                BindingLocatorScope::GlobalDeclarative => {
+                    let env = context.vm.environments.global();
+                    if env.get(binding_index).is_some() {
+                        env.set(binding_index, value);
+                        return Ok(());
+                    }
+                }
+                BindingLocatorScope::GlobalObject => {}
+            }
+        }
+
         let code_block = context.vm.frame().code_block();
         let mut binding_locator = code_block.bindings[usize::from(index)].clone();
         let strict = code_block.strict();

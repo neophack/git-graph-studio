@@ -116,6 +116,47 @@ pub(crate) trait Operation {
 }
 
 /// The compile time representation of bytecode instructions.
+/// GGS-patch: `CallRegister`'s argument-register list, decoded as a borrowed slice of
+/// the frame's bytecode — no per-execution heap materialisation (a `ThinVec` operand
+/// allocated on every single call, which ate the fusion's entire win). The encode side
+/// points at the compiler's temporary list; the decode side into the bytecode stream.
+/// Valid only while the owning bytecode (or the encoder's temporary) is alive — always
+/// true at both uses. The elements read unaligned: the stream is byte-aligned.
+#[derive(Clone, Copy)]
+pub(crate) struct CallArgs {
+    len: u16,
+    ptr: *const u8,
+}
+
+impl CallArgs {
+    /// The encode side: borrow the compiler's register list.
+    pub(crate) fn from_slice(slice: &[u32]) -> Self {
+        Self { len: slice.len() as u16, ptr: slice.as_ptr().cast() }
+    }
+
+    /// The number of argument registers.
+    pub(crate) fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// The `i`th argument register (unaligned read out of the bytecode stream).
+    pub(crate) fn get(&self, i: usize) -> u32 {
+        unsafe { self.ptr.add(i * 4).cast::<u32>().read_unaligned() }
+    }
+
+    /// The decode side: point into the bytecode stream (a zero-length list may sit one
+    /// past the end, which pointer arithmetic permits).
+    pub(crate) fn from_stream(bytes: &[u8], pos: usize, len: usize) -> Self {
+        Self { len: len as u16, ptr: unsafe { bytes.as_ptr().add(pos) } }
+    }
+}
+
+impl std::fmt::Debug for CallArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries((0..self.len()).map(|i| self.get(i))).finish()
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct ByteCodeEmitter {
     bytecode: Vec<u8>,
@@ -202,34 +243,17 @@ pub(crate) struct ByteCode {
     pub(crate) bytecode: Box<[u8]>,
 }
 
-/// The enum representation of [`VaryingOperand`] values.
-enum VaryingOperandVariant {
-    U8(u8),
-    U16(u16),
-    U32(u32),
-}
-
-#[derive(Debug, Clone, Copy)]
-/// A varying operand is a value that can be either a u8, u16 or u32.
+/// An expanding, non-frequent operand of an instruction. GGS-patch: always encoded as a
+/// fixed-width `u32` (see `args.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct VaryingOperand {
     value: u32,
 }
 
 impl VaryingOperand {
-    /// Create a new [`VaryingOperand`] from a u32 value.
+    /// Create a new [`VaryingOperand`] from a u32.
     pub(crate) fn new(value: u32) -> Self {
         Self { value }
-    }
-
-    /// Return the variant of the [`VaryingOperand`].
-    fn variant(self) -> VaryingOperandVariant {
-        if let Ok(value) = u8::try_from(self.value) {
-            VaryingOperandVariant::U8(value)
-        } else if let Ok(value) = u16::try_from(self.value) {
-            VaryingOperandVariant::U16(value)
-        } else {
-            VaryingOperandVariant::U32(self.value)
-        }
     }
 }
 
@@ -350,7 +374,11 @@ macro_rules! generate_opcodes {
             )*
         }
 
-        type OpcodeHandler = fn(&mut Context, usize) -> ControlFlow<CompletionRecord>;
+        // GGS-patch: the handlers (and the budget twins below) return the one-word
+        // `ControlFlow<()>` instead of `ControlFlow<CompletionRecord>` — the 24-byte
+        // record forced an sret memory round trip on EVERY instruction; the payload now
+        // crosses only on a break, stashed in `Vm::completion_out` (`stash_flow`).
+        type OpcodeHandler = fn(&mut Context, usize) -> ControlFlow<()>;
 
         const OPCODE_HANDLERS: [OpcodeHandler; 256] = {
             [
@@ -360,7 +388,7 @@ macro_rules! generate_opcodes {
             ]
         };
 
-        type OpcodeHandlerBudget = fn(&mut Context, usize, &mut u32) -> ControlFlow<CompletionRecord>;
+        type OpcodeHandlerBudget = fn(&mut Context, usize, &mut u32) -> ControlFlow<()>;
 
         const OPCODE_HANDLERS_BUDGET: [OpcodeHandlerBudget; 256] = {
             [
@@ -370,16 +398,34 @@ macro_rules! generate_opcodes {
             ]
         };
 
+        /// GGS-patch: fold a full `ControlFlow<CompletionRecord>` into the one-word
+        /// `ControlFlow<()>` the handlers return, stashing the payload on a break.
+        #[inline(always)]
+        fn stash_flow(
+            flow: ControlFlow<CompletionRecord>,
+            context: &mut Context,
+        ) -> ControlFlow<()> {
+            match flow {
+                ControlFlow::Continue(()) => ControlFlow::Continue(()),
+                ControlFlow::Break(record) => {
+                    context.vm.completion_out = Some(record);
+                    ControlFlow::Break(())
+                }
+            }
+        }
+
         $(
             paste::paste! {
                 #[inline(always)]
                 #[allow(unused_parens)]
-                fn [<handle_ $Variant:snake>](context: &mut Context, pc: usize) -> ControlFlow<CompletionRecord> {
-                    let bytes = &context.vm.frame.code_block.bytecode.bytecode;
+                fn [<handle_ $Variant:snake>](context: &mut Context, pc: usize) -> ControlFlow<()> {
+                    // GGS-patch: the frame's cached bytecode slice — one load, not the
+                    // three dependent loads of `code_block.bytecode.bytecode`.
+                    let bytes = context.vm.frame.bytecode();
                     let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
                     context.vm.frame_mut().pc = next_pc as u32;
                     let result = $Variant::operation(args, context);
-                    IntoCompletionRecord::into_completion_record(result, context)
+                    stash_flow(IntoCompletionRecord::into_completion_record(result, context), context)
                 }
             }
         )*
@@ -388,13 +434,13 @@ macro_rules! generate_opcodes {
             paste::paste! {
                 #[inline(always)]
                 #[allow(unused_parens)]
-                fn [<handle_ $Variant:snake _budget>](context: &mut Context, pc: usize, budget: &mut u32) -> ControlFlow<CompletionRecord> {
+                fn [<handle_ $Variant:snake _budget>](context: &mut Context, pc: usize, budget: &mut u32) -> ControlFlow<()> {
                     *budget = budget.saturating_sub(u32::from($Variant::COST));
-                    let bytes = &context.vm.frame.code_block.bytecode.bytecode;
+                    let bytes = context.vm.frame.bytecode();
                     let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
                     context.vm.frame_mut().pc = next_pc as u32;
                     let result = $Variant::operation(args, context);
-                    IntoCompletionRecord::into_completion_record(result, context)
+                    stash_flow(IntoCompletionRecord::into_completion_record(result, context), context)
                 }
             }
         )*
@@ -457,7 +503,7 @@ impl Context {
     pub(crate) fn execute_bytecode_instruction(
         &mut self,
         opcode: Opcode,
-    ) -> ControlFlow<CompletionRecord> {
+    ) -> ControlFlow<()> {
         let frame = self.vm.frame_mut();
         let pc = frame.pc as usize;
 
@@ -468,7 +514,7 @@ impl Context {
         &mut self,
         budget: &mut u32,
         opcode: Opcode,
-    ) -> ControlFlow<CompletionRecord> {
+    ) -> ControlFlow<()> {
         let frame = self.vm.frame_mut();
         let pc = frame.pc as usize;
 
@@ -1710,6 +1756,9 @@ generate_opcodes! {
     /// Stack: this, func, arguments_array **=>** result
     CallSpread,
 
+    /// GGS-patch: a register-staged plain call (see the Operation impl for the protocol).
+    CallRegister { dst: VaryingOperand, this: VaryingOperand, func: VaryingOperand, args: CallArgs },
+
     /// Call construct on a function.
     ///
     /// - Operands:
@@ -2216,6 +2265,4 @@ generate_opcodes! {
     Reserved61 => Reserved,
     /// Reserved [`Opcode`].
     Reserved62 => Reserved,
-    /// Reserved [`Opcode`].
-    Reserved63 => Reserved,
 }

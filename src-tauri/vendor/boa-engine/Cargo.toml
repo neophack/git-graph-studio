@@ -548,3 +548,13 @@ invalid_rust_codeblocks = "warn"
 missing_crate_level_docs = "warn"
 private_doc_tests = "warn"
 private_intra_doc_links = "warn"
+
+# GGS-patch: its own workspace root, so `cargo test` can run this vendored crate's
+# own suites from inside the tree (the app workspace keeps patch-resolving it by path).
+[workspace]
+# GGS-patch: standalone (`cargo test` inside this crate) resolves the sibling vendored
+# crates, not the unpatched crates.io ones the version numbers would fetch.
+[patch.crates-io]
+boa_ast = { path = "../boa-ast" }
+boa_parser = { path = "../boa-parser" }
+boa_gc = { path = "../boa-gc" }
