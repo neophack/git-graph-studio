@@ -157,6 +157,16 @@ export function extFileDataUrl(extId: string, relPath: string): Promise<string |
 	return pending;
 }
 
+/** Drop one extension's cached package-file data URLs: an upgrade replaced its bytes on disk
+ *  (and a moved icon must fall to the label-text fallback, not keep serving the retired
+ *  version's image forever). The next read follows the install's new version. */
+function forgetExtDataUrls(extId: string): void {
+	const prefix = `${extId}:`;
+	for (const key of dataUrlCache.keys()) {
+		if (key.startsWith(prefix)) dataUrlCache.delete(key);
+	}
+}
+
 /** A diff a page asks the workbench to open (the editor input's shape minus the kind):
  *  the two sides carry a revision/path/label and whether that side exists. */
 export interface PageDiffRequest {
@@ -710,8 +720,11 @@ export class ExtensionHost {
 	private readonly webviewViews = new Map<string, WebviewViewRecord>();
 	/** View ids whose provider the host already asked the frame to resolve. */
 	private readonly resolvedWebviewViews = new Set<string>();
-	/** Workbench hook: open a webview panel's tab (wired like `onOpenPage`). */
-	onOpenWebview: ((panelId: number, title: string, extId: string) => void) | null = null;
+	/** Workbench hook: open a webview panel's tab (wired like `onOpenPage`). The placement
+	 *  is the create's `showOptions.viewColumn` (Beside is the side group, as VS Code places
+	 *  it — claude-code opens its chat there and locks the group right after); `focus` is
+	 *  false only under `preserveFocus`, when the panel's group must not steal the focus. */
+	onOpenWebview: ((panelId: number, title: string, extId: string, placement?: EditorPlacement, focus?: boolean) => void) | null = null;
 	/** Workbench hook: close a webview panel's tab by its editor id (extension-side dispose). */
 	onCloseWebviewTab: ((tabId: string) => void) | null = null;
 	/** Workbench hook: focus a webview panel's tab (`panel.reveal()`). */
@@ -1244,6 +1257,9 @@ export class ExtensionHost {
 	private async reload(extId: string): Promise<void> {
 			this.deactivate(extId);
 		removeContributions(extId);
+		// The package's own files may all have changed with the version: the cached icon
+		// data URLs follow the new install, never the retired bytes.
+		forgetExtDataUrls(extId);
 		// An upgraded process package restarts fresh: the old backend does not survive it.
 		await invoke('ext_process_stop', { extId }).catch(() => undefined);
 		const ext = (await this.list().catch(() => [] as ExtInfo[])).find((e) => e.id === extId);
@@ -2298,7 +2314,7 @@ export class ExtensionHost {
 				// A webview panel needs its extension's frame alive (events route back into it);
 				// an extension page has none and gets the clear error instead.
 				if (!this.frames.has(extId)) throw new Error('webview panels need a running extension frame');
-				const [framePanelId, , title] = args as [number | null, string, string];
+				const [framePanelId, , title, column, preserveFocus] = args as [number | null, string, string, unknown, boolean | undefined];
 				const panelId = framePanelId ?? this.nextWebviewPanelId++;
 				// A backend restart resets its panel sequence (a live backend's ids only
 				// grow), so a create reusing this extension's live panel id means every
@@ -2328,9 +2344,9 @@ export class ExtensionHost {
 						this.closeWebview(view.extId, view.panelId);
 					}
 				}
-				this.webviews.set(this.webviewKey(extId, panelId), { panelId, extId, title, html: '', frame: null, pending: [], loaded: false, painted: null, loadGrace: null, firstPaintTimer: null });
-				extLog('info', 'host', `webview ${extId}#${panelId}: created ("${title}")`);
-				this.onOpenWebview?.(panelId, title, extId);
+			this.webviews.set(this.webviewKey(extId, panelId), { panelId, extId, title, html: '', frame: null, pending: [], loaded: false, painted: null, loadGrace: null, firstPaintTimer: null });
+			extLog('info', 'host', `webview ${extId}#${panelId}: created ("${title}")`);
+			this.onOpenWebview?.(panelId, title, extId, ExtensionHost.placementOf(column), preserveFocus !== true);
 				return Promise.resolve(panelId);
 			}
 			case 'webview.setTitle': {

@@ -2993,11 +2993,18 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 				else if (hideAfter && typeof (hideAfter as PromiseLike<unknown>).then === 'function') (hideAfter as PromiseLike<unknown>).then(dispose, dispose);
 				return new Disposable(dispose);
 			},
-			createWebviewPanel: (viewType: string, title: string, _showOptions?: unknown, options?: Record<string, unknown>) => {
+			createWebviewPanel: (viewType: string, title: string, showOptions?: unknown, options?: Record<string, unknown>) => {
 				const panelId = ++webviewSeq;
 				const panel = new WebviewPanel(bridge, ctx, viewType, title, options ?? {}, panelId);
 				webviewPanels.set(panelId, panel);
-				send('webview.create', [panelId, viewType, title]);
+				// VS Code's showOptions: a bare ViewColumn or `{ viewColumn, preserveFocus }`. Both
+				// ride the create — the host turns the column into a placement (Beside is what an
+				// extension's chat panel opens in; claude-code locks the group it lands a new
+				// column in right after, exactly as in VS Code) and skips focusing it while
+				// preserveFocus holds.
+				const column = typeof showOptions === 'number' ? showOptions : (showOptions as { viewColumn?: unknown } | null | undefined)?.viewColumn;
+				const preserveFocus = typeof showOptions === 'object' && showOptions !== null && (showOptions as { preserveFocus?: unknown }).preserveFocus === true;
+				send('webview.create', [panelId, viewType, title, column, preserveFocus]);
 				return panel;
 			},
 			registerWebviewViewProvider: (viewId: string, provider: { resolveWebviewView: (view: unknown, context: unknown, token: unknown) => unknown }, _options?: unknown) => {

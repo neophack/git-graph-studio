@@ -694,6 +694,18 @@ describe('the VS Code API surface, round one (messages, picks, progress, status 
 		expect(panel.visible).toBe(false);
 	});
 
+	it('a webview panel create carries its ViewColumn and preserveFocus to the host', async () => {
+		const { api, requests } = shim();
+		// claude-code's chat: a bare ViewColumn.Beside, no preserveFocus — the panel's
+		// group is placed beside the code and takes the focus, so the group the extension
+		// locks right after is its own, as in VS Code.
+		api.window.createWebviewPanel('demo.view', 'Demo', -2);
+		// The options-object form: an explicit column with the focus preserved.
+		api.window.createWebviewPanel('demo.view', 'Demo', { viewColumn: 3, preserveFocus: true });
+		expect(requests[0]).toMatchObject({ method: 'webview.create', args: [1, 'demo.view', 'Demo', -2, false] });
+		expect(requests[1]).toMatchObject({ method: 'webview.create', args: [2, 'demo.view', 'Demo', 3, true] });
+	});
+
 	it('a configChanged host event refreshes the settings and fires onDidChangeConfiguration', async () => {
 		const { api } = shim();
 		const fired: unknown[] = [];
@@ -811,6 +823,22 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		// The tab closing on its own (user close) runs the disposer: same notification, once.
 		dispose();
 		expect(sent.filter((m) => (m as { type?: string }).type === '__studioExtEvent' && (m as { event?: string }).event === 'webviewDisposed')).toHaveLength(1);
+	});
+
+	it('webview.create resolves the create\'s ViewColumn into the tab open\'s placement and focus', async () => {
+		const { host } = hostWithFrame();
+		const opened: [number, string, string, unknown, boolean | undefined][] = [];
+		host.onOpenWebview = (panelId, title, extId, placement, focus) => opened.push([panelId, title, extId, placement, focus]);
+		await host['serve']('webview.create', [1, 'demo.view', 'Demo Panel', -2, false], 'acme.demo', {} as never);
+		// An older frame's create carries no showOptions: the focused group, focus kept —
+		// the behavior before placements existed.
+		await host['serve']('webview.create', [2, 'demo.view', 'Demo Panel'], 'acme.demo', {} as never);
+		await host['serve']('webview.create', [3, 'demo.view', 'Demo Panel', 2, true], 'acme.demo', {} as never);
+		expect(opened).toEqual([
+			[1, 'Demo Panel', 'acme.demo', 'beside', true],
+			[2, 'Demo Panel', 'acme.demo', undefined, true],
+			[3, 'Demo Panel', 'acme.demo', 2, false]
+		]);
 	});
 
 	it('a webview mounted into a still-offscreen pane loads once the pane joins the document', async () => {
