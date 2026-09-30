@@ -902,6 +902,12 @@ const OBJ_CAN_FD_MESSAGE_64: u32 = 101;
 /// Flags 1 count 10-microsecond units; anything else (CANoe and python-can write 2) is
 /// nanoseconds.
 fn object_header(buf: &[u8], pos: usize, version: u16) -> Option<(u64, u32)> {
+    // The header reads reach pos+32; the walk's own bound only guarantees pos+16 (a
+    // truncated container can end an object 20-31 bytes in). Past-the-end is damage —
+    // the walk skips it instead of indexing out of bounds.
+    if pos + 32 > buf.len() {
+        return None;
+    }
     let ts = u64_at(buf, pos + 24);
     let flags = u32_at(buf, pos + 16);
     let _ = version;
@@ -1486,6 +1492,14 @@ fn parse_hms(rest: &mut std::iter::Peekable<std::str::SplitWhitespace<'_>>) -> O
         } else if meridiem == "pm" {
             if h != 12.0 {
                 day += 12.0 * 3_600.0;
+                // A log can carry a 24-hour time WITH a stray PM token
+                // ("13:53:33.005 PM" appears in real CANoe ctime lines): 13..23 is
+                // already the afternoon, so the 12-hour addition would land past
+                // midnight and shift every derived timestamp by 12 hours. The 24-hour
+                // value wins.
+                if day >= 24.0 * 3_600.0 {
+                    day -= 12.0 * 3_600.0;
+                }
             }
             rest.next();
         }
@@ -3962,6 +3976,17 @@ base hex timestamps absolute
         );
         assert!(
             (parse_asc_date("14.09.2026 08:30:00").unwrap() - (days * 86_400.0 + 30_600.0)).abs()
+                < 1e-6
+        );
+        // A stray PM token after an already-afternoon 24-hour time (real CANoe ctime
+        // lines carry this hybrid) must not shift the timestamp by 12 hours.
+        assert!(
+            (parse_asc_date("Fri Feb 14 13:53:33.005 PM 2025").unwrap()
+                - (days_from_civil(2025, 2, 14) as f64 * 86_400.0
+                    + 13.0 * 3_600.0
+                    + 53.0 * 60.0
+                    + 33.005))
+                .abs()
                 < 1e-6
         );
         assert!(parse_asc_date("some weekday nonsense").is_none());

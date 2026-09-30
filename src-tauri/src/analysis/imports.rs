@@ -235,13 +235,12 @@ fn cycles_of(edges: &[(String, String)]) -> Vec<Vec<String>> {
             if recursed {
                 continue;
             }
-            let own_low = lowlink.get(&node).copied().unwrap_or(usize::MAX);
-            let children_low = children
-                .iter()
-                .filter_map(|c| lowlink.get(c).copied())
-                .min()
-                .unwrap_or(usize::MAX);
-            let merged = own_low.min(children_low);
+            // Tree edges were already merged at child-pop time and back edges in-loop;
+            // folding every child's lowlink in again here would also fold in children
+            // whose SCC completed in an EARLIER outer iteration (cross edges — Tarjan's
+            // forbidden merge). A poisoned lowlink keeps nodes on the stack forever and
+            // silently drops the genuine cycles reported after them.
+            let merged = lowlink.get(&node).copied().unwrap_or(usize::MAX);
             lowlink.insert(node, merged);
             if merged == index.get(&node).copied().unwrap_or(usize::MAX) {
                 let mut component: Vec<&str> = Vec::new();
@@ -315,6 +314,34 @@ mod tests {
         assert_eq!(
             graph.cycles,
             vec![vec!["a.js".to_owned(), "b.js".to_owned()]]
+        );
+    }
+
+    #[test]
+    fn a_cross_edge_into_an_earlier_cycle_does_not_hide_a_later_one() {
+        // The forbidden merge: `z -> x` is a CROSS edge when the {x, y} cycle completed
+        // in an earlier outer iteration — x is off-stack, and its poisoned-low lowlink
+        // must not reach z. The independent {w, z} cycle must still report regardless of
+        // which root the (unordered) outer loop starts from.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "x.js", "import { y } from './y';\n");
+        write(dir.path(), "y.js", "import { x } from './x';\n");
+        write(dir.path(), "w.js", "import { z } from './z';\n");
+        write(dir.path(), "z.js", "import { x } from './x';\nimport { w } from './w';\n");
+        let data = built(dir.path());
+        let graph = import_graph(&data);
+        let mut cycles = graph.cycles.clone();
+        for cycle in &mut cycles {
+            cycle.sort();
+        }
+        cycles.sort();
+        assert!(
+            cycles.contains(&vec!["x.js".to_owned(), "y.js".to_owned()]),
+            "the x/y cycle must report: {cycles:?}"
+        );
+        assert!(
+            cycles.contains(&vec!["w.js".to_owned(), "z.js".to_owned()]),
+            "the w/z cycle must report even when the DFS roots order adversarially: {cycles:?}"
         );
     }
 

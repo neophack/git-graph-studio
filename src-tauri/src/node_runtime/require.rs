@@ -371,8 +371,14 @@ fn resolve_path(target: &Path) -> Option<PathBuf> {
                     if entry.is_file() {
                         return Some(entry);
                     }
-                    if let Some(resolved) = resolve_path(&entry) {
-                        return Some(resolved);
+                    // `"main": "."` (legal Node, packages ship it) resolves back to this
+                    // very directory — recursing verbatim would loop until the stack
+                    // overflows and kills the whole ggs-node host. The frame-side
+                    // resolver has skipped dot-mains for the same reason.
+                    if entry != target {
+                        if let Some(resolved) = resolve_path(&entry) {
+                            return Some(resolved);
+                        }
                     }
                 }
             }
@@ -637,7 +643,17 @@ fn evaluate_module(path: &Path, source: &str, context: &mut Context) -> JsResult
         ],
         context,
     );
-    result?;
+    if result.is_err() {
+        // Node's loader removes a module that threw mid-evaluation from the require
+        // cache; leaving the pre-evaluation `exports` in would answer every later
+        // require with the partial object instead of re-evaluating (the standard
+        // `try { require('dep') } catch {}` availability probe would freeze a failure
+        // in place forever).
+        with_state(|state| {
+            state.module_cache.remove(&path.to_path_buf());
+        });
+        result?;
+    }
     if phase_trace {
         eprintln!(
             "[perf] {} executed in {} ms",

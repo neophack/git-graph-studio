@@ -227,10 +227,34 @@ impl AnalysisIndex {
             }
         };
         let built = AnalysisData::build(root, threads, &report, &|| !is_current());
-        // A cancelled build leaves the previous analysis standing, like the symbol index.
+        // A cancelled build leaves the previous analysis standing, like the symbol index —
+        // and its STATUS too: the progress report left "Building N/M" on the note, and a
+        // cancelled build never clears it (a report run bumps the same generation, so
+        // "open a report while a rebuild streams" strands the stale counter forever).
         let data = match built {
             Some(data) => data,
             None => {
+                if let Some(existing) = self.data(root) {
+                    // The cancelled build's generation was retired, the installed
+                    // analysis stands: restore its READY status over the stranded
+                    // "Building N/M" note.
+                    let status = existing.lock().map(|data| ready_status(&data));
+                    if let Ok(status) = status {
+                        self.note(root, status);
+                    }
+                } else {
+                    self.note(
+                        root,
+                        AnalysisStatus {
+                            state: AnalysisState::Empty,
+                            done: 0,
+                            total: 0,
+                            files: 0,
+                            symbols: 0,
+                            calls: 0,
+                        },
+                    );
+                }
                 if let Some(channel) = channel {
                     let _ = channel.send(AnalysisIndexEvent::Done {
                         files: 0,

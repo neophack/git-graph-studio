@@ -1856,24 +1856,54 @@ fn strip_jsonc_comments(text: &str) -> String {
 
 /// Drop commas whose next non-whitespace character is `]` or `}` (JSONC's trailing commas).
 fn strip_trailing_commas(text: &str) -> String {
+    // String-aware: a comma inside a string literal is content, not syntax — `"\d{2,}"`
+    // followed by `}` must keep its comma (dropping it silently rewrote a grammar's
+    // regex into a different one, and the manifest still parsed). The same in_string /
+    // escaped walk `strip_jsonc_comments` runs.
     let mut out = String::with_capacity(text.len());
     let mut pending_comma = false;
+    let mut pending_whitespace = String::new();
+    let mut in_string = false;
+    let mut escaped = false;
     for ch in text.chars() {
+        if in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == ',' {
+            // Held back — with the whitespace that follows it — until the next
+            // non-whitespace character says whether it was a trailing comma.
+            pending_comma = true;
+            pending_whitespace.clear();
+            continue;
+        }
         if pending_comma {
             if ch.is_whitespace() {
-                out.push(ch);
+                pending_whitespace.push(ch);
                 continue;
             }
             if ch != ']' && ch != '}' {
+                // A live comma: it goes back exactly where it was, before the gap.
                 out.push(',');
+                out.push_str(&pending_whitespace);
+            } else {
+                // Trailing: the comma goes, the whitespace between stays.
+                out.push_str(&pending_whitespace);
             }
+            pending_whitespace.clear();
             pending_comma = false;
         }
-        if ch == ',' {
-            pending_comma = true;
-        } else {
-            out.push(ch);
+        if ch == '"' {
+            in_string = true;
         }
+        out.push(ch);
     }
     if pending_comma {
         out.push(',');
@@ -2413,8 +2443,11 @@ fn percent_decode(input: &str) -> String {
                     }
                 }
             }
+            // A literal plus: URI PATH semantics (the only use here — the `ggs://`
+            // request path). Plus-for-space is form/query encoding, and decoding it
+            // here 404s every asset whose name carries a `+` (`a+b.js`, `c++/`).
             b'+' => {
-                out.push(b' ');
+                out.push(b'+');
                 at += 1;
             }
             byte => {
@@ -3691,6 +3724,25 @@ mod vsix_tests {
             .unwrap();
         zip.finish().unwrap();
         assert!(read_vsix_manifest(&nobundle).is_ok());
+    }
+
+    #[test]
+    fn strip_trailing_commas_is_string_aware() {
+        // A comma inside a string literal followed by `}` is content: `"\d{2,}"` keeps
+        // its comma (the old stripper deleted it and silently rewrote the regex).
+        assert_eq!(
+            strip_trailing_commas(r#"{"a": "\d{2,}"}"#),
+            r#"{"a": "\d{2,}"}"#
+        );
+        // Real trailing commas still strip; the string's own comma survives.
+        assert_eq!(
+            strip_trailing_commas("{\n  \"a\": 1,\n  \"b\": [2, 3,],\n  \"c\": \"x,\",\n}"),
+            "{\n  \"a\": 1,\n  \"b\": [2, 3],\n  \"c\": \"x,\"\n}"
+        );
+        assert_eq!(
+            strip_trailing_commas(r#"{"a": "\"quoted,\"", "b": [1,],}"#),
+            r#"{"a": "\"quoted,\"", "b": [1]}"#
+        );
     }
 
     #[test]

@@ -135,7 +135,14 @@ impl McpServer {
     fn log_call(&self, tool: &str, args: &Value, ok: bool, elapsed: std::time::Duration) {
         let mut brief = args.to_string();
         if brief.len() > 120 {
-            brief.truncate(120);
+            // A byte cut can land inside a multi-byte character (a CJK path, an emoji in
+            // any argument) — `truncate` panics on a non-boundary and the panic unwinds
+            // out of `run`, killing the whole MCP server mid-session. Cut on a boundary.
+            let mut cut = 120.min(brief.len());
+            while !brief.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            brief.truncate(cut);
             brief.push('…');
         }
         append_log(

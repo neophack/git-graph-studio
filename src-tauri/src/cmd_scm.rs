@@ -539,8 +539,15 @@ pub async fn scm_blame(
     repo: Option<String>,
 ) -> Result<Vec<BlameLine>, String> {
     let git = git(&state, repo)?;
-    let output = git.output(&["blame", "--porcelain", "--", &path])?;
-    Ok(parse_blame(&output))
+    // Blame of a large file runs seconds to minutes — off the async runtime's workers,
+    // the same way `scm_status` and `file_log` run theirs (a blocking worker starves
+    // every other IPC command, the watcher-paced status refresh included).
+    tauri::async_runtime::spawn_blocking(move || {
+        let output = git.output(&["blame", "--porcelain", "--", &path])?;
+        Ok(parse_blame(&output))
+    })
+    .await
+    .map_err(|error| format!("blame failed: {error}"))?
 }
 
 #[tauri::command]

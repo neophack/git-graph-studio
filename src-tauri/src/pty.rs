@@ -101,14 +101,31 @@ pub fn pty_create(app: TauriAppHandle, id: u32, cols: u16, rows: u16) -> Result<
     let event_app = app.clone();
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
+        // Carry the tail of a split multi-byte UTF-8 sequence into the next read: a
+        // per-read lossy decode turns a sequence the kernel split at 8 KiB into U+FFFD
+        // garbage in the terminal (a CJK filename in `ls`, a localized git message).
+        let mut carry: Vec<u8> = Vec::new();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    let payload = String::from_utf8_lossy(&buf[..n]).into_owned();
-                    let _ = event_app.emit(format!("studio://pty-output-{id}").as_str(), payload);
+                    carry.extend_from_slice(&buf[..n]);
+                    // Flush up to the last complete boundary; keep the tail bytes.
+                    let complete = match std::str::from_utf8(&carry) {
+                        Ok(_) => carry.len(),
+                        Err(error) => error.valid_up_to(),
+                    };
+                    if complete > 0 {
+                        let payload = String::from_utf8_lossy(&carry[..complete]).into_owned();
+                        let _ = event_app.emit(format!("studio://pty-output-{id}").as_str(), payload);
+                        carry.drain(..complete);
+                    }
                 }
             }
+        }
+        if !carry.is_empty() {
+            let payload = String::from_utf8_lossy(&carry).into_owned();
+            let _ = event_app.emit(format!("studio://pty-output-{id}").as_str(), payload);
         }
         let _ = event_app.emit(format!("studio://pty-exit-{id}").as_str(), ());
         if let Some(state) = event_app.try_state::<Mutex<PtyState>>() {

@@ -339,6 +339,14 @@ impl ProcessHostState {
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
+        // The handshake's reply channel is registered BEFORE the reader thread exists:
+        // a backend that dies instantly must be failed by the reader's EOF drain as
+        // "the process exited", not stranded in a map the drain already passed — the
+        // start would then wait out the full handshake timeout reporting a bogus
+        // "did not answer initialize".
+        let (handshake_tx, handshake_rx) = mpsc::channel();
+        pending.lock().unwrap().insert(1, handshake_tx.clone());
+
         // The stdout reader: resolves responses, records notifications, forwards a real-Node
         // host's `ggs.hostRequest`s into the workbench, and — on EOF — fails everything
         // waiting on the backend, forgets the handle and reaps the child. The pending map is
@@ -372,8 +380,7 @@ impl ProcessHostState {
         };
         procs.insert(ext_id.to_owned(), handle);
 
-        let (tx, rx) = mpsc::channel();
-        pending.lock().unwrap().insert(1, tx);
+        let (_tx, rx) = (handshake_tx, handshake_rx);
         let workspace_folders = self
             .workspace
             .lock()

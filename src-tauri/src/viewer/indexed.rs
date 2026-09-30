@@ -98,13 +98,18 @@ fn build_index(
                 let raw = start + at_newline as u64;
                 match utf16 {
                     Some(little) => {
+                        // LE stores a code unit low-byte-first (\n = 0A 00), BE high-first
+                        // (\n = 00 0A). A break is real when the memchr hit is the 0x0A of
+                        // a CORRECTLY ALIGNED pair — the neighbour check must look at that
+                        // pair's OTHER byte, on the side the encoding dictates. (The old
+                        // alignment branch checked `at_newline + 1` for BE too — the NEXT
+                        // character's high byte — so a line break after `\n` + non-ASCII
+                        // was missed and two lines merged in the index.)
                         let low_first = (raw - bom).is_multiple_of(2);
-                        let paired = if little == low_first {
-                            buf.get(at_newline + 1).copied() == Some(0)
+                        let paired = if little {
+                            low_first && buf.get(at_newline + 1).copied() == Some(0)
                         } else {
-                            buf.get(at_newline).copied() == Some(0)
-                                && at_newline > 0
-                                && buf[at_newline - 1] == b'\n'
+                            !low_first && at_newline > 0 && buf[at_newline - 1] == 0
                         };
                         if paired {
                             found.push(raw + 1);
@@ -700,6 +705,48 @@ mod tests {
             window.len(),
             again.len()
         );
+    }
+
+    #[test]
+    fn utf16be_line_breaks_survive_a_non_ascii_neighbour() {
+        // `\n` followed by non-ASCII in UTF-16BE: the break's 0x0A sits at an odd
+        // offset and its pair's 0x00 is the byte BEFORE it — the old check looked at
+        // the byte after (the next character's high byte), failed the pairing, and the
+        // two lines merged in the index.
+        let mut bytes = vec![0xFE, 0xFF];
+        // The line AFTER the probed break must start with a NON-ASCII character: an
+        // ASCII head's high byte is 0x00, which makes the old (wrong-side) check pass
+        // by accident.
+        for unit in "alpha\n\u{4F60}c\ngamma\n".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_be_bytes());
+        }
+        let (_dir, path) = scratch_bytes("be.txt", &bytes);
+        let head = open_indexed(&path).expect("head");
+        assert_eq!(head.encoding, "utf-16be");
+        let utf16 = utf16_of(&head.encoding);
+        let index =
+            build_index(&path, head.bom, head.total, utf16, head.bom).expect("index");
+        // Three lines of text plus the empty line after the last break — the count the
+        // viewer shows; the failure mode this pins is `alpha\nb你c` merging into one.
+        assert_eq!(
+            index.line_count(),
+            4,
+            "three lines indexed (plus the empty tail), none merged"
+        );
+        let doc = IndexedDoc {
+            path: path.clone(),
+            total: head.total,
+            encoding: head.encoding.clone(),
+            head_text: head.head_text.clone(),
+            file: Mutex::new(None),
+            estimate: 1,
+            index: RwLock::new(Some(Arc::new(index))),
+            error: Mutex::new(None),
+            gate: TailGate::pending(),
+            find_gen: AtomicU64::new(0),
+        };
+        let window = doc.window(0, 4).expect("window");
+        assert_eq!(window, vec!["alpha", "\u{4F60}c", "gamma", ""]);
     }
 
     #[test]
