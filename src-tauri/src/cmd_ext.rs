@@ -2260,10 +2260,28 @@ fn serve_ext_asset_from(
         return ext_not_found(&requested);
     }
     let file = home.join(package).join(rel.join("/"));
-    let Ok(bytes) = std::fs::read(&file) else {
-        return ext_not_found(&requested);
+    // A retired version's directory is gone while one of its pages lives on: another app
+    // instance (or this one's boot pass) upgraded the package in this shared store, and a
+    // page activated before the upgrade still composes its asset URLs out of the old
+    // directory name. The package's current install answers for its retired one — the page
+    // keeps its assets instead of breaking on every image — and an id nothing installed
+    // stays a 404. The HTML composition applies to the fallback too, so a reloaded page
+    // even re-points its own URLs at the living directory.
+    let serving = match std::fs::read(&file) {
+        Ok(bytes) => (file, bytes),
+        Err(_) => {
+            let Some(current) = current_install_dir(home, package) else {
+                return ext_not_found(&requested);
+            };
+            let current_file = home.join(&current).join(rel.join("/"));
+            match std::fs::read(&current_file) {
+                Ok(bytes) => (current_file, bytes),
+                Err(_) => return ext_not_found(&requested),
+            }
+        }
     };
-    let is_page = file
+    let (serving_path, bytes) = serving;
+    let is_page = serving_path
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("html") || ext.eq_ignore_ascii_case("htm"));
     let content = if is_page {
@@ -2272,7 +2290,10 @@ fn serve_ext_asset_from(
         bytes
     };
     tauri::http::Response::builder()
-        .header(tauri::http::header::CONTENT_TYPE, content_type(&file))
+        .header(
+            tauri::http::header::CONTENT_TYPE,
+            content_type(&serving_path),
+        )
         // Content-Length is load-bearing on WebView2: a custom-scheme response without it
         // leaves the loader waiting for a stream end that never comes, and a multi-megabyte
         // bundle (claude-code's 5.4 MB webview/index.js) never finishes loading — the page
@@ -2299,6 +2320,25 @@ fn ext_not_found(requested: &str) -> tauri::http::Response<Vec<u8>> {
         )
         .body(format!("no such extension asset: {requested}").into_bytes())
         .expect("a response with a valid header value")
+}
+
+/// The directory name of the package's current install, when `requested` names a retired
+/// version of an installed package (`{id}-{version}` matched against the manifests' real
+/// ids, never by splitting the name: an id that is another's prefix must not steal its
+/// requests — the longest matching id wins). None when nothing installed carries the id.
+fn current_install_dir(home: &Path, requested: &str) -> Option<String> {
+    let mut best: Option<(usize, String)> = None;
+    for info in list_installed(home).ok()? {
+        let prefix = format!("{}-", info.id);
+        if requested
+            .strip_prefix(&prefix)
+            .is_some_and(|tail| !tail.is_empty())
+            && best.as_ref().is_none_or(|(len, _)| info.id.len() > *len)
+        {
+            best = Some((info.id.len(), format!("{}-{}", info.id, info.version)));
+        }
+    }
+    best.map(|(_, dir)| dir)
 }
 
 fn content_type(file: &Path) -> &'static str {
@@ -3247,6 +3287,73 @@ mod ext_asset_tests {
                 .status(),
             tauri::http::StatusCode::NOT_FOUND
         );
+    }
+
+    /// A scratch home whose one package (`acme.demo` 2.0.0) carries a manifest, so the
+    /// retired-version fallback can resolve it: `web/logo.svg` and `web/view.html` exist.
+    fn home_with_current_install() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("acme.demo-2.0.0").join("web");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            tmp.path().join("acme.demo-2.0.0").join("package.json"),
+            br#"{"name": "demo", "publisher": "acme", "version": "2.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("view.html"),
+            b"<html><head><title>t</title></head><body></body></html>",
+        )
+        .unwrap();
+        std::fs::write(dir.join("logo.svg"), b"<svg xmlns='...'></svg>").unwrap();
+        tmp
+    }
+
+    #[test]
+    fn a_retired_versions_assets_are_served_from_the_current_install() {
+        // Another instance upgraded the package in this shared store while a page of the old
+        // version stayed open: the page's asset URLs still name the deleted directory
+        // (claude-code's welcome art 404ing into a broken image), and the package's current
+        // install answers for them.
+        let tmp = home_with_current_install();
+        let page = serve_ext_asset_from(tmp.path(), &request_for("/acme.demo-1.9.0/web/view.html"));
+        assert_eq!(page.status(), tauri::http::StatusCode::OK);
+        assert!(String::from_utf8_lossy(page.body()).contains("acquireGgsApi"));
+        let logo = serve_ext_asset_from(tmp.path(), &request_for("/acme.demo-1.9.0/web/logo.svg"));
+        assert_eq!(logo.status(), tauri::http::StatusCode::OK);
+        assert_eq!(logo.body().as_slice(), b"<svg xmlns='...'></svg>");
+        assert_eq!(logo.headers().get("content-type").unwrap(), "image/svg+xml");
+        // An id nothing installed, and a missing file of a retired version, stay 404s.
+        assert_eq!(
+            serve_ext_asset_from(tmp.path(), &request_for("/other.pkg-1.0.0/web/logo.svg"))
+                .status(),
+            tauri::http::StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            serve_ext_asset_from(tmp.path(), &request_for("/acme.demo-1.9.0/web/missing.css"))
+                .status(),
+            tauri::http::StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn an_id_that_is_anothers_prefix_never_steals_the_fallback() {
+        // `acme.demo` and `acme.demo.pro` are both installed; a retired `acme.demo.pro` must
+        // resolve to its own install (the longest matching id), not to `acme.demo`'s.
+        let tmp = home_with_current_install();
+        let dir = tmp.path().join("acme.demo.pro-1.0.0").join("web");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            tmp.path().join("acme.demo.pro-1.0.0").join("package.json"),
+            br#"{"name": "demo.pro", "publisher": "acme", "version": "1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("logo.svg"), b"<svg>pro</svg>").unwrap();
+        let pro = serve_ext_asset_from(
+            tmp.path(),
+            &request_for("/acme.demo.pro-0.9.0/web/logo.svg"),
+        );
+        assert_eq!(pro.body().as_slice(), b"<svg>pro</svg>");
     }
 
     #[test]
