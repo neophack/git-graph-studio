@@ -11,6 +11,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { hasBookmark, toggleBookmark } from './bookmarks';
 import { diagnosticsExtension } from './editorDiagnosticsView';
 import { extensionDecorationsExtension } from './editorDecorationsView';
+import { extensionProviderExtensions } from './editorProviderViews';
 import { samePath } from './editorDiagnostics';
 import { loadAnalysisPages, loadCanViews, loadCallTree, loadFastView, loadFileHistory, loadFolderCompare, loadHexCompare, loadHexView, loadMerge, loadMergeEditor, loadSnippetRegistry, loadSymbolDbView, loadTextEditor } from './lazy';
 // The hex and CAN views are async chunks (lazy.ts): a binary or a CAN trace is the exception
@@ -1462,7 +1463,7 @@ export class EditorGroup {
 				extensions: [
 					...baseExtensions(false, editor.input.kind === 'file' ? editor.input.path : editor.label),
 					...completionExtension(editor.input.kind === 'file' ? editor.input.path : editor.label),
-					...(editor.input.kind === 'file' ? [diagnosticsExtension(editor.input.path), extensionDecorationsExtension(editor.input.path)] : []),
+					...(editor.input.kind === 'file' ? [diagnosticsExtension(editor.input.path), extensionDecorationsExtension(editor.input.path), extensionProviderExtensions(editor.input.path)] : []),
 					bookmarkGutter(editor.input.kind === 'file' ? editor.input.path : ''),
 					languageSlot.of([]),
 					blameSlot.of([]),

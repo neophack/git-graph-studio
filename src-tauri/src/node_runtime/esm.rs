@@ -138,13 +138,26 @@ fn load_path(path: &Path, context: &mut Context) -> JsResult<Module> {
                 JsNativeError::error().with_message(format!("{}: {error}", path.display())),
             )
         })?;
-        Module::parse(Source::from_bytes(&source).with_path(path), None, context).map_err(
-            |error| {
-                JsError::from_native(
-                    JsNativeError::syntax().with_message(format!("{}: {error}", path.display())),
+        // GGS-patch: the register-local compile of a big third-party module can PANIC
+        // inside Boa's scope analysis (Kimi Code's 8.8 MB entry tripped "binding must
+        // exist" in the bytecompiler's var instantiation). The panic unwinds through
+        // the JS thread's job — contained since the job-level guard — but the module
+        // still failed. The degrade: re-parse with every binding kept in its
+        // environment (the module twin of the CommonJS path's all-escaping recompile),
+        // and the compile degrades instead of the package dying.
+        Module::parse(Source::from_bytes(&source).with_path(path), None, context).or_else(
+            |_| {
+                Module::parse_all_bindings_escaping(
+                    Source::from_bytes(&source).with_path(path),
+                    None,
+                    context,
                 )
             },
-        )?
+        ).map_err(|error| {
+            JsError::from_native(
+                JsNativeError::syntax().with_message(format!("{}: {error}", path.display())),
+            )
+        })?
     } else {
         let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
         let exports = require::require(&parent, &path.display().to_string(), context)?;
@@ -246,7 +259,30 @@ fn synthetic(value: JsValue, path: Option<PathBuf>, context: &mut Context) -> Js
 pub(crate) fn require_esm(path: &Path, context: &mut Context) -> JsResult<JsValue> {
     let module = load_path(path, context)?;
     let promise = module.load_link_evaluate(context);
-    settle(context, promise.into()).map_err(|message| {
+    let result = settle(context, promise.into());
+    // GGS-patch: "access of uninitialized binding" on an ESM entry is usually the
+    // register-local compile's static TDZ throw firing on a use that runs AFTER
+    // initialization (the vendor note: wrong for every such site) — real Node runs the
+    // same file. The scripts path already recompiles all-escaping on that trip; the
+    // module path now does too: re-parse with every binding in its environment, replace
+    // the cache entry, and evaluate once more.
+    if let Err(message) = &result {
+        if message.contains("access of uninitialized binding") {
+            with_state(|state| {
+                state.esm_cache.remove(path);
+            });
+            let module = load_path(path, context)?;
+            let promise = module.load_link_evaluate(context);
+            settle(context, promise.into()).map_err(|retried| {
+                JsError::from_native(
+                    JsNativeError::error()
+                        .with_message(format!("{}: {retried}", path.display())),
+                )
+            })?;
+            return Ok(module.namespace(context).into());
+        }
+    }
+    result.map_err(|message| {
         JsError::from_native(
             JsNativeError::error().with_message(format!("{}: {message}", path.display())),
         )

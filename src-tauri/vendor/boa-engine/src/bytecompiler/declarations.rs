@@ -1183,7 +1183,16 @@ impl ByteCompiler<'_> {
 
                         // 2. Perform ! env.CreateMutableBinding(n, false).
                         // 3. Perform ! env.InitializeBinding(n, undefined).
-                        let binding = scope.get_binding_reference(&n).expect("binding must exist");
+                        // GGS-patch: the scope analyzer has edges — a var collected here
+                        // whose binding the analyzer's table never recorded (Kimi Code's
+                        // 8.8 MB entry tripped exactly this) PANICKED the bytecompiler
+                        // and killed the whole ggs-node runtime. Degrade instead: the
+                        // missed var skips its `undefined` initialization (reads of it
+                        // become a runtime ReferenceError on that one binding) while the
+                        // module — and the runtime — live.
+                        let Some(binding) = scope.get_binding_reference(&n) else {
+                            continue;
+                        };
                         let index = self.insert_binding(binding);
                         let value = self.register_allocator.alloc();
                         self.bytecode.emit_push_undefined(value.variable());

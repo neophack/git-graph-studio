@@ -227,6 +227,33 @@ impl<'a, R: ReadChar> Parser<'a, R> {
         self.parse_module_with_source(scope, interner).map(|x| x.0)
     }
 
+    /// GGS-patch: like [`Self::parse_module`], with every binding kept in its
+    /// environment (the module twin of `parse_script`'s all-escaping mode). The
+    /// ggs-node host re-parses a module whose register-local compile panicked.
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if an error happens during parsing.
+    pub fn parse_module_all_bindings_escaping(
+        &mut self,
+        scope: &Scope,
+        interner: &mut Interner,
+    ) -> ParseResult<boa_ast::Module>
+    where
+        R: ReadChar,
+    {
+        self.cursor.set_goal(InputElement::HashbangOrRegExp);
+        self.presize_source();
+        let (mut module, source) = ModuleParser.parse(&mut self.cursor, interner)?;
+        if let Err(reason) = module.analyze_scope_all_escaping(scope, interner) {
+            return Err(Error::general(
+                format!("invalid scope analysis: {reason}"),
+                Position::new(1, 1),
+            ));
+        }
+        Ok((module, source).0)
+    }
+
     /// Parse the full input as an [ECMAScript Module][spec] into the boa AST representation with source text.
     /// The resulting `ModuleItemList` can be compiled into boa bytecode and executed in the boa vm.
     ///

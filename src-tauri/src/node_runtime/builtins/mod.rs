@@ -208,6 +208,7 @@ pub fn register_natives(context: &mut Context) -> JsResult<()> {
             NativeFunction::from_fn_ptr(net::connect),
         ),
         ("__ggsNetWrite", 2, NativeFunction::from_fn_ptr(net::write)),
+        ("__ggsDnsLookup", 1, NativeFunction::from_fn_ptr(net::dns_lookup)),
         ("__ggsNetEnd", 1, NativeFunction::from_fn_ptr(net::end)),
         (
             "__ggsNetDestroy",
@@ -247,6 +248,19 @@ fn buffer_module(context: &mut Context) -> JsResult<JsValue> {
     let module = JsObject::with_object_proto(context.intrinsics());
     let buffer = global_object(context, "Buffer")?;
     module.set(key("Buffer"), buffer, false, context)?;
+    // GGS-patch: Blob / File ride on the Buffer global the prelude assembled (Node 18+
+    // exports them from `node:buffer`; a missing named export was a module load failure
+    // for packages that import them — Kimi Code's chunks do).
+    for name in ["Blob", "File"] {
+        if let Some(value) = global_object(context, "Buffer")?
+            .as_object()
+            .map(|object| object.get(key(name), context))
+            .transpose()?
+            .filter(|value| !value.is_undefined())
+        {
+            module.set(key(name), value, false, context)?;
+        }
+    }
     module.set(
         key("kMaxLength"),
         JsValue::from(2_147_483_647.0),

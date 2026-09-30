@@ -2263,6 +2263,20 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 		triggerCharacters: string[];
 		run: (document: unknown, position: unknown, token: unknown, context: unknown) => unknown;
 	}>();
+	/** GGS-patch: the registered hover and definition providers (see editorHovers.ts). */
+	const hoverProviders = new Map<string, {
+		selectors: unknown[];
+		run: (document: unknown, position: unknown, token: unknown) => unknown;
+	}>();
+	const definitionProviders = new Map<string, {
+		selectors: unknown[];
+		run: (document: unknown, position: unknown, token: unknown) => unknown;
+	}>();
+	/** GGS-patch: the registered file decoration providers (see explorerDecorations.ts). */
+	const fileDecorationProviders = new Map<string, {
+		label: string;
+		run: (uri: unknown, token: unknown) => unknown;
+	}>();
 
 	/** The document table entry for a path (created on first sight when `text` is given). */
 	function rememberDocument(path: string, text: string, languageId: string, uri?: Uri): { state: DocumentState; opened: boolean; changed: boolean; previous: string } {
@@ -3018,7 +3032,18 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			registerWebviewPanelSerializer: (viewType: string, _serializer: unknown) => inert(`window.registerWebviewPanelSerializer(${viewType})`),
 			registerCustomEditorProvider: (viewType: string, _provider: unknown) => inert(`window.registerCustomEditorProvider(${viewType})`),
 			registerUriHandler: (_handler: unknown) => inert('window.registerUriHandler'),
-			registerFileDecorationProvider: (_provider: unknown) => inert('window.registerFileDecorationProvider'),
+			registerFileDecorationProvider: (provider: { provideFileDecoration: (uri: unknown, token: unknown) => unknown }, options?: { label?: string }) => {
+				// GGS-patch: real file decorations — the explorer's badges/colours ask the
+				// providers (see explorerDecorations.ts, the store half; the extension's
+				// decoration crosses as its serializable subset: badge letter + colour name).
+				const id = `filedeco-${++formatterSeq}`;
+				fileDecorationProviders.set(id, { label: options?.label ?? '', run: provider.provideFileDecoration.bind(provider) });
+				send('fileDecorations.register', [{ id, label: options?.label ?? '' }]);
+				return new Disposable(() => {
+					fileDecorationProviders.delete(id);
+					send('fileDecorations.unregister', [{ id }]);
+				});
+			},
 			registerTerminalLinkProvider: (_provider: unknown) => inert('window.registerTerminalLinkProvider'),
 			registerTerminalProfileProvider: (_id: string, _provider: unknown) => inert('window.registerTerminalProfileProvider'),
 			registerTreeDataProvider: (viewId: string, treeDataProvider: TreeDataProvider<unknown>) => {
@@ -3510,7 +3535,10 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 					const last = (document.lineAt as (line: number) => { text: string })(lineCount - 1);
 					return formatter.provideDocumentRangeFormattingEdits(document, new Range(0, 0, lineCount - 1, last.text.length), options, token);
 				}),
-			registerCompletionItemProvider: (selector: unknown, provider: { provideCompletionItems: (document: unknown, position: unknown, token: unknown, context: unknown) => unknown }, ...triggerCharacters: string[]) => {
+			registerCompletionItemProvider: (selector: unknown, provider: { provideCompletionItems?: (document: unknown, position: unknown, token: unknown, context: unknown) => unknown }, ...triggerCharacters: string[]) => {
+				if (typeof provider?.provideCompletionItems !== 'function') {
+					return inert('languages.registerCompletionItemProvider');
+				}
 				// GGS-patch: real completion providers. The workbench's completion UI calls
 				// over at every trigger (see editorCompletions.ts); the frame answers with
 				// serialized items. Trigger characters register with the declaration, as
@@ -3526,8 +3554,39 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 				});
 			},
 			registerInlineCompletionItemProvider: provider('registerInlineCompletionItemProvider'),
-			registerHoverProvider: provider('registerHoverProvider'),
-			registerDefinitionProvider: provider('registerDefinitionProvider'),
+			registerHoverProvider: (selector: unknown, provider: { provideHover?: (document: unknown, position: unknown, token: unknown) => unknown }) => {
+				// GGS-patch: real hover providers — the editor's hover tooltip calls over
+				// (see editorHovers.ts), the frame answers with serialized hover contents.
+				// A provider without the method degrades to an inert registration (the
+				// Open VSX posture: a foreign extension's shape mistake never throws).
+				if (typeof provider?.provideHover !== 'function') {
+					return inert('languages.registerHoverProvider');
+				}
+				const selectors = (Array.isArray(selector) ? selector : [selector]).map((entry) => (typeof entry === 'string' ? { language: entry } : entry));
+				const id = `hov-${++formatterSeq}`;
+				hoverProviders.set(id, { selectors, run: provider.provideHover.bind(provider) });
+				send('languages.registerHover', [{ id, selectors: selectors.map(plainSelector) }]);
+				return new Disposable(() => {
+					hoverProviders.delete(id);
+					send('languages.unregisterHover', [{ id }]);
+				});
+			},
+			registerDefinitionProvider: (selector: unknown, provider: { provideDefinition?: (document: unknown, position: unknown, token: unknown) => unknown }) => {
+				if (typeof provider?.provideDefinition !== 'function') {
+					return inert('languages.registerDefinitionProvider');
+				}
+				// GGS-patch: real definition providers — Go-to-Definition calls over (see
+				// editorHovers.ts, which also drives the alt-click navigation), the frame
+				// answers with serialized locations the workbench opens.
+				const selectors = (Array.isArray(selector) ? selector : [selector]).map((entry) => (typeof entry === 'string' ? { language: entry } : entry));
+				const id = `def-${++formatterSeq}`;
+				definitionProviders.set(id, { selectors, run: provider.provideDefinition.bind(provider) });
+				send('languages.registerDefinition', [{ id, selectors: selectors.map(plainSelector) }]);
+				return new Disposable(() => {
+					definitionProviders.delete(id);
+					send('languages.unregisterDefinition', [{ id }]);
+				});
+			},
 			registerDeclarationProvider: provider('registerDeclarationProvider'),
 			registerTypeDefinitionProvider: provider('registerTypeDefinitionProvider'),
 			registerImplementationProvider: provider('registerImplementationProvider'),
@@ -3921,6 +3980,95 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			}
 		},
 
+		/** GGS-patch: not part of VS Code's module — the file-decoration ask side: the
+		 *  host's explorer batches its paths, this answers the serializable decoration
+		 *  per path (badge letter + one of VS Code's decoration colour names). */
+		__serveFileDecorationsAsk: async (providerId: string, paths: string[]): Promise<Record<string, { badge: string; color?: string; tooltip?: string } | null>> => {
+			const entry = fileDecorationProviders.get(providerId);
+			if (!entry) return {};
+			const answers: Record<string, { badge: string; color?: string; tooltip?: string } | null> = {};
+			for (const path of paths) {
+				try {
+					const decoration = await Promise.resolve(entry.run(Uri.file(path), CancellationTokenNone));
+					if (!decoration) {
+						answers[path] = null;
+						continue;
+					}
+					const value = decoration as { badge?: unknown; color?: unknown; tooltip?: unknown };
+					const color = value.color;
+					answers[path] = {
+						badge: typeof value.badge === 'string' && value.badge.length > 0 ? value.badge.slice(0, 2) : '',
+						color: typeof color === 'string'
+							? color
+							: color && typeof color === 'object' && 'id' in (color as Record<string, unknown>)
+								? String((color as { id: unknown }).id)
+								: undefined,
+						tooltip: typeof value.tooltip === 'string' ? value.tooltip : undefined
+					};
+				} catch (error) {
+					shimLog('error', `file decoration provider failed on ${path}: ${String(error)}`, error);
+					answers[path] = null;
+				}
+			}
+			return answers;
+		},
+
+		/** GGS-patch: the hover answer side (see editorHovers.ts): the serialized hover's
+		 *  contents — a plain string or the markdown value's text — plus an optional
+		 *  range. Everything exotic degrades to its string form; a null answer is no
+		 *  hover. */
+		__serveHover: async (id: string, document: { path: string; languageId: string; text: string }, position: { line: number; character: number }): Promise<{ contents: string[]; range?: { start: { line: number; character: number }; end: { line: number; character: number } } } | null> => {
+			const entry = hoverProviders.get(id);
+			if (!entry) return null;
+			const { state } = rememberDocument(document.path, document.text, document.languageId);
+			const view = documentView(state, () => saveDocument(document.path));
+			try {
+				const hover = await Promise.resolve(entry.run(view, new Position(position.line, position.character), CancellationTokenNone));
+				if (!hover) return null;
+				const value = hover as { contents?: unknown[]; range?: Range };
+				const contents = (Array.isArray(value.contents) ? value.contents : []).map((entry2) => {
+					if (typeof entry2 === 'string') return entry2;
+					const markdown = entry2 as { value?: unknown };
+					return typeof markdown?.value === 'string' ? markdown.value : String(entry2 ?? '');
+				}).filter((text) => text.length > 0);
+				if (contents.length === 0) return null;
+				return {
+					contents,
+					range: value.range ? { start: { line: value.range.start.line, character: value.range.start.character }, end: { line: value.range.end.line, character: value.range.end.character } } : undefined
+				};
+			} catch (error) {
+				shimLog('error', `hover provider ${id} failed on ${document.path}: ${String(error)}`, error);
+				return null;
+			}
+		},
+
+		/** GGS-patch: the definition answer side: the symbol's locations as path+range
+		 *  pairs — the workbench opens the first one, the rest land in a peek. */
+		__serveDefinition: async (id: string, document: { path: string; languageId: string; text: string }, position: { line: number; character: number }): Promise<{ path: string; startLine: number; startCharacter: number; endLine: number; endCharacter: number }[]> => {
+			const entry = definitionProviders.get(id);
+			if (!entry) return [];
+			const { state } = rememberDocument(document.path, document.text, document.languageId);
+			const view = documentView(state, () => saveDocument(document.path));
+			try {
+				const locations = await Promise.resolve(entry.run(view, new Position(position.line, position.character), CancellationTokenNone));
+				const list = Array.isArray(locations) ? locations : (locations as { uri?: Uri; target?: Uri; range?: Range } | null ? [locations] : []);
+				return (list as { uri?: unknown; target?: unknown; range?: Range }[]).map((location) => {
+					const uri = (location.target ?? location.uri) as { fsPath?: string; path?: string } | undefined;
+					const range = location.range;
+					return {
+						path: String(uri?.fsPath ?? uri?.path ?? ''),
+						startLine: range?.start.line ?? 0,
+						startCharacter: range?.start.character ?? 0,
+						endLine: range?.end.line ?? 0,
+						endCharacter: range?.end.character ?? 0
+					};
+				}).filter((location) => location.path.length > 0);
+			} catch (error) {
+				shimLog('error', `definition provider ${id} failed on ${document.path}: ${String(error)}`, error);
+				return [];
+			}
+		},
+
 		/** Not part of VS Code's `vscode` module either: the webview view plumbing — the
 		 *  frame's answer to the host calls `webviewView.resolve` (the view's first show)
 		 *  and `webviewView.setVisible` (the sidebar's view switching). */
@@ -4217,6 +4365,25 @@ export function serveHostCall(api: VscodeApi | null, method: string, args: unkno
 		case 'formatDocument.run': {
 			const [id, doc, options] = args as [string, { path: string; languageId: string; text: string }, { tabSize: number; insertSpaces: boolean }];
 			return api.__runFormatter(id, doc, options);
+		}
+		// GGS-patch: the language-provider run methods the host's ranked callers use
+		// (completions/hover/definition/fileDecorations — editorCompletions.ts and
+		// editorHovers.ts).
+		case 'completion.run': {
+			const [id, doc, position, context] = args as [string, { path: string; languageId: string; text: string }, { line: number; character: number }, { triggerCharacter?: string }];
+			return api.__serveCompletions(id, doc, position, context);
+		}
+		case 'hover.run': {
+			const [id, doc, position] = args as [string, { path: string; languageId: string; text: string }, { line: number; character: number }];
+			return api.__serveHover(id, doc, position);
+		}
+		case 'definition.run': {
+			const [id, doc, position] = args as [string, { path: string; languageId: string; text: string }, { line: number; character: number }];
+			return api.__serveDefinition(id, doc, position);
+		}
+		case 'fileDecorations.ask': {
+			const [{ providerId, paths }] = args as [{ providerId: string; paths: string[] }];
+			return api.__serveFileDecorationsAsk(providerId, paths);
 		}
 		case 'webviewView.resolve':
 			return api.__serveWebviewView.resolve(args[0] as string);

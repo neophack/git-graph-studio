@@ -1124,6 +1124,15 @@ for (const name of ['dispose', 'asyncDispose']) {
 		return bytes.length;
 	});
 	/* writeSync(fd, buffer[, offset[, length[, position]]]) or writeSync(fd, string[, position[, encoding]]). */
+	// GGS-patch: fsync/fdatasync as successful no-ops — this runtime's writeSync already
+	// lands every write on the file (no buffered descriptor to flush), which is the whole
+	// of what fsync promises. Kimi Code's chunks import it by name; a missing export was
+	// a module load failure.
+	fs.fsyncSync = (fd) => {
+		descriptorOf(fd);
+		return undefined;
+	};
+	fs.fdatasyncSync = fs.fsyncSync;
 	fs.writeSync = coded((fd, data, offset, length, position) => {
 		const entry = descriptorOf(fd);
 		if (!entry.writable) throw Object.assign(new Error('EBADF: bad file descriptor, write'), { code: 'EBADF' });
@@ -1345,8 +1354,54 @@ for (const name of ['dispose', 'asyncDispose']) {
 	}
 	if (Symbol.asyncDispose) FileHandle.prototype[Symbol.asyncDispose] = FileHandle.prototype.close;
 	promise.open = (path, flags) => promised(() => new FileHandle(fs.openSync(path, flags ?? 'r')))();
+	// GGS-patch: `cp` (recursive copy, Node 16.7+) and `utimes` — Kimi Code's
+	// fs/promises imports named them; a missing export was a module load failure.
+	promise.cp = async (source, destination, options = {}) => {
+		const copy = (from, to) => {
+			const stat = fs.statSync(from);
+			if (stat.isDirectory()) {
+				fs.mkdirSync ? fs.mkdirSync(to) : fs.mkdir(to);
+				for (const entry of fs.readdirSync(from)) copy(from + '/' + entry, to + '/' + entry);
+				return;
+			}
+			fs.writeFileSync(to, fs.readFileSync(from));
+		};
+		try {
+			fs.statSync(destination);
+		} catch {
+			fs.mkdirSync ? fs.mkdirSync(destination) : fs.mkdir(destination);
+		}
+		copy(String(source), String(destination));
+	};
+	promise.utimes = async (path, atime, mtime) => undefined;
 	promise.constants = fs.constants;
 	fs.promises = promise;
+	// GGS-patch: the watch family as no-ops — an ESM `import { unwatchFile } from 'fs'`
+	// (Kimi Code's chunks) is an EXPORT check, and a missing named export is a module
+	// load failure, not a missing feature. The no-op keeps the import honest: watching
+	// degrades to nothing, the runtime's own workspace watcher already pushes changes.
+	fs.watchFile = (filename, listener) => {
+		if (typeof listener === 'function') {
+			let current = null;
+			try { current = fs.statSync(filename); } catch { try { listener({ exists: false }); } catch {} }
+			if (current) { try { listener({ exists: true, mtime: current.mtime, size: current.size }); } catch {} }
+		}
+		return fs.StatWatcher ? new fs.StatWatcher() : {};
+	};
+	fs.unwatchFile = (filename, listener) => undefined;
+	fs.watch = (filename, options, listener) => {
+		// Event-name-compatible shell over the runtime's own change pushes: a real watch
+		// would need the native watcher's routing; callers get a closeable stand-in.
+		const watchers = new Set();
+		return {
+			close: () => watchers.clear(),
+			on: (event, handler) => { watchers.add(handler); return this; },
+			once: (event, handler) => { watchers.add(handler); return this; },
+			addListener: function (event, handler) { watchers.add(handler); return this; },
+			removeListener: (event, handler) => { watchers.delete(handler); return this; },
+			[Symbol.iterator]: undefined
+		};
+	};
 	globalThis.fs = fs;
 	delete globalThis.__ggsFs;
 })();
@@ -1985,8 +2040,132 @@ for (const name of ['dispose', 'asyncDispose']) {
  * consults for any core name it does not build itself — so `import 'node:assert'` and
  * `require('assert')` reach the same object. */
 (() => {
+	// GGS-patch: `buffer.Blob` / `buffer.File` (Node 18+): the minimal slice packages
+	// actually use — construction from byte-ish parts, size, type, arrayBuffer, text,
+	// slice. Kimi Code's chunks import Blob/File by name; a missing export was a module
+	// load failure.
+	if (typeof globalThis.Blob !== 'function') {
+		globalThis.Blob = class Blob {
+			constructor(parts = [], options = {}) {
+				const bytes = [];
+				for (const part of parts) {
+					if (part instanceof Uint8Array) bytes.push(...part);
+					else if (part instanceof globalThis.Blob) bytes.push(...new Uint8Array(part._bytes));
+					else if (typeof part === 'string') {
+						const text = new TextEncoder().encode(part);
+						bytes.push(...text);
+					} else if (part && typeof part === 'object' && part[Symbol.iterator]) {
+						for (const byte of part) bytes.push(Number(byte) & 0xff);
+					}
+				}
+				this._bytes = Uint8Array.from(bytes);
+				this.type = typeof options.type === 'string' ? options.type : '';
+			}
+			get size() { return this._bytes.length; }
+			arrayBuffer() { return Promise.resolve(this._bytes.buffer.slice(this._bytes.byteOffset, this._bytes.byteOffset + this._bytes.byteLength)); }
+			text() { return Promise.resolve(new TextDecoder().decode(this._bytes)); }
+			slice(start = 0, end = this._bytes.length, contentType = '') {
+				const from = Math.max(0, start < 0 ? this._bytes.length + start : start);
+				const to = Math.min(this._bytes.length, end < 0 ? this._bytes.length + end : end);
+				const copy = new globalThis.Blob([], { type: contentType });
+				copy._bytes = this._bytes.slice(from, Math.max(from, to));
+				return copy;
+			}
+			stream() { throw new Error('Blob.stream() is not supported by this runtime'); }
+		};
+		globalThis.File = class File extends globalThis.Blob {
+			constructor(parts, name, options = {}) {
+				super(parts, options);
+				this.name = String(name);
+				this.lastModified = Number(options.lastModified ?? Date.now());
+			}
+		};
+	}
+	if (typeof globalThis.Buffer !== 'undefined' && !globalThis.Buffer.Blob) {
+		globalThis.Buffer.Blob = globalThis.Blob;
+		globalThis.Buffer.File = globalThis.File;
+	}
 	const builtins = (globalThis.__ggsBuiltins = Object.create(null));
 	const path = __ggsRequire('', 'path');
+
+	/* dns / dns/promises — the lookup over the runtime's native resolver (the same
+	 * getaddrinfo `net.connect` uses); the record-type resolves answer empty (a package
+	 * probing MX/TXT records gets "no records", not a crash), lookupService is the one
+	 * honest refusal. Kimi Code's `node:dns/promises` import was the case this covers. */
+	const dnsLookupNative = (host) => {
+		const parsed = JSON.parse(globalThis.__ggsDnsLookup(String(host)));
+		if (!parsed.ok) {
+			const error = new Error(parsed.message);
+			error.code = parsed.code;
+			error.errno = parsed.code;
+			error.hostname = host;
+			throw error;
+		}
+		return parsed.addrs;
+	};
+	const dnsResolveIp = (host, family) => {
+		const addresses = dnsLookupNative(host).filter((addr) => addr.family === family).map((addr) => addr.address);
+		if (addresses.length === 0) {
+			const error = new Error('getaddrinfo ' + host + ' ENOTFOUND');
+			error.code = 'ENOTFOUND';
+			error.hostname = host;
+			throw error;
+		}
+		return addresses;
+	};
+	const makeDns = (promises) => {
+		const lookup = (host, options, callback) => {
+			let all = false;
+			let family = 0;
+			let cb = callback;
+			if (typeof options === 'function') { cb = options; }
+			else if (typeof options === 'number') { family = options; }
+			else if (options && typeof options === 'object') { all = options.all === true; family = options.family || 0; }
+			const run = () => {
+				const addrs = dnsLookupNative(host).filter((addr) => family === 0 || addr.family === family);
+				if (all) return addrs;
+				if (addrs.length === 0) { const e = new Error('getaddrinfo ' + host + ' ENOTFOUND'); e.code = 'ENOTFOUND'; throw e; }
+				return addrs[0];
+			};
+			if (promises || typeof cb !== 'function') {
+				return Promise.resolve().then(run);
+			}
+			try {
+				const result = run();
+				if (all) cb(null, result);
+				else cb(null, result.address, result.family);
+			} catch (error) { cb(error); }
+		};
+		const refuse = (name) => () => { const e = new Error(name + ' is not supported by this runtime'); e.code = 'ENOSYS'; if (promises) return Promise.reject(e); throw e; };
+		const emptyResolve = () => (host, callback) => {
+			if (typeof callback === 'function') { callback(null, []); return; }
+			return Promise.resolve([]);
+		};
+		const moduleObject = {
+			lookup,
+			resolve4: (host, callback) => { const r = () => dnsResolveIp(host, 4); if (typeof callback === 'function') { try { callback(null, r()); } catch (e) { callback(e); } return; } return Promise.resolve().then(r); },
+			resolve6: (host, callback) => { const r = () => dnsResolveIp(host, 6); if (typeof callback === 'function') { try { callback(null, r()); } catch (e) { callback(e); } return; } return Promise.resolve().then(r); },
+			resolveCaa: emptyResolve(),
+			resolveMx: emptyResolve(),
+			resolveNs: emptyResolve(),
+			resolvePtr: emptyResolve(),
+			resolveSrv: emptyResolve(),
+			resolveTxt: emptyResolve(),
+			resolveSoa: emptyResolve(),
+			resolveNaptr: emptyResolve(),
+			lookupService: refuse('lookupService'),
+			resolveAny: emptyResolve()
+		};
+		moduleObject.Resolver = class Resolver {
+			constructor() {}
+			cancel() {}
+		};
+		moduleObject.Resolver.prototype.resolve4 = moduleObject.resolve4;
+		moduleObject.Resolver.prototype.resolve6 = moduleObject.resolve6;
+		return moduleObject;
+	};
+	builtins.dns = makeDns(false);
+	builtins['dns/promises'] = makeDns(true);
 
 	/* os — `platform()` is a function in Node (the native half answers the string; fast-glob
 	 * calls `os.platform()` at load), plus the members libraries probe for sizing and
@@ -2516,6 +2695,41 @@ for (const name of ['dispose', 'asyncDispose']) {
 		isIP: (text) => (isIPv4(text) ? 4 : isIPv6(text) ? 6 : 0),
 		isIPv4,
 		isIPv6,
+		// GGS-patch: BlockList (Node 18+; Kimi Code's chunks import it by name) over the
+		// IPv4 range check — v6 entries compare textually, which covers the
+		// allow-list/deny-list uses a chat extension puts one to.
+		BlockList: class BlockList {
+			constructor() { this.ranges = []; }
+			addAddress(address, type) { this.addSubnet(address, type === 'IPv6' ? 128 : 32, type); }
+			addSubnet(address, prefix, type) {
+				const cidr = typeof address === 'string' && String(prefix) !== '' && !address.includes('/') ? `${address}/${prefix}` : String(address);
+				const [network, bitsRaw] = cidr.split('/');
+				const bits = Number(bitsRaw ?? (isIPv6(network) ? 128 : 32));
+				this.ranges.push({ network, bits, v6: isIPv6(network) });
+			}
+			check(address) {
+				for (const range of this.ranges) {
+					if (range.v6 !== isIPv6(String(address))) continue;
+					if (!range.v6) {
+						const net = range.network.split('.').map(Number);
+						const probe = String(address).split('.').map(Number);
+						if (probe.length !== 4 || net.length !== 4) continue;
+						const bits = Math.min(32, range.bits);
+						const full = Math.floor(bits / 8);
+						let match = true;
+						for (let i = 0; i < full && match; i++) match = net[i] === probe[i];
+						if (match && bits % 8 !== 0) {
+							const mask = 0xff << (8 - bits % 8);
+							match = (net[full] & mask) === (probe[full] & mask);
+						}
+						if (match) return true;
+					} else if (range.network === String(address)) {
+						return true;
+					}
+				}
+				return false;
+			}
+		},
 		connect: noSockets('net.connect'),
 		createConnection: noSockets('net.createConnection'),
 		createServer: noSockets('net.createServer'),
@@ -2524,7 +2738,11 @@ for (const name of ['dispose', 'asyncDispose']) {
 		}
 	};
 	builtins.tls = { connect: noSockets('tls.connect'), createServer: noSockets('tls.createServer'), rootCertificates: [] };
-	builtins.dns = { lookup: noSockets('dns.lookup'), resolve: noSockets('dns.resolve'), promises: { lookup: noSockets('dns.promises.lookup') } };
+	// GGS-patch: dns has a REAL implementation now (the `makeDns` assembly beside the
+	// builtins table above — the native resolver `net.connect` uses); this late
+	// no-socket placeholder would have overwritten it. The line stays only to keep the
+	// diff honest: it is the leftover of the honest-throw era, superseded.
+	if (!builtins.dns) builtins.dns = { lookup: noSockets('dns.lookup'), resolve: noSockets('dns.resolve'), promises: { lookup: noSockets('dns.promises.lookup') } };
 
 	/* zlib — the compression transforms need a codec the runtime does not carry; every
 	 * entry is an honest call-time throw, the constants real (a bundle that requires

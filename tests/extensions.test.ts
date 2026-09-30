@@ -2467,7 +2467,9 @@ describe('the shim degrades instead of throwing (Open VSX compatibility posture)
 
 	it('an unsupported provider registration returns a Disposable, never throws', () => {
 		const api = shimApi();
-		expect(() => api.languages.registerHoverProvider(() => undefined, {})).not.toThrow();
+		// GGS-patch: hover providers are REAL now (see editorHovers.ts) — registration
+		// returns a Disposable without any unsupported-API noise.
+		expect(() => api.languages.registerHoverProvider(() => undefined, { provideHover: () => undefined })).not.toThrow();
 		expect(() => api.window.registerCustomEditorProvider('x', {})).not.toThrow();
 		expect(() => api.tasks.registerTaskProvider('x', {})).not.toThrow();
 	});
@@ -3114,11 +3116,15 @@ describe('VS Code API fidelity: value types, configuration, edits, diagnostics (
 
 	it('an unsupported API is accepted, logged once, and never throws', () => {
 		const { api, requests } = shim();
-		api.languages.registerHoverProvider('ts', {});
-		api.languages.registerHoverProvider('js', {});
+		// GGS-patch: hover providers are real (editorHovers.ts); the still-inert
+		// surfaces keep the one-log-then-accept contract.
+		const first = api.languages.registerHoverProvider('ts', { provideHover: () => undefined });
+		const second = api.languages.registerHoverProvider('js', { provideHover: () => undefined });
+		expect(first.dispose).toBeInstanceOf(Function);
+		expect(second.dispose).toBeInstanceOf(Function);
 		api.window.registerUriHandler({});
 		const logs = requests.filter((request) => request.method === 'log').map((request) => String(request.args[1]));
-		expect(logs.filter((line) => line.includes('registerHoverProvider'))).toHaveLength(1);
+		expect(logs.filter((line) => line.includes('registerHoverProvider'))).toHaveLength(0);
 		expect(logs.some((line) => line.includes('registerUriHandler'))).toBe(true);
 		expect(typeof new api.Hover('x').contents).toBe('object');
 		expect(new api.SemanticTokensBuilder().build().data).toBeInstanceOf(Uint32Array);

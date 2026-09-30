@@ -1970,6 +1970,23 @@ fn native_node_files(vsix: &Path) -> Result<Vec<String>, String> {
 /// that load fails. A package with native binaries but no
 /// `main` is the named failure at the door — a package that installs and silently never
 /// works is the one outcome this refuses to produce.
+/// GGS-patch: the frame host's own code-map ceilings (cmd_ext's `load_code_from` skips a
+/// single file past 8 MB and the whole map past 64 MB) — a main past either runs on
+/// ggs-node instead of the sandboxed frame.
+const FRAME_MAIN_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const FRAME_TREE_MAX_BYTES: u64 = 48 * 1024 * 1024;
+
+/// The directory an entry's chunk set lives in (`dist` for `./dist/extension.js`, the
+/// package root for a bare `main.js`) — what the frame's code map would have carried.
+fn entry_dir_of(main: &str) -> Option<String> {
+    let without_file = main.rsplit_once('/')?.0;
+    if without_file.is_empty() {
+        None
+    } else {
+        Some(without_file.to_owned())
+    }
+}
+
 fn resolve_node_binaries(
     manifest: &VsixManifest,
     vsix: &Path,
@@ -1977,6 +1994,40 @@ fn resolve_node_binaries(
 ) -> Result<Option<BackendDecl>, String> {
     let nodes = native_node_files(vsix)?;
     if nodes.is_empty() {
+        // GGS-patch: a main-only package whose entry is TOO BIG for the frame host's
+        // code map derives a `ggs-node` backend anyway — the sidecar reads its files
+        // straight from the install directory (no code map, no 8 MB single-file cap)
+        // and serves the same vscode shim as a frame. Kimi Code's 8.8 MB
+        // `extension.js` crossed neither route before this: the frame host skipped the
+        // file as oversized and activation failed on a missing module. Sizes read from
+        // the VSIX's own entries (the install directory does not exist yet here).
+        if let Some(main) = manifest.main.as_deref().filter(|main| !main.trim().is_empty()) {
+            let main_rel = format!("extension/{}", main.trim_start_matches("./"));
+            let entry_dir = entry_dir_of(main.trim_start_matches("./"));
+            let (mut entry_bytes, mut tree_bytes) = (0u64, 0u64);
+            let file = std::fs::File::open(vsix).map_err(|e| format!("open {}: {e}", vsix.display()))?;
+            let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("read VSIX: {e}"))?;
+            for i in 0..zip.len() {
+                let entry = zip.by_index(i).map_err(|e| e.to_string())?;
+                let name = entry.name();
+                if name == main_rel {
+                    entry_bytes = entry.size();
+                } else if let Some(rel) = name.strip_prefix("extension/") {
+                    if !rel.is_empty() && entry_dir.as_deref().is_some_and(|dir| rel.starts_with(dir)) {
+                        tree_bytes += entry.size();
+                    }
+                }
+            }
+            if entry_bytes > FRAME_MAIN_MAX_BYTES || tree_bytes > FRAME_TREE_MAX_BYTES {
+                return Ok(Some(BackendDecl {
+                    kind: "node".to_owned(),
+                    command: main.to_owned(),
+                    args: Vec::new(),
+                    protocol: None,
+                    binaries: None,
+                }));
+            }
+        }
         return Ok(None);
     }
     let platform = host_platform_key();
@@ -3732,6 +3783,52 @@ mod vsix_tests {
             .unwrap();
         zip.finish().unwrap();
         assert!(read_vsix_manifest(&nobundle).is_ok());
+    }
+
+    #[test]
+    fn an_oversized_main_derives_a_node_backend() {
+        // A main-only VSIX whose entry is past the frame host's code-map ceiling
+        // (8 MB single file) runs on ggs-node — the sidecar reads its files straight
+        // from the install directory. Kimi Code's 8.8 MB extension.js was the case:
+        // neither route carried it, and activation failed on a missing module.
+        let dir = tempfile::tempdir().unwrap();
+        let vsix = dir.path().join("big.vsix");
+        {
+            let file = std::fs::File::create(&vsix).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("extension/package.json", options).unwrap();
+            zip.write_all(br#"{"name":"big","publisher":"acme","version":"1.0.0","main":"./dist/extension.js"}"#).unwrap();
+            zip.start_file("extension/dist/extension.js", options).unwrap();
+            zip.write_all(&vec![b'x'; 9 * 1024 * 1024]).unwrap();
+            zip.start_file("extension/dist/chunk.mjs", options).unwrap();
+            zip.write_all(&vec![b'x'; 1024]).unwrap();
+            zip.finish().unwrap();
+        }
+        let manifest = read_vsix_manifest(&vsix).unwrap();
+        let derived = resolve_node_binaries(&manifest, &vsix, false).unwrap();
+        assert!(
+            derived.as_ref().is_some_and(|backend| backend.kind == "node" && backend.command == "./dist/extension.js"),
+            "the oversized main derives a ggs-node backend: {derived:?}"
+        );
+
+        // A small main stays on the frame host (no backend).
+        let vsix_small = dir.path().join("small.vsix");
+        {
+            let file = std::fs::File::create(&vsix_small).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("extension/package.json", options).unwrap();
+            zip.write_all(br#"{"name":"small","publisher":"acme","version":"1.0.0","main":"./extension.js"}"#).unwrap();
+            zip.start_file("extension/extension.js", options).unwrap();
+            zip.write_all(br#"exports.activate = () => {};"#).unwrap();
+            zip.finish().unwrap();
+        }
+        let manifest = read_vsix_manifest(&vsix_small).unwrap();
+        assert!(
+            resolve_node_binaries(&manifest, &vsix_small, false).unwrap().is_none(),
+            "a small main stays frame-hosted"
+        );
     }
 
     #[test]

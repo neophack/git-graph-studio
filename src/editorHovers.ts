@@ -1,0 +1,58 @@
+// The bridge between the editor's hover tooltip / Go-to-Definition and the extensions'
+// registered `vscode.languages.registerHoverProvider` / `registerDefinitionProvider`:
+// a module-level provider slot the workbench fills at assembly (it owns the
+// ExtensionHost), and the editor reads. Like editorCompletions.ts, no CodeMirror here.
+
+export interface ExtensionHover {
+	contents: string[];
+	range?: { start: { line: number; character: number }; end: { line: number; character: number } };
+}
+
+export interface ExtensionLocation {
+	path: string;
+	startLine: number;
+	startCharacter: number;
+	endLine: number;
+	endCharacter: number;
+}
+
+export type ExtensionHoverProvider = (path: string, languageId: string, text: string, line: number, character: number) => Promise<ExtensionHover | null>;
+export type ExtensionDefinitionProvider = (path: string, languageId: string, text: string, line: number, character: number) => Promise<ExtensionLocation[]>;
+
+let hoverProvider: ExtensionHoverProvider | null = null;
+let definitionProvider: ExtensionDefinitionProvider | null = null;
+
+/** The workbench installs the ExtensionHost-backed providers here at assembly. */
+export function setExtensionHoverProvider(fill: ExtensionHoverProvider | null): void {
+	hoverProvider = fill;
+}
+
+export function setExtensionDefinitionProvider(fill: ExtensionDefinitionProvider | null): void {
+	definitionProvider = fill;
+}
+
+export function hasExtensionHovers(): boolean {
+	return hoverProvider !== null;
+}
+
+export function hasExtensionDefinitions(): boolean {
+	return definitionProvider !== null;
+}
+
+export async function extensionHoverFor(path: string, languageId: string, text: string, line: number, character: number): Promise<ExtensionHover | null> {
+	if (!hoverProvider) return null;
+	try {
+		return await hoverProvider(path, languageId, text, line, character);
+	} catch {
+		return null;
+	}
+}
+
+export async function extensionDefinitionFor(path: string, languageId: string, text: string, line: number, character: number): Promise<ExtensionLocation[]> {
+	if (!definitionProvider) return [];
+	try {
+		return await definitionProvider(path, languageId, text, line, character);
+	} catch {
+		return [];
+	}
+}

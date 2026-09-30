@@ -292,6 +292,26 @@ pub(super) fn close_server(
 
 /// `__ggsNetConnect(host, port)` → socket id at once; `connect` (with the endpoints) or
 /// `error` follows. Writes made before the connection lands queue in order.
+/// GGS-patch: `dns.lookup`'s native half — the hostname resolves on this (worker) call
+/// the way `connect` resolves, and the addresses cross as JSON for the prelude's dns
+/// module to shape (`[{address, family}]`). ENOTFOUND crosses as a JSON error object so
+/// the JS side can reject with Node's own error shape.
+pub(super) fn dns_lookup(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = opt_string_arg(args, 0, context).unwrap_or_else(|| "localhost".to_owned());
+    let host = host.trim().to_owned();
+    let family_number = |addr: &SocketAddr| if addr.is_ipv4() { 4 } else { 6 };
+    let resolved = (host.as_str(), 0u16)
+        .to_socket_addrs()
+        .map(|addrs| {
+            let list: Vec<String> = addrs
+                .map(|addr| format!("{{\"address\":\"{}\",\"family\":{}}}", addr.ip(), family_number(&addr)))
+                .collect();
+            format!("{{\"ok\":true,\"addrs\":[{}]}}", list.join(","))
+        })
+        .unwrap_or_else(|_| format!("{{\"ok\":false,\"code\":\"ENOTFOUND\",\"message\":\"getaddrinfo ENOTFOUND {host}\"}}"));
+    Ok(JsValue::from(boa_engine::js_string!(resolved)))
+}
+
 pub(super) fn connect(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = opt_string_arg(args, 0, context).unwrap_or_else(|| "localhost".to_owned());
     let port = args.get_or_undefined(1).to_number(context).unwrap_or(0.0) as u16;

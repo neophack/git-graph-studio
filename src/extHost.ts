@@ -634,6 +634,15 @@ export class ExtensionHost {
 	private readonly formattingProviders = new Map<string, { extId: string; id: string; selectors: FormatterSelector[]; handle: FrameHandle }>();
 	/** GGS-patch: the frames' registered completion providers (see editorCompletions.ts). */
 	private readonly completionProviders = new Map<string, { extId: string; id: string; selectors: FormatterSelector[]; handle: FrameHandle; triggerCharacters: string[] }>();
+	/** GGS-patch: the frames' registered hover and definition providers (see editorHovers.ts). */
+	private readonly hoverProviders = new Map<string, { extId: string; id: string; selectors: FormatterSelector[]; handle: FrameHandle }>();
+	/** GGS-patch: the frames' registered file decoration providers, the decorations they
+	 *  last answered, and the parked batches (the explorer's ask crosses once; the
+	 *  frame's answers come back on the channel). */
+	private readonly fileDecorationProviders = new Map<string, { extId: string; id: string; handle: FrameHandle }>();
+	private extensionDecorations: { key: string; path: string; badge: string; color?: string; tooltip?: string }[] = [];
+	onFileDecorationsChanged: (() => void) | null = null;
+	private readonly definitionProviders = new Map<string, { extId: string; id: string; selectors: FormatterSelector[]; handle: FrameHandle }>();
 	/** The extensions whose missing `extensionDependencies` were already reported. */
 	private readonly dependencyWarned = new Set<string>();
 	/** Debounced document-change pushes, by path (`noteDocumentChanged`). */
@@ -1384,6 +1393,19 @@ export class ExtensionHost {
 		}
 		for (const [key, registration] of [...this.completionProviders]) {
 			if (registration.extId === extId) this.completionProviders.delete(key);
+		}
+		for (const [key, registration] of [...this.hoverProviders]) {
+			if (registration.extId === extId) this.hoverProviders.delete(key);
+		}
+		if ([...this.fileDecorationProviders.keys()].some((key) => key.startsWith(`${extId}/`))) {
+			for (const key of [...this.fileDecorationProviders.keys()]) {
+				if (key.startsWith(`${extId}/`)) this.fileDecorationProviders.delete(key);
+			}
+			this.extensionDecorations = this.extensionDecorations.filter((entry) => !entry.key.startsWith(`${extId}/`));
+			this.onFileDecorationsChanged?.();
+		}
+		for (const [key, registration] of [...this.definitionProviders]) {
+			if (registration.extId === extId) this.definitionProviders.delete(key);
 		}
 		// The frame's decoration marks leave the editors with it.
 		for (const key of this.decorTypesByExt.get(extId) ?? []) this.onSetDecorations?.(null, key, []);
@@ -2234,6 +2256,41 @@ export class ExtensionHost {
 				this.completionProviders.delete(`${extId}/${declaration.id}`);
 				return Promise.resolve(undefined);
 			}
+			case 'fileDecorations.register': {
+				// GGS-patch: the frame registered a file decoration provider (see
+				// explorerDecorations.ts — the store the explorer's badges read).
+				const [declaration] = args as [{ id: string; label: string }];
+				this.fileDecorationProviders.set(`${extId}/${declaration.id}`, { extId, id: declaration.id, handle });
+				return Promise.resolve(undefined);
+			}
+			case 'fileDecorations.unregister': {
+				const [declaration] = args as [{ id: string }];
+				this.fileDecorationProviders.delete(`${extId}/${declaration.id}`);
+				this.extensionDecorations = this.extensionDecorations.filter((entry) => !entry.key.startsWith(`${extId}/`));
+				this.onFileDecorationsChanged?.();
+				return Promise.resolve(undefined);
+			}
+			case 'languages.registerHover': {
+				// GGS-patch: the frame registered a hover provider (see editorHovers.ts).
+				const [declaration] = args as [{ id: string; selectors: FormatterSelector[] }];
+				this.hoverProviders.set(`${extId}/${declaration.id}`, { extId, id: declaration.id, selectors: declaration.selectors ?? [], handle });
+				return Promise.resolve(undefined);
+			}
+			case 'languages.unregisterHover': {
+				const [declaration] = args as [{ id: string }];
+				this.hoverProviders.delete(`${extId}/${declaration.id}`);
+				return Promise.resolve(undefined);
+			}
+			case 'languages.registerDefinition': {
+				const [declaration] = args as [{ id: string; selectors: FormatterSelector[] }];
+				this.definitionProviders.set(`${extId}/${declaration.id}`, { extId, id: declaration.id, selectors: declaration.selectors ?? [], handle });
+				return Promise.resolve(undefined);
+			}
+			case 'languages.unregisterDefinition': {
+				const [declaration] = args as [{ id: string }];
+				this.definitionProviders.delete(`${extId}/${declaration.id}`);
+				return Promise.resolve(undefined);
+			}
 			case 'languages.registerFormatting': {
 				// The frame registered a document formatting provider: `{ id, selectors }`.
 				// `editor.formatDocument` routes to the best-scoring provider for the document.
@@ -2572,6 +2629,63 @@ export class ExtensionHost {
 	 *  then run what its activation registered. */
 	/** Run the formatting providers matching `languageId` over `text` and apply the edits
 	 *  to the open editor. Answers true when a formatter produced edits. */
+	/** GGS-patch: the extensions' file decorations for a batch of paths: every
+	 *  registered provider is asked over one frame call each (their answers ride the
+	 *  `fileDecorations.answer` channel), merged into the store's entries. */
+	async extensionFileDecorations(paths: string[]): Promise<{ key: string; path: string; badge: string; color?: string; tooltip?: string }[]> {
+		const out: { key: string; path: string; badge: string; color?: string; tooltip?: string }[] = [];
+		for (const [registrationKey, registration] of this.fileDecorationProviders) {
+			const frame = this.frames.get(registration.extId);
+			if (!frame) continue;
+			await this.ensureActive(registration.extId).catch(() => undefined);
+			const answers = await this.callFrame(frame, 'fileDecorations.ask', [{ providerId: registration.id, paths }]).catch(() => ({})) as Record<string, { badge: string; color?: string; tooltip?: string } | null>;
+			for (const [path, decoration] of Object.entries(answers)) {
+				if (!decoration || !decoration.badge) continue;
+				out.push({ key: registrationKey, path, badge: decoration.badge, color: decoration.color, tooltip: decoration.tooltip });
+			}
+		}
+		this.extensionDecorations = out;
+		return out;
+	}
+
+	/** GGS-patch: the extensions' hover for one position (see editorHovers.ts): the
+	 *  best-scoring provider runs; a provider's failure is no hover. */
+	async extensionHover(path: string, languageId: string, text: string, line: number, character: number): Promise<{ contents: string[]; range?: { start: { line: number; character: number }; end: { line: number; character: number } } } | null> {
+		const ranked = [...this.hoverProviders.values()]
+			.map((registration) => ({ registration, score: formatterScore(registration.selectors, path, languageId) }))
+			.filter((entry) => entry.score > 0)
+			.sort((a, b) => b.score - a.score);
+		for (const { registration } of ranked) {
+			await this.ensureActive(registration.extId).catch(() => undefined);
+			try {
+				const hover = await this.callFrame(registration.handle, 'hover.run', [registration.id, { path, languageId, text }, { line, character }]) as { contents: string[] } | null | undefined;
+				if (hover && hover.contents.length > 0) return hover;
+			} catch {
+				// the next provider tries
+			}
+		}
+		return null;
+	}
+
+	/** GGS-patch: the extensions' definition for one position: the first provider with
+	 *  locations wins; the workbench opens the first location. */
+	async extensionDefinition(path: string, languageId: string, text: string, line: number, character: number): Promise<{ path: string; startLine: number; startCharacter: number; endLine: number; endCharacter: number }[]> {
+		const ranked = [...this.definitionProviders.values()]
+			.map((registration) => ({ registration, score: formatterScore(registration.selectors, path, languageId) }))
+			.filter((entry) => entry.score > 0)
+			.sort((a, b) => b.score - a.score);
+		for (const { registration } of ranked) {
+			await this.ensureActive(registration.extId).catch(() => undefined);
+			try {
+				const locations = await this.callFrame(registration.handle, 'definition.run', [registration.id, { path, languageId, text }, { line, character }]) as { path: string; startLine: number; startCharacter: number; endLine: number; endCharacter: number }[] | undefined;
+				if (locations && locations.length > 0) return locations;
+			} catch {
+				// the next provider tries
+			}
+		}
+		return [];
+	}
+
 	/** GGS-patch: the extensions' completion answer for one trigger position (see
 	 *  editorCompletions.ts): the best-scoring provider for the document runs, its items
 	 *  cross serialized. A provider's failure is its own empty answer — completions are
@@ -2762,9 +2876,13 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 			// extension is active — the frame parks the provider until then.
 			if (contribution?.views.some((view) => view.viewId === viewId && view.type === 'webview') && visible && !this.resolvedWebviewViews.has(viewId)) {
 				const frame = this.frames.get(owner);
+				extLog('info', owner, `webview view ${viewId}: resolve via ${frame ? (frame.remote ? 'process backend' : 'frame') : 'NO HANDLE'}`);
 				if (frame) {
 					this.resolvedWebviewViews.add(viewId);
-					void this.callFrame(frame, 'webviewView.resolve', [viewId]).catch(() => this.resolvedWebviewViews.delete(viewId));
+					void this.callFrame(frame, 'webviewView.resolve', [viewId]).catch((error) => {
+						this.resolvedWebviewViews.delete(viewId);
+						extLog('warn', owner, `webview view ${viewId}: resolve failed: ${String(error)}`);
+					});
 				}
 			}
 		});

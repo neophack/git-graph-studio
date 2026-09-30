@@ -183,6 +183,48 @@ impl Module {
         })
     }
 
+    /// GGS-patch: [`Module::parse`] with every binding kept in its environment — the
+    /// module twin of `Script::parse_all_bindings_escaping`. A ggs-node host re-parses
+    /// a module whose register-local compile panicked (Boa's scope analysis has edges;
+    /// Kimi Code's 8.8 MB entry tripped one) and the compile degrades instead of
+    /// killing the runtime.
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if parsing fails.
+    pub fn parse_all_bindings_escaping<R: ReadChar>(
+        src: Source<'_, R>,
+        realm: Option<Realm>,
+        context: &mut Context,
+    ) -> JsResult<Self> {
+        let path = src.path().map(Path::to_path_buf);
+        let realm = realm.unwrap_or_else(|| context.realm().clone());
+
+        let mut parser = Parser::new(src);
+        parser.set_identifier(context.next_parser_identifier());
+        let module =
+            parser.parse_module_all_bindings_escaping(realm.scope(), context.interner_mut())?;
+
+        // No spanned source text: the degrade path never needs source positions.
+        let source_text = crate::spanned_source_text::SpannedSourceText::new_empty();
+        let src = SourceTextModule::new(
+            module,
+            context.interner(),
+            source_text.source_text(),
+            path.clone(),
+        );
+
+        Ok(Self {
+            inner: Gc::new(ModuleRepr {
+                realm,
+                namespace: GcRefCell::default(),
+                kind: ModuleKind::SourceText(Box::new(src)),
+                host_defined: HostDefined::default(),
+                path,
+            }),
+        })
+    }
+
     /// Abstract operation [`CreateSyntheticModule ( exportNames, evaluationSteps, realm )`][spec].
     ///
     /// Creates a new Synthetic Module from its list of exported names, its evaluation steps and

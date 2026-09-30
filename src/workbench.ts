@@ -17,6 +17,8 @@ import { mountProviderPaneGate } from './providerUsageView';
 import { commandForBinding, commands, effectiveBinding, setKeybindingResolver, UNSHIFTED_GLYPHS } from './commands';
 import { registerDecorationType } from './editorDecorations';
 import { setExtensionCompletionProvider } from './editorCompletions';
+import { setExtensionDefinitionProvider, setExtensionHoverProvider } from './editorHovers';
+import { setExtensionDefinitionOpener } from './editorProviderViews';
 import { languageIdFor, registerContextProvider } from './contributions';
 import { EditorArea } from './editorArea';
 import { ENCODING_LABELS, type EditorPlacement } from './editor';
@@ -208,6 +210,17 @@ export class Workbench {
 		// GGS-patch: the extensions' completion providers feed the editor's completion UI
 		// through the module bridge (see editorCompletions.ts).
 		setExtensionCompletionProvider((path, languageId, text, line, character, triggerCharacter) => this.extensionHost.extensionCompletions(path, languageId, text, line, character, triggerCharacter));
+		// GGS-patch: the extensions' hover and definition providers feed the editor's
+		// hover tooltip and Go-to-Definition through the module bridge (editorHovers.ts).
+		setExtensionHoverProvider((path, languageId, text, line, character) => this.extensionHost.extensionHover(path, languageId, text, line, character));
+		setExtensionDefinitionProvider((path, languageId, text, line, character) => this.extensionHost.extensionDefinition(path, languageId, text, line, character));
+		setExtensionDefinitionOpener({
+			open: (path, line, character) => {
+				// The same convention the frame host's onOpenFile uses (line 222): the
+				// providers' VS Code 0-based position passes through as the tab's anchor.
+				void this.editors.openFile(path, line !== undefined ? { line, column: character } : undefined);
+			}
+		});
 		this.extensionHost.onOpenFile = (path, line, column, placement) => void this.editors.openFile(path, line !== undefined ? { line, column } : undefined, placement);
 		this.extensionHost.activeText = () => this.editors.activeText();
 		// `openTextDocument` reads an open editor's buffer, `TextDocument.save()` saves it,

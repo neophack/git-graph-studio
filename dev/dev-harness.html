@@ -964,6 +964,69 @@
 					console.log('[full] module self-tests: ' + selfSummary.pass + ' pass, ' + selfSummary.fail + ' fail, ' + selfSummary.skip + ' skip');
 				}
 
+				/* ---------- Phase 1½: kimi-code (when ?kimi=1) ---------- */
+				// The Kimi Code extension's real-app pass: installed into the sandbox HOME by
+				// scripts/probes/kimi-live-check.mjs, this phase proves the frame-host path
+				// end to end — the package is seen installed, its contributed commands are in
+				// the registry, its sidebar webview view mounts and loads, and the mount is
+				// timed (the "打开速度快" bar). quick mode runs it too: it IS the kimi pass.
+				const KIMI = 'moonshot-ai.kimi-code';
+				if (fullParams.has('kimi')) {
+					const kimiStarted = performance.now();
+					const { commands: kimiCommands } = await import('/src/commands.ts');
+					try {
+					await check('kimi-code', 'the package is installed', async () => {
+						const installed = await invoke('ext_list').catch(() => []);
+						const kimi = installed.find((entry) => entry.id === KIMI);
+						if (!kimi) throw new Error(KIMI + ' is not in ext_list');
+						return kimi.version + ' installed';
+					});
+					await check('kimi-code', 'its contributed commands are in the registry', async () => {
+						const expected = ['kimi.newConversation', 'kimi.openInSideBar', 'kimi.focusInput'];
+						const missing = expected.filter((id) => !kimiCommands.all().some((entry) => entry.id === id));
+						if (missing.length > 0) throw new Error('missing: ' + missing.join(', '));
+						return expected.length + ' commands registered';
+					});
+					await check('kimi-code', 'the sidebar view mounts and loads', async () => {
+						const mountStarted = performance.now();
+						const wb = (await import('/src/workbench.ts')).currentWorkbench;
+						const containerKey = 'ext-container:' + KIMI + '.kimi-sidebar';
+						try {
+							await withTimeout(wb.showView(containerKey), 20000, 'showView(kimi-sidebar)');
+							const frame = await waitFor(() => {
+								const candidates = [...document.querySelectorAll('#sidebar iframe.ext-page-frame')];
+								return candidates.find((node) => node.contentDocument && node.contentDocument.body && node.contentDocument.body.childElementCount > 0) ?? null;
+							}, 20000);
+							const mountMs = Math.round(performance.now() - mountStarted);
+							return 'kimi.webview mounted in ' + mountMs + ' ms (' + Math.round(frame.getBoundingClientRect().width) + 'px wide)';
+						} catch (error) {
+							// The failure detail IS the diagnosis: what the sidebar actually carries.
+							const iframes = [...document.querySelectorAll('#sidebar iframe')].map((node) => ({ cls: node.className, title: node.title, kids: (node.contentDocument && node.contentDocument.body && node.contentDocument.body.childElementCount) || 0, srcdocLen: (node.getAttribute('srcdoc') || '').length, bodyHtml: node.contentDocument && node.contentDocument.body ? node.contentDocument.body.innerHTML.slice(0, 120) : null }));
+							const containers = [...document.querySelectorAll('.ext-container-view')].length;
+							const active = wb.activeView;
+							throw new Error(`${error.message} | activeView=${active} | containers=${containers} | iframes=${JSON.stringify(iframes)}`);
+						}
+					});
+					report.push({ group: 'kimi-code', name: 'activation to mounted view', status: 'pass', ms: Math.round(performance.now() - kimiStarted), detail: 'total kimi-code wall time in the harness' });
+					} catch (error) {
+						report.push({ group: 'kimi-code', name: 'the kimi pass crashed', status: 'fail', ms: Math.round(performance.now() - kimiStarted), detail: String(error) });
+					}
+					renderPanel();
+					postReport(false);
+				}
+
+				// The kimi pass is the ONLY extension under test in its sandbox HOME — the
+				// git-graph-rs and claude phases would fail on a missing package there.
+				if (fullParams.has('kimi')) {
+					report.push({ group: 'kimi-code', name: 'pass complete', status: 'pass', ms: 0, detail: 'kimi mode: the git-graph-rs and claude phases are out of scope' });
+					postReport(true);
+					// The kimi pass IS the whole run: the phases below would fail on a sandbox
+					// HOME that carries no git-graph-rs or claude. The report is final above;
+					// this top-level context has no `return`, so the pass parks here (the
+					// probe kills the app once it has the verdict).
+					await new Promise(() => undefined);
+				}
+
 				/* ---------- Phase 2: git-graph-rs ---------- */
 				const GG = 'neophack.git-graph-rs';
 				const { commands } = await import('/src/commands.ts');

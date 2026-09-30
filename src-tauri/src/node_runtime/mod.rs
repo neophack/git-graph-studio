@@ -514,8 +514,22 @@ fn js_main(rx: mpsc::Receiver<Job>, wake: Arc<(Mutex<bool>, Condvar)>, entry: Pa
         // 1. Everything queued.
         let mut quit = false;
         while let Some(job) = next_job(&jobs) {
-            if execute_job(&mut context, job) {
-                quit = true;
+            // GGS-patch: a Rust panic inside a job (Boa's compiler has edges — Kimi
+            // Code's dist chunk tripped "binding must exist" in the bytecompiler) must
+            // fail THAT request, not unwind out of the JS thread and take the whole
+            // runtime with it. The compile happens in its own frame, so the VM state
+            // survives; the reply channel's drop surfaces as the request's error.
+            let job_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                execute_job(&mut context, job)
+            }));
+            match job_result {
+                Ok(should_quit) if should_quit => quit = true,
+                Ok(_) => {}
+                Err(_) => {
+                    with_state(|state| {
+                        state.log("error", "a runtime job panicked; the request failed but the runtime lives");
+                    });
+                }
             }
         }
         if quit {

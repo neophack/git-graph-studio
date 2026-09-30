@@ -578,57 +578,56 @@ fn evaluate_module(path: &Path, source: &str, context: &mut Context) -> JsResult
     // recompiles the module with every binding escaping — the mode ggs-node always used.
     // The discarded compile is cold-load-only; the bytecode cache stores what survived.
     Script::reset_uninitialized_local_trip();
-    let mut script = Script::parse(
-        Source::from_bytes(wrapper.as_bytes()).with_path(path),
-        None,
-        context,
-    )?;
-    if script.max_register_count(context) > REGISTER_LOCALS_LIMIT
-        || Script::tripped_uninitialized_local()
-    {
-        script = Script::parse_all_bindings_escaping(
-            Source::from_bytes(wrapper.as_bytes()).with_path(path),
-            None,
-            context,
-        )?;
-    }
-    drop(wrapper);
-    // Compile now (evaluate would anyway) and store the tree: the write is best-effort —
-    // a full disk or a read-only home degrades to compiling again next start.
-    if let Ok(compiled) = script.codeblock(context) {
-        if let Some(cache_path) = bytecode_cache_path(&cache_key) {
-            let mirror_started = std::time::Instant::now();
-            let mirror = boa_engine::vm::bytecode_cache::to_mirror(&compiled);
-            let ser_started = std::time::Instant::now();
-            let blob = bincode::serialize(&mirror);
-            if phase_trace {
-                eprintln!(
-                    "[perf] cache mirror {} ms, serialize {} ms ({} bytes)",
-                    ser_started.duration_since(mirror_started).as_millis(),
-                    ser_started.elapsed().as_millis(),
-                    blob.as_ref().map_or(0, std::vec::Vec::len)
-                );
-            }
-            if let Ok(blob) = blob {
-                let tmp = cache_path.with_extension("tmp");
-                if std::fs::write(&tmp, &blob).is_ok() {
-                    let _ = std::fs::rename(&tmp, &cache_path);
-                }
-            }
+    // GGS-patch: a compiler PANIC (Boa's scope analysis has edges — a var collected from
+    // a nested scope its binding table never saw) must degrade to the all-escaping
+    // recompile like the guarded walls below, not unwind through the job and kill the
+    // ggs-node runtime. Kimi Code's dist chunk tripped exactly this ("binding must
+    // exist" in the bytecompiler) and took the whole backend down with it.
+    let compile_and_run = |escaping: bool, context: &mut Context| -> JsResult<JsValue> {
+        let source = Source::from_bytes(wrapper.as_bytes()).with_path(path);
+        let mut script = if escaping {
+            Script::parse_all_bindings_escaping(source, None, context)?
+        } else {
+            Script::parse(source, None, context)?
+        };
+        // The register-locals walls (see the comment above): a tripped static TDZ throw
+        // or an over-limit register file recompiles all-escaping. (This check lived in
+        // the pre-evaluate flow before the panic fallback existed — dropping it made a
+        // fresh sandbox compile of git-graph-rs run with broken static throws.)
+        if !escaping
+            && (script.max_register_count(context) > REGISTER_LOCALS_LIMIT
+                || Script::tripped_uninitialized_local())
+        {
+            script = Script::parse_all_bindings_escaping(
+                Source::from_bytes(wrapper.as_bytes()).with_path(path),
+                None,
+                context,
+            )?;
         }
-    }
-    let function = script
-        .evaluate(context)?
+        script.evaluate(context)
+    };
+    let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        compile_and_run(false, context)
+    })) {
+        Ok(result) => result,
+        Err(_) => {
+            with_state(|state| {
+                state.log("warn", &format!(
+                    "{}: the register-local compile panicked; recompiling all-escaping",
+                    path.display()
+                ));
+            });
+            Script::reset_uninitialized_local_trip();
+            compile_and_run(true, context)
+        }
+    };
+    let function = result?
         .as_object()
         .ok_or_else(|| internal("the module wrapper evaluated to no function"))?;
-    if phase_trace {
-        eprintln!(
-            "[perf] {} compiled in {} ms ({} bytes)",
-            path.display(),
-            compile_started.elapsed().as_millis(),
-            source.len()
-        );
-    }
+    // Compile now (evaluate would anyway) and store the tree: the write is best-effort —
+    // a full disk or a read-only home degrades to compiling again next start.
+    // The bytecode cache write folded into the closure above is lost on a panic retry —
+    // acceptable: the retry is rare, and the next clean start re-caches.
     let exports = JsObject::with_object_proto(context.intrinsics());
     let module = JsObject::with_object_proto(context.intrinsics());
     module.set(key("exports"), exports.clone(), false, context)?;

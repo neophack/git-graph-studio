@@ -218,6 +218,25 @@ impl Module {
 
         Ok(())
     }
+
+    /// GGS-patch: [`Module::analyze_scope`] with every binding kept in its environment —
+    /// the module twin of [`Script::analyze_scope_all_escaping`]. The register-local
+    /// compile of a big third-party module can trip the analyzer's edges (Kimi Code's
+    /// 8.8 MB entry panicked the bytecompiler's var instantiation on the register
+    /// path); a ggs-node host re-parses the module with this and the compile degrades
+    /// instead of killing the runtime.
+    pub fn analyze_scope_all_escaping(
+        &mut self,
+        scope: &Scope,
+        interner: &Interner,
+    ) -> Result<(), &'static str> {
+        let _memo = crate::JsStringMemo::enter();
+        collect_bindings(self, true, false, scope, interner)?;
+        analyze_binding_escapes(self, true, scope.clone(), interner)?;
+        optimize_scope_indicies(self, &self.scope.clone());
+
+        Ok(())
+    }
 }
 
 impl VisitWith for Module {

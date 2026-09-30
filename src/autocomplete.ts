@@ -173,7 +173,9 @@ function positionOf(context: CompletionContext, items: ExtensionCompletion[]): n
 	return context.pos;
 }
 
-function languageIdOf(state: { language?: { name?: string } }): string {
+/** The CodeMirror language's name as the provider selector's approximation of a VS Code
+ *  language id (shared with the hover source — see editorHovers.ts). */
+export function languageIdOf(state: { language?: { name?: string } }): string {
 	// CodeMirror's language name approximates VS Code's id (typescript vs
 	// typescript's 'ts' among them); a selector keyed exactly on the id the editor
 	// does not carry simply does not match — the same provider set serving `*`
