@@ -153,11 +153,19 @@ guarantees the window is never a blank dark rectangle.
 - Backend: `src-tauri/src/lib.rs` / `main.rs` (crate inventory and app entry),
   `src-tauri/src/cmd_app.rs` (the app-instance domain: File → New Window's
   `app_new_instance` spawns a sibling process — the multi-open entry every platform
-  shares; a packaged macOS run reaches Launch Services through `open -n <bundle>`,
-  since activating a bundled app's icon only focuses the running instance. On macOS the
-  Dock icon's right-click menu offers the same: `dock_menu` injects
-  `applicationDockMenu:` into tao's application-delegate class at boot, additively via
-  `class_addMethod`, the item's label following the persisted display language)
+  shares, optionally carrying a folder (`open -n <bundle> --args <path>` on a packaged
+  macOS run, plain argv elsewhere), the handoff a Finder "Open With" makes of an
+  occupied window; a packaged macOS run reaches Launch Services through
+  `open -n <bundle>`, since activating a bundled app's icon only focuses the running
+  instance. On macOS the Dock icon's right-click menu offers the same:
+  `dock_menu` injects `applicationDockMenu:` into tao's application-delegate class at
+  boot, additively via `class_addMethod`, the item's label following the persisted
+  display language. The Finder "Open With" handoff itself is lib.rs's run loop routing
+  `RunEvent::Opened` (`handle_opened`): one that beats the frontend's `boot_context`
+  seeds the launch context exactly like a `ggs <path>` argv launch; one that arrives
+  later crosses as the `studio://open-paths` event, which workbench.ts routes — a
+  folder takes over an empty window and wins a new instance otherwise, a file opens
+  like a drop)
 
 ### 2. Command System
 
@@ -172,13 +180,17 @@ language are user data under `~/.ggs/`; theme and UI quality are enforced, not h
 - Backend: `src-tauri/src/cmd_assoc.rs` (the File Associations setting: OS-level
   "open with" registration per platform — HKCU ProgIds + RegisteredApplications on
   Windows, desktop entry / MIME package / `mimeapps.list` on Linux, bundle-declared on
-  macOS; the Explorer context-menu entry `context_menu_apply` — the "Open with Git
-  Graph Studio" static shell verb under `*` / `Directory` / `Directory\Background` /
-  `Drive`, re-applied at every boot, removed by the NSIS uninstall hooks; and the
-  `ggs` launcher's PATH entry `user_path_apply` — the install directory appended to
-  HKCU\Environment\Path at every boot, idempotently and without length limits: the
-  NSIS hooks no longer write PATH, whose string-limited read once mistook a long user
-  PATH for an empty one and wiped it, 2026-09-23)
+  macOS: the file types from `bundle.fileAssociations`, mirrored — plus `public.folder`,
+  the Finder folder right-click's "Open With → Git Graph Studio" entry — in
+  `src-tauri/Info.plist`, which the bundler merges after the generated keys and whose
+  `CFBundleDocumentTypes` therefore replaces theirs (the module's tests fail the build
+  when the two drift apart); the Explorer context-menu entry `context_menu_apply` — the
+  "Open with Git Graph Studio" static shell verb under `*` / `Directory` /
+  `Directory\Background` / `Drive`, re-applied at every boot, removed by the NSIS
+  uninstall hooks; and the `ggs` launcher's PATH entry `user_path_apply` — the install
+  directory appended to HKCU\Environment\Path at every boot, idempotently and without
+  length limits: the NSIS hooks no longer write PATH, whose string-limited read once
+  mistook a long user PATH for an empty one and wiped it, 2026-09-23)
 - Assets: `static/theme/*.css` (the colour themes)
 
 ### 3. File Explorer
@@ -511,9 +523,18 @@ page shows the integration's state (`claude_mcp_status`).
   bundled offer as the offline fallback — and anything else installed under "Other
   installed"), `src/aiProviders.ts` (the AI provider bridge's store client and the
   sidebar switcher chip — the active provider's name on the Claude section header, the
-  quick pick that switches or opens the page), `src/providersPage.ts` (the Model
-  Providers page — the profiles, the add/edit form whose key field travels once into
-  the backend's seal, activate and delete), `src/nodeHost.ts` (the real-Node
+  quick pick that switches or opens the page), `src/providerUsageView.ts` (the bridge's
+  usage surfaces: the token-usage curve — `provider_usage`'s per-UTC-hour answer
+  re-bucketed into local today / 7-day / 30-day ranges, one smooth line with a hover
+  breakdown of cache hits, cache writes, uncached input and output, tokens only, never
+  money or durations — and the chat pane's gate, `mountProviderPaneGate`: while the
+  active third-party provider of a preset that requires a key has none, the pane
+  carries the set-key page over the extension's own login one, and once the key lands
+  the curve rides as a compact strip above the chat; the page and the strip share
+  `mountUsagePanel`), `src/providersPage.ts` (the Model
+  Providers page — flat and compact: the usage card, the profiles as one-line rows,
+  the add/edit form whose key field travels once into the
+  backend's seal, activate and delete), `src/nodeHost.ts` (the real-Node
   extension host's entry, compiled to `node-host.cjs`: stdio ggs-ext/1 server, the shared
   `vscode` shim over a stdio bridge, `require('vscode')` interception, ESM fallback —
   VS Code's own extension-host shape), `src/extHost.ts` (the extension host for VSIX
@@ -572,7 +593,11 @@ page shows the integration's state (`claude_mcp_status`).
   through `cmd_ext`'s ordinary VSIX path),
   `src-tauri/src/cmd_providers.rs` (the AI provider bridge: the provider store under
   `~/.ggs/ai-providers.json`, the AES-256-GCM key sealing under `~/.ggs/keys/`, the
-  built-in presets — official / DeepSeek / Zhipu GLM / Moonshot Kimi / custom — and the
+  built-in presets — official / DeepSeek / Zhipu GLM / Moonshot Kimi / custom, each
+  flagging whether it can run keyless — `provider_usage` (the usage curve's data: the
+  redirected Claude state's session transcripts `~/.ggs/claude/projects/**/*.jsonl`,
+  their assistant turns' usage records aggregated per UTC hour over the last 31 days,
+  tokens only) and the
   spawn-time environment `ext_process` injects into the bridged backend through its
   registered spawn-env sources — the composition root's wiring, so the two modules do
   not name each other),
@@ -687,7 +712,9 @@ page shows the integration's state (`claude_mcp_status`).
   handle routing), `tests/providers.test.ts` (the provider bridge's frontend half: the
   store client's seam contract — the key travels only inside `provider_save`, never
   back in a `provider_list` — the sidebar chip and its quick pick, the Model Providers
-  page), `tests/editor.test.ts` (the extpage tab),
+  page, the usage curve's ranges and hover breakdown, and the chat pane gate's two
+  states — the set-key page that saves into `provider_save`, the usage strip after),
+  `tests/editor.test.ts` (the extpage tab),
   `tests/editorServices.test.ts` (the diagnostics store and the document-formatting
   registry, booted through the frame bootstrap),
   `src-tauri/tests/node_runtime.rs` (the pretend Node runtime: a package's JS entry served
@@ -923,7 +950,9 @@ Everything that turns the source tree into installers: asset assembly into
   direct prepare runs pass — sets the fetch TTL to 0 (2026-09-30, the owner's direction: an
   installer must carry open-vsx.org's latest extension builds); the re-check is a lookup, a
   same-version answer reuses the cached file, and a `tauri dev` iteration keeps the TTL and
-  never phones home), `vite.config.ts`
+  never phones home), `vite.config.ts`, and `src-tauri/Info.plist` (the macOS bundle's
+  merged fragment — the `public.folder` declaration behind the Finder folder right-click's
+  "Open With" entry plus the mirrored file associations; see module 2 and its drift test)
 - Seam checks: `scripts/check-seams.mjs` (TypeScript / CSS) and `src-tauri/build.rs` (Rust)
 - Packaging: `scripts/build-studio.bat` (Windows, one command; builds `ggs-node` and
   `node-host.cjs` through `prepare.mjs` as part of that) and its shell counterpart
