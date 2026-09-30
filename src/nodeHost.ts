@@ -30,6 +30,7 @@ import { pathToFileURL } from 'node:url';
 import { join, resolve } from 'node:path';
 import Module from 'node:module';
 import { activationContext, createVscodeApi, readLocalDocProvider, rehydrateUris, serveHostCall, UNSERVED_HOST_CALL, Uri, type HostBridge, type HostContext, type HostEvent, type VscodeApi } from './vscodeApi';
+import { probeVscodeNamespace } from './vscodeNamespaceProbe';
 
 /* ---------- the wire: newline JSON-RPC on stdio, both directions ---------- */
 
@@ -168,12 +169,15 @@ function ensureActivated(): Promise<void> {
 		context_ = context;
 		const api = createVscodeApi(context, bridge);
 		api_ = api;
-		// `require('vscode')` answers the shim; everything else resolves through Node's
-		// own machinery — the package's `node_modules`, its `.node` NAPI addons, its ESM.
+		// `require('vscode')` answers the shim, carrying the upgrade-safety probe (an
+		// absent member logs its name — see vscodeNamespaceProbe.ts); everything else
+		// resolves through Node's own machinery — the package's `node_modules`, its
+		// `.node` NAPI addons, its ESM.
+		const probed = probeVscodeNamespace(api);
 		const nodeModule = Module as unknown as { _load: (request: string, parent: unknown, isMain: boolean) => unknown };
 		const originalLoad = nodeModule._load.bind(nodeModule);
 		nodeModule._load = function (request: string, parent: unknown, isMain: boolean): unknown {
-			if (request === 'vscode') return api;
+			if (request === 'vscode') return probed;
 			return originalLoad(request, parent, isMain);
 		};
 
@@ -193,7 +197,7 @@ function ensureActivated(): Promise<void> {
 				}
 			}
 			loaded_ = loaded ?? null;
-			await Promise.resolve(loaded?.activate?.(activationContext(context, api)));
+			await Promise.resolve(loaded?.activate?.(activationContext(context, probed)));
 			// The activation's queued command registrations cross as one batch now (see
 			// vscodeApi's flushCommandRegistrations).
 			(globalThis as { __ggsFlushRegistrations?: () => void }).__ggsFlushRegistrations?.();

@@ -11,6 +11,7 @@
 // nature. Data crosses as JSON strings at the bridge; everything inside is typed objects.
 
 import { activationContext, createVscodeApi, readLocalDocProvider, rehydrateUris, serveHostCall, UNSERVED_HOST_CALL, Uri, type HostBridge, type HostContext, type VscodeApi } from './vscodeApi';
+import { probeVscodeNamespace } from './vscodeNamespaceProbe';
 
 interface ShimGlobal {
 	__ggsHostRequest: (method: string, argsJson: string) => string | null;
@@ -109,8 +110,13 @@ shim.__ggsVscodeShimInstall = function (args: InstallArgs): InstalledVscode {
 		// timeout (the `vscode.diff` reentry class).
 		readDocProvider: (uri) => readLocalDocProvider(docProviders, uri)
 	};
-	const api = createVscodeApi(context, bridge);
-	installed = api;
+	// The raw namespace serves the host-call dispatch (its internal `__`-members are the
+	// shim's own wiring); the package-facing one carries the upgrade-safety probe — an
+	// absent member logs its name instead of failing silently deep in the bundle (see
+	// vscodeNamespaceProbe.ts). Values are identical either way.
+	const raw = createVscodeApi(context, bridge);
+	installed = raw;
+	const api = probeVscodeNamespace(raw);
 	shim.vscode = api;
 	// The dispatcher installs eagerly: a package that registers only a content provider -
 	// never a command - must still answer the host's provide call.

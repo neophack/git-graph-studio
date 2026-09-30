@@ -445,7 +445,12 @@ fable — take the profile's
 main model, the everyday tiers its small one — GLM: opus and fable → glm-5.3, sonnet and
 haiku → glm-5.3-flash — so a tier pick in Claude's `/model` never sends or shows a
 `claude-*` id a
-provider does not serve; switching back to official clears the four with the rest),
+provider does not serve) and `CLAUDE_CODE_ATTRIBUTION_HEADER=0` (2026-09-30, the owner's
+direction: Claude Code's attribution header is off on every third-party endpoint —
+Anthropic-compatible gateways fold it into their request identity, so the same prompt
+stops hashing equal and prompt-cache reuse drops, while the official endpoint's prefix
+cache ignores headers and keeps the default; switching back to official clears it with
+the rest),
 inherited by the
 extension's CLI children (the same takeover `claude-code-sandbox.mjs` proves against a
 local server). The UI is the sidebar chip on the Claude view's section header

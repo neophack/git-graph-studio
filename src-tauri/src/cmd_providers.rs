@@ -12,11 +12,15 @@
 //!   (login, session history, `settings.json`) never touches `~/.claude`;
 //! - the active third-party profile adds `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` /
 //!   `ANTHROPIC_API_KEY` (the decrypted key), `ANTHROPIC_MODEL` /
-//!   `ANTHROPIC_SMALL_FAST_MODEL` and the tier-alias remap
+//!   `ANTHROPIC_SMALL_FAST_MODEL`, the tier-alias remap
 //!   `ANTHROPIC_DEFAULT_{OPUS,FABLE,SONNET,HAIKU}_MODEL` (the flagship tiers take the
 //!   main model, the everyday tiers the small one — so a tier pick never sends a
-//!   `claude-*` id to a provider that serves none) — the same takeover the claude-code
-//!   sandbox probe proves end to end against a local stand-in server.
+//!   `claude-*` id to a provider that serves none) and
+//!   `CLAUDE_CODE_ATTRIBUTION_HEADER=0` (Claude Code's attribution header off:
+//!   Anthropic-compatible gateways fold it into their request identity, so the same
+//!   prompt stops hashing equal and prompt-cache reuse drops — the official endpoint's
+//!   prefix cache ignores headers and keeps the default) — the same takeover the
+//!   claude-code sandbox probe proves end to end against a local stand-in server.
 //!
 //! Switching provider (or editing the active profile) rewrites the redirected Claude
 //! settings' `env` map — which Claude Code applies at every session start, the mechanism
@@ -486,6 +490,15 @@ pub fn provider_env_vars(active: &ProviderProfile, home: &Path) -> Vec<(String, 
     if active.preset == "official" {
         return env;
     }
+    // Claude Code's attribution header is off on every third-party endpoint (2026-09-30,
+    // the owner's direction): the gateway folds it into its request identity, the same
+    // prompt stops hashing equal and prompt-cache reuse drops — a miss is billed at full
+    // price. The official endpoint's prefix cache ignores headers, so official keeps the
+    // default and writes no key at all.
+    env.push((
+        "CLAUDE_CODE_ATTRIBUTION_HEADER".to_owned(),
+        "0".to_owned(),
+    ));
     if let Some(base_url) = active.base_url.as_deref().filter(|url| !url.is_empty()) {
         env.push(("ANTHROPIC_BASE_URL".to_owned(), base_url.to_owned()));
     }
@@ -1032,6 +1045,7 @@ pub const PROVIDER_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_DEFAULT_FABLE_MODEL",
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER",
 ];
 
 /// Claude's redirected settings with the active provider's environment applied — the
@@ -1986,7 +2000,10 @@ mod tests {
         assert_eq!(map["ANTHROPIC_DEFAULT_FABLE_MODEL"], "deepseek-chat");
         assert_eq!(map["ANTHROPIC_DEFAULT_SONNET_MODEL"], "deepseek-chat");
         assert_eq!(map["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "deepseek-chat");
-        assert_eq!(map.len(), 9, "{env:?}");
+        assert_eq!(map.len(), 10, "{env:?}");
+        // The attribution header is off on a third-party endpoint: gateways fold it into
+        // their request identity and prompt-cache reuse drops.
+        assert_eq!(map["CLAUDE_CODE_ATTRIBUTION_HEADER"], "0");
         // The official profile carries none of them — its keys must leave the settings
         // so the user's own login is never shadowed.
         assert!(provider_env_vars(&official_profile(), &home).is_empty());
@@ -2084,9 +2101,10 @@ mod tests {
             ),
             ("ANTHROPIC_AUTH_TOKEN".to_owned(), "sk-live".to_owned()),
             ("ANTHROPIC_MODEL".to_owned(), "deepseek-chat".to_owned()),
+            ("CLAUDE_CODE_ATTRIBUTION_HEADER".to_owned(), "0".to_owned()),
         ];
         let written = claude_provider_settings(
-            Some(r#"{"model": "claude-fable-5-1[1m]", "env": {"MY_VAR": "keep-me", "ANTHROPIC_BASE_URL": "https://stale", "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-5", "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5-1"}}"#),
+            Some(r#"{"model": "claude-fable-5-1[1m]", "env": {"MY_VAR": "keep-me", "CLAUDE_CODE_ATTRIBUTION_HEADER": "1", "ANTHROPIC_BASE_URL": "https://stale", "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-5", "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5-1"}}"#),
             &third_party,
         )
         .unwrap()
@@ -2125,6 +2143,14 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("sk-live")
         );
+        // A hand-set attribution header is replaced with the bridge's off value, never
+        // merged beside it.
+        assert_eq!(
+            json.pointer("/env/CLAUDE_CODE_ATTRIBUTION_HEADER")
+                .and_then(|v| v.as_str()),
+            Some("0"),
+            "{json}"
+        );
 
         // Applying the same env again is a no-op; switching to official clears only
         // this bridge's keys.
@@ -2141,6 +2167,10 @@ mod tests {
             Some("keep-me")
         );
         assert!(json.pointer("/env/ANTHROPIC_BASE_URL").is_none());
+        assert!(
+            json.pointer("/env/CLAUDE_CODE_ATTRIBUTION_HEADER").is_none(),
+            "official keeps Claude Code's default (header on): {json}"
+        );
         // Back on the official service the pin this bridge wrote is cleared with the
         // env keys — a stale `deepseek-chat` would shadow the login the same way.
         assert!(json.pointer("/model").is_none(), "{json}");

@@ -14,6 +14,7 @@
 //                         tree view walks, webview view resolutions.
 
 import { activationContext, createVscodeApi, Disposable, readLocalDocProvider, rehydrateUris, serveHostCall, setUriPlatform, shimLog, UNSERVED_HOST_CALL, Uri, type HostContext, type VscodeApi } from './vscodeApi';
+import { probeVscodeNamespace } from './vscodeNamespaceProbe';
 import { setShimFailureReporter } from './nodeShims/shared';
 import { createNodeRequire, defaultNodeEnv, type NodeEnv } from './extModuleLoader';
 import { createNodeBuiltins, installNodeGlobals } from './nodeShims';
@@ -215,6 +216,10 @@ function boot(message: InitMessage): void {
 		readDocProvider: (uri) => readLocalDocProvider(docProviders, uri)
 	});
 	api_ = api;
+	// The package-facing namespace carries the upgrade-safety probe (an absent member
+	// logs its name instead of failing silently — see vscodeNamespaceProbe.ts); the raw
+	// one keeps serving the host-call dispatch and the host-event pushes.
+	const probed = probeVscodeNamespace(api);
 	// A Node surface the frame cannot serve (a sync spawn, a socket) is logged before it
 	// throws — a package that catches the error and carries on still leaves the trace.
 	setShimFailureReporter((text, level = 'warn') => shimLog(level, text));
@@ -240,7 +245,7 @@ function boot(message: InitMessage): void {
 		files,
 		truncated: message.truncated ?? false,
 		extensionPath: context.extensionPath,
-		vscode: api,
+		vscode: probed,
 		builtin: (id) => (id in builtins ? builtins[id] : undefined)
 	});
 	installNodeGlobals(shimHost, builtins, require);
@@ -265,7 +270,7 @@ function boot(message: InitMessage): void {
 			? ((esmMain && typeof pkg.browser === 'string' && pkg.browser !== '' ? pkg.browser : (pkg.main ?? 'extension.js')))
 			: 'extension.js';
 		module_ = runEntry(main) as { exports: { activate?: (context: unknown) => unknown; deactivate?: () => unknown } };
-		Promise.resolve(module_.exports.activate?.(activationContext(context, api))).then(
+		Promise.resolve(module_.exports.activate?.(activationContext(context, probed))).then(
 			() => {
 				// The activation's queued command registrations cross as one batch now (see
 				// vscodeApi's flushCommandRegistrations).
