@@ -107,6 +107,20 @@ const tauriArgs = ['tauri', 'dev', '--no-watch', '--', '--', workspace];
 say(`[app] npx ${tauriArgs.join(' ')} (HOME=${home.replace(appDir, '…')})`);
 const caffeinate = spawn('caffeinate', ['-d', '-i'], { stdio: 'ignore' });
 const app = spawn('npx', tauriArgs, { cwd: appDir, stdio: ['ignore', 'pipe', 'pipe'], env: appEnv, detached: true });
+// Any exit path — a die(), a thrown download, the probe itself being killed's
+// SIGTERM/SIGINT reaching here — must tear the whole detached group down. Earlier runs
+// that died mid-flight left `tauri dev` trees (vite + cargo + the app + backends) and
+// mounted scratch DMGs burning CPU for hours; this handler is the leak's plug.
+const cleanupApp = () => {
+	try { process.kill(-app.pid, 'SIGKILL'); } catch {}
+};
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+	process.on(signal, () => {
+		cleanupApp();
+		process.exit(130);
+	});
+}
+process.on('exit', () => cleanupApp());
 const stopApp = async () => {
 	if (app.exitCode === null) {
 		app.kill('SIGINT');
