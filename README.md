@@ -154,7 +154,11 @@ comparison subcommands open in the window they started. Inside the app, **File �
 Window** (Ctrl/Cmd+Shift+N) opens another instance on every platform — the discoverable
 way on macOS, where clicking the app's icon again only focuses the running window
 (`open -n -a "Git Graph Studio"` does the same from the terminal). On macOS the **Dock
-icon's right-click menu** carries a New Window entry too. Instances are independent:
+icon's right-click menu** carries a New Window entry too, and a Finder folder's
+right-click lists the app under **打开方式 / Open With** (the bundle declares
+`public.folder`): the folder opens in an empty window and wins a new one otherwise, and
+a file opens like a drop would — a fresh install may need one logout/relogin before
+Finder lists the new declaration. Instances are independent:
 each spawns and owns its own extension backends, and the shared `~/.ggs` user data is
 written atomically so concurrent instances cannot corrupt it.
 

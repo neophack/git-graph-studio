@@ -5,8 +5,12 @@
 //! the *default* - it registers into the "Open with" list and Default Apps, where one
 //! confirmation makes it the default). Linux maps each extension to a custom MIME
 //! type and writes the desktop entry, the MIME package and `mimeapps.list`. macOS
-//! offers no runtime registration - associations are declared at bundle time
-//! (`bundle.fileAssociations`) and chosen in Finder.
+//! offers no runtime registration - associations are declared at bundle time and
+//! chosen in Finder: the file types come from `bundle.fileAssociations`, and
+//! `src-tauri/Info.plist` (which merges after them and replaces their generated
+//! `CFBundleDocumentTypes`) mirrors them plus declares `public.folder`, the Finder
+//! folder right-click's "Open With → Git Graph Studio" (cmd_assoc's tests guard the
+//! mirror; the handoff itself is lib.rs's `handle_opened`).
 //!
 //! The same file owns the Explorer context-menu entry (`context_menu_apply`): the
 //! "Open with Git Graph Studio" verb Zed's Windows 10 install writes - static shell
@@ -759,5 +763,96 @@ mod tests {
                 environment.delete_value("Path").unwrap();
             }
         }
+    }
+
+    /// The macOS bundle's `Info.plist` fragment replaces the `CFBundleDocumentTypes` array
+    /// the bundler generates from `tauri.conf.json`'s `bundle.fileAssociations` (its keys
+    /// merge last, and a dictionary insert replaces), so it carries both the Folder
+    /// declaration — `public.folder`, which is what puts "Open With → Git Graph Studio"
+    /// on a Finder folder's right-click menu — and the file entry, replicated
+    /// field-for-field. This test is the guard: the moment the two declarations drift
+    /// apart (an extension added to the config but not the plist, the folder entry lost),
+    /// the build fails instead of the Mac install quietly losing its registration.
+    #[test]
+    fn the_macos_bundle_plist_carries_the_folder_entry_and_mirrors_the_config() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let plist = plist::Value::from_file(manifest.join("Info.plist")).unwrap();
+        let types = plist
+            .as_dictionary()
+            .and_then(|dict| dict.get("CFBundleDocumentTypes"))
+            .and_then(plist::Value::as_array)
+            .expect("the Info.plist declares CFBundleDocumentTypes");
+        assert_eq!(
+            types.len(),
+            2,
+            "exactly the folder entry and the file entry"
+        );
+
+        let strings = |entry: &plist::Value, key: &str| -> Vec<String> {
+            entry
+                .as_dictionary()
+                .and_then(|dict| dict.get(key))
+                .and_then(plist::Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(plist::Value::as_string)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        fn scalar<'a>(entry: &'a plist::Value, key: &str) -> Option<&'a str> {
+            entry
+                .as_dictionary()
+                .and_then(|dict| dict.get(key))
+                .and_then(plist::Value::as_string)
+        }
+
+        // The folder entry: an Alternate Viewer of `public.folder` — an additional viewer,
+        // never a claim on the default (Finder keeps opening folders itself).
+        let folder = types
+            .iter()
+            .find(|entry| {
+                strings(entry, "LSItemContentTypes").contains(&"public.folder".to_owned())
+            })
+            .expect("a public.folder document type");
+        assert_eq!(scalar(folder, "CFBundleTypeRole"), Some("Viewer"));
+        assert_eq!(scalar(folder, "LSHandlerRank"), Some("Alternate"));
+
+        // The file entry mirrors `bundle.fileAssociations`: the same extensions, name,
+        // role and rank the bundler would have generated from the config.
+        let config: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(manifest.join("tauri.conf.json")).unwrap(),
+        )
+        .unwrap();
+        let associations = config["bundle"]["fileAssociations"]
+            .as_array()
+            .expect("tauri.conf.json declares fileAssociations");
+        assert_eq!(
+            associations.len(),
+            1,
+            "a second association must be mirrored into Info.plist and this test grown with it"
+        );
+        let mut expected: Vec<String> = associations[0]["ext"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|value| value.as_str().map(str::to_owned))
+            .collect();
+        expected.sort();
+        let file = types
+            .iter()
+            .find(|entry| !strings(entry, "CFBundleTypeExtensions").is_empty())
+            .expect("an extension-based document type");
+        let mut declared = strings(file, "CFBundleTypeExtensions");
+        declared.sort();
+        assert_eq!(declared, expected);
+        assert_eq!(
+            scalar(file, "CFBundleTypeName"),
+            associations[0]["name"].as_str()
+        );
+        assert_eq!(scalar(file, "CFBundleTypeRole"), Some("Editor"));
+        assert_eq!(scalar(file, "LSHandlerRank"), Some("Default"));
     }
 }

@@ -9,7 +9,7 @@ import { applyContributions, removeContributions } from '../src/contributions';
 import { commands } from '../src/commands';
 import { ExtensionHost } from '../src/extHost';
 import * as state from '../src/state';
-import { FS_CHANGED_EVENT, Workbench } from '../src/workbench';
+import { FS_CHANGED_EVENT, OPEN_PATHS_EVENT, Workbench } from '../src/workbench';
 import { backend, windowApi } from './tauriMock';
 import { click, flush, key, notificationButton, texts } from './helpers';
 
@@ -400,6 +400,61 @@ describe('files dragged onto the window', () => {
 		backend.dropHandlers[0]!({ payload: { type: 'leave' } });
 		await flush(4);
 		expect(workbench.editors.openFilePaths()).toEqual([]);
+	});
+});
+
+describe('the Finder open-paths handoff', () => {
+	it('hands a folder to a new instance while a window is showing something', async () => {
+		backend.emit(OPEN_PATHS_EVENT, { folders: [REPO_B], files: [] });
+		await flush(8);
+		// The occupied window never reopens the folder itself — the new instance does.
+		expect(backend.callsTo('app_new_instance')).toEqual([{ folder: REPO_B }]);
+		expect(backend.callsTo('open_folder').some((args) => args.path === REPO_B)).toBe(false);
+	});
+
+	it('opens a file as an editor tab in the window that is showing a folder', async () => {
+		backend.emit(OPEN_PATHS_EVENT, { folders: [], files: [STANDALONE] });
+		await flush(8);
+		expect(workbench.editors.openFilePaths()).toEqual([STANDALONE]);
+		expect(backend.callsTo('app_new_instance')).toEqual([]);
+	});
+
+	it('takes a folder over an empty window, and a file standalone', async () => {
+		// An empty window: boot with no repo and no remembered folder (the default boot's
+		// REPO_A must not win as the recents entry).
+		workbench.dispose();
+		localStorage.clear();
+		backend.handlers.set('boot_context', () => ({ file: null, actions: [], repo: null }));
+		workbench = new Workbench();
+		await workbench.boot();
+		await flush(6);
+
+		backend.emit(OPEN_PATHS_EVENT, { folders: [REPO_B], files: [] });
+		await flush(8);
+		// The beforeEach boot's own open of REPO_A stays in the log; what matters is that
+		// the handoff's folder was opened here, and only once.
+		expect(backend.callsTo('open_folder').filter((args) => args.path === REPO_B)).toEqual([{ path: REPO_B }]);
+		expect(backend.callsTo('app_new_instance')).toEqual([]);
+
+		// A file into the now-open folder opens as a tab, not a standalone window.
+		backend.emit(OPEN_PATHS_EVENT, { folders: [], files: [STANDALONE] });
+		await flush(8);
+		expect(workbench.editors.openFilePaths()).toEqual([STANDALONE]);
+		expect(backend.callsTo('boot_stage').some((args) => args.stage === 'single file shown')).toBe(false);
+	});
+
+	it('shows a file standalone when the window has nothing open', async () => {
+		workbench.dispose();
+		localStorage.clear();
+		backend.handlers.set('boot_context', () => ({ file: null, actions: [], repo: null }));
+		workbench = new Workbench();
+		await workbench.boot();
+		await flush(6);
+
+		backend.emit(OPEN_PATHS_EVENT, { folders: [], files: [STANDALONE] });
+		await flush(8);
+		expect(workbench.editors.openFilePaths()).toEqual([STANDALONE]);
+		expect(backend.callsTo('boot_stage').some((args) => args.stage === 'single file shown')).toBe(true);
 	});
 });
 

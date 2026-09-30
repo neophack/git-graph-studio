@@ -48,20 +48,37 @@ pub fn new_instance_plan(exe: &Path) -> NewInstancePlan {
     }
 }
 
-/// Start another instance of this app — the shared body of the File menu's "New Window"
-/// and the Dock menu's item. The child gets null stdio (it shares nothing of this
-/// window's pipes) and is reaped on a spare thread — `open -n` exits as soon as Launch
-/// Services has taken the handoff, and a dropped `Child` is never waited.
-fn spawn_new_instance() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("locate this app's executable: {e}"))?;
-    let mut command = match new_instance_plan(&exe) {
+/// The program and arguments that start another instance — the testable core of
+/// [`spawn_new_instance`]. A launch path rides along as the new instance's one argument
+/// (`ggs <path>`): Launch Services carries it on macOS (`open -n <bundle> --args <path>`),
+/// every other build gets it as plain argv.
+fn instance_argv(plan: &NewInstancePlan, launch: Option<&str>) -> (String, Vec<String>) {
+    match plan {
         NewInstancePlan::OpenNew { bundle } => {
-            let mut open = std::process::Command::new("open");
-            open.arg("-n").arg(bundle);
-            open
+            let mut args = vec!["-n".to_owned(), bundle.display().to_string()];
+            if let Some(path) = launch {
+                args.push("--args".to_owned());
+                args.push(path.to_owned());
+            }
+            ("open".to_owned(), args)
         }
-        NewInstancePlan::SpawnExe { exe } => std::process::Command::new(exe),
-    };
+        NewInstancePlan::SpawnExe { exe } => {
+            let args = launch.map(|path| vec![path.to_owned()]).unwrap_or_default();
+            (exe.display().to_string(), args)
+        }
+    }
+}
+
+/// Start another instance of this app — the shared body of the File menu's "New Window",
+/// the Dock menu's item, and a Finder "Open With" folder handed to an occupied window. The
+/// child gets null stdio (it shares nothing of this window's pipes) and is reaped on a
+/// spare thread — `open -n` exits as soon as Launch Services has taken the handoff, and a
+/// dropped `Child` is never waited.
+fn spawn_new_instance(launch: Option<&str>) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("locate this app's executable: {e}"))?;
+    let (program, args) = instance_argv(&new_instance_plan(&exe), launch);
+    let mut command = std::process::Command::new(program);
+    command.args(args);
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -75,10 +92,11 @@ fn spawn_new_instance() -> Result<(), String> {
 }
 
 /// File > New Window: start another instance of this app, the multi-open entry every
-/// platform shares.
+/// platform shares. `folder` — a path the new window opens instead of a blank one, the
+/// Finder "Open With" handoff for a window that is already showing something.
 #[tauri::command]
-pub fn app_new_instance() -> Result<(), String> {
-    spawn_new_instance()
+pub fn app_new_instance(folder: Option<String>) -> Result<(), String> {
+    spawn_new_instance(folder.as_deref())
 }
 
 /// The Dock icon's right-click menu: "New Window", the multi-open affordance a Mac user
@@ -128,12 +146,8 @@ pub mod dock_menu {
                 menu_imp,
                 c"@@:@".as_ptr(),
             );
-            let action_added = ffi::class_addMethod(
-                class,
-                sel!(ggsNewWindow:),
-                action_imp,
-                c"v@:@".as_ptr(),
-            );
+            let action_added =
+                ffi::class_addMethod(class, sel!(ggsNewWindow:), action_imp, c"v@:@".as_ptr());
             let title = item_title();
             drop(build_menu(delegate_ptr.cast_mut(), &title, mtm));
             eprintln!(
@@ -165,7 +179,7 @@ pub mod dock_menu {
         _cmd: Sel,
         _sender: *mut AnyObject,
     ) {
-        if let Err(reason) = super::spawn_new_instance() {
+        if let Err(reason) = super::spawn_new_instance(None) {
             eprintln!("[dock] new window: {reason}");
         }
     }
@@ -270,6 +284,56 @@ mod tests {
             NewInstancePlan::SpawnExe {
                 exe: PathBuf::from(exe)
             }
+        );
+    }
+
+    #[test]
+    fn a_launch_path_rides_along_as_the_new_instances_argument() {
+        // A packaged macOS run: Launch Services owns the argv handoff, so the path goes
+        // through `--args` (everything after it becomes the app's argv).
+        let bundle = if cfg!(target_os = "macos") {
+            PathBuf::from("/Applications/Git Graph Studio.app")
+        } else {
+            PathBuf::from(r"C:\Apps\Git Graph Studio.app")
+        };
+        assert_eq!(
+            instance_argv(
+                &NewInstancePlan::OpenNew { bundle },
+                Some("/Users/nn/Documents/git-graph-studio")
+            ),
+            (
+                "open".to_owned(),
+                vec![
+                    "-n".to_owned(),
+                    if cfg!(target_os = "macos") {
+                        "/Applications/Git Graph Studio.app".to_owned()
+                    } else {
+                        r"C:\Apps\Git Graph Studio.app".to_owned()
+                    },
+                    "--args".to_owned(),
+                    "/Users/nn/Documents/git-graph-studio".to_owned()
+                ]
+            )
+        );
+        // Every other build: the path as plain argv — exactly a `ggs <path>` launch.
+        assert_eq!(
+            instance_argv(
+                &NewInstancePlan::SpawnExe {
+                    exe: PathBuf::from("/usr/bin/ggs")
+                },
+                Some("/home/nn/repo")
+            ),
+            ("/usr/bin/ggs".to_owned(), vec!["/home/nn/repo".to_owned()])
+        );
+        // No launch path: the plain "New Window" spawn, argumentless.
+        assert_eq!(
+            instance_argv(
+                &NewInstancePlan::SpawnExe {
+                    exe: PathBuf::from("/usr/bin/ggs")
+                },
+                None
+            ),
+            ("/usr/bin/ggs".to_owned(), Vec::new())
         );
     }
 }

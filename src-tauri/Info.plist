@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The macOS bundle's merged Info.plist fragment. Tauri merges this file LAST, top-level key
+  by key — and a plist dictionary insert REPLACES, so the CFBundleDocumentTypes below
+  replaces the array the bundler generates from tauri.conf.json's `bundle.fileAssociations`.
+  Both must therefore live here:
+
+  - the Folder entry: declaring `public.folder` (role Viewer, rank Alternate — an additional
+    viewer, never a claim on the default) is what puts "打开方式 / Open With → Git Graph
+    Studio" on a Finder folder's right-click menu. The handoff itself arrives as
+    RunEvent::Opened (lib.rs's handle_opened), routed to this window or a new instance;
+  - the file entry: blf / asc / bin / hex, replicated field-for-field from
+    tauri.conf.json's association (the bundler would generate exactly this: extensions,
+    name, Editor role, Default rank, no UTIs for these formats).
+
+  cmd_assoc's macos_bundle_plist_tests fails the build if the two ever drift apart.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Folder</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.folder</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Git Graph Studio file</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Default</string>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>blf</string>
+				<string>asc</string>
+				<string>bin</string>
+				<string>hex</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

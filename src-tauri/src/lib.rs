@@ -143,9 +143,15 @@ mod desktop {
         pub watcher: Mutex<Vec<watcher::FolderWatcher>>,
         /// Roots whose heavy background services (the symbol/analysis index builds and the
         /// file watcher) are recorded by `open_folder` / `open_workspace` but only started by
-        /// `post_first_paint`, which the shell calls once its first frame with the new folder
-        /// has painted - so none of them competes with that frame for the CPU.
+        /// `post_first_paint`, once the shell calls it after its first frame with the new
+        /// folder has painted - so none of them competes with that frame for the CPU.
         pub deferred_services: DeferredServices,
+        /// Whether the frontend has read its launch context (`boot_context`). Until it has,
+        /// a macOS Finder "Open With" handoff still arrives in time to seed that very
+        /// context ([`desktop::seed_launch_paths`]); after it, handoffs cross as the
+        /// `studio://open-paths` event instead. Set as the first thing `boot_context` does,
+        /// before its awaits, so a handoff racing the boot can never take both roads.
+        pub boot_context_served: std::sync::atomic::AtomicBool,
     }
 
     /// The open folders whose background services wait for the shell's first painted frame.
@@ -201,8 +207,14 @@ mod desktop {
         }
     }
 
+    impl Default for AppState {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl AppState {
-        fn new() -> Self {
+        pub fn new() -> Self {
             AppState {
                 repos: Mutex::new(Vec::new()),
                 single_file: Mutex::new(None),
@@ -214,6 +226,7 @@ mod desktop {
                 analysis_index: Arc::new(cmd_analysis::AnalysisIndex::new()),
                 watcher: Mutex::new(Vec::new()),
                 deferred_services: DeferredServices::default(),
+                boot_context_served: std::sync::atomic::AtomicBool::new(false),
             }
         }
 
@@ -829,6 +842,12 @@ mod desktop {
 
     #[tauri::command]
     async fn boot_context(state: tauri::State<'_, AppState>) -> Result<BootContext, String> {
+        // First thing, before the awaits: from here on the frontend has its launch context,
+        // so a Finder "Open With" handoff must cross as the open-paths event instead of
+        // seeding a context that was just read (see `handle_opened`).
+        state
+            .boot_context_served
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let file = state.single_file.lock().unwrap().clone();
         let actions = state.startup_actions.lock().unwrap().clone();
         let repo = state.first_repo();
@@ -922,6 +941,95 @@ mod desktop {
                     })
                     .unwrap_or(arg)
             })
+    }
+
+    /// What a macOS Finder "Open With" handoff ([`tauri::RunEvent::Opened`]) carries,
+    /// classified: the file URLs split into folders and files, everything else (other
+    /// schemes, paths that no longer exist) ignored. Compiled on every platform so the
+    /// classification is tested where CI runs it.
+    #[cfg(any(target_os = "macos", test))]
+    pub fn opened_paths(urls: &[tauri::Url]) -> (Vec<String>, Vec<String>) {
+        let mut folders = Vec::new();
+        let mut files = Vec::new();
+        for url in urls {
+            if url.scheme() != "file" {
+                continue;
+            }
+            let Ok(path) = url.to_file_path() else {
+                continue;
+            };
+            // display(): the handoff's call site is macOS, where paths are UTF-8.
+            if path.is_dir() {
+                folders.push(path.display().to_string());
+            } else if path.is_file() {
+                files.push(path.display().to_string());
+            }
+        }
+        (folders, files)
+    }
+
+    /// The cold-start half of the Finder "Open With" handoff: record the opened path the
+    /// way the argv launch records it (`ggs <folder>` / `ggs <file>` — run()'s branch), so
+    /// the `boot_context` the frontend has not asked for yet opens it as this window's
+    /// launch form, remembered-folder precedence and all. Answers whether the path was
+    /// taken: a window whose argv already carried a launch form is left alone, and the
+    /// handoff crosses as the `studio://open-paths` event instead.
+    #[cfg(any(target_os = "macos", test))]
+    pub fn seed_launch_paths(state: &AppState, folders: &[String], files: &[String]) -> bool {
+        let mut repos = state.repos.lock().unwrap();
+        let mut single = state.single_file.lock().unwrap();
+        if !repos.is_empty() || single.is_some() {
+            return false;
+        }
+        if let Some(folder) = folders.first() {
+            repos.push(folder.clone());
+            // The same warm-up the argv launch runs: the first file's outline wants the
+            // syntax set, best paid on a spare core now rather than on that first open.
+            std::thread::spawn(|| {
+                viewer::doc::syntax_set();
+                stamp("syntax set ready");
+            });
+        } else if let Some(file) = files.first() {
+            viewer::prewarm(file.clone());
+            *single = Some(file.clone());
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// The `studio://open-paths` payload: a Finder handoff crossing to a frontend that
+    /// has already booted.
+    #[cfg(target_os = "macos")]
+    #[derive(serde::Serialize, Clone)]
+    #[serde(rename_all = "camelCase")]
+    struct OpenedPaths {
+        folders: Vec<String>,
+        files: Vec<String>,
+    }
+
+    /// A Finder "Open With" handoff: macOS asked the running app to open folders or files
+    /// (the bundle's `public.folder` declaration, the file associations). A frontend that
+    /// has not read its boot context yet — Finder launched the app on this very path —
+    /// takes the argv-launch seeding; a booted one is told over the event, and the
+    /// workbench routes it: a folder takes over an empty window and wins a new instance
+    /// otherwise, a file opens like a drop would.
+    #[cfg(target_os = "macos")]
+    fn handle_opened(app: &tauri::AppHandle, urls: &[tauri::Url]) {
+        use tauri::{Emitter, Manager};
+        let state = app.state::<AppState>();
+        let (folders, files) = opened_paths(urls);
+        if folders.is_empty() && files.is_empty() {
+            return;
+        }
+        if !state
+            .boot_context_served
+            .load(std::sync::atomic::Ordering::SeqCst)
+            && seed_launch_paths(state.inner(), &folders, &files)
+        {
+            return;
+        }
+        let _ = app.emit("studio://open-paths", OpenedPaths { folders, files });
     }
 
     /// One comparison a `ggs <subcommand>` launch opens in its window, serialised to the
@@ -1675,6 +1783,7 @@ mod desktop {
                 cmd_providers::provider_save,
                 cmd_providers::provider_delete,
                 cmd_providers::provider_activate,
+                cmd_providers::provider_usage,
                 cmd_providers::provider_fetch_models,
                 cmd_providers::provider_test_connection,
                 cmd_providers::provider_ccswitch_scan,
@@ -1725,6 +1834,13 @@ mod desktop {
             .build(tauri::generate_context!())
             .expect("error while building Git Graph Studio")
             .run(|app, event| {
+                // Finder's "Open With" handoff (the bundle's folder declaration and the
+                // file associations): macOS hands the running app the paths as file URLs,
+                // and the routing decides between this window and a new instance.
+                #[cfg(target_os = "macos")]
+                if let tauri::RunEvent::Opened { urls } = &event {
+                    handle_opened(app, urls);
+                }
                 // No backend outlives its window: on exit every process this instance spawned
                 // is stopped (another instance's backends are not ours to stop) — the warm
                 // extension backends and a frame's child processes alike.
@@ -1783,6 +1899,60 @@ mod launch_path_tests {
         assert_eq!(launch_path_of(&argv), None);
         let argv = args(&["ggs", "--measure", "Z:/definitely/not/here"]);
         assert_eq!(launch_path_of(&argv), None);
+    }
+}
+
+/// The Finder "Open With" handoff's two halves: the URL classification, and the cold-start
+/// seeding that turns a handoff into this window's launch form.
+#[cfg(all(test, feature = "desktop"))]
+mod opened_paths_tests {
+    use super::desktop::{opened_paths, seed_launch_paths, AppState};
+
+    #[test]
+    fn file_urls_split_by_kind_and_other_schemes_are_ignored() {
+        // The test binary itself is a real file beside a real folder.
+        let exe = std::env::current_exe().unwrap();
+        let dir = exe.parent().unwrap().to_owned();
+        let urls = [
+            tauri::Url::from_file_path(&dir).unwrap(),
+            tauri::Url::from_file_path(&exe).unwrap(),
+            tauri::Url::parse("https://gitgraph.studio/x").unwrap(),
+        ];
+        let (folders, files) = opened_paths(&urls);
+        assert_eq!(folders, vec![dir.display().to_string()]);
+        assert_eq!(files, vec![exe.display().to_string()]);
+    }
+
+    #[test]
+    fn seeding_takes_one_path_and_only_into_an_empty_window() {
+        // A folder seeds the launch repository — exactly the argv launch's record.
+        let state = AppState::new();
+        let folder = tempfile::tempdir().unwrap();
+        let folder = folder.path().display().to_string();
+        assert!(seed_launch_paths(
+            &state,
+            std::slice::from_ref(&folder),
+            &[]
+        ));
+        assert_eq!(*state.repos.lock().unwrap(), vec![folder]);
+        // A window that already has a launch form is never re-seeded.
+        assert!(!seed_launch_paths(
+            &state,
+            ["/elsewhere".into()].as_slice(),
+            &[]
+        ));
+        assert_eq!(state.repos.lock().unwrap().len(), 1);
+
+        // A file seeds single-file mode instead.
+        let state = AppState::new();
+        let file = std::env::current_exe().unwrap().display().to_string();
+        assert!(seed_launch_paths(&state, &[], std::slice::from_ref(&file)));
+        assert_eq!(state.single_file.lock().unwrap().clone(), Some(file));
+
+        // Nothing to open seeds nothing.
+        let state = AppState::new();
+        assert!(!seed_launch_paths(&state, &[], &[]));
+        assert_eq!(state.repos.lock().unwrap().len(), 0);
     }
 }
 
