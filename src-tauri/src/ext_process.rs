@@ -107,9 +107,7 @@ pub fn add_spawn_env_source(source: SpawnEnvSource) {
 
 /// The extra environment every registered source asks for `ext_id`.
 fn spawn_env(ext_id: &str) -> Vec<(String, String)> {
-    let sources = SPAWN_ENV_SOURCES
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
+    let sources = SPAWN_ENV_SOURCES.lock().unwrap_or_else(|p| p.into_inner());
     sources.iter().flat_map(|source| source(ext_id)).collect()
 }
 

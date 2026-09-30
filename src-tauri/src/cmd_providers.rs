@@ -15,9 +15,12 @@
 //!   `ANTHROPIC_SMALL_FAST_MODEL` — the same takeover the claude-code sandbox probe
 //!   proves end to end against a local stand-in server.
 //!
-//! Switching provider (or editing the active profile) restarts the bridged backend, the
-//! same deliberate restart the Extensions view's button performs — a running backend
-//! keeps the environment it was spawned with.
+//! Switching provider (or editing the active profile) never restarts the bridged
+//! backend: the switch's whole effect is a rewrite of the redirected Claude settings'
+//! `env` map, which Claude Code applies at every session start — a new chat runs on the
+//! new provider, a conversation in flight keeps its own. [`provider_change`] is the gate
+//! every store-writing command runs to decide that rewrite (and the push the windows'
+//! switcher chips re-read on).
 //!
 //! Coupling is one-directional: this module may stop and start the bridged backends,
 //! but the spawn path never names this store — [`backend_env`] is registered onto
@@ -41,9 +44,9 @@ pub const CLAUDE_CODE_EXT_ID: &str = "Anthropic.claude-code";
 /// Every extension id whose backend runs under the provider bridge.
 pub const BRIDGED_EXT_IDS: &[&str] = &[CLAUDE_CODE_EXT_ID];
 
-/// The Tauri event pushed when the active provider (or a profile's endpoint) changed and
-/// the bridged backend was restarted — the frontend's switchers re-read on it, so a
-/// switch in one window updates the chip in another.
+/// The Tauri event pushed when the store visibly changed (a switch, an edit, a delete)
+/// — the frontend's switchers re-read on it, so a switch in one window updates the chip
+/// in another.
 pub const PROVIDERS_EVENT: &str = "providers-changed";
 
 /// What the key cipher binds into every sealed blob (defence in depth: a sealed key from
@@ -176,7 +179,11 @@ pub fn presets() -> Vec<ProviderPreset> {
 /// third-party shapes already listed (a switch is then one paste of a key away). Seeded
 /// in memory — the file first appears when something is saved.
 fn seeded_store() -> ProviderStore {
-    let mut store = ProviderStore { version: 1, active_id: Some("official".to_owned()), profiles: Vec::new() };
+    let mut store = ProviderStore {
+        version: 1,
+        active_id: Some("official".to_owned()),
+        profiles: Vec::new(),
+    };
     for preset in presets() {
         // The gateway and custom presets have no fixed shape to seed — the Add flow
         // creates their profiles once the user names an endpoint.
@@ -208,15 +215,31 @@ static TEST_HOME: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// The `~/.ggs` root every provider file lives under (`ai-providers.json`, `keys/`,
 /// and the `claude/` config dir the bridge points the backend at).
 fn ggs_home() -> Result<PathBuf, String> {
+    // A test build never resolves the developer's real `~/.ggs`: a lib-level test that
+    // drives a whole folder flow (lib.rs's open/reopen suite) reaches the Claude
+    // integration writes without pinning TEST_HOME, and its `current_exe` is the test
+    // binary — the `mcpServers.ggs` registration the app's bridge reads must never
+    // become that garbage (it once did, and Claude's /mcp listed nothing because the
+    // entry pointed at a deleted scratch folder).
     #[cfg(test)]
-    if let Some(dir) = TEST_HOME.lock().unwrap().clone() {
-        return Ok(dir);
+    {
+        let pinned = TEST_HOME.lock().unwrap().clone();
+        match pinned {
+            Some(dir) => Ok(dir),
+            None => {
+                Ok(std::env::temp_dir()
+                    .join(format!("ggs-provider-test-home-{}", std::process::id())))
+            }
+        }
     }
-    let extensions = crate::cmd_ext::extensions_home_dir()?;
-    extensions
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| "no ~/.ggs home directory".to_owned())
+    #[cfg(not(test))]
+    {
+        let extensions = crate::cmd_ext::extensions_home_dir()?;
+        extensions
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "no ~/.ggs home directory".to_owned())
+    }
 }
 
 fn store_path(home: &Path) -> PathBuf {
@@ -225,14 +248,17 @@ fn store_path(home: &Path) -> PathBuf {
 
 fn read_store(home: &Path) -> Result<ProviderStore, String> {
     match std::fs::read_to_string(store_path(home)) {
-        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("invalid ai-providers.json: {e}")),
+        Ok(text) => {
+            serde_json::from_str(&text).map_err(|e| format!("invalid ai-providers.json: {e}"))
+        }
         Err(_) => Ok(seeded_store()),
     }
 }
 
 fn write_store(home: &Path, store: &ProviderStore) -> Result<(), String> {
     let path = store_path(home);
-    let text = serde_json::to_string_pretty(store).map_err(|e| format!("serialize providers: {e}"))?;
+    let text =
+        serde_json::to_string_pretty(store).map_err(|e| format!("serialize providers: {e}"))?;
     std::fs::write(&path, text + "\n").map_err(|e| format!("write {}: {e}", path.display()))
 }
 
@@ -273,7 +299,10 @@ fn seal(home: &Path, secret: &str) -> Result<String, String> {
     let sealed = cipher
         .encrypt(
             Nonce::from_slice(&nonce),
-            Payload { msg: secret.as_bytes(), aad: KEY_AAD },
+            Payload {
+                msg: secret.as_bytes(),
+                aad: KEY_AAD,
+            },
         )
         .map_err(|_| "seal the API key".to_owned())?;
     let mut blob = nonce.to_vec();
@@ -284,7 +313,9 @@ fn seal(home: &Path, secret: &str) -> Result<String, String> {
 /// The `seal` inverse: any tampering, any other master key, any other purpose fails.
 fn unseal(home: &Path, sealed: &str) -> Result<String, String> {
     let key = master_key(home)?;
-    let blob = BASE64.decode(sealed).map_err(|e| format!("a sealed key is not valid base64: {e}"))?;
+    let blob = BASE64
+        .decode(sealed)
+        .map_err(|e| format!("a sealed key is not valid base64: {e}"))?;
     if blob.len() < 12 + 16 {
         return Err("a sealed key is too short to open".to_owned());
     }
@@ -293,9 +324,14 @@ fn unseal(home: &Path, sealed: &str) -> Result<String, String> {
     let plain = cipher
         .decrypt(
             Nonce::from_slice(nonce),
-            Payload { msg: body, aad: KEY_AAD },
+            Payload {
+                msg: body,
+                aad: KEY_AAD,
+            },
         )
-        .map_err(|_| "the stored API key does not open under this install's master key".to_owned())?;
+        .map_err(|_| {
+            "the stored API key does not open under this install's master key".to_owned()
+        })?;
     String::from_utf8(plain).map_err(|_| "the stored API key is not valid UTF-8".to_owned())
 }
 
@@ -311,7 +347,10 @@ fn clean_option(value: &Option<String>) -> Option<String> {
 
 /// Validate and normalize one save. The official profile is endpoint-less by
 /// construction; every other profile needs an http(s) base URL.
-fn normalize_profile(input: &ProviderInput, presets: &[ProviderPreset]) -> Result<ProviderProfile, String> {
+fn normalize_profile(
+    input: &ProviderInput,
+    presets: &[ProviderPreset],
+) -> Result<ProviderProfile, String> {
     let id = input.id.trim().to_owned();
     if id.is_empty() || id.contains(['/', '\\', ':']) || id.contains("..") {
         return Err(format!("invalid provider id {id:?}"));
@@ -320,8 +359,7 @@ fn normalize_profile(input: &ProviderInput, presets: &[ProviderPreset]) -> Resul
         .iter()
         .find(|preset| preset.id == input.preset)
         .ok_or_else(|| format!("unknown preset {:?}", input.preset))?;
-    let label = clean_option(&Some(input.label.clone()))
-        .unwrap_or_else(|| preset.label.clone());
+    let label = clean_option(&Some(input.label.clone())).unwrap_or_else(|| preset.label.clone());
     if preset.official {
         return Ok(ProviderProfile {
             id,
@@ -338,7 +376,9 @@ fn normalize_profile(input: &ProviderInput, presets: &[ProviderPreset]) -> Resul
         format!("{label} needs the provider's base URL (its Anthropic-compatible endpoint)")
     })?;
     if !base_url.starts_with("https://") && !base_url.starts_with("http://") {
-        return Err(format!("the base URL must start with https:// (or http:// for a local server): {base_url}"));
+        return Err(format!(
+            "the base URL must start with https:// (or http:// for a local server): {base_url}"
+        ));
     }
     let base_url = base_url.trim_end_matches('/').to_owned();
     Ok(ProviderProfile {
@@ -356,11 +396,7 @@ fn normalize_profile(input: &ProviderInput, presets: &[ProviderPreset]) -> Resul
 /// Apply one save onto the store: normalize the fields, then the key — absent keeps the
 /// stored one (and its hint), empty clears it, anything else seals the new value. The
 /// key never rides through the normalized profile.
-fn apply_save(
-    home: &Path,
-    store: &mut ProviderStore,
-    input: &ProviderInput,
-) -> Result<(), String> {
+fn apply_save(home: &Path, store: &mut ProviderStore, input: &ProviderInput) -> Result<(), String> {
     let mut profile = normalize_profile(input, &presets())?;
     let existing = store.profiles.iter().find(|p| p.id == profile.id);
     if profile.preset == "official" {
@@ -380,7 +416,16 @@ fn apply_save(
                 let trimmed = key.trim();
                 if !trimmed.is_empty() {
                     profile.api_key_enc = Some(seal(home, trimmed)?);
-                    profile.api_key_hint = Some(trimmed.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect());
+                    profile.api_key_hint = Some(
+                        trimmed
+                            .chars()
+                            .rev()
+                            .take(4)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect(),
+                    );
                 }
             }
         }
@@ -500,7 +545,10 @@ pub fn fetch_gateway_models(base_url: &str, api_key: &str) -> Result<Vec<String>
     let entries = parsed
         .get("data")
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "the model catalogue has no \"data\" array — is this an OpenAI-compatible gateway?".to_owned())?;
+        .ok_or_else(|| {
+            "the model catalogue has no \"data\" array — is this an OpenAI-compatible gateway?"
+                .to_owned()
+        })?;
     let mut models: Vec<String> = Vec::new();
     for entry in entries {
         if let Some(id) = entry.get("id").and_then(serde_json::Value::as_str) {
@@ -531,7 +579,8 @@ fn gateway_status_message(status: u16, url: &str) -> String {
             "nothing answers /v1/messages at {url} — the base URL may need the provider's \
              Anthropic suffix (e.g. /anthropic)"
         ),
-        429 => "the gateway rate-limited the probe (HTTP 429) — the key works, but is throttled".to_owned(),
+        429 => "the gateway rate-limited the probe (HTTP 429) — the key works, but is throttled"
+            .to_owned(),
         other => format!("the gateway answered HTTP {other}"),
     }
 }
@@ -540,7 +589,11 @@ fn gateway_status_message(status: u16, url: &str) -> String {
 /// is a diagnosis (401 — key rejected, 404 — wrong base URL, …); only a transport
 /// failure is an `Err`. NewAPI gateways route by model id, so the form's model rides
 /// along (a wrong one still proves reachability — the gateway answers, just unhappy).
-pub fn test_gateway_connection(base_url: &str, api_key: &str, model: &str) -> Result<ConnectionReport, String> {
+pub fn test_gateway_connection(
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+) -> Result<ConnectionReport, String> {
     let url = format!("{}/v1/messages", gateway_base_url(base_url)?);
     let key = api_key.trim();
     let body = serde_json::json!({
@@ -549,7 +602,8 @@ pub fn test_gateway_connection(base_url: &str, api_key: &str, model: &str) -> Re
         "messages": [{ "role": "user", "content": "ping" }]
     });
     let started = std::time::Instant::now();
-    let body_text = serde_json::to_string(&body).map_err(|e| format!("serialize the probe: {e}"))?;
+    let body_text =
+        serde_json::to_string(&body).map_err(|e| format!("serialize the probe: {e}"))?;
     let sent = gateway_agent()
         .post(&url)
         .header("x-api-key", key)
@@ -567,7 +621,12 @@ pub fn test_gateway_connection(base_url: &str, api_key: &str, model: &str) -> Re
             } else {
                 (false, gateway_status_message(status, &url))
             };
-            Ok(ConnectionReport { ok, status, ms, message })
+            Ok(ConnectionReport {
+                ok,
+                status,
+                ms,
+                message,
+            })
         }
         Err(ureq::Error::StatusCode(status)) => {
             let (ok, message) = if (200..300).contains(&status) {
@@ -575,7 +634,12 @@ pub fn test_gateway_connection(base_url: &str, api_key: &str, model: &str) -> Re
             } else {
                 (false, gateway_status_message(status, &url))
             };
-            Ok(ConnectionReport { ok, status, ms, message })
+            Ok(ConnectionReport {
+                ok,
+                status,
+                ms,
+                message,
+            })
         }
         Err(e) => Err(format!("could not reach {url}: {e}")),
     }
@@ -620,7 +684,13 @@ fn claude_settings_path(home: &Path) -> PathBuf {
 fn slugify(label: &str, fallback: &str) -> String {
     let slug: String = label
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     let slug = slug.trim_matches('-').to_owned();
     if slug.is_empty() {
@@ -712,7 +782,8 @@ fn scan_ccswitch_config(json: &serde_json::Value) -> Vec<CcSwitchEntry> {
         Some(serde_json::Value::Object(map)) => map
             .iter()
             .filter_map(|(id, entry)| {
-                ccswitch_entry_object(entry, Some(id), "cc-switch").map(|e| (Some(id.to_owned()), e))
+                ccswitch_entry_object(entry, Some(id), "cc-switch")
+                    .map(|e| (Some(id.to_owned()), e))
             })
             .collect(),
         _ => Vec::new(),
@@ -743,7 +814,10 @@ fn scan_claude_settings(json: &serde_json::Value) -> Option<CcSwitchEntry> {
 fn scan_ccswitch_entries(home: &Path) -> Vec<CcSwitchEntry> {
     let mut entries: Vec<CcSwitchEntry> = Vec::new();
     for (path, scan) in [
-        (ccswitch_config_path(home), scan_ccswitch_config as fn(&serde_json::Value) -> Vec<CcSwitchEntry>),
+        (
+            ccswitch_config_path(home),
+            scan_ccswitch_config as fn(&serde_json::Value) -> Vec<CcSwitchEntry>,
+        ),
         (claude_settings_path(home), |json: &serde_json::Value| {
             scan_claude_settings(json).into_iter().collect()
         }),
@@ -758,7 +832,8 @@ fn scan_ccswitch_entries(home: &Path) -> Vec<CcSwitchEntry> {
             // Same endpoint and same key is the same provider, whatever either tool
             // named it; a different key on one endpoint is a second account and stays.
             if let Some(known) = entries.iter_mut().find(|known| {
-                known.candidate.base_url == entry.candidate.base_url && known.api_key == entry.api_key
+                known.candidate.base_url == entry.candidate.base_url
+                    && known.api_key == entry.api_key
             }) {
                 known.candidate.current |= entry.candidate.current;
                 continue;
@@ -843,6 +918,50 @@ pub fn backend_env(ext_id: &str) -> Vec<(String, String)> {
 
 /* ---------- The provider → Claude settings application ---------- */
 
+/// The active profile's provider environment — the settings writer's source. The same
+/// resolution [`apply_claude_provider_env`] performs, exposed so the store-writing
+/// commands can tell a settings-reaching change (endpoint, key, model, the active id)
+/// from a cosmetic one (a label) — exactly what a switch gates on.
+fn active_provider_env(store: &ProviderStore, home: &Path) -> Vec<(String, String)> {
+    store
+        .active_id
+        .as_deref()
+        .and_then(|id| store.profiles.iter().find(|profile| profile.id == id))
+        .map(|active| provider_env_vars(active, home))
+        .unwrap_or_default()
+}
+
+/// What a store-writing command's tail must run, decided by comparing the store before
+/// and after the mutation: `env_changed` rewrites the redirected Claude settings (the
+/// next session picks the new provider up; a conversation in flight is never touched),
+/// `store_changed` pushes the event the windows' switcher chips re-read on.
+///
+/// The env comparison is over the *provider environment*, never the spawn environment:
+/// the spawn env is the constant config redirect now, and gating a switch on it made
+/// every switch a silent no-op — the settings kept the previous provider and new chats
+/// never moved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderChange {
+    /// The active provider's environment (endpoint, key, models) changed: rewrite
+    /// Claude's redirected settings.
+    pub env_changed: bool,
+    /// The store visibly changed (the active id, a label): the windows re-read.
+    pub store_changed: bool,
+}
+
+/// [`ProviderChange`] for one store mutation: the active profile's provider env decides
+/// the settings write, the whole store decides the push.
+pub fn provider_change(
+    before: &ProviderStore,
+    after: &ProviderStore,
+    home: &Path,
+) -> ProviderChange {
+    ProviderChange {
+        env_changed: active_provider_env(before, home) != active_provider_env(after, home),
+        store_changed: before != after,
+    }
+}
+
 /// The provider environment keys this bridge owns in Claude's settings — everything a
 /// third-party endpoint needs, and everything that must be *absent* for the official
 /// service (a stale endpoint here would shadow the user's login).
@@ -868,17 +987,18 @@ pub fn claude_provider_settings(
 ) -> Result<Option<String>, String> {
     let mut settings: serde_json::Value = match existing {
         Some(text) if text.trim().is_empty() => serde_json::json!({}),
-        Some(text) => serde_json::from_str(text)
-            .map_err(|e| format!("the existing Claude settings are not valid JSON — not overwriting them: {e}"))?,
+        Some(text) => serde_json::from_str(text).map_err(|e| {
+            format!("the existing Claude settings are not valid JSON — not overwriting them: {e}")
+        })?,
         None => serde_json::json!({}),
     };
     if !settings.is_object() {
-        return Err("the existing Claude settings are not a JSON object — not overwriting them".to_owned());
+        return Err(
+            "the existing Claude settings are not a JSON object — not overwriting them".to_owned(),
+        );
     }
     let object = settings.as_object_mut().expect("checked above");
-    let map = object
-        .entry("env")
-        .or_insert_with(|| serde_json::json!({}));
+    let map = object.entry("env").or_insert_with(|| serde_json::json!({}));
     if !map.is_object() {
         return Err("the existing env entry is not a JSON object — not overwriting it".to_owned());
     }
@@ -922,12 +1042,7 @@ pub fn apply_claude_provider_env() {
 fn apply_claude_provider_env_inner() -> Result<(), String> {
     let home = ggs_home()?;
     let store = read_store(&home)?;
-    let env = store
-        .active_id
-        .as_deref()
-        .and_then(|id| store.profiles.iter().find(|p| p.id == id))
-        .map(|active| provider_env_vars(active, &home))
-        .unwrap_or_default();
+    let env = active_provider_env(&store, &home);
     let dir = home.join("claude");
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let path = dir.join("settings.json");
@@ -1003,15 +1118,17 @@ fn list_answer(store: &ProviderStore) -> ProviderList {
 /// The store for the UI: profiles (keys masked), the built-in presets, and the bridged
 /// extension ids. A missing file answers the seeded store, not an error.
 #[tauri::command]
-pub fn provider_list() -> Result<ProviderList, String> {    let _guard = STORE_LOCK.lock().unwrap();
+pub fn provider_list() -> Result<ProviderList, String> {
+    let _guard = STORE_LOCK.lock().unwrap();
     let home = ggs_home()?;
     let store = read_store(&home)?;
     Ok(list_answer(&store))
 }
 
 /// Create or update one profile. `apiKey` absent keeps the stored key, empty clears it,
-/// a value seals it. Saving the *active* profile restarts the bridged backend when the
-/// change reaches its environment (endpoint, model or key).
+/// a value seals it. Saving the *active* profile rewrites the redirected Claude settings
+/// when the change reaches its environment (endpoint, model or key) — the next chat runs
+/// on it, a conversation in flight keeps its provider.
 #[tauri::command]
 pub fn provider_save(
     app: tauri::AppHandle,
@@ -1020,17 +1137,16 @@ pub fn provider_save(
     let _guard = STORE_LOCK.lock().unwrap();
     let home = ggs_home()?;
     let mut store = read_store(&home)?;
-    let before = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
+    let before = store.clone();
     apply_save(&home, &mut store, &profile)?;
     write_store(&home, &store)?;
     drop(_guard);
-    let after = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
     let answer = list_answer(&store);
-    if before != after {
-        // No restart: the provider reaches Claude through its redirected settings
-        // (applied at every session start), so the switch lands on the next chat and
-        // a conversation in flight is untouched.
+    let change = provider_change(&before, &store, &home);
+    if change.env_changed {
         apply_claude_provider_env();
+    }
+    if change.store_changed {
         let _ = tauri::Emitter::emit(&app, PROVIDERS_EVENT, ());
     }
     Ok(answer)
@@ -1072,41 +1188,41 @@ pub fn provider_delete(app: tauri::AppHandle, id: String) -> Result<ProviderList
     let _guard = STORE_LOCK.lock().unwrap();
     let home = ggs_home()?;
     let mut store = read_store(&home)?;
-    let before = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
+    let before = store.clone();
     remove_profile(&mut store, &id)?;
     write_store(&home, &store)?;
     drop(_guard);
-    let after = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
     let answer = list_answer(&store);
-    if before != after {
-        // No restart: the provider reaches Claude through its redirected settings
-        // (applied at every session start), so the switch lands on the next chat and
-        // a conversation in flight is untouched.
+    let change = provider_change(&before, &store, &home);
+    if change.env_changed {
         apply_claude_provider_env();
+    }
+    if change.store_changed {
         let _ = tauri::Emitter::emit(&app, PROVIDERS_EVENT, ());
     }
     Ok(answer)
 }
 
-/// Make one profile the provider the bridged backend runs under, restarting the backend
-/// (the running process keeps the environment it was spawned with). The official
-/// profile is always present, so switching back is one click.
+/// Make one profile the provider the bridged backend runs under. Never restarts the
+/// backend: the switch rewrites the redirected Claude settings' env map, which Claude
+/// Code applies at every session start — a new chat runs on the new provider, a
+/// conversation in flight keeps its own. The official profile is always present, so
+/// switching back is one click.
 #[tauri::command]
 pub fn provider_activate(app: tauri::AppHandle, id: String) -> Result<ProviderList, String> {
     let _guard = STORE_LOCK.lock().unwrap();
     let home = ggs_home()?;
     let mut store = read_store(&home)?;
-    let before = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
+    let before = store.clone();
     set_active(&mut store, &id)?;
     write_store(&home, &store)?;
     drop(_guard);
-    let after = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
     let answer = list_answer(&store);
-    if before != after {
-        // No restart: the provider reaches Claude through its redirected settings
-        // (applied at every session start), so the switch lands on the next chat and
-        // a conversation in flight is untouched.
+    let change = provider_change(&before, &store, &home);
+    if change.env_changed {
         apply_claude_provider_env();
+    }
+    if change.store_changed {
         let _ = tauri::Emitter::emit(&app, PROVIDERS_EVENT, ());
     }
     Ok(answer)
@@ -1117,7 +1233,12 @@ pub fn provider_activate(app: tauri::AppHandle, id: String) -> Result<ProviderLi
 /// The key the probes run with: what the form holds (a typed key), else the named
 /// profile's stored one, decrypted here and never returned — an edit of an existing
 /// provider probes with the key it already has.
-fn probe_key(home: &Path, store: &ProviderStore, api_key: &str, profile_id: Option<&str>) -> String {
+fn probe_key(
+    home: &Path,
+    store: &ProviderStore,
+    api_key: &str,
+    profile_id: Option<&str>,
+) -> String {
     let typed = api_key.trim();
     if !typed.is_empty() {
         return typed.to_owned();
@@ -1187,7 +1308,7 @@ pub fn provider_import_ccswitch(
     let _guard = STORE_LOCK.lock().unwrap();
     let home = ggs_home()?;
     let mut store = read_store(&home)?;
-    let before = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
+    let before = store.clone();
     let (imported, activate) = import_ccswitch_entries(&home, &mut store, &names)?;
     if imported == 0 {
         return Err("none of the named configurations was found to import".to_owned());
@@ -1197,13 +1318,12 @@ pub fn provider_import_ccswitch(
     }
     write_store(&home, &store)?;
     drop(_guard);
-    let after = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
     let answer = list_answer(&store);
-    if before != after {
-        // No restart: the provider reaches Claude through its redirected settings
-        // (applied at every session start), so the switch lands on the next chat and
-        // a conversation in flight is untouched.
+    let change = provider_change(&before, &store, &home);
+    if change.env_changed {
         apply_claude_provider_env();
+    }
+    if change.store_changed {
         let _ = tauri::Emitter::emit(&app, PROVIDERS_EVENT, ());
     }
     Ok(answer)
@@ -1227,12 +1347,15 @@ pub fn claude_mcp_settings(
 ) -> Result<Option<String>, String> {
     let mut settings: serde_json::Value = match existing {
         Some(text) if text.trim().is_empty() => serde_json::json!({}),
-        Some(text) => serde_json::from_str(text)
-            .map_err(|e| format!("the existing Claude settings are not valid JSON — not overwriting them: {e}"))?,
+        Some(text) => serde_json::from_str(text).map_err(|e| {
+            format!("the existing Claude settings are not valid JSON — not overwriting them: {e}")
+        })?,
         None => serde_json::json!({}),
     };
     if !settings.is_object() {
-        return Err("the existing Claude settings are not a JSON object — not overwriting them".to_owned());
+        return Err(
+            "the existing Claude settings are not a JSON object — not overwriting them".to_owned(),
+        );
     }
     let servers = settings
         .as_object_mut()
@@ -1240,7 +1363,9 @@ pub fn claude_mcp_settings(
         .entry("mcpServers")
         .or_insert_with(|| serde_json::json!({}));
     if !servers.is_object() {
-        return Err("the existing mcpServers entry is not a JSON object — not overwriting it".to_owned());
+        return Err(
+            "the existing mcpServers entry is not a JSON object — not overwriting it".to_owned(),
+        );
     }
     let wanted = folders.first().map(|folder| {
         serde_json::json!({
@@ -1269,11 +1394,15 @@ pub fn claude_mcp_settings(
             .and_then(serde_json::Value::as_object_mut)
             .expect("checked above");
         if map.is_empty() {
-            out.as_object_mut().expect("checked above").remove("mcpServers");
+            out.as_object_mut()
+                .expect("checked above")
+                .remove("mcpServers");
         }
     }
     Ok(Some(
-        serde_json::to_string_pretty(&out).map_err(|e| format!("serialize the Claude settings: {e}"))? + "\n",
+        serde_json::to_string_pretty(&out)
+            .map_err(|e| format!("serialize the Claude settings: {e}"))?
+            + "\n",
     ))
 }
 
@@ -1313,7 +1442,10 @@ fn apply_claude_mcp_inner(folders: &[String], command: Option<&Path>) -> Result<
 /// [`apply_claude_integration`]'s injectable core (the executable path is a test seam):
 /// the MCP registration first, then the active provider's environment — two passes over
 /// one file, each a no-op when the file already agrees.
-fn apply_claude_integration_inner(folders: &[String], command: Option<&Path>) -> Result<(), String> {
+fn apply_claude_integration_inner(
+    folders: &[String],
+    command: Option<&Path>,
+) -> Result<(), String> {
     apply_claude_mcp_inner(folders, command)?;
     apply_claude_provider_env_inner()
 }
@@ -1334,7 +1466,10 @@ pub fn claude_mcp_status() -> Result<ClaudeMcpStatus, String> {
     let server = std::fs::read_to_string(&path)
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|json| json.pointer(&format!("/mcpServers/{CLAUDE_MCP_SERVER_NAME}")).cloned());
+        .and_then(|json| {
+            json.pointer(&format!("/mcpServers/{CLAUDE_MCP_SERVER_NAME}"))
+                .cloned()
+        });
     let text_in = |pointer: &str| {
         server
             .as_ref()
@@ -1369,12 +1504,14 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Serializes every TEST_HOME manipulation (pins and unpins alike): cargo runs a
+    /// module's tests in parallel, and a home swap must never interleave with another
+    /// test's resolution. Not reentrant — never nest two guards.
+    static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
     /// One test's isolated `~/.ggs`: pinned for the guard's lifetime, restored (and the
     /// temp directory cleaned) on drop. Keep the guard in its own binding — a shadowed
     /// guard unpins immediately and the test would touch the developer's real home.
-    /// The static home is process-wide and cargo runs a module's tests in parallel, so
-    /// every guard also holds a serializing lock: a pinned home stays pinned until its
-    /// own test is done. Never nest two pins — the lock is not reentrant.
     struct ProviderHome {
         _serial: std::sync::MutexGuard<'static, ()>,
         /// Held (not read) for the guard's lifetime: dropping it cleans the temp dir.
@@ -1384,12 +1521,15 @@ mod tests {
 
     impl ProviderHome {
         fn pin() -> Self {
-            static SERIAL: Mutex<()> = Mutex::new(());
-            let serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+            let serial = TEST_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
             let previous = TEST_HOME.lock().unwrap().clone();
             let dir = tempfile::tempdir().unwrap();
             *TEST_HOME.lock().unwrap() = Some(dir.path().to_path_buf());
-            ProviderHome { _serial: serial, _dir: dir, previous }
+            ProviderHome {
+                _serial: serial,
+                _dir: dir,
+                previous,
+            }
         }
     }
 
@@ -1397,6 +1537,37 @@ mod tests {
         fn drop(&mut self) {
             *TEST_HOME.lock().unwrap() = self.previous.take();
         }
+    }
+
+    /// The leak this module once had: a lib-level test that drives a whole folder flow
+    /// reaches the Claude integration writes without ever pinning a home, so
+    /// `ggs_home()` resolved the developer's real `~/.ggs` — and stamped the test
+    /// binary plus a scratch folder into `mcpServers.ggs`, leaving Claude's `/mcp`
+    /// with a server that cannot start. Unpinned, the home must be the throwaway.
+    #[test]
+    fn an_unpinned_test_resolves_a_throwaway_home_not_the_developer_one() {
+        struct Unpinned {
+            _serial: std::sync::MutexGuard<'static, ()>,
+            previous: Option<PathBuf>,
+        }
+        impl Drop for Unpinned {
+            fn drop(&mut self) {
+                *TEST_HOME.lock().unwrap() = self.previous.take();
+            }
+        }
+        let serial = TEST_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        let previous = TEST_HOME.lock().unwrap().clone();
+        *TEST_HOME.lock().unwrap() = None;
+        let _unpinned = Unpinned {
+            _serial: serial,
+            previous,
+        };
+        let home = ggs_home().unwrap();
+        assert!(
+            home.to_string_lossy().contains("ggs-provider-test-home-"),
+            "an unpinned test must land in the throwaway home, got {}",
+            home.display()
+        );
     }
 
     fn official_profile() -> ProviderProfile {
@@ -1505,7 +1676,10 @@ mod tests {
         let active = store.profiles[1].clone();
         let env = provider_env_vars(&active, &home);
         let map = env_map(&env);
-        assert_eq!(map["ANTHROPIC_BASE_URL"], "https://api.deepseek.com/anthropic");
+        assert_eq!(
+            map["ANTHROPIC_BASE_URL"],
+            "https://api.deepseek.com/anthropic"
+        );
         assert_eq!(map["ANTHROPIC_AUTH_TOKEN"], "sk-live-key");
         assert_eq!(map["ANTHROPIC_API_KEY"], "sk-live-key");
         assert_eq!(map["ANTHROPIC_MODEL"], "deepseek-chat");
@@ -1549,7 +1723,10 @@ mod tests {
     #[test]
     fn claude_provider_settings_merges_clears_and_preserves() {
         let third_party = vec![
-            ("ANTHROPIC_BASE_URL".to_owned(), "https://api.deepseek.com/anthropic".to_owned()),
+            (
+                "ANTHROPIC_BASE_URL".to_owned(),
+                "https://api.deepseek.com/anthropic".to_owned(),
+            ),
             ("ANTHROPIC_AUTH_TOKEN".to_owned(), "sk-live".to_owned()),
             ("ANTHROPIC_MODEL".to_owned(), "deepseek-chat".to_owned()),
         ];
@@ -1560,16 +1737,35 @@ mod tests {
         .unwrap()
         .unwrap();
         let json: serde_json::Value = serde_json::from_str(&written).unwrap();
-        assert_eq!(json.pointer("/env/MY_VAR").and_then(|v| v.as_str()), Some("keep-me"));
-        assert_eq!(json.pointer("/env/ANTHROPIC_BASE_URL").and_then(|v| v.as_str()), Some("https://api.deepseek.com/anthropic"));
-        assert_eq!(json.pointer("/env/ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()), Some("sk-live"));
+        assert_eq!(
+            json.pointer("/env/MY_VAR").and_then(|v| v.as_str()),
+            Some("keep-me")
+        );
+        assert_eq!(
+            json.pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(|v| v.as_str()),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        assert_eq!(
+            json.pointer("/env/ANTHROPIC_AUTH_TOKEN")
+                .and_then(|v| v.as_str()),
+            Some("sk-live")
+        );
 
         // Applying the same env again is a no-op; switching to official clears only
         // this bridge's keys.
-        assert_eq!(claude_provider_settings(Some(&written), &third_party).unwrap(), None);
-        let cleared = claude_provider_settings(Some(&written), &[]).unwrap().unwrap();
+        assert_eq!(
+            claude_provider_settings(Some(&written), &third_party).unwrap(),
+            None
+        );
+        let cleared = claude_provider_settings(Some(&written), &[])
+            .unwrap()
+            .unwrap();
         let json: serde_json::Value = serde_json::from_str(&cleared).unwrap();
-        assert_eq!(json.pointer("/env/MY_VAR").and_then(|v| v.as_str()), Some("keep-me"));
+        assert_eq!(
+            json.pointer("/env/MY_VAR").and_then(|v| v.as_str()),
+            Some("keep-me")
+        );
         assert!(json.pointer("/env/ANTHROPIC_BASE_URL").is_none());
 
         assert!(claude_provider_settings(Some("{not json"), &third_party).is_err());
@@ -1591,14 +1787,105 @@ mod tests {
         let text = claude_provider_settings(None, &env).unwrap().unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, &text).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(json.pointer("/env/ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()), Some("sk-live-key"));
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            json.pointer("/env/ANTHROPIC_AUTH_TOKEN")
+                .and_then(|v| v.as_str()),
+            Some("sk-live-key")
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
+    }
+
+    /// The switch's gate: a real switch reports the settings env changed (the tail that
+    /// rewrites Claude's redirected settings) and the store visibly changed (the push the
+    /// windows' chips re-read); a label-only edit is cosmetic; the no-op re-activate is
+    /// neither. The gate compares the active profile's provider env — never the spawn
+    /// env, which is the constant config redirect and once made every switch a silent
+    /// no-op (the settings kept the previous provider, new chats never moved).
+    #[test]
+    fn the_switch_gate_fires_on_provider_env_changes_only() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        let mut store = third_party_store();
+        store.active_id = Some("official".to_owned());
+        store.profiles[1].api_key_enc = Some(seal(&home, "sk-live-key").unwrap());
+
+        // official → deepseek: both the settings env and the store changed.
+        let before = store.clone();
+        set_active(&mut store, "deepseek").unwrap();
+        let change = provider_change(&before, &store, &home);
+        assert!(change.env_changed && change.store_changed);
+
+        // The no-op re-activate: neither.
+        let before = store.clone();
+        set_active(&mut store, "deepseek").unwrap();
+        assert_eq!(
+            provider_change(&before, &store, &home),
+            ProviderChange {
+                env_changed: false,
+                store_changed: false
+            }
+        );
+
+        // A label-only edit of the active profile: the chips' list re-reads, the
+        // settings do not.
+        let before = store.clone();
+        store.profiles[1].label = "DeepSeek (team)".to_owned();
+        let change = provider_change(&before, &store, &home);
+        assert!(!change.env_changed && change.store_changed);
+
+        // deepseek → official: the env changes again — this bridge's keys must leave
+        // the settings or the stale endpoint would shadow the login.
+        let before = store.clone();
+        set_active(&mut store, "official").unwrap();
+        assert!(provider_change(&before, &store, &home).env_changed);
+    }
+
+    /// The tail the gate drives, end to end: switch the store, write it, run the apply
+    /// the gate asks for — and the redirected Claude settings carry the new provider for
+    /// the next session (exactly the path that was dead while the gate compared the
+    /// constant spawn env: the chip said GLM, the chat still ran where it always had).
+    #[test]
+    fn a_switched_store_lands_in_the_claude_settings_for_the_next_session() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        let mut store = third_party_store();
+        store.active_id = Some("official".to_owned());
+        store.profiles[1].api_key_enc = Some(seal(&home, "sk-live-key").unwrap());
+        let before = store.clone();
+        set_active(&mut store, "deepseek").unwrap();
+        write_store(&home, &store).unwrap();
+        if provider_change(&before, &store, &home).env_changed {
+            apply_claude_provider_env();
+        }
+        let json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join("claude").join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            json.pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(|v| v.as_str()),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        assert_eq!(
+            json.pointer("/env/ANTHROPIC_AUTH_TOKEN")
+                .and_then(|v| v.as_str()),
+            Some("sk-live-key")
+        );
+        assert_eq!(
+            json.pointer("/env/ANTHROPIC_MODEL")
+                .and_then(|v| v.as_str()),
+            Some("deepseek-chat")
+        );
     }
 
     /// Saving keeps, replaces and clears the stored key as `apiKey` says, and the store
@@ -1619,10 +1906,18 @@ mod tests {
             api_key: Some("sk-first-key".to_owned()),
         };
         apply_save(&home, &mut store, &input).unwrap();
-        let saved = store.profiles.iter().find(|p| p.id == "deepseek").unwrap().clone();
+        let saved = store
+            .profiles
+            .iter()
+            .find(|p| p.id == "deepseek")
+            .unwrap()
+            .clone();
         assert_eq!(saved.api_key_hint.as_deref(), Some("-key"));
         // The trailing slash is normalized at save.
-        assert_eq!(saved.base_url.as_deref(), Some("https://api.deepseek.com/anthropic"));
+        assert_eq!(
+            saved.base_url.as_deref(),
+            Some("https://api.deepseek.com/anthropic")
+        );
 
         // Absent apiKey keeps the sealed key through a label-only edit.
         let mut relabel = input.clone();
@@ -1631,7 +1926,12 @@ mod tests {
         let mut store2 = store.clone();
         apply_save(&home, &mut store2, &relabel).unwrap();
         assert_eq!(
-            store2.profiles.iter().find(|p| p.id == "deepseek").unwrap().api_key_enc,
+            store2
+                .profiles
+                .iter()
+                .find(|p| p.id == "deepseek")
+                .unwrap()
+                .api_key_enc,
             saved.api_key_enc
         );
 
@@ -1639,12 +1939,24 @@ mod tests {
         let mut cleared = relabel.clone();
         cleared.api_key = Some(String::new());
         apply_save(&home, &mut store2, &cleared).unwrap();
-        assert!(store2.profiles.iter().find(|p| p.id == "deepseek").unwrap().api_key_enc.is_none());
+        assert!(store2
+            .profiles
+            .iter()
+            .find(|p| p.id == "deepseek")
+            .unwrap()
+            .api_key_enc
+            .is_none());
 
         write_store(&home, &store).unwrap();
         let text = std::fs::read_to_string(store_path(&home)).unwrap();
-        assert!(!text.contains("sk-first-key"), "the plaintext key must never land in the file");
-        assert!(text.contains("apiKeyEnc"), "the sealed key rides its own field: {text}");
+        assert!(
+            !text.contains("sk-first-key"),
+            "the plaintext key must never land in the file"
+        );
+        assert!(
+            text.contains("apiKeyEnc"),
+            "the sealed key rides its own field: {text}"
+        );
     }
 
     /// Validation: the official profile is endpoint-less whatever was typed; a
@@ -1665,7 +1977,9 @@ mod tests {
         };
         apply_save(&home, &mut store, &official).unwrap();
         let profile = store.profiles.iter().find(|p| p.id == "official").unwrap();
-        assert!(profile.base_url.is_none() && profile.model.is_none() && profile.api_key_enc.is_none());
+        assert!(
+            profile.base_url.is_none() && profile.model.is_none() && profile.api_key_enc.is_none()
+        );
 
         let mut bad_url = official.clone();
         bad_url.id = "custom1".to_owned();
@@ -1692,7 +2006,10 @@ mod tests {
         store.profiles[1].api_key_enc = Some(seal(&home, "sk-live-key").unwrap());
         let answer = list_answer(&store);
         let json = serde_json::to_string(&answer).unwrap();
-        assert!(!json.contains("sk-live-key"), "the plaintext leaked: {json}");
+        assert!(
+            !json.contains("sk-live-key"),
+            "the plaintext leaked: {json}"
+        );
         assert!(
             !json.contains("apiKeyEnc") && !json.contains("api_key_enc"),
             "the ciphertext leaked: {json}"
@@ -1859,7 +2176,10 @@ mod tests {
         assert!(request.contains("GET /v1/models"), "{request}");
         // ureq spells its header names lowercase; the value's case is the scheme's own.
         let lowered = request.to_lowercase();
-        assert!(lowered.contains("authorization: bearer sk-gw-key"), "{request}");
+        assert!(
+            lowered.contains("authorization: bearer sk-gw-key"),
+            "{request}"
+        );
 
         let (url, server) = serve(http_response("401 Unauthorized", r#"{"error":"bad key"}"#));
         let error = fetch_gateway_models(&url, "sk-wrong").unwrap_err();
@@ -1879,10 +2199,16 @@ mod tests {
         let request = server.join().unwrap();
         assert!(report.ok && report.status == 200 && report.message.contains("reachable"));
         assert!(request.contains("POST /v1/messages"), "{request}");
-        assert!(request.contains("anthropic-version: 2023-06-01"), "{request}");
+        assert!(
+            request.contains("anthropic-version: 2023-06-01"),
+            "{request}"
+        );
         assert!(request.contains(r#""model":"glm-4.6""#), "{request}");
 
-        let (url, server) = serve(http_response("401 Unauthorized", r#"{"error":{"type":"authentication_error"}}"#));
+        let (url, server) = serve(http_response(
+            "401 Unauthorized",
+            r#"{"error":{"type":"authentication_error"}}"#,
+        ));
         let report = test_gateway_connection(&url, "sk-wrong", "").unwrap();
         server.join().unwrap();
         assert!(!report.ok && report.status == 401);
@@ -1955,7 +2281,10 @@ mod tests {
         assert!(!json.contains("sk-cc-"), "a key leaked in the scan: {json}");
 
         assert_eq!(candidates.len(), 2, "{candidates:?}");
-        let deepseek = candidates.iter().find(|c| c.label == "DeepSeek 官方").unwrap();
+        let deepseek = candidates
+            .iter()
+            .find(|c| c.label == "DeepSeek 官方")
+            .unwrap();
         assert!(
             deepseek.has_key && deepseek.current && deepseek.source == "cc-switch",
             "current names it in cc-switch AND the live config folds into it: {candidates:?}"
@@ -1963,7 +2292,10 @@ mod tests {
         let gateway = candidates.iter().find(|c| c.label == "My NewAPI").unwrap();
         assert_eq!(gateway.model.as_deref(), Some("glm-4.6"));
         assert!(!gateway.current);
-        assert!(candidates.iter().all(|c| c.label != "sign-in only"), "an env-less entry configures nothing");
+        assert!(
+            candidates.iter().all(|c| c.label != "sign-in only"),
+            "an env-less entry configures nothing"
+        );
     }
 
     /// Neither configuration present: an empty answer, never an error.
@@ -1988,7 +2320,10 @@ mod tests {
         let names: Vec<String> = candidates.iter().map(|c| c.id.clone()).collect();
         let (imported, activate) = import_ccswitch_entries(&home, &mut store, &names).unwrap();
         assert_eq!(imported, 2, "{candidates:?}");
-        assert_eq!(activate.as_deref(), Some(candidates.iter().find(|c| c.current).unwrap().id.as_str()));
+        assert_eq!(
+            activate.as_deref(),
+            Some(candidates.iter().find(|c| c.current).unwrap().id.as_str())
+        );
         set_active(&mut store, &activate.unwrap()).unwrap();
 
         let profile = store
@@ -2002,12 +2337,19 @@ mod tests {
         // writer's source); the spawn environment stays the config redirect alone.
         let env = provider_env_vars(profile, &home);
         let map = env_map(&env);
-        assert_eq!(map["ANTHROPIC_BASE_URL"], "https://api.deepseek.com/anthropic");
+        assert_eq!(
+            map["ANTHROPIC_BASE_URL"],
+            "https://api.deepseek.com/anthropic"
+        );
         assert_eq!(map["ANTHROPIC_AUTH_TOKEN"], "sk-cc-deepseek");
-        assert_eq!(env_map(&backend_env_for(CLAUDE_CODE_EXT_ID, &home)).len(), 1);
+        assert_eq!(
+            env_map(&backend_env_for(CLAUDE_CODE_EXT_ID, &home)).len(),
+            1
+        );
 
         // Unknown names are skipped, an empty import answers zero.
-        let (imported, _) = import_ccswitch_entries(&home, &mut store, &["no-such".to_owned()]).unwrap();
+        let (imported, _) =
+            import_ccswitch_entries(&home, &mut store, &["no-such".to_owned()]).unwrap();
         assert_eq!(imported, 0);
     }
 
@@ -2023,19 +2365,35 @@ mod tests {
   "env": { "ANTHROPIC_BASE_URL": "https://gw.example.com" },
   "mcpServers": { "other": { "command": "other-srv" } }
 }"#;
-        let text = claude_mcp_settings(
-            Some(existing),
-            &["/repo".to_owned()],
-            COMMAND,
-        )
-        .unwrap()
-        .unwrap();
+        let text = claude_mcp_settings(Some(existing), &["/repo".to_owned()], COMMAND)
+            .unwrap()
+            .unwrap();
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(json.pointer("/env/ANTHROPIC_BASE_URL").and_then(|v| v.as_str()), Some("https://gw.example.com"));
-        assert_eq!(json.pointer("/mcpServers/other/command").and_then(|v| v.as_str()), Some("other-srv"));
-        assert_eq!(json.pointer("/mcpServers/ggs/command").and_then(|v| v.as_str()), Some(COMMAND));
-        assert_eq!(json.pointer("/mcpServers/ggs/args/0").and_then(|v| v.as_str()), Some("--mcp"));
-        assert_eq!(json.pointer("/mcpServers/ggs/args/1").and_then(|v| v.as_str()), Some("/repo"));
+        assert_eq!(
+            json.pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(|v| v.as_str()),
+            Some("https://gw.example.com")
+        );
+        assert_eq!(
+            json.pointer("/mcpServers/other/command")
+                .and_then(|v| v.as_str()),
+            Some("other-srv")
+        );
+        assert_eq!(
+            json.pointer("/mcpServers/ggs/command")
+                .and_then(|v| v.as_str()),
+            Some(COMMAND)
+        );
+        assert_eq!(
+            json.pointer("/mcpServers/ggs/args/0")
+                .and_then(|v| v.as_str()),
+            Some("--mcp")
+        );
+        assert_eq!(
+            json.pointer("/mcpServers/ggs/args/1")
+                .and_then(|v| v.as_str()),
+            Some("/repo")
+        );
     }
 
     /// Applying the same registration twice is a no-op (None — Claude's own file is
@@ -2043,16 +2401,33 @@ mod tests {
     /// still leaving the rest of the file alone.
     #[test]
     fn re_applying_the_same_registration_is_a_no_op_and_a_change_replaces_it() {
-        let first = claude_mcp_settings(None, &["/repo".to_owned()], COMMAND).unwrap().unwrap();
-        assert_eq!(claude_mcp_settings(Some(&first), &["/repo".to_owned()], COMMAND).unwrap(), None);
+        let first = claude_mcp_settings(None, &["/repo".to_owned()], COMMAND)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            claude_mcp_settings(Some(&first), &["/repo".to_owned()], COMMAND).unwrap(),
+            None
+        );
         // A different folder, a different binary: rewritten.
-        let second = claude_mcp_settings(Some(&first), &["/other".to_owned()], COMMAND).unwrap().unwrap();
+        let second = claude_mcp_settings(Some(&first), &["/other".to_owned()], COMMAND)
+            .unwrap()
+            .unwrap();
         assert_ne!(first, second);
         let json: serde_json::Value = serde_json::from_str(&second).unwrap();
-        assert_eq!(json.pointer("/mcpServers/ggs/args/1").and_then(|v| v.as_str()), Some("/other"));
-        let third = claude_mcp_settings(Some(&second), &["/other".to_owned()], "/new/place/ggs").unwrap().unwrap();
+        assert_eq!(
+            json.pointer("/mcpServers/ggs/args/1")
+                .and_then(|v| v.as_str()),
+            Some("/other")
+        );
+        let third = claude_mcp_settings(Some(&second), &["/other".to_owned()], "/new/place/ggs")
+            .unwrap()
+            .unwrap();
         let json: serde_json::Value = serde_json::from_str(&third).unwrap();
-        assert_eq!(json.pointer("/mcpServers/ggs/command").and_then(|v| v.as_str()), Some("/new/place/ggs"));
+        assert_eq!(
+            json.pointer("/mcpServers/ggs/command")
+                .and_then(|v| v.as_str()),
+            Some("/new/place/ggs")
+        );
     }
 
     /// With no folder open the GGS entry goes away — a repo-scoped server makes no
@@ -2069,14 +2444,20 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let cleaned = claude_mcp_settings(Some(&ours_and_other), &[], COMMAND).unwrap().unwrap();
+        let cleaned = claude_mcp_settings(Some(&ours_and_other), &[], COMMAND)
+            .unwrap()
+            .unwrap();
         let json: serde_json::Value = serde_json::from_str(&cleaned).unwrap();
         assert!(json.pointer("/mcpServers/ggs").is_none());
         assert!(json.pointer("/mcpServers/other").is_some());
 
         // Ours was the only server: the empty mcpServers map goes with it.
-        let alone = claude_mcp_settings(None, &["/repo".to_owned()], COMMAND).unwrap().unwrap();
-        let cleaned = claude_mcp_settings(Some(&alone), &[], COMMAND).unwrap().unwrap();
+        let alone = claude_mcp_settings(None, &["/repo".to_owned()], COMMAND)
+            .unwrap()
+            .unwrap();
+        let cleaned = claude_mcp_settings(Some(&alone), &[], COMMAND)
+            .unwrap()
+            .unwrap();
         let json: serde_json::Value = serde_json::from_str(&cleaned).unwrap();
         assert!(json.get("mcpServers").is_none(), "{json}");
 
