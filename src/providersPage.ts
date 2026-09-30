@@ -1,20 +1,22 @@
 // The Model Providers page (module 12): the management half of the AI provider bridge —
-// the profiles (`aiProviders.ts` is the store client), one row each, with the add /
-// edit form (preset, endpoint, model ids, the API key that travels once into the
-// backend's seal), activate, delete, and the storage notes: everything lives under
-// ~/.ggs, the key is AES-256-GCM sealed at rest and decrypted only when the bridged
-// backend spawns, and a switch restarts that backend. Opened as an editor tab (the
-// `ai.providers` command, the sidebar chip's "Configure Providers…" entry); a lazy
-// chunk, like the self-test and analysis pages.
+// the profiles (`aiProviders.ts` is the store client), one compact row each, with the
+// add / edit form (preset, endpoint, model ids, the API key that travels once into the
+// backend's seal), activate, delete, the token-usage curve over the redirected Claude
+// state, and the storage notes: everything lives under ~/.ggs, the key is AES-256-GCM
+// sealed at rest and decrypted only when the bridged backend spawns, and a switch
+// restarts that backend. Flat and compact by design: one hairline-bordered usage card,
+// one-line rows, a two-column form. Opened as an editor tab (the `ai.providers`
+// command, the sidebar chip's "Configure Providers…" entry); a lazy chunk, like the
+// self-test and analysis pages.
 
 import { t, tf } from './i18n';
 import { actionButton, confirmDialog, el, icon, notify, quickPick } from './ui';
+import { mountUsagePanel } from './providerUsageView';
 import {
 	PROVIDERS_CHANGED_EVENT,
 	activateProvider,
 	cachedProviders,
 	deleteProvider,
-	describeProvider,
 	draftFromPreset,
 	fetchGatewayModels,
 	importCcSwitch,
@@ -45,7 +47,7 @@ function presetLabel(preset: ProviderPreset): string {
 }
 
 /** Mount the page into its editor tab's pane. Returns the disposer the tab's close
- *  runs (the store-change listener must not outlive the page). */
+ *  runs (the store-change listener and the usage panel must not outlive the page). */
 export function mountProvidersPage(container: HTMLElement): () => void {
 	return new ProvidersPage(container).dispose;
 }
@@ -64,6 +66,8 @@ class ProvidersPage {
 	private testError = '';
 	/** The model catalogue a Fetch brought in (the model fields' placeholder). */
 	private fetchedModels: string[] = [];
+	/** The usage card's disposer (the tab's close ends its listeners). */
+	private disposeUsage: (() => void) | null = null;
 
 	/** The store changed under us (a switch from the sidebar chip, another window):
 	 *  follow it while the tab lives; the disposer ends the listening. */
@@ -74,15 +78,20 @@ class ProvidersPage {
 
 	constructor(private readonly container: HTMLElement) {
 		container.classList.add('an-page', 'providers-page');
-		container.appendChild(el('div', 'an-header', [
-			icon('cloud'),
-			el('span', 'an-title', [t('providers.title')]),
+		const add = el('button', 'button primary prov-add', [t('providers.add')]);
+		add.type = 'button';
+		add.addEventListener('click', () => this.startAdd());
+		container.appendChild(el('div', 'prov-header', [
+			el('div', 'prov-heading', [
+				el('span', 'title', [t('providers.title')]),
+				el('span', 'subtitle', [t('providers.subtitle')])
+			]),
 			el('div', 'actions', [
 				actionButton('cloud-download', t('providers.import'), () => void this.importCcSwitch()),
-				actionButton('add', t('providers.add'), () => this.startAdd())
+				add
 			])
 		]));
-		this.body = el('div', 'an-list');
+		this.body = el('div', 'prov-body');
 		container.appendChild(this.body);
 		document.addEventListener(PROVIDERS_CHANGED_EVENT, this.onStoreChange);
 		this.list = cachedProviders();
@@ -93,6 +102,8 @@ class ProvidersPage {
 	/** The tab's disposer (wired to `Editor.onClose`): drop the store listener. */
 	dispose = (): void => {
 		document.removeEventListener(PROVIDERS_CHANGED_EVENT, this.onStoreChange);
+		this.disposeUsage?.();
+		this.disposeUsage = null;
 	};
 
 	private async load(): Promise<void> {
@@ -228,44 +239,59 @@ class ProvidersPage {
 	}
 
 	render(): void {
+		this.disposeUsage?.();
+		this.disposeUsage = null;
 		this.body.replaceChildren();
 		if (this.editing !== null) {
-			this.renderForm();
+			this.body.appendChild(this.renderForm());
 			return;
 		}
+		// The usage curve rides ahead of the list on every non-form view of the page —
+		// tokens per hour or day, whichever range the switcher last picked.
+		const usageCard = el('div', 'prov-usage-card');
+		this.body.appendChild(usageCard);
+		this.disposeUsage = mountUsagePanel(usageCard, {});
 		if (this.failed) {
-			const row = el('div', 'an-empty', [
+			this.body.appendChild(el('div', 'prov-empty', [
 				t('providers.loadFailed') + ' ',
 				actionButton('refresh', t('providers.retry'), () => void this.load())
-			]);
-			this.body.appendChild(row);
+			]));
 			return;
 		}
 		if (this.list === null) {
-			this.body.appendChild(el('div', 'an-empty', [`${t('providers.loading')}…`]));
+			this.body.appendChild(el('div', 'prov-empty', [`${t('providers.loading')}…`]));
 			return;
 		}
 		if (this.list.profiles.length === 0) {
-			this.body.appendChild(el('div', 'an-empty', [t('providers.empty')]));
+			this.body.appendChild(el('div', 'prov-empty', [t('providers.empty')]));
 			return;
 		}
-		this.body.appendChild(el('div', 'an-section', [t('providers.section.profiles')]));
+		this.body.appendChild(el('div', 'prov-section-label', [t('providers.section.profiles')]));
 		for (const profile of this.list.profiles) this.body.appendChild(this.renderRow(profile));
-		for (const note of ['providers.note.state', 'providers.note.key', 'providers.note.restart'] as const) {
-			this.body.appendChild(el('div', 'an-empty an-note', [t(note)]));
-		}
+const notes = (['providers.note.state', 'providers.note.key', 'providers.note.restart'] as const).map((key) => el('div', '', [t(key)]));
+		this.body.appendChild(el('div', 'prov-notes', notes));
 	}
 
 	private renderRow(profile: ProviderProfile): HTMLElement {
 		const active = profile.id === this.list?.activeId;
-		const row = el('div', `an-row${active ? ' provider-row-active' : ''}`);
+		const row = el('div', `prov-row${active ? ' active' : ''}`);
+		const name = el('span', 'name', [profile.label]);
+		name.title = profile.label;
+		const desc = profile.preset === 'official'
+			? t('providers.official.description')
+			: [profile.baseUrl ?? '', profile.model ?? ''].filter((part) => part !== '').join(' · ');
+		const keyChip = profile.preset === 'official'
+			? null
+			: el('span', 'key-chip', [profile.hasKey ? `••••${profile.keyHint ?? ''}` : t('providers.noKey')]);
 		row.append(
+			el('span', `marker${active ? ' on' : ''}`),
 			icon(profile.preset === 'official' ? 'rocket' : 'globe'),
-			el('span', 'label', [profile.label]),
-			el('span', 'description', [describeProvider(profile)]),
-			el('span', 'tail', [active ? t('providers.active') : ''])
+			name,
+			el('span', 'desc', [desc]),
+			keyChip ?? el('span', 'key-chip empty', ['']),
+			el('span', 'status', [active ? t('providers.active') : ''])
 		);
-		const actions = el('span', 'tail actions');
+		const actions = el('span', 'actions');
 		if (!active) actions.appendChild(actionButton('play', t('providers.activate'), () => void activateProvider(profile.id)));
 		actions.appendChild(actionButton('edit', t('providers.edit'), () => this.startEdit(profile)));
 		if (profile.preset !== 'official') actions.appendChild(actionButton('trash', t('providers.delete'), () => void this.remove(profile)));
@@ -273,12 +299,13 @@ class ProvidersPage {
 		return row;
 	}
 
-	/** The add / edit form. The official preset carries no endpoint — its fields stay
-	 *  off the form entirely. */
-	private renderForm(): void {
+	/** The add / edit form: a flat two-column card. The official preset carries no
+	 *  endpoint — its fields stay off the form entirely. */
+	private renderForm(): HTMLElement {
 		const draft = this.editing!;
 		const presets = this.list?.presets ?? [];
 		const official = presets.find((preset) => preset.id === draft.preset)?.official ?? draft.preset === 'official';
+		const wrap = el('div', 'providers-form-wrap');
 		const form = el('div', 'providers-form');
 
 		const presetRow = el('div', 'providers-field', [el('label', '', [t('providers.preset')])]);
@@ -308,9 +335,11 @@ class ProvidersPage {
 			draft.label = value;
 		}));
 		if (!official) {
-			form.appendChild(this.field('providers.baseUrl', draft.baseUrl, (value) => {
+			const baseUrl = this.field('providers.baseUrl', draft.baseUrl, (value) => {
 				draft.baseUrl = value;
-			}, draft.preset === 'newapi' ? 'https://your-newapi.example.com' : 'https://api.example.com/anthropic'));
+			}, draft.preset === 'newapi' ? 'https://your-newapi.example.com' : 'https://api.example.com/anthropic');
+			baseUrl.classList.add('span2');
+			form.appendChild(baseUrl);
 			const models = this.candidateModels();
 			const hint = models.length > 0 ? models.join('  ·  ') : undefined;
 			form.appendChild(this.modelField('providers.model', draft.model, (value) => {
@@ -322,13 +351,13 @@ class ProvidersPage {
 
 			// The gateway tools: one probe (its report on the result line below) and the
 			// catalogue fetch. Both ride the form's endpoint, not the stored profile's.
-			const tools = el('div', 'providers-form-actions');
+			const tools = el('div', 'providers-form-actions span2');
 			tools.appendChild(actionButton('plug', t('providers.test'), () => void this.runTest()));
 			tools.appendChild(actionButton('list-tree', t('providers.fetchModels'), () => void this.runFetchModels()));
 			form.appendChild(tools);
 			form.appendChild(this.renderTestResult());
 
-			const keyRow = el('div', 'providers-field', [el('label', '', [t('providers.apiKey')])]);
+			const keyRow = el('div', 'providers-field span2', [el('label', '', [t('providers.apiKey')])]);
 			const existing = this.list?.profiles.find((profile) => profile.id === draft.id);
 			const key = el('input', 'input') as HTMLInputElement;
 			key.type = 'password';
@@ -345,7 +374,7 @@ class ProvidersPage {
 			form.appendChild(keyRow);
 		}
 
-		const buttons = el('div', 'providers-form-actions');
+		const buttons = el('div', 'providers-form-actions span2 tail');
 		const save = el('button', 'button primary', [t('providers.save')]);
 		save.addEventListener('click', () => void this.submit());
 		const cancel = el('button', 'button secondary', [t('providers.cancel')]);
@@ -355,8 +384,11 @@ class ProvidersPage {
 		});
 		buttons.append(save, cancel);
 		form.appendChild(buttons);
-		this.body.appendChild(el('div', 'an-section', [draft.id && this.list?.profiles.some((p) => p.id === draft.id) ? t('providers.edit.title') : t('providers.add')]));
-		this.body.appendChild(form);
+		wrap.appendChild(el('div', 'prov-section-label', [
+			draft.id && this.list?.profiles.some((p) => p.id === draft.id) ? t('providers.edit.title') : t('providers.add')
+		]));
+		wrap.appendChild(form);
+		return wrap;
 	}
 
 	/** One labelled text field bound to the draft. */
@@ -420,7 +452,7 @@ class ProvidersPage {
 	/** The Test Connection line: the probe's report, or the transport error, or
 	 *  nothing yet. */
 	private renderTestResult(): HTMLElement {
-		const line = el('div', 'providers-test-result');
+		const line = el('div', 'providers-test-result span2');
 		if (this.testResult === 'testing') {
 			line.textContent = `${t('providers.testing')}…`;
 		} else if (this.testResult === 'error') {

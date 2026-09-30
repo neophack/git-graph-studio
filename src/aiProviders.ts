@@ -33,6 +33,9 @@ export interface ProviderPreset {
 	official: boolean;
 	baseUrl: string | null;
 	models: string[];
+	/** Whether a profile of this shape is usable without an API key — the chat pane's
+	 *  set-key gate keys on it (a custom or NewAPI gateway may be keyless). */
+	requiresKey: boolean;
 }
 
 export interface ProviderList {

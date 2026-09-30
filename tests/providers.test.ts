@@ -1,10 +1,11 @@
 // The AI provider bridge's vitest (module 12): the store client and the sidebar chip
-// (the switcher's quick pick) plus the Model Providers page, everything over the
-// scripted `tauriMock` backend. The sealing itself is backend-side and tested beside
-// the command (src-tauri/src/cmd_providers.rs); what this suite pins is the seam
-// contract — the key travels only inside `provider_save`'s arguments, and never comes
-// back in a `provider_list` answer (a `hasKey` flag and the last four characters stand
-// in for it).
+// (the switcher's quick pick), the Model Providers page, the chat pane's gate (the
+// set-key page over a keyless third-party provider's chat) and the token-usage curve —
+// everything over the scripted `tauriMock` backend. The sealing itself is backend-side
+// and tested beside the command (src-tauri/src/cmd_providers.rs); what this suite pins
+// is the seam contract — the key travels only inside `provider_save`'s arguments, and
+// never comes back in a `provider_list` answer (a `hasKey` flag and the last four
+// characters stand in for it).
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -14,10 +15,14 @@ import { backend } from './tauriMock';
 let mountProvidersPage: typeof import('../src/providersPage').mountProvidersPage;
 let mountProviderSwitcher: typeof import('../src/aiProviders').mountProviderSwitcher;
 let resetProviderCacheForTests: typeof import('../src/aiProviders').resetProviderCacheForTests;
+let mountUsagePanel: typeof import('../src/providerUsageView').mountUsagePanel;
+let formatTokens: typeof import('../src/providerUsageView').formatTokens;
+let mountProviderPaneGate: typeof import('../src/providerUsageView').mountProviderPaneGate;
 
 async function modules(): Promise<void> {
 	({ mountProvidersPage } = await import('../src/providersPage'));
 	({ mountProviderSwitcher, resetProviderCacheForTests } = await import('../src/aiProviders'));
+	({ mountUsagePanel, formatTokens, mountProviderPaneGate } = await import('../src/providerUsageView'));
 }
 
 function host(): HTMLElement {
@@ -32,16 +37,39 @@ function providerListAnswer(): Record<string, unknown> {
 		activeId: 'official',
 		profiles: [
 			{ id: 'official', preset: 'official', label: 'Official Claude', baseUrl: null, model: null, smallModel: null, hasKey: false, keyHint: null },
-			{ id: 'deepseek', preset: 'deepseek', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/anthropic', model: 'deepseek-chat', smallModel: 'deepseek-chat', hasKey: true, keyHint: 'abcd' }
+			{ id: 'deepseek', preset: 'deepseek', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/anthropic', model: 'deepseek-v4-pro', smallModel: 'deepseek-flash', hasKey: true, keyHint: 'abcd' }
 		],
 		presets: [
-			{ id: 'official', label: 'Official Claude', official: true, baseUrl: null, models: [] },
-			{ id: 'deepseek', label: 'DeepSeek', official: false, baseUrl: 'https://api.deepseek.com/anthropic', models: ['deepseek-chat', 'deepseek-reasoner'] },
-			{ id: 'glm', label: 'Zhipu GLM', official: false, baseUrl: 'https://open.bigmodel.cn/api/anthropic', models: ['glm-5.3', 'glm-5.3-flash', 'glm-4.7', 'glm-4.6'] },
-			{ id: 'custom', label: 'Custom (Anthropic-compatible)', official: false, baseUrl: null, models: [] }
+			{ id: 'official', label: 'Official Claude', official: true, baseUrl: null, models: [], requiresKey: false },
+			{ id: 'deepseek', label: 'DeepSeek', official: false, baseUrl: 'https://api.deepseek.com/anthropic', models: ['deepseek-v4-pro', 'deepseek-flash'], requiresKey: true },
+			{ id: 'glm', label: 'Zhipu GLM', official: false, baseUrl: 'https://open.bigmodel.cn/api/anthropic', models: ['glm-5.3', 'glm-5.3-flash', 'glm-5.3-flashx'], requiresKey: true },
+			{ id: 'custom', label: 'Custom (Anthropic-compatible)', official: false, baseUrl: null, models: [], requiresKey: false }
 		],
 		bridgedExtIds: ['Anthropic.claude-code']
 	};
+}
+
+/** The store with the keyless third-party provider active — the gate's state. */
+function keylessListAnswer(): Record<string, unknown> {
+	const answer = providerListAnswer();
+	(answer['profiles'] as Record<string, unknown>[])[1] = {
+		id: 'deepseek', preset: 'deepseek', label: 'DeepSeek',
+		baseUrl: 'https://api.deepseek.com/anthropic', model: 'deepseek-v4-pro', smallModel: 'deepseek-flash',
+		hasKey: false, keyHint: null
+	};
+	answer['activeId'] = 'deepseek';
+	return answer;
+}
+
+/** A usage answer with one shaped hour at today's local midnight (the bucket the
+ *  jsdom hover — a zero-width layout — always lands on) and a sprinkle yesterday. */
+function usageAnswer(): Record<string, unknown>[] {
+	const midnight = new Date();
+	midnight.setHours(0, 0, 0, 0);
+	return [
+		{ startMs: midnight.getTime(), cacheRead: 1_234_000, cacheCreation: 500, input: 400, output: 12_000 },
+		{ startMs: midnight.getTime() - 86_400_000, cacheRead: 900, cacheCreation: 0, input: 100, output: 2_000 }
+	];
 }
 
 /** The management page's text inputs in form order: name, base URL, model, background
@@ -54,24 +82,38 @@ function actionByTitle(title: string, root: ParentNode = document): HTMLElement 
 	return [...root.querySelectorAll<HTMLElement>('.action-btn, .button')].find((button) => button.title === title || button.textContent === title) ?? null;
 }
 
+function rows(): HTMLElement[] {
+	return [...document.querySelectorAll<HTMLElement>('.prov-row')];
+}
+
 describe('the Model Providers page', () => {
 	beforeEach(async () => {
 		await modules();
 		resetProviderCacheForTests();
 		backend.on('provider_list', () => providerListAnswer());
+		backend.on('provider_usage', () => []);
 	});
 
 	it('lists the profiles, the active one marked, keys shown as hints only', async () => {
 		mountProvidersPage(host());
 		await flush();
-		const rows = texts('.an-row .label');
-		expect(rows).toEqual(['Official Claude', 'DeepSeek']);
+		expect(texts('.prov-row .name')).toEqual(['Official Claude', 'DeepSeek']);
 		// The masked key, never a value the page could leak: the hint the backend sent.
-		expect(texts('.an-row .description')[1]).toContain('••••abcd');
-		expect(texts('.an-row .tail')[0]).toContain('Active');
+		expect(texts('.prov-row .key-chip')[1]).toContain('••••abcd');
+		expect(texts('.prov-row .status')[0]).toContain('Active');
 		// The official row offers no delete; the third-party one offers activate.
-		expect(actionByTitle('Delete', document.querySelector('.an-row')!)).toBeNull();
+		expect(actionByTitle('Delete', rows()[0]!)).toBeNull();
 		expect(actionByTitle('Activate')).not.toBeNull();
+	});
+
+	it('rides the usage curve card above the list — tokens, never money', async () => {
+		backend.on('provider_usage', () => usageAnswer());
+		mountProvidersPage(host());
+		await flush();
+		expect(document.querySelector('.prov-usage-card .usage-panel')).not.toBeNull();
+		expect(document.querySelector('.usage-line')).not.toBeNull();
+		// The range's total is token-shaped (1.2M + 12k + the small change), no currency.
+		expect(texts('.prov-usage-card .usage-total')[0]).toContain('Total 1.2M');
 	});
 
 	it('saves an edit: an untouched key field keeps the stored one, a typed one travels once', async () => {
@@ -83,27 +125,27 @@ describe('the Model Providers page', () => {
 		});
 		mountProvidersPage(host());
 		await flush();
-		click(actionByTitle('Edit', [...document.querySelectorAll('.an-row')][1]!));
+		click(actionByTitle('Edit', rows()[1]!));
 		await flush();
 		let [name, baseUrl, model, smallModel, apiKey] = formInputs();
 		expect(name.value).toBe('DeepSeek');
 		expect(apiKey.placeholder).toContain('••••abcd');
 		// A relabel and a new model, the key untouched: `apiKey: null` — keep.
 		type(name, 'DeepSeek (team)');
-		type(model, 'deepseek-reasoner');
+		type(model, 'deepseek-flash');
 		click(document.querySelector('.providers-form-actions .button.primary')!);
 		await flush();
 		expect(backend.callsTo('provider_save')).toEqual([{
 			profile: {
 				id: 'deepseek', preset: 'deepseek', label: 'DeepSeek (team)',
 				baseUrl: 'https://api.deepseek.com/anthropic',
-				model: 'deepseek-reasoner', smallModel: 'deepseek-chat',
+				model: 'deepseek-flash', smallModel: 'deepseek-flash',
 				apiKey: null
 			}
 		}]);
 
 		// Typed key: exactly what was typed, once, inside the save.
-		click(actionByTitle('Edit', [...document.querySelectorAll('.an-row')][1]!));
+		click(actionByTitle('Edit', rows()[1]!));
 		await flush();
 		[, , , , apiKey] = formInputs();
 		type(apiKey, 'sk-new-key');
@@ -123,7 +165,7 @@ describe('the Model Providers page', () => {
 		const [name, baseUrl, model] = formInputs();
 		expect(name.value).toBe('DeepSeek');
 		expect(baseUrl.value).toBe('https://api.deepseek.com/anthropic');
-		expect(model.value).toBe('deepseek-chat');
+		expect(model.value).toBe('deepseek-v4-pro');
 		const [apiKey] = formInputs().slice(4);
 		type(apiKey, 'sk-brand-new');
 		click(document.querySelector('.providers-form-actions .button.primary')!);
@@ -145,13 +187,11 @@ describe('the Model Providers page', () => {
 		await flush();
 		expect(backend.callsTo('provider_activate')).toEqual([{ id: 'deepseek' }]);
 		expect(notifications()[0]).toContain('DeepSeek');
-		// The page follows the announced switch: DeepSeek is the active row now (its
-		// first tail is the status; the second carries the row's actions).
-		const deepseekRow = [...document.querySelectorAll('.an-row')][1]!;
-		expect(deepseekRow.querySelector('.tail')!.textContent).toContain('Active');
+		// The page follows the announced switch: DeepSeek is the active row now.
+		expect(rows()[1]!.querySelector('.status')!.textContent).toContain('Active');
 		// The active row offers no activate; the official row it displaced now does.
-		expect(deepseekRow.querySelector('[title="Activate"]')).toBeNull();
-		expect([...document.querySelectorAll('.an-row')][0]!.querySelector('[title="Activate"]')).not.toBeNull();
+		expect(rows()[1]!.querySelector('[title="Activate"]')).toBeNull();
+		expect(rows()[0]!.querySelector('[title="Activate"]')).not.toBeNull();
 	});
 
 	it('reports a failed switch and keeps the page as it was', async () => {		backend.on('provider_activate', () => {
@@ -164,20 +204,20 @@ describe('the Model Providers page', () => {
 		expect(backend.callsTo('provider_activate')).toEqual([{ id: 'deepseek' }]);
 		expect(notifications()[0]).toContain('Could not switch the provider');
 		// Nothing announced: the official row is still the active one.
-		expect(texts('.an-row .tail')[0]).toContain('Active');
+		expect(texts('.prov-row .status')[0]).toContain('Active');
 	});
 
 	it('deletes a profile behind a confirmation', async () => {
 		backend.on('provider_delete', () => ({ ...providerListAnswer(), profiles: providerListAnswer().profiles.slice(0, 1) }));
 		mountProvidersPage(host());
 		await flush();
-		click(actionByTitle('Delete', [...document.querySelectorAll('.an-row')][1]!));
+		click(actionByTitle('Delete', rows()[1]!));
 		await flush();
 		expect(backend.callsTo('provider_delete')).toEqual([]); // nothing before the confirm
 		click(notificationButton('Delete'));
 		await flush();
 		expect(backend.callsTo('provider_delete')).toEqual([{ id: 'deepseek' }]);
-		expect(texts('.an-row .label')).toEqual(['Official Claude']);
+		expect(texts('.prov-row .name')).toEqual(['Official Claude']);
 	});
 
 	it('shows a load failure with a retry that recovers', async () => {		let broken = true;
@@ -187,7 +227,7 @@ describe('the Model Providers page', () => {
 		});
 		mountProvidersPage(host());
 		await flush();
-		expect(texts('.an-empty')[0]).toContain('Could not read the provider store');
+		expect(texts('.prov-empty')[0]).toContain('Could not read the provider store');
 		// Nothing re-throws when the store changes while broken — the page just re-renders.
 		document.dispatchEvent(new CustomEvent('ggs:providers-changed'));
 		await flush();
@@ -195,7 +235,7 @@ describe('the Model Providers page', () => {
 		broken = false;
 		click(actionByTitle('Retry'));
 		await flush();
-		expect(texts('.an-row .label')).toEqual(['Official Claude', 'DeepSeek']);
+		expect(texts('.prov-row .name')).toEqual(['Official Claude', 'DeepSeek']);
 	});
 
 	it('follows a store change announced from outside (the sidebar chip, another window)', async () => {
@@ -207,14 +247,14 @@ describe('the Model Providers page', () => {
 		const chipSlot = host();
 		const disposeChip = mountProviderSwitcher('Anthropic.claude-code', chipSlot);
 		await flush();
-		expect(texts('.an-row .tail')[0]).toContain('Active'); // the official service starts active
+		expect(texts('.prov-row .status')[0]).toContain('Active'); // the official service starts active
 
 		// Another window switched to DeepSeek and the backend pushed the change.
 		answer = { ...providerListAnswer(), activeId: 'deepseek' };
 		backend.emit('providers-changed', null);
 		await flush();
 		// Both surfaces followed without a reload: the page's active row and the chip.
-		expect([...document.querySelectorAll('.an-row')][1]!.querySelector('.tail')!.textContent).toContain('Active');
+		expect(rows()[1]!.querySelector('.status')!.textContent).toContain('Active');
 		expect(chipSlot.querySelector('.provider-chip .label')!.textContent).toBe('DeepSeek');
 		disposeChip();
 	});
@@ -299,11 +339,208 @@ describe('the sidebar provider chip', () => {
 		await flush();
 		click(slot.querySelector('.provider-chip')!);
 		await flush();
-		const rows = [...document.querySelectorAll('.quick-input .row')];
-		click(rows[0]!); // the active one
+		const quickRows = [...document.querySelectorAll('.quick-input .row')];
+		click(quickRows[0]!); // the active one
 		await flush();
 		expect(backend.callsTo('provider_activate')).toEqual([]);
 		dispose();
+	});
+});
+
+describe('the token-usage curve', () => {
+	beforeEach(async () => {
+		await modules();
+		resetProviderCacheForTests();
+		backend.on('provider_list', () => providerListAnswer());
+		backend.on('provider_usage', () => usageAnswer());
+	});
+
+	it('formats token counts without any money shape', () => {
+		expect(formatTokens(0)).toBe('0');
+		expect(formatTokens(999)).toBe('999');
+		expect(formatTokens(1_200)).toBe('1.2k');
+		expect(formatTokens(12_000)).toBe('12k');
+		expect(formatTokens(1_234_000)).toBe('1.2M');
+	});
+
+	it('draws the range as a curve with its total, and switches today / 7 days / 30 days', async () => {
+		const slot = host();
+		const dispose = mountUsagePanel(slot);
+		await flush();
+		// The curve itself: one smooth line over the buckets, an area under it.
+		expect(slot.querySelector('.usage-line')).not.toBeNull();
+		expect((slot.querySelector('.usage-line') as SVGPathElement).getAttribute('d')).toMatch(/^M/);
+		expect(slot.querySelector('.usage-area')).not.toBeNull();
+		// Today's total: the midnight bucket's tokens alone (yesterday's day-bucket
+		// totals land outside today's range).
+		expect(texts('.usage-total')[0]).toBe('Total 1.2M');
+
+		const ranges = [...slot.querySelectorAll<HTMLButtonElement>('.usage-range')];
+		expect(ranges.map((button) => button.textContent)).toEqual(['Today', '7 days', '30 days']);
+		click(ranges[1]!); // 7 days — yesterday's sprinkle joins the total
+		await flush();
+		expect(ranges[1]!.classList.contains('active')).toBe(true);
+		expect(ranges[0]!.classList.contains('active')).toBe(false);
+		expect(texts('.usage-total')[0]).toBe('Total 1.2M');
+		click(ranges[2]!); // 30 days
+		await flush();
+		expect(ranges[2]!.classList.contains('active')).toBe(true);
+		dispose();
+	});
+
+	it('hovers into the breakdown: cache hits, cache writes, uncached input, output — never money or durations', async () => {
+		const slot = host();
+		const dispose = mountUsagePanel(slot);
+		await flush();
+		const svg = slot.querySelector('.usage-chart svg')!;
+		// A zero-width jsdom layout anchors the hover to the first bucket — today's
+		// midnight, whose numbers the fixture shaped.
+		svg.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 0 }));
+		await flush();
+		const tooltip = slot.querySelector<HTMLElement>('.usage-tooltip')!;
+		expect(tooltip.hidden).toBe(false);
+		const rows = [...tooltip.querySelectorAll('.row')].map((row) => row.textContent);
+		expect(rows[0]).toContain('Cache hits');
+		expect(rows[0]).toContain('1.2M');
+		expect(rows[1]).toContain('Cache writes');
+		expect(rows[2]).toContain('Uncached input');
+		expect(rows[3]).toContain('Output');
+		expect(rows[3]).toContain('12k');
+		// Nothing in the panel names money or durations anywhere.
+		for (const text of [...texts('.usage-panel', slot), ...rows]) {
+			expect(text).not.toMatch(/\$|¥|cost|USD|duration|ms\b/i);
+		}
+		svg.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
+		expect(tooltip.hidden).toBe(true);
+		dispose();
+	});
+
+	it('says so when the range is empty, and reports a failed read with a working retry', async () => {
+		let broken = false;
+		backend.on('provider_usage', () => {
+			if (broken) throw new Error('the transcripts are unreadable');
+			return [];
+		});
+		const slot = host();
+		const dispose = mountUsagePanel(slot);
+		await flush();
+		// No transcripts is a state, not a failure: the honest empty curve. (The panel
+		// carries two .usage-empty rows — the error one and the empty one; only the
+		// state that holds speaks.)
+		const spoken = texts('.usage-empty', slot).filter((text) => text !== '');
+		expect(spoken[0]).toContain('No token usage in this range');
+
+		broken = true;
+		document.dispatchEvent(new CustomEvent('ggs:providers-changed'));
+		await flush();
+		expect(texts('.usage-empty', slot).filter((text) => text !== '')[0]).toContain('Could not read the usage history');
+
+		broken = false;
+		backend.on('provider_usage', () => usageAnswer());
+		click(slot.querySelector('.usage-empty .action-btn')!);
+		await flush();
+		expect(slot.querySelector('.usage-line')).not.toBeNull();
+		dispose();
+	});
+
+	it('collapses in its compact form (the chat pane strip) without losing the data', async () => {
+		const slot = host();
+		const dispose = mountUsagePanel(slot, { compact: true });
+		await flush();
+		const body = slot.querySelector<HTMLElement>('.usage-body')!;
+		expect(body.hidden).toBe(false);
+		click(slot.querySelector('.usage-collapse')!);
+		expect(body.hidden).toBe(true);
+		click(slot.querySelector('.usage-collapse')!);
+		expect(body.hidden).toBe(false);
+		expect(slot.querySelector('.usage-line')).not.toBeNull(); // the redraw after expand
+		dispose();
+	});
+});
+
+describe('the chat pane gate (the login page it replaces)', () => {
+	beforeEach(async () => {
+		await modules();
+		resetProviderCacheForTests();
+		backend.on('provider_list', () => providerListAnswer());
+		backend.on('provider_usage', () => usageAnswer());
+	});
+
+	it('shows the set-key page over a keyless third-party provider, and the strip once the key lands', async () => {
+		backend.on('provider_list', () => keylessListAnswer());
+		backend.on('provider_save', ({ profile }) => {
+			// The save answers the store the backend would: the key present, the
+			// provider still the active one.
+			expect(profile['apiKey']).toBe('sk-typed-once');
+			return { ...providerListAnswer(), activeId: 'deepseek' };
+		});
+		const pane = host();
+		const dispose = mountProviderPaneGate('Anthropic.claude-code', pane);
+		await flush();
+
+		const gate = pane.querySelector<HTMLElement>('.provider-gate')!;
+		expect(gate).not.toBeNull();
+		expect(gate.textContent).toContain('Set the DeepSeek API key');
+		const key = gate.querySelector<HTMLInputElement>('input')!;
+		expect(key.type).toBe('password');
+
+		type(key, 'sk-typed-once');
+		click([...gate.querySelectorAll<HTMLElement>('.button')].find((button) => button.textContent === 'Save & Open Chat')!);
+		await flush();
+		// The save carried the whole active profile with the typed key — the backend's
+		// restart rides the same env change.
+		const saved = backend.callsTo('provider_save')[0]!.profile as Record<string, unknown>;
+		expect(saved).toMatchObject({
+			id: 'deepseek', preset: 'deepseek', label: 'DeepSeek',
+			baseUrl: 'https://api.deepseek.com/anthropic', apiKey: 'sk-typed-once'
+		});
+		// The announced store flipped the gate into the usage strip, by itself.
+		expect(pane.querySelector('.provider-gate')).toBeNull();
+		expect(pane.querySelector('.provider-usage-strip')).not.toBeNull();
+		expect(pane.querySelector('.usage-panel')).not.toBeNull();
+		dispose();
+	});
+
+	it('carries the usage strip above the chat while a keyed provider is active', async () => {
+		backend.on('provider_list', () => ({ ...providerListAnswer(), activeId: 'deepseek' }));
+		const pane = host();
+		const dispose = mountProviderPaneGate('Anthropic.claude-code', pane);
+		await flush();
+		expect(pane.querySelector('.provider-gate')).toBeNull();
+		expect(pane.querySelector('.provider-usage-strip')).not.toBeNull();
+		dispose();
+		// The strip's teardown returns the pane to the chat alone.
+		await flush();
+		expect(pane.querySelector('.provider-usage-strip')).toBeNull();
+	});
+
+	it('never gates the official service, a keyless custom gateway, or another extension', async () => {
+		backend.on('provider_list', () => ({
+			...keylessListAnswer(),
+			profiles: [
+				...(keylessListAnswer().profiles as Record<string, unknown>[]).slice(0, 1),
+				{ id: 'gateway', preset: 'custom', label: 'Local proxy', baseUrl: 'http://127.0.0.1:8080', model: 'glm-5.3', smallModel: null, hasKey: false, keyHint: null }
+			],
+			activeId: 'gateway'
+		}));
+		const bridged = host();
+		const other = host();
+		const disposeBridged = mountProviderPaneGate('Anthropic.claude-code', bridged);
+		const disposeOther = mountProviderPaneGate('some.other.ext', other);
+		await flush();
+		// A keyless custom gateway may be exactly how the chat runs — no gate over it.
+		expect(bridged.querySelector('.provider-gate')).toBeNull();
+		expect(bridged.querySelector('.provider-usage-strip')).toBeNull();
+		// And the official service needs a sign-in, not a key.
+		backend.on('provider_list', () => providerListAnswer());
+		document.dispatchEvent(new CustomEvent('ggs:providers-changed'));
+		await flush();
+		expect(bridged.querySelector('.provider-gate')).toBeNull();
+		// Another extension's pane is never the bridge's to gate, whatever the store.
+		expect(other.querySelector('.provider-gate')).toBeNull();
+		expect(other.querySelector('.provider-usage-strip')).toBeNull();
+		disposeBridged();
+		disposeOther();
 	});
 });
 
@@ -312,19 +549,20 @@ describe('the gateway tools and the cc-switch import', () => {
 		await modules();
 		resetProviderCacheForTests();
 		backend.on('provider_list', () => providerListAnswer());
+		backend.on('provider_usage', () => []);
 	});
 
 	function openEditForm(): void {
-		click(actionByTitle('Edit', [...document.querySelectorAll('.an-row')][1]!));
+		click(actionByTitle('Edit', rows()[1]!));
 	}
 
 	it('tests the connection and renders the probe report on the form', async () => {
-		backend.on('provider_test_connection', ({ baseUrl, apiKey, model, profileId }) => {
+		backend.on('provider_test_connection', ({ baseUrl, apiKey, profileId, model }) => {
 			expect(baseUrl).toBe('https://api.deepseek.com/anthropic');
 			// An untouched key field falls back to the profile's stored key, backend-side.
 			expect(apiKey).toBe('');
 			expect(profileId).toBe('deepseek');
-			expect(model).toBe('deepseek-chat');
+			expect(model).toBe('deepseek-v4-pro');
 			return { ok: true, status: 200, ms: 42, message: 'reachable' };
 		});
 		mountProvidersPage(host());
@@ -353,10 +591,10 @@ describe('the gateway tools and the cc-switch import', () => {
 		await flush();
 		click(actionByTitle('Fetch Models'));
 		await flush();
-		const rows = [...document.querySelectorAll('.quick-input .row')];
-		expect(rows.map((row) => row.querySelector('.label')!.textContent)).toEqual(
+		const quickRows = [...document.querySelectorAll('.quick-input .row')];
+		expect(quickRows.map((row) => row.querySelector('.label')!.textContent)).toEqual(
 			['glm-4.6', 'claude-sonnet-4-5', 'deepseek-r1']);
-		click(rows[2]!);
+		click(quickRows[2]!);
 		await flush();
 		const model = [...document.querySelectorAll('.providers-form input.input')][2]!;
 		expect(model.value).toBe('deepseek-r1');
@@ -372,26 +610,26 @@ describe('the gateway tools and the cc-switch import', () => {
 		expect(combos.length).toBe(2);
 		click(combos[0]!.querySelector('.action-btn')!);
 		await flush();
-		let rows = [...document.querySelectorAll('.quick-input .row')];
-		expect(rows.map((row) => row.querySelector('.label')!.textContent)).toEqual(
-			['deepseek-chat', 'deepseek-reasoner']);
-		click(rows[1]!); // the main model
+		let quickRows = [...document.querySelectorAll('.quick-input .row')];
+		expect(quickRows.map((row) => row.querySelector('.label')!.textContent)).toEqual(
+			['deepseek-v4-pro', 'deepseek-flash']);
+		click(quickRows[1]!); // the main model
 		await flush();
 		// The pick did not re-render the form (the other box's button stays live), and
 		// writing the main model leaves the background model untouched.
 		click(combos[1]!.querySelector('.action-btn')!);
 		await flush();
-		rows = [...document.querySelectorAll('.quick-input .row')];
-		click(rows[0]!); // the background model
+		quickRows = [...document.querySelectorAll('.quick-input .row')];
+		click(quickRows[0]!); // the background model
 		await flush();
 		const [, , model, smallModel] = formInputs();
-		expect(model.value).toBe('deepseek-reasoner');
-		expect(smallModel.value).toBe('deepseek-chat');
+		expect(model.value).toBe('deepseek-flash');
+		expect(smallModel.value).toBe('deepseek-v4-pro');
 		// The picks travel into the save.
 		click(document.querySelector('.providers-form-actions .button.primary')!);
 		await flush();
 		const profile = backend.callsTo('provider_save')[0]!.profile as Record<string, unknown>;
-		expect(profile).toMatchObject({ model: 'deepseek-reasoner', smallModel: 'deepseek-chat' });
+		expect(profile).toMatchObject({ model: 'deepseek-flash', smallModel: 'deepseek-v4-pro' });
 	});
 
 	it('offers the GLM preset its current lineup without any fetch — and the fetched catalogue rides first', async () => {
@@ -411,12 +649,12 @@ describe('the gateway tools and the cc-switch import', () => {
 		// The dropdown carries the preset's whole list.
 		click(document.querySelectorAll('.providers-combo .action-btn')[0]!);
 		await flush();
-		const rows = [...document.querySelectorAll('.quick-input .row')];
-		expect(rows.map((row) => row.querySelector('.label')!.textContent)).toEqual(
-			['glm-5.3', 'glm-5.3-flash', 'glm-4.7', 'glm-4.6']);
-		click(rows[2]!);
+		let quickRows = [...document.querySelectorAll('.quick-input .row')];
+		expect(quickRows.map((row) => row.querySelector('.label')!.textContent)).toEqual(
+			['glm-5.3', 'glm-5.3-flash', 'glm-5.3-flashx']);
+		click(quickRows[2]!);
 		await flush();
-		expect(formInputs()[2]!.value).toBe('glm-4.7');
+		expect(formInputs()[2]!.value).toBe('glm-5.3-flashx');
 
 		// A fetch merges the endpoint's live catalogue ahead of the preset list — the
 		// re-render the fetch triggers rebuilds the boxes over the merged candidates.
@@ -433,7 +671,7 @@ describe('the gateway tools and the cc-switch import', () => {
 		await flush();
 		const merged = [...document.querySelectorAll('.quick-input .row')];
 		expect(merged.map((row) => row.querySelector('.label')!.textContent)).toEqual(
-			['glm-5.4', 'glm-5.3', 'glm-5.3-flash', 'glm-4.7', 'glm-4.6']);
+			['glm-5.4', 'glm-5.3', 'glm-5.3-flash', 'glm-5.3-flashx']);
 	});
 
 	it('shows no dropdown when nothing is known yet — the custom preset before any fetch', async () => {

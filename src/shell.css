@@ -506,7 +506,11 @@ body.resizing iframe { pointer-events: none; }
 /* A webview view's iframe needs a definite height of its own — the sidebar's stacked
  * sections are content-sized, and a `height: 100%` iframe inside an auto-height pane
  * collapses to nothing (the view reads as empty however much it rendered). */
-.ext-webview-view-pane { flex: 1 1 auto; min-height: 220px; }
+.ext-webview-view-pane { flex: 1 1 auto; min-height: 220px; position: relative; }
+/* The pane carries the AI provider bridge's gate (the set-key page over a keyless
+ * third-party provider's chat) and, with a key set, the usage strip above the chat. */
+.provider-pane-usage { display: flex; flex-direction: column; }
+.provider-pane-usage .ext-page-frame { flex: 1 1 auto; height: auto; min-height: 0; }
 .ext-tree .ext-tree-row { display: flex; align-items: center; gap: 4px; height: 22px; line-height: 22px; white-space: nowrap; cursor: pointer; user-select: none; }
 .ext-tree .ext-tree-row:hover { background: var(--vscode-list-hoverBackground); }
 .ext-tree .ext-tree-row .label { overflow: hidden; text-overflow: ellipsis; }
@@ -1052,11 +1056,12 @@ body.resizing iframe { pointer-events: none; }
 .editor-sash.vertical { width: 4px; cursor: ew-resize; margin-left: -2px; }
 .editor-sash.horizontal { height: 4px; cursor: ns-resize; margin-top: -2px; }
 .editor-sash:hover, .editor-sash.active { background: var(--vscode-sash-hoverBorder); }
-/* The locked-group badge (VS Code's marker): the box wears the state, the badge sits over
-   the tab strip's right edge and never takes a pointer (the tabs beneath stay clickable to
-   the last pixel that is not covered — VS Code shows its lock the same way). */
-.group-lock { display: none; position: absolute; top: 0; right: 0; align-items: center; height: var(--tab-height); padding: 0 8px 0 10px; color: var(--vscode-descriptionForeground, #999); background: var(--vscode-editorGroupHeader-tabsBackground); border-left: 1px solid var(--vscode-editorGroupHeader-tabsBorder, transparent); pointer-events: none; font-size: 13px; }
-.editor-group-box.locked .group-lock { display: inline-flex; }
+/* The locked-group badge (VS Code's marker): the tab strip's last item, in flow after the
+   title actions — it marks the state beside them (an extension's title button — the Claude
+   one claude-code contributes — sits at that edge too), never an overlay covering what
+   stands there. The box's `locked` class remains the state marker; renderTabs decides the
+   badge's presence. */
+.group-lock { display: inline-flex; align-items: center; flex: none; padding: 0 8px 0 2px; color: var(--vscode-descriptionForeground, #999); font-size: 13px; }
 /* The webview overlay layer: an extension page's frame keeps its DOM home here, outside
    the group tree the area rebuilds on every layout change — a re-parented iframe loses its
    browsing context and reloads (WKWebView reloads the page, interrupting the extension
@@ -1631,7 +1636,7 @@ body.resizing iframe { pointer-events: none; }
 	opacity: 0.55;
 }
 
-/* ---------- The AI provider bridge (module 12): the sidebar chip and the page ---------- */
+/* ---------- The AI provider bridge (module 12): the sidebar chip, the chat pane gate, the usage curve, the page ---------- */
 
 /* The switcher chip a bridged extension's sidebar section header carries — the active
  * provider's name, one click from the quick pick. */
@@ -1647,16 +1652,127 @@ body.resizing iframe { pointer-events: none; }
 .provider-chip .codicon { font-size: 13px; }
 .provider-chip .label { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* The Model Providers page's rows and form (the analysis page kit hosts the page). */
-.provider-row-active .label { color: var(--vscode-textLink-foreground); }
-.providers-form { padding: 4px 20px 16px; max-width: 560px; display: flex; flex-direction: column; gap: 8px; }
-.providers-field { display: flex; flex-direction: column; gap: 3px; }
+/* The set-key page over a keyless third-party provider's chat pane — flat card, no
+ * chrome of the extension's own login page under it. */
+.provider-gate {
+	position: absolute; inset: 0; z-index: 6; overflow: auto;
+	background: var(--vscode-sideBar-background, var(--vscode-editor-background, #1e1e1e));
+	display: flex; align-items: flex-start; justify-content: center; padding: 28px 16px;
+}
+.provider-gate-card {
+	width: 100%; max-width: 340px; display: flex; flex-direction: column; gap: 10px;
+	padding: 18px 16px; border-radius: 6px;
+	border: 1px solid color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 14%, transparent);
+	background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 3%, transparent);
+}
+.provider-gate-card .gate-head { display: flex; align-items: center; gap: 8px; }
+.provider-gate-card .gate-head .codicon { font-size: 16px; color: var(--vscode-textLink-foreground); }
+.provider-gate-card .gate-head .title { font-size: 13px; font-weight: 600; }
+.provider-gate-card .gate-body { font-size: 11.5px; line-height: 1.5; color: var(--vscode-descriptionForeground); }
+.provider-gate-card .input { width: 100%; box-sizing: border-box; }
+.provider-gate-card .gate-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* The usage strip a keyed chat pane carries, and the same panel's full-size form on
+ * the Model Providers page. Tokens only — no money, no durations. */
+.provider-usage-strip { flex: none; border-bottom: 1px solid color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 12%, transparent); }
+.usage-panel { display: flex; flex-direction: column; }
+.usage-head { display: flex; align-items: center; gap: 6px; min-height: 24px; padding: 5px 8px 3px; }
+.usage-head .codicon { font-size: 13px; color: var(--vscode-descriptionForeground); }
+.usage-title { font-size: 10.5px; font-weight: 600; letter-spacing: .4px; text-transform: uppercase; color: var(--vscode-descriptionForeground); white-space: nowrap; }
+.usage-total { margin-left: auto; font-size: 11px; color: var(--vscode-descriptionForeground); font-family: var(--monaco-monospace-font, monospace); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.usage-range-switch { display: inline-flex; margin-left: 8px; border: 1px solid color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 14%, transparent); border-radius: 4px; overflow: hidden; }
+.usage-range {
+	border: none; background: transparent; height: 18px; padding: 0 8px; cursor: pointer;
+	font-size: 10.5px; font-family: inherit; color: var(--vscode-descriptionForeground); white-space: nowrap;
+}
+.usage-range + .usage-range { border-left: 1px solid color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 14%, transparent); }
+.usage-range:hover { background: var(--vscode-toolbar-hoverBackground); }
+.usage-range.active { background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 12%, transparent); color: var(--vscode-sideBar-foreground, var(--vscode-editor-foreground)); }
+.usage-collapse { border: none; background: transparent; padding: 2px; cursor: pointer; display: inline-flex; color: var(--vscode-descriptionForeground); }
+.usage-collapse:hover { color: var(--vscode-sideBar-foreground, var(--vscode-editor-foreground)); }
+.usage-body { padding: 0 8px 6px; }
+.usage-chart-host { position: relative; }
+.usage-chart { position: relative; }
+.usage-chart svg { display: block; user-select: none; }
+.usage-grid { stroke: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 8%, transparent); stroke-width: 1; }
+.usage-axis { stroke: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 18%, transparent); stroke-width: 1; }
+.usage-tick { fill: var(--vscode-descriptionForeground); font-size: 9px; font-family: var(--monaco-monospace-font, monospace); }
+.usage-area { fill: color-mix(in srgb, var(--vscode-charts-lines, #3794ff) 14%, transparent); }
+.usage-line { fill: none; stroke: var(--vscode-charts-lines, #3794ff); stroke-width: 1.5; stroke-linecap: round; }
+.usage-guide { stroke: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 30%, transparent); stroke-dasharray: 3 3; }
+.usage-dot { fill: var(--vscode-editor-background, #1e1e1e); stroke: var(--vscode-charts-lines, #3794ff); stroke-width: 1.5; }
+.usage-tooltip {
+	position: absolute; top: 2px; left: 0; z-index: 8; min-width: 132px;
+	display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: 4px;
+	background: var(--vscode-editorWidget-background, #252526);
+	border: 1px solid var(--vscode-editorWidget-border, color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 14%, transparent));
+	color: var(--vscode-editorWidget-foreground, #ccc); font-size: 11px;
+}
+.usage-tooltip .title { font-weight: 600; font-variant-numeric: tabular-nums; margin-bottom: 2px; }
+.usage-tooltip .row { display: flex; align-items: center; gap: 6px; }
+.usage-tooltip .row .dot { width: 7px; height: 7px; border-radius: 2px; background: var(--dot, currentColor); flex: none; }
+.usage-tooltip .row .value { margin-left: auto; font-variant-numeric: tabular-nums; padding-left: 12px; }
+.usage-empty { display: flex; align-items: center; gap: 4px; padding: 6px 2px; font-size: 11px; color: var(--vscode-descriptionForeground); }
+.usage-empty:empty { display: none; padding: 0; }
+
+/* The Model Providers page — flat, professional, compact: a hairline usage card,
+ * one-line rows, a two-column form, no shadows anywhere. */
+.prov-header {
+	flex: none; display: flex; align-items: center; gap: 10px; padding: 10px 16px 9px;
+	border-bottom: 1px solid color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 12%, transparent);
+}
+.prov-heading { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.prov-heading .title { font-size: 13px; font-weight: 600; white-space: nowrap; }
+.prov-heading .subtitle { font-size: 11px; color: var(--vscode-descriptionForeground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prov-header .actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.prov-add { height: 24px; padding: 0 12px; font-size: 11.5px; }
+.prov-body { flex: 1; overflow: auto; padding: 12px 16px 20px; }
+.prov-usage-card { max-width: 760px; margin-bottom: 12px; padding: 4px 8px 2px; border: 1px solid color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 12%, transparent); border-radius: 6px; }
+.prov-section-label { max-width: 760px; margin: 10px 0 6px; font-size: 10.5px; font-weight: 600; letter-spacing: .5px; text-transform: uppercase; color: var(--vscode-descriptionForeground); }
+.prov-row {
+	max-width: 760px; display: flex; align-items: center; gap: 8px; height: 30px;
+	padding: 0 6px; border-radius: 5px; border-left: 2px solid transparent;
+}
+.prov-row:hover { background: var(--vscode-list-hoverBackground); }
+.prov-row.active {
+	border-left-color: var(--vscode-focusBorder, #3794ff);
+	background: color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 7%, transparent);
+}
+.prov-row .marker { flex: none; width: 6px; height: 6px; border-radius: 50%; background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 18%, transparent); }
+.prov-row .marker.on { background: var(--vscode-charts-green, #89d185); }
+.prov-row .codicon { flex: none; font-size: 14px; color: var(--vscode-descriptionForeground); }
+.prov-row .name { flex: none; max-width: 38%; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prov-row.active .name { color: var(--vscode-textLink-foreground); }
+.prov-row .desc { flex: 1; min-width: 0; font-size: 11px; color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prov-row .key-chip {
+	flex: none; max-width: 110px; padding: 1px 5px; border-radius: 3px; font-size: 10.5px;
+	font-family: var(--monaco-monospace-font, monospace); color: var(--vscode-descriptionForeground);
+	border: 1px solid color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 14%, transparent);
+	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.prov-row .key-chip.empty { visibility: hidden; } /* keeps the columns aligned for the official row */
+.prov-row .status { flex: none; font-size: 11px; color: var(--vscode-textLink-foreground); }
+.prov-row .actions { display: flex; gap: 2px; visibility: hidden; }
+.prov-row:hover .actions, .prov-row:focus-within .actions { visibility: visible; }
+.prov-notes { max-width: 760px; display: flex; flex-direction: column; gap: 3px; margin-top: 14px; }
+.prov-notes div { font-size: 10.5px; color: color-mix(in srgb, var(--vscode-descriptionForeground, #8b8b8b) 85%, transparent); }
+.prov-empty { max-width: 760px; padding: 10px 2px; font-size: 12px; color: var(--vscode-descriptionForeground); }
+
+/* The add / edit form: a flat two-column card inside the page's width. */
+.providers-form-wrap { max-width: 640px; }
+.providers-form {
+	display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; padding: 12px;
+	border: 1px solid color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 12%, transparent); border-radius: 6px;
+}
+.providers-form .span2 { grid-column: 1 / -1; }
+.providers-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .providers-field label { font-size: 11px; color: var(--vscode-descriptionForeground); }
-.providers-form .input { width: 100%; }
+.providers-form .input { width: 100%; box-sizing: border-box; }
 /* A model field's input + its dropdown button (the pick list rides the chevron). */
 .providers-combo { display: flex; gap: 4px; align-items: center; }
 .providers-combo .input { flex: 1; min-width: 0; width: auto; }
-.providers-form-actions { display: flex; gap: 8px; }
-.providers-test-result { min-height: 16px; font-size: 11px; }
+.providers-form-actions { display: flex; gap: 8px; align-items: center; }
+.providers-form-actions.tail { justify-content: flex-end; }
+.providers-test-result { min-height: 15px; font-size: 11px; }
 .providers-test-ok { color: var(--vscode-charts-green, var(--vscode-descriptionForeground)); }
 .providers-test-bad { color: var(--vscode-errorForeground); }

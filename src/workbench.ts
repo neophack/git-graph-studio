@@ -13,12 +13,13 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { AnalysisView, type AnalysisStatus } from './analysisView';
 import type { AnalysisToolId } from './analysisTools';
 import { mountProviderSwitcher } from './aiProviders';
+import { mountProviderPaneGate } from './providerUsageView';
 import { commandForBinding, commands, effectiveBinding, setKeybindingResolver, UNSHIFTED_GLYPHS } from './commands';
 import { registerDecorationType } from './editorDecorations';
 import { setExtensionCompletionProvider } from './editorCompletions';
 import { languageIdFor, registerContextProvider } from './contributions';
 import { EditorArea } from './editorArea';
-import { ENCODING_LABELS } from './editor';
+import { ENCODING_LABELS, type EditorPlacement } from './editor';
 import { Explorer } from './explorer';
 import { ExtensionHost, extTitle, type ExtInfo, type PageDiffRequest } from './extHost';
 import { ExtensionsPanel } from './extensionsPanel';
@@ -56,6 +57,15 @@ export interface FsChange {
 
 /** The backend watcher's event (main.rs `FS_CHANGED_EVENT`). */
 export const FS_CHANGED_EVENT = 'studio://fs-changed';
+
+/** The Finder "Open With" handoff's event (lib.rs `handle_opened`): folders and files macOS
+ * asked the running app to open — the bundle's folder declaration and the file
+ * associations. Only a booted workbench receives it; a handoff that wins the boot race
+ * seeds the launch context instead and never crosses here. */
+export const OPEN_PATHS_EVENT = 'studio://open-paths';
+
+/** What [`OPEN_PATHS_EVENT`] carries. */
+export interface OpenedPaths { folders: string[]; files: string[] }
 
 /** The symbol index's progress event (cmd_symbols `SYMBOL_INDEX_EVENT`): what the status
  *  bar's "Indexing symbols n/m" item follows. */
@@ -168,7 +178,7 @@ export class Workbench {
 		// The extension host's webview panels (`window.createWebviewPanel`) ride the same
 		// editor-tab path the extension pages do; the status bar and Output view host its items
 		// and channels. All wired here: the host owns the data, the views own the DOM.
-		this.extensionHost.onOpenWebview = (panelId, title, extId) => this.openWebviewPanel(panelId, title, extId);
+		this.extensionHost.onOpenWebview = (panelId, title, extId, placement, focus) => this.openWebviewPanel(panelId, title, extId, placement, focus);
 		this.extensionHost.onCloseWebviewTab = (tabId) => this.editors.closeById(tabId);
 		this.extensionHost.onRevealWebviewTab = (tabId) => this.editors.revealById(tabId);
 		this.extensionHost.onRenameWebviewTab = (tabId, title) => this.editors.renameById(tabId, title);
@@ -264,7 +274,7 @@ export class Workbench {
 		// one; the new window boots like a fresh launch. On Windows and Linux a second launch
 		// of the app already is a new instance; on macOS this is the discoverable way to
 		// multi-open, where clicking the app's icon again only focuses the running window.
-		register({ id: 'workbench.newWindow', title: 'New Window', category: 'File', keybinding: 'Ctrl+Shift+N', run: () => void invoke('app_new_instance').catch((error) => notify('error', `Could not open a new window: ${String(error)}`)) });
+		register({ id: 'workbench.newWindow', title: 'New Window', category: 'File', keybinding: 'Ctrl+Shift+N', run: () => void invoke('app_new_instance').catch((error) => notify('error', tf('workbench.newWindowFailed', String(error)))) });
 		register({ id: 'workbench.openWorkspace', title: 'Open Workspace...', category: 'File', run: () => this.pickWorkspace() });
 		register({ id: 'workbench.openFileStandalone', title: 'Open File...', category: 'File', run: () => this.pickSingleFile() });
 		register({ id: 'workbench.closeFolder', title: 'Close Folder', category: 'File', enabled: hasRepo, run: () => this.closeFolder() });
@@ -329,6 +339,9 @@ export class Workbench {
 		register({ id: 'git.toggleBlame', title: 'Git: Toggle Blame', category: 'Git', keybinding: 'Ctrl+K Ctrl+B', enabled: () => hasRepo() && this.editors.activeView !== null && this.editors.activeInput?.kind === 'file', run: () => this.editors.toggleBlame() });
 		register({ id: 'markdown.showPreview', title: 'Markdown: Open Preview', category: 'View', keybinding: 'Ctrl+Shift+V', enabled: () => this.editors.activeInput?.kind === 'file' && /\.(md|markdown)$/i.test(this.editors.activeInput.path), run: () => this.editors.openMarkdownPreview() });
 		register({ id: 'markdown.showPreviewToSide', title: 'Markdown: Open Preview to the Side', category: 'View', keybinding: 'Ctrl+K V', enabled: () => this.editors.activeInput?.kind === 'file' && /\.(md|markdown)$/i.test(this.editors.activeInput.path), run: () => this.editors.openMarkdownPreviewToSide() });
+		// The `.py` tab-strip run button's palette twin (VS Code's Run Python File): the
+		// terminal opens with the file's interpreter line.
+		register({ id: 'python.runFile', title: 'Python: Run File in Terminal', category: 'Python', enabled: () => this.editors.activeInput?.kind === 'file' && /\.py$/i.test(this.editors.activeInput.path), run: () => { const input = this.editors.activeInput; if (input?.kind === 'file') void this.runPythonFile(input.path); } });
 		register({ id: 'workbench.openHexViewer', title: 'File: Open in Hex Viewer', category: 'File', enabled: () => this.editors.activeInput?.kind === 'file', run: () => void this.editors.openHex(this.editors.activeInput!.kind === 'file' ? this.editors.activeInput.path : '') });
 		register({ id: 'workbench.compareFolders', title: 'Compare Two Folders...', category: 'File', enabled: hasRepo, run: () => void this.compareFolders() });
 		register({ id: 'workbench.gotoSymbolInFile', title: 'Go to Symbol in File...', category: 'Go', keybinding: 'Ctrl+Shift+O', enabled: () => this.editors.activeInput?.kind === 'file', run: () => void this.editors.gotoSymbolInFile() });
@@ -746,6 +759,11 @@ export class Workbench {
 				section.appendChild(pane);
 				this.extWebviewViewDisposers.push(this.extensionHost.mountWebviewView(viewId, extId, pane));
 				this.extWebviewViewDisposers.push(mountProviderSwitcher(extId, chipSlot));
+				// The AI provider bridge's pane gate: the set-key page over a keyless
+				// third-party provider's chat, the usage strip above a keyed one —
+				// mounted for every webview section, rendered only for the bridged
+				// extension's (the backend's `bridgedExtIds` decides).
+				this.extWebviewViewDisposers.push(mountProviderPaneGate(extId, pane));
 			} else {
 				const tree = new ExtensionTreeView(section, name, {
 					viewId,
@@ -830,15 +848,38 @@ export class Workbench {
 		if (!formatted) notify('info', t('editor.noFormatter'));
 	}
 
-	private openWebviewPanel(panelId: number, title: string, extId: string): void {
-		// The panel's tab wears the extension's own icon, like its extension pages do.
-		const iconPath = this.extensionHost.packageIcon(extId);
-		const icon = iconPath ? extFileDataUrl(extId, iconPath).catch(() => null) : Promise.resolve(null);
-		void icon.then((iconSrc) => this.editors.openExtPage(
+	/** Run a Python file in the integrated terminal (the `.py` tab-strip run button and the
+	 *  `python.runFile` command): the terminal shows and the interpreter line runs in its
+	 *  active shell — `python3` where that is the spelling the platform ships (macOS, Linux),
+	 *  `python` on Windows. The path rides double-quoted; a `"` in a POSIX path is escaped,
+	 *  on Windows one cannot occur in a file name. */
+	private async runPythonFile(path: string): Promise<void> {
+		this.panel.show('terminal');
+		const python = /^win/i.test(navigator.platform ?? '') ? 'python' : 'python3';
+		await this.panel.terminal.run(`${python} "${path.replace(/"/g, '\\"')}"`);
+	}
+
+	private openWebviewPanel(panelId: number, title: string, extId: string, placement?: EditorPlacement, focus?: boolean): void {
+		// The tab opens at once — the open must not wait on the package icon's read: the
+		// extension may act on the group the panel lands in the moment the create returns
+		// (claude-code locks the column its chat just opened in), and a delayed open would
+		// leave that act aiming at whatever group was focused before. The icon joins the
+		// existing tab when its data URL arrives; until then the tab wears the globe.
+		this.editors.openExtPage(
 			{ kind: 'extpage', id: this.extensionHost.webviewTabId(extId, panelId), title, extId, pageId: 'webview' },
 			(pane) => this.extensionHost.mountWebview(extId, panelId, pane),
-			iconSrc
-		));
+			null,
+			placement,
+			focus
+		);
+		const iconPath = this.extensionHost.packageIcon(extId);
+		if (iconPath) {
+			void extFileDataUrl(extId, iconPath)
+				.catch(() => null)
+				.then((iconSrc) => {
+					if (iconSrc) this.editors.setIconSrc(this.extensionHost.webviewTabId(extId, panelId), iconSrc);
+				});
+		}
 	}
 
 	/** The Extensions view's detail page (module 12): a package's facts and README in an
@@ -951,6 +992,9 @@ export class Workbench {
 		};
 		this.editors.onMergeResolved = () => this.scheduleRefresh(0);
 		this.editors.onExternalFileChange = () => this.scheduleRefresh(0);
+		// A `.py` file's tab-strip run button: the terminal opens with the file's run line
+		// (the editor area reaches no panel).
+		this.editors.onRunInTerminal = (path) => void this.runPythonFile(path);
 
 		this.explorer.onFileOpened = (path) => void this.editors.openFile(path);
 		this.explorer.onOpenInDirection = (path, direction) => this.editors.openInDirection(path, direction);
@@ -1079,6 +1123,8 @@ export class Workbench {
 				for (const path of event.payload.paths) void this.editors.openFile(path);
 			}
 		}).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
+		// macOS Finder's "Open With" handoff, once the backend knows this window has booted.
+		void listen<OpenedPaths>(OPEN_PATHS_EVENT, (event) => void this.onOpenPaths(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
 	}
 
 	/** The Context Window's debounce (M4 4.7): the symbol under the cursor settles for this
@@ -1451,6 +1497,33 @@ export class Workbench {
 	async openRecent(path: string): Promise<void> {
 		if (path.toLowerCase().endsWith('.ggs-workspace')) await this.openWorkspace(path);
 		else await this.openFolder(path);
+	}
+
+	/** The Finder "Open With" handoff ([`OPEN_PATHS_EVENT`], macOS only - a folder picked
+	 * under "打开方式 / Open With", or a file the associations claim). A folder takes over
+	 * only an empty window; one that is showing anything (a folder, a workspace, a single
+	 * file) gets a new instance carrying it - the multi-open answer to "open this folder",
+	 * the same handoff the Dock and File menus spell "New Window". A file opens the way a
+	 * drop does: an editor tab over an open folder, the whole window otherwise. */
+	private async onOpenPaths(payload: OpenedPaths): Promise<void> {
+		for (const folder of payload.folders) {
+			if (this.repoPath !== null || this.singleFile !== null) {
+				await invoke('app_new_instance', { folder }).catch((error) => notify('error', tf('workbench.newWindowFailed', String(error))));
+			} else {
+				await this.openFolder(folder);
+			}
+		}
+		// Decided after the folders: one of them may have just become this window's content,
+		// and its files belong in it rather than in a standalone window.
+		let standalone = this.repoPath === null && this.singleFile === null;
+		for (const file of payload.files) {
+			if (standalone) {
+				await this.openFileStandalone(file);
+				standalone = false;
+			} else {
+				await this.editors.openFile(file);
+			}
+		}
 	}
 
 	async pickFolder(): Promise<void> {
