@@ -186,7 +186,7 @@ class ProvidersPage {
 		this.render();
 	}
 
-	/** Fetch Models: the gateway's catalogue becomes the model fields' suggestions,
+	/** Fetch Models: the gateway's catalogue becomes the model fields' pick list,
 	 *  and a quick pick lands the main model in one click. */
 	private async runFetchModels(): Promise<void> {
 		if (this.editing === null) return;
@@ -203,6 +203,9 @@ class ProvidersPage {
 			return;
 		}
 		this.fetchedModels = models;
+		// Re-render before the pick: the fields' dropdowns must already carry the
+		// catalogue, whatever the pick below does (a dismissed pick leaves it there).
+		this.render();
 		const picked = await quickPick(
 			models.map((id) => ({ label: id, value: id })),
 			t('providers.models.pick'),
@@ -308,14 +311,14 @@ class ProvidersPage {
 			form.appendChild(this.field('providers.baseUrl', draft.baseUrl, (value) => {
 				draft.baseUrl = value;
 			}, draft.preset === 'newapi' ? 'https://your-newapi.example.com' : 'https://api.example.com/anthropic'));
-			const models = presets.find((preset) => preset.id === draft.preset)?.models ?? this.fetchedModels;
+			const models = this.candidateModels();
 			const hint = models.length > 0 ? models.join('  ·  ') : undefined;
-			form.appendChild(this.field('providers.model', draft.model, (value) => {
+			form.appendChild(this.modelField('providers.model', draft.model, (value) => {
 				draft.model = value;
-			}, hint));
-			form.appendChild(this.field('providers.smallModel', draft.smallModel, (value) => {
+			}, models, hint));
+			form.appendChild(this.modelField('providers.smallModel', draft.smallModel, (value) => {
 				draft.smallModel = value;
-			}, hint));
+			}, models, hint));
 
 			// The gateway tools: one probe (its report on the result line below) and the
 			// catalogue fetch. Both ride the form's endpoint, not the stored profile's.
@@ -357,7 +360,7 @@ class ProvidersPage {
 	}
 
 	/** One labelled text field bound to the draft. */
-	private field(labelKey: 'providers.label' | 'providers.baseUrl' | 'providers.model' | 'providers.smallModel', value: string, onInput: (value: string) => void, placeholder?: string): HTMLElement {
+	private field(labelKey: 'providers.label' | 'providers.baseUrl', value: string, onInput: (value: string) => void, placeholder?: string): HTMLElement {
 		const row = el('div', 'providers-field', [el('label', '', [t(labelKey)])]);
 		const input = el('input', 'input') as HTMLInputElement;
 		input.type = 'text';
@@ -366,6 +369,51 @@ class ProvidersPage {
 		if (placeholder !== undefined) input.placeholder = placeholder;
 		input.addEventListener('input', () => onInput(input.value));
 		row.appendChild(input);
+		return row;
+	}
+
+	/** The model ids both model fields offer as their pick list: the gateway's fetched
+	 *  catalogue first (the endpoint's live truth), then the preset's suggestions,
+	 *  deduplicated. */
+	private candidateModels(): string[] {
+		const presetModels = this.list?.presets.find((preset) => preset.id === this.editing?.preset)?.models ?? [];
+		const merged: string[] = [];
+		for (const id of [...this.fetchedModels, ...presetModels]) {
+			if (!merged.includes(id)) merged.push(id);
+		}
+		return merged;
+	}
+
+	/** One model field: free text over a pick list. The dropdown rides the candidate
+	 *  models (preset suggestions plus whatever a Fetch brought in); typing stays
+	 *  possible — the catalogues move faster than any app's list. */
+	private modelField(labelKey: 'providers.model' | 'providers.smallModel', value: string, onInput: (value: string) => void, candidates: string[], placeholder?: string): HTMLElement {
+		const row = el('div', 'providers-field', [el('label', '', [t(labelKey)])]);
+		const combo = el('div', 'providers-combo');
+		const input = el('input', 'input') as HTMLInputElement;
+		input.type = 'text';
+		input.spellcheck = false;
+		input.value = value;
+		if (placeholder !== undefined) input.placeholder = placeholder;
+		input.addEventListener('input', () => onInput(input.value));
+		combo.appendChild(input);
+		if (candidates.length > 0) {
+			combo.appendChild(actionButton('chevron-down', t('providers.model.pick'), () => {
+				void (async () => {
+					const picked = await quickPick(
+						candidates.map((id) => ({ label: id, value: id })),
+						t('providers.model.pick'),
+						t(labelKey)
+					);
+					// The form may have re-rendered (or closed) while the pick was open —
+					// a detached input keeps its value harmlessly, but the draft stays.
+					if (picked === null) return;
+					onInput(picked);
+					if (input.isConnected) input.value = picked;
+				})();
+			}));
+		}
+		row.appendChild(combo);
 		return row;
 	}
 

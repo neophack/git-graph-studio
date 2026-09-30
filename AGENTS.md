@@ -432,7 +432,12 @@ extension's own state — login, history — never touches `~/.claude`; an expli
 `CLAUDE_CONFIG_DIR` in the app's own environment wins — the sandbox probe's hermetic
 config dir rides on it), and the active
 third-party profile adds `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` /
-`ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` / `ANTHROPIC_SMALL_FAST_MODEL`, inherited by the
+`ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` / `ANTHROPIC_SMALL_FAST_MODEL` plus the tier-alias
+remap `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` (the flagship tier takes the profile's
+main model, the everyday tiers its small one — GLM: opus → glm-5.3, sonnet and haiku →
+glm-5.3-flash — so a tier pick in Claude's `/model` never sends or shows a `claude-*` id a
+provider does not serve; switching back to official clears the trio with the rest),
+inherited by the
 extension's CLI children (the same takeover `claude-code-sandbox.mjs` proves against a
 local server). The UI is the sidebar chip on the Claude view's section header
 (`aiProviders.ts` — mounted only for the ids the backend's `bridgedExtIds` names, so
@@ -445,7 +450,12 @@ restarting anything and a conversation in flight keeps its provider; the spawn
 environment carries only `CLAUDE_CONFIG_DIR` — one source of provider truth, the two
 can never disagree. Writing the settings clears this bridge's keys when the official
 profile is active (a stale endpoint would shadow the login), preserves the user's own
-env keys, and lands the file at 0600 when it carries a key. Commercial finish
+env keys, and lands the file at 0600 when it carries a key. The settings' top-level
+`model` pin rides the same takeover (2026-09-30, the `claude-fable-5-1[1m]` bug: a
+`/model` tier pick persists there and outranks the env map, so the pin is rewritten to
+the active profile's model while one is pinned, and a pin naming an id the official
+service cannot serve is cleared — the user's own `claude-*` / tier-alias pin survives
+verbatim). Commercial finish
 (2026-09-30): a **NewAPI gateway** preset beside
 DeepSeek / GLM / Kimi, a **Test Connection** probe (a 1-token `/v1/messages` round
 trip whose every HTTP answer is a diagnosis — key rejected, wrong base URL, throttled)
@@ -457,16 +467,22 @@ raw key) plus the live `~/.claude/settings.json` env — keys stripped from the 
 deduplicated by endpoint+key — and `provider_import_ccswitch` seals the named ones
 into the store and activates the one cc-switch points at. **The analysis rides into
 Claude itself** (2026-09-30): `apply_claude_mcp` — wired at the composition root beside
-every `notify_workspace` call — keeps an `mcpServers.ggs` entry in the redirected
-Claude configuration (`~/.ggs/claude/settings.json`), pointing at the app binary's own
-`ggs --mcp <folder>` headless mode for the open folder (removed when no folder is
-open, other servers and settings preserved verbatim, an unparseable file failed on
-rather than replaced). Every new Claude session therefore lists the `ggs` MCP server
-under `/mcp` — the persistent symbol index and the analysis tools, with the
-`initialize` handshake's `instructions` teaching the model the workflow (map a name's
-blast radius before editing, chase cycles while refactoring, self-check dead code and
-secrets after). The MCP Server page shows the integration's state
-(`claude_mcp_status`).
+every `notify_workspace` call — keeps a `ggs` entry in the user-scope `mcpServers` of
+the redirected global config (`~/.ggs/claude/.claude.json` — the one place Claude Code
+reads user-level MCP servers from; the first cut of this bridge wrote `settings.json`,
+whose schema has no `mcpServers` key at all, so Claude never listed the server — fixed
+the same day, the stale entry retired wherever it is found), pointing at the app
+binary's own `ggs --mcp <folder>` headless mode for the open folder (removed when no
+folder is open, Claude's own login and state keys in the file preserved verbatim, an
+unparseable file failed on rather than replaced, the write landing 0600), plus the
+`mcp__ggs` auto-allow rule in `settings.json`'s `permissions.allow` — every tool the
+server serves is a read-only, repository-confined read, and the zero-configuration
+promise is that a session never prompts for one. Every new Claude session therefore
+lists the `ggs` MCP server under `/mcp`, no setup and no approval — the persistent
+symbol index and the analysis tools, with the `initialize` handshake's `instructions`
+teaching the model the workflow (map a name's blast radius before editing, chase
+cycles while refactoring, self-check dead code and secrets after). The MCP Server
+page shows the integration's state (`claude_mcp_status`).
 
 - Frontend: `src/extensionsPanel.ts` (the Extensions view: the installed list with detail
   pages and backend status: the featured packages' rows, each its Open VSX entry merged

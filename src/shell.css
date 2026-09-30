@@ -1633,6 +1633,9 @@ body.resizing iframe { pointer-events: none; }
 .providers-field { display: flex; flex-direction: column; gap: 3px; }
 .providers-field label { font-size: 11px; color: var(--vscode-descriptionForeground); }
 .providers-form .input { width: 100%; }
+/* A model field's input + its dropdown button (the pick list rides the chevron). */
+.providers-combo { display: flex; gap: 4px; align-items: center; }
+.providers-combo .input { flex: 1; min-width: 0; width: auto; }
 .providers-form-actions { display: flex; gap: 8px; }
 .providers-test-result { min-height: 16px; font-size: 11px; }
 .providers-test-ok { color: var(--vscode-charts-green, var(--vscode-descriptionForeground)); }

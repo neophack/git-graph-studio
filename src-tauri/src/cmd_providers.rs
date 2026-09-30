@@ -11,16 +11,21 @@
 //! - `CLAUDE_CONFIG_DIR` always points at `~/.ggs/claude`, so the extension's own state
 //!   (login, session history, `settings.json`) never touches `~/.claude`;
 //! - the active third-party profile adds `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` /
-//!   `ANTHROPIC_API_KEY` (the decrypted key) and `ANTHROPIC_MODEL` /
-//!   `ANTHROPIC_SMALL_FAST_MODEL` — the same takeover the claude-code sandbox probe
-//!   proves end to end against a local stand-in server.
+//!   `ANTHROPIC_API_KEY` (the decrypted key), `ANTHROPIC_MODEL` /
+//!   `ANTHROPIC_SMALL_FAST_MODEL` and the tier-alias remap
+//!   `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` (the flagship tier takes the main
+//!   model, the everyday tiers the small one — so a tier pick never sends a `claude-*`
+//!   id to a provider that serves none) — the same takeover the claude-code sandbox
+//!   probe proves end to end against a local stand-in server.
 //!
 //! Switching provider (or editing the active profile) never restarts the bridged
 //! backend: the switch's whole effect is a rewrite of the redirected Claude settings'
 //! `env` map, which Claude Code applies at every session start — a new chat runs on the
-//! new provider, a conversation in flight keeps its own. [`provider_change`] is the gate
-//! every store-writing command runs to decide that rewrite (and the push the windows'
-//! switcher chips re-read on).
+//! new provider, a conversation in flight keeps its own — and of the settings' top-level
+//! `model` pin, which would otherwise outrank that env (a `/model` tier pick persists
+//! there, and its `claude-*` id would be shown and sent on an endpoint that serves
+//! none). [`provider_change`] is the gate every store-writing command runs to decide
+//! that rewrite (and the push the windows' switcher chips re-read on).
 //!
 //! Coupling is one-directional: this module may stop and start the bridged backends,
 //! but the spawn path never names this store — [`backend_env`] is registered onto
@@ -121,7 +126,9 @@ pub struct ProviderPreset {
     pub official: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<&'static str>,
-    /// Suggested model ids; the field stays free text (the lists move faster than apps).
+    /// Suggested model ids — the form's model fields offer them as a pick list (the
+    /// gateway's live `/v1/models` catalogue joins them); the text stays free, the
+    /// lists move faster than apps.
     #[serde(default)]
     pub models: Vec<&'static str>,
 }
@@ -141,21 +148,42 @@ pub fn presets() -> Vec<ProviderPreset> {
             label: "DeepSeek".to_owned(),
             official: false,
             base_url: Some("https://api.deepseek.com/anthropic"),
-            models: vec!["deepseek-chat", "deepseek-reasoner"],
+            // 2026-09: the lineup is V4 — deepseek-flash (the default, V4.1, vision)
+            // and deepseek-v4-pro (the heavyweight, no vision); the old
+            // deepseek-chat / deepseek-reasoner aliases still resolve (both to
+            // V4 Flash), so configs saved on them keep working.
+            models: vec![
+                "deepseek-v4-pro",
+                "deepseek-flash",
+                "deepseek-chat",
+                "deepseek-reasoner",
+            ],
         },
         ProviderPreset {
             id: "glm".to_owned(),
             label: "Zhipu GLM".to_owned(),
             official: false,
             base_url: Some("https://open.bigmodel.cn/api/anthropic"),
-            models: vec!["glm-4.6", "glm-4.5", "glm-4.5-air"],
+            // 2026-09: every Coding Plan tier serves GLM-5.3 and GLM-5.3-Flash; the
+            // older ids still resolve (glm-5.2/-5.1 forward to 5.3, glm-5-turbo and
+            // glm-4.7 to 5.3-Flash), so configs saved on them keep working.
+            models: vec!["glm-5.3", "glm-5.3-flash", "glm-4.7", "glm-4.6"],
         },
         ProviderPreset {
             id: "kimi".to_owned(),
             label: "Moonshot Kimi".to_owned(),
             official: false,
             base_url: Some("https://api.moonshot.cn/anthropic"),
-            models: vec!["kimi-k2", "kimi-k2-turbo"],
+            // 2026-09: kimi-k3 is the flagship (1M context, vision) and
+            // kimi-k2.7-code-highspeed the fast coding tier; kimi-k2.5 (and every
+            // moonshot-v1 variant) was retired 2026-08-31 — kimi-k2 still resolves,
+            // so configs saved on it keep working.
+            models: vec![
+                "kimi-k3",
+                "kimi-k2.7-code-highspeed",
+                "kimi-k2.6",
+                "kimi-k2",
+            ],
         },
         ProviderPreset {
             id: "newapi".to_owned(),
@@ -464,6 +492,26 @@ pub fn provider_env_vars(active: &ProviderProfile, home: &Path) -> Vec<(String, 
     }
     if let Some(model) = active.model.as_deref().filter(|m| !m.is_empty()) {
         env.push(("ANTHROPIC_MODEL".to_owned(), model.to_owned()));
+        // Claude Code's tier aliases resolve through these: without the remap a tier
+        // pick in /model sends a `claude-*` id to the provider's endpoint and the
+        // model display names Claude models the provider does not serve. The flagship
+        // tier takes the profile's main model, the everyday tiers its small model
+        // (GLM: opus → glm-5.3, sonnet and haiku → glm-5.3-flash) — falling back to
+        // the main model when the profile configures no small one.
+        let everyday = active
+            .small_model
+            .as_deref()
+            .filter(|m| !m.is_empty())
+            .unwrap_or(model);
+        env.push(("ANTHROPIC_DEFAULT_OPUS_MODEL".to_owned(), model.to_owned()));
+        env.push((
+            "ANTHROPIC_DEFAULT_SONNET_MODEL".to_owned(),
+            everyday.to_owned(),
+        ));
+        env.push((
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_owned(),
+            everyday.to_owned(),
+        ));
     }
     if let Some(model) = active.small_model.as_deref().filter(|m| !m.is_empty()) {
         env.push(("ANTHROPIC_SMALL_FAST_MODEL".to_owned(), model.to_owned()));
@@ -971,6 +1019,9 @@ pub const PROVIDER_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_MODEL",
     "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
 ];
 
 /// Claude's redirected settings with the active provider's environment applied — the
@@ -979,8 +1030,14 @@ pub const PROVIDER_ENV_KEYS: &[&str] = &[
 /// chat run on the new provider without restarting anything; a running conversation is
 /// never touched. The user's own env keys and every other setting are preserved
 /// verbatim; switching to the official profile removes exactly this bridge's keys (a
-/// stale endpoint here would shadow the official login). An unchanged file answers
-/// None; an unparseable one fails rather than being replaced.
+/// stale endpoint here would shadow the official login). The top-level `model` pin
+/// follows the active provider under the same takeover: Claude Code's own `/model`
+/// pick persists there and outranks the env map for what a session shows and sends,
+/// so while the active profile pins a model the pin carries it (a `claude-*` tier id
+/// left there would be displayed and sent on an endpoint that serves none), and a pin
+/// naming an id the official service cannot serve is cleared — a `claude-*` id or a
+/// bare tier alias (`sonnet[1m]`, …) is the user's own and survives verbatim. An
+/// unchanged file answers None; an unparseable one fails rather than being replaced.
 pub fn claude_provider_settings(
     existing: Option<&str>,
     env: &[(String, String)],
@@ -1013,6 +1070,28 @@ pub fn claude_provider_settings(
     }
     if env_map.is_empty() {
         object.remove("env");
+    }
+    // The `/model` pin takeover the doc comment promises. `split('[')` first: the
+    // tier picker pins carry a context-window suffix (`sonnet[1m]`), the alias it
+    // names is what Claude's own service actually serves.
+    let pinned_model = env
+        .iter()
+        .find(|(key, _)| key == "ANTHROPIC_MODEL")
+        .map(|(_, value)| value.clone());
+    match pinned_model {
+        Some(model) => {
+            object.insert("model".to_owned(), serde_json::Value::String(model));
+        }
+        None => {
+            if let Some(pin) = object.get("model").and_then(|value| value.as_str()) {
+                let base = pin.split('[').next().unwrap_or(pin);
+                let claude_owned = pin.starts_with("claude")
+                    || matches!(base, "default" | "opus" | "sonnet" | "haiku" | "opusplan");
+                if !claude_owned {
+                    object.remove("model");
+                }
+            }
+        }
     }
     let text = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("serialize the Claude settings: {e}"))?
@@ -1334,30 +1413,36 @@ pub fn provider_import_ccswitch(
 /// The MCP server name Claude's `/mcp` lists the analysis bridge under.
 pub const CLAUDE_MCP_SERVER_NAME: &str = "ggs";
 
-/// Claude's redirected settings with (or without) the GGS analysis server, as JSON —
-/// the composition core. `existing` is the file's current text (None when absent);
-/// the answer is the new text to write, or None when the file already says the right
-/// thing (a no-op apply must not touch Claude's own mtime-ordered state). A user
-/// entry this app did not write is preserved verbatim; an unparseable one fails
-/// rather than being replaced.
-pub fn claude_mcp_settings(
+/// Claude's redirected global config (`~/.ggs/claude/.claude.json`) with (or without)
+/// the GGS analysis server under the user-scope `mcpServers` — the composition core.
+/// This file is the one place Claude Code reads user-level MCP servers from
+/// (`claude mcp add --scope user` writes here; its settings schema has no
+/// `mcpServers` key, which is why the first cut of this bridge — writing
+/// `settings.json` — never reached `/mcp`). The same file carries Claude's own login
+/// and state keys, so the merge preserves every entry this app did not write and an
+/// unparseable file fails rather than being replaced. `existing` is the file's
+/// current text (None when absent); the answer is the new text to write, or None
+/// when the file already says the right thing (a no-op apply must not touch Claude's
+/// own mtime-ordered state).
+pub fn claude_mcp_global_config(
     existing: Option<&str>,
     folders: &[String],
     command: &str,
 ) -> Result<Option<String>, String> {
-    let mut settings: serde_json::Value = match existing {
+    let mut config: serde_json::Value = match existing {
         Some(text) if text.trim().is_empty() => serde_json::json!({}),
         Some(text) => serde_json::from_str(text).map_err(|e| {
-            format!("the existing Claude settings are not valid JSON — not overwriting them: {e}")
+            format!("the existing Claude global config is not valid JSON — not overwriting it: {e}")
         })?,
         None => serde_json::json!({}),
     };
-    if !settings.is_object() {
+    if !config.is_object() {
         return Err(
-            "the existing Claude settings are not a JSON object — not overwriting them".to_owned(),
+            "the existing Claude global config is not a JSON object — not overwriting it"
+                .to_owned(),
         );
     }
-    let servers = settings
+    let servers = config
         .as_object_mut()
         .expect("checked above")
         .entry("mcpServers")
@@ -1367,10 +1452,14 @@ pub fn claude_mcp_settings(
             "the existing mcpServers entry is not a JSON object — not overwriting it".to_owned(),
         );
     }
+    // The entry `claude mcp add --scope user` would write — an explicit stdio type,
+    // the shape Claude Code's own reader is documented against.
     let wanted = folders.first().map(|folder| {
         serde_json::json!({
+            "type": "stdio",
             "command": command,
             "args": ["--mcp", folder],
+            "env": {},
         })
     });
     let map = servers.as_object_mut().expect("checked above");
@@ -1387,7 +1476,7 @@ pub fn claude_mcp_settings(
             }
         }
     }
-    let mut out = settings;
+    let mut out = config;
     {
         let map = out
             .get_mut("mcpServers")
@@ -1401,17 +1490,125 @@ pub fn claude_mcp_settings(
     }
     Ok(Some(
         serde_json::to_string_pretty(&out)
+            .map_err(|e| format!("serialize the Claude global config: {e}"))?
+            + "\n",
+    ))
+}
+
+/// Claude's redirected settings with the GGS server's settings-side state: the
+/// `mcp__ggs` auto-allow rule — every tool the server serves is a read-only,
+/// repository-confined analysis read, and the zero-configuration promise is that a
+/// session never has to prompt for one — plus the retirement of the `mcpServers.ggs`
+/// entry an earlier cut of this bridge wrote here (the settings schema has no
+/// `mcpServers` key; Claude Code never read it). `enabled` follows the open folder.
+/// Everything else is preserved verbatim; the answer is None when the file already
+/// agrees, and an unparseable or wrongly-shaped file fails rather than being
+/// replaced.
+pub fn claude_mcp_settings(
+    existing: Option<&str>,
+    enabled: bool,
+) -> Result<Option<String>, String> {
+    let mut settings: serde_json::Value = match existing {
+        Some(text) if text.trim().is_empty() => serde_json::json!({}),
+        Some(text) => serde_json::from_str(text).map_err(|e| {
+            format!("the existing Claude settings are not valid JSON — not overwriting them: {e}")
+        })?,
+        None => serde_json::json!({}),
+    };
+    if !settings.is_object() {
+        return Err(
+            "the existing Claude settings are not a JSON object — not overwriting them".to_owned(),
+        );
+    }
+    let rule = format!("mcp__{CLAUDE_MCP_SERVER_NAME}");
+    let mut changed = false;
+
+    // The retired registration: our entry goes, whatever a hand put beside it stays,
+    // and an emptied map goes with it.
+    if let Some(map) = settings
+        .get_mut("mcpServers")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        changed |= map.remove(CLAUDE_MCP_SERVER_NAME).is_some();
+        if map.is_empty() {
+            settings
+                .as_object_mut()
+                .expect("checked above")
+                .remove("mcpServers");
+        }
+    }
+
+    let permissions = settings
+        .as_object_mut()
+        .expect("checked above")
+        .entry("permissions")
+        .or_insert_with(|| serde_json::json!({}));
+    if !permissions.is_object() {
+        return Err(
+            "the existing permissions entry is not a JSON object — not overwriting it".to_owned(),
+        );
+    }
+    let allow = permissions
+        .as_object_mut()
+        .expect("checked above")
+        .entry("allow")
+        .or_insert_with(|| serde_json::json!([]));
+    if !allow.is_array() {
+        return Err(
+            "the existing permissions.allow entry is not an array — not overwriting it".to_owned(),
+        );
+    }
+    let list = allow.as_array_mut().expect("checked above");
+    let present = list.iter().any(|item| item.as_str() == Some(rule.as_str()));
+    match (enabled, present) {
+        (true, false) => {
+            list.push(serde_json::json!(rule));
+            changed = true;
+        }
+        (false, true) => {
+            list.retain(|item| item.as_str() != Some(rule.as_str()));
+            changed = true;
+        }
+        _ => {}
+    }
+    if !changed {
+        return Ok(None);
+    }
+    // An unregister leaves no scaffolding behind in Claude's own file.
+    if let Some(map) = settings
+        .get_mut("permissions")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        if map
+            .get("allow")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty)
+        {
+            map.remove("allow");
+        }
+        if map.is_empty() {
+            settings
+                .as_object_mut()
+                .expect("checked above")
+                .remove("permissions");
+        }
+    }
+    Ok(Some(
+        serde_json::to_string_pretty(&settings)
             .map_err(|e| format!("serialize the Claude settings: {e}"))?
             + "\n",
     ))
 }
 
-/// Keep Claude's redirected settings current with everything this bridge owns: the
-/// MCP server registration (the analysis server for the open folder) and the active
+/// Keep Claude's redirected configuration current with everything this bridge owns:
+/// the MCP server registration (the analysis server for the open folder, in the
+/// global config's user-scope `mcpServers` — the one place Claude Code reads
+/// user-level servers from) with its settings-side auto-allow rule, and the active
 /// provider's environment. Written at boot and on every folder open/close beside
 /// `notify_workspace` (the composition root's wiring), so every new Claude session
-/// lists `ggs` under `/mcp` and runs on the chosen provider. Nothing here touches
-/// Claude's login state — `settings.json` only, and only our own entries.
+/// lists `ggs` under `/mcp` and runs on the chosen provider — no setup, no restart.
+/// The global config also carries Claude's own login state: the merge moves only
+/// this app's own entries and preserves every other key verbatim.
 pub fn apply_claude_integration(folders: &[String]) {
     let result = apply_claude_integration_inner(folders, std::env::current_exe().ok().as_deref());
     if let Err(error) = result {
@@ -1422,19 +1619,42 @@ pub fn apply_claude_integration(folders: &[String]) {
     }
 }
 
-/// [`apply_claude_mcp`]'s injectable core (the executable path is a test seam).
+/// [`apply_claude_mcp`]'s injectable core (the executable path is a test seam). Two
+/// files: the registration into the redirected global config (the user-scope
+/// `mcpServers` — the only place Claude Code reads user-level servers from, and a
+/// file it rewrites itself while carrying its login state, so the write preserves
+/// every other key and lands 0600 like Claude keeps it), then the settings pass
+/// (the `mcp__ggs` auto-allow rule, plus the retirement of the entry the first cut
+/// of this bridge mistakenly wrote there).
 fn apply_claude_mcp_inner(folders: &[String], command: Option<&Path>) -> Result<(), String> {
     let home = ggs_home()?;
     let dir = home.join("claude");
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    let path = dir.join("settings.json");
-    let existing = std::fs::read_to_string(&path).ok();
     let command = command
         .map(Path::to_string_lossy)
         .map(|c| c.into_owned())
         .ok_or_else(|| "the app's own executable path is unknown".to_owned())?;
-    if let Some(text) = claude_mcp_settings(existing.as_deref(), folders, &command)? {
-        std::fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))?;
+
+    let global_path = dir.join(".claude.json");
+    let existing = std::fs::read_to_string(&global_path).ok();
+    if let Some(text) = claude_mcp_global_config(existing.as_deref(), folders, &command)? {
+        std::fs::write(&global_path, &text)
+            .map_err(|e| format!("write {}: {e}", global_path.display()))?;
+        // Claude keeps its account and login state in this file; an entry this app
+        // creates gets the same at-rest posture Claude's own writer leaves.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&global_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("restrict {}: {e}", global_path.display()))?;
+        }
+    }
+
+    let settings_path = dir.join("settings.json");
+    let existing = std::fs::read_to_string(&settings_path).ok();
+    if let Some(text) = claude_mcp_settings(existing.as_deref(), !folders.is_empty())? {
+        std::fs::write(&settings_path, &text)
+            .map_err(|e| format!("write {}: {e}", settings_path.display()))?;
     }
     Ok(())
 }
@@ -1462,7 +1682,9 @@ pub struct ClaudeMcpStatus {
 #[tauri::command]
 pub fn claude_mcp_status() -> Result<ClaudeMcpStatus, String> {
     let home = ggs_home()?;
-    let path = home.join("claude").join("settings.json");
+    // What Claude Code actually loads: the registration lives in the redirected
+    // global config's user-scope `mcpServers`.
+    let path = home.join("claude").join(".claude.json");
     let server = std::fs::read_to_string(&path)
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
@@ -1684,7 +1906,10 @@ mod tests {
         assert_eq!(map["ANTHROPIC_API_KEY"], "sk-live-key");
         assert_eq!(map["ANTHROPIC_MODEL"], "deepseek-chat");
         assert_eq!(map["ANTHROPIC_SMALL_FAST_MODEL"], "deepseek-chat");
-        assert_eq!(map.len(), 5, "{env:?}");
+        assert_eq!(map["ANTHROPIC_DEFAULT_OPUS_MODEL"], "deepseek-chat");
+        assert_eq!(map["ANTHROPIC_DEFAULT_SONNET_MODEL"], "deepseek-chat");
+        assert_eq!(map["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "deepseek-chat");
+        assert_eq!(map.len(), 8, "{env:?}");
         // The official profile carries none of them — its keys must leave the settings
         // so the user's own login is never shadowed.
         assert!(provider_env_vars(&official_profile(), &home).is_empty());
@@ -1692,6 +1917,55 @@ mod tests {
         // provider truth: the settings file).
         let spawn = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
         assert_eq!(env_map(&spawn).len(), 1, "{spawn:?}");
+    }
+
+    /// The tier-alias remap: Claude Code's /model picker resolves opus / sonnet /
+    /// haiku through `ANTHROPIC_DEFAULT_*_MODEL`, and without the remap a tier pick
+    /// sends a `claude-*` id to the provider's endpoint — the display then names
+    /// Claude models the provider does not serve. The flagship tier takes the main
+    /// model, the everyday tiers the small one (GLM: opus → glm-5.3, sonnet and
+    /// haiku → glm-5.3-flash); a profile with no small model falls the everyday
+    /// tiers back to the main one.
+    #[test]
+    fn the_tier_aliases_remap_to_the_providers_own_models() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        let store = seeded_store();
+        let glm = store
+            .profiles
+            .iter()
+            .find(|p| p.id == "glm")
+            .unwrap()
+            .clone();
+        let glm_env = provider_env_vars(&glm, &home);
+        let map = env_map(&glm_env);
+        assert_eq!(map["ANTHROPIC_DEFAULT_OPUS_MODEL"], "glm-5.3");
+        assert_eq!(map["ANTHROPIC_DEFAULT_SONNET_MODEL"], "glm-5.3-flash");
+        assert_eq!(map["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "glm-5.3-flash");
+        assert!(
+            !map.values().any(|value| value.starts_with("claude-")),
+            "no tier resolves to a Claude model id: {map:?}"
+        );
+
+        // No small model configured: every tier falls back to the main one.
+        let mut no_small = glm.clone();
+        no_small.small_model = None;
+        let no_small_env = provider_env_vars(&no_small, &home);
+        let map = env_map(&no_small_env);
+        assert_eq!(map["ANTHROPIC_DEFAULT_SONNET_MODEL"], "glm-5.3");
+        assert_eq!(map["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "glm-5.3");
+
+        // No model configured at all: nothing to remap to, so no tier keys.
+        let mut bare = glm.clone();
+        bare.model = None;
+        bare.small_model = None;
+        let bare_env = provider_env_vars(&bare, &home);
+        assert!(
+            !bare_env
+                .iter()
+                .any(|(key, _)| key.starts_with("ANTHROPIC_DEFAULT")),
+            "{bare_env:?}"
+        );
     }
 
     /// A key sealed under another install's master key is skipped, not fatal: the
@@ -1719,7 +1993,9 @@ mod tests {
     /// The switch's write path: a third-party profile lands its env in Claude's
     /// settings, the official one removes exactly this bridge's keys (a stale endpoint
     /// would shadow the login), the user's own env keys survive, an unchanged file is
-    /// a no-op, and an unparseable one is failed on.
+    /// a no-op, and an unparseable one is failed on. The top-level `model` pin rides
+    /// the same takeover: the active profile's model while third-party, cleared back
+    /// to nothing when official — the user's own `claude-*` / tier-alias pin survives.
     #[test]
     fn claude_provider_settings_merges_clears_and_preserves() {
         let third_party = vec![
@@ -1731,15 +2007,30 @@ mod tests {
             ("ANTHROPIC_MODEL".to_owned(), "deepseek-chat".to_owned()),
         ];
         let written = claude_provider_settings(
-            Some(r#"{"env": {"MY_VAR": "keep-me", "ANTHROPIC_BASE_URL": "https://stale"}}"#),
+            Some(r#"{"model": "claude-fable-5-1[1m]", "env": {"MY_VAR": "keep-me", "ANTHROPIC_BASE_URL": "https://stale", "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-5"}}"#),
             &third_party,
         )
         .unwrap()
         .unwrap();
         let json: serde_json::Value = serde_json::from_str(&written).unwrap();
+        // The `/model` pin a tier pick left behind is rewritten onto the active
+        // provider's model — it outranks the env for what the chat shows and sends,
+        // so `claude-fable-5-1[1m]` would have been displayed and sent on DeepSeek.
+        assert_eq!(
+            json.pointer("/model").and_then(|v| v.as_str()),
+            Some("deepseek-chat"),
+            "{json}"
+        );
         assert_eq!(
             json.pointer("/env/MY_VAR").and_then(|v| v.as_str()),
             Some("keep-me")
+        );
+        // A tier key another tool left behind is replaced wholesale with this bridge's
+        // set (the hand-made env here carries none), never merged beside it.
+        assert!(
+            json.pointer("/env/ANTHROPIC_DEFAULT_SONNET_MODEL")
+                .is_none(),
+            "{json}"
         );
         assert_eq!(
             json.pointer("/env/ANTHROPIC_BASE_URL")
@@ -1767,6 +2058,35 @@ mod tests {
             Some("keep-me")
         );
         assert!(json.pointer("/env/ANTHROPIC_BASE_URL").is_none());
+        // Back on the official service the pin this bridge wrote is cleared with the
+        // env keys — a stale `deepseek-chat` would shadow the login the same way.
+        assert!(json.pointer("/model").is_none(), "{json}");
+
+        // The user's own pins are never touched on official: a `claude-*` id from the
+        // tier list, and a bare tier alias with its context suffix. (The answer can
+        // differ from a hand-written input's whitespace alone — compare the JSON.)
+        for pin in ["claude-fable-5-1[1m]", "sonnet[1m]"] {
+            let existing = format!(r#"{{"model": "{pin}"}}"#);
+            let answer = claude_provider_settings(Some(&existing), &[]).unwrap();
+            let text = answer.as_deref().unwrap_or(&existing);
+            let json: serde_json::Value = serde_json::from_str(text).unwrap();
+            assert_eq!(json.pointer("/model").and_then(|v| v.as_str()), Some(pin));
+        }
+        // A gateway profile that pins no model leaves the pin alone too — the id the
+        // user pinned is routing metadata for the gateway itself.
+        let gateway = vec![(
+            "ANTHROPIC_BASE_URL".to_owned(),
+            "https://gw.example.com".to_owned(),
+        )];
+        let routed = claude_provider_settings(Some(r#"{"model": "claude-sonnet-4-5"}"#), &gateway)
+            .unwrap()
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&routed).unwrap();
+        assert_eq!(
+            json.pointer("/model").and_then(|v| v.as_str()),
+            Some("claude-sonnet-4-5"),
+            "{json}"
+        );
 
         assert!(claude_provider_settings(Some("{not json"), &third_party).is_err());
     }
@@ -1861,6 +2181,16 @@ mod tests {
         let mut store = third_party_store();
         store.active_id = Some("official".to_owned());
         store.profiles[1].api_key_enc = Some(seal(&home, "sk-live-key").unwrap());
+        // A `/model` pin from an official-era session: Claude Code persists the tier
+        // pick into the settings' top level, where it outranks the env this switch is
+        // about to write — the takeover must rewrite it onto the provider's model.
+        let claude_dir = home.join("claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            r#"{"model": "claude-fable-5-1[1m]"}"#,
+        )
+        .unwrap();
         let before = store.clone();
         set_active(&mut store, "deepseek").unwrap();
         write_store(&home, &store).unwrap();
@@ -1871,6 +2201,11 @@ mod tests {
             &std::fs::read_to_string(home.join("claude").join("settings.json")).unwrap(),
         )
         .unwrap();
+        assert_eq!(
+            json.pointer("/model").and_then(|v| v.as_str()),
+            Some("deepseek-chat"),
+            "{json}"
+        );
         assert_eq!(
             json.pointer("/env/ANTHROPIC_BASE_URL")
                 .and_then(|v| v.as_str()),
@@ -1883,6 +2218,16 @@ mod tests {
         );
         assert_eq!(
             json.pointer("/env/ANTHROPIC_MODEL")
+                .and_then(|v| v.as_str()),
+            Some("deepseek-chat")
+        );
+        assert_eq!(
+            json.pointer("/env/ANTHROPIC_DEFAULT_OPUS_MODEL")
+                .and_then(|v| v.as_str()),
+            Some("deepseek-chat")
+        );
+        assert_eq!(
+            json.pointer("/env/ANTHROPIC_DEFAULT_HAIKU_MODEL")
                 .and_then(|v| v.as_str()),
             Some("deepseek-chat")
         );
@@ -2048,6 +2393,35 @@ mod tests {
         assert!(store.profiles.iter().any(|p| p.id == "deepseek"));
         assert!(store.profiles.iter().any(|p| p.id == "glm"));
         assert!(store.profiles.iter().all(|p| p.preset != "custom"));
+        // The seeded GLM profile rides the preset's current model head — the pick list
+        // a fresh install offers is the provider's present lineup, not history.
+        let glm = store
+            .profiles
+            .iter()
+            .find(|p| p.id == "glm")
+            .expect("the glm profile is seeded");
+        assert_eq!(glm.model.as_deref(), Some("glm-5.3"));
+        assert_eq!(glm.small_model.as_deref(), Some("glm-5.3-flash"));
+        // The other seeded third-party profiles ride their preset's current head too
+        // (the 2026-09 lineups) — the tier remap then points every provider's flagship
+        // tier at its flagship model and the everyday tiers at its fast one.
+        let deepseek = store
+            .profiles
+            .iter()
+            .find(|p| p.id == "deepseek")
+            .expect("the deepseek profile is seeded");
+        assert_eq!(deepseek.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(deepseek.small_model.as_deref(), Some("deepseek-flash"));
+        let kimi = store
+            .profiles
+            .iter()
+            .find(|p| p.id == "kimi")
+            .expect("the kimi profile is seeded");
+        assert_eq!(kimi.model.as_deref(), Some("kimi-k3"));
+        assert_eq!(
+            kimi.small_model.as_deref(),
+            Some("kimi-k2.7-code-highspeed")
+        );
         // The frontend never learns a ciphertext: the list answer masks the key.
         let answer = list_answer(&store);
         assert!(answer.profiles.iter().all(|p| !p.has_key));
@@ -2357,27 +2731,38 @@ mod tests {
 
     const COMMAND: &str = "/opt/ggs/ggs";
 
-    /// The registration composes into whatever else Claude's settings carry: the
-    /// user's own env map and other MCP servers survive untouched.
+    /// The registration composes into whatever else Claude's global config carries:
+    /// its own state keys (login, account) and other MCP servers survive untouched.
     #[test]
-    fn the_registration_composes_into_existing_claude_settings() {
+    fn the_registration_composes_into_the_claude_global_config() {
         let existing = r#"{
-  "env": { "ANTHROPIC_BASE_URL": "https://gw.example.com" },
+  "userID": "u-123",
+  "oauthAccount": { "emailAddress": "dev@example.com" },
   "mcpServers": { "other": { "command": "other-srv" } }
 }"#;
-        let text = claude_mcp_settings(Some(existing), &["/repo".to_owned()], COMMAND)
+        let text = claude_mcp_global_config(Some(existing), &["/repo".to_owned()], COMMAND)
             .unwrap()
             .unwrap();
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(
-            json.pointer("/env/ANTHROPIC_BASE_URL")
+            json.pointer("/userID").and_then(|v| v.as_str()),
+            Some("u-123")
+        );
+        assert_eq!(
+            json.pointer("/oauthAccount/emailAddress")
                 .and_then(|v| v.as_str()),
-            Some("https://gw.example.com")
+            Some("dev@example.com")
         );
         assert_eq!(
             json.pointer("/mcpServers/other/command")
                 .and_then(|v| v.as_str()),
             Some("other-srv")
+        );
+        // The entry `claude mcp add --scope user` would write — stdio typed.
+        assert_eq!(
+            json.pointer("/mcpServers/ggs/type")
+                .and_then(|v| v.as_str()),
+            Some("stdio")
         );
         assert_eq!(
             json.pointer("/mcpServers/ggs/command")
@@ -2394,6 +2779,11 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("/repo")
         );
+        assert_eq!(
+            json.pointer("/mcpServers/ggs/env")
+                .and_then(|v| v.as_object()),
+            Some(&serde_json::Map::new())
+        );
     }
 
     /// Applying the same registration twice is a no-op (None — Claude's own file is
@@ -2401,15 +2791,15 @@ mod tests {
     /// still leaving the rest of the file alone.
     #[test]
     fn re_applying_the_same_registration_is_a_no_op_and_a_change_replaces_it() {
-        let first = claude_mcp_settings(None, &["/repo".to_owned()], COMMAND)
+        let first = claude_mcp_global_config(None, &["/repo".to_owned()], COMMAND)
             .unwrap()
             .unwrap();
         assert_eq!(
-            claude_mcp_settings(Some(&first), &["/repo".to_owned()], COMMAND).unwrap(),
+            claude_mcp_global_config(Some(&first), &["/repo".to_owned()], COMMAND).unwrap(),
             None
         );
         // A different folder, a different binary: rewritten.
-        let second = claude_mcp_settings(Some(&first), &["/other".to_owned()], COMMAND)
+        let second = claude_mcp_global_config(Some(&first), &["/other".to_owned()], COMMAND)
             .unwrap()
             .unwrap();
         assert_ne!(first, second);
@@ -2419,9 +2809,10 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("/other")
         );
-        let third = claude_mcp_settings(Some(&second), &["/other".to_owned()], "/new/place/ggs")
-            .unwrap()
-            .unwrap();
+        let third =
+            claude_mcp_global_config(Some(&second), &["/other".to_owned()], "/new/place/ggs")
+                .unwrap()
+                .unwrap();
         let json: serde_json::Value = serde_json::from_str(&third).unwrap();
         assert_eq!(
             json.pointer("/mcpServers/ggs/command")
@@ -2437,14 +2828,14 @@ mod tests {
     #[test]
     fn closing_the_folder_unregisters_the_server_and_cleans_up() {
         // Ours plus another server: ours goes, theirs stays.
-        let ours_and_other = claude_mcp_settings(
+        let ours_and_other = claude_mcp_global_config(
             Some(r#"{"mcpServers":{"other":{"command":"x"}}}"#),
             &["/repo".to_owned()],
             COMMAND,
         )
         .unwrap()
         .unwrap();
-        let cleaned = claude_mcp_settings(Some(&ours_and_other), &[], COMMAND)
+        let cleaned = claude_mcp_global_config(Some(&ours_and_other), &[], COMMAND)
             .unwrap()
             .unwrap();
         let json: serde_json::Value = serde_json::from_str(&cleaned).unwrap();
@@ -2452,30 +2843,104 @@ mod tests {
         assert!(json.pointer("/mcpServers/other").is_some());
 
         // Ours was the only server: the empty mcpServers map goes with it.
-        let alone = claude_mcp_settings(None, &["/repo".to_owned()], COMMAND)
+        let alone = claude_mcp_global_config(None, &["/repo".to_owned()], COMMAND)
             .unwrap()
             .unwrap();
-        let cleaned = claude_mcp_settings(Some(&alone), &[], COMMAND)
+        let cleaned = claude_mcp_global_config(Some(&alone), &[], COMMAND)
             .unwrap()
             .unwrap();
         let json: serde_json::Value = serde_json::from_str(&cleaned).unwrap();
         assert!(json.get("mcpServers").is_none(), "{json}");
 
         // Nothing of ours in the file at all: still a no-op.
-        assert_eq!(claude_mcp_settings(Some("{}"), &[], COMMAND).unwrap(), None);
+        assert_eq!(
+            claude_mcp_global_config(Some("{}"), &[], COMMAND).unwrap(),
+            None
+        );
     }
 
-    /// A settings file we cannot parse is failed on, never replaced — it is Claude's
-    /// own configuration, and a registration is not worth destroying state over.
+    /// A configuration file we cannot parse is failed on, never replaced — it is
+    /// Claude's own configuration, and a registration is not worth destroying state
+    /// over. Both halves of the apply carry the posture.
     #[test]
-    fn an_unparseable_settings_file_is_failed_on_not_replaced() {
-        assert!(claude_mcp_settings(Some("{not json"), &["/repo".to_owned()], COMMAND).is_err());
-        assert!(claude_mcp_settings(Some("[1,2]"), &["/repo".to_owned()], COMMAND).is_err());
+    fn an_unparseable_configuration_file_is_failed_on_not_replaced() {
+        assert!(
+            claude_mcp_global_config(Some("{not json"), &["/repo".to_owned()], COMMAND).is_err()
+        );
+        assert!(claude_mcp_global_config(Some("[1,2]"), &["/repo".to_owned()], COMMAND).is_err());
+        assert!(claude_mcp_settings(Some("{not json"), true).is_err());
+        assert!(claude_mcp_settings(Some("[1,2]"), true).is_err());
+        assert!(claude_mcp_settings(Some(r#"{"permissions":"nope"}"#), true).is_err());
+        assert!(claude_mcp_settings(Some(r#"{"permissions":{"allow":"nope"}}"#), true).is_err());
     }
 
-    /// The IO path end to end against the pinned home: boot writes the registration,
-    /// an open-folder change updates it, close removes it, and the status command
-    /// reads back what Claude will see.
+    /// The settings-side pass: an open folder adds the `mcp__ggs` auto-allow rule
+    /// beside the user's own rules (a session never prompts for an analysis read),
+    /// closing the folder takes it back out, and the `mcpServers.ggs` entry the first
+    /// cut of this bridge mistakenly wrote into settings.json — a key whose schema
+    /// Claude Code never read — is retired wherever it is found.
+    #[test]
+    fn the_settings_pass_allows_the_tools_and_retires_the_old_entry() {
+        let stale = r#"{
+  "env": { "ANTHROPIC_BASE_URL": "https://gw.example.com" },
+  "mcpServers": { "ggs": { "command": "x" }, "other": { "command": "y" } },
+  "permissions": { "allow": ["Bash(ls:*)"], "deny": ["Read(.env)"] }
+}"#;
+        let text = claude_mcp_settings(Some(stale), true).unwrap().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            json.pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(|v| v.as_str()),
+            Some("https://gw.example.com")
+        );
+        assert!(json.pointer("/mcpServers/ggs").is_none(), "{json}");
+        assert!(json.pointer("/mcpServers/other").is_some());
+        assert_eq!(
+            json.pointer("/permissions/deny/0").and_then(|v| v.as_str()),
+            Some("Read(.env)")
+        );
+        let allow: Vec<&str> = json
+            .pointer("/permissions/allow")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(allow.contains(&"Bash(ls:*)"));
+        assert!(allow.contains(&"mcp__ggs"));
+
+        // The agreeing file is a no-op; closing the folder takes our rule with it,
+        // the user's own rules and no empty scaffolding staying behind.
+        assert_eq!(claude_mcp_settings(Some(&text), true).unwrap(), None);
+        let closed = claude_mcp_settings(Some(&text), false).unwrap().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&closed).unwrap();
+        let allow: Vec<&str> = json
+            .pointer("/permissions/allow")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(!allow.contains(&"mcp__ggs"));
+        assert_eq!(allow, ["Bash(ls:*)"]);
+
+        // A fresh install (no settings at all) carries the rule alone, and a closed
+        // folder with nothing of ours anywhere writes nothing.
+        let fresh = claude_mcp_settings(None, true).unwrap().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&fresh).unwrap();
+        assert_eq!(
+            json.pointer("/permissions/allow/0")
+                .and_then(|v| v.as_str()),
+            Some("mcp__ggs")
+        );
+        assert_eq!(claude_mcp_settings(Some("{}"), false).unwrap(), None);
+    }
+
+    /// The IO path end to end against the pinned home: boot writes the registration
+    /// into the redirected global config (where Claude Code actually reads it —
+    /// Claude's own state keys surviving the merge, the file kept 0600) plus the
+    /// settings-side auto-allow rule, an open-folder change updates it, close removes
+    /// both again, and the status command reads back what Claude will see.
     #[test]
     fn the_apply_status_round_trip_tracks_the_open_folder() {
         let _guard = ProviderHome::pin();
@@ -2490,11 +2955,67 @@ mod tests {
         assert_eq!(status.folder.as_deref(), Some("/repo"));
         assert_eq!(status.command.as_deref(), Some(command));
 
+        // The registration is in the global config — the user-scope mcpServers — and
+        // the file keeps Claude's at-rest posture.
+        let global_path = home.join("claude").join(".claude.json");
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&global_path).unwrap()).unwrap();
+        assert_eq!(
+            config
+                .pointer("/mcpServers/ggs/command")
+                .and_then(|v| v.as_str()),
+            Some(command)
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&global_path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+
+        // A settings.json from the first cut (the entry Claude never read) migrates
+        // away, leaving the auto-allow rule behind beside the user's own rules.
+        let settings_path = home.join("claude").join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"mcpServers":{"ggs":{"command":"old"}},"permissions":{"allow":["Bash(ls:*)"]}}"#,
+        )
+        .unwrap();
+        apply_claude_mcp_inner(&["/repo".to_owned()], Some(Path::new(command))).unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert!(settings.pointer("/mcpServers").is_none(), "{settings}");
+        let allow: Vec<&str> = settings
+            .pointer("/permissions/allow")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(allow, ["Bash(ls:*)", "mcp__ggs"]);
+
         apply_claude_mcp_inner(&["/two".to_owned()], Some(Path::new(command))).unwrap();
         assert_eq!(claude_mcp_status().unwrap().folder.as_deref(), Some("/two"));
 
         apply_claude_mcp_inner(&[], Some(Path::new(command))).unwrap();
         let status = claude_mcp_status().unwrap();
         assert!(!status.registered && status.folder.is_none() && status.command.is_none());
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&global_path).unwrap()).unwrap();
+        assert!(config.get("mcpServers").is_none());
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert_eq!(
+            settings
+                .pointer("/permissions/allow/0")
+                .and_then(|v| v.as_str()),
+            Some("Bash(ls:*)")
+        );
     }
 }

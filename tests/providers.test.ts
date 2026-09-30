@@ -37,7 +37,7 @@ function providerListAnswer(): Record<string, unknown> {
 		presets: [
 			{ id: 'official', label: 'Official Claude', official: true, baseUrl: null, models: [] },
 			{ id: 'deepseek', label: 'DeepSeek', official: false, baseUrl: 'https://api.deepseek.com/anthropic', models: ['deepseek-chat', 'deepseek-reasoner'] },
-			{ id: 'glm', label: 'Zhipu GLM', official: false, baseUrl: 'https://open.bigmodel.cn/api/anthropic', models: ['glm-4.6', 'glm-4.5-air'] },
+			{ id: 'glm', label: 'Zhipu GLM', official: false, baseUrl: 'https://open.bigmodel.cn/api/anthropic', models: ['glm-5.3', 'glm-5.3-flash', 'glm-4.7', 'glm-4.6'] },
 			{ id: 'custom', label: 'Custom (Anthropic-compatible)', official: false, baseUrl: null, models: [] }
 		],
 		bridgedExtIds: ['Anthropic.claude-code']
@@ -360,6 +360,93 @@ describe('the gateway tools and the cc-switch import', () => {
 		await flush();
 		const model = [...document.querySelectorAll('.providers-form input.input')][2]!;
 		expect(model.value).toBe('deepseek-r1');
+	});
+
+	it('offers every model box its own dropdown — a pick lands in that field alone', async () => {
+		mountProvidersPage(host());
+		await flush();
+		openEditForm();
+		await flush();
+		// Both model boxes (model, background model) carry a dropdown over their input.
+		const combos = [...document.querySelectorAll('.providers-combo')];
+		expect(combos.length).toBe(2);
+		click(combos[0]!.querySelector('.action-btn')!);
+		await flush();
+		let rows = [...document.querySelectorAll('.quick-input .row')];
+		expect(rows.map((row) => row.querySelector('.label')!.textContent)).toEqual(
+			['deepseek-chat', 'deepseek-reasoner']);
+		click(rows[1]!); // the main model
+		await flush();
+		// The pick did not re-render the form (the other box's button stays live), and
+		// writing the main model leaves the background model untouched.
+		click(combos[1]!.querySelector('.action-btn')!);
+		await flush();
+		rows = [...document.querySelectorAll('.quick-input .row')];
+		click(rows[0]!); // the background model
+		await flush();
+		const [, , model, smallModel] = formInputs();
+		expect(model.value).toBe('deepseek-reasoner');
+		expect(smallModel.value).toBe('deepseek-chat');
+		// The picks travel into the save.
+		click(document.querySelector('.providers-form-actions .button.primary')!);
+		await flush();
+		const profile = backend.callsTo('provider_save')[0]!.profile as Record<string, unknown>;
+		expect(profile).toMatchObject({ model: 'deepseek-reasoner', smallModel: 'deepseek-chat' });
+	});
+
+	it('offers the GLM preset its current lineup without any fetch — and the fetched catalogue rides first', async () => {
+		mountProvidersPage(host());
+		await flush();
+		click(actionByTitle('Add Provider'));
+		await flush();
+		const select = document.querySelector<HTMLSelectElement>('.providers-field select')!;
+		select.value = 'glm';
+		select.dispatchEvent(new Event('change'));
+		await flush();
+		// The draft took the preset's head: the current flagship main, its Flash variant
+		// as the background model — no manual typing anywhere.
+		const [, , model, smallModel] = formInputs();
+		expect(model.value).toBe('glm-5.3');
+		expect(smallModel.value).toBe('glm-5.3-flash');
+		// The dropdown carries the preset's whole list.
+		click(document.querySelectorAll('.providers-combo .action-btn')[0]!);
+		await flush();
+		const rows = [...document.querySelectorAll('.quick-input .row')];
+		expect(rows.map((row) => row.querySelector('.label')!.textContent)).toEqual(
+			['glm-5.3', 'glm-5.3-flash', 'glm-4.7', 'glm-4.6']);
+		click(rows[2]!);
+		await flush();
+		expect(formInputs()[2]!.value).toBe('glm-4.7');
+
+		// A fetch merges the endpoint's live catalogue ahead of the preset list — the
+		// re-render the fetch triggers rebuilds the boxes over the merged candidates.
+		backend.on('provider_fetch_models', () => ['glm-5.4', 'glm-5.3']);
+		click(actionByTitle('Fetch Models'));
+		await flush();
+		const fetchRows = [...document.querySelectorAll('.quick-input .row')];
+		expect(fetchRows.map((row) => row.querySelector('.label')!.textContent)).toEqual(
+			['glm-5.4', 'glm-5.3']);
+		click(fetchRows[0]!);
+		await flush();
+		expect(formInputs()[2]!.value).toBe('glm-5.4');
+		click(document.querySelectorAll('.providers-combo .action-btn')[1]!);
+		await flush();
+		const merged = [...document.querySelectorAll('.quick-input .row')];
+		expect(merged.map((row) => row.querySelector('.label')!.textContent)).toEqual(
+			['glm-5.4', 'glm-5.3', 'glm-5.3-flash', 'glm-4.7', 'glm-4.6']);
+	});
+
+	it('shows no dropdown when nothing is known yet — the custom preset before any fetch', async () => {
+		mountProvidersPage(host());
+		await flush();
+		click(actionByTitle('Add Provider'));
+		await flush();
+		const select = document.querySelector<HTMLSelectElement>('.providers-field select')!;
+		select.value = 'custom';
+		select.dispatchEvent(new Event('change'));
+		await flush();
+		expect(document.querySelectorAll('.providers-combo .action-btn').length).toBe(0);
+		expect(document.querySelectorAll('.providers-combo').length).toBe(2); // the inputs stay
 	});
 
 	it('imports the cc-switch configuration after a confirmation, keys never round-tripping', async () => {
