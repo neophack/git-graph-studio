@@ -343,13 +343,15 @@ impl ProcessHostState {
         // host's `ggs.hostRequest`s into the workbench, and — on EOF — fails everything
         // waiting on the backend, forgets the handle and reaps the child. The pending map is
         // drained before the map is touched, so a process that dies during its handshake
-        // unblocks `start` even while `start` still holds the map lock.
+        // unblocks `start` even while `start` still holds the map lock. The pid rides along
+        // so the EOF cleanup only ever reaps the process this reader served.
         let reader = ReaderState {
             pending: Arc::clone(&pending),
             log: Arc::clone(&log),
             procs: Arc::clone(&self.procs),
             history: Arc::clone(&self.history),
             ext_id: ext_id.to_owned(),
+            pid: child.id(),
             app: self.app.lock().unwrap().clone(),
         };
         std::thread::spawn(move || reader.serve(BufReader::new(stdout)));
@@ -611,6 +613,11 @@ struct ReaderState {
     procs: Arc<Mutex<HashMap<String, ProcHandle>>>,
     history: Arc<Mutex<HashMap<String, ProcHistory>>>,
     ext_id: String,
+    /// The pid of the process this reader serves: the EOF cleanup may only reap the handle
+    /// when it is still THIS process — after a stop+start (a provider switch's restart, the
+    /// Extensions view's restart) the map can already hold the fresh process, and an
+    /// unguarded remove+kill here would reap the restarted backend mid-handshake.
+    pid: u32,
     /// Forwarding channel for a real-Node host's `ggs.hostRequest`s (`None` in the pure
     /// test readers, which get the in-band error instead).
     app: Option<tauri::AppHandle>,
@@ -729,14 +736,24 @@ impl ReaderState {
 
     /// EOF: the backend is gone. Fail everything waiting on it first — a `start` still in its
     /// handshake unblocks through the pending map, not the handle map — then forget the handle
-    /// and reap the child. A handle still in the map means the process died on its own (a
-    /// deliberate stop removes the handle first): that crash is the remembered reason it is
-    /// not running.
+    /// and reap the child, but only if the map still holds THIS reader's process: a deliberate
+    /// stop removes the handle first, and a stop+start pair (a provider switch, the Extensions
+    /// view's restart) may already have installed the fresh process under the same id — killing
+    /// that one here would reap the restarted backend out from under its handshake. A handle
+    /// still in the map AND still this process means it died on its own: that crash is the
+    /// remembered reason it is not running.
     fn cleanup(&self) {
         for (_, tx) in self.pending.lock().unwrap().drain() {
             let _ = tx.send(Err("the backend process exited".to_owned()));
         }
-        if let Some(mut handle) = self.procs.lock().unwrap().remove(&self.ext_id) {
+        let mut procs = self.procs.lock().unwrap();
+        let still_mine = procs
+            .get(&self.ext_id)
+            .is_some_and(|handle| handle.child.id() == self.pid);
+        if !still_mine {
+            return;
+        }
+        if let Some(mut handle) = procs.remove(&self.ext_id) {
             push_log(&handle.log, "backend exited".to_owned());
             if let Some(history) = self.history.lock().unwrap().get_mut(&self.ext_id) {
                 history.last_error = Some("the backend exited".to_owned());
@@ -1192,6 +1209,7 @@ mod tests {
             procs: Arc::new(Mutex::new(HashMap::new())),
             history: Arc::new(Mutex::new(HashMap::new())),
             ext_id: "acme.demo".to_owned(),
+            pid: 0,
             app: None,
         }
     }
@@ -1240,6 +1258,57 @@ mod tests {
             rx.recv().unwrap().unwrap_err(),
             "the backend process exited"
         );
+    }
+
+    /// The restart race: a backend's reader reaches its EOF cleanup only after a stop+start
+    /// already installed the FRESH process under the same extension id. The cleanup must fail
+    /// its own pending calls but leave the fresh handle in the map — removing and killing it
+    /// reaped the restarted backend mid-handshake (a provider switch then left the sidebar on
+    /// the old provider's page, the very bug the restart was fixing). Only the reader whose
+    /// pid still matches the mapped handle reaps it.
+    #[test]
+    fn an_eof_cleanup_reaps_only_its_own_process() {
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let procs: Arc<Mutex<HashMap<String, ProcHandle>>> = Arc::new(Mutex::new(HashMap::new()));
+        // A stand-in child: the freshly restarted backend sitting in the handle map. `--list`
+        // makes the test binary exit at once — only the pid matters here.
+        let child = Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let fresh_pid = child.id();
+        procs.lock().unwrap().insert(
+            "acme.demo".to_owned(),
+            ProcHandle {
+                child,
+                stdin: Mutex::new(None),
+                pending: Arc::clone(&pending),
+                next_id: AtomicU64::new(1),
+                commands: Vec::new(),
+                log: Arc::new(Mutex::new(Vec::new())),
+            },
+        );
+
+        // The OLD process's reader: its pid no longer matches the mapped handle — it must
+        // not remove or kill the fresh one.
+        let mut stale = make_reader(&pending);
+        stale.procs = Arc::clone(&procs);
+        stale.pid = fresh_pid + 1;
+        stale.cleanup();
+        assert!(
+            procs.lock().unwrap().contains_key("acme.demo"),
+            "the old reader's cleanup reaped the restarted backend"
+        );
+
+        // The fresh process's own reader still reaps it on EOF.
+        let mut own = make_reader(&pending);
+        own.procs = Arc::clone(&procs);
+        own.pid = fresh_pid;
+        own.cleanup();
+        assert!(procs.lock().unwrap().is_empty());
     }
 
     /// A backend log notification is logged, not dropped as unparsable.

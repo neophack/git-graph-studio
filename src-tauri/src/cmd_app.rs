@@ -121,12 +121,12 @@ pub mod dock_menu {
                 Imp,
             >(new_window_imp);
             // The ObjC type encodings of the two signatures, self and _cmd included:
-            // `@:@` — an object back, an object argument; `v@:@` — nothing back.
+            // `@@:@` — an object back, self, _cmd, an object argument; `v@:@` — nothing back.
             let menu_added = ffi::class_addMethod(
                 class,
                 sel!(applicationDockMenu:),
                 menu_imp,
-                c"@:@".as_ptr(),
+                c"@@:@".as_ptr(),
             );
             let action_added = ffi::class_addMethod(
                 class,

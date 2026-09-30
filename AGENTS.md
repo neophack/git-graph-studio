@@ -458,8 +458,9 @@ start, the mechanism cc-switch uses) **and restarts the running bridged backend*
 (`restart_bridged_backends`, 2026-09-30 — the never-restart cut shipped that morning
 and left the sidebar on the old provider's login page forever: the extension process
 applies the env map once, at its own start, so a running one keeps answering with the
-provider it booted under; the fresh process reads the rewritten settings, and its
-settled activation is announced as the `ext-backend-restarted` event, on which the
+provider it booted under; the fresh process reads the rewritten settings, and the
+settled start attempt — success or failure, the old process is dead either way — is
+announced as the `ext-backend-restarted` event, on which the
 extension host re-resolves the extension's webview views — the chat page reloads with
 the new provider, a conversation in flight restarting on it); the spawn
 environment carries only `CLAUDE_CONFIG_DIR` — one source of provider truth, the two

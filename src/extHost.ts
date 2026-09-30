@@ -89,11 +89,11 @@ export const MARKETPLACE_URL = 'https://open-vsx.org';
 /** The Tauri event a real-Node extension host's `ggs.hostRequest` arrives on (the Rust
  *  reader forwards it; see ext_process.rs's HOST_REQUEST_EVENT). */
 export const HOST_REQUEST_EVENT = 'ext-host-request';
-/** The Tauri event a provider switch's backend restart announces (cmd_providers emits
- *  it once the fresh process's activation settled; payload: the extension id). The
- *  host resets that extension's settled webview views on it — their pages were set by
- *  the old process and would keep showing what it rendered (the login page of the
- *  provider it booted under). */
+/** The Tauri event a provider switch's backend restart announces (cmd_providers emits it
+ *  when the fresh process's start attempt settles, success or failure — the old process
+ *  is dead either way; payload: the extension id). The host resets that extension's
+ *  settled webview views on it — their pages were set by the old process and would keep
+ *  showing what it rendered (the login page of the provider it booted under). */
 export const BACKEND_RESTARTED_EVENT = 'ext-backend-restarted';
 
 /** The `manifest.json` of an extension package. */
@@ -1027,8 +1027,15 @@ export class ExtensionHost {
 		// A backend-hosted package re-activates in the new process: its remote handle must be
 		// registered first, or the activation's first `host.env` request finds no owner (a
 		// restart after a failed start - whose handle was dropped - failed exactly that way).
-		if (this.backendHosted(extId)) return this.ensureNodeHost(extId);
-		await invoke('ext_process_start', { extId });
+		if (this.backendHosted(extId)) {
+			await this.ensureNodeHost(extId);
+		} else {
+			await invoke('ext_process_start', { extId });
+		}
+		// The fresh process re-activated, but this restart path emits no
+		// BACKEND_RESTARTED_EVENT (that is the provider switch's, cmd_providers): reset the
+		// settled webview views here, or the sidebar keeps the page the old process rendered.
+		this.resetViewsAfterBackendRestart(extId);
 	}
 
 	/** Uninstall an extension (the Rust side refuses built-ins), then drop its frame, its

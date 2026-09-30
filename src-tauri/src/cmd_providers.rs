@@ -1160,7 +1160,10 @@ fn apply_claude_provider_env_inner() -> Result<(), String> {
 /// The Tauri event pushed when a provider switch restarted a bridged backend (payload:
 /// the extension id). The extension host hears it and re-resolves that extension's
 /// settled webview views — their pages were set by the old process and would otherwise
-/// keep showing what it rendered (the login page of the provider it booted under).
+/// keep showing what it rendered (the login page of the provider it booted under). The
+/// event fires on a failed restart too: the old process is dead either way, and the
+/// re-resolve it triggers is the frontend's self-healing path — the resolve crosses as a
+/// backend request, which lazy-starts the fresh process on the rewritten settings.
 pub const BACKEND_RESTARTED_EVENT: &str = "ext-backend-restarted";
 
 /// The bridged backends a restart pass touches: the ones actually running. A backend
@@ -1181,13 +1184,16 @@ fn bridged_running(status: &[crate::ext_process::ProcessInfo]) -> Vec<String> {
 /// provider it booted under (the chat's login state included); the fresh process reads
 /// the rewritten settings and comes up on the new provider. The start runs on its own
 /// thread (the activation handshake takes its time; the command's answer must not wait
-/// it out) and its completion is announced as [`BACKEND_RESTARTED_EVENT`].
+/// it out) and its completion is announced as [`BACKEND_RESTARTED_EVENT`] — on failure
+/// too: the old process is dead either way, and the re-resolve the event triggers
+/// lazy-starts the fresh one (the frontend's only recovery from a dead backend whose
+/// views are still marked resolved).
 fn restart_bridged_backends(app: &tauri::AppHandle) {
     let host = crate::ext_process::global();
     host.attach_app(app.clone());
     for ext_id in bridged_running(&host.status()) {
-        // The backend's own children (the chat's CLI sessions) go with it — the same
-        // cleanup the Extensions view's restart runs.
+        // The frame host's children the extension spawned go with it — the same cleanup
+        // the Extensions view's restart runs.
         let _ = crate::ext_child::ext_child_stop_for(ext_id.clone());
         if host.stop(&ext_id).is_err() {
             continue;
@@ -1196,15 +1202,13 @@ fn restart_bridged_backends(app: &tauri::AppHandle) {
             continue;
         };
         let app = app.clone();
-        std::thread::spawn(move || match host.start(&dir, &ext_id) {
-            Ok(_) => {
-                let _ = tauri::Emitter::emit(&app, BACKEND_RESTARTED_EVENT, ext_id.clone());
-            }
-            Err(error) => {
+        std::thread::spawn(move || {
+            if let Err(error) = host.start(&dir, &ext_id) {
                 crate::cmd_ext::log_extensions(&format!(
                     "provider switch: {ext_id} backend did not come back: {error}"
                 ));
             }
+            let _ = tauri::Emitter::emit(&app, BACKEND_RESTARTED_EVENT, ext_id.clone());
         });
     }
 }
@@ -1273,8 +1277,8 @@ pub fn provider_list() -> Result<ProviderList, String> {
 
 /// Create or update one profile. `apiKey` absent keeps the stored key, empty clears it,
 /// a value seals it. Saving the *active* profile rewrites the redirected Claude settings
-/// when the change reaches its environment (endpoint, model or key) — the next chat runs
-/// on it, a conversation in flight keeps its provider.
+/// and restarts the running bridged backend when the change reaches its environment
+/// (endpoint, model or key) — the fresh process applies it at its own start.
 #[tauri::command]
 pub fn provider_save(
     app: tauri::AppHandle,

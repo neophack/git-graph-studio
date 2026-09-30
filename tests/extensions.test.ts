@@ -1278,6 +1278,47 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		}
 	});
 
+	it('the Extensions view\'s restart re-resolves the settled chat view too (no stale page without the provider event)', async () => {
+		// restartProcess is the other restart path — it emits no BACKEND_RESTARTED_EVENT, so
+		// it resets the settled webview views itself; otherwise the sidebar would keep the
+		// page the old process rendered, the same stuck-page bug the provider event fixes.
+		backend.on('ext_process_stop', () => null);
+		backend.on('ext_child_stop_for', () => null);
+		backend.on('ext_process_start', () => null);
+		const { host, sent } = hostWithFrame();
+		applyContributions('acme.demo', {
+			viewsContainers: { activitybar: [{ id: 'acmeSide', title: 'Acme' }] },
+			views: { acmeSide: [{ id: 'acme.chat', name: 'Chat', type: 'webview' }] }
+		}, {}, () => undefined, () => true);
+		try {
+			const answer = (event: MessageEvent): void => {
+				const data = event.data as { type?: string; id?: number };
+				if (data?.type !== '__studioExtCall') return;
+				window.dispatchEvent(new MessageEvent('message', { data: { type: '__studioExtCallResult', id: data.id, ok: true, result: undefined } }));
+			};
+			window.addEventListener('message', answer);
+			const resolves = () => sent.filter((message) => (message as { type?: string; method?: string }).method === 'webviewView.resolve');
+
+			await host['serve']('webviewView.register', ['acme.chat'], 'acme.demo', {} as never);
+			const section = document.body.appendChild(document.createElement('div'));
+			const dispose = host.mountWebviewView('acme.chat', 'acme.demo', section);
+			host.noteViewVisible('acme.chat', true);
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(resolves()).toHaveLength(1); // resolved once, settled
+
+			await host.restartProcess('acme.demo');
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(backend.callsTo('ext_process_stop')).toEqual([{ extId: 'acme.demo' }]);
+			expect(backend.callsTo('ext_process_start')).toEqual([{ extId: 'acme.demo' }]);
+			expect(resolves()).toHaveLength(2);
+
+			dispose();
+			window.removeEventListener('message', answer);
+		} finally {
+			removeContributions('acme.demo');
+		}
+	});
+
 	it('a page that settled without ever firing load still gets its messages (the watchdog\'s settle quirk)', async () => {
 		const { host } = hostWithFrame();
 		await host['serve']('webview.create', [1, 'demo.view', 'Demo Panel'], 'acme.demo', {} as never);
