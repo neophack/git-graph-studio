@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import { ExtensionHost, themeVars, type ExtInfo, type GalleryEntry } from '../src/extHost';
 import { EditorGroup } from '../src/editor';
-import { applyExtensionSettings, evaluateWhen, extensionSettingDefs, registerContextProvider, resolvedMenuEntries } from '../src/contributions';
+import { applyContributions, applyExtensionSettings, evaluateWhen, extensionSettingDefs, registerContextProvider, removeContributions, resolvedMenuEntries } from '../src/contributions';
 import { extLog, extLogEntries, flushExtLog, resetExtLog } from '../src/extLog';
 import { ExtensionsPanel } from '../src/extensionsPanel';
 import { commandForBinding, commands } from '../src/commands';
@@ -1186,6 +1186,51 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		await host['serve']('webviewView.postMessage', ['acme.chat', { state: 'live' }], 'acme.demo', {} as never);
 		expect(posted[1]).toEqual({ __ggsWebviewHost: true, type: 'message', message: { state: 'live' } });
 		dispose();
+	});
+
+	it('a rebuilt sidebar section re-resolves its webview view — the chat never goes blank', async () => {
+		const { host, sent } = hostWithFrame();
+		// The manifest declares the chat view (a `type: "webview"` view in its container) —
+		// what `noteViewVisible` reads to know a view resolves at its first visibility.
+		applyContributions('acme.demo', {
+			viewsContainers: { activitybar: [{ id: 'acmeSide', title: 'Acme' }] },
+			views: { acmeSide: [{ id: 'acme.chat', name: 'Chat', type: 'webview' }] }
+		}, {}, () => undefined, () => true);
+		try {
+			// Answer the frame calls the host places (resolve dispatches would otherwise hang).
+			const answer = (event: MessageEvent): void => {
+				const data = event.data as { type?: string; id?: number };
+				if (data?.type !== '__studioExtCall') return;
+				window.dispatchEvent(new MessageEvent('message', { data: { type: '__studioExtCallResult', id: data.id, ok: true, result: undefined } }));
+			};
+			window.addEventListener('message', answer);
+			const resolves = () => sent.filter((message) => (message as { type?: string; method?: string }).method === 'webviewView.resolve');
+
+			await host['serve']('webviewView.register', ['acme.chat'], 'acme.demo', {} as never);
+			await host['serve']('webviewView.setHtml', ['acme.chat', '<html><body>chat</body></html>'], 'acme.demo', {} as never);
+			const section = document.body.appendChild(document.createElement('div'));
+			const dispose = host.mountWebviewView('acme.chat', 'acme.demo', section);
+			host.noteViewVisible('acme.chat', true);
+			await new Promise((resolve) => setTimeout(resolve, 20)); // the resolve rides ensureActive's then
+			expect(resolves()).toHaveLength(1); // the first visibility resolves the provider
+
+			// The sidebar rebuilds (any extension's install or uninstall ends here): the old
+			// section unmounts, a fresh one mounts the same view.
+			dispose();
+			const rebuilt = document.body.appendChild(document.createElement('div'));
+			host.mountWebviewView('acme.chat', 'acme.demo', rebuilt);
+			// The record's html fills the new frame at once — the mount does not wait for the
+			// provider to push a document it already pushed.
+			expect(rebuilt.querySelector('iframe')!.getAttribute('srcdoc')).toContain('<body>chat</body>');
+			// And the view becoming visible again must ask the provider to resolve once more —
+			// a remounted view that never re-resolves sits blank forever.
+			host.noteViewVisible('acme.chat', true);
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(resolves()).toHaveLength(2);
+			window.removeEventListener('message', answer);
+		} finally {
+			removeContributions('acme.demo');
+		}
 	});
 
 	it('a page that settled without ever firing load still gets its messages (the watchdog\'s settle quirk)', async () => {

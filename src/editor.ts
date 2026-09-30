@@ -379,6 +379,10 @@ export class EditorGroup {
 	/** Whether an empty group shows the welcome page: the area keeps that to its first group,
 	 *  so an empty split shows an empty editor (VS Code's behaviour), not a second welcome. */
 	showWelcome = true;
+	/** VS Code's editor group lock (`workbench.action.lockEditorGroup`): a locked group
+	 *  keeps its editors — the area routes placed opens into another group. claude-code
+	 *  locks its chat's group right after opening it, exactly as it does in VS Code. */
+	locked = false;
 
 	onActiveChange: ((editor: { kind: EditorInput['kind']; path?: string; languageName?: string; encoding?: string; eol?: 'lf' | 'crlf'; line: number; column: number; selected?: number; selections?: number } | null) => void) | null = null;
 	onNavigationChange: (() => void) | null = null;
@@ -418,8 +422,18 @@ export class EditorGroup {
 	/** Fills the Model Providers pane (the provider bridge's page mounts itself, lazily);
 	 *  the returned disposer, when there is one, runs when the tab closes. */
 	renderProviders: ((container: HTMLElement) => void | (() => void)) | null = null;
+	/** The editor area's webview overlay service: an extension page's frame must not live in
+	 *  the group tree the area rebuilds on every layout change — a re-parented iframe loses
+	 *  its browsing context and reloads (WKWebView reloads it, interrupting the extension
+	 *  chat mid-conversation on every split/merge). The pane stays in the tree as the
+	 *  positioned placeholder; the frame mounts into the host this returns, outside it.
+	 *  Null — a standalone group, the tests — mounts straight into the pane, as before. */
+	extOverlayHost: ((placeholder: HTMLElement) => { host: HTMLElement; dispose: () => void }) | null = null;
 	/** A tab was activated or the group was clicked: the editor area focuses it (M3 3.1). */
 	onFocus: (() => void) | null = null;
+	/** An editor's tab closed here (the area's reopen-closed stack snapshots what it can
+	 *  re-open; VS Code's `workbench.action.reopenClosedEditor`). */
+	onEditorClosed: ((editor: Editor) => void) | null = null;
 	/** The tab strip's preview button was clicked: the editor area opens the preview beside
 	 *  the group (a group cannot split itself). */
 	onOpenPreviewToSide: ((path: string) => void) | null = null;
@@ -2135,8 +2149,18 @@ export class EditorGroup {
 			pane: el('div', 'editor-pane ext-page'),
 			dirty: false
 		};
-		const dispose = mount(editor.pane);
-		if (dispose) editor.onClose = dispose;
+		// The frame's DOM home: the overlay host when the area provides one (the pane stays in
+		// the rebuilt tree as the placeholder the host is positioned over), the pane itself
+		// otherwise — the standalone-group shape the tests use.
+		const overlay = this.extOverlayHost?.(editor.pane);
+		const dispose = mount(overlay?.host ?? editor.pane);
+		if (dispose || overlay) {
+			const teardownOverlay = overlay?.dispose;
+			editor.onClose = () => {
+				dispose?.();
+				teardownOverlay?.();
+			};
+		}
 		this.add(editor);
 	}
 
@@ -2388,6 +2412,7 @@ export class EditorGroup {
 		editor.onClose?.();
 		editor.pane.remove();
 		this.forget(editor);
+		this.onEditorClosed?.(editor);
 		this.activateSuccessor(editor, index);
 		if (editor.input.kind === 'file') this.onDocumentClosed?.(editor.input.path);
 	}

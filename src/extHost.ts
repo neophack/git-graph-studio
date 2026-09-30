@@ -1677,8 +1677,17 @@ export class ExtensionHost {
 		}
 		return () => {
 			if (this.webviewViews.get(viewId)?.frame === frame) {
-				record.frame = null;
-				this.webviewViews.delete(viewId);
+				// The section went away (the sidebar rebuilds on any install or uninstall), the
+				// frame with it. The record keeps its html for the next mount — the pane fills
+				// at once — while every volatile gate (the loaded flag, the grace timers)
+				// belonged to the dead frame and resets. The remount must also resolve its
+				// provider again: a view marked resolved forever sits blank through every
+				// later rebuild, its record answering no document to a frame that no longer
+				// exists.
+				if (record.loadGrace !== null) clearTimeout(record.loadGrace);
+				if (record.firstPaintTimer !== null) clearTimeout(record.firstPaintTimer);
+				this.webviewViews.set(viewId, { extId: record.extId, html: record.html, frame: null, pending: [], loaded: false, painted: null, loadGrace: null, firstPaintTimer: null });
+				this.resolvedWebviewViews.delete(viewId);
 			}
 			frame.remove();
 		};

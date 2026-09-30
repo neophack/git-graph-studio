@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
 import { commands } from '../src/commands';
 import { Workbench } from '../src/workbench';
 import { backend } from './tauriMock';
-import { flush } from './helpers';
+import { flush, texts } from './helpers';
 
 const REPO = 'C:\\repo';
 
@@ -163,6 +163,47 @@ describe('every command of the workbench', () => {
 		]);
 		const swept = skipped.filter((id) => !id.startsWith('git-graph-rs.') && !contextual.has(id));
 		expect(swept, `skipped: ${swept.join(', ')}`).toEqual([]);
+	});
+
+	it('a provider document\'s tab is keyed by its path — same-titled documents never replace each other', async () => {
+		const workbench = await bootWithRepo();
+		const host = workbench['extensionHost'];
+		// The chat's read-only outputs: two provider documents whose titles (basenames)
+		// collide while their paths differ — the second must open its own tab, not reveal
+		// the first with the first's content.
+		host.onOpenContent?.('utils.ts', '/readonly/a/utils.ts', 'const A = 1;', undefined);
+		await flush(6);
+		host.onOpenContent?.('utils.ts', '/readonly/b/utils.ts', 'const B = 2;', undefined);
+		await flush(6);
+		const chatTabs = () => texts('.tab .label').filter((label) => label === 'utils.ts');
+		expect(chatTabs()).toHaveLength(2);
+		expect(workbench.editors.activeView!.state.doc.toString()).toBe('const B = 2;');
+
+		// The same document opened again reveals its own tab — no duplicate.
+		host.onOpenContent?.('utils.ts', '/readonly/b/utils.ts', 'const B = 2;', undefined);
+		await flush(6);
+		expect(chatTabs()).toHaveLength(2);
+	});
+
+	it('VS Code\'s canonical command ids are registered — the ones extensions call (claude-code\'s group focus, lock, reopen)', async () => {
+		const workbench = await bootWithRepo();
+		const canonical = [
+			'workbench.action.focusFirstEditorGroup',
+			'workbench.action.focusSecondEditorGroup',
+			'workbench.action.focusThirdEditorGroup',
+			'workbench.action.lockEditorGroup',
+			'workbench.action.unlockEditorGroup',
+			'workbench.action.reopenClosedEditor'
+		];
+		for (const id of canonical) expect(commands.get(id), id).toBeDefined();
+		// Lock and unlock round-trip the focused group; the focus aliases focus by index.
+		expect(workbench.editors.activeGroup.locked).toBe(false);
+		await commands.execute('workbench.action.lockEditorGroup');
+		expect(workbench.editors.activeGroup.locked).toBe(true);
+		await commands.execute('workbench.action.unlockEditorGroup');
+		expect(workbench.editors.activeGroup.locked).toBe(false);
+		await commands.execute('workbench.action.focusFirstEditorGroup');
+		expect(workbench.editors.focusedIndex).toBe(0);
 	});
 
 	it('menus name registered commands only, and keybindings are unique', async () => {

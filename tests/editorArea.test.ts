@@ -222,6 +222,124 @@ describe('editor area (M3 3.1)', () => {
 		expect(pane.parentElement).not.toBeNull();
 	});
 
+	it('an extension page\'s frame is never detached by a layout change (the chat keeps its page)', async () => {
+		files({ 'C:\\repo\\a.ts': 'a\n', 'C:\\repo\\b.ts': 'b\n' });
+		const area = new EditorArea(document.getElementById('editorGroup')!);
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
+		// The mounted frame stands for the extension chat's page: whatever holds it must keep
+		// its DOM home across every layout change, because WKWebView discards a detached
+		// iframe's browsing context and reloads the page — the conversation interrupted on
+		// every split/merge this fix removes.
+		const frame = document.createElement('iframe');
+		await area.openExtPage({ kind: 'extpage', id: 'extpage:x:1', title: 'Claude', extId: 'x', pageId: 'webview' }, (host) => { host.appendChild(frame); });
+		const home = frame.parentElement!;
+		// The frame lives in the overlay layer, outside the group tree the area rebuilds.
+		expect(home.classList.contains('ext-overlay-host')).toBe(true);
+		expect(frame.closest('.editor-groups-root')).toBeNull();
+		expect(frame.isConnected).toBe(true);
+
+		// A detached subtree would surface as a childList removal record carrying the frame,
+		// even though the re-render re-attaches it before anything can observe the gap.
+		const removed: Node[] = [];
+		const observer = new MutationObserver((records) => {
+			for (const record of records) removed.push(...record.removedNodes);
+		});
+		observer.observe(document.getElementById('editorGroup')!, { childList: true, subtree: true });
+
+		// Single -> split: the whole group tree is rebuilt.
+		await area.split('right').openFile('C:\\repo\\b.ts');
+		expect(area.groupCount).toBe(2);
+		// Split -> single: the layer collapses when its last tab closes.
+		await area.close();
+		expect(area.groupCount).toBe(1);
+		expect(frame.parentElement).toBe(home);
+		expect(frame.isConnected).toBe(true);
+
+		// A tab dragged into another group re-parents its placeholder pane, never the frame.
+		await area.split('right').openFile('C:\\repo\\b.ts');
+		const boxes = document.querySelectorAll('.editor-group-box');
+		const chatTab = [...boxes[0]!.querySelectorAll('.tab')].find((tab) => tab.textContent?.includes('Claude'))!;
+		drag(chatTab, boxes[1]!);
+		expect(boxes[1]!.querySelector('.editor-pane.ext-page')).not.toBeNull();
+		expect(frame.parentElement).toBe(home);
+		observer.disconnect();
+		expect(removed.some((node) => node.contains(frame))).toBe(false);
+
+		// Closing the tab tears the overlay down with it.
+		await area.closeById('extpage:x:1');
+		expect(document.querySelector('.ext-overlay-layer')!.childElementCount).toBe(0);
+	});
+
+	it('a locked group keeps its editors — placed opens land elsewhere (claude-code locks its chat group)', async () => {
+		files({ 'C:\\repo\\a.ts': 'a\n', 'C:\\repo\\b.ts': 'b\n', 'C:\\repo\\c.ts': 'c\n' });
+		const area = new EditorArea(document.getElementById('editorGroup')!);
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
+		const right = area.split('right');
+		await right.openFile('C:\\repo\\b.ts');
+		await area.openExtPage({ kind: 'extpage', id: 'extpage:x:1', title: 'Claude', extId: 'x', pageId: 'webview' }, () => undefined);
+		// The lock claude-code asks for: the chat's group keeps its editors.
+		area.setGroupLock(right, true);
+		expect(right.locked).toBe(true);
+		expect(document.querySelector('.editor-group-box.locked .group-lock')).not.toBeNull();
+
+		// An open without a placement while the locked group is focused lands in the other
+		// group — the chat layer is never the destination.
+		area.focusIndex(1);
+		await area.openFile('C:\\repo\\c.ts');
+		expect(area.groups()[0]!.openFilePaths()).toContain('C:\\repo\\c.ts');
+		expect(right.openFilePaths()).toEqual(['C:\\repo\\b.ts']);
+
+		// A placed 'beside' open skips the locked layer too: with the locked group focused,
+		// a fresh split beside it takes the content.
+		area.focusIndex(1);
+		await area.openFile('C:\\repo\\a.ts', undefined, 'beside');
+		expect(area.groupCount).toBe(3);
+		expect(area.groups()[2]!.openFilePaths()).toEqual(['C:\\repo\\a.ts']);
+		expect(right.openFilePaths()).toEqual(['C:\\repo\\b.ts']);
+
+		// Unlocking restores the group as a destination for its own opens.
+		area.setGroupLock(right, false);
+		expect(document.querySelector('.editor-group-box.locked')).toBeNull();
+		area.focusIndex(1);
+		await area.openFile('C:\\repo\\c.ts');
+		expect(right.openFilePaths()).toEqual(['C:\\repo\\b.ts', 'C:\\repo\\c.ts']);
+	});
+
+	it('the reopen-closed stack restores the last closed tab where it closed', async () => {
+		files({ 'C:\\repo\\a.ts': 'a\n', 'C:\\repo\\b.ts': 'b\n' });
+		const area = new EditorArea(document.getElementById('editorGroup')!);
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
+		await area.openFile('C:\\repo\\b.ts');
+		await area.close(); // closes b.ts, the active tab
+		expect(area.openFilePaths()).toEqual(['C:\\repo\\a.ts']);
+		area.reopenClosed();
+		await flush();
+		expect(area.openFilePaths()).toEqual(['C:\\repo\\a.ts', 'C:\\repo\\b.ts']);
+		expect(area.activeInput?.kind === 'file' && area.activeInput.path.endsWith('b.ts')).toBe(true);
+		// The stack empties: a second reopen with nothing closed does nothing.
+		area.reopenClosed();
+		await flush();
+		expect(area.openFilePaths()).toEqual(['C:\\repo\\a.ts', 'C:\\repo\\b.ts']);
+	});
+
+	it('reopen lands in the active group once the closed tab\'s layer is gone', async () => {
+		files({ 'C:\\repo\\a.ts': 'a\n', 'C:\\repo\\b.ts': 'b\n' });
+		const area = new EditorArea(document.getElementById('editorGroup')!);
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
+		const right = area.split('right');
+		await right.openFile('C:\\repo\\b.ts');
+		await area.close(); // closes b.ts; the empty right layer collapses away
+		expect(area.groupCount).toBe(1);
+		area.reopenClosed();
+		await flush();
+		expect(area.groupCount).toBe(1);
+		expect(area.groups()[0]!.openFilePaths()).toEqual(['C:\\repo\\a.ts', 'C:\\repo\\b.ts']);
+	});
+
 	it('the welcome page belongs to the first group, and a split without files collapses back', async () => {
 		const area = new EditorArea(document.getElementById('editorGroup')!);
 		area.renderWelcome = (container) => container.appendChild(document.createElement('h1'));

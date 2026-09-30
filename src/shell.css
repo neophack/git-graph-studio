@@ -292,7 +292,11 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 .breadcrumbs[hidden] { display: none; }
 .editors { flex: 1; min-height: 0; position: relative; display: flex; }
 .editor-pane { position: absolute; inset: 0; display: flex; flex-direction: column; }
-.editor-pane[hidden] { display: none; }
+/* !important: the pane kinds below re-declare display (block, flex) at equal specificity
+   and later in the file — a hidden pane of any kind must fold, or it stays stacked over
+   the tab the user switched to (and, since the webview overlay left it an empty
+   placeholder, swallows the clicks meant for the editor beneath it). */
+.editor-pane[hidden] { display: none !important; }
 /* An extension page (module 12): the extension package's own document, sandboxed, filling its tab. */
 .editor-pane.ext-page { display: block; }
 /* The extension detail page is a document, not a frame: it grows past the tab's height, so the
@@ -1035,10 +1039,12 @@ body.resizing iframe { pointer-events: none; }
 .cm-bookmark-gutter .codicon { font-size: 12px; }
 
 /* ---------- Editor area: multiple groups in split rows (M3 3.1) ---------- */
+.editor-area { position: relative; }
+.editor-groups-root { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .editor-area-row { display: flex; flex-direction: row; flex: 1 1 0; min-width: 0; min-height: 0; }
 .editor-area-col { display: flex; flex-direction: column; flex: 1 1 0; min-width: 0; min-height: 0; }
 .editor-split-child { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; }
-.editor-group-box { display: flex; flex-direction: column; flex: 1 1 0; min-width: 220px; min-height: 0; }
+.editor-group-box { display: flex; flex-direction: column; flex: 1 1 0; min-width: 220px; min-height: 0; position: relative; }
 .editor-group-container { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
 .editor-group-box.focused .tabs-container { box-shadow: inset 0 2px 0 0 var(--vscode-focusBorder); }
 .editor-group-box.drop-target { outline: 1px dashed var(--vscode-focusBorder); outline-offset: -1px; }
@@ -1046,6 +1052,20 @@ body.resizing iframe { pointer-events: none; }
 .editor-sash.vertical { width: 4px; cursor: ew-resize; margin-left: -2px; }
 .editor-sash.horizontal { height: 4px; cursor: ns-resize; margin-top: -2px; }
 .editor-sash:hover, .editor-sash.active { background: var(--vscode-sash-hoverBorder); }
+/* The locked-group badge (VS Code's marker): the box wears the state, the badge sits over
+   the tab strip's right edge and never takes a pointer (the tabs beneath stay clickable to
+   the last pixel that is not covered — VS Code shows its lock the same way). */
+.group-lock { display: none; position: absolute; top: 0; right: 0; align-items: center; height: var(--tab-height); padding: 0 8px 0 10px; color: var(--vscode-descriptionForeground, #999); background: var(--vscode-editorGroupHeader-tabsBackground); border-left: 1px solid var(--vscode-editorGroupHeader-tabsBorder, transparent); pointer-events: none; font-size: 13px; }
+.editor-group-box.locked .group-lock { display: inline-flex; }
+/* The webview overlay layer: an extension page's frame keeps its DOM home here, outside
+   the group tree the area rebuilds on every layout change — a re-parented iframe loses its
+   browsing context and reloads (WKWebView reloads the page, interrupting the extension
+   chat mid-conversation on every split/merge). Each host is positioned over its tab's
+   placeholder pane by the area. The layer lets pointers through except where a host
+   stands; it paints above the group tree's in-flow content (a later positioned sibling)
+   and below the sashes (z-index 5) and every workbench overlay (fixed, z-index 60+). */
+.ext-overlay-layer { position: absolute; inset: 0; pointer-events: none; }
+.ext-overlay-host { position: absolute; pointer-events: auto; }
 
 /* ---------- Editor decorations (M3 3.2): brackets, sticky scroll, minimap ---------- */
 /* VS Code's bracket-colorization trio, per theme via editorBracketHighlight tokens - the dark

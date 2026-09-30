@@ -6,6 +6,7 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { applyContributions, removeContributions } from '../src/contributions';
+import { commands } from '../src/commands';
 import { ExtensionHost } from '../src/extHost';
 import * as state from '../src/state';
 import { FS_CHANGED_EVENT, Workbench } from '../src/workbench';
@@ -515,5 +516,22 @@ describe('extension view containers follow setContext', () => {
 		expect(document.querySelector('#activitybar .activity-item[aria-label="Acme List"]')).toBe(listItem);
 		removeContributions('acme.side');
 		workbench.extensionHost.onViewsChanged!();
+	});
+
+	it('each extension views container carries VS Code\'s <id>.focus command — the chat reveals its sidebar with it', async () => {
+		applyContributions('acme.side', {
+			viewsContainers: { activitybar: [{ id: 'acme-chat', title: 'Acme Chat' }] },
+			views: { 'acme-chat': [{ id: 'acmeChat', name: 'Chat', type: 'webview' }] }
+		}, {}, () => undefined, () => true);
+		workbench.extensionHost.onViewsChanged!();
+		expect(commands.get('acme-chat.focus')).toBeDefined();
+		expect(commands.isEnabled('acme-chat.focus')).toBe(true);
+		await commands.execute('acme-chat.focus');
+		expect(document.querySelector<HTMLElement>('#activitybar .activity-item[aria-label="Acme Chat"]')!.classList.contains('active')).toBe(true);
+		// The container gone (the extension uninstalled): its focus command stands down
+		// instead of dragging the sidebar to a view that no longer exists.
+		removeContributions('acme.side');
+		workbench.extensionHost.onViewsChanged!();
+		expect(commands.isEnabled('acme-chat.focus')).toBe(false);
 	});
 });

@@ -7,15 +7,23 @@
 // everything that concerns "the" editor, the whole area answers what spans groups (saving,
 // closing, path renames).
 
-import { EditorGroup, askToSaveMany, tabDrag, type EditorInput, type EditorPlacement } from './editor';
+import { EditorGroup, askToSaveMany, tabDrag, type Editor, type EditorInput, type EditorPlacement } from './editor';
 import type { EditorGridCell } from './state';
-import { el } from './ui';
+import { el, icon } from './ui';
 import type { EditorView } from '@codemirror/view';
 
 /** One editor group in the grid: its box element and its group. */
 interface GroupBox {
 	el: HTMLElement;
 	group: EditorGroup;
+}
+
+/** One extension-page overlay: the stable DOM home a webview tab's frame keeps while the
+ *  group tree around its placeholder pane is rebuilt. */
+interface ExtOverlay {
+	host: HTMLElement;
+	placeholder: HTMLElement;
+	resize: ResizeObserver | null;
 }
 
 /** A grid leaf: one editor group. */
@@ -42,6 +50,18 @@ export type ActiveEditorInfo = Parameters<NonNullable<EditorGroup['onActiveChang
 
 export class EditorArea {
 	private readonly container: HTMLElement;
+	/** The group tree's render root — the only part of the area `render()` clears and
+	 *  rebuilds. */
+	private readonly groupsRoot: HTMLElement;
+	/** The webview overlay layer: extension-page frames live here, each positioned over its
+	 *  tab's placeholder pane. No render ever touches this layer — a re-parented iframe
+	 *  loses its browsing context and reloads (WKWebView reloads the page, interrupting the
+	 *  extension chat mid-conversation), so a frame must never sit inside the rebuilt tree. */
+	private readonly overlayLayer: HTMLElement;
+	/** The live overlays: one per open extension-page tab. */
+	private readonly overlays: ExtOverlay[] = [];
+	/** A pending overlay-placement frame id (0 = none). */
+	private overlaySyncPending = 0;
 	/** Assigned in the constructor; until then a group's first `update()` (fired by the
 	 *  render-welcome wiring) must not touch the tree, hence the tolerant `leaves`. */
 	private root!: Node;
@@ -84,6 +104,29 @@ export class EditorArea {
 	constructor(container: HTMLElement) {
 		this.container = container;
 		container.classList.add('editor-area');
+		// The area's two permanent children: the group tree's root, which `render()` rebuilds,
+		// and the webview overlay layer, which nothing rebuilds — an extension page's frame
+		// keeps its DOM home (and so its browsing context) across every layout change.
+		this.groupsRoot = el('div', 'editor-groups-root');
+		this.overlayLayer = el('div', 'ext-overlay-layer');
+		container.append(this.groupsRoot, this.overlayLayer);
+		// Every mutation under the group tree (a layout rebuild, a pane's `hidden`, a sash's
+		// flexGrow, a tab moved between groups) can move or resize a placeholder: the hosts
+		// follow on the next frame. Resizes that change no DOM inside the tree — a window
+		// resize, a sidebar toggle — arrive through the per-placeholder observers and this
+		// window listener.
+		new MutationObserver(() => this.scheduleOverlaySync())
+			.observe(this.groupsRoot, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'class', 'style'] });
+		const onResize = () => {
+			// The workbench's one area never detaches; a test's does, and takes its listener
+			// with it rather than leaking one per constructed area.
+			if (!container.isConnected) {
+				window.removeEventListener('resize', onResize);
+				return;
+			}
+			this.scheduleOverlaySync();
+		};
+		window.addEventListener('resize', onResize);
 		this.root = { kind: 'leaf', box: this.makeBox() };
 		this.render();
 		this.reassignWelcome();
@@ -108,6 +151,48 @@ export class EditorArea {
 	/** The group commands act on: the focused one, or the first. */
 	get activeGroup(): EditorGroup {
 		return this.focused?.group ?? this.groups()[0]!;
+	}
+
+	/** VS Code's group lock (`workbench.action.lock/unlockEditorGroup`): a locked group
+	 *  keeps its editors — placed opens land elsewhere (`groupForPlacement`) — and its box
+	 *  wears the lock badge. */
+	setGroupLock(group: EditorGroup, lock: boolean): void {
+		group.locked = lock;
+		this.leafBoxOf(group)?.el.classList.toggle('locked', lock);
+	}
+
+	/** The closed-tabs stack behind VS Code's `workbench.action.reopenClosedEditor`
+	 *  (Ctrl+Shift+T): the inputs that can re-open, newest first, capped like a history. */
+	private readonly closedStack: { group: EditorGroup; open: (group: EditorGroup) => void }[] = [];
+
+	/** Reopen the most recently closed tab, in the group it closed from — the active group
+	 *  once that layer is gone. Not every close left something re-openable (an extension
+	 *  page's mount lives with its open call); those closes simply skip the stack. */
+	reopenClosed(): void {
+		const entry = this.closedStack.shift();
+		if (!entry) return;
+		entry.open(this.groups().includes(entry.group) ? entry.group : this.activeGroup);
+	}
+
+	/** The re-open call for a closing editor's input, when the input carries everything its
+	 *  open needs: files and CAN logs, diffs, content tabs, folder compares, analysis pages,
+	 *  the symbol database, markdown previews, file histories, hex views, help pages. */
+	private reopenOf(editor: Editor): ((group: EditorGroup) => void) | null {
+		const input = editor.input;
+		switch (input.kind) {
+			case 'file': return (group) => void group.openFile(input.path);
+			case 'diff': return (group) => void group.openDiff(input);
+			case 'content': return (group) => void group.openContent(input);
+			case 'folders': return (group) => group.openFolderCompare(input);
+			case 'symboldb': return (group) => group.openSymbolDatabase();
+			case 'analysis': return (group) => group.openAnalysisPage(input.tool, input.folders);
+			case 'markdown': return (group) => void group.openMarkdownPreview(input.path);
+			case 'history': return (group) => void group.openFileHistory(input.path);
+			case 'hex': return (group) => void group.openHex(input.path);
+			case 'canlog': return (group) => void group.openFile(input.path);
+			case 'help': return (group) => group.openHelp(input.help);
+		}
+		return null;
 	}
 
 	/** Close the tab with this input id in whichever group holds it (the extension host
@@ -248,17 +333,28 @@ export class EditorArea {
 	 *  editor takes the other; a 1-based index answers that group, splitting right until
 	 *  it exists (VS Code creates missing columns); `undefined` is the focused group. */
 	private groupForPlacement(placement?: EditorPlacement): EditorGroup {
-		if (placement === undefined) return this.activeGroup;
+		if (placement === undefined) {
+			// A locked group receives no new editors (VS Code's group lock — claude-code locks
+			// its chat's group right after opening it): the open lands in the first unlocked
+			// group, and only in the locked one when every group is locked.
+			const active = this.activeGroup;
+			if (!active.locked) return active;
+			return this.groups().find((group) => !group.locked) ?? active;
+		}
 		if (placement === 'beside') {
 			// The remembered side layer is the destination while it lives — even when the
-			// focus moved into it (clicking inside a webview never refocuses its group).
-			if (this.besideGroup !== null && this.groups().includes(this.besideGroup)) return this.besideGroup;
+			// focus moved into it (clicking inside a webview never refocuses its group) —
+			// unless that layer is locked now.
+			if (this.besideGroup !== null && this.groups().includes(this.besideGroup) && !this.besideGroup.locked) return this.besideGroup;
 			const active = this.activeGroup;
 			// An empty focused group is where the content belongs — nothing is open to sit
 			// beside (the caller's surface is a sidebar view, not an editor tab).
 			if (active.openEditorIds().length === 0 || this.groupCount >= 8) return active;
 			const source = this.leafOfBox(this.focused) ?? this.leaves()[0]!;
-			const target = this.neighbor(source, 'right') ?? this.insertBeside(source, 'right');
+			// A locked right neighbour is no destination either: a fresh split beside the
+			// source takes the content instead of piling into the pinned layer.
+			const neighbour = this.neighbor(source, 'right');
+			const target = neighbour === null || neighbour.box.group.locked ? this.insertBeside(source, 'right') : neighbour;
 			this.render();
 			this.besideGroup = target.box.group;
 			return target.box.group;
@@ -431,17 +527,22 @@ export class EditorArea {
 		// The first group owns the welcome page; `reassignWelcome` sorts that out after the
 		// tree change, so a box is created welcome-less here (the tree may not exist yet).
 		group.showWelcome = false;
+		// The locked-group badge (VS Code's marker) over the tab strip's right edge, shown
+		// by the box's `locked` class.
+		elBox.appendChild(el('div', 'group-lock', [icon('lock')]));
 		const box: GroupBox = { el: elBox, group };
 		this.wire(group, elBox);
 		return box;
 	}
 
 	/** Rebuild the DOM from the layout tree. The panes themselves (each group's tab strip and
-	 *  editors) are moved, not recreated. */
+	 *  editors) are moved, not recreated — and an extension page's frame is not even moved:
+	 *  it lives in the overlay layer, over the placeholder pane its tab keeps here. */
 	private render(): void {
-		this.container.textContent = '';
-		this.renderNode(this.root, this.container);
+		this.groupsRoot.textContent = '';
+		this.renderNode(this.root, this.groupsRoot);
 		if (this.focused) this.focused.el.classList.add('focused');
+		this.scheduleOverlaySync();
 	}
 
 	private renderNode(node: Node, host: HTMLElement): void {
@@ -530,6 +631,66 @@ export class EditorArea {
 		return sash;
 	}
 
+	/* ---------- The webview overlay layer ---------- */
+
+	/** An extension page's stable frame home: the pane stays in the group tree as the
+	 *  positioned placeholder, and the host the frame mounts into lives in the overlay
+	 *  layer, where no layout change ever re-parents it. The disposer runs when the tab
+	 *  closes. */
+	private attachExtOverlay(placeholder: HTMLElement): { host: HTMLElement; dispose: () => void } {
+		const host = el('div', 'ext-overlay-host');
+		this.overlayLayer.appendChild(host);
+		const entry: ExtOverlay = { host, placeholder, resize: null };
+		// The area-level mutation observer cannot see a placeholder resize that changed no
+		// DOM inside the tree (a window resize, a sidebar toggle, a settings-driven metrics
+		// change), so each placeholder carries its own observer where the platform has one
+		// (jsdom does not — its zero-size boxes make placement a no-op there anyway).
+		if (typeof ResizeObserver !== 'undefined') {
+			entry.resize = new ResizeObserver(() => this.scheduleOverlaySync());
+			entry.resize.observe(placeholder);
+		}
+		this.overlays.push(entry);
+		this.placeOverlay(entry);
+		return {
+			host,
+			dispose: () => {
+				const index = this.overlays.indexOf(entry);
+				if (index !== -1) this.overlays.splice(index, 1);
+				entry.resize?.disconnect();
+				host.remove();
+			}
+		};
+	}
+
+	/** Position one overlay's host exactly over its placeholder pane, or hide it while the
+	 *  placeholder is hidden or gone (another tab showing, the tab closed) — the frame
+	 *  beneath keeps running either way, as a pane-hidden pane always kept its iframe. */
+	private placeOverlay(entry: ExtOverlay): void {
+		const { host, placeholder } = entry;
+		if (!placeholder.isConnected || placeholder.hidden) {
+			host.style.display = 'none';
+			return;
+		}
+		const base = this.overlayLayer.getBoundingClientRect();
+		const box = placeholder.getBoundingClientRect();
+		host.style.display = 'block';
+		host.style.left = `${box.left - base.left}px`;
+		host.style.top = `${box.top - base.top}px`;
+		host.style.width = `${box.width}px`;
+		host.style.height = `${box.height}px`;
+	}
+
+	/** Re-place every overlay on the next frame: mutations and resizes arrive in bursts (a
+	 *  layout rebuild, a sash drag), and one placement per frame reads layout once. */
+	private scheduleOverlaySync(): void {
+		if (this.overlaySyncPending) return;
+		const raf = window.requestAnimationFrame?.bind(window) ?? ((callback: () => void) => window.setTimeout(callback, 16) as unknown as number);
+		this.overlaySyncPending = raf(() => {
+			this.overlaySyncPending = 0;
+			for (const entry of this.overlays) this.placeOverlay(entry);
+		});
+	}
+
 	/* ---------- Group wiring ---------- */
 
 	private wire(group: EditorGroup, boxEl: HTMLElement): void {
@@ -560,6 +721,17 @@ export class EditorArea {
 		group.renderHelp = (help, container) => this.renderHelp?.(help, container);
 		group.renderSelfTest = (container) => this.renderSelfTest?.(container);
 		group.renderProviders = (container) => this.renderProviders?.(container);
+		// The overlay service the group's extension pages mount through: the pane stays in
+		// this tree, the frame lives in the overlay layer above it.
+		group.extOverlayHost = (placeholder) => this.attachExtOverlay(placeholder);
+		// A tab closing here feeds the reopen-closed stack when its input can re-open.
+		group.onEditorClosed = (editor) => {
+			const open = this.reopenOf(editor);
+			if (open) {
+				this.closedStack.unshift({ group, open });
+				if (this.closedStack.length > 50) this.closedStack.length = 50;
+			}
+		};
 		// A tab dragged from another group drops here (the payload lives in `tabDrag`).
 		boxEl.addEventListener('dragover', (event) => {
 			if (tabDrag.editor && tabDrag.groupId !== group.groupId) {

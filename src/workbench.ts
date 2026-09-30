@@ -202,7 +202,11 @@ export class Workbench {
 		// opens diffs and revisions, shows the SCM view, runs the terminal, and nudges the
 		// workbench after its own writes — the delegate the graph page acts through).
 		this.extensionHost.onOpenDiff = (diff: PageDiffRequest, placement) => void this.editors.openDiff({ kind: 'diff', ...diff }, placement);
-		this.extensionHost.onOpenContent = (title, path, text, placement) => void this.editors.openContent({ kind: 'content', id: `ext-content:${title}`, title, path, text }, placement);
+		// The tab's id keys the DOCUMENT, not its label: the chat's read-only outputs and code
+		// blocks are provider documents whose paths differ while their titles (basenames)
+		// collide — an id keyed on the title would reveal the first tab for the second
+		// document, showing the wrong content.
+		this.extensionHost.onOpenContent = (title, path, text, placement) => void this.editors.openContent({ kind: 'content', id: `ext-content:${path || title}`, title, path, text }, placement);
 		this.extensionHost.onOpenFileAtRevision = (revision, path, title, repo) => void this.editors.openRevision(revision, path, title, repo);
 		this.extensionHost.onShowView = (id) => this.showView(id as never);
 		this.extensionHost.onRevealTerminal = () => this.panel.show('terminal');
@@ -257,8 +261,19 @@ export class Workbench {
 		register({ id: 'workbench.focusFirstEditorGroup', title: 'Focus First Editor Group', category: 'View', keybinding: 'Ctrl+1', run: () => this.editors.focusIndex(0) });
 		register({ id: 'workbench.focusSecondEditorGroup', title: 'Focus Second Editor Group', category: 'View', keybinding: 'Ctrl+2', run: () => this.editors.focusIndex(1) });
 		register({ id: 'workbench.focusThirdEditorGroup', title: 'Focus Third Editor Group', category: 'View', keybinding: 'Ctrl+3', run: () => this.editors.focusIndex(2) });
+		// VS Code's canonical spellings of the same focus commands — extensions call these
+		// (claude-code hands the focus back to the code with them after opening its chat).
+		// Palette-hidden: the rows above already carry the keybindings.
+		register({ id: 'workbench.action.focusFirstEditorGroup', title: 'Focus First Editor Group', category: 'View', paletteHidden: () => true, run: () => this.editors.focusIndex(0) });
+		register({ id: 'workbench.action.focusSecondEditorGroup', title: 'Focus Second Editor Group', category: 'View', paletteHidden: () => true, run: () => this.editors.focusIndex(1) });
+		register({ id: 'workbench.action.focusThirdEditorGroup', title: 'Focus Third Editor Group', category: 'View', paletteHidden: () => true, run: () => this.editors.focusIndex(2) });
 		register({ id: 'workbench.splitEditor', title: 'Split Editor', category: 'View', keybinding: 'Ctrl+\\', run: () => this.editors.splitEditor('right') });
 		register({ id: 'workbench.splitEditorDown', title: 'Split Editor Down', category: 'View', keybinding: 'Ctrl+K Ctrl+\\', run: () => this.editors.splitEditor('down') });
+		// The group lock (claude-code locks its chat's group right after opening it, as it
+		// does in VS Code — a locked group keeps its editors, placed opens land elsewhere).
+		register({ id: 'workbench.action.lockEditorGroup', title: 'Lock Editor Group', category: 'View', enabled: () => !this.editors.activeGroup.locked, run: () => this.editors.setGroupLock(this.editors.activeGroup, true) });
+		register({ id: 'workbench.action.unlockEditorGroup', title: 'Unlock Editor Group', category: 'View', enabled: () => this.editors.activeGroup.locked, run: () => this.editors.setGroupLock(this.editors.activeGroup, false) });
+		register({ id: 'workbench.action.reopenClosedEditor', title: 'Reopen Closed Editor', category: 'View', keybinding: 'Ctrl+Shift+T', run: () => this.editors.reopenClosed() });
 		register({ id: 'workbench.openSettings', title: 'Settings', category: 'Preferences', keybinding: 'Ctrl+,', run: () => openSettingsPanel() });
 		register({ id: 'workbench.exit', title: 'Exit', category: 'File', keybinding: 'Alt+F4', run: () => getCurrentWindow().close() });
 
@@ -373,7 +388,7 @@ export class Workbench {
 			] },
 			'separator', item('editor.toggleWordWrap'), 'separator', item('markdown.showPreview'), item('markdown.showPreviewToSide'), item('git.openFileHistory'), item('git.toggleBlame'), 'separator',
 				{ label: 'Editor Layout', submenu: [
-				item('workbench.splitEditor'), item('workbench.splitEditorDown'), 'separator', item('workbench.focusFirstEditorGroup'), item('workbench.focusSecondEditorGroup'), item('workbench.focusThirdEditorGroup')
+				item('workbench.splitEditor'), item('workbench.splitEditorDown'), 'separator', item('workbench.focusFirstEditorGroup'), item('workbench.focusSecondEditorGroup'), item('workbench.focusThirdEditorGroup'), 'separator', item('workbench.action.lockEditorGroup'), item('workbench.action.unlockEditorGroup'), item('workbench.action.reopenClosedEditor')
 				] },
 				{ label: 'Appearance', submenu: [
 					{ label: 'Primary Side Bar', checked: state.layout.sidebarVisible, keybinding: 'Ctrl+B', run: () => this.toggleSidebar() },
@@ -750,6 +765,10 @@ export class Workbench {
 				if (viewIds.length === 0) continue;
 				this.sidebar.appendChild(element);
 				this.extContainers.set(key, { element, viewIds });
+				// VS Code generates a focus command per views container (`<container-id>.focus`)
+				// — claude-code's chat calls its own to reveal its sidebar container from inside
+				// a panel. Re-registering on every rebuild keeps it pointing at the live one.
+				commands.register({ id: `${container.id}.focus`, title: tf('workbench.focusViewContainer', container.title), category: 'View', enabled: () => this.extContainers.has(key), run: () => this.showView(key) });
 				const item = el('div', 'activity-item', [icon('list-tree')]);
 				item.title = container.title;
 				item.setAttribute('role', 'button');
