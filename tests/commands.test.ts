@@ -151,13 +151,15 @@ describe('every command of the workbench', () => {
 		// running handler, they stay disabled - expected skips, not coverage the sweep lost.
 		// Six workbench commands are legitimately disabled in this exact workspace - a clean
 		// plain-text file (save/saveAll have nothing dirty, markdown preview needs markdown,
-		// gotoSymbolInFile needs an outline) plus initRepository (a repository is open):
-		// VS Code disables them here too. Everything else must be swept.
+		// python.runFile needs python, gotoSymbolInFile needs an outline) plus
+		// initRepository (a repository is open): VS Code disables them here too. Everything
+		// else must be swept.
 		const contextual = new Set([
 			'workbench.save',
 			'workbench.saveAll',
 			'markdown.showPreview',
 			'markdown.showPreviewToSide',
+			'python.runFile',
 			'workbench.gotoSymbolInFile',
 			'git.initRepository'
 		]);
@@ -204,6 +206,27 @@ describe('every command of the workbench', () => {
 		expect(workbench.editors.activeGroup.locked).toBe(false);
 		await commands.execute('workbench.action.focusFirstEditorGroup');
 		expect(workbench.editors.focusedIndex).toBe(0);
+	});
+
+	it('python.runFile runs the active .py file in the terminal (the tab-strip run button)', async () => {
+		const workbench = await bootWithRepo();
+		await workbench.editors.openFile(`${REPO}\\main.py`);
+		await flush(6);
+		// A Python file active: the command enables and the run button rides the tab strip.
+		expect(commands.isEnabled('python.runFile')).toBe(true);
+		expect(document.querySelector('.python-run-button')).not.toBeNull();
+		await commands.execute('python.runFile');
+		await flush(10);
+		// The terminal opened and the interpreter line was typed into its shell. The
+		// spelling follows the platform exactly as the command reads it.
+		const python = /^win/i.test(navigator.platform ?? '') ? 'python' : 'python3';
+		const writes = backend.callsTo('pty_write').map((args) => args.data);
+		expect(writes).toContain(`${python} "${REPO}\\main.py"\r`);
+		// Not a Python file: the command disables and the button is gone.
+		await workbench.editors.openFile(`${REPO}\\notes.txt`);
+		await flush(6);
+		expect(commands.isEnabled('python.runFile')).toBe(false);
+		expect(document.querySelector('.python-run-button')).toBeNull();
 	});
 
 	it('menus name registered commands only, and keybindings are unique', async () => {

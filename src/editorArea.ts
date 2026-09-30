@@ -10,7 +10,7 @@
 import { EditorGroup, askToSaveMany, tabDrag, type Editor, type EditorInput, type EditorPlacement } from './editor';
 import { setDecorationRanges } from './editorDecorations';
 import type { EditorGridCell } from './state';
-import { el, icon } from './ui';
+import { el } from './ui';
 import type { EditorView } from '@codemirror/view';
 
 /** One editor group in the grid: its box element and its group. */
@@ -86,6 +86,9 @@ export class EditorArea {
 	onSaveProgress: ((progress: { written: number; total: number } | null) => void) | null = null;
 	onMergeResolved: (() => void) | null = null;
 	onExternalFileChange: (() => void) | null = null;
+	/** A `.py` file's tab-strip run button was clicked: the workbench opens the terminal and
+	 *  runs the file there (the area reaches no panel). */
+	onRunInTerminal: ((path: string) => void) | null = null;
 	private welcomeRenderer: ((container: HTMLElement) => void) | null = null;
 	/** The welcome-page renderer, late-assigned by the workbench: setting it re-renders every
 	 *  group that is showing the welcome page, so a freshly-built shell does not sit blank. */
@@ -155,11 +158,22 @@ export class EditorArea {
 	}
 
 	/** VS Code's group lock (`workbench.action.lock/unlockEditorGroup`): a locked group
-	 *  keeps its editors — placed opens land elsewhere (`groupForPlacement`) — and its box
-	 *  wears the lock badge. */
+	 *  keeps its editors — placed opens land elsewhere (`groupForPlacement`) — its box
+	 *  carries the state class and its tab strip re-renders, where the lock badge lives
+	 *  (in flow after the title actions, covering nothing). */
 	setGroupLock(group: EditorGroup, lock: boolean): void {
 		group.locked = lock;
 		this.leafBoxOf(group)?.el.classList.toggle('locked', lock);
+		group.update();
+	}
+
+	/** A tab's icon, set after its open (a webview panel opens before its package icon's
+	 *  read answers). The first group holding the input id wins, as `renameById`. */
+	setIconSrc(id: string, iconSrc: string): boolean {
+		for (const group of this.groups()) {
+			if (group.setIconSrc(id, iconSrc)) return true;
+		}
+		return false;
 	}
 
 	/** The closed-tabs stack behind VS Code's `workbench.action.reopenClosedEditor`
@@ -538,9 +552,8 @@ export class EditorArea {
 		// The first group owns the welcome page; `reassignWelcome` sorts that out after the
 		// tree change, so a box is created welcome-less here (the tree may not exist yet).
 		group.showWelcome = false;
-		// The locked-group badge (VS Code's marker) over the tab strip's right edge, shown
-		// by the box's `locked` class.
-		elBox.appendChild(el('div', 'group-lock', [icon('lock')]));
+		// The locked-group badge (VS Code's marker) renders in the group's tab strip (in
+		// flow, after the title actions) whenever the group re-renders its tabs locked.
 		const box: GroupBox = { el: elBox, group };
 		this.wire(group, elBox);
 		return box;
@@ -728,6 +741,7 @@ export class EditorArea {
 		group.onMergeResolved = () => this.onMergeResolved?.();
 		group.onExternalFileChange = () => this.onExternalFileChange?.();
 		group.onOpenPreviewToSide = (path) => void this.openMarkdownPreviewToSide(path);
+		group.onRunInTerminal = (path) => this.onRunInTerminal?.(path);
 		group.renderWelcome = (container) => this.renderWelcome?.(container);
 		group.renderHelp = (help, container) => this.renderHelp?.(help, container);
 		group.renderSelfTest = (container) => this.renderSelfTest?.(container);
@@ -952,8 +966,21 @@ export class EditorArea {
 	openSymbolDatabase = () => this.activeGroup.openSymbolDatabase();
 	openAnalysisPage = (tool: import('./analysisTools').AnalysisToolId, folders?: string[]) => this.activeGroup.openAnalysisPage(tool, folders);
 	/** An extension page tab (module 12): mounts through the active group, like every other
-	 *  custom editor kind. */
-	openExtPage = (input: import('./editor').EditorInput & { kind: 'extpage' }, mount: (pane: HTMLElement) => (() => void) | void, iconSrc?: string | null) => this.activeGroup.openExtPage(input, mount, iconSrc);
+	 *  custom editor kind — or, with a placement (a webview panel's `ViewColumn`), in the
+	 *  group that placement names (`groupForPlacement`), focused as VS Code focuses the
+	 *  column a panel opens in unless `preserveFocus` held (`focus`). */
+	openExtPage = (input: import('./editor').EditorInput & { kind: 'extpage' }, mount: (pane: HTMLElement) => (() => void) | void, iconSrc?: string | null, placement?: EditorPlacement, focus?: boolean) => {
+		if (placement === undefined) {
+			this.activeGroup.openExtPage(input, mount, iconSrc);
+			return;
+		}
+		const group = this.groupForPlacement(placement);
+		group.openExtPage(input, mount, iconSrc);
+		if (focus) {
+			const box = this.leafBoxOf(group);
+			if (box) this.focus(box);
+		}
+	};
 	/** The Extensions view's detail page tab (module 12): the same mounting path. */
 	openExtDetail = (input: import('./editor').EditorInput & { kind: 'extdetail' }, mount: (pane: HTMLElement) => (() => void) | void) => this.activeGroup.openExtDetail(input, mount);
 	gotoSymbolInFile = () => this.activeGroup.gotoSymbolInFile();

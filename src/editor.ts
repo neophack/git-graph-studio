@@ -438,6 +438,9 @@ export class EditorGroup {
 	/** The tab strip's preview button was clicked: the editor area opens the preview beside
 	 *  the group (a group cannot split itself). */
 	onOpenPreviewToSide: ((path: string) => void) | null = null;
+	/** The tab strip's run button was clicked (a `.py` file's): the workbench opens the
+	 *  terminal and runs the file there (a group reaches no panel). */
+	onRunInTerminal: ((path: string) => void) | null = null;
 
 	/** Toggling the outline setting (Settings → Editor) shows or hides it on every open file;
 	 *  the tab-size and word-wrap settings reconfigure the open editors in place. */
@@ -2361,6 +2364,17 @@ export class EditorGroup {
 		return true;
 	}
 
+	/** Set an already-open tab's icon in place — a webview panel opens before its package
+	 *  icon's read answers, and the icon joins the tab when it does (the globe until
+	 *  then). Answers whether a tab here carries the id. */
+	setIconSrc(id: string, iconSrc: string): boolean {
+		const editor = this.open.find((e) => e.id === id);
+		if (!editor) return false;
+		editor.iconSrc = iconSrc;
+		this.update();
+		return true;
+	}
+
 	/** Whether a tab with this input id is open here (the editor area's revealById scans
 	 *  the groups with it). */
 	hasEditor(id: string): boolean {
@@ -3073,9 +3087,16 @@ export class EditorGroup {
 			});
 			this.tabs.appendChild(tab);
 		}
-		// A Markdown file's tab strip carries the preview button VS Code shows: it opens the
-		// rendered view beside the group (already-open previews are just revealed).
+		// The tab strip's one action cluster at its right edge. A Markdown file's preview
+		// button (VS Code shows it there) sits beside the extensions' `editor/title` actions
+		// for the active file: the `navigation` group as buttons (the manifest's own icon —
+		// codicon or package image — else the title), the rest behind "…", each run with the
+		// file's Uri as VS Code passes it. One container, never one per source:
+		// `tab-actions` centers itself with `margin-left: auto`, and two of them split the
+		// strip's free space between themselves — the Markdown button marooned mid-strip,
+		// apart from the title actions it belongs beside.
 		const active = this.active;
+		const actions: HTMLElement[] = [];
 		if (active?.input.kind === 'file' && /\.(md|markdown)$/i.test(active.input.path)) {
 			const button = el('button', 'markdown-preview-button', [icon('open-preview')]);
 			button.title = 'Open Preview to the Side (Ctrl+K V)';
@@ -3083,17 +3104,24 @@ export class EditorGroup {
 				event.stopPropagation();
 				this.onOpenPreviewToSide?.(active.input.kind === 'file' ? active.input.path : '');
 			});
-			this.tabs.appendChild(el('div', 'tab-actions', [button]));
+			actions.push(button);
 		}
-		// The extensions' `editor/title` actions for the active file: the `navigation`
-		// group as buttons (the manifest's own icon — codicon or package image — else the
-		// title), the rest behind "…", each run with the file's Uri as VS Code passes it.
+		// A Python file's run button, VS Code's Run Python File: the terminal opens with the
+		// file's interpreter line ready to run.
+		if (active?.input.kind === 'file' && /\.py$/i.test(active.input.path)) {
+			const button = el('button', 'markdown-preview-button python-run-button', [icon('play')]);
+			button.title = t('python.runFile');
+			button.addEventListener('click', (event) => {
+				event.stopPropagation();
+				this.onRunInTerminal?.(active.input.kind === 'file' ? active.input.path : '');
+			});
+			actions.push(button);
+		}
 		if (active?.input.kind === 'file') {
 			const path = active.input.path;
 			const entries = resolvedMenuEntries('editor/title', resourceContext(path));
 			if (entries.length > 0) {
 				const args = [contextUri(path), [contextUri(path)]];
-				const actions: HTMLElement[] = [];
 				for (const entry of entries.filter((candidate) => candidate.group === 'navigation')) {
 					const button = el('button', 'markdown-preview-button ext-editor-action', commandIconContent(entry, entry.label, extFileDataUrl));
 					button.title = entry.label;
@@ -3113,8 +3141,16 @@ export class EditorGroup {
 					});
 					actions.push(more);
 				}
-				this.tabs.appendChild(el('div', 'tab-actions', actions));
 			}
+		}
+		if (actions.length > 0) this.tabs.appendChild(el('div', 'tab-actions', actions));
+		// The locked-group badge (VS Code's marker) as the tab strip's last item, in flow
+		// after the title actions — a marker beside them, never an overlay covering them
+		// (the Claude button a claude-code install contributes sits right there).
+		if (this.locked) {
+			const badge = el('div', 'group-lock', [icon('lock')]);
+			badge.title = t('editor.groupLocked');
+			this.tabs.appendChild(badge);
 		}
 	}
 

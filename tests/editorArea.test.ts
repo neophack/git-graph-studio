@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { EditorArea } from '../src/editorArea';
 import { tabDrag } from '../src/editor';
+import { applyContributions, removeContributions } from '../src/contributions';
 import { SETTINGS_EVENT } from '../src/settings';
 import { backend } from './tauriMock';
 import { click, flush, notificationButton, notifications, texts } from './helpers';
@@ -282,7 +283,13 @@ describe('editor area (M3 3.1)', () => {
 		// The lock claude-code asks for: the chat's group keeps its editors.
 		area.setGroupLock(right, true);
 		expect(right.locked).toBe(true);
-		expect(document.querySelector('.editor-group-box.locked .group-lock')).not.toBeNull();
+		const badge = document.querySelector('.editor-group-box.locked .group-lock')!;
+		expect(badge).not.toBeNull();
+		// The badge is the tab strip's own last item, in flow after the title actions — a
+		// marker beside them, never an overlay covering them (an extension's title button
+		// sits at that edge; the absolute overlay once ate the Claude one whole).
+		expect(badge.closest('.tabs-container')).not.toBeNull();
+		expect(badge.querySelector('.codicon-lock')).not.toBeNull();
 
 		// An open without a placement while the locked group is focused lands in the other
 		// group — the chat layer is never the destination.
@@ -302,9 +309,49 @@ describe('editor area (M3 3.1)', () => {
 		// Unlocking restores the group as a destination for its own opens.
 		area.setGroupLock(right, false);
 		expect(document.querySelector('.editor-group-box.locked')).toBeNull();
+		expect(document.querySelector('.group-lock')).toBeNull();
 		area.focusIndex(1);
 		await area.openFile('C:\\repo\\c.ts');
 		expect(right.openFilePaths()).toEqual(['C:\\repo\\b.ts', 'C:\\repo\\c.ts']);
+	});
+
+	it('a placed webview panel opens its own side group — the lock claude-code asks for lands on the chat, not the code', async () => {
+		files({ 'C:\\repo\\a.ts': 'a\n' });
+		const area = new EditorArea(document.getElementById('editorGroup')!);
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
+		const code = area.activeGroup;
+		// claude-code's chat panel: ViewColumn.Beside with no preserveFocus — the create's
+		// showOptions reach the open as placement plus focus, as in VS Code.
+		await area.openExtPage({ kind: 'extpage', id: 'webview:claude:1', title: 'Claude Code', extId: 'claude', pageId: 'webview' }, () => undefined, null, 'beside', true);
+		expect(area.groupCount).toBe(2);
+		const chat = area.activeGroup;
+		expect(chat).not.toBe(code);
+		expect(chat.activeInput?.kind).toBe('extpage');
+		// The lock the extension runs right after its create (`workbench.action.lock
+		// EditorGroup` locks the focused group): with the chat's group focused, the code's
+		// group stays unlocked — its tab strip keeps every title action clear.
+		area.setGroupLock(area.activeGroup, true);
+		expect(chat.locked).toBe(true);
+		expect(code.locked).toBe(false);
+		const boxes = document.querySelectorAll('.editor-group-box');
+		expect(boxes[1]!.querySelector('.group-lock')).not.toBeNull();
+		expect(boxes[0]!.querySelector('.group-lock')).toBeNull();
+	});
+
+	it('a webview panel tab opens at once and its package icon joins it when the read answers', async () => {
+		files({ 'C:\\repo\\a.ts': 'a\n' });
+		const area = new EditorArea(document.getElementById('editorGroup')!);
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
+		await area.openExtPage({ kind: 'extpage', id: 'webview:x:1', title: 'Chat', extId: 'x', pageId: 'webview' }, () => undefined, null);
+		const tabOf = () => [...document.querySelectorAll('.tab')].find((entry) => entry.textContent?.includes('Chat'))!;
+		// The globe placeholder stands in until the icon's data URL arrives.
+		expect(tabOf().querySelector('.icon .codicon-globe')).not.toBeNull();
+		expect(area.setIconSrc('webview:x:1', 'data:image/svg+xml;base64,AAA')).toBe(true);
+		// renderTabs rebuilds the strip: the fresh tab carries the image.
+		expect(tabOf().querySelector('.icon img')?.getAttribute('src')).toBe('data:image/svg+xml;base64,AAA');
+		expect(area.setIconSrc('webview:missing:1', 'x')).toBe(false);
 	});
 
 	it('the reopen-closed stack restores the last closed tab where it closed', async () => {
@@ -444,6 +491,87 @@ describe('editor area (M3 3.1)', () => {
 		await flush();
 		expect(area.groupCount).toBe(2);
 		expect(area.groups()[1]!.openEditorIds()).toEqual(['markdown:C:\\repo\\NOTE.md']);
+	});
+
+	it('a markdown file\'s preview button shares the one action cluster with the extensions\' title actions', async () => {
+		// claude-code contributes an editor/title navigation action (the Claude button);
+		// a .md file adds the preview button. Both must ride ONE `tab-actions` container —
+		// two would split the strip's free space between their `margin-left: auto`s and
+		// maroon the preview button mid-strip, apart from the title actions.
+		files({ 'C:\\repo\\README.md': '# t\n' });
+		applyContributions('acme.demo', {
+			commands: [{ command: 'acme.demo.open', title: 'Open Side Panel' }],
+			menus: { 'editor/title': [{ command: 'acme.demo.open', group: 'navigation' }] }
+		}, {}, () => undefined, () => true);
+		try {
+			const area = new EditorArea(document.getElementById('editorGroup')!);
+			area.setRoot('C:\\repo');
+			await area.openFile('C:\\repo\\README.md');
+			const clusters = document.querySelectorAll('.tabs-container .tab-actions');
+			expect(clusters).toHaveLength(1);
+			const cluster = clusters[0]!;
+			expect(cluster.querySelector('.markdown-preview-button:not(.ext-editor-action)')).not.toBeNull();
+			expect(cluster.querySelector('.ext-editor-action')).not.toBeNull();
+			// The preview button leads the cluster, the title actions follow it.
+			expect(cluster.firstElementChild!.classList.contains('markdown-preview-button')).toBe(true);
+			// A non-markdown file shows the title actions alone — no preview button.
+			files({ 'C:\\repo\\README.md': '# t\n', 'C:\\repo\\a.ts': 'a\n' });
+			await area.openFile('C:\\repo\\a.ts');
+			const only = document.querySelector('.tabs-container .tab-actions')!;
+			expect(only.querySelector('.markdown-preview-button:not(.ext-editor-action)')).toBeNull();
+			expect(only.querySelector('.ext-editor-action')).not.toBeNull();
+		} finally {
+			removeContributions('acme.demo');
+		}
+	});
+
+	it('a python file\'s run button joins the action cluster and reports its path', async () => {
+		files({ 'C:\\repo\\main.py': 'print(1)\n', 'C:\\repo\\a.ts': 'a\n' });
+		const area = new EditorArea(document.getElementById('editorGroup')!);
+		area.setRoot('C:\\repo');
+		const runs: string[] = [];
+		area.onRunInTerminal = (path) => runs.push(path);
+		await area.openFile('C:\\repo\\main.py');
+		const cluster = document.querySelector('.tabs-container .tab-actions')!;
+		const run = cluster.querySelector('.python-run-button')!;
+		expect(run).not.toBeNull();
+		click(run);
+		expect(runs).toEqual(['C:\\repo\\main.py']);
+		// The button is a .py file's alone: a .ts tab carries none.
+		await area.openFile('C:\\repo\\a.ts');
+		expect(document.querySelector('.python-run-button')).toBeNull();
+	});
+
+	it('an upgrade\'s fresh manifest re-renders the title button — whichever icon and placement the new version declares', async () => {
+		// The Claude button is the extension\'s own editor/title contribution; an upgrade
+		// must never lose it. What the host does on an install (reload(): drop the old
+		// contributions, apply the new manifest) is simulated here version by version —
+		// the rendering follows whatever the new manifest says, not any memory of the old.
+		files({ 'C:\\repo\\a.ts': 'a\n', 'C:\\repo\\b.ts': 'b\n' });
+		applyContributions('Anthropic.claude-code', {
+			commands: [{ command: 'claude-vscode.editor.openLast', title: 'Claude Code: Open', icon: { light: 'resources/claude-logo.svg', dark: 'resources/claude-logo.svg' } }],
+			menus: { 'editor/title': [{ command: 'claude-vscode.editor.openLast', when: '!config.claudeCode.useTerminal', group: 'navigation' }] }
+		}, {}, () => undefined, () => true);
+		const area = new EditorArea(document.getElementById('editorGroup')!);
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
+		const ofOld = document.querySelector('.ext-editor-action')!;
+		expect(ofOld.title).toBe('Claude Code: Open');
+
+		// The upgrade lands: the host re-applies the package's new manifest — here a future
+		// version that spells its icon as a codicon and keeps the same command.
+		removeContributions('Anthropic.claude-code');
+		applyContributions('Anthropic.claude-code', {
+			commands: [{ command: 'claude-vscode.editor.openLast', title: 'Claude Code: Open', icon: '$(play)' }],
+			menus: { 'editor/title': [{ command: 'claude-vscode.editor.openLast', group: 'navigation' }] }
+		}, {}, () => undefined, () => true);
+		await area.openFile('C:\\repo\\b.ts');
+		const buttons = document.querySelectorAll('.ext-editor-action');
+		expect(buttons).toHaveLength(1);
+		expect(buttons[0]!.title).toBe('Claude Code: Open');
+		expect(buttons[0]!.querySelector('.codicon-play')).not.toBeNull();
+		// The old version\'s image spelling is gone with it.
+		expect(buttons[0]!.querySelector('img')).toBeNull();
 	});
 
 	it('detaches a destroyed group\'s settings listener (collapse and grid rebuild)', async () => {
