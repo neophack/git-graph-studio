@@ -797,13 +797,15 @@
 				// A clean boot per distinct query string, the scroll mode's rule.
 				if (sessionStorage.getItem('full-clean') !== location.search) {
 					sessionStorage.setItem('full-clean', location.search);
-					// Clear the session junk but keep the extensions' mementos (extMemento.*):
-					// wiping them made every run forget the login state the previous run ended
-					// with — the claude wizard then greeted each run after a logout test.
+					// Clear the session junk but keep the extensions' mementos — the real keys
+					// carry the app storage's ggstudio. prefix (state.ts), so the keep matches
+					// that: wiping them made every run forget the login state the previous run
+					// ended with, and the claude wizard then greeted each run after a logout
+					// test (a keep that matched no real key wiped them all the same).
 					const kept = {};
 					for (let i = 0; i < localStorage.length; i++) {
 						const key = localStorage.key(i);
-						if (key && key.startsWith('extMemento.')) kept[key] = localStorage.getItem(key);
+						if (key && key.startsWith('ggstudio.extMemento.')) kept[key] = localStorage.getItem(key);
 					}
 					localStorage.clear();
 					for (const [key, value] of Object.entries(kept)) localStorage.setItem(key, value);
@@ -1520,7 +1522,10 @@
 									await sleep(500);
 									escapeOverlays();
 									try {
-										const key = 'extMemento.global.Anthropic.claude-code';
+										// The app's real memento key (state.ts's ggstudio. prefix) — the
+										// unprefixed name this once used matched nothing, so a logout
+										// poisoned every later run with the logged-out state.
+										const key = 'ggstudio.extMemento.global.Anthropic.claude-code';
 										const snap = window.__claudeMementoSnapshot;
 										if (snap === undefined) localStorage.removeItem(key);
 										else localStorage.setItem(key, snap);
@@ -1551,7 +1556,7 @@
 								'claude-vscode.createWorktree': openDismiss('claude-vscode.createWorktree'),
 								'claude-vscode.installPlugin': openDismiss('claude-vscode.installPlugin')
 							};
-							try { window.__claudeMementoSnapshot = localStorage.getItem('extMemento.global.Anthropic.claude-code'); } catch { /* private mode */ }
+							try { window.__claudeMementoSnapshot = localStorage.getItem('ggstudio.extMemento.global.Anthropic.claude-code'); } catch { /* private mode */ }
 							const CLAUDE_BUTTON_ORDER = ['claude-vscode.window.open', 'claude-vscode.focus', 'claude-vscode.focusLastMessage',
 								'claude-vscode.insertAtMention', 'claude-vscode.newConversation', 'claude-vscode.editor.openLast',
 								'claude-vscode.reopenClosedSession', 'claude-vscode.terminal.open', 'claude-vscode.blur',

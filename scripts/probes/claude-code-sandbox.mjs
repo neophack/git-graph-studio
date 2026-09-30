@@ -169,9 +169,16 @@ const buildSandbox = async () => {
 	remote.seededHead = sandboxGit(scratch, ['rev-parse', 'main']).stdout.trim();
 	// The fake login, sealed twice: the settings env map applies inside every claude session
 	// (even one spawned without our inherited env), and the process env carries it everywhere.
+	// AUTH_TOKEN is the load-bearing half: the extension spawns its sessions with
+	// CLAUDE_CODE_ENTRYPOINT=claude-vscode, and an IDE-entrypoint session accepts a gateway
+	// token (ANTHROPIC_AUTH_TOKEN) as its login but not a bare API key — the API-key-only
+	// shape left every in-app session answering "Not logged in · Please run /login" and the
+	// chat stuck on the login-choice wizard (the extension's 2.1.285 behaviour; the same
+	// reason the provider bridge writes both vars into Claude's settings).
 	writeFileSync(join(claudeConfigDir, 'settings.json'), JSON.stringify({
 		env: {
 			ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.port}`,
+			ANTHROPIC_AUTH_TOKEN: FAKE_KEY,
 			ANTHROPIC_API_KEY: FAKE_KEY,
 			DISABLE_TELEMETRY: '1',
 			DISABLE_ERROR_REPORTING: '1',
@@ -224,6 +231,7 @@ const preflight = () => {
 			...process.env,
 			CLAUDE_CONFIG_DIR: claudeConfigDir,
 			ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.port}`,
+			ANTHROPIC_AUTH_TOKEN: FAKE_KEY,
 			ANTHROPIC_API_KEY: FAKE_KEY,
 			DISABLE_TELEMETRY: '1',
 			DISABLE_ERROR_REPORTING: '1',
@@ -372,6 +380,7 @@ const run = async () => {
 		...process.env,
 		CLAUDE_CONFIG_DIR: claudeConfigDir,
 		ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.port}`,
+		ANTHROPIC_AUTH_TOKEN: FAKE_KEY,
 		ANTHROPIC_API_KEY: FAKE_KEY,
 		DISABLE_TELEMETRY: '1',
 		DISABLE_ERROR_REPORTING: '1',
