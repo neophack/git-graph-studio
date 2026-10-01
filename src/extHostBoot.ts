@@ -98,6 +98,10 @@ const registered = new Map<string, (...args: unknown[]) => unknown>();
  *  frame): the host's `vscode.open` / `vscode.diff` of a provider-scheme Uri calls back
  *  into the scheme's provider for the text. */
 const docProviders = new Map<string, { provideTextDocumentContent?: (uri: unknown) => unknown }>();
+/** The same for file-system providers — claude-code stages its change-review diffs'
+ *  both sides in in-memory `_claude_*_fs_*` schemes, and the host reads them back
+ *  through `fsProvider.read`. */
+const fsProviders = new Map<string, { readFile?: (uri: unknown) => unknown }>();
 
 function handleCall(method: string, args: unknown[]): unknown {
 	if (method === 'runCommand') {
@@ -111,6 +115,12 @@ function handleCall(method: string, args: unknown[]): unknown {
 		const provider = docProviders.get(String((args[0] as { scheme?: unknown } | undefined)?.scheme ?? ''));
 		if (!provider) throw new Error('no content provider registered for the scheme');
 		return provider.provideTextDocumentContent?.(args[0]);
+	}
+	if (method === 'fsProvider.read') {
+		const uri = rehydrateUris(args[0]) as Uri;
+	const text = readLocalDocProvider(new Map(), uri, fsProviders);
+		if (text === null) throw new Error('no file-system provider registered for the scheme');
+		return text;
 	}
 	if (method === 'deactivate') {
 		module_?.exports.deactivate?.();
@@ -211,9 +221,11 @@ function boot(message: InitMessage): void {
 		registerCommandHandler: (id, handler) => registered.set(id, handler),
 		registerDocProvider: (scheme, provider) => docProviders.set(scheme, provider),
 		unregisterDocProvider: (scheme) => docProviders.delete(scheme),
+		registerFsProvider: (scheme, provider) => fsProviders.set(scheme, provider),
+		unregisterFsProvider: (scheme) => fsProviders.delete(scheme),
 		// The frame's own registration answers locally — one postMessage round-trip fewer
 		// for the common case, on the same contract the process hosts serve.
-		readDocProvider: (uri) => readLocalDocProvider(docProviders, uri)
+		readDocProvider: (uri) => readLocalDocProvider(docProviders, uri, fsProviders)
 	});
 	api_ = api;
 	// The package-facing namespace carries the upgrade-safety probe (an absent member

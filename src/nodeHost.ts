@@ -72,16 +72,19 @@ function log(level: string, text: string): void {
 
 const registeredCommands = new Map<string, (...args: unknown[]) => unknown>();
 const docProviders = new Map<string, { provideTextDocumentContent?: (uri: unknown) => unknown }>();
+const fsProviders = new Map<string, { readFile?: (uri: unknown) => unknown }>();
 
 const bridge: HostBridge = {
 	request: (method, args) => hostRequest(method, args as unknown[]),
 	registerCommandHandler: (id, handler) => registeredCommands.set(id, handler),
 	registerDocProvider: (scheme, provider) => docProviders.set(scheme, provider),
 	unregisterDocProvider: (scheme) => docProviders.delete(scheme),
+	registerFsProvider: (scheme, provider) => fsProviders.set(scheme, provider),
+	unregisterFsProvider: (scheme) => fsProviders.delete(scheme),
 	// This process's own registration answers locally; the host round-trip stays the
 	// fallback for a scheme another extension registered (where the ggs-node side cannot
 	// take the round-trip at all — its answer would reenter the blocked JS thread).
-	readDocProvider: (uri) => readLocalDocProvider(docProviders, uri)
+	readDocProvider: (uri) => readLocalDocProvider(docProviders, uri, fsProviders)
 };
 
 let api_: VscodeApi | null = null;
@@ -102,6 +105,12 @@ function handleCall(method: string, args: unknown[]): unknown {
 		const provider = docProviders.get(String((args[0] as { scheme?: unknown } | undefined)?.scheme ?? ''));
 		if (!provider) throw new Error('no content provider registered for the scheme');
 		return provider.provideTextDocumentContent?.(args[0]);
+	}
+	if (method === 'fsProvider.read') {
+		const uri = rehydrateUris(args[0]) as Uri;
+	const text = readLocalDocProvider(new Map(), uri, fsProviders);
+		if (text === null) throw new Error('no file-system provider registered for the scheme');
+		return text;
 	}
 	if (method === 'deactivate') {
 		loaded_?.deactivate?.();

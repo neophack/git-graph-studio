@@ -30,17 +30,53 @@ export interface HostBridge {
 	 *  ggs-node process whose one JS thread is blocked waiting for exactly that answer —
 	 *  the `vscode.diff` reentry deadlock class, 30 s to nothing. */
 	readDocProvider?(uri: Uri): string | PromiseLike<string> | null;
+	/** Park a file-system provider in the frame — the host's `vscode.open` / `vscode.diff`
+	 *  ask it back (`fsProvider.read`) for a scheme's text, exactly as for the content
+	 *  providers above. claude-code stages its change-review diffs' both sides in
+	 *  in-memory `workspace.registerFileSystemProvider` schemes. */
+	registerFsProvider?(scheme: string, provider: { readFile?: (uri: unknown) => unknown }): void;
+	/** Forget a parked file-system provider (its Disposable ran). */
+	unregisterFsProvider?(scheme: string): void;
 }
 
 /** The bridge-side half of a local provider read: this side's own registration answers
  *  from its parked map — `null` when the scheme is not registered here, so the host's
  *  global lookup stays the fallback (another extension may own the scheme). Every host
- *  bridge (`docProvider.provide`'s own lookup) serves the same shape. */
-export function readLocalDocProvider(docProviders: Map<string, { provideTextDocumentContent?: (uri: unknown) => unknown }>, uri: Uri): string | PromiseLike<string> | null {
+ *  bridge (`docProvider.provide`'s own lookup) serves the same shape. An fs-provider
+ *  registration answers through its `readFile` when the scheme carries one — claude-code
+ *  stages its change-review diffs in `_claude_*_fs_*` file-system schemes — the bytes
+ *  decoded as UTF-8, a thenable awaited. */
+export function readLocalDocProvider(
+	docProviders: Map<string, { provideTextDocumentContent?: (uri: unknown) => unknown }>,
+	uri: Uri,
+	fsProviders?: Map<string, { readFile?: (uri: unknown) => unknown }>
+): string | PromiseLike<string> | null {
 	const provider = docProviders.get(uri.scheme);
-	if (!provider?.provideTextDocumentContent) return null;
-	const text = provider.provideTextDocumentContent(uri);
-	return text === undefined || text === null ? '' : (text as string | PromiseLike<string>);
+	if (provider?.provideTextDocumentContent) {
+		const text = provider.provideTextDocumentContent(uri);
+		return text === undefined || text === null ? '' : (text as string | PromiseLike<string>);
+	}
+	const fsProvider = fsProviders?.get(uri.scheme);
+	if (!fsProvider?.readFile) return null;
+	const readText = (): string | PromiseLike<string> => {
+		const bytes = fsProvider.readFile!(uri);
+		if (bytes === null || bytes === undefined) return '';
+		if (typeof bytes === 'string') return bytes;
+		const decode = (view: Uint8Array): string => {
+			const decoder = new TextDecoder();
+			return decoder.decode(view);
+		};
+		if (bytes instanceof Uint8Array) return decode(bytes);
+		return Promise.resolve(bytes).then((view) => decode(new Uint8Array(view as ArrayBufferView as Uint8Array)));
+	};
+	try {
+		return readText();
+	} catch (error) {
+		// A FileNotFound-style throw reads as "not this scheme's answer": the host's
+		// global lookup (or the diff's own error) takes it from here.
+		shimLog('warn', `fs provider readFile(${uri.toString()}) failed: ${String(error)}`);
+		return null;
+	}
 }
 
 /** One watcher pattern against one base-relative path (forward slashes, `**` crossing
@@ -3253,7 +3289,20 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 					send('docProvider.unregister', [scheme]);
 				});
 			},
-			registerFileSystemProvider: (scheme: string, _provider: unknown, _options?: unknown) => inert(`workspace.registerFileSystemProvider(${scheme})`),
+			/** The read half is served: the provider parks in this frame and the host
+			 *  remembers the scheme, its `vscode.open` / `vscode.diff` asking the text back
+			 *  through `fsProvider.read` (claude-code's change-review diffs stage both sides
+			 *  in its in-memory `_claude_*_fs_*` schemes). watch and the directory members
+			 *  stay the extension's own — the host never enumerates a package's VFS. */
+			registerFileSystemProvider: (scheme: string, provider: unknown, _options?: unknown) => {
+				const readable = (provider ?? {}) as { readFile?: (uri: unknown) => unknown };
+				bridge.registerFsProvider?.(scheme, readable);
+				send('fsProvider.register', [scheme]);
+				return new Disposable(() => {
+					bridge.unregisterFsProvider?.(scheme);
+					send('fsProvider.unregister', [scheme]);
+				});
+			},
 			registerNotebookSerializer: (notebookType: string, _serializer: unknown) => inert(`workspace.registerNotebookSerializer(${notebookType})`),
 			registerTaskProvider: (type: string, _provider: unknown) => inert(`workspace.registerTaskProvider(${type})`),
 			onDidSaveTextDocument: documentSaved.event,

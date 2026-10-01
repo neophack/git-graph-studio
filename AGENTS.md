@@ -415,7 +415,13 @@ its half of the area), a column number in that group; `workspace.createFileSyste
 served from the backend watcher's real batches (`fsChanged` events into every frame, the
 `.git` flag firing a `.git/HEAD` change); `window.createTerminal` (`sendText` runs in the
 integrated terminal); and `crypto.createHash` (md5 / sha1 / sha256, pure TypeScript — the
-gravatar-class digests, synchronous like Node's).
+gravatar-class digests, synchronous like Node's). The read half of
+`workspace.registerFileSystemProvider` serves too (2026-10-02): the provider parks in its
+frame/process, the host remembers the scheme's owner, and `vscode.open` / `vscode.diff`
+fetch the text through `fsProvider.read` — claude-code stages its change-review diffs'
+both sides in in-memory `_claude_*_fs_*` schemes, and until this bridge those diffs opened
+empty; watch and the directory members stay the extension's own (the host never enumerates
+a package's VFS).
 **Which extension packages the installer carries is the build's choice** (never a
 per-install one): `prepare.mjs` packs the marketplace builds — Open VSX, per architecture,
 downloaded by `scripts/fetch-marketplace-extensions.mjs` (no marketplace package has a

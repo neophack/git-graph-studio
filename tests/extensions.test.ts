@@ -509,6 +509,43 @@ describe('the vscode API shim', () => {
 		]);
 	});
 
+	it('a file-system provider scheme answers openTextDocument locally - claude-code\u2019s diff sides', async () => {
+		// claude-code stages its change-review diffs' both sides in in-memory
+		// `workspace.registerFileSystemProvider` schemes (`_claude_vscode_fs_left/right`):
+		// the read half is served — the provider parks in this frame, the host learns the
+		// scheme, and this frame's own reads never round-trip. A content provider keeps
+		// its priority when both are registered under one scheme.
+		const requests: { method: string; args: unknown[] }[] = [];
+		const parkedFs = new Map<string, { readFile?: (uri: unknown) => unknown }>();
+		const encoder = new TextEncoder();
+		const api = createVscodeApi(
+			{ extensionId: 'acme.demo', extensionPath: '/ext', workspaceFolders: [], settings: {}, language: 'en' },
+			{
+				request: async (method, args) => {
+					requests.push({ method, args: args ?? [] });
+					return undefined;
+				},
+				registerCommandHandler: () => undefined,
+				registerFsProvider: (scheme, provider) => parkedFs.set(scheme, provider),
+				unregisterFsProvider: (scheme) => parkedFs.delete(scheme),
+				readDocProvider: (uri) => readLocalDocProvider(new Map(), uri, parkedFs)
+			}
+		);
+		const disposable = api.workspace.registerFileSystemProvider('_acme_fs_left', {
+			readFile: (uri) => encoder.encode(`DIFF-LEFT:${(uri as { path?: string }).path}`)
+		});
+		expect(requests).toEqual([{ method: 'fsProvider.register', args: ['_acme_fs_left'] }]);
+		const uri = Uri.from({ scheme: '_acme_fs_left', path: '/temp/left/src/main.ts' });
+		const doc = await api.workspace.openTextDocument(uri);
+		expect(doc.getText()).toBe('DIFF-LEFT:/temp/left/src/main.ts');
+		// Unregistering closes the scheme: the read misses, the host lookup is the fallback.
+		disposable.dispose();
+		expect(requests).toEqual([
+			{ method: 'fsProvider.register', args: ['_acme_fs_left'] },
+			{ method: 'fsProvider.unregister', args: ['_acme_fs_left'] }
+		]);
+	});
+
 	it('reads and persists configuration through the settings bridge', async () => {
 		const settings: Record<string, unknown> = { 'demo.greeting': 'hello' };
 		const updates: unknown[][] = [];
@@ -2888,6 +2925,36 @@ describe('the compatibility surface this round: digests, watchers, provider-back
 		expect(diff.right.path).toBe('C:\\repo\\src\\main.rs');
 		// The unregistered scheme is a clear error, never a silent nothing.
 		await expect(host.executeCommand('vscode.diff', [{ ...uri, scheme: 'nobody' }, uri])).rejects.toThrow(/no text-document content provider/);
+	});
+
+	it('vscode.diff resolves a file-system provider\u2019s scheme through the registering frame', async () => {
+		// The other half of claude-code's change-review diff: its left side is an
+		// in-memory `registerFileSystemProvider` scheme, answered by `fsProvider.read`
+		// exactly as a content provider's is.
+		const host = new ExtensionHost();
+		const handle = { frame: document.createElement('iframe'), commandIds: new Set<string>(), pendingCalls: new Set<(error: Error) => void>() };
+		document.body.appendChild(handle.frame);
+		host['frames'].set('acme.demo', handle);
+		await host['serve']('fsProvider.register', ['_acme_fs_left'], 'acme.demo', handle);
+		const asked: unknown[] = [];
+		(host as unknown as { callFrame: (h: unknown, method: string, args: unknown[]) => Promise<unknown> }).callFrame =
+			async (_h, method, args) => {
+				if (method !== 'fsProvider.read') throw new Error(`unexpected frame call: ${method}`);
+				asked.push(args[0]);
+				return 'the staged left side';
+			};
+		const opened: unknown[] = [];
+		host.onOpenDiff = (diff) => opened.push(diff);
+		const leftUri = { scheme: '_acme_fs_left', path: '/temp/left/src/main.rs', fsPath: '', query: '', fragment: '', toString: () => '_acme_fs_left:/temp/left/src/main.rs', with: () => leftUri };
+		const rightUri = { scheme: 'file', path: '/repo/src/main.rs', fsPath: 'C:\\repo\\src\\main.rs', query: '', fragment: '', toString: () => 'file:///repo/src/main.rs', with: () => rightUri };
+		await host.executeCommand('vscode.diff', [leftUri, rightUri, 'main.rs (proposed)']);
+		expect(asked).toEqual([leftUri]);
+		const diff = opened[0] as { title: string; left: { content?: string } };
+		expect(diff.title).toBe('main.rs (proposed)');
+		expect(diff.left.content).toBe('the staged left side');
+		// Unregistering closes the scheme: the diff reports the missing provider.
+		await host['serve']('fsProvider.unregister', ['_acme_fs_left'], 'acme.demo', handle);
+		await expect(host.executeCommand('vscode.diff', [leftUri, rightUri])).rejects.toThrow(/no text-document content provider/);
 	});
 
 	it('vscode.open opens a provider-scheme document in a read-only content tab', async () => {

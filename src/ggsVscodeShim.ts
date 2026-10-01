@@ -64,6 +64,7 @@ shim.__ggsVscodeShimInstall = function (args: InstallArgs): InstalledVscode {
 	};
 	const handlers = new Map<string, (...callArgs: unknown[]) => unknown>();
 	const docProviders = new Map<string, { provideTextDocumentContent?: (uri: unknown) => unknown }>();
+	const fsProviders = new Map<string, { readFile?: (uri: unknown) => unknown }>();
 	/** The runtime's dispatch consults `ggs.onRequest` before the exports-dispatch
 	 *  fallback: one dispatcher for the host-call vocabulary — registered commands, and a
 	 *  content provider's text the host asks for when a diff or a read-only content tab
@@ -84,6 +85,15 @@ shim.__ggsVscodeShimInstall = function (args: InstallArgs): InstalledVscode {
 				throw new Error(`no text-document content provider is registered for the ${uri?.scheme} scheme`);
 			}
 			return provider.provideTextDocumentContent(uri);
+		}
+		if (command === 'fsProvider.read') {
+			// The host asks this extension for a file-system scheme's text (claude-code's
+			// change-review diff sides). The answer crosses as a plain string, a thenable
+			// settled by the runtime's dispatch.
+			const [uri] = rehydrateUris(Array.isArray(commandArgs) ? commandArgs : [commandArgs]) as [{ scheme?: string }];
+			const text = readLocalDocProvider(new Map(), uri as never, fsProviders);
+			if (text === null) throw new Error(`no file-system provider is registered for the ${uri?.scheme} scheme`);
+			return text;
 		}
 		const handler = handlers.get(command);
 		if (!handler) throw new Error(`no handler registered for ${command}`);
@@ -115,11 +125,17 @@ shim.__ggsVscodeShimInstall = function (args: InstallArgs): InstalledVscode {
 			shim.ggs.onRequest(dispatchHostCall);
 		},
 		unregisterDocProvider: (scheme) => docProviders.delete(scheme),
+		registerFsProvider: (scheme, provider) => {
+			fsProviders.set(scheme, provider);
+			shim.ggs.onRequest(dispatchHostCall);
+		},
+		unregisterFsProvider: (scheme) => fsProviders.delete(scheme),
 		// The local answer: this process registered the scheme, so its text never crosses
 		// the blocking bridge — the host's `docProvider.read` round-trip would call back
 		// into this same parked JS thread and deadlock it for the full host-request
-		// timeout (the `vscode.diff` reentry class).
-		readDocProvider: (uri) => readLocalDocProvider(docProviders, uri)
+		// timeout (the `vscode.diff` reentry class). The fs-provider schemes answer the
+		// same way — claude-code's diff sides live in this process's memory.
+		readDocProvider: (uri) => readLocalDocProvider(docProviders, uri, fsProviders)
 	};
 	// The raw namespace serves the host-call dispatch (its internal `__`-members are the
 	// shim's own wiring); the package-facing one carries the upgrade-safety probe — an

@@ -692,6 +692,10 @@ export class ExtensionHost {
 	 *  The host decodes nothing of any package's private schemes — asking back is the whole
 	 *  mechanism. */
 	private readonly docProviders = new Map<string, FrameHandle>();
+	/** The same for file-system providers (`workspace.registerFileSystemProvider`): the
+	 *  owning frame answers `fsProvider.read` for the scheme's text — claude-code stages
+	 *  its change-review diffs' both sides in its in-memory `_claude_*_fs_*` schemes. */
+	private readonly fsProviders = new Map<string, FrameHandle>();
 	/** The serial of extension-opened diff/content tabs, for their reuse keys. */
 	private nextExtDocSerial = 1;
 	/** The theme as webview documents wear it (its variable definitions and kind class):
@@ -1562,9 +1566,16 @@ export class ExtensionHost {
 			return { scheme, name: fsPath.split(/[\\/]/).pop() || fsPath, fsPath, label: fsPath, local: true };
 		}
 		const handle = this.docProviders.get(scheme);
-		if (!handle) throw new Error(`no text-document content provider is registered for the ${scheme} scheme`);
-		const text = await this.callFrame(handle, 'docProvider.provide', [value]) as string | null | undefined;
-		return { scheme, name: path.split('/').pop() || scheme, fsPath: path, label: path, content: text ?? '' };
+		if (handle) {
+			const text = await this.callFrame(handle, 'docProvider.provide', [value]) as string | null | undefined;
+			return { scheme, name: path.split('/').pop() || scheme, fsPath: path, label: path, content: text ?? '' };
+		}
+		// A file-system provider's scheme (claude-code's diff sides): the same ask-back,
+		// the frame's provider answering `readFile` and the frame decoding to text.
+		const fsHandle = this.fsProviders.get(scheme);
+		if (!fsHandle) throw new Error(`no text-document content provider is registered for the ${scheme} scheme`);
+		const fsText = await this.callFrame(fsHandle, 'fsProvider.read', [value]) as string | null | undefined;
+		return { scheme, name: path.split('/').pop() || scheme, fsPath: path, label: path, content: fsText ?? '' };
 	}
 
 	/** A `ViewColumn` argument (a bare number or `{ viewColumn }`) as an editor placement:
@@ -2247,6 +2258,20 @@ export class ExtensionHost {
 			case 'docProvider.unregister': {
 				const scheme = args[0] as string;
 				if (this.docProviders.get(scheme) === handle) this.docProviders.delete(scheme);
+				return Promise.resolve(undefined);
+			}
+			case 'fsProvider.register': {
+				// `workspace.registerFileSystemProvider(scheme, provider)`: the same ask-back
+				// as the content providers — the frame keeps the object, the host keeps the
+				// scheme's owner, `fsProvider.read` fetches a document's text from it.
+				const scheme = args[0];
+				if (typeof scheme !== 'string' || scheme === '') throw new Error('fsProvider.register needs a scheme');
+				this.fsProviders.set(scheme, handle);
+				return Promise.resolve(undefined);
+			}
+			case 'fsProvider.unregister': {
+				const scheme = args[0] as string;
+				if (this.fsProviders.get(scheme) === handle) this.fsProviders.delete(scheme);
 				return Promise.resolve(undefined);
 			}
 			case 'terminal.send': {
