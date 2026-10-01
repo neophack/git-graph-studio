@@ -267,15 +267,54 @@ describe('file watcher events', () => {
 		expect(reloaded).toHaveLength(2);
 		expect(refreshes).toBe(2);
 
-		// A git-only batch right after a refresh of our own is its echo, not a change: the
-		// git commands a refresh runs touch .git/, and reacting to that would loop forever.
+		// A git-only batch right after a refresh of our own is ambiguous — its echo or a
+		// real external commit — so it is re-checked against the last refresh's snapshot,
+		// never trusted and never dropped. The re-read answering the same snapshot (it was
+		// the echo) refreshes nothing.
 		(workbench as unknown as { lastRefreshAt: number }).lastRefreshAt = performance.now();
+		(workbench as unknown as { scm: { statusDiffers: () => Promise<boolean> } }).scm.statusDiffers = async () => false;
 		backend.emit(FS_CHANGED_EVENT, { root: 'C:\\repo', paths: [], truncated: false, gitChanged: true });
+		await flush();
 		expect(refreshes).toBe(2);
-		// Well after the refresh, the same batch is an external change (a commit in a terminal).
+		// ...but a re-check that sees a different status (a terminal commit inside the
+		// window — one burst, no second event to catch it later) refreshes.
+		(workbench as unknown as { scm: { statusDiffers: () => Promise<boolean> } }).scm.statusDiffers = async () => true;
+		backend.emit(FS_CHANGED_EVENT, { root: 'C:\\repo', paths: [], truncated: false, gitChanged: true });
+		await flush();
+		expect(refreshes).toBe(3);
+		// Well after the refresh, the same batch is an external change outright.
 		(workbench as unknown as { lastRefreshAt: number }).lastRefreshAt = performance.now() - 5000;
 		backend.emit(FS_CHANGED_EVENT, { root: 'C:\\repo', paths: [], truncated: false, gitChanged: true });
-		expect(refreshes).toBe(3);
+		expect(refreshes).toBe(4);
+	});
+
+	it('refreshes immediately while the window is hidden - background timers are throttled', async () => {
+		backend.on('boot_context', () => ({ file: null, actions: [], repo: null }));
+		backend.on('ext_list', () => []);
+		const workbench = new Workbench();
+		let runs = 0;
+		(workbench as unknown as { repoPath: string }).repoPath = 'C:\\repo';
+		(workbench as unknown as { repoPaths: string[] }).repoPaths = ['C:\\repo'];
+		// The schedule itself stays real; only its body (the git views' refresh) is stubbed.
+		// A hidden window's timers are throttled by the webview, so the hidden path must run
+		// on the microtask queue — immediately, not a timer delay later.
+		(workbench as unknown as { runScheduledRefresh: () => void }).runScheduledRefresh = () => { runs++; };
+		workbench.editors.reloadIfClean = async () => undefined;
+		const hiddenDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden')!;
+		Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+		try {
+			backend.emit(FS_CHANGED_EVENT, { root: 'C:\\repo', paths: ['src/a.ts'], truncated: false, gitChanged: false });
+			await flush();
+			expect(runs).toBe(1);
+			// A burst inside the same task coalesces into the one refresh.
+			backend.emit(FS_CHANGED_EVENT, { root: 'C:\\repo', paths: ['src/b.ts'], truncated: false, gitChanged: false });
+			backend.emit(FS_CHANGED_EVENT, { root: 'C:\\repo', paths: ['src/c.ts'], truncated: false, gitChanged: false });
+			await flush();
+			expect(runs).toBe(2);
+		} finally {
+			Object.defineProperty(document, 'hidden', hiddenDescriptor);
+		}
+		workbench.dispose();
 	});
 
 	it('joins a change batch to the root it came from, not the first root (multi-root)', () => {

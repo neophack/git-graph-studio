@@ -1457,9 +1457,16 @@ export class Workbench {
 		// another root and would be joined onto the new one.
 		if (!this.repoPaths.includes(change.root)) return;
 		// A batch that names no working-tree file and lands right after a refresh of our own
-		// is that refresh's echo (the git commands it ran touching `.git/`): acting on it would
-		// refresh again, and again. Real external changes keep coming after the window.
-		if (change.paths.length === 0 && !change.truncated && performance.now() - this.lastRefreshAt < REFRESH_ECHO_MS) return;
+		// is ambiguous: it is that refresh's echo (the git commands it ran touching
+		// `.git/`) — acting on it would refresh again, and again — or a real external git
+		// operation (a terminal commit, a branch switch), whose burst never comes again, so
+		// dropping it lost the update until some file happened to change. The re-check
+		// reads the live status and refreshes only when it differs from the last one; the
+		// in-flight flag folds a commit's burst of `.git` batches into one re-check.
+		if (change.paths.length === 0 && !change.truncated && performance.now() - this.lastRefreshAt < REFRESH_ECHO_MS) {
+			this.recheckSwallowedBatch();
+			return;
+		}
 		if (!change.truncated) {
 			for (const relative of change.paths) void this.editors.reloadIfClean(joinRepo(change.root, relative));
 		} else {
@@ -1477,25 +1484,64 @@ export class Workbench {
 	/** When the last git-derived refresh ran (`scheduleRefresh`'s timer fired). */
 	private lastRefreshAt = -Infinity;
 
+	/** One re-check at a time: a commit's burst of `.git`-only batches folds into one. */
+	private recheckInFlight = false;
+
+	/** The swallowed-batch re-check: the live status against the last refresh's snapshot
+	 *  (scm.statusDiffers), a refresh only when they differ — the echo cannot loop this,
+	 *  because an echoed-against refresh that sees the same status never schedules one. */
+	private recheckSwallowedBatch(): void {
+		if (this.recheckInFlight) return;
+		this.recheckInFlight = true;
+		void this.scm
+			.statusDiffers()
+			.catch(() => true)
+			.then((differs) => {
+				this.recheckInFlight = false;
+				if (differs) this.scheduleRefresh(0);
+			});
+	}
+
+	/** A hidden window's refresh is queued: coalescing flag for the microtask that runs it. */
+	private hiddenRefreshQueued = false;
+
 	/** Refresh everything git-derived: the SCM view (which colours the Explorer), the graph,
 	 *  the status bar, the tree, and clean editors whose files changed. Coalesced. */
 	scheduleRefresh(delay: number): void {
+		// A hidden window's timers are throttled by the webview (to seconds, eventually to
+		// a minute) — and the background window is exactly where external work happens: the
+		// terminal commits, another editor saves, a build finishes. Hidden runs the refresh
+		// on the microtask queue (never throttled), one burst coalesced into one refresh.
+		if (document.hidden) {
+			if (this.hiddenRefreshQueued) return;
+			this.hiddenRefreshQueued = true;
+			queueMicrotask(() => {
+				this.hiddenRefreshQueued = false;
+				this.runScheduledRefresh();
+			});
+			return;
+		}
 		if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
 		this.refreshTimer = window.setTimeout(() => {
 			this.refreshTimer = null;
-			if (!this.repoPath) return;
-			// While a sash drag is in progress, defer: refreshes mid-drag make the tree and
-			// the editors churn under the pointer for no benefit. It re-fires after mouseup.
-			if (document.body.classList.contains('resizing')) {
-				this.scheduleRefresh(200);
-				return;
-			}
-			this.lastRefreshAt = performance.now();
-			void this.scm.refresh(); // its repo_head feeds the status bar (see scm.onHead)
-			void this.explorer.refresh();
-			const active = this.editors.activeInput;
-			if (active?.kind === 'file') void this.editors.reloadIfClean(active.path);
+			this.runScheduledRefresh();
 		}, delay);
+	}
+
+	/** The timer's body, shared by the visible (debounced) and hidden (immediate) paths. */
+	private runScheduledRefresh(): void {
+		if (!this.repoPath) return;
+		// While a sash drag is in progress, defer: refreshes mid-drag make the tree and
+		// the editors churn under the pointer for no benefit. It re-fires after mouseup.
+		if (document.body.classList.contains('resizing')) {
+			this.scheduleRefresh(200);
+			return;
+		}
+		this.lastRefreshAt = performance.now();
+		void this.scm.refresh(); // its repo_head feeds the status bar (see scm.onHead)
+		void this.explorer.refresh();
+		const active = this.editors.activeInput;
+		if (active?.kind === 'file') void this.editors.reloadIfClean(active.path);
 	}
 
 	/* ---------- Folders ---------- */

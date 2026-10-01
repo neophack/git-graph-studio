@@ -223,6 +223,9 @@ export class SourceControlView {
 	private error: string | null = null;
 	/** Bumped by setRepo: a refresh that started before a folder switch is dropped on return. */
 	private generation = 0;
+	/** What the last completed refresh saw (the raw status and head, serialised): the
+	 *  fingerprint `statusDiffers` re-checks a swallowed `.git`-only batch against. */
+	private lastSnapshot: string | null = null;
 	/** The flattened change list (groups, folders, files) and its virtual window. */
 	private rows: ScmRow[] = [];
 	private list: HTMLElement | null = null;
@@ -314,6 +317,7 @@ export class SourceControlView {
 			this.error = null;
 		} catch (error) {
 			if (generation !== this.generation) return;
+			changes = [];
 			this.changes = [];
 			this.error = String(error);
 		}
@@ -322,6 +326,9 @@ export class SourceControlView {
 		// keeps the previous values; the workbench no longer needs its own follow-up fetch.
 		const head = await invoke<{ repo: string; branch: string | null; shortHash: string; ahead: number; behind: number; upstream: string | null }>('repo_head').catch(() => null);
 		if (generation !== this.generation) return;
+		// The fingerprint a swallowed `.git`-only batch is re-checked against (see
+		// `statusDiffers`): exactly what this refresh saw, nothing more.
+		this.lastSnapshot = JSON.stringify([changes, head]);
 		if (head) {
 			this.branch = head.branch;
 			this.shortHash = head.shortHash;
@@ -349,6 +356,28 @@ export class SourceControlView {
 		this.onCount?.(allChanges.length);
 		this.onConflicts?.(allConflicts);
 		this.render();
+	}
+
+	/** Whether the repository's live status differs from what the last refresh recorded.
+	 *  The recheck for a `.git`-only batch that landed inside the workbench's echo window
+	 *  (workbench.onFsChanged): those batches are indistinguishable from the refresh's own
+	 *  git commands' echo, and a real external git operation — a terminal commit, a branch
+	 *  switch — is one burst whose events never come again, so a swallowed one left the
+	 *  view stale until any file happened to change. A failed read errs toward "differs":
+	 *  the refresh is the recovery. */
+	async statusDiffers(): Promise<boolean> {
+		if (!this.repoPath || !this.isRepo) return false;
+		const generation = this.generation;
+		try {
+			const [changes, head] = await Promise.all([
+				invoke<ScmChange[]>('scm_status'),
+				invoke<{ repo: string; branch: string | null; shortHash: string; ahead: number; behind: number; upstream: string | null }>('repo_head').catch(() => null)
+			]);
+			if (generation !== this.generation) return false;
+			return JSON.stringify([changes, head]) !== this.lastSnapshot;
+		} catch {
+			return true;
+		}
 	}
 
 	/** Re-read the submodule roots (a `git submodule update` may have initialised or removed
