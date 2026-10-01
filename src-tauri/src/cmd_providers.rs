@@ -570,20 +570,31 @@ pub fn provider_env_vars(active: &ProviderProfile, home: &Path) -> Vec<(String, 
 }
 
 /// The spawn environment a bridged extension's backend runs with. Pure over the home,
-/// so the exact bytes a backend sees are testable. Only the state redirect rides the
-/// process environment: the provider's endpoint and key live in the redirected Claude
-/// settings (`claude_provider_settings`), which the process applies at its own start —
-/// one source of provider truth, the two can never disagree mid-flight. It is also why
-/// a provider switch restarts the running backend: the settings write alone would land
-/// on a process that already applied the previous provider's env.
+/// so the exact bytes a backend sees are testable. The state redirect always rides the
+/// process environment; the active provider's endpoint and key ride it too (2026-10-01,
+/// the long-login-page bug): the redirected Claude settings' `env` map is applied by the
+/// CLI at its own start, never by the extension process — a fresh backend whose
+/// `process.env` carried no `ANTHROPIC_AUTH_TOKEN` answered its auth status null and
+/// the chat rendered the official login page until the CLI's config probe (tens of
+/// seconds under ggs-node) delivered the third-party verdict. The extension reads
+/// `process.env` for exactly this shape — a token there is Claude Code's own
+/// keyless-auth form, authenticated from the first state push. Both sinks (the settings
+/// write and this spawn env) derive from the one store read, and every switch restarts
+/// the backend, so they cannot disagree in flight. A store that cannot be read adds
+/// nothing: the backend still starts, and the extension's own login remains the
+/// fallback.
 pub fn backend_env_for(ext_id: &str, home: &Path) -> Vec<(String, String)> {
     if !BRIDGED_EXT_IDS.contains(&ext_id) {
         return Vec::new();
     }
-    vec![(
+    let mut env = vec![(
         "CLAUDE_CONFIG_DIR".to_owned(),
         home.join("claude").to_string_lossy().into_owned(),
-    )]
+    )];
+    if let Ok(store) = read_store(home) {
+        env.extend(active_provider_env(&store, home));
+    }
+    env
 }
 
 /* ---------- The gateway probes (NewAPI / OneAPI / any Anthropic-compatible origin) ---------- */
@@ -1032,13 +1043,14 @@ fn active_provider_env(store: &ProviderStore, home: &Path) -> Vec<(String, Strin
 
 /// What a store-writing command's tail must run, decided by comparing the store before
 /// and after the mutation: `env_changed` rewrites the redirected Claude settings and
-/// restarts the running bridged backend on top (the fresh process applies the env map
-/// at its own start — the running one keeps the provider it booted under);
+/// restarts the running bridged backend on top (the fresh process reads the rewritten
+/// settings and spawns with the new provider env — a running one keeps the provider it
+/// booted under);
 /// `store_changed` pushes the event the windows' switcher chips re-read on.
 ///
 /// The env comparison is over the *provider environment*, never the spawn environment:
-/// the spawn env is the constant config redirect now, and gating a switch on it made
-/// every switch a silent no-op — the settings kept the previous provider and new chats
+/// the spawn env derives from the same store at every spawn, so comparing it made every
+/// switch a silent no-op — the settings kept the previous provider and new chats
 /// never moved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProviderChange {
@@ -2240,6 +2252,7 @@ mod tests {
         let home = ggs_home().unwrap();
         let mut store = third_party_store();
         store.active_id = Some("official".to_owned());
+        write_store(&home, &store).unwrap();
         let env = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
         let map = env_map(&env);
         assert_eq!(map.len(), 1, "official adds no endpoint vars: {env:?}");
@@ -2247,6 +2260,45 @@ mod tests {
         assert_eq!(dir, home.join("claude").to_str().unwrap());
         // And nothing at all for an extension the bridge does not serve.
         assert!(backend_env_for("some.other.ext", &home).is_empty());
+    }
+
+    /// The active provider's environment rides the backend's spawn environment too
+    /// (2026-10-01, the long-login-page-after-a-switch bug): the redirected Claude
+    /// settings' `env` map is applied by the CLI at its own start, never by the
+    /// extension process — so a fresh backend's `process.env` carried no
+    /// `ANTHROPIC_AUTH_TOKEN`, its auth status answered null, and the chat rendered the
+    /// official login page until the CLI's config probe (tens of seconds under ggs-node)
+    /// reported the third-party verdict. The extension reads `process.env` for exactly
+    /// this: a token there is Claude Code's own keyless-auth shape, authenticated from
+    /// the first state push. Official adds none — the user's own login is never
+    /// shadowed — and both sinks (the settings write, this spawn env) derive from the
+    /// one store read, the switch's restart keeping them in step.
+    #[test]
+    fn the_spawn_environment_carries_the_active_provider_for_the_extension_process() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        let mut store = third_party_store();
+        store.profiles[1].api_key_enc = Some(seal(&home, "sk-live-key").unwrap());
+        write_store(&home, &store).unwrap();
+        let spawn = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
+        let map = env_map(&spawn);
+        assert_eq!(map["ANTHROPIC_AUTH_TOKEN"], "sk-live-key");
+        assert_eq!(map["ANTHROPIC_API_KEY"], "sk-live-key");
+        assert_eq!(
+            map["ANTHROPIC_BASE_URL"],
+            "https://api.deepseek.com/anthropic"
+        );
+        assert_eq!(
+            map["CLAUDE_CONFIG_DIR"],
+            home.join("claude").to_str().unwrap()
+        );
+        // Switching back to official: the next spawn carries the redirect alone again.
+        store.active_id = Some("official".to_owned());
+        write_store(&home, &store).unwrap();
+        assert_eq!(
+            env_map(&backend_env_for(CLAUDE_CODE_EXT_ID, &home)).len(),
+            1
+        );
     }
 
     /// The active third-party profile's provider environment carries the endpoint, the
@@ -2285,10 +2337,18 @@ mod tests {
         // The official profile carries none of them — its keys must leave the settings
         // so the user's own login is never shadowed.
         assert!(provider_env_vars(&official_profile(), &home).is_empty());
-        // And the spawn environment stays the config redirect alone (one source of
-        // provider truth: the settings file).
+        // The same active profile rides the spawn environment — the redirect plus every
+        // provider pair, so the extension process itself (not only its CLI children)
+        // sees the provider it runs under.
+        write_store(&home, &store).unwrap();
         let spawn = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
-        assert_eq!(env_map(&spawn).len(), 1, "{spawn:?}");
+        let spawn_map = env_map(&spawn);
+        assert_eq!(spawn_map.len(), 12, "{spawn:?}");
+        assert_eq!(spawn_map["ANTHROPIC_AUTH_TOKEN"], "sk-live-key");
+        assert_eq!(
+            spawn_map["ANTHROPIC_BASE_URL"],
+            "https://api.deepseek.com/anthropic"
+        );
     }
 
     /// The tier-alias remap: Claude Code's /model picker resolves opus / fable /
@@ -3172,8 +3232,8 @@ mod tests {
             .expect("the imported profile is in the store");
         let sealed = profile.api_key_enc.as_deref().expect("the key was sealed");
         assert_eq!(unseal(&home, sealed).unwrap(), "sk-cc-deepseek");
-        // The imported current one drives the provider environment now (the settings
-        // writer's source); the spawn environment stays the config redirect alone.
+        // The imported current one drives the provider environment now — the settings
+        // writer's source and, with the store on disk, the backend's spawn environment.
         let env = provider_env_vars(profile, &home);
         let map = env_map(&env);
         assert_eq!(
@@ -3181,10 +3241,10 @@ mod tests {
             "https://api.deepseek.com/anthropic"
         );
         assert_eq!(map["ANTHROPIC_AUTH_TOKEN"], "sk-cc-deepseek");
-        assert_eq!(
-            env_map(&backend_env_for(CLAUDE_CODE_EXT_ID, &home)).len(),
-            1
-        );
+        write_store(&home, &store).unwrap();
+        let spawn_env = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
+        let spawn = env_map(&spawn_env);
+        assert_eq!(spawn["ANTHROPIC_AUTH_TOKEN"], "sk-cc-deepseek");
 
         // Unknown names are skipped, an empty import answers zero.
         let (imported, _) =

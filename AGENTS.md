@@ -497,9 +497,16 @@ provider it booted under; the fresh process reads the rewritten settings, and th
 settled start attempt — success or failure, the old process is dead either way — is
 announced as the `ext-backend-restarted` event, on which the
 extension host re-resolves the extension's webview views — the chat page reloads with
-the new provider, a conversation in flight restarting on it); the spawn
-environment carries only `CLAUDE_CONFIG_DIR` — one source of provider truth, the two
-can never disagree. Writing the settings clears this bridge's keys when the official
+the new provider, a conversation in flight restarting on it); the spawn environment
+carries `CLAUDE_CONFIG_DIR` plus the active provider's own pairs (2026-10-01, the
+long-login-page bug: the settings env map is applied by the CLI at its start, never by
+the extension process — a fresh backend whose `process.env` carried no
+`ANTHROPIC_AUTH_TOKEN` answered its auth status null and the chat rendered the official
+login page until the CLI's config probe, tens of seconds under ggs-node, delivered the
+third-party verdict; the extension reads `process.env` for exactly this shape, Claude
+Code's own keyless-auth form, authenticated from the first state push). Both sinks —
+the settings write and the spawn env — derive from the one store read, and the switch's
+restart keeps them in step. Writing the settings clears this bridge's keys when the official
 profile is active (a stale endpoint would shadow the login), preserves the user's own
 env keys, and lands the file at 0600 when it carries a key. The settings' top-level
 `model` pin rides the same takeover (2026-09-30, the `claude-fable-5-1[1m]` bug: a
