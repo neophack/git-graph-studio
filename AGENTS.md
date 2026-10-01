@@ -846,7 +846,11 @@ page shows the integration's state (`claude_mcp_status`).
   for the ggs-node `vscode` shim),
   `scripts/probes/claude-code-live-check.mjs` (the live claude-code check: the backend on
   ggs-node (or `--host real-node`), its commands, the chat webview mounted, the IDE MCP
-  server up; `--screenshot` saves the workbench),
+  server up — the server read off the backend process's own LISTENING socket, the Output
+  line being batched and not worth waiting for; the chat page is a same-process srcdoc
+  context, so the frame probes read both CDP sessions and execution contexts (2026-10-02:
+  a session-only scan reported the new-session page blank forever while it rendered fine);
+  `--screenshot` saves the workbench),
   `scripts/probes/claude-code-sandbox.mjs` + `scripts/probes/fake-claude-server.mjs`
   (the logged-in claude-code sandbox, no account and no real network: the fake server
   answers `/v1/messages` (streaming), `/api/hello` and `count_tokens` on the loopback,

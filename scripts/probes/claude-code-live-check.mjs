@@ -315,16 +315,21 @@ try {
 	 * exactly the mount race (the extension's initial postMessage crossed before the tab
 	 * mounted, and the old host dropped it). The tab-count check above cannot see it:
 	 * this probes the frame that attached since the click for real content — root
-	 * mounted, children, and non-empty text (a blank-but-loaded page has none). */
+	 * mounted, children, and non-empty text (a blank-but-loaded page has none). The
+	 * chat page is a same-process srcdoc context, so the new tab's frame arrives as an
+	 * execution context, not a session — probe both kinds (a session-only scan reported
+	 * the page blank forever). */
 	let newSessionOk = false;
 	let newSessionDetail = String.fromCharCode(45, 45);
 	for (let attempt = 0; attempt < 30 && !newSessionOk; attempt++) {
 		await sleep(500);
 		for (const frame of workbench.frames.slice(framesBefore)) {
-			if (frame.sessionId === null) continue;
 			try {
-				const probe = await workbench.send('Runtime.evaluate', { expression: frameProbeExpression, returnByValue: true }, frame.sessionId)
-					.then((r) => r?.result?.value ?? { root: false, children: 0, text: '' });
+				const probe = frame.sessionId !== null
+					? await workbench.send('Runtime.evaluate', { expression: frameProbeExpression, returnByValue: true }, frame.sessionId)
+						.then((r) => r?.result?.value ?? { root: false, children: 0, text: '' })
+					: await workbench.send('Runtime.evaluate', { expression: frameProbeExpression, returnByValue: true, contextId: frame.contextId })
+						.then((r) => r?.result?.value ?? { root: false, children: 0, text: '' });
 				if (probe.root && probe.children > 0 && (probe.text || '').trim().length > 0) {
 					newSessionOk = true;
 					newSessionDetail = JSON.stringify(probe);
@@ -351,7 +356,18 @@ try {
 	const machinery = probeRequests.filter((r) => /OAuth tokens|AuthManager|MCP Server/.test(r));
 	check("the extension's OAuth/MCP machinery is alive", machinery.length > 0, JSON.stringify(machinery.slice(0, 2)));
 	const mcp = probeRequests.find((r) => /MCP Server running on port/.test(r));
-	check('the IDE MCP server is running (the Claude CLI link)', Boolean(mcp), mcp ?? 'no "MCP Server running" line');
+	// The Output channel batches its writes, so the line can lag the run; the socket is
+	// the fact itself — a LISTENING endpoint owned by the backend process is the server.
+	let mcpListening = '';
+	if (status && status.pid > 0) {
+		const netstat = spawnSync('netstat', ['-ano', '-p', 'TCP'], { encoding: 'utf8' }).stdout;
+		mcpListening = netstat
+			.split('\n')
+			.filter((line) => line.includes('LISTENING') && line.trim().endsWith(String(status.pid)))
+			.map((line) => line.trim().split(/\s+/)[1])
+			.join(',');
+	}
+	check('the IDE MCP server is running (the Claude CLI link)', Boolean(mcp) || mcpListening !== '', mcp ?? `listening=${mcpListening || 'none'}`);
 
 	/* 7. No exception-level console entries in the workbench. */
 	const exceptions = workbench.consoleEntries.filter((entry) => entry.level === 'exception');
