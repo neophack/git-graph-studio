@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Build Git Graph Studio (the Tauri app this repository is) plus its extension packages:
-# the app installer and the marketplace extension VSIXes the installer carries as
-# resources (the app installs them on first launch, like VS Code ships its bundled
-# extensions) - scripts/prepare.mjs (step 2 below) fetches them from Open VSX
-# (scripts/fetch-marketplace-extensions.mjs). The app tree carries no plugin code and
-# links no engine - every package arrives as its own self-contained VSIX.
+# the app installer and the extension VSIXes the installer carries as resources (the
+# app installs them on first launch, like VS Code ships its bundled extensions). The
+# marketplace packages (git-graph-rs, claude-code) arrive from Open VSX via
+# scripts/prepare.mjs (step 2 below, scripts/fetch-marketplace-extensions.mjs);
+# claude-remote packs from its local source (extensions-src/claude-remote). The app
+# tree carries no plugin code and links no engine - every package arrives as its own
+# self-contained VSIX.
 #
 # The shell counterpart of scripts\build-studio.bat (Windows). NOT the Linux floor
 # containers: a deb/rpm built here carries THIS machine's glibc, and the distributable
@@ -14,7 +16,7 @@
 #
 # Usage:
 #   scripts/build-studio.sh          release build, installers in target/studio/cargo/release/bundle
-#                                    packages in target/studio/bundled/app-resources/extensions/ (git-graph-rs.vsix)
+#                                    packages in target/studio/bundled/app-resources/extensions/ (git-graph-rs.vsix, claude-remote.vsix)
 #   scripts/build-studio.sh dev      run the app in dev mode
 #   scripts/build-studio.sh debug    cargo debug build of the Tauri backend
 set -euo pipefail
@@ -32,12 +34,15 @@ command -v node >/dev/null 2>&1 || {
 	exit 1
 }
 
-# The installer packs the marketplace extension packages (Open VSX downloads,
-# scripts/fetch-marketplace-extensions.mjs): git-graph-rs rides in every build,
+# The installer packs the extension packages: the marketplace ones (Open VSX downloads,
+# scripts/fetch-marketplace-extensions.mjs) - git-graph-rs rides in every build,
 # claude-code does not (the Extensions view installs it from the marketplace on
-# demand; set GGS_BUNDLE_CLAUDE_CODE=1 to pack it into this build). A selected
-# package the fetch cannot serve fails this build (there is no local source for
-# either). GGS_SKIP_MARKETPLACE_FETCH=1 builds fully offline without either.
+# demand; set GGS_BUNDLE_CLAUDE_CODE=1 to pack it into this build) - plus
+# claude-remote, packed from its local source (extensions-src/claude-remote) into
+# every build (GGS_BUNDLE_CLAUDE_REMOTE=0 leaves it out; it needs no fetch and
+# packs offline too). A selected marketplace package the fetch cannot serve fails
+# this build (there is no local source for either). GGS_SKIP_MARKETPLACE_FETCH=1
+# builds offline without the marketplace pair - claude-remote still packs.
 if [ -z "${GGS_SKIP_MARKETPLACE_FETCH:-}" ]; then
 	export GGS_REQUIRE_MARKETPLACE=1
 fi

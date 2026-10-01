@@ -80,6 +80,16 @@ pub(super) fn os_module(context: &mut Context) -> JsResult<JsObject> {
         false,
         context,
     )?;
+    module.set(
+        key("networkInterfaces"),
+        native_callable(
+            context,
+            "networkInterfaces",
+            NativeFunction::from_fn_ptr(os_network_interfaces),
+        ),
+        false,
+        context,
+    )?;
     Ok(module)
 }
 
@@ -134,4 +144,75 @@ fn os_cpus(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResul
         .map(|_| json!({ "model": "cpu", "speed": 0 }))
         .collect();
     JsValue::from_json(&Value::Array(cpus), context)
+}
+
+/// One interface's address and netmask pair, family-matched by construction.
+fn iface_pair(iface: &if_addrs::Interface) -> (std::net::IpAddr, std::net::IpAddr) {
+    match &iface.addr {
+        if_addrs::IfAddr::V4(v4) => (
+            std::net::IpAddr::V4(v4.ip),
+            std::net::IpAddr::V4(v4.netmask),
+        ),
+        if_addrs::IfAddr::V6(v6) => (
+            std::net::IpAddr::V6(v6.ip),
+            std::net::IpAddr::V6(v6.netmask),
+        ),
+    }
+}
+
+/// Node's `os.networkInterfaces()`: the interface list grouped by name, one
+/// `{ address, netmask, family, mac, internal, cidr }` record per address. The LAN
+/// addresses are what a package like Claude Remote needs to build its pairing QR.
+/// if-addrs has no MAC address — the field stays empty (nothing in-tree reads it), and
+/// `internal` is the loopback test, as in Node.
+fn os_network_interfaces(
+    _this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let mut interfaces: serde_json::Map<String, Value> = serde_json::Map::new();
+    for iface in if_addrs::get_if_addrs().unwrap_or_default() {
+        let (ip, netmask) = iface_pair(&iface);
+        let prefix = match netmask {
+            std::net::IpAddr::V4(mask) => u32::from(mask).count_ones(),
+            std::net::IpAddr::V6(mask) => u128::from(mask).count_ones(),
+        };
+        let record = json!({
+            "address": ip.to_string(),
+            "netmask": netmask.to_string(),
+            "family": if ip.is_ipv4() { "IPv4" } else { "IPv6" },
+            "mac": "",
+            "internal": iface.is_loopback(),
+            "cidr": format!("{ip}/{prefix}"),
+        });
+        interfaces
+            .entry(iface.name)
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("the entry was just created as an array")
+            .push(record);
+    }
+    JsValue::from_json(&Value::Object(interfaces), context)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::iface_pair;
+
+    /// Every host running the suite has at least a loopback interface; the records carry
+    /// Node's field set. A JS-level exercise lives in `tests/node_runtime.rs`.
+    #[test]
+    fn network_interfaces_answer_node_shaped_records() {
+        let ifaces = if_addrs::get_if_addrs().expect("the interface list reads");
+        assert!(!ifaces.is_empty());
+        for iface in &ifaces {
+            assert!(!iface.name.is_empty());
+            let (ip, netmask) = iface_pair(iface);
+            assert_eq!(
+                ip.is_ipv6(),
+                netmask.is_ipv6(),
+                "an address and its netmask share the family"
+            );
+        }
+    }
 }

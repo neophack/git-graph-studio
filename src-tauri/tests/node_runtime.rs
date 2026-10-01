@@ -201,7 +201,10 @@ fn an_extensionless_main_activates_as_a_frame_program() {
     let entry = make_package(
         tmp.path(),
         &[
-            ("package.json", r#"{"name":"bare","publisher":"acme","version":"1.0.0","main":"./out/extension"}"#),
+            (
+                "package.json",
+                r#"{"name":"bare","publisher":"acme","version":"1.0.0","main":"./out/extension"}"#,
+            ),
             (
                 "out/extension.js",
                 r#"
@@ -293,7 +296,10 @@ module.exports.activate = function () {
         if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
             let id = wire["id"].as_u64().unwrap_or_default();
             requests_tx
-                .send(git_graph_studio_lib::ext_protocol::response(id, Ok(Value::Null)))
+                .send(git_graph_studio_lib::ext_protocol::response(
+                    id,
+                    Ok(Value::Null),
+                ))
                 .unwrap();
             continue;
         }
@@ -309,6 +315,158 @@ module.exports.activate = function () {
 }
 
 #[test]
+fn a_frame_programs_command_arguments_keep_their_undefined_across_the_json_wire() {
+    // The host's `executeCommand` reaches a backend command through JSON at both hops
+    // (the invoke, the ggs-ext/1 line), and JSON has no undefined: the placeholder
+    // arguments a caller passes (`executeCommand('id', sessionId, undefined, …)` —
+    // claude-remote's claudeChatRun, and claude-code's own `void 0` slots) landed as
+    // null, and a handler that branches on `viewColumn !== void 0` then took the wrong
+    // branch and threw `cannot convert 'null' or 'undefined' to object` in Boa — a
+    // phone-started new conversation could never open its tab. The dispatch hands the
+    // handler the undefined the caller passed (top level only: a null inside an object
+    // is data and stays null).
+    //
+    // The shim file the bootstrap evaluates for a frame program (the dev layout prepare
+    // writes); a checkout without a built shim skips this suite.
+    let shim = std::env::var("GGS_VSCODE_SHIM")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("../target/studio/vscode-shim.cjs"));
+    if !shim.is_file() {
+        eprintln!("skipping: no vscode-shim.cjs built");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[
+            (
+                "package.json",
+                r#"{"name":"args","publisher":"acme","version":"1.0.0","main":"main.js"}"#,
+            ),
+            (
+                "main.js",
+                r#"
+const vscode = require('vscode');
+module.exports.activate = function () {
+    vscode.commands.registerCommand('args.probe', function (a, b, c) {
+        return JSON.stringify({
+            a: a === undefined ? 'undef' : a === null ? 'null' : String(a),
+            b: b === undefined ? 'undef' : b === null ? 'null' : String(b),
+            inner: c && c.x === null ? 'null-kept' : 'other',
+            arity: arguments.length
+        });
+    });
+};
+"#,
+            ),
+        ],
+    )
+    .join("main.js");
+
+    let (requests_tx, requests_rx) = std::sync::mpsc::channel::<String>();
+    let (output_tx, output_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        git_graph_studio_lib::node_runtime::serve_on(
+            entry,
+            ChannelReader::from(requests_rx),
+            ChannelWriter(output_tx),
+        );
+    });
+    let read_line = || -> String {
+        match output_rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(line) => line,
+            Err(_) => panic!("the backend fell silent (activation never finished)"),
+        }
+    };
+
+    let mut next_id = 1u64;
+    requests_tx
+        .send(git_graph_studio_lib::ext_protocol::request(
+            next_id,
+            "initialize",
+            json!({
+                "protocolVersion": "ggs-ext/1",
+                "extensionId": "acme.args",
+                "extensionPath": tmp.path().join("pkg").display().to_string(),
+                "workspaceFolders": [],
+            }),
+        ))
+        .unwrap();
+    // The claude-vscode.editor.open shape the host sends: a real value, a placeholder,
+    // and an options object carrying a null of its own. The loop answers the activation's
+    // own host asks, then takes the handshake.
+    let handshake;
+    loop {
+        let line = read_line();
+        let Ok(wire) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
+            let id = wire["id"].as_u64().unwrap_or_default();
+            let inner = wire["params"]["method"].as_str().unwrap_or_default();
+            let answer = if inner == "host.env" {
+                json!({ "settings": {}, "language": "en", "state": { "global": {}, "workspace": {} } })
+            } else {
+                Value::Null
+            };
+            requests_tx
+                .send(git_graph_studio_lib::ext_protocol::response(id, Ok(answer)))
+                .unwrap();
+            continue;
+        }
+        if wire["id"].as_u64() == Some(next_id) {
+            handshake = wire;
+            break;
+        }
+    }
+    assert_eq!(handshake["result"]["protocolVersion"], "ggs-ext/1");
+
+    next_id += 1;
+    requests_tx
+        .send(git_graph_studio_lib::ext_protocol::request(
+            next_id,
+            "runCommand",
+            json!({ "command": "args.probe", "args": ["s1", null, { "x": null }] }),
+        ))
+        .unwrap();
+    let answer;
+    loop {
+        let line = read_line();
+        let Ok(wire) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
+            let id = wire["id"].as_u64().unwrap_or_default();
+            requests_tx
+                .send(git_graph_studio_lib::ext_protocol::response(
+                    id,
+                    Ok(Value::Null),
+                ))
+                .unwrap();
+            continue;
+        }
+        if wire["id"].as_u64() == Some(next_id) {
+            answer = wire;
+            break;
+        }
+    }
+    let seen: Value = serde_json::from_str(
+        answer["result"].as_str().expect("the handler answered a string"),
+    )
+    .expect("the handler answered JSON");
+    assert_eq!(seen["a"], "s1", "the real argument arrives as it was");
+    assert_eq!(
+        seen["b"], "undef",
+        "the wire's null arrives as the undefined the caller passed"
+    );
+    assert_eq!(
+        seen["inner"], "null-kept",
+        "a null inside an argument object is data, untouched"
+    );
+    assert_eq!(seen["arity"], 3, "no argument was dropped or added");
+}
+
+#[test]
 fn a_module_that_throws_is_removed_from_the_require_cache() {
     // Node's loader: a module that throws mid-evaluation is NOT cached — the standard
     // `try { require('dep') } catch {}` availability probe must be able to retry, and a
@@ -317,7 +475,10 @@ fn a_module_that_throws_is_removed_from_the_require_cache() {
     let entry = make_package(
         tmp.path(),
         &[
-            ("package.json", r#"{"name":"probe","publisher":"acme","version":"1.0.0","main":"main.js"}"#),
+            (
+                "package.json",
+                r#"{"name":"probe","publisher":"acme","version":"1.0.0","main":"main.js"}"#,
+            ),
             (
                 "main.js",
                 r#"
@@ -332,16 +493,19 @@ module.exports = { dispatch: (command) => (command === 'probe' ? { first, second
 "#,
             ),
             ("package2.json", r#"{}"#),
-            ("flaky/package.json", r#"{"name":"flaky","main":"index.js"}"#),
-            ("flaky/index.js", "exports.started = true; throw new Error('boom');"),
+            (
+                "flaky/package.json",
+                r#"{"name":"flaky","main":"index.js"}"#,
+            ),
+            (
+                "flaky/index.js",
+                "exports.started = true; throw new Error('boom');",
+            ),
         ],
     )
     .join("main.js");
 
-    let answers = serve(
-        entry,
-        &[initialize(), run_command("probe", json!([]))],
-    );
+    let answers = serve(entry, &[initialize(), run_command("probe", json!([]))]);
     let result = answers[1].clone().expect("the probe answers");
     assert_eq!(result["first"], "threw", "the first require throws");
     assert_eq!(
@@ -949,6 +1113,53 @@ ggs.onRequest((command, args) => {
         );
     }
     assert_eq!(answers[6].as_ref().unwrap()["unknown"], json!("nobody"));
+}
+
+#[test]
+fn os_network_interfaces_list_the_lans_addresses() {
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[(
+            "main.js",
+            r#"
+const os = require('os');
+const groups = os.networkInterfaces();
+const flat = [];
+for (const name of Object.keys(groups)) for (const entry of groups[name]) flat.push(entry);
+ggs.onRequest((command) => {
+    if (command !== 'report') return { unknown: command };
+    return {
+        groups: Object.keys(groups).length,
+        records: flat.length,
+        // Node's field set on every record (the pairing QR reads address/family/internal).
+        everyRecordNodeShaped: flat.every((e) =>
+            typeof e.address === 'string' &&
+            (e.family === 'IPv4' || e.family === 'IPv6') &&
+            typeof e.netmask === 'string' &&
+            typeof e.internal === 'boolean' &&
+            typeof e.cidr === 'string' && e.cidr.includes('/')),
+        hasLoopback: flat.some((e) => e.internal === true && (e.address === '127.0.0.1' || e.address === '::1'))
+    };
+});
+"#,
+        )],
+    )
+    .join("main.js");
+
+    let answers = serve(entry, &[initialize(), run_command("report", json!([]))]);
+    assert_eq!(answers.len(), 2, "{answers:?}");
+    let report = answers[1].as_ref().unwrap();
+    assert!(
+        report["groups"].as_u64().unwrap_or(0) >= 1,
+        "at least one interface group: {report}"
+    );
+    assert_eq!(report["everyRecordNodeShaped"], json!(true), "{report}");
+    assert_eq!(
+        report["hasLoopback"],
+        json!(true),
+        "loopback present and marked internal: {report}"
+    );
 }
 
 #[test]
@@ -2042,6 +2253,68 @@ ggs.onRequest((command) => (command === 'buffer' ? bufferCase() : null));
     .join("main.js");
     let answers = serve(entry, &[initialize(), run_command("buffer", json!([]))]);
     let expected: Value = serde_json::from_str(r#"{"hex":"abcdefbeaddefe3ff800000000000000","r16":43981,"r32":3735928559,"r8":-2,"rd":1.5,"big":"1099511627781","uint":78187493530,"intLE":-1,"view":"JJJJJ world","b64url":"-__-","b64urlBack":"fbfffe","u16":"6800e900","u16back":"hé","indexOf":3,"includes":true,"upper":"6869","cmp":-1,"pkce":"iMnq5o6zALKXGivsnlom_0F5_WYda32GHkxlV7mq7hQ","write":"3:0078797a","range":"ERR_BUFFER_OUT_OF_BOUNDS"}"#).unwrap();
+    assert_eq!(answers[1].as_ref().unwrap(), &expected);
+}
+
+/// The Claude Remote extension's whole sealed wire rides the crypto shim: PBKDF2-SHA256
+/// key derivation (checked against a published RFC test vector) and an AES-256-GCM
+/// seal/open round trip with AAD, whose tag tampering and AAD substitution must both fail.
+#[test]
+fn crypto_pbkdf2_and_aes_gcm_behave_like_node() {
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[(
+            "main.js",
+            r#"
+function cryptoCase() {
+    const crypto = require('crypto');
+    // the published PBKDF2-HMAC-SHA256 vector (password/salt, c=1, 32 bytes)
+    const vector = crypto.pbkdf2Sync('password', Buffer.from('salt', 'utf8'), 1, 32, 'sha256').toString('hex');
+    // the extension's own chain: 150k rounds over the pairing code, then a sealed envelope
+    const key = crypto.pbkdf2Sync('ABCD-EFGH-JKMN-PQRS-TVWX-YZ01', Buffer.from('c2FsdA', 'base64url'), 150000, 32, 'sha256');
+    const iv = Buffer.from('000102030405060708090a0b', 'hex');
+    const aad = Buffer.from('cr2:req:abcdef123456', 'utf8');
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    cipher.setAAD(aad);
+    const sealed = Buffer.concat([cipher.update(Buffer.from('{"m":"hello"}', 'utf8')), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    const open = (openAad, openTag) => {
+        const d = crypto.createDecipheriv('aes-256-gcm', key, iv);
+        d.setAAD(openAad);
+        d.setAuthTag(openTag);
+        return Buffer.concat([d.update(sealed), d.final()]).toString('utf8');
+    };
+    const flipped = Buffer.from(tag);
+    flipped[0] = flipped[0] ^ 1;
+    let tampered = 'no throw';
+    try { open(aad, flipped); } catch (e) { tampered = 'threw'; }
+    let wrongAad = 'no throw';
+    try { open(Buffer.from('cr2:res:someone-else', 'utf8'), tag); } catch (e) { wrongAad = 'threw'; }
+    return {
+        vector,
+        keyLen: key.length,
+        opened: open(aad, tag),
+        tampered,
+        wrongAad,
+        tagLen: tag.length,
+        sealedEveryTime: (() => {
+            const c2 = crypto.createCipheriv('aes-256-gcm', key, iv);
+            c2.setAAD(aad);
+            return Buffer.concat([c2.update(Buffer.from('{"m":"hello"}', 'utf8')), c2.final()]).toString('hex') === sealed.toString('hex');
+        })()
+    };
+}
+ggs.onRequest((command) => (command === 'crypto' ? cryptoCase() : null));
+"#,
+        )],
+    )
+    .join("main.js");
+    let answers = serve(entry, &[initialize(), run_command("crypto", json!([]))]);
+    let expected: Value = serde_json::from_str(
+        r#"{"vector":"120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b","keyLen":32,"opened":"{\"m\":\"hello\"}","tampered":"threw","wrongAad":"threw","tagLen":16,"sealedEveryTime":true}"#,
+    )
+    .unwrap();
     assert_eq!(answers[1].as_ref().unwrap(), &expected);
 }
 

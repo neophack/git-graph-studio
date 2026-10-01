@@ -33,7 +33,7 @@ import { commandIconContent, contextUri, declaredLanguageName, menuSection, reso
 import { extFileDataUrl } from './extHost';
 import type { FolderCompareView } from './folderCompare';
 import type { MergeToolbar } from './mergeEditor';
-import { t } from './i18n';
+import { t, trText } from './i18n';
 import { SETTINGS_EVENT, settings } from './settings';
 import { basename, dirname, el, icon, joinPath, notify, quickPick, relativeTo, showContextMenu, showMenuBelow, toPosix, type MenuEntry } from './ui';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
@@ -385,6 +385,10 @@ export class EditorGroup {
 	 *  keeps its editors — the area routes placed opens into another group. claude-code
 	 *  locks its chat's group right after opening it, exactly as it does in VS Code. */
 	locked = false;
+	/** Toggle this group's lock from its own surfaces — the lock badge's click and the tab
+	 *  menu's Lock/Unlock entry, both inside this class with no area reference. The area
+	 *  wires it to `setGroupLock`, the one state-changer (the box's state class included). */
+	onToggleGroupLock: (() => void) | null = null;
 
 	onActiveChange: ((editor: { kind: EditorInput['kind']; path?: string; languageName?: string; encoding?: string; eol?: 'lf' | 'crlf'; line: number; column: number; selected?: number; selections?: number } | null) => void) | null = null;
 	onNavigationChange: (() => void) | null = null;
@@ -2714,7 +2718,12 @@ export class EditorGroup {
 			{ label: 'Close Others', run: () => void this.closeOthers(editor) },
 			{ label: 'Close to the Right', disabled: this.open.indexOf(editor) === this.open.length - 1, run: () => void this.closeToTheRight(editor) },
 			{ label: 'Close Saved', run: () => void this.closeSaved() },
-			{ label: 'Close All', keybinding: 'Ctrl+K Ctrl+W', run: () => void this.closeAll() }
+			{ label: 'Close All', keybinding: 'Ctrl+K Ctrl+W', run: () => void this.closeAll() },
+			// VS Code's tab-menu lock toggle, labelled by the state — the discoverable exit
+			// beside the badge's click (the palette names the commands too). `trText` reuses
+			// the palette labels' own translations, so every surface says the same thing.
+			'separator',
+			{ label: trText(this.locked ? 'Unlock Editor Group' : 'Lock Editor Group'), run: () => this.onToggleGroupLock?.() }
 		];
 		if (editor.input.kind === 'file') {
 			const path = editor.input.path;
@@ -3151,6 +3160,13 @@ export class EditorGroup {
 		if (this.locked) {
 			const badge = el('div', 'group-lock', [icon('lock')]);
 			badge.title = t('editor.groupLocked');
+			// The badge is the exit too, as in VS Code: a click unlocks this group. The lock
+			// claude-code leaves on its chat's group is the one users meet unasked — without
+			// this, no surface in the group itself answered, and the lock read as permanent.
+			badge.addEventListener('click', (event) => {
+				event.stopPropagation();
+				this.onToggleGroupLock?.();
+			});
 			this.tabs.appendChild(badge);
 		}
 	}

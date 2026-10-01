@@ -296,7 +296,11 @@ pub(super) fn close_server(
 /// the way `connect` resolves, and the addresses cross as JSON for the prelude's dns
 /// module to shape (`[{address, family}]`). ENOTFOUND crosses as a JSON error object so
 /// the JS side can reject with Node's own error shape.
-pub(super) fn dns_lookup(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+pub(super) fn dns_lookup(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let host = opt_string_arg(args, 0, context).unwrap_or_else(|| "localhost".to_owned());
     let host = host.trim().to_owned();
     let family_number = |addr: &SocketAddr| if addr.is_ipv4() { 4 } else { 6 };

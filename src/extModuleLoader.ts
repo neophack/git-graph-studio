@@ -192,7 +192,10 @@ class ModuleLoader {
 		const base = asAbsolute !== null
 			? asAbsolute
 			: request.startsWith('.') || request.startsWith('/')
-				? normalizePath((request.startsWith('/') ? '' : fromDir + '/') + request)
+				// A root-level module's directory is '' — prefixing '/' there would make
+				// normalizePath keep a leading slash ('/sessions.js') that no map key
+				// carries, and every `require('./sibling.js')` from the entry would miss.
+				? normalizePath(request.startsWith('/') ? request : (fromDir ? fromDir + '/' : '') + request)
 				: this.resolveBare(request, fromDir);
 		return base === undefined ? undefined : this.resolveAsFileOrDirectory(base);
 	}

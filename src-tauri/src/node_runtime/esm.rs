@@ -145,19 +145,19 @@ fn load_path(path: &Path, context: &mut Context) -> JsResult<Module> {
         // still failed. The degrade: re-parse with every binding kept in its
         // environment (the module twin of the CommonJS path's all-escaping recompile),
         // and the compile degrades instead of the package dying.
-        Module::parse(Source::from_bytes(&source).with_path(path), None, context).or_else(
-            |_| {
+        Module::parse(Source::from_bytes(&source).with_path(path), None, context)
+            .or_else(|_| {
                 Module::parse_all_bindings_escaping(
                     Source::from_bytes(&source).with_path(path),
                     None,
                     context,
                 )
-            },
-        ).map_err(|error| {
-            JsError::from_native(
-                JsNativeError::syntax().with_message(format!("{}: {error}", path.display())),
-            )
-        })?
+            })
+            .map_err(|error| {
+                JsError::from_native(
+                    JsNativeError::syntax().with_message(format!("{}: {error}", path.display())),
+                )
+            })?
     } else {
         let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
         let exports = require::require(&parent, &path.display().to_string(), context)?;
@@ -275,8 +275,7 @@ pub(crate) fn require_esm(path: &Path, context: &mut Context) -> JsResult<JsValu
             let promise = module.load_link_evaluate(context);
             settle(context, promise.into()).map_err(|retried| {
                 JsError::from_native(
-                    JsNativeError::error()
-                        .with_message(format!("{}: {retried}", path.display())),
+                    JsNativeError::error().with_message(format!("{}: {retried}", path.display())),
                 )
             })?;
             return Ok(module.namespace(context).into());

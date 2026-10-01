@@ -2242,7 +2242,8 @@ for (const name of ['dispose', 'asyncDispose']) {
 		uptime: () => performance.now() / 1000,
 		version: () => os.type(),
 		machine: () => (typeof os.arch === 'function' ? os.arch() : String(os.arch)) === 'arm64' ? 'arm64' : 'x86_64',
-		networkInterfaces: () => ({}),
+		// No networkInterfaces here: the os builtin answers the real interface list
+		// (if-addrs) — a pairing QR needs the machine's true LAN addresses.
 		userInfo: () => {
 			const homedir = os.homedir();
 			return { username: process.env.USERNAME || process.env.USER || '', uid: -1, gid: -1, shell: process.env.SHELL || null, homedir };

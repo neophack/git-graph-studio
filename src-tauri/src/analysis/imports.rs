@@ -327,7 +327,11 @@ mod tests {
         write(dir.path(), "x.js", "import { y } from './y';\n");
         write(dir.path(), "y.js", "import { x } from './x';\n");
         write(dir.path(), "w.js", "import { z } from './z';\n");
-        write(dir.path(), "z.js", "import { x } from './x';\nimport { w } from './w';\n");
+        write(
+            dir.path(),
+            "z.js",
+            "import { x } from './x';\nimport { w } from './w';\n",
+        );
         let data = built(dir.path());
         let graph = import_graph(&data);
         let mut cycles = graph.cycles.clone();

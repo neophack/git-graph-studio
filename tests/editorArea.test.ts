@@ -5,7 +5,7 @@ import { tabDrag } from '../src/editor';
 import { applyContributions, removeContributions } from '../src/contributions';
 import { SETTINGS_EVENT } from '../src/settings';
 import { backend } from './tauriMock';
-import { click, flush, notificationButton, notifications, texts } from './helpers';
+import { click, flush, menuItem, notificationButton, notifications, rightClick, texts } from './helpers';
 
 function files(contents: Record<string, string | null>): void {
 	backend.on('read_file', ({ path }) => {
@@ -313,6 +313,35 @@ describe('editor area (M3 3.1)', () => {
 		area.focusIndex(1);
 		await area.openFile('C:\\repo\\c.ts');
 		expect(right.openFilePaths()).toEqual(['C:\\repo\\b.ts', 'C:\\repo\\c.ts']);
+	});
+
+	it('the lock badge and the tab menu unlock a group — the exits a claude-code lock leaves visible', async () => {
+		files({ 'C:\\repo\\a.ts': 'a\n', 'C:\\repo\\b.ts': 'b\n' });
+		const area = new EditorArea(document.getElementById('editorGroup')!);
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
+		const right = area.split('right');
+		await right.openFile('C:\\repo\\b.ts');
+		area.setGroupLock(right, true);
+		const rightBox = () => document.querySelectorAll('.editor-group-box')[1]!;
+
+		// The padlock badge is the unlock exit itself, as in VS Code: one click on it
+		// unlocks the group (claude-code locks its chat's on open; before this the badge
+		// was a marker no interaction answered, and the lock read as permanent).
+		click(rightBox().querySelector('.group-lock')!);
+		expect(right.locked).toBe(false);
+		expect(document.querySelector('.group-lock')).toBeNull();
+
+		// The tab context menu carries VS Code's Lock/Unlock Editor Group entry, labelled
+		// by the state: unlock while locked...
+		area.setGroupLock(right, true);
+		rightClick(rightBox().querySelector('.tab')!);
+		click(menuItem('Unlock Editor Group'));
+		expect(right.locked).toBe(false);
+		// ...lock while unlocked — the same toggle from the group's own surface.
+		rightClick(rightBox().querySelector('.tab')!);
+		click(menuItem('Lock Editor Group'));
+		expect(right.locked).toBe(true);
 	});
 
 	it('a placed webview panel opens its own side group — the lock claude-code asks for lands on the chat, not the code', async () => {

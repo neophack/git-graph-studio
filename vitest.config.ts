@@ -19,7 +19,9 @@ export default defineConfig({
 	// suite's wall time (per vitest's own post-run report). extensions.test.ts
 	// vm-requires jsdom's CJS dependency tree, whose @exodus/bytes dependency ships ESM
 	// under a CJS extension and breaks inside the vm context — that one file stays on
-	// the classic threads pool. The global seam check runs in both; it is idempotent.
+	// the classic threads pool, as does claudeRemoteActivation.test.ts, whose
+	// require('vscode') interception patches Module._load (the vm pool's module system
+	// does not honor it). The global seam check runs in both; it is idempotent.
 	test: {
 		environment: 'jsdom',
 		setupFiles: ['tests/setup.ts'],
@@ -32,7 +34,7 @@ export default defineConfig({
 					globalSetup: ['./scripts/check-seams.mjs'],
 					environment: 'jsdom',
 					include: ['tests/**/*.test.ts'],
-					exclude: ['tests/extensions.test.ts'],
+					exclude: ['tests/extensions.test.ts', 'tests/claudeRemoteActivation.test.ts'],
 					setupFiles: ['tests/setup.ts'],
 					pool: 'vmThreads',
 					poolOptions: { vmThreads: { memoryLimit: 4096 } }
@@ -44,7 +46,7 @@ export default defineConfig({
 					name: 'ext-threads',
 					globalSetup: ['./scripts/check-seams.mjs'],
 					environment: 'jsdom',
-					include: ['tests/extensions.test.ts'],
+					include: ['tests/extensions.test.ts', 'tests/claudeRemoteActivation.test.ts'],
 					setupFiles: ['tests/setup.ts'],
 					pool: 'threads'
 				}

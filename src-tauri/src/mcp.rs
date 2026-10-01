@@ -1696,7 +1696,10 @@ mod tests {
         );
         let answer = reply(&server, &line);
         // Whatever the tool answered, the server lived — and the log records the call.
-        assert!(answer["result"].is_object() || answer["error"].is_object(), "{answer}");
+        assert!(
+            answer["result"].is_object() || answer["error"].is_object(),
+            "{answer}"
+        );
         let log = std::fs::read_to_string(&server.log_path).expect("the call log");
         assert!(log.contains("search_text"), "{log}");
         let _ = &dir;

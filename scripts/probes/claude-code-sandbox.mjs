@@ -182,7 +182,11 @@ const buildSandbox = async () => {
 			ANTHROPIC_API_KEY: FAKE_KEY,
 			DISABLE_TELEMETRY: '1',
 			DISABLE_ERROR_REPORTING: '1',
-			CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+			CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+			// The fake server is a third-party endpoint: it passes none of the
+			// `safeguards` fields auto mode's server-side classifier checks ride on,
+			// so the checks are off — the same takeover the provider bridge writes.
+			CLAUDE_CODE_AUTO_MODE_SERVER: '0'
 		}
 	}, null, '\t') + '\n');
 	// Onboarding done, this workspace trusted, no first-run gates inside the chat.
@@ -235,7 +239,8 @@ const preflight = () => {
 			ANTHROPIC_API_KEY: FAKE_KEY,
 			DISABLE_TELEMETRY: '1',
 			DISABLE_ERROR_REPORTING: '1',
-			CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+			CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+			CLAUDE_CODE_AUTO_MODE_SERVER: '0'
 		}
 	});
 	const ms = Date.now() - started;
@@ -385,6 +390,7 @@ const run = async () => {
 		DISABLE_TELEMETRY: '1',
 		DISABLE_ERROR_REPORTING: '1',
 		CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+		CLAUDE_CODE_AUTO_MODE_SERVER: '0',
 		// lib.rs's dev-only probe hook navigates the window to the harness page at first load
 		// (a --config windows[0].url override proved unreachable: the window is built from the
 		// base config and always opened index.html), and dumps a page diagnostic on the second

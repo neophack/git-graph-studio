@@ -2,8 +2,8 @@
   "name": "claude-remote",
   "displayName": "Claude Remote (LAN)",
   "publisher": "ggs",
-  "version": "0.1.0",
-  "description": "Remotely use Claude Code conversations from a phone on the same LAN: encrypted pairing, conversation list, reader and new-conversation control. Works in VS Code and Git Graph Studio.",
+  "version": "0.6.0",
+  "description": "Continue this workspace's Claude Code conversations from a phone on the same LAN: full history, live progress, send-now or queue-after-turn prompts, end-to-end AES-256-GCM encryption with a resettable pairing key. Works in VS Code and Git Graph Studio.",
   "categories": [
     "Other"
   ],
@@ -11,33 +11,76 @@
   "engines": {
     "vscode": "^1.100.0"
   },
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "contributes": {
     "commands": [
       {
+        "command": "claude-remote.reveal",
+        "title": "Open Panel",
+        "category": "Claude Remote"
+      },
+      {
         "command": "claude-remote.start",
-        "title": "Claude Remote: Start LAN Server",
+        "title": "Start LAN Server",
         "category": "Claude Remote"
       },
       {
         "command": "claude-remote.stop",
-        "title": "Claude Remote: Stop LAN Server",
+        "title": "Stop LAN Server",
         "category": "Claude Remote"
       },
       {
-        "command": "claude-remote.reveal",
-        "title": "Claude Remote: Show Pairing Info Again",
+        "command": "claude-remote.resetKey",
+        "title": "Reset Pairing Key",
         "category": "Claude Remote"
       }
-    ]
-  },
-  "ggs": {
-    "format": "ggs/2",
-    "id": "ggs.claude-remote",
-    "version": "0.1.0",
-    "backend": {
-      "kind": "node",
-      "command": "./extension.js"
+    ],
+    "configuration": {
+      "title": "Claude Remote",
+      "properties": {
+        "claudeRemote.port": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "LAN server port. 0 reuses the last port (or picks a free one), so paired phones keep their bookmark."
+        },
+        "claudeRemote.autoStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Start the LAN server when the window opens."
+        },
+        "claudeRemote.desktopTab": {
+          "type": "string",
+          "enum": [
+            "reload",
+            "open",
+            "off"
+          ],
+          "default": "reload",
+          "enumDescriptions": [
+            "Open the conversation's Claude Code tab when a phone turn starts, and reload it when the turn ends so it shows the phone's turn and continues from it",
+            "Only open (or reveal) the tab when a phone turn starts",
+            "Leave the desktop tabs alone"
+          ],
+          "description": "What a phone prompt does to the conversation's Claude Code tab on this desktop."
+        },
+        "claudeRemote.backend": {
+          "type": "string",
+          "enum": [
+            "desktop",
+            "headless"
+          ],
+          "default": "desktop",
+          "enumDescriptions": [
+            "Type the phone's prompt into the conversation's Claude Code tab and send it from there (Git Graph Studio); the desktop and the phone show the same turn. Falls back to headless where the host cannot.",
+            "Run the phone's prompt through the claude CLI in the background"
+          ],
+          "description": "How a phone prompt runs on this desktop."
+        }
+      }
     }
   }
 }

@@ -26,6 +26,7 @@ import { locale, registerZhCnText, t, tf } from './i18n';
 import * as state from './state';
 import { notify, progressToast, quickInput, type ProgressToast } from './ui';
 import type { SerializedTreeItem } from './treeView';
+import { answerChatQuestion, chatBusy, chatControls, interruptChat, pickChatModel, pressSend, setChatInput, type ChatAnswer } from './claudeChatInject';
 
 export interface ExtInfo {
 	id: string;
@@ -1876,6 +1877,189 @@ export class ExtensionHost {
 		this.webviewClosed(extId, panelId);
 	}
 
+	/** Close every webview tab hosting `sessionId` (the extension's panel learns it through
+	 *  `webviewDisposed`, as for a user's close). Answers how many closed. */
+	private closeSessionTabs(sessionId: string): number {
+		if (!sessionId) return 0;
+		const hosting = [...this.webviewSessions].filter(([, hosted]) => hosted === sessionId).map(([key]) => this.webviews.get(key)).filter((view) => view !== undefined);
+		for (const view of hosting) this.closeWebview(view.extId, view.panelId);
+		return hosting.length;
+	}
+
+	/* ---------- Claude Remote: prompts typed into the Claude Code tab ---------- */
+
+	/** The tickets of detached sends/opens, by id (pruned after ten minutes). */
+	private readonly claudeChatTickets = new Map<string, ClaudeChatTicket>();
+	private claudeChatSerial = 0;
+
+	/** The Claude Code extension: whoever registered (or declares) its open command. */
+	private claudeExtId(): string | null {
+		return commandsRegistered.get(CLAUDE_OPEN_COMMAND)?.extId ?? this.declaringExtension(CLAUDE_OPEN_COMMAND);
+	}
+
+	private claudePanels(): WebviewHandle[] {
+		const extId = this.claudeExtId();
+		return extId ? [...this.webviews.values()].filter((view) => view.extId === extId) : [];
+	}
+
+	private panelForSession(sessionId: string): WebviewHandle | null {
+		for (const [key, hosted] of this.webviewSessions) {
+			if (hosted === sessionId) {
+				const view = this.webviews.get(key);
+				if (view) return view;
+			}
+		}
+		return null;
+	}
+
+	private async pollFor<T>(probe: () => T | null | undefined | false, ms: number): Promise<T | null> {
+		const until = Date.now() + ms;
+		for (;;) {
+			const value = probe();
+			if (value) return value;
+			if (Date.now() > until) return null;
+			await new Promise((resolve) => setTimeout(resolve, 120));
+		}
+	}
+
+	/** Open (or reveal) the session's Claude Code tab — a new conversation's when no
+	 *  session is named — and, for a send, type the prompt and press send. Answers the
+	 *  ticket at once; the work runs detached. */
+	private claudeChatStart(raw: unknown, send: boolean): { ticket: string } {
+		const request = (raw ?? {}) as { sessionId?: unknown; text?: unknown; interrupt?: unknown; model?: unknown };
+		const text = typeof request.text === 'string' ? request.text : '';
+		if (send && !text.trim()) throw new Error('empty prompt');
+		const sessionId = typeof request.sessionId === 'string' && request.sessionId ? request.sessionId : null;
+		// The phone's model pick (a tier alias or a full id), validated as the extension's
+		// own runner validates it — applied in the tab's picker before the prompt is typed.
+		const model = typeof request.model === 'string' && /^[\w.\-[\]:/]{1,80}$/.test(request.model.trim()) ? request.model.trim() : null;
+		if (!this.claudeExtId()) throw new Error('the Claude Code extension is not installed');
+		const now = Date.now();
+		for (const [id, old] of this.claudeChatTickets) if (now - old.at > 10 * 60_000) this.claudeChatTickets.delete(id);
+		const ticket: ClaudeChatTicket = { id: `cc${++this.claudeChatSerial}`, at: now, phase: 'opening', error: null, panelKey: null, sessionId };
+		this.claudeChatTickets.set(ticket.id, ticket);
+		void this.claudeChatRun(ticket, send ? text : null, request.interrupt === true, model).catch((error) => {
+			ticket.phase = 'error';
+			ticket.error = error instanceof Error ? error.message : String(error);
+			extLog('warn', 'host', `claude chat ${ticket.id}: ${ticket.error}`);
+		});
+		return { ticket: ticket.id };
+	}
+
+	private async claudeChatRun(ticket: ClaudeChatTicket, text: string | null, interrupt: boolean, model: string | null): Promise<void> {
+		const keyOf = (view: WebviewHandle) => this.webviewKey(view.extId, view.panelId);
+		let view = ticket.sessionId ? this.panelForSession(ticket.sessionId) : null;
+		if (view) {
+			this.onRevealWebviewTab?.(this.webviewTabId(view.extId, view.panelId));
+		} else {
+			const before = new Set(this.claudePanels().map(keyOf));
+			// (sessionId, initialPrompt, viewColumn, groupId, fullEditor, { programmatic }):
+			// "pin-to-panel" lands it in an editor tab whatever the sidebar preference
+			await this.executeCommand(CLAUDE_OPEN_COMMAND, [ticket.sessionId ?? undefined, undefined, undefined, undefined, undefined, { programmatic: 'pin-to-panel' }]);
+			view = await this.pollFor(() => (ticket.sessionId ? this.panelForSession(ticket.sessionId) : null) ?? this.claudePanels().find((candidate) => !before.has(keyOf(candidate))), 20_000);
+			if (!view) throw new Error('the Claude Code tab did not open');
+		}
+		ticket.panelKey = keyOf(view);
+		const target = view;
+		const controls = await this.pollFor(() => chatControls(target.frame?.contentDocument), 20_000);
+		if (!controls) throw new Error('the Claude Code chat did not become ready');
+		if (text === null) {
+			ticket.phase = 'sent';
+			return;
+		}
+		if (model) {
+			// The phone chose a model: pick it in the tab's own picker first, so the desktop
+			// runs exactly what the phone asked for. Best effort — a name the picker does not
+			// offer sends with the tab's current model, logged.
+			const picked = await pickChatModel(target.frame?.contentDocument, model);
+			if (picked === null) extLog('warn', 'host', `claude chat ${ticket.id}: no model matching "${model}" in the tab's picker; sending with its current model`);
+		}
+		ticket.phase = 'typing';
+		if (interrupt && chatBusy(controls)) {
+			interruptChat(controls);
+			await this.pollFor(() => !chatBusy(controls), 15_000);
+		}
+		setChatInput(controls, text);
+		const sent = await this.pollFor(() => pressSend(controls), 3_000);
+		if (!sent) throw new Error('the Claude Code chat did not take the prompt');
+		ticket.phase = 'sent';
+		ticket.sentAt = Date.now();
+	}
+
+	/** A ticket's progress (or a session's tab), with whether its chat shows a turn in flight. */
+	private claudeChatState(raw: unknown): { phase: string; error: string | null; sessionId: string | null; open: boolean; busy: boolean | null } {
+		const request = (raw ?? {}) as { ticket?: unknown; sessionId?: unknown };
+		const ticket = typeof request.ticket === 'string' ? this.claudeChatTickets.get(request.ticket) ?? null : null;
+		if (typeof request.ticket === 'string' && !ticket) return { phase: 'error', error: 'unknown ticket', sessionId: null, open: false, busy: null };
+		const view = ticket?.panelKey ? this.webviews.get(ticket.panelKey) ?? null : typeof request.sessionId === 'string' ? this.panelForSession(request.sessionId) : null;
+		const sessionId = (view ? this.webviewSessions.get(this.webviewKey(view.extId, view.panelId)) : undefined) ?? ticket?.sessionId ?? null;
+		if (ticket && sessionId) ticket.sessionId = sessionId;
+		const controls = chatControls(view?.frame?.contentDocument);
+		return { phase: ticket?.phase ?? (view ? 'sent' : 'none'), error: ticket?.error ?? null, sessionId, open: !!view, busy: controls ? chatBusy(controls) : null };
+	}
+
+	/** Interrupt the turn the session's (or ticket's) chat is running. */
+	private claudeChatStop(raw: unknown): { stopped: boolean } {
+		const request = (raw ?? {}) as { ticket?: unknown; sessionId?: unknown };
+		const ticket = typeof request.ticket === 'string' ? this.claudeChatTickets.get(request.ticket) ?? null : null;
+		const view = ticket?.panelKey ? this.webviews.get(ticket.panelKey) ?? null : typeof request.sessionId === 'string' ? this.panelForSession(request.sessionId) : null;
+		const controls = chatControls(view?.frame?.contentDocument);
+		return { stopped: controls ? interruptChat(controls) : false };
+	}
+
+	/** Answer the session's pending AskUserQuestion from the phone: open the session's
+	 *  tab if it is not up, click the picked options in its own question card. Like a
+	 *  send, answers a ticket at once — the clicks run detached (Claude Remote polls
+	 *  `ggs.claudeChat.state` for the outcome). */
+	private claudeChatAnswer(raw: unknown): { ticket: string } {
+		const request = (raw ?? {}) as { sessionId?: unknown; answers?: unknown };
+		const sessionId = typeof request.sessionId === 'string' && request.sessionId ? request.sessionId : null;
+		if (!sessionId) throw new Error('a question belongs to a conversation');
+		const answers: ChatAnswer[] = [];
+		for (const entry of Array.isArray(request.answers) ? request.answers : []) {
+			if (!entry || typeof entry !== 'object') throw new Error('malformed answer');
+			const answer = entry as Record<string, unknown>;
+			const picks = (Array.isArray(answer.picks) ? answer.picks : []).map(String).filter(Boolean).slice(0, 8);
+			if (!picks.length) throw new Error('an answer picks nothing');
+			answers.push({
+				question: String(answer.question ?? '').slice(0, 600),
+				header: String(answer.header ?? '').slice(0, 24),
+				picks,
+				other: typeof answer.other === 'string' ? answer.other.slice(0, 500) : undefined
+			});
+		}
+		if (!answers.length) throw new Error('no answers to give');
+		if (!this.claudeExtId()) throw new Error('the Claude Code extension is not installed');
+		const now = Date.now();
+		for (const [id, old] of this.claudeChatTickets) if (now - old.at > 10 * 60_000) this.claudeChatTickets.delete(id);
+		const ticket: ClaudeChatTicket = { id: `cc${++this.claudeChatSerial}`, at: now, phase: 'opening', error: null, panelKey: null, sessionId };
+		this.claudeChatTickets.set(ticket.id, ticket);
+		void this.claudeChatAnswerRun(ticket, answers).catch((error) => {
+			ticket.phase = 'error';
+			ticket.error = error instanceof Error ? error.message : String(error);
+			extLog('warn', 'host', `claude chat ${ticket.id}: ${ticket.error}`);
+		});
+		return { ticket: ticket.id };
+	}
+
+	private async claudeChatAnswerRun(ticket: ClaudeChatTicket, answers: ChatAnswer[]): Promise<void> {
+		const keyOf = (view: WebviewHandle) => this.webviewKey(view.extId, view.panelId);
+		let view = this.panelForSession(ticket.sessionId!);
+		if (view) {
+			this.onRevealWebviewTab?.(this.webviewTabId(view.extId, view.panelId));
+		} else {
+			await this.executeCommand(CLAUDE_OPEN_COMMAND, [ticket.sessionId ?? undefined, undefined, undefined, undefined, undefined, { programmatic: 'pin-to-panel' }]);
+			view = await this.pollFor(() => this.panelForSession(ticket.sessionId!), 20_000);
+			if (!view) throw new Error('the Claude Code tab did not open');
+		}
+		ticket.panelKey = keyOf(view);
+		ticket.phase = 'answering';
+		const answered = await answerChatQuestion(view.frame?.contentDocument, answers);
+		if (!answered) throw new Error('the question card did not take the answer');
+		ticket.phase = 'sent';
+		ticket.sentAt = Date.now();
+	}
+
 	/* ---------- Status bar items and output channels ---------- */
 
 	/** Hand the workbench's status bar the current set of extension items. */
@@ -2585,6 +2769,22 @@ export class ExtensionHost {
 			}
 			return Promise.resolve(undefined);
 		}
+		// The session tabs, by the session each webview panel reports hosting: which sessions
+		// have a tab open, and closing the tab of one. Claude Remote reloads a conversation's
+		// tab after a turn ran outside it — an open chat panel never re-reads its session
+		// file, and its next turn would branch off the history it still holds. VS Code
+		// answers the same through `window.tabGroups`, which this host cannot see.
+		if (id === 'ggs.sessionTabs.list') return Promise.resolve([...new Set(this.webviewSessions.values())]);
+		if (id === 'ggs.sessionTabs.close') return Promise.resolve(this.closeSessionTabs(String(args[0] ?? '')));
+		// Claude Remote's prompts, typed into the Claude Code tab itself (claudeChatInject.ts).
+		// Each answers at once: a process-backed caller's thread is parked inside this request,
+		// and opening a tab and waiting for its page takes seconds — the work runs detached
+		// under a ticket the caller polls (`ggs.claudeChat.state`).
+		if (id === 'ggs.claudeChat.send') return Promise.resolve().then(() => this.claudeChatStart(args[0], true));
+		if (id === 'ggs.claudeChat.open') return Promise.resolve().then(() => this.claudeChatStart(args[0], false));
+		if (id === 'ggs.claudeChat.state') return Promise.resolve(this.claudeChatState(args[0]));
+		if (id === 'ggs.claudeChat.stop') return Promise.resolve(this.claudeChatStop(args[0]));
+		if (id === 'ggs.claudeChat.answer') return Promise.resolve().then(() => this.claudeChatAnswer(args[0]));
 		if (id === 'workbench.view.scm' || id === 'workbench.view.explorer' || id === 'workbench.view.search' || id === 'workbench.view.extensions') {
 			this.onShowView?.(id.slice('workbench.view.'.length));
 			return Promise.resolve(undefined);
@@ -3206,6 +3406,20 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 
 /** Live command registrations: command id -> the frame holding its handler. */
 const commandsRegistered = new Map<string, { extId: string; handle: FrameHandle }>();
+
+/** The Claude Code extension's open-a-conversation command (the one its own session list runs). */
+const CLAUDE_OPEN_COMMAND = 'claude-vscode.editor.open';
+
+/** One detached Claude Remote send/open (see `claudeChatStart`). */
+interface ClaudeChatTicket {
+	id: string;
+	at: number;
+	phase: 'opening' | 'typing' | 'answering' | 'sent' | 'error';
+	error: string | null;
+	panelKey: string | null;
+	sessionId: string | null;
+	sentAt?: number;
+}
 
 /** VS Code dialog filters (`{ 'TypeScript': ['ts', 'tsx'] }`) onto the Tauri plugin's shape. */
 function dialogFilters(filters: Record<string, string[]> | undefined): { name: string; extensions: string[] }[] | undefined {

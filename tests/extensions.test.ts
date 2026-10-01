@@ -1113,6 +1113,185 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		expect(disposedPanels()).toEqual([1]);
 	});
 
+	it('ggs.sessionTabs lists the sessions with an open tab and closes the one hosting a session', async () => {
+		const { host, sent } = hostWithFrame();
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		host.onOpenWebview = (panelId, title) => {
+			void group.openExtPage({ kind: 'extpage', id: host['webviewTabId']('acme.demo', panelId), title, extId: 'acme.demo', pageId: 'webview' }, (pane) => host.mountWebview('acme.demo', panelId, pane));
+		};
+		host.onCloseWebviewTab = (tabId) => { if (group.closeById(tabId)) host['webviewClosed']('acme.demo', Number(tabId.split(':').at(-1))); };
+		const fromPanel = (source: Window | null, request: Record<string, unknown>) => window.dispatchEvent(new MessageEvent('message', {
+			source: source as MessageEventSource,
+			data: { __ggsWebview: true, kind: 'message', message: { type: 'request', request } }
+		}));
+		const chatFrames = () => [...document.querySelectorAll('#editorGroup iframe')];
+		await host['serve']('webview.create', [1, 'chat.view', 'Claude Code'], 'acme.demo', {} as never);
+		await host['serve']('webview.setHtml', [1, '<html><body>a</body></html>'], 'acme.demo', {} as never);
+		await host['serve']('webview.create', [2, 'chat.view', 'Claude Code'], 'acme.demo', {} as never);
+		await host['serve']('webview.setHtml', [2, '<html><body>b</body></html>'], 'acme.demo', {} as never);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		fromPanel(chatFrames()[0]!.contentWindow, { type: 'update_session_state', sessionId: 'session-a', state: 'idle' });
+		fromPanel(chatFrames()[1]!.contentWindow, { type: 'update_session_state', sessionId: 'session-b', state: 'idle' });
+
+		expect(await host.executeCommand('ggs.sessionTabs.list')).toEqual(['session-a', 'session-b']);
+		expect(await host.executeCommand('ggs.sessionTabs.close', ['session-a'])).toBe(1);
+		expect(chatFrames()).toHaveLength(1);
+		expect(sent.filter((m) => (m as { event?: string }).event === 'webviewDisposed').map((m) => (m as { panelId?: number }).panelId)).toEqual([1]);
+		expect(await host.executeCommand('ggs.sessionTabs.list')).toEqual(['session-b']);
+		expect(await host.executeCommand('ggs.sessionTabs.close', ['nobody'])).toBe(0);
+	});
+
+	it('ggs.claudeChat types a prompt into the session’s Claude Code tab — or a new one — and sends it from there', async () => {
+		const { host } = hostWithFrame();
+		host['declaredCommandIds'].set('acme.demo', ['claude-vscode.editor.open']);
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		const revealed: string[] = [];
+		host.onOpenWebview = (panelId, title) => {
+			void group.openExtPage({ kind: 'extpage', id: host['webviewTabId']('acme.demo', panelId), title, extId: 'acme.demo', pageId: 'webview' }, (pane) => host.mountWebview('acme.demo', panelId, pane));
+		};
+		host.onRevealWebviewTab = (tabId) => revealed.push(tabId);
+		const fromPanel = (source: Window | null, request: Record<string, unknown>) => window.dispatchEvent(new MessageEvent('message', {
+			source: source as MessageEventSource,
+			data: { __ggsWebview: true, kind: 'message', message: { type: 'request', request } }
+		}));
+		const sent: string[][] = [[], [], []];
+		// The chat page's composer inside the panel's own document (the srcdoc frame the
+		// host reaches): the button reads "Stop" while a turn runs with an empty input, and
+		// the model pill opens the page's own picker (the phone's model pick drives it).
+		const chatPage = (frame: HTMLIFrameElement, into: string[]) => {
+			const doc = frame.contentDocument!;
+			doc.body.innerHTML = '<form><div role="textbox" contenteditable="plaintext-only" aria-label="Ask"></div><button type="submit" data-permission-mode="default" aria-label="Send message" disabled>send</button><button type="button" title="Switch model" role="combobox" aria-haspopup="listbox" aria-expanded="false">Sonnet 4.5</button></form>';
+			const form = doc.querySelector('form')!;
+			const input = form.querySelector<HTMLElement>('[role="textbox"]')!;
+			const button = form.querySelector('button')!;
+			const pill = doc.querySelector<HTMLButtonElement>('[role="combobox"]')!;
+			let busy = false;
+			let menuOpen = false;
+			const closeMenu = () => { doc.querySelector('[role="listbox"]')?.remove(); menuOpen = false; pill.setAttribute('aria-expanded', 'false'); };
+			const render = () => {
+				const text = (input.textContent ?? '').trim();
+				button.setAttribute('aria-label', busy && !text ? 'Stop' : 'Send message');
+				button.disabled = !busy && !text;
+			};
+			input.addEventListener('input', render);
+			button.addEventListener('click', (event) => { if (busy && !(input.textContent ?? '').trim()) { event.preventDefault(); busy = false; render(); } });
+			form.addEventListener('submit', (event) => { event.preventDefault(); into.push(input.textContent ?? ''); input.textContent = ''; busy = true; render(); });
+			pill.addEventListener('click', () => {
+				if (menuOpen) { closeMenu(); return; }
+				menuOpen = true;
+				pill.setAttribute('aria-expanded', 'true');
+				const box = doc.createElement('div');
+				box.setAttribute('role', 'listbox');
+				box.innerHTML = '<div role="option"><span>Opus 4.6</span><span>claude-opus-4-6</span></div><div role="option"><span>Sonnet 4.5</span><span>claude-sonnet-4-5</span></div>';
+				box.addEventListener('click', (event) => {
+					const option = (event.target as HTMLElement).closest<HTMLElement>('[role="option"]');
+					if (!option) return;
+					pill.textContent = (option.firstElementChild?.textContent ?? '').trim();
+					closeMenu();
+				});
+				doc.body.appendChild(box);
+			});
+		};
+		const waitFrames = () => new Promise((resolve) => setTimeout(resolve, 20));
+		const chatFrames = () => [...document.querySelectorAll<HTMLIFrameElement>('#editorGroup iframe')];
+		const until = async (probe: () => Promise<{ phase: string }>, phase: string) => {
+			for (let i = 0; i < 100; i++) { const state = await probe(); if (state.phase === phase) return state; await new Promise((resolve) => setTimeout(resolve, 50)); }
+			throw new Error('never reached ' + phase);
+		};
+
+		// An open tab hosting session-1: the prompt lands in it, the tab is brought forward.
+		await host['serve']('webview.create', [1, 'claudeVSCodePanel', 'Claude Code'], 'acme.demo', {} as never);
+		await host['serve']('webview.setHtml', [1, '<html><body></body></html>'], 'acme.demo', {} as never);
+		await waitFrames();
+		chatPage(chatFrames()[0]!, sent[0]!);
+		fromPanel(chatFrames()[0]!.contentWindow, { type: 'update_session_state', sessionId: 'session-1', state: 'idle' });
+		const { ticket } = await host.executeCommand('ggs.claudeChat.send', [{ sessionId: 'session-1', text: 'run the tests' }]) as { ticket: string };
+		const done = await until(() => host.executeCommand('ggs.claudeChat.state', [{ ticket }]) as Promise<{ phase: string }>, 'sent');
+		expect(sent[0]).toEqual(['run the tests']);
+		expect(done).toMatchObject({ sessionId: 'session-1', open: true, busy: true });
+		expect(revealed).toEqual(['webview:acme.demo:1']);
+		// Stop: the tab's own Stop button.
+		expect(await host.executeCommand('ggs.claudeChat.stop', [{ sessionId: 'session-1' }])).toEqual({ stopped: true });
+		expect(await host.executeCommand('ggs.claudeChat.state', [{ sessionId: 'session-1' }])).toMatchObject({ busy: false });
+
+		// A new conversation: Claude Code opens a fresh tab, the prompt goes there, and the
+		// session the tab then reports is the ticket's.
+		const opened: unknown[][] = [];
+		const realExecute = host.executeCommand.bind(host);
+		host.executeCommand = (id: string, args: unknown[] = [], caller?: never) => {
+			if (id !== 'claude-vscode.editor.open') return realExecute(id, args, caller);
+			opened.push(args);
+			return (async () => {
+				await host['serve']('webview.create', [2, 'claudeVSCodePanel', 'Claude Code'], 'acme.demo', {} as never);
+				await host['serve']('webview.setHtml', [2, '<html><body></body></html>'], 'acme.demo', {} as never);
+				await waitFrames();
+				chatPage(chatFrames()[1]!, sent[1]!);
+			})();
+		};
+		const fresh = await host.executeCommand('ggs.claudeChat.send', [{ text: 'start something new' }]) as { ticket: string };
+		await until(() => host.executeCommand('ggs.claudeChat.state', [{ ticket: fresh.ticket }]) as Promise<{ phase: string }>, 'sent');
+		expect(opened).toEqual([[undefined, undefined, undefined, undefined, undefined, { programmatic: 'pin-to-panel' }]]);
+		expect(sent[1]).toEqual(['start something new']);
+		fromPanel(chatFrames()[1]!.contentWindow, { type: 'update_session_state', sessionId: 'session-2', state: 'running' });
+		expect(await host.executeCommand('ggs.claudeChat.state', [{ ticket: fresh.ticket }])).toMatchObject({ sessionId: 'session-2', phase: 'sent' });
+
+		// "now" against a busy tab: interrupt first, then send.
+		const now = await host.executeCommand('ggs.claudeChat.send', [{ sessionId: 'session-2', text: 'urgent', interrupt: true }]) as { ticket: string };
+		await until(() => host.executeCommand('ggs.claudeChat.state', [{ ticket: now.ticket }]) as Promise<{ phase: string }>, 'sent');
+		expect(sent[1]).toEqual(['start something new', 'urgent']);
+
+		// A model rides along: the host picks it in the tab's own model picker before typing.
+		const pick = await host.executeCommand('ggs.claudeChat.send', [{ sessionId: 'session-2', text: 'on opus please', model: 'opus' }]) as { ticket: string };
+		await until(() => host.executeCommand('ggs.claudeChat.state', [{ ticket: pick.ticket }]) as Promise<{ phase: string }>, 'sent');
+		expect(sent[1]).toEqual(['start something new', 'urgent', 'on opus please']);
+		expect(chatFrames()[1]!.contentDocument!.querySelector('[role="combobox"]')!.textContent).toContain('Opus 4.6');
+
+		// A pending AskUserQuestion in session-1's tab: a radio card plus its "Submit
+		// answers" button (enabled once a question holds a pick, the click that resolves
+		// the card — the real card never submits by itself). The phone's answer clicks
+		// the option and then that button.
+		const card = chatFrames()[0]!.contentDocument!;
+		const cardRoot = card.createElement('div');
+		let picked = false;
+		for (const label of ['自动化测试级验证', '自动化 + 实机安装验证']) {
+			const option = card.createElement('div');
+			option.setAttribute('role', 'radio');
+			option.setAttribute('aria-checked', 'false');
+			option.innerHTML = `<div>${label}</div><div>desc of ${label}</div>`;
+			option.addEventListener('click', () => {
+				cardRoot.querySelectorAll('[role="radio"]').forEach((row) => row.setAttribute('aria-checked', 'false'));
+				option.setAttribute('aria-checked', 'true');
+				picked = true;
+				submit.disabled = false;
+			});
+			cardRoot.appendChild(option);
+		}
+		const submit = card.createElement('button');
+		submit.textContent = '1 Submit answers';
+		submit.disabled = true;
+		submit.addEventListener('click', () => {
+			if (submit.disabled) return;
+			cardRoot.querySelectorAll('[role="radio"]').forEach((row) => row.setAttribute('aria-disabled', 'true'));
+		});
+		cardRoot.appendChild(submit);
+		card.body.appendChild(cardRoot);
+		const ans = await host.executeCommand('ggs.claudeChat.answer', [{ sessionId: 'session-1', answers: [{ question: '做到什么程度？', header: '验证', picks: ['自动化 + 实机安装验证'] }] }]) as { ticket: string };
+		await until(() => host.executeCommand('ggs.claudeChat.state', [{ ticket: ans.ticket }]) as Promise<{ phase: string }>, 'sent');
+		expect(picked).toBe(true);
+		expect(cardRoot.querySelector('[aria-checked="true"]')!.firstElementChild!.textContent).toBe('自动化 + 实机安装验证');
+		// a tab with no pending question answers an error, not a click
+		const noCard = await host.executeCommand('ggs.claudeChat.answer', [{ sessionId: 'session-2', answers: [{ question: 'q', header: 'h', picks: ['x'] }] }]) as { ticket: string };
+		const failed = await until(() => host.executeCommand('ggs.claudeChat.state', [{ ticket: noCard.ticket }]) as Promise<{ phase: string; error: string | null }>, 'error');
+		expect(failed.error).toMatch(/did not take the answer/);
+		await expect(host.executeCommand('ggs.claudeChat.answer', [{ answers: [] }])).rejects.toThrow(/belongs to a conversation/);
+
+		expect(await host.executeCommand('ggs.claudeChat.state', [{ ticket: 'nope' }])).toMatchObject({ phase: 'error', error: 'unknown ticket' });
+		expect(await host.executeCommand('ggs.claudeChat.state', [{}])).toMatchObject({ phase: 'none', open: false });
+		await expect(host.executeCommand('ggs.claudeChat.send', [{ sessionId: 'session-1', text: '  ' }])).rejects.toThrow(/empty prompt/);
+		host['declaredCommandIds'].delete('acme.demo');
+		await expect(host.executeCommand('ggs.claudeChat.send', [{ text: 'x' }])).rejects.toThrow(/not installed/);
+	});
+
 	it('the load watchdog never restarts a page that is still making progress', async () => {
 		vi.useFakeTimers();
 		const originalAdd = HTMLIFrameElement.prototype.addEventListener;
@@ -2404,6 +2583,25 @@ describe('the Node compatibility layer (multi-file CommonJS packages)', () => {
 		expect(call).toBeDefined();
 		expect(call!.ok).toBe(true);
 		expect(call!.result).toBe(65); // double(20) + quarter(100)
+	});
+
+	it('resolves a root-level sibling require (the entry directory is the package root)', async () => {
+		// Claude Remote's shape — a flat multi-file package whose `extension.js` requires
+		// `./sessions.js`: the entry's directory is '' and the resolver once built
+		// '/./sessions.js', whose normalized '/sessions.js' key no code map carries, so
+		// every root-level sibling require died on MODULE_NOT_FOUND.
+		bootPackage({
+			'package.json': '{"main":"./extension.js"}',
+			'extension.js': "const sessions = require('./sessions.js');\nexports.activate = () => { require('vscode').commands.registerCommand('multi.flat', () => sessions.name); };",
+			'sessions.js': 'exports.name = \'flat-package\';'
+		});
+		await flush();
+		window.dispatchEvent(new MessageEvent('message', { data: { type: '__studioExtCall', id: 74, method: 'runCommand', args: ['multi.flat'] } }));
+		await flush();
+		const call = posts.get(74);
+		expect(call).toBeDefined();
+		expect(call!.ok).toBe(true);
+		expect(call!.result).toBe('flat-package');
 	});
 
 	it('serves the Node builtins: path, Buffer, process, os, util, and the node: prefix', async () => {

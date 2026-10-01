@@ -1059,9 +1059,11 @@ body.resizing iframe { pointer-events: none; }
 /* The locked-group badge (VS Code's marker): the tab strip's last item, in flow after the
    title actions — it marks the state beside them (an extension's title button — the Claude
    one claude-code contributes — sits at that edge too), never an overlay covering what
-   stands there. The box's `locked` class remains the state marker; renderTabs decides the
-   badge's presence. */
-.group-lock { display: inline-flex; align-items: center; flex: none; padding: 0 8px 0 2px; color: var(--vscode-descriptionForeground, #999); font-size: 13px; }
+   stands there. A click unlocks the group, VS Code's badge being the unlock exit itself.
+   The box's `locked` class remains the state marker; renderTabs decides the badge's
+   presence. */
+.group-lock { display: inline-flex; align-items: center; flex: none; padding: 0 8px 0 2px; color: var(--vscode-descriptionForeground, #999); font-size: 13px; cursor: pointer; }
+.group-lock:hover { color: var(--vscode-foreground, #ccc); }
 /* The webview overlay layer: an extension page's frame keeps its DOM home here, outside
    the group tree the area rebuilds on every layout change — a re-parented iframe loses its
    browsing context and reloads (WKWebView reloads the page, interrupting the extension

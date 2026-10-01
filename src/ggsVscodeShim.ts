@@ -87,11 +87,22 @@ shim.__ggsVscodeShimInstall = function (args: InstallArgs): InstalledVscode {
 		}
 		const handler = handlers.get(command);
 		if (!handler) throw new Error(`no handler registered for ${command}`);
+		// The wire this call crossed is JSON at both hops (the workbench's invoke, the
+		// ggs-ext/1 line), and JSON has no undefined: a placeholder argument the caller
+		// passed — the host's `executeCommand('id', sessionId, undefined, …)`, or
+		// claude-code's own `void 0` slots — lands here as null, and handlers
+		// distinguish (`viewColumn !== void 0` decides whether to compute the column;
+		// claude-code's editor.open threw on a null one). A real null argument is not a
+		// shape VS Code commands take, so null arrives as the undefined the caller
+		// passed — the argument shape VS Code's own dispatch guarantees. Top level only:
+		// a null inside an object is data. (Frames keep theirs without this —
+		// postMessage's structured clone carries undefined.)
+		const wireArgs = (Array.isArray(commandArgs) ? commandArgs : [commandArgs]).map((value) => (value === null ? undefined : value));
 		// A menu's context crosses the line as Uri-shaped data; the handler receives full
 		// Uris, the argument shape VS Code's own command dispatch guarantees. The result
 		// returns — the runtime's dispatch settles it into the runCommand answer, a
 		// thenable included (an async handler's value waits, as in a frame).
-		return handler(...(rehydrateUris(Array.isArray(commandArgs) ? commandArgs : [commandArgs]) as unknown[]));
+		return handler(...(rehydrateUris(wireArgs) as unknown[]));
 	};
 	const bridge: HostBridge = {
 		request: (method, requestArgs) => Promise.resolve(hostRequest(method, requestArgs as unknown[])),

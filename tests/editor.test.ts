@@ -420,7 +420,7 @@ describe('editor group', () => {
 
 		const firstTab = document.querySelector('.tab')!; // a.txt
 		rightClick(firstTab);
-		expect(menuLabels()).toEqual(['Close', 'Close Others', 'Close to the Right', 'Close Saved', 'Close All', 'Copy Path', 'Copy Relative Path']);
+		expect(menuLabels()).toEqual(['Close', 'Close Others', 'Close to the Right', 'Close Saved', 'Close All', 'Lock Editor Group', 'Copy Path', 'Copy Relative Path']);
 		click(menuItem('Copy Relative Path'));
 		expect(backend.clipboard).toEqual(['a.txt']);
 

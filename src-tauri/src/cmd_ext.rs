@@ -1769,11 +1769,11 @@ pub fn install_from_vsix_into(dir: &Path, vsix: &Path, builtin: bool) -> Result<
         }
     }
     extract_vsix(vsix, &target)?;
-    // The package's runtime manifest: identity plus the backend derived from its own
-    // `main` and native binaries. The extension runs where VS Code would run it — its
-    // own entry, under this host's Node runtime when it carries native binaries; a
-    // package with neither entry nor binaries needs no backend at all (the frame host
-    // serves it whole).
+    // The package's runtime manifest: identity plus the backend derived from the package
+    // itself (`resolve_node_binaries` — native binaries, or a main the sandboxed frame
+    // cannot host: oversized, or opening listening sockets). The extension runs where VS
+    // Code would run it — its own entry; a package with neither entry nor binaries needs
+    // no backend at all (the frame host serves it whole).
     let capabilities = StudioManifest {
         id: format!("{}.{}", manifest.publisher, manifest.name),
         version: manifest.version.clone(),
@@ -1994,31 +1994,84 @@ fn resolve_node_binaries(
 ) -> Result<Option<BackendDecl>, String> {
     let nodes = native_node_files(vsix)?;
     if nodes.is_empty() {
-        // GGS-patch: a main-only package whose entry is TOO BIG for the frame host's
-        // code map derives a `ggs-node` backend anyway — the sidecar reads its files
-        // straight from the install directory (no code map, no 8 MB single-file cap)
-        // and serves the same vscode shim as a frame. Kimi Code's 8.8 MB
-        // `extension.js` crossed neither route before this: the frame host skipped the
-        // file as oversized and activation failed on a missing module. Sizes read from
-        // the VSIX's own entries (the install directory does not exist yet here).
-        if let Some(main) = manifest.main.as_deref().filter(|main| !main.trim().is_empty()) {
+        // GGS-patch: a main-only package whose loadable code the sandboxed frame cannot
+        // host derives a `ggs-node` backend anyway — the sidecar reads its files straight
+        // from the install directory (no code map, no caps) and serves the same vscode
+        // shim as a frame. Two shapes cannot be hosted by a frame, both read from
+        // the VSIX's own entries (the install directory does not exist yet here):
+        //
+        //   too big     the frame host's code map skips the file outright (Kimi Code's
+        //               8.8 MB `extension.js` crossed no route before this rule and
+        //               activation failed on a missing module);
+        //   listening   the package's loadable code opens listening sockets through a
+        //               qualified call (`http.createServer(…)` — the frame's http/net
+        //               shims are client halves over the host bridge, nothing there can
+        //               ACCEPT a connection; Claude Remote's LAN server is this rule's
+        //               resident). The call may sit in the entry or in a module it
+        //               requires — Claude Remote 0.2 split its server into `server.js`
+        //               and the entry alone no longer names it — so the scan reads every
+        //               `.js` / `.cjs` file the frame's own code map would carry, the
+        //               `node_modules` tree included.
+        //
+        // Only QUALIFIED calls count: a minified bundle aliases the module
+        // (`l.createServer` — ms-python's named-pipe transport) and never carries the
+        // qualified form, so client-only bundles stay in their frame; a hand-written
+        // server says `http.createServer`. A false positive only lands a package on
+        // the fuller runtime — the frame is the degraded host, not the other way round.
+        if let Some(main) = manifest
+            .main
+            .as_deref()
+            .filter(|main| !main.trim().is_empty())
+        {
             let main_rel = format!("extension/{}", main.trim_start_matches("./"));
             let entry_dir = entry_dir_of(main.trim_start_matches("./"));
             let (mut entry_bytes, mut tree_bytes) = (0u64, 0u64);
-            let file = std::fs::File::open(vsix).map_err(|e| format!("open {}: {e}", vsix.display()))?;
+            // Every loadable code file's text, for the socket scan below — the entry, its
+            // siblings and the `node_modules` tree alike, each within the frame map's own
+            // per-file bound (a file past it never crosses to the frame, so a socket call
+            // there cannot run in one either).
+            let mut code_text = String::new();
+            let file =
+                std::fs::File::open(vsix).map_err(|e| format!("open {}: {e}", vsix.display()))?;
             let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("read VSIX: {e}"))?;
             for i in 0..zip.len() {
-                let entry = zip.by_index(i).map_err(|e| e.to_string())?;
-                let name = entry.name();
+                let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
+                let name = entry.name().to_owned();
+                let Some(rel) = name.strip_prefix("extension/").map(|r| r.to_owned()) else {
+                    continue; // [Content_Types].xml, extension.vsixmanifest, …
+                };
                 if name == main_rel {
                     entry_bytes = entry.size();
-                } else if let Some(rel) = name.strip_prefix("extension/") {
-                    if !rel.is_empty() && entry_dir.as_deref().is_some_and(|dir| rel.starts_with(dir)) {
-                        tree_bytes += entry.size();
-                    }
+                } else if !rel.is_empty()
+                    && entry_dir.as_deref().is_some_and(|dir| rel.starts_with(dir))
+                {
+                    tree_bytes += entry.size();
+                }
+                if entry.is_dir() {
+                    continue;
+                }
+                let lower = rel.to_ascii_lowercase();
+                if (lower.ends_with(".js") || lower.ends_with(".cjs"))
+                    && entry.size() <= FRAME_MAIN_MAX_BYTES
+                {
+                    // Best effort: a binary or non-UTF-8 file simply misses the socket rule.
+                    let mut text = String::new();
+                    let _ = entry.read_to_string(&mut text);
+                    code_text.push_str(&text);
                 }
             }
-            if entry_bytes > FRAME_MAIN_MAX_BYTES || tree_bytes > FRAME_TREE_MAX_BYTES {
+            let too_big = entry_bytes > FRAME_MAIN_MAX_BYTES || tree_bytes > FRAME_TREE_MAX_BYTES;
+            const QUALIFIED_SERVER_CALLS: [&str; 5] = [
+                "http.createServer",
+                "https.createServer",
+                "net.createServer",
+                "tls.createServer",
+                "dgram.createServer",
+            ];
+            let opens_sockets = QUALIFIED_SERVER_CALLS
+                .iter()
+                .any(|call| code_text.contains(call));
+            if too_big || opens_sockets {
                 return Ok(Some(BackendDecl {
                     kind: "node".to_owned(),
                     command: main.to_owned(),
@@ -2525,7 +2578,7 @@ pub(crate) struct VsixManifest {
     version: String,
     /// The package's own JS entry (VS Code's extension-host entry). The frame host runs it
     /// for the `vscode` API; the pretend Node runtime runs it as the package's backend when
-    /// the install derives one (native binaries with no declared backend).
+    /// the install derives one (native binaries, or a main the sandboxed frame cannot host).
     #[serde(default)]
     main: Option<String>,
     #[serde(default)]
@@ -2826,7 +2879,8 @@ mod install_tests {
         let refreshed: StudioManifest =
             serde_json::from_str(&std::fs::read_to_string(target.join("manifest.json")).unwrap())
                 .unwrap();
-        // The rebuilt package declares no native binaries: no backend is derived for it.
+        // The rebuilt package declares no native binaries and opens no listening socket:
+        // no backend is derived for it.
         assert!(refreshed.backend.is_none());
         // The next boot leaves it alone (the build is recorded).
         assert!(refresh_bundled_installs_in(&exts, &packages).is_empty());
@@ -3314,6 +3368,130 @@ mod install_tests {
         let info = install_from_vsix_into(&exts, &ggx, false).unwrap();
         assert!(info.capabilities.as_ref().unwrap().backend.is_none());
     }
+
+    #[test]
+    fn a_main_that_opens_listening_sockets_derives_the_node_backend() {
+        // A small main-only package whose entry starts a real server (Claude Remote's
+        // shape — `http.createServer` for its LAN pairing server): the sandboxed frame
+        // cannot accept a connection, so the install derives the ggs-node process, and
+        // the derivation rides the runtime manifest — pure VSIX, no host-specific key.
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        let vsix = tmp.path().join("remote.vsix");
+        let file = std::fs::File::create(&vsix).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("extension/package.json", options).unwrap();
+        zip.write_all(
+            br#"{"name":"remote","publisher":"ggs","version":"0.1.2","main":"./extension.js"}"#,
+        )
+        .unwrap();
+        zip.start_file("extension/extension.js", options).unwrap();
+        zip.write_all(
+            b"const http = require('http');\nconst qr = require('./qrcode.js');\nconst server = http.createServer(() => {});\nmodule.exports = { activate: () => {} };",
+        )
+        .unwrap();
+        zip.start_file("extension/qrcode.js", options).unwrap();
+        zip.write_all(b"module.exports = {};").unwrap();
+        zip.finish().unwrap();
+
+        let info = install_from_vsix_into(&exts, &vsix, false).unwrap();
+        let backend = info
+            .capabilities
+            .as_ref()
+            .unwrap()
+            .backend
+            .as_ref()
+            .expect("the listening main derives the node backend");
+        assert_eq!(backend.kind, "node");
+        assert_eq!(backend.command, "./extension.js");
+        // The runtime manifest on disk carries it — the listing (and through it the
+        // workbench's backendHosted) decides frame or process by exactly this field.
+        let manifest: StudioManifest = serde_json::from_str(
+            &std::fs::read_to_string(exts.join("ggs.remote-0.1.2/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.backend.as_ref().unwrap().kind, "node");
+    }
+
+    #[test]
+    fn a_sibling_module_that_opens_listening_sockets_derives_the_node_backend() {
+        // Claude Remote 0.2's shape: the entry is a thin loader and the LAN server lives
+        // in a sibling module (`server.js` calls `http.createServer`). The socket scan
+        // reads the package's whole loadable surface, not the entry alone — before it
+        // did, this package installed with `backend: null`, landed in the sandboxed
+        // frame, and its activation died on `Cannot find module './sessions.js'`.
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        let vsix = tmp.path().join("remote-split.vsix");
+        let file = std::fs::File::create(&vsix).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("extension/package.json", options).unwrap();
+        zip.write_all(
+            br#"{"name":"remote","publisher":"ggs","version":"0.2.1","main":"./extension.js"}"#,
+        )
+        .unwrap();
+        zip.start_file("extension/extension.js", options).unwrap();
+        zip.write_all(
+            b"const sessions = require('./sessions.js');\nconst server = require('./server.js');\nmodule.exports = { activate: () => server.start(sessions) };",
+        )
+        .unwrap();
+        zip.start_file("extension/sessions.js", options).unwrap();
+        zip.write_all(b"module.exports = {};").unwrap();
+        zip.start_file("extension/server.js", options).unwrap();
+        zip.write_all(
+            b"const http = require('http');\nconst s = http.createServer(() => {});\nmodule.exports = { start: () => s.listen(0) };",
+        )
+        .unwrap();
+        zip.finish().unwrap();
+
+        let info = install_from_vsix_into(&exts, &vsix, false).unwrap();
+        let backend = info
+            .capabilities
+            .as_ref()
+            .unwrap()
+            .backend
+            .as_ref()
+            .expect("a sibling's qualified server call derives the node backend");
+        assert_eq!(backend.kind, "node");
+        assert_eq!(backend.command, "./extension.js");
+        let manifest: StudioManifest = serde_json::from_str(
+            &std::fs::read_to_string(exts.join("ggs.remote-0.2.1/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.backend.as_ref().unwrap().kind, "node");
+    }
+
+    #[test]
+    fn a_minified_alias_of_create_server_stays_in_its_frame() {
+        // The socket rule reads QUALIFIED calls only: a minified bundle aliases the
+        // module (`l.createServer` — ms-python's named-pipe transport carries exactly
+        // that) and must not flip a frame-hosted client extension onto ggs-node.
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        let vsix = tmp.path().join("client.vsix");
+        let file = std::fs::File::create(&vsix).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("extension/package.json", options).unwrap();
+        zip.write_all(
+            br#"{"name":"client","publisher":"acme","version":"1.0.0","main":"./extension.js"}"#,
+        )
+        .unwrap();
+        zip.start_file("extension/extension.js", options).unwrap();
+        zip.write_all(b"const l = require('net'); const pipe = l.createServer(() => {}); module.exports = {};").unwrap();
+        zip.finish().unwrap();
+
+        let info = install_from_vsix_into(&exts, &vsix, false).unwrap();
+        assert!(
+            info.capabilities.as_ref().unwrap().backend.is_none(),
+            "an aliased call site is no qualified server call"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3799,7 +3977,8 @@ mod vsix_tests {
             let options = zip::write::SimpleFileOptions::default();
             zip.start_file("extension/package.json", options).unwrap();
             zip.write_all(br#"{"name":"big","publisher":"acme","version":"1.0.0","main":"./dist/extension.js"}"#).unwrap();
-            zip.start_file("extension/dist/extension.js", options).unwrap();
+            zip.start_file("extension/dist/extension.js", options)
+                .unwrap();
             zip.write_all(&vec![b'x'; 9 * 1024 * 1024]).unwrap();
             zip.start_file("extension/dist/chunk.mjs", options).unwrap();
             zip.write_all(&vec![b'x'; 1024]).unwrap();
@@ -3808,7 +3987,9 @@ mod vsix_tests {
         let manifest = read_vsix_manifest(&vsix).unwrap();
         let derived = resolve_node_binaries(&manifest, &vsix, false).unwrap();
         assert!(
-            derived.as_ref().is_some_and(|backend| backend.kind == "node" && backend.command == "./dist/extension.js"),
+            derived.as_ref().is_some_and(
+                |backend| backend.kind == "node" && backend.command == "./dist/extension.js"
+            ),
             "the oversized main derives a ggs-node backend: {derived:?}"
         );
 
@@ -3819,14 +4000,19 @@ mod vsix_tests {
             let mut zip = zip::ZipWriter::new(file);
             let options = zip::write::SimpleFileOptions::default();
             zip.start_file("extension/package.json", options).unwrap();
-            zip.write_all(br#"{"name":"small","publisher":"acme","version":"1.0.0","main":"./extension.js"}"#).unwrap();
+            zip.write_all(
+                br#"{"name":"small","publisher":"acme","version":"1.0.0","main":"./extension.js"}"#,
+            )
+            .unwrap();
             zip.start_file("extension/extension.js", options).unwrap();
             zip.write_all(br#"exports.activate = () => {};"#).unwrap();
             zip.finish().unwrap();
         }
         let manifest = read_vsix_manifest(&vsix_small).unwrap();
         assert!(
-            resolve_node_binaries(&manifest, &vsix_small, false).unwrap().is_none(),
+            resolve_node_binaries(&manifest, &vsix_small, false)
+                .unwrap()
+                .is_none(),
             "a small main stays frame-hosted"
         );
     }
@@ -3835,7 +4021,10 @@ mod vsix_tests {
     fn the_asset_path_decoder_keeps_a_literal_plus() {
         // URI path semantics: `+` is a plus (form/query encoding is where it means a
         // space). Decoding it as a space 404'd every package asset named with a `+`.
-        assert_eq!(percent_decode("scripts/c++/parser.js"), "scripts/c++/parser.js");
+        assert_eq!(
+            percent_decode("scripts/c++/parser.js"),
+            "scripts/c++/parser.js"
+        );
         assert_eq!(percent_decode("a%2Bb.js"), "a+b.js");
         assert_eq!(percent_decode("a%20b.js"), "a b.js");
         assert_eq!(percent_decode("unicode%20%E4%BD%A0.js"), "unicode 你.js");

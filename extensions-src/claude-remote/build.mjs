@@ -1,17 +1,28 @@
 // Packs the Claude Remote extension into a store-format VSIX:
 //   node build.mjs [--out <file>]
-// Output: target/studio/claude-remote-<version>.vsix (a zip with extension/… and the
+// Output (default): target/studio/claude-remote-<version>.vsix (a zip with extension/… and the
 // [Content_Types].xml vsce writes — installable by VS Code and by Git Graph Studio).
-import { spawnSync } from 'node:child_process';
+// prepare.mjs packs the product build with --out straight into the installer's bundled
+// extensions directory (claude-remote.vsix rides in every build; scripts/prepare.mjs step 4).
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const here = new URL('.', import.meta.url).pathname;
+// The store's own package gate (module 15's marketplace validator) — the same
+// central-directory check every downloaded VSIX passes before it is packed into an
+// installer, pure Node so the packer runs on every build host.
+import { validatePackage } from '../../scripts/fetch-marketplace-extensions.mjs';
+
+// fileURLToPath, never URL.pathname: on Windows the pathname keeps its leading /C:/,
+// which resolve() widens into C:\C:\… — the packer must run on the Windows build host.
+const here = fileURLToPath(new URL('.', import.meta.url));
 const pkg = JSON.parse(readFileSync(resolve(here, 'package.json'), 'utf8'));
 const appDir = resolve(here, '..', '..');
-const outDir = resolve(appDir, 'target/studio');
-mkdirSync(outDir, { recursive: true });
-const out = resolve(appDir, 'target/studio', `claude-remote-${pkg.version}.vsix`);
+const outFlag = process.argv.indexOf('--out');
+const out = outFlag >= 0
+	? resolve(process.cwd(), process.argv[outFlag + 1])
+	: resolve(appDir, 'target/studio', `claude-remote-${pkg.version}.vsix`);
+mkdirSync(dirname(out), { recursive: true });
 
 // [Content_Types].xml — the fixed vsce default.
 const contentTypes = `<?xml version="1.0" encoding="utf-8"?>
@@ -19,6 +30,10 @@ const contentTypes = `<?xml version="1.0" encoding="utf-8"?>
 	<Default Extension=".json" ContentType="application/json"/>
 	<Default Extension=".js" ContentType="application/javascript"/>
 	<Default Extension=".md" ContentType="text/markdown"/>
+	<Default Extension=".html" ContentType="text/html"/>
+	<Default Extension=".css" ContentType="text/css"/>
+	<Default Extension=".svg" ContentType="image/svg+xml"/>
+	<Default Extension=".webmanifest" ContentType="application/manifest+json"/>
 	<Default Extension=".vsixmanifest" ContentType="text/xml"/>
 </Types>`;
 const vsixManifest = `<?xml version="1.0" encoding="utf-8"?>
@@ -39,8 +54,10 @@ const files = [
 	['[Content_Types].xml', contentTypes],
 	['extension.vsixmanifest', vsixManifest],
 	['extension/package.json', readFileSync(resolve(here, 'package.json'))],
-	['extension/extension.js', readFileSync(resolve(here, 'extension.js'))],
-	['extension/README.md', readFileSync(resolve(here, 'README.md'))]
+	...[
+		'extension.js', 'sessions.js', 'runner.js', 'server.js', 'panel.js', 'desktop.js', 'qrcode.js', 'sjcl.js', 'README.md',
+		'web/index.html', 'web/app.js', 'web/app.css', 'web/icon.svg', 'web/manifest.webmanifest'
+	].map((file) => [`extension/${file}`, readFileSync(resolve(here, file))])
 ];
 
 // CRC32 (zip store, no deps).
@@ -104,10 +121,12 @@ end.writeUInt32LE(offset, 16);
 writeFileSync(out, Buffer.concat([...chunks, centralBuf, end]));
 console.log(`packed ${out} (${files.length} files)`);
 
-// Sanity: the store's own reader must accept it.
-const probe = spawnSync('python3', ['-c', `import zipfile,sys; z=zipfile.ZipFile(${JSON.stringify(out)}); z.testzip(); print('|'.join(z.namelist()))`], { encoding: 'utf8' });
-if (probe.status !== 0 || !probe.stdout.includes('extension/package.json')) {
-	console.error(`zip self-check failed: ${probe.stdout}${probe.stderr}`);
+// Sanity: the store's package validator must accept it (the central-directory shape
+// every marketplace VSIX is gated on before it is bundled into an installer).
+try {
+	validatePackage(out, { slug: 'claude-remote', engineRequired: false });
+} catch (reason) {
+	console.error(`zip self-check failed: ${reason instanceof Error ? reason.message : reason}`);
 	process.exit(1);
 }
-console.log(`zip self-check OK: ${probe.stdout.trim()}`);
+console.log('zip self-check OK: the central directory reads and extension/package.json is there');

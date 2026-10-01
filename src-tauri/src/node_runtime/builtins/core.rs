@@ -63,13 +63,14 @@ pub(super) fn pbkdf2_sha256(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+    use base64::Engine as _;
     use pbkdf2::pbkdf2_hmac;
     use sha2::Sha256;
     let password = string_arg(args, 0, context);
-    let salt = B64.decode(string_arg(args, 1, context))
-        .map_err(|e| error(&format!("salt: {e}")))?;
+    let salt = B64
+        .decode(string_arg(args, 1, context))
+        .map_err(|e| error(format!("salt: {e}")))?;
     let iterations = args
         .get_or_undefined(2)
         .to_number(context)
@@ -95,22 +96,25 @@ pub(super) fn aes_gcm_seal(
 ) -> JsResult<JsValue> {
     use aes_gcm::aead::Aead as _;
     use aes_gcm::{Aes256Gcm, KeyInit as _};
-    use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+    use base64::Engine as _;
     let mut decode = move |at: usize, what: &str| -> Result<Vec<u8>, JsError> {
         B64.decode(string_arg(args, at, context))
-            .map_err(|e| error(&format!("{what}: {e}")))
+            .map_err(|e| error(format!("{what}: {e}")))
     };
     let key = decode(0, "key")?;
     let iv = decode(1, "iv")?;
     let plain = decode(2, "plaintext")?;
     let aad = decode(3, "aad")?;
-    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| error(&format!("key: {e}")))?;
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| error(format!("key: {e}")))?;
     let nonce = aes_gcm::Nonce::from_slice(&iv);
     let mut ciphertext = cipher
         .encrypt(
             nonce,
-            aes_gcm::aead::Payload { msg: &plain, aad: &aad },
+            aes_gcm::aead::Payload {
+                msg: &plain,
+                aad: &aad,
+            },
         )
         .map_err(|_| error("seal failed"))?;
     // The aead crate appends the tag; split it out so the JS shape is `ct‖tag` chunks
@@ -130,17 +134,17 @@ pub(super) fn aes_gcm_open(
 ) -> JsResult<JsValue> {
     use aes_gcm::aead::Aead as _;
     use aes_gcm::{Aes256Gcm, KeyInit as _};
-    use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+    use base64::Engine as _;
     let mut decode = move |at: usize, what: &str| -> Result<Vec<u8>, JsError> {
         B64.decode(string_arg(args, at, context))
-            .map_err(|e| error(&format!("{what}: {e}")))
+            .map_err(|e| error(format!("{what}: {e}")))
     };
     let key = decode(0, "key")?;
     let iv = decode(1, "iv")?;
     let sealed = decode(2, "ciphertext")?;
     let aad = decode(3, "aad")?;
-    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| error(&format!("key: {e}")))?;
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| error(format!("key: {e}")))?;
     let nonce = aes_gcm::Nonce::from_slice(&iv);
     let plain = cipher
         .decrypt(

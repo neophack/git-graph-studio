@@ -1,9 +1,10 @@
 # Git Graph Studio's CI: the frontend test suite plus the per-platform installer builds.
 #
-# The app is self-contained: every extension package an installer carries arrives as the
-# marketplace's per-architecture VSIX (Open VSX, fetched by scripts/
-# fetch-marketplace-extensions.mjs inside prepare.mjs) — no plugin source or build lives in
-# this tree, so no job checks anything beyond this repository out.
+# The app is self-contained: every marketplace extension package an installer carries
+# arrives as the per-architecture VSIX (Open VSX, fetched by scripts/
+# fetch-marketplace-extensions.mjs inside prepare.mjs), and the one package with local
+# source — claude-remote (extensions-src/claude-remote) — is packed from this tree by its
+# own build.mjs inside prepare.mjs. No job checks anything beyond this repository out.
 #
 # Tests gate the installers: every installer job runs clippy and the backend test suite
 # first, and `tauri build` only starts after the last test passed. The dependency graph is
@@ -38,12 +39,13 @@
 # published (`full` adds the niche macOS x64 platform).
 #
 # Which extension packages are packed INTO the installers is one policy everywhere
-# (2026-09-28, the owner's direction): git-graph-rs rides in every build, claude-code in
-# none by default — the Extensions view's marketplace row installs it on demand. The
-# release form's checkboxes reach the build as GGS_BUNDLE_GIT_GRAPH /
-# GGS_BUNDLE_CLAUDE_CODE (scripts/fetch-marketplace-extensions.mjs), and a pushed tag or
-# a plain push to main takes the same defaults (`GGS_BUNDLE_CLAUDE_CODE=1` opts a build
-# back in).
+# (2026-09-28, the owner's direction): git-graph-rs and the local claude-remote ride in
+# every build, claude-code in none by default — the Extensions view's marketplace row
+# installs it on demand. The release form's checkboxes reach the build as
+# GGS_BUNDLE_GIT_GRAPH / GGS_BUNDLE_CLAUDE_CODE / GGS_BUNDLE_CLAUDE_REMOTE
+# (scripts/fetch-marketplace-extensions.mjs and scripts/prepare.mjs), and a pushed tag
+# or a plain push to main takes the same defaults (`GGS_BUNDLE_CLAUDE_CODE=1` opts a
+# build back in).
 
 name: Studio
 
@@ -73,6 +75,11 @@ on:
         required: false
         default: false
         type: boolean
+      bundle-claude-remote:
+        description: 'Pack claude-remote (local source) into the installers'
+        required: false
+        default: true
+        type: boolean
   workflow_call:
     inputs:
       full:
@@ -90,6 +97,10 @@ on:
       bundle-claude-code:
         required: false
         default: false
+        type: boolean
+      bundle-claude-remote:
+        required: false
+        default: true
         type: boolean
 
 permissions:
@@ -142,6 +153,7 @@ jobs:
       # this package packed into the installers" for every prepare.mjs run below.
       GGS_BUNDLE_GIT_GRAPH: ${{ inputs.bundle-git-graph == false && '0' || '1' }}
       GGS_BUNDLE_CLAUDE_CODE: ${{ inputs.bundle-claude-code == true && '1' || '0' }}
+      GGS_BUNDLE_CLAUDE_REMOTE: ${{ inputs.bundle-claude-remote == false && '0' || '1' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -270,6 +282,7 @@ jobs:
       # prepare and the container build read the same answer).
       GGS_BUNDLE_GIT_GRAPH: ${{ inputs.bundle-git-graph == false && '0' || '1' }}
       GGS_BUNDLE_CLAUDE_CODE: ${{ inputs.bundle-claude-code == true && '1' || '0' }}
+      GGS_BUNDLE_CLAUDE_REMOTE: ${{ inputs.bundle-claude-remote == false && '0' || '1' }}
     strategy:
       fail-fast: false
       matrix:
@@ -374,6 +387,7 @@ jobs:
             -e GGS_REQUIRE_MARKETPLACE=1 \
             -e GGS_BUNDLE_GIT_GRAPH \
             -e GGS_BUNDLE_CLAUDE_CODE \
+            -e GGS_BUNDLE_CLAUDE_REMOTE \
             ggs-linux-builder-${{ matrix.cache }} \
             bash /repo/scripts/docker/studio-linux-build.sh
 
@@ -419,6 +433,7 @@ jobs:
       # The release form's checkboxes, as in the Windows job.
       GGS_BUNDLE_GIT_GRAPH: ${{ inputs.bundle-git-graph == false && '0' || '1' }}
       GGS_BUNDLE_CLAUDE_CODE: ${{ inputs.bundle-claude-code == true && '1' || '0' }}
+      GGS_BUNDLE_CLAUDE_REMOTE: ${{ inputs.bundle-claude-remote == false && '0' || '1' }}
     strategy:
       fail-fast: false
       matrix:

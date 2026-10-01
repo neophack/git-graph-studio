@@ -15,12 +15,17 @@
 //!   `ANTHROPIC_SMALL_FAST_MODEL`, the tier-alias remap
 //!   `ANTHROPIC_DEFAULT_{OPUS,FABLE,SONNET,HAIKU}_MODEL` (the flagship tiers take the
 //!   main model, the everyday tiers the small one — so a tier pick never sends a
-//!   `claude-*` id to a provider that serves none) and
+//!   `claude-*` id to a provider that serves none),
 //!   `CLAUDE_CODE_ATTRIBUTION_HEADER=0` (Claude Code's attribution header off:
 //!   Anthropic-compatible gateways fold it into their request identity, so the same
 //!   prompt stops hashing equal and prompt-cache reuse drops — the official endpoint's
-//!   prefix cache ignores headers and keeps the default) — the same takeover the
-//!   claude-code sandbox probe proves end to end against a local stand-in server.
+//!   prefix cache ignores headers and keeps the default) and
+//!   `CLAUDE_CODE_AUTO_MODE_SERVER=0` (auto mode's server-side classifier checks off:
+//!   gateways strip the `safeguards` fields those checks ride on, so Claude Code falls
+//!   back to its own classifier requests instead of holding the first checked action
+//!   on an eligibility notice — the official endpoint serves the checks at no charge)
+//!   — the same takeover the claude-code sandbox probe proves end to end against a
+//!   local stand-in server.
 //!
 //! Switching provider (or editing the active profile) rewrites the redirected Claude
 //! settings' `env` map — which Claude Code applies at every session start, the mechanism
@@ -33,7 +38,13 @@
 //! re-resolves the extension's settled webview views. The settings' top-level `model`
 //! pin is rewritten alongside (it would otherwise outrank that env: a `/model` tier pick
 //! persists there, and its `claude-*` id would be shown and sent on an endpoint that
-//! serves none). [`provider_change`] is the gate every store-writing command runs to
+//! serves none), and so is the top-level `attribution` pin (2026-10-01, the owner's
+//! direction: Claude Code's `Co-Authored-By` commit trailer and "Generated with Claude
+//! Code" PR line stay off — an empty `commit`/`pr` is Claude Code's documented hide
+//! value, and a set `attribution.commit` outranks the deprecated `includeCoAuthoredBy`,
+//! which therefore needs no takeover of its own; unlike the endpoint env keys this is a
+//! preference, not a per-endpoint workaround, so official carries it too).
+//! [`provider_change`] is the gate every store-writing command runs to
 //! decide that rewrite (and the push the windows' switcher chips re-read on).
 //!
 //! Coupling is one-directional: this module may stop and start the bridged backends,
@@ -509,6 +520,15 @@ pub fn provider_env_vars(active: &ProviderProfile, home: &Path) -> Vec<(String, 
     // price. The official endpoint's prefix cache ignores headers, so official keeps the
     // default and writes no key at all.
     env.push(("CLAUDE_CODE_ATTRIBUTION_HEADER".to_owned(), "0".to_owned()));
+    // Auto mode's server-side classifier checks are off on every third-party endpoint
+    // (2026-10-01, the owner's direction): Anthropic-compatible gateways strip or
+    // rewrite the `safeguards` fields those checks ride on, so the verdicts never
+    // arrive and Claude Code holds the first checked action on an eligibility notice
+    // before falling back to its own — billed — classifier requests. Asking for the
+    // fallback up front (`CLAUDE_CODE_AUTO_MODE_SERVER=0`) keeps auto mode working
+    // with no notice to answer. The official endpoint serves the checks at no charge
+    // and keeps the default.
+    env.push(("CLAUDE_CODE_AUTO_MODE_SERVER".to_owned(), "0".to_owned()));
     if let Some(base_url) = active.base_url.as_deref().filter(|url| !url.is_empty()) {
         env.push(("ANTHROPIC_BASE_URL".to_owned(), base_url.to_owned()));
     }
@@ -1056,6 +1076,7 @@ pub const PROVIDER_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     "CLAUDE_CODE_ATTRIBUTION_HEADER",
+    "CLAUDE_CODE_AUTO_MODE_SERVER",
 ];
 
 /// Claude's redirected settings with the active provider's environment applied — the
@@ -1072,6 +1093,11 @@ pub const PROVIDER_ENV_KEYS: &[&str] = &[
 /// naming an id the official service cannot serve is cleared — a `claude-*` id or a
 /// bare tier alias (`sonnet[1m]`, …) is the user's own and survives verbatim. An
 /// unchanged file answers None; an unparseable one fails rather than being replaced.
+/// The top-level `attribution` pin is written alongside on every profile (the owner's
+/// 2026-10-01 direction above): the empty `commit`/`pr` are Claude Code's documented
+/// hide values, the key is replaced wholesale like the bridge's env keys (a hand-set
+/// trailer text never survives), and official keeps it — a preference, not a
+/// per-endpoint workaround.
 pub fn claude_provider_settings(
     existing: Option<&str>,
     env: &[(String, String)],
@@ -1105,6 +1131,17 @@ pub fn claude_provider_settings(
     if env_map.is_empty() {
         object.remove("env");
     }
+    // Claude Code's commit and PR attribution is pinned off on every profile (2026-10-01,
+    // the owner's direction): the empty strings are Claude Code's documented "hide the
+    // attribution" values, and a set `attribution.commit` outranks the deprecated
+    // `includeCoAuthoredBy` — one key covers both surfaces, so the old one needs no
+    // takeover of its own. Replaced wholesale like the bridge's env keys (a hand-set
+    // trailer text never survives), but unlike them it is the owner's preference, not a
+    // per-endpoint workaround, so it is written on official too and never removed.
+    object.insert(
+        "attribution".to_owned(),
+        serde_json::json!({"commit": "", "pr": ""}),
+    );
     // The `/model` pin takeover the doc comment promises. `split('[')` first: the
     // tier picker pins carry a context-window suffix (`sonnet[1m]`), the alias it
     // names is what Claude's own service actually serves.
@@ -2237,10 +2274,14 @@ mod tests {
         assert_eq!(map["ANTHROPIC_DEFAULT_FABLE_MODEL"], "deepseek-flash");
         assert_eq!(map["ANTHROPIC_DEFAULT_SONNET_MODEL"], "deepseek-flash");
         assert_eq!(map["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "deepseek-flash");
-        assert_eq!(map.len(), 10, "{env:?}");
+        assert_eq!(map.len(), 11, "{env:?}");
         // The attribution header is off on a third-party endpoint: gateways fold it into
         // their request identity and prompt-cache reuse drops.
         assert_eq!(map["CLAUDE_CODE_ATTRIBUTION_HEADER"], "0");
+        // Auto mode's server-side classifier checks are off there too: the gateway
+        // strips the `safeguards` fields they ride on, so Claude Code runs its own
+        // classifier requests instead of holding actions on an eligibility notice.
+        assert_eq!(map["CLAUDE_CODE_AUTO_MODE_SERVER"], "0");
         // The official profile carries none of them — its keys must leave the settings
         // so the user's own login is never shadowed.
         assert!(provider_env_vars(&official_profile(), &home).is_empty());
@@ -2329,6 +2370,9 @@ mod tests {
     /// a no-op, and an unparseable one is failed on. The top-level `model` pin rides
     /// the same takeover: the active profile's model while third-party, cleared back
     /// to nothing when official — the user's own `claude-*` / tier-alias pin survives.
+    /// The `attribution` pin instead rides every write: a hand-set trailer text is
+    /// replaced with the empty hide value, and official keeps the pin (the owner's
+    /// preference, not a per-endpoint key, so it is never cleared).
     #[test]
     fn claude_provider_settings_merges_clears_and_preserves() {
         let third_party = vec![
@@ -2339,9 +2383,10 @@ mod tests {
             ("ANTHROPIC_AUTH_TOKEN".to_owned(), "sk-live".to_owned()),
             ("ANTHROPIC_MODEL".to_owned(), "deepseek-flash".to_owned()),
             ("CLAUDE_CODE_ATTRIBUTION_HEADER".to_owned(), "0".to_owned()),
+            ("CLAUDE_CODE_AUTO_MODE_SERVER".to_owned(), "0".to_owned()),
         ];
         let written = claude_provider_settings(
-            Some(r#"{"model": "claude-fable-5-1[1m]", "env": {"MY_VAR": "keep-me", "CLAUDE_CODE_ATTRIBUTION_HEADER": "1", "ANTHROPIC_BASE_URL": "https://stale", "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-5", "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5-1"}}"#),
+            Some(r#"{"model": "claude-fable-5-1[1m]", "attribution": {"commit": "Co-Authored-By: Someone <someone@example.com>", "pr": "Made by Someone"}, "env": {"MY_VAR": "keep-me", "CLAUDE_CODE_ATTRIBUTION_HEADER": "1", "CLAUDE_CODE_AUTO_MODE_SERVER": "1", "ANTHROPIC_BASE_URL": "https://stale", "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-5", "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5-1"}}"#),
             &third_party,
         )
         .unwrap()
@@ -2388,6 +2433,27 @@ mod tests {
             Some("0"),
             "{json}"
         );
+        // A hand-set auto-mode server flag is replaced the same way.
+        assert_eq!(
+            json.pointer("/env/CLAUDE_CODE_AUTO_MODE_SERVER")
+                .and_then(|v| v.as_str()),
+            Some("0"),
+            "{json}"
+        );
+        // The owner's no-attribution pin: the hand-set trailer text above is replaced
+        // with the empty hide value, never merged beside — and a set
+        // `attribution.commit` outranks the deprecated `includeCoAuthoredBy`, so that
+        // key needs no takeover of its own.
+        assert_eq!(
+            json.pointer("/attribution/commit").and_then(|v| v.as_str()),
+            Some(""),
+            "{json}"
+        );
+        assert_eq!(
+            json.pointer("/attribution/pr").and_then(|v| v.as_str()),
+            Some(""),
+            "{json}"
+        );
 
         // Applying the same env again is a no-op; switching to official clears only
         // this bridge's keys.
@@ -2405,9 +2471,24 @@ mod tests {
         );
         assert!(json.pointer("/env/ANTHROPIC_BASE_URL").is_none());
         assert!(
-            json.pointer("/env/CLAUDE_CODE_ATTRIBUTION_HEADER")
-                .is_none(),
+            json.pointer("/env/CLAUDE_CODE_ATTRIBUTION_HEADER").is_none(),
             "official keeps Claude Code's default (header on): {json}"
+        );
+        assert!(
+            json.pointer("/env/CLAUDE_CODE_AUTO_MODE_SERVER").is_none(),
+            "official keeps Claude Code's default (server checks on): {json}"
+        );
+        // The no-attribution pin survives official — the owner's preference, not a
+        // per-endpoint workaround, so unlike the env keys it is never cleared.
+        assert_eq!(
+            json.pointer("/attribution/commit").and_then(|v| v.as_str()),
+            Some(""),
+            "{json}"
+        );
+        assert_eq!(
+            json.pointer("/attribution/pr").and_then(|v| v.as_str()),
+            Some(""),
+            "{json}"
         );
         // Back on the official service the pin this bridge wrote is cleared with the
         // env keys — a stale `deepseek-flash` would shadow the login the same way.
@@ -2588,6 +2669,11 @@ mod tests {
             json.pointer("/env/ANTHROPIC_DEFAULT_HAIKU_MODEL")
                 .and_then(|v| v.as_str()),
             Some("deepseek-flash")
+        );
+        assert_eq!(
+            json.pointer("/env/CLAUDE_CODE_AUTO_MODE_SERVER")
+                .and_then(|v| v.as_str()),
+            Some("0")
         );
     }
 

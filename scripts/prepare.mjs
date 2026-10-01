@@ -17,8 +17,8 @@
 // Extensions view installs it from the marketplace on demand). The first launch installs
 // whatever was packed, like VS Code's bundled extensions.
 import { checkSeams } from './check-seams.mjs';
-import { fetchMarketplacePackages } from './fetch-marketplace-extensions.mjs';
-import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { bundleSelected, fetchMarketplacePackages } from './fetch-marketplace-extensions.mjs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 
 // The seam rules first: nothing under src/ or static/ may name the git-graph-rs extension's
 // artifacts (it is a plugin; the app's only interface to it is the extension platform), so a
@@ -218,6 +218,8 @@ const packGitGraph = Boolean(externalVsix) || gitGraphMarketplace?.selected !== 
  *                                     substitution, verbatim)
  *      extensions/claude-code.vsix    the marketplace's build, only when a build
  *                                     explicitly selected it
+ *      extensions/claude-remote.vsix  the local source's pack (extensions-src), every
+ *                                     build
  *
  *    The directory is rebuilt from nothing every run (a stale file here would ship: the
  *    mapping packs whatever sits in it). `--vsix <path>` (or GGS_BUNDLED_VSIX) substitutes
@@ -249,6 +251,28 @@ if (claudeCode?.path) {
 	console.log('claude-code: not selected for this build — not packed (the Extensions view installs it from the marketplace)');
 } else {
 	console.warn('claude-code: the marketplace fetch failed — not packed (a required build would have failed already)');
+}
+
+/* claude-remote is the one bundled package with local source (extensions-src/): its own
+ * packer writes the store-format VSIX right here — no marketplace, no network, so it
+ * rides in every build (GGS_BUNDLE_CLAUDE_REMOTE=0 leaves it out; GGS_SKIP_MARKETPLACE_
+ * FETCH does not touch it). A failed local pack means the source is broken and fails the
+ * build — there is nothing to fall back from. The packer self-checks the zip with the
+ * same central-directory gate every marketplace VSIX passes. */
+const claudeRemoteSpec = { slug: 'claude-remote', env: 'GGS_BUNDLE_CLAUDE_REMOTE', defaultSelected: true };
+if (bundleSelected(claudeRemoteSpec)) {
+	const claudeRemotePkg = JSON.parse(readFileSync(join(appDir, 'extensions-src', 'claude-remote', 'package.json'), 'utf8'));
+	const claudeRemoteOut = join(bundledDir, 'claude-remote.vsix');
+	const packed = spawnSync(process.execPath,
+		[join(appDir, 'extensions-src', 'claude-remote', 'build.mjs'), '--out', claudeRemoteOut],
+		{ stdio: 'inherit' });
+	if (packed.status !== 0 || !existsSync(claudeRemoteOut)) {
+		console.error('Packing claude-remote failed — refusing to build an installer without it');
+		process.exit(1);
+	}
+	console.log(`Packed claude-remote ${claudeRemotePkg.version} from extensions-src (local source)`);
+} else {
+	console.log('claude-remote: not selected for this build — not packed');
 }
 
 console.log(`Prepared ${out}`);

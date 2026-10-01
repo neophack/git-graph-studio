@@ -732,6 +732,9 @@ export class EditorArea {
 			this.collapseEmptyGroups();
 			this.onTabsChange?.();
 		};
+		// The group's own lock surfaces — the badge's click, the tab menu's entry — toggle
+		// through the one state-changer (the box's state class and the tab re-render ride it).
+		group.onToggleGroupLock = () => this.setGroupLock(group, !group.locked);
 		group.onFileSaved = (path) => this.onFileSaved?.(path);
 		group.onDocumentEdited = (path, text) => this.onDocumentEdited?.(path, text);
 		group.onDocumentClosed = (path) => {

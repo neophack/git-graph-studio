@@ -353,12 +353,19 @@ terminal list.
 The extension store (`~/.ggs/extensions/`): **one package format, the store's own `.vsix`**
 (since 2026-09-24 the only one — the custom `.ggx` package format was removed; an install
 made from one before that still runs and uninstalls, nothing new installs from one). A
-VSIX's `package.json` may declare the `ggs/2` capabilities under a `ggs` key — VS Code
-ignores it, and the install generates the runtime `manifest.json` from it (`ext_install_
-from_vsix`); a VSIX without the key is the store's ordinary fare — a compiled bundle that
-activates in the frame host, or a static-contribution package (themes, snippets, grammars)
-that installs for its contributions alone. `ggs/2` adds the named page registry (every page
-a package can show, opened as editor tabs over the `ggs://` protocol) and the backends: a
+VSIX is a plain VS Code package — no host-specific `package.json` key is read (2026-10-01,
+the owner's direction: the `ggs` key is gone; the retired `ggs/2` vocabulary survives only
+as history). The install derives the runtime `manifest.json` from the package itself
+(`ext_install_from_vsix` → `resolve_node_binaries`): identity from `package.json`, and a
+backend when the package needs one — native `.node` binaries, or a `main` the sandboxed
+frame cannot host: too big for the frame's code map (2026-09-27, the Kimi rule), or opening
+listening sockets through a qualified call (`http.createServer(…)` — the frame's http/net
+shims are client halves, nothing there can accept a connection; Claude Remote's LAN server
+is this rule's resident, and a minified bundle's aliased `l.createServer` never trips it).
+A package with neither entry nor binaries needs no backend at all — the frame host serves
+it whole. The named page registry (every page a package can show, opened as editor tabs
+over the `ggs://` protocol) registers at runtime through the process-command dispatch, and
+the backends are: a
 process binary (speaking the `ggs-ext/1` line-JSON-RPC protocol over stdin/stdout — any
 language that can write lines to stdout qualifies) or a `node` backend (`kind: "node"`) —
 the package's own JS entry. **ggs-node is the default host** (2026-09-25, the owner's
@@ -411,17 +418,22 @@ integrated terminal); and `crypto.createHash` (md5 / sha1 / sha256, pure TypeScr
 gravatar-class digests, synchronous like Node's).
 **Which extension packages the installer carries is the build's choice** (never a
 per-install one): `prepare.mjs` packs the marketplace builds — Open VSX, per architecture,
-downloaded by `scripts/fetch-marketplace-extensions.mjs` (there is no local source for any
-package; a selected package the fetch cannot serve from cache leaves the build unpacked,
-or fails it in require mode) — into `extensions/`
-beside the app, and the first launch installs whatever sits there like VS Code's bundled
-extensions (`cmd_ext::install_missing_bundled`; a deliberate uninstall stays
-uninstalled). Which packages ride is one policy everywhere (2026-09-28, the owner's
+downloaded by `scripts/fetch-marketplace-extensions.mjs` (no marketplace package has a
+local source; a selected package the fetch cannot serve from cache leaves the build
+unpacked, or fails it in require mode) — into `extensions/`
+beside the app; the one local-source package, Claude Remote, packs from
+`extensions-src/claude-remote/` by its own `build.mjs` (2026-10-01: it rides in every
+build — no fetch, packs offline). The first launch installs whatever sits there like
+VS Code's bundled extensions (`cmd_ext::install_missing_bundled`; a deliberate uninstall
+stays uninstalled). Which packages ride is one policy everywhere (2026-09-28, the owner's
 direction): git-graph-rs in every build, claude-code in none by default — the Extensions
-view's marketplace row installs it online on demand. The `GGS_BUNDLE_GIT_GRAPH` /
-`GGS_BUNDLE_CLAUDE_CODE` env are the switches (CI's release form forwards its checkboxes;
-`GGS_BUNDLE_CLAUDE_CODE=1` opts a build back in). A package a build left out still
-installs from the Extensions view's marketplace row. **Install means run**: the boot
+view's marketplace row installs it online on demand — and claude-remote in every build
+from its local source. The `GGS_BUNDLE_GIT_GRAPH` / `GGS_BUNDLE_CLAUDE_CODE` /
+`GGS_BUNDLE_CLAUDE_REMOTE` env are the switches (CI's release form forwards its
+checkboxes; `GGS_BUNDLE_CLAUDE_CODE=1` opts a build back in, `GGS_BUNDLE_CLAUDE_REMOTE=0`
+leaves the local package out — which then installs only from a hand-picked VSIX, for it
+is not on the marketplace). A marketplace package a build left out still installs from
+the Extensions view's marketplace row. **Install means run**: the boot
 pass starts every installed package that declares a backend
 (`ext_process::start_all_installed`, off the window's thread), an install starts its
 backend at once, and the first command remains the lazy fallback.
@@ -462,7 +474,13 @@ direction: Claude Code's attribution header is off on every third-party endpoint
 Anthropic-compatible gateways fold it into their request identity, so the same prompt
 stops hashing equal and prompt-cache reuse drops, while the official endpoint's prefix
 cache ignores headers and keeps the default; switching back to official clears it with
-the rest),
+the rest) and `CLAUDE_CODE_AUTO_MODE_SERVER=0` (2026-10-01, the owner's direction: auto
+mode's server-side classifier checks are off on every third-party endpoint — gateways
+strip the `safeguards` fields those checks ride on, so the verdicts never arrive and
+Claude Code holds the first checked action on an eligibility notice before falling back
+to its own billed classifier requests; asking for the fallback up front keeps auto mode
+notice-free, while the official endpoint serves the checks at no charge and keeps the
+default),
 inherited by the
 extension's CLI children (the same takeover `claude-code-sandbox.mjs` proves against a
 local server). The UI is the sidebar chip on the Claude view's section header
@@ -539,7 +557,7 @@ page shows the integration's state (`claude_mcp_status`).
   `vscode` shim over a stdio bridge, `require('vscode')` interception, ESM fallback —
   VS Code's own extension-host shape), `src/extHost.ts` (the extension host for VSIX
   extensions — frames without a Node runtime, remote handles over ggs-ext/1 with one;
-  the page host, the process-command dispatch of `ggs/2`, and the host services behind the
+  the page host, the process-command dispatch, and the host services behind the
   `vscode` API — webview panels, webview views, status bar items, output channels, progress
   toasts, memento persistence, tree views, activationEvents; the activation policy also
   derives the implicit `onLanguage` events VS Code 1.74 reads off `contributes.languages` /
@@ -551,7 +569,7 @@ page shows the integration's state (`claude_mcp_status`).
   `CodeActionKind`, …) constructs), `src/extModuleLoader.ts` (the frame's CommonJS resolver
   over the activation preload `ext_load_code` — un-bundled multi-file packages and their
   `node_modules` load exactly as in Node: relative siblings, package.json `main`, cache,
-  circular partials, `MODULE_NOT_FOUND`), `src/ggsVscodeShim.ts` (the same `vscode` shim bundled as the IIFE ggs-node evaluates when a package's entry is a frame program — ggs-node's own frame-program host), `src/nodeShims.ts` (the Node builtins — `path`,
+  circular partials, `MODULE_NOT_FOUND`), `src/ggsVscodeShim.ts` (the same `vscode` shim bundled as the IIFE ggs-node evaluates when a package's entry is a frame program — ggs-node's own frame-program host; a backend command's arguments cross JSON at both hops, which has no `undefined`, so its dispatch restores a top-level `null` arg to the `undefined` the caller passed — handlers branch on `arg !== void 0` (claude-code's `editor.open` computes its column that way), and the placeholder args the host's `claudeChatRun` sends landed as `null` and threw in Boa; frames need no restore, postMessage's structured clone keeps `undefined`), `src/nodeShims.ts` (the Node builtins — `path`,
   `os`, `events`, `util`, `fs` over the preload and the workspace-confined bridge, `Buffer`,
   `process`; real implementations for what a frame can serve — `child_process` through the
   host bridge, `nodeShims/processSurfaces.ts` + `shared.ts`, and `stream` —
@@ -609,13 +627,19 @@ page shows the integration's state (`claude_mcp_status`).
   default) — off the main thread, with the backend's own `ggs.hostRequest`s forwarded to
   the workbench as `ext-host-request` events — or, under the `GGS_REAL_NODE=1` opt-in, on
   the real Node runtime plus `node-host.cjs`; `resolve_node_binaries` (cmd_ext) derives a
-  backend from a package's engine `.node` (real-Node host) or its `package.json` `main`
-  when native binaries are present),
+  backend from a package's engine `.node` (real-Node host), its `package.json` `main` when
+  native binaries are present, or — loadable code the sandboxed frame cannot host — an
+  oversized entry, or a qualified `http.createServer`-class call anywhere in the package's
+  `.js`/`.cjs` surface (2026-10-01: the scan reads the whole loadable tree, not the entry
+  alone — Claude Remote 0.2 moved its server into `server.js` and the entry-only scan
+  left the package `backend: null` in a frame that could not even resolve its siblings)),
   `src-tauri/src/node_runtime/` (`ggs-node`, the `node-runtime` feature's
   pretend Node runtime sidecar — the default `node`-backend host: Boa on one JS thread fed
   by a job queue — protocol requests, timers, child-process events, the activation — a CommonJS `require`
   confined to the package root (`require.rs`), real `fs`/`path`/`os`/`child_process`
-  builtins over std (`builtins/`: `mod` the registry, `fs`, `path`, `os`, `child`, `net`
+  builtins over std (`builtins/`: `mod` the registry, `fs`, `path`, `os` — including a
+  real `networkInterfaces()` over if-addrs (2026-10-01: Claude Remote's pairing QR needs
+  the machine's true LAN addresses; the prelude's empty stub is gone), `child`, `net`
   the TCP sockets and the HTTP(S) client under the prelude's `net` / `http` / `fetch`,
   `core` the prelude natives, `support` the shared helpers), `alloc.rs` the size-class
   free-list global allocator the `ggs-node` binary installs (a bundle load is millions of
@@ -705,6 +729,71 @@ page shows the integration's state (`claude_mcp_status`).
   `vsix.mjs` the zip writer, `stubs/` the bundle stubs, plus the two in-page bridges); the
   app tree carries no plugin code, and no build step of this repository runs the packer —
   the package arrives here as the marketplace's VSIX (or a hand-picked `--vsix`).
+- The one extension with source in this tree: `extensions-src/claude-remote/` (Claude
+  Remote (LAN), rewritten 2026-10-01 — continue the open workspace's Claude Code
+  conversations from a phone. `sessions.js` reads Claude Code's store read-only from the
+  host's one config root (Git Graph Studio `~/.ggs/claude`, VS Code `~/.claude`, an
+  explicit `CLAUDE_CONFIG_DIR` over either — never a mix of the two stores), scoped to the
+  workspace folders by default, incrementally (a poll re-reads only appended bytes), and
+  tail-first: a cold open parses only the last 512 KB (long conversations answer in tail
+  time, not whole-file time) and older history parses backward in 1 MB steps when a wider
+  window — or a `before` page, one screen of earlier history — is asked for; prepended
+  items take stamps counting down below the parsed floor, so file order keeps increasing
+  stamps and the phone's delta cursor survives the extension (a before page never advances
+  it);
+  `runner.js` runs phone prompts through the desktop's own `claude` CLI (the Claude Code
+  extension's bundled native binary first; `-p --output-format stream-json`, prompt on
+  stdin, `--resume` under the session's own config root) with one lane per conversation —
+  "send now" interrupts the running turn, "after this turn" queues behind it (and behind a
+  desktop turn visibly in flight); stop pauses the queue. `server.js` serves the phone
+  app (`web/`, CSP-strict, sjcl for crypto since the LAN origin is not a secure context)
+  and one sealed endpoint: AES-256-GCM under PBKDF2(code), AAD `cr2:req:<kid>` /
+  `cr2:res:<nonce>`, a ±5 min clock window, single-use nonces, per-address lockout. The
+  pairing secret persists in `context.secrets`; "Reset Pairing Key" swaps it and every
+  paired device gets `401 rekeyed`. `panel.js` is the desktop panel (QR per LAN address,
+  masked code, reset, devices, activity). Phone prompts are sent FROM the desktop tab
+  in Git Graph Studio (2026-10-01, the owner's direction — a background CLI turn left the
+  desktop tab showing nothing): the host's `ggs.claudeChat.send` / `.open` / `.state` /
+  `.stop` (`extHost.ts`, driving the page through `src/claudeChatInject.ts`: the
+  composer is the form whose submit button carries `data-permission-mode`, its input
+  the `role="textbox"` contenteditable; text goes in through the page's own `input`
+  handling, send is a click, "now" first clicks the tab's Stop) open or reveal the
+  session's tab, type, and send; they answer a ticket at once and run detached, because
+  a process-backed caller's JS thread is parked inside a host request; the runner polls
+  `.state` (tab busy + the session file) to settle the turn. Only VS Code, which cannot
+  reach another extension's page, runs the headless CLI (`claudeRemote.backend`), and
+  there `desktop.js` keeps the desktop in step
+  (`claudeRemote.desktopTab`): a phone turn opens the session's Claude Code tab
+  (`claude-vscode.editor.open`, "pin-to-panel") and reloads it when the turn ends — an
+  open chat panel never re-reads its session file, and its next turn would branch off
+  the stale history; the reload closes exactly the hosting tab through the host's
+  `ggs.sessionTabs.list` / `ggs.sessionTabs.close` (`extHost.ts`, from the
+  `update_session_state` session map; VS Code falls back to `window.tabGroups`, closing
+  the revealed tab only when it is a Claude Code panel). The phone also sees the
+  desktop's current model (`sessions.modelInfo`: settings pin → tier alias through
+  `ANTHROPIC_DEFAULT_*_MODEL` → `ANTHROPIC_MODEL` → the latest answered model), each
+  session's model and the running turn's (the CLI's `init` event), and can pick one — on
+  Git Graph Studio the pick rides the prompt to `ggs.claudeChat.send` as a `model` arg and
+  the host chooses it in the tab's own model picker first (`pickChatModel` in
+  `claudeChatInject.ts`: the pill is the composer's combobox, the menu its `listbox`;
+  best effort — a name the picker does not offer sends with the tab's current model,
+  logged); The phone also answers Claude's own questions: an `AskUserQuestion` tool_use
+  parses to a structured `question` body (options, multiSelect; `sessions.js`) that —
+  alone among tool bodies — rides the sync whole (`server.js` `lazyTool` keeps it), so
+  the phone renders a tappable card; `answer` (protocol 4) validates the picks against
+  exactly those options ("Other" always, with its text) and hands them to
+  `ggs.claudeChat.answer`, which clicks the tab's own option card — per question its nav
+  tab (a button whose whole text is the header), then its `role="radio"`/`"checkbox"`
+  options by label, and finally the card's own "Submit answers" button — the one act
+  that resolves the question (the card collects every click but never submits itself;
+  a multi-select keeps toggling until that click) (`answerChatQuestion` in
+  `claudeChatInject.ts`; the submitted card renders read-only, and that flip, via the
+  `tool_result`'s `"question"="answer"` summary, is what settles the phone's card);
+  headless hosts have no tab to click, so there the card is display-only;
+  the "default" permission mode passes no flag (the CLI has no `default` choice). A plain VS Code VSIX whose entry runs as a
+  `node` backend on ggs-node and installs in VS Code too; `build.mjs` packs the
+  store-format VSIX `prepare.mjs` bundles into every installer, self-checked by the
+  marketplace validator).
 - Build: `scripts/prepare.mjs` (fetches the bundled packages from the marketplace —
   Open VSX per architecture; `--vsix <path>` / `GGS_BUNDLED_VSIX` bundles a ready-built
   VSIX as-is, outranking the registry for git-graph-rs)
@@ -714,6 +803,10 @@ page shows the integration's state (`claude_mcp_status`).
   back in a `provider_list` — the sidebar chip and its quick pick, the Model Providers
   page, the usage curve's ranges and hover breakdown, and the chat pane gate's two
   states — the set-key page that saves into `provider_save`, the usage strip after),
+  `tests/claudeRemote.test.ts` (Claude Remote headless against a fixture store and a fake
+  `claude` — the sealed wire as the phone's sjcl speaks it, replay/clock/rekey/lockout,
+  workspace scoping, the transcript, send-now vs queue, stop/cancel/resume — plus its
+  VSIX packer),
   `tests/editor.test.ts` (the extpage tab),
   `tests/editorServices.test.ts` (the diagnostics store and the document-formatting
   registry, booted through the frame bootstrap),
@@ -945,7 +1038,11 @@ Everything that turns the source tree into installers: asset assembly into
   git-graph-rs packed in every build, claude-code in none by default (the Extensions view's
   marketplace row installs it online; `GGS_BUNDLE_CLAUDE_CODE=1` opts a build back in);
   there is no local source for either package — in require mode a fetch a selected package
-  cannot serve fails the build. A build pass re-checks the registry even when the cache is
+  cannot serve fails the build. The one local-source package, claude-remote, packs by its
+  own `extensions-src/claude-remote/build.mjs` into every build
+  (`GGS_BUNDLE_CLAUDE_REMOTE=0` leaves it out) — no fetch involved, so it packs offline
+  too (GGS_SKIP_MARKETPLACE_FETCH does not touch it). A build pass re-checks the registry
+  even when the cache is
   fresh: `prepare.mjs --build` — which `tauri.conf.json`'s `beforeBuildCommand` and CI's
   direct prepare runs pass — sets the fetch TTL to 0 (2026-09-30, the owner's direction: an
   installer must carry open-vsx.org's latest extension builds); the re-check is a lookup, a

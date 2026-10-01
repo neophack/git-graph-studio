@@ -11,10 +11,10 @@
 # commit. Check `full` to also build the macOS x64 dmg.
 #
 # The extension checkboxes decide which packages are packed INTO the installers
-# (studio.yml's GGS_BUNDLE_* env): `bundle-git-graph` checked by default,
-# `bundle-claude-code` unchecked by default (its 100+ MB platform VSIX stays out of the
-# installers; the Extensions view's marketplace row installs it on demand). A pushed tag
-# takes the same defaults.
+# (studio.yml's GGS_BUNDLE_* env): `bundle-git-graph` and `bundle-claude-remote` (local
+# source) checked by default, `bundle-claude-code` unchecked by default (its 100+ MB
+# platform VSIX stays out of the installers; the Extensions view's marketplace row
+# installs it on demand). A pushed tag takes the same defaults.
 #
 # Artifacts per release: windows NSIS setup exe + MSI, deb (Ubuntu 22.04-26.04 / Debian
 # 12/13), rpm (Fedora 38+ / openSUSE Leap 15.6+), macOS arm64 dmg (+ x64 on `full`), each
@@ -50,6 +50,11 @@ on:
         description: 'Pack claude-code into the installers'
         required: false
         default: false
+        type: boolean
+      bundle-claude-remote:
+        description: 'Pack claude-remote (local source) into the installers'
+        required: false
+        default: true
         type: boolean
 
 permissions:
@@ -100,9 +105,11 @@ jobs:
       full: ${{ inputs.full == true }}
       studio-version: ${{ needs.resolve-tag.outputs.version }}
       # `!= false` / `== true` so a tag push (no dispatch inputs at all) falls through
-      # to studio.yml's own defaults: git-graph-rs packed, claude-code not.
+      # to studio.yml's own defaults: git-graph-rs and claude-remote packed,
+      # claude-code not.
       bundle-git-graph: ${{ inputs.bundle-git-graph != false }}
       bundle-claude-code: ${{ inputs.bundle-claude-code == true }}
+      bundle-claude-remote: ${{ inputs.bundle-claude-remote != false }}
 
   release:
     name: Publish the GitHub Release

@@ -108,7 +108,8 @@ pub fn pty_create(app: TauriAppHandle, id: u32, cols: u16, rows: u16) -> Result<
                 Ok(n) => {
                     let payload = decode_pty_chunk(&mut carry, &buf[..n]);
                     if !payload.is_empty() {
-                        let _ = event_app.emit(format!("studio://pty-output-{id}").as_str(), payload);
+                        let _ =
+                            event_app.emit(format!("studio://pty-output-{id}").as_str(), payload);
                     }
                 }
             }
