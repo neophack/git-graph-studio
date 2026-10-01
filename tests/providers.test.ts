@@ -8,6 +8,7 @@
 // characters stand in for it).
 
 import { beforeEach, describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 
 import { click, flush, notifications, notificationButton, texts, type } from './helpers';
 import { backend } from './tauriMock';
@@ -412,6 +413,37 @@ describe('the token-usage curve', () => {
 		}
 		svg.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
 		expect(tooltip.hidden).toBe(true);
+		dispose();
+	});
+
+	it('never flickers: the pointer crossing the tooltip\u2019s own box keeps the hover alive', async () => {
+		const slot = host();
+		const dispose = mountUsagePanel(slot);
+		await flush();
+		const svg = slot.querySelector('.usage-chart svg')!;
+		svg.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 0 }));
+		await flush();
+		const tooltip = slot.querySelector<HTMLElement>('.usage-tooltip')!;
+		expect(tooltip.hidden).toBe(false);
+		const title = tooltip.querySelector('.title')!;
+		// A move inside the same bucket keeps the built tooltip — no per-pixel rebuild.
+		svg.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 3 }));
+		expect(tooltip.querySelector('.title')).toBe(title);
+		// The flicker loop this pins: the tooltip overlays the chart, so the pointer lands
+		// inside its box and the chart\u2019s own mouseleave fires — a move that arrives via
+		// the tooltip itself must still drive the hover (the listeners ride the chart
+		// host, of which the tooltip is a child), and re-entering shows it again.
+		svg.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
+		expect(tooltip.hidden).toBe(true);
+		tooltip.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 4 }));
+		expect(tooltip.hidden).toBe(false);
+		expect(tooltip.querySelector('.title')?.textContent).toBeTruthy();
+		// The other half of the fix: the tooltip is pointer-transparent, so a real
+		// browser keeps targeting the chart under it (jsdom does no hit-testing — the
+		// stylesheet carries the rule, pinned here; the vm pool's import.meta.url is no
+		// file: URL, so the path rides the run's cwd).
+		const css = readFileSync('src/shell.css', 'utf8');
+		expect(css).toMatch(/\.usage-tooltip\s*\{[^}]*pointer-events:\s*none/);
 		dispose();
 	});
 

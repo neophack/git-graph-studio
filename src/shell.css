@@ -1705,6 +1705,10 @@ body.resizing iframe { pointer-events: none; }
 .usage-dot { fill: var(--vscode-editor-background, #1e1e1e); stroke: var(--vscode-charts-lines, #3794ff); stroke-width: 1.5; }
 .usage-tooltip {
 	position: absolute; top: 2px; left: 0; z-index: 8; min-width: 132px;
+	/* The tooltip overlays the chart it explains; it must never take the pointer — a
+	   cursor inside its box keeps targeting the chart beneath, whose hover stays alive
+	   (with the listeners on the chart host this is what stops the show/hide flicker). */
+	pointer-events: none;
 	display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: 4px;
 	background: var(--vscode-editorWidget-background, #252526);
 	border: 1px solid var(--vscode-editorWidget-border, color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 14%, transparent));

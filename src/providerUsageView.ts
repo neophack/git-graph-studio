@@ -171,8 +171,11 @@ class UsageChart {
 		points: [number, number][];
 		guide: SVGLineElement;
 		dot: SVGCircleElement;
+		hoverIndex: number;
 	} | null = null;
 	private readonly tooltip = el('div', 'usage-tooltip');
+	/** Retires the previous render's hover listeners — each render owns the pointer. */
+	private hoverController: AbortController | null = null;
 
 	constructor(container: HTMLElement, private readonly height: number) {
 		this.root = el('div', 'usage-chart');
@@ -184,6 +187,8 @@ class UsageChart {
 	/** Drop the plot (the panel's empty and error states draw their own words). */
 	clear(): void {
 		this.drawn = null;
+		this.hoverController?.abort();
+		this.hoverController = null;
 		this.root.replaceChildren(this.tooltip);
 		this.tooltip.hidden = true;
 	}
@@ -250,23 +255,39 @@ class UsageChart {
 		svg.append(guide, dot);
 		this.root.replaceChildren(svg, this.tooltip);
 
-		svg.addEventListener('mousemove', (event) => this.hover(event, buckets, range, padLeft, step, width));
-		svg.addEventListener('mouseleave', () => {
+		// The hover rides the chart host, not the svg the tooltip overlays: the tooltip
+		// is the svg's sibling, so the pointer crossing onto it fires the svg's own
+		// mouseleave while still inside the host — the show/hide loop that flickered.
+		// The tooltip is pointer-transparent (shell.css) as well; this is the structural
+		// half. Each render retires the previous listeners — only the current plot
+		// answers the pointer.
+		this.hoverController?.abort();
+		const controller = new AbortController();
+		this.hoverController = controller;
+		this.root.addEventListener('mousemove', (event) => this.hover(event, buckets, range, padLeft, step, width), { signal: controller.signal });
+		this.root.addEventListener('mouseleave', () => {
 			guide.setAttribute('visibility', 'hidden');
 			dot.setAttribute('visibility', 'hidden');
 			this.tooltip.hidden = true;
-		});
-		this.drawn = { points, guide, dot };
+			// A later move on re-entering the same bucket must not early-return on the
+			// index it left behind.
+			if (this.drawn !== null) this.drawn.hoverIndex = -1;
+		}, { signal: controller.signal });
+		this.drawn = { points, guide, dot, hoverIndex: -1 };
 	}
 
 	/** The hover: the nearest bucket's guide, dot and breakdown tooltip. The `x`
-	 *  mapping tolerates a zero-width layout (jsdom) by anchoring to the first bucket. */
+	 *  mapping tolerates a zero-width layout (jsdom) by anchoring to the first bucket.
+	 *  A move inside the same bucket's span changes nothing — the early return keeps
+	 *  the built tooltip instead of rebuilding it per pixel. */
 	private hover(event: MouseEvent, buckets: UsageBucket[], range: UsageRange, padLeft: number, step: number, width: number): void {
 		const drawn = this.drawn;
 		if (drawn === null) return;
 		const rect = this.root.getBoundingClientRect();
 		const x = event.clientX - rect.left;
 		const index = step > 0 ? Math.max(0, Math.min(buckets.length - 1, Math.round((x - padLeft) / step))) : 0;
+		if (index === drawn.hoverIndex) return;
+		drawn.hoverIndex = index;
 		const point = drawn.points[index];
 		if (point === undefined) return;
 		drawn.guide.setAttribute('x1', String(point[0]));
