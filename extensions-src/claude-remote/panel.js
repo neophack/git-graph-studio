@@ -39,7 +39,7 @@ const STRINGS = {
 		sec1: "二维码与配对码就是访问密钥：任何获得它的人都能读取并操控本机的 Claude Code 对话。只向信任的设备展示。",
 		sec2: "配对码只出现在链接的 # 片段中（浏览器从不发送片段）；之后所有请求与应答均以 AES-256-GCM 加密，密钥由配对码经 PBKDF2-SHA256（15 万轮）派生，并通过 AAD 绑定请求与应答，防重放、防篡改。",
 		sec3: "仅限局域网，无任何云端中继；错误尝试会触发按地址的锁定。需跨网使用请走 VPN，不要把端口暴露到公网。",
-		ev_send: "发送指令", ev_start: "开始运行", ev_done: "运行完成", ev_error: "运行失败", ev_interrupted: "已中断", ev_stop: "停止运行", ev_session: "创建会话", ev_device: "设备已配对",
+		ev_send: "发送指令", ev_start: "开始运行", ev_done: "运行完成", ev_error: "运行失败", ev_interrupted: "已中断", ev_stop: "停止运行", ev_session: "创建会话", ev_device: "设备已配对", ev_answer: "回答提问",
 		now: "刚刚", minAgo: "{0} 分钟前", hourAgo: "{0} 小时前"
 	},
 	en: {
@@ -57,7 +57,7 @@ const STRINGS = {
 		sec1: "The QR and the pairing code are the access key: anyone holding them can read and drive this machine's Claude Code conversations. Show them only to devices you trust.",
 		sec2: "The code travels only in the link's # fragment (browsers never send fragments); afterwards every request and response is AES-256-GCM encrypted under a key derived from it (PBKDF2-SHA256, 150k rounds), with AAD binding each answer to its request — replayed or altered messages are rejected.",
 		sec3: "LAN only, no cloud relay; repeated failures lock the sending address out. To use it across networks, go through a VPN — never expose the port to the internet.",
-		ev_send: "Prompt sent", ev_start: "Turn started", ev_done: "Turn finished", ev_error: "Turn failed", ev_interrupted: "Interrupted", ev_stop: "Stopped", ev_session: "Session created", ev_device: "Device paired",
+		ev_send: "Prompt sent", ev_start: "Turn started", ev_done: "Turn finished", ev_error: "Turn failed", ev_interrupted: "Interrupted", ev_stop: "Stopped", ev_session: "Session created", ev_device: "Device paired", ev_answer: "Question answered",
 		now: "just now", minAgo: "{0}m ago", hourAgo: "{0}h ago"
 	}
 };

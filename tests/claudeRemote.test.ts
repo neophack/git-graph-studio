@@ -1146,3 +1146,35 @@ describe('the VSIX packer (what prepare.mjs bundles into every installer)', () =
 		}
 	});
 });
+
+describe('host conformance (VS Code’s real Node and Git Graph Studio’s ggs-node behave alike)', () => {
+	// The same probe runs under ggs-node in src-tauri/tests/node_runtime.rs against the same
+	// expected report — this is the real-Node half of that contract.
+	it('answers the conformance probe’s expected report under real Node', async () => {
+		const conformance = nodeRequire(path.join(extensionDir, 'test', 'conformance.js'));
+		const work = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-remote-conformance-'));
+		try {
+			const expected = conformance.expected();
+			expect(await conformance.run('crypto')).toEqual(expected.crypto);
+			expect(await conformance.run('e2e', work)).toEqual(expected.e2e);
+		} finally {
+			fs.rmSync(work, { recursive: true, force: true });
+		}
+	}, 60_000);
+
+	it('runs a .js CLI through each host’s own Node: real Node itself, Electron as Node, ggs-node through the system node', () => {
+		const { nodeExecutable } = nodeRequire(path.join(extensionDir, 'runner.js'));
+		const plain: Record<string, string> = {};
+		expect(nodeExecutable(plain, { node: '22.0.0' })).toBe(process.execPath);
+		expect(plain).toEqual({});
+		// VS Code's extension host is Electron: its binary is Node only under this flag
+		const electron: Record<string, string> = {};
+		expect(nodeExecutable(electron, { node: '22.0.0', electron: '37.0.0' })).toBe(process.execPath);
+		expect(electron.ELECTRON_RUN_AS_NODE).toBe('1');
+		// ggs-node is an extension host, not a script runner: its execPath would load the
+		// CLI as an extension entry, exit 0 and lose the prompt
+		const ggs: Record<string, string> = {};
+		expect(nodeExecutable(ggs, { node: '22.0.0-ggs', ggs: 'node-runtime' })).toBe('node');
+		expect(ggs).toEqual({});
+	});
+});

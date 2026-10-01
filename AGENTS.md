@@ -583,6 +583,9 @@ page shows the integration's state (`claude_mcp_status`).
   into the Output view's "Extension Host" channel and `~/.ggs/logs/ext-host.log`, at the
   `extensionLogLevel` setting's threshold; the `extensions.showLog` /
   `extensions.openLogFile` commands),
+  `src/claudeChatInject.ts` (the host's Claude Code chat driver behind
+  `ggs.claudeChat.*`: the composer typed into and sent, the turn interrupted, the model
+  picker chosen, the AskUserQuestion card answered — the page's own DOM, same-origin),
   `src/editorDiagnostics.ts` (the diagnostics store: the host's
   `languages.createDiagnosticCollection` entries land as CodeMirror squiggles in the open
   editors) + `src/editorDiagnosticsView.ts` (the CodeMirror half, loaded with the editor
@@ -641,7 +644,11 @@ page shows the integration's state (`claude_mcp_status`).
   real `networkInterfaces()` over if-addrs (2026-10-01: Claude Remote's pairing QR needs
   the machine's true LAN addresses; the prelude's empty stub is gone), `child`, `net`
   the TCP sockets and the HTTP(S) client under the prelude's `net` / `http` / `fetch`,
-  `core` the prelude natives, `support` the shared helpers), `alloc.rs` the size-class
+  `core` the prelude natives — the crypto ones in Node's own shapes since 2026-10-01:
+  PBKDF2 (sha1/256/512, string or Buffer password), AES-128/192/256-GCM whose `update`
+  answers as it goes over the GCM counter stream with encodings honoured and AAD read
+  at its byte offset, and Buffer's base64/base64url codec; bytes cross as typed arrays,
+  the old base64-string hop hung on a 600 KB message — `support` the shared helpers), `alloc.rs` the size-class
   free-list global allocator the `ggs-node` binary installs (a bundle load is millions of
   small allocations, a third of its parse+compile time in Windows `HeapAlloc` round trips
   alone; the JS thread keeps lock-free per-thread lists, other threads share one guarded
@@ -743,7 +750,10 @@ page shows the integration's state (`claude_mcp_status`).
   it);
   `runner.js` runs phone prompts through the desktop's own `claude` CLI (the Claude Code
   extension's bundled native binary first; `-p --output-format stream-json`, prompt on
-  stdin, `--resume` under the session's own config root) with one lane per conversation —
+  stdin, `--resume` under the session's own config root; a `.js` CLI runs on each host's
+  own Node — `nodeExecutable`: real Node itself, VS Code's Electron under
+  `ELECTRON_RUN_AS_NODE=1`, ggs-node through the system `node`, since the sidecar is an
+  extension host and loaded the script as one, losing the prompt) with one lane per conversation —
   "send now" interrupts the running turn, "after this turn" queues behind it (and behind a
   desktop turn visibly in flight); stop pauses the queue. `server.js` serves the phone
   app (`web/`, CSP-strict, sjcl for crypto since the LAN origin is not a secure context)
@@ -796,7 +806,8 @@ page shows the integration's state (`claude_mcp_status`).
   marketplace validator).
 - Build: `scripts/prepare.mjs` (fetches the bundled packages from the marketplace —
   Open VSX per architecture; `--vsix <path>` / `GGS_BUNDLED_VSIX` bundles a ready-built
-  VSIX as-is, outranking the registry for git-graph-rs)
+  VSIX as-is, outranking the registry for git-graph-rs; claude-remote packs from
+  `extensions-src/claude-remote/` by its own `build.mjs --out`, no fetch)
 - Tests: `tests/extensions.test.ts` (pages, the process dispatch, the real-Node remote
   handle routing), `tests/providers.test.ts` (the provider bridge's frontend half: the
   store client's seam contract — the key travels only inside `provider_save`, never
@@ -806,13 +817,24 @@ page shows the integration's state (`claude_mcp_status`).
   `tests/claudeRemote.test.ts` (Claude Remote headless against a fixture store and a fake
   `claude` — the sealed wire as the phone's sjcl speaks it, replay/clock/rekey/lockout,
   workspace scoping, the transcript, send-now vs queue, stop/cancel/resume — plus its
-  VSIX packer),
+  VSIX packer), `tests/claudeRemoteActivation.test.ts` (its `activate()` against a fake
+  of the real VS Code API — no `ggs.*` commands, so the headless CLI backend; on the
+  classic threads pool, see `vitest.config.ts`), `tests/claudeChatInject.test.ts` (the
+  host's chat driver against a stand-in composer: type, send, interrupt, the model
+  picker, the AskUserQuestion card),
   `tests/editor.test.ts` (the extpage tab),
   `tests/editorServices.test.ts` (the diagnostics store and the document-formatting
   registry, booted through the frame bootstrap),
   `src-tauri/tests/node_runtime.rs` (the pretend Node runtime: a package's JS entry served
   over `ggs-ext/1`, the process-host chain over the bundled `ggs-node` sidecar, a NAPI
-  addon answering under ggs-node, the installed extension's whole activation),
+  addon answering under ggs-node, the installed extension's whole activation; Claude
+  Remote's host conformance — its `test/conformance.js` probe (crypto vectors, the sealed
+  wire with an sjcl phone, a headless turn) answering `test/conformance.expected.json`
+  exactly as `tests/claudeRemote.test.ts` checks it under real Node — the e2e section's
+  sjcl-on-the-interpreter cost (~35 s for the sealed 256 KB tool result, against under one
+  in real Node) rides `GGS_PROMISE_TIMEOUT_SECS`, the settle-budget knob `settle()` reads
+  (30 s by default, raised only by that test) — and its `activate()` under the ggs-node
+  `vscode` shim serving a real HTTP request),
   `src-tauri/tests/vscode_shim_boa.rs` (the Boa define-op repro bed
   for the ggs-node `vscode` shim),
   `scripts/probes/claude-code-live-check.mjs` (the live claude-code check: the backend on

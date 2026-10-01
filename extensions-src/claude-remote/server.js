@@ -83,18 +83,10 @@ function deriveKey(pairing) {
 	return crypto.pbkdf2Sync(pairing.code, Buffer.from(pairing.salt, "base64url"), KDF_ITERATIONS, 32, "sha256");
 }
 
-/** A fresh, unpooled byte copy: ggs-node's GCM shim reads AAD from offset 0 of `.buffer`. */
-function bytes(text) {
-	const encoded = Buffer.from(String(text), "utf8");
-	const out = Buffer.alloc(encoded.length);
-	encoded.copy(out);
-	return out;
-}
-
 function seal(key, aad, obj) {
 	const iv = crypto.randomBytes(12);
 	const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
-	cipher.setAAD(bytes(aad));
+	cipher.setAAD(Buffer.from(aad, "utf8"));
 	const ct = Buffer.concat([cipher.update(Buffer.from(JSON.stringify(obj), "utf8")), cipher.final()]);
 	return { i: iv.toString("base64url"), d: Buffer.concat([ct, cipher.getAuthTag()]).toString("base64url") };
 }
@@ -104,7 +96,7 @@ function open(key, aad, envelope) {
 	const sealed = Buffer.from(String(envelope.d || ""), "base64url");
 	if (iv.length !== 12 || sealed.length < 17) throw new Error("malformed");
 	const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
-	decipher.setAAD(bytes(aad));
+	decipher.setAAD(Buffer.from(aad, "utf8"));
 	decipher.setAuthTag(sealed.subarray(sealed.length - 16));
 	const plain = Buffer.concat([decipher.update(sealed.subarray(0, sealed.length - 16)), decipher.final()]);
 	return JSON.parse(plain.toString("utf8"));
@@ -287,31 +279,31 @@ function startServer(options) {
 			return { scope: scope ? "workspace" : "all", sessions: [...drafts, ...list.slice(0, limit).map(sessionView)], total: list.length, version: runner.version };
 		},
 		session(p) {
-				const laneKey = String(p.lane || p.id || "");
-				const laneState = runner.laneState(laneKey);
-				const sessionId = laneState && laneState.sessionId ? laneState.sessionId : laneKey.startsWith("draft:") ? null : laneKey;
-				const s = sessionId ? sessions.findSession(sessionId) : null;
-				if (!s) {
-					if (laneState) return { draft: true, id: laneKey, lane: laneView(laneKey), items: [], rev: "draft:" + runner.version, total: 0, hasMore: false };
-					throw Object.assign(new Error("no such conversation"), { status: 404 });
-				}
-				const state = sessions.readTranscript(s.file);
-				const before = p.before != null && Number.isFinite(Number(p.before)) ? Number(p.before) : null;
-				const rev = state.size + ":" + state.mtimeMs + ":" + runner.version + ":" + (Number(p.limit) || 0) + ":" + (before || 0);
-				const lane = laneView(s.id);
-				const meta = { ...sessionView(s), midTurn: undefined, model: shownModel(state.model || s.model, s.cwd) };
-				if (p.rev === rev) return { same: true, rev, lane, session: meta, cur: { gen: state.gen, since: state.seq } };
-				// A cursor from this same parse asks for the delta; anything else (a first read, a
-				// rebuilt state, a wider window) gets the full window back. A `before` stamp asks
-				// for one page of older history — prepended client-side, never disturbing the
-				// delta cursor the phone polls with.
-				const since = p.cur && p.cur.gen === state.gen && Number.isFinite(Number(p.cur.since)) ? Number(p.cur.since) : null;
-				const window = sessions.transcriptWindow(state, { limit: p.limit, since, before });
-				const sent = new Set(runner.sentTexts(s.id).map((t) => t.trim()));
-				const items = window.items.map((item) => (item.k === "user" && sent.has(item.text.trim()) ? { ...item, remote: true } : item)).map(lazyTool);
-				return { id: s.id, session: meta, items, total: window.total, hasMore: window.hasMore, desktopBusy: sessions.desktopBusy({ ...s, midTurn: window.midTurn, mtimeMs: state.mtimeMs }), lane, rev, cur: window.cur, delta: window.delta };
-			},
-			/** The models a prompt may run with: the desktop's current one, this session's own, the tiers. */
+			const laneKey = String(p.lane || p.id || "");
+			const laneState = runner.laneState(laneKey);
+			const sessionId = laneState && laneState.sessionId ? laneState.sessionId : laneKey.startsWith("draft:") ? null : laneKey;
+			const s = sessionId ? sessions.findSession(sessionId) : null;
+			if (!s) {
+				if (laneState) return { draft: true, id: laneKey, lane: laneView(laneKey), items: [], rev: "draft:" + runner.version, total: 0, hasMore: false };
+				throw Object.assign(new Error("no such conversation"), { status: 404 });
+			}
+			const state = sessions.readTranscript(s.file);
+			const before = p.before != null && Number.isFinite(Number(p.before)) ? Number(p.before) : null;
+			const rev = state.size + ":" + state.mtimeMs + ":" + runner.version + ":" + (Number(p.limit) || 0) + ":" + (before || 0);
+			const lane = laneView(s.id);
+			const meta = { ...sessionView(s), midTurn: undefined, model: shownModel(state.model || s.model, s.cwd) };
+			if (p.rev === rev) return { same: true, rev, lane, session: meta, cur: { gen: state.gen, since: state.seq } };
+			// A cursor from this same parse asks for the delta; anything else (a first read, a
+			// rebuilt state, a wider window) gets the full window back. A `before` stamp asks
+			// for one page of older history — prepended client-side, never disturbing the
+			// delta cursor the phone polls with.
+			const since = p.cur && p.cur.gen === state.gen && Number.isFinite(Number(p.cur.since)) ? Number(p.cur.since) : null;
+			const window = sessions.transcriptWindow(state, { limit: p.limit, since, before });
+			const sent = new Set(runner.sentTexts(s.id).map((t) => t.trim()));
+			const items = window.items.map((item) => (item.k === "user" && sent.has(item.text.trim()) ? { ...item, remote: true } : item)).map(lazyTool);
+			return { id: s.id, session: meta, items, total: window.total, hasMore: window.hasMore, desktopBusy: sessions.desktopBusy({ ...s, midTurn: window.midTurn, mtimeMs: state.mtimeMs }), lane, rev, cur: window.cur, delta: window.delta };
+		},
+		/** The models a prompt may run with: the desktop's current one, this session's own, the tiers. */
 		models(p) {
 			const s = p.id ? sessions.findSession(p.id) : null;
 			const model = s ? sessions.readTranscript(s.file).model || s.model : null;

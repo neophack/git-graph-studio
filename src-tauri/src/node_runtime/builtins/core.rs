@@ -52,113 +52,232 @@ pub(super) fn random_bytes(
         .map(JsValue::from)
 }
 
-/// The `crypto` builtin's one native: `(algorithm, bytes) → hex digest`. The JS side's
-/// `createHash` accumulates the bytes (the `update` calls) and hands them over here —
-/// md5 / sha1 / sha256, the gravatar-class digests the frame host serves too.
-/// GGS-patch: PBKDF2-HMAC-SHA256 — `(password, salt, iterations, bits) → key bytes`.
-/// The `crypto.pbkdf2Sync` shim wraps this (the KDF behind the remote-Claude bridge's
-/// pairing key). Only SHA-256 is provided; other digests throw honestly.
-pub(super) fn pbkdf2_sha256(
+/// GGS-patch: PBKDF2 — `(password, salt, iterations, keylen, digest) → key bytes`, the
+/// password and salt as bytes (Node accepts strings and Buffers; the prelude encodes a
+/// string as UTF-8 before the crossing). The digests Node extensions name: sha1, sha256,
+/// sha512; anything else throws Node's own "Invalid digest" error.
+pub(super) fn pbkdf2(
     _this: &JsValue,
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-    use base64::Engine as _;
     use pbkdf2::pbkdf2_hmac;
-    use sha2::Sha256;
-    let password = string_arg(args, 0, context);
-    let salt = B64
-        .decode(string_arg(args, 1, context))
-        .map_err(|e| error(format!("salt: {e}")))?;
-    let iterations = args
-        .get_or_undefined(2)
-        .to_number(context)
-        .map(|n| n.max(1.0))
-        .unwrap_or(1.0) as u32;
-    let bits = args
-        .get_or_undefined(3)
-        .to_number(context)
-        .map(|n| n.max(128.0))
-        .unwrap_or(256.0) as usize;
-    let mut out = vec![0u8; bits / 8];
-    pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, iterations, &mut out);
-    Ok(text(B64.encode(out)))
+    let password = bytes_arg(args.get_or_undefined(0), context)
+        .ok_or_else(|| error("pbkdf2: the password must be bytes"))?;
+    let salt = bytes_arg(args.get_or_undefined(1), context)
+        .ok_or_else(|| error("pbkdf2: the salt must be bytes"))?;
+    let iterations = args.get_or_undefined(2).to_number(context)?;
+    let keylen = args.get_or_undefined(3).to_number(context)?;
+    if !(1.0..=u32::MAX as f64).contains(&iterations) || iterations.fract() != 0.0 {
+        return Err(error("pbkdf2: iterations must be a positive integer"));
+    }
+    if !(0.0..=(1u64 << 30) as f64).contains(&keylen) || keylen.fract() != 0.0 {
+        return Err(error("pbkdf2: keylen must be a non-negative integer"));
+    }
+    let digest = string_arg(args, 4, context).to_ascii_lowercase();
+    let mut out = vec![0u8; keylen as usize];
+    match digest.as_str() {
+        "sha1" => pbkdf2_hmac::<sha1::Sha1>(&password, &salt, iterations as u32, &mut out),
+        "sha256" => pbkdf2_hmac::<sha2::Sha256>(&password, &salt, iterations as u32, &mut out),
+        "sha512" => pbkdf2_hmac::<sha2::Sha512>(&password, &salt, iterations as u32, &mut out),
+        other => return Err(error(format!("Invalid digest: {other}"))),
+    }
+    array_buffer(out, context)
 }
 
-/// GGS-patch: AES-256-GCM seal — `(key, iv, plaintext, aad)` → `ciphertext‖tag`, all
-/// base64url. The prelude's `createCipheriv('aes-256-gcm', …)` buffers updates and seals
-/// once through this.
+fn array_buffer(bytes: Vec<u8>, context: &mut Context) -> JsResult<JsValue> {
+    JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(bytes), context)
+        .map(JsValue::from)
+}
+
+/// The key and IV the GCM natives share, checked the way Node checks them. The IV is the
+/// 96-bit form — the only one this runtime derives a counter for; a wrong length is a
+/// thrown error, never the aes-gcm crate's slice-length panic.
+fn gcm_key_iv(args: &[JsValue], context: &mut Context) -> JsResult<(Vec<u8>, [u8; 12])> {
+    let key = bytes_arg(args.get_or_undefined(0), context)
+        .ok_or_else(|| error("aes-gcm: the key must be bytes"))?;
+    if !matches!(key.len(), 16 | 24 | 32) {
+        return Err(error("Invalid key length"));
+    }
+    let iv = bytes_arg(args.get_or_undefined(1), context)
+        .ok_or_else(|| error("aes-gcm: the iv must be bytes"))?;
+    let iv: [u8; 12] = iv
+        .try_into()
+        .map_err(|_| error("aes-gcm: only 12-byte IVs are supported by this runtime"))?;
+    Ok((key, iv))
+}
+
+/// One AES-GCM operation for whichever key size the bytes carry (128/192/256).
+macro_rules! with_gcm {
+    ($key:expr, |$cipher:ident| $body:expr) => {{
+        use aes_gcm::aead::consts::U12;
+        use aes_gcm::KeyInit as _;
+        match $key.len() {
+            16 => {
+                let $cipher = aes_gcm::AesGcm::<aes_gcm::aes::Aes128, U12>::new_from_slice($key)
+                    .map_err(|_| error("Invalid key length"))?;
+                $body
+            }
+            24 => {
+                let $cipher = aes_gcm::AesGcm::<aes_gcm::aes::Aes192, U12>::new_from_slice($key)
+                    .map_err(|_| error("Invalid key length"))?;
+                $body
+            }
+            _ => {
+                let $cipher = aes_gcm::AesGcm::<aes_gcm::aes::Aes256, U12>::new_from_slice($key)
+                    .map_err(|_| error("Invalid key length"))?;
+                $body
+            }
+        }
+    }};
+}
+
+/// GGS-patch: AES-GCM seal — `(key, iv, plaintext, aad)` → `ciphertext‖tag` bytes. The
+/// prelude's `createCipheriv('aes-*-gcm')` seals once at `final` for the tag (its `update`
+/// calls already answered the ciphertext through [`aes_gcm_ctr`]).
 pub(super) fn aes_gcm_seal(
     _this: &JsValue,
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    use aes_gcm::aead::Aead as _;
-    use aes_gcm::{Aes256Gcm, KeyInit as _};
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-    use base64::Engine as _;
-    let mut decode = move |at: usize, what: &str| -> Result<Vec<u8>, JsError> {
-        B64.decode(string_arg(args, at, context))
-            .map_err(|e| error(format!("{what}: {e}")))
-    };
-    let key = decode(0, "key")?;
-    let iv = decode(1, "iv")?;
-    let plain = decode(2, "plaintext")?;
-    let aad = decode(3, "aad")?;
-    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| error(format!("key: {e}")))?;
-    let nonce = aes_gcm::Nonce::from_slice(&iv);
-    let mut ciphertext = cipher
-        .encrypt(
-            nonce,
-            aes_gcm::aead::Payload {
-                msg: &plain,
-                aad: &aad,
-            },
-        )
-        .map_err(|_| error("seal failed"))?;
-    // The aead crate appends the tag; split it out so the JS shape is `ct‖tag` chunks
-    // the same way Node's getAuthTag presents it.
-    let tag = ciphertext.split_off(ciphertext.len().saturating_sub(16));
-    let mut out = ciphertext;
-    out.extend_from_slice(&tag);
-    Ok(text(B64.encode(out)))
+    use aes_gcm::aead::AeadInPlace as _;
+    let (key, iv) = gcm_key_iv(args, context)?;
+    let mut buffer = bytes_arg(args.get_or_undefined(2), context).unwrap_or_default();
+    let aad = bytes_arg(args.get_or_undefined(3), context).unwrap_or_default();
+    let tag = with_gcm!(&key, |cipher| cipher
+        .encrypt_in_place_detached((&iv).into(), &aad, &mut buffer)
+        .map_err(|_| error("aes-gcm: seal failed"))?);
+    buffer.extend_from_slice(&tag);
+    array_buffer(buffer, context)
 }
 
-/// GGS-patch: AES-256-GCM open — `(key, iv, ciphertext‖tag, aad)` → plaintext, or a
-/// clean "open failed" error (wrong key/tag), never a panic.
+/// GGS-patch: AES-GCM open — `(key, iv, ciphertext, tag, aad)` → plaintext bytes, or
+/// Node's own authentication error (wrong key, tag or AAD; tampered data), never a panic.
 pub(super) fn aes_gcm_open(
     _this: &JsValue,
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    use aes_gcm::aead::Aead as _;
-    use aes_gcm::{Aes256Gcm, KeyInit as _};
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-    use base64::Engine as _;
-    let mut decode = move |at: usize, what: &str| -> Result<Vec<u8>, JsError> {
-        B64.decode(string_arg(args, at, context))
-            .map_err(|e| error(format!("{what}: {e}")))
-    };
-    let key = decode(0, "key")?;
-    let iv = decode(1, "iv")?;
-    let sealed = decode(2, "ciphertext")?;
-    let aad = decode(3, "aad")?;
-    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| error(format!("key: {e}")))?;
-    let nonce = aes_gcm::Nonce::from_slice(&iv);
-    let plain = cipher
-        .decrypt(
-            nonce,
-            aes_gcm::aead::Payload {
-                msg: &sealed,
-                aad: &aad,
-            },
-        )
-        .map_err(|_| error("open failed (wrong key or tampered data)"))?;
-    Ok(text(B64.encode(plain)))
+    use aes_gcm::aead::AeadInPlace as _;
+    const AUTH_FAILED: &str = "Unsupported state or unable to authenticate data";
+    let (key, iv) = gcm_key_iv(args, context)?;
+    let mut buffer = bytes_arg(args.get_or_undefined(2), context).unwrap_or_default();
+    let tag = bytes_arg(args.get_or_undefined(3), context).unwrap_or_default();
+    let aad = bytes_arg(args.get_or_undefined(4), context).unwrap_or_default();
+    let tag: [u8; 16] = tag.try_into().map_err(|_| error(AUTH_FAILED))?;
+    with_gcm!(&key, |cipher| cipher
+        .decrypt_in_place_detached((&iv).into(), &aad, &mut buffer, (&tag).into())
+        .map_err(|_| error(AUTH_FAILED))?);
+    array_buffer(buffer, context)
 }
 
-/// The `crypto` builtin's one native: `(algorithm, bytes) → hex digest`.
+/// GGS-patch: GCM's keystream — `(key, iv, offset, data)` → `data` XOR the AES-CTR stream
+/// GCM encrypts with (96-bit IV: counter block `iv‖2` for the first byte), started at
+/// `offset` bytes into the message. This is what lets the prelude's `update()` answer its
+/// ciphertext (or plaintext) as it goes, as Node's does, instead of all at `final()` —
+/// code that keeps only `update`'s output (Node's GCM `final` answers nothing) works.
+pub(super) fn aes_gcm_ctr(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    use aes_gcm::aes::cipher::{BlockEncrypt, KeyInit};
+    let (key, iv) = gcm_key_iv(args, context)?;
+    let offset = args.get_or_undefined(2).to_number(context)?;
+    if !(0.0..=(1u64 << 36) as f64).contains(&offset) || offset.fract() != 0.0 {
+        return Err(error("aes-gcm: bad stream offset"));
+    }
+    let offset = offset as u64;
+    let mut data = bytes_arg(args.get_or_undefined(3), context).unwrap_or_default();
+    // GCM's inc32: the low 32 bits count, wrapping; the first data block is J0 + 1 = 2.
+    let mut counter = 2u32.wrapping_add((offset / 16) as u32);
+    let mut skip = (offset % 16) as usize;
+    let mut at = 0usize;
+    macro_rules! stream {
+        ($aes:ty) => {{
+            let aes = <$aes>::new_from_slice(&key).map_err(|_| error("Invalid key length"))?;
+            while at < data.len() {
+                let mut block = aes_gcm::aes::Block::default();
+                block[..12].copy_from_slice(&iv);
+                block[12..].copy_from_slice(&counter.to_be_bytes());
+                aes.encrypt_block(&mut block);
+                for byte in &block[skip..] {
+                    if at == data.len() {
+                        break;
+                    }
+                    data[at] ^= byte;
+                    at += 1;
+                }
+                skip = 0;
+                counter = counter.wrapping_add(1);
+            }
+        }};
+    }
+    match key.len() {
+        16 => stream!(aes_gcm::aes::Aes128),
+        24 => stream!(aes_gcm::aes::Aes192),
+        _ => stream!(aes_gcm::aes::Aes256),
+    }
+    array_buffer(data, context)
+}
+
+/// Buffer's base64 / base64url rendering — `(bytes, url) → text`. The JS loop it replaces
+/// built the string a character at a time, quadratic on the interpreter's flat strings: a
+/// few hundred KB (a sealed RPC answer, an image) never finished.
+pub(super) fn base64_encode(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+    use base64::Engine as _;
+    let bytes =
+        bytes_arg(args.get_or_undefined(0), context).ok_or_else(|| error("base64: needs bytes"))?;
+    let url = args.get_or_undefined(1).to_boolean();
+    Ok(text(if url {
+        URL_SAFE_NO_PAD.encode(bytes)
+    } else {
+        STANDARD.encode(bytes)
+    }))
+}
+
+/// `Buffer.from(text, 'base64' | 'base64url')` — `(text) → bytes`, Node's lenient decode:
+/// both alphabets, padding optional, characters outside the alphabet skipped, the first
+/// pad ends the data, dangling bits of a final partial group dropped.
+pub(super) fn base64_decode(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+    use base64::Engine as _;
+    const LENIENT: GeneralPurpose = GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        GeneralPurposeConfig::new()
+            .with_decode_allow_trailing_bits(true)
+            .with_decode_padding_mode(DecodePaddingMode::RequireNone),
+    );
+    let input = string_arg(args, 0, context);
+    let mut clean: Vec<u8> = Vec::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'=' => break,
+            b'-' => clean.push(b'+'),
+            b'_' => clean.push(b'/'),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' => clean.push(byte),
+            _ => {}
+        }
+    }
+    if clean.len() % 4 == 1 {
+        clean.pop(); // six bits make no byte
+    }
+    let bytes = LENIENT.decode(&clean).unwrap_or_default();
+    array_buffer(bytes, context)
+}
+
+/// The `crypto` builtin's hash native: `(algorithm, bytes) → hex digest`. The JS side's
+/// `createHash` accumulates the bytes (the `update` calls) and hands them over here —
+/// md5 / sha1 / sha256, the gravatar-class digests the frame host serves too.
 pub(super) fn digest_hex(
     _this: &JsValue,
     args: &[JsValue],

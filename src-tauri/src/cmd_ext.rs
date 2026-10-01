@@ -2058,6 +2058,8 @@ fn resolve_node_binaries(
                     let mut text = String::new();
                     let _ = entry.read_to_string(&mut text);
                     code_text.push_str(&text);
+                    // A file boundary never fuses two halves into a qualified call.
+                    code_text.push('\n');
                 }
             }
             let too_big = entry_bytes > FRAME_MAIN_MAX_BYTES || tree_bytes > FRAME_TREE_MAX_BYTES;

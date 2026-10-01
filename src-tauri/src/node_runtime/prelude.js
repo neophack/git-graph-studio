@@ -397,65 +397,106 @@ for (const name of ['dispose', 'asyncDispose']) {
 	};
 	globalThis.crypto.webcrypto = { getRandomValues: (target) => globalThis.crypto.getRandomValues(target) };
 
-	// GGS-patch: pbkdf2Sync + createCipheriv/createDecipheriv('aes-*-gcm') over the
-	// Rust natives (aes-gcm + pbkdf2 crates). Only the shapes general extension crypto
-	// uses: sha256 KDF, gcm ciphers with single-tag auth. Other algorithms throw honestly.
+	// GGS-patch: pbkdf2 + createCipheriv/createDecipheriv('aes-*-gcm') over the Rust
+	// natives (aes-gcm + pbkdf2 crates), in Node's own shapes: bytes cross as typed
+	// arrays (no base64 hop — a few hundred KB through the old string codec never
+	// finished), `update` answers its output as it goes (GCM is a counter-mode stream:
+	// code that keeps only `update`'s result works, Node's GCM `final` answers nothing),
+	// input/output encodings are honoured, and AAD/keys are read at their own byte
+	// offsets (a small `Buffer.from(string)` is a view into a shared pool). Other
+	// algorithms throw honestly.
 	{
-		const b64u = {
-			encode: (bytes) => btoa(String.fromCharCode.apply(null, bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
-			decode: (text) => { const std = text.replace(/-/g, '+').replace(/_/g, '/'); const padded = std + '='.repeat((4 - (std.length % 4)) % 4); return Uint8Array.from(atob(padded), (ch) => ch.charCodeAt(0)); }
+		// A view of the caller's bytes (a string in the given encoding), and an owned
+		// copy for what the cipher keeps past the call.
+		const viewOf = (data, encoding) => {
+			if (typeof data === 'string') return Buffer.from(data, encoding || 'utf8');
+			if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+			if (data instanceof ArrayBuffer) return new Uint8Array(data);
+			throw new TypeError('The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView.');
 		};
+		const copyOf = (data, encoding) => Uint8Array.from(viewOf(data, encoding));
+		const rendered = (bytes, encoding) => (encoding && encoding !== 'buffer' ? bytes.toString(encoding) : bytes);
 		const pbkdf2Sync = (password, salt, iterations, keylen, digest) => {
-			if (digest !== undefined && digest !== 'sha256') throw new Error('pbkdf2Sync: only sha256 is supported by this runtime');
-			const saltBytes = typeof salt === 'string' ? new TextEncoder().encode(salt) : new Uint8Array(salt);
-			const keyText = globalThis.__ggsPbkdf2Sha256(String(password), b64u.encode(saltBytes), iterations, keylen * 8);
-			return Buffer.from(b64u.decode(keyText));
+			if (typeof digest !== 'string') throw new TypeError('The "digest" argument must be of type string');
+			return Buffer.from(globalThis.__ggsPbkdf2(viewOf(password), viewOf(salt), iterations, keylen, digest));
 		};
-		const isGcm = (algo) => /^(aes-(128|192|256)-gcm)$/i.test(String(algo));
+		const pbkdf2 = (password, salt, iterations, keylen, digest, callback) => {
+			if (typeof callback !== 'function') throw new TypeError('The "callback" argument must be of type function');
+			let key = null;
+			let failure = null;
+			try { key = pbkdf2Sync(password, salt, iterations, keylen, digest); } catch (error) { failure = error; }
+			setTimeout(() => callback(failure, key), 0);
+		};
+		const gcmBits = (algo) => {
+			const match = /^aes-(128|192|256)-gcm$/i.exec(String(algo));
+			return match ? Number(match[1]) : 0;
+		};
+		const AUTH_FAILED = 'Unsupported state or unable to authenticate data';
 		const Cipher = class {
-			constructor(key, iv, decrypt) {
-				this._key = b64u.encode(new Uint8Array(key.buffer, key.byteOffset, key.byteLength));
-				this._iv = b64u.encode(new Uint8Array(iv.buffer, iv.byteOffset, iv.byteLength));
+			constructor(bits, key, iv, decrypt) {
+				this._key = copyOf(key);
+				if (this._key.length * 8 !== bits) throw new RangeError('Invalid key length');
+				this._iv = copyOf(iv);
+				if (this._iv.length !== 12) throw new Error('aes-gcm: only 12-byte IVs are supported by this runtime');
 				this._decrypt = decrypt;
-				this._chunks = [];
+				this._offset = 0;
+				// The input so far: encrypt seals the plaintext at final for the tag,
+				// decrypt verifies the ciphertext against the tag it was given.
+				this._kept = [];
+				this._aad = new Uint8Array(0);
 				this._tag = null;
 				this._done = false;
 			}
-			update(data) {
-				if (this._done) throw new Error('cipher already finished');
-				this._chunks.push(typeof data === 'string' ? new TextEncoder().encode(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
-				return Buffer.alloc(0);
+			setAAD(aad) {
+				if (this._done || this._offset > 0) throw new Error(AUTH_FAILED);
+				this._aad = copyOf(aad);
+				return this;
 			}
-			setAAD(aad) { this._aad = aad; return this; }
-			setAuthTag(tag) { this._tag = new Uint8Array(tag.buffer, tag.byteOffset, tag.byteLength); return this; }
-			getAuthTag() { if (!this._tag) throw new Error('no auth tag (call final first)'); return Buffer.from(this._tag); }
-			final() {
-				if (this._done) throw new Error('cipher already finished');
+			setAutoPadding() { return this; }
+			setAuthTag(tag) {
+				if (!this._decrypt || this._done) throw new Error('Invalid state for operation setAuthTag');
+				this._tag = copyOf(tag);
+				return this;
+			}
+			getAuthTag() {
+				if (this._decrypt || !this._done) throw new Error('Invalid state for operation getAuthTag');
+				return Buffer.from(this._tag);
+			}
+			update(data, inputEncoding, outputEncoding) {
+				if (this._done) throw new Error(AUTH_FAILED);
+				const input = copyOf(data, inputEncoding);
+				const output = Buffer.from(globalThis.__ggsAesGcmCtr(this._key, this._iv, this._offset, input));
+				this._offset += input.length;
+				this._kept.push(input);
+				return rendered(output, outputEncoding);
+			}
+			final(outputEncoding) {
+				if (this._done) throw new Error(AUTH_FAILED);
 				this._done = true;
-				const plain = Buffer.concat(this._chunks.map((c) => new Uint8Array(c.buffer, c.byteOffset, c.byteLength)));
-				const aadB64 = this._aad ? b64u.encode(new Uint8Array(this._aad.buffer ?? this._aad, 0, this._aad.byteLength ?? this._aad.length)) : '';
-				if (!this._decrypt) {
-					const sealed = globalThis.__ggsAesGcmSeal(this._key, this._iv, b64u.encode(plain), aadB64);
-					const sealedBytes = b64u.decode(sealed);
-					const ct = sealedBytes.subarray(0, sealedBytes.length - 16);
-					this._tag = sealedBytes.subarray(sealedBytes.length - 16);
-					return Buffer.from(ct);
+				const kept = Buffer.concat(this._kept);
+				this._kept = [];
+				if (this._decrypt) {
+					if (!this._tag) throw new Error(AUTH_FAILED);
+					globalThis.__ggsAesGcmOpen(this._key, this._iv, kept, this._tag, this._aad);
+				} else {
+					const sealed = new Uint8Array(globalThis.__ggsAesGcmSeal(this._key, this._iv, kept, this._aad));
+					this._tag = sealed.slice(sealed.length - 16);
 				}
-				if (!this._tag) throw new Error('setAuthTag is required before final');
-				const sealed = b64u.encode(new Uint8Array([...plain, ...this._tag]));
-				const opened = globalThis.__ggsAesGcmOpen(this._key, this._iv, sealed, aadB64);
-				return Buffer.from(b64u.decode(opened));
+				return rendered(Buffer.alloc(0), outputEncoding);
 			}
 		};
 		globalThis.crypto.createCipheriv = (algo, key, iv) => {
-			if (!isGcm(algo)) throw new Error('createCipheriv: only aes-128/192/256-gcm is supported by this runtime');
-			return new Cipher(key, iv, false);
+			const bits = gcmBits(algo);
+			if (!bits) throw new Error('createCipheriv: only aes-128/192/256-gcm is supported by this runtime');
+			return new Cipher(bits, key, iv, false);
 		};
 		globalThis.crypto.createDecipheriv = (algo, key, iv) => {
-			if (!isGcm(algo)) throw new Error('createDecipheriv: only aes-128/192/256-gcm is supported by this runtime');
-			return new Cipher(key, iv, true);
+			const bits = gcmBits(algo);
+			if (!bits) throw new Error('createDecipheriv: only aes-128/192/256-gcm is supported by this runtime');
+			return new Cipher(bits, key, iv, true);
 		};
 		globalThis.crypto.pbkdf2Sync = pbkdf2Sync;
+		globalThis.crypto.pbkdf2 = pbkdf2;
 	}
 })();
 
@@ -677,22 +718,9 @@ for (const name of ['dispose', 'asyncDispose']) {
 					return out;
 				}
 				case 'base64': case 'base64url': {
-					// Both alphabets decode, as in Node: base64url's - and _ are + and /.
-					const clean = text.replace(/-/g, '+').replace(/_/g, '/').replace(/[^A-Za-z0-9+/]/g, '');
-					const out = new Buffer(Math.floor(clean.length * 3 / 4));
-					let bits = 0;
-					let acc = 0;
-					let at = 0;
-					for (const ch of clean) {
-						acc = (acc << 6) | B64.indexOf(ch);
-						bits += 6;
-						if (bits >= 8) {
-							bits -= 8;
-							out[at] = (acc >> bits) & 0xff;
-							at += 1;
-						}
-					}
-					return out.subarray(0, at);
+					// Both alphabets decode, as in Node (base64url's - and _ are + and /), natively:
+					// the per-character JS loop was the slow half of every sealed message.
+					return Buffer.from(__ggsBase64Decode(text));
 				}
 				default:
 					throw new TypeError(`Unknown encoding: ${encoding}`);
@@ -721,18 +749,10 @@ for (const name of ['dispose', 'asyncDispose']) {
 					return out;
 				}
 				case 'base64': case 'base64url': {
-					let out = '';
-					for (let i = 0; i < bytes.length; i += 3) {
-						const b1 = bytes[i];
-						const b2 = bytes[i + 1];
-						const b3 = bytes[i + 2];
-						out += B64[b1 >> 2];
-						out += B64[((b1 & 3) << 4) | ((b2 ?? 0) >> 4)];
-						out += b2 === undefined ? (encoding === 'base64url' ? '' : '=') : B64[((b2 & 15) << 2) | ((b3 ?? 0) >> 6)];
-						out += b3 === undefined ? (encoding === 'base64url' ? '' : '=') : B64[b3 & 63];
-					}
-					// base64url is its own alphabet (RFC 4648 §5) — PKCE challenges and JWTs.
-					return encoding === 'base64url' ? out.replace(/\+/g, '-').replace(/\//g, '_') : out;
+					// Native: the per-character `out +=` loop was quadratic on the interpreter's flat
+					// strings — a few hundred KB never finished. base64url is its own alphabet (RFC
+					// 4648 §5, unpadded) — PKCE challenges, JWTs, sealed envelopes.
+					return __ggsBase64Encode(bytes, encoding === 'base64url');
 				}
 				default:
 					throw new TypeError(`Unknown encoding: ${encoding}`);

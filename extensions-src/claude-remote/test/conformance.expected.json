@@ -1,0 +1,99 @@
+{
+	"crypto": {
+		"buffer.base64url": {
+			"dec": "fbff0010",
+			"enc": "-_8AEA",
+			"hex": "fbff0010"
+		},
+		"gcm.encodings": {
+			"back": "hello world",
+			"hex": "e2c6cc4ac55a3874346739"
+		},
+		"gcm.large": {
+			"digest": "863330f83035296fb30910e8e58474860229a596890d89d03cd3aa7c64a0594a",
+			"len": 614400,
+			"same": true
+		},
+		"gcm.pooledAad": {
+			"ct": "e2c6cc4ac5",
+			"pt": "hello",
+			"tag": "e142619cc86b51fc975b9ac9125bb762"
+		},
+		"gcm.sjclInterop": "from phone",
+		"gcm.tamperRejected": "rejected",
+		"os.loopback": {
+			"cidr": "127.0.0.1/8",
+			"family": "IPv4",
+			"internal": true,
+			"netmask": "255.0.0.0"
+		},
+		"pbkdf2": "6bded321c02632a6e2fb0f0f1cf785750dcc16e0281252e5c195cef75ff71148",
+		"pbkdf2.bufferPassword": "6bded321c02632a6e2fb0f0f1cf785750dcc16e0281252e5c195cef75ff71148"
+	},
+	"e2e": {
+		"http.static": {
+			"csp": true,
+			"missing": 404,
+			"sjcl": true,
+			"status": 200
+		},
+		"rpc.detailLarge": {
+			"head": "yyy",
+			"len": 262144
+		},
+		"rpc.hello": {
+			"injection": false,
+			"protocol": 4,
+			"workspace": [
+				"my-app"
+			]
+		},
+		"rpc.replay": [
+			200,
+			401,
+			"replay"
+		],
+		"rpc.session": [
+			{
+				"k": "user",
+				"text": "first question"
+			},
+			{
+				"k": "tool",
+				"more": true,
+				"name": "Bash",
+				"st": "ok"
+			},
+			{
+				"k": "assistant",
+				"text": "first **answer** 你好"
+			}
+		],
+		"rpc.sessions": [
+			{
+				"branch": "main",
+				"id": "conv-a",
+				"project": "my-app",
+				"title": "Fixture conversation A"
+			}
+		],
+		"rpc.tamper": [
+			401,
+			"auth"
+		],
+		"rpc.wrongKid": [
+			401,
+			"rekeyed"
+		],
+		"runner.headlessTurn": {
+			"error": null,
+			"lastText": "echo: ping from probe",
+			"status": "done"
+		},
+		"wire.hello": {
+			"iterations": 150000,
+			"kidOk": true,
+			"protocol": 4
+		}
+	}
+}

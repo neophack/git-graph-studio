@@ -163,8 +163,9 @@ fn iface_pair(iface: &if_addrs::Interface) -> (std::net::IpAddr, std::net::IpAdd
 /// Node's `os.networkInterfaces()`: the interface list grouped by name, one
 /// `{ address, netmask, family, mac, internal, cidr }` record per address. The LAN
 /// addresses are what a package like Claude Remote needs to build its pairing QR.
-/// if-addrs has no MAC address — the field stays empty (nothing in-tree reads it), and
-/// `internal` is the loopback test, as in Node.
+/// if-addrs has no MAC address — the field carries Node's own "unknown" value, the
+/// all-zero address (libraries that read it parse the colon form and skip zeros; an
+/// empty string would fail that parse), and `internal` is the loopback test, as in Node.
 fn os_network_interfaces(
     _this: &JsValue,
     _args: &[JsValue],
@@ -181,7 +182,7 @@ fn os_network_interfaces(
             "address": ip.to_string(),
             "netmask": netmask.to_string(),
             "family": if ip.is_ipv4() { "IPv4" } else { "IPv6" },
-            "mac": "",
+            "mac": "00:00:00:00:00:00",
             "internal": iface.is_loopback(),
             "cidr": format!("{ip}/{prefix}"),
         });

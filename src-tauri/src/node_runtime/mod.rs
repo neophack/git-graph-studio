@@ -47,6 +47,18 @@ use crate::ext_protocol::{self as proto, Emitter};
 const PRELUDE: &str = include_str!("prelude.js");
 /// How long a JS handler's returned promise may take to settle before the request fails.
 const PROMISE_TIMEOUT: Duration = Duration::from_secs(30);
+/// The same budget, overridable for diagnosis and tests: `GGS_PROMISE_TIMEOUT_SECS`. The
+/// conformance probe's e2e section moves a sealed 256 KB tool result through sjcl on the
+/// interpreter — ~35 s where real Node takes under one — so its test raises this; every
+/// ordinary request keeps the default.
+fn promise_timeout() -> Duration {
+    std::env::var("GGS_PROMISE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|text| text.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(PROMISE_TIMEOUT)
+}
 /// The no-timer idle wait: bounded so a missed wake cannot idle a request forever.
 const IDLE_TICK: Duration = Duration::from_secs(30);
 /// The backend's own request ids start here. Both directions share the one channel, and the
@@ -1237,7 +1249,8 @@ pub(crate) fn settle(context: &mut Context, value: JsValue) -> Result<JsValue, S
         Ok::<JsValue, boa_engine::JsError>(value),
         context,
     );
-    let deadline = Instant::now() + PROMISE_TIMEOUT;
+    let timeout = promise_timeout();
+    let deadline = Instant::now() + timeout;
     let trace = std::env::var("GGS_TRACE_BOOT").is_ok();
     let mut waited = 0usize;
     loop {
@@ -1250,7 +1263,7 @@ pub(crate) fn settle(context: &mut Context, value: JsValue) -> Result<JsValue, S
                 if Instant::now() > deadline {
                     return Err(format!(
                         "the handler's promise did not settle within {} s",
-                        PROMISE_TIMEOUT.as_secs()
+                        timeout.as_secs()
                     ));
                 }
                 // The event loop is blocked inside this request, so its timer step never

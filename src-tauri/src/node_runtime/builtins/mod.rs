@@ -213,11 +213,7 @@ pub fn register_natives(context: &mut Context) -> JsResult<()> {
             1,
             NativeFunction::from_fn_ptr(net::dns_lookup),
         ),
-        (
-            "__ggsPbkdf2Sha256",
-            4,
-            NativeFunction::from_fn_ptr(core::pbkdf2_sha256),
-        ),
+        ("__ggsPbkdf2", 5, NativeFunction::from_fn_ptr(core::pbkdf2)),
         (
             "__ggsAesGcmSeal",
             4,
@@ -225,8 +221,23 @@ pub fn register_natives(context: &mut Context) -> JsResult<()> {
         ),
         (
             "__ggsAesGcmOpen",
-            4,
+            5,
             NativeFunction::from_fn_ptr(core::aes_gcm_open),
+        ),
+        (
+            "__ggsAesGcmCtr",
+            4,
+            NativeFunction::from_fn_ptr(core::aes_gcm_ctr),
+        ),
+        (
+            "__ggsBase64Encode",
+            2,
+            NativeFunction::from_fn_ptr(core::base64_encode),
+        ),
+        (
+            "__ggsBase64Decode",
+            1,
+            NativeFunction::from_fn_ptr(core::base64_decode),
         ),
         ("__ggsNetEnd", 1, NativeFunction::from_fn_ptr(net::end)),
         (

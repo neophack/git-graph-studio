@@ -451,7 +451,9 @@ module.exports.activate = function () {
         }
     }
     let seen: Value = serde_json::from_str(
-        answer["result"].as_str().expect("the handler answered a string"),
+        answer["result"]
+            .as_str()
+            .expect("the handler answered a string"),
     )
     .expect("the handler answered JSON");
     assert_eq!(seen["a"], "s1", "the real argument arrives as it was");
@@ -2441,4 +2443,252 @@ ggs.onRequest(async (command) => {
     assert_eq!(result["plainHead"], json!("Error: plain"));
     assert_eq!(result["plainHasFrames"], json!(true), "{result}");
     assert_eq!(result["limit"], json!(10));
+}
+
+/// Claude Remote runs unchanged in VS Code (real Node) and here (ggs-node), so its whole
+/// Node surface is pinned by one host-conformance probe both runtimes execute — the
+/// package's own `test/conformance.js`, served straight from its source tree — against
+/// one expected report (`conformance.expected.json`, which vitest checks under real
+/// Node). The crypto section is where ggs-node used to diverge: AAD read from offset 0 of
+/// a pooled Buffer's `.buffer`, `update`/`final` ignoring encodings, and a JS base64 hop
+/// so slow a 600 KB message — a sealed 256 KB tool result — never finished. The e2e
+/// section drives the LAN server with an sjcl phone, and one headless turn through a fake
+/// `claude` script: before `nodeExecutable`, ggs-node ran that script as an extension
+/// entry, the turn ended "done" and the prompt was silently lost.
+#[test]
+fn claude_remote_answers_its_conformance_probe_exactly_as_real_node_does() {
+    let package = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../extensions-src/claude-remote");
+    let expected: Value = serde_json::from_str(
+        &std::fs::read_to_string(package.join("test/conformance.expected.json")).unwrap(),
+    )
+    .unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let work_dir = work.path().display().to_string();
+    // The e2e section decrypts a sealed 256 KB tool result with sjcl on the interpreter —
+    // tens of seconds where real Node takes under one — so its sidecar runs with a raised
+    // settle budget (the same knob, defaulting to 30 s, every other request keeps).
+    std::env::set_var("GGS_PROMISE_TIMEOUT_SECS", "90");
+    let answers = serve(
+        package.join("test/conformance.js"),
+        &[
+            initialize(),
+            run_command("conformance", json!([{ "section": "crypto" }])),
+            run_command(
+                "conformance",
+                json!([{ "section": "e2e", "workDir": work_dir }]),
+            ),
+        ],
+    );
+    assert_eq!(answers[1].as_ref().unwrap(), &expected["crypto"]);
+    assert_eq!(answers[2].as_ref().unwrap(), &expected["e2e"]);
+}
+
+/// Claude Remote's `activate()` under Git Graph Studio's own host shape — ggs-node with the
+/// bundled `vscode` shim, as the app's process host runs it — beyond the bare Node surface
+/// the conformance probe pins: the activation probes the host's `ggs.claudeChat.state`
+/// (answered here as Git Graph Studio answers it, so the injected backend is chosen),
+/// `claude-remote.start` reads and stores the pairing secret through `context.secrets`,
+/// opens the LAN server and renders the panel (its HTML carries the port), and a real HTTP
+/// request then reaches that server. VS Code's half of the same activation is
+/// `tests/claudeRemoteActivation.test.ts`.
+#[test]
+fn claude_remote_activates_and_serves_under_the_ggs_node_vscode_shim() {
+    let shim = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/studio/vscode-shim.cjs");
+    if !shim.is_file() {
+        eprintln!("skipping: no compiled vscode shim at {}", shim.display());
+        return;
+    }
+    std::env::set_var("GGS_VSCODE_SHIM", &shim);
+    let package = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../extensions-src/claude-remote");
+    let workspace = tempfile::tempdir().unwrap();
+
+    let (requests_tx, requests_rx) = std::sync::mpsc::channel::<String>();
+    let (output_tx, output_rx) = std::sync::mpsc::channel::<String>();
+    let entry = package.join("extension.js");
+    let serve = std::thread::spawn(move || {
+        git_graph_studio_lib::node_runtime::serve_on(
+            entry,
+            ChannelReader::from(requests_rx),
+            ChannelWriter(output_tx),
+        );
+    });
+
+    // The workbench side, on its own thread the whole time: the extension's timers issue
+    // host requests of their own (the panel heartbeat's `ggs.sessionTabs.list`), and its JS
+    // thread parks until each is answered — so the answers must keep flowing while this
+    // test blocks elsewhere (on the LAN socket below). The answers are minimal but
+    // shape-true: `ggs.claudeChat.state` answers as Git Graph Studio does with no chat
+    // open, everything else (the secrets included) is empty. Each host request's name and
+    // the latest panel HTML are recorded; every other line (responses) is forwarded.
+    #[derive(Default)]
+    struct Seen {
+        requests: Vec<String>,
+        panel_html: String,
+    }
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (responses_tx, responses_rx) = std::sync::mpsc::channel::<Value>();
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let workbench = {
+        let seen = Arc::clone(&seen);
+        let done = Arc::clone(&done);
+        let requests_tx = requests_tx.clone();
+        std::thread::spawn(move || {
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                let Ok(line) = output_rx.recv_timeout(std::time::Duration::from_millis(50)) else {
+                    continue;
+                };
+                let Ok(wire) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                if wire.get("method").and_then(Value::as_str) != Some("ggs.hostRequest") {
+                    if wire.get("id").is_some() {
+                        let _ = responses_tx.send(wire);
+                    }
+                    continue;
+                }
+                let inner = wire["params"]["method"].as_str().unwrap_or_default();
+                let args = &wire["params"]["args"];
+                let command = args[0].as_str().unwrap_or_default();
+                let mut seen = seen.lock().unwrap();
+                let answer = match (inner, command) {
+                    ("host.env", _) => json!({
+                        "settings": {}, "language": "en", "appVersion": "0.1.8-test",
+                        "themeKind": 2, "state": { "global": {}, "workspace": {} }
+                    }),
+                    ("commands.execute", "ggs.claudeChat.state") => json!({
+                        "phase": "none", "error": null, "sessionId": null,
+                        "open": false, "busy": null
+                    }),
+                    ("commands.execute", "ggs.sessionTabs.list") => json!([]),
+                    ("webview.setHtml", _) => {
+                        if let Some(html) = args.as_array().and_then(|all| {
+                            all.iter()
+                                .find_map(|v| v.as_str().filter(|s| s.contains("<html")))
+                        }) {
+                            seen.panel_html = html.to_owned();
+                        }
+                        Value::Null
+                    }
+                    _ => Value::Null,
+                };
+                seen.requests.push(if inner == "commands.execute" {
+                    format!("commands.execute {command}")
+                } else {
+                    inner.to_owned()
+                });
+                if let Some(id) = wire["id"].as_u64() {
+                    let _ = requests_tx
+                        .send(git_graph_studio_lib::ext_protocol::response(id, Ok(answer)));
+                }
+            }
+        })
+    };
+    let call = |id: u64, method: &str, params: Value| -> Value {
+        requests_tx
+            .send(git_graph_studio_lib::ext_protocol::request(
+                id, method, params,
+            ))
+            .unwrap();
+        loop {
+            let wire = responses_rx
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "the backend fell silent; host requests: {:?}",
+                        seen.lock().unwrap().requests
+                    )
+                });
+            if wire["id"].as_u64() == Some(id) {
+                return wire;
+            }
+        }
+    };
+
+    let handshake = call(
+        1,
+        "initialize",
+        json!({
+            "protocolVersion": "ggs-ext/1",
+            "extensionId": "ggs.claude-remote",
+            "extensionPath": package.display().to_string(),
+            "workspaceFolders": [workspace.path().display().to_string()],
+        }),
+    );
+    assert_eq!(
+        handshake["result"]["protocolVersion"], "ggs-ext/1",
+        "{handshake}"
+    );
+
+    // `start` orders behind the activation on the JS thread's job queue, so its answer
+    // also proves activate() completed; start(true) reveals the panel once the server is up.
+    let started = call(
+        2,
+        "runCommand",
+        json!({ "command": "claude-remote.start", "args": [] }),
+    );
+    let (requests, panel_html) = {
+        let seen = seen.lock().unwrap();
+        (seen.requests.clone(), seen.panel_html.clone())
+    };
+    assert!(
+        started.get("error").is_none(),
+        "{started}\nhost requests: {requests:?}"
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|s| s == "commands.execute ggs.claudeChat.state"),
+        "the activation probes the injected backend: {requests:?}"
+    );
+    assert!(requests.iter().any(|s| s == "secrets.get"), "{requests:?}");
+    assert!(
+        requests.iter().any(|s| s == "secrets.store"),
+        "a fresh pairing is stored: {requests:?}"
+    );
+    assert!(
+        requests.iter().any(|s| s == "statusbar.set"),
+        "{requests:?}"
+    );
+
+    // The port the panel shows (the state object's own key: the string table carries a
+    // `"port":"Port"` label too), and the server behind it answering a real request.
+    let marker = "\"running\":true,\"port\":";
+    let at = panel_html
+        .find(marker)
+        .unwrap_or_else(|| panic!("the panel shows the server up: {panel_html}"));
+    let port: u16 = panel_html[at + marker.len()..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .expect("a numeric port");
+    let mut stream =
+        std::net::TcpStream::connect(("127.0.0.1", port)).expect("the LAN server listens");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(20)))
+        .unwrap();
+    stream
+        .write_all(b"GET /api/hello HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    assert!(response.starts_with("HTTP/1.1 200"), "{response:?}");
+    let body: Value =
+        serde_json::from_str(response.split("\r\n\r\n").nth(1).unwrap_or_default().trim())
+            .unwrap_or_else(|e| panic!("{e}: {response}"));
+    assert_eq!(body["protocol"], json!(4), "{body}");
+    assert_eq!(body["iterations"], json!(150_000), "{body}");
+
+    let stopped = call(
+        3,
+        "runCommand",
+        json!({ "command": "claude-remote.stop", "args": [] }),
+    );
+    assert!(stopped.get("error").is_none(), "{stopped}");
+    // The workbench thread's sender goes first, then this one: the runtime's reader sees
+    // its end of input only once every sender is gone.
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = workbench.join();
+    drop(requests_tx);
+    let _ = serve.join();
 }

@@ -65,6 +65,17 @@ function claudeCliPath(env = process.env) {
 	return "claude";
 }
 
+/** The executable that runs a `.js` CLI as Node would, on every host this package runs
+ *  in: real Node is its own `execPath`; VS Code's extension host is Electron, whose binary
+ *  acts as Node only under ELECTRON_RUN_AS_NODE (what Node's own `fork` sets there); Git
+ *  Graph Studio's ggs-node is an extension host, not a script runner, so the CLI gets the
+ *  system `node` from PATH. */
+function nodeExecutable(env, versions = process.versions) {
+	if (versions && versions.ggs) return "node";
+	if (versions && versions.electron) env.ELECTRON_RUN_AS_NODE = "1";
+	return process.execPath;
+}
+
 let serial = 0;
 const nextId = (prefix) => prefix + Date.now().toString(36) + (++serial).toString(36);
 
@@ -236,7 +247,7 @@ class Runner {
 		let shell = false;
 		if (/\.(c|m)?js$/i.test(command)) {
 			argv = [command, ...args];
-			command = process.execPath;
+			command = nodeExecutable(env);
 		} else if (process.platform === "win32" && !path.isAbsolute(command)) {
 			shell = true; // `claude` on PATH is an npm .cmd shim
 		}
@@ -445,4 +456,4 @@ class Runner {
 	}
 }
 
-module.exports = { Runner, claudeCliPath, PERMISSION_MODES };
+module.exports = { Runner, claudeCliPath, nodeExecutable, PERMISSION_MODES };

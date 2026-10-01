@@ -659,7 +659,8 @@
 	function inline(src) {
 		const slots = [];
 		const hold = (html) => "\u0000" + (slots.push(html) - 1) + "\u0000";
-		let s = String(src).replace(/`([^`\n]+)`/g, (_, c) => hold(`<code>${esc(c)}</code>`));
+		// NULs are the slot delimiters: one in the source text would resolve to a bogus slot
+		let s = String(src).replace(/\u0000/g, "").replace(/`([^`\n]+)`/g, (_, c) => hold(`<code>${esc(c)}</code>`));
 		s = s.replace(/\[([^\]\n]+)\]\(((?:https?:\/\/|mailto:)[^)\s]+)\)/g, (_, text, url) => hold(`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(text)}</a>`));
 		s = s.replace(/(^|[\s(])((?:https?:\/\/)[^\s<>()]+[^\s<>().,;:!?'"])/g, (_, pre, url) => pre + hold(`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`));
 		s = esc(s);

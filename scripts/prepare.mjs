@@ -9,13 +9,15 @@
 //   target/studio/dist/     the Vite build output (vite.config.ts)
 //
 // The bundled VSIX packages the installer carries are the marketplace's per-architecture
-// builds (Open VSX — fetched by scripts/fetch-marketplace-extensions.mjs; there is no local
-// source anymore, so a fetch that cannot be served from cache leaves the package unpacked —
-// or fails the build in require mode). Which packages ride in the installer is a build-time
-// choice (GGS_BUNDLE_GIT_GRAPH / GGS_BUNDLE_CLAUDE_CODE — CI's release form forwards its
-// checkboxes): git-graph-rs rides in every build, claude-code in none by default (the
-// Extensions view installs it from the marketplace on demand). The first launch installs
-// whatever was packed, like VS Code's bundled extensions.
+// builds (Open VSX — fetched by scripts/fetch-marketplace-extensions.mjs; neither has a
+// local source, so a fetch that cannot be served from cache leaves the package unpacked —
+// or fails the build in require mode), plus claude-remote, packed from its local source
+// (extensions-src/claude-remote) by its own build.mjs. Which packages ride in the
+// installer is a build-time choice (GGS_BUNDLE_GIT_GRAPH / GGS_BUNDLE_CLAUDE_CODE /
+// GGS_BUNDLE_CLAUDE_REMOTE — CI's release form forwards its checkboxes): git-graph-rs and
+// claude-remote ride in every build, claude-code in none by default (the Extensions view
+// installs it from the marketplace on demand). The first launch installs whatever was
+// packed, like VS Code's bundled extensions.
 import { checkSeams } from './check-seams.mjs';
 import { bundleSelected, fetchMarketplacePackages } from './fetch-marketplace-extensions.mjs';
 import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
