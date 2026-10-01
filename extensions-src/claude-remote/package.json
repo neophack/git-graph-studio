@@ -1,0 +1,43 @@
+{
+  "name": "claude-remote",
+  "displayName": "Claude Remote (LAN)",
+  "publisher": "ggs",
+  "version": "0.1.0",
+  "description": "Remotely use Claude Code conversations from a phone on the same LAN: encrypted pairing, conversation list, reader and new-conversation control. Works in VS Code and Git Graph Studio.",
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "claude-remote.start",
+        "title": "Claude Remote: Start LAN Server",
+        "category": "Claude Remote"
+      },
+      {
+        "command": "claude-remote.stop",
+        "title": "Claude Remote: Stop LAN Server",
+        "category": "Claude Remote"
+      },
+      {
+        "command": "claude-remote.reveal",
+        "title": "Claude Remote: Show Pairing Info Again",
+        "category": "Claude Remote"
+      }
+    ]
+  },
+  "ggs": {
+    "format": "ggs/2",
+    "id": "ggs.claude-remote",
+    "version": "0.1.0",
+    "backend": {
+      "kind": "node",
+      "command": "./extension.js"
+    }
+  }
+}
