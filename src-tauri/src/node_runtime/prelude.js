@@ -396,6 +396,67 @@ for (const name of ['dispose', 'asyncDispose']) {
 		}
 	};
 	globalThis.crypto.webcrypto = { getRandomValues: (target) => globalThis.crypto.getRandomValues(target) };
+
+	// GGS-patch: pbkdf2Sync + createCipheriv/createDecipheriv('aes-*-gcm') over the
+	// Rust natives (aes-gcm + pbkdf2 crates). Only the shapes general extension crypto
+	// uses: sha256 KDF, gcm ciphers with single-tag auth. Other algorithms throw honestly.
+	{
+		const b64u = {
+			encode: (bytes) => btoa(String.fromCharCode.apply(null, bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+			decode: (text) => { const std = text.replace(/-/g, '+').replace(/_/g, '/'); const padded = std + '='.repeat((4 - (std.length % 4)) % 4); return Uint8Array.from(atob(padded), (ch) => ch.charCodeAt(0)); }
+		};
+		const pbkdf2Sync = (password, salt, iterations, keylen, digest) => {
+			if (digest !== undefined && digest !== 'sha256') throw new Error('pbkdf2Sync: only sha256 is supported by this runtime');
+			const saltBytes = typeof salt === 'string' ? new TextEncoder().encode(salt) : new Uint8Array(salt);
+			const keyText = globalThis.__ggsPbkdf2Sha256(String(password), b64u.encode(saltBytes), iterations, keylen * 8);
+			return Buffer.from(b64u.decode(keyText));
+		};
+		const isGcm = (algo) => /^(aes-(128|192|256)-gcm)$/i.test(String(algo));
+		const Cipher = class {
+			constructor(key, iv, decrypt) {
+				this._key = b64u.encode(new Uint8Array(key.buffer, key.byteOffset, key.byteLength));
+				this._iv = b64u.encode(new Uint8Array(iv.buffer, iv.byteOffset, iv.byteLength));
+				this._decrypt = decrypt;
+				this._chunks = [];
+				this._tag = null;
+				this._done = false;
+			}
+			update(data) {
+				if (this._done) throw new Error('cipher already finished');
+				this._chunks.push(typeof data === 'string' ? new TextEncoder().encode(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+				return Buffer.alloc(0);
+			}
+			setAAD(aad) { this._aad = aad; return this; }
+			setAuthTag(tag) { this._tag = new Uint8Array(tag.buffer, tag.byteOffset, tag.byteLength); return this; }
+			getAuthTag() { if (!this._tag) throw new Error('no auth tag (call final first)'); return Buffer.from(this._tag); }
+			final() {
+				if (this._done) throw new Error('cipher already finished');
+				this._done = true;
+				const plain = Buffer.concat(this._chunks.map((c) => new Uint8Array(c.buffer, c.byteOffset, c.byteLength)));
+				const aadB64 = this._aad ? b64u.encode(new Uint8Array(this._aad.buffer ?? this._aad, 0, this._aad.byteLength ?? this._aad.length)) : '';
+				if (!this._decrypt) {
+					const sealed = globalThis.__ggsAesGcmSeal(this._key, this._iv, b64u.encode(plain), aadB64);
+					const sealedBytes = b64u.decode(sealed);
+					const ct = sealedBytes.subarray(0, sealedBytes.length - 16);
+					this._tag = sealedBytes.subarray(sealedBytes.length - 16);
+					return Buffer.from(ct);
+				}
+				if (!this._tag) throw new Error('setAuthTag is required before final');
+				const sealed = b64u.encode(new Uint8Array([...plain, ...this._tag]));
+				const opened = globalThis.__ggsAesGcmOpen(this._key, this._iv, sealed, aadB64);
+				return Buffer.from(b64u.decode(opened));
+			}
+		};
+		globalThis.crypto.createCipheriv = (algo, key, iv) => {
+			if (!isGcm(algo)) throw new Error('createCipheriv: only aes-128/192/256-gcm is supported by this runtime');
+			return new Cipher(key, iv, false);
+		};
+		globalThis.crypto.createDecipheriv = (algo, key, iv) => {
+			if (!isGcm(algo)) throw new Error('createDecipheriv: only aes-128/192/256-gcm is supported by this runtime');
+			return new Cipher(key, iv, true);
+		};
+		globalThis.crypto.pbkdf2Sync = pbkdf2Sync;
+	}
 })();
 
 /* ---------- url: the URL class and the classic resolve, parsing-only ---------- */

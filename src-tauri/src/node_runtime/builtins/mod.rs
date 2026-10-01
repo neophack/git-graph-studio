@@ -209,6 +209,9 @@ pub fn register_natives(context: &mut Context) -> JsResult<()> {
         ),
         ("__ggsNetWrite", 2, NativeFunction::from_fn_ptr(net::write)),
         ("__ggsDnsLookup", 1, NativeFunction::from_fn_ptr(net::dns_lookup)),
+        ("__ggsPbkdf2Sha256", 4, NativeFunction::from_fn_ptr(core::pbkdf2_sha256)),
+        ("__ggsAesGcmSeal", 4, NativeFunction::from_fn_ptr(core::aes_gcm_seal)),
+        ("__ggsAesGcmOpen", 4, NativeFunction::from_fn_ptr(core::aes_gcm_open)),
         ("__ggsNetEnd", 1, NativeFunction::from_fn_ptr(net::end)),
         (
             "__ggsNetDestroy",

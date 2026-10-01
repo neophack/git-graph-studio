@@ -55,6 +55,106 @@ pub(super) fn random_bytes(
 /// The `crypto` builtin's one native: `(algorithm, bytes) → hex digest`. The JS side's
 /// `createHash` accumulates the bytes (the `update` calls) and hands them over here —
 /// md5 / sha1 / sha256, the gravatar-class digests the frame host serves too.
+/// GGS-patch: PBKDF2-HMAC-SHA256 — `(password, salt, iterations, bits) → key bytes`.
+/// The `crypto.pbkdf2Sync` shim wraps this (the KDF behind the remote-Claude bridge's
+/// pairing key). Only SHA-256 is provided; other digests throw honestly.
+pub(super) fn pbkdf2_sha256(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+    use pbkdf2::pbkdf2_hmac;
+    use sha2::Sha256;
+    let password = string_arg(args, 0, context);
+    let salt = B64.decode(string_arg(args, 1, context))
+        .map_err(|e| error(&format!("salt: {e}")))?;
+    let iterations = args
+        .get_or_undefined(2)
+        .to_number(context)
+        .map(|n| n.max(1.0))
+        .unwrap_or(1.0) as u32;
+    let bits = args
+        .get_or_undefined(3)
+        .to_number(context)
+        .map(|n| n.max(128.0))
+        .unwrap_or(256.0) as usize;
+    let mut out = vec![0u8; bits / 8];
+    pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, iterations, &mut out);
+    Ok(text(B64.encode(out)))
+}
+
+/// GGS-patch: AES-256-GCM seal — `(key, iv, plaintext, aad)` → `ciphertext‖tag`, all
+/// base64url. The prelude's `createCipheriv('aes-256-gcm', …)` buffers updates and seals
+/// once through this.
+pub(super) fn aes_gcm_seal(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    use aes_gcm::aead::Aead as _;
+    use aes_gcm::{Aes256Gcm, KeyInit as _};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+    let mut decode = move |at: usize, what: &str| -> Result<Vec<u8>, JsError> {
+        B64.decode(string_arg(args, at, context))
+            .map_err(|e| error(&format!("{what}: {e}")))
+    };
+    let key = decode(0, "key")?;
+    let iv = decode(1, "iv")?;
+    let plain = decode(2, "plaintext")?;
+    let aad = decode(3, "aad")?;
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| error(&format!("key: {e}")))?;
+    let nonce = aes_gcm::Nonce::from_slice(&iv);
+    let mut ciphertext = cipher
+        .encrypt(
+            nonce,
+            aes_gcm::aead::Payload { msg: &plain, aad: &aad },
+        )
+        .map_err(|_| error("seal failed"))?;
+    // The aead crate appends the tag; split it out so the JS shape is `ct‖tag` chunks
+    // the same way Node's getAuthTag presents it.
+    let tag = ciphertext.split_off(ciphertext.len().saturating_sub(16));
+    let mut out = ciphertext;
+    out.extend_from_slice(&tag);
+    Ok(text(B64.encode(out)))
+}
+
+/// GGS-patch: AES-256-GCM open — `(key, iv, ciphertext‖tag, aad)` → plaintext, or a
+/// clean "open failed" error (wrong key/tag), never a panic.
+pub(super) fn aes_gcm_open(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    use aes_gcm::aead::Aead as _;
+    use aes_gcm::{Aes256Gcm, KeyInit as _};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+    let mut decode = move |at: usize, what: &str| -> Result<Vec<u8>, JsError> {
+        B64.decode(string_arg(args, at, context))
+            .map_err(|e| error(&format!("{what}: {e}")))
+    };
+    let key = decode(0, "key")?;
+    let iv = decode(1, "iv")?;
+    let sealed = decode(2, "ciphertext")?;
+    let aad = decode(3, "aad")?;
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| error(&format!("key: {e}")))?;
+    let nonce = aes_gcm::Nonce::from_slice(&iv);
+    let plain = cipher
+        .decrypt(
+            nonce,
+            aes_gcm::aead::Payload {
+                msg: &sealed,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| error("open failed (wrong key or tampered data)"))?;
+    Ok(text(B64.encode(plain)))
+}
+
+/// The `crypto` builtin's one native: `(algorithm, bytes) → hex digest`.
 pub(super) fn digest_hex(
     _this: &JsValue,
     args: &[JsValue],
