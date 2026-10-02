@@ -363,8 +363,11 @@ export class SourceControlView {
 	 *  (workbench.onFsChanged): those batches are indistinguishable from the refresh's own
 	 *  git commands' echo, and a real external git operation — a terminal commit, a branch
 	 *  switch — is one burst whose events never come again, so a swallowed one left the
-	 *  view stale until any file happened to change. A failed read errs toward "differs":
-	 *  the refresh is the recovery. */
+	 *  view stale until any file happened to change. A failed read errs toward "differs"
+	 *  while the last refresh was healthy (the refresh is the recovery) — but stops once a
+	 *  refresh has failed too: the failure is not transient, and demanding refreshes would
+	 *  loop forever (refresh → its own `.git` echo batch → re-check → refresh) while git
+	 *  keeps failing. The next real event — a file change, focus — still refreshes. */
 	async statusDiffers(): Promise<boolean> {
 		if (!this.repoPath || !this.isRepo) return false;
 		const generation = this.generation;
@@ -376,7 +379,7 @@ export class SourceControlView {
 			if (generation !== this.generation) return false;
 			return JSON.stringify([changes, head]) !== this.lastSnapshot;
 		} catch {
-			return true;
+			return this.error === null;
 		}
 	}
 

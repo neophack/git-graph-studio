@@ -317,6 +317,74 @@ describe('file watcher events', () => {
 		workbench.dispose();
 	});
 
+	it('never wedges the microtask queue when a hidden window is mid-sash-drag', async () => {
+		backend.on('boot_context', () => ({ file: null, actions: [], repo: null }));
+		backend.on('ext_list', () => []);
+		const workbench = new Workbench();
+		(workbench as unknown as { repoPath: string }).repoPath = 'C:\\repo';
+		(workbench as unknown as { repoPaths: string[] }).repoPaths = ['C:\\repo'];
+		workbench.editors.reloadIfClean = async () => undefined;
+		// The real scheduleRefresh AND the real runScheduledRefresh both run; only the git
+		// views' bodies are stubbed. A counting wrapper caps the schedule at 8 calls so a
+		// wedged chain ends in a countable state instead of spinning the worker forever:
+		// beyond the cap it silently drops, breaking the cycle without an unhandled throw.
+		const realScheduleRefresh = workbench.scheduleRefresh.bind(workbench);
+		let schedules = 0;
+		workbench.scheduleRefresh = (delay: number) => {
+			if (++schedules <= 8) realScheduleRefresh(delay);
+		};
+		let runs = 0;
+		(workbench as unknown as { scm: { refresh: () => void } }).scm.refresh = () => { runs++; };
+		(workbench as unknown as { explorer: { refresh: () => void } }).explorer.refresh = () => undefined;
+		const hiddenDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden')!;
+		Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+		// A sash drag whose mouseup was lost when the window hid: the class sticks until
+		// the window returns and the user clicks.
+		document.body.classList.add('resizing');
+		try {
+			backend.emit(FS_CHANGED_EVENT, { root: 'C:\\repo', paths: ['src/a.ts'], truncated: false, gitChanged: false });
+			await flush();
+			// Hidden, the refresh ran once, immediately: the drag deferral must not re-enter
+			// the microtask scheduler (a queueMicrotask cycle never yields to the event
+			// loop - the window would be dead for good).
+			expect(runs).toBe(1);
+			expect(schedules).toBe(1);
+		} finally {
+			Object.defineProperty(document, 'hidden', hiddenDescriptor);
+			document.body.classList.remove('resizing');
+		}
+		workbench.dispose();
+	});
+
+	it('a hidden-window refresh cancels the pending visible-path timer', async () => {
+		backend.on('boot_context', () => ({ file: null, actions: [], repo: null }));
+		backend.on('ext_list', () => []);
+		const workbench = new Workbench();
+		let runs = 0;
+		(workbench as unknown as { repoPath: string }).repoPath = 'C:\\repo';
+		(workbench as unknown as { repoPaths: string[] }).repoPaths = ['C:\\repo'];
+		(workbench as unknown as { runScheduledRefresh: () => void }).runScheduledRefresh = () => { runs++; };
+		workbench.editors.reloadIfClean = async () => undefined;
+		// Visible: a refresh is scheduled with a debounce delay (the terminal path's 300 ms
+		// class) - it has not run yet.
+		workbench.scheduleRefresh(150);
+		expect(runs).toBe(0);
+		const hiddenDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden')!;
+		Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+		try {
+			backend.emit(FS_CHANGED_EVENT, { root: 'C:\\repo', paths: ['src/a.ts'], truncated: false, gitChanged: false });
+			await flush();
+			expect(runs).toBe(1);
+		} finally {
+			Object.defineProperty(document, 'hidden', hiddenDescriptor);
+		}
+		// The pending visible timer must not fire a second refresh on top of the one the
+		// hidden path already ran.
+		await new Promise((resolve) => setTimeout(resolve, 250));
+		expect(runs).toBe(1);
+		workbench.dispose();
+	});
+
 	it('joins a change batch to the root it came from, not the first root (multi-root)', () => {
 		backend.on('boot_context', () => ({ file: null, actions: [], repo: null }));
 		backend.on('ext_list', () => []);

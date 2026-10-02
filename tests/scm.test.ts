@@ -434,6 +434,26 @@ describe('source control view', () => {
 		expect(document.querySelector('.welcome-view button')).toBeNull();
 	});
 
+	it('a failing status read stops demanding refreshes once a refresh has failed too', async () => {
+		const { view } = setup([]);
+		view.setRepo(REPO);
+		await view.refresh();
+		// The backend's status read starts failing (a wedged index, a corrupted repo).
+		backend.on('scm_status', () => { throw new Error('fatal: bad index'); });
+		// After a healthy refresh, one failed read still errs toward "differs" - the
+		// refresh is the recovery for a transient failure.
+		await expect(view.statusDiffers()).resolves.toBe(true);
+		// The recovery refresh itself fails and lands in the error state; a further
+		// failing read must NOT demand another one: that cycle (refresh -> its own .git
+		// echo batch -> re-check -> refresh) spins forever while git keeps failing.
+		await view.refresh();
+		await expect(view.statusDiffers()).resolves.toBe(false);
+		// And git coming back is still picked up: a healthy read against the failed
+		// refresh's empty snapshot differs, so the view recovers on the next batch.
+		backend.on('scm_status', () => [change('src/main.ts', { unstaged: 'modified' })]);
+		await expect(view.statusDiffers()).resolves.toBe(true);
+	});
+
 });
 
 describe('submodule sections', () => {

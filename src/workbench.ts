@@ -1513,6 +1513,12 @@ export class Workbench {
 		// terminal commits, another editor saves, a build finishes. Hidden runs the refresh
 		// on the microtask queue (never throttled), one burst coalesced into one refresh.
 		if (document.hidden) {
+			// A visible-path timer pending from before the window hid would fire a second
+			// refresh on top of the one this path runs now.
+			if (this.refreshTimer !== null) {
+				window.clearTimeout(this.refreshTimer);
+				this.refreshTimer = null;
+			}
 			if (this.hiddenRefreshQueued) return;
 			this.hiddenRefreshQueued = true;
 			queueMicrotask(() => {
@@ -1533,7 +1539,11 @@ export class Workbench {
 		if (!this.repoPath) return;
 		// While a sash drag is in progress, defer: refreshes mid-drag make the tree and
 		// the editors churn under the pointer for no benefit. It re-fires after mouseup.
-		if (document.body.classList.contains('resizing')) {
+		// Hidden skips the deferral — the churn is invisible, and the deferral would
+		// re-enter the microtask scheduler (scheduleRefresh's hidden path) in a cycle
+		// that never yields to the event loop: a wedged queue, a dead window. A drag
+		// whose mouseup was lost to the hiding window is exactly when the class sticks.
+		if (!document.hidden && document.body.classList.contains('resizing')) {
 			this.scheduleRefresh(200);
 			return;
 		}
