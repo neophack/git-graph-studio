@@ -17,7 +17,8 @@
 //     notifications;
 //   - `require` is Node's own — a package's `.node` native addon, its ESM, its workers
 //     and its `node_modules` all behave exactly as in VS Code. Only `require('vscode')`
-//     is intercepted.
+//     is intercepted, and — through the loader hooks of nodeHostEsm.ts — the ESM graph's
+//     static `import 'vscode'` with it.
 //
 // stdout is the protocol, as in every backend: the extension's console crosses as `$/log`
 // notifications, and package code must not write stdout directly (VS Code's extension
@@ -31,6 +32,7 @@ import { join, resolve } from 'node:path';
 import Module from 'node:module';
 import { activationContext, createVscodeApi, readLocalDocProvider, rehydrateUris, serveHostCall, UNSERVED_HOST_CALL, Uri, type HostBridge, type HostContext, type HostEvent, type VscodeApi } from './vscodeApi';
 import { probeVscodeNamespace } from './vscodeNamespaceProbe';
+import { VSCODE_ESM_GLOBAL, vscodeEsmHookUrl } from './nodeHostEsm';
 
 /* ---------- the wire: newline JSON-RPC on stdio, both directions ---------- */
 
@@ -189,6 +191,25 @@ function ensureActivated(): Promise<void> {
 			if (request === 'vscode') return probed;
 			return originalLoad(request, parent, isMain);
 		};
+		// A static `import 'vscode'` takes Node's own ESM resolver, which the require
+		// patch above never sees. The loader hooks map the specifier onto a synthetic
+		// module over this same instance — the stash the generated source reads, then the
+		// registration (Node 20.6+; register() installs the hooks synchronously, and the
+		// tick after it is one turn of insurance, not a requirement). Below that floor the
+		// old behavior stands: the import fails ERR_MODULE_NOT_FOUND, and the log names
+		// the Node as the reason.
+		(globalThis as unknown as Record<symbol, unknown>)[Symbol.for(VSCODE_ESM_GLOBAL)] = probed;
+		const registerHooks = (Module as unknown as { register?: (specifier: string, parentURL: string) => void }).register;
+		if (typeof registerHooks === 'function') {
+			try {
+				registerHooks(vscodeEsmHookUrl(probed), pathToFileURL(__filename).href);
+				await new Promise((tick) => setImmediate(tick));
+			} catch (error) {
+				log('warn', `the ESM 'vscode' loader hook could not install: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		} else {
+			log('warn', "this Node has no module.register (20.6+): an ES module entry cannot import 'vscode'");
+		}
 
 		declaredCommands = (pkg.contributes?.commands ?? []).map((entry) => entry.command);
 		const mainPath = entryOverride ?? resolve(params.extensionPath, (pkg.main ?? 'index.js').replace(/^\.\//, ''));
@@ -197,9 +218,13 @@ function ensureActivated(): Promise<void> {
 			try {
 				loaded = createRequire(__filename)(mainPath) as typeof loaded;
 			} catch (error) {
-				// A `"type": "module"` package (or an `.mjs` entry) refuses `require` on older
-				// Node lines; the dynamic import is the same module for VS Code's purposes.
-				if ((error as { code?: string })?.code !== 'ERR_REQUIRE_ESM') throw error;
+				// A `"type": "module"` package (or an `.mjs` entry) refuses `require`: outright
+				// on Node lines without require(esm) (ERR_REQUIRE_ESM), and on the lines that
+				// grew it whenever the graph holds a top-level await
+				// (ERR_REQUIRE_ASYNC_MODULE). The dynamic import is the same module for VS
+				// Code's purposes.
+				const code = (error as { code?: string })?.code;
+				if (code !== 'ERR_REQUIRE_ESM' && code !== 'ERR_REQUIRE_ASYNC_MODULE') throw error;
 				loaded = (await import(pathToFileURL(mainPath).href)) as typeof loaded;
 				if (loaded && typeof loaded.activate !== 'function' && typeof (loaded as { default?: unknown }).default === 'object') {
 					loaded = (loaded as { default: typeof loaded }).default;

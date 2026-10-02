@@ -327,7 +327,13 @@ the extension's artifacts — `scripts/check-seams.mjs` fails the build on any r
   services cross as `ggs.hostRequest` requests (forwarded to the workbench, which answers
   through the same `serve` path a frame's RPC takes), host pushes arrive as
   `ggs.hostEvent` notifications, and only `require('vscode')` is intercepted — a package's
-  ESM, workers, `node_modules` and `.node` all behave natively.
+  ESM, workers, `node_modules` and `.node` all behave natively. The ESM graph's static
+  `import 'vscode'` rides the same shim through a `module.register()` loader hook
+  (`src/nodeHostEsm.ts`, the generated data-URL hooks; below Node 20.6 the old
+  ERR_MODULE_NOT_FOUND stands, logged), and a `"type": "module"` entry's `require` falls
+  back to the dynamic import on both refusal codes (`ERR_REQUIRE_ESM`, and
+  `ERR_REQUIRE_ASYNC_MODULE` — a top-level-await graph on the Node lines that grew
+  require(esm)).
 - The package's own web side (the extension repository's `studio/`: `bridge.js`/
   `compare-bridge.js` the in-page extension hosts, `bundle.mjs` the page bundles with
   relative URLs, `config-stdin.js` the config bundle's entry, `vsix.mjs` the zip writer,
@@ -573,7 +579,9 @@ page shows the integration's state (`claude_mcp_status`).
   backend's seal, activate and delete), `src/nodeHost.ts` (the real-Node
   extension host's entry, compiled to `node-host.cjs`: stdio ggs-ext/1 server, the shared
   `vscode` shim over a stdio bridge, `require('vscode')` interception, ESM fallback —
-  VS Code's own extension-host shape), `src/extHost.ts` (the extension host for VSIX
+  VS Code's own extension-host shape), `src/nodeHostEsm.ts` (the generated loader hooks
+  mapping an ESM graph's static `import 'vscode'` onto that same shim — named exports
+  over the host instance, the well-known unserved names linking undefined), `src/extHost.ts` (the extension host for VSIX
   extensions — frames without a Node runtime, remote handles over ggs-ext/1 with one;
   the page host, the process-command dispatch, and the host services behind the
   `vscode` API — webview panels, webview views, status bar items, output channels, progress
