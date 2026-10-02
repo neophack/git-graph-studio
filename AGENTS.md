@@ -338,7 +338,12 @@ the extension's artifacts — `scripts/check-seams.mjs` fails the build on any r
   `src-tauri/src/ext_protocol.rs` (the one wire protocol, `ggs-ext/1`: JSON-RPC 2.0 over
   stdio, `serve_plugin` dispatching every request onto its own thread — the view's opening
   burst of reads never serializes), `src/extHost.ts` (the page services:
-  `theme.stylesheet`, `backend.run`, `workbench.*`, singleton pages, theme/workspace pushes)
+  `theme.stylesheet`, `backend.run`, `workbench.*`, singleton pages, theme/workspace pushes;
+  plus the change pushes that keep a page off polling — the watcher's every batch rides the
+  page channel as `kind: 'fs'` (root/paths/`gitChanged`/`truncated`, so a stage or commit's
+  `.git` burst is the stage/commit event) and a workbench save as `kind: 'documentSaved'`;
+  additive and GGS-internal — under VS Code these posts never exist and a package keeps its
+  own degradation path)
 
 ### 11. Integrated Terminal
 

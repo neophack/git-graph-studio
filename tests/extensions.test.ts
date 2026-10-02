@@ -2568,6 +2568,24 @@ describe('round three: languages, snippets, themes, workspace.fs and the editor 
 		expect(events[0]!.editor?.languageId).toBe('markdown');
 		expect(events[1]!.languageId).toBe('markdown');
 	});
+
+	it('a page frame hears the watcher batch and the save on the page channel - no polling', () => {
+		const host = new ExtensionHost();
+		const pageSent: { __ggsHost?: boolean; type?: string; event?: { kind?: string; root?: string; paths?: string[]; gitChanged?: boolean; truncated?: boolean; path?: string; languageId?: string } }[] = [];
+		const frame = { contentWindow: { postMessage: (message: unknown) => pageSent.push(message as typeof pageSent[number]) } } as unknown as HTMLIFrameElement;
+		host['pageFrames'].set(1, { extId: 'acme.demo', pageId: 'main', frame, pendingCalls: new Set() });
+
+		// The watcher's batch (a commit's .git burst here) rides the page channel: a ggs://
+		// page has no frame and no vscode API to watch with, so this push is how its view
+		// (the graph's) learns a stage/commit landed without polling the engine.
+		backend.emit('studio://fs-changed', { root: 'C:/ws', paths: [], gitChanged: true, truncated: false });
+		const fs = pageSent.find((message) => message.event?.kind === 'fs');
+		expect(fs).toMatchObject({ __ggsHost: true, type: 'event', event: { kind: 'fs', root: 'C:/ws', paths: [], gitChanged: true, truncated: false } });
+
+		host.noteDocumentSaved('C:/ws/a.md');
+		const saved = pageSent.find((message) => message.event?.kind === 'documentSaved');
+		expect(saved).toMatchObject({ __ggsHost: true, type: 'event', event: { kind: 'documentSaved', path: 'C:/ws/a.md', languageId: 'markdown' } });
+	});
 });
 
 describe('extension page frames (shell.css)', () => {

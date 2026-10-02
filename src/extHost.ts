@@ -915,9 +915,15 @@ export class ExtensionHost {
 		// external changes (and on commits made in the app's own Source Control). The event
 		// name is main.rs's `FS_CHANGED_EVENT` ('studio://fs-changed'); the constant lives
 		// with the workbench, which this module must not import (it imports this one).
+		// The same batch rides the page channel (kind: 'fs') — a package's ggs:// page has
+		// no frame and no vscode API to watch with, so the batch is the only way its view
+		// (the graph's) learns a file changed or a stage/commit landed without polling.
 		void listen<{ root: string; paths: string[]; gitChanged: boolean; truncated: boolean }>('studio://fs-changed', (event) => {
 			for (const handle of this.frames.values()) {
 				handle.send?.({ type: '__studioExtEvent', event: 'fsChanged', fs: event.payload });
+			}
+			for (const page of this.pageFrames.values()) {
+				page.frame.contentWindow?.postMessage({ __ggsHost: true, type: 'event', event: { kind: 'fs', ...event.payload } }, '*');
 			}
 		}).catch(() => undefined);
 		// The theme cache for webview documents: the first `composeWebview` needs it ready.
@@ -3208,10 +3214,15 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 		for (const handle of this.frames.values()) handle.send?.({ type: '__studioExtEvent', event: 'documentClosed', path });
 	}
 
-	/** A document was saved: every frame's `onDidSaveTextDocument` fires. */
+	/** A document was saved: every frame's `onDidSaveTextDocument` fires, and the pages
+	 *  hear the save on their own channel (`kind: 'documentSaved'`) — immediate, no
+	 *  watcher hop, the same instant-visibility the frames have. */
 	noteDocumentSaved(path: string): void {
 		const push = { type: '__studioExtEvent', event: 'documentSaved', path, languageId: languageIdFor(path) };
 		for (const handle of this.frames.values()) handle.send?.(push);
+		for (const page of this.pageFrames.values()) {
+			page.frame.contentWindow?.postMessage({ __ggsHost: true, type: 'event', event: { kind: 'documentSaved', path, languageId: languageIdFor(path) } }, '*');
+		}
 	}
 
 	/** A file opened in an editor: every extension declaring `onLanguage:<its language>`
