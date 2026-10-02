@@ -92,7 +92,7 @@ const byExtension = new Map<string, ExtensionContributions>();
 /** Resource/environment values `evaluateWhen` resolves without asking anything else - the ones
  *  Studio's own views actually match: a single Source Control provider (`git`), no multi-select
  *  in that view's resource list, and a context menu always opened on a real file. */
-const staticContext: Record<string, unknown> = { scmProvider: 'git', listMultiSelection: false, resourceScheme: 'file' };
+const staticContext: Record<string, unknown> = { scmProvider: 'git', listMultiSelection: false, resourceScheme: 'file', isDevelopment: import.meta.env.DEV };
 
 /** Context keys a natively-hosted extension's own code would otherwise set itself (VS Code's
  *  `setContext`), resolved lazily so they always reflect the current settings/locale - see

@@ -820,9 +820,11 @@ export class Workbench {
 				const element = el('div', 'view ext-container-view');
 				element.style.display = 'none';
 				const viewIds: string[] = [];
+				const viewNames = new Map<string, string>();
 				for (const declared of visibleViews.filter((view) => view.container === container.id)) {
 					makeSection(declared.viewId, declared.name, contribution.extId, declared.type ?? 'tree', element);
 					viewIds.push(declared.viewId);
+					viewNames.set(declared.viewId, declared.name);
 				}
 				if (viewIds.length === 0) continue;
 				this.sidebar.appendChild(element);
@@ -831,6 +833,14 @@ export class Workbench {
 				// — claude-code's chat calls its own to reveal its sidebar container from inside
 				// a panel. Re-registering on every rebuild keeps it pointing at the live one.
 				commands.register({ id: `${container.id}.focus`, title: tf('workbench.focusViewContainer', container.title), category: 'View', enabled: () => this.extContainers.has(key), run: () => this.showView(key) });
+				// VS Code also generates one per view (`<view-id>.focus`) — kimi-code's own
+				// menu commands call `kimi.webview.focus`, the view's, not the container's.
+				// Each is titled by its own view — one palette row per view, not N copies of the
+				// container's name; a view sharing the container's id keeps the container's.
+				for (const viewId of viewIds) {
+					if (viewId === container.id) continue;
+					commands.register({ id: `${viewId}.focus`, title: tf('workbench.focusViewContainer', viewNames.get(viewId) || container.title), category: 'View', enabled: () => this.extContainers.has(key), run: () => this.showView(key) });
+				}
 				const item = el('div', 'activity-item', [icon('list-tree')]);
 				item.title = container.title;
 				item.setAttribute('role', 'button');

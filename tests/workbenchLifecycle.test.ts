@@ -589,4 +589,22 @@ describe('extension view containers follow setContext', () => {
 		workbench.extensionHost.onViewsChanged!();
 		expect(commands.isEnabled('acme-chat.focus')).toBe(false);
 	});
+
+	it('each extension view carries its own <view-id>.focus command, titled by the view — kimi-code calls kimi.webview.focus', async () => {
+		applyContributions('acme.side', {
+			viewsContainers: { activitybar: [{ id: 'acme-chat', title: 'Acme Chat' }] },
+			views: { 'acme-chat': [{ id: 'acmeChat', name: 'Chat', type: 'webview' }, { id: 'acmeHistory', name: 'History' }] }
+		}, {}, () => undefined, () => true);
+		workbench.extensionHost.onViewsChanged!();
+		expect(commands.isEnabled('acmeChat.focus')).toBe(true);
+		// One palette row per view, each with its own name — not N copies of the container's.
+		expect(commands.get('acmeChat.focus')!.title).toContain('Chat');
+		expect(commands.get('acmeHistory.focus')!.title).toContain('History');
+		expect(commands.get('acmeHistory.focus')!.title).not.toContain('Acme Chat');
+		await commands.execute('acmeHistory.focus');
+		expect(document.querySelector<HTMLElement>('#activitybar .activity-item[aria-label="Acme Chat"]')!.classList.contains('active')).toBe(true);
+		removeContributions('acme.side');
+		workbench.extensionHost.onViewsChanged!();
+		expect(commands.isEnabled('acmeChat.focus')).toBe(false);
+	});
 });
