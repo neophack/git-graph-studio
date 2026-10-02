@@ -19,10 +19,14 @@
 //! Parsed modules are cached per path in the runtime state, which the JS thread drops
 //! with its context (the `Module` records live in the Boa heap).
 
+use std::cell::Cell;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use boa_engine::module::{Module, ModuleLoader, Referrer, SyntheticModuleInitializer};
-use boa_engine::{Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, Source};
+use boa_engine::{
+    Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, Script, Source,
+};
 
 use crate::node_runtime::{key, require, settle, text, with_state};
 
@@ -126,6 +130,28 @@ fn load(base: &Path, specifier: &str, context: &mut Context) -> JsResult<Module>
     load_path(&resolved, context)
 }
 
+thread_local! {
+    /// Set while [`require_esm`] reloads a module graph after its register-local compile
+    /// failed: every ES module parsed meanwhile — the root and each import the loader
+    /// parses — keeps all its bindings in their environments. The register-or-escaping
+    /// choice is made by the parse's scope analysis, so the reload has to reach the
+    /// loader's parses too, not just the root's.
+    static FORCE_ESCAPING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Run `body` with [`FORCE_ESCAPING`] set, clearing it again whatever `body` answers.
+fn with_forced_escaping<T>(body: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FORCE_ESCAPING.with(|flag| flag.set(false));
+        }
+    }
+    FORCE_ESCAPING.with(|flag| flag.set(true));
+    let _reset = Reset;
+    body()
+}
+
 /// The resolved file as a module record, cached by path: an ES module parsed from its
 /// source, anything else loaded through `require` and wrapped.
 fn load_path(path: &Path, context: &mut Context) -> JsResult<Module> {
@@ -133,31 +159,44 @@ fn load_path(path: &Path, context: &mut Context) -> JsResult<Module> {
         return Ok(cached);
     }
     let module = if is_esm(path) {
-        let source = std::fs::read(path).map_err(|error| {
+        let bytes = std::fs::read(path).map_err(|error| {
             JsError::from_native(
                 JsNativeError::error().with_message(format!("{}: {error}", path.display())),
             )
         })?;
-        // GGS-patch: the register-local compile of a big third-party module can PANIC
-        // inside Boa's scope analysis (Kimi Code's 8.8 MB entry tripped "binding must
-        // exist" in the bytecompiler's var instantiation). The panic unwinds through
-        // the JS thread's job — contained since the job-level guard — but the module
-        // still failed. The degrade: re-parse with every binding kept in its
-        // environment (the module twin of the CommonJS path's all-escaping recompile),
-        // and the compile degrades instead of the package dying.
-        Module::parse(Source::from_bytes(&source).with_path(path), None, context)
-            .or_else(|_| {
-                Module::parse_all_bindings_escaping(
-                    Source::from_bytes(&source).with_path(path),
-                    None,
-                    context,
-                )
-            })
-            .map_err(|error| {
-                JsError::from_native(
-                    JsNativeError::syntax().with_message(format!("{}: {error}", path.display())),
-                )
-            })?
+        // GGS-patch: only the PARSE happens here — Boa compiles a module's bytecode when
+        // the graph links (`SourceTextModule::initialize_environment`), so the compile's
+        // walls (a panic, a baked static TDZ throw) are checked by `require_esm` around
+        // `link`, which reloads the graph through FORCE_ESCAPING. What this parse guards
+        // is its own scope analysis: an error or a panic there degrades to the
+        // all-escaping parse rather than failing the import.
+        let parsed = if FORCE_ESCAPING.with(Cell::get) {
+            parse_esm(&bytes, path, true, context)
+        } else {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                parse_esm(&bytes, path, false, context)
+            })) {
+                Ok(Ok(parsed)) => Ok(parsed),
+                Ok(Err(error)) => parse_esm(&bytes, path, true, context).map_err(|_| error),
+                Err(_panic) => {
+                    with_state(|state| {
+                        state.log(
+                            "warn",
+                            &format!(
+                                "{}: the register-local module parse panicked; reparsing all-escaping",
+                                path.display()
+                            ),
+                        );
+                    });
+                    parse_esm(&bytes, path, true, context)
+                }
+            }
+        };
+        parsed.map_err(|error| {
+            JsError::from_native(
+                JsNativeError::syntax().with_message(format!("{}: {error}", path.display())),
+            )
+        })?
     } else {
         let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
         let exports = require::require(&parent, &path.display().to_string(), context)?;
@@ -165,6 +204,16 @@ fn load_path(path: &Path, context: &mut Context) -> JsResult<Module> {
     };
     with_state(|state| state.esm_cache.insert(path.to_path_buf(), module.clone()));
     Ok(module)
+}
+
+/// One ES-module parse, register-local or all-escaping.
+fn parse_esm(bytes: &[u8], path: &Path, escaping: bool, context: &mut Context) -> JsResult<Module> {
+    let source = Source::from_bytes(bytes).with_path(path);
+    if escaping {
+        Module::parse_all_bindings_escaping(source, None, context)
+    } else {
+        Module::parse(source, None, context)
+    }
 }
 
 /// An import specifier resolved to a file: `file://` URLs, paths, then the package walk
@@ -256,35 +305,107 @@ fn synthetic(value: JsValue, path: Option<PathBuf>, context: &mut Context) -> Js
 /// `require(esm)`: the module loaded, linked and evaluated to settlement (top-level
 /// `await` included — the pump runs timers and child events meanwhile), answering its
 /// namespace object.
+///
+/// GGS-patch: the register-local compile has walls the CommonJS path checks in
+/// `require.rs`, and the module path checks them here, around `link` — where Boa compiles
+/// every module of the graph:
+///
+/// - **panic**: the compile can PANIC inside the bytecompiler (Kimi Code's 8.8 MB entry
+///   tripped "binding must exist" in its var instantiation);
+/// - **baked TDZ**: a register-local binding used before its declaration point compiles
+///   to a static TDZ throw, wrong for every use that runs after initialization.
+///
+/// Either one discards the modules this call added and reloads the graph with every
+/// binding escaping (FORCE_ESCAPING) before anything has evaluated. As a backstop, an
+/// evaluation that still throws "access of uninitialized binding" reloads the same way
+/// and evaluates once more — the second attempt is a different image, never the one that
+/// just threw; a module of the failed graph that had already evaluated runs again.
 pub(crate) fn require_esm(path: &Path, context: &mut Context) -> JsResult<JsValue> {
-    let module = load_path(path, context)?;
-    let promise = module.load_link_evaluate(context);
-    let result = settle(context, promise.into());
-    // GGS-patch: "access of uninitialized binding" on an ESM entry is usually the
-    // register-local compile's static TDZ throw firing on a use that runs AFTER
-    // initialization (the vendor note: wrong for every such site) — real Node runs the
-    // same file. The scripts path already recompiles all-escaping on that trip; the
-    // module path now does too: re-parse with every binding in its environment, replace
-    // the cache entry, and evaluate once more.
-    if let Err(message) = &result {
-        if message.contains("access of uninitialized binding") {
-            with_state(|state| {
-                state.esm_cache.remove(path);
-            });
-            let module = load_path(path, context)?;
-            let promise = module.load_link_evaluate(context);
-            settle(context, promise.into()).map_err(|retried| {
-                JsError::from_native(
-                    JsNativeError::error().with_message(format!("{}: {retried}", path.display())),
-                )
-            })?;
-            return Ok(module.namespace(context).into());
-        }
-    }
-    result.map_err(|message| {
+    let fail = |message: String| {
         JsError::from_native(
             JsNativeError::error().with_message(format!("{}: {message}", path.display())),
         )
-    })?;
+    };
+    let known: HashSet<PathBuf> = with_state(|state| state.esm_cache.keys().cloned().collect());
+
+    let module = load_path(path, context)?;
+    let (module, escaping) = match load_and_link(&module, context).map_err(fail)? {
+        Linked::Clean => (module, false),
+        Linked::Degraded(why) => {
+            with_state(|state| {
+                state.log(
+                    "warn",
+                    &format!(
+                        "{}: the register-local module compile {why}; recompiling all-escaping",
+                        path.display()
+                    ),
+                );
+            });
+            (reload_escaping(path, &known, context).map_err(fail)?, true)
+        }
+    };
+
+    let promise = module.evaluate(context);
+    let evaluated = settle(context, promise.into());
+    let module = match evaluated {
+        Err(message) if !escaping && message.contains("access of uninitialized binding") => {
+            let module = reload_escaping(path, &known, context).map_err(fail)?;
+            let promise = module.evaluate(context);
+            settle(context, promise.into()).map_err(fail)?;
+            module
+        }
+        other => {
+            other.map_err(fail)?;
+            module
+        }
+    };
     Ok(module.namespace(context).into())
+}
+
+/// How a module graph's link went.
+enum Linked {
+    /// Compiled register-local without tripping a wall.
+    Clean,
+    /// The register-local compile hit a wall; the reason, for the log.
+    Degraded(&'static str),
+}
+
+/// Load a module's imports, then link the graph — compiling every module in it — with the
+/// register-local walls checked: a panic or a tripped static TDZ throw answers
+/// [`Linked::Degraded`]; a genuine link error (a missing export) is an error.
+fn load_and_link(module: &Module, context: &mut Context) -> Result<Linked, String> {
+    let promise = module.load(context);
+    settle(context, promise.into())?;
+    Script::reset_uninitialized_local_trip();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| module.link(context))) {
+        Err(_panic) => Ok(Linked::Degraded("panicked")),
+        Ok(Err(error)) => Err(error.to_string()),
+        Ok(Ok(())) if Script::tripped_uninitialized_local() => Ok(Linked::Degraded(
+            "used a binding before its declaration point",
+        )),
+        Ok(Ok(())) => Ok(Linked::Clean),
+    }
+}
+
+/// Forget every module the failed attempt added (anything not in `known`) and the root
+/// itself (cached by an earlier call, it is the very image that failed), then load and
+/// link `path`'s graph again with every binding escaping.
+fn reload_escaping(
+    path: &Path,
+    known: &HashSet<PathBuf>,
+    context: &mut Context,
+) -> Result<Module, String> {
+    with_state(|state| {
+        state
+            .esm_cache
+            .retain(|cached, _| cached != path && known.contains(cached));
+    });
+    let module = with_forced_escaping(|| {
+        let module = load_path(path, context).map_err(|error| error.to_string())?;
+        let promise = module.load(context);
+        settle(context, promise.into())?;
+        Ok::<_, String>(module)
+    })?;
+    module.link(context).map_err(|error| error.to_string())?;
+    Ok(module)
 }

@@ -447,14 +447,34 @@ impl<'ast> VisitorMut<'ast> for BindingEscapeAnalyzer<'_> {
             ClassElement::FieldDefinition(field) | ClassElement::StaticFieldDefinition(field) => {
                 self.visit_property_name_mut(&mut field.name)?;
                 if let Some(e) = &mut field.initializer {
-                    self.visit_expression_mut(e)?;
+                    // GGS-patch: a class field initializer compiles as its own function
+                    // (the bytecompiler gives it HAS_FUNCTION_SCOPE and pushes the
+                    // field's scope), so every binding it references from outside crosses
+                    // a function border and must be marked ESCAPES — otherwise the
+                    // register path keeps them register-locals and the field function
+                    // reads an environment slot that was never written ("access of
+                    // uninitialized binding"; kimi-code's `AuthClient` static fields read
+                    // module consts exactly so). Visited inside a function-flavored
+                    // scope, the border crossing marks them. Upstream 0.21.1 visits the
+                    // initializer in the enclosing scope, where nothing ever escapes. The
+                    // scope is the field's own (`field.scope`, the function scope the
+                    // declaration pass made and the bytecompiler pushes), the way a
+                    // static block's analysis enters `node.scopes`.
+                    std::mem::swap(&mut self.scope, &mut field.scope);
+                    let visited = self.visit_expression_mut(e);
+                    std::mem::swap(&mut self.scope, &mut field.scope);
+                    visited?;
                 }
                 ControlFlow::Continue(())
             }
             ClassElement::PrivateFieldDefinition(field)
             | ClassElement::PrivateStaticFieldDefinition(field) => {
                 if let Some(e) = &mut field.initializer {
-                    self.visit_expression_mut(e)?;
+                    // GGS-patch: see the FieldDefinition branch — same implicit function.
+                    std::mem::swap(&mut self.scope, &mut field.scope);
+                    let visited = self.visit_expression_mut(e);
+                    std::mem::swap(&mut self.scope, &mut field.scope);
+                    visited?;
                 }
                 ControlFlow::Continue(())
             }

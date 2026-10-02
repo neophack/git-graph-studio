@@ -240,6 +240,15 @@ pub(crate) struct State {
     /// only receiver): [`settle`] drains child-process arrivals from it while a request
     /// holds the thread — the run loop that would deliver them cannot run.
     job_source: Option<Arc<Mutex<mpsc::Receiver<Job>>>>,
+    /// The running activation's promise, parked by [`install_frame_program`] instead of a
+    /// blocking settle: an `activate()` that never settles (kimi-code's login probe pends
+    /// on the outside world) must not hold the one JS thread hostage. The run loop polls
+    /// it; a command with no handler waits for it bounded (see [`run_command`]).
+    pending_activation: Option<boa_engine::object::builtins::JsPromise>,
+    /// Set once a command has waited the parked activation out to the settle budget and
+    /// found it still pending: later commands dispatch at once instead of each paying the
+    /// full budget again (the promise itself stays parked for the run loop's poll).
+    activation_wait_spent: bool,
 }
 
 thread_local! {
@@ -277,6 +286,8 @@ impl State {
             frame_program: false,
             vscode_api: None,
             job_source: None,
+            pending_activation: None,
+            activation_wait_spent: false,
         }
     }
 
@@ -539,7 +550,10 @@ fn js_main(rx: mpsc::Receiver<Job>, wake: Arc<(Mutex<bool>, Condvar)>, entry: Pa
                 Ok(_) => {}
                 Err(_) => {
                     with_state(|state| {
-                        state.log("error", "a runtime job panicked; the request failed but the runtime lives");
+                        state.log(
+                            "error",
+                            "a runtime job panicked; the request failed but the runtime lives",
+                        );
                     });
                 }
             }
@@ -559,6 +573,9 @@ fn js_main(rx: mpsc::Receiver<Job>, wake: Arc<(Mutex<bool>, Condvar)>, entry: Pa
         napi_host::drain_threadsafe_calls(&mut context);
         // 4. Settled promise jobs (microtasks).
         let _ = context.run_jobs();
+        // 4½. The parked activation promise (see `install_frame_program`): its settlement
+        //     runs the registration flush; a rejection is logged. A pending one stays.
+        poll_activation(&mut context);
         // 5. Idle housekeeping (the queue was drained above): a large module's parse tree,
         //    parked by the compiler so tearing it down — millions of frees — never delayed
         //    the module's first run. A no-op when nothing is parked.
@@ -977,23 +994,95 @@ fn install_frame_program(context: &mut Context, params: &Value) -> Result<(), St
     if trace {
         eprintln!("[boot] the activate call returned");
     }
-    settle(context, settled).map_err(|e| e.to_string())?;
+    // GGS-patch: the activation promise is PARKED, not settled inline. settle() held the
+    // one JS thread until the promise settled — an `activate()` that never does (kimi-code's
+    // awaits its login probe, which pends without the outside world) starved every later
+    // request into timeouts. VS Code's own policy: the host keeps serving while activate()
+    // runs. The run loop polls the promise (see `poll_activation`); a command that finds no
+    // handler waits for it bounded (see `run_command`).
+    let promise = boa_engine::object::builtins::JsPromise::from_result(
+        Ok::<_, boa_engine::JsError>(settled),
+        context,
+    );
     if trace {
-        eprintln!("[boot] activation settled");
+        eprintln!("[boot] activation promise parked");
     }
-    // The shim queued the activation's command registrations (one pipe round trip for the
-    // lot, not one per command): the flush hook the API layer left on globalThis runs now
-    // that the workbench can afford the single batch.
+    // Whatever the activation's synchronous part registered crosses now: a promise that
+    // never settles would otherwise keep its commands queued in the shim forever.
+    flush_registrations(context);
+    with_state(|state| state.pending_activation = Some(promise));
+    Ok(())
+}
+
+/// Poll the parked activation promise. Registrations queued since the last pass cross
+/// either way — a pending activation keeps registering as its awaits resolve, and VS Code
+/// makes every command live the moment `registerCommand` returns. A rejection is logged
+/// like a failed activation (what it registered before throwing stays, as in VS Code); a
+/// settled promise leaves the slot.
+fn poll_activation(context: &mut Context) {
+    let Some(promise) = with_state(|state| state.pending_activation.take()) else {
+        return;
+    };
+    flush_registrations(context);
+    match promise.state() {
+        boa_engine::builtins::promise::PromiseState::Pending => {
+            with_state(|state| state.pending_activation = Some(promise));
+        }
+        boa_engine::builtins::promise::PromiseState::Fulfilled(_) => {}
+        boa_engine::builtins::promise::PromiseState::Rejected(reason) => {
+            let message = reason
+                .to_string(context)
+                .map(|text| text.to_std_string_escaped())
+                .unwrap_or_else(|_| "the activation rejected".to_owned());
+            with_state(|state| state.log("error", &format!("activation failed: {message}")));
+        }
+    }
+}
+
+/// The queued command registrations cross as one batch (`commands.registerBatch`): the
+/// flush hook the API layer left on globalThis. It runs when `activate()` returns and on
+/// every run-loop pass while the activation is parked — one batch per pass, not one pipe
+/// round trip per `registerCommand` — and a pass with nothing queued sends nothing.
+fn flush_registrations(context: &mut Context) {
     if let Ok(flush) = context
         .global_object()
         .get(key("__ggsFlushRegistrations"), context)
-        .map_err(|e| e.to_string())
     {
         if let Some(flush) = flush.as_object() {
             let _ = flush.call(&JsValue::undefined(), &[], context);
         }
     }
-    Ok(())
+}
+
+/// Wait out the parked activation, bounded like every handler promise: driven by the same
+/// pump [`settle`] runs (timers, threadsafe calls, child jobs), so an activation awaiting
+/// the outside world still reaches its settle. A rejection is consumed (logged by the
+/// poll); a timeout leaves the promise parked — its later settlement must still flush — and
+/// spends the wait, so the next command does not block for the budget again.
+fn wait_out_activation(context: &mut Context) {
+    let Some(promise) = with_state(|state| {
+        if state.activation_wait_spent {
+            None
+        } else {
+            state.pending_activation.clone()
+        }
+    }) else {
+        return;
+    };
+    let _ = settle(context, promise.clone().into());
+    if matches!(
+        promise.state(),
+        boa_engine::builtins::promise::PromiseState::Pending
+    ) {
+        with_state(|state| {
+            state.activation_wait_spent = true;
+            state.log(
+                "warn",
+                "the activation has not settled within the wait budget; commands now dispatch without waiting for it",
+            );
+        });
+    }
+    poll_activation(context);
 }
 
 /// The package's entry specifier the way Node resolves it: `package.json`'s `main`, with
@@ -1096,12 +1185,30 @@ fn run_command(context: &mut Context, command: &str, args: &Value) -> Result<Val
     // 2. The registered handler: `ggs.onRequest(fn)` — the package's own code answering.
     let handler = with_state(|state| state.on_request.clone());
     if let Some(handler) = handler.and_then(|value| value.as_object()) {
-        let command_value = text(command);
-        let args_value =
-            JsValue::from_json(&Value::Array(args.clone()), context).map_err(|e| e.to_string())?;
-        let result = handler
-            .call(&JsValue::undefined(), &[command_value, args_value], context)
-            .map_err(|e| e.to_string())?;
+        let call = |context: &mut Context| -> Result<JsValue, String> {
+            let args_value = JsValue::from_json(&Value::Array(args.clone()), context)
+                .map_err(|e| e.to_string())?;
+            handler
+                .call(&JsValue::undefined(), &[text(command), args_value], context)
+                .map_err(|e| e.to_string())
+        };
+        // GGS-patch: a command that lands while the activation is still parked and finds
+        // no handler waits the activation out (bounded) and dispatches once more — the
+        // handler may be registered by an `await` still in flight. A command whose
+        // handler is already live never waits: an activation that never settles
+        // (kimi-code's) must not hold every command hostage (see `install_frame_program`).
+        let result = match call(context) {
+            Err(message)
+                if message.contains(&format!("no handler registered for {command}"))
+                    && with_state(|state| {
+                        state.pending_activation.is_some() && !state.activation_wait_spent
+                    }) =>
+            {
+                wait_out_activation(context);
+                call(context)?
+            }
+            other => other?,
+        };
         let settled = settle(context, result)?;
         return js_to_json(context, settled);
     }

@@ -107,6 +107,14 @@ impl BufRead for OrderedRequests {
 /// Serve one package's entry over the protocol with the given request lines, and answer
 /// with the parsed `result` values of every response (logs skipped).
 fn serve(entry: PathBuf, requests: &[Value]) -> Vec<Result<Value, String>> {
+    serve_with_logs(entry, requests).0
+}
+
+/// [`serve`], also answering the backend's `$/log` messages in order.
+fn serve_with_logs(
+    entry: PathBuf,
+    requests: &[Value],
+) -> (Vec<Result<Value, String>>, Vec<String>) {
     let lines: Vec<String> = requests
         .iter()
         .enumerate()
@@ -132,6 +140,7 @@ fn serve(entry: PathBuf, requests: &[Value]) -> Vec<Result<Value, String>> {
     // Requests are answered on their own threads, so responses cross in any order: index
     // them by id.
     let mut answers = vec![None; requests.len()];
+    let mut logs = Vec::new();
     for line in text.lines() {
         let Ok(wire) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -154,6 +163,9 @@ fn serve(entry: PathBuf, requests: &[Value]) -> Vec<Result<Value, String>> {
             if std::env::var("GGS_TEST_LOGS").is_ok() {
                 eprintln!("[log] {}", wire);
             }
+            if let Some(message) = wire["params"]["message"].as_str() {
+                logs.push(message.to_owned());
+            }
             continue; // a `$/log` notification
         };
         let error = wire["error"]["message"].as_str().map(str::to_owned);
@@ -162,10 +174,11 @@ fn serve(entry: PathBuf, requests: &[Value]) -> Vec<Result<Value, String>> {
             None => Ok(wire.get("result").cloned().unwrap_or(Value::Null)),
         });
     }
-    answers
+    let answers = answers
         .into_iter()
         .map(|answer| answer.expect("every request answered"))
-        .collect()
+        .collect();
+    (answers, logs)
 }
 
 fn initialize() -> Value {
@@ -2691,4 +2704,379 @@ fn claude_remote_activates_and_serves_under_the_ggs_node_vscode_shim() {
     let _ = workbench.join();
     drop(requests_tx);
     let _ = serve.join();
+}
+
+#[test]
+fn an_esm_entry_with_a_use_before_its_declaration_still_activates() {
+    // The register-local compile bakes a static TDZ throw into a binding use that lexically
+    // precedes the binding's declaration — wrong whenever that use runs after
+    // initialization, and real bundles (kimi-code's 8.8 MB entry) carry such sites. Both
+    // shapes below are plain hoisting that node.exe answers; ggs-node must fall back to
+    // the all-escaping compile instead of running a code image with the throw inside.
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[
+            (
+                "package.json",
+                r#"{"name":"acme.esm-tdz","version":"1.0.0","type":"module","main":"main.js"}"#,
+            ),
+            (
+                "main.js",
+                r#"
+function outer() {
+	const value = helper();
+	function helper() { return 41 + 1; }
+	return value;
+}
+const answered = outer() + ':' + announce();
+function announce() { return 'announced'; }
+ggs.onRequest((command) => {
+	if (command === 'announce') return { said: answered };
+	return { unknown: command };
+});
+"#,
+            ),
+        ],
+    )
+    .join("main.js");
+
+    let answers = serve(entry, &[initialize(), run_command("announce", json!([]))]);
+    assert_eq!(answers.len(), 2, "{answers:?}");
+    assert_eq!(answers[0].as_ref().unwrap()["protocolVersion"], "ggs-ext/1");
+    assert_eq!(
+        answers[1].as_ref().unwrap()["said"],
+        json!("42:announced"),
+        "the use-before-declaration sites must answer, not throw"
+    );
+}
+
+#[test]
+fn a_class_field_initializer_reading_a_module_const_evaluates() {
+    // The kimi-code shape: a class static field's initializer references a const declared
+    // at module scope. The initializer compiles as its own function, so the const crosses
+    // a function border — the escape analysis must mark it ESCAPES (the bytecompiler then
+    // keeps it in the environment the field function reads), or the field reads an
+    // environment slot that was never written ("access of uninitialized binding"). The
+    // import rides the dynamic path, which has no loader-level retry: the compile itself
+    // has to come out clean.
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[
+            (
+                "package.json",
+                r#"{"name":"acme.esm-field","version":"1.0.0","type":"module","main":"main.js"}"#,
+            ),
+            (
+                "main.js",
+                r#"
+const mod = await import('./auth.mjs');
+export function activate() { return { tag: mod.AuthClient.tag(), name: mod.name }; }
+ggs.onRequest((command) => {
+	if (command === 'tag') return activate();
+	return { unknown: command };
+});
+"#,
+            ),
+            (
+                "auth.mjs",
+                r#"
+var helper_1 = { log: (name) => () => name };
+export const name = 'auth';
+export const AuthClient = class AuthClient extends Object {
+	static tag = (0, helper_1.log)('auth');
+	static DEFAULT = { resolved: async (config) => config };
+	constructor(options) { super(); this.key = options?.key; }
+	async getHeaders() { return { tag: AuthClient.tag() }; }
+};
+"#,
+            ),
+        ],
+    )
+    .join("main.js");
+
+    let answers = serve(entry, &[initialize(), run_command("tag", json!([]))]);
+    assert_eq!(answers.len(), 2, "{answers:?}");
+    assert_eq!(answers[0].as_ref().unwrap()["protocolVersion"], "ggs-ext/1");
+    assert_eq!(
+        answers[1].as_ref().unwrap()["tag"],
+        json!("auth"),
+        "the static field initializer must read the module const, not an uninitialized slot"
+    );
+}
+
+#[test]
+fn an_esm_dependency_with_a_use_before_its_declaration_links_all_escaping() {
+    // Boa compiles a module's bytecode when the graph LINKS, not when it parses — so the
+    // register-local walls (a compiler panic, a static TDZ throw baked into a site used
+    // before its declaration point) are checked around `link`, for every module of the
+    // graph. Here the tripping shape (vscode_shim_boa's repro: a block-scoped binding read
+    // before its class declaration) sits in a statically imported dependency. Its branch
+    // is dead, so both images answer alike: what the test pins is that the link-time
+    // check fired and the graph reloaded all-escaping before anything evaluated — the old
+    // check read the trip flag right after a parse, which never compiles, so it could
+    // never fire. The graph loads through `require(esm)` inside a request, so the
+    // degrade's log crosses the wire (bootstrap runs before any emitter is attached).
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[
+            (
+                "package.json",
+                r#"{"name":"acme.esm-dep-tdz","version":"1.0.0","main":"main.js"}"#,
+            ),
+            (
+                "main.js",
+                r#"
+ggs.onRequest((command) => {
+    if (command === 'announce') return { said: require('./entry.mjs').answered };
+    return { unknown: command };
+});
+"#,
+            ),
+            (
+                "entry.mjs",
+                r#"
+export { answered } from './dep.mjs';
+"#,
+            ),
+            (
+                "dep.mjs",
+                r#"
+if (false) { let probe = typeof Later; class Later {} }
+function outer() {
+    const value = helper();
+    function helper() { return 41 + 1; }
+    return value;
+}
+export const answered = outer() + ':' + announce();
+function announce() { return 'announced'; }
+"#,
+            ),
+        ],
+    )
+    .join("main.js");
+
+    let (answers, logs) =
+        serve_with_logs(entry, &[initialize(), run_command("announce", json!([]))]);
+    assert_eq!(answers.len(), 2, "{answers:?}");
+    assert_eq!(
+        answers[1].as_ref().unwrap()["said"],
+        json!("42:announced"),
+        "the dependency's use-before-declaration sites must answer, not throw"
+    );
+    assert!(
+        logs.iter().any(|line| line.contains("entry.mjs")
+            && line
+                .contains("used a binding before its declaration point; recompiling all-escaping")),
+        "the link-time check fired and the graph reloaded all-escaping: {logs:?}"
+    );
+}
+
+#[test]
+fn the_prelude_web_streams_intl_and_message_ports_behave_like_nodes() {
+    // The shims kimi-code's bundle needed, held to Node's semantics:
+    // - a multi-byte character split across chunks survives TextDecoderStream (a network
+    //   read cuts anywhere; decoding each chunk alone turned CJK text into U+FFFD);
+    // - `pipeThrough` exists — the shape every SSE client is written in;
+    // - a TransformStream's async transform sees its chunks one at a time, in order;
+    // - MessagePort delivers on a later turn, to addEventListener listeners too;
+    // - Intl.DateTimeFormat's default year is numeric, and Collator sorts numerically.
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[
+            (
+                "package.json",
+                r#"{"name":"acme.web-shims","version":"1.0.0","main":"main.js"}"#,
+            ),
+            (
+                "main.js",
+                r#"
+ggs.onRequest(async (command) => {
+    if (command !== 'probe') return { unknown: command };
+    const bytes = new TextEncoder().encode('前后');
+    const source = new ReadableStream({
+        start(controller) {
+            controller.enqueue(bytes.slice(0, 2));
+            controller.enqueue(bytes.slice(2, 4));
+            controller.enqueue(bytes.slice(4));
+            controller.close();
+        }
+    });
+    let text = '';
+    for await (const piece of source.pipeThrough(new TextDecoderStream())) text += piece;
+
+    const seen = [];
+    const pair = new TransformStream({
+        async transform(chunk, controller) {
+            await new Promise((resolve) => setTimeout(resolve, chunk === 1 ? 20 : 0));
+            seen.push(chunk);
+            controller.enqueue(chunk * 10);
+        }
+    });
+    const writer = pair.writable.getWriter();
+    writer.write(1);
+    writer.write(2);
+    writer.close();
+    const out = [];
+    for await (const value of pair.readable) out.push(value);
+
+    const channel = new MessageChannel();
+    const got = [];
+    let inSenderCall = true;
+    channel.port2.addEventListener('message', (event) => got.push([event.data, inSenderCall]));
+    channel.port1.postMessage({ n: 1 });
+    inSenderCall = false;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const year = new Intl.DateTimeFormat('en-US')
+        .formatToParts(new Date(2026, 9, 2))
+        .find((part) => part.type === 'year').value;
+    const sorted = ['a10', 'a2'].sort(new Intl.Collator(undefined, { numeric: true }).compare);
+    return { text, seen, out, got, year, sorted };
+});
+"#,
+            ),
+        ],
+    )
+    .join("main.js");
+
+    let answers = serve(entry, &[initialize(), run_command("probe", json!([]))]);
+    let probe = answers[1].as_ref().expect("the probe answered");
+    assert_eq!(probe["text"], json!("前后"), "{probe}");
+    assert_eq!(probe["seen"], json!([1, 2]), "{probe}");
+    assert_eq!(probe["out"], json!([10, 20]), "{probe}");
+    assert_eq!(probe["got"], json!([[{ "n": 1 }, false]]), "{probe}");
+    assert_eq!(probe["year"], json!("2026"), "{probe}");
+    assert_eq!(probe["sorted"], json!(["a2", "a10"]), "{probe}");
+}
+
+#[test]
+fn an_activation_that_never_settles_still_registers_and_serves_its_commands() {
+    // kimi-code's activate() awaits a login probe that pends on the outside world. The
+    // activation promise is parked, not settled inline — and what the activation already
+    // registered must cross to the workbench at once (`commands.registerBatch`), and a
+    // command whose handler is live must answer without waiting out the settle budget.
+    // Before: the registrations stayed queued in the shim forever (the flush ran only on
+    // settlement), and every command waited the full budget first.
+    let shim = std::env::var("GGS_VSCODE_SHIM")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("../target/studio/vscode-shim.cjs"));
+    if !shim.is_file() {
+        eprintln!("skipping: no vscode-shim.cjs built");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[
+            (
+                "package.json",
+                r#"{"name":"pending","publisher":"acme","version":"1.0.0","main":"main.js"}"#,
+            ),
+            (
+                "main.js",
+                r#"
+const vscode = require('vscode');
+module.exports.activate = function () {
+    vscode.commands.registerCommand('pending.early', () => 'EARLY');
+    return new Promise(() => {});
+};
+"#,
+            ),
+        ],
+    )
+    .join("main.js");
+
+    let (requests_tx, requests_rx) = std::sync::mpsc::channel::<String>();
+    let (output_tx, output_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        git_graph_studio_lib::node_runtime::serve_on(
+            entry,
+            ChannelReader::from(requests_rx),
+            ChannelWriter(output_tx),
+        );
+    });
+
+    let registered = Arc::new(Mutex::new(Vec::<String>::new()));
+    // Answer host asks (recording the registration batches) until response `id` crosses.
+    let wait_for = |id: u64| -> Value {
+        loop {
+            let line = output_rx
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .expect("the backend fell silent");
+            let Ok(wire) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
+                let host_id = wire["id"].as_u64().unwrap_or_default();
+                let inner = wire["params"]["method"].as_str().unwrap_or_default();
+                if inner == "commands.registerBatch" {
+                    let batch = &wire["params"]["args"][0];
+                    for id in batch.as_array().into_iter().flatten() {
+                        registered
+                            .lock()
+                            .unwrap()
+                            .push(id.as_str().unwrap_or_default().to_owned());
+                    }
+                }
+                let answer = if inner == "host.env" {
+                    json!({ "settings": {}, "language": "en", "state": { "global": {}, "workspace": {} } })
+                } else {
+                    Value::Null
+                };
+                requests_tx
+                    .send(git_graph_studio_lib::ext_protocol::response(
+                        host_id,
+                        Ok(answer),
+                    ))
+                    .unwrap();
+                continue;
+            }
+            if wire["id"].as_u64() == Some(id) {
+                return wire;
+            }
+        }
+    };
+
+    requests_tx
+        .send(git_graph_studio_lib::ext_protocol::request(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": "ggs-ext/1",
+                "extensionId": "acme.pending",
+                "extensionPath": tmp.path().join("pkg").display().to_string(),
+                "workspaceFolders": [],
+            }),
+        ))
+        .unwrap();
+    assert_eq!(wait_for(1)["result"]["protocolVersion"], "ggs-ext/1");
+
+    let asked = std::time::Instant::now();
+    requests_tx
+        .send(git_graph_studio_lib::ext_protocol::request(
+            2,
+            "runCommand",
+            json!({ "command": "pending.early", "args": [] }),
+        ))
+        .unwrap();
+    let answer = wait_for(2);
+    assert_eq!(answer["result"], "EARLY", "{answer:?}");
+    assert!(
+        asked.elapsed() < std::time::Duration::from_secs(10),
+        "a live handler answered without waiting out the pending activation ({:?})",
+        asked.elapsed()
+    );
+    assert!(
+        registered
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|id| id == "pending.early"),
+        "the pending activation's registration crossed to the workbench: {:?}",
+        registered.lock().unwrap()
+    );
 }

@@ -66,6 +66,187 @@ for (const name of ['dispose', 'asyncDispose']) {
 	}
 })();
 
+/* ---------- the standard-library gaps Boa leaves: Intl ---------- */
+/* Boa (0.21, as vendored) ships no Intl at all, and bundle code written against Node
+   references it freely at module scope (a grapheme truncation helper constructs
+   `Intl.Segmenter` before any function runs — the reference alone killed kimi-code's
+   evaluation). Not localised anything: Segmenter segments by code point (grapheme
+   clusters degrade, the truncation still terminates), DateTimeFormat answers the local
+   clock (or UTC) as the parts its options ask for. Defining `Intl` turns every
+   `typeof Intl !== 'undefined'` feature check true, so the constructors such checks
+   reach for next — NumberFormat, Collator, PluralRules — exist too, in their plainest
+   en-US form, instead of failing as "not a constructor". */
+(() => {
+	if (typeof globalThis.Intl !== 'undefined') return;
+	const pad2 = (value) => String(value).padStart(2, '0');
+	class Segmenter {
+		constructor(locale, options = {}) {
+			this.locale = locale;
+			this.granularity = options.granularity ?? 'grapheme';
+		}
+		segment(value) {
+			const text = String(value);
+			const word = this.granularity === 'word';
+			const pieces = word ? text.split(/(\s+|[^\p{L}\p{N}_\s]+)/u).filter((part) => part !== '') : Array.from(text);
+			let index = 0;
+			const parts = pieces.map((segment) => {
+				const part = { segment, index, input: text };
+				if (word) part.isWordLike = /[\p{L}\p{N}_]/u.test(segment);
+				index += segment.length;
+				return part;
+			});
+			// A Segments object: iterable any number of times, plus `containing(index)`.
+			return {
+				[Symbol.iterator]: () => parts[Symbol.iterator](),
+				containing: (at = 0) => parts.find((part) => at >= part.index && at < part.index + part.segment.length)
+			};
+		}
+		resolvedOptions() {
+			return { locale: this.locale ?? 'en-US', granularity: this.granularity };
+		}
+	}
+	const timeZoneName = () => {
+		const offset = -new Date().getTimezoneOffset();
+		if (offset === 0) return 'UTC';
+		const sign = offset > 0 ? '+' : '-';
+		const minutes = Math.abs(offset);
+		return `UTC${sign}${pad2(Math.floor(minutes / 60))}:${pad2(minutes % 60)}`;
+	};
+	// Only the zone names that really are UTC: the local zone's own `UTC+08:00` spelling
+	// (what resolvedOptions answers, and callers hand back) must keep the local clock.
+	const isUtcZone = (zone) => /^(utc|gmt|z|etc\/(utc|gmt|uct|zulu|universal)|universal|zulu)$/i.test(String(zone ?? ''));
+	class DateTimeFormat {
+		constructor(locale, options = {}) {
+			this.locale = locale;
+			this.options = { ...options };
+		}
+		resolvedOptions() {
+			return { locale: this.locale ?? 'en-US', calendar: 'gregory', numberingSystem: 'latn', timeZone: timeZoneName(), ...this.options };
+		}
+		formatToParts(date) {
+			const moment = date === undefined ? new Date() : date instanceof Date ? date : new Date(date);
+			const options = this.options;
+			const utc = isUtcZone(options.timeZone);
+			const pick = (local, universal) => (utc ? moment[universal]() : moment[local]());
+			const wantsTime = options.hour !== undefined || options.minute !== undefined || options.second !== undefined || options.timeStyle !== undefined;
+			const wantsDate = options.year !== undefined || options.month !== undefined || options.day !== undefined || options.dateStyle !== undefined || !wantsTime;
+			// `2-digit` pads (a year keeps its last two); `numeric` — the default — does not.
+			const field = (style, value) => (style === '2-digit' ? pad2(value % 100) : String(value));
+			const parts = [];
+			const literal = (value) => parts.push({ type: 'literal', value });
+			if (wantsDate) {
+				parts.push({ type: 'month', value: field(options.month, pick('getMonth', 'getUTCMonth') + 1) });
+				literal('/');
+				parts.push({ type: 'day', value: field(options.day, pick('getDate', 'getUTCDate')) });
+				literal('/');
+				parts.push({ type: 'year', value: field(options.year, pick('getFullYear', 'getUTCFullYear')) });
+			}
+			if (wantsTime) {
+				if (wantsDate) literal(', ');
+				const hours = pick('getHours', 'getUTCHours');
+				const twelve = options.hour12 === true || (options.hour12 === undefined && options.hourCycle !== 'h23' && options.hourCycle !== 'h24');
+				parts.push({ type: 'hour', value: field(options.hour, twelve ? hours % 12 || 12 : hours) });
+				literal(':');
+				parts.push({ type: 'minute', value: pad2(pick('getMinutes', 'getUTCMinutes')) });
+				if (options.second !== undefined || options.timeStyle !== undefined) {
+					literal(':');
+					parts.push({ type: 'second', value: pad2(pick('getSeconds', 'getUTCSeconds')) });
+				}
+				if (twelve) {
+					literal(' ');
+					parts.push({ type: 'dayPeriod', value: hours < 12 ? 'AM' : 'PM' });
+				}
+			}
+			return parts;
+		}
+		format(date) {
+			return this.formatToParts(date)
+				.map((part) => part.value)
+				.join('');
+		}
+	}
+	class NumberFormat {
+		constructor(locale, options = {}) {
+			this.locale = locale;
+			this.options = { ...options };
+		}
+		resolvedOptions() {
+			return { locale: this.locale ?? 'en-US', numberingSystem: 'latn', style: 'decimal', ...this.options };
+		}
+		format(value) {
+			const number = Number(value);
+			if (!Number.isFinite(number)) return String(number);
+			const { minimumFractionDigits: min = 0, useGrouping = true } = this.options;
+			const max = this.options.maximumFractionDigits ?? Math.max(min, 3);
+			let text = number.toFixed(Math.min(20, Math.max(min, max)));
+			// Trailing zeros past the minimum go, as Intl drops them.
+			if (max > min && text.includes('.')) text = text.replace(new RegExp(`0{1,${max - min}}$`), '').replace(/\.$/, '');
+			if (useGrouping === false) return text;
+			const [whole, fraction] = text.split('.');
+			const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+			return fraction === undefined ? grouped : `${grouped}.${fraction}`;
+		}
+		formatToParts(value) {
+			return [{ type: 'integer', value: this.format(value) }];
+		}
+	}
+	class Collator {
+		constructor(locale, options = {}) {
+			this.locale = locale;
+			this.options = { ...options };
+			// A bound function, as Intl's own: `array.sort(collator.compare)` works.
+			this.compare = (left, right) => {
+				let a = String(left);
+				let b = String(right);
+				if (this.options.sensitivity === 'base' || this.options.sensitivity === 'accent') {
+					a = a.toLowerCase();
+					b = b.toLowerCase();
+				}
+				if (this.options.numeric) {
+					const chunk = /(\d+|\D+)/g;
+					const as = a.match(chunk) ?? [];
+					const bs = b.match(chunk) ?? [];
+					for (let i = 0; i < Math.min(as.length, bs.length); i++) {
+						const numeric = /^\d/.test(as[i]) && /^\d/.test(bs[i]);
+						const order = numeric ? Number(as[i]) - Number(bs[i]) : as[i] < bs[i] ? -1 : as[i] > bs[i] ? 1 : 0;
+						if (order !== 0) return Math.sign(order);
+					}
+					return Math.sign(as.length - bs.length);
+				}
+				return a < b ? -1 : a > b ? 1 : 0;
+			};
+		}
+		resolvedOptions() {
+			return { locale: this.locale ?? 'en-US', usage: 'sort', sensitivity: 'variant', ...this.options };
+		}
+	}
+	class PluralRules {
+		constructor(locale, options = {}) {
+			this.locale = locale;
+			this.options = { ...options };
+		}
+		select(value) {
+			const number = Math.abs(Number(value));
+			if (this.options.type === 'ordinal') {
+				const tens = number % 100;
+				if (tens < 11 || tens > 13) {
+					if (number % 10 === 1) return 'one';
+					if (number % 10 === 2) return 'two';
+					if (number % 10 === 3) return 'few';
+				}
+				return 'other';
+			}
+			return number === 1 ? 'one' : 'other';
+		}
+		resolvedOptions() {
+			return { locale: this.locale ?? 'en-US', type: 'cardinal', ...this.options };
+		}
+	}
+	const supportedLocalesOf = (locales) => (locales === undefined ? [] : [].concat(locales).map(String));
+	for (const ctor of [Segmenter, DateTimeFormat, NumberFormat, Collator, PluralRules]) ctor.supportedLocalesOf = supportedLocalesOf;
+	globalThis.Intl = { Segmenter, DateTimeFormat, NumberFormat, Collator, PluralRules, getCanonicalLocales: supportedLocalesOf };
+})();
+
 /* ---------- util: format, inspect, promisify, inherits ---------- */
 (() => {
 	const formatValue = (value) => {
@@ -396,6 +577,10 @@ for (const name of ['dispose', 'asyncDispose']) {
 		}
 	};
 	globalThis.crypto.webcrypto = { getRandomValues: (target) => globalThis.crypto.getRandomValues(target) };
+	// getHashes — the digests createHash actually answers (the SRI layer of every fetch-era
+	// SDK filters its algorithm set through this, so the honest short list beats a wide
+	// one whose tail would throw).
+	globalThis.crypto.getHashes = () => ['md5', 'sha1', 'sha256'];
 
 	// GGS-patch: pbkdf2 + createCipheriv/createDecipheriv('aes-*-gcm') over the Rust
 	// natives (aes-gcm + pbkdf2 crates), in Node's own shapes: bytes cross as typed
@@ -1875,12 +2060,49 @@ for (const name of ['dispose', 'asyncDispose']) {
 			this.encoding = 'utf-8';
 			this.fatal = Boolean(options.fatal);
 			this.ignoreBOM = Boolean(options.ignoreBOM);
+			// The streaming state: the incomplete UTF-8 sequence the last `{stream: true}`
+			// chunk ended inside, and whether the stream's start (its BOM) is behind us.
+			this.__pending = null;
+			this.__started = false;
 		}
-		decode(input) {
-			if (input === undefined || input === null) return '';
-			const bytes = ArrayBuffer.isView(input) ? new Uint8Array(input.buffer, input.byteOffset, input.byteLength) : new Uint8Array(input);
-			const text = __ggsUtf8Decode(bytes);
-			return !this.ignoreBOM && text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+		decode(input, options = {}) {
+			const stream = Boolean(options && options.stream);
+			let bytes =
+				input === undefined || input === null
+					? new Uint8Array(0)
+					: ArrayBuffer.isView(input)
+						? new Uint8Array(input.buffer, input.byteOffset, input.byteLength)
+						: new Uint8Array(input);
+			if (this.__pending) {
+				const joined = new Uint8Array(this.__pending.length + bytes.length);
+				joined.set(this.__pending);
+				joined.set(bytes, this.__pending.length);
+				bytes = joined;
+				this.__pending = null;
+			}
+			if (stream) {
+				// A chunk boundary can split a multi-byte character (a network read cuts
+				// anywhere): hold its lead bytes back for the next chunk instead of
+				// decoding them to U+FFFD.
+				let lead = bytes.length - 1;
+				while (lead >= 0 && lead > bytes.length - 4 && (bytes[lead] & 0xc0) === 0x80) lead--;
+				if (lead >= 0) {
+					const byte = bytes[lead];
+					const width = byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : byte >= 0xc0 ? 2 : 1;
+					if (width > bytes.length - lead) {
+						this.__pending = bytes.slice(lead);
+						bytes = bytes.subarray(0, lead);
+					}
+				}
+			}
+			let text = bytes.length > 0 ? __ggsUtf8Decode(bytes) : '';
+			if (!this.__started && text.length > 0) {
+				this.__started = true;
+				if (!this.ignoreBOM && text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+			}
+			// A plain decode() ends the stream: the next one starts over, BOM included.
+			if (!stream) this.__started = false;
+			return text;
 		}
 	}
 	define('TextEncoder', TextEncoder);
@@ -4309,10 +4531,25 @@ for (const name of ['dispose', 'asyncDispose']) {
 					reader.releaseLock();
 				}
 			}
-			async pipeTo(destination) {
+			async pipeTo(destination, options = {}) {
 				const writer = destination.getWriter ? destination.getWriter() : destination;
-				for await (const chunk of this) await writer.write(chunk);
-				await writer.close?.();
+				try {
+					for await (const chunk of this) await writer.write(chunk);
+				} catch (error) {
+					// The source failed: the destination hears it (a TransformStream's readable
+					// errors with it) instead of waiting for a close that never comes.
+					if (!options.preventAbort) await writer.abort?.(error);
+					throw error;
+				}
+				if (!options.preventClose) await writer.close?.();
+			}
+			// `source.pipeThrough(new TextDecoderStream()).pipeThrough(parser)` — the shape
+			// every SSE client is written in: pipe into the pair's writable, hand back its
+			// readable. A pipe failure surfaces on that readable, so the promise is not left
+			// rejecting unobserved.
+			pipeThrough(transform, options) {
+				this.pipeTo(transform.writable, options).catch(() => {});
+				return transform.readable;
 			}
 			tee() {
 				const chunks = [];
@@ -4345,6 +4582,285 @@ for (const name of ['dispose', 'asyncDispose']) {
 		}
 		globalThis.ReadableStream = ReadableStream;
 		globalThis.ReadableStreamDefaultReader = ReadableStreamDefaultReader;
+	}
+	/* WritableStream / TransformStream / TextDecoderStream — Node 18's other web-stream
+	 * globals, over the same shapes. Marketplace bundles subclass TransformStream for
+	 * their SSE parsers (the MCP SDK's EventSourceParserStream) and take the pair as
+	 * globals, so each answer with the WHATWG constructor surface: start / transform /
+	 * flush with a controller, and a writer on the writable side. */
+	if (typeof globalThis.WritableStream === 'undefined') {
+		class WritableStreamDefaultWriter {
+			constructor(stream) {
+				this.__stream = stream;
+				stream.__locked = true;
+			}
+			// `await writer.ready` before each write is the WHATWG idiom; the queue below
+			// already orders writes, so readiness is the stream not having failed.
+			get ready() {
+				return this.__stream.__error === undefined ? Promise.resolve() : Promise.reject(this.__stream.__error);
+			}
+			get closed() {
+				return this.__stream.__closed;
+			}
+			get desiredSize() {
+				return this.__stream.__error === undefined ? 1 : null;
+			}
+			write(chunk) {
+				return this.__stream.__write(chunk);
+			}
+			close() {
+				return this.__stream.__close();
+			}
+			abort(reason) {
+				return this.__stream.abort(reason);
+			}
+			releaseLock() {
+				this.__stream.__locked = false;
+			}
+		}
+		class WritableStream {
+			constructor(underlying = {}) {
+				this.__locked = false;
+				this.__underlying = underlying;
+				this.__error = undefined;
+				let settleClosed;
+				this.__closed = new Promise((resolve, reject) => (settleClosed = { resolve, reject }));
+				this.__closed.catch(() => {});
+				this.__settleClosed = settleClosed;
+				this.__controller = {
+					error: (error) => this.__fail(error),
+					signal: new AbortController().signal
+				};
+				// Writes run one at a time, in order, each after the previous settled (the
+				// WHATWG sink contract — an async `write` never sees two chunks at once).
+				this.__chain = Promise.resolve();
+				try {
+					const started = underlying.start?.(this.__controller);
+					if (started && typeof started.then === 'function') {
+						this.__chain = started.then(
+							() => {},
+							(error) => this.__fail(error)
+						);
+					}
+				} catch (error) {
+					this.__fail(error);
+				}
+			}
+			get locked() {
+				return this.__locked;
+			}
+			getWriter() {
+				if (this.__locked) throw new TypeError('WritableStream is locked');
+				return new WritableStreamDefaultWriter(this);
+			}
+			__fail(error) {
+				if (this.__error !== undefined) return;
+				this.__error = error ?? new Error('the stream errored');
+				this.__settleClosed.reject(this.__error);
+			}
+			__enqueue(step) {
+				const run = this.__chain.then(() => {
+					if (this.__error !== undefined) throw this.__error;
+					return step();
+				});
+				this.__chain = run.then(
+					() => {},
+					(error) => this.__fail(error)
+				);
+				return run;
+			}
+			__write(chunk) {
+				return this.__enqueue(() => this.__underlying.write?.(chunk, this.__controller));
+			}
+			__close() {
+				return this.__enqueue(async () => {
+					await this.__underlying.close?.();
+					this.__settleClosed.resolve();
+				});
+			}
+			abort(reason) {
+				this.__fail(reason);
+				return Promise.resolve(this.__underlying.abort?.(reason));
+			}
+			close() {
+				if (this.__locked) return Promise.reject(new TypeError('WritableStream is locked'));
+				return this.__close();
+			}
+		}
+		globalThis.WritableStream = WritableStream;
+		globalThis.WritableStreamDefaultWriter = WritableStreamDefaultWriter;
+	}
+	if (typeof globalThis.TransformStream === 'undefined') {
+		class TransformStream {
+			constructor(transformer = {}, writableStrategy, readableStrategy) {
+				void writableStrategy;
+				void readableStrategy;
+				let readableController = null;
+				this.readable = new globalThis.ReadableStream({
+					start: (controller) => {
+						readableController = controller;
+					}
+				});
+				let writable = null;
+				const controller = {
+					enqueue: (chunk) => readableController.enqueue(chunk),
+					// terminate: the readable ends, and the writable stops taking chunks.
+					terminate: () => {
+						readableController.close();
+						writable?.__fail(new TypeError('the TransformStream was terminated'));
+					},
+					error: (error) => {
+						readableController.error(error);
+						writable?.__fail(error);
+					},
+					get desiredSize() {
+						return 1;
+					}
+				};
+				// start runs before the first chunk: the writable's start awaits it.
+				let started;
+				try {
+					started = transformer.start?.(controller);
+				} catch (error) {
+					controller.error(error);
+				}
+				writable = new globalThis.WritableStream({
+					start: () => started,
+					write: async (chunk) => {
+						if (transformer.transform) await transformer.transform(chunk, controller);
+						else controller.enqueue(chunk);
+					},
+					close: async () => {
+						if (transformer.flush) await transformer.flush(controller);
+						readableController.close();
+					},
+					abort: (reason) => readableController.error(reason)
+				});
+				this.writable = writable;
+			}
+		}
+		globalThis.TransformStream = TransformStream;
+	}
+	if (typeof globalThis.TextDecoderStream === 'undefined') {
+		class TextDecoderStream {
+			constructor(encoding = 'utf-8', options = {}) {
+				this.__encodingLabel = String(encoding);
+				// One decoder for the whole stream, in `stream: true` mode: a character split
+				// across two chunks is held back until its tail arrives.
+				const decoder = new TextDecoder(encoding, options);
+				const pair = new globalThis.TransformStream({
+					transform: (chunk, controller) => {
+						const text = decoder.decode(chunk, { stream: true });
+						if (text) controller.enqueue(text);
+					},
+					flush: (controller) => {
+						const text = decoder.decode();
+						if (text) controller.enqueue(text);
+					}
+				});
+				this.readable = pair.readable;
+				this.writable = pair.writable;
+			}
+			get encoding() {
+				return this.__encodingLabel;
+			}
+		}
+		globalThis.TextDecoderStream = TextDecoderStream;
+	}
+	/* MessageChannel / MessagePort — Node 15's globals, and unguarded bare references in
+	 * the webidl layer of every fetch-era SDK (undici's type assertions run at module
+	 * evaluation, so a missing global kills the whole bundle). A real linked pair over the
+	 * event loop: postMessage clones into the peer's queue and delivers on a later turn
+	 * (never inside the sender's call — schedulers post to themselves and rely on that),
+	 * to `onmessage`, `addEventListener('message')` and Node's `on('message')` alike. */
+	if (typeof globalThis.MessagePort === 'undefined') {
+		const later = typeof globalThis.setImmediate === 'function' ? globalThis.setImmediate : (fn) => setTimeout(fn, 0);
+		class MessagePort extends globalThis.EventTarget {
+			constructor() {
+				super();
+				this.__queue = [];
+				this.__peer = null;
+				this.__started = false;
+				this.__scheduled = false;
+				this.__onmessage = null;
+				this.onmessageerror = null;
+			}
+			// Assigning onmessage starts the port, as in the DOM.
+			get onmessage() {
+				return this.__onmessage;
+			}
+			set onmessage(handler) {
+				this.__onmessage = handler;
+				if (typeof handler === 'function') this.start();
+			}
+			addEventListener(type, listener, options) {
+				super.addEventListener(type, listener, options);
+				if (type === 'message') this.start();
+			}
+			// Node's EventEmitter face: the listener takes the message itself.
+			on(type, listener) {
+				const wrapped = (event) => listener(type === 'message' ? event.data : event);
+				listener.__ggsPortWrapper = wrapped;
+				this.addEventListener(type, wrapped);
+				return this;
+			}
+			once(type, listener) {
+				const wrapped = (event) => listener(type === 'message' ? event.data : event);
+				listener.__ggsPortWrapper = wrapped;
+				this.addEventListener(type, wrapped, { once: true });
+				return this;
+			}
+			off(type, listener) {
+				this.removeEventListener(type, listener.__ggsPortWrapper ?? listener);
+				return this;
+			}
+			ref() {
+				return this;
+			}
+			unref() {
+				return this;
+			}
+			postMessage(message, transfer) {
+				void transfer;
+				const other = this.__peer;
+				if (!other) return;
+				other.__queue.push(structuredClone(message));
+				other.__schedule();
+			}
+			start() {
+				this.__started = true;
+				this.__schedule();
+			}
+			close() {
+				const peer = this.__peer;
+				this.__peer = null;
+				this.__queue.length = 0;
+				if (peer) peer.__peer = null;
+			}
+			__schedule() {
+				if (!this.__started || this.__scheduled || this.__queue.length === 0) return;
+				this.__scheduled = true;
+				later(() => {
+					this.__scheduled = false;
+					// One turn delivers what was queued when it began; later posts get theirs.
+					for (const data of this.__queue.splice(0)) {
+						const event = new Event('message');
+						event.data = data;
+						this.dispatchEvent(event);
+					}
+				});
+			}
+		}
+		class MessageChannel {
+			constructor() {
+				this.port1 = new MessagePort();
+				this.port2 = new MessagePort();
+				this.port1.__peer = this.port2;
+				this.port2.__peer = this.port1;
+			}
+		}
+		globalThis.MessagePort = MessagePort;
+		globalThis.MessageChannel = MessageChannel;
 	}
 	if (typeof globalThis.Headers === 'undefined') {
 		class Headers {
@@ -4623,6 +5139,12 @@ for (const name of ['dispose', 'asyncDispose']) {
 		console.warn(text);
 	};
 	process.memoryUsage = Object.assign(() => ({ rss: 0, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 }), { rss: () => 0 });
+	// cpuUsage — telemetry collectors sample it at construction (kimi-code's metrics
+	// sink); the honest zeros shape like memoryUsage's.
+	process.cpuUsage = (previous) => {
+		void previous;
+		return { user: 0, system: 0 };
+	};
 	process.uptime = () => performance.now() / 1000;
 	process.hrtime = Object.assign(
 		(previous) => {
