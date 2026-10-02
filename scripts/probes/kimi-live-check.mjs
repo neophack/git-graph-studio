@@ -308,11 +308,18 @@ try {
 		else check('the backend process is ggs-node (the bundled runtime)', /^ggs-node/i.test(imageName), imageName);
 	}
 
-	/* 3. The palette lists the contributed commands — and hides the debug-only one. */
-	await sleep(1500);
-	const rows3 = (await paletteRows('Kimi Code')) ?? [];
-	const titles3 = rows3.filter((text) => /Kimi Code:/.test(text));
+	/* 3. The palette lists the contributed commands — and hides the debug-only one. The
+	 *    registration batch lands when the activation's own awaits resolve, so the round
+	 *    polls until the rows are all there — a one-shot query read its own race (the
+	 *    Logout row regularly lost it). */
 	const expectCommands = ['Open in New Tab', 'Open in Side Panel', 'Focus Input', 'Insert Current File', 'New Conversation', 'Show Logs', 'Reset Kimi', 'Logout', 'Migrate Legacy Data'];
+	let titles3 = [];
+	for (let attempt = 0; attempt < 20; attempt++) {
+		const rows3 = (await paletteRows('Kimi Code')) ?? [];
+		titles3 = rows3.filter((text) => /Kimi Code:/.test(text));
+		if (expectCommands.every((title) => titles3.some((text) => text.includes(title)))) break;
+		await sleep(500);
+	}
 	const missing = expectCommands.filter((title) => !titles3.some((text) => text.includes(title)));
 	check('every palette-visible command is listed', missing.length === 0, missing.length ? 'missing: ' + missing.join(', ') : `${titles3.length} rows`);
 	check('the debug-only Clear All State stays out of the palette', !titles3.some((text) => text.includes('Clear All State')), titles3.join(' | '));
