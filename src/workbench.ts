@@ -1885,11 +1885,16 @@ export class Workbench {
 		// folder argument) decides everything the boot does next. A plain-folder launch is
 		// opened inside this very call (the backend opens it during the splash), so when the
 		// folder the boot picks matches, the answer is applied directly - no second round trip.
-		const context = await invoke<{ file: string | null; actions: { type: string; left?: string; right?: string; path?: string }[]; repo: string | null; opened: { root: string; isRepo: boolean } | null; openedFor: string | null }>('boot_context')
-			.catch(() => ({ file: null as string | null, actions: [] as { type: string; left?: string; right?: string; path?: string }[], repo: null as string | null, opened: null as { root: string; isRepo: boolean } | null, openedFor: null as string | null }));
+		const context = await invoke<{ file: string | null; actions: { type: string; left?: string; right?: string; path?: string }[]; repo: string | null; workspace: string | null; opened: { root: string; isRepo: boolean } | null; openedFor: string | null }>('boot_context')
+			.catch(() => ({ file: null as string | null, actions: [] as { type: string; left?: string; right?: string; path?: string }[], repo: null as string | null, workspace: null as string | null, opened: null as { root: string; isRepo: boolean } | null, openedFor: null as string | null }));
 		// A `ggs <file>` launch shows exactly that file, alone.
 		if (context.file) {
 			await this.openFileStandalone(context.file);
+			return;
+		}
+		// A `ggs <workspace>.ggs-workspace` launch opens that multi-root workspace.
+		if (context.workspace) {
+			await this.openWorkspace(context.workspace);
 			return;
 		}
 		// A `ggs compare|hex|hex-compare|folder-compare ...` launch opens its comparison as the
@@ -1915,16 +1920,16 @@ export class Workbench {
 				}
 			}
 		} else {
-			// The backend re-opens its launch folder (a workspace's first root); the recents may
-			// hold the workspace file itself, which must win - opening the root as a plain folder
-			// would drop the workspace's other roots.
-			const remembered = state.lastFolder();
-			const last = remembered !== null && remembered.toLowerCase().endsWith('.ggs-workspace') ? remembered : context.repo ?? remembered;
+			// A `ggs <folder>` launch is explicit: it beats everything the last session
+			// remembered (VS Code's own precedence — `code <dir>` opens <dir>, whatever was
+			// open before). Only a no-argument launch falls back to the remembered folder —
+			// or to the remembered `.ggs-workspace` file, whose multi-root set must not
+			// reopen as its first root.
+			const last = context.repo ?? state.lastFolder();
 			if (last) {
 				if (last.toLowerCase().endsWith('.ggs-workspace')) {
 					await this.openWorkspace(last);
 				} else {
-					
 					if (context.opened !== null && context.openedFor === last) {
 						// The backend already opened this very folder inside `boot_context`:
 						// apply the answer directly instead of spending another round trip.

@@ -124,6 +124,10 @@ mod desktop {
         /// The comparisons a `ggs <subcommand> ...` launch opens in its window (see
         /// [`StartupAction`]), applied by the frontend's boot after it read them once.
         pub startup_actions: Mutex<Vec<StartupAction>>,
+        /// A `ggs <workspace>.ggs-workspace` launch: the workspace FILE the window opens as
+        /// its multi-root workspace. A file (not a folder) — it must not fall into
+        /// `single_file`, whose viewer would show the JSON instead of the workspace.
+        pub startup_workspace: Mutex<Option<String>>,
         /// Quick Open's file list, cached so repeat opens skip the tree walk (cmd_fs). The Arc
         /// lets the open-folder prefetch thread fill it without borrowing the Tauri state.
         pub file_list_cache: std::sync::Arc<cmd_fs::FileListCache>,
@@ -219,6 +223,7 @@ mod desktop {
                 repos: Mutex::new(Vec::new()),
                 single_file: Mutex::new(None),
                 startup_actions: Mutex::new(Vec::new()),
+                startup_workspace: Mutex::new(None),
                 file_list_cache: Arc::new(cmd_fs::FileListCache::default()),
                 symbol_cache: Arc::new(cmd_search::SymbolCache::default()),
                 search: Arc::new(cmd_search::SearchState::default()),
@@ -827,15 +832,16 @@ mod desktop {
     /// `opened` / `openedFor`: when the launch form can only open a folder (`ggs <folder>`,
     /// no file, no comparison), the folder is opened right here - one IPC round trip fewer
     /// on the boot's critical path, and the open happens during the splash instead of after
-    /// it. The frontend's own folder choice can differ (a remembered workspace file still
-    /// wins over the launch argument), so it applies this only when `openedFor` matches the
-    /// folder it picked, and re-opens the plain way otherwise.
+    /// it. The frontend's own folder choice can differ (a launch of a `.ggs-workspace` file
+    /// opens it as a workspace through `workspace` below), so it applies this only when
+    /// `openedFor` matches the folder it picked, and re-opens the plain way otherwise.
     #[derive(serde::Serialize)]
     #[serde(rename_all = "camelCase")]
     struct BootContext {
         file: Option<String>,
         actions: Vec<StartupAction>,
         repo: Option<String>,
+        workspace: Option<String>,
         opened: Option<OpenedFolder>,
         opened_for: Option<String>,
     }
@@ -850,8 +856,9 @@ mod desktop {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let file = state.single_file.lock().unwrap().clone();
         let actions = state.startup_actions.lock().unwrap().clone();
+        let workspace = state.startup_workspace.lock().unwrap().clone();
         let repo = state.first_repo();
-        let (opened, opened_for) = if file.is_none() && actions.is_empty() {
+        let (opened, opened_for) = if file.is_none() && actions.is_empty() && workspace.is_none() {
             match repo.clone() {
                 Some(folder) => (
                     open_folder_impl(state.inner(), &folder).await.ok(),
@@ -866,6 +873,7 @@ mod desktop {
             file,
             actions,
             repo,
+            workspace,
             opened,
             opened_for,
         })
@@ -1439,18 +1447,29 @@ mod desktop {
             if let Some(arg) = launch_path_of(&args) {
                 let path = std::path::PathBuf::from(&arg);
                 if path.is_file() {
-                    // The file's document (read, decode, rope, outline, the syntax set) builds
-                    // now, while the window and the webview come up: the page's `viewer_open`
-                    // then takes it ready-made. A small file never reaches the viewer, so its
-                    // prewarm is wasted but cheap; a binary file is skipped by the probe.
-                    viewer::prewarm(arg.clone());
-                    *state.single_file.lock().unwrap() = Some(arg.clone());
+                    if arg.to_ascii_lowercase().ends_with(".ggs-workspace") {
+                        // A workspace FILE launch opens the multi-root workspace — the
+                        // frontend's boot re-opens it through `open_workspace`. Not a
+                        // single-file launch: the viewer would show the JSON.
+                        stamp(&format!("launch workspace file: {arg}"));
+                        *state.startup_workspace.lock().unwrap() = Some(arg.clone());
+                    } else {
+                        // The file's document (read, decode, rope, outline, the syntax set) builds
+                        // now, while the window and the webview come up: the page's `viewer_open`
+                        // then takes it ready-made. A small file never reaches the viewer, so its
+                        // prewarm is wasted but cheap; a binary file is skipped by the probe.
+                        viewer::prewarm(arg.clone());
+                        *state.single_file.lock().unwrap() = Some(arg.clone());
+                    }
                 }
                 if path.is_dir() {
                     // The frontend's boot re-opens this path through `open_folder`, which resolves
                     // the repository root once the backend is up.
+                    stamp(&format!("launch folder: {arg}"));
                     state.repos.lock().unwrap().push(arg);
                 }
+            } else {
+                stamp("launch: no path argument");
             }
         } else {
             *state.startup_actions.lock().unwrap() = startup_actions;
