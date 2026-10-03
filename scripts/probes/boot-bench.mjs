@@ -21,7 +21,12 @@ import { fileURLToPath } from 'node:url';
 
 const appDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const release = join(appDir, 'target', 'studio', 'cargo', 'release');
-const defaultExe = process.platform === 'win32' ? join(release, 'git-graph-studio.exe') : join(release, 'git-graph-studio');
+// The default target is the tauri-built binary (mainBinaryName, ggs): a bare `cargo build`
+// binary is the dev-server build — its context bakes build.devUrl in, so standalone it
+// shows Chromium's error page for http://localhost:5173 and never stamps a stage.
+const tauriExe = process.platform === 'win32' ? join(release, 'ggs.exe') : join(release, 'ggs');
+const cargoExe = process.platform === 'win32' ? join(release, 'git-graph-studio.exe') : join(release, 'git-graph-studio');
+const defaultExe = existsSync(tauriExe) ? tauriExe : cargoExe;
 
 const args = process.argv.slice(2);
 const target = args.find((a) => !a.startsWith('--'));

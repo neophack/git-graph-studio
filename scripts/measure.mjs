@@ -102,7 +102,7 @@ export function runBootBench(repo) {
 	if (!existsSync(exe) || !repo) return null;
 	const out = join(studio, 'boot-bench.json');
 	const probe = join(appDir, 'scripts', 'probes', 'boot-bench.mjs');
-	const result = spawnSync(process.execPath, [probe, repo, '--runs', '5', '--until', 'graph first page', '--json', out], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+	const result = spawnSync(process.execPath, [probe, repo, '--runs', '5', '--until', 'graph first page', '--json', out, '--exe', exe], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
 	if (result.status !== 0 || !existsSync(out)) {
 		console.error(result.stderr || result.stdout);
 		return null;
