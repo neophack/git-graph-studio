@@ -133,7 +133,8 @@ The app installs a `ggs` command, like VS Code's `code`:
 ```sh
 ggs                                   # open the app (last folder, as at a normal launch)
 ggs .                                 # open the current directory
-ggs <path>                            # open that folder (a file opens in single-file mode)
+ggs <path>                            # open that folder (a file opens in single-file mode;
+                                       #   a .ggs-workspace file opens as the workspace)
 ggs --compare <a> <b>                 # open a text diff of two files (a binary pair opens
                                       #   the hex comparison)
 ggs --hex <file>                      # open the file in the hex viewer

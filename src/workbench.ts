@@ -1601,23 +1601,32 @@ export class Workbench {
 	}
 
 	/** The Finder "Open With" handoff ([`OPEN_PATHS_EVENT`], macOS only - a folder picked
-	 * under "打开方式 / Open With", or a file the associations claim). A folder takes over
-	 * only an empty window; one that is showing anything (a folder, a workspace, a single
-	 * file) gets a new instance carrying it - the multi-open answer to "open this folder",
-	 * the same handoff the Dock and File menus spell "New Window". A file opens the way a
-	 * drop does: an editor tab over an open folder, the whole window otherwise. */
+	 * under "打开方式 / Open With", or a file the associations claim). A folder — or a
+	 * `.ggs-workspace` file, a container like a folder and never a document whose JSON a
+	 * viewer would show — takes over only an empty window; one that is showing anything (a
+	 * folder, a workspace, a single file) gets a new instance carrying it - the multi-open
+	 * answer to "open this folder", the same handoff the Dock and File menus spell "New
+	 * Window". Every other file opens the way a drop does: an editor tab over an open
+	 * folder, the whole window otherwise. */
 	private async onOpenPaths(payload: OpenedPaths): Promise<void> {
-		for (const folder of payload.folders) {
+		const workspaces: string[] = [];
+		const documents: string[] = [];
+		for (const file of payload.files) {
+			(file.toLowerCase().endsWith('.ggs-workspace') ? workspaces : documents).push(file);
+		}
+		for (const path of [...payload.folders, ...workspaces]) {
 			if (this.repoPath !== null || this.singleFile !== null) {
-				await invoke('app_new_instance', { folder }).catch((error) => notify('error', tf('workbench.newWindowFailed', String(error))));
+				await invoke('app_new_instance', { folder: path }).catch((error) => notify('error', tf('workbench.newWindowFailed', String(error))));
+			} else if (path.toLowerCase().endsWith('.ggs-workspace')) {
+				await this.openWorkspace(path);
 			} else {
-				await this.openFolder(folder);
+				await this.openFolder(path);
 			}
 		}
 		// Decided after the folders: one of them may have just become this window's content,
 		// and its files belong in it rather than in a standalone window.
 		let standalone = this.repoPath === null && this.singleFile === null;
-		for (const file of payload.files) {
+		for (const file of documents) {
 			if (standalone) {
 				await this.openFileStandalone(file);
 				standalone = false;
@@ -1885,15 +1894,17 @@ export class Workbench {
 		// folder argument) decides everything the boot does next. A plain-folder launch is
 		// opened inside this very call (the backend opens it during the splash), so when the
 		// folder the boot picks matches, the answer is applied directly - no second round trip.
-		const context = await invoke<{ file: string | null; actions: { type: string; left?: string; right?: string; path?: string }[]; repo: string | null; workspace: string | null; opened: { root: string; isRepo: boolean } | null; openedFor: string | null }>('boot_context')
-			.catch(() => ({ file: null as string | null, actions: [] as { type: string; left?: string; right?: string; path?: string }[], repo: null as string | null, workspace: null as string | null, opened: null as { root: string; isRepo: boolean } | null, openedFor: null as string | null }));
+		const context = await invoke<{ file: string | null; actions: { type: string; left?: string; right?: string; path?: string }[]; repo: string | null; workspace: string | null; reloaded: boolean; opened: { root: string; isRepo: boolean } | null; openedFor: string | null }>('boot_context')
+			.catch(() => ({ file: null as string | null, actions: [] as { type: string; left?: string; right?: string; path?: string }[], repo: null as string | null, workspace: null as string | null, reloaded: false, opened: null as { root: string; isRepo: boolean } | null, openedFor: null as string | null }));
 		// A `ggs <file>` launch shows exactly that file, alone.
 		if (context.file) {
 			await this.openFileStandalone(context.file);
 			return;
 		}
-		// A `ggs <workspace>.ggs-workspace` launch opens that multi-root workspace.
-		if (context.workspace) {
+		// A `ggs <workspace>.ggs-workspace` launch opens that multi-root workspace. A page
+		// reload is past its launch: the window may have switched folders since, and what it
+		// holds now is the remembered folder below.
+		if (context.workspace && !context.reloaded) {
 			await this.openWorkspace(context.workspace);
 			return;
 		}
@@ -1924,8 +1935,12 @@ export class Workbench {
 			// remembered (VS Code's own precedence — `code <dir>` opens <dir>, whatever was
 			// open before). Only a no-argument launch falls back to the remembered folder —
 			// or to the remembered `.ggs-workspace` file, whose multi-root set must not
-			// reopen as its first root.
-			const last = context.repo ?? state.lastFolder();
+			// reopen as its first root. A page reload is no launch: the backend still holds
+			// the window's open roots, `repo` being a workspace's FIRST root, so there the
+			// remembered workspace file wins - its other roots would drop otherwise.
+			const remembered = state.lastFolder();
+			const rememberedWorkspace = remembered !== null && remembered.toLowerCase().endsWith('.ggs-workspace');
+			const last = context.reloaded && rememberedWorkspace ? remembered : context.repo ?? remembered;
 			if (last) {
 				if (last.toLowerCase().endsWith('.ggs-workspace')) {
 					await this.openWorkspace(last);

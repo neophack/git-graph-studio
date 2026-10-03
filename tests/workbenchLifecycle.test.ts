@@ -128,6 +128,39 @@ describe('the boot sequence', () => {
 		// The folder rode along with boot_context: this boot ran no open_folder exchange.
 		expect(backend.callsTo('open_folder').length).toBe(openCallsBefore);
 	});
+
+	/** Re-boot against the given launch context, with `remembered` as the last session's folder. */
+	async function reboot(context: Record<string, unknown>, remembered: string): Promise<void> {
+		workbench.dispose();
+		state.rememberFolder(remembered);
+		backend.calls.length = 0;
+		backend.handlers.set('boot_context', () => ({ file: null, actions: [], workspace: null, ...context }));
+		workbench = new Workbench();
+		await workbench.boot();
+		await flush(10);
+	}
+
+	it('an explicit folder launch beats a remembered workspace file', async () => {
+		await reboot({ repo: REPO_B, reloaded: false }, 'C:\\team.ggs-workspace');
+		expect(backend.callsTo('open_workspace')).toEqual([]);
+		expect(backend.callsTo('open_folder')).toEqual([{ path: REPO_B }]);
+	});
+
+	it('a page reload of a multi-root workspace reopens the workspace, not its first root alone', async () => {
+		// The backend still holds the open workspace's roots, so `repo` is its first root —
+		// opening that as a plain folder would drop the workspace's other roots.
+		await reboot({ repo: `${REPO_A}\\one`, reloaded: true }, 'C:\\team.ggs-workspace');
+		expect(backend.callsTo('open_workspace')).toEqual([{ path: 'C:\\team.ggs-workspace' }]);
+		expect(backend.callsTo('open_folder')).toEqual([]);
+	});
+
+	it('a page reload reopens what the window holds now, not the workspace file it was launched with', async () => {
+		// Launched as `ggs team.ggs-workspace`, then switched to a plain folder: the launch
+		// form is spent, the reload shows the folder.
+		await reboot({ repo: REPO_B, workspace: 'C:\\team.ggs-workspace', reloaded: true }, REPO_B);
+		expect(backend.callsTo('open_workspace')).toEqual([]);
+		expect(workbench.currentRepo).toBe(REPO_B);
+	});
 });
 
 
@@ -455,6 +488,28 @@ describe('the Finder open-paths handoff', () => {
 		await flush(8);
 		expect(workbench.editors.openFilePaths()).toEqual([STANDALONE]);
 		expect(backend.callsTo('boot_stage').some((args) => args.stage === 'single file shown')).toBe(true);
+	});
+
+	it('takes a workspace file over an empty window — the workspace opens, never the JSON standalone', async () => {
+		workbench.dispose();
+		localStorage.clear();
+		backend.handlers.set('boot_context', () => ({ file: null, actions: [], repo: null }));
+		workbench = new Workbench();
+		await workbench.boot();
+		await flush(6);
+
+		backend.emit(OPEN_PATHS_EVENT, { folders: [], files: ['C:\\team.ggs-workspace'] });
+		await flush(12);
+		expect(backend.callsTo('open_workspace')).toEqual([{ path: 'C:\\team.ggs-workspace' }]);
+		expect(backend.callsTo('boot_stage').some((args) => args.stage === 'single file shown')).toBe(false);
+		expect(workbench.editors.openFilePaths()).toEqual([]);
+	});
+
+	it('hands a workspace file to a new instance while a window is showing something', async () => {
+		backend.emit(OPEN_PATHS_EVENT, { folders: [], files: ['C:\\team.ggs-workspace'] });
+		await flush(8);
+		expect(backend.callsTo('app_new_instance')).toEqual([{ folder: 'C:\\team.ggs-workspace' }]);
+		expect(workbench.editors.openFilePaths()).toEqual([]);
 	});
 });
 

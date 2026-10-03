@@ -835,6 +835,12 @@ mod desktop {
     /// it. The frontend's own folder choice can differ (a launch of a `.ggs-workspace` file
     /// opens it as a workspace through `workspace` below), so it applies this only when
     /// `openedFor` matches the folder it picked, and re-opens the plain way otherwise.
+    ///
+    /// `reloaded`: this window's page asked before - a webview reload, not a launch. The
+    /// state above is then what the window holds NOW (a multi-root workspace's first root
+    /// as `repo`), so the frontend lets the remembered folder win and nothing is opened
+    /// eagerly: opening that first root would collapse the workspace before the frontend
+    /// re-opens it.
     #[derive(serde::Serialize)]
     #[serde(rename_all = "camelCase")]
     struct BootContext {
@@ -842,6 +848,7 @@ mod desktop {
         actions: Vec<StartupAction>,
         repo: Option<String>,
         workspace: Option<String>,
+        reloaded: bool,
         opened: Option<OpenedFolder>,
         opened_for: Option<String>,
     }
@@ -851,29 +858,31 @@ mod desktop {
         // First thing, before the awaits: from here on the frontend has its launch context,
         // so a Finder "Open With" handoff must cross as the open-paths event instead of
         // seeding a context that was just read (see `handle_opened`).
-        state
+        let reloaded = state
             .boot_context_served
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+            .swap(true, std::sync::atomic::Ordering::SeqCst);
         let file = state.single_file.lock().unwrap().clone();
         let actions = state.startup_actions.lock().unwrap().clone();
         let workspace = state.startup_workspace.lock().unwrap().clone();
         let repo = state.first_repo();
-        let (opened, opened_for) = if file.is_none() && actions.is_empty() && workspace.is_none() {
-            match repo.clone() {
-                Some(folder) => (
-                    open_folder_impl(state.inner(), &folder).await.ok(),
-                    Some(folder),
-                ),
-                None => (None, None),
-            }
-        } else {
-            (None, None)
-        };
+        let (opened, opened_for) =
+            if !reloaded && file.is_none() && actions.is_empty() && workspace.is_none() {
+                match repo.clone() {
+                    Some(folder) => (
+                        open_folder_impl(state.inner(), &folder).await.ok(),
+                        Some(folder),
+                    ),
+                    None => (None, None),
+                }
+            } else {
+                (None, None)
+            };
         Ok(BootContext {
             file,
             actions,
             repo,
             workspace,
+            reloaded,
             opened,
             opened_for,
         })
@@ -977,7 +986,8 @@ mod desktop {
     }
 
     /// The cold-start half of the Finder "Open With" handoff: record the opened path the
-    /// way the argv launch records it (`ggs <folder>` / `ggs <file>` — run()'s branch), so
+    /// way the argv launch records it (`ggs <folder>` / `ggs <file>` — run()'s branch,
+    /// a `.ggs-workspace` file seeding the workspace launch, not single-file mode), so
     /// the `boot_context` the frontend has not asked for yet opens it as this window's
     /// launch form, remembered-folder precedence and all. Answers whether the path was
     /// taken: a window whose argv already carried a launch form is left alone, and the
@@ -986,7 +996,8 @@ mod desktop {
     pub fn seed_launch_paths(state: &AppState, folders: &[String], files: &[String]) -> bool {
         let mut repos = state.repos.lock().unwrap();
         let mut single = state.single_file.lock().unwrap();
-        if !repos.is_empty() || single.is_some() {
+        let mut workspace = state.startup_workspace.lock().unwrap();
+        if !repos.is_empty() || single.is_some() || workspace.is_some() {
             return false;
         }
         if let Some(folder) = folders.first() {
@@ -998,8 +1009,14 @@ mod desktop {
                 stamp("syntax set ready");
             });
         } else if let Some(file) = files.first() {
-            viewer::prewarm(file.clone());
-            *single = Some(file.clone());
+            if file.to_ascii_lowercase().ends_with(".ggs-workspace") {
+                // Run()'s branch verbatim: a workspace FILE opens the multi-root workspace,
+                // never `single_file`, whose viewer would show the JSON.
+                *workspace = Some(file.clone());
+            } else {
+                viewer::prewarm(file.clone());
+                *single = Some(file.clone());
+            }
         } else {
             return false;
         }
@@ -1142,7 +1159,9 @@ mod desktop {
             "Usage: ggs [flag] [paths]".to_owned(),
             String::new(),
             "  ggs                                  open the app (the last folder, as at a normal launch)".to_owned(),
-            "  ggs <path>                           open that folder (a file opens in single-file mode)".to_owned(),
+            "  ggs <path>                           open that folder (a file opens in single-file".to_owned(),
+            "                                       mode; a .ggs-workspace file opens as the".to_owned(),
+            "                                       workspace)".to_owned(),
             "  ggs --compare <left> <right>         open a text diff of two files (a binary pair opens".to_owned(),
             "                                       the hex comparison)".to_owned(),
             "  ggs --hex <file>                     open the file in the hex viewer".to_owned(),
@@ -1972,6 +1991,33 @@ mod opened_paths_tests {
         let state = AppState::new();
         assert!(!seed_launch_paths(&state, &[], &[]));
         assert_eq!(state.repos.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_workspace_file_seeds_the_workspace_launch_not_single_file() {
+        // The cold-start handoff mirrors the argv launch's `.ggs-workspace` branch: the
+        // file opens as the multi-root workspace, never as the JSON in the single-file
+        // viewer (the bug 76f73bb fixed for `ggs <workspace>.ggs-workspace`).
+        let state = AppState::new();
+        let temp = tempfile::tempdir().unwrap();
+        let ws_file = temp.path().join("team.ggs-workspace");
+        std::fs::write(&ws_file, br#"{"folders": [{"path": "."}]}"#).unwrap();
+        let ws = ws_file.display().to_string();
+        assert!(seed_launch_paths(&state, &[], std::slice::from_ref(&ws)));
+        assert_eq!(*state.startup_workspace.lock().unwrap(), Some(ws.clone()));
+        assert_eq!(state.single_file.lock().unwrap().clone(), None);
+
+        // A window whose launch already carried a workspace file is never re-seeded.
+        assert!(!seed_launch_paths(
+            &state,
+            ["/elsewhere".into()].as_slice(),
+            &[]
+        ));
+        assert_eq!(state.repos.lock().unwrap().len(), 0);
+        assert_eq!(
+            state.startup_workspace.lock().unwrap().clone().as_deref(),
+            Some(ws.as_str())
+        );
     }
 }
 
