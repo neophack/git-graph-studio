@@ -219,13 +219,10 @@ fn opening_a_large_repository_stays_within_the_budgets() {
         "every 10th file carries a TODO ({hits} found)"
     );
 
-    // Plan §3.4's streaming promise: the first batch reaches the view within 200 ms. The
-    // probe stops after that batch, so it costs one BATCH_FILES slice, not the tree.
+    // Plan §3.4's streaming promise, recorded like every other size — measured, never
+    // gated (2026-10-03, the owner's direction: the 200 ms assert left the same day it
+    // landed). The probe stops after that batch, so it costs one BATCH_FILES slice.
     let first_batch_ms = cmd_search::search_first_batch_ms(&list, &root, "TODO").unwrap();
-    assert!(
-        first_batch_ms <= 200.0 * allowance,
-        "the first streaming batch {first_batch_ms} ms (plan §3.4: 200 ms × the debug allowance)"
-    );
 
     let started = Instant::now();
     let symbols = cmd_search::index_symbols_of(&root);
