@@ -115,7 +115,7 @@ svg.i.xs { width: 13px; height: 13px; }
 	width: 44px; height: 44px; border-radius: 13px; display: grid; place-items: center;
 	background: linear-gradient(135deg, var(--brand), #c25a3c); color: #fff; box-shadow: 0 6px 18px rgba(217, 119, 87, .35);
 }
-.brand-mark svg { width: 24px; height: 24px; }
+.brand-mark svg { width: 24px; height: 24px; fill: currentColor; stroke: none; }
 .brand h1 { margin: 0; font-size: 19px; letter-spacing: -.01em; }
 .brand p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
 .pair-card h2 { margin: 0 0 6px; font-size: 16px; }
