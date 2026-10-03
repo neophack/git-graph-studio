@@ -870,6 +870,34 @@ pub fn search_literal(files: &[String], root: &str, query: &str) -> Result<Searc
     search_root(files.to_vec(), root, query, false, false, false)
 }
 
+/// The first streaming batch's latency, in milliseconds — plan §3.4's "the first batch
+/// reaches the UI within 200 ms" as a number instead of an adjective. The scan stops right
+/// after the first batch lands (the stop flag trips on the emitted batch), so the probe pays
+/// one batch's work, not the whole tree. The clock is microsecond — a small first batch can
+/// land in well under a millisecond, and a 0 would read as "no batch". `Err` when the first
+/// batch held no hits: the caller's query missed the head of the tree — pick one that hits.
+pub fn search_first_batch_ms(files: &[String], root: &str, query: &str) -> Result<f64, String> {
+    let matcher = build_matcher(query, false, false, false)?;
+    let first_us = AtomicU64::new(0);
+    let started = Instant::now();
+    search_files(
+        files,
+        root,
+        &matcher,
+        |_batch| {
+            first_us.store(
+                u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+        },
+        || first_us.load(Ordering::Relaxed) != 0,
+    );
+    let us = first_us.load(Ordering::Relaxed);
+    (us > 0)
+        .then_some(us as f64 / 1000.0)
+        .ok_or_else(|| format!("the first batch found no {query:?} hits"))
+}
+
 /// Serve the symbol index from the per-folder cache when it is fresh; otherwise rebuild it.
 pub(crate) fn cached_symbols(root: &str, cache: &SymbolCache) -> Vec<WorkspaceSymbol> {
     {
@@ -1137,6 +1165,34 @@ mod tests {
         );
         assert!(cancelled);
         assert!(scanned < 600);
+    }
+
+    #[test]
+    fn the_first_batch_probe_answers_one_batchs_latency_and_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..600 {
+            std::fs::write(dir.path().join(format!("f{i:04}.txt")), "needle\n").unwrap();
+        }
+        let root = dir.path().display().to_string();
+        let files = walk_files(&root);
+
+        let ms = search_first_batch_ms(&files, &root, "needle").unwrap();
+        assert!(
+            ms > 0.0 && ms < 5000.0,
+            "the first batch's latency is a real number ({ms} ms)"
+        );
+
+        // A single tiny file lands in well under a millisecond — the microsecond clock
+        // keeps that a number, not a false "no batch".
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "// TODO one\nfn alpha() {}\n").unwrap();
+        let files = walk_files(&dir.path().display().to_string());
+        let ms = search_first_batch_ms(&files, &dir.path().display().to_string(), "TODO").unwrap();
+        assert!(ms > 0.0, "a sub-millisecond first batch still reports ({ms} ms)");
+
+        // A query the head of the tree never matches is an error, not a null: the caller
+        // picks a query that hits early (the measure probe's own words).
+        assert!(search_first_batch_ms(&files, &root, "no-such-needle").is_err());
     }
 
     #[test]

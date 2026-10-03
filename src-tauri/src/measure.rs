@@ -9,7 +9,8 @@
 //! - `walkFiles`: the `.gitignore`-aware parallel walk Quick Open and the search use;
 //! - `scmStatus`: the working-tree status over the git CLI (the SCM view's list);
 //! - `symbolIndex`: the whole-workspace symbol extraction Go to Definition reads;
-//! - `searchTodo`: a literal, case-insensitive search for `TODO` across the tree.
+//! - `searchTodo`: a literal, case-insensitive search for `TODO` across the tree;
+//! - `searchFirstBatch`: that search's first streaming batch (plan §3.4's 200 ms line).
 
 use std::time::Instant;
 
@@ -81,6 +82,10 @@ pub fn run(folder: &str) -> Result<String, String> {
     let search = cmd_search::search_literal(&files, &root, "TODO")?;
     let search_ms = ms(started);
 
+    // Plan §3.4's streaming promise, as a number: the first batch's latency (the scan
+    // stops right after it, so this is one batch's work, not the tree's).
+    let first_batch_ms = cmd_search::search_first_batch_ms(&files, &root, "TODO")?;
+
     // The single-file open path: a synthetic large file through the exact steps the editor's
     // open takes - raw read, encoding-decoding to text, the viewer document build (with its
     // syntax setup) and the first highlighted screen. `GGS_PERF_FILE_MB` sizes it (default
@@ -105,6 +110,7 @@ pub fn run(folder: &str) -> Result<String, String> {
             "symbolIndex": symbols_ms,
             "analysisBuild": analysis_ms,
             "searchTodo": search_ms,
+            "searchFirstBatch": first_batch_ms,
             "largeFileRead": read_ms,
             "largeFileDecode": decode_ms,
             "largeFileViewer": viewer_ms
@@ -175,6 +181,7 @@ mod tests {
         // The large-file probe always reports (a synthetic file, so it needs no repository).
         assert!(plain["ms"]["largeFileRead"].is_number());
         assert!(plain["ms"]["largeFileViewer"].is_number());
+        assert!(plain["ms"]["searchFirstBatch"].is_number());
         assert!(plain["largeFileLines"].as_u64().unwrap() > 0);
 
         // A repository is measured for real now that the status read is the app's own: the
