@@ -269,6 +269,8 @@ paged, never loaded whole.
   `src/hexCompare.ts` (byte-aligned two-pane compare)
 - Backend: `src-tauri/src/viewer/`, byte comparison in `cmd_search.rs`, chunked reads via
   `cmd_fs.rs`
+- Bench: `src-tauri/examples/viewer_bench.rs` (the open path's phases — syntax set, rope,
+  `ViewerDoc::new`, the first highlight window — `viewer_bench [mb]`)
 - Dev probe: `dev/hex-probe.html` (the hex view in isolation, against any theme)
 
 ### 8. Compare & Merge
