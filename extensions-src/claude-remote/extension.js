@@ -134,12 +134,12 @@ function activate(context) {
 	status.command = "claude-remote.reveal";
 	const paintStatus = () => {
 		if (!live) {
-			status.text = "$(radio-tower) Remote";
+			status.text = "$(device-mobile) Remote";
 			status.tooltip = L("Claude Remote 未启动 —— 点击打开面板并扫码配对", "Claude Remote is off — click to open the panel and pair a phone");
 		} else {
 			const online = live.devices().filter((d) => d.online).length;
 			const { running } = runner.summary();
-			status.text = `$(radio-tower) Remote${online ? " · " + online : ""}${running ? " $(sync~spin)" : ""}`;
+			status.text = `$(device-mobile) Remote${online ? " · " + online : ""}${running ? " $(sync~spin)" : ""}`;
 			status.tooltip = L(`Claude Remote 运行中 · 端口 ${live.port} · ${online} 台设备在线`, `Claude Remote on port ${live.port} · ${online} device(s) online`);
 		}
 	};

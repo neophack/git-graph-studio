@@ -7,6 +7,7 @@
   "categories": [
     "Other"
   ],
+  "icon": "media/icon.png",
   "main": "./extension.js",
   "engines": {
     "vscode": "^1.100.0"

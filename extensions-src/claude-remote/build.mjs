@@ -56,7 +56,7 @@ const files = [
 	['extension/package.json', readFileSync(resolve(here, 'package.json'))],
 	...[
 		'extension.js', 'sessions.js', 'runner.js', 'server.js', 'panel.js', 'desktop.js', 'qrcode.js', 'sjcl.js', 'README.md',
-		'web/index.html', 'web/app.js', 'web/app.css', 'web/icon.svg', 'web/manifest.webmanifest'
+		'web/index.html', 'web/app.js', 'web/app.css', 'web/icon.svg', 'web/manifest.webmanifest', 'media/icon.png'
 	].map((file) => [`extension/${file}`, readFileSync(resolve(here, file))])
 ];
 
