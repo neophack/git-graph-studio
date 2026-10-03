@@ -162,7 +162,7 @@ describe('the commands no other harness drives', () => {
 		expect(workbench.editors.groupCount).toBe(2);
 		// The split shows the same file again, as VS Code's does.
 		expect(workbench.editors.groups()[1]!.openFilePaths()).toEqual([NOTES]);
-		await commands.execute('workbench.splitEditorDown');
+		await commands.execute('workbench.action.splitEditorDown');
 		await flush(6);
 		expect(workbench.editors.groupCount).toBe(3);
 		await commands.execute('workbench.focusSecondEditorGroup');
@@ -171,6 +171,46 @@ describe('the commands no other harness drives', () => {
 		expect(workbench.editors.focusedIndex).toBe(2);
 		await commands.execute('workbench.focusFirstEditorGroup');
 		expect(workbench.editors.focusedIndex).toBe(0);
+	});
+
+	it('the editor-group family: orthogonal split, focus adjacency, move editor, maximize, join, reset', async () => {
+		await workbench.editors.openFile(NOTES);
+		await flush(6);
+		// Orthogonal: the first cut is down (the default last split is horizontal).
+		await commands.execute('workbench.action.splitEditorOrthogonal');
+		await flush(6);
+		expect(workbench.editors.groupCount).toBe(2);
+		expect(document.querySelectorAll('.editor-area-col').length).toBeGreaterThan(0);
+		// Focus adjacency walks the visual order; at the edges it stays.
+		await commands.execute('workbench.action.focusNextGroup');
+		expect(workbench.editors.focusedIndex).toBe(1);
+		await commands.execute('workbench.action.focusNextGroup');
+		expect(workbench.editors.focusedIndex).toBe(1);
+		await commands.execute('workbench.action.focusPreviousGroup');
+		expect(workbench.editors.focusedIndex).toBe(0);
+		// Maximize, then leave it by focusing the other group.
+		await commands.execute('workbench.action.toggleMaximizeEditorGroup');
+		expect(document.getElementById('editorGroup')!.classList.contains('maximized')).toBe(true);
+		await commands.execute('workbench.action.focusNextGroup');
+		expect(document.getElementById('editorGroup')!.classList.contains('maximized')).toBe(false);
+		// The move hands the tab to the neighbour and the emptied source collapses. The
+		// orthogonal split duplicated the editor, so the receiver ends up holding both tabs.
+		await commands.execute('workbench.action.focusPreviousGroup');
+		await commands.execute('workbench.action.moveEditorToNextGroup');
+		await flush(6);
+		expect(workbench.editors.groupCount).toBe(1);
+		expect(workbench.editors.groups()[0]!.openFilePaths()).toEqual([NOTES, NOTES]);
+		// Join folds everything back into one group; reset closes it and keeps one.
+		await commands.execute('workbench.splitEditor');
+		await flush(6);
+		expect(workbench.editors.groupCount).toBe(2);
+		await commands.execute('workbench.action.joinAllGroups');
+		await flush(6);
+		expect(workbench.editors.groupCount).toBe(1);
+		await commands.execute('workbench.action.resetEditorGroups');
+		await flush(6);
+		expect(workbench.editors.groupCount).toBe(1);
+		expect(workbench.editors.openFilePaths()).toEqual([]);
 	});
 
 	it('Next / Previous Editor cycle the tabs; Go Back / Go Forward walk the history', async () => {

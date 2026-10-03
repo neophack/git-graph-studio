@@ -39,6 +39,7 @@ const LIVE_COMMANDS: ReadonlySet<string> = new Set([
 	'workbench.nextEditor',
 	'workbench.previousEditor',
 	'workbench.splitEditor',
+	'workbench.action.splitEditorOrthogonal',
 	'workbench.focusFirstEditorGroup',
 	'workbench.focusSecondEditorGroup',
 	'workbench.focusThirdEditorGroup',

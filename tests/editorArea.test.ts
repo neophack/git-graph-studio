@@ -634,19 +634,19 @@ describe('editor area (M3 3.1)', () => {
 
 describe('the grid snapshot when a group holds no files', () => {
 	it('numbers the cells over the session-bearing groups only, so a restore lands files in their panes', async () => {
-		files({ 'C:\repo\a.ts': 'a\n', 'C:\repo\c.ts': 'c\n' });
+		files({ 'C:\\repo\\a.ts': 'a\n', 'C:\\repo\\c.ts': 'c\n' });
 		const area = new EditorArea(document.getElementById('editorGroup')!);
-		area.setRoot('C:\repo');
-		await area.openFile('C:\repo\a.ts');
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
 		// Three groups: a.ts | Git Graph (no file - dropped from the sessions) | c.ts.
 		const middle = area.split('right');
 		await middle.openHelp('welcome');
 		const right = area.split('right');
-		await right.openFile('C:\repo\c.ts');
+		await right.openFile('C:\\repo\\c.ts');
 		expect(area.groupCount).toBe(3);
 		expect(area.groupSessions()).toEqual([
-			{ files: ['C:\repo\a.ts'], active: 'C:\repo\a.ts' },
-			{ files: ['C:\repo\c.ts'], active: 'C:\repo\c.ts' }
+			{ files: ['C:\\repo\\a.ts'], active: 'C:\\repo\\a.ts' },
+			{ files: ['C:\\repo\\c.ts'], active: 'C:\\repo\\c.ts' }
 		]);
 		// The cells line up with the sessions: two of them, the graph's pane left out, its
 		// share handed to the survivors (proportions still sum to one).
@@ -656,24 +656,24 @@ describe('the grid snapshot when a group holds no files', () => {
 
 		// A layout whose only file-bearing group is one of several is a single-group session.
 		const single = new EditorArea(document.getElementById('editorGroup')!);
-		single.setRoot('C:\repo');
-		await single.openFile('C:\repo\a.ts');
+		single.setRoot('C:\\repo');
+		await single.openFile('C:\\repo\\a.ts');
 		await single.split('right').openHelp('welcome');
 		expect(single.groupCount).toBe(2);
 		expect(single.gridLayout()).toBeNull();
 	});
 
 	it('collapses a split left with one cell into that cell', async () => {
-		files({ 'C:\repo\a.ts': 'a\n', 'C:\repo\b.ts': 'b\n' });
+		files({ 'C:\\repo\\a.ts': 'a\n', 'C:\\repo\\b.ts': 'b\n' });
 		const area = new EditorArea(document.getElementById('editorGroup')!);
-		area.setRoot('C:\repo');
-		await area.openFile('C:\repo\a.ts');
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
 		// a.ts | (graph over b.ts): the right column's graph pane drops, leaving b.ts alone
 		// in it - the column disappears and b.ts becomes the row's second cell directly.
 		const rightTop = area.split('right');
 		await rightTop.openHelp('welcome');
 		const rightBottom = area.split('down');
-		await rightBottom.openFile('C:\repo\b.ts');
+		await rightBottom.openFile('C:\\repo\\b.ts');
 		expect(area.groupCount).toBe(3);
 		expect(area.gridLayout()).toEqual({ axis: 'x', sizes: [0.5, 0.5], children: [{ group: 0 }, { group: 1 }] });
 	});
@@ -681,25 +681,318 @@ describe('the grid snapshot when a group holds no files', () => {
 
 describe('the sash between three groups', () => {
 	it('moves a pair\'s shares by the dragged fraction of the split, not of the pair', async () => {
-		files({ 'C:\repo\a.ts': 'a\n', 'C:\repo\b.ts': 'b\n', 'C:\repo\c.ts': 'c\n' });
+		files({ 'C:\\repo\\a.ts': 'a\n', 'C:\\repo\\b.ts': 'b\n', 'C:\\repo\\c.ts': 'c\n' });
 		const area = new EditorArea(document.getElementById('editorGroup')!);
-		area.setRoot('C:\repo');
-		await area.openFile('C:\repo\a.ts');
-		await area.split('right').openFile('C:\repo\b.ts');
-		await area.split('right').openFile('C:\repo\c.ts');
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
+		await area.split('right').openFile('C:\\repo\\b.ts');
+		await area.split('right').openFile('C:\\repo\\c.ts');
+		// Each split halves its source: a keeps its half, b and c share the other half.
 		expect(area.gridLayout()).toEqual({ axis: 'x', sizes: [0.5, 0.25, 0.25], children: [{ group: 0 }, { group: 1 }, { group: 2 }] });
 		const row = document.querySelector<HTMLElement>('.editor-area-row')!;
 		row.getBoundingClientRect = () => ({ width: 1000, height: 500, top: 0, left: 0, right: 1000, bottom: 500, x: 0, y: 0, toJSON: () => undefined });
 		// Drag the second sash (between b and c) 100px to the right: a tenth of the row's
-		// width moves from c to b - 0.25 -> 0.35 and 0.25 -> 0.15, the first group untouched.
+		// width moves from c to b - b becomes 0.35 and c 0.15, the first group untouched.
 		const sash = document.querySelectorAll<HTMLElement>('.editor-sash')[1]!;
-		sash.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 750, clientY: 100 }));
-		document.dispatchEvent(new MouseEvent('mousemove', { clientX: 850, clientY: 100 }));
-		document.dispatchEvent(new MouseEvent('mouseup', { clientX: 850, clientY: 100 }));
+		sash.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 667, clientY: 100 }));
+		document.dispatchEvent(new MouseEvent('mousemove', { clientX: 767, clientY: 100 }));
+		document.dispatchEvent(new MouseEvent('mouseup', { clientX: 767, clientY: 100 }));
 		await flush();
 		const sizes = (area.gridLayout() as { sizes: number[] }).sizes;
 		expect(sizes[0]).toBeCloseTo(0.5);
-		expect(sizes[1]).toBeCloseTo(0.35);
-		expect(sizes[2]).toBeCloseTo(0.15);
+		expect(sizes[1]).toBeCloseTo(0.25 + 0.1);
+		expect(sizes[2]).toBeCloseTo(0.25 - 0.1);
 	});
 });
+
+describe('a split takes half of the source, a close hands it back proportionally', () => {
+	const shares = (area: EditorArea) => (area.gridLayout() as { sizes: number[] }).sizes;
+
+	it('a split from a middle pane joins the row and splits only the source\'s share', async () => {
+		files({ 'C:\\repo\\a.ts': 'a\n', 'C:\\repo\\b.ts': 'b\n', 'C:\\repo\\c.ts': 'c\n', 'C:\\repo\\d.ts': 'd\n' });
+		const area = new EditorArea(document.getElementById('editorGroup')!);
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
+		await area.split('right').openFile('C:\\repo\\b.ts');
+		await area.split('right').openFile('C:\\repo\\c.ts');
+		area.focusIndex(1);
+		await area.split('right').openFile('C:\\repo\\d.ts');
+		// b's quarter halves for the newcomer: a's half and c's quarter stay untouched, as
+		// VS Code's grid never reflows the groups a split does not touch. The cells number
+		// in visual order: a, b, d, c.
+		expect(area.gridLayout()).toEqual({ axis: 'x', sizes: [0.5, 0.125, 0.125, 0.25], children: [{ group: 0 }, { group: 1 }, { group: 2 }, { group: 3 }] });
+	});
+
+	it('closing a pane hands its share back proportionally, a dragged layout included', async () => {
+		files({ 'C:\\repo\\a.ts': 'a\n', 'C:\\repo\\b.ts': 'b\n', 'C:\\repo\\c.ts': 'c\n' });
+		const area = new EditorArea(document.getElementById('editorGroup')!);
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
+		await area.split('right').openFile('C:\\repo\\b.ts');
+		await area.split('right').openFile('C:\\repo\\c.ts');
+		const row = document.querySelector<HTMLElement>('.editor-area-row')!;
+		row.getBoundingClientRect = () => ({ width: 1000, height: 500, top: 0, left: 0, right: 1000, bottom: 500, x: 0, y: 0, toJSON: () => undefined });
+		const sash = document.querySelectorAll<HTMLElement>('.editor-sash')[0]!;
+		sash.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 500, clientY: 100 }));
+		document.dispatchEvent(new MouseEvent('mousemove', { clientX: 600, clientY: 100 }));
+		document.dispatchEvent(new MouseEvent('mouseup', { clientX: 600, clientY: 100 }));
+		await flush();
+		expect(shares(area)[0]).toBeCloseTo(0.6);
+		await area.close(); // closes c.ts; its empty column collapses away
+		expect(area.groupCount).toBe(2);
+		// c held a quarter; the survivors take it back in their own ratio (4:1), not evenly.
+		expect(shares(area)[0]).toBeCloseTo(0.8);
+		expect(shares(area)[1]).toBeCloseTo(0.2);
+		const wrappers = [...document.querySelectorAll<HTMLElement>('.editor-area-row > .editor-split-child')];
+		expect(Number(wrappers[0]!.style.flexGrow)).toBeCloseTo(0.8);
+		expect(Number(wrappers[1]!.style.flexGrow)).toBeCloseTo(0.2);
+	});
+
+	it('a nested row left alone in its column dissolves into the outer row, its panes keeping their quarters', async () => {
+		files({ 'C:\\repo\\a.ts': 'a\n', 'C:\\repo\\b.ts': 'b\n', 'C:\\repo\\c.ts': 'c\n', 'C:\\repo\\d.ts': 'd\n' });
+		const area = new EditorArea(document.getElementById('editorGroup')!);
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
+		// a | ((b | c) over d)
+		await area.split('right').openFile('C:\\repo\\b.ts');
+		await area.split('down').openFile('C:\\repo\\d.ts');
+		area.focusIndex(1);
+		// b sits in the row's second cell: its split must find that column, not replace the grid.
+		await area.split('right').openFile('C:\\repo\\c.ts');
+		expect(area.gridLayout()).toEqual({ axis: 'x', sizes: [0.5, 0.5], children: [
+			{ group: 0 },
+			{ axis: 'y', sizes: [0.5, 0.5], children: [{ axis: 'x', sizes: [0.5, 0.5], children: [{ group: 1 }, { group: 2 }] }, { group: 3 }] }
+		] });
+		area.focusIndex(3);
+		await area.close(); // closes d.ts; the column collapses and b | c joins the outer row
+		// b and c were quarter-width panes inside the column; the dissolving split hands
+		// them its own half scaled by their shares — a stays half, VS Code's merge.
+		expect(area.gridLayout()).toEqual({ axis: 'x', sizes: [0.5, 0.25, 0.25], children: [{ group: 0 }, { group: 1 }, { group: 2 }] });
+	});
+});
+
+describe('VS Code\'s editor-group navigation and management', () => {
+	async function threeByLayout(): Promise<EditorArea> {
+		// a | b, c below a: visual order a, c, b.
+		files({ 'C:\\repo\\a.ts': 'a\n', 'C:\\repo\\b.ts': 'b\n', 'C:\\repo\\c.ts': 'c\n' });
+		const area = new EditorArea(document.getElementById('editorGroup')!);
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
+		await area.split('right').openFile('C:\\repo\\b.ts');
+		area.focusIndex(0);
+		await area.split('down').openFile('C:\\repo\\c.ts');
+		return area;
+	}
+
+	const activePath = (area: EditorArea): string | null => {
+		const input = area.activeInput;
+		return input?.kind === 'file' ? input.path.slice(-4) : null;
+	};
+
+	it('focus walks the grid spatially and in sequence, stopping at the edges', async () => {
+		const area = await threeByLayout();
+		area.focusIndex(0);
+		area.focusDirection('right'); // the boundary leaf of the right column
+		expect(activePath(area)).toBe('b.ts');
+		area.focusDirection('down'); // nothing below the right column
+		expect(activePath(area)).toBe('b.ts');
+		area.focusDirection('left');
+		area.focusDirection('down'); // c sits below a in the first column
+		expect(activePath(area)).toBe('c.ts');
+		area.focusSequence(1); // c -> b, the last in visual order
+		expect(activePath(area)).toBe('b.ts');
+		area.focusSequence(1); // no wrap
+		expect(activePath(area)).toBe('b.ts');
+		area.focusSequence(-1); // b -> c
+		expect(activePath(area)).toBe('c.ts');
+		area.focusLast();
+		expect(area.focusedIndex).toBe(2);
+		area.focusIndex(8); // beyond the groups: no-op
+		expect(area.focusedIndex).toBe(2);
+	});
+
+	it('move editor: into the spatial neighbour, into a fresh group past the end, never out of a locked group', async () => {
+		const area = await threeByLayout();
+		area.focusIndex(0);
+		area.moveEditorToDirection('right'); // a's tab joins b's group
+		expect(groupTabs()).toEqual([['c.ts'], ['b.ts', 'a.ts']]);
+		// The emptied column folded away; the move landed with the focus on the receiver.
+		expect(area.groupCount).toBe(2);
+		expect(activePath(area)).toBe('a.ts');
+
+		area.moveEditorToSequence(1); // past the last group: a fresh split right takes the tab
+		expect(area.groupCount).toBe(3);
+		expect(groupTabs()).toEqual([['c.ts'], ['b.ts'], ['a.ts']]);
+
+		area.moveEditorToDirection('left'); // back into the middle group
+		expect(area.groupCount).toBe(2);
+		expect(groupTabs()).toEqual([['c.ts'], ['b.ts', 'a.ts']]);
+
+		area.setGroupLock(area.activeGroup, true);
+		area.moveEditorToSequence(-1); // a locked group keeps its editors
+		expect(groupTabs()).toEqual([['c.ts'], ['b.ts', 'a.ts']]);
+	});
+
+	it('move editor into previous group opens the split on the left when at the first', async () => {
+		const area = await threeByLayout();
+		area.focusIndex(0);
+		area.moveEditorToSequence(-1);
+		// The fresh left group receives a's tab; a's emptied cell in the column folds away.
+		expect(area.groupCount).toBe(3);
+		expect(groupTabs()).toEqual([['a.ts'], ['c.ts'], ['b.ts']]);
+	});
+
+	it('the maximize toggle fills the area with the focused group and any arrival restores', async () => {
+		const area = await threeByLayout();
+		area.focusIndex(0);
+		area.toggleMaximizedGroup();
+		const container = document.getElementById('editorGroup')!;
+		expect(container.classList.contains('maximized')).toBe(true);
+		const wrappers = [...document.querySelectorAll<HTMLElement>('.editor-area-row > .editor-split-child')];
+		expect(wrappers.map((wrapper) => wrapper.style.flexGrow)).toEqual(['0.5', '0.0001']);
+		// Only the focused group shows: inside its own column the sibling collapses too.
+		const inner = [...document.querySelectorAll<HTMLElement>('.editor-area-col > .editor-split-child')];
+		expect(inner.map((wrapper) => wrapper.style.flexGrow)).toEqual(['0.5', '0.0001']);
+
+		area.focusIndex(2); // arriving in a collapsed group ends the maximize
+		expect(container.classList.contains('maximized')).toBe(false);
+		expect(wrappers.map((wrapper) => wrapper.style.flexGrow)).toEqual(['0.5', '0.5']);
+
+		area.minimizeOtherGroups();
+		expect(container.classList.contains('maximized')).toBe(true);
+		area.toggleMaximizedGroup(); // the focused group is the maximized one: the same toggle restores
+		expect(container.classList.contains('maximized')).toBe(false);
+	});
+
+	it('closing the maximized group clears the state with it', async () => {
+		const area = await threeByLayout();
+		area.focusIndex(2); // b's group
+		area.toggleMaximizedGroup();
+		expect(document.getElementById('editorGroup')!.classList.contains('maximized')).toBe(true);
+		await area.close(); // closes b.ts; the emptied maximized group folds
+		await flush();
+		expect(document.getElementById('editorGroup')!.classList.contains('maximized')).toBe(false);
+		expect(area.groupCount).toBe(2); // a and c remain, stacked in their column
+	});
+
+	it('split editor duplicates the active editor — any input that can re-open, files and previews alike', async () => {
+		(window as unknown as { markdownIt: unknown }).markdownIt = { render: (text: string) => `<p>${text}</p>` };
+		files({ 'C:\\repo\\a.ts': 'a\n' });
+		backend.on('read_file', () => ({ contents: 'the tool output\n', binary: false, size: 16, encoding: 'utf8', eol: 'lf' }));
+		const area = new EditorArea(document.getElementById('editorGroup')!);
+		area.setRoot('C:\\repo');
+		const content = { kind: 'content' as const, id: 'ext-content:x', title: 'Output', path: '/temp/readonly/Output', text: 'the tool output\n' };
+		await area.openContent(content);
+		area.splitEditor('down');
+		await flush();
+		expect(area.groupCount).toBe(2);
+		// The content tab rides `reopenOf` into the new group, as VS Code's split duplicates
+		// the active editor — whatever kind it is.
+		expect(area.groups()[0]!.openEditorIds()).toEqual(['content:ext-content:x']);
+		expect(area.groups()[1]!.openEditorIds()).toEqual(['content:ext-content:x']);
+
+		// An extension page's mount lives with its open call: its split stays empty.
+		const pane = document.createElement('div');
+		await area.openExtPage({ kind: 'extpage', id: 'extpage:x:1', title: 'Chat', extId: 'x', pageId: 'webview' }, (container) => { container.appendChild(pane); });
+		area.focusIndex(1);
+		area.splitEditor('right');
+		expect(area.groupCount).toBe(3);
+		expect(area.groups()[2]!.openEditorIds()).toEqual([]);
+	});
+
+	it('a sash drag ends the maximize and still resizes', async () => {
+		const area = await threeByLayout();
+		area.focusIndex(0);
+		area.toggleMaximizedGroup();
+		const row = document.querySelector<HTMLElement>('.editor-area-row')!;
+		row.getBoundingClientRect = () => ({ width: 1000, height: 500, top: 0, left: 0, right: 1000, bottom: 500, x: 0, y: 0, toJSON: () => undefined });
+		// Document order: the column's own sash comes first; the row's sash is the second.
+		const sash = document.querySelectorAll<HTMLElement>('.editor-sash')[1]!;
+		sash.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 500, clientY: 100 }));
+		document.dispatchEvent(new MouseEvent('mousemove', { clientX: 550, clientY: 100 }));
+		document.dispatchEvent(new MouseEvent('mouseup', { clientX: 550, clientY: 100 }));
+		await flush();
+		expect(document.getElementById('editorGroup')!.classList.contains('maximized')).toBe(false);
+		expect(sharesOf(area)[0]).toBeCloseTo(0.55);
+	});
+
+	it('join all groups folds the grid back to one, in visual order', async () => {
+		const area = await threeByLayout();
+		area.joinAllGroups();
+		expect(area.groupCount).toBe(1);
+		expect(groupTabs()).toEqual([['a.ts', 'c.ts', 'b.ts']]);
+		expect(area.focusedIndex).toBe(0);
+	});
+
+	it('close editors in other groups leaves the focused layer alone', async () => {
+		const area = await threeByLayout();
+		area.focusIndex(2); // b's group
+		await area.closeOtherGroups();
+		await flush();
+		expect(area.groupCount).toBe(1);
+		expect(groupTabs()).toEqual([['b.ts']]);
+	});
+
+	it('even editor widths re-shares the columns only, rows keep their sizes', async () => {
+		const area = await threeByLayout();
+		// Uneven both axes. Document order: the column's own sash first, the row's second.
+		const row = document.querySelector<HTMLElement>('.editor-area-row')!;
+		row.getBoundingClientRect = () => ({ width: 1000, height: 500, top: 0, left: 0, right: 1000, bottom: 500, x: 0, y: 0, toJSON: () => undefined });
+		const rowSash = document.querySelectorAll<HTMLElement>('.editor-sash')[1]!;
+		rowSash.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 500, clientY: 100 }));
+		document.dispatchEvent(new MouseEvent('mousemove', { clientX: 600, clientY: 100 }));
+		document.dispatchEvent(new MouseEvent('mouseup', { clientX: 600, clientY: 100 }));
+		await flush();
+		const cell = document.querySelector<HTMLElement>('.editor-area-col')!;
+		cell.getBoundingClientRect = () => ({ width: 400, height: 500, top: 0, left: 0, right: 400, bottom: 500, x: 0, y: 0, toJSON: () => undefined });
+		const colSash = document.querySelectorAll<HTMLElement>('.editor-sash')[0]!;
+		colSash.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 100, clientY: 250 }));
+		document.dispatchEvent(new MouseEvent('mousemove', { clientX: 100, clientY: 375 }));
+		document.dispatchEvent(new MouseEvent('mouseup', { clientX: 100, clientY: 375 }));
+		await flush();
+		expect(sharesOf(area)).toEqual([0.6, 0.4]); // row: the column vs b
+		expect(colSharesOf(area)).toEqual([0.75, 0.25]); // column: a over c
+
+		area.evenEditorWidths();
+		expect(sharesOf(area)).toEqual([0.5, 0.5]);
+		expect(colSharesOf(area)).toEqual([0.75, 0.25]); // the column keeps its own sizes
+	});
+
+	it('a tab dropped on an edge band opens the split that side, the centre stays the plain move', async () => {
+		files({ 'C:\\repo\\a.ts': 'a\n', 'C:\\repo\\b.ts': 'b\n' });
+		const area = new EditorArea(document.getElementById('editorGroup')!);
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
+		await area.split('right').openFile('C:\\repo\\b.ts');
+		const box = () => document.querySelectorAll<HTMLElement>('.editor-group-box')[0]!;
+		box().getBoundingClientRect = () => ({ width: 1000, height: 500, top: 0, left: 0, right: 1000, bottom: 500, x: 0, y: 0, toJSON: () => undefined });
+		const tab = document.querySelectorAll('.editor-group-box')[1]!.querySelector('.tab')!;
+
+		// The drag over the left band marks the left edge as the drop shape.
+		tab.dispatchEvent(new Event('dragstart', { bubbles: true }));
+		box().dispatchEvent(new MouseEvent('dragover', { bubbles: true, cancelable: true, clientX: 50, clientY: 250 }));
+		expect(box().classList.contains('drop-edge')).toBe(true);
+		expect(box().classList.contains('drop-left')).toBe(true);
+		box().dispatchEvent(new MouseEvent('drop', { bubbles: true, cancelable: true, clientX: 50, clientY: 250 }));
+		tab.dispatchEvent(new Event('dragend', { bubbles: true }));
+		// b's group emptied on the moveOut and folded; the drop re-opens it on a's left.
+		expect(area.groupCount).toBe(2);
+		expect(groupTabs()).toEqual([['b.ts'], ['a.ts']]);
+
+		// A centre drop is still the move into the group (the unsized jsdom boxes are centre).
+		const tab2 = document.querySelectorAll('.editor-group-box')[1]!.querySelector('.tab')!;
+		drag(tab2, document.querySelectorAll('.editor-group-box')[0]!);
+		expect(groupTabs()).toEqual([['b.ts', 'a.ts']]);
+	});
+});
+
+/** The root row's shares, as the grid serialises them. */
+function sharesOf(area: EditorArea): number[] {
+	return ((area.gridLayout() as { sizes: number[] }).sizes);
+}
+
+/** The first column's shares, as the grid serialises them. */
+function colSharesOf(area: EditorArea): number[] {
+	const saved = area.gridLayout() as { children: { axis?: string; sizes?: number[] }[] };
+	return saved.children[0]!.sizes!;
+}

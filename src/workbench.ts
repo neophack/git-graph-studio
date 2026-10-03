@@ -305,8 +305,38 @@ export class Workbench {
 		register({ id: 'workbench.action.focusFirstEditorGroup', title: 'Focus First Editor Group', category: 'View', paletteHidden: () => true, run: () => this.editors.focusIndex(0) });
 		register({ id: 'workbench.action.focusSecondEditorGroup', title: 'Focus Second Editor Group', category: 'View', paletteHidden: () => true, run: () => this.editors.focusIndex(1) });
 		register({ id: 'workbench.action.focusThirdEditorGroup', title: 'Focus Third Editor Group', category: 'View', paletteHidden: () => true, run: () => this.editors.focusIndex(2) });
+		// The rest of VS Code's editor-group management (the palette's Editor Group family):
+		// focus by number up to eight, focus by adjacency, focus spatially, move the active
+		// editor between groups, and the layout commands.
+		for (const [nth, word] of [[4, 'Fourth'], [5, 'Fifth'], [6, 'Sixth'], [7, 'Seventh'], [8, 'Eighth']] as const) {
+			register({ id: `workbench.action.focus${word}EditorGroup`, title: `Focus ${word} Editor Group`, category: 'View', keybinding: `Ctrl+${nth}`, run: () => this.editors.focusIndex(nth - 1) });
+		}
+		register({ id: 'workbench.action.focusLastEditorGroup', title: 'Focus Last Editor Group', category: 'View', run: () => this.editors.focusLast() });
+		register({ id: 'workbench.action.focusNextGroup', title: 'Focus Next Editor Group', category: 'View', keybinding: 'Ctrl+K Ctrl+Right', run: () => this.editors.focusSequence(1) });
+		register({ id: 'workbench.action.focusPreviousGroup', title: 'Focus Previous Editor Group', category: 'View', keybinding: 'Ctrl+K Ctrl+Left', run: () => this.editors.focusSequence(-1) });
+		register({ id: 'workbench.action.focusAboveGroup', title: 'Focus Editor Group Above', category: 'View', keybinding: 'Ctrl+K Ctrl+Up', run: () => this.editors.focusDirection('up') });
+		register({ id: 'workbench.action.focusBelowGroup', title: 'Focus Editor Group Below', category: 'View', keybinding: 'Ctrl+K Ctrl+Down', run: () => this.editors.focusDirection('down') });
+		register({ id: 'workbench.action.focusLeftGroup', title: 'Focus Editor Group on the Left', category: 'View', run: () => this.editors.focusDirection('left') });
+		register({ id: 'workbench.action.focusRightGroup', title: 'Focus Editor Group on the Right', category: 'View', run: () => this.editors.focusDirection('right') });
 		register({ id: 'workbench.splitEditor', title: 'Split Editor', category: 'View', keybinding: 'Ctrl+\\', run: () => this.editors.splitEditor('right') });
-		register({ id: 'workbench.splitEditorDown', title: 'Split Editor Down', category: 'View', keybinding: 'Ctrl+K Ctrl+\\', run: () => this.editors.splitEditor('down') });
+		register({ id: 'workbench.action.splitEditorOrthogonal', title: 'Split Editor Orthogonal', category: 'View', keybinding: 'Ctrl+K Ctrl+\\', run: () => this.editors.splitEditorOrthogonal() });
+		register({ id: 'workbench.action.splitEditorLeft', title: 'Split Editor Left', category: 'View', run: () => this.editors.splitEditor('left') });
+		register({ id: 'workbench.action.splitEditorRight', title: 'Split Editor Right', category: 'View', run: () => this.editors.splitEditor('right') });
+		register({ id: 'workbench.action.splitEditorUp', title: 'Split Editor Up', category: 'View', run: () => this.editors.splitEditor('up') });
+		register({ id: 'workbench.action.splitEditorDown', title: 'Split Editor Down', category: 'View', run: () => this.editors.splitEditor('down') });
+		register({ id: 'workbench.action.moveEditorToNextGroup', title: 'Move Editor into Next Group', category: 'View', keybinding: 'Ctrl+Alt+Right', run: () => this.editors.moveEditorToSequence(1) });
+		register({ id: 'workbench.action.moveEditorToPreviousGroup', title: 'Move Editor into Previous Group', category: 'View', keybinding: 'Ctrl+Alt+Left', run: () => this.editors.moveEditorToSequence(-1) });
+		register({ id: 'workbench.action.moveEditorToLeftGroup', title: 'Move Editor into Left Group', category: 'View', run: () => this.editors.moveEditorToDirection('left') });
+		register({ id: 'workbench.action.moveEditorToRightGroup', title: 'Move Editor into Right Group', category: 'View', run: () => this.editors.moveEditorToDirection('right') });
+		register({ id: 'workbench.action.moveEditorToAboveGroup', title: 'Move Editor into Above Group', category: 'View', run: () => this.editors.moveEditorToDirection('up') });
+		register({ id: 'workbench.action.moveEditorToBelowGroup', title: 'Move Editor into Below Group', category: 'View', run: () => this.editors.moveEditorToDirection('down') });
+		register({ id: 'workbench.action.evenEditorWidths', title: 'Even Editor Group Widths', category: 'View', run: () => this.editors.evenEditorWidths() });
+		register({ id: 'workbench.action.toggleMaximizeEditorGroup', title: 'Toggle Maximized Editor Group', category: 'View', run: () => this.editors.toggleMaximizedGroup() });
+		register({ id: 'workbench.action.minimizeOtherEditorGroups', title: 'Minimize Other Editor Groups', category: 'View', run: () => this.editors.minimizeOtherGroups() });
+		register({ id: 'workbench.action.joinAllGroups', title: 'Join All Editor Groups', category: 'View', run: () => this.editors.joinAllGroups() });
+		register({ id: 'workbench.action.resetEditorGroups', title: 'Reset Editor Groups', category: 'View', run: () => void this.editors.resetEditorGroups() });
+		register({ id: 'workbench.action.closeEditorsInGroup', title: 'Close All Editors in Group', category: 'View', keybinding: 'Ctrl+K W', run: () => void this.editors.activeGroup.closeAll() });
+		register({ id: 'workbench.action.closeEditorsInOtherGroups', title: 'Close Editors in Other Groups', category: 'View', run: () => void this.editors.closeOtherGroups() });
 		// The group lock (claude-code locks its chat's group right after opening it, as it
 		// does in VS Code — a locked group keeps its editors, placed opens land elsewhere).
 		register({ id: 'workbench.action.lockEditorGroup', title: 'Lock Editor Group', category: 'View', enabled: () => !this.editors.activeGroup.locked, run: () => this.editors.setGroupLock(this.editors.activeGroup, true) });
@@ -429,7 +459,16 @@ export class Workbench {
 			] },
 			'separator', item('editor.toggleWordWrap'), 'separator', item('markdown.showPreview'), item('markdown.showPreviewToSide'), item('git.openFileHistory'), item('git.toggleBlame'), 'separator',
 				{ label: 'Editor Layout', submenu: [
-				item('workbench.splitEditor'), item('workbench.splitEditorDown'), 'separator', item('workbench.focusFirstEditorGroup'), item('workbench.focusSecondEditorGroup'), item('workbench.focusThirdEditorGroup'), 'separator', item('workbench.action.lockEditorGroup'), item('workbench.action.unlockEditorGroup'), item('workbench.action.reopenClosedEditor')
+					item('workbench.splitEditor'), item('workbench.action.splitEditorOrthogonal'), 'separator',
+					item('workbench.action.splitEditorLeft'), item('workbench.action.splitEditorRight'), item('workbench.action.splitEditorUp'), item('workbench.action.splitEditorDown'), 'separator',
+					item('workbench.action.moveEditorToNextGroup'), item('workbench.action.moveEditorToPreviousGroup'),
+					{ label: 'Move Editor into Group', submenu: [
+						item('workbench.action.moveEditorToLeftGroup'), item('workbench.action.moveEditorToRightGroup'), item('workbench.action.moveEditorToAboveGroup'), item('workbench.action.moveEditorToBelowGroup')
+					] }, 'separator',
+					item('workbench.focusFirstEditorGroup'), item('workbench.focusSecondEditorGroup'), item('workbench.focusThirdEditorGroup'), item('workbench.action.focusLastEditorGroup'), 'separator',
+					item('workbench.action.evenEditorWidths'), item('workbench.action.toggleMaximizeEditorGroup'), item('workbench.action.minimizeOtherEditorGroups'), item('workbench.action.joinAllGroups'), item('workbench.action.resetEditorGroups'), 'separator',
+					item('workbench.action.closeEditorsInGroup'), item('workbench.action.closeEditorsInOtherGroups'), 'separator',
+					item('workbench.action.lockEditorGroup'), item('workbench.action.unlockEditorGroup'), item('workbench.action.reopenClosedEditor')
 				] },
 				{ label: 'Appearance', submenu: [
 					{ label: 'Primary Side Bar', checked: state.layout.sidebarVisible, keybinding: 'Ctrl+B', run: () => this.toggleSidebar() },

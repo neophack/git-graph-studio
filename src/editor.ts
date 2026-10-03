@@ -507,6 +507,12 @@ export class EditorGroup {
 		return this.active?.input ?? null;
 	}
 
+	/** The active editor instance — the area's split-duplication and the moves between
+	 *  groups need the editor itself, not only its input. */
+	get activeEditor(): Editor | null {
+		return this.active;
+	}
+
 	/** The active text editor's CodeMirror view (a file or a read-only revision), if any. */
 	get activeView(): EditorView | null {
 		return this.active?.view ?? null;

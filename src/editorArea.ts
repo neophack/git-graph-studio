@@ -309,7 +309,8 @@ export class EditorArea {
 	/** Open a file in the neighbouring layer - left, right, above or below - creating that
 	 *  layer at the edge when it does not exist yet, as VS Code's grid does. This is how
 	 *  layers are meant to appear: from a file's context menu, never as an empty split. */
-	openInDirection(path: string, direction: Direction): void {		if (this.groupCount >= 8) {
+	openInDirection(path: string, direction: Direction): void {
+		if (this.groupCount >= 8) {
 			void this.activeGroup.openFile(path);
 			return;
 		}
@@ -323,18 +324,33 @@ export class EditorArea {
 		void target.box.group.openFile(path);
 	}
 
-	/** VS Code's Split Editor (Ctrl+\): a new group to the right of the focused one, showing
-	 *  the same file again (an empty group when nothing splittable is active). */
-	splitEditor(direction: 'right' | 'down' = 'right'): void {
-		const input = this.activeGroup.activeInput;
+	/** VS Code's Split Editor (Ctrl+\): a new group in the direction, showing the same
+	 *  editor again — whatever input can re-open rides `reopenOf` (files, diffs, previews,
+	 *  histories), like VS Code's split duplicating the active editor; an input that cannot
+	 *  (an extension page's mount lives with its open call) leaves the new group empty. */
+	splitEditor(direction: Direction = 'right'): void {
+		this.lastSplit = direction;
+		const from = this.activeGroup;
+		const editor = from.activeEditor;
 		const group = this.split(direction);
-		if (input?.kind === 'file') void group.openFile(input.path);
+		if (group !== from && editor) this.reopenOf(editor)?.(group);
 	}
 
-	/** Split the focused group: right (a group beside it) or down (a group beneath it). The
-	 *  new group is empty, focused, and takes half of the source's space. Returns the new
-	 *  group. Used by session restore; live splits come from `openInDirection`. */
-	split(direction: 'right' | 'down'): EditorGroup {
+	/** VS Code's Split Editor Orthogonal (Ctrl+K Ctrl+\): the direction orthogonal to the
+	 *  last split — down after a horizontal one, right after a vertical one. */
+	splitEditorOrthogonal(): void {
+		this.splitEditor(this.lastSplit === 'left' || this.lastSplit === 'right' ? 'down' : 'right');
+	}
+
+	/** The direction of the last split action, so the orthogonal cut alternates the axis
+	 *  the way VS Code's does (the boot state counts as horizontal: the first orthogonal
+	 *  split stacks). */
+	private lastSplit: Direction = 'right';
+
+	/** Split the focused group in a direction. The new group is empty, focused, and takes
+	 *  half of the source's space. Returns the new group. Used by session restore and the
+	 *  preview-to-side; live splits come from `openInDirection`. */
+	split(direction: Direction = 'right'): EditorGroup {
 		// A cap, like VS Code's editor-group limit: unbounded splits made the area grow past
 		// the window (220px minimum each) and push the whole layout off-screen.
 		if (this.groupCount >= 8) return this.activeGroup;
@@ -419,24 +435,23 @@ export class EditorArea {
 		return node;
 	}
 
-	/** Create a new leaf beside an existing one. The new group takes half of the source's
-	 *  space, from the source's neighbours when it sits at a split's edge, else by wrapping
-	 *  the source in a fresh split - either way only the source loses width/height. */
+	/** Create a new leaf beside an existing one. A split already running along the
+	 *  direction's axis takes the newcomer right beside the source, splitting THE SOURCE's
+	 *  share in half — VS Code's grid: the new group takes half of the split group's space
+	 *  and every other group keeps its size. Otherwise the source is wrapped in a fresh
+	 *  half-and-half split, so a first split is still two equal halves. */
 	private insertBeside(source: LeafNode, direction: Direction): LeafNode {
 		const axis = direction === 'left' || direction === 'right' ? 'x' : 'y';
 		const forward = direction === 'right' || direction === 'down';
 		const fresh: LeafNode = { kind: 'leaf', box: this.makeBox() };
 		const parent = this.parentOf(source);
-		const index = parent ? parent.children.indexOf(source) : -1;
 		if (parent && parent.axis === axis) {
-			const atEdge = forward ? index === parent.children.length - 1 : index === 0;
-			if (atEdge) {
-				// A sibling at the split's edge: the newcomer takes half of the source's share.
-				parent.sizes[index]! /= 2;
-				parent.sizes.splice(forward ? index + 1 : index, 0, parent.sizes[index]!);
-				parent.children.splice(forward ? index + 1 : index, 0, fresh);
-				return fresh;
-			}
+			const index = parent.children.indexOf(source);
+			const half = parent.sizes[index]! / 2;
+			parent.sizes[index] = half;
+			parent.sizes.splice(forward ? index + 1 : index, 0, half);
+			parent.children.splice(forward ? index + 1 : index, 0, fresh);
+			return fresh;
 		}
 		const split: SplitNode = {
 			kind: 'split',
@@ -459,7 +474,177 @@ export class EditorArea {
 		if (index >= 0 && index < leaves.length) this.focus(leaves[index]!.box);
 	}
 
+	/** VS Code's directional group focus (Ctrl+K Ctrl+Arrow family): the nearest group that
+	 *  way, spatially — nothing happens at an edge, as in VS Code. */
+	focusDirection(direction: Direction): void {
+		const source = this.leafOfBox(this.focused) ?? this.leaves()[0]!;
+		const target = this.neighbor(source, direction);
+		if (target) this.focus(target.box);
+	}
+
+	/** VS Code's Focus Next/Previous Editor Group: one step in visual order, no wrap. */
+	focusSequence(step: 1 | -1): void {
+		const leaves = this.leaves();
+		const index = this.focusedIndex + step;
+		if (index >= 0 && index < leaves.length) this.focus(leaves[index]!.box);
+	}
+
+	/** VS Code's Focus Last Editor Group. */
+	focusLast(): void {
+		const leaves = this.leaves();
+		this.focus(leaves[leaves.length - 1]!.box);
+	}
+
+	/** VS Code's Move Editor into the Group <direction> (the directional family): the active
+	 *  tab leaves for the group that way, creating it at the edge when there is none. A
+	 *  locked group keeps its editors (VS Code's group lock holds explicit moves too). */
+	moveEditorToDirection(direction: Direction): void {
+		const from = this.activeGroup;
+		const editor = from.activeEditor;
+		if (!editor || from.locked) return;
+		const source = this.leafOfBox(this.focused) ?? this.leaves()[0]!;
+		const existing = this.neighbor(source, direction);
+		if (existing) {
+			this.moveBetween(from, existing.box.group, editor);
+			return;
+		}
+		if (this.groupCount >= 8) return;
+		// A fresh neighbour: the tab leaves first — the emptied source group folds when this
+		// was its last tab, so the fresh split anchors at whatever took its place — then the
+		// new group takes the tab, focused, as the drop-at-the-edge path does.
+		from.moveOut(editor);
+		const anchor = this.leafOfBox(this.focused) ?? this.leaves()[0]!;
+		const fresh = this.insertBeside(anchor, direction);
+		this.render();
+		this.focus(fresh.box);
+		fresh.box.group.moveIn(editor);
+	}
+
+	/** VS Code's Move Editor into Next/Previous Group (Ctrl+Alt+Right/Left): the adjacent
+	 *  group in visual order; past the last (before the first), a fresh split opens at that
+	 *  end to receive the tab. */
+	moveEditorToSequence(step: 1 | -1): void {
+		const from = this.activeGroup;
+		const editor = from.activeEditor;
+		if (!editor || from.locked) return;
+		const leaves = this.leaves();
+		const index = this.focusedIndex + step;
+		if (index < 0 || index >= leaves.length) {
+			this.moveEditorToDirection(step === 1 ? 'right' : 'left');
+			return;
+		}
+		this.moveBetween(from, leaves[index]!.box.group, editor);
+	}
+
+	/** The shared move: focus lands first, so the emptied source group may collapse around
+	 *  the arrival — the same order the drag-and-drop path uses. */
+	private moveBetween(from: EditorGroup, target: EditorGroup, editor: Editor): void {
+		if (target === from) return;
+		const box = this.leafBoxOf(target);
+		if (box) this.focus(box);
+		from.moveOut(editor);
+		target.moveIn(editor);
+	}
+
+	/** VS Code's Maximized Editor Group (and Minimize Other Editor Groups, the same view
+	 *  named for its intent): the focused group takes the whole area while the others
+	 *  collapse to nothing. The tree's sizes are never touched, so restoring is only a
+	 *  re-render — focusing another group, dragging a sash, closing the group or the toggle
+	 *  itself ends it. */
+	toggleMaximizedGroup(): void {
+		const box = this.focused ?? this.leaves()[0]!.box;
+		this.maximized = this.maximized === box ? null : box;
+		this.applyMaximizedStyles();
+		this.onTabsChange?.();
+	}
+
+	/** The maximized box, null when every group shows. */
+	private maximized: GroupBox | null = null;
+
+	/** VS Code's Minimize Other Editor Groups: the focused group fills the area — the same
+	 *  view the maximize toggle shows, named for its intent (the toggle is the way out). */
+	minimizeOtherGroups(): void {
+		if (this.groupCount <= 1) return; // nothing to minimize: the maximize would have no exit
+		this.maximized = this.focused ?? this.leaves()[0]!.box;
+		this.applyMaximizedStyles();
+		this.onTabsChange?.();
+	}
+
+	private clearMaximized(): void {
+		if (!this.maximized) return;
+		this.maximized = null;
+		this.applyMaximizedStyles();
+	}
+
+	/** Grow the tree's wrappers straight from the state: the maximized leaf's branch keeps
+	 *  its sizes and everything beside it collapses to a sliver (the area's `maximized`
+	 *  class lets the CSS shrink the boxes past their 220px floor and hides the sashes). No
+	 *  render — a rebuild would kill an in-flight sash drag, and the drag clears the state
+	 *  through this same walk. */
+	private applyMaximizedStyles(): void {
+		const max = this.maximized;
+		this.container.classList.toggle('maximized', max !== null);
+		const apply = (node: Node, host: HTMLElement): boolean => {
+			if (node.kind === 'leaf') return node.box === max;
+			// The split's wrappers live inside its split element, which is the host's own
+			// child — the same element `renderNode` built for this node.
+			const splitEl = host.firstElementChild;
+			if (!(splitEl instanceof HTMLElement)) return false;
+			const wrappers = [...splitEl.children].filter((child): child is HTMLElement =>
+				child instanceof HTMLElement && child.classList.contains('editor-split-child'));
+			let contains = false;
+			node.children.forEach((child, index) => {
+				const hit = apply(child, wrappers[index]!);
+				contains = contains || hit;
+				wrappers[index]!.style.flexGrow = String(!max || hit ? node.sizes[index]! : 0.0001);
+			});
+			return contains;
+		};
+		apply(this.root, this.groupsRoot);
+	}
+
+	/** VS Code's Join All Editor Groups: every tab of every group moves into the first one,
+	 *  in visual order, and the grid folds back to a single group. */
+	joinAllGroups(): void {
+		const first = this.groups()[0]!;
+		// The drained groups must not collapse mid-move — every moveIn activates its tab,
+		// which would collapse-then-render per editor; one fold at the end instead.
+		this.holdingEmpty = true;
+		try {
+			for (const group of this.groups().slice(1)) {
+				for (const id of group.openEditorIds()) {
+					const editor = group.findEditor(id);
+					if (editor) first.moveIn(group.moveOut(editor)!);
+				}
+			}
+		} finally {
+			this.holdingEmpty = false;
+		}
+		const box = this.leafBoxOf(first);
+		if (box) this.focus(box);
+	}
+
+	/** VS Code's Reset Editor Groups: every editor closes (the dirty prompt included) and
+	 *  the grid folds back to one group. */
+	async resetEditorGroups(): Promise<void> {
+		if (!(await this.closeAll())) return;
+		this.clearMaximized();
+		this.applyGridLayout(null);
+	}
+
+	/** VS Code's Close Editors in Other Groups: every group but the focused one empties and
+	 *  collapses, each through its own dirty prompt. */
+	async closeOtherGroups(): Promise<void> {
+		for (const group of [...this.groups()]) {
+			if (group === this.activeGroup) continue;
+			if (!(await group.closeAll())) return;
+		}
+	}
+
 	private focus(box: GroupBox): void {
+		// Arriving in another group ends the maximize, as a click into a collapsed group
+		// restores the layout in VS Code.
+		if (this.maximized && this.maximized !== box) this.clearMaximized();
 		this.focused = box;
 		for (const leaf of this.leaves()) leaf.box.el.classList.toggle('focused', leaf.box === box);
 		this.collapseEmptyGroups(box);
@@ -498,23 +683,51 @@ export class EditorArea {
 		if (!parent) return;
 		const index = parent.children.indexOf(leaf);
 		parent.children.splice(index, 1);
-		parent.sizes.splice(index, 1);
+		// The removed group's share flows back to the survivors proportionally, as VS Code's
+		// grid removes a view: their relative sizes survive, only the hole disappears.
+		const removed = parent.sizes.splice(index, 1)[0]!;
+		const total = 1 - removed;
+		if (total > 0 && parent.sizes.length > 0) parent.sizes = parent.sizes.map((size) => size / total);
 		if (parent.children.length === 1) this.hoist(parent);
 		if (this.focused === leaf.box) this.focused = null;
+		if (this.maximized === leaf.box) {
+			this.maximized = null;
+			this.container.classList.remove('maximized');
+		}
 		leaf.box.group.dispose();
 		this.render();
 		this.reassignWelcome();
 	}
 
-	/** A split with one child left is meaningless: replace it with that child, cascading. */
+	/** A split with one child left is meaningless: replace it with that child, cascading. A
+	 *  surviving split along the parent's own axis dissolves into it — its panes become the
+	 *  parent's direct children, each scaled by the share the dissolving split held, so a
+	 *  quarter stays a quarter when the column around it disappears (VS Code's grid merge). */
 	private hoist(node: SplitNode): void {
 		const only = node.children[0]!;
 		const parent = this.parentOf(node);
 		if (!parent) this.root = only;
-		else {
+		else if (only.kind === 'split' && only.axis === parent.axis) {
+			const index = parent.children.indexOf(node);
+			const share = parent.sizes[index]!;
+			parent.children.splice(index, 1, ...only.children);
+			parent.sizes.splice(index, 1, ...only.sizes.map((size) => size * share));
+		} else {
 			parent.children[parent.children.indexOf(node)] = only;
 			if (parent.children.length === 1) this.hoist(parent);
 		}
+	}
+
+	/** Every side-by-side split shares its span equally again — VS Code's Even Editor Group
+	 *  Widths (rows keep their own sizes; a dragged layout returns to equal columns). */
+	evenEditorWidths(): void {
+		const walk = (node: Node): void => {
+			if (node.kind !== 'split') return;
+			if (node.axis === 'x') node.sizes = node.children.map(() => 1 / node.children.length);
+			node.children.forEach(walk);
+		};
+		walk(this.root);
+		this.render();
 	}
 
 	/* ---------- Tree helpers ---------- */
@@ -533,7 +746,12 @@ export class EditorArea {
 		const search = (node: Node): SplitNode | null => {
 			if (node.kind === 'leaf') return null;
 			if (node.children.includes(target)) return node;
-			return node.children.flatMap((child) => search(child))[0] ?? null;
+			// Every subtree, not just the first: a miss answers null, which flatMap keeps.
+			for (const child of node.children) {
+				const found = search(child);
+				if (found) return found;
+			}
+			return null;
 		};
 		return search(this.root);
 	}
@@ -566,6 +784,9 @@ export class EditorArea {
 		this.groupsRoot.textContent = '';
 		this.renderNode(this.root, this.groupsRoot);
 		if (this.focused) this.focused.el.classList.add('focused');
+		// A rebuild lays the plain tree out; a maximize survives it (a tab closing in another
+		// group re-renders) and re-collapses the others on top of the fresh wrappers.
+		this.applyMaximizedStyles();
 		this.scheduleOverlaySync();
 	}
 
@@ -620,6 +841,10 @@ export class EditorArea {
 		const sash = el('div', `editor-sash ${axis}`);
 		sash.addEventListener('mousedown', (event) => {
 			event.preventDefault();
+			// Dragging any sash ends the maximize first (VS Code's behaviour), and — because
+			// `clearMaximized` re-styles the live wrappers without a render — this drag keeps
+			// running on the same sash element.
+			this.clearMaximized();
 			const origin = axis === 'vertical' ? event.clientX : event.clientY;
 			let latest = origin;
 			let applied = 0;
@@ -719,8 +944,8 @@ export class EditorArea {
 
 	private wire(group: EditorGroup, boxEl: HTMLElement): void {
 		group.onFocus = () => {
-			const leaf = this.leafOfBox(this.leafBoxOf(group));
-			if (leaf) this.focus(leaf.box);
+			const box = this.leafBoxOf(group);
+			if (box) this.focus(box);
 		};
 		group.onActiveChange = (editor) => {
 			if (this.focused?.group === group) this.onActiveChange?.(editor);
@@ -760,16 +985,20 @@ export class EditorArea {
 				if (this.closedStack.length > 50) this.closedStack.length = 50;
 			}
 		};
-		// A tab dragged from another group drops here (the payload lives in `tabDrag`).
+		// A tab dragged from another group drops here (the payload lives in `tabDrag`), in
+		// one of VS Code's two drop shapes: onto the centre it moves into the group; onto
+		// an edge band it splits that side of the group open and takes the dropped tab.
 		boxEl.addEventListener('dragover', (event) => {
-			if (tabDrag.editor && tabDrag.groupId !== group.groupId) {
-				event.preventDefault();
-				boxEl.classList.add('drop-target');
-			}
+			if (!tabDrag.editor || tabDrag.groupId === group.groupId) return;
+			event.preventDefault();
+			const zone = this.dropZone(boxEl, event);
+			boxEl.classList.add('drop-target');
+			boxEl.classList.toggle('drop-edge', zone !== 'center');
+			for (const side of ['left', 'right', 'up', 'down'] as const) boxEl.classList.toggle(`drop-${side}`, zone === side);
 		});
-		boxEl.addEventListener('dragleave', () => boxEl.classList.remove('drop-target'));
+		boxEl.addEventListener('dragleave', () => this.clearDropMarks(boxEl));
 		boxEl.addEventListener('drop', (event) => {
-			boxEl.classList.remove('drop-target');
+			this.clearDropMarks(boxEl);
 			const editor = tabDrag.editor;
 			const fromId = tabDrag.groupId;
 			tabDrag.editor = null;
@@ -778,13 +1007,55 @@ export class EditorArea {
 			event.preventDefault();
 			const from = this.groups().find((g) => g.groupId === fromId);
 			if (!from || !from.moveOut(editor)) return;
+			// The edge band: the drop opens a fresh group on that side of the target, as if
+			// the user had split there and dropped into it. Anything else — the centre, an
+			// unsized box, the group cap — is the plain move into the target group.
+			const zone = this.dropZone(boxEl, event);
+			const leaf = zone === 'center' ? null : this.leafOfGroup(group);
+			if (zone !== 'center' && leaf && this.groupCount < 8) {
+				const fresh = this.insertBeside(leaf, zone);
+				this.render();
+				this.focus(fresh.box);
+				fresh.box.group.moveIn(editor);
+				return;
+			}
 			group.moveIn(editor);
 		});
 	}
 
+	/** Which drop shape a pointer over a group's box names: the middle half moves the tab
+	 *  into the group; an edge band (a quarter of the box, nearer-edge wins on a corner)
+	 *  opens a fresh split on that side. A box the layout has not sized yet — jsdom, a
+	 *  hidden pane — is all centre, the plain move. */
+	private dropZone(boxEl: HTMLElement, event: DragEvent): Direction | 'center' {
+		const bounds = boxEl.getBoundingClientRect();
+		if (bounds.width <= 0 || bounds.height <= 0) return 'center';
+		const x = (event.clientX - bounds.left) / bounds.width;
+		const y = (event.clientY - bounds.top) / bounds.height;
+		const left = x < 0.25 ? 0.25 - x : 1;
+		const right = x > 0.75 ? x - 0.75 : 1;
+		const up = y < 0.25 ? 0.25 - y : 1;
+		const down = y > 0.75 ? y - 0.75 : 1;
+		const nearest = Math.min(left, right, up, down);
+		if (nearest >= 1) return 'center';
+		if (nearest === left) return 'left';
+		if (nearest === right) return 'right';
+		if (nearest === up) return 'up';
+		return 'down';
+	}
+
+	private clearDropMarks(boxEl: HTMLElement): void {
+		boxEl.classList.remove('drop-target', 'drop-edge', 'drop-left', 'drop-right', 'drop-up', 'drop-down');
+	}
+
+	/** The leaf a group lives in — the tree-side twin of `leafBoxOf`. */
+	private leafOfGroup(group: EditorGroup): LeafNode | null {
+		return this.leaves().find((leaf) => leaf.box.group === group) ?? null;
+	}
+
 	/** The box element a group lives in, for focus lookups. */
 	private leafBoxOf(group: EditorGroup): GroupBox | null {
-		return this.leaves().find((leaf) => leaf.box.group === group)?.box ?? null;
+		return this.leafOfGroup(group)?.box ?? null;
 	}
 
 	/* ---------- The facade the workbench talks to ---------- */
@@ -856,6 +1127,7 @@ export class EditorArea {
 	 *  whole restore, or the still-empty layers collapse before their files arrive. */
 	applyGridLayout(cell: EditorGridCell | null): EditorGroup[] {
 		this.holdingEmpty = true;
+		this.maximized = null; // the rebuild destroys every group the state could name
 		const first = this.leaves()[0]!; // the boot group, reused as cell 0
 		// Every group the rebuild replaces is destroyed, not just dropped from the tree.
 		for (const leaf of this.leaves()) {
