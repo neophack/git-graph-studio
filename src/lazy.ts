@@ -11,6 +11,16 @@ function once<T>(load: () => Promise<T>): () => Promise<T> {
 /** The text editor widget (`textEditor.ts`) and with it CodeMirror's core. */
 export const loadTextEditor = once(() => import('./textEditor'));
 
+/** The file editor's extension-provider surfaces - diagnostics squiggles, decorations and the
+ *  hover / Go-to-Definition tooltips (`editorDiagnosticsView.ts` / `editorDecorationsView.ts` /
+ *  `editorProviderViews.ts`): CodeMirror extensions that ride with the editor suite, never
+ *  first paint. */
+export const loadEditorExtensions = once(() => Promise.all([
+	import('./editorDiagnosticsView'),
+	import('./editorDecorationsView'),
+	import('./editorProviderViews')
+]));
+
 /** `@codemirror/merge`: the side-by-side and unified diff views. */
 export const loadMerge = once(() => import('@codemirror/merge'));
 

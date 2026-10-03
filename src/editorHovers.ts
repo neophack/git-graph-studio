@@ -19,8 +19,23 @@ export interface ExtensionLocation {
 export type ExtensionHoverProvider = (path: string, languageId: string, text: string, line: number, character: number) => Promise<ExtensionHover | null>;
 export type ExtensionDefinitionProvider = (path: string, languageId: string, text: string, line: number, character: number) => Promise<ExtensionLocation[]>;
 
+/** The host that opens a definition location: the workbench's editor placement. */
+export interface ExtensionDefinitionOpener {
+	open(path: string, line?: number, character?: number): void;
+}
+
 let hoverProvider: ExtensionHoverProvider | null = null;
 let definitionProvider: ExtensionDefinitionProvider | null = null;
+let definitionOpener: ExtensionDefinitionOpener | null = null;
+
+/** The workbench installs the tab-opener here at assembly. */
+export function setExtensionDefinitionOpener(opener: ExtensionDefinitionOpener | null): void {
+	definitionOpener = opener;
+}
+
+export function extensionDefinitionOpener(): ExtensionDefinitionOpener | null {
+	return definitionOpener;
+}
 
 /** The workbench installs the ExtensionHost-backed providers here at assembly. */
 export function setExtensionHoverProvider(fill: ExtensionHoverProvider | null): void {

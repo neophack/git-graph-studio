@@ -6,21 +6,10 @@
 
 import { hoverTooltip, EditorView, keymap, type TooltipView } from '@codemirror/view';
 import { Facet, type Extension } from '@codemirror/state';
-import { extensionDefinitionFor, extensionHoverFor, hasExtensionDefinitions, hasExtensionHovers } from './editorHovers';
+import { extensionDefinitionFor, extensionDefinitionOpener, extensionHoverFor, hasExtensionDefinitions, hasExtensionHovers } from './editorHovers';
 
 /** The open file's path, so the provider call names the right document. */
 const pathSlot = Facet.define<string, string>({ combine: (values) => values[values.length - 1] ?? '' });
-
-interface ProviderHost {
-	open(path: string, line?: number, character?: number): void;
-}
-
-let definitionOpener: ProviderHost | null = null;
-
-/** The workbench installs the tab-opener here at assembly. */
-export function setExtensionDefinitionOpener(opener: ProviderHost | null): void {
-	definitionOpener = opener;
-}
 
 function docInfo(view: EditorView): { path: string; languageId: string; text: string; line: number; character: number } | null {
 	const path = view.state.facet(pathSlot);
@@ -60,12 +49,13 @@ const extensionHover = hoverTooltip(async (view, pos) => {
 
 /** Go-to-Definition: the providers' first location opens in a tab (F12 or Ctrl/Cmd+Click). */
 function goToDefinition(view: EditorView): boolean {
-	if (!hasExtensionDefinitions() || !definitionOpener) return false;
+	const opener = extensionDefinitionOpener();
+	if (!hasExtensionDefinitions() || !opener) return false;
 	const info = docInfo(view);
 	if (!info) return false;
 	void extensionDefinitionFor(info.path, info.languageId, info.text, info.line, info.character).then((locations) => {
 		const first = locations[0];
-		if (first) definitionOpener?.open(first.path, first.startLine, first.startCharacter);
+		if (first) opener.open(first.path, first.startLine, first.startCharacter);
 	});
 	return true;
 }
@@ -86,7 +76,7 @@ export function extensionProviderExtensions(path: string): Extension[] {
 				if (!info) return false;
 				void extensionDefinitionFor(info.path, info.languageId, info.text, view.state.doc.lineAt(pos).number - 1, pos - view.state.doc.lineAt(pos).from).then((locations) => {
 					const first = locations[0];
-					if (first) definitionOpener?.open(first.path, first.startLine, first.startCharacter);
+					if (first) extensionDefinitionOpener()?.open(first.path, first.startLine, first.startCharacter);
 				});
 				return true;
 			}

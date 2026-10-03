@@ -9,11 +9,8 @@ import type { MergeView } from '@codemirror/merge';
 import { invoke } from '@tauri-apps/api/core';
 
 import { hasBookmark, toggleBookmark } from './bookmarks';
-import { diagnosticsExtension } from './editorDiagnosticsView';
-import { extensionDecorationsExtension } from './editorDecorationsView';
-import { extensionProviderExtensions } from './editorProviderViews';
 import { samePath } from './editorDiagnostics';
-import { loadAnalysisPages, loadCanViews, loadCallTree, loadFastView, loadFileHistory, loadFolderCompare, loadHexCompare, loadHexView, loadMerge, loadMergeEditor, loadSnippetRegistry, loadSymbolDbView, loadTextEditor } from './lazy';
+import { loadAnalysisPages, loadCanViews, loadCallTree, loadEditorExtensions, loadFastView, loadFileHistory, loadFolderCompare, loadHexCompare, loadHexView, loadMerge, loadMergeEditor, loadSnippetRegistry, loadSymbolDbView, loadTextEditor } from './lazy';
 // The hex and CAN views are async chunks (lazy.ts): a binary or a CAN trace is the exception
 // among opens, and their code would otherwise ride in the first-paint bundle. The fast
 // viewer, the folder-compare, merge-conflict, file-history and call-tree views and the
@@ -1466,6 +1463,7 @@ export class EditorGroup {
 	 *  Frames bar stays above the editor. */
 	private async mountTextEditor(editor: Editor, contents: string, parent: HTMLElement = editor.pane): Promise<void> {
 		const { EditorView, EditorState, baseExtensions, completionExtension, bookmarkGutter, languageSlot, blameSlot, keymap, loadLanguage } = await textEditor();
+		const [{ diagnosticsExtension }, { extensionDecorationsExtension }, { extensionProviderExtensions }] = await loadEditorExtensions();
 		editor.languageName = 'Plain Text';
 		editor.view = new EditorView({
 			state: EditorState.create({
