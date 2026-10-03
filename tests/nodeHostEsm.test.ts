@@ -24,7 +24,10 @@ describe('the ESM vscode loader hook source', () => {
 		expect(source).toContain('export const Uri = api["Uri"];');
 		// ...the well-known names this host may lack export undefined instead of failing
 		// the link (the require path's tolerance)...
-		expect(source).toContain('export const LogLevel = api["LogLevel"];');
+		// — as a literal, never a read through the instance: the instance is the probe, and
+		// reading every absent fallback would log each as a gap of every ESM package...
+		expect(source).toContain('export const LogLevel = undefined;');
+		expect(source).not.toContain('api["LogLevel"]');
 		// ...and a key that is not an identifier cannot poison the generated source.
 		expect(source).not.toContain('not-an-identifier');
 		// The instance is read off the global at evaluation time — the hooks thread that
@@ -67,23 +70,28 @@ describe('an ES module entry importing vscode under a real Node', () => {
 		const driver = [
 			"const { register } = require('node:module');",
 			"const { pathToFileURL } = require('node:url');",
-			"const api = { commands: { register() {} }, Uri: class Uri {} };",
+			// The instance stands in for the probe: it records every read of a name it lacks.
+			"const reads = [];",
+			"const api = new Proxy({ commands: { register() {} }, Uri: class Uri {} }, { get(t, p) { if (typeof p === 'string' && !(p in t)) reads.push(p); return t[p]; } });",
 			`globalThis[Symbol.for(${JSON.stringify(VSCODE_ESM_GLOBAL)})] = api;`,
 			'register(process.argv[2], pathToFileURL(__filename).href);',
 			'import(pathToFileURL(process.argv[3]).href)',
 			'  .then((m) => m.activate())',
-			'  .then((r) => { process.stdout.write(JSON.stringify({ ...r, sameInstance: globalThis.__probe === api.commands }) + "\\n"); })',
+			'  .then((r) => { process.stdout.write(JSON.stringify({ ...r, sameInstance: globalThis.__probe === api.commands, reads }) + "\\n"); })',
 			'  .catch((error) => { process.stderr.write(String(error)); process.exit(1); });',
 			''
 		].join('\n');
 		writeFileSync(join(dir, 'driver.cjs'), driver);
 		const { stdout } = await exec(process.execPath, [join(dir, 'driver.cjs'), vscodeEsmHookUrl({ commands: { register() {} }, Uri: class Uri {} }), join(dir, 'entry.mjs')]);
-		const verdict = JSON.parse(stdout.trim()) as { commandsOk: boolean; uriOk: boolean; logLevel: unknown; sameInstance: boolean };
+		const verdict = JSON.parse(stdout.trim()) as { commandsOk: boolean; uriOk: boolean; logLevel: unknown; sameInstance: boolean; reads: string[] };
 		expect(verdict.commandsOk).toBe(true);
 		expect(verdict.uriOk).toBe(true);
 		// The name the shim lacks links (undefined), exactly like the require path.
 		expect(verdict.logLevel).toBeUndefined();
 		// The named import IS the host's own object, not a copy.
 		expect(verdict.sameInstance).toBe(true);
+		// Linking never reads an absent name through the instance — the probe would log
+		// every fallback as a gap of every ES module package.
+		expect(verdict.reads).toEqual([]);
 	}, 30_000);
 });

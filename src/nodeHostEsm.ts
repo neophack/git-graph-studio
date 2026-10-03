@@ -46,14 +46,18 @@ function isIdentifier(name: string): boolean {
 /** The synthetic `vscode` module: one named export per shim key plus every fallback name
  *  (absent ones `undefined`), a default export of the instance itself, and the instance
  *  read off the global at evaluation time. Only identifier names export — a stray key
- *  cannot poison the generated source. */
+ *  cannot poison the generated source. A fallback name the instance lacks exports a
+ *  literal `undefined` rather than a read: the instance is the upgrade-safety probe
+ *  (vscodeNamespaceProbe.ts), and reading every absent fallback at evaluation would log
+ *  each one as an API gap of every ES module package, used or not. */
 export function vscodeEsmModuleSource(api: object): string {
-	const names = [...new Set([...Object.keys(api), ...VSCODE_ESM_FALLBACK_EXPORTS])]
+	const served = new Set(Object.keys(api));
+	const names = [...new Set([...served, ...VSCODE_ESM_FALLBACK_EXPORTS])]
 		.filter((name) => name !== 'default' && isIdentifier(name))
 		.sort();
 	return [
 		`const api = globalThis[Symbol.for(${JSON.stringify(VSCODE_ESM_GLOBAL)})];`,
-		...names.map((name) => `export const ${name} = api[${JSON.stringify(name)}];`),
+		...names.map((name) => served.has(name) ? `export const ${name} = api[${JSON.stringify(name)}];` : `export const ${name} = undefined;`),
 		'export default api;'
 	].join('\n');
 }
