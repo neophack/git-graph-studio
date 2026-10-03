@@ -1704,6 +1704,14 @@ body.resizing iframe { pointer-events: none; }
 .usage-range.active { background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 12%, transparent); color: var(--vscode-sideBar-foreground, var(--vscode-editor-foreground)); }
 .usage-collapse { border: none; background: transparent; padding: 2px; cursor: pointer; display: inline-flex; color: var(--vscode-descriptionForeground); }
 .usage-collapse:hover { color: var(--vscode-sideBar-foreground, var(--vscode-editor-foreground)); }
+/* The sidebar strip is narrow: the head wraps into two rows — identity, total and the
+   collapse chevron on top, the range switch as a full-width segmented control beneath — so
+   the 30-day segment is never clipped by a long total or a narrow sidebar. */
+.usage-panel.compact .usage-head { flex-wrap: wrap; row-gap: 4px; }
+.usage-panel.compact .usage-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.usage-panel.compact .usage-collapse { order: 1; }
+.usage-panel.compact .usage-range-switch { order: 2; flex: 1 0 100%; margin-left: 0; display: flex; }
+.usage-panel.compact .usage-range { flex: 1 1 0; min-width: 0; padding: 0 4px; overflow: hidden; text-overflow: ellipsis; }
 .usage-body { padding: 0 8px 6px; }
 .usage-chart-host { position: relative; }
 .usage-chart { position: relative; }
