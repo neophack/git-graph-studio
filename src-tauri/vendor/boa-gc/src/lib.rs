@@ -75,6 +75,14 @@ impl Default for GcConfig {
     }
 }
 
+/// GGS-patch: the ceiling the GOGC pacing's `survivors × 2` growth may reach. A sidecar
+/// hosting third-party JS must not follow that JS's appetite without bound: this machine's
+/// commit limit is what refused the allocation that aborted the whole backend
+/// (2026-10-04's ggs-node fastfail). 512 MiB of live heap is far above any session this
+/// product hosts; past it the collector trades marking cost for commit, which degrades the
+/// session instead of killing it.
+const GC_THRESHOLD_CEILING: usize = 512 * 1_048_576;
+
 #[derive(Default, Debug, Clone, Copy)]
 struct GcRuntimeData {
     collections: usize,
@@ -190,7 +198,14 @@ impl Allocator {
     }
 
     fn manage_state(gc: &mut BoaGc) {
-        if gc.runtime.bytes_allocated > gc.config.threshold {
+        // GGS-patch: the trigger carries a 16 MiB slack. Under the ceiling below the slack
+        // is noise; at the ceiling the threshold stops growing, and a bare `>` would fire
+        // this on every allocation once the live heap sits at the cap — the slack keeps the
+        // collection cadence at one per 16 MiB of growth instead of per allocation.
+        const COLLECT_SLACK: usize = 16 * 1_048_576;
+        if gc.runtime.bytes_allocated
+            > gc.config.threshold.saturating_add(COLLECT_SLACK)
+        {
             // GGS-patch: collection timing behind GGS_PHASE_TRACE (read once).
             static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             let traced = *TRACE.get_or_init(|| std::env::var_os("GGS_PHASE_TRACE").is_some());
@@ -214,8 +229,18 @@ impl Allocator {
             {
                 // GGS-patch: grow to twice the survivors (upstream: survivors / 0.7) —
                 // the GOGC=100 pacing, so a steadily growing heap is marked a logarithmic
-                // number of times with a 2x base instead of a 1.43x one.
-                gc.config.threshold = gc.runtime.bytes_allocated.saturating_mul(2);
+                // number of times with a 2x base instead of a 1.43x one — but never past
+                // [`GC_THRESHOLD_CEILING`]: an uncapped threshold let a long claude-code
+                // session balloon the sidecar's commit into the gigabytes, and on a machine
+                // already near its commit limit the next refused allocation aborted the
+                // whole process (rust_oom's fastfail — the 2026-10-04 ggs-node crash that
+                // took the chat down). Past the cap the collector runs once per
+                // COLLECT_SLACK of growth: bounded commit, bounded marking cost.
+                gc.config.threshold = gc
+                    .runtime
+                    .bytes_allocated
+                    .saturating_mul(2)
+                    .min(GC_THRESHOLD_CEILING);
             }
         }
     }
