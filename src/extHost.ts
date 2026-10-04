@@ -905,9 +905,17 @@ export class ExtensionHost {
 		}).catch((error) => extLog('warn', 'host', `the backend-restart channel is unavailable: ${String(error)}`));
 		// An extension's own settings change (its update(), or the Settings dialog writing the
 		// same key) reaches its frame as a configChanged event — `onDidChangeConfiguration`.
+		// A process-hosted extension whose remote handle does not exist yet gets one on the
+		// spot: the Rust boot pass starts (and activates) the backend before any view has
+		// resolved it, so a push that waited for `frames.get` landed on nothing and the
+		// backend kept the settings it was activated with forever. An extId with no process
+		// at all fails the push, which the send swallows — the next activation reads the
+		// fresh settings through `host.env` anyway.
 		document.addEventListener(state.EXT_SETTINGS_EVENT, (event) => {
 			const extId = (event as CustomEvent<string>).detail;
-			this.frames.get(extId)?.send?.({ type: '__studioExtEvent', event: 'configChanged', settings: state.extSettings(extId) });
+			const handle = this.frames.get(extId) ?? this.remoteHandle(extId);
+			this.frames.set(extId, handle);
+			handle.send?.({ type: '__studioExtEvent', event: 'configChanged', settings: state.extSettings(extId) });
 		});
 		window.addEventListener('beforeunload', () => void flushExtLog());
 		// The backend watcher's batches reach every frame as fsChanged events — the half of

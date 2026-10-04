@@ -1618,6 +1618,35 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		expect(events[0]!.settings).toEqual({});
 	});
 
+	it('a settings change reaches a process-hosted extension before any view resolved it', async () => {
+		// The Rust boot pass starts (and activates) node backends before the workbench has a
+		// remote handle for them; the push could not wait for `frames.get` — a backend whose
+		// first settings write arrived pre-resolution kept its activation-time settings
+		// forever (git-graph-rs's enableLog never turned on live). The handle is created on
+		// the spot, so the configChanged crosses `ext_process_push_event` regardless.
+		const host = new ExtensionHost();
+		// Every ExtensionHost this file has created still listens on the shared document, so
+		// one dispatch fans out to all of them — the assertions read only this host's own
+		// frames table, where the count and the identity are unambiguous.
+		const extId = 'acme.process';
+		document.dispatchEvent(new CustomEvent('ggs-ext-settings', { detail: extId }));
+		const handle = host['frames'].get(extId);
+		expect(handle).toBeDefined();
+
+		// The recorded invoke carries the configChanged to the backend's push command.
+		const mine = backend.callsTo('ext_process_push_event').filter((c) => c.extId === extId);
+		expect(mine.length).toBeGreaterThanOrEqual(1);
+		const event = (mine.at(-1)! as { event: { type: string; event: string; settings: unknown } }).event;
+		expect(event.type).toBe('__studioExtEvent');
+		expect(event.event).toBe('configChanged');
+
+		// A second dispatch reuses the handle — created once, then found in the frames table.
+		const beforeSecond = mine.length;
+		document.dispatchEvent(new CustomEvent('ggs-ext-settings', { detail: extId }));
+		expect(backend.callsTo('ext_process_push_event').filter((c) => c.extId === extId).length).toBeGreaterThan(beforeSecond);
+		expect(host['frames'].get(extId)).toBe(handle);
+	});
+
 	it('state.update persists the memento under the extension id', async () => {
 		const { host } = hostWithFrame();
 		await host['serve']('state.update', ['global', 'lastOpen', 'file-a'], 'acme.demo', {} as never);
