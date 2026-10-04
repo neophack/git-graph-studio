@@ -61,6 +61,15 @@ fn promise_timeout() -> Duration {
 }
 /// The no-timer idle wait: bounded so a missed wake cannot idle a request forever.
 const IDLE_TICK: Duration = Duration::from_secs(30);
+/// The JS thread's native stack. Boa's parser, compiler and several builtins recurse in
+/// Rust once per nesting level of the source or the data; on the 2 MiB default thread a
+/// hundred nested closures, two hundred nested parentheses or a 700-deep array handed to
+/// `String()` overflowed it — and a stack overflow kills the process outright
+/// (0xC00000FD), every request of the backend with it. The size is a reservation: only
+/// the pages a deep recursion really touches are committed. The native stack guard
+/// (`boa_engine::parser::stack_guard`, armed at the thread's top) turns what is still too
+/// deep for this stack into an ordinary `RangeError` / `SyntaxError`.
+const JS_THREAD_STACK: usize = 64 * 1024 * 1024;
 /// The backend's own request ids start here. Both directions share the one channel, and the
 /// app resolves a response line against whatever request it sent with that id — disjoint
 /// id spaces are what keep a `host.env` answer from resolving the app's `initialize`.
@@ -249,6 +258,9 @@ pub(crate) struct State {
     /// found it still pending: later commands dispatch at once instead of each paying the
     /// full budget again (the promise itself stays parked for the run loop's poll).
     activation_wait_spent: bool,
+    /// The out-of-heap bytes (`alloc::large_live_bytes`) after the last collection the
+    /// external pressure forced — the watermark [`collect_on_external_pressure`] paces from.
+    external_baseline: usize,
 }
 
 thread_local! {
@@ -288,6 +300,7 @@ impl State {
             job_source: None,
             pending_activation: None,
             activation_wait_spent: false,
+            external_baseline: 0,
         }
     }
 
@@ -459,10 +472,16 @@ pub fn serve_on<R: std::io::BufRead, W: std::io::Write + Send + 'static>(
     let package_root = find_package_root(&entry);
     let js_pump = pump.clone();
     let serve_pump = pump.clone();
-    let js_thread = std::thread::spawn(move || {
-        STATE.with(|slot| *slot.borrow_mut() = Some(State::new(js_pump, package_root)));
-        js_main(rx, wake, entry);
-    });
+    let js_thread = std::thread::Builder::new()
+        .name("ggs-node-js".to_owned())
+        .stack_size(JS_THREAD_STACK)
+        .spawn(move || {
+            boa_engine::parser::stack_guard::arm(JS_THREAD_STACK);
+            STATE.with(|slot| *slot.borrow_mut() = Some(State::new(js_pump, package_root)));
+            js_main(rx, wake, entry);
+            boa_engine::parser::stack_guard::disarm();
+        })
+        .expect("the ggs-node JS thread spawns");
     let responses_pump = pump.clone();
     proto::serve_plugin_on_with_responses(
         reader,
@@ -478,11 +497,13 @@ pub fn serve_on<R: std::io::BufRead, W: std::io::Write + Send + 'static>(
                 reply: reply_tx,
                 emitter: carried,
             });
-            Some(
-                reply_rx
-                    .recv()
-                    .unwrap_or_else(|_| Err("the ggs-node runtime stopped".to_owned())),
-            )
+            Some(reply_rx.recv().unwrap_or_else(|_| {
+                // The reply sender died unanswered: a panic the run loop contained (logged
+                // there), or a JS thread that is gone.
+                Err(format!(
+                    "the ggs-node runtime dropped {method} — a contained runtime fault or a stopped runtime (see the backend log)"
+                ))
+            }))
         },
         move |id, answer| {
             // An answer to this backend's own `ggs.hostRequest`: wake the JS thread that
@@ -526,60 +547,79 @@ fn js_main(rx: mpsc::Receiver<Job>, wake: Arc<(Mutex<bool>, Condvar)>, entry: Pa
     if std::env::var("GGS_VM_TRACE").is_ok() {
         context.set_trace(true);
     }
-    if let Err(error) = bootstrap(&mut context, &entry) {
-        with_state(|state| state.log("error", &format!("bootstrap failed: {error}")));
-        // The backend must still answer its handshake (a failed preload is not a dead
-        // backend); a bootstrap failure is a runtime defect, so serving nothing is right.
-        drop_js_state();
-        return;
+    // Declared after the context, so it drops BEFORE it — on the normal exit and on an
+    // unwind alike. The state's Boa values live in this context's heap and must die with
+    // it, never in the TLS destructor that runs after this function is gone (dropping them
+    // over a freed heap aborted the process intermittently).
+    let _teardown = StateTeardown;
+    let booted = contained(&mut context, "the bootstrap", |context| {
+        bootstrap(context, &entry)
+    });
+    match booted {
+        Some(Ok(())) => {}
+        Some(Err(error)) => {
+            with_state(|state| state.log("error", &format!("bootstrap failed: {error}")));
+            // The backend must still answer its handshake (a failed preload is not a dead
+            // backend); a bootstrap failure is a runtime defect, so serving nothing is right.
+            return;
+        }
+        None => return,
     }
+    // GGS-patch: every step below runs package code (a job, a timer callback, an addon
+    // completion, a promise reaction, the activation's flush) and each runs under
+    // `contained`. Only the queued jobs used to: a Rust panic inside a timer or a promise
+    // job — Boa's compiler has edges (Kimi Code's chunk tripped "binding must exist"), a
+    // native can trip an expect — unwound out of the JS thread, and the teardown that
+    // followed dropped Boa values over a dead heap: the backend aborted. A contained
+    // panic fails what it was running (a request answers an error) and the VM is put back
+    // at its resting depth; the runtime keeps serving.
     loop {
         // 1. Everything queued.
         let mut quit = false;
         while let Some(job) = next_job(&jobs) {
-            // GGS-patch: a Rust panic inside a job (Boa's compiler has edges — Kimi
-            // Code's dist chunk tripped "binding must exist" in the bytecompiler) must
-            // fail THAT request, not unwind out of the JS thread and take the whole
-            // runtime with it. The compile happens in its own frame, so the VM state
-            // survives; the reply channel's drop surfaces as the request's error.
-            let job_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                execute_job(&mut context, job)
-            }));
-            match job_result {
-                Ok(should_quit) if should_quit => quit = true,
-                Ok(_) => {}
-                Err(_) => {
-                    with_state(|state| {
-                        state.log(
-                            "error",
-                            "a runtime job panicked; the request failed but the runtime lives",
-                        );
-                    });
-                }
+            if contained(&mut context, "a runtime job", |context| {
+                execute_job(context, job)
+            }) == Some(true)
+            {
+                quit = true;
             }
         }
         if quit {
             break;
         }
-        // 2. Due timers.
+        // 2. Due timers, each its own step: one throwing or panicking callback does not
+        //    skip the others that fell due with it.
         let due = with_state(|state| state.take_due_timers(Instant::now()));
         for (callable, args) in due {
             if let Some(object) = callable.as_object() {
-                let _ = object.call(&JsValue::undefined(), &args, &mut context);
+                contained(&mut context, "a timer callback", |context| {
+                    let _ = object.call(&JsValue::undefined(), &args, context);
+                });
             }
         }
         // 3. Threadsafe-function arrivals (an addon's async completions, queued from its
         //    worker threads and woken here): delivered before the microtasks they settle.
-        napi_host::drain_threadsafe_calls(&mut context);
+        contained(&mut context, "a native addon completion", |context| {
+            napi_host::drain_threadsafe_calls(context);
+        });
         // 4. Settled promise jobs (microtasks).
-        let _ = context.run_jobs();
+        contained(&mut context, "a promise job", |context| {
+            let _ = context.run_jobs();
+        });
         // 4½. The parked activation promise (see `install_frame_program`): its settlement
         //     runs the registration flush; a rejection is logged. A pending one stays.
-        poll_activation(&mut context);
+        contained(&mut context, "the activation poll", poll_activation);
         // 5. Idle housekeeping (the queue was drained above): a large module's parse tree,
         //    parked by the compiler so tearing it down — millions of frees — never delayed
         //    the module's first run. A no-op when nothing is parked.
-        boa_engine::script::free_released_sources();
+        contained(&mut context, "the parse-tree release", |_| {
+            boa_engine::script::free_released_sources();
+        });
+        // 5½. Out-of-heap pressure: collect when the strings and buffers the JS heap holds
+        //     have grown, even though the heap's own boxes have not (see the function).
+        contained(&mut context, "the external-pressure collection", |_| {
+            collect_on_external_pressure();
+        });
         // 6. Sleep until a job, a timer deadline, or the idle tick.
         let deadline = with_state(|state| state.next_deadline());
         let (flag, condvar) = &*wake;
@@ -607,16 +647,127 @@ fn js_main(rx: mpsc::Receiver<Job>, wake: Arc<(Mutex<bool>, Condvar)>, entry: Pa
         }
         drop(guard);
         if let Some(job) = arrived {
-            if execute_job(&mut context, job) {
+            if contained(&mut context, "a runtime job", |context| {
+                execute_job(context, job)
+            }) == Some(true)
+            {
                 break;
             }
         }
     }
-    // The state's Boa values live in this context's heap: they must die with it, not in
-    // the TLS destructor that runs after this function returns (dropping them over a
-    // freed heap aborted the process intermittently). Same for a live child process's
-    // waiters — `Quit` means the backend is going away either way.
-    drop_js_state();
+    // `_teardown` drops the state here, before the context — and so do a live child
+    // process's waiters: `Quit` means the backend is going away either way.
+}
+
+/// The out-of-heap growth that forces a collection even when the baseline is small.
+const EXTERNAL_PRESSURE_FLOOR: usize = 64 * 1024 * 1024;
+
+/// Collect the JS heap when the memory it holds OUTSIDE itself has grown. Boa paces its
+/// collector by the bytes of its own boxes, and a box is small while what it holds is not:
+/// a ~200-byte promise pinning an 80 K-character commit list counts as 200 bytes, so a
+/// git-graph session's results, or claude-code's message payloads, piled up by the
+/// gigabyte before the box count reached the next collection — and on a machine near its
+/// commit limit the next refused allocation aborted the backend (0xC0000409). This is
+/// V8's external-memory accounting in miniature: the global allocator counts the live
+/// large blocks (`alloc::large_live_bytes`), and once they grow by half their post-
+/// collection watermark (at least [`EXTERNAL_PRESSURE_FLOOR`]) the heap is collected and
+/// the watermark re-read. A no-op where `GgsAlloc` is not installed (the count stays 0).
+fn collect_on_external_pressure() {
+    let live = alloc::large_live_bytes();
+    let Some(baseline) = STATE.with(|slot| {
+        slot.try_borrow_mut().ok().and_then(|mut state| {
+            let state = state.as_mut()?;
+            // Memory released by refcount lowers the watermark with it.
+            if live < state.external_baseline {
+                state.external_baseline = live;
+            }
+            Some(state.external_baseline)
+        })
+    }) else {
+        return;
+    };
+    let step = (baseline / 2).max(EXTERNAL_PRESSURE_FLOOR);
+    if live < baseline.saturating_add(step) {
+        return;
+    }
+    boa_engine::gc::force_collect();
+    let after = alloc::large_live_bytes();
+    STATE.with(|slot| {
+        if let Ok(mut state) = slot.try_borrow_mut() {
+            if let Some(state) = state.as_mut() {
+                state.external_baseline = after;
+            }
+        }
+    });
+    if std::env::var("GGS_TRACE_BOOT").is_ok() {
+        eprintln!(
+            "[gc] external pressure: {} MiB live out of the heap, {} MiB after the collection",
+            live >> 20,
+            after >> 20
+        );
+    }
+}
+
+/// Drops the JS thread's state when `js_main` leaves, however it leaves (see its use).
+struct StateTeardown;
+
+impl Drop for StateTeardown {
+    fn drop(&mut self) {
+        drop_js_state();
+    }
+}
+
+/// A panic payload as text — the `&str` / `String` a `panic!` carries, or a placeholder.
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a non-text panic payload".to_owned())
+}
+
+/// Run one step of the JS thread with a Rust panic contained: the step's work is lost
+/// (a request it was answering fails — its reply sender drops unanswered), the VM goes
+/// back to the depth it had before the step, the N-API arena releases what the step's
+/// abandoned callbacks created, and the runtime goes on serving. `None` means the step
+/// panicked.
+fn contained<T>(
+    context: &mut Context,
+    what: &str,
+    step: impl FnOnce(&mut Context) -> T,
+) -> Option<T> {
+    let checkpoint = context.vm_checkpoint();
+    let handles = napi_host::handle_mark();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| step(context))) {
+        Ok(value) => Some(value),
+        Err(payload) => {
+            context.unwind_vm_to(checkpoint);
+            napi_host::release_handles_to(handles);
+            let message = panic_message(payload.as_ref());
+            // The state is reachable unless the panic was its own teardown.
+            let logged = STATE.with(|slot| {
+                slot.try_borrow()
+                    .map(|state| {
+                        if let Some(state) = state.as_ref() {
+                            state.log(
+                                "error",
+                                &format!(
+                                    "{what} panicked ({message}); its work failed and the runtime recovered"
+                                ),
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false)
+            });
+            if !logged {
+                eprintln!("[ggs-node] {what} panicked ({message})");
+            }
+            None
+        }
+    }
 }
 
 /// Take one queued job. The queue lock is released before the job runs: a `while let` over
@@ -1410,6 +1561,9 @@ pub(crate) fn settle(context: &mut Context, value: JsValue) -> Result<JsValue, S
                     eprintln!("[settle] running jobs");
                 }
                 let _ = context.run_jobs();
+                // A long request (an activation, a big engine read) may allocate far more
+                // out of the heap than the run loop's idle pass ever sees.
+                collect_on_external_pressure();
                 if trace {
                     eprintln!("[settle] sleeping");
                 }
@@ -1588,6 +1742,78 @@ fn find_package_root(entry: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Rust panic deep inside JS execution — here a native that panics under a hundred
+    /// JS frames — is contained, and the VM goes back to its resting depth. Before the
+    /// unwind, every abandoned frame stayed pushed and charged against the 512-frame
+    /// recursion budget: twenty contained panics at depth 100 would leave no budget for
+    /// any later call, so the full-depth recursion at the end fails without it.
+    #[test]
+    fn a_contained_panic_puts_the_vm_back_at_rest() {
+        let mut context = Context::default();
+        context
+            .register_global_callable(
+                boa_engine::JsString::from("fault"),
+                0,
+                boa_engine::NativeFunction::from_fn_ptr(|_, _, _| panic!("a native fault")),
+            )
+            .unwrap();
+        context
+            .eval(boa_engine::Source::from_bytes(
+                "function deep(n) { return n ? deep(n - 1) + 0 : fault(); }
+                 function depth(n) { return n ? depth(n - 1) + 1 : 0; }",
+            ))
+            .unwrap();
+        let deep = context
+            .global_object()
+            .get(key("deep"), &mut context)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .clone();
+        let rest = context.vm_checkpoint();
+        for _ in 0..20 {
+            let outcome = contained(&mut context, "a test call", |context| {
+                deep.call(&JsValue::undefined(), &[JsValue::from(100)], context)
+            });
+            assert!(outcome.is_none(), "the native's panic was contained");
+            assert_eq!(context.vm_checkpoint(), rest, "the VM is back at rest");
+        }
+        let depth = context
+            .eval(boa_engine::Source::from_bytes("depth(400)"))
+            .expect("the whole recursion budget is still there");
+        assert_eq!(depth.as_number(), Some(400.0));
+    }
+
+    /// A promise job that fails fails alone: the executor used to bail on the first error
+    /// and clear every queue, stranding each other continuation the program had pending.
+    #[test]
+    fn a_failing_promise_job_leaves_the_others_queued_and_run() {
+        let mut context = Context::default();
+        context.enqueue_job(
+            boa_engine::job::PromiseJob::new(|_| {
+                Err(boa_engine::JsNativeError::error()
+                    .with_message("this job fails")
+                    .into())
+            })
+            .into(),
+        );
+        context.enqueue_job(
+            boa_engine::job::PromiseJob::new(|context| {
+                context
+                    .global_object()
+                    .set(key("ran"), true, false, context)?;
+                Ok(JsValue::undefined())
+            })
+            .into(),
+        );
+        assert!(
+            context.run_jobs().is_err(),
+            "the failure is still reported"
+        );
+        let ran = context.global_object().get(key("ran"), &mut context).unwrap();
+        assert_eq!(ran.as_boolean(), Some(true), "the job behind it ran");
+    }
 
     #[test]
     fn the_package_root_walks_up_to_the_manifest() {

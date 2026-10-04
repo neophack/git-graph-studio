@@ -60,6 +60,9 @@ where
     type Output = Expression;
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+        // GGS-patch: a unary chain recurses with no AssignmentExpression between its
+        // levels (see `stack_guard`).
+        crate::parser::guard_stack(cursor, interner)?;
         let tok = cursor.peek(0, interner).or_abrupt()?;
         let token_start = tok.span().start();
         match tok.kind() {

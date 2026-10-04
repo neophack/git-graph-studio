@@ -116,6 +116,8 @@ where
     type Output = ast::Statement;
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+        // GGS-patch: nested blocks and statement bodies pass here (see `stack_guard`).
+        crate::parser::guard_stack(cursor, interner)?;
         // TODO: add BreakableStatement and divide Whiles, fors and so on to another place.
         let tok = cursor.peek(0, interner).or_abrupt()?;
 
@@ -417,6 +419,8 @@ where
     type Output = ast::StatementListItem;
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+        // GGS-patch: every nested function and class body passes here (see `stack_guard`).
+        crate::parser::guard_stack(cursor, interner)?;
         let tok = cursor.peek(0, interner).or_abrupt()?;
 
         match tok.kind().clone() {

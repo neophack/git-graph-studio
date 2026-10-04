@@ -33,7 +33,7 @@
 use crate::context::time::{JsDuration, JsInstant};
 use crate::sys::time;
 use crate::{
-    Context, JsResult, JsValue,
+    Context, JsError, JsResult, JsValue,
     object::{JsFunction, NativeObject},
     realm::Realm,
 };
@@ -635,15 +635,6 @@ pub struct SimpleJobExecutor {
     generic_jobs: RefCell<VecDeque<GenericJob>>,
 }
 
-impl SimpleJobExecutor {
-    fn clear(&self) {
-        self.promise_jobs.borrow_mut().clear();
-        self.async_jobs.borrow_mut().clear();
-        self.timeout_jobs.borrow_mut().clear();
-        self.generic_jobs.borrow_mut().clear();
-    }
-}
-
 impl Debug for SimpleJobExecutor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SimpleJobExecutor").finish_non_exhaustive()
@@ -680,6 +671,9 @@ impl JobExecutor for SimpleJobExecutor {
         Self: Sized,
     {
         let mut group = FutureGroup::new();
+        // GGS-patch: the first job error, reported once every queue has drained (see the
+        // promise batch below).
+        let mut first_error: Option<JsError> = None;
         loop {
             for job in mem::take(&mut *self.async_jobs.borrow_mut()) {
                 group.insert(job.call(context));
@@ -701,8 +695,7 @@ impl JobExecutor for SimpleJobExecutor {
             }
 
             if let Some(Err(err)) = future::poll_once(group.next()).await.flatten() {
-                self.clear();
-                return Err(err);
+                first_error.get_or_insert(err);
             }
 
             {
@@ -715,31 +708,42 @@ impl JobExecutor for SimpleJobExecutor {
 
                 for job in jobs_to_run.into_values() {
                     if let Err(err) = job.call(&mut context.borrow_mut()) {
-                        self.clear();
-                        return Err(err);
+                        first_error.get_or_insert(err);
                     }
                 }
             }
 
-            let jobs = mem::take(&mut *self.promise_jobs.borrow_mut());
-            for job in jobs {
+            // GGS-patch: the batch is popped one job at a time instead of taken whole, and
+            // a failing job fails alone. Upstream bailed on the first error and `clear()`ed
+            // every queue — one job that answered an uncatchable error (a runtime limit)
+            // dropped every other pending continuation in the program, and each `await`
+            // in flight anywhere in a long-lived extension host never resumed. Taking the
+            // batch whole also meant a panic the embedder contains inside one job lost the
+            // rest of the batch with it. The batch boundary stays where it was: the jobs
+            // queued while this batch runs wait for the next pass, as before.
+            let batch = self.promise_jobs.borrow().len();
+            for _ in 0..batch {
+                let Some(job) = self.promise_jobs.borrow_mut().pop_front() else {
+                    break;
+                };
                 if let Err(err) = job.call(&mut context.borrow_mut()) {
-                    self.clear();
-                    return Err(err);
+                    first_error.get_or_insert(err);
                 }
             }
 
-            let jobs = mem::take(&mut *self.generic_jobs.borrow_mut());
-            for job in jobs {
+            let batch = self.generic_jobs.borrow().len();
+            for _ in 0..batch {
+                let Some(job) = self.generic_jobs.borrow_mut().pop_front() else {
+                    break;
+                };
                 if let Err(err) = job.call(&mut context.borrow_mut()) {
-                    self.clear();
-                    return Err(err);
+                    first_error.get_or_insert(err);
                 }
             }
             context.borrow_mut().clear_kept_objects();
             future::yield_now().await;
         }
 
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 }

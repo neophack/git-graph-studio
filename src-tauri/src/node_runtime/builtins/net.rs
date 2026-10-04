@@ -157,14 +157,47 @@ fn write_loop(id: u64, mut stream: TcpStream, ops: mpsc::Receiver<WriteOp>, pump
     }
 }
 
-/// Register an accepted or connected stream and start its reader and writer threads.
+/// The most sockets one runtime keeps open at once. Every socket costs two OS threads
+/// here (Node multiplexes them on one loop), and a listener is reachable from the LAN —
+/// Claude Remote's is. Without a ceiling a connection flood, or a client that reconnects
+/// without closing, grew the thread count until the OS refused a spawn, which panicked
+/// the accept thread and left the server deaf. Past the ceiling a new connection is
+/// closed at once, which a client sees as a reset and retries.
+const MAX_LIVE_SOCKETS: usize = 1024;
+
+fn live_sockets() -> usize {
+    table()
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|entry| matches!(entry, Entry::Socket { .. }))
+        .count()
+}
+
+/// Register an accepted or connected stream and start its reader and writer threads. A
+/// thread the OS refuses fails this socket alone — the peer sees the connection close and
+/// the JS side its `close` — instead of panicking the thread that called.
 fn start_socket(id: u64, stream: TcpStream, ops: mpsc::Receiver<WriteOp>, pump: &Pump) {
     let _ = stream.set_nodelay(true);
-    if let (Ok(reader), Ok(writer)) = (stream.try_clone(), stream.try_clone()) {
-        let read_pump = pump.clone();
-        std::thread::spawn(move || read_loop(id, reader, read_pump));
-        let write_pump = pump.clone();
-        std::thread::spawn(move || write_loop(id, writer, ops, write_pump));
+    let started = match (stream.try_clone(), stream.try_clone()) {
+        (Ok(reader), Ok(writer)) => {
+            let read_pump = pump.clone();
+            let reading = std::thread::Builder::new()
+                .name(format!("ggs-net-read-{id}"))
+                .spawn(move || read_loop(id, reader, read_pump));
+            let write_pump = pump.clone();
+            let writing = std::thread::Builder::new()
+                .name(format!("ggs-net-write-{id}"))
+                .spawn(move || write_loop(id, writer, ops, write_pump));
+            reading.is_ok() && writing.is_ok()
+        }
+        _ => false,
+    };
+    if !started {
+        let _ = stream.shutdown(Shutdown::Both);
+        table().lock().unwrap().remove(&id);
+        send(pump, id, "close", json!({ "hadError": true }), None);
+        return;
     }
     if let Some(Entry::Socket { stream: slot, .. }) = table().lock().unwrap().get_mut(&id) {
         *slot = Some(stream);
@@ -206,12 +239,17 @@ pub(super) fn listen(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
         },
     );
     let pump = pump();
-    std::thread::spawn(move || {
+    let accepting = std::thread::Builder::new().name(format!("ggs-net-accept-{id}"));
+    let spawned = accepting.spawn(move || {
         for incoming in listener.incoming() {
             if stop.load(Ordering::SeqCst) {
                 break;
             }
             match incoming {
+                Ok(stream) if live_sockets() >= MAX_LIVE_SOCKETS => {
+                    // Over the ceiling (see `MAX_LIVE_SOCKETS`): refuse this one.
+                    let _ = stream.shutdown(Shutdown::Both);
+                }
                 Ok(stream) => {
                     let socket_id = next_id();
                     let (writer, ops) = mpsc::channel();
@@ -243,6 +281,10 @@ pub(super) fn listen(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
         drop(listener);
         let _ = dropped_tx.send(());
     });
+    if let Err(e) = spawned {
+        table().lock().unwrap().remove(&id);
+        return Err(error(format!("EAGAIN|listen: no thread for the listener: {e}")));
+    }
     JsValue::from_json(
         &json!({ "id": id, "address": local.ip().to_string(), "port": local.port(), "family": family(&local) }),
         context,

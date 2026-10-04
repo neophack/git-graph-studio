@@ -85,6 +85,8 @@ where
     type Output = Expression;
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Expression> {
+        // GGS-patch: every nested expression passes here (see `stack_guard`).
+        crate::parser::guard_stack(cursor, interner)?;
         cursor.set_goal(InputElement::RegExp);
 
         match cursor.peek(0, interner).or_abrupt()?.kind() {

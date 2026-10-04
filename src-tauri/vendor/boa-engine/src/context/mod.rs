@@ -592,6 +592,20 @@ impl Context {
         &mut self.vm.runtime_limits
     }
 
+    /// GGS-patch: the VM's current depth (frames and operand stack). An embedder that
+    /// catches Rust panics around its calls into the engine takes one before the call.
+    #[must_use]
+    pub fn vm_checkpoint(&self) -> crate::vm::VmCheckpoint {
+        self.vm.checkpoint()
+    }
+
+    /// GGS-patch: after a caught panic, return the VM to `checkpoint` — the frames the
+    /// unwinding abandoned popped, their stack values released, no half-finished
+    /// completion left behind. A no-op when the VM is already there.
+    pub fn unwind_vm_to(&mut self, checkpoint: crate::vm::VmCheckpoint) {
+        self.vm.unwind_to(checkpoint);
+    }
+
     /// Returns `true` if this context can be suspended by an `Atomics.wait` call.
     #[inline]
     #[must_use]

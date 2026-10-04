@@ -381,6 +381,10 @@ impl Json {
         holder: &JsObject,
         context: &mut Context,
     ) -> JsResult<Option<JsString>> {
+        // GGS-patch: serialization recurses in Rust once per nesting level with no call
+        // in between for plain data — the native stack guard stops a deep object here.
+        crate::vm::check_native_stack()?;
+
         // 1. Let value be ? Get(holder, key).
         let mut value = holder.get(key.clone(), context)?;
 

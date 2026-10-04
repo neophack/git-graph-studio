@@ -22,7 +22,19 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, UnsafeCell};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+/// The bytes of the large (system-heap) blocks currently live. The JS engine's collector
+/// paces itself by its own boxes alone, and a box is small while what it holds is not: a
+/// string, an ArrayBuffer's bytes, a parsed tree all live out here, uncounted. The run
+/// loop reads this to collect when out-of-heap memory grows (see `node_runtime`'s
+/// `collect_on_external_pressure`). Only maintained where this allocator is installed.
+static LARGE_LIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// The live bytes of large blocks (0 where `GgsAlloc` is not the global allocator).
+pub fn large_live_bytes() -> usize {
+    LARGE_LIVE.load(Ordering::Relaxed)
+}
 
 /// The largest size served from the size classes.
 pub const MAX_SMALL: usize = 512;
@@ -189,8 +201,14 @@ unsafe impl GlobalAlloc for GgsAlloc {
         match class_of(&layout) {
             // SAFETY: the pool invariant (see `Pool::take`).
             Some(class) => with_pool(|pool| unsafe { pool.take(class) }),
-            // SAFETY: forwarded unchanged.
-            None => unsafe { System.alloc(layout) },
+            None => {
+                // SAFETY: forwarded unchanged.
+                let block = unsafe { System.alloc(layout) };
+                if !block.is_null() {
+                    LARGE_LIVE.fetch_add(layout.size(), Ordering::Relaxed);
+                }
+                block
+            }
         }
     }
 
@@ -199,8 +217,11 @@ unsafe impl GlobalAlloc for GgsAlloc {
         match class_of(&layout) {
             // SAFETY: the caller hands back a block this allocator served for `layout`.
             Some(class) => with_pool(|pool| unsafe { pool.give(class, block) }),
-            // SAFETY: forwarded unchanged.
-            None => unsafe { System.dealloc(block, layout) },
+            None => {
+                LARGE_LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+                // SAFETY: forwarded unchanged.
+                unsafe { System.dealloc(block, layout) }
+            }
         }
     }
 
@@ -215,8 +236,14 @@ unsafe impl GlobalAlloc for GgsAlloc {
                 }
                 block
             }
-            // SAFETY: forwarded unchanged.
-            None => unsafe { System.alloc_zeroed(layout) },
+            None => {
+                // SAFETY: forwarded unchanged.
+                let block = unsafe { System.alloc_zeroed(layout) };
+                if !block.is_null() {
+                    LARGE_LIVE.fetch_add(layout.size(), Ordering::Relaxed);
+                }
+                block
+            }
         }
     }
 
@@ -228,8 +255,15 @@ unsafe impl GlobalAlloc for GgsAlloc {
             // Same class: the block already has the room.
             (Some(old), Some(new)) if old == new => block,
             // Both large: the system heap can often grow in place.
-            // SAFETY: forwarded unchanged.
-            (None, None) => unsafe { System.realloc(block, layout, new_size) },
+            (None, None) => {
+                // SAFETY: forwarded unchanged.
+                let moved = unsafe { System.realloc(block, layout, new_size) };
+                if !moved.is_null() {
+                    LARGE_LIVE.fetch_add(new_size, Ordering::Relaxed);
+                    LARGE_LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+                }
+                moved
+            }
             _ => {
                 // SAFETY: a fresh block for the new layout, the overlap copied, the old
                 // block returned under its own layout.

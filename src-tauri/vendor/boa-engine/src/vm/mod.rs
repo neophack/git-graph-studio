@@ -35,6 +35,14 @@ pub(crate) use {
 };
 
 pub use runtime_limits::RuntimeLimits;
+
+/// GGS-patch: a VM depth taken by [`Context::vm_checkpoint`](crate::Context::vm_checkpoint)
+/// and restored by [`Context::unwind_vm_to`](crate::Context::unwind_vm_to).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmCheckpoint {
+    frames: usize,
+    stack: usize,
+}
 pub use {
     call_frame::{CallFrame, GeneratorResumeKind},
     code_block::CodeBlock,
@@ -440,6 +448,32 @@ impl Vm {
             #[cfg(feature = "trace")]
             trace: false,
         }
+    }
+
+    /// GGS-patch: the VM's depth, for [`Vm::unwind_to`].
+    pub(crate) fn checkpoint(&self) -> VmCheckpoint {
+        VmCheckpoint {
+            frames: self.frames.len(),
+            stack: self.stack.stack.len(),
+        }
+    }
+
+    /// GGS-patch: put the VM back at a depth it had before a run that never came back —
+    /// a Rust panic the embedder caught mid-execution. The unwinding skipped every frame
+    /// pop on the way out: the dead frames stayed pushed (each one charged against the
+    /// recursion limit forever), the current environment and realm stayed swapped to the
+    /// innermost dead frame, and the operand stack kept its values rooted. Frames are
+    /// popped the way a return pops them, so the environments and realm swap back.
+    pub(crate) fn unwind_to(&mut self, checkpoint: VmCheckpoint) {
+        while self.frames.len() > checkpoint.frames {
+            if self.pop_frame().is_none() {
+                break;
+            }
+        }
+        self.stack.stack.truncate(checkpoint.stack);
+        self.pending_exception = None;
+        self.completion_out = None;
+        self.native_active_function = None;
     }
 
     #[track_caller]
@@ -930,9 +964,25 @@ impl Context {
                 .with_message("exceeded maximum call stack length")
                 .into());
         }
+        // GGS-patch: every function call — JS or native, from the VM or from a builtin —
+        // passes here, so a builtin that recurses through calls (`join` over nested
+        // arrays, a getter chain) meets the native stack guard on the way down.
+        check_native_stack()?;
 
         Ok(())
     }
+}
+
+/// GGS-patch: the engine side of the native stack guard (`boa_parser::stack_guard`): a
+/// catchable `RangeError` — Node's own shape — once the armed thread's stack reaches its
+/// floor, instead of the stack overflow that kills the process. Free on an unarmed thread.
+pub(crate) fn check_native_stack() -> JsResult<()> {
+    if boa_parser::stack_guard::exhausted() {
+        return Err(JsNativeError::range()
+            .with_message(boa_parser::stack_guard::EXHAUSTED_MESSAGE)
+            .into());
+    }
+    Ok(())
 }
 
 /// Yields once to the executor.

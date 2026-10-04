@@ -189,6 +189,10 @@ where
                 }
                 let handle = Arc::clone(&handle);
                 let out = Arc::clone(&out);
+                // Reap the request threads that already answered: the shutdown join only
+                // needs the ones still running, and a long session's every finished handle
+                // (its OS thread object, its result packet) used to stay held until exit.
+                threads.retain(|thread: &std::thread::JoinHandle<()>| !thread.is_finished());
                 threads.push(std::thread::spawn(move || {
                     if let Some(result) = handle(
                         &method,

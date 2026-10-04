@@ -786,11 +786,19 @@ fn exit_reason(status: &std::process::ExitStatus) -> String {
     const FASTFAIL: i32 = 0xC0000409u32 as i32;
     const ACCESS_VIOLATION: i32 = 0xC0000005u32 as i32;
     const STACK_OVERFLOW: i32 = 0xC00000FDu32 as i32;
+    // ggs-node's own exit when a package's native addon calls `napi_fatal_error`.
+    const ADDON_FATAL: i32 = 134;
     match status.code() {
         Some(0) => "the backend exited cleanly".to_owned(),
         Some(FASTFAIL) => {
-            "the backend died on a fatal abort (0xC0000409) — most often the machine ran \
-             out of commit memory; it restarts on its next use"
+            "the backend died on a fatal abort (0xC0000409) — the machine running out of \
+             commit memory, or a fault the runtime could not contain (the backend log's \
+             last stderr lines name it); it restarts on its next use"
+                .to_owned()
+        }
+        Some(ADDON_FATAL) => {
+            "the backend stopped on a native addon's fatal error (napi_fatal_error) — the \
+             backend log carries the addon's message; it restarts on its next use"
                 .to_owned()
         }
         Some(ACCESS_VIOLATION) => {
@@ -1256,6 +1264,7 @@ mod tests {
         assert!(exit_reason(&status(0xC0000409)).contains("commit memory"));
         assert!(exit_reason(&status(0xC0000005)).contains("access violation"));
         assert!(exit_reason(&status(0xC00000FD)).contains("stack overflow"));
+        assert!(exit_reason(&status(134)).contains("napi_fatal_error"));
         assert!(exit_reason(&status(1)).contains("0x1"));
         assert!(exit_reason(&status(0xFFFFFFFF)).contains("0xffffffff"));
     }

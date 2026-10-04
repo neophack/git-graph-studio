@@ -13,6 +13,9 @@ use crate::node_runtime::{children, key, native_callable, with_state, Job, ProcE
 
 /// The next child handle, unique across every runtime in the process.
 static NEXT_PROC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+/// How long a child's exit waits for its pipes to drain before it is reported anyway (see
+/// the exit watcher in [`proc_spawn`]).
+const READER_DRAIN: Duration = Duration::from_secs(2);
 
 struct SpawnRequest {
     file: String,
@@ -241,8 +244,21 @@ pub(super) fn proc_spawn(
                 // exit cross. Sent from racing threads, the exit could overtake the output —
                 // `proc_exit` retires the handle, so the late `data` was dropped and a fast
                 // command (`git --version`) read as empty.
+                // Bounded, though: a grandchild that inherited the pipes (a CLI's MCP
+                // server, git's credential helper) holds them open after the child is
+                // gone, and an unbounded join never sent the exit at all — the awaiting
+                // extension hung forever where Node reports the exit at once. Past the
+                // drain window the exit crosses and the readers detach.
+                let drained_by = std::time::Instant::now() + READER_DRAIN;
+                while readers.iter().any(|reader| !reader.is_finished())
+                    && std::time::Instant::now() < drained_by
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
                 for reader in std::mem::take(&mut readers) {
-                    let _ = reader.join();
+                    if reader.is_finished() {
+                        let _ = reader.join();
+                    }
                 }
                 pump.send_job(Job::ProcExit {
                     handle,

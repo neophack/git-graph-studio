@@ -1861,6 +1861,10 @@ impl Array {
         this_arg: &JsValue,
         context: &mut Context,
     ) -> JsResult<u64> {
+        // GGS-patch: `flat(Infinity)` recurses here once per nesting level, natively — the
+        // stack guard stops a deep array instead of the stack overflowing.
+        crate::vm::check_native_stack()?;
+
         // 1. Assert target is Object
         // 2. Assert source is Object
 

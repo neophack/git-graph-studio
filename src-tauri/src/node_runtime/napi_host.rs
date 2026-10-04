@@ -54,6 +54,34 @@ impl NapiEnv {
         self.handles.push(value);
         self.handles.len() as *mut c_void // 1-based, so a napi_value is never null
     }
+
+    /// The arena's current depth: the mark a scope releases back to.
+    fn mark(&self) -> usize {
+        self.handles.len()
+    }
+
+    /// Release every handle created since `mark` — N-API's own lifetime rule: a
+    /// `napi_value` lives until its scope closes (a callback's implicit scope, an explicit
+    /// handle scope), and what must outlive it is a reference. Scopes nest strictly
+    /// (a callback that calls into JS that calls another callback returns first), so a
+    /// stack of marks is the whole bookkeeping. Before this the arena only ever grew:
+    /// every argument, result and intermediate of every engine call stayed rooted for the
+    /// process's life — a long git-graph session's commit-list strings among them — and
+    /// no collection could reclaim any of it.
+    fn release_to(&mut self, mark: usize) {
+        if mark < self.handles.len() {
+            self.handles.truncate(mark);
+        }
+    }
+}
+
+/// A scope token as a non-null pointer, and back: the mark the scope releases to.
+fn scope_token(mark: usize) -> *mut c_void {
+    (mark + 1) as *mut c_void
+}
+
+fn scope_mark(token: *mut c_void) -> Option<usize> {
+    (token as usize).checked_sub(1)
 }
 
 /// This thread's environment, when the `env` the addon passed is it.
@@ -97,6 +125,30 @@ pub(crate) fn release_thread_env() {
     // The thread is going away: its functions' Boa values die with its context. The
     // finalizers are skipped — they would call back into an environment being torn down.
     RETIRED.lock().unwrap().retain(|tsfn| tsfn.owner != owner);
+}
+
+/// The calling thread's handle-arena depth (0 without an environment) — the run loop takes
+/// it before each step so a contained panic can release what the step's abandoned
+/// callbacks never did (see [`release_handles_to`]).
+pub(crate) fn handle_mark() -> usize {
+    let raw = ENV.with(|slot| slot.get());
+    if raw.is_null() {
+        return 0;
+    }
+    unsafe { (*raw).mark() }
+}
+
+/// Release the calling thread's handles back to `mark`, and drop any pending exception a
+/// panicking call left behind — the run loop's cleanup after a contained panic.
+pub(crate) fn release_handles_to(mark: usize) {
+    let raw = ENV.with(|slot| slot.get());
+    if raw.is_null() {
+        return;
+    }
+    unsafe {
+        (*raw).release_to(mark);
+        (*raw).pending = None;
+    }
 }
 
 unsafe fn context<'a>() -> &'a mut Context {
@@ -213,19 +265,24 @@ pub(crate) fn load_and_register(
             .map_err(|_| "carries no napi_register_module_v1: not a Node-API addon".to_owned())?
     };
     let env = unsafe { any_env() as *mut NapiEnv as *mut c_void };
+    let mark = unsafe { any_env().mark() };
     let exports = JsObject::with_object_proto(context.intrinsics());
     let exports_handle = unsafe { any_env().handle(exports.clone().into()) };
     let returned = unsafe { register(env, exports_handle) };
     let module = if returned.is_null() {
-        exports
+        Ok(exports)
     } else {
         match unsafe { value_of(returned) } {
             Some(value) => value
                 .as_object()
-                .ok_or("the addon's registration did not answer an object")?,
-            None => exports,
+                .ok_or("the addon's registration did not answer an object"),
+            None => Ok(exports),
         }
     };
+    // The registration ran in its own scope (Node opens one around it too): whatever it
+    // built is reachable from the module object now, not from the arena.
+    unsafe { any_env().release_to(mark) };
+    let module = module?;
     // A failed registration leaves a pending exception: surface it as the load error, the
     // way a throw during require surfaces in Node.
     if let Some(pending) = unsafe { any_env().pending.take() } {
@@ -267,6 +324,9 @@ unsafe fn callback_trampoline(
     _context: &mut Context,
 ) -> JsResult<JsValue> {
     let env = any_env() as *mut NapiEnv as *mut c_void;
+    // The callback's implicit handle scope: everything it creates is released when it
+    // returns, after its answer has been read out of the arena.
+    let mark = any_env().mark();
     let this_handle = any_env().handle(this.clone());
     let mut argv = Vec::with_capacity(args.len());
     for argument in args {
@@ -278,18 +338,20 @@ unsafe fn callback_trampoline(
         data: callback.data,
     };
     let result = (callback.function)(env, &info as *const CallbackInfo as *mut c_void);
-    if let Some(pending) = any_env().pending.take() {
-        return Err(JsError::from_opaque(pending));
-    }
-    if result.is_null() {
-        return Ok(JsValue::undefined());
-    }
-    value_of(result).ok_or_else(|| {
-        JsError::from_native(
-            JsNativeError::error()
-                .with_message("the addon answered an invalid napi_value".to_owned()),
-        )
-    })
+    let outcome = if let Some(pending) = any_env().pending.take() {
+        Err(JsError::from_opaque(pending))
+    } else if result.is_null() {
+        Ok(JsValue::undefined())
+    } else {
+        value_of(result).ok_or_else(|| {
+            JsError::from_native(
+                JsNativeError::error()
+                    .with_message("the addon answered an invalid napi_value".to_owned()),
+            )
+        })
+    };
+    any_env().release_to(mark);
+    outcome
 }
 
 /* ---------- threadsafe functions: async completion across threads ---------- */
@@ -365,11 +427,13 @@ pub(crate) fn drain_threadsafe_calls(context: &mut Context) {
     if !retired.is_empty() {
         install(context as *mut Context);
         let env = unsafe { any_env() as *mut NapiEnv as *mut c_void };
+        let mark = unsafe { any_env().mark() };
         for tsfn in &retired {
             if let Some((finalize, data)) = tsfn.finalize {
                 unsafe { finalize(env, data.0, tsfn.context) };
             }
         }
+        unsafe { any_env().release_to(mark) };
         drop(retired);
     }
     let batch: Vec<(usize, SendPtr)> = {
@@ -409,6 +473,8 @@ pub(crate) fn drain_threadsafe_calls(context: &mut Context) {
             continue;
         };
         let env = unsafe { any_env() as *mut NapiEnv as *mut c_void };
+        // Each delivery is its own scope, as each `call_js_cb` is in Node.
+        let mark = unsafe { any_env().mark() };
         match converter {
             Some(converter) => {
                 let callback_handle = unsafe { any_env().handle(callback) };
@@ -421,6 +487,7 @@ pub(crate) fn drain_threadsafe_calls(context: &mut Context) {
                 }
             }
         }
+        unsafe { any_env().release_to(mark) };
         // A pending exception the delivery raised has nowhere to go (Node reports it as
         // uncaught); clear it so the next delivery's API calls do not see it.
         if let Some(pending) = unsafe { any_env().pending.take() } {
@@ -451,11 +518,29 @@ fn utf8_or_latin1(ptr: *const c_char, length: isize) -> Option<String> {
     }
 }
 
+// Every export is `extern "C"`, and a Rust panic may not unwind across that boundary: the
+// runtime turns it into an abort (0xC0000409 on Windows) — the whole backend gone over one
+// failed call. A panic here is rarely the host's own: `napi_call_function` runs the
+// package's JS, and a Boa compiler edge panicking inside that call would unwind straight
+// through the addon's frames. The body runs under `catch_unwind`, and a panic answers
+// `napi_generic_failure`, which napi-rs surfaces as a thrown error at the call site.
 macro_rules! napi_fn {
     ($(#[$doc:meta])* $name:ident($($arg:ident: $ty:ty),*) -> $ret:ty $body:block) => {
         $(#[$doc])*
         #[no_mangle]
-        pub unsafe extern "C" fn $name($($arg: $ty),*) -> $ret $body
+        pub unsafe extern "C" fn $name($($arg: $ty),*) -> $ret {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> $ret { $body })) {
+                Ok(status) => status,
+                Err(payload) => {
+                    eprintln!(
+                        "[ggs-node] {} panicked: {}; the call fails instead of the backend",
+                        stringify!($name),
+                        crate::node_runtime::panic_message(payload.as_ref()),
+                    );
+                    NAPI_GENERIC_FAILURE
+                }
+            }
+        }
     };
 }
 
@@ -745,7 +830,15 @@ unsafe fn read_value_string(
             return Ok(NAPI_OK);
         }
         let size = buffer_size.max(0) as usize;
-        let capacity = size.saturating_sub(1);
+        // A zero-size buffer has no room even for the terminator: Node writes nothing.
+        // Writing the NUL anyway put a byte past the addon's buffer.
+        if size == 0 {
+            if !written.is_null() {
+                *written = 0;
+            }
+            return Ok(NAPI_OK);
+        }
+        let capacity = size - 1;
         if utf16_units {
             let target = buffer as *mut u16;
             let mut copied = 0usize;
@@ -1102,6 +1195,7 @@ napi_fn!(napi_call_function(env: *mut c_void, receiver: *mut c_void, function: *
     let Some(_) = env_mut(env) else { return NAPI_INVALID_ARG };
     let Some(function) = object_of(function) else { return NAPI_INVALID_ARG };
     let Some(receiver) = value_of(receiver) else { return NAPI_INVALID_ARG };
+    if argc > 0 && argv.is_null() { return NAPI_INVALID_ARG };
     let mut arguments = Vec::with_capacity(argc);
     for at in 0..argc {
         arguments.push(value_of(*argv.add(at)).unwrap_or_else(JsValue::undefined));
@@ -1118,6 +1212,7 @@ napi_fn!(napi_call_function(env: *mut c_void, receiver: *mut c_void, function: *
 napi_fn!(napi_new_instance(env: *mut c_void, constructor: *mut c_void, argc: usize, argv: *mut *mut c_void, result: *mut *mut c_void) -> u32 {
     let Some(_) = env_mut(env) else { return NAPI_INVALID_ARG };
     let Some(constructor) = object_of(constructor) else { return NAPI_INVALID_ARG };
+    if argc > 0 && argv.is_null() { return NAPI_INVALID_ARG };
     let mut arguments = Vec::with_capacity(argc);
     for at in 0..argc {
         arguments.push(value_of(*argv.add(at)).unwrap_or_else(JsValue::undefined));
@@ -1278,12 +1373,16 @@ unsafe fn settle_deferred(
     let Some(_) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    let Some(settle) = (deferred as *mut Deferred).as_ref() else {
+    if deferred.is_null() {
         return NAPI_INVALID_ARG;
-    };
+    }
     let Some(value) = value_of(value) else {
         return NAPI_INVALID_ARG;
     };
+    // N-API frees the deferred when it is settled — the addon never touches it again.
+    // Borrowing it instead leaked the box and its two rooted resolvers (and through them
+    // the promise and everything its reactions held) once per async engine call.
+    let settle = Box::from_raw(deferred as *mut Deferred);
     let function = if resolve {
         &settle.resolve
     } else {
@@ -1320,39 +1419,53 @@ napi_fn!(napi_is_promise(env: *mut c_void, value: *mut c_void, result: *mut bool
     NAPI_OK
 });
 
-/* ----- handle scopes, references: the arena makes them administrative ----- */
+/* ----- handle scopes: marks over the arena; references: rooted boxes ----- */
 
+// A scope's token is the arena mark it releases back to (see `NapiEnv::release_to`). A
+// close with a mark above the arena's depth (an outer scope already released it, or a
+// foreign token) releases nothing.
 napi_fn!(napi_open_handle_scope(env: *mut c_void, result: *mut *mut c_void) -> u32 {
-    let Some(_) = env_mut(env) else { return NAPI_INVALID_ARG };
-    if !result.is_null() {
-        *result = std::ptr::dangling_mut::<c_void>(); // a token scope: the arena roots every handle
-    }
+    let Some(slot) = env_mut(env) else { return NAPI_INVALID_ARG };
+    if result.is_null() { return NAPI_INVALID_ARG; }
+    *result = scope_token(slot.mark());
     NAPI_OK
 });
 
-napi_fn!(napi_close_handle_scope(env: *mut c_void, _scope: *mut c_void) -> u32 {
-    let Some(_) = env_mut(env) else { return NAPI_INVALID_ARG };
+napi_fn!(napi_close_handle_scope(env: *mut c_void, scope: *mut c_void) -> u32 {
+    let Some(slot) = env_mut(env) else { return NAPI_INVALID_ARG };
+    let Some(mark) = scope_mark(scope) else { return NAPI_INVALID_ARG };
+    slot.release_to(mark);
     NAPI_OK
 });
 
+// An escapable scope reserves one slot BELOW its mark — the slot `napi_escape_handle`
+// promotes a value into, so the escaped handle survives the scope's close.
 napi_fn!(napi_open_escapable_handle_scope(env: *mut c_void, result: *mut *mut c_void) -> u32 {
-    let Some(_) = env_mut(env) else { return NAPI_INVALID_ARG };
-    if !result.is_null() {
-        *result = std::ptr::dangling_mut::<c_void>();
-    }
+    let Some(slot) = env_mut(env) else { return NAPI_INVALID_ARG };
+    if result.is_null() { return NAPI_INVALID_ARG; }
+    slot.handles.push(JsValue::undefined());
+    *result = scope_token(slot.mark());
     NAPI_OK
 });
 
-napi_fn!(napi_close_escapable_handle_scope(env: *mut c_void, _scope: *mut c_void) -> u32 {
-    let Some(_) = env_mut(env) else { return NAPI_INVALID_ARG };
+napi_fn!(napi_close_escapable_handle_scope(env: *mut c_void, scope: *mut c_void) -> u32 {
+    let Some(slot) = env_mut(env) else { return NAPI_INVALID_ARG };
+    let Some(mark) = scope_mark(scope) else { return NAPI_INVALID_ARG };
+    slot.release_to(mark);
     NAPI_OK
 });
 
-napi_fn!(napi_escape_handle(env: *mut c_void, _scope: *mut c_void, value: *mut c_void, result: *mut *mut c_void) -> u32 {
-    let Some(_) = env_mut(env) else { return NAPI_INVALID_ARG };
-    if !result.is_null() {
-        *result = value;
-    }
+napi_fn!(napi_escape_handle(env: *mut c_void, scope: *mut c_void, value: *mut c_void, result: *mut *mut c_void) -> u32 {
+    let Some(slot) = env_mut(env) else { return NAPI_INVALID_ARG };
+    if result.is_null() { return NAPI_INVALID_ARG; }
+    let Some(value) = value_of(value) else { return NAPI_INVALID_ARG };
+    // The reserved slot sits just below the scope's mark; its 1-based handle is the mark.
+    let Some(reserved) = scope_mark(scope).and_then(|mark| mark.checked_sub(1)) else {
+        return NAPI_INVALID_ARG;
+    };
+    let Some(target) = slot.handles.get_mut(reserved) else { return NAPI_INVALID_ARG };
+    *target = value;
+    *result = (reserved + 1) as *mut c_void;
     NAPI_OK
 });
 
@@ -1530,6 +1643,30 @@ pub extern "C" fn uv_default_loop() -> *mut c_void {
     std::ptr::dangling_mut::<c_void>()
 }
 
+/// The exit code of an addon's `napi_fatal_error` — the shell convention for an abort,
+/// and distinct from the Windows fastfail code `ext_process` reads as a commit-memory
+/// abort, so the status surface names the real reason.
+const FATAL_ERROR_EXIT: i32 = 134;
+
+// `napi_fatal_error` is declared no-return in the headers: the addon calls it where it
+// cannot go on, and the code after the call is unreachable to its compiler. The stub that
+// returned `napi_generic_failure` resumed it there — undefined behaviour inside the addon.
+// Node prints the location and message and aborts; this host prints them to the backend
+// log and exits with its own code.
+#[no_mangle]
+pub unsafe extern "C" fn napi_fatal_error(
+    location: *const c_char,
+    location_len: usize,
+    message: *const c_char,
+    message_len: usize,
+) -> ! {
+    // NAPI_AUTO_LENGTH is SIZE_MAX, which reads as -1: the NUL-terminated spelling.
+    let location = utf8_or_latin1(location, location_len as isize).unwrap_or_default();
+    let message = utf8_or_latin1(message, message_len as isize).unwrap_or_default();
+    eprintln!("[ggs-node] FATAL ERROR (a native addon gave up): {location} {message}");
+    std::process::exit(FATAL_ERROR_EXIT)
+}
+
 /* ----- the long tail: honest stubs, so a probe degrades instead of crashing ----- */
 
 macro_rules! napi_stub {
@@ -1591,7 +1728,6 @@ napi_stub!(
     napi_async_init,
     napi_async_destroy,
     napi_make_callback_external_buffers,
-    napi_fatal_error,
     napi_fatal_exception,
     napi_module_register,
     napi_set_instance_data,
@@ -1753,4 +1889,107 @@ pub fn force_link() {
         uv_run as *const () as usize,
     ];
     std::hint::black_box(&surface);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// This thread's environment over a fresh context, as the run loop installs it.
+    fn env_over(context: &mut Context) -> *mut c_void {
+        install(context as *mut Context);
+        ENV.with(|slot| slot.get()) as *mut c_void
+    }
+
+    fn number(env: *mut c_void, value: f64) -> *mut c_void {
+        let mut handle = std::ptr::null_mut();
+        assert_eq!(unsafe { napi_create_double(env, value, &mut handle) }, NAPI_OK);
+        handle
+    }
+
+    /// A closed scope releases every handle created inside it — before, scopes were
+    /// tokens and the arena only ever grew, rooting every value an addon touched.
+    #[test]
+    fn a_closed_handle_scope_releases_what_it_created() {
+        let mut context = Context::default();
+        let env = env_over(&mut context);
+        let base = handle_mark();
+        let mut scope = std::ptr::null_mut();
+        assert_eq!(unsafe { napi_open_handle_scope(env, &mut scope) }, NAPI_OK);
+        for at in 0..100 {
+            number(env, f64::from(at));
+        }
+        assert_eq!(handle_mark(), base + 100);
+        assert_eq!(unsafe { napi_close_handle_scope(env, scope) }, NAPI_OK);
+        assert_eq!(handle_mark(), base, "the scope released its handles");
+        release_thread_env();
+    }
+
+    /// An escaped handle outlives its escapable scope, which releases everything else.
+    #[test]
+    fn an_escaped_handle_survives_its_scope() {
+        let mut context = Context::default();
+        let env = env_over(&mut context);
+        let base = handle_mark();
+        let mut scope = std::ptr::null_mut();
+        assert_eq!(unsafe { napi_open_escapable_handle_scope(env, &mut scope) }, NAPI_OK);
+        for at in 0..10 {
+            number(env, f64::from(at));
+        }
+        let kept = number(env, 42.0);
+        let mut escaped = std::ptr::null_mut();
+        assert_eq!(unsafe { napi_escape_handle(env, scope, kept, &mut escaped) }, NAPI_OK);
+        assert_eq!(unsafe { napi_close_escapable_handle_scope(env, scope) }, NAPI_OK);
+        assert_eq!(handle_mark(), base + 1, "only the escape slot outlives the scope");
+        assert_eq!(unsafe { value_of(escaped) }.and_then(|v| v.as_number()), Some(42.0));
+        release_thread_env();
+    }
+
+    /// An addon callback's handles die with the callback (its implicit scope), however
+    /// many it created and however often JS calls it.
+    #[test]
+    fn a_callback_releases_its_handles_when_it_returns() {
+        unsafe extern "C" fn busy(env: *mut c_void, _info: *mut c_void) -> *mut c_void {
+            let mut last = std::ptr::null_mut();
+            for at in 0..50 {
+                unsafe { napi_create_double(env, f64::from(at), &mut last) };
+            }
+            last
+        }
+        let mut context = Context::default();
+        let env = env_over(&mut context);
+        let function = unsafe { bridged_function("busy", busy, std::ptr::null_mut()) };
+        let base = handle_mark();
+        for _ in 0..10 {
+            let answer = function
+                .call(&JsValue::undefined(), &[JsValue::from(1)], &mut context)
+                .unwrap();
+            assert_eq!(answer.as_number(), Some(49.0), "the answer was read before the release");
+        }
+        assert_eq!(handle_mark(), base, "ten calls left no handle behind");
+        let _ = env;
+        release_thread_env();
+    }
+
+    /// A zero-size buffer gets nothing written — not even the terminator, which landed a
+    /// byte past the addon's buffer.
+    #[test]
+    fn a_zero_size_string_buffer_is_never_written() {
+        let mut context = Context::default();
+        let env = env_over(&mut context);
+        let mut text = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { napi_create_string_utf8(env, c"hello".as_ptr(), -1, &mut text) },
+            NAPI_OK
+        );
+        let mut buffer = [0x55u8; 4];
+        let mut written = 7usize;
+        let status = unsafe {
+            napi_get_value_string_utf8(env, text, buffer.as_mut_ptr().cast(), 0, &mut written)
+        };
+        assert_eq!(status, NAPI_OK);
+        assert_eq!(buffer, [0x55; 4], "nothing written");
+        assert_eq!(written, 0);
+        release_thread_env();
+    }
 }

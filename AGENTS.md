@@ -670,8 +670,12 @@ page shows the integration's state (`claude_mcp_status`).
   confined to the package root (`require.rs`), real `fs`/`path`/`os`/`child_process`
   builtins over std (`builtins/`: `mod` the registry, `fs`, `path`, `os` — including a
   real `networkInterfaces()` over if-addrs (2026-10-01: Claude Remote's pairing QR needs
-  the machine's true LAN addresses; the prelude's empty stub is gone), `child`, `net`
-  the TCP sockets and the HTTP(S) client under the prelude's `net` / `http` / `fetch`,
+  the machine's true LAN addresses; the prelude's empty stub is gone), `child` (a
+  child's exit waits at most 2 s for its pipes to drain — a grandchild holding them
+  open never again withholds the exit), `net`
+  the TCP sockets and the HTTP(S) client under the prelude's `net` / `http` / `fetch`
+  (at most 1024 live sockets, two threads each — a LAN listener sheds the rest; a
+  refused thread spawn fails its socket, never the accept thread),
   `core` the prelude natives — the crypto ones in Node's own shapes since 2026-10-01:
   PBKDF2 (sha1/256/512, string or Buffer password), AES-128/192/256-GCM whose `update`
   answers as it goes over the GCM counter stream with encodings honoured and AAD read
@@ -682,9 +686,24 @@ page shows the integration's state (`claude_mcp_status`).
   alone; the JS thread keeps lock-free per-thread lists, other threads share one guarded
   pool), the JS prelude's
   Buffer/EventEmitter/util/`vscode`-stub (`prelude.js`), the N-API host a package's
-  `.node` loads through (`native.rs` the loader, `napi_host.rs` the `napi_*` surface) —
-  and the dispatch: launcher → `ggs.onRequest` → `exports.dispatch`; stdout is the
-  protocol, package code writes through `ggs.log` only; `examples/boa_bench.rs` the
+  `.node` loads through (`native.rs` the loader, `napi_host.rs` the `napi_*` surface —
+  its handle arena honours N-API's scopes: a callback, a threadsafe delivery, the
+  registration and every explicit scope release what they created, an escapable scope
+  keeps one slot below its mark, a settled deferred is freed, and every export runs
+  under `catch_unwind` because a panic may not unwind out of `extern "C"`; before
+  2026-10-04 the arena only grew, rooting every argument and result an addon touched
+  for the process's life) — and the dispatch: launcher → `ggs.onRequest` →
+  `exports.dispatch`; stdout is the protocol, package code writes through `ggs.log`
+  only. The run loop's crash-proofing (2026-10-04): the JS thread runs on a 64 MiB
+  stack reservation with the native stack guard armed; every step that runs package
+  code — a job, a timer, an addon completion, the promise jobs, the activation poll —
+  runs under `contained` (`catch_unwind` + the VM unwind + the N-API arena release),
+  and the state drops before the context however `js_main` leaves; and
+  `collect_on_external_pressure` collects the heap when the allocator's live large
+  blocks (`alloc::large_live_bytes` — strings, buffers: memory Boa's box-counting pacing
+  never sees) grow by half their post-collection watermark, 64 MiB at least — a
+  git-graph session's results and claude-code's payloads used to pile up by the
+  gigabyte before a collection ran; `examples/boa_bench.rs` the
   scratch parse/compile benchmark — `boa_bench <bundle.js> [parse|compile|lexer|read]`),
   `src-tauri/vendor/` (the patched Boa 0.21.1 crates the sidecar's parser and
   compiler run through, wired by `[patch.crates-io]` in `src-tauri/Cargo.toml`; the
@@ -699,7 +718,23 @@ page shows the integration's state (`claude_mcp_status`).
   (the known `Function`-constructor miscompile) instead of killing the JS thread; the
   grammar and semantics are pinned in `tests/vscode_shim_boa.rs`, the compile semantics
   end-to-end in `tests/node_runtime.rs`; retire the fork when upstream carries the
-  fixes. Performance patches ride along (2026-09-27, same marking), taking Claude
+  fixes. Crash-proofing patches (2026-10-04, same marking): `boa-parser`'s
+  `stack_guard.rs` is the native stack guard — the embedder arms it at the top of its
+  JS thread with that thread's stack size, the parser's recursion hubs
+  (`AssignmentExpression`, `UnaryExpression`, `Statement`, `StatementListItem`) fail
+  as a `SyntaxError` once two thirds of the stack is used (the last third is the
+  unguarded scope-analysis / bytecompile / drop passes' over the same tree), and
+  `boa-engine`'s `check_runtime_limits` (every call), `JSON.stringify`'s
+  `serialize_json_property` and `flat`'s `flatten_into_array` throw a catchable
+  `RangeError: Maximum call stack size exceeded` with an eighth left — before it, a
+  hundred nested closures or a 700-deep array handed to `String()` overflowed the
+  native stack (0xC00000FD, the backend gone); `boa-engine`'s `SimpleJobExecutor` pops
+  its batch one job at a time and lets a failing job fail alone (upstream `clear()`ed
+  every queue on the first error, stranding every pending `await` in the program); and
+  `Context::vm_checkpoint` / `unwind_vm_to` put the VM back at rest after a panic the
+  embedder caught mid-run (the abandoned frames stayed pushed, charged against the
+  512-frame budget, with the environment and realm still swapped to the dead frame).
+  Performance patches ride along (2026-09-27, same marking), taking Claude
   Code's 3 MB bundle from 13.2 s of activation to under a second end to end:
   `boa-ast`'s `Scope` carries a name→index map (with a negative-cache sentinel for
   free variables) beside its binding vector — every by-name lookup was a linear scan,

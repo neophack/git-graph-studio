@@ -661,3 +661,22 @@ impl<T> OrAbrupt<T> for ParseResult<Option<T>> {
         self?.ok_or(Error::AbruptEnd)
     }
 }
+
+/// GGS-patch: the parser's native stack check (see [`crate::stack_guard`]), called at the
+/// recursion hubs — every nesting construct (a paren, an array or object literal, a nested
+/// function or block, a unary chain) passes through one of them. Past the floor the parse
+/// fails as a `SyntaxError` at the current token instead of overflowing the thread.
+fn guard_stack<R: ReadChar>(cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<()> {
+    if !crate::stack_guard::parser_exhausted() {
+        return Ok(());
+    }
+    let position = cursor
+        .peek(0, interner)
+        .ok()
+        .flatten()
+        .map_or_else(Position::default, |token| boa_ast::Spanned::span(token).start());
+    Err(Error::general(
+        crate::stack_guard::EXHAUSTED_MESSAGE,
+        position,
+    ))
+}

@@ -3080,3 +3080,103 @@ module.exports.activate = function () {
         registered.lock().unwrap()
     );
 }
+
+/// Deep nesting fails as an ordinary error, never a stack overflow. Boa's parser, its
+/// `JSON.stringify`, `Array.prototype.join` and `flat` recurse natively once per level;
+/// on the old 2 MiB JS thread a hundred nested closures, two hundred nested parentheses
+/// or a 700-deep array handed to `String()` overflowed the stack — 0xC00000FD, the whole
+/// backend dead. Now the JS thread has room for real code, and what is deeper still is a
+/// catchable `RangeError` / `SyntaxError` with the runtime serving on.
+#[test]
+fn deep_nesting_fails_as_an_error_never_a_stack_overflow() {
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[(
+            "main.js",
+            r#"
+const N = 200000;
+function nestedObject(n) { let o = {}; for (let i = 0; i < n; i++) o = { a: o }; return o; }
+function nestedArray(n) { let o = []; for (let i = 0; i < n; i++) o = [o]; return o; }
+function attempt(work) {
+    try { return { ok: work() }; } catch (error) { return { error: String(error) }; }
+}
+ggs.onRequest((command) => {
+    switch (command) {
+        case 'stringify': return attempt(() => JSON.stringify(nestedObject(N)).length);
+        case 'join': return attempt(() => String(nestedArray(N)).length);
+        case 'flat': return attempt(() => nestedArray(N).flat(Infinity).length);
+        case 'parens': return attempt(() => typeof new Function('return ' + '('.repeat(N) + '1' + ')'.repeat(N)));
+        // What real bundles nest: well inside the room the JS thread now has.
+        case 'closures': return attempt(() => {
+            const source = '(function(){return '.repeat(300) + '7' + '})()'.repeat(300);
+            return new Function('return ' + source)();
+        });
+        case 'ping': return 'pong';
+    }
+});
+"#,
+        )],
+    )
+    .join("main.js");
+    let answers = serve(
+        entry,
+        &[
+            initialize(),
+            run_command("stringify", json!([])),
+            run_command("join", json!([])),
+            run_command("flat", json!([])),
+            run_command("parens", json!([])),
+            run_command("closures", json!([])),
+            run_command("ping", json!([])),
+        ],
+    );
+    assert_eq!(answers.len(), 7, "{answers:?}");
+    for (at, name) in [(1, "stringify"), (2, "join"), (3, "flat"), (4, "parens")] {
+        let answer = answers[at].as_ref().expect("answered, not dropped");
+        let error = answer["error"].as_str().unwrap_or_default();
+        assert!(
+            answer.get("ok").is_some() || error.contains("Maximum call stack size exceeded"),
+            "{name} answered or failed as a stack error: {answer}"
+        );
+    }
+    assert_eq!(
+        answers[5].as_ref().unwrap()["ok"],
+        json!(7),
+        "three hundred nested closures compile and run: {answers:?}"
+    );
+    assert_eq!(answers[6].as_ref().unwrap(), &json!("pong"), "the runtime serves on");
+}
+
+/// A child's exit is reported even while a grandchild still holds the child's stdout —
+/// the exit watcher used to join the pipe readers without bound, so a CLI that left a
+/// background process behind (an MCP server, git's credential helper) never reported
+/// `exit` and the awaiting extension hung. The grandchild here lives ~6 s; the exit must
+/// cross well before it is gone.
+#[test]
+fn a_childs_exit_is_reported_while_a_grandchild_holds_its_pipes() {
+    let (file, args) = if cfg!(windows) {
+        ("cmd", r#"["/c", "start /b ping -n 7 127.0.0.1 & echo child-done"]"#)
+    } else {
+        ("sh", r#"["-c", "sleep 6 & echo child-done"]"#)
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let main = format!(
+        r#"
+const {{ spawn }} = require('child_process');
+ggs.onRequest(() => new Promise((resolve) => {{
+    const started = Date.now();
+    let out = '';
+    const child = spawn({file:?}, {args});
+    child.stdout.on('data', (chunk) => {{ out += String(chunk); }});
+    child.on('exit', (code) => resolve({{ code, ms: Date.now() - started, sawOutput: out.includes('child-done') }}));
+}}));
+"#
+    );
+    let entry = make_package(tmp.path(), &[("main.js", &main)]).join("main.js");
+    let answers = serve(entry, &[initialize(), run_command("go", json!([]))]);
+    let answer = answers[1].as_ref().expect("the exit was reported");
+    assert_eq!(answer["sawOutput"], json!(true), "the child's own output arrived first: {answer}");
+    let ms = answer["ms"].as_f64().unwrap_or(f64::MAX);
+    assert!(ms < 5000.0, "the exit crossed before the grandchild ended: {answer}");
+}
