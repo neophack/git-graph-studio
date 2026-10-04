@@ -761,13 +761,48 @@ impl ReaderState {
             return;
         }
         if let Some(mut handle) = procs.remove(&self.ext_id) {
-            push_log(&handle.log, "backend exited".to_owned());
-            if let Some(history) = self.history.lock().unwrap().get_mut(&self.ext_id) {
-                history.last_error = Some("the backend exited".to_owned());
-            }
             let _ = handle.child.kill();
-            let _ = handle.child.wait();
+            let reason = handle
+                .child
+                .wait()
+                .map(|status| exit_reason(&status))
+                .unwrap_or_else(|_| "the backend exited".to_owned());
+            push_log(&handle.log, reason.clone());
+            if let Some(history) = self.history.lock().unwrap().get_mut(&self.ext_id) {
+                history.last_error = Some(reason);
+            }
         }
+    }
+}
+
+/// The backend's exit as a readable reason for the status surface and the log. A fastfail
+/// (`0xC0000409`) is what Rust's `rust_oom` abort raises: on this product's machines that
+/// has been the machine's commit memory running out under a long claude-code session
+/// (2026-10-04's ggs-node crash), which deserves more than a bare "exited" — the session
+/// state itself survives (the conversation lives in the CLI's own store), and the backend
+/// restarts on its next use.
+fn exit_reason(status: &std::process::ExitStatus) -> String {
+    // The Windows codes are unsigned; `ExitStatus::code()` reads them as i32.
+    const FASTFAIL: i32 = 0xC0000409u32 as i32;
+    const ACCESS_VIOLATION: i32 = 0xC0000005u32 as i32;
+    const STACK_OVERFLOW: i32 = 0xC00000FDu32 as i32;
+    match status.code() {
+        Some(0) => "the backend exited cleanly".to_owned(),
+        Some(FASTFAIL) => {
+            "the backend died on a fatal abort (0xC0000409) — most often the machine ran \
+             out of commit memory; it restarts on its next use"
+                .to_owned()
+        }
+        Some(ACCESS_VIOLATION) => {
+            "the backend died on an access violation (0xC0000005) — a crash inside native \
+             code, such as a package's .node addon"
+                .to_owned()
+        }
+        Some(STACK_OVERFLOW) => {
+            "the backend died on a stack overflow (0xC00000FD)".to_owned()
+        }
+        Some(code) => format!("the backend exited with code {code:#x}"),
+        None => "the backend exited without a code (terminated)".to_owned(),
     }
 }
 
@@ -1208,6 +1243,22 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Cursor;
+
+    /// The status surface reads a dead backend's reason from here: a fastfail must not
+    /// read as a bare "exited" — on this product's machines it is the machine's commit
+    /// memory running out under a long session.
+    #[test]
+    fn an_exit_code_reads_as_its_reason() {
+        use std::os::windows::process::ExitStatusExt;
+        let status = |raw: u32| std::process::ExitStatus::from_raw(raw);
+        assert!(exit_reason(&status(0)).contains("cleanly"));
+        assert!(exit_reason(&status(0xC0000409)).contains("0xC0000409"));
+        assert!(exit_reason(&status(0xC0000409)).contains("commit memory"));
+        assert!(exit_reason(&status(0xC0000005)).contains("access violation"));
+        assert!(exit_reason(&status(0xC00000FD)).contains("stack overflow"));
+        assert!(exit_reason(&status(1)).contains("0x1"));
+        assert!(exit_reason(&status(0xFFFFFFFF)).contains("0xffffffff"));
+    }
 
     fn make_reader(pending: &PendingMap) -> ReaderState {
         ReaderState {
