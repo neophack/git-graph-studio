@@ -2177,6 +2177,27 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 		expect(handleAtStart).toBe(true);
 		expect(host['frames'].has('acme.engine')).toBe(true);
 	});
+
+	it('a boot-pass backend\'s cold host.env activates it without any prior frontend touch', async () => {
+		// The Rust boot pass starts node backends with no frontend involvement; its first
+		// ask — the activation's `host.env` — used to be refused ("no extension host
+		// frame"), leaving the backend dead until some view happened to resolve it. The
+		// remote handle is created on the spot, the ask is answered, and the backend lives.
+		const ENGINE: ExtInfo = {
+			...GGX2, id: 'acme.engine',
+			capabilities: { format: 'ggs/2', id: 'acme.engine', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'ggs-node', command: 'out/main.js' }, permissions: [] }
+		};
+		withExtensions(ENGINE);
+		backend.on('ext_storage_paths', () => null);
+		const host = new ExtensionHost();
+		// No `ext_process_start` scripting and no ensure — the raw boot-pass ask, cold.
+		backend.emit('ext-host-request', { extId: 'acme.engine', id: 1000000001, method: 'host.env', args: [] });
+		await flush();
+		expect(host['frames'].has('acme.engine')).toBe(true);
+		const answers = backend.callsTo('ext_process_host_respond').filter((c) => c.extId === 'acme.engine');
+		expect(answers.length).toBeGreaterThanOrEqual(1);
+		expect(answers.at(-1)!.ok).toBe(true);
+	});
 });
 
 describe('an installed ggs/2 package in the workbench surfaces (the full feature matrix)', () => {

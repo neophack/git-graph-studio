@@ -880,16 +880,21 @@ export class ExtensionHost {
 		commands.register({ id: 'extensions.openLogFile', title: 'Open Extension Host Log File', category: 'Extensions', run: () => void this.openLogFile() });
 		// A real-Node extension host's `ggs.hostRequest`s arrive as backend events: served
 		// through the same `serve` path a frame's RPC takes, answered over the backend's
-		// stdin. The remote frame handle must exist already — `ensureNodeHost` registers
-		// it before starting the process — so an unknown extension's request fails honestly.
+		// stdin. `ensureNodeHost` registers the remote handle before *its* starts, but the
+		// Rust boot pass starts (and activates) node backends with no frontend touch at
+		// all — those first asks (the activation's `host.env`, a settings push it missed)
+		// arrived to `frames.get` returning nothing and were refused, leaving the backend
+		// dead until some view happened to resolve it. The handle is created on the spot:
+		// an extId with no process fails the push honestly, and one with a process — the
+		// boot-pass shape — now activates.
 		void listen<{ extId: string; id: number; method: string; args: unknown[] }>(HOST_REQUEST_EVENT, (event) => {
 			const { extId, id, method, args } = event.payload;
-			const handle = this.frames.get(extId);
+			const handle = this.frames.get(extId) ?? this.remoteHandle(extId);
+			this.frames.set(extId, handle);
 			const respond = (ok: boolean, result: unknown) => {
 				void invoke('ext_process_host_respond', { extId, id, ok, result })
 					.catch((error) => extLog('warn', extId, `host request ${method}: the answer could not be delivered: ${String(error)}`));
 			};
-			if (!handle) return respond(false, `no extension host frame for ${extId}`);
 			this.serve(method, args ?? [], extId, handle).then(
 				(result) => respond(true, result === undefined ? null : result),
 				(error) => respond(false, String(error))
