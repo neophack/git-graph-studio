@@ -604,6 +604,34 @@ describe('the vscode API shim', () => {
 		expect(appended.at(-1)![1]).toMatch(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z \[info\] client created\n$/);
 	});
 
+	it('an appendLine after the activation settled crosses on the short timer (it must not sit queued forever)', async () => {
+		// The activation flush runs once at settle; a logger the user enables mid-session
+		// (git-graph-rs's enableLog) appends after that — its lines queued but never
+		// crossed, and the Output channel stayed empty for the rest of the session.
+		vi.useFakeTimers();
+		try {
+			const sent: [string, unknown][] = [];
+			const api = createVscodeApi(
+				{ extensionId: 'x', extensionPath: '/x', workspaceFolders: [], settings: {}, language: 'en' },
+				{
+					request: async (method, args) => {
+						sent.push([method, args]);
+						return undefined;
+					},
+					registerCommandHandler: () => undefined
+				}
+			);
+			const channel = api.window.createOutputChannel('Late Logger');
+			channel.appendLine('after the settle');
+			await vi.advanceTimersByTimeAsync(150);
+			const batch = sent.find(([method]) => method === 'output.appendBatch');
+			expect(batch).toBeDefined();
+			expect(batch![1]).toEqual([[['Late Logger', 'after the settle\n']]]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it('serves env.createTelemetryLogger as an inert logger (never a missing method an activation calls)', () => {
 		const api = createVscodeApi(
 			{ extensionId: 'x', extensionPath: '/x', workspaceFolders: [], settings: {}, language: 'en' },

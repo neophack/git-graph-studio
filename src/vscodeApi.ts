@@ -2837,13 +2837,30 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 	};
 	/** Output-channel lines waiting to cross, for the same reason: an activation logs
 	 *  dozens of lines (claude-code: ~15 on activate) and each was its own round trip.
-	 *  Flushed by the same activation-settled hook, and before any `show`/`clear` of the
-	 *  channel (their order semantics must not jump the queued lines). */
+	 *  Flushed by the same activation-settled hook, before any `show`/`clear` of the
+	 *  channel (their order semantics must not jump the queued lines), and — so lines
+	 *  appended after the activation settled (a logger the user enables mid-session) reach
+	 *  the Output view at all — on a short timer: the activation flush runs once, and
+	 *  without it every later line sat in the queue forever (git-graph-rs's enableLog
+	 *  logged into a channel that never received it). */
 	let pendingOutputLines: [string, string][] = [];
+	let outputFlushTimer: ReturnType<typeof setTimeout> | null = null;
 	const flushOutputLines = (): void => {
+		if (outputFlushTimer !== null) {
+			clearTimeout(outputFlushTimer);
+			outputFlushTimer = null;
+		}
 		const batch = pendingOutputLines;
 		pendingOutputLines = [];
 		if (batch.length > 0) send('output.appendBatch', [batch]);
+	};
+	/** Lines arriving after the activation's own flush cross within `OUTPUT_FLUSH_DELAY`
+	 *  of the first queued one. */
+	const OUTPUT_FLUSH_DELAY = 100;
+	const scheduleOutputFlush = (): void => {
+		if (outputFlushTimer === null) {
+			outputFlushTimer = setTimeout(flushOutputLines, OUTPUT_FLUSH_DELAY);
+		}
 	};
 	(globalThis as { __ggsFlushRegistrations?: () => void }).__ggsFlushRegistrations = () => {
 		flushCommandRegistrations();
@@ -3005,16 +3022,23 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 					info: (message: unknown, ...args: unknown[]) => logLine('info', message, ...args),
 					warn: (message: unknown, ...args: unknown[]) => logLine('warning', message, ...args),
 					error: (message: unknown, ...args: unknown[]) => logLine('error', message, ...args),
-					append: (value: string) => pendingOutputLines.push([name, String(value)]),
-					appendLine: (value: string) => pendingOutputLines.push([name, String(value) + '\n']),
-					clear: () => { flushOutputLines(); send('output.clear', [name]); },
-					show: (_columnOrPreserveFocus?: unknown, _preserveFocus?: boolean) => { flushOutputLines(); send('output.show', [name]); },
-					hide: () => undefined,
-					replace: (value: string) => {
-						flushOutputLines();
-						send('output.clear', [name]);
-						pendingOutputLines.push([name, String(value)]);
-					},
+					append: (value: string) => {
+					pendingOutputLines.push([name, String(value)]);
+					scheduleOutputFlush();
+				},
+				appendLine: (value: string) => {
+					pendingOutputLines.push([name, String(value) + '\n']);
+					scheduleOutputFlush();
+				},
+				clear: () => { flushOutputLines(); send('output.clear', [name]); },
+				show: (_columnOrPreserveFocus?: unknown, _preserveFocus?: boolean) => { flushOutputLines(); send('output.show', [name]); },
+				hide: () => undefined,
+				replace: (value: string) => {
+					flushOutputLines();
+					send('output.clear', [name]);
+					pendingOutputLines.push([name, String(value)]);
+					scheduleOutputFlush();
+				},
 					dispose: () => send('output.dispose', [name])
 				};
 			},
