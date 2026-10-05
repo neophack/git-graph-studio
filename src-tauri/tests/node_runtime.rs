@@ -3180,3 +3180,172 @@ ggs.onRequest(() => new Promise((resolve) => {{
     let ms = answer["ms"].as_f64().unwrap_or(f64::MAX);
     assert!(ms < 5000.0, "the exit crossed before the grandchild ended: {answer}");
 }
+
+/// The live check's 11/13 run (2026-10-04): a process-hosted extension's `configChanged`
+/// push crossed to the ggs-node shim's `handleHostEvent` (Rust-side tracing proved the
+/// delivery), yet the extension's `onDidChangeConfiguration` listener never woke and its
+/// logger stayed off — while the same shim code passes the jsdom suite. This repro runs
+/// the full-fidelity environment (the real prelude, builtins and shim, driven the way
+/// `ext_process_push_event` drives it) and splits the two halves so the broken one names
+/// itself: does the pushed setting read back through `getConfiguration`, and does the
+/// listener fire.
+#[test]
+fn a_config_changed_push_updates_the_settings_and_fires_the_listener_in_boa() {
+    // The shim file the frame program evaluates (the dev layout prepare writes); a
+    // checkout without a built shim skips this suite.
+    let shim = std::env::var("GGS_VSCODE_SHIM")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("../target/studio/vscode-shim.cjs"));
+    if !shim.is_file() {
+        eprintln!("skipping: no vscode-shim.cjs built");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[
+            (
+                "package.json",
+                r#"{"name":"cfg","publisher":"acme","version":"1.0.0","main":"./out/extension"}"#,
+            ),
+            (
+                "out/extension.js",
+                r#"
+const vscode = require('vscode');
+module.exports.activate = function () {
+    globalThis.__ggsProbe = { fired: [] };
+    globalThis.__ggsProbe.before = vscode.workspace.getConfiguration('git-graph-rs').get('enableLog', false);
+    vscode.workspace.onDidChangeConfiguration((event) => {
+        globalThis.__ggsProbe.fired.push(event.affectsConfiguration('git-graph-rs'));
+        globalThis.__ggsProbe.after = vscode.workspace.getConfiguration('git-graph-rs').get('enableLog');
+    });
+    vscode.commands.registerCommand('cfg.probe', () => JSON.stringify(globalThis.__ggsProbe));
+};
+"#,
+            ),
+        ],
+    )
+    .join("out/extension");
+
+    let (requests_tx, requests_rx) = std::sync::mpsc::channel::<String>();
+    let (output_tx, output_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        git_graph_studio_lib::node_runtime::serve_on(
+            entry,
+            ChannelReader::from(requests_rx),
+            ChannelWriter(output_tx),
+        );
+    });
+    let read_line = || -> String {
+        match output_rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(line) => line,
+            Err(_) => panic!("the backend fell silent"),
+        }
+    };
+
+    let mut next_id = 1u64;
+    requests_tx
+        .send(git_graph_studio_lib::ext_protocol::request(
+            next_id,
+            "initialize",
+            json!({
+                "protocolVersion": "ggs-ext/1",
+                "extensionId": "acme.cfg",
+                "extensionPath": tmp.path().join("pkg").display().to_string(),
+                "workspaceFolders": [],
+            }),
+        ))
+        .unwrap();
+    let handshake;
+    loop {
+        let line = read_line();
+        let Ok(wire) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
+            let id = wire["id"].as_u64().unwrap_or_default();
+            let inner = wire["params"]["method"].as_str().unwrap_or_default();
+            let answer = if inner == "host.env" {
+                // The activation-time snapshot: the setting was written after the backend
+                // started, the live shape.
+                json!({ "settings": {}, "defaults": {}, "language": "en", "state": { "global": {}, "workspace": {} } })
+            } else {
+                Value::Null
+            };
+            requests_tx
+                .send(git_graph_studio_lib::ext_protocol::response(id, Ok(answer)))
+                .unwrap();
+            continue;
+        }
+        if wire["id"].as_u64() == Some(next_id) {
+            handshake = wire;
+            break;
+        }
+    }
+    assert_eq!(handshake["result"]["protocolVersion"], "ggs-ext/1");
+
+    // The probe command orders behind the queued activation; its answer is the
+    // activation-time read.
+    let run_probe = |requests_tx: &std::sync::mpsc::Sender<String>, next_id: u64| -> String {
+        requests_tx
+            .send(git_graph_studio_lib::ext_protocol::request(
+                next_id,
+                "runCommand",
+                json!({ "command": "cfg.probe", "args": [] }),
+            ))
+            .unwrap();
+        loop {
+            let line = read_line();
+            let Ok(wire) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
+                let id = wire["id"].as_u64().unwrap_or_default();
+                requests_tx
+                    .send(git_graph_studio_lib::ext_protocol::response(id, Ok(Value::Null)))
+                    .unwrap();
+                continue;
+            }
+            if wire["id"].as_u64() == Some(next_id) {
+                return wire["result"].as_str().unwrap_or_default().to_owned();
+            }
+        }
+    };
+
+    next_id += 1;
+    let before = run_probe(&requests_tx, next_id);
+    assert_eq!(
+        before,
+        r#"{"fired":[],"before":false}"#,
+        "the activation-time read starts false: {before}"
+    );
+
+    // The push, written exactly as `ext_process_push_event` writes it: a `ggs.hostEvent`
+    // notification with the frame's event object.
+    next_id += 1;
+    let _ = next_id;
+    requests_tx
+        .send(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "ggs.hostEvent",
+                "params": {
+                    "type": "__studioExtEvent",
+                    "event": "configChanged",
+                    "settings": { "git-graph-rs.enableLog": true }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+    // The post-push read: the setting answers true and the listener fired with a
+    // section-matching event.
+    next_id += 1;
+    let after = run_probe(&requests_tx, next_id + 0);
+    assert_eq!(
+        after,
+        r#"{"fired":[true],"before":false,"after":true}"#,
+        "the push must update the settings and fire the listener: {after}"
+    );
+}
