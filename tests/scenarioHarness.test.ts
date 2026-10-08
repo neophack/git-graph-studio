@@ -14,7 +14,7 @@ import { Workbench } from '../src/workbench';
 import { commands } from '../src/commands';
 import { SCENARIOS, handlersFor, type Scenario } from './scenarioFixtures';
 import { backend } from './tauriMock';
-import { click, flush, texts } from './helpers';
+import { click, flush, texts, until } from './helpers';
 
 
 const REPO = 'C:\\repo';
@@ -117,10 +117,12 @@ describe('the scenario harness', () => {
 					case 'merge-conflict': {
 						expect(scmGroups()).toContain('Merge Changes 1');
 						expect(statusItems().some((item) => item.includes('1 conflict'))).toBe(true);
-						// Opening the conflicted file shows the conflict toolbar.
+						// Opening the conflicted file shows the conflict toolbar — polling, not a
+						// fixed settle: a starved worker reaches it later, not never (the fixed
+						// ten-tick flush raced it two runs in three).
 						const row = Array.from(scmView().querySelectorAll<HTMLElement>('.row')).find((r) => r.textContent!.includes('conflicted.txt'));
 						click(row!);
-						await flush(10);
+						await until(() => document.querySelector('.merge-bar') !== null);
 						expect(document.querySelector('.merge-bar')).not.toBeNull();
 						notes.push('conflict toolbar: shown');
 						break;
@@ -152,7 +154,7 @@ describe('the scenario harness', () => {
 						expect(texts('.tree .row .label')).toContain('notes.txt');
 						const fileRow = Array.from(document.querySelectorAll<HTMLElement>('.tree .row')).find((r) => r.textContent!.includes('notes.txt'));
 						click(fileRow!);
-						await flush(10);
+						await until(() => texts('.tab .label').includes('notes.txt'));
 						expect(texts('.tab .label')).toContain('notes.txt');
 						notes.push('file open works without a repository');
 						break;

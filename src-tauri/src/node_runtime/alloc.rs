@@ -154,6 +154,23 @@ fn class_of(layout: &Layout) -> Option<usize> {
     }
 }
 
+/// The layout a request goes out to `System` under. The system allocator's own adapter
+/// asserts a nonzero size on every call and aborts the process on the violation (rustc
+/// 1.99 turned the GlobalAlloc contract into a hard check — a zero-sized, over-aligned
+/// round trip died exactly there on the Linux CI, in this module's own churn test).
+/// The pool path serves zero sizes as real blocks; the forwarded path serves them as
+/// one byte, and the caller's zero layout is normalized the same way on `dealloc`, so
+/// every block leaves the system heap under the layout it entered with.
+#[inline]
+fn system_layout(layout: Layout) -> Layout {
+    if layout.size() == 0 {
+        // SAFETY: size 1 is nonzero; the alignment is the caller's own.
+        unsafe { Layout::from_size_align_unchecked(1, layout.align()) }
+    } else {
+        layout
+    }
+}
+
 /// Run `f` on this thread's pool if it has one, else on the shared pool under its lock.
 #[inline]
 fn with_pool<R>(f: impl FnOnce(&mut Pool) -> R) -> R {
@@ -202,8 +219,8 @@ unsafe impl GlobalAlloc for GgsAlloc {
             // SAFETY: the pool invariant (see `Pool::take`).
             Some(class) => with_pool(|pool| unsafe { pool.take(class) }),
             None => {
-                // SAFETY: forwarded unchanged.
-                let block = unsafe { System.alloc(layout) };
+                // SAFETY: forwarded with a nonzero size (see `system_layout`).
+                let block = unsafe { System.alloc(system_layout(layout)) };
                 if !block.is_null() {
                     LARGE_LIVE.fetch_add(layout.size(), Ordering::Relaxed);
                 }
@@ -219,8 +236,8 @@ unsafe impl GlobalAlloc for GgsAlloc {
             Some(class) => with_pool(|pool| unsafe { pool.give(class, block) }),
             None => {
                 LARGE_LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
-                // SAFETY: forwarded unchanged.
-                unsafe { System.dealloc(block, layout) }
+                // SAFETY: forwarded with the size it was served under.
+                unsafe { System.dealloc(block, system_layout(layout)) }
             }
         }
     }
@@ -237,8 +254,8 @@ unsafe impl GlobalAlloc for GgsAlloc {
                 block
             }
             None => {
-                // SAFETY: forwarded unchanged.
-                let block = unsafe { System.alloc_zeroed(layout) };
+                // SAFETY: forwarded with a nonzero size (see `system_layout`).
+                let block = unsafe { System.alloc_zeroed(system_layout(layout)) };
                 if !block.is_null() {
                     LARGE_LIVE.fetch_add(layout.size(), Ordering::Relaxed);
                 }
@@ -256,8 +273,10 @@ unsafe impl GlobalAlloc for GgsAlloc {
             (Some(old), Some(new)) if old == new => block,
             // Both large: the system heap can often grow in place.
             (None, None) => {
-                // SAFETY: forwarded unchanged.
-                let moved = unsafe { System.realloc(block, layout, new_size) };
+                // SAFETY: forwarded with nonzero sizes (see `system_layout`); the
+                // copied span is the caller's, not the substituted byte.
+                let new_size = if new_size == 0 { 1 } else { new_size };
+                let moved = unsafe { System.realloc(block, system_layout(layout), new_size) };
                 if !moved.is_null() {
                     LARGE_LIVE.fetch_add(new_size, Ordering::Relaxed);
                     LARGE_LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
@@ -454,6 +473,26 @@ mod tests {
                 .iter()
                 .all(|&b| b == 0));
             alloc.dealloc(clean, layout);
+        }
+    }
+
+    /// A zero-sized, over-aligned request round-trips. `churn`'s random layouts hit
+    /// this only by seed; rustc 1.99's hard `assert_unchecked` on the system
+    /// allocator's nonzero-size contract made every miss abort the process — the
+    /// pinned, deterministic shape of that regression.
+    #[test]
+    fn a_zero_sized_over_aligned_request_serves_and_frees() {
+        let alloc = GgsAlloc;
+        let layout = Layout::from_size_align(0, 32).unwrap();
+        // SAFETY: the block is served for and freed under the same layout.
+        unsafe {
+            let block = alloc.alloc(layout);
+            assert!(!block.is_null(), "the request is served");
+            assert_eq!(block as usize % 32, 0, "the alignment is honoured");
+            alloc.dealloc(block, layout);
+            let zeroed = alloc.alloc_zeroed(layout);
+            assert!(!zeroed.is_null());
+            alloc.dealloc(zeroed, layout);
         }
     }
 }

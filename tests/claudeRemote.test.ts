@@ -485,7 +485,7 @@ describe('the conversation store', () => {
 		} finally {
 			fs.rmSync(file);
 		}
-	});
+	}, 20_000); // a loaded worker builds and re-parses the 1.2 MB fixture slower than the default 5 s
 });
 
 describe('a pending AskUserQuestion, answered from the phone', () => {
