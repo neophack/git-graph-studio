@@ -1252,21 +1252,38 @@ mod tests {
     use serde_json::json;
     use std::io::Cursor;
 
+    /// An `ExitStatus` whose `code()` reads as `raw_code`: Windows takes the exit code
+    /// verbatim (unsigned; `code()` reads it back as i32). A Unix wait status carries a
+    /// one-byte exit code in its second byte — the fastfail, access-violation and
+    /// stack-overflow codes past that byte exist only on a Windows backend.
+    #[cfg(windows)]
+    fn exit_status(raw_code: u32) -> std::process::ExitStatus {
+        use std::os::windows::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(raw_code)
+    }
+
+    #[cfg(unix)]
+    fn exit_status(raw_code: u32) -> std::process::ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(((raw_code & 0xFF) as i32) << 8)
+    }
+
     /// The status surface reads a dead backend's reason from here: a fastfail must not
     /// read as a bare "exited" — on this product's machines it is the machine's commit
     /// memory running out under a long session.
     #[test]
     fn an_exit_code_reads_as_its_reason() {
-        use std::os::windows::process::ExitStatusExt;
-        let status = |raw: u32| std::process::ExitStatus::from_raw(raw);
-        assert!(exit_reason(&status(0)).contains("cleanly"));
-        assert!(exit_reason(&status(0xC0000409)).contains("0xC0000409"));
-        assert!(exit_reason(&status(0xC0000409)).contains("commit memory"));
-        assert!(exit_reason(&status(0xC0000005)).contains("access violation"));
-        assert!(exit_reason(&status(0xC00000FD)).contains("stack overflow"));
-        assert!(exit_reason(&status(134)).contains("napi_fatal_error"));
-        assert!(exit_reason(&status(1)).contains("0x1"));
-        assert!(exit_reason(&status(0xFFFFFFFF)).contains("0xffffffff"));
+        assert!(exit_reason(&exit_status(0)).contains("cleanly"));
+        assert!(exit_reason(&exit_status(1)).contains("0x1"));
+        assert!(exit_reason(&exit_status(134)).contains("napi_fatal_error"));
+        #[cfg(windows)]
+        {
+            assert!(exit_reason(&exit_status(0xC0000409)).contains("0xC0000409"));
+            assert!(exit_reason(&exit_status(0xC0000409)).contains("commit memory"));
+            assert!(exit_reason(&exit_status(0xC0000005)).contains("access violation"));
+            assert!(exit_reason(&exit_status(0xC00000FD)).contains("stack overflow"));
+            assert!(exit_reason(&exit_status(0xFFFFFFFF)).contains("0xffffffff"));
+        }
     }
 
     fn make_reader(pending: &PendingMap) -> ReaderState {

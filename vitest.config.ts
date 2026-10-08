@@ -22,9 +22,17 @@ export default defineConfig({
 	// the classic threads pool, as does claudeRemoteActivation.test.ts, whose
 	// require('vscode') interception patches Module._load (the vm pool's module system
 	// does not honor it). The global seam check runs in both; it is idempotent.
+	//
+	// The snapshot environment is named explicitly (tests/vmSnapshotEnvironment.ts,
+	// vitest's own class): the default resolution is a bare dynamic import() that runs
+	// INSIDE the vm context, one per test file, and Node 20 answers it with
+	// ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING — 61 unhandled rejections killed the CI
+	// run while the tests themselves passed. The module-runner path knows no such
+	// callback gap.
 	test: {
 		environment: 'jsdom',
 		setupFiles: ['tests/setup.ts'],
+		snapshotEnvironment: './tests/vmSnapshotEnvironment.ts',
 		css: false,
 		projects: [
 			{

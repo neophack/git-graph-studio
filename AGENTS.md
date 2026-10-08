@@ -1346,7 +1346,7 @@ Tests mirror the modules.
 
 | Layer | Location | Harness |
 | ----- | -------- | ------- |
-| Frontend unit / view | `tests/<module>.test.ts` (e.g. `scm.test.ts`, `explorer.test.ts`, `canLog.test.ts`) | vitest + jsdom; `tests/tauriMock.ts` scripts every Tauri `invoke`, records calls, and replays backend events |
+| Frontend unit / view | `tests/<module>.test.ts` (e.g. `scm.test.ts`, `explorer.test.ts`, `canLog.test.ts`) | vitest + jsdom; `tests/tauriMock.ts` scripts every Tauri `invoke`, records calls, and replays backend events; most files share the `vmThreads` pool, whose snapshot environment is named explicitly in `tests/vmSnapshotEnvironment.ts` — vitest's default resolution is a bare dynamic `import()` inside the vm context that dies with `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING` on the Node 20 line |
 | Frontend scenario | `tests/scenarioHarness.test.ts`, `tests/scenarioFixtures.ts`, `tests/helpers.ts` | Multi-view flows over the same mock |
 | Frontend sweeps | `tests/commandSweep.test.ts`, `tests/uiSweep.test.ts`, `tests/themeContrast.themes.test.ts` | Every command executes; layout and WCAG invariants hold for every theme |
 | Backend unit | `#[cfg(test)]` beside each command; `src-tauri/src/test_support.rs` | Scratch repositories with an isolated git config |

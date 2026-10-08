@@ -3342,7 +3342,7 @@ module.exports.activate = function () {
     // The post-push read: the setting answers true and the listener fired with a
     // section-matching event.
     next_id += 1;
-    let after = run_probe(&requests_tx, next_id + 0);
+    let after = run_probe(&requests_tx, next_id);
     assert_eq!(
         after,
         r#"{"fired":[true],"before":false,"after":true}"#,
