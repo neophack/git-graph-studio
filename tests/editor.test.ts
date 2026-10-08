@@ -632,14 +632,14 @@ describe('lazy syntax highlighting', () => {
 		// The editor is up ("Plain Text") without waiting for the language chunk…
 		expect(document.querySelector('.cm-editor')).not.toBeNull();
 		expect(names.at(-1)).toBe('Plain Text');
-		// …which lands in place shortly after. The ceiling is generous on purpose: on a
-		// cold CI runner under the full suite the chunk's first transform+import took
-		// past a second — this test pins the arrival, not its latency.
+		// …which lands in place shortly after. The ceilings are generous on purpose: on a
+		// cold CI runner the chunk's first transform+import took past the DEFAULT test
+		// timeout, let alone one second — this test pins the arrival, not its latency.
 		for (let i = 0; i < 500 && names.at(-1) === 'Plain Text'; i++) {
 			await new Promise((resolve) => setTimeout(resolve, 20));
 		}
 		expect(names.at(-1)).toBe('TypeScript');
-	});
+	}, 30_000);
 });
 
 describe('navigation history across renames', () => {
