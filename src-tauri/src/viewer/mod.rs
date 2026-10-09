@@ -218,6 +218,10 @@ pub struct EditResult {
     /// The viewer re-highlights from this 0-based line onward (checkpoints before it stay
     /// valid, everything from the edit line down was invalidated).
     pub rehighlight_from: usize,
+    /// Whether the buffer is back at the text the file holds on disk: the tab's dirty
+    /// mark clears when an edit — an undo landing, or a plain delete — returns the
+    /// document exactly there.
+    pub clean: bool,
 }
 
 /// A plain-text window: the same range model as `LinesResult` without the highlight work —
@@ -236,6 +240,9 @@ pub struct TextResult {
 pub struct UndoResult {
     pub first_line: usize,
     pub line_count: usize,
+    /// Whether the buffer is back at the text the file holds on disk (the tab's dirty
+    /// mark clears on it — the undo back to the saved content is nothing to save).
+    pub clean: bool,
 }
 
 /// What `viewer_reload` found: `changed` is false when the file on disk still matches the
@@ -542,6 +549,10 @@ fn spawn_tail(
                 if doc.tail_id == Some(id) {
                     match built {
                         Ok(Ok(tail)) => {
+                            // The saved-state baseline grows with the rope: the tail is
+                            // disk content too, so a document still at its opened text
+                            // keeps reading clean once it lands.
+                            doc.saved_rope.append(tail.clone());
                             doc.rope.append(tail);
                             doc.line_estimate = None;
                             doc.tail_id = None;
@@ -995,6 +1006,7 @@ fn edit_impl(
         EditResult {
             line_count: doc.line_count(),
             rehighlight_from,
+            clean: doc.at_saved_state(),
         }
     })
 }
@@ -1158,6 +1170,9 @@ pub struct ReplaceResult {
     pub replacements: usize,
     pub first_line: usize,
     pub line_count: usize,
+    /// Whether the buffer is back at the text the file holds on disk (see
+    /// [`EditResult::clean`] — a replace-all landing on the saved content is clean).
+    pub clean: bool,
 }
 
 /// Apply one replacement to the document's rope. Positions are 0-based line + code-point
@@ -1348,11 +1363,14 @@ pub async fn viewer_save(
         .map_err(|e| e.to_string())??;
     // The rope clones cheap (ropey chunks share under an Arc — the `viewer_symbols` pattern),
     // so the blocking writer below never queues the document lock behind a whole-file pass.
-    let (path, encoding, eol, rope) = state.with_doc(doc_id, |doc| {
+    // The second clone is the saved-state baseline: exactly the text this write puts on
+    // disk, so an edit landing while the write runs still reads dirty against it.
+    let (path, encoding, eol, rope, saved_rope) = state.with_doc(doc_id, |doc| {
         (
             doc.path.clone(),
             doc.encoding.clone(),
             doc.eol.clone(),
+            doc.rope.clone(),
             doc.rope.clone(),
         )
     })?;
@@ -1366,7 +1384,10 @@ pub async fn viewer_save(
     })
     .await
     .map_err(|e| e.to_string())??;
-    let _ = state.with_doc(doc_id, |doc| doc.fingerprint = stamp.clone());
+    let _ = state.with_doc(doc_id, |doc| {
+        doc.fingerprint = stamp.clone();
+        doc.saved_rope = saved_rope;
+    });
     // Match write_file: a saved (possibly new) file must show up in Quick Open and search.
     use tauri::Manager;
     app.state::<crate::AppState>().file_list_cache.invalidate();
@@ -1587,6 +1608,7 @@ fn replace_impl(
             replacements,
             first_line,
             line_count: doc.line_count(),
+            clean: doc.at_saved_state(),
         }
     })
 }
@@ -1683,9 +1705,11 @@ pub fn viewer_undo(
 ) -> Result<Option<UndoResult>, String> {
     state.stop_warming(doc_id);
     state.with_doc(doc_id, |doc| {
-        doc.undo().map(|(first_line, line_count)| UndoResult {
+        let (first_line, line_count) = doc.undo()?;
+        Some(UndoResult {
             first_line,
             line_count,
+            clean: doc.at_saved_state(),
         })
     })
 }
@@ -1698,9 +1722,11 @@ pub fn viewer_redo(
 ) -> Result<Option<UndoResult>, String> {
     state.stop_warming(doc_id);
     state.with_doc(doc_id, |doc| {
-        doc.redo().map(|(first_line, line_count)| UndoResult {
+        let (first_line, line_count) = doc.redo()?;
+        Some(UndoResult {
             first_line,
             line_count,
+            clean: doc.at_saved_state(),
         })
     })
 }
@@ -1823,6 +1849,11 @@ mod tests {
         assert_eq!(last.lines[0], "line 329998 of the staged open test");
         assert_eq!(last.lines[1], "line 329999 of the staged open test");
         assert_eq!(last.lines[2], "", "the trailing newline's empty final line");
+        // The saved-state baseline grew with the tail: a document still at its opened
+        // content reads clean — no first save needed to clear the tab's dirty mark.
+        assert!(state
+            .with_doc(opened.doc_id, |doc| doc.at_saved_state())
+            .unwrap());
     }
 
     struct Scratch {
@@ -1952,6 +1983,7 @@ mod tests {
         let edit = edit_impl(&state, opened.doc_id, 1, 0, 2, 0, "TWO\n").unwrap();
         assert_eq!(edit.line_count, 3);
         assert_eq!(edit.rehighlight_from, 1);
+        assert!(!edit.clean, "an edit away from the opened text is dirty");
         // The save path itself (the streaming writer `viewer_save` runs), not a manual dump.
         let (path_of, encoding, eol, rope) = state
             .with_doc(opened.doc_id, |doc| {
@@ -1965,6 +1997,20 @@ mod tests {
             .unwrap();
         write_doc(&path_of, &rope, &encoding, &eol, &|_, _| {}).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\nTWO\n");
+        // What `viewer_save` records after its write: the written rope is the baseline, so
+        // the undo back to the opened text (which differs from disk) reads dirty, and the
+        // redo returning to it reads clean again.
+        state
+            .with_doc(opened.doc_id, |doc| doc.saved_rope = rope.clone())
+            .unwrap();
+        state.with_doc(opened.doc_id, |doc| doc.undo()).unwrap();
+        assert!(!state
+            .with_doc(opened.doc_id, |doc| doc.at_saved_state())
+            .unwrap());
+        state.with_doc(opened.doc_id, |doc| doc.redo()).unwrap();
+        assert!(state
+            .with_doc(opened.doc_id, |doc| doc.at_saved_state())
+            .unwrap());
     }
 
     #[test]

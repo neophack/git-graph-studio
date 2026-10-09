@@ -160,8 +160,10 @@ export class EditableDocView {
 	/** The wheel over CodeMirror's scroller (scroll/input.ts), attached with the editor. */
 	private wheel: Disposable | null = null;
 
-	/** The buffer became dirty (the editor group marks the tab). */
-	onChanged: (() => void) | null = null;
+	/** The buffer changed; `clean` is the backend's verdict that the whole rope is back at
+	 *  the text the file holds on disk (the editor group clears the tab's dirty mark on
+	 *  it — an undo back to the saved content is nothing to save). */
+	onChanged: ((clean: boolean) => void) | null = null;
 	/** The cursor moved (the editor group refreshes the status bar's line and column). */
 	onStatusChange: (() => void) | null = null;
 	/** Ctrl+S inside the window. */
@@ -625,7 +627,7 @@ export class EditableDocView {
 		}
 		const docId = this.docId;
 		try {
-			const result = await invoke<{ lineCount: number }>('viewer_edit', {
+			const result = await invoke<{ lineCount: number; clean?: boolean }>('viewer_edit', {
 				docId,
 				startLine,
 				startCol: 0,
@@ -637,8 +639,9 @@ export class EditableDocView {
 			this.synced = current;
 			this.lineCount = result.lineCount;
 			this.relayout();
-			this.onChanged?.();
-			this.scheduleBackup();
+			this.onChanged?.(result.clean ?? false);
+			// A buffer back at the saved text needs no hot-exit backup.
+			if (result.clean !== true) this.scheduleBackup();
 			// An edit moved every match below it: recount (debounced by the bar itself).
 			this.findBar?.refresh();
 			return true;
@@ -712,7 +715,7 @@ export class EditableDocView {
 			if (this.disposed || this.docId === null) return;
 			if (!(await this.sendDiff()) || this.disposed || this.docId === null) return;
 			try {
-				const result = await invoke<{ firstLine: number; lineCount: number } | null>(command, { docId: this.docId });
+				const result = await invoke<{ firstLine: number; lineCount: number; clean?: boolean }>(command, { docId: this.docId });
 				if (!result || this.disposed || this.docId === null) return;
 				this.lineCount = result.lineCount;
 				// Centre the window on the restored line, so the cursor lands well inside it
@@ -722,7 +725,9 @@ export class EditableDocView {
 				await this.showWindow(target, result.firstLine);
 				this.scroll.autoscroll(result.firstLine, 'center');
 				this.cm?.focus();
-				this.onChanged?.();
+				// The verdict rides the jump: an undo that returns the rope to the saved
+				// text clears the tab's dirty mark.
+				this.onChanged?.(result.clean ?? false);
 			} catch (error) {
 				notify('error', String(error));
 			}
@@ -879,7 +884,7 @@ export class EditableDocView {
 			if (this.disposed || this.docId === null || !this.cm) return;
 			if (!(await this.sendDiff()) || this.disposed || this.docId === null) return;
 			try {
-				const result = await invoke<{ replacements: number; firstLine: number; lineCount: number }>('viewer_replace', {
+				const result = await invoke<{ replacements: number; firstLine: number; lineCount: number; clean?: boolean }>('viewer_replace', {
 					docId: this.docId,
 					query: spec.query,
 					replacement,
@@ -900,8 +905,8 @@ export class EditableDocView {
 				await this.showWindow(target, result.firstLine, from ? from.startCol : 0);
 				this.scroll.autoscroll(result.firstLine, 'center');
 				this.cm?.focus();
-				this.onChanged?.();
-				this.scheduleBackup();
+				this.onChanged?.(result.clean ?? false);
+				if (result.clean !== true) this.scheduleBackup();
 			} catch (error) {
 				notify('error', String(error));
 			}

@@ -43,6 +43,12 @@ pub struct ViewerDoc {
     /// The encoding id and line endings the file was read with (`crate::encoding`).
     pub encoding: String,
     pub eol: String,
+    /// The text the file holds on disk — as the document was opened, or as `viewer_save`
+    /// last wrote it. The dirty verdict the editor's tab shows is `rope != saved_rope`:
+    /// an undo (or a plain delete) that returns the buffer exactly here reads clean. A
+    /// staged open's tail appends to it when it lands, so a document still at its opened
+    /// content keeps reading clean.
+    pub saved_rope: Rope,
     syntax: SyntaxReference,
     checkpoints: HashMap<usize, Checkpoint>,
     undo_stack: Vec<UndoEntry>,
@@ -107,9 +113,11 @@ impl ViewerDoc {
             .or_else(|| set.find_syntax_by_extension("txt"))
             .expect("syntect always ships a plain-text syntax")
             .clone();
+        let rope = Rope::from(text);
         ViewerDoc {
             path,
-            rope: Rope::from(text),
+            rope: rope.clone(),
+            saved_rope: rope,
             language: language.to_owned(),
             syntax_name: syntax.name.to_owned(),
             encoding: "utf8".to_owned(),
@@ -129,6 +137,14 @@ impl ViewerDoc {
     /// the rope's exact count once it lands.
     pub fn line_count(&self) -> usize {
         self.line_estimate.unwrap_or_else(|| self.rope.len_lines())
+    }
+
+    /// Whether the buffer is back at the text the file holds on disk — as it was opened
+    /// or as the last save wrote it. The rope compares chunk-wise with an early exit, so
+    /// the verdict rides every edit's result without a whole-document pass in the common
+    /// (still-dirty) case; the equal case after an undo is one full compare.
+    pub fn at_saved_state(&self) -> bool {
+        self.rope == self.saved_rope
     }
 
     /// The line count the rope actually holds — the clamp every rope indexing uses, so an
@@ -479,6 +495,43 @@ mod tests {
             d.undo().is_none(),
             "an empty replace-all pushes no undo step"
         );
+    }
+
+    #[test]
+    fn an_undo_back_to_the_saved_text_reads_clean() {
+        // The tab's dirty verdict is "the rope differs from the saved rope": the undo (or
+        // the delete) that returns the buffer exactly to the saved text clears it.
+        let mut d = doc("one\ntwo\n", "txt");
+        assert!(d.at_saved_state(), "a freshly opened document is clean");
+        d.edit(d.offset_of(0, 0), d.offset_of(0, 0), "X");
+        assert!(!d.at_saved_state());
+        d.undo().unwrap();
+        assert!(
+            d.at_saved_state(),
+            "an undo back to the saved text is clean again"
+        );
+        d.redo().unwrap();
+        assert!(!d.at_saved_state(), "redo past the saved text is dirty");
+        // Typing then deleting the same text — no undo involved — is clean too.
+        d.undo().unwrap();
+        d.edit(d.offset_of(0, 0), d.offset_of(0, 0), "X");
+        d.edit(d.offset_of(0, 0), d.offset_of(0, 1), "");
+        assert!(d.at_saved_state(), "a delete restoring the saved text is clean");
+        // What `viewer_save` does after its write: the written rope becomes the baseline,
+        // and undoing back past it is dirty even though it matches the opened text.
+        d.edit(d.offset_of(1, 0), d.offset_of(2, 0), "TWO\n");
+        assert!(!d.at_saved_state());
+        d.saved_rope = d.rope.clone();
+        assert!(d.at_saved_state(), "the saved rope is the baseline");
+        d.undo().unwrap();
+        assert!(
+            !d.at_saved_state(),
+            "undo past the save differs from what disk holds"
+        );
+        // A replace-all landing on the saved text — the same verdict, no undo involved:
+        // "one\ntwo\n" with chars 4..7 ("two") replaced by what the save wrote.
+        d.replace_sites(vec![(4, 7, "TWO".to_owned())]);
+        assert!(d.at_saved_state());
     }
 
     #[test]

@@ -51,6 +51,9 @@ export class RopeDocMock {
 	text: string;
 	/** What `viewer_save` last wrote, null until the first save. */
 	saved: string | null = null;
+	/** The saved-state baseline the clean verdict compares against: the text as opened,
+	 *  replaced by what `viewer_save` last wrote. */
+	private savedText: string;
 	/** Set by a test to stand in for the file changing on disk under the editor. */
 	diskChanged = false;
 	/** When set, the next `viewer_edit` throws once (a failed send). */
@@ -60,6 +63,12 @@ export class RopeDocMock {
 
 	constructor(text: string) {
 		this.text = text;
+		this.savedText = text;
+	}
+
+	/** Mirrors the backend's `ViewerDoc::at_saved_state`. */
+	clean(): boolean {
+		return this.text === this.savedText;
 	}
 
 	/** ropey's lines: "a\nb\n" is three lines, the last one empty. */
@@ -243,25 +252,33 @@ export class RopeDocMock {
 				throw new Error('edit failed');
 			}
 			const rehighlightFrom = this.edit(startLine, startCol, endLine, endCol, text);
-			return { lineCount: this.lineCount(), rehighlightFrom };
+			return { lineCount: this.lineCount(), rehighlightFrom, clean: this.clean() };
 		});
-		backend.on('viewer_undo', () => this.undo());
-		backend.on('viewer_redo', () => this.redo());
+		backend.on('viewer_undo', () => {
+			const result = this.undo();
+			return result && { ...result, clean: this.clean() };
+		});
+		backend.on('viewer_redo', () => {
+			const result = this.redo();
+			return result && { ...result, clean: this.clean() };
+		});
 		backend.on('viewer_find', ({ query, caseSensitive, wholeWord, regexp }) =>
 			this.find(String(query), { caseSensitive: Boolean(caseSensitive), wholeWord: Boolean(wholeWord), regexp: Boolean(regexp) })
 		);
-		backend.on('viewer_replace', ({ query, replacement, caseSensitive, wholeWord, regexp, fromLine, fromCol, max }) =>
-			this.replace(
+		backend.on('viewer_replace', ({ query, replacement, caseSensitive, wholeWord, regexp, fromLine, fromCol, max }) => {
+			const result = this.replace(
 				String(query),
 				String(replacement ?? ''),
 				{ caseSensitive: Boolean(caseSensitive), wholeWord: Boolean(wholeWord), regexp: Boolean(regexp) },
 				Number(fromLine ?? 0),
 				Number(fromCol ?? 0),
 				Number(max ?? Number.MAX_SAFE_INTEGER)
-			)
-		);
+			);
+			return { ...result, clean: this.clean() };
+		});
 		backend.on('viewer_save', () => {
 			this.saved = this.text;
+			this.savedText = this.text;
 			return null;
 		});
 		backend.on('viewer_reload', () => {

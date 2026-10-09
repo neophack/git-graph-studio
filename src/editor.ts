@@ -3,7 +3,7 @@
 // demand), diffs (CodeMirror's merge view over two revisions of a file), and the Git Graph
 // view (an iframe the graph host owns) - plus the welcome page shown when nothing is open.
 
-import type { Extension } from '@codemirror/state';
+import type { Extension, Text } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
 import type { MergeView } from '@codemirror/merge';
 import { invoke } from '@tauri-apps/api/core';
@@ -233,6 +233,15 @@ export interface Editor {
 	/** An enormous file's read-only windowed viewer — past what an editable document can hold. */
 	fast?: FastView;
 	dirty: boolean;
+	/** The buffer as it was last saved — or loaded, before any save: the doc's own `Text`
+	 *  object, so the equality check shares unchanged nodes with the live document. An
+	 *  undo (or a plain delete) that returns the buffer exactly here clears `dirty`,
+	 *  as VS Code's does. */
+	savedDoc?: Text;
+	/** The line endings and encoding `savedDoc` was written with: a pure EOL or encoding
+	 *  switch keeps the tab dirty even while the text itself matches. */
+	savedEol?: 'lf' | 'crlf';
+	savedEncoding?: string;
 	/** A file's encoding id and line endings: what it was read with, what a save writes back. */
 	encoding?: string;
 	eol?: 'lf' | 'crlf';
@@ -754,7 +763,18 @@ export class EditorGroup {
 			view.dispose();
 			return false;
 		}
-		view.onChanged = () => {
+		view.onChanged = (clean) => {
+			// The backend's verdict — the rope is back at what the file holds on disk — is
+			// the tab's dirty mark: an undo (or a delete) that returns the buffer to the
+			// saved text clears it, exactly as the full editor's own comparison does.
+			if (clean) {
+				if (editor.dirty) {
+					editor.dirty = false;
+					this.forgetBackup(editor);
+					this.renderTabs();
+				}
+				return;
+			}
 			if (!editor.dirty) {
 				editor.dirty = true;
 				this.renderTabs();
@@ -1403,6 +1423,11 @@ export class EditorGroup {
 		editor.dirty = false;
 		editor.encoding = file.encoding ?? encoding;
 		editor.eol = file.eol ?? editor.eol;
+		// The reopened text is the new saved baseline, read with these line endings and
+		// this encoding.
+		editor.savedDoc = view.state.doc;
+		editor.savedEol = editor.eol;
+		editor.savedEncoding = editor.encoding;
 		this.forgetBackup(editor);
 		this.renderTabs();
 		this.emitActive();
@@ -1458,6 +1483,18 @@ export class EditorGroup {
 		else cm[command](view);
 	}
 
+	/** Whether the buffer is exactly its last saved state — text, line endings and encoding
+	 *  all matching. The tab's dirty mark is this, recomputed on every change: an edit
+	 *  undone (or deleted) back to the saved content leaves nothing to save, and the tab
+	 *  must not claim otherwise. `Text.eq` shares unchanged nodes with the live document,
+	 *  so the comparison stays cheap however large the file. */
+	private bufferAtSavedState(editor: Editor): boolean {
+		if (!editor.view || editor.savedDoc === undefined) return false;
+		return editor.view.state.doc.eq(editor.savedDoc)
+			&& (editor.eol ?? 'lf') === (editor.savedEol ?? 'lf')
+			&& (editor.encoding ?? 'utf8') === (editor.savedEncoding ?? 'utf8');
+	}
+
 	/** Build the CodeMirror editor for a file pane (the fallback open path and edit mode).
 	 *  `parent` defaults to the editor pane; the CAN text form passes its wrapper so the
 	 *  Frames bar stays above the editor. */
@@ -1480,11 +1517,16 @@ export class EditorGroup {
 				]),
 					EditorView.domEventHandlers({ blur: () => this.onEditorBlur(editor) }),
 					EditorView.updateListener.of((update) => {
-						if (update.docChanged && !editor.dirty) {
-							editor.dirty = true;
-							this.renderTabs();
-						}
 						if (update.docChanged) {
+							// Dirty means "differs from the last saved state", recomputed on every
+							// change: the undo — or the plain delete — that returns the text exactly
+							// to the saved content clears the mark again.
+							const dirty = !this.bufferAtSavedState(editor);
+							if (dirty !== editor.dirty) {
+								editor.dirty = dirty;
+								if (!dirty) this.forgetBackup(editor);
+								this.renderTabs();
+							}
 							editor.mergeToolbar?.update();
 							this.onEdited(editor);
 						}
@@ -1494,6 +1536,11 @@ export class EditorGroup {
 			}),
 			parent
 		});
+		// The baseline the dirty mark compares against: this content, these line endings,
+		// this encoding — exactly what a save would write right now.
+		editor.savedDoc = editor.view.state.doc;
+		editor.savedEol = editor.eol;
+		editor.savedEncoding = editor.encoding;
 		// The language loads asynchronously: by the time it arrives the editor may have been
 		// remounted (a reopen with encoding rebuilds the view), so reconfigure the view that
 		// was built here, and only while it is still the editor's current one.
@@ -2516,17 +2563,27 @@ export class EditorGroup {
 			return;
 		}
 		if (editor.input.kind !== 'file' || !editor.view) return;
-		const contents = editor.view.state.doc.toString();
+		// The saved baseline is the buffer as it crosses this line: an edit landing while
+		// the write runs leaves the buffer past what disk now holds, and the tab must stay
+		// dirty for it.
+		const savedDoc = editor.view.state.doc;
+		const contents = savedDoc.toString();
 		try {
 			await invoke('write_file', { path: editor.input.path, contents, encoding: editor.encoding ?? 'utf8', eol: editor.eol ?? 'lf' });
 		} catch (error) {
 			notify('error', `Failed to save '${editor.label}': ${String(error)}`);
 			return;
 		}
-		editor.dirty = false;
-		this.renderTabs();
+		editor.savedDoc = savedDoc;
+		editor.savedEol = editor.eol;
+		editor.savedEncoding = editor.encoding;
+		const dirty = !this.bufferAtSavedState(editor);
+		if (dirty !== editor.dirty) {
+			editor.dirty = dirty;
+			this.renderTabs();
+		}
 		this.flashSavedTab(editor);
-		this.forgetBackup(editor);
+		if (!editor.dirty) this.forgetBackup(editor);
 		this.onFileSaved?.(editor.input.path);
 	}
 
@@ -2583,6 +2640,10 @@ export class EditorGroup {
 			if (current === file.contents || current === file.contents.replace(/\r\n?/g, '\n')) return;
 			cm?.replaceDocument(view, file.contents);
 			editor.dirty = false;
+			// The reloaded disk text is the saved baseline the dirty mark compares against.
+			editor.savedDoc = view.state.doc;
+			editor.savedEol = editor.eol;
+			editor.savedEncoding = editor.encoding;
 			this.renderTabs();
 			this.refreshPreviews(path);
 		} catch {

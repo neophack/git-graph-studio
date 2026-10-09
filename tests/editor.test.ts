@@ -81,6 +81,39 @@ describe('editor group', () => {
 		expect(states.at(-1)).toBe('none');
 	});
 
+	it('clears the dirty mark when an undo returns the text to the saved content', async () => {
+		files({ 'C:\\repo\\a.txt': 'one\ntwo\n' });
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openFile('C:\\repo\\a.txt');
+		const view = group.activeView!;
+		// Typing dirties the tab…
+		view.dispatch({ changes: { from: 0, insert: 'X' } });
+		expect(group.hasDirtyEditors()).toBe(true);
+		expect(document.querySelector('.tab.active')!.classList.contains('dirty')).toBe(true);
+		// …and the Ctrl+Z that returns the text exactly to the saved content cleans it
+		// again: there is nothing left to save, and the tab must not claim otherwise.
+		group.runEditorCommand('undo');
+		expect(group.hasDirtyEditors()).toBe(false);
+		expect(document.querySelector('.tab.active')!.classList.contains('dirty')).toBe(false);
+		// Redo walks past the saved text once more: dirty again.
+		group.runEditorCommand('redo');
+		expect(group.hasDirtyEditors()).toBe(true);
+		// The plain delete that restores the saved text — no undo involved — cleans too.
+		view.dispatch({ changes: { from: 0, to: 1, insert: '' } });
+		expect(group.hasDirtyEditors()).toBe(false);
+		// A save mid-way moves the baseline: an undo past it differs from what disk holds.
+		view.dispatch({ changes: { from: 4, to: 7, insert: 'TWO' } });
+		await group.save();
+		expect(group.hasDirtyEditors()).toBe(false);
+		group.runEditorCommand('undo');
+		expect(group.hasDirtyEditors()).toBe(true);
+		// Redo back to the saved text cleans, so the close below has nothing to ask about.
+		group.runEditorCommand('redo');
+		expect(group.hasDirtyEditors()).toBe(false);
+		await group.closeAll();
+	});
+
 	it('opens binary files in the hex viewer and reports read errors', async () => {
 		files({ 'C:\\repo\\a.bin': null });
 		backend.on('read_file_chunk', () => ({ size: 4, base64: Buffer.from([0xde, 0xad, 0xbe, 0xef]).toString('base64') }));

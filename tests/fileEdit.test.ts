@@ -250,17 +250,21 @@ describe('text file editing', () => {
 			lineCount: docLines.length,
 			lines: docLines.slice(start, end + 1)
 		}));
+		// The opened text is the saved baseline: the clean verdict rides every edit and
+		// undo result, exactly as the backend's saved-rope comparison does.
+		const opened = docLines.join('\n');
+		const clean = () => docLines.join('\n') === opened;
 		backend.on('viewer_edit', ({ startLine, endLine, text }: { startLine: number; endLine: number; text: string }) => {
 			const lines = text === '' ? [] : text.replace(/\n$/, '').split('\n');
 			undoStack.push({ startLine, count: endLine - startLine, lines: docLines.slice(startLine, endLine) });
 			docLines.splice(startLine, endLine - startLine, ...lines);
-			return { lineCount: docLines.length, rehighlightFrom: startLine };
+			return { lineCount: docLines.length, rehighlightFrom: startLine, clean: clean() };
 		});
 		backend.on('viewer_undo', () => {
 			const last = undoStack.pop();
 			if (!last) return null;
 			docLines.splice(last.startLine, last.lines.length, ...last.lines);
-			return { firstLine: last.startLine, lineCount: docLines.length };
+			return { firstLine: last.startLine, lineCount: docLines.length, clean: clean() };
 		});
 		backend.on('viewer_save', () => null);
 		backend.on('viewer_close', () => null);
@@ -283,6 +287,7 @@ describe('text file editing', () => {
 		expect(undoStack).toHaveLength(1);
 		await editLine(20, 'line 20 EDIT TWO');
 		expect(undoStack).toHaveLength(2);
+		expect(group.open[0]!.dirty).toBe(true);
 
 		// Two rapid Ctrl+Z presses without awaiting the first: both steps must land.
 		void doc.undo();
@@ -292,18 +297,21 @@ describe('text file editing', () => {
 		expect(backend.callsTo('viewer_undo')).toHaveLength(2);
 		expect(docLines[10]).toBe('line 10');
 		expect(docLines[20]).toBe('line 20');
+		// Both edits undone: the buffer is back at the opened text, and the tab's dirty
+		// mark must clear with it — the undo that returns to the saved content is nothing
+		// to save.
+		expect(group.open[0]!.dirty).toBe(false);
 		// The cursor sits on the line the last undo restored (0-based 10 — the stack pops
 		// newest first, so the second press restores the first edit), not wherever the
 		// double window swap happened to leave it.
 		const head = doc.editorView!.state.selection.main.head;
 		expect(doc.editorView!.state.doc.lineAt(head).number).toBe(11);
-		// A third press finds an empty stack and changes nothing.
+		// A third press finds an empty stack and changes nothing — the tab stays clean.
 		await doc.undo();
 		await flush();
 		expect(backend.callsTo('viewer_undo')).toHaveLength(3);
 		expect(docLines[10]).toBe('line 10');
-		// Save the (still dirty) editor so closeAll does not park on a confirmation.
-		await group.save(group.open[0]!);
+		expect(group.open[0]!.dirty).toBe(false);
 		await group.closeAll();
 	});
 
