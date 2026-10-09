@@ -157,6 +157,7 @@ const tauriEvent = `({ listen: (event, handler) => window.__TAURI_INTERNALS__.in
 
 /* ---------- launch ---------- */
 
+const bootStarted = Date.now();
 const child = spawn(exe, [repo], {
 	cwd: appDir,
 	stdio: ['ignore', 'ignore', 'pipe'],
@@ -251,6 +252,7 @@ try {
 		if (typeof text === 'string' && SUBJECTS.every((subject) => text.includes(subject))) rendered = text.replace(/\s+/g, ' ');
 	}
 	const renderMs = Date.now() - renderStarted;
+	console.log(`[activation] the extension activated and registered its commands in ${Date.now() - bootStarted} ms from launch`);
 	console.log(`[render] the graph's commits rendered ${renderMs} ms after the palette click`);
 	const tabs = await workbench.evaluate(`[...document.querySelectorAll('.tabs-container .tab')].map((t) => t.textContent.trim())`);
 	check('the Git Graph view tab opened', /Git Graph/i.test(JSON.stringify(tabs)), JSON.stringify(tabs));
