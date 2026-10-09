@@ -216,7 +216,9 @@ try {
 	})()`);
 	await sleep(500);
 
-	/* 3. The view, from the command palette. */
+	/* 3. The view, from the command palette. The wall clock from the palette click to the
+	 * commits rendering is the git-graph render time this probe measures. */
+	const renderStarted = Date.now();
 	const picked = await workbench.evaluate(`(async () => {
 		const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 		document.querySelector('.command-center')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -248,6 +250,8 @@ try {
 		const text = await view.evaluate('document.body ? document.body.innerText : ""').catch(() => '');
 		if (typeof text === 'string' && SUBJECTS.every((subject) => text.includes(subject))) rendered = text.replace(/\s+/g, ' ');
 	}
+	const renderMs = Date.now() - renderStarted;
+	console.log(`[render] the graph's commits rendered ${renderMs} ms after the palette click`);
 	const tabs = await workbench.evaluate(`[...document.querySelectorAll('.tabs-container .tab')].map((t) => t.textContent.trim())`);
 	check('the Git Graph view tab opened', /Git Graph/i.test(JSON.stringify(tabs)), JSON.stringify(tabs));
 	check('all three probe commits render in the view', Boolean(rendered), rendered.slice(0, 200));
