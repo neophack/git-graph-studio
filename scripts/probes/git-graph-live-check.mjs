@@ -203,6 +203,9 @@ try {
 			if (event.payload.extId === '${EXT_ID}' && event.payload.method === 'output.append') {
 				window.__probeOutput.push(String(event.payload.args[1]).trim());
 			}
+			if (event.payload.extId === '${EXT_ID}' && event.payload.method === 'output.appendBatch') {
+				for (const line of event.payload.args[0]) window.__probeOutput.push(String(line[1]).trim());
+			}
 		});
 		const key = 'ggstudio.extSettings.${EXT_ID}';
 		const settings = JSON.parse(localStorage.getItem(key) || '{}');
