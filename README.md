@@ -317,9 +317,6 @@ version; the tag is then created at that commit.
 
 ## License
 
-The repository's own code is MIT ([LICENSE](LICENSE)). The built installers are more restricted
-than that: they embed the Git Graph webview and the app icon, ported from Git Graph by mhutchie,
-whose license does not permit distributing derivative works — read the *Git Graph webview and
-built products* section of the [LICENSE](LICENSE) and the extension repository's
-`licenses/LICENSE_GIT_GRAPH` before redistributing anything produced by
-`npx tauri build`.
+MIT ([LICENSE](LICENSE)). The third-party components the app bundles — and the
+extension packages a build carries — remain under their own licenses; see
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
