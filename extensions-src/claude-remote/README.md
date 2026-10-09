@@ -1,88 +1,118 @@
 # Claude Remote (LAN)
 
-在手机上查看并继续**当前工作区**的 Claude Code 对话：完整历史、实时进度、远程发送指令。
-一个 VSIX，同时支持 VS Code 与 Git Graph Studio；纯局域网，无云端中继。
+View and continue **this workspace's** Claude Code conversations from a phone: full history,
+live progress, remote prompts. One VSIX that runs in both VS Code and Git Graph Studio;
+LAN only, no cloud relay.
 
-## 功能
+## Features
 
-- **历史对话**：读取 Claude Code 自己的会话存储（只读宿主自己的那一份：
-  Git Graph Studio 用 `~/.ggs/claude`，VS Code 用 Claude 默认的 `~/.claude`；设置了 `CLAUDE_CONFIG_DIR` 时以它为准），默认只列出当前打开的工作区目录下的对话，可切换为全部项目；
-  支持搜索、按日期分组、标题（自定义标题 › AI 标题 › 摘要 › 首条提问）。
-- **对话视图**：Markdown 渲染（代码块可复制）、思考过程折叠、工具调用卡片
-  （Bash 命令、Edit 差异、TodoWrite 清单）、图片、上下文压缩与中断提示。
-- **按需传输**：同步只携带条目摘要——每个工具行是一行概要，输入内容与输出文本在展开
-  该行时才单独获取（超长结果可「加载全文」），结果图片同样打开后才加载；已获取的内容
-  在手机端缓存，不随同步重复传输。
-- **增量同步**：手机带回版本游标，服务端只回传新增或变化的条目，活跃对话轮询更密
-  也不再重发历史。会话文件增量读取（只解析新追加的行）。
-- **远程指令**：在已有对话中继续，或在工作区目录中新建对话。两种发送方式：
-  - **完成后发送**：进入该对话的队列，等当前轮次（手机发起的，或桌面端正在进行的）结束后依次发送；
-  - **立即发送**：中断正在运行的轮次，立刻发送。
-  队列中的指令可单独「立即发送」或取消；「停止」会中断当前轮次并暂停队列，不会在背后自动继续。
-- **由桌面发送（Git Graph Studio）**：手机的指令会被输入到该对话的 Claude Code 标签页并从那里发送
-  （没打开就先打开；新对话会新开一个标签页）——桌面上看到的就是一条普通的对话，使用该标签页自己的
-  模型与权限模式；手机读取的正是这个标签页写入的会话文件，两边始终一致。「立即发送」先按下标签页的
-  停止再发送；「完成后发送」等这一轮结束再输入。手机端可一键「在桌面打开」，会话列表顶部列出桌面
-  已打开的对话。
-- **远程作答（由桌面发送时）**：Claude 调用「提问」工具（AskUserQuestion）时，手机端直接渲染成可点选的
-  问题卡片——选项、说明、多选、「其他（自定义回答）」都在手机上点选提交；桌面端那个对话的标签页会
-  用这些选择点它自己的选项卡，答案落盘后卡片自动翻转为「已回答」并标出所选。无头运行（VS Code）下
-  问题照常显示，但只能在桌面端作答。
-- **无头运行（VS Code）**：VS Code 无法操作其他扩展的页面，指令改由 `claude -p` 在后台运行；开始时
-  打开该对话的标签页，结束后重新加载它（已打开的聊天面板不会自己重读会话文件）。
-- **模型**：手机显示桌面当前模型（项目 / 用户设置中的 `model`，档位别名经服务商映射解析，
-  否则 `ANTHROPIC_MODEL`，否则最近一次实际使用的模型）、每个对话上次回答所用模型、运行中这一轮的模型；
-  无头运行时可选择「跟随桌面」、本对话模型或 opus / sonnet / haiku / fable 档位（由桌面发送时
-  使用标签页自己的模型，只显示不选择）。使用第三方服务商（Git Graph Studio 的模型供应商桥接）时，
-  手机一律显示第三方的模型名：档位别名按 `ANTHROPIC_DEFAULT_<TIER>_MODEL` 映射成服务商自己的
-  模型 id（选择列表、模型胶囊、运行横幅都如此），映射到同一模型的档位合并为一个选项。
-- **权限模式**：默认（沿用 Claude 设置）/ 自动模式 / 自动接受编辑 / 计划模式 / 跳过权限确认
-  （远程为无头运行，无法逐条确认）。
-- **桌面面板**：服务启停、每个局域网地址的配对二维码、配对码（默认遮罩）、**重置配对密钥**、
-  已配对设备（在线状态）、远程活动记录、运行环境。
+- **Conversation history**: reads Claude Code's own session store (read-only, the host's own
+  copy: Git Graph Studio uses `~/.ggs/claude`, VS Code uses Claude's default `~/.claude`; an
+  explicit `CLAUDE_CONFIG_DIR` overrides either). By default it lists only the conversations
+  under the currently open workspace folders, switchable to all projects; search, grouping
+  by date, and titles (custom title › AI title › summary › first prompt).
+- **Conversation view**: Markdown rendering (copyable code blocks), collapsible thinking,
+  tool-call cards (Bash commands, Edit diffs, TodoWrite lists), images, and context-compaction
+  and interruption notices.
+- **On-demand transfer**: sync carries only entry summaries — every tool row is a one-line
+  digest, and input content or output text is fetched individually when that row is expanded
+  ("load full text" for oversized results); result images likewise load only when opened.
+  Anything already fetched is cached on the phone and never re-sent by a sync.
+- **Incremental sync**: the phone carries a version cursor and the server returns only new or
+  changed entries, so even a densely polled active conversation never resends history. Session
+  files are read incrementally (only newly appended lines are parsed).
+- **Remote prompts**: continue an existing conversation or start a new one inside a workspace
+  folder. Two send modes:
+  - **After this turn**: joins that conversation's queue and sends one by one once the current
+    turn (phone-initiated, or already running on the desktop) ends;
+  - **Send now**: interrupts the running turn and sends immediately.
+  A queued prompt can be sent "now" individually or cancelled; "Stop" interrupts the current
+  turn and pauses the queue — nothing continues silently in the background.
+- **Sent from the desktop (Git Graph Studio)**: the phone's prompt is typed into the
+  conversation's Claude Code tab and sent from there (opened first if needed; a new
+  conversation opens a new tab) — the desktop sees an ordinary conversation, using that tab's
+  own model and permission mode; the phone reads exactly the session file this tab writes, so
+  the two sides never diverge. "Send now" presses the tab's Stop first; "After this turn"
+  waits for the turn to end before typing. The phone offers one-tap "Open on desktop", and
+  the top of the session list shows the conversations the desktop already has open.
+- **Remote answers (when sent from the desktop)**: when Claude calls the AskUserQuestion
+  tool, the phone renders it directly as a tappable question card — options, descriptions,
+  multi-select and "Other (custom answer)" are all picked and submitted on the phone; the
+  desktop's tab for that conversation clicks its own option cards with those picks, and once
+  the answer lands on disk the card flips to "answered" with the chosen options marked. Under
+  headless operation (VS Code) questions still display, but can only be answered on the
+  desktop.
+- **Headless operation (VS Code)**: VS Code cannot drive another extension's pages, so prompts
+  run through `claude -p` in the background; the conversation's tab opens when a turn starts
+  and reloads when it ends (an open chat panel does not re-read the session file on its own).
+- **Models**: the phone shows the desktop's current model (the `model` pin in project/user
+  settings with tier aliases resolved through the provider mapping, else `ANTHROPIC_MODEL`,
+  else the most recently used model), each conversation's last-answer model, and the running
+  turn's model; under headless operation it can pick "follow the desktop", the conversation's
+  own model, or the opus / sonnet / haiku / fable tiers (when sent from the desktop the tab's
+  own model applies — shown, not chosen). Under a third-party provider (Git Graph Studio's
+  model-provider bridge) the phone always shows the provider's own model names: tier aliases
+  map through `ANTHROPIC_DEFAULT_<TIER>_MODEL` to the provider's own model ids (in the picker,
+  the model pill and the running banner alike), and tiers that map to the same model merge
+  into one option.
+- **Permission modes**: default (follows Claude settings) / auto mode / accept edits / plan
+  mode / bypass permissions (remote turns run headless — there is no per-prompt confirmation).
+- **Desktop panel**: server start/stop, the pairing QR per LAN address, the pairing code
+  (masked by default), **Reset pairing key**, paired devices (online state), the remote
+  activity log, and the runtime environment.
 
-## 安全模型
+## Security model
 
-| 层 | 措施 |
+| Layer | Measure |
 | --- | --- |
-| 配对密钥 | 120 位随机配对码 + 随机盐 + 密钥 ID，保存在编辑器的 Secret Storage；重启后仍有效 |
-| 重置 | 「重置配对密钥」立即换新密钥：旧设备下一次请求即收到 `rekeyed`，需重新扫码 |
-| 传输 | 配对码只在链接的 `#` 片段中（浏览器从不发送），手机读取后立即从地址栏抹除 |
-| 加密 | 所有接口经同一个 `/api/rpc`：AES-256-GCM，密钥 = PBKDF2-SHA256(配对码, 盐, 150 000)；方法名也在密文内 |
-| 绑定 | 请求 AAD = `cr2:req:<kid>`，应答 AAD = `cr2:res:<nonce>`：应答无法挪作他用 |
-| 防重放 | 时间戳 ±5 分钟窗口（手机按服务器时间校正时钟）+ 一次性 nonce |
-| 防暴力 | 同一地址 1 分钟内 10 次解密失败即锁定 1 分钟 |
-| 页面 | 严格 CSP（无内联脚本）、`no-referrer`、`nosniff`、禁止被嵌入；手机端密码学用内置 sjcl（局域网 HTTP 非安全上下文，无 WebCrypto） |
-| 范围 | 新对话只能在已打开的工作区目录中创建 |
+| Pairing secret | 120-bit random pairing code + random salt + key ID, stored in the editor's Secret Storage; survives restarts |
+| Reset | "Reset pairing key" swaps in a new key at once: an old device's next request gets `rekeyed` and it must scan the new QR |
+| Transport | the pairing code lives only in the link's `#` fragment (browsers never send it), and the phone wipes it from the address bar as soon as it reads it |
+| Encryption | every endpoint goes through the one `/api/rpc`: AES-256-GCM, key = PBKDF2-SHA256(code, salt, 150,000); the method name travels inside the ciphertext too |
+| Binding | request AAD = `cr2:req:<kid>`, response AAD = `cr2:res:<nonce>`: a response cannot be repurposed |
+| Anti-replay | timestamp within a ±5-minute window (the phone corrects its clock against server time) + single-use nonce |
+| Anti-brute-force | 10 decryption failures within one minute from the same address lock it out for one minute |
+| Page | strict CSP (no inline scripts), `no-referrer`, `nosniff`, embedding denied; the phone's crypto uses the vendored sjcl (a plain-HTTP LAN origin is not a secure context — no WebCrypto) |
+| Scope | new conversations can only be created inside the open workspace folders |
 
-## 命令与设置
+## Commands and settings
 
-- `Claude Remote: Open Panel`（状态栏入口）、`Start LAN Server`、`Stop LAN Server`、`Reset Pairing Key`
-- `claudeRemote.port`：端口，0 = 沿用上次端口（手机书签不失效）
-- `claudeRemote.autoStart`：打开窗口时自动启动服务
-- `claudeRemote.backend`：`desktop`（默认，由桌面的 Claude Code 标签页发送；宿主不支持时自动退回无头）/ `headless`
-- `claudeRemote.desktopTab`（仅无头运行）：`reload`（默认，开始时打开、结束后重载标签页）/ `open`（只打开）/ `off`
+- `Claude Remote: Open Panel` (the status-bar entry), `Start LAN Server`, `Stop LAN Server`, `Reset Pairing Key`
+- `claudeRemote.port`: the port; 0 = reuse the last port (paired phones' bookmarks keep working)
+- `claudeRemote.autoStart`: start the server when the window opens
+- `claudeRemote.backend`: `desktop` (default — sent from the desktop's Claude Code tab; falls back to headless where the host cannot) / `headless`
+- `claudeRemote.desktopTab` (headless only): `reload` (default — open the tab when a turn starts, reload it when the turn ends) / `open` (open only) / `off`
 
-## 构建
+## Build
 
 ```sh
 node extensions-src/claude-remote/build.mjs
-# 产物：target/studio/claude-remote-<version>.vsix
+# output: target/studio/claude-remote-<version>.vsix
 ```
 
-Git Graph Studio 每个安装包默认自带；VS Code 用 `Extensions → … → Install from VSIX…`。
+Bundled with every Git Graph Studio installer by default; in VS Code, install via
+`Extensions → … → Install from VSIX…`.
 
-## 已知边界
+## Known limits
 
-- 二维码与配对码就是访问密钥——只向信任的设备展示；泄露后请立即重置。
-- 局域网明文 HTTP 承载密文；跨网使用请走 VPN，不要把端口暴露到公网。
-- 由桌面发送时，工具的权限确认（允许 / 拒绝）仍在桌面标签页里弹出，手机端无法代为确认；
-  「提问」（AskUserQuestion）例外——手机端可以点选作答。
-- 由桌面发送会把标签页带到前台并聚焦其输入框；输入框中未发送的草稿会被这条指令替换。
-- 无头运行时工具权限按所选模式与 Claude Code 自己的设置执行。
-- 重载标签页 = 关闭后重新打开：标签页输入框里未发送的草稿会丢失。Git Graph Studio 精确知道哪个标签页
-  承载该会话；VS Code 没有这项映射，只在切到该会话后当前标签页确为 Claude Code 面板时才关闭。
-- 「桌面端运行中」由会话文件推断（最后一条记录处于轮次中且文件 3 分钟内有写入）。
-- 超大会话只解析最后 24 MiB。
-- 二维码编码器 vendored 自 [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator)（MIT），
-  手机端加密库 vendored 自 [sjcl](https://github.com/bitwiseshiftleft/sjcl)（BSD-2-Clause）。
+- The QR and the pairing code are the access key — show them only to devices you trust, and
+  reset immediately if one leaks.
+- Plain-HTTP LAN carries only ciphertext; use a VPN across networks and never expose the port
+  to the internet.
+- When sent from the desktop, tool permission prompts (allow / deny) still pop up in the
+  desktop tab and cannot be confirmed from the phone; AskUserQuestion is the exception — the
+  phone can answer it by tapping.
+- Sending from the desktop brings the tab to the front and focuses its input box; an unsent
+  draft in that input is replaced by the prompt.
+- Under headless operation, tool permissions follow the selected mode and Claude Code's own
+  settings.
+- Reloading a tab = closing and reopening it: unsent drafts in the tab's input are lost. Git
+  Graph Studio knows exactly which tab hosts a session; VS Code has no such mapping and closes
+  the current tab only after switching to that session, and only when it is indeed a Claude
+  Code panel.
+- "Desktop running" is inferred from the session file (the last record is mid-turn and the
+  file was written within the last 3 minutes).
+- Oversized sessions parse only the last 24 MiB.
+- The QR encoder is vendored from [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator)
+  (MIT); the phone's crypto library is vendored from [sjcl](https://github.com/bitwiseshiftleft/sjcl)
+  (BSD-2-Clause).
