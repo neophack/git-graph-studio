@@ -74,7 +74,7 @@ pub fn local_offset_seconds() -> i64 {
             if localtime_r(&now, &mut tm).is_null() {
                 0
             } else {
-                tm.tm_gmtoff as i64
+                tm.tm_gmtoff
             }
         }
     }

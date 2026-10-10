@@ -130,7 +130,7 @@ pub fn run_applet(shell: &mut Shell, io: &Io, name: &str, args: &[String]) -> Op
         "md5sum" | "sha1sum" | "sha256sum" => checksum(shell, io, name, args),
         "base64" => base64_applet(io, args),
         "du" => du(shell, io, args),
-        "ln" => ln(io, args),
+        "ln" => ln(shell, io, args),
         "chmod" => chmod(shell, io, args),
         "timeout" => timeout(shell, io, args),
         "tar" => super::archive::run_tar(shell, io, args),
@@ -3343,7 +3343,7 @@ fn human_size(bytes: u64, human: bool) -> String {
 }
 
 /// `ln -s target link` — a real symlink when the OS grants it.
-fn ln(io: &Io, args: &[String]) -> ExecResult {
+fn ln(shell: &Shell, io: &Io, args: &[String]) -> ExecResult {
     let symbolic = args.iter().any(|arg| arg == "-s");
     let paths: Vec<String> = args
         .iter()
@@ -3354,20 +3354,23 @@ fn ln(io: &Io, args: &[String]) -> ExecResult {
         io.err_str("ln: -s target link is the supported form\n");
         return Ok(1);
     }
-    let (target, link) = (&paths[0], &paths[1]);
+    // Both operands live in the shell's cwd, not the process's.
+    let target = shell.resolve_working_path(&paths[0]);
+    let link = shell.resolve_working_path(&paths[1]);
     #[cfg(unix)]
-    let result = std::os::unix::fs::symlink(target, link);
+    let result = std::os::unix::fs::symlink(&target, &link);
     #[cfg(windows)]
-    let result = if Path::new(target).is_dir() {
-        std::os::windows::fs::symlink_dir(target, link)
+    let result = if target.is_dir() {
+        std::os::windows::fs::symlink_dir(&target, &link)
     } else {
-        std::os::windows::fs::symlink_file(target, link)
+        std::os::windows::fs::symlink_file(&target, &link)
     };
     match result {
         Ok(()) => Ok(0),
         Err(error) => {
             io.err_str(&format!(
-                "ln: {link}: {error} (Windows needs Developer Mode or privileges for symlinks)\n"
+                "ln: {}: {error} (Windows needs Developer Mode or privileges for symlinks)\n",
+                link.display()
             ));
             Ok(1)
         }

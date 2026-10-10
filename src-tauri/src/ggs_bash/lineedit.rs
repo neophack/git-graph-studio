@@ -1041,11 +1041,8 @@ fn command_candidates(shell: &Shell, prefix: &str) -> Vec<Candidate> {
     } else {
         Vec::new()
     };
-    for dir in shell.path_var().split([';', ':']) {
-        if dir.is_empty() {
-            continue;
-        }
-        let dir = super::msys::from_msys(dir);
+    for dir in super::exec::split_path_list(&shell.path_var()) {
+        let dir = super::msys::from_msys(&dir);
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };

@@ -446,9 +446,8 @@ impl Shell {
     /// and spawned-with form stays Windows-native (`;`-joined). `echo $PATH` is the
     /// presented form; `PATH=$PATH:/c/tools` stores back through [`store_path`].
     pub fn present_path(&self, stored: &str) -> String {
-        stored
-            .split([';', ':'])
-            .filter(|piece| !piece.is_empty())
+        split_path_list(stored)
+            .iter()
             .map(|piece| super::msys::to_msys(Path::new(&super::msys::from_msys(piece))))
             .collect::<Vec<_>>()
             .join(":")
@@ -456,12 +455,15 @@ impl Shell {
 
     /// The inverse of [`present_path`]: a colon-separated MSYS value stores native.
     fn store_path(&self, value: &str) -> String {
-        value
-            .split([';', ':'])
-            .filter(|piece| !piece.is_empty())
-            .map(super::msys::from_msys)
-            .collect::<Vec<_>>()
-            .join(";")
+        let dirs = split_path_list(value)
+            .iter()
+            .map(|piece| super::msys::from_msys(piece))
+            .collect::<Vec<_>>();
+        if cfg!(windows) {
+            dirs.join(";")
+        } else {
+            dirs.join(":")
+        }
     }
 
     /// The value of `$@` as separate words (the one expansion that keeps arguments
@@ -578,6 +580,42 @@ fn executable_extensions() -> Vec<String> {
     }
 }
 
+/// The directories of a PATH-style list, in whichever dialect it arrived. The native
+/// Windows form is `;`-joined and its entries carry drive-letter colons (`C:\x`) that
+/// must never split; the MSYS and Unix forms are `:`-joined (`/c/x:/d/y`). A naive
+/// split on both separators mangles every drive letter — `C:\x` becomes the pieces
+/// `C` and `\x`, and the second, rooted without a drive, resolves against the
+/// *current* drive, so a process cwd off C: loses all of C:'s directories.
+pub(crate) fn split_path_list(value: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        let mut dirs: Vec<String> = Vec::new();
+        let mut pieces = value.split([';', ':']);
+        while let Some(piece) = pieces.next() {
+            if piece.len() == 1 && piece.as_bytes()[0].is_ascii_alphabetic() {
+                // `C:\x` split into the bare drive letter and the rest: glue the
+                // pair back with its colon.
+                if let Some(rest) = pieces.next() {
+                    dirs.push(format!("{piece}:{rest}"));
+                    continue;
+                }
+            }
+            if !piece.is_empty() {
+                dirs.push(piece.to_owned());
+            }
+        }
+        dirs
+    }
+    #[cfg(not(windows))]
+    {
+        value
+            .split(':')
+            .filter(|piece| !piece.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
 /// Find `name` the way the shell spawns it: a path with separators runs as-is;
 /// otherwise each `PATH` entry, with the platform's executable extensions (PATHEXT on
 /// Windows) appended. Returns the resolved path and whether it is a `.cmd`/`.bat`
@@ -590,13 +628,8 @@ pub fn resolve_on_path(name: &str, path_var: &str) -> Option<PathBuf> {
         return Some(PathBuf::from(name));
     }
     let extensions = executable_extensions();
-    // Both dialects, whichever side the value came from: the stored form is
-    // `;`-joined Windows paths, `$PATH` round-trips arrive `:`-joined MSYS ones.
-    for dir in path_var.split([';', ':']) {
-        if dir.is_empty() {
-            continue;
-        }
-        let dir = super::msys::from_msys(dir);
+    for dir in split_path_list(path_var) {
+        let dir = super::msys::from_msys(&dir);
         for extension in &extensions {
             let candidate = Path::new(&dir).join(format!("{name}{extension}"));
             if candidate.is_file() {
@@ -1761,4 +1794,34 @@ fn describe(body: &super::ast::AndOr) -> String {
         text.push_str(&pipeline(next));
     }
     format!("{text} &")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_path_list;
+
+    #[test]
+    fn native_windows_path_lists_keep_their_drive_colons() {
+        let dirs = split_path_list(r"C:\Program Files\Git\cmd;C:\Windows\system32;D:\tools");
+        assert_eq!(
+            dirs,
+            vec![
+                r"C:\Program Files\Git\cmd".to_owned(),
+                r"C:\Windows\system32".to_owned(),
+                r"D:\tools".to_owned(),
+            ]
+        );
+        // The MSYS form splits on its colons as ever.
+        assert_eq!(
+            split_path_list("/c/tools:/d/elsewhere"),
+            vec!["/c/tools".to_owned(), "/d/elsewhere".to_owned()]
+        );
+        // A lone native entry survives whole.
+        assert_eq!(split_path_list(r"C:\Program Files"), vec![r"C:\Program Files"]);
+        // A rewritten list mixes the dialects across one colon join.
+        assert_eq!(
+            split_path_list(r"C:\Windows:/c/tools"),
+            vec![r"C:\Windows".to_owned(), "/c/tools".to_owned()]
+        );
+    }
 }
