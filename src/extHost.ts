@@ -282,6 +282,10 @@ interface FrameHandle {
  *  sidebar view's alike: the frame hosting the page, the messages held until the page can
  *  receive them, and whether the frame's current document finished loading. */
 interface WebviewDelivery {
+	/** The owning extension — every delivery record carries it (the composed boot pins its
+	 *  asset base as the page's `_VSCODE_FILE_ROOT`, the root monaco-class worker loaders
+	 *  resolve their module ids against). */
+	extId: string;
 	/** Set once the surface mounted it (the first `setHtml` may arrive first — it queues on
 	 *  the surface's own `html`). */
 	frame: HTMLIFrameElement | null;
@@ -323,7 +327,6 @@ interface WebviewDelivery {
  *  host half feeds it HTML and relays messages both ways. */
 interface WebviewHandle extends WebviewDelivery {
 	panelId: number;
-	extId: string;
 	title: string;
 }
 
@@ -331,9 +334,7 @@ interface WebviewHandle extends WebviewDelivery {
  *  record — the same delivery gate a panel crosses, on the section's mount instead of a
  *  tab's (the sidebar chat is the same claude-code page a tab hosts, and blanks the same
  *  way when its first pushes cross before the section mounts). */
-interface WebviewViewRecord extends WebviewDelivery {
-	extId: string;
-}
+type WebviewViewRecord = WebviewDelivery;
 
 /** One extension-owned status bar item (`window.createStatusBarItem`), as the bar renders it. */
 export interface ExtStatusBarItem {
@@ -437,10 +438,16 @@ export function parseActivationPolicy(events: string[] | undefined, contributes?
  *  message listener the host relays through. State stays inside the frame (as much of it as
  *  a sandboxed srcdoc document can keep). The boot script wears the extension's own CSP
  *  nonce when its html declares one — VS Code's own convention, and the only way the boot
- *  survives a `script-src 'nonce-…'` policy the package shipped. */
-function webviewBoot(nonce: string | null): string {
+ *  survives a `script-src 'nonce-…'` policy the package shipped. It also pins
+ *  `globalThis._VSCODE_FILE_ROOT` to the extension's asset base before any page script
+ *  runs — the root monaco-vscode-api bundles (claude-code's webview) resolve their
+ *  language-worker module ids against; VS Code's host defines it, and without it the
+ *  loader's ESM path falls into its AMD branch and dies reading `require.toUrl` of
+ *  undefined. */
+function webviewBoot(nonce: string | null, fileRoot: string): string {
 	return `<script${nonce ? ` nonce="${nonce}"` : ''}>
 (function () {
+	if (globalThis._VSCODE_FILE_ROOT === undefined) globalThis._VSCODE_FILE_ROOT = ${jsonForScript(fileRoot)};
 	var api = null;
 	var state = null;
 	window.acquireVsCodeApi = function () {
@@ -480,7 +487,7 @@ function webviewBoot(nonce: string | null): string {
  *  every webview document itself — without the same injection here, every `var(--vscode-…)`
  *  in a package's own CSS is undefined, and widgets (dropdown menus above all) render with
  *  no background at all. */
-function composeWebview(html: string, theme: { kind: 'vscode-dark' | 'vscode-light'; css: string; vars: Record<string, string> } | null): string {
+function composeWebview(html: string, theme: { kind: 'vscode-dark' | 'vscode-light'; css: string; vars: Record<string, string> } | null, fileRoot: string): string {
 	// The extension's own CSP nonce (VS Code's convention: the html declares one nonce and
 	// the injected api script reuses it) — without it a `script-src 'nonce-…'` policy
 	// blocks the boot and the webview can never speak.
@@ -488,7 +495,7 @@ function composeWebview(html: string, theme: { kind: 'vscode-dark' | 'vscode-lig
 	const themeHead = theme === null
 		? ''
 		: `<style id="__ggsTheme">${theme.css}</style><script${nonce ? ` nonce="${nonce}"` : ''}>document.documentElement.classList.add('${theme.kind}');var s=document.documentElement.style,v=${jsonForScript(theme.vars)};for(var k in v)s.setProperty(k,v[k]);</script>`;
-	const boot = themeHead + webviewBoot(nonce);
+	const boot = themeHead + webviewBoot(nonce, fileRoot);
 	for (const marker of ['</head>', '</HEAD>']) {
 		const at = html.indexOf(marker);
 		if (at !== -1) return `${html.slice(0, at)}${boot}${html.slice(at)}`;
@@ -511,8 +518,8 @@ function composeWebview(html: string, theme: { kind: 'vscode-dark' | 'vscode-lig
  *  moment the pane joins the document, with a generous timer as the bound. Every step
  *  lands in the extension host log — the intermittent-blank causal chain is read from
  *  there, not guessed. */
-function loadFrameDoc(frame: HTMLIFrameElement, html: string, theme: { kind: 'vscode-dark' | 'vscode-light'; css: string; vars: Record<string, string> } | null, owner: string): void {
-	const composed = composeWebview(html, theme);
+function loadFrameDoc(frame: HTMLIFrameElement, html: string, theme: { kind: 'vscode-dark' | 'vscode-light'; css: string; vars: Record<string, string> } | null, owner: string, fileRoot: string): void {
+	const composed = composeWebview(html, theme, fileRoot);
 	const started = performance.now();
 	let done = false;
 	const finish = (path: string) => {
@@ -1743,7 +1750,7 @@ export class ExtensionHost {
 			// mounts hold to the same rule.
 			if (view.html !== '') {
 				view.painted = view.html;
-				loadFrameDoc(frame, view.html, this.webviewTheme, `${extId}#${panelId}`);
+				loadFrameDoc(frame, view.html, this.webviewTheme, `${extId}#${panelId}`, this.webviewAssetBase(extId));
 			} else {
 				extLog('info', 'host', `webview ${extId}#${panelId}: mount defers the first paint — the record has no html yet`);
 			}
@@ -1787,7 +1794,7 @@ export class ExtensionHost {
 		frame.addEventListener('load', () => this.armLoadGrace(record, `view:${record.extId}/${viewId}`));
 		if (record.html !== '') {
 			record.painted = record.html;
-			loadFrameDoc(frame, record.html, this.webviewTheme, `view:${record.extId}/${viewId}`);
+			loadFrameDoc(frame, record.html, this.webviewTheme, `view:${record.extId}/${viewId}`, this.webviewAssetBase(record.extId));
 		}
 		return () => {
 			if (this.webviewViews.get(viewId)?.frame === frame) {
@@ -1842,7 +1849,7 @@ export class ExtensionHost {
 			// A settled document (or one inside its load grace) reloads now.
 			record.loaded = false;
 			record.painted = html;
-			loadFrameDoc(record.frame, html, this.webviewTheme, owner);
+			loadFrameDoc(record.frame, html, this.webviewTheme, owner, this.webviewAssetBase(record.extId));
 			return;
 		}
 		// First paint pending: the same pair-coalescing a panel gets — one boot of the
@@ -1884,7 +1891,7 @@ export class ExtensionHost {
 		record.loaded = false;
 		record.painted = record.html;
 		extLog('info', 'host', `webview ${owner}: the coalescing window paints the latest document (${record.html.length} chars)`);
-		loadFrameDoc(record.frame, record.html, this.webviewTheme, owner);
+		loadFrameDoc(record.frame, record.html, this.webviewTheme, owner, this.webviewAssetBase(record.extId));
 		return true;
 	}
 
@@ -2129,6 +2136,15 @@ export class ExtensionHost {
 			if (!quiet) extLog('warn', extId, `host request ${method} failed: ${String(error)}`, error instanceof Error ? error : undefined);
 			throw error;
 		}
+	}
+
+	/** The asset base a webview's composed boot pins as `globalThis._VSCODE_FILE_ROOT`
+	 *  (see `webviewBoot`): the extension's own install root — the same base
+	 *  `asWebviewUri` composes onto — falling back to the scheme-shaped default the way
+	 *  `extensionEnv`'s `webviewResourceBase` does when the install list has no record. */
+	private webviewAssetBase(extId: string): string {
+		const ext = this.installedExts.find((candidate) => candidate.id === extId);
+		return ext ? extAssetBase(ext) : `ggs://localhost/${extId}/`;
 	}
 
 	/** The extension-facing facts every host boots from: stored settings, the declared and
@@ -2684,7 +2700,7 @@ export class ExtensionHost {
 					// grace's queued messages deliver into this fresh load.
 					view.loaded = false; // the reload drops the old listeners; messages queue until the new load
 					view.painted = html;
-					loadFrameDoc(view.frame, html, this.webviewTheme, owner);
+					loadFrameDoc(view.frame, html, this.webviewTheme, owner, this.webviewAssetBase(view.extId));
 					return Promise.resolve(undefined);
 				}
 				// First paint still pending: hold it and coalesce the pair — the latest

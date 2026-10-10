@@ -5,6 +5,16 @@
 // parent window; the page's own scripts never learn anything about the transport.
 (function () {
 	'use strict';
+	// monaco-class bundles (claude-code's webview is one) resolve their language-worker
+	// module ids against `globalThis._VSCODE_FILE_ROOT`; unset, the loader's ESM path falls
+	// into its AMD branch and dies reading `require.toUrl` of undefined. Pin the page's own
+	// directory — the base its bundle's relative imports already resolve against — before
+	// any page script runs (this boot is the head's first script). A location that cannot
+	// serve as a URL base leaves it unset, and a page that pinned its own value first keeps
+	// that one.
+	if (globalThis._VSCODE_FILE_ROOT === undefined) {
+		try { globalThis._VSCODE_FILE_ROOT = new URL('.', location.href).toString(); } catch (e) { /* unresolvable base — leave unset */ }
+	}
 	var acquired = false;
 	var nextId = 1;
 	var pending = new Map();

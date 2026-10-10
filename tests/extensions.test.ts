@@ -890,6 +890,27 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		expect(sent.filter((m) => (m as { type?: string }).type === '__studioExtEvent' && (m as { event?: string }).event === 'webviewDisposed')).toHaveLength(1);
 	});
 
+	it('a composed webview pins _VSCODE_FILE_ROOT before the page\'s own scripts run', async () => {
+		// claude-code's webview bundles monaco-vscode-api, whose language-worker loading
+		// resolves module ids against `globalThis._VSCODE_FILE_ROOT`; unset (ggs's composed
+		// documents never defined it — VS Code's host does), the worker path falls into its
+		// AMD branch and dies reading `require.toUrl` of undefined — the repeated
+		// "Cannot read properties of undefined (reading 'toUrl')" console errors.
+		const { host } = hostWithFrame();
+		await host['serve']('webview.create', [1, 'demo.view', 'Demo Panel'], 'acme.demo', {} as never);
+		await host['serve']('webview.setHtml', [1, '<html><head></head><body>hi</body></html>'], 'acme.demo', {} as never);
+		const pane = document.body.appendChild(document.createElement('div'));
+		const dispose = host.mountWebview('acme.demo', 1, pane);
+		const frame = pane.querySelector('iframe')!;
+		const srcdoc = frame.getAttribute('srcdoc')!;
+		// The pin is the extension's own asset base — the same root `asWebviewUri` composes
+		// onto, so worker-module imports stay inside the page's own resource tree.
+		expect(srcdoc).toContain('globalThis._VSCODE_FILE_ROOT = "ggs://localhost/acme.demo/";');
+		// And it lands before any page script can run (the boot precedes the body).
+		expect(srcdoc.indexOf('_VSCODE_FILE_ROOT')).toBeLessThan(srcdoc.indexOf('<body>'));
+		dispose();
+	});
+
 	it('webview.create resolves the create\'s ViewColumn into the tab open\'s placement and focus', async () => {
 		const { host } = hostWithFrame();
 		const opened: [number, string, string, unknown, boolean | undefined][] = [];

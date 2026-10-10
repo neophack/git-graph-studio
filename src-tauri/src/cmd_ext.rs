@@ -3539,6 +3539,22 @@ mod ext_asset_tests {
     }
 
     #[test]
+    fn a_served_page_pins_the_file_root_worker_loaders_resolve_against() {
+        // monaco-vscode-api bundles (claude-code's webview is one) resolve their
+        // language-worker module ids against `globalThis._VSCODE_FILE_ROOT`; unset, the
+        // loader's ESM path falls into its AMD branch and dies reading `require.toUrl`
+        // of undefined. The composed boot pins it from the page's own URL, ahead of every
+        // script the page itself declares.
+        let tmp = home_with_demo_page();
+        let response =
+            serve_ext_asset_from(tmp.path(), &request_for("/acme.demo-1.0.0/web/view.html"));
+        assert_eq!(response.status(), tauri::http::StatusCode::OK);
+        let body = String::from_utf8(response.body().to_vec()).unwrap();
+        assert!(body.contains("_VSCODE_FILE_ROOT"));
+        assert!(body.find("_VSCODE_FILE_ROOT").unwrap() < body.find("<title>").unwrap());
+    }
+
+    #[test]
     fn a_percent_encoded_slash_in_the_package_path_still_serves_the_page() {
         // convertFileSrc composes the base with the trailing slash percent-encoded, so the
         // live requests carry the package segment and the page path as one encoded run.
