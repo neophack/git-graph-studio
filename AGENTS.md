@@ -1217,7 +1217,9 @@ way Git Bash does.
   derived from `USERPROFILE`; MSYS-shaped arguments translated for native children
   exactly the way MSYS2 does (`git -C /c/x` works); `cygpath` for explicit conversion
 - Git Bash's startup and look: `~/.bashrc` sourced at interactive start, the colored
-  `user@host MINGW64 ~/path` prompt (a hand-set `PS1` with `\u \h \w` wins), `ls`
+  `user@host ~/path` prompt — Git Bash's shape without its `MINGW64` segment
+  (2026-10-10, the owner's direction; `uname` and `MSYSTEM` keep answering MINGW64 for
+  scripts that probe the dialect) — (a hand-set `PS1` with `\u \h \w` wins), `ls`
   colorized on a terminal (bold blue directories, bold green executables), `history`
 - The language: quotes and every `$` form, pipes, redirections (heredocs `<<`/`<<-`,
   here-strings), **process substitution `<(cmd)` and `>(cmd)`** (temp-file backed:

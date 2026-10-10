@@ -3,7 +3,7 @@
 //! interpreter in this module, the POSIX line tools as built-in applets (an `awk`
 //! interpreter included), a small BRE/ERE engine for `grep`/`sed`, and Git Bash's path
 //! dialect (`msys.rs`): `/c/...` drive paths, `/dev/null`, `/tmp`, a colon-separated
-//! `PATH`, `~/.bashrc` at startup, the colored `user@host MINGW64 ~/path` prompt. A
+//! `PATH`, `~/.bashrc` at startup, the colored `user@host ~/path` prompt. A
 //! clean Windows machine has no bash — this one ships with the app: the integrated
 //! terminal runs it (the Terminal Shell setting, GGS Bash by default) and the bridged
 //! claude-code backend is pointed at it through `CLAUDE_CODE_GIT_BASH_PATH` with
@@ -329,7 +329,8 @@ pub(crate) fn run_nested(parent: &Shell, io: &Io, name: &str, args: &[String]) -
 /// syntactically incomplete (an open quote, `if` without `fi`, a pending heredoc).
 /// ConPTY provides the line discipline and the echo; the shell reads whole lines.
 /// Git Bash's startup contract holds: `~/.bashrc` runs first, and the default prompt
-/// is its own — green `user@host`, magenta `MINGW64`, yellow `~`-shortened path.
+/// is Git Bash's shape — green `user@host`, yellow `~`-shortened path — without the
+/// `MINGW64` segment.
 fn repl(mut shell: Shell, io: &Io) -> i32 {
     if let Some(home) = shell.get_var("HOME") {
         let bashrc = shell.resolve_working_path(&format!("{home}/.bashrc"));
@@ -405,9 +406,11 @@ fn repl(mut shell: Shell, io: &Io) -> i32 {
     }
 }
 
-/// Git Bash's own prompt: `user@host MINGW64 ~/path`, then `$ ` on the same line
-/// (the classic dot-files add a newline; the stock one does not). A hand-set `PS1`
-/// wins, with the usual `\u \h \w \$` escapes honoured.
+/// The default prompt: Git Bash's shape without its `MINGW64` segment (the owner's
+/// direction, 2026-10-10 — the shell is GGS Bash, not an MSYS2 environment; `uname` and
+/// `MSYSTEM` still answer MINGW64 for scripts that probe the dialect): `user@host
+/// ~/path`, then `$ ` on the next line. A hand-set `PS1` wins, with the usual
+/// `\u \h \w \$` escapes honoured.
 fn prompt(shell: &Shell) -> String {
     if let Some(custom) = shell.get_var("PS1") {
         return custom
@@ -428,7 +431,7 @@ fn prompt(shell: &Shell) -> String {
         .unwrap_or_else(|| "localhost".to_owned())
         .to_lowercase();
     let path = msys::display_cwd(&shell.cwd, shell.get_var("HOME").as_deref());
-    format!("\x1b[32m{user}@{host}\x1b[0m \x1b[35mMINGW64\x1b[0m \x1b[33m{path}\x1b[0m\n$ ")
+    format!("\x1b[32m{user}@{host}\x1b[0m \x1b[33m{path}\x1b[0m\n$ ")
 }
 
 fn run_with_status(shell: &mut Shell, line: &str, io: &Io) -> i32 {
@@ -1924,6 +1927,22 @@ y z w
         );
         assert_eq!(status, 0);
         assert_eq!(out.trim().len(), 40, "{out}");
+    }
+
+    #[test]
+    fn the_default_prompt_carries_no_mingw64_segment() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut shell = shell_in(dir.path());
+        // An inherited PS1 would take over the default; the test reads the default.
+        shell
+            .vars
+            .retain(|name, _| !name.eq_ignore_ascii_case("PS1"));
+        shell.set_var("USERNAME", "Alice");
+        shell.set_var("COMPUTERNAME", "BOX");
+        let shown = prompt(&shell);
+        assert!(!shown.contains("MINGW64"), "{shown:?}");
+        assert!(shown.contains("alice@box"), "{shown:?}");
+        assert!(shown.ends_with("\n$ "), "{shown:?}");
     }
 
     #[test]
