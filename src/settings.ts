@@ -15,6 +15,10 @@ export type LinuxDmabuf = 'auto' | 'disable' | 'keep';
  *  the Rust bash-like shell that also backs Claude Code's tool calls on Windows,
  *  where no bash exists for them to find — or PowerShell. */
 export type TerminalShell = 'powershell' | 'ggsBash';
+/** What the right mouse button does inside the integrated terminal (module 18) —
+ *  VS Code's `terminal.integrated.rightClickBehavior`: open the context menu, act as
+ *  smart copy/paste, always paste, or nothing. */
+export type TerminalRightClickBehavior = 'menu' | 'copyPaste' | 'paste' | 'nothing';
 export type WorkbenchDensity = 'comfortable' | 'compact';
 /** The extension host log's threshold (`extLog.ts`): what reaches the Output channel and
  *  `~/.ggs/logs/ext-host.log`. */
@@ -69,6 +73,9 @@ export interface AppSettings {
 	 *  backend when it spawns the bridged claude-code backend (the persisted
 	 *  `~/.ggs/settings.json` is the file that spawn path reads). */
 	terminalShell: TerminalShell;
+	/** The terminal surface's right-click behavior — read at click time, so a change
+	 *  reaches every open terminal without a restart. */
+	terminalRightClickBehavior: TerminalRightClickBehavior;
 	/** Zed's `use_smartcase_search`: a query containing an uppercase letter matches case
 	 *  exactly, an all-lowercase query ignores case. The Match Case toggle shows the state
 	 *  the query's case picked — and can still override it — in every search field. */
@@ -88,6 +95,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	explorerContextMenu: true,
 	linuxDmabuf: 'auto',
 	terminalShell: 'ggsBash',
+	terminalRightClickBehavior: 'menu',
 	density: 'comfortable',
 	searchSmartCase: true,
 	extensionLogLevel: 'info'
@@ -145,6 +153,12 @@ export const SETTING_DEFS: SettingDef[] = [
 	{ key: 'terminalShell', category: 'general', kind: 'enum', options: [
 		{ value: 'powershell', label: 'settings.terminalShell.powershell' },
 		{ value: 'ggsBash', label: 'settings.terminalShell.ggsBash' }
+	] },
+	{ key: 'terminalRightClickBehavior', category: 'general', kind: 'enum', options: [
+		{ value: 'menu', label: 'settings.terminalRightClickBehavior.menu' },
+		{ value: 'copyPaste', label: 'settings.terminalRightClickBehavior.copyPaste' },
+		{ value: 'paste', label: 'settings.terminalRightClickBehavior.paste' },
+		{ value: 'nothing', label: 'settings.terminalRightClickBehavior.nothing' }
 	] },
 	{ key: 'theme', category: 'appearance', kind: 'theme' },
 	{ key: 'density', category: 'appearance', kind: 'enum', options: [

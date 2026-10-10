@@ -10,8 +10,9 @@ import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { loadXterm } from './lazy';
 
-import { actionButton, el, icon, notify } from './ui';
+import { actionButton, el, icon, notify, showContextMenu, type MenuEntry } from './ui';
 import { THEME_EVENT, settings } from './settings';
+import { t } from './i18n';
 
 interface Session {
 	id: number;
@@ -176,6 +177,35 @@ export class TerminalView {
 			}
 			return true;
 		});
+		// The right mouse button follows the Terminal Right-Click setting (VS Code's
+		// terminal.integrated.rightClickBehavior): the menu by default, smart copy/paste
+		// (copy the selection, paste with none), plain paste, or swallowed. The
+		// workbench's catch-all (main.ts) already keeps the browser's own menu down.
+		element.addEventListener('contextmenu', (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			const behavior = settings.terminalRightClickBehavior;
+			if (behavior === 'nothing') return;
+			if (behavior === 'paste' || (behavior === 'copyPaste' && !term.hasSelection())) {
+				void readText().then((text) => { if (text) term.paste(text); }).catch(() => undefined);
+				return;
+			}
+			if (behavior === 'copyPaste') {
+				void writeText(term.getSelection()).catch(() => undefined);
+				term.clearSelection();
+				return;
+			}
+			const entries: MenuEntry[] = [
+				{ label: t('terminal.menu.copy'), keybinding: 'Ctrl+Shift+C', disabled: !term.hasSelection(),
+					run: () => { void writeText(term.getSelection()).catch(() => undefined); term.focus(); } },
+				{ label: t('terminal.menu.paste'), keybinding: 'Ctrl+Shift+V',
+					run: () => { void readText().then((text) => { if (text) term.paste(text); }).catch(() => undefined); term.focus(); } },
+				{ label: t('terminal.menu.selectAll'), run: () => { term.selectAll(); term.focus(); } },
+				'separator',
+				{ label: t('terminal.menu.clear'), run: () => { term.clear(); term.focus(); } }
+			];
+			showContextMenu(event.clientX, event.clientY, entries);
+		});
 
 		const row = el('div', 'row');
 		const session: Session = { id, name: 'shell', term, fit, element, row, exited: false, unlisten: [] };
@@ -276,6 +306,18 @@ export class TerminalView {
 			row.title = session.name;
 			row.appendChild(el('div', 'actions', [actionButton('trash', 'Kill Terminal', () => void this.kill(session))]));
 			row.addEventListener('click', () => this.activate(session));
+			// Right-clicking a session's row activates it first (the way VS Code focuses a
+			// terminal tab on its context menu), then offers the row's two actions.
+			row.addEventListener('contextmenu', (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				this.activate(session);
+				showContextMenu(event.clientX, event.clientY, [
+					{ label: t('terminal.menu.newTerminal'), run: () => void this.create() },
+					'separator',
+					{ label: t('terminal.menu.kill'), run: () => void this.kill(session) }
+				]);
+			});
 			this.list.appendChild(row);
 		}
 	}

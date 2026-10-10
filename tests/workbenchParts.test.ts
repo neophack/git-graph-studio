@@ -6,6 +6,7 @@ import * as state from '../src/state';
 import { StatusBar } from '../src/statusbar';
 import { TitleBar } from '../src/titlebar';
 import { Panel } from '../src/panel';
+import { settings } from '../src/settings';
 import { backend } from './tauriMock';
 import { click, flush, hover, menuLabels, texts, type } from './helpers';
 
@@ -579,6 +580,94 @@ describe('terminal resizing', () => {
 		expect(term.pasted).toEqual(['from clipboard']);
 		expect(press({ key: 'v', ctrlKey: true })).toBe(true);
 		await panel.terminal.killActive();
+	});
+});
+
+describe('terminal right-click', () => {
+	type FakeTerm = { selection: string; pasted: string[]; selectAllCalled: number; cleared: number };
+	const setup = async (): Promise<{ panel: Panel; term: FakeTerm }> => {
+		backend.on('pty_create', () => 'powershell');
+		backend.on('pty_write', () => null);
+		backend.on('pty_kill', () => null);
+		const panel = new Panel(document.getElementById('panel')!);
+		panel.show('terminal');
+		await flush();
+		return { panel, term: (globalThis as unknown as { __xterms: FakeTerm[] }).__xterms.at(-1)! };
+	};
+	const rightClick = (element: Element): void =>
+		element.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+	const menuItem = (label: string): HTMLElement | undefined =>
+		Array.from(document.querySelectorAll<HTMLElement>('.context-menu .item')).find((item) => item.querySelector('.label')?.textContent === label);
+
+	it('opens the menu by default: Copy takes the selection, Paste the clipboard, Select All and Clear the viewport', async () => {
+		const { panel, term } = await setup();
+		backend.clipboardText = 'clip text';
+		// Copy stays disabled until there is a selection to take.
+		rightClick(document.querySelector('.terminal-instance')!);
+		expect(menuLabels()).toEqual(['Copy', 'Paste', 'Select All', 'Clear']);
+		expect(menuItem('Copy')!.classList.contains('disabled')).toBe(true);
+		term.selection = 'sel text';
+		rightClick(document.querySelector('.terminal-instance')!);
+		menuItem('Copy')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush();
+		expect(backend.clipboard).toEqual(['sel text']);
+		rightClick(document.querySelector('.terminal-instance')!);
+		menuItem('Paste')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush();
+		expect(term.pasted).toEqual(['clip text']);
+		rightClick(document.querySelector('.terminal-instance')!);
+		menuItem('Select All')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		expect(term.selectAllCalled).toBe(1);
+		rightClick(document.querySelector('.terminal-instance')!);
+		menuItem('Clear')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		expect(term.cleared).toBe(1);
+		await panel.terminal.killActive();
+	});
+
+	it('follows the Terminal Right-Click setting: smart copy/paste, paste, nothing', async () => {
+		const surface = (): Element => document.querySelector('.terminal-instance')!;
+		settings.terminalRightClickBehavior = 'copyPaste';
+		const { panel, term } = await setup();
+		backend.clipboardText = 'clip text';
+		// With a selection the click copies it (and drops the selection); with none it pastes.
+		term.selection = 'marked';
+		rightClick(surface());
+		await flush();
+		expect(backend.clipboard).toEqual(['marked']);
+		expect(term.selection).toBe('');
+		rightClick(surface());
+		await flush();
+		expect(term.pasted).toEqual(['clip text']);
+		expect(menuLabels()).toEqual([]);
+		settings.terminalRightClickBehavior = 'paste';
+		backend.clipboardText = 'again';
+		rightClick(surface());
+		await flush();
+		expect(term.pasted).toEqual(['clip text', 'again']);
+		settings.terminalRightClickBehavior = 'nothing';
+		rightClick(surface());
+		await flush();
+		expect(menuLabels()).toEqual([]);
+		expect(term.pasted).toEqual(['clip text', 'again']);
+		settings.terminalRightClickBehavior = 'menu';
+		await panel.terminal.killActive();
+	});
+
+	it('offers New / Kill on the session rows, activating the row first', async () => {
+		const { panel } = await setup();
+		await panel.terminal.newTerminal();
+		await flush();
+		expect(texts('.terminal-tabs .row .label')).toEqual(['powershell', 'powershell']);
+		const rows = document.querySelectorAll('.terminal-tabs .row');
+		rightClick(rows[1]!);
+		// Right-clicking the second row activated it before the menu opened (and the
+		// activation re-rendered the list, so the row is queried fresh).
+		const refreshed = document.querySelectorAll('.terminal-tabs .row');
+		expect(refreshed[1]!.classList.contains('active')).toBe(true);
+		expect(menuLabels()).toEqual(['New Terminal', 'Kill Terminal']);
+		menuItem('Kill Terminal')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush();
+		expect(panel.terminal.sessionCount()).toBe(1);
 	});
 });
 

@@ -43,6 +43,12 @@ vi.mock('@xterm/xterm', () => ({
 		hasSelection(): boolean { return this.selection !== ''; }
 		getSelection(): string { return this.selection; }
 		paste(text: string): void { this.pasted.push(text); }
+		/** The right-click menu's viewport actions: what Select All / Clear touched. */
+		selectAllCalled = 0;
+		cleared = 0;
+		clearSelection(): void { this.selection = ''; }
+		selectAll(): void { this.selectAllCalled++; }
+		clear(): void { this.cleared++; }
 		/** Test hook: type into the terminal as the user would. */
 		type(data: string): void { for (const h of this.dataHandlers) h(data); }
 		pressKey(): void { for (const h of this.keyHandlers) h(); }
