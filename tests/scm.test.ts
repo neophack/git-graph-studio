@@ -152,6 +152,85 @@ describe('source control view', () => {
 		expect(opened).toEqual([`${REPO}\\new.txt`]);
 	});
 
+	it('multi-selects rows with Ctrl and Shift, and the row actions act on the whole selection', async () => {
+		const { view } = setup();
+		const diffs: string[] = [];
+		view.onOpenDiff = (d) => diffs.push(d.id);
+		view.setRepo(REPO);
+		await view.refresh();
+		const row = (label: string) => Array.from(document.querySelectorAll<HTMLElement>('.scm-group .row'))
+			.find((r) => r.querySelector('.label')!.textContent === label)!;
+		const selected = () => Array.from(document.querySelectorAll<HTMLElement>('.scm-group .row.selected'))
+			.map((r) => r.querySelector('.label')!.textContent);
+
+		// Ctrl toggles rows into the selection; picking files opens nothing.
+		click(row('main.ts'), { ctrlKey: true });
+		click(row('README.md'), { ctrlKey: true });
+		expect(selected()).toEqual(['main.ts', 'README.md']);
+		expect(diffs).toEqual([]);
+
+		// Ctrl again takes a row back out.
+		click(row('main.ts'), { ctrlKey: true });
+		expect(selected()).toEqual(['README.md']);
+
+		// Shift spans the flattened rows from the anchor (main.ts, just re-added) to the
+		// click, across the group boundary.
+		click(row('main.ts'), { ctrlKey: true });
+		click(row('README.md'), { shiftKey: true });
+		expect(selected()).toEqual(['main.ts', 'gone.txt', 'new.txt', 'README.md']);
+		expect(diffs).toEqual([]);
+
+		// The inline Stage of a selected row carries every picked unstaged path (the staged
+		// pick keeps its own Unstage action).
+		click(row('new.txt').querySelector('[title="Stage Changes"]')!);
+		await flush();
+		expect(backend.callsTo('git_stage')).toEqual([{ paths: ['gone.txt', 'new.txt', 'README.md'] }]);
+
+		// The context menu of a selected row speaks for the selection too: one confirmation
+		// naming the count, one backend write with the paths split tracked / untracked.
+		rightClick(row('gone.txt'));
+		click(menuItem('Discard Changes'));
+		await flush();
+		expect(notifications().at(-1)).toContain('discard changes in 3 files');
+		click(notificationButton('Discard Changes'));
+		await flush();
+		expect(backend.callsTo('git_discard_all')).toEqual([{ restore: ['gone.txt', 'README.md'], clean: ['new.txt'] }]);
+
+		// A plain click collapses the selection back to one row and opens it.
+		click(row('main.ts'));
+		expect(selected()).toEqual(['main.ts']);
+		expect(diffs).toHaveLength(1);
+	});
+
+	it('keeps the selection across a refresh that moves a file between groups', async () => {
+		const { view, setChanges } = setup();
+		view.setRepo(REPO);
+		await view.refresh();
+		const row = (label: string) => Array.from(document.querySelectorAll<HTMLElement>('.scm-group .row'))
+			.find((r) => r.querySelector('.label')!.textContent === label)!;
+		const selected = () => Array.from(document.querySelectorAll<HTMLElement>('.scm-group .row.selected'))
+			.map((r) => r.querySelector('.label')!.textContent);
+
+		// Two picks: one per group.
+		click(row('main.ts'), { ctrlKey: true });
+		click(row('README.md'), { ctrlKey: true });
+
+		// The stage lands: README moves from Changes to Staged Changes, the other two
+		// changes are gone.
+		setChanges([
+			change('src/main.ts', { staged: 'modified' }),
+			change('README.md', { staged: 'modified' })
+		]);
+		await view.refresh();
+
+		// README followed its group move; both staged rows stay picked — so the Unstage of
+		// either carries both paths.
+		expect(selected()).toEqual(['README.md', 'main.ts']);
+		click(row('main.ts').querySelector('[title="Unstage Changes"]')!);
+		await flush();
+		expect(backend.callsTo('git_unstage')).toEqual([{ paths: ['README.md', 'src/main.ts'] }]);
+	});
+
 	it('stages, unstages and discards through the inline actions and asks before discarding', async () => {
 		const { view } = setup();
 		let changed = 0;

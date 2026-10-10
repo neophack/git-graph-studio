@@ -219,7 +219,12 @@ export class SourceControlView {
 	private message = '';
 	private collapsed: Record<ScmGroup, boolean> = { merge: false, staged: false, changes: false };
 	private readonly collapsedFolders = new Set<string>();
-	private selected: string | null = null;
+	/** The selected change rows, `group + ':' + posix path` — VS Code's SCM multi-select:
+	 *  Ctrl toggles a row, Shift takes the range from `anchor`, and the inline actions and
+	 *  the context menu of a selected row act on every pick. */
+	private selection = new Set<string>();
+	/** The row a Shift-click ranges from — the last plainly or Ctrl-clicked row. */
+	private anchor: string | null = null;
 	private error: string | null = null;
 	/** Bumped by setRepo: a refresh that started before a folder switch is dropped on return. */
 	private generation = 0;
@@ -281,7 +286,8 @@ export class SourceControlView {
 		this.upstream = null;
 		this.shortHash = '';
 		this.message = '';
-		this.selected = null;
+		this.selection.clear();
+		this.anchor = null;
 		this.collapsedFolders.clear();
 		this.submodules = [];
 		this.subRepos = [];
@@ -321,6 +327,7 @@ export class SourceControlView {
 			this.changes = [];
 			this.error = String(error);
 		}
+		this.trackSelection(changes);
 		// The branch's own state rides along: the commit button's clean-tree roles (Push, Sync
 		// Changes, Publish Branch) read it. A backend build or scripted test without repo_head
 		// keeps the previous values; the workbench no longer needs its own follow-up fetch.
@@ -381,6 +388,62 @@ export class SourceControlView {
 		} catch {
 			return this.error === null;
 		}
+	}
+
+	/** A refresh keeps the selection on the files it still sees: a key whose path moved to
+	 *  exactly one other group (staging moves a row from Changes to Staged Changes) follows
+	 *  it there; a path gone, or one now split across groups (half-staged), drops out —
+	 *  VS Code's own selection survives the same move by tracking the resource. */
+	private trackSelection(changes: ScmChange[]): void {
+		if (this.selection.size === 0 && this.anchor === null) return;
+		const valid = new Set<string>();
+		const groupsOf = new Map<string, ScmGroup[]>();
+		for (const file of changes) {
+			const path = toPosix(file.path);
+			const groups: ScmGroup[] = [];
+			if (file.conflicted) groups.push('merge');
+			if (file.staged !== null) groups.push('staged');
+			if (!file.conflicted && (file.unstaged !== null || file.untracked)) groups.push('changes');
+			groupsOf.set(path, groups);
+			for (const key of groups) valid.add(key + ':' + path);
+		}
+		const remap = (id: string | null): string | null => {
+			if (id === null || valid.has(id)) return id;
+			const groups = groupsOf.get(id.slice(id.indexOf(':') + 1)) ?? [];
+			return groups.length === 1 ? groups[0] + ':' + id.slice(id.indexOf(':') + 1) : null;
+		};
+		this.selection = new Set([...this.selection].map(remap).filter((id): id is string => id !== null));
+		this.anchor = remap(this.anchor);
+	}
+
+	/** Re-apply the selection classes over the drawn window — the rows carry their keys
+	 *  (`dataset.scmKey`), so a Ctrl or Shift click repaints without rebuilding the pane. */
+	private repaintSelection(): void {
+		if (!this.listInner) return;
+		for (const element of this.listInner.querySelectorAll<HTMLElement>('.row')) {
+			const id = element.dataset.scmKey ?? '';
+			element.classList.toggle('selected', this.selection.has(id));
+			element.classList.toggle('focused', id === this.anchor);
+		}
+	}
+
+	/** The rows an action on `file`'s row touches: the whole selection — scoped to the
+	 *  groups the action applies to, in flattened display order — when the row belongs to
+	 *  a multi-selection, the row's own file otherwise. Each target carries its own group,
+	 *  the side a diff or a letter reads. */
+	private targetRows(key: ScmGroup, file: ScmChange, groups: ScmGroup[]): { file: ScmChange; key: ScmGroup }[] {
+		if (!this.selection.has(key + ':' + toPosix(file.path)) || this.selection.size <= 1) return [{ file, key }];
+		const targets: { file: ScmChange; key: ScmGroup }[] = [];
+		for (const row of this.rows) {
+			if (row.kind !== 'file' || !groups.includes(row.key)) continue;
+			if (this.selection.has(row.key + ':' + toPosix(row.file.path))) targets.push({ file: row.file, key: row.key });
+		}
+		return targets;
+	}
+
+	/** `targetRows`, files only — the path lists a stage / unstage / discard sends. */
+	private targetsFor(key: ScmGroup, file: ScmChange, groups: ScmGroup[]): ScmChange[] {
+		return this.targetRows(key, file, groups).map((target) => target.file);
 	}
 
 	/** Re-read the submodule roots (a `git submodule update` may have initialised or removed
@@ -808,56 +871,97 @@ export class SourceControlView {
 		]);
 		if (inTree) row.style.paddingLeft = `${8 + depth * 8}px`;
 		row.title = `${posix} • ${LETTER_TITLE[letter] ?? letter}`;
-		if (this.selected === key + ':' + posix) row.classList.add('selected', 'focused');
+		const id = key + ':' + posix;
+		row.dataset.scmKey = id;
+		if (this.selection.has(id)) row.classList.add('selected');
+		if (this.anchor === id) row.classList.add('focused');
 		const actions = el('div', 'actions', [
 			actionButton('go-to-file', 'Open File', () => this.onOpenFile?.(this.absolute(file.path)))
 		]);
 		if (key === 'merge') {
-			actions.appendChild(actionButton('add', 'Stage Changes (Mark Resolved)', () => void this.run('git_stage', { paths: [file.path] })));
+			actions.appendChild(actionButton('add', 'Stage Changes (Mark Resolved)', () => void this.run('git_stage', { paths: this.targetsFor(key, file, ['merge', 'changes']).map((f) => f.path) })));
 		} else if (key === 'changes') {
-			actions.appendChild(actionButton('discard', 'Discard Changes', () => void this.discard(file)));
-			actions.appendChild(actionButton('add', 'Stage Changes', () => void this.run('git_stage', { paths: [file.path] })));
+			actions.appendChild(actionButton('discard', 'Discard Changes', () => void this.discardFiles(this.targetsFor(key, file, ['changes']))));
+			actions.appendChild(actionButton('add', 'Stage Changes', () => void this.run('git_stage', { paths: this.targetsFor(key, file, ['merge', 'changes']).map((f) => f.path) })));
 		} else {
-			actions.appendChild(actionButton('remove', 'Unstage Changes', () => void this.run('git_unstage', { paths: [file.path] })));
+			actions.appendChild(actionButton('remove', 'Unstage Changes', () => void this.run('git_unstage', { paths: this.targetsFor(key, file, ['staged']).map((f) => f.path) })));
 		}
 		row.appendChild(actions);
 		const decoration = el('span', 'decoration', [letter]);
 		decoration.title = LETTER_TITLE[letter] ?? letter;
 		row.appendChild(decoration);
-		row.addEventListener('click', () => {
-			this.selected = key + ':' + posix;
-			for (const other of this.content.querySelectorAll('.row')) other.classList.remove('selected', 'focused');
-			row.classList.add('selected', 'focused');
+		row.addEventListener('click', (event) => {
+			if (event.ctrlKey || event.metaKey) {
+				// Ctrl toggles one row into or out of the selection; nothing opens — the
+				// gesture picks files, it does not read them.
+				if (this.selection.has(id)) this.selection.delete(id);
+				else this.selection.add(id);
+				this.anchor = id;
+				this.repaintSelection();
+				return;
+			}
+			if (event.shiftKey && this.anchor !== null) {
+				// The range spans the flattened file rows between the anchor and this row
+				// (groups and collapsed folders in between are geometry, not boundaries).
+				const ids = this.rows.filter((r) => r.kind === 'file').map((r) => r.key + ':' + toPosix(r.file.path));
+				const from = ids.indexOf(this.anchor);
+				const to = ids.indexOf(id);
+				if (from >= 0 && to >= 0) {
+					this.selection.clear();
+					for (const between of ids.slice(Math.min(from, to), Math.max(from, to) + 1)) this.selection.add(between);
+					this.repaintSelection();
+					return;
+				}
+			}
+			this.selection.clear();
+			this.selection.add(id);
+			this.anchor = id;
+			this.repaintSelection();
 			this.openChange(file, key, letter);
 		});
 		row.addEventListener('contextmenu', (event) => {
 			event.preventDefault();
+			// A right-click on an unselected row makes it the selection (VS Code's own rule);
+			// on a selected one the menu below speaks for the whole selection.
+			if (!this.selection.has(id)) {
+				this.selection.clear();
+				this.selection.add(id);
+				this.anchor = id;
+				this.repaintSelection();
+			}
+			const open = (): void => {
+				for (const f of this.targetsFor(key, file, ['merge', 'staged', 'changes'])) this.onOpenFile?.(this.absolute(f.path));
+			};
 			const entries = key === 'merge'
 				? [
-					{ label: 'Open in Merge Editor', run: () => this.onOpenFile?.(this.absolute(file.path)) },
+					{ label: 'Open in Merge Editor', run: open },
 					'separator' as const,
-					{ label: 'Stage Changes (Mark Resolved)', run: () => void this.run('git_stage', { paths: [file.path] }) }
+					{ label: 'Stage Changes (Mark Resolved)', run: () => void this.run('git_stage', { paths: this.targetsFor(key, file, ['merge', 'changes']).map((f) => f.path) }) }
 				]
 				: key === 'changes'
 				? [
-					{ label: 'Open File', run: () => this.onOpenFile?.(this.absolute(file.path)) },
-					{ label: 'Open Changes', run: () => this.openChange(file, key, letter) },
+					{ label: 'Open File', run: open },
+					{ label: 'Open Changes', run: () => { for (const target of this.targetRows(key, file, ['staged', 'merge', 'changes'])) this.openChange(target.file, target.key, letterOf(target.file, target.key)); } },
 					'separator' as const,
-					{ label: 'Stage Changes', run: () => void this.run('git_stage', { paths: [file.path] }) },
-					{ label: 'Discard Changes', run: () => void this.discard(file) }
+					{ label: 'Stage Changes', run: () => void this.run('git_stage', { paths: this.targetsFor(key, file, ['merge', 'changes']).map((f) => f.path) }) },
+					{ label: 'Discard Changes', run: () => void this.discardFiles(this.targetsFor(key, file, ['changes'])) }
 				]
 				: [
-					{ label: 'Open File', run: () => this.onOpenFile?.(this.absolute(file.path)) },
-					{ label: 'Open Changes', run: () => this.openChange(file, key, letter) },
+					{ label: 'Open File', run: open },
+					{ label: 'Open Changes', run: () => { for (const target of this.targetRows(key, file, ['staged'])) this.openChange(target.file, target.key, letterOf(target.file, target.key)); } },
 					'separator' as const,
-					{ label: 'Unstage Changes', run: () => void this.run('git_unstage', { paths: [file.path] }) }
+					{ label: 'Unstage Changes', run: () => void this.run('git_unstage', { paths: this.targetsFor(key, file, ['staged']).map((f) => f.path) }) }
 				];
 			// Every scm/resourceState/context contribution an installed extension's manifest
 			// declares: the right-clicked resource rides along as VS Code's own menu argument —
 			// a SourceControlResourceState, whose `resourceUri` is what a "filter by this
-			// file" command reads.
+			// file" command reads. With a multi-selection every picked resource rides along,
+			// one argument per file.
 			for (const entry of resolvedMenuEntries('scm/resourceState/context')) {
-				entries.push('separator', { label: entry.label, run: () => this.onExtensionCommand?.(entry.command, [{ resourceUri: contextUri(this.absolute(file.path)) }]) });
+				entries.push('separator', {
+					label: entry.label,
+					run: () => this.onExtensionCommand?.(entry.command, this.targetsFor(key, file, ['merge', 'staged', 'changes']).map((f) => ({ resourceUri: contextUri(this.absolute(f.path)) })))
+				});
 			}
 			showContextMenu(event.clientX, event.clientY, entries);
 		});
@@ -983,6 +1087,25 @@ export class SourceControlView {
 		);
 		if (!confirmed) return;
 		await this.run('git_discard', { path: file.path, untracked: file.untracked });
+	}
+
+	/** The multi-row Discard: one confirmation naming the count, then the one backend write
+	 *  `git_discard_all` already takes as explicit path lists (the merge-safe form). */
+	private async discardFiles(files: ScmChange[]): Promise<void> {
+		if (files.length === 0) return;
+		if (files.length === 1) return this.discard(files[0]!);
+		const untracked = files.filter((f) => f.untracked);
+		const confirmed = await confirmDialog(
+			untracked.length > 0
+				? `Are you sure you want to discard changes in ${files.length} files? ${untracked.length} untracked file(s) will be DELETED!\nThis is IRREVERSIBLE!\nYour current working set will be FOREVER LOST if you proceed.`
+				: `Are you sure you want to discard changes in ${files.length} files?\nThis is IRREVERSIBLE!\nYour current working set will be FOREVER LOST if you proceed.`,
+			'Discard Changes'
+		);
+		if (!confirmed) return;
+		await this.run('git_discard_all', {
+			restore: files.filter((f) => !f.untracked).map((f) => f.path),
+			clean: untracked.map((f) => f.path)
+		});
 	}
 
 	private async discardAll(): Promise<void> {
