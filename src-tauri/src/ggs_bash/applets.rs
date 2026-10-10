@@ -3043,7 +3043,19 @@ fn cygpath(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
         return Ok(1);
     }
     for path in &paths {
-        let native = shell.resolve_working_path(&super::msys::from_msys(path));
+        // Absolute in its own dialect translates as text — `/c/...` becomes `C:/...`
+        // whose absolute-ness a POSIX `Path` cannot see; only a relative operand
+        // anchors to the shell's cwd.
+        let absolute = path.starts_with('/')
+            || (path.len() > 1
+                && path.as_bytes()[1] == b':'
+                && path.as_bytes()[0].is_ascii_alphabetic());
+        let native = super::msys::from_msys(path);
+        let native = if absolute {
+            std::path::PathBuf::from(native)
+        } else {
+            shell.resolve_working_path(&native)
+        };
         let answer = if to_windows {
             // -w speaks with backslashes (Git Bash's own output shape).
             native.display().to_string().replace('/', "\\")

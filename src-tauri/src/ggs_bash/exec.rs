@@ -1800,6 +1800,7 @@ fn describe(body: &super::ast::AndOr) -> String {
 mod tests {
     use super::split_path_list;
 
+    #[cfg(windows)]
     #[test]
     fn native_windows_path_lists_keep_their_drive_colons() {
         let dirs = split_path_list(r"C:\Program Files\Git\cmd;C:\Windows\system32;D:\tools");
