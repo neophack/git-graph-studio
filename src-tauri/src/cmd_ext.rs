@@ -2456,13 +2456,22 @@ fn serve_ext_asset_from(
 }
 
 fn ext_not_found(requested: &str) -> tauri::http::Response<Vec<u8>> {
+    let body = format!("no such extension asset: {requested}").into_bytes();
     tauri::http::Response::builder()
         .status(tauri::http::StatusCode::NOT_FOUND)
         .header(
             tauri::http::header::CONTENT_TYPE,
             "text/plain; charset=utf-8",
         )
-        .body(format!("no such extension asset: {requested}").into_bytes())
+        .header(tauri::http::header::CONTENT_LENGTH, body.len())
+        // The 404 must carry the same allow-origin as a served file: the host's page-bundle
+        // prewarm fetches `webview/index.js` of every activation cross-origin, a package
+        // without one answers here, and a 404 without the header is unreadable cross-origin -
+        // the fetch dies as a CORS violation instead of resolving, one console error per
+        // installed package that ships no page bundle (the prewarm's own contract is that a
+        // 404 is the silent "this package ships none" case).
+        .header(tauri::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(body)
         .expect("a response with a valid header value")
 }
 
@@ -3575,6 +3584,19 @@ mod ext_asset_tests {
                 .status(),
             tauri::http::StatusCode::NOT_FOUND
         );
+    }
+
+    #[test]
+    fn a_404_is_readable_cross_origin_like_a_served_file() {
+        // The host's page-bundle prewarm fetches `webview/index.js` of every activation
+        // (extHost.ts); a package that ships none answers 404, and without the allow-origin
+        // header the browser blocks the response as a CORS violation - a console error per
+        // such package instead of the prewarm's silent skip.
+        let tmp = home_with_demo_page();
+        let response =
+            serve_ext_asset_from(tmp.path(), &request_for("/acme.demo-1.0.0/webview/index.js"));
+        assert_eq!(response.status(), tauri::http::StatusCode::NOT_FOUND);
+        assert_eq!(response.headers().get("access-control-allow-origin").unwrap(), "*");
     }
 
     /// A scratch home whose one package (`acme.demo` 2.0.0) carries a manifest, so the
