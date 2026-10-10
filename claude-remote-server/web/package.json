@@ -1,0 +1,5 @@
+{
+  "comment": "the phone page is plain CommonJS-style browser script; this marker keeps Node (the crypto vectors test) loading it as such, not as the repo-root ESM scope",
+  "type": "commonjs",
+  "private": true
+}

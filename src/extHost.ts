@@ -26,7 +26,7 @@ import { locale, registerZhCnText, t, tf } from './i18n';
 import * as state from './state';
 import { notify, progressToast, quickInput, type ProgressToast } from './ui';
 import type { SerializedTreeItem } from './treeView';
-import { answerChatQuestion, chatBusy, chatControls, interruptChat, pickChatModel, pressSend, setChatInput, type ChatAnswer } from './claudeChatInject';
+import { answerChatPermission, answerChatQuestion, chatBusy, chatControls, interruptChat, pickChatModel, pressSend, setChatInput, setChatPermissionMode, type ChatAnswer } from './claudeChatInject';
 
 export interface ExtInfo {
 	id: string;
@@ -2024,15 +2024,15 @@ export class ExtensionHost {
 	}
 
 	/** A ticket's progress (or a session's tab), with whether its chat shows a turn in flight. */
-	private claudeChatState(raw: unknown): { phase: string; error: string | null; sessionId: string | null; open: boolean; busy: boolean | null } {
+	private claudeChatState(raw: unknown): { phase: string; error: string | null; sessionId: string | null; open: boolean; busy: boolean | null; rc: ClaudeRcState | null } {
 		const request = (raw ?? {}) as { ticket?: unknown; sessionId?: unknown };
 		const ticket = typeof request.ticket === 'string' ? this.claudeChatTickets.get(request.ticket) ?? null : null;
-		if (typeof request.ticket === 'string' && !ticket) return { phase: 'error', error: 'unknown ticket', sessionId: null, open: false, busy: null };
+		if (typeof request.ticket === 'string' && !ticket) return { phase: 'error', error: 'unknown ticket', sessionId: null, open: false, busy: null, rc: null };
 		const view = ticket?.panelKey ? this.webviews.get(ticket.panelKey) ?? null : typeof request.sessionId === 'string' ? this.panelForSession(request.sessionId) : null;
 		const sessionId = (view ? this.webviewSessions.get(this.webviewKey(view.extId, view.panelId)) : undefined) ?? ticket?.sessionId ?? null;
 		if (ticket && sessionId) ticket.sessionId = sessionId;
 		const controls = chatControls(view?.frame?.contentDocument);
-		return { phase: ticket?.phase ?? (view ? 'sent' : 'none'), error: ticket?.error ?? null, sessionId, open: !!view, busy: controls ? chatBusy(controls) : null };
+		return { phase: ticket?.phase ?? (view ? 'sent' : 'none'), error: ticket?.error ?? null, sessionId, open: !!view, busy: controls ? chatBusy(controls) : null, rc: ticket?.rc ?? null };
 	}
 
 	/** Interrupt the turn the session's (or ticket's) chat is running. */
@@ -2095,6 +2095,275 @@ export class ExtensionHost {
 		if (!answered) throw new Error('the question card did not take the answer');
 		ticket.phase = 'sent';
 		ticket.sentAt = Date.now();
+	}
+
+	/** Toggle the conversation's Remote Control through the page's own request channel:
+	 *  the host synthesizes exactly the request the page's capsule sends, the extension's
+	 *  answer is intercepted before it reaches the page (the page never made the request,
+	 *  so consuming the answer keeps its state machine clean), and the state it reports
+	 *  back becomes the ticket's `rc`. Ticketed like a send — a process caller parks. */
+	private claudeChatRemoteControl(raw: unknown): { ticket: string } {
+		const request = (raw ?? {}) as { sessionId?: unknown; enable?: unknown };
+		const sessionId = typeof request.sessionId === 'string' && request.sessionId ? request.sessionId : null;
+		if (!sessionId) throw new Error('remote control belongs to a conversation');
+		if (!this.claudeExtId()) throw new Error('the Claude Code extension is not installed');
+		const now = Date.now();
+		for (const [id, old] of this.claudeChatTickets) if (now - old.at > 10 * 60_000) this.claudeChatTickets.delete(id);
+		const ticket: ClaudeChatTicket = { id: `cc${++this.claudeChatSerial}`, at: now, phase: 'requesting', error: null, panelKey: null, sessionId, rc: null };
+		this.claudeChatTickets.set(ticket.id, ticket);
+		void this.claudeChatRemoteControlRun(ticket, request.enable !== false).catch((error) => {
+			ticket.phase = 'error';
+			ticket.error = error instanceof Error ? error.message : String(error);
+			extLog('warn', 'host', `claude chat ${ticket.id}: ${ticket.error}`);
+		});
+		return { ticket: ticket.id };
+	}
+
+	private async claudeChatRemoteControlRun(ticket: ClaudeChatTicket, enable: boolean): Promise<void> {
+		let view = this.panelForSession(ticket.sessionId!);
+		if (!view) {
+			await this.executeCommand(CLAUDE_OPEN_COMMAND, [ticket.sessionId ?? undefined, undefined, undefined, undefined, undefined, { programmatic: 'pin-to-panel' }]);
+			view = await this.pollFor(() => this.panelForSession(ticket.sessionId!), 20_000);
+			if (!view) throw new Error('the Claude Code tab did not open');
+		}
+		this.onRevealWebviewTab?.(this.webviewTabId(view.extId, view.panelId));
+		const panelKey = this.webviewKey(view.extId, view.panelId);
+		ticket.panelKey = panelKey;
+		// The channel id is learned from the page's own traffic; a fresh conversation that
+		// has not shown a message yet takes a moment to speak one.
+		const channelId = await this.pollFor(() => this.webviewChannels.get(panelKey) ?? null, 10_000);
+		if (!channelId) throw new Error('the conversation tab has not reported its channel yet');
+		const claudeFrame = this.frames.get(this.claudeExtId()!) ?? null;
+		if (!claudeFrame?.send) throw new Error('the Claude Code extension has no live frame');
+		const answer = new Promise<unknown>((resolve, reject) => {
+			const timer = setTimeout(() => {
+				this.claudeRcWaiters.delete(panelKey);
+				reject(new Error('the chat page did not answer the remote-control request'));
+			}, 15_000);
+			this.claudeRcWaiters.set(panelKey, {
+				channelId,
+				resolve: (response) => {
+					clearTimeout(timer);
+					this.claudeRcWaiters.delete(panelKey);
+					resolve(response);
+				}
+			});
+		});
+		// Exactly the request the page's own capsule sends (plan §1.1) — the page's UI
+		// never learns the host asked, and the answer is consumed below.
+		claudeFrame.send({ type: '__studioExtEvent', event: 'webviewMessage', panelId: view.panelId, message: { type: 'request', channelId, request: { type: 'toggle_remote_control', enable } } });
+		const response = await answer;
+		const state = claudeRcStateOf(response) ?? this.claudeRcStates.get(panelKey) ?? null;
+		ticket.rc = state;
+		ticket.phase = 'sent';
+		ticket.sentAt = Date.now();
+	}
+
+	/** What the host knows about the conversation's Remote Control: the availability the
+	 *  page pushed (`channelRemoteControlAvailable`) and its latest state — the plugin
+	 *  reads the CLI's own verdict instead of guessing (plan §1.2). */
+	private claudeChatRemoteState(raw: unknown): { available: boolean | null; rc: ClaudeRcState | null; sessionId: string | null } {
+		const request = (raw ?? {}) as { sessionId?: unknown };
+		const sessionId = typeof request.sessionId === 'string' && request.sessionId ? request.sessionId : null;
+		const view = sessionId ? this.panelForSession(sessionId) : this.claudePanels()[0] ?? null;
+		if (!view) return { available: null, rc: null, sessionId };
+		const panelKey = this.webviewKey(view.extId, view.panelId);
+		const availableRaw = this.claudeRcAvailable.get(panelKey);
+		return { available: availableRaw === undefined ? null : availableRaw, rc: this.claudeRcStates.get(panelKey) ?? null, sessionId: this.webviewSessions.get(panelKey) ?? sessionId };
+	}
+
+	/** Answer the conversation's pending permission card from the phone: the decision's
+	 *  own button in the tab, the deny reason typed first when one is given. */
+	private claudeChatPermission(raw: unknown): { ticket: string } {
+		const request = (raw ?? {}) as { sessionId?: unknown; decision?: unknown; message?: unknown };
+		const sessionId = typeof request.sessionId === 'string' && request.sessionId ? request.sessionId : null;
+		if (!sessionId) throw new Error('a permission belongs to a conversation');
+		const decision = request.decision === 'allowAlways' ? 'allowAlways' : request.decision === 'allow' ? 'allow' : request.decision === 'deny' ? 'deny' : null;
+		if (!decision) throw new Error('the decision must be allow, allowAlways or deny');
+		const message = typeof request.message === 'string' ? request.message.slice(0, 500) : undefined;
+		if (!this.claudeExtId()) throw new Error('the Claude Code extension is not installed');
+		const now = Date.now();
+		for (const [id, old] of this.claudeChatTickets) if (now - old.at > 10 * 60_000) this.claudeChatTickets.delete(id);
+		const ticket: ClaudeChatTicket = { id: `cc${++this.claudeChatSerial}`, at: now, phase: 'opening', error: null, panelKey: null, sessionId };
+		this.claudeChatTickets.set(ticket.id, ticket);
+		void this.claudeChatCardRun(ticket, (doc) => answerChatPermission(doc, decision, message)).catch((error) => {
+			ticket.phase = 'error';
+			ticket.error = error instanceof Error ? error.message : String(error);
+			extLog('warn', 'host', `claude chat ${ticket.id}: ${ticket.error}`);
+		});
+		return { ticket: ticket.id };
+	}
+
+	/** Switch the conversation's permission mode through its own selector in the tab. */
+	private claudeChatMode(raw: unknown): { ticket: string } {
+		const request = (raw ?? {}) as { sessionId?: unknown; mode?: unknown };
+		const sessionId = typeof request.sessionId === 'string' && request.sessionId ? request.sessionId : null;
+		if (!sessionId) throw new Error('a permission mode belongs to a conversation');
+		const mode = typeof request.mode === 'string' && /^[\w -]{2,24}$/.test(request.mode.trim()) ? request.mode.trim() : '';
+		if (!mode) throw new Error('not a permission mode');
+		if (!this.claudeExtId()) throw new Error('the Claude Code extension is not installed');
+		const now = Date.now();
+		for (const [id, old] of this.claudeChatTickets) if (now - old.at > 10 * 60_000) this.claudeChatTickets.delete(id);
+		const ticket: ClaudeChatTicket = { id: `cc${++this.claudeChatSerial}`, at: now, phase: 'opening', error: null, panelKey: null, sessionId };
+		this.claudeChatTickets.set(ticket.id, ticket);
+		void this.claudeChatCardRun(ticket, (doc) => setChatPermissionMode(doc, mode)).catch((error) => {
+			ticket.phase = 'error';
+			ticket.error = error instanceof Error ? error.message : String(error);
+			extLog('warn', 'host', `claude chat ${ticket.id}: ${ticket.error}`);
+		});
+		return { ticket: ticket.id };
+	}
+
+	/** The shared tail of the card-driving tickets (permission, mode): open or reveal the
+	 *  conversation's tab, run the DOM driver against its page, settle the ticket. */
+	private async claudeChatCardRun(ticket: ClaudeChatTicket, drive: (doc: Document | null | undefined) => Promise<boolean>): Promise<void> {
+		let view = this.panelForSession(ticket.sessionId!);
+		if (view) {
+			this.onRevealWebviewTab?.(this.webviewTabId(view.extId, view.panelId));
+		} else {
+			await this.executeCommand(CLAUDE_OPEN_COMMAND, [ticket.sessionId ?? undefined, undefined, undefined, undefined, undefined, { programmatic: 'pin-to-panel' }]);
+			view = await this.pollFor(() => this.panelForSession(ticket.sessionId!), 20_000);
+			if (!view) throw new Error('the Claude Code tab did not open');
+		}
+		ticket.panelKey = this.webviewKey(view.extId, view.panelId);
+		ticket.phase = 'answering';
+		const done = await drive(view.frame?.contentDocument);
+		if (!done) throw new Error('the chat page did not take the action');
+		ticket.phase = 'sent';
+		ticket.sentAt = Date.now();
+	}
+
+	/* ---------- the conversation tap (plan §6): read-only, bounded, authorized ---------- */
+
+	private readonly claudeTaps = new Map<string, ClaudeTapSub>();
+	/** Grants remembered across sessions (the setting `claudeTapAccess: deny` overrides
+	 *  them all — the revocation path). */
+	private claudeTapGrants: Record<string, boolean> = state.load('ext.claudeTapGrants', {} as Record<string, boolean>);
+	/** panelKey → the conversation channel id the page's own traffic names. */
+	private readonly webviewChannels = new Map<string, string>();
+	/** panelKey → the latest remote-control state and availability the page pushed. */
+	private readonly claudeRcStates = new Map<string, ClaudeRcState>();
+	private readonly claudeRcAvailable = new Map<string, boolean>();
+	/** A pending synthesized remote-control request's answer waiter, by panel. */
+	private readonly claudeRcWaiters = new Map<string, { channelId: string; resolve: (response: unknown) => void }>();
+
+	/** `ggs.claudeTap.subscribe`: the caller begins receiving the Claude conversations'
+	 *  live traffic. One confirmation per extension (the setting denies everything when it
+	 *  is flipped to deny — the revocation). */
+	private async claudeTapSubscribe(caller?: FrameHandle): Promise<{ ok: boolean; reason?: string }> {
+		const extId = caller ? this.extIdForHandle(caller) : 'host';
+		if (appSettings.claudeTapAccess === 'deny') return { ok: false, reason: 'denied by the Claude-conversation access setting' };
+		if (!this.claudeTapGrants[extId]) {
+			const allow = t('extensions.claudeTap.allow');
+			const denyLabel = t('extensions.claudeTap.deny');
+			// The notification is fire-and-forget UI; its buttons (or its dismissal — a
+			// dismissal is a no) settle the one promise the subscription waits on.
+			const answer = await new Promise<'allow' | 'deny'>((resolve) => {
+				let settled = false;
+				const done = (value: 'allow' | 'deny') => {
+					if (!settled) {
+						settled = true;
+						resolve(value);
+					}
+				};
+				notify('warning', t('extensions.claudeTap.askTitle') + '\n' + tf('extensions.claudeTap.askBody', extId), [
+					{ label: allow, run: () => done('allow') },
+					{ label: denyLabel, run: () => done('deny') }
+				], () => done('deny'));
+			});
+			if (answer !== 'allow') return { ok: false, reason: 'the user declined' };
+			this.claudeTapGrants[extId] = true;
+			state.save('ext.claudeTapGrants', this.claudeTapGrants);
+			extLog('info', extId, 'granted access to the Claude conversations tap');
+		}
+		if (!this.claudeTaps.has(extId)) this.claudeTaps.set(extId, { extId, queue: [], dropped: false, flushing: false });
+		return { ok: true };
+	}
+
+	private claudeTapUnsubscribe(caller?: FrameHandle): { ok: boolean } {
+		const extId = caller ? this.extIdForHandle(caller) : 'host';
+		this.claudeTaps.delete(extId);
+		return { ok: true };
+	}
+
+	/** The tap's copy step — runs where the original message passes, synchronously, before
+	 *  its delivery; every failure is swallowed (a broken tap may never break the chat). */
+	private noteClaudeTap(extId: string, panelId: number, dir: 'in' | 'out', message: unknown): void {
+		try {
+			const panelKey = this.webviewKey(extId, panelId);
+			// Channel and remote-control learning happen whether or not anyone taps: the
+			// remote-control bridge needs them.
+			const channelId = (message as { channelId?: unknown } | null)?.channelId;
+			if (typeof channelId === 'string' && channelId) this.webviewChannels.set(panelKey, channelId);
+			const rcState = claudeRcStateOf(message);
+			if (rcState) this.claudeRcStates.set(panelKey, rcState);
+			const available = claudeRemoteControlScan(message, 'channelRemoteControlAvailable');
+			if (typeof available === 'boolean') this.claudeRcAvailable.set(panelKey, available);
+			const kind = claudeTapKind(message);
+			if (!kind || !this.claudeTaps.size) return;
+			const event = { dir, kind, panelId, sessionId: this.webviewSessions.get(panelKey) ?? null, message };
+			for (const sub of this.claudeTaps.values()) this.enqueueTapEvent(sub, event);
+		} catch {
+			/* never the original delivery's problem */ }
+	}
+
+	private enqueueTapEvent(sub: ClaudeTapSub, event: { dir: 'in' | 'out'; kind: string; panelId: number; sessionId: string | null; message: unknown }): void {
+		if (sub.queue.length >= TAP_QUEUE_MAX) {
+			// The plan's overflow rule: drop the mirror side, mark the gap; the original
+			// delivery is untouched and the plugin backfills from the session store. The
+			// marker rides the head of the next flushed batch — waiting for a later
+			// enqueue would lose it when nothing more arrives.
+			sub.dropped = true;
+			return;
+		}
+		sub.queue.push(event);
+		this.flushClaudeTap(sub);
+	}
+
+	/** Batched asynchronous flush: up to 32 events cross per push (a burst of stream
+	 *  deltas is one round trip), a failing subscriber unsubscribes itself. */
+	private flushClaudeTap(sub: ClaudeTapSub): void {
+		if (sub.flushing) return;
+		sub.flushing = true;
+		void (async () => {
+			for (;;) {
+				const batch = sub.queue.splice(0, TAP_BATCH);
+				if (!batch.length) break;
+				if (sub.dropped) {
+					sub.dropped = false;
+					const any = batch[0];
+					batch.unshift({ dir: any.dir, kind: 'gap', panelId: any.panelId, sessionId: any.sessionId, message: null });
+				}
+				const handle = this.frames.get(sub.extId) ?? this.remoteHandle(sub.extId);
+				if (!handle?.send) {
+					this.claudeTaps.delete(sub.extId);
+					break;
+				}
+				try {
+					await handle.send({ type: '__studioExtEvent', event: 'claudeTap', tap: batch });
+				} catch {
+					this.claudeTaps.delete(sub.extId);
+					extLog('warn', sub.extId, 'claude conversations tap: the subscriber went away');
+					break;
+				}
+			}
+			sub.flushing = false;
+			if (sub.queue.length && this.claudeTaps.get(sub.extId) === sub) this.flushClaudeTap(sub);
+		})();
+	}
+
+	/** Whether this posted message is the answer to a synthesized remote-control request:
+	 *  consumed here so the page (which never asked) never sees it. */
+	private consumeClaudeRcResponse(extId: string, panelId: number, message: unknown): boolean {
+		const panelKey = this.webviewKey(extId, panelId);
+		const waiter = this.claudeRcWaiters.get(panelKey);
+		if (!waiter) return false;
+		const envelope = message as { type?: unknown; channelId?: unknown } | null;
+		if (envelope?.type !== 'response') return false;
+		if (typeof envelope.channelId === 'string' && envelope.channelId && envelope.channelId !== waiter.channelId) return false;
+		this.claudeRcWaiters.delete(panelKey);
+		waiter.resolve(message);
+		return true;
 	}
 
 	/* ---------- Status bar items and output channels ---------- */
@@ -2718,6 +2987,12 @@ export class ExtensionHost {
 					extLog('warn', 'host', `webview ${extId}#${panelId}: postMessage with no panel record — dropped`);
 					return Promise.resolve(undefined);
 				}
+				// A synthesized remote-control request's answer is consumed before it
+				// reaches the page (the page never made that request).
+				if (this.consumeClaudeRcResponse(extId, panelId, message)) return Promise.resolve(undefined);
+				// The conversation tap copies synchronously before the delivery; its own
+				// failures can never touch the message it copies (plan §2.2).
+				this.noteClaudeTap(extId, panelId, 'out', message);
 				this.gateWebviewMessage(view, message, `${extId}#${panelId}`);
 				return Promise.resolve(undefined);
 			}
@@ -2845,6 +3120,14 @@ export class ExtensionHost {
 		if (id === 'ggs.claudeChat.state') return Promise.resolve(this.claudeChatState(args[0]));
 		if (id === 'ggs.claudeChat.stop') return Promise.resolve(this.claudeChatStop(args[0]));
 		if (id === 'ggs.claudeChat.answer') return Promise.resolve().then(() => this.claudeChatAnswer(args[0]));
+		// The remote-control bridge and the conversation tap (Claude Remote 2.0): the same
+		// answer-at-once rule — a process caller's thread parks inside this request.
+		if (id === 'ggs.claudeChat.remoteControl') return Promise.resolve().then(() => this.claudeChatRemoteControl(args[0]));
+		if (id === 'ggs.claudeChat.remoteState') return Promise.resolve(this.claudeChatRemoteState(args[0]));
+		if (id === 'ggs.claudeChat.permission') return Promise.resolve().then(() => this.claudeChatPermission(args[0]));
+		if (id === 'ggs.claudeChat.mode') return Promise.resolve().then(() => this.claudeChatMode(args[0]));
+		if (id === 'ggs.claudeTap.subscribe') return this.claudeTapSubscribe(caller);
+		if (id === 'ggs.claudeTap.unsubscribe') return Promise.resolve(this.claudeTapUnsubscribe(caller));
 		if (id === 'workbench.view.scm' || id === 'workbench.view.explorer' || id === 'workbench.view.search' || id === 'workbench.view.extensions') {
 			this.onShowView?.(id.slice('workbench.view.'.length));
 			return Promise.resolve(undefined);
@@ -3361,6 +3644,7 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 					const view = this.webviewFor(event.source);
 				if (view) {
 					this.noteWebviewSessionTraffic(view.extId, view.panelId, message.message);
+					this.noteClaudeTap(view.extId, view.panelId, 'in', message.message);
 					this.frames.get(view.extId)?.send?.({ type: '__studioExtEvent', event: 'webviewMessage', panelId: view.panelId, message: message.message });
 					return;
 				}
@@ -3479,12 +3763,80 @@ const CLAUDE_OPEN_COMMAND = 'claude-vscode.editor.open';
 interface ClaudeChatTicket {
 	id: string;
 	at: number;
-	phase: 'opening' | 'typing' | 'answering' | 'sent' | 'error';
+	phase: 'opening' | 'typing' | 'answering' | 'requesting' | 'sent' | 'error';
 	error: string | null;
 	panelKey: string | null;
 	sessionId: string | null;
 	sentAt?: number;
+	/** A remote-control toggle's captured answer: the state the chat page pushed back. */
+	rc?: ClaudeRcState | null;
 }
+
+/** The remote-control state of one conversation, as the chat page itself reports it. */
+interface ClaudeRcState {
+	status: string;
+	connectUrl: string | null;
+	sessionUrl: string | null;
+	bridgeEpoch: number | null;
+}
+
+/** Which kind of Claude-conversation traffic a relayed webview message is — the tap only
+ *  ever copies these shapes, and everything else a panel exchanges stays private to it. */
+export function claudeTapKind(message: unknown): 'sdk' | 'permission' | 'rc' | null {
+	const envelope = message as { type?: unknown; request?: { type?: unknown } | null } | null;
+	const type = typeof envelope?.type === 'string' ? envelope.type : typeof envelope?.request?.type === 'string' ? envelope.request.type : '';
+	if (type === 'io_message') return 'sdk';
+	if (type === 'tool_permission_request' || type === 'control_cancel_request' || type === 'permission_request') return 'permission';
+	if (type === 'interrupt_claude') return 'sdk';
+	if (claudeRemoteControlScan(message, 'channelRemoteControlState') !== undefined) return 'rc';
+	if (claudeRemoteControlScan(message, 'channelRemoteControlAvailable') !== undefined) return 'rc';
+	return null;
+}
+
+/** Read a remote-control field out of a message, wherever the page's protocol nests it
+ *  (`channelRemoteControlState`, `.state.channelRemoteControlState`,
+ *  `.request.state.…` are all shapes the versions have shipped). */
+function claudeRemoteControlScan(message: unknown, key: string, depth = 0): unknown {
+	if (!message || typeof message !== 'object' || depth > 3) return undefined;
+	const record = message as Record<string, unknown>;
+	if (key in record) return record[key];
+	for (const nested of ['state', 'request']) {
+		if (nested in record) {
+			const found = claudeRemoteControlScan(record[nested], key, depth + 1);
+			if (found !== undefined) return found;
+		}
+	}
+	return undefined;
+}
+
+function claudeRcStateOf(message: unknown): ClaudeRcState | null {
+	// The versions have shipped both spellings (`channelRemoteControlState` and the
+	// channel-state bundle's `remoteControlState`); either names the same payload.
+	const raw = claudeRemoteControlScan(message, 'channelRemoteControlState')
+		?? claudeRemoteControlScan(message, 'remoteControlState');
+	if (!raw || typeof raw !== 'object') return null;
+	const record = raw as Record<string, unknown>;
+	return {
+		status: typeof record.status === 'string' ? record.status : '',
+		connectUrl: typeof record.connectUrl === 'string' ? record.connectUrl : null,
+		sessionUrl: typeof record.sessionUrl === 'string' ? record.sessionUrl : null,
+		bridgeEpoch: typeof record.bridgeEpoch === 'number' ? record.bridgeEpoch : null
+	};
+}
+
+/** One subscriber of the Claude-conversation tap: its queue is bounded, its flush is
+ *  asynchronous, and nothing it does may delay or drop the original delivery. */
+interface ClaudeTapSub {
+	extId: string;
+	/** Bounded batches of tap events, flushed to the subscriber one `claudeTap` push at a
+	 *  time (up to 32 events per push, so a burst of stream deltas crosses as one). */
+	queue: { dir: 'in' | 'out'; kind: string; panelId: number; sessionId: string | null; message: unknown }[];
+	dropped: boolean;
+	flushing: boolean;
+}
+
+const TAP_QUEUE_MAX = 256;
+const TAP_BATCH = 32;
 
 /** VS Code dialog filters (`{ 'TypeScript': ['ts', 'tsx'] }`) onto the Tauri plugin's shape. */
 function dialogFilters(filters: Record<string, string[]> | undefined): { name: string; extensions: string[] }[] | undefined {

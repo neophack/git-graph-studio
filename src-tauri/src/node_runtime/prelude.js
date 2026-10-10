@@ -582,6 +582,38 @@ for (const name of ['dispose', 'asyncDispose']) {
 	// one whose tail would throw).
 	globalThis.crypto.getHashes = () => ['md5', 'sha1', 'sha256'];
 
+	// GGS-patch: createHmac and hkdfSync over the Rust natives (hmac crate), in Node's
+	// shapes — the only digest both serves is sha256, which is what the pairing and
+	// frame-key derivations of Claude Remote ask for; other algorithms throw honestly.
+	globalThis.crypto.createHmac = (algorithm, key) => {
+		if (String(algorithm).toLowerCase().replace(/-/g, '') !== 'sha256') {
+			throw new Error(`Unknown HMAC digest ${algorithm}`);
+		}
+		const keyBytes = asBytes(key);
+		const parts = [];
+		return {
+			update(data) {
+				parts.push(asBytes(data));
+				return this;
+			},
+			digest(encoding) {
+				const hex = __ggsHmacSha256Hex(keyBytes, partsToBytes(parts));
+				if (encoding === 'hex') return hex;
+				const bytes = new Uint8Array(hex.match(/../g).map((pair) => parseInt(pair, 16)));
+				const buf = new globalThis.__ggsBufferClass(bytes);
+				if (encoding === undefined || encoding === 'buffer') return buf;
+				if (encoding === 'base64' || encoding === 'base64url' || encoding === 'latin1' || encoding === 'binary') return buf.toString(encoding);
+				throw new Error(`Unknown digest encoding ${encoding}`);
+			}
+		};
+	};
+	globalThis.crypto.hkdfSync = (digest, ikm, salt, info, length) => {
+		if (String(digest).toLowerCase().replace(/-/g, '') !== 'sha256') {
+			throw new Error('Invalid digest');
+		}
+		return __ggsHkdfSha256(asBytes(ikm), asBytes(salt), asBytes(info), Number(length) || 0);
+	};
+
 	// GGS-patch: pbkdf2 + createCipheriv/createDecipheriv('aes-*-gcm') over the Rust
 	// natives (aes-gcm + pbkdf2 crates), in Node's own shapes: bytes cross as typed
 	// arrays (no base64 hop — a few hundred KB through the old string codec never

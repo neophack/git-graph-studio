@@ -3627,3 +3627,175 @@ describe('Node shims: fs options forms and working streams', () => {
 		expect(viaCallback.length).toBe(8);
 	});
 });
+
+
+describe('the Claude conversation tap and the remote-control bridge (Claude Remote 2.0)', () => {
+	/** A host with the claude extension's frame and one mounted chat panel, plus a
+	 *  subscriber extension pre-granted tap access (the grant read happens at
+	 *  construction, so it is seeded in storage first). */
+	async function tapHost() {
+		localStorage.setItem('ggstudio.ext.claudeTapGrants', JSON.stringify({ 'ggs.claude-remote': true }));
+		const host = new ExtensionHost();
+		const subscriberSent: unknown[] = [];
+		const subscriber = { frame: document.body.appendChild(document.createElement('iframe')), commandIds: new Set<string>(), pendingCalls: new Set<(error: Error) => void>(), send: (message: unknown) => { subscriberSent.push(message); } };
+		host['frames'].set('ggs.claude-remote', subscriber as never);
+		const claudeSent: unknown[] = [];
+		const claudeFrame = { frame: document.body.appendChild(document.createElement('iframe')), commandIds: new Set<string>(), pendingCalls: new Set<(error: Error) => void>(), send: (message: unknown) => { claudeSent.push(message); } };
+		host['frames'].set('anthropic.claude-code', claudeFrame as never);
+		// The claude extension is whoever registered the open command — what every
+		// claudeChat* bridge resolves it by. The registry is module-global across this
+		// suite, so any earlier registration of the same id moves to this host's frame.
+		await host['serve']('commands.unregister', ['claude-vscode.editor.open'], 'anthropic.claude-code', claudeFrame as never).catch(() => undefined);
+		await host['serve']('commands.register', ['claude-vscode.editor.open'], 'anthropic.claude-code', claudeFrame as never);
+		// One mounted chat panel: the record the relays resolve panels by, an iframe in
+		// the DOM whose window can speak as the page and whose document the drivers run on.
+		const panelFrame = document.body.appendChild(document.createElement('iframe'));
+		host['webviews'].set('anthropic.claude-code#1', {
+			extId: 'anthropic.claude-code', panelId: 1, title: 'Claude', frame: panelFrame,
+			pending: [], html: '', loaded: true, painted: true, loadGrace: 0, firstPaintTimer: null
+		} as never);
+		/** A message from the page (webview → extension), as the composed bootstrap sends it. */
+		const speakAsPage = (message: unknown) => {
+			window.dispatchEvent(new MessageEvent('message', { data: { __ggsWebview: true, kind: 'message', message }, source: panelFrame.contentWindow }));
+		};
+		/** Bind the panel to a conversation id (what `update_session_state` does). */
+		const bindSession = (sessionId: string) => {
+			speakAsPage({ request: { type: 'update_session_state', sessionId } });
+		};
+		return { host, subscriberSent, claudeSent, panelFrame, speakAsPage, bindSession, subscriberHandle: subscriber as never };
+	}
+
+	/** The tap pushes a subscriber received, flattened (the HostEvent's `tap` batch). */
+	function tapEvents(sent: unknown[]): { dir: string; kind: string; sessionId: string | null; message: unknown }[] {
+		return sent.flatMap((message) => {
+			const event = message as { type?: string; event?: string; tap?: unknown[] };
+			return event.type === '__studioExtEvent' && event.event === 'claudeTap' ? event.tap! as { dir: string; kind: string; sessionId: string | null; message: unknown }[] : [];
+		});
+	}
+
+	it('copies the conversation traffic to a granted subscriber in both directions, session-tagged, and ignores the rest', async () => {
+		const { host, subscriberSent, speakAsPage, bindSession, subscriberHandle } = await tapHost();
+		bindSession('s1');
+		expect(await host.executeCommand('ggs.claudeTap.subscribe', [], subscriberHandle)).toEqual({ ok: true });
+		// The CLI's stream (extension → page): tapped, channel learned, still delivered.
+		const delivered: unknown[] = [];
+		const gate = vi.spyOn(host as never as { gateWebviewMessage: (view: unknown, message: unknown, key: string) => void }, 'gateWebviewMessage').mockImplementation(((view: unknown, message: unknown) => { delivered.push(message); }) as never);
+		await host['serve']('webview.postMessage', [1, { type: 'io_message', channelId: 'ch1', message: { type: 'assistant', content: 'hi' }, done: true }], 'anthropic.claude-code', {} as never);
+		await host['serve']('webview.postMessage', [1, { type: 'unrelated_state', hello: 1 }], 'anthropic.claude-code', {} as never);
+		// The user's own typing (page → extension): tapped on the way in.
+		speakAsPage({ type: 'io_message', channelId: 'ch1', message: { type: 'user', content: 'there' } });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const events = tapEvents(subscriberSent);
+		expect(events.map((event) => [event.dir, event.kind, event.sessionId])).toEqual([['out', 'sdk', 's1'], ['in', 'sdk', 's1']]);
+		expect((events[0].message as { message?: unknown }).message).toEqual({ type: 'assistant', content: 'hi' });
+		expect(delivered).toEqual([{ type: 'io_message', channelId: 'ch1', message: { type: 'assistant', content: 'hi' }, done: true }, { type: 'unrelated_state', hello: 1 }]);
+		await expect(host.executeCommand('ggs.claudeChat.remoteState', [{ sessionId: 's1' }])).resolves.toMatchObject({ rc: null });
+		gate.mockRestore();
+		await host.executeCommand('ggs.claudeTap.unsubscribe', [], subscriberHandle);
+		await host['serve']('webview.postMessage', [1, { type: 'io_message', channelId: 'ch1', message: { type: 'assistant', content: 'more' }, done: true }], 'anthropic.claude-code', {} as never);
+		expect(tapEvents(subscriberSent)).toHaveLength(2);
+	});
+
+	it('the permission requests and the remote-control state pushes are tapped too, and remoteState answers them', async () => {
+		const { host, subscriberSent, subscriberHandle } = await tapHost();
+		window.dispatchEvent(new MessageEvent('message', { data: { __ggsWebview: true, kind: 'message', message: { request: { type: 'update_session_state', sessionId: 's1' } } }, source: (host['webviews'].get('anthropic.claude-code#1') as unknown as { frame: HTMLIFrameElement }).frame.contentWindow }));
+		await host.executeCommand('ggs.claudeTap.subscribe', [], subscriberHandle);
+		const gate = vi.spyOn(host as never as { gateWebviewMessage: (view: unknown, message: unknown, key: string) => void }, 'gateWebviewMessage').mockImplementation(() => undefined);
+		await host['serve']('webview.postMessage', [1, { type: 'tool_permission_request', toolName: 'Bash', inputs: { command: 'ls' } }], 'anthropic.claude-code', {} as never);
+		await host['serve']('webview.postMessage', [1, { type: 'state_sync', state: { channelRemoteControlState: { status: 'connected', connectUrl: 'https://claude.ai/x', sessionUrl: null, bridgeEpoch: 3 }, channelRemoteControlAvailable: true } }], 'anthropic.claude-code', {} as never);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const events = tapEvents(subscriberSent);
+		expect(events.map((event) => event.kind)).toEqual(['permission', 'rc']);
+		await expect(host.executeCommand('ggs.claudeChat.remoteState', [{ sessionId: 's1' }])).resolves.toMatchObject({ available: true, rc: { status: 'connected', connectUrl: 'https://claude.ai/x' } });
+		gate.mockRestore();
+	});
+
+	it('a synthesized remote-control request crosses as the page\'s own, and its answer is consumed before the page sees it', async () => {
+		const { host, claudeSent, speakAsPage, bindSession } = await tapHost();
+		bindSession('s1');
+		// The page has spoken once — the channel id is learned from it.
+		speakAsPage({ type: 'io_message', channelId: 'ch9', message: { type: 'assistant', content: 'hi' } });
+		const gate = vi.spyOn(host as never as { gateWebviewMessage: (view: unknown, message: unknown, key: string) => void }, 'gateWebviewMessage').mockImplementation(() => undefined);
+		const { ticket } = await host.executeCommand('ggs.claudeChat.remoteControl', [{ sessionId: 's1', enable: true }]) as { ticket: string };
+		// Exactly the request the page's capsule sends, injected as the page:
+		const injected = claudeSent.find((message) => (message as { message?: { request?: { type?: string } } }).message?.request?.type === 'toggle_remote_control') as { panelId?: number; message?: unknown } | undefined;
+		expect(injected).toMatchObject({ panelId: 1, message: { type: 'request', channelId: 'ch9', request: { type: 'toggle_remote_control', enable: true } } });
+		// The extension answers: consumed (the page never asked), the ticket carries the state.
+		gate.mockClear();
+		await host['serve']('webview.postMessage', [1, { type: 'response', channelId: 'ch9', request: { type: 'toggle_remote_control', state: { channelRemoteControlState: { status: 'connected', connectUrl: 'https://claude.ai/y', sessionUrl: 'https://claude.ai/s', bridgeEpoch: 1 } } } }], 'anthropic.claude-code', {} as never);
+		const state = await host.executeCommand('ggs.claudeChat.state', [{ ticket }]) as { phase: string; rc: { status: string; connectUrl: string } | null };
+		expect(state.phase).toBe('sent');
+		expect(state.rc).toMatchObject({ status: 'connected', connectUrl: 'https://claude.ai/y' });
+		// The consumed answer never reached the delivery gate.
+		expect(gate).not.toHaveBeenCalled();
+		// And an ordinary response for another channel is not consumed:
+		await host['serve']('webview.postMessage', [1, { type: 'response', channelId: 'other', hello: 1 }], 'anthropic.claude-code', {} as never);
+		expect(gate).toHaveBeenCalledTimes(1);
+		gate.mockRestore();
+	});
+
+	it('the permission and mode tickets drive the conversation\'s own page', async () => {
+		const { host, bindSession } = await tapHost();
+		bindSession('s1');
+		const settle = async (raw: unknown): Promise<{ phase: string; error: string | null }> => {
+			const { ticket } = await host.executeCommand('ggs.claudeChat.permission', [raw]) as { ticket: string };
+			for (let i = 0; i < 100; i++) {
+				const state = await host.executeCommand('ggs.claudeChat.state', [{ ticket }]) as { phase: string; error: string | null };
+				if (state.phase === 'sent' || state.phase === 'error') return state;
+				await new Promise((resolve) => setTimeout(resolve, 20));
+			}
+			return { phase: 'timeout', error: null };
+		};
+		// The card lives in the panel's own document; a click on its button settles the ticket.
+		const card = document.createElement('div');
+		card.innerHTML = '<button type="button">Allow</button> <button type="button">Always allow</button> <button type="button">Deny</button>';
+		const frameDocument = (host['webviews'].get('anthropic.claude-code#1') as unknown as { frame: HTMLIFrameElement }).frame.contentDocument!;
+		frameDocument.body.appendChild(card);
+		for (const button of [...card.querySelectorAll('button')]) {
+			button.addEventListener('click', () => {
+				card.remove();
+			});
+		}
+		const state = await settle({ sessionId: 's1', decision: 'allowAlways' });
+		expect(state.phase).toBe('sent');
+		expect(frameDocument.body.contains(card)).toBe(false);
+	});
+
+	it('a subscriber that never drains gets a bounded queue with a gap, and the original delivery never feels it', async () => {
+		const { host, subscriberSent, subscriberHandle } = await tapHost();
+		// A subscriber whose pushes take a moment each — the queue banks behind them.
+		const handle = subscriberHandle as unknown as { send: (message: unknown) => void };
+		const originalSend = handle.send.bind(handle);
+		handle.send = (message: unknown) => new Promise((resolve) => {
+			setTimeout(() => {
+				originalSend(message);
+				resolve();
+			}, 30);
+		});
+		await host.executeCommand('ggs.claudeTap.subscribe', [], subscriberHandle);
+		const gate = vi.spyOn(host as never as { gateWebviewMessage: (view: unknown, message: unknown, key: string) => void }, 'gateWebviewMessage').mockImplementation(() => undefined);
+		for (let i = 0; i < 320; i++) {
+			await host['serve']('webview.postMessage', [1, { type: 'io_message', channelId: 'ch1', message: { n: i }, done: true }], 'anthropic.claude-code', {} as never);
+		}
+		expect(gate).toHaveBeenCalledTimes(320); // every message delivered, none dropped
+		await new Promise((resolve) => setTimeout(resolve, 400));
+		const events = tapEvents(subscriberSent);
+		expect(events.some((event) => event.kind === 'gap')).toBe(true);
+		const frames = events.filter((event) => event.kind === 'sdk');
+		expect(frames.length).toBeGreaterThan(0);
+		expect(frames.length).toBeLessThan(320);
+		gate.mockRestore();
+	});
+
+	it('the access setting denies subscriptions outright (the revocation path)', async () => {
+		const { settings } = await import('../src/settings');
+		const { host, subscriberHandle } = await tapHost();
+		const before = settings.claudeTapAccess;
+		settings.claudeTapAccess = 'deny';
+		try {
+			expect(await host.executeCommand('ggs.claudeTap.subscribe', [], subscriberHandle)).toMatchObject({ ok: false });
+		} finally {
+			settings.claudeTapAccess = before;
+		}
+	});
+});

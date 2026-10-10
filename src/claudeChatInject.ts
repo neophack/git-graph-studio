@@ -140,6 +140,126 @@ export async function pickChatModel(doc: Document | null | undefined, want: stri
 	return best.label;
 }
 
+/* ---------- the permission card and the permission mode ---------- */
+
+/** The one-word labels a permission card offers, normalized as the page shows them. A
+ *  card is claude-code's own UI for a `tool_permission_request`: its buttons are the
+ *  whole vocabulary, so an exact-text match (after whitespace) is precise — a loose
+ *  substring match would catch every "Allow" in any other widget on the page. */
+const PERMISSION_BUTTONS = {
+	allow: ['allow once', 'allow', 'yes, allow', 'yes', 'proceed'],
+	allowAlways: ['always allow', 'allow always', 'always', 'don\u2019t ask again', "don't ask again", 'dont ask again'],
+	deny: ['deny', 'no, deny', 'no', 'reject', 'decline']
+};
+
+function normalizedText(element: HTMLElement): string {
+	return (element.textContent ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function permissionButtons(doc: Document | null | undefined): { allow: HTMLButtonElement[]; allowAlways: HTMLButtonElement[]; deny: HTMLButtonElement[] } {
+	const out = { allow: [] as HTMLButtonElement[], allowAlways: [] as HTMLButtonElement[], deny: [] as HTMLButtonElement[] };
+	if (!doc) return out;
+	for (const button of [...doc.querySelectorAll<HTMLButtonElement>('button')]) {
+		if (!button.isConnected || button.getAttribute('aria-disabled') === 'true' || button.disabled) continue;
+		const label = normalizedText(button);
+		if (PERMISSION_BUTTONS.allow.includes(label)) out.allow.push(button);
+		else if (PERMISSION_BUTTONS.allowAlways.includes(label)) out.allowAlways.push(button);
+		else if (PERMISSION_BUTTONS.deny.includes(label)) out.deny.push(button);
+	}
+	return out;
+}
+
+/**
+ * The page's pending permission card, answered the way a click does: the decision's own
+ * button ("Always allow" beats "Allow" for allowAlways; a deny may first type its reason
+ * into the card's message box, when the card offers one). Answers whether a button was
+ * clicked and the card settled (its permission buttons gone). False when no card is
+ * pending, its button never matched, or the card did not take the click in time — the
+ * phone is told, and the desktop user can still answer it by hand.
+ */
+export async function answerChatPermission(doc: Document | null | undefined, decision: 'allow' | 'allowAlways' | 'deny', message?: string): Promise<boolean> {
+	if (!doc) return false;
+	const before = permissionButtons(doc);
+	const buttons = decision === 'deny' ? before.deny : decision === 'allowAlways' ? before.allowAlways.length ? before.allowAlways : before.allow : before.allow;
+	if (!buttons.length) return false; // no pending card (or a shape this host does not know)
+	if (decision === 'deny' && message) {
+		// A deny-with-reason card carries a free-text box beside its buttons; the page's
+		// own value setter is what its handler sees (the AskUserQuestion "Other" rule).
+		const input = doc.querySelector<HTMLInputElement | HTMLTextAreaElement>('textarea, input[type="text"]');
+		if (input) {
+			const win = doc.defaultView as (Window & typeof globalThis) | null;
+			const proto = input.tagName === 'TEXTAREA' ? win?.HTMLTextAreaElement?.prototype : win?.HTMLInputElement?.prototype;
+			const setter = proto && Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+			input.focus();
+			if (setter) setter.call(input, message);
+			else input.value = message;
+			input.dispatchEvent(new (win?.Event ?? Event)('input', { bubbles: true }));
+		}
+	}
+	buttons[buttons.length - 1].click(); // the card's own button, not a stray match elsewhere
+	const settled = await waitFor(() => {
+		const after = permissionButtons(doc);
+		return after.allow.length + after.allowAlways.length + after.deny.length === 0;
+	}, 6000);
+	return settled;
+}
+
+/** The permission-mode selector: the control near the composer that names the mode (the
+ *  submit button carries `data-permission-mode`, and the mode's own control is the
+ *  button/combobox that names a mode in its title or label). */
+function permissionModeControl(doc: Document | null | undefined): HTMLButtonElement | null {
+	if (!doc) return null;
+	const send = doc.querySelector<HTMLButtonElement>('form button[type="submit"][data-permission-mode]');
+	const scope = send?.closest('form') ?? doc.body;
+	for (const button of [...scope.querySelectorAll<HTMLButtonElement>('button')]) {
+		if (!button.isConnected) continue;
+		const described = `${button.getAttribute('title') ?? ''} ${button.getAttribute('aria-label') ?? ''} ${normalizedText(button)}`.toLowerCase();
+		if (/permission mode|approval mode|mode:/.test(described) || button.getAttribute('aria-haspopup') === 'menu') {
+			if (/default|accept edits|acceptEdits|plan|bypass|auto|manual|dont ask|don\u2019t ask/i.test(described)) return button;
+		}
+	}
+	return null;
+}
+
+/**
+ * Switch the chat's permission mode through its own selector: open the control, click
+ * the option that names `mode`, wait for the menu to close. Best effort by design — the
+ * page's structure is claude-code's, and a mode it does not offer answers false without
+ * touching anything.
+ */
+export async function setChatPermissionMode(doc: Document | null | undefined, mode: string): Promise<boolean> {
+	if (!doc || !mode.trim()) return false;
+	const control = permissionModeControl(doc);
+	if (!control) return false;
+	control.click();
+	const menuOf = () => {
+		const id = control.getAttribute('aria-controls');
+		const box = (id ? doc.getElementById(id) : null) ?? doc.querySelector('[role="menu"], [role="listbox"]');
+		return box && box.isConnected ? box : null;
+	};
+	const menu = await waitFor(() => menuOf() !== null, 3000) ? menuOf() : null;
+	if (!menu) return false;
+	// acceptEdits, accept-edits and accept edits all name the same mode: split the camel
+	// humps and the separators, then compare word-wise.
+	const wanted = mode.trim().replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+	const options = [...menu.querySelectorAll<HTMLElement>('[role="menuitem"], [role="option"], button')];
+	let best: { score: number; option: HTMLElement } | null = null;
+	for (const option of options) {
+		if (option.getAttribute('aria-disabled') === 'true') continue;
+		const label = normalizedText(option);
+		if (!label) continue;
+		const score = label === wanted ? 3 : label.includes(wanted) ? 2 : 0;
+		if (score && (!best || score > best.score)) best = { score, option };
+	}
+	if (!best) {
+		control.click(); // close the menu
+		return false;
+	}
+	best.option.click();
+	await waitFor(() => !menu.isConnected, 3000);
+	return true;
+}
+
 /* ---------- AskUserQuestion: the pending option card ---------- */
 
 /** One answer the phone gave: the question text and header the card showed, the option

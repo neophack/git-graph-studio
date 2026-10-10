@@ -5,7 +5,7 @@
 // with an empty input, a click on it interrupts, a submit with text sends.
 
 import { describe, expect, it } from 'vitest';
-import { answerChatQuestion, chatBusy, chatControls, chatModelPill, interruptChat, pickChatModel, pressSend, setChatInput } from '../src/claudeChatInject';
+import { answerChatPermission, answerChatQuestion, chatBusy, chatControls, chatModelPill, interruptChat, pickChatModel, pressSend, setChatInput, setChatPermissionMode } from '../src/claudeChatInject';
 
 function chatPage() {
 	const doc = document.implementation.createHTMLDocument('chat');
@@ -313,5 +313,107 @@ describe('the question card driver (AskUserQuestion)', () => {
 		expect(page.submitted()).toBe(false);
 		expect(page.submits()).toBe(0); // the driver never reached the submit button
 		expect(await answerChatQuestion(questionPage([{ header: 'H', opts: ['x'] }]).doc, [])).toBe(false);
+	});
+});
+
+
+describe('the permission card and the permission mode', () => {
+	/** A chat page with a pending permission card: Allow / Always allow / Deny, an
+	 *  optional reason box, and a card that settles (its buttons go) on a click. */
+	function permissionPage(withReason = true) {
+		const doc = document.implementation.createHTMLDocument('chat');
+		const card = doc.createElement('div');
+		card.className = 'permission-card';
+		card.innerHTML = `
+			<p>Bash wants to run <code>rm -rf build</code></p>
+			${withReason ? '<input type="text" placeholder="Tell Claude what to do differently (optional)">' : ''}
+			<div class="row">
+				<button type="button">Allow</button>
+				<button type="button">Always allow</button>
+				<button type="button">Deny</button>
+			</div>`;
+		doc.body.appendChild(card);
+		const typed: string[] = [];
+		const clicked: string[] = [];
+		const settled = () => {
+			card.querySelectorAll('button').forEach((button) => button.setAttribute('aria-disabled', 'true'));
+		};
+		card.querySelectorAll('button').forEach((button) => {
+			button.addEventListener('click', () => {
+				clicked.push((button.textContent ?? '').trim());
+				settled();
+			});
+		});
+		const input = card.querySelector('input');
+		input?.addEventListener('input', () => typed.push(input.value));
+		return { doc, card, clicked, typed };
+	}
+
+	it('answers Allow with the card\'s own Allow button and settles it', async () => {
+		const page = permissionPage();
+		expect(await answerChatPermission(page.doc, 'allow')).toBe(true);
+		expect(page.clicked).toEqual(['Allow']);
+	});
+
+	it('allowAlways prefers the Always allow button', async () => {
+		const page = permissionPage();
+		expect(await answerChatPermission(page.doc, 'allowAlways')).toBe(true);
+		expect(page.clicked).toEqual(['Always allow']);
+	});
+
+	it('a deny types its reason first when the card offers a box', async () => {
+		const page = permissionPage();
+		expect(await answerChatPermission(page.doc, 'deny', 'not that one')).toBe(true);
+		expect(page.typed).toEqual(['not that one']);
+		expect(page.clicked).toEqual(['Deny']);
+	});
+
+	it('a page without a pending card answers false and touches nothing', async () => {
+		const empty = document.implementation.createHTMLDocument('chat');
+		expect(await answerChatPermission(empty, 'allow')).toBe(false);
+		const page = permissionPage();
+		// A card whose buttons already went (answered by the desktop user) is not pending:
+		page.card.querySelector('button')!.setAttribute('aria-disabled', 'true');
+		page.card.querySelectorAll('button').forEach((button) => ((button as HTMLButtonElement).disabled = true));
+		expect(await answerChatPermission(page.doc, 'allow')).toBe(false);
+		expect(page.clicked).toEqual([]);
+	});
+
+	it('picks the mode through the page\'s own selector and menu', async () => {
+		const doc = document.implementation.createHTMLDocument('chat');
+		doc.body.innerHTML = `
+			<form>
+				<button type="button" title="Permission mode: default" aria-haspopup="menu">default</button>
+				<div role="textbox" contenteditable="true"></div>
+				<button type="submit" data-permission-mode="default">send</button>
+			</form>`;
+		const menu = doc.createElement('div');
+		menu.setAttribute('role', 'menu');
+		menu.innerHTML = `
+			<div role="menuitem">default</div>
+			<div role="menuitem">accept edits</div>
+			<div role="menuitem">plan mode</div>
+			<div role="menuitem" aria-disabled="true">bypass permissions</div>`;
+		let open = false;
+		const control = doc.querySelector('button[title^="Permission mode"]')!;
+		control.addEventListener('click', () => {
+			open = !open;
+			if (open) doc.body.appendChild(menu);
+			else menu.remove();
+		});
+		for (const item of [...menu.querySelectorAll('[role="menuitem"]')]) {
+			item.addEventListener('click', () => {
+				control.textContent = item.textContent;
+				open = false;
+				menu.remove();
+			});
+		}
+		expect(await setChatPermissionMode(doc, 'acceptEdits')).toBe(true);
+		expect(control.textContent).toBe('accept edits');
+		// A mode the menu does not offer closes the menu and changes nothing.
+		expect(await setChatPermissionMode(doc, 'bypassPermissions')).toBe(false);
+		expect(control.textContent).toBe('accept edits');
+		// No selector on the page: false, nothing thrown.
+		expect(await setChatPermissionMode(document.implementation.createHTMLDocument('chat'), 'plan')).toBe(false);
 	});
 });

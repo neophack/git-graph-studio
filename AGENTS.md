@@ -139,6 +139,7 @@ Extensions view would call it), a mission line, and a test file.
 | 16 | Symbol MCP Server | The `ggs --mcp` AI bridge over the symbol index |
 | 17 | Code Analysis | tree-sitter parsing and the five analysis tools |
 | 18 | GGS Bash | The bundled bash-like shell and the Terminal Shell setting |
+| 19 | Claude Remote | Continue this machine's Claude Code conversations from a phone: the official Remote Control and the self-hosted end-to-end encrypted relay |
 
 ### 1. Workbench Shell
 
@@ -807,74 +808,11 @@ page shows the integration's state (`claude_mcp_status`).
   `vsix.mjs` the zip writer, `stubs/` the bundle stubs, plus the two in-page bridges); the
   app tree carries no plugin code, and no build step of this repository runs the packer —
   the package arrives here as the marketplace's VSIX (or a hand-picked `--vsix`).
-- The one extension with source in this tree: `extensions-src/claude-remote/` (Claude
-  Remote (LAN), rewritten 2026-10-01 — continue the open workspace's Claude Code
-  conversations from a phone. `sessions.js` reads Claude Code's store read-only from the
-  host's one config root (Git Graph Studio `~/.ggs/claude`, VS Code `~/.claude`, an
-  explicit `CLAUDE_CONFIG_DIR` over either — never a mix of the two stores), scoped to the
-  workspace folders by default, incrementally (a poll re-reads only appended bytes), and
-  tail-first: a cold open parses only the last 512 KB (long conversations answer in tail
-  time, not whole-file time) and older history parses backward in 1 MB steps when a wider
-  window — or a `before` page, one screen of earlier history — is asked for; prepended
-  items take stamps counting down below the parsed floor, so file order keeps increasing
-  stamps and the phone's delta cursor survives the extension (a before page never advances
-  it);
-  `runner.js` runs phone prompts through the desktop's own `claude` CLI (the Claude Code
-  extension's bundled native binary first; `-p --output-format stream-json`, prompt on
-  stdin, `--resume` under the session's own config root; a `.js` CLI runs on each host's
-  own Node — `nodeExecutable`: real Node itself, VS Code's Electron under
-  `ELECTRON_RUN_AS_NODE=1`, ggs-node through the system `node`, since the sidecar is an
-  extension host and loaded the script as one, losing the prompt) with one lane per conversation —
-  "send now" interrupts the running turn, "after this turn" queues behind it (and behind a
-  desktop turn visibly in flight); stop pauses the queue. `server.js` serves the phone
-  app (`web/`, CSP-strict, sjcl for crypto since the LAN origin is not a secure context)
-  and one sealed endpoint: AES-256-GCM under PBKDF2(code), AAD `cr2:req:<kid>` /
-  `cr2:res:<nonce>`, a ±5 min clock window, single-use nonces, per-address lockout. The
-  pairing secret persists in `context.secrets`; "Reset Pairing Key" swaps it and every
-  paired device gets `401 rekeyed`. `panel.js` is the desktop panel (QR per LAN address,
-  masked code, reset, devices, activity). Phone prompts are sent FROM the desktop tab
-  in Git Graph Studio (2026-10-01, the owner's direction — a background CLI turn left the
-  desktop tab showing nothing): the host's `ggs.claudeChat.send` / `.open` / `.state` /
-  `.stop` (`extHost.ts`, driving the page through `src/claudeChatInject.ts`: the
-  composer is the form whose submit button carries `data-permission-mode`, its input
-  the `role="textbox"` contenteditable; text goes in through the page's own `input`
-  handling, send is a click, "now" first clicks the tab's Stop) open or reveal the
-  session's tab, type, and send; they answer a ticket at once and run detached, because
-  a process-backed caller's JS thread is parked inside a host request; the runner polls
-  `.state` (tab busy + the session file) to settle the turn. Only VS Code, which cannot
-  reach another extension's page, runs the headless CLI (`claudeRemote.backend`), and
-  there `desktop.js` keeps the desktop in step
-  (`claudeRemote.desktopTab`): a phone turn opens the session's Claude Code tab
-  (`claude-vscode.editor.open`, "pin-to-panel") and reloads it when the turn ends — an
-  open chat panel never re-reads its session file, and its next turn would branch off
-  the stale history; the reload closes exactly the hosting tab through the host's
-  `ggs.sessionTabs.list` / `ggs.sessionTabs.close` (`extHost.ts`, from the
-  `update_session_state` session map; VS Code falls back to `window.tabGroups`, closing
-  the revealed tab only when it is a Claude Code panel). The phone also sees the
-  desktop's current model (`sessions.modelInfo`: settings pin → tier alias through
-  `ANTHROPIC_DEFAULT_*_MODEL` → `ANTHROPIC_MODEL` → the latest answered model), each
-  session's model and the running turn's (the CLI's `init` event), and can pick one — on
-  Git Graph Studio the pick rides the prompt to `ggs.claudeChat.send` as a `model` arg and
-  the host chooses it in the tab's own model picker first (`pickChatModel` in
-  `claudeChatInject.ts`: the pill is the composer's combobox, the menu its `listbox`;
-  best effort — a name the picker does not offer sends with the tab's current model,
-  logged); The phone also answers Claude's own questions: an `AskUserQuestion` tool_use
-  parses to a structured `question` body (options, multiSelect; `sessions.js`) that —
-  alone among tool bodies — rides the sync whole (`server.js` `lazyTool` keeps it), so
-  the phone renders a tappable card; `answer` (protocol 4) validates the picks against
-  exactly those options ("Other" always, with its text) and hands them to
-  `ggs.claudeChat.answer`, which clicks the tab's own option card — per question its nav
-  tab (a button whose whole text is the header), then its `role="radio"`/`"checkbox"`
-  options by label, and finally the card's own "Submit answers" button — the one act
-  that resolves the question (the card collects every click but never submits itself;
-  a multi-select keeps toggling until that click) (`answerChatQuestion` in
-  `claudeChatInject.ts`; the submitted card renders read-only, and that flip, via the
-  `tool_result`'s `"question"="answer"` summary, is what settles the phone's card);
-  headless hosts have no tab to click, so there the card is display-only;
-  the "default" permission mode passes no flag (the CLI has no `default` choice). A plain VS Code VSIX whose entry runs as a
-  `node` backend on ggs-node and installs in VS Code too; `build.mjs` packs the
-  store-format VSIX `prepare.mjs` bundles into every installer, self-checked by the
-  marketplace validator).
+- The one extension with source in this tree: `extensions-src/claude-remote/` — **module 19**
+  since the 2.0 rewrite (2026-10-11, the plan of record `docs/claude-remote-rc-plan.md`): the
+  phone path is the official Remote Control where the CLI serves it plus a self-hosted
+  end-to-end-encrypted relay (`claude-remote-server/`, its own Cargo workspace the app binary
+  never links), and every file of the extension itself lives in module 19's section below.
 - Build: `scripts/prepare.mjs` (fetches the bundled packages from the marketplace —
   Open VSX per architecture; `--vsix <path>` / `GGS_BUNDLED_VSIX` bundles a ready-built
   VSIX as-is, outranking the registry for git-graph-rs; claude-remote packs from
@@ -885,27 +823,28 @@ page shows the integration's state (`claude_mcp_status`).
   back in a `provider_list` — the sidebar chip and its quick pick, the Model Providers
   page, the usage curve's ranges and hover breakdown, and the chat pane gate's two
   states — the set-key page that saves into `provider_save`, the usage strip after),
-  `tests/claudeRemote.test.ts` (Claude Remote headless against a fixture store and a fake
-  `claude` — the sealed wire as the phone's sjcl speaks it, replay/clock/rekey/lockout,
-  workspace scoping, the transcript, send-now vs queue, stop/cancel/resume — plus its
-  VSIX packer), `tests/claudeRemoteActivation.test.ts` (its `activate()` against a fake
-  of the real VS Code API — no `ggs.*` commands, so the headless CLI backend; on the
-  classic threads pool, see `vitest.config.ts`), `tests/claudeChatInject.test.ts` (the
+  `tests/claudeRemote.test.ts` (module 19's headless half: the E2E crypto vectors —
+  native and sjcl — the identity including the two-window registration race, the relay
+  client against an in-memory relay speaking the Rust server's wire contract, the two
+  sources' one event shape, the sdk host's permission round trip through a fake `claude`
+  CLI, the phone's request table, the mirror's read-only rules, the phone page's crypto
+  against the extension's codec, and the VSIX packer), `tests/claudeRemoteActivation.test.ts`
+  (its `activate()` against a fake of the real VS Code API — no `ggs.*` commands, so the
+  sdk-host source; with a relay configured, the registration and the long-poll crossing;
+  on the classic threads pool, see `vitest.config.ts`), `tests/claudeChatInject.test.ts` (the
   host's chat driver against a stand-in composer: type, send, interrupt, the model
-  picker, the AskUserQuestion card),
+  picker, the AskUserQuestion card, the permission card and the permission-mode menu),
   `tests/editor.test.ts` (the extpage tab),
   `tests/editorServices.test.ts` (the diagnostics store and the document-formatting
   registry, booted through the frame bootstrap),
   `src-tauri/tests/node_runtime.rs` (the pretend Node runtime: a package's JS entry served
   over `ggs-ext/1`, the process-host chain over the bundled `ggs-node` sidecar, a NAPI
   addon answering under ggs-node, the installed extension's whole activation; Claude
-  Remote's host conformance — its `test/conformance.js` probe (crypto vectors, the sealed
-  wire with an sjcl phone, a headless turn) answering `test/conformance.expected.json`
-  exactly as `tests/claudeRemote.test.ts` checks it under real Node — the e2e section's
-  sjcl-on-the-interpreter cost (~35 s for the sealed 256 KB tool result, against under one
-  in real Node) rides `GGS_PROMISE_TIMEOUT_SECS`, the settle-budget knob `settle()` reads
-  (30 s by default, raised only by that test) — and its `activate()` under the ggs-node
-  `vscode` shim serving a real HTTP request),
+  Remote's host conformance — its `test/conformance.js` probe (crypto vectors, a mini
+  relay over the long-poll pair, one sdk-host turn) answering
+  `test/conformance.expected.json` exactly as `tests/claudeRemote.test.ts` checks it under
+  real Node — and its `activate()` under the ggs-node `vscode` shim, which with no relay
+  configured subscribes the tap and touches neither secrets nor network),
   `src-tauri/tests/vscode_shim_boa.rs` (the Boa define-op repro bed
   for the ggs-node `vscode` shim),
   `scripts/probes/claude-code-live-check.mjs` (the live claude-code check: the backend on
@@ -1307,6 +1246,16 @@ way Git Bash does.
   binary's CLI contract — the `-l`/`-i` flags riding around `-c` in any order,
   `--login`, the positional words after the command string);
   `tests/ggsBash.test.ts` and the module self-test group
+
+### 19. Claude Remote
+
+From a phone, continue this machine's Claude Code conversations: the **official Remote Control** where the CLI serves it (claude.ai login + first-party models), and a **self-hosted relay** everywhere else — one user id and one QR per PC, every window of it, payloads end-to-end encrypted so the relay (even one you run yourself) sees routing metadata only. The plan of record is `docs/claude-remote-rc-plan.md`; the surface probe `scripts/probes/claude-rc-surface.mjs` re-checks the CLI-side markers on every new claude-code version.
+
+- The relay `claude-remote-server/` (its own Cargo workspace, target under `target/studio/claude-remote-server/`; never linked into the app): registration (open/token/closed), challenge-response pairing (`k_auth = HKDF(K, "crr1/auth")`, the QR link `https://<relay>/c/<user>#<K>.<epoch>` — the key rides the fragment), optional Argon2id login password, rekey (epoch bump, every phone kicked `4401 rekeyed`, sibling windows told `epoch_changed`), device list/revoke, per-PC window routing over WebSocket **or** the long-poll pair (`GET /api/v1/agent/poll` + `POST /api/v1/agent/send` — ggs-node has no WebSocket client), bounded per-connection queues (windows: drop-oldest + `gap`; phones: disconnect 4413), strict user isolation. Its gate: `cargo test` (24 unit + 9 integration over real sockets, including the spawned binary) and `clippy --all-targets -- -D warnings`.
+- The phone app is the relay's `web/` (embedded at build): pairing, the window list (sealed `window.meta` bodies), the session list and the transcript renderer ported from the 1.x app, the question and permission cards, queue-now/queue-behind sending. Its crypto (`web/crypto.js`) is WebCrypto on secure origins, the vendored sjcl on plain-HTTP LANs — `tests/claudeRemote.test.ts` pins it against Node's own vectors and against the extension's codec (one wire, both ends).
+- The extension `extensions-src/claude-remote/` (one CommonJS package, VS Code and ggs-node unchanged): `identity.js` (the PC identity in `context.secrets`, the multi-window registration race over a global-state lock, register/rekey/password/devices), `crypto.js` (HKDF/HMAC/AES-256-GCM frames, AAD `crr1|user|epoch|from|to|seq`, the sjcl fallback for frame hosts), `relay.js` (WS or long-poll, epoch reload, bounded outbox), `sources/tap.js` (GGS: `ggs.claudeTap.*` plus the `ggs.claudeChat.*` driving), `sources/sdkHost.js` (VS Code: the CLI as a stream-json child with `--permission-prompt-tool stdio`), `control.js` (the phone's request table over the kept `sessions.js` reader), `official.js` (the CLI's own RC through the host's synthesized `toggle_remote_control`), `mirror.js` (the read-only official-session mirror: cleansed — `connectUrl` stays behind unless opted in — gated by `claudeRemote.mirrorOfficial`, importing none of the write path), `panel.js`, and the kept `runner.js`/`desktop.js`/`qrcode.js`/`sjcl.js`. `test/conformance.js` is the one host-conformance probe both runtimes answer (`tests/claudeRemote.test.ts` under real Node, `src-tauri/tests/node_runtime.rs` under ggs-node).
+- Routing policy (2026-10-11): a tap host drives EVERYTHING through the conversation's own Claude Code tab — the host's send opens or reveals it, a new conversation opens a fresh one — so a second CLI never branches the history under the desktop; the sdk host serves hosts with no tab surface. `mirrorControl` is the official-mode read-only gate (`control.js`'s `controlAllowed`): with official RC carrying the PC and the gate closed, the self-hosted phone reads everything and acts on nothing. The phone's pending permission card rides the session meta (`pendingPermission`, fed by both sources, fresh for ten minutes); the panel's window list and the password flag come from the relay (`GET /api/v1/me/windows`, sealed metas decrypted with the frame key; `password_set` on `/me/devices`).
+- The host-side bridges stay module 12: `ggs.claudeTap.subscribe/unsubscribe` (the read-only conversation tap in `src/extHost.ts` — sync copy before delivery, batched async flush, bounded queues with `gap`, one-time user consent, revocable by the `claudeTapAccess` setting; the events cross the shim as `env.onClaudeConversationTap`), `ggs.claudeChat.remoteControl` (the synthesized request whose answer is consumed before the page sees it), `ggs.claudeChat.permission` / `ggs.claudeChat.mode` (the tab's own permission card and mode selector in `src/claudeChatInject.ts`), and ggs-node's native `crypto.createHmac('sha256')` / `crypto.hkdfSync` (RFC 4231/5869 vectors in `node_runtime.rs`).
 
 ## Development workflow
 

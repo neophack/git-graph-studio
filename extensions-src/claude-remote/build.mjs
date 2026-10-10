@@ -55,8 +55,9 @@ const files = [
 	['extension.vsixmanifest', vsixManifest],
 	['extension/package.json', readFileSync(resolve(here, 'package.json'))],
 	...[
-		'extension.js', 'sessions.js', 'runner.js', 'server.js', 'panel.js', 'desktop.js', 'qrcode.js', 'sjcl.js', 'README.md',
-		'web/index.html', 'web/app.js', 'web/app.css', 'web/icon.svg', 'web/manifest.webmanifest', 'media/icon.png'
+		'extension.js', 'sessions.js', 'runner.js', 'panel.js', 'desktop.js', 'identity.js', 'crypto.js', 'cryptojs.js', 'relay.js',
+		'mirror.js', 'official.js', 'control.js', 'qrcode.js', 'sjcl.js', 'README.md',
+		'sources/tap.js', 'sources/sdkHost.js', 'media/icon.png'
 	].map((file) => [`extension/${file}`, readFileSync(resolve(here, file))])
 ];
 

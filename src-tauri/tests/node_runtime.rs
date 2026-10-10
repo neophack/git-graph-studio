@@ -2499,10 +2499,10 @@ fn claude_remote_answers_its_conformance_probe_exactly_as_real_node_does() {
 /// Claude Remote's `activate()` under Git Graph Studio's own host shape — ggs-node with the
 /// bundled `vscode` shim, as the app's process host runs it — beyond the bare Node surface
 /// the conformance probe pins: the activation probes the host's `ggs.claudeChat.state`
-/// (answered here as Git Graph Studio answers it, so the injected backend is chosen),
-/// `claude-remote.start` reads and stores the pairing secret through `context.secrets`,
-/// opens the LAN server and renders the panel (its HTML carries the port), and a real HTTP
-/// request then reaches that server. VS Code's half of the same activation is
+/// (answered here as Git Graph Studio answers it, so the tap source is chosen), subscribes
+/// the conversation tap (`ggs.claudeTap.subscribe`), paints the status bar, and — with no
+/// relay address configured — registers the 2.0 command set without touching the network
+/// or the secrets. VS Code's half of the same activation is
 /// `tests/claudeRemoteActivation.test.ts`.
 #[test]
 fn claude_remote_activates_and_serves_under_the_ggs_node_vscode_shim() {
@@ -2632,72 +2632,71 @@ fn claude_remote_activates_and_serves_under_the_ggs_node_vscode_shim() {
         "{handshake}"
     );
 
-    // `start` orders behind the activation on the JS thread's job queue, so its answer
-    // also proves activate() completed; start(true) reveals the panel once the server is up.
-    let started = call(
+    // `reveal` orders behind the activation on the JS thread's job queue, so its answer
+    // also proves activate() completed. The 2.0 activation with no relay configured
+    // touches neither the secrets nor the network — it probes, subscribes and paints.
+    let revealed = call(
         2,
         "runCommand",
-        json!({ "command": "claude-remote.start", "args": [] }),
+        json!({ "command": "claude-remote.reveal", "args": [] }),
     );
     let (requests, panel_html) = {
         let seen = seen.lock().unwrap();
         (seen.requests.clone(), seen.panel_html.clone())
     };
     assert!(
-        started.get("error").is_none(),
-        "{started}\nhost requests: {requests:?}"
+        revealed.get("error").is_none(),
+        "{revealed}\nhost requests: {requests:?}"
     );
     assert!(
         requests
             .iter()
             .any(|s| s == "commands.execute ggs.claudeChat.state"),
-        "the activation probes the injected backend: {requests:?}"
-    );
-    assert!(requests.iter().any(|s| s == "secrets.get"), "{requests:?}");
-    assert!(
-        requests.iter().any(|s| s == "secrets.store"),
-        "a fresh pairing is stored: {requests:?}"
+        "the activation probes the desktop-tab surface: {requests:?}"
     );
     assert!(
-        requests.iter().any(|s| s == "statusbar.set"),
-        "{requests:?}"
+        requests
+            .iter()
+            .any(|s| s == "commands.execute ggs.claudeTap.subscribe"),
+        "the conversation tap is subscribed: {requests:?}"
+    );
+    assert!(requests.iter().any(|s| s == "statusbar.set"), "{requests:?}");
+    // No relay address is configured: the identity stays untouched and nothing registers.
+    assert!(
+        !requests.iter().any(|s| s == "secrets.store"),
+        "nothing registers without a relay: {requests:?}"
+    );
+    assert!(
+        panel_html.is_empty() || panel_html.contains("Claude Remote"),
+        "the panel that opens is the 2.0 one: {:.200}",
+        panel_html
     );
 
-    // The port the panel shows (the state object's own key: the string table carries a
-    // `"port":"Port"` label too), and the server behind it answering a real request.
-    let marker = "\"running\":true,\"port\":";
-    let at = panel_html
-        .find(marker)
-        .unwrap_or_else(|| panic!("the panel shows the server up: {panel_html}"));
-    let port: u16 = panel_html[at + marker.len()..]
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect::<String>()
-        .parse()
-        .expect("a numeric port");
-    let mut stream =
-        std::net::TcpStream::connect(("127.0.0.1", port)).expect("the LAN server listens");
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(20)))
-        .unwrap();
-    stream
-        .write_all(b"GET /api/hello HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-        .unwrap();
-    let mut response = String::new();
-    let _ = stream.read_to_string(&mut response);
-    assert!(response.starts_with("HTTP/1.1 200"), "{response:?}");
-    let body: Value =
-        serde_json::from_str(response.split("\r\n\r\n").nth(1).unwrap_or_default().trim())
-            .unwrap_or_else(|e| panic!("{e}: {response}"));
-    assert_eq!(body["protocol"], json!(4), "{body}");
-    assert_eq!(body["iterations"], json!(150_000), "{body}");
+    // The panel's live state push must carry the RESOLVED state — panelState is async
+    // (the relay reads), and a promise handed to postMessage would leave the panel on
+    // its boot state forever. The push lands on the debounced timer (~150 ms).
+    let mut state_pushed = false;
+    for _ in 0..100 {
+        let seen = seen.lock().unwrap();
+        if seen.requests.iter().any(|s| s == "webview.postMessage") {
+            state_pushed = true;
+            break;
+        }
+        drop(seen);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        state_pushed,
+        "the panel receives its state push: {:?}",
+        seen.lock().unwrap().requests
+    );
 
-    let stopped = call(
+    let disconnected = call(
         3,
         "runCommand",
-        json!({ "command": "claude-remote.stop", "args": [] }),
+        json!({ "command": "claude-remote.disconnect", "args": [] }),
     );
-    assert!(stopped.get("error").is_none(), "{stopped}");
+    assert!(disconnected.get("error").is_none(), "{disconnected}");
     // The workbench thread's sender goes first, then this one: the runtime's reader sees
     // its end of input only once every sender is gone.
     done.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -3363,4 +3362,46 @@ module.exports.activate = function () {
         after, r#"{"fired":[true],"before":false,"after":true}"#,
         "the push must update the settings and fire the listener: {after}"
     );
+}
+
+#[test]
+fn hmac_and_hkdf_answer_nodes_vectors() {
+    // RFC 4231 test case 1 (HMAC-SHA256) and RFC 5869 test case 1 (HKDF-SHA256): the
+    // same vectors Node's crypto answers, over the pretend runtime's prelude surfaces
+    // (Claude Remote's pairing proofs and frame-key derivation ride them).
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(tmp.path(), &[("index.js", r#"
+const crypto = require('crypto');
+const key = Buffer.alloc(20, 0x0b);
+const mac = crypto.createHmac('sha256', key).update('Hi There').digest('hex');
+const multi = crypto.createHmac('sha256', 'k').update('a').update('b').digest('hex');
+const ikm = Buffer.alloc(22, 0x0b);
+const salt = Buffer.from([0,1,2,3,4,5,6,7,8,9,10,11,12]);
+const info = Buffer.from([0xf0,0xf1,0xf2,0xf3,0xf4,0xf5,0xf6,0xf7,0xf8,0xf9]);
+const okm = Buffer.from(crypto.hkdfSync('sha256', ikm, salt, info, 42)).toString('hex');
+const stringInputs = crypto.createHmac('sha256', Buffer.from('key')).update(Buffer.from('data')).digest('base64');
+let threw = '';
+try { crypto.createHmac('sha1', 'k'); } catch (e) { threw = String(e.message); }
+module.exports.dispatch = (cmd) => ({ mac, multi, okm, stringInputs, threw });
+"#)]);
+    let answers = serve(entry, &[initialize(), run_command("x", json!(null))]);
+    let result = answers[1].as_ref().expect("the command ran").as_object().unwrap();
+    assert_eq!(
+        result["mac"].as_str().unwrap(),
+        "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+    );
+    // update chains hash the concatenation: HMAC(k, "ab") — the RFC 4231 shape over
+    // other bytes, checked against the same derivation Node answers.
+    assert_eq!(
+        result["multi"].as_str().unwrap(),
+        // HMAC-SHA256("k", "ab")
+        "7475bb119fe9b74cc0af5014a49d80ab23bd1ac82987e7696cdc242288654436"
+    );
+    assert_eq!(
+        result["okm"].as_str().unwrap(),
+        "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
+    );
+    // The base64 rendering of HMAC-SHA256("key", "data"), Node's own encoding path.
+    assert_eq!(result["stringInputs"].as_str().unwrap(), "UDH+PZicbRU3oBP6bnOdojRj/a7DtwE32Cjjas4iG9A=");
+    assert!(result["threw"].as_str().unwrap().contains("Unknown HMAC digest"), "{result:?}");
 }

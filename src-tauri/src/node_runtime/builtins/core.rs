@@ -275,6 +275,67 @@ pub(super) fn base64_decode(
     array_buffer(bytes, context)
 }
 
+/// GGS-patch: HMAC-SHA256 — `(key, data) → hex digest`, what the prelude's
+/// `createHmac('sha256', …)` accumulates to (the pairing proofs Claude Remote's relay
+/// checks). Keys of any length follow RFC 2104 (longer than the block size hash first).
+pub(super) fn hmac_sha256_hex(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    use hmac::Mac as _;
+    let key = bytes_arg(args.get_or_undefined(0), context)
+        .ok_or_else(|| error("hmac: the key must be bytes"))?;
+    let data = bytes_arg(args.get_or_undefined(1), context)
+        .ok_or_else(|| error("hmac: the data must be bytes"))?;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&key)
+        .map_err(|e| error(format!("hmac: {e}")))?;
+    mac.update(&data);
+    Ok(text(hex::encode(mac.finalize().into_bytes())))
+}
+
+/// GGS-patch: HKDF-SHA256 (RFC 5869) — `(ikm, salt, info, length) → key bytes`, the
+/// extract-and-expand the prelude's `hkdfSync` serves. An empty salt is the RFC's
+/// zero-filled block, and `length` is bounded the way Node bounds it (255 × 32).
+pub(super) fn hkdf_sha256(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    use hmac::Mac as _;
+    let type_error = || error("hkdf: the inputs must be bytes");
+    let ikm = bytes_arg(args.get_or_undefined(0), context).ok_or_else(type_error)?;
+    let salt = bytes_arg(args.get_or_undefined(1), context).ok_or_else(type_error)?;
+    let info = bytes_arg(args.get_or_undefined(2), context).ok_or_else(type_error)?;
+    let length = args.get_or_undefined(3).to_number(context)?;
+    if !(0.0..=8160.0).contains(&length) || length.fract() != 0.0 {
+        return Err(error("hkdf: the length must be an integer in 0..=8160"));
+    }
+    let length = length as usize;
+    // Extract: PRK = HMAC-SHA256(salt, IKM); the empty salt is 32 zero bytes.
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&salt)
+        .map_err(|e| error(format!("hkdf: {e}")))?;
+    mac.update(&ikm);
+    let prk = mac.finalize().into_bytes();
+    // Expand: T(1) = HMAC(PRK, info || 0x01); T(n) = HMAC(PRK, T(n-1) || info || n).
+    let mut okm = Vec::with_capacity(length);
+    let mut previous: Vec<u8> = Vec::new();
+    for counter in 1u8..=255 {
+        if okm.len() >= length {
+            break;
+        }
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&prk)
+            .map_err(|e| error(format!("hkdf: {e}")))?;
+        mac.update(&previous);
+        mac.update(&info);
+        mac.update(&[counter]);
+        previous = mac.finalize().into_bytes().to_vec();
+        okm.extend_from_slice(&previous);
+    }
+    okm.truncate(length);
+    array_buffer(okm, context)
+}
+
 /// The `crypto` builtin's hash native: `(algorithm, bytes) → hex digest`. The JS side's
 /// `createHash` accumulates the bytes (the `update` calls) and hands them over here —
 /// md5 / sha1 / sha256, the gravatar-class digests the frame host serves too.

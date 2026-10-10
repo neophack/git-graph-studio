@@ -1,9 +1,9 @@
 {
   "name": "claude-remote",
-  "displayName": "Claude Remote (LAN)",
+  "displayName": "Claude Remote",
   "publisher": "ggs",
-  "version": "0.6.0",
-  "description": "Continue this workspace's Claude Code conversations from a phone on the same LAN: full history, live progress, send-now or queue-after-turn prompts, end-to-end AES-256-GCM encryption with a resettable pairing key. Works in VS Code and Git Graph Studio.",
+  "version": "2.0.0",
+  "description": "Continue this machine's Claude Code conversations from a phone: the official Remote Control where the CLI serves it, and a self-hosted end-to-end encrypted relay (claude-remote-server) everywhere else. One QR per PC, every window of it, phones paired by scan, sealed frames the relay cannot read. Works in VS Code and Git Graph Studio.",
   "categories": [
     "Other"
   ],
@@ -23,35 +23,116 @@
         "category": "Claude Remote"
       },
       {
-        "command": "claude-remote.start",
-        "title": "Start LAN Server",
+        "command": "claude-remote.connect",
+        "title": "Connect to the Relay",
         "category": "Claude Remote"
       },
       {
-        "command": "claude-remote.stop",
-        "title": "Stop LAN Server",
+        "command": "claude-remote.disconnect",
+        "title": "Disconnect from the Relay",
+        "category": "Claude Remote"
+      },
+      {
+        "command": "claude-remote.copyLink",
+        "title": "Copy Pairing Link",
         "category": "Claude Remote"
       },
       {
         "command": "claude-remote.resetKey",
         "title": "Reset Pairing Key",
         "category": "Claude Remote"
+      },
+      {
+        "command": "claude-remote.setPassword",
+        "title": "Set Login Password",
+        "category": "Claude Remote"
+      },
+      {
+        "command": "claude-remote.clearPassword",
+        "title": "Clear Login Password",
+        "category": "Claude Remote"
+      },
+      {
+        "command": "claude-remote.revokeDevice",
+        "title": "Revoke a Paired Phone",
+        "category": "Claude Remote"
+      },
+      {
+        "command": "claude-remote.toggleOfficial",
+        "title": "Toggle Official Remote Control",
+        "category": "Claude Remote"
       }
     ],
     "configuration": {
       "title": "Claude Remote",
       "properties": {
-        "claudeRemote.port": {
-          "type": "number",
-          "default": 0,
-          "minimum": 0,
-          "maximum": 65535,
-          "description": "LAN server port. 0 reuses the last port (or picks a free one), so paired phones keep their bookmark."
+        "claudeRemote.mode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "official",
+            "selfHosted"
+          ],
+          "default": "auto",
+          "enumDescriptions": [
+            "The official Remote Control where the CLI reports it available; the self-hosted relay otherwise (and always for third-party model providers)",
+            "Only the official Remote Control; the panel shows the CLI's own reason when it is unavailable",
+            "Only the self-hosted relay (works with any model provider)"
+          ],
+          "description": "How the phone reaches this machine's Claude Code conversations."
         },
-        "claudeRemote.autoStart": {
+        "claudeRemote.serverUrl": {
+          "type": "string",
+          "default": "",
+          "description": "The self-hosted relay (claude-remote-server) this PC registers on, e.g. https://relay.example.com:8787. Every window of this PC shares its user id and pairing QR."
+        },
+        "claudeRemote.autoConnect": {
+          "type": "boolean",
+          "default": true,
+          "description": "Connect to the relay when the window opens (when an address is configured)."
+        },
+        "claudeRemote.mirrorOfficial": {
+          "type": "string",
+          "enum": [
+            "off",
+            "whenConnected",
+            "always"
+          ],
+          "default": "whenConnected",
+          "enumDescriptions": [
+            "Do not mirror official Remote Control sessions to the relay",
+            "Mirror a conversation while the CLI reports its Remote Control connected (read-only)",
+            "Mirror the conversation stream to the relay whether or not official Remote Control is on"
+          ],
+          "description": "A read-only copy of the official Remote Control's own stream, delivered to the self-hosted relay so its phone app shows the same conversation. The official switch itself is never touched."
+        },
+        "claudeRemote.mirrorControl": {
           "type": "boolean",
           "default": false,
-          "description": "Start the LAN server when the window opens."
+          "description": "Let the self-hosted phone drive a mirrored conversation. Instructions travel the desktop tab's own UI (the same buttons a user at the keyboard could press), so the official client sees only the local user."
+        },
+        "claudeRemote.mirrorConnectUrl": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include the official Remote Control connectUrl in the mirrored stream (it is a live key into the official session — off by default)."
+        },
+        "claudeRemote.official.allSessions": {
+          "type": "boolean",
+          "default": false,
+          "description": "Claude's own `remoteControlAtStartup` — Remote Control on for every new conversation (claude.ai login and first-party models only)."
+        },
+        "claudeRemote.backend": {
+          "type": "string",
+          "enum": [
+            "desktop",
+            "headless"
+          ],
+          "default": "desktop",
+          "enumDescriptions": [
+            "Drive the conversation's own Claude Code tab (Git Graph Studio); falls back to the self-hosted SDK runner where the host cannot",
+            "Never drive the desktop tabs: prompts run through this window's own claude CLI child"
+          ],
+          "description": "How a phone prompt runs on this desktop."
         },
         "claudeRemote.desktopTab": {
           "type": "string",
@@ -62,24 +143,11 @@
           ],
           "default": "reload",
           "enumDescriptions": [
-            "Open the conversation's Claude Code tab when a phone turn starts, and reload it when the turn ends so it shows the phone's turn and continues from it",
-            "Only open (or reveal) the tab when a phone turn starts",
+            "Open the conversation's Claude Code tab when an out-of-tab turn starts, and reload it when the turn ends so it shows the phone's turn and continues from it",
+            "Only open (or reveal) the tab when an out-of-tab turn starts",
             "Leave the desktop tabs alone"
           ],
-          "description": "What a phone prompt does to the conversation's Claude Code tab on this desktop."
-        },
-        "claudeRemote.backend": {
-          "type": "string",
-          "enum": [
-            "desktop",
-            "headless"
-          ],
-          "default": "desktop",
-          "enumDescriptions": [
-            "Type the phone's prompt into the conversation's Claude Code tab and send it from there (Git Graph Studio); the desktop and the phone show the same turn. Falls back to headless where the host cannot.",
-            "Run the phone's prompt through the claude CLI in the background"
-          ],
-          "description": "How a phone prompt runs on this desktop."
+          "description": "What an out-of-tab phone turn does to the conversation's Claude Code tab."
         }
       }
     }

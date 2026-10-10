@@ -1,0 +1,32 @@
+<!doctype html>
+<!-- Claude Remote — the phone app. The pairing key arrives in the URL fragment
+     (#<K>.<epoch>, which no browser ever sends to a server); afterwards every payload
+     is an end-to-end encrypted frame the relay cannot read. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>Claude Remote</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<script src="/sjcl.js"></script>
+<script src="/crypto.js"></script>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="app" class="boot">
+	<div class="boot-card">
+		<div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.9 2.9M15.5 15.5l2.9 2.9M5.6 18.4l2.9-2.9M15.5 8.5l2.9-2.9"/></svg></div>
+		<div id="bootText">Claude Remote</div>
+	</div>
+</div>
+<nav id="topbar" class="topbar hidden">
+	<button id="backBtn" class="icon-btn hidden" aria-label="Back">‹</button>
+	<div class="grow"><div id="titleText" class="title">Claude Remote</div><div id="subText" class="sub"></div></div>
+	<button id="dotsBtn" class="icon-btn" aria-label="Menu">⋯</button>
+</nav>
+<main id="view" class="view"></main>
+<script src="/app.js"></script>
+</body>
+</html>

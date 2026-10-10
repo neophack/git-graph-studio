@@ -215,6 +215,16 @@ pub fn register_natives(context: &mut Context) -> JsResult<()> {
         ),
         ("__ggsPbkdf2", 5, NativeFunction::from_fn_ptr(core::pbkdf2)),
         (
+            "__ggsHmacSha256Hex",
+            2,
+            NativeFunction::from_fn_ptr(core::hmac_sha256_hex),
+        ),
+        (
+            "__ggsHkdfSha256",
+            4,
+            NativeFunction::from_fn_ptr(core::hkdf_sha256),
+        ),
+        (
             "__ggsAesGcmSeal",
             4,
             NativeFunction::from_fn_ptr(core::aes_gcm_seal),

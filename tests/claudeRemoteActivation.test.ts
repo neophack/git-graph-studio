@@ -3,11 +3,12 @@
 // pool (see vitest.config.ts): the fake `vscode` is injected by patching Module._load around
 // activate()'s inner require — the vm pool's module system does not honor that patch.
 //
-// The fake offers ONLY APIs real VS Code ≥1.100 has — no ggs.* commands — so the
-// injected-backend probe falls back to the headless CLI, exactly as a genuine VS Code host.
+// The fake offers ONLY APIs real VS Code ≥1.100 has — no ggs.* commands — so the tap probe
+// falls back to the sdk-host source, exactly as a genuine VS Code host. The relay is the
+// in-memory one from claudeRemote.test.ts's contract: activation registers the PC on it
+// when an address is configured, and never touches the network when one is not.
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,12 +20,12 @@ const nodeRequire = createRequire(import.meta.url);
 const extensionDir = path.resolve(__dirname, '../extensions-src/claude-remote');
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
-const sjcl: Any = nodeRequire(path.join(extensionDir, 'sjcl.js'));
 const ext = nodeRequire(path.join(extensionDir, 'extension.js'));
 
 let home = '';
 let workspace = '';
 const savedEnv = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, CLAUDE_CLI_PATH: process.env.CLAUDE_CLI_PATH };
+const realFetch = globalThis.fetch;
 
 beforeAll(() => {
 	home = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-remote-activation-'));
@@ -37,43 +38,30 @@ beforeAll(() => {
 
 afterAll(() => {
 	for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
-	fs.rmSync(home, { recursive: true, force: true });
+	globalThis.fetch = realFetch;
+	try { fs.rmSync(home, { recursive: true, force: true }); } catch { /* Windows locks */ }
 });
 
-/* ---------- the phone's crypto (sjcl), as web/app.js does it ---------- */
-
-const utf8 = (s: string) => sjcl.codec.utf8String.toBits(s);
-const bitsFromB64u = (s: string) => sjcl.codec.base64.toBits(s.replace(/-/g, '+').replace(/_/g, '/'));
-const b64uFromBits = (b: unknown) => sjcl.codec.base64.fromBits(b).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-
-/** A paired phone against a running server port: seals calls exactly as web/app.js does. */
-async function phone(code: string, port: number) {
-	const hello = await (await fetch(`http://127.0.0.1:${port}/api/hello`)).json();
-	const prp = new sjcl.cipher.aes(sjcl.misc.pbkdf2(utf8(code), bitsFromB64u(hello.salt), hello.iterations, 256));
-	const call = async (m: string, p: object = {}) => {
-		const n = crypto.randomBytes(16).toString('hex');
-		const iv = sjcl.codec.hex.toBits(crypto.randomBytes(12).toString('hex'));
-		const body = { m, p, ts: Date.now(), n, dev: { id: 'activation-phone', label: 'Activation Probe' } };
-		const ct = sjcl.mode.gcm.encrypt(prp, utf8(JSON.stringify(body)), iv, utf8('cr2:req:' + hello.kid), 128);
-		const res = await fetch(`http://127.0.0.1:${port}/api/rpc`, {
-			method: 'POST', headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ kid: hello.kid, i: b64uFromBits(iv), d: b64uFromBits(ct) })
-		});
-		const env = await res.json();
-		const pt = sjcl.mode.gcm.decrypt(prp, bitsFromB64u(env.d), bitsFromB64u(env.i), utf8('cr2:res:' + n), 128);
-		const out = JSON.parse(sjcl.codec.utf8String.fromBits(pt));
-		if (!out.ok) throw new Error(out.error);
-		return out.r;
-	};
-	return { call };
+/** The relay's register endpoint, as the contract's test double answers it. */
+function serveRelayRegister(calls: Any[]) {
+	globalThis.fetch = (async (input: Any, init: Any = {}) => {
+		const url = String(input instanceof URL ? input.href : input);
+		calls.push(url);
+		if (url.endsWith('/api/v1/register') && (init.method ?? 'GET') === 'POST') {
+			const user = 'u_act1vat10n2test';
+			return { status: 201, ok: true, text: async () => JSON.stringify({ user_id: user, agent_secret: 'a'.repeat(64), epoch: 1 }), json: async () => ({ user_id: user, agent_secret: 'a'.repeat(64), epoch: 1 }) } as Any;
+		}
+		if (url.includes('/api/v1/agent/')) return { status: 200, ok: true, text: async () => JSON.stringify({ v: 1, frames: [], cursor: 0, epoch: 1, user: 'u_act1vat10n2test' }), json: async () => ({ v: 1, frames: [], cursor: 0, epoch: 1, user: 'u_act1vat10n2test' }) } as Any;
+		return { status: 404, ok: false, text: async () => '{}', json: async () => ({}) } as Any;
+	}) as Any;
 }
 
 describe('activation: the real VS Code surface (engines ^1.100.0)', () => {
-	type Call = [string, ...unknown[]];
-	function realVscode(opts: { brokenSecrets?: boolean } = {}) {
-		const executed: Call[] = [];
+	function realVscode(opts: { brokenSecrets?: boolean; settings?: Record<string, unknown> } = {}) {
+		const executed: [string, ...unknown[]][] = [];
 		const secretsStore: Record<string, string> = {};
 		const gState: Record<string, unknown> = {};
+		const settings: Record<string, unknown> = { backend: 'desktop', desktopTab: 'reload', autoConnect: false, ...(opts.settings ?? {}) };
 		const vscode = {
 			version: '1.100.0',
 			StatusBarAlignment: { Left: 1, Right: 2 },
@@ -87,20 +75,21 @@ describe('activation: the real VS Code surface (engines ^1.100.0)', () => {
 					if (id === 'setContext') return undefined;
 					throw new Error(`command '${id}' not found`);
 				},
-				getCommands: async () => []
+				getCommands: async () => [] as string[]
 			},
 			window: {
 				createStatusBarItem: () => ({ text: '', tooltip: '', command: '', show() {}, dispose() {} }),
-				// autoStart starts headless; a panel during activation would be a bug
 				createWebviewPanel: () => { throw new Error('unexpected panel'); },
 				showErrorMessage: async () => undefined,
 				showInformationMessage: async () => undefined,
 				showWarningMessage: async () => undefined,
+				showInputBox: async () => undefined,
+				showQuickPick: async () => undefined,
 				tabGroups: { close: async () => false, activeTabGroup: { activeTab: null } }
 			},
 			workspace: {
 				workspaceFolders: [{ name: 'my-app', uri: { fsPath: workspace } }],
-				getConfiguration: () => ({ get: (key: string) => ({ backend: 'desktop', desktopTab: 'reload', port: 0, autoStart: true })[key] }),
+				getConfiguration: () => ({ get: (key: string) => settings[key] }),
 				onDidChangeConfiguration: () => ({ dispose() {} })
 			}
 		};
@@ -116,8 +105,6 @@ describe('activation: the real VS Code surface (engines ^1.100.0)', () => {
 		return { vscode, context, executed, secretsStore, gState };
 	}
 	const withVscode = (api: Any, fn: () => unknown) => {
-		// the Module CLASS runs every require; node:module's exports only carry a legacy copy of
-		// _load that patching does nothing to
 		const Module = (nodeRequire('node:module') as Any).Module;
 		const orig = Module._load;
 		Module._load = function (this: Any, request: string, ...rest: unknown[]) { return request === 'vscode' ? api : orig.apply(this, [request, ...rest]); };
@@ -135,41 +122,54 @@ describe('activation: the real VS Code surface (engines ^1.100.0)', () => {
 		return value;
 	};
 
-	it('activates, pairs into secret storage and serves a sealed round trip the phone accepts', async () => {
+	it('activates headless (no ggs surface: the sdk-host source), registers its commands, and stays offline without a relay address', async () => {
 		const f = realVscode();
 		const logs: string[] = [];
 		const spy = vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => { logs.push(a.map(String).join(' ')); });
 		try {
-			withVscode(f.vscode, () => ext.activate(f.context)); // sync: only the inner require needs the patch
-			const port = await until(() => f.gState['claude-remote.lastPort'], (v) => typeof v === 'number' && v > 0);
-			await until(() => f.executed, (ex) => ex.some(([id]) => id === 'setContext'));
-			expect(f.executed).toContainEqual(['setContext', 'claude-remote.running', true]);
-			// the pairing lives in secret storage — the plaintext fallback never fired
-			expect(f.secretsStore['claude-remote.pairing']).toBeTruthy();
-			expect(f.gState['claude-remote.pairing']).toBeUndefined();
-			expect(logs.join('\n')).toMatch(/through the claude CLI/); // the ggs probe failed → headless
-			// a phone pairs against the activation's own server and gets a sealed answer
-			const pairing = JSON.parse(f.secretsStore['claude-remote.pairing']);
-			const p = await phone(pairing.code, port);
-			const hello = await p.call('hello');
-			expect(hello.injection).toBe(false);
-			expect(hello.app).toBe('Visual Studio Code');
-			expect(hello.workspace).toEqual([{ name: 'my-app', path: workspace }]);
+			withVscode(f.vscode, () => ext.activate(f.context));
+			// Every command of the 2.0 surface is registered; nothing throws without a relay.
+			const registered = f.context.subscriptions.filter((d) => d && typeof d === 'object').length;
+			expect(registered).toBeGreaterThan(5);
+			expect(f.secretsStore['claude-remote.identity']).toBeUndefined(); // no address → no registration
+			await until(() => logs.join('\n'), (text) => /sdk host/.test(text)); // the tap probe failed → the sdk source
 		} finally {
 			disposeAll(f.context);
 			spy.mockRestore();
 		}
 	});
 
-	it('a host without secret storage still pairs — loudly, into global state', async () => {
-		const f = realVscode({ brokenSecrets: true });
+	it('with a relay configured, autoConnect registers this PC into secret storage and long-polls it', async () => {
+		const fetches: string[] = [];
+		serveRelayRegister(fetches);
+		(globalThis as Any).WebSocket = undefined; // the VS Code host under test has no client WebSocket
+		const f = realVscode({ settings: { serverUrl: 'https://relay.test', autoConnect: true } });
 		const logs: string[] = [];
 		const spy = vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => { logs.push(a.map(String).join(' ')); });
 		try {
 			withVscode(f.vscode, () => ext.activate(f.context));
-			await until(() => f.gState['claude-remote.pairing'], (v) => !!v); // the fallback keeps the extension usable
-			expect(logs.join('\n')).toMatch(/unencrypted/); // …and says so
-			await until(() => f.gState['claude-remote.lastPort'], (v) => typeof v === 'number'); // the server still starts
+			await until(() => fetches, (urls) => urls.some((u) => u.endsWith('/api/v1/register')));
+			const identity = JSON.parse(f.secretsStore['claude-remote.identity']);
+			expect(identity.userId).toBe('u_act1vat10n2test');
+			expect(identity.epoch).toBe(1);
+			expect(identity.K).toMatch(/^[A-Za-z0-9_-]{43}$/); // the pairing key, stored in its string spelling
+			// The window's connection crosses the long-poll pair.
+			await until(() => fetches, (urls) => urls.some((u) => u.includes('/api/v1/agent/poll?window=w_')));
+			await until(() => logs.join('\n'), (text) => /sdk host/.test(text));
+		} finally {
+			disposeAll(f.context);
+			spy.mockRestore();
+			delete (globalThis as Any).WebSocket;
+		}
+	});
+
+	it('a host without secret storage still activates, and without a relay neither path stores an identity', async () => {
+		const f = realVscode({ brokenSecrets: true });
+		const spy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+		try {
+			withVscode(f.vscode, () => ext.activate(f.context));
+			await until(() => f.context.subscriptions, (subs) => subs.length > 5);
+			expect(f.gState['claude-remote.identity']).toBeUndefined(); // nothing was configured — nothing stored either way
 		} finally {
 			disposeAll(f.context);
 			spy.mockRestore();

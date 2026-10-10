@@ -84,6 +84,11 @@ export interface AppSettings {
 	 *  exceptions, unsupported API use) always reach the log at `info`; `debug` adds every
 	 *  host request an extension makes, `trace` their answers. */
 	extensionLogLevel: ExtensionLogLevel;
+	/** Whether extensions may read the Claude Code conversations' live traffic (the
+	 *  `ggs.claudeTap` relay): `ask` prompts once per extension and remembers the grant,
+	 *  `deny` refuses every subscription (the revocation path: flip it and every tap
+	 *  stops; flip back and extensions re-ask). */
+	claudeTapAccess: 'ask' | 'deny';
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -98,7 +103,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	terminalRightClickBehavior: 'menu',
 	density: 'comfortable',
 	searchSmartCase: true,
-	extensionLogLevel: 'info'
+	extensionLogLevel: 'info',
+	claudeTapAccess: 'ask'
 };
 
 /** Any settings write persists the whole object, so a store from an older release pins the
@@ -150,6 +156,10 @@ export const SETTING_DEFS: SettingDef[] = [
 		{ value: 'keep', label: 'settings.linuxDmabuf.keep' }
 	] },
 	{ key: 'extensionLogLevel', category: 'general', kind: 'enum', options: (['trace', 'debug', 'info', 'warn', 'error'] as const).map((value) => ({ value, label: `settings.extensionLogLevel.${value}` })) },
+	{ key: 'claudeTapAccess', category: 'general', kind: 'enum', options: [
+		{ value: 'ask', label: 'settings.claudeTapAccess.ask' },
+		{ value: 'deny', label: 'settings.claudeTapAccess.deny' }
+	] },
 	{ key: 'terminalShell', category: 'general', kind: 'enum', options: [
 		{ value: 'powershell', label: 'settings.terminalShell.powershell' },
 		{ value: 'ggsBash', label: 'settings.terminalShell.ggsBash' }

@@ -161,7 +161,7 @@ export interface HostContext {
  *  (with its document text when the document changed), a document being saved, a message
  *  from one of its webview views (sidebar), a view's visibility, or a theme change. */
 export interface HostEvent {
-	event: 'configChanged' | 'webviewMessage' | 'webviewDisposed' | 'activeEditorChanged' | 'documentSaved' | 'webviewViewMessage' | 'webviewViewVisible' | 'themeChanged' | 'fsChanged' | 'documentChanged' | 'documentClosed' | 'workspaceFoldersChanged' | 'webviewViewState';
+	event: 'configChanged' | 'webviewMessage' | 'webviewDisposed' | 'activeEditorChanged' | 'documentSaved' | 'webviewViewMessage' | 'webviewViewVisible' | 'themeChanged' | 'fsChanged' | 'documentChanged' | 'documentClosed' | 'workspaceFoldersChanged' | 'webviewViewState' | 'claudeTap';
 	/** A document edit (documentChanged): the document's whole new text. */
 	text?: string;
 	/** The open folders after a change (workspaceFoldersChanged). */
@@ -183,6 +183,10 @@ export interface HostEvent {
 	/** A watcher batch (fsChanged): the changed working-tree paths under `root`, and
 	 *  whether something under `.git/` changed (the ref/index half the batch never lists). */
 	fs?: { root: string; paths: string[]; gitChanged: boolean; truncated: boolean };
+	/** A conversation-tap batch (claudeTap): the Claude Code chat traffic a subscribed
+	 *  extension mirrors (each item: direction, shape, the panel, the session, the
+	 *  message itself — or a `gap` marker after the host dropped mirror-side events). */
+	tap?: { dir: 'in' | 'out'; kind: 'sdk' | 'permission' | 'rc' | 'gap'; panelId: number; sessionId: string | null; message: unknown }[];
 }
 
 /** One edit as it crosses the bridge: 1-based line / 0-based character positions, the shape
@@ -2264,6 +2268,10 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 	const documentClosed = new EventEmitter<Record<string, unknown>>();
 	/** The host's watcher batches — what `createFileSystemWatcher` serves its events from. */
 	const fsChanged = new EventEmitter<{ root: string; paths: string[]; gitChanged: boolean; truncated: boolean }>();
+	/** The conversation tap's batches — what `env.onClaudeConversationTap` serves. */
+	const claudeTapEvents = new EventEmitter<{ dir: 'in' | 'out'; kind: 'sdk' | 'permission' | 'rc' | 'gap'; panelId: number; sessionId: string | null; message: unknown }>();
+	/** `env.onClaudeConversationTap` hands this out; set before the api literal closes. */
+	const claudeTapEmitterProxy = { event: claudeTapEvents.event.bind(claudeTapEvents) };
 	const activeEditorChangedEmitter = new EventEmitter<unknown>();
 	const visibleEditorsChanged = new EventEmitter<unknown[]>();
 	const selectionChanged = new EventEmitter<{ textEditor: unknown; selections: unknown[]; kind?: number }>();
@@ -3893,6 +3901,11 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 			onDidChangeLogLevel: silentEvent() as never,
 			onDidChangeTelemetryEnabled: silentEvent() as never,
 			onDidChangeShell: silentEvent() as never,
+			// The conversation tap (the ggs.claudeTap.* command family's stream side):
+			// the Claude Code chat traffic a subscribed extension mirrors, batched as the
+			// host relays it. VS Code has no such surface — undefined there, and the
+			// extension's own feature probe degrades to its other sources.
+			onClaudeConversationTap: (listener: (item: { dir: 'in' | 'out'; kind: 'sdk' | 'permission' | 'rc' | 'gap'; panelId: number; sessionId: string | null; message: unknown }) => void) => claudeTapEmitterProxy.event(listener),
 			get shell(): string {
 				return (ctx.platform ?? (uriWin32 ? 'win32' : 'linux')) === 'win32' ? 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' : '/bin/bash';
 			},
@@ -4292,6 +4305,9 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 		if (event.event === 'documentSaved' && event.path !== undefined) {
 			documentSaved.fire(makeTextDocument(event.path));
 			return;
+		}
+		if (event.event === 'claudeTap' && event.tap) {
+			for (const item of event.tap) claudeTapEvents.fire(item);
 		}
 		if (event.event === 'fsChanged' && event.fs) {
 			fsChanged.fire(event.fs);
