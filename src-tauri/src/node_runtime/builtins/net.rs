@@ -283,7 +283,9 @@ pub(super) fn listen(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
     });
     if let Err(e) = spawned {
         table().lock().unwrap().remove(&id);
-        return Err(error(format!("EAGAIN|listen: no thread for the listener: {e}")));
+        return Err(error(format!(
+            "EAGAIN|listen: no thread for the listener: {e}"
+        )));
     }
     JsValue::from_json(
         &json!({ "id": id, "address": local.ip().to_string(), "port": local.port(), "family": family(&local) }),

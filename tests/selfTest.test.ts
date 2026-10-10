@@ -162,7 +162,7 @@ describe('the module suites', () => {
 			'Workbench Shell', 'Command System', 'File Explorer', 'Quick Open', 'Workspace Search',
 			'Editor Suite', 'Large-File Viewers', 'Compare & Merge', 'Source Control',
 			'Git Graph Engine', 'Integrated Terminal', 'Extension Platform', 'CAN Trace Analyzer',
-			'Performance Lab', 'Build & Release Pipeline', 'Symbol MCP Server', 'Code Analysis'
+			'Performance Lab', 'Build & Release Pipeline', 'Symbol MCP Server', 'Code Analysis', 'GGS Bash'
 		]);
 	});
 

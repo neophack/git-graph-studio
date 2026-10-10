@@ -516,7 +516,10 @@ mod tests {
         d.undo().unwrap();
         d.edit(d.offset_of(0, 0), d.offset_of(0, 0), "X");
         d.edit(d.offset_of(0, 0), d.offset_of(0, 1), "");
-        assert!(d.at_saved_state(), "a delete restoring the saved text is clean");
+        assert!(
+            d.at_saved_state(),
+            "a delete restoring the saved text is clean"
+        );
         // What `viewer_save` does after its write: the written rope becomes the baseline,
         // and undoing back past it is dirty even though it matches the opened text.
         d.edit(d.offset_of(1, 0), d.offset_of(2, 0), "TWO\n");

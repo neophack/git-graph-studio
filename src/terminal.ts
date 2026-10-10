@@ -11,7 +11,7 @@ import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { loadXterm } from './lazy';
 
 import { actionButton, el, icon, notify } from './ui';
-import { THEME_EVENT } from './settings';
+import { THEME_EVENT, settings } from './settings';
 
 interface Session {
 	id: number;
@@ -198,7 +198,9 @@ export class TerminalView {
 
 		let shellName: string;
 		try {
-			shellName = await invoke<string>('pty_create', { id, cols: term.cols, rows: term.rows });
+			// The Terminal Shell setting rides every creation, so a Settings change reaches
+		// the next terminal without a restart.
+		shellName = await invoke<string>('pty_create', { id, cols: term.cols, rows: term.rows, shell: settings.terminalShell });
 		} catch (error) {
 			notify('error', String(error));
 			term.write(`\x1b[31m${String(error)}\x1b[0m\r\n`);

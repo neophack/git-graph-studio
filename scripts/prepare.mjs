@@ -79,11 +79,8 @@ if (!existsSync(join(appIcons, 'icon.ico')) || !existsSync(join(appIcons, '32x32
  *    builds (dev iteration) fast after the first. A package's own `.node` addon arrives
  *    inside its VSIX — nothing of any plugin compiles here anymore. */
 const srcTauri = join(appDir, 'src-tauri');
-function buildBackend(bin, features) {
+function buildBackend(bin, features, profile = 'ggs-node') {
 	const exe = process.platform === 'win32' ? `${bin}.exe` : bin;
-	// The sidecar's own profile: the release size diet with unwinding panics, because it
-	// runs third-party JS whose poisoned closures must degrade, not abort the backend.
-	const profile = 'ggs-node';
 	// Where cargo actually puts artifacts: `.cargo/config.toml` says `../target/studio/cargo`,
 	// but a caller's CARGO_TARGET_DIR env overrides the config — the Linux container pass
 	// exports one onto its cache volume, and the sidecar was once looked for where it never
@@ -112,10 +109,14 @@ function buildBackend(bin, features) {
 	process.exit(1);
 }
 const nodeRuntimeBin = buildBackend('ggs-node', 'node-runtime');
+// GGS Bash (module 18) needs no build here: it is a plain `[[bin]]` of the app crate
+// (no feature gates), so the bundler's own cargo pass builds it and ships it beside the
+// main binary — a staged `externalBin` copy of the same file made the MSI install it
+// twice (ICE30: two components, one target file).
 
 /* The sidecar copy Tauri bundles: externalBin wants `<name>-<target-triple>[.exe]`, which the
  * installer drops next to the main binary (that is where ext_process's host lookup finds it). */
-if (nodeRuntimeBin) {
+{
 	const TRIPLES = {
 		'win32-x64': 'x86_64-pc-windows-msvc',
 		'win32-arm64': 'aarch64-pc-windows-msvc',
@@ -127,7 +128,8 @@ if (nodeRuntimeBin) {
 	const triple = TRIPLES[`${process.platform}-${process.arch}`] ?? `${process.platform}-${process.arch}`;
 	const sidecarDir = join(out, 'bundled', 'binaries');
 	mkdirSync(sidecarDir, { recursive: true });
-	copyFileSync(nodeRuntimeBin, join(sidecarDir, `ggs-node-${triple}${process.platform === 'win32' ? '.exe' : ''}`));
+	const exeSuffix = process.platform === 'win32' ? '.exe' : '';
+	copyFileSync(nodeRuntimeBin, join(sidecarDir, `ggs-node-${triple}${exeSuffix}`));
 }
 
 /* 3½. The real-Node extension host bundle (`node-host.cjs`): the entry a system Node runs

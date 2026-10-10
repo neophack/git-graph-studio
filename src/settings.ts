@@ -11,6 +11,10 @@ import { el, notify } from './ui';
 
 export type AutoSave = 'off' | 'afterDelay' | 'onFocusChange' | 'onWindowChange';
 export type LinuxDmabuf = 'auto' | 'disable' | 'keep';
+/** The shell a new integrated terminal opens (module 18): the bundled GGS Bash —
+ *  the Rust bash-like shell that also backs Claude Code's tool calls on Windows,
+ *  where no bash exists for them to find — or PowerShell. */
+export type TerminalShell = 'powershell' | 'ggsBash';
 export type WorkbenchDensity = 'comfortable' | 'compact';
 /** The extension host log's threshold (`extLog.ts`): what reaches the Output channel and
  *  `~/.ggs/logs/ext-host.log`. */
@@ -61,6 +65,10 @@ export interface AppSettings {
 	linuxDmabuf: LinuxDmabuf;
 	/** `workbench.density`: how tightly rows, tabs and bars are packed (M7 7.3). */
 	density: WorkbenchDensity;
+	/** The integrated terminal's shell — read by `pty_create` per terminal, and by the
+	 *  backend when it spawns the bridged claude-code backend (the persisted
+	 *  `~/.ggs/settings.json` is the file that spawn path reads). */
+	terminalShell: TerminalShell;
 	/** Zed's `use_smartcase_search`: a query containing an uppercase letter matches case
 	 *  exactly, an all-lowercase query ignores case. The Match Case toggle shows the state
 	 *  the query's case picked — and can still override it — in every search field. */
@@ -79,6 +87,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	fileAssociations: ['blf', 'asc', 'bin', 'hex'],
 	explorerContextMenu: true,
 	linuxDmabuf: 'auto',
+	terminalShell: 'ggsBash',
 	density: 'comfortable',
 	searchSmartCase: true,
 	extensionLogLevel: 'info'
@@ -133,6 +142,10 @@ export const SETTING_DEFS: SettingDef[] = [
 		{ value: 'keep', label: 'settings.linuxDmabuf.keep' }
 	] },
 	{ key: 'extensionLogLevel', category: 'general', kind: 'enum', options: (['trace', 'debug', 'info', 'warn', 'error'] as const).map((value) => ({ value, label: `settings.extensionLogLevel.${value}` })) },
+	{ key: 'terminalShell', category: 'general', kind: 'enum', options: [
+		{ value: 'powershell', label: 'settings.terminalShell.powershell' },
+		{ value: 'ggsBash', label: 'settings.terminalShell.ggsBash' }
+	] },
 	{ key: 'theme', category: 'appearance', kind: 'theme' },
 	{ key: 'density', category: 'appearance', kind: 'enum', options: [
 		{ value: 'comfortable', label: 'settings.density.comfortable' },
@@ -313,8 +326,18 @@ export function updateSetting<K extends keyof AppSettings>(key: K, value: AppSet
 	if (key === 'density') applyDensity();
 	if (key === 'fileAssociations') applyFileAssociations();
 	if (key === 'explorerContextMenu') applyExplorerContextMenu(true);
+	if (key === 'terminalShell') applyTerminalShell();
 	persistSettingsFile();
 	dispatch(SETTINGS_EVENT, key);
+}
+
+/** The Terminal Shell choice changed: the backend re-applies the bridged claude-code
+ *  environment (the `CLAUDE_CODE_GIT_BASH_PATH` both of its sinks carry) and restarts
+ *  the running backend onto it — a backend in flight applied its environment at its
+ *  own start and would keep spawning shells the old way. New terminals pick the
+ *  setting up on their own; they read it at creation. */
+function applyTerminalShell(): void {
+	void invoke('providers_shell_refresh').catch(() => undefined);
 }
 
 /** Re-register the OS-level "open with" associations for the current selection. The

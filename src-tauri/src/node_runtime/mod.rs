@@ -1807,11 +1807,11 @@ mod tests {
             })
             .into(),
         );
-        assert!(
-            context.run_jobs().is_err(),
-            "the failure is still reported"
-        );
-        let ran = context.global_object().get(key("ran"), &mut context).unwrap();
+        assert!(context.run_jobs().is_err(), "the failure is still reported");
+        let ran = context
+            .global_object()
+            .get(key("ran"), &mut context)
+            .unwrap();
         assert_eq!(ran.as_boolean(), Some(true), "the job behind it ran");
     }
 

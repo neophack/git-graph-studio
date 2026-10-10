@@ -594,7 +594,22 @@ pub fn backend_env_for(ext_id: &str, home: &Path) -> Vec<(String, String)> {
     if let Ok(store) = read_store(home) {
         env.extend(active_provider_env(&store, home));
     }
+    env.extend(claude_shell_env(home));
     env
+}
+
+/// The Terminal Shell preference's half of the bridged environment: when the user
+/// picked GGS Bash and the bundled sidecar resolves, Claude Code gets its documented
+/// `CLAUDE_CODE_GIT_BASH_PATH` — on a clean Windows machine there is no bash for its
+/// tool calls to find, and the PowerShell fallback is where they start failing. Pure
+/// over the home and a resolved sidecar path, so the exact bytes are testable.
+fn claude_shell_env(home: &Path) -> Vec<(String, String)> {
+    crate::ggs_bash::pref::claude_shell_env(
+        crate::ggs_bash::pref::preference(home),
+        crate::ext_process::resolve_engine_host("ggs-bash")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /* ---------- The gateway probes (NewAPI / OneAPI / any Anthropic-compatible origin) ---------- */
@@ -1089,6 +1104,10 @@ pub const PROVIDER_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     "CLAUDE_CODE_ATTRIBUTION_HEADER",
     "CLAUDE_CODE_AUTO_MODE_SERVER",
+    // The Terminal Shell preference's keys (claude_shell_env): the bridge owns them
+    // the same way, so switching back to PowerShell withdraws them.
+    "CLAUDE_CODE_GIT_BASH_PATH",
+    "MSYSTEM",
 ];
 
 /// Claude's redirected settings with the active provider's environment applied — the
@@ -1139,6 +1158,15 @@ pub fn claude_provider_settings(
     }
     for (key, value) in env {
         env_map.insert(key.clone(), serde_json::Value::String(value.clone()));
+    }
+    // A SHELL the bridge once wrote names the ggs-bash sidecar; one the user set
+    // themselves survives untouched.
+    if let Some(serde_json::Value::String(existing)) = env_map.get("SHELL") {
+        if existing.to_lowercase().contains("ggs-bash")
+            && !env.iter().any(|(key, _)| key == "SHELL")
+        {
+            env_map.remove("SHELL");
+        }
     }
     if env_map.is_empty() {
         object.remove("env");
@@ -1209,7 +1237,8 @@ pub fn apply_claude_provider_env() {
 fn apply_claude_provider_env_inner() -> Result<(), String> {
     let home = ggs_home()?;
     let store = read_store(&home)?;
-    let env = active_provider_env(&store, &home);
+    let mut env = active_provider_env(&store, &home);
+    env.extend(claude_shell_env(&home));
     let dir = home.join("claude");
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let path = dir.join("settings.json");
@@ -1227,6 +1256,18 @@ fn apply_claude_provider_env_inner() -> Result<(), String> {
             }
         }
     }
+    Ok(())
+}
+
+/// The Terminal Shell setting changed (module 18): the provider env's settings write
+/// and the spawn environment both carry the shell choice, and a backend already
+/// running applied its environment at its own start — so the switch re-applies and
+/// restarts, exactly like a provider switch does (the never-restart cut of 2026-09-30
+/// left the chat on the old provider's login page for exactly this reason).
+#[tauri::command]
+pub fn providers_shell_refresh(app: tauri::AppHandle) -> Result<(), String> {
+    apply_claude_provider_env();
+    restart_bridged_backends(&app);
     Ok(())
 }
 
@@ -2123,6 +2164,15 @@ mod tests {
             let previous = TEST_HOME.lock().unwrap().clone();
             let dir = tempfile::tempdir().unwrap();
             *TEST_HOME.lock().unwrap() = Some(dir.path().to_path_buf());
+            // The provider suite pins a PowerShell home: module 18's default (GGS
+            // Bash) would otherwise leak its shell variables into every spawn-env
+            // assertion here, on machines whose build tree resolves the sidecar.
+            let _ = std::fs::create_dir_all(dir.path().join(".ggs")).and_then(|()| {
+                std::fs::write(
+                    dir.path().join(".ggs").join("settings.json"),
+                    r#"{ "terminalShell": "powershell" }"#,
+                )
+            });
             ProviderHome {
                 _serial: serial,
                 _dir: dir,
@@ -2299,6 +2349,41 @@ mod tests {
             env_map(&backend_env_for(CLAUDE_CODE_EXT_ID, &home)).len(),
             1
         );
+    }
+
+    #[test]
+    fn the_terminal_shell_preference_adds_the_bash_path_only_when_chosen() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        std::fs::create_dir_all(home.join(".ggs")).unwrap();
+        // An explicit PowerShell choice names no shell: the environment carries
+        // nothing of module 18, whatever the machine resolves. (The default — a
+        // missing or unrecognised value — IS GGS Bash since 2026-10-10.)
+        std::fs::write(
+            home.join(".ggs").join("settings.json"),
+            r#"{ "terminalShell": "powershell" }"#,
+        )
+        .unwrap();
+        let spawn = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
+        let map = env_map(&spawn);
+        assert!(!map.contains_key("CLAUDE_CODE_GIT_BASH_PATH"));
+        assert!(!map.contains_key("MSYSTEM"));
+        // The chosen shell names the sidecar only when one actually resolves — the
+        // pure half of that decision is pinned in ggs_bash::pref's own tests.
+        std::fs::write(
+            home.join(".ggs").join("settings.json"),
+            r#"{ "terminalShell": "ggsBash" }"#,
+        )
+        .unwrap();
+        let spawn_env = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
+        let spawn = env_map(&spawn_env);
+        if let Some(path) = spawn.get("CLAUDE_CODE_GIT_BASH_PATH") {
+            assert!(
+                Path::new(path).is_file(),
+                "points at a shell that is not there: {path}"
+            );
+            assert_eq!(spawn.get("MSYSTEM"), Some(&"MINGW64"));
+        }
     }
 
     /// The active third-party profile's provider environment carries the endpoint, the
@@ -2531,7 +2616,8 @@ mod tests {
         );
         assert!(json.pointer("/env/ANTHROPIC_BASE_URL").is_none());
         assert!(
-            json.pointer("/env/CLAUDE_CODE_ATTRIBUTION_HEADER").is_none(),
+            json.pointer("/env/CLAUDE_CODE_ATTRIBUTION_HEADER")
+                .is_none(),
             "official keeps Claude Code's default (header on): {json}"
         );
         assert!(

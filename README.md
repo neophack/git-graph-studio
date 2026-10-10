@@ -6,7 +6,10 @@ editor whose split groups behave as VS Code's (Ctrl+\ family and the orthogonal 
 editors between groups, spatial and sequential group focus, maximize, join, reset, and tab
 drag-and-drop whose edge bands open the split they name — a split takes half of the source
 group's space and a close hands it back proportionally), a built-in terminal (ConPTY on
-Windows) — and an extension platform whose
+Windows; the shell is a setting, defaulting to **GGS Bash** — the bundled pure-Rust
+bash-like shell that speaks Git Bash's dialect (`/c/...` paths, `/dev/null`, a built-in
+awk, `uname MINGW64`) and also backs Claude Code's shell tool on Windows, where no bash
+exists for it to find; PowerShell is the alternative) — and an extension platform whose
 packages are the store's own `.vsix` files (whose `package.json` may declare the Studio
 capabilities under a `ggs` key: pages, a process backend, or an engine `.node` served over
 its C ABI) — installed from the Extensions view (which also searches the **marketplace**:

@@ -612,10 +612,13 @@ fn evaluate_module(path: &Path, source: &str, context: &mut Context) -> JsResult
         Ok(result) => result,
         Err(_) => {
             with_state(|state| {
-                state.log("warn", &format!(
-                    "{}: the register-local compile panicked; recompiling all-escaping",
-                    path.display()
-                ));
+                state.log(
+                    "warn",
+                    &format!(
+                        "{}: the register-local compile panicked; recompiling all-escaping",
+                        path.display()
+                    ),
+                );
             });
             Script::reset_uninitialized_local_trip();
             compile_and_run(true, context)
@@ -786,7 +789,6 @@ mod tests {
         std::fs::create_dir_all(&empty).unwrap();
         assert_eq!(resolve_path(&empty), None);
     }
-
 
     #[test]
     fn cached_scripts_evaluate_identically_on_the_second_load() {

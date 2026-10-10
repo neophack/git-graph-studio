@@ -26,9 +26,18 @@ pub struct PtyState {
     sessions: HashMap<u32, PtySession>,
 }
 
-/// Spawn the shell in the open repository (the session's working directory).
+/// Spawn the shell in the open repository (the session's working directory). `shell`
+/// is the Terminal Shell setting's value (`"ggsBash"` or the default `powershell`);
+/// every new terminal re-reads it, so a Settings change reaches the next terminal
+/// without a restart.
 #[tauri::command]
-pub fn pty_create(app: TauriAppHandle, id: u32, cols: u16, rows: u16) -> Result<String, String> {
+pub fn pty_create(
+    app: TauriAppHandle,
+    id: u32,
+    cols: u16,
+    rows: u16,
+    shell: Option<String>,
+) -> Result<String, String> {
     let cwd = app
         .state::<AppState>()
         .first_repo()
@@ -49,18 +58,7 @@ pub fn pty_create(app: TauriAppHandle, id: u32, cols: u16, rows: u16) -> Result<
         })
         .map_err(|e| format!("Could not open a terminal: {e}"))?;
 
-    // PowerShell is the Windows default; every other platform takes the user's shell.
-    let (mut command, shell_name) = if cfg!(windows) {
-        let mut c = CommandBuilder::new("powershell.exe");
-        c.arg("-NoLogo");
-        (c, "powershell".to_owned())
-    } else {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_owned());
-        let name = shell.rsplit('/').next().unwrap_or("sh").to_owned();
-        let mut c = CommandBuilder::new(shell);
-        c.env("TERM", "xterm-256color");
-        (c, name)
-    };
+    let (mut command, shell_name) = shell_command(shell.as_deref())?;
     command.cwd(&cwd);
 
     let child = pair
@@ -175,6 +173,31 @@ pub fn pty_kill(app: TauriAppHandle, id: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// The shell a new terminal opens. GGS Bash (module 18) when the setting says so — the
+/// bundled sidecar beside the app binary, the same host lookup every extension backend
+/// resolves through; PowerShell is the Windows default, `$SHELL` everywhere else.
+fn shell_command(shell: Option<&str>) -> Result<(CommandBuilder, String), String> {
+    if shell == Some("ggsBash") {
+        let path = crate::ext_process::resolve_engine_host("ggs-bash")
+            .map_err(|error| format!("GGS Bash is not available: {error}"))?;
+        let mut command = CommandBuilder::new(&path);
+        command.arg("-i");
+        command.env("TERM", "xterm-256color");
+        return Ok((command, "ggs-bash".to_owned()));
+    }
+    if cfg!(windows) {
+        let mut command = CommandBuilder::new("powershell.exe");
+        command.arg("-NoLogo");
+        Ok((command, "powershell".to_owned()))
+    } else {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_owned());
+        let name = shell.rsplit('/').next().unwrap_or("sh").to_owned();
+        let mut command = CommandBuilder::new(shell);
+        command.env("TERM", "xterm-256color");
+        Ok((command, name))
+    }
+}
+
 fn with_session<T>(
     app: &TauriAppHandle,
     id: u32,
@@ -206,7 +229,41 @@ fn decode_pty_chunk(carry: &mut Vec<u8>, chunk: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_pty_chunk;
+    use super::{decode_pty_chunk, shell_command};
+
+    #[test]
+    fn the_default_shell_is_the_platform_one_and_ggs_bash_needs_its_sidecar() {
+        let (.., name) = shell_command(None).unwrap();
+        if cfg!(windows) {
+            assert_eq!(name, "powershell");
+        } else {
+            assert_eq!(
+                name,
+                std::env::var("SHELL")
+                    .unwrap_or_else(|_| "sh".into())
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("sh")
+            );
+        }
+        // GGS Bash resolves exactly where the extension backends find their hosts:
+        // `GGS_ENGINE_HOST` is the test override.
+        let host = tempfile::TempDir::new().unwrap();
+        let binary = host.path().join(if cfg!(windows) {
+            "ggs-bash.exe"
+        } else {
+            "ggs-bash"
+        });
+        std::fs::write(&binary, b"").unwrap();
+        std::env::set_var("GGS_ENGINE_HOST", host.path());
+        let (_command, name) = shell_command(Some("ggsBash")).unwrap();
+        assert_eq!(name, "ggs-bash");
+        std::env::remove_var("GGS_ENGINE_HOST");
+        // Without the override the sidecar still resolves in a build tree (cargo test
+        // builds the bin beside the harness), and names itself.
+        let (_command, name) = shell_command(Some("ggsBash")).unwrap();
+        assert_eq!(name, "ggs-bash");
+    }
 
     #[test]
     fn a_split_multibyte_sequence_decides_whole() {

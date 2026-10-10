@@ -806,9 +806,7 @@ fn exit_reason(status: &std::process::ExitStatus) -> String {
              code, such as a package's .node addon"
                 .to_owned()
         }
-        Some(STACK_OVERFLOW) => {
-            "the backend died on a stack overflow (0xC00000FD)".to_owned()
-        }
+        Some(STACK_OVERFLOW) => "the backend died on a stack overflow (0xC00000FD)".to_owned(),
         Some(code) => format!("the backend exited with code {code:#x}"),
         None => "the backend exited without a code (terminated)".to_owned(),
     }
@@ -1016,7 +1014,7 @@ fn synthesize_extension_host_backend_with(
 /// `GGS_ENGINE_HOST` says last — the dev and test override. Only a host that ships with the
 /// app can ever run: the manifest names one, it never brings its own, so a package cannot
 /// smuggle an executable through a `node` backend.
-fn resolve_engine_host(name: &str) -> Result<PathBuf, String> {
+pub(crate) fn resolve_engine_host(name: &str) -> Result<PathBuf, String> {
     if name
         .split(['/', '\\'])
         .any(|segment| segment == ".." || segment.is_empty())

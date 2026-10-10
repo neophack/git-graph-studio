@@ -3145,7 +3145,11 @@ ggs.onRequest((command) => {
         json!(7),
         "three hundred nested closures compile and run: {answers:?}"
     );
-    assert_eq!(answers[6].as_ref().unwrap(), &json!("pong"), "the runtime serves on");
+    assert_eq!(
+        answers[6].as_ref().unwrap(),
+        &json!("pong"),
+        "the runtime serves on"
+    );
 }
 
 /// A child's exit is reported even while a grandchild still holds the child's stdout —
@@ -3156,7 +3160,10 @@ ggs.onRequest((command) => {
 #[test]
 fn a_childs_exit_is_reported_while_a_grandchild_holds_its_pipes() {
     let (file, args) = if cfg!(windows) {
-        ("cmd", r#"["/c", "start /b ping -n 7 127.0.0.1 & echo child-done"]"#)
+        (
+            "cmd",
+            r#"["/c", "start /b ping -n 7 127.0.0.1 & echo child-done"]"#,
+        )
     } else {
         ("sh", r#"["-c", "sleep 6 & echo child-done"]"#)
     };
@@ -3176,9 +3183,16 @@ ggs.onRequest(() => new Promise((resolve) => {{
     let entry = make_package(tmp.path(), &[("main.js", &main)]).join("main.js");
     let answers = serve(entry, &[initialize(), run_command("go", json!([]))]);
     let answer = answers[1].as_ref().expect("the exit was reported");
-    assert_eq!(answer["sawOutput"], json!(true), "the child's own output arrived first: {answer}");
+    assert_eq!(
+        answer["sawOutput"],
+        json!(true),
+        "the child's own output arrived first: {answer}"
+    );
     let ms = answer["ms"].as_f64().unwrap_or(f64::MAX);
-    assert!(ms < 5000.0, "the exit crossed before the grandchild ended: {answer}");
+    assert!(
+        ms < 5000.0,
+        "the exit crossed before the grandchild ended: {answer}"
+    );
 }
 
 /// The live check's 11/13 run (2026-10-04): a process-hosted extension's `configChanged`
@@ -3302,7 +3316,10 @@ module.exports.activate = function () {
             if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
                 let id = wire["id"].as_u64().unwrap_or_default();
                 requests_tx
-                    .send(git_graph_studio_lib::ext_protocol::response(id, Ok(Value::Null)))
+                    .send(git_graph_studio_lib::ext_protocol::response(
+                        id,
+                        Ok(Value::Null),
+                    ))
                     .unwrap();
                 continue;
             }
@@ -3315,8 +3332,7 @@ module.exports.activate = function () {
     next_id += 1;
     let before = run_probe(&requests_tx, next_id);
     assert_eq!(
-        before,
-        r#"{"fired":[],"before":false}"#,
+        before, r#"{"fired":[],"before":false}"#,
         "the activation-time read starts false: {before}"
     );
 
@@ -3344,8 +3360,7 @@ module.exports.activate = function () {
     next_id += 1;
     let after = run_probe(&requests_tx, next_id);
     assert_eq!(
-        after,
-        r#"{"fired":[true],"before":false,"after":true}"#,
+        after, r#"{"fired":[true],"before":false,"after":true}"#,
         "the push must update the settings and fire the listener: {after}"
     );
 }

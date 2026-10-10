@@ -1903,7 +1903,10 @@ mod tests {
 
     fn number(env: *mut c_void, value: f64) -> *mut c_void {
         let mut handle = std::ptr::null_mut();
-        assert_eq!(unsafe { napi_create_double(env, value, &mut handle) }, NAPI_OK);
+        assert_eq!(
+            unsafe { napi_create_double(env, value, &mut handle) },
+            NAPI_OK
+        );
         handle
     }
 
@@ -1932,16 +1935,32 @@ mod tests {
         let env = env_over(&mut context);
         let base = handle_mark();
         let mut scope = std::ptr::null_mut();
-        assert_eq!(unsafe { napi_open_escapable_handle_scope(env, &mut scope) }, NAPI_OK);
+        assert_eq!(
+            unsafe { napi_open_escapable_handle_scope(env, &mut scope) },
+            NAPI_OK
+        );
         for at in 0..10 {
             number(env, f64::from(at));
         }
         let kept = number(env, 42.0);
         let mut escaped = std::ptr::null_mut();
-        assert_eq!(unsafe { napi_escape_handle(env, scope, kept, &mut escaped) }, NAPI_OK);
-        assert_eq!(unsafe { napi_close_escapable_handle_scope(env, scope) }, NAPI_OK);
-        assert_eq!(handle_mark(), base + 1, "only the escape slot outlives the scope");
-        assert_eq!(unsafe { value_of(escaped) }.and_then(|v| v.as_number()), Some(42.0));
+        assert_eq!(
+            unsafe { napi_escape_handle(env, scope, kept, &mut escaped) },
+            NAPI_OK
+        );
+        assert_eq!(
+            unsafe { napi_close_escapable_handle_scope(env, scope) },
+            NAPI_OK
+        );
+        assert_eq!(
+            handle_mark(),
+            base + 1,
+            "only the escape slot outlives the scope"
+        );
+        assert_eq!(
+            unsafe { value_of(escaped) }.and_then(|v| v.as_number()),
+            Some(42.0)
+        );
         release_thread_env();
     }
 
@@ -1964,7 +1983,11 @@ mod tests {
             let answer = function
                 .call(&JsValue::undefined(), &[JsValue::from(1)], &mut context)
                 .unwrap();
-            assert_eq!(answer.as_number(), Some(49.0), "the answer was read before the release");
+            assert_eq!(
+                answer.as_number(),
+                Some(49.0),
+                "the answer was read before the release"
+            );
         }
         assert_eq!(handle_mark(), base, "ten calls left no handle behind");
         let _ = env;

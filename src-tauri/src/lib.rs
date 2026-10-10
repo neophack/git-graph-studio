@@ -17,6 +17,11 @@
 
 pub mod ext_protocol;
 
+/// GGS Bash (module 18): the bundled bash-like shell — the `ggs-bash` sidecar, the
+/// integrated terminal's alternative shell and the shell the bridged claude-code
+/// backend is pointed at. Pure std, unconditional: the sidecar builds without the
+/// desktop stack and its tests run in every `cargo test` pass.
+pub mod ggs_bash;
 pub mod git;
 /// The pretend Node runtime (the `ggs-node` sidecar): runs a package's own JS entry —
 /// CommonJS and the builtins — speaking `ggs-ext/1` on stdio. The default host for every
@@ -1821,6 +1826,7 @@ mod desktop {
                 cmd_providers::provider_save,
                 cmd_providers::provider_delete,
                 cmd_providers::provider_activate,
+                cmd_providers::providers_shell_refresh,
                 cmd_providers::provider_usage,
                 cmd_providers::provider_fetch_models,
                 cmd_providers::provider_test_connection,

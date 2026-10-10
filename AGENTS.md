@@ -138,6 +138,7 @@ Extensions view would call it), a mission line, and a test file.
 | 15 | Build & Release Pipeline | Asset preparation, packaging, installers, CI |
 | 16 | Symbol MCP Server | The `ggs --mcp` AI bridge over the symbol index |
 | 17 | Code Analysis | tree-sitter parsing and the five analysis tools |
+| 18 | GGS Bash | The bundled bash-like shell and the Terminal Shell setting |
 
 ### 1. Workbench Shell
 
@@ -356,7 +357,9 @@ the extension's artifacts — `scripts/check-seams.mjs` fails the build on any r
 ### 11. Integrated Terminal
 
 xterm.js fronting portable-pty sessions (ConPTY on Windows), with new/kill actions and the
-terminal list.
+terminal list. The shell a new terminal opens is the Terminal Shell setting (module 18's
+`terminalShell`: PowerShell, the default, or GGS Bash — the bundled sidecar); the choice
+rides every `pty_create`, so it reaches the next terminal without a restart.
 
 - Frontend: `src/terminal.ts`
 - Backend: `src-tauri/src/pty.rs`
@@ -499,7 +502,12 @@ strip the `safeguards` fields those checks ride on, so the verdicts never arrive
 Claude Code holds the first checked action on an eligibility notice before falling back
 to its own billed classifier requests; asking for the fallback up front keeps auto mode
 notice-free, while the official endpoint serves the checks at no charge and keeps the
-default),
+default), and `CLAUDE_CODE_GIT_BASH_PATH` (2026-10-10, module 18): the Terminal Shell
+setting rides the same two sinks — when GGS Bash is chosen and the bundled sidecar
+resolves, the spawn env and the settings `env` map both point Claude Code's shell tool at
+it, because a clean Windows machine has no bash for those tool calls to find and the
+PowerShell fallback is where they fail — and a change re-applies and restarts through
+`providers_shell_refresh`, the provider switch's own path. The whole env set is
 inherited by the
 extension's CLI children (the same takeover `claude-code-sandbox.mjs` proves against a
 local server). The UI is the sidebar chip on the Claude view's section header
@@ -1192,6 +1200,111 @@ Everything that turns the source tree into installers: asset assembly into
 - Tests: `tests/marketplace.test.ts` (the marketplace fetch's cache contract — the dev
   iteration's TTL serves offline, the build pass's forced registry re-check, the newer-build
   download, the stale-cache fallback — and the `--build` wiring in `tauri.conf.json`)
+
+### 18. GGS Bash
+
+The bundled bash-like shell and the app's default terminal shell (2026-10-10, the
+owner's direction): a pure-Rust `ggs-bash` sidecar (no dependencies beyond std) that
+speaks **Git Bash's dialect end to end** — a clean Windows machine has no bash, and
+both the interactive terminal and Claude Code's shell tool need one that answers the
+way Git Bash does.
+
+- The dialect (`msys.rs`): `/c/...` drive paths accepted everywhere the shell resolves
+  and printed everywhere it reports (`pwd` answers `/c/Users/...`, `pwd -W` the Windows
+  form); `/dev/null` (redirects hit the null device, arguments cross to `NUL`);
+  `/tmp`; a colon-separated presented `PATH` over a Windows-native stored one
+  (`PATH=$PATH:/c/tools` round-trips; children spawn with the `;` form); a `HOME`
+  derived from `USERPROFILE`; MSYS-shaped arguments translated for native children
+  exactly the way MSYS2 does (`git -C /c/x` works); `cygpath` for explicit conversion
+- Git Bash's startup and look: `~/.bashrc` sourced at interactive start, the colored
+  `user@host MINGW64 ~/path` prompt (a hand-set `PS1` with `\u \h \w` wins), `ls`
+  colorized on a terminal (bold blue directories, bold green executables), `history`
+- The language: quotes and every `$` form, pipes, redirections (heredocs `<<`/`<<-`,
+  here-strings), **process substitution `<(cmd)` and `>(cmd)`** (temp-file backed:
+  the input form's file carries the command's output, the output form's command
+  consumes the file when the caller finishes), `&&`/`||`/`;`/`&`, `if`/`for`/`while`/
+  `until`/`case`, functions, subshells, `set -e`/`-x`, aliases, `test`/`[[ ]]`, and
+  `./script.sh args` executing through this shell (shebang lines honoured, no chmod
+  ceremony), **brace expansion** (`{a,b}`, nested, `{1..10..2}`, `{a..e}`, `{01..10}`;
+  quoted or comma-less braces stay literal), `trap 'cmd' EXIT` (fires at script end, `exit`
+  and EOF; other signal names are remembered for `trap -p`, never delivered) and
+  `break N` / `continue N`, **indexed arrays** (`a=(x y)`, `a+=(z)`, `a[i]=v`, `${a[i]}`,
+  `${a[@]}` spliced in double quotes, `${#a[@]}`, `${!a[@]}`, negative indices, `unset a[i]`,
+  `declare -a/-x`, `mapfile -t`), the **parameter operators** (`${x#p}` `${x##p}` `${x%p}`
+  `${x%%p}` `${x/p/r}` `${x//p/r}` `${x/#p/r}` `${x/%p/r}` `${x:o:l}` `${@:2}` `${x^}` `${x^^}`
+  `${x,}` `${x,,}`) and `set -- a b c`, **associative arrays** (`declare -A`, `m[key]=v`, `m=([k]=v)`, `${m[$k]}`,
+  `${!m[@]}`, `unset m[k]`), `name[$i]=v` subscripts, `read -a`, **`(( ))` / `let` / C-style
+  `for ((i=0;i<n;i++))`** over a full arithmetic engine (`arith.rs`: C precedence, `**`, bitwise,
+  shifts, `?:`, `,`, assignments and `++`/`--` on variables and array elements, short-circuit)
+  and **job control** (`cmd &` registers a job: `jobs`, `wait [%n]`, `fg`, `bg`, `disown`,
+  `$!`, `Done` notices at the next prompt; `kill pid` reaches real processes only — a job is a
+  thread of the shell and cannot be signalled); not implemented: `select`, `getopts`, nested
+  associative values — unsupported
+  constructs fail with a clear syntax error
+- The tools — Claude's high-frequency set, analysed and closed to parity (nothing
+  external, no MINGW/MSYS component anywhere): the curated applet list wins over
+  `PATH` (a script's `find` is never Windows' `find.exe`) — `ls(-t/-r) cat
+  grep(-o/-E/-r/-A/-B/-C/--include/--exclude) sed(-i, multiple -e) find(-exec/-delete/
+  -o/! / parens/-path/-mtime) head(-c) tail wc sort(-t/-k/-o/-n/-u/-r) uniq cut tr cp mv
+  rm mkdir touch env which basename dirname realpath readlink(-f) date sleep seq clear
+  diff(Myers, unified) tee xargs(-n/-0/-I/-r, GNU empty-input semantics) uname whoami
+  hostname cygpath md5sum sha1sum sha256sum(-c) base64(-d) du(-s/-h) ln(-s) chmod
+  timeout(124 on expiry) tar(-c/-x/-t/-z) unzip(-l/-o/-d) gzip/gunzip less/more` (the pager
+  prints whole inputs, `-N` numbers; the terminal has its own scrollback) plus **`bash`/`sh`
+  as builtins** (`bash script.sh`, `bash -c '…' a b`, `sh -c`, a script on stdin: a fresh
+  nested shell over the parent's exported environment and cwd, `run_nested` in `mod.rs`) and a working
+  **awk** interpreter (`awk.rs`: patterns and actions, BEGIN/END, `$n` fields with
+  assignment, associative arrays, `print`/`printf` with redirection, `sub`/`gsub`/
+  `split`/`substr`/`index`/`sprintf`, `if`/`while`/`for`/`for-in`, pre/post `++`/`--`,
+  `next`/`exit`, `-F`/`-v`; no user functions, no `getline`/`system`); the archives are
+  pure Rust (`compress.rs`: a real DEFLATE inflater, fixed and dynamic Huffman, plus a
+  stored-block gzip writer; `archive.rs`: USTAR tar read/write and zip extraction)
+- The setting (`terminalShell`: **ggsBash is the default**, powershell the alternative):
+  it rides every `pty_create` (new terminals pick it up live), the backend reads it
+  from `~/.ggs/settings.json`, and for the bridged claude-code backend it injects
+  `CLAUDE_CODE_GIT_BASH_PATH` + `MSYSTEM=MINGW64` + `SHELL` (module 12's two sinks, the
+  provider switch's own restart path `providers_shell_refresh`) — so Claude Code writes
+  its commands exactly as on Git Bash
+- `uname` answers `MINGW64_NT-...` (the dialect's identity, stated on purpose); the
+  checksums are pure-Rust MD5/SHA-1/SHA-256 (`hashes.rs`); the regex engine
+  (`regexlite.rs`) is a backtracking VM on an explicit heap stack — no pattern can
+  overflow a thread stack
+
+- The line editor (`lineedit.rs`): the REPL's readline — raw mode only while a line is read
+  (Win32 console mode / `stty`, restored before any command runs; a stdin that cannot
+  enter it falls back to plain `read_line`), cursor motion, Ctrl-A/E/U/K/W/L, word motion,
+  history recall on Up/Down, Ctrl-R reverse incremental search, `!!` / `!$` / `!^` / `!*` /
+  `!n` / `!-n` / `!prefix` / `!?text` history expansion (single quotes and `\!` keep a bang
+  literal), Ctrl-C/Ctrl-D, and **Tab completion**: command names
+  (builtins, applets, functions, aliases, PATH executables), files and directories
+  (`~`, `/c/...`, spaces escaped, hidden files on a leading dot, `cd` dirs only),
+  `$VARIABLES`, git subcommands and — after `checkout`/`switch`/`merge`/… — branch,
+  remote and tag names; a unique match is inserted, an ambiguous one extends to the common
+  prefix and then lists in columns
+- The shell: `src-tauri/src/ggs_bash/` (`lex.rs` the tokenizer, `parse.rs` the parser,
+  `expand.rs` word expansion, `exec.rs` the interpreter over in-process pipes and the
+  PATH/HOME plumbing, `builtins.rs` the shell builtins, `applets.rs` the line tools,
+  `awk.rs` the awk interpreter, `arith.rs` shell arithmetic, `lineedit.rs` the line editor,
+  `regexlite.rs`, `glob.rs`, `hashes.rs`, `localtime.rs`,
+  `msys.rs` the path dialect, `compress.rs`/`archive.rs` the pure-Rust archives,
+  `mod.rs` the CLI entry and REPL, `pref.rs` the setting
+  read + the claude env), the binary `src-tauri/src/bin/ggs_bash.rs` (no feature gates:
+  `cargo test` builds and runs its suite everywhere, and the bundler ships it as the
+  crate's own additional binary beside `ggs.exe` — never also as a staged `externalBin`
+  sidecar: two components installing the same `ggs-bash.exe` fail MSI validation with
+  ICE30)
+- The setting: `terminalShell` in `src/settings.ts` (switching it invokes
+  `providers_shell_refresh`), the shell choice on every `pty_create` in
+  `src/terminal.ts`, the sidecar spawn in `src-tauri/src/pty.rs` (`shell_command`)
+- Tests: the `#[cfg(test)]` suites through `src-tauri/src/ggs_bash/` (the language, the
+  dialect round-trip, the invocation-dialect parser, and the e2e batches in
+  `mod.rs` — the file operations, `ls`, the grep/find/sed/sort/head/xargs flag sets,
+  the checksums and archives, `timeout`, the builtins, the `>`/`<` process
+  substitutions, the parameter forms) and `pty.rs`'s `shell_command`;
+  `cmd_providers.rs`'s spawn-env guard; `src-tauri/tests/ggs_bash_cli.rs` (the built
+  binary's CLI contract — the `-l`/`-i` flags riding around `-c` in any order,
+  `--login`, the positional words after the command string);
+  `tests/ggsBash.test.ts` and the module self-test group
 
 ## Development workflow
 

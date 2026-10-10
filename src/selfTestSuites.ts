@@ -14,6 +14,7 @@ import { commands } from './commands';
 import { locale, t } from './i18n';
 import { scoreFile, makeQuery, type FileEntry } from './fuzzy';
 import { ANALYSIS_TOOLS } from './analysisTools';
+import { SETTING_DEFS } from './settings';
 import { registerSelfTests, type SelfTestGroup } from './selftest';
 import type { Workbench } from './workbench';
 
@@ -595,6 +596,32 @@ export function registerSelfTestSuites(workbench: Workbench): void {
 					await settle();
 					await commands.execute('workbench.closeEditor');
 					await settle();
+				}
+			}
+		]
+	});
+
+	/* 18 · GGS Bash */
+	registerSelfTests({
+		module: 'GGS Bash',
+		tests: [
+			{
+				id: 'setting',
+				name: 'the Terminal Shell setting offers PowerShell and GGS Bash',
+				run: async () => {
+					const def = SETTING_DEFS.find((candidate) => candidate.key === 'terminalShell');
+					if (!def) throw new Error('the terminalShell setting is not registered');
+					const values = def.options?.map((option) => option.value);
+					if (values?.join(',') !== 'powershell,ggsBash') throw new Error(`unexpected options: ${values?.join(',')}`);
+				}
+			},
+			{
+				id: 'labels',
+				name: 'both shell options label themselves in the active language',
+				run: async () => {
+					for (const key of ['settings.terminalShell', 'settings.terminalShell.powershell', 'settings.terminalShell.ggsBash'] as const) {
+						if (t(key) === key) throw new Error(`${key} has no label`);
+					}
 				}
 			}
 		]

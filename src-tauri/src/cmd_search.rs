@@ -1188,7 +1188,10 @@ mod tests {
         std::fs::write(dir.path().join("a.rs"), "// TODO one\nfn alpha() {}\n").unwrap();
         let files = walk_files(&dir.path().display().to_string());
         let ms = search_first_batch_ms(&files, &dir.path().display().to_string(), "TODO").unwrap();
-        assert!(ms > 0.0, "a sub-millisecond first batch still reports ({ms} ms)");
+        assert!(
+            ms > 0.0,
+            "a sub-millisecond first batch still reports ({ms} ms)"
+        );
 
         // A query the head of the tree never matches is an error, not a null: the caller
         // picks a query that hits early (the measure probe's own words).

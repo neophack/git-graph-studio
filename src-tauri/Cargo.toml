@@ -50,6 +50,14 @@ name = "ggs-node"
 path = "src/bin/ggs_node.rs"
 required-features = ["node-runtime"]
 
+# GGS Bash (`src/ggs_bash/`, module 18): the bundled bash-like shell. No feature gates
+# and no dependencies beyond std — pure Rust, so plain `cargo test` builds and tests it
+# everywhere, and the sidecar build (`prepare.mjs`) compiles it without the desktop
+# stack exactly like ggs-node.
+[[bin]]
+name = "ggs-bash"
+path = "src/bin/ggs_bash.rs"
+
 [features]
 default = ["desktop"]
 # The pretend Node runtime's JS engine (`src/node_runtime/`): Boa is pure Rust (plan §3.1 —
