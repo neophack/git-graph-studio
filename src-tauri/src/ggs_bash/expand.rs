@@ -4,17 +4,21 @@
 //! characters were unquoted, and quote removal throughout. Which parts of a word were
 //! quoted decides all of it, which is why the AST keeps the quoting structure.
 
+use std::sync::{Arc, Mutex};
+
 use super::ast::{DPart, ParamOp, Part, Word};
 use super::exec::{ExecError, Io, Shell};
 use super::lex;
 
 /// One expanded run of text. `quoted` text neither splits nor globs; `boundary` closes
-/// the current field after the fragment (the `"$@"` splice).
+/// the current field after the fragment (the `"$@"` splice); `split` marks an unquoted
+/// expansion result — the only text IFS field-splits (literals never split).
 #[derive(Debug, Clone)]
 struct Frag {
     text: String,
     quoted: bool,
     boundary: bool,
+    split: bool,
 }
 
 /// Expand command words: fields, split and globbed.
@@ -304,31 +308,68 @@ fn expand_one_word(shell: &mut Shell, word: &Word, io: &Io) -> Result<Vec<String
     let mut current = String::new();
     let mut started = false;
     let mut globbable = false;
+    // A `"$@"` splice is still inside the quotes: following text glues onto its last
+    // argument (`"x$@y"` over `a b` is two fields, `xa` and `by`), and only the NEXT
+    // splice opens a new field. Set while the last splice's field is still open.
+    let mut spliced = false;
+    // IFS whitespace seen since the last field with nothing between: it merges into a
+    // following non-whitespace delimiter instead of counting as its own boundary.
+    let mut pending_ws = false;
     for frag in frags {
         if frag.boundary {
-            // A `"$@"` splice: this text is a whole field, closed behind itself.
+            if spliced {
+                fields.push((std::mem::take(&mut current), false));
+                globbable = false;
+            }
             current.push_str(&frag.text);
-            fields.push((std::mem::take(&mut current), false));
-            started = false;
-            globbable = false;
+            started = true;
+            spliced = true;
+            pending_ws = false;
             continue;
         }
-        if frag.quoted {
+        if frag.quoted || !frag.split {
+            // Only unquoted expansion results field-split — literal text never does
+            // (`IFS=:; echo a::b` passes one argument), though an unquoted literal's
+            // glob characters still glob.
+            if !frag.quoted {
+                for c in frag.text.chars() {
+                    if matches!(c, '*' | '?' | '[') {
+                        globbable = true;
+                    }
+                }
+            }
             started = true;
             current.push_str(&frag.text);
             continue;
         }
         let mut chunk = String::new();
         for c in frag.text.chars() {
-            if ifs.contains(&c) {
+            if ifs.contains(&c) && !matches!(c, ' ' | '\t' | '\n') {
+                // A non-whitespace delimiter always ends a field: with its content
+                // when there is any, as an empty one between adjacent delimiters
+                // (`IFS=:; set -- $v` over `a::b` is three fields) — unless IFS
+                // whitespace just delimited, which absorbs it.
+                current.push_str(&chunk);
+                chunk.clear();
+                if !current.is_empty() || started || !pending_ws {
+                    fields.push((std::mem::take(&mut current), globbable));
+                }
+                started = false;
+                globbable = false;
+                spliced = false;
+                pending_ws = false;
+            } else if ifs.contains(&c) {
                 if !chunk.is_empty() || started {
                     current.push_str(&chunk);
                     chunk.clear();
                     fields.push((std::mem::take(&mut current), globbable));
                     started = false;
                     globbable = false;
+                    spliced = false;
                 }
+                pending_ws = true;
             } else {
+                pending_ws = false;
                 if matches!(c, '*' | '?' | '[') {
                     globbable = true;
                 }
@@ -372,6 +413,7 @@ fn fragments(shell: &mut Shell, word: &Word, io: &Io) -> Result<Vec<Frag>, ExecE
                         text,
                         quoted: false,
                         boundary: false,
+                        split: false,
                     });
                 }
             }
@@ -379,8 +421,20 @@ fn fragments(shell: &mut Shell, word: &Word, io: &Io) -> Result<Vec<Frag>, ExecE
                 text: text.clone(),
                 quoted: true,
                 boundary: false,
+                split: false,
             }),
             Part::DQuoted(parts) => {
+                // `""` is one empty field, not zero: an interior that produced no parts
+                // still marks the word as started, so the empty argument survives
+                // (`set -- ""; echo $#` is 1, and `cmd ""` passes an empty argument).
+                if parts.is_empty() {
+                    frags.push(Frag {
+                        text: String::new(),
+                        quoted: true,
+                        boundary: false,
+                        split: false,
+                    });
+                }
                 for part in parts {
                     match part {
                         DPart::Lit(text) => {
@@ -389,6 +443,7 @@ fn fragments(shell: &mut Shell, word: &Word, io: &Io) -> Result<Vec<Frag>, ExecE
                                     text: text.clone(),
                                     quoted: true,
                                     boundary: false,
+                                    split: false,
                                 });
                             }
                         }
@@ -403,6 +458,7 @@ fn fragments(shell: &mut Shell, word: &Word, io: &Io) -> Result<Vec<Frag>, ExecE
                                             text: item,
                                             quoted: true,
                                             boundary: true,
+                                            split: false,
                                         });
                                     }
                                     continue;
@@ -415,6 +471,7 @@ fn fragments(shell: &mut Shell, word: &Word, io: &Io) -> Result<Vec<Frag>, ExecE
                                         text: arg,
                                         quoted: true,
                                         boundary: true,
+                                        split: false,
                                     });
                                 }
                             } else {
@@ -423,6 +480,7 @@ fn fragments(shell: &mut Shell, word: &Word, io: &Io) -> Result<Vec<Frag>, ExecE
                                     text: value,
                                     quoted: true,
                                     boundary: false,
+                                    split: false,
                                 });
                             }
                         }
@@ -432,6 +490,7 @@ fn fragments(shell: &mut Shell, word: &Word, io: &Io) -> Result<Vec<Frag>, ExecE
                                 text: value,
                                 quoted: true,
                                 boundary: false,
+                                split: false,
                             });
                         }
                         DPart::ProcSub(script, out) => {
@@ -440,6 +499,7 @@ fn fragments(shell: &mut Shell, word: &Word, io: &Io) -> Result<Vec<Frag>, ExecE
                                 text: path,
                                 quoted: true,
                                 boundary: false,
+                                split: false,
                             });
                         }
                         DPart::Arith(text) => {
@@ -448,6 +508,7 @@ fn fragments(shell: &mut Shell, word: &Word, io: &Io) -> Result<Vec<Frag>, ExecE
                                 text: value.to_string(),
                                 quoted: true,
                                 boundary: false,
+                                split: false,
                             });
                         }
                     }
@@ -461,24 +522,33 @@ fn fragments(shell: &mut Shell, word: &Word, io: &Io) -> Result<Vec<Frag>, ExecE
                     text: format!("({})", items.join(" ")),
                     quoted: true,
                     boundary: false,
+                    split: false,
                 });
             }
             Part::Sep => {}
             Part::Var { name, op, word } => {
                 if name == "@" && matches!(op, ParamOp::Plain) {
-                    for arg in shell.positional() {
-                        frags.push(Frag {
-                            text: arg,
-                            quoted: false,
-                            boundary: true,
-                        });
-                    }
+                    // Unquoted `$@` splits and globs like any expansion: the arguments
+                    // rejoin into one text the IFS loop breaks apart again
+                    // (`set -- "a b" c; for v in $@` walks a, b, c). The join character
+                    // is the first of IFS, so a custom IFS re-splits it.
+                    let sep = match shell.get_var("IFS") {
+                        Some(ifs) => ifs.chars().next().map(String::from).unwrap_or_default(),
+                        None => " ".to_owned(),
+                    };
+                    frags.push(Frag {
+                        text: shell.positional().join(&sep),
+                        quoted: false,
+                        boundary: false,
+                        split: true,
+                    });
                 } else {
                     let value = param_value(shell, name, *op, word.as_ref(), io, false)?;
                     frags.push(Frag {
                         text: value,
                         quoted: false,
                         boundary: false,
+                        split: true,
                     });
                 }
             }
@@ -488,6 +558,7 @@ fn fragments(shell: &mut Shell, word: &Word, io: &Io) -> Result<Vec<Frag>, ExecE
                     text: value,
                     quoted: false,
                     boundary: false,
+                    split: true,
                 });
             }
             Part::ProcSub(script, out) => {
@@ -496,6 +567,7 @@ fn fragments(shell: &mut Shell, word: &Word, io: &Io) -> Result<Vec<Frag>, ExecE
                     text: path,
                     quoted: true,
                     boundary: false,
+                    split: false,
                 });
             }
             Part::Arith(text) => {
@@ -504,6 +576,7 @@ fn fragments(shell: &mut Shell, word: &Word, io: &Io) -> Result<Vec<Frag>, ExecE
                     text: value.to_string(),
                     quoted: false,
                     boundary: false,
+                    split: true,
                 });
             }
         }
@@ -811,10 +884,28 @@ fn param_value(
     io: &Io,
     _quoted: bool,
 ) -> Result<String, ExecError> {
+    // `${!name}` — one extra hop: the value of $name is the variable to fetch.
+    if let Some(indirect) = name.strip_prefix('!') {
+        if !indirect.is_empty() {
+            if let Some(target) = shell.get_var(indirect) {
+                if !target.is_empty() {
+                    return param_value(shell, &target, op, word, io, _quoted);
+                }
+            }
+        }
+    }
     if let Some(items) = array_all_items(shell, name, op, word, io)? {
         return Ok(items.join(" "));
     }
-    if name == "@" || name == "*" {
+    if name == "*" {
+        // The glue form joins with the first IFS character (`IFS=:; "$*"` → a:b:c).
+        let sep = match shell.get_var("IFS") {
+            Some(ifs) => ifs.chars().next().map(String::from).unwrap_or_default(),
+            None => " ".to_owned(),
+        };
+        return Ok(shell.positional().join(&sep));
+    }
+    if name == "@" {
         // Handled by the caller for the splice; the glue form joins.
         return Ok(shell.positional().join(" "));
     }
@@ -874,8 +965,14 @@ fn param_value(
         | ParamOp::Replace { .. }
         | ParamOp::Substring
         | ParamOp::Case { .. } => text_op(shell, op, &value, word, io),
-        ParamOp::Default => {
-            let use_default = if is_set { value.is_empty() } else { true };
+        ParamOp::Default { colon } => {
+            // The colon forms test unset-or-empty; the bare forms test unset only
+            // (`${x-d}` leaves a set-but-empty x alone).
+            let use_default = if colon {
+                !is_set || value.is_empty()
+            } else {
+                !is_set
+            };
             if use_default {
                 Ok(word
                     .map(|w| expand_single(shell, w, io))
@@ -885,21 +982,36 @@ fn param_value(
                 Ok(value)
             }
         }
-        ParamOp::Assign => {
-            let use_default = if is_set { value.is_empty() } else { true };
+        ParamOp::Assign { colon } => {
+            let use_default = if colon {
+                !is_set || value.is_empty()
+            } else {
+                !is_set
+            };
             if use_default {
                 let assigned = word
                     .map(|w| expand_single(shell, w, io))
                     .transpose()?
                     .unwrap_or_default();
-                shell.set_var(name, &assigned);
+                // `${arr[i]:=word}` assigns the element, not a variable literally
+                // named `arr[i]` — the same routing an assignment statement takes.
+                if split_subscript(name).is_some() {
+                    shell.assign(name, &Word(vec![Part::Lit(assigned.clone())]), io)?;
+                } else {
+                    shell.set_var(name, &assigned);
+                }
                 Ok(assigned)
             } else {
                 Ok(value)
             }
         }
-        ParamOp::Alternate => {
-            if is_set && !value.is_empty() {
+        ParamOp::Alternate { colon } => {
+            let use_alt = if colon {
+                is_set && !value.is_empty()
+            } else {
+                is_set
+            };
+            if use_alt {
                 Ok(word
                     .map(|w| expand_single(shell, w, io))
                     .transpose()?
@@ -921,7 +1033,14 @@ fn command_substitution(
     let mut sub = shell.clone();
     let (capture_io, buffer) = Io::capturing();
     let _ = io;
-    let result = sub.exec_script(script, &capture_io);
+    let outcome = sub.exec_script(script, &capture_io);
+    // `exit` (or a stray `return`) inside the substitution ends the SUBSHELL; the
+    // outer shell keeps going (`x=$(exit 5); echo after` still echoes).
+    let result = match outcome {
+        Ok(status) => Ok(status),
+        Err(ExecError::Exit(code)) | Err(ExecError::Return(code)) => Ok(code),
+        Err(other) => Err(other),
+    };
     shell.status = match &result {
         Ok(status) => *status,
         Err(_) => 1,
@@ -984,7 +1103,7 @@ pub fn flush_pending_process_subs(shell: &mut Shell, io: &Io) {
             continue;
         };
         let run_io = Io {
-            stdin: super::exec::Source::Str(text),
+            stdin: super::exec::Source::Str(Arc::new(Mutex::new(text))),
             stdout: io.stdout.clone(),
             stderr: io.stderr.clone(),
         };

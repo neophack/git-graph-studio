@@ -79,6 +79,16 @@ pub struct Match {
 /// One VM outcome: the end position and the capture groups.
 type RunOutcome = (usize, Vec<Option<(usize, usize)>>);
 
+/// Byte offsets of each character boundary: `map[i]` is where `chars[i]` starts in
+/// bytes, `map[len]` the text's length — the engine's char positions cross over into
+/// the byte indices callers slice with.
+fn byte_map(text: &str) -> Vec<usize> {
+    text.char_indices()
+        .map(|(at, _)| at)
+        .chain(std::iter::once(text.len()))
+        .collect()
+}
+
 impl Regex {
     /// Compile `pattern`. `ere` selects the dialect: ERE (`a|b`, `(x)+`) or BRE
     /// (`a\|b`, `\(x\)\+`). `icase` folds case into every literal and class.
@@ -120,6 +130,7 @@ impl Regex {
     /// engine one line at a time (grep, sed), the way those tools anchor lines.
     pub fn find(&self, text: &str) -> Option<Match> {
         let chars: Vec<char> = text.chars().collect();
+        let map = byte_map(text);
         // One budget across every start position: a runaway at one offset must not
         // repeat itself at the next four thousand.
         let mut steps = 0usize;
@@ -127,7 +138,17 @@ impl Regex {
             if let Some((end, groups)) = self.run(&chars, start, &mut steps) {
                 let mut groups = groups;
                 groups[0] = Some((start, end));
-                return Some(Match { start, end, groups });
+                // Byte offsets on the way out: every caller slices `text` with these
+                // spans, and a char count panics the slice once a multibyte
+                // character sits in front of the match.
+                return Some(Match {
+                    start: map[start],
+                    end: map[end],
+                    groups: groups
+                        .into_iter()
+                        .map(|g| g.map(|(s, e)| (map[s], map[e])))
+                        .collect(),
+                });
             }
         }
         None
@@ -149,32 +170,37 @@ impl Regex {
         out
     }
 
-    /// Every non-overlapping match, left to right.
+    /// Every non-overlapping match, left to right, in byte offsets. An empty match
+    /// advances one character so it cannot match again at the same place.
     pub fn find_iter(&self, text: &str) -> Vec<Match> {
-        let mut out = Vec::new();
         let chars: Vec<char> = text.chars().collect();
-        let mut at = 0;
+        let map = byte_map(text);
+        let mut out = Vec::new();
+        let mut steps = 0usize;
+        let mut at = 0usize;
         while at <= chars.len() {
-            let tail: String = chars[at..].iter().collect();
-            if let Some(found) = self.find(&tail) {
-                let advanced = if found.end == found.start {
-                    at + 1
-                } else {
-                    at + found.end
-                };
-                out.push(Match {
-                    start: at + found.start,
-                    end: at + found.end,
-                    groups: found
-                        .groups
-                        .iter()
-                        .map(|g| g.map(|(s, e)| (at + s, at + e)))
-                        .collect(),
-                });
-                at = advanced;
-            } else {
-                break;
+            // The leftmost match starting at `at` or later — `find`'s scan minus the
+            // start positions already ruled out.
+            let mut hit = None;
+            for start in at..=chars.len() {
+                if let Some((end, groups)) = self.run(&chars, start, &mut steps) {
+                    hit = Some((start, end, groups));
+                    break;
+                }
             }
+            let Some((start, end, mut groups)) = hit else {
+                break;
+            };
+            groups[0] = Some((start, end));
+            out.push(Match {
+                start: map[start],
+                end: map[end],
+                groups: groups
+                    .into_iter()
+                    .map(|g| g.map(|(s, e)| (map[s], map[e])))
+                    .collect(),
+            });
+            at = if end == start { start + 1 } else { end };
         }
         out
     }

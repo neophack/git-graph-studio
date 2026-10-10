@@ -611,6 +611,13 @@ impl Lexer {
                 let start = self.at;
                 let mut depth = 1;
                 while let Some(c) = self.peek() {
+                    // A backslash escapes the next character for the brace scan, the
+                    // way it does inside the expansion (`${q:-a\}b}` closes at the real
+                    // `}`, not at the escaped one).
+                    if c == '\\' && self.peek_at(1).is_some() {
+                        self.at += 2;
+                        continue;
+                    }
                     if c == '{' {
                         depth += 1;
                     } else if c == '}' {
@@ -740,16 +747,6 @@ fn array_target(lit: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-fn sub_word(text: &str) -> Result<Word, LexError> {
-    let mut sub = Lexer {
-        chars: text.chars().collect(),
-        at: 0,
-        out: LexOut::default(),
-        pending_heredocs: Vec::new(),
-    };
-    Ok(sub.read_word()?.0)
-}
-
 /// The argument text of `${x/pat/rep}` / `${x:off:len}`: read like a double quote, so
 /// spaces and operators inside stay literal and the `$` forms still expand.
 fn loose_word(text: &str) -> Result<Word, LexError> {
@@ -842,15 +839,28 @@ fn parse_param(inner: &str) -> Result<Part, LexError> {
         at += 1;
     }
     if at == 0 {
-        // A special parameter (`?`, `#`, `$`, …) or `$`-prefixed indirect — take one char.
-        if !chars.is_empty() {
-            at = 1;
-        } else {
-            return Ok(Part::Var {
-                name: String::new(),
-                op: ParamOp::Plain,
-                word: None,
-            });
+        // `${!name}` without a subscript: indirection — `param_value` resolves the
+        // extra hop (`x=hi; y=x; ${!y}` answers hi).
+        if chars.first() == Some(&'!') {
+            let mut end = 1;
+            while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+                end += 1;
+            }
+            if end > 1 {
+                at = end;
+            }
+        }
+        if at == 0 {
+            // A special parameter (`?`, `#`, `$`, …) or `$`-prefixed indirect — take one char.
+            if !chars.is_empty() {
+                at = 1;
+            } else {
+                return Ok(Part::Var {
+                    name: String::new(),
+                    op: ParamOp::Plain,
+                    word: None,
+                });
+            }
         }
     } else if chars.get(at) == Some(&'[') {
         // A subscript: `arr[0]`, `arr[@]`, `arr[i+1]` — the name keeps its brackets.
@@ -871,7 +881,9 @@ fn parse_param(inner: &str) -> Result<Part, LexError> {
         let word = if tail.is_empty() {
             None
         } else {
-            Some(sub_word(tail)?)
+            // The operator's word reads like double-quoted text: `${z:-a b c}` keeps
+            // its spaces (read_word would stop at the first one).
+            Some(loose_word(tail)?)
         };
         Ok(Part::Var {
             name: name.clone(),
@@ -880,20 +892,20 @@ fn parse_param(inner: &str) -> Result<Part, LexError> {
         })
     };
     let (op, tail) = if let Some(t) = rest.strip_prefix(":-") {
-        (ParamOp::Default, t)
+        (ParamOp::Default { colon: true }, t)
     } else if let Some(t) = rest.strip_prefix('-') {
-        (ParamOp::Default, t)
+        (ParamOp::Default { colon: false }, t)
     } else if let Some(t) = rest.strip_prefix(":=") {
-        (ParamOp::Assign, t)
+        (ParamOp::Assign { colon: true }, t)
     } else if let Some(t) = rest.strip_prefix('=') {
-        (ParamOp::Assign, t)
+        (ParamOp::Assign { colon: false }, t)
     } else if let Some(t) = rest.strip_prefix(":+") {
-        (ParamOp::Alternate, t)
+        (ParamOp::Alternate { colon: true }, t)
     } else if let Some(t) = rest.strip_prefix('+') {
-        (ParamOp::Alternate, t)
+        (ParamOp::Alternate { colon: false }, t)
     } else if let Some(t) = rest.strip_prefix(":?") {
         // `:?` (error when unset) degrades to a default carrying the message.
-        (ParamOp::Default, t)
+        (ParamOp::Default { colon: true }, t)
     } else if let Some(t) = rest.strip_prefix("##") {
         return simple(ParamOp::TrimPrefix { longest: true }, t);
     } else if let Some(t) = rest.strip_prefix('#') {
@@ -995,7 +1007,7 @@ mod tests {
             matches!(&word[0].0[0], Part::Var { name, op: ParamOp::Plain, .. } if name == "HOME")
         );
         assert!(
-            matches!(&word[1].0[0], Part::Var { name, op: ParamOp::Default, .. } if name == "x")
+            matches!(&word[1].0[0], Part::Var { name, op: ParamOp::Default { .. }, .. } if name == "x")
         );
         assert!(matches!(&word[2].0[0], Part::CmdSub(_)));
         assert!(matches!(&word[3].0[0], Part::Arith(text) if text == "1+2"));

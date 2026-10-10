@@ -172,12 +172,18 @@ pub enum DPart {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ParamOp {
     Plain,
-    /// `${name:-word}` / `${name-word}`
-    Default,
-    /// `${name:=word}`
-    Assign,
-    /// `${name:+word}`
-    Alternate,
+    /// `${name:-word}` (`colon: true`, unset-or-empty) / `${name-word}` (unset only)
+    Default {
+        colon: bool,
+    },
+    /// `${name:=word}` / `${name=word}`
+    Assign {
+        colon: bool,
+    },
+    /// `${name:+word}` / `${name+word}`
+    Alternate {
+        colon: bool,
+    },
     /// `${#name}` (the word is unused)
     Length,
     /// `${name#pat}` / `${name##pat}`

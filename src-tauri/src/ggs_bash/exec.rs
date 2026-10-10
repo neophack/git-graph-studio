@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -53,17 +54,33 @@ pub type ExecResult = Result<i32, ExecError>;
 pub enum Source {
     Inherit,
     Null,
-    Str(String),
-    /// A heredoc/pipe input.
-    PipeIn(Arc<Mutex<Receiver<Vec<u8>>>>),
+    /// Here-string / heredoc text — shared, so successive `read`s consume it in
+    /// steps (`while read x; do …; done <<< "$text"` walks the whole string).
+    Str(Arc<Mutex<String>>),
+    /// The receiving end of a pipe: the channel plus the bytes a one-line read
+    /// pulled early, so `while read` over a pipeline takes it line by line instead
+    /// of draining the stream on the first call.
+    PipeIn(Arc<Mutex<PipeRx>>),
     File(Arc<Mutex<std::fs::File>>),
+}
+
+/// The shared state behind [`Source::PipeIn`].
+pub struct PipeRx {
+    pub rx: Receiver<Vec<u8>>,
+    pub pending: Vec<u8>,
 }
 
 #[derive(Clone)]
 pub enum Sink {
     Inherit,
     Null,
-    PipeOut(Sender<Vec<u8>>),
+    PipeOut {
+        tx: Sender<Vec<u8>>,
+        /// Set once a send fails: the reading stage is gone, and the producing
+        /// stage's loops stop instead of pumping a disconnected channel forever —
+        /// the producer half of SIGPIPE (`while :; do echo; done | head -1`).
+        broken: Arc<std::sync::atomic::AtomicBool>,
+    },
     Capture(Arc<Mutex<Vec<u8>>>),
     File(Arc<Mutex<std::fs::File>>),
 }
@@ -107,8 +124,10 @@ impl Io {
                 let _ = out.flush();
             }
             Sink::Null => {}
-            Sink::PipeOut(tx) => {
-                let _ = tx.send(bytes.to_vec());
+            Sink::PipeOut { tx, broken } => {
+                if tx.send(bytes.to_vec()).is_err() {
+                    broken.store(true, Ordering::Relaxed);
+                }
             }
             Sink::Capture(buffer) => buffer.lock().unwrap().extend_from_slice(bytes),
             Sink::File(file) => {
@@ -130,8 +149,10 @@ impl Io {
                 let _ = err.flush();
             }
             Sink::Null => {}
-            Sink::PipeOut(tx) => {
-                let _ = tx.send(bytes.to_vec());
+            Sink::PipeOut { tx, broken } => {
+                if tx.send(bytes.to_vec()).is_err() {
+                    broken.store(true, Ordering::Relaxed);
+                }
             }
             Sink::Capture(buffer) => buffer.lock().unwrap().extend_from_slice(bytes),
             Sink::File(file) => {
@@ -142,6 +163,13 @@ impl Io {
 
     pub fn err_str(&self, text: &str) {
         self.write_err(text.as_bytes());
+    }
+
+    /// Whether a pipe this context writes into has closed — its reader is gone, the
+    /// producer's own version of SIGPIPE. Command loops check this between commands.
+    pub fn broken_pipe(&self) -> bool {
+        let dead = |sink: &Sink| matches!(sink, Sink::PipeOut { broken, .. } if broken.load(Ordering::Relaxed));
+        dead(&self.stdout) || dead(&self.stderr)
     }
 
     /// Everything stdin still holds. Channel input drains to the close; inherit reads
@@ -155,17 +183,16 @@ impl Io {
             }
             Source::Null => String::new(),
             Source::Str(text) => {
-                let taken = text.clone();
-                self.stdin = Source::Str(String::new());
-                taken
+                let mut text = text.lock().unwrap();
+                std::mem::take(&mut *text)
             }
-            Source::PipeIn(rx) => {
+            Source::PipeIn(state) => {
                 let mut bytes = Vec::new();
-                loop {
-                    let next = rx.lock().unwrap().recv();
-                    match next {
-                        Ok(chunk) => bytes.extend_from_slice(&chunk),
-                        Err(_) => break,
+                {
+                    let mut state = state.lock().unwrap();
+                    bytes.append(&mut state.pending);
+                    while let Ok(chunk) = state.rx.recv() {
+                        bytes.extend_from_slice(&chunk);
                     }
                 }
                 self.stdin = Source::Null;
@@ -179,20 +206,84 @@ impl Io {
         }
     }
 
-    /// One line, for the `read` builtin: a live interactive stdin reads exactly one
-    /// line; captured or piped input falls back to draining (a pipeline stage owns the
-    /// whole stream anyway).
+    /// One line, for the `read` builtin — exactly one: the position (a file handle, a
+    /// herestring, a pipe's buffered bytes) advances by the line, so the next `read`
+    /// in a `while read` loop sees the next line, not end-of-stream.
     pub fn read_one_line(&mut self) -> Option<String> {
-        if matches!(self.stdin, Source::Inherit) {
-            let mut line = String::new();
-            match std::io::stdin().read_line(&mut line) {
-                Ok(0) => None,
-                Ok(_) => Some(line.trim_end_matches(['\n', '\r']).to_owned()),
-                Err(_) => None,
+        self.read_raw_line().map(|line| {
+            String::from_utf8_lossy(&line)
+                .trim_end_matches(['\n', '\r'])
+                .to_owned()
+        })
+    }
+
+    /// One line as raw bytes, its terminating newline kept (absent only on a last line
+    /// that had none) — the byte-exact form `head` passes through untouched.
+    pub fn read_raw_line(&mut self) -> Option<Vec<u8>> {
+        match &self.stdin {
+            Source::Inherit => {
+                use std::io::BufRead;
+                let mut line = Vec::new();
+                match std::io::stdin().lock().read_until(b'\n', &mut line) {
+                    Ok(0) | Err(_) => None,
+                    Ok(_) => Some(line),
+                }
             }
-        } else {
-            let all = self.read_all_stdin();
-            all.lines().next().map(str::to_owned)
+            Source::Null => None,
+            Source::Str(text) => {
+                let mut text = text.lock().unwrap();
+                match text.find('\n') {
+                    Some(at) => {
+                        let line = text[..=at].as_bytes().to_vec();
+                        text.replace_range(..=at, "");
+                        Some(line)
+                    }
+                    None if text.is_empty() => None,
+                    None => Some(std::mem::take(&mut *text).into_bytes()),
+                }
+            }
+            Source::PipeIn(state) => {
+                let mut state = state.lock().unwrap();
+                loop {
+                    if let Some(at) = state.pending.iter().position(|b| *b == b'\n') {
+                        return Some(state.pending.drain(..=at).collect());
+                    }
+                    match state.rx.recv() {
+                        Ok(chunk) => state.pending.extend_from_slice(&chunk),
+                        Err(_) => {
+                            if state.pending.is_empty() {
+                                return None;
+                            }
+                            return Some(std::mem::take(&mut state.pending));
+                        }
+                    }
+                }
+            }
+            Source::File(file) => {
+                // Byte-wise on the shared handle: a fresh BufReader would drop its
+                // buffered-but-unread tail when it dies, losing every line after the
+                // first; the handle's own position is the only durable cursor.
+                let mut handle = file.lock().unwrap();
+                let mut line = Vec::new();
+                let mut byte = [0u8; 1];
+                loop {
+                    match handle.read(&mut byte) {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            line.push(byte[0]);
+                            if byte[0] == b'\n' {
+                                break;
+                            }
+                        }
+                        Err(_) => return None,
+                    }
+                }
+                if line.is_empty() {
+                    None
+                } else {
+                    Some(line)
+                }
+            }
         }
     }
 }
@@ -317,8 +408,18 @@ impl Shell {
             "$" => return Some(std::process::id().to_string()),
             "!" => return Some(self.jobs.lock().unwrap().last.to_string()),
             "0" => return Some(self.arg0.clone()),
-            "@" | "*" => return Some(self.args.join(" ")),
-            n if n.len() == 1 && n.chars().all(|c| c.is_ascii_digit()) => {
+            "@" => return Some(self.args.join(" ")),
+            // `$*` glues with the FIRST IFS character (`IFS=:; "$*"` is a:b:c), space
+            // when IFS is unset, nothing when it is set but empty.
+            "*" => {
+                return Some(match self.get_var("IFS") {
+                    Some(ifs) => self
+                        .args
+                        .join(&ifs.chars().next().map(String::from).unwrap_or_default()),
+                    None => self.args.join(" "),
+                });
+            }
+            n if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => {
                 return self
                     .args
                     .get(n.parse::<usize>().unwrap().checked_sub(1)?)
@@ -462,6 +563,21 @@ fn insert_env(env: &mut BTreeMap<String, String>, name: &str, value: &str) {
 
 /* ---------- Program resolution ---------- */
 
+/// The platform's executable extensions: PATHEXT on Windows (`.COM;.EXE;.BAT;.CMD` by
+/// default), a lone empty one elsewhere.
+fn executable_extensions() -> Vec<String> {
+    if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned())
+            .split(';')
+            .filter(|e| !e.is_empty())
+            .map(str::to_owned)
+            .collect()
+    } else {
+        vec![String::new()]
+    }
+}
+
 /// Find `name` the way the shell spawns it: a path with separators runs as-is;
 /// otherwise each `PATH` entry, with the platform's executable extensions (PATHEXT on
 /// Windows) appended. Returns the resolved path and whether it is a `.cmd`/`.bat`
@@ -473,16 +589,7 @@ pub fn resolve_on_path(name: &str, path_var: &str) -> Option<PathBuf> {
     {
         return Some(PathBuf::from(name));
     }
-    let extensions: Vec<String> = if cfg!(windows) {
-        let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned());
-        pathext
-            .split(';')
-            .filter(|e| !e.is_empty())
-            .map(str::to_owned)
-            .collect()
-    } else {
-        vec![String::new()]
-    };
+    let extensions = executable_extensions();
     // Both dialects, whichever side the value came from: the stored form is
     // `;`-joined Windows paths, `$PATH` round-trips arrive `:`-joined MSYS ones.
     for dir in path_var.split([';', ':']) {
@@ -498,6 +605,37 @@ pub fn resolve_on_path(name: &str, path_var: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Anchor a resolved-but-relative program (`./x`, `dir/tool`, an MSYS `/c/...` spelling)
+/// to the shell's cwd in the native dialect before spawning. Windows resolves a
+/// *relative* application path against the spawning process's cwd, which the shell's
+/// `cd` never moves — without this, `cd scripts && ./x.bat` would look for
+/// `<process cwd>\x.bat`. A literal miss then completes a PATHEXT extension the way Git
+/// Bash does: `./build` finds `build.bat`.
+pub fn anchor_program(program: &Path, cwd: &Path) -> PathBuf {
+    let text = program.display().to_string();
+    let dialect = if cfg!(windows) {
+        super::msys::from_msys(&text)
+    } else {
+        text
+    };
+    let mut anchored = PathBuf::from(dialect);
+    if !anchored.is_absolute() {
+        anchored = cwd.join(anchored);
+    }
+    if cfg!(windows) && !anchored.is_file() {
+        for extension in executable_extensions() {
+            if extension.is_empty() {
+                continue;
+            }
+            let candidate = PathBuf::from(format!("{}{}", anchored.display(), extension));
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    anchored
 }
 
 /* ---------- The interpreter ---------- */
@@ -693,6 +831,11 @@ impl Shell {
     pub fn exec_block(&mut self, script: &Script, io: &Io, exempt_pass: bool) -> ExecResult {
         let mut status = 0;
         for stmt in &script.0 {
+            // A closed pipe downstream ends this stage the way SIGPIPE ends a producer:
+            // `while :; do echo; done | head -1` stops once head exits, not never.
+            if io.broken_pipe() {
+                return Err(ExecError::Exit(141));
+            }
             self.last_was_exempt = false;
             status = self.exec_stmt(stmt, io)?;
             if self.errexit && status != 0 && !exempt_pass && !self.last_was_exempt {
@@ -791,14 +934,17 @@ impl Shell {
     /// (bash's pipeline segments are subshells). The channels are made up front so an
     /// early error drops every sender and the already-spawned stages see clean closes.
     fn run_threaded_pipeline(&mut self, pipeline: &Pipeline, io: &Io) -> ExecResult {
-        type PipeEnd = Arc<Mutex<Receiver<Vec<u8>>>>;
+        type PipeEnd = Arc<Mutex<PipeRx>>;
         let count = pipeline.stages.len();
         let mut senders: Vec<Option<Sender<Vec<u8>>>> = vec![None; count];
         let mut receivers: Vec<Option<PipeEnd>> = vec![None; count];
         for link in 0..count - 1 {
             let (tx, rx) = channel::<Vec<u8>>();
             senders[link] = Some(tx);
-            receivers[link + 1] = Some(Arc::new(Mutex::new(rx)));
+            receivers[link + 1] = Some(Arc::new(Mutex::new(PipeRx {
+                rx,
+                pending: Vec::new(),
+            })));
         }
         let mut threads = Vec::new();
         for (index, stage) in pipeline.stages.iter().enumerate() {
@@ -814,11 +960,12 @@ impl Shell {
             let stdout = if index + 1 == count {
                 io.stdout.clone()
             } else {
-                Sink::PipeOut(
-                    senders[index]
+                Sink::PipeOut {
+                    tx: senders[index]
                         .clone()
                         .expect("every non-last stage has a sender"),
-                )
+                    broken: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                }
             };
             let mut stage_io = Io {
                 stdin,
@@ -835,12 +982,25 @@ impl Shell {
         // The vec's originals of each sender must go before the joins: a downstream
         // stage's recv() only reports EOF once every sender clone is gone, and each
         // stage's own clone dies with its thread. Joining first would deadlock the
-        // reader of the very channel we are holding open.
+        // reader of the very channel we are holding open. The receiver originals
+        // matter just as much: a producer's send() only fails once the receiver is
+        // fully dropped, and an early-finishing consumer must close its pipe so an
+        // endless producer (`while :; do echo; done | head -1`) sees the close and
+        // stops instead of pumping forever.
         drop(senders);
+        drop(receivers);
         let mut status = 0;
         for thread in threads {
             match thread.join() {
-                Ok(result) => status = result.unwrap_or(1),
+                Ok(result) => {
+                    status = match result {
+                        Ok(code) => code,
+                        // A pipeline segment is a subshell: `exit` stays inside it and
+                        // its code is the stage's status.
+                        Err(ExecError::Exit(code)) => code,
+                        Err(_) => 1,
+                    }
+                }
                 Err(_) => status = 1,
             }
         }
@@ -906,7 +1066,12 @@ impl Shell {
             }
             Compound::Subshell(body) => {
                 let mut shell = self.clone();
-                shell.exec_block(body, io, false)
+                // `exit` ends the subshell, not the parent: its code becomes the
+                // subshell's status (`(exit 3); echo after` still echoes).
+                match shell.exec_block(body, io, false) {
+                    Err(ExecError::Exit(code)) => Ok(code),
+                    other => other,
+                }
             }
             Compound::If {
                 cond,
@@ -972,7 +1137,9 @@ impl Shell {
                 for arm in arms {
                     for pattern in &arm.patterns {
                         let pattern_text = expand::expand_pattern(self, pattern, io)?;
-                        if super::glob::glob_match(&pattern_text, &value) {
+                        // `case` is pattern matching, not pathname expansion — no
+                        // hidden-file rule (`case .git in *) …` must take the arm).
+                        if super::glob::glob_match_raw(&pattern_text, &value) {
                             return self.exec_block(&arm.body, io, false);
                         }
                     }
@@ -1030,9 +1197,22 @@ impl Shell {
             for (name, value) in assigns {
                 extra.push((name.clone(), expand::expand_assignment(self, value, io)?));
             }
+            // Save/restore under the key the map actually holds: on Windows `PATH`
+            // lives as `Path`, and restoring the literal spelling would remove
+            // nothing while `export_var` had already clobbered the real entry —
+            // a `PATH=…:$PATH cmd` leaking into the whole session afterwards.
             let saved: Vec<(String, Option<Var>)> = extra
                 .iter()
-                .map(|(name, _)| (name.clone(), self.vars.get(name).cloned()))
+                .map(|(name, _)| {
+                    let key = self
+                        .vars
+                        .keys()
+                        .find(|key| key.eq_ignore_ascii_case(name))
+                        .cloned()
+                        .unwrap_or_else(|| name.clone());
+                    let previous = self.vars.get(&key).cloned();
+                    (key, previous)
+                })
                 .collect();
             for (name, value) in &extra {
                 self.export_var(name, Some(value));
@@ -1098,10 +1278,23 @@ impl Shell {
         extra_env: &[(String, String)],
         io: &Io,
     ) -> ExecResult {
-        let Some(program) = resolve_on_path(name, &self.path_var()) else {
+        let Some(resolved) = resolve_on_path(name, &self.path_var()) else {
             io.err_str(&format!("ggs-bash: {name}: command not found\n"));
             return Ok(127);
         };
+        let program = anchor_program(&resolved, &self.cwd);
+        // Rust std routes a .bat/.cmd through cmd.exe without checking the script
+        // exists, so a missing one turns into cmd.exe's localized "not recognized"
+        // noise carrying cmd's own exit code — report it the way every other missing
+        // program reports instead.
+        let is_batch = program
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("bat") || e.eq_ignore_ascii_case("cmd"));
+        if cfg!(windows) && is_batch && !program.is_file() {
+            io.err_str(&format!("ggs-bash: {name}: command not found\n"));
+            return Ok(127);
+        }
         // Native programs do not know `/c/...`; MSYS2 converts arguments of the
         // unambiguous path shape for native children, and so does the shell.
         let translated: Vec<String> = if cfg!(windows) {
@@ -1122,12 +1315,8 @@ impl Shell {
             Err(error) => {
                 // A text file with a shebang (or a .sh the platform refuses as PE)
                 // executes through this very shell: `./build.sh args` runs the way
-                // Git Bash runs it, no chmod ceremony.
-                let program = if program.is_absolute() {
-                    program.clone()
-                } else {
-                    self.cwd.join(&program)
-                };
+                // Git Bash runs it, no chmod ceremony. `program` is already anchored
+                // absolute above, so it reads as-is.
                 if let Ok(head) = std::fs::read(&program) {
                     let looks_script = head.starts_with(b"#!")
                         || (program.extension().map(|e| e == "sh").unwrap_or(false)
@@ -1198,9 +1387,18 @@ impl Shell {
                 if fields.len() == 1 && fields[0] == "/dev/null" {
                     match redirect.op {
                         RedirOp::Input => io.stdin = Source::Null,
-                        RedirOp::Output | RedirOp::Append | RedirOp::Both => {
+                        // `&>` nulls both streams; a plain `>`/`>>` nulls only the fd it
+                        // names (`2>/dev/null` must leave stdout alone).
+                        RedirOp::Both => {
                             io.stdout = Sink::Null;
                             io.stderr = Sink::Null;
+                        }
+                        RedirOp::Output | RedirOp::Append => {
+                            if redirect.fd == Some(2) {
+                                io.stderr = Sink::Null;
+                            } else {
+                                io.stdout = Sink::Null;
+                            }
                         }
                         _ => {}
                     }
@@ -1273,14 +1471,14 @@ impl Shell {
                 } else {
                     content.to_string()
                 };
-                io.stdin = Source::Str(text);
+                io.stdin = Source::Str(Arc::new(Mutex::new(text)));
             }
             RedirOp::Herestring => {
                 let RedirTarget::Word(word) = &redirect.target else {
                     return Err(ExecError::Io("bad herestring".into()));
                 };
                 let text = expand::expand_single(self, word, io)?;
-                io.stdin = Source::Str(format!("{text}\n"));
+                io.stdin = Source::Str(Arc::new(Mutex::new(format!("{text}\n"))));
             }
         }
         Ok(())
@@ -1342,24 +1540,42 @@ impl Shell {
 
 /* ---------- External process plumbing ---------- */
 
+/// A spawned child plus the pump threads feeding/draining its piped ends. The pumps
+/// outlive the spawn call; drop the child (or kill it) and they wind down.
+pub struct SpawnedChild {
+    pub child: std::process::Child,
+    pumps: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl SpawnedChild {
+    /// Wait for the child, then let its pumps drain.
+    pub fn finish(&mut self) -> Result<i32, String> {
+        let status = self.child.wait().map_err(|e| format!("{e}"))?;
+        for pump in self.pumps.drain(..) {
+            let _ = pump.join();
+        }
+        Ok(status.code().unwrap_or(1))
+    }
+}
+
 /// Spawn `program` with the Io's streams mapped onto stdio. Piped ends get pump
 /// threads: a channel sink is fed from the child's stdout as it arrives, and a channel
 /// source drains into the child's stdin until it closes.
-pub fn spawn_process(
+pub fn spawn_with_io(
     program: &Path,
     args: &[String],
     cwd: &Path,
     env: &[(String, String)],
     io: &Io,
-) -> Result<i32, String> {
+) -> Result<SpawnedChild, String> {
     let mut command = std::process::Command::new(program);
     command.args(args).current_dir(cwd).env_clear();
     for (key, value) in env {
         command.env(key, value);
     }
     command.stdin(stdin_of(&io.stdin)?);
-    let stdout_pipe = matches!(io.stdout, Sink::PipeOut(_) | Sink::Capture(_));
-    let stderr_pipe = matches!(io.stderr, Sink::PipeOut(_) | Sink::Capture(_));
+    let stdout_pipe = matches!(io.stdout, Sink::PipeOut { .. } | Sink::Capture(_));
+    let stderr_pipe = matches!(io.stderr, Sink::PipeOut { .. } | Sink::Capture(_));
     if stdout_pipe {
         command.stdout(std::process::Stdio::piped());
     } else {
@@ -1375,21 +1591,34 @@ pub fn spawn_process(
     match &io.stdin {
         Source::Str(text) => {
             if let Some(mut handle) = child.stdin.take() {
-                let _ = handle.write_all(text.as_bytes());
+                let _ = handle.write_all(text.lock().unwrap().as_bytes());
             }
         }
         Source::PipeIn(rx) => {
             if let Some(mut handle) = child.stdin.take() {
                 let rx = rx.clone();
-                std::thread::spawn(move || loop {
-                    let next = rx.lock().unwrap().recv();
-                    match next {
-                        Ok(chunk) => {
-                            if handle.write_all(&chunk).is_err() {
-                                break;
+                std::thread::spawn(move || {
+                    // The bytes an earlier one-line read pulled early go to the child
+                    // first, then the channel's remainder as it arrives.
+                    {
+                        let mut state = rx.lock().unwrap();
+                        if !state.pending.is_empty() {
+                            if handle.write_all(&state.pending).is_err() {
+                                return;
                             }
+                            state.pending.clear();
                         }
-                        Err(_) => break,
+                    }
+                    loop {
+                        let next = rx.lock().unwrap().rx.recv();
+                        match next {
+                            Ok(chunk) => {
+                                if handle.write_all(&chunk).is_err() {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
                     }
                 });
             }
@@ -1408,11 +1637,18 @@ pub fn spawn_process(
             pumps.push(pump(err, io.stderr.clone()));
         }
     }
-    let status = child.wait().map_err(|e| format!("{e}"))?;
-    for pump in pumps {
-        let _ = pump.join();
-    }
-    Ok(status.code().unwrap_or(1))
+    Ok(SpawnedChild { child, pumps })
+}
+
+/// [`spawn_with_io`] plus the wait: the one-call form every plain external uses.
+pub fn spawn_process(
+    program: &Path,
+    args: &[String],
+    cwd: &Path,
+    env: &[(String, String)],
+    io: &Io,
+) -> Result<i32, String> {
+    spawn_with_io(program, args, cwd, env, io)?.finish()
 }
 
 fn pump<R: Read + Send + 'static>(mut reader: R, sink: Sink) -> std::thread::JoinHandle<()> {
@@ -1422,8 +1658,9 @@ fn pump<R: Read + Send + 'static>(mut reader: R, sink: Sink) -> std::thread::Joi
             match reader.read(&mut buffer) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => match &sink {
-                    Sink::PipeOut(tx) => {
+                    Sink::PipeOut { tx, broken } => {
                         if tx.send(buffer[..n].to_vec()).is_err() {
+                            broken.store(true, Ordering::Relaxed);
                             break;
                         }
                     }
@@ -1459,7 +1696,7 @@ fn stdout_of(sink: &Sink) -> Result<std::process::Stdio, String> {
             .try_clone()
             .map(Into::into)
             .map_err(|e| format!("{e}")),
-        Sink::PipeOut(_) | Sink::Capture(_) => Ok(std::process::Stdio::piped()),
+        Sink::PipeOut { .. } | Sink::Capture(_) => Ok(std::process::Stdio::piped()),
     }
 }
 

@@ -26,7 +26,12 @@ pub fn inflate(data: &[u8]) -> Result<Vec<u8>, String> {
             }
             1 => {
                 // Fixed Huffman.
-                decompress_block(&mut reader, &fixed_literals()?, &FIXED_DISTANCES, &mut out)?;
+                decompress_block(
+                    &mut reader,
+                    &fixed_literals()?,
+                    &fixed_distances()?,
+                    &mut out,
+                )?;
             }
             2 => {
                 // Dynamic Huffman: the code-length code, then the two trees.
@@ -138,11 +143,12 @@ fn fixed_literals() -> Result<Node, String> {
     build_tree(&lengths)
 }
 
-const FIXED_DISTANCES: Node = Node {
-    symbol: 0,
-    left: None,
-    right: None,
-};
+/// The fixed-Huffman distance tree: thirty five-bit codes for symbols 0..29. (A
+/// single-leaf tree here would decode every distance as 1 and never consume a bit —
+/// fixed blocks with back-references, i.e. most gzipped data, would never end.)
+fn fixed_distances() -> Result<Node, String> {
+    build_tree(&vec![5usize; 30])
+}
 
 /* ---------- the Huffman plumbing ---------- */
 

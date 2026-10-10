@@ -494,7 +494,57 @@ fn printf(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
         return Ok(1);
     };
     let mut out = String::new();
-    let mut arg_at = 1;
+    let mut arg_at = 1usize;
+    // A bad numeric argument reports, formats as 0 and turns the status to 1 — bash
+    // keeps going; only an unsupported conversion stops the format.
+    let mut status = 0;
+    // The format reuses while arguments remain (`printf '%s\n' a b c` prints three
+    // lines); a pass that consumed none (no conversions) must not loop forever.
+    loop {
+        let before = arg_at;
+        if let Err(code) = printf_pass(format, args, &mut arg_at, &mut out, &mut status, io) {
+            // What formatted before the failure still prints, as in bash.
+            io.out_str(&out);
+            return Ok(code);
+        }
+        if arg_at >= args.len() || arg_at == before {
+            break;
+        }
+    }
+    io.out_str(&out);
+    Ok(status)
+}
+
+/// A numeric printf argument: a missing one is 0 (`printf '%s=%d\n' a 1 b` ends with
+/// `b=0`), `'c` / `"c` is the character's code (POSIX), anything unparsable reports
+/// and reads as 0 with the status turned to 1.
+fn printf_number(arg: &str, status: &mut i32, io: &Io) -> f64 {
+    let text = arg.trim();
+    if text.is_empty() {
+        return 0.0;
+    }
+    if let Some(quoted) = text.strip_prefix(['\'', '"']) {
+        return quoted.chars().next().map_or(0.0, |c| c as u32 as f64);
+    }
+    let parsed = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => i64::from_str_radix(hex, 16).ok().map(|n| n as f64),
+        None => text.strip_prefix('+').unwrap_or(text).parse::<f64>().ok(),
+    };
+    parsed.unwrap_or_else(|| {
+        io.err_str(&format!("printf: {arg}: invalid number\n"));
+        *status = 1;
+        0.0
+    })
+}
+
+fn printf_pass(
+    format: &str,
+    args: &[String],
+    arg_at: &mut usize,
+    out: &mut String,
+    status: &mut i32,
+    io: &Io,
+) -> Result<(), i32> {
     let mut chars = format.chars().peekable();
     while let Some(c) = chars.next() {
         if c != '%' {
@@ -542,9 +592,9 @@ fn printf(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
             continue;
         }
         let verb = verb.unwrap();
-        let arg = args.get(arg_at).cloned().unwrap_or_default();
-        if arg_at < args.len() {
-            arg_at += 1;
+        let arg = args.get(*arg_at).cloned().unwrap_or_default();
+        if *arg_at < args.len() {
+            *arg_at += 1;
         }
         let piece = match verb {
             's' => {
@@ -552,41 +602,50 @@ fn printf(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
                 text = pad(&text, width, left, false);
                 text
             }
-            'd' | 'i' | 'u' => match arg.parse::<i64>() {
-                Ok(n) => pad(&n.to_string(), width, left, zero),
-                Err(_) => {
-                    io.err_str(&format!("printf: {arg}: expected a number\n"));
-                    return Ok(1);
+            'b' => {
+                // The argument escapes like echo -e (`\n`, `\t`, `\0NNN`).
+                let mut text = unescape(&arg);
+                if let Some(precision) = precision {
+                    text = text.chars().take(precision).collect();
                 }
-            },
-            'x' => pad(
-                &radix(arg.parse::<i64>().unwrap_or(0), 16),
+                pad(&text, width, left, false)
+            }
+            'd' | 'i' | 'u' => {
+                let n = printf_number(&arg, status, io).trunc() as i64;
+                pad_number(&n.to_string(), width, left, zero)
+            }
+            'x' => pad_number(
+                &radix(printf_number(&arg, status, io).trunc() as i64, 16),
                 width,
                 left,
                 zero,
             ),
-            'X' => pad(
-                &radix(arg.parse::<i64>().unwrap_or(0), 16).to_uppercase(),
+            'X' => pad_number(
+                &radix(printf_number(&arg, status, io).trunc() as i64, 16).to_uppercase(),
                 width,
                 left,
                 zero,
             ),
-            'o' => pad(
-                &radix(arg.parse::<i64>().unwrap_or(0), 8),
+            'o' => pad_number(
+                &radix(printf_number(&arg, status, io).trunc() as i64, 8),
                 width,
                 left,
                 zero,
             ),
+            'f' => {
+                let value = printf_number(&arg, status, io);
+                let text = format!("{value:.prec$}", prec = precision.unwrap_or(6));
+                pad_number(&text, width, left, zero)
+            }
             'c' => arg.chars().next().map(String::from).unwrap_or_default(),
             other => {
                 io.err_str(&format!("printf: %{other}: unsupported\n"));
-                return Ok(1);
+                return Err(1);
             }
         };
         out.push_str(&piece);
     }
-    io.out_str(&out);
-    Ok(0)
+    Ok(())
 }
 
 fn pad(text: &str, width: usize, left: bool, zero: bool) -> String {
@@ -601,6 +660,21 @@ fn pad(text: &str, width: usize, left: bool, zero: bool) -> String {
     } else {
         format!("{padding}{text}")
     }
+}
+
+/// Zero-padding for numbers: the fill goes after the sign, so `%05d` of -42 is
+/// `-0042`, not `00-42`.
+fn pad_number(text: &str, width: usize, left: bool, zero: bool) -> String {
+    if !zero || left {
+        return pad(text, width, left, false);
+    }
+    let unsigned = text.strip_prefix(['-', '+']);
+    let (sign, digits) = match unsigned {
+        Some(rest) => (&text[..1], rest),
+        None => ("", text),
+    };
+    let body = pad(digits, width.saturating_sub(sign.len()), false, true);
+    format!("{sign}{body}")
 }
 
 fn radix(value: i64, base: i64) -> String {
@@ -1084,7 +1158,12 @@ pub fn eval_condition(words: &[String], patterns: bool) -> Result<bool, String> 
     };
     let value = parser.parse_or()?;
     if parser.at != words.len() {
-        return Err(format!("unexpected `{}`", words[parser.at]));
+        // `at` may sit past the end after a dangling operator — never index blind.
+        let unexpected = words
+            .get(parser.at)
+            .cloned()
+            .unwrap_or_else(|| "end of expression".to_owned());
+        return Err(format!("unexpected `{unexpected}`"));
     }
     Ok(value)
 }
@@ -1141,7 +1220,9 @@ impl<'a> CondParser<'a> {
             self.at += 1;
             return Ok(value);
         }
-        // A unary operator with its operand.
+        // A unary operator with its operand. A lone operator is the one-argument
+        // form (POSIX: non-null is true) — not an operand-less unary that would
+        // walk the cursor past the end.
         if let Some(word) = self.peek() {
             if word.starts_with('-') && word.len() == 2 {
                 let op = word.clone();
@@ -1149,10 +1230,13 @@ impl<'a> CondParser<'a> {
                     op.as_str(),
                     "-e" | "-f" | "-d" | "-r" | "-w" | "-x" | "-s" | "-z" | "-n"
                 ) {
+                    if self.words.get(self.at + 1).is_some() {
+                        self.at += 2;
+                        return unary(&op, &self.words[self.at - 1]);
+                    }
+                    // One argument, spelled like an operator: non-null is true.
                     self.at += 1;
-                    let operand = self.words.get(self.at).cloned().unwrap_or_default();
-                    self.at += 1;
-                    return unary(&op, &operand);
+                    return Ok(true);
                 }
             }
         }
@@ -1212,14 +1296,16 @@ fn binary(left: &str, op: &str, right: &str, patterns: bool) -> Result<bool, Str
     match op {
         "=" | "==" => {
             if patterns && (right.contains('*') || right.contains('?') || right.contains('[')) {
-                Ok(super::glob::glob_match(right, left))
+                // `[[ ]]` is pattern matching, not pathname expansion: no hidden-file
+                // rule (`[[ .git == * ]]` is true), and `*` crosses `/`.
+                Ok(super::glob::glob_match_raw(right, left))
             } else {
                 Ok(left == right)
             }
         }
         "!=" => {
             if patterns && (right.contains('*') || right.contains('?') || right.contains('[')) {
-                Ok(!super::glob::glob_match(right, left))
+                Ok(!super::glob::glob_match_raw(right, left))
             } else {
                 Ok(left != right)
             }

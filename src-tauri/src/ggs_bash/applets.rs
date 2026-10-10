@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use super::builtins::unescape;
-use super::exec::{resolve_on_path, ExecResult, Io, Shell};
+use super::exec::{anchor_program, resolve_on_path, spawn_with_io, ExecResult, Io, Shell};
 use super::glob;
 use super::localtime::{local_now, unix_to_local, Civil};
 use super::regexlite::Regex;
@@ -542,7 +542,14 @@ fn grep(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
             sources.push(file.clone());
         }
     }
-    let labelled = files.len() > 1 || recursive;
+    // `-H` forces the file prefix on, `-h` off; otherwise several files or -r label.
+    let labelled = if flags.contains('H') {
+        true
+    } else if flags.contains('h') {
+        false
+    } else {
+        files.len() > 1 || recursive
+    };
     let mut inputs: Vec<(String, String)> = Vec::new();
     if sources.is_empty() && files.is_empty() {
         let mut io_mut = io.clone();
@@ -565,10 +572,35 @@ fn grep(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
         let mut count = 0usize;
         let printed_file = false;
         let all_lines = lines_of(text);
+        // Every match on a line as a byte span — the regex's, or the fixed string's
+        // (case-folded under -i) — keeping under `-w` only the spans flanked by
+        // non-word characters (or the edges). `-w` and `-o` both read these.
+        let spans_of = |line: &str| -> Vec<(usize, usize)> {
+            let spans: Vec<(usize, usize)> = match &matcher {
+                Some(regex) => regex
+                    .find_iter(line)
+                    .iter()
+                    .map(|found| (found.start, found.end))
+                    .collect(),
+                None => fixed_spans(line, &pattern, icase),
+            };
+            if flags.contains('w') {
+                spans
+                    .into_iter()
+                    .filter(|(start, end)| word_bounded(line, *start, *end))
+                    .collect()
+            } else {
+                spans
+            }
+        };
         let is_hit = |line: &str| -> bool {
-            let hit = match &matcher {
-                Some(regex) => regex.is_match(line),
-                None => contains_fold(line, &pattern, icase),
+            let hit = if flags.contains('w') {
+                !spans_of(line).is_empty()
+            } else {
+                match &matcher {
+                    Some(regex) => regex.is_match(line),
+                    None => contains_fold(line, &pattern, icase),
+                }
             };
             hit != flags.contains('v')
         };
@@ -626,18 +658,11 @@ fn grep(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
             previous_printed = Some(at);
             if flags.contains('o') {
                 // Only the matched parts, one per line.
-                let parts: Vec<String> = match &matcher {
-                    Some(regex) => regex
-                        .find_iter(line)
-                        .iter()
-                        .map(|found| line[found.start..found.end].to_owned())
-                        .collect(),
-                    None if !pattern.is_empty() => line
-                        .match_indices(&pattern)
-                        .map(|(at, _)| line[at..at + pattern.len()].to_owned())
-                        .collect(),
-                    None => Vec::new(),
-                };
+                let parts: Vec<String> = spans_of(line)
+                    .into_iter()
+                    .filter(|(start, end)| start != end)
+                    .map(|(start, end)| line[start..end].to_owned())
+                    .collect();
                 for part in parts {
                     io.out_str(&format!("{prefix}{line_number}{part}\n"));
                 }
@@ -661,6 +686,54 @@ fn contains_fold(haystack: &str, needle: &str, icase: bool) -> bool {
         return haystack.contains(needle);
     }
     haystack.to_lowercase().contains(&needle.to_lowercase())
+}
+
+/// Every non-overlapping occurrence of the fixed string `needle` in `line`, as byte
+/// spans; `icase` folds case character by character, so the spans stay on the line's
+/// own character boundaries whatever the folded forms' lengths.
+fn fixed_spans(line: &str, needle: &str, icase: bool) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    if needle.is_empty() {
+        return spans;
+    }
+    let mut at = 0usize;
+    while at < line.len() {
+        match fixed_match_at(&line[at..], needle, icase) {
+            Some(len) => {
+                spans.push((at, at + len));
+                at += len;
+            }
+            None => at += line[at..].chars().next().map_or(1, char::len_utf8),
+        }
+    }
+    spans
+}
+
+/// The byte length of `needle` matched at the start of `text`, if it matches there.
+fn fixed_match_at(text: &str, needle: &str, icase: bool) -> Option<usize> {
+    if !icase {
+        return text.starts_with(needle).then_some(needle.len());
+    }
+    let mut taken = 0usize;
+    let mut hay = text.chars();
+    for want in needle.chars() {
+        let got = hay.next()?;
+        if !got.to_lowercase().eq(want.to_lowercase()) {
+            return None;
+        }
+        taken += got.len_utf8();
+    }
+    Some(taken)
+}
+
+/// Whether the `[start, end)` byte span of `text` is flanked by non-word characters
+/// (or the string's edges) — grep -w's test. Word means `[A-Za-z0-9_]`; multibyte
+/// bytes are never ASCII-word, so the byte check is boundary-correct.
+fn word_bounded(text: &str, start: usize, end: usize) -> bool {
+    let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let before_ok = start == 0 || !is_word(text.as_bytes()[start - 1]);
+    let after_ok = end >= text.len() || !is_word(text.as_bytes()[end]);
+    before_ok && after_ok
 }
 
 /// The -r walk, honouring `--include`/`--exclude` filename globs.
@@ -724,6 +797,7 @@ fn find(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
     let mut parser = FindParser {
         tokens: expression,
         at: 0,
+        min_depth: 0,
     };
     let mut max_depth = None;
     let mut actions: Vec<FindAction> = Vec::new();
@@ -756,49 +830,104 @@ fn find(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
         let mut walker = Walker {
             depth: 0,
             max_depth,
+            min_depth: parser.min_depth,
         };
         let mut found: Vec<(String, bool)> = Vec::new();
+        // The root is visited first — `find _t` answers `_t` before its contents, and
+        // `find . -maxdepth 0` answers `.` and nothing else; `-mindepth 1` leaves it out.
+        if parser.min_depth > 0 {
+            // The root is depth 0: below the floor, walked but not a candidate.
+        } else if let Ok(metadata) = std::fs::symlink_metadata(&resolved) {
+            let is_dir = metadata.is_dir();
+            let is_file = metadata.is_file();
+            let mtime_secs = metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let name = display_root
+                .rsplit('/')
+                .next()
+                .unwrap_or(&display_root)
+                .to_owned();
+            if test_matches(&tree, &name, &display_root, is_dir, is_file, mtime_secs) {
+                found.push((display_root.clone(), is_dir));
+            }
+        }
         walker.visit(&resolved, &display_root, &tree, &mut found);
-        for (display, is_dir) in found.iter().rev() {
-            // Actions run deepest-first for `-delete` (a directory empties before it goes).
-            for action in &actions {
-                if let FindAction::Delete = action {
-                    let native = shell.resolve_working_path(display);
-                    let result = if *is_dir {
-                        std::fs::remove_dir(&native)
-                    } else {
-                        std::fs::remove_file(&native)
-                    };
-                    if let Err(error) = result {
-                        io.err_str(&format!("find: {display}: {error}\n"));
-                        status = 1;
-                    }
+        // `-exec … {} +` batches every match into one invocation — run once, not once
+        // per match (GNU aggregates; no matches means no run at all).
+        for action in &actions {
+            if let FindAction::Exec {
+                command,
+                terminator: '+',
+            } = action
+            {
+                if found.is_empty() {
                     continue;
                 }
-                if let FindAction::Exec {
-                    command,
-                    terminator,
-                } = action
-                {
-                    let mut argv: Vec<String> = Vec::new();
-                    for piece in command {
-                        if piece == "{}" {
-                            if *terminator == '+' {
-                                argv.extend(found.iter().map(|(path, _)| path.clone()));
-                                break;
-                            }
-                            argv.push(display.clone());
+                let mut argv: Vec<String> = Vec::new();
+                for piece in command {
+                    if piece == "{}" {
+                        argv.extend(found.iter().map(|(path, _)| path.clone()));
+                    } else {
+                        argv.push(piece.clone());
+                    }
+                }
+                if let Err(error) = shell.run_argv(&argv, io) {
+                    io.err_str(&format!("find: -exec: {error:?}\n"));
+                    status = 1;
+                }
+            }
+        }
+        // GNU walks pre-order (a directory before its contents); only -delete needs the
+        // deepest-first pass (a directory empties before it goes).
+        let deepest_first = actions.iter().any(|a| matches!(a, FindAction::Delete));
+        let order: Vec<&(String, bool)> = if deepest_first {
+            found.iter().rev().collect()
+        } else {
+            found.iter().collect()
+        };
+        for (display, is_dir) in order {
+            for action in &actions {
+                match action {
+                    // GNU never removes `.` itself (`find . -delete` empties the
+                    // directory and stays quiet about its own root).
+                    FindAction::Delete if display == "." => {}
+                    FindAction::Delete => {
+                        let native = shell.resolve_working_path(display);
+                        let result = if *is_dir {
+                            std::fs::remove_dir(&native)
                         } else {
-                            argv.push(piece.clone());
+                            std::fs::remove_file(&native)
+                        };
+                        if let Err(error) = result {
+                            io.err_str(&format!("find: {display}: {error}\n"));
+                            status = 1;
                         }
                     }
-                    if let Err(error) = shell.run_argv(&argv, io) {
-                        io.err_str(&format!("find: -exec: {error:?}\n"));
-                        status = 1;
+                    FindAction::Exec {
+                        command,
+                        terminator: ';',
+                    } => {
+                        let mut argv: Vec<String> = Vec::new();
+                        for piece in command {
+                            if piece == "{}" {
+                                argv.push(display.clone());
+                            } else {
+                                argv.push(piece.clone());
+                            }
+                        }
+                        if let Err(error) = shell.run_argv(&argv, io) {
+                            io.err_str(&format!("find: -exec: {error:?}\n"));
+                            status = 1;
+                        }
                     }
-                    continue;
+                    // `+` already ran once over the whole batch above.
+                    FindAction::Exec { .. } => {}
+                    FindAction::Print => io.out_str(&format!("{display}\n")),
                 }
-                io.out_str(&format!("{display}\n"));
             }
         }
     }
@@ -841,6 +970,9 @@ enum FindAction {
 struct FindParser<'a> {
     tokens: &'a [String],
     at: usize,
+    /// `-mindepth N`: entries shallower than N (the root is depth 0) are walked but
+    /// never tested — `find dir -mindepth 1 -delete` empties `dir` and keeps it.
+    min_depth: usize,
 }
 
 impl<'a> FindParser<'a> {
@@ -963,8 +1095,12 @@ impl<'a> FindParser<'a> {
                 Ok(FindTest::MaxDepth)
             }
             Some("-mindepth") => {
-                self.at += 2; // value consumed, no effect
-                Ok(FindTest::Always)
+                self.at += 1;
+                self.min_depth = self
+                    .value("-mindepth")?
+                    .parse()
+                    .map_err(|_| "bad -mindepth")?;
+                Ok(FindTest::MaxDepth)
             }
             Some("-true") => {
                 self.at += 1;
@@ -1023,12 +1159,13 @@ fn test_matches(
 ) -> bool {
     match test {
         FindTest::Always | FindTest::MaxDepth => true,
-        FindTest::Name(pattern) => glob::glob_match(pattern, name),
+        // find matches hidden names like any other — no pathname-expansion dot rule.
+        FindTest::Name(pattern) => glob::glob_match_raw(pattern, name),
         FindTest::Path(pattern, insensitive) => {
             if *insensitive {
-                glob::glob_match(&pattern.to_lowercase(), &display_path.to_lowercase())
+                glob::glob_match_raw(&pattern.to_lowercase(), &display_path.to_lowercase())
             } else {
-                glob::glob_match(pattern, display_path)
+                glob::glob_match_raw(pattern, display_path)
             }
         }
         FindTest::MTime(days, mode) => {
@@ -1060,6 +1197,7 @@ fn test_matches(
 struct Walker {
     depth: usize,
     max_depth: Option<usize>,
+    min_depth: usize,
 }
 
 impl Walker {
@@ -1093,7 +1231,10 @@ impl Walker {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-            if test_matches(test, &file_name, &display_path, is_dir, is_file, mtime_secs) {
+            // A child of a depth-d visit sits at find-depth d+1.
+            if self.depth + 1 >= self.min_depth
+                && test_matches(test, &file_name, &display_path, is_dir, is_file, mtime_secs)
+            {
                 out.push((display_path.clone(), is_dir));
             }
             if is_dir {
@@ -1134,8 +1275,37 @@ fn head(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
         scanned.push(arg.clone());
         index += 1;
     }
-    let (count, rest) = split_count_args(&scanned, 10);
+    let (count, _from_start, rest) = split_count_args(&scanned, 10);
     let (_flags, paths) = parse_flags(&rest);
+    // stdin is streamed line by line: head must be able to stop BEFORE the writer
+    // ends — `while :; do echo; done | head -1` only terminates because head closes
+    // its end of the pipe after the first line (the writer's SIGPIPE). The lines pass
+    // through byte-exact: a CRLF stays CRLF, and a last line without a newline gets none.
+    if paths.is_empty() {
+        let mut stdin = io.clone();
+        if let Some(bytes) = bytes {
+            let mut got: Vec<u8> = Vec::new();
+            while got.len() < bytes {
+                match stdin.read_raw_line() {
+                    Some(line) => got.extend_from_slice(&line),
+                    None => break,
+                }
+            }
+            io.write_out(&got[..bytes.min(got.len())]);
+            return Ok(0);
+        }
+        let mut printed = 0i64;
+        while printed < count {
+            match stdin.read_raw_line() {
+                Some(line) => {
+                    io.write_out(&line);
+                    printed += 1;
+                }
+                None => break,
+            }
+        }
+        return Ok(0);
+    }
     let mut io_mut = io.clone();
     let inputs = match read_input(shell, &mut io_mut, &paths) {
         Ok(inputs) => inputs,
@@ -1162,26 +1332,47 @@ fn head(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
 }
 
 /// The `-n N` / `-nN` / legacy `-N` count forms, split away from the positional
-/// arguments (so `head -n 2` does not also open a file named `2`).
-fn split_count_args(args: &[String], default: i64) -> (i64, Vec<String>) {
+/// arguments (so `head -n 2` does not also open a file named `2`). The second answer
+/// carries a leading `+` (`tail -n +K` means from line K, not the last K — and Rust's
+/// integer parse would happily swallow the sign and lose the distinction).
+fn split_count_args(args: &[String], default: i64) -> (i64, bool, Vec<String>) {
     let mut count = default;
+    let mut from_start = false;
     let mut rest = Vec::new();
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
         if let Some(body) = arg.strip_prefix('-') {
+            let mut take = |value: &str| -> bool {
+                match value.strip_prefix('+') {
+                    Some(plus) => match plus.parse::<i64>() {
+                        Ok(parsed) => {
+                            count = parsed;
+                            from_start = true;
+                            true
+                        }
+                        Err(_) => false,
+                    },
+                    None => match value.parse::<i64>() {
+                        Ok(parsed) => {
+                            count = parsed;
+                            from_start = false;
+                            true
+                        }
+                        Err(_) => false,
+                    },
+                }
+            };
             if body == "n" {
                 if let Some(value) = args.get(index + 1) {
-                    if let Ok(parsed) = value.parse::<i64>() {
-                        count = parsed;
+                    if take(value) {
                         index += 2;
                         continue;
                     }
                 }
             }
             if let Some(value) = body.strip_prefix('n') {
-                if let Ok(parsed) = value.parse::<i64>() {
-                    count = parsed;
+                if take(value) {
                     index += 1;
                     continue;
                 }
@@ -1189,6 +1380,7 @@ fn split_count_args(args: &[String], default: i64) -> (i64, Vec<String>) {
             if !body.is_empty() && body.chars().all(|c| c.is_ascii_digit()) {
                 if let Ok(parsed) = body.parse::<i64>() {
                     count = parsed;
+                    from_start = false;
                     index += 1;
                     continue;
                 }
@@ -1197,27 +1389,13 @@ fn split_count_args(args: &[String], default: i64) -> (i64, Vec<String>) {
         rest.push(arg.clone());
         index += 1;
     }
-    (count, rest)
+    (count, from_start, rest)
 }
 
 fn tail(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
-    let (count, rest) = split_count_args(args, 10);
+    let (count, from_start, rest) = split_count_args(args, 10);
     // `tail -n +K` prints from line K instead of the last K.
-    let mut from_line: Option<usize> = None;
-    let rest: Vec<String> = rest
-        .into_iter()
-        .filter(|arg| {
-            if let Some(body) = arg.strip_prefix("-n") {
-                if let Some(plus) = body.strip_prefix('+') {
-                    if let Ok(value) = plus.parse::<usize>() {
-                        from_line = Some(value);
-                        return false;
-                    }
-                }
-            }
-            true
-        })
-        .collect();
+    let from_line: Option<usize> = from_start.then_some(count.max(1) as usize);
     let (_flags, paths) = parse_flags(&rest);
     let mut io_mut = io.clone();
     let inputs = match read_input(shell, &mut io_mut, &paths) {
@@ -1496,7 +1674,9 @@ fn sort(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
     let mut numeric = false;
     let mut unique = false;
     let mut fold = false;
-    let mut delim = '\t';
+    // `None` until -t: the default field separator is a RUN of blanks with the
+    // leading ones skipped (so `-k2` sees "a  b" as field 2 = "b"), not a tab.
+    let mut delim: Option<char> = None;
     let mut keys: Vec<(usize, usize, bool)> = Vec::new(); // (field, end_field, numeric)
     let mut output: Option<String> = None;
     let mut paths: Vec<String> = Vec::new();
@@ -1507,10 +1687,10 @@ fn sort(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
             // The spaced form first: "-t" alone must not match the glued strip below.
             index += 1;
             if let Some(value) = args.get(index) {
-                delim = value.chars().next().unwrap_or('\t');
+                delim = value.chars().next();
             }
         } else if let Some(value) = arg.strip_prefix("-t") {
-            delim = unescape(value).chars().next().unwrap_or('\t');
+            delim = unescape(value).chars().next();
         } else if let Some(value) = arg.strip_prefix("-k") {
             // -k 2, -k2, -k 2.1, -k2,3, -k 2n, -k2r — the common shapes.
             let key = if value.is_empty() {
@@ -1527,8 +1707,9 @@ fn sort(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
             let (start_field, end_field) = match body.split_once(',') {
                 Some((from, to)) => (field_number(from), field_number(to)),
                 None => {
+                    // A bare `-k N` runs to the end of the line, not just field N.
                     let at = field_number(&body);
-                    (at, at)
+                    (at, usize::MAX)
                 }
             };
             keys.push((start_field, end_field, key_numeric));
@@ -1575,38 +1756,59 @@ fn sort(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
                 .collect::<Vec<_>>()
         })
         .collect();
-    // The key of one line: the joined -k field range (or the whole line — a bare
-    // `sort -n` still sorts numerically).
-    let key_of = |line: &str| -> (String, f64) {
-        if keys.is_empty() {
-            return (line.to_owned(), numeric_prefix_of(line));
+    // The fields of one line under the separator in force: an explicit -t splits on
+    // each single delimiter (empties kept); the default splits on blank runs and
+    // never sees the leading blanks as a field.
+    fn fields_of(line: &str, delim: Option<char>) -> Vec<&str> {
+        match delim {
+            Some(d) => line.split(d).collect(),
+            None => line.split_whitespace().collect(),
         }
-        let fields: Vec<&str> = line.split(delim).collect();
-        let mut picked: Vec<&str> = Vec::new();
-        for (start, end, _numeric) in &keys {
-            let from = start.saturating_sub(1);
-            let to = (*end).min(fields.len());
-            picked.extend(fields[from..to.max(from)].iter().copied());
+    }
+    // One -k range's text: fields start..=end (end clamped by the line).
+    let key_text = |line: &str, start: &usize, end: &usize| -> String {
+        let fields = fields_of(line, delim);
+        let from = start.saturating_sub(1);
+        let to = (*end).min(fields.len());
+        fields[from..to.max(from)].join(" ")
+    };
+    let lex = |a: &str, b: &str| -> std::cmp::Ordering {
+        if fold {
+            a.to_lowercase().cmp(&b.to_lowercase())
+        } else {
+            a.cmp(b)
         }
-        let joined = picked.join(&delim.to_string());
-        (joined.clone(), numeric_prefix_of(&joined))
     };
     lines.sort_by(|a, b| {
-        let (ka, na) = key_of(a);
-        let (kb, nb) = key_of(b);
-        let (ka, kb) = if fold {
-            (ka.to_lowercase(), kb.to_lowercase())
-        } else {
-            (ka, kb)
-        };
-        let numeric = numeric || keys.iter().any(|(_, _, key_numeric)| *key_numeric);
-        if numeric {
-            na.partial_cmp(&nb)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| ka.cmp(&kb))
-        } else {
-            ka.cmp(&kb)
+        if keys.is_empty() {
+            return if numeric {
+                numeric_prefix_of(a)
+                    .partial_cmp(&numeric_prefix_of(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| lex(a, b))
+            } else {
+                lex(a, b)
+            };
         }
+        // Each key compares on its own: numeric where the key (or a global -n)
+        // says so, lexically otherwise; the first difference decides.
+        for (start, end, key_numeric) in &keys {
+            let ka = key_text(a, start, end);
+            let kb = key_text(b, start, end);
+            let ord = if *key_numeric || numeric {
+                numeric_prefix_of(&ka)
+                    .partial_cmp(&numeric_prefix_of(&kb))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| lex(&ka, &kb))
+            } else {
+                lex(&ka, &kb)
+            };
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        // Every key equal: the whole line decides, lexically (GNU's last resort).
+        lex(a, b)
     });
     if unique {
         lines.dedup_by(|a, b| {
@@ -1644,12 +1846,32 @@ fn field_number(text: &str) -> usize {
     base.parse().unwrap_or(1).max(1)
 }
 
+/// The numeric prefix GNU sort reads: optional sign, digits, one decimal point —
+/// anything else ends the number (and a prefix with no digits at all is zero).
 fn numeric_prefix_of(text: &str) -> f64 {
-    let digits: String = text
-        .trim_start()
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '-')
-        .collect();
+    let trimmed = text.trim_start();
+    let mut digits = String::new();
+    let mut seen_digit = false;
+    let mut seen_point = false;
+    let mut chars = trimmed.chars().peekable();
+    if let Some(sign @ ('-' | '+')) = chars.peek().copied() {
+        digits.push(sign);
+        chars.next();
+    }
+    for c in chars {
+        if c.is_ascii_digit() {
+            seen_digit = true;
+            digits.push(c);
+        } else if c == '.' && !seen_point {
+            seen_point = true;
+            digits.push(c);
+        } else {
+            break;
+        }
+    }
+    if !seen_digit {
+        return 0.0;
+    }
     digits.parse().unwrap_or(0.0)
 }
 
@@ -1849,6 +2071,9 @@ fn tr(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
     };
     // The last character of SET2 covers every SET1 member beyond its length (`tr ab 1`).
     let set2_last = set2.as_ref().and_then(|s| s.last().copied());
+    // `-s` squeezes repeats of the LAST set's characters: SET2 when translating (or
+    // when deleting with a squeeze set), SET1 for a lone `tr -s set`.
+    let squeeze_set: &[char] = set2.as_deref().unwrap_or(&set1);
     for (_, text) in inputs {
         let mut out = String::new();
         let mut previous: Option<char> = None;
@@ -1867,7 +2092,7 @@ fn tr(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
                 }
             };
             let Some(mapped) = mapped else { continue };
-            if squeeze && set1.contains(&mapped) && previous == Some(mapped) {
+            if squeeze && squeeze_set.contains(&mapped) && previous == Some(mapped) {
                 continue;
             }
             out.push(mapped);
@@ -1980,25 +2205,51 @@ fn sed(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
         let lines: Vec<&str> = lines_of(&text);
         let total = lines.len();
         let mut file_out = String::new();
+        // A two-address range is a state, not a per-line AND: `/a/,/b/` opens at the
+        // first `a` and stays open (inclusive) through the first `b` after it. Each
+        // rule owns its own open flag; a new input file starts every range closed.
+        let mut range_open = vec![false; rules.len()];
         for (at, line) in lines.iter().enumerate() {
             let line_number = at + 1;
             let mut current: String = line.to_string();
             let mut deleted = false;
             let mut quit = false;
-            for rule in &rules {
-                let from_hit = match &rule.from {
-                    None => true,
-                    Some(SedAddr::Line(n)) => *n == line_number,
-                    Some(SedAddr::Last) => line_number == total,
-                    Some(SedAddr::Regex(re)) => re.is_match(&current),
+            let addr_hit = |addr: &SedAddr, current: &str| match addr {
+                SedAddr::Line(n) => *n == line_number,
+                SedAddr::Last => line_number == total,
+                SedAddr::Regex(re) => re.is_match(current),
+            };
+            for (rule_at, rule) in rules.iter().enumerate() {
+                let in_range = match (&rule.from, &rule.to) {
+                    (None, _) => true,
+                    (Some(_), None) => addr_hit(rule.from.as_ref().unwrap(), &current),
+                    (Some(_), Some(_)) => {
+                        let (from, to) = (rule.from.as_ref().unwrap(), rule.to.as_ref().unwrap());
+                        if range_open[rule_at] {
+                            if addr_hit(to, &current) {
+                                range_open[rule_at] = false;
+                            }
+                            true
+                        } else if addr_hit(from, &current) {
+                            // The opening line is in the range. POSIX tries a regex
+                            // end address from the NEXT line on (`/^---$/,/^---$/`
+                            // spans the front matter); a line-number end at or before
+                            // this line makes the range exactly this one line.
+                            let closes_here = match to {
+                                SedAddr::Line(n) => *n <= line_number,
+                                SedAddr::Last => line_number == total,
+                                SedAddr::Regex(_) => false,
+                            };
+                            if !closes_here {
+                                range_open[rule_at] = true;
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    }
                 };
-                let to_hit = match &rule.to {
-                    None => true,
-                    Some(SedAddr::Line(n)) => *n == line_number,
-                    Some(SedAddr::Last) => line_number == total,
-                    Some(SedAddr::Regex(re)) => re.is_match(&current),
-                };
-                if !from_hit || !to_hit {
+                if !in_range {
                     continue;
                 }
                 match &rule.cmd {
@@ -2047,45 +2298,28 @@ fn sed(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
 }
 
 fn substitute(regex: &Regex, line: &str, replacement: &str, global: bool) -> String {
+    // The matches are laid over the whole line in byte offsets: `^` anchors once at the
+    // line start (rescanning a tail would re-anchor it at every step), and the spans
+    // slice `line` directly whatever multibyte text sits in front of them.
     let mut out = String::new();
-    let mut consumed = 0usize;
-    let chars: Vec<char> = line.chars().collect();
-    loop {
-        let rest: String = chars[consumed..].iter().collect();
-        let Some(found) = regex.find(&rest) else {
-            break;
-        };
-        out.push_str(&rest[..found.start]);
-        out.push_str(&expand_replacement(replacement, &rest, &found));
-        let advance = if found.end == found.start {
-            char_len_at(&chars, consumed + found.start)
-        } else {
-            found.end
-        };
-        consumed += advance;
+    let mut at = 0usize;
+    let mut last_end: Option<usize> = None;
+    for found in regex.find_iter(line) {
+        // An empty match right where the previous match ended is no match — GNU's
+        // rule (`s/x*/-/g` over `xab` is `-a-b-`).
+        if found.start == found.end && last_end == Some(found.start) {
+            continue;
+        }
+        out.push_str(&line[at..found.start]);
+        out.push_str(&expand_replacement(replacement, line, &found));
+        at = found.end;
+        last_end = Some(found.end);
         if !global {
-            out.push_str(&rest[found.end..]);
-            return out;
-        }
-        if consumed >= chars.len() {
             break;
         }
     }
-    out.push_str(
-        &chars[consumed.min(chars.len())..]
-            .iter()
-            .collect::<String>(),
-    );
+    out.push_str(&line[at..]);
     out
-}
-
-/// One character's length (a zero-width match must still advance or `s//x/g` loops).
-fn char_len_at(chars: &[char], at: usize) -> usize {
-    if at < chars.len() {
-        1
-    } else {
-        0
-    }
 }
 
 fn expand_replacement(replacement: &str, text: &str, found: &super::regexlite::Match) -> String {
@@ -3155,7 +3389,9 @@ fn chmod(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
     Ok(0)
 }
 
-/// `timeout N cmd…` — run under a clock; 124 on expiry (GNU's own code).
+/// `timeout N cmd…` — run under a clock; 124 on expiry (GNU's own code). The child is
+/// spawned through [`spawn_with_io`], so the pipeline's pipe (or a redirection's file)
+/// reaches it — the inherit() wiring starved `cmd | timeout 5 awk …` of its stdin.
 fn timeout(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
     let mut duration: Option<String> = None;
     let mut rest: Vec<String> = Vec::new();
@@ -3186,31 +3422,28 @@ fn timeout(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
         io.err_str("timeout: a command is required\n");
         return Ok(2);
     }
-    let program =
+    let resolved =
         resolve_on_path(&rest[0], &shell.path_var()).unwrap_or_else(|| PathBuf::from(&rest[0]));
-    let mut command = std::process::Command::new(&program);
-    command
-        .args(&rest[1..])
-        .current_dir(&shell.cwd)
-        .envs(shell.child_env(&[]))
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit());
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            io.err_str(&format!("timeout: {}: {error}\n", rest[0]));
-            return Ok(127);
-        }
-    };
+    let program = anchor_program(&resolved, &shell.cwd);
+    let mut spawned =
+        match spawn_with_io(&program, &rest[1..], &shell.cwd, &shell.child_env(&[]), io) {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                io.err_str(&format!("timeout: {}: {error}\n", rest[0]));
+                return Ok(127);
+            }
+        };
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_millis((secs * 1000.0) as u64);
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(status.code().unwrap_or(1)),
+        match spawned.child.try_wait() {
+            Ok(Some(_)) => break,
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
+                    let _ = spawned.child.kill();
+                    // Drain the pumps even on the kill: a pipe writer waiting on them
+                    // would otherwise hang past the child's death.
+                    let _ = spawned.finish();
                     return Ok(124);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -3219,6 +3452,13 @@ fn timeout(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
                 io.err_str(&format!("timeout: {error}\n"));
                 return Ok(1);
             }
+        }
+    }
+    match spawned.finish() {
+        Ok(code) => Ok(code),
+        Err(error) => {
+            io.err_str(&format!("timeout: {error}\n"));
+            Ok(1)
         }
     }
 }

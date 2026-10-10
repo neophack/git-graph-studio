@@ -386,9 +386,10 @@ pub fn run_awk(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
 }
 
 fn lines(text: &str) -> impl Iterator<Item = &str> {
+    // Every line is a record — an empty one included (`awk '{print NR}'` counts
+    // blank lines); split_inclusive never yields a trailing empty artifact.
     text.split_inclusive('\n')
-        .map(|line| line.trim_end_matches('\n'))
-        .take_while(|line| !line.is_empty() || !text.ends_with('\n'))
+        .map(|line| line.trim_end_matches(['\n', '\r']))
 }
 
 fn unescape_common(text: &str) -> String {
@@ -426,9 +427,8 @@ impl<'a> Interp<'a> {
                 .map(|v| v.to_str())
                 .unwrap_or_else(|| " ".to_owned()),
         );
-        self.fields = vec![joined.clone()];
-        self.vars
-            .insert("NF".to_owned(), Val::num((self.fields.len() - 1) as f64));
+        // `$1 = "x"` rebuilds $0 but leaves $1..$NF addressable afterwards.
+        self.fields[0] = joined;
     }
 
     fn record(&mut self, line: &str, name: &str) -> Flow {
@@ -465,6 +465,9 @@ impl<'a> Interp<'a> {
                 continue;
             }
             match self.run_body(&rule.body) {
+                // Every matching rule runs per record — a normal finish falls
+                // through to the next rule, only the escapes abandon it.
+                Flow::Normal => {}
                 // `next` abandons the RECORD, not just this rule.
                 Flow::Next => return Flow::Next,
                 other => return other,
@@ -902,10 +905,33 @@ impl<'a> Interp<'a> {
                     Val::str(&self.record_text().unwrap_or_default())
                 };
                 let regex = Regex::compile(&pattern, true, false)?;
-                let mut text = target.to_str();
-                let mut count = 0;
+                let text = target.to_str();
                 let global = name == "gsub";
-                while let Some(found) = regex.find(&text) {
+                // The matches are laid over the ORIGINAL text — replacing as we went
+                // would rescan the replacement itself (`gsub(/a/, "aa")` would run
+                // forever). Non-global keeps only the first.
+                // An empty match right where the previous match ended is no match
+                // (`gsub(/x*/, "-")` over `xab` is `-a-b-`).
+                let mut last_end: Option<usize> = None;
+                let mut found_iter: Vec<_> = regex
+                    .find_iter(&text)
+                    .into_iter()
+                    .filter(|found| {
+                        let skip = found.start == found.end && last_end == Some(found.start);
+                        if !skip {
+                            last_end = Some(found.end);
+                        }
+                        !skip
+                    })
+                    .collect();
+                if !global {
+                    found_iter.truncate(1);
+                }
+                let mut rebuilt = String::new();
+                let mut at = 0usize;
+                let mut count = 0usize;
+                for found in found_iter {
+                    rebuilt.push_str(&text[at..found.start]);
                     let mut expanded = String::new();
                     let mut chars = replacement.chars();
                     while let Some(c) = chars.next() {
@@ -928,15 +954,12 @@ impl<'a> Interp<'a> {
                             expanded.push(c);
                         }
                     }
-                    text = format!("{}{}{}", &text[..found.start], expanded, &text[found.end..]);
+                    rebuilt.push_str(&expanded);
+                    at = found.end;
                     count += 1;
-                    if !global {
-                        break;
-                    }
-                    if found.end == found.start {
-                        break;
-                    }
                 }
+                rebuilt.push_str(&text[at..]);
+                let text = rebuilt;
                 if count > 0 {
                     if args.len() > 2 {
                         if let Some(target_expr) = args.get(2) {
@@ -950,7 +973,11 @@ impl<'a> Interp<'a> {
             }
             "sprintf" => {
                 let format = value(self, 0)?.to_str();
-                let rest: Vec<Val> = args[1..]
+                // `sprintf()` with nothing past the format is legal (an empty
+                // format string) — `args[1..]` would panic on the empty slice.
+                let rest: Vec<Val> = args
+                    .get(1..)
+                    .unwrap_or(&[])
                     .iter()
                     .map(|arg| self.eval(arg))
                     .collect::<Result<_, _>>()?;
@@ -969,13 +996,13 @@ impl<'a> Interp<'a> {
                 let regex = Regex::compile(&pattern, true, false)?;
                 match regex.find(&text) {
                     Some(found) => {
-                        self.vars
-                            .insert("RSTART".to_owned(), Val::num(found.start as f64 + 1.0));
-                        self.vars.insert(
-                            "RLENGTH".to_owned(),
-                            Val::num((found.end - found.start) as f64),
-                        );
-                        Ok(Val::num(found.start as f64 + 1.0))
+                        // The regex answers byte offsets; awk counts characters, like
+                        // `index`, `length` and `substr` do.
+                        let start = text[..found.start].chars().count() as f64 + 1.0;
+                        let length = text[found.start..found.end].chars().count() as f64;
+                        self.vars.insert("RSTART".to_owned(), Val::num(start));
+                        self.vars.insert("RLENGTH".to_owned(), Val::num(length));
+                        Ok(Val::num(start))
                     }
                     None => {
                         self.vars.insert("RSTART".to_owned(), Val::num(0.0));
@@ -1121,6 +1148,7 @@ fn parse_program(source: &str) -> Result<Vec<Rule>, String> {
     let mut parser = AwkParser {
         tokens: tokenize(source)?,
         at: 0,
+        in_print: false,
     };
     let mut rules = Vec::new();
     while parser.peek().is_some() {
@@ -1226,7 +1254,7 @@ fn tokenize(source: &str) -> Result<Vec<Tok>, String> {
                 let two: String = chars[at..(at + 2).min(chars.len())].iter().collect();
                 let op = [
                     "<=", ">=", "==", "!=", "&&", "||", "++", "--", "+=", "-=", "*=", "/=", "%=",
-                    "^=",
+                    "^=", ">>",
                 ]
                 .iter()
                 .find(|candidate| **candidate == two);
@@ -1236,7 +1264,7 @@ fn tokenize(source: &str) -> Result<Vec<Tok>, String> {
                         at += 2;
                     }
                     None => {
-                        if "+-*/%{}()<>!=,;?[].".contains(other) {
+                        if "+-*/%{}()<>!=,;?[].~".contains(other) {
                             tokens.push(Tok::Op(other.to_string()));
                             at += 1;
                         } else {
@@ -1251,18 +1279,25 @@ fn tokenize(source: &str) -> Result<Vec<Tok>, String> {
 }
 
 /// `/` starts a regex when a value cannot follow the previous token (after an
-/// operator, at a rule start, after `(` or `,` or `&&`).
+/// operator, at a rule start, after `(` or `,` or `&&`). After `)` or `]` an operand
+/// just ended, so `/` is division there (`($1+2)/3`).
 fn regex_position(tokens: &[Tok]) -> bool {
-    matches!(tokens.last(), None | Some(Tok::Newline) | Some(Tok::Op(_)))
+    match tokens.last() {
+        None | Some(Tok::Newline) => true,
+        Some(Tok::Op(op)) => !matches!(op.as_str(), ")" | "]"),
+        Some(_) => false,
+    }
 }
 
 struct AwkParser {
     tokens: Vec<Tok>,
     at: usize,
+    /// Inside a `print` / `printf` argument list outside any parentheses, a bare `>` is
+    /// the output redirection, not the comparison.
+    in_print: bool,
 }
 
 impl AwkParser {
-    // `at: 0` above is a placeholder; the real field type:
     fn peek(&self) -> Option<&Tok> {
         self.tokens.get(self.at)
     }
@@ -1423,13 +1458,15 @@ impl AwkParser {
                     while let Some(token) = self.peek() {
                         if matches!(token, Tok::Newline)
                             || matches!(token, Tok::Op(op) if op == "}" || op == ";")
+                            // `print > "f"`: the redirection is not an argument.
+                            || matches!(token, Tok::Op(op) if op == ">" || op == ">>")
                         {
                             break;
                         }
                         if self.eat(",") {
                             continue;
                         }
-                        args.push(self.parse_expr()?);
+                        args.push(self.parse_print_arg()?);
                     }
                     let redirect = self.parse_redirect()?;
                     self.end_stmt();
@@ -1440,18 +1477,19 @@ impl AwkParser {
                 }
                 "printf" => {
                     self.at += 1;
-                    let format = self.parse_expr()?;
+                    let format = self.parse_print_arg()?;
                     let mut args = Vec::new();
                     while let Some(token) = self.peek() {
                         if matches!(token, Tok::Newline)
                             || matches!(token, Tok::Op(op) if op == "}" || op == ";")
+                            || matches!(token, Tok::Op(op) if op == ">" || op == ">>")
                         {
                             break;
                         }
                         if self.eat(",") {
                             continue;
                         }
-                        args.push(self.parse_expr()?);
+                        args.push(self.parse_print_arg()?);
                     }
                     let redirect = self.parse_redirect()?;
                     self.end_stmt();
@@ -1526,6 +1564,22 @@ impl AwkParser {
         } else {
             Ok(vec![self.parse_stmt()?])
         }
+    }
+
+    /// One `print` argument, where an unparenthesized `>` ends the list.
+    fn parse_print_arg(&mut self) -> Result<Expr, String> {
+        let saved = std::mem::replace(&mut self.in_print, true);
+        let expr = self.parse_expr();
+        self.in_print = saved;
+        expr
+    }
+
+    /// An expression inside parentheses, brackets or call arguments: `>` compares again.
+    fn parse_nested_expr(&mut self) -> Result<Expr, String> {
+        let saved = std::mem::replace(&mut self.in_print, false);
+        let expr = self.parse_expr();
+        self.in_print = saved;
+        expr
     }
 
     fn parse_redirect(&mut self) -> Result<Option<(String, Expr)>, String> {
@@ -1682,6 +1736,9 @@ impl AwkParser {
             ("<", BinOp::Lt),
             (">", BinOp::Gt),
         ] {
+            if self.in_print && op == ">" {
+                continue;
+            }
             if self.eat(op) {
                 let right = self.parse_concat()?;
                 return Ok(Expr::Binary {
@@ -1698,8 +1755,10 @@ impl AwkParser {
         let mut left = self.parse_add()?;
         loop {
             let joins = match self.peek() {
-                Some(Tok::Word(_)) | Some(Tok::Num(_)) | Some(Tok::Str(_))
-                | Some(Tok::Regex(_)) => true,
+                // `in` is an operator keyword, not a concat operand — leaving it here
+                // would swallow `(k in a)` before parse_in ever sees it.
+                Some(Tok::Word(word)) => word != "in",
+                Some(Tok::Num(_)) | Some(Tok::Str(_)) | Some(Tok::Regex(_)) => true,
                 Some(Tok::Op(op)) => matches!(op.as_str(), "$" | "(" | "!" | "-"),
                 _ => false,
             };
@@ -1838,7 +1897,7 @@ impl AwkParser {
                 Ok(Expr::Field(Box::new(index)))
             }
             Some(Tok::Op(op)) if op == "(" => {
-                let inner = self.parse_expr()?;
+                let inner = self.parse_nested_expr()?;
                 if !self.eat(")") {
                     return Err("expected `)`".into());
                 }
@@ -1850,7 +1909,7 @@ impl AwkParser {
                     let mut args = Vec::new();
                     if !self.matches_op(")") {
                         loop {
-                            args.push(self.parse_expr()?);
+                            args.push(self.parse_nested_expr()?);
                             if !self.eat(",") {
                                 break;
                             }
@@ -1862,7 +1921,7 @@ impl AwkParser {
                     return Ok(Expr::Call { name: word, args });
                 }
                 if self.eat("[") {
-                    let key = self.parse_expr()?;
+                    let key = self.parse_nested_expr()?;
                     if !self.eat("]") {
                         return Err("expected `]`".into());
                     }
@@ -1891,7 +1950,9 @@ mod tests {
         let mut shell = Shell::new("awk");
         shell.cwd = dir.to_path_buf();
         let mut io = Io {
-            stdin: crate::ggs_bash::exec::Source::Str(input.to_owned()),
+            stdin: crate::ggs_bash::exec::Source::Str(std::sync::Arc::new(std::sync::Mutex::new(
+                input.to_owned(),
+            ))),
             stdout: crate::ggs_bash::exec::Sink::Capture(std::sync::Arc::new(
                 std::sync::Mutex::new(Vec::new()),
             )),

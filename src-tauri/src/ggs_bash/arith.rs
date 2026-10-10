@@ -31,7 +31,9 @@ fn tokenize(text: &str) -> Result<Vec<Tok>, ExecError> {
         if c.is_whitespace() {
             at += 1;
         } else if c == '$' {
-            // `$x` / `${x}` inside arithmetic is the variable itself.
+            // `$x` / `${x}` inside arithmetic is the variable itself; the special
+            // parameters keep their special name (`$1`, `$$`, `$?`, `$#`) instead of
+            // lexing as a number or an operator once the `$` is gone.
             at += 1;
             if chars.get(at) == Some(&'{') {
                 at += 1;
@@ -41,6 +43,11 @@ fn tokenize(text: &str) -> Result<Vec<Tok>, ExecError> {
                 }
                 tokens.push(Tok::Name(chars[start..at].iter().collect()));
                 at += 1;
+            } else if let Some(next) = chars.get(at) {
+                if next.is_ascii_digit() || matches!(next, '?' | '#' | '$' | '!' | '@' | '*') {
+                    at += 1;
+                    tokens.push(Tok::Name(next.to_string()));
+                }
             }
         } else if c.is_ascii_digit() {
             let start = at;

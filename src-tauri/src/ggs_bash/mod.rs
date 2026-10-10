@@ -781,6 +781,58 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn batch_scripts_run_from_the_shell_cwd() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("x.bat"),
+            "@echo off\r\necho bat-ran %1\r\nexit /b 7\r\n",
+        )
+        .unwrap();
+        // `shell_in` moves only the shell's cwd — the process cwd stays behind in the
+        // cargo harness dir, exactly the trap `anchor_program` closes: Windows resolves
+        // a relative application path against the *process* cwd, so without anchoring
+        // this would spawn `<harness dir>\x.bat` and cmd.exe would report it missing.
+        let (out, err, status) = run_in(dir.path(), "./x.bat one");
+        assert_eq!(status, 7, "{out}{err}");
+        assert!(out.contains("bat-ran one"), "{out}{err}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn batch_scripts_resolve_after_cd() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(
+            dir.path().join("sub").join("y.bat"),
+            "@echo off\r\necho from-sub\r\n",
+        )
+        .unwrap();
+        let (out, err, status) = run_in(dir.path(), "cd sub && ./y.bat");
+        assert_eq!(status, 0, "{out}{err}");
+        assert!(out.contains("from-sub"), "{out}{err}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn patext_completes_an_extensionless_name() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("z.bat"), "@echo off\r\necho completed\r\n").unwrap();
+        let (out, err, status) = run_in(dir.path(), "./z");
+        assert_eq!(status, 0, "{out}{err}");
+        assert!(out.contains("completed"), "{out}{err}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_missing_batch_reports_not_found_not_cmd_noise() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (out, err, status) = run_in(dir.path(), "./nope.bat");
+        assert_eq!(status, 127, "{out}{err}");
+        assert!(err.contains("command not found"), "{out}{err}");
+    }
+
+    #[test]
     fn grep_prints_context_windows() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(
@@ -1270,7 +1322,7 @@ mod tests {
         let (out, _, _) = run_in(dir.path(), "find . -path './sub/*'");
         assert_eq!(out, "./sub/f3.rs\n");
         let (out, _, _) = run_in(dir.path(), "find . -type d");
-        assert_eq!(out, "./sub\n");
+        assert_eq!(out, ".\n./sub\n");
         let (out, _, _) = run_in(dir.path(), "find . -maxdepth 1 -name '*.rs'");
         assert_eq!(out, "./f1.rs\n");
         // -mtime counts whole days of age: +n older, -n newer, n exact.
@@ -1749,5 +1801,128 @@ y z w
         assert!(out.starts_with("started\nslow\nafter\n"));
         assert!(out.contains("rc=0\n"));
         assert!(out.contains("Running"));
+    }
+
+    #[test]
+    fn find_walks_preorder_and_batches_exec_plus() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/x")).unwrap();
+        std::fs::create_dir(dir.path().join("b")).unwrap();
+        std::fs::write(dir.path().join("a/x/y"), "").unwrap();
+        std::fs::write(dir.path().join("f1"), "").unwrap();
+        std::fs::write(dir.path().join("f2"), "").unwrap();
+        // Pre-order: the root itself first, then each subtree depth-first, names
+        // sorted — GNU's walk (`find _t` answered only the children before).
+        let (out, _, status) = run_in(dir.path(), "find .");
+        assert_eq!(status, 0);
+        assert_eq!(out, ".\n./a\n./a/x\n./a/x/y\n./b\n./f1\n./f2\n");
+        // The root is a candidate like any other: -maxdepth 0 answers it alone.
+        let (out, _, _) = run_in(dir.path(), "find . -maxdepth 0");
+        assert_eq!(out, ".\n");
+        // `-exec {} +` runs ONE command over the whole batch — a single echo line.
+        let (out, _, status) = run_in(dir.path(), "find . -name 'f*' -exec echo {} +");
+        assert_eq!(status, 0);
+        assert_eq!(out, "./f1 ./f2\n");
+        // No matches, no run.
+        let (out, _, status) = run_in(dir.path(), "find . -name 'zz*' -exec echo {} +");
+        assert_eq!((status, out.as_str()), (0, ""));
+    }
+
+    #[test]
+    fn awk_blank_records_the_in_operator_and_print_redirects() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Every input line — blank ones included — is a record.
+        let (out, _, _) = run_in(
+            dir.path(),
+            "printf 'a\n\nb\n' | awk '{ print NR \":\" NF \":\" $0 }'",
+        );
+        assert_eq!(out, "1:1:a\n2:0:\n3:1:b\n");
+        // `in` is an operator keyword, both polarities; a plain `2 in a` used to
+        // concatenate into "2".
+        let (out, _, _) = run_in(
+            dir.path(),
+            "printf '' | awk 'BEGIN { a[1]=7; print (2 in a); if (1 in a) print \"yes\"; if (!(2 in a)) print \"no\" }'",
+        );
+        assert_eq!(out, "0\nyes\nno\n");
+        // `$0 ~ /re/` matches; a `/` after `)` divides.
+        let (out, _, _) = run_in(
+            dir.path(),
+            "printf 'ax\nbx\n' | awk '($0 ~ /a/) && /x/ { print ($1 \"!\") }'",
+        );
+        assert_eq!(out, "ax!\n");
+        let (out, _, _) = run_in(dir.path(), "printf '' | awk 'BEGIN { print (2+2)/2 }'");
+        assert_eq!(out, "2\n");
+        // print > file truncates; >> appends.
+        let (_, _, status) = run_in(
+            dir.path(),
+            "printf '' | awk 'BEGIN { print \"one\" > \"f.txt\" }'",
+        );
+        assert_eq!(status, 0);
+        let (_, _, status) = run_in(
+            dir.path(),
+            "printf '' | awk 'BEGIN { print \"two\" >> \"f.txt\" }'",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "one\ntwo\n"
+        );
+    }
+
+    #[test]
+    fn name_indirection_reads_through_the_variable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (out, _, _) = run_in(dir.path(), "x=hello; y=x; echo ${!y}");
+        assert_eq!(out, "hello\n");
+        let (out, _, _) = run_in(dir.path(), "a=b; b=done; echo ${!a}");
+        assert_eq!(out, "done\n");
+    }
+
+    #[test]
+    fn ifs_field_splitting_follows_posix() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Only unquoted expansion results split — literal text never does, whatever
+        // IFS holds.
+        let (out, _, _) = run_in(dir.path(), "IFS=:; set -- a::b; echo literal=$#");
+        assert_eq!(out, "literal=1\n");
+        // An unquoted expansion splits on the non-whitespace delimiters, adjacent
+        // ones leaving an empty field between them.
+        let (out, _, _) = run_in(dir.path(), "IFS=:; v=a::b; set -- $v; echo split=$# 2=[$2]");
+        assert_eq!(out, "split=3 2=[]\n");
+        // IFS whitespace before a delimiter merges into it instead of adding empties.
+        let (out, _, _) = run_in(dir.path(), "IFS=' :'; v='a :: b'; set -- $v; echo mixed=$#");
+        assert_eq!(out, "mixed=3\n");
+        // `"$*"` joins with the FIRST IFS character; unquoted `$@` re-joins the same
+        // way and the IFS loop breaks it apart again.
+        let (out, _, _) = run_in(dir.path(), "IFS=:; set -- a b c; echo \"$*\"");
+        assert_eq!(out, "a:b:c\n");
+        let (out, _, _) = run_in(
+            dir.path(),
+            "IFS=:; set -- a b c; for x in $@; do echo \"[$x]\"; done",
+        );
+        assert_eq!(out, "[a]\n[b]\n[c]\n");
+        // IFS set but empty glues nothing.
+        let (out, _, _) = run_in(dir.path(), "IFS=; set -- a b; echo \"$*\"x");
+        assert_eq!(out, "abx\n");
+        // Glob characters in unquoted literal text still glob.
+        std::fs::write(dir.path().join("g.txt"), "").unwrap();
+        let (out, _, _) = run_in(dir.path(), "echo *.txt");
+        assert_eq!(out, "g.txt\n");
+    }
+
+    #[test]
+    fn timeout_carries_the_pipelines_streams() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // The wrapped command runs against the shell's Io, not the process's stdio:
+        // its stdout reaches the capture and the pipeline's stdin reaches it.
+        let (out, _, status) = run_in(dir.path(), "timeout 5 git --version");
+        assert_eq!(status, 0);
+        assert!(out.starts_with("git version"), "{out}");
+        let (out, _, status) = run_in(
+            dir.path(),
+            "printf 'needle\n' | timeout 5 git hash-object --stdin",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out.trim().len(), 40, "{out}");
     }
 }
