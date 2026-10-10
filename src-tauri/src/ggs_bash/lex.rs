@@ -771,6 +771,28 @@ fn loose_word(text: &str) -> Result<Word, LexError> {
     ))
 }
 
+/// Drop the backslash of every `\}` in a parameter operator's word; any other escape
+/// pair passes through whole for the double-quote reader to judge.
+fn unescape_close_brace(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('}') => out.push('}'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 /// Split `text` at its first top-level `sep` (a backslash escapes it; `${…}` nests),
 /// un-escaping `\sep` on both sides.
 fn split_unescaped(text: &str, sep: char) -> (String, Option<String>) {
@@ -882,8 +904,10 @@ fn parse_param(inner: &str) -> Result<Part, LexError> {
             None
         } else {
             // The operator's word reads like double-quoted text: `${z:-a b c}` keeps
-            // its spaces (read_word would stop at the first one).
-            Some(loose_word(tail)?)
+            // its spaces (read_word would stop at the first one). A `\}` there is the
+            // brace the scan skipped, quoted — it reads as a plain `}` (`${q:-a\}b}`
+            // is `a}b`), which double-quote rules alone would keep backslashed.
+            Some(loose_word(&unescape_close_brace(tail))?)
         };
         Ok(Part::Var {
             name: name.clone(),

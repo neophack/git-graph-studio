@@ -6,7 +6,8 @@ import * as state from '../src/state';
 import { StatusBar } from '../src/statusbar';
 import { TitleBar } from '../src/titlebar';
 import { Panel } from '../src/panel';
-import { settings } from '../src/settings';
+import { DEFAULT_SETTINGS, SETTING_DEFS, settings, updateSetting } from '../src/settings';
+import { setLocale, t } from '../src/i18n';
 import { backend } from './tauriMock';
 import { click, flush, hover, menuLabels, texts, type } from './helpers';
 
@@ -584,6 +585,35 @@ describe('terminal resizing', () => {
 });
 
 describe('terminal right-click', () => {
+	it('registers the setting: four behaviors, the context menu by default', () => {
+		const def = SETTING_DEFS.find((d) => d.key === 'terminalRightClickBehavior')!;
+		expect(def.kind).toBe('enum');
+		expect(def.options?.map((option) => option.value)).toEqual(['menu', 'copyPaste', 'paste', 'nothing']);
+		expect(DEFAULT_SETTINGS.terminalRightClickBehavior).toBe('menu');
+	});
+
+	it('labels the setting, its options and the menus in both language tables', () => {
+		for (const value of ['menu', 'copyPaste', 'paste', 'nothing'] as const) {
+			expect(t(`settings.terminalRightClickBehavior.${value}`)).not.toBe(`settings.terminalRightClickBehavior.${value}`);
+		}
+		setLocale('zh-cn');
+		try {
+			expect(t('settings.terminalRightClickBehavior')).toBe('终端右键行为');
+			expect(t('terminal.menu.copy')).toBe('复制');
+			expect(t('terminal.menu.kill')).toBe('终止终端');
+		} finally {
+			setLocale('en');
+		}
+	});
+
+	it('is a pure UI toggle: no backend restart rides it', () => {
+		backend.on('providers_shell_refresh', () => null);
+		updateSetting('terminalRightClickBehavior', 'paste');
+		expect(settings.terminalRightClickBehavior).toBe('paste');
+		expect(backend.callsTo('providers_shell_refresh')).toHaveLength(0);
+		settings.terminalRightClickBehavior = 'menu';
+	});
+
 	type FakeTerm = { selection: string; pasted: string[]; selectAllCalled: number; cleared: number };
 	const setup = async (): Promise<{ panel: Panel; term: FakeTerm }> => {
 		backend.on('pty_create', () => 'powershell');

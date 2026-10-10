@@ -15,7 +15,7 @@ import { extFileDataUrl } from './extHost';
 import type { DiffSide } from './editor';
 import { fileIcon, fileIconColor } from './editor';
 import type { StatusMap } from './explorer';
-import { t, trText } from './i18n';
+import { t, tf, trText } from './i18n';
 import * as state from './state';
 import { actionButton, basename, confirmDialog, el, icon, notify, quickInput, quickPick, showContextMenu, showMenuBelow, toPosix, type MenuEntry, type QuickPickItem } from './ui';
 
@@ -1097,9 +1097,9 @@ export class SourceControlView {
 		const untracked = files.filter((f) => f.untracked);
 		const confirmed = await confirmDialog(
 			untracked.length > 0
-				? `Are you sure you want to discard changes in ${files.length} files? ${untracked.length} untracked file(s) will be DELETED!\nThis is IRREVERSIBLE!\nYour current working set will be FOREVER LOST if you proceed.`
-				: `Are you sure you want to discard changes in ${files.length} files?\nThis is IRREVERSIBLE!\nYour current working set will be FOREVER LOST if you proceed.`,
-			'Discard Changes'
+				? tf('scm.discardMany.confirmUntracked', files.length, untracked.length)
+				: tf('scm.discardMany.confirm', files.length),
+			t('scm.discardMany.action')
 		);
 		if (!confirmed) return;
 		await this.run('git_discard_all', {

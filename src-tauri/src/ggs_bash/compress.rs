@@ -392,4 +392,19 @@ mod tests {
         let stream = [0x73u8, 0x04, 0x00];
         assert_eq!(inflate(&stream).unwrap(), b"A");
     }
+
+    #[test]
+    fn inflate_reads_fixed_huffman_back_references() {
+        // zlib's own fixed-Huffman output (level 9, short input — BTYPE=01) for a text
+        // full of repeats: every `abc` and `hello` after the first is a back-reference,
+        // so each one decodes a five-bit fixed distance code. The single-leaf distance
+        // tree this replaced decoded every distance as 1 and consumed no bits.
+        let stream = [
+            75u8, 76, 74, 78, 68, 69, 10, 25, 169, 57, 57, 249, 200, 36, 23, 0,
+        ];
+        assert_eq!(
+            inflate(&stream).unwrap(),
+            b"abcabcabcabcabcabc hello hello hello\n"
+        );
+    }
 }

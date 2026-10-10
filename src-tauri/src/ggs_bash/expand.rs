@@ -536,6 +536,22 @@ fn fragments(shell: &mut Shell, word: &Word, io: &Io) -> Result<Vec<Frag>, ExecE
                         Some(ifs) => ifs.chars().next().map(String::from).unwrap_or_default(),
                         None => " ".to_owned(),
                     };
+                    if sep.is_empty() {
+                        // IFS set but empty splits nothing, yet `$@` still expands to
+                        // one field per argument (`IFS=; set -- $@` keeps the count) —
+                        // spliced, with empty arguments dropped as unquoted text is.
+                        for arg in shell.positional() {
+                            if !arg.is_empty() {
+                                frags.push(Frag {
+                                    text: arg,
+                                    quoted: false,
+                                    boundary: true,
+                                    split: false,
+                                });
+                            }
+                        }
+                        continue;
+                    }
                     frags.push(Frag {
                         text: shell.positional().join(&sep),
                         quoted: false,

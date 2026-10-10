@@ -54,30 +54,3 @@ describe('the Terminal Shell setting', () => {
 		expect(settings.terminalShell).toBe('powershell');
 	});
 });
-
-describe('the Terminal Right-Click setting', () => {
-	it('offers the four behaviors, defaulting to the context menu', () => {
-		const def = SETTING_DEFS.find((d) => d.key === 'terminalRightClickBehavior')!;
-		expect(def.kind).toBe('enum');
-		expect(def.options?.map((option) => option.value)).toEqual(['menu', 'copyPaste', 'paste', 'nothing']);
-		expect(DEFAULT_SETTINGS.terminalRightClickBehavior).toBe('menu');
-	});
-
-	it('labels itself and every option in both language tables', () => {
-		for (const value of ['menu', 'copyPaste', 'paste', 'nothing'] as const) {
-			expect(t(`settings.terminalRightClickBehavior.${value}`)).not.toBe(`settings.terminalRightClickBehavior.${value}`);
-		}
-		setLocale('zh-cn');
-		expect(t('settings.terminalRightClickBehavior')).toBe('终端右键行为');
-		expect(t('terminal.menu.copy')).toBe('复制');
-		expect(t('terminal.menu.kill')).toBe('终止终端');
-	});
-
-	it('is a pure UI toggle: no backend restart rides it', () => {
-		backend.on('providers_shell_refresh', () => null);
-		updateSetting('terminalRightClickBehavior', 'paste');
-		expect(settings.terminalRightClickBehavior).toBe('paste');
-		expect(backend.callsTo('providers_shell_refresh')).toHaveLength(0);
-		settings.terminalRightClickBehavior = 'menu';
-	});
-});

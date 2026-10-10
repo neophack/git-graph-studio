@@ -3441,9 +3441,10 @@ fn timeout(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
                     let _ = spawned.child.kill();
-                    // Drain the pumps even on the kill: a pipe writer waiting on them
-                    // would otherwise hang past the child's death.
-                    let _ = spawned.finish();
+                    // Drain the pumps even on the kill — a pipe writer waiting on them
+                    // would otherwise hang past the child's death — but at most 2 s:
+                    // a grandchild holding the pipes must not outlive the deadline.
+                    let _ = spawned.finish_within(std::time::Duration::from_secs(2));
                     return Ok(124);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));

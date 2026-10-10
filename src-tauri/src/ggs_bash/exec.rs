@@ -1393,13 +1393,13 @@ impl Shell {
                             io.stdout = Sink::Null;
                             io.stderr = Sink::Null;
                         }
-                        RedirOp::Output | RedirOp::Append => {
-                            if redirect.fd == Some(2) {
-                                io.stderr = Sink::Null;
-                            } else {
-                                io.stdout = Sink::Null;
-                            }
-                        }
+                        RedirOp::Output | RedirOp::Append => match redirect.fd {
+                            None | Some(1) => io.stdout = Sink::Null,
+                            Some(2) => io.stderr = Sink::Null,
+                            // A descriptor the shell does not model (`3>/dev/null`)
+                            // touches neither standard stream.
+                            Some(_) => {}
+                        },
                         _ => {}
                     }
                     return Ok(());
@@ -1553,6 +1553,23 @@ impl SpawnedChild {
         let status = self.child.wait().map_err(|e| format!("{e}"))?;
         for pump in self.pumps.drain(..) {
             let _ = pump.join();
+        }
+        Ok(status.code().unwrap_or(1))
+    }
+
+    /// [`finish`](Self::finish) with the pump drain bounded by `grace`: after a kill, a
+    /// grandchild still holding the pipes open must not hold the caller with it — the
+    /// stranded pumps end on their own once that grandchild closes its ends.
+    pub fn finish_within(&mut self, grace: std::time::Duration) -> Result<i32, String> {
+        let status = self.child.wait().map_err(|e| format!("{e}"))?;
+        let deadline = std::time::Instant::now() + grace;
+        for pump in self.pumps.drain(..) {
+            while !pump.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if pump.is_finished() {
+                let _ = pump.join();
+            }
         }
         Ok(status.code().unwrap_or(1))
     }

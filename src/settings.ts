@@ -15,7 +15,7 @@ export type LinuxDmabuf = 'auto' | 'disable' | 'keep';
  *  the Rust bash-like shell that also backs Claude Code's tool calls on Windows,
  *  where no bash exists for them to find — or PowerShell. */
 export type TerminalShell = 'powershell' | 'ggsBash';
-/** What the right mouse button does inside the integrated terminal (module 18) —
+/** What the right mouse button does inside the integrated terminal (module 11) —
  *  VS Code's `terminal.integrated.rightClickBehavior`: open the context menu, act as
  *  smart copy/paste, always paste, or nothing. */
 export type TerminalRightClickBehavior = 'menu' | 'copyPaste' | 'paste' | 'nothing';

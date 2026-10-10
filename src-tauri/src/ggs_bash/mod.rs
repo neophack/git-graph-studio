@@ -1925,4 +1925,235 @@ y z w
         assert_eq!(status, 0);
         assert_eq!(out.trim().len(), 40, "{out}");
     }
+
+    #[test]
+    fn sed_substitution_is_byte_safe_and_anchors_once() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Multibyte text in front of a /g match: every match is replaced, nothing after
+        // the first one is lost (byte offsets were added to a character cursor).
+        let (out, _, _) = run_in(dir.path(), "echo '中文a中文a' | sed 's/a/b/g'");
+        assert_eq!(out, "中文b中文b\n");
+        let (out, _, _) = run_in(dir.path(), "echo 'é1é2' | sed 's/[0-9]/#/'");
+        assert_eq!(out, "é#é2\n");
+        // `^` anchors at the line start once, not at every restart of the scan.
+        let (out, _, _) = run_in(dir.path(), "echo aaa | sed 's/^a/b/g'");
+        assert_eq!(out, "baa\n");
+        // An empty match right after a match is no match (GNU).
+        let (out, _, _) = run_in(dir.path(), "echo xab | sed 's/x*/-/g'");
+        assert_eq!(out, "-a-b-\n");
+        // In place, the file keeps every line whole.
+        std::fs::write(dir.path().join("f.txt"), "中文a\n中文a\n").unwrap();
+        let (_, err, status) = run_in(dir.path(), "sed -i 's/a/b/g' f.txt");
+        assert_eq!(status, 0, "{err}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "中文b\n中文b\n"
+        );
+    }
+
+    #[test]
+    fn sed_ranges_follow_posix() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // A regex end address is tried from the line AFTER the opening one.
+        let (out, _, _) = run_in(dir.path(), "printf 'a\nb\na\nc\n' | sed -n '/a/,/a/p'");
+        assert_eq!(out, "a\nb\na\n");
+        let (out, _, _) = run_in(
+            dir.path(),
+            "printf '%s\n' --- 't: 1' --- body | sed -n '/^---$/,/^---$/p'",
+        );
+        assert_eq!(out, "---\nt: 1\n---\n");
+        // A line-number end at or before the opening line: exactly that one line.
+        let (out, _, _) = run_in(dir.path(), "printf '1\n2\n3\n4\n' | sed -n '3,2p'");
+        assert_eq!(out, "3\n");
+        let (out, _, _) = run_in(dir.path(), "printf '1\n2\n3\n4\n' | sed -n '2,3p'");
+        assert_eq!(out, "2\n3\n");
+    }
+
+    #[test]
+    fn find_mindepth_and_delete_keep_the_root() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("d/x")).unwrap();
+        std::fs::write(dir.path().join("d/x/f"), "").unwrap();
+        std::fs::write(dir.path().join("d/g"), "").unwrap();
+        std::fs::write(dir.path().join("1"), "").unwrap();
+        // -mindepth 1 leaves the root out of the candidates.
+        let (out, _, _) = run_in(dir.path(), "find . -mindepth 1 -maxdepth 1");
+        assert_eq!(out, "./1\n./d\n");
+        let (out, _, _) = run_in(dir.path(), "find d -mindepth 2");
+        assert_eq!(out, "d/x/f\n");
+        // `-mindepth 1 -delete` empties the directory and keeps it.
+        let (_, err, status) = run_in(dir.path(), "find d -mindepth 1 -delete");
+        assert_eq!(status, 0, "{err}");
+        assert!(dir.path().join("d").is_dir());
+        assert_eq!(std::fs::read_dir(dir.path().join("d")).unwrap().count(), 0);
+        // `find . -delete` never tries to remove `.` itself.
+        let (out, err, _) = run_in(dir.path(), "cd d && touch q && find . -delete; echo rc=$?");
+        assert_eq!(out, "rc=0\n", "{err}");
+        assert!(dir.path().join("d").is_dir());
+        assert!(!dir.path().join("d/q").exists());
+    }
+
+    #[test]
+    fn grep_word_and_label_flags() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // -w with -i on a fixed string folds case in the word test too.
+        let (out, _, _) = run_in(dir.path(), "printf 'FOO bar\nfoobar\n' | grep -iwF foo");
+        assert_eq!(out, "FOO bar\n");
+        // -o under -w prints only the word-bounded matches.
+        let (out, _, _) = run_in(dir.path(), "echo 'cat category cat' | grep -ow cat");
+        assert_eq!(out, "cat\ncat\n");
+        // Folded fixed-string spans stay on the line's own characters.
+        let (out, _, _) = run_in(dir.path(), "echo 'x ÄB y' | grep -oiF äb");
+        assert_eq!(out, "ÄB\n");
+        // -H forces the file label, -h drops it.
+        std::fs::write(dir.path().join("a.txt"), "k\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "k\n").unwrap();
+        let (out, _, _) = run_in(dir.path(), "grep -H k a.txt");
+        assert_eq!(out, "a.txt:k\n");
+        let (out, _, _) = run_in(dir.path(), "grep -h k a.txt b.txt");
+        assert_eq!(out, "k\nk\n");
+    }
+
+    #[test]
+    fn head_streams_stdin_byte_exact() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (out, _, _) = run_in(dir.path(), r"printf 'a\r\nb\r\n' | head -1");
+        assert_eq!(out, "a\r\n");
+        let (out, _, _) = run_in(dir.path(), "printf 'abc' | head -n 5");
+        assert_eq!(out, "abc");
+        let (out, _, _) = run_in(dir.path(), "printf 'abc' | head -c 10");
+        assert_eq!(out, "abc");
+        let (out, _, _) = run_in(dir.path(), "printf 'abcdef\n' | head -c 3");
+        assert_eq!(out, "abc");
+        // head closes its end after the count, and the endless producer stops.
+        let (out, _, _) = run_in(dir.path(), "while :; do echo y; done | head -2");
+        assert_eq!(out, "y\ny\n");
+    }
+
+    #[test]
+    fn awk_match_counts_characters_and_gsub_skips_adjacent_empty_matches() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (out, _, _) = run_in(
+            dir.path(),
+            "echo '中文ab' | awk '{ print match($0, /ab/), RSTART, RLENGTH }'",
+        );
+        assert_eq!(out, "3 3 2\n");
+        let (out, _, _) = run_in(dir.path(), "echo xab | awk '{ gsub(/x*/, \"-\"); print }'");
+        assert_eq!(out, "-a-b-\n");
+        let (out, _, _) = run_in(dir.path(), "echo aaa | awk '{ gsub(/^a/, \"b\"); print }'");
+        assert_eq!(out, "baa\n");
+    }
+
+    #[test]
+    fn printf_formats_numbers_like_bash() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // The reused format's missing numeric argument is 0, not an error.
+        let (out, _, status) = run_in(dir.path(), "printf '%s=%d\\n' a 1 b");
+        assert_eq!((out.as_str(), status), ("a=1\nb=0\n", 0));
+        // A bad number reports, formats as 0, and the run goes on with status 1.
+        let (out, err, _) = run_in(dir.path(), "printf '%d|' 7 x; echo \" rc=$?\"");
+        assert_eq!(out, "7|0| rc=1\n");
+        assert!(err.contains("invalid number"), "{err}");
+        let (out, _, _) = run_in(
+            dir.path(),
+            "printf '%05d %x %.2f %b\\n' -42 255 3.14159 'a\\tb'",
+        );
+        assert_eq!(out, "-0042 ff 3.14 a\tb\n");
+        let (out, _, _) = run_in(dir.path(), "printf '%d\\n' \"'A\"");
+        assert_eq!(out, "65\n");
+    }
+
+    #[test]
+    fn unquoted_at_under_an_empty_ifs_keeps_one_field_per_argument() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (out, _, _) = run_in(dir.path(), "f() { IFS=; set -- $@; echo $#; }; f x y");
+        assert_eq!(out, "2\n");
+    }
+
+    #[test]
+    fn dev_null_redirects_touch_only_the_named_stream() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (out, err, _) = run_in(dir.path(), "ls no-such-file 2>/dev/null; echo done");
+        assert_eq!((out.as_str(), err.as_str()), ("done\n", ""));
+        let (out, _, _) = run_in(dir.path(), "echo kept 3>/dev/null");
+        assert_eq!(out, "kept\n");
+        let (out, _, _) = run_in(dir.path(), "echo gone >/dev/null; echo shown");
+        assert_eq!(out, "shown\n");
+    }
+
+    #[test]
+    fn read_walks_pipes_herestrings_and_files_line_by_line() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (out, _, _) = run_in(
+            dir.path(),
+            "printf 'a\nb\nc\n' | while read x; do echo \"[$x]\"; done",
+        );
+        assert_eq!(out, "[a]\n[b]\n[c]\n");
+        let (out, _, _) = run_in(
+            dir.path(),
+            "t=$(printf 'p\nq'); while read x; do echo \"<$x>\"; done <<< \"$t\"",
+        );
+        assert_eq!(out, "<p>\n<q>\n");
+        std::fs::write(dir.path().join("lines.txt"), "1\n2\n").unwrap();
+        let (out, _, _) = run_in(
+            dir.path(),
+            "while read x; do echo \"$x!\"; done < lines.txt",
+        );
+        assert_eq!(out, "1!\n2!\n");
+    }
+
+    #[test]
+    fn exit_inside_subshells_stays_inside() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (out, _, _) = run_in(dir.path(), "(exit 3); echo \"after $?\"");
+        assert_eq!(out, "after 3\n");
+        let (out, _, _) = run_in(dir.path(), "x=$(exit 5); echo \"sub $?\"");
+        assert_eq!(out, "sub 5\n");
+        let (out, _, _) = run_in(dir.path(), "echo | exit 4; echo \"pipe $?\"");
+        assert_eq!(out, "pipe 4\n");
+    }
+
+    #[test]
+    fn parameter_operators_distinguish_unset_from_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (out, _, _) = run_in(dir.path(), "e=; echo \"[${e-d}][${e:-d}][${u-d}]\"");
+        assert_eq!(out, "[][d][d]\n");
+        let (out, _, _) = run_in(dir.path(), "e=; echo \"[${e+a}][${e:+a}][${u+a}]\"");
+        assert_eq!(out, "[a][][]\n");
+        // The operator's word keeps its spaces, and `\}` does not close the brace.
+        let (out, _, _) = run_in(dir.path(), "echo \"${z:-a b c}\"");
+        assert_eq!(out, "a b c\n");
+        let (out, _, _) = run_in(dir.path(), r"echo ${q:-a\}b}");
+        assert_eq!(out, "a}b\n");
+        let (out, _, _) = run_in(dir.path(), "set -- 4 5; echo $(( $1 + $2 )) $(( $# * 10 ))");
+        assert_eq!(out, "9 20\n");
+    }
+
+    #[test]
+    fn sort_keys_and_tr_squeeze() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Default fields are blank runs; a bare -kN runs to the line end.
+        let (out, _, _) = run_in(dir.path(), "printf 'x  2\ny 10\nz 1\n' | sort -k2n");
+        assert_eq!(out, "z 1\nx  2\ny 10\n");
+        // Keys compare one by one.
+        let (out, _, _) = run_in(dir.path(), "printf 'b 1\na 1\nc 0\n' | sort -k2,2 -k1,1");
+        assert_eq!(out, "c 0\na 1\nb 1\n");
+        let (out, _, _) = run_in(dir.path(), "printf '%s\\n' 1.5 -2 10 | sort -n");
+        assert_eq!(out, "-2\n1.5\n10\n");
+        // -s squeezes the translated set's repeats.
+        let (out, _, _) = run_in(dir.path(), "echo aaabbb | tr -s ab xy");
+        assert_eq!(out, "xy\n");
+        let (out, _, _) = run_in(dir.path(), "echo 'a   b' | tr -s ' '");
+        assert_eq!(out, "a b\n");
+    }
+
+    #[test]
+    fn a_prefix_assignment_does_not_outlive_its_command() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (out, _, _) = run_in(
+            dir.path(),
+            "PATH=/nowhere:$PATH git --version >/dev/null; case \"$PATH\" in /nowhere*) echo leaked;; *) echo clean;; esac",
+        );
+        assert_eq!(out, "clean\n");
+    }
 }
