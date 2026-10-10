@@ -33,12 +33,21 @@ fn main() {
             ));
         }
     }
-    rows.sort_by(|a, b| b.2.cmp(&a.2));
-    println!("{:<24} {:>9} {:>10} {:>8}", "file", "bytes", "parse µs", "defs");
+    rows.sort_by_key(|r| std::cmp::Reverse(r.2));
+    println!(
+        "{:<24} {:>9} {:>10} {:>8}",
+        "file", "bytes", "parse µs", "defs"
+    );
     for (name, bytes, micros, defs) in &rows {
         println!("{:<24} {:>9} {:>10} {:>8}", name, bytes, micros, defs);
     }
     let total: u128 = rows.iter().map(|r| r.2).sum();
     println!("{:-<52}", "");
-    println!("{:<24} {:>9} {:>10} {:>8}", "TOTAL", rows.iter().map(|r| r.1).sum::<u64>(), total, rows.iter().map(|r| r.3).sum::<usize>());
+    println!(
+        "{:<24} {:>9} {:>10} {:>8}",
+        "TOTAL",
+        rows.iter().map(|r| r.1).sum::<u64>(),
+        total,
+        rows.iter().map(|r| r.3).sum::<usize>()
+    );
 }
