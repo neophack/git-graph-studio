@@ -39,7 +39,10 @@ struct PendingNonce {
     expires: u64,
 }
 
-const NONCE_TTL_MS: u64 = 60_000;
+// Single-use and per-user; generous because the phone may sit on the password card
+// for a while between taking the challenge and posting the pair (a nonce is 128 random
+// bits — a long life costs nothing).
+const NONCE_TTL_MS: u64 = 300_000;
 const MAX_PENDING_NONCES: usize = 10_000;
 const MAX_PAIR_BODY: usize = 16 * 1024;
 const MAX_SEND_FRAMES: usize = 64;
@@ -338,6 +341,27 @@ async fn pair(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Respon
     if device_name.len() > MAX_NAME {
         return err(StatusCode::BAD_REQUEST, "device name too long");
     }
+    // The plain pairing (the link's fragment carries the auth credential itself, hex):
+    // no challenge round trip and no browser crypto — the form the phone uses while the
+    // frames cross unencrypted. Same epoch, password and lockout rules as the proof form.
+    let secret = body.get("secret").and_then(Value::as_str).unwrap_or("");
+    if !secret.is_empty() {
+        let Some(user) = app.store.get(user_id) else {
+            app.guard.hit(client_ip(&headers), Kind::Auth);
+            return err(StatusCode::NOT_FOUND, "no such user");
+        };
+        if user.disabled {
+            return err(StatusCode::FORBIDDEN, "disabled");
+        }
+        if user.epoch != epoch {
+            return err(StatusCode::CONFLICT, "rekeyed — scan the new QR");
+        }
+        if !constant_eq(&secret.to_ascii_lowercase(), &user.auth.to_ascii_lowercase()) {
+            app.guard.hit(client_ip(&headers), Kind::Auth);
+            return err(StatusCode::UNAUTHORIZED, "bad proof");
+        }
+        return finish_pair(&app, &headers, &user, password, device_name);
+    }
     // Single-use whichever way the proof lands:
     let pending = app.pairings.lock().unwrap().remove(nonce);
     let Some(pending) = pending.filter(|p| p.expires >= now_ms() && p.user == user_id) else {
@@ -357,13 +381,18 @@ async fn pair(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Respon
         app.guard.hit(client_ip(&headers), Kind::Auth);
         return err(StatusCode::UNAUTHORIZED, "bad proof");
     }
+    finish_pair(&app, &headers, &user, password, device_name)
+}
+
+/// The shared tail of both pairing forms: the login-password gate, then the device.
+fn finish_pair(app: &App, headers: &HeaderMap, user: &User, password: &str, device_name: &str) -> Response {
     if let Some(record) = &user.password {
         if !store::verify_password(record, password) {
-            app.guard.hit(client_ip(&headers), Kind::Auth);
+            app.guard.hit(client_ip(headers), Kind::Auth);
             return err(StatusCode::UNAUTHORIZED, "bad password");
         }
     }
-    match app.store.pair_device(user_id, device_name, app.config.max_devices) {
+    match app.store.pair_device(&user.id, device_name, app.config.max_devices) {
         Ok((device, token)) => api_json(
             StatusCode::CREATED,
             json!({ "device_id": device.id, "device_token": token, "epoch": user.epoch }),

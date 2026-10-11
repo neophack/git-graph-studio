@@ -19,13 +19,16 @@ const MAX_PROMPT_CHARS = 100_000;
  * @param {{ log, onChange, folders: () => {name: string, path: string}[],
  *           runner: import('./runner.js').Runner, sdkHost, tap: { send, open, stopTurn, state, answer, permission, mode } | null,
  *           desktopTabs: () => Iterable<string>, openDesktopTab?: (sessionId: string) => Promise<void>,
- *           answerQuestion?: (arg) => Promise<unknown>, official }} options
+ *           answerQuestion?: (arg) => Promise<unknown>, official, live?: import('./live.js') }} options
  */
 function createControl(options) {
 	const log = options.log || (() => {});
 	const runner = options.runner;
 	const sdkHost = options.sdkHost;
-	const tap = options.tap;
+	// Read live, never copied: the host's tap is adopted after an async probe, and a copy
+	// taken here stayed null on Git Graph Studio — every prompt then ran in a background
+	// CLI instead of the conversation's own Claude Code tab.
+	const tapNow = () => options.tap || null;
 
 	const workspaceFolders = () => (options.folders() || []).filter((f) => f && f.path);
 	const folderPaths = () => workspaceFolders().map((f) => f.path);
@@ -88,10 +91,10 @@ function createControl(options) {
 	/** Whether the conversation's tab is up on the desktop — informational (the panel
 	 *  and the phone's "on desktop" marker); routing itself is tap-first. */
 	function hasTab(sessionId) {
-		return !!tap && !!sessionId && desktopTabs().has(sessionId);
+		return !!tapNow() && !!sessionId && desktopTabs().has(sessionId);
 	}
 
-	function sendPrompt(p) {
+	function sendPrompt(p, ctx = {}) {
 		const text = String(p.text ?? "");
 		let cwd, root = null, title = null, sessionId = null;
 		const laneState = p.lane ? runner.laneState(String(p.lane)) : null;
@@ -121,9 +124,13 @@ function createControl(options) {
 		// conversation opens a fresh one — so the desktop shows the turn as its own and
 		// the session file the phone reads is the one that tab writes. A second CLI here
 		// would branch the conversation history under the desktop's feet.
-		if (tap) {
+		if (tapNow()) {
 			const arg = { sessionId: sessionId || undefined, text, interrupt: p.mode === "now", model: p.model || null };
-			void tap.send(arg).catch((error) => log(`the desktop tab turn failed: ${error && error.message}`));
+			void tapNow().send(arg).catch((error) => {
+				log(`the desktop tab turn failed: ${error && error.message}`);
+				// The phone is waiting on this turn's live stream: tell it, or it waits forever.
+				if (options.notify && ctx.from) options.notify(ctx.from, { t: "sendError", sessionId, draft: p.draftId || null, error: String(error && error.message || error) });
+			});
 			return { lane: sessionId || `tab:${text.trim().slice(0, 24)}`, sessionId, started: true, via: "tab" };
 		}
 		// No tab surface to drive (VS Code, or the headless backend): this window runs
@@ -136,16 +143,118 @@ function createControl(options) {
 		return runner.send({ sessionId, draftId: laneState ? String(p.lane).replace(/^draft:/, "") : p.draftId, cwd, root, title, text, mode: p.mode, permissionMode: p.permissionMode, model: p.model });
 	}
 
+	/* ---------- the /remote-control inbound messages ---------- */
+
+	// A model picked by `control_request {subtype: "set_model"}` rides the conversation's
+	// next turn (the tab's own picker, or the sdk host's --model).
+	const pickedModels = new Map(); // sessionId | draft → model
+
+	/** The text a `user` message carries (a string, or its text blocks). */
+	function userText(message) {
+		const content = message && message.message ? message.message.content : message && message.content;
+		if (typeof content === "string") return content;
+		if (Array.isArray(content)) return content.filter((b) => b && b.type === "text").map((b) => b.text || "").join("\n");
+		return "";
+	}
+
+	// A waiting AskUserQuestion read off the transcript (a question tool call with no result
+	// yet), as the protocol's can_use_tool request. The fallback for a host whose tap does
+	// not carry the chat page's prompts (Git Graph Studio builds before 2026-10-11 classified
+	// the wrapped page envelope by its outer type and never forwarded one): the remote still
+	// gets its question pop-up, answered through the tab's question card.
+	const SYNTH_PREFIX = "tu:";
+	function waitingQuestions(state) {
+		const out = [];
+		for (const item of state.items.slice(-40)) {
+			if (item.k !== "tool" || item.name !== "AskUserQuestion" || item.st !== "run") continue;
+			const body = item.body && item.body.kind === "question" ? item.body : null;
+			if (!body || !body.questions.length) continue;
+			out.push({
+				type: "control_request",
+				request_id: SYNTH_PREFIX + item.id,
+				synthesized: true,
+				request: {
+					subtype: "can_use_tool",
+					tool_name: "AskUserQuestion",
+					input: { questions: body.questions.map((q) => ({ question: q.q, header: q.header, multiSelect: q.multi, options: q.opts.map((o) => ({ label: o.label, description: o.desc })) })) },
+					permission_suggestions: []
+				}
+			});
+		}
+		return out;
+	}
+
+	/** The open requests a session's meta carries: the host's real ones, plus a waiting
+	 *  question the transcript shows that no real request covers. */
+	function openRequestsFor(s, state) {
+		const real = options.openRequests ? options.openRequests(s.id) || [] : [];
+		if (real.some((r) => r && r.request && r.request.tool_name === "AskUserQuestion")) return real;
+		return [...real, ...waitingQuestions(state)];
+	}
+
+	/** A synthesized question's answer: the protocol's `updatedInput.answers` (question
+	 *  text → the picked labels joined, or typed text) back into the tab card's picks. */
+	async function answerSynthesized(sessionId, requestId, result) {
+		if (result.behavior !== "allow") throw Object.assign(new Error("this question can only be declined on the desktop"), { status: 409 });
+		const s = sessions.findSession(sessionId);
+		if (!s) throw Object.assign(new Error("no such conversation"), { status: 404 });
+		const itemId = requestId.slice(SYNTH_PREFIX.length);
+		const item = sessions.readTranscript(s.file).items.find((it) => it.id === itemId && it.k === "tool" && it.name === "AskUserQuestion");
+		if (!item || !item.body || item.body.kind !== "question") throw Object.assign(new Error("that question is no longer waiting"), { status: 409 });
+		const given = result.updatedInput && typeof result.updatedInput.answers === "object" ? result.updatedInput.answers : {};
+		const answers = item.body.questions.map((q) => {
+			const raw = String(given[q.q] ?? "").trim();
+			const labels = q.opts.map((o) => o.label);
+			const picks = labels.filter((label) => raw === label || raw.split(", ").includes(label));
+			let rest = raw;
+			for (const label of picks) rest = rest.split(", ").filter((part) => part !== label).join(", ");
+			rest = rest.trim();
+			if (rest) picks.push("Other");
+			return { picks, other: rest || undefined };
+		});
+		await methods.answer({ id: s.id, item: itemId, answers });
+		return { t: "rc", ok: true, via: "tab-question" };
+	}
+
+	/** Answer a `can_use_tool` request with the remote's control_response: by protocol
+	 *  on both hosts — the asking chat page's own answer on Git Graph Studio
+	 *  (`ggs.claudeChat.respond`), the CLI's stdin where this window runs the turn. */
+	async function respond(sessionId, response) {
+		const answer = response && typeof response === "object" ? response : null;
+		const result = answer && answer.response;
+		if (!answer || typeof answer.request_id !== "string" || !result || (result.behavior !== "allow" && result.behavior !== "deny")) {
+			throw Object.assign(new Error("a control_response answers one request: {request_id, response: {behavior: allow|deny, …}}"), { status: 400 });
+		}
+		if (answer.request_id.startsWith(SYNTH_PREFIX)) return answerSynthesized(sessionId, answer.request_id, result);
+		const tap = tapNow();
+		if (tap && tap.respond) {
+			const done = await tap.respond({ requestId: answer.request_id, result }).catch((error) => ({ error }));
+			if (done && done.ok) return { t: "rc", ok: true, via: "tab" };
+			// A prompt this window's own CLI asked (no tab ever saw it) is the sdk host's.
+			if (sdkHost && sdkHost.respond(sessionId, answer)) return { t: "rc", ok: true, via: "sdk" };
+			throw done && done.error ? done.error : new Error("that permission prompt is no longer open");
+		}
+		if (sdkHost && sdkHost.respond(sessionId, answer)) return { t: "rc", ok: true, via: "sdk" };
+		throw Object.assign(new Error("that permission prompt is no longer open"), { status: 409 });
+	}
+
 	/* ---------- the request table the phone speaks ---------- */
 
 	const methods = {
-		hello() {
+		async hello() {
+			const tap = tapNow();
+			// A GGS host that cannot forward the chat page's tool-permission prompts: the
+			// remote says so instead of silently never showing one (questions still work,
+			// read off the transcript).
+			const prompts = tap ? (tap.forwardsPrompts ? await tap.forwardsPrompts().catch(() => false) : false) : true;
 			return {
 				t: "hello",
-				host: tap ? "ggs" : "vscode",
+				host: tapNow() ? "ggs" : "vscode",
 				capabilities: {
-					tab: !!tap,
+					tab: !!tapNow(),
 					sdk: !!sdkHost,
+					live: !!options.live,
+					prompts,
 					official: options.official ? options.official.supported() : false
 				},
 				folders: workspaceFolders(),
@@ -165,11 +274,12 @@ function createControl(options) {
 			}
 			return { t: "sessions", scope: scope ? "workspace" : "all", sessions: [...drafts, ...list.slice(0, limit).map(sessionView)], total: list.length, version: runner.version };
 		},
-		session(p) {
+		session(p, ctx) {
 			const laneKey = String(p.lane || p.id || "");
 			const laneState = runner.laneState(laneKey);
 			const sessionId = laneState && laneState.sessionId ? laneState.sessionId : laneKey.startsWith("draft:") ? null : laneKey;
 			const s = sessionId ? sessions.findSession(sessionId) : null;
+			if (s && options.live && ctx && ctx.from && p.watch !== false) options.live.watch(ctx.from, { sessionId: s.id });
 			if (!s) {
 				if (laneState) return { t: "session", draft: true, id: laneKey, lane: laneView(laneKey), items: [], rev: "draft:" + runner.version, total: 0, hasMore: false };
 				throw Object.assign(new Error("no such conversation"), { status: 404 });
@@ -178,7 +288,7 @@ function createControl(options) {
 			const before = p.before != null && Number.isFinite(Number(p.before)) ? Number(p.before) : null;
 			const rev = `${state.size}:${state.mtimeMs}:${runner.version}:${Number(p.limit) || 0}:${before || 0}`;
 			const lane = laneView(s.id);
-			const meta = { ...sessionView(s), midTurn: undefined, model: shownModel(state.model || s.model, s.cwd), pendingPermission: options.pendingPermission ? options.pendingPermission(s.id) : null };
+			const meta = { ...sessionView(s), midTurn: undefined, model: shownModel(state.model || s.model, s.cwd), openRequests: openRequestsFor(s, state) };
 			if (p.rev === rev) return { t: "session", same: true, rev, lane, session: meta, cur: { gen: state.gen, since: state.seq } };
 			const since = p.cur && p.cur.gen === state.gen && Number.isFinite(Number(p.cur.since)) ? Number(p.cur.since) : null;
 			const window = sessions.transcriptWindow(state, { limit: p.limit, since, before });
@@ -217,18 +327,67 @@ function createControl(options) {
 			if (!img) throw Object.assign(new Error("no such image"), { status: 404 });
 			return { t: "image", ...img };
 		},
-		send(p) {
-			const result = sendPrompt(p);
-			return { t: "send", ...result, state: laneView(result.lane) };
+		send(p, ctx) {
+			// A new conversation: the phone names a draft and watches it BEFORE the turn
+			// starts, so the conversation id the turn creates is one it did not know — the
+			// live stream adopts it and streams the turn from its first message.
+			const fresh = !(p.lane && runner.laneState(String(p.lane))) && !(p.sessionId && !String(p.sessionId).startsWith("draft:"));
+			const draft = fresh ? String(p.draft || p.draftId || `d${Date.now().toString(36)}`).replace(/[^\w-]/g, "").slice(0, 40) : null;
+			if (fresh && options.live && ctx && ctx.from) options.live.watch(ctx.from, { draft });
+			const result = sendPrompt(fresh ? { ...p, draftId: draft } : p, ctx);
+			if (!fresh && options.live && ctx && ctx.from && result.sessionId) options.live.watch(ctx.from, { sessionId: result.sessionId });
+			return { t: "send", ...result, draft, state: laneView(result.lane) };
+		},
+		/**
+		 * One inbound `/remote-control` message for a conversation (`sessionId`) or the new
+		 * one the remote is starting (`draft`, with `cwd`):
+		 *   {type: "user", message: {role, content}}             a prompt (`mode`: now | queue)
+		 *   {type: "control_request", request: {subtype: "interrupt"}}
+		 *   {type: "control_request", request: {subtype: "set_permission_mode", mode}}
+		 *   {type: "control_request", request: {subtype: "set_model", model}}
+		 *   {type: "control_response", response: {subtype, request_id, response}}  a can_use_tool answer
+		 */
+		async rc(p, ctx) {
+			const msg = p.msg && typeof p.msg === "object" ? p.msg : {};
+			const sessionId = typeof p.sessionId === "string" && p.sessionId ? p.sessionId : null;
+			const key = sessionId || (p.draft ? `draft:${p.draft}` : null);
+			if (msg.type === "user") {
+				const text = userText(msg).trim();
+				if (!text) throw Object.assign(new Error("empty prompt"), { status: 400 });
+				const model = (key && pickedModels.get(key)) || p.model || null;
+				const sent = methods.send({ sessionId, lane: sessionId || undefined, draft: p.draft, cwd: p.cwd, text, mode: p.mode === "now" ? "now" : "queue", model }, ctx);
+				return { ...sent, t: "rc", ok: true };
+			}
+			if (msg.type === "control_response") return respond(sessionId, msg.response);
+			if (msg.type === "control_request") {
+				const request = msg.request || {};
+				if (request.subtype === "interrupt") return { ...methods.stop({ sessionId, lane: sessionId }), t: "rc" };
+				if (request.subtype === "set_permission_mode") return { ...(await methods.mode({ sessionId: sessionId || key, mode: request.mode })), t: "rc" };
+				if (request.subtype === "set_model") {
+					if (!key) throw Object.assign(new Error("set_model names a conversation"), { status: 400 });
+					const model = typeof request.model === "string" && /^[\w.\-[\]:/]{1,80}$/.test(request.model) ? request.model : null;
+					if (model) pickedModels.set(key, model);
+					else pickedModels.delete(key);
+					return { t: "rc", ok: true, model };
+				}
+				throw Object.assign(new Error(`unsupported control_request: ${request.subtype || "?"}`), { status: 400 });
+			}
+			throw Object.assign(new Error(`unsupported message: ${msg.type || "?"}`), { status: 400 });
+		},
+		/** The phone watches a conversation's live SDK stream (renewed while it is open);
+		 *  `{}` stops watching. */
+		watch(p, ctx) {
+			if (!options.live || !ctx || !ctx.from) return { t: "watch", ok: false };
+			return { t: "watch", ...options.live.watch(ctx.from, { sessionId: p.sessionId || null, draft: p.draft || null }) };
 		},
 		stop(p) {
 			const key = String(p.lane || "");
 			const lane = runner.laneState(key);
 			const sessionId = p.sessionId && typeof p.sessionId === "string" ? p.sessionId : (lane && lane.sessionId) || (!key.startsWith("draft:") && !key.startsWith("tab:") ? key : null);
-			if (tap) {
+			if (tapNow()) {
 				// The turn lives in the conversation's tab: its own Stop is what
 				// interrupts it, exactly as the desktop user's Esc would.
-				void tap.stopTurn({ sessionId: sessionId || undefined }).catch(() => undefined);
+				void tapNow().stopTurn({ sessionId: sessionId || undefined }).catch(() => undefined);
 				return { t: "stop", ok: true, state: laneView(key) };
 			}
 			const stopped = sdkHost ? sdkHost.interrupt(lane ? lane.sessionId : sessionId) : false;
@@ -287,13 +446,13 @@ function createControl(options) {
 		async permission(p) {
 			const decision = p.decision === "allowAlways" ? "allowAlways" : p.decision === "allow" ? "allow" : p.decision === "deny" ? "deny" : null;
 			if (!decision) throw Object.assign(new Error("the decision must be allow, allowAlways or deny"), { status: 400 });
-			if (!tap && sdkHost) {
+			if (!tapNow() && sdkHost) {
 				const ok = sdkHost.permission(p.sessionId, { decision, message: p.message });
 				if (ok) options.onPermissionAnswered?.(p.sessionId);
 				return { t: "permission", ok };
 			}
-			if (!tap) throw new Error("answering permissions needs the desktop's Claude Code tab");
-			await tap.permission({ sessionId: p.sessionId, decision, message: p.message });
+			if (!tapNow()) throw new Error("answering permissions needs the desktop's Claude Code tab");
+			await tapNow().permission({ sessionId: p.sessionId, decision, message: p.message });
 			options.onPermissionAnswered?.(p.sessionId);
 			return { t: "permission", ok: true };
 		},
@@ -302,8 +461,8 @@ function createControl(options) {
 			// The tab's own mode selector where there is one; the sdk host's next-turn
 			// mode where this window runs the turns (a lane-less conversation's pick is
 			// remembered for its first turn).
-			if (tap) {
-				await tap.mode({ sessionId: p.sessionId, mode });
+			if (tapNow()) {
+				await tapNow().mode({ sessionId: p.sessionId, mode });
 				return { t: "mode", ok: true };
 			}
 			if (sdkHost) return { t: "mode", ok: sdkHost.setMode(p.sessionId, mode) };
@@ -326,17 +485,18 @@ function createControl(options) {
 
 	// The methods that act on the desktop. Everything else (sessions, transcripts, the
 	// lazy fetches, the official reads) is exactly what a read-only mirror serves.
-	const CONTROL_METHODS = new Set(["send", "stop", "resume", "cancel", "promote", "answer", "permission", "mode", "model", "openOnDesktop"]);
+	const CONTROL_METHODS = new Set(["rc", "send", "stop", "resume", "cancel", "promote", "answer", "permission", "mode", "model", "openOnDesktop"]);
 
-	/** Answer one inner-protocol request; `{t:…}` answers, throws carry {status,message}. */
-	async function dispatch(plain) {
+	/** Answer one inner-protocol request; `{t:…}` answers, throws carry {status,message}.
+	 *  `ctx.from` is the asking phone's device id (the live stream's watcher key). */
+	async function dispatch(plain, ctx = {}) {
 		const name = plain && typeof plain.t === "string" ? plain.t : "";
 		const method = Object.prototype.hasOwnProperty.call(methods, name) ? methods[name] : null;
 		if (!method) throw Object.assign(new Error("unknown method"), { status: 404 });
 		if (CONTROL_METHODS.has(name) && options.controlAllowed && !options.controlAllowed()) {
 			throw Object.assign(new Error("the self-hosted phone is read-only while the official Remote Control carries this PC (claudeRemote.mirrorControl lets it drive)"), { status: 403 });
 		}
-		return method.call(methods, plain && typeof plain === "object" ? plain : {});
+		return method.call(methods, plain && typeof plain === "object" ? plain : {}, ctx);
 	}
 
 	return { dispatch, methods, sessionView, laneView, sendPrompt, hasTab };

@@ -3710,6 +3710,41 @@ describe('the Claude conversation tap and the remote-control bridge (Claude Remo
 		gate.mockRestore();
 	});
 
+	it('the real wrapped permission traffic is tapped — the prompt, its withdrawal, the page\'s answer — and ggs.claudeChat.respond answers by protocol', async () => {
+		const { host, subscriberSent, claudeSent, bindSession, subscriberHandle } = await tapHost();
+		bindSession('s1');
+		await host.executeCommand('ggs.claudeTap.subscribe', [], subscriberHandle);
+		const delivered: unknown[] = [];
+		const gate = vi.spyOn(host as never as { gateWebviewMessage: (view: unknown, message: unknown, key: string) => void }, 'gateWebviewMessage').mockImplementation(((view: unknown, message: unknown) => { delivered.push(message); }) as never);
+		// The extension's prompt, as it really crosses: wrapped in a request envelope (the
+		// outer type is "request" — reading only that once missed every real prompt).
+		const prompt = { type: 'request', channelId: 'ch1', requestId: 'req-7', request: { type: 'tool_permission_request', toolName: 'AskUserQuestion', inputs: { questions: [{ question: 'Pick?', options: [{ label: 'A' }, { label: 'B' }] }] }, suggestions: [] } };
+		// Claude Code posts to its page wrapped — {type: "from-extension", message} — and
+		// the tap reads the protocol message inside (the wrapper's own type matched nothing).
+		await host['serve']('webview.postMessage', [1, { type: 'from-extension', message: prompt }], 'anthropic.claude-code', {} as never);
+		await host['serve']('webview.postMessage', [1, { type: 'from-extension', message: { type: 'cancel_request', targetRequestId: 'req-old' } }], 'anthropic.claude-code', {} as never);
+		await host['serve']('webview.postMessage', [1, { type: 'from-extension', message: { type: 'io_message', channelId: 'ch1', message: { type: 'assistant', uuid: 'a1' }, done: false } }], 'anthropic.claude-code', {} as never);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const seen = tapEvents(subscriberSent);
+		expect(seen.map((event) => [event.dir, event.kind, event.sessionId])).toEqual([['out', 'permission', 's1'], ['out', 'permission', 's1'], ['out', 'sdk', 's1']]);
+		expect(seen[0].message).toEqual(prompt); // the protocol message itself, unwrapped
+		expect((seen[2].message as { message?: unknown }).message).toEqual({ type: 'assistant', uuid: 'a1' });
+		// The remote answers with the SDK's PermissionResult: it crosses to the extension as
+		// the asking page's own response, and the page's card is withdrawn.
+		const result = { behavior: 'allow', updatedInput: { questions: prompt.request.inputs.questions, answers: { 'Pick?': 'B' } } };
+		expect(await host.executeCommand('ggs.claudeChat.respond', [{ requestId: 'req-7', result }])).toEqual({ ok: true });
+		expect(claudeSent).toContainEqual({ type: '__studioExtEvent', event: 'webviewMessage', panelId: 1, message: { type: 'response', requestId: 'req-7', response: { type: 'tool_permission_response', result } } });
+		// The page only reads wrapped posts: the withdrawal goes out in its wrapper.
+		expect(delivered).toContainEqual({ type: 'from-extension', message: { type: 'cancel_request', targetRequestId: 'req-7' } });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const last = tapEvents(subscriberSent).at(-1)!;
+		expect([last.dir, last.kind]).toEqual(['in', 'permission']); // the remotes see it answered
+		// A settled (or unknown) prompt cannot be answered twice; nonsense is refused.
+		await expect(host.executeCommand('ggs.claudeChat.respond', [{ requestId: 'req-7', result }])).rejects.toThrow(/no longer open/);
+		await expect(host.executeCommand('ggs.claudeChat.respond', [{ requestId: 'req-7', result: { behavior: 'maybe' } }])).rejects.toThrow(/allow or deny/);
+		gate.mockRestore();
+	});
+
 	it('a synthesized remote-control request crosses as the page\'s own, and its answer is consumed before the page sees it', async () => {
 		const { host, claudeSent, speakAsPage, bindSession } = await tapHost();
 		bindSession('s1');
@@ -3720,9 +3755,15 @@ describe('the Claude conversation tap and the remote-control bridge (Claude Remo
 		// Exactly the request the page's capsule sends, injected as the page:
 		const injected = claudeSent.find((message) => (message as { message?: { request?: { type?: string } } }).message?.request?.type === 'toggle_remote_control') as { panelId?: number; message?: unknown } | undefined;
 		expect(injected).toMatchObject({ panelId: 1, message: { type: 'request', channelId: 'ch9', request: { type: 'toggle_remote_control', enable: true } } });
-		// The extension answers: consumed (the page never asked), the ticket carries the state.
+		const requestId = (injected!.message as { requestId?: string }).requestId;
+		expect(requestId).toMatch(/^ggs-rc-/); // like the page's own requests, it names itself
+		// The extension answers — wrapped, as it posts everything to its page: consumed (the
+		// page never asked), the ticket carries the state.
 		gate.mockClear();
-		await host['serve']('webview.postMessage', [1, { type: 'response', channelId: 'ch9', request: { type: 'toggle_remote_control', state: { channelRemoteControlState: { status: 'connected', connectUrl: 'https://claude.ai/y', sessionUrl: 'https://claude.ai/s', bridgeEpoch: 1 } } } }], 'anthropic.claude-code', {} as never);
+		await host['serve']('webview.postMessage', [1, { type: 'from-extension', message: { type: 'response', requestId: 'someone-else', response: {} } }], 'anthropic.claude-code', {} as never);
+		expect(gate).toHaveBeenCalledTimes(1); // another request's answer is the page's, delivered
+		gate.mockClear();
+		await host['serve']('webview.postMessage', [1, { type: 'from-extension', message: { type: 'response', channelId: 'ch9', requestId, request: { type: 'toggle_remote_control', state: { channelRemoteControlState: { status: 'connected', connectUrl: 'https://claude.ai/y', sessionUrl: 'https://claude.ai/s', bridgeEpoch: 1 } } } } }], 'anthropic.claude-code', {} as never);
 		const state = await host.executeCommand('ggs.claudeChat.state', [{ ticket }]) as { phase: string; rc: { status: string; connectUrl: string } | null };
 		expect(state.phase).toBe('sent');
 		expect(state.rc).toMatchObject({ status: 'connected', connectUrl: 'https://claude.ai/y' });

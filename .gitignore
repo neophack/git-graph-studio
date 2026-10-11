@@ -12,4 +12,5 @@ vite.config.ts.timestamp-*
 .DS_Store
 Thumbs.db
 .zcode/claude-remote-server/claude-remote-data/
+claude-remote-server/claude-remote-data/
 .zcode/

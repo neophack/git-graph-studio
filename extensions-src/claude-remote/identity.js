@@ -30,20 +30,23 @@ function normalizeServer(url) {
 	}
 }
 
-/** The QR/link a phone pairs by: `https://<relay>/c/<user>#<K>.<epoch>` — the key rides
- *  the URL fragment, which no browser ever sends to a server. */
+/** The QR/link a phone pairs by: `https://<relay>/c/<user>#p.<auth>.<epoch>` — the
+ *  pairing credential (hex HKDF(K, "crr1/auth"), what the relay stored at registration)
+ *  rides the URL fragment, which no browser ever sends to a server on its own. The
+ *  phone hands it to `/api/v1/pair` as `secret` — no browser crypto involved while the
+ *  frames are plain (wire.js). */
 function linkUrl(serverUrl, userId, K, epoch) {
-	const key = Buffer.isBuffer(K) ? crypto.b64url(K) : String(K);
-	return `${normalizeServer(serverUrl)}/c/${userId}#${key}.${epoch}`;
+	const auth = crypto.deriveAuth(crypto.keyMaterial(K)).toString("hex");
+	return `${normalizeServer(serverUrl)}/c/${userId}#p.${auth}.${epoch}`;
 }
 
 /** What the fragments of a pairing link carry, parsed back; null when malformed. */
 function parseLink(url) {
 	try {
 		const parsed = new URL(String(url));
-		const match = parsed.hash.replace(/^#/, "").match(/^([A-Za-z0-9_-]+)\.(\d+)$/);
+		const match = parsed.hash.replace(/^#/, "").match(/^p\.([0-9a-f]{64})\.(\d+)$/);
 		if (!match || !/^\/c\/[\w-]+$/.test(parsed.pathname)) return null;
-		return { serverUrl: parsed.origin, K: match[1], epoch: Number(match[2]), userId: parsed.pathname.split("/").pop() };
+		return { serverUrl: parsed.origin, auth: match[1], epoch: Number(match[2]), userId: parsed.pathname.split("/").pop() };
 	} catch {
 		return null;
 	}

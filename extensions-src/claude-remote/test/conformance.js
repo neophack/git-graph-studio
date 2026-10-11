@@ -9,8 +9,10 @@
  *           that once exposed the base64-string hop), and the sjcl fallback's interop.
  *   e2e     the relay round trip on this host: a mini relay served from THIS process
  *           (node's http / the runtime's http), the identity registering on it, the
- *           long-poll window exchanging one sealed frame each way, and one sdk-host
- *           turn through a fake `claude` script (the nodeExecutable rule pinned). */
+ *           long-poll window exchanging one frame each way (through wire.js — the plain
+ *           codec today), and one sdk-host turn through a fake `claude` script speaking
+ *           the SDK's stream-json user message (the nodeExecutable rule pinned).
+ *   debug   the local debug page's long-poll pair: a parked poll woken by the reply. */
 
 const http = require("http");
 const crypto = require("crypto");
@@ -128,7 +130,7 @@ const fakeCli = [
 	"	if (nl < 0) return;",
 	"	const request = JSON.parse(buffer.slice(0, nl));",
 	"	buffer = '';",
-	"	const prompt = (request.content ?? []).map((b) => b.text ?? '').join('');",
+	"	const prompt = ((request.message && request.message.content) ?? []).map((b) => b.text ?? '').join('');",
 	"	write({ type: 'result', subtype: 'success', is_error: false, result: 'echo: ' + prompt, session_id: id });",
 	"});"
 ].join("\n");
@@ -186,8 +188,48 @@ async function e2eSection(workDir) {
 	};
 }
 
+/** The local debug page's transport on this host, in the browser's order: a poll is
+ *  already PARKED when the page's request arrives, and the reply must wake it. Under
+ *  ggs-node a request's `close` fires once it has been read — the first cut treated that
+ *  as "the page left" and every parked poll hung, so the page never saw a reply. */
+async function debugSection() {
+	const { createLocalDebug } = require("../localDebug.js");
+	const wire = require("../wire.js");
+	let local;
+	local = createLocalDebug({
+		windowId: "w_c0nf0rm1ty5pec1",
+		meta: () => ({ name: "conformance" }),
+		onFrame: (plain, meta) => {
+			setTimeout(() => local.send(meta.from, { t: "reply", rid: plain.rid, ok: true, r: { echoed: plain.t } }), 50);
+		}
+	});
+	const url = await local.start();
+	const api = url + "/api";
+	try {
+		const first = await (await fetch(api + "/poll?cursor=0")).json();
+		const started = Date.now();
+		const parked = fetch(api + "/poll?cursor=" + first.cursor).then((r) => r.json());
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		await fetch(api + "/send", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ frames: [{ v: 1, kind: "frame", from: local.deviceId, to: "w_c0nf0rm1ty5pec1", seq: 1, ct: wire.encode({ rid: "c1", t: "hello" }) }] })
+		});
+		const woke = await parked;
+		const frame = (woke.messages || []).find((m) => m.kind === "frame");
+		return {
+			"debug.firstPoll": first.messages.map((m) => m.kind),
+			"debug.parkedPollWoke": Date.now() - started < 10000,
+			"debug.reply": frame ? wire.decode(frame.ct) : null
+		};
+	} finally {
+		local.stop();
+	}
+}
+
 function run(section, workDir) {
 	if (section === "crypto") return cryptoSection();
+	if (section === "debug") return debugSection();
 	if (section === "e2e") return e2eSection(String(workDir || "."));
 	throw new Error("unknown section " + section);
 }

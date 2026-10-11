@@ -7,7 +7,9 @@
 // request every session makes), `POST /v1/messages?beta=true` streaming and plain, and
 // `POST /v1/messages/count_tokens`. Replies carry the marker `FAKE-CLAUDE` so a harness
 // can wait for them in the chat UI, and stream in a few chunks so the streaming UI is
-// exercised, not just the final render.
+// exercised, not just the final render. A prompt with `RUN_BASH: <command>` is answered
+// with a Bash tool call instead (the permission round trip's trigger), one with
+// `RUN_ASK:` with an AskUserQuestion call (the question pop-up's).
 //
 // Beyond the API it doubles as the sandbox run's message board (CORS-open — the dev
 // harness page posts its report from inside the app, which on macOS has no CDP to read
@@ -64,6 +66,22 @@ const replyText = (payload) => {
 	const filler = Array.from({ length: fillerSentences }, (_, i) =>
 		`Filler sentence ${i + 2}: the reply is streamed from the local fake Claude server, not the cloud.`).join(' ');
 	return `${marker}: you said "${echoed}". ${filler}`;
+};
+
+/** A prompt carrying `RUN_BASH: <command>` is answered with a Bash tool call, one with
+ * `RUN_ASK:` with an AskUserQuestion call (once each — the
+ * turn after its tool_result gets the ordinary text reply), so a harness can exercise the
+ * tool-permission round trip without a real model. */
+const toolCallOf = (payload) => {
+	const users = (payload?.messages ?? []).filter((m) => m.role === 'user');
+	const last = users[users.length - 1];
+	if (!last || (Array.isArray(last.content) && last.content.some((b) => b && b.type === 'tool_result'))) return null;
+	const said = lastUserText(payload);
+	if (/RUN_ASK:/.test(said)) {
+		return { name: 'AskUserQuestion', input: { questions: [{ question: 'Which color?', header: 'Color', multiSelect: false, options: [{ label: 'Red', description: 'warm' }, { label: 'Blue', description: 'cool' }] }] } };
+	}
+	const match = said.match(/RUN_BASH:\s*(.+)$/m);
+	return match ? { name: 'Bash', input: { command: match[1].trim(), description: 'fake tool call from the sandbox server' } } : null;
 };
 
 const sse = (res, event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -125,6 +143,16 @@ const server = http.createServer(async (req, res) => {
 			sse(res, 'message_start', { type: 'message_start', message: { id: 'msg_fake_' + started, type: 'message', role: 'assistant',
 				model: payload.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1 } } });
 			if (firstTokenDelay) await sleep(firstTokenDelay);
+			const tool = toolCallOf(payload);
+			if (tool) {
+				sse(res, 'content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_fake_' + started, name: tool.name, input: {} } });
+				sse(res, 'content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(tool.input) } });
+				sse(res, 'content_block_stop', { type: 'content_block_stop', index: 0 });
+				sse(res, 'message_delta', { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 12 } });
+				sse(res, 'message_stop', { type: 'message_stop' });
+				res.end();
+				return;
+			}
 			sse(res, 'content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
 			// A few chunks, not one blob: the chat's streaming render is part of what the sandbox measures.
 			const chunks = text.match(/.{1,40}/gs) ?? [text];

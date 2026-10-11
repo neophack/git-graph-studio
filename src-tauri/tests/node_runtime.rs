@@ -2490,10 +2490,14 @@ fn claude_remote_answers_its_conformance_probe_exactly_as_real_node_does() {
                 "conformance",
                 json!([{ "section": "e2e", "workDir": work_dir }]),
             ),
+            // The local debug page's long-poll pair: a poll parked BEFORE the request must
+            // wake on the reply (a request's early `close` once hung every parked poll here).
+            run_command("conformance", json!([{ "section": "debug" }])),
         ],
     );
     assert_eq!(answers[1].as_ref().unwrap(), &expected["crypto"]);
     assert_eq!(answers[2].as_ref().unwrap(), &expected["e2e"]);
+    assert_eq!(answers[3].as_ref().unwrap(), &expected["debug"]);
 }
 
 /// Claude Remote's `activate()` under Git Graph Studio's own host shape — ggs-node with the

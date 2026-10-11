@@ -21,7 +21,15 @@ const OPEN_TIMEOUT_MS = 60 * 1000;
 const MAX_QUEUE = 20;
 const PERMISSION_MODES = ["default", "auto", "acceptEdits", "plan", "bypassPermissions", "manual", "dontAsk"];
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/** One stream-json line onto a child's stdin; false when the pipe is gone. */
+function writeLine(child, value) {
+	try {
+		child.stdin.write(JSON.stringify(value) + "\n");
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 /**
  * @param {{ log, onEvent, onChange, spawn?, cliPath?, defaultRoot?: () => string }} options
@@ -81,13 +89,18 @@ function createSdkHostSource(options) {
 		try {
 			child = spawnImpl(command, argv, { cwd: lane.cwd, env, stdio: ["pipe", "pipe", "pipe"], shell, windowsHide: true });
 		} catch (error) {
-			finish(lane, `spawn failed: ${error && error.message || error}`);
+			lane.running = false;
+			lane.busy = false;
+			failTurn(lane, `spawn failed: ${error && error.message || error}`);
+			emitState(lane);
+			options.onChange();
 			return;
 		}
 		lane.child = child;
 		let outBuffer = "";
 		let inBuffer = "";
 		let stderr = "";
+		let sawResult = false;
 		let timer = setTimeout(() => {
 			lane.lastError = "timeout";
 			try {
@@ -119,15 +132,39 @@ function createSdkHostSource(options) {
 				lane.model = event.model;
 			}
 			if (event.type === "control_request") {
-				// The CLI asks permission over stdio (`--permission-prompt-tool stdio`):
-				// surfaced to the phone, answered by `permission()` below. The request's
-				// own id rides the response verbatim.
-				lane.permission = event;
-				options.onEvent({ kind: "permission", sessionId: lane.sessionId, message: event });
-				options.onChange();
+				const request = event.request && typeof event.request === "object" ? event.request : {};
+				if (request.subtype === "can_use_tool") {
+					// The CLI asks permission over stdio (`--permission-prompt-tool stdio`):
+					// surfaced to the phone, answered by `permission()` below with a
+					// control_response carrying the request's own id.
+					lane.permission = event;
+					options.onEvent({ kind: "permission", sessionId: lane.sessionId, message: event });
+					options.onChange();
+					return;
+				}
+				// Nothing else is served here (hooks, MCP, dialogs): an answered error lets
+				// the CLI fall through instead of waiting on a response that never comes.
+				writeLine(child, { type: "control_response", response: { subtype: "error", request_id: event.request_id, error: `unsupported control request: ${request.subtype || "?"}` } });
 				return;
 			}
+			if (event.type === "control_cancel_request") {
+				if (lane.permission && lane.permission.request_id === event.request_id) {
+					lane.permission = null;
+					options.onEvent({ kind: "permission", sessionId: lane.sessionId, message: event });
+					options.onChange();
+				}
+				return;
+			}
+			if (event.type === "control_response") return; // answers to our own interrupt
 			options.onEvent({ kind: "sdk", sessionId: lane.sessionId, dir: "out", message: event });
+			if (event.type === "result") {
+				sawResult = true;
+				// One prompt per process: the turn is over, EOF lets the CLI exit (stdin
+				// stayed open only so permission answers could cross).
+				try {
+					child.stdin.end();
+				} catch { /* already closed */ }
+			}
 			const interesting = event.type !== "stream_event";
 			if (interesting) options.onChange();
 		};
@@ -143,9 +180,12 @@ function createSdkHostSource(options) {
 		child.stdout.on("data", (chunk) => {
 			outBuffer = feed(chunk, outBuffer, onLine);
 		});
-		// stream-json input: the prompt as one user message, then EOF keeps the turn readable.
+		// stream-json input: the prompt as one user message; stdin stays open for the
+		// permission answers and ends at the turn's result.
 		child.stdin.on("error", () => undefined);
-		child.stdin.write(JSON.stringify({ type: "user", content: [{ type: "text", text: next.text }] }) + "\n");
+		// The SDK's own user message (what the claude-code extension writes): the prompt
+		// as a MessageParam. The CLI drops a bare {type, content} line without a word.
+		writeLine(child, { type: "user", message: { role: "user", content: [{ type: "text", text: next.text }] }, parent_tool_use_id: null, session_id: lane.sessionId || "" });
 		child.stderr.on("data", (chunk) => {
 			stderr = (stderr + chunk.toString("utf8")).slice(-4000);
 		});
@@ -153,11 +193,17 @@ function createSdkHostSource(options) {
 			clearTimeout(timer);
 			if (outBuffer.trim()) onLine(outBuffer);
 			lane.child = null;
-			const failed = lane.lastError || (code && code !== 0 ? `claude exited ${code}${stderr.trim() ? ": " + stderr.trim().split("\n").slice(-2).join(" ") : ""}` : null);
+			// A turn that answered its result is done, whatever the exit code (an interrupt
+			// or the EOF exit may report one); one that did not is a failure the phone sees.
+			const failed = lane.lastError || (code && code !== 0 && !sawResult ? `claude exited ${code}${stderr.trim() ? ": " + stderr.trim().split("\n").slice(-2).join(" ") : ""}` : null);
+			lane.lastError = null;
 			lane.running = false;
 			lane.busy = false;
 			lane.permission = null;
-			if (failed) lane.lastErrorNote = failed;
+			if (failed) {
+				lane.lastErrorNote = failed;
+				if (!sawResult) failTurn(lane, failed);
+			}
 			emitState(lane);
 			options.onChange();
 			runTurn(lane); // the queued prompt behind this one, if any
@@ -166,13 +212,13 @@ function createSdkHostSource(options) {
 			lane.lastError = `spawn failed: ${error && error.message || error}`;
 		});
 		child.on("close", settle);
+	}
 
-		function finish(target, error) {
-			lane.lastError = error;
-			try {
-				child.kill();
-			} catch { /* the close handler settles */ }
-		}
+	/** A turn that ended without the CLI's own result: the phone sees it as one — the
+	 *  same `result` shape an errored turn carries — so it never waits on a dead turn. */
+	function failTurn(lane, reason) {
+		log(`sdk turn failed: ${reason}`);
+		options.onEvent({ kind: "sdk", sessionId: lane.sessionId, dir: "out", message: { type: "result", subtype: "error_during_execution", is_error: true, result: reason, session_id: lane.sessionId || undefined } });
 	}
 
 	function emitState(lane) {
@@ -221,21 +267,38 @@ function createSdkHostSource(options) {
 			}
 			return false;
 		},
+		/** Answer a `can_use_tool` request with the remote's own control_response — the
+		 *  `/remote-control` protocol verbatim: `{subtype, request_id, response:
+		 *  PermissionResult}` onto the CLI's stdin. False when no such request is pending. */
+		respond(sessionId, response) {
+			const answer = response && typeof response === "object" ? response : {};
+			for (const lane of lanes.values()) {
+				if ((lane.key === sessionId || lane.sessionId === sessionId) && lane.permission && lane.child) {
+					if (answer.request_id && answer.request_id !== lane.permission.request_id) return false;
+					const line = { type: "control_response", response: { subtype: answer.subtype || "success", request_id: lane.permission.request_id, response: answer.response } };
+					if (!writeLine(lane.child, line)) return false;
+					lane.permission = null;
+					options.onEvent({ kind: "permission", sessionId: lane.sessionId, message: line });
+					return true;
+				}
+			}
+			return false;
+		},
 		/** Answer the lane's pending permission question (the phone's card). */
 		permission(sessionId, { decision, message } = {}) {
 			for (const lane of lanes.values()) {
 				if ((lane.key === sessionId || lane.sessionId === sessionId) && lane.permission && lane.child) {
 					const request = lane.permission;
-					const behavior = decision === "deny" ? "deny" : decision === "allowAlways" ? "allow_always" : "allow";
-					const response = { type: "control_response", request_id: request.request_id ?? request.id ?? null, response: { behavior, message: decision === "deny" && message ? message : undefined, updatedInput: request.request?.updatedInput ?? request.updatedInput ?? undefined } };
-					try {
-						lane.child.stdin.write(JSON.stringify(response) + "\n");
-						lane.permission = null;
-						return true;
-					} catch (error) {
-						log(`answering the permission failed: ${error && error.message}`);
-						return false;
-					}
+					const asked = request.request || {};
+					// The SDK's PermissionResult: allow carries the input it runs with (the
+					// CLI requires it) and, for "always", the suggestions it offered as the
+					// rules to remember; deny carries the reason Claude reads.
+					const result = decision === "deny"
+						? { behavior: "deny", message: message || "The user denied this from the phone." }
+						: { behavior: "allow", updatedInput: asked.input || {}, ...(decision === "allowAlways" && Array.isArray(asked.permission_suggestions) ? { updatedPermissions: asked.permission_suggestions } : {}) };
+					if (!writeLine(lane.child, { type: "control_response", response: { subtype: "success", request_id: request.request_id, response: result } })) return false;
+					lane.permission = null;
+					return true;
 				}
 			}
 			return false;

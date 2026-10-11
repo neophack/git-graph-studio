@@ -104,8 +104,6 @@ pub(crate) fn windows_view(user: &UserOnline) -> Value {
 
 #[derive(Debug, PartialEq)]
 pub enum RouteError {
-    /// the target is not one of this user's members (close 4400)
-    CrossUser,
     /// too many online windows for this PC (HTTP 409 / close 4400)
     TooManyWindows,
 }
@@ -113,12 +111,11 @@ pub enum RouteError {
 impl RouteError {
     pub fn close_code(&self) -> u16 {
         match self {
-            RouteError::CrossUser | RouteError::TooManyWindows => CLOSE_PROTOCOL,
+            RouteError::TooManyWindows => CLOSE_PROTOCOL,
         }
     }
     pub fn message(&self) -> &'static str {
         match self {
-            RouteError::CrossUser => "the target does not belong to this PC",
             RouteError::TooManyWindows => "too many online windows for this PC",
         }
     }
@@ -371,25 +368,26 @@ impl Hub {
                 Ok(banked)
             }
             to if to.starts_with("w_") => {
-                let entry = online
-                    .windows
-                    .get_mut(to)
-                    .ok_or(RouteError::CrossUser)?;
-                Ok(self.bank(entry, &frame))
+                // A window this PC never attached (or one a relay restart forgot) is a
+                // dropped frame, not an error: the lookup is confined to this user's own
+                // routing table, so nothing about another PC can leak through it, and
+                // failing here once closed the sender's whole connection.
+                match online.windows.get_mut(to) {
+                    Some(entry) => Ok(self.bank(entry, &frame)),
+                    None => Ok(None),
+                }
             }
             to => {
-                let device = online
-                    .devices
-                    .values()
-                    .find(|d| d.id == to)
-                    .ok_or(RouteError::CrossUser)?;
-                push_device(device, frame.to_json().to_string());
+                // A phone that is not connected right now (backgrounded, reconnecting)
+                // misses the frame — phones resync by pulling; the sender carries on.
+                if let Some(device) = online.devices.values().find(|d| d.id == to) {
+                    push_device(device, frame.to_json().to_string());
+                }
                 Ok(None)
             }
         }
     }
 
-    /// Bank a frame into a window ring under a fresh cursor; overflow drops the oldest
     /// and arms a gap marker at the next append, so a draining client learns exactly what
     /// its cursor missed (`after` = the highest cursor that went).
     fn bank(&self, entry: &mut WindowConn, frame: &Frame) -> Option<u64> {
@@ -550,18 +548,13 @@ mod tests {
     }
 
     #[test]
-    fn cross_user_addressing_is_refused() {
+    fn an_unknown_or_offline_target_drops_the_frame() {
         let hub = Hub::new(limits());
         let user = user_with("u_a");
-        // No window of this user carries that id:
-        assert_eq!(
-            hub.route(&user, frame("d_0123456789abcdef", "w_ffffffffffffffff", 1)),
-            Err(RouteError::CrossUser)
-        );
-        assert_eq!(
-            hub.route(&user, frame("d_0123456789abcdef", "d_ffffffffffffffff", 1)),
-            Err(RouteError::CrossUser)
-        );
+        // No window or phone of this user carries that id: the frame is dropped, the
+        // sender's connection survives (an error here once closed it).
+        assert_eq!(hub.route(&user, frame("d_0123456789abcdef", "w_ffffffffffffffff", 1)), Ok(None));
+        assert_eq!(hub.route(&user, frame("w_0123456789abcdef", "d_ffffffffffffffff", 1)), Ok(None));
     }
 
     #[test]
@@ -688,10 +681,9 @@ mod tests {
         let b = user_with("u_b");
         let (tx, _rx) = tokio::sync::oneshot::channel();
         hub.window_attach(&a, "w_0123456789abcdef", tx).unwrap();
-        // B's device frame to A's window id: the id exists only in A's table.
-        assert_eq!(
-            hub.route(&b, frame("d_0123456789abcdef", "w_0123456789abcdef", 1)),
-            Err(RouteError::CrossUser)
-        );
+        // B's device frame to A's window id: the id exists only in A's table, so B's
+        // frame goes nowhere — A's ring stays empty.
+        assert_eq!(hub.route(&b, frame("d_0123456789abcdef", "w_0123456789abcdef", 1)), Ok(None));
+        assert!(hub.window_drain("u_a", "w_0123456789abcdef", 0, 64).is_empty());
     }
 }

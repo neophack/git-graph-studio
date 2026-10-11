@@ -31,6 +31,8 @@ const STRINGS = {
 		modeAuto: "自动（官方优先，第三方走自建）", modeOfficial: "官方 Remote Control", modeSelf: "自建服务器",
 		serverUrl: "服务器地址", serverUrlPh: "https://relay.example.com:8787",
 		save: "保存", saved: "已保存",
+		debug: "本地调试", debugSub: "在电脑浏览器里打开与手机端相同的页面，直接连接本窗口（不经中继、无需配对）：会话列表、历史、新对话和 /remote-control 相同的实时 SDK 消息流。仅监听 127.0.0.1，链接中的随机令牌即凭据。",
+		debugOpen: "打开本地调试页", debugStop: "停止", debugOff: "未启动",
 		scanTitle: "扫码配对", scanSub: "用手机相机扫描 —— 密钥只存在于链接的 # 片段中",
 		noServer: "填入中继服务器地址后开始配对", copyLink: "复制链接", copied: "已复制",
 		userId: "用户 ID", epoch: "密钥纪元", created: "注册于",
@@ -41,13 +43,12 @@ const STRINGS = {
 		windows: "本机在线窗口", noWindows: "没有窗口连接到中继", thisWindow: "（本窗口）",
 		official: "官方 Remote Control", officialOff: "当前会话未开启", officialUnavailable: "CLI 报告不可用（第三方模型只能使用自建服务器）",
 		officialToggle: "开启 / 关闭", officialAll: "所有会话启动即开（Claude 设置）", officialOpen: "在 claude.ai 中打开",
-		mirror: "官方会话镜像", mirrorOff: "关闭", mirrorWhen: "已连接时镜像", mirrorAlways: "始终镜像",
 		activity: "远程活动", noActivity: "暂无远程活动", running: "运行中", queued: "排队中",
 		env: "运行环境", cli: "Claude CLI", roots: "会话存储", folders: "工作区", tab: "桌面标签页驱动",
 		secTitle: "安全说明",
-		sec1: "配对密钥只出现在链接的 # 片段（浏览器从不发送片段）、电脑的机密存储和手机的本地存储中；所有内容以 AES-256-GCM 端到端加密，服务器（包括自建服务器的运维者）只能看到路由元数据。",
+		sec1: "配对凭据只出现在链接的 # 片段（浏览器从不主动发送片段）、电脑的机密存储和手机的本地存储中。注意：当前版本的对话内容以明文经中继转发（端到端加密在功能测通后恢复）——请只在可信网络或 HTTPS 中继上使用。",
 		sec2: "重置密钥使所有已配对手机立即失效；撤销单台手机在下方设备列表。旁路读取需要你在弹窗中一次性授权。",
-		sec3: "官方 Remote Control 走 Claude 自己的通道；自建镜像只读旁路，不影响官方开关。",
+		sec3: "官方 Remote Control 走 Claude 自己的通道；自建中继读取对话的 SDK 消息流，不影响官方开关。",
 		now: "刚刚", minAgo: "{0} 分钟前", hourAgo: "{0} 小时前"
 	},
 	en: {
@@ -57,6 +58,8 @@ const STRINGS = {
 		modeAuto: "Auto (official first, self-hosted on third-party)", modeOfficial: "Official Remote Control", modeSelf: "Self-hosted server",
 		serverUrl: "Server address", serverUrlPh: "https://relay.example.com:8787",
 		save: "Save", saved: "Saved",
+		debug: "Local debug", debugSub: "Open the phone page in this computer's browser, talking to this window directly (no relay, no pairing): the conversation list, history, new conversations and the same live SDK stream /remote-control carries. Listens on 127.0.0.1 only; the random token in the link is the credential.",
+		debugOpen: "Open the local debug page", debugStop: "Stop", debugOff: "Not running",
 		scanTitle: "Scan to pair", scanSub: "Scan with the phone camera — the key lives only in the link's # fragment",
 		noServer: "Enter the relay address to start pairing", copyLink: "Copy link", copied: "Copied",
 		userId: "User ID", epoch: "Key epoch", created: "Registered",
@@ -67,13 +70,12 @@ const STRINGS = {
 		windows: "This PC's online windows", noWindows: "No window is connected to the relay", thisWindow: " (this window)",
 		official: "Official Remote Control", officialOff: "Off for the current conversation", officialUnavailable: "The CLI reports it unavailable (third-party models can only use the self-hosted server)",
 		officialToggle: "Toggle", officialAll: "On for all sessions at startup (Claude's setting)", officialOpen: "Open on claude.ai",
-		mirror: "Official-session mirror", mirrorOff: "Off", mirrorWhen: "While connected", mirrorAlways: "Always",
 		activity: "Remote activity", noActivity: "No remote activity yet", running: "running", queued: "queued",
 		env: "Environment", cli: "Claude CLI", roots: "Session store", folders: "Workspace", tab: "Desktop-tab driving",
 		secTitle: "Security",
-		sec1: "The pairing key lives only in the link's # fragment (browsers never send fragments), this PC's secret storage and the phone's local storage; every payload is AES-256-GCM end-to-end encrypted — the relay (including a self-hosted one's operator) sees routing metadata only.",
+		sec1: "The pairing credential lives only in the link's # fragment (browsers never send fragments on their own), this PC's secret storage and the phone's local storage. Note: this version relays conversation content in plain text (end-to-end encryption returns once the flows are tested) — use it on a trusted network or an HTTPS relay only.",
 		sec2: "Resetting the key invalidates every paired phone at once; one phone is revoked in the device list below. The conversation tap asks for your one-time consent.",
-		sec3: "The official Remote Control rides Claude's own channel; the self-hosted mirror is a read-only bypass that never touches the official switch.",
+		sec3: "The official Remote Control rides Claude's own channel; the self-hosted relay reads the conversation's SDK message stream and never touches the official switch.",
 		now: "just now", minAgo: "{0}m ago", hourAgo: "{0}h ago"
 	}
 };
@@ -186,6 +188,15 @@ select, input[type=text] { width: 100%; height: 30px; padding: 0 8px; border-rad
 			</div>
 		</section>
 		<section class="card">
+			<h2>${T.debug}</h2>
+			<div class="sub">${T.debugSub}</div>
+			<div class="row"><div class="urlrow" id="debugUrl"></div></div>
+			<div class="row">
+				<button class="btn small" id="openDebug">${T.debugOpen}</button>
+				<button class="btn sec small" id="stopDebug">${T.debugStop}</button>
+			</div>
+		</section>
+		<section class="card">
 			<h2>${T.password}</h2>
 			<div class="sub">${T.passwordSub}</div>
 			<div class="row"><span id="pwState"></span></div>
@@ -213,14 +224,6 @@ select, input[type=text] { width: 100%; height: 30px; padding: 0 8px; border-rad
 				<label style="display:flex;gap:8px;align-items:center;font-size:12.5px">
 					<input type="checkbox" id="officialAll"> ${T.officialAll}
 				</label>
-			</div>
-			<div class="row">
-				<span style="font-size:12.5px;color:var(--muted)">${T.mirror}:</span>
-				<select id="mirror" style="width:auto">
-					<option value="off">${T.mirrorOff}</option>
-					<option value="whenConnected">${T.mirrorWhen}</option>
-					<option value="always">${T.mirrorAlways}</option>
-				</select>
 			</div>
 		</section>
 		<section class="card">
@@ -266,6 +269,13 @@ select, input[type=text] { width: 100%; height: 30px; padding: 0 8px; border-rad
 		else box.innerHTML = '<div class="qr">' + s.qr + '</div><div class="urlrow"><span class="url" title="' + esc(s.link) + '">' + esc(s.link.replace(/#.*$/, "#…")) + '</span><button class="btn sec small" id="copyLink">' + esc(T.copyLink) + "</button></div>";
 		const copy = $("copyLink");
 		if (copy) copy.onclick = () => { vscode.postMessage({ type: "copy", text: s.link }); flash(copy); };
+		const debugUrl = s.debug && s.debug.url;
+		$("debugUrl").innerHTML = debugUrl
+			? '<span class="url" title="' + esc(debugUrl) + '">' + esc(debugUrl) + '</span><button class="btn sec small" id="copyDebug">' + esc(T.copyLink) + "</button>"
+			: '<span class="url">' + esc(T.debugOff) + "</span>";
+		const copyDebug = $("copyDebug");
+		if (copyDebug) copyDebug.onclick = () => { vscode.postMessage({ type: "copy", text: debugUrl }); flash(copyDebug); };
+		$("stopDebug").disabled = !debugUrl;
 		$("pwState").textContent = s.passwordSet ? T.passwordSet : T.passwordNone;
 		$("devices").innerHTML = s.devices.length ? s.devices.map((d) =>
 			'<div class="item"><span class="d' + (d.online ? " on" : "") + '"></span><div class="grow"><div class="t">' + esc(d.name) + '</div><div class="m">' + (d.online ? esc(T.online) : esc(ago(d.last_seen))) + '</div></div><button class="btn danger small" data-revoke="' + esc(d.id) + '">' + esc(T.revoke) + "</button></div>").join("")
@@ -277,7 +287,6 @@ select, input[type=text] { width: 100%; height: 30px; padding: 0 8px; border-rad
 		$("officialToggle").disabled = s.official.available === false;
 		$("officialQr").innerHTML = s.official.connectUrl ? '<div class="qr">' + s.official.qr + '</div><div class="urlrow"><span class="url" title="' + esc(s.official.connectUrl) + '">' + esc(s.official.connectUrl) + "</span></div>" : "";
 		if (document.activeElement !== $("officialAll")) $("officialAll").checked = !!s.officialAll;
-		if (document.activeElement !== $("mirror")) $("mirror").value = s.mirror;
 		$("activity").innerHTML = s.summary.activity.length ? s.summary.activity.slice(0, 12).map((a) => {
 			const detail = a.error || a.text || a.title || "";
 			return '<div class="item"><span class="d"></span><div class="grow"><div class="t">' + esc(a.kind) + '</div><div class="m">' + esc(detail) + "</div></div><span>" + esc(ago(a.at)) + "</span></div>";
@@ -297,9 +306,10 @@ select, input[type=text] { width: 100%; height: 30px; padding: 0 8px; border-rad
 		else if (id === "setPw") vscode.postMessage({ type: "setPassword" });
 		else if (id === "clearPw") vscode.postMessage({ type: "clearPassword" });
 		else if (id === "officialToggle") vscode.postMessage({ type: "officialToggle" });
+		else if (id === "openDebug") vscode.postMessage({ type: "openDebug" });
+		else if (id === "stopDebug") vscode.postMessage({ type: "stopDebug" });
 	});
 	$("mode").addEventListener("change", () => vscode.postMessage({ type: "setMode", mode: $("mode").value }));
-	$("mirror").addEventListener("change", () => vscode.postMessage({ type: "setMirror", mirror: $("mirror").value }));
 	$("officialAll").addEventListener("change", () => vscode.postMessage({ type: "officialAll", on: $("officialAll").checked }));
 	window.addEventListener("message", (e) => {
 		if (e.data && e.data.type === "state") { state = e.data.state; render(); }

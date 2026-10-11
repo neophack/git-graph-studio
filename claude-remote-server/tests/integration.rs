@@ -369,19 +369,53 @@ async fn one_pcs_frames_never_reach_another_pc() {
     let (_app, base, _stop) = start(test_config()).await;
     let a = register_pc(&base).await;
     let b = register_pc(&base).await;
-    let (_, a_token) = pair_phone(&base, &a, None, "A phone").await;
+    let (a_device, a_token) = pair_phone(&base, &a, None, "A phone").await;
 
-    // B's window comes online; A's phone tries to address it by the same id shape.
+    // B's window comes online; A's phone addresses the same window id from its own table.
     let mut agent_b = agent_ws(&base, &b, WINDOW).await;
     expect_json(&mut agent_b, |v| v["kind"] == "hello").await;
     let mut phone_a = phone_ws(&base, &a_token).await;
     expect_json(&mut phone_a, |v| v["kind"] == "hello").await;
     phone_a
-        .send(Message::text(frame("d_000000000000001", WINDOW, 1, "Y3Jvc3M")))
+        .send(Message::text(frame(&a_device, WINDOW, 1, "Y3Jvc3M")))
         .await
         .unwrap();
-    let closed = next_close(&mut phone_a).await;
-    assert_eq!(closed, Some(4400)); // cross-user addressing closes the connection
+    // The frame goes nowhere: B's window never sees it ...
+    let leaked = tokio::time::timeout(std::time::Duration::from_millis(600), agent_b.next()).await;
+    assert!(leaked.is_err(), "B's window received A's frame: {leaked:?}");
+    // ... and A's phone stays connected (an undeliverable frame once closed it).
+    phone_a.send(Message::text(r#"{"v":1,"kind":"windows"}"#)).await.unwrap();
+    expect_json(&mut phone_a, |v| v["kind"] == "windows").await;
+}
+
+#[tokio::test]
+async fn the_plain_pairing_takes_the_links_secret() {
+    let (_app, base, _stop) = start(test_config()).await;
+    let pc = register_pc(&base).await;
+    let pair = |secret: String, epoch: u64| {
+        let base = base.clone();
+        let user = pc.user_id.clone();
+        async move {
+            http(
+                "POST",
+                &format!("{base}/api/v1/pair"),
+                &[],
+                &format!(r#"{{"user_id":"{user}","epoch":{epoch},"secret":"{secret}","device_name":"Plain"}}"#),
+            )
+            .await
+        }
+    };
+    // The link's credential pairs without a challenge round trip ...
+    let (status, body) = pair(pc.auth_hex.clone(), 1).await;
+    assert_eq!(status, 201, "{body}");
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(parsed["device_token"].as_str().is_some_and(|t| !t.is_empty()));
+    // ... a wrong one is refused like a bad proof, a stale epoch as rekeyed.
+    let (status, body) = pair("00".repeat(32), 1).await;
+    assert_eq!(status, 401, "{body}");
+    assert!(body.contains("bad proof"), "{body}");
+    let (status, body) = pair(pc.auth_hex.clone(), 7).await;
+    assert_eq!(status, 409, "{body}");
 }
 
 #[tokio::test]

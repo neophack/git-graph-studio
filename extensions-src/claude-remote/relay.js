@@ -4,18 +4,20 @@
  * long-poll pair (`GET /agent/poll` + `POST /agent/send`) — the relay serves both over
  * one ring with one cursor space, so the transports are interchangeable.
  *
- * Every payload crosses end-to-end encrypted (crypto.js); the relay only ever sees the
- * routing envelope. The window's sealed metadata rides the `window.meta` control —
- * itself a sealed body under the broadcast AAD with seq 0 (metadata is idempotent and
- * replayable by design; frames that must not replay carry their own increasing seq). */
+ * Every payload crosses as one `ct` string through wire.js — the plain codec while the
+ * remote flows are brought up (encryption returns there, and only there). The window's
+ * metadata rides the `window.meta` control in the same codec. `seq` is per sender and
+ * increasing; nothing rejects a lower one — a phone that reloads starts its own count
+ * again, and the plain codec has no replay window to defend. */
 
-const crypto = require("./crypto.js");
+const wire = require("./wire.js");
 const { normalizeServer, relayFetch } = require("./identity.js");
 
 const BACKOFF_MIN_MS = 1000;
 const BACKOFF_MAX_MS = 30000;
 const POLL_WAIT_S = 20;
-const OUTBOX_MAX = 256;
+const OUTBOX_MAX = 512;
+const SEND_BATCH = 64; // the relay's per-POST frame cap
 
 function wsSupported() {
 	return typeof WebSocket === "function";
@@ -37,11 +39,9 @@ function createRelay(identity, options) {
 	const mode = options.transport === "long-poll" || options.transport === "websocket" ? options.transport : wsSupported() ? "websocket" : "long-poll";
 	let stopped = true;
 	let socket = null;
-	let seq = Math.floor(Date.now() / 1000); // per-sender monotonic; receivers reject regressions
-	const lastSeqByFrom = new Map(); // anti-replay: the highest seq accepted per peer
+	let seq = Math.floor(Date.now() / 1000); // per-sender increasing (the relay's envelope wants one)
 	let backoff = BACKOFF_MIN_MS;
 	let online = false;
-	let metaPublished = false;
 	const outbox = [];
 
 	const setOnline = (value) => {
@@ -54,27 +54,9 @@ function createRelay(identity, options) {
 
 	const currentIdentity = () => (options.getIdentity ? options.getIdentity() : identity);
 
-	/** Seal one body under the current key material and the envelope it will travel in.
-	 *  The wire's `ct` is the sealed body's two base64url parts joined by a dot. */
+	/** One body as the frame it travels in. */
 	function frame(to, plain) {
-		const id = currentIdentity();
-		const envelope = { userId: id.userId, epoch: id.epoch, from: windowId, to, seq: ++seq };
-		const sealed = crypto.sealFrame(crypto.deriveE2E(id.K), envelope, plain);
-		return { v: 1, kind: "frame", from: windowId, to, seq: envelope.seq, ct: sealed.n + "." + sealed.c };
-	}
-
-	function open(envelope, body) {
-		const id = currentIdentity();
-		// AAD binds the receiver's current epoch: a frame sealed under an older one (a
-		// rekey raced the delivery) fails authentication — the transcript backfills it.
-		const material = { ...envelope, userId: id.userId, epoch: id.epoch };
-		const last = lastSeqByFrom.get(envelope.from) ?? 0;
-		if (envelope.from !== windowId && envelope.seq <= last) {
-			throw new Error(`frame from ${envelope.from} replays seq ${envelope.seq}`);
-		}
-		const plain = crypto.openFrame(crypto.deriveE2E(id.K), material, body);
-		if (envelope.from !== windowId) lastSeqByFrom.set(envelope.from, envelope.seq);
-		return plain;
+		return { v: 1, kind: "frame", from: windowId, to, seq: ++seq, ct: wire.encode(plain) };
 	}
 
 	/** One message off the wire: a frame for this window, or a control word. */
@@ -89,8 +71,15 @@ function createRelay(identity, options) {
 			return;
 		}
 		if (value.kind === "frame") {
-			const split = String(value.ct ?? "").split(".");
-			const plain = open({ from: value.from, to: value.to, seq: Number(value.seq) }, { n: split[0], c: split[1] });
+			let plain;
+			try {
+				plain = wire.decode(value.ct);
+			} catch (error) {
+				// One undecodable frame is that frame's loss — throwing here would fail the
+				// whole poll batch, and the cursor would never move past it.
+				log(`a frame from ${value.from} did not decode: ${error && error.message}`);
+				return;
+			}
 			try {
 				options.onFrame?.(plain, { from: value.from, to: value.to, seq: value.seq });
 			} catch (error) {
@@ -101,66 +90,85 @@ function createRelay(identity, options) {
 		if (value.kind === "gap") log("the relay dropped frames while this window was away — the transcripts backfill");
 	}
 
-	/** The window's sealed metadata control line (the seq-0 broadcast body). The wire's
-	 *  `ct` is the sealed body's two base64url parts joined by a dot — a bare object
-	 *  here read as a protocol violation server-side and closed the connection on every
-	 *  publish, flapping the window off the relay for good. */
+	/** The window's metadata control line (workspace name, host, folders) — the phone's
+	 *  window list reads it. `ct` is the codec's string: a bare object here read as a
+	 *  protocol violation server-side and closed the connection on every publish. */
 	function metaControl() {
-		const id = currentIdentity();
-		const envelope = { userId: id.userId, epoch: id.epoch, from: windowId, to: "*", seq: 0 };
-		const sealed = crypto.sealFrame(crypto.deriveE2E(id.K), envelope, options.meta ? options.meta() : {});
-		return { v: 1, kind: "window.meta", host: options.host || "ggs", ct: sealed.n + "." + sealed.c };
+		return { v: 1, kind: "window.meta", host: options.host || "ggs", ct: wire.encode(options.meta ? options.meta() : {}) };
 	}
 
 	async function pollSend(frames) {
 		const id = currentIdentity();
 		const { ok, status, json } = await relayFetch(id.serverUrl, "POST", "/api/v1/agent/send", {
 			agentSecret: id.agentSecret,
-			body: { window: windowId, frames: frames.map((wire) => (typeof wire === "string" ? JSON.parse(wire) : wire)) },
+			body: { window: windowId, frames },
 			timeoutMs: 20000
 		});
 		if (status === 401) {
 			setOnline(false);
 			throw new Error("the relay rejected this PC's agent secret");
 		}
-		if (!ok) throw new Error((json && json.error) || `HTTP ${status}`);
+		if (!ok) throw Object.assign(new Error((json && json.error) || `HTTP ${status}`), { status });
 	}
 
-	/** Send one sealed body — immediately on either transport; a failure banks it. */
+	/** Send one body. The WebSocket writes at once; the poll path queues and pumps — one
+	 *  POST in flight at a time, up to SEND_BATCH frames each, so a live stream's frames
+	 *  reach the phone in the order they were made (parallel POSTs raced each other). */
 	function send(to, plain) {
-		const wire = frame(to, plain);
+		const item = frame(to, plain);
 		if (mode === "websocket" && socket !== null) {
 			try {
-				socket.send(JSON.stringify(wire));
+				socket.send(JSON.stringify(item));
 				return true;
 			} catch {
 				/* falls through to the outbox */ }
-		} else if (mode === "long-poll" && online) {
-			void pollSend([wire]).catch(() => {
-				if (outbox.length >= OUTBOX_MAX) outbox.shift();
-				outbox.push(wire);
-			});
-			return true;
 		}
 		if (outbox.length >= OUTBOX_MAX) outbox.shift();
-		outbox.push(wire);
+		outbox.push(item);
+		flushOutbox();
 		return online;
 	}
 
+	let pumping = false;
 	function flushOutbox() {
-		while (outbox.length && online) {
-			const wire = outbox.shift();
-			try {
-				if (socket !== null) socket.send(JSON.stringify(wire));
-				else if (mode === "long-poll") {
-					void pollSend([wire]).catch(() => outbox.unshift(wire));
-					return; // one in-flight send at a time on the poll path
+		if (!online || !outbox.length) return;
+		if (mode === "websocket") {
+			while (outbox.length && socket !== null) {
+				const item = outbox.shift();
+				try {
+					socket.send(JSON.stringify(item));
+				} catch {
+					outbox.unshift(item);
+					return;
 				}
-			} catch {
-				outbox.unshift(wire);
-				return;
 			}
+			return;
 		}
+		if (pumping) return;
+		pumping = true;
+		void (async () => {
+			try {
+				while (outbox.length && online && !stopped) {
+					const batch = outbox.splice(0, SEND_BATCH);
+					try {
+						await pollSend(batch);
+					} catch (error) {
+						if (error && error.status >= 400 && error.status < 500 && error.status !== 401 && error.status !== 429) {
+							// The relay refused the batch's shape: resending it cannot help.
+							log(`the relay refused ${batch.length} frame(s): ${error.message}`);
+							continue;
+						}
+						// Back to the head, in order; the next successful poll pumps again.
+						outbox.unshift(...batch);
+						while (outbox.length > OUTBOX_MAX) outbox.shift();
+						log(`sending to the relay failed: ${error && error.message}`);
+						return;
+					}
+				}
+			} finally {
+				pumping = false;
+			}
+		})();
 	}
 
 	/* ---------- the WebSocket transport ---------- */
@@ -184,7 +192,6 @@ function createRelay(identity, options) {
 			opened = true;
 			backoff = BACKOFF_MIN_MS;
 			setOnline(true);
-			metaPublished = false;
 			publishMeta();
 			flushOutbox();
 		};
@@ -230,12 +237,12 @@ function createRelay(identity, options) {
 				const wasOffline = !online;
 				setOnline(true);
 				backoff = BACKOFF_MIN_MS;
-				if (wasOffline && !metaPublished) {
-					metaPublished = true;
-					await pollSend([metaControl()]);
+				if (wasOffline) {
+					// Every (re)attach republishes: a relay that restarted forgot the meta.
+					await pollSend([metaControl()]).catch((error) => log(`publishing the window meta failed: ${error && error.message}`));
 				}
 				const arrived = (json.frames ?? []).length;
-				for (const wire of Array.isArray(json.frames) ? json.frames : []) ingest(wire);
+				for (const item of Array.isArray(json.frames) ? json.frames : []) ingest(item);
 				cursor = Number(json.cursor) || cursor;
 				flushOutbox();
 				// A relay that answers an empty poll instantly (or a proxy that unwaits it)

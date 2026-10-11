@@ -36,5 +36,20 @@
       "lastText": "echo: ping from probe",
       "sessionId": "adopted"
     }
+  },
+  "debug": {
+    "debug.firstPoll": [
+      "hello",
+      "windows"
+    ],
+    "debug.parkedPollWoke": true,
+    "debug.reply": {
+      "t": "reply",
+      "rid": "c1",
+      "ok": true,
+      "r": {
+        "echoed": "hello"
+      }
+    }
   }
 }

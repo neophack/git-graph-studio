@@ -56,9 +56,13 @@ const files = [
 	['extension/package.json', readFileSync(resolve(here, 'package.json'))],
 	...[
 		'extension.js', 'sessions.js', 'runner.js', 'panel.js', 'desktop.js', 'identity.js', 'crypto.js', 'cryptojs.js', 'relay.js',
-		'mirror.js', 'official.js', 'control.js', 'qrcode.js', 'sjcl.js', 'README.md',
-		'sources/tap.js', 'sources/sdkHost.js', 'media/icon.png'
-	].map((file) => [`extension/${file}`, readFileSync(resolve(here, file))])
+		'wire.js', 'live.js', 'official.js', 'control.js', 'qrcode.js', 'sjcl.js', 'README.md',
+		'sources/tap.js', 'sources/sdkHost.js', 'media/icon.png', 'localDebug.js'
+	].map((file) => [`extension/${file}`, readFileSync(resolve(here, file))]),
+	// The phone app itself (the relay serves the same files): the local debug page
+	// (localDebug.js) serves it from web/ beside the extension.
+	...['index.html', 'app.js', 'app.css', 'icon.svg', 'manifest.webmanifest']
+		.map((file) => [`extension/web/${file}`, readFileSync(resolve(appDir, 'claude-remote-server', 'web', file))])
 ];
 
 // CRC32 (zip store, no deps).

@@ -1,6 +1,15 @@
 # Claude Remote 2.0 计划：官方 Remote Control 接入 + 自建中继服务器
 
 状态：已实施（P1–P6，2026-10-11）· 基于 `Anthropic.claude-code-2.1.296` 的逆向分析 —— 每个新版 claude-code 用 `scripts/probes/claude-rc-surface.mjs` 复查 §1.3/§1.4；实机项（P0 的官方手机端 prompt 是否出现在 io_message、P5/P5b 的 claude.ai 账号与真机验证）按 §8 待做
+**2.1 修订（2026-10-11，所有者指示："先不做加密，先把功能测试通，再做加密"）**：2.0 实测不可用，按以下改动先打通功能——
+帧内容改为明文编码（`ct = "p." + base64url(JSON)`，插件 `wire.js` 与手机端 `codec` 是仅有的两处编码点，加密以后在这两处恢复，
+服务器契约不变）；配对改为二维码片段直接携带 `k_auth`（`#p.<hex>.<epoch>`，以 `secret` 提交，手机端不需要任何加密运算）；
+去掉 2.0 的防重放窗口（手机刷新后 seq 重新计数，此前所有请求都被当成重放丢弃）；中继对"目标不在线"的帧改为丢弃而非断开发送方；
+§2.2 的镜像（`mirror.js`）由 `live.js` 取代——手机打开哪个会话就"观看"哪个会话，该会话的 SDK 消息（与 `/remote-control`
+承载的内容相同）合并后实时推送，新对话以 draft 观看、按首个未知会话 id 认领；`sources/sdkHost.js` 改为 SDK 真实的 stream-json
+形状（此前的 user 消息与 control_response 形状真实 CLI 不认，回合也永不结束）。端到端验证：`scripts/probes/claude-remote-e2e.mjs`。
+§3.3、§3.5、§5 的加密描述在加密恢复前不生效。
+
 范围：重写 `extensions-src/claude-remote/`（插件），新建 `claude-remote-server/`（Rust 独立中继服务器），
 以及 Git Graph Studio 宿主侧的少量配套能力（模块 12）。
 

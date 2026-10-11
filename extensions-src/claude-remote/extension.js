@@ -1,20 +1,26 @@
 "use strict";
-/* Claude Remote 2.0 — continue this machine's Claude Code conversations from a phone,
- * over the PC's own relay (claude-remote-server) with end-to-end encrypted frames, and
- * over the official Remote Control where the CLI serves it.
+/* Claude Remote — continue this machine's Claude Code conversations from a phone, over
+ * the PC's own relay (claude-remote-server), and over the official Remote Control where
+ * the CLI serves it. The phone browses the history, opens a conversation or starts a new
+ * one, and watches its turns live as the CLI's own SDK messages — the same content the
+ * /remote-control bridge carries.
  *
  * One CommonJS package (no build step) that runs unchanged in VS Code (real Node) and in
  * Git Graph Studio's ggs-node runtime:
  *   identity.js   the PC identity on a relay (one user id + one QR per PC)
- *   crypto.js     HKDF / HMAC / AES-256-GCM — the E2E layer (sjcl fallback for frames)
+ *   wire.js       the frame body codec — plain while the flows are brought up (crypto.js
+ *                 keeps the AES-256-GCM layer for when encryption returns)
  *   relay.js      the relay connection: WebSocket, or the long-poll pair on ggs-node
  *   sources/      the two conversation sources: the host tap (GGS) and the sdk host
+ *   live.js       the conversation's SDK stream to the phones watching it, coalesced,
+ *                 with new-conversation adoption
+ *   localDebug.js the same phone app served on 127.0.0.1, talking to this window
+ *                 directly (no relay, no pairing) — the panel's debug link
  *   official.js   the CLI's own Remote Control, toggled through the tab's request channel
- *   mirror.js     the read-only official-session mirror to the relay
  *   control.js    the phone's request table (sessions, transcripts, prompts, cards)
- *   sessions.js   the read-only conversation store (unchanged)
- *   runner.js     the desktop-tab queue and the headless CLI lane (unchanged)
- *   desktop.js    the conversation's tab around an out-of-tab turn (unchanged)
+ *   sessions.js   the read-only conversation store
+ *   runner.js     the desktop-tab queue and the headless CLI lane
+ *   desktop.js    the conversation's tab around an out-of-tab turn
  *   panel.js      the desktop control panel
  */
 
@@ -30,12 +36,13 @@ try { vscode = require("vscode"); } catch { /* headless or pre-activation */ }
 const sessions = require("./sessions.js");
 const { Runner, claudeCliPath } = require("./runner.js");
 const identity = require("./identity.js");
-const crypto = require("./crypto.js");
+const wire = require("./wire.js");
 const { createRelay, wsSupported } = require("./relay.js");
 const { createTapSource, probe: probeTap } = require("./sources/tap.js");
 const { createSdkHostSource } = require("./sources/sdkHost.js");
 const { createOfficial } = require("./official.js");
-const { createMirror } = require("./mirror.js");
+const { createLive, rcPermissionOf } = require("./live.js");
+const { createLocalDebug } = require("./localDebug.js");
 const { createControl } = require("./control.js");
 const { panelHtml, qrSvg } = require("./panel.js");
 const { createDesktopTabs } = require("./desktop.js");
@@ -54,8 +61,6 @@ function activate(context) {
 	const config = () => vscode.workspace.getConfiguration(CONFIG);
 	const configOf = {
 		mode: () => { const mode = config().get("mode"); return ["auto", "official", "selfHosted"].includes(mode) ? mode : "auto"; },
-		mirrorOfficial: () => { const value = config().get("mirrorOfficial"); return ["off", "whenConnected", "always"].includes(value) ? value : "whenConnected"; },
-		mirrorConnectUrl: () => config().get("mirrorConnectUrl") === true,
 		mirrorControl: () => config().get("mirrorControl") === true,
 		serverUrl: () => identity.normalizeServer(config().get("serverUrl")),
 		officialAll: () => config().get("official.allSessions") === true
@@ -76,7 +81,7 @@ function activate(context) {
 		log,
 		defaultRoot: () => sessions.claudeRoot(),
 		externalBusy: (sessionId) => sessions.desktopBusy(sessions.findSession(sessionId)),
-		onChange: () => changed()
+		onChange: () => nudgePhones()
 	});
 
 	/* ---------- the sources ---------- */
@@ -91,7 +96,7 @@ function activate(context) {
 				log,
 				onEvent: (event) => {
 					notePermissionEvent(event);
-					mirror.offer(event);
+					live.offer(event);
 				},
 				onChange: () => changed()
 			});
@@ -103,38 +108,38 @@ function activate(context) {
 		}
 	})();
 
-	// The pending tool-permission questions, per conversation — what the phone renders
-	// as an answerable card. Both sources feed it: the tap's `tool_permission_request`
-	// pushes (the desktop tab's own card) and the sdk host's `control_request` lines.
-	const pendingPermissions = new Map(); // sessionId → { tool, summary, at }
-	const PERMISSION_FRESH_MS = 10 * 60 * 1000;
+	// The open `can_use_tool` requests, per conversation, in the `/remote-control`
+	// protocol's own shape (live.js's rcPermissionOf maps the tap's page envelopes): what a
+	// remote renders as its permission / question pop-up — including one that opens the
+	// conversation while a prompt is already waiting. A withdrawal or an answer (from the
+	// desktop, a phone or the debug page) closes it; the turn's end sweeps the rest.
+	const openRequests = new Map(); // sessionId → Map(request_id → { message, at })
+	const REQUEST_FRESH_MS = 30 * 60 * 1000;
 	function notePermissionEvent(event) {
 		if (!event || event.kind !== "permission") return;
-		const message = event.message || {};
-		const request = message.request && typeof message.request === "object" ? message.request : {};
-		const tool = message.toolName || message.tool_name || request.tool || "tool";
-		const input = message.inputs || request.input || {};
-		const summary = String(input.command || input.description || input.file_path || input.pattern || input.url || JSON.stringify(input)).slice(0, 160);
-		pendingPermissions.set(event.sessionId || "(new)", { tool: String(tool), summary, at: Date.now() });
-		changed();
-	}
-	function clearPermission(sessionId) {
-		if (pendingPermissions.delete(sessionId)) schedulePush();
-	}
-	function pendingPermissionOf(sessionId) {
-		const pending = pendingPermissions.get(sessionId);
-		if (!pending || Date.now() - pending.at >= PERMISSION_FRESH_MS) return null;
-		// A card whose conversation went quiet was answered (or died) on the desktop:
-		// past the freshness window it never returns, and once the session's turn ended
-		// it lingers only briefly — the tap side has no "gone" push of its own.
-		if (sessionId && sessionId !== "(new)") {
-			const summary = sessions.findSession(sessionId);
-			if (summary && !sessions.desktopBusy(summary) && Date.now() - pending.at > 60_000) {
-				pendingPermissions.delete(sessionId);
-				return null;
+		const rc = rcPermissionOf(event.message);
+		if (!rc) return;
+		if (rc.type === "control_request" && rc.request && rc.request.subtype === "can_use_tool") {
+			const key = event.sessionId || "(new)";
+			if (!openRequests.has(key)) openRequests.set(key, new Map());
+			openRequests.get(key).set(rc.request_id, { message: rc, at: Date.now() });
+		} else {
+			const requestId = rc.type === "control_cancel_request" ? rc.request_id : rc.response && rc.response.request_id;
+			for (const [key, open] of openRequests) {
+				if (open.delete(requestId) && !open.size) openRequests.delete(key);
 			}
 		}
-		return pending;
+		changed();
+	}
+	function clearRequests(sessionId) {
+		if (openRequests.delete(sessionId)) schedulePush();
+	}
+	function openRequestsOf(sessionId) {
+		const open = openRequests.get(sessionId);
+		if (!open) return [];
+		const now = Date.now();
+		for (const [id, entry] of open) if (now - entry.at >= REQUEST_FRESH_MS) open.delete(id);
+		return [...open.values()].map((entry) => entry.message);
 	}
 
 	const sdkHost = createSdkHostSource({
@@ -145,8 +150,8 @@ function activate(context) {
 			// crosses live for the same deltas the tap would show. A permission question
 			// parks the card; the turn's end clears it.
 			if (event.kind === "permission") notePermissionEvent(event);
-			if (event.kind === "state" && event.busy === false) clearPermission(event.sessionId);
-			mirror.offer({ kind: event.kind, sessionId: event.sessionId, dir: "out", message: event.message });
+			if (event.kind === "state" && event.busy === false) clearRequests(event.sessionId);
+			live.offer(event);
 			changed();
 		},
 		onChange: () => changed()
@@ -159,15 +164,12 @@ function activate(context) {
 		log(available ? "driving the desktop's Claude Code tabs" : "no desktop tab surface — turns run through the sdk host");
 	}).catch(() => undefined);
 
-	// One forwarding path for the tap stream: the mirror's own setting resolves the
-	// mode (a self-hosted phone session mirrors always — that IS its primary stream).
-	const mirror = createMirror({
-		config: () => ({
-			mirrorOfficial: configOf.mode() === "selfHosted" ? "always" : configOf.mirrorOfficial(),
-			mirrorConnectUrl: configOf.mirrorConnectUrl()
-		}),
+	// The live stream: every source event reaches the phones watching its conversation
+	// (whatever the mode — this IS the self-hosted phone's primary stream).
+	const live = createLive({
 		log,
-		forward: (payload) => relay.send("*", payload)
+		send: (to, payload) => sendTo(to, payload),
+		knownSessions: () => sessions.listSessions({}).map((s) => s.id)
 	});
 
 	/* ---------- the relay ---------- */
@@ -178,7 +180,19 @@ function activate(context) {
 	// The relay's window ids are w_ + 16 alphanumeric characters, minted once per window.
 	const windowId = "w_" + Array.from({ length: 16 }, () => "0123456789abcdefghijklmnopqrstuvwxyz"[Math.floor(Math.random() * 36)]).join("");
 	let online = false;
-	const pendingReplies = new Map(); // rid → {resolve, reject} (the phone's RPC calls that span async work)
+
+	// The local debug page: the phone app on 127.0.0.1, this window its only peer. It
+	// answers through the same request table and live stream as a paired phone.
+	const windowMeta = () => ({ t: "window.meta", name: folders().map((f) => f.name).join(", ") || "workspace", host: onGgs ? "ggs" : "vscode", folders: folders().map((f) => f.path) });
+	const local = createLocalDebug({ windowId, host: onGgs ? "ggs" : "vscode", meta: windowMeta, log, onFrame: (plain, meta) => relayFrame(plain, meta) });
+
+	/** One body to a peer: the local debug page by its device id, a relay phone by
+	 *  its own, the broadcast to both. */
+	function sendTo(to, payload) {
+		if (to === local.deviceId) return local.send(to, payload);
+		if (to === "*") local.send(to, payload);
+		return relay ? relay.send(to, payload) : false;
+	}
 
 	const control = createControl({
 		log,
@@ -190,14 +204,15 @@ function activate(context) {
 		// Official mode without mirrorControl: the self-hosted phone watches, never
 		// drives (plan §2.2's rule 3) — the official client keeps the conversation.
 		controlAllowed: () => configOf.mode() !== "official" || configOf.mirrorControl(),
-		pendingPermission: pendingPermissionOf,
-		onPermissionAnswered: clearPermission,
+		openRequests: openRequestsOf,
 		desktopTabs: () => tabs.list(),
 		openDesktopTab: async (sessionId) => {
 			if (tap) await tap.open({ sessionId }).catch(() => undefined);
 			else await tabs.openTab(sessionId);
 			setTimeout(() => void tabs.refresh(), 1500);
 		},
+		live,
+		notify: (to, payload) => sendTo(to, payload),
 		answerQuestion: async ({ sessionId, answers }) => {
 			await tapInjection;
 			if (!tap) throw new Error("answering questions needs the desktop's Claude Code tab");
@@ -213,9 +228,9 @@ function activate(context) {
 		if (plain && (typeof plain.rid === "string" || typeof plain.rid === "number")) {
 			const rid = plain.rid;
 			Promise.resolve()
-				.then(() => control.dispatch(plain))
-				.then((r) => relay.send(meta.from, { t: "reply", rid, ok: true, r }))
-				.catch((error) => relay.send(meta.from, { t: "reply", rid, ok: false, e: String(error && error.message || error) }));
+				.then(() => control.dispatch(plain, { from: meta.from }))
+				.then((r) => sendTo(meta.from, { t: "reply", rid, ok: true, r }))
+				.catch((error) => sendTo(meta.from, { t: "reply", rid, ok: false, e: String(error && error.message || error) }));
 			return;
 		}
 		if (plain && plain.t === "nudge") changed();
@@ -254,7 +269,7 @@ function activate(context) {
 		relay = createRelay(current, {
 			windowId,
 			host: onGgs ? "ggs" : "vscode",
-			meta: () => ({ t: "window.meta", name: folders().map((f) => f.name).join(", ") || "workspace", host: onGgs ? "ggs" : "vscode", folders: folders().map((f) => f.path) }),
+			meta: windowMeta,
 			log,
 			getIdentity: () => current,
 			onFrame: relayFrame,
@@ -289,13 +304,22 @@ function activate(context) {
 	/* ---------- what the phone sees of this window's changes ---------- */
 
 	let nudgeTimer = null;
+	/** Something the phone shows may have changed: bump the runner's version (the
+	 *  transcript's revision stamp) — whose own onChange is `nudgePhones`, never this. The
+	 *  2.0 wiring had the runner's onChange call back into here: an endless mutual
+	 *  recursion that real Node's stack overflow (swallowed by the runner's try/catch) hid,
+	 *  and that ggs-node's frame limit turned into a panic killing the request in flight. */
 	function changed() {
 		runner.changed();
-		if (!relay || !online) return;
+	}
+
+	/** The coalesced "something changed" push to every peer (the phones re-pull). */
+	function nudgePhones() {
+		if ((!relay || !online) && !local.running()) return;
 		if (nudgeTimer) return;
 		nudgeTimer = setTimeout(() => {
 			nudgeTimer = null;
-			relay.send("*", { t: "nudge" });
+			sendTo("*", { t: "nudge" });
 		}, 300);
 		nudgeTimer.unref?.();
 	}
@@ -336,7 +360,6 @@ function activate(context) {
 		const link = current ? identity.link(current) : null;
 		return {
 			mode: configOf.mode(),
-			mirror: configOf.mirrorOfficial(),
 			relay: { wanted: relayWanted, online, transport: relay ? relay.transport() : wsSupported() ? "websocket" : "long-poll", serverUrl: configOf.serverUrl() || "" },
 			identity: { userId: identityView.userId || "", epoch: identityView.epoch || 0 },
 			link,
@@ -352,6 +375,7 @@ function activate(context) {
 			},
 			officialAll: official.allSessions(sessions.claudeRoot),
 			tabDriving: !!tap,
+			debug: { url: local.url() },
 			summary: runner.summary(),
 			folders: folders().map((f) => f.path),
 			cli: path.basename(runner.cliPath),
@@ -359,23 +383,20 @@ function activate(context) {
 		};
 	}
 
-	/** This PC's windows as the relay routes them — each sealed `meta_ct` decrypted with
-	 *  the frame key (the broadcast AAD, seq 0), the relay never the wiser. Answers the
-	 *  local shape when the relay is out of reach. */
+	/** This PC's windows as the relay routes them — each `meta_ct` decoded through the
+	 *  frame codec. Answers the local shape when the relay is out of reach. */
 	async function relayWindows() {
 		const local = { name: folders().map((f) => f.name).join(", ") || "workspace", host: onGgs ? "ggs" : "vscode", online: true, seen: Date.now(), self: true };
 		if (!current) return [local];
 		const routed = await identity.windows(current).catch(() => []);
-		const kE2E = crypto.deriveE2E(current.K);
 		const out = [];
 		for (const entry of routed) {
 			if (!entry || typeof entry.id !== "string") continue;
 			let name = "a window";
 			try {
-				const [n, c] = String(entry.meta_ct || "").split(".");
-				const meta = crypto.openFrame(kE2E, { userId: current.userId, epoch: current.epoch, from: entry.id, to: "*", seq: 0 }, { n, c });
+				const meta = wire.decode(entry.meta_ct);
 				if (meta && typeof meta.name === "string") name = meta.name;
-			} catch { /* an older epoch's meta — the name falls back */ }
+			} catch { /* no meta yet — the name falls back */ }
 			out.push({ name, host: entry.host || "", online: entry.online === true, seen: Number(entry.seen) || 0, self: entry.id === windowId });
 		}
 		// This window first (its own meta rides the relay's list too, but the local name
@@ -408,7 +429,6 @@ function activate(context) {
 				case "clearPassword": await clearPassword(); break;
 				case "revokeDevice": await revokeDevice(String(message.id)); break;
 				case "setMode": await config().update("mode", String(message.mode), vscode.ConfigurationTarget.Global); schedulePush(); break;
-				case "setMirror": await config().update("mirrorOfficial", String(message.mirror), vscode.ConfigurationTarget.Global); schedulePush(); break;
 				case "officialAll": {
 					const value = message.on === true;
 					await config().update("official.allSessions", value, vscode.ConfigurationTarget.Global);
@@ -417,9 +437,35 @@ function activate(context) {
 					break;
 				}
 				case "officialToggle": await toggleOfficial(); break;
+				case "openDebug": await openDebugPage(); break;
+				case "stopDebug": local.stop(); schedulePush(); break;
 			}
 		});
 		panel.onDidDispose(() => { panel = null; });
+	}
+
+	/* ---------- the local debug page ---------- */
+
+	const DEBUG_PORT_KEY = "claude-remote.debugPort";
+	/** Start the local debug server (on the port it had last time, so a bookmarked tab
+	 *  reconnects) and open the page in the system browser. */
+	async function openDebugPage() {
+		let url;
+		try {
+			url = await local.start({ port: context.globalState.get(DEBUG_PORT_KEY) || 0 });
+			const port = Number(new URL(url).port);
+			if (port) await context.globalState.update(DEBUG_PORT_KEY, port);
+		} catch (error) {
+			vscode.window.showErrorMessage(L("本地调试页启动失败：", "The local debug page did not start: ") + (error && error.message || error));
+			return null;
+		}
+		schedulePush();
+		const opened = await Promise.resolve(vscode.env.openExternal(vscode.Uri ? vscode.Uri.parse(url) : url)).catch(() => false);
+		if (!opened) {
+			await vscode.env.clipboard.writeText(url).catch(() => undefined);
+			vscode.window.showInformationMessage(L(`本地调试页：${url}（链接已复制）`, `Local debug page: ${url} (link copied)`));
+		}
+		return url;
 	}
 
 	/* ---------- the management actions ---------- */
@@ -443,7 +489,6 @@ function activate(context) {
 		try {
 			const next = await identity.rekey(current);
 			current = await identity.adopt(context, next);
-			mirror.reset();
 			vscode.window.showInformationMessage(L("配对密钥已重置，用新的二维码重新配对。", "Pairing key reset — pair again with the new QR."));
 		} catch (error) {
 			const reloaded = await identity.readIdentity(context).catch(() => null);
@@ -458,7 +503,6 @@ function activate(context) {
 					await identity.forget(context);
 					const fresh = await identity.register(configOf.serverUrl(), { log });
 					current = await identity.adopt(context, fresh);
-					mirror.reset();
 					if (relay) { relay.stop(); relay = null; online = false; }
 					await connect();
 					vscode.window.showInformationMessage(L(
@@ -565,6 +609,7 @@ function activate(context) {
 		schedulePush();
 		void tabs.refresh();
 		relay?.republishMeta();
+		local.republish();
 	}, 5000);
 
 	async function activateRelayFromSettings() {
@@ -595,7 +640,8 @@ function activate(context) {
 			if (picked) await revokeDevice(picked.id);
 		}),
 		vscode.commands.registerCommand("claude-remote.toggleOfficial", toggleOfficial),
-		{ dispose: () => { clearInterval(heartbeat); runner.dispose(); sdkHost.dispose(); if (tap) tap.stop(); if (relay) relay.stop(); } }
+		vscode.commands.registerCommand("claude-remote.openDebugPage", openDebugPage),
+		{ dispose: () => { clearInterval(heartbeat); runner.dispose(); sdkHost.dispose(); live.dispose(); local.stop(); if (tap) tap.stop(); if (relay) relay.stop(); } }
 	);
 
 	paintStatus();
@@ -613,6 +659,6 @@ module.exports = {
 	__core: {
 		sessions, Runner, claudeCliPath, identity, qrSvg, panelHtml, createDesktopTabs,
 		createRelay, wsSupported, createTapSource, createSdkHostSource, createOfficial,
-		createMirror, createControl, hostname: () => os.hostname()
+		createLive, createLocalDebug, createControl, hostname: () => os.hostname()
 	}
 };

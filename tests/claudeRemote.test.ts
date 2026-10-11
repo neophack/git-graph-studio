@@ -1,11 +1,14 @@
 // @vitest-environment node
-// The Claude Remote 2.0 extension, headless: the E2E crypto layer (both its native and
-// its sjcl paths), the PC identity (including the multi-window registration race), the
-// relay client against an in-memory relay that implements the same wire contract the
-// Rust server's tests pin (so either side drifting shows up here), the two conversation
-// sources emitting one shape, the phone's request table over a fixture store, and the
-// official-session mirror's read-only rules. Only activate() needs `vscode` — that is
-// claudeRemoteActivation.test.ts.
+// The Claude Remote extension, headless: the frame body codec (plain while the remote
+// flows are brought up) and the kept E2E crypto layer (both its native and its sjcl
+// paths), the PC identity (including the multi-window registration race), the relay
+// client against an in-memory relay that implements the same wire contract the Rust
+// server's tests pin (so either side drifting shows up here), the two conversation
+// sources emitting one shape — the sdk host against a fake CLI speaking the real
+// stream-json protocol — the live SDK stream to watching phones, and the phone's request
+// table over a fixture store. Only activate() needs `vscode` — that is
+// claudeRemoteActivation.test.ts; the whole live path (relay binary, real CLI, the phone
+// app in a browser) is scripts/probes/claude-remote-e2e.mjs.
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
@@ -288,12 +291,15 @@ describe('the PC identity', () => {
 		expect(id.normalizeServer('nas.local:8787')).toBe('https://nas.local:8787');
 		expect(id.normalizeServer('  ')).toBe(null);
 		const K = crypto.randomBytes(32);
-		const link = id.linkUrl('https://relay.example.com', 'u_abc123', K, 4);
-		expect(link).toBe(`https://relay.example.com/c/u_abc123#${K.toString('base64url')}.4`);
+		// The link carries the pairing credential the relay checks (hex HKDF(K, "crr1/auth"))
+		// — the phone pairs with it as-is, no browser crypto while the frames are plain.
+		const auth = Buffer.from(crypto.hkdfSync('sha256', K, Buffer.alloc(0), Buffer.from('crr1/auth'), 32)).toString('hex');
+		const link = id.linkUrl('https://relay.example.com', 'u_abc123', K.toString('base64url'), 4);
+		expect(link).toBe(`https://relay.example.com/c/u_abc123#p.${auth}.4`);
 		const parsed = id.parseLink(link);
-		expect(parsed).toMatchObject({ serverUrl: 'https://relay.example.com', userId: 'u_abc123', epoch: 4 });
-		expect(parsed.K).toBe(K.toString('base64url')); // the stored spelling, never a Buffer
+		expect(parsed).toEqual({ serverUrl: 'https://relay.example.com', userId: 'u_abc123', epoch: 4, auth });
 		expect(id.parseLink('https://relay.example.com/c/u_x#nope')).toBe(null);
+		expect(id.parseLink(`https://relay.example.com/c/u_x#${K.toString('base64url')}.4`)).toBe(null); // the 2.0 key-in-link form
 		expect(id.validIdentity({ userId: 'u_ab12cd34ef56ab12', agentSecret: 'f'.repeat(64), K: K.toString('base64url'), epoch: 1, serverUrl: 'https://a' })).toBe(true);
 		expect(id.validIdentity({ userId: 'x', agentSecret: 'y', K: 'z', epoch: 1, serverUrl: 'https://a' })).toBe(false);
 	});
@@ -370,73 +376,102 @@ describe('the PC identity', () => {
 
 /* ---------- the relay client ---------- */
 
+describe('the frame body codec', () => {
+	it('round-trips any JSON body as a base64url ct the relay accepts, and refuses a sealed one', () => {
+		const wire = requireExtension('wire.js');
+		const body = { t: 'live', text: '中文 ✓ \u0000 "quotes"', n: [1, 2, { deep: true }] };
+		const ct = wire.encode(body);
+		expect(ct).toMatch(/^p\.[A-Za-z0-9_-]+$/); // the relay's ct charset: base64url plus dots
+		expect(wire.decode(ct)).toEqual(body);
+		expect(() => wire.decode('AAAA.BBBB')).toThrow(/not a plain frame body/);
+		expect(wire.encrypted).toBe(false);
+	});
+});
+
 describe('the relay client (long-poll transport)', () => {
-	it('exchanges frames with a phone: sealed in, sealed out, AAD-verified', async () => {
+	const makeRelay = (identityValue: Any, frames: Any[], extra: Any = {}) => requireExtension('relay.js').createRelay(identityValue, {
+		windowId: 'w_abcdefghijklmnop',
+		meta: () => ({ name: 'workspace' }),
+		getIdentity: () => identityValue,
+		onFrame: (plain: Any, meta: Any) => frames.push({ plain, meta }),
+		onEpoch: () => undefined,
+		onOnline: () => undefined,
+		log: () => undefined,
+		...extra
+	});
+
+	it('exchanges frames with a phone: bodies in, bodies out, the meta a plain string', async () => {
 		(globalThis as Any).WebSocket = undefined; // the poll pair is the transport under test
 		serveRelay();
-		const id = requireExtension('identity.js');
-		const identityValue = await id.register('https://relay.test');
+		const wire = requireExtension('wire.js');
+		const identityValue = await requireExtension('identity.js').register('https://relay.test');
 		const frames: Any[] = [];
-		const relay = requireExtension('relay.js').createRelay(identityValue, {
-			windowId: 'w_abcdefghijklmnop',
-			meta: () => ({ name: 'workspace' }),
-			getIdentity: () => identityValue,
-			onFrame: (plain: Any) => frames.push(plain),
-			onEpoch: () => undefined,
-			onOnline: () => undefined,
-			log: () => undefined
-		});
+		const relay = makeRelay(identityValue, frames);
 		relay.start();
 		await sleep(200); // the first poll attaches the window's ring
 		const device = 'd_1234567890abcdef';
-		const kE2E = extCrypto().deriveE2E(identityValue.K);
-		const envelope = { userId: identityValue.userId, epoch: 1, from: device, to: 'w_abcdefghijklmnop', seq: 7 };
-		const sealed = extCrypto().sealFrame(kE2E, envelope, { t: 'sessions' });
-		relayMock.deliver('w_abcdefghijklmnop', { from: device, to: 'w_abcdefghijklmnop', seq: 7, ct: sealed.n + '.' + sealed.c });
+		relayMock.deliver('w_abcdefghijklmnop', { from: device, to: 'w_abcdefghijklmnop', seq: 7, ct: wire.encode({ t: 'sessions' }) });
 		await until(() => frames, (v) => v.length > 0);
-		expect(frames[0]).toEqual({ t: 'sessions' });
-		// The window's answer crosses sealed and opens under the same AAD rule.
-		// The poller's first crossing is its sealed window.metadata control — and its
-		// `ct` must be the wire's "n.c" STRING: a bare object here read as a protocol
-		// violation server-side and closed the connection on every publish, flapping
-		// the window off the relay (the phone's every RPC then timed out).
+		expect(frames[0]).toEqual({ plain: { t: 'sessions' }, meta: { from: device, to: 'w_abcdefghijklmnop', seq: 7 } });
+		// The poller's first crossing is its window.meta control — `ct` the codec's STRING
+		// (a bare object read as a protocol violation server-side and flapped the window).
 		await until(() => relayMock.sent, (v) => v.some((frame) => frame.kind === 'window.meta'));
 		const meta = relayMock.sent.find((frame) => frame.kind === 'window.meta');
-		expect(typeof meta.ct).toBe('string');
-		expect(meta.ct).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+		expect(wire.decode(meta.ct)).toEqual({ name: 'workspace' });
 		relay.send(device, { t: 'reply', rid: 1, ok: true, r: { list: [] } });
 		await until(() => relayMock.sent, (v) => v.some((frame) => frame.kind === 'frame'));
-		const wire = relayMock.sent.find((frame) => frame.kind === 'frame');
-		expect(wire).toMatchObject({ v: 1, kind: 'frame', from: 'w_abcdefghijklmnop', to: device });
-		const [n, c] = String(wire.ct).split('.');
-		const opened = extCrypto().openFrame(kE2E, { userId: identityValue.userId, epoch: 1, from: wire.from, to: wire.to, seq: wire.seq }, { n, c });
-		expect(opened).toMatchObject({ t: 'reply', ok: true });
+		const out = relayMock.sent.find((frame) => frame.kind === 'frame');
+		expect(out).toMatchObject({ v: 1, kind: 'frame', from: 'w_abcdefghijklmnop', to: device });
+		expect(wire.decode(out.ct)).toEqual({ t: 'reply', rid: 1, ok: true, r: { list: [] } });
 		relay.stop();
 	});
 
-	it('delivers epoch_changed to the identity reload, and a rekeyed key opens nothing old', async () => {
+	it('a phone that reloads (its seq starts over) is still heard, and one bad frame never stalls the poll', async () => {
 		(globalThis as Any).WebSocket = undefined;
 		serveRelay();
-		const id = requireExtension('identity.js');
-		const identityValue = await id.register('https://relay.test');
+		const wire = requireExtension('wire.js');
+		const identityValue = await requireExtension('identity.js').register('https://relay.test');
+		const frames: Any[] = [];
+		const relay = makeRelay(identityValue, frames);
+		relay.start();
+		await sleep(200);
+		const device = 'd_1234567890abcdef';
+		relayMock.deliver('w_abcdefghijklmnop', { from: device, to: 'w_abcdefghijklmnop', seq: 900, ct: wire.encode({ t: 'before reload' }) });
+		relayMock.deliver('w_abcdefghijklmnop', { from: device, to: 'w_abcdefghijklmnop', seq: 901, ct: 'not.a-plain-body' });
+		// The reloaded page counts from a lower number: 2.0's replay window dropped every
+		// request after a reload ("the window did not answer in time").
+		relayMock.deliver('w_abcdefghijklmnop', { from: device, to: 'w_abcdefghijklmnop', seq: 3, ct: wire.encode({ t: 'after reload' }) });
+		await until(() => frames, (v) => v.length >= 2);
+		expect(frames.map((f) => f.plain.t)).toEqual(['before reload', 'after reload']);
+		relay.stop();
+	});
+
+	it('sends in order, batched, one POST in flight — a live stream never reorders', async () => {
+		(globalThis as Any).WebSocket = undefined;
+		serveRelay();
+		const wire = requireExtension('wire.js');
+		const identityValue = await requireExtension('identity.js').register('https://relay.test');
+		const relay = makeRelay(identityValue, []);
+		relay.start();
+		await until(() => relay.online(), Boolean);
+		for (let i = 0; i < 150; i++) relay.send('d_1234567890abcdef', { t: 'live', i });
+		await until(() => relayMock.sent.filter((f) => f.kind === 'frame').length, (n) => n === 150);
+		const order = relayMock.sent.filter((f) => f.kind === 'frame').map((f) => wire.decode(f.ct).i);
+		expect(order).toEqual(Array.from({ length: 150 }, (_, i) => i));
+		relay.stop();
+	});
+
+	it('delivers epoch_changed to the identity reload', async () => {
+		(globalThis as Any).WebSocket = undefined;
+		serveRelay();
+		const identityValue = await requireExtension('identity.js').register('https://relay.test');
 		const epochs: number[] = [];
-		const relay = requireExtension('relay.js').createRelay(identityValue, {
-			windowId: 'w_abcdefghijklmnop',
-			meta: () => ({}),
-			getIdentity: () => identityValue,
-			onFrame: () => undefined,
-			onEpoch: (epoch: number) => epochs.push(epoch),
-			onOnline: () => undefined,
-			log: () => undefined
-		});
+		const relay = makeRelay(identityValue, [], { onEpoch: (epoch: number) => epochs.push(epoch) });
 		relay.start();
 		await sleep(200);
 		relayMock.announceEpoch('w_abcdefghijklmnop', 2);
 		await until(() => epochs, (v) => v.length > 0);
 		expect(epochs[0]).toBe(2);
-		// A frame sealed under the old K fails authentication under the rekeyed one.
-		const old = extCrypto().sealFrame(extCrypto().deriveE2E(identityValue.K), { userId: identityValue.userId, epoch: 1, from: 'd_1234567890abcdef', to: 'w_abcdefghijklmnop', seq: 1 }, {});
-		expect(() => extCrypto().openFrame(extCrypto().deriveE2E(crypto.randomBytes(32)), { userId: identityValue.userId, epoch: 2, from: 'd_1234567890abcdef', to: 'w_abcdefghijklmnop', seq: 1 }, old)).toThrow();
 		relay.stop();
 	});
 });
@@ -504,6 +539,14 @@ describe('the tap source', () => {
 		tap.stop();
 	});
 
+	it("tells a host that forwards the chat page's prompts from an older one (which has no ggs.claudeChat.respond)", async () => {
+		const { createTapSource } = requireExtension('sources/tap.js');
+		const current = createTapSource(fakeVscodeGgs({ 'ggs.claudeChat.respond': () => { throw new Error('a permission answer names its request'); } }), { log: () => undefined, onEvent: () => undefined, onChange: () => undefined });
+		expect(await current.forwardsPrompts()).toBe(true);
+		const older = createTapSource(fakeVscodeGgs({}), { log: () => undefined, onEvent: () => undefined, onChange: () => undefined });
+		expect(await older.forwardsPrompts()).toBe(false);
+	});
+
 	it('the probe distinguishes a GGS host from VS Code', async () => {
 		const { probe } = requireExtension('sources/tap.js');
 		expect(await probe(fakeVscodeGgs({ 'ggs.claudeChat.state': () => ({ phase: 'sent' }) }))).toBe(true);
@@ -541,12 +584,18 @@ process.stdin.on('data', (c) => {
 		let request;
 		try { request = JSON.parse(line); } catch { continue; }
 		if (request.type === 'control_response') {
-			if (waitingForPermission) { const p = waitingForPermission; waitingForPermission = null; finish(p + ' [answered]'); }
+			// The SDK's own answer shape: {response: {subtype, request_id, response: PermissionResult}}.
+			const answer = request.response ?? {};
+			const result = answer.response ?? {};
+			if (waitingForPermission && answer.request_id === 'pr-1') { const p = waitingForPermission; waitingForPermission = null; finish(p + ' [' + result.behavior + (result.updatedInput ? '+input' : '') + (result.updatedPermissions ? '+rules' : '') + ']'); }
 			continue;
 		}
-		const prompt = (request.content ?? []).map((b) => b.text ?? '').join('');
+		// The SDK's user message: {type: 'user', message: {role, content}} — a bare
+		// {content} line is what 2.0 wrote, and the real CLI ignores it.
+		if (request.type !== 'user' || !request.message) continue;
+		const prompt = (request.message.content ?? []).map((b) => b.text ?? '').join('');
 		if (/perm/.test(prompt)) {
-			write({ type: 'control_request', request_id: 'pr-1', request: { tool: 'Bash', input: { command: 'rm -rf build' } } });
+			write({ type: 'control_request', request_id: 'pr-1', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'rm -rf build' }, permission_suggestions: [{ type: 'addRules', rules: [{ toolName: 'Bash' }], behavior: 'allow', destination: 'session' }] } });
 			waitingForPermission = prompt;
 		} else {
 			finish(prompt);
@@ -577,6 +626,10 @@ describe('the sdk host source', () => {
 		// was remapped to the adopted session id (the CLI announced it in its init).
 		expect(source.permission(question.sessionId, { decision: 'allowAlways' })).toBe(true);
 		await until(() => events, (v) => v.some((e) => e.kind === 'sdk' && e.message.type === 'result'));
+		// allow carries the input it runs with, "always" the offered rules.
+		expect(events.find((e) => e.kind === 'sdk' && e.message.type === 'result').message.result).toBe('echo: perm please [allow+input+rules]');
+		// The turn's result ended stdin, so the CLI exits and the lane settles.
+		await until(() => events, (v) => v.some((e) => e.kind === 'state' && e.busy === false));
 		const init = events.find((e) => e.kind === 'sdk' && e.message.type === 'system');
 		expect(init.message.subtype).toBe('init');
 		// The session id was adopted, and the transcript the phone reads carries the turn.
@@ -659,12 +712,12 @@ describe('the control table', () => {
 		]);
 	});
 
-	function makeControl({ tap = null, sdk = null, tabSessions = [] as string[], answer = null as Any, controlAllowed = true, pendingPermission = null as Any }: { tap?: Any; sdk?: Any; tabSessions?: string[]; answer?: Any; controlAllowed?: boolean; pendingPermission?: Any } = {}) {
+	function makeControl({ tap = null, sdk = null, tabSessions = [] as string[], answer = null as Any, controlAllowed = true, openRequests = null as Any, live = undefined as Any }: { tap?: Any; sdk?: Any; tabSessions?: string[]; answer?: Any; controlAllowed?: boolean; openRequests?: Any; live?: Any } = {}) {
 		const { Runner } = requireExtension('runner.js');
 		const { createControl } = requireExtension('control.js');
 		const runner = new Runner({ log: () => undefined, onChange: () => undefined, spawn: () => { throw new Error('the control table test never spawns'); } });
 		const official = { supported: () => !!tap, state: async () => ({ available: tap ? true : null, status: 'off', connectUrl: null, sessionUrl: null }), toggle: async () => { throw new Error('no official writes in this test'); } };
-		return { control: createControl({ log: () => undefined, onChange: () => undefined, folders: () => [{ name: 'workspace', path: workspace }], runner, sdkHost: sdk, tap, desktopTabs: () => new Set(tabSessions), answerQuestion: answer ?? undefined, official, controlAllowed: () => controlAllowed, pendingPermission: pendingPermission ? () => pendingPermission : undefined, onPermissionAnswered: () => undefined }), runner };
+		return { control: createControl({ log: () => undefined, onChange: () => undefined, folders: () => [{ name: 'workspace', path: workspace }], runner, sdkHost: sdk, tap, desktopTabs: () => new Set(tabSessions), answerQuestion: answer ?? undefined, official, controlAllowed: () => controlAllowed, openRequests: openRequests ? () => openRequests : undefined, live }), runner };
 	}
 
 	it('answers the session list, the transcript windows and the same/delta contract', async () => {
@@ -687,6 +740,21 @@ describe('the control table', () => {
 		expect(result.via).toBe('sdk');
 		expect(sends[0]).toMatchObject({ sessionId: 'conv-a', text: 'go', mode: 'queue' });
 		await expect(control.dispatch({ t: 'send', cwd: 'C:\\not-a-workspace', text: 'x' })).rejects.toThrow(/choose an open workspace folder/);
+	});
+
+	it('a new conversation watches its draft BEFORE the turn starts; an open one renews its watch on every pull', async () => {
+		const order: string[] = [];
+		const live = { watch: (from: string, arg: Any) => { order.push(`watch ${from} ${arg.draft ? 'draft:' + arg.draft : arg.sessionId}`); return { ok: true }; } };
+		const sdk = { send: (arg: Any) => { order.push(`send ${arg.draftId}`); return { lane: 'draft:' + arg.draftId, sessionId: null }; }, interrupt: () => true, permission: () => true, setMode: () => true, busy: () => false, dispose: () => undefined };
+		const { control } = makeControl({ sdk, live });
+		const result = await control.dispatch({ t: 'send', text: 'start something', mode: 'now', draft: 'dPhone1' }, { from: 'd_phone' });
+		expect(result.draft).toBe('dPhone1');
+		// The watch comes first: the id the turn creates must be one the phone did not know.
+		expect(order).toEqual(['watch d_phone draft:dPhone1', 'send dPhone1']);
+		await control.dispatch({ t: 'session', id: 'conv-a', limit: 20 }, { from: 'd_phone' });
+		expect(order[order.length - 1]).toBe('watch d_phone conv-a');
+		await control.dispatch({ t: 'watch', sessionId: 'conv-a' }, { from: 'd_phone' });
+		expect(order[order.length - 1]).toBe('watch d_phone conv-a');
 	});
 
 	it("on a tap host every turn rides the conversation's tab — open or not, new conversations included — and never a side CLI", async () => {
@@ -760,16 +828,73 @@ describe('the control table', () => {
 		expect(setModes).toHaveLength(1);
 	});
 
-	it('the session meta carries the pending permission the phone renders as a card', async () => {
-		const card = { tool: 'Bash', summary: 'rm -rf build', at: Date.now() };
-		const { control } = makeControl({ pendingPermission: card });
+	it("the session meta carries the open can_use_tool requests (a page that opens mid-prompt still gets the pop-up)", async () => {
+		const request = { type: 'control_request', request_id: 'req-1', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'rm -rf build' }, permission_suggestions: [] } };
+		const { control } = makeControl({ openRequests: [request] });
 		const session = await control.dispatch({ t: 'session', id: 'conv-a' });
-		expect(session.session.pendingPermission).toEqual(card);
+		expect(session.session.openRequests).toEqual([request]);
 		const again = await control.dispatch({ t: 'session', id: 'conv-a', rev: session.rev });
-		// A same-rev poll still tells the phone about the pending card (it is not part of
-		// the transcript revision — it lives beside it).
+		// A same-rev poll still carries them (they live beside the transcript revision).
 		expect(again.same).toBe(true);
-		expect(again.session.pendingPermission).toEqual(card);
+		expect(again.session.openRequests).toEqual([request]);
+	});
+
+	it("a waiting AskUserQuestion in the transcript becomes the pop-up's can_use_tool request where the host forwards none, answered through the tab's question card", async () => {
+		writeSession(workspace, 'conv-ask', [
+			{ type: 'user', uuid: 'qu1', cwd: workspace, timestamp: '2026-10-11T10:00:00Z', message: { role: 'user', content: 'ask me' } },
+			{ type: 'assistant', uuid: 'qa1', cwd: workspace, timestamp: '2026-10-11T10:00:01Z', message: { role: 'assistant', model: 'fake-1', content: [{ type: 'tool_use', id: 'toolu_q1', name: 'AskUserQuestion', input: { questions: [{ question: 'Which color?', header: 'Color', multiSelect: false, options: [{ label: 'Red', description: 'warm' }, { label: 'Blue', description: 'cool' }] }, { question: 'Which sizes?', header: 'Size', multiSelect: true, options: [{ label: 'S' }, { label: 'M' }] }] } }] } }
+		]);
+		const answered: Any[] = [];
+		const { control } = makeControl({ answer: async (arg: Any) => { answered.push(arg); } });
+		const session = await control.dispatch({ t: 'session', id: 'conv-ask' });
+		const [request] = session.session.openRequests;
+		expect(request).toMatchObject({ type: 'control_request', request_id: 'tu:qa1:0', synthesized: true, request: { subtype: 'can_use_tool', tool_name: 'AskUserQuestion' } });
+		expect(request.request.input.questions[0]).toEqual({ question: 'Which color?', header: 'Color', multiSelect: false, options: [{ label: 'Red', description: 'warm' }, { label: 'Blue', description: 'cool' }] });
+		// The page answers exactly as it answers a real request: updatedInput.answers.
+		const result = { behavior: 'allow', updatedInput: { ...request.request.input, answers: { 'Which color?': 'Blue', 'Which sizes?': 'S, M, XL please' } } };
+		expect(await control.dispatch({ t: 'rc', sessionId: 'conv-ask', msg: { type: 'control_response', response: { subtype: 'success', request_id: request.request_id, response: result } } })).toMatchObject({ ok: true, via: 'tab-question' });
+		expect(answered).toHaveLength(1);
+		expect(answered[0].answers.map((a: Any) => [a.picks, a.other])).toEqual([[['Blue'], undefined], [['S', 'M', 'Other'], 'XL please']]);
+		await expect(control.dispatch({ t: 'rc', sessionId: 'conv-ask', msg: { type: 'control_response', response: { request_id: request.request_id, response: { behavior: 'deny' } } } })).rejects.toThrow(/declined on the desktop/);
+		// A host that forwards the real prompt wins: no synthesized twin beside it.
+		const real = { type: 'control_request', request_id: 'req-real', request: { subtype: 'can_use_tool', tool_name: 'AskUserQuestion', input: {} } };
+		const { control: withReal } = makeControl({ openRequests: [real] });
+		expect((await withReal.dispatch({ t: 'session', id: 'conv-ask' })).session.openRequests).toEqual([real]);
+	});
+
+	it('speaks /remote-control inbound: user prompts, interrupt, mode, model — routed to the tab on GGS', async () => {
+		const calls: Any[] = [];
+		const tap = {
+			send: async (arg: Any) => { calls.push(['send', arg]); return { phase: 'sent' }; },
+			stopTurn: async (arg: Any) => { calls.push(['stop', arg]); return { stopped: true }; },
+			mode: async (arg: Any) => { calls.push(['mode', arg]); return { phase: 'sent' }; },
+			respond: async (arg: Any) => { calls.push(['respond', arg]); return { ok: true }; }
+		};
+		const { control } = makeControl({ tap });
+		await control.dispatch({ t: 'rc', sessionId: 'conv-a', msg: { type: 'control_request', request: { subtype: 'set_model', model: 'opus' } } });
+		const sent = await control.dispatch({ t: 'rc', sessionId: 'conv-a', mode: 'queue', msg: { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'continue' }] } } });
+		expect(sent).toMatchObject({ t: 'rc', ok: true, via: 'tab' });
+		await control.dispatch({ t: 'rc', sessionId: 'conv-a', msg: { type: 'control_request', request: { subtype: 'interrupt' } } });
+		await control.dispatch({ t: 'rc', sessionId: 'conv-a', msg: { type: 'control_request', request: { subtype: 'set_permission_mode', mode: 'plan' } } });
+		await sleep(10);
+		expect(calls[0]).toEqual(['send', { sessionId: 'conv-a', text: 'continue', interrupt: false, model: 'opus' }]); // the picked model rides the turn
+		expect(calls[1]).toEqual(['stop', { sessionId: 'conv-a' }]);
+		expect(calls[2]).toEqual(['mode', { sessionId: 'conv-a', mode: 'plan' }]);
+		// The permission answer crosses by protocol: the PermissionResult, verbatim.
+		const result = { behavior: 'allow', updatedInput: { questions: [], answers: { 'Pick?': 'B' } } };
+		expect(await control.dispatch({ t: 'rc', sessionId: 'conv-a', msg: { type: 'control_response', response: { subtype: 'success', request_id: 'req-9', response: result } } })).toMatchObject({ ok: true, via: 'tab' });
+		expect(calls[3]).toEqual(['respond', { requestId: 'req-9', result }]);
+		await expect(control.dispatch({ t: 'rc', sessionId: 'conv-a', msg: { type: 'control_response', response: { request_id: 'req-9', response: { behavior: 'maybe' } } } })).rejects.toThrow(/allow\|deny/);
+		await expect(control.dispatch({ t: 'rc', sessionId: 'conv-a', msg: { type: 'bogus' } })).rejects.toThrow(/unsupported message/);
+	});
+
+	it('on the sdk host a control_response goes to the CLI child as-is', async () => {
+		const answered: Any[] = [];
+		const sdk = { send: () => ({ lane: 'x', sessionId: null }), interrupt: () => true, permission: () => true, respond: (sessionId: string, response: Any) => (answered.push([sessionId, response]), true), setMode: () => true, busy: () => false, dispose: () => undefined };
+		const { control } = makeControl({ sdk });
+		const response = { subtype: 'success', request_id: 'cr-1', response: { behavior: 'deny', message: 'no' } };
+		expect(await control.dispatch({ t: 'rc', sessionId: 'conv-a', msg: { type: 'control_response', response } })).toMatchObject({ ok: true, via: 'sdk' });
+		expect(answered).toEqual([['conv-a', response]]);
 	});
 
 	it('validates the phone\'s question answers against the offered options', async () => {
@@ -793,66 +918,126 @@ describe('the control table', () => {
 	});
 });
 
-/* ---------- the mirror's read-only rules ---------- */
+/* ---------- the live stream ---------- */
 
-describe('the official-session mirror', () => {
-	const mirrorModule = () => requireExtension('mirror.js');
+describe('the live stream (the SDK messages to the phones watching)', () => {
+	const live = () => requireExtension('live.js');
+	const make = (known: string[] = []) => {
+		const sent: { to: string; payload: Any }[] = [];
+		const stream = live().createLive({ send: (to: string, payload: Any) => sent.push({ to, payload }), log: () => undefined, knownSessions: () => known });
+		return { stream, sent };
+	};
+	const liveMsgs = (sent: Any[], to: string) => sent.filter((s) => s.to === to && s.payload.t === 'live').flatMap((s) => s.payload.msgs);
 
-	it('mirrors sdk and permission events verbatim, never the connectUrl by default', () => {
-		const { createMirror, cleanse } = mirrorModule();
-		const forwarded: Any[] = [];
-		const mirror = createMirror({ config: () => ({ mirrorOfficial: 'always', mirrorConnectUrl: false }), log: () => undefined, forward: (payload: Any) => forwarded.push(payload) });
-		expect(mirror.offer({ kind: 'sdk', sessionId: 's1', dir: 'out', message: { type: 'io_message', message: { type: 'assistant' } } })).toBe(true);
-		expect(mirror.offer({ kind: 'permission', sessionId: 's1', dir: 'in', message: { type: 'tool_permission_request' } })).toBe(true);
-		expect(forwarded.map((f) => f.event.kind)).toEqual(['sdk', 'permission']);
-		const clean = cleanse({ kind: 'rc', sessionId: 's1', message: { channelRemoteControlState: { status: 'connected', connectUrl: 'https://claude.ai/live-key', sessionUrl: 'https://claude.ai/s', bridgeEpoch: 3 } } }, { mirrorConnectUrl: false });
-		expect(clean.message).toEqual({ status: 'connected', sessionUrl: 'https://claude.ai/s', bridgeEpoch: 3 });
-		expect(JSON.stringify(clean)).not.toContain('live-key');
-		const optedIn = cleanse({ kind: 'rc', sessionId: 's1', message: { channelRemoteControlState: { status: 'connected', connectUrl: 'https://claude.ai/live-key' } } }, { mirrorConnectUrl: true });
-		expect(optedIn.message.connectUrl).toBe('https://claude.ai/live-key');
+	it("forwards a watched conversation's SDK messages verbatim — the tap's envelopes unwrapped, other conversations not", async () => {
+		const { stream, sent } = make();
+		stream.watch('d_phone1', { sessionId: 's1' });
+		stream.offer({ kind: 'sdk', sessionId: 's1', dir: 'out', message: { type: 'io_message', channelId: 'c1', message: { type: 'stream_event', session_id: 's1', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hel' } } } } });
+		stream.offer({ kind: 'sdk', sessionId: 's1', dir: 'out', message: { type: 'io_message', channelId: 'c1', message: { type: 'assistant', uuid: 'a1', session_id: 's1', message: { content: [{ type: 'text', text: 'Hello' }] } } } });
+		stream.offer({ kind: 'sdk', sessionId: 's2', dir: 'out', message: { type: 'assistant', uuid: 'x', session_id: 's2' } }); // another conversation
+		stream.offer({ kind: 'sdk', sessionId: null, dir: 'out', message: { type: 'result', session_id: 's1', subtype: 'success' } }); // the SDK's own session_id tags it
+		stream.offer({ kind: 'rc', sessionId: 's1', message: { channelRemoteControlState: { status: 'connected', connectUrl: 'https://claude.ai/live-key' } } }); // never the RC state
+		await sleep(live().FLUSH_MS + 40);
+		const msgs = liveMsgs(sent, 'd_phone1');
+		expect(msgs.map((m: Any) => m.type)).toEqual(['stream_event', 'assistant', 'result']);
+		expect(msgs[1]).toEqual({ type: 'assistant', uuid: 'a1', session_id: 's1', message: { content: [{ type: 'text', text: 'Hello' }] } });
+		// One coalesced frame for the burst, not one per message.
+		expect(sent.filter((s) => s.payload.t === 'live')).toHaveLength(1);
+		expect(JSON.stringify(sent)).not.toContain('live-key');
 	});
 
-	it('gates whenConnected on the conversation\'s own state, per conversation', () => {
-		const { createMirror } = mirrorModule();
-		const forwarded: Any[] = [];
-		const mirror = createMirror({ config: () => ({ mirrorOfficial: 'whenConnected', mirrorConnectUrl: false }), log: () => undefined, forward: (payload: Any) => forwarded.push(payload) });
-		expect(mirror.offer({ kind: 'sdk', sessionId: 's1', dir: 'out', message: {} })).toBe(false);
-		expect(mirror.offer({ kind: 'rc', sessionId: 's1', message: { channelRemoteControlState: { status: 'connected' } } })).toBe(true);
-		expect(mirror.offer({ kind: 'sdk', sessionId: 's1', dir: 'out', message: {} })).toBe(true);
-		// 'connecting' is NOT the end: a mirrored session that re-connects keeps
-		// mirroring (a truthy-status delete here used to close the gate on it).
-		expect(mirror.offer({ kind: 'rc', sessionId: 's1', message: { channelRemoteControlState: { status: 'connecting' } } })).toBe(true);
-		expect(mirror.offer({ kind: 'sdk', sessionId: 's1', dir: 'out', message: {} })).toBe(true);
-		// Only a terminal state closes it — and the closing event crosses once.
-		expect(mirror.offer({ kind: 'rc', sessionId: 's1', message: { channelRemoteControlState: { status: 'disconnected' } } })).toBe(true);
-		expect(mirror.offer({ kind: 'sdk', sessionId: 's1', dir: 'out', message: {} })).toBe(false);
-		expect(mirror.offer({ kind: 'rc', sessionId: 's1', message: { channelRemoteControlState: { status: 'connecting' } } })).toBe(false);
-		expect(mirror.offer({ kind: 'sdk', sessionId: 's2', dir: 'out', message: {} })).toBe(false);
-		expect(forwarded.filter((f) => f.event.kind === 'sdk')).toHaveLength(2);
+	it('adopts a new conversation: the first event of an id the phone did not know', async () => {
+		const { stream, sent } = make(['old-1', 'old-2']);
+		stream.watch('d_phone1', { draft: 'd42' });
+		stream.offer({ kind: 'sdk', sessionId: 'old-1', message: { type: 'assistant', session_id: 'old-1' } }); // a desktop conversation, known
+		stream.offer({ kind: 'state', sessionId: null, busy: true }); // no id yet
+		stream.offer({ kind: 'sdk', sessionId: 'new-9', message: { type: 'system', subtype: 'init', session_id: 'new-9' } });
+		stream.offer({ kind: 'sdk', sessionId: 'new-9', message: { type: 'assistant', session_id: 'new-9' } });
+		await sleep(live().FLUSH_MS + 40);
+		expect(sent[0]).toEqual({ to: 'd_phone1', payload: { t: 'adopt', draft: 'd42', sessionId: 'new-9' } });
+		expect(liveMsgs(sent, 'd_phone1').map((m: Any) => m.type)).toEqual(['system', 'assistant']);
+		expect(stream.snapshot()).toEqual([{ deviceId: 'd_phone1', sessionId: 'new-9', draft: null }]);
 	});
 
-	it('off mirrors nothing — the official switch is the only stream then', () => {
-		const { createMirror } = mirrorModule();
-		const forwarded: Any[] = [];
-		const mirror = createMirror({ config: () => ({ mirrorOfficial: 'off', mirrorConnectUrl: false }), log: () => undefined, forward: (payload: Any) => forwarded.push(payload) });
-		expect(mirror.offer({ kind: 'sdk', sessionId: 's1', dir: 'out', message: {} })).toBe(false);
-		expect(mirror.offer({ kind: 'rc', sessionId: 's1', message: { channelRemoteControlState: { status: 'connected' } } })).toBe(false);
-		expect(forwarded).toHaveLength(0);
+	it("permission traffic crosses in the /remote-control protocol's own shapes — the GGS page envelopes mapped field for field", async () => {
+		const { stream, sent } = make();
+		stream.watch('d_phone1', { sessionId: 's1' });
+		// The chat page's prompt, its withdrawal (untagged — it carries no channel), its answer.
+		stream.offer({ kind: 'permission', sessionId: 's1', dir: 'out', message: { type: 'request', channelId: 'c1', requestId: 'req-1', request: { type: 'tool_permission_request', toolName: 'AskUserQuestion', inputs: { questions: [{ question: 'Pick?' }] }, suggestions: [{ type: 'addRules' }], toolUseId: 'tu1' } } });
+		stream.offer({ kind: 'permission', sessionId: null, dir: 'out', message: { type: 'cancel_request', targetRequestId: 'req-0' } });
+		stream.offer({ kind: 'permission', sessionId: 's1', dir: 'in', message: { type: 'response', requestId: 'req-1', response: { type: 'tool_permission_response', result: { behavior: 'allow', updatedInput: { answers: { 'Pick?': 'A' } } } } } });
+		stream.offer({ kind: 'permission', sessionId: 's1', dir: 'out', message: { type: 'request', requestId: 'x', request: { type: 'something_else' } } }); // not a permission prompt
+		await sleep(live().FLUSH_MS + 40);
+		expect(liveMsgs(sent, 'd_phone1')).toEqual([
+			{ type: 'control_request', request_id: 'req-1', request: { subtype: 'can_use_tool', tool_name: 'AskUserQuestion', input: { questions: [{ question: 'Pick?' }] }, permission_suggestions: [{ type: 'addRules' }], tool_use_id: 'tu1' } },
+			{ type: 'control_cancel_request', request_id: 'req-0' },
+			{ type: 'control_response', response: { subtype: 'success', request_id: 'req-1', response: { behavior: 'allow', updatedInput: { answers: { 'Pick?': 'A' } } } } }
+		]);
 	});
 
-	it('never touches the write path — no official import, no settings writes, no synthesized requests', () => {
-		const mirrorSource = fs.readFileSync(path.join(extensionDir, 'mirror.js'), 'utf8')
-			.replace(/\/\*[\s\S]*?\*\//g, '') // the header explains the rule in prose; the code is what must hold
-			.replace(/^\s*\/\/.*$/gm, '');
-		expect(mirrorSource).not.toMatch(/official\.js/);
-		expect(mirrorSource).not.toMatch(/toggle_remote_control|remoteControlAtStartup|writeFileSync/);
+	it('the sdk host\'s control messages cross verbatim; state as a marker; a huge message as a stub; unwatch stops it', async () => {
+		const { stream, sent } = make();
+		stream.watch('d_phone1', { sessionId: 's1' });
+		stream.offer({ kind: 'permission', sessionId: 's1', message: { type: 'control_request', request_id: 'r1', request: { subtype: 'can_use_tool' } } });
+		stream.offer({ kind: 'state', sessionId: 's1', busy: false, model: 'm' });
+		stream.offer({ kind: 'sdk', sessionId: 's1', message: { type: 'user', uuid: 'u9', session_id: 's1', message: { content: [{ type: 'tool_result', content: 'x'.repeat(live().MAX_MESSAGE_CHARS + 10) }] } } });
+		await sleep(live().FLUSH_MS + 40);
+		const msgs = liveMsgs(sent, 'd_phone1');
+		expect(msgs[0]).toEqual({ type: 'control_request', request_id: 'r1', request: { subtype: 'can_use_tool' } });
+		expect(msgs[1]).toMatchObject({ type: 'ggs_state', busy: false, model: 'm' });
+		expect(msgs[2]).toMatchObject({ type: 'user', uuid: 'u9', truncated: true });
+		stream.watch('d_phone1', {}); // the phone left the conversation
+		stream.offer({ kind: 'sdk', sessionId: 's1', message: { type: 'assistant', session_id: 's1' } });
+		await sleep(live().FLUSH_MS + 40);
+		expect(liveMsgs(sent, 'd_phone1')).toHaveLength(3);
+	});
+});
+
+describe('the local debug page (the phone app on 127.0.0.1, no relay)', () => {
+	it('serves the page with its local config, plays the relay for one device, and guards the API with the token', async () => {
+		const fetchBefore = globalThis.fetch;
+		globalThis.fetch = realFetch; // earlier describes stub the relay's fetch
+		const { createLocalDebug, findWebDir } = requireExtension('localDebug.js');
+		const wire = requireExtension('wire.js');
+		expect(findWebDir()).toBeTruthy(); // the repository's claude-remote-server/web
+		const frames: Any[] = [];
+		const local = createLocalDebug({ windowId: 'w_abcdefghijklmnop', host: 'vscode', meta: () => ({ name: 'demo' }), log: () => undefined, onFrame: (plain: Any, meta: Any) => frames.push({ plain, meta }) });
+		try {
+			const url = await local.start();
+			expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/d\/[0-9a-f]{32}$/);
+			const page = await (await fetch(url)).text();
+			expect(page).toContain('window.CRR_LOCAL');
+			expect(page).toContain(`"device":"${local.deviceId}"`);
+			expect((await fetch(new URL('/app.js', url))).status).toBe(200);
+			// A guessed token reaches nothing.
+			expect((await fetch(url.replace(/[0-9a-f]{32}$/, '0'.repeat(32)) + '/api/poll')).status).toBe(404);
+			const api = url + '/api';
+			const first = await (await fetch(`${api}/poll?cursor=0`)).json();
+			expect(first.messages.map((m: Any) => m.kind)).toEqual(['hello', 'windows']);
+			expect(wire.decode(first.messages[1].list[0].meta_ct)).toEqual({ name: 'demo' });
+			// The page's request reaches the window as a relay frame from its device ...
+			await fetch(`${api}/send`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ frames: [{ v: 1, kind: 'frame', from: local.deviceId, to: 'w_abcdefghijklmnop', seq: 1, ct: wire.encode({ rid: 'r1', t: 'sessions' }) }] }) });
+			expect(frames).toEqual([{ plain: { rid: 'r1', t: 'sessions' }, meta: { from: local.deviceId, to: 'w_abcdefghijklmnop', seq: 1 } }]);
+			// ... and the answer parks the next poll until it arrives (a relay phone's id is not this page's).
+			const parked = fetch(`${api}/poll?cursor=${first.cursor}`).then((r) => r.json());
+			expect(local.send('d_somephone000000', { t: 'reply' })).toBe(false);
+			await sleep(100);
+			expect(local.send(local.deviceId, { t: 'reply', rid: 'r1', ok: true, r: { sessions: [] } })).toBe(true);
+			const next = await parked;
+			expect(next.messages).toHaveLength(1);
+			expect(wire.decode(next.messages[0].ct)).toEqual({ t: 'reply', rid: 'r1', ok: true, r: { sessions: [] } });
+		} finally {
+			local.stop();
+			globalThis.fetch = fetchBefore;
+		}
+		expect(local.url()).toBe(null);
 	});
 });
 
 /* ---------- the package still packs ---------- */
 
 describe('the VSIX packer', () => {
-	it('packs the 2.0 file set and the store validator accepts it', async () => {
+	it('packs the file set (the phone app under web/ included) and the store validator accepts it', async () => {
 		const { validatePackage } = await import('../scripts/fetch-marketplace-extensions.mjs');
 		const { execFileSync } = await import('node:child_process');
 		const out = path.join(home, 'claude-remote-test.vsix');
@@ -896,6 +1081,7 @@ describe("host conformance (VS Code's real Node and Git Graph Studio's ggs-node 
 		try {
 			const expected = conformance.expected();
 			expect(await conformance.run('crypto')).toEqual(expected.crypto);
+			expect(await conformance.run('debug')).toEqual(expected.debug);
 			expect(await conformance.run('e2e', work)).toEqual(expected.e2e);
 		} finally {
 			globalThis.fetch = fetchBefore;

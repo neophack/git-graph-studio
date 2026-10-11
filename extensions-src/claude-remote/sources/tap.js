@@ -34,6 +34,7 @@ function createTapSource(vscode, options) {
 	const log = options.log || (() => {});
 	let subscription = null;
 	let listening = false;
+	let promptSupport = null;
 
 	const exec = (id, arg) => Promise.resolve(vscode.commands.executeCommand(id, arg)).catch((error) => {
 		throw new Error(`${id}: ${error && error.message}`);
@@ -123,6 +124,25 @@ function createTapSource(vscode, options) {
 		},
 		async permission(arg) {
 			return settle("ggs.claudeChat.permission", arg, { timeoutMs: 30000 });
+		},
+		/** Answer a permission prompt by protocol (`ggs.claudeChat.respond`): the remote's
+		 *  PermissionResult crosses as the asking chat page's own answer. */
+		async respond(arg) {
+			return exec("ggs.claudeChat.respond", arg);
+		},
+		/** Whether this host forwards the chat page's permission prompts and answers them by
+		 *  protocol (Git Graph Studio since 2026-10-11). An older host has no
+		 *  `ggs.claudeChat.respond`: asked with nothing, a current one refuses the empty
+		 *  answer, an older one does not know the command. */
+		async forwardsPrompts() {
+			if (promptSupport !== null) return promptSupport;
+			try {
+				await vscode.commands.executeCommand("ggs.claudeChat.respond", {});
+				promptSupport = true;
+			} catch (error) {
+				promptSupport = !/not found|unknown command|no such command/i.test(String(error && error.message || error));
+			}
+			return promptSupport;
 		},
 		async mode(arg) {
 			return settle("ggs.claudeChat.mode", arg, { timeoutMs: 30000 });

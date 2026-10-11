@@ -2023,6 +2023,33 @@ export class ExtensionHost {
 		ticket.sentAt = Date.now();
 	}
 
+	/** Answer a tool-permission prompt by protocol — the `/remote-control` way: the
+	 *  remote's PermissionResult (allow with the input it runs with — AskUserQuestion's
+	 *  answers ride `updatedInput` — and any rules to remember, or deny with a reason)
+	 *  crosses to the extension as the asking page's own `tool_permission_response`, then
+	 *  the page's card is withdrawn exactly as the extension withdraws a prompt another
+	 *  answer settled (`cancel_request`). No DOM is clicked; the page never answered. */
+	private claudeChatRespond(raw: unknown): { ok: boolean } {
+		const request = (raw ?? {}) as { requestId?: unknown; result?: unknown };
+		const requestId = typeof request.requestId === 'string' ? request.requestId : '';
+		const result = request.result as { behavior?: unknown } | null | undefined;
+		if (!requestId) throw new Error('a permission answer names its request');
+		if (!result || typeof result !== 'object' || (result.behavior !== 'allow' && result.behavior !== 'deny')) throw new Error('a permission answer is allow or deny');
+		const panelKey = this.claudePermissionPanels.get(requestId);
+		const view = panelKey ? this.webviews.get(panelKey) ?? null : null;
+		if (!view) throw new Error('that permission prompt is no longer open');
+		const claudeFrame = this.frames.get(view.extId) ?? null;
+		if (!claudeFrame?.send) throw new Error('the Claude Code extension has no live frame');
+		const answer = { type: 'response', requestId, response: { type: 'tool_permission_response', result } };
+		claudeFrame.send({ type: '__studioExtEvent', event: 'webviewMessage', panelId: view.panelId, message: answer });
+		this.claudePermissionPanels.delete(requestId);
+		// The tap sees the answer as the page's own (the remotes close their prompt), and
+		// the page's card closes the way an answer from elsewhere closes it.
+		this.noteClaudeTap(view.extId, view.panelId, 'in', answer);
+		this.gateWebviewMessage(view, { type: 'from-extension', message: { type: 'cancel_request', targetRequestId: requestId } }, `${view.extId}#${view.panelId}`);
+		return { ok: true };
+	}
+
 	/** A ticket's progress (or a session's tab), with whether its chat shows a turn in flight. */
 	private claudeChatState(raw: unknown): { phase: string; error: string | null; sessionId: string | null; open: boolean; busy: boolean | null; rc: ClaudeRcState | null } {
 		const request = (raw ?? {}) as { ticket?: unknown; sessionId?: unknown };
@@ -2151,7 +2178,9 @@ export class ExtensionHost {
 		});
 		// Exactly the request the page's own capsule sends (plan §1.1) — the page's UI
 		// never learns the host asked, and the answer is consumed below.
-		claudeFrame.send({ type: '__studioExtEvent', event: 'webviewMessage', panelId: view.panelId, message: { type: 'request', channelId, request: { type: 'toggle_remote_control', enable } } });
+		const requestId = `ggs-rc-${ticket.id}`;
+		this.claudeRcRequestIds.set(panelKey, requestId);
+		claudeFrame.send({ type: '__studioExtEvent', event: 'webviewMessage', panelId: view.panelId, message: { type: 'request', channelId, requestId, request: { type: 'toggle_remote_control', enable } } });
 		const response = await answer;
 		const state = claudeRcStateOf(response) ?? this.claudeRcStates.get(panelKey) ?? null;
 		ticket.rc = state;
@@ -2251,6 +2280,11 @@ export class ExtensionHost {
 	/** panelKey → the latest remote-control state and availability the page pushed. */
 	private readonly claudeRcStates = new Map<string, ClaudeRcState>();
 	private readonly claudeRcAvailable = new Map<string, boolean>();
+	/** Which chat panel each tool-permission prompt was asked in (request id → panel key),
+	 *  so a remote answer reaches the panel that asked. */
+	private readonly claudePermissionPanels = new Map<string, string>();
+	/** The request id a synthesized remote-control request went out with, per panel. */
+	private readonly claudeRcRequestIds = new Map<string, string>();
 	/** A pending synthesized remote-control request's answer waiter, by panel. */
 	private readonly claudeRcWaiters = new Map<string, { channelId: string; resolve: (response: unknown) => void }>();
 
@@ -2307,6 +2341,11 @@ export class ExtensionHost {
 			const available = claudeRemoteControlScan(message, 'channelRemoteControlAvailable');
 			if (typeof available === 'boolean') this.claudeRcAvailable.set(panelKey, available);
 			const kind = claudeTapKind(message);
+			const asked = message as { type?: unknown; requestId?: unknown; request?: { type?: unknown } | null } | null;
+			if (kind === 'permission' && dir === 'out' && asked?.type === 'request' && asked.request?.type === 'tool_permission_request' && typeof asked.requestId === 'string') {
+				this.claudePermissionPanels.set(asked.requestId, panelKey);
+				while (this.claudePermissionPanels.size > 64) this.claudePermissionPanels.delete(this.claudePermissionPanels.keys().next().value!);
+			}
 			if (!kind || !this.claudeTaps.size) return;
 			const event = { dir, kind, panelId, sessionId: this.webviewSessions.get(panelKey) ?? null, message };
 			for (const sub of this.claudeTaps.values()) this.enqueueTapEvent(sub, event);
@@ -2365,9 +2404,13 @@ export class ExtensionHost {
 		const panelKey = this.webviewKey(extId, panelId);
 		const waiter = this.claudeRcWaiters.get(panelKey);
 		if (!waiter) return false;
-		const envelope = message as { type?: unknown; channelId?: unknown } | null;
+		const envelope = message as { type?: unknown; channelId?: unknown; requestId?: unknown } | null;
 		if (envelope?.type !== 'response') return false;
 		if (typeof envelope.channelId === 'string' && envelope.channelId && envelope.channelId !== waiter.channelId) return false;
+		// The answer names the request it answers: anything else is the page's own traffic.
+		const asked = this.claudeRcRequestIds.get(panelKey);
+		if (asked && typeof envelope.requestId === 'string' && envelope.requestId !== asked) return false;
+		this.claudeRcRequestIds.delete(panelKey);
 		this.claudeRcWaiters.delete(panelKey);
 		waiter.resolve(message);
 		return true;
@@ -2996,10 +3039,12 @@ export class ExtensionHost {
 				}
 				// A synthesized remote-control request's answer is consumed before it
 				// reaches the page (the page never made that request).
-				if (this.consumeClaudeRcResponse(extId, panelId, message)) return Promise.resolve(undefined);
+				const inner = claudePageMessage(message);
+				if (this.consumeClaudeRcResponse(extId, panelId, inner)) return Promise.resolve(undefined);
 				// The conversation tap copies synchronously before the delivery; its own
-				// failures can never touch the message it copies (plan §2.2).
-				this.noteClaudeTap(extId, panelId, 'out', message);
+				// failures can never touch the message it copies (plan §2.2). It copies the
+				// protocol message, not Claude Code's page wrapper around it.
+				this.noteClaudeTap(extId, panelId, 'out', inner);
 				this.gateWebviewMessage(view, message, `${extId}#${panelId}`);
 				return Promise.resolve(undefined);
 			}
@@ -3132,6 +3177,7 @@ export class ExtensionHost {
 		if (id === 'ggs.claudeChat.remoteControl') return Promise.resolve().then(() => this.claudeChatRemoteControl(args[0]));
 		if (id === 'ggs.claudeChat.remoteState') return Promise.resolve(this.claudeChatRemoteState(args[0]));
 		if (id === 'ggs.claudeChat.permission') return Promise.resolve().then(() => this.claudeChatPermission(args[0]));
+		if (id === 'ggs.claudeChat.respond') return Promise.resolve().then(() => this.claudeChatRespond(args[0]));
 		if (id === 'ggs.claudeChat.mode') return Promise.resolve().then(() => this.claudeChatMode(args[0]));
 		if (id === 'ggs.claudeTap.subscribe') return this.claudeTapSubscribe(caller);
 		if (id === 'ggs.claudeTap.unsubscribe') return Promise.resolve(this.claudeTapUnsubscribe(caller));
@@ -3802,13 +3848,29 @@ function claudeRefusalOf(response: unknown): string | null {
 	return null;
 }
 
+/** The protocol message inside an extension → page post. Claude Code posts every message
+ *  to its chat page wrapped — `{type: "from-extension", message}` (the page listens for
+ *  exactly that) — while the page posts back bare. Reading the wrapper's own type as the
+ *  message's missed all of it: the tap forwarded nothing, the remote-control answer was
+ *  never recognized. A bare message passes through. */
+export function claudePageMessage(message: unknown): unknown {
+	const wrapper = message as { type?: unknown; message?: unknown } | null;
+	return wrapper && wrapper.type === 'from-extension' && wrapper.message && typeof wrapper.message === 'object' ? wrapper.message : message;
+}
+
 /** Which kind of Claude-conversation traffic a relayed webview message is — the tap only
  *  ever copies these shapes, and everything else a panel exchanges stays private to it. */
 export function claudeTapKind(message: unknown): 'sdk' | 'permission' | 'rc' | null {
-	const envelope = message as { type?: unknown; request?: { type?: unknown } | null } | null;
-	const type = typeof envelope?.type === 'string' ? envelope.type : typeof envelope?.request?.type === 'string' ? envelope.request.type : '';
+	const envelope = message as { type?: unknown; request?: { type?: unknown } | null; response?: { type?: unknown } | null } | null;
+	// The page protocol wraps a request as {type: "request", requestId, request: {type, …}}
+	// and its answer as {type: "response", requestId, response: {type, …}}: the inner type
+	// names it. Reading only the outer one missed every real permission prompt.
+	const outer = typeof envelope?.type === 'string' ? envelope.type : '';
+	const inner = outer === 'request' || !outer ? (typeof envelope?.request?.type === 'string' ? envelope.request.type : '') : outer === 'response' ? (typeof envelope?.response?.type === 'string' ? envelope.response.type : '') : '';
+	const type = inner || outer;
 	if (type === 'io_message') return 'sdk';
-	if (type === 'tool_permission_request' || type === 'control_cancel_request' || type === 'permission_request') return 'permission';
+	// The prompt (extension → page), its withdrawal, and the page's answer (page → extension).
+	if (type === 'tool_permission_request' || type === 'tool_permission_response' || type === 'cancel_request' || type === 'control_cancel_request' || type === 'permission_request') return 'permission';
 	if (type === 'interrupt_claude') return 'sdk';
 	if (claudeRemoteControlScan(message, 'channelRemoteControlState') !== undefined) return 'rc';
 	if (claudeRemoteControlScan(message, 'channelRemoteControlAvailable') !== undefined) return 'rc';
