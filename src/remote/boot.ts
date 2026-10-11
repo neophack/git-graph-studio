@@ -36,7 +36,17 @@ async function boot(): Promise<void> {
 	manifest.href = new URL('manifest.webmanifest', new URL(basePath, location.href)).href;
 	document.head.appendChild(manifest);
 	status('Connecting…');
-	const transport = new Transport({ basePath, instance, formFactor: formFactor(), dataSaver: dataSaverPreferred() });
+	const transport = new Transport({
+		basePath,
+		instance,
+		formFactor: formFactor(),
+		dataSaver: dataSaverPreferred(),
+		// A dropped link must not look like a frozen workbench: say so while the retry loop
+		// runs, greet the return, and let the notices (relay restarted, PC reconnecting)
+		// refine the story when they know more.
+		onOffline: () => showBanner('remote.banner.offline', 0),
+		onOnline: () => showBanner('remote.banner.reconnected', 4000)
+	});
 	const attached = await transport.connect();
 	setRemoteEnv({ transport, attached, basePath });
 	installInternals();

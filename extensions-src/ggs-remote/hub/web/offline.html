@@ -7,6 +7,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
+<!-- The no-script fallback; the script below removes it and polls softly instead, so the
+     page never flashes a full reload while it waits. The cadence stays at 15 s on purpose:
+     the Hub holds an offline-probe budget of 100 per IP per 10 minutes (§20.6). -->
+<meta http-equiv="refresh" content="15">
 <title>GGS Remote — not online</title>
 <style>
 :root { color-scheme: light dark; }
@@ -20,6 +24,10 @@ body {
 	background: radial-gradient(circle at 35% 30%, #7a7a7a, #4a4a4a);
 	opacity: .8;
 }
+@media (prefers-reduced-motion: no-preference) {
+	.dot { animation: breathe 4s ease-in-out infinite; }
+	@keyframes breathe { 50% { opacity: .35; } }
+}
 h1 { font-size: 1.25rem; margin: 0 0 .6em; }
 p { margin: .4em 0; opacity: .85; }
 .retry { font-size: .85em; opacity: .6; }
@@ -31,7 +39,31 @@ p { margin: .4em 0; opacity: .85; }
 	<h1>This PC is not online</h1>
 	<p>The link is correct, but the PC it belongs to is not connected to the relay right now.</p>
 	<p>它现在没有连上中继服务器——等这台电脑上线后自动恢复。</p>
-	<p class="retry">Retrying every 15&nbsp;s…</p>
+	<p class="retry">Checking the link…</p>
 </main>
+<script>
+(() => {
+	'use strict';
+	document.querySelector('meta[http-equiv="refresh"]').remove();
+	let checked = 0;
+	const check = async () => {
+		const now = Date.now();
+		if (now - checked < 5000) return; // a focus burst is not a poll burst
+		checked = now;
+		try {
+			const answer = await fetch(location.href, { cache: 'no-store', credentials: 'same-origin' });
+			// Anything but this page means the PC is answering again — the reload lands
+			// wherever its daemon sends us (the sign-in, or straight to the workbench).
+			// No per-render text changes on purpose: the page stays byte-identical for
+			// every not-online link (§20.5's enumeration guard).
+			if (answer.status !== 503) location.replace(location.href);
+		} catch {
+			/* the relay itself hiccupped; the next round tries again */
+		}
+	};
+	setInterval(check, 15000);
+	document.addEventListener('visibilitychange', () => { if (!document.hidden) check(); });
+})();
+</script>
 </body>
 </html>

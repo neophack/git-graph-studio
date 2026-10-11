@@ -320,9 +320,10 @@ async fn a_not_online_link_answers_the_same_page() {
         "/u/not-a-uuid/",
         "/u/not-a-uuid",
     ] {
-        let (status, head, body) = http(fixture.hub, "GET", path.to_owned(), &[], None).await;
+        let (status, _head, body) = http(fixture.hub, "GET", path.to_owned(), &[], None).await;
         assert_eq!(status, 503, "{path}");
-        assert!(head.contains("refresh: 15"), "{path}");
+        // The page's own fallback refresh (the script swaps it for a soft poll).
+        assert!(body.contains("http-equiv=\"refresh\""), "{path}");
         assert!(body.contains("not online"), "{path}");
     }
 }

@@ -72,11 +72,12 @@ async fn serve(
 /// identical whether the uuid is wrong, unknown or the PC is away.
 pub fn offline_page() -> Response {
     let html = include_str!("../web/offline.html");
+    // No `refresh` header: the page carries its own meta-refresh fallback, which its script
+    // replaces with a soft poll (no full-reload flash) at the same 15 s cadence.
     Response::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, "no-store")
-        .header("refresh", "15")
         .body(Body::from(html))
         .expect("a static page")
 }

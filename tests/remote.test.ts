@@ -269,6 +269,49 @@ describe('transport', () => {
 		expect(frameMsgpack<{ bytes: number; ackSeq: number }>(credit).bytes).toBeGreaterThanOrEqual(256 * 1024);
 	});
 
+	it('says so when the link drops and again when a retry lands', async () => {
+		// The workbench must not look merely frozen while the retry loop queues frames:
+		// onOffline fires on the drop, onOnline when the resumed link is back.
+		const sockets: FakeSocket[] = [];
+		const offline: number[] = [];
+		const online: number[] = [];
+		const handshake = (socket: FakeSocket): void => {
+			socket.deliver(down(msgpackFrame(T.HELLO_ACK, { sid: 's1', resumed: false, credit: 1 << 20 })));
+			socket.deliver(down(msgpackFrame(T.ATTACHED, { instance: 'ggs-1', version: '0.1.10', assetBase: '/', ggsBase: '/', frontendId: 'remote/1' })));
+		};
+		const transport = new Transport({
+			basePath: '/',
+			instance: 'ggs-1',
+			createSocket: (url) => {
+				const socket = new FakeSocket(url);
+				sockets.push(socket);
+				setTimeout(() => socket.open(), 0); // the browser's stack would
+				return socket as unknown as WebSocket;
+			},
+			fetchSession: async () => ({ csrf: 'tok' }),
+			onOffline: () => offline.push(Date.now()),
+			onOnline: () => online.push(Date.now())
+		});
+		const attached = transport.connect();
+		await flush();
+		await flush(); // the socket's open timer, then its wiring, land before the frames
+		handshake(sockets[0]!);
+		await attached;
+		expect(offline).toEqual([]);
+
+		// The link dies without a terminal verdict: the banner hook fires at once, the
+		// retry (first wait ~500 ms) opens a fresh socket and handshakes it again.
+		sockets[0]!.onclose?.({ code: 1006, reason: '' });
+		await flush();
+		expect(offline).toHaveLength(1);
+		await new Promise((r) => setTimeout(r, 700));
+		await flush(); // the retry's socket opened and wired in the meantime
+		handshake(sockets[1]!);
+		await new Promise((r) => setTimeout(r, 50));
+		expect(online).toHaveLength(1);
+		expect(sockets).toHaveLength(2);
+	});
+
 	it('sends the browser to login on 4401 and to the picker on 4410', async () => {
 		const first = await connected();
 		first.socket.deliver(down(msgpackFrame(T.CLOSE, { code: 4410, reason: 'instance-exited' })));

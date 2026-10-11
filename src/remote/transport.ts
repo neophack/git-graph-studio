@@ -63,6 +63,11 @@ export interface TransportOptions {
 	fetchSession?: () => Promise<{ csrf: string } | null>;
 	/** What to do on a terminal close (4401 → login, 4410 → picker). */
 	navigate?: (to: 'login' | 'picker', reason: string) => void;
+	/** The link dropped and the retry loop took over (frames queue meanwhile) — the
+	 *  workbench says so instead of looking merely frozen. */
+	onOffline?: () => void;
+	/** A retry landed; the queued frames are on their way again. */
+	onOnline?: () => void;
 	formFactor?: string;
 	dataSaver?: boolean;
 }
@@ -293,11 +298,13 @@ export class Transport {
 
 	private async reconnect(): Promise<void> {
 		if (this.closedForGood) return;
+		this.options.onOffline?.();
 		const wait = this.retryMs;
 		this.retryMs = Math.min(this.retryMs * 2, 8000);
 		await new Promise((r) => setTimeout(r, wait));
 		try {
 			await this.open(true);
+			this.options.onOnline?.();
 		} catch {
 			void this.reconnect();
 		}

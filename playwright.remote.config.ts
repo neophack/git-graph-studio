@@ -1,11 +1,21 @@
 // The Playwright config for Remote Access's browser specs (docs/ggs-remote-plan.md §17.4):
-// the three engines — Chromium, Firefox, WebKit — as the plan's matrix asks (`npx playwright
-// install firefox webkit` once per machine; a machine without them runs the chromium project
-// only, the others fail to launch and are skipped). The phone and desktop shapes ride device
-// descriptors inside the specs that care. The daemon-only specs need just the daemon binary;
-// the workbench spec is gated behind GGS_REMOTE_E2E_FULL (it boots a real GGS instance).
-// Nothing here runs on pull requests — `npm run test:e2e-remote` is explicit.
-import { defineConfig, devices } from '@playwright/test';
+// the three engines — Chromium, Firefox, WebKit — as the plan's matrix asks. Firefox and
+// WebKit join only when their binaries are present (`npx playwright install firefox webkit`
+// once per machine); a machine without them runs the chromium project alone instead of
+// failing every launch. The phone and desktop shapes ride device descriptors inside the
+// specs that care. The daemon-only specs need just the daemon binary; the workbench spec is
+// gated behind GGS_REMOTE_E2E_FULL (it boots a real GGS instance). Nothing here runs on
+// pull requests — `npm run test:e2e-remote` is explicit.
+import { defineConfig, devices, chromium, firefox, webkit } from '@playwright/test';
+import { existsSync } from 'node:fs';
+
+const projects = [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }];
+for (const [name, type, descriptor] of [
+	['firefox', firefox, 'Desktop Firefox'],
+	['webkit', webkit, 'Desktop Safari']
+] as const) {
+	if (existsSync(type.executablePath())) projects.push({ name, use: { ...devices[descriptor] } });
+}
 
 export default defineConfig({
 	testDir: 'tests/e2e/remote',
@@ -24,9 +34,5 @@ export default defineConfig({
 		ignoreHTTPSErrors: true,
 		...devices['Desktop Chrome']
 	},
-	projects: [
-		{ name: 'chromium', use: { ...devices['Desktop Chrome'] } },
-		{ name: 'firefox', use: { ...devices['Desktop Firefox'] } },
-		{ name: 'webkit', use: { ...devices['Desktop Safari'] } }
-	]
+	projects
 });
