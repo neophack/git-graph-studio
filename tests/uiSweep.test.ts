@@ -26,7 +26,7 @@ import { settings, updateSetting } from '../src/settings';
 import { Workbench } from '../src/workbench';
 import { commonHandlers, type Handler } from './scenarioFixtures';
 import { backend } from './tauriMock';
-import { installRemoteRound } from './remoteRound';
+import { installRemoteRound, uninstallRemoteRound } from './remoteRound';
 import { click, flush, hover, key, rightClick, type } from './helpers';
 
 
@@ -1025,6 +1025,7 @@ describe('the full UI sweep under the remote shims', () => {
 	});
 	afterAll(() => {
 		remoteRound = false;
+		uninstallRemoteRound(); // the last test's wire comes down with the round
 	});
 	uiSweepIts();
 });

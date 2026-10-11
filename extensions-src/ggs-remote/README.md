@@ -31,6 +31,11 @@ tunnel or a reverse proxy that terminates TLS (`ggsRemote.tlsMode: none`, bind `
 use Tailscale with your own certificate (`ggsRemote.tlsMode: custom`), or run the
 self-hosted relay (`ggs-remote-hub`).
 
+Whatever fronts the PC, the browser must reach it over **HTTPS**: the session cookie is
+always `Secure`, and WebKit browsers (Safari on iPhone, iPad and Mac) drop `Secure` cookies
+on plain HTTP even for `localhost` and LAN addresses — the sign-in would seem to succeed but
+never stick. The default self-signed TLS (or a TLS front proxy) avoids this on every browser.
+
 ## Command line
 
 ```text

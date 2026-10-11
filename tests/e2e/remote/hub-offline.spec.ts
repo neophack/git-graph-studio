@@ -39,11 +39,13 @@ test('every not-online link answers the same page', async ({ page }, testInfo) =
 		}
 		// Malformed, unknown and merely-away all render the same text (§20.5).
 		expect(snapshots[0]).toBe(snapshots[1]);
-		// The bare root is a 404 — no landing, no index to probe. Firefox does not retry a
-		// pooled keep-alive socket the server has since closed idle (WebKit and Chromium
-		// do) — one retry on the empty answer, a fresh connection.
-		const rootResponse = await page.goto(base).catch(() => page.goto(base));
-		expect(rootResponse?.status()).toBe(404);
+		// The bare root is a 404 — no landing, no index to probe. Over the request API, not
+		// a page navigation: after the three 503s, Firefox's connection pool hands the next
+		// navigation a socket it will not retry (WebKit and Chromium do), and the answer
+		// reads as NS_ERROR_NET_EMPTY_RESPONSE — the status is the assertion, the socket is
+		// none of its business.
+		const rootResponse = await page.request.get(base);
+		expect(rootResponse.status()).toBe(404);
 		// The health check answers for the orchestrator.
 		const health = await page.request.get(`${base}/healthz`);
 		expect(health.status()).toBe(200);

@@ -1,7 +1,7 @@
 // login.spec.ts (docs/ggs-remote-plan.md §17.4): the daemon's own login page — the redirect
 // from `/`, the wrong-password lockout, the signed-in road to the window picker, and the
 // cookie's flags.
-import { test, expect, loginCookie } from './daemon.fixture';
+import { test, expect } from './daemon.fixture';
 
 test('an anonymous visit lands on the login page', async ({ page, daemon }) => {
 	await page.goto(daemon.baseURL);

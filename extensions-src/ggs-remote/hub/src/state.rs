@@ -324,6 +324,27 @@ mod tests {
     }
 
     #[test]
+    fn handshake_rate_governs_the_front_door_and_zero_opens_it() {
+        let ip: IpAddr = "203.0.113.4".parse().unwrap();
+        // The configured rate is the ceiling: 2 allowed, the third refused.
+        let hub = Hub::new(Config {
+            handshake_rate: 2,
+            ..Config::default()
+        });
+        assert!(hub.hello_allowed(ip));
+        assert!(hub.hello_allowed(ip));
+        assert!(!hub.hello_allowed(ip));
+        // 0 = unlimited (load tests, single-address fleets): the counter never gates.
+        let open = Hub::new(Config {
+            handshake_rate: 0,
+            ..Config::default()
+        });
+        for _ in 0..100 {
+            assert!(open.hello_allowed(ip));
+        }
+    }
+
+    #[test]
     fn offline_probes_ban_past_the_limit() {
         let hub = hub();
         let ip: IpAddr = "203.0.113.9".parse().unwrap();

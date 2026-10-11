@@ -4,7 +4,7 @@
 // pages. The daemon-only specs need no GGS instance; the workbench spec boots one and is
 // gated behind GGS_REMOTE_E2E_FULL because it needs the built app.
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import net from 'node:net';
@@ -96,27 +96,5 @@ export const test = base.extend<FixedDaemon>({
 });
 export { expect };
 
-/** Logs in over the API and answers the cookie, the way the specs' pages do it. */
-export async function loginCookie(baseURL: string, password = PASSWORD): Promise<string> {
-	const response = await fetch(`${baseURL}/api/login`, {
-		method: 'POST',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ password, device: 'e2e' })
-	});
-	expect(response.status).toBe(200);
-	return (response.headers.get('set-cookie') ?? '').split(';')[0];
-}
-
-export async function readAdminToken(home: string): Promise<string> {
-	return readFileSync(resolve(home, 'remote/admin.token'), 'utf8').trim();
-}
-
-export async function adminCall(home: string, daemon: DaemonHandle, method: string, path: string, body?: unknown): Promise<Response> {
-	return fetch(`http://127.0.0.1:${JSON.parse(readFileSync(resolve(home, 'remote/loopback.json'), 'utf8')).port}${path}`, {
-		method,
-		headers: { Authorization: `Bearer ${await readAdminToken(home)}`, 'content-type': 'application/json' },
-		body: body === undefined ? undefined : JSON.stringify(body)
-	});
-}
 
 export { root, spawn, ChildProcess };

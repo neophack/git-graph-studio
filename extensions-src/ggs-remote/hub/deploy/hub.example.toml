@@ -26,5 +26,9 @@ asset_cache_mb = 256
 # Trust X-Forwarded-For from the loopback Caddy in front (real client IPs for the limits).
 trust_proxy = true
 
+# /tunnel handshakes one IP may start per minute (stampede protection for real fleets).
+# 0 = unlimited — for load tests, or a private deployment whose whole fleet shares one address.
+handshake_rate = 10
+
 landing_page = false
 metrics_listen = ""            # e.g. "127.0.0.1:9100" for /metrics

@@ -121,12 +121,15 @@ impl Config {
              bytes_per_day_per_tunnel = 0\n\
              asset_cache_mb = {cache}\n\
              trust_proxy = false\n\
+             # /tunnel handshakes one IP may start per minute; 0 = unlimited (load tests).\n\
+             handshake_rate = {handshake_rate}\n\
              landing_page = false\n\
              metrics_listen = \"\"\n",
             listen = Config::default().listen,
             max_tunnels = Config::default().max_tunnels,
             sessions = Config::default().sessions_per_tunnel,
             cache = DEFAULT_ASSET_CACHE_MB,
+            handshake_rate = Config::default().handshake_rate,
         )
     }
 

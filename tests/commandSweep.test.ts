@@ -13,7 +13,7 @@ import { commands } from '../src/commands';
 import { bookmarksFor } from '../src/bookmarks';
 import * as state from '../src/state';
 import { backend } from './tauriMock';
-import { installRemoteRound } from './remoteRound';
+import { installRemoteRound, uninstallRemoteRound } from './remoteRound';
 import { click, flush, key, menuItem, menuLabels, notifications, texts, until } from './helpers';
 
 
@@ -425,6 +425,7 @@ describe('the command sweep under the remote shims', () => {
 	});
 	afterAll(() => {
 		remoteRound = null;
+		uninstallRemoteRound(); // the last test's wire comes down with the round
 	});
 	it('every registered command runs over the wire without throwing and leaves the shell usable', { timeout: 90_000 }, sweepEveryCommand);
 
