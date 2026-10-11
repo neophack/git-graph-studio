@@ -8,13 +8,33 @@ import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { fileIcon, fileIconColor } from './editor';
 import { contextUri, menuSection, resourceContext } from './contributions';
-import { actionButton, basename, confirmDialog, el, icon, joinPath, notify, relativeTo, showContextMenu, toPosix, type MenuEntry } from './ui';
+import { tf } from './i18n';
+import { actionButton, basename, confirmDialog, el, icon, joinPath, liveSidebarTitle, notify, relativeTo, showContextMenu, toPosix, type MenuEntry } from './ui';
 
 interface DirEntryInfo {
 	name: string;
 	path: string;
 	isDir: boolean;
 	size: number;
+}
+
+/** One window of a paged directory listing (`list_dir_page`): the same order `list_dir`
+ *  spells, sliced, with the unfiltered total behind it. */
+interface DirPage {
+	entries: DirEntryInfo[];
+	total: number;
+	offset: number;
+	limit: number;
+}
+
+/** Remote traffic (docs/ggs-remote-plan.md §10.3): over the WebSocket every byte is metered,
+ *  so a huge directory pages — the first `REMOTE_DIR_PAGE` entries render and a "load more"
+ *  row fetches the rest on demand. The desktop workbench keeps the whole listing; the
+ *  `data-remote-shell` marker boot.ts sets is what makes a build remote (openThreshold.ts). */
+const REMOTE_DIR_PAGE = 500;
+
+function remoteShell(): boolean {
+	return typeof document !== 'undefined' && document.documentElement.hasAttribute('data-remote-shell');
 }
 
 /** repo-relative path (forward slashes) -> status letter (M A D R U !), as the SCM view reports it. */
@@ -34,6 +54,11 @@ export class Explorer {
 	private status: StatusMap = new Map();
 	/** Bumped on setRoot: a listing that started before a folder switch is dropped. */
 	private generation = 0;
+	/** The remotely paged listings (§10.3): dir path -> the entries loaded so far, the
+	 *  directory's total, and whether the entries were just fetched (a load-more merge may
+	 *  render straight from them — refetching the whole loaded span would pay for it twice).
+	 *  Desktop paging never writes here — `list_dir` answers whole. */
+	private readonly dirPages = new Map<string, { entries: DirEntryInfo[]; total: number; fresh: boolean }>();
 	private readonly expanded = new Set<string>();
 	/** The anchor of the selection - the focused row, where a Shift+click range starts. */
 	private selected: string | null = null;
@@ -75,7 +100,7 @@ onOpenInTerminal: ((folder: string) => void) | null = null;
 onModuleAnalysis: ((folders: string[]) => void) | null = null;
 
 	constructor(container: HTMLElement) {
-		container.appendChild(el('div', 'sidebar-title', [el('span', 'label', ['Explorer'])]));
+		container.appendChild(liveSidebarTitle('explorer.title'));
 		this.pane = el('div', 'view-pane');
 		this.header = el('div', 'pane-header');
 		this.header.addEventListener('click', () => {
@@ -125,6 +150,7 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		this.generation++;
 		this.status = new Map(); // the old repo's status letters must not decorate the new tree
 		this.expanded.clear();
+		this.dirPages.clear(); // the old tree's paging state belongs to the old tree
 		if (rootPath) {
 			const separator = rootPath.includes('\\') ? '\\' : '/';
 			for (const folder of expanded) this.expanded.add(rootPath.replace(/[\\/]+$/, '') + separator + folder.replaceAll('/', separator));
@@ -294,8 +320,27 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 	private async renderLevel(parent: HTMLElement, dirPath: string, depth: number): Promise<void> {
 		const generation = this.generation;
 		let entries: DirEntryInfo[];
+		/** Remote paging (§10.3): how much of this directory is loaded, and whether more
+		 *  waits behind the "load more" row. Desktop stays null — the whole listing. */
+		let paging: { total: number } | null = null;
 		try {
-			entries = await invoke<DirEntryInfo[]>('list_dir', { path: dirPath });
+			if (remoteShell()) {
+				const record = this.dirPages.get(dirPath);
+				if (record?.fresh) {
+					// A load-more just merged its page: render from what is loaded, no refetch.
+					record.fresh = false;
+					entries = record.entries;
+					paging = record.entries.length < record.total ? { total: record.total } : null;
+				} else {
+					const limit = Math.max(REMOTE_DIR_PAGE, record?.entries.length ?? 0);
+					const page = await invoke<DirPage>('list_dir_page', { path: dirPath, offset: 0, limit });
+					this.dirPages.set(dirPath, { entries: page.entries, total: page.total, fresh: false });
+					entries = page.entries;
+					if (page.entries.length < page.total) paging = { total: page.total };
+				}
+			} else {
+				entries = await invoke<DirEntryInfo[]>('list_dir', { path: dirPath });
+			}
 		} catch (error) {
 			if (generation !== this.generation) return;
 			notify('error', String(error));
@@ -305,6 +350,8 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		if (generation !== this.generation) return;
 		const existing = new Map<string, { row: HTMLElement; group: HTMLElement | null }>();
 		for (const child of Array.from(parent.children) as HTMLElement[]) {
+			// The "load more" row is not a file row: renderLoadMore owns its lifetime.
+			if (child.classList.contains('more-row')) continue;
 			if (child.classList.contains('row') && child.dataset['path']) {
 				existing.set(child.dataset['path']!, { row: child, group: null });
 			} else if (child.classList.contains('children') && child.dataset['parent']) {
@@ -342,7 +389,44 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		const unchanged =
 			next.length === parent.children.length && next.every((node, i) => parent.children[i] === node);
 		if (!unchanged) for (const node of next) parent.appendChild(node);
+		this.renderLoadMore(parent, dirPath, depth, paging);
 		await Promise.all(recurse);
+	}
+
+	/** The "load more" row of a remotely paged directory (§10.3): one below the loaded
+	 *  entries while more wait, gone once the last page landed. Reconciled by hand — it is
+	 *  not a file row, so the listing reconcile above never owns it. */
+	private renderLoadMore(parent: HTMLElement, dirPath: string, depth: number, paging: { total: number } | null): void {
+		let row = parent.querySelector<HTMLDivElement>('.row.load-more');
+		if (!paging) {
+			row?.remove();
+			return;
+		}
+		if (!row) {
+			row = el('div', 'row load-more');
+			row.dataset['depth'] = String(depth);
+			row.style.paddingLeft = `${8 + depth * 8}px`;
+			row.appendChild(el('span', 'twistie'));
+			row.appendChild(el('span', 'icon', [icon('ellipsis')]));
+			row.appendChild(el('span', 'label'));
+			row.addEventListener('click', () => {
+				const loaded = this.dirPages.get(dirPath)?.entries.length ?? 0;
+				void invoke<DirPage>('list_dir_page', { path: dirPath, offset: loaded, limit: REMOTE_DIR_PAGE })
+					.then((page) => {
+						const current = this.dirPages.get(dirPath);
+						// Another load-more (or a refresh) raced ahead: keep whichever saw more.
+						if (current && page.offset === current.entries.length) {
+							this.dirPages.set(dirPath, { entries: current.entries.concat(page.entries), total: page.total, fresh: true });
+						}
+						return this.renderLevel(parent, dirPath, depth);
+					})
+					.catch((error) => notify('error', String(error)));
+			});
+		}
+		parent.appendChild(row); // always last: the reconcile above may have re-appended its rows
+		const loaded = this.dirPages.get(dirPath)?.entries.length ?? 0;
+		const label = row.querySelector<HTMLElement>('.label');
+		if (label) label.textContent = tf('explorer.loadMore', loaded, paging.total);
 	}
 
 	private makeRow(entry: DirEntryInfo, depth: number): HTMLElement {
@@ -606,7 +690,10 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 			{ label: 'New File...', run: () => void this.createInline(folder, false) },
 			{ label: 'New Folder...', run: () => void this.createInline(folder, true) },
 			'separator',
-			{ label: 'Reveal in File Explorer', run: () => void revealItemInDir(path).catch((e) => notify('error', String(e))) },
+			// "Reveal in File Explorer" opens the PC's own desktop Explorer: a browser page
+			// has no such place. Hidden on the remote shell (the opener shim's
+			// remote-picker fallback stays for anything else that reveals).
+			...(remoteShell() ? [] : [{ label: 'Reveal in File Explorer', run: () => void revealItemInDir(path).catch((e) => notify('error', String(e))) }] as MenuEntry[]),
 			...(isDir ? [
 				{ label: 'Module Analysis', run: () => this.onModuleAnalysis?.(this.selectedFolders(path)) },
 				{ label: 'Open in Integrated Terminal', run: () => this.onOpenInTerminal?.(path) }

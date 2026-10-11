@@ -130,6 +130,65 @@ jobs:
       - name: Test
         run: npx vitest run
 
+      # The remote workbench (docs/ggs-remote-plan.md §9.1): the same frontend with the Tauri
+      # seam aliased onto the WebSocket shims — it must keep building.
+      - name: Build the remote workbench
+        run: npx vite build -c vite.remote.config.ts
+
+  # GGS Remote's daemon (extensions-src/ggs-remote/daemon, a crate of its own the app never
+  # links): format, lint, and the unit + integration suites on all three platforms
+  # (docs/ggs-remote-plan.md §15.6) — the tray backends differ per OS.
+  remote-daemon-test:
+    name: GGS Remote daemon (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: extensions-src/ggs-remote/daemon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: extensions-src/ggs-remote/daemon -> ../../../target/studio/ggs-remote
+          key: ggs-remote-daemon
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --all-targets --target-dir ../../../target/studio/ggs-remote -- -D warnings
+      - name: Test
+        run: cargo test --target-dir ../../../target/studio/ggs-remote
+
+  # The relay (extensions-src/ggs-remote/hub, another crate of its own, never inside the
+  # VSIX): the server half of the tunnel protocol — one OS is enough, it has no tray
+  # (docs/ggs-remote-plan.md §15.6, §20.8).
+  remote-hub-test:
+    name: GGS Remote hub
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extensions-src/ggs-remote/hub
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: extensions-src/ggs-remote/hub -> ../../../target/studio/ggs-remote-hub
+          key: ggs-remote-hub
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --all-targets --target-dir ../../../target/studio/ggs-remote-hub -- -D warnings
+      - name: Test
+        run: cargo test --target-dir ../../../target/studio/ggs-remote-hub
+
   # The Windows installers (NSIS setup exe + MSI), built natively.
   studio-windows:
     name: Studio installers (windows-x64)

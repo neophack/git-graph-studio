@@ -16,12 +16,13 @@
 // offline offer is what a featured row falls back to when the marketplace is unreachable.
 
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { listen } from '@tauri-apps/api/event';
 
 import type { ExtInfo, ExtProcessInfo, ExtensionHost, GalleryEntry } from './extHost';
 import { extFileDataUrl, extIconRelPath as iconRelPath, extTitle } from './extHost';
 import { renderMarkdown } from './markdown';
 import { t, tf } from './i18n';
-import { actionButton, confirmDialog, el, icon, notify } from './ui';
+import { actionButton, confirmDialog, el, icon, liveSidebarTitle, notify } from './ui';
 
 /** One featured id's marketplace half: in flight, its entry, or why there is none. */
 type MarketState = { status: 'loading' } | { status: 'ok'; entry: GalleryEntry } | { status: 'error'; error: string };
@@ -48,7 +49,7 @@ export class ExtensionsPanel {
 
 	constructor(container: HTMLElement, host: ExtensionHost) {
 		this.host = host;
-		container.appendChild(el('div', 'sidebar-title', [el('span', 'label', [t('extensions.title')])]));
+		container.appendChild(liveSidebarTitle('extensions.title'));
 		const pane = el('div', 'view-pane');
 		const header = el('div', 'pane-header');
 		header.appendChild(el('span', 'label', [t('extensions.featured')]));
@@ -60,6 +61,20 @@ export class ExtensionsPanel {
 		this.body.appendChild(this.list);
 		pane.append(header, this.body);
 		container.appendChild(pane);
+		this.render();
+		// A backend's start settles after this view's first refresh may already have run
+		// (the boot pass races the user): the `ext-backend-state` push re-reads the status
+		// lines, so "not running" never outlives the backend it described.
+		void listen('ext-backend-state', () => void this.refreshStatus());
+	}
+
+	/** Re-read only the backends' state — the cheap half of [`refresh`]. */
+	private async refreshStatus(): Promise<void> {
+		try {
+			this.processes = new Map((await this.host.processStatus()).map((info) => [info.extensionId, info]));
+		} catch {
+			return;
+		}
 		this.render();
 	}
 

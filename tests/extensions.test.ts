@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { ExtensionHost, themeVars, type ExtInfo, type GalleryEntry } from '../src/extHost';
+import { ExtensionHost, localizeAssetRoots, themeVars, type ExtInfo, type GalleryEntry } from '../src/extHost';
+import { assetUrl } from '../src/remote/assetUrl';
 import { EditorGroup } from '../src/editor';
 import { applyContributions, applyExtensionSettings, evaluateWhen, extensionSettingDefs, registerContextProvider, removeContributions, resolvedMenuEntries } from '../src/contributions';
 import { extLog, extLogEntries, flushExtLog, resetExtLog } from '../src/extLog';
@@ -18,6 +19,7 @@ import { THEMES, syncExtensionThemes, updateSetting } from '../src/settings';
 // frame's `parent` is this same window, so tests drive it with MessageEvents and read its posts.
 import '../src/extHostBoot';
 import { backend } from './tauriMock';
+import { setRemoteEnv } from '../src/remote/session';
 import { saveExtSetting } from '../src/state';
 import { click, flush, key, menuItem, menuLabels, notificationButton, notifications, rightClick, type } from './helpers';
 import { Explorer } from '../src/explorer';
@@ -2219,6 +2221,117 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 		expect(answers.length).toBeGreaterThanOrEqual(1);
 		expect(answers.at(-1)!.ok).toBe(true);
 	});
+
+	it('a remote page replays the running backend\'s registrations — the context key that gates a container among them', async () => {
+		// The remote-page bug: claude-code's activation set `claude-code:doesNotSupportSecondarySidebar`
+		// in the desktop window that served it; a remote page attaching later never saw it,
+		// so the Claude Code container's `when` failed and the entry never showed.
+		const ENGINE: ExtInfo = {
+			...GGX2, id: 'acme.engine', name: 'engine',
+			capabilities: { format: 'ggs/2', id: 'acme.engine', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'ggs-node', command: 'out/main.js' }, permissions: [] }
+		};
+		withExtensions(ENGINE);
+		backend.on('ext_read_file', ({ relPath }) => {
+			if (relPath === 'package.json') return JSON.stringify({ main: './main.js', contributes: { commands: [{ command: 'engine.go', title: 'Go' }] } });
+			throw new Error('no such file');
+		});
+		backend.on('ext_process_start', () => ({ extensionId: 'acme.engine', pid: 4242, commands: [], protocolVersion: 'ggs-ext/1', startCount: 1, lastError: null }));
+		backend.on('ext_process_registrations', () => [
+			{ method: 'commands.registerBatch', args: [['engine.go']] },
+			{ method: 'commands.execute', args: ['setContext', ['engine:sidebarShown', true]] }
+		]);
+		setRemoteEnv({ transport: {} as never, attached: { frontendId: 'remote/1' } as never, basePath: '/' });
+		try {
+			const host = new ExtensionHost();
+			await host.activateInstalled();
+			await flush();
+			expect(backend.callsTo('ext_process_registrations')).toContainEqual({ extId: 'acme.engine' });
+			expect(evaluateWhen('acme.engine', 'engine:sidebarShown')).toBe(true);
+			expect(commands.get('engine.go')).toBeDefined();
+		} finally {
+			setRemoteEnv(undefined);
+		}
+	});
+
+	it('a webview\'s package-asset roots are this frontend\'s own, whoever served the activation', () => {
+		// One backend, several frontends: the html arrives with the desktop's ggs:// root or
+		// another remote user's token route; this page loads only through its own.
+		const own = assetUrl('', 'ggs');
+		const html = [
+			'<script src="ggs://localhost/acme.x-1.0.0/a.js"></script>',
+			'<link href="http://ggs.localhost/acme.x-1.0.0/b.css">',
+			'<script src="https://10.0.0.5:47615/w/ggs-1/ggs/OtherUsersToken/acme.x-1.0.0/c.js"></script>',
+			'<script src="https://hub.example/u/abc/w/ggs-1/ggs/Tok2/acme.x-1.0.0/d.js"></script>',
+			'<script src="http://127.0.0.1%3A54500/w/ggs-1/ggs/Tok3/acme.x-1.0.0/e.js"></script>',
+			'<a href="https://example.com/w/docs">kept</a>'
+		].join('');
+		const out = localizeAssetRoots(html);
+		for (const file of ['a.js', 'b.css', 'c.js', 'd.js', 'e.js']) expect(out).toContain(`${own}acme.x-1.0.0/${file}`);
+		expect(out).not.toMatch(/OtherUsersToken|Tok2|Tok3/);
+		expect(out).toContain('https://example.com/w/docs');
+	});
+
+	it('a panel moving to this frontend opens here; moving away drops the tab without disposing it', async () => {
+		// Git Graph keeps one panel: when another user asks for it, the backend's reveal moves
+		// it — the asker opens it from its create args and html, the old page lets go
+		// quietly (a `webviewDisposed` would kill the extension's one panel for both).
+		const ENGINE: ExtInfo = {
+			...GGX2, id: 'acme.engine',
+			capabilities: { format: 'ggs/2', id: 'acme.engine', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'ggs-node', command: 'out/main.js' }, permissions: [] }
+		};
+		withExtensions(ENGINE);
+		const host = new ExtensionHost();
+		const opened: [number, string][] = [];
+		const closed: string[] = [];
+		host.onOpenWebview = (panelId, title) => void opened.push([panelId, title]);
+		host.onCloseWebviewTab = (tabId) => void closed.push(tabId);
+		backend.emit('ext-webview-move', { extId: 'acme.engine', panelId: 4, from: 'remote/2', to: 'main', create: [4, 'graph', 'Git Graph RS', 1, false], html: '<p>graph</p>' });
+		await flush();
+		expect(opened).toEqual([[4, 'Git Graph RS']]);
+		expect(host['webviews'].get(host['webviewKey']('acme.engine', 4))?.html).toBe('<p>graph</p>');
+		backend.emit('ext-webview-move', { extId: 'acme.engine', panelId: 4, from: 'main', to: 'remote/2', create: [4, 'graph', 'Git Graph RS', 1, false], html: '<p>graph</p>' });
+		await flush();
+		expect(closed).toEqual([host.webviewTabId('acme.engine', 4)]);
+		expect(host['webviews'].has(host['webviewKey']('acme.engine', 4))).toBe(false);
+		const pushes = backend.callsTo('ext_process_push_event').map((call) => (call.event as { event?: string }).event);
+		expect(pushes).not.toContain('webviewDisposed');
+	});
+
+	it('the shim\'s Uri keeps a port\'s colon (asWebviewUri over an http base)', () => {
+		expect(Uri.parse('http://127.0.0.1:54500/w/x/ggs/t/a.js').toString()).toBe('http://127.0.0.1:54500/w/x/ggs/t/a.js');
+		expect(Uri.parse('https://User:Pw@Example.com:8443/p').toString()).toBe('https://User:Pw@example.com:8443/p');
+	});
+
+	it('the desktop window does not replay — it served the activation itself', async () => {
+		const ENGINE: ExtInfo = {
+			...GGX2, id: 'acme.engine',
+			capabilities: { format: 'ggs/2', id: 'acme.engine', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'ggs-node', command: 'out/main.js' }, permissions: [] }
+		};
+		withExtensions(ENGINE);
+		backend.on('ext_read_file', () => { throw new Error('no such file'); });
+		backend.on('ext_process_start', () => ({ extensionId: 'acme.engine', pid: 4242, commands: [], protocolVersion: 'ggs-ext/1', startCount: 1, lastError: null }));
+		const host = new ExtensionHost();
+		await host.activateInstalled();
+		expect(backend.callsTo('ext_process_registrations')).toEqual([]);
+	});
+
+	it('a registration another frontend served is mirrored here without an answer', async () => {
+		// The live half: a `setContext` the backend sends while a remote page is the one
+		// answering still reaches the desktop window's `when` clauses — and vice versa.
+		const ENGINE: ExtInfo = {
+			...GGX2, id: 'acme.engine', name: 'engine',
+			capabilities: { format: 'ggs/2', id: 'acme.engine', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'ggs-node', command: 'out/main.js' }, permissions: [] }
+		};
+		withExtensions(ENGINE);
+		new ExtensionHost();
+		backend.emit('ext-host-state', { extId: 'acme.engine', method: 'commands.execute', args: ['setContext', ['engine:mirrored', 'yes']], served: 'remote' });
+		backend.emit('ext-host-state', { extId: 'acme.engine', method: 'commands.execute', args: ['setContext', ['engine:servedHere', true]], served: 'main' });
+		await flush();
+		expect(evaluateWhen('acme.engine', "engine:mirrored == 'yes'")).toBe(true);
+		// The one this frontend served itself is not applied twice (and never answered).
+		expect(evaluateWhen('acme.engine', 'engine:servedHere')).toBe(false);
+		expect(backend.callsTo('ext_process_host_respond')).toEqual([]);
+	});
 });
 
 describe('an installed ggs/2 package in the workbench surfaces (the full feature matrix)', () => {
@@ -2848,8 +2961,10 @@ describe('the shim degrades instead of throwing (Open VSX compatibility posture)
 	it('webview view registration is served: register, resolve at first visibility, setHtml', async () => {
 		const api = shimApi();
 		const requests = (api as unknown as { __requests: { method: string; args: unknown[] }[] }).__requests;
+		let resolves = 0;
 		api.window.registerWebviewViewProvider('acme.panel', {
 			resolveWebviewView: (view) => {
+				resolves++;
 				(view as { webview: { html: string } }).webview.html = '<p>panel</p>';
 			}
 		});
@@ -2857,10 +2972,13 @@ describe('the shim degrades instead of throwing (Open VSX compatibility posture)
 		// The host resolves the view at its first visibility (extHostBoot routes the call here).
 		await api.__serveWebviewView.resolve('acme.panel');
 		expect(requests.some((request) => request.method === 'webviewView.setHtml')).toBe(true);
-		// A second resolve is idempotent (resolved once, like VS Code).
+		// A second resolve — another frontend of the same backend showing the view (a remote
+		// page beside the desktop window) — runs no provider again (resolved once, like VS
+		// Code) but re-sends the page it set, so the asking frontend renders it too.
 		await api.__serveWebviewView.resolve('acme.panel');
+		expect(resolves).toBe(1);
 		const setHtmlCalls = requests.filter((request) => request.method === 'webviewView.setHtml');
-		expect(setHtmlCalls).toHaveLength(1);
+		expect(setHtmlCalls.map((request) => request.args)).toEqual([['acme.panel', '<p>panel</p>'], ['acme.panel', '<p>panel</p>']]);
 	});
 
 	it('a webviewViewMessage host event reaches the registered view', async () => {

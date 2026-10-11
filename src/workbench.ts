@@ -4,6 +4,7 @@
 // the folder lifecycle (open / reopen last / close) that feeds them all.
 
 import { invoke, Channel } from '@tauri-apps/api/core';
+import { startSummaryReporter } from './remote/summary';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
@@ -604,7 +605,11 @@ export class Workbench {
 	/* ---------- Layout ---------- */
 
 	/** VS Code-style pending-changes badge on the Source Control activity bar item. */
+	/** The pending SCM changes the badge shows (also the remote content summary's count). */
+	private scmChangeCount = 0;
+
 	private setScmBadge(count: number): void {
+		this.scmChangeCount = count;
 		const item = this.activityItems['scm'];
 		if (!item) return;
 		item.querySelector('.badge')?.remove();
@@ -614,6 +619,8 @@ export class Workbench {
 	private buildActivityBar(): void {
 		const add = (id: string, content: HTMLElement, title: string, onClick: () => void) => {
 			const item = el('div', 'activity-item', [content]);
+			// The view id, for shells that mirror the bar (the remote phone's bottom tabs).
+			item.dataset.view = id;
 			item.title = title;
 			item.setAttribute('role', 'button');
 			// Focusable for F6's cycle, with the workbench's delayed tooltip (M7).
@@ -880,6 +887,8 @@ export class Workbench {
 					commands.register({ id: `${viewId}.focus`, title: tf('workbench.focusViewContainer', viewNames.get(viewId) || container.title), category: 'View', enabled: () => this.extContainers.has(key), run: () => this.showView(key) });
 				}
 				const item = el('div', 'activity-item', [icon('list-tree')]);
+				// The view key, for shells that mirror the bar (the remote phone's bottom tabs).
+				item.dataset.view = key;
 				item.title = container.title;
 				item.setAttribute('role', 'button');
 				item.tabIndex = 0;
@@ -1202,6 +1211,9 @@ export class Workbench {
 		}).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
 		// macOS Finder's "Open With" handoff, once the backend knows this window has booted.
 		void listen<OpenedPaths>(OPEN_PATHS_EVENT, (event) => void this.onOpenPaths(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
+		// Remote Access (module 19): what this window shows, for the window picker's cards.
+		const stopSummary = startSummaryReporter({ tabs: () => this.editors.contentSummary(), scmChanges: () => this.scmChangeCount });
+		this.trackUnlisten(stopSummary);
 	}
 
 	/** The Context Window's debounce (M4 4.7): the symbol under the cursor settles for this
@@ -1876,7 +1888,7 @@ export class Workbench {
 	private renderWelcome(container: HTMLElement): void {
 		const inner = el('div', 'welcome-inner');
 		const logo = el('img');
-		logo.src = '/icons/icon.png';
+		logo.src = import.meta.env.BASE_URL + 'icons/icon.png';
 		logo.alt = '';
 		inner.appendChild(el('div', 'welcome-header', [
 			logo,

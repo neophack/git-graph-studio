@@ -1,0 +1,184 @@
+[
+	{
+		"name": "hello",
+		"hex": "010800000000000000000000000000006100000087a570726f746f01a6636c69656e74a3776562a3766572a6302e312e3130a46361707383a76465666c617465c3a27377c2a9636c6970626f617264c3aa666f726d466163746f72a570686f6e65a9646174615361766572c2a463737266a3616263",
+		"frames": [
+			{
+				"type": 1,
+				"flags": 8,
+				"session": 0,
+				"stream": 0,
+				"seq": 0,
+				"payloadMsgpack": {
+					"proto": 1,
+					"client": "web",
+					"ver": "0.1.10",
+					"caps": {
+						"deflate": true,
+						"sw": false,
+						"clipboard": true
+					},
+					"formFactor": "phone",
+					"dataSaver": false,
+					"csrf": "abc"
+				}
+			}
+		]
+	},
+	{
+		"name": "invoke-json",
+		"hex": "10040000000000000300000000000000270000007b2263223a226c6973745f646972222c2261223a7b2270617468223a22433a2f7265706f227d7d",
+		"frames": [
+			{
+				"type": 16,
+				"flags": 4,
+				"session": 0,
+				"stream": 3,
+				"seq": 0,
+				"payloadText": "{\"c\":\"list_dir\",\"a\":{\"path\":\"C:/repo\"}}"
+			}
+		]
+	},
+	{
+		"name": "result-error",
+		"hex": "111400000000000003000000070000001a0000007b226d657373616765223a226e6f20737563682066696c65227d",
+		"frames": [
+			{
+				"type": 17,
+				"flags": 20,
+				"session": 0,
+				"stream": 3,
+				"seq": 7,
+				"payloadText": "{\"message\":\"no such file\"}"
+			}
+		]
+	},
+	{
+		"name": "chan-data-compressed",
+		"hex": "200500000000000005000000080000004c0300004dd7bd6e15411044e157413726d8aadabfe15590430224cb48101020de9d006d9dce26da63d9ee6f7afebc7efef8fdebf5e5ebebfdfbc7b74fdbebf3ff839e839f439ec3fe1c8ee7703e87eb39dccf61f5837cbadf563fae7e5dfdbcfa7d35a016d484da701be6e76fc36db80db7e136dc86db701b69236d845f521b69236da48db49136d2c6dec6dec6dec6ce5fa28dbd8dbd8dbd8dbd8dbd8da38da38da38da38d833f771b471b471b471b471b671b671b671b671b671b27ff536d9c6d9c6d9c6d5c6d5c6d5c6d5c6d5c6d5c6d5cfce3b671b571b571b771b771b771b771b771b771b771331d6ddc6dac36561bab8dd5c66a63b5b1da586d2c4670cc2043b831851b63b831871b83b831891ba3b8318b1bc3b8519b234f6d0cfd98fa31f663eec7e08fc91fa3cfec8be1978730d4987f0180104010200c100808050403c2016580460d0a84050203a181e04078204010220812b40f3fa9a1826041b820601032081a840d0207a1838ec13535801042082284110209a18460423821a0d0396e076a5821b0105a082e8417020c2186204398a16b5c46d46043b821e01072083a841d020fa187e043f7b8fba821882044182210118a0846842302122189d6b86ac75dcb658b25c6126389b1c458622c3196184b8c25d6b8daa96189b1c458622c3196184b8c251e7bc45824e626416dec12639918dbc45827c63e31160a2c3196184b9cb1b850c3126389b1c458622c3196184b8c25c612ef634fa28625c6126389b1c458622c3196184b8c253ec65a460d4b8c25c6126389b1c458622c3196184b7c8e2d901a96184b8c25c6126389b1c458622c3196f81a4b27352c3196184b8c25c6126389b1c458622cf13d765c6a58622c3196184b8c25c6126389b1c458e23556eab153b3546349b02458122c0996044b8225c19260493456786a58122c0996044b8225c1926049b02458128f1703352c0996044b8225c1926049c6eb643c4fc6fb643e50a88d27ca78a38c47ca78a58c670a96044b8225c192ece33d440d4b8225c1926049b02458122c0996044b728ce717352c0996044b8225c1926049b02458122c0996044b8225c1926049b02458122c0996044b8225c1926049b02458122c0996044b8225c1926049b02458122c0996044b8225c1926049b02458122c0996044bb2d6ebedef3f",
+		"frames": [
+			{
+				"type": 32,
+				"flags": 5,
+				"session": 0,
+				"stream": 5,
+				"seq": 8,
+				"payloadText": "{\"rows\":[\"line 0\",\"line 1\",\"line 2\",\"line 3\",\"line 4\",\"line 5\",\"line 6\",\"line 7\",\"line 8\",\"line 9\",\"line 10\",\"line 11\",\"line 12\",\"line 13\",\"line 14\",\"line 15\",\"line 16\",\"line 17\",\"line 18\",\"line 19\",\"line 20\",\"line 21\",\"line 22\",\"line 23\",\"line 24\",\"line 25\",\"line 26\",\"line 27\",\"line 28\",\"line 29\",\"line 30\",\"line 31\",\"line 32\",\"line 33\",\"line 34\",\"line 35\",\"line 36\",\"line 37\",\"line 38\",\"line 39\",\"line 40\",\"line 41\",\"line 42\",\"line 43\",\"line 44\",\"line 45\",\"line 46\",\"line 47\",\"line 48\",\"line 49\",\"line 50\",\"line 51\",\"line 52\",\"line 53\",\"line 54\",\"line 55\",\"line 56\",\"line 57\",\"line 58\",\"line 59\",\"line 60\",\"line 61\",\"line 62\",\"line 63\",\"line 64\",\"line 65\",\"line 66\",\"line 67\",\"line 68\",\"line 69\",\"line 70\",\"line 71\",\"line 72\",\"line 73\",\"line 74\",\"line 75\",\"line 76\",\"line 77\",\"line 78\",\"line 79\",\"line 80\",\"line 81\",\"line 82\",\"line 83\",\"line 84\",\"line 85\",\"line 86\",\"line 87\",\"line 88\",\"line 89\",\"line 90\",\"line 91\",\"line 92\",\"line 93\",\"line 94\",\"line 95\",\"line 96\",\"line 97\",\"line 98\",\"line 99\",\"line 100\",\"line 101\",\"line 102\",\"line 103\",\"line 104\",\"line 105\",\"line 106\",\"line 107\",\"line 108\",\"line 109\",\"line 110\",\"line 111\",\"line 112\",\"line 113\",\"line 114\",\"line 115\",\"line 116\",\"line 117\",\"line 118\",\"line 119\",\"line 120\",\"line 121\",\"line 122\",\"line 123\",\"line 124\",\"line 125\",\"line 126\",\"line 127\",\"line 128\",\"line 129\",\"line 130\",\"line 131\",\"line 132\",\"line 133\",\"line 134\",\"line 135\",\"line 136\",\"line 137\",\"line 138\",\"line 139\",\"line 140\",\"line 141\",\"line 142\",\"line 143\",\"line 144\",\"line 145\",\"line 146\",\"line 147\",\"line 148\",\"line 149\",\"line 150\",\"line 151\",\"line 152\",\"line 153\",\"line 154\",\"line 155\",\"line 156\",\"line 157\",\"line 158\",\"line 159\",\"line 160\",\"line 161\",\"line 162\",\"line 163\",\"line 164\",\"line 165\",\"line 166\",\"line 167\",\"line 168\",\"line 169\",\"line 170\",\"line 171\",\"line 172\",\"line 173\",\"line 174\",\"line 175\",\"line 176\",\"line 177\",\"line 178\",\"line 179\",\"line 180\",\"line 181\",\"line 182\",\"line 183\",\"line 184\",\"line 185\",\"line 186\",\"line 187\",\"line 188\",\"line 189\",\"line 190\",\"line 191\",\"line 192\",\"line 193\",\"line 194\",\"line 195\",\"line 196\",\"line 197\",\"line 198\",\"line 199\",\"line 200\",\"line 201\",\"line 202\",\"line 203\",\"line 204\",\"line 205\",\"line 206\",\"line 207\",\"line 208\",\"line 209\",\"line 210\",\"line 211\",\"line 212\",\"line 213\",\"line 214\",\"line 215\",\"line 216\",\"line 217\",\"line 218\",\"line 219\",\"line 220\",\"line 221\",\"line 222\",\"line 223\",\"line 224\",\"line 225\",\"line 226\",\"line 227\",\"line 228\",\"line 229\",\"line 230\",\"line 231\",\"line 232\",\"line 233\",\"line 234\",\"line 235\",\"line 236\",\"line 237\",\"line 238\",\"line 239\",\"line 240\",\"line 241\",\"line 242\",\"line 243\",\"line 244\",\"line 245\",\"line 246\",\"line 247\",\"line 248\",\"line 249\",\"line 250\",\"line 251\",\"line 252\",\"line 253\",\"line 254\",\"line 255\",\"line 256\",\"line 257\",\"line 258\",\"line 259\",\"line 260\",\"line 261\",\"line 262\",\"line 263\",\"line 264\",\"line 265\",\"line 266\",\"line 267\",\"line 268\",\"line 269\",\"line 270\",\"line 271\",\"line 272\",\"line 273\",\"line 274\",\"line 275\",\"line 276\",\"line 277\",\"line 278\",\"line 279\",\"line 280\",\"line 281\",\"line 282\",\"line 283\",\"line 284\",\"line 285\",\"line 286\",\"line 287\",\"line 288\",\"line 289\",\"line 290\",\"line 291\",\"line 292\",\"line 293\",\"line 294\",\"line 295\",\"line 296\",\"line 297\",\"line 298\",\"line 299\",\"line 300\",\"line 301\",\"line 302\",\"line 303\",\"line 304\",\"line 305\",\"line 306\",\"line 307\",\"line 308\",\"line 309\",\"line 310\",\"line 311\",\"line 312\",\"line 313\",\"line 314\",\"line 315\",\"line 316\",\"line 317\",\"line 318\",\"line 319\",\"line 320\",\"line 321\",\"line 322\",\"line 323\",\"line 324\",\"line 325\",\"line 326\",\"line 327\",\"line 328\",\"line 329\",\"line 330\",\"line 331\",\"line 332\",\"line 333\",\"line 334\",\"line 335\",\"line 336\",\"line 337\",\"line 338\",\"line 339\",\"line 340\",\"line 341\",\"line 342\",\"line 343\",\"line 344\",\"line 345\",\"line 346\",\"line 347\",\"line 348\",\"line 349\",\"line 350\",\"line 351\",\"line 352\",\"line 353\",\"line 354\",\"line 355\",\"line 356\",\"line 357\",\"line 358\",\"line 359\",\"line 360\",\"line 361\",\"line 362\",\"line 363\",\"line 364\",\"line 365\",\"line 366\",\"line 367\",\"line 368\",\"line 369\",\"line 370\",\"line 371\",\"line 372\",\"line 373\",\"line 374\",\"line 375\",\"line 376\",\"line 377\",\"line 378\",\"line 379\",\"line 380\",\"line 381\",\"line 382\",\"line 383\",\"line 384\",\"line 385\",\"line 386\",\"line 387\",\"line 388\",\"line 389\",\"line 390\",\"line 391\",\"line 392\",\"line 393\",\"line 394\",\"line 395\",\"line 396\",\"line 397\",\"line 398\",\"line 399\"]}"
+			}
+		]
+	},
+	{
+		"name": "relay-session",
+		"hex": "100400002a0000000900000000000000190000007b2263223a22626f6f745f7374616765222c2261223a7b7d7d",
+		"frames": [
+			{
+				"type": 16,
+				"flags": 4,
+				"session": 42,
+				"stream": 9,
+				"seq": 0,
+				"payloadText": "{\"c\":\"boot_stage\",\"a\":{}}"
+			}
+		]
+	},
+	{
+		"name": "windows",
+		"hex": "03080000000000000000000002000000b500000081a9696e7374616e6365739188a26964a86767732d31323334a57469746c65a47265706fa7666f6c6465727391a7433a2f7265706fa776657273696f6ea6302e312e3130a776697369626c65c3ae72656d6f746553657373696f6e7301a57374617465a26f6ba773756d6d61727984a4746162739183a470617468ac433a2f7265706f2f612e7273a56469727479c3a6616374697665c3a97465726d696e616c7302a5646972747901aa73636d4368616e67657303",
+		"frames": [
+			{
+				"type": 3,
+				"flags": 8,
+				"session": 0,
+				"stream": 0,
+				"seq": 2,
+				"payloadMsgpack": {
+					"instances": [
+						{
+							"id": "ggs-1234",
+							"title": "repo",
+							"folders": [
+								"C:/repo"
+							],
+							"version": "0.1.10",
+							"visible": true,
+							"remoteSessions": 1,
+							"state": "ok",
+							"summary": {
+								"tabs": [
+									{
+										"path": "C:/repo/a.rs",
+										"dirty": true,
+										"active": true
+									}
+								],
+								"terminals": 2,
+								"dirty": 1,
+								"scmChanges": 3
+							}
+						}
+					]
+				}
+			}
+		]
+	},
+	{
+		"name": "packed-keystrokes",
+		"hex": "10040000000000000b00000000000000290000007b2263223a227074795f7772697465222c2261223a7b226964223a312c2264617461223a226c227d7d10040000000000000d00000000000000290000007b2263223a227074795f7772697465222c2261223a7b226964223a312c2264617461223a2273227d7d5100000000000000000000000000000000000000",
+		"frames": [
+			{
+				"type": 16,
+				"flags": 4,
+				"session": 0,
+				"stream": 11,
+				"seq": 0,
+				"payloadText": "{\"c\":\"pty_write\",\"a\":{\"id\":1,\"data\":\"l\"}}"
+			},
+			{
+				"type": 16,
+				"flags": 4,
+				"session": 0,
+				"stream": 13,
+				"seq": 0,
+				"payloadText": "{\"c\":\"pty_write\",\"a\":{\"id\":1,\"data\":\"s\"}}"
+			},
+			{
+				"type": 81,
+				"flags": 0,
+				"session": 0,
+				"stream": 0,
+				"seq": 0
+			}
+		]
+	},
+	{
+		"name": "fragment-head",
+		"hex": "11200000000000000f000000140000000b00000066697273742068616c667c",
+		"frames": [
+			{
+				"type": 17,
+				"flags": 32,
+				"session": 0,
+				"stream": 15,
+				"seq": 20,
+				"payloadText": "first half|"
+			}
+		]
+	},
+	{
+		"name": "close",
+		"hex": "7f0800000000000000000000000000002400000082a4636f6465cd1131a6726561736f6eb363726564656e7469616c732d6368616e676564",
+		"frames": [
+			{
+				"type": 127,
+				"flags": 8,
+				"session": 0,
+				"stream": 0,
+				"seq": 0,
+				"payloadMsgpack": {
+					"code": 4401,
+					"reason": "credentials-changed"
+				}
+			}
+		]
+	}
+]

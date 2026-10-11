@@ -1,7 +1,7 @@
 // Small DOM building blocks shared by every part of the workbench: element construction,
 // codicons, notifications (VS Code's toasts), context menus, and the quick-input prompt.
 
-import { trText } from './i18n';
+import { onLocaleChange, t, trText, type LocaleKey } from './i18n';
 
 export function el<K extends keyof HTMLElementTagNameMap>(
 	tag: K,
@@ -37,6 +37,17 @@ export function labelWithIcons(text: string): (string | HTMLElement)[] {
 }
 
 /** A 22px toolbar button: a codicon with a title, as VS Code's view title actions. */
+/** A sidebar-title element whose label follows the locale (the `sidebar-title` shape every
+ *  built-in view spells): constructed once, relabelled in place when the display language
+ *  switches — the view's own body does the same through `onLocaleChange`. */
+export function liveSidebarTitle(key: LocaleKey): HTMLElement {
+	const label = el('span', 'label', [t(key)]);
+	onLocaleChange(() => {
+		label.textContent = t(key);
+	});
+	return el('div', 'sidebar-title', [label]);
+}
+
 export function actionButton(iconName: string, title: string, onClick: (event: MouseEvent) => void): HTMLButtonElement {
 	const button = el('button', 'action-btn', [icon(iconName)]);
 	button.title = title;
@@ -341,8 +352,18 @@ function renderMenu(x: number, y: number, entries: MenuEntry[], level: number, m
 	return menu;
 }
 
+/** A replacement presenter for context menus — the remote workbench's phone action sheet
+ *  (src/remote/actionSheet.ts). Answering true means it showed the entries itself; callers
+ *  of showContextMenu never know the difference. */
+let menuPresenter: ((entries: MenuEntry[]) => boolean) | null = null;
+
+export function setMenuPresenter(presenter: ((entries: MenuEntry[]) => boolean) | null): void {
+	menuPresenter = presenter;
+}
+
 export function showContextMenu(x: number, y: number, entries: MenuEntry[]): void {
 	closeContextMenu();
+	if (menuPresenter?.(entries)) return;
 	renderMenu(x, y, entries, 0, 180);
 }
 

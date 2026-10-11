@@ -224,14 +224,18 @@ function systemTheme(): ThemeDef {
 	return themeById(dark ? 'dark-modern' : 'light-modern');
 }
 
+/** The public directory's URL prefix: `/` in the app, `./` in the remote build, whose pages
+ *  live under the daemon's `/w/<inst>/v/<ver>/` (docs/ggs-remote-plan.md §9.1). */
+const PUBLIC = import.meta.env.BASE_URL;
+
 export const THEMES: ThemeDef[] = [
-	{ id: 'auto', label: 'Auto (System)', kind: 'vscode-dark', css: '/theme/dark-modern.css' },
-	{ id: 'dark-modern', label: 'Dark Modern', kind: 'vscode-dark', css: '/theme/dark-modern.css' },
-	{ id: 'light-modern', label: 'Light Modern', kind: 'vscode-light', css: '/theme/light-modern.css' },
-	{ id: 'dark-plus', label: 'Default Dark+', kind: 'vscode-dark', css: '/theme/dark-plus.css' },
-	{ id: 'hc-black', label: 'Dark High Contrast', kind: 'vscode-dark', css: '/theme/hc-black.css' },
-	{ id: 'monokai', label: 'Monokai', kind: 'vscode-dark', css: '/theme/monokai.css' },
-	{ id: 'nord', label: 'Nord', kind: 'vscode-dark', css: '/theme/nord.css' }
+	{ id: 'auto', label: 'Auto (System)', kind: 'vscode-dark', css: PUBLIC + 'theme/dark-modern.css' },
+	{ id: 'dark-modern', label: 'Dark Modern', kind: 'vscode-dark', css: PUBLIC + 'theme/dark-modern.css' },
+	{ id: 'light-modern', label: 'Light Modern', kind: 'vscode-light', css: PUBLIC + 'theme/light-modern.css' },
+	{ id: 'dark-plus', label: 'Default Dark+', kind: 'vscode-dark', css: PUBLIC + 'theme/dark-plus.css' },
+	{ id: 'hc-black', label: 'Dark High Contrast', kind: 'vscode-dark', css: PUBLIC + 'theme/hc-black.css' },
+	{ id: 'monokai', label: 'Monokai', kind: 'vscode-dark', css: PUBLIC + 'theme/monokai.css' },
+	{ id: 'nord', label: 'Nord', kind: 'vscode-dark', css: PUBLIC + 'theme/nord.css' }
 ];
 
 /* ---------- Extension themes (`contributes.themes`) ---------- */
@@ -279,7 +283,7 @@ export function syncExtensionThemes(themes: { extId: string; label: string; kind
 			id: `ext-theme:${theme.extId}:${index}`,
 			label: theme.label,
 			kind: theme.kind,
-			css: theme.kind === 'vscode-light' ? '/theme/light-modern.css' : '/theme/dark-modern.css',
+			css: theme.kind === 'vscode-light' ? PUBLIC + 'theme/light-modern.css' : PUBLIC + 'theme/dark-modern.css',
 			overlay: themeOverlayVars(theme)
 		});
 	}

@@ -479,7 +479,7 @@ export class Uri {
 	toString(skipEncoding = false): string {
 		const minimal = skipEncoding === true;
 		let out = `${this.scheme}:`;
-		if (this.authority !== '' || this.scheme === 'file') out += `//${encodeComponent(this.authority.toLowerCase(), false, minimal)}`;
+		if (this.authority !== '' || this.scheme === 'file') out += `//${encodeAuthority(this.authority, minimal)}`;
 		let path = this.path;
 		// VS Code lowercases a file path's drive letter and encodes its colon.
 		const drive = /^\/([A-Za-z]):/.exec(path);
@@ -533,6 +533,25 @@ export class Uri {
 	static isUri(value: unknown): value is Uri {
 		return value instanceof Uri || (value !== null && typeof value === 'object' && typeof (value as Uri).scheme === 'string' && typeof (value as Uri).path === 'string' && typeof (value as Uri).with === 'function');
 	}
+}
+
+/** VS Code's authority formatting: the userinfo's parts and the host encode, the `@` and
+ *  the port's `:` stay raw — `http://127.0.0.1:54500/` must not become `127.0.0.1%3A54500`,
+ *  a host no browser resolves (every `asWebviewUri` script of a remote page died on it). */
+function encodeAuthority(authority: string, minimal: boolean): string {
+	let out = '';
+	let host = authority;
+	const at = host.lastIndexOf('@');
+	if (at !== -1) {
+		const user = host.slice(0, at);
+		const colon = user.indexOf(':');
+		out += colon === -1 ? encodeComponent(user, false, minimal) : `${encodeComponent(user.slice(0, colon), false, minimal)}:${encodeComponent(user.slice(colon + 1), false, minimal)}`;
+		out += '@';
+		host = host.slice(at + 1);
+	}
+	host = host.toLowerCase();
+	const port = host.lastIndexOf(':');
+	return port === -1 ? out + encodeComponent(host, false, minimal) : out + encodeComponent(host.slice(0, port), false, minimal) + host.slice(port);
 }
 
 /** VS Code's `uriToFsPath`: a UNC authority, a drive letter, the platform's separators. */
@@ -1777,6 +1796,11 @@ class WebviewView {
 	set title(value: string) {
 		this.titleValue = value;
 		void this.bridge.request('webviewView.setTitle', [this.viewType, value]);
+	}
+
+	/** Send the current page again (a second frontend resolving the same view). */
+	republish(): void {
+		if (this.htmlValue !== '') void this.bridge.request('webviewView.setHtml', [this.viewType, this.htmlValue]);
 	}
 
 	get description(): string | undefined {
@@ -4170,7 +4194,13 @@ export function createVscodeApi(ctx: HostContext, bridge: HostBridge) {
 					view = new WebviewView(bridge, ctx, viewId, {});
 					webviewViews.set(viewId, view);
 				}
-				if (view.resolved) return;
+				// Resolved already — by another frontend of the same backend (the desktop
+				// window, while a remote page shows the view now): the provider resolves a
+				// view once, so the page it set is re-sent to the frontend asking.
+				if (view.resolved) {
+					view.republish();
+					return;
+				}
 				view.resolved = true;
 				try {
 					await Promise.resolve(viewProvider.resolveWebviewView(view, { state: undefined }, CancellationTokenNone));

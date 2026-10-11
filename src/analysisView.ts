@@ -5,7 +5,7 @@
 
 import { invoke, Channel } from '@tauri-apps/api/core';
 
-import { t, tf } from './i18n';
+import { onLocaleChange, t, tf } from './i18n';
 import { ANALYSIS_TOOLS, type AnalysisToolId } from './analysisTools';
 import { actionButton, el, icon } from './ui';
 
@@ -20,6 +20,10 @@ export interface AnalysisStatus {
 }
 
 export class AnalysisView {
+	private readonly titleLabel: HTMLElement;
+	private readonly toolsLabel: HTMLElement;
+	private readonly indexLabel: HTMLElement;
+	private readonly rebuildButton: HTMLButtonElement;
 	private readonly toolsBody: HTMLElement;
 	private readonly statusLine: HTMLElement;
 	private status: AnalysisStatus | null = null;
@@ -28,22 +32,40 @@ export class AnalysisView {
 	onOpenTool: ((tool: AnalysisToolId) => void) | null = null;
 
 	constructor(container: HTMLElement) {
+		// Every label is kept by reference: a display-language switch relabels the whole
+		// view at once instead of waiting for the next remount.
+		this.titleLabel = el('span', 'label', [t('analysis.title')]);
+		this.toolsLabel = el('span', 'label', [t('analysis.tools')]);
+		this.indexLabel = el('span', 'label', [t('analysis.index')]);
+		this.rebuildButton = actionButton('refresh', t('analysis.rebuild'), () => void this.rebuild());
 		container.append(
-			el('div', 'sidebar-title', [el('span', 'label', ['Analysis'])]),
+			el('div', 'sidebar-title', [this.titleLabel]),
 			el('div', 'view-pane', [
-				el('div', 'pane-header', [el('span', 'label', [t('analysis.tools')])]),
+				el('div', 'pane-header', [this.toolsLabel]),
 				this.toolsBody = el('div', 'pane-body list')
 			]),
 			el('div', 'view-pane', [
-				el('div', 'pane-header', [
-					el('span', 'label', [t('analysis.index')]),
-					el('div', 'actions', [
-						actionButton('refresh', t('analysis.rebuild'), () => void this.rebuild())
-					])
-				]),
+				el('div', 'pane-header', [this.indexLabel, el('div', 'actions', [this.rebuildButton])]),
 				el('div', 'pane-body', [this.statusLine = el('div', 'an-status')])
 			])
 		);
+		this.renderTools();
+		onLocaleChange(() => this.relabel());
+	}
+
+	/** The display language switched: relabel everything built once. */
+	private relabel(): void {
+		this.titleLabel.textContent = t('analysis.title');
+		this.toolsLabel.textContent = t('analysis.tools');
+		this.indexLabel.textContent = t('analysis.index');
+		this.rebuildButton.title = t('analysis.rebuild');
+		this.rebuildButton.setAttribute('aria-label', t('analysis.rebuild'));
+		this.renderTools();
+		this.renderStatus();
+	}
+
+	private renderTools(): void {
+		this.toolsBody.replaceChildren();
 		for (const tool of ANALYSIS_TOOLS) {
 			const row = el('div', 'row an-tool');
 			row.tabIndex = 0;
@@ -64,7 +86,6 @@ export class AnalysisView {
 			});
 			this.toolsBody.appendChild(row);
 		}
-		this.renderStatus();
 	}
 
 	/** Refresh the index state (the view's reveal and every studio://analysis-index). */

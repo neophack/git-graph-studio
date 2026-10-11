@@ -32,14 +32,66 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{json, Value};
+use tauri::Emitter;
 
 use crate::cmd_ext;
 use crate::ext_protocol::{self as proto, Wire};
+use crate::ext_routing;
 
 /// The Tauri event a backend's `ggs.hostRequest` crosses to the workbench on: the payload
 /// carries `{extId, id, method, args}`; the workbench serves it through the same `serve`
 /// path a frame's RPC takes and answers via [`ext_process_host_respond`].
 pub const HOST_REQUEST_EVENT: &str = "ext-host-request";
+
+/// The Tauri event a state-carrying host request is mirrored on (`{extId, method, args,
+/// served}`): every frontend but the one that served it applies the registration without
+/// answering — a remote page keeps the same commands, context keys and status bar items
+/// the desktop window got from the backend (see `ext_routing`).
+pub const HOST_STATE_EVENT: &str = "ext-host-state";
+
+/// The Tauri event a webview panel changes frontends on (`{extId, panelId, from, to,
+/// create, html}`, see `ext_routing::panel_move`): the `to` frontend opens the panel from
+/// its create arguments and html, the `from` frontend drops its tab without telling the
+/// extension — the panel lives on, in the page of the user who asked for it.
+pub const WEBVIEW_MOVE_EVENT: &str = "ext-webview-move";
+
+/// The Tauri event a backend's start settles on (`{extId, running, pid?, startCount?,
+/// error?}`): up with its pid, or failed with the reason. The Extensions view refreshes
+/// its status lines on it — a view opened during the boot pass would otherwise keep
+/// showing "not running" after the backend comes up (the refresh raced the start).
+pub const BACKEND_STATE_EVENT: &str = "ext-backend-state";
+
+/// The frontend a host request is addressed to (`"main"`, one remote session
+/// `"remote/<n>"`, or `"remote"` — the remote side at large), given the frontend
+/// `ext_routing` says claims it (the webview's owner, the caller in flight) — the policy
+/// honours the claim while that frontend exists. Registered by the composition root
+/// (Remote Access decides it), so this module names no frontend policy. Unset, a claim is
+/// honoured and the rest goes to `"main"`. The frontends all hear the event; each serves
+/// only the requests addressed to it (the Relay hands a session's to that session only).
+type FrontendPolicy = fn(&tauri::AppHandle, Option<String>) -> String;
+
+static HOST_REQUEST_FRONTEND: std::sync::OnceLock<FrontendPolicy> = std::sync::OnceLock::new();
+
+pub fn set_host_request_frontend(resolve: FrontendPolicy) {
+    let _ = HOST_REQUEST_FRONTEND.set(resolve);
+}
+
+fn host_request_frontend(app: &tauri::AppHandle, claimed: Option<String>) -> String {
+    match HOST_REQUEST_FRONTEND.get() {
+        Some(resolve) => resolve(app, claimed),
+        None => claimed.unwrap_or_else(|| "main".into()),
+    }
+}
+
+/// The frontend a call came from: the calling webview, and — for the Relay — the session
+/// its `x-ggs-frontend` header names (see `ext_routing::frontend_of`).
+fn caller(webview: &tauri::Webview, request: &tauri::ipc::Request<'_>) -> String {
+    let header = request
+        .headers()
+        .get("x-ggs-frontend")
+        .and_then(|value| value.to_str().ok());
+    ext_routing::frontend_of(webview.label(), header)
+}
 
 /// How long `initialize` may take before the backend is declared unresponsive and killed.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -157,7 +209,7 @@ pub struct ProcessInfo {
 /// The id every backend this app instance spawns is given as `GGS_INSTANCE_ID`. Two
 /// concurrently running GGS windows each start their own backend set; a plugin that writes
 /// per-instance state (a lock file, a port) tells them apart on this.
-fn instance_id() -> &'static str {
+pub fn instance_id() -> &'static str {
     static ID: OnceLock<String> = OnceLock::new();
     ID.get_or_init(|| format!("ggs-{}", std::process::id()))
 }
@@ -191,7 +243,22 @@ impl ProcessHostState {
     /// waits for its own backend rather than spawning a second one. Failures are remembered
     /// in the history (the status surface shows them) and returned.
     pub fn start(&self, exts_dir: &Path, ext_id: &str) -> Result<ProcessInfo, String> {
-        match self.start_inner(exts_dir, ext_id) {
+        let settled = self.start_inner(exts_dir, ext_id);
+        // The settle is announced wherever a listener waits on it (the Extensions view's
+        // status lines); a headless start with no app attached emits nothing.
+        let event = match &settled {
+            Ok(info) => json!({
+                "extId": ext_id,
+                "running": true,
+                "pid": info.pid,
+                "startCount": info.start_count,
+            }),
+            Err(message) => json!({ "extId": ext_id, "running": false, "error": message }),
+        };
+        if let Some(app) = self.app.lock().unwrap().clone() {
+            let _ = app.emit(BACKEND_STATE_EVENT, event);
+        }
+        match settled {
             Ok(info) => Ok(info),
             Err(message) => {
                 self.record(ext_id, |history| history.last_error = Some(message.clone()));
@@ -379,6 +446,8 @@ impl ProcessHostState {
             log: Arc::clone(&log),
         };
         procs.insert(ext_id.to_owned(), handle);
+        // A fresh process: the previous one's registrations and webviews died with it.
+        ext_routing::reset(ext_id);
 
         let (_tx, rx) = (handshake_tx, handshake_rx);
         let workspace_folders = self
@@ -690,12 +759,60 @@ impl ReaderState {
                 Wire::Request { id, method, params } if method == "ggs.hostRequest" => {
                     match &self.app {
                         Some(app) => {
-                            use tauri::Emitter;
+                            let host_method = params
+                                .get("method")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            let args = params.get("args").cloned().unwrap_or_else(|| json!([]));
+                            // The frontend that answers: the webview's owner or the caller
+                            // in flight, when either claims it (ext_routing), else policy.
+                            if let Some(moved) =
+                                ext_routing::panel_move(&self.ext_id, host_method, &args)
+                            {
+                                // Only to a frontend that is there to take it.
+                                if host_request_frontend(app, Some(moved.to.clone())) == moved.to {
+                                    ext_routing::set_owner(
+                                        &self.ext_id,
+                                        host_method,
+                                        &args,
+                                        &moved.to,
+                                    );
+                                    let _ = app.emit(
+                                        WEBVIEW_MOVE_EVENT,
+                                        json!({
+                                            "extId": self.ext_id,
+                                            "panelId": args.get(0).cloned().unwrap_or(Value::Null),
+                                            "from": moved.from,
+                                            "to": moved.to,
+                                            "create": moved.create,
+                                            "html": moved.html,
+                                        }),
+                                    );
+                                }
+                            }
+                            let claimed = ext_routing::preferred(&self.ext_id, host_method, &args);
+                            let frontend = host_request_frontend(app, claimed);
+                            let stateful =
+                                ext_routing::routed(&self.ext_id, host_method, &args, &frontend);
+                            if stateful {
+                                // The other frontends mirror the registration (a context
+                                // key, a command, a status bar item) without answering it.
+                                let _ = app.emit(
+                                    HOST_STATE_EVENT,
+                                    json!({
+                                        "extId": self.ext_id,
+                                        "method": host_method,
+                                        "args": args,
+                                        "served": frontend,
+                                    }),
+                                );
+                            }
                             let payload = json!({
                                 "extId": self.ext_id,
                                 "id": id,
-                                "method": params.get("method").cloned().unwrap_or(Value::Null),
-                                "args": params.get("args").cloned().unwrap_or_else(|| json!([])),
+                                "method": host_method,
+                                "args": args,
+                                "frontend": frontend,
                             });
                             if let Err(error) = app.emit(HOST_REQUEST_EVENT, payload) {
                                 // The workbench never sees it: answer in band so the host's
@@ -1145,6 +1262,8 @@ pub async fn ext_process_start(
 #[tauri::command]
 pub async fn ext_process_run(
     app: tauri::AppHandle,
+    webview: tauri::Webview,
+    request: tauri::ipc::Request<'_>,
     state: tauri::State<'_, ProcessHostState>,
     ext_id: String,
     command: String,
@@ -1154,9 +1273,14 @@ pub async fn ext_process_run(
     let dir = cmd_ext::extensions_dir(&app)?;
     let state = state.inner().clone();
     let args = args.unwrap_or_else(|| json!([]));
-    tauri::async_runtime::spawn_blocking(move || state.run(&dir, &ext_id, &command, args))
-        .await
-        .map_err(|e| format!("run task: {e}"))?
+    // The caller claims the requests its command makes (a panel it opens opens in it).
+    let frontend = caller(&webview, &request);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _call = ext_routing::call_begin(&ext_id, &frontend, "runCommand", &args);
+        state.run(&dir, &ext_id, &command, args)
+    })
+    .await
+    .map_err(|e| format!("run task: {e}"))?
 }
 
 /// The workbench's answer to a real-Node host's `ggs.hostRequest` (`ext-host-request`
@@ -1188,6 +1312,8 @@ pub fn ext_process_host_respond(
 #[tauri::command]
 pub async fn ext_process_invoke(
     app: tauri::AppHandle,
+    webview: tauri::Webview,
+    request: tauri::ipc::Request<'_>,
     state: tauri::State<'_, ProcessHostState>,
     ext_id: String,
     method: String,
@@ -1196,10 +1322,23 @@ pub async fn ext_process_invoke(
     state.attach_app(app.clone());
     let dir = cmd_ext::extensions_dir(&app)?;
     let state = state.inner().clone();
-    let params = json!({ "args": args.unwrap_or_else(|| json!([])) });
-    tauri::async_runtime::spawn_blocking(move || state.call(&dir, &ext_id, &method, params))
-        .await
-        .map_err(|e| format!("invoke task: {e}"))?
+    let args = args.unwrap_or_else(|| json!([]));
+    // The caller claims the requests the call makes — a view it resolves renders in it.
+    let frontend = caller(&webview, &request);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _call = ext_routing::call_begin(&ext_id, &frontend, &method, &args);
+        state.call(&dir, &ext_id, &method, json!({ "args": args }))
+    })
+    .await
+    .map_err(|e| format!("invoke task: {e}"))?
+}
+
+/// The registrations `ext_id`'s running backend made (`ext_routing`'s journal, as
+/// `{method, args}` in order): a frontend that attaches after the activation — a remote
+/// page — replays them to show the commands, context keys and views the activation set.
+#[tauri::command]
+pub fn ext_process_registrations(ext_id: String) -> Vec<Value> {
+    ext_routing::journal(&ext_id)
 }
 
 /// Push one host event into a backend (`ggs.hostEvent`): the same event objects a frame
@@ -1207,10 +1346,14 @@ pub async fn ext_process_invoke(
 /// watcher batches.
 #[tauri::command]
 pub fn ext_process_push_event(
+    webview: tauri::Webview,
+    request: tauri::ipc::Request<'_>,
     state: tauri::State<'_, ProcessHostState>,
     ext_id: String,
     event: Value,
 ) -> Result<(), String> {
+    // A webview's message makes its sender the webview's owner: the replies go back to it.
+    ext_routing::note_event(&ext_id, &caller(&webview, &request), &event);
     let procs = state.procs.lock().unwrap();
     let line = proto::notification("ggs.hostEvent", event);
     write_line(&procs, &ext_id, &line)

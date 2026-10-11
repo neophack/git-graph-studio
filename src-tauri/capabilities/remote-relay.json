@@ -1,0 +1,7 @@
+{
+	"$schema": "../gen/schemas/desktop-schema.json",
+	"identifier": "remote-relay",
+	"description": "The hidden Relay webview of Remote Access (docs/ggs-remote-plan.md §8.4): core IPC only — invoke, Channel, events. Window controls, dialogs, the clipboard and the opener are served by the remote browser itself, never here.",
+	"windows": ["remote-relay"],
+	"permissions": ["core:default"]
+}

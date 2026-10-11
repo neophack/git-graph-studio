@@ -16,7 +16,7 @@
 
 vi.mock('mermaid', () => import('./mermaidStub'));
 vi.mock('@mermaid-js/layout-elk', () => ({ default: {} }));
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,6 +26,7 @@ import { settings, updateSetting } from '../src/settings';
 import { Workbench } from '../src/workbench';
 import { commonHandlers, type Handler } from './scenarioFixtures';
 import { backend } from './tauriMock';
+import { installRemoteRound } from './remoteRound';
 import { click, flush, hover, key, rightClick, type } from './helpers';
 
 
@@ -63,6 +64,11 @@ function richHandlers(): Map<string, Handler> {
 		];
 	});
 	map.set('list_files', () => ['notes.txt', 'README.md', 'src/main.rs', 'conflicted.txt']);
+	// The remote shell's explorer pages its listings (§10.3): serve the same tree sliced.
+	map.set('list_dir_page', ({ path, offset = 0, limit = 100 }) => {
+		const all = (map.get('list_dir')!({ path }) ?? []) as { name: string }[];
+		return { entries: all.slice(Number(offset), Number(offset) + Number(limit)), total: all.length };
+	});
 	map.set('read_file', ({ path }) => {
 		const p = String(path);
 		if (p.endsWith('conflicted.txt')) return { contents: 'ours\n<<<<<<< HEAD\nours line\n=======\ntheirs line\n>>>>>>> feature\ncommon\n', binary: false, size: 40 };
@@ -354,6 +360,10 @@ beforeAll(async () => {
 
 // The global beforeEach (setup.ts) resets the backend and the shell per test, so the boot
 // belongs to the test itself.
+/** §17.3's remote round: set by its describe below, honoured here — the wire re-installs
+ *  per test (the global setup resets the backend between them). */
+let remoteRound = false;
+
 beforeEach(async () => {
 	workbench?.dispose();
 	shell();
@@ -363,13 +373,16 @@ beforeEach(async () => {
 		renderer: { rules: {} }
 	};
 	backend.handlers = richHandlers();
+	if (remoteRound) await installRemoteRound('desktop');
 	workbench = new Workbench();
 	await workbench.boot();
 	await flush(12);
 	await recover();
 });
 
-describe('the full UI sweep', () => {
+/** The sweep's tests, registered as-is for the desktop round and again for the remote one
+ *  (§17.3): same drives, same assertions — only the layer under the workbench differs. */
+function uiSweepIts(): void {
 	it('boots against the rich repository', () => {
 		expect(workbench.currentRepo).toBe(REPO);
 	});
@@ -490,16 +503,22 @@ describe('the full UI sweep', () => {
 				return row!;
 			};
 			const activeTab = () => document.querySelector('.editor-group-box.focused .tab.active .label, .tab.active .label')!.textContent;
+			// Over the remote wire the open lands a round trip later, so the tab is polled
+			// rather than read the instant after the click.
+			const tabBecomes = async (label: string): Promise<void> => {
+				for (let i = 0; i < 40 && activeTab() !== label; i++) await flush(2);
+				expect(activeTab()).toBe(label);
+			};
 			click(rowNamed('main.rs')); await flush(8);
-			expect(activeTab()).toBe('main.rs (Index)'); // staged: HEAD vs index
+			await tabBecomes('main.rs (Index)'); // staged: HEAD vs index
 			click(rowNamed('notes.txt')); await flush(8);
-			expect(activeTab()).toBe('notes.txt (Working Tree)'); // unstaged: index vs working tree
+			await tabBecomes('notes.txt (Working Tree)'); // unstaged: index vs working tree
 			click(rowNamed('gone.txt')); await flush(8);
-			expect(activeTab()).toBe('gone.txt (Working Tree)'); // deleted: the diff with an empty right side
+			await tabBecomes('gone.txt (Working Tree)'); // deleted: the diff with an empty right side
 			click(rowNamed('new.txt')); await flush(8);
-			expect(activeTab()).toBe('new.txt'); // untracked: the file itself
+			await tabBecomes('new.txt'); // untracked: the file itself
 			click(rowNamed('conflicted.txt')); await flush(10);
-			expect(activeTab()).toBe('conflicted.txt'); // conflicted: the file, with the conflict toolbar
+			await tabBecomes('conflicted.txt'); // conflicted: the file, with the conflict toolbar
 			expect(document.querySelector('.editor-pane:not([hidden]) .merge-bar:not([hidden])')).not.toBeNull();
 			count();
 			await clickAll(scm, '.scm-list .row .action-btn', count, { after: async () => { await flush(6); } });
@@ -641,10 +660,19 @@ describe('the full UI sweep', () => {
 	it('diff editors', { timeout: 120_000 }, async () => {
 		await surface('diff editors', async (count) => {
 			await showView('scm');
-			const rows = Array.from(view(2).querySelectorAll<HTMLElement>('.scm-list .row'));
-			// A staged row (HEAD vs index) and an unstaged one (index vs working tree).
-			for (const row of rows.slice(0, 3)) { if (reachable(row)) { click(row); await flush(8); } }
-			const header = document.querySelector<HTMLElement>('.diff-header');
+			// A staged row (HEAD vs index) and an unstaged one (index vs working tree) — by
+			// name, not position: over the remote wire the status lands a round trip later and
+			// the list's order is not the desktop's, so "the first three rows" would click
+			// whatever rendered first (a file-opening row among them).
+			const rowNamed2 = (name: string) => Array.from(view(2).querySelectorAll<HTMLElement>('.scm-list .row')).find((r) => r.querySelector('.label')?.textContent === name);
+			for (const name of ['main.rs', 'notes.txt', 'gone.txt']) {
+				const row = rowNamed2(name);
+				if (row && reachable(row)) { click(row); await flush(8); }
+			}
+			// Over the remote wire the diff's contents land a round trip later: poll for the
+			// header instead of reading it the instant after the clicks.
+			let header: HTMLElement | null = null;
+			for (let i = 0; i < 40 && !(header = document.querySelector<HTMLElement>('.diff-header')); i++) await flush(2);
 			expect(header).not.toBeNull();
 			// Outcome: the header counts the changes and walks them.
 			expect(header!.textContent).toMatch(/\d+ changes?|No changes/);
@@ -987,4 +1015,16 @@ describe('the full UI sweep', () => {
 		expect(report.reduce((sum, entry) => sum + entry.driven, 0)).toBeGreaterThan(300);
 		expect(windowErrors).toEqual([]);
 	});
+}
+
+describe('the full UI sweep', uiSweepIts);
+
+describe('the full UI sweep under the remote shims', () => {
+	beforeAll(() => {
+		remoteRound = true;
+	});
+	afterAll(() => {
+		remoteRound = false;
+	});
+	uiSweepIts();
 });

@@ -47,6 +47,24 @@ describe('editor decorations (M3 3.2)', () => {
 		expect(document.querySelectorAll('.cm-bracket-0').length).toBeGreaterThan(0);
 	});
 
+	it('a syntax leaf spanning lines colours its brackets once, in order', async () => {
+		// A markdown paragraph is one leaf over several lines: scanning the whole leaf for each
+		// line it covers added its marks again behind the ones already built, and CodeMirror's
+		// RangeSetBuilder threw "Ranges must be added sorted" out of every redraw.
+		const errors: unknown[] = [];
+		const onError = (event: ErrorEvent) => errors.push(event.error);
+		window.addEventListener('error', onError);
+		const md = 'a (b\nc) d\n';
+		backend.on('read_file', () => ({ contents: md, binary: false, size: md.length }));
+		await group.openFile('C:\\repo\\notes.md');
+		for (let i = 0; i < 20 && !document.querySelector('.cm-content [class*="cm-bracket-"]'); i++) await frame();
+		await frame();
+		window.removeEventListener('error', onError);
+		expect(errors).toEqual([]);
+		const marks = Array.from(group.activeView!.dom.querySelectorAll('[class*="cm-bracket-"]')).map((e) => e.textContent);
+		expect(marks).toEqual(['(', ')']);
+	});
+
 	it('shows the minimap element, and the setting hides it', async () => {
 		expect(document.querySelector('.cm-minimap')).not.toBeNull();
 		expect(group.activeView!.dom.classList.contains('has-minimap')).toBe(true);

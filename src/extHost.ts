@@ -16,6 +16,8 @@ import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { commands } from './commands';
+import { assetUrl } from './remote/assetUrl';
+import { addressedHere, frontendClass, frontendId, remoteEnv } from './remote/session';
 import { applyContributions, applyExtensionSettings, declaredCommand, extensionSettingDefs, extensionThemeList, extensionViewContributions, languageIdFor, localize, registerContextProvider, registerExtensionSnippets, registerExtensionThemes, removeContributions, type ExtensionThemeDef, type ManifestContributes } from './contributions';
 import { describeDetail, extLog, extLogEnabled, extLogLevel, extLogOnce, flushExtLog, levelForConsole, setExtLogOutput, type ExtLogLevel } from './extLog';
 import { defaultNodeEnv, type NodeEnv } from './extModuleLoader';
@@ -90,6 +92,17 @@ export const MARKETPLACE_URL = 'https://open-vsx.org';
 /** The Tauri event a real-Node extension host's `ggs.hostRequest` arrives on (the Rust
  *  reader forwards it; see ext_process.rs's HOST_REQUEST_EVENT). */
 export const HOST_REQUEST_EVENT = 'ext-host-request';
+/** The Tauri event a backend's state-carrying host request is mirrored on (a command
+ *  registration, a `setContext` key, a status bar item — ext_routing.rs decides which):
+ *  `{ extId, method, args, served }`. Every frontend but the one that served the request
+ *  applies it without answering, so a remote page and the desktop window show the same
+ *  entries (docs/ggs-remote-plan.md §8.6 #1). */
+export const HOST_STATE_EVENT = 'ext-host-state';
+/** The Tauri event a webview panel changes frontends on (ext_process.rs's
+ *  WEBVIEW_MOVE_EVENT): `{ extId, panelId, from, to, create, html }`. An extension keeping
+ *  one panel (Git Graph) reveals it when another user asks — the asker's page opens it from
+ *  its create arguments and html, the old page drops its tab without telling the extension. */
+export const WEBVIEW_MOVE_EVENT = 'ext-webview-move';
 /** The Tauri event a provider switch's backend restart announces (cmd_providers emits it
  *  when the fresh process's start attempt settles, success or failure — the old process
  *  is dead either way; payload: the extension id). The host resets that extension's
@@ -231,8 +244,7 @@ interface PageFrameHandle {
  *  separator is appended after the conversion, never inside it. */
 export function extAssetBase(ext: ExtInfo | undefined): string {
 	const dirName = ext?.path.split(/[\\/]/).pop() ?? '';
-	const internals = (window as { __TAURI_INTERNALS__?: { convertFileSrc?: (path: string, protocol: string) => string } }).__TAURI_INTERNALS__;
-	return internals?.convertFileSrc ? internals.convertFileSrc(dirName, 'ggs') + '/' : `ggs://localhost/${dirName}/`;
+	return assetUrl(dirName, 'ggs') + '/';
 }
 
 /** The `ggs://` URL of a file inside an installed package, the way the pages' iframes load
@@ -250,9 +262,10 @@ export function extAssetUrl(ext: ExtInfo | undefined, rel: string): string {
  *  answers in cmd_ext.rs); under the dev server the plain path stands, the server sending
  *  `*` itself (vite.config's `cors`). */
 function extHostFrameUrl(): string {
-	if (!import.meta.env.PROD) return '/ext-host.html';
-	const internals = (window as { __TAURI_INTERNALS__?: { convertFileSrc?: (path: string, protocol: string) => string } }).__TAURI_INTERNALS__;
-	return internals?.convertFileSrc ? internals.convertFileSrc('ext-host.html', 'ggs') : 'ggs://localhost/ext-host.html';
+	// A remote workbench always takes the package path: its frame document is the instance's
+	// own, served by the daemon under the session's resource token (§12.2).
+	if (!import.meta.env.PROD && !remoteEnv()) return '/ext-host.html';
+	return assetUrl('ext-host.html', 'ggs');
 }
 
 interface FrameHandle {
@@ -509,6 +522,22 @@ function composeWebview(html: string, theme: { kind: 'vscode-dark' | 'vscode-lig
 	return boot + html;
 }
 
+/** The package-asset roots a webview's HTML can carry from ANOTHER frontend: a backend
+ *  extension runs once per instance and bakes its `asWebviewUri` / `cspSource` from the
+ *  frontend that served its activation — the desktop's `ggs://localhost/` (or Windows'
+ *  `http://ggs.localhost/`), or one remote session's token route
+ *  (`…[/u/<link>]/w/<instance>/ggs/<token>/`, its port colon possibly percent-encoded by
+ *  an older shim). */
+const FOREIGN_ASSET_ROOT = /ggs:\/\/localhost\/|https?:\/\/ggs\.localhost\/|https?:\/\/[^\s"'<>/]+(?:\/u\/[^\s"'<>/]+)?\/w\/[^\s"'<>/]+\/ggs\/[^\s"'<>/]+\//g;
+
+/** Point every package-asset root in a webview's HTML at THIS frontend's own: the remote
+ *  page cannot load `ggs://`, and one user's page must never load through another user's
+ *  token (the token is that session's credential). */
+export function localizeAssetRoots(html: string): string {
+	const own = assetUrl('', 'ggs');
+	return html.replace(FOREIGN_ASSET_ROOT, () => own);
+}
+
 /** Load a webview frame's composed document. Assigning `srcdoc` to a frame whose subtree
  *  is not yet connected to the document (an editor pane still being assembled offscreen)
  *  silently drops the navigation — the panel then sits blank until something reloads it.
@@ -519,7 +548,7 @@ function composeWebview(html: string, theme: { kind: 'vscode-dark' | 'vscode-lig
  *  lands in the extension host log — the intermittent-blank causal chain is read from
  *  there, not guessed. */
 function loadFrameDoc(frame: HTMLIFrameElement, html: string, theme: { kind: 'vscode-dark' | 'vscode-light'; css: string; vars: Record<string, string> } | null, owner: string, fileRoot: string): void {
-	const composed = composeWebview(html, theme, fileRoot);
+	const composed = composeWebview(localizeAssetRoots(html), theme, fileRoot);
 	const started = performance.now();
 	let done = false;
 	const finish = (path: string) => {
@@ -876,6 +905,27 @@ export class ExtensionHost {
 			this.reportActivationFailure(extId, String(error), describeDetail(error));
 			throw error;
 		}
+		// One backend per instance, several frontends: a remote page attaches to a backend
+		// the desktop window activated long before, and every registration of that
+		// activation (its commands, its `setContext` keys, its view providers) landed there.
+		// The backend keeps them (`ext_process_registrations`); replayed here, the page shows
+		// the same entries — the Claude Code container, the Git Graph button.
+		if (frontendClass() === 'remote') await this.replayRegistrations(extId);
+	}
+
+	/** Apply a backend's registration journal (see `ensureNodeHost`), in order. */
+	private async replayRegistrations(extId: string): Promise<void> {
+		const entries = await invoke<{ method: string; args: unknown[] }[] | null>('ext_process_registrations', { extId }).catch(() => null);
+		for (const entry of entries ?? []) this.applyMirroredState(extId, entry.method, entry.args ?? []);
+		if (entries?.length) extLog('info', extId, `replayed ${entries.length} registration(s) of the running backend`);
+	}
+
+	/** One registration another frontend served (or this one missed), applied through the
+	 *  same `serveRequest` path a live request takes — every one of them is idempotent. */
+	private applyMirroredState(extId: string, method: string, args: unknown[]): void {
+		const handle = this.frames.get(extId) ?? this.remoteHandle(extId);
+		this.frames.set(extId, handle);
+		void this.serveRequest(method, args, extId, handle).catch((error) => extLog('warn', extId, `mirrored ${method} failed: ${String(error)}`));
 	}
 
 	
@@ -894,8 +944,12 @@ export class ExtensionHost {
 		// dead until some view happened to resolve it. The handle is created on the spot:
 		// an extId with no process fails the push honestly, and one with a process — the
 		// boot-pass shape — now activates.
-		void listen<{ extId: string; id: number; method: string; args: unknown[] }>(HOST_REQUEST_EVENT, (event) => {
-			const { extId, id, method, args } = event.payload;
+		void listen<{ extId: string; id: number; method: string; args: unknown[]; frontend?: string }>(HOST_REQUEST_EVENT, (event) => {
+			const { extId, id, method, args, frontend } = event.payload;
+			// One instance, several frontends (the desktop window, remote sessions): each
+			// request is addressed to one of them, and only that one answers it
+			// (docs/ggs-remote-plan.md §8.6 #1).
+			if (frontend && !addressedHere(frontend)) return;
 			const handle = this.frames.get(extId) ?? this.remoteHandle(extId);
 			this.frames.set(extId, handle);
 			const respond = (ok: boolean, result: unknown) => {
@@ -907,6 +961,22 @@ export class ExtensionHost {
 				(error) => respond(false, String(error))
 			);
 		}).catch((error) => extLog('warn', 'host', `the extension-host request channel is unavailable: ${String(error)}`));
+		// The same backend's registrations another frontend served: applied here too, never
+		// answered (the serving frontend already did) — Claude Code's activity-bar container
+		// is gated on a `setContext` key, and a frontend that missed it never shows the entry.
+		void listen<{ extId: string; method: string; args: unknown[]; served?: string }>(HOST_STATE_EVENT, (event) => {
+			const { extId, method, args, served } = event.payload;
+			if (served === frontendId()) return;
+			this.applyMirroredState(extId, method, args ?? []);
+		}).catch((error) => extLog('warn', 'host', `the extension-host state channel is unavailable: ${String(error)}`));
+		void listen<{ extId: string; panelId: number; from: string; to: string; create: unknown[]; html: string | null }>(WEBVIEW_MOVE_EVENT, (event) => {
+			const { extId, panelId, from, to, create, html } = event.payload;
+			const me = frontendId();
+			if (from === me || (from === 'remote' && frontendClass() === 'remote')) this.releaseWebview(extId, panelId);
+			if (to !== me) return;
+			this.applyMirroredState(extId, 'webview.create', create ?? []);
+			if (typeof html === 'string') this.applyMirroredState(extId, 'webview.setHtml', [panelId, html]);
+		}).catch((error) => extLog('warn', 'host', `the webview move channel is unavailable: ${String(error)}`));
 		// A provider switch restarted a bridged extension's backend (cmd_providers): the
 		// fresh process re-activated, but its sidebar views stay marked resolved with the
 		// old process's page — the claude chat would keep showing the login state it
@@ -1163,6 +1233,12 @@ export class ExtensionHost {
 			if ((policy?.eager ?? true) || (await this.matchesWorkspaceContains(policy?.workspaceContains ?? []))) toActivate.push(ext);
 		}
 		await Promise.all(toActivate.map((ext) => (this.backendHosted(ext.id) ? this.ensureActive(ext.id) : this.activate(ext))));
+		// A remote page also mirrors the lazy backend packages the desktop window already
+		// woke (their activation ran there): an empty journal means nothing runs yet.
+		if (frontendClass() === 'remote') {
+			const lazy = installed.filter((ext) => this.backendHosted(ext.id) && !toActivate.includes(ext));
+			await Promise.all(lazy.map((ext) => this.replayRegistrations(ext.id)));
+		}
 		this.onContributionsApplied?.();
 		this.onViewsChanged?.();
 	}
@@ -1832,11 +1908,14 @@ export class ExtensionHost {
 	}
 
 	/** Apply a webview view's html: to its mounted iframe, or held for its mount. */
-	private setWebviewViewHtml(viewId: string, html: string): void {
-		const record = this.webviewViews.get(viewId);
+	private setWebviewViewHtml(extId: string, viewId: string, html: string): void {
+		// A view's html can precede its mount (a journal replay on a re-attached frontend,
+		// the backend racing the sidebar's first show): the record is created on demand so
+		// the html waits for the section instead of being dropped.
+		let record = this.webviewViews.get(viewId);
 		if (!record) {
-			extLog('warn', 'host', `webview view ${viewId}: setHtml (${html.length} chars) with no record — DROPPED`);
-			return;
+			record = { extId, html: '', frame: null, pending: [], loaded: false, painted: null, loadGrace: null, firstPaintTimer: null };
+			this.webviewViews.set(viewId, record);
 		}
 		record.html = html;
 		if (!record.frame) return; // the section mounts later and loads record.html then
@@ -1905,6 +1984,22 @@ export class ExtensionHost {
 
 	/** The extension disposed its panel: close its tab (the tab's disposer finishes the job),
 	 *  or — if no tab ever mounted — just run the same teardown. */
+	/** Drop a panel's tab here WITHOUT disposing the panel: it moved to another frontend
+	 *  (see WEBVIEW_MOVE_EVENT), where the extension's panel object lives on. The record
+	 *  goes first, so the tab's disposer finds nothing to report `webviewDisposed` for. */
+	private releaseWebview(extId: string, panelId: number): void {
+		const key = this.webviewKey(extId, panelId);
+		const view = this.webviews.get(key);
+		if (!view) return;
+		this.webviews.delete(key);
+		this.webviewSessions.delete(key);
+		if (view.loadGrace !== null) clearTimeout(view.loadGrace);
+		if (view.firstPaintTimer !== null) clearTimeout(view.firstPaintTimer);
+		view.frame = null;
+		this.onCloseWebviewTab?.(this.webviewTabId(extId, panelId));
+		extLog('info', 'host', `webview ${extId}#${panelId}: moved to another frontend`);
+	}
+
 	private closeWebview(extId: string, panelId: number): void {
 		if (!this.webviews.has(this.webviewKey(extId, panelId))) return;
 		if (this.onCloseWebviewTab) {
@@ -3069,7 +3164,7 @@ export class ExtensionHost {
 				return Promise.resolve(undefined);
 			}
 			case 'webviewView.setHtml': {
-				this.setWebviewViewHtml(args[0] as string, args[1] as string);
+				this.setWebviewViewHtml(extId, args[0] as string, args[1] as string);
 				return Promise.resolve(undefined);
 			}
 			case 'webviewView.setTitle':

@@ -71,12 +71,20 @@ pub mod ext_gallery;
 pub mod ext_grammar;
 #[cfg(feature = "desktop")]
 pub mod ext_process;
+/// Which frontend answers a backend's host request, and the registration journal a late
+/// frontend replays (docs/ggs-remote-plan.md §8.6 #1).
+#[cfg(feature = "desktop")]
+pub mod ext_routing;
 #[cfg(feature = "desktop")]
 pub mod mcp;
 #[cfg(feature = "desktop")]
 pub mod measure;
 #[cfg(feature = "desktop")]
 pub mod pty;
+/// Remote Access (module 19): this instance's registration with a local `ggs-remote/1`
+/// daemon, the remote workbench's assets and the hidden Relay webview.
+#[cfg(feature = "desktop")]
+pub mod remote_host;
 #[cfg(feature = "desktop")]
 pub mod scm_ops;
 #[cfg(all(test, feature = "desktop"))]
@@ -108,14 +116,14 @@ pub(crate) fn atomic_write(path: &std::path::Path, contents: &[u8]) -> Result<()
 }
 
 #[cfg(feature = "desktop")]
-pub use desktop::{find_repo_root, run, AppState};
+pub use desktop::{ensure_main_window, find_repo_root, run, AppState};
 
 #[cfg(feature = "desktop")]
 mod desktop {
     use crate::{
         can_log, cmd_analysis, cmd_app, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_providers,
         cmd_scm, cmd_search, cmd_symbols, ext_child, ext_gallery, ext_process, git, mcp, measure,
-        pty, viewer, watcher,
+        pty, remote_host, viewer, watcher,
     };
     use std::sync::{Arc, Mutex};
 
@@ -347,6 +355,7 @@ mod desktop {
         if !already_open {
             ext_process::global().notify_workspace(std::slice::from_ref(&root));
             cmd_providers::apply_claude_integration(std::slice::from_ref(&root));
+            remote_host::notify_folders(std::slice::from_ref(&root));
         }
         // Warm Quick Open's file list in the background: by the time the user hits Ctrl+P the
         // walk has usually finished and the picker opens on a cache hit. This walk is the one
@@ -705,6 +714,7 @@ mod desktop {
         *state.repos.lock().unwrap() = roots.iter().map(|root| root.root.clone()).collect();
         ext_process::global().notify_workspace(&[]);
         cmd_providers::apply_claude_integration(&[]);
+        remote_host::notify_folders(&state.repos.lock().unwrap());
 
         // The Quick Open prefetch stays on the open path (cheap, and the first Ctrl+P can come
         // at any moment); the index builds and the watchers wait for the first painted frame,
@@ -795,6 +805,13 @@ mod desktop {
     /// The user-level `settings.json` (~/.ggs/settings.json): the form writes it, and a hand
     /// edit of it wins on the next launch (M3 3.9's "edited both ways").
     fn settings_file() -> Result<std::path::PathBuf, String> {
+        // `GGS_HOME` names the `.ggs` directory itself (the hermetic-probe relocation);
+        // unset, the settings live at `~/.ggs/settings.json`.
+        if let Some(root) = std::env::var_os("GGS_HOME") {
+            if !root.is_empty() {
+                return Ok(std::path::PathBuf::from(root).join("settings.json"));
+            }
+        }
         let home = std::env::var_os("HOME")
             .or_else(|| std::env::var_os("USERPROFILE"))
             .map(std::path::PathBuf::from)
@@ -911,6 +928,7 @@ mod desktop {
         *state.single_file.lock().unwrap() = Some(path);
         ext_process::global().notify_workspace(&[]);
         cmd_providers::apply_claude_integration(&[]);
+        remote_host::notify_folders(&state.repos.lock().unwrap());
         Ok(())
     }
 
@@ -928,6 +946,7 @@ mod desktop {
         state.deferred_services.clear();
         ext_process::global().notify_workspace(&[]);
         cmd_providers::apply_claude_integration(&[]);
+        remote_host::notify_folders(&state.repos.lock().unwrap());
     }
 
     /// The path a launch should open: the last argument that is neither a flag nor a flag's
@@ -1408,6 +1427,45 @@ mod desktop {
         }
     }
 
+    /// Whether this launch is a `--remote-host` one (§8.2): no desktop window at boot.
+    fn args_have_remote_host() -> bool {
+        std::env::args().skip(1).any(|arg| arg == "--remote-host")
+    }
+
+    /// Build the desktop window from its tauri.conf.json declaration (with the asset
+    /// revalidation hook) — at boot, or later when a `--remote-host` instance is asked to
+    /// show itself on the desktop.
+    fn build_main_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+        let config = app
+            .config()
+            .app
+            .windows
+            .first()
+            .cloned()
+            .expect("tauri.conf.json declares the main window");
+        tauri::WebviewWindowBuilder::from_config(app, &config)?
+            .on_web_resource_request(revalidate_assets)
+            .build()
+    }
+
+    /// Show the desktop window, building it first when this instance has none (the Remote
+    /// Access daemon's `Show`, the tray's "Open Git Graph Studio").
+    pub fn ensure_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
+        use tauri::Manager;
+        match app.get_webview_window("main") {
+            Some(window) => {
+                window.show()?;
+                window.unminimize()?;
+                window.set_focus()
+            }
+            None => {
+                #[cfg(target_os = "macos")]
+                app.set_activation_policy(tauri::ActivationPolicy::Regular)?;
+                build_main_window(app).map(|_| ())
+            }
+        }
+    }
+
     /// The app's entry point (`main.rs` is a one-line stub around it).
     pub fn run() {
         apply_webkit_compat();
@@ -1416,6 +1474,19 @@ mod desktop {
         // start through this registered source — ext_process itself names no provider
         // knowledge, so the two modules meet only here, in the composition root.
         ext_process::add_spawn_env_source(cmd_providers::backend_env);
+        // The app's own executable, for whatever an extension starts on the app's behalf
+        // (the Remote Access daemon launches new windows with it). Set before any thread
+        // exists; every backend and every frame's `process.env` inherits it.
+        if let Ok(exe) = std::env::current_exe() {
+            std::env::set_var("GGS_APP_EXE", exe);
+        }
+        // The host-request seam: a backend's `ggs.hostRequest` is addressed to one frontend —
+        // the one whose call or webview claims it, else the desktop window while it exists,
+        // a remote session otherwise — so a request is never answered twice
+        // (docs/ggs-remote-plan.md §8.6 #1).
+        ext_process::set_host_request_frontend(remote_host::host_request_frontend);
+        // A remote session that ends releases the webviews it owned (ext_routing).
+        remote_host::on_frontend_gone(crate::ext_routing::frontend_gone);
         let _boot = boot_started();
         // `ggs --help` / `ggs -h` prints every launch form; no window is created.
         let args: Vec<String> = std::env::args().collect();
@@ -1626,26 +1697,27 @@ mod desktop {
                 // rather than by Tauri's own setup: this is where the response hook that lets the
                 // webview cache the app's assets is attached, and where the window's creation -
                 // the WebView2 environment and its browser processes, most of the time between
-                // process start and the first frame - gets its own boot stamp.
-                let config = app
-                    .config()
-                    .app
-                    .windows
-                    .first()
-                    .cloned()
-                    .expect("tauri.conf.json declares the main window");
-                // Only the macOS debug harness hook reads the handle; every other
-                // target would flag the binding unused.
-                #[cfg_attr(not(all(debug_assertions, target_os = "macos")), allow(unused_variables))]
-                let window = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
-                    .on_web_resource_request(revalidate_assets)
-                    .build()?;
-                // The automated harness run needs its timers firing: keep this window awake.
-                #[cfg(all(debug_assertions, target_os = "macos"))]
-                if std::env::var_os("GGS_DEV_HARNESS").is_some() {
-                    keep_awake_for_probe_runs(&window);
+                // process start and the first frame - gets its own boot stamp. A
+                // `--remote-host` launch (an instance the Remote Access daemon opened for a
+                // remote session, docs/ggs-remote-plan.md §8.2) builds no desktop window
+                // until the daemon asks it to show one.
+                let remote_host_only = args_have_remote_host();
+                if remote_host_only {
+                    #[cfg(target_os = "macos")]
+                    app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                    stamp("remote host mode: no desktop window");
+                } else {
+                    #[cfg_attr(not(all(debug_assertions, target_os = "macos")), allow(unused_variables))]
+                    let window = build_main_window(app.handle())?;
+                    // The automated harness run needs its timers firing: keep this window awake.
+                    #[cfg(all(debug_assertions, target_os = "macos"))]
+                    if std::env::var_os("GGS_DEV_HARNESS").is_some() {
+                        keep_awake_for_probe_runs(&window);
+                    }
+                    stamp("window + webview created");
                 }
-                stamp("window + webview created");
+                // Remote Access (module 19): register with a local daemon when one runs.
+                remote_host::start(app.handle(), remote_host_only);
                 Ok(())
             })
             .on_page_load(|webview, payload| {
@@ -1700,6 +1772,7 @@ mod desktop {
                 open_devtools,
                 cmd_app::app_new_instance,
                 cmd_fs::list_dir,
+                cmd_fs::list_dir_page,
                 cmd_fs::read_file,
                 cmd_fs::read_file_raw,
                 cmd_fs::file_probe,
@@ -1709,6 +1782,8 @@ mod desktop {
                 cmd_fs::read_file_chunk,
                 cmd_fs::patch_file,
                 cmd_fs::write_file,
+                cmd_fs::fs_write_chunk,
+                cmd_fs::fs_upload_offset,
                 cmd_fs::read_file_at,
                 cmd_fs::materialize_revision_file,
                 cmd_fs::discard_temp_blob,
@@ -1844,6 +1919,7 @@ mod desktop {
                 ext_process::ext_process_host_respond,
                 ext_process::ext_process_invoke,
                 ext_process::ext_process_push_event,
+                ext_process::ext_process_registrations,
                 ext_process::ext_node_runtime,
                 ext_child::ext_child_spawn,
                 ext_child::ext_child_write,
@@ -1873,7 +1949,12 @@ mod desktop {
                 mcp::mcp_log,
                 mcp::mcp_tools,
                 cmd_providers::claude_mcp_status,
-                cmd_search::hex_diff
+                cmd_search::hex_diff,
+                pty::pty_list,
+                pty::pty_tail,
+                remote_host::remote_host_set_summary,
+                remote_host::remote_host_frontend_gone,
+                remote_host::remote_host_status
             ])
             .build(tauri::generate_context!())
             .expect("error while building Git Graph Studio")
@@ -1888,6 +1969,31 @@ mod desktop {
                 // No backend outlives its window: on exit every process this instance spawned
                 // is stopped (another instance's backends are not ours to stop) — the warm
                 // extension backends and a frame's child processes alike.
+                // A `--remote-host` instance has no window most of its life: the Relay
+                // closing must not end it — the daemon's idle exit (`Quit`) does.
+                if let tauri::RunEvent::ExitRequested { code: None, api, .. } = &event {
+                    if remote_host::remote_host_only() {
+                        api.prevent_exit();
+                    }
+                }
+                // The desktop window closing while remote sessions are attached keeps the
+                // instance up for them (the Relay is a window too); the daemon is told the
+                // window is no longer visible.
+                if let tauri::RunEvent::WindowEvent {
+                    label,
+                    event: tauri::WindowEvent::Destroyed,
+                    ..
+                } = &event
+                {
+                    if label == "main" {
+                        remote_host::send_update(app);
+                    }
+                    if label == remote_host::RELAY_LABEL {
+                        // A destroyed Relay is why a remote session goes dead: the daemon
+                        // asks for a rebuild, and this line is the record of the cause.
+                        eprintln!("[remote] relay webview destroyed");
+                    }
+                }
                 if let tauri::RunEvent::Exit = event {
                     use tauri::Manager;
                     app.state::<ext_process::ProcessHostState>().stop_all();

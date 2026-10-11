@@ -933,11 +933,23 @@ export class EditorArea {
 	 *  layout rebuild, a sash drag), and one placement per frame reads layout once. */
 	private scheduleOverlaySync(): void {
 		if (this.overlaySyncPending) return;
-		const raf = window.requestAnimationFrame?.bind(window) ?? ((callback: () => void) => window.setTimeout(callback, 16) as unknown as number);
-		this.overlaySyncPending = raf(() => {
+		let done = false;
+		const run = () => {
+			if (done) return;
+			done = true;
 			this.overlaySyncPending = 0;
 			for (const entry of this.overlays) this.placeOverlay(entry);
+		};
+		const timer = window.setTimeout(run, 100);
+		// The frame-aligned rAF is the cheap path; it can starve indefinitely in a page the
+		// compositor never paints (an occluded-but-visible window, a PWA in a shelf, an
+		// automated browser) — and a webview panel opened there would stay invisible until
+		// the next layout change. The timer guarantees placement; whichever runs first wins.
+		window.requestAnimationFrame?.(() => {
+			window.clearTimeout(timer);
+			run();
 		});
+		this.overlaySyncPending = timer;
 	}
 
 	/* ---------- Group wiring ---------- */
@@ -1159,6 +1171,24 @@ export class EditorArea {
 
 	hasDirtyEditors(): boolean {
 		return this.groups().some((g) => g.hasDirtyEditors());
+	}
+
+	/** Every group's open files (Remote Access's content summary, R21); a file open in two
+	 *  groups is listed once, active if it is active in the active group. */
+	contentSummary(): { path: string; dirty: boolean; active: boolean }[] {
+		const active = this.activeGroup;
+		const byPath = new Map<string, { path: string; dirty: boolean; active: boolean }>();
+		for (const group of this.groups()) {
+			for (const tab of group.contentSummary()) {
+				const seen = byPath.get(tab.path);
+				const isActive = tab.active && group === active;
+				if (seen) {
+					seen.dirty ||= tab.dirty;
+					seen.active ||= isActive;
+				} else byPath.set(tab.path, { ...tab, active: isActive });
+			}
+		}
+		return [...byPath.values()];
 	}
 
 	async saveAll(): Promise<void> {

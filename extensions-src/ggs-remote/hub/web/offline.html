@@ -1,0 +1,37 @@
+<!doctype html>
+<!-- The one page every not-online link answers with (docs/ggs-remote-plan.md §20.5):
+     identical whether the uuid is mistyped, unknown, or the PC is merely away — the Hub
+     cannot tell either, and neither can whoever is probing. Retries itself every 15 s. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>GGS Remote — not online</title>
+<style>
+:root { color-scheme: light dark; }
+body {
+	margin: 0; min-height: 100vh; display: grid; place-items: center;
+	font: 16px/1.6 system-ui, sans-serif; text-align: center; padding: 24px;
+}
+.card { max-width: 28em; }
+.dot {
+	width: 56px; height: 56px; border-radius: 50%; margin: 0 auto 20px;
+	background: radial-gradient(circle at 35% 30%, #7a7a7a, #4a4a4a);
+	opacity: .8;
+}
+h1 { font-size: 1.25rem; margin: 0 0 .6em; }
+p { margin: .4em 0; opacity: .85; }
+.retry { font-size: .85em; opacity: .6; }
+</style>
+</head>
+<body>
+<main class="card">
+	<div class="dot"></div>
+	<h1>This PC is not online</h1>
+	<p>The link is correct, but the PC it belongs to is not connected to the relay right now.</p>
+	<p>它现在没有连上中继服务器——等这台电脑上线后自动恢复。</p>
+	<p class="retry">Retrying every 15&nbsp;s…</p>
+</main>
+</body>
+</html>

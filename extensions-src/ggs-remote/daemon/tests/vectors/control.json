@@ -1,0 +1,207 @@
+[
+  {
+    "direction": "from",
+    "hex": "a800000081a8526567697374657288ab696e7374616e63655f6964a86767732d31323334a3706964cd04d2a776657273696f6ea6302e312e3130a57469746c65b97265706f20e28094204769742047726170682053747564696fa7666f6c6465727391a7433a2f7265706fa776697369626c65c3ab72656d6f74655f686f7374c2a66c61756e636882a770726f6772616dae433a2f4747532f6767732e657865aa6172677350726566697890",
+    "message": {
+      "Register": {
+        "folders": [
+          "C:/repo"
+        ],
+        "instance_id": "ggs-1234",
+        "launch": {
+          "argsPrefix": [],
+          "program": "C:/GGS/ggs.exe"
+        },
+        "pid": 1234,
+        "remote_host": false,
+        "title": "repo — Git Graph Studio",
+        "version": "0.1.10",
+        "visible": true
+      }
+    },
+    "name": "register"
+  },
+  {
+    "direction": "from",
+    "hex": "7100000081a655706461746584a57469746c65c0a7666f6c64657273c0a776697369626c65c0a773756d6d61727984a4746162739183a470617468ac433a2f7265706f2f612e7273a56469727479c3a6616374697665c3a97465726d696e616c7302a5646972747901aa73636d4368616e67657303",
+    "message": {
+      "Update": {
+        "folders": null,
+        "summary": {
+          "dirty": 1,
+          "scmChanges": 3,
+          "tabs": [
+            {
+              "active": true,
+              "dirty": true,
+              "path": "C:/repo/a.rs"
+            }
+          ],
+          "terminals": 2
+        },
+        "title": null,
+        "visible": null
+      }
+    },
+    "name": "update-summary"
+  },
+  {
+    "direction": "from",
+    "hex": "0e00000081a4506f6e6781a56e6f6e636507",
+    "message": {
+      "Pong": {
+        "nonce": 7
+      }
+    },
+    "name": "pong"
+  },
+  {
+    "direction": "from",
+    "hex": "2300000081ac436c6f7365426c6f636b656481a5646972747991ac433a2f7265706f2f612e7273",
+    "message": {
+      "CloseBlocked": {
+        "dirty": [
+          "C:/repo/a.rs"
+        ]
+      }
+    },
+    "name": "close-blocked"
+  },
+  {
+    "direction": "from",
+    "hex": "4b00000081aa41737365745265706c7986a372657103a6737461747573ccc8ac636f6e74656e745f74797065a9746578742f68746d6ca465746167a422653122a4626f6479c4026869a4646f6e65c3",
+    "message": {
+      "AssetReply": {
+        "body": [
+          104,
+          105
+        ],
+        "content_type": "text/html",
+        "done": true,
+        "etag": "\"e1\"",
+        "req": 3,
+        "status": 200
+      }
+    },
+    "name": "asset-reply"
+  },
+  {
+    "direction": "from",
+    "hex": "3b00000081a946696c655265706c7986a372657104a6737461747573ccc8a46e616d65a4612e7273a5746f74616c02a56368756e6bc4026f6ba4646f6e65c3",
+    "message": {
+      "FileReply": {
+        "chunk": [
+          111,
+          107
+        ],
+        "done": true,
+        "name": "a.rs",
+        "req": 4,
+        "status": 200,
+        "total": 2
+      }
+    },
+    "name": "file-reply"
+  },
+  {
+    "direction": "from",
+    "hex": "0b000000aa52656c61795265616479",
+    "message": "RelayReady",
+    "name": "relay-ready"
+  },
+  {
+    "direction": "from",
+    "hex": "04000000a3427965",
+    "message": "Bye",
+    "name": "bye"
+  },
+  {
+    "direction": "to",
+    "hex": "4400000081a757656c636f6d6582ae6461656d6f6e5f76657273696f6ea5302e312e30a972656c61795f75726cba77733a2f2f3132372e302e302e313a35303030302f72656c6179",
+    "message": {
+      "Welcome": {
+        "daemon_version": "0.1.0",
+        "relay_url": "ws://127.0.0.1:50000/relay"
+      }
+    },
+    "name": "welcome"
+  },
+  {
+    "direction": "to",
+    "hex": "2c00000081aa4665746368417373657483a372657103a46b696e64a3417070a470617468ab72656d6f74652e68746d6c",
+    "message": {
+      "FetchAsset": {
+        "kind": "App",
+        "path": "remote.html",
+        "req": 3
+      }
+    },
+    "name": "fetch-asset-app"
+  },
+  {
+    "direction": "to",
+    "hex": "3500000081aa4665746368417373657483a372657105a46b696e64a3457874a470617468b4706b672d312e302e302f696e6465782e68746d6c",
+    "message": {
+      "FetchAsset": {
+        "kind": "Ext",
+        "path": "pkg-1.0.0/index.html",
+        "req": 5
+      }
+    },
+    "name": "fetch-asset-ext"
+  },
+  {
+    "direction": "to",
+    "hex": "2800000081a9466574636846696c6583a372657104a470617468ac433a2f7265706f2f612e7273a37a6970c2",
+    "message": {
+      "FetchFile": {
+        "path": "C:/repo/a.rs",
+        "req": 4,
+        "zip": false
+      }
+    },
+    "name": "fetch-file"
+  },
+  {
+    "direction": "to",
+    "hex": "1800000081ab456e7375726552656c617981a5746f6b656ea3746f6b",
+    "message": {
+      "EnsureRelay": {
+        "token": "tok"
+      }
+    },
+    "name": "ensure-relay"
+  },
+  {
+    "direction": "to",
+    "hex": "0a000000a944726f7052656c6179",
+    "message": "DropRelay",
+    "name": "drop-relay"
+  },
+  {
+    "direction": "to",
+    "hex": "0e00000081a450696e6781a56e6f6e636507",
+    "message": {
+      "Ping": {
+        "nonce": 7
+      }
+    },
+    "name": "ping"
+  },
+  {
+    "direction": "to",
+    "hex": "05000000a453686f77",
+    "message": "Show",
+    "name": "show"
+  },
+  {
+    "direction": "to",
+    "hex": "0e00000081a45175697481a5666f726365c3",
+    "message": {
+      "Quit": {
+        "force": true
+      }
+    },
+    "name": "quit"
+  }
+]

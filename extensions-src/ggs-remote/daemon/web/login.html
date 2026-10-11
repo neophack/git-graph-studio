@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<base href="/">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>GGS Remote</title>
+<link rel="stylesheet" href="static/style.css">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="static/icon.svg">
+</head>
+<body>
+<main class="card narrow">
+	<h1 data-i18n="title"></h1>
+	<p class="reason" id="reason" hidden></p>
+	<form id="form">
+		<label for="password" data-i18n="password"></label>
+		<input type="password" id="password" autocomplete="current-password" required autofocus>
+		<label for="device" data-i18n="device"></label>
+		<input type="text" id="device" autocomplete="off" maxlength="64">
+		<label class="check"><input type="checkbox" id="remember"> <span data-i18n="remember"></span></label>
+		<button class="primary" id="submit" data-i18n="signIn"></button>
+		<p class="error" id="error"></p>
+	</form>
+</main>
+<script type="module" src="static/login.js"></script>
+</body>
+</html>

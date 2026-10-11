@@ -53,7 +53,7 @@ export class TitleBar {
 		container.setAttribute('role', 'banner');
 
 		const logo = el('img', 'titlebar-logo');
-		logo.src = '/icons/icon.png';
+		logo.src = import.meta.env.BASE_URL + 'icons/icon.png';
 		logo.alt = '';
 		logo.setAttribute('data-tauri-drag-region', '');
 		this.menubar = el('div', 'menubar');
@@ -125,6 +125,12 @@ export class TitleBar {
 		if (index === -1 || !item) return false;
 		this.open(item, this.menus[index]!);
 		return true;
+	}
+
+	/** The bar's current menu definitions — the phone shell's ☰ serves them whole (its
+	 *  action sheet turns each menu into a second level, enablement computed on open). */
+	menuDefinitions(): MenuDefinition[] {
+		return this.menus;
 	}
 
 	private open(item: HTMLElement, menu: MenuDefinition): void {

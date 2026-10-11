@@ -6,13 +6,14 @@
 
 vi.mock('mermaid', () => import('./mermaidStub'));
 vi.mock('@mermaid-js/layout-elk', () => ({ default: {} }));
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Workbench } from '../src/workbench';
 import { commands } from '../src/commands';
 import { bookmarksFor } from '../src/bookmarks';
 import * as state from '../src/state';
 import { backend } from './tauriMock';
+import { installRemoteRound } from './remoteRound';
 import { click, flush, key, menuItem, menuLabels, notifications, texts, until } from './helpers';
 
 
@@ -28,6 +29,9 @@ class DefaultingHandlers extends Map<string, (args: Record<string, unknown>) => 
 }
 
 let workbench: Workbench;
+/** §17.3's remote round: set by its describe, honoured by the boot below — every test there
+ *  re-installs the wire (the global setup resets the backend per test). */
+let remoteRound: 'tablet' | null = null;
 
 beforeAll(async () => {
 	await import('../src/textEditor');
@@ -95,6 +99,7 @@ beforeEach(async () => {
 		['graph_request', ({ message }) => ({ command: (message as { command: string }).command, error: null, errors: [null], commits: [] })]
 	] as [string, (args: Record<string, unknown>) => unknown][]);
 	(window as unknown as { markdownIt: unknown }).markdownIt = { render: (text: string) => `<p>${text}</p>` };
+	if (remoteRound) await installRemoteRound(remoteRound);
 	workbench = new Workbench();
 	await workbench.boot();
 	await flush(10);
@@ -378,8 +383,10 @@ describe('the commands no other harness drives', () => {
 	});
 });
 
-describe('the command sweep', () => {
-	it('every registered command runs without throwing and leaves the shell usable', { timeout: 60_000 }, async () => {
+/** The sweep proper: every registered command executes (exit and close-folder aside),
+ *  nothing throws, no overlay lingers, and the shell still answers after each one. */
+async function sweepEveryCommand(): Promise<void> {
+	{
 		await workbench.editors.openFile(NOTES);
 		await flush(6);
 		const failures: string[] = [];
@@ -400,5 +407,47 @@ describe('the command sweep', () => {
 		// Exit is the one command that closes the window.
 		await commands.execute('workbench.exit');
 		expect(backend.window.closed).toBe(1);
+	}
+}
+
+describe('the command sweep', () => {
+	it('every registered command runs without throwing and leaves the shell usable', { timeout: 60_000 }, sweepEveryCommand);
+});
+
+describe('the command sweep under the remote shims', () => {
+	// §17.3: the same commands with every invoke crossing the remote wire — the tauriShim's
+	// invoke, a Transport over the (fake) WebSocket, the frame codec, the RelayEngine —
+	// answering from the very handler map the desktop round uses. 'tablet' keeps the desktop
+	// menu surfaces the sweep asserts; the phone's sheet-driven menus are the responsive
+	// suites' ground, so its marker is exercised by the phone smoke below.
+	beforeAll(() => {
+		remoteRound = 'tablet';
+	});
+	afterAll(() => {
+		remoteRound = null;
+	});
+	it('every registered command runs over the wire without throwing and leaves the shell usable', { timeout: 90_000 }, sweepEveryCommand);
+
+	it('the phone form factor: the everyday flow rides the wire', async () => {
+		// A phone-marked boot: open, edit, save, palette — the marker's branches take nothing
+		// away from the command layer.
+		document.documentElement.dataset.formFactor = 'phone';
+		try {
+			await workbench.editors.openFile(NOTES);
+			await flush(6);
+			const view = workbench.editors.groups()[0]!.findEditor(workbench.editors.groups()[0]!.openEditorIds()[0]!)!.view!;
+			view.dispatch({ changes: { from: 0, insert: 'remote ' } });
+			await flush(4);
+			expect(commands.isEnabled('workbench.save')).toBe(true);
+			await commands.execute('workbench.save');
+			await flush(4);
+			expect(backend.callsTo('write_file').at(-1)).toMatchObject({ path: NOTES });
+			void commands.execute('workbench.quickOpen');
+			await flush(4);
+			expect(document.querySelector('.quick-input input')).not.toBeNull();
+			await dismissOverlays();
+		} finally {
+			delete document.documentElement.dataset.formFactor;
+		}
 	});
 });

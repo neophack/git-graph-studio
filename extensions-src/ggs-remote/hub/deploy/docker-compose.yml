@@ -1,0 +1,30 @@
+# The Hub's compose (docs/ggs-remote-plan.md §20.9): the relay plus Caddy for automatic
+# Let's Encrypt certificates. One DNS record (remote.example.com → this machine) is all it
+# takes; nothing here needs backing up.
+services:
+  hub:
+    image: ghcr.io/ggs/ggs-remote-hub:latest   # or build: ..
+    restart: unless-stopped
+    # Caddy fronts it, so the Hub itself speaks plain HTTP on loopback only.
+    command: ["--config", "/etc/ggs-hub/hub.toml"]
+    volumes:
+      - ./hub.toml:/etc/ggs-hub/hub.toml:ro
+    expose:
+      - "8443"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - hub
+
+volumes:
+  caddy-data:
+  caddy-config:

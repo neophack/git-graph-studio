@@ -33,7 +33,7 @@ export function loadMarkdownIt(): Promise<MarkdownIt | null> {
 			const existing = globals.markdownit ?? globals.markdownIt;
 			if (existing) return resolve(annotateSourceLines(existing));
 			const script = document.createElement('script');
-			script.src = '/vendor/markdown-it.min.js';
+			script.src = import.meta.env.BASE_URL + 'vendor/markdown-it.min.js';
 			// A script that never reports (a blocked load, a stalled webview) must not hang
 			// every preview forever: after the grace period the source shows instead.
 			const deadline = window.setTimeout(() => resolve(null), MARKDOWN_IT_LOAD_TIMEOUT_MS);

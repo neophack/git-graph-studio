@@ -58,11 +58,16 @@ export default defineConfig({
 		outDir: resolve(studio, 'dist'),
 		emptyOutDir: true,
 		// The extension host frame is its own entry (app/ext-host.html), emitted next to the
-		// main window so `src/extHost.ts` can load it as /ext-host.html.
+		// main window so `src/extHost.ts` can load it as /ext-host.html. The remote workbench is
+		// a separate build (vite.remote.config.ts) into dist/remote/; this one must not wipe
+		// it, so the remote build runs after it.
 		rollupOptions: {
 			input: {
 				main: resolve(__dirname, 'index.html'),
-				extHost: resolve(__dirname, 'ext-host.html')
+				extHost: resolve(__dirname, 'ext-host.html'),
+				// The Remote Access Relay (docs/ggs-remote-plan.md §8.3): a hidden webview's page,
+				// on the real Tauri API like the main window.
+				relay: resolve(__dirname, 'relay.html')
 			},
 			output: {
 				manualChunks(id) {

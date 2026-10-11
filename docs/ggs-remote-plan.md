@@ -1,10 +1,17 @@
 # GGS Remote 远程访问插件 — 详细开发计划
 
-> 状态：计划（2026-10-11），尚未实现。本文是开发说明书：技术选型、库与版本、目录与文件、数据结构、协议字段、关键代码骨架、任务拆分与验收，照着做即可落地。
-> 修订（2026-10-11，评审后补充）：§6.1 一消息多帧与 §6.4 上行合帧；§7.4 防火墙指引与多 OS 用户端口取舍；§7.6 配对页密码解锁（R19）；§7.7 会话周期重验；§7.8 下载控制消息 `FetchFile`；§7.9 托盘语言与扫码窗口；§7.12 进程自愈与关机退出；§8.6 终端 resize 与并发编辑；§10.2 PWA manifest；§16 日志脱敏；§17–§19 对应测试、任务与风险。
-> 修订（2026-10-11，第二次）：R20/R21 远程实例生命周期管理与内容摘要——两级心跳与 `unresponsive` 标记、`INSTANCE_CLOSE`/`INSTANCE_RESTART` 帧、`Ping`/`Pong`/`CloseBlocked`/`Summary` 控制消息、窗口选择页摘要卡片（§6.2、§7.8、§8.1、§13、§18 M3.5）。
+> 状态：**已实现（框架与功能，2026-10-11）**——守护进程、应用侧宿主与 Relay、远程前端（垫片/传输/响应式外壳）、插件包、Hub 中继（§20）与守护进程的 Hub 客户端均已落地；守护进程与 Hub 各自的 `cargo test`、`tests/hub_link.rs` 的两 crate 端到端（登录、隧道上的 WS 会话、改密 1 s 内 4401、断开后离线页）、`tests/remote*.test.ts` 与 CI 作业（`remote-daemon-test` 三平台、`remote-hub-test`）全绿。尚未做：三平台托盘手测、真机（iOS/Android）清单、可选的端到端加密 M10（Playwright 的三引擎矩阵与截图基线已落地：`tests/e2e/remote/` 六个 spec + `playwright.remote.config.ts`，Chromium/Firefox/WebKit，`npm run test:e2e-remote`）。已知取舍：Hub 侧在隧道断开时关闭浏览器 WS（4503 `pc-offline`）而不是挂住等待（§20.4 的 `pc-reconnecting` 通知），断线恢复由守护进程的 120 s 恢复窗口在重连后接续；TLS 客户端信任用 webpki-roots 静态根 + `fp=` 指纹固定，未用 rustls-platform-verifier。
 > 范围：新插件 `ggs-remote` 及它需要的应用侧通用宿主能力。**不基于、不复用 Claude Remote（`extensions-src/claude-remote/`）**，两者互不依赖。
 > 约束来源：`docs/ggs-development-plan.md` §3（架构原则）、`AGENTS.md`（模块图、接缝规则、完成定义、代码风格）。
+> 修订（2026-10-11，评审后补充）：§6.1 一消息多帧与 §6.4 上行合帧；§7.4 防火墙指引与多 OS 用户端口取舍；§7.6 配对页密码解锁（R19）；§7.7 会话周期重验；§7.8 下载控制消息 `FetchFile`；§7.9 托盘语言与扫码窗口；§7.12 进程自愈与关机退出；§8.6 终端 resize 与并发编辑；§10.2 PWA manifest；§16 日志脱敏；§17–§19 对应测试、任务与风险。
+> 修订（2026-10-11，第二次）：R20/R21 远程实例生命周期管理与内容摘要——两级心跳与 `unresponsive` 标记、`INSTANCE_CLOSE`/`INSTANCE_RESTART` 帧、`Ping`/`Pong`/`CloseBlocked`/`Summary` 控制消息、窗口选择页摘要卡片（§6.2、§7.8、§8.1、§13、§18 M3.5）。
+> 修订（2026-10-11，实测修复）：两个中断级缺陷与手机端补全——(1) §14.2 的 `install` 现在先问运行中守护进程的版本（admin API），同版本或更新绝不关停：此前全新 home 里插件激活会把在跑的守护进程杀掉约 20 s 换一份字节相同的副本，期间打开的页面什么都加载不出来（资源管理器、文件内容、SCM 全空，`client::tests::a_running_same_version_daemon_survives_install` 回归）；(2) §12.2 的令牌路径 HTML 改写同时折叠根绝对 `/assets/…` 引用——扩展宿主帧的文档（`ext-host.html`）是应用资产，主构建把它的哈希脚本拼成根绝对路径，不改写就落到守护进程根上 404，任何帧宿主插件在远程端都激活不了；(3) §11.3 手机档补齐：文件默认只读 + 解锁条（`src/remote/editLock.ts`，Compartment 原位重配置，注意 `EditorState.readOnly` 的 facet 合并先到先得、锁必须放在扩展列表最前）、侧边栏左缘滑动返回、快速输入全屏化；(4) §10.3 资源管理器远程分页落地（`list_dir_page` + "加载更多"行，`explorer.ts`）。
+> 修订（2026-10-11，第三次，实测修复）：§11.2 手机页面栈落地（`src/remote/nav.ts`）——全屏侧边栏是覆盖层，编辑器激活（`editor.ts` 的 activate）与面板显示（`panel.ts` 的 show）都会先收起它（经 `workbench.toggleSidebar` 命令），被覆盖的面板再点终端标签是"现出"而非"藏起"（toggle 的 covered 分支）；修复前手机端点文件、点终端都打开在覆盖层之下，看起来毫无反应（`tests/remoteResponsive.test.ts` 的 phone page stack 组回归）。
+> 修订（2026-10-11，第四次）：§11.2 紧凑顶栏落地（`src/remote/phoneMenu.ts`）——左上角 ☰ 打开完整菜单（动作表一级是菜单名、二级是条目，启用态打开时计算；`TitleBar.menuDefinitions()` 为取数口），手机档隐藏 logo 与菜单栏，命令中心改为弹性占位。注意手机页面的可见版本跟随应用内嵌的 remote 构建（dev 由 prepare.mjs 产出 `target/studio/dist/remote/`，打包随 `tauri build`），且 Service Worker 对 remote.html 缓存优先、后台刷新——新版本第二次访问才现身。
+> 修订（2026-10-12，手机端重新设计）：§11.2 手机档从“缩小的桌面”改为一套 App 外壳，由同一个页面模型（`src/remote/pages.ts`）驱动——顶部 App 栏（`appBar.ts`：☰ 抽屉、页面标题与副标题、页面自己的操作表）、底部导航（`bottomTabs.ts`：文件 · 编辑器 · 变更 · 各插件页面，最多五个，点了必定显示该页、再点为“重选”）、导航抽屉（`navDrawer.ts`，取代 `phoneMenu.ts`：全部页面、转到文件、命令面板、窗口、传输、完整菜单、省流与设置）、编辑器页（`editorSwitcher.ts`：标签条隐藏，已打开编辑器与编辑器操作改为底部表单，无文件时显示空状态）、键盘上方编辑键行（`editorAccessory.ts`）、统一的底部表单（`actionSheet.ts`：把手、标题、返回级、下拉关闭）与手机返回键关闭浮层（`backStack.ts`）。插件页面按通用规则发现（视图容器取自隐藏的活动栏，Git Graph 类取自 `scm/title` 的 navigation 项），不出现插件 id。终端改为全屏页面；页面栈导航中编辑器激活同时收起终端页。
+> 修订（2026-10-12，多用户实测与 Hub 收口）：(1) §20.5 的两种链接形态修复——规范链接 `publicBase`（带尾斜杠）此前落到 Hub 路由之外答裸 404，手剥尾斜杠的 `/u/<uuid>` 撞上双参数提取器答 500；现在两种形态都以空 rest 进入 `entry`，由 PC 按自己的 `/` 应答（登录或窗口页的重定向），`hub/tests/tunnel.rs` 的 `the_link_shapes_a_browser_opens_reach_the_pc` 与离线页四形态断言回归；(2) 多用户活体探针 `scripts/probes/remote-hub-multi-check.mjs`：一个真 Hub + 两台守护进程（独立 home）+ 两个 `--remote-host` 实例 + 同一浏览器用户经 `/u/<uuid>/` 双登录——并行会话、Cookie `Path` 隔离、Storage 前缀隔离、改密只踢一方（83 ms 内 401 + WS 4401）、限速隔离、跨 PC Cookie 拒绝、外部 Origin 由 PC 侧关 4403、编码路径穿越拒绝、离线页逐字节一致，55 项检查；(3) §20.6 的跨 PC 缓存记录为**有意偏差**：缓存键含 `/w/<inst>/`，两台 PC 的实例 id 必不相同 → 计划中的"公开构建产物跨 PC 共享"实际是每 PC 各自缓存——共享会让任一接入 PC 的守护进程有能力给其他 PC 的哈希资产投毒，按 PC 隔离以极小的带宽代价消掉该面；(4) §7.6 的 Cookie 无条件 `Secure` 记录为部署注意：`tls = none` 且无 TLS 前置、经非 loopback 地址访问时浏览器会静默丢弃会话 Cookie（登录返回成功但永不保持）——该模式的前提是 Caddy 类前置已终结 TLS（§20.8/§20.9）；(5) §15.6/§20.13 M9.9 补齐：`release.yml` 新增 `hub-image` 作业，打 tag 时经 `hub/Dockerfile` 构建 `ghcr.io/<owner>/ggs-remote-hub:<版本>`（amd64+arm64，门禁随 studio.yml 的 remote-hub-test）。
+> 修订（2026-10-12，测试缺口收口）：§17.1/§20.12 中"已实现未测"的项落地——(1) `tests/hub_link.rs` 新增 `a_restarted_hub_is_rejoined_with_the_same_link`：以最小假 Hub（测试内 tokio-tungstenite，逐代可真正掐断——进程内 `axum::serve` 中止后已接受连接仍存活，演不了 Hub 重启）验证守护进程掉线退避后自动重握手、uuid 与链接逐字节不变；(2) `tests/integration.rs` 新增配对解锁流（锁定态无链接/二维码 403、错密码 401、重复错密码 429、正确解锁后 SVG 可见、伪造 unlock 拒绝）；(3) 新增实例生命周期两测：`unresponsive` 标记的 WINDOWS 推送与恢复（配 `registry.rs` 的 Heartbeat 单元测：ping 周期、两次未答判超、Pong 治愈），close-blocked 脏文件清单与 force 杀注册 pid（一次性子进程扮演）+ 事后 4410；(4) §20.8 新增 `handshake_rate` 配置（默认 10/min/IP，0 = 不限）：压测与单地址大车队需要，默认值不变即原防踩踏语义；(5) `scripts/probes/hub-load.mjs` 落地 §20.12 压测行。
+> 修订（2026-10-12，计划收口第三轮）：(1) §17.3 的远程垫片轮落地——`tests/remoteRound.ts` 把 tauriMock 的 invoke 引到真垫片链（tauriShim `invoke` → Transport → 帧编解码 → RelayEngine → 同一套脚本 handler），mock `Channel` 带 `toJSON` 流标记（`__GGS_CHAN__:<stream>`，relay 侧 revive，事件双向流动）；commandSweep 全命令在 tablet 标记下重跑 + phone 冒烟，uiSweep 整组在远程垫片下重跑（SCM/diff 断言改为轮询——wire 的往返让落点晚一拍；SCM 列表顺序在远程下不保证，按行名点击）；richHandlers 补 `list_dir_page`（远程资源管理器分页路径）。(2) §17.1 INSTANCE_RESTART 成功路径：`a_restart_kills_relaunches_and_waits_for_the_registration`——被注册 pid 终止、按注册的 LaunchSpec 重拉本测试二进制（`--exact restart_child_role --ignored` 的子角色，经 GGS_REMOTE_HOME 找到控制端点注册）、SPAWNED 应答新实例 id、WINDOWS 推送换人。(3) §7.10 idle_exit 单测两条（空闲计时先布防、到点才问退；有会话不问；0 分钟关闭）。(4) §17.4 三引擎矩阵：`playwright.remote.config.ts` 增加 Firefox/WebKit 项目；**发现并实测确认**——WebKit/Safari 不给 plain-HTTP localhost 豁免，`Secure` 会话 Cookie 被丢弃（登录永远回登录页）→ e2e fixture 全面改为 TLS 守护进程（`self-signed` + `ignoreHTTPSErrors`，即产品出厂形态），三引擎全绿；`visual-baseline.spec.ts` 按引擎×桌面/手机截登录页与离线页存 `target/studio/remote-e2e-shots/`（不提交像素基线——DOM 断言承载正确性，截图作肉眼比对记录）。
 
 ## 目录
 
@@ -688,7 +695,7 @@ GGS Remote — 监听中 (https://192.168.1.20:47615/)
 - **Windows/macOS**：`tao::event_loop::EventLoopBuilder::with_user_event()` 在主线程运行；`tray_icon::TrayIconBuilder` 创建图标；菜单事件通过 `MenuEvent::receiver()` 转成 `std::sync::mpsc` 发给 tokio 线程；状态变化通过 `EventLoopProxy::send_event` 回到主线程更新图标。macOS 启动时设置 `ActivationPolicy::Accessory`（不出现在 Dock），打包为 `GGS Remote.app`，`Info.plist` 里 `LSUIElement = true`。
 - **Linux**：`ksni::TrayMethods::spawn`（tokio 特性）。D-Bus 上没有 `StatusNotifierWatcher`（如未装 AppIndicator 扩展的 GNOME）时记录日志，进入无托盘模式，管理只能通过 GGS 插件页或 CLI。
 - **扫码窗口（R19）**：“显示配对二维码…”经一次性票据打开 loopback 配对页（`https://127.0.0.1:<lp>/pair?t=…`，默认浏览器）；页面先要求输入访问密码（§7.6 配对页解锁），解锁成功才渲染各 LAN 地址的二维码与 Hub 链接，5 分钟后重新上锁。
-- **菜单语言**：读 `~/.ggs/settings.json` 的 `displayLanguage`（应用的显示语言设置，en / zh-cn），文件缺失或不可解析时用英文；语言跟随应用变化，托盘菜单在状态变化或下次打开时重建。
+- **菜单语言**：读 `~/.ggs/settings.json` 的 `locale`（应用实际写入的键；`displayLanguage` 作为旧写法兼容），en / zh-cn；两个托盘后端每秒轮询菜单模型并在签名变化时重建，应用切语言后秒级跟随。
 - **平台细节（M6 手测清单）**：explorer.exe 崩溃重启后按 `TaskbarCreated` 重新注册图标；系统关机/注销（`WM_ENDSESSION` / macOS 会话结束）时事件循环干净退出，避免 `sessions.json`、`daemon.lock` 写坏；Windows 托盘 tooltip ≤ 127 字符；macOS 图标提供模板版本（黑白两套，菜单栏深浅自适应）。
 - **内存措施**：tokio current_thread；I/O 线程栈 1 MB；资源缓存默认放磁盘，内存 LRU 只放最近 16 MB；不在内存里保留实例资源的原文；空闲时 `malloc_trim(0)`（Linux glibc，每 5 分钟）；Windows 上定期 `SetProcessWorkingSetSize(-1,-1)` 不做（会造成页面抖动），只依赖不常驻大块内存。**M7 用 `scripts/probes/remote-memory.mjs` 测量**，未达标再考虑 `mimalloc` 等措施。
 
@@ -1068,13 +1075,13 @@ type FormFactor = 'phone' | 'tablet' | 'desktop';
 
 | 区域 | 桌面网页（> 1024） | 平板（600–1024） | 手机（< 600） |
 | ---- | ------------------ | ---------------- | ------------- |
-| 标题栏 | 网页标题栏：菜单 + 命令中心 + 窗口切换器，无窗口控制按钮 | 菜单收进 ☰ | 紧凑顶栏：☰、当前文件名、命令面板按钮、窗口切换 |
-| 活动栏 | 左侧竖栏 | 左侧竖栏 | 底部标签栏（`bottomTabs.ts`：资源管理器、搜索、源代码管理、Git Graph、更多） |
-| 侧边栏 | 可拖动宽度 | 覆盖式抽屉 | 全屏页面，右滑返回（`gestures.ts`） |
-| 编辑区 | 分屏网格 | 最多 2 组 | 单组；标签页变下拉列表 |
-| 面板（终端/输出） | 底部 | 底部 | 底部抽屉：收起 / 半屏 / 全屏三档，拖动把手 |
-| 状态栏 | 完整 | 精简 | 隐藏，关键项（分支、问题数）进顶栏 |
-| 右键菜单 | 右键 | 长按 500 ms | 长按 → 底部动作表（`actionSheet.ts`，复用 `ui.ts` 的菜单数据结构） |
+| 标题栏 | 网页标题栏：菜单 + 命令中心 + 窗口切换器，无窗口控制按钮 | 菜单收进 ☰ | App 栏（`appBar.ts`）：☰ 打开导航抽屉（`navDrawer.ts`：全部页面、转到文件、命令面板、窗口、传输、完整菜单、省流、设置）；中间是页面标题 + 副标题（编辑器：文件名 + 所在目录，点击打开“已打开的编辑器”；变更：分支 + 变更数）；右侧是本页操作（转到文件、编辑器/仓库/终端的操作表） |
+| 活动栏 | 左侧竖栏 | 左侧竖栏 | 底部导航（`bottomTabs.ts`）：文件 · 编辑器 · 变更 · 各插件页面（Git Graph 类的 `scm/title` 启动项、Claude Code 类的视图容器），最多五个，空位补终端、搜索；点了必定显示该页（不再切换隐藏），再点为重选；徽标显示已打开编辑器数（有未保存时变色）与变更数；键盘弹出时让位 |
+| 侧边栏 | 可拖动宽度 | 覆盖式抽屉 | 全屏页面（标题只有名字的行隐藏，由 App 栏代替），右滑返回（`gestures.ts`）；编辑器激活或面板显示先收起它——页面栈导航（`nav.ts`） |
+| 编辑区 | 分屏网格 | 最多 2 组 | 单组（只显示获得焦点的组）；标签条与面包屑隐藏，改为 App 栏标题 + “已打开的编辑器”表单 + 编辑器操作表（`editorSwitcher.ts`）；无文件时显示空状态；解锁后键盘上方有编辑键行（`editorAccessory.ts`） |
+| 面板（终端/输出） | 底部 | 底部 | 全屏页面（终端、输出、上下文分段），终端视图底部是扩展按键行；编辑器激活时收起（`nav.ts` 的 `revealEditorPage`）；被全屏侧边栏盖住时 toggle 是现出而非藏起（`panel.ts`） |
+| 状态栏 | 完整 | 精简 | 隐藏，关键项（分支、变更数）进 App 栏副标题与导航徽标 |
+| 右键菜单 | 右键 | 长按 500 ms | 长按（轻触觉反馈）→ 底部表单（`actionSheet.ts`，复用 `ui.ts` 的菜单数据结构；把手下拉关闭，子菜单带返回级；手机返回键关闭浮层——`backStack.ts`） |
 | 悬停提示 | hover | 长按 | 长按 |
 | 快捷键 | 全部 | 外接键盘全部 | 命令面板代替；常用操作有显式按钮 |
 
@@ -1584,6 +1591,8 @@ Hub 收到 `/u/<uuid>/<rest>`：查内存表 `uuid → 隧道`，剥掉前缀，
 
 局域网直连时 `basePath = "/"`，代码路径相同；已连 Hub 的 PC 在局域网直连时也接受 `/u/<自己的 uuid>/` 前缀，同一个书签在家和在外都能用（只是主机名不同）。
 
+链接的两种裸形态——`/u/<uuid>/`（`publicBase` 的原文，带尾斜杠）与 `/u/<uuid>`（手剥斜杠）——都按空 rest 进入同一处理，由 PC 按自己的 `/` 应答（未登录重定向登录页、已登录重定向窗口页，Location 带 basePath）。`{*rest}` 不匹配空 rest，两种形态在路由表上单列（`hub/src/lib.rs`）。
+
 Hub 的路径：
 
 | 路径 | 说明 |
@@ -1683,6 +1692,7 @@ listen = "0.0.0.0:8443"
 public_url = "https://remote.example.com"   # 用于拼 publicBase、挑战绑定的主机名
 tls = { mode = "acme", email = "ops@example.com" }  # 或 { mode = "files", cert = "...", key = "..." } 或 { mode = "none" }（前置 Caddy）
 trust_proxy = ["127.0.0.1/32"]              # tls=none 时，只信任这些地址的 X-Forwarded-*
+handshake_rate = 10                         # /tunnel 每 IP 每分钟握手数；0 = 不限（压测/私有大车队）
 join_key = ""                               # 空 = 任何 ggs-remote 都能连；非空 = 需要口令
 max_tunnels = 200
 sessions_per_tunnel = 8
@@ -1741,7 +1751,7 @@ services:
 | Hub 集成（`hub/tests/`） | 起 Hub + 两个假 PC：各自链接只到达各自 PC；改密只断开该 PC 的浏览器会话（4401 经 `CONN_CLOSE`）；同一密钥第二次连接 → 旧隧道收到 `T_REPLACED`；joinKey 错误 → `T_REJECTED`；Hub 重启后 PC 自动重连、链接不变；跨 PC 缓存只命中公开资源 |
 | 守护进程 | `hub::link` 重连退避、隧道恢复后浏览器会话续上、`trait Conn` 两种实现跑同一组 WS 测试、更换链接后旧链接失效、密钥导出导入往返 |
 | 端到端（Playwright） | `hub.spec.ts`：容器内真 Hub + 两个守护进程 + 一个浏览器同时登录两个链接（Cookie、localStorage、Service Worker 互不影响；A 的 Cookie 访问 B 的路径被拒）、改密重登、更换链接后旧链接显示“不在线”页 |
-| 压测 | `scripts/probes/hub-load.mjs`：500 条隧道、2000 个浏览器会话，记录 Hub 内存与 CPU |
+| 压测 | `scripts/probes/hub-load.mjs`（已落地）：N 个假 PC（真 Ed25519 握手）+ M 个浏览器 WS 会话，记录 Hub 内存/CPU 到 `metrics.json` 的 `remote.hubLoad`；压测配置 `handshake_rate = 0` |
 
 ### 20.13 里程碑（追加到 §18）
 

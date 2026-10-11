@@ -28,9 +28,13 @@ const EXCLUDED: &[&str] = &[".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.d
 /// (case-insensitive, matching how the VS Code explorer orders entries).
 #[tauri::command]
 pub async fn list_dir(path: String) -> Result<Vec<DirEntryInfo>, String> {
+    read_dir_sorted(&path)
+}
+
+fn read_dir_sorted(path: &str) -> Result<Vec<DirEntryInfo>, String> {
     let mut dirs = Vec::new();
     let mut files = Vec::new();
-    let entries = fs::read_dir(&path).map_err(|e| format!("{path}: {e}"))?;
+    let entries = fs::read_dir(path).map_err(|e| format!("{path}: {e}"))?;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if EXCLUDED.contains(&name.as_str()) {
@@ -53,6 +57,35 @@ pub async fn list_dir(path: String) -> Result<Vec<DirEntryInfo>, String> {
     files.sort_by_key(|e| e.name.to_lowercase());
     dirs.extend(files);
     Ok(dirs)
+}
+
+/// A window of a directory listing (docs/ggs-remote-plan.md §10.3): the same order
+/// `list_dir` spells, sliced — a remote Explorer on a metered link pages through a huge
+/// directory instead of paying for it whole. `total` is the unfiltered count of that order.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirPage {
+    pub entries: Vec<DirEntryInfo>,
+    pub total: u32,
+    pub offset: u32,
+    pub limit: u32,
+}
+
+#[tauri::command]
+pub async fn list_dir_page(path: String, offset: u32, limit: u32) -> Result<DirPage, String> {
+    let all = read_dir_sorted(&path)?;
+    let total = all.len() as u32;
+    let window = all
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit.min(2000) as usize)
+        .collect();
+    Ok(DirPage {
+        entries: window,
+        total,
+        offset,
+        limit: limit.min(2000),
+    })
 }
 
 #[derive(Serialize)]
@@ -527,6 +560,152 @@ pub fn discard_temp_blob(path: String) -> Result<(), String> {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!("{path}: {e}")),
+    }
+}
+
+/// Where an upload accumulates until its last chunk arrives (a sibling of the target, so the
+/// final rename never crosses a file system).
+fn upload_partial(target: &Path) -> PathBuf {
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    target.with_file_name(format!("{name}.ggs-upload"))
+}
+
+/// Write one upload chunk at `offset` of a file that will be `total` bytes. Chunks must
+/// arrive in order (the partial file's length is the resume point); the last one moves the
+/// partial file into place.
+pub fn write_upload_chunk(
+    target: &Path,
+    offset: u64,
+    total: u64,
+    bytes: &[u8],
+) -> Result<u64, String> {
+    use std::io::{Seek, SeekFrom, Write};
+    if offset + bytes.len() as u64 > total {
+        return Err(format!(
+            "{}: chunk past the declared size",
+            target.display()
+        ));
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let partial = upload_partial(target);
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(offset == 0)
+        .open(&partial)
+        .map_err(|e| format!("{}: {e}", partial.display()))?;
+    let have = file.metadata().map(|m| m.len()).unwrap_or(0);
+    if have != offset {
+        return Err(format!(
+            "upload offset mismatch: the PC has {have} bytes, the chunk starts at {offset}"
+        ));
+    }
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|e| e.to_string())?;
+    file.write_all(bytes)
+        .map_err(|e| format!("{}: {e}", partial.display()))?;
+    let written = offset + bytes.len() as u64;
+    drop(file);
+    if written == total {
+        fs::rename(&partial, target).map_err(|e| format!("{}: {e}", target.display()))?;
+    }
+    Ok(written)
+}
+
+/// Remote Access uploads (docs/ggs-remote-plan.md §11.3): one chunk as the raw request body,
+/// the target in `x-ggs-path` (percent-encoded), its position in `x-ggs-offset` and the
+/// file's size in `x-ggs-total`. Answers the bytes the PC now has.
+#[tauri::command]
+pub fn fs_write_chunk(request: tauri::ipc::Request<'_>) -> Result<u64, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("fs_write_chunk expects a binary body".into());
+    };
+    let header = |name: &str| {
+        request
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("missing {name}"))
+    };
+    let path = crate::cmd_ext::percent_decode(&header("x-ggs-path")?);
+    let offset: u64 = header("x-ggs-offset")?
+        .parse()
+        .map_err(|_| "bad x-ggs-offset")?;
+    let total: u64 = header("x-ggs-total")?
+        .parse()
+        .map_err(|_| "bad x-ggs-total")?;
+    write_upload_chunk(Path::new(&path), offset, total, bytes)
+}
+
+/// Where an interrupted upload of `path` resumes: the partial file's length when it is not
+/// larger than the file being uploaded, else 0 (a different file — start over).
+#[tauri::command]
+pub fn fs_upload_offset(path: String, size: u64) -> u64 {
+    let partial = upload_partial(Path::new(&path));
+    match fs::metadata(&partial) {
+        Ok(meta) if meta.len() <= size => meta.len(),
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod paging_tests {
+    use super::list_dir_page;
+
+    #[tokio::test]
+    async fn pages_the_same_order_list_dir_spells() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..7 {
+            std::fs::write(dir.path().join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        std::fs::create_dir(dir.path().join("zed")).unwrap();
+        let path = dir.path().display().to_string();
+        let page = list_dir_page(path.clone(), 0, 3).await.unwrap();
+        assert_eq!(page.total, 8);
+        assert_eq!(page.entries.len(), 3);
+        // The folder leads: zed, then f0….
+        assert_eq!(page.entries[0].name, "zed");
+        assert_eq!(page.entries[1].name, "f0.txt");
+        let next = list_dir_page(path.clone(), 3, 3).await.unwrap();
+        assert_eq!(next.entries[0].name, "f2.txt"); // page 1 was zed, f0, f1
+        let tail = list_dir_page(path.clone(), 6, 3).await.unwrap();
+        assert_eq!(tail.entries.len(), 2);
+        // Past the end: empty, not an error.
+        let past = list_dir_page(path, 99, 3).await.unwrap();
+        assert!(past.entries.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::{fs_upload_offset, write_upload_chunk};
+
+    #[test]
+    fn chunks_resume_and_land_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("sub").join("photo.bin");
+        let data: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        assert_eq!(
+            write_upload_chunk(&target, 0, 1000, &data[..400]).unwrap(),
+            400
+        );
+        assert!(!target.exists());
+        // A restarted upload asks where to resume.
+        assert_eq!(fs_upload_offset(target.display().to_string(), 1000), 400);
+        assert!(write_upload_chunk(&target, 300, 1000, &data[300..400]).is_err());
+        assert_eq!(
+            write_upload_chunk(&target, 400, 1000, &data[400..]).unwrap(),
+            1000
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), data);
+        assert_eq!(fs_upload_offset(target.display().to_string(), 1000), 0);
+        assert!(write_upload_chunk(&target, 0, 10, &[0; 11]).is_err());
     }
 }
 

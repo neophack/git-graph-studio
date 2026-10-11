@@ -47,6 +47,9 @@ function terminalTheme(): Record<string, string> {
 	};
 }
 
+/** A window event whose `detail` string is written to the active terminal's shell. */
+export const TERMINAL_SEND_EVENT = 'ggs:terminal-send';
+
 export class TerminalView {
 	readonly element: HTMLElement;
 	readonly actions: HTMLElement;
@@ -88,6 +91,15 @@ export class TerminalView {
 		// A page reload (dev hot reload) would otherwise leave the shells running unattached.
 		window.addEventListener('beforeunload', () => {
 			for (const session of this.sessions) void invoke('pty_kill', { id: session.id });
+		});
+		// Keys from outside the terminal's own keyboard — the phone's extra key row (Esc,
+		// Tab, Ctrl+…, arrows; src/remote/terminalKeys.ts) — go to the active shell as is.
+		window.addEventListener(TERMINAL_SEND_EVENT, (event) => {
+			const data = (event as CustomEvent<string>).detail;
+			const session = this.active;
+			if (!session || session.exited || typeof data !== 'string') return;
+			void invoke('pty_write', { id: session.id, data });
+			session.term.focus();
 		});
 		// A theme switch retints the running terminals once the new stylesheet has loaded.
 		window.addEventListener(THEME_EVENT, () => {

@@ -33,6 +33,9 @@ import type { MergeToolbar } from './mergeEditor';
 import { t, trText } from './i18n';
 import { SETTINGS_EVENT, settings } from './settings';
 import { basename, dirname, el, icon, joinPath, notify, quickPick, relativeTo, showContextMenu, showMenuBelow, toPosix, type MenuEntry } from './ui';
+import { editLockDefault, mountEditUnlockBar } from './remote/editLock';
+import { revealEditorPage } from './remote/nav';
+import { windowedEditThreshold } from './remote/openThreshold';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 /** The text editor module once it has been loaded (`textEditor()`): CodeMirror lives in an
@@ -87,6 +90,7 @@ const LARGE_DOC_CHARS = 1024 * 1024;
  *  editor, a large one the read-only indexed view with its Edit button into the full
  *  editor. */
 const WINDOWED_EDIT_BYTES = 8 * 1024 * 1024;
+
 /** Past this the fast viewer's Edit button refuses the swap to the whole-file editor: that
  *  editor holds the file as one JavaScript string, and V8 strings cap at 2²⁹ − 24
  *  characters — a byte past this margin would make the decode throw instead of edit. */
@@ -548,6 +552,18 @@ export class EditorGroup {
 		return this.open.some((e) => e.dirty);
 	}
 
+	/** The group's open editors as Remote Access shows them (R21): the files a tab shows —
+	 *  a file or a markdown preview — with their dirty and active state. */
+	contentSummary(): { path: string; dirty: boolean; active: boolean }[] {
+		const out: { path: string; dirty: boolean; active: boolean }[] = [];
+		for (const editor of this.open) {
+			const input = editor.input;
+			const path = input.kind === 'file' || input.kind === 'markdown' || input.kind === 'history' ? input.path : null;
+			if (path) out.push({ path, dirty: editor.dirty, active: editor === this.active });
+		}
+		return out;
+	}
+
 	/* ---------- Opening ---------- */
 
 	/** Opens a file, optionally placing the cursor at a line (1-based) and column - how
@@ -682,7 +698,7 @@ export class EditorGroup {
 		// rope backend refuses — both still offer the whole-file editor through the view's
 		// Edit button, and only when every editable surface refuses does the plain
 		// read-and-mount path below take over.
-		if (probe !== null && probe.size > WINDOWED_EDIT_BYTES) {
+		if (probe !== null && probe.size > windowedEditThreshold(WINDOWED_EDIT_BYTES)) {
 			const offerWholeEditor = () => void this.swapFastToWholeEditor(editor);
 			if (!probe.longLines && (await this.tryMountDocEdit(editor))) {
 				const showNow = show();
@@ -882,7 +898,7 @@ export class EditorGroup {
 		// A minified one (few enormous lines) or a document the rope backend refuses opens
 		// in the indexed fast viewer instead, still offering the whole-file editor through
 		// its Edit button.
-		if (probe !== null && probe.size > WINDOWED_EDIT_BYTES) {
+		if (probe !== null && probe.size > windowedEditThreshold(WINDOWED_EDIT_BYTES)) {
 			if (!probe.longLines && (await this.tryMountDocEdit(editor, wrap))) return;
 			if (await this.tryMountFastView(editor, wrap, true, () => void this.swapFastToWholeEditor(editor))) {
 				if (!probe.longLines) notify('info', t('viewer.readOnlyFallback') + basename(path));
@@ -1499,13 +1515,21 @@ export class EditorGroup {
 	 *  `parent` defaults to the editor pane; the CAN text form passes its wrapper so the
 	 *  Frames bar stays above the editor. */
 	private async mountTextEditor(editor: Editor, contents: string, parent: HTMLElement = editor.pane): Promise<void> {
-		const { EditorView, EditorState, baseExtensions, completionExtension, bookmarkGutter, languageSlot, blameSlot, keymap, loadLanguage } = await textEditor();
+		const { EditorView, EditorState, baseExtensions, completionExtension, bookmarkGutter, languageSlot, blameSlot, keymap, loadLanguage, editLockSlot, editLockedExtensions } = await textEditor();
 		const [{ diagnosticsExtension }, { extensionDecorationsExtension }, { extensionProviderExtensions }] = await loadEditorExtensions();
+		// A phone's remote workbench opens files locked: the unlock bar carries the one
+		// explicit edit grant (src/remote/editLock.ts). Everywhere else this is false and
+		// the editor is born editable as always.
+		const editLocked = editLockDefault();
 		editor.languageName = 'Plain Text';
 		editor.view = new EditorView({
 			state: EditorState.create({
 				doc: contents,
 				extensions: [
+					// The lock must lead: `EditorState.readOnly`'s facet combine honours the
+					// first value, so baseExtensions' own `readOnly.of(false)` would otherwise
+					// swallow the locked `true` that follows it.
+					...(editLocked ? [editLockSlot.of(editLockedExtensions())] : []),
 					...baseExtensions(false, editor.input.kind === 'file' ? editor.input.path : editor.label),
 					...completionExtension(editor.input.kind === 'file' ? editor.input.path : editor.label),
 					...(editor.input.kind === 'file' ? [diagnosticsExtension(editor.input.path), extensionDecorationsExtension(editor.input.path), extensionProviderExtensions(editor.input.path)] : []),
@@ -1541,6 +1565,7 @@ export class EditorGroup {
 		editor.savedDoc = editor.view.state.doc;
 		editor.savedEol = editor.eol;
 		editor.savedEncoding = editor.encoding;
+		if (editLocked) mountEditUnlockBar(parent, () => editor.view?.dispatch({ effects: editLockSlot.reconfigure([]) }), () => editor.view?.focus());
 		// The language loads asynchronously: by the time it arrives the editor may have been
 		// remounted (a reopen with encoding rebuilds the view), so reconfigure the view that
 		// was built here, and only while it is still the editor's current one.
@@ -2267,6 +2292,11 @@ export class EditorGroup {
 			if (!leaving || leaving.input !== editor.input) this.pushNav(editor);
 		}
 		this.active = editor;
+		// The phone's page stack (src/remote/nav.ts): an editor shown beneath the full-screen
+		// side view (or the full-screen terminal page) navigates to it — tapping a file in the
+		// explorer is "open this file", and with one column the file only becomes visible once
+		// the page above it closes.
+		revealEditorPage();
 		const mruIndex = this.mru.indexOf(editor);
 		if (mruIndex !== -1) this.mru.splice(mruIndex, 1);
 		this.mru.unshift(editor);
@@ -3118,6 +3148,10 @@ export class EditorGroup {
 			const tab = el('div', 'tab' + (editor === this.active ? ' active' : '') + (editor.dirty ? ' dirty' : ''));
 			tab.setAttribute('role', 'tab');
 			tab.setAttribute('aria-selected', editor === this.active ? 'true' : 'false');
+			// What the tab holds, for shells that mirror the strip (the remote phone's page
+			// model tells an extension's own page from a file by these).
+			tab.dataset.kind = editor.input.kind;
+			if (editor.input.kind === 'extpage' || editor.input.kind === 'extdetail') tab.dataset.ext = editor.input.extId;
 			tab.title = editor.input.kind === 'file' ? editor.input.path : editor.label;
 			const iconElement = el('span', 'icon');
 			if (editor.iconSrc) {

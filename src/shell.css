@@ -148,6 +148,9 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 }
 .row:hover { background: var(--vscode-list-hoverBackground); }
 .row.selected { background: var(--vscode-list-inactiveSelectionBackground); }
+/* The remote Explorer's "load more" gate (module 19 §10.3): a listing row like any other,
+   muted — it is an affordance, not an entry. */
+.row.load-more .label { color: var(--vscode-descriptionForeground); font-style: italic; }
 .list:focus-within .row.selected, .row.selected.focused {
 	background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground);
 	outline: 1px solid var(--vscode-list-focusOutline); outline-offset: -1px;

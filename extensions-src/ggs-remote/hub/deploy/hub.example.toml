@@ -1,0 +1,30 @@
+# ggs-remote-hub — one file, nothing else to back up (docs/ggs-remote-plan.md §20.8).
+# Generate a fresh one with: ggs-remote-hub --example-config
+listen = "0.0.0.0:8443"
+
+# The name the https://…/u/<uuid>/ links spell. Empty: taken from each tunnel's Host header —
+# fine when Caddy fronts this Hub with exactly one domain.
+public_url = ""
+
+[tls]
+# "files": cert/key below. "none": a front proxy (see Caddyfile) ends TLS.
+mode = "none"
+cert = ""
+key = ""
+
+# The server password. Empty: any GGS Remote may connect — set one on the public internet
+# unless you mean to run a communal relay.
+join_key = ""
+
+max_tunnels = 200
+sessions_per_tunnel = 8
+bytes_per_day_per_tunnel = 0
+
+# The cross-PC cache for the workbench's immutable assets (identical on every PC).
+asset_cache_mb = 256
+
+# Trust X-Forwarded-For from the loopback Caddy in front (real client IPs for the limits).
+trust_proxy = true
+
+landing_page = false
+metrics_listen = ""            # e.g. "127.0.0.1:9100" for /metrics

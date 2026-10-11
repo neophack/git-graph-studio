@@ -1,0 +1,75 @@
+/* The daemon pages' one stylesheet: light and dark, phone to desktop. */
+:root {
+	--bg: #f5f5f7;
+	--card: #ffffff;
+	--fg: #1d1d1f;
+	--muted: #6e6e73;
+	--line: #d2d2d7;
+	--accent: #0a66d8;
+	--accent-fg: #ffffff;
+	--danger: #c62828;
+	--ok: #2e7d32;
+	--warn: #b26a00;
+	color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg: #1f1f1f;
+		--card: #2a2a2c;
+		--fg: #f2f2f2;
+		--muted: #a1a1a6;
+		--line: #3d3d40;
+		--accent: #3b8eea;
+		--danger: #ef5350;
+		--ok: #66bb6a;
+		--warn: #ffb74d;
+	}
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+body { padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+main { max-width: 880px; margin: 0 auto; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin: 0 auto 16px; }
+.narrow { max-width: 420px; }
+h1 { font-size: 22px; margin: 0 0 16px; }
+h2 { font-size: 17px; margin: 0 0 12px; }
+label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 13px; }
+label.check { display: flex; gap: 8px; align-items: center; color: var(--fg); font-size: 14px; }
+input[type=password], input[type=text] { width: 100%; font: inherit; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); min-height: 44px; }
+button, .button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; font: inherit; min-height: 44px; padding: 0 16px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer; text-decoration: none; }
+button.primary, .button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+button.danger { color: var(--danger); }
+button:disabled { opacity: 0.5; cursor: default; }
+form button { margin-top: 16px; width: 100%; }
+.error { color: var(--danger); min-height: 1.2em; }
+.muted { color: var(--muted); font-size: 13px; }
+.reason { background: color-mix(in srgb, var(--accent) 12%, transparent); padding: 10px 12px; border-radius: 8px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.spacer { flex: 1; }
+.windows { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.window { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+.window h3 { margin: 0; font-size: 16px; word-break: break-all; }
+.window .folders { color: var(--muted); font-size: 13px; word-break: break-all; }
+.badges { display: flex; gap: 6px; flex-wrap: wrap; }
+.badge { font-size: 12px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+.badge.bad { color: var(--danger); border-color: var(--danger); }
+.badge.warn { color: var(--warn); border-color: var(--warn); }
+.tabs { margin: 0; padding: 0; list-style: none; font-size: 13px; max-height: 160px; overflow: auto; }
+.tabs li { padding: 2px 0; word-break: break-all; }
+.tabs li.active { font-weight: 600; }
+.tabs li.dirty::after { content: " ●"; color: var(--warn); }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: auto; }
+.actions button { flex: 1; }
+.links { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.link { text-align: center; }
+.link img { width: 220px; height: 220px; background: #fff; border-radius: 8px; }
+.link code { display: block; word-break: break-all; margin-top: 6px; }
+.banner { position: sticky; top: 0; background: var(--warn); color: #000; padding: 8px 12px; border-radius: 8px; margin-bottom: 12px; }
+.devices { list-style: none; padding: 0; margin: 0; }
+.devices li { display: flex; gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+.devices li:first-child { border-top: 0; }
+details summary { cursor: pointer; min-height: 32px; }
+@media (max-width: 600px) {
+	.card { padding: 16px; border-radius: 10px; }
+	.windows { grid-template-columns: 1fr; }
+}

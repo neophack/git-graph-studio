@@ -1,0 +1,43 @@
+{
+	"name": "ggs-remote",
+	"displayName": "GGS Remote",
+	"publisher": "ggs",
+	"version": "0.1.0",
+	"description": "Use Git Graph Studio from a phone or another computer: one link and a password per PC, every window of it, served by a low-memory tray daemon over HTTPS and a binary WebSocket (ggs-remote/1).",
+	"license": "MIT",
+	"categories": ["Other"],
+	"icon": "media/icon.png",
+	"main": "./extension.js",
+	"engines": {
+		"vscode": "^1.80.0"
+	},
+	"extensionKind": ["workspace"],
+	"activationEvents": ["onStartupFinished"],
+	"contributes": {
+		"commands": [
+			{ "command": "ggsRemote.showPage", "title": "Open", "category": "Remote Access" },
+			{ "command": "ggsRemote.copyLink", "title": "Copy Link", "category": "Remote Access" },
+			{ "command": "ggsRemote.pair", "title": "Show Pairing QR Code in the Browser", "category": "Remote Access" },
+			{ "command": "ggsRemote.changePassword", "title": "Set or Change Password", "category": "Remote Access" },
+			{ "command": "ggsRemote.signOutAll", "title": "Sign Out All Devices", "category": "Remote Access" },
+			{ "command": "ggsRemote.toggle", "title": "Pause / Resume", "category": "Remote Access" },
+			{ "command": "ggsRemote.restartService", "title": "Restart Background Service", "category": "Remote Access" },
+			{ "command": "ggsRemote.uninstallService", "title": "Uninstall Background Service", "category": "Remote Access" }
+		],
+		"configuration": {
+			"title": "GGS Remote",
+			"properties": {
+				"ggsRemote.port": { "type": "number", "default": 47615, "description": "The port of this PC's remote access link." },
+				"ggsRemote.bind": { "type": "string", "default": "0.0.0.0", "description": "The address the link listens on (127.0.0.1 behind a tunnel or reverse proxy)." },
+				"ggsRemote.tlsMode": { "type": "string", "enum": ["self-signed", "custom", "none"], "default": "self-signed", "description": "self-signed: a local CA the devices trust once; custom: your own certificate; none: plain HTTP on loopback only (a tunnel ends TLS)." },
+				"ggsRemote.tlsCertPath": { "type": "string", "default": "", "description": "custom TLS: the certificate chain (PEM), e.g. from `tailscale cert`." },
+				"ggsRemote.tlsKeyPath": { "type": "string", "default": "", "description": "custom TLS: the private key (PEM)." },
+				"ggsRemote.autostart": { "type": "boolean", "default": true, "description": "Start the background service at login, and restart it after a crash." },
+				"ggsRemote.spawnVisible": { "type": "boolean", "default": false, "description": "Windows opened from a remote device also show on this PC's desktop." },
+				"ggsRemote.mdns": { "type": "boolean", "default": true, "description": "Announce the link on the local network (mDNS)." },
+				"ggsRemote.hubUrl": { "type": "string", "default": "", "description": "Reach this PC from anywhere through your own relay (a ggs-remote-hub server): its address, or the whole ggsr1: connect string. Empty = LAN only." },
+				"ggsRemote.hubJoinKey": { "type": "string", "default": "", "description": "The relay's server password, when it has one (also #… inside the connect string)." }
+			}
+		}
+	}
+}

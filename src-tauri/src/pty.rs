@@ -18,6 +18,25 @@ struct PtySession {
     child: Box<dyn portable_pty::Child + Send>,
     /// Kept alive here: dropping the master closes the ConPTY, and a resize needs it.
     master: Box<dyn portable_pty::MasterPty + Send>,
+    /// The last [`TAIL_BYTES`] of output: what a second frontend attaching to this terminal
+    /// (a remote session, docs/ggs-remote-plan.md §8.6 #5) replays before it follows live.
+    tail: std::sync::Arc<Mutex<String>>,
+}
+
+/// How much recent output each terminal keeps for late joiners.
+pub const TAIL_BYTES: usize = 64 * 1024;
+
+/// Append output to a tail buffer, dropping the oldest text past the cap (at a char boundary).
+fn push_tail(tail: &Mutex<String>, text: &str) {
+    let mut tail = tail.lock().unwrap();
+    tail.push_str(text);
+    if tail.len() > TAIL_BYTES {
+        let mut cut = tail.len() - TAIL_BYTES;
+        while !tail.is_char_boundary(cut) {
+            cut += 1;
+        }
+        tail.drain(..cut);
+    }
 }
 
 /// The live terminal sessions, keyed by the id the frontend assigned the tab.
@@ -79,6 +98,8 @@ pub fn pty_create(
     // thread, so an instantly-exiting shell cannot remove the entry after this insert.
     static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let gen = GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tail = std::sync::Arc::new(Mutex::new(String::new()));
+    let reader_tail = tail.clone();
     {
         let mut sessions = state.lock().unwrap();
         if let Some(mut old) = sessions.sessions.remove(&id) {
@@ -91,6 +112,7 @@ pub fn pty_create(
                 writer,
                 child,
                 master: pair.master,
+                tail,
             },
         );
     }
@@ -106,6 +128,7 @@ pub fn pty_create(
                 Ok(n) => {
                     let payload = decode_pty_chunk(&mut carry, &buf[..n]);
                     if !payload.is_empty() {
+                        push_tail(&reader_tail, &payload);
                         let _ =
                             event_app.emit(format!("studio://pty-output-{id}").as_str(), payload);
                     }
@@ -160,6 +183,39 @@ pub fn pty_resize(app: TauriAppHandle, id: u32, cols: u16, rows: u16) -> Result<
             })
             .map_err(|e| format!("Could not resize the terminal: {e}"))
     })
+}
+
+/// The live terminal ids (a frontend attaching to an instance lists the terminals it can
+/// join — §8.6 #5).
+#[tauri::command]
+pub fn pty_list(app: TauriAppHandle) -> Vec<u32> {
+    let state = app.state::<Mutex<PtyState>>();
+    let mut ids: Vec<u32> = state.lock().unwrap().sessions.keys().copied().collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// The recent output of a terminal, at most `bytes` (default and cap: [`TAIL_BYTES`]) — the
+/// replay a joining frontend writes before it follows `studio://pty-output-{id}` live.
+#[tauri::command]
+pub fn pty_tail(app: TauriAppHandle, id: u32, bytes: Option<usize>) -> Result<String, String> {
+    let state = app.state::<Mutex<PtyState>>();
+    let sessions = state.lock().unwrap();
+    let session = sessions.sessions.get(&id).ok_or("no such terminal")?;
+    let tail = session.tail.lock().unwrap();
+    let want = bytes.unwrap_or(TAIL_BYTES).min(TAIL_BYTES);
+    let mut start = tail.len().saturating_sub(want);
+    while !tail.is_char_boundary(start) {
+        start += 1;
+    }
+    Ok(tail[start..].to_owned())
+}
+
+/// How many terminals run in this instance (the Remote Access summary, R21).
+pub fn session_count(app: &TauriAppHandle) -> u32 {
+    app.try_state::<Mutex<PtyState>>()
+        .map(|state| state.lock().unwrap().sessions.len() as u32)
+        .unwrap_or(0)
 }
 
 /// Kill the shell (the "trash" action). The reader thread notices the exit and emits it.
@@ -229,7 +285,18 @@ fn decode_pty_chunk(carry: &mut Vec<u8>, chunk: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_pty_chunk, shell_command};
+    use super::{decode_pty_chunk, push_tail, shell_command, TAIL_BYTES};
+
+    #[test]
+    fn the_tail_keeps_the_newest_output_at_char_boundaries() {
+        let tail = std::sync::Mutex::new(String::new());
+        push_tail(&tail, "héllo ");
+        push_tail(&tail, &"界".repeat(TAIL_BYTES));
+        let kept = tail.lock().unwrap();
+        assert!(kept.len() <= TAIL_BYTES);
+        assert!(kept.ends_with("界"));
+        assert!(kept.chars().all(|c| c == '界'));
+    }
 
     #[test]
     fn the_default_shell_is_the_platform_one_and_ggs_bash_needs_its_sidecar() {

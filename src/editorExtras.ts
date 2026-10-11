@@ -114,10 +114,14 @@ export function bracketColorsExtension(): Extension {
 function buildBracketDecorations(view: EditorView, index: DepthIndex): DecorationSet {
 	const { state } = view;
 	const builder = new RangeSetBuilder<Decoration>();
+	// RangeSetBuilder demands ascending positions: two visible ranges can share a line (a
+	// fold ends mid-line), so a line already scanned is never scanned again.
+	let done = 0;
 	for (const { from, to } of view.visibleRanges) {
-		const first = state.doc.lineAt(from).number;
+		const first = Math.max(state.doc.lineAt(from).number, done + 1);
 		const last = state.doc.lineAt(to).number;
 		for (let n = first; n <= last; n++) {
+			done = n;
 			const line = state.doc.line(n);
 			let depth = index.depthAt(view, n);
 			// `from` is the token's own document position: the tree's leaves do not cover the
@@ -145,7 +149,13 @@ function buildBracketDecorations(view: EditorView, index: DepthIndex): Decoratio
 					enter: (node) => {
 						if (node.to - node.from > 0 && node.node.firstChild) return; // only leaves
 						const name = node.name.toLowerCase();
-						scan(state.sliceDoc(node.from, node.to), !name.includes('string') && !name.includes('comment'), node.from);
+						// A leaf can span lines (a block comment, a template string): only its
+						// part on this line is scanned, or its earlier part would be added again
+						// behind marks already built and the builder throws.
+						const start = Math.max(node.from, line.from);
+						const end = Math.min(node.to, line.to);
+						if (end <= start) return;
+						scan(state.sliceDoc(start, end), !name.includes('string') && !name.includes('comment'), start);
 					}
 				});
 			}

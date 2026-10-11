@@ -139,6 +139,7 @@ Extensions view would call it), a mission line, and a test file.
 | 16 | Symbol MCP Server | The `ggs --mcp` AI bridge over the symbol index |
 | 17 | Code Analysis | tree-sitter parsing and the five analysis tools |
 | 18 | GGS Bash | The bundled bash-like shell and the Terminal Shell setting |
+| 19 | Remote Access | The tray daemon, the Hub relay and the browser workbench (ggs-remote) |
 
 ### 1. Workbench Shell
 
@@ -798,7 +799,25 @@ page shows the integration's state (`claude_mcp_status`).
   diet with unwinding panics, because third-party JS must degrade its own miscompiled
   closures, never abort the backend (`scripts/prepare.mjs` builds it that way),
   `src-tauri/src/ext_protocol.rs` (the `ggs-ext/1` wire
-  protocol, shared with plugin binaries), `src-tauri/src/ext_page_boot.js` (the
+  protocol, shared with plugin binaries), `src-tauri/src/ext_routing.rs` (which of the
+  instance's frontends answers a backend's `ggs.hostRequest` — `main`, or ONE remote
+  session `remote/<n>` (the Relay's `x-ggs-frontend` header, believed only from the
+  Relay's webview; through a Hub these are different people, and one user's click must
+  never land in another's page): a webview's owner, else the frontend whose call is in
+  flight, else the composition root's policy, the Relay then handing a session's
+  request to that session only; an explicit `webview.reveal` from another frontend's
+  call MOVES a one-panel extension's panel (`ext-webview-move`: the asker opens it from
+  the remembered create args and html, the old page drops its tab without a
+  `webviewDisposed`); a session that ends releases what it owned
+  (`remote_host::on_frontend_gone`); plus the compacted registration journal —
+  commands, `setContext` keys, providers, views, status bar items — that a frontend
+  attaching to a running backend replays through `ext_process_registrations`, and
+  that the `ext-host-state` event mirrors live into every frontend but the serving
+  one; and since a backend bakes its webview asset URLs from whichever frontend served
+  its activation, every frontend rewrites those roots to its own before rendering
+  (`extHost.ts`'s `localizeAssetRoots`); 2026-10-11: a remote page never saw
+  claude-code's activation-time `setContext`, so its Claude Code container stayed
+  hidden, and a remote "View Git Graph" opened on the desktop), `src-tauri/src/ext_page_boot.js` (the
   `acquireGgsApi()` bootstrap the protocol composes into served pages),
   `src-tauri/src/ext_child.rs` (the frame host's child processes: one `ext_child_spawn` +
   stdin/kill follow-ups per spawned tool, stdout/stderr streamed as base64 `Channel` events,
@@ -1227,6 +1246,137 @@ way Git Bash does.
   `--login`, the positional words after the command string);
   `tests/ggsBash.test.ts` and the module self-test group
 
+### 19. Remote Access (ggs-remote)
+
+One PC, one link and one password: a tray-resident daemon serves every Git Graph Studio
+window of this machine to a phone's or another computer's browser over HTTPS and the binary
+`ggs-remote/1` WebSocket protocol; a self-hosted relay (`ggs-remote-hub`, no accounts, no
+database) carries the link through NAT. The whole design lives in
+`docs/ggs-remote-plan.md` — this section is the map of where its parts live.
+
+- **The daemon** (`extensions-src/ggs-remote/daemon/`, a crate of its own workspace — the app
+  binary never links it): tray, self-signed TLS, Argon2id password + sessions + epochs
+  (a password change closes every socket with 4401 within a second), the window registry
+  over the local control channel, frame routing to each window's hidden Relay webview,
+  credit-window flow control, the 120 s resume ring, instance lifecycle (SPAWN / close /
+  restart with the dirty-file check), and the Hub client (`src/hub/`: the Ed25519 device
+  key whose public half *is* the link's UUID, the outbound tunnel with challenge handshake
+  and reconnect backoff, and tunneled browser sessions served through the very router the
+  LAN listener uses). The install path (`client.rs`) never shuts down a running daemon of
+  the same or a newer version — it asks the live one over the admin API before touching
+  it, so the plugin's activation cannot drop every remote session for a byte-identical
+  reinstall (2026-10-11: the fresh-home case once killed the daemon for ~20 s, and a page
+  opened in that window showed nothing at all — no explorer, no file contents, no SCM).
+  The extension likewise never pushes its activation-time config/hub patch to a daemon
+  that answers `outcome: "current"` (2026-10-12: the boot pass activates the backend
+  before any frontend has served the stored settings, and that defaults-shaped patch
+  once rebound the live daemon off the port every open page was on — user-made changes
+  still land through the configuration-change push; an install or upgrade starts the
+  daemon fresh and takes the config there).
+  The token-guarded package route (`http/assets.rs`) rewrites `ggs://localhost/`
+  references AND the root-absolute `/assets/…` ones onto the token path — the extension
+  host frame's document is an app asset whose build spells its hashed scripts
+  root-absolute, and unrewritten they fell out of the token route and 404'd at the
+  daemon's root (no frame extension ever activated remotely). Its
+  `tests/integration.rs` covers the LAN paths; `tests/hub_link.rs` runs a real Hub
+  against a real daemon — login, a WebSocket session and a password change's kick, all
+  through `/u/<uuid>/`.
+- **The Hub** (`extensions-src/ggs-remote/hub/`, another crate of its own — never inside the
+  VSIX): `/tunnel` handshake, the uuid → tunnel table (a newer key connection replaces the
+  older, `T_REPLACED`), HTTP and WebSocket proxying with session re-stamping, the offline
+  page every not-online link answers, per-IP limits (handshakes, login entries,
+  offline-probe bans), joinKey in constant time, and the cross-PC cache for the workbench's
+  immutable assets only. Deploy files and the Dockerfile sit in `hub/deploy/`.
+- **The plugin package** (`extensions-src/ggs-remote/`: `extension.js`, `lib/daemon.js`
+  install/upgrade/start, `lib/admin.js` the admin API client, `media/page/` the Remote
+  Access page — links + QR behind the password unlock, devices, password, and the relay
+  section "Reach this PC from anywhere": connect string, the `/u/<uuid>/` link, change-link,
+  export/import of the sealed device key). Its `build.mjs` packs the platform's daemon
+  binary into the VSIX.
+- **The app side** (`src/remote/` + `remote.html` + `relay.html` + `vite.remote.config.ts` +
+  `src-tauri/src/remote_host.rs` + `capabilities/remote-relay.json`): the same frontend with
+  its `@tauri-apps/api` seam aliased onto the WebSocket shims (`tauriShim/`), the
+  responsive shell, and the hidden Relay webview that executes a remote browser's
+  invoke/Channel/listen calls with the real Tauri API. The phone form factor is an app,
+  not a shrunken desktop (redesigned 2026-10-12): one column of full-screen pages over
+  one page model (`pages.ts` — the page showing is read off the workbench's own DOM, and
+  going to a page always shows it, never toggles it away; the extensions' pages are found
+  generically: views containers mirrored off the hidden activity bar, `scm/title`
+  navigation launchers such as Git Graph — no plugin id), the app bar (`appBar.ts`: ☰,
+  the page's title and subtitle — the open file and its folder, the branch and its
+  changes — and the page's own action sheets: the editor's, the repository's git set,
+  the terminal's), the bottom navigation (`bottomTabs.ts`: Files · Editor · Changes ·
+  each extension's page, five at most, with the open-editors and pending-changes badges;
+  a second tap reselects — the Editor's opens the open editors list), the drawer
+  (`navDrawer.ts`: every page, Go to File, the palette, this PC's windows, transfers,
+  the full menus as sheets, Data Saver and Settings), the editor page's chrome
+  (`editorSwitcher.ts`: the tab strip hidden, the open editors and the editor's actions
+  as sheets, an empty state that is never a dead end), the editing row above the
+  keyboard (`editorAccessory.ts`: Tab, arrows, undo/redo, comment, find, save — the
+  arrows and Tab are the editor's own key events), the sheets every touch menu shares
+  (`actionSheet.ts`: grabber, header, back step, drag to dismiss) and the phone's back
+  button closing the overlay on screen (`backStack.ts`); `responsive.ts` marks a raised
+  keyboard (`data-keyboard`) and the body follows the visual viewport, so the bars step
+  aside or lift with the content. A swipe from the left edge closes a side-view page
+  (`gestures.ts`'s `swipeBack`, wired in `shell.ts`), the quick input (palette, quick
+  picks) becomes a full-screen page (`remote.css`), and every file opens read-only with an
+  unlock bar above the editor — one explicit tap reconfigures that editor editable in
+  place (`editLock.ts`; the compartment leads the extension list because CodeMirror's
+  `readOnly` facet combine honours the first value — `editor.ts` and `docEditView.ts`
+  each reconfigure their own). The pages are page-stack navigation (`nav.ts`): an editor
+  activating (`editor.ts`'s activate) closes the side view and the Terminal page above
+  it, the panel showing (`panel.ts`'s show; a covered panel's toggle reveals it instead
+  of hiding it unseen) closes the side view — over the `workbench.toggleSidebar` /
+  `workbench.togglePanel` commands; before this, a file tapped in the explorer and a
+  Terminal tab tap both opened beneath the overlay and looked dead. The phone chrome has
+  a preview over the scripted backend (`dev/remote-phone.html`) and a screenshot pass
+  (`scripts/probes/remote-phone-shots.mjs`).
+  Traffic stays on demand: the Explorer pages huge
+  directories over `list_dir_page` behind a "load more" row (`explorer.ts`, remote shell
+  only), and the windowed-open threshold (`openThreshold.ts`) routes big files to the
+  windowed editor at a sixteenth of the desktop cut. The remote hardening round
+  (2026-10-12, browser-tested to a green live check): the Service Worker's cache lookups
+  are bounded (`sw.ts` — a CacheStorage op wedged behind a large concurrent `put` once
+  held a webview's parser-blocking stylesheet forever, and no frame extension's page
+  ever finished loading; a lost race falls through to the network and refills), the
+  editor area's overlay sync runs on a timer as well as rAF (`editorArea.ts` — a page
+  the compositor never paints starves rAF, and a webview panel opened there stayed
+  invisible), `ensure_relay` waits out the asynchronous window destroy before rebuilding
+  (a rebuild racing it failed "already exists" and no relay ever came back), a backend's
+  start settles are announced (`ext_process.rs`'s `ext-backend-state` — the Extensions
+  view's "not running" no longer outlives the backend it described), a re-attached
+  frontend recovers what it lost (`ext_routing`: a `webview.reveal` for a panel whose
+  frontend died moves it to the asker, `webviewView.setHtml` joins the replay journal —
+  before this a page reload left every extension panel unopenable and the sidebar's
+  webview views blank), and the explorer's context menu hides the desktop-only
+  "Reveal in File Explorer" on the remote shell. `GGS_HOME` now relocates the extension
+  store, the symbol index, the settings and the locale (the hermetic probes relied on
+  it; before, the real `~/.ggs` leaked into every probe run).
+  The module's seams are enforced:
+  `scripts/check-seams.mjs` keeps `__TAURI_INTERNALS__` inside `src/remote/tauriShim/` and
+  the plugin id out of the app tree.
+- Tests: `tests/remote.test.ts` + `tests/remoteResponsive.test.ts` (the shims, transport,
+  relay engine; the phone's page model, app bar, navigation, drawer, sheets and editing
+  row), the daemon and hub crates' `cargo test`,
+  `tests/e2e/remote/` (the Playwright browser specs — `npm run test:e2e-remote`, the
+  Chromium/Firefox/WebKit matrix against TLS daemons: WebKit grants plain-HTTP localhost no
+  Secure-cookie exemption, so the specs ride the shipping self-signed shape; the workbench
+  pair behind `GGS_REMOTE_E2E_FULL=1` and a build that bundles claude-code),
+  `scripts/probes/remote-live-check.mjs` (the live LAN end-to-end probe),
+  `tests/remoteRound.ts` (§17.3's remote round: the sweeps re-run with every invoke
+  crossing the real shim chain — tauriShim → Transport → frames → RelayEngine — against the
+  same scripted handlers; the mock Channel carries the `__GGS_CHAN__:` stream marker),
+  `scripts/probes/remote-hub-multi-check.mjs` (the multi-PC live probe: one Hub, two
+  daemons in hermetic homes, two `--remote-host` instances, one browser user on both
+  `/u/<uuid>/` links — session/Cookie/Storage isolation, the kick reaching only one PC,
+  rate-limit isolation, the front-door guards; both link shapes `/u/<uuid>/` and
+  `/u/<uuid>` serve the PC, never a router 404) and
+  `scripts/probes/hub-load.mjs` (the Hub load probe: N fake PCs with real Ed25519
+  handshakes, M browser sessions, Hub RSS/CPU to `metrics.json` under `remote.hubLoad`;
+  its config sets `handshake_rate = 0`, the knob that lifts the default 10 handshakes
+  per minute per IP). CI:
+  `remote-daemon-test` (three OSes) and `remote-hub-test` in `studio.yml`.
+
 ## Development workflow
 
 ### Before you change anything
@@ -1371,8 +1521,10 @@ Key strings in `src/i18n.ts`, resolve with `t(key)`. Missing translations fall b
 English, never to an empty string.
 
 **Nothing generated in the source tree.**
-`prepare.mjs` writes only to `target/studio/`; `vite build` bundles only `index.html` and
-`ext-host.html`; `dev/` pages never ship.
+`prepare.mjs` writes only to `target/studio/`; `vite build` bundles `index.html`,
+`ext-host.html` and `relay.html`, and the remote workbench build
+(`vite.remote.config.ts`) writes under `target/studio/dist/remote/`; `dev/` pages never
+ship.
 
 ## Testing
 

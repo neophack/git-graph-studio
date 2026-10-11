@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<base href="/">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GGS Remote</title>
+<link rel="stylesheet" href="static/style.css">
+<link rel="icon" href="static/icon.svg">
+</head>
+<body>
+<main>
+	<section class="card">
+		<h1 data-i18n="pairTitle"></h1>
+		<p class="muted" data-i18n="warning"></p>
+		<form id="unlock-form" hidden>
+			<p data-i18n="pairLocked"></p>
+			<label for="unlock-password" data-i18n="password"></label>
+			<input type="password" id="unlock-password" autocomplete="current-password" required autofocus>
+			<button class="primary" data-i18n="unlock"></button>
+			<p class="error" id="unlock-error"></p>
+		</form>
+		<form id="first-form" hidden>
+			<p data-i18n="setFirst"></p>
+			<label for="first-password" data-i18n="newPassword"></label>
+			<input type="password" id="first-password" autocomplete="new-password" required minlength="8">
+			<button class="primary" data-i18n="setPassword"></button>
+			<p class="error" id="first-error"></p>
+		</form>
+		<div id="unlocked" hidden>
+			<p data-i18n="links"></p>
+			<div class="links" id="links"></div>
+			<p class="muted" id="foreign"></p>
+		</div>
+	</section>
+	<section class="card" id="ca" hidden>
+		<h2 data-i18n="caTitle"></h2>
+		<p><span data-i18n="caText"></span> <code id="fingerprint"></code></p>
+		<div class="row">
+			<a class="button" id="ca-ios" data-i18n="caIos"></a>
+			<a class="button" id="ca-crt" data-i18n="caOther"></a>
+		</div>
+		<p class="muted" data-i18n="caIosSteps"></p>
+	</section>
+	<section class="card" id="change" hidden>
+		<h2 data-i18n="changePassword"></h2>
+		<form id="change-form">
+			<label for="change-password" data-i18n="newPassword"></label>
+			<input type="password" id="change-password" autocomplete="new-password" required minlength="8">
+			<button data-i18n="save"></button>
+			<p class="error" id="change-error"></p>
+		</form>
+	</section>
+</main>
+<script type="module" src="static/pair.js"></script>
+</body>
+</html>

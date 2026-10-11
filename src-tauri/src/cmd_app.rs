@@ -69,6 +69,19 @@ fn instance_argv(plan: &NewInstancePlan, launch: Option<&str>) -> (String, Vec<S
     }
 }
 
+/// The program and the arguments before a folder that start another instance (no folder):
+/// what the Remote Access daemon reuses to open and restart windows (remote_host.rs).
+pub fn launch_prefix() -> (String, Vec<String>) {
+    let Ok(exe) = std::env::current_exe() else {
+        return (String::new(), Vec::new());
+    };
+    let (program, mut args) = instance_argv(&new_instance_plan(&exe), None);
+    if matches!(new_instance_plan(&exe), NewInstancePlan::OpenNew { .. }) {
+        args.push("--args".to_owned());
+    }
+    (program, args)
+}
+
 /// Start another instance of this app — the shared body of the File menu's "New Window",
 /// the Dock menu's item, and a Finder "Open With" folder handed to an occupied window. The
 /// child gets null stdio (it shares nothing of this window's pipes) and is reaped on a
@@ -221,16 +234,19 @@ pub mod dock_menu {
         }
     }
 
-    /// The persisted display language, mirroring lib.rs's settings path (`HOME` /
-    /// `USERPROFILE` + `~/.ggs/settings.json`); unreadable or unparseable means English.
+    /// The persisted display language, mirroring lib.rs's settings path (`GGS_HOME`, or
+    /// `HOME` / `USERPROFILE` + `~/.ggs/settings.json`); unreadable or unparseable means English.
     fn stored_locale() -> Option<String> {
-        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-        let contents = std::fs::read_to_string(
-            std::path::Path::new(&home)
-                .join(".ggs")
-                .join("settings.json"),
-        )
-        .ok()?;
+        let file = if let Some(root) = std::env::var_os("GGS_HOME") {
+            if root.is_empty() {
+                return None;
+            }
+            std::path::PathBuf::from(root).join("settings.json")
+        } else {
+            let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+            std::path::Path::new(&home).join(".ggs").join("settings.json")
+        };
+        let contents = std::fs::read_to_string(file).ok()?;
         serde_json::from_str::<serde_json::Value>(&contents)
             .ok()?
             .get("locale")?

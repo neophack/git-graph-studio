@@ -1,0 +1,22 @@
+/* The Remote Access page: the workbench theme's variables only. */
+body { margin: 0; padding: 16px; color: var(--vscode-foreground); background: var(--vscode-editor-background); font: 13px/1.5 var(--vscode-font-family, system-ui, sans-serif); }
+#app { max-width: 880px; margin: 0 auto; }
+.card { border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3)); border-radius: 6px; padding: 14px 16px; margin-bottom: 12px; }
+h2 { font-size: 14px; margin: 0 0 10px; }
+label { display: block; margin: 8px 0 4px; color: var(--vscode-descriptionForeground); }
+label.check { display: flex; gap: 6px; align-items: center; color: var(--vscode-foreground); }
+input[type=password] { width: 100%; max-width: 360px; box-sizing: border-box; padding: 6px 8px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); border-radius: 2px; }
+button { margin: 8px 8px 0 0; padding: 5px 12px; border: 0; border-radius: 2px; cursor: pointer; color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
+button.primary { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
+button.danger { color: var(--vscode-errorForeground); }
+.error { color: var(--vscode-errorForeground); min-height: 1em; }
+.muted { color: var(--vscode-descriptionForeground); }
+.row { display: flex; flex-wrap: wrap; gap: 4px; }
+.links { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+.link { text-align: center; }
+.link code { display: block; word-break: break-all; margin: 6px 0; }
+.qr { width: 200px; height: 200px; background: #fff; border-radius: 4px; }
+.devices { list-style: none; padding: 0; margin: 0; }
+.devices li { display: flex; gap: 8px; align-items: center; padding: 6px 0; border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2)); }
+.devices li:first-child { border-top: 0; }
+.spacer { flex: 1; }

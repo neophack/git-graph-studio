@@ -253,4 +253,27 @@ if (claudeCode?.path) {
 	console.warn('claude-code: the marketplace fetch failed — not packed (a required build would have failed already)');
 }
 
+/* GGS Remote (docs/ggs-remote-plan.md §15.3) is the one bundled package with a local source:
+ * its packer builds the tray daemon for this platform (cargo, release) and writes the VSIX
+ * straight into the bundled directory. On by default for a build pass, opt-in for a dev
+ * start (GGS_BUNDLE_GGS_REMOTE=1) so `tauri dev` stays quick; GGS_BUNDLE_GGS_REMOTE=0 opts a
+ * build out. */
+const bundleRemote = process.env.GGS_BUNDLE_GGS_REMOTE ?? (buildPass ? '1' : '0');
+if (bundleRemote === '1') {
+	const packer = join(appDir, 'extensions-src', 'ggs-remote', 'build.mjs');
+	const packed = spawnSync(process.execPath, [packer, '--out', join(bundledDir, 'ggs-remote.vsix')], { stdio: 'inherit' });
+	if (packed.status !== 0) throw new Error('packing GGS Remote failed');
+} else {
+	console.log('ggs-remote: not packed (GGS_BUNDLE_GGS_REMOTE=1 packs it into a dev run)');
+}
+
+/* The remote workbench build (vite.remote.config.ts → dist/remote/) is what an instance
+ * serves to the GGS Remote daemon. A build pass makes it after the main build
+ * (`npm run build:vite`); a dev start makes it once when it is missing, since the debug
+ * app reads it from disk (`npm run dev:remote` keeps it current while editing). */
+if (!buildPass && process.env.GGS_REMOTE_BUILD !== '0' && !existsSync(join(out, 'dist', 'remote', 'remote.html'))) {
+	const vite = spawnSync('npx vite build -c vite.remote.config.ts', { cwd: appDir, shell: true, stdio: 'inherit' });
+	if (vite.status !== 0) console.warn('the remote workbench build failed — remote sessions of this dev run will not load');
+}
+
 console.log(`Prepared ${out}`);

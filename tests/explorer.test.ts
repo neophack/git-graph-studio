@@ -163,6 +163,26 @@ describe('explorer', () => {
 		expect(texts('.tree .row .label')).toEqual([]);
 	});
 
+	it('hides the desktop-only Reveal entry on the remote shell, keeps it on the desktop', async () => {
+		fileSystem({ [ROOT]: ['README.md'] });
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoot(ROOT);
+		await flush();
+		// On the desktop the PC's own File Explorer is a real place to show.
+		rightClick(document.querySelector('.tree .row'));
+		expect(menuLabels()).toContain('Reveal in File Explorer');
+		// The remote workbench's marker (boot.ts sets it before main.ts loads): a browser
+		// page has no such place — the entry hides while the rest of the menu stands.
+		document.documentElement.setAttribute('data-remote-shell', '');
+		try {
+			rightClick(document.querySelector('.tree .row'));
+			expect(menuLabels()).not.toContain('Reveal in File Explorer');
+			expect(menuLabels()).toContain('Copy Path');
+		} finally {
+			document.documentElement.removeAttribute('data-remote-shell');
+		}
+	});
+
 	it('opens folders in the integrated terminal and settles inline inputs cancelled by a refresh', async () => {
 		fileSystem({ [ROOT]: ['src/', 'README.md'], [`${ROOT}\\src`]: [] });
 		const explorer = new Explorer(document.getElementById('sidebar')!);
@@ -329,5 +349,67 @@ describe('explorer renames and refreshes', () => {
 		});
 		await explorer.refresh();
 		expect(texts('.tree .row .label')).toEqual(['src', 'a.ts', 'b.ts']);
+	});
+
+	// 1200 rows reconcile four times (three pages plus the refresh); under the full suite's
+	// load — the vm pool shares one jsdom per worker, so co-resident files' timers interleave —
+	// that crosses vitest's 5 s default, and a timeout here leaves this test's in-flight
+	// refresh landing in the NEXT test's recording. The volume is the point; the budget follows.
+	it('pages huge directories over the remote shell, loading more on demand', async () => {
+		// The remote workbench's marker (boot.ts sets it before main.ts loads): over the
+		// WebSocket every byte is metered, so a directory pages instead of arriving whole.
+		document.documentElement.setAttribute('data-remote-shell', '');
+		try {
+			const many = Array.from({ length: 1200 }, (_, i) => `f${String(i).padStart(4, '0')}.txt`);
+			fileSystem({ [ROOT]: many });
+			const pages: Record<string, unknown>[] = [];
+			backend.on('list_dir_page', (args) => {
+				pages.push({ ...args });
+				const offset = Number(args['offset']);
+				const limit = Number(args['limit']);
+				return { entries: many.slice(offset, offset + limit).map((name) => ({ name, path: `${ROOT}\\${name}`, isDir: false, size: 0 })), total: many.length, offset, limit };
+			});
+			const explorer = new Explorer(document.getElementById('sidebar')!);
+			explorer.setRoot(ROOT);
+			await flush();
+			// The first 500 arrive; a "load more" row gates the rest.
+			expect(backend.callsTo('list_dir')).toHaveLength(0);
+			expect(document.querySelectorAll('.tree .row:not(.load-more)')).toHaveLength(500);
+			const more = document.querySelector<HTMLElement>('.tree .row.load-more')!;
+			expect(more.textContent).toContain('500');
+			expect(more.textContent).toContain('1200');
+
+			click(more);
+			await flush();
+			expect(pages.at(-1)).toMatchObject({ offset: 500 });
+			expect(document.querySelectorAll('.tree .row:not(.load-more)')).toHaveLength(1000);
+			expect(document.querySelector('.tree .row.load-more')).not.toBeNull();
+
+			click(document.querySelector('.tree .row.load-more')!);
+			await flush();
+			expect(pages.at(-1)).toMatchObject({ offset: 1000 });
+			expect(document.querySelectorAll('.tree .row:not(.load-more)')).toHaveLength(1200);
+			// The last page landed: the gate row is gone.
+			expect(document.querySelector('.tree .row.load-more')).toBeNull();
+
+			// A refresh keeps what was loaded (the same span re-read), not the whole listing.
+			await explorer.refresh();
+			expect(pages.at(-1)).toMatchObject({ offset: 0 });
+			expect(document.querySelectorAll('.tree .row:not(.load-more)')).toHaveLength(1200);
+			expect(document.querySelector('.tree .row.load-more')).toBeNull();
+		} finally {
+			document.documentElement.removeAttribute('data-remote-shell');
+		}
+	}, 20_000);
+
+	it('keeps the whole listing on the desktop (no remote shell marker)', async () => {
+		const many = Array.from({ length: 1200 }, (_, i) => `f${i}.txt`);
+		fileSystem({ [ROOT]: many });
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoot(ROOT);
+		await flush();
+		expect(backend.callsTo('list_dir_page')).toHaveLength(0);
+		expect(document.querySelectorAll('.tree .row')).toHaveLength(1200);
+		expect(document.querySelector('.tree .row.load-more')).toBeNull();
 	});
 });

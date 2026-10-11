@@ -4,10 +4,19 @@
 
 import { vi } from 'vitest';
 
+import { CHANNEL_PREFIX } from '../src/remote/frame';
+
 type Handler = (args: Record<string, unknown>) => unknown;
 
 export const backend = {
 	handlers: new Map<string, Handler>(),
+	/** §17.3's remote round: when set, every invoke crosses this instead of answering from
+	 *  the handler map directly — the remote shims' wire (Transport → frames → RelayEngine),
+	 *  with the same recording. */
+	wire: null as ((command: string, args: Record<string, unknown>) => Promise<unknown>) | null,
+	/** The remote round's channel hook: every Channel constructed while the wire is up
+	 *  registers itself with the transport, so streamed events flow both ways. */
+	wireChannel: null as ((channel: Channel<unknown>) => void) | null,
 	calls: [] as { command: string; args: Record<string, unknown> }[],
 	listeners: new Map<string, ((event: { payload: unknown }) => void)[]>(),
 	dialog: { openResult: null as string | null, saveResult: null as string | null },
@@ -28,6 +37,8 @@ export const backend = {
 		return this.calls.filter((c) => c.command === command).map((c) => c.args);
 	},
 	reset(): void {
+		this.wire = null;
+		this.wireChannel = null;
 		this.handlers.clear();
 		this.calls.length = 0;
 		this.listeners.clear();
@@ -43,9 +54,21 @@ export const backend = {
 
 /** The stand-in for Tauri's `Channel`: a handler can push events into a channel it was given
  *  as an argument (`(args.onEvent as Channel<T>).onmessage(event)`), exactly as the backend
- *  does through `tauri::ipc::Channel`. */
+ *  does through `tauri::ipc::Channel`. Under §17.3's remote round the channel also carries
+ *  the wire's stream id: it serializes as the `__GGS_CHAN__<stream>` marker (the shim
+ *  Channel's own shape), the RelayEngine revives it, and events pushed relay-side land back
+ *  in this channel's `onmessage`. */
 export class Channel<T = unknown> {
 	onmessage: (event: T) => void = () => undefined;
+	/** The remote round's stream id, when the wire carries this channel. */
+	wireStream: number | null = null;
+	constructor(onmessage?: (event: T) => void) {
+		if (onmessage) this.onmessage = onmessage;
+		backend.wireChannel?.(this);
+	}
+	toJSON(): unknown {
+		return this.wireStream === null ? undefined : `${CHANNEL_PREFIX}${this.wireStream}`;
+	}
 	/** Test hook: deliver one event, as the backend's `send` would. */
 	send(event: T): void {
 		this.onmessage(event);
@@ -72,16 +95,17 @@ export function encodeRawFile(file: { contents: string | null; binary?: boolean;
 	return payload;
 }
 
-export async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+/** Resolve a command to its scripted handler — the one resolution both rounds share: the
+ *  desktop `invoke` and the remote round's RelayEngine answer from it. The raw-file bridge
+ *  rides here so editors read identically over the wire. */
+export function dispatchScripted(command: string, args: Record<string, unknown> = {}): Promise<unknown> {
 	// `has`, not `get`: a test's handler map may default unknown commands to a null answer
 	// by overriding `get` (DefaultingHandlers), and that must not hide the raw bridge below.
 	let handler = backend.handlers.has(command) ? backend.handlers.get(command) : undefined;
-	let recorded = command;
 	// The editor reads text over `read_file_raw`; a test that only scripts `read_file` keeps
-	// working: its answer is encoded into the raw payload here, and the call is recorded as
-	// the `read_file` it was answered by. The scripted handler is found through `get` too, so
-	// a defaulting layer's `read_file` answers as well; one that answers null leaves the
-	// command unhandled, exactly as an unscripted one.
+	// working: its answer is encoded into the raw payload here. The scripted handler is found
+	// through `get` too, so a defaulting layer's `read_file` answers as well; one that
+	// answers null leaves the command unhandled, exactly as an unscripted one.
 	if (!handler && command === 'read_file_raw') {
 		const read = backend.handlers.get('read_file');
 		if (read) {
@@ -90,15 +114,23 @@ export async function invoke<T>(command: string, args: Record<string, unknown> =
 				if (file == null) throw new Error('unhandled invoke: read_file_raw');
 				return encodeRawFile(file);
 			};
-			recorded = 'read_file';
 		}
 	}
-	backend.calls.push({ command: recorded, args });
 	// A map that overrides `get` with its own defaulting layer still answers; only a truly
 	// unhandled command throws.
 	handler ??= backend.handlers.get(command);
 	if (!handler) throw new Error(`unhandled invoke: ${command}`);
-	return (await handler(args)) as T;
+	return Promise.resolve(handler(args));
+}
+
+export async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+	// The remote round rides the wire: the call is recorded here (once), answered there.
+	if (backend.wire) {
+		backend.calls.push({ command, args });
+		return backend.wire(command, args) as Promise<T>;
+	}
+	backend.calls.push({ command: command === 'read_file_raw' && backend.handlers.get('read_file') ? 'read_file' : command, args });
+	return (await dispatchScripted(command, args)) as T;
 }
 
 export async function listen(event: string, handler: (event: { payload: unknown }) => void): Promise<() => void> {

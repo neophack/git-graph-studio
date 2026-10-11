@@ -11,7 +11,7 @@
 // the reveals all go through the model — no scroll event is ever an input, except the
 // scroller's own moves (CodeMirror keeping the caret in view), which are read back into it.
 
-import { EditorState, StateEffect, StateField } from '@codemirror/state';
+import { EditorState, StateEffect, StateField, Compartment } from '@codemirror/state';
 import { Decoration, type DecorationSet, EditorView, drawSelection, highlightActiveLine, highlightSpecialChars, keymap, lineNumbers } from '@codemirror/view';
 import { attachWheel, type Disposable } from './scroll/input';
 import { type AutoscrollStrategy, ScrollModel, VERTICAL_SCROLL_MARGIN } from './scroll/model';
@@ -21,6 +21,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import { DocFindController, type DocFindHost, type DocFindMatch, type DocFindSpec } from './docFind';
 import { toggleBlockComment, toggleLineComment } from './comments';
+import { editLockDefault, mountEditUnlockBar } from './remote/editLock';
 import { vscodeHighlighting } from './cmTheme';
 import { el, notify } from './ui';
 import { Channel, invoke } from '@tauri-apps/api/core';
@@ -58,6 +59,9 @@ const SYNC_DELAY_MS = 150;
 const LANDING_SETTLE_MS = 500;
 /** How long after a synced edit the hot-exit backup is written (backend-side, no payload). */
 const BACKUP_DELAY_MS = 3000;
+/** The phone's read-only open's reconfigure point (src/remote/editLock.ts): this editor
+ *  keeps its own, so the unlock bar reconfigures exactly the slice it lives on. */
+const docEditLockSlot = new Compartment();
 
 /* ---------- The whole-file find's window decorations ---------- */
 
@@ -233,8 +237,10 @@ export class EditableDocView {
 	}
 
 	private buildEditor(): void {
-		this.cm = new EditorView({
-			state: EditorState.create({
+		// The phone's read-only open applies here too (src/remote/editLock.ts): a windowed
+		// large file browses locked until the bar's unlock reconfigures the slice editable.
+		const editLocked = editLockDefault();
+		this.cm = new EditorView({			state: EditorState.create({
 				// Absolute line numbers: the gutter's own 1-based number plus the window's offset.
 				extensions: [
 					lineNumbers({ formatNumber: (n) => String(n + this.first) }),
@@ -283,11 +289,16 @@ export class EditableDocView {
 							if (line < EDGE / 2 || line > this.synced.length - EDGE / 2) void this.ensureAround(this.first + line, false);
 						}
 						if (update.docChanged || update.selectionSet) this.onStatusChange?.();
-					})
+					}),
+					...(editLocked ? [docEditLockSlot.of([EditorState.readOnly.of(true), EditorView.editable.of(false)])] : [])
 				]
 			}),
 			parent: this.host
 		});
+		if (editLocked) {
+			const cm = this.cm;
+			mountEditUnlockBar(this.root, () => cm.dispatch({ effects: docEditLockSlot.reconfigure([]) }), () => cm.focus());
+		}
 		this.lineHeight = this.cm.defaultLineHeight || 19;
 		this.scroll.setRowHeight(this.lineHeight);
 		const scrollDOM = this.cm.scrollDOM;

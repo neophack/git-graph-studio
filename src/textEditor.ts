@@ -22,6 +22,17 @@ import { settings } from './settings';
 import { icon } from './ui';
 
 export { EditorState, EditorView, keymap, openSearchPanel, openReplacePanel, redo, selectAll, undo, completionExtension };
+
+/** The phone's read-only open's reconfigure point (src/remote/editLock.ts): the locked
+ *  configuration is editor state, lifted in place by the unlock bar's click. */
+export const editLockSlot = new Compartment();
+
+/** The locked configuration: user input, the touch keyboard and paste are all refused
+ *  while selection and copy keep working (`state.readOnly` also gates the commands that
+ *  check it; `editable: false` takes the content out of contenteditable). */
+export function editLockedExtensions(): Extension[] {
+	return [EditorState.readOnly.of(true), EditorView.editable.of(false)];
+}
 export type { Extension };
 
 /** The extensions every text surface shares: VS Code-like gutters, selection, search,

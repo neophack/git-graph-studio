@@ -1,0 +1,14 @@
+<!-- The Relay page (docs/ggs-remote-plan.md §8.3): a hidden webview the instance opens while
+     remote sessions are attached. It runs the remote sessions' calls with the real Tauri API
+     and forwards the results to the GGS Remote daemon over a loopback WebSocket. Never
+     visible; a Vite rollup input beside index.html and ext-host.html. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<title>Git Graph Studio - Remote Relay</title>
+</head>
+<body>
+	<script type="module" src="/src/remote/relayMain.ts"></script>
+</body>
+</html>

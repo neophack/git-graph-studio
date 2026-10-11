@@ -17,7 +17,7 @@ import { fileIcon, fileIconColor } from './editor';
 import type { StatusMap } from './explorer';
 import { t, tf, trText } from './i18n';
 import * as state from './state';
-import { actionButton, basename, confirmDialog, el, icon, notify, quickInput, quickPick, showContextMenu, showMenuBelow, toPosix, type MenuEntry, type QuickPickItem } from './ui';
+import { actionButton, basename, confirmDialog, el, icon, liveSidebarTitle, notify, quickInput, quickPick, showContextMenu, showMenuBelow, toPosix, type MenuEntry, type QuickPickItem } from './ui';
 
 interface ScmChange {
 	path: string;
@@ -268,7 +268,7 @@ export class SourceControlView {
 
 	constructor(container: HTMLElement, private readonly commands: CommandRegistry | null = null) {
 		this.container = container;
-		this.title = el('div', 'sidebar-title', [el('span', 'label', ['Source Control'])]);
+		this.title = liveSidebarTitle('scm.title');
 		this.content = el('div', 'view-pane');
 		container.append(this.title, this.content);
 		this.render();

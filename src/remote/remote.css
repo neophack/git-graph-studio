@@ -1,0 +1,437 @@
+/* The remote shell (docs/ggs-remote-plan.md §11.2): the desktop workbench, re-laid out by
+   form factor. Everything keys on <html data-form-factor data-pointer> (responsive.ts);
+   colours come only from the theme variables. */
+
+/* A browser tab has no native window to control. */
+.remote-shell .window-controls { display: none !important; }
+.remote-shell #titlebar { padding-left: max(0px, env(safe-area-inset-left)); padding-right: max(0px, env(safe-area-inset-right)); }
+.ggs-window-switcher { margin-left: 6px; }
+
+/* Touch: bigger targets, no hover-only affordances, no grey flash on tap. */
+:root.remote-shell[data-pointer="coarse"] { --row-height: 36px; --tab-height: 40px; -webkit-tap-highlight-color: transparent; }
+:root.remote-shell[data-pointer="coarse"] .action-btn { min-width: 32px; min-height: 32px; }
+:root.remote-shell[data-pointer="coarse"] .row .actions { visibility: visible !important; opacity: 1 !important; }
+/* A pane header's actions (Source Control's "View Git Graph") are hover-revealed on the
+   desktop; a finger has no hover. */
+:root.remote-shell[data-pointer="coarse"] .pane-header .actions { visibility: visible !important; }
+
+/* ---------- Tablet: the side bar becomes a drawer over the editor ---------- */
+:root.remote-shell[data-form-factor="tablet"] #sidebar:not([hidden]) {
+	position: fixed; z-index: 40; left: var(--activity-size); top: 35px; bottom: var(--status-height);
+	width: min(360px, 70vw) !important;
+	box-shadow: 0 0 16px rgba(0, 0, 0, 0.35);
+}
+:root.remote-shell[data-form-factor="tablet"] #sidebarSash { display: none !important; }
+
+/* ===================================================================================
+   Phone: an app, not a shrunken desktop. One column of full-screen pages (pages.ts):
+   the app bar on top, the page, the editing row while typing, the bottom navigation.
+   Every bar is in the body's own flex column, and the body follows the visual viewport,
+   so a raised keyboard lifts the editing row and the terminal keys with the content.
+   =================================================================================== */
+:root.remote-shell[data-form-factor="phone"] {
+	--ggs-appbar-h: 52px;
+	--ggs-nav-h: 58px;
+	--row-height: 40px;
+	--tab-height: 40px;
+	--ggs-sep: var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.25)));
+	--ggs-accent: var(--vscode-activityBar-activeBorder, var(--vscode-focusBorder));
+	--ggs-muted: var(--vscode-descriptionForeground);
+	--ggs-press: var(--vscode-toolbar-activeBackground, var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2)));
+	--ggs-dirty: var(--vscode-gitDecoration-modifiedResourceForeground, #e2c08d);
+	--ggs-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+	/* No double-tap zoom delay; no pull-to-refresh (it would reload the workbench). */
+	touch-action: manipulation;
+	overscroll-behavior: none;
+}
+:root.remote-shell[data-form-factor="phone"] body {
+	position: fixed; left: 0; right: 0; top: var(--vv-top, 0px);
+	height: var(--vvh, 100%);
+	overscroll-behavior: none;
+}
+/* The desktop chrome steps aside: its jobs moved to the app bar, the navigation and the
+   drawer. The title bar stays in the DOM (the workbench keeps filling it). */
+:root.remote-shell[data-form-factor="phone"] #titlebar,
+:root.remote-shell[data-form-factor="phone"] #activitybar,
+:root.remote-shell[data-form-factor="phone"] #statusbar,
+:root.remote-shell[data-form-factor="phone"] #sidebarSash,
+:root.remote-shell[data-form-factor="phone"] #panelSash,
+:root.remote-shell[data-form-factor="phone"] .menubar { display: none !important; }
+:root.remote-shell[data-form-factor="phone"] #workbench { position: relative; }
+:root.remote-shell[data-form-factor="phone"] #editorPart { position: relative; }
+
+/* Pages over the editor: a side view, or the panel. */
+:root.remote-shell[data-form-factor="phone"] #sidebar:not([hidden]) {
+	position: absolute; z-index: 40; inset: 0;
+	width: auto !important; min-width: 0; border-right: 0;
+	padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right);
+}
+:root.remote-shell[data-form-factor="phone"] #panel:not([hidden]) {
+	position: absolute; z-index: 35; inset: 0; height: auto !important; min-height: 0; border-top: 0;
+	padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right);
+}
+
+/* ---------- The app bar ---------- */
+.ggs-appbar[hidden] { display: none !important; }
+.ggs-appbar {
+	flex: none; display: flex; align-items: center; gap: 2px; position: relative; z-index: 50;
+	height: calc(var(--ggs-appbar-h) + env(safe-area-inset-top));
+	padding: env(safe-area-inset-top) max(4px, env(safe-area-inset-right)) 0 max(4px, env(safe-area-inset-left));
+	box-sizing: border-box;
+	background: var(--vscode-titleBar-activeBackground, var(--vscode-sideBar-background));
+	color: var(--vscode-titleBar-activeForeground, var(--vscode-foreground));
+	border-bottom: 1px solid var(--vscode-titleBar-border, var(--ggs-sep));
+	user-select: none;
+}
+.ggs-appbar-btn {
+	width: 44px; height: 44px; flex: none; display: inline-flex; align-items: center; justify-content: center;
+	padding: 0; border: 0; border-radius: 12px; background: transparent; color: inherit;
+}
+.ggs-appbar-btn .codicon { font-size: 20px; }
+.ggs-appbar-btn:active { background: var(--ggs-press); }
+.ggs-appbar-actions { display: flex; align-items: center; flex: none; }
+.ggs-appbar-heading {
+	flex: 1; min-width: 0; height: 44px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center;
+	padding: 0 8px; border: 0; border-radius: 10px; background: transparent; color: inherit; text-align: left; cursor: default;
+}
+.ggs-appbar-heading.switcher { cursor: pointer; }
+.ggs-appbar-heading.switcher:active { background: var(--ggs-press); }
+.ggs-appbar-heading .title { display: flex; align-items: center; gap: 6px; max-width: 100%; font-size: 16px; font-weight: 600; line-height: 21px; }
+.ggs-appbar-heading .title .text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ggs-appbar-heading .chevron { font-size: 14px; opacity: 0.7; }
+.ggs-appbar-heading .chevron[hidden] { display: none !important; }
+.ggs-appbar-heading .subtitle { max-width: 100%; font-size: 12px; line-height: 16px; color: var(--ggs-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ggs-appbar-heading .subtitle[hidden] { display: none; }
+.dirty-dot { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--ggs-dirty, #e2c08d); }
+.dirty-dot[hidden] { display: none; }
+
+/* ---------- The bottom navigation ---------- */
+.ggs-bottom-tabs[hidden] { display: none !important; }
+.ggs-bottom-tabs {
+	flex: none; display: flex; position: relative; z-index: 50;
+	height: calc(var(--ggs-nav-h) + env(safe-area-inset-bottom)); box-sizing: border-box;
+	padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+	background: var(--vscode-activityBar-background, var(--vscode-sideBar-background));
+	border-top: 1px solid var(--vscode-activityBar-border, var(--ggs-sep));
+	user-select: none;
+}
+/* The keyboard is up: the navigation steps aside for the content (and the editing row). */
+:root[data-keyboard] .ggs-bottom-tabs { display: none; }
+.ggs-bottom-tabs button {
+	flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+	padding: 6px 2px 4px; border: 0; background: none;
+	color: var(--vscode-activityBar-inactiveForeground, var(--ggs-muted)); font-size: 11px;
+}
+.ggs-bottom-tabs .pill {
+	position: relative; width: 56px; max-width: 100%; height: 30px; border-radius: 15px;
+	display: flex; align-items: center; justify-content: center;
+	transition: background-color 160ms var(--ggs-ease);
+}
+.ggs-bottom-tabs button:active .pill { background: var(--ggs-press); }
+.ggs-bottom-tabs button.active { color: var(--vscode-activityBar-foreground, var(--vscode-foreground)); }
+.ggs-bottom-tabs button.active .pill { background: var(--vscode-list-inactiveSelectionBackground, var(--ggs-press)); }
+@supports (background: color-mix(in srgb, red 50%, transparent)) {
+	.ggs-bottom-tabs button.active .pill { background: color-mix(in srgb, var(--ggs-accent) 24%, transparent); }
+}
+.ggs-bottom-tabs .codicon { font-size: 22px; }
+.ggs-bottom-tabs .ext-icon { width: 22px; height: 22px; object-fit: contain; }
+.ggs-bottom-tabs .label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; letter-spacing: 0.01em; }
+.ggs-bottom-tabs button.active .label { font-weight: 600; }
+.ggs-bottom-tabs .badge {
+	position: absolute; top: -3px; left: calc(50% + 5px);
+	min-width: 16px; height: 16px; padding: 0 4px; box-sizing: border-box; border-radius: 8px;
+	background: var(--vscode-activityBarBadge-background); color: var(--vscode-activityBarBadge-foreground);
+	font-size: 10px; font-weight: 600; line-height: 16px; text-align: center;
+	box-shadow: 0 0 0 2px var(--vscode-activityBar-background, var(--vscode-sideBar-background));
+}
+.ggs-bottom-tabs .badge[hidden] { display: none; }
+/* An unsaved editor: the count wears the modified colour. */
+.ggs-bottom-tabs .badge.dirty { background: var(--ggs-dirty); color: #1f1f1f; }
+
+/* ---------- The editor page ---------- */
+/* The tab strip and the breadcrumbs move to the app bar and the open editors sheet. */
+:root.remote-shell[data-form-factor="phone"] .tabs-container,
+:root.remote-shell[data-form-factor="phone"] .breadcrumbs,
+:root.remote-shell[data-form-factor="phone"] .welcome { display: none !important; }
+/* One group on screen: the focused one (an editor an extension opened "beside" takes the
+   page; the open editors sheet reaches the rest). */
+:root.remote-shell[data-form-factor="phone"] .editor-split-child:not(:has(.editor-group-box.focused)) { display: none !important; }
+:root.remote-shell[data-form-factor="phone"] .editor-sash { display: none !important; }
+:root.remote-shell[data-form-factor="phone"] .editor-group-box { min-width: 0; }
+:root.remote-shell[data-form-factor="phone"] .minimap,
+:root.remote-shell[data-form-factor="phone"] .cm-minimap,
+:root.remote-shell[data-form-factor="phone"] .cm-sticky-scroll { display: none !important; }
+
+.ggs-editor-empty[hidden] { display: none !important; }
+.ggs-editor-empty {
+	position: absolute; inset: 0; z-index: 30; overflow-y: auto; overscroll-behavior: contain;
+	display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+	padding: 24px max(20px, env(safe-area-inset-right)) 24px max(20px, env(safe-area-inset-left));
+	background: var(--vscode-editor-background); text-align: center;
+}
+.ggs-editor-empty .hero { font-size: 48px; color: var(--ggs-muted); opacity: 0.6; margin-bottom: 4px; }
+.ggs-editor-empty .title { font-size: 17px; font-weight: 600; }
+.ggs-editor-empty .text { max-width: 300px; font-size: 13px; line-height: 19px; color: var(--ggs-muted); }
+.ggs-editor-empty .actions { display: flex; flex-direction: column; gap: 8px; width: 100%; max-width: 300px; margin-top: 12px; }
+.ggs-editor-empty .actions button {
+	display: flex; align-items: center; justify-content: center; gap: 8px; height: 44px; border-radius: 10px;
+	border: 1px solid var(--vscode-button-border, var(--ggs-sep));
+	background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, inherit);
+	font-size: 14px; font-weight: 500;
+}
+.ggs-editor-empty .actions button.primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: transparent; }
+.ggs-editor-empty .actions button:active { filter: brightness(1.15); }
+.ggs-editor-empty .open-list { width: 100%; max-width: 360px; margin-top: 20px; text-align: left; }
+.ggs-editor-empty .open-list .section { padding: 0 4px 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ggs-muted); }
+
+/* The locked editor's bar (editLock.ts): a phone opens files read-only — the bar names the
+   state and carries the one tap that lifts it. */
+.edit-lock-bar {
+	display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 4px 12px;
+	padding-left: max(12px, env(safe-area-inset-left));
+	background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+	border-bottom: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
+	color: var(--vscode-descriptionForeground); font-size: 12px;
+}
+.edit-lock-bar .codicon { color: var(--vscode-editorWarning-foreground, inherit); }
+.edit-lock-bar .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.edit-lock-bar button {
+	background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+	border: 0; border-radius: 8px; min-height: 32px; padding: 2px 14px; font-size: 13px; font-weight: 500;
+}
+.edit-lock-bar button:active { background: var(--vscode-button-hoverBackground, var(--vscode-button-background)); }
+
+/* The editing row above the keyboard (editorAccessory.ts). */
+.ggs-editor-accessory {
+	display: none; flex: none; gap: 6px; align-items: center;
+	padding: 5px max(6px, env(safe-area-inset-right)) 5px max(6px, env(safe-area-inset-left));
+	overflow-x: auto; scrollbar-width: none;
+	background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+	border-top: 1px solid var(--ggs-sep);
+}
+.ggs-editor-accessory::-webkit-scrollbar { display: none; }
+:root[data-keyboard][data-editor-focus] .ggs-editor-accessory:not([hidden]) { display: flex; }
+.ggs-editor-accessory button {
+	flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+	min-width: 44px; height: 38px; padding: 0 10px; border-radius: 8px;
+	border: 1px solid var(--vscode-input-border, transparent);
+	background: var(--vscode-button-secondaryBackground, var(--vscode-input-background));
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+	font-size: 13px;
+}
+.ggs-editor-accessory button .codicon { font-size: 17px; }
+.ggs-editor-accessory button:active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+.ggs-editor-accessory button[data-key="done"] { margin-left: auto; }
+
+/* ---------- Side-view pages (Files, Search, Changes, an extension's) ---------- */
+:root.remote-shell[data-form-factor="phone"] #sidebar .sidebar-title { height: 40px; padding: 0 8px 0 16px; font-size: 12px; }
+/* A view title that is only its name repeats the app bar's: the page starts at its content. */
+:root.remote-shell[data-form-factor="phone"] #sidebar .sidebar-title:not(:has(> :not(.label))) { display: none; }
+/* A focused list's ring is a keyboard cue; a finger opened the page. */
+:root.remote-shell[data-form-factor="phone"][data-pointer="coarse"] #sidebar :focus-visible { outline-color: transparent; }
+:root.remote-shell[data-form-factor="phone"] #sidebar .pane-header { height: 34px; font-size: 12px; padding-right: 8px; }
+:root.remote-shell[data-form-factor="phone"] #sidebar .pane-body { overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+:root.remote-shell[data-form-factor="phone"] #sidebar .action-btn { min-width: 36px; min-height: 36px; border-radius: 8px; }
+:root.remote-shell[data-form-factor="phone"] #sidebar .action-btn .codicon { font-size: 18px; }
+:root.remote-shell[data-form-factor="phone"] #sidebar .row:active { background: var(--vscode-list-hoverBackground); }
+/* An extension's webview page (Claude Code's chat) takes the whole page height. */
+:root.remote-shell[data-form-factor="phone"] #sidebar .ext-container-view > .ext-webview-view-section { flex: 1 1 0; min-height: 0; }
+
+/* ---------- The Terminal page ---------- */
+:root.remote-shell[data-form-factor="phone"] #panel .panel-header { height: 44px; padding: 0 4px 0 8px; border-bottom: 1px solid var(--ggs-sep); }
+:root.remote-shell[data-form-factor="phone"] #panel .panel-title {
+	font-size: 13px; line-height: 44px; text-transform: none; padding: 0 12px; letter-spacing: 0;
+	color: var(--vscode-panelTitle-inactiveForeground, var(--ggs-muted));
+}
+:root.remote-shell[data-form-factor="phone"] #panel .panel-title.active { color: var(--vscode-panelTitle-activeForeground, var(--vscode-foreground)); font-weight: 600; }
+:root.remote-shell[data-form-factor="phone"] #panel .panel-title::after { left: 12px; right: 12px; bottom: 0; height: 2px; border-radius: 1px; }
+/* Maximize / hide belong to a docked panel; the page has the navigation. */
+:root.remote-shell[data-form-factor="phone"] #panel .panel-header > .actions { display: none; }
+:root.remote-shell[data-form-factor="phone"] .terminal-host { padding-left: 6px; }
+:root.remote-shell[data-form-factor="phone"] .terminal-instance { inset: 4px 0 4px 6px; }
+:root.remote-shell[data-form-factor="phone"] .terminal-tabs { width: 112px; }
+:root.remote-shell[data-form-factor="phone"] .terminal-tabs .row { height: 40px; }
+
+/* The terminal's extra key row, at the page's foot — on the Terminal view only. */
+.ggs-terminal-keys {
+	display: flex; gap: 6px; padding: 5px max(6px, env(safe-area-inset-right)) 5px max(6px, env(safe-area-inset-left));
+	overflow-x: auto; flex: none; scrollbar-width: none;
+	background: var(--vscode-panel-background); border-top: 1px solid var(--vscode-panel-border);
+}
+.ggs-terminal-keys::-webkit-scrollbar { display: none; }
+.ggs-terminal-keys[hidden] { display: none; }
+:root[data-panel-view]:not([data-panel-view="terminal"]):not([data-panel-view=""]) .ggs-terminal-keys { display: none; }
+.ggs-terminal-keys button {
+	flex: none; min-width: 44px; min-height: 38px; padding: 0 10px; border-radius: 8px; font-size: 13px;
+	background: var(--vscode-button-secondaryBackground, var(--vscode-input-background));
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+	border: 1px solid var(--vscode-input-border, transparent);
+}
+.ggs-terminal-keys button:active { background: var(--vscode-button-hoverBackground, var(--vscode-button-background)); color: var(--vscode-button-foreground); }
+.ggs-terminal-keys button.on { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+
+/* ---------- Bottom sheets (actionSheet.ts) ---------- */
+.ggs-action-sheet-backdrop {
+	position: fixed; inset: 0; z-index: 1000; display: flex; align-items: flex-end; justify-content: center;
+	background: rgba(0, 0, 0, 0); transition: background-color 200ms ease;
+}
+.ggs-action-sheet-backdrop.open { background: rgba(0, 0, 0, 0.45); }
+.ggs-action-sheet {
+	width: 100%; max-width: 560px; display: flex; flex-direction: column;
+	max-height: min(82vh, calc(var(--vvh, 100vh) - 40px));
+	padding-bottom: env(safe-area-inset-bottom); box-sizing: border-box;
+	background: var(--vscode-menu-background, var(--vscode-editorWidget-background));
+	color: var(--vscode-menu-foreground, var(--vscode-foreground));
+	border: 1px solid var(--vscode-menu-border, transparent); border-bottom: 0;
+	border-top-left-radius: 16px; border-top-right-radius: 16px;
+	box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.35);
+	transform: translateY(100%); transition: transform 260ms var(--ggs-ease, ease-out);
+	user-select: none;
+}
+.ggs-action-sheet-backdrop.open .ggs-action-sheet { transform: none; }
+.ggs-action-sheet.dragging { transition: none; }
+.ggs-action-sheet .grabber { flex: none; width: 36px; height: 5px; margin: 8px auto 4px; border-radius: 3px; background: var(--vscode-scrollbarSlider-background, rgba(128, 128, 128, 0.45)); touch-action: none; }
+.ggs-sheet-header {
+	flex: none; display: flex; align-items: center; gap: 4px; min-height: 48px; padding: 0 8px 4px 20px;
+	border-bottom: 1px solid var(--vscode-menu-separatorBackground, var(--ggs-sep, rgba(128, 128, 128, 0.25)));
+	touch-action: none;
+}
+.ggs-sheet-header > .ggs-sheet-btn:first-child { margin-left: -14px; }
+.ggs-sheet-header .titles { flex: 1; min-width: 0; }
+.ggs-sheet-header .title { font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ggs-sheet-header .subtitle { font-size: 12px; color: var(--vscode-descriptionForeground); }
+.ggs-sheet-btn {
+	flex: none; width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center;
+	padding: 0; border: 0; border-radius: 12px; background: transparent; color: inherit;
+}
+.ggs-sheet-btn .codicon { font-size: 18px; }
+.ggs-sheet-btn:active { background: var(--ggs-press, rgba(128, 128, 128, 0.2)); }
+.ggs-sheet-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 0 6px; }
+.ggs-action-sheet .row {
+	display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px; padding: 0 20px;
+	text-align: left; background: none; border: 0; color: inherit; font-size: 15px;
+}
+.ggs-action-sheet .row .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ggs-action-sheet .row .trail { font-size: 16px; opacity: 0.7; }
+.ggs-action-sheet .row.checked .codicon-check { color: var(--ggs-accent, var(--vscode-focusBorder)); opacity: 1; }
+.ggs-action-sheet .row:active:not(:disabled) { background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-menu-selectionForeground, inherit); }
+.ggs-action-sheet .row:disabled { opacity: 0.4; }
+.ggs-action-sheet .row.cancel { justify-content: center; font-weight: 600; margin-top: 4px; border-top: 1px solid var(--vscode-menu-separatorBackground, var(--vscode-panel-border)); }
+.ggs-action-sheet .separator { height: 1px; margin: 4px 20px; background: var(--vscode-menu-separatorBackground, var(--vscode-panel-border)); }
+.ggs-sheet-empty { padding: 28px 20px; text-align: center; color: var(--vscode-descriptionForeground); font-size: 14px; }
+
+/* The open editors list (the sheet's rows, and the empty page's). */
+.ggs-editor-row {
+	position: relative; display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 0 4px 0 20px;
+	color: inherit; cursor: pointer;
+}
+.ggs-editor-row:active { background: var(--vscode-list-hoverBackground); }
+.ggs-editor-row.current { background: var(--vscode-list-inactiveSelectionBackground, transparent); }
+.ggs-editor-row.current::before { content: ''; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px; border-radius: 0 2px 2px 0; background: var(--ggs-accent, var(--vscode-focusBorder)); }
+.ggs-editor-row .icon { width: 20px; flex: none; display: flex; align-items: center; justify-content: center; font-size: 18px; }
+.ggs-editor-row .icon img { width: 18px; height: 18px; }
+.ggs-editor-row .text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ggs-editor-row .name { display: flex; align-items: center; gap: 6px; font-size: 15px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.ggs-editor-row .folder { font-size: 12px; color: var(--vscode-descriptionForeground); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.ggs-editor-row .folder:empty { display: none; }
+.ggs-editor-empty .ggs-editor-row { border-radius: 10px; padding-left: 12px; }
+
+/* ---------- The navigation drawer (navDrawer.ts) ---------- */
+.ggs-drawer-backdrop { position: fixed; inset: 0; z-index: 900; background: rgba(0, 0, 0, 0); transition: background-color 200ms ease; }
+.ggs-drawer-backdrop.open { background: rgba(0, 0, 0, 0.45); }
+.ggs-drawer {
+	position: absolute; top: 0; bottom: 0; left: 0; width: min(86vw, 340px); box-sizing: border-box;
+	display: flex; flex-direction: column;
+	padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom) env(safe-area-inset-left);
+	background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+	color: var(--vscode-sideBar-foreground, var(--vscode-foreground));
+	border-right: 1px solid var(--vscode-sideBar-border, transparent);
+	box-shadow: 8px 0 28px rgba(0, 0, 0, 0.35);
+	transform: translateX(-100%); transition: transform 260ms var(--ggs-ease, ease-out);
+	touch-action: pan-y; user-select: none;
+}
+.ggs-drawer-backdrop.open .ggs-drawer { transform: none; }
+.ggs-drawer.dragging { transition: none; }
+.ggs-drawer-header { flex: none; padding: 20px 20px 16px; border-bottom: 1px solid var(--ggs-sep, var(--vscode-panel-border)); }
+.ggs-drawer-header .product { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ggs-accent, var(--vscode-focusBorder)); }
+.ggs-drawer-header .workspace { margin-top: 6px; font-size: 19px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ggs-drawer-header .meta { margin-top: 4px; font-size: 12px; color: var(--vscode-descriptionForeground); display: flex; align-items: center; gap: 2px; }
+.ggs-drawer-header .meta:empty { display: none; }
+.ggs-drawer-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 0 12px; }
+.ggs-drawer-section .heading { padding: 14px 20px 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--vscode-descriptionForeground); }
+.ggs-drawer-row {
+	display: flex; align-items: center; gap: 14px; width: calc(100% - 16px); margin: 0 8px; min-height: 46px; padding: 0 12px;
+	border: 0; border-radius: 12px; background: none; color: inherit; font-size: 14px; text-align: left;
+}
+.ggs-drawer-row:active:not(:disabled) { background: var(--vscode-list-hoverBackground); }
+.ggs-drawer-row:disabled { opacity: 0.4; }
+.ggs-drawer-row.active { background: var(--vscode-list-inactiveSelectionBackground, var(--vscode-list-hoverBackground)); font-weight: 600; }
+@supports (background: color-mix(in srgb, red 50%, transparent)) {
+	.ggs-drawer-row.active { background: color-mix(in srgb, var(--ggs-accent, var(--vscode-focusBorder)) 20%, transparent); }
+}
+.ggs-drawer-row .icon { width: 22px; flex: none; display: flex; align-items: center; justify-content: center; }
+.ggs-drawer-row .icon .codicon { font-size: 18px; }
+.ggs-drawer-row .icon img { width: 18px; height: 18px; object-fit: contain; }
+.ggs-drawer-row .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ggs-drawer-row > .codicon-chevron-right { opacity: 0.6; }
+.ggs-drawer-row .count {
+	min-width: 20px; height: 20px; padding: 0 6px; box-sizing: border-box; border-radius: 10px;
+	background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
+	font-size: 11px; font-weight: 600; line-height: 20px; text-align: center;
+}
+.ggs-drawer-row .switch {
+	position: relative; flex: none; width: 40px; height: 24px; border-radius: 12px;
+	background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--ggs-sep, transparent));
+	box-sizing: border-box; transition: background-color 160ms ease;
+}
+.ggs-drawer-row .switch i { position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: var(--vscode-descriptionForeground); transition: left 160ms var(--ggs-ease, ease-out), background-color 160ms; }
+.ggs-drawer-row .switch.on { background: var(--vscode-button-background); border-color: transparent; }
+.ggs-drawer-row .switch.on i { left: 18px; background: var(--vscode-button-foreground, #fff); }
+.ggs-drawer-footer { flex: none; padding: 12px 20px; font-size: 12px; color: var(--vscode-descriptionForeground); border-top: 1px solid var(--ggs-sep, var(--vscode-panel-border)); }
+
+/* ---------- Full-screen surfaces and toasts on a phone ---------- */
+/* The quick input (the palette, quick picks, file picks) as a full-screen page (§11.3):
+   the 600 px desktop card is a thumb-hostile strip at the top of a 390 px screen. */
+:root.remote-shell[data-form-factor="phone"] .quick-input {
+	top: calc(var(--vv-top, 0px) + env(safe-area-inset-top)); left: 0; transform: none;
+	width: 100vw; max-width: none; height: calc(var(--vvh, 100vh) - env(safe-area-inset-top));
+	display: flex; flex-direction: column; border-radius: 0; border: 0;
+}
+:root.remote-shell[data-form-factor="phone"] .quick-input .input { height: 44px; font-size: 16px; }
+:root.remote-shell[data-form-factor="phone"] .quick-input .list { flex: 1; max-height: none; overscroll-behavior: contain; }
+:root.remote-shell[data-form-factor="phone"] .quick-input .list .row { min-height: 48px; }
+/* A text field under 16 px makes iOS zoom the page on focus. */
+:root.remote-shell[data-form-factor="phone"] input:not([type="checkbox"]):not([type="radio"]),
+:root.remote-shell[data-form-factor="phone"] textarea,
+:root.remote-shell[data-form-factor="phone"] select { font-size: 16px; }
+/* Toasts sit above the navigation, full width. */
+:root.remote-shell[data-form-factor="phone"] #notifications {
+	left: max(8px, env(safe-area-inset-left)); right: max(8px, env(safe-area-inset-right)); width: auto; max-width: none;
+	bottom: calc(var(--ggs-nav-h) + env(safe-area-inset-bottom) + 8px);
+}
+:root.remote-shell[data-form-factor="phone"][data-keyboard] #notifications { bottom: 8px; }
+:root.remote-shell[data-form-factor="phone"] .notification { border-radius: 12px; }
+
+/* The transport's banner (relay restored, PC reconnecting, a new version). */
+.remote-banner {
+	position: fixed; z-index: 2000; top: max(8px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%);
+	max-width: calc(100vw - 32px); display: flex; gap: 12px; align-items: center; padding: 8px 14px; border-radius: 10px;
+	background: var(--vscode-notifications-background, var(--vscode-editorWidget-background));
+	color: var(--vscode-notifications-foreground, var(--vscode-foreground));
+	border: 1px solid var(--vscode-notifications-border, var(--vscode-widget-border, transparent));
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3); font-size: 13px;
+}
+:root.remote-shell[data-form-factor="phone"] .remote-banner { top: calc(env(safe-area-inset-top) + var(--ggs-appbar-h) + 8px); }
+.remote-banner button {
+	background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+	border: 0; border-radius: 6px; padding: 4px 10px; min-height: 32px;
+}
+
+/* Data Saver: drop the purely decorative surfaces. */
+:root[data-data-saver] .minimap,
+:root[data-data-saver] .cm-minimap,
+:root[data-data-saver] .cm-sticky-scroll { display: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+	.ggs-action-sheet, .ggs-drawer, .ggs-action-sheet-backdrop, .ggs-drawer-backdrop, .ggs-bottom-tabs .pill { transition: none !important; }
+}

@@ -106,6 +106,8 @@ export class StatusBar {
 		this.repoItem.hidden = true;
 		this.repoItem.addEventListener('click', () => this.onRepoClick?.());
 		this.branchItem = el('div', 'status-item');
+		// Named for shells that surface it elsewhere (the remote phone's app bar subtitle).
+		this.branchItem.dataset.item = 'branch';
 		this.branchItem.addEventListener('click', () => this.onBranchClick?.());
 		this.syncItem = el('div', 'status-item');
 		this.syncItem.hidden = true;

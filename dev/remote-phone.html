@@ -1,0 +1,136 @@
+<!doctype html>
+<!-- The phone shell preview (module 19, docs/ggs-remote-plan.md §11.2): the remote workbench's
+     phone chrome — app bar, bottom navigation, drawer, sheets, the editor and terminal pages —
+     over a scripted fake backend, without a daemon or a PC. Open it at phone size
+     (`npm run dev:vite`, then /dev/remote-phone.html in a 390×844 device view);
+     scripts/probes/remote-phone-shots.mjs drives it headless and saves screenshots. Layout
+     only: nothing here proves the transport. Never ships. -->
+<html lang="en" class="vscode-dark">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+	<title>Git Graph Studio - phone preview</title>
+	<link id="theme-css" rel="stylesheet" href="/theme/dark-modern.css" />
+	<script>
+		(function () {
+			'use strict';
+			var root = '/home/dev/git-graph-studio';
+			var tree = {};
+			tree[root] = [
+				['src', true], ['docs', true], ['tests', true], ['README.md', false], ['package.json', false], ['tsconfig.json', false], ['vite.config.ts', false]
+			];
+			tree[root + '/src'] = [['remote', true], ['editor.ts', false], ['workbench.ts', false], ['ui.ts', false], ['main.ts', false]];
+			tree[root + '/src/remote'] = [['appBar.ts', false], ['pages.ts', false], ['remote.css', false]];
+			tree[root + '/docs'] = [['ggs-remote-plan.md', false]];
+			tree[root + '/tests'] = [['remote.test.ts', false]];
+			function entries(path) {
+				return (tree[path] || []).map(function (e) { return { name: e[0], path: path + '/' + e[0], isDir: e[1], size: 1200 }; });
+			}
+			var text = [
+				'// The phone shell preview: a scripted file, so the editor page has something to show.',
+				"import { commands } from '../commands';",
+				'',
+				'export function greet(name: string): string {',
+				'\treturn `Hello, ${name}!`;',
+				'}',
+				'',
+				'export class Workbench {',
+				'\tprivate readonly views = new Map<string, HTMLElement>();',
+				'\tshow(id: string): void {',
+				'\t\tconst view = this.views.get(id);',
+				"\t\tif (view) view.hidden = false;",
+				'\t}',
+				'}'
+			].join('\n');
+			function raw() {
+				var body = new TextEncoder().encode(text);
+				var meta = new TextEncoder().encode(JSON.stringify({ binary: false, size: body.length, encoding: 'utf8', eol: 'lf' }));
+				var out = new Uint8Array(8 + meta.length + body.length);
+				new DataView(out.buffer).setBigUint64(0, BigInt(meta.length), true);
+				out.set(meta, 8);
+				out.set(body, 8 + meta.length);
+				return out;
+			}
+			var handlers = {
+				'initial_repo': function () { return root; },
+				'open_folder': function () { return { root: root, isRepo: true }; },
+				'boot_context': function () { return { file: null, actions: [], repo: root, opened: null, openedFor: null }; },
+				'repo_head': function () { return { branch: 'main', shortHash: 'c4a96de', ahead: 1, behind: 2, upstream: 'origin/main' }; },
+				'list_files': function () { return ['README.md', 'src/editor.ts', 'src/workbench.ts']; },
+				'list_dir': function (a) { return entries(a.path); },
+				'list_dir_page': function (a) { var all = entries(a.path); return { entries: all, total: all.length, offset: 0, limit: all.length }; },
+				'scm_status': function () { return [
+					{ path: 'src/editor.ts', oldPath: null, staged: null, unstaged: 'M', untracked: false },
+					{ path: 'src/remote/appBar.ts', oldPath: null, staged: 'A', unstaged: null, untracked: false },
+					{ path: 'README.md', oldPath: null, staged: null, unstaged: 'M', untracked: false }
+				]; },
+				'scm_branches': function () { return [{ name: 'main', remote: false, current: true, upstream: 'origin/main' }]; },
+				'scm_remotes': function () { return [{ name: 'origin', url: 'https://example.com/repo.git' }]; },
+				'scm_tags': function () { return []; },
+				'read_file': function () { return { contents: text, binary: false, size: text.length }; },
+				'read_file_at': function () { return { contents: text, binary: false, size: text.length }; },
+				'file_probe': function () { return { size: text.length, binary: false, longLines: false }; },
+				'read_file_raw': raw,
+				'pty_create': function () { return 'mockshell'; },
+				'pty_write': function () { return null; },
+				'pty_kill': function () { return null; },
+				'git_output_log': function () { return []; },
+				'ext_list': function () { return []; },
+				'workspace_symbols': function () { return []; },
+				'analysis_status': function () { return { state: 'idle' }; },
+				'version': function () { return '0.1.5'; },
+				'settings_read': function () { return null; },
+				'keybindings_read': function () { return null; }
+			};
+			window.__TAURI_INTERNALS__ = {
+				metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+				invoke: function (command, args) {
+					var handler = handlers[command];
+					return Promise.resolve(handler ? handler(args || {}) : null);
+				},
+				transformCallback: function () { return Math.floor(Math.random() * 1e9); }
+			};
+			document.documentElement.setAttribute('data-remote-shell', '');
+		})();
+	</script>
+</head>
+<body class="vscode-dark" data-vscode-theme-kind="vscode-dark" data-vscode-theme-name="Dark Modern">
+	<div id="titlebar"></div>
+	<div id="workbench">
+		<div id="activitybar" role="toolbar" aria-label="Activity Bar"></div>
+		<div id="sidebar" role="complementary"></div>
+		<div id="sidebarSash" class="sash sash-vertical"></div>
+		<div id="editorPart">
+			<div id="editorGroup"></div>
+			<div id="panelSash" class="sash sash-horizontal" hidden></div>
+			<div id="panel" hidden></div>
+		</div>
+	</div>
+	<div id="statusbar" role="status"></div>
+	<div id="notifications" aria-live="polite"></div>
+	<div id="overlays"></div>
+	<script type="module">
+		import { initResponsive } from '/src/remote/responsive.ts';
+		import '/src/remote/remote.css';
+		initResponsive();
+		await import('/src/main.ts');
+		const { installRemoteShell } = await import('/src/remote/shell.ts');
+		installRemoteShell();
+		// Stand-ins for two installed extensions, so the navigation shows their pages: a
+		// `scm/title` launcher (the Git Graph class) and a views container (the Claude class).
+		const { applyContributions } = await import('/src/contributions.ts');
+		const { commands } = await import('/src/commands.ts');
+		commands.register({ id: 'preview.graph.view', title: 'View Graph', run: () => undefined });
+		applyContributions('preview.graph', {
+			commands: [{ command: 'preview.graph.view', title: 'View Git Graph (git log)', icon: '$(git-merge)' }],
+			menus: { 'scm/title': [{ command: 'preview.graph.view', group: 'navigation' }] }
+		}, {}, () => undefined, () => true);
+		const item = document.createElement('div');
+		item.className = 'activity-item';
+		item.dataset.view = 'ext-container:preview.chat.chat-sidebar';
+		item.title = 'Claude Code';
+		document.querySelector('#activitybar .activity-spacer')?.before(item);
+		window.__phonePreviewReady = true;
+	</script>
+</body>
+</html>

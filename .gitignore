@@ -14,3 +14,6 @@ Thumbs.db
 .zcode/claude-remote-server/claude-remote-data/
 claude-remote-server/claude-remote-data/
 .zcode/
+
+# Playwright per-run output (tests/e2e)
+test-results/

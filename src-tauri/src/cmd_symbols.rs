@@ -82,6 +82,13 @@ pub struct SymbolIndex {
 
 /// The user-level GGS home (`~/.ggs`), resolved the way settings / extensions do.
 pub(crate) fn ggs_home() -> PathBuf {
+    // `GGS_HOME` relocates the whole store — the same hermeticity `cmd_ext`'s
+    // `extensions_home_dir` honours, so a probe's index and extensions agree.
+    if let Some(root) = std::env::var_os("GGS_HOME") {
+        if !root.is_empty() {
+            return PathBuf::from(root);
+        }
+    }
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .unwrap_or_default();

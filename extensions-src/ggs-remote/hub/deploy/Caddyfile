@@ -1,0 +1,5 @@
+# Caddy fronts the Hub (docs/ggs-remote-plan.md §20.8): automatic Let's Encrypt certificate,
+# plain HTTP to the Hub, WebSocket upgrade headers pass through untouched.
+remote.example.com {
+	reverse_proxy hub:8443
+}

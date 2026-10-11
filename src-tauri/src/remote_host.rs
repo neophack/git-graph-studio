@@ -1,0 +1,939 @@
+//! Remote Access host surface (module 19, docs/ggs-remote-plan.md §8): registers this
+//! instance with whatever local daemon listens on the `ggs-remote/1` control endpoint, serves
+//! the remote workbench's assets and the installed packages' files to it, streams downloads,
+//! and creates the hidden Relay webview while remote sessions are attached. It names no
+//! plugin — the endpoint and the protocol are the whole contract — and an absent daemon
+//! costs one reconnect attempt per 30 s.
+//!
+//! The control messages are this module's own copy of the daemon's (`control_msg.rs` there):
+//! the two never share a crate, and the shared test vectors hold them together
+//! (`src-tauri/tests/remote_control_vectors.rs`).
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Manager};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::mpsc;
+
+/// The hidden Relay webview's label (its capability file is `capabilities/remote-relay.json`).
+pub const RELAY_LABEL: &str = "remote-relay";
+const RECONNECT_EVERY: Duration = Duration::from_secs(30);
+const MAX_MESSAGE: usize = 4 << 20;
+const CHUNK: usize = 1 << 20;
+const SUMMARY_THROTTLE: Duration = Duration::from_millis(500);
+
+// ---- the control messages (a copy of the daemon's; see the module doc) ----
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LaunchSpec {
+    pub program: String,
+    pub args_prefix: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SummaryTab {
+    pub path: String,
+    pub dirty: bool,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Summary {
+    pub tabs: Vec<SummaryTab>,
+    pub terminals: u32,
+    pub dirty: u32,
+    pub scm_changes: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AssetKind {
+    App,
+    Ext,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum FromInstance {
+    Register {
+        instance_id: String,
+        pid: u32,
+        version: String,
+        title: String,
+        folders: Vec<String>,
+        visible: bool,
+        remote_host: bool,
+        launch: LaunchSpec,
+    },
+    Update {
+        title: Option<String>,
+        folders: Option<Vec<String>>,
+        visible: Option<bool>,
+        summary: Option<Summary>,
+    },
+    Pong {
+        nonce: u64,
+    },
+    CloseBlocked {
+        dirty: Vec<String>,
+    },
+    AssetReply {
+        req: u32,
+        status: u16,
+        content_type: String,
+        etag: String,
+        #[serde(with = "serde_bytes")]
+        body: Vec<u8>,
+        done: bool,
+    },
+    FileReply {
+        req: u32,
+        status: u16,
+        name: String,
+        total: u64,
+        #[serde(with = "serde_bytes")]
+        chunk: Vec<u8>,
+        done: bool,
+    },
+    RelayReady,
+    Bye,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ToInstance {
+    Welcome {
+        daemon_version: String,
+        relay_url: String,
+    },
+    FetchAsset {
+        req: u32,
+        kind: AssetKind,
+        path: String,
+    },
+    FetchFile {
+        req: u32,
+        path: String,
+        zip: bool,
+    },
+    EnsureRelay {
+        token: String,
+    },
+    DropRelay,
+    Ping {
+        nonce: u64,
+    },
+    Show,
+    Quit {
+        force: bool,
+    },
+}
+
+pub fn encode<T: Serialize>(message: &T) -> Vec<u8> {
+    let body = rmp_serde::to_vec_named(message).expect("control messages always serialize");
+    let mut out = Vec::with_capacity(4 + body.len());
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+pub fn decode<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, String> {
+    rmp_serde::from_slice(body).map_err(|e| format!("control message: {e}"))
+}
+
+// ---- the endpoint ----
+
+/// `~/.ggs/remote`, honouring the same relocations the daemon does (`GGS_REMOTE_HOME`,
+/// `GGS_HOME`) so a hermetic daemon and app find each other.
+pub fn remote_root() -> Option<PathBuf> {
+    if let Some(root) = std::env::var_os("GGS_REMOTE_HOME") {
+        return Some(PathBuf::from(root));
+    }
+    let ggs = match std::env::var_os("GGS_HOME") {
+        Some(home) => PathBuf::from(home),
+        None => {
+            #[cfg(windows)]
+            let var = "USERPROFILE";
+            #[cfg(not(windows))]
+            let var = "HOME";
+            PathBuf::from(std::env::var_os(var)?).join(".ggs")
+        }
+    };
+    Some(ggs.join("remote"))
+}
+
+/// The control endpoint's name — the daemon's derivation exactly: a named pipe from
+/// sha256(user name ‖ 0 ‖ root path) on Windows, a socket file under the root elsewhere.
+pub fn endpoint_name(root: &Path) -> String {
+    #[cfg(windows)]
+    {
+        use sha2::{Digest, Sha256};
+        let user = std::env::var("USERNAME").unwrap_or_default();
+        let mut hasher = Sha256::new();
+        hasher.update(user.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(root.to_string_lossy().as_bytes());
+        let digest = hasher.finalize();
+        let hex: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+        format!("ggsr1-control-{hex}")
+    }
+    #[cfg(not(windows))]
+    {
+        root.join("control.sock").to_string_lossy().into_owned()
+    }
+}
+
+async fn connect(endpoint: &str) -> std::io::Result<interprocess::local_socket::tokio::Stream> {
+    use interprocess::local_socket::tokio::prelude::*;
+    #[cfg(windows)]
+    let name = {
+        use interprocess::local_socket::{GenericNamespaced, ToNsName};
+        endpoint.to_ns_name::<GenericNamespaced>()?
+    };
+    #[cfg(not(windows))]
+    let name = {
+        use interprocess::local_socket::{GenericFilePath, ToFsName};
+        endpoint.to_fs_name::<GenericFilePath>()?
+    };
+    interprocess::local_socket::tokio::Stream::connect(name).await
+}
+
+async fn read_message<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> std::io::Result<Vec<u8>> {
+    let mut len = [0u8; 4];
+    reader.read_exact(&mut len).await?;
+    let len = u32::from_le_bytes(len) as usize;
+    if len > MAX_MESSAGE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "control message too large",
+        ));
+    }
+    let mut body = vec![0u8; len];
+    reader.read_exact(&mut body).await?;
+    Ok(body)
+}
+
+// ---- the link state ----
+
+/// One frontend's latest content summary (R21), keyed by frontend id ("main" for the desktop
+/// window, "remote/<n>" for a remote session).
+#[derive(Default)]
+struct Summaries {
+    by_frontend: HashMap<String, Summary>,
+    last_sent: Option<Instant>,
+    pending: bool,
+}
+
+struct Link {
+    tx: Mutex<Option<mpsc::UnboundedSender<FromInstance>>>,
+    relay_url: Mutex<String>,
+    summaries: Mutex<Summaries>,
+    remote_host_only: AtomicBool,
+    connected: AtomicBool,
+}
+
+fn link() -> &'static Link {
+    static LINK: OnceLock<Link> = OnceLock::new();
+    LINK.get_or_init(|| Link {
+        tx: Mutex::new(None),
+        relay_url: Mutex::new(String::new()),
+        summaries: Mutex::new(Summaries::default()),
+        remote_host_only: AtomicBool::new(false),
+        connected: AtomicBool::new(false),
+    })
+}
+
+fn send(message: FromInstance) {
+    if let Some(tx) = link().tx.lock().unwrap().as_ref() {
+        let _ = tx.send(message);
+    }
+}
+
+/// Whether this instance runs without a desktop window (`--remote-host`).
+pub fn remote_host_only() -> bool {
+    link().remote_host_only.load(Ordering::Relaxed)
+}
+
+/// Start the registration loop (from the composition root's setup).
+pub fn start(app: &AppHandle, remote_host_only: bool) {
+    link()
+        .remote_host_only
+        .store(remote_host_only, Ordering::Relaxed);
+    let Some(root) = remote_root() else { return };
+    let endpoint = endpoint_name(&root);
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            if let Ok(stream) = connect(&endpoint).await {
+                if let Err(error) = session(&app, stream).await {
+                    eprintln!("[remote] control channel ended: {error}");
+                }
+                link().connected.store(false, Ordering::Relaxed);
+                *link().tx.lock().unwrap() = None;
+            }
+            tokio::time::sleep(RECONNECT_EVERY).await;
+        }
+    });
+}
+
+/// The command line that starts another instance of this app (`cmd_app::instance_argv`
+/// without the folder): what the daemon reuses for SPAWN and restart.
+fn launch_spec() -> LaunchSpec {
+    let (program, args_prefix) = crate::cmd_app::launch_prefix();
+    LaunchSpec {
+        program,
+        args_prefix,
+    }
+}
+
+fn folders(app: &AppHandle) -> Vec<String> {
+    app.state::<crate::AppState>().repos.lock().unwrap().clone()
+}
+
+fn main_visible(app: &AppHandle) -> bool {
+    app.get_webview_window("main")
+        .is_some_and(|w| w.is_visible().unwrap_or(false))
+}
+
+fn title(app: &AppHandle) -> String {
+    app.get_webview_window("main")
+        .and_then(|w| w.title().ok())
+        .filter(|t| !t.is_empty())
+        .or_else(|| {
+            folders(app).first().and_then(|f| {
+                Path::new(f)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+            })
+        })
+        .unwrap_or_else(|| "Git Graph Studio".into())
+}
+
+async fn session(
+    app: &AppHandle,
+    stream: interprocess::local_socket::tokio::Stream,
+) -> std::io::Result<()> {
+    use interprocess::local_socket::tokio::prelude::*;
+    let (mut rx, mut tx) = stream.split();
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<FromInstance>();
+    out_tx
+        .send(FromInstance::Register {
+            instance_id: crate::ext_process::instance_id().to_owned(),
+            pid: std::process::id(),
+            version: app.package_info().version.to_string(),
+            title: title(app),
+            folders: folders(app),
+            visible: main_visible(app),
+            remote_host: remote_host_only(),
+            launch: launch_spec(),
+        })
+        .ok();
+    *link().tx.lock().unwrap() = Some(out_tx.clone());
+    link().connected.store(true, Ordering::Relaxed);
+    flush_summary(app, true);
+    let writer = tauri::async_runtime::spawn(async move {
+        while let Some(message) = out_rx.recv().await {
+            if tx.write_all(&encode(&message)).await.is_err() {
+                break;
+            }
+        }
+    });
+    let result = loop {
+        let body = match read_message(&mut rx).await {
+            Ok(body) => body,
+            Err(e) => break Err(e),
+        };
+        let Ok(message) = decode::<ToInstance>(&body) else {
+            continue;
+        };
+        handle(app, message, &out_tx);
+    };
+    writer.abort();
+    let _ = drop_relay(app);
+    result
+}
+
+fn handle(app: &AppHandle, message: ToInstance, out: &mpsc::UnboundedSender<FromInstance>) {
+    match message {
+        ToInstance::Welcome { relay_url, .. } => *link().relay_url.lock().unwrap() = relay_url,
+        ToInstance::Ping { nonce } => {
+            let _ = out.send(FromInstance::Pong { nonce });
+        }
+        ToInstance::FetchAsset { req, kind, path } => {
+            let (app, out) = (app.clone(), out.clone());
+            tauri::async_runtime::spawn_blocking(move || {
+                let (status, content_type, body) = match kind {
+                    AssetKind::App => app_asset(&app, &path),
+                    AssetKind::Ext => ext_asset(&app, &path),
+                };
+                reply_asset(&out, req, status, &content_type, body);
+            });
+        }
+        ToInstance::FetchFile { req, path, zip } => {
+            let (app, out) = (app.clone(), out.clone());
+            tauri::async_runtime::spawn_blocking(move || serve_file(&app, &out, req, &path, zip));
+        }
+        ToInstance::EnsureRelay { token } => {
+            if let Err(error) = ensure_relay(app, &token) {
+                eprintln!("[remote] relay webview: {error}");
+            }
+        }
+        ToInstance::DropRelay => {
+            let _ = drop_relay(app);
+        }
+        ToInstance::Show => {
+            if let Err(error) = crate::ensure_main_window(app) {
+                eprintln!("[remote] show the desktop window: {error}");
+            }
+            send_update(app);
+        }
+        ToInstance::Quit { force } => {
+            let dirty = dirty_files();
+            if !force && !dirty.is_empty() {
+                let _ = out.send(FromInstance::CloseBlocked { dirty });
+            } else {
+                let _ = out.send(FromInstance::Bye);
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    app.exit(0);
+                });
+            }
+        }
+    }
+}
+
+fn reply_asset(
+    out: &mpsc::UnboundedSender<FromInstance>,
+    req: u32,
+    status: u16,
+    content_type: &str,
+    body: Vec<u8>,
+) {
+    let etag = if status == 200 {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(&body);
+        format!(
+            "\"{}\"",
+            digest
+                .iter()
+                .take(8)
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        )
+    } else {
+        String::new()
+    };
+    let chunks: Vec<&[u8]> = if body.is_empty() {
+        vec![&[][..]]
+    } else {
+        body.chunks(CHUNK).collect()
+    };
+    let last = chunks.len() - 1;
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        let _ = out.send(FromInstance::AssetReply {
+            req,
+            status,
+            content_type: content_type.to_owned(),
+            etag: etag.clone(),
+            body: chunk.to_vec(),
+            done: i == last,
+        });
+    }
+}
+
+/// A path the daemon may ask for: relative, no `..`, no backslash, no NUL.
+fn safe_rel(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && !path.contains('\0')
+        && path
+            .split('/')
+            .all(|seg| !seg.is_empty() && seg != ".." && seg != ".")
+}
+
+/// The remote workbench build, `remote/…` inside the embedded assets — never anything else
+/// of them. A debug build (`tauri dev`, no embedded assets) reads the build output on disk.
+pub fn app_asset(app: &AppHandle, path: &str) -> (u16, String, Vec<u8>) {
+    if !safe_rel(path) {
+        return (404, "text/plain".into(), Vec::new());
+    }
+    let key = format!("remote/{path}");
+    if let Some(asset) = app.asset_resolver().get(key.clone()) {
+        return (200, asset.mime_type, asset.bytes);
+    }
+    #[cfg(debug_assertions)]
+    {
+        let dist = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/studio/dist")
+            .join(&key);
+        if let Ok(bytes) = std::fs::read(&dist) {
+            return (200, guess_type(path).into(), bytes);
+        }
+    }
+    (404, "text/plain".into(), Vec::new())
+}
+
+fn guess_type(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("") {
+        "html" => "text/html",
+        "js" | "mjs" => "text/javascript",
+        "css" => "text/css",
+        "json" | "map" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "wasm" => "application/wasm",
+        "webmanifest" => "application/manifest+json",
+        _ => "application/octet-stream",
+    }
+}
+
+/// An installed package's file, through the `ggs` protocol's own serving function — the
+/// same confinement rules as the desktop's page iframes.
+pub fn ext_asset(app: &AppHandle, path: &str) -> (u16, String, Vec<u8>) {
+    if !safe_rel(path) {
+        return (404, "text/plain".into(), Vec::new());
+    }
+    let Ok(request) = tauri::http::Request::builder()
+        .uri(format!("ggs://localhost/{path}"))
+        .body(Vec::new())
+    else {
+        return (400, "text/plain".into(), Vec::new());
+    };
+    let response = crate::cmd_ext::serve_ext_asset(&request, &app.asset_resolver());
+    let content_type = response
+        .headers()
+        .get(tauri::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    (
+        response.status().as_u16(),
+        content_type,
+        response.into_body(),
+    )
+}
+
+/// Whether a download path lies inside an open folder or the extension store (§7.8: the same
+/// confinement `ext_fs` applies).
+pub fn download_allowed(path: &Path, roots: &[PathBuf]) -> bool {
+    let Ok(canonical) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    roots
+        .iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .any(|root| canonical.starts_with(root))
+}
+
+fn download_roots(app: &AppHandle) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = folders(app).into_iter().map(PathBuf::from).collect();
+    if let Ok(home) = crate::cmd_ext::extensions_home_dir() {
+        roots.push(home);
+    }
+    roots
+}
+
+fn serve_file(
+    app: &AppHandle,
+    out: &mpsc::UnboundedSender<FromInstance>,
+    req: u32,
+    path: &str,
+    zip: bool,
+) {
+    let fail = |status: u16| {
+        let _ = out.send(FromInstance::FileReply {
+            req,
+            status,
+            name: String::new(),
+            total: 0,
+            chunk: Vec::new(),
+            done: true,
+        });
+    };
+    let target = PathBuf::from(path);
+    if !download_allowed(&target, &download_roots(app)) {
+        return fail(403);
+    }
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "download".into());
+    // A folder (or an explicit zip) is packed into a temporary file first — the zip writer
+    // needs to seek — and then streamed like any file.
+    let (mut file, name) = if target.is_dir() || zip {
+        let Ok(mut temp) = tempfile::tempfile() else {
+            return fail(500);
+        };
+        if zip_tree(&target, &mut temp).is_err() {
+            return fail(500);
+        }
+        use std::io::Seek;
+        if temp.seek(std::io::SeekFrom::Start(0)).is_err() {
+            return fail(500);
+        }
+        (temp, format!("{name}.zip"))
+    } else {
+        match std::fs::File::open(&target) {
+            Ok(file) => (file, name),
+            Err(_) => return fail(404),
+        }
+    };
+    let total = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut buf = vec![0u8; CHUNK];
+    let mut sent_any = false;
+    loop {
+        use std::io::Read;
+        let n = match file.read(&mut buf) {
+            Ok(n) => n,
+            Err(_) => return fail(500),
+        };
+        let done = n == 0;
+        if done && sent_any {
+            let _ = out.send(FromInstance::FileReply {
+                req,
+                status: 200,
+                name: name.clone(),
+                total,
+                chunk: Vec::new(),
+                done: true,
+            });
+            return;
+        }
+        let _ = out.send(FromInstance::FileReply {
+            req,
+            status: 200,
+            name: name.clone(),
+            total,
+            chunk: buf[..n].to_vec(),
+            done,
+        });
+        sent_any = true;
+        if done {
+            return;
+        }
+    }
+}
+
+/// Zip a file or a folder tree, skipping `.git` and whatever cannot be read.
+fn zip_tree<W: std::io::Write + std::io::Seek>(root: &Path, sink: W) -> zip::result::ZipResult<W> {
+    use std::io::Write;
+    let mut writer = zip::ZipWriter::new(sink);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let base = if root.is_dir() {
+        root.to_path_buf()
+    } else {
+        root.parent().map(Path::to_path_buf).unwrap_or_default()
+    };
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        if path.is_dir() {
+            if path.file_name().is_some_and(|n| n == ".git") {
+                continue;
+            }
+            if let Ok(entries) = std::fs::read_dir(&path) {
+                let mut children: Vec<PathBuf> =
+                    entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+                children.sort();
+                stack.extend(children.into_iter().rev());
+            }
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(&base) else {
+            continue;
+        };
+        let name = rel.to_string_lossy().replace('\\', "/");
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        writer.start_file(name, options)?;
+        writer.write_all(&bytes)?;
+    }
+    writer.finish()
+}
+
+// ---- the Relay webview ----
+
+fn ensure_relay(app: &AppHandle, token: &str) -> tauri::Result<()> {
+    // The daemon asks again after a Relay link drop: tear the old webview down and
+    // rebuild it. `destroy()` is asynchronous — the label stays registered until the
+    // platform tears the window down, and a rebuild that races it fails with "a
+    // webview with label `remote-relay` already exists" (which once left every remote
+    // session dead: the drop was never recovered). Retry the build until the label
+    // frees, bounded, so one control-frame handling cannot hang the reader loop.
+    if let Some(window) = app.get_webview_window(RELAY_LABEL) {
+        let _ = window.destroy();
+    }
+    let url = link().relay_url.lock().unwrap().clone();
+    if url.is_empty() {
+        return Ok(());
+    }
+    let config = serde_json::json!({ "url": url, "token": token });
+    // The token travels in an initialization script, never in the URL: no history, no log.
+    let build = || {
+        tauri::WebviewWindowBuilder::new(
+            app,
+            RELAY_LABEL,
+            tauri::WebviewUrl::App("relay.html".into()),
+        )
+        .title("GGS Remote Relay")
+        .visible(false)
+        .skip_taskbar(true)
+        .focused(false)
+        .inner_size(1.0, 1.0)
+        .initialization_script(format!("window.__GGS_RELAY__ = {config};"))
+        .build()
+    };
+    let mut attempt = build();
+    let mut tries = 1;
+    while let Err(error) = attempt {
+        if tries >= 100 {
+            return Err(error);
+        }
+        tries += 1;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        attempt = build();
+    }
+    Ok(())
+}
+
+fn drop_relay(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window(RELAY_LABEL) {
+        window.destroy()?;
+    }
+    Ok(())
+}
+
+/// Where a host request of a backend goes (§8.6 #1): the frontend that claims it (its call
+/// is in flight, or it owns the webview the request names) while that frontend exists —
+/// a remote click on "View Git Graph" opens the graph in that one session's page, never in
+/// another user's — else the desktop window while it shows, the remote side otherwise
+/// (the Relay picks the session). Registered as `ext_process`'s host-request target at the
+/// composition root, so neither module names the other.
+pub fn host_request_frontend(app: &AppHandle, claimed: Option<String>) -> String {
+    let main = app.get_webview_window("main").is_some();
+    let relay = app.get_webview_window(RELAY_LABEL).is_some();
+    match claimed {
+        Some(remote) if remote.starts_with("remote") && relay => remote,
+        _ if main => "main".into(),
+        _ => "remote".into(),
+    }
+}
+
+// ---- updates from the rest of the app ----
+
+/// Title, folders and visibility changed (non-blocking; dropped without a daemon).
+pub fn send_update(app: &AppHandle) {
+    if !link().connected.load(Ordering::Relaxed) {
+        return;
+    }
+    send(FromInstance::Update {
+        title: Some(title(app)),
+        folders: Some(folders(app)),
+        visible: Some(main_visible(app)),
+        summary: None,
+    });
+}
+
+/// The open folders changed (open / close folder, a workspace): pushed as they are.
+pub fn notify_folders(folders: &[String]) {
+    if link().connected.load(Ordering::Relaxed) {
+        send(FromInstance::Update {
+            title: None,
+            folders: Some(folders.to_vec()),
+            visible: None,
+            summary: None,
+        });
+    }
+}
+
+/// The merged summary over every frontend: tabs de-duplicated by path (a tab is dirty or
+/// active if any frontend says so), the terminal count from the backend's own sessions.
+fn merged_summary(app: &AppHandle) -> Summary {
+    let summaries = link().summaries.lock().unwrap();
+    let mut tabs: Vec<SummaryTab> = Vec::new();
+    let mut scm = 0;
+    for summary in summaries.by_frontend.values() {
+        scm = scm.max(summary.scm_changes);
+        for tab in &summary.tabs {
+            match tabs.iter_mut().find(|t| t.path == tab.path) {
+                Some(existing) => {
+                    existing.dirty |= tab.dirty;
+                    existing.active |= tab.active;
+                }
+                None => tabs.push(tab.clone()),
+            }
+        }
+    }
+    let dirty = tabs.iter().filter(|t| t.dirty).count() as u32;
+    Summary {
+        tabs,
+        terminals: crate::pty::session_count(app),
+        dirty,
+        scm_changes: scm,
+    }
+}
+
+fn dirty_files() -> Vec<String> {
+    let summaries = link().summaries.lock().unwrap();
+    let mut dirty: Vec<String> = summaries
+        .by_frontend
+        .values()
+        .flat_map(|s| s.tabs.iter().filter(|t| t.dirty).map(|t| t.path.clone()))
+        .collect();
+    dirty.sort();
+    dirty.dedup();
+    dirty
+}
+
+fn flush_summary(app: &AppHandle, force: bool) {
+    {
+        let mut summaries = link().summaries.lock().unwrap();
+        let due = summaries
+            .last_sent
+            .is_none_or(|at| at.elapsed() >= SUMMARY_THROTTLE);
+        if !force && !due {
+            if !summaries.pending {
+                summaries.pending = true;
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(SUMMARY_THROTTLE).await;
+                    link().summaries.lock().unwrap().pending = false;
+                    flush_summary(&app, true);
+                });
+            }
+            return;
+        }
+        summaries.last_sent = Some(Instant::now());
+    }
+    if link().connected.load(Ordering::Relaxed) {
+        send(FromInstance::Update {
+            title: None,
+            folders: None,
+            visible: None,
+            summary: Some(merged_summary(app)),
+        });
+    }
+}
+
+/// A frontend reports what it shows (R21): open editors, unsaved files, SCM changes. Sent on
+/// change, throttled to one push per 500 ms.
+#[tauri::command]
+pub fn remote_host_set_summary(app: AppHandle, frontend: String, summary: Summary) {
+    link()
+        .summaries
+        .lock()
+        .unwrap()
+        .by_frontend
+        .insert(frontend, summary);
+    flush_summary(&app, false);
+}
+
+/// Who else must hear that a frontend went away — the extension host's request routing
+/// forgets the webviews the session owned. Registered by the composition root, so this
+/// module names no extension-platform module.
+static FRONTEND_GONE_HOOKS: Mutex<Vec<fn(&str)>> = Mutex::new(Vec::new());
+
+pub fn on_frontend_gone(hook: fn(&str)) {
+    FRONTEND_GONE_HOOKS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(hook);
+}
+
+/// A frontend went away (a remote session ended — the Relay reports it).
+#[tauri::command]
+pub fn remote_host_frontend_gone(app: AppHandle, frontend: String) {
+    for hook in FRONTEND_GONE_HOOKS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+    {
+        hook(&frontend);
+    }
+    link()
+        .summaries
+        .lock()
+        .unwrap()
+        .by_frontend
+        .remove(&frontend);
+    flush_summary(&app, false);
+}
+
+/// Whether a local daemon is connected — the frontend's status line for Remote Access.
+#[tauri::command]
+pub fn remote_host_status(app: AppHandle) -> serde_json::Value {
+    serde_json::json!({
+        "connected": link().connected.load(Ordering::Relaxed),
+        "remoteHostOnly": remote_host_only(),
+        "folders": folders(&app),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_paths_only() {
+        assert!(safe_rel("assets/a.js"));
+        for bad in ["", "/etc/passwd", "../x", "a/../b", "a\\b", "a//b", "./a"] {
+            assert!(!safe_rel(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn downloads_stay_inside_their_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/a.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "no").unwrap();
+        let roots = vec![repo.clone()];
+        assert!(download_allowed(&repo.join("src/a.rs"), &roots));
+        assert!(download_allowed(&repo.join("src"), &roots));
+        assert!(!download_allowed(&dir.path().join("secret.txt"), &roots));
+        assert!(!download_allowed(
+            &repo.join("src/../../secret.txt"),
+            &roots
+        ));
+        assert!(!download_allowed(&repo.join("missing.rs"), &roots));
+    }
+
+    #[test]
+    fn zips_a_tree_without_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref").unwrap();
+        std::fs::write(repo.join("src/a.rs"), "fn a() {}").unwrap();
+        std::fs::write(repo.join("README.md"), "# r").unwrap();
+        let bytes = zip_tree(&repo, std::io::Cursor::new(Vec::new())).unwrap();
+        let mut archive = zip::ZipArchive::new(bytes).unwrap();
+        let mut names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["README.md", "src/a.rs"]);
+    }
+
+    #[test]
+    fn endpoint_names_follow_the_root() {
+        let a = endpoint_name(Path::new("/home/u/.ggs/remote"));
+        let b = endpoint_name(Path::new("/tmp/other/remote"));
+        assert_ne!(a, b);
+        #[cfg(windows)]
+        assert!(a.starts_with("ggsr1-control-"));
+        #[cfg(not(windows))]
+        assert!(a.ends_with("control.sock"));
+    }
+}

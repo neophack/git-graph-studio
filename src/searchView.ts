@@ -11,7 +11,7 @@ import * as state from './state';
 import { queryHasUppercase } from './findOptions';
 import { FindHistory, HistoryRecall, recallKey } from './findHistory';
 import { settings } from './settings';
-import { actionButton, basename, confirmDialog, dirname, el, icon, notify } from './ui';
+import { actionButton, basename, confirmDialog, dirname, el, icon, liveSidebarTitle, notify } from './ui';
 
 export interface SearchMatch {
 	line: number;
@@ -145,7 +145,7 @@ export class SearchView {
 
 	constructor(container: HTMLElement) {
 		this.container = container;
-		this.title = el('div', 'sidebar-title', [el('span', 'label', ['Search'])]);
+		this.title = liveSidebarTitle('search.title');
 		this.content = el('div', 'view-pane');
 		container.append(this.title, this.content);
 

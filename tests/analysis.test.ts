@@ -9,6 +9,7 @@
 vi.mock('mermaid', () => import('./mermaidStub'));
 vi.mock('@mermaid-js/layout-elk', () => ({ default: {} }));
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { setLocale } from '../src/i18n';
 import { flush } from './helpers';
 
 import { backend, Channel } from './tauriMock';
@@ -63,6 +64,24 @@ function moduleGraphAnswer(): Record<string, unknown> {
 }
 
 describe('the Analysis sidebar', () => {
+	it('relabels everything when the display language switches', async () => {
+		await modules();
+		backend.on('analysis_status', () => ({ state: 'ready', done: 3, total: 3, files: 3, symbols: 9, calls: 5 }));
+		const view = new AnalysisView(host());
+		await view.refresh();
+		setLocale('en');
+		expect(texts('.sidebar-title .label')[0]).toBe('Analysis');
+		expect(texts('.pane-header .label')[0]).toBe('Tools');
+		// The switch relabels the titles, the pane headers, the tool rows and the state
+		// line in place — no remount, the same view instance.
+		setLocale('zh-cn');
+		expect(texts('.sidebar-title .label')[0]).toBe('代码分析');
+		expect(texts('.pane-header .label')[0]).toBe('工具');
+		expect(texts('.an-tool .label').some((text) => text.includes('模块'))).toBe(true);
+		expect(texts('.an-status')[0]).not.toBe('Analysis');
+		setLocale('en');
+		expect(texts('.sidebar-title .label')[0]).toBe('Analysis');
+	});
 	it('lists the five tools and opens their pages on click', async () => {
 		await modules();
 		backend.on('analysis_status', () => ({ state: 'ready', done: 3, total: 3, files: 3, symbols: 9, calls: 5 }));

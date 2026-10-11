@@ -237,8 +237,7 @@ pub fn extensions_home_dir() -> Result<PathBuf, String> {
     if let Some(dir) = TEST_EXTENSIONS_HOME.lock().unwrap().clone() {
         return Ok(dir);
     }
-    let home = home_dir().ok_or_else(|| "no user home directory".to_string())?;
-    let dir = home.join(".ggs").join("extensions");
+    let dir = extensions_store_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     Ok(dir)
 }
@@ -261,6 +260,18 @@ fn home_dir() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
+}
+
+/// `GGS_HOME` names the `.ggs` directory itself (the relocation `remote_host` and the
+/// daemon's paths honour); unset, the store lives at `~/.ggs/extensions`.
+fn extensions_store_dir() -> Result<PathBuf, String> {
+    if let Some(root) = std::env::var_os("GGS_HOME") {
+        if !root.is_empty() {
+            return Ok(PathBuf::from(root).join("extensions"));
+        }
+    }
+    let home = home_dir().ok_or_else(|| "no user home directory".to_string())?;
+    Ok(home.join(".ggs").join("extensions"))
 }
 
 /// One-time move from the pre-`.ggs` location (`{app_data}/extensions`) so existing installs
@@ -2589,7 +2600,7 @@ fn compose_page(html: &str) -> String {
 /// Percent-decode a URL path (and `+` as space, the form-encoding convention); invalid
 /// escapes pass through untouched. Byte-wise on purpose: slicing the `&str` at arbitrary
 /// offsets would panic inside multi-byte characters.
-fn percent_decode(input: &str) -> String {
+pub(crate) fn percent_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut at = 0;

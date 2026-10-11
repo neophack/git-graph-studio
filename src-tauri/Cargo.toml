@@ -92,6 +92,11 @@ desktop = [
     "dep:getrandom",
     "dep:tree-sitter",
     "dep:big-code-analysis",
+    "dep:interprocess",
+    "dep:rmp-serde",
+    "dep:serde_bytes",
+    "dep:tokio",
+    "dep:sha2",
     "grammar-rust",
     "grammar-python",
     "grammar-go",
@@ -194,6 +199,13 @@ flate2 = { version = "1", default-features = false, features = ["zlib-rs"], opti
 # The .asc walker's newline scan (can_log.rs): SIMD-accelerated where std's byte-by-byte
 # `position` is not; already in the tree via the `ignore` crate, so it costs nothing.
 memchr = "2"
+# Remote Access (module 19, remote_host.rs): the local control channel to the GGS Remote
+# daemon — a named pipe (Windows) or a Unix socket, over Tauri's own tokio runtime — and its
+# MessagePack messages (the daemon keeps its own copy; shared test vectors align the two).
+interprocess = { version = "2.2", features = ["tokio"], optional = true }
+rmp-serde = { version = "1.3", optional = true }
+serde_bytes = { version = "0.11", optional = true }
+tokio = { version = "1", features = ["io-util", "sync", "time", "rt"], optional = true }
 # The file-system watcher behind "external changes show up by themselves" (watcher.rs).
 notify = { version = "8", default-features = false, features = ["macos_fsevent"], optional = true }
 # measure.rs's large-file probe writes its synthetic file into a temp dir.
