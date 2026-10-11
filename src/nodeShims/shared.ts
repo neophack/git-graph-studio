@@ -133,7 +133,7 @@ export function traceShim(level: 'trace' | 'debug' | 'info' | 'warn' | 'error', 
  *  does not (a spawn an extension never performs must not kill its activation). */
 export function callThrowsFn(name: string): () => never {
 	return () => {
-		const message = `${name} is not supported by the Git Graph Studio extension host (extensions run in a sandboxed frame; a package that needs real processes declares a ggs backend)`;
+		const message = `${name} is not supported by the Git Graph Studio extension host (this extension runs in a sandboxed frame; installing the package again — or its next version — derives the fuller runtime its code asks for)`;
 		reportShimFailure(message);
 		throw new Error(message);
 	};

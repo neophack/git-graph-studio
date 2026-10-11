@@ -1997,7 +1997,7 @@ fn resolve_node_binaries(
         // GGS-patch: a main-only package whose loadable code the sandboxed frame cannot
         // host derives a `ggs-node` backend anyway — the sidecar reads its files straight
         // from the install directory (no code map, no caps) and serves the same vscode
-        // shim as a frame. Two shapes cannot be hosted by a frame, both read from
+        // shim as a frame. Three shapes cannot be hosted by a frame, all read from
         // the VSIX's own entries (the install directory does not exist yet here):
         //
         //   too big     the frame host's code map skips the file outright (Kimi Code's
@@ -2006,18 +2006,50 @@ fn resolve_node_binaries(
         //   listening   the package's loadable code opens listening sockets through a
         //               qualified call (`http.createServer(…)` — the frame's http/net
         //               shims are client halves over the host bridge, nothing there can
-        //               ACCEPT a connection; Claude Remote's LAN server is this rule's
-        //               resident). The call may sit in the entry or in a module it
-        //               requires — Claude Remote 0.2 split its server into `server.js`
-        //               and the entry alone no longer names it — so the scan reads every
-        //               `.js` / `.cjs` file the frame's own code map would carry, the
-        //               `node_modules` tree included.
+        //               ACCEPT a connection). The call may sit in the entry or in a
+        //               module it requires — so the scan reads every `.js` / `.cjs`
+        //               file the frame's own code map would carry, the `node_modules`
+        //               tree included;
+        //   crypto      the package's code calls a crypto CONSTRUCTOR the frame's shim
+        //               refuses outright (`crypto.createHmac(…)`, `createCipheriv(…)`,
+        //               … — the frame serves the digests and the randoms, but these
+        //               answer `callThrowsFn` at invocation; Claude Remote 2.0 dropped
+        //               its LAN server and crossed NO route before this rule — it
+        //               installed `backend: null`, landed in a frame, and its
+        //               activation died on `crypto.createHmac is not supported`). The
+        //               same qualified-form discipline: only `crypto.createHmac` counts,
+        //               `h = crypto.createHmac` bound-and-called-later rides too, but a
+        //               minified alias (`n(...)`) never carries the qualified form.
         //
         // Only QUALIFIED calls count: a minified bundle aliases the module
         // (`l.createServer` — ms-python's named-pipe transport) and never carries the
         // qualified form, so client-only bundles stay in their frame; a hand-written
         // server says `http.createServer`. A false positive only lands a package on
         // the fuller runtime — the frame is the degraded host, not the other way round.
+        // A package that DECLARES its side needs no scan: VS Code's `extensionKind:
+        // ["workspace"]` is the package's own word that it runs where processes live
+        // (Claude Remote 2.0 — its crypto and the session store outside the workspace
+        // cannot be served by a frame, and its minified require alias hid the call from
+        // the qualified-form scan besides).
+        if manifest
+            .extension_kind
+            .iter()
+            .any(|kind| kind.eq_ignore_ascii_case("workspace"))
+        {
+            if let Some(main) = manifest
+                .main
+                .as_deref()
+                .filter(|main| !main.trim().is_empty())
+            {
+                return Ok(Some(BackendDecl {
+                    kind: "node".to_owned(),
+                    command: main.to_owned(),
+                    args: Vec::new(),
+                    protocol: None,
+                    binaries: None,
+                }));
+            }
+        }
         if let Some(main) = manifest
             .main
             .as_deref()
@@ -2070,10 +2102,21 @@ fn resolve_node_binaries(
                 "tls.createServer",
                 "dgram.createServer",
             ];
-            let opens_sockets = QUALIFIED_SERVER_CALLS
+            // The crypto constructors the frame's shim answers with an honest throw —
+            // the digests (`createHash`) and the randoms ARE served in a frame and stay
+            // off this list, so packages that only hash keep their frame.
+            const QUALIFIED_CRYPTO_CALLS: [&str; 5] = [
+                "crypto.createHmac",
+                "crypto.createCipheriv",
+                "crypto.createDecipheriv",
+                "crypto.createSign",
+                "crypto.createVerify",
+            ];
+            let needs_process_runtime = QUALIFIED_SERVER_CALLS
                 .iter()
+                .chain(QUALIFIED_CRYPTO_CALLS.iter())
                 .any(|call| code_text.contains(call));
-            if too_big || opens_sockets {
+            if too_big || needs_process_runtime {
                 return Ok(Some(BackendDecl {
                     kind: "node".to_owned(),
                     command: main.to_owned(),
@@ -2612,6 +2655,12 @@ pub(crate) struct VsixManifest {
     extension_dependencies: Vec<String>,
     #[serde(default, rename = "extensionPack")]
     extension_pack: Vec<String>,
+    /// VS Code's own declaration of where a package runs. `["workspace"]` says the
+    /// package needs workspace-side (process) capabilities — the filesystem beyond the
+    /// open folders, real crypto, real children — which this host's sandboxed frame
+    /// cannot serve; the install honours it by deriving the ggs-node backend.
+    #[serde(default, rename = "extensionKind")]
+    extension_kind: Vec<String>,
 }
 
 /// `repository` is either a URL string or `{ "type": "git", "url": "..." }`.
@@ -4570,5 +4619,149 @@ mod ext_log_and_storage_tests {
                 "{bad} should be refused"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod crypto_derivation_tests {
+    use super::*;
+    use std::io::Write as _;
+
+    #[test]
+    fn a_package_that_calls_crypto_createhmac_derives_the_node_backend() {
+        // Claude Remote 2.0's shape: no LAN server left, but its E2E layer says
+        // `crypto.createHmac(…)` qualified — the frame's crypto shim refuses the call at
+        // invocation, so the install derives the process backend. Before this rule the
+        // package installed `backend: null` and its activation died on
+        // "crypto.createHmac is not supported by the … extension host".
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        let vsix = tmp.path().join("remote2.vsix");
+        let file = std::fs::File::create(&vsix).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("extension/package.json", options).unwrap();
+        zip.write_all(
+            br#"{"name":"remote2","publisher":"ggs","version":"2.0.1","main":"./extension.js"}"#,
+        )
+        .unwrap();
+        zip.start_file("extension/extension.js", options).unwrap();
+        zip.write_all(b"module.exports = { activate: () => {} };").unwrap();
+        zip.start_file("extension/crypto.js", options).unwrap();
+        zip.write_all(
+            // The qualified form, exactly as the real crypto.js spells it — an aliased
+            // require (nodeCrypto.createHmac) is the minified shape the rule leaves alone.
+            b"const crypto = require('crypto');
+const mac = crypto.createHmac('sha256', key).update(data).digest();
+module.exports = { mac };",
+        )
+        .unwrap();
+        zip.finish().unwrap();
+
+        let info = install_from_vsix_into(&exts, &vsix, false).unwrap();
+        let backend = info
+            .capabilities
+            .as_ref()
+            .unwrap()
+            .backend
+            .as_ref()
+            .expect("the crypto-writing module derives the node backend");
+        assert_eq!(backend.kind, "node");
+        assert_eq!(backend.command, "./extension.js");
+    }
+
+    #[test]
+    fn a_package_declaring_extension_kind_workspace_derives_the_node_backend() {
+        // The declaration beats the scan: Claude Remote 2.0's minified require alias
+        // (`nodeCrypto.createHmac`) hides the call from the qualified-form rule, but the
+        // package's own VS Code-standard word — `extensionKind: ["workspace"]`, "I need
+        // the side where processes live" — derives the backend outright.
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        let vsix = tmp.path().join("workspace-side.vsix");
+        let file = std::fs::File::create(&vsix).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("extension/package.json", options).unwrap();
+        zip.write_all(
+            br#"{"name":"wside","publisher":"ggs","version":"1.0.0","main":"./extension.js","extensionKind":["workspace"]}"#,
+        )
+        .unwrap();
+        zip.start_file("extension/extension.js", options).unwrap();
+        zip.write_all(b"const n = require('crypto'); n.createHmac('sha256', k);").unwrap();
+        zip.finish().unwrap();
+
+        let info = install_from_vsix_into(&exts, &vsix, false).unwrap();
+        let backend = info
+            .capabilities
+            .as_ref()
+            .unwrap()
+            .backend
+            .as_ref()
+            .expect("the declared workspace side derives the node backend");
+        assert_eq!(backend.kind, "node");
+        assert_eq!(backend.command, "./extension.js");
+    }
+
+    #[test]
+    fn a_package_declaring_extension_kind_ui_stays_in_its_frame() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        let vsix = tmp.path().join("ui-side.vsix");
+        let file = std::fs::File::create(&vsix).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("extension/package.json", options).unwrap();
+        zip.write_all(
+            br#"{"name":"uiside","publisher":"ggs","version":"1.0.0","main":"./extension.js","extensionKind":["ui"]}"#,
+        )
+        .unwrap();
+        zip.start_file("extension/extension.js", options).unwrap();
+        zip.write_all(b"module.exports = { activate: () => {} };").unwrap();
+        zip.finish().unwrap();
+
+        let info = install_from_vsix_into(&exts, &vsix, false).unwrap();
+        assert!(
+            info.capabilities.as_ref().unwrap().backend.is_none(),
+            "a declared ui side never derives a backend"
+        );
+    }
+
+    #[test]
+    fn a_package_that_only_hashes_stays_in_its_frame() {
+        // `createHash` (and the randoms) ARE served by the frame's crypto shim — a
+        // package that only digests keeps its frame; only the refused constructors
+        // derive a backend.
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        let vsix = tmp.path().join("hashy.vsix");
+        let file = std::fs::File::create(&vsix).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("extension/package.json", options).unwrap();
+        zip.write_all(
+            br#"{"name":"hashy","publisher":"ggs","version":"1.0.0","main":"./extension.js"}"#,
+        )
+        .unwrap();
+        zip.start_file("extension/extension.js", options).unwrap();
+        zip.write_all(
+            b"const crypto = require('crypto');\nconst hex = crypto.createHash('sha256').update('x').digest('hex');\nmodule.exports = { activate: () => {}, hex };",
+        )
+        .unwrap();
+        zip.finish().unwrap();
+
+        let info = install_from_vsix_into(&exts, &vsix, false).unwrap();
+        assert!(
+            info.capabilities
+                .as_ref()
+                .unwrap()
+                .backend
+                .is_none(),
+            "hashing alone never derives a backend"
+        );
     }
 }
