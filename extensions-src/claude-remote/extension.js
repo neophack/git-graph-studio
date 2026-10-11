@@ -486,10 +486,27 @@ function activate(context) {
 			return;
 		}
 		const state = await official.state(sessionId).catch(() => null);
+		// The CLI's own verdict gates the switch: on a third-party model provider the
+		// official Remote Control does not exist (the CLI refuses with its own error),
+		// so the toggle explains and points at the relay instead of firing into it.
+		if (state && state.available === false) {
+			vscode.window.showInformationMessage(
+				L(
+					"CLI 报告官方 Remote Control 不可用（第三方模型端点不支持，仅 claude.ai 登录 + 官方模型可用）。请使用自建中继：面板里把模式切到“自建服务器”。",
+					"The CLI reports the official Remote Control unavailable (third-party model endpoints are not served; it needs claude.ai login + first-party models). Use the self-hosted relay instead: switch the mode to self-hosted in the panel."
+				)
+			);
+			return;
+		}
 		const enable = !(state && (state.status === "connected" || state.status === "connecting"));
 		try {
 			const answer = await official.toggle(sessionId, enable);
 			lastOfficialSession = sessionId;
+			if (answer && answer.status === "error" && answer.reason) {
+				vscode.window.showWarningMessage(answer.reason);
+				schedulePush();
+				return;
+			}
 			if (answer.connectUrl) await vscode.env.clipboard.writeText(answer.connectUrl).catch(() => undefined);
 			vscode.window.showInformationMessage(
 				answer.connectUrl

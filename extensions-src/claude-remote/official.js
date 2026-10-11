@@ -66,7 +66,8 @@ function createOfficial(options) {
 		return {
 			status: rc && rc.status ? rc.status : enable ? "connecting" : "disconnected",
 			connectUrl: rc && rc.connectUrl || null,
-			sessionUrl: rc && rc.sessionUrl || null
+			sessionUrl: rc && rc.sessionUrl || null,
+			reason: rc && rc.reason || null
 		};
 	}
 

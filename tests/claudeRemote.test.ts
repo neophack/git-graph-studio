@@ -206,6 +206,46 @@ describe('the E2E crypto layer', () => {
 		expect(() => c.openFrame(kE2E, { ...envelope, epoch: 3 }, body)).toThrow(); // rekeyed peer
 	});
 
+	it("a sandboxed frame's call-throws crypto stubs fall back to sjcl instead of dying", () => {
+		// The frame shim's shape: createHmac/createCipheriv/hkdfSync are FUNCTIONS whose
+		// invocation throws (typeof alone answered "function" — the probe's whole point).
+		// createHash and randomBytes are genuinely served there.
+		const Module = nodeRequire('module') as Any;
+		const originalLoad = Module._load;
+		const throwsNow = (name: string) => () => { throw new Error(`${name} is not supported by the Git Graph Studio extension host`); };
+		Module._load = function (request: string, ...rest: Any[]) {
+			if (request !== 'crypto') return originalLoad.call(this, request, ...rest);
+			const real = originalLoad.call(this, request, ...rest);
+			return {
+				createHash: real.createHash, // served in a frame
+				randomBytes: real.randomBytes, // served in a frame
+				createHmac: throwsNow('crypto.createHmac'),
+				createCipheriv: throwsNow('crypto.createCipheriv'),
+				createDecipheriv: throwsNow('crypto.createDecipheriv'),
+				hkdfSync: throwsNow('crypto.hkdfSync')
+			};
+		};
+		try {
+			delete nodeRequire.cache[nodeRequire.resolve(path.join(extensionDir, 'crypto.js'))];
+			const c = requireExtension('crypto.js');
+			const K = Buffer.alloc(32, 5);
+			// Every primitive answers — over sjcl — and agrees with Node's own vectors.
+			expect(c.deriveE2E(K).equals(Buffer.from(crypto.hkdfSync('sha256', K, Buffer.alloc(0), Buffer.from('crr1/e2e'), 32)))).toBe(true);
+			expect(c.hmacSha256(Buffer.alloc(20, 0x0b), [Buffer.from('Hi There')]).toString('hex')).toBe('b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7');
+			const envelope = { userId: 'u_x', epoch: 1, from: 'w_abcdefghijklmnop', to: 'd_1234567890abcdef', seq: 4 };
+			const kE2E = c.deriveE2E(K);
+			const body = c.sealFrame(kE2E, envelope, { frame: 'hosted' });
+			expect(c.openFrame(kE2E, envelope, body)).toEqual({ frame: 'hosted' });
+			// And the wire stays one: the native codec opens what the fallback sealed.
+			delete nodeRequire.cache[nodeRequire.resolve(path.join(extensionDir, 'crypto.js'))];
+			const cNative = requireExtension('crypto.js');
+			expect(() => cNative.openFrame(cNative.deriveE2E(K), envelope, body)).not.toThrow();
+		} finally {
+			Module._load = originalLoad;
+			delete nodeRequire.cache[nodeRequire.resolve(path.join(extensionDir, 'crypto.js'))];
+		}
+	});
+
 	it('the sjcl fallback (frame hosts, plain-HTTP phones) answers the same vectors', () => {
 		// Shadow require('crypto') with a bare surface for one load: the pure-JS paths carry.
 		const Module = nodeRequire('module') as Any;
@@ -330,9 +370,16 @@ describe('the relay client (long-poll transport)', () => {
 		await until(() => frames, (v) => v.length > 0);
 		expect(frames[0]).toEqual({ t: 'sessions' });
 		// The window's answer crosses sealed and opens under the same AAD rule.
+		// The poller's first crossing is its sealed window.metadata control — and its
+		// `ct` must be the wire's "n.c" STRING: a bare object here read as a protocol
+		// violation server-side and closed the connection on every publish, flapping
+		// the window off the relay (the phone's every RPC then timed out).
+		await until(() => relayMock.sent, (v) => v.some((frame) => frame.kind === 'window.meta'));
+		const meta = relayMock.sent.find((frame) => frame.kind === 'window.meta');
+		expect(typeof meta.ct).toBe('string');
+		expect(meta.ct).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
 		relay.send(device, { t: 'reply', rid: 1, ok: true, r: { list: [] } });
 		await until(() => relayMock.sent, (v) => v.some((frame) => frame.kind === 'frame'));
-		// The poller's own first crossing is its sealed window.meta control; the frame follows.
 		const wire = relayMock.sent.find((frame) => frame.kind === 'frame');
 		expect(wire).toMatchObject({ v: 1, kind: 'frame', from: 'w_abcdefghijklmnop', to: device });
 		const [n, c] = String(wire.ct).split('.');

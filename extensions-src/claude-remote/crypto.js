@@ -20,7 +20,38 @@ let nodeCrypto = null;
 try {
 	nodeCrypto = require("crypto");
 } catch {
-	/* a frame host: the pure-JS paths below carry it */ }
+	/* a host with no crypto module at all: the pure-JS paths below carry it */ }
+
+/* The capability probes: a sandboxed frame's shim hands out call-throws STUBS for the
+ * constructors it refuses (typeof answers "function" — the throw happens at invocation),
+ * so "does this host really serve createHmac / hkdfSync / GCM" must be answered by
+ * trying the call once, at load, on throwaway input. Where the answer is no, the sjcl
+ * fallback carries — honestly and correctly — instead of an activation dying
+ * mid-connect. (createHash and randomBytes ARE served in a frame; no probe needed.) */
+function probes() {
+	if (!nodeCrypto) return { hmac: false, hkdf: false, gcm: false };
+	try {
+		nodeCrypto.createHmac("sha256", Buffer.alloc(32)).update("probe").digest();
+	} catch {
+		return { hmac: false, hkdf: false, gcm: false };
+	}
+	// A host that serves createHmac serves the family (ggs-node's natives and real
+	// Node alike); hkdfSync and GCM are probed individually for the odd middle shape.
+	let hkdf = false;
+	try {
+		nodeCrypto.hkdfSync("sha256", Buffer.alloc(32), Buffer.alloc(0), Buffer.alloc(1), 16);
+		hkdf = true;
+	} catch { /* falls back to the HMAC-based expansion */ }
+	let gcm = false;
+	try {
+		const cipher = nodeCrypto.createCipheriv("aes-256-gcm", Buffer.alloc(32), Buffer.alloc(12));
+		cipher.update("probe");
+		cipher.final();
+		gcm = true;
+	} catch { /* falls back to sjcl's GCM */ }
+	return { hmac: true, hkdf, gcm };
+}
+const native = probes();
 
 /* ---------- the shared primitives ---------- */
 
@@ -33,12 +64,12 @@ function sha256Hex(parts) {
 	}
 	// The pure-JS fallback: the frame shim and ggs-node both serve createHash("sha256")
 	// natively, so this path is the belt under a host that serves neither.
-	const { sha256js } = require("./cryptojs.js");
-	return sha256js(parts);
+	const { sha256Bytes } = require("./cryptojs.js");
+	return Buffer.from(sha256Bytes(parts)).toString("hex");
 }
 
 function hmacSha256(key, parts) {
-	if (nodeCrypto && typeof nodeCrypto.createHmac === "function") {
+	if (native.hmac) {
 		const mac = nodeCrypto.createHmac("sha256", key);
 		for (const part of parts) mac.update(part);
 		return mac.digest();
@@ -52,7 +83,7 @@ function hmacSha256(key, parts) {
 
 /** HKDF-SHA256 (RFC 5869): extract-and-expand, the `length` answer bytes. */
 function hkdf(ikm, salt, info, length) {
-	if (nodeCrypto && typeof nodeCrypto.hkdfSync === "function") {
+	if (native.hkdf) {
 		// Node's hkdfSync answers an ArrayBuffer of exactly `length` bytes.
 		return Buffer.from(nodeCrypto.hkdfSync("sha256", ikm, salt, info, length));
 	}
@@ -103,7 +134,7 @@ function unb64url(text) {
 function sealFrame(kE2E, { userId, epoch, from, to, seq }, plain) {
 	const nonce = randomBytes(12);
 	const aad = Buffer.from(`${AAD_PREFIX}|${userId}|${epoch}|${from}|${to}|${seq}`, "utf8");
-	if (nodeCrypto && typeof nodeCrypto.createCipheriv === "function") {
+	if (native.gcm) {
 		const cipher = nodeCrypto.createCipheriv("aes-256-gcm", kE2E, nonce);
 		cipher.setAAD(aad);
 		const ct = Buffer.concat([cipher.update(Buffer.from(JSON.stringify(plain), "utf8")), cipher.final(), cipher.getAuthTag()]);
@@ -121,7 +152,7 @@ function openFrame(kE2E, { userId, epoch, from, to, seq }, body) {
 	if (nonce.length !== 12 || sealed.length < 16) throw new Error("malformed frame");
 	const aad = Buffer.from(`${AAD_PREFIX}|${userId}|${epoch}|${from}|${to}|${seq}`, "utf8");
 	let plain;
-	if (nodeCrypto && typeof nodeCrypto.createDecipheriv === "function") {
+	if (native.gcm) {
 		const decipher = nodeCrypto.createDecipheriv("aes-256-gcm", kE2E, nonce);
 		decipher.setAAD(aad);
 		decipher.setAuthTag(sealed.subarray(sealed.length - 16));

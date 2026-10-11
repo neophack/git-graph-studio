@@ -2155,6 +2155,13 @@ export class ExtensionHost {
 		const response = await answer;
 		const state = claudeRcStateOf(response) ?? this.claudeRcStates.get(panelKey) ?? null;
 		ticket.rc = state;
+		// The CLI refuses third-party endpoints ("Remote Control is only available when
+		// using Claude via api.anthropic.com…") inside the answer payload, not as a state
+		// — surface its text so the caller reports the reason instead of a bare status.
+		const refusal = claudeRefusalOf(response);
+		if (refusal) {
+			ticket.rc = { ...(state ?? { status: 'error', connectUrl: null, sessionUrl: null, bridgeEpoch: null }), status: 'error', reason: refusal };
+		}
 		ticket.phase = 'sent';
 		ticket.sentAt = Date.now();
 	}
@@ -3778,6 +3785,21 @@ interface ClaudeRcState {
 	connectUrl: string | null;
 	sessionUrl: string | null;
 	bridgeEpoch: number | null;
+	/** The CLI's own refusal text, when it refused the toggle (a third-party endpoint). */
+	reason?: string;
+}
+
+/** The refusal message a remote-control answer carries, wherever the versions put it. */
+function claudeRefusalOf(response: unknown): string | null {
+	const value = response as { error?: unknown; message?: unknown; request?: { error?: unknown; message?: unknown } } | null;
+	for (const candidate of [value?.error, value?.message, value?.request?.error, value?.request?.message]) {
+		if (typeof candidate === 'string' && /remote control/i.test(candidate)) return candidate;
+		if (candidate && typeof candidate === 'object' && typeof (candidate as { message?: unknown }).message === 'string') {
+			const message = (candidate as { message: string }).message;
+			if (/remote control/i.test(message)) return message;
+		}
+	}
+	return null;
 }
 
 /** Which kind of Claude-conversation traffic a relayed webview message is — the tap only

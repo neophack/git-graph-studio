@@ -37,7 +37,13 @@ async function cryptoSection() {
 
 	let tamper = "opened";
 	try {
-		core.openFrame(kE2E, envelope, { ...largeSealed, c: largeSealed.c.slice(0, -2) + "AA" });
+		// Flip the FIRST character — always fully significant. (Two earlier attempts
+		// flipped the tail: a fixed "AA" overwrite no-opped whenever the tag ended in
+		// AA, and even a last-char flip decodes to the SAME bytes whenever the char sits
+		// in the same 4-bit group, because base64url's trailing bits are padding — the
+		// report flapped on 1/16 of runs.)
+		const alt = largeSealed.c[0] === "A" ? "B" : "A";
+		core.openFrame(kE2E, envelope, { ...largeSealed, c: alt + largeSealed.c.slice(1) });
 	} catch {
 		tamper = "rejected";
 	}

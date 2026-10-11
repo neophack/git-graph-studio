@@ -375,10 +375,13 @@ the owner's direction: the `ggs` key is gone; the retired `ggs/2` vocabulary sur
 as history). The install derives the runtime `manifest.json` from the package itself
 (`ext_install_from_vsix` → `resolve_node_binaries`): identity from `package.json`, and a
 backend when the package needs one — native `.node` binaries, or a `main` the sandboxed
-frame cannot host: too big for the frame's code map (2026-09-27, the Kimi rule), or opening
+frame cannot host: too big for the frame's code map (2026-09-27, the Kimi rule), opening
 listening sockets through a qualified call (`http.createServer(…)` — the frame's http/net
-shims are client halves, nothing there can accept a connection; Claude Remote's LAN server
-is this rule's resident, and a minified bundle's aliased `l.createServer` never trips it).
+shims are client halves, nothing there can accept a connection), or calling a crypto
+constructor the frame's shim refuses at invocation (`crypto.createHmac(…)`-class — the
+frame serves the digests and the randoms; 2026-10-11, Claude Remote 2.0's resident: it
+dropped its LAN server and crossed no route until this rule). A minified bundle's aliased
+`l.createServer` never trips any of it — only the qualified forms count.
 A package with neither entry nor binaries needs no backend at all — the frame host serves
 it whole. The named page registry (every page a package can show, opened as editor tabs
 over the `ggs://` protocol) registers at runtime through the process-command dispatch, and
@@ -669,10 +672,14 @@ page shows the integration's state (`claude_mcp_status`).
   the real Node runtime plus `node-host.cjs`; `resolve_node_binaries` (cmd_ext) derives a
   backend from a package's engine `.node` (real-Node host), its `package.json` `main` when
   native binaries are present, or — loadable code the sandboxed frame cannot host — an
-  oversized entry, or a qualified `http.createServer`-class call anywhere in the package's
-  `.js`/`.cjs` surface (2026-10-01: the scan reads the whole loadable tree, not the entry
-  alone — Claude Remote 0.2 moved its server into `server.js` and the entry-only scan
-  left the package `backend: null` in a frame that could not even resolve its siblings)),
+  oversized entry, or a qualified `http.createServer`-class or `crypto.createHmac`-class
+  call anywhere in the package's `.js`/`.cjs` surface (2026-10-01: the scan reads the
+  whole loadable tree, not the entry alone — Claude Remote 0.2 moved its server into
+  `server.js` and the entry-only scan left the package `backend: null` in a frame that
+  could not even resolve its siblings; 2026-10-11: the crypto constructors the frame's
+  shim refuses joined the rule — Claude Remote 2.0 dropped its LAN server and crossed no
+  route until `crypto.createHmac` derived its backend, while `createHash` and the randoms
+  stay off the list because a frame serves them)),
   `src-tauri/src/node_runtime/` (`ggs-node`, the `node-runtime` feature's
   pretend Node runtime sidecar — the default `node`-backend host: Boa on one JS thread fed
   by a job queue — protocol requests, timers, child-process events, the activation — a CommonJS `require`
@@ -1253,7 +1260,7 @@ From a phone, continue this machine's Claude Code conversations: the **official 
 
 - The relay `claude-remote-server/` (its own Cargo workspace, target under `target/studio/claude-remote-server/`; never linked into the app): registration (open/token/closed), challenge-response pairing (`k_auth = HKDF(K, "crr1/auth")`, the QR link `https://<relay>/c/<user>#<K>.<epoch>` — the key rides the fragment), optional Argon2id login password, rekey (epoch bump, every phone kicked `4401 rekeyed`, sibling windows told `epoch_changed`), device list/revoke, per-PC window routing over WebSocket **or** the long-poll pair (`GET /api/v1/agent/poll` + `POST /api/v1/agent/send` — ggs-node has no WebSocket client), bounded per-connection queues (windows: drop-oldest + `gap`; phones: disconnect 4413), strict user isolation. Its gate: `cargo test` (24 unit + 9 integration over real sockets, including the spawned binary) and `clippy --all-targets -- -D warnings`.
 - The phone app is the relay's `web/` (embedded at build): pairing, the window list (sealed `window.meta` bodies), the session list and the transcript renderer ported from the 1.x app, the question and permission cards, queue-now/queue-behind sending. Its crypto (`web/crypto.js`) is WebCrypto on secure origins, the vendored sjcl on plain-HTTP LANs — `tests/claudeRemote.test.ts` pins it against Node's own vectors and against the extension's codec (one wire, both ends).
-- The extension `extensions-src/claude-remote/` (one CommonJS package, VS Code and ggs-node unchanged): `identity.js` (the PC identity in `context.secrets`, the multi-window registration race over a global-state lock, register/rekey/password/devices), `crypto.js` (HKDF/HMAC/AES-256-GCM frames, AAD `crr1|user|epoch|from|to|seq`, the sjcl fallback for frame hosts), `relay.js` (WS or long-poll, epoch reload, bounded outbox), `sources/tap.js` (GGS: `ggs.claudeTap.*` plus the `ggs.claudeChat.*` driving), `sources/sdkHost.js` (VS Code: the CLI as a stream-json child with `--permission-prompt-tool stdio`), `control.js` (the phone's request table over the kept `sessions.js` reader), `official.js` (the CLI's own RC through the host's synthesized `toggle_remote_control`), `mirror.js` (the read-only official-session mirror: cleansed — `connectUrl` stays behind unless opted in — gated by `claudeRemote.mirrorOfficial`, importing none of the write path), `panel.js`, and the kept `runner.js`/`desktop.js`/`qrcode.js`/`sjcl.js`. `test/conformance.js` is the one host-conformance probe both runtimes answer (`tests/claudeRemote.test.ts` under real Node, `src-tauri/tests/node_runtime.rs` under ggs-node).
+- The extension `extensions-src/claude-remote/` (one CommonJS package, VS Code and ggs-node unchanged): `identity.js` (the PC identity in `context.secrets`, the multi-window registration race over a global-state lock, register/rekey/password/devices), `crypto.js` (HKDF/HMAC/AES-256-GCM frames, AAD `crr1|user|epoch|from|to|seq`, the sjcl fallback for frame hosts), `relay.js` (WS or long-poll, epoch reload, bounded outbox), `sources/tap.js` (GGS: `ggs.claudeTap.*` plus the `ggs.claudeChat.*` driving), `sources/sdkHost.js` (VS Code: the CLI as a stream-json child with `--permission-prompt-tool stdio`), `control.js` (the phone's request table over the kept `sessions.js` reader), `official.js` (the CLI's own RC through the host's synthesized `toggle_remote_control`), `mirror.js` (the read-only official-session mirror: cleansed — `connectUrl` stays behind unless opted in — gated by `claudeRemote.mirrorOfficial`, importing none of the write path), `panel.js`, and the kept `runner.js`/`desktop.js`/`qrcode.js`/`sjcl.js`. `test/conformance.js` is the one host-conformance probe both runtimes answer (`tests/claudeRemote.test.ts` under real Node, `src-tauri/tests/node_runtime.rs` under ggs-node). The package declares `"extensionKind": ["workspace"]` — its crypto and the session store outside the workspace need the process side, and the install honours the declaration (a minified require alias hid its `createHmac` call from the qualified-form scan; the declaration is the package's own word and beats any scan).
 - Routing policy (2026-10-11): a tap host drives EVERYTHING through the conversation's own Claude Code tab — the host's send opens or reveals it, a new conversation opens a fresh one — so a second CLI never branches the history under the desktop; the sdk host serves hosts with no tab surface. `mirrorControl` is the official-mode read-only gate (`control.js`'s `controlAllowed`): with official RC carrying the PC and the gate closed, the self-hosted phone reads everything and acts on nothing. The phone's pending permission card rides the session meta (`pendingPermission`, fed by both sources, fresh for ten minutes); the panel's window list and the password flag come from the relay (`GET /api/v1/me/windows`, sealed metas decrypted with the frame key; `password_set` on `/me/devices`).
 - The host-side bridges stay module 12: `ggs.claudeTap.subscribe/unsubscribe` (the read-only conversation tap in `src/extHost.ts` — sync copy before delivery, batched async flush, bounded queues with `gap`, one-time user consent, revocable by the `claudeTapAccess` setting; the events cross the shim as `env.onClaudeConversationTap`), `ggs.claudeChat.remoteControl` (the synthesized request whose answer is consumed before the page sees it), `ggs.claudeChat.permission` / `ggs.claudeChat.mode` (the tab's own permission card and mode selector in `src/claudeChatInject.ts`), and ggs-node's native `crypto.createHmac('sha256')` / `crypto.hkdfSync` (RFC 4231/5869 vectors in `node_runtime.rs`).
 

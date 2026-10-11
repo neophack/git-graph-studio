@@ -59,6 +59,13 @@ Login Password`, `Revoke a Paired Phone`, `Toggle Official Remote Control`.
 - Session files are read read-only, from the host's own store (Git Graph Studio
   `~/.ggs/claude`, VS Code `~/.claude`, an explicit `CLAUDE_CONFIG_DIR` over either).
 
+## Installation note
+
+The package declares `"extensionKind": ["workspace"]` — VS Code's own word for "runs on
+the side where processes live". Git Graph Studio honours it: the install derives the
+process backend (its E2E crypto and the conversation store outside the workspace cannot
+be served by the sandboxed frame host), while VS Code reads it the standard way.
+
 ## Deployment
 
 Run the relay (see its README), point `claudeRemote.serverUrl` at it, open the panel, scan.

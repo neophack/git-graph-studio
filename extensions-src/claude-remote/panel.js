@@ -274,6 +274,7 @@ select, input[type=text] { width: 100%; height: 30px; padding: 0 8px; border-rad
 			'<div class="item"><span class="d' + (w.online ? " on" : "") + '"></span><div class="grow"><div class="t">' + esc(w.name) + (w.self ? esc(T.thisWindow) : "") + '</div><div class="m">' + esc(w.host || "") + " · " + (w.online ? esc(T.online) : esc(ago(w.seen))) + "</div></div></div>").join("")
 			: '<div class="empty">' + esc(T.noWindows) + "</div>";
 		$("officialSub").textContent = s.official.available === false ? T.officialUnavailable : s.official.status && s.official.status !== "off" ? s.official.status : T.officialOff;
+		$("officialToggle").disabled = s.official.available === false;
 		$("officialQr").innerHTML = s.official.connectUrl ? '<div class="qr">' + s.official.qr + '</div><div class="urlrow"><span class="url" title="' + esc(s.official.connectUrl) + '">' + esc(s.official.connectUrl) + "</span></div>" : "";
 		if (document.activeElement !== $("officialAll")) $("officialAll").checked = !!s.officialAll;
 		if (document.activeElement !== $("mirror")) $("mirror").value = s.mirror;

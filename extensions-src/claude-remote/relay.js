@@ -101,11 +101,15 @@ function createRelay(identity, options) {
 		if (value.kind === "gap") log("the relay dropped frames while this window was away — the transcripts backfill");
 	}
 
-	/** The window's sealed metadata control line (the seq-0 broadcast body). */
+	/** The window's sealed metadata control line (the seq-0 broadcast body). The wire's
+	 *  `ct` is the sealed body's two base64url parts joined by a dot — a bare object
+	 *  here read as a protocol violation server-side and closed the connection on every
+	 *  publish, flapping the window off the relay for good. */
 	function metaControl() {
 		const id = currentIdentity();
 		const envelope = { userId: id.userId, epoch: id.epoch, from: windowId, to: "*", seq: 0 };
-		return { v: 1, kind: "window.meta", host: options.host || "ggs", ct: crypto.sealFrame(crypto.deriveE2E(id.K), envelope, options.meta ? options.meta() : {}) };
+		const sealed = crypto.sealFrame(crypto.deriveE2E(id.K), envelope, options.meta ? options.meta() : {});
+		return { v: 1, kind: "window.meta", host: options.host || "ggs", ct: sealed.n + "." + sealed.c };
 	}
 
 	async function pollSend(frames) {

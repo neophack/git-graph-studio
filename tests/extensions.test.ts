@@ -3787,6 +3787,24 @@ describe('the Claude conversation tap and the remote-control bridge (Claude Remo
 		gate.mockRestore();
 	});
 
+	it('a refused remote-control toggle carries the CLI\'s reason in the ticket', async () => {
+		const { host, claudeSent, speakAsPage, bindSession } = await tapHost();
+		bindSession('s1');
+		speakAsPage({ type: 'io_message', channelId: 'ch9', message: { type: 'assistant', content: 'hi' } });
+		const gate = vi.spyOn(host as never as { gateWebviewMessage: (view: unknown, message: unknown, key: string) => void }, 'gateWebviewMessage').mockImplementation(() => undefined);
+		// The CLI refuses (a third-party endpoint): the answer carries the message
+		// wherever the version puts it — the ticket reports it, not a bare status.
+		const { ticket } = await host.executeCommand('ggs.claudeChat.remoteControl', [{ sessionId: 's1', enable: true }]) as { ticket: string };
+		await host['serve']('webview.postMessage', [1, { type: 'response', channelId: 'ch9', error: 'Remote Control is only available when using Claude via api.anthropic.com. ANTHROPIC_BASE_URL is set and does not point at api.anthropic.com…' }], 'anthropic.claude-code', {} as never);
+		const state = await host.executeCommand('ggs.claudeChat.state', [{ ticket }]) as { phase: string; rc: { status: string; reason: string } | null };
+		expect(state.phase).toBe('sent');
+		expect(state.rc?.status).toBe('error');
+		expect(state.rc?.reason).toMatch(/api\.anthropic\.com/);
+		// A non-RC error string never poses as a refusal.
+		void claudeSent;
+		gate.mockRestore();
+	});
+
 	it('the access setting denies subscriptions outright (the revocation path)', async () => {
 		const { settings } = await import('../src/settings');
 		const { host, subscriberHandle } = await tapHost();
