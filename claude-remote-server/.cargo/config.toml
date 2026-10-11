@@ -1,4 +1,0 @@
-# Build artifacts go to the project's target/ (never into the source tree), in a sub-dir
-# of their own: the relay is its own Cargo workspace, never linked into the app.
-[build]
-target-dir = "../target/studio/claude-remote-server"

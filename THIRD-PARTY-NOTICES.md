@@ -29,10 +29,10 @@ their upstream licenses — this file keeps the notices those licenses require.
 
 ## Extension packages carried by a build
 
-- The extension packages `scripts/prepare.mjs` bundles (fetched from Open VSX,
-  plus the local `extensions-src/claude-remote/` package) are separate works
-  distributed under their own package licenses, which their `.vsix` files
-  carry. They install into `~/.ggs/extensions/` beside the app, not into it.
+- The extension packages `scripts/prepare.mjs` bundles (fetched from Open VSX)
+  are separate works distributed under their own package licenses, which their
+  `.vsix` files carry. They install into `~/.ggs/extensions/` beside the app,
+  not into it.
 
 The respective license texts are available in the upstream packages. If the
 terms above ever conflict with an upstream license, the upstream license

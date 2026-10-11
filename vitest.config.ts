@@ -25,12 +25,10 @@ export default defineConfig({
 	// run while the tests themselves passed. The module-runner path knows no such
 	// callback gap.
 	//
-	// Three files stay on the classic threads pool, each because the vm pool's module
+	// Two files stay on the classic threads pool, each because the vm pool's module
 	// system breaks something they exercise: extensions.test.ts vm-requires jsdom's CJS
 	// dependency tree, whose @exodus/bytes dependency ships ESM under a CJS extension
-	// and breaks inside the vm context; claudeRemoteActivation.test.ts's
-	// require('vscode') interception patches Module._load, which the vm pool's module
-	// system does not honor; and editor.test.ts asserts the lazy language chunk's
+	// and breaks inside the vm context; and editor.test.ts asserts the lazy language chunk's
 	// arrival — an in-app dynamic import the vm pool answers with
 	// ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING under the full suite's load, which
 	// loadLanguage degrades to a silent Plain Text (the same vm import-callback gap the
@@ -51,7 +49,6 @@ export default defineConfig({
 					include: ['tests/**/*.test.ts'],
 					exclude: [
 						'tests/extensions.test.ts',
-						'tests/claudeRemoteActivation.test.ts',
 						'tests/editor.test.ts'
 					],
 					setupFiles: ['tests/setup.ts'],
@@ -67,7 +64,6 @@ export default defineConfig({
 					environment: 'jsdom',
 					include: [
 						'tests/extensions.test.ts',
-						'tests/claudeRemoteActivation.test.ts',
 						'tests/editor.test.ts'
 					],
 					setupFiles: ['tests/setup.ts'],
