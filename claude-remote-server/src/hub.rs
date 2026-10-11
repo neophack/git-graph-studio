@@ -149,9 +149,16 @@ impl Frame {
         let to = if to_raw == "*" { "*".to_string() } else { member_id(to_raw)? };
         let seq = message.get("seq")?.as_u64()?;
         let ct = message.get("ct")?.as_str()?;
-        // The ciphertext is base64url without padding; a length cap keeps a hostile client
-        // from parking megabytes of junk per frame even under a raised body limit.
-        if ct.is_empty() || ct.len() > 1_572_864 || !ct.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        // The ciphertext is the sealed body's two base64url parts joined by a dot
+        // ("<nonce>.<ciphertext‖tag>" — the shape both clients send); the relay never
+        // parses it, so only emptiness, the length cap and a sane charset are checked.
+        // The dot was missing from the charset once: the server then refused EVERY real
+        // frame as malformed (the hand-written test ciphertexts carried no separator and
+        // hid it) — the live e2e probe caught it on its first RPC.
+        if ct.is_empty()
+            || ct.len() > 1_572_864
+            || !ct.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+        {
             return None;
         }
         Some(Frame { from, to, seq, ct: ct.to_string() })
@@ -511,6 +518,9 @@ mod tests {
     fn frames_parse_and_reject() {
         let good = json!({"v":1,"kind":"frame","from":"w_0123456789abcdef","to":"d_0123456789abcdef","seq":1,"ct":"Y3J5cHRv"});
         assert!(Frame::parse(&good).is_some());
+        // The wire's real shape: "<nonce>.<ciphertext>" — the dot is part of it.
+        let joined = json!({"v":1,"kind":"frame","from":"w_0123456789abcdef","to":"d_0123456789abcdef","seq":1,"ct":"AAAAAAAAAAAAAAAA.Y3J5cHRv"});
+        assert!(Frame::parse(&joined).is_some());
         assert!(Frame::parse(&json!({"v":2,"kind":"frame","from":"w_0123456789abcdef","to":"*","seq":1,"ct":"Y3J5cHRv"})).is_none());
         assert!(Frame::parse(&json!({"v":1,"kind":"window.meta","ct":"e30"})).is_none());
         assert!(Frame::parse(&json!({"v":1,"kind":"frame","from":"x_bad","to":"*","seq":1,"ct":"Y3J5cHRv"})).is_none());
