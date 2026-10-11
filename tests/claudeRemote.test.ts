@@ -311,6 +311,32 @@ describe('the PC identity', () => {
 		await expect(id.rekey(first)).rejects.toThrow(/rekeyed|stale/);
 	});
 
+	it("a dead credential's rekey fails 401-tagged, and forget + load registers fresh (the relay-data-reset recovery)", async () => {
+		serveRelay();
+		const id = identity();
+		const first = await id.register('https://relay.test');
+		// A ghost credential (the relay's data was wiped): every authenticated call 401s.
+		const ghost = { ...first, agentSecret: 'f'.repeat(64) };
+		await expect(id.rekey(ghost)).rejects.toMatchObject({ status: 401, message: /rekeying failed: auth/ });
+		// check() says false for the ghost, null when the relay is unreachable.
+		expect(await id.check(ghost)).toBe(false);
+		const savedFetch = globalThis.fetch;
+		globalThis.fetch = (async () => { throw new TypeError('fetch failed'); }) as Any;
+		expect(await id.check(ghost)).toBe(null);
+		globalThis.fetch = savedFetch;
+		// forget + load: the recovery path mints a fresh identity on the same relay.
+		const secrets = new Map<string, string>();
+		const global = new Map<string, Any>();
+		const context = { secrets: { get: async (k: string) => secrets.get(k), store: async (k: string, v: string) => { secrets.set(k, v); }, delete: async (k: string) => { secrets.delete(k); } }, globalState: { get: (k: string) => global.get(k), update: async (k: string, v: Any) => { if (v === undefined) global.delete(k); else global.set(k, v); } } };
+		await id.writeIdentity(context, first);
+		expect(id.validIdentity(await id.readIdentity(context))).toBe(true);
+		await id.forget(context);
+		expect(await id.readIdentity(context)).toBe(null);
+		const fresh = await id.load(context, { serverUrl: 'https://relay.test' });
+		expect(relayMock.registers).toHaveLength(2); // registered again, not adopted
+		expect(fresh.userId).not.toBe(first.userId);
+	});
+
 	it('two windows racing the first creation register exactly once and adopt one identity', async () => {
 		serveRelay();
 		const id = identity();

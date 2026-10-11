@@ -51,6 +51,12 @@ function serveRelayRegister(calls: Any[]) {
 			const user = 'u_act1vat10n2test';
 			return { status: 201, ok: true, text: async () => JSON.stringify({ user_id: user, agent_secret: 'a'.repeat(64), epoch: 1 }), json: async () => ({ user_id: user, agent_secret: 'a'.repeat(64), epoch: 1 }) } as Any;
 		}
+		// The credential-liveness probe every connect makes before its relay: the minted
+		// agent secret answers 200 (anything else would trigger the fresh-registration
+		// recovery — correct against a real relay, wrong against this fake).
+		if (url.endsWith('/api/v1/me/devices') && String(init.headers?.Authorization ?? '') === 'Bearer ' + 'a'.repeat(64)) {
+			return { status: 200, ok: true, text: async () => JSON.stringify({ devices: [], password_set: false }), json: async () => ({ devices: [], password_set: false }) } as Any;
+		}
 		if (url.includes('/api/v1/agent/')) return { status: 200, ok: true, text: async () => JSON.stringify({ v: 1, frames: [], cursor: 0, epoch: 1, user: 'u_act1vat10n2test' }), json: async () => ({ v: 1, frames: [], cursor: 0, epoch: 1, user: 'u_act1vat10n2test' }) } as Any;
 		return { status: 404, ok: false, text: async () => '{}', json: async () => ({}) } as Any;
 	}) as Any;

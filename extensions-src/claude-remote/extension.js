@@ -231,6 +231,18 @@ function activate(context) {
 		relayWanted = true;
 		try {
 			current = await identity.load(context, { serverUrl, log });
+			// A relay reset from empty data no longer knows this PC: the stored credential
+			// would 401 on every authenticated call forever (rekey included). Register
+			// fresh instead — a new user id and QR, announced once, self-healing.
+			if (current && (await identity.check(current).catch(() => null)) === false) {
+				log("the relay no longer knows this PC (its data was reset) — registering fresh");
+				await identity.forget(context);
+				current = await identity.load(context, { serverUrl, log });
+				vscode.window.showInformationMessage(L(
+					"中继已不认识本 PC（数据被重置）——已重新注册，请在面板用新二维码配对手机。",
+					"The relay no longer knew this PC (its data was reset) — registered fresh; pair the phone with the new QR in the panel."
+				));
+			}
 		} catch (error) {
 			relayWanted = false;
 			log(`loading the identity failed: ${error && error.message}`);
@@ -434,11 +446,28 @@ function activate(context) {
 			mirror.reset();
 			vscode.window.showInformationMessage(L("配对密钥已重置，用新的二维码重新配对。", "Pairing key reset — pair again with the new QR."));
 		} catch (error) {
-			// Another window rekeyed first: adopt what it published.
 			const reloaded = await identity.readIdentity(context).catch(() => null);
 			if (reloaded && reloaded.epoch > current.epoch) {
+				// Another window rekeyed first: adopt what it published.
 				current = reloaded;
 				vscode.window.showInformationMessage(L("另一个窗口已重置密钥，本窗口已同步。", "Another window rekeyed first; this window synced to it."));
+			} else if (error && (error.status === 401 || /\bauth\b/.test(String(error.message)))) {
+				// The relay no longer knows this PC (its data was reset): a reset is
+				// exactly the moment to register fresh — new user id, new QR, reconnect.
+				try {
+					await identity.forget(context);
+					const fresh = await identity.register(configOf.serverUrl(), { log });
+					current = await identity.adopt(context, fresh);
+					mirror.reset();
+					if (relay) { relay.stop(); relay = null; online = false; }
+					await connect();
+					vscode.window.showInformationMessage(L(
+						"中继已不认识本 PC（数据被重置）——已重新注册，请用新的二维码配对。",
+						"The relay no longer knew this PC (its data was reset) — registered fresh; pair with the new QR."
+					));
+				} catch (registerError) {
+					vscode.window.showErrorMessage(L("重新注册失败：", "Registering fresh failed: ") + (registerError && registerError.message || registerError));
+				}
 			} else {
 				vscode.window.showErrorMessage(String(error && error.message || error));
 			}

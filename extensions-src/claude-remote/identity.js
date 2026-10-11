@@ -110,9 +110,33 @@ async function rekey(identity) {
 	});
 	if (!ok) {
 		const reason = json && json.error ? json.error : `HTTP ${status}`;
-		throw new Error(status === 409 ? "another window rekeyed first — reloading the identity" : `rekeying failed: ${reason}`);
+		const error = new Error(status === 409 ? "another window rekeyed first — reloading the identity" : `rekeying failed: ${reason}`);
+		// The HTTP status rides along: 401 means the relay no longer knows this PC at
+		// all (its data was reset) — the caller's cue to register fresh, not to retry.
+		error.status = status;
+		throw error;
 	}
 	return { ...identity, K: crypto.b64url(K), epoch: Number(json.epoch) || identity.epoch + 1 };
+}
+
+/** Forget the stored identity — the recovery half of a relay that was reset from empty
+ *  data: the next load registers this PC fresh (a new user id and QR). */
+async function forget(context) {
+	try { await context.secrets.delete(IDENTITY_KEY); } catch { /* no secret storage, or no delete */ }
+	try { await context.globalState.update(IDENTITY_KEY, undefined); } catch { /* nothing stored */ }
+}
+
+/** Whether the relay still knows this PC's credential: true it does, false it does not
+ *  (register fresh), null when the relay was unreachable (the ordinary offline retry —
+ *  never a cue to throw the identity away). */
+async function check(identity) {
+	let answer;
+	try {
+		answer = await relayFetch(identity.serverUrl, "GET", "/api/v1/me/devices", { agentSecret: identity.agentSecret, timeoutMs: 8000 });
+	} catch {
+		return null;
+	}
+	return answer.ok;
 }
 
 async function setPassword(identity, password) {
@@ -285,6 +309,8 @@ module.exports = {
 	adopt,
 	register,
 	rekey,
+	forget,
+	check,
 	setPassword,
 	clearPassword,
 	devices,
