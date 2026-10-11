@@ -110,8 +110,40 @@
 		return { ok: true };
 	}
 
+	/** The stored pairing is gone (the relay's data was reset, the phone revoked, or the
+	 *  key rekeyed): stop reconnecting and show the re-pair screen — the QR is the way back. */
+	function markPairingLost() {
+		state.device = null;
+		state.pairingLost = true;
+		state.online = false;
+		state.windows = [];
+		state.session = null;
+		state.view = "windows";
+		store.clear();
+		paint();
+	}
+
 	async function connect() {
 		if (state.socket) { try { state.socket.close(); } catch { /* already gone */ } }
+		// Probe the stored token BEFORE the WebSocket: the browser never shows a failed
+		// handshake's status, so a dead token otherwise becomes an invisible reconnect
+		// loop that hammers the relay into its lockout ("Unexpected response code: 429").
+		if (state.device) {
+			const probe = await fetch("/api/v1/device/verify", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ device_token: state.device.token })
+			}).catch(() => null);
+			if (probe && probe.status === 401) { markPairingLost(); return; }
+			if (probe && probe.status === 429) {
+				// Honored to the second the relay names — no guesswork hammering.
+				const retryAfter = Math.max(1000, Number(probe.headers.get("retry-after") || 0) * 1000 || 30000);
+				setTimeout(() => { if (state.device) void connect(); }, retryAfter);
+				state.online = false;
+				paint();
+				return;
+			}
+		}
 		const socket = new WebSocket(`${location.origin.replace(/^http/, "ws")}/ws/device?token=${encodeURIComponent(state.device.token)}`);
 		state.socket = socket;
 		socket.onopen = () => {
@@ -123,14 +155,8 @@
 		socket.onclose = (event) => {
 			state.online = false;
 			state.socket = null;
-			if (event.code === 4401) { // rekeyed or revoked: this pairing is gone
-				state.device = null;
-				state.pairingLost = true;
-				state.windows = [];
-				state.session = null;
-				state.view = "windows";
-				store.clear();
-				paint();
+			if (event.code === 4401) { // rekeyed or revoked mid-session: the same screen
+				markPairingLost();
 				return;
 			}
 			setTimeout(() => { if (state.device) void connect(); }, state.backoff);

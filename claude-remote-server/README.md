@@ -52,9 +52,9 @@ The phone app is served from `/c/<user id>`; the PC side is the Claude Remote ex
 | PC | `POST /api/v1/register {token?, auth}` → `{user_id, agent_secret, epoch}` |
 | PC (Bearer agent_secret) | `PUT /me/pairing {auth, expect_epoch}` (rekey), `PUT/DELETE /me/password`, `GET /me/devices` (+ `password_set`), `GET /me/windows` (the sealed window metas), `DELETE /me/devices/{id}`, `POST /me/rotate-agent-secret`, `DELETE /me` |
 | PC window | `GET /ws/agent?window=w_…[&token=…]` **or** `GET /api/v1/agent/poll?window&cursor&wait` + `POST /api/v1/agent/send {window, frames}` |
-| Phone | `GET /c/{user_id}` (the app), `POST /pair/challenge`, `POST /pair`, `POST /login`, `GET /ws/device?token=…` |
+| Phone | `GET /c/{user_id}` (the app), `POST /pair/challenge`, `POST /pair`, `POST /login`, `POST /device/verify` (a stored token's liveness — the phone's pre-WebSocket probe; a dead token becomes the re-pair screen instead of a reconnect loop into the lockout), `GET /ws/device?token=…` |
 | Ops | `GET /healthz` |
 
 Frames: `{v:1, kind:"frame", from, to, seq, ct}` where `ct` is `<nonce>.<ciphertext‖tag>`
 (base64url); controls: `hello`, `windows` (sealed metas), `window.meta`, `epoch_changed`,
-`gap`, `kick`. Close codes: 4400 protocol, 4401 auth/rekeyed/revoked, 4413 overflow.
+`gap`, `kick`. Close codes: 4400 protocol, 4401 auth/rekeyed/revoked, 4413 overflow. Lockouts (429) carry `Retry-After`.

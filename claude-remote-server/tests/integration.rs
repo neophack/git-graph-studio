@@ -35,7 +35,14 @@ async fn start(config: Config) -> (App, String, watch::Sender<bool>) {
 
 /* ---------- a minimal HTTP/1.1 client (no extra dependencies) ---------- */
 
+
+/// [`http`] before the tuple grew its header half.
 async fn http(method: &str, url: &str, headers: &[(&str, &str)], body: &str) -> (u16, String) {
+    let (status, body, _) = http_with_headers(method, url, headers, body).await;
+    (status, body)
+}
+
+async fn http_with_headers(method: &str, url: &str, headers: &[(&str, &str)], body: &str) -> (u16, String, String) {
     let url = url.strip_prefix("http://").unwrap_or(url);
     let (host, path) = url.split_once('/').unwrap();
     let mut request = format!("{method} /{path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
@@ -53,8 +60,11 @@ async fn http(method: &str, url: &str, headers: &[(&str, &str)], body: &str) -> 
     stream.read_to_end(&mut raw).await.expect("read");
     let text = String::from_utf8_lossy(&raw).to_string();
     let status: u16 = text.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let head = text.split("
+
+").next().unwrap_or("").to_lowercase();
     let body = text.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
-    (status, body)
+    (status, body, head)
 }
 
 /* ---------- the simulated PC and phone ---------- */
@@ -651,4 +661,58 @@ async fn the_pc_side_reads_its_windows_and_the_password_flag() {
     let (_, body) = http("GET", &format!("{base}/api/v1/me/devices"), &[("Authorization", &auth)], "").await;
     let devices: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(devices["password_set"], serde_json::json!(true));
+}
+
+#[tokio::test]
+async fn a_stale_device_token_stops_at_the_verify_probe_and_the_lockout_names_its_wait() {
+    let (_app, base, _stop) = start(test_config()).await;
+    let pc = register_pc(&base).await;
+    let (_, live_token) = pair_phone(&base, &pc, None, "Pixel").await;
+
+    // The verify probe: a live token answers its identity; the liveness gate the phone
+    // checks before its WebSocket (the browser never shows a handshake failure's status,
+    // so a dead token otherwise reconnect-loops into the lockout).
+    let (status, body) = http(
+        "POST",
+        &format!("{base}/api/v1/device/verify"),
+        &[],
+        &format!(r#"{{"device_token":"{live_token}"}}"#),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(answer["user_id"], serde_json::json!(pc.user_id));
+    assert_eq!(answer["epoch"], serde_json::json!(1));
+
+    // Ten unknown-token probes from one address lock it; the eleventh answers 429 with
+    // the remaining window as Retry-After — a client that honors it stops hammering.
+    let att = "9.9.9.9";
+    for _ in 0..10 {
+        let (status, _) = http(
+            "POST",
+            &format!("{base}/api/v1/device/verify"),
+            &[("X-Forwarded-For", att)],
+            r#"{"device_token":"deadbeef"}"#,
+        )
+        .await;
+        assert_eq!(status, 401);
+    }
+    let (status, body, headers) = http_with_headers(
+        "POST",
+        &format!("{base}/api/v1/device/verify"),
+        &[("X-Forwarded-For", att)],
+        r#"{"device_token":"deadbeef"}"#,
+    )
+    .await;
+    assert_eq!(status, 429, "{body}");
+    assert!(headers.contains("retry-after"), "the lockout names its wait: {headers}");
+    // Another address is untouched — the lockout is per-client, never the relay's.
+    let (status, _) = http(
+        "POST",
+        &format!("{base}/api/v1/device/verify"),
+        &[("X-Forwarded-For", "10.0.0.7")],
+        &format!(r#"{{"device_token":"{live_token}"}}"#),
+    )
+    .await;
+    assert_eq!(status, 200);
 }

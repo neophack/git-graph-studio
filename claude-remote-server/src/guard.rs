@@ -56,6 +56,17 @@ impl Guard {
             .is_some_and(|until| until > Instant::now())
     }
 
+    /// How much of the lockout remains, so a 429 can carry an honest Retry-After
+    /// instead of a guess (a phone that honors it stops hammering the handshake).
+    pub fn locked_remaining(&self, ip: IpAddr, kind: Kind) -> Option<Duration> {
+        let buckets = self.buckets.lock().unwrap();
+        buckets
+            .get(&(ip, kind))
+            .and_then(|b| b.locked_until)
+            .filter(|until| *until > Instant::now())
+            .map(|until| until.saturating_duration_since(Instant::now()))
+    }
+
     /// Count one event; `true` when this event tipped the address into a lockout.
     pub fn hit(&self, ip: IpAddr, kind: Kind) -> bool {
         let now = Instant::now();

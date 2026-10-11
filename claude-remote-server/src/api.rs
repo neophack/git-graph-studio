@@ -70,6 +70,7 @@ impl App {
             .route("/api/v1/pair/challenge", get(forbidden).post(pair_challenge))
             .route("/api/v1/pair", get(forbidden).post(pair))
             .route("/api/v1/login", get(forbidden).post(login))
+            .route("/api/v1/device/verify", get(forbidden).post(device_verify))
             .route("/api/v1/me/devices", get(me_devices))
             .route("/api/v1/me/windows", get(me_windows))
             .route("/api/v1/me/devices/{id}", get(forbidden).delete(me_device_delete))
@@ -140,6 +141,26 @@ fn ok(body: Value) -> Response {
 
 fn err(status: StatusCode, message: &str) -> Response {
     api_json(status, json!({ "error": message }))
+}
+
+/// The lockout answer: 429 with the lockout's remaining time as `Retry-After` (seconds)
+/// and in the body, so a client that honors it backs off exactly as long as needed —
+/// a phone blind-retrying a dead WebSocket handshake otherwise keeps the bucket locked
+/// forever (the browser never shows it the status, only "Unexpected response code: 429").
+fn err_locked(app: &App, headers: &HeaderMap) -> Response {
+    let remaining = app
+        .guard
+        .locked_remaining(client_ip(headers), Kind::Auth)
+        .unwrap_or(Duration::from_secs(1));
+    let secs = remaining.as_secs().max(1);
+    let mut response = api_json(
+        StatusCode::TOO_MANY_REQUESTS,
+        json!({ "error": "locked — too many attempts", "retry_after_ms": remaining.as_millis() as u64 }),
+    );
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, header::HeaderValue::from_str(&secs.to_string()).expect("seconds"));
+    response
 }
 
 async fn forbidden() -> Response {
@@ -300,7 +321,7 @@ async fn pair_challenge(State(app): State<App>, body: Bytes) -> Response {
 
 async fn pair(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Response {
     if app.guard.locked(client_ip(&headers), Kind::Auth) {
-        return err(StatusCode::TOO_MANY_REQUESTS, "locked");
+        return err_locked(&app, &headers);
     }
     if body.len() > MAX_PAIR_BODY {
         return err(StatusCode::PAYLOAD_TOO_LARGE, "body too large");
@@ -352,9 +373,47 @@ async fn pair(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Respon
     }
 }
 
+/// A stored device token's liveness: 200 when it still pairs this PC, 401 when it is
+/// gone (the relay's data was reset, or the phone was revoked). The token IS the
+/// credential — the login password gates pairing and interactive login, not a
+/// remembered device's reconnect — so the phone can probe this before every WebSocket
+/// and stop dead instead of hammering the handshake into the lockout.
+async fn device_verify(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Response {
+    if app.guard.locked(client_ip(&headers), Kind::Auth) {
+        return err_locked(&app, &headers);
+    }
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return err(StatusCode::BAD_REQUEST, "bad json");
+    };
+    let token = body
+        .get("device_token")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| bearer(&headers));
+    let Some(token) = token else {
+        return err(StatusCode::BAD_REQUEST, "device_token is required");
+    };
+    match app.store.device_by_token(&token) {
+        Some(device) => {
+            let user = app.store.get(&device.user);
+            app.store.touch_device(&device.id);
+            ok(json!({
+                "ok": true,
+                "user_id": device.user,
+                "device_id": device.id,
+                "epoch": user.as_ref().map(|u| u.epoch).unwrap_or(0),
+            }))
+        }
+        None => {
+            app.guard.hit(client_ip(&headers), Kind::Auth);
+            err(StatusCode::UNAUTHORIZED, "unknown device token")
+        }
+    }
+}
+
 async fn login(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Response {
     if app.guard.locked(client_ip(&headers), Kind::Auth) {
-        return err(StatusCode::TOO_MANY_REQUESTS, "locked");
+        return err_locked(&app, &headers);
     }
     let Ok(body) = serde_json::from_slice::<Value>(&body) else {
         return err(StatusCode::BAD_REQUEST, "bad json");
@@ -800,7 +859,7 @@ async fn ws_device(
         return err(StatusCode::UNAUTHORIZED, "auth");
     };
     if app.guard.locked(client_ip(&headers), Kind::Auth) {
-        return err(StatusCode::TOO_MANY_REQUESTS, "locked");
+        return err_locked(&app, &headers);
     }
     let Some(device) = app.store.device_by_token(&token) else {
         app.guard.hit(client_ip(&headers), Kind::Auth);

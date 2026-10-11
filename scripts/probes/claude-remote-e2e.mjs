@@ -146,6 +146,24 @@ try {
 	await until(() => nudgeSeen === true || phoneInbox.some((m) => m.kind === 'frame'), () => nudgeSeen || phoneInbox.some((m) => m.kind === 'frame'), 10000, 'the nudge frame');
 	check('push: the window\'s broadcast frame reached the phone', true);
 
+	/* ---------- the reconnect gate: the verify probe, and the lockout's honest wait ---------- */
+	const verify = await (await fetch(`${base}/api/v1/device/verify`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ device_token: paired.device_token }) })).json();
+	check('verify: a live token answers its identity', verify.ok === true && verify.user_id === pc.userId, JSON.stringify(verify));
+
+	// A stale token 401s at the probe — the phone then shows the re-pair screen instead
+	// of blind-retrying the handshake (the loop that once locked the bucket).
+	const stale = await fetch(`${base}/api/v1/device/verify`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': '9.9.9.9' }, body: JSON.stringify({ device_token: 'deadbeef' }) });
+	check('verify: a stale token answers 401', stale.status === 401);
+
+	// Ten failures from one address lock exactly that address; the 429 names its wait
+	// in Retry-After, and another address sails through untouched.
+	for (let i = 0; i < 9; i++) await fetch(`${base}/api/v1/device/verify`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': '9.9.9.9' }, body: JSON.stringify({ device_token: 'deadbeef' }) });
+	const locked = await fetch(`${base}/api/v1/device/verify`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': '9.9.9.9' }, body: JSON.stringify({ device_token: 'deadbeef' }) });
+	const retryAfter = locked.headers.get('retry-after');
+	check('lockout: 429 with a Retry-After the client can honor', locked.status === 429 && Number(retryAfter) >= 1, `status ${locked.status}, retry-after ${retryAfter}`);
+	const unaffected = await fetch(`${base}/api/v1/device/verify`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': '10.0.0.7' }, body: JSON.stringify({ device_token: paired.device_token }) });
+	check('lockout: another address is untouched (per-client, never the relay)', unaffected.status === 200);
+
 	/* ---------- rekey: every phone is kicked at once ---------- */
 	let phoneClosed = null;
 	phoneWs.onclose = (event) => { phoneClosed = event.code; phoneWs.onclose = null; };
