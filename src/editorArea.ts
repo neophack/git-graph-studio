@@ -10,7 +10,8 @@
 import { EditorGroup, askToSaveMany, tabDrag, type Editor, type EditorInput, type EditorPlacement } from './editor';
 import { setDecorationRanges } from './editorDecorations';
 import type { EditorGridCell } from './state';
-import { el } from './ui';
+import { el, notify } from './ui';
+import { readText } from '@tauri-apps/plugin-clipboard-manager';
 import type { EditorView } from '@codemirror/view';
 
 /** One editor group in the grid: its box element and its group. */
@@ -1112,6 +1113,22 @@ export class EditorArea {
 		return this.activeGroup.activeView;
 	}
 
+	/** Paste the clipboard's text into the active editor at its selection — the remote
+	 *  workbench's Paste, where a browser forbids `execCommand('paste')`. The read goes
+	 *  through the clipboard plugin (the remote shim falls back to a paste box when the
+	 *  permission is denied), the insert mirrors the editor's own context-menu paste. */
+	async pasteFromClipboard(): Promise<void> {
+		const view = this.activeView;
+		if (!view || view.state.readOnly) return;
+		try {
+			const text = await readText();
+			const selection = view.state.selection.main;
+			view.dispatch({ changes: { from: selection.from, to: selection.to, insert: text }, selection: { anchor: selection.from + text.length } });
+		} catch {
+			notify('warning', 'The clipboard could not be read.');
+		}
+	}
+
 	get seedableView(): EditorView | null {
 		return this.activeGroup.seedableView;
 	}
@@ -1130,6 +1147,13 @@ export class EditorArea {
 	 *  cross-frontend close sync (module 19) watches this set. */
 	openExtPageIds(): string[] {
 		return this.groups().flatMap((g) => g.openIdsOfKind('extpage'));
+	}
+
+	/** Every group's open tabs as input id + input, in visual order: Remote Access's
+	 *  cross-frontend sync (module 19) carries the re-openable ones — a Source Control
+	 *  change's diff, a file history — to the other frontend. */
+	openTabInputs(): { id: string; input: EditorInput }[] {
+		return this.groups().flatMap((g) => g.openTabInputs());
 	}
 
 	/** Per-group file sessions, for the workspace snapshot's group layout. Groups without

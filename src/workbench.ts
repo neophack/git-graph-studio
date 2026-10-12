@@ -8,6 +8,7 @@ import { startSummaryReporter } from './remote/summary';
 import { installMirrorHost, mirrorViewersActive } from './remote/mirror/hostStub';
 import { installWorkbenchSync } from './remote/workbenchSync';
 import { remoteEnv } from './remote/session';
+import { phoneShell } from './remote/nav';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
@@ -358,7 +359,9 @@ export class Workbench {
 		register({ id: 'editor.redo', title: 'Redo', category: 'Edit', keybinding: 'Ctrl+Y', enabled: hasEditor, run: () => this.editors.runEditorCommand('redo') });
 		register({ id: 'editor.cut', title: 'Cut', category: 'Edit', keybinding: 'Ctrl+X', enabled: hasEditor, run: () => void document.execCommand('cut') });
 		register({ id: 'editor.copy', title: 'Copy', category: 'Edit', keybinding: 'Ctrl+C', enabled: hasEditor, run: () => void document.execCommand('copy') });
-		register({ id: 'editor.paste', title: 'Paste', category: 'Edit', keybinding: 'Ctrl+V', enabled: hasEditor, run: () => void document.execCommand('paste') });
+		// A browser forbids execCommand('paste'): the remote workbench reads the clipboard
+		// through the plugin (its shim falls back to a paste box) and inserts directly.
+		register({ id: 'editor.paste', title: 'Paste', category: 'Edit', keybinding: 'Ctrl+V', enabled: hasEditor, run: () => (remoteEnv() ? void this.editors.pasteFromClipboard() : void document.execCommand('paste')) });
 		register({ id: 'editor.find', title: 'Find', category: 'Edit', keybinding: 'Ctrl+F', enabled: hasEditor, run: () => this.editors.runEditorCommand('find') });
 		register({ id: 'editor.replace', title: 'Replace', category: 'Edit', keybinding: 'Ctrl+H', enabled: hasEditor, run: () => this.editors.runEditorCommand('replace') });
 		const hasCommentSurface = () => this.editors.activeView !== null || this.editors.activeInput !== null;
@@ -447,7 +450,9 @@ export class Workbench {
 		const item = (id: string) => commands.menuItem(id);
 		return [
 			{ label: t('menu.file'), entries: (): MenuEntry[] => [
-				item('workbench.newWindow'), item('workbench.newFile'), 'separator',
+				// A browser session spawns a PC-side window it cannot see — the remote's own
+				// New Window lives in its window switcher, so the desktop entry hides here.
+				...(remoteEnv() ? [] : [item('workbench.newWindow')]), item('workbench.newFile'), 'separator',
 				item('workbench.openFolder'), item('workbench.openFileStandalone'), item('workbench.openWorkspace'),
 				{ label: 'Open Recent', submenu: [
 					...state.recentFolders().map((folder) => ({ label: basename(folder), keybinding: folder, run: () => void this.openRecent(folder) })),
@@ -467,7 +472,9 @@ export class Workbench {
 				item('analysis.showModules'), item('analysis.showMetrics'), item('analysis.showDeadCode'), item('analysis.showSecurity'), item('analysis.showImports'), item('analysis.showMcp')
 			] },
 			'separator', item('editor.toggleWordWrap'), 'separator', item('markdown.showPreview'), item('markdown.showPreviewToSide'), item('git.openFileHistory'), item('git.toggleBlame'), 'separator',
-				{ label: 'Editor Layout', submenu: [
+				// The phone shell's CSS keeps one editor group on screen — the split/move
+				// layout commands are noise there (they stay on the desktop and tablet).
+				...(phoneShell() ? [] : [{ label: 'Editor Layout', submenu: [
 					item('workbench.splitEditor'), item('workbench.action.splitEditorOrthogonal'), 'separator',
 					item('workbench.action.splitEditorLeft'), item('workbench.action.splitEditorRight'), item('workbench.action.splitEditorUp'), item('workbench.action.splitEditorDown'), 'separator',
 					item('workbench.action.moveEditorToNextGroup'), item('workbench.action.moveEditorToPreviousGroup'),
@@ -478,7 +485,7 @@ export class Workbench {
 					item('workbench.action.evenEditorWidths'), item('workbench.action.toggleMaximizeEditorGroup'), item('workbench.action.minimizeOtherEditorGroups'), item('workbench.action.joinAllGroups'), item('workbench.action.resetEditorGroups'), 'separator',
 					item('workbench.action.closeEditorsInGroup'), item('workbench.action.closeEditorsInOtherGroups'), 'separator',
 					item('workbench.action.lockEditorGroup'), item('workbench.action.unlockEditorGroup'), item('workbench.action.reopenClosedEditor')
-				] },
+				] } as MenuEntry]),
 				{ label: 'Appearance', submenu: [
 					{ label: 'Primary Side Bar', checked: state.layout.sidebarVisible, keybinding: 'Ctrl+B', run: () => this.toggleSidebar() },
 					{ label: 'Panel', checked: this.panel.isVisible(), keybinding: 'Ctrl+J', run: () => this.panel.toggle() }
@@ -487,7 +494,15 @@ export class Workbench {
 			] },
 			{ label: t('menu.go'), entries: (): MenuEntry[] => [item('workbench.quickOpen'), 'separator', item('workbench.gotoSymbolInFile'), item('workbench.gotoSymbolInWorkspace'), item('editor.gotoDefinition'), item('editor.findReferences'), item('editor.callTree'), item('workbench.gotoLine'), item('symbols.rebuild'), 'separator', item('workbench.goBack'), item('workbench.goForward'), 'separator', item('workbench.nextEditor'), item('workbench.previousEditor')] },
 			{ label: t('menu.terminal'), entries: (): MenuEntry[] => [item('terminal.new'), item('terminal.toggle'), 'separator', item('terminal.kill')] },
-			{ label: t('menu.help'), entries: (): MenuEntry[] => [item('help.welcome'), item('help.shortcuts'), item('help.selfTest'), ...((import.meta.env.DEV && !import.meta.env.VITEST) ? [item('help.devHarness')] : []), 'separator', item('help.repository'), 'separator', item('help.openDevTools'), 'separator', item('help.about')] }
+			{ label: t('menu.help'), entries: (): MenuEntry[] => [
+				item('help.welcome'),
+				// A phone has no keyboard to bind — the shortcuts page is a desktop read.
+				...(phoneShell() ? [] : [item('help.shortcuts')]),
+				item('help.selfTest'), ...((import.meta.env.DEV && !import.meta.env.VITEST) ? [item('help.devHarness')] : []), 'separator', item('help.repository'), 'separator',
+				// Opens the PC's own (hidden relay) devtools — invisible to a browser user.
+				...(remoteEnv() ? [] : [item('help.openDevTools')]),
+				'separator', item('help.about')
+			] }
 		];
 	}
 

@@ -1,7 +1,11 @@
 // Uploads and downloads for the remote workbench (docs/ggs-remote-plan.md §11.3 File
 // Explorer): an upload crosses as 256 KB raw INVOKE chunks to `fs_write_chunk` (resumable —
 // the backend answers the size it has); a download is a one-time ticket URL the browser
-// navigates to, so the bytes stream straight from the instance to the device's disk.
+// navigates to, so the bytes stream straight from the instance to the device's disk. The
+// `uploadInto` / `downloadTo` wrappers carry the UI (a progress toast, the failure notice);
+// the commands (remote/shell.ts) and the Explorer's context menu both ride them.
+import { notify, progressToast } from '../ui';
+import { tf } from '../i18n';
 import { invoke } from './tauriShim/core';
 import { remoteEnv } from './session';
 
@@ -11,6 +15,13 @@ export interface UploadProgress {
 	name: string;
 	sent: number;
 	total: number;
+}
+
+/** What a batch upload settled on: the PC paths that landed, and per-file failures (one
+ *  bad file never strands the rest, and a failure is always reported, never silent). */
+export interface UploadOutcome {
+	uploaded: string[];
+	failed: { name: string; error: string }[];
 }
 
 function joinPath(dir: string, name: string): string {
@@ -45,8 +56,9 @@ export async function uploadFile(file: File, dir: string, onProgress?: (p: Uploa
 	return target;
 }
 
-/** Ask the device for files (or a folder) and upload them; resolves with the PC paths. */
-export function uploadFiles(dir: string, folder = false, onProgress?: (p: UploadProgress) => void): Promise<string[]> {
+/** Ask the device for files (or a folder) and upload them. Every file's outcome is
+ *  collected — a failed file is reported in `failed` and never rejects the batch. */
+export function uploadFiles(dir: string, folder = false, onProgress?: (p: UploadProgress, index: number, count: number) => void): Promise<UploadOutcome> {
 	return new Promise((resolve) => {
 		const input = document.createElement('input');
 		input.type = 'file';
@@ -56,17 +68,42 @@ export function uploadFiles(dir: string, folder = false, onProgress?: (p: Upload
 		input.addEventListener('change', async () => {
 			const files = [...(input.files ?? [])];
 			input.remove();
-			const done: string[] = [];
-			for (const file of files) done.push(await uploadFile(file, dir, onProgress));
-			resolve(done);
+			const outcome: UploadOutcome = { uploaded: [], failed: [] };
+			for (const [index, file] of files.entries()) {
+				const name = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+				try {
+					outcome.uploaded.push(await uploadFile(file, dir, (p) => onProgress?.(p, index, files.length)));
+				} catch (error) {
+					outcome.failed.push({ name, error: String(error) });
+				}
+			}
+			resolve(outcome);
 		});
 		input.addEventListener('cancel', () => {
 			input.remove();
-			resolve([]);
+			resolve({ uploaded: [], failed: [] });
 		});
 		document.body.appendChild(input);
 		input.click();
 	});
+}
+
+/** Pick files (or a folder) on the device and upload them into `dir`, with a progress
+ *  toast and the outcome notified. Resolves with the PC paths that landed. */
+export async function uploadInto(dir: string, folder = false): Promise<string[]> {
+	// An object property: the closure assignment must survive control-flow narrowing.
+	const progress: { toast: ReturnType<typeof progressToast> | null } = { toast: null };
+	const outcome = await uploadFiles(dir, folder, (p, index, count) => {
+		const label = count > 1 ? `${index + 1}/${count} ${p.name}` : p.name;
+		progress.toast ??= progressToast(tf('remote.transfer.uploading', label));
+		progress.toast.update(p.total > 0 ? Math.round(((index + p.sent / p.total) / count) * 100) : null, tf('remote.transfer.uploading', label));
+	});
+	progress.toast?.done();
+	if (outcome.failed.length > 0) {
+		notify('error', tf('remote.transfer.failed', outcome.failed.map((f) => f.name).join(', ')));
+	}
+	if (outcome.uploaded.length > 0) notify('info', tf('remote.transfer.uploaded', outcome.uploaded.length));
+	return outcome.uploaded;
 }
 
 /** Download a file or a folder (zipped by the instance) to this device. */
@@ -89,4 +126,16 @@ export async function download(path: string, zip = false): Promise<void> {
 	document.body.appendChild(link);
 	link.click();
 	link.remove();
+}
+
+/** `download` with its failure notified (the ticket refusal, a dead session). Resolves
+ *  whether the download started. */
+export async function downloadTo(path: string, zip = false): Promise<boolean> {
+	try {
+		await download(path, zip);
+		return true;
+	} catch (error) {
+		notify('error', tf('remote.transfer.failed', String(error)));
+		return false;
+	}
 }

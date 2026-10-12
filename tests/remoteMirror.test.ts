@@ -121,6 +121,13 @@ describe('the recorder and the viewer', () => {
 		expect(copy.querySelector('script')?.textContent).toBe('');
 	});
 
+	it('hides the PC window’s own controls — a remote page has no window to drive', () => {
+		const r = rig('<div class="titlebar"><div class="window-controls"><div class="window-control close"></div></div></div>');
+		const copy = r.copy();
+		const controls = copy.querySelector('.window-controls')!;
+		expect(copy.defaultView!.getComputedStyle(controls).display).toBe('none');
+	});
+
 	it('follows additions, removals, moves, text and attribute changes', () => {
 		const r = rig('<ul id="list"><li id="one">1</li><li id="two">2</li></ul><p id="p">old</p>');
 		const list = r.pc.getElementById('list')!;

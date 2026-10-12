@@ -573,6 +573,46 @@ fn upload_partial(target: &Path) -> PathBuf {
     target.with_file_name(format!("{name}.ggs-upload"))
 }
 
+/// The canonical form of a path that may not exist yet: the nearest existing ancestor
+/// canonicalized, the missing tail re-appended. `..` segments collapse to the real path.
+fn canonicalize_lenient(path: &Path) -> Option<PathBuf> {
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = path;
+    loop {
+        match fs::canonicalize(cursor) {
+            Ok(mut canonical) => {
+                for part in missing.iter().rev() {
+                    canonical.push(part);
+                }
+                return Some(canonical);
+            }
+            Err(_) => {
+                missing.push(cursor.file_name()?.to_os_string());
+                cursor = cursor.parent()?;
+            }
+        }
+    }
+}
+
+/// Remote Access uploads land inside the open folders only (docs/ggs-remote-plan.md §7.8 —
+/// the download side confines the same way): an authenticated browser session must not
+/// write outside the workspace it serves. `path` may not exist yet; its tail canonicalizes
+/// through its nearest existing ancestor.
+pub(crate) fn upload_allowed(path: &Path, roots: &[PathBuf]) -> bool {
+    let Some(canonical) = canonicalize_lenient(path) else {
+        return false;
+    };
+    roots
+        .iter()
+        .filter_map(|root| canonicalize_lenient(root))
+        .any(|root| canonical.starts_with(root))
+}
+
+/// One upload's chunks serialize per process: two uploads of one target would otherwise
+/// interleave their appends (the offset check fails loudly, but the round trip it costs the
+/// user is avoidable).
+static UPLOAD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Write one upload chunk at `offset` of a file that will be `total` bytes. Chunks must
 /// arrive in order (the partial file's length is the resume point); the last one moves the
 /// partial file into place.
@@ -583,6 +623,7 @@ pub fn write_upload_chunk(
     bytes: &[u8],
 ) -> Result<u64, String> {
     use std::io::{Seek, SeekFrom, Write};
+    let _guard = UPLOAD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if offset + bytes.len() as u64 > total {
         return Err(format!(
             "{}: chunk past the declared size",
@@ -619,9 +660,10 @@ pub fn write_upload_chunk(
 
 /// Remote Access uploads (docs/ggs-remote-plan.md §11.3): one chunk as the raw request body,
 /// the target in `x-ggs-path` (percent-encoded), its position in `x-ggs-offset` and the
-/// file's size in `x-ggs-total`. Answers the bytes the PC now has.
+/// file's size in `x-ggs-total`. Answers the bytes the PC now has. The target is confined to
+/// the open folders — a browser session writes nowhere else (§7.8).
 #[tauri::command]
-pub fn fs_write_chunk(request: tauri::ipc::Request<'_>) -> Result<u64, String> {
+pub fn fs_write_chunk(state: State<'_, AppState>, request: tauri::ipc::Request<'_>) -> Result<u64, String> {
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
         return Err("fs_write_chunk expects a binary body".into());
     };
@@ -640,18 +682,32 @@ pub fn fs_write_chunk(request: tauri::ipc::Request<'_>) -> Result<u64, String> {
     let total: u64 = header("x-ggs-total")?
         .parse()
         .map_err(|_| "bad x-ggs-total")?;
+    let roots: Vec<PathBuf> = state.repos.lock().unwrap().iter().map(PathBuf::from).collect();
+    if !upload_allowed(Path::new(&path), &roots) {
+        return Err(format!("{path}: uploads land inside the open folders only"));
+    }
     write_upload_chunk(Path::new(&path), offset, total, bytes)
 }
 
 /// Where an interrupted upload of `path` resumes: the partial file's length when it is not
 /// larger than the file being uploaded, else 0 (a different file — start over).
-#[tauri::command]
-pub fn fs_upload_offset(path: String, size: u64) -> u64 {
-    let partial = upload_partial(Path::new(&path));
+fn upload_offset(path: &Path, size: u64) -> u64 {
+    let partial = upload_partial(path);
     match fs::metadata(&partial) {
         Ok(meta) if meta.len() <= size => meta.len(),
         _ => 0,
     }
+}
+
+/// The resume point of an interrupted upload, confined like the write itself (a refused
+/// path errors, and the write refuses too).
+#[tauri::command]
+pub fn fs_upload_offset(state: State<'_, AppState>, path: String, size: u64) -> Result<u64, String> {
+    let roots: Vec<PathBuf> = state.repos.lock().unwrap().iter().map(PathBuf::from).collect();
+    if !upload_allowed(Path::new(&path), &roots) {
+        return Err(format!("{path}: uploads land inside the open folders only"));
+    }
+    Ok(upload_offset(Path::new(&path), size))
 }
 
 #[cfg(test)]
@@ -684,7 +740,7 @@ mod paging_tests {
 
 #[cfg(test)]
 mod upload_tests {
-    use super::{fs_upload_offset, write_upload_chunk};
+    use super::{upload_allowed, upload_offset, write_upload_chunk};
 
     #[test]
     fn chunks_resume_and_land_whole() {
@@ -697,15 +753,33 @@ mod upload_tests {
         );
         assert!(!target.exists());
         // A restarted upload asks where to resume.
-        assert_eq!(fs_upload_offset(target.display().to_string(), 1000), 400);
+        assert_eq!(upload_offset(&target, 1000), 400);
         assert!(write_upload_chunk(&target, 300, 1000, &data[300..400]).is_err());
         assert_eq!(
             write_upload_chunk(&target, 400, 1000, &data[400..]).unwrap(),
             1000
         );
         assert_eq!(std::fs::read(&target).unwrap(), data);
-        assert_eq!(fs_upload_offset(target.display().to_string(), 1000), 0);
+        assert_eq!(upload_offset(&target, 1000), 0);
         assert!(write_upload_chunk(&target, 0, 10, &[0; 11]).is_err());
+    }
+
+    #[test]
+    fn uploads_are_confined_to_the_workspace_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let roots = vec![root.clone()];
+        // Existing file, missing file and missing-deep-tail all pass inside the root.
+        assert!(upload_allowed(&root.join("a.txt"), &roots));
+        assert!(upload_allowed(&root.join("sub").join("deep").join("a.txt"), &roots));
+        // A sibling, the parent, an escape and an unrelated drive path are refused.
+        assert!(!upload_allowed(&dir.path().join("other.txt"), &roots));
+        assert!(!upload_allowed(dir.path(), &roots));
+        assert!(!upload_allowed(&root.join("..").join("escape.txt"), &roots));
+        assert!(!upload_allowed(std::path::Path::new(if cfg!(windows) { "C:\\Windows\\x.dll" } else { "/etc/x" }), &roots));
+        // No folder open: nowhere to upload.
+        assert!(!upload_allowed(&root.join("a.txt"), &[]));
     }
 }
 

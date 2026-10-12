@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { Explorer } from '../src/explorer';
+import { setRemoteEnv } from '../src/remote/session';
 import { basename } from '../src/ui';
 import { backend } from './tauriMock';
 import { click, flush, key, menuItem, menuLabels, notificationButton, notifications, rightClick, texts, type } from './helpers';
@@ -180,6 +181,31 @@ describe('explorer', () => {
 			expect(menuLabels()).toContain('Copy Path');
 		} finally {
 			document.documentElement.removeAttribute('data-remote-shell');
+		}
+	});
+
+	it('offers downloads and uploads on the remote shell menu', async () => {
+		fileSystem({ [ROOT]: ['src/', 'README.md'], [`${ROOT}\\src`]: [] });
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoot(ROOT);
+		await flush();
+		const rows = () => document.querySelectorAll('.tree .row');
+		// The desktop has no transfers: its file manager does the job.
+		rightClick(rows()[1]);
+		expect(menuLabels()).not.toContain('Download');
+		// A real browser session (the env marks it) transfers with the PC: a file downloads
+		// straight; a folder downloads zipped and receives uploads.
+		setRemoteEnv({ transport: {} as never, attached: { frontendId: 'remote/1' } as never, basePath: '/' });
+		try {
+			rightClick(rows()[1]);
+			expect(menuLabels()).toContain('Download');
+			expect(menuLabels()).not.toContain('Download as Zip');
+			rightClick(rows()[0]);
+			expect(menuLabels()).toContain('Download as Zip');
+			expect(menuLabels()).toContain('Upload Files Here…');
+			expect(menuLabels()).toContain('Upload Folder Here…');
+		} finally {
+			setRemoteEnv(undefined);
 		}
 	});
 

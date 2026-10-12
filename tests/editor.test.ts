@@ -645,7 +645,10 @@ describe('editor group', () => {
 		group.openHelp('shortcuts');
 		group.openHelp('welcome');
 		expect(texts('.tab .label')).toEqual(['Keyboard Shortcuts', 'Welcome']);
-		expect(texts('.breadcrumbs .crumb')).toEqual(['Welcome']);
+		// A page without a file path keeps its breadcrumbs hidden — the crumb would only
+		// repeat the tab's own title.
+		expect(document.querySelector<HTMLElement>('.breadcrumbs')!.hidden).toBe(true);
+		expect(texts('.breadcrumbs .crumb')).toEqual([]);
 		expect(rendered).toEqual(['shortcuts', 'welcome']);
 		// Re-opening activates the existing tab instead of duplicating it.
 		group.openHelp('shortcuts');

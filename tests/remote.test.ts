@@ -578,3 +578,124 @@ function encodeB64(bytes: Uint8Array): string {
 	for (const byte of bytes) raw += String.fromCharCode(byte);
 	return btoa(raw).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
+
+/* ---------- File transfers (module 19, §11.3) ---------- */
+
+describe('file transfers', () => {
+	const attached = { instance: 'ggs-1', version: '1', assetBase: '', ggsBase: '', frontendId: 'remote/1' };
+
+	/** A transport stand-in whose calls the test scripts; a throw rejects the call. */
+	function fakeTransport(handler: (cmd: string, args: unknown, headers?: Record<string, string>) => unknown) {
+		return {
+			call: (cmd: string, args: unknown, headers?: Record<string, string>) => Promise.resolve().then(() => handler(cmd, args, headers))
+		};
+	}
+
+	function env(handler: (cmd: string, args: unknown, headers?: Record<string, string>) => unknown): void {
+		setRemoteEnv({ transport: fakeTransport(handler) as never, attached, basePath: '/' });
+	}
+
+	/** Drive the picker uploadFiles opens: the files chosen, then the change event. */
+	function pick(...files: File[]): void {
+		const input = document.querySelector<HTMLInputElement>('input[type=file]')!;
+		Object.defineProperty(input, 'files', { value: files });
+		input.dispatchEvent(new Event('change'));
+	}
+
+	it('an upload resumes at the backend offset and streams its chunks in order', async () => {
+		const offsets: unknown[] = [];
+		const writes: { path: string; offset: number; bytes: number[] }[] = [];
+		env((cmd, args, headers) => {
+			if (cmd === 'fs_upload_offset') {
+				offsets.push(args);
+				return 3;
+			}
+			writes.push({ path: decodeURIComponent(headers!['x-ggs-path']!), offset: Number(headers!['x-ggs-offset']), bytes: [...(args as Uint8Array)] });
+			return 0;
+		});
+		const { uploadFile } = await import('../src/remote/transfer');
+		const progress: { name: string; sent: number; total: number }[] = [];
+		const target = await uploadFile(new File([new Uint8Array([1, 2, 3, 4, 5])], 'report.txt'), 'C:\\dest', (p) => progress.push(p));
+		expect(target).toBe('C:\\dest\\report.txt');
+		expect(offsets).toEqual([{ path: 'C:\\dest\\report.txt', size: 5 }]);
+		expect(writes).toEqual([{ path: 'C:\\dest\\report.txt', offset: 3, bytes: [4, 5] }]);
+		expect(progress).toEqual([{ name: 'report.txt', sent: 5, total: 5 }]);
+		setRemoteEnv(undefined);
+	});
+
+	it('a batch upload collects per-file failures instead of hanging or rejecting', async () => {
+		env((cmd, _args, headers) => {
+			if (cmd === 'fs_upload_offset') return 0;
+			if (decodeURIComponent(headers!['x-ggs-path']!).endsWith('bad.txt')) throw new Error('disk full');
+			return 0;
+		});
+		const { uploadFiles } = await import('../src/remote/transfer');
+		const outcomePromise = uploadFiles('C:\\dest');
+		pick(new File(['a'], 'good.txt'), new File(['b'], 'bad.txt'));
+		const outcome = await outcomePromise;
+		expect(outcome.uploaded).toEqual(['C:\\dest\\good.txt']);
+		expect(outcome.failed).toHaveLength(1);
+		expect(outcome.failed[0]!.name).toBe('bad.txt');
+		expect(outcome.failed[0]!.error).toContain('disk full');
+		setRemoteEnv(undefined);
+	});
+
+	it('a cancelled picker resolves an empty outcome', async () => {
+		env(() => 0);
+		const { uploadFiles } = await import('../src/remote/transfer');
+		const outcomePromise = uploadFiles('C:\\dest');
+		document.querySelector<HTMLInputElement>('input[type=file]')!.dispatchEvent(new Event('cancel'));
+		await expect(outcomePromise).resolves.toEqual({ uploaded: [], failed: [] });
+		setRemoteEnv(undefined);
+	});
+
+	it('a download mints a ticket and navigates to its one-time URL', async () => {
+		env(() => 0);
+		const posts: { url: string; body: unknown }[] = [];
+		vi.stubGlobal('fetch', vi.fn(async (url: unknown, init: unknown) => {
+			posts.push({ url: String(url), body: JSON.parse((init as { body: string }).body) });
+			return { ok: true, json: async () => ({ url: 'w/ggs-1/download?t=tok' }) } as Response;
+		}));
+		const clicks: string[] = [];
+		vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+			clicks.push(this.href);
+		});
+		const { download } = await import('../src/remote/transfer');
+		await download('C:\\repo\\报告.txt', true);
+		expect(posts).toEqual([{ url: `${location.origin}/api/download-ticket`, body: { instance: 'ggs-1', path: 'C:\\repo\\报告.txt', zip: true } }]);
+		expect(clicks).toEqual([`${location.origin}/w/ggs-1/download?t=tok`]);
+		vi.unstubAllGlobals();
+		vi.restoreAllMocks();
+		setRemoteEnv(undefined);
+	});
+
+	it('a refused download notifies instead of throwing', async () => {
+		env(() => 0);
+		document.body.appendChild(Object.assign(document.createElement('div'), { id: 'notifications' }));
+		vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 403 }) as Response));
+		const { downloadTo } = await import('../src/remote/transfer');
+		await expect(downloadTo('C:\\x\\a.txt')).resolves.toBe(false);
+		expect(document.getElementById('notifications')!.textContent).toContain('403');
+		vi.unstubAllGlobals();
+		setRemoteEnv(undefined);
+	});
+
+	it('uploadInto reports progress and the mixed outcome, and removes its toast', async () => {
+		env((cmd, _args, headers) => {
+			if (cmd === 'fs_upload_offset') return 0;
+			if (decodeURIComponent(headers!['x-ggs-path']!).endsWith('bad.txt')) throw new Error('disk full');
+			return 0;
+		});
+		document.body.appendChild(Object.assign(document.createElement('div'), { id: 'notifications' }));
+		const { uploadInto } = await import('../src/remote/transfer');
+		const promise = uploadInto('C:\\dest');
+		pick(new File(['a'], 'good.txt'), new File(['b'], 'bad.txt'));
+		await expect(promise).resolves.toEqual(['C:\\dest\\good.txt']);
+		const notifications = document.getElementById('notifications')!;
+		// The progress toast is done and removed; the failure and the count were notified.
+		expect(notifications.querySelector('.progress-track')).toBeNull();
+		expect(notifications.textContent).toContain('bad.txt');
+		expect(notifications.textContent).toContain('Uploaded 1');
+		setRemoteEnv(undefined);
+	});
+});

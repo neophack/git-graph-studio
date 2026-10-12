@@ -260,8 +260,9 @@ interface NavEntry {
 	column: number;
 }
 
-/** The tab id a navigation entry's editor has while open. */
-function inputId(input: EditorInput): string {
+/** The tab id an input's editor has while open (a navigation entry's, Remote Access's
+ *  cross-frontend tab sync — module 19). */
+export function inputId(input: EditorInput): string {
 	switch (input.kind) {
 		case 'file': return 'file:' + input.path;
 		case 'diff': return 'diff:' + input.id;
@@ -543,6 +544,12 @@ export class EditorGroup {
 	 *  (Remote Access's cross-frontend close of an extension page, module 19). */
 	openIdsOfKind(kind: EditorInput['kind']): string[] {
 		return this.open.filter((e) => e.input.kind === kind).map((e) => e.id);
+	}
+
+	/** The open editors' ids and inputs, in tab order (Remote Access's cross-frontend sync
+	 *  of the re-openable tabs — diffs and file histories, module 19). */
+	openTabInputs(): { id: string; input: EditorInput }[] {
+		return this.open.map((e) => ({ id: e.id, input: e.input }));
 	}
 
 	/** The open file tabs' paths, in tab order (what a relaunch reopens). */
@@ -3285,29 +3292,23 @@ export class EditorGroup {
 
 	private renderBreadcrumbs(): void {
 		this.breadcrumbs.innerHTML = '';
-		this.breadcrumbs.hidden = this.active === null;
-		if (!this.active) return;
-		const crumbs: { label: string; iconName?: string; iconColor?: string }[] = [];
-		if (this.active.input.kind === 'file') {
-			const relative = this.rootPath ? relativeTo(this.rootPath, this.active.input.path) : toPosix(this.active.input.path);
-			const parts = relative.split('/').filter((p) => p !== '');
-			parts.forEach((part, index) => crumbs.push({ label: part, iconName: index === parts.length - 1 ? fileIcon(part) : 'folder', iconColor: index === parts.length - 1 ? fileIconColor(part) : undefined }));
-		} else if (this.active.input.kind === 'diff' || this.active.input.kind === 'folders' || this.active.input.kind === 'calltree') {
-			crumbs.push({ label: this.active.label, iconName: 'diff' });
-		} else if (this.active.input.kind === 'markdown' || this.active.input.kind === 'history' || this.active.input.kind === 'hex' || this.active.input.kind === 'canlog') {
-			// A preview, history or hex tab of a file walks the file's own path, as VS Code's
-			// breadcrumbs do for a custom editor over that file.
-			const relative = this.rootPath ? relativeTo(this.rootPath, this.active.input.path) : toPosix(this.active.input.path);
-			const parts = relative.split('/').filter((p) => p !== '');
-			parts.forEach((part, index) => crumbs.push({ label: part, iconName: index === parts.length - 1 ? this.active!.iconClass ?? fileIcon(part) : 'folder', iconColor: index === parts.length - 1 ? fileIconColor(part) : undefined }));
-		} else {
-			crumbs.push({ label: this.active.label });
-		}
-		crumbs.forEach((crumb, index) => {
+		const input = this.active?.input;
+		// Only a file-backed tab has a path worth walking — a preview, history or hex tab
+		// walks the file's own path, as VS Code's breadcrumbs do for a custom editor over
+		// that file. Every other page has no path, and its single crumb would only repeat
+		// the tab's own title, so the bar stays hidden.
+		const path = input && (input.kind === 'file' || input.kind === 'markdown' || input.kind === 'history' || input.kind === 'hex' || input.kind === 'canlog') ? input.path : null;
+		this.breadcrumbs.hidden = path === null;
+		if (path === null) return;
+		const relative = this.rootPath ? relativeTo(this.rootPath, path) : toPosix(path);
+		const parts = relative.split('/').filter((p) => p !== '');
+		parts.forEach((part, index) => {
 			if (index > 0) this.breadcrumbs.appendChild(icon('chevron-right'));
-			const glyph = crumb.iconName ? icon(crumb.iconName) : null;
-			if (glyph && crumb.iconColor) glyph.style.color = crumb.iconColor;
-			this.breadcrumbs.appendChild(el('span', 'crumb', [glyph, crumb.label]));
+			const last = index === parts.length - 1;
+			const glyph = icon(last ? this.active!.iconClass ?? fileIcon(part) : 'folder');
+			const color = last ? fileIconColor(part) : undefined;
+			if (color) glyph.style.color = color;
+			this.breadcrumbs.appendChild(el('span', 'crumb', [glyph, part]));
 		});
 	}
 }

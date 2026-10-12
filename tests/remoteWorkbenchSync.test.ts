@@ -20,6 +20,7 @@ import { EditorArea } from '../src/editorArea';
 import { Workbench } from '../src/workbench';
 import { commands } from '../src/commands';
 import { attachWorkbenchSync, WORKBENCH_SYNC_EVENT, type SyncedEditorArea, type SyncedWorkbench, type WorkbenchSyncMessage } from '../src/remote/workbenchSync';
+import { setRemoteEnv } from '../src/remote/session';
 import { backend, emit as mockEmit, listen as mockListen } from './tauriMock';
 import { click, flush, until } from './helpers';
 
@@ -50,10 +51,23 @@ function bus() {
 	};
 }
 
+/** Two spellings of one file, the way the editor area's samePath reads them: slashes
+ *  unified, a Windows drive path case-insensitive. */
+function sameFile(a: string, b: string): boolean {
+	const left = a.replace(/\\/g, '/');
+	const right = b.replace(/\\/g, '/');
+	if (left === right) return true;
+	return /^[A-Za-z]:\//.test(left) && left.toLowerCase() === right.toLowerCase();
+}
+
 /** A stand-in workbench: its editor area records what the sync did to it. The
  *  extension-page tabs are the webview panels' (a real tab on the PC, a copy on a phone):
  *  opening one is the create mirror's business (it does not cross), closing one is the
- *  `closeTab` message's. */
+ *  `closeTab` message's. The fake models the real editor's fine print the sync relies on:
+ *  path lookups match by samePath, an `inactive` open never takes the focus, an open's
+ *  implied activation is superseded by any later one (the editor's openIntent), a failed
+ *  open resolves quietly (the editor notifies and returns), and a dirty tab's close waits
+ *  on the save dialog until the test settles it. */
 function fakeWorkbench(): SyncedWorkbench & {
 	opened: { path: string; line?: number; column?: number }[];
 	closed: string[];
@@ -71,6 +85,9 @@ function fakeWorkbench(): SyncedWorkbench & {
 	revealedTabs: string[];
 	closeTabById(id: string): boolean;
 	setHold(hold: Promise<void> | null): void;
+	failOpens: Set<string>;
+	markDirty(path: string): void;
+	settleClose(path: string): void;
 	readonly sidebarToggles: number;
 } {
 	const state = {
@@ -89,30 +106,59 @@ function fakeWorkbench(): SyncedWorkbench & {
 		activeView: 'explorer',
 		sidebarToggles: 0,
 		/** While set, every open waits on it first — a test's stand-in for a slow file read. */
-		hold: null as Promise<void> | null
+		hold: null as Promise<void> | null,
+		/** Opens of these paths resolve without a tab — the editor's quiet failure. */
+		failOpens: new Set<string>(),
+		/** Paths whose close waits on the save dialog until settleClose answers it. */
+		dirty: new Set<string>(),
+		/** The editor's openIntent: only the newest open's landing takes the focus. */
+		intent: 0
 	};
 	const notify = (): void => area.onTabsChange?.();
 	const focus = (path: string): void => {
 		state.activeTab = null;
 		area.onActiveChange?.({ kind: 'file', path, line: 1, column: 1 });
 	};
+	/** A user or remote-applied activation: supersedes every in-flight open's ticket. */
+	const activate = (path: string): void => {
+		state.intent++;
+		state.active = path;
+		focus(path);
+	};
 	/** An extension page takes the focus: like the real group, the tabs change first (the
 	 *  strip re-renders), then the active editor is reported. */
 	const focusTab = (id: string, added: boolean): void => {
+		state.intent++;
 		state.activeTab = id;
 		if (added) notify();
 		area.onActiveChange?.({ kind: 'extpage', id, line: 1, column: 1 });
 	};
+	/** Take the tab at `index` out, activating the successor when it was showing. */
+	const removeAt = (index: number): void => {
+		const [removed] = state.paths.splice(index, 1);
+		state.closed.push(removed!);
+		if (state.active !== null && sameFile(state.active, removed!)) {
+			state.active = state.paths[Math.max(0, index - 1)] ?? null;
+			if (state.active !== null) focus(state.active);
+		}
+		notify();
+	};
 	const area: SyncedEditorArea = {
 		async openFile(path, options) {
+			const ticket = options?.inactive === true ? null : ++state.intent;
 			if (state.hold !== null) await state.hold;
-			if (!state.paths.includes(path)) {
+			if (state.failOpens.has(path)) return; // the editor's quiet failure: notify + return
+			const index = state.paths.findIndex((open) => sameFile(open, path));
+			if (index < 0) {
 				state.paths.push(path);
 				state.opened.push({ path, line: options?.line, column: options?.column });
 				notify();
 			}
-			state.active = path;
-			focus(path);
+			const stored = state.paths[index < 0 ? state.paths.length - 1 : index]!;
+			if (ticket !== null && ticket === state.intent) {
+				state.active = stored;
+				focus(stored);
+			}
 		},
 		openFilePaths: () => [...state.paths],
 		openExtPageIds: () => [...state.extTabs],
@@ -123,22 +169,18 @@ function fakeWorkbench(): SyncedWorkbench & {
 		onTabsChange: null,
 		onActiveChange: null,
 		closeFilePath(path) {
-			const index = state.paths.indexOf(path);
+			const index = state.paths.findIndex((open) => sameFile(open, path));
 			if (index < 0) return false;
-			state.paths.splice(index, 1);
-			state.closed.push(path);
-			if (state.active === path) {
-				state.active = state.paths[Math.max(0, index - 1)] ?? null;
-				if (state.active !== null) focus(state.active);
-			}
-			notify();
+			// A dirty tab's close waits on the save dialog: the tab stays until settleClose.
+			if (state.dirty.has(state.paths[index]!)) return true;
+			removeAt(index);
 			return true;
 		},
 		revealFilePath(path) {
-			if (!state.paths.includes(path)) return false;
-			state.active = path;
-			state.revealed.push(path);
-			focus(path);
+			const stored = state.paths.find((open) => sameFile(open, path));
+			if (stored === undefined) return false;
+			state.revealed.push(stored);
+			activate(stored);
 			return true;
 		},
 		closeById(id) {
@@ -185,12 +227,12 @@ function fakeWorkbench(): SyncedWorkbench & {
 		tabs: () => [...state.paths],
 		extTabs: () => [...state.extTabs],
 		activePath: () => state.active,
-		setActive: focus,
+		setActive: activate,
 		close: (path: string) => area.closeFilePath(path),
-		openExtTab: (id: string, activate = false) => {
+		openExtTab: (id: string, activateTab = false) => {
 			if (state.extTabs.includes(id)) return;
 			state.extTabs.push(id);
-			if (activate) focusTab(id, true);
+			if (activateTab) focusTab(id, true);
 			else notify();
 		},
 		clickExtTab: (id: string) => focusTab(id, false),
@@ -199,6 +241,17 @@ function fakeWorkbench(): SyncedWorkbench & {
 		closeTabById: (id: string) => area.closeById(id),
 		setHold: (hold: Promise<void> | null) => {
 			state.hold = hold;
+		},
+		failOpens: state.failOpens,
+		markDirty: (path: string) => {
+			const stored = state.paths.find((open) => sameFile(open, path));
+			if (stored !== undefined) state.dirty.add(stored);
+		},
+		settleClose: (path: string) => {
+			const index = state.paths.findIndex((open) => sameFile(open, path));
+			if (index < 0) return;
+			state.dirty.delete(state.paths[index]!);
+			removeAt(index);
 		}
 	};
 }
@@ -499,6 +552,158 @@ describe('the sync core over a shared bus', () => {
 			expect(JSON.stringify(message).length).toBeLessThan(200);
 		}
 	});
+
+	it('a failed remote open never rebounds as a close of the sender healthy tab', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const phone = fakeWorkbench();
+		attachWorkbenchSync(pc, channel.deps, 'main');
+		attachWorkbenchSync(phone, channel.deps, 'remote/1');
+		await pc.editors.openFile(NOTES);
+		// The phone cannot read this one (the editor notifies and returns — no throw).
+		phone.failOpens.add(README);
+		await pc.editors.openFile(README);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		expect(phone.tabs()).toEqual([NOTES]);
+		// The next tabs diff on the phone must not read the failed open as a close of the
+		// PC's healthy tab: the phone opens a file of its own, and nothing about README
+		// crosses back.
+		channel.sent.length = 0;
+		await phone.editors.openFile(`${NOTES}.x`);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		expect(channel.by('remote/1').filter((m) => m.k === 'close')).toEqual([]);
+		// The PC's healthy README stayed open, and the phone's own open synced normally.
+		expect(pc.tabs()).toEqual([NOTES, README, `${NOTES}.x`]);
+		expect(pc.closed).toEqual([]);
+	});
+
+	it('closes a tab whose open was still in flight the moment it lands', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const phone = fakeWorkbench();
+		attachWorkbenchSync(pc, channel.deps, 'main');
+		attachWorkbenchSync(phone, channel.deps, 'remote/1');
+		await pc.editors.openFile(NOTES);
+		channel.sent.length = 0;
+		// The phone's apply of the PC's open stalls on its slow read; the PC's close of the
+		// same file crosses meanwhile.
+		let release!: () => void;
+		phone.setHold(new Promise<void>((resolve) => (release = resolve)));
+		await pc.editors.openFile(README);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		pc.close(README);
+		release();
+		phone.setHold(null);
+		await until(() => phone.closed.includes(README));
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		// The landed open was closed right away, and nothing re-announced it: the PC never
+		// re-opens its just-closed tab.
+		expect(phone.tabs()).toEqual([NOTES]);
+		expect(channel.by('remote/1').filter((m) => m.k === 'open')).toEqual([]);
+		expect(pc.tabs()).toEqual([NOTES]);
+		expect(pc.opened.filter((entry) => entry.path === README)).toHaveLength(1);
+	});
+
+	it('an open superseded mid-flight lands in the background, and switching to it crosses', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const phone = fakeWorkbench();
+		attachWorkbenchSync(pc, channel.deps, 'main');
+		attachWorkbenchSync(phone, channel.deps, 'remote/1');
+		await phone.editors.openFile(NOTES);
+		await phone.editors.openFile(`${NOTES}.y`);
+		let release!: () => void;
+		phone.setHold(new Promise<void>((resolve) => (release = resolve)));
+		const opening = phone.editors.openFile(README);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		channel.sent.length = 0;
+		// Before README lands the user picks another existing tab — README's implied
+		// activation is superseded, so it lands in the background and announces nothing.
+		phone.setActive(NOTES);
+		expect(channel.by('remote/1')).toEqual([{ by: 'remote/1', k: 'active', path: NOTES }]);
+		release();
+		phone.setHold(null);
+		await opening;
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		expect(phone.activePath()).toBe(NOTES);
+		expect(channel.by('remote/1')).toEqual([{ by: 'remote/1', k: 'active', path: NOTES }]);
+		// The user's later switch to README is a real switch, not the stale open's echo.
+		phone.setActive(README);
+		expect(channel.by('remote/1')).toContainEqual({ by: 'remote/1', k: 'active', path: README });
+	});
+
+	it('a background open never pends an activation, and the later switch to it crosses', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const phone = fakeWorkbench();
+		attachWorkbenchSync(pc, channel.deps, 'main');
+		attachWorkbenchSync(phone, channel.deps, 'remote/1');
+		await phone.editors.openFile(NOTES);
+		await phone.editors.openFile(README, { inactive: true });
+		expect(phone.activePath()).toBe(NOTES);
+		channel.sent.length = 0;
+		phone.setActive(README);
+		expect(channel.by('remote/1')).toEqual([{ by: 'remote/1', k: 'active', path: README }]);
+	});
+
+	it('converges one file across two spellings instead of oscillating close/open', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const phone = fakeWorkbench();
+		// The phone restored its session before the sync attached, with its own spelling.
+		await phone.editors.openFile('c:\\repo\\notes.txt');
+		attachWorkbenchSync(pc, channel.deps, 'main');
+		attachWorkbenchSync(phone, channel.deps, 'remote/1');
+		await pc.editors.openFile(NOTES);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		// The phone recognized its restored tab: no duplicate, and nothing bounced back.
+		expect(phone.tabs()).toEqual(['c:\\repo\\notes.txt']);
+		expect(channel.by('remote/1')).toEqual([]);
+		expect(pc.tabs()).toEqual([NOTES]);
+		// The PC's close closes the phone's restored spelling, and that is the end of it.
+		channel.sent.length = 0;
+		pc.close(NOTES);
+		await until(() => phone.tabs().length === 0);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		expect(channel.by('remote/1')).toEqual([]);
+		expect(pc.tabs()).toEqual([]);
+	});
+
+	it('a dirty tab closed from the other side never drags it to the successor', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const phone = fakeWorkbench();
+		attachWorkbenchSync(pc, channel.deps, 'main');
+		attachWorkbenchSync(pc, channel.deps, 'main');
+		const phoneSync = attachWorkbenchSync(phone, channel.deps, 'remote/1');
+		await pc.editors.openFile(NOTES);
+		await pc.editors.openFile(README);
+		pc.setActive(README);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		// The phone's user is looking at NOTES (a divergence the sync allows to stand — a
+		// session restore's baseline), and their copy is dirty.
+		phoneSync.localOnly(true);
+		phone.setActive(NOTES);
+		phoneSync.localOnly(false);
+		phone.markDirty(NOTES);
+		channel.sent.length = 0;
+		pc.close(NOTES);
+		// The phone's close waits on the save dialog: the tab stays meanwhile.
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(phone.tabs()).toEqual([NOTES, README]);
+		// The user discards: the close completes and the successor takes the focus locally —
+		// but that activation is the close's consequence, never a switch to cross.
+		phone.settleClose(NOTES);
+		await until(() => !phone.tabs().includes(NOTES));
+		await new Promise((resolve) => setTimeout(resolve, 250)); // the hold's poll releases
+		expect(channel.by('remote/1').filter((m) => m.k === 'active')).toEqual([]);
+		expect(phone.activePath()).toBe(README);
+		// The hold has released: the next real switch crosses again.
+		await phone.editors.openFile(`${NOTES}.x`);
+		channel.sent.length = 0;
+		phone.setActive(README);
+		expect(channel.by('remote/1')).toEqual([{ by: 'remote/1', k: 'active', path: README }]);
+	});
 });
 
 /* ---------- A real editor area under the sync ---------- */
@@ -579,6 +784,88 @@ describe('a real editor area under the sync', () => {
 		expect(channel.sent).toEqual([{ by: 'main', k: 'activeTab', id: 'webview:acme.graph:3' }]);
 		containerA.remove();
 		containerB.remove();
+	});
+
+	it('opens, focuses and closes a Source Control change diff on the other side', async () => {
+		backend.on('read_file_at', () => ({ contents: 'one\n', binary: false, size: 4 }));
+		const containerA = document.createElement('div');
+		const containerB = document.createElement('div');
+		document.body.append(containerA, containerB);
+		const areaA = new EditorArea(containerA);
+		const areaB = new EditorArea(containerB);
+		const channel = bus();
+		attachWorkbenchSync({ editors: areaA, showView: () => undefined }, channel.deps, 'main');
+		attachWorkbenchSync({ editors: areaB, showView: () => undefined }, channel.deps, 'remote/1');
+		const diff = {
+			kind: 'diff',
+			id: 'scm:worktree:notes.txt',
+			title: 'notes.txt (Working Tree)',
+			left: { revision: 'HEAD', path: 'notes.txt', label: 'HEAD', exists: true },
+			right: { revision: '*', path: 'notes.txt', label: 'Working Tree', exists: true }
+		} as const;
+		const diffTab = 'diff:scm:worktree:notes.txt';
+		const tabsOf = (area: EditorArea): string[] => area.openTabInputs().map((tab) => tab.id);
+		// The PC clicks a change in Source Control: the phone opens the same diff, active.
+		await areaA.openDiff({ ...diff, left: { ...diff.left }, right: { ...diff.right } });
+		await until(() => tabsOf(areaB).includes(diffTab));
+		expect(areaB.activeInput?.kind).toBe('diff');
+		expect(channel.by('main')).toEqual([{ by: 'main', k: 'openTab', input: diff }]);
+		// And the applied open crossed back as nothing.
+		expect(channel.by('remote/1')).toEqual([]);
+		// A file in front, then the diff tab chosen again on the phone: the PC shows the diff.
+		await areaA.openFile(NOTES);
+		await until(() => areaB.activeInput?.kind === 'file');
+		channel.sent.length = 0;
+		areaB.revealById(diffTab);
+		await until(() => areaA.activeInput?.kind === 'diff');
+		expect(channel.by('remote/1')).toEqual([{ by: 'remote/1', k: 'activeTab', id: diffTab, input: diff }]);
+		// The phone closes the diff: the PC's closes too.
+		channel.sent.length = 0;
+		areaB.closeById(diffTab);
+		await until(() => !tabsOf(areaA).includes(diffTab));
+		// (The neighbour taking the focus crosses as its own switch.)
+		expect(channel.by('remote/1')).toContainEqual({ by: 'remote/1', k: 'closeTab', id: diffTab });
+		expect(channel.by('main')).toEqual([]);
+		containerA.remove();
+		containerB.remove();
+	});
+
+	it('opens a file history on the other side, and a missed diff converges on its focus', async () => {
+		backend.on('file_log', () => []);
+		backend.on('read_file_at', () => ({ contents: 'one\n', binary: false, size: 4 }));
+		const containerA = document.createElement('div');
+		const containerB = document.createElement('div');
+		document.body.append(containerA, containerB);
+		const areaA = new EditorArea(containerA);
+		const areaB = new EditorArea(containerB);
+		areaA.setRoot('C:\\repo');
+		areaB.setRoot('C:\\repo');
+		const channel = bus();
+		attachWorkbenchSync({ editors: areaA, showView: () => undefined }, channel.deps, 'main');
+		attachWorkbenchSync({ editors: areaB, showView: () => undefined }, channel.deps, 'remote/1');
+		await areaB.openFileHistory(NOTES);
+		await until(() => areaA.openTabInputs().some((tab) => tab.id === `history:${NOTES}`));
+		expect(channel.by('remote/1')).toEqual([{ by: 'remote/1', k: 'openTab', input: { kind: 'history', path: NOTES } }]);
+		// A diff this side never saw (opened before it arrived): its focus opens it here.
+		const diff = { kind: 'diff', id: 'rev:abc:notes.txt', title: 'notes.txt (abc)', left: { revision: 'abc', path: 'notes.txt', label: 'abc', exists: true }, right: { revision: 'abc', path: 'notes.txt', label: 'abc', exists: true } } as const;
+		channel.deps.send({ by: 'remote/2', k: 'activeTab', id: `diff:${diff.id}`, input: diff });
+		await until(() => areaA.openTabInputs().some((tab) => tab.id === `diff:${diff.id}`) && areaB.openTabInputs().some((tab) => tab.id === `diff:${diff.id}`));
+		expect(channel.by('main')).toEqual([]);
+		expect(channel.by('remote/1')).toHaveLength(1);
+		containerA.remove();
+		containerB.remove();
+	});
+
+	it('keeps a diff of provider text on its own frontend', async () => {
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const area = new EditorArea(container);
+		const channel = bus();
+		attachWorkbenchSync({ editors: area, showView: () => undefined }, channel.deps, 'main');
+		await area.openDiff({ kind: 'diff', id: 'ext:1', title: 'a ↔ b', left: { revision: '', path: 'a', label: 'a', exists: true, content: 'x\n' }, right: { revision: '', path: 'b', label: 'b', exists: true, content: 'y\n' } });
+		await until(() => area.openTabInputs().length === 1);
+		expect(channel.sent).toEqual([]);
+		container.remove();
 	});
 
 	it('closes a tab from its own strip and the close crosses', async () => {
@@ -722,6 +1009,39 @@ describe('the wired workbench', () => {
 		phoneHost.remove();
 	});
 
+	it('hides the PC-only and keyboard-only menu entries from a browser session', async () => {
+		const labelsOf = (menu: string): string[] =>
+			(workbench.menus().find((m) => m.label === menu)?.entries() ?? [])
+				.filter((entry) => typeof entry !== 'string')
+				.map((entry) => (entry as { label: string }).label);
+		// Desktop baseline: everything stands.
+		expect(labelsOf('File')).toContain('New Window');
+		expect(labelsOf('Help')).toContain('Keyboard Shortcuts');
+		expect(labelsOf('Help')).toContain('Open Developer Tools');
+		expect(labelsOf('View')).toContain('Editor Layout');
+		// A real browser session: no PC-side window spawn, no PC-side devtools.
+		setRemoteEnv({ transport: {} as never, attached: { frontendId: 'remote/1' } as never, basePath: '/' });
+		try {
+			expect(labelsOf('File')).not.toContain('New Window');
+			expect(labelsOf('Help')).not.toContain('Open Developer Tools');
+			expect(labelsOf('File')).toContain('Open Folder...');
+		} finally {
+			setRemoteEnv(undefined);
+		}
+		// The phone form factor adds the keyboard page and the split-layout submenu.
+		const root = document.documentElement;
+		root.setAttribute('data-remote-shell', '');
+		root.dataset['formFactor'] = 'phone';
+		try {
+			expect(labelsOf('Help')).not.toContain('Keyboard Shortcuts');
+			expect(labelsOf('View')).not.toContain('Editor Layout');
+			expect(labelsOf('View')).toContain('Explorer');
+		} finally {
+			root.removeAttribute('data-remote-shell');
+			delete root.dataset['formFactor'];
+		}
+	});
+
 	it('stops answering once disposed', async () => {
 		workbench.dispose();
 		backend.emit(WORKBENCH_SYNC_EVENT, { by: 'remote/1', k: 'open', path: NOTES });
@@ -835,6 +1155,7 @@ describe('the extension pages across frontends — Claude Code and Git Graph', (
 
 	afterEach(() => {
 		phoneForm(false);
+		setRemoteEnv(undefined);
 		workbench.dispose();
 	});
 
@@ -888,7 +1209,9 @@ describe('the extension pages across frontends — Claude Code and Git Graph', (
 	});
 
 	it('on a phone, leaving the Claude Code page stays local — it is navigation, not layout', async () => {
+		// A real phone session: the shell marker, the phone form factor, and the remote env.
 		phoneForm(true);
+		setRemoteEnv({ transport: {} as never, attached: { frontendId: 'remote/1' } as never, basePath: '/' });
 		click(claudeItem());
 		await until(() => workbench.activeSidebarView === CLAUDE_CONTAINER);
 		backend.emits.length = 0;
@@ -897,6 +1220,20 @@ describe('the extension pages across frontends — Claude Code and Git Graph', (
 		await flush(5);
 		expect(sidebarHidden()).toBe(true);
 		expect(sentByMain()).toEqual([]);
+	});
+
+	it('the PC window wearing the phone shell still crosses the side bar hide', async () => {
+		// The replica's phone mode marks the PC's own DOM (mirror/phoneShell.ts) but has no
+		// remote session env: a hide here is layout, and an own-UI session attached beside
+		// the mirror viewer must still hear it.
+		phoneForm(true);
+		click(claudeItem());
+		await until(() => workbench.activeSidebarView === CLAUDE_CONTAINER);
+		backend.emits.length = 0;
+		await commands.execute('workbench.toggleSidebar');
+		await until(() => sentByMain().length > 0);
+		expect(sidebarHidden()).toBe(true);
+		expect(sentByMain()).toEqual([{ by: 'main', k: 'sidebar', shown: false }]);
 	});
 
 	it('the phone bottom tab for Claude Code opens the view on the other side', async () => {

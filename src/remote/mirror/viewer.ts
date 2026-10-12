@@ -19,8 +19,10 @@ import { localizeTokens, type DownMessage, type MirrorOp, type SDoc, type SNode,
 
 const XLINK = 'http://www.w3.org/1999/xlink';
 /** The copy is a picture: no caret blinking where the PC has none, no text selection
- *  fighting the replayed one, pinch-zoom kept for phones. */
-const BASE_CSS = 'html{touch-action:pinch-zoom}*{caret-color:transparent!important;-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none}';
+ *  fighting the replayed one, pinch-zoom kept for phones — and the PC window's own
+ *  minimize / maximize / close never show: a remote page has no window to drive, and a
+ *  tap on them would replay into the PC's real controls. */
+const BASE_CSS = 'html{touch-action:pinch-zoom}.window-controls{display:none!important}*{caret-color:transparent!important;-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none}';
 /** A fluid copy scrolls natively under the finger. */
 const FLUID_CSS = '*{caret-color:transparent!important;-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none}';
 /** A fluid copy looks for its scrollers again at most this often while it knows none. */

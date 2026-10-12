@@ -8,6 +8,10 @@
 // 'phone' swaps menus for sheets — the sweeps' desktop-shaped assertions do not all hold
 // there, so phone stays the responsive suites' ground (tests/remoteResponsive.test.ts) and
 // this helper only marks it for the flows that branch on the marker.
+//
+// The sweep runs no daemon, so the one HTTP call the remote workbench makes off-socket —
+// the transfer entries' `api/download-ticket` POST — is answered here with a ticket URL:
+// a Download click exercises the whole frontend flow, navigation being jsdom's no-op.
 import { backend, dispatchScripted } from './tauriMock';
 import { T, decodeFrames, encodeFrames, msgpackFrame, type Frame } from '../src/remote/frame';
 import { Transport } from '../src/remote/transport';
@@ -91,6 +95,17 @@ export async function installRemoteRound(formFactor: 'desktop' | 'tablet' | 'pho
 	});
 	socket.toRelay = (bytes) => relay.receive(bytes);
 	setRemoteEnv({ transport, attached: info, basePath: '/' });
+	// The daemon's only off-socket HTTP endpoint: the download ticket (§11.3).
+	const realFetch = globalThis.fetch;
+	globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+		if (String(input).endsWith('api/download-ticket')) {
+			return new Response(JSON.stringify({ url: 'w/ggs-sweep/download?t=sweep' }), {
+				status: 200,
+				headers: { 'content-type': 'application/json' }
+			});
+		}
+		return realFetch(input, init);
+	}) as typeof fetch;
 	backend.wireChannel = (channel) => {
 		const stream = transport.allocStream();
 		transport.registerChannel(stream, (message) => channel.onmessage(message));
@@ -102,6 +117,7 @@ export async function installRemoteRound(formFactor: 'desktop' | 'tablet' | 'pho
 	previous = () => {
 		backend.wire = null;
 		backend.wireChannel = null;
+		globalThis.fetch = realFetch;
 		document.documentElement.removeAttribute('data-remote-shell');
 		delete document.documentElement.dataset.formFactor;
 		try {

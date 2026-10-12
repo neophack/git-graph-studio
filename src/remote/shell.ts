@@ -22,7 +22,7 @@ import { closeDrawer, openDrawer } from './navDrawer';
 import { backToEditor, currentPage, onWorkbenchChange } from './pages';
 import { formFactor, onFormFactorChange } from './responsive';
 import { createTerminalKeys } from './terminalKeys';
-import { download, uploadFiles } from './transfer';
+import { downloadTo, uploadInto } from './transfer';
 import { openWindowSwitcher, watchLifecycle } from './windowSwitcher';
 import { connectionLooksSlow, dataSaverPreferred, setDataSaver } from './dataSaver';
 import { remoteEnv } from './session';
@@ -58,8 +58,7 @@ function registerCommands(): void {
 		run: async () => {
 			const dir = await firstFolder();
 			if (!dir) return;
-			const done = await uploadFiles(dir, false);
-			if (done.length) notify('info', tf('remote.transfer.uploaded', done.length));
+			await uploadInto(dir, false);
 		}
 	});
 	commands.register({
@@ -69,8 +68,7 @@ function registerCommands(): void {
 		run: async () => {
 			const dir = await firstFolder();
 			if (!dir) return;
-			const done = await uploadFiles(dir, true);
-			if (done.length) notify('info', tf('remote.transfer.uploaded', done.length));
+			await uploadInto(dir, true);
 		}
 	});
 	commands.register({
@@ -80,11 +78,7 @@ function registerCommands(): void {
 		run: async () => {
 			const active = document.querySelector('.tab.active')?.getAttribute('title') ?? (await firstFolder());
 			if (!active) return;
-			try {
-				await download(active);
-			} catch (error) {
-				notify('error', tf('remote.transfer.failed', String(error)));
-			}
+			await downloadTo(active);
 		}
 	});
 	commands.register({

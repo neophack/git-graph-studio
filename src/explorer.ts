@@ -8,7 +8,8 @@ import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { fileIcon, fileIconColor } from './editor';
 import { contextUri, menuSection, resourceContext } from './contributions';
-import { tf } from './i18n';
+import { t, tf } from './i18n';
+import { remoteEnv } from './remote/session';
 import { actionButton, basename, confirmDialog, el, icon, joinPath, liveSidebarTitle, notify, relativeTo, showContextMenu, toPosix, type MenuEntry } from './ui';
 
 interface DirEntryInfo {
@@ -694,6 +695,17 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 			// has no such place. Hidden on the remote shell (the opener shim's
 			// remote-picker fallback stays for anything else that reveals).
 			...(remoteShell() ? [] : [{ label: 'Reveal in File Explorer', run: () => void revealItemInDir(path).catch((e) => notify('error', String(e))) }] as MenuEntry[]),
+			// Remote Access (module 19): a real browser session transfers files with the PC —
+			// a file downloads straight to the device, a folder downloads zipped by the
+			// instance and receives uploads. The transfer module loads on first click, so the
+			// desktop bundle never carries it.
+			...(remoteEnv() ? (isDir ? [
+				{ label: t('remote.transfer.downloadZip'), run: () => void import('./remote/transfer').then((transfer) => transfer.downloadTo(path, true)) },
+				{ label: t('remote.transfer.uploadHere'), run: () => void import('./remote/transfer').then((transfer) => transfer.uploadInto(path, false)) },
+				{ label: t('remote.transfer.uploadFolderHere'), run: () => void import('./remote/transfer').then((transfer) => transfer.uploadInto(path, true)) }
+			] : [
+				{ label: t('remote.transfer.download'), run: () => void import('./remote/transfer').then((transfer) => transfer.downloadTo(path)) }
+			] as MenuEntry[]) : []),
 			...(isDir ? [
 				{ label: 'Module Analysis', run: () => this.onModuleAnalysis?.(this.selectedFolders(path)) },
 				{ label: 'Open in Integrated Terminal', run: () => this.onOpenInTerminal?.(path) }

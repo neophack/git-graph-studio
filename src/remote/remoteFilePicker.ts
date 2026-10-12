@@ -103,7 +103,7 @@ export async function pickRemotePath(options: PickOptions): Promise<string | str
 			continue;
 		}
 		if (picked === UPLOAD) {
-			const uploaded = await uploadFiles(dir);
+			const { uploaded } = await uploadFiles(dir);
 			if (uploaded.length) return options.multiple ? uploaded : uploaded[0];
 			continue;
 		}

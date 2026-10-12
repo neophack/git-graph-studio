@@ -5,8 +5,9 @@
 // opens, closes or switches to, and every sidebar view it shows, crosses as one tiny intent
 // message and is performed on the other frontends' own workbenches. Paths and ids only —
 // never content, never DOM: the receiving side opens the document through its own editor
-// area (one file read it would have paid anyway), so the wire cost of a synced open is the
-// message itself, well under 200 bytes.
+// area (one file read it would have paid anyway). A file open/close/active message is well
+// under 200 bytes; the tabs that cross whole (a diff, a file history) carry their input —
+// revisions, paths and labels, never text.
 //
 // Both sides run the same shared workbench code (src/workbench.ts), so one module serves
 // both: the desktop emits through the real Tauri broadcast (which the Relay forwards to
@@ -23,10 +24,10 @@
 // local-only while a session restore rebuilds this frontend's own tabs.
 
 import { emit as tauriEmit, listen as tauriListen } from '@tauri-apps/api/event';
-import type { EditorPlacement } from '../editor';
+import { inputId, type EditorInput, type EditorPlacement } from '../editor';
 import type { ActiveEditorInfo, EditorArea } from '../editorArea';
 import { phoneShell } from './nav';
-import { frontendId } from './session';
+import { frontendId, remoteEnv } from './session';
 
 export const WORKBENCH_SYNC_EVENT = 'studio://workbench-sync';
 
@@ -41,6 +42,15 @@ export const WORKBENCH_SYNC_EVENT = 'studio://workbench-sync';
  *  every remaining copy). `activeTab` is the same tab id taking the focus — Git Graph's or
  *  Claude Code's page chosen on one side comes forward on the other.
  *
+ *  `openTab` is a re-openable tab that is neither a file nor an extension page: a Source
+ *  Control change's diff, a history entry's diff, a file history. Its input crosses whole —
+ *  revisions and repository paths, never text: a diff whose side carries its own content
+ *  (an extension's provider text) stays on its frontend — and the receiving side opens it
+ *  through its own editor area, so its tab id (`diff:<id>`, `history:<path>`) is the same
+ *  on both sides and `closeTab` / `activeTab` key it exactly like an extension page. An
+ *  `activeTab` for such a tab carries its input too, so a side that missed the open
+ *  converges by opening it.
+ *
  *  `sidebar` is the side bar hidden: the PC closing its Claude Code (or any) view takes a
  *  phone off that side page. Only a side-by-side workbench announces it — on a phone the
  *  side view is a full-screen page whose dismissal is navigation (every file tap closes it),
@@ -51,8 +61,32 @@ export type WorkbenchSyncMessage =
 	| { by: string; k: 'active'; path: string }
 	| { by: string; k: 'view'; id: string }
 	| { by: string; k: 'closeTab'; id: string }
-	| { by: string; k: 'activeTab'; id: string }
+	| { by: string; k: 'activeTab'; id: string; input?: SyncedTabInput }
+	| { by: string; k: 'openTab'; input: SyncedTabInput }
 	| { by: string; k: 'sidebar'; shown: false };
+
+/** The tab inputs that cross whole: diffs between revisions or files on disk, and file
+ *  histories. */
+export type SyncedTabInput = Extract<EditorInput, { kind: 'diff' } | { kind: 'history' }>;
+
+/** Whether an open tab's input crosses as `openTab`: a diff only when both sides are read
+ *  from the repository or the disk (an extension's provider text is that frontend's own,
+ *  and can be any size). */
+function syncedTabInput(input: EditorInput): SyncedTabInput | null {
+	if (input.kind === 'history') return input;
+	if (input.kind === 'diff' && input.left.content === undefined && input.right.content === undefined) return input;
+	return null;
+}
+
+/** The sync sets' path key: the editor area keys its tabs by samePath (slashes unified, a
+ *  Windows drive path case-insensitive), so the sync's bookkeeping must too — one file
+ *  restored as `c:\repo\a.ts` here and opened as `C:\repo\a.ts` there must not oscillate
+ *  close/open between the spellings. Messages still carry the sender's own spelling; the
+ *  receiving side's path lookups (closeFilePath, revealFilePath) match by samePath. */
+function keyOf(path: string): string {
+	const key = path.replace(/\\/g, '/');
+	return /^[A-Za-z]:\//.test(key) ? key.toLowerCase() : key;
+}
 
 /** The editor-area surface the sync rides on — the real `EditorArea` satisfies it
  *  structurally, and a test can fake it. */
@@ -67,6 +101,11 @@ export interface SyncedEditorArea {
 	openExtPageIds(): string[];
 	closeById(id: string): boolean;
 	revealById(id: string): boolean;
+	/** The open tabs' ids and inputs, and the opens of the tabs that cross whole — optional:
+	 *  an area without them syncs no diff or history tabs. */
+	openTabInputs?(): { id: string; input: EditorInput }[];
+	openDiff?(input: Extract<EditorInput, { kind: 'diff' }>): Promise<void>;
+	openFileHistory?(path: string): Promise<void>;
 }
 
 /** The workbench surface the sync rides on. */
@@ -95,12 +134,14 @@ export interface AttachedWorkbenchSync {
 }
 
 /** The active tab's sync key: `file:<path>` for a file, `tab:<id>` for an extension page
- *  (whose tab id is the same on every frontend), null while anything else (a diff, the
- *  welcome) holds the focus — those keep their frontend's own layout, they do not sync. */
+ *  or a tab that crosses whole (whose tab id is the same on every frontend), null while
+ *  anything else (a content tab, the welcome) holds the focus — those keep their
+ *  frontend's own layout, they do not sync. */
 function activeKeyOf(input: { kind: string; path?: string; id?: string } | null): string | null {
 	if (input?.kind === 'file') return input.path ? `file:${input.path}` : null;
 	if (input?.kind === 'extpage') return input.id ? `tab:${input.id}` : null;
-	return null;
+	const synced = input ? syncedTabInput(input as EditorInput) : null;
+	return synced ? `tab:${inputId(synced)}` : null;
 }
 
 /** Wire one workbench into the sync: local operations cross as messages, remote messages
@@ -119,12 +160,26 @@ export function attachWorkbenchSync(
 	/** What the other frontends believe about this one's open files. Local operations
 	 *  announce into it, remote operations pre-mark it, and the tabs diff announces exactly
 	 *  the difference — so an echo can never re-announce, and a local change landing while a
-	 *  remote operation is still in flight still crosses. */
-	let announced = new Set(editors.openFilePaths());
+	 *  remote operation is still in flight still crosses. Keyed by `keyOf` (one file's two
+	 *  spellings are one entry), valued by the spelling to announce with — this side's own
+	 *  while the tab is local, the message's for a remote open still in flight. */
+	let announced = new Map(editors.openFilePaths().map((path) => [keyOf(path), path]));
 	/** The same contract for extension-page tabs: what the others believe is open here. A
 	 *  tab ADDED needs no message (the backend's create mirror opened it everywhere); a tab
 	 *  REMOVED locally is a close that must cross. */
-	let announcedTabs = new Set(editors.openExtPageIds());
+	/** The open tabs that cross whole, by tab id. */
+	const syncedTabs = (): Map<string, SyncedTabInput> => {
+		const tabs = new Map<string, SyncedTabInput>();
+		for (const { id, input } of editors.openTabInputs?.() ?? []) {
+			const synced = syncedTabInput(input);
+			if (synced) tabs.set(id, synced);
+		}
+		return tabs;
+	};
+	const openTabIds = (): Set<string> => new Set([...editors.openExtPageIds(), ...syncedTabs().keys()]);
+	let announcedTabs = openTabIds();
+	/** Tab ids whose remote `openTab` is still in flight: pre-marked announced, tab not landed. */
+	const applyingTabs = new Set<string>();
 	let activeKey = activeKeyOf(editors.activeInput);
 	/** Extension-page tabs that just appeared as the active tab — a panel's create (the
 	 *  backend's mirror opens it on every frontend at once): its own activation is not a
@@ -136,12 +191,19 @@ export function attachWorkbenchSync(
 	 *  active switches (their message already said so). */
 	let applying = 0;
 	/** Paths a local open already announced, waiting for the activation their open implies —
-	 *  that activation is not a separate switch. The activation consumes the entry; an open
-	 *  that never lands leaves it, harmless (the next open of the same path re-announces). */
+	 *  that activation is not a separate switch. The activation consumes the entry; any
+	 *  activation also clears the rest, whose implied activation it superseded (the editor's
+	 *  openIntent lets only the newest open take the focus) — a stale entry would swallow
+	 *  the user's next real switch to that tab. Background opens never wait here. */
 	const pendingOpens = new Set<string>();
-	/** Paths whose remote open is still in flight: pre-marked announced, tab not landed —
-	 *  a tabs diff meanwhile must read them as pending, not as closed. */
+	/** Paths whose open is still in flight — a remote open's pre-mark, or a local facade
+	 *  open's own. A tabs diff meanwhile must read them as pending, not as closed; a remote
+	 *  close naming one queues in `pendingCloses` instead of finding no tab and getting
+	 *  lost (which would re-open the other side's just-closed tab when the open lands). */
 	const applyingOpens = new Set<string>();
+	/** Closes that arrived while their open was still in flight: applied when it lands. */
+	const pendingCloses = new Set<string>();
+	const pendingTabCloses = new Set<string>();
 	/** Announcements are allowed only while live (booted, not detached) and not local-only. */
 	let live = options.startImmediately !== false;
 	let quiet = false;
@@ -150,38 +212,155 @@ export function attachWorkbenchSync(
 	const announce = (message: WorkbenchSyncMessage): void => {
 		if (live && !quiet) deps.send(message);
 	};
+	/** Whether an announced open really landed — the editor reports a failed open as a
+	 *  notification, not a rejection, so a resolved promise proves nothing. Without this
+	 *  check the pre-mark would rebound at the next tabs diff as a close of the other
+	 *  side's healthy tab. */
+	const landedFile = (key: string): boolean => editors.openFilePaths().some((path) => keyOf(path) === key);
+	const landedTab = (id: string): boolean => openTabIds().has(id);
+
+	/** A remote close applied to the ACTIVE tab keeps suppressing activations until the tab
+	 *  is really gone: the editor's close settles asynchronously when a dirty tab asks to
+	 *  save, and the successor activation that fires then is the close's consequence, not
+	 *  this user's switch — letting it cross would drag the other side off the tab the
+	 *  sender's own `active` message just chose. A user gesture releases the hold only when
+	 *  the tab survived it (a Cancel; a Discard's gesture precedes the close itself, and
+	 *  the poll wins that race), and a cap bounds the worst case. */
+	const holdUntilClosed = (stillOpen: () => boolean): void => {
+		if (!stillOpen()) return;
+		applying++;
+		let released = false;
+		const release = (): void => {
+			if (released) return;
+			released = true;
+			applying--;
+			clearInterval(poll);
+			clearTimeout(cap);
+			window.removeEventListener('pointerdown', onGesture, true);
+			window.removeEventListener('keydown', onGesture, true);
+		};
+		const poll = setInterval(() => {
+			if (!stillOpen()) release();
+		}, 100);
+		const cap = setTimeout(release, 120_000);
+		const onGesture = (): void => {
+			setTimeout(() => {
+				if (stillOpen()) release();
+			}, 150);
+		};
+		window.addEventListener('pointerdown', onGesture, true);
+		window.addEventListener('keydown', onGesture, true);
+	};
+
+	/** Apply a close that crossed: its removal was pre-marked before this ran, so the tabs
+	 *  diff never echoes it. The editor's close only looks synchronous — it settles in a
+	 *  later task (a dirty tab's save dialog whenever the user answers) — so the applying
+	 *  guard outlives the call itself, and an active tab's close holds it until the tab is
+	 *  really gone. */
+	const closeNow = async (key: string): Promise<void> => {
+		applying++;
+		try {
+			const wasActive = activeKey !== null && activeKey.startsWith('file:') && keyOf(activeKey.slice(5)) === key;
+			if (!editors.closeFilePath(key)) return;
+			// A clean close settles within a task; a dirty one waits on the save dialog.
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			if (wasActive) holdUntilClosed(() => landedFile(key));
+		} finally {
+			applying--;
+		}
+	};
+	const closeTabNow = async (id: string): Promise<void> => {
+		applying++;
+		try {
+			const wasActive = activeKey === `tab:${id}`;
+			if (!editors.closeById(id)) return;
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			if (wasActive) holdUntilClosed(() => landedTab(id));
+		} finally {
+			applying--;
+		}
+	};
+
 	/** A remote operation: pre-mark what it will change, run it raw (never through the local
-	 *  wrappers), and un-mark an open that failed. A close the user refuses leaves the tab
-	 *  open and unannounced — the next tabs diff announces it back, and the two sides settle
-	 *  on "kept open", exactly the refused close's meaning. */
-	const run = async (step: () => unknown, own: { add?: string; remove?: string; removeTab?: string } = {}): Promise<void> => {
+	 *  wrappers), and un-mark an open that failed — thrown or verified (the editor swallows
+	 *  an open's failure as a notification, so the landing itself is checked). A close the
+	 *  user refuses leaves the tab open and unannounced — the next tabs diff announces it
+	 *  back, and the two sides settle on "kept open", exactly the refused close's meaning. */
+	const run = async (step: () => unknown, own: { add?: string; spell?: string; remove?: string; addTab?: string; removeTab?: string } = {}): Promise<void> => {
 		if (own.add !== undefined) {
-			announced.add(own.add);
+			announced.set(own.add, own.spell ?? own.add);
 			applyingOpens.add(own.add);
+		}
+		if (own.addTab !== undefined) {
+			announcedTabs.add(own.addTab);
+			applyingTabs.add(own.addTab);
 		}
 		if (own.remove !== undefined) announced.delete(own.remove);
 		if (own.removeTab !== undefined) announcedTabs.delete(own.removeTab);
 		applying++;
+		let failed = false;
 		try {
 			await step();
+			if (own.add !== undefined && !landedFile(own.add)) failed = true;
+			if (own.addTab !== undefined && !landedTab(own.addTab)) failed = true;
 		} catch {
-			if (own.add !== undefined) announced.delete(own.add);
+			failed = true;
 		} finally {
 			applying--;
-			if (own.add !== undefined) applyingOpens.delete(own.add);
+			if (own.add !== undefined) {
+				applyingOpens.delete(own.add);
+				if (failed) {
+					announced.delete(own.add);
+					pendingCloses.delete(own.add);
+				} else if (pendingCloses.delete(own.add)) {
+					// Its close arrived while the open was in flight: close what just landed.
+					announced.delete(own.add);
+					void closeNow(own.add);
+				}
+			}
+			if (own.addTab !== undefined) {
+				applyingTabs.delete(own.addTab);
+				if (failed) {
+					announcedTabs.delete(own.addTab);
+					pendingTabCloses.delete(own.addTab);
+				} else if (pendingTabCloses.delete(own.addTab)) {
+					announcedTabs.delete(own.addTab);
+					void closeTabNow(own.addTab);
+				}
+			}
 		}
 	};
+	/** Open a tab that crosses whole through this frontend's own editor area. */
+	const openSyncedTab = (input: SyncedTabInput): Promise<void> | undefined =>
+		input.kind === 'diff' ? editors.openDiff?.(input) : editors.openFileHistory?.(input.path);
 
 	// A local file open crosses with its anchor, the moment the user asked for it, and marks
 	// the path announced — the tabs diff must not repeat it. Everything user-facing opens
 	// through this facade (explorer, quick open, SCM, search, extensions); a session restore
-	// opens through its groups directly and stays local.
+	// opens through its groups directly and stays local. The settle check matters as much as
+	// the announcement: a failed open (the editor notifies and returns) must un-mark what it
+	// pre-marked, or the next tabs diff reads it as a close and shuts the other side's tab.
 	const rawOpenFile = editors.openFile.bind(editors) as typeof editors.openFile;
 	editors.openFile = (path, options, placement) => {
+		const key = keyOf(path);
 		announce({ by, k: 'open', path, line: options?.line, column: options?.column });
-		announced.add(path);
-		pendingOpens.add(path);
-		return rawOpenFile(path, options, placement);
+		announced.set(key, path);
+		applyingOpens.add(key);
+		if (options?.inactive !== true) pendingOpens.add(key);
+		const settle = (): void => {
+			applyingOpens.delete(key);
+			if (!landedFile(key)) {
+				announced.delete(key);
+				pendingOpens.delete(key);
+				pendingCloses.delete(key);
+			} else if (pendingCloses.delete(key)) {
+				announced.delete(key);
+				void closeNow(key);
+			}
+		};
+		const opened = rawOpenFile(path, options, placement);
+		void Promise.resolve(opened).then(settle, settle);
+		return opened;
 	};
 
 	// The tabs diff catches closes from wherever they came (the tab strip's own close
@@ -191,8 +370,10 @@ export function attachWorkbenchSync(
 	const prevOnTabsChange = editors.onTabsChange;
 	editors.onTabsChange = () => {
 		prevOnTabsChange?.();
-		const now = new Set(editors.openFilePaths());
-		const nowTabs = new Set(editors.openExtPageIds());
+		const nowPaths = editors.openFilePaths();
+		const now = new Map(nowPaths.map((path) => [keyOf(path), path]));
+		const synced = syncedTabs();
+		const nowTabs = new Set([...editors.openExtPageIds(), ...synced.keys()]);
 		const active = editors.activeInput;
 		// A tab arriving as the active one whose activation has not been reported yet: that
 		// coming report is the create's own (when the report came first, it was read fresh
@@ -200,12 +381,16 @@ export function attachWorkbenchSync(
 		for (const id of nowTabs) if (!announcedTabs.has(id) && active?.kind === 'extpage' && active.id === id && activeKey !== `tab:${id}`) freshTabs.add(id);
 		for (const id of freshTabs) if (!nowTabs.has(id)) freshTabs.delete(id);
 		if (live && !quiet) {
-			for (const path of now) if (!announced.has(path)) deps.send({ by, k: 'open', path });
-			for (const path of announced) if (!now.has(path) && !applyingOpens.has(path)) deps.send({ by, k: 'close', path });
-			for (const id of announcedTabs) if (!nowTabs.has(id)) deps.send({ by, k: 'closeTab', id });
+			for (const [key, path] of now) if (!announced.has(key)) deps.send({ by, k: 'open', path });
+			for (const [key, spelling] of announced) if (!now.has(key) && !applyingOpens.has(key)) deps.send({ by, k: 'close', path: spelling });
+			// A diff or a file history opened here (a Source Control change clicked, a history
+			// entry): the other side opens the same tab. An extension page's tab needs no
+			// message — its create mirror opened it everywhere.
+			for (const [id, input] of synced) if (!announcedTabs.has(id)) deps.send({ by, k: 'openTab', input });
+			for (const id of announcedTabs) if (!nowTabs.has(id) && !applyingTabs.has(id)) deps.send({ by, k: 'closeTab', id });
 		}
-		announced = new Set([...now, ...applyingOpens]);
-		announcedTabs = nowTabs;
+		announced = new Map([...now, ...[...applyingOpens].map((key) => [key, announced.get(key) ?? key] as [string, string])]);
+		announcedTabs = new Set([...nowTabs, ...applyingTabs]);
 	};
 
 	// A file tab or an extension page taking the focus crosses as one message — the open's
@@ -214,19 +399,27 @@ export function attachWorkbenchSync(
 	const prevOnActiveChange = editors.onActiveChange;
 	editors.onActiveChange = (editor) => {
 		prevOnActiveChange?.(editor);
-		const key = activeKeyOf(editor);
-		if (key !== null && key.startsWith('file:') && pendingOpens.has(key.slice(5))) {
-			pendingOpens.delete(key.slice(5));
+		// A diff or history reports its tab id, not its input: its key is read off the full
+		// input the area holds, the one form `activeKeyOf` keys it by.
+		const key = editor?.kind === 'diff' || editor?.kind === 'history' ? activeKeyOf(editors.activeInput) : activeKeyOf(editor);
+		if (key !== null && key.startsWith('file:')) {
+			// The open's own activation is consumed silently; either way this activation
+			// superseded every other in-flight open's implied one (the editor's openIntent
+			// lets only the newest open take the focus), so their entries go too — a stale
+			// entry would swallow the user's next real switch to that tab.
+			const implied = pendingOpens.delete(keyOf(key.slice(5)));
+			pendingOpens.clear();
+			if (!implied && key !== activeKey && applying === 0 && live && !quiet) announce({ by, k: 'active', path: key.slice(5) });
 		} else if (key !== null && key !== activeKey) {
+			pendingOpens.clear();
 			const crosses = applying === 0 && live && !quiet;
-			if (key.startsWith('file:')) {
-				if (crosses) announce({ by, k: 'active', path: key.slice(5) });
-			} else {
-				// Fresh: the tabs diff saw it arrive as the active tab, or has not seen it at all
-				// yet (the group's focus re-reports the new tab before its strip re-renders).
-				const id = key.slice(4);
-				if (freshTabs.has(id) || !announcedTabs.has(id)) freshTabs.delete(id);
-				else if (crosses) announce({ by, k: 'activeTab', id });
+			// Fresh: the tabs diff saw it arrive as the active tab, or has not seen it at all
+			// yet (the group's focus re-reports the new tab before its strip re-renders).
+			const id = key.slice(4);
+			if (freshTabs.has(id) || !announcedTabs.has(id)) freshTabs.delete(id);
+			else if (crosses) {
+				const input = editors.activeInput ? syncedTabInput(editors.activeInput as EditorInput) : null;
+				announce(input && inputId(input) === id ? { by, k: 'activeTab', id, input } : { by, k: 'activeTab', id });
 			}
 		}
 		activeKey = key;
@@ -262,28 +455,65 @@ export function attachWorkbenchSync(
 			detachListener = deps.receive((message) => {
 				if (!message || message.by === by) return;
 				switch (message.k) {
-					case 'open':
-						void run(() => rawOpenFile(message.path, message.line !== undefined ? { line: message.line, column: message.column } : undefined), { add: message.path });
+					case 'open': {
+						const key = keyOf(message.path);
+						// An open of it is already landing here (a local one, or the message's
+						// own earlier copy): it satisfies this message.
+						if (applyingOpens.has(key)) break;
+						void run(() => rawOpenFile(message.path, message.line !== undefined ? { line: message.line, column: message.column } : undefined), { add: key, spell: message.path });
 						break;
-					case 'close':
-						void run(() => editors.closeFilePath(message.path), { remove: message.path });
+					}
+					case 'close': {
+						const key = keyOf(message.path);
+						// Its open is still in flight: close it the moment it lands — closing now
+						// would find no tab, and the landing would re-announce the open, re-opening
+						// the sender's just-closed tab.
+						if (applyingOpens.has(key)) {
+							pendingCloses.add(key);
+							break;
+						}
+						void run(() => closeNow(key), { remove: key });
 						break;
+					}
 					case 'closeTab':
-						void run(() => editors.closeById(message.id), { removeTab: message.id });
+						if (applyingTabs.has(message.id)) {
+							pendingTabCloses.add(message.id);
+							break;
+						}
+						void run(() => closeTabNow(message.id), { removeTab: message.id });
 						break;
-					case 'activeTab':
+					case 'activeTab': {
 						// A tab not open here (its create mirror still in flight, or a copy this
-						// side never had) stays a no-op: the create opens it in the foreground.
-						void run(() => editors.revealById(message.id));
+						// side never had) stays a no-op: the create opens it in the foreground. A
+						// tab that crosses whole carries its input, and opening it converges —
+						// unless its open is already landing here, in which case that open
+						// activates it (opening again would read the same revisions twice).
+						const input = message.input;
+						const inFlight = applyingTabs.has(message.id);
+						void run(() => {
+							if (editors.revealById(message.id)) return undefined;
+							return !inFlight && input ? openSyncedTab(input) : undefined;
+						}, inFlight || !input ? {} : { addTab: message.id });
+						break;
+					}
+					case 'openTab':
+						void run(() => openSyncedTab(message.input), { addTab: inputId(message.input) });
 						break;
 					case 'sidebar':
 						if (rawToggleSidebar && workbench.sidebarShown !== false) void run(() => rawToggleSidebar.call(workbench));
 						break;
-					case 'active':
+					case 'active': {
 						// Not open here (a missed open, or opened before this page arrived): opening
-						// it is the convergence — the active file is the same on both sides.
-						void run(() => (editors.revealFilePath(message.path) ? undefined : rawOpenFile(message.path)), { add: message.path });
+						// it is the convergence — the active file is the same on both sides. An open
+						// already landing here activates it itself.
+						const key = keyOf(message.path);
+						const inFlight = applyingOpens.has(key);
+						void run(() => {
+							if (editors.revealFilePath(message.path)) return undefined;
+							return inFlight ? undefined : rawOpenFile(message.path);
+						}, inFlight ? {} : { add: key, spell: message.path });
 						break;
+					}
 					case 'view':
 						void run(() => rawShowView.call(workbench, message.id));
 						break;
@@ -295,10 +525,12 @@ export function attachWorkbenchSync(
 			if (local) return;
 			// Leaving local-only absorbs whatever changed: this frontend's own restored tabs
 			// are its baseline, nothing to announce and nothing to close on the others.
-			announced = new Set(editors.openFilePaths());
-			announcedTabs = new Set(editors.openExtPageIds());
+			announced = new Map(editors.openFilePaths().map((path) => [keyOf(path), path]));
+			announcedTabs = openTabIds();
 			activeKey = activeKeyOf(editors.activeInput);
 			pendingOpens.clear();
+			pendingCloses.clear();
+			pendingTabCloses.clear();
 			freshTabs.clear();
 		},
 		detach(): void {
@@ -336,5 +568,12 @@ export function installWorkbenchSync(workbench: SyncedWorkbench): AttachedWorkbe
 				unlisten?.();
 			};
 		}
-	}, frontendId(), { startImmediately: false, sidebarHideCrosses: () => !phoneShell() });
+	}, frontendId(), {
+		startImmediately: false,
+		// A phone session's side-page dismissal is navigation, never a layout change to
+		// cross — but only a real browser session's: the PC's own window wearing the phone
+		// shell for a mirror viewer (phoneShell() reads the live DOM marker) keeps crossing,
+		// or every own-UI session attached beside the viewer would miss the hide.
+		sidebarHideCrosses: () => !(remoteEnv() && phoneShell())
+	});
 }
