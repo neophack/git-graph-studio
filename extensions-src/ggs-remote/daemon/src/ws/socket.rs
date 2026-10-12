@@ -250,6 +250,16 @@ fn hello_ack(conn: &Conn, resumed: bool) -> Vec<u8> {
     .encode()
 }
 
+/// Whether a remote session may drive this instance: with the sandbox on (§23), only
+/// sandboxed instances are a remote session's to touch — attach, close or restart alike.
+fn remote_may_drive(daemon: &Daemon, instance: &str) -> bool {
+    !daemon.config().sandbox.enabled
+        || daemon
+            .registry
+            .with(instance, |i| i.info.sandboxed)
+            .unwrap_or(false)
+}
+
 pub fn windows_frame(daemon: &Daemon) -> Frame {
     // With the sandbox enabled (§23) a remote session sees sandboxed instances only:
     // the desktop windows stay the user's own. The recent list narrows with them.
@@ -312,14 +322,7 @@ pub fn handle(daemon: &Arc<Daemon>, conn: &Arc<Conn>, mut frame: Frame) {
             let daemon = daemon.clone();
             let conn = conn.clone();
             tokio::spawn(async move {
-                // The sandbox on: a desktop (non-sandboxed) window is not a remote
-                // session's to drive (§23) — it answers as though it were gone.
-                if daemon.config().sandbox.enabled
-                    && !daemon
-                        .registry
-                        .with(&attach.instance, |i| i.info.sandboxed)
-                        .unwrap_or(false)
-                {
+                if !remote_may_drive(&daemon, &attach.instance) {
                     conn.close(code::INSTANCE_GONE, "instance-exited");
                     return;
                 }
@@ -387,6 +390,18 @@ pub fn handle(daemon: &Arc<Daemon>, conn: &Arc<Conn>, mut frame: Frame) {
             };
             let (daemon, conn) = (daemon.clone(), conn.clone());
             tokio::spawn(async move {
+                // The same boundary as ATTACH (2026-10-13 audit F1): a desktop window is
+                // not a remote session's to close or force-kill either.
+                if !remote_may_drive(&daemon, &close.instance) {
+                    notice(
+                        &conn,
+                        Notice {
+                            instance: Some(close.instance.clone()),
+                            ..Notice::kind("instance-exited")
+                        },
+                    );
+                    return;
+                }
                 match crate::lifecycle::close(&daemon, &close.instance, close.force).await {
                     crate::lifecycle::CloseOutcome::Blocked(dirty) => notice(
                         &conn,
@@ -413,6 +428,16 @@ pub fn handle(daemon: &Arc<Daemon>, conn: &Arc<Conn>, mut frame: Frame) {
             };
             let (daemon, conn) = (daemon.clone(), conn.clone());
             tokio::spawn(async move {
+                if !remote_may_drive(&daemon, &restart.instance) {
+                    notice(
+                        &conn,
+                        Notice {
+                            instance: Some(restart.instance.clone()),
+                            ..Notice::kind("restart-failed")
+                        },
+                    );
+                    return;
+                }
                 match crate::lifecycle::restart(&daemon, &restart.instance).await {
                     Ok(instance) => conn.push(Frame::msgpack(ty::SPAWNED, &Spawned { instance })),
                     Err(message) => notice(

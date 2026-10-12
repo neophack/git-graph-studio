@@ -28,6 +28,17 @@ pub struct LoginBody {
     remember: bool,
 }
 
+/// The ceiling on Argon2 verifications in flight at once (audit F3, 2026-10-13): each
+/// hash holds ~19 MiB and a core; unbounded concurrent junk logins (which all pass the
+/// check-then-fail limiter's first window) once bought ~4 GB of RSS on the LAN. Two per
+/// core is far above any honest login's need.
+fn verify_permits() -> &'static tokio::sync::Semaphore {
+    static PERMITS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    PERMITS.get_or_init(|| {
+        tokio::sync::Semaphore::new(2 * std::thread::available_parallelism().map_or(2, |n| n.get()))
+    })
+}
+
 /// Run the rate limiter around a password check; `Err` is the response to send.
 pub async fn throttled_verify(
     daemon: &Arc<Daemon>,
@@ -47,6 +58,12 @@ pub async fn throttled_verify(
         Verdict::Delay(delay) => tokio::time::sleep(delay).await,
         Verdict::Allow => {}
     }
+    let _permit = verify_permits().acquire().await.map_err(|_| {
+        Box::new(error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the daemon is stopping",
+        ))
+    })?;
     if daemon.auth.verify(password).await {
         daemon.limiter.lock().unwrap().success(ip);
         Ok(())

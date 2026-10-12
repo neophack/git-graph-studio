@@ -29,6 +29,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use mxc_sdk::mxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext};
 use mxc_sdk::v1::{
@@ -247,6 +248,11 @@ pub fn control_grant_dir(paths: &Paths) -> PathBuf {
 #[cfg(windows)]
 pub const CONTROL_PIPE_SDDL: &str = "D:P(A;;GA;;;S-1-15-2-1)(A;;GA;;;OW)";
 
+/// How long an unconsumed spawn token stays redeemable (audit F8, 2026-10-13): the
+/// token rides a child's environment, so a spawn that never registers should not leave
+/// a live credential lying around for the daemon's lifetime.
+const TOKEN_TTL: Duration = Duration::from_secs(300);
+
 /// Issue a one-shot registration token for a sandboxed spawn and record it. The instance
 /// must present it in its Register; the daemon consumes it on first use, so a token leak
 /// buys exactly one registration race the leaker would lose anyway.
@@ -254,16 +260,24 @@ pub fn issue_token(daemon: &Daemon) -> String {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).expect("system randomness");
     let token = hex(&bytes);
-    daemon.sandbox_tokens.lock().unwrap().insert(token.clone());
+    let mut tokens = daemon.sandbox_tokens.lock().unwrap();
+    // The sweep: anything older than the TTL goes — cheap enough to run per issue.
+    tokens.retain(|_, issued| issued.elapsed() < TOKEN_TTL);
+    tokens.insert(token.clone(), Instant::now());
     token
 }
 
-/// Consume a token: `true` when it was one the daemon issued and had not been used.
+/// Consume a token: `true` when it was one the daemon issued, had not been used, and is
+/// still within its lifetime.
 pub fn take_token(daemon: &Daemon, token: &str) -> bool {
     if token.is_empty() {
         return false;
     }
-    daemon.sandbox_tokens.lock().unwrap().remove(token)
+    let mut tokens = daemon.sandbox_tokens.lock().unwrap();
+    match tokens.remove(token) {
+        Some(issued) => issued.elapsed() < TOKEN_TTL,
+        None => false,
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -514,7 +528,11 @@ pub fn launch(
         environment: Some(environment),
         inherit_default_environment: Some(true),
         timeout_ms: None,
-        container_name: Some(format!("ggs-{}", hex(&daemon.secret[..8]))),
+        container_name: {
+            let mut name = [0u8; 8];
+            getrandom::fill(&mut name).expect("system randomness");
+            Some(format!("ggs-{}", hex(&name)))
+        },
     };
 
     let mut child = v1::spawn(request, Default::default())

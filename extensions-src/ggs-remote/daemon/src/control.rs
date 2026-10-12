@@ -177,6 +177,21 @@ async fn read_loop(daemon: &Arc<Daemon>, id: &str, rx: &mut RecvHalf) -> std::io
                 visible,
                 summary,
             } => {
+                // The same caps as Register (audit F9) — an oversized update is dropped,
+                // the connection stays.
+                if title.as_ref().is_some_and(|t| t.len() > 256)
+                    || folders.as_ref().is_some_and(|f| f.len() > 16)
+                    || folders
+                        .as_ref()
+                        .is_some_and(|f| f.iter().any(|path| path.len() > 1024))
+                    || summary.as_ref().is_some_and(|s| s.tabs.len() > 256)
+                    || summary
+                        .as_ref()
+                        .is_some_and(|s| s.tabs.iter().any(|t| t.path.len() > 1024))
+                {
+                    crate::warn!("{id}: an update exceeded its field caps");
+                    continue;
+                }
                 daemon
                     .registry
                     .update(id, title, folders.clone(), visible, summary);

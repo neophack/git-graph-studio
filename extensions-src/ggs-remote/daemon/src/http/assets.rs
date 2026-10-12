@@ -111,7 +111,7 @@ pub async fn app_asset(
     // must reach the browser, and a version-keyed copy of remote.html kept naming the old
     // build's scripts forever (2026-10-12: a reinstalled phone shell never appeared).
     let cacheable = immutable(&path);
-    let key = format!("{ver}|{path}");
+    let key = format!("{inst}|{ver}|{path}");
     let cached = if cacheable {
         daemon.cache.get(&key)
     } else {
@@ -205,8 +205,14 @@ fn respond(headers: &HeaderMap, entry: Entry, cache_control: &str) -> Response {
 }
 
 /// `/sw.js` (§10.2): the Service Worker comes from the remote build of whichever instance is
-/// up; served at the root so its scope covers the base path.
+/// up; served at the root so its scope covers the base path. Session-gated (audit F2,
+/// 2026-10-13): the fetch buffers and compresses instance output, which no unauthenticated
+/// LAN peer should be able to make the daemon do — and the workbench's own pages, the only
+/// things a service worker can serve, all carry a session cookie anyway.
 pub async fn service_worker(State(daemon): State<Arc<Daemon>>, headers: HeaderMap) -> Response {
+    if super::session_of(&daemon, &headers).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     let Some(first) = daemon.registry.snapshot().into_iter().next() else {
         return StatusCode::NOT_FOUND.into_response();
     };

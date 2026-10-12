@@ -177,17 +177,26 @@ pub fn token_hash_of(headers: &HeaderMap) -> Option<String> {
 /// The client address: the peer, or — behind a trusted local proxy — the first
 /// `X-Forwarded-For` hop (§7.4).
 pub fn client_ip(daemon: &Daemon, peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
-    let trust = peer.ip().is_loopback()
-        && (daemon.config.lock().unwrap().trust_proxy || headers.contains_key(BASE_HEADER));
+    let via_tunnel = headers.contains_key(BASE_HEADER);
+    let trust =
+        peer.ip().is_loopback() && (daemon.config.lock().unwrap().trust_proxy || via_tunnel);
     if trust {
         if let Some(ip) = headers
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split(',').next())
+            // The RIGHTMOST hop is the one the immediate trusted proxy appended; the
+            // leftmost is whoever forged the header before it (audit 2026-10-13).
+            .and_then(|v| v.rsplit(',').next())
             .and_then(|v| v.trim().parse().ok())
         {
             return ip;
         }
+    }
+    if via_tunnel {
+        // Through the tunnel the whole header set is the Hub's (audit F6): it can mint a
+        // fresh address per attempt, so per-IP lockouts would never trip. One shared
+        // bucket for everything the tunnel carries — the global limiter still bounds it.
+        return "127.0.0.127".parse().expect("the tunnel bucket address");
     }
     peer.ip()
 }

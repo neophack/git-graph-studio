@@ -144,10 +144,17 @@ impl Sessions {
         let session = Session {
             token_hash: hex(&sha256(&raw)),
             epoch,
+            // A device name is user-typed and lands in the log and the devices page —
+            // CR/LF never crosses (a forged log line, audit F11), nor do control chars.
             device: if device.trim().is_empty() {
                 device_from_ua(ua)
             } else {
-                device.trim().chars().take(64).collect()
+                device
+                    .trim()
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(64)
+                    .collect()
             },
             ua: ua.chars().take(256).collect(),
             ip: ip.to_string(),

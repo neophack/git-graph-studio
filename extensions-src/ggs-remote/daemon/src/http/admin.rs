@@ -62,10 +62,18 @@ pub fn status_json(daemon: &Daemon, open: bool) -> serde_json::Value {
     let last_foreign = daemon.last_foreign.load(Ordering::Relaxed);
     // The saved relay settings ride along so the link pages' server forms prefill (a null
     // `settings` means no server yet); only the loopback status and pair state serve this.
+    // The settings carry the joinKey — a secret — so once a password exists they sit
+    // behind the same unlock as the links themselves (audit F11, 2026-10-13). Before one
+    // does, the no-password pair flow is the only consumer (§20: a server saved ahead of
+    // the password connects the moment the password lands).
     let mut hub = daemon.hub.snapshot().as_json();
-    hub["settings"] = match daemon.hub.current() {
-        Some(settings) => serde_json::to_value(settings).unwrap_or(serde_json::Value::Null),
-        None => serde_json::Value::Null,
+    hub["settings"] = if open || !daemon.auth.is_set() {
+        match daemon.hub.current() {
+            Some(settings) => serde_json::to_value(settings).unwrap_or(serde_json::Value::Null),
+            None => serde_json::Value::Null,
+        }
+    } else {
+        serde_json::Value::Null
     };
     let mut status = serde_json::json!({
         "running": true,

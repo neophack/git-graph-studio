@@ -1657,6 +1657,76 @@ async fn the_sandbox_endpoint_registers_only_with_a_one_shot_token() {
     let _ = (desktop, sbx_rx, sbx_tx);
 }
 
+/// The sandbox boundary covers close and restart too (audit F1, 2026-10-13): a remote
+/// session must not force-kill or relaunch a desktop window just because ATTACH alone is
+/// guarded. Both answer as though the window were gone, and the registration survives.
+#[tokio::test]
+async fn the_sandbox_hides_desktop_windows_from_close_and_restart_too() {
+    let harness = start().await;
+    let daemon = harness.daemon.clone();
+    daemon.config.lock().unwrap().sandbox.enabled = true;
+    set_password(&harness).await;
+
+    let mut desktop = FakeInstance::connect_spec(
+        &harness,
+        "desktop",
+        std::process::id(),
+        LaunchSpec {
+            program: "ggs".into(),
+            args_prefix: vec![],
+        },
+        vec!["C:/somewhere".into()],
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let (cookie, csrf) = login(&harness).await;
+    let mut ws = browser(&harness, &cookie, &csrf).await;
+    let _ = next_of(&mut ws, ty::WINDOWS).await;
+    send(
+        &mut ws,
+        Frame::msgpack(
+            ty::INSTANCE_CLOSE,
+            &ggs_remote::ws::msg::InstanceClose {
+                instance: "desktop".into(),
+                force: true,
+            },
+        ),
+    )
+    .await;
+    send(
+        &mut ws,
+        Frame::msgpack(
+            ty::INSTANCE_RESTART,
+            &ggs_remote::ws::msg::InstanceRestart {
+                instance: "desktop".into(),
+            },
+        ),
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        daemon.registry.exists("desktop"),
+        "the guarded close/restart never reached the desktop window"
+    );
+    // And the instance still answers — the force-kill never happened: its control
+    // connection delivers the daemon's next message within a bounded wait.
+    daemon
+        .registry
+        .send("desktop", ToInstance::Ping { nonce: 7 });
+    let delivered = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let body = control_msg::read_message(&mut desktop.rx).await.unwrap();
+            if let ToInstance::Ping { nonce: 7 } = control_msg::decode(&body).unwrap() {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(delivered.is_ok(), "the desktop window still answers pings");
+}
+
 /// The real sandbox runtime, end to end, on this machine (ignored in CI: it needs the
 /// host's sandbox — Windows 11 24H2+/AppContainer, bubblewrap, or Seatbelt — and
 /// exercises `sandbox::launch`'s whole path). Run locally with

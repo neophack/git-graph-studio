@@ -1284,10 +1284,12 @@ async fn a_browser_session_resumes_when_the_tunnel_returns() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_shared_cache_answers_immutable_assets_across_pcs() {
-    // §20.6's cross-PC cache: only the workbench's immutable build artifacts are shared —
-    // every PC ships the same bytes, so the Hub may answer them for any tunnel without
-    // waking it. A mutable page is never cached: every fetch rides its own tunnel.
+async fn the_asset_cache_shares_within_one_pc_and_never_across_pcs() {
+    // §20.6's cache, after the 2026-10-13 audit (H-2): the workbench's immutable build
+    // artifacts are cached per LINK — one PC's windows share them without waking the
+    // tunnel twice — but never across PCs: cross-PC dedup let any keyholder's daemon
+    // poison same-origin script for every other PC's browsers. A mutable page is never
+    // cached at all: every fetch rides its own tunnel.
     let j = joint("").await;
     let a = j.daemon("a");
     let uuid_a = j.online(&a, PASSWORD, "").await;
@@ -1296,6 +1298,7 @@ async fn the_shared_cache_answers_immutable_assets_across_pcs() {
     let (cookie_a, _csrf) = login_through(j.hub_addr, &uuid_a, PASSWORD).await;
     let (cookie_b, _csrf) = login_through(j.hub_addr, &uuid_b, "quartz-lantern-3").await;
     let mut inst_a = FakeInstance::connect(&a, "ggs-a").await;
+    let mut inst_a2 = FakeInstance::connect(&a, "ggs-a2").await;
     let mut inst_b = FakeInstance::connect(&b, "ggs-b").await;
 
     // PC A serves one hashed (immutable) asset through its own link.
@@ -1316,28 +1319,45 @@ async fn the_shared_cache_answers_immutable_assets_across_pcs() {
     assert_eq!(status, 200);
     assert_eq!(body, "from-pc-a");
 
-    // The same asset under B's OWN instance name — a browser on B's link asks B's windows,
-    // whatever their ids are. Every PC ships the same bytes for the same version and hashed
-    // name, so the Hub's shared cache answers A's copy without waking B's tunnel.
-    let path = format!("/u/{uuid_b}/w/ggs-b/v/0.1.10/assets/remote-Ab12Cd34.js");
-    let cookie = cookie_b.clone();
+    // The same asset under ANOTHER WINDOW of the SAME PC: the cache answers without
+    // waking the daemon a second time.
+    let path = format!("/u/{uuid_a}/w/ggs-a2/v/0.1.10/assets/remote-Ab12Cd34.js");
+    let cookie = cookie_a.clone();
     let fetch =
         tokio::spawn(
             async move { http(j.hub_addr, "GET", &path, &[("cookie", &cookie)], "").await },
         );
-    let asked = inst_b.quiet_for(300).await;
+    let asked = inst_a2.quiet_for(300).await;
     assert!(
         asked.is_none(),
-        "the shared cache must answer without waking B's tunnel: {asked:?}"
+        "the same PC's cache entry must answer without waking its other window: {asked:?}"
     );
     let (status, _head, body) = tokio::time::timeout(Duration::from_secs(2), fetch)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(status, 200);
+    assert_eq!(body, "from-pc-a");
+
+    // The same asset under B's OWN link: B's tunnel IS woken and B's bytes answer —
+    // A's entry never crosses the link boundary.
+    let path = format!("/u/{uuid_b}/w/ggs-b/v/0.1.10/assets/remote-Ab12Cd34.js");
+    let cookie = cookie_b.clone();
+    let fetch =
+        tokio::spawn(
+            async move { http(j.hub_addr, "GET", &path, &[("cookie", &cookie)], "").await },
+        );
+    inst_b
+        .serve_asset("assets/remote-Ab12Cd34.js", "text/javascript", "from-pc-b")
+        .await;
+    let (status, _head, body) = tokio::time::timeout(Duration::from_secs(2), fetch)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status, 200);
     assert_eq!(
-        body, "from-pc-a",
-        "the immutable asset must arrive from the shared cache, byte-for-byte A's"
+        body, "from-pc-b",
+        "another PC's link never receives this PC's cached bytes"
     );
 
     // A mutable page is never cached: each fetch reaches B's own instance and serves what
