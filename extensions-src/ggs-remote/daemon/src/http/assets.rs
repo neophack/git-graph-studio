@@ -311,7 +311,7 @@ pub async fn download(
             .unwrap_or(StatusCode::NOT_FOUND)
             .into_response();
     }
-    let name = first.name.replace(['"', '\r', '\n'], "_");
+    let name = first.name.clone();
     let total = first.total;
     let done = first.done;
     let head = first.body;
@@ -336,10 +336,7 @@ pub async fn download(
                 "application/octet-stream"
             },
         )
-        .header(
-            header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{name}\""),
-        )
+        .header(header::CONTENT_DISPOSITION, content_disposition(&name))
         .header(header::CACHE_CONTROL, "no-store");
     if total > 0 && !ticket.zip {
         builder = builder.header(header::CONTENT_LENGTH, total);
@@ -347,6 +344,36 @@ pub async fn download(
     builder
         .body(Body::from_stream(stream))
         .expect("valid download response")
+}
+
+/// A download's Content-Disposition (RFC 5987): the plain `filename` is an ASCII-only
+/// fallback (quotes, CR/LF and every non-ASCII byte become `_`), and the real name rides
+/// `filename*` percent-encoded in UTF-8 — without it a browser reads the plain form as
+/// Latin-1 and a Chinese file name downloads as mojibake.
+fn content_disposition(name: &str) -> String {
+    let fallback: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii() && c != '"' && c != '\\' && c != '\r' && c != '\n' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut encoded = String::new();
+    for &byte in name.as_bytes() {
+        match byte {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    format!("attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}")
 }
 
 #[cfg(test)]
@@ -382,5 +409,24 @@ mod tests {
         let out = super::rewrite_ggs_urls(relative, "/w/i/ggs/t/");
         assert!(out.contains(r#"src="webview/app.js""#));
         assert!(out.contains(r#"href="/docs""#));
+    }
+
+    #[test]
+    fn content_disposition_carries_utf8_names() {
+        // ASCII passes through verbatim in both forms.
+        assert_eq!(
+            super::content_disposition("notes.txt"),
+            "attachment; filename=\"notes.txt\"; filename*=UTF-8''notes.txt"
+        );
+        // A Chinese name: the fallback degrades to underscores, the real name rides
+        // filename* percent-encoded (报 = E6 8A A5, 告 = E5 91 8A), the space included.
+        let header = super::content_disposition("报告 2026.txt");
+        assert!(header.starts_with("attachment; filename=\"__ 2026.txt\"; "));
+        assert!(header.contains("filename*=UTF-8''%E6%8A%A5%E5%91%8A%202026.txt"));
+        // Header injection is impossible: a hostile name's quotes, CR and LF never survive
+        // (the fallback replaces them, the encoded form percent-escapes them).
+        let hostile = super::content_disposition("a\"\r\nb.txt");
+        assert_eq!(hostile.matches('"').count(), 2); // the fallback's own framing only
+        assert!(!hostile.contains(['\r', '\n']));
     }
 }

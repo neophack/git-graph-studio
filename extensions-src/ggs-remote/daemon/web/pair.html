@@ -7,6 +7,7 @@
 <title>GGS Remote</title>
 <link rel="stylesheet" href="static/style.css">
 <link rel="icon" href="static/icon.svg">
+<script src="lang.js"></script>
 </head>
 <body>
 <main>
@@ -28,10 +29,24 @@
 			<p class="error" id="first-error"></p>
 		</form>
 		<div id="unlocked" hidden>
-			<p data-i18n="links"></p>
+			<p id="links-intro" data-i18n="links"></p>
 			<div class="links" id="links"></div>
 			<p class="muted" id="foreign"></p>
 		</div>
+	</section>
+	<section class="card" id="relay" hidden>
+		<h2 data-i18n="relayTitle"></h2>
+		<p class="muted" id="relay-state"></p>
+		<form id="relay-form">
+			<label for="relay-url" data-i18n="relayAddress"></label>
+			<input type="text" id="relay-url" autocomplete="off" spellcheck="false" placeholder="remote.example.com">
+			<label for="relay-key" data-i18n="relayKey"></label>
+			<input type="password" id="relay-key" autocomplete="off">
+			<button class="primary" data-i18n="relaySave"></button>
+			<p class="error" id="relay-error"></p>
+		</form>
+		<button id="relay-disconnect" data-i18n="relayDisconnect" hidden></button>
+		<p class="muted" data-i18n="relayHint"></p>
 	</section>
 	<section class="card" id="ca" hidden>
 		<h2 data-i18n="caTitle"></h2>
@@ -45,9 +60,10 @@
 	<section class="card" id="change" hidden>
 		<h2 data-i18n="changePassword"></h2>
 		<form id="change-form">
-			<label for="change-password" data-i18n="newPassword"></label>
-			<input type="password" id="change-password" autocomplete="new-password" required minlength="8">
-			<button data-i18n="save"></button>
+			<div class="pw-row">
+				<input type="password" id="change-password" autocomplete="new-password" required minlength="8" data-i18n-placeholder="newPassword" data-i18n-aria="newPassword">
+				<button class="primary" data-i18n="save"></button>
+			</div>
 			<p class="error" id="change-error"></p>
 		</form>
 	</section>

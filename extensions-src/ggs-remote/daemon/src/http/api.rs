@@ -61,6 +61,23 @@ pub async fn throttled_verify(
     }
 }
 
+/// The session cookie's `Secure` follows the scheme the browser actually spoke: a
+/// Hub-fronted request carries the Hub's `x-forwarded-proto` (the Hub never forwards a
+/// browser's own copy — only its stamp), and a direct request follows this daemon's TLS
+/// mode. Unconditional `Secure` once made a plain-HTTP Hub's login return success while
+/// the browser silently dropped every cookie (§7.6; forging the header only strips
+/// `Secure` from the forger's own cookie, never anyone else's).
+fn cookie_secure(daemon: &Daemon, headers: &HeaderMap) -> bool {
+    if let Some(proto) = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty())
+    {
+        return proto.eq_ignore_ascii_case("https");
+    }
+    daemon.config().tls.mode != crate::config::TlsMode::None
+}
+
 pub async fn login(
     State(daemon): State<Arc<Daemon>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -96,8 +113,13 @@ pub async fn login(
     } else {
         String::new()
     };
+    let secure = if cookie_secure(&daemon, &headers) {
+        "; Secure"
+    } else {
+        ""
+    };
     let cookie =
-        format!("{COOKIE}={token}; HttpOnly; Secure; SameSite=Strict; Path={base}{max_age}");
+        format!("{COOKIE}={token}; HttpOnly{secure}; SameSite=Strict; Path={base}{max_age}");
     (
         StatusCode::OK,
         [
@@ -117,11 +139,16 @@ pub async fn logout(State(daemon): State<Arc<Daemon>>, headers: HeaderMap) -> Re
         daemon.revoke(&hash);
     }
     let base = base_path(&headers);
+    let secure = if cookie_secure(&daemon, &headers) {
+        "; Secure"
+    } else {
+        ""
+    };
     (
         StatusCode::OK,
         [(
             header::SET_COOKIE,
-            format!("{COOKIE}=; HttpOnly; Secure; SameSite=Strict; Path={base}; Max-Age=0"),
+            format!("{COOKIE}=; HttpOnly{secure}; SameSite=Strict; Path={base}; Max-Age=0"),
         )],
         Json(serde_json::json!({ "ok": true })),
     )
@@ -143,6 +170,7 @@ pub async fn session(State(daemon): State<Arc<Daemon>>, headers: HeaderMap) -> R
             "basePath": base_path(&headers),
             "dataSaverDefault": daemon.config().data_saver_default,
             "spawnVisible": daemon.config().spawn_visible,
+            "folderInput": daemon.config().folder_input,
         }),
     )
 }
@@ -182,6 +210,9 @@ pub async fn set_password(daemon: &Arc<Daemon>, password: &str) -> Response {
     match daemon.auth.set_password(password).await {
         Ok(_) => {
             daemon.credentials_changed("credentials-changed");
+            // A Hub configured while no password existed sits in NoPassword, parked on the
+            // restart notify — the password landing is what lets it connect (§20.4).
+            daemon.hub.restart.notify_one();
             json_response(StatusCode::OK, serde_json::json!({ "ok": true }))
         }
         Err(e @ (crate::auth::AuthError::TooShort | crate::auth::AuthError::TooCommon)) => {
@@ -370,6 +401,60 @@ pub async fn pair_password(
     response
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct PairHub {
+    ticket: String,
+    url: String,
+    #[serde(default, alias = "joinKey")]
+    join_key: String,
+}
+
+/// Point this PC at a relay from the pair page: its set-password and unlock screens carry
+/// the server fields (2026-10-12), so a server may land before any password exists — it
+/// parks in NoPassword and connects the moment one does (§20.4). The one-time pair ticket
+/// is the local proof, the same one that authorizes setting the very password.
+pub async fn pair_hub_connect(
+    State(daemon): State<Arc<Daemon>>,
+    headers: HeaderMap,
+    body: Option<Json<PairHub>>,
+) -> Response {
+    let Some(Json(body)) = body else {
+        return error(StatusCode::BAD_REQUEST, "bad-request");
+    };
+    if !json_request_ok(&headers) || !ticket_ok(&daemon, &body.ticket) {
+        return error(StatusCode::FORBIDDEN, "ticket");
+    }
+    let settings = match super::admin::hub_settings(&body.url, &body.join_key, "") {
+        Ok(settings) => settings,
+        Err(e) => return error(StatusCode::BAD_REQUEST, &e),
+    };
+    match daemon.hub.connect(settings) {
+        Ok(()) => {
+            json_response(StatusCode::OK, super::admin::hub_state_settled(&daemon).await.as_json())
+        }
+        Err(e) => error(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
+/// Forget the relay from the pair page; the device key stays (§20.10).
+pub async fn pair_hub_disconnect(
+    State(daemon): State<Arc<Daemon>>,
+    headers: HeaderMap,
+    body: Option<Json<PairHub>>,
+) -> Response {
+    let Some(Json(body)) = body else {
+        return error(StatusCode::BAD_REQUEST, "bad-request");
+    };
+    if !json_request_ok(&headers) || !ticket_ok(&daemon, &body.ticket) {
+        return error(StatusCode::FORBIDDEN, "ticket");
+    }
+    match daemon.hub.disconnect() {
+        Ok(()) => json_response(StatusCode::OK, daemon.hub.snapshot().as_json()),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+}
+
 pub async fn pair_qr(
     State(daemon): State<Arc<Daemon>>,
     Query(query): Query<HashMap<String, String>>,
@@ -401,4 +486,50 @@ pub fn qr_response(text: &str) -> Response {
 /// Whether the request carries a cookie at all (used by pages to choose login vs picker).
 pub fn has_cookie(headers: &HeaderMap) -> bool {
     cookie_token(headers).is_some()
+}
+
+#[cfg(test)]
+mod cookie_secure_tests {
+    use super::{cookie_secure, Daemon, HeaderMap};
+    use crate::config::{Config, TlsConfig, TlsMode};
+    use crate::paths::Paths;
+
+    fn daemon_with(mode: TlsMode) -> (tempfile::TempDir, std::sync::Arc<Daemon>) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::at(dir.path().join("remote"), dir.path().to_path_buf());
+        paths.ensure().unwrap();
+        let config = Config {
+            port: 0,
+            bind: "127.0.0.1".into(),
+            tls: TlsConfig {
+                mode,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        (dir, Daemon::new(paths, config).unwrap())
+    }
+
+    fn proto(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", value.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn secure_follows_the_scheme_the_browser_spoke() {
+        // Direct against a plain-HTTP listener: no Secure, or the browser drops the cookie.
+        let (_dir, plain) = daemon_with(TlsMode::None);
+        assert!(!cookie_secure(&plain, &HeaderMap::new()));
+        // Direct against TLS: Secure, the hardening holds.
+        let (_dir, tls) = daemon_with(TlsMode::SelfSigned);
+        assert!(cookie_secure(&tls, &HeaderMap::new()));
+        let (_dir, tls) = daemon_with(TlsMode::Custom);
+        assert!(cookie_secure(&tls, &HeaderMap::new()));
+        // A Hub's stamp decides for tunneled requests, whatever the local listener is.
+        assert!(!cookie_secure(&plain, &proto("http")));
+        assert!(cookie_secure(&plain, &proto("https")));
+        assert!(cookie_secure(&tls, &proto("HTTPS")));
+        assert!(!cookie_secure(&tls, &proto("http")));
+    }
 }

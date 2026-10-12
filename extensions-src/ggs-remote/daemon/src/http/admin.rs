@@ -30,6 +30,17 @@ macro_rules! admin_only {
     };
 }
 
+/// The links the unlocked pages show QR codes for: while the relay is online, its link is
+/// the one QR (2026-10-12, the owner's direction — a set server makes the LAN codes clutter;
+/// a configured-but-offline relay has no link to show, so the LAN codes stay as the
+/// fallback). `lanLinks` always carries the direct addresses for the CA anchors.
+pub fn qr_links(hub_base: Option<&str>, lan: &[String]) -> Vec<String> {
+    match hub_base {
+        Some(base) => vec![base.to_owned()],
+        None => lan.to_vec(),
+    }
+}
+
 /// The status object; addresses, links and the QR-able data only when `open` (R19: the pair
 /// page and the extension page show them after the password unlock).
 pub fn status_json(daemon: &Daemon, open: bool) -> serde_json::Value {
@@ -49,6 +60,13 @@ pub fn status_json(daemon: &Daemon, open: bool) -> serde_json::Value {
     let epoch = daemon.auth.epoch();
     let devices = daemon.sessions.lock().unwrap().devices(epoch, None);
     let last_foreign = daemon.last_foreign.load(Ordering::Relaxed);
+    // The saved relay settings ride along so the link pages' server forms prefill (a null
+    // `settings` means no server yet); only the loopback status and pair state serve this.
+    let mut hub = daemon.hub.snapshot().as_json();
+    hub["settings"] = match daemon.hub.current() {
+        Some(settings) => serde_json::to_value(settings).unwrap_or(serde_json::Value::Null),
+        None => serde_json::Value::Null,
+    };
     let mut status = serde_json::json!({
         "running": true,
         "version": env!("CARGO_PKG_VERSION"),
@@ -66,16 +84,20 @@ pub fn status_json(daemon: &Daemon, open: bool) -> serde_json::Value {
         "uptimeSecs": daemon.started.elapsed().as_secs(),
         "unlocked": open,
         "config": config,
-        "hub": daemon.hub.snapshot().as_json(),
     });
+    status["hub"] = hub;
     if open {
         status["addresses"] = serde_json::json!(addresses);
-        let mut all = links.clone();
-        if let crate::hub::Status::Online { public_base, .. } = daemon.hub.snapshot() {
-            all.push(public_base);
-        }
+        status["lanLinks"] = serde_json::json!(links);
+        let hub_base = match daemon.hub.snapshot() {
+            crate::hub::Status::Online { public_base, .. } => Some(public_base),
+            _ => None,
+        };
+        // The relay's QR is the default — the only one shown while it is online (the LAN
+        // codes hide, 2026-10-12); `lanLinks` keeps the direct addresses for the CA anchors.
+        let all = qr_links(hub_base.as_deref(), &links);
         status["links"] = serde_json::json!(all);
-        status["link"] = links.first().cloned().into();
+        status["link"] = hub_base.or_else(|| links.first().cloned()).into();
     }
     status
 }
@@ -277,12 +299,14 @@ pub async fn shutdown(State(daemon): State<Arc<Daemon>>, headers: HeaderMap) -> 
 }
 
 #[derive(Deserialize, Default)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubConnectBody {
     url: String,
-    #[serde(default)]
+    /// `joinKey` is what the extension's admin client sends; the snake spelling stays
+    /// accepted for any other caller of the loopback API.
+    #[serde(default, alias = "join_key")]
     join_key: String,
-    #[serde(default)]
+    #[serde(default, alias = "fingerprint")]
     fingerprint: String,
 }
 
@@ -310,6 +334,46 @@ pub async fn hub_status(State(daemon): State<Arc<Daemon>>, headers: HeaderMap) -
     json_response(StatusCode::OK, value)
 }
 
+/// The settings a connect body spells: with no explicit key or fingerprint the `url` field
+/// is taken as a whole connect string (`ggsr1:…#key;fp=…` or a bare URL); explicit parts
+/// win over whatever the string carries.
+pub(crate) fn hub_settings(
+    url: &str,
+    join_key: &str,
+    fingerprint: &str,
+) -> Result<crate::hub::Settings, String> {
+    if join_key.is_empty() && fingerprint.is_empty() {
+        crate::hub::parse_connect_string(url)
+    } else {
+        Ok(crate::hub::Settings {
+            url: url.to_owned(),
+            join_key: join_key.to_owned(),
+            fingerprint: fingerprint.to_owned(),
+        })
+    }
+}
+
+/// `connect` parks the settings and wakes the loop; the loop is what turns them into a
+/// state. Wait briefly for that first transition so the caller's answer (and the page's
+/// re-render) shows the truth instead of the pre-connect snapshot.
+pub(crate) async fn hub_state_settled(daemon: &Daemon) -> crate::hub::Status {
+    let mut watch = daemon.hub.status.subscribe();
+    if matches!(*watch.borrow(), crate::hub::Status::Unconfigured) {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if watch.changed().await.is_err() {
+                    break;
+                }
+                if !matches!(*watch.borrow(), crate::hub::Status::Unconfigured) {
+                    break;
+                }
+            }
+        })
+        .await;
+    }
+    daemon.hub.snapshot()
+}
+
 /// Point this PC at a relay: the URL (the pasteable connect string works too) and, when the
 /// server has one, its join key.
 pub async fn hub_connect(
@@ -318,21 +382,14 @@ pub async fn hub_connect(
     Json(body): Json<HubConnectBody>,
 ) -> Response {
     admin_only!(daemon, headers);
-    let settings = if body.join_key.is_empty() && body.fingerprint.is_empty() {
-        // A whole connect string in the url field: take what it spells.
-        match crate::hub::parse_connect_string(&body.url) {
-            Ok(settings) => settings,
-            Err(e) => return error(StatusCode::BAD_REQUEST, &e),
-        }
-    } else {
-        crate::hub::Settings {
-            url: body.url,
-            join_key: body.join_key,
-            fingerprint: body.fingerprint,
-        }
+    let settings = match hub_settings(&body.url, &body.join_key, &body.fingerprint) {
+        Ok(settings) => settings,
+        Err(e) => return error(StatusCode::BAD_REQUEST, &e),
     };
     match daemon.hub.connect(settings) {
-        Ok(()) => json_response(StatusCode::OK, daemon.hub.snapshot().as_json()),
+        Ok(()) => {
+            json_response(StatusCode::OK, hub_state_settled(&daemon).await.as_json())
+        }
         Err(e) => error(StatusCode::BAD_REQUEST, &e),
     }
 }
@@ -352,7 +409,7 @@ pub async fn hub_relink(State(daemon): State<Arc<Daemon>>, headers: HeaderMap) -
     admin_only!(daemon, headers);
     match crate::hub::identity::rotate(&daemon.paths) {
         Ok(key) => {
-            daemon.hub.restart.notify_one();
+            daemon.hub.key_changed();
             let uuid = crate::hub::identity::uuid_for(&key.verifying_key().to_bytes());
             json_response(StatusCode::OK, serde_json::json!({ "uuid": uuid }))
         }
@@ -382,7 +439,7 @@ pub async fn hub_import_key(
     admin_only!(daemon, headers);
     match crate::hub::identity::import_encrypted(&daemon.paths, &body.password, &body.data) {
         Ok(uuid) => {
-            daemon.hub.restart.notify_one();
+            daemon.hub.key_changed();
             json_response(StatusCode::OK, serde_json::json!({ "uuid": uuid }))
         }
         Err(e) => error(StatusCode::BAD_REQUEST, &e),
@@ -406,5 +463,22 @@ pub async fn spawn(
     match crate::lifecycle::spawn(&daemon, body.folder, body.visible.or(Some(true))).await {
         Ok(id) => json_response(StatusCode::OK, serde_json::json!({ "instance": id })),
         Err(e) => error(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::qr_links;
+
+    /// While the relay is online its link is the only QR; without one the LAN links stand.
+    #[test]
+    fn the_relay_online_hides_the_lan_codes() {
+        let lan = vec!["https://192.168.1.5:4312/".to_owned(), "https://pc.local:4312/".to_owned()];
+        assert_eq!(
+            qr_links(Some("https://relay.example.com/u/uuid/"), &lan),
+            vec!["https://relay.example.com/u/uuid/".to_owned()]
+        );
+        assert_eq!(qr_links(None, &lan), lan);
+        assert_eq!(qr_links(None, &[]), Vec::<String>::new());
     }
 }

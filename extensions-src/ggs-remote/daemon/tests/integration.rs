@@ -252,6 +252,18 @@ async fn next_of(ws: &mut Ws, want: u8) -> Frame {
     }
 }
 
+/// The first WINDOWS frame whose recent list leads with `needle` (skips the interim pushes).
+async fn windows_until(ws: &mut Ws, needle: &str) -> serde_json::Value {
+    loop {
+        let frame = next_of(ws, ty::WINDOWS).await;
+        let body: serde_json::Value = frame.decode_msgpack().unwrap();
+        let first = body["recentFolders"].as_array().and_then(|l| l.first());
+        if first.and_then(|v| v.as_str()) == Some(needle) {
+            return body["recentFolders"].clone();
+        }
+    }
+}
+
 /// A fake GGS instance on the control channel.
 struct FakeInstance {
     rx: RecvHalf,
@@ -818,6 +830,109 @@ async fn resume_replays_missed_frames() {
     assert_eq!(replayed["instances"][0]["id"], "ggs-test-2");
 }
 
+/// The recent-paths list (2026-10-12): a window registering with folders notes them, the
+/// WINDOWS frame carries them most-recent-first, a folder seen again moves to the front,
+/// and the list persists as `recent.json` under the daemon's root.
+#[tokio::test]
+async fn windows_carries_the_recent_folder_history() {
+    let h = start().await;
+    set_password(&h).await;
+    let (cookie, csrf) = login(&h).await;
+    let mut ws = browser(&h, &cookie, &csrf).await;
+
+    let _a = FakeInstance::connect_spec(
+        &h,
+        "ggs-a",
+        std::process::id(),
+        LaunchSpec::default(),
+        vec!["C:/alpha".into(), "C:/beta".into()],
+    )
+    .await;
+    let recent = windows_until(&mut ws, "C:/alpha").await;
+    assert_eq!(
+        recent,
+        serde_json::json!(["C:/alpha", "C:/beta"]),
+        "a multi-folder window keeps its order, the primary folder firstmost"
+    );
+
+    // A second window, then the first folder seen again through an Update: it moves to the
+    // front without duplicating.
+    let mut b = FakeInstance::connect_spec(
+        &h,
+        "ggs-b",
+        std::process::id(),
+        LaunchSpec::default(),
+        vec!["C:/gamma".into()],
+    )
+    .await;
+    let recent = windows_until(&mut ws, "C:/gamma").await;
+    assert_eq!(recent, serde_json::json!(["C:/gamma", "C:/alpha", "C:/beta"]));
+    b.send(&FromInstance::Update {
+        title: None,
+        folders: Some(vec!["C:/alpha".into()]),
+        visible: None,
+        summary: None,
+    })
+    .await;
+    let recent = windows_until(&mut ws, "C:/alpha").await;
+    assert_eq!(
+        recent,
+        serde_json::json!(["C:/alpha", "C:/gamma", "C:/beta"]),
+        "an Update's folders move to the front, deduped"
+    );
+
+    // And the list is on disk, in the shape a fresh daemon loads.
+    assert_eq!(
+        ggs_remote::recent::Recent::load(&h.daemon.paths).list(),
+        ["C:/alpha", "C:/gamma", "C:/beta"]
+    );
+}
+
+/// The page language (2026-10-12): `lang.js` carries the app's `~/.ggs/settings.json`
+/// language to every page — `zh-cn`/`en` when the file spells one, the empty fallback
+/// (the browser's language) when it does not — and it loads before the guard (a page
+/// that is paused or passwordless still needs its strings).
+#[tokio::test]
+async fn lang_js_follows_the_app_settings() {
+    let h = start().await;
+    let bare = http(h.public, "GET", "/lang.js", &[], None).await;
+    assert_eq!(bare.status, 200, "{}", bare.body);
+    assert_eq!(bare.body, "window.ggsLang = \"\";\n");
+    std::fs::write(h.daemon.paths.settings(), r#"{ "locale": "zh-cn" }"#).unwrap();
+    let zh = http(h.public, "GET", "/lang.js", &[], None).await;
+    assert_eq!(zh.status, 200);
+    assert_eq!(zh.body, "window.ggsLang = \"zh-cn\";\n");
+    std::fs::write(h.daemon.paths.settings(), r#"{ "locale": "en" }"#).unwrap();
+    let en = http(h.public, "GET", "/lang.js", &[], None).await;
+    assert_eq!(en.body, "window.ggsLang = \"en\";\n");
+    // The older spelling answers too, and the loopback pair page sees the same script.
+    std::fs::write(
+        h.daemon.paths.settings(),
+        r#"{ "displayLanguage": "zh-cn" }"#,
+    )
+    .unwrap();
+    let pair = http(h.loopback, "GET", "/lang.js", &[], None).await;
+    assert_eq!(pair.status, 200);
+    assert_eq!(pair.body, "window.ggsLang = \"zh-cn\";\n");
+}
+
+/// The window picker's folder-input row is a setting (2026-10-12): on by default, and the
+/// session the picker loads carries the state (the admin patch route itself is covered by
+/// config.rs's unit tests — this harness runs on the ephemeral port 0, which any patch
+/// would refuse).
+#[tokio::test]
+async fn session_carries_the_folder_input_switch() {
+    let h = start().await;
+    set_password(&h).await;
+    let (cookie, _csrf) = login(&h).await;
+    let session = http(h.public, "GET", "/api/session", &[("Cookie", &cookie)], None).await;
+    assert_eq!(session.status, 200);
+    assert!(session.body.contains("\"folderInput\":true"), "{}", session.body);
+    h.daemon.config.lock().unwrap().folder_input = false;
+    let session = http(h.public, "GET", "/api/session", &[("Cookie", &cookie)], None).await;
+    assert!(session.body.contains("\"folderInput\":false"), "{}", session.body);
+}
+
 /// §17.1's pair-unlock row: the QR and the links stay behind the pair page's password
 /// unlock — a wrong password is refused and repetition locks the door (the same per-IP
 /// limiter as login), the right one unlocks, and anything but a live unlock token is
@@ -937,6 +1052,134 @@ async fn pair_unlock_guards_the_qr_behind_the_password() {
         }
     }
     assert!(saw_429, "repeated wrong unlocks must lock the door");
+}
+
+/// The pair page's relay card (2026-10-12): the tray's set-password screen carries the
+/// server fields, so a server may be saved before any password exists — it parks in
+/// NoPassword, the pair state carries the saved settings for the form to prefill, and the
+/// password landing through the same page wakes the parked tunnel.
+#[tokio::test]
+async fn the_pair_page_sets_the_relay_server_before_the_password() {
+    let h = start().await;
+
+    let issued = admin(&h, "POST", "/admin/pair-ticket", "{}").await;
+    assert_eq!(issued.status, 200, "{}", issued.body);
+    let issued: serde_json::Value = serde_json::from_str(&issued.body).unwrap();
+    let ticket = issued["ticket"].as_str().unwrap().to_owned();
+
+    // No server yet: the pair state's hub is unconfigured and carries a null settings.
+    let state = http(
+        h.loopback,
+        "GET",
+        &format!("/pair/state?t={ticket}"),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(state.status, 200);
+    assert!(state.body.contains("\"state\":\"unconfigured\""), "{}", state.body);
+    assert!(state.body.contains("\"settings\":null"), "{}", state.body);
+
+    // A forged ticket changes nothing; neither does an unparsable address.
+    let denied = http(
+        h.loopback,
+        "POST",
+        "/pair/hub/connect",
+        &[("Content-Type", "application/json")],
+        Some(r#"{"ticket":"forged","url":"http://127.0.0.1:9"}"#),
+    )
+    .await;
+    assert_eq!(denied.status, 403, "{}", denied.body);
+    let bad = http(
+        h.loopback,
+        "POST",
+        "/pair/hub/connect",
+        &[("Content-Type", "application/json")],
+        Some(&format!(r#"{{"ticket":"{ticket}","url":"not a server"}}"#)),
+    )
+    .await;
+    assert_eq!(bad.status, 400, "{}", bad.body);
+
+    // Saving the server parks it: no password exists, so the tunnel waits in NoPassword.
+    let saved = http(
+        h.loopback,
+        "POST",
+        "/pair/hub/connect",
+        &[("Content-Type", "application/json")],
+        Some(&format!(
+            r#"{{"ticket":"{ticket}","url":"http://127.0.0.1:9","joinKey":"lan-secret"}}"#
+        )),
+    )
+    .await;
+    assert_eq!(saved.status, 200, "{}", saved.body);
+    assert!(
+        saved.body.contains("\"state\":\"no-password\""),
+        "{}",
+        saved.body
+    );
+    assert_eq!(
+        h.daemon.hub.current().map(|s| s.join_key),
+        Some("lan-secret".into())
+    );
+
+    // The state now carries the settings — the form prefills what it saved.
+    let state = http(
+        h.loopback,
+        "GET",
+        &format!("/pair/state?t={ticket}"),
+        &[],
+        None,
+    )
+    .await;
+    assert!(
+        state.body.contains("\"url\":\"http://127.0.0.1:9\""),
+        "{}",
+        state.body
+    );
+
+    // The password landing through the same page wakes the parked tunnel: it leaves
+    // NoPassword and dials the (unreachable, deliberately) saved server.
+    let set = http(
+        h.loopback,
+        "POST",
+        "/pair/password",
+        &[("Content-Type", "application/json")],
+        Some(&format!(r#"{{"ticket":"{ticket}","password":"{PASSWORD}"}}"#)),
+    )
+    .await;
+    assert_eq!(set.status, 200, "{}", set.body);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let state = h.daemon.hub.snapshot();
+        if !matches!(
+            state,
+            ggs_remote::hub::Status::NoPassword | ggs_remote::hub::Status::Unconfigured
+        ) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the password landing must wake the parked tunnel (still {state:?})"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // Disconnect forgets it again, key and all.
+    let off = http(
+        h.loopback,
+        "POST",
+        "/pair/hub/disconnect",
+        &[("Content-Type", "application/json")],
+        Some(&format!(r#"{{"ticket":"{ticket}"}}"#)),
+    )
+    .await;
+    assert_eq!(off.status, 200, "{}", off.body);
+    assert!(
+        off.body.contains("\"state\":\"unconfigured\""),
+        "{}",
+        off.body
+    );
+    assert!(h.daemon.hub.current().is_none());
 }
 
 /// §7.8's two-level heartbeat: an instance that stops answering is flagged `unresponsive`

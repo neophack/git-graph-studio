@@ -51,10 +51,31 @@
 		return `${Math.round(d / 3600)} h`;
 	}
 
+	/** A modal popup — the sandboxed webview swallows `alert()`, and a wrong password is
+	 *  too easy to miss as an inline line (the owner's direction, 2026-10-12). */
+	function popup(text) {
+		const overlay = el(
+			'div',
+			{ class: 'popup-overlay' },
+			el(
+				'div',
+				{ class: 'popup' },
+				el('p', {}, String(text)),
+				el('button', { class: 'primary', onclick: () => overlay.remove() }, 'OK')
+			)
+		);
+		overlay.addEventListener('click', (event) => {
+			if (event.target === overlay) overlay.remove();
+		});
+		document.body.append(overlay);
+	}
+
+	/** The compact one-line password form (flat and VS Code-shaped, 2026-10-12): the label
+	 *  rides as the input's placeholder and aria-label, the button shares the row. */
 	function passwordForm(label, button, onSubmit) {
-		const input = el('input', { type: 'password', autocomplete: 'current-password', required: true });
+		const input = el('input', { type: 'password', autocomplete: 'current-password', required: true, placeholder: label, 'aria-label': label });
 		const error = el('p', { class: 'error' });
-		const form = el('form', {}, el('label', {}, label), input, el('button', { class: 'primary' }, button), error);
+		const form = el('form', { class: 'pw-row' }, input, el('button', { class: 'primary' }, button), error);
 		form.addEventListener('submit', async (event) => {
 			event.preventDefault();
 			error.textContent = '';
@@ -62,6 +83,7 @@
 				await onSubmit(input.value);
 			} catch (e) {
 				error.textContent = String(e.message || e);
+				popup(e.message || e);
 			}
 		});
 		return form;
@@ -71,6 +93,12 @@
 		const svg = await request('qr', { text }).catch(() => null);
 		if (!svg || typeof svg !== 'string') return el('div', { class: 'qr missing' });
 		return el('img', { class: 'qr', alt: text, src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}` });
+	}
+
+	/** Re-fetch the status shortly after an action that the daemon completes asynchronously
+	 *  (the hub tunnel coming online once the password lands). */
+	function refreshSoon() {
+		setTimeout(() => render(), 1500);
 	}
 
 	async function devicesList() {
@@ -108,45 +136,66 @@
 		return el('label', { class: 'check' }, box, ' ', label);
 	}
 
-	async function hubSection(status) {
-		const hub = status.hub || { state: 'unconfigured' };
-		const state = hub.state;
-		const line = {
-			unconfigured: L('Not connected to a relay.', '未连接中继服务器。'),
-			'no-password': L('Set the access password first.', '请先设置访问密码。'),
-			connecting: `${L('Connecting to', '正在连接')} ${hub.url || ''}`,
-			online: `${L('Online', '在线')} — ${hub.publicBase || ''}`,
-			rejected: `${L('Refused', '被拒绝')} (${hub.reason || ''})`,
-			replaced: L('This PC’s key connected from elsewhere.', '此 PC 的密钥在别处连接了。')
-		}[state] || state;
-		const children = [el('p', {}, line)];
-		if (state === 'online' && status.unlocked && hub.publicBase) {
-			children.push(
-				el('div', { class: 'link' }, await qrImage(hub.publicBase), el('code', {}, hub.publicBase), el('button', { onclick: () => request('copy', { text: hub.publicBase }) }, L('Copy', '复制')))
-			);
-		}
-		const urlInput = el('input', { type: 'text', placeholder: 'https://remote.example.com', value: (hub.settings && hub.settings.url) || '' });
-		const keyInput = el('input', { type: 'password', placeholder: L('server password (optional)', '服务器口令（可选）'), value: (hub.settings && hub.settings.joinKey) || '' });
+	function hubStateLine(hub) {
+		const state = hub && hub.state;
+		return (
+			{
+				unconfigured: L('Not connected to a relay.', '未连接中继服务器。'),
+				'no-password': L('Saved. It connects once the access password is set.', '已保存。设置访问密码后自动连接。'),
+				connecting: `${L('Connecting to', '正在连接')} ${(hub && hub.url) || ''}`,
+				online: `${L('Online', '在线')} — ${(hub && hub.publicBase) || ''}`,
+				rejected: `${L('Refused', '被拒绝')} (${(hub && hub.reason) || ''})`,
+				replaced: L('This PC’s key connected from elsewhere.', '此 PC 的密钥在别处连接了。')
+			}[state] || String(state || '')
+		);
+	}
+
+	/** The relay server configuration: shown on the password screens (where it is first
+	 *  needed) and in the relay section below. Saving persists it; with no password set yet
+	 *  the daemon holds it until the password lands, then connects. */
+	function serverForm(status, buttonLabel) {
+		const hub = status.hub || {};
+		const settings = hub.settings || {};
+		const urlInput = el('input', { type: 'text', placeholder: 'https://remote.example.com', value: settings.url || '' });
+		const keyInput = el('input', { type: 'password', placeholder: L('server password (optional)', '服务器口令（可选）'), value: settings.joinKey || '' });
 		const error = el('p', { class: 'error' });
-		children.push(
-			el('form', {},
-				el('label', {}, L('Relay server address or connect string', '中继服务器地址或连接串')),
-				urlInput, ' ', keyInput, ' ',
-				el('button', { class: 'primary', onclick: async (event) => {
+		return el(
+			'form',
+			{},
+			el('label', {}, L('Relay server address or connect string', '中继服务器地址或连接串')),
+			urlInput,
+			' ',
+			keyInput,
+			' ',
+			el(
+				'button',
+				{ class: 'primary', onclick: async (event) => {
 					event.preventDefault();
 					error.textContent = '';
 					try {
 						const result = await request('hubConnect', { url: urlInput.value.trim(), joinKey: keyInput.value });
-						render({ ...status, hub: result && result.state ? result : hub });
+						// hubStatus answers with the settings too, so the form keeps what it saved.
+						render({ ...status, hub: await request('hubStatus').catch(() => result) });
+						refreshSoon();
 					} catch (e) {
 						error.textContent = String(e.message || e);
 					}
-				} }, L('Connect', '连接')),
-				error
+				} },
+				buttonLabel || L('Connect', '连接')
 			),
-			el('p', { class: 'muted' }, L('A relay of your own (ggs-remote-hub) carries this PC’s link through NAT; the access password still applies, the link is per-PC and cannot be guessed.', '自建的中继服务器（ggs-remote-hub）把此 PC 的链接带出内网；访问密码不变，链接每台 PC 独有、无法猜测。'))
+			error,
+			el('p', { class: 'muted' }, hubStateLine(hub))
 		);
-		if (state !== 'unconfigured') {
+	}
+
+	async function hubSection(status) {
+		const hub = status.hub || { state: 'unconfigured' };
+		const children = [
+			el('p', {}, hubStateLine(hub)),
+			serverForm(status),
+			el('p', { class: 'muted' }, L('A relay of your own (ggs-remote-hub) carries this PC’s link through NAT; the access password still applies, the link is per-PC and cannot be guessed. While it is set and online, only its QR code is shown above — the LAN codes hide.', '自建的中继服务器（ggs-remote-hub）把此 PC 的链接带出内网；访问密码不变，链接每台 PC 独有、无法猜测。设置并在线时，上方只显示它的二维码——局域网的会隐藏。'))
+		];
+		if (hub.state !== 'unconfigured') {
 			children.push(el('div', { class: 'row' },
 				el('button', { onclick: async () => render({ ...status, hub: await request('hubDisconnect') }) }, L('Disconnect', '断开')),
 				el('button', { onclick: async () => {
@@ -200,7 +249,12 @@
 			parts.push(
 				section(
 					L('Set the access password', '设置访问密码'),
-					passwordForm(L('New password (8+ characters)', '新密码（至少 8 个字符）'), L('Set password', '设置密码'), async (password) => render(await request('setPassword', { password })))
+					passwordForm(L('New password (8+ characters)', '新密码（至少 8 个字符）'), L('Set password', '设置密码'), async (password) => {
+						render(await request('setPassword', { password }));
+						refreshSoon();
+					}),
+					el('p', { class: 'muted' }, L('A relay server (ggs-remote-hub) is optional: with one the phone works from any network. While it is set and online, only its QR code is shown below — the LAN codes hide.', '中继服务器（ggs-remote-hub）是可选的：配置后手机在任何网络都能访问。设置并在线时，下方只显示中继的二维码——局域网的二维码会隐藏。')),
+					serverForm(status, L('Save server', '保存服务器'))
 				)
 			);
 		} else if (!status.unlocked) {
@@ -208,13 +262,25 @@
 				section(
 					L('Links and QR codes', '链接与二维码'),
 					el('p', {}, L('Enter the access password to show this PC’s links.', '输入访问密码后显示此 PC 的链接。')),
-					passwordForm(L('Access password', '访问密码'), L('Unlock', '解锁'), async (password) => render(await request('unlock', { password })))
+					passwordForm(L('Access password', '访问密码'), L('Unlock', '解锁'), async (password) => render(await request('unlock', { password }))),
+					el('p', { class: 'muted' }, L('A relay server (ggs-remote-hub) is optional: with one the phone works from any network. While it is set and online, only its QR code is shown below — the LAN codes hide.', '中继服务器（ggs-remote-hub）是可选的：配置后手机在任何网络都能访问。设置并在线时，下方只显示中继的二维码——局域网的二维码会隐藏。')),
+					serverForm(status, L('Save server', '保存服务器'))
 				)
 			);
 		} else {
+			const hubBase = status.hub && status.hub.state === 'online' && status.hub.publicBase;
 			const links = el('div', { class: 'links' });
 			for (const link of status.links || []) {
-				links.append(el('div', { class: 'link' }, await qrImage(link), el('code', {}, link), el('button', { onclick: () => request('copy', { text: link }) }, L('Copy', '复制'))));
+				links.append(
+					el(
+						'div',
+						{ class: 'link' },
+						hubBase && link === hubBase ? el('span', { class: 'tag' }, L('Server', '服务器')) : null,
+						await qrImage(link),
+						el('code', {}, link),
+						el('button', { onclick: () => request('copy', { text: link }) }, L('Copy', '复制'))
+					)
+				);
 			}
 			parts.push(
 				section(
@@ -225,7 +291,7 @@
 				)
 			);
 			if (status.tls && status.tls.mode === 'self-signed') {
-				const first = (status.links || [])[0];
+				const first = (status.lanLinks || status.links || [])[0];
 				parts.push(
 					section(
 						L('Trust this PC (once per device)', '信任此 PC（每台设备一次）'),
@@ -250,6 +316,7 @@
 				toggle(L('Pause remote access', '暂停远程访问'), status.paused, (on) => request('pause', { paused: on }).then(() => render())),
 				toggle(L('Start at login', '开机启动'), config.autostart, (on) => request('config', { patch: { autostart: on } })),
 				toggle(L('Windows opened remotely also show on this desktop', '远程打开的窗口也在桌面显示'), config.spawnVisible, (on) => request('config', { patch: { spawnVisible: on } })),
+				toggle(L('Folder input on the window page', '窗口页显示路径输入框'), config.folderInput, (on) => request('config', { patch: { folderInput: on } })),
 				el('p', { class: 'muted' }, `GGS Remote ${status.version} · ${Math.round((status.rss || 0) / 1048576)} MB`),
 				el('button', { onclick: () => request('restart').then(render) }, L('Restart the background service', '重启后台服务'))
 			)

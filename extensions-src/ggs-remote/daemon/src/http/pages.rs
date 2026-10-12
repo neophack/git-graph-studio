@@ -69,6 +69,20 @@ pub fn notice_page(_daemon: &Daemon, request: &Request, kind: &str) -> Response 
     response
 }
 
+/// The page language (2026-10-12, the owner's direction: the pages follow the user's set
+/// language): a tiny script every page loads before its modules — the app's
+/// `~/.ggs/settings.json` when it spells one, an empty string (the browser's language,
+/// which `i18n.js` then reads) when it does not. `no-store`, so a language switched in the
+/// app takes effect on the page's next load.
+pub async fn lang_js(State(daemon): State<Arc<Daemon>>) -> Response {
+    let lang = daemon.paths.display_language().unwrap_or_default();
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/javascript; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(format!("window.ggsLang = {lang:?};\n")))
+        .expect("valid lang response")
+}
+
 pub async fn static_file(Path(file): Path<String>, headers: HeaderMap) -> Response {
     let Some(prepared) = crate::web::get(&file).filter(|_| !file.ends_with(".html")) else {
         return StatusCode::NOT_FOUND.into_response();

@@ -1098,6 +1098,7 @@ dependencies = [
  "subtle",
  "tokio",
  "toml",
+ "tower-service",
  "uuid",
 ]
 

@@ -32,6 +32,7 @@ pub fn public_router(daemon: Arc<Daemon>) -> Router {
         .route("/", get(pages::root))
         .route("/login", get(pages::login))
         .route("/windows", get(pages::windows))
+        .route("/lang.js", get(pages::lang_js))
         .route("/static/{file}", get(pages::static_file))
         .route("/manifest.webmanifest", get(pages::manifest))
         .route("/sw.js", get(assets::service_worker))
@@ -62,7 +63,10 @@ pub fn loopback_router(daemon: Arc<Daemon>) -> Router {
         .route("/pair/unlock", post(api::pair_unlock))
         .route("/pair/state", get(api::pair_state))
         .route("/pair/password", post(api::pair_password))
+        .route("/pair/hub/connect", post(api::pair_hub_connect))
+        .route("/pair/hub/disconnect", post(api::pair_hub_disconnect))
         .route("/pair/qr", get(api::pair_qr))
+        .route("/lang.js", get(pages::lang_js))
         .route("/static/{file}", get(pages::static_file))
         .route("/admin/status", get(admin::status))
         .route("/admin/password", post(admin::password))
@@ -99,7 +103,8 @@ async fn guard(
     let exempt = path.starts_with("/static/")
         || path == "/ca.crt"
         || path == "/ca.mobileconfig"
-        || path == "/manifest.webmanifest";
+        || path == "/manifest.webmanifest"
+        || path == "/lang.js";
     if !exempt {
         if daemon.config.lock().unwrap().paused {
             return pages::notice_page(&daemon, &request, "paused");

@@ -47,6 +47,7 @@ document.getElementById('form').addEventListener('submit', async (event) => {
 		}
 		if (response.status === 429) {
 			let left = response.data?.retryAfter ?? 60;
+			alert(t('locked', { n: left }));
 			clearInterval(lockTimer);
 			const show = () => {
 				error.textContent = t('locked', { n: left });
@@ -60,8 +61,17 @@ document.getElementById('form').addEventListener('submit', async (event) => {
 			lockTimer = setInterval(show, 1000);
 			return;
 		}
-		error.textContent = response.status === 401 ? t('wrongPassword') : t('failed', { msg: response.data?.error ?? response.status });
+		if (response.status === 401) {
+			// The inline line is easy to miss on a phone — the popup is the verdict.
+			alert(t('wrongPassword'));
+			error.textContent = t('wrongPassword');
+		} else {
+			const message = t('failed', { msg: response.data?.error ?? response.status });
+			alert(message);
+			error.textContent = message;
+		}
 	} catch (e) {
+		alert(t('failed', { msg: String(e) }));
 		error.textContent = t('failed', { msg: String(e) });
 	}
 	submit.disabled = false;
