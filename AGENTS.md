@@ -1357,7 +1357,8 @@ database) carries the link through NAT. The whole design lives in
   the plugin id out of the app tree.
 - Tests: `tests/remote.test.ts` + `tests/remoteResponsive.test.ts` (the shims, transport,
   relay engine; the phone's page model, app bar, navigation, drawer, sheets and editing
-  row), the daemon and hub crates' `cargo test`,
+  row; M10's end-to-end crypto — the browser twin of the tray service's e2e core against
+  the committed cross-implementation vectors), the daemon and hub crates' `cargo test`,
   `tests/e2e/remote/` (the Playwright browser specs — `npm run test:e2e-remote`, the
   Chromium/Firefox/WebKit matrix against TLS daemons: WebKit grants plain-HTTP localhost no
   Secure-cookie exemption, so the specs ride the shipping self-signed shape; the workbench

@@ -29,7 +29,8 @@ const RULES = [
 /** The Remote Access seams (docs/ggs-remote-plan.md §15.4). Rule 1: Tauri's internals object
  *  is touched only by the remote shims (and the one `assetUrl` helper every caller goes
  *  through), so the remote build can stand in for it. Rule 2: the app speaks the platform
- *  protocol `ggs-remote/1` and names the plan, never the GGS Remote extension itself — the
+ *  protocol `ggs-remote/1` (and its e2e domains `ggs-remote-e2e/1`, `ggs-remote-uuid/1`) and
+ *  names the plan, never the GGS Remote extension itself — the
  *  extension's id appears nowhere in src/ or src-tauri/src/. */
 const REMOTE_RULES = [
 	{
@@ -38,7 +39,7 @@ const REMOTE_RULES = [
 		because: 'Tauri internals are reached only through src/remote/assetUrl.ts (and the remote shims)'
 	},
 	{
-		pattern: /ggs-remote(?!\/1|-plan)|ggsRemote/,
+		pattern: /ggs-remote(?!\/1|-plan|-e2e\/1|-uuid\/1)|ggsRemote/,
 		allowed: () => false,
 		because: 'the app names the ggs-remote/1 protocol, never the GGS Remote extension'
 	}

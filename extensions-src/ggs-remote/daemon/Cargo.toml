@@ -40,6 +40,8 @@ argon2 = { version = "0.5", features = ["std"] }
 getrandom = "0.3"
 subtle = "2.6"
 sha2 = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+aes-gcm = { version = "0.10", features = ["alloc"] }
 hmac = "0.12"
 base64 = "0.22"
 brotli = "8"

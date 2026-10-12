@@ -1735,13 +1735,21 @@ services:
 | 安全 §16 | 增加 §20.6 的条目 |
 | 构建 §15 | Hub 的 CI：`cargo test`、clippy、musl 静态构建；打 tag 时推送容器镜像到 GHCR 并附二进制到 Release |
 
-### 20.11 可选：端到端加密（M10）
+### 20.11 可选：端到端加密（M10）—— 密码学核心已落地（2026-10-12）
 
-目标：即使 Hub 被攻破也看不到文件内容和访问密码。
+目标不变：即使 Hub 被攻破也看不到文件内容和访问密码。设计从 OPAQUE+WASM 落地为等效但轻得多的组合（无 WASM、无新前端加密框架）：
 
-- 密钥协商：OPAQUE（`opaque-ke` 3，编译成 WASM 给浏览器）——访问密码不离开浏览器，PC 只存 OPAQUE 注册记录；得到的会话密钥用于 XChaCha20-Poly1305。
-- 代价：WASM 约 150–250 KB（首次加载后缓存）；Hub 无法缓存任何资源（全是密文），PC 上行流量增加；静态资源改为经 WS 的加密 `FETCH` 加载。
-- 默认关闭，在插件页开启。
+| 件 | 选择 | 说明 |
+| -- | ---- | ---- |
+| 静态身份 | X25519 静态密钥（`~/.ggs/remote/e2e.key`，0600） | 公钥随 `GET api/e2e-params` 发布，**由设备 Ed25519 密钥签名**（域 `ggs-remote-e2e/1` ‖ x_pub）——浏览器先验 `uuid_for(ed_pub)` 等于链接里的 uuid 再验签名，Hub 换钥需要造出哈希到该 uuid 的密钥；LAN 直连时由 TLS 承担 |
+| 密钥协商 | 浏览器每次会话/连接的临时 X25519 | `shared = X25519(eph, static)` → `HKDF-SHA512(salt = 双方公钥, info = ggs-remote-e2e/1)`（RFC 5869，两侧同十六行） |
+| AEAD | AES-256-GCM，12 字节随机 nonce | 浏览器 WebCrypto（零依赖）、PC RustCrypto `aes-gcm`；标准 wire 格式逐字节兼容 |
+| 密码通道 | `api/e2e-login`：POST `secretbox(password)` | 明文密码不再过 Hub；离线猜字典需 PC 静态私钥（截获的密文验不了猜测）；PC 侧照旧 Argon2id 校验 |
+| 帧封装 | 外层 20 字节头照旧（Hub 的会话改写只碰它），置 `FLAG_ENCRYPTED(0x40)`，载荷 = `nonce(12) ‖ GCM(完整原帧)` | Hub 对内层一无所知，纯搬运密文 |
+
+已交付（`daemon/src/e2e.rs` + `src/remote/e2e.ts` + `daemon/tests/vectors/e2e.json`）：双侧实现、跨实现向量互证（uuid 推导、参数验签与替换拒绝、密钥推导、开封/封出逐字节相同、信封往返）——`tests/remote.test.ts` 三条向量测试 + daemon 单测全绿。
+
+**剩余接线（下一轮）**：`api/e2e-params`/`api/e2e-login` 路由与登录页改造（`daemon/web/login.js` 引入 tweetnacl）、WS 侧 HELLO 携带协商与会话绑定（cookie 被抢也无法伪造密文）、daemon 双接收路径（`ws/socket.rs` 与 `hub/session.rs`）的信封拆装与强制、`e2e` 配置开关与插件页切换、Hub 禁用跨 PC 资源缓存的密文路径、e2e 探针断言"Hub 视角全密文"。原 OPAQUE 方案的离线字典抗性差异记录为取舍：OPAQUE 下攻击者需注册记录，本设计下需 DH 私钥——对 Hub 威胁模型等效。
 
 ### 20.12 测试
 

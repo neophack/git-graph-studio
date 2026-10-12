@@ -4,6 +4,7 @@
 // Relay engine that runs inside the instance.
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { webcrypto as nodeWebcrypto } from 'node:crypto';
 import { resolve } from 'node:path';
 import { encode as encodeMsgpack } from '@msgpack/msgpack';
 import {
@@ -519,3 +520,61 @@ describe('remote helpers', () => {
 		expect(frame.flags).toBe(Enc.Msgpack << 2);
 	});
 });
+
+describe('end-to-end encryption (the browser twin against the daemon vectors)', () => {
+	// The committed vectors (daemon/tests/vectors/e2e.json, written by e2e.rs's ignored
+	// generator) hold the Rust side's answers; every assertion here is the browser twin
+	// reproducing them byte-for-byte — the two halves are one protocol.
+	const vectors = JSON.parse(readFileSync(resolve(__dirname, '../extensions-src/ggs-remote/daemon/tests/vectors/e2e.json'), 'utf8')) as Record<string, string>;
+	// jsdom ships no WebCrypto; Node's is the same standard.
+	const subtle = (globalThis.crypto?.subtle ?? nodeWebcrypto.subtle) as SubtleCrypto;
+
+	it('derives the same conversation key from the same seeds', async () => {
+		const { ephemeral, sharedWith, conversationKey, decodeBase64 } = await import('../src/remote/e2e');
+		const eph = ephemeral(decodeBase64(vectors.browserSeed!));
+		expect(encodeB64(eph.public)).toBe(vectors.browserPub);
+		const shared = sharedWith(eph.secret, decodeBase64(vectors.xPub!));
+		expect(encodeB64(shared)).toBe(vectors.shared);
+		const key = conversationKey(shared, eph.public, decodeBase64(vectors.xPub!));
+		expect(encodeB64(key)).toBe(vectors.conversationKey);
+	});
+
+	it('verifies the signed parameters and rejects substitution', async () => {
+		const { verifyParams, uuidFor, decodeBase64 } = await import('../src/remote/e2e');
+		const edPub = decodeBase64(vectors.edPub!);
+		expect(await uuidFor(edPub, subtle)).toBe(vectors.uuid);
+		expect(await verifyParams({ edPub: vectors.edPub!, xPub: vectors.xPub!, sig: vectors.sig! }, vectors.uuid, subtle)).not.toBeNull();
+		// A swapped X25519 half breaks the signature; a swapped Ed25519 half breaks the uuid.
+		const wrong = { edPub: vectors.edPub!, xPub: encodeB64(decodeBase64(vectors.xPub!).map((b) => b ^ 1)), sig: vectors.sig! };
+		expect(await verifyParams(wrong, vectors.uuid, subtle)).toBeNull();
+		const wrongId = { edPub: encodeB64(edPub.map((b) => b ^ 1)), xPub: vectors.xPub!, sig: vectors.sig! };
+		expect(await verifyParams(wrongId, vectors.uuid, subtle)).toBeNull();
+	});
+
+	it('opens what the daemon sealed, seals to the same bytes, and rides the envelope', async () => {
+		const { ephemeral, sharedWith, conversationKey, open, seal, wrapFrame, unwrapFrame, decodeBase64 } = await import('../src/remote/e2e');
+		const eph = ephemeral(decodeBase64(vectors.browserSeed!));
+		const key = conversationKey(sharedWith(eph.secret, decodeBase64(vectors.xPub!)), eph.public, decodeBase64(vectors.xPub!));
+		const nonce = decodeBase64(vectors.nonce!);
+		const frame = decodeBase64(vectors.frame!);
+		// Open the Rust-sealed box…
+		const opened = await open(key, decodeBase64(vectors.sealed!), nonce, subtle);
+		expect(encodeB64(opened!)).toBe(vectors.frame);
+		// …seal the same plaintext to the same bytes (GCM is deterministic)…
+		const sealed = await seal(key, frame, nonce, subtle);
+		expect(encodeB64(sealed)).toBe(vectors.sealed);
+		// …and ride the frame envelope both ways.
+		const wrapped = await wrapFrame(frame, key, nonce, subtle);
+		expect(encodeB64(wrapped)).toBe(vectors.envelope);
+		const unwrapped = await unwrapFrame(decodeBase64(vectors.envelope!), key, subtle);
+		expect(encodeB64(unwrapped!)).toBe(vectors.frame);
+		// The wrong key opens nothing.
+		expect(await unwrapFrame(decodeBase64(vectors.envelope!), new Uint8Array(32), subtle)).toBeNull();
+	});
+});
+
+function encodeB64(bytes: Uint8Array): string {
+	let raw = '';
+	for (const byte of bytes) raw += String.fromCharCode(byte);
+	return btoa(raw).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}

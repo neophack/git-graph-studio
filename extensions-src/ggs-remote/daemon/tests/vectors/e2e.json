@@ -1,0 +1,16 @@
+{
+  "browserPub": "UKYUCbHd0DJemxa3AOcZ6XcsBwALG9d4bpB8ZT0gSV0",
+  "browserSeed": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+  "conversationKey": "16AZGE1pBwTkf3by4bEDt5dcXBoN6RpIo_IZpGUztr8",
+  "deviceSeed": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+  "e2eSeed": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+  "edPub": "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw",
+  "envelope": "EEQAAAAAAAAHAAAAAAAAAFYAAAACAgICAgICAgICAgI0PMdSeaJH_d6W3P09qPpkcbAv8QVSnbiJh_JnkXz5erozPS-MIcxM9UUrJ_9w57_02Cg-niyAg5fm_1mHvCcncf7gpJTTYxwSPw",
+  "frame": "EAQAAAAAAAAHAAAAAAAAACYAAAB7ImMiOiJsaXN0X2RpciIsImEiOnsicGF0aCI6IkM6CmVwbyJ9fQ",
+  "nonce": "AgICAgICAgICAgIC",
+  "sealed": "NDzHUnmiR_3eltz9Paj6ZHGwL_EFUp24iYfyZ5F8-Xq6Mz0vjCHMTPVFKyf_cOe_9NgoPp4sgIOX5v9Zh7wnJ3H-4KSU02McEj8",
+  "shared": "in7d8dLmnWyJWl6WkJLda-DKpyXUNcAkT-M_wiWaqEc",
+  "sig": "i3pA0WEuSHnWsZIWVGZuDCt_dPaQlRy6I3hn_vKHfb6YAb_ySDA8bWZprqZBBJCsSTo3xOfQ3nPa-fDWu8UODw",
+  "uuid": "198fef64-82e7-8b45-843a-80fdc62c3ea5",
+  "xPub": "Xf7dO2vUf2-ijuFdlp1bsOpTd01Ii9r53xxuASSz7yI"
+}

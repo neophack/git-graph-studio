@@ -11,6 +11,7 @@ pub mod config;
 pub mod control;
 pub mod control_msg;
 pub mod desk;
+pub mod e2e;
 pub mod http;
 pub mod hub;
 pub mod lifecycle;
