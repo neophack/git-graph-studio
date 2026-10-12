@@ -74,10 +74,30 @@ pub fn router(hub: Arc<Hub>) -> Router {
 /// every other request closes the connection without a byte. `serve` runs this, and the
 /// tunnel suite runs the same stack, so the tested Hub is the shipped one.
 pub fn gated(hub: Arc<Hub>) -> gate::GateListener {
-    gate::GateListener::new(router(hub))
+    gate::GateListener::new(router_with_ceiling(hub))
 }
 
 /// Bind the main listener (TLS per config) and serve until stopped.
+/// The request-work ceiling: generous for a personal relay, fatal to a flood.
+static REQUESTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1024);
+
+/// The router with the ceiling applied (audit M-2, 2026-10-13): a bound on request work
+/// in flight — slowloris headers are killed by the header-read timeout, and this keeps a
+/// flood of otherwise-valid requests from holding unbounded memory at once. Above the
+/// ceiling a request waits, it is never dropped silently.
+fn router_with_ceiling(hub: Arc<Hub>) -> Router {
+    router(hub).layer(axum::middleware::from_fn(
+        |request: axum::extract::Request, next: axum::middleware::Next| async move {
+            let _permit = REQUESTS.acquire().await;
+            if _permit.is_err() {
+                return Err(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+            }
+            let _permit = _permit.expect("checked above");
+            Ok::<_, axum::http::StatusCode>(next.run(request).await)
+        },
+    ))
+}
+
 pub async fn serve(
     config: Config,
     shutdown: tokio::sync::oneshot::Receiver<()>,
@@ -126,11 +146,23 @@ pub async fn serve(
         }
     }
 
+    // The empty join_key is the documented open relay (§20.6) — on a public bind it deserves
+    // a loud line in the log, not a silent default (audit M-1, 2026-10-13).
+    if config.join_key.is_empty() && !addr.ip().is_loopback() {
+        crate::warn!(
+            "join_key is empty and the listener is public: ANY GGS Remote can join this relay — set join_key in the config"
+        );
+    }
+
     let listener = std::net::TcpListener::bind(addr)?;
     crate::info!("ggs-remote-hub on {}", listener.local_addr()?);
     match config.tls.mode {
         config::TlsMode::None => {
-            let server = axum_server::from_tcp(listener);
+            let mut server = axum_server::from_tcp(listener);
+            server
+                .http_builder()
+                .http1()
+                .header_read_timeout(std::time::Duration::from_secs(30));
             let handle = axum_server::Handle::new();
             let served = server.handle(handle.clone()).serve(app);
             tokio::select! {
@@ -146,7 +178,11 @@ pub async fn serve(
                 .await
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
             let _ = mode;
-            let server = axum_server::from_tcp_rustls(listener, tls);
+            let mut server = axum_server::from_tcp_rustls(listener, tls);
+            server
+                .http_builder()
+                .http1()
+                .header_read_timeout(std::time::Duration::from_secs(30));
             let handle = axum_server::Handle::new();
             let served = server.handle(handle.clone()).serve(app);
             tokio::select! {

@@ -43,6 +43,11 @@ pub struct Config {
     pub asset_cache_mb: usize,
     /// Trust `X-Forwarded-For` from loopback peers (a front proxy ends TLS, §20.8).
     pub trust_proxy: bool,
+    /// Networks whose `X-Forwarded-For` is trusted (audit H-1, 2026-10-13): the compose
+    /// topology fronts the Hub with Caddy in its own container, so the peer is a bridge
+    /// address, never loopback — without this list every visitor shares one rate-limit
+    /// bucket there. The RIGHTMOST hop is taken (the proxy's own append).
+    pub trusted_proxies: Vec<String>,
     /// `/tunnel` handshakes one IP may start per minute (§20.6); 0 = unlimited — for load
     /// tests and private deployments whose whole fleet shares one address.
     pub handshake_rate: u32,
@@ -79,6 +84,7 @@ impl Default for Config {
             bytes_per_day_per_tunnel: 0,
             asset_cache_mb: DEFAULT_ASSET_CACHE_MB,
             trust_proxy: false,
+            trusted_proxies: Vec::new(),
             handshake_rate: 10,
             visitors_per_day_per_tunnel: 32,
             http_rate: 600,

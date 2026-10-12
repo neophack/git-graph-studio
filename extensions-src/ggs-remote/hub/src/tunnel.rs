@@ -6,7 +6,7 @@
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
@@ -33,7 +33,14 @@ pub async fn tunnel_handler(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    if !hub.hello_allowed(peer.ip()) {
+    // Proxy-aware (audit H-1): behind a front proxy the raw peer is the proxy's address,
+    // and one fleet plus every attacker would share a single handshake bucket.
+    let peer_addr = crate::http_proxy::peer_ip(&hub, peer.ip(), &{
+        let mut request = Request::new(axum::body::Body::empty());
+        *request.headers_mut() = headers.clone();
+        request
+    });
+    if !hub.hello_allowed(peer_addr) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
     let host = headers

@@ -1913,3 +1913,34 @@ M9 依赖 M2（认证）和 M3（多窗口），可与 M5（响应式）并行�
 
 - 默认拒绝读沙箱外文件 ✓；断网档 ✓；`egress.default=Allow` 即 internet 档 ✓；AppContainer 层拒绝 CIDR 规则（`policy_validation`）✓；沙箱内 bind+connect 自身回环 ✓；带 AAP ACE 的管道可连可交换字节 ✓（默认 DACL 拒绝 ✓）；`sandbox::launch` 端到端 ✓（`cargo test --test integration sandbox_launch -- --ignored`，CI 中忽略——需要宿主沙箱）。
 - **如实残余**（页面上同样写着）：环境变量被继承（隔离的是文件与网络，不是环境）；构建工具（npm、cargo…）按所选网络档联网；沙箱窗口的设置/扩展/AI 供应商从空白开始，须在沙箱内配置；非内核强制的文档说明——OS 沙箱由 mxc 的各平台后端执行，Windows 的 AppContainer 层是其"降级层"（PSEC/BaseContainer 层的机器获得同策略的更强执行）。
+
+
+### 23.6 安全审计（2026-10-13）与修复
+
+三个方向的定向审计（daemon 攻击面 / 公网 Hub / app 侧与网页）后的修复，全部有测试：
+
+**app 侧（远程会话的文件边界）**
+- **Relay invoke 门禁**（`src/remote/pathGate.ts` + `relay.ts`）：远程会话的路径类 invoke（读写、搜索、比较、viewer、file_log/repo 等）只能落在**打开的文件夹**（+ 单文件启动）内；`open_folder`/`open_workspace` 直接拒绝（打开新目录是 picker 的沙箱 SPAWN 的事）。roots 经新命令 `remote_paths_policy` 由 Relay 本地取（带 3 s 缓存，仅门禁命令才取）。修复的攻击链：伪造 workbenchSync `open` + 未设防的 `read_file` → 读取 `~/.ggs/keys/ai-providers.key` 与密封的 API key → 离线解密全部供应商密钥。
+- **事件桥白名单与身份盖章**：`relayEmit` 只放行 `studio://mirror-up` 与 `studio://workbench-sync`，`from`/`by` 一律盖成 relay 的 `remote/<session>`（会话不能冒充 `main` 或彼此），目标恒为 `main`。
+- **workbenchSync 接收侧**：远端来源的 `open`/`active` 限在打开文件夹内（`Workbench.openFolders()` ← `Explorer.roots()`）。
+- **镜像副本的外域 URL 丢弃**（`protocol.ts`）：副本只加载 app/ggs 令牌根与 `data:`/`blob:`——PC 页面里的外来 http(s) URL 不再是手机端的外泄/追踪通道。
+
+**daemon**
+- 沙箱边界覆盖 `INSTANCE_CLOSE`/`INSTANCE_RESTART`（此前只有 ATTACH 有守卫——远程可强杀/重启桌面窗口）。
+- Argon2 验证并发信号量（2×核数）：并发的垃圾登录不再能把内存打到 ~4 GB。
+- `/sw.js` 会话门禁：未认证的 LAN 对端不能再让 daemon 为它缓冲+压缩实例资产。
+- 资产缓存键带实例 id（同版本重装的实例不再共享/污染条目）。
+- `client_ip`：XFF 取**最右**一跳（可信代理追加的那个），经隧道来的登录全部落一个"tunnel"桶——恶意 Hub 不能再铸造每请求一个的限流桶。
+- 沙箱 spawn 令牌 5 分钟过期；容器名不再嵌 daemon HMAC 密钥切片。
+- Register/Update 字段上限（title/version/folders/launch/summary）；设备名剥控制字符（日志伪造）；`hub.settings`（含 joinKey）挪到解锁之后（无密码状态除外——配对页需要预填）。
+
+**Hub（公网面）**
+- **跨 PC 资产缓存投毒修复**：缓存键带上链接 id——任何持键者的 daemon 不再把同源脚本喂给其他 PC 的浏览器（此前的跨 PC 去重是整条链里唯一能伤到别人的写放大）。
+- **每 IP 控制在两种前置拓扑下的修复**：XFF 右取 + 新配置 `trusted_proxies`（CIDR 列表，docker-compose 里 Caddy 在独立容器、对端是网桥地址的场景）；`/tunnel` 握手限流同样代理感知（此前整个机队+攻击者共享一个桶，可饿死真实 PC）。
+- 空 `join_key` + 公网监听 → 启动时大声告警。
+- 监听层：HTTP/1 头读取 30 s 超时（slowloris）+ 1024 并发请求工作上限；代理体 30 s 空闲间隔超时（此前头部超时后涓流体能永久占住 8 个会话槽之一）。
+- PC 侧响应头清洗：丢弃其 `content-length`/`content-encoding`，重复头首个胜出。
+
+### 23.7 信任模型声明（如实）
+
+**Hub 是全信任组件。** e2e.rs 的端到端加密设计（登录密码经 secretbox、帧加密）**未接线**——通过 Hub 的全部流量（含登录密码与会话 cookie）对 Hub 明文可见，恶意/被入侵的 Hub 可以以手机身份发任意已认证请求。Ed25519/uuid 身份只防"密钥替换"，不防上述任何一条。在 e2e 接线之前，部署 Hub 即等于信任 Hub 的运营者；文档与页面按此陈述。LAN 直连不经 Hub，不受影响。终端（PTY）与镜像模式本身是"密码持有者可做本机用户可做之事"的产品语义——对它的强化边界就是 §23 的 OS 沙箱。

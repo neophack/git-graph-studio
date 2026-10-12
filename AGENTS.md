@@ -1284,6 +1284,22 @@ database) carries the link through NAT. The whole design lives in
   INSTANCE_GONE. `daemon/src/sandbox.rs` is the module; the Remote page carries the
   "Security sandbox" section and the picker an "open a sandboxed window" entry; the real
   e2e is `cargo test --test integration sandbox_launch -- --ignored` on a capable host.
+- **The 2026-10-13 security pass** (plan §23.6): three directed audits (daemon attack
+  surface, the public Hub, app-side remote + web) and their fixes, all tested. The
+  remote-session file boundary lives in the Relay (`src/remote/pathGate.ts`): path-carrying
+  invokes land inside the open folders only (`remote_paths_policy` feeds the roots),
+  `open_folder` is refused, `relayEmit` is allowlisted and identity-stamped
+  (`remote/<session>` over any client-claimed `by`/`from`), workbenchSync confines
+  remote-originated opens, and the mirror copy drops foreign-origin URLs. The daemon
+  gained: the sandbox guard on INSTANCE_CLOSE/RESTART, an Argon2 concurrency semaphore,
+  a session gate on `/sw.js`, instance-keyed asset cache, rightmost-XFF + a single tunnel
+  bucket for login limiting, expiring sandbox tokens, Register/Update field caps, control
+  chars stripped from device names, and `hub.settings` behind the unlock. The Hub gained:
+  link-keyed asset cache (no cross-PC poisoning), `trusted_proxies` CIDR config +
+  rightmost-hop XFF + proxy-aware handshake limiting, an empty-join_key startup warning,
+  header-read timeouts + a request-work ceiling, a body idle-gap timeout, and PC response
+  header hygiene. Declared honestly (plan §23.7): **the Hub is a full-trust component**
+  — e2e.rs is designed but unwired, so everything through a Hub is visible to it.
 
 - **The daemon** (`extensions-src/ggs-remote/daemon/`, a crate of its own workspace — the app
   binary never links it): tray, self-signed TLS, Argon2id password + sessions + epochs

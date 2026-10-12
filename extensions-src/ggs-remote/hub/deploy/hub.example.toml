@@ -25,6 +25,11 @@ asset_cache_mb = 256
 
 # Trust X-Forwarded-For from the loopback Caddy in front (real client IPs for the limits).
 trust_proxy = true
+# Networks whose X-Forwarded-For is trusted, when the front proxy is NOT on loopback
+# (the docker-compose topology: Caddy in its own container, the peer a bridge address).
+# Without this, every visitor shares one rate-limit bucket. The RIGHTMOST forwarded hop
+# is taken — the proxy's own append, never a client-forged leftmost value.
+# trusted_proxies = ["172.16.0.0/12"]
 
 # /tunnel handshakes one IP may start per minute (stampede protection for real fleets).
 # 0 = unlimited — for load tests, or a private deployment whose whole fleet shares one address.

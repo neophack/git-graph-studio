@@ -10,6 +10,7 @@ use axum::http::{header, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use futures_util::Stream;
+use std::future::Future;
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
@@ -40,7 +41,13 @@ const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// a key that kept them never matched across PCs. Only immutable-marked answers are ever
 /// stored (see below), so nothing per-PC — API answers, package files, downloads — can land
 /// under it.
-fn cache_key_of(method: &Method, rest: &str, query: &str, conditional: bool) -> Option<String> {
+fn cache_key_of(
+    method: &Method,
+    link: &str,
+    rest: &str,
+    query: &str,
+    conditional: bool,
+) -> Option<String> {
     if method != Method::GET || !query.is_empty() || conditional {
         return None;
     }
@@ -51,16 +58,29 @@ fn cache_key_of(method: &Method, rest: &str, query: &str, conditional: bool) -> 
         return None; // `/w/<inst>/ggs/<tok>/…` package files ride their own tunnel
     }
     let tail = parts.next()?; // the tail is a single segment: the path wildcard
-    Some(format!("/w/_/v/{tail}"))
+                              // The PC's link id is part of the key (audit H-2, 2026-10-13): cross-PC dedup let
+                              // any keyholder's daemon poison an entry that every other PC's browsers then ran
+                              // as same-origin script. Losing that dedup costs some bytes; the isolation is the
+                              // point of a relay.
+    Some(format!("{link}/w/_/v/{tail}"))
 }
 
 pub fn peer_ip(hub: &Hub, peer: IpAddr, request: &Request) -> IpAddr {
-    if hub.config.trust_proxy && peer.is_loopback() {
+    let trusted = (hub.config.trust_proxy && peer.is_loopback())
+        || hub
+            .config
+            .trusted_proxies
+            .iter()
+            .filter_map(|cidr| cidr.parse::<ipnet::IpNet>().ok())
+            .any(|net| net.contains(&peer));
+    if trusted {
         if let Some(ip) = request
             .headers()
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split(',').next())
+            // The RIGHTMOST hop is the one the immediate trusted proxy appended; the
+            // leftmost is a client-forged value that survived the append (audit H-1).
+            .and_then(|v| v.rsplit(',').next())
             .and_then(|v| v.trim().parse().ok())
         {
             return ip;
@@ -88,7 +108,7 @@ pub async fn proxy(
     let conditional = headers.contains_key(header::IF_NONE_MATCH)
         || headers.contains_key(header::IF_MODIFIED_SINCE)
         || headers.contains_key(header::RANGE);
-    let cache_key = cache_key_of(&method, &rest, &query, conditional);
+    let cache_key = cache_key_of(&method, &uuid, &rest, &query, conditional);
 
     if let Some(key) = &cache_key {
         if let Some(cached) = hub.cache_get(key) {
@@ -179,10 +199,14 @@ pub async fn proxy(
     );
     let mut builder = Response::builder().status(status);
     for (name, value) in &http.headers {
-        // Reframing is ours: the framing headers would clash with the streamed body.
+        // Reframing is ours: the framing headers would clash with the streamed body, and
+        // the PC's content-length/content-encoding describe bytes it may re-frame —
+        // hyper writes both itself (audit L-1, 2026-10-13).
         if name.eq_ignore_ascii_case("transfer-encoding")
             || name.eq_ignore_ascii_case("connection")
             || name.eq_ignore_ascii_case("keep-alive")
+            || name.eq_ignore_ascii_case("content-length")
+            || name.eq_ignore_ascii_case("content-encoding")
         {
             continue;
         }
@@ -190,22 +214,32 @@ pub async fn proxy(
             HeaderName::from_bytes(name.as_bytes()),
             HeaderValue::from_str(value),
         ) {
+            if builder
+                .headers_ref()
+                .is_some_and(|set| set.contains_key(&name))
+            {
+                continue; // a duplicated header is the first one's
+            }
             builder = builder.header(name, value);
         }
     }
 
+    // Decided on the PC's own answer head (`http.headers`), not on the response builder:
+    // the builder's framing headers are the Hub's to write, and the live response no
+    // longer carries the PC's content-length at all (the header-hygiene drop).
     let cacheable = cache_key.is_some()
         && status == StatusCode::OK
-        && builder
-            .headers_ref()
-            .and_then(|h| h.get(header::CACHE_CONTROL))
-            .and_then(|v| v.to_str().ok())
+        && http
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("cache-control"))
+            .and_then(|(_, value)| value.parse::<String>().ok())
             .is_some_and(|v| v.contains("immutable"))
-        && builder
-            .headers_ref()
-            .and_then(|h| h.get(header::CONTENT_LENGTH))
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<usize>().ok())
+        && http
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.parse::<usize>().ok())
             .is_some_and(|len| len <= CACHE_ENTRY_CAP);
 
     let body = ProxyBody {
@@ -216,6 +250,7 @@ pub async fn proxy(
         tunnel: tunnel.clone(),
         session,
         done: false,
+        idle: Some(Box::pin(tokio::time::sleep(BODY_IDLE))),
     };
     builder
         .body(Body::from_stream(body))
@@ -302,7 +337,15 @@ struct ProxyBody {
     tunnel: Arc<Tunnel>,
     session: u32,
     done: bool,
+    /// The idle-gap deadline (audit M-3, 2026-10-13): the 30 s head timeout bounded only
+    /// the answer's head — a body that never trickles another byte held one of the eight
+    /// session slots and the browser connection forever. Thirty seconds between chunks,
+    /// renewed by every chunk, ends the response instead.
+    idle: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
 }
+
+/// The largest gap between body chunks before the response is terminated.
+const BODY_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl ProxyBody {
     /// A buffer that reached the head's content-length is the whole asset: finish the
@@ -352,6 +395,13 @@ impl Stream for ProxyBody {
         let Some(rx) = this.rx.as_mut() else {
             return Poll::Ready(None);
         };
+        if let Some(deadline) = this.idle.as_mut() {
+            if std::pin::pin!(deadline.as_mut()).poll(cx).is_ready() {
+                this.done = true;
+                crate::warn!("body idle timeout on session {}", this.session);
+                return Poll::Ready(None);
+            }
+        }
         match rx.poll_recv(cx) {
             Poll::Ready(Some(ToConn::Bytes(bytes))) => {
                 let Some(frames) = Frame::decode_all(&bytes) else {
@@ -373,6 +423,11 @@ impl Stream for ProxyBody {
                 }
                 if fin {
                     this.done = true;
+                }
+                if let Some(sleep) = this.idle.as_mut() {
+                    sleep
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + BODY_IDLE);
                 }
                 Poll::Ready(Some(Ok(Bytes::from(out))))
             }
@@ -406,10 +461,13 @@ impl IntoResponse for crate::cache::Entry {
     fn into_response(self) -> Response {
         let mut builder = Response::builder()
             .status(StatusCode::from_u16(self.head.status).unwrap_or(StatusCode::OK));
+        let mut seen = std::collections::HashSet::new();
         for (name, value) in &self.head.headers {
             if name.eq_ignore_ascii_case("transfer-encoding")
                 || name.eq_ignore_ascii_case("connection")
                 || name.eq_ignore_ascii_case("keep-alive")
+                || name.eq_ignore_ascii_case("content-length")
+                || name.eq_ignore_ascii_case("content-encoding")
             {
                 continue;
             }
@@ -417,6 +475,9 @@ impl IntoResponse for crate::cache::Entry {
                 HeaderName::from_bytes(name.as_bytes()),
                 HeaderValue::from_str(value),
             ) {
+                if !seen.insert(name.clone()) {
+                    continue; // a duplicated header is the first one's
+                }
                 builder = builder.header(name, value);
             }
         }
@@ -481,19 +542,31 @@ mod tests {
     }
 
     fn get(rest: &str) -> Option<String> {
-        cache_key_of(&Method::GET, rest, "", false)
+        cache_key_of(&Method::GET, "u1", rest, "", false)
     }
 
     #[test]
     fn workbench_assets_key_across_instance_ids_but_keep_the_version() {
-        // The same version and hashed tail, two PCs' window ids: one key.
+        // The same PC's link, the same version and hashed tail, two window ids: one key.
         assert_eq!(
             get("w/ggs-101/v/0.1.10/assets/remote-Ab12Cd34.js").as_deref(),
-            Some("/w/_/v/0.1.10/assets/remote-Ab12Cd34.js")
+            Some("u1/w/_/v/0.1.10/assets/remote-Ab12Cd34.js")
         );
         assert_eq!(
             get("w/ggs-98765/v/0.1.10/assets/remote-Ab12Cd34.js").as_deref(),
-            Some("/w/_/v/0.1.10/assets/remote-Ab12Cd34.js")
+            Some("u1/w/_/v/0.1.10/assets/remote-Ab12Cd34.js")
+        );
+        // Another PC's link NEVER shares the entry (audit H-2): cross-PC dedup let any
+        // keyholder's daemon poison same-origin script for everyone else's browsers.
+        assert_ne!(
+            get("w/ggs-101/v/0.1.10/assets/remote-Ab12Cd34.js"),
+            cache_key_of(
+                &Method::GET,
+                "another-link",
+                "w/ggs-101/v/0.1.10/assets/remote-Ab12Cd34.js",
+                "",
+                false
+            )
         );
         // A different version is a different build: a different key.
         assert_ne!(
@@ -508,8 +581,8 @@ mod tests {
         assert!(get("api/session").is_none());
         assert!(get("w/ggs-101/ggs/tok/pkg/index.html").is_none());
         assert!(get("login").is_none());
-        assert!(cache_key_of(&Method::GET, "w/g/v/1/a.js", "x=1", false).is_none());
-        assert!(cache_key_of(&Method::GET, "w/g/v/1/a.js", "", true).is_none());
-        assert!(cache_key_of(&Method::POST, "w/g/v/1/a.js", "", false).is_none());
+        assert!(cache_key_of(&Method::GET, "u1", "w/g/v/1/a.js", "x=1", false).is_none());
+        assert!(cache_key_of(&Method::GET, "u1", "w/g/v/1/a.js", "", true).is_none());
+        assert!(cache_key_of(&Method::POST, "u1", "w/g/v/1/a.js", "", false).is_none());
     }
 }
