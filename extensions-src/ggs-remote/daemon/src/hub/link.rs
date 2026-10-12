@@ -151,8 +151,18 @@ async fn run(
     ))
     .await
     .map_err(|e| e.to_string())?;
-    let challenge = first_frame(&mut stream)
-        .await?
+    // A wrong join key is refused before any challenge is spent on it: T_REJECTED can be
+    // the very first frame back, and treating it as "no challenge" turned the refusal into
+    // an endless Dropped retry loop that never surfaced Rejected.
+    let first = first_frame(&mut stream).await?;
+    if let Some(rejected) = first
+        .as_ref()
+        .and_then(|f| (f.ty == ty::T_REJECTED).then_some(f))
+        .and_then(|f| f.decode_msgpack::<super::msg::TRejected>())
+    {
+        return Ok(End::Rejected(rejected.reason));
+    }
+    let challenge = first
         .filter(|f| f.ty == ty::T_CHALLENGE)
         .and_then(|f| f.decode_msgpack::<super::msg::TChallenge>())
         .ok_or("the Hub sent no challenge")?;

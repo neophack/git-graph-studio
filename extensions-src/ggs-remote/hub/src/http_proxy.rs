@@ -15,8 +15,10 @@ use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::sync::mpsc;
 
+use crate::audit::mask_path;
 use crate::frame::{flag, ty, Frame};
 use crate::front::{forward_headers, hub_extras};
 use crate::msg::{ConnClose, HttpReq, HttpRes};
@@ -27,6 +29,30 @@ use crate::state::{Hub, ToConn, Tunnel};
 const MAX_REQUEST_BODY: usize = 1 << 20;
 /// The largest asset the shared cache keeps.
 const CACHE_ENTRY_CAP: usize = 2 << 20;
+/// The PC may accept a request and never answer it (a hung or hostile daemon): the browser
+/// hears a 504 instead of a request that hangs forever — and the session slot frees either
+/// way (the `SessionSlot` guard below).
+const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The shared cache's key (§20.6): only the workbench's app-asset shape `/w/<inst>/v/<ver>/…`
+/// is keyed, with the per-window instance segment normalized away — every PC ships the same
+/// bytes for the same version and hashed name whatever its window ids are (`ggs-<pid>`), and
+/// a key that kept them never matched across PCs. Only immutable-marked answers are ever
+/// stored (see below), so nothing per-PC — API answers, package files, downloads — can land
+/// under it.
+fn cache_key_of(method: &Method, rest: &str, query: &str, conditional: bool) -> Option<String> {
+    if method != Method::GET || !query.is_empty() || conditional {
+        return None;
+    }
+    let after_inst = rest.strip_prefix("w/")?.splitn(3, '/');
+    let mut parts = after_inst;
+    let _inst = parts.next()?; // per-window (`ggs-<pid>`): not part of the key
+    if parts.next()? != "v" {
+        return None; // `/w/<inst>/ggs/<tok>/…` package files ride their own tunnel
+    }
+    let tail = parts.next()?; // the tail is a single segment: the path wildcard
+    Some(format!("/w/_/v/{tail}"))
+}
 
 pub fn peer_ip(hub: &Hub, peer: IpAddr, request: &Request) -> IpAddr {
     if hub.config.trust_proxy && peer.is_loopback() {
@@ -62,8 +88,7 @@ pub async fn proxy(
     let conditional = headers.contains_key(header::IF_NONE_MATCH)
         || headers.contains_key(header::IF_MODIFIED_SINCE)
         || headers.contains_key(header::RANGE);
-    let cache_key =
-        (method == Method::GET && query.is_empty() && !conditional).then(|| format!("/{rest}"));
+    let cache_key = cache_key_of(&method, &rest, &query, conditional);
 
     if let Some(key) = &cache_key {
         if let Some(cached) = hub.cache_get(key) {
@@ -83,6 +108,15 @@ pub async fn proxy(
     }
     let (conn_tx, mut conn_rx) = mpsc::unbounded_channel::<ToConn>();
     tunnel.conns.lock().unwrap().insert(session, conn_tx);
+    // The slot owns the session entry from here: a request whose browser vanishes before
+    // the PC's answer head arrives is cancelled mid-await, and before this guard nothing
+    // revisited its entry — a tunnel's ceiling slowly filled with ghosts until every
+    // request 429'd (an 8-slot tunnel bricked by eight dropped connections).
+    let mut slot = SessionSlot {
+        tunnel: tunnel.clone(),
+        session,
+        armed: true,
+    };
 
     let mut head = HttpReq {
         method: method.as_str().to_owned(),
@@ -92,7 +126,7 @@ pub async fn proxy(
         ip: ip.to_string(),
         base_path: base_path.clone(),
     };
-    for (name, value) in hub_extras(&base_path, ip, &headers) {
+    for (name, value) in hub_extras(&hub.config, &base_path, ip, &headers) {
         head.headers.insert(name, value);
     }
     let mut frames = vec![Frame::msgpack(ty::HTTP_REQ, &head).with_session(session)];
@@ -115,12 +149,34 @@ pub async fn proxy(
         }
     }
 
-    // The answer's head first; its body streams after it.
-    let http = match wait_head(&mut conn_rx).await {
-        Some(head) => head,
-        None => return gone_offline(),
+    // The answer's head first; its body streams after it. A PC that never sends one runs
+    // out the clock — the slot frees with the return either way.
+    let http = match tokio::time::timeout(HEAD_TIMEOUT, wait_head(&mut conn_rx)).await {
+        Ok(Some(head)) => head,
+        Ok(None) => return gone_offline(),
+        Err(_) => return gateway_timeout(),
     };
+    // The streamed body owns the session from here — its drop is the cleanup.
+    slot.disarm();
     let status = StatusCode::from_u16(http.status).unwrap_or(StatusCode::BAD_GATEWAY);
+    hub.audit.log(
+        "http",
+        &[
+            ("uuid", serde_json::json!(uuid)),
+            ("ip", serde_json::json!(ip.to_string())),
+            ("method", serde_json::json!(method.as_str())),
+            ("path", serde_json::json!(mask_path(&format!("/{rest}")))),
+            ("status", serde_json::json!(http.status)),
+            (
+                "content_type",
+                serde_json::json!(header_of(&http.headers, "content-type").unwrap_or_default()),
+            ),
+            (
+                "content_length",
+                serde_json::json!(header_of(&http.headers, "content-length")),
+            ),
+        ],
+    );
     let mut builder = Response::builder().status(status);
     for (name, value) in &http.headers {
         // Reframing is ours: the framing headers would clash with the streamed body.
@@ -166,6 +222,14 @@ pub async fn proxy(
         .unwrap_or_else(|_| bad_gateway())
 }
 
+/// One case-insensitive header out of a `HttpRes` head.
+fn header_of(headers: &[(String, String)], name: &str) -> Option<String> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.clone())
+}
+
 /// Chunk `MAX_PAYLOAD` at a time; the caller marks the last FIN.
 fn body_frames(session: u32, body: &[u8]) -> Vec<Frame> {
     body.chunks(crate::frame::MAX_PAYLOAD)
@@ -191,6 +255,43 @@ async fn wait_head(rx: &mut mpsc::UnboundedReceiver<ToConn>) -> Option<HttpRes> 
     }
 }
 
+/// Ownership of one session slot on a tunnel, from the request's entry into the table
+/// until the PC's answer head arrives: freed on drop — removed from the table, closed
+/// toward the PC — however `proxy` leaves, cancellation included. Before it, an abandoned
+/// request's entry was never revisited (a failed `to_conn` send did not remove it either),
+/// and the ghosts piled up against `sessions_per_tunnel` until the tunnel refused
+/// everything. Once the head lands the streamed body takes the session over (`disarm`) —
+/// its own drop is the cleanup then.
+struct SessionSlot {
+    tunnel: Arc<Tunnel>,
+    session: u32,
+    armed: bool,
+}
+
+impl SessionSlot {
+    /// Hand the session to the streamed answer body: its drop frees the slot from here on.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SessionSlot {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.tunnel.conns.lock().unwrap().remove(&self.session);
+        let _ = self.tunnel.send(&Frame::msgpack(
+            ty::CONN_CLOSE,
+            &ConnClose {
+                session: self.session,
+                code: 1000,
+                reason: String::new(),
+            },
+        ));
+    }
+}
+
 /// The streamed answer body: decodes the PC's RAW chunks, tees into the shared cache when the
 /// head said the asset is immutable, and frees the tunnel session when it ends (or drops).
 struct ProxyBody {
@@ -204,6 +305,22 @@ struct ProxyBody {
 }
 
 impl ProxyBody {
+    /// A buffer that reached the head's content-length is the whole asset: finish the
+    /// store. The FIN branch below is the ordinary path, but a client that disconnects the
+    /// moment its bytes arrive (hyper stops polling once content-length is written) must
+    /// not lose the cache entry.
+    fn store_if_complete(&mut self) {
+        let Some((hub, key)) = self.cache.clone() else {
+            return;
+        };
+        let complete = self.store.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("content-length") && value == &self.buffered.len().to_string()
+        });
+        if complete {
+            hub.cache_store(&key, &self.store, std::mem::take(&mut self.buffered));
+        }
+    }
+
     fn cleanup(&self) {
         self.tunnel.conns.lock().unwrap().remove(&self.session);
         let _ = self.tunnel.send(&Frame::msgpack(
@@ -219,6 +336,7 @@ impl ProxyBody {
 
 impl Drop for ProxyBody {
     fn drop(&mut self) {
+        self.store_if_complete();
         self.cleanup();
     }
 }
@@ -267,10 +385,19 @@ impl Stream for ProxyBody {
     }
 }
 
-fn too_many_requests() -> Response {
+pub fn too_many_requests() -> Response {
     error_page(
         StatusCode::TOO_MANY_REQUESTS,
         "too many requests — wait a minute",
+    )
+}
+
+/// The daily distinct-viewer ceiling (§20.6): a personal link has a handful of viewers;
+/// this answer means the link is being shared like a public site.
+pub fn too_many_viewers() -> Response {
+    error_page(
+        StatusCode::TOO_MANY_REQUESTS,
+        "this link has too many viewers today",
     )
 }
 
@@ -303,6 +430,13 @@ fn bad_gateway() -> Response {
     error_page(StatusCode::BAD_GATEWAY, "this PC did not answer")
 }
 
+fn gateway_timeout() -> Response {
+    error_page(
+        StatusCode::GATEWAY_TIMEOUT,
+        "this PC did not answer in time",
+    )
+}
+
 fn gone_offline() -> Response {
     error_page(StatusCode::SERVICE_UNAVAILABLE, "this PC went offline")
 }
@@ -314,4 +448,68 @@ fn error_page(status: StatusCode, message: &str) -> Response {
         message.to_owned(),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The regression this guard exists for: a request cancelled before the PC's answer
+    /// head (its browser gone) must leave nothing behind — before, the entry lingered
+    /// forever and eight of them bricked the tunnel's session ceiling.
+    #[test]
+    fn an_abandoned_request_frees_its_session_slot() {
+        let hub = Hub::new(crate::config::Config::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let tunnel = Arc::new(hub.new_tunnel("u".into(), tx));
+        {
+            let (conn_tx, _conn_rx) = mpsc::unbounded_channel();
+            tunnel.conns.lock().unwrap().insert(7, conn_tx);
+            let _slot = SessionSlot {
+                tunnel: tunnel.clone(),
+                session: 7,
+                armed: true,
+            };
+            assert_eq!(tunnel.sessions(), 1);
+        }
+        assert_eq!(tunnel.sessions(), 0);
+        let bytes = rx.try_recv().unwrap();
+        let frames = Frame::decode_all(&bytes).unwrap();
+        assert!(frames.iter().any(|f| f.ty == ty::CONN_CLOSE
+            && f.decode_msgpack::<ConnClose>()
+                .is_some_and(|c| c.session == 7)));
+    }
+
+    fn get(rest: &str) -> Option<String> {
+        cache_key_of(&Method::GET, rest, "", false)
+    }
+
+    #[test]
+    fn workbench_assets_key_across_instance_ids_but_keep_the_version() {
+        // The same version and hashed tail, two PCs' window ids: one key.
+        assert_eq!(
+            get("w/ggs-101/v/0.1.10/assets/remote-Ab12Cd34.js").as_deref(),
+            Some("/w/_/v/0.1.10/assets/remote-Ab12Cd34.js")
+        );
+        assert_eq!(
+            get("w/ggs-98765/v/0.1.10/assets/remote-Ab12Cd34.js").as_deref(),
+            Some("/w/_/v/0.1.10/assets/remote-Ab12Cd34.js")
+        );
+        // A different version is a different build: a different key.
+        assert_ne!(
+            get("w/ggs-101/v/0.1.11/assets/remote-Ab12Cd34.js"),
+            get("w/ggs-101/v/0.1.10/assets/remote-Ab12Cd34.js")
+        );
+    }
+
+    #[test]
+    fn nothing_else_is_keyed() {
+        // API answers, package files, queries, conditional gets: never cached.
+        assert!(get("api/session").is_none());
+        assert!(get("w/ggs-101/ggs/tok/pkg/index.html").is_none());
+        assert!(get("login").is_none());
+        assert!(cache_key_of(&Method::GET, "w/g/v/1/a.js", "x=1", false).is_none());
+        assert!(cache_key_of(&Method::GET, "w/g/v/1/a.js", "", true).is_none());
+        assert!(cache_key_of(&Method::POST, "w/g/v/1/a.js", "", false).is_none());
+    }
 }

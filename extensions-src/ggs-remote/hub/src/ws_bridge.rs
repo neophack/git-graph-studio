@@ -53,7 +53,7 @@ async fn run(
         base_path: base_path.clone(),
         headers: forward_headers(&headers),
     };
-    for (name, value) in hub_extras(&base_path, ip, &headers) {
+    for (name, value) in hub_extras(&hub.config, &base_path, ip, &headers) {
         open.headers.insert(name, value);
     }
     if !tunnel.send(&Frame::msgpack(ty::CONN_OPEN, &open)) {
@@ -69,6 +69,14 @@ async fn run(
     let (conn_tx, mut conn_rx) = mpsc::unbounded_channel::<ToConn>();
     tunnel.conns.lock().unwrap().insert(session, conn_tx);
     crate::info!("session {session} on {} from {ip}", tunnel.uuid);
+    hub.audit.log(
+        "session_open",
+        &[
+            ("uuid", serde_json::json!(tunnel.uuid)),
+            ("session", serde_json::json!(session)),
+            ("ip", serde_json::json!(ip.to_string())),
+        ],
+    );
 
     // The writer: downlink messages and closes from the tunnel.
     let writer = tokio::spawn(async move {
@@ -135,5 +143,13 @@ async fn run(
         },
     ));
     writer.abort();
+    hub.audit.log(
+        "session_close",
+        &[
+            ("uuid", serde_json::json!(tunnel.uuid)),
+            ("session", serde_json::json!(session)),
+            ("code", serde_json::json!(close.0)),
+        ],
+    );
     crate::info!("session {session} on {} closed", tunnel.uuid);
 }

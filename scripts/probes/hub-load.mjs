@@ -160,9 +160,10 @@ async function metrics(metricsPort) {
 async function main() {
 	const port = await freePort();
 	const metricsPort = await freePort();
-	// handshake_rate = 0: the default 10/min/IP is stampede protection for real fleets — a
-	// single load box starting hundreds of tunnels from one address is exactly what it stops.
-	writeFileSync(resolve(home, 'hub.toml'), `listen = "127.0.0.1:${port}"\npublic_url = "http://127.0.0.1:${port}"\ntls = { mode = "none" }\nmax_tunnels = 2000\nhandshake_rate = 0\nmetrics_listen = "127.0.0.1:${metricsPort}"\n`);
+	// handshake_rate / http_rate / visitors_per_day_per_tunnel = 0: their defaults are abuse
+	// guards for real fleets — a single load box starting hundreds of tunnels and hammering
+	// requests from one address is exactly what each of them stops.
+	writeFileSync(resolve(home, 'hub.toml'), `listen = "127.0.0.1:${port}"\npublic_url = "http://127.0.0.1:${port}"\ntls = { mode = "none" }\nmax_tunnels = 2000\nhandshake_rate = 0\nhttp_rate = 0\nvisitors_per_day_per_tunnel = 0\nmetrics_listen = "127.0.0.1:${metricsPort}"\n`);
 	const hub = spawn(hubExe, ['--config', resolve(home, 'hub.toml')], { stdio: ['ignore', 'pipe', 'pipe'] });
 	hub.stderr.on('data', (d) => (hubLog += d));
 	hub.stdout.on('data', (d) => (hubLog += d));

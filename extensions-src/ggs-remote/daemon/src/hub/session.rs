@@ -4,7 +4,7 @@
 //! router the public listener serves — one code path for both listeners, which is the whole
 //! point of the design.
 
-use axum::body::Body;
+use axum::body::{Body, HttpBody};
 use axum::extract::ConnectInfo;
 use axum::http::{HeaderName, HeaderValue, Method, Uri};
 use std::net::{IpAddr, SocketAddr};
@@ -119,7 +119,10 @@ pub async fn ws(
             }
             Some(bytes) = rx.recv() => {
                 if !tunnel.send_session(session, bytes) {
-                    break true;
+                    // The tunnel went away under us — not the browser (§6.5): park the
+                    // resume window; the push above is already in the ring and replays on
+                    // resume through whatever tunnel answers next.
+                    break false;
                 }
             }
             kick = kicks.recv() => {
@@ -308,7 +311,7 @@ pub async fn http(
         .unwrap_or_else(|never| match never {});
 
     let (parts, response_body) = response.into_parts();
-    let heads: Vec<(String, String)> = parts
+    let mut heads: Vec<(String, String)> = parts
         .headers
         .iter()
         .filter(|(name, _)| !matches!(name.as_str(), "transfer-encoding" | "connection"))
@@ -319,6 +322,15 @@ pub async fn http(
                 .map(|value| (name.as_str().to_owned(), value.to_owned()))
         })
         .collect();
+    // A body of known size carries its length: hyper adds content-length only on the wire
+    // (the LAN listener), never in the router's parts — without it the Hub's shared cache
+    // refuses every proxied asset (§20.6), and immutable answers were never cached at all.
+    if let (Some(exact), None) = (
+        response_body.size_hint().exact(),
+        parts.headers.get(axum::http::header::CONTENT_LENGTH),
+    ) {
+        heads.push(("content-length".to_owned(), exact.to_string()));
+    }
     reply_head(&tunnel, session, parts.status.as_u16(), &heads);
 
     // The body streams: chunks become RAW frames, an empty FIN frame ends the answer.

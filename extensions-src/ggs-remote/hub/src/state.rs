@@ -9,7 +9,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
+use tokio::sync::Notify;
 
+use crate::audit::Audit;
+use crate::blocklist::Blocklist;
 use crate::config::Config;
 use crate::frame::Frame;
 
@@ -37,6 +40,10 @@ pub struct Tunnel {
     pub since: Instant,
     /// The per-tunnel daily byte budget (§20.8 `bytes_per_day_per_tunnel`); `None` = off.
     pub budget: Option<AtomicU64>,
+    /// The operator's kill switch lands here (`blocklist`): one stored permit wakes the run
+    /// loop's `killed` arm, whose exit path unregisters the tunnel and tells its browsers
+    /// the plain `pc-offline` — a blocked PC looks exactly like an away one.
+    pub killed: Notify,
 }
 
 impl Tunnel {
@@ -44,12 +51,18 @@ impl Tunnel {
         self.conns.lock().unwrap().len()
     }
 
-    /// One downlink message for one browser connection; `false` when it is gone.
+    /// One downlink message for one browser connection; `false` when it is gone. A gone
+    /// receiver's entry leaves with the failed send — nothing else would revisit it, and a
+    /// table full of ghosts is a table whose ceiling (`sessions_per_tunnel`) fills with them.
     pub fn to_conn(&self, session: u32, bytes: Vec<u8>) -> bool {
-        let conns = self.conns.lock().unwrap();
-        conns
+        let mut conns = self.conns.lock().unwrap();
+        let sent = conns
             .get(&session)
-            .is_some_and(|tx| tx.send(ToConn::Bytes(bytes)).is_ok())
+            .is_some_and(|tx| tx.send(ToConn::Bytes(bytes)).is_ok());
+        if !sent {
+            conns.remove(&session);
+        }
+        sent
     }
 
     /// The daemon closed a browser connection (CONN_CLOSE from the PC: a password change's
@@ -90,14 +103,21 @@ impl Tunnel {
             })
             .is_ok()
     }
+
+    /// Take this tunnel off the air (§20.6 `blocklist`): the permit wakes the run loop's
+    /// `killed` arm; its exit path unregisters and tells every browser `pc-offline`.
+    pub fn kill(&self) {
+        self.killed.notify_one();
+    }
 }
 
-/// The per-IP counters that guard the front door (§20.6): tunnel handshakes, login entries
-/// and offline-link probes, each with its own window.
+/// The per-IP counters that guard the front door (§20.6): tunnel handshakes, login entries,
+/// proxied requests and offline-link probes, each with its own window.
 #[derive(Default)]
 pub struct IpWindows {
     pub hellos: Mutex<HashMap<IpAddr, (u32, Instant)>>,
     pub logins: Mutex<HashMap<(IpAddr, String), (u32, Instant)>>,
+    pub requests: Mutex<HashMap<IpAddr, (u32, Instant)>>,
     pub offline: Mutex<HashMap<IpAddr, (u32, Instant)>>,
     pub banned: Mutex<HashMap<IpAddr, Instant>>,
 }
@@ -106,8 +126,16 @@ pub struct Counters {
     pub tunnels_total: AtomicU64,
     pub sessions_total: AtomicU64,
     pub http_requests: AtomicU64,
+    pub visitor_refused: AtomicU64,
     pub bytes_up: AtomicU64,
     pub bytes_down: AtomicU64,
+}
+
+/// One link's day bucket of distinct viewer IPs (§20.6): when the bucket started, and the
+/// first-seen instant of each IP.
+pub struct VisitorBucket {
+    pub since: Instant,
+    pub seen: HashMap<IpAddr, Instant>,
 }
 
 pub struct Hub {
@@ -117,19 +145,34 @@ pub struct Hub {
     next_tunnel: AtomicU64,
     pub ips: IpWindows,
     pub counters: Counters,
+    /// The distinct browser IPs each link has served inside its day bucket (§20.6
+    /// `visitors_per_day_per_tunnel`) — keyed by uuid, not by tunnel, so a reconnect does
+    /// not reset it: a personal remote-workbench link has a handful of viewers, a link
+    /// shared like a public site hundreds, and cycling the tunnel must not launder the count.
+    pub visitors: Mutex<HashMap<String, VisitorBucket>>,
+    /// The operator's audit trail (§20.6 `audit_log`); a no-op when off.
+    pub audit: Audit,
+    /// The operator's kill switch (§20.6 `blocklist`); inert when off.
+    pub blocklist: Blocklist,
     pub cache: crate::cache::AssetCache,
 }
 
 pub const HELLO_WINDOW: Duration = Duration::from_secs(60);
 pub const LOGIN_WINDOW: Duration = Duration::from_secs(60);
 pub const LOGIN_MAX: u32 = 10;
+pub const REQUEST_WINDOW: Duration = Duration::from_secs(60);
 pub const OFFLINE_WINDOW: Duration = Duration::from_secs(600);
 pub const OFFLINE_MAX: u32 = 100;
 pub const BAN: Duration = Duration::from_secs(600);
+/// One day per visitor bucket — a rounded bucket, not a rolling window: simple to reason
+/// about, and precise to the minute is not a property this guard needs.
+pub const VISITOR_WINDOW: Duration = Duration::from_secs(24 * 3600);
 
 impl Hub {
     pub fn new(config: Config) -> Arc<Hub> {
         let cache = crate::cache::AssetCache::new(config.asset_cache_mb.max(1) << 20);
+        let audit = Audit::open(&config.audit_log);
+        let blocklist = Blocklist::open(&config.blocklist);
         Arc::new(Hub {
             config,
             tunnels: Mutex::new(HashMap::new()),
@@ -140,9 +183,13 @@ impl Hub {
                 tunnels_total: AtomicU64::new(0),
                 sessions_total: AtomicU64::new(0),
                 http_requests: AtomicU64::new(0),
+                visitor_refused: AtomicU64::new(0),
                 bytes_up: AtomicU64::new(0),
                 bytes_down: AtomicU64::new(0),
             },
+            visitors: Mutex::new(HashMap::new()),
+            audit,
+            blocklist,
             cache,
         })
     }
@@ -170,6 +217,7 @@ impl Hub {
             since: Instant::now(),
             budget: (self.config.bytes_per_day_per_tunnel > 0)
                 .then(|| AtomicU64::new(self.config.bytes_per_day_per_tunnel)),
+            killed: Notify::new(),
         }
     }
 
@@ -226,6 +274,9 @@ impl Hub {
              # HELP ggs_hub_http_requests_total Proxied HTTP requests.\n\
              # TYPE ggs_hub_http_requests_total counter\n\
              ggs_hub_http_requests_total {}\n\
+             # HELP ggs_hub_visitor_refused_total Requests refused by a link's daily distinct-viewer ceiling.\n\
+             # TYPE ggs_hub_visitor_refused_total counter\n\
+             ggs_hub_visitor_refused_total {}\n\
              # HELP ggs_hub_bytes_total Bytes proxied, down toward the PCs and up back.\n\
              # TYPE ggs_hub_bytes_total counter\n\
              ggs_hub_bytes_down_total {}\n\
@@ -233,6 +284,7 @@ impl Hub {
             self.counters.tunnels_total.load(Ordering::Relaxed),
             self.counters.sessions_total.load(Ordering::Relaxed),
             self.counters.http_requests.load(Ordering::Relaxed),
+            self.counters.visitor_refused.load(Ordering::Relaxed),
             self.counters.bytes_down.load(Ordering::Relaxed),
             self.counters.bytes_up.load(Ordering::Relaxed),
         )
@@ -247,7 +299,13 @@ fn count<K: std::hash::Hash + Eq + Clone>(
 ) -> u32 {
     let now = Instant::now();
     let mut map = window.lock().unwrap();
-    map.retain(|_, (_, at)| now.duration_since(*at) < span);
+    // Compact only once the table has grown — a per-event `retain` made every counted
+    // event O(table), and a many-IP scan turned the front door itself into the cost center.
+    // Below the threshold stale entries merely sit until the next compaction; the count of
+    // any touched key is exact either way (its own window resets it).
+    if map.len() > 1024 {
+        map.retain(|_, (_, at)| now.duration_since(*at) < span);
+    }
     let entry = map.entry(key).or_insert((0, now));
     entry.0 += 1;
     if now.duration_since(entry.1) >= span {
@@ -267,6 +325,73 @@ impl Hub {
 
     pub fn login_entry(&self, ip: IpAddr, uuid: &str) -> bool {
         count(&self.ips.logins, (ip, uuid.to_owned()), LOGIN_WINDOW) <= LOGIN_MAX
+    }
+
+    /// Every proxied request toward an online link one IP may make per minute (§20.6
+    /// `http_rate`) — the guard a single address hammering one PC's pages otherwise lacks
+    /// (the session ceiling caps concurrency, not rate). 0 = unlimited.
+    pub fn request_allowed(&self, ip: IpAddr) -> bool {
+        if self.config.http_rate == 0 {
+            return true;
+        }
+        count(&self.ips.requests, ip, REQUEST_WINDOW) <= self.config.http_rate
+    }
+
+    /// Count one browser IP against a link's daily distinct-viewer ceiling (§20.6
+    /// `visitors_per_day_per_tunnel`): an IP already seen costs nothing, a new one past the
+    /// cap is refused. Keyed by uuid so a reconnecting PC cannot reset its own count.
+    pub fn admit_visitor(&self, uuid: &str, ip: IpAddr) -> bool {
+        let cap = self.config.visitors_per_day_per_tunnel;
+        if cap == 0 {
+            return true;
+        }
+        let now = Instant::now();
+        let mut visitors = self.visitors.lock().unwrap();
+        let bucket = visitors
+            .entry(uuid.to_owned())
+            .or_insert_with(|| VisitorBucket {
+                since: now,
+                seen: HashMap::new(),
+            });
+        if now.duration_since(bucket.since) >= VISITOR_WINDOW {
+            bucket.since = now;
+            bucket.seen.clear();
+        }
+        if bucket.seen.contains_key(&ip) {
+            return true;
+        }
+        if bucket.seen.len() >= cap {
+            return false;
+        }
+        bucket.seen.insert(ip, now);
+        // Bounded by the day's active links: uuids whose bucket expired drop out once the
+        // table is large, so a long-lived Hub does not accumulate one entry per ever-seen PC.
+        if visitors.len() > 1024 {
+            visitors.retain(|_, bucket| now.duration_since(bucket.since) < VISITOR_WINDOW);
+        }
+        true
+    }
+
+    /// The operator's kill switch (§20.6 `blocklist`): re-read the file, then take every
+    /// listed PC's tunnel off the air — the run loop's exit path unregisters it and its
+    /// browsers hear the plain `pc-offline` close, the same page a next load gets.
+    pub fn enforce_blocklist(&self) {
+        if !self.blocklist.enabled() {
+            return;
+        }
+        self.blocklist.refresh();
+        let tunnels: Vec<Arc<Tunnel>> = self
+            .tunnels
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(uuid, _)| self.blocklist.blocked(uuid))
+            .map(|(_, tunnel)| tunnel.clone())
+            .collect();
+        for tunnel in tunnels {
+            crate::warn!("tunnel {}: taken off the air by the blocklist", tunnel.uuid);
+            tunnel.kill();
+        }
     }
 
     /// A request for a link whose PC is not online (§20.6): the same page answers whether the
@@ -374,5 +499,68 @@ mod tests {
         assert!(rx2.try_recv().is_err());
         t.close_all(1001, "tunnel-closed");
         assert!(matches!(rx2.try_recv(), Ok(ToConn::Close { .. })));
+    }
+
+    #[test]
+    fn a_dead_session_entry_leaves_with_its_failed_send() {
+        let hub = hub();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let t = Arc::new(hub.new_tunnel("u".into(), tx));
+        let (tx1, rx1) = mpsc::unbounded_channel();
+        t.conns.lock().unwrap().insert(1, tx1);
+        drop(rx1); // the browser task is gone — the entry must not linger as a ghost slot
+        assert!(!t.to_conn(1, vec![0]));
+        assert!(t.conns.lock().unwrap().is_empty());
+        assert_eq!(t.sessions(), 0);
+    }
+
+    #[test]
+    fn request_rate_governs_every_request_and_zero_opens_it() {
+        let ip: IpAddr = "203.0.113.11".parse().unwrap();
+        let hub = Hub::new(Config {
+            http_rate: 2,
+            ..Config::default()
+        });
+        assert!(hub.request_allowed(ip));
+        assert!(hub.request_allowed(ip));
+        assert!(!hub.request_allowed(ip));
+        let open = Hub::new(Config {
+            http_rate: 0,
+            ..Config::default()
+        });
+        for _ in 0..100 {
+            assert!(open.request_allowed(ip));
+        }
+    }
+
+    #[test]
+    fn visitors_admit_up_to_the_cap_and_a_new_day_resets() {
+        let a: IpAddr = "203.0.113.21".parse().unwrap();
+        let b: IpAddr = "203.0.113.22".parse().unwrap();
+        let c: IpAddr = "203.0.113.23".parse().unwrap();
+        let hub = Hub::new(Config {
+            visitors_per_day_per_tunnel: 2,
+            ..Config::default()
+        });
+        assert!(hub.admit_visitor("u", a));
+        assert!(hub.admit_visitor("u", b));
+        assert!(
+            hub.admit_visitor("u", a),
+            "an already-seen IP costs nothing"
+        );
+        assert!(!hub.admit_visitor("u", c));
+        // The count hangs off the uuid, not the tunnel: a replaced tunnel inherits it.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let _t = hub.new_tunnel("u".into(), tx);
+        assert!(
+            !hub.admit_visitor("u", c),
+            "a reconnect does not launder the count"
+        );
+        // A new day is a new bucket.
+        let mut visitors = hub.visitors.lock().unwrap();
+        let bucket = visitors.get_mut("u").unwrap();
+        bucket.since = Instant::now() - VISITOR_WINDOW;
+        drop(visitors);
+        assert!(hub.admit_visitor("u", c));
     }
 }

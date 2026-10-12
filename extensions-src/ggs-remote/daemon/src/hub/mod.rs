@@ -183,6 +183,14 @@ impl HubClient {
         Ok(())
     }
 
+    /// The device key changed under a running tunnel (relink, import): the tunnel must drop
+    /// at once — the old link dies the moment it does (§20.1), not whenever it next falls
+    /// over on its own. A bare `restart.notify_one()` is a spurious wake the tunnel ignores.
+    pub fn key_changed(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
+        self.restart.notify_one();
+    }
+
     /// One setting changed (the join key, say) without a full connect round.
     pub fn update<F: FnOnce(&mut Settings)>(&self, edit: F) -> Result<(), String> {
         let mut current = self.settings.lock().unwrap();

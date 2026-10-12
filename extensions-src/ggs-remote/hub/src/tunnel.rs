@@ -129,6 +129,23 @@ async fn run(hub: Arc<Hub>, socket: WebSocket, peer: SocketAddr, host: Option<St
         return;
     }
 
+    // The operator's kill switch (§20.6): a blocklisted device key is refused here and its
+    // online tunnel (if any) is taken off the air by the periodic refresh — both look like
+    // a plain offline PC from every other vantage.
+    if hub.blocklist.blocked(&uuid) {
+        crate::warn!("tunnel for {uuid} refused: blocklisted");
+        hub.audit.log(
+            "tunnel_refused",
+            &[
+                ("uuid", serde_json::json!(uuid)),
+                ("ip", serde_json::json!(peer.ip().to_string())),
+                ("reason", serde_json::json!("banned")),
+            ],
+        );
+        reject(&mut sink, "banned").await;
+        return;
+    }
+
     // Capacity counts distinct PCs, not connections of the same one.
     if hub.tunnel(&uuid).is_none() && hub.tunnel_count() >= hub.config.max_tunnels {
         crate::warn!("tunnel for {uuid} refused: at capacity");
@@ -168,6 +185,13 @@ async fn run(hub: Arc<Hub>, socket: WebSocket, peer: SocketAddr, host: Option<St
         crate::info!("tunnel {uuid}: replaced by a newer connection");
     }
     crate::info!("tunnel {uuid} online from {}", peer.ip());
+    hub.audit.log(
+        "tunnel_online",
+        &[
+            ("uuid", serde_json::json!(uuid)),
+            ("ip", serde_json::json!(peer.ip().to_string())),
+        ],
+    );
 
     // The writer: everything the Hub sends the PC — browser frames (session stamped),
     // heartbeats, the goodbye — goes through the tunnel's channel so ordering is one queue.
@@ -183,6 +207,7 @@ async fn run(hub: Arc<Hub>, socket: WebSocket, peer: SocketAddr, host: Option<St
     let mut beat = tokio::time::interval(HEARTBEAT);
     beat.tick().await; // the first tick is immediate
     let mut missed = 0u32;
+    let mut kicked = false;
     loop {
         tokio::select! {
             message = stream.next() => {
@@ -206,12 +231,28 @@ async fn run(hub: Arc<Hub>, socket: WebSocket, peer: SocketAddr, host: Option<St
                     break;
                 }
             }
+            // The blocklist's kill: `kill()` stored its permit, so this arm wakes on the
+            // next poll and the exit path below takes the tunnel off the table.
+            _ = tunnel.killed.notified() => {
+                kicked = true;
+                break;
+            }
         }
     }
 
     hub.unregister(&uuid, tunnel.id);
     tunnel.close_all(4503, "pc-offline");
     writer.abort();
+    hub.audit.log(
+        "tunnel_offline",
+        &[
+            ("uuid", serde_json::json!(uuid)),
+            (
+                "reason",
+                serde_json::json!(if kicked { "blocked" } else { "gone" }),
+            ),
+        ],
+    );
     crate::info!("tunnel {uuid} offline");
 }
 

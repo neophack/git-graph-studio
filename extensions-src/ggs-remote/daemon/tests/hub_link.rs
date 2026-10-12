@@ -1,14 +1,27 @@
 //! End-to-end across both crates (docs/ggs-remote-plan.md §20.12): a real Hub, a real
 //! daemon, the outbound tunnel between them, and a fake browser — login over the Hub's
 //! `/u/<uuid>/` path, a WebSocket session through the tunnel carrying a real invoke, and a
-//! password change kicking the tunneled session within a second.
+//! password change kicking the tunneled session within a second. The password-first flow
+//! (relay saved before any password exists — the Remote Access page's set-password screen)
+//! and the link pages' relay-first ordering live here too.
+//!
+//! The `Joint` suite below is the multi-PC half of the same table: one Hub, a spawnable
+//! family of real daemons, fake GGS instances feeding them assets — two PCs side by side,
+//! the join key, a link change retiring the old link at once, an exported device key taking
+//! the link over on a second PC (T_REPLACED), a browser session resuming through a
+//! recovered tunnel, and the cross-PC cache answering immutable assets without waking the
+//! serving tunnel.
 
 use futures_util::{SinkExt, StreamExt};
 use ggs_remote::config::{Config, TlsConfig, TlsMode};
+use ggs_remote::control_msg::{self, FromInstance, LaunchSpec, ToInstance};
 use ggs_remote::hub::{Settings, Status};
 use ggs_remote::paths::Paths;
 use ggs_remote::state::Daemon;
 use ggs_remote::ws::frame::{ty, Frame};
+use ggs_remote::ws::msg::HelloAck;
+use interprocess::local_socket::tokio::{prelude::*, RecvHalf, SendHalf, Stream};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16,6 +29,10 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
 const PASSWORD: &str = "tangerine-kayak-42";
+
+type Ws = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+>;
 
 struct Both {
     _dir: tempfile::TempDir,
@@ -156,34 +173,33 @@ fn find_cookie(head: &str) -> Option<String> {
     None
 }
 
-/// Login through the Hub, then ride one WebSocket: HELLO (with the CSRF from /api/session),
-/// ATTACH-less INVOKE (the daemon answers "not attached"), and the WINDOWS push.
-async fn browser_session(
-    both: &Both,
-) -> (
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    Vec<Frame>,
-) {
-    let base = format!("/u/{}/", both.uuid);
+/// Login through the Hub for any PC's link: answers the session cookie and the CSRF value
+/// (the first half of every browser-facing test here).
+async fn login_through(
+    addr: std::net::SocketAddr,
+    uuid: &str,
+    password: &str,
+) -> (String, String) {
+    let base = format!("/u/{uuid}/");
     let (status, head, _body) = http(
-        both.hub_addr,
+        addr,
         "POST",
         &format!("{base}api/login"),
         &[
             ("content-type", "application/json"),
             (
                 "origin",
-                &format!("http://127.0.0.1:{}", both.hub_addr.port()),
+                &format!("http://127.0.0.1:{}", addr.port()),
             ),
         ],
-        &format!("{{\"password\":\"{PASSWORD}\",\"device\":\"test\",\"remember\":false}}"),
+        &format!("{{\"password\":\"{password}\",\"device\":\"joint\",\"remember\":false}}"),
     )
     .await;
     assert_eq!(status, 200, "login through the hub: {head}");
     let cookie = find_cookie(&head).expect("a session cookie");
 
     let (status, _head, body) = http(
-        both.hub_addr,
+        addr,
         "GET",
         &format!("{base}api/session"),
         &[("cookie", &cookie)],
@@ -195,19 +211,31 @@ async fn browser_session(
         .as_str()
         .unwrap()
         .to_owned();
+    (cookie, csrf)
+}
 
-    let ws_url = format!("ws://{}{}ws", both.hub_addr, base);
+/// The workbench WebSocket of one link — cookie and origin in place, HELLO not yet sent.
+async fn browser_ws(addr: std::net::SocketAddr, uuid: &str, cookie: &str) -> Ws {
+    let ws_url = format!("ws://{}/u/{}/ws", addr, uuid);
     let mut request = ws_url.as_str().into_client_request().unwrap();
     request
         .headers_mut()
         .insert("Cookie", cookie.parse().unwrap());
     request.headers_mut().insert(
         "Origin",
-        format!("http://127.0.0.1:{}", both.hub_addr.port())
+        format!("http://127.0.0.1:{}", addr.port())
             .parse()
             .unwrap(),
     );
     let (ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    ws
+}
+
+/// Login through the Hub, then ride one WebSocket: HELLO (with the CSRF from /api/session),
+/// ATTACH-less INVOKE (the daemon answers "not attached"), and the WINDOWS push.
+async fn browser_session(both: &Both) -> (Ws, Vec<Frame>) {
+    let (cookie, csrf) = login_through(both.hub_addr, &both.uuid, PASSWORD).await;
+    let mut ws = browser_ws(both.hub_addr, &both.uuid, &cookie).await;
 
     // HELLO with the CSRF value; then an INVOKE the daemon rejects with a message — proof
     // the frame crossed the tunnel, hit the connection logic and came back.
@@ -220,7 +248,6 @@ async fn browser_session(
         &serde_json::json!({ "c": "list_dir", "a": { "path": "." } }),
     )
     .with_stream(1);
-    let (mut ws, _) = (ws, ());
     ws.send(Message::Binary(
         [hello.encode(), invoke.encode()].concat().into(),
     ))
@@ -256,6 +283,189 @@ async fn browser_session(
     assert!(got_hello_ack, "the tunneled HELLO was answered");
     assert!(!windows.is_empty(), "WINDOWS arrived through the tunnel");
     (ws, frames)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hub_saved_before_the_password_connects_when_it_lands() {
+    // The set-password screen's order: the relay is saved first, the password after. The
+    // hub loop parks in NoPassword until the password lands — setting it must wake the
+    // tunnel (the admin and pair routes share this one handler).
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::at(dir.path().join("remote"), dir.path().to_path_buf());
+    paths.ensure().unwrap();
+    let config = Config {
+        port: 0,
+        bind: "127.0.0.1".into(),
+        tls: TlsConfig {
+            mode: TlsMode::None,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    config.save(&paths).unwrap();
+    let daemon = Daemon::new(paths, config).unwrap();
+    let run = daemon.clone();
+    tokio::spawn(async move { ggs_remote::server::run(run).await });
+
+    let hub = ggs_remote_hub::state::Hub::new(ggs_remote_hub::config::Config {
+        listen: "127.0.0.1:0".into(),
+        ..Default::default()
+    });
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let hub_port = listener.local_addr().unwrap().port();
+    let task = tokio::spawn(async move {
+        let app = ggs_remote_hub::router(hub)
+            .into_make_service_with_connect_info::<std::net::SocketAddr>();
+        let _ = axum::serve(listener, app).await;
+    });
+
+    daemon
+        .hub
+        .connect(Settings {
+            url: format!("http://127.0.0.1:{hub_port}"),
+            join_key: String::new(),
+            fingerprint: String::new(),
+        })
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if matches!(daemon.hub.snapshot(), Status::NoPassword) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a relay saved without a password must sit in NoPassword"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let response = ggs_remote::http::api::set_password(&daemon, PASSWORD).await;
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if daemon.hub.snapshot().online() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the password landing must wake the parked tunnel"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_relay_link_leads_the_status_links_when_online() {
+    let both = start().await;
+    let status = ggs_remote::http::admin::status_json(&both.daemon, true);
+    let public = format!("http://127.0.0.1:{}/u/{}/", both.hub_addr.port(), both.uuid);
+    assert_eq!(status["links"][0].as_str(), Some(public.as_str()));
+    assert_eq!(status["link"].as_str(), Some(public.as_str()));
+    let lan: Vec<&str> = status["lanLinks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(!lan.is_empty(), "the LAN links stay addressable for the CA anchors");
+    assert!(!lan.contains(&public.as_str()));
+    let all: Vec<&str> = status["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    // While the relay is online its link is the one QR shown (2026-10-12, the owner's
+    // direction — a set server makes the LAN codes clutter); `lanLinks` above keeps the
+    // direct addresses for the CA anchors.
+    assert_eq!(all, vec![public.as_str()], "links is the relay link alone");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_admin_connect_body_takes_the_extension_camel_case() {
+    // The extension's admin client posts `joinKey` (camelCase); the body struct's snake
+    // spelling once ate it — a keyless Hub hid the loss, a keyed one refused the tunnel
+    // with "join-key" no matter what the page sent.
+    let both = start().await;
+    let url = format!("http://127.0.0.1:{}", both.hub_addr.port());
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "authorization",
+        format!("Bearer {}", both.daemon.admin_token)
+            .parse()
+            .unwrap(),
+    );
+    let body = serde_json::from_value::<ggs_remote::http::admin::HubConnectBody>(serde_json::json!({
+        "url": url,
+        "joinKey": "server-secret"
+    }))
+    .unwrap();
+    let response = ggs_remote::http::admin::hub_connect(
+        axum::extract::State(both.daemon.clone()),
+        headers.clone(),
+        axum::Json(body),
+    )
+    .await;
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert_eq!(
+        both.daemon.hub.current().map(|s| s.join_key),
+        Some("server-secret".into())
+    );
+
+    let body = serde_json::from_value::<ggs_remote::http::admin::HubConnectBody>(serde_json::json!({
+        "url": url,
+        "join_key": "snake-secret"
+    }))
+    .unwrap();
+    let response = ggs_remote::http::admin::hub_connect(
+        axum::extract::State(both.daemon.clone()),
+        headers,
+        axum::Json(body),
+    )
+    .await;
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert_eq!(
+        both.daemon.hub.current().map(|s| s.join_key),
+        Some("snake-secret".into())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plain_http_hub_login_sets_a_cookie_the_browser_keeps() {
+    // §7.6: the cookie's `Secure` follows the browser's scheme. A plain-HTTP Hub once got
+    // a `Secure` cookie anyway — the login answered 200 while the browser silently dropped
+    // it, so no session ever held (raw-socket tests never noticed; only browsers enforce).
+    let both = start().await;
+    let base = format!("/u/{}/", both.uuid);
+    let (status, head, _body) = http(
+        both.hub_addr,
+        "POST",
+        &format!("{base}api/login"),
+        &[
+            ("content-type", "application/json"),
+            (
+                "origin",
+                &format!("http://127.0.0.1:{}", both.hub_addr.port()),
+            ),
+        ],
+        &format!("{{\"password\":\"{PASSWORD}\",\"device\":\"cookie-test\",\"remember\":false}}"),
+    )
+    .await;
+    assert_eq!(status, 200, "login through the hub: {head}");
+    let cookie_line = head
+        .lines()
+        .find(|line| line.to_ascii_lowercase().starts_with("set-cookie:"))
+        .expect("a Set-Cookie on login");
+    assert!(cookie_line.contains("HttpOnly"), "{cookie_line}");
+    assert!(cookie_line.contains(&format!("Path={base}")), "{cookie_line}");
+    assert!(
+        !cookie_line.to_ascii_lowercase().contains("secure"),
+        "a plain-HTTP browser drops a Secure cookie: {cookie_line}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -496,3 +706,671 @@ async fn a_restarted_hub_is_rejoined_with_the_same_link() {
     second.task.abort();
     let _ = second.task.await;
 }
+
+// ==== The multi-PC joint suite (§20.12): one Hub, several real daemons ====
+
+/// One Hub (kept by its `Arc` — the tests read its tunnel table) with a spawnable family of
+/// real daemons under one temp home: every §20.12 row that needs two PCs, a join key, or a
+/// device key carried across machines.
+struct Joint {
+    _dir: tempfile::TempDir,
+    hub: Arc<ggs_remote_hub::state::Hub>,
+    hub_addr: std::net::SocketAddr,
+}
+
+async fn joint(join_key: &str) -> Joint {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = ggs_remote_hub::state::Hub::new(ggs_remote_hub::config::Config {
+        join_key: join_key.to_owned(),
+        ..Default::default()
+    });
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let hub_addr = listener.local_addr().unwrap();
+    let app = ggs_remote_hub::router(hub.clone())
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    Joint {
+        _dir: dir,
+        hub,
+        hub_addr,
+    }
+}
+
+impl Joint {
+    /// One real daemon under its own home — listeners up, no password, no Hub settings yet.
+    fn daemon(&self, name: &str) -> Arc<Daemon> {
+        let paths = Paths::at(self._dir.path().join(name), self._dir.path().to_path_buf());
+        paths.ensure().unwrap();
+        let config = Config {
+            port: 0,
+            bind: "127.0.0.1".into(),
+            tls: TlsConfig {
+                mode: TlsMode::None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.save(&paths).unwrap();
+        let daemon = Daemon::new(paths, config).unwrap();
+        let run = daemon.clone();
+        tokio::spawn(async move { ggs_remote::server::run(run).await });
+        daemon
+    }
+
+    /// Password set, tunnel up: answers this PC's uuid once it is Online.
+    async fn online(&self, daemon: &Arc<Daemon>, password: &str, join_key: &str) -> String {
+        daemon.auth.set_password(password).await.unwrap();
+        daemon
+            .hub
+            .connect(Settings {
+                url: format!("http://127.0.0.1:{}", self.hub_addr.port()),
+                join_key: join_key.to_owned(),
+                fingerprint: String::new(),
+            })
+            .unwrap();
+        wait_online(daemon).await
+    }
+}
+
+async fn wait_online(daemon: &Arc<Daemon>) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Status::Online { uuid, .. } = daemon.hub.snapshot() {
+            return uuid;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the daemon never went Online: {:?}",
+            daemon.hub.snapshot()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// One admin call on a daemon's loopback listener — the extension's own channel, Bearer and
+/// all (the same wire the Remote Access page's buttons ride).
+async fn admin(daemon: &Arc<Daemon>, path: &str, body: &str) -> (u16, String, String) {
+    let mut port = 0;
+    for _ in 0..200 {
+        port = daemon.loopback_port.load(Ordering::Relaxed);
+        if port != 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(port != 0, "the daemon's loopback listener never came up");
+    http(
+        std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        "POST",
+        path,
+        &[
+            ("content-type", "application/json"),
+            ("authorization", &format!("Bearer {}", daemon.admin_token)),
+        ],
+        body,
+    )
+    .await
+}
+
+/// Drain a browser socket until the server closes it; answers the close code.
+async fn await_close(ws: &mut Ws) -> u16 {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let message = tokio::time::timeout_at(deadline, ws.next())
+            .await
+            .expect("a close within 5 s")
+            .unwrap()
+            .unwrap();
+        if let Message::Close(frame) = message {
+            return frame.map(|f| f.code).map(|c| c.into()).unwrap_or(0);
+        }
+    }
+}
+
+/// A fake GGS instance on the control channel — the asset source of a joint PC. Heartbeat
+/// pings are answered on the way through every read.
+struct FakeInstance {
+    rx: RecvHalf,
+    tx: SendHalf,
+}
+
+impl FakeInstance {
+    async fn connect(daemon: &Arc<Daemon>, id: &str) -> FakeInstance {
+        let endpoint = daemon.paths.control_endpoint();
+        #[cfg(windows)]
+        let name = {
+            use interprocess::local_socket::{GenericNamespaced, ToNsName};
+            endpoint.as_str().to_ns_name::<GenericNamespaced>().unwrap()
+        };
+        #[cfg(not(windows))]
+        let name = {
+            use interprocess::local_socket::{GenericFilePath, ToFsName};
+            endpoint.as_str().to_fs_name::<GenericFilePath>().unwrap()
+        };
+        let stream = Stream::connect(name).await.unwrap();
+        let (rx, tx) = stream.split();
+        let mut fake = FakeInstance { rx, tx };
+        fake.send(&FromInstance::Register {
+            instance_id: id.into(),
+            pid: std::process::id(),
+            version: "0.1.10".into(),
+            title: "repo".into(),
+            folders: vec!["C:/repo".into()],
+            visible: true,
+            remote_host: false,
+            launch: LaunchSpec::default(),
+        })
+        .await;
+        match fake.recv().await {
+            ToInstance::Welcome { .. } => {}
+            other => panic!("expected Welcome, got {other:?}"),
+        }
+        fake
+    }
+
+    async fn send(&mut self, message: &FromInstance) {
+        self.tx
+            .write_all(&control_msg::encode(message))
+            .await
+            .unwrap();
+    }
+
+    /// The next message that is not a heartbeat ping (pings answered on the way).
+    async fn recv(&mut self) -> ToInstance {
+        loop {
+            let body = tokio::time::timeout(
+                Duration::from_secs(5),
+                control_msg::read_message(&mut self.rx),
+            )
+            .await
+            .expect("a control message within 5 s")
+            .unwrap();
+            match control_msg::decode::<ToInstance>(&body).unwrap() {
+                ToInstance::Ping { nonce } => self.send(&FromInstance::Pong { nonce }).await,
+                other => return other,
+            }
+        }
+    }
+
+    /// `None` when nothing but heartbeats arrived within `ms` — asserting a tunnel was
+    /// never asked.
+    async fn quiet_for(&mut self, ms: u64) -> Option<ToInstance> {
+        tokio::time::timeout(Duration::from_millis(ms), self.recv())
+            .await
+            .ok()
+    }
+
+    /// Answer the next FetchAsset with a fixed body, asserting the path it asked for.
+    async fn serve_asset(&mut self, want_path: &str, content_type: &str, body: &str) {
+        match self.recv().await {
+            ToInstance::FetchAsset { req, path, .. } => {
+                assert_eq!(path, want_path);
+                self.send(&FromInstance::AssetReply {
+                    req,
+                    status: 200,
+                    content_type: content_type.into(),
+                    etag: String::new(),
+                    body: body.as_bytes().to_vec(),
+                    done: true,
+                })
+                .await;
+            }
+            other => panic!("expected FetchAsset for {want_path}, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_pcs_through_one_hub_never_touch_each_other() {
+    // The M9 exit criterion: two PCs behind one Hub, served at once, neither hearing the
+    // other. Each daemon keeps its own password and session store — a cookie minted on A's
+    // link is just a random string to B (the Playwright row's rule, at the wire level).
+    let j = joint("").await;
+    let a = j.daemon("a");
+    let uuid_a = j.online(&a, PASSWORD, "").await;
+    let b = j.daemon("b");
+    let uuid_b = j.online(&b, "plum-trellis-88", "").await;
+    assert_ne!(uuid_a, uuid_b);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if j.hub.tunnel_count() == 2 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "both tunnels must be live together: {}",
+            j.hub.tunnel_count()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let (cookie_a, _csrf) = login_through(j.hub_addr, &uuid_a, PASSWORD).await;
+    let (cookie_b, _csrf) = login_through(j.hub_addr, &uuid_b, "plum-trellis-88").await;
+
+    // A's session on B's link, and B's on A's: both refused (401), both directions.
+    let (status, _head, _body) = http(
+        j.hub_addr,
+        "GET",
+        &format!("/u/{uuid_b}/api/session"),
+        &[("cookie", &cookie_a)],
+        "",
+    )
+    .await;
+    assert_eq!(status, 401, "A's cookie must not open B's link");
+    let (status, _head, _body) = http(
+        j.hub_addr,
+        "GET",
+        &format!("/u/{uuid_a}/api/session"),
+        &[("cookie", &cookie_b)],
+        "",
+    )
+    .await;
+    assert_eq!(status, 401, "B's cookie must not open A's link");
+    // Each own link still answers its own cookie.
+    let (status, _head, _body) = http(
+        j.hub_addr,
+        "GET",
+        &format!("/u/{uuid_a}/api/session"),
+        &[("cookie", &cookie_a)],
+        "",
+    )
+    .await;
+    assert_eq!(status, 200);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wrong_join_key_is_refused_until_the_right_one_is_saved() {
+    // The Hub's join key end to end (§20.3): a wrong key answers T_REJECTED and the daemon
+    // reports it; saving the right key through the page's one-setting update retries at
+    // once — no reconnect ceremony, no waiting out the backoff.
+    let j = joint("sesame").await;
+    let a = j.daemon("a");
+    a.auth.set_password(PASSWORD).await.unwrap();
+    a.hub
+        .connect(Settings {
+            url: format!("http://127.0.0.1:{}", j.hub_addr.port()),
+            join_key: "open".into(),
+            fingerprint: String::new(),
+        })
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if matches!(&a.hub.snapshot(), Status::Rejected(reason) if reason == "join-key") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the wrong join key must surface as Rejected(join-key): {:?}",
+            a.hub.snapshot()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    a.hub.update(|s| s.join_key = "sesame".into()).unwrap();
+    let uuid = wait_online(&a).await;
+    let (cookie, _csrf) = login_through(j.hub_addr, &uuid, PASSWORD).await;
+    let (status, _head, _body) = http(
+        j.hub_addr,
+        "GET",
+        &format!("/u/{uuid}/api/session"),
+        &[("cookie", &cookie)],
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "the link must serve after the key is fixed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_link_change_closes_the_old_link_at_once() {
+    // §20.1's "更换链接": the button's confirm text promises the old link stops working
+    // immediately. The running tunnel carries the OLD key — the moment it drops, the Hub
+    // retires the old uuid and the daemon reconnects under the new one.
+    let j = joint("").await;
+    let a = j.daemon("a");
+    let old_uuid = j.online(&a, PASSWORD, "").await;
+    let (cookie, csrf) = login_through(j.hub_addr, &old_uuid, PASSWORD).await;
+    let mut ws = browser_ws(j.hub_addr, &old_uuid, &cookie).await;
+    ws.send(Message::Binary(
+        Frame::msgpack(
+            ty::HELLO,
+            &serde_json::json!({ "proto": 1, "client": "web", "csrf": csrf }),
+        )
+        .encode()
+        .into(),
+    ))
+    .await
+    .unwrap();
+
+    // "Change link" through the extension's admin channel.
+    let (status, _head, body) = admin(&a, "/admin/hub/relink", "{}").await;
+    assert_eq!(status, 200, "{body}");
+    let new_uuid = serde_json::from_str::<serde_json::Value>(&body).unwrap()["uuid"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(new_uuid, old_uuid);
+
+    // The open session closes with the old tunnel (the Hub's pc-offline close).
+    let code = await_close(&mut ws).await;
+    assert_ne!(code, 0, "the old link's sessions must close");
+    // The daemon is back Online under the new uuid — same Hub, same password.
+    assert_eq!(wait_online(&a).await, new_uuid);
+
+    // The old link is retired: the not-online page, not a stale workbench.
+    let mut retired = false;
+    for _ in 0..100 {
+        let (status, _head, body) =
+            http(j.hub_addr, "GET", &format!("/u/{old_uuid}/login"), &[], "").await;
+        if status == 503 && body.contains("not online") {
+            retired = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(retired, "the old link must answer the not-online page");
+
+    // And the new link serves a fresh login.
+    let (_cookie, _csrf) = login_through(j.hub_addr, &new_uuid, PASSWORD).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_exported_key_carries_the_link_to_the_second_pc() {
+    // §20.1's "换电脑": the device key sealed under the access password moves the link to a
+    // new PC. The second connection with the same key replaces the first (§20.4): the old
+    // PC hears T_REPLACED and stops retrying; the link itself — same uuid — now serves the
+    // new PC's password.
+    let j = joint("").await;
+    let a = j.daemon("old");
+    let uuid = j.online(&a, PASSWORD, "").await;
+
+    let (status, _head, body) = admin(
+        &a,
+        "/admin/hub/export-key",
+        &format!("{{\"password\":\"{PASSWORD}\"}}"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let blob = serde_json::from_str::<serde_json::Value>(&body).unwrap()["data"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // The second PC: its own access password, the imported key. A wrong password never
+    // installs anything.
+    let b = j.daemon("new");
+    b.auth.set_password("vellum-cactus-5").await.unwrap();
+    let (status, _head, _body) = admin(
+        &b,
+        "/admin/hub/import-key",
+        &format!("{{\"password\":\"wrong\",\"data\":\"{blob}\"}}"),
+    )
+    .await;
+    assert_eq!(status, 400, "a wrong export password must be refused");
+    let (status, _head, body) = admin(
+        &b,
+        "/admin/hub/import-key",
+        &format!("{{\"password\":\"{PASSWORD}\",\"data\":\"{blob}\"}}"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let imported = serde_json::from_str::<serde_json::Value>(&body).unwrap()["uuid"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(imported, uuid, "the imported key must keep the same link");
+
+    // B connects with the same Hub: same key, same uuid — the Hub replaces A's tunnel.
+    b.hub
+        .connect(Settings {
+            url: format!("http://127.0.0.1:{}", j.hub_addr.port()),
+            join_key: String::new(),
+            fingerprint: String::new(),
+        })
+        .unwrap();
+    assert_eq!(wait_online(&b).await, uuid);
+
+    // A heard T_REPLACED: the status says so and the loop parks (no auto-retry, §20.4).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if a.hub.snapshot() == Status::Replaced {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the displaced PC must report Replaced: {:?}",
+            a.hub.snapshot()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // The link now serves B: its password in, the old PC's refused.
+    let (cookie, _csrf) = login_through(j.hub_addr, &uuid, "vellum-cactus-5").await;
+    let (status, _head, _body) = http(
+        j.hub_addr,
+        "GET",
+        &format!("/u/{uuid}/api/session"),
+        &[("cookie", &cookie)],
+        "",
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, head, _body) = http(
+        j.hub_addr,
+        "POST",
+        &format!("/u/{uuid}/api/login"),
+        &[
+            ("content-type", "application/json"),
+            (
+                "origin",
+                &format!("http://127.0.0.1:{}", j.hub_addr.port()),
+            ),
+        ],
+        &format!(
+            "{{\"password\":\"{PASSWORD}\",\"device\":\"joint\",\"remember\":false}}"
+        ),
+    )
+    .await;
+    assert_eq!(status, 401, "the old PC's password is gone: {head}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_browser_session_resumes_when_the_tunnel_returns() {
+    // §20.12's "隧道恢复后浏览器会话续上": the tunnel dies under a browser session — the
+    // session parks (not retired), the missed WINDOWS lands in the resume ring, and the
+    // browser that reconnects through the recovered tunnel resumes onto the same state.
+    let j = joint("").await;
+    let a = j.daemon("a");
+    let uuid = j.online(&a, PASSWORD, "").await;
+    let (cookie, csrf) = login_through(j.hub_addr, &uuid, PASSWORD).await;
+
+    let mut ws = browser_ws(j.hub_addr, &uuid, &cookie).await;
+    ws.send(Message::Binary(
+        Frame::msgpack(
+            ty::HELLO,
+            &serde_json::json!({ "proto": 1, "client": "web", "csrf": csrf }),
+        )
+        .encode()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let mut sid = None;
+    let mut last_seq = 0u32;
+    for _ in 0..12 {
+        let message = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let Message::Binary(bytes) = message else {
+            continue;
+        };
+        for frame in Frame::decode_all(&bytes).unwrap_or_default() {
+            if frame.ty == ty::HELLO_ACK {
+                sid = frame.decode_msgpack::<HelloAck>().map(|ack| ack.sid);
+            } else if frame.seq > last_seq {
+                last_seq = frame.seq;
+            }
+        }
+        if sid.is_some() && last_seq > 0 {
+            break;
+        }
+    }
+    let sid = sid.expect("a HELLO_ACK with a sid");
+    assert!(last_seq > 0, "the initial WINDOWS push carries a seq");
+
+    // The tunnel dies (a settings touch restarts it — the same path a join-key save takes).
+    a.hub.update(|_| {}).unwrap();
+    // The Hub closes the browser socket with the tunnel (4503 pc-offline).
+    let code = await_close(&mut ws).await;
+    assert_eq!(code, 4503, "the browser closes as the tunnel dies");
+    // Back online on the same link — same device key, same uuid.
+    assert_eq!(wait_online(&a).await, uuid);
+
+    // While the browser is away, a window registers: the WINDOWS push must land in the
+    // parked connection's ring (a brief settle lets the old session task park first).
+    let _instance = FakeInstance::connect(&a, "ggs-live-1").await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Resume: the same sid, everything after last_seq.
+    let mut ws = browser_ws(j.hub_addr, &uuid, &cookie).await;
+    ws.send(Message::Binary(
+        Frame::msgpack(
+            ty::HELLO,
+            &serde_json::json!({
+                "proto": 1, "client": "web", "csrf": csrf,
+                "resume": { "sid": sid, "lastSeq": last_seq }
+            }),
+        )
+        .encode()
+        .into(),
+    ))
+    .await
+    .unwrap();
+
+    let mut resumed = None;
+    let mut replayed = Vec::new();
+    for _ in 0..12 {
+        let message = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let Message::Binary(bytes) = message else {
+            continue;
+        };
+        for frame in Frame::decode_all(&bytes).unwrap_or_default() {
+            if frame.ty == ty::HELLO_ACK {
+                let ack = frame.decode_msgpack::<HelloAck>().expect("a HELLO_ACK");
+                assert_eq!(ack.sid, sid, "the resumed session keeps its sid");
+                resumed = Some(ack.resumed);
+            } else if frame.ty == ty::WINDOWS {
+                replayed.push(frame);
+            }
+        }
+        if resumed == Some(true) && !replayed.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(resumed, Some(true), "the session must resume, not restart");
+    let missed: Vec<serde_json::Value> =
+        replayed.iter().filter_map(|f| f.decode_msgpack()).collect();
+    assert!(
+        missed.iter().any(|w| w["instances"]
+            .as_array()
+            .is_some_and(|list| list.iter().any(|i| i["id"] == "ggs-live-1"))),
+        "the WINDOWS registered while away must replay: {missed:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_shared_cache_answers_immutable_assets_across_pcs() {
+    // §20.6's cross-PC cache: only the workbench's immutable build artifacts are shared —
+    // every PC ships the same bytes, so the Hub may answer them for any tunnel without
+    // waking it. A mutable page is never cached: every fetch rides its own tunnel.
+    let j = joint("").await;
+    let a = j.daemon("a");
+    let uuid_a = j.online(&a, PASSWORD, "").await;
+    let b = j.daemon("b");
+    let uuid_b = j.online(&b, "quartz-lantern-3", "").await;
+    let (cookie_a, _csrf) = login_through(j.hub_addr, &uuid_a, PASSWORD).await;
+    let (cookie_b, _csrf) = login_through(j.hub_addr, &uuid_b, "quartz-lantern-3").await;
+    let mut inst_a = FakeInstance::connect(&a, "ggs-a").await;
+    let mut inst_b = FakeInstance::connect(&b, "ggs-b").await;
+
+    // PC A serves one hashed (immutable) asset through its own link.
+    let hashed = "/w/ggs-a/v/0.1.10/assets/remote-Ab12Cd34.js";
+    let path = format!("/u/{uuid_a}{hashed}");
+    let cookie = cookie_a.clone();
+    let fetch = tokio::spawn(async move {
+        http(j.hub_addr, "GET", &path, &[("cookie", &cookie)], "").await
+    });
+    inst_a
+        .serve_asset("assets/remote-Ab12Cd34.js", "text/javascript", "from-pc-a")
+        .await;
+    let (status, _head, body) = tokio::time::timeout(Duration::from_secs(2), fetch)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, "from-pc-a");
+
+    // The same asset under B's OWN instance name — a browser on B's link asks B's windows,
+    // whatever their ids are. Every PC ships the same bytes for the same version and hashed
+    // name, so the Hub's shared cache answers A's copy without waking B's tunnel.
+    let path = format!("/u/{uuid_b}/w/ggs-b/v/0.1.10/assets/remote-Ab12Cd34.js");
+    let cookie = cookie_b.clone();
+    let fetch = tokio::spawn(async move {
+        http(j.hub_addr, "GET", &path, &[("cookie", &cookie)], "").await
+    });
+    let asked = inst_b.quiet_for(300).await;
+    assert!(
+        asked.is_none(),
+        "the shared cache must answer without waking B's tunnel: {asked:?}"
+    );
+    let (status, _head, body) = tokio::time::timeout(Duration::from_secs(2), fetch)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(
+        body, "from-pc-a",
+        "the immutable asset must arrive from the shared cache, byte-for-byte A's"
+    );
+
+    // A mutable page is never cached: each fetch reaches B's own instance and serves what
+    // it answers now.
+    let page = "/w/ggs-b/v/0.1.10/remote.html";
+    let path = format!("/u/{uuid_b}{page}");
+    let cookie = cookie_b.clone();
+    let fetch = tokio::spawn(async move {
+        http(j.hub_addr, "GET", &path, &[("cookie", &cookie)], "").await
+    });
+    inst_b.serve_asset("remote.html", "text/html", "b-first").await;
+    let (status, _head, body) = tokio::time::timeout(Duration::from_secs(2), fetch)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, "b-first");
+    let path = format!("/u/{uuid_b}{page}");
+    let cookie = cookie_b.clone();
+    let fetch = tokio::spawn(async move {
+        http(j.hub_addr, "GET", &path, &[("cookie", &cookie)], "").await
+    });
+    inst_b
+        .serve_asset("remote.html", "text/html", "b-second")
+        .await;
+    let (status, _head, body) = tokio::time::timeout(Duration::from_secs(2), fetch)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, "b-second");
+}
+
