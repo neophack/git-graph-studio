@@ -142,18 +142,42 @@ pub fn folder_in_root(folder: &Path, root: &Path) -> bool {
 }
 
 fn canonicalize_lenient(path: &Path) -> Option<PathBuf> {
-    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    // Walk up from the end until an ancestor exists, resolving `.`/`..` in the missing
+    // tail **lexically** as we go — `a/../repo` with a nonexistent `a` must land on the
+    // ancestor plus `repo`, not fall apart (`Path::file_name` alone returns None on a
+    // `..` segment, and a plain stack makes `..` cancel the wrong neighbour when it is
+    // met right-to-left). A leftover `skip` pops real components off the found ancestor.
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut skip = 0usize;
     let mut cursor = path;
     loop {
         match std::fs::canonicalize(cursor) {
             Ok(mut canonical) => {
-                for part in missing.iter().rev() {
+                for _ in 0..skip {
+                    if !canonical.pop() {
+                        return None;
+                    }
+                }
+                for part in tail.iter().rev() {
                     canonical.push(part);
                 }
                 return Some(canonical);
             }
             Err(_) => {
-                missing.push(cursor.file_name()?.to_os_string());
+                // `Path::file_name` answers None for a `..`-terminated path — the raw
+                // component is the only honest view of the last segment.
+                match cursor.components().next_back() {
+                    Some(std::path::Component::Normal(name)) => {
+                        if skip > 0 {
+                            skip -= 1;
+                        } else {
+                            tail.push(name.to_os_string());
+                        }
+                    }
+                    Some(std::path::Component::ParentDir) => skip += 1,
+                    Some(std::path::Component::CurDir) => {}
+                    _ => return None,
+                }
                 cursor = cursor.parent()?;
             }
         }
@@ -656,6 +680,15 @@ mod tests {
         assert!(folder_in_root(&root.join("workspace").join("repo"), &root));
         assert!(folder_in_root(
             &root.join("workspace").join("a").join("..").join("repo"),
+            &root
+        ));
+        // A `..` that climbs past a missing tail segment pops the found ancestor.
+        assert!(folder_in_root(
+            &root
+                .join("workspace")
+                .join("missing")
+                .join("..")
+                .join("repo"),
             &root
         ));
         assert!(!folder_in_root(&dir.path().join("elsewhere"), &root));
