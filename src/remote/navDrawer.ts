@@ -154,10 +154,13 @@ export function openDrawer(menus: () => MenuDefinition[]): void {
 		}, { active: entry.id === page, badge: tabBadge(entry.id)?.text })
 	);
 
+	// The rows only a browser session can serve (this PC's windows, transfers, Data Saver)
+	// are left out where the drawer runs in the PC's own window — the replica's phone mode,
+	// whose viewer carries its own Windows button.
 	const workspaceRows = [
 		commandRow('go-to-file', t('remote.appbar.quickOpen'), 'workbench.quickOpen'),
 		commandRow('terminal-cmd', t('remote.drawer.palette'), 'workbench.commandPalette'),
-		commandRow('multiple-windows', t('remote.drawer.windows'), 'remote.switchWindow', { badge: windows > 1 ? String(windows) : undefined }),
+		...(env ? [commandRow('multiple-windows', t('remote.drawer.windows'), 'remote.switchWindow', { badge: windows > 1 ? String(windows) : undefined })] : []),
 		commandRow('folder-opened', t('remote.files.openFolder'), 'workbench.openFolder')
 	];
 	const transferRows = [
@@ -179,7 +182,7 @@ export function openDrawer(menus: () => MenuDefinition[]): void {
 	}, { trailing: toggleSwitch(saver) });
 	// Settings opens the phone's own page (settingsPage.ts), never the desktop dialog the
 	// command would show: the 720 px two-pane window is unreadable at this width.
-	const settingsRows = [saverRow, row(codicon('settings-gear'), t('remote.drawer.settings'), () => {
+	const settingsRows = [...(env ? [saverRow] : []), row(codicon('settings-gear'), t('remote.drawer.settings'), () => {
 		closeDrawer();
 		openSettingsPage();
 	})];
@@ -189,7 +192,7 @@ export function openDrawer(menus: () => MenuDefinition[]): void {
 	body.append(
 		section(t('remote.drawer.pages'), pages),
 		section(t('remote.drawer.workspace'), workspaceRows),
-		section(t('remote.drawer.transfer'), transferRows),
+		...(env ? [section(t('remote.drawer.transfer'), transferRows)] : []),
 		section(t('remote.drawer.menus'), menuRows),
 		section(t('remote.drawer.preferences'), settingsRows)
 	);

@@ -1,7 +1,9 @@
-// remote.html's entry (docs/ggs-remote-plan.md §9.2): the remote workbench boots exactly
-// like the desktop one, after the Tauri seam has been pointed at the WebSocket — connect,
-// HELLO, ATTACH, install the session and the internals stand-in, set the form factor, then
-// load the very same `main.ts` the app runs.
+// remote.html's entry. By default the page is a replica viewer (docs/ggs-remote-plan.md §22):
+// connect, HELLO, ATTACH, then show the PC window's live DOM copy — the one real workbench
+// runs on the PC, so a reload or a closed tab restarts nothing there. `?frontend=1` keeps the
+// older mode (§9.2): the remote workbench boots exactly like the desktop one, after the Tauri
+// seam has been pointed at the WebSocket — install the session and the internals stand-in,
+// set the form factor, then load the very same `main.ts` the app runs.
 import { Transport, basePathOf, instanceOf, type Notice } from './transport';
 import { setRemoteEnv } from './session';
 import { installInternals } from './tauriShim/internals';
@@ -17,6 +19,11 @@ function status(text: string): void {
 	if (line) line.textContent = text;
 }
 
+/** Whether this page runs the browser-side workbench instead of the replica viewer. */
+function frontendMode(): boolean {
+	return new URLSearchParams(location.search).get('frontend') === '1';
+}
+
 async function boot(): Promise<void> {
 	const basePath = basePathOf(location.pathname);
 	const instance = instanceOf(location.pathname);
@@ -24,13 +31,16 @@ async function boot(): Promise<void> {
 		location.replace(new URL('windows', new URL(basePath, location.href)).href);
 		return;
 	}
+	const replica = !frontendMode();
 	// Through a Hub every PC shares one origin: this PC's storage keys get its own prefix
 	// before any module reads them (§20.6.1).
 	installScopedStorage(basePath);
 	// The marker every shared module reads to take its remote-mode defaults (§10.3): the
 	// open-size threshold below all, others as they grow one.
-	document.documentElement.setAttribute('data-remote-shell', '');
-	initResponsive();
+	if (!replica) {
+		document.documentElement.setAttribute('data-remote-shell', '');
+		initResponsive();
+	}
 	const manifest = document.createElement('link');
 	manifest.rel = 'manifest';
 	manifest.href = new URL('manifest.webmanifest', new URL(basePath, location.href)).href;
@@ -49,7 +59,23 @@ async function boot(): Promise<void> {
 	});
 	const attached = await transport.connect();
 	setRemoteEnv({ transport, attached, basePath });
+	if ('serviceWorker' in navigator && window.isSecureContext) {
+		void navigator.serviceWorker.register(new URL('sw.js', new URL(basePath, location.href)).href, { scope: basePath }).catch(() => undefined);
+	}
+	if (replica) {
+		const { bootMirrorViewer } = await import('./mirror/viewerBoot');
+		watchNotices(transport);
+		bootMirrorViewer(transport, attached, basePath);
+		return;
+	}
 	installInternals();
+	watchNotices(transport);
+	status('Loading Git Graph Studio…');
+	await import('../main');
+	installRemoteShell();
+}
+
+function watchNotices(transport: Transport): void {
 	transport.onNotice((notice: Notice) => {
 		switch (notice.kind) {
 			case 'relay-restarted':
@@ -68,12 +94,6 @@ async function boot(): Promise<void> {
 	});
 	document.addEventListener('visibilitychange', () => transport.onVisibility(document.visibilityState === 'visible'));
 	window.addEventListener('online', () => transport.onVisibility(true));
-	if ('serviceWorker' in navigator && window.isSecureContext) {
-		void navigator.serviceWorker.register(new URL('sw.js', new URL(basePath, location.href)).href, { scope: basePath }).catch(() => undefined);
-	}
-	status('Loading Git Graph Studio…');
-	await import('../main');
-	installRemoteShell();
 }
 
 boot().catch((error) => {

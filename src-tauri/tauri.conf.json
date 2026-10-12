@@ -24,7 +24,8 @@
         "backgroundColor": "#1f1f1f",
         "decorations": false,
         "shadow": true,
-        "resizable": true
+        "resizable": true,
+        "backgroundThrottling": "disabled"
       }
     ],
     "security": {

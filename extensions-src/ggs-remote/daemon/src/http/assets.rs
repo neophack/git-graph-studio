@@ -77,8 +77,10 @@ pub async fn fetch_from_instance(
     }
 }
 
-/// Files whose names carry a content hash never change: cache them for a year.
+/// Files whose names carry a content hash never change: cache them for a year — the
+/// remote build's and the desktop build's (`main/assets/…`, the replica's stylesheets).
 fn immutable(path: &str) -> bool {
+    let path = path.strip_prefix("main/").unwrap_or(path);
     path.starts_with("assets/")
         && path
             .rsplit('/')
@@ -350,6 +352,9 @@ mod tests {
         assert!(super::immutable("assets/workbench-3f9a.js"));
         assert!(!super::immutable("remote.html"));
         assert!(!super::immutable("sw.js"));
+        // The desktop build's stylesheets the replica viewer renders with.
+        assert!(super::immutable("main/assets/index-9c1e.css"));
+        assert!(!super::immutable("main/theme/dark-modern.css"));
     }
 
     #[test]

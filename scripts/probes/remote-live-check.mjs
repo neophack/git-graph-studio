@@ -59,7 +59,7 @@ function portOpen(port) {
 }
 
 // ---- frames (the header by hand; MessagePack from the daemon pages' codec) ----
-const T = { HELLO: 1, HELLO_ACK: 2, WINDOWS: 3, ATTACH: 4, ATTACHED: 5, INVOKE: 0x10, RESULT: 0x11, LISTEN: 0x30, EVENT: 0x32, INSTANCE_CLOSE: 0x0a, NOTICE: 0x60, CLOSE: 0x7f, PING: 0x51 };
+const T = { HELLO: 1, HELLO_ACK: 2, WINDOWS: 3, ATTACH: 4, ATTACHED: 5, INVOKE: 0x10, RESULT: 0x11, LISTEN: 0x30, EVENT: 0x32, EMIT: 0x33, INSTANCE_CLOSE: 0x0a, NOTICE: 0x60, CLOSE: 0x7f, PING: 0x51 };
 function frame(type, enc, payload, stream = 0) {
 	const body = typeof payload === 'string' ? Buffer.from(payload) : Buffer.from(payload ?? []);
 	const head = Buffer.alloc(20);
@@ -71,26 +71,38 @@ function frame(type, enc, payload, stream = 0) {
 }
 const mp = (type, body, stream = 0) => frame(type, 2, encodeMsgpack(body), stream);
 const json = (type, body, stream = 0) => frame(type, 1, JSON.stringify(body), stream);
+/** MORE fragment chains being joined, by type and stream (§6.1). */
+const partials = new Map();
 function decode(data) {
 	const bytes = Buffer.from(data);
 	const out = [];
 	for (let at = 0; at + 20 <= bytes.length; ) {
 		const len = bytes.readUInt32LE(at + 16);
 		const flags = bytes[at + 1];
-		const payload = bytes.subarray(at + 20, at + 20 + len);
+		let payload = bytes.subarray(at + 20, at + 20 + len);
+		const key = `${bytes[at]}:${bytes.readUInt32LE(at + 8)}`;
+		if (flags & 0x20) {
+			partials.set(key, [...(partials.get(key) ?? []), Buffer.from(payload)]);
+			at += 20 + len;
+			continue;
+		}
+		if (partials.has(key)) {
+			payload = Buffer.concat([...partials.get(key), payload]);
+			partials.delete(key);
+		}
 		const enc = (flags & 0x0c) >> 2;
 		out.push({
 			type: bytes[at],
 			flags,
 			stream: bytes.readUInt32LE(at + 8),
-			body: enc === 2 && len ? decodeMsgpack(new Uint8Array(payload)) : enc === 1 && len ? JSON.parse(payload.toString('utf8')) : payload
+			body: enc === 2 && payload.length ? decodeMsgpack(new Uint8Array(payload)) : enc === 1 && payload.length ? JSON.parse(payload.toString('utf8')) : payload
 		});
 		at += 20 + len;
 	}
 	return out;
 }
 
-// ---- the browser phase: the real remote workbench in headless Edge over CDP ----
+// ---- the browser phase: the replica, then the browser-side workbench, in headless Edge ----
 const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 
 async function browserPhase(base, instance, port) {
@@ -163,7 +175,55 @@ async function browserPhase(base, instance, port) {
 	const extSettings = JSON.stringify({ 'ggsRemote.port': port, 'ggsRemote.bind': '127.0.0.1', 'ggsRemote.tlsMode': 'none' });
 	await evaluate(`localStorage.setItem('ggstudio.extSettings.ggs.ggs-remote', ${JSON.stringify(extSettings)})`);
 	const workbench = `${base}/w/${instance.id}/v/${instance.version}/remote.html`;
+
+	// ---- the replica (§22): the page is a live copy of the PC's hidden desktop window ----
+	const copy = `document.querySelector('.mirror-frame')?.contentDocument`;
+	// A point inside the copy, in page coordinates (the frame is scaled to fit).
+	const copyPoint = (pick) => evaluate(`(() => { const f = document.querySelector('.mirror-frame'); const d = f?.contentDocument; if (!d) return null; const el = (${pick})(d); if (!el) return null; const fr = f.getBoundingClientRect(); const r = el.getBoundingClientRect(); const s = fr.width / f.offsetWidth; return { x: fr.left + (r.left + r.width / 2) * s, y: fr.top + (r.top + r.height / 2) * s }; })()`);
+	const clickAt = async (point) => {
+		await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y });
+		await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+		await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+	};
 	await send('Page.navigate', { url: workbench });
+	const replicaUp = await waitFor(`(() => { const d = ${copy}; return !!d && d.querySelectorAll('#activitybar .activity-item').length > 0 && !document.getElementById('boot-splash'); })()`, 60000);
+	check('browser: replica — the PC window’s copy is on screen', replicaUp, replicaUp ? '' : String(await evaluate(`document.body.innerText.slice(0, 200)`).catch(() => '')));
+	const replicaExplorer = await waitFor(`/package\.json|README\.md/.test(${copy}?.getElementById('sidebar')?.innerText ?? '')`, 30000);
+	check('browser: replica — the copy shows the PC’s File Explorer', replicaExplorer);
+	const readme = await copyPoint(`(d) => [...d.querySelectorAll('#sidebar .row')].find((r) => /README\.md/.test(r.textContent ?? ''))`);
+	if (readme) await clickAt(readme);
+	const opened = await waitFor(`(() => { const cm = ${copy}?.querySelector('.cm-content'); return !!cm && (cm.textContent ?? '').trim().length > 100; })()`, 20000);
+	check('browser: replica — a click on the copy opens the file on the PC', opened, readme ? '' : 'no README row in the copy');
+	await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'p', code: 'KeyP', windowsVirtualKeyCode: 80, modifiers: 2 });
+	await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'p', code: 'KeyP', windowsVirtualKeyCode: 80, modifiers: 2 });
+	const quickOpen = await waitFor(`!!${copy}?.querySelector('.quick-input input')`, 10000);
+	if (quickOpen) await send('Input.insertText', { text: 'READ' });
+	const typed = quickOpen && (await waitFor(`(${copy}?.querySelector('.quick-input input')?.value ?? '') === 'READ'`, 10000));
+	check('browser: replica — keys and text reach the PC (Ctrl+P, then typing)', typed, quickOpen ? String(await evaluate(`${copy}?.querySelector('.quick-input input')?.value`)) : 'no quick open in the copy');
+	await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+	await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+	await shot('replica-desktop.png');
+	const reloadAt = Date.now();
+	await send('Page.reload');
+	const sameState = await waitFor(`(() => { const cm = ${copy}?.querySelector('.cm-content'); return !!cm && (cm.textContent ?? '').trim().length > 100; })()`, 30000);
+	check('browser: replica — a reload shows the same PC state (the file is still open)', sameState, `${Date.now() - reloadAt} ms`);
+	await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+	await send('Emulation.setTouchEmulationEnabled', { enabled: true });
+	const phoneReplica = await waitFor(`(() => { const d = ${copy}; return !!d && d.documentElement.dataset.formFactor === 'phone' && !!d.querySelector('.ggs-bottom-tabs:not([hidden])'); })()`, 20000);
+	check('browser: replica — a phone gets the PC window in the phone shell', phoneReplica, String(await evaluate(`JSON.stringify({ ff: ${copy}?.documentElement.dataset.formFactor, w: document.querySelector('.mirror-frame')?.offsetWidth })`)));
+	const scmTab = await copyPoint(`(d) => [...d.querySelectorAll('.ggs-bottom-tabs button')].find((b) => b.dataset.tab === 'scm')`);
+	if (scmTab) {
+		await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: scmTab.x, y: scmTab.y }] });
+		await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+	}
+	const phoneScm = await waitFor(`(() => { const side = ${copy}?.getElementById('sidebar'); const text = side?.innerText ?? ''; return !!side && !side.hidden && /(staged|changes|暂存|更改)/i.test(text); })()`, 20000);
+	check('browser: replica — a tap on the phone copy switches the PC to Source Control', phoneScm, scmTab ? '' : 'no SCM tab in the copy');
+	await shot('replica-phone.png');
+	await send('Emulation.clearDeviceMetricsOverride');
+	await send('Emulation.setTouchEmulationEnabled', { enabled: false });
+
+	// ---- the older browser-side workbench (`?frontend=1`) ----
+	await send('Page.navigate', { url: `${workbench}?frontend=1` });
 	const booted = await waitFor(`document.querySelectorAll('#activitybar .activity-item').length > 0 && !document.getElementById('boot-splash')`, 60000);
 	check('browser: the remote workbench booted', booted, booted ? '' : String(await evaluate(`document.getElementById('boot-splash')?.textContent ?? document.body.innerText.slice(0, 200)`).catch(() => '')));
 	const explorer = await waitFor(`/package\\.json|README\\.md|src/.test(document.getElementById('sidebar')?.innerText ?? '')`, 30000);
@@ -326,8 +386,9 @@ async function main() {
 	const attached = await next((f) => f.type === T.ATTACHED || f.type === T.NOTICE, 40000).catch(() => null);
 	check('ATTACH → the Relay webview connected', attached?.type === T.ATTACHED, attached ? JSON.stringify(attached.body) : 'timeout');
 	if (attached?.type !== T.ATTACHED) {
-		await sleep(2000);
-		console.error('--- app log on attach failure ---\n' + appLog.split('\n').slice(-25).join('\n') + '\n---');
+		await sleep(10000);
+		console.error('--- app log on attach failure ---\n' + appLog.split('\n').filter((l) => !l.startsWith('[boot]')).slice(-60).join('\n') + '\n---');
+		console.error('--- daemon log ---\n' + daemonLog.split('\n').slice(-25).join('\n') + '\n---');
 	}
 
 	let stream = 1;
@@ -349,6 +410,23 @@ async function main() {
 	check('a failing command rejects with its message', missing !== 'resolved', missing);
 	ws.send(mp(T.LISTEN, { event: 'studio://git-output' }, (stream += 2)));
 	check('event subscription accepted', true);
+
+	// The replica (§22): the --remote-host instance's desktop window is built hidden and is
+	// the one real frontend; a viewer's hello earns a snapshot of its live DOM.
+	const mirrorStream = (stream += 2);
+	ws.send(mp(T.LISTEN, { event: 'studio://mirror-down' }, mirrorStream));
+	const viewerId = attached?.body?.frontendId ?? 'remote/probe';
+	const mirrorUp = (payload) => ws.send(json(T.EMIT, { event: 'studio://mirror-up', payload: { ...payload, from: viewerId }, target: { kind: 'AnyLabel', label: 'main' } }));
+	let snap = null;
+	for (let attempt = 0; attempt < 6 && !snap; attempt++) {
+		// The hidden window's workbench may still be booting: hello again until it answers.
+		mirrorUp({ k: 'hello', vw: 1280, vh: 800, touch: false });
+		snap = await next((f) => f.type === T.EVENT && f.stream === mirrorStream && f.body?.payload?.k === 'snap', 10000).catch(() => null);
+	}
+	const snapText = snap ? JSON.stringify(snap.body.payload) : '';
+	check('replica: the hidden PC window answers a hello with a snapshot', Boolean(snap), snap ? `${Math.round(snapText.length / 1024)} KB, viewport ${JSON.stringify(snap.body.payload.vp)}` : 'no snapshot');
+	check('replica: the snapshot is the workbench', /activitybar/.test(snapText) && /statusbar/.test(snapText));
+	mirrorUp({ k: 'bye' });
 
 	if (existsSync(EDGE) && !process.argv.includes('--no-browser')) await browserPhase(base, instance, port);
 	else console.log('SKIP  the browser phase (no Edge, or --no-browser)');

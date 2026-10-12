@@ -14,6 +14,7 @@
 > 修订（2026-10-12，操作体验）：(1) §9.2 的横幅现在覆盖链路本身——Transport 新增 `onOffline`/`onOnline` 钩子（断线即报、重连后 4 s 致意，帧照常排队），boot 接线到 `remote.banner.offline`/`reconnected`（此前断线期间工作台看起来只是冻住）；(2) §20.5 的离线页改为脚本软轮询（15 s 节奏不变以避开离线探测预算、visibilitychange 即时一查、PC 上线的下一轮整体跳转；非 JS 环境 meta refresh 兜底；页面文字逐字节恒定），HTTP 层不再下发 `refresh` 头；(3) `playwright.remote.config.ts` 按 `executablePath` 探测加入 Firefox/WebKit 项目——缺引擎的机器只跑 chromium，不再成片启动失败。
 > 修订（2026-10-12，手机端设置页重设计）：§11.3 的“设置页单列”落地为专属全屏页面（`src/remote/settingsPage.ts`）——桌面设置对话框是 720 px 双栏窗口，170 px 分类栏在 390 px 屏上把行挤成 130 px 竖条，完全不可读；新页面为单列全屏：分类作下钻行（每级自右滑入、表头带返回步，手机返回键逐级弹出、最后关页——backStack 的单条历史项按级重新武装），布尔为行内开关、枚举/主题/语言从底部表单选择、数字在表单里 − 值 + 步进（按设置自身步长取整、夹取上下界）、文件关联目录为独立一级（后端 `assoc_list_defaults` 目录）、文本/JSON 扩展设置在表单里编辑（非法 JSON 拒收并提示）；根级搜索横跨全部类别与扩展声明；省流模式归入“远程访问”分类。数据源与桌面完全同源：`SETTING_DEFS` + `updateSetting`、扩展声明经 `saveExtSetting`，枚举写入统一走 `settings.ts` 的 `applyEnumSetting`（桌面对话框同样改走它）。抽屉的设置行与手机档的 `workbench.openSettings`（命令面板、扩展的 `workbench.action.openSettings`）都路由到该页（`installPhoneSettingsEntry`，离开手机档恢复桌面原命令）；`tests/remoteResponsive.test.ts` 的 settings page 组七用例回归，截图基线 `scripts/probes/remote-phone-shots.mjs` 增 11–13 三张。
 > 修订（2026-10-12，计划收口第三轮）：(1) §17.3 的远程垫片轮落地——`tests/remoteRound.ts` 把 tauriMock 的 invoke 引到真垫片链（tauriShim `invoke` → Transport → 帧编解码 → RelayEngine → 同一套脚本 handler），mock `Channel` 带 `toJSON` 流标记（`__GGS_CHAN__:<stream>`，relay 侧 revive，事件双向流动）；commandSweep 全命令在 tablet 标记下重跑 + phone 冒烟，uiSweep 整组在远程垫片下重跑（SCM/diff 断言改为轮询——wire 的往返让落点晚一拍；SCM 列表顺序在远程下不保证，按行名点击）；richHandlers 补 `list_dir_page`（远程资源管理器分页路径）。(2) §17.1 INSTANCE_RESTART 成功路径：`a_restart_kills_relaunches_and_waits_for_the_registration`——被注册 pid 终止、按注册的 LaunchSpec 重拉本测试二进制（`--exact restart_child_role --ignored` 的子角色，经 GGS_REMOTE_HOME 找到控制端点注册）、SPAWNED 应答新实例 id、WINDOWS 推送换人。(3) §7.10 idle_exit 单测两条（空闲计时先布防、到点才问退；有会话不问；0 分钟关闭）。(4) §17.4 三引擎矩阵：`playwright.remote.config.ts` 增加 Firefox/WebKit 项目；**发现并实测确认**——WebKit/Safari 不给 plain-HTTP localhost 豁免，`Secure` 会话 Cookie 被丢弃（登录永远回登录页）→ e2e fixture 全面改为 TLS 守护进程（`self-signed` + `ignoreHTTPSErrors`，即产品出厂形态），三引擎全绿；`visual-baseline.spec.ts` 按引擎×桌面/手机截登录页与离线页存 `target/studio/remote-e2e-shots/`（不提交像素基线——DOM 断言承载正确性，截图作肉眼比对记录）。
+> 修订（2026-10-12，远程原理改为副本，§22）：按所有者要求（“整个 GGS 都在 PC 上跑，远程网页只是一个副本显示，核心逻辑在 PC 上”）——远程页默认不再在浏览器里运行工作台，而是 PC 桌面窗口（可隐藏）的实时 DOM 副本；输入回传 PC 重放。浏览器刷新、关闭不再重启任何东西：Claude Code 的对话页面常驻 PC 窗口，关掉网页后对话继续，下次打开看到的就是正在工作的 Claude。手机观看时隐藏的 PC 窗口按手机尺寸重排并换上手机外壳，副本 1:1。旧的浏览器端工作台保留为 `?frontend=1`。
 
 ## 目录
 
@@ -39,6 +40,7 @@
 19. [风险与对策](#19-风险与对策)
 20. [多用户：自建中继服务器 Hub](#20-多用户自建中继服务器-hub)
 21. [待确认问题](#21-待确认问题)
+22. [副本模式：PC 是唯一前端](#22-副本模式pc-是唯一前端)
 
 ---
 
@@ -1781,3 +1783,38 @@ M9 依赖 M2（认证）和 M3（多窗口），可与 M5（响应式）并行�
 4. ~~链接方式~~：已确定为路径方式，`/u/<uuid>/`，UUID 对应用户（§20.1、§20.5）。
 5. 默认端口 47615 是否可以？
 6. 服务器自己部署（已确定）。是否需要端到端加密 M10？公网部署时 joinKey 默认留空（任何 ggs-remote 都能连）还是首次启动自动生成一个？（本计划默认留空，文档建议公网设置。）
+
+## 22. 副本模式：PC 是唯一前端
+
+### 22.1 为什么改
+
+§3.3 的“一个实例、多个前端”让远程浏览器运行一整份工作台：浏览器刷新等于前端重启，扩展 webview 页面（Claude Code 的对话页）的状态全在页面 JS 里，随标签页一起消失。Claude Code 的页面按 `retainContextWhenHidden: true` 设计，页面不会重载、也无法重新接上正在运行的 CLI 通道——刷新后旧通道成了孤儿，新页面是一张空白对话。所有者的要求是：整个 GGS 在 PC 上运行，远程只是副本。
+
+### 22.2 结构
+
+| 部分 | 位置 | 职责 |
+| ---- | ---- | ---- |
+| 录制 | `src/remote/mirror/recorder.ts`（PC 窗口内） | 节点编号；快照；MutationObserver → 操作批（add/rm/attr/text）；轮询表单值、滚动、CSSOM 规则、adoptedStyleSheets、视口；同源 iframe（扩展 webview 页）递归；URL 规范化为 app/ggs 令牌；脚本内容、事件属性、CSP meta 不过线 |
+| 重放 | `replay.ts`（PC） | 按目标框架自己的构造器派发 pointer/mouse/wheel/keyboard/input 事件，补齐合成事件没有的默认动作（按下聚焦、滚轮滚动、编辑键）；合成指针 id 的 pointer capture 由补丁接管 |
+| 主机 | `host.ts` + `hostStub.ts`（PC） | 观看者表（10 s hello、35 s 遗忘）；首个 hello 才加载录制器；最后一个观看者离开即停；焦点模拟、隐藏窗口尺寸适配 |
+| 观看 | `viewer.ts` + `viewerInput.ts` + `viewerBoot.ts`（浏览器） | 无脚本沙箱 iframe 中重建副本并缩放适配；序号缺口请求重新快照；鼠标、触摸（点按、拖动滚动、长按菜单、双指缩放留给浏览器）、隐藏文本框承接键盘/IME/手机软键盘 |
+| 手机 | `phoneShell.ts`（PC） | 窗口宽度 < 600（只可能来自手机观看者的适配）时 PC 窗口换上手机外壳（shell.ts + remote.css，指针按 coarse）；回到桌面尺寸即恢复 |
+
+通道：PC → 浏览器为应用事件 `studio://mirror-down`（Relay 转发给监听的会话，`to` 字段区分快照接收者）；浏览器 → PC 为 `studio://mirror-up`，`emitTo('main')`。
+
+### 22.3 PC 侧配套
+
+- `--remote-host` 实例建隐藏窗口（不再“无窗口”）；托盘/远程的 Show 先恢复桌面尺寸再显示。
+- 有观看者或为远程主机实例时，关闭窗口只隐藏（`remote_host_hide_main`）。
+- 有观看者时 `remote_mirror_focus` 经 WebView2 DevTools 协议开 `Emulation.setFocusEmulationEnabled`，隐藏窗口的页面仍按“有焦点”工作。
+- 隐藏窗口照常渲染（Claude 的流式文字靠 requestAnimationFrame）：Tauri 隐藏窗口不会把 WebView2 设为不可见，实测（2026-10-12）rAF 与 10 ms 计时器全速、`visibilityState` 为 visible。**不得**使用自定义 `additionalBrowserArgs`：同一用户数据目录下应用的所有实例共用一个 WebView2 浏览器进程，参数与已运行实例不同的实例根本建不出 webview（实测：装机版在运行时，带参数的调试实例连主窗口与 Relay 都无法创建）。macOS 另设 `backgroundThrottling: disabled`。
+- 守护进程 idle exit 的 `Quit` 带 `idle: true`，实例拒绝；默认 `idleExitMinutes` 改为 0。
+- 守护进程 app 资源路由新增 `main/…`：只放行桌面构建的 css/字体/图片，供副本渲染。
+
+### 22.4 已知取舍
+
+- 副本按 PC 布局显示（手机除外），字体差异会带来少量排版漂移；输入以“目标节点 + 相对位置 + 文本插入点”定位，不依赖像素一致。
+- canvas 内容、blob: 图片、PC 原生对话框（打开文件夹等）不进副本；PC 剪贴板操作在 PC 上，浏览器复制走 `copy` 请求 PC 选区。
+- 多个观看者共享同一个 PC 界面（同一焦点、同一滚动），这是副本的本义。
+- 旧的浏览器端工作台（§9）保留为 `?frontend=1`，不再是默认。
+

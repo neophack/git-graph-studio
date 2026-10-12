@@ -238,6 +238,11 @@ big-code-analysis = { version = "2.2", default-features = false, optional = true
 # RegisteredApplications entry under HKCU.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+# Remote Access's replica (remote_host::emulate_focus): the hidden desktop window's page
+# keeps believing it has the focus through WebView2's DevTools protocol. The versions are
+# the ones wry already builds (one copy each).
+webview2-com = "0.38"
+windows-core = "0.61"
 
 # The probe runs' App Nap guard (lib.rs's GGS_DEV_HARNESS hook): an occluded macOS
 # WKWebView stops firing page timers, so the dev harness's bounded waits stall for

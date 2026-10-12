@@ -62,7 +62,9 @@ impl Default for Config {
             mdns: true,
             autostart: true,
             spawn_visible: false,
-            idle_exit_minutes: 10,
+            // Off: the PC runs the user's Git Graph Studio and a browser only watches it
+            // (the replica, §22) — nothing should quit because nobody is watching.
+            idle_exit_minutes: 0,
             trust_proxy: false,
             data_saver_default: false,
             paused: false,
@@ -142,7 +144,7 @@ mod tests {
         let config: Config = serde_json::from_str(r#"{"port": 50000, "futureKey": 1}"#).unwrap();
         assert_eq!(config.port, 50000);
         assert_eq!(config.bind, "0.0.0.0");
-        assert_eq!(config.idle_exit_minutes, 10);
+        assert_eq!(config.idle_exit_minutes, 0);
     }
 
     #[test]

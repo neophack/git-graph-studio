@@ -4,7 +4,10 @@
 // Data Saver hint and the traffic readout; and on a phone the whole app chrome: the app bar,
 // the bottom navigation, the drawer, the editor page's empty state and editing row, and the
 // terminal's key row, all driven by one page model (pages.ts). Layout itself is CSS
-// (remote.css), keyed on the form factor responsive.ts writes.
+// (remote.css), keyed on the form factor responsive.ts writes. The PC's own window installs
+// the same shell while a phone watches it (the replica's phone mode, mirror/phoneShell.ts):
+// what only a browser session can do — the window switcher, transfers, the traffic readout,
+// Data Saver — stays with the browser.
 import { commands } from '../commands';
 import { notify } from '../ui';
 import { t, tf } from '../i18n';
@@ -24,7 +27,7 @@ import { openWindowSwitcher, watchLifecycle } from './windowSwitcher';
 import { connectionLooksSlow, dataSaverPreferred, setDataSaver } from './dataSaver';
 import { remoteEnv } from './session';
 import { installPhoneSettingsEntry } from './settingsPage';
-import { invoke } from './tauriShim/core';
+import { invoke } from '@tauri-apps/api/core';
 
 function formatBytes(n: number): string {
 	if (n < 1024) return `${n} B`;
@@ -42,6 +45,7 @@ async function firstFolder(): Promise<string | null> {
 }
 
 function registerCommands(): void {
+	if (!remoteEnv()) return;
 	commands.register({ id: 'remote.switchWindow', title: t('remote.windows'), category: 'Remote', run: () => openWindowSwitcher() });
 	commands.register({
 		id: 'remote.uploadFiles',
@@ -97,6 +101,7 @@ function registerCommands(): void {
 }
 
 function addSwitcherButton(): void {
+	if (!remoteEnv()) return;
 	const titlebar = document.getElementById('titlebar');
 	if (!titlebar || titlebar.querySelector('.ggs-window-switcher')) return;
 	const button = document.createElement('div');
@@ -170,13 +175,19 @@ function placePhoneChrome(): void {
 let swipeBackInstalled = false;
 let pageMarked = false;
 
+/** Re-place the phone chrome for the current form factor (the replica's phone mode turning
+ *  off — no form-factor change fires once the responsive watch has stopped). */
+export function refreshPhoneChrome(): void {
+	placePhoneChrome();
+}
+
 /** Wait for the workbench's first frame (the title bar is filled), then install. */
 export function installRemoteShell(): void {
 	registerCommands();
 	installActionSheet();
 	installLongPress(document);
 	watchLifecycle();
-	setDataSaver(dataSaverPreferred());
+	if (remoteEnv()) setDataSaver(dataSaverPreferred());
 	const ready = () => {
 		addSwitcherButton();
 		placePhoneChrome();

@@ -1,0 +1,82 @@
+// The remote page in replica mode (docs/ggs-remote-plan.md §22): connected and attached by
+// boot.ts, it shows the PC window's live copy — nothing of the workbench runs in the
+// browser. Hello on arrival and every few seconds (the PC forgets a silent viewer), bye on
+// leaving; a reload is a new hello and a new snapshot, and the PC never restarts anything.
+
+import { showBanner } from '../banner';
+import { setLocale, t } from '../../i18n';
+import type { Attached, Transport } from '../transport';
+import { HELLO_EVERY_MS, MIRROR_DOWN, MIRROR_UP, type DownMessage, type UpPayload } from './protocol';
+import { MirrorViewer } from './viewer';
+import { ViewerInput } from './viewerInput';
+
+function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
+	const node = document.createElement(tag);
+	node.className = className;
+	if (text !== undefined) node.textContent = text;
+	return node;
+}
+
+/** The page's own viewport, zoomable: a phone pinches into the copy. */
+function allowZoom(): void {
+	const meta = document.querySelector<HTMLMetaElement>('meta[name="viewport"]');
+	meta?.setAttribute('content', 'width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content');
+}
+
+export function bootMirrorViewer(transport: Transport, attached: Attached, basePath: string): void {
+	if (/^zh/i.test(navigator.language)) setLocale('zh-cn');
+	allowZoom();
+	document.documentElement.classList.add('mirror-mode');
+	const stage = el('div', 'mirror-stage');
+	stage.setAttribute('aria-label', t('remote.mirror.live'));
+	document.body.appendChild(stage);
+	const from = attached.frontendId;
+	const touch = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+	const send = (message: UpPayload) => {
+		transport.emit(MIRROR_UP, { ...message, from }, { kind: 'AnyLabel', label: 'main' });
+	};
+	// The page's real size, a raised soft keyboard included: the PC window follows it the way
+	// a phone app's own viewport would (the phone shell lifts its editing row above the
+	// keyboard), instead of the copy shrinking to fit.
+	const hello = () => send({ k: 'hello', vw: stage.clientWidth || window.innerWidth, vh: stage.clientHeight || window.innerHeight, touch });
+	const appBase = new URL(`${attached.assetBase}main/`, location.href).href;
+	const ggsBase = new URL(attached.ggsBase, location.href).href;
+	let input: ViewerInput | null = null;
+	const viewer = new MirrorViewer(stage, from, {
+		appBase,
+		ggsBase,
+		resnap: () => send({ k: 'resnap' }),
+		onDocument: (doc) => input?.attach(doc),
+		onReady: () => document.getElementById('boot-splash')?.remove(),
+		onClipboard: (text) => {
+			if (!text) return;
+			void navigator.clipboard?.writeText(text).then(() => showBanner('remote.mirror.copied', 2000)).catch(() => undefined);
+		}
+	});
+	input = new ViewerInput(viewer, send, document);
+
+	const bar = el('div', 'mirror-bar');
+	const keyboard = el('button', 'mirror-bar-button', t('remote.mirror.keyboard'));
+	keyboard.type = 'button';
+	keyboard.addEventListener('click', () => input?.focusKeyboard());
+	const windows = el('a', 'mirror-bar-button', t('remote.mirror.windows'));
+	windows.href = new URL('windows', new URL(basePath, location.href)).href;
+	bar.append(keyboard, windows);
+	document.body.appendChild(bar);
+	const status = document.querySelector('#boot-splash .boot-status');
+	if (status) status.textContent = t('remote.mirror.waiting');
+
+	transport.listen(MIRROR_DOWN, (event) => viewer.receive(event.payload as DownMessage));
+	hello();
+	setInterval(hello, HELLO_EVERY_MS);
+	let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+	window.addEventListener('resize', () => {
+		if (resizeTimer !== null) clearTimeout(resizeTimer);
+		resizeTimer = setTimeout(hello, 300);
+	});
+	window.addEventListener('online', hello);
+	document.addEventListener('visibilitychange', () => {
+		if (document.visibilityState === 'visible') hello();
+	});
+	window.addEventListener('pagehide', () => send({ k: 'bye' }));
+}

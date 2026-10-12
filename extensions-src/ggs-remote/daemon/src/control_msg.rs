@@ -120,9 +120,13 @@ pub enum ToInstance {
         nonce: u64,
     },
     Show,
-    /// Graceful exit; `force` skips the unsaved-files check.
+    /// Graceful exit; `force` skips the unsaved-files check. `idle` marks the idle exit's
+    /// ask (§7.10), which an instance running the replica (§22) declines — a browser that
+    /// went away must not end the work it left running on the PC.
     Quit {
         force: bool,
+        #[serde(default)]
+        idle: bool,
     },
 }
 

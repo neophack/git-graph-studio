@@ -1435,7 +1435,10 @@ mod desktop {
     /// Build the desktop window from its tauri.conf.json declaration (with the asset
     /// revalidation hook) — at boot, or later when a `--remote-host` instance is asked to
     /// show itself on the desktop.
-    fn build_main_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+    fn build_main_window(
+        app: &tauri::AppHandle,
+        visible: bool,
+    ) -> tauri::Result<tauri::WebviewWindow> {
         let config = app
             .config()
             .app
@@ -1444,6 +1447,7 @@ mod desktop {
             .cloned()
             .expect("tauri.conf.json declares the main window");
         tauri::WebviewWindowBuilder::from_config(app, &config)?
+            .visible(visible)
             .on_web_resource_request(revalidate_assets)
             .build()
     }
@@ -1454,6 +1458,9 @@ mod desktop {
         use tauri::Manager;
         match app.get_webview_window("main") {
             Some(window) => {
+                #[cfg(target_os = "macos")]
+                app.set_activation_policy(tauri::ActivationPolicy::Regular)?;
+                remote_host::restore_desktop_size(&window);
                 window.show()?;
                 window.unminimize()?;
                 window.set_focus()
@@ -1461,7 +1468,7 @@ mod desktop {
             None => {
                 #[cfg(target_os = "macos")]
                 app.set_activation_policy(tauri::ActivationPolicy::Regular)?;
-                build_main_window(app).map(|_| ())
+                build_main_window(app, true).map(|_| ())
             }
         }
     }
@@ -1699,16 +1706,18 @@ mod desktop {
                 // the WebView2 environment and its browser processes, most of the time between
                 // process start and the first frame - gets its own boot stamp. A
                 // `--remote-host` launch (an instance the Remote Access daemon opened for a
-                // remote session, docs/ggs-remote-plan.md §8.2) builds no desktop window
-                // until the daemon asks it to show one.
+                // remote session, docs/ggs-remote-plan.md §8.2) builds its desktop window
+                // hidden: the whole workbench runs on this PC, the remote browsers show its
+                // live copy (the replica, §22), and the daemon's Show reveals it.
                 let remote_host_only = args_have_remote_host();
                 if remote_host_only {
                     #[cfg(target_os = "macos")]
                     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-                    stamp("remote host mode: no desktop window");
+                    build_main_window(app.handle(), false)?;
+                    stamp("remote host mode: hidden desktop window");
                 } else {
                     #[cfg_attr(not(all(debug_assertions, target_os = "macos")), allow(unused_variables))]
-                    let window = build_main_window(app.handle())?;
+                    let window = build_main_window(app.handle(), true)?;
                     // The automated harness run needs its timers firing: keep this window awake.
                     #[cfg(all(debug_assertions, target_os = "macos"))]
                     if std::env::var_os("GGS_DEV_HARNESS").is_some() {
@@ -1954,7 +1963,10 @@ mod desktop {
                 pty::pty_tail,
                 remote_host::remote_host_set_summary,
                 remote_host::remote_host_frontend_gone,
-                remote_host::remote_host_status
+                remote_host::remote_host_status,
+                remote_host::remote_host_hide_main,
+                remote_host::remote_mirror_fit,
+                remote_host::remote_mirror_focus
             ])
             .build(tauri::generate_context!())
             .expect("error while building Git Graph Studio")

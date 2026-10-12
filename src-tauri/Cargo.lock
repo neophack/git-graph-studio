@@ -2070,6 +2070,8 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "ureq",
+ "webview2-com",
+ "windows-core 0.61.2",
  "winreg 0.52.0",
  "zip",
 ]

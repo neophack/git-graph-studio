@@ -1305,6 +1305,39 @@ database) carries the link through NAT. The whole design lives in
   section "Reach this PC from anywhere": connect string, the `/u/<uuid>/` link, change-link,
   export/import of the sealed device key). Its `build.mjs` packs the platform's daemon
   binary into the VSIX.
+- **The replica** (2026-10-12, the owner's direction: "the whole GGS runs on the PC, the
+  remote page is only a copy"): the PC's desktop window is the one real frontend of its
+  instance, and a remote page is by default a live DOM copy of it (`src/remote/mirror/`;
+  the browser-side workbench below stays reachable as `?frontend=1`). The window records
+  its own tree and every same-origin frame's — the extension webview pages, Claude Code's
+  chat among them — as a snapshot plus mutation batches (`recorder.ts`: node ids,
+  MutationObservers, polled form values / scroll / CSSOM and adopted sheets, URLs crossing
+  as app / package tokens), out as the `studio://mirror-down` app event the Relay forwards;
+  a viewer (`viewer.ts`, a script-less sandboxed frame scaled to fit) rebuilds it, and its
+  input (`viewerInput.ts`: mouse, touch taps / drag-scroll / long press, a hidden text field
+  for keys, IME and the phone keyboard) comes back as `studio://mirror-up` to `main`, where
+  `replay.ts` dispatches it with each frame's own event constructors and performs the
+  defaults a synthetic event lacks (focus on press, scroll on wheel, editing keys).
+  `host.ts` keeps the viewers (hello every 10 s, forgotten after 35 s silent, the recorder
+  stopped with the last one) and `hostStub.ts` loads it on the first hello, so a desktop
+  nobody watches pays nothing. A reload is a new hello and a new snapshot: nothing on the
+  PC restarts, and a Claude turn keeps running whether any browser is open. While viewers
+  watch, the window's page keeps the focus (`remote_mirror_focus` — WebView2's
+  `Emulation.setFocusEmulationEnabled`), a hidden window is sized to the viewer
+  (`remote_mirror_fit`, the desktop size restored on Show), closing the window only hides
+  it (`remote_host_hide_main`). A hidden window keeps rendering on its own — hiding a
+  Tauri window never tells WebView2 it is invisible (measured 2026-10-12: rAF and 10 ms
+  timers at full rate, `visibilityState` "visible"); custom `additionalBrowserArgs` are
+  ruled out, since every instance of the app shares one WebView2 browser process per
+  user-data folder and an instance whose arguments differ from a running one's gets no
+  webview at all (macOS: `backgroundThrottling: "disabled"`); a `--remote-host` instance builds its window hidden instead of not at all,
+  and declines the daemon's idle exit (`Quit { idle: true }`). A phone viewer makes the
+  hidden window phone-sized, and below 600 px the window wears the phone shell itself
+  (`phoneShell.ts` — the shell below, its stylesheet, the pointer counted as coarse), so
+  the phone sees the phone app 1:1; the drawer's browser-only rows (windows, transfers,
+  Data Saver) stay out there. The viewer's stylesheets come from the desktop build through
+  the daemon's `main/…` app-asset route (`remote_host::app_asset` — css, fonts, images
+  only, never scripts or pages).
 - **The app side** (`src/remote/` + `remote.html` + `relay.html` + `vite.remote.config.ts` +
   `src-tauri/src/remote_host.rs` + `capabilities/remote-relay.json`): the same frontend with
   its `@tauri-apps/api` seam aliased onto the WebSocket shims (`tauriShim/`), the
@@ -1380,7 +1413,10 @@ database) carries the link through NAT. The whole design lives in
   The module's seams are enforced:
   `scripts/check-seams.mjs` keeps `__TAURI_INTERNALS__` inside `src/remote/tauriShim/` and
   the plugin id out of the app tree.
-- Tests: `tests/remote.test.ts` + `tests/remoteResponsive.test.ts` (the shims, transport,
+- Tests: `tests/remoteMirror.test.ts` (the replica: snapshot and every mutation kind into
+  the copy, URL tokens, the CSP drop, the sequence-gap resnap, the input replay, the host's
+  viewer lifecycle, the PC window's phone mode), `tests/remote.test.ts` +
+  `tests/remoteResponsive.test.ts` (the shims, transport,
   relay engine; the phone's page model, app bar, navigation, drawer, sheets, editing row
   and settings page; M10's end-to-end crypto — the browser twin of the tray service's e2e core against
   the committed cross-implementation vectors), the daemon and hub crates' `cargo test`,

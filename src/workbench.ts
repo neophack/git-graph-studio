@@ -5,6 +5,8 @@
 
 import { invoke, Channel } from '@tauri-apps/api/core';
 import { startSummaryReporter } from './remote/summary';
+import { installMirrorHost, mirrorViewersActive } from './remote/mirror/hostStub';
+import { remoteEnv } from './remote/session';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
@@ -1193,6 +1195,15 @@ export class Workbench {
 		window.addEventListener('focus', this.onWindowFocusBound);
 		window.addEventListener('blur', this.onWindowBlurBound);
 		void getCurrentWindow().onCloseRequested(async (event) => {
+			// Remote Access's replica (docs/ggs-remote-plan.md §22): while a remote browser
+			// watches this window, or the instance is a remote host, closing only hides it —
+			// the workbench, its terminals and the extension pages (a Claude Code turn in
+			// flight) keep running for the browser.
+			if (!remoteEnv() && (await this.keepRunningHidden())) {
+				event.preventDefault();
+				void invoke('remote_host_hide_main').catch(() => undefined);
+				return;
+			}
 			// The window is destroyed right after this handler resolves - long before the
 			// debounced snapshot would fire - so the session is saved first, and before the
 			// dirty editors settle (closeFolder's order).
@@ -1214,6 +1225,16 @@ export class Workbench {
 		// Remote Access (module 19): what this window shows, for the window picker's cards.
 		const stopSummary = startSummaryReporter({ tabs: () => this.editors.contentSummary(), scmChanges: () => this.scmChangeCount });
 		this.trackUnlisten(stopSummary);
+		// The replica host: remote browsers show this window's live copy (§22).
+		if (!remoteEnv()) this.trackUnlisten(installMirrorHost());
+	}
+
+	/** Whether closing the window should hide it instead: a remote browser is watching, or
+	 *  this instance runs as a remote host (`--remote-host`, no desktop of its own). */
+	private async keepRunningHidden(): Promise<boolean> {
+		if (await mirrorViewersActive()) return true;
+		const status = await invoke<{ remoteHostOnly?: boolean }>('remote_host_status').catch(() => null);
+		return status?.remoteHostOnly === true;
 	}
 
 	/** The Context Window's debounce (M4 4.7): the symbol under the cursor settles for this

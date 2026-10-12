@@ -20,7 +20,16 @@ export function formFactor(): FormFactor {
 	return current ?? formFactorFor(typeof window === 'undefined' ? 1280 : window.innerWidth);
 }
 
+/** The pointer kind a replica viewer imposes (docs/ggs-remote-plan.md §22): the PC window
+ *  laid out for a phone that watches it has a mouse of its own, but is driven by touch. */
+let pointerOverride: 'coarse' | 'fine' | null = null;
+
+export function setPointerOverride(kind: 'coarse' | 'fine' | null): void {
+	pointerOverride = kind;
+}
+
 export function coarsePointer(): boolean {
+	if (pointerOverride !== null) return pointerOverride === 'coarse';
 	return typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
 }
 

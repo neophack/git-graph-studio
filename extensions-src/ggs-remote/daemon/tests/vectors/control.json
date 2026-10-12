@@ -196,12 +196,23 @@
   },
   {
     "direction": "to",
-    "hex": "0e00000081a45175697481a5666f726365c3",
+    "hex": "1400000081a45175697482a5666f726365c3a469646c65c2",
     "message": {
       "Quit": {
         "force": true
       }
     },
     "name": "quit"
+  },
+  {
+    "direction": "to",
+    "hex": "1400000081a45175697482a5666f726365c2a469646c65c3",
+    "message": {
+      "Quit": {
+        "force": false,
+        "idle": true
+      }
+    },
+    "name": "quit-idle"
   }
 ]

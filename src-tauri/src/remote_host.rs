@@ -130,6 +130,9 @@ pub enum ToInstance {
     Show,
     Quit {
         force: bool,
+        /// The daemon's idle exit asks, not a person (§7.10). Absent from older daemons.
+        #[serde(default)]
+        idle: bool,
     },
 }
 
@@ -391,7 +394,13 @@ fn handle(app: &AppHandle, message: ToInstance, out: &mpsc::UnboundedSender<From
             }
             send_update(app);
         }
-        ToInstance::Quit { force } => {
+        // The replica model (§22): this instance IS the user's Git Graph Studio, a browser
+        // only watches it — an idle exit would end a Claude Code turn the browser merely
+        // walked away from. Only a person's close (from a remote page, the tray) quits.
+        ToInstance::Quit { idle: true, .. } => {
+            eprintln!("[remote] the daemon's idle exit was declined: the instance keeps running");
+        }
+        ToInstance::Quit { force, .. } => {
             let dirty = dirty_files();
             if !force && !dirty.is_empty() {
                 let _ = out.send(FromInstance::CloseBlocked { dirty });
@@ -457,15 +466,53 @@ fn safe_rel(path: &str) -> bool {
             .all(|seg| !seg.is_empty() && seg != ".." && seg != ".")
 }
 
-/// The remote workbench build, `remote/…` inside the embedded assets — never anything else
-/// of them. A debug build (`tauri dev`, no embedded assets) reads the build output on disk.
+/// The desktop build's files a replica viewer renders the PC window with (§22): its
+/// stylesheets and what they reference — fonts, images, the theme files. Never its scripts
+/// or pages: the copy runs no code.
+fn replica_static(path: &str) -> bool {
+    matches!(
+        path.rsplit('.').next().unwrap_or(""),
+        "css"
+            | "woff"
+            | "woff2"
+            | "ttf"
+            | "otf"
+            | "svg"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "ico"
+    )
+}
+
+/// The remote workbench build, `remote/…` inside the embedded assets, plus the desktop
+/// build's static files under `main/…` for the replica viewer — never anything else of
+/// them. A debug build (`tauri dev`, no embedded assets) reads the build output on disk.
 pub fn app_asset(app: &AppHandle, path: &str) -> (u16, String, Vec<u8>) {
     if !safe_rel(path) {
         return (404, "text/plain".into(), Vec::new());
     }
-    let key = format!("remote/{path}");
+    let replica = path.strip_prefix("main/");
+    let key = match replica {
+        Some(rest) if replica_static(rest) => rest.to_owned(),
+        Some(_) => return (404, "text/plain".into(), Vec::new()),
+        None => format!("remote/{path}"),
+    };
+    // The desktop build's stylesheets name their fonts root-absolute (`url(/assets/…)`),
+    // which a viewer would resolve against the daemon's root: rebased to relative paths.
+    let rebase = |mime: String, bytes: Vec<u8>| match replica {
+        Some(rest) if rest.ends_with(".css") => {
+            let depth = rest.matches('/').count();
+            let css = String::from_utf8_lossy(&bytes);
+            (mime, rebase_root_urls(&css, depth).into_bytes())
+        }
+        _ => (mime, bytes),
+    };
     if let Some(asset) = app.asset_resolver().get(key.clone()) {
-        return (200, asset.mime_type, asset.bytes);
+        let (mime, bytes) = rebase(asset.mime_type, asset.bytes);
+        return (200, mime, bytes);
     }
     #[cfg(debug_assertions)]
     {
@@ -473,10 +520,36 @@ pub fn app_asset(app: &AppHandle, path: &str) -> (u16, String, Vec<u8>) {
             .join("../target/studio/dist")
             .join(&key);
         if let Ok(bytes) = std::fs::read(&dist) {
-            return (200, guess_type(path).into(), bytes);
+            let (mime, bytes) = rebase(guess_type(path).into(), bytes);
+            return (200, mime, bytes);
         }
     }
     (404, "text/plain".into(), Vec::new())
+}
+
+/// `url(/x)` → `url(../x)` for a stylesheet `depth` directories below the build root (the
+/// quoted forms too; protocol-relative `//host` URLs stay as they are).
+fn rebase_root_urls(css: &str, depth: usize) -> String {
+    let up = "../".repeat(depth);
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(at) = rest.find("url(") {
+        let (head, tail) = rest.split_at(at + 4);
+        out.push_str(head);
+        let quote = tail.chars().next().filter(|c| *c == '"' || *c == '\'');
+        let body = &tail[quote.map_or(0, char::len_utf8)..];
+        if let Some(q) = quote {
+            out.push(q);
+        }
+        if body.starts_with('/') && !body.starts_with("//") {
+            out.push_str(&up);
+            rest = &body[1..];
+        } else {
+            rest = body;
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn guess_type(path: &str) -> &'static str {
@@ -488,7 +561,13 @@ fn guess_type(path: &str) -> &'static str {
         "svg" => "image/svg+xml",
         "png" => "image/png",
         "woff2" => "font/woff2",
+        "woff" => "font/woff",
         "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
         "wasm" => "application/wasm",
         "webmanifest" => "application/manifest+json",
         _ => "application/octet-stream",
@@ -868,6 +947,91 @@ pub fn remote_host_frontend_gone(app: AppHandle, frontend: String) {
     flush_summary(&app, false);
 }
 
+// ---- the replica (§22): the desktop window as the one real frontend ----
+
+/// The desktop size the window had before a viewer's fit resized it (restored on show).
+static DESKTOP_SIZE: Mutex<Option<tauri::LogicalSize<f64>>> = Mutex::new(None);
+
+/// Size the hidden desktop window for a viewer's viewport: the copy then lays out at the
+/// viewer's own proportions. A window the user can see is the user's — left as it is.
+#[tauri::command]
+pub fn remote_mirror_fit(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+    if window.is_visible().unwrap_or(false) {
+        return Ok(());
+    }
+    let (width, height) = (width.clamp(320.0, 3840.0), height.clamp(320.0, 4000.0));
+    let mut saved = DESKTOP_SIZE.lock().unwrap_or_else(|p| p.into_inner());
+    if saved.is_none() {
+        let scale = window.scale_factor().map_err(|e| e.to_string())?;
+        let size = window.inner_size().map_err(|e| e.to_string())?;
+        *saved = Some(size.to_logical(scale));
+    }
+    window
+        .set_min_size(None::<tauri::LogicalSize<f64>>)
+        .map_err(|e| e.to_string())?;
+    window
+        .set_size(tauri::LogicalSize::new(width, height))
+        .map_err(|e| e.to_string())
+}
+
+/// Put the desktop size back before the window shows again (`ensure_main_window`).
+pub fn restore_desktop_size(window: &tauri::WebviewWindow) {
+    let saved = DESKTOP_SIZE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take();
+    if let Some(size) = saved {
+        let _ = window.set_min_size(Some(tauri::LogicalSize::new(800.0, 500.0)));
+        let _ = window.set_size(size);
+    }
+}
+
+/// While remote viewers drive the window, its page must believe it has the focus — a
+/// hidden or background window otherwise drops focus events, and a focused editor, a
+/// quick pick or a menu never behaves as focused. WebView2's DevTools protocol has exactly
+/// that switch; elsewhere this is a no-op.
+#[tauri::command]
+pub fn remote_mirror_focus(app: AppHandle, enabled: bool) {
+    if let Some(window) = app.get_webview_window("main") {
+        emulate_focus(&window, enabled);
+    }
+}
+
+#[cfg(windows)]
+fn emulate_focus(window: &tauri::WebviewWindow, enabled: bool) {
+    let params = format!("{{\"enabled\":{enabled}}}");
+    let _ = window.with_webview(move |webview| unsafe {
+        use webview2_com::CallDevToolsProtocolMethodCompletedHandler;
+        use windows_core::HSTRING;
+        let Ok(core) = webview.controller().CoreWebView2() else {
+            return;
+        };
+        let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
+        let method = HSTRING::from("Emulation.setFocusEmulationEnabled");
+        let params = HSTRING::from(params);
+        if let Err(error) = core.CallDevToolsProtocolMethod(&method, &params, &handler) {
+            eprintln!("[remote] focus emulation: {error}");
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn emulate_focus(_window: &tauri::WebviewWindow, _enabled: bool) {}
+
+/// The desktop window's close while the replica keeps running (a viewer watches, or a
+/// remote-host instance): hide it, and tell the daemon it is no longer visible.
+#[tauri::command]
+pub fn remote_host_hide_main(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.hide().map_err(|e| e.to_string())?;
+    }
+    send_update(&app);
+    Ok(())
+}
+
 /// Whether a local daemon is connected — the frontend's status line for Remote Access.
 #[tauri::command]
 pub fn remote_host_status(app: AppHandle) -> serde_json::Value {
@@ -881,6 +1045,25 @@ pub fn remote_host_status(app: AppHandle) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_replica_stylesheets_name_their_fonts_relatively() {
+        let css = r#"@font-face{src:url(/assets/codicon.ttf?x)}a{b:url("/theme/i.svg")}c{d:url('//cdn/x')}e{f:url(data:,x)}"#;
+        assert_eq!(
+            rebase_root_urls(css, 1),
+            r#"@font-face{src:url(../assets/codicon.ttf?x)}a{b:url("../theme/i.svg")}c{d:url('//cdn/x')}e{f:url(data:,x)}"#
+        );
+        assert_eq!(rebase_root_urls("x{y:url(/a.png)}", 0), "x{y:url(a.png)}");
+    }
+
+    #[test]
+    fn the_replica_reads_only_the_desktop_builds_static_files() {
+        assert!(replica_static("assets/index-1a2b.css"));
+        assert!(replica_static("theme/dark-modern.css"));
+        assert!(replica_static("assets/codicon-9f.ttf"));
+        assert!(!replica_static("assets/index-1a2b.js"));
+        assert!(!replica_static("index.html"));
+    }
 
     #[test]
     fn relative_paths_only() {

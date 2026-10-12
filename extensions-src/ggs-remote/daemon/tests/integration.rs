@@ -739,7 +739,7 @@ async fn attach_invoke_assets_and_instance_exit() {
     )
     .await;
     match instance.recv().await {
-        ToInstance::Quit { force } => assert!(!force),
+        ToInstance::Quit { force, idle } => assert!(!force && !idle),
         other => panic!("expected Quit, got {other:?}"),
     }
     instance
@@ -1030,7 +1030,10 @@ async fn a_close_with_unsaved_files_blocks_until_forced() {
     )
     .await;
     match instance.recv().await {
-        ToInstance::Quit { force: false } => {}
+        ToInstance::Quit {
+            force: false,
+            idle: false,
+        } => {}
         other => panic!("expected a graceful Quit, got {other:?}"),
     }
     instance

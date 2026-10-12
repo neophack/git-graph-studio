@@ -541,3 +541,66 @@
 	.ggs-action-sheet, .ggs-drawer, .ggs-action-sheet-backdrop, .ggs-drawer-backdrop, .ggs-bottom-tabs .pill,
 	.ggs-settings-page, .ggs-settings-level { transition: none !important; }
 }
+
+/* ---- Replica mode (docs/ggs-remote-plan.md §22): the PC window's live copy ---- */
+html.mirror-mode,
+html.mirror-mode body {
+	margin: 0;
+	height: 100%;
+	overflow: hidden;
+	background: #1f1f1f;
+}
+.mirror-stage {
+	position: fixed;
+	inset: 0;
+	overflow: hidden;
+}
+.mirror-frame {
+	position: absolute;
+	border: 0;
+	transform-origin: 0 0;
+	background: transparent;
+}
+/* The keyboard's landing field: invisible, but a real focusable textarea, so a phone raises
+   its keyboard for it; 16px keeps iOS from zooming the page on focus. */
+.mirror-proxy {
+	position: fixed;
+	left: 0;
+	bottom: 0;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	border: 0;
+	opacity: 0;
+	font-size: 16px;
+	resize: none;
+	pointer-events: none;
+}
+/* On the right edge, mid-height: clear of the copy's title / app bar and of its status bar
+   and bottom navigation. */
+.mirror-bar {
+	position: fixed;
+	right: 0;
+	top: 50%;
+	transform: translateY(-50%);
+	z-index: 20;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	opacity: 0.72;
+}
+.mirror-bar-button {
+	font: 12px/1 system-ui, sans-serif;
+	padding: 8px 10px;
+	border-radius: 6px 0 0 6px;
+	border: 1px solid rgba(255, 255, 255, 0.18);
+	background: rgba(20, 24, 30, 0.88);
+	color: #e6e6e6;
+	text-decoration: none;
+	cursor: pointer;
+}
+@media (pointer: fine) {
+	.mirror-bar button.mirror-bar-button {
+		display: none;
+	}
+}

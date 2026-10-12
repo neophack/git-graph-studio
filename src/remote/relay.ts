@@ -196,7 +196,9 @@ export class RelayEngine {
 				if (!this.sessions.get(session)?.listeners.has(stream)) return;
 				if (event === HOST_REQUEST_EVENT && this.hostRequestTarget((e.payload as { frontend?: string })?.frontend) !== session) return;
 				if (pty && typeof e.payload === 'string') return this.coalescePty(session, stream, e.event, e.id, e.payload);
-				this.send([jsonFrame(T.EVENT, { event: e.event, id: e.id, payload: e.payload }, stream, 0, session)]);
+				// Split like a result: an event can outgrow one frame (the replica's snapshot of
+				// the PC window, §22), and the daemon refuses a frame past MAX_PAYLOAD.
+				this.send(splitFrame(jsonFrame(T.EVENT, { event: e.event, id: e.id, payload: e.payload }, stream, 0, session)));
 			},
 			target ? { target: target as never } : undefined
 		);

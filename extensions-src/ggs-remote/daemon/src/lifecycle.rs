@@ -102,9 +102,13 @@ pub async fn close(daemon: &Arc<Daemon>, instance: &str, force: bool) -> CloseOu
     daemon
         .registry
         .with(instance, |i| i.close_waiter = Some(tx));
-    daemon
-        .registry
-        .send(instance, ToInstance::Quit { force: false });
+    daemon.registry.send(
+        instance,
+        ToInstance::Quit {
+            force: false,
+            idle: false,
+        },
+    );
     match tokio::time::timeout(CLOSE_WAIT, rx).await {
         Ok(Ok(dirty)) if !dirty.is_empty() => CloseOutcome::Blocked(dirty),
         _ => CloseOutcome::Closed,
@@ -164,7 +168,10 @@ pub fn idle_exit(daemon: &Arc<Daemon>, now: Instant) {
         let since = *inst.idle_since.get_or_insert(now);
         if now.duration_since(since) >= limit {
             inst.idle_since = None;
-            let _ = inst.control.send(ToInstance::Quit { force: false });
+            let _ = inst.control.send(ToInstance::Quit {
+                force: false,
+                idle: true,
+            });
             crate::info!("idle invisible instance {} asked to quit", inst.info.id);
         }
     }
@@ -242,7 +249,10 @@ mod tests {
         idle_exit(&daemon, start + Duration::from_secs(61));
         assert!(matches!(
             idle.try_recv(),
-            Ok(ToInstance::Quit { force: false })
+            Ok(ToInstance::Quit {
+                force: false,
+                idle: true
+            })
         ));
         assert!(attached.try_recv().is_err(), "a session keeps the instance");
     }
