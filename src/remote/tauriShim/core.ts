@@ -27,7 +27,7 @@ export async function invoke<T>(cmd: string, args?: InvokeArgs, options?: Invoke
 }
 
 // A Channel nobody references anymore releases its stream on both ends.
-const finalizer = typeof FinalizationRegistry === 'function' ? new FinalizationRegistry<number>((stream) => transport().dropChannel(stream)) : undefined;
+const finalizer = typeof FinalizationRegistry === 'function' ? new FinalizationRegistry<number>((stream) => remoteEnv()?.transport.dropChannel(stream)) : undefined;
 
 export class Channel<T = unknown> {
 	id: number;

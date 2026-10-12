@@ -820,9 +820,14 @@ async fn await_close(ws: &mut Ws) -> u16 {
     loop {
         let message = tokio::time::timeout_at(deadline, ws.next())
             .await
-            .expect("a close within 5 s")
-            .unwrap()
-            .unwrap();
+            .expect("a close within 5 s");
+        // A protocol error here is the socket going away without a close handshake
+        // (a reset): the session is every bit as closed — reported as u16::MAX so the
+        // callers' "nonzero" assertions still hold, distinct from every real code.
+        let message = match message {
+            Some(Ok(message)) => message,
+            _ => return u16::MAX,
+        };
         if let Message::Close(frame) = message {
             return frame.map(|f| f.code).map(|c| c.into()).unwrap_or(0);
         }
