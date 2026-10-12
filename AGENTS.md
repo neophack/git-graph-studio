@@ -1110,7 +1110,15 @@ Everything that turns the source tree into installers: asset assembly into
   the uninstall hook deletes the value only when it is exactly the install directory),
   and the deb/rpm packages install it as `/usr/bin/ggs`. Installer-level file associations for the default
   extension set come from `bundle.fileAssociations` in `tauri.conf.json`; the NSIS hooks also
-  remove the runtime-registered ProgIds and the RegisteredApplications entry on uninstall
+  remove the runtime-registered ProgIds and the RegisteredApplications entry on uninstall,
+  and (2026-10-12, never on an `/UPDATE` run) clean what lives outside the install
+  directory: GGS Remote's tray daemon — its "GGS Remote" logon task first, then the process
+  (a capped `ggs-remote stop`, then `taskkill` scoped to this user) — its binary and asset
+  cache, the bytecode cache and the symbol indexes; the whole of `~/.ggs` (settings,
+  extensions, Claude state, provider keys, the remote password and link identity) only
+  with the uninstaller's own "Delete the application data" box ticked, and only the
+  profile's own `~/.ggs`, never a `GGS_HOME`-chosen path (pinned in
+  `tests/marketplace.test.ts`)
 - Signing: installer signing is decided from CI secrets, never in the sources —
   `scripts/signing.mjs` writes the `tauri build --config` merge file each build reads
   (the ad-hoc bundle seal when no secrets are configured; a quarantined download of it

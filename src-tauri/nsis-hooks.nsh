@@ -61,3 +61,50 @@
     System::Call 'user32::SendMessageTimeout(p 0xffff, i 0x1A, p 0, t "Environment", i 2, i 5000, *p .r1)'
   ggs_unpath_done:
 !macroend
+
+; What lives outside the install directory (2026-10-12, the owner's direction: an uninstall
+; leaves nothing of the program behind). Runs after Tauri's own removal and its app-is-
+; running check, so a cancelled uninstall has touched nothing. Never on an update: the new
+; version's installer runs this uninstaller with /UPDATE and must find the user's state —
+; and the remote daemon the bundled GGS Remote package upgrades in place — as it was.
+;
+; Two tiers. Always: what the program put there and can rebuild — GGS Remote's tray daemon
+; (its logon task, the process, its binary), the daemon's asset cache (whose version-keyed
+; entries once served a reinstalled build's predecessor), the runtime files, the bytecode
+; cache and the symbol indexes. Only with the uninstaller's own "Delete the application
+; data" box ticked: the whole of ~/.ggs — settings, keybindings, extensions, the Claude
+; state, the sealed provider keys, and the remote password, certificates and device key
+; (the link's identity: a reinstall then gets a new link). Only the profile's own ~/.ggs is
+; ever removed: a GGS_HOME override may name any directory, and an uninstaller must not
+; recursively delete a path an environment variable chose.
+!macro NSIS_HOOK_POSTUNINSTALL
+  ${If} $UpdateMode <> 1
+    StrCpy $R5 "$PROFILE\.ggs"
+    ; The logon task first: it restarts a daemon that exits on failure, and a killed one
+    ; reads as failed. The Run value is the fallback autostart some systems are given.
+    nsExec::Exec 'schtasks /Delete /TN "GGS Remote" /F'
+    Pop $R6
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "GGS Remote"
+    ; A clean stop takes the tray icon with it; capped, since a wedged daemon's admin call
+    ; would otherwise hold the uninstaller for its 30 s read timeout. Whatever is left of
+    ; this user's daemon is then ended outright (another user's is theirs to keep).
+    ${If} ${FileExists} "$R5\remote\bin\ggs-remote.exe"
+      nsExec::Exec /TIMEOUT=3000 '"$R5\remote\bin\ggs-remote.exe" stop'
+      Pop $R6
+      Sleep 800
+    ${EndIf}
+    ReadEnvStr $R7 USERNAME
+    nsExec::Exec 'taskkill /F /T /FI "IMAGENAME eq ggs-remote.exe" /FI "USERNAME eq $R7"'
+    Pop $R6
+    Sleep 500
+    RMDir /r "$R5\remote\bin"
+    RMDir /r "$R5\remote\cache"
+    Delete "$R5\remote\loopback.json"
+    Delete "$R5\remote\daemon.lock"
+    RMDir /r "$R5\cache"
+    RMDir /r "$R5\index"
+    ${If} $DeleteAppDataCheckboxState = 1
+      RMDir /r "$R5"
+    ${EndIf}
+  ${EndIf}
+!macroend

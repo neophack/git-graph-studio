@@ -186,3 +186,38 @@ describe('the build wiring (module 15)', () => {
 		expect(conf.build.beforeDevCommand).not.toContain('--build');
 	});
 });
+
+// The Windows uninstaller's cleanup outside the install directory (src-tauri/nsis-hooks.nsh,
+// 2026-10-12): the rules that make it safe are pinned here, since the NSIS itself only
+// runs on a real uninstall.
+describe('the uninstaller cleanup (module 15)', () => {
+	const hooks = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src-tauri', 'nsis-hooks.nsh'), 'utf8');
+	const post = hooks.slice(hooks.indexOf('!macro NSIS_HOOK_POSTUNINSTALL'));
+	const body = post.slice(0, post.indexOf('!macroend'));
+
+	it('is wired as the post-uninstall hook and skips updates', () => {
+		const conf = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src-tauri', 'tauri.conf.json'), 'utf8'));
+		expect(conf.bundle.windows.nsis.installerHooks).toBe('nsis-hooks.nsh');
+		expect(body).toMatch(/^\s*\$\{If\} \$UpdateMode <> 1/m);
+	});
+
+	it('ends the remote daemon — its logon task before the process — and removes its program and cache', () => {
+		const task = body.indexOf('schtasks /Delete /TN "GGS Remote"');
+		const kill = body.indexOf('taskkill /F /T /FI "IMAGENAME eq ggs-remote.exe"');
+		expect(task).toBeGreaterThan(-1);
+		expect(kill).toBeGreaterThan(task);
+		expect(body).toContain('/FI "USERNAME eq $R7"');
+		for (const dir of ['remote\\bin', 'remote\\cache', 'cache', 'index']) expect(body).toContain(`RMDir /r "$R5\\${dir}"`);
+	});
+
+	it('deletes the user data only with the uninstaller\'s own checkbox, and only the profile\'s ~/.ggs', () => {
+		expect(body).toContain('StrCpy $R5 "$PROFILE\\.ggs"');
+		// No path an environment variable chose is ever deleted (comments may name one).
+		expect(body.replace(/;.*$/gm, '')).not.toMatch(/ReadEnvStr \$R5|GGS_HOME/);
+		const whole = body.indexOf('RMDir /r "$R5"');
+		const box = body.indexOf('${If} $DeleteAppDataCheckboxState = 1');
+		expect(box).toBeGreaterThan(-1);
+		expect(whole).toBeGreaterThan(box);
+		expect(body.indexOf('RMDir /r "$R5"', whole + 1)).toBe(-1);
+	});
+});
