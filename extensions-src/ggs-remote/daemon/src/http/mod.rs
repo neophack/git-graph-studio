@@ -26,6 +26,11 @@ pub const COOKIE: &str = "ggsr";
 /// browser sees, e.g. `/u/<uuid>/`. Absent on the LAN, where the base is `/`.
 pub const BASE_HEADER: &str = "x-ggs-base-path";
 
+/// The one bucket every tunnel-carried client shares (audit F6, 2026-10-13): a loopback
+/// address nothing real answers from, so it never collides with a LAN peer.
+pub const TUNNEL_BUCKET: std::net::IpAddr =
+    std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 127));
+
 /// The public router: what a phone reaches.
 pub fn public_router(daemon: Arc<Daemon>) -> Router {
     Router::new()
@@ -177,9 +182,14 @@ pub fn token_hash_of(headers: &HeaderMap) -> Option<String> {
 /// The client address: the peer, or — behind a trusted local proxy — the first
 /// `X-Forwarded-For` hop (§7.4).
 pub fn client_ip(daemon: &Daemon, peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
-    let via_tunnel = headers.contains_key(BASE_HEADER);
-    let trust =
-        peer.ip().is_loopback() && (daemon.config.lock().unwrap().trust_proxy || via_tunnel);
+    // Through the tunnel the WHOLE header set is the Hub's (audit F6): it stamps a fresh
+    // address per attempt, so any per-IP accounting on the forwarded value is mintable.
+    // Everything the tunnel carries lands in one shared bucket — the global limiter
+    // still bounds it, and the Hub's own logs hold the real addresses.
+    if headers.contains_key(BASE_HEADER) {
+        return TUNNEL_BUCKET;
+    }
+    let trust = peer.ip().is_loopback() && daemon.config.lock().unwrap().trust_proxy;
     if trust {
         if let Some(ip) = headers
             .get("x-forwarded-for")
@@ -191,12 +201,6 @@ pub fn client_ip(daemon: &Daemon, peer: SocketAddr, headers: &HeaderMap) -> IpAd
         {
             return ip;
         }
-    }
-    if via_tunnel {
-        // Through the tunnel the whole header set is the Hub's (audit F6): it can mint a
-        // fresh address per attempt, so per-IP lockouts would never trip. One shared
-        // bucket for everything the tunnel carries — the global limiter still bounds it.
-        return "127.0.0.127".parse().expect("the tunnel bucket address");
     }
     peer.ip()
 }

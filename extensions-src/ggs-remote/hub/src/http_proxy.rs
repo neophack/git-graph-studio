@@ -199,14 +199,14 @@ pub async fn proxy(
     );
     let mut builder = Response::builder().status(status);
     for (name, value) in &http.headers {
-        // Reframing is ours: the framing headers would clash with the streamed body, and
-        // the PC's content-length/content-encoding describe bytes it may re-frame —
-        // hyper writes both itself (audit L-1, 2026-10-13).
+        // Reframing is ours: the framing headers would clash with the streamed body —
+        // hyper writes content-length itself (audit L-1, 2026-10-13). content-encoding
+        // STAYS: the daemon's brotli-marked answers cross byte-identical, and without
+        // the header the browser cannot decode them.
         if name.eq_ignore_ascii_case("transfer-encoding")
             || name.eq_ignore_ascii_case("connection")
             || name.eq_ignore_ascii_case("keep-alive")
             || name.eq_ignore_ascii_case("content-length")
-            || name.eq_ignore_ascii_case("content-encoding")
         {
             continue;
         }
@@ -467,7 +467,6 @@ impl IntoResponse for crate::cache::Entry {
                 || name.eq_ignore_ascii_case("connection")
                 || name.eq_ignore_ascii_case("keep-alive")
                 || name.eq_ignore_ascii_case("content-length")
-                || name.eq_ignore_ascii_case("content-encoding")
             {
                 continue;
             }

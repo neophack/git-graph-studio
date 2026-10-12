@@ -46,17 +46,43 @@ export function withinRoots(path: string, roots: string[]): boolean {
 	});
 }
 
+/** The git/scm/analysis/symbol family: every one anchors on `repo` (an absolute path)
+ *  and some carry a repo-relative `path`. One rule, spelled once. */
+const REPO_ANCHORED = { args: ['repo'] };
+const REPO_AND_PATH = { args: ['path', 'repo'], relativeAllowed: true };
+
+/** Whether `partial` is on its way TO a root — a completion's typed prefix (`C:\r`
+ *  while the root is `C:\repo`): not inside any root yet, but some root starts with it. */
+function towardRoot(partial: string, roots: string[]): boolean {
+	const form = absoluteForm(partial);
+	if (form === null) return false;
+	return roots.some((root) => {
+		const base = absoluteForm(root);
+		return base !== null && base.startsWith(form);
+	});
+}
+
 /** The commands whose arguments name filesystem paths, by argument name (the JS/camelCase
- *  spelling the invoke carries). `relative` marks the git-anchored commands whose backend
- *  resolves a relative path against the (gated) `repo` argument — for the rest, a relative
- *  path would resolve against a working directory outside the roots and is refused. */
+ *  spelling the invoke carries — the Rust side spells them snake_case). `relativeAllowed`
+ *  marks args the backend resolves against the (gated) `repo` argument — for the rest, a
+ *  relative path would resolve against a working directory outside the roots and is
+ *  refused. `sameRootOnly` marks the commands that would WIDEN the boundary (opening a
+ *  new folder or single file makes it a root); `prefixTowardRoot` marks the completion
+ *  command, whose partial input may also be on the way TO a root. The table is the
+ *  extraction of every `#[tauri::command]` with String path-like parameters — a command
+ *  missing here is a hole, so extend it with the command, not around it. */
 export const PATH_GATED: Record<
 	string,
-	{ args: string[]; relativeAllowed?: boolean; sameRootOnly?: boolean }
+	{
+		args: string[];
+		relativeAllowed?: boolean;
+		sameRootOnly?: boolean;
+		prefixTowardRoot?: boolean;
+	}
 > = {
+	// The Explorer/editor file surface.
 	list_dir: { args: ['path'] },
 	list_dir_page: { args: ['path'] },
-	list_files: { args: ['root'] },
 	read_file: { args: ['path'] },
 	read_file_raw: { args: ['path'] },
 	read_file_base64: { args: ['path'] },
@@ -72,21 +98,91 @@ export const PATH_GATED: Record<
 	backup_write: { args: ['path'] },
 	backup_clear: { args: ['path'] },
 	backup_read: { args: ['path'] },
-	read_file_at: { args: ['path', 'repo'], relativeAllowed: true },
-	materialize_revision_file: { args: ['path', 'repo'], relativeAllowed: true },
-	file_log: { args: ['path', 'repo'], relativeAllowed: true },
-	scm_blame: { args: ['path', 'repo'], relativeAllowed: true },
-	workspace_symbols: { args: ['repo'] },
-	find_references: { args: ['path', 'repo'], relativeAllowed: true },
-	repo_head: { args: ['repo'] },
+	fs_upload_offset: { args: ['path'] },
+	discard_temp_blob: { args: ['path'] },
+	// Revisions and history.
+	read_file_at: REPO_AND_PATH,
+	materialize_revision_file: REPO_AND_PATH,
+	file_log: REPO_AND_PATH,
+	scm_blame: REPO_AND_PATH,
+	repo_head: REPO_ANCHORED,
 	repo_submodules: { args: ['repo'] },
-	search_workspace: { args: ['path'] },
+	// Search, symbols, analysis — everything that walks a tree.
+	search_workspace: { args: ['repo'] },
+	list_files: REPO_ANCHORED,
 	compare_dirs: { args: ['left', 'right'] },
 	hex_diff: { args: ['pathA', 'pathB'] },
+	workspace_symbols: { args: ['repo'] },
+	symbol_lookup: { args: ['repo'] },
+	symbol_references: { args: ['repo'] },
+	symbol_tree: REPO_ANCHORED,
+	symbols_rebuild: REPO_ANCHORED,
+	symbols_status: REPO_ANCHORED,
+	analysis_status: REPO_ANCHORED,
+	analysis_rebuild: REPO_ANCHORED,
+	analysis_metrics: REPO_ANCHORED,
+	analysis_dead_code: REPO_ANCHORED,
+	analysis_security: REPO_ANCHORED,
+	analysis_import_graph: REPO_ANCHORED,
+	analysis_module_graph: REPO_ANCHORED,
+	analysis_module_diagram: { args: ['repo', 'focus'], relativeAllowed: true },
+	// The git/scm write set.
+	git_commit: REPO_ANCHORED,
+	git_discard: REPO_AND_PATH,
+	git_discard_all: REPO_ANCHORED,
+	git_stage: REPO_ANCHORED,
+	git_stage_all: REPO_ANCHORED,
+	git_unstage: REPO_ANCHORED,
+	git_unstage_all: REPO_ANCHORED,
+	scm_add_remote: REPO_ANCHORED,
+	scm_add_tag: REPO_ANCHORED,
+	scm_amend_last_commit: REPO_ANCHORED,
+	scm_apply_stash: REPO_ANCHORED,
+	scm_branches: REPO_ANCHORED,
+	scm_checkout: REPO_ANCHORED,
+	scm_clone: { args: ['parent'], sameRootOnly: true },
+	scm_create_branch: REPO_ANCHORED,
+	scm_delete_branch: REPO_ANCHORED,
+	scm_delete_remote: REPO_ANCHORED,
+	scm_delete_tag: REPO_ANCHORED,
+	scm_drop_stash: REPO_ANCHORED,
+	scm_fetch: REPO_ANCHORED,
+	scm_merge: REPO_ANCHORED,
+	scm_pop_stash: REPO_ANCHORED,
+	scm_pull: REPO_ANCHORED,
+	scm_push: REPO_ANCHORED,
+	scm_push_stash: REPO_ANCHORED,
+	scm_rebase: REPO_ANCHORED,
+	scm_remotes: REPO_ANCHORED,
+	scm_rename_branch: REPO_ANCHORED,
+	scm_reset_to_remote: REPO_ANCHORED,
+	scm_stashes: REPO_ANCHORED,
+	scm_status: REPO_ANCHORED,
+	scm_sync: REPO_ANCHORED,
+	scm_tags: REPO_ANCHORED,
+	scm_undo_last_commit: REPO_ANCHORED,
+	gerrit_install_hook: REPO_ANCHORED,
+	gerrit_push_ref: REPO_ANCHORED,
+	// The big-file viewers and the CAN analyzer.
 	viewer_open: { args: ['path'] },
 	viewer_backup: { args: ['path'] },
+	indexed_open: { args: ['path'] },
+	can_intervals: { args: ['path'] },
+	can_log_open: { args: ['path'] },
+	can_log_stats: { args: ['path'] },
+	convert_can_log: { args: ['from', 'to'] },
+	// The extension platform's own path surfaces (the backend confines these too —
+	// this is the second lock on the same door).
+	ext_fs: { args: ['path', 'to'] },
+	ext_page_file_chunk: { args: ['path', 'repo'], relativeAllowed: true },
+	ext_page_revision_bytes: { args: ['path', 'repo'], relativeAllowed: true },
+	ext_install_from_vsix: { args: ['path'], sameRootOnly: true },
+	// The boundary's own gates: opening anything NEW is not a remote session's to do.
 	open_folder: { args: ['path'], sameRootOnly: true },
-	open_workspace: { args: ['path'], sameRootOnly: true }
+	open_workspace: { args: ['path'], sameRootOnly: true },
+	open_single_file: { args: ['path'], sameRootOnly: true },
+	// Path completion: the partial input may sit inside a root or be on its way to one.
+	path_completions: { args: ['prefix'], prefixTowardRoot: true }
 };
 
 /** The commands a remote session may not run at all: they widen the very boundary this
@@ -126,7 +222,8 @@ export function gateInvoke(
 			throw new Error(`${command}: ${name} must be an absolute path inside the open folders`);
 		}
 		if (!withinRoots(value, roots)) {
-			if (rule.sameRootOnly) {
+			if (rule.prefixTowardRoot && towardRoot(value, roots)) continue;
+			if (rule.sameRootOnly || rule.prefixTowardRoot) {
 				throw new Error(
 					'a remote session cannot open new folders on this PC — open one from the PC, or spawn a sandboxed window'
 				);

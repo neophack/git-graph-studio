@@ -107,6 +107,20 @@ pub(crate) async fn serve_instance(
     {
         return Err(std::io::Error::other("invalid instance id"));
     }
+    // Field caps (audit F9): every one of these rides the WINDOWS frames to every
+    // connected browser and, for folders, into recent.json — a hostile or buggy local
+    // process on the control channel must not make either unbounded. 64 folders covers
+    // a multi-root workspace with room to spare.
+    if title.len() > 256
+        || version.len() > 64
+        || folders.len() > 64
+        || folders.iter().any(|f| f.len() > 1024)
+        || launch.program.len() > 1024
+        || launch.args_prefix.len() > 16
+        || launch.args_prefix.iter().any(|a| a.len() > 1024)
+    {
+        return Err(std::io::Error::other("register fields exceed their caps"));
+    }
     if !launch.program.is_empty() {
         let mut config = daemon.config.lock().unwrap();
         if config.last_launch.as_ref() != Some(&launch) {
@@ -180,7 +194,7 @@ async fn read_loop(daemon: &Arc<Daemon>, id: &str, rx: &mut RecvHalf) -> std::io
                 // The same caps as Register (audit F9) — an oversized update is dropped,
                 // the connection stays.
                 if title.as_ref().is_some_and(|t| t.len() > 256)
-                    || folders.as_ref().is_some_and(|f| f.len() > 16)
+                    || folders.as_ref().is_some_and(|f| f.len() > 64)
                     || folders
                         .as_ref()
                         .is_some_and(|f| f.iter().any(|path| path.len() > 1024))
