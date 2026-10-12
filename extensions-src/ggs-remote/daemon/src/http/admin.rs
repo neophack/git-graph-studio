@@ -287,7 +287,7 @@ pub async fn unlock(
     }
     let local: std::net::IpAddr = [127, 0, 0, 1].into();
     if let Err(response) = super::api::throttled_verify(&daemon, local, &body.password).await {
-        return response;
+        return *response;
     }
     let token = daemon.tickets.lock().unwrap().issue_unlock();
     json_response(StatusCode::OK, serde_json::json!({ "unlock": token }))

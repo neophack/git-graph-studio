@@ -93,6 +93,8 @@ impl Tunnel {
     }
 
     /// The tunnel's remaining daily byte budget, when one is configured.
+    #[allow(deprecated)] // `fetch_update` was renamed `try_update` in 1.99; the crate floor
+                         // (1.94) predates the new name, so the old one stays until the floor passes it.
     pub fn spend(&self, bytes: u64) -> bool {
         let Some(budget) = &self.budget else {
             return true;

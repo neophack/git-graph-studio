@@ -33,14 +33,16 @@ pub async fn throttled_verify(
     daemon: &Arc<Daemon>,
     ip: std::net::IpAddr,
     password: &str,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
+    // Boxed: `Response` alone is past clippy's `result_large_err` ceiling (1.99), and the
+    // wrapper is on every login path — one indirection, no copies.
     let verdict = daemon.limiter.lock().unwrap().check(ip, Instant::now());
     match verdict {
         Verdict::Locked(wait) => {
-            return Err(json_response(
+            return Err(Box::new(json_response(
                 StatusCode::TOO_MANY_REQUESTS,
                 serde_json::json!({ "error": "locked", "retryAfter": wait.as_secs().max(1) }),
-            ))
+            )))
         }
         Verdict::Delay(delay) => tokio::time::sleep(delay).await,
         Verdict::Allow => {}
@@ -51,13 +53,13 @@ pub async fn throttled_verify(
     } else {
         let lock = daemon.limiter.lock().unwrap().failure(ip, Instant::now());
         crate::warn!("password check failed from {ip}");
-        Err(match lock {
+        Err(Box::new(match lock {
             Some(wait) => json_response(
                 StatusCode::TOO_MANY_REQUESTS,
                 serde_json::json!({ "error": "locked", "retryAfter": wait.as_secs() }),
             ),
             None => error(StatusCode::UNAUTHORIZED, "wrong-password"),
-        })
+        }))
     }
 }
 
@@ -93,7 +95,7 @@ pub async fn login(
     let ip = client_ip(&daemon, peer, &headers);
     daemon.note_foreign(ip);
     if let Err(response) = throttled_verify(&daemon, ip, &body.password).await {
-        return response;
+        return *response;
     }
     let ua = headers
         .get(header::USER_AGENT)
@@ -209,7 +211,7 @@ pub async fn change_password(
     };
     let ip = client_ip(&daemon, peer, &headers);
     if let Err(response) = throttled_verify(&daemon, ip, &body.current).await {
-        return response;
+        return *response;
     }
     set_password(&daemon, &body.password).await
 }
@@ -348,7 +350,7 @@ pub async fn pair_unlock(
         return error(StatusCode::CONFLICT, "no-password");
     }
     if let Err(response) = throttled_verify(&daemon, peer.ip(), &body.password).await {
-        return response;
+        return *response;
     }
     let unlock = daemon.tickets.lock().unwrap().issue_unlock();
     json_response(StatusCode::OK, serde_json::json!({ "unlock": unlock }))
