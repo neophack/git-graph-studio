@@ -67,15 +67,19 @@ In GGS: Remote Access page → *Reach this PC from anywhere (relay)* → paste t
 
 | path | what |
 | ---- | ---- |
-| `/u/<uuid>/…` | the browser entry — proxied to that uuid's tunnel |
-| `/tunnel` | a PC's outbound WebSocket (Ed25519 challenge handshake) |
-| `/healthz` | liveness for orchestrators |
-| `/metrics` | Prometheus text, on `metrics_listen` when configured |
-| `/` | nothing (an optional `landing_page = true` static note) |
+| `/u/<uuid>/…` | the browser entry — proxied to that uuid's tunnel; the only public surface, and only for a well-formed uuid (a malformed segment drops like any scan path) |
+| `/tunnel` | a PC's outbound WebSocket (Ed25519 challenge handshake); plain HTTP probes of it are dropped |
+| `/metrics`, `/healthz` | the operator's corners, on `metrics_listen` when configured |
+| anything else | **nothing** — the connection closes without a byte, as if the port was not open |
 
-Every not-online link — mistyped, unknown, or the PC is away — answers the same page, so the
-relay cannot be probed for which PCs exist; probing past 100 links / 10 minutes holds an IP
-off for ten minutes.
+A well-formed link whose PC is unknown or away answers the same offline page, so the relay
+cannot be probed for which PCs exist; probing past 100 links / 10 minutes holds an IP
+off for ten minutes. Everything else — every path outside `/u/<uuid>/…`, every uuid that
+is not the well-formed v8 shape, and any `/tunnel` request that is not a WebSocket
+handshake — is dropped at the gate (`src/gate.rs`) with zero response bytes. TCP-level SYN
+replies and (in `tls = "files"` mode) the TLS handshake itself still happen — the port must
+answer its own clients — but no HTTP fingerprint ever leaves it. The same rule ships in
+`deploy/Caddyfile`, which proxies only `/u/*` and `/tunnel` and aborts the rest.
 
 ## Limits
 

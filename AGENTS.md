@@ -1299,7 +1299,22 @@ database) carries the link through NAT. The whole design lives in
   older, `T_REPLACED`), HTTP and WebSocket proxying with session re-stamping, the offline
   page every not-online link answers, per-IP limits (handshakes, login entries,
   offline-probe bans), joinKey in constant time, and the cross-PC cache for the workbench's
-  immutable assets only. Deploy files and the Dockerfile sit in `hub/deploy/`.
+  immutable assets only. The silence gate (2026-10-12, the owner's direction:
+  "如果不是 /u/uuid 访问，不要返回任何东西，就像没开这个端口一样" +
+  "判别不是 uuid 也要返回端口关闭，链接对才返回内容" — only a well-formed link is ever
+  answered, everything else is the shape of an unopened port): `gate.rs` wraps the router
+  in a tower service whose `Silent` error makes hyper close the connection without one
+  byte of HTTP — the public surface is exactly `/u/<uuid>/…` for a uuid segment that
+  passes `identity::valid_uuid` (the lowercase v8 shape every real link spells; a
+  malformed segment — wrong spelling, uppercase, percent-encoded — drops like every other
+  scan path, while unknown-but-well-formed stays the identical offline page) plus
+  `/tunnel` opened only as the WebSocket handshake shape the daemon's client sends;
+  `/healthz` moved beside `/metrics` onto the configured `metrics_listen`, the optional
+  `/` landing page and its `landing_page` config are gone, and `deploy/Caddyfile` carries
+  the same rule at the TLS front (proxy `/u/*` and `/tunnel`, `abort` the rest — never a
+  Caddy 502 for a dropped path; TCP SYN replies and the TLS handshake itself are physical
+  facts of listening, the silence is the HTTP layer's). Deploy files and the Dockerfile
+  sit in `hub/deploy/`.
 - **The plugin package** (`extensions-src/ggs-remote/`: `extension.js`, `lib/daemon.js`
   install/upgrade/start, `lib/admin.js` the admin API client, `media/page/` the Remote
   Access page — links + QR behind the password unlock, devices, password, and the relay

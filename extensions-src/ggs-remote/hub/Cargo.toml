@@ -25,6 +25,7 @@ axum = { version = "0.8", default-features = false, features = ["ws", "http1", "
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tower-service = "0.3"
 http-body-util = "0.1"
 bytes = "1"
 serde = { version = "1", features = ["derive"] }

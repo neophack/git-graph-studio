@@ -1,5 +1,17 @@
 # Caddy fronts the Hub (docs/ggs-remote-plan.md §20.8): automatic Let's Encrypt certificate,
-# plain HTTP to the Hub, WebSocket upgrade headers pass through untouched.
+# plain HTTP to the Hub, WebSocket upgrade headers pass through untouched. Only the links
+# and the PCs' own /tunnel cross; every other path aborts — the connection closes without
+# an answer, the Hub's own silence rule (§20.5) at the TLS front.
 remote.example.com {
-	reverse_proxy hub:8443
+	@link path /u/*
+	@tunnel path /tunnel
+	handle @link {
+		reverse_proxy hub:8443
+	}
+	handle @tunnel {
+		reverse_proxy hub:8443
+	}
+	handle {
+		abort
+	}
 }

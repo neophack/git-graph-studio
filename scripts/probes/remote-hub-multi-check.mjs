@@ -368,8 +368,13 @@ async function main() {
 	hub.stdout.on('data', (d) => (hubLog += d));
 	for (let i = 0; i < 50 && !(await portOpen(hubPort)); i++) await sleep(100);
 	check('hub listening', await portOpen(hubPort), `http://127.0.0.1:${hubPort}/ (metrics :${metricsPort})`);
-	const health = await fetch(`http://127.0.0.1:${hubPort}/healthz`).then((r) => r.status).catch(() => 0);
-	check('hub /healthz', health === 200, String(health));
+	// §20.5: the public port answers /u/<uuid>/… and nothing else — liveness lives on the
+	// metrics listener, and a request outside the links drops with zero bytes (fetch sees
+	// the socket close before any response and throws).
+	const health = await fetch(`http://127.0.0.1:${metricsPort}/healthz`).then((r) => r.status).catch(() => 0);
+	check('hub /healthz (metrics listener)', health === 200, String(health));
+	const rootProbe = await fetch(`http://127.0.0.1:${hubPort}/`).then((r) => r.status).catch(() => 0);
+	check('hub public port silent outside links', rootProbe === 0, String(rootProbe));
 
 	// ---- the two PCs ----
 	const pcA = await makePc('pc-a', PASSWORD_A, root);
@@ -451,10 +456,14 @@ async function main() {
 		check(`${pc.name}: list_dir returns its own folder`, Array.isArray(listing) && (pc.name === 'pc-a' ? names.includes('package.json') : names.includes('ZTEST-PC-B.md')), `${(listing ?? []).length} entries`);
 	}
 
-	// ---- the offline page: unknown and malformed uuids answer the same thing ----
-	const unknown = await fetch(`${hubBase}/u/00000000-0000-0000-0000-000000000000/login`).then((r) => r.text()).catch(() => '');
+	// ---- the offline page and the uuid gate: only a well-formed link is ever answered ----
+	const unknown = await fetch(`${hubBase}/u/00000000-0000-8000-8000-000000000000/login`).then((r) => r.text()).catch(() => '');
+	const unknownStripped = await fetch(`${hubBase}/u/00000000-0000-8000-8000-000000000000`).then((r) => r.text()).catch(() => '');
+	check('offline page: unknown well-formed links answer the same page', unknown.length > 0 && unknown === unknownStripped, `${unknown.length} bytes`);
+	// A malformed uuid segment is not a link — the gate drops it with zero bytes (fetch
+	// throws on a socket that closes before any response).
 	const malformed = await fetch(`${hubBase}/u/not-a-uuid/login`).then((r) => r.text()).catch(() => '');
-	check('offline page: unknown and malformed uuids are indistinguishable', unknown.length > 0 && unknown === malformed, `${unknown.length} bytes`);
+	check('uuid gate: a malformed uuid drops with nothing', malformed === '', `${malformed.length} bytes`);
 	// The link shapes a user actually types (print-link spells publicBase with the trailing
 	// slash; a hand-stripped one without). Both must reach the PC (or the offline page), not
 	// a Hub router fallthrough.

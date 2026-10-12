@@ -9,6 +9,7 @@ pub mod cache;
 pub mod config;
 pub mod frame;
 pub mod front;
+pub mod gate;
 pub mod http_proxy;
 pub mod identity;
 pub mod msg;
@@ -26,11 +27,13 @@ use axum::Router;
 use crate::config::Config;
 use crate::state::Hub;
 
-/// The whole surface (§20.5): the browser entry, the PC tunnel, the operator's corners.
-/// Everything else is 404 — the same shape an unknown path has. The `/u/<uuid>` and
-/// `/u/<uuid>/` spellings are registered apart from the catch-all because `{*rest}` does
-/// not match an empty rest: without them the canonical link (the trailing slash) fell out
-/// of the router entirely.
+/// The routes behind the gate (§20.5): the browser entry and the PC tunnel. Nothing else —
+/// a path that falls out of this router is not a `/u/<uuid>/…` request and never reaches
+/// it: the [`gate`] wraps this stack and answers such requests with silence (the connection
+/// closes without a byte, as if the port was not open). The `/u/<uuid>` and `/u/<uuid>/`
+/// spellings are registered apart from the catch-all because `{*rest}` does not match an
+/// empty rest: without them the canonical link (the trailing slash) fell out of the router
+/// entirely.
 pub fn router(hub: Arc<Hub>) -> Router {
     Router::new()
         .route(
@@ -61,9 +64,15 @@ pub fn router(hub: Arc<Hub>) -> Router {
                 .head(front::entry),
         )
         .route("/tunnel", get(tunnel::tunnel_handler))
-        .route("/healthz", get(front::healthz))
-        .route("/", get(front::landing))
         .with_state(hub)
+}
+
+/// The public serving stack (§20.5): the router behind the silence gate — `/u/<uuid>/…`
+/// (and the PCs' `/tunnel` WebSocket handshakes) is everything this port ever answers;
+/// every other request closes the connection without a byte. `serve` runs this, and the
+/// tunnel suite runs the same stack, so the tested Hub is the shipped one.
+pub fn gated(hub: Arc<Hub>) -> gate::GateListener {
+    gate::GateListener::new(router(hub))
 }
 
 /// Bind the main listener (TLS per config) and serve until stopped.
@@ -77,15 +86,18 @@ pub async fn serve(
         .listen
         .parse()
         .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 8443)));
-    let app = router(hub.clone()).into_make_service_with_connect_info::<SocketAddr>();
+    let app = gated(hub.clone());
 
     if !config.metrics_listen.is_empty() {
+        // The operator's corners (§20.5) — the public port stays silent outside the links,
+        // so liveness and metrics live on this deliberately bound listener only.
         let metrics = Router::new()
             .route("/metrics", get(front::metrics))
+            .route("/healthz", get(front::healthz))
             .with_state(hub.clone());
         if let Ok(bind) = config.metrics_listen.parse::<SocketAddr>() {
             if let Ok(listener) = tokio::net::TcpListener::bind(bind).await {
-                crate::info!("metrics on http://{bind}/metrics");
+                crate::info!("metrics and healthz on http://{bind}/");
                 tokio::spawn(async move {
                     let app = metrics.into_make_service();
                     if let Err(e) = axum::serve(listener, app).await {

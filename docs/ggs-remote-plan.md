@@ -15,6 +15,7 @@
 > 修订（2026-10-12，手机端设置页重设计）：§11.3 的“设置页单列”落地为专属全屏页面（`src/remote/settingsPage.ts`）——桌面设置对话框是 720 px 双栏窗口，170 px 分类栏在 390 px 屏上把行挤成 130 px 竖条，完全不可读；新页面为单列全屏：分类作下钻行（每级自右滑入、表头带返回步，手机返回键逐级弹出、最后关页——backStack 的单条历史项按级重新武装），布尔为行内开关、枚举/主题/语言从底部表单选择、数字在表单里 − 值 + 步进（按设置自身步长取整、夹取上下界）、文件关联目录为独立一级（后端 `assoc_list_defaults` 目录）、文本/JSON 扩展设置在表单里编辑（非法 JSON 拒收并提示）；根级搜索横跨全部类别与扩展声明；省流模式归入“远程访问”分类。数据源与桌面完全同源：`SETTING_DEFS` + `updateSetting`、扩展声明经 `saveExtSetting`，枚举写入统一走 `settings.ts` 的 `applyEnumSetting`（桌面对话框同样改走它）。抽屉的设置行与手机档的 `workbench.openSettings`（命令面板、扩展的 `workbench.action.openSettings`）都路由到该页（`installPhoneSettingsEntry`，离开手机档恢复桌面原命令）；`tests/remoteResponsive.test.ts` 的 settings page 组七用例回归，截图基线 `scripts/probes/remote-phone-shots.mjs` 增 11–13 三张。
 > 修订（2026-10-12，计划收口第三轮）：(1) §17.3 的远程垫片轮落地——`tests/remoteRound.ts` 把 tauriMock 的 invoke 引到真垫片链（tauriShim `invoke` → Transport → 帧编解码 → RelayEngine → 同一套脚本 handler），mock `Channel` 带 `toJSON` 流标记（`__GGS_CHAN__:<stream>`，relay 侧 revive，事件双向流动）；commandSweep 全命令在 tablet 标记下重跑 + phone 冒烟，uiSweep 整组在远程垫片下重跑（SCM/diff 断言改为轮询——wire 的往返让落点晚一拍；SCM 列表顺序在远程下不保证，按行名点击）；richHandlers 补 `list_dir_page`（远程资源管理器分页路径）。(2) §17.1 INSTANCE_RESTART 成功路径：`a_restart_kills_relaunches_and_waits_for_the_registration`——被注册 pid 终止、按注册的 LaunchSpec 重拉本测试二进制（`--exact restart_child_role --ignored` 的子角色，经 GGS_REMOTE_HOME 找到控制端点注册）、SPAWNED 应答新实例 id、WINDOWS 推送换人。(3) §7.10 idle_exit 单测两条（空闲计时先布防、到点才问退；有会话不问；0 分钟关闭）。(4) §17.4 三引擎矩阵：`playwright.remote.config.ts` 增加 Firefox/WebKit 项目；**发现并实测确认**——WebKit/Safari 不给 plain-HTTP localhost 豁免，`Secure` 会话 Cookie 被丢弃（登录永远回登录页）→ e2e fixture 全面改为 TLS 守护进程（`self-signed` + `ignoreHTTPSErrors`，即产品出厂形态），三引擎全绿；`visual-baseline.spec.ts` 按引擎×桌面/手机截登录页与离线页存 `target/studio/remote-e2e-shots/`（不提交像素基线——DOM 断言承载正确性，截图作肉眼比对记录）。
 > 修订（2026-10-12，远程原理改为副本，§22）：按所有者要求（“整个 GGS 都在 PC 上跑，远程网页只是一个副本显示，核心逻辑在 PC 上”）——远程页默认不再在浏览器里运行工作台，而是 PC 桌面窗口（可隐藏）的实时 DOM 副本；输入回传 PC 重放。浏览器刷新、关闭不再重启任何东西：Claude Code 的对话页面常驻 PC 窗口，关掉网页后对话继续，下次打开看到的就是正在工作的 Claude。手机观看时隐藏的 PC 窗口按手机尺寸重排并换上手机外壳，副本 1:1。旧的浏览器端工作台保留为 `?frontend=1`。
+> 修订（2026-10-12，公开端口静默）：按所有者要求（“如果不是 /u/uuid 访问，不要返回任何东西，就像没开这个端口一样”；“链接对才返回内容；判别不是 uuid 也要返回端口关闭”——同日所有者撤回了“端口扫描时也要端口关闭”的 TCP 层诉求，`listen` 保持 `0.0.0.0:8443` 默认）——§20.5 的公开表面收口为“只有链接形态对才有内容”：`/u/<合法 uuid>/…` 与 PC 自身的 `/tunnel`（仅放行 WebSocket 握手形态——守护进程的连法；对它的普通 HTTP 探测也静默）之外，任何请求**不写一个字节直接断开连接**（`hub/src/gate.rs`：tower 服务返回 `Silent` 错误，hyper 在服务应答 `Ok` 之前不写任何响应，故连接以“端口没开”的形态关闭）。uuid 的**形态判别也在门口**：`/u/` 后的段必须是 `identity::valid_uuid` 的小写带连字符 v8 形态（真实链接的固定拼写；大写、版本位错、百分号编码、`not-a-uuid` 一类都不是链接），否则同样零字节断开；形态合法但未知/离线的 uuid 照旧答同一个离线页（两态一致，PC 睡醒的自动重连 UX 保留，Hub 仍无从泄露哪些 uuid 存在）。`/healthz` 移到 `metrics_listen` 运营口（与 `/metrics` 同口，默认关闭）；`/` 的可选说明页（`landing_page` 配置）整体删除。部署面的同样收口：`deploy/Caddyfile` 只代理 `/u/*` 与 `/tunnel`，其余 `abort`（Caddy 直接关闭连接，不答 502）。物理边界如实记录：TCP 层的 SYN 应答无法隐藏（否则浏览器也连不上，SYN 扫描必见 open）；TLS 模式下 TLS 握手本身仍会完成（证书可见）；静默指 HTTP 层不产生任何响应字节——`nmap` 等探测拿不到任何服务指纹。`hub/tests/tunnel.rs` 的 `paths_outside_the_links_answer_nothing`（含畸形 uuid 各形态）与 fixture 改走 `gated()`（与 `serve` 同栈）回归，`gate.rs` 内含放行判定单测；探针 `remote-hub-multi-check.mjs` 的 healthz 检查改走 metrics 口、新增公开口静默与畸形 uuid 零字节检查。
 
 ## 目录
 
@@ -1503,9 +1504,9 @@ cargo build --manifest-path extensions-src/ggs-remote/daemon/Cargo.toml --releas
 - **一台 PC = 一个设备密钥 = 一个 UUID = 一个链接。** 这里的“用户”就是“一台 PC 的主人”；Hub 上不存在用户这个概念。
 - **UUID 的来源**：守护进程首次启用 Hub 时生成 Ed25519 设备密钥（`~/.ggs/remote/hub/device.key`，0600）。
   `uuid = UUIDv8( SHA-256("ggs-remote-uuid/1" ‖ 公钥)[0..16] )`——取哈希前 16 字节，按 RFC 9562 设置版本位（8）和变体位（`10`），共 122 位来自哈希。同一把密钥永远得到同一个 UUID，链接稳定；Hub 不需要保存任何映射。
-- UUID 统一为小写带连字符的 36 字符；Hub 只匹配 `^/u/[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/`，其他写法一律 404。
+- UUID 统一为小写带连字符的 36 字符（v8 形态）；`/u/` 后的段不是这个形态（畸形、大写、版本位错）就在门口零字节断开，`/u/` 之外的路径同样**不答**——如同此端口未开（§20.5 静默门）；形态合法的 uuid 才可能有内容。
 - UUID 无法猜测，别人不能遍历出有哪些 PC；但**链接不是凭据**，进入仍需该 PC 设置的密码。
-- **更换链接**：在 PC 的插件页点“更换链接” → 守护进程生成新的设备密钥 → 新 UUID → 重连 Hub。旧链接立即 404，旧链接上的会话全部断开（4401 `link-changed`）。
+- **更换链接**：在 PC 的插件页点“更换链接” → 守护进程生成新的设备密钥 → 新 UUID → 重连 Hub。旧链接立即答离线页（与任何未知链接不可区分），旧链接上的会话全部断开（4401 `link-changed`）。
 - **换电脑**：新电脑会得到新链接。想保留原链接，可以把 `device.key` 从旧电脑拷到新电脑（插件页提供“导出 / 导入设备密钥”，导出文件用访问密码加密：Argon2id 派生密钥 + XChaCha20-Poly1305）。同一把密钥同时在两台 PC 上连 Hub 时，后连上的生效，先前的收到 `T_REPLACED` 并停止重连，插件页提示。
 - 一台 PC 上多个操作系统用户：各自的守护进程各有密钥，各有链接。
 - 只需要一个域名和一张普通证书。
@@ -1597,17 +1598,18 @@ Hub 收到 `/u/<uuid>/<rest>`：查内存表 `uuid → 隧道`，剥掉前缀，
 
 链接的两种裸形态——`/u/<uuid>/`（`publicBase` 的原文，带尾斜杠）与 `/u/<uuid>`（手剥斜杠）——都按空 rest 进入同一处理，由 PC 按自己的 `/` 应答（未登录重定向登录页、已登录重定向窗口页，Location 带 basePath）。`{*rest}` 不匹配空 rest，两种形态在路由表上单列（`hub/src/lib.rs`）。
 
-Hub 的路径：
+Hub 的路径（§20.5 的静默门，2026-10-12 按所有者要求收口：“如果不是 /u/uuid 访问，不要返回任何东西，就像没开这个端口一样”）：
 
 | 路径 | 说明 |
 | ---- | ---- |
-| `/u/<uuid>/…` | 浏览器入口 |
-| `/tunnel` | PC 隧道 |
-| `/healthz` | 健康检查（容器编排用） |
-| `/metrics` | Prometheus 指标（只在配置的地址上监听，默认关闭） |
-| `/` 及其他 | 404，或一个不含任何 PC 信息的静态说明页（配置项） |
+| `/u/<uuid>/…` | 浏览器入口——唯一的公开表面 |
+| `/tunnel` | PC 隧道；只放行 WebSocket 握手形态（守护进程的连法），对它的普通 HTTP 请求也静默 |
+| `/metrics`、`/healthz` | 运营口，只在配置的 `metrics_listen` 上（默认关闭） |
+| 其他一切 | **零字节断开连接**，如同此端口未开 |
 
-没有管理后台。格式错误、uuid 不在线、uuid 从未出现过，三种情况返回**同一个**“此链接对应的 PC 当前不在线”页面（Hub 内嵌，< 10 KB；脚本软轮询 15 s——非 JS 环境退化 meta refresh——PC 上线的下一轮即整体跳转，轮询节奏不动用离线探测预算，页面文字逐字节恒定以保三态一致）——Hub 本来就不知道哪些 uuid“存在”，也就无从泄露。
+没有管理后台。`/u/` 后的段**形态合法**是得到任何内容的前提：形态错误的 uuid（畸形、大写、版本位错、百分号编码——一切不是真实链接的拼写）在静默门口即断开，与任何扫描路径无异。形态合法的 uuid 里，不在线与从未出现过两种情况返回**同一个**“此链接对应的 PC 当前不在线”页面（Hub 内嵌，< 10 KB；脚本软轮询 15 s——非 JS 环境退化 meta refresh——PC 上线的下一轮即整体跳转，轮询节奏不动用离线探测预算，页面文字逐字节恒定以保两态一致）——Hub 本来就不知道哪些 uuid“存在”，也就无从泄露。
+
+静默的实现（`hub/src/gate.rs`）：`serve` 跑的是路由外包一层的 tower 服务，不在放行名单里的请求以 `Silent` 错误应答——hyper 只在服务返回 `Ok` 后才写响应字节，`Err` 即关闭连接、一个字节都不发；对扫描器而言这个端口上没有任何 HTTP 服务。放行名单就两条：`/u/<合法 uuid>/…`（`identity::valid_uuid` 的小写 v8 形态，任意方法——形态之后的未知/离线是两态一致离线页的事，不是门的事）与 `/tunnel` 的 WebSocket 握手。物理边界如实记录：TCP 层的 SYN 应答无法隐藏（否则浏览器也连不上，SYN 扫描必见 open）；TLS 模式下 TLS 握手本身仍会完成（证书可见）；静默指 HTTP 层不产生任何响应字节——`nmap` 等探测拿不到任何服务指纹。前置 Caddy 的部署由 `deploy/Caddyfile` 配合——只代理 `/u/*` 与 `/tunnel`，其余 `abort`（Caddy 关闭连接而不答 502）。
 
 ### 20.6 安全
 
@@ -1616,7 +1618,7 @@ Hub 的路径：
 | 冒充别人的 PC（抢占 uuid） | uuid 由公钥哈希决定，接入时必须用对应私钥签 Hub 的一次性挑战（绑定 Hub 主机名，防跨服务器重放）；没有私钥就拿不到这个 uuid |
 | 不相干的人把你的服务器当免费中继 | 可选 `joinKey`（服务器口令，常量时间比较）；`maxTunnels` 在线 PC 上限；每条隧道并发会话上限（默认 8）与可选的每日流量上限；`T_HELLO` 每 IP 限速 |
 | 浏览器端爆破某台 PC 的密码 | PC 守护进程限速（§7.6）按真实 IP：Hub 在 `CONN_OPEN`/`HTTP_REQ` 里带客户端 IP；Hub 另有每 IP、每 uuid 的登录入口限速（10 次/分钟） |
-| 枚举链接 | 122 位哈希，无法遍历；所有不可用链接返回同一页面；每 IP 访问不在线链接超过 100 次/10 分钟则临时封禁 |
+| 枚举链接 | 122 位哈希，无法遍历；畸形 uuid 在门口即静默（与任何扫描路径无异），形态合法的未知/离线链接返回同一页面；每 IP 访问不在线链接超过 100 次/10 分钟则临时封禁 |
 | 链接泄露 | 链接不是凭据，仍需密码；可“更换链接” |
 | 设备私钥泄露 | 等于链接被别人接管（对方仍不知道访问密码，但可以冒充你的 PC 骗取密码）。私钥文件 0600；导出文件必须加密；插件页“更换链接”立即作废旧密钥 |
 | Hub 被攻破 | 可读写经过的流量。缓解：自己部署；Hub 不存密码、会话、任何持久数据；可选 M10 端到端加密 |
@@ -1702,8 +1704,7 @@ max_tunnels = 200
 sessions_per_tunnel = 8
 bytes_per_day_per_tunnel = 0                # 0 = 不限
 asset_cache_mb = 256
-landing_page = false
-metrics_listen = ""                         # 如 "127.0.0.1:9100"
+metrics_listen = ""                         # 运营口（/metrics 与 /healthz）；空 = 关闭
 ```
 
 ### 20.9 部署

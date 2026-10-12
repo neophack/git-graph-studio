@@ -1,7 +1,9 @@
 //! The browser entry (docs/ggs-remote-plan.md §20.5): `/u/<uuid>/<rest>` — find the tunnel,
 //! hand `/ws` to the bridge and everything else to the HTTP proxy; a uuid that is malformed,
 //! unknown or merely offline all answer the same page, so nothing about which PCs exist
-//! leaks. `/healthz` and `/metrics` are the operator's corners.
+//! leaks. The port answers nothing else — the [`crate::gate`] drops every non-link request
+//! without a byte. `/healthz` and `/metrics` are the operator's corners, served on the
+//! configured metrics listener.
 
 use axum::body::Body;
 use axum::extract::ws::WebSocketUpgrade;
@@ -68,8 +70,10 @@ async fn serve(
     http_proxy::proxy(hub, tunnel, uuid, rest, base_path, peer_ip, request).await
 }
 
-/// The one answer for every not-online link (§20.5): a page under 10 KB that retries itself,
-/// identical whether the uuid is wrong, unknown or the PC is away.
+/// The one answer for a well-formed link whose PC is unknown or away (§20.5): a page under
+/// 10 KB that retries itself, identical in both cases. (A malformed uuid never gets this
+/// far — the gate drops it; this handler's own `valid_uuid` check stays as defense in
+/// depth for the bare-router stacks the daemon suite runs.)
 pub fn offline_page() -> Response {
     let html = include_str!("../web/offline.html");
     // No `refresh` header: the page carries its own meta-refresh fallback, which its script
@@ -82,6 +86,7 @@ pub fn offline_page() -> Response {
         .expect("a static page")
 }
 
+/// Liveness, on the metrics listener only (§20.5) — the public port never answers it.
 pub async fn healthz() -> Response {
     StatusCode::OK.into_response()
 }
@@ -93,19 +98,6 @@ pub async fn metrics(State(hub): State<Arc<Hub>>) -> Response {
             "text/plain; version=0.0.4; charset=utf-8",
         )],
         hub.metrics_text(),
-    )
-        .into_response()
-}
-
-/// The optional landing page at `/` (config `landing_page`): says what this server is, names
-/// no PC. Off by default — a bare 404, the same shape an unknown path has.
-pub async fn landing(State(hub): State<Arc<Hub>>) -> Response {
-    if !hub.config.landing_page {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        include_str!("../web/landing.html"),
     )
         .into_response()
 }

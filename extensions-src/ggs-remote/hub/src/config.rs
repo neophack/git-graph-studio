@@ -46,9 +46,9 @@ pub struct Config {
     /// `/tunnel` handshakes one IP may start per minute (§20.6); 0 = unlimited — for load
     /// tests and private deployments whose whole fleet shares one address.
     pub handshake_rate: u32,
-    /// Serve a landing page (no PC information) at `/`.
-    pub landing_page: bool,
-    /// A second listener for `/metrics` (Prometheus text); empty = off.
+    /// A second listener for the operator's corners — `/metrics` (Prometheus text) and
+    /// `/healthz` (§20.5): the public port answers nothing outside `/u/<uuid>/…`.
+    /// Empty = off.
     pub metrics_listen: String,
 }
 
@@ -65,7 +65,6 @@ impl Default for Config {
             asset_cache_mb: DEFAULT_ASSET_CACHE_MB,
             trust_proxy: false,
             handshake_rate: 10,
-            landing_page: false,
             metrics_listen: String::new(),
         }
     }
@@ -123,7 +122,6 @@ impl Config {
              trust_proxy = false\n\
              # /tunnel handshakes one IP may start per minute; 0 = unlimited (load tests).\n\
              handshake_rate = {handshake_rate}\n\
-             landing_page = false\n\
              metrics_listen = \"\"\n",
             listen = Config::default().listen,
             max_tunnels = Config::default().max_tunnels,

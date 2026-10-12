@@ -30,5 +30,6 @@ trust_proxy = true
 # 0 = unlimited — for load tests, or a private deployment whose whole fleet shares one address.
 handshake_rate = 10
 
-landing_page = false
-metrics_listen = ""            # e.g. "127.0.0.1:9100" for /metrics
+# The operator's corners — /metrics and /healthz live here, never on the public port
+# (which answers nothing outside /u/<uuid>/…, like an unopened port).
+metrics_listen = ""            # e.g. "127.0.0.1:9100" for /metrics and /healthz

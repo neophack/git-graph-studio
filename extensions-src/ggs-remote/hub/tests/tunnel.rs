@@ -1,7 +1,7 @@
 //! End-to-end: a real Hub on a loopback port (plain HTTP), fake PCs speaking the tunnel
 //! protocol over tokio-tungstenite, and a fake browser — the plan's §20.12 tunnel suite:
 //! the handshake, the join key, replacement, the offline page, HTTP proxying, the WebSocket
-//! bridge and two PCs never hearing each other's traffic.
+//! bridge, the silence outside the links and two PCs never hearing each other's traffic.
 
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
@@ -23,16 +23,14 @@ struct Fixture {
 
 async fn start_hub(config: Config) -> Fixture {
     let hub = Hub::new(config);
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .unwrap();
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let addr = listener.local_addr().unwrap();
-    let app =
-        ggs_remote_hub::router(hub).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let app = ggs_remote_hub::gated(hub);
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
+        let server = axum_server::from_tcp(listener);
         tokio::select! {
-            _ = axum::serve(listener, app) => {}
+            _ = server.serve(app) => {}
             _ = stopped => {}
         }
     });
@@ -310,21 +308,62 @@ async fn a_second_connection_with_the_same_key_replaces_the_first() {
 #[tokio::test]
 async fn a_not_online_link_answers_the_same_page() {
     let fixture = start_hub(Config::default()).await;
+    // Well-formed uuids only — the gate drops a malformed segment before the router ever
+    // sees it. Unknown and away answer the same page, not on a router 404 or an
+    // extractor 500; both bare link shapes included.
     for path in [
         "/u/3f9c2a6e-8b1d-8c7a-9e45-2d6f0b8a71c3/login",
-        "/u/not-a-uuid/login",
-        // The link shapes themselves — unknown and malformed alike must land on the same
-        // page, not on a router 404 or an extractor 500.
         "/u/3f9c2a6e-8b1d-8c7a-9e45-2d6f0b8a71c3/",
         "/u/3f9c2a6e-8b1d-8c7a-9e45-2d6f0b8a71c3",
-        "/u/not-a-uuid/",
-        "/u/not-a-uuid",
     ] {
         let (status, _head, body) = http(fixture.hub, "GET", path.to_owned(), &[], None).await;
         assert_eq!(status, 503, "{path}");
         // The page's own fallback refresh (the script swaps it for a soft poll).
         assert!(body.contains("http-equiv=\"refresh\""), "{path}");
         assert!(body.contains("not online"), "{path}");
+    }
+}
+
+/// §20.5, the silence: a request that does not address a well-formed `/u/<uuid>/…` link
+/// (nor the PCs' `/tunnel` WebSocket handshake — every other test's `pc()` proves that leg
+/// still passes) closes the connection with zero bytes, as if nothing had this port open.
+/// The uuid shape is judged here too: a malformed segment is not a link.
+#[tokio::test]
+async fn paths_outside_the_links_answer_nothing() {
+    let fixture = start_hub(Config::default()).await;
+    for path in [
+        "/",
+        "/healthz",
+        "/metrics",
+        "/favicon.ico",
+        "/wp-admin/setup.php",
+        "/u",
+        "/u/",
+        "/u//x",
+        // Not a uuid — the shape fails the gate, no page, no bytes.
+        "/u/not-a-uuid",
+        "/u/not-a-uuid/",
+        "/u/not-a-uuid/login",
+        "/u/3F9C2A6E-8B1D-8C7A-9E45-2D6F0B8A71C3",
+        "/u/3f9c2a6e-8b1d-4c7a-9e45-2d6f0b8a71c3",
+        // The PCs' own leg probed as plain HTTP — not a WebSocket handshake.
+        "/tunnel",
+    ] {
+        let mut stream = tokio::net::TcpStream::connect(fixture.hub).await.unwrap();
+        stream
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        assert!(
+            raw.is_empty(),
+            "{path}: the port answered {} bytes",
+            raw.len()
+        );
     }
 }
 
