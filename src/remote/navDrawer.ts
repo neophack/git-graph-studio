@@ -15,6 +15,7 @@ import { tabBadge } from './bottomTabs';
 import { setDataSaver } from './dataSaver';
 import { BUILTIN_VIEWS, currentPage, extensionContainers, goTo, launchers, pageIcon, type PageId } from './pages';
 import { remoteEnv } from './session';
+import { openSettingsPage } from './settingsPage';
 
 let open: { root: HTMLElement; release: () => void } | null = null;
 
@@ -106,10 +107,10 @@ function commandRow(iconName: string, label: string, id: string, extra: { badge?
 	}, { ...extra, disabled: !commands.isEnabled(id) });
 }
 
-/** The on/off switch a settings row carries. */
+/** The on/off switch a settings row carries (settingsPage's shape too — .ggs-switch draws it). */
 function toggleSwitch(on: boolean): HTMLElement {
 	const track = document.createElement('span');
-	track.className = 'switch' + (on ? ' on' : '');
+	track.className = 'switch ggs-switch' + (on ? ' on' : '');
 	track.setAttribute('role', 'switch');
 	track.setAttribute('aria-checked', on ? 'true' : 'false');
 	track.appendChild(document.createElement('i'));
@@ -176,7 +177,12 @@ export function openDrawer(menus: () => MenuDefinition[]): void {
 		setDataSaver(next);
 		saverRow.querySelector('.switch')?.replaceWith(toggleSwitch(next));
 	}, { trailing: toggleSwitch(saver) });
-	const settingsRows = [saverRow, commandRow('settings-gear', t('remote.drawer.settings'), 'workbench.openSettings')];
+	// Settings opens the phone's own page (settingsPage.ts), never the desktop dialog the
+	// command would show: the 720 px two-pane window is unreadable at this width.
+	const settingsRows = [saverRow, row(codicon('settings-gear'), t('remote.drawer.settings'), () => {
+		closeDrawer();
+		openSettingsPage();
+	})];
 
 	const body = document.createElement('div');
 	body.className = 'ggs-drawer-body';

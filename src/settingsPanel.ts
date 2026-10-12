@@ -8,7 +8,7 @@
 import { invoke } from '@tauri-apps/api/core';
 
 import { LOCALES, t, tf } from './i18n';
-import { SETTINGS_EVENT, SETTING_DEFS, THEMES, isSettingModified, settings, updateSetting, type SettingDef } from './settings';
+import { SETTINGS_EVENT, SETTING_DEFS, THEMES, applyEnumSetting, isSettingModified, settings, updateSetting, type SettingDef } from './settings';
 import { extensionSettingDefs } from './contributions';
 import { saveExtSetting, extSettings } from './state';
 import { el, icon, notify } from './ui';
@@ -108,13 +108,7 @@ function controlFor(def: SettingDef): HTMLElement {
 		case 'locale':
 			return select(settings.locale, LOCALES.map((l) => ({ value: l.id, label: l.label })), (value) => updateSetting('locale', value));
 		case 'enum':
-			return select(String(settings[def.key]), def.options ?? [], (value) => {
-				if (def.key === 'autoSave') updateSetting('autoSave', value as typeof settings.autoSave);
-				// Numeric enums (fontSize, tabSize) store numbers; string enums
-				// (autoSave, linuxDmabuf) keep the option text.
-				else if (/^-?\d+$/.test(value)) updateSetting(def.key, Number(value) as never);
-				else updateSetting(def.key, value as never);
-			});
+			return select(String(settings[def.key]), def.options ?? [], (value) => applyEnumSetting(def, value));
 		case 'number':
 			return numberInput(settings[def.key] as number, (value) => updateSetting(def.key, value as never), def.min ?? 0, def.max ?? 10000, def.step);
 		default:

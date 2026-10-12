@@ -2,7 +2,7 @@
 // factor detection, context menus as the phone's action sheet, the phone's page model with
 // its app bar, bottom navigation, drawer, open editors sheet and editing row, long-press as
 // contextmenu, the terminal key row, the page stack and the edit lock.
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { formFactorFor, initResponsive, formFactor } from '../src/remote/responsive';
 import { installActionSheet, closeActionSheet, showActionSheet } from '../src/remote/actionSheet';
 import { createBottomTabs } from '../src/remote/bottomTabs';
@@ -12,7 +12,7 @@ import { ACCESSORY_KEYS, createEditorAccessory } from '../src/remote/editorAcces
 import { closeDrawer, drawerOpen, openDrawer } from '../src/remote/navDrawer';
 import { currentPage, editorPlaceholderShown, resetWorkbenchWatch } from '../src/remote/pages';
 import { editableFocused, keyboardOpen } from '../src/remote/responsive';
-import { applyContributions, removeContributions } from '../src/contributions';
+import { applyContributions, applyExtensionSettings, removeContributions } from '../src/contributions';
 import { installLongPress, LONG_PRESS_MS } from '../src/remote/gestures';
 import { createTerminalKeys } from '../src/remote/terminalKeys';
 import { TERMINAL_SEND_EVENT } from '../src/terminal';
@@ -20,8 +20,13 @@ import { Panel } from '../src/panel';
 import { showContextMenu, setMenuPresenter, type MenuEntry, type MenuItem } from '../src/ui';
 import { commands } from '../src/commands';
 import { EditorGroup } from '../src/editor';
+import { closeSettingsPage, installPhoneSettingsEntry, openSettingsPage, settingsPageOpen } from '../src/remote/settingsPage';
+import { openSettingsPanel } from '../src/settingsPanel';
+import { DEFAULT_SETTINGS, settings } from '../src/settings';
+import { extSettings } from '../src/state';
+import { setLocale, t } from '../src/i18n';
 import { backend } from './tauriMock';
-import { click } from './helpers';
+import { click, flush, type } from './helpers';
 
 function setWidth(width: number): void {
 	Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
@@ -204,7 +209,9 @@ describe('bottom navigation', () => {
 		const container = document.createElement('div');
 		container.className = 'activity-item';
 		container.dataset.view = 'ext-container:anthropic.claude-code.claude-sidebar';
-		container.title = 'Claude Code';
+		// Shaped as the workbench leaves it: the delayed tooltip strips the native `title`,
+		// keeping the container's name as the accessible label.
+		container.setAttribute('aria-label', 'Claude Code');
 		let containerClicks = 0;
 		container.addEventListener('click', () => {
 			containerClicks++;
@@ -218,6 +225,10 @@ describe('bottom navigation', () => {
 		expect([...bar.querySelectorAll('button')].map((button) => button.dataset.tab)).toEqual(['explorer', 'editor', 'scm', 'launch:preview.graph.view', 'ext-container:anthropic.claude-code.claude-sidebar']);
 		const tab = (id: string) => bar.querySelector<HTMLButtonElement>(`[data-tab="${id}"]`)!;
 		expect(tab('launch:preview.graph.view').textContent).toBe('Git Graph');
+		// The container's tab carries its label — not the icon alone — wherever the workbench
+		// kept the name (a stripped `title` falls back to the accessible one).
+		expect(tab('ext-container:anthropic.claude-code.claude-sidebar').querySelector('.label')!.textContent).toBe('Claude Code');
+		expect(pageHeading('ext-container:anthropic.claude-code.claude-sidebar').title).toBe('Claude Code');
 		tab('ext-container:anthropic.claude-code.claude-sidebar').click();
 		tab('ext-container:anthropic.claude-code.claude-sidebar').click();
 		// The container's activity item toggles, so the page showing is never clicked again.
@@ -591,5 +602,151 @@ describe('edit lock', () => {
 			delete document.documentElement.dataset['formFactor'];
 			document.documentElement.removeAttribute('data-remote-shell');
 		}
+	});
+});
+
+// The phone's Settings page (settingsPage.ts): the desktop dialog's two panes cannot fit a
+// 390 px screen, so Settings on a phone is a full-screen page — categories as drill-in rows,
+// choices as sheets, booleans as row switches, one registry under it all. The phone's back
+// button pops one level at a time, the page itself last.
+describe('settings page', () => {
+	const CATALOG = [
+		{ ext: 'blf', recommended: true },
+		{ ext: 'md', recommended: false }
+	];
+
+	/** A row of the level currently showing, by its label. */
+	const row = (label: string) => [...document.querySelectorAll<HTMLElement>('.ggs-settings-page .ggs-settings-level:last-child .ggs-settings-row')]
+		.find((candidate) => candidate.querySelector('.label')!.textContent === label)!;
+	const levelLabels = () => [...document.querySelectorAll<HTMLElement>('.ggs-settings-page .ggs-settings-level:last-child .ggs-settings-row .label')]
+		.map((label) => label.textContent);
+	const title = () => document.querySelector<HTMLElement>('.ggs-settings-title')!.textContent;
+
+	beforeEach(() => {
+		setLocale('en');
+		settings.theme = 'dark-modern';
+		settings.wordWrap = false;
+		settings.autoSaveDelay = DEFAULT_SETTINGS.autoSaveDelay;
+		settings.fileAssociations = [...DEFAULT_SETTINGS.fileAssociations];
+		localStorage.clear();
+		backend.on('settings_write', () => null);
+		backend.on('assoc_list_defaults', () => CATALOG);
+		backend.on('assoc_apply', () => ({ messageKey: 'assoc.applied.linux', detail: '' }));
+		backend.on('context_menu_apply', () => null);
+		commands.register({ id: 'workbench.openSettings', title: 'Settings', category: 'Preferences', run: () => openSettingsPanel() });
+	});
+
+	afterEach(() => {
+		closeSettingsPage();
+		closeActionSheet();
+		removeContributions('demo.ext');
+		installPhoneSettingsEntry(false);
+		leavePhone();
+	});
+
+	it('opens from the drawer and lists the categories as drill-in rows', () => {
+		phoneWorkbench();
+		openDrawer(() => []);
+		[...document.querySelectorAll<HTMLButtonElement>('.ggs-drawer-row')]
+			.find((candidate) => candidate.querySelector('.label')!.textContent === t('remote.drawer.settings'))!.click();
+		expect(drawerOpen()).toBe(false);
+		expect(settingsPageOpen()).toBe(true);
+		expect(levelLabels()).toEqual(['Remote Access', 'General', 'Appearance', 'Editor', 'Search', 'Extensions']);
+		expect(title()).toBe('Settings');
+	});
+
+	it('drills in, picks a choice from a sheet, and the phone back pops one level at a time', async () => {
+		phoneWorkbench();
+		openSettingsPage();
+		row('Appearance').click();
+		expect(title()).toBe('Appearance');
+		expect(levelLabels()).toContain(t('settings.theme'));
+		row(t('settings.theme')).click();
+		const sheetRows = [...document.querySelectorAll<HTMLElement>('.ggs-action-sheet .row')];
+		expect(sheetRows.find((candidate) => candidate.textContent === 'Dark Modern')!.classList.contains('checked')).toBe(true);
+		sheetRows.find((candidate) => candidate.textContent === 'Light Modern')!.click();
+		await flush();
+		expect(settings.theme).toBe('light-modern');
+		expect(row(t('settings.theme')).querySelector('.value')!.textContent).toBe('Light Modern');
+		expect(row(t('settings.theme')).classList.contains('modified')).toBe(true);
+		// The phone's back pops the category level first, then closes the page.
+		window.dispatchEvent(new PopStateEvent('popstate'));
+		expect(title()).toBe('Settings');
+		expect(settingsPageOpen()).toBe(true);
+		window.dispatchEvent(new PopStateEvent('popstate'));
+		expect(settingsPageOpen()).toBe(false);
+	});
+
+	it('a boolean toggles through the registry and a number steps in its sheet', async () => {
+		phoneWorkbench();
+		openSettingsPage();
+		row('Editor').click();
+		expect(row(t('settings.wordWrap')).querySelector('.switch')!.classList.contains('on')).toBe(false);
+		row(t('settings.wordWrap')).click();
+		await flush();
+		expect(settings.wordWrap).toBe(true);
+		expect(row(t('settings.wordWrap')).querySelector('.switch')!.classList.contains('on')).toBe(true);
+		row(t('settings.autoSaveDelay')).click();
+		const picker = document.querySelector<HTMLElement>('.ggs-number-picker')!;
+		expect(picker.querySelector<HTMLInputElement>('input')!.value).toBe('1000');
+		[...picker.querySelectorAll('button')].pop()!.click();
+		await flush();
+		expect(settings.autoSaveDelay).toBe(1100);
+		expect(picker.querySelector<HTMLInputElement>('input')!.value).toBe('1100');
+	});
+
+	it('the root search spans every category', () => {
+		phoneWorkbench();
+		openSettingsPage();
+		type(document.querySelector<HTMLInputElement>('.ggs-settings-searchbar input')!, 'theme');
+		expect(levelLabels()).toContain(t('settings.theme'));
+		expect(levelLabels()).not.toContain('General');
+		type(document.querySelector<HTMLInputElement>('.ggs-settings-searchbar input')!, 'zzzz-nothing');
+		expect(levelLabels()).toEqual([]);
+		expect(document.querySelector('.ggs-settings-level .empty')!.textContent).toBe(t('settings.noMatching'));
+	});
+
+	it('routes workbench.openSettings to the page on a phone, back to the dialog off it', async () => {
+		phoneWorkbench();
+		const overlays = document.createElement('div');
+		overlays.id = 'overlays';
+		document.body.appendChild(overlays);
+		installPhoneSettingsEntry(true);
+		await commands.execute('workbench.openSettings');
+		expect(settingsPageOpen()).toBe(true);
+		closeSettingsPage();
+		installPhoneSettingsEntry(false);
+		await commands.execute('workbench.openSettings');
+		expect(settingsPageOpen()).toBe(false);
+		expect(document.querySelector('.settings-overlay')).not.toBeNull();
+	});
+
+	it('extension-declared settings ride under Extensions and toggle through the store', async () => {
+		phoneWorkbench();
+		applyExtensionSettings('demo.ext', { properties: { 'demo.flag': { type: 'boolean', description: 'A demo flag', default: false } } }, {});
+		openSettingsPage();
+		row('Extensions').click();
+		const flag = row('demo.flag');
+		expect(flag.querySelector('.desc')!.textContent).toContain('demo.ext');
+		flag.click();
+		await flush();
+		expect(extSettings('demo.ext')['demo.flag']).toBe(true);
+	});
+
+	it('the file associations level toggles over the backend catalogue', async () => {
+		phoneWorkbench();
+		// The apply pass reports through a toast; the notifications host must exist for it.
+		const notes = document.createElement('div');
+		notes.id = 'notifications';
+		document.body.appendChild(notes);
+		openSettingsPage();
+		row('General').click();
+		row(t('settings.fileAssociations')).click();
+		expect(title()).toBe(t('settings.fileAssociations'));
+		await flush();
+		expect(row('.blf').querySelector('.switch.on')).not.toBeNull();
+		row('.md').click();
+		await flush();
+		expect(settings.fileAssociations).toEqual([...DEFAULT_SETTINGS.fileAssociations, 'md']);
 	});
 });

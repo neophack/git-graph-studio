@@ -2,8 +2,9 @@
 // dev/remote-phone.html (the phone chrome over the scripted fake backend) in a headless
 // Chromium at iPhone size with touch, walks every page and overlay — the empty editor, Files,
 // a file open, the open editors sheet, the editor's actions, Changes, the extension pages, the
-// Terminal, the drawer — and saves one screenshot each under target/studio/phone-shots/, plus
-// any page error it saw. Layout evidence, not a test gate.
+// Terminal, the drawer, the Settings page (root, a category, a choice sheet) — and saves one
+// screenshot each under target/studio/phone-shots/, plus any page error it saw. Layout
+// evidence, not a test gate.
 //
 //   npx vite --port 5291 &   # the dev server
 //   node scripts/probes/remote-phone-shots.mjs [--url http://localhost:5291] [--theme light]
@@ -66,15 +67,26 @@ await page.locator('.ggs-appbar .ggs-appbar-btn.leading').tap();
 await shot('09-drawer');
 await page.locator('.ggs-drawer-row', { hasText: /Terminal|终端/ }).first().tap();
 await shot('10-terminal');
+// The phone's Settings page: the root's categories, a category's rows, a choice sheet.
+await page.locator('.ggs-appbar .ggs-appbar-btn.leading').tap();
+await page.locator('.ggs-drawer-row', { hasText: /Settings|设置/ }).first().tap();
+await shot('11-settings-root');
+await page.locator('.ggs-settings-row', { hasText: /Appearance|外观/ }).first().tap();
+await shot('12-settings-appearance');
+await page.locator('.ggs-settings-row', { hasText: /Color Theme|颜色主题/ }).first().tap();
+await shot('13-settings-theme-sheet');
+await page.locator('.ggs-action-sheet .row.cancel').tap();
+await page.locator('.ggs-settings-back').tap();
+await page.locator('.ggs-settings-back').tap();
 await tab('editor').tap();
-await shot('11-editor-again');
+await shot('14-editor-again');
 // The keyboard: unlock, put the caret in the text, then shrink the viewport the way a raised
 // on-screen keyboard does — the navigation steps aside and the editing row shows.
 await page.locator('.edit-lock-bar button').tap();
 await page.locator('.cm-content').tap();
 await page.setViewportSize({ width: 390, height: 480 });
 await page.waitForTimeout(300);
-await shot('12-editing-keyboard');
+await shot('15-editing-keyboard');
 
 console.log(errors.length ? `page errors:\n  ${errors.join('\n  ')}` : 'no page errors');
 await browser.close();

@@ -23,6 +23,7 @@ import { download, uploadFiles } from './transfer';
 import { openWindowSwitcher, watchLifecycle } from './windowSwitcher';
 import { connectionLooksSlow, dataSaverPreferred, setDataSaver } from './dataSaver';
 import { remoteEnv } from './session';
+import { installPhoneSettingsEntry } from './settingsPage';
 import { invoke } from './tauriShim/core';
 
 function formatBytes(n: number): string {
@@ -137,6 +138,9 @@ function placePhoneChrome(): void {
 	const panel = document.getElementById('panel');
 	if (panel) phonePart('.ggs-terminal-keys', createTerminalKeys, (keys) => panel.appendChild(keys), phone);
 	if (!phone) closeDrawer();
+	// Settings on a phone is the phone's own page (settingsPage.ts), whichever entry asked —
+	// the drawer's row, the palette, an extension's `workbench.action.openSettings`.
+	installPhoneSettingsEntry(phone);
 	// The full-screen side view's back gesture (§11.2): a swipe from the left edge returns
 	// to the editor, the way every phone app's back navigation works. One binding for the
 	// workbench's lifetime — the sidebar element itself persists across view switches.

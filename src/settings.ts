@@ -202,6 +202,14 @@ export function isSettingModified(key: keyof AppSettings): boolean {
 	return JSON.stringify(settings[key]) !== JSON.stringify(DEFAULT_SETTINGS[key]);
 }
 
+/** Write an enum control's pick: numeric enums (fontSize, tabSize) store numbers; string
+ *  enums (autoSave, terminalShell, …) keep the option text. Both Settings UIs write through
+ *  this, so a pick stores the same shape whichever surface made it. */
+export function applyEnumSetting(def: SettingDef, value: string): void {
+	if (/^-?\d+$/.test(value)) updateSetting(def.key, Number(value) as never);
+	else updateSetting(def.key, value as never);
+}
+
 /** Dispatched on document whenever a setting changes (`detail.key` is the one that changed). */
 export const SETTINGS_EVENT = 'app:settings-changed';
 /** Dispatched after the theme stylesheet finished loading - derived colors can be re-read. */

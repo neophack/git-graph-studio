@@ -1335,7 +1335,20 @@ database) carries the link through NAT. The whole design lives in
   unlock bar above the editor — one explicit tap reconfigures that editor editable in
   place (`editLock.ts`; the compartment leads the extension list because CodeMirror's
   `readOnly` facet combine honours the first value — `editor.ts` and `docEditView.ts`
-  each reconfigure their own). The pages are page-stack navigation (`nav.ts`): an editor
+  each reconfigure their own). Settings is the phone's own page (`settingsPage.ts`,
+  2026-10-12: the desktop dialog's 720 px two panes leave a 390 px screen a 130 px strip,
+  unreadable): one column of categories as drill-in rows, each level sliding in from the
+  right with a back step, the phone's back popping one level at a time before it closes
+  the page; booleans are row switches, choices (theme, language, enums) pick from an
+  action sheet, numbers step in a − value + sheet snapped to the setting's own step, the
+  File Associations catalogue and text/JSON extension settings edit in their own level or
+  sheet, the root's search spans every category and the extension declarations, and Data
+  Saver sits under a Remote Access category — all driving the same registry the desktop
+  dialog drives (`SETTING_DEFS` + `updateSetting`, extensions through `saveExtSetting`,
+  enum writes unified in `applyEnumSetting`); `installPhoneSettingsEntry` routes the
+  drawer's row and the `workbench.openSettings` command (the palette, an extension's
+  `workbench.action.openSettings`) to the page on the phone and restores the desktop
+  command verbatim off it. The pages are page-stack navigation (`nav.ts`): an editor
   activating (`editor.ts`'s activate) closes the side view and the Terminal page above
   it, the panel showing (`panel.ts`'s show; a covered panel's toggle reveals it instead
   of hiding it unseen) closes the side view — over the `workbench.toggleSidebar` /
@@ -1368,8 +1381,8 @@ database) carries the link through NAT. The whole design lives in
   `scripts/check-seams.mjs` keeps `__TAURI_INTERNALS__` inside `src/remote/tauriShim/` and
   the plugin id out of the app tree.
 - Tests: `tests/remote.test.ts` + `tests/remoteResponsive.test.ts` (the shims, transport,
-  relay engine; the phone's page model, app bar, navigation, drawer, sheets and editing
-  row; M10's end-to-end crypto — the browser twin of the tray service's e2e core against
+  relay engine; the phone's page model, app bar, navigation, drawer, sheets, editing row
+  and settings page; M10's end-to-end crypto — the browser twin of the tray service's e2e core against
   the committed cross-implementation vectors), the daemon and hub crates' `cargo test`,
   `tests/e2e/remote/` (the Playwright browser specs — `npm run test:e2e-remote`, the
   Chromium/Firefox/WebKit matrix against TLS daemons: WebKit grants plain-HTTP localhost no

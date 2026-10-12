@@ -80,6 +80,14 @@
 				'analysis_status': function () { return { state: 'idle' }; },
 				'version': function () { return '0.1.5'; },
 				'settings_read': function () { return null; },
+				'settings_write': function () { return null; },
+				'assoc_list_defaults': function () { return [
+					{ ext: 'blf', recommended: true }, { ext: 'asc', recommended: true },
+					{ ext: 'bin', recommended: true }, { ext: 'hex', recommended: true },
+					{ ext: 'json', recommended: false }, { ext: 'md', recommended: false }
+				]; },
+				'assoc_apply': function () { return { messageKey: 'assoc.applied.linux', detail: '' }; },
+				'context_menu_apply': function () { return null; },
 				'keybindings_read': function () { return null; }
 			};
 			window.__TAURI_INTERNALS__ = {
