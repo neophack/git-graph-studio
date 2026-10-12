@@ -82,11 +82,24 @@ export function collectSizes() {
 	};
 }
 
+/** Both probes are hard-bounded: an unbounded `spawnSync` once held a CI runner for its
+ *  whole 180-minute budget (2026-10-12 — the first build that bundled the GGS Remote
+ *  extension left its tray daemon running on the runner, and whichever child held the
+ *  pipes, the step never ended). A probe that hits its ceiling is recorded as absent and
+ *  named in the log — the sizes, the artefacts and the build are never hostage to it. */
+const PROBE_TIMEOUT_MS = 10 * 60 * 1000;
+const BOOT_TIMEOUT_MS = 15 * 60 * 1000;
+
 /** Run the backend's `--measure` against a repository; `null` when the exe is not built. */
 export function runProbes(repo) {
 	const exe = join(release, process.platform === 'win32' ? 'ggs.exe' : 'ggs');
 	if (!existsSync(exe)) return null;
-	const result = spawnSync(exe, ['--measure', repo], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+	console.error('measure: backend --measure probes…');
+	const result = spawnSync(exe, ['--measure', repo], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: PROBE_TIMEOUT_MS });
+	if (result.error?.code === 'ETIMEDOUT') {
+		console.error(`measure: the backend probes did not finish within ${PROBE_TIMEOUT_MS / 60000} min — recorded as absent`);
+		return null;
+	}
 	if (result.status !== 0) {
 		console.error(result.stderr || result.stdout);
 		return null;
@@ -102,7 +115,12 @@ export function runBootBench(repo) {
 	if (!existsSync(exe) || !repo) return null;
 	const out = join(studio, 'boot-bench.json');
 	const probe = join(appDir, 'scripts', 'probes', 'boot-bench.mjs');
-	const result = spawnSync(process.execPath, [probe, repo, '--runs', '5', '--until', 'graph first page', '--json', out, '--exe', exe], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+	console.error('measure: boot-bench (5 cold starts)…');
+	const result = spawnSync(process.execPath, [probe, repo, '--runs', '5', '--until', 'graph first page', '--json', out, '--exe', exe], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: BOOT_TIMEOUT_MS });
+	if (result.error?.code === 'ETIMEDOUT') {
+		console.error(`measure: boot-bench did not finish within ${BOOT_TIMEOUT_MS / 60000} min — recorded as absent`);
+		return null;
+	}
 	if (result.status !== 0 || !existsSync(out)) {
 		console.error(result.stderr || result.stdout);
 		return null;
