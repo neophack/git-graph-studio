@@ -52,6 +52,11 @@ export class Explorer {
 	/** Every open root: one entry for a plain folder, one per folder of a workspace (M3 3.8).
 	 *  Several roots render a virtual top level - one expandable folder row per root. */
 	private rootPaths: string[] = [];
+
+	/** The open roots as the sync's remote-open boundary reads them (workbenchSync). */
+	public roots(): string[] {
+		return this.rootPaths;
+	}
 	private status: StatusMap = new Map();
 	/** Bumped on setRoot: a listing that started before a folder switch is dropped. */
 	private generation = 0;

@@ -89,6 +89,16 @@ describe('the replica protocol', () => {
 		expect(localizeTokens(`${APP_TOKEN}a.css ${GGS_TOKEN}b.js`, 'https://p/main/', 'https://p/ggs/t/')).toBe('https://p/main/a.css https://p/ggs/t/b.js');
 	});
 
+	it('drops foreign absolute URLs — a copy never loads an origin the PC page did not control', () => {
+		const app = 'http://tauri.localhost/';
+		expect(canonicalize('https://attacker.example/x.gif?d=secret', 'http://tauri.localhost/', app)).toBe('');
+		expect(canonicalize('http://tracker.example/pixel.png', 'http://tauri.localhost/', app)).toBe('');
+		expect(canonicalizeCss('a{background:url(https://evil.example/bg.css)}', 'http://tauri.localhost/', app)).toBe('a{background:url("")}');
+		// The token roots and data: URLs keep crossing as before.
+		expect(canonicalize('/assets/a.css', 'http://tauri.localhost/', app)).toBe(`${APP_TOKEN}assets/a.css`);
+		expect(canonicalize('data:image/png;base64,AA', app, app)).toBe('data:image/png;base64,AA');
+	});
+
 	it('sizes a hidden PC window to the viewer: a phone 1:1, wider screens never below the desktop minimum', () => {
 		expect(fitFor(1600, 900)).toEqual({ width: 1600, height: 900 });
 		expect(fitFor(390, 844)).toEqual({ width: 390, height: 844 });

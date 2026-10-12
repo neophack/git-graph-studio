@@ -140,12 +140,17 @@ export function modsOf(event: { ctrlKey: boolean; shiftKey: boolean; altKey: boo
 /** The package-asset roots a copied URL can carry (the same set `extHost.ts` localizes). */
 const GGS_ROOT = /^(?:ggs:\/\/localhost\/|https?:\/\/ggs\.localhost\/|https?:\/\/[^\s"'<>/]+(?:\/u\/[^\s"'<>/]+)?\/w\/[^\s"'<>/]+\/ggs\/[^\s"'<>/]+\/)/;
 
-/** One absolute URL in canonical form: the app root and the package roots become tokens,
- *  anything else (data:, https:) stays as it is. */
+/** One absolute URL in canonical form: the app root and the package roots become tokens;
+ *  any OTHER absolute http(s) URL is dropped (an empty value) — a copied document is the
+ *  PC's own content, and a URL the PC page never controlled the origin of would only ever
+ *  be a channel out (exfil encoded in query strings, remote CSS on the copy) or tracking
+ *  (2026-10-13 audit F11). `data:`/`blob:` stay: they carry bytes, not origins.
+ */
 export function canonicalUrl(absolute: string, appRoot: string): string {
 	if (appRoot && absolute.startsWith(appRoot)) return APP_TOKEN + absolute.slice(appRoot.length);
 	const ggs = GGS_ROOT.exec(absolute);
 	if (ggs) return GGS_TOKEN + absolute.slice(ggs[0].length);
+	if (/^https?:/i.test(absolute)) return '';
 	return absolute;
 }
 

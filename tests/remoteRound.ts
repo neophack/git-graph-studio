@@ -46,6 +46,9 @@ class WireSocket {
 	}
 }
 
+/** The scripted repository the round's policy fetch reports as the one open root. */
+const ROUND_REPO = 'C:\\repo';
+
 let previous: (() => void) | null = null;
 
 /** Install the remote round: handshake a Transport against a RelayEngine wired to the
@@ -82,6 +85,9 @@ export async function installRemoteRound(formFactor: 'desktop' | 'tablet' | 'pho
 	const info = await attached;
 	const relay = new RelayEngine({
 		invoke: (async (cmd: string, args?: unknown) => {
+			// The relay's own policy fetch is local (no session header): answer it with
+			// the scripted repository, the roots the gate confines remote invokes to.
+			if (cmd === 'remote_paths_policy') return [ROUND_REPO];
 			return dispatchScripted(cmd, args as Record<string, unknown>);
 		}) as never,
 		listen: (async () => () => undefined) as never,

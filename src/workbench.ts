@@ -91,6 +91,11 @@ const REFRESH_ECHO_MS = 1500;
 
 
 export class Workbench {
+	/** The folders this window has open — the sync's remote-open boundary (workbenchSync). */
+	public openFolders(): string[] {
+		return this.explorer.roots();
+	}
+
 	/** Serial for extension page tabs: every open of an extension page is its own instance. */
 	private static extPageSerial = 0;
 	/** Singleton pages' tab ids, by `${extId}/${pageId}` (a second open reveals the tab). */

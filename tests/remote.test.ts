@@ -360,8 +360,10 @@ describe('tauri shims', () => {
 });
 
 describe('relay engine', () => {
+	const isWindows = navigator.platform.toLowerCase().includes('win');
 	function engine() {
 		const sent: Frame[] = [];
+		const emitTo = vi.fn(async () => undefined);
 		const listeners = new Map<string, (e: { event: string; id: number; payload: unknown }) => void>();
 		const every: [string, (e: { event: string; id: number; payload: unknown }) => void][] = [];
 		const unlistened: string[] = [];
@@ -369,6 +371,7 @@ describe('relay engine', () => {
 		const invoke = vi.fn(async (cmd: string, args?: unknown) => {
 			if (cmd === 'fail') throw 'boom';
 			if (cmd === 'raw') return new Uint8Array([1, 2]).buffer;
+			if (cmd === 'remote_paths_policy') return [isWindows ? 'C:\\work\\repo' : '/work/repo'];
 			return { cmd, args };
 		});
 		const relay = new RelayEngine({
@@ -379,7 +382,7 @@ describe('relay engine', () => {
 				return () => unlistened.push(event);
 			}) as never,
 			emit: vi.fn(async () => undefined) as never,
-			emitTo: vi.fn(async () => undefined) as never,
+			emitTo: emitTo as never,
 			createChannel: (onmessage) => {
 				const channel = { onmessage };
 				channels.push(channel);
@@ -392,8 +395,78 @@ describe('relay engine', () => {
 		const fire = (event: string, payload: unknown) => {
 			for (const [name, handler] of every) if (name === event) handler({ event, id: 1, payload });
 		};
-		return { relay, sent, listeners, unlistened, channels, invoke, fire };
+		return { relay, sent, listeners, unlistened, channels, invoke, fire, emitTo };
 	}
+
+	/** The remote trust boundary (§23.4, the audit's F1): path-carrying invokes land
+	 *  inside the open folders only; the folder-opening commands are refused outright. */
+	it('confines path-carrying invokes to the open folders', async () => {
+		const { relay, invoke, sent } = engine();
+		const root = isWindows ? 'C:\\work\\repo' : '/work/repo';
+		const inside = isWindows ? 'C:\\work\\repo\\src\\a.ts' : '/work/repo/src/a.ts';
+		const outside = isWindows
+			? 'C:\\Users\\me\\.ggs\\keys\\ai-providers.key'
+			: '/home/me/.ggs/keys/ai-providers.key';
+		const up = isWindows ? 'C:\\work\\repo\\..\\..\\secret' : '/work/repo/../../secret';
+		const answer = () => sent.find((f) => f.type === T.RESULT && f.flags & FLAG.ERROR);
+
+		relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: 'read_file', a: { path: inside } }, 1, 0, 7)));
+		await new Promise((r) => setTimeout(r, 10));
+		expect(invoke).toHaveBeenCalledWith('read_file', { path: inside }, expect.anything());
+		expect(answer()).toBeUndefined();
+
+		for (const path of [outside, up, 'relative/x.ts']) {
+			invoke.mockClear();
+			relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: 'read_file', a: { path } }, 1, 0, 7)));
+			await new Promise((r) => setTimeout(r, 10));
+			expect(answer()).toBeTruthy();
+			expect(invoke).not.toHaveBeenCalledWith('read_file', expect.anything(), expect.anything());
+		}
+
+		// Opening the SAME root again (the boot's idempotent reopen) passes; a NEW root
+		// is what the refusal is for.
+		sent.length = 0;
+		invoke.mockClear();
+		relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: 'open_folder', a: { path: root } }, 1, 0, 7)));
+		await new Promise((r) => setTimeout(r, 10));
+		expect(answer()).toBeUndefined();
+		expect(invoke).toHaveBeenCalledWith('open_folder', { path: root }, expect.anything());
+
+		sent.length = 0;
+		invoke.mockClear();
+		relay.receive(
+			encodeFrame(jsonFrame(T.INVOKE, { c: 'open_folder', a: { path: outside } }, 1, 0, 7))
+		);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(answer()).toBeTruthy();
+		expect(invoke).not.toHaveBeenCalledWith('open_folder', expect.anything(), expect.anything());
+	});
+
+	it('stamps and allowlists the events a session may emit', async () => {
+		const { relay, emitTo } = engine();
+		// Allowed: the identity is stamped over whatever the session claimed, and the
+		// destination is the PC window.
+		relay.receive(encodeFrame(jsonFrame(T.EMIT, { event: 'studio://workbench-sync', payload: { k: 'open', by: 'main', path: 'x' }, target: 'elsewhere' }, 1, 0, 7)));
+		await new Promise((r) => setTimeout(r, 10));
+		expect(emitTo).toHaveBeenCalledTimes(1);
+		let [label, event, payload] = emitTo.mock.calls[0];
+		expect(label).toBe('main');
+		expect(event).toBe('studio://workbench-sync');
+		expect((payload as Record<string, unknown>).by).toBe('remote/7');
+
+		emitTo.mockClear();
+		relay.receive(encodeFrame(jsonFrame(T.EMIT, { event: 'studio://mirror-up', payload: { k: 'hello', from: 'remote/999' } }, 1, 0, 7)));
+		await new Promise((r) => setTimeout(r, 10));
+		expect(emitTo).toHaveBeenCalledTimes(1);
+		[label, event, payload] = emitTo.mock.calls[0];
+		expect((payload as Record<string, unknown>).from).toBe('remote/7');
+
+		// Anything else a session might emit is dropped unread.
+		emitTo.mockClear();
+		relay.receive(encodeFrame(jsonFrame(T.EMIT, { event: 'studio://fs-changed', payload: { root: 'C:/' } }, 1, 0, 7)));
+		await new Promise((r) => setTimeout(r, 20));
+		expect(emitTo).not.toHaveBeenCalled();
+	});
 
 	it('runs invokes with revived channels and answers on the same session', async () => {
 		const { relay, sent, channels, invoke } = engine();

@@ -28,6 +28,7 @@ import { inputId, type EditorInput, type EditorPlacement } from '../editor';
 import type { ActiveEditorInfo, EditorArea } from '../editorArea';
 import { phoneShell } from './nav';
 import { frontendId, remoteEnv } from './session';
+import { withinRoots } from './pathGate';
 
 export const WORKBENCH_SYNC_EVENT = 'studio://workbench-sync';
 
@@ -112,6 +113,11 @@ export interface SyncedEditorArea {
 export interface SyncedWorkbench {
 	editors: SyncedEditorArea | EditorArea;
 	showView(view: string, focus?: boolean): void;
+	/** The folders this window has open — the boundary a remote-originated `open` must
+	 *  land inside (the relay gates invokes the same way; this is the receiver's half,
+	 *  so a forged direct emit has nowhere to land either). Optional: without it,
+	 *  remote-originated opens are simply ignored. */
+	openFolders?(): string[];
 	/** The side bar's hide toggle, its state and its view — optional: a workbench without
 	 *  them syncs no side-bar hides. */
 	toggleSidebar?(): void;
@@ -454,6 +460,15 @@ export function attachWorkbenchSync(
 			live = true;
 			detachListener = deps.receive((message) => {
 				if (!message || message.by === by) return;
+				// A remote-originated file open is the product (the phone opens, the PC
+				// follows) — but only inside the folders this window has open: a forged or
+				// curious session must not make the PC render ~/.ggs into the mirror.
+				const remoteOrigin = message.by !== 'main';
+				const remoteOpensFile =
+					remoteOrigin && (message.k === 'open' || message.k === 'active') && typeof message.path === 'string';
+				if (remoteOpensFile && !(workbench.openFolders ? withinRoots(message.path, workbench.openFolders()) : false)) {
+					return;
+				}
 				switch (message.k) {
 					case 'open': {
 						const key = keyOf(message.path);

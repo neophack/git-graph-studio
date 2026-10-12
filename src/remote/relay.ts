@@ -5,6 +5,7 @@
 // window does, every command, channel and event works remotely with no per-command code.
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { emit, emitTo, listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { gateInvoke, isPathGated } from './pathGate';
 import {
 	CHANNEL_PREFIX,
 	decodeFrames,
@@ -133,6 +134,20 @@ export class RelayEngine {
 		return out;
 	}
 
+	/** The open folders (plus a single-file launch), refreshed briefly: the roots every
+	 *  path-carrying remote invoke is confined to. Fetched locally — no session header —
+	 *  so the answer is the app's own truth (§23.4's audit fix: app commands themselves
+	 *  are unconfined by design; the boundary lives here, where remote trust ends). */
+	private rootsAt: { at: number; roots: string[] } | null = null;
+
+	private async allowedRoots(): Promise<string[]> {
+		const now = Date.now();
+		if (this.rootsAt && now - this.rootsAt.at < 3000) return this.rootsAt.roots;
+		const roots = (await this.deps.invoke('remote_paths_policy')) as string[];
+		this.rootsAt = { at: now, roots: Array.isArray(roots) ? roots : [] };
+		return this.rootsAt.roots;
+	}
+
 	private async runInvoke(frame: Frame): Promise<void> {
 		const { session, stream } = frame;
 		const frontend = `remote/${session}`;
@@ -140,10 +155,12 @@ export class RelayEngine {
 			let result: unknown;
 			if (encOf(frame) === Enc.Raw) {
 				const { c, h, body } = decodeRawInvoke(frame.payload);
+				if (isPathGated(c)) gateInvoke(c, body as unknown as Record<string, unknown> | undefined, await this.allowedRoots());
 				result = await this.deps.invoke(c, body, { headers: { ...(h ?? {}), 'x-ggs-frontend': frontend } });
 			} else {
 				const { c, a, h } = frameJson<{ c: string; a?: Record<string, unknown>; h?: Record<string, string> }>(frame);
 				const args = this.revive(session, a ?? {}) as Record<string, unknown>;
+				if (isPathGated(c)) gateInvoke(c, args, await this.allowedRoots());
 				result = await this.deps.invoke(c, args, { headers: { ...(h ?? {}), 'x-ggs-frontend': frontend } });
 			}
 			if (result instanceof ArrayBuffer || result instanceof Uint8Array) {
@@ -237,9 +254,21 @@ export class RelayEngine {
 	}
 
 	private async relayEmit(frame: Frame): Promise<void> {
-		const { event, payload, target } = frameJson<{ event: string; payload?: unknown; target?: unknown }>(frame);
-		if (target) await this.deps.emitTo(target as never, event, payload);
-		else await this.deps.emit(event, payload);
+		const { event, payload } = frameJson<{ event: string; payload?: unknown; target?: unknown }>(frame);
+		// The event bridge is a privilege: the desktop trusts what arrives on these
+		// channels, so only the two the remote workbench actually speaks cross, the
+		// sender's identity is stamped over (a session cannot pose as `main` or as
+		// another session), and the destination is always the PC window.
+		if (event !== 'studio://mirror-up' && event !== 'studio://workbench-sync') return;
+		const stamped =
+			payload && typeof payload === 'object' && !Array.isArray(payload)
+				? { ...(payload as Record<string, unknown>) }
+				: payload;
+		if (stamped && typeof stamped === 'object') {
+			if ('from' in stamped) stamped.from = `remote/${frame.session}`;
+			if ('by' in stamped) stamped.by = `remote/${frame.session}`;
+		}
+		await this.deps.emitTo('main' as never, event, stamped);
 	}
 
 	/** The daemon ended a session (sign-out, kick, resume timeout): drop everything of it. */

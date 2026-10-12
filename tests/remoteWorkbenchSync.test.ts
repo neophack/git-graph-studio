@@ -201,6 +201,9 @@ function fakeWorkbench(): SyncedWorkbench & {
 	};
 	return {
 		editors: area,
+		/** The remote-open boundary's roots: a permissive default so the suite's
+		 *  cross-front-end opens behave as before; the confinement test narrows it. */
+		openFolders: () => ['C:\\'],
 		showView: (view: string) => {
 			state.views.push(view);
 			state.activeView = view;
@@ -272,6 +275,26 @@ describe('the sync core over a shared bus', () => {
 		expect(phone.activePath()).toBe(NOTES);
 		// The open said everything: no follow-up active message for its own activation.
 		expect(channel.sent).toEqual([{ by: 'main', k: 'open', path: NOTES, line: 42, column: 3 }]);
+	});
+
+	it('ignores a remote-originated open outside the open folders', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const REPO = 'C:' + '\\repo';
+		const SECRET = 'C:' + '\\Users\\me\\.ggs\\keys\\ai-providers.key';
+		const NOTES_IN = REPO + '\\notes.txt';
+		pc.openFolders = () => [REPO];
+		const phone = fakeWorkbench();
+		attachWorkbenchSync(pc, channel.deps, 'main');
+		attachWorkbenchSync(phone, channel.deps, 'remote/1');
+		channel.deps.send({ by: 'remote/1', k: 'open', path: SECRET });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(pc.tabs()).toEqual([]);
+		expect(pc.opened).toEqual([]);
+		// Inside the folders it still crosses — the product behaviour is unchanged.
+		channel.deps.send({ by: 'remote/1', k: 'open', path: NOTES_IN });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(pc.tabs()).toEqual([NOTES_IN]);
 	});
 
 	it('closes on the other side whatever one side closed', async () => {

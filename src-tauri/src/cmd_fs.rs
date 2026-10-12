@@ -698,6 +698,19 @@ pub fn fs_write_chunk(
     write_upload_chunk(Path::new(&path), offset, total, bytes)
 }
 
+/// The roots a remote session's path-carrying invokes are confined to (§23.4, the
+/// 2026-10-13 audit's F1): the open folders plus a single-file launch. The Relay asks for
+/// these locally (no session header) and enforces the boundary before forwarding an
+/// invoke — the app's own commands stay unconfined for the desktop window that runs them.
+#[tauri::command]
+pub fn remote_paths_policy(state: State<'_, AppState>) -> Vec<String> {
+    let mut roots: Vec<String> = state.repos.lock().unwrap().clone();
+    if let Some(file) = state.single_file.lock().unwrap().clone() {
+        roots.push(file);
+    }
+    roots
+}
+
 /// Where an interrupted upload of `path` resumes: the partial file's length when it is not
 /// larger than the file being uploaded, else 0 (a different file — start over).
 fn upload_offset(path: &Path, size: u64) -> u64 {
