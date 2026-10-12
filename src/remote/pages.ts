@@ -48,7 +48,15 @@ export interface Launcher {
 export function extensionContainers(): ExtensionContainer[] {
 	return [...document.querySelectorAll<HTMLElement>('#activitybar .activity-item')]
 		.filter((item) => item.dataset.view?.startsWith('ext-container:'))
-		.map((item) => ({ id: item.dataset.view!, title: item.title, image: item.querySelector('img')?.src || null, item }));
+		.map((item) => ({
+			id: item.dataset.view!,
+			// The workbench's delayed tooltip strips the native `title` off every activity
+			// item (ui.ts keeps the name as `aria-label`), so the mirror reads whichever the
+			// item carries — from a stripped item the tab would carry no label at all.
+			title: item.title || item.getAttribute('aria-label') || '',
+			image: item.querySelector('img')?.src || null,
+			item
+		}));
 }
 
 /** The extension launchers: `scm/title` navigation entries (the "View Git Graph" class of
