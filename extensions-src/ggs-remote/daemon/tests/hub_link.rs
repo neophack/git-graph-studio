@@ -403,9 +403,7 @@ fn spawn_fake_hub(port: u16) -> FakeHub {
                 for frame in Frame::decode_all(&bytes).unwrap_or_default() {
                     if frame.ty == ty::T_PING {
                         let _ = ws
-                            .send(Message::Binary(
-                                Frame::empty(ty::T_PONG).encode().into(),
-                            ))
+                            .send(Message::Binary(Frame::empty(ty::T_PONG).encode().into()))
                             .await;
                     }
                 }
@@ -436,7 +434,9 @@ async fn a_restarted_hub_is_rejoined_with_the_same_link() {
     tokio::spawn(async move { ggs_remote::server::run(run).await });
     daemon.auth.set_password(PASSWORD).await.unwrap();
 
-    let probe = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let probe = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
     let port = probe.local_addr().unwrap().port();
     drop(probe);
 

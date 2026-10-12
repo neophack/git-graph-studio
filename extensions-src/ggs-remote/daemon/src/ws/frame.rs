@@ -526,7 +526,10 @@ mod tests {
     struct Lcg(u64);
     impl Lcg {
         fn next(&mut self) -> u64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             self.0 >> 33
         }
         fn bytes(&mut self, len: usize) -> Vec<u8> {
@@ -556,7 +559,9 @@ mod tests {
             let _ = Frame::decode_all(&bytes);
         }
         // Flip one bit at a time through a valid frame: decode or refuse, never panic.
-        let valid = Frame::new(0x11, crate::ws::frame::Enc::Raw, rng.bytes(64)).with_session(7).encode();
+        let valid = Frame::new(0x11, crate::ws::frame::Enc::Raw, rng.bytes(64))
+            .with_session(7)
+            .encode();
         for bit in 0..(valid.len() as u32) * 8 {
             let mut mutated = valid.clone();
             mutated[(bit / 8) as usize] ^= 1 << (bit % 8);
@@ -571,7 +576,12 @@ mod tests {
             let session = (rng.next() & 0xFFFF_FFFF) as u32;
             let len = 1 + (rng.next() % 3000) as usize;
             let payload = rng.bytes(len);
-            let frame = Frame::new((rng.next() % 0x90) as u8, crate::ws::frame::Enc::Raw, payload).with_session(session);
+            let frame = Frame::new(
+                (rng.next() % 0x90) as u8,
+                crate::ws::frame::Enc::Raw,
+                payload,
+            )
+            .with_session(session);
             let bytes = frame.encode();
             let back = Frame::decode_all(&bytes).unwrap();
             assert_eq!(back.len(), 1);

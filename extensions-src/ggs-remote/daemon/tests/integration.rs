@@ -810,7 +810,9 @@ async fn pair_unlock_guards_the_qr_behind_the_password() {
         "POST",
         "/pair/unlock",
         &[("Content-Type", "application/json")],
-        Some(&format!("{{\"ticket\":\"{ticket}\",\"password\":\"nope-nope\"}}")),
+        Some(&format!(
+            "{{\"ticket\":\"{ticket}\",\"password\":\"nope-nope\"}}"
+        )),
     )
     .await;
     assert_eq!(wrong.status, 401, "{}", wrong.body);
@@ -957,10 +959,7 @@ async fn a_close_with_unsaved_files_blocks_until_forced() {
     // A remote session is attached (the user closing the window they are using).
     send(
         &mut ws,
-        Frame::msgpack(
-            ty::ATTACH,
-            &serde_json::json!({ "instance": "ggs-close" }),
-        ),
+        Frame::msgpack(ty::ATTACH, &serde_json::json!({ "instance": "ggs-close" })),
     )
     .await;
     let token = match instance.recv().await {
@@ -1054,21 +1053,20 @@ async fn a_restart_kills_relaunches_and_waits_for_the_registration() {
             .unwrap()
     };
     let child_spec = LaunchSpec {
-        program: std::env::current_exe().unwrap().to_string_lossy().into_owned(),
+        program: std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
         args_prefix: vec![
             "--exact".into(),
             "restart_child_role".into(),
             "--ignored".into(),
         ],
     };
-    let folder = h
-        ._dir
-        .path()
-        .join("repo")
-        .to_string_lossy()
-        .into_owned();
+    let folder = h._dir.path().join("repo").to_string_lossy().into_owned();
     std::fs::create_dir_all(&folder).unwrap();
-    let instance = FakeInstance::connect_spec(&h, "ggs-restart", dummy.id(), child_spec, vec![folder]).await;
+    let instance =
+        FakeInstance::connect_spec(&h, "ggs-restart", dummy.id(), child_spec, vec![folder]).await;
     let _ = next_of(&mut ws, ty::WINDOWS).await;
 
     // The child derives the daemon's control endpoint from GGS_REMOTE_HOME, which launch()
@@ -1077,7 +1075,10 @@ async fn a_restart_kills_relaunches_and_waits_for_the_registration() {
 
     send(
         &mut ws,
-        Frame::msgpack(ty::INSTANCE_RESTART, &serde_json::json!({ "instance": "ggs-restart" })),
+        Frame::msgpack(
+            ty::INSTANCE_RESTART,
+            &serde_json::json!({ "instance": "ggs-restart" }),
+        ),
     )
     .await;
     // The registered pid is terminated...

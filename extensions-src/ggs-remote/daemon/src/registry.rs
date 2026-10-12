@@ -354,7 +354,8 @@ mod tests {
         let t0 = Instant::now();
         assert!(beat.tick(t0).is_some(), "the first ping is due at once");
         assert!(
-            beat.tick(t0 + PING_EVERY - Duration::from_secs(1)).is_none(),
+            beat.tick(t0 + PING_EVERY - Duration::from_secs(1))
+                .is_none(),
             "not before the period"
         );
         assert!(beat.tick(t0 + PING_EVERY).is_some(), "due at the period");

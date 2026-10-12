@@ -192,7 +192,12 @@ mod tests {
         daemon
     }
 
-    fn register(daemon: &Daemon, id: &str, spawned: bool, remote_sessions: u32) -> tokio::sync::mpsc::UnboundedReceiver<ToInstance> {
+    fn register(
+        daemon: &Daemon,
+        id: &str,
+        spawned: bool,
+        remote_sessions: u32,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<ToInstance> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         daemon.registry.register(
             Registration {
@@ -235,7 +240,10 @@ mod tests {
 
         // A minute later the idle one is asked to quit; the attached one is not.
         idle_exit(&daemon, start + Duration::from_secs(61));
-        assert!(matches!(idle.try_recv(), Ok(ToInstance::Quit { force: false })));
+        assert!(matches!(
+            idle.try_recv(),
+            Ok(ToInstance::Quit { force: false })
+        ));
         assert!(attached.try_recv().is_err(), "a session keeps the instance");
     }
 

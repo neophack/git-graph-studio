@@ -403,17 +403,9 @@ mod tests {
         )
         .unwrap();
         assert!(zh(&daemon), "the app's own key is locale");
-        std::fs::write(
-            paths.settings(),
-            r#"{ "locale": "en" }"#,
-        )
-        .unwrap();
+        std::fs::write(paths.settings(), r#"{ "locale": "en" }"#).unwrap();
         assert!(!zh(&daemon));
-        std::fs::write(
-            paths.settings(),
-            r#"{ "displayLanguage": "zh-cn" }"#,
-        )
-        .unwrap();
+        std::fs::write(paths.settings(), r#"{ "displayLanguage": "zh-cn" }"#).unwrap();
         assert!(zh(&daemon), "the older spelling still answers");
     }
 
