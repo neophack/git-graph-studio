@@ -103,8 +103,15 @@ pub async fn app_asset(
         Some(running) if running != ver => return StatusCode::CONFLICT.into_response(),
         _ => {}
     }
+    // Only content-hashed files are cached: their names change whenever their bytes do.
+    // Everything else (remote.html, sw.js, the theme and icon files) is asked of the instance
+    // on every load — a rebuild reinstalled under the same version number (0.1.10 → 0.1.10)
+    // must reach the browser, and a version-keyed copy of remote.html kept naming the old
+    // build's scripts forever (2026-10-12: a reinstalled phone shell never appeared).
+    let cacheable = immutable(&path);
     let key = format!("{ver}|{path}");
-    let entry = match daemon.cache.get(&key) {
+    let cached = if cacheable { daemon.cache.get(&key) } else { None };
+    let entry = match cached {
         Some(entry) => entry,
         None => {
             let fetched = match fetch_from_instance(&daemon, &inst, AssetKind::App, &path).await {
@@ -146,7 +153,9 @@ pub async fn app_asset(
                 body,
                 br,
             };
-            daemon.cache.put(&key, entry.clone());
+            if cacheable {
+                daemon.cache.put(&key, entry.clone());
+            }
             entry
         }
     };

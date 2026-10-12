@@ -2,7 +2,7 @@
 	"name": "ggs-remote",
 	"displayName": "GGS Remote",
 	"publisher": "ggs",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Use Git Graph Studio from a phone or another computer: one link and a password per PC, every window of it, served by a low-memory tray daemon over HTTPS and a binary WebSocket (ggs-remote/1).",
 	"license": "MIT",
 	"categories": ["Other"],

@@ -609,16 +609,67 @@ async fn attach_invoke_assets_and_instance_exit() {
     let page = fetch.await.unwrap();
     assert_eq!(page.status, 200);
     assert_eq!(page.body, "<html>remote</html>");
-    // Cached: the second request never reaches the instance.
-    let again = http(
-        h.public,
-        "GET",
-        "/w/ggs-test-1/v/0.1.10/remote.html",
-        &[("Cookie", &cookie)],
-        None,
-    )
-    .await;
-    assert_eq!(again.body, "<html>remote</html>");
+    // Not cached: the shell names this build's hashed scripts, and a rebuild under the same
+    // version (a reinstalled 0.1.10) must reach the browser — the second request asks the
+    // instance again and serves what it answers now.
+    let again = tokio::spawn({
+        let cookie = cookie.clone();
+        let port = h.public;
+        async move {
+            http(
+                port,
+                "GET",
+                "/w/ggs-test-1/v/0.1.10/remote.html",
+                &[("Cookie", &cookie)],
+                None,
+            )
+            .await
+        }
+    });
+    match instance.recv().await {
+        ToInstance::FetchAsset { req, path, .. } => {
+            assert_eq!(path, "remote.html");
+            instance
+                .send(&FromInstance::AssetReply {
+                    req,
+                    status: 200,
+                    content_type: "text/html".into(),
+                    etag: String::new(),
+                    body: b"<html>rebuilt</html>".to_vec(),
+                    done: true,
+                })
+                .await;
+        }
+        other => panic!("expected FetchAsset, got {other:?}"),
+    }
+    assert_eq!(again.await.unwrap().body, "<html>rebuilt</html>");
+    // A content-hashed asset is cached: its name changes whenever its bytes do, so the
+    // second request never reaches the instance.
+    let hashed = "/w/ggs-test-1/v/0.1.10/assets/remote-Ab12Cd34.js";
+    let first = tokio::spawn({
+        let cookie = cookie.clone();
+        let port = h.public;
+        async move { http(port, "GET", hashed, &[("Cookie", &cookie)], None).await }
+    });
+    match instance.recv().await {
+        ToInstance::FetchAsset { req, path, .. } => {
+            assert_eq!(path, "assets/remote-Ab12Cd34.js");
+            instance
+                .send(&FromInstance::AssetReply {
+                    req,
+                    status: 200,
+                    content_type: "text/javascript".into(),
+                    etag: String::new(),
+                    body: b"export {}".to_vec(),
+                    done: true,
+                })
+                .await;
+        }
+        other => panic!("expected FetchAsset, got {other:?}"),
+    }
+    assert_eq!(first.await.unwrap().body, "export {}");
+    let cached = http(h.public, "GET", hashed, &[("Cookie", &cookie)], None).await;
+    assert_eq!(cached.body, "export {}");
     let traversal = http(
         h.public,
         "GET",
