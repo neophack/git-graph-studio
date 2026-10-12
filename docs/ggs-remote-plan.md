@@ -9,7 +9,7 @@
 > 修订（2026-10-11，第三次，实测修复）：§11.2 手机页面栈落地（`src/remote/nav.ts`）——全屏侧边栏是覆盖层，编辑器激活（`editor.ts` 的 activate）与面板显示（`panel.ts` 的 show）都会先收起它（经 `workbench.toggleSidebar` 命令），被覆盖的面板再点终端标签是"现出"而非"藏起"（toggle 的 covered 分支）；修复前手机端点文件、点终端都打开在覆盖层之下，看起来毫无反应（`tests/remoteResponsive.test.ts` 的 phone page stack 组回归）。
 > 修订（2026-10-11，第四次）：§11.2 紧凑顶栏落地（`src/remote/phoneMenu.ts`）——左上角 ☰ 打开完整菜单（动作表一级是菜单名、二级是条目，启用态打开时计算；`TitleBar.menuDefinitions()` 为取数口），手机档隐藏 logo 与菜单栏，命令中心改为弹性占位。注意手机页面的可见版本跟随应用内嵌的 remote 构建（dev 由 prepare.mjs 产出 `target/studio/dist/remote/`，打包随 `tauri build`），且 Service Worker 对 remote.html 缓存优先、后台刷新——新版本第二次访问才现身。
 > 修订（2026-10-12，手机端重新设计）：§11.2 手机档从“缩小的桌面”改为一套 App 外壳，由同一个页面模型（`src/remote/pages.ts`）驱动——顶部 App 栏（`appBar.ts`：☰ 抽屉、页面标题与副标题、页面自己的操作表）、底部导航（`bottomTabs.ts`：文件 · 编辑器 · 变更 · 各插件页面，最多五个，点了必定显示该页、再点为“重选”）、导航抽屉（`navDrawer.ts`，取代 `phoneMenu.ts`：全部页面、转到文件、命令面板、窗口、传输、完整菜单、省流与设置）、编辑器页（`editorSwitcher.ts`：标签条隐藏，已打开编辑器与编辑器操作改为底部表单，无文件时显示空状态）、键盘上方编辑键行（`editorAccessory.ts`）、统一的底部表单（`actionSheet.ts`：把手、标题、返回级、下拉关闭）与手机返回键关闭浮层（`backStack.ts`）。插件页面按通用规则发现（视图容器取自隐藏的活动栏，Git Graph 类取自 `scm/title` 的 navigation 项），不出现插件 id。终端改为全屏页面；页面栈导航中编辑器激活同时收起终端页。
-> 修订（2026-10-12，多用户实测与 Hub 收口）：(1) §20.5 的两种链接形态修复——规范链接 `publicBase`（带尾斜杠）此前落到 Hub 路由之外答裸 404，手剥尾斜杠的 `/u/<uuid>` 撞上双参数提取器答 500；现在两种形态都以空 rest 进入 `entry`，由 PC 按自己的 `/` 应答（登录或窗口页的重定向），`hub/tests/tunnel.rs` 的 `the_link_shapes_a_browser_opens_reach_the_pc` 与离线页四形态断言回归；(2) 多用户活体探针 `scripts/probes/remote-hub-multi-check.mjs`：一个真 Hub + 两台守护进程（独立 home）+ 两个 `--remote-host` 实例 + 同一浏览器用户经 `/u/<uuid>/` 双登录——并行会话、Cookie `Path` 隔离、Storage 前缀隔离、改密只踢一方（83 ms 内 401 + WS 4401）、限速隔离、跨 PC Cookie 拒绝、外部 Origin 由 PC 侧关 4403、编码路径穿越拒绝、离线页逐字节一致，55 项检查；(3) §20.6 的跨 PC 缓存记录为**有意偏差**：缓存键含 `/w/<inst>/`，两台 PC 的实例 id 必不相同 → 计划中的"公开构建产物跨 PC 共享"实际是每 PC 各自缓存——共享会让任一接入 PC 的守护进程有能力给其他 PC 的哈希资产投毒，按 PC 隔离以极小的带宽代价消掉该面；(4) §7.6 的 Cookie 无条件 `Secure` 记录为部署注意：`tls = none` 且无 TLS 前置、经非 loopback 地址访问时浏览器会静默丢弃会话 Cookie（登录返回成功但永不保持）——该模式的前提是 Caddy 类前置已终结 TLS（§20.8/§20.9）；(5) §15.6/§20.13 M9.9 补齐：`release.yml` 新增 `hub-image` 作业，打 tag 时经 `hub/Dockerfile` 构建 `ghcr.io/<owner>/ggs-remote-hub:<版本>`（amd64+arm64，门禁随 studio.yml 的 remote-hub-test）。
+> 修订（2026-10-12，多用户实测与 Hub 收口）：(1) §20.5 的两种链接形态修复——规范链接 `publicBase`（带尾斜杠）此前落到 Hub 路由之外答裸 404，手剥尾斜杠的 `/u/<uuid>` 撞上双参数提取器答 500；现在两种形态都以空 rest 进入 `entry`，由 PC 按自己的 `/` 应答（登录或窗口页的重定向），`hub/tests/tunnel.rs` 的 `the_link_shapes_a_browser_opens_reach_the_pc` 与离线页四形态断言回归；(2) 多用户活体探针 `scripts/probes/remote-hub-multi-check.mjs`：一个真 Hub + 两台守护进程（独立 home）+ 两个 `--remote-host` 实例 + 同一浏览器用户经 `/u/<uuid>/` 双登录——并行会话、Cookie `Path` 隔离、Storage 前缀隔离、改密只踢一方（83 ms 内 401 + WS 4401）、限速隔离、跨 PC Cookie 拒绝、外部 Origin 由 PC 侧关 4403、编码路径穿越拒绝、离线页逐字节一致，55 项检查；(3) §20.6 的跨 PC 缓存记录为**有意偏差**：缓存键含 `/w/<inst>/`，两台 PC 的实例 id 必不相同 → 计划中的"公开构建产物跨 PC 共享"实际是每 PC 各自缓存——共享会让任一接入 PC 的守护进程有能力给其他 PC 的哈希资产投毒，按 PC 隔离以极小的带宽代价消掉该面；(4) §7.6 的 Cookie `Secure` 已改为跟随浏览器协议（同日修复）：Hub 转发时打 `x-forwarded-proto`（`trust_proxy` 时透传前置反代的值，否则按自身 `tls.mode` 推导，浏览器的同名头不在转发白名单、无法伪造），守护进程据此并按自身 TLS 模式决定 `Secure`——修复前 `tls = none` 且无 TLS 前置、经非 loopback 地址访问时浏览器静默丢弃会话 Cookie（登录返回成功但永不保持），修复后纯 HTTP 也能登录（会话明文是该模式自身的属性）；`hub/tests/tunnel.rs` 的 `the_forwarded_proto_follows_the_front_proxy_when_trusted` 与 `daemon/tests/hub_link.rs` 的 `a_plain_http_hub_login_sets_a_cookie_the_browser_keeps` 回归；(5) §15.6/§20.13 M9.9 补齐：`release.yml` 新增 `hub-image` 作业，打 tag 时经 `hub/Dockerfile` 构建 `ghcr.io/<owner>/ggs-remote-hub:<版本>`（amd64+arm64，门禁随 studio.yml 的 remote-hub-test）。
 > 修订（2026-10-12，测试缺口收口）：§17.1/§20.12 中"已实现未测"的项落地——(1) `tests/hub_link.rs` 新增 `a_restarted_hub_is_rejoined_with_the_same_link`：以最小假 Hub（测试内 tokio-tungstenite，逐代可真正掐断——进程内 `axum::serve` 中止后已接受连接仍存活，演不了 Hub 重启）验证守护进程掉线退避后自动重握手、uuid 与链接逐字节不变；(2) `tests/integration.rs` 新增配对解锁流（锁定态无链接/二维码 403、错密码 401、重复错密码 429、正确解锁后 SVG 可见、伪造 unlock 拒绝）；(3) 新增实例生命周期两测：`unresponsive` 标记的 WINDOWS 推送与恢复（配 `registry.rs` 的 Heartbeat 单元测：ping 周期、两次未答判超、Pong 治愈），close-blocked 脏文件清单与 force 杀注册 pid（一次性子进程扮演）+ 事后 4410；(4) §20.8 新增 `handshake_rate` 配置（默认 10/min/IP，0 = 不限）：压测与单地址大车队需要，默认值不变即原防踩踏语义；(5) `scripts/probes/hub-load.mjs` 落地 §20.12 压测行。
 > 修订（2026-10-12，操作体验）：(1) §9.2 的横幅现在覆盖链路本身——Transport 新增 `onOffline`/`onOnline` 钩子（断线即报、重连后 4 s 致意，帧照常排队），boot 接线到 `remote.banner.offline`/`reconnected`（此前断线期间工作台看起来只是冻住）；(2) §20.5 的离线页改为脚本软轮询（15 s 节奏不变以避开离线探测预算、visibilitychange 即时一查、PC 上线的下一轮整体跳转；非 JS 环境 meta refresh 兜底；页面文字逐字节恒定），HTTP 层不再下发 `refresh` 头；(3) `playwright.remote.config.ts` 按 `executablePath` 探测加入 Firefox/WebKit 项目——缺引擎的机器只跑 chromium，不再成片启动失败。
 > 修订（2026-10-12，手机端设置页重设计）：§11.3 的“设置页单列”落地为专属全屏页面（`src/remote/settingsPage.ts`）——桌面设置对话框是 720 px 双栏窗口，170 px 分类栏在 390 px 屏上把行挤成 130 px 竖条，完全不可读；新页面为单列全屏：分类作下钻行（每级自右滑入、表头带返回步，手机返回键逐级弹出、最后关页——backStack 的单条历史项按级重新武装），布尔为行内开关、枚举/主题/语言从底部表单选择、数字在表单里 − 值 + 步进（按设置自身步长取整、夹取上下界）、文件关联目录为独立一级（后端 `assoc_list_defaults` 目录）、文本/JSON 扩展设置在表单里编辑（非法 JSON 拒收并提示）；根级搜索横跨全部类别与扩展声明；省流模式归入“远程访问”分类。数据源与桌面完全同源：`SETTING_DEFS` + `updateSetting`、扩展声明经 `saveExtSetting`，枚举写入统一走 `settings.ts` 的 `applyEnumSetting`（桌面对话框同样改走它）。抽屉的设置行与手机档的 `workbench.openSettings`（命令面板、扩展的 `workbench.action.openSettings`）都路由到该页（`installPhoneSettingsEntry`，离开手机档恢复桌面原命令）；`tests/remoteResponsive.test.ts` 的 settings page 组七用例回归，截图基线 `scripts/probes/remote-phone-shots.mjs` 增 11–13 三张。
@@ -273,9 +273,9 @@ extensions-src/ggs-remote/                      # 插件包（VSIX 源）
     ├── assets/icons/{idle,listening,active}.png
     ├── web/                                    # 守护进程自带的极小页面（无构建步骤，ES2021）
     │   ├── login.html / login.js
-    │   ├── picker.html / picker.js             # 窗口选择页
+    │   ├── picker.html / picker.js             # 窗口选择页（含“最近打开的文件夹”历史路径列表）
     │   ├── pair.html / pair.js                 # 仅 loopback：密码解锁（R19）、二维码、证书下载、改密
-    │   ├── style.css                           # 共用样式，含深浅色与三档断点
+    │   ├── style.css                           # 共用样式，VS Code 风格（2026-10-12 重写：扁平紧凑、深浅色、手机到桌面）
     │   └── i18n.js                             # zh-cn / en
     └── src/
         ├── main.rs                             # 参数解析、单例锁、启动 tokio 线程与托盘主循环
@@ -284,6 +284,7 @@ extensions-src/ggs-remote/                      # 插件包（VSIX 源）
         ├── auth.rs                             # Argon2id、epoch、改密
         ├── session.rs                          # 会话表、设备列表、踢下线
         ├── ratelimit.rs                        # 每 IP 指数退避 + 全局上限
+        ├── recent.rs                           # 最近打开的文件夹历史（recent.json，随 WINDOWS 下发）
         ├── tls.rs                              # CA/服务器证书生成、加载、续期
         ├── http/
         │   ├── mod.rs                          # axum Router 组装、中间件（安全头、认证）
@@ -493,7 +494,7 @@ fn main() -> ExitCode {
 
 | 文件 | 权限 | 内容 |
 | ---- | ---- | ---- |
-| `config.json` | 0600 | `{port, bind, tls:{mode:"self-signed"|"custom"|"none", certPath?, keyPath?}, mdns, autostart, spawnVisible, idleExitMinutes, trustProxy, dataSaverDefault}` |
+| `config.json` | 0600 | `{port, bind, tls:{mode:"self-signed"|"custom"|"none", certPath?, keyPath?}, mdns, autostart, spawnVisible, folderInput, idleExitMinutes, trustProxy, dataSaverDefault}` |
 | `auth.json` | 0600 | `{hash:"$argon2id$…", epoch, updatedAt}` |
 | `sessions.json` | 0600 | `[{tokenHash, epoch, device, ua, ip, created, lastSeen, remember}]`（重启后会话仍有效） |
 | `admin.token` | 0600 | 32 字节随机，loopback 管理 API 用 |
@@ -512,6 +513,7 @@ Windows 权限：用 `icacls` 等效 API 不现实，`auth.json`、`admin.token`
 | --------- | ---- | ---- | ---- |
 | `GET /` | 对外 | — | 已登录 → 302 `/windows`；否则 302 `/login` |
 | `GET /login`、`/login.js`、`/style.css`、`/i18n.js` | 对外 | — | 内嵌小页面（`include_bytes!`，构建时预压缩 br） |
+| `GET /lang.js` | 对外 + loopback | — | 页面语言：`window.ggsLang`，取自 `~/.ggs/settings.json`（`locale`/`displayLanguage`），未设置时为空串（页面回退浏览器语言）；`no-store`，豁免暂停/无密码守卫（2026-10-12） |
 | `POST /api/login` | 对外 | 限速 | `{password, device, remember}` → Set-Cookie |
 | `POST /api/logout` | 对外 | 会话 | 删除会话 |
 | `GET /api/session` | 对外 | 会话 | `{device, expires, csrf}`（csrf 供 WS HELLO 用） |
@@ -527,6 +529,7 @@ Windows 权限：用 `icacls` 等效 API 不现实，`auth.json`、`admin.token`
 | `GET /relay` | loopback | 一次性令牌 | Relay 接入 |
 | `GET /pair` | loopback | `?t=` 一次性票据 | 本机配对页（扫码窗口）：输入访问密码解锁（R19）后才显示二维码与地址列表 |
 | `POST /pair/unlock` | loopback | 一次性票据 | `{password}` → Argon2id 校验 → 解锁令牌（内存 5 min、仅 loopback；失败计入 §7.6 限速） |
+| `POST /pair/hub/connect`、`/pair/hub/disconnect` | loopback | 一次性票据 | 配对页的中继服务器表单（2026-10-12）：`{url, joinKey?}`（url 也可为整条连接串）保存 / 忘记中继；与 `/admin/hub/*` 同一逻辑，票据即本机凭据（与首次设密同一凭证）；`GET /pair/state` 的 `hub.settings` 带回已存地址供表单回填 |
 | `GET /admin/*` | loopback | admin token | 管理 API；`/admin/qr` 需另附解锁令牌（R19） |
 
 中间件（顺序）：请求体上限（API 64 KB，上传走 WS）→ 安全响应头 → 认证提取（`Cookie: ggsr=<token>` → 查会话 → 校验 epoch、过期）→ 路由。
@@ -593,7 +596,7 @@ impl Auth {
 
 - **首次设置密码只能在本机完成**：托盘“设置密码…”打开 loopback `/pair` 页面，或在插件页设置，或用 CLI `ggs-remote set-password`。未设置密码时对外端口只返回“请在 PC 上设置密码”。
 - **密码规则**：≥ 8 个字符；拒绝常见弱口令（内置前 1 万个常见密码的 SHA-1 前缀表，约 40 KB，`include_bytes!`）。
-- **登录**：成功后 `Set-Cookie: ggsr=<base64url(32B)>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=…`（`tls.mode = none` 且在反代后时 `Secure` 仍然保留，因为浏览器看到的是 HTTPS）。
+- **登录**：成功后 `Set-Cookie: ggsr=<base64url(32B)>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=…`——`Secure` 跟随浏览器实际使用的协议（2026-10-12 修复）：直连看本守护进程的 TLS 模式，经 Hub 看其转发的 `x-forwarded-proto`（Hub 按自身 `tls.mode` 推导，`trust_proxy` 时以前置反代的值为准）。纯 HTTP 访问不再带 `Secure`——否则浏览器静默丢弃该 Cookie，登录返回成功却永不保持。
 - **限速**（`ratelimit.rs`）：按 IP 计失败次数，第 5 次起锁定 `60 s × 2^(n-5)`，上限 1 h；全局每分钟失败 30 次后，所有登录统一延迟 2 s。成功登录清零该 IP 计数。锁定状态只保存在内存。
 - **改密后重登（R9）**：
   1. 任意入口调用 `set_password`；远程入口要求当前密码，本机入口（admin）不要求；
@@ -602,7 +605,7 @@ impl Auth {
   4. 浏览器 `transport.ts` 处理 4401：注销 Service Worker 中的私有缓存（API 响应，资源缓存保留）、清 sessionStorage → `location.replace('/login?reason=password-changed')`；
   5. 登录页根据 `reason` 显示“密码已更新，请重新登录”。
 - **踢下线**：删除单个会话 + 向该会话的连接发 4401 `revoked`。“全部下线”保持密码不变，只把 `epoch+1`。
-- **配对页解锁（R19）**：`/pair` 与插件页显示二维码、地址列表前须输入访问密码——`POST /pair/unlock`（配对页）或 `POST /admin/unlock`（插件页代理）本机 Argon2id 校验，错误同样计入限速。解锁令牌只存内存、5 分钟过期、仅在 loopback 有效；密码未设置时配对页先引导设置，首次设置成功即视为已解锁；配对页的改密区域在解锁之后。
+- **配对页解锁（R19）**：`/pair` 与插件页显示二维码、地址列表前须输入访问密码——`POST /pair/unlock`（配对页）或 `POST /admin/unlock`（插件页代理）本机 Argon2id 校验，错误同样计入限速。解锁令牌只存内存、5 分钟过期、仅在 loopback 有效；密码未设置时配对页先引导设置，首次设置成功即视为已解锁；配对页的改密区域在解锁之后。配对页的设密与解锁两屏同样带中继服务器表单（2026-10-12：托盘打开的页面也是"密码设置处即服务器设置处"——`POST /pair/hub/connect` 凭一次性票据即可保存，密码未落定前由守护进程持有（NoPassword），密码落定即自动连接）。
 
 ### 7.7 WS 连接任务（`ws/mod.rs`）
 
@@ -699,7 +702,7 @@ GGS Remote — 监听中 (https://192.168.1.20:47615/)
 
 - **Windows/macOS**：`tao::event_loop::EventLoopBuilder::with_user_event()` 在主线程运行；`tray_icon::TrayIconBuilder` 创建图标；菜单事件通过 `MenuEvent::receiver()` 转成 `std::sync::mpsc` 发给 tokio 线程；状态变化通过 `EventLoopProxy::send_event` 回到主线程更新图标。macOS 启动时设置 `ActivationPolicy::Accessory`（不出现在 Dock），打包为 `GGS Remote.app`，`Info.plist` 里 `LSUIElement = true`。
 - **Linux**：`ksni::TrayMethods::spawn`（tokio 特性）。D-Bus 上没有 `StatusNotifierWatcher`（如未装 AppIndicator 扩展的 GNOME）时记录日志，进入无托盘模式，管理只能通过 GGS 插件页或 CLI。
-- **扫码窗口（R19）**：“显示配对二维码…”经一次性票据打开 loopback 配对页（`https://127.0.0.1:<lp>/pair?t=…`，默认浏览器）；页面先要求输入访问密码（§7.6 配对页解锁），解锁成功才渲染各 LAN 地址的二维码与 Hub 链接，5 分钟后重新上锁。
+- **扫码窗口（R19）**：“显示配对二维码…”经一次性票据打开 loopback 配对页（`https://127.0.0.1:<lp>/pair?t=…`，默认浏览器）；页面先要求输入访问密码（§7.6 配对页解锁），解锁成功才渲染各 LAN 地址的二维码与 Hub 链接（Hub 在线时其链接与二维码居首，2026-10-12），5 分钟后重新上锁。页面常设中继服务器卡片（设密屏、解锁屏、解锁后都在）：地址/连接串 + 可选服务器口令、连接状态行（未配置/已保存待设密/连接中/在线/被拒/被顶替）与断开按钮（§7.6）。
 - **菜单语言**：读 `~/.ggs/settings.json` 的 `locale`（应用实际写入的键；`displayLanguage` 作为旧写法兼容），en / zh-cn；两个托盘后端每秒轮询菜单模型并在签名变化时重建，应用切语言后秒级跟随。
 - **平台细节（M6 手测清单）**：explorer.exe 崩溃重启后按 `TaskbarCreated` 重新注册图标；系统关机/注销（`WM_ENDSESSION` / macOS 会话结束）时事件循环干净退出，避免 `sessions.json`、`daemon.lock` 写坏；Windows 托盘 tooltip ≤ 127 字符；macOS 图标提供模板版本（黑白两套，菜单栏深浅自适应）。
 - **内存措施**：tokio current_thread；I/O 线程栈 1 MB；资源缓存默认放磁盘，内存 LRU 只放最近 16 MB；不在内存里保留实例资源的原文；空闲时 `malloc_trim(0)`（Linux glibc，每 5 分钟）；Windows 上定期 `SetProcessWorkingSetSize(-1,-1)` 不做（会造成页面抖动），只依赖不常驻大块内存。**M7 用 `scripts/probes/remote-memory.mjs` 测量**，未达标再考虑 `mimalloc` 等措施。
@@ -1164,11 +1167,12 @@ type FormFactor = 'phone' | 'tablet' | 'desktop';
 ## 13. 多窗口与新开窗口
 
 - **注册**：每个 GGS 实例启动后 `remote_host::start` 连接控制通道并 `Register`；标题、文件夹变化时 `Update`；守护进程实时推 `WINDOWS`。
-- **选择窗口（R10）**：登录后进入 `/windows`（守护进程内嵌页面，卡片列表：标题、文件夹、是否桌面可见、远程会话数、运行时长、状态徽标与**内容摘要**——R21：打开的编辑器与活动文件、终端数、未保存数、SCM 变更数，卡片展开可见完整文件列表。卡片即“每个 GGS 的内容”预览；不做像素缩略图，§3.2 已否决像素流，接入后看到的就是全部）。只有一个实例时可设置“自动进入”。工作台标题栏有窗口切换器（`windowSwitcher.ts`，同样带摘要与徽标），切换 = `DETACH` + 跳转到另一个实例的 `remote.html`（两个实例版本可能不同，所以整页加载而不是热切换）。
+- **选择窗口（R10）**：登录后进入 `/windows`（守护进程内嵌页面，卡片列表：标题、文件夹、是否桌面可见、远程会话数、运行时长、状态徽标与**内容摘要**——R21：打开的编辑器与活动文件、终端数、未保存数、SCM 变更数，卡片展开可见完整文件列表。卡片即“每个 GGS 的内容”预览；不做像素缩略图，§3.2 已否决像素流，接入后看到的就是全部）。只有一个实例时可设置“自动进入”。标题行右侧是“退出登录”；标题下方的“输入要打开的文件夹路径”行（可经 `folderInput` 配置关闭）输入路径即 `SPAWN` 该文件夹；独立的“新窗口”按钮已删（2026-10-12，主人的要求：没有用处）。工作台标题栏有窗口切换器（`windowSwitcher.ts`，同样带摘要与徽标），切换 = `DETACH` + 跳转到另一个实例的 `remote.html`（两个实例版本可能不同，所以整页加载而不是热切换）。
 - **新开窗口（R12）**：远程端“文件 → 新窗口”或“在新窗口中打开文件夹…”（文件夹用远程文件选择器挑）→ `SPAWN{folder, visible}`：
   - `remote.spawnVisible = false`（默认）：`ggs --remote-host <folder>`，不建桌面窗口，只在远程接入时建 Relay，比完整工作台少一个可见渲染进程；托盘“已连接设备”旁的窗口列表可“在桌面显示”；
   - `true`：正常可见窗口。
   - 实例注册完成后，远程端自动接入新窗口。
+- **最近打开的文件夹（2026-10-12，主人的要求：增加历史路径、可选择打开）**：守护进程把每个窗口注册/更新时带的文件夹记入历史（`src/recent.rs`：最近在前、去重、上限 12，持久化为 `~/.ggs/remote/recent.json`），随每条 `WINDOWS` 帧下发（`recentFolders`）。窗口选择页的“最近打开的文件夹”列表逐行展示，点“打开”即重开该文件夹——已在某窗口中打开的直接进入那个窗口，否则 `SPAWN` 一个新的；已在运行的路径带“已打开”徽标。手机上不必再手输路径。
 - **远程实例管理（R20）**：卡片与切换器提供“关闭 / 重启 / 新开”操作。“关闭”走优雅退出——实例有未保存文件时弹 `close-blocked` 清单（来自摘要与 `CloseBlocked`），确认后才强杀；“重启”用于卡死（`state = unresponsive` 徽标提示，两级心跳判定见 §7.8）——终止后按原 `LaunchSpec` 与文件夹拉起，注册完成自动接入，原会话收 4410 回选择页再被带回；“新开”即 SPAWN（R12）。
 - **空闲回收**：见 §7.10。
 - **没有任何 GGS 在运行**：窗口列表为空，页面直接提供“新窗口”；用配置中的 `ggsExe` 拉起。
@@ -1232,7 +1236,7 @@ deactivate(): 不停守护进程（它要常驻）
 
 ### 14.3 “远程访问”页面
 
-状态（运行/暂停、端口、TLS 模式、CA 指纹、最近外来访问时间与防火墙指引）、每个 LAN 地址的链接与二维码、复制按钮、设置/修改密码、设备列表与断开、全部断开、证书下载与安装说明（iOS/Android/桌面）、开机启动开关、“在新窗口打开的远程窗口是否在桌面显示”开关。**二维码与地址列表的显示在解锁之后**（R19：`POST /admin/unlock`，与托盘打开的配对页同一机制与令牌）。样式用主题变量，文字中英双语。
+状态（运行/暂停、端口、TLS 模式、CA 指纹、最近外来访问时间与防火墙指引）、每个 LAN 地址的链接与二维码、复制按钮、设置/修改密码、设备列表与断开、全部断开、证书下载与安装说明（iOS/Android/桌面）、开机启动开关、“在新窗口打开的远程窗口是否在桌面显示”开关、“窗口页显示路径输入框”开关（`folderInput`，默认开）。**二维码与地址列表的显示在解锁之后**（R19：`POST /admin/unlock`，与托盘打开的配对页同一机制与令牌）。**设置密码与解锁两屏都带中继服务器配置**（服务器地址/连接串 + 可选服务器口令；2026-10-12，主人的要求：密码设置处即服务器设置处）——密码未设置时先保存的服务器由守护进程持有（NoPassword），密码落定即自动连接。**中继设置并在线时，`status_json` 的 `links` 只含它的 `/u/<uuid>/` 链接——页面上（扩展页与配对页）只显示它的二维码，局域网的隐藏**（2026-10-12，主人的要求；服务器已配置但未在线时没有中继链接可显，局域网二维码作为回退保留）；证书下载锚点固定在 LAN 链接（`lanLinks`）上，不跟着排位走。样式用主题变量，文字中英双语。
 
 ---
 
@@ -1295,7 +1299,7 @@ cargo build --manifest-path extensions-src/ggs-remote/daemon/Cargo.toml --releas
 | 领域 | 措施 |
 | ---- | ---- |
 | 身份验证 | Argon2id；弱口令表；首次设置仅本机；限速与锁定；登录失败日志 |
-| 会话 | 256 位随机令牌，只存哈希；HttpOnly/Secure/SameSite=Strict；滑动过期；epoch 失效；登出与踢下线 |
+| 会话 | 256 位随机令牌，只存哈希；HttpOnly/SameSite=Strict（https 下加 `Secure`，跟随浏览器协议）；滑动过期；epoch 失效；登出与踢下线 |
 | CSRF / CSWSH | Cookie 为 Strict；`/ws` 校验 `Origin` == 本站；HELLO 中带会话 csrf；所有改状态的 API 要求 `Content-Type: application/json`（阻止简单表单提交） |
 | 传输 | 默认 TLS 1.2/1.3；HTTP 模式只能绑定 loopback |
 | 访问控制 | 实例资源只读 `remote/` 前缀；插件文件复用 `serve_ext_asset` 的目录约束；下载需一次性票据，`FetchFile` 路径约束与 `ext_fs` 同一策略（打开的文件夹 + 插件目录）；资源令牌与会话绑定；配对/插件页二维码须密码解锁（R19） |
@@ -1554,7 +1558,9 @@ PC 主人：GGS → “远程访问”页面 → 模式“通过服务器访问�
   2. wss://remote.example.com/tunnel → T_HELLO{pubkey, joinKey?} → T_CHALLENGE{nonce}
      → T_AUTH{sig} → T_READY{publicBase:"https://remote.example.com/u/<uuid>/"}
   3. 插件页显示专属链接与二维码；托盘菜单“复制服务器链接”
-  4. 如果还没设置访问密码，插件页要求先在本机设置（未设置密码时守护进程拒绝连接 Hub）
+  4. 如果还没设置访问密码，插件页要求先在本机设置（未设置密码时守护进程拒绝连接 Hub）；
+     服务器地址可以在设置密码的同一屏先保存——守护进程持有它停在 NoPassword，密码落定
+     那一刻被唤醒连接（`set_password` 通知隧道循环，2026-10-12）
 之后：开机自启的守护进程自动重连 Hub，链接始终不变。
 ```
 
@@ -1617,12 +1623,14 @@ Hub 的路径（§20.5 的静默门，2026-10-12 按所有者要求收口：“�
 | ---- | ---- |
 | 冒充别人的 PC（抢占 uuid） | uuid 由公钥哈希决定，接入时必须用对应私钥签 Hub 的一次性挑战（绑定 Hub 主机名，防跨服务器重放）；没有私钥就拿不到这个 uuid |
 | 不相干的人把你的服务器当免费中继 | 可选 `joinKey`（服务器口令，常量时间比较）；`maxTunnels` 在线 PC 上限；每条隧道并发会话上限（默认 8）与可选的每日流量上限；`T_HELLO` 每 IP 限速 |
+| 把中继当免费网页托管（挂自己的黄色/暴力/任意站点） | 四层（2026-10-12）：**访客上限**——`visitors_per_day_per_tunnel`（默认 32，0 = 关），个人链接的观众是个位数、被当公开网站分享的链接是成百上千个独立 IP，计数挂在 uuid 上（重连不清零），超出即 429；**请求速率**——`http_rate`（默认 600 次/分钟/IP，0 = 关），会话上限只限并发不限速率；**审计**——`audit_log`（默认空 = 关），每个隧道生死、浏览器会话开关、被代理应答**头**一行 JSON（无请求体、无 Cookie、路径中的包令牌脱敏为前 6 位，§16 的同一形状），运营者应对投诉与取证的那条痕；**黑名单**——`blocklist`（默认空 = 关），一文件一行一个 uuid（`#` 注释），30 s 重读一次并在每次握手时检查，被列 PC 的隧道被摘下（浏览器看到的与离线页无差别）且下次握手被 `banned` 拒绝。公网部署另见 §20.6 末的运营提示：joinKey 当邀请制用、日志留存遵循所在司法辖区 |
 | 浏览器端爆破某台 PC 的密码 | PC 守护进程限速（§7.6）按真实 IP：Hub 在 `CONN_OPEN`/`HTTP_REQ` 里带客户端 IP；Hub 另有每 IP、每 uuid 的登录入口限速（10 次/分钟） |
 | 枚举链接 | 122 位哈希，无法遍历；畸形 uuid 在门口即静默（与任何扫描路径无异），形态合法的未知/离线链接返回同一页面；每 IP 访问不在线链接超过 100 次/10 分钟则临时封禁 |
 | 链接泄露 | 链接不是凭据，仍需密码；可“更换链接” |
 | 设备私钥泄露 | 等于链接被别人接管（对方仍不知道访问密码，但可以冒充你的 PC 骗取密码）。私钥文件 0600；导出文件必须加密；插件页“更换链接”立即作废旧密钥 |
 | Hub 被攻破 | 可读写经过的流量。缓解：自己部署；Hub 不存密码、会话、任何持久数据；可选 M10 端到端加密 |
 | 资源跨 PC 缓存泄露 | 只缓存**应用自身**的带哈希不可变资源（`/v/<ver>/assets/*`，各 PC 相同的公开构建产物），键为（版本、路径、sha256）；插件文件、API、下载永不跨 PC 缓存 |
+| 放弃中的请求占满会话槽（DoS） | 2026-10-12 修复：HTTP 请求从入表到应答头之间被浏览器放弃（连接断开、handler 被取消）时，会话条目曾经无人回收——8 个幽灵即可让默认隧道永久 429。现在 `SessionSlot`（http_proxy.rs）持有所有权、随 drop 无论怎样离开都回收，`to_conn` 的失败投递同样移除死条目；应答头另有 30 s 超时（挂死的 PC 答案是 504 而非无限悬挂） |
 
 #### 20.6.1 路径方式下的浏览器侧隔离
 
@@ -1676,9 +1684,11 @@ extensions-src/ggs-remote/hub/                # 不进 VSIX；发布为静态二
     ├── identity.rs                           # 公钥 → uuid、挑战签名校验
     ├── tunnel.rs                             # /tunnel：握手、内存表 uuid → 隧道、替换、心跳
     ├── front.rs                              # /u/<uuid>/：解析、剥前缀、查表
-    ├── http_proxy.rs                         # HTTP 请求 ↔ HTTP_REQ/HTTP_RES
+    ├── http_proxy.rs                         # HTTP 请求 ↔ HTTP_REQ/HTTP_RES（SessionSlot 会话槽所有权、应答头 30 s 超时）
     ├── ws_bridge.rs                          # 浏览器 WS ↔ 隧道会话（只改写 session）
     ├── cache.rs                              # 跨 PC 共享的公开不可变资源缓存（内存 LRU + 可选磁盘）
+    ├── audit.rs                              # 运营者审计日志（JSON 行：隧道/会话/应答头，令牌脱敏）
+    ├── blocklist.rs                          # uuid 黑名单文件（30 s 重读 + 每次握手检查）
     ├── limits.rs                             # joinKey、maxTunnels、每 IP / 每 uuid 限速、封禁
     └── metrics.rs
 
@@ -1699,6 +1709,10 @@ public_url = "https://remote.example.com"   # 用于拼 publicBase、挑战绑�
 tls = { mode = "acme", email = "ops@example.com" }  # 或 { mode = "files", cert = "...", key = "..." } 或 { mode = "none" }（前置 Caddy）
 trust_proxy = ["127.0.0.1/32"]              # tls=none 时，只信任这些地址的 X-Forwarded-*
 handshake_rate = 10                         # /tunnel 每 IP 每分钟握手数；0 = 不限（压测/私有大车队）
+http_rate = 600                             # 每 IP 每分钟被代理的 HTTP 请求数；0 = 不限
+visitors_per_day_per_tunnel = 32            # 每链接每日独立访客 IP 上限（挂在 uuid 上，重连不清零）；0 = 不限
+audit_log = ""                              # 审计日志路径（JSON 行：隧道/会话/应答头，令牌脱敏）；空 = 关
+blocklist = ""                              # uuid 黑名单文件（一行一个，30 s 重读，被列即摘线+拒连）；空 = 关
 join_key = ""                               # 空 = 任何 ggs-remote 都能连；非空 = 需要口令
 max_tunnels = 200
 sessions_per_tunnel = 8
@@ -1721,7 +1735,7 @@ services:
 
 - DNS 一条 `remote.example.com` 记录即可；也可以直接用 IP + 自签证书（连接串带 `fp=` 指纹）。
 - 不用 Docker 时，`ggs-remote-hub --config hub.toml` 直接运行（单个静态二进制，附 systemd 单元示例）。
-- **独立安装包（2026-10-12 落地）**：发布页随每个版本携带三件——Windows 的 `ggs-remote-hub-<版本>-windows-x64.zip`（解压即用）、`ggs-remote-hub_<版本>_amd64.deb`（musl 静态二进制 + 加固 systemd 单元 [DynamicUser、ProtectSystem=strict] + 示例配置以 conffile 落位 `/etc/ggs-hub/hub.toml`——`dpkg -i` 后 `systemctl enable --now` 开箱即跑，升级保留本地改动）、以及给非 Debian 系的 `x86_64-musl.tar.gz`；本地可用 `hub/deploy/build-deb.sh` 自行打包（`PREBUILT`/`VERSION` 可注入），`release.yml` 的 `hub-packages` 作业在打 tag 时构建并纳入 `SHA256SUMS` 与 GPG 签名。deb 布局已在真实 Ubuntu 24.04 上安装/卸载验证。
+- **独立安装包（2026-10-12 落地）**：发布页随每个版本携带三件——Windows 的 `ggs-remote-hub-<版本>-windows-x64.zip`（解压即用）、`ggs-remote-hub_<版本>_amd64.deb`（musl 静态二进制 + 加固 systemd 单元 [DynamicUser、ProtectSystem=strict] + 示例配置以 conffile 落位 `/etc/ggs-hub/hub.toml`——`dpkg -i` 后 `systemctl enable --now` 开箱即跑，升级保留本地改动）、以及给非 Debian 系的 `x86_64-musl.tar.gz`；本地可用 `hub/deploy/build-deb.sh` 自行打包 deb + tarball、`hub/deploy/build-zip.bat` 自行打包 Windows zip（两者均可用 `PREBUILT`/`VERSION` 注入），`release.yml` 的 `hub-packages` 作业在打 tag 时构建并纳入 `SHA256SUMS` 与 GPG 签名。deb 布局已在真实 Ubuntu 24.04 上安装/卸载验证。
 - 资源估算：每条在线隧道约 64 KB 内存；1 核 1 GB 的服务器可承载数百台在线 PC，瓶颈是带宽（所有远程流量都经过 Hub）。
 - Hub **没有需要备份的数据**：换服务器只需让域名指向新机器，各 PC 自动重连，链接不变。
 
@@ -1858,3 +1872,44 @@ M9 依赖 M2（认证）和 M3（多窗口），可与 M5（响应式）并行�
 扩展页面的“打开”是同一诉求的另外两条路，各归其位：**Claude 的侧栏对话视图**是 `view` 消息——PC 点 Claude 活动项、手机点 Claude 底部标签都走 `showView('ext-container:…')`，同步后另一端的容器上屏、其 webview 视图窗格挂出流式副本（§22.6）；**Git Graph 这类面板页**（`window.createWebviewPanel` 的编辑器标签）本来就有状态镜像，修正后的策略（见 §22.6 末条）让另一端的副本标签在前台打开，手机侧随激活自动翻到编辑器页（`activate()` 一向调 `revealEditorPage()`）。
 
 **实测**（`scripts/probes/remote-sync-check.mjs`，2026-10-12）：dev harness 与 dev/remote-phone.html 作为同浏览器里的两个真实前端（`dev/dev-events.js` 用 BroadcastChannel 扮演 Relay），按钮矩阵 11 步全部双向对应——活动视图（Search / Explorer / Source Control / Extensions）、手机底部标签（Files / Changes）、两端文件树行、标签切换、标签关闭——整场同步 13 条消息共 1.2 KB（平均 96 B/条）；同会话用真实 `DomRecorder` 实测 DOM 副本方案需快照 208 KB + 变更批次 122 KB = 330 KB。操作同步是副本方案的 **1/272**，远低于所有者 1/10 的流量要求。
+
+
+## 23. 安全沙箱：远程会话只驱动被操作系统隔离的窗口
+
+2026-10-12（所有者的方向："remote 增加权限设置，增加安全沙箱功能，ggs 运行在沙箱里面，不能获取 ~/.ggs 的内容，所有文件在沙箱里，claude 只能访问沙箱里的文件内容，沙箱可以设置访问内网权限，访问外网权限……不要自己实现沙箱，要使用开源跨平台的沙箱方案"）。沙箱**不自研**：执行引擎是微软的开源 [mxc](https://github.com/microsoft/mxc)（Microsoft eXecution Container，MIT，GitHub Copilot 本地沙箱的 GA 引擎；Rust crate `mxc-sdk` 直接连进 daemon）——策略驱动的操作系统原生进程隔离（Windows ProcessContainer / Linux bubblewrap / macOS Seatbelt），作用于被包裹进程**及其整棵子树**。选型时对比过 Anthropic 的 sandbox-runtime（srt）：npm-only、Windows 需一次性管理员安装且以另一个用户运行、Linux 上网络命名空间整体移除 + AF_UNIX 默认封锁——无法包裹一个 GUI 工作台；mxc 在三平台上都无需每次提权。
+
+### 23.1 策略模型（daemon 只出策略，不自己强制）
+
+| 面 | 做法 |
+| ---- | ---- |
+| 文件系统 | deny-by-default。沙箱根（默认 `~/.ggs/remote/sandbox`，可配）是实例的全部世界：根内读写；真实 `~/.ggs`（设置、AI 供应商密钥、Claude 状态、扩展库）与主目录其余部分、磁盘其余位置**不可读**。除程序自身安装目录（只读执行）外不授任何系统目录——Windows 的系统目录与 Program Files 自带 ALL APPLICATION PACKAGES 读 ACE，AppContainer 令牌直接读得到（mxc 自己的授权过滤会跳过它们；显式授予反而要求用户没有的 write-DACL，实测 2026-10-12） |
+| 网络 | 三档单选：`off`（默认拒绝，什么都不通）/ `intranet`（私网段：10/8、172.16/12、192.168/16、100.64/10、169.254/16、127/8）/ `internet`（全通）。沙箱自身的回环在每档都通——智能体的本地服务器不受影响（实测：断网档下 bind+connect 127.0.0.1 正常）。macOS 的 Seatbelt 只有开关没有 CIDR，Windows 的 AppContainer 层拒绝 CIDR 规则（mxc 会以 `policy_validation` 拒绝它无法忠实执行的策略）——这两类主机上 `intranet` 降级为 `off`，状态 JSON 里 `degraded: true`，页面如实标注 |
+| 状态重定位 | 实例的 `GGS_HOME` 指向 `<root>/home`：设置、扩展、供应商密钥、Claude 状态从空白开始，全部落在沙箱里；`HOME`/`USERPROFILE`/`TEMP`/`TMP`、`WEBVIEW2_USER_DATA_FOLDER`、`XDG_*` 一并重定位。控制通道走专用沙箱端点（env `GGS_REMOTE_CONTROL`） |
+| UI | `ui.disable: false`——工作台要建窗口画 webview；剪贴板与输入注入保持默认拒绝 |
+
+### 23.2 控制通道：第二条端点 + 一次性令牌
+
+沙箱实例的令牌（Windows AppContainer）打不开默认 DACL 的主控制管道（实测 os error 5）。做法：
+
+- 主端点一切不变（桌面实例照旧，无令牌）。
+- 新增**沙箱端点**（`daemon/src/sandbox.rs::control_endpoint`：Windows 是名字带 `ggsr1-sbx-` 前缀的第二个管道，经 GGS 补丁的 `../vendor/interprocess` 以 SDDL `D:P(A;;GA;;;S-1-15-2-1)(A;;GA;;;OW)` 创建——ALL APPLICATION PACKAGES 可连、属主全权、其他人一概不行；Unix 是 `<root>/sandbox-sock/control.sock`，目录 0700、策略单独授予 rw）。daemon 每次 spawn 生成 32 字节一次性令牌（env `GGS_REMOTE_CONTROL_TOKEN`），Register 带上、daemon 验后即焚——端点 DACL 放宽了，注册仍只有 daemon 自己发出去的实例能完成（实测：无令牌被拒、有效令牌得 Welcome、重放被拒）。
+- `Register` 增 `sandboxed` / `controlToken` 两字段（serde default，向前兼容；两侧向量 `tests/vectors/control.json` 已同步）。app 侧 `remote_host.rs` 优先读 env `GGS_REMOTE_CONTROL`（重定位后的 `GGS_HOME` 推导不出真端点，daemon 显式下发）。
+
+### 23.3 权限面（谁能看到什么）
+
+- 沙箱开启时，WINDOWS 只列 `sandboxed` 实例，recent 只留沙箱根内的路径；直接 ATTACH 桌面实例按 INSTANCE_GONE 回（拿到密码的人不能绕过沙箱去连主窗口）。SPAWN 的目录必须在沙箱根内，空则默认 `<root>/workspace`。
+- **只有远程会话触发的 SPAWN 走沙箱**：托盘与管理 API 代表 PC 跟前的用户，开的是全信任窗口（沙箱开启时它们不出现在远程列表里）。重启沙箱实例仍走沙箱。
+- 配置（`config.json` 的 `sandbox` 段，页面与 `PUT /admin/config` 同一通道）：`enabled`、`network`、`root`。状态 JSON 带 `sandbox` 段：所配、所能（`supported`/`backend`/`tier`/`intranetSupported`/`degraded`）。默认关闭——关着时一切与从前一致。
+- 窗口页（picker）：沙箱开启时路径输入框隐藏（根外的路径本来就打不开），新增"打开沙箱窗口"按钮（空沙箱的唯一入口）；沙箱窗口带"沙箱中"徽标。Remote 页新增"安全沙箱"区块：开关、网络三档（此电脑不支持的档位禁用并标注）、根目录设置、后端/层级与如实说明。
+
+### 23.4 实现位置
+
+- `daemon/src/sandbox.rs`：支持探测（`platform_support`/`available_backends`/intranet 可达性）、`plan`（root + 有效网络档，含降级）、目录校验（lenient canonicalize 前缀）、`launch`（argv → mxc 引用规则序列化（`mxc_common::cmdline`，Windows CreateProcess / POSIX shell 各按其规）、env 重定位、fs/net/ui 策略、`v1::spawn` + 后台收割）、令牌发放/核销、沙箱端点绑定与 serve、状态 JSON。
+- `lifecycle.rs::spawn/restart` 路由（`via_remote`）；`control.rs::serve_instance` 带 `sandbox_channel`；`registry`/`ws::msg` 的 `sandboxed` 贯通；`server.rs` 开机按配置起沙箱端点；`http/api.rs` 会话 extras 带沙箱事实给 picker。
+- macOS 的 `open -n <bundle> --args` 启动形态在沙箱内换成 bundle 自身的可执行文件（`resolve_program`）——`open` 会把启动递回沙箱外。
+- 依赖与补丁：daemon 直接依赖 `mxc-sdk = "1.0"`；`[patch.crates-io] interprocess = { path = "../vendor/interprocess" }`（Boa 的 vendoring 先例：仅新增 `ListenerOptions::security_descriptor_sddl` 一个方法，其余不动；另删了一行本地工具链不认识的 lint 名）。
+
+### 23.5 实测（本机 Windows 11，AppContainer 层）
+
+- 默认拒绝读沙箱外文件 ✓；断网档 ✓；`egress.default=Allow` 即 internet 档 ✓；AppContainer 层拒绝 CIDR 规则（`policy_validation`）✓；沙箱内 bind+connect 自身回环 ✓；带 AAP ACE 的管道可连可交换字节 ✓（默认 DACL 拒绝 ✓）；`sandbox::launch` 端到端 ✓（`cargo test --test integration sandbox_launch -- --ignored`，CI 中忽略——需要宿主沙箱）。
+- **如实残余**（页面上同样写着）：环境变量被继承（隔离的是文件与网络，不是环境）；构建工具（npm、cargo…）按所选网络档联网；沙箱窗口的设置/扩展/AI 供应商从空白开始，须在沙箱内配置；非内核强制的文档说明——OS 沙箱由 mxc 的各平台后端执行，Windows 的 AppContainer 层是其"降级层"（PSEC/BaseContainer 层的机器获得同策略的更强执行）。

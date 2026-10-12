@@ -90,6 +90,8 @@ pub struct InstanceInfo {
     pub summary: Summary,
     /// Spawned by the daemon (`--remote-host`), not by a desktop launch.
     pub spawned: bool,
+    /// Running inside the security sandbox (§23): its whole world is the sandbox root.
+    pub sandboxed: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

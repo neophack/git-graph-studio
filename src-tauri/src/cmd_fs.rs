@@ -663,7 +663,10 @@ pub fn write_upload_chunk(
 /// file's size in `x-ggs-total`. Answers the bytes the PC now has. The target is confined to
 /// the open folders — a browser session writes nowhere else (§7.8).
 #[tauri::command]
-pub fn fs_write_chunk(state: State<'_, AppState>, request: tauri::ipc::Request<'_>) -> Result<u64, String> {
+pub fn fs_write_chunk(
+    state: State<'_, AppState>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<u64, String> {
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
         return Err("fs_write_chunk expects a binary body".into());
     };
@@ -682,7 +685,13 @@ pub fn fs_write_chunk(state: State<'_, AppState>, request: tauri::ipc::Request<'
     let total: u64 = header("x-ggs-total")?
         .parse()
         .map_err(|_| "bad x-ggs-total")?;
-    let roots: Vec<PathBuf> = state.repos.lock().unwrap().iter().map(PathBuf::from).collect();
+    let roots: Vec<PathBuf> = state
+        .repos
+        .lock()
+        .unwrap()
+        .iter()
+        .map(PathBuf::from)
+        .collect();
     if !upload_allowed(Path::new(&path), &roots) {
         return Err(format!("{path}: uploads land inside the open folders only"));
     }
@@ -702,8 +711,18 @@ fn upload_offset(path: &Path, size: u64) -> u64 {
 /// The resume point of an interrupted upload, confined like the write itself (a refused
 /// path errors, and the write refuses too).
 #[tauri::command]
-pub fn fs_upload_offset(state: State<'_, AppState>, path: String, size: u64) -> Result<u64, String> {
-    let roots: Vec<PathBuf> = state.repos.lock().unwrap().iter().map(PathBuf::from).collect();
+pub fn fs_upload_offset(
+    state: State<'_, AppState>,
+    path: String,
+    size: u64,
+) -> Result<u64, String> {
+    let roots: Vec<PathBuf> = state
+        .repos
+        .lock()
+        .unwrap()
+        .iter()
+        .map(PathBuf::from)
+        .collect();
     if !upload_allowed(Path::new(&path), &roots) {
         return Err(format!("{path}: uploads land inside the open folders only"));
     }
@@ -772,12 +791,22 @@ mod upload_tests {
         let roots = vec![root.clone()];
         // Existing file, missing file and missing-deep-tail all pass inside the root.
         assert!(upload_allowed(&root.join("a.txt"), &roots));
-        assert!(upload_allowed(&root.join("sub").join("deep").join("a.txt"), &roots));
+        assert!(upload_allowed(
+            &root.join("sub").join("deep").join("a.txt"),
+            &roots
+        ));
         // A sibling, the parent, an escape and an unrelated drive path are refused.
         assert!(!upload_allowed(&dir.path().join("other.txt"), &roots));
         assert!(!upload_allowed(dir.path(), &roots));
         assert!(!upload_allowed(&root.join("..").join("escape.txt"), &roots));
-        assert!(!upload_allowed(std::path::Path::new(if cfg!(windows) { "C:\\Windows\\x.dll" } else { "/etc/x" }), &roots));
+        assert!(!upload_allowed(
+            std::path::Path::new(if cfg!(windows) {
+                "C:\\Windows\\x.dll"
+            } else {
+                "/etc/x"
+            }),
+            &roots
+        ));
         // No folder open: nowhere to upload.
         assert!(!upload_allowed(&root.join("a.txt"), &[]));
     }
@@ -1187,11 +1216,17 @@ pub(crate) fn cached_file_list(
 /// Where unsaved buffers are kept between a crash and the next launch: one JSON file per
 /// document under `~/.ggs/backups/`, named by the hash of its path.
 pub(crate) fn backups_dir() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
+    // GGS_HOME first (it is what every other user-data path honours, and a sandboxed
+    // instance relocates it); the literal home only as the fallback of a hand launch.
+    let base = std::env::var_os("GGS_HOME")
         .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|home| PathBuf::from(home).join(".ggs"))
+        })
         .ok_or_else(|| "no user home directory".to_string())?;
-    let dir = home.join(".ggs").join("backups");
+    let dir = base.join("backups");
     fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     Ok(dir)
 }

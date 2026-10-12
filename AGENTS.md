@@ -200,9 +200,10 @@ language are user data under `~/.ggs/`; theme and UI quality are enforced, not h
 The workspace folder tree — lazy, with git status colouring, inline new/rename inputs and
 the full context menu — over filesystem services that also serve the editors.
 
-- Frontend: `src/explorer.ts`
+- Frontend: `src/explorer.ts` (the context menu adapts to the remote shell: the
+  desktop-only Reveal hides, a browser session gains the transfer entries — module 19)
 - Backend: `src-tauri/src/cmd_fs.rs` (tree, file contents of the working tree / index / any
-  revision, new-rename-delete), `src-tauri/src/watcher.rs` (one recursive `notify` watch,
+  revision, new-rename-delete, the confined chunked upload writes), `src-tauri/src/watcher.rs` (one recursive `notify` watch,
   debounced `FsChange` batches — external changes appear by themselves)
 
 ### 4. Quick Open
@@ -1263,6 +1264,27 @@ window of this machine to a phone's or another computer's browser over HTTPS and
 database) carries the link through NAT. The whole design lives in
 `docs/ggs-remote-plan.md` — this section is the map of where its parts live.
 
+- **The security sandbox** (2026-10-12, the owner's direction, plan §23): when enabled, every
+  instance a remote session opens runs OS-sandboxed — the engine is Microsoft's open-source
+  mxc (`mxc-sdk`, MIT — Copilot local sandboxing's GA runtime; ProcessContainer on Windows,
+  bubblewrap on Linux, Seatbelt on macOS) applied to the spawned process and its whole tree.
+  Filesystem deny-by-default with the sandbox root (`~/.ggs/remote/sandbox`, configurable) as
+  the instance's whole world — the real `~/.ggs` and the rest of the disk are unreadable;
+  network is a three-level setting (off / intranet / internet; hosts whose tier cannot
+  express CIDR rules degrade intranet to off, flagged). The instance's `GGS_HOME` is
+  relocated inside the root (settings, extensions, provider keys, Claude state start empty
+  in the sandbox). The control channel gets a second, sandbox endpoint — Windows a pipe
+  created through the GGS-patched vendored `../vendor/interprocess`
+  (`ListenerOptions::security_descriptor_sddl`, the Boa vendoring precedent) with an
+  ALL APPLICATION PACKAGES DACL; every spawn carries a one-shot registration token
+  (`GGS_REMOTE_CONTROL_TOKEN`) the Register must present. `Register`/`InstanceInfo` carry
+  `sandboxed`/`controlToken`; the app's `remote_host.rs` honours `GGS_REMOTE_CONTROL`.
+  Only remote-driven SPAWNs are sandboxed (tray/admin act for the user at the PC); with the
+  sandbox on, WINDOWS lists sandboxed instances only and ATTACH to a desktop window answers
+  INSTANCE_GONE. `daemon/src/sandbox.rs` is the module; the Remote page carries the
+  "Security sandbox" section and the picker an "open a sandboxed window" entry; the real
+  e2e is `cargo test --test integration sandbox_launch -- --ignored` on a capable host.
+
 - **The daemon** (`extensions-src/ggs-remote/daemon/`, a crate of its own workspace — the app
   binary never links it): tray, self-signed TLS, Argon2id password + sessions + epochs
   (a password change closes every socket with 4401 within a second), the window registry
@@ -1271,7 +1293,22 @@ database) carries the link through NAT. The whole design lives in
   restart with the dirty-file check), and the Hub client (`src/hub/`: the Ed25519 device
   key whose public half *is* the link's UUID, the outbound tunnel with challenge handshake
   and reconnect backoff, and tunneled browser sessions served through the very router the
-  LAN listener uses). The install path (`client.rs`) never shuts down a running daemon of
+  LAN listener uses). The recently opened folders (`src/recent.rs`, 2026-10-12): every
+  folder a window registers or updates with — most recent first, deduped, capped at 12 —
+  persists as `recent.json` under the root and rides every WINDOWS frame
+  (`recentFolders`), so the picker's "recent paths" list survives a daemon restart and a
+  tap reopens the folder (entering the window that already shows it, SPAWNing one
+  otherwise). The daemon's web pages (`web/`) are VS Code-styled (2026-10-12, the owner's
+  direction): flat and compact, light and dark, phone to desktop — `style.css` mirrors
+  the `--vscode-*` palette; the change-password forms are one-line rows (placeholder +
+  aria-label instead of stacked labels); the login page centers its card under the logo.
+  The pages' language follows the user's set language (`GET /lang.js`, guard-exempt and
+  `no-store`, answers `window.ggsLang` from `~/.ggs/settings.json` — the same
+  `Paths::display_language` the tray reads, the browser's language as fallback). The
+  window picker (2026-10-12, the owner's direction): sign-out lives in the header row,
+  the standalone "new window" button is gone, and the "open a folder by typing its path"
+  row stays behind the `folderInput` config switch (`api/session` carries it; the
+  extension page's Service section exposes the toggle). The install path (`client.rs`) never shuts down a running daemon of
   the same or a newer version — it asks the live one over the admin API before touching
   it, so the plugin's activation cannot drop every remote session for a byte-identical
   reinstall (2026-10-11: the fresh-home case once killed the daemon for ~20 s, and a page
@@ -1294,12 +1331,14 @@ database) carries the link through NAT. The whole design lives in
   VSIX): standalone packaging beside the container image — `deploy/build-deb.sh` wraps the
   static musl binary into a deb (hardened systemd unit + the example config as a conffile
   at `/etc/ggs-hub/hub.toml`, so dpkg -i plus systemctl runs out of the box) and a plain
-  tarball; `release.yml`'s `hub-packages` job builds them (plus the Windows zip) on tags.
+  tarball; `deploy/build-zip.bat` builds the Windows zip locally in the release page's
+  layout (exe + `hub.toml.example` + README under a versioned folder). `release.yml`'s
+  `hub-packages` job builds all of them on tags.
   `/tunnel` handshake, the uuid → tunnel table (a newer key connection replaces the
   older, `T_REPLACED`), HTTP and WebSocket proxying with session re-stamping, the offline
-  page every not-online link answers, per-IP limits (handshakes, login entries,
-  offline-probe bans), joinKey in constant time, and the cross-PC cache for the workbench's
-  immutable assets only. The silence gate (2026-10-12, the owner's direction:
+  page every not-online link answers, per-IP limits (handshakes, login entries, proxied
+  requests, offline-probe bans), joinKey in constant time, and the cross-PC cache for the
+  workbench's immutable assets only. The silence gate (2026-10-12, the owner's direction:
   "如果不是 /u/uuid 访问，不要返回任何东西，就像没开这个端口一样" +
   "判别不是 uuid 也要返回端口关闭，链接对才返回内容" — only a well-formed link is ever
   answered, everything else is the shape of an unopened port): `gate.rs` wraps the router
@@ -1313,14 +1352,39 @@ database) carries the link through NAT. The whole design lives in
   `/` landing page and its `landing_page` config are gone, and `deploy/Caddyfile` carries
   the same rule at the TLS front (proxy `/u/*` and `/tunnel`, `abort` the rest — never a
   Caddy 502 for a dropped path; TCP SYN replies and the TLS handshake itself are physical
-  facts of listening, the silence is the HTTP layer's). Deploy files and the Dockerfile
-  sit in `hub/deploy/`.
+  facts of listening, the silence is the HTTP layer's). The abuse guards (2026-10-12, the
+  open-relay problem:
+  a keyless public Hub is a free hosting service waiting to happen): the per-link daily
+  distinct-viewer ceiling `visitors_per_day_per_tunnel` (default 32 — a personal link has a
+  handful of viewers, a link shared like a public site hundreds; the bucket hangs off the
+  uuid so a reconnect cannot launder it), the per-IP request rate `http_rate`, the audit
+  trail `audit_log` (one JSON line per tunnel lifecycle / browser session / proxied answer
+  head — never a body, package tokens in paths masked to 6 characters) and the blocklist
+  file `blocklist` (one uuid per line, re-read every 30 s and at every handshake: a listed
+  PC's tunnel is taken off the air — its browsers see the plain offline page — and its next
+  handshake is refused with `banned`). The HTTP proxy's session slot is owned by a
+  `SessionSlot` guard freed on drop however the request leaves (before it, a request
+  abandoned before the PC's answer head leaked its entry forever — eight ghosts bricked a
+  default tunnel's session ceiling), the answer head waits under a 30 s timeout (a hung PC
+  answers 504, never a hanging request), and `to_conn` drops a dead session's entry on its
+  failed send. Deploy files and the Dockerfile sit in `hub/deploy/`.
 - **The plugin package** (`extensions-src/ggs-remote/`: `extension.js`, `lib/daemon.js`
   install/upgrade/start, `lib/admin.js` the admin API client, `media/page/` the Remote
   Access page — links + QR behind the password unlock, devices, password, and the relay
   section "Reach this PC from anywhere": connect string, the `/u/<uuid>/` link, change-link,
-  export/import of the sealed device key). Its `build.mjs` packs the platform's daemon
-  binary into the VSIX.
+  export/import of the sealed device key. 2026-10-12, the owner's direction: the
+  set-password and unlock screens carry the relay server fields themselves — a server saved
+  before any password exists is held in NoPassword and connects the moment the password
+  lands (`set_password` wakes the tunnel loop) — on BOTH pages: the extension page (the
+  admin API's `hubConnect`) and the tray's loopback pair page, whose server card lives on
+  every screen and rides the ticket-guarded `pair/hub/connect` / `pair/hub/disconnect`
+  routes (`pair/state`'s `hub.settings` prefills the form) — and while the relay is set and
+  online its `/u/<uuid>/` link is the ONE QR on both the extension page and the pair page
+  (2026-10-12, the owner's direction: `status_json`'s `links` is the relay link alone —
+  the LAN codes hide; a configured-but-offline relay has no link to show, so the LAN codes
+  stand as the fallback, and `lanLinks` always keeps the direct addresses for the CA
+  anchors). Its
+  `build.mjs` packs the platform's daemon binary into the VSIX.
 - **The replica** (2026-10-12, the owner's direction: "the whole GGS runs on the PC, the
   remote page is only a copy"): the PC's desktop window is the one real frontend of its
   instance, and a remote page is by default a live DOM copy of it (`src/remote/mirror/`;
@@ -1329,7 +1393,10 @@ database) carries the link through NAT. The whole design lives in
   chat among them — as a snapshot plus mutation batches (`recorder.ts`: node ids,
   MutationObservers, polled form values / scroll / CSSOM and adopted sheets, URLs crossing
   as app / package tokens), out as the `studio://mirror-down` app event the Relay forwards;
-  a viewer (`viewer.ts`, a script-less sandboxed frame scaled to fit) rebuilds it, and its
+  a viewer (`viewer.ts`, a script-less sandboxed frame scaled to fit; its base style
+  hides the PC window's own minimize / maximize / close — 2026-10-12, the owner's
+  direction: a remote page shows no window controls, a tap there would drive the PC's
+  real window) rebuilds it, and its
   input (`viewerInput.ts`: mouse, touch taps / drag-scroll / long press, a hidden text field
   for keys, IME and the phone keyboard) comes back as `studio://mirror-up` to `main`, where
   `replay.ts` dispatches it with each frame's own event constructors and performs the
@@ -1358,6 +1425,10 @@ database) carries the link through NAT. The whole design lives in
   each other's OPERATIONS, not pixels — every file open (with its line anchor), tab close,
   active-tab switch (an extension page's tab too — Git Graph or Claude Code's chat focused
   on one side comes forward on the other, a panel's own create never echoing as a switch),
+  a diff or file-history tab (a Source Control change clicked, a history entry — its input
+  crossing whole, revisions and paths only, so its tab id is the same on both sides and its
+  focus and close key like an extension page's; a diff of an extension's provider text
+  stays local),
   sidebar view switch and — from a side-by-side workbench only, a phone's side-page
   dismissal being navigation — side bar hide crosses as one `studio://workbench-sync`
   message (paths only, well under 200 bytes; a mirror-mode page subscribes to nothing and
@@ -1366,7 +1437,20 @@ database) carries the link through NAT. The whole design lives in
   operations, remote operations run raw and pre-mark an `announced` set (an echo can never
   re-announce; a local change mid-apply still crosses), a refused close settles both sides
   on "kept open", and the sync is silent until boot is through and local-only while a
-  session restore rebuilds that frontend's own tabs. `editorArea.ts`'s `closeFilePath` /
+  session restore rebuilds that frontend's own tabs. Its hardening round (2026-10-12, the
+  sync-bugs pass, `tests/remoteWorkbenchSync.test.ts` pins each): an applied open is
+  verified LANDED (the editor reports a failed open as a notification, not a rejection — an
+  unverified pre-mark rebounded at the next tabs diff as a close of the other side's
+  healthy tab), a close arriving while its open is still in flight queues and applies when
+  it lands (a lost close re-opened the sender's just-closed tab), the bookkeeping keys
+  paths slash- and drive-case-insensitively like the editor's `samePath` (one file's two
+  spellings oscillated close/open until both sides' tabs closed), a superseded open's
+  pending activation never swallows a later real switch and a background open never pends
+  one, a remote close of the ACTIVE tab holds the applying guard until the tab is really
+  gone (a dirty tab's save dialog settles whenever the user answers, and the successor
+  activation it then fires is the close's consequence, not a switch), and the side-bar
+  hide rule keys on the session (a real phone's own UI), not the window's live phone-shell
+  marker — the PC wearing it for a mirror viewer keeps crossing. `editorArea.ts`'s `closeFilePath` /
   `revealFilePath` (and `EditorGroup.editorForPath`) are the path-keyed landings. A fluid copy of a page that renders its content around
   the scroll position needs the copy's own scroll on the PC too (2026-10-12, the phone's
   git-graph-rs showed blank below its header): the copy reports each scroller's position
@@ -1470,7 +1554,20 @@ database) carries the link through NAT. The whole design lives in
   frontend died moves it to the asker, `webviewView.setHtml` joins the replay journal —
   before this a page reload left every extension panel unopenable and the sidebar's
   webview views blank), and the explorer's context menu hides the desktop-only
-  "Reveal in File Explorer" on the remote shell. `GGS_HOME` now relocates the extension
+  "Reveal in File Explorer" on the remote shell — and gains the transfer entries on a real
+  browser session (2026-10-12: a file's Download, a folder's Download as Zip and
+  Upload Files / Folder Here, riding `transfer.ts`'s `downloadTo` / `uploadInto` — progress
+  toast, per-file failures collected and notified, never a silent hang; the module loads on
+  first click, so the desktop bundle never carries it). Uploads stay confined to the open
+  folders server-side (`cmd_fs`'s `fs_write_chunk` / `fs_upload_offset` canonicalize the
+  target, missing tail included, and refuse outside them — the download side's §7.8 rule;
+  one process lock serializes chunks), and a download's Content-Disposition carries the
+  RFC 5987 `filename*` beside the ASCII fallback, so a Chinese name no longer downloads as
+  mojibake (the daemon's `content_disposition`). The menus a browser session cannot use
+  drop at the source (`workbench.ts`'s `menus()`: New Window and Open Developer Tools for
+  any remote session — both would open on the PC, invisible to the browser — and Keyboard
+  Shortcuts plus the Editor Layout submenu on the phone form factor; Paste runs through the
+  clipboard plugin there, a browser forbidding `execCommand('paste')`). `GGS_HOME` now relocates the extension
   store, the symbol index, the settings and the locale (the hermetic probes relied on
   it; before, the real `~/.ggs` leaked into every probe run).
   The module's seams are enforced:
@@ -1481,8 +1578,13 @@ database) carries the link through NAT. The whole design lives in
   viewer lifecycle, the PC window's phone mode), `tests/remote.test.ts` +
   `tests/remoteResponsive.test.ts` (the shims, transport,
   relay engine; the phone's page model, app bar, navigation, drawer, sheets, editing row
-  and settings page; M10's end-to-end crypto — the browser twin of the tray service's e2e core against
-  the committed cross-implementation vectors), the daemon and hub crates' `cargo test`,
+  and settings page; the transfer layer — chunked resumable uploads with per-file failure
+  collection, the download ticket flow and its refusal; M10's end-to-end crypto — the
+  browser twin of the tray service's e2e core against the committed cross-implementation
+  vectors), `tests/remoteWorkbenchSync.test.ts`
+  (the cross-frontend operation sync: the shared-bus core, a real EditorArea under the sync,
+  the wired workbench, the extension pages across frontends, and the hardening round's
+  regression cases), the daemon and hub crates' `cargo test`,
   `tests/e2e/remote/` (the Playwright browser specs — `npm run test:e2e-remote`, the
   Chromium/Firefox/WebKit matrix against TLS daemons: WebKit grants plain-HTTP localhost no
   Secure-cookie exemption, so the specs ride the shipping self-signed shape; the workbench

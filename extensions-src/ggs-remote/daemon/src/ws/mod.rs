@@ -5,6 +5,6 @@ pub mod conn;
 pub mod frame;
 pub mod msg;
 pub mod resume;
-mod socket;
+pub mod socket;
 
 pub use socket::{handle, windows_frame, ws_handler};

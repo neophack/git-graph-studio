@@ -58,6 +58,15 @@ pub enum FromInstance {
         visible: bool,
         remote_host: bool,
         launch: LaunchSpec,
+        /// This instance runs inside the security sandbox (§23) — an app half a
+        /// version behind may not say, so the daemon believes its own channel, not
+        /// this flag.
+        #[serde(default)]
+        sandboxed: bool,
+        /// The one-shot token a sandboxed spawn was issued; empty for ordinary
+        /// registrations (§23).
+        #[serde(default)]
+        control_token: String,
     },
     Update {
         title: Option<String>,

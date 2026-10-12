@@ -367,9 +367,18 @@ fn content_disposition(name: &str) -> String {
             b'A'..=b'Z'
             | b'a'..=b'z'
             | b'0'..=b'9'
-            | b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~' => {
-                encoded.push(byte as char)
-            }
+            | b'!'
+            | b'#'
+            | b'$'
+            | b'&'
+            | b'+'
+            | b'-'
+            | b'.'
+            | b'^'
+            | b'_'
+            | b'`'
+            | b'|'
+            | b'~' => encoded.push(byte as char),
             _ => encoded.push_str(&format!("%{byte:02X}")),
         }
     }

@@ -86,6 +86,9 @@ pub fn status_json(daemon: &Daemon, open: bool) -> serde_json::Value {
         "config": config,
     });
     status["hub"] = hub;
+    // The sandbox's own state (§23): what is configured, what this host can enforce —
+    // the Remote page's sandbox section and the picker render from this.
+    status["sandbox"] = crate::sandbox::status_json(&config, &daemon.paths);
     if open {
         status["addresses"] = serde_json::json!(addresses);
         status["lanLinks"] = serde_json::json!(links);
@@ -387,9 +390,7 @@ pub async fn hub_connect(
         Err(e) => return error(StatusCode::BAD_REQUEST, &e),
     };
     match daemon.hub.connect(settings) {
-        Ok(()) => {
-            json_response(StatusCode::OK, hub_state_settled(&daemon).await.as_json())
-        }
+        Ok(()) => json_response(StatusCode::OK, hub_state_settled(&daemon).await.as_json()),
         Err(e) => error(StatusCode::BAD_REQUEST, &e),
     }
 }
@@ -460,7 +461,7 @@ pub async fn spawn(
     Json(body): Json<SpawnBody>,
 ) -> Response {
     admin_only!(daemon, headers);
-    match crate::lifecycle::spawn(&daemon, body.folder, body.visible.or(Some(true))).await {
+    match crate::lifecycle::spawn(&daemon, body.folder, body.visible.or(Some(true)), false).await {
         Ok(id) => json_response(StatusCode::OK, serde_json::json!({ "instance": id })),
         Err(e) => error(StatusCode::BAD_GATEWAY, &e),
     }
@@ -473,7 +474,10 @@ mod tests {
     /// While the relay is online its link is the only QR; without one the LAN links stand.
     #[test]
     fn the_relay_online_hides_the_lan_codes() {
-        let lan = vec!["https://192.168.1.5:4312/".to_owned(), "https://pc.local:4312/".to_owned()];
+        let lan = vec![
+            "https://192.168.1.5:4312/".to_owned(),
+            "https://pc.local:4312/".to_owned(),
+        ];
         assert_eq!(
             qr_links(Some("https://relay.example.com/u/uuid/"), &lan),
             vec!["https://relay.example.com/u/uuid/".to_owned()]

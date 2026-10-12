@@ -495,6 +495,7 @@ mod tests {
                     visible,
                     remote_host: !visible,
                     launch: LaunchSpec::default(),
+                    sandboxed: false,
                 },
                 tx,
             );

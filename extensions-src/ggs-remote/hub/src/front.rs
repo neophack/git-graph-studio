@@ -57,6 +57,20 @@ async fn serve(
         }
         return offline_page();
     };
+    // A blocklisted PC answers exactly like an absent one — nothing about the operator's
+    // actions leaks to the browser (§20.6).
+    if hub.blocklist.blocked(&uuid) {
+        return offline_page();
+    }
+    if !hub.request_allowed(peer_ip) {
+        return http_proxy::too_many_requests();
+    }
+    if !hub.admit_visitor(&uuid, peer_ip) {
+        hub.counters
+            .visitor_refused
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return http_proxy::too_many_viewers();
+    }
     let base_path = format!("/u/{uuid}/");
     if rest == "ws" && request.method() == Method::GET {
         let headers = request.headers().clone();
@@ -133,15 +147,43 @@ pub fn forward_headers(headers: &HeaderMap) -> std::collections::BTreeMap<String
 }
 
 /// The Hub's own request extras: the path prefix the browser sees and the client address
-/// behind the proxy chain, in the forms the daemon's `client_ip` / `base_path` read.
-pub fn hub_extras(base_path: &str, ip: IpAddr, headers: &HeaderMap) -> Vec<(String, String)> {
+/// behind the proxy chain, in the forms the daemon's `client_ip` / `base_path` read, plus
+/// the scheme the browser spoke (`x-forwarded-proto`) — the daemon's session cookie marks
+/// `Secure` only for https, or a plain-HTTP browser silently drops it and no login ever
+/// holds (§7.6).
+pub fn hub_extras(
+    config: &crate::config::Config,
+    base_path: &str,
+    ip: IpAddr,
+    headers: &HeaderMap,
+) -> Vec<(String, String)> {
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
+    // A front proxy's word for the scheme wins when trusted (Caddy ends TLS in front of a
+    // `tls = "none"` Hub); otherwise this Hub's own listener says it. Browsers cannot
+    // smuggle the header through — `FORWARDED_HEADERS` never forwards it.
+    let proto = if config.trust_proxy {
+        headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+    } else {
+        None
+    }
+    .unwrap_or_else(|| {
+        if config.tls.mode == crate::config::TlsMode::None {
+            "http".to_owned()
+        } else {
+            "https".to_owned()
+        }
+    });
     vec![
         ("x-ggs-base-path".into(), base_path.to_owned()),
         ("x-forwarded-for".into(), ip.to_string()),
         ("x-forwarded-host".into(), host.to_owned()),
+        ("x-forwarded-proto".into(), proto),
     ]
 }

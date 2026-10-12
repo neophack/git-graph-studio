@@ -48,6 +48,12 @@ brotli = "8"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 mime_guess = "2"
 interprocess = { version = "2.2", features = ["tokio"] }
+# The security sandbox's engine (module 19, docs/ggs-remote-plan.md §24): the Microsoft
+# eXecution Container — policy-driven OS-native process containment (ProcessContainer on
+# Windows, bubblewrap on Linux, Seatbelt on macOS), the runtime behind GitHub Copilot's
+# local sandboxing. The daemon spawns sandboxed GGS instances through it instead of
+# enforcing a sandbox of its own.
+mxc-sdk = "1.0"
 if-addrs = "0.13"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 httpdate = "1"
@@ -81,3 +87,11 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# GGS-patch of interprocess (the Boa vendoring precedent in src-tauri/vendor): one added
+# method — `ListenerOptions::security_descriptor_sddl` (src/local_socket/listener/options.rs,
+# GGS-patch comment) — so the daemon can create its control pipe with a DACL that grants
+# ALL APPLICATION PACKAGES, without which a sandboxed instance (an AppContainer token on
+# the Windows tier this build ships to) cannot open the pipe at all. No other diff.
+[patch.crates-io]
+interprocess = { path = "../vendor/interprocess" }

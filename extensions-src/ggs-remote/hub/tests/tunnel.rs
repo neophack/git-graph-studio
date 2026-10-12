@@ -10,6 +10,7 @@ use ggs_remote_hub::frame::{flag, ty, Frame};
 use ggs_remote_hub::identity;
 use ggs_remote_hub::msg::{ConnClose, ConnOpen, HttpReq, HttpRes, TAuth, THello, TReady, PROTO};
 use ggs_remote_hub::state::Hub;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -18,14 +19,18 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 struct Fixture {
     hub: std::net::SocketAddr,
+    state: Arc<Hub>,
     _stop: tokio::sync::oneshot::Sender<()>,
 }
 
+/// The shipped stack verbatim (§20.5): the router behind the silence gate on
+/// axum-server — the same `gated` service `serve` runs, so what the suite exercises is
+/// what a deployment serves.
 async fn start_hub(config: Config) -> Fixture {
     let hub = Hub::new(config);
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = ggs_remote_hub::gated(hub);
+    let app = ggs_remote_hub::gated(hub.clone());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
         let server = axum_server::from_tcp(listener);
@@ -36,6 +41,7 @@ async fn start_hub(config: Config) -> Fixture {
     });
     Fixture {
         hub: addr,
+        state: hub,
         _stop: stop,
     }
 }
@@ -240,6 +246,64 @@ async fn the_handshake_and_an_http_round_trip() {
     assert_eq!(
         seen.headers.get("x-ggs-base-path").map(String::as_str),
         Some(format!("/u/{uuid}/").as_str())
+    );
+    // The scheme the browser spoke rides along: the daemon's session cookie marks `Secure`
+    // only for https (§7.6 — a plain-HTTP browser silently drops a Secure cookie).
+    assert_eq!(
+        seen.headers.get("x-forwarded-proto").map(String::as_str),
+        Some("http")
+    );
+}
+
+/// `trust_proxy` set: a front proxy's own `x-forwarded-proto` (Caddy ending TLS in front of
+/// a `tls = "none"` Hub) is the browser's real scheme and must win over the listener's.
+/// Without trust the Hub derives it from its own TLS mode and ignores the wire's copy.
+#[tokio::test]
+async fn the_forwarded_proto_follows_the_front_proxy_when_trusted() {
+    let fronted = Config {
+        trust_proxy: true,
+        ..Config::default()
+    };
+    let fixture = start_hub(fronted).await;
+    let signing = SigningKey::from_bytes(&[9u8; 32]);
+    let mut ws = pc(fixture.hub, &signing, None).await;
+    let host = format!("127.0.0.1:{}", fixture.hub.port());
+    let _ready = answer_challenge(&mut ws, &signing, &host).await;
+    let uuid = identity::uuid_for(&signing.verifying_key().to_bytes());
+
+    let request = tokio::spawn(http(
+        fixture.hub,
+        "GET",
+        format!("/u/{uuid}/login"),
+        &[("X-Forwarded-Proto", "https")],
+        None,
+    ));
+    let seen = serve_one_http(&mut ws, 200, "ok").await;
+    let (_status, _head, _body) = request.await.unwrap();
+    assert_eq!(
+        seen.headers.get("x-forwarded-proto").map(String::as_str),
+        Some("https")
+    );
+
+    // Untrusted: the Hub speaks for itself (a browser cannot spoof the scheme through it).
+    let fixture = start_hub(Config::default()).await;
+    let signing = SigningKey::from_bytes(&[11u8; 32]);
+    let mut ws = pc(fixture.hub, &signing, None).await;
+    let host = format!("127.0.0.1:{}", fixture.hub.port());
+    let _ready = answer_challenge(&mut ws, &signing, &host).await;
+    let uuid = identity::uuid_for(&signing.verifying_key().to_bytes());
+    let request = tokio::spawn(http(
+        fixture.hub,
+        "GET",
+        format!("/u/{uuid}/login"),
+        &[("X-Forwarded-Proto", "https")],
+        None,
+    ));
+    let seen = serve_one_http(&mut ws, 200, "ok").await;
+    let (_status, _head, _body) = request.await.unwrap();
+    assert_eq!(
+        seen.headers.get("x-forwarded-proto").map(String::as_str),
+        Some("http")
     );
 }
 
@@ -489,4 +553,252 @@ async fn two_pcs_never_hear_each_other() {
     // B has nothing pending (the heartbeat gives it a moment to have delivered anything).
     let heard = tokio::time::timeout(Duration::from_millis(300), pc_b.next()).await;
     assert!(!matches!(heard, Ok(Some(Ok(Message::Binary(_))))));
+}
+
+/// §20.6 `http_rate`: the session ceiling caps concurrency, not rate — a single address
+/// hammering one link sequentially needs its own guard, and one that does not throttle a
+/// page's burst of asset loads (the cap here is per minute).
+#[tokio::test]
+async fn the_http_rate_refuses_a_hammering_ip() {
+    let config = Config {
+        http_rate: 1,
+        ..Config::default()
+    };
+    let fixture = start_hub(config).await;
+    let signing = SigningKey::from_bytes(&[21u8; 32]);
+    let mut ws = pc(fixture.hub, &signing, None).await;
+    let host = format!("127.0.0.1:{}", fixture.hub.port());
+    let ready = answer_challenge(&mut ws, &signing, &host).await;
+
+    let first = tokio::spawn(http(
+        fixture.hub,
+        "GET",
+        format!("/u/{}/login", ready.uuid),
+        &[],
+        None,
+    ));
+    let _seen = serve_one_http(&mut ws, 200, "ok").await;
+    assert_eq!(first.await.unwrap().0, 200);
+    // The same IP inside the same minute: refused without waking the tunnel.
+    let second = http(
+        fixture.hub,
+        "GET",
+        format!("/u/{}/login", ready.uuid),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(second.0, 429, "{}", second.1);
+}
+
+/// §20.6 `visitors_per_day_per_tunnel`: a personal link has a handful of viewers, a link
+/// shared like a public site hundreds — the second IP past the ceiling answers 429 while
+/// the first keeps working. The browser IPs come from `x-forwarded-for` (`trust_proxy`
+/// from a loopback front), which is how a real fronted deployment sees them.
+#[tokio::test]
+async fn the_visitor_ceiling_refuses_a_new_ip_but_not_a_seen_one() {
+    let config = Config {
+        trust_proxy: true,
+        visitors_per_day_per_tunnel: 1,
+        ..Config::default()
+    };
+    let fixture = start_hub(config).await;
+    let signing = SigningKey::from_bytes(&[22u8; 32]);
+    let mut ws = pc(fixture.hub, &signing, None).await;
+    let host = format!("127.0.0.1:{}", fixture.hub.port());
+    let ready = answer_challenge(&mut ws, &signing, &host).await;
+    let uuid = &ready.uuid;
+
+    let first = tokio::spawn(http(
+        fixture.hub,
+        "GET",
+        format!("/u/{uuid}/login"),
+        &[("X-Forwarded-For", "203.0.113.31")],
+        None,
+    ));
+    let _seen = serve_one_http(&mut ws, 200, "ok").await;
+    assert_eq!(first.await.unwrap().0, 200);
+
+    // The same viewer again: already inside the bucket, costs nothing.
+    let again = tokio::spawn(http(
+        fixture.hub,
+        "GET",
+        format!("/u/{uuid}/windows"),
+        &[("X-Forwarded-For", "203.0.113.31")],
+        None,
+    ));
+    let _seen = serve_one_http(&mut ws, 200, "ok").await;
+    assert_eq!(again.await.unwrap().0, 200);
+
+    // A second distinct IP past the ceiling of one: 429, and the PC never hears a request
+    // for it (the CONN_CLOSE of the answered requests above is ordinary bookkeeping).
+    let stranger = http(
+        fixture.hub,
+        "GET",
+        format!("/u/{uuid}/login"),
+        &[("X-Forwarded-For", "203.0.113.32")],
+        None,
+    )
+    .await;
+    assert_eq!(stranger.0, 429, "{}", stranger.1);
+    assert_eq!(stranger.2, "this link has too many viewers today");
+    let mut drained = Vec::new();
+    let heard = tokio::time::timeout(Duration::from_millis(300), ws.next()).await;
+    if let Ok(Some(Ok(Message::Binary(bytes)))) = &heard {
+        drained = bytes.to_vec();
+    }
+    assert!(
+        !matches!(heard, Ok(Some(Err(_))) | Ok(None)),
+        "the tunnel itself must stay up"
+    );
+    if let Some(frames) = Frame::decode_all(&drained) {
+        assert!(
+            !frames
+                .iter()
+                .any(|f| f.ty == ty::HTTP_REQ && f.decode_msgpack::<HttpReq>().is_some()),
+            "the refused request must never reach the PC"
+        );
+    }
+}
+
+/// §20.6 `blocklist`: editing the file and refreshing takes the listed PC off the air —
+/// its tunnel closes (browsers see the plain offline page), and its next handshake is
+/// refused with `banned`.
+#[tokio::test]
+async fn the_blocklist_takes_a_pc_off_the_air() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("block.txt");
+    std::fs::write(&file, "").unwrap();
+    let config = Config {
+        blocklist: file.to_str().unwrap().to_owned(),
+        ..Config::default()
+    };
+    let fixture = start_hub(config).await;
+    let signing = SigningKey::from_bytes(&[23u8; 32]);
+    let mut ws = pc(fixture.hub, &signing, None).await;
+    let host = format!("127.0.0.1:{}", fixture.hub.port());
+    let ready = answer_challenge(&mut ws, &signing, &host).await;
+    let uuid = ready.uuid.clone();
+
+    // The operator lists the PC and the periodic refresh runs (the test calls it directly).
+    std::fs::write(&file, format!("{uuid}\n")).unwrap();
+    fixture.state.enforce_blocklist();
+    let ended = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
+    assert!(
+        // Err is the abrupt close of the dropped socket — the tunnel is just as gone.
+        matches!(
+            ended,
+            Ok(None) | Ok(Some(Ok(Message::Close(_)))) | Ok(Some(Err(_)))
+        ),
+        "the tunnel must end after the kick"
+    );
+
+    // The link now answers the plain offline page — indistinguishable from an away PC.
+    let (status, _head, body) =
+        http(fixture.hub, "GET", format!("/u/{uuid}/login"), &[], None).await;
+    assert_eq!(status, 503);
+    assert!(body.contains("not online"));
+
+    // And the PC cannot handshake back in: rejected with `banned`.
+    let mut again = pc(fixture.hub, &signing, None).await;
+    let frames = next_frames(&mut again).await;
+    let challenge = frames
+        .iter()
+        .find(|f| f.ty == ty::T_CHALLENGE)
+        .and_then(|f| f.decode_msgpack::<ggs_remote_hub::msg::TChallenge>())
+        .expect("a challenge");
+    let message = identity::auth_message(&challenge.nonce, &challenge.host);
+    again
+        .send(Message::Binary(
+            Frame::msgpack(
+                ty::T_AUTH,
+                &TAuth {
+                    sig: signing.sign(&message).to_bytes().to_vec(),
+                },
+            )
+            .encode()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let frames = next_frames(&mut again).await;
+    let rejected = frames
+        .iter()
+        .find(|f| f.ty == ty::T_REJECTED)
+        .and_then(|f| f.decode_msgpack::<ggs_remote_hub::msg::TRejected>());
+    assert_eq!(
+        rejected.map(|r| r.reason),
+        Some("banned".into()),
+        "the same device key must be refused"
+    );
+}
+
+/// The `SessionSlot` regression, end to end: with a session ceiling of one, a browser that
+/// abandons its request before the PC's answer (the connection dropped mid-await) must not
+/// hold the ceiling hostage — before the guard, eight such ghosts would brick a default
+/// tunnel and one is enough at ceiling 1.
+#[tokio::test]
+async fn an_abandoned_request_frees_the_tunnel_for_the_next_one() {
+    let config = Config {
+        sessions_per_tunnel: 1,
+        ..Config::default()
+    };
+    let fixture = start_hub(config).await;
+    let signing = SigningKey::from_bytes(&[24u8; 32]);
+    let mut ws = pc(fixture.hub, &signing, None).await;
+    let host = format!("127.0.0.1:{}", fixture.hub.port());
+    let ready = answer_challenge(&mut ws, &signing, &host).await;
+    let uuid = &ready.uuid;
+
+    // One request whose client vanishes before the PC answers it.
+    let mut ghost = tokio::net::TcpStream::connect(fixture.hub).await.unwrap();
+    ghost
+        .write_all(
+            format!(
+                "GET /u/{uuid}/login HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                fixture.hub.port()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    // The PC seeing the request means the session is allocated and parked on the answer.
+    let _head = serve_one_http_head_only(&mut ws).await;
+    drop(ghost);
+
+    // The cancelled request's slot frees (the browser is gone, hyper dropped the handler).
+    let tunnel = fixture.state.tunnel(uuid).expect("the tunnel");
+    let deadline = tokio::time::timeout(Duration::from_secs(5), async {
+        while tunnel.sessions() > 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(deadline.is_ok(), "the ghost session must leave");
+
+    // The next browser through the same ceiling of one is served normally.
+    let request = tokio::spawn(http(
+        fixture.hub,
+        "GET",
+        format!("/u/{uuid}/login"),
+        &[],
+        None,
+    ));
+    let _seen = serve_one_http(&mut ws, 200, "still alive").await;
+    assert_eq!(request.await.unwrap().0, 200);
+}
+
+/// Watch one HTTP request arrive from the PC side without answering it — the abandonment
+/// test needs the request parked on the tunnel, not answered.
+async fn serve_one_http_head_only(ws: &mut Pc) -> HttpReq {
+    loop {
+        let frames = next_frames(ws).await;
+        for frame in &frames {
+            if frame.ty == ty::HTTP_REQ {
+                if let Some(head) = frame.decode_msgpack::<HttpReq>() {
+                    return head;
+                }
+            }
+        }
+    }
 }

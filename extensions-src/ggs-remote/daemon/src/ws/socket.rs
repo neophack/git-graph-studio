@@ -251,11 +251,42 @@ fn hello_ack(conn: &Conn, resumed: bool) -> Vec<u8> {
 }
 
 pub fn windows_frame(daemon: &Daemon) -> Frame {
+    // With the sandbox enabled (§23) a remote session sees sandboxed instances only:
+    // the desktop windows stay the user's own. The recent list narrows with them.
+    let sandbox = daemon.config().sandbox.enabled;
+    let (instances, recent) = if sandbox {
+        let root = crate::sandbox::effective_root(&daemon.config(), &daemon.paths);
+        (
+            daemon
+                .registry
+                .snapshot()
+                .into_iter()
+                .filter(|info| info.sandboxed)
+                .collect(),
+            daemon
+                .recent
+                .lock()
+                .unwrap()
+                .list()
+                .iter()
+                .filter(|folder| {
+                    std::path::Path::new(folder.as_str()).starts_with(&root)
+                        || crate::sandbox::folder_in_root(std::path::Path::new(folder), &root)
+                })
+                .cloned()
+                .collect(),
+        )
+    } else {
+        (
+            daemon.registry.snapshot(),
+            daemon.recent.lock().unwrap().list().to_vec(),
+        )
+    };
     Frame::msgpack(
         ty::WINDOWS,
         &Windows {
-            instances: daemon.registry.snapshot(),
-            recent_folders: daemon.recent.lock().unwrap().list().to_vec(),
+            instances,
+            recent_folders: recent,
         },
     )
 }
@@ -281,6 +312,17 @@ pub fn handle(daemon: &Arc<Daemon>, conn: &Arc<Conn>, mut frame: Frame) {
             let daemon = daemon.clone();
             let conn = conn.clone();
             tokio::spawn(async move {
+                // The sandbox on: a desktop (non-sandboxed) window is not a remote
+                // session's to drive (§23) — it answers as though it were gone.
+                if daemon.config().sandbox.enabled
+                    && !daemon
+                        .registry
+                        .with(&attach.instance, |i| i.info.sandboxed)
+                        .unwrap_or(false)
+                {
+                    conn.close(code::INSTANCE_GONE, "instance-exited");
+                    return;
+                }
                 match crate::router::attach(&daemon, &conn, &attach.instance).await {
                     Ok(attached) => conn.push(Frame::msgpack(ty::ATTACHED, &attached)),
                     Err(crate::router::AttachError::NoInstance) => {
@@ -327,7 +369,7 @@ pub fn handle(daemon: &Arc<Daemon>, conn: &Arc<Conn>, mut frame: Frame) {
             let (daemon, conn) = (daemon.clone(), conn.clone());
             tokio::spawn(async move {
                 let visible = if spawn.visible { Some(true) } else { None };
-                match crate::lifecycle::spawn(&daemon, spawn.folder, visible).await {
+                match crate::lifecycle::spawn(&daemon, spawn.folder, visible, true).await {
                     Ok(instance) => conn.push(Frame::msgpack(ty::SPAWNED, &Spawned { instance })),
                     Err(message) => notice(
                         &conn,

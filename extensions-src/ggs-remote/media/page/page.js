@@ -129,6 +129,74 @@
 		);
 	}
 
+	/** The security sandbox (§24): remote sessions drive OS-sandboxed windows. The
+	 * status carries what this host can enforce (status.sandbox), the config carries
+	 * what is asked for; the intranet level says when the host degrades it to off. */
+	async function sandboxSection(status, config) {
+		const sb = status.sandbox || {};
+		const cfg = config.sandbox || {};
+		const patch = (sandbox) => request('config', { patch: { sandbox } }).then(() => render());
+		const select = el('select');
+		for (const [value, label] of [
+			['off', L('No network (offline)', '断网（无网络）')],
+			['intranet', L('Intranet only (private ranges)', '仅内网（私网地址段）')],
+			['internet', L('Internet + intranet', '外网 + 内网')],
+		]) {
+			const option = el('option', { value }, label);
+			if ((cfg.network || 'internet') === value) option.selected = true;
+			if (value === 'intranet' && sb.intranetSupported === false) {
+				option.disabled = true;
+				option.textContent += L(' — not on this computer', ' — 此电脑不支持');
+			}
+			select.append(option);
+		}
+		select.addEventListener('change', () =>
+			patch({ enabled: Boolean(cfg.enabled), network: select.value, root: cfg.root || null })
+		);
+		const rootInput = el('input', {
+			type: 'text',
+			placeholder: sb.root || '',
+			value: cfg.root || '',
+			'aria-label': L('Sandbox root folder', '沙箱根目录'),
+		});
+		const notes = [
+			L(
+				'While the sandbox is on, a remote session sees and drives sandboxed windows only; the folders it opens live under the sandbox root, and neither this PC’s ~/.ggs (settings, AI provider keys, Claude state) nor the rest of the disk is readable from inside. Enforcing engine: the Microsoft eXecution Container (mxc).',
+				'沙箱开启时，远程会话只能看到和操作沙箱窗口；打开的目录都在沙箱根之下，沙箱内读不到此 PC 的 ~/.ggs（设置、AI 供应商密钥、Claude 状态）和磁盘其余内容。执行引擎：Microsoft eXecution Container（mxc）。'
+			),
+			L(
+				'Honest limits: environment variables are inherited, and an agent’s build tools (npm, cargo…) run with the network level set here. A sandboxed window has its own empty settings, extensions and AI providers — configure them inside it.',
+				'如实说明：环境变量会被继承；智能体的构建工具（npm、cargo…）按此处设置的网络级别联网。沙箱窗口有自己的空白设置、扩展和 AI 供应商——需在沙箱内配置。'
+			),
+		];
+		if (sb.supported === false) {
+			notes.unshift(
+				el('strong', {}, L('This computer cannot run the sandbox: ', '此电脑无法运行沙箱：'), (sb.reason || '').toString())
+			);
+		}
+		if (sb.degraded) {
+			notes.unshift(
+				el('strong', {}, L('This computer’s sandbox cannot express “intranet only” — the level is enforced as no network.', '此电脑的沙箱无法表达“仅内网”——该档位按断网执行。'))
+			);
+		}
+		return section(
+			L('Security sandbox', '安全沙箱'),
+			toggle(L('Remote sessions drive sandboxed windows only', '远程会话只操作沙箱窗口'), Boolean(cfg.enabled), (on) =>
+				patch({ enabled: on, network: cfg.network || 'internet', root: cfg.root || null })
+			),
+			el('label', { class: 'check' }, select, ' ', L('Network access of a sandboxed window', '沙箱窗口的网络访问')),
+			el('div', { class: 'row' },
+				rootInput,
+				el('button', {
+					onclick: () => patch({ enabled: Boolean(cfg.enabled), network: cfg.network || 'internet', root: rootInput.value.trim() || null }),
+				}, L('Set root', '设置根目录'))
+			),
+			el('p', { class: 'muted' }, L('Sandbox root: ', '沙箱根目录：'), el('code', {}, sb.root || '')),
+			sb.tier ? el('p', { class: 'muted' }, `${L('Sandbox backend', '沙箱后端')}: ${sb.backend} (${sb.tier})`) : null,
+			...notes.map((note) => el('p', { class: 'muted' }, note))
+		);
+	}
+
 	function toggle(label, checked, onChange) {
 		const box = el('input', { type: 'checkbox' });
 		box.checked = Boolean(checked);
@@ -310,6 +378,7 @@
 		}
 		parts.push(section(L('Signed-in devices', '已登录的设备'), await devicesList()));
 		parts.push(await hubSection(status));
+		parts.push(await sandboxSection(status, config));
 		parts.push(
 			section(
 				L('Service', '服务'),

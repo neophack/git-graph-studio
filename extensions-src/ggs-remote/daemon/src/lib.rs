@@ -22,6 +22,7 @@ pub mod recent;
 pub mod registry;
 pub mod relay_link;
 pub mod router;
+pub mod sandbox;
 pub mod server;
 pub mod session;
 pub mod spawn;

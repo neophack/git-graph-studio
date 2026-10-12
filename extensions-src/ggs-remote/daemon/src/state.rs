@@ -2,7 +2,7 @@
 //! task holds. Locks are std mutexes held for a few field updates at a time — the runtime is
 //! current-thread (§4.1), so nothing contends across threads except the tray.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -117,6 +117,9 @@ pub struct Daemon {
     pub recent: Mutex<crate::recent::Recent>,
     /// Resource tokens of the `ggs` file paths (§12.2): token → (session hash, instance).
     pub resource_tokens: Mutex<HashMap<String, (String, String)>>,
+    /// One-shot registration tokens issued to sandboxed spawns (§23): consumed by the
+    /// Register that presents them.
+    pub sandbox_tokens: Mutex<HashSet<String>>,
     pub kicks: broadcast::Sender<Kick>,
     pub tray: watch::Sender<TrayState>,
     pub admin_token: String,
@@ -161,6 +164,7 @@ impl Daemon {
             next_conn: AtomicU32::new(1),
             tickets: Mutex::new(Tickets::default()),
             recent: Mutex::new(crate::recent::Recent::load(&paths)),
+            sandbox_tokens: Mutex::new(HashSet::new()),
             resource_tokens: Mutex::new(HashMap::new()),
             kicks: broadcast::channel(64).0,
             tray: watch::channel(TrayState::Stopped).0,

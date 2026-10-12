@@ -46,6 +46,21 @@ pub struct Config {
     /// `/tunnel` handshakes one IP may start per minute (§20.6); 0 = unlimited — for load
     /// tests and private deployments whose whole fleet shares one address.
     pub handshake_rate: u32,
+    /// Distinct browser IPs one link may serve per day (§20.6): a personal remote-workbench
+    /// link has a handful of viewers, a link used as a public site hundreds — the count
+    /// survives tunnel reconnects (it hangs off the uuid, not the connection). 0 = off.
+    pub visitors_per_day_per_tunnel: usize,
+    /// Proxied HTTP requests one IP may make per minute toward online links (§20.6);
+    /// 0 = unlimited — load tests set it off with `handshake_rate`.
+    pub http_rate: u32,
+    /// The operator's audit trail (§20.6): one JSON line per tunnel lifecycle, browser
+    /// session and proxied answer head — no bodies, tokens masked. Empty = off (the Hub's
+    /// "nothing persisted" default).
+    pub audit_log: String,
+    /// The operator's kill switch (§20.6): a file of uuids, one per line (`#` comments),
+    /// re-read every 30 s — a listed PC's tunnel is taken off the air and its next
+    /// handshake refused. Empty = off.
+    pub blocklist: String,
     /// A second listener for the operator's corners — `/metrics` (Prometheus text) and
     /// `/healthz` (§20.5): the public port answers nothing outside `/u/<uuid>/…`.
     /// Empty = off.
@@ -65,6 +80,10 @@ impl Default for Config {
             asset_cache_mb: DEFAULT_ASSET_CACHE_MB,
             trust_proxy: false,
             handshake_rate: 10,
+            visitors_per_day_per_tunnel: 32,
+            http_rate: 600,
+            audit_log: String::new(),
+            blocklist: String::new(),
             metrics_listen: String::new(),
         }
     }
@@ -122,12 +141,24 @@ impl Config {
              trust_proxy = false\n\
              # /tunnel handshakes one IP may start per minute; 0 = unlimited (load tests).\n\
              handshake_rate = {handshake_rate}\n\
+             # Distinct browser IPs one link may serve per day — a personal link has a\n\
+             # handful of viewers, a link shared like a public site hundreds. 0 = off.\n\
+             visitors_per_day_per_tunnel = {visitors}\n\
+             # Proxied HTTP requests one IP may make per minute; 0 = unlimited (load tests).\n\
+             http_rate = {http_rate}\n\
+             # The operator's audit trail: one JSON line per tunnel/session/answer head,\n\
+             # no bodies, tokens masked. Empty = off.\n\
+             audit_log = \"\"\n\
+             # The operator's kill switch: uuids, one per line, re-read every 30 s. Empty = off.\n\
+             blocklist = \"\"\n\
              metrics_listen = \"\"\n",
             listen = Config::default().listen,
             max_tunnels = Config::default().max_tunnels,
             sessions = Config::default().sessions_per_tunnel,
             cache = DEFAULT_ASSET_CACHE_MB,
             handshake_rate = Config::default().handshake_rate,
+            visitors = Config::default().visitors_per_day_per_tunnel,
+            http_rate = Config::default().http_rate,
         )
     }
 

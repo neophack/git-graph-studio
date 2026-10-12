@@ -32,7 +32,7 @@ pub async fn serve(daemon: Arc<Daemon>) -> std::io::Result<()> {
         let daemon = daemon.clone();
         tokio::spawn(async move {
             let (rx, tx) = stream.split();
-            if let Err(e) = serve_instance(daemon, rx, tx).await {
+            if let Err(e) = serve_instance(daemon, rx, tx, false).await {
                 crate::warn!("control connection ended: {e}");
             }
         });
@@ -61,10 +61,11 @@ fn bind(endpoint: &str) -> std::io::Result<interprocess::local_socket::tokio::Li
     Ok(listener)
 }
 
-async fn serve_instance(
+pub(crate) async fn serve_instance(
     daemon: Arc<Daemon>,
     mut rx: RecvHalf,
     mut tx: SendHalf,
+    sandbox_channel: bool,
 ) -> std::io::Result<()> {
     let first = tokio::time::timeout(Duration::from_secs(10), read_message(&mut rx))
         .await
@@ -80,12 +81,24 @@ async fn serve_instance(
         visible,
         remote_host,
         launch,
+        control_token,
+        ..
     } = decode::<FromInstance>(&first).map_err(std::io::Error::other)?
     else {
         return Err(std::io::Error::other(
             "the first control message must be Register",
         ));
     };
+    // The sandbox endpoint serves instances the daemon itself spawned into a sandbox —
+    // a Register is accepted only with an unconsumed one-shot token (§23). The main
+    // endpoint ignores the field entirely: a sandboxed process cannot reach it (the
+    // sandbox token cannot open the default DACL), so there is nothing to check.
+    let sandboxed = sandbox_channel && crate::sandbox::take_token(&daemon, &control_token);
+    if sandbox_channel && !sandboxed {
+        return Err(std::io::Error::other(
+            "a sandboxed instance must register with the token it was issued",
+        ));
+    }
     if instance_id.is_empty()
         || instance_id.len() > 64
         || !instance_id
@@ -112,6 +125,7 @@ async fn serve_instance(
             visible,
             remote_host,
             launch,
+            sandboxed,
         },
         ctl_tx.clone(),
     );
@@ -163,7 +177,9 @@ async fn read_loop(daemon: &Arc<Daemon>, id: &str, rx: &mut RecvHalf) -> std::io
                 visible,
                 summary,
             } => {
-                daemon.registry.update(id, title, folders.clone(), visible, summary);
+                daemon
+                    .registry
+                    .update(id, title, folders.clone(), visible, summary);
                 if let Some(folders) = folders {
                     crate::recent::note_folders(daemon, &folders);
                 }

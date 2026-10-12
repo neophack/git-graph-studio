@@ -47,6 +47,12 @@ pub async fn run(daemon: Arc<Daemon>) -> std::io::Result<()> {
         });
     }
 
+    // The sandbox control endpoint (§23): up at boot when the sandbox is on, and lazily
+    // by the first sandboxed spawn if it is switched on later.
+    if daemon.config().sandbox.enabled {
+        crate::sandbox::ensure_listener(&daemon);
+    }
+
     tokio::spawn(public_listener(daemon.clone()));
     tokio::spawn(windows_broadcaster(daemon.clone()));
     tokio::spawn(housekeeping(daemon.clone()));

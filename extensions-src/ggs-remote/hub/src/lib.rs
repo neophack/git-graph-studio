@@ -5,6 +5,8 @@
 //! every message this one defines — field names are the contract, the vectors in
 //! `../daemon/tests/vectors/` hold both to it.
 
+pub mod audit;
+pub mod blocklist;
 pub mod cache;
 pub mod config;
 pub mod frame;
@@ -87,6 +89,20 @@ pub async fn serve(
         .parse()
         .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 8443)));
     let app = gated(hub.clone());
+
+    // The operator's kill switch refreshes (§20.6): edit the blocklist, and within half a
+    // minute the listed PCs are off the air and cannot handshake back in. Nothing to do
+    // when no blocklist is configured.
+    if hub.blocklist.enabled() {
+        let refresher = hub.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                tick.tick().await;
+                refresher.enforce_blocklist();
+            }
+        });
+    }
 
     if !config.metrics_listen.is_empty() {
         // The operator's corners (§20.5) — the public port stays silent outside the links,

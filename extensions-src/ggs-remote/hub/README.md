@@ -84,7 +84,32 @@ answer its own clients — but no HTTP fingerprint ever leaves it. The same rule
 ## Limits
 
 `join_key` (the server password, constant-time compared), `max_tunnels`, per-tunnel concurrent
-sessions, per-tunnel daily bytes, per-IP handshake and login-entry rates — all in `hub.toml`.
+sessions, per-tunnel daily bytes, per-IP handshake / request / login-entry rates, and the
+per-link daily distinct-viewer ceiling — all in `hub.toml`.
+
+## Abuse guards
+
+The relay forwards whatever a connected PC's daemon serves — an open relay is a free hosting
+service waiting to happen, so the guards come in layers (§20.6 of the plan):
+
+- **`join_key`** — treat it as an invitation list. A keyless public Hub admits any GGS Remote;
+  on the public internet, set one.
+- **`visitors_per_day_per_tunnel`** (default 32, 0 = off) — a personal remote-workbench link has
+  a handful of viewers; a link shared like a public site has hundreds of distinct IPs. The count
+  hangs off the link's uuid (a reconnect does not reset it) and past the ceiling new IPs get 429.
+- **`http_rate`** (default 600/min/IP, 0 = off) — the session ceiling caps concurrency, not rate;
+  this is the rate cap on proxied requests.
+- **`audit_log`** (empty = off) — one JSON line per tunnel lifecycle, browser session and proxied
+  answer *head*: no bodies, no cookies, package tokens in paths masked to their first 6
+  characters. The trail an operator answers takedowns and forensics with.
+- **`blocklist`** (empty = off) — a plain file of uuids, one per line (`#` comments), re-read
+  every 30 s and at every handshake: a listed PC's tunnel is taken off the air (its browsers see
+  the plain offline page) and its next handshake is refused with `banned`. Edit the file, no
+  restart.
+
+For a public deployment, also consider fronting with Caddy/nginx for real TLS, keeping the audit
+log on, and the legal duties of a relay operator in your jurisdiction (log retention, a takedown
+contact on the landing page).
 
 ## Build
 
@@ -92,6 +117,10 @@ sessions, per-tunnel daily bytes, per-IP handshake and login-entry rates — all
 cargo build --release            # a single static-friendly binary
 docker build -t ggs-remote-hub . # rust:alpine → FROM scratch
 deploy/build-deb.sh              # the deb + the musl tarball (musl-tools + the musl target)
+```
+
+```bat
+deploy\build-zip.bat             # the Windows zip (the release page's layout, built locally)
 ```
 
 One hub binary, one config file, no data directory.

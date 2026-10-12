@@ -81,6 +81,7 @@ function card(info, now) {
 	const tabs = summary.tabs ?? [];
 	const badges = [];
 	if (info.state === 'unresponsive') badges.push(el('span', { class: 'badge bad' }, t('unresponsive')));
+	if (info.sandboxed) badges.push(el('span', { class: 'badge' }, t('sandboxed')));
 	if (!info.visible) badges.push(el('span', { class: 'badge' }, t('hidden')));
 	if (info.remoteSessions) badges.push(el('span', { class: 'badge' }, t('sessions', { n: info.remoteSessions })));
 	if (summary.terminals) badges.push(el('span', { class: 'badge' }, t('terminals', { n: summary.terminals })));
@@ -182,9 +183,19 @@ async function connect() {
 	}
 	if (session.status === 401) return toLogin();
 	if (!session.ok) return reconnectLater();
-	const { csrf, folderInput } = await session.json();
+	const { csrf, folderInput, sandbox } = await session.json();
 	// The folder-path row is a setting (2026-10-12): off hides it, the recent list stays.
-	if (folderInput === false) document.getElementById('open-row').hidden = true;
+	// The sandbox (§24) hides it too — a typed path outside the sandbox root could never
+	// open; everything a remote session opens lives under the root.
+	if (folderInput === false || (sandbox && sandbox.enabled)) {
+		document.getElementById('open-row').hidden = true;
+	}
+	// The sandbox's own open button (§24): with the typed-path row hidden there is no
+	// other entry into an empty sandbox, and every spawn lands inside the root.
+	document.getElementById('sandbox-row').hidden = !(sandbox && sandbox.enabled);
+	document.getElementById('sandbox-open').addEventListener('click', () => {
+		send(T.SPAWN, { folder: null, visible: false });
+	});
 	const url = new URL('ws', document.baseURI);
 	url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
 	ws = new WebSocket(url);

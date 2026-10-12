@@ -171,6 +171,14 @@ pub async fn session(State(daemon): State<Arc<Daemon>>, headers: HeaderMap) -> R
             "dataSaverDefault": daemon.config().data_saver_default,
             "spawnVisible": daemon.config().spawn_visible,
             "folderInput": daemon.config().folder_input,
+            // The sandbox (§23): with it on, the picker opens folders inside the sandbox
+            // root only, so the typed-path row hides and the hint explains where files live.
+            "sandbox": {
+                "enabled": daemon.config().sandbox.enabled,
+                "root": crate::sandbox::effective_root(&daemon.config(), &daemon.paths)
+                    .to_string_lossy()
+                    .into_owned(),
+            },
         }),
     )
 }
@@ -430,9 +438,10 @@ pub async fn pair_hub_connect(
         Err(e) => return error(StatusCode::BAD_REQUEST, &e),
     };
     match daemon.hub.connect(settings) {
-        Ok(()) => {
-            json_response(StatusCode::OK, super::admin::hub_state_settled(&daemon).await.as_json())
-        }
+        Ok(()) => json_response(
+            StatusCode::OK,
+            super::admin::hub_state_settled(&daemon).await.as_json(),
+        ),
         Err(e) => error(StatusCode::BAD_REQUEST, &e),
     }
 }

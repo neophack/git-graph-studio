@@ -17,6 +17,50 @@ pub enum TlsMode {
     None,
 }
 
+/// The sandbox's network level (module 19, docs/ggs-remote-plan.md §23): what a sandboxed
+/// instance may talk to beyond its own loopback. `intranet` is the private ranges; hosts
+/// whose sandbox tier cannot express CIDR rules degrade it to `off` (flagged in the
+/// status JSON — `sandbox::plan`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxNetwork {
+    Off,
+    Intranet,
+    #[default]
+    Internet,
+}
+
+impl SandboxNetwork {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SandboxNetwork::Off => "off",
+            SandboxNetwork::Intranet => "intranet",
+            SandboxNetwork::Internet => "internet",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SandboxConfig {
+    /// Remote sessions drive sandboxed instances only when set (the picker hides
+    /// desktop windows otherwise; SPAWN opens folders inside the sandbox root).
+    pub enabled: bool,
+    pub network: SandboxNetwork,
+    /// The sandbox root; `<remote root>/sandbox` when unset.
+    pub root: Option<String>,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> SandboxConfig {
+        SandboxConfig {
+            enabled: false,
+            network: SandboxNetwork::Internet,
+            root: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TlsConfig {
@@ -54,6 +98,8 @@ pub struct Config {
     /// been gone for a day the extension was uninstalled, and the daemon retires (§14.2).
     pub extension_dir: Option<String>,
     pub extension_missing_since: Option<u64>,
+    /// The security sandbox (§23): remote-opened instances run OS-sandboxed.
+    pub sandbox: SandboxConfig,
 }
 
 impl Default for Config {
@@ -76,6 +122,7 @@ impl Default for Config {
             last_launch: None,
             extension_dir: None,
             extension_missing_since: None,
+            sandbox: SandboxConfig::default(),
         }
     }
 }
@@ -172,10 +219,36 @@ mod tests {
             config.apply_patch(&serde_json::json!({ "folderInput": false })),
             Ok(false)
         );
-        assert!(!config.folder_input, "the picker's folder row can be switched off");
+        assert!(
+            !config.folder_input,
+            "the picker's folder row can be switched off"
+        );
         assert_eq!(
             config.apply_patch(&serde_json::json!({ "port": 50001 })),
             Ok(true)
+        );
+        // The sandbox section (§23): a whole-object patch, validated by serde.
+        assert_eq!(
+            config.apply_patch(&serde_json::json!({
+                "sandbox": { "enabled": true, "network": "intranet", "root": "D:/sb" }
+            })),
+            Ok(false)
+        );
+        assert!(config.sandbox.enabled);
+        assert_eq!(
+            config.sandbox.network,
+            crate::config::SandboxNetwork::Intranet
+        );
+        assert_eq!(config.sandbox.root.as_deref(), Some("D:/sb"));
+        assert!(config
+            .apply_patch(&serde_json::json!({ "sandbox": { "network": "nope" } }))
+            .is_err());
+        // An old config without the key loads with the sandbox off.
+        let legacy: Config = serde_json::from_str(r#"{"port": 50000}"#).unwrap();
+        assert!(!legacy.sandbox.enabled);
+        assert_eq!(
+            legacy.sandbox.network,
+            crate::config::SandboxNetwork::Internet
         );
         assert!(config
             .apply_patch(&serde_json::json!({ "nope": 1 }))

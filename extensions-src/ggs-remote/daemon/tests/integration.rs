@@ -323,6 +323,8 @@ impl FakeInstance {
             visible: true,
             remote_host: false,
             launch,
+            sandboxed: false,
+            control_token: String::new(),
         })
         .await;
         match fake.recv().await {
@@ -866,7 +868,10 @@ async fn windows_carries_the_recent_folder_history() {
     )
     .await;
     let recent = windows_until(&mut ws, "C:/gamma").await;
-    assert_eq!(recent, serde_json::json!(["C:/gamma", "C:/alpha", "C:/beta"]));
+    assert_eq!(
+        recent,
+        serde_json::json!(["C:/gamma", "C:/alpha", "C:/beta"])
+    );
     b.send(&FromInstance::Update {
         title: None,
         folders: Some(vec!["C:/alpha".into()]),
@@ -925,12 +930,34 @@ async fn session_carries_the_folder_input_switch() {
     let h = start().await;
     set_password(&h).await;
     let (cookie, _csrf) = login(&h).await;
-    let session = http(h.public, "GET", "/api/session", &[("Cookie", &cookie)], None).await;
+    let session = http(
+        h.public,
+        "GET",
+        "/api/session",
+        &[("Cookie", &cookie)],
+        None,
+    )
+    .await;
     assert_eq!(session.status, 200);
-    assert!(session.body.contains("\"folderInput\":true"), "{}", session.body);
+    assert!(
+        session.body.contains("\"folderInput\":true"),
+        "{}",
+        session.body
+    );
     h.daemon.config.lock().unwrap().folder_input = false;
-    let session = http(h.public, "GET", "/api/session", &[("Cookie", &cookie)], None).await;
-    assert!(session.body.contains("\"folderInput\":false"), "{}", session.body);
+    let session = http(
+        h.public,
+        "GET",
+        "/api/session",
+        &[("Cookie", &cookie)],
+        None,
+    )
+    .await;
+    assert!(
+        session.body.contains("\"folderInput\":false"),
+        "{}",
+        session.body
+    );
 }
 
 /// §17.1's pair-unlock row: the QR and the links stay behind the pair page's password
@@ -1077,7 +1104,11 @@ async fn the_pair_page_sets_the_relay_server_before_the_password() {
     )
     .await;
     assert_eq!(state.status, 200);
-    assert!(state.body.contains("\"state\":\"unconfigured\""), "{}", state.body);
+    assert!(
+        state.body.contains("\"state\":\"unconfigured\""),
+        "{}",
+        state.body
+    );
     assert!(state.body.contains("\"settings\":null"), "{}", state.body);
 
     // A forged ticket changes nothing; neither does an unparsable address.
@@ -1144,7 +1175,9 @@ async fn the_pair_page_sets_the_relay_server_before_the_password() {
         "POST",
         "/pair/password",
         &[("Content-Type", "application/json")],
-        Some(&format!(r#"{{"ticket":"{ticket}","password":"{PASSWORD}"}}"#)),
+        Some(&format!(
+            r#"{{"ticket":"{ticket}","password":"{PASSWORD}"}}"#
+        )),
     )
     .await;
     assert_eq!(set.status, 200, "{}", set.body);
@@ -1459,6 +1492,8 @@ async fn restart_child_role() {
         visible: true,
         remote_host: false,
         launch: LaunchSpec::default(),
+        sandboxed: false,
+        control_token: String::new(),
     }))
     .await
     .unwrap();
@@ -1481,4 +1516,178 @@ async fn restart_child_role() {
         }
     })
     .await;
+}
+
+/* ---------- The security sandbox (§24) ---------- */
+
+/// The sandbox control endpoint is token-gated: a Register without a valid one-shot
+/// token is refused the Welcome, one with it registers (and marks the instance
+/// sandboxed — which `windows_frame` then lists while a desktop window is hidden).
+#[tokio::test]
+async fn the_sandbox_endpoint_registers_only_with_a_one_shot_token() {
+    let harness = start().await;
+    let daemon = harness.daemon.clone();
+    daemon.config.lock().unwrap().sandbox.enabled = true;
+    ggs_remote::sandbox::ensure_listener(&daemon);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let endpoint = ggs_remote::sandbox::control_endpoint(&daemon.paths);
+    let connect = || async {
+        #[cfg(windows)]
+        let name = {
+            use interprocess::local_socket::{GenericNamespaced, ToNsName};
+            endpoint.as_str().to_ns_name::<GenericNamespaced>().unwrap()
+        };
+        #[cfg(not(windows))]
+        let name = {
+            use interprocess::local_socket::{GenericFilePath, ToFsName};
+            endpoint.as_str().to_fs_name::<GenericFilePath>().unwrap()
+        };
+        Stream::connect(name).await.unwrap()
+    };
+
+    // No token: the connection closes without a Welcome.
+    {
+        let stream = connect().await;
+        let (mut rx, mut tx) = stream.split();
+        tx.write_all(&control_msg::encode(&FromInstance::Register {
+            instance_id: "impostor".into(),
+            pid: 4242,
+            version: "0.1.10".into(),
+            title: "no token".into(),
+            folders: vec![],
+            visible: true,
+            remote_host: false,
+            launch: LaunchSpec::default(),
+            sandboxed: true,
+            control_token: String::new(),
+        }))
+        .await
+        .unwrap();
+        let first = control_msg::read_message(&mut rx).await;
+        assert!(
+            first.is_err(),
+            "a tokenless Register is dropped, not welcomed: {first:?}"
+        );
+    }
+
+    // A desktop window registers over the main endpoint (no token, as ever).
+    let desktop = FakeInstance::connect_spec(
+        &harness,
+        "desktop",
+        std::process::id(),
+        LaunchSpec {
+            program: "ggs".into(),
+            args_prefix: vec![],
+        },
+        vec!["C:/somewhere".into()],
+    )
+    .await;
+
+    // With the daemon-issued token: the Welcome arrives. The connection stays open —
+    // a dropped control connection unregisters the instance, and the WINDOWS check
+    // below wants it registered.
+    let token = ggs_remote::sandbox::issue_token(&daemon);
+    let sbx = connect().await;
+    let (mut sbx_rx, mut sbx_tx) = sbx.split();
+    {
+        sbx_tx
+            .write_all(&control_msg::encode(&FromInstance::Register {
+                instance_id: "sbx-1".into(),
+                pid: std::process::id(),
+                version: "0.1.10".into(),
+                title: "sandboxed".into(),
+                folders: vec!["C:/sb/repo".into()],
+                visible: true,
+                remote_host: false,
+                launch: LaunchSpec::default(),
+                sandboxed: true,
+                control_token: token.clone(),
+            }))
+            .await
+            .unwrap();
+        match control_msg::decode::<ToInstance>(
+            &control_msg::read_message(&mut sbx_rx).await.unwrap(),
+        )
+        .unwrap()
+        {
+            ToInstance::Welcome { .. } => {}
+            other => panic!("expected Welcome, got {other:?}"),
+        }
+    }
+    // The token is one-shot: replaying it on a fresh connection is refused.
+    {
+        let stream = connect().await;
+        let (mut rx, mut tx) = stream.split();
+        tx.write_all(&control_msg::encode(&FromInstance::Register {
+            instance_id: "replay".into(),
+            pid: std::process::id(),
+            version: "0.1.10".into(),
+            title: "replayed token".into(),
+            folders: vec![],
+            visible: true,
+            remote_host: false,
+            launch: LaunchSpec::default(),
+            sandboxed: true,
+            control_token: token,
+        }))
+        .await
+        .unwrap();
+        assert!(
+            control_msg::read_message(&mut rx).await.is_err(),
+            "a consumed token buys no second registration"
+        );
+    }
+
+    // With the sandbox on, WINDOWS lists the sandboxed instance only.
+    let frame = ggs_remote::ws::socket::windows_frame(&daemon);
+    let windows: ggs_remote::ws::msg::Windows = frame.decode_msgpack().unwrap();
+    let ids: Vec<&str> = windows.instances.iter().map(|i| i.id.as_str()).collect();
+    assert!(
+        ids.contains(&"sbx-1"),
+        "the sandboxed instance is listed: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"desktop"),
+        "the desktop window is hidden: {ids:?}"
+    );
+    for info in &windows.instances {
+        assert!(info.sandboxed, "everything listed carries the sandbox flag");
+    }
+    let _ = (desktop, sbx_rx, sbx_tx);
+}
+
+/// The real sandbox runtime, end to end, on this machine (ignored in CI: it needs the
+/// host's sandbox — Windows 11 24H2+/AppContainer, bubblewrap, or Seatbelt — and
+/// exercises `sandbox::launch`'s whole path). Run locally with
+/// `cargo test --test integration sandbox_launches -- --ignored`.
+#[tokio::test]
+#[ignore]
+async fn sandbox_launch_runs_a_command_under_the_real_runtime() {
+    let harness = start().await;
+    let daemon = harness.daemon.clone();
+    let mut config = daemon.config.lock().unwrap();
+    config.sandbox.enabled = true;
+    config.sandbox.network = ggs_remote::config::SandboxNetwork::Off;
+    let plan = ggs_remote::sandbox::plan(&config, &daemon.paths);
+    drop(config);
+    ggs_remote::sandbox::ensure_listener(&daemon);
+    // A stand-in "GGS": a program that exits at once. The launch must be accepted by
+    // the runtime, and the sandbox root must come into being.
+    let spec = LaunchSpec {
+        program: if cfg!(windows) {
+            r"c:\Windows\System32\cmd.exe".into()
+        } else {
+            "/bin/true".into()
+        },
+        args_prefix: if cfg!(windows) {
+            vec!["/C".into(), "exit".into(), "0".into()]
+        } else {
+            vec![]
+        },
+    };
+    ggs_remote::sandbox::launch(&daemon, &plan, &spec, None, false)
+        .expect("the sandbox runtime accepts the launch");
+    assert!(plan.root.join("home").is_dir(), "the relocated home exists");
+    assert!(plan.root.join("workspace").is_dir());
 }

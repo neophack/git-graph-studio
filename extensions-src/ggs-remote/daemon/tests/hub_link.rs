@@ -30,9 +30,8 @@ use tokio_tungstenite::tungstenite::Message;
 
 const PASSWORD: &str = "tangerine-kayak-42";
 
-type Ws = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 struct Both {
     _dir: tempfile::TempDir,
@@ -175,11 +174,7 @@ fn find_cookie(head: &str) -> Option<String> {
 
 /// Login through the Hub for any PC's link: answers the session cookie and the CSRF value
 /// (the first half of every browser-facing test here).
-async fn login_through(
-    addr: std::net::SocketAddr,
-    uuid: &str,
-    password: &str,
-) -> (String, String) {
+async fn login_through(addr: std::net::SocketAddr, uuid: &str, password: &str) -> (String, String) {
     let base = format!("/u/{uuid}/");
     let (status, head, _body) = http(
         addr,
@@ -187,10 +182,7 @@ async fn login_through(
         &format!("{base}api/login"),
         &[
             ("content-type", "application/json"),
-            (
-                "origin",
-                &format!("http://127.0.0.1:{}", addr.port()),
-            ),
+            ("origin", &format!("http://127.0.0.1:{}", addr.port())),
         ],
         &format!("{{\"password\":\"{password}\",\"device\":\"joint\",\"remember\":false}}"),
     )
@@ -223,9 +215,7 @@ async fn browser_ws(addr: std::net::SocketAddr, uuid: &str, cookie: &str) -> Ws 
         .insert("Cookie", cookie.parse().unwrap());
     request.headers_mut().insert(
         "Origin",
-        format!("http://127.0.0.1:{}", addr.port())
-            .parse()
-            .unwrap(),
+        format!("http://127.0.0.1:{}", addr.port()).parse().unwrap(),
     );
     let (ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
     ws
@@ -371,7 +361,10 @@ async fn the_relay_link_leads_the_status_links_when_online() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    assert!(!lan.is_empty(), "the LAN links stay addressable for the CA anchors");
+    assert!(
+        !lan.is_empty(),
+        "the LAN links stay addressable for the CA anchors"
+    );
     assert!(!lan.contains(&public.as_str()));
     let all: Vec<&str> = status["links"]
         .as_array()
@@ -399,11 +392,12 @@ async fn the_admin_connect_body_takes_the_extension_camel_case() {
             .parse()
             .unwrap(),
     );
-    let body = serde_json::from_value::<ggs_remote::http::admin::HubConnectBody>(serde_json::json!({
-        "url": url,
-        "joinKey": "server-secret"
-    }))
-    .unwrap();
+    let body =
+        serde_json::from_value::<ggs_remote::http::admin::HubConnectBody>(serde_json::json!({
+            "url": url,
+            "joinKey": "server-secret"
+        }))
+        .unwrap();
     let response = ggs_remote::http::admin::hub_connect(
         axum::extract::State(both.daemon.clone()),
         headers.clone(),
@@ -416,11 +410,12 @@ async fn the_admin_connect_body_takes_the_extension_camel_case() {
         Some("server-secret".into())
     );
 
-    let body = serde_json::from_value::<ggs_remote::http::admin::HubConnectBody>(serde_json::json!({
-        "url": url,
-        "join_key": "snake-secret"
-    }))
-    .unwrap();
+    let body =
+        serde_json::from_value::<ggs_remote::http::admin::HubConnectBody>(serde_json::json!({
+            "url": url,
+            "join_key": "snake-secret"
+        }))
+        .unwrap();
     let response = ggs_remote::http::admin::hub_connect(
         axum::extract::State(both.daemon.clone()),
         headers,
@@ -461,7 +456,10 @@ async fn a_plain_http_hub_login_sets_a_cookie_the_browser_keeps() {
         .find(|line| line.to_ascii_lowercase().starts_with("set-cookie:"))
         .expect("a Set-Cookie on login");
     assert!(cookie_line.contains("HttpOnly"), "{cookie_line}");
-    assert!(cookie_line.contains(&format!("Path={base}")), "{cookie_line}");
+    assert!(
+        cookie_line.contains(&format!("Path={base}")),
+        "{cookie_line}"
+    );
     assert!(
         !cookie_line.to_ascii_lowercase().contains("secure"),
         "a plain-HTTP browser drops a Secure cookie: {cookie_line}"
@@ -863,6 +861,8 @@ impl FakeInstance {
             visible: true,
             remote_host: false,
             launch: LaunchSpec::default(),
+            sandboxed: false,
+            control_token: String::new(),
         })
         .await;
         match fake.recv().await {
@@ -1165,14 +1165,9 @@ async fn an_exported_key_carries_the_link_to_the_second_pc() {
         &format!("/u/{uuid}/api/login"),
         &[
             ("content-type", "application/json"),
-            (
-                "origin",
-                &format!("http://127.0.0.1:{}", j.hub_addr.port()),
-            ),
+            ("origin", &format!("http://127.0.0.1:{}", j.hub_addr.port())),
         ],
-        &format!(
-            "{{\"password\":\"{PASSWORD}\",\"device\":\"joint\",\"remember\":false}}"
-        ),
+        &format!("{{\"password\":\"{PASSWORD}\",\"device\":\"joint\",\"remember\":false}}"),
     )
     .await;
     assert_eq!(status, 401, "the old PC's password is gone: {head}");
@@ -1307,9 +1302,10 @@ async fn the_shared_cache_answers_immutable_assets_across_pcs() {
     let hashed = "/w/ggs-a/v/0.1.10/assets/remote-Ab12Cd34.js";
     let path = format!("/u/{uuid_a}{hashed}");
     let cookie = cookie_a.clone();
-    let fetch = tokio::spawn(async move {
-        http(j.hub_addr, "GET", &path, &[("cookie", &cookie)], "").await
-    });
+    let fetch =
+        tokio::spawn(
+            async move { http(j.hub_addr, "GET", &path, &[("cookie", &cookie)], "").await },
+        );
     inst_a
         .serve_asset("assets/remote-Ab12Cd34.js", "text/javascript", "from-pc-a")
         .await;
@@ -1325,9 +1321,10 @@ async fn the_shared_cache_answers_immutable_assets_across_pcs() {
     // name, so the Hub's shared cache answers A's copy without waking B's tunnel.
     let path = format!("/u/{uuid_b}/w/ggs-b/v/0.1.10/assets/remote-Ab12Cd34.js");
     let cookie = cookie_b.clone();
-    let fetch = tokio::spawn(async move {
-        http(j.hub_addr, "GET", &path, &[("cookie", &cookie)], "").await
-    });
+    let fetch =
+        tokio::spawn(
+            async move { http(j.hub_addr, "GET", &path, &[("cookie", &cookie)], "").await },
+        );
     let asked = inst_b.quiet_for(300).await;
     assert!(
         asked.is_none(),
@@ -1348,10 +1345,13 @@ async fn the_shared_cache_answers_immutable_assets_across_pcs() {
     let page = "/w/ggs-b/v/0.1.10/remote.html";
     let path = format!("/u/{uuid_b}{page}");
     let cookie = cookie_b.clone();
-    let fetch = tokio::spawn(async move {
-        http(j.hub_addr, "GET", &path, &[("cookie", &cookie)], "").await
-    });
-    inst_b.serve_asset("remote.html", "text/html", "b-first").await;
+    let fetch =
+        tokio::spawn(
+            async move { http(j.hub_addr, "GET", &path, &[("cookie", &cookie)], "").await },
+        );
+    inst_b
+        .serve_asset("remote.html", "text/html", "b-first")
+        .await;
     let (status, _head, body) = tokio::time::timeout(Duration::from_secs(2), fetch)
         .await
         .unwrap()
@@ -1360,9 +1360,10 @@ async fn the_shared_cache_answers_immutable_assets_across_pcs() {
     assert_eq!(body, "b-first");
     let path = format!("/u/{uuid_b}{page}");
     let cookie = cookie_b.clone();
-    let fetch = tokio::spawn(async move {
-        http(j.hub_addr, "GET", &path, &[("cookie", &cookie)], "").await
-    });
+    let fetch =
+        tokio::spawn(
+            async move { http(j.hub_addr, "GET", &path, &[("cookie", &cookie)], "").await },
+        );
     inst_b
         .serve_asset("remote.html", "text/html", "b-second")
         .await;
@@ -1373,4 +1374,3 @@ async fn the_shared_cache_answers_immutable_assets_across_pcs() {
     assert_eq!(status, 200);
     assert_eq!(body, "b-second");
 }
-

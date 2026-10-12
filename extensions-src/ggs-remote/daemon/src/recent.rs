@@ -83,7 +83,10 @@ mod tests {
         let mut recent = Recent::default();
         assert!(recent.note(&["C:/a".into(), "C:/b".into()]));
         assert_eq!(recent.list(), ["C:/a", "C:/b"]);
-        assert!(!recent.note(&["C:/a".into(), "C:/b".into()]), "an unchanged set writes nothing");
+        assert!(
+            !recent.note(&["C:/a".into(), "C:/b".into()]),
+            "an unchanged set writes nothing"
+        );
         assert!(recent.note(&["C:/c".into()]));
         assert_eq!(recent.list(), ["C:/c", "C:/a", "C:/b"]);
         // The same path in another window's set moves to the front alone.
