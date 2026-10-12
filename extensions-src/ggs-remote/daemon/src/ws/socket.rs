@@ -255,6 +255,7 @@ pub fn windows_frame(daemon: &Daemon) -> Frame {
         ty::WINDOWS,
         &Windows {
             instances: daemon.registry.snapshot(),
+            recent_folders: daemon.recent.lock().unwrap().list().to_vec(),
         },
     )
 }

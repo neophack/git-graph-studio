@@ -1,7 +1,9 @@
-// The window picker (docs/ggs-remote-plan.md §13, R10/R12/R20/R21): every GGS window on this
+// The window picker (docs/ggs-remote-plan.md §13, R10/R20/R21): every GGS window on this
 // PC as a card with its content summary and state, live over the ggs-remote/1 WebSocket —
-// open, new, close (with the unsaved-files confirmation) and restart. Plus this device's
-// settings: the device list, the password change and sign-out.
+// open, close (with the unsaved-files confirmation) and restart. The recent-paths list
+// and the folder-path row (2026-10-12) open folders without the old "new window" button,
+// which is gone at the owner's direction. Plus this device's settings: the device list
+// and the password change; sign-out sits in the header.
 import { t, translate, el, postJson } from './i18n.js';
 import { T, encodeFrame, decodeFrames } from './wire.js';
 
@@ -10,6 +12,7 @@ const windowsEl = document.getElementById('windows');
 const banner = document.getElementById('banner');
 let ws;
 let instances = [];
+let recentFolders = [];
 let pendingOpen = null;
 let retry = 500;
 
@@ -35,6 +38,32 @@ function toLogin(reason) {
 
 function openInstance(info) {
 	location.href = `w/${encodeURIComponent(info.id)}/v/${encodeURIComponent(info.version)}/remote.html`;
+}
+
+/** Open a folder from the recent list: a window already showing it is entered, anything
+ *  else spawns a new (invisible) window for it — the same open either way. */
+function openPath(path) {
+	const info = instances.find((i) => (i.folders ?? []).includes(path));
+	if (info) openInstance(info);
+	else send(T.SPAWN, { folder: path, visible: false });
+}
+
+function renderRecent() {
+	const card = document.getElementById('recent-card');
+	const list = document.getElementById('recent');
+	card.hidden = recentFolders.length === 0;
+	list.replaceChildren(
+		...recentFolders.map((path) => {
+			const open = instances.some((i) => (i.folders ?? []).includes(path));
+			return el(
+				'li',
+				{ class: open ? 'open' : '' },
+				el('span', { class: 'path' }, path),
+				open ? el('span', { class: 'badge' }, t('alreadyOpen')) : null,
+				el('button', { class: 'primary', onclick: () => openPath(path) }, t('open'))
+			);
+		})
+	);
 }
 
 function duration(secs) {
@@ -92,6 +121,7 @@ function render() {
 	const now = Date.now() / 1000;
 	windowsEl.replaceChildren(...instances.map((info) => card(info, now)));
 	document.getElementById('empty').hidden = instances.length > 0;
+	renderRecent();
 	if (!entered && instances.length === 1 && autoEnter.checked && !params.get('reason')) {
 		entered = true;
 		openInstance(instances[0]);
@@ -106,6 +136,7 @@ function onFrame(frame) {
 			break;
 		case T.WINDOWS:
 			instances = frame.body?.instances ?? [];
+			recentFolders = frame.body?.recentFolders ?? recentFolders;
 			render();
 			if (pendingOpen) {
 				const info = instances.find((i) => i.id === pendingOpen);
@@ -151,7 +182,9 @@ async function connect() {
 	}
 	if (session.status === 401) return toLogin();
 	if (!session.ok) return reconnectLater();
-	const { csrf } = await session.json();
+	const { csrf, folderInput } = await session.json();
+	// The folder-path row is a setting (2026-10-12): off hides it, the recent list stays.
+	if (folderInput === false) document.getElementById('open-row').hidden = true;
 	const url = new URL('ws', document.baseURI);
 	url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
 	ws = new WebSocket(url);
@@ -166,14 +199,19 @@ async function connect() {
 
 setInterval(() => send(T.PING, {}), 20000);
 
-document.getElementById('new-window').addEventListener('click', () => {
-	const row = document.getElementById('new-row');
-	row.hidden = !row.hidden;
-	if (!row.hidden) document.getElementById('new-folder').focus();
-});
-document.getElementById('new-go').addEventListener('click', () => {
-	const folder = document.getElementById('new-folder').value.trim();
-	send(T.SPAWN, { folder: folder || null, visible: false });
+// The folder-path row: type a path (or pick one from the recent list), open it as a new
+// (invisible) window. The standalone "new window" button is gone (2026-10-12, the owner's
+// direction — it was unused); an empty path opens nothing.
+function openTypedFolder() {
+	const folder = document.getElementById('open-folder').value.trim();
+	if (folder) send(T.SPAWN, { folder, visible: false });
+}
+document.getElementById('open-go').addEventListener('click', openTypedFolder);
+document.getElementById('open-folder').addEventListener('keydown', (event) => {
+	if (event.key === 'Enter') {
+		event.preventDefault();
+		openTypedFolder();
+	}
 });
 
 async function loadDevices() {

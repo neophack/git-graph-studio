@@ -17,8 +17,9 @@ const STRINGS = {
 		'reason.link-changed': 'The link of this PC changed.',
 		windows: 'Windows on this PC',
 		noWindows: 'No Git Graph Studio window is running.',
-		newWindow: 'New window',
-		folderOptional: 'Folder to open (optional)',
+		folderOptional: 'Folder path to open',
+		recentFolders: 'Recent folders',
+		alreadyOpen: 'already open',
 		open: 'Open',
 		close: 'Close',
 		restart: 'Restart',
@@ -58,6 +59,7 @@ const STRINGS = {
 		setFirst: 'Set the access password for remote access.',
 		setPassword: 'Set password',
 		links: 'Scan one of these from the phone (same network):',
+		linksRelay: 'Scan this from the phone — it works from any network:',
 		caTitle: 'Trust this PC (once per device)',
 		caText: 'Install the certificate so the browser trusts the connection. Fingerprint:',
 		caIos: 'iPhone / iPad profile',
@@ -67,6 +69,18 @@ const STRINGS = {
 		lastForeign: 'Last remote access: {t}',
 		never: 'never',
 		relocked: 'Locked again after 5 minutes.',
+		relayTitle: 'Reach this PC from anywhere (relay server)',
+		relayAddress: 'Relay server address or connect string',
+		relayKey: 'Server password (optional)',
+		relaySave: 'Save server',
+		relayDisconnect: 'Disconnect server',
+		relayHint: 'A relay of your own (ggs-remote-hub) carries this PC’s link through NAT; the access password still applies. While the server is set and online, only its QR code is shown — the LAN codes hide. A server saved before the password is set connects by itself once the password lands.',
+		'relay.unconfigured': 'Not connected to a relay.',
+		'relay.noPassword': 'Server saved — it connects once the access password is set.',
+		'relay.connecting': 'Connecting to {url}…',
+		'relay.online': 'Online — {base}',
+		'relay.rejected': 'Refused ({reason})',
+		'relay.replaced': 'Another copy of this PC’s key is connected; retry from this PC.',
 		warning: 'Anyone with the password can do on this PC whatever you can — including running commands in a terminal. Share it only with people you trust.'
 	},
 	'zh-cn': {
@@ -85,8 +99,9 @@ const STRINGS = {
 		'reason.link-changed': '此 PC 的链接已更换。',
 		windows: '此 PC 上的窗口',
 		noWindows: '没有正在运行的 Git Graph Studio 窗口。',
-		newWindow: '新窗口',
-		folderOptional: '要打开的文件夹（可选）',
+		folderOptional: '输入要打开的文件夹路径',
+		recentFolders: '最近打开的文件夹',
+		alreadyOpen: '已打开',
 		open: '打开',
 		close: '关闭',
 		restart: '重启',
@@ -126,6 +141,7 @@ const STRINGS = {
 		setFirst: '请设置远程访问密码。',
 		setPassword: '设置密码',
 		links: '在同一网络下用手机扫描其中一个：',
+		linksRelay: '用手机扫描即可，任何网络都能访问：',
 		caTitle: '信任此 PC（每台设备一次）',
 		caText: '安装证书后浏览器才会信任连接。指纹：',
 		caIos: 'iPhone / iPad 描述文件',
@@ -135,11 +151,26 @@ const STRINGS = {
 		lastForeign: '最近外来访问：{t}',
 		never: '从未',
 		relocked: '5 分钟后已重新上锁。',
+		relayTitle: '从任何地方访问此 PC（中继服务器）',
+		relayAddress: '中继服务器地址或连接串',
+		relayKey: '服务器口令（可选）',
+		relaySave: '保存服务器',
+		relayDisconnect: '断开服务器',
+		relayHint: '自建的中继服务器（ggs-remote-hub）把此 PC 的链接带出内网；访问密码不变。服务器设置并在线时，只显示它的二维码——局域网的二维码会隐藏。密码设置前保存的服务器，会在密码设置后自动连接。',
+		'relay.unconfigured': '未连接中继服务器。',
+		'relay.noPassword': '服务器已保存——设置访问密码后即会自动连接。',
+		'relay.connecting': '正在连接 {url}…',
+		'relay.online': '在线 — {base}',
+		'relay.rejected': '被拒绝（{reason}）',
+		'relay.replaced': '此 PC 的密钥在别处连接，请在本 PC 重试。',
 		warning: '知道密码的人可以在这台 PC 上做你能做的一切——包括在终端里执行命令。只把密码告诉可信的人。'
 	}
 };
 
-const lang = (navigator.language || 'en').toLowerCase().startsWith('zh') ? 'zh-cn' : 'en';
+// The user's set language wins (the daemon's lang.js sets it from the app's settings file,
+// 2026-10-12); the browser's language is the fallback when the app spells none.
+const chosen = String(window.ggsLang || navigator.language || 'en');
+const lang = chosen.toLowerCase().startsWith('zh') ? 'zh-cn' : 'en';
 
 export function t(key, vars) {
 	let text = STRINGS[lang][key] ?? STRINGS.en[key] ?? key;
@@ -152,6 +183,7 @@ export function translate(root = document) {
 	document.documentElement.lang = lang === 'zh-cn' ? 'zh-CN' : 'en';
 	for (const el of root.querySelectorAll('[data-i18n]')) el.textContent = t(el.dataset.i18n);
 	for (const el of root.querySelectorAll('[data-i18n-placeholder]')) el.placeholder = t(el.dataset.i18nPlaceholder);
+	for (const el of root.querySelectorAll('[data-i18n-aria]')) el.setAttribute('aria-label', t(el.dataset.i18nAria));
 }
 
 export function el(tag, props = {}, ...children) {

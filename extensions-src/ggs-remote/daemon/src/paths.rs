@@ -53,6 +53,10 @@ impl Paths {
     pub fn sessions(&self) -> PathBuf {
         self.root.join("sessions.json")
     }
+    /// The recently opened folders (the picker's "recent paths" list).
+    pub fn recent(&self) -> PathBuf {
+        self.root.join("recent.json")
+    }
     pub fn admin_token(&self) -> PathBuf {
         self.root.join("admin.token")
     }
@@ -84,6 +88,25 @@ impl Paths {
     }
     pub fn settings(&self) -> PathBuf {
         self.ggs_home.join("settings.json")
+    }
+
+    /// The app's display language as `~/.ggs/settings.json` spells it — `locale` (the key
+    /// `settings_write` persists), `displayLanguage` accepted as the older spelling:
+    /// `Some("zh-cn")` / `Some("en")`, `None` when the file or the key is absent. The tray
+    /// labels and the daemon pages' language both follow it (2026-10-12, the owner's
+    /// direction for the pages), falling back to the browser's language.
+    pub fn display_language(&self) -> Option<String> {
+        let bytes = std::fs::read(self.settings()).ok()?;
+        let value = serde_json::from_slice::<serde_json::Value>(&bytes).ok()?;
+        let lang = value
+            .get("locale")
+            .or_else(|| value.get("displayLanguage"))?
+            .as_str()?;
+        Some(if lang.eq_ignore_ascii_case("zh-cn") {
+            "zh-cn".into()
+        } else {
+            "en".into()
+        })
     }
     pub fn secret(&self) -> PathBuf {
         self.root.join("server.secret")

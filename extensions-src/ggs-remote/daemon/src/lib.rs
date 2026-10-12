@@ -18,6 +18,7 @@ pub mod lifecycle;
 pub mod log;
 pub mod paths;
 pub mod ratelimit;
+pub mod recent;
 pub mod registry;
 pub mod relay_link;
 pub mod router;

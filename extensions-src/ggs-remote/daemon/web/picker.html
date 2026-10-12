@@ -8,6 +8,7 @@
 <link rel="stylesheet" href="static/style.css">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="static/icon.svg">
+<script src="lang.js"></script>
 </head>
 <body>
 <main>
@@ -16,31 +17,34 @@
 		<div class="row">
 			<h1 data-i18n="windows"></h1>
 			<span class="spacer"></span>
-			<button class="primary" id="new-window" data-i18n="newWindow"></button>
+			<button class="danger" id="sign-out" data-i18n="signOut"></button>
 		</div>
-		<div class="row" id="new-row" hidden>
-			<input type="text" id="new-folder" data-i18n-placeholder="folderOptional">
-			<button class="primary" id="new-go" data-i18n="open"></button>
+		<div class="pw-row" id="open-row" style="margin-top:8px">
+			<input type="text" id="open-folder" data-i18n-placeholder="folderOptional" data-i18n-aria="folderOptional" autocomplete="off" spellcheck="false">
+			<button class="primary" id="open-go" data-i18n="open"></button>
 		</div>
 		<p class="muted" id="empty" hidden data-i18n="noWindows"></p>
 		<div class="windows" id="windows"></div>
-		<label class="check"><input type="checkbox" id="auto-enter"> <span data-i18n="autoEnter"></span></label>
+		<label class="check" style="margin-top:10px"><input type="checkbox" id="auto-enter"> <span data-i18n="autoEnter"></span></label>
+	</section>
+	<section class="card" id="recent-card" hidden>
+		<h2 data-i18n="recentFolders"></h2>
+		<ul class="recent" id="recent"></ul>
 	</section>
 	<section class="card">
 		<details id="settings">
 			<summary data-i18n="settings"></summary>
-			<h2 data-i18n="devices"></h2>
-			<ul class="devices" id="devices"></ul>
 			<h2 data-i18n="changePassword"></h2>
 			<form id="password-form">
-				<label for="current" data-i18n="currentPassword"></label>
-				<input type="password" id="current" autocomplete="current-password" required>
-				<label for="next" data-i18n="newPassword"></label>
-				<input type="password" id="next" autocomplete="new-password" required minlength="8">
-				<button data-i18n="save"></button>
+				<div class="pw-row">
+					<input type="password" id="current" autocomplete="current-password" required data-i18n-placeholder="currentPassword" data-i18n-aria="currentPassword">
+					<input type="password" id="next" autocomplete="new-password" required minlength="8" data-i18n-placeholder="newPassword" data-i18n-aria="newPassword">
+					<button class="primary" data-i18n="save"></button>
+				</div>
 				<p class="error" id="password-error"></p>
 			</form>
-			<button class="danger" id="sign-out" data-i18n="signOut"></button>
+			<h2 data-i18n="devices"></h2>
+			<ul class="devices" id="devices"></ul>
 		</details>
 	</section>
 </main>

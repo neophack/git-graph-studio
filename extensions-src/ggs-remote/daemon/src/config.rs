@@ -35,6 +35,9 @@ pub struct Config {
     pub autostart: bool,
     /// Whether a window the remote side opens also shows on the desktop (§13).
     pub spawn_visible: bool,
+    /// The window picker's "open a folder by typing its path" row (2026-10-12, the
+    /// owner's direction: the feature stays but can be switched off).
+    pub folder_input: bool,
     /// Daemon-spawned invisible instances quit after this many idle minutes (§7.10).
     pub idle_exit_minutes: u64,
     /// Trust `X-Forwarded-*` from loopback peers (a tunnel or reverse proxy ends TLS, §7.4).
@@ -62,6 +65,7 @@ impl Default for Config {
             mdns: true,
             autostart: true,
             spawn_visible: false,
+            folder_input: true,
             // Off: the PC runs the user's Git Graph Studio and a browser only watches it
             // (the replica, §22) — nothing should quit because nobody is watching.
             idle_exit_minutes: 0,
@@ -164,6 +168,11 @@ mod tests {
             Ok(false)
         );
         assert!(config.spawn_visible);
+        assert_eq!(
+            config.apply_patch(&serde_json::json!({ "folderInput": false })),
+            Ok(false)
+        );
+        assert!(!config.folder_input, "the picker's folder row can be switched off");
         assert_eq!(
             config.apply_patch(&serde_json::json!({ "port": 50001 })),
             Ok(true)

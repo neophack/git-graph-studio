@@ -112,6 +112,9 @@ pub struct Daemon {
     pub conns: Mutex<HashMap<u32, Arc<Conn>>>,
     next_conn: AtomicU32,
     pub tickets: Mutex<Tickets>,
+    /// The recently opened folders (the picker's "recent paths" list), persisted as
+    /// `recent.json` under the root.
+    pub recent: Mutex<crate::recent::Recent>,
     /// Resource tokens of the `ggs` file paths (§12.2): token → (session hash, instance).
     pub resource_tokens: Mutex<HashMap<String, (String, String)>>,
     pub kicks: broadcast::Sender<Kick>,
@@ -157,6 +160,7 @@ impl Daemon {
             conns: Mutex::new(HashMap::new()),
             next_conn: AtomicU32::new(1),
             tickets: Mutex::new(Tickets::default()),
+            recent: Mutex::new(crate::recent::Recent::load(&paths)),
             resource_tokens: Mutex::new(HashMap::new()),
             kicks: broadcast::channel(64).0,
             tray: watch::channel(TrayState::Stopped).0,

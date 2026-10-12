@@ -55,21 +55,15 @@ pub fn run(daemon: Arc<Daemon>) {
     linux::run(daemon);
 }
 
-/// The app's settings file spells the display language as `locale` (the key
-/// `settings_write` persists); `displayLanguage` is accepted as the older spelling. Both
-/// tray backends re-read this every second they poll their model, so a language switched
-/// in the app relabels the tray within moments of the file's atomic rewrite.
+/// The app's settings file spells the display language (`locale`, `displayLanguage` the
+/// older spelling); both tray backends re-read this every second they poll their model, so
+/// a language switched in the app relabels the tray within moments of the file's atomic
+/// rewrite.
 fn zh(daemon: &Daemon) -> bool {
-    std::fs::read(daemon.paths.settings())
-        .ok()
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|v| {
-            v.get("locale")
-                .or_else(|| v.get("displayLanguage"))
-                .and_then(|l| l.as_str())
-                .map(|l| l.eq_ignore_ascii_case("zh-cn"))
-        })
-        .unwrap_or(false)
+    daemon
+        .paths
+        .display_language()
+        .is_some_and(|l| l == "zh-cn")
 }
 
 /// The label set, en / zh-cn.

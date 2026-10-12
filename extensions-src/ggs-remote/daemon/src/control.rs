@@ -108,13 +108,14 @@ async fn serve_instance(
             pid,
             version,
             title,
-            folders,
+            folders: folders.clone(),
             visible,
             remote_host,
             launch,
         },
         ctl_tx.clone(),
     );
+    crate::recent::note_folders(&daemon, &folders);
     crate::info!("instance {instance_id} registered (pid {pid})");
     let relay_url = format!(
         "ws://127.0.0.1:{}/relay",
@@ -161,7 +162,12 @@ async fn read_loop(daemon: &Arc<Daemon>, id: &str, rx: &mut RecvHalf) -> std::io
                 folders,
                 visible,
                 summary,
-            } => daemon.registry.update(id, title, folders, visible, summary),
+            } => {
+                daemon.registry.update(id, title, folders.clone(), visible, summary);
+                if let Some(folders) = folders {
+                    crate::recent::note_folders(daemon, &folders);
+                }
+            }
             FromInstance::Pong { nonce } => {
                 let was = daemon.registry.with(id, |i| {
                     let before = i.info.state.clone();

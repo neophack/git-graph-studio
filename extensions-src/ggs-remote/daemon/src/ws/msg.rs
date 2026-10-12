@@ -93,9 +93,12 @@ pub struct InstanceInfo {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct Windows {
     pub instances: Vec<InstanceInfo>,
+    /// The recently opened folders (the picker's "recent paths" list, most recent first) —
+    /// what a `SPAWN` with that folder reopens. May be absent from an older daemon.
+    pub recent_folders: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -234,5 +237,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(value, serde_json::json!({ "kind": "relay-restarted" }));
+    }
+
+    #[test]
+    fn windows_carries_the_recent_folders_camel_cased_and_decodes_without_them() {
+        let value: serde_json::Value = rmp_serde::from_slice(
+            &rmp_serde::to_vec_named(&Windows {
+                instances: Vec::new(),
+                recent_folders: vec!["C:/repo".into()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["recentFolders"][0], "C:/repo");
+        // An older daemon's frame (no field) still decodes into an empty list.
+        let legacy = rmp_serde::to_vec_named(&serde_json::json!({ "instances": [] })).unwrap();
+        let windows: Windows = rmp_serde::from_slice(&legacy).unwrap();
+        assert!(windows.recent_folders.is_empty());
     }
 }
