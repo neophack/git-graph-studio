@@ -1282,7 +1282,11 @@ database) carries the link through NAT. The whole design lives in
   against a real daemon — login, a WebSocket session and a password change's kick, all
   through `/u/<uuid>/`.
 - **The Hub** (`extensions-src/ggs-remote/hub/`, another crate of its own — never inside the
-  VSIX): `/tunnel` handshake, the uuid → tunnel table (a newer key connection replaces the
+  VSIX): standalone packaging beside the container image — `deploy/build-deb.sh` wraps the
+  static musl binary into a deb (hardened systemd unit + the example config as a conffile
+  at `/etc/ggs-hub/hub.toml`, so dpkg -i plus systemctl runs out of the box) and a plain
+  tarball; `release.yml`'s `hub-packages` job builds them (plus the Windows zip) on tags.
+  `/tunnel` handshake, the uuid → tunnel table (a newer key connection replaces the
   older, `T_REPLACED`), HTTP and WebSocket proxying with session re-stamping, the offline
   page every not-online link answers, per-IP limits (handshakes, login entries,
   offline-probe bans), joinKey in constant time, and the cross-PC cache for the workbench's

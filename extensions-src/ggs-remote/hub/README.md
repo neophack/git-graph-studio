@@ -30,6 +30,22 @@ ggs-remote-hub --example-config > hub.toml   # commented template
 ggs-remote-hub --config hub.toml
 ```
 
+Or as a standalone package (every release carries them, alongside the container image):
+
+- **Windows**: `ggs-remote-hub-<version>-windows-x64.zip` — unzip and run
+  `ggs-remote-hub.exe --config hub.toml.example` (edit a copy first; the example listens
+  on `0.0.0.0:8443` behind a TLS proxy).
+- **Debian/Ubuntu**: `ggs-remote-hub_<version>_amd64.deb` — `sudo dpkg -i` puts the
+  binary under `/usr/bin`, a hardened systemd unit under `lib/systemd/system`, and the
+  example config at `/etc/ggs-hub/hub.toml` (a conffile — edits survive upgrades):
+  ```sh
+  sudo dpkg -i ggs-remote-hub_*_amd64.deb
+  sudo systemctl enable --now ggs-remote-hub    # journalctl -u ggs-remote-hub -f
+  ```
+  The binary is statically linked (musl): no runtime dependencies on any glibc.
+- **Any other Linux**: `ggs-remote-hub-<version>-x86_64-musl.tar.gz` — the binary, the
+  example config and the systemd unit; run it wherever you like.
+
 Or with Docker:
 
 ```sh
@@ -71,6 +87,7 @@ sessions, per-tunnel daily bytes, per-IP handshake and login-entry rates — all
 ```sh
 cargo build --release            # a single static-friendly binary
 docker build -t ggs-remote-hub . # rust:alpine → FROM scratch
+deploy/build-deb.sh              # the deb + the musl tarball (musl-tools + the musl target)
 ```
 
 One hub binary, one config file, no data directory.

@@ -1717,6 +1717,7 @@ services:
 
 - DNS 一条 `remote.example.com` 记录即可；也可以直接用 IP + 自签证书（连接串带 `fp=` 指纹）。
 - 不用 Docker 时，`ggs-remote-hub --config hub.toml` 直接运行（单个静态二进制，附 systemd 单元示例）。
+- **独立安装包（2026-10-12 落地）**：发布页随每个版本携带三件——Windows 的 `ggs-remote-hub-<版本>-windows-x64.zip`（解压即用）、`ggs-remote-hub_<版本>_amd64.deb`（musl 静态二进制 + 加固 systemd 单元 [DynamicUser、ProtectSystem=strict] + 示例配置以 conffile 落位 `/etc/ggs-hub/hub.toml`——`dpkg -i` 后 `systemctl enable --now` 开箱即跑，升级保留本地改动）、以及给非 Debian 系的 `x86_64-musl.tar.gz`；本地可用 `hub/deploy/build-deb.sh` 自行打包（`PREBUILT`/`VERSION` 可注入），`release.yml` 的 `hub-packages` 作业在打 tag 时构建并纳入 `SHA256SUMS` 与 GPG 签名。deb 布局已在真实 Ubuntu 24.04 上安装/卸载验证。
 - 资源估算：每条在线隧道约 64 KB 内存；1 核 1 GB 的服务器可承载数百台在线 PC，瓶颈是带宽（所有远程流量都经过 Hub）。
 - Hub **没有需要备份的数据**：换服务器只需让域名指向新机器，各 PC 自动重连，链接不变。
 

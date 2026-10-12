@@ -1,0 +1,34 @@
+# The Hub as a system service (docs/ggs-remote-plan.md §20.9): nothing is persisted — no
+# state directory, no database, nothing to back up — so a throwaway user and a locked-down
+# runtime are the whole story. Install: place a config at /etc/ggs-hub/hub.toml (the example
+# ships under /usr/share/ggs-remote-hub/), then:
+#
+#   systemctl daemon-reload && systemctl enable --now ggs-remote-hub
+#   journalctl -u ggs-remote-hub -f
+[Unit]
+Description=GGS Remote Hub — the self-hosted relay
+Documentation=https://github.com/neophack/git-graph-studio
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ggs-remote-hub --config /etc/ggs-hub/hub.toml
+Restart=on-failure
+RestartSec=2
+# No state, no keys of its own: a throwaway identity per start, and a runtime that may
+# touch nothing but its config and the network.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryDenyWriteExecute=yes
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

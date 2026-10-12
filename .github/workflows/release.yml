@@ -142,9 +142,67 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # The Hub's standalone packages (docs/ggs-remote-plan.md §20.9): a Windows zip you unzip
+  # and run beside its example config, and a deb around the static musl binary — zero
+  # glibc dependency — whose example config lands at /etc/ggs-hub/hub.toml as a conffile,
+  # so dpkg -i plus systemctl enable --now runs out of the box. A plain tarball rides
+  # along for every Linux that is not a Debian. Gated on the tests like every other
+  # release artifact (build-and-test runs remote-hub-test).
+  hub-packages:
+    name: Hub standalone packages (${{ matrix.os }})
+    needs: [resolve-tag, build-and-test]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: extensions-src/ggs-remote/hub
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build the deb and the tarball
+        if: runner.os == 'Linux'
+        run: VERSION=${{ needs.resolve-tag.outputs.version }} deploy/build-deb.sh
+
+      - name: Build the windows zip
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release
+          $version = "${{ needs.resolve-tag.outputs.version }}"
+          $stage = "target/packages/stage/ggs-remote-hub-$version-windows-x64"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item target/release/ggs-remote-hub.exe $stage/
+          Copy-Item deploy/hub.example.toml "$stage/hub.toml.example"
+          Copy-Item README.md $stage/
+          Compress-Archive -Path $stage -DestinationPath "target/packages/ggs-remote-hub-$version-windows-x64.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hub-package-${{ matrix.os }}
+          path: extensions-src/ggs-remote/hub/target/packages/*.deb
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hub-package-${{ matrix.os }}-misc
+          path: |
+            extensions-src/ggs-remote/hub/target/packages/*.tar.gz
+            extensions-src/ggs-remote/hub/target/packages/*.zip
+          if-no-files-found: ignore
+
   release:
     name: Publish the GitHub Release
-    needs: [resolve-tag, build-and-test]
+    needs: [resolve-tag, build-and-test, hub-packages]
     runs-on: ubuntu-latest
     steps:
       - name: Download every installer
@@ -153,6 +211,14 @@ jobs:
           pattern: studio-*
           merge-multiple: true
           path: artifacts
+
+      # The Hub's standalone packages join the same release (and its checksums).
+      - name: Download the hub packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: hub-package-*
+          merge-multiple: true
+          path: hubpkgs
 
       # Flatten (the artifacts keep their bundle/... structure) and checksum everything;
       # SHA256SUMS lists exactly the files attached to the release. Only installers and
@@ -164,6 +230,7 @@ jobs:
           find artifacts -type f \( \
             -name '*.exe' -o -name '*.msi' -o -name '*.deb' -o -name '*.rpm' \
             -o -name '*.dmg' -o -name 'metrics.json' \) -exec cp {} flat/ \;
+          find hubpkgs -type f -exec cp {} flat/ \;
           cd flat
           sha256sum * > SHA256SUMS
           ls -l
