@@ -5,22 +5,25 @@
 //! the instance can have several frontends: the desktop window (`"main"`) and every remote
 //! session behind the Relay (`"remote/<session>"` — through a Hub, sessions of different
 //! people). Every `ggs.hostRequest` is answered by exactly one of them, so each request
-//! needs an address — a session's own, never "some remote page", or one person's click
-//! would open in another person's browser:
+//! needs an address:
 //!
-//! - a request about a webview panel or webview view goes to the frontend that owns it —
-//!   the one whose call created the panel, or the one that last resolved, showed or
-//!   messaged the view;
+//! - every request about a webview panel or webview view goes to the desktop window
+//!   ([`WEBVIEW_HOME`]): a webview's page is ONE live document per instance — Claude Code's
+//!   chat keeps its conversation in its page — and a remote page that runs its own
+//!   workbench shows a live copy of it (§22.6, `src/remote/mirror/webviewShare.ts`), so a
+//!   question asked on either side streams on both. Before 2026-10-12 a webview followed
+//!   the frontend that last resolved or messaged it, and the other side's chat froze;
 //! - any other request made while a frontend's call into the backend is in flight goes to
-//!   that frontend (the latest such call wins) — a remote click on "View Git Graph" opens
-//!   the graph in the remote page, not on the desktop;
+//!   that frontend (the latest such call wins) — a remote quick pick opens in the remote
+//!   page, not on the desktop;
 //! - the rest — the activation's own requests, timers, background work — has no caller,
 //!   and the composition root's default policy decides.
 //!
 //! The activation's registrations (commands, `setContext` keys, providers, views, status
 //! bar items) land only in the frontend that served them; the journal keeps them, compacted,
 //! so a frontend that attaches to an already-running backend can replay them and show the
-//! same entries (Claude Code's activity-bar container is gated on a `setContext` key).
+//! same entries (Claude Code's activity-bar container is gated on a `setContext` key). The
+//! live webview panels ride along, so the attaching page opens their copies.
 //!
 //! The module is pure bookkeeping — no Tauri types — so `ext_process` stays the only owner
 //! of the wire and this stays testable.
@@ -35,6 +38,9 @@ use serde_json::{Map, Value};
 /// few dozen), so a backend past this is churning — later entries are dropped, not the
 /// activation's.
 const JOURNAL_CAP: usize = 4096;
+
+/// The frontend every webview lives in (see the module doc).
+pub const WEBVIEW_HOME: &str = "main";
 
 /// The frontend a call came from: the desktop window is `"main"`; a call through the Relay
 /// carries its session in the `x-ggs-frontend` header the Relay stamps on every invoke
@@ -60,24 +66,11 @@ pub fn is_session(id: &str) -> bool {
 struct ExtRoutes {
     /// The frontend calls into the backend in flight, in start order.
     calls: Vec<(u64, String)>,
-    /// Webview panel and view owners: `webview:<panel id>` / `view:<view id>`.
-    owners: HashMap<String, String>,
     /// The state-carrying requests, in arrival order (see [`journal_key`]).
     journal: Vec<(Option<String>, String, Value)>,
-    /// Each live webview panel's `webview.create` arguments and latest html, by
-    /// `webview:<panel id>` — what it takes to show the panel in another frontend.
-    panels: HashMap<String, (Value, Option<Value>)>,
-}
-
-/// A webview panel changing frontends (see [`panel_move`]).
-#[derive(Debug, PartialEq)]
-pub struct PanelMove {
-    pub from: String,
-    pub to: String,
-    /// The panel's `webview.create` arguments (the title kept current).
-    pub create: Value,
-    /// Its latest html, when it set one.
-    pub html: Option<Value>,
+    /// Each live webview panel's `webview.create` arguments (the title kept current), in
+    /// creation order — what a frontend that attaches later needs to show the panel.
+    panels: Vec<(String, Value)>,
 }
 
 fn routes() -> &'static Mutex<HashMap<String, ExtRoutes>> {
@@ -104,35 +97,26 @@ impl Drop for CallGuard {
     }
 }
 
-/// The id the owner map keys a webview request on, from its method and first argument.
-fn owner_key(method: &str, args: &Value) -> Option<String> {
-    let first = args.get(0)?;
-    let id = match first {
-        Value::String(text) => text.clone(),
-        Value::Number(number) => number.to_string(),
-        _ => return None,
-    };
-    if method.starts_with("webviewView.") {
-        Some(format!("view:{id}"))
-    } else if method.starts_with("webview.") {
-        Some(format!("webview:{id}"))
-    } else {
-        None
+/// Whether a host request is about a webview panel or a webview view.
+fn is_webview(method: &str) -> bool {
+    method.starts_with("webview.") || method.starts_with("webviewView.")
+}
+
+/// A panel id as [`ExtRoutes::panels`] keys it.
+fn panel_key(id: &Value) -> Option<String> {
+    match id {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
     }
 }
 
-/// A frontend's call into `ext_id`'s backend begins. A call that shows a webview view
-/// (`webviewView.resolve` / `.setVisible`) makes its frontend the view's owner.
-pub fn call_begin(ext_id: &str, frontend: &str, method: &str, args: &Value) -> CallGuard {
+/// A frontend's call into `ext_id`'s backend begins.
+pub fn call_begin(ext_id: &str, frontend: &str) -> CallGuard {
     static SEQ: AtomicU64 = AtomicU64::new(1);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     with(ext_id, |routes| {
-        routes.calls.push((seq, frontend.to_owned()));
-        if method == "webviewView.resolve" || method == "webviewView.setVisible" {
-            if let Some(key) = owner_key(method, args) {
-                routes.owners.insert(key, frontend.to_owned());
-            }
-        }
+        routes.calls.push((seq, frontend.to_owned()))
     });
     CallGuard {
         ext_id: ext_id.to_owned(),
@@ -140,117 +124,66 @@ pub fn call_begin(ext_id: &str, frontend: &str, method: &str, args: &Value) -> C
     }
 }
 
-/// A frontend pushed an event into the backend: a webview's or a view's message makes the
-/// pushing frontend its owner — the replies go where the conversation is.
-pub fn note_event(ext_id: &str, frontend: &str, event: &Value) {
-    let key = match event.get("event").and_then(Value::as_str) {
-        Some("webviewMessage") => event.get("panelId").map(|id| format!("webview:{id}")),
-        Some("webviewViewMessage" | "webviewViewVisible") => event
-            .get("viewId")
-            .and_then(Value::as_str)
-            .map(|id| format!("view:{id}")),
-        _ => None,
-    };
-    if let Some(key) = key {
-        with(ext_id, |routes| {
-            routes.owners.insert(key, frontend.to_owned())
-        });
-    }
-}
-
-/// The frontend a request should reach, when one claims it: the webview's owner, else the
-/// latest frontend call in flight. `None` leaves it to the default policy.
-pub fn preferred(ext_id: &str, method: &str, args: &Value) -> Option<String> {
+/// The latest frontend call in flight — whose click a request answers, if anyone's.
+pub fn caller(ext_id: &str) -> Option<String> {
     with(ext_id, |routes| {
-        owner_key(method, args)
-            .and_then(|key| routes.owners.get(&key).cloned())
-            .or_else(|| routes.calls.last().map(|(_, frontend)| frontend.clone()))
+        routes.calls.last().map(|(_, frontend)| frontend.clone())
     })
 }
 
-/// Whether a `webview.reveal` moves its panel: an extension that keeps ONE panel (Git
-/// Graph's `createOrShow`) reveals it when someone asks again — and when that someone is a
-/// different frontend from the panel's owner (another user's page), showing it in the
-/// owner's page would leave the asker with nothing. The asker is the latest frontend call
-/// in flight; only an explicit reveal moves a panel, never its background traffic.
-pub fn panel_move(ext_id: &str, method: &str, args: &Value) -> Option<PanelMove> {
-    if method != "webview.reveal" {
+/// The frontend a request should reach, when one claims it: the desktop window for a
+/// webview, else the latest frontend call in flight. `None` leaves it to the default
+/// policy.
+pub fn preferred(ext_id: &str, method: &str) -> Option<String> {
+    if is_webview(method) {
+        return Some(WEBVIEW_HOME.into());
+    }
+    caller(ext_id)
+}
+
+/// The desktop window closed a webview panel's tab (the `webviewDisposed` event it pushes
+/// into the backend): the panel is gone, and the other frontends drop their copies of it.
+/// Answers the panel id when the event is such a close.
+pub fn panel_closed(ext_id: &str, event: &Value) -> Option<Value> {
+    if event.get("event").and_then(Value::as_str) != Some("webviewDisposed") {
         return None;
     }
-    let key = owner_key(method, args)?;
+    let id = event.get("panelId")?.clone();
+    let key = panel_key(&id)?;
     with(ext_id, |routes| {
-        // An absent owner is a frontend that went away since the panel was created (its
-        // page reloaded; `frontend_gone` cleared the claim): the panel record is what
-        // remains, and the asker takes it — the move re-creates the panel in the asking
-        // page. Without this, the extension's "reveal the one panel I keep" reached a
-        // frontend that had no record of it and nothing showed, forever.
-        let from = routes.owners.get(&key).cloned();
-        let (_, to) = routes.calls.last()?;
-        if from.as_deref() == Some(to.as_str()) {
-            return None;
-        }
-        let (create, html) = routes.panels.get(&key)?;
-        Some(PanelMove {
-            from: from.unwrap_or_default(),
-            to: to.clone(),
-            create: create.clone(),
-            html: html.clone(),
-        })
-    })
+        routes.panels.retain(|(panel, _)| *panel != key)
+    });
+    Some(id)
 }
 
-/// The panel a `webview.*` request names now belongs to `frontend`.
-pub fn set_owner(ext_id: &str, method: &str, args: &Value, frontend: &str) {
-    if let Some(key) = owner_key(method, args) {
-        with(ext_id, |routes| {
-            routes.owners.insert(key, frontend.to_owned())
-        });
-    }
-}
-
-/// A frontend went away (a remote session ended): nothing it owned is addressed to it
-/// anymore — its webviews' traffic falls back to the default policy instead of waiting
-/// on a page no one shows.
-pub fn frontend_gone(frontend: &str) {
-    let mut all = routes().lock().unwrap_or_else(|p| p.into_inner());
-    for routes in all.values_mut() {
-        routes.owners.retain(|_, owner| owner != frontend);
-    }
-}
-
-/// A request was delivered to `frontend`: a created panel belongs to it, a disposed panel
-/// or view is forgotten, and a state-carrying request joins the journal. Answers whether
-/// the request carries state the other frontends should mirror.
-pub fn routed(ext_id: &str, method: &str, args: &Value, frontend: &str) -> bool {
+/// A request was delivered: a panel's life (create, title, reveal, dispose) is tracked,
+/// and a state-carrying request joins the journal. Answers whether the request carries
+/// state the other frontends should mirror — a registration, or a panel whose copy they
+/// show.
+pub fn routed(ext_id: &str, method: &str, args: &Value) -> bool {
+    let key = args.get(0).and_then(panel_key);
     with(ext_id, |routes| {
-        match method {
-            "webview.create" => {
-                if let Some(key) = owner_key(method, args) {
-                    routes.owners.insert(key.clone(), frontend.to_owned());
-                    routes.panels.insert(key, (args.clone(), None));
-                }
+        match (method, key) {
+            ("webview.create", Some(key)) => {
+                routes.panels.retain(|(panel, _)| *panel != key);
+                routes.panels.push((key, args.clone()));
+                return true;
             }
-            "webview.setHtml" => {
-                if let Some(panel) =
-                    owner_key(method, args).and_then(|key| routes.panels.get_mut(&key))
-                {
-                    panel.1 = args.get(1).cloned();
+            ("webview.setTitle", Some(key)) => {
+                let create = routes
+                    .panels
+                    .iter_mut()
+                    .find(|(panel, _)| *panel == key)
+                    .and_then(|(_, create)| create.get_mut(2));
+                if let (Some(slot), Some(title)) = (create, args.get(1)) {
+                    *slot = title.clone();
                 }
+                return true;
             }
-            "webview.setTitle" => {
-                if let Some(panel) =
-                    owner_key(method, args).and_then(|key| routes.panels.get_mut(&key))
-                {
-                    if let (Some(slot), Some(title)) = (panel.0.get_mut(2), args.get(1)) {
-                        *slot = title.clone();
-                    }
-                }
-            }
-            "webview.dispose" | "webviewView.dispose" => {
-                if let Some(key) = owner_key(method, args) {
-                    routes.owners.remove(&key);
-                    routes.panels.remove(&key);
-                }
+            ("webview.reveal", Some(_)) => return true,
+            ("webview.dispose", Some(key)) => {
+                routes.panels.retain(|(panel, _)| *panel != key);
+                return true;
             }
             _ => {}
         }
@@ -339,18 +272,26 @@ fn record(
     journal.push((key, method.to_owned(), args.clone()));
 }
 
-/// The journal, in order, as `{ method, args }` — what a late frontend replays.
+/// The journal, in order, as `{ method, args }` — what a late frontend replays — with
+/// one `webview.create` per live panel at its end, so the frontend opens their copies.
 pub fn journal(ext_id: &str) -> Vec<Value> {
+    let entry = |method: &str, args: &Value| {
+        let mut entry = Map::new();
+        entry.insert("method".into(), Value::String(method.to_owned()));
+        entry.insert("args".into(), args.clone());
+        Value::Object(entry)
+    };
     with(ext_id, |routes| {
         routes
             .journal
             .iter()
-            .map(|(_, method, args)| {
-                let mut entry = Map::new();
-                entry.insert("method".into(), Value::String(method.clone()));
-                entry.insert("args".into(), args.clone());
-                Value::Object(entry)
-            })
+            .map(|(_, method, args)| entry(method, args))
+            .chain(
+                routes
+                    .panels
+                    .iter()
+                    .map(|(_, create)| entry("webview.create", create)),
+            )
             .collect()
     })
 }
@@ -358,7 +299,6 @@ pub fn journal(ext_id: &str) -> Vec<Value> {
 /// A fresh process for `ext_id`: its predecessor's registrations and webviews are gone.
 pub fn reset(ext_id: &str) {
     with(ext_id, |routes| {
-        routes.owners.clear();
         routes.journal.clear();
         routes.panels.clear();
     });
@@ -368,10 +308,6 @@ pub fn reset(ext_id: &str) {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    fn claim(ext: &str, method: &str, args: Value) -> Option<String> {
-        preferred(ext, method, &args)
-    }
 
     #[test]
     fn a_call_names_its_frontend_and_only_the_relay_may_name_a_session() {
@@ -387,131 +323,96 @@ mod tests {
     #[test]
     fn a_request_follows_the_call_in_flight() {
         let ext = "test.call-in-flight";
-        assert_eq!(claim(ext, "notify", json!([])), None);
-        let desktop = call_begin(ext, "main", "runCommand", &json!({}));
-        assert_eq!(claim(ext, "notify", json!([])).as_deref(), Some("main"));
-        let remote = call_begin(ext, "remote/3", "runCommand", &json!({}));
+        assert_eq!(preferred(ext, "notify"), None);
+        let desktop = call_begin(ext, "main");
+        assert_eq!(preferred(ext, "notify").as_deref(), Some("main"));
+        let remote = call_begin(ext, "remote/3");
         assert_eq!(
-            claim(ext, "webview.create", json!([1])).as_deref(),
+            preferred(ext, "window.showQuickPick").as_deref(),
             Some("remote/3")
         );
+        assert_eq!(caller(ext).as_deref(), Some("remote/3"));
         drop(remote);
-        assert_eq!(claim(ext, "notify", json!([])).as_deref(), Some("main"));
+        assert_eq!(preferred(ext, "notify").as_deref(), Some("main"));
         drop(desktop);
-        assert_eq!(claim(ext, "notify", json!([])), None);
+        assert_eq!(preferred(ext, "notify"), None);
+        assert_eq!(caller(ext), None);
     }
 
     #[test]
-    fn two_remote_users_never_get_each_others_pages() {
-        // Through a Hub two people's browsers are two sessions of the same instance: each
-        // one's Git Graph opens in its own page, and the traffic of each panel stays there
-        // whoever clicked last.
-        let ext = "test.two-users";
+    fn every_webview_lives_in_the_desktop_window_whoever_asked() {
+        // One live chat per instance: a remote page's click that opens a panel, resolves
+        // a view or messages either still lands in the desktop window, whose page the
+        // remote copies — the conversation streams on both sides (2026-10-12).
+        let ext = "test.webview-home";
         reset(ext);
-        let alice = call_begin(ext, "remote/1", "runCommand", &json!({}));
-        let to = claim(ext, "webview.create", json!([1, "view", "Git Graph"])).unwrap();
-        routed(ext, "webview.create", &json!([1, "view", "Git Graph"]), &to);
-        drop(alice);
-        let bob = call_begin(ext, "remote/2", "runCommand", &json!({}));
-        let to = claim(ext, "webview.create", json!([2, "view", "Git Graph"])).unwrap();
-        routed(ext, "webview.create", &json!([2, "view", "Git Graph"]), &to);
-        // Bob's call is still in flight; Alice's panel's traffic still goes to Alice.
-        assert_eq!(
-            claim(ext, "webview.postMessage", json!([1, {}])).as_deref(),
-            Some("remote/1")
-        );
-        assert_eq!(
-            claim(ext, "webview.postMessage", json!([2, {}])).as_deref(),
-            Some("remote/2")
-        );
-        drop(bob);
-        // Alice leaves: her panel's leftovers fall back to policy, never to Bob.
-        frontend_gone("remote/1");
-        assert_eq!(claim(ext, "webview.postMessage", json!([1, {}])), None);
-        assert_eq!(
-            claim(ext, "webview.postMessage", json!([2, {}])).as_deref(),
-            Some("remote/2")
-        );
+        let _remote = call_begin(ext, "remote/4");
+        for method in [
+            "webview.create",
+            "webview.setHtml",
+            "webview.postMessage",
+            "webview.reveal",
+            "webviewView.setHtml",
+            "webviewView.postMessage",
+            "webviewView.show",
+        ] {
+            assert_eq!(
+                preferred(ext, method).as_deref(),
+                Some(WEBVIEW_HOME),
+                "{method}"
+            );
+        }
     }
 
     #[test]
-    fn a_second_users_reveal_moves_the_one_panel_to_that_user() {
-        // Git Graph keeps one panel: B opened it, A asks for it — A must get it, carrying
-        // the page it shows; B's background traffic alone never moves it.
-        let ext = "test.panel-move";
+    fn a_panels_life_is_mirrored_and_replayed_to_late_frontends() {
+        let ext = "test.panel-life";
         reset(ext);
-        let b = call_begin(ext, "remote/2", "runCommand", &json!({}));
-        routed(
+        assert!(routed(
             ext,
             "webview.create",
-            &json!([1, "view", "Git Graph", 1, false]),
-            "remote/2",
-        );
-        routed(
+            &json!([1, "view", "Git Graph", 1, false])
+        ));
+        assert!(routed(
             ext,
-            "webview.setHtml",
-            &json!([1, "<p>graph</p>"]),
-            "remote/2",
-        );
-        routed(
+            "webview.create",
+            &json!([2, "claudeVSCodePanel", "Claude Code", 2, false])
+        ));
+        // The title a frontend attaching now opens the copy with is the current one.
+        assert!(routed(
             ext,
             "webview.setTitle",
-            &json!([1, "Git Graph RS"]),
-            "remote/2",
-        );
-        assert_eq!(panel_move(ext, "webview.reveal", &json!([1])), None);
-        drop(b);
-        assert_eq!(panel_move(ext, "webview.reveal", &json!([1])), None);
-        let a = call_begin(ext, "remote/1", "runCommand", &json!({}));
+            &json!([2, "Fix the build"])
+        ));
+        assert!(routed(ext, "webview.reveal", &json!([1])));
+        // The page's own traffic is not state: a copy follows the live page instead.
+        assert!(!routed(ext, "webview.setHtml", &json!([1, "<p>graph</p>"])));
+        assert!(!routed(ext, "webview.postMessage", &json!([2, {}])));
+        let panels = |ext: &str| -> Vec<Value> {
+            journal(ext)
+                .into_iter()
+                .filter(|entry| entry["method"] == "webview.create")
+                .map(|entry| entry["args"].clone())
+                .collect()
+        };
         assert_eq!(
-            panel_move(ext, "webview.postMessage", &json!([1, {}])),
+            panels(ext),
+            vec![
+                json!([1, "view", "Git Graph", 1, false]),
+                json!([2, "claudeVSCodePanel", "Fix the build", 2, false]),
+            ]
+        );
+        // The extension disposes one; the desktop's user closes the other's tab.
+        assert!(routed(ext, "webview.dispose", &json!([1])));
+        assert_eq!(
+            panel_closed(ext, &json!({ "event": "webviewMessage", "panelId": 2 })),
             None
         );
-        let moved = panel_move(ext, "webview.reveal", &json!([1])).unwrap();
         assert_eq!(
-            moved,
-            PanelMove {
-                from: "remote/2".into(),
-                to: "remote/1".into(),
-                create: json!([1, "view", "Git Graph RS", 1, false]),
-                html: Some(json!("<p>graph</p>")),
-            }
+            panel_closed(ext, &json!({ "event": "webviewDisposed", "panelId": 2 })),
+            Some(json!(2))
         );
-        set_owner(ext, "webview.reveal", &json!([1]), &moved.to);
-        assert_eq!(
-            claim(ext, "webview.postMessage", json!([1, {}])).as_deref(),
-            Some("remote/1")
-        );
-        assert_eq!(panel_move(ext, "webview.reveal", &json!([1])), None);
-        drop(a);
-    }
-
-    #[test]
-    fn a_dead_owners_panel_moves_to_the_reloader() {
-        // The panel's frontend went away (its page reloaded — `frontend_gone` cleared the
-        // claim) and the extension's "reveal the one panel I keep" arrives from the NEW
-        // frontend: the move hands the panel over, instead of the reveal landing on a
-        // page that has no record of it and nothing showing, forever.
-        let ext = "test.panel-reload";
-        reset(ext);
-        let old = call_begin(ext, "remote/4", "runCommand", &json!({}));
-        routed(
-            ext,
-            "webview.create",
-            &json!([1, "view", "Git Graph", 1, false]),
-            "remote/4",
-        );
-        routed(ext, "webview.setHtml", &json!([1, "<p>graph</p>"]), "remote/4");
-        drop(old);
-        frontend_gone("remote/4");
-        let fresh = call_begin(ext, "remote/5", "runCommand", &json!({}));
-        let moved = panel_move(ext, "webview.reveal", &json!([1])).unwrap();
-        assert_eq!(moved.from, "");
-        assert_eq!(moved.to, "remote/5");
-        assert_eq!(moved.html, Some(json!("<p>graph</p>")));
-        set_owner(ext, "webview.reveal", &json!([1]), &moved.to);
-        assert_eq!(panel_move(ext, "webview.reveal", &json!([1])), None);
-        drop(fresh);
+        assert!(panels(ext).is_empty());
     }
 
     #[test]
@@ -525,93 +426,18 @@ mod tests {
             ext,
             "webviewView.setHtml",
             &json!(["sessions", "<b>first</b>"]),
-            "remote/1",
         );
         routed(
             ext,
             "webviewView.setHtml",
             &json!(["sessions", "<b>second</b>"]),
-            "remote/1",
         );
-        let replayed: Vec<(String, Value)> = journal(ext)
+        let replayed: Vec<Value> = journal(ext)
             .into_iter()
-            .map(|entry| {
-                (
-                    entry["method"].as_str().unwrap().to_owned(),
-                    entry["args"].clone(),
-                )
-            })
-            .filter(|(method, _)| method == "webviewView.setHtml")
-            .map(|(_, args)| ("webviewView.setHtml".to_owned(), args))
+            .filter(|entry| entry["method"] == "webviewView.setHtml")
+            .map(|entry| entry["args"].clone())
             .collect();
-        assert_eq!(
-            replayed,
-            vec![("webviewView.setHtml".to_owned(), json!(["sessions", "<b>second</b>"]))]
-        );
-    }
-
-    #[test]
-    fn a_panel_belongs_to_the_frontend_that_created_it() {
-        let ext = "test.panel-owner";
-        reset(ext);
-        let call = call_begin(ext, "remote/4", "runCommand", &json!({}));
-        let target = claim(ext, "webview.create", json!([7, "view", "Git Graph"])).unwrap();
-        routed(
-            ext,
-            "webview.create",
-            &json!([7, "view", "Git Graph"]),
-            &target,
-        );
-        drop(call);
-        // Later, with the desktop calling, its traffic still reaches the remote page.
-        let _desktop = call_begin(ext, "main", "runCommand", &json!({}));
-        assert_eq!(
-            claim(ext, "webview.setHtml", json!([7, "<html>"])).as_deref(),
-            Some("remote/4")
-        );
-        assert_eq!(
-            claim(ext, "webview.postMessage", json!([8, {}])).as_deref(),
-            Some("main")
-        );
-        routed(ext, "webview.dispose", &json!([7]), "remote/4");
-        assert_eq!(
-            claim(ext, "webview.setHtml", json!([7, ""])).as_deref(),
-            Some("main")
-        );
-    }
-
-    #[test]
-    fn a_view_follows_the_frontend_that_last_showed_or_messaged_it() {
-        let ext = "test.view-owner";
-        reset(ext);
-        drop(call_begin(
-            ext,
-            "remote/5",
-            "webviewView.resolve",
-            &json!(["chat"]),
-        ));
-        assert_eq!(
-            claim(ext, "webviewView.setHtml", json!(["chat", "<html>"])).as_deref(),
-            Some("remote/5")
-        );
-        note_event(
-            ext,
-            "main",
-            &json!({ "event": "webviewViewMessage", "viewId": "chat", "message": {} }),
-        );
-        assert_eq!(
-            claim(ext, "webviewView.postMessage", json!(["chat", {}])).as_deref(),
-            Some("main")
-        );
-        note_event(
-            ext,
-            "remote/5",
-            &json!({ "event": "webviewMessage", "panelId": 3, "message": {} }),
-        );
-        assert_eq!(
-            claim(ext, "webview.postMessage", json!([3, {}])).as_deref(),
-            Some("remote/5")
-        );
+        assert_eq!(replayed, vec![json!(["sessions", "<b>second</b>"])]);
     }
 
     #[test]
@@ -621,47 +447,40 @@ mod tests {
         assert!(routed(
             ext,
             "commands.registerBatch",
-            &json!([["a.one", "a.two"]]),
-            "main"
+            &json!([["a.one", "a.two"]])
         ));
         assert!(routed(
             ext,
             "commands.execute",
-            &json!(["setContext", ["a:flag", false]]),
-            "main"
+            &json!(["setContext", ["a:flag", false]])
         ));
-        assert!(routed(ext, "statusbar.create", &json!(["item", 1]), "main"));
+        assert!(routed(ext, "statusbar.create", &json!(["item", 1])));
         assert!(routed(
             ext,
             "statusbar.set",
-            &json!(["item", { "text": "one", "visible": true }]),
-            "main"
+            &json!(["item", { "text": "one", "visible": true }])
         ));
         assert!(routed(
             ext,
             "commands.execute",
-            &json!(["setContext", ["a:flag", true]]),
-            "main"
+            &json!(["setContext", ["a:flag", true]])
         ));
         assert!(routed(
             ext,
             "statusbar.set",
-            &json!(["item", { "text": "two" }]),
-            "main"
+            &json!(["item", { "text": "two" }])
         ));
         assert!(routed(
             ext,
             "languages.registerHover",
-            &json!([{ "id": "h1" }]),
-            "main"
+            &json!([{ "id": "h1" }])
         ));
         // Not state: requests the journal never keeps.
-        assert!(!routed(ext, "notify", &json!(["info", "hi"]), "main"));
+        assert!(!routed(ext, "notify", &json!(["info", "hi"])));
         assert!(!routed(
             ext,
             "commands.execute",
-            &json!(["vscode.open", []]),
-            "main"
+            &json!(["vscode.open", []])
         ));
         assert_eq!(
             journal(ext),

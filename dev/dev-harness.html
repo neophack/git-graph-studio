@@ -21,6 +21,7 @@
 	<title>Git Graph Studio - dev harness</title>
 	<link rel="stylesheet" href="/theme/dark-modern.css" />
 	<script src="/gitgraph/config.js"></script>
+	<script src="/dev/dev-events.js"></script>
 	<script>
 		(function () {
 			'use strict';
@@ -128,6 +129,9 @@
 					},
 					transformCallback: function (callback) { return Math.floor(Math.random() * 1e9); }
 				};
+				// The event plugin, with emits crossing to the other dev pages (dev/dev-events.js):
+				// two dev pages become two frontends, as the Relay makes them.
+				window.__ggsDevEvents.bridge(window.__TAURI_INTERNALS__);
 			}
 
 			// The mode banner: a green harness against the mocks proves nothing about the

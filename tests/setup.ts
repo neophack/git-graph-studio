@@ -7,10 +7,10 @@
 
 import { beforeEach, vi } from 'vitest';
 
-import { backend, Channel, clipboard, dialog, invoke, listen, opener, windowApi, webviewApi } from './tauriMock';
+import { backend, Channel, clipboard, dialog, emit, invoke, listen, opener, windowApi, webviewApi } from './tauriMock';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke, Channel }));
-vi.mock('@tauri-apps/api/event', () => ({ listen }));
+vi.mock('@tauri-apps/api/event', () => ({ listen, emit }));
 vi.mock('@tauri-apps/api/window', () => windowApi);
 vi.mock('@tauri-apps/api/webview', () => webviewApi);
 vi.mock('@tauri-apps/plugin-dialog', () => dialog);

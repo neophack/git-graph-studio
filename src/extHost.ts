@@ -18,6 +18,8 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { commands } from './commands';
 import { assetUrl } from './remote/assetUrl';
 import { addressedHere, frontendClass, frontendId, remoteEnv } from './remote/session';
+import { panelStream, viewStream } from './remote/mirror/protocol';
+import { parseStream, setWebviewFrameSource } from './remote/mirror/webviewFrames';
 import { applyContributions, applyExtensionSettings, declaredCommand, extensionSettingDefs, extensionThemeList, extensionViewContributions, languageIdFor, localize, registerContextProvider, registerExtensionSnippets, registerExtensionThemes, removeContributions, type ExtensionThemeDef, type ManifestContributes } from './contributions';
 import { describeDetail, extLog, extLogEnabled, extLogLevel, extLogOnce, flushExtLog, levelForConsole, setExtLogOutput, type ExtLogLevel } from './extLog';
 import { defaultNodeEnv, type NodeEnv } from './extModuleLoader';
@@ -93,16 +95,12 @@ export const MARKETPLACE_URL = 'https://open-vsx.org';
  *  reader forwards it; see ext_process.rs's HOST_REQUEST_EVENT). */
 export const HOST_REQUEST_EVENT = 'ext-host-request';
 /** The Tauri event a backend's state-carrying host request is mirrored on (a command
- *  registration, a `setContext` key, a status bar item — ext_routing.rs decides which):
- *  `{ extId, method, args, served }`. Every frontend but the one that served the request
- *  applies it without answering, so a remote page and the desktop window show the same
- *  entries (docs/ggs-remote-plan.md §8.6 #1). */
+ *  registration, a `setContext` key, a status bar item, a webview panel's create / title /
+ *  reveal / dispose — ext_routing.rs decides which): `{ extId, method, args, served,
+ *  caller }`. Every frontend but the one that served the request applies it without
+ *  answering, so a remote page and the desktop window show the same entries
+ *  (docs/ggs-remote-plan.md §8.6 #1); `caller` is the frontend whose call caused it. */
 export const HOST_STATE_EVENT = 'ext-host-state';
-/** The Tauri event a webview panel changes frontends on (ext_process.rs's
- *  WEBVIEW_MOVE_EVENT): `{ extId, panelId, from, to, create, html }`. An extension keeping
- *  one panel (Git Graph) reveals it when another user asks — the asker's page opens it from
- *  its create arguments and html, the old page drops its tab without telling the extension. */
-export const WEBVIEW_MOVE_EVENT = 'ext-webview-move';
 /** The Tauri event a provider switch's backend restart announces (cmd_providers emits it
  *  when the fresh process's start attempt settles, success or failure — the old process
  *  is dead either way; payload: the extension id). The host resets that extension's
@@ -921,11 +919,80 @@ export class ExtensionHost {
 	}
 
 	/** One registration another frontend served (or this one missed), applied through the
-	 *  same `serveRequest` path a live request takes — every one of them is idempotent. */
+	 *  same `serveRequest` path a live request takes — every one of them is idempotent. A
+	 *  webview panel's life reaches here too: this page shows the desktop window's panel as
+	 *  a copy tab (§22.6) — and one opened or revealed anywhere OPENS here (2026-10-12, the
+	 *  owner's direction: a page one side opens, the other side opens too — the old
+	 *  background-unless-asked policy left the other side's copy invisible behind whatever
+	 *  page it was on), closed when the panel goes. */
 	private applyMirroredState(extId: string, method: string, args: unknown[]): void {
 		const handle = this.frames.get(extId) ?? this.remoteHandle(extId);
 		this.frames.set(extId, handle);
+		if (this.sharesWebviews(extId)) {
+			const panelId = args[0] as number;
+			switch (method) {
+				case 'webview.create': {
+					const create = [...args];
+					create[4] = false; // preserveFocus off: the copy takes the foreground
+					args = create;
+					break;
+				}
+				case 'webview.dispose':
+					this.releaseWebview(extId, panelId);
+					return;
+				case 'webview.reveal': {
+					const view = this.webviews.get(this.webviewKey(extId, panelId));
+					// A copy closed here reopens: the panel itself lives on in the desktop window.
+					if (view && !this.webviewCopies.has(this.webviewKey(extId, panelId))) this.onOpenWebview?.(panelId, view.title, extId, undefined, true);
+					else if (view) this.onRevealWebviewTab?.(this.webviewTabId(extId, panelId));
+					return;
+				}
+			}
+		}
 		void this.serveRequest(method, args, extId, handle).catch((error) => extLog('warn', extId, `mirrored ${method} failed: ${String(error)}`));
+	}
+
+	/* ---------- Webview copies (docs/ggs-remote-plan.md §22.6) ---------- */
+
+	/** Whether this page shows the desktop window's copies of an extension's webviews
+	 *  instead of hosting its own: a remote page's backend extension — its webviews all
+	 *  live in the desktop window (ext_routing.rs), one live page per instance, so a
+	 *  conversation asked on either side streams on both. */
+	private sharesWebviews(extId: string): boolean {
+		return frontendClass() === 'remote' && this.backendHosted(extId);
+	}
+
+	/** The panel copies mounted in this page, by panel key. */
+	private readonly webviewCopies = new Set<string>();
+
+	/** Mount the live copy of the desktop window's frame for a stream into a pane. */
+	private mountWebviewCopy(container: HTMLElement, stream: string): () => void {
+		let dispose: (() => void) | null = null;
+		let gone = false;
+		void import('./remote/mirror/webviewCopy')
+			.then(({ mountWebviewCopy }) => {
+				if (!gone) dispose = mountWebviewCopy(container, stream);
+			})
+			.catch((error) => extLog('warn', 'host', `webview copy ${stream}: ${String(error)}`));
+		return () => {
+			gone = true;
+			dispose?.();
+		};
+	}
+
+	/** The desktop window's frame for a stream (the replica host reads it). */
+	private webviewFrameFor(stream: string): HTMLIFrameElement | null {
+		const parsed = parseStream(stream);
+		if (!parsed) return null;
+		if ('view' in parsed) return this.webviewViews.get(parsed.view)?.frame ?? null;
+		return this.webviews.get(this.webviewKey(parsed.extId, parsed.panelId))?.frame ?? null;
+	}
+
+	/** A remote page watches a webview view the desktop has not shown yet: resolve it now,
+	 *  exactly as its first visibility would. */
+	private ensureWebviewShown(stream: string): void {
+		const parsed = parseStream(stream);
+		if (parsed && 'view' in parsed && !this.resolvedWebviewViews.has(parsed.view)) this.noteViewVisible(parsed.view, true);
 	}
 
 	
@@ -964,19 +1031,19 @@ export class ExtensionHost {
 		// The same backend's registrations another frontend served: applied here too, never
 		// answered (the serving frontend already did) — Claude Code's activity-bar container
 		// is gated on a `setContext` key, and a frontend that missed it never shows the entry.
-		void listen<{ extId: string; method: string; args: unknown[]; served?: string }>(HOST_STATE_EVENT, (event) => {
+		void listen<{ extId: string; method: string; args: unknown[]; served?: string; caller?: string | null }>(HOST_STATE_EVENT, (event) => {
 			const { extId, method, args, served } = event.payload;
 			if (served === frontendId()) return;
 			this.applyMirroredState(extId, method, args ?? []);
 		}).catch((error) => extLog('warn', 'host', `the extension-host state channel is unavailable: ${String(error)}`));
-		void listen<{ extId: string; panelId: number; from: string; to: string; create: unknown[]; html: string | null }>(WEBVIEW_MOVE_EVENT, (event) => {
-			const { extId, panelId, from, to, create, html } = event.payload;
-			const me = frontendId();
-			if (from === me || (from === 'remote' && frontendClass() === 'remote')) this.releaseWebview(extId, panelId);
-			if (to !== me) return;
-			this.applyMirroredState(extId, 'webview.create', create ?? []);
-			if (typeof html === 'string') this.applyMirroredState(extId, 'webview.setHtml', [panelId, html]);
-		}).catch((error) => extLog('warn', 'host', `the webview move channel is unavailable: ${String(error)}`));
+		// The desktop window is where every backend extension's webviews live (ext_routing.rs):
+		// it tells the replica host which frame a remote page's copy reads (§22.6).
+		if (frontendClass() === 'main') {
+			setWebviewFrameSource({
+				frameFor: (stream) => this.webviewFrameFor(stream),
+				ensure: (stream) => this.ensureWebviewShown(stream)
+			});
+		}
 		// A provider switch restarted a bridged extension's backend (cmd_providers): the
 		// fresh process re-activated, but its sidebar views stay marked resolved with the
 		// old process's page — the claude chat would keep showing the login state it
@@ -1799,6 +1866,20 @@ export class ExtensionHost {
 	 *  tab owns the iframe, the disposer runs on close). The document is a srcdoc composed
 	 *  with the acquireVsCodeApi bootstrap — `setHtml` reloads it, as VS Code's webviews do. */
 	mountWebview(extId: string, panelId: number, container: HTMLElement): () => void {
+		if (this.sharesWebviews(extId)) {
+			// A remote page shows the desktop window's live panel (§22.6). Closing the copy
+			// crosses: module 19's sync sees the tab go and closes the PC's real panel (its
+			// close reaches the extension, and the backend's dispose mirror clears every
+			// remaining copy). Until that mirror lands here the record stays, so the
+			// extension's next reveal of the panel opens the copy again.
+			const key = this.webviewKey(extId, panelId);
+			this.webviewCopies.add(key);
+			const dispose = this.mountWebviewCopy(container, panelStream(extId, panelId));
+			return () => {
+				this.webviewCopies.delete(key);
+				dispose();
+			};
+		}
 		const view = this.webviews.get(this.webviewKey(extId, panelId));
 		if (!view) extLog('warn', 'host', `webview ${extId}#${panelId}: mounted with no panel record — the tab will sit empty until the extension creates it`);
 		const frame = document.createElement('iframe');
@@ -1855,6 +1936,8 @@ export class ExtensionHost {
 	 *  panel's does). An html that arrived before the mount (or after the provider's
 	 *  resolve, which the first visibility triggers) applies here. */
 	mountWebviewView(viewId: string, extId: string, container: HTMLElement): () => void {
+		// A remote page shows the desktop window's live page of the view (§22.6).
+		if (this.sharesWebviews(extId)) return this.mountWebviewCopy(container, viewStream(viewId));
 		const record = this.webviewViews.get(viewId) ?? { extId, html: '', frame: null, pending: [], loaded: false, painted: null, loadGrace: null, firstPaintTimer: null };
 		this.webviewViews.set(viewId, record);
 		const frame = document.createElement('iframe');
@@ -1984,9 +2067,9 @@ export class ExtensionHost {
 
 	/** The extension disposed its panel: close its tab (the tab's disposer finishes the job),
 	 *  or — if no tab ever mounted — just run the same teardown. */
-	/** Drop a panel's tab here WITHOUT disposing the panel: it moved to another frontend
-	 *  (see WEBVIEW_MOVE_EVENT), where the extension's panel object lives on. The record
-	 *  goes first, so the tab's disposer finds nothing to report `webviewDisposed` for. */
+	/** Drop a panel's copy tab here WITHOUT disposing anything: the panel lives (or died)
+	 *  in the desktop window. The record goes first, so the tab's disposer finds nothing to
+	 *  report `webviewDisposed` for. */
 	private releaseWebview(extId: string, panelId: number): void {
 		const key = this.webviewKey(extId, panelId);
 		const view = this.webviews.get(key);
@@ -1997,11 +2080,16 @@ export class ExtensionHost {
 		if (view.firstPaintTimer !== null) clearTimeout(view.firstPaintTimer);
 		view.frame = null;
 		this.onCloseWebviewTab?.(this.webviewTabId(extId, panelId));
-		extLog('info', 'host', `webview ${extId}#${panelId}: moved to another frontend`);
+		extLog('info', 'host', `webview ${extId}#${panelId}: the desktop window's panel closed — its copy goes`);
 	}
 
 	private closeWebview(extId: string, panelId: number): void {
 		if (!this.webviews.has(this.webviewKey(extId, panelId))) return;
+		// A copy's panel is the desktop window's to dispose: here only the copy goes.
+		if (this.sharesWebviews(extId)) {
+			this.releaseWebview(extId, panelId);
+			return;
+		}
 		if (this.onCloseWebviewTab) {
 			this.onCloseWebviewTab(this.webviewTabId(extId, panelId));
 			if (!this.webviews.has(this.webviewKey(extId, panelId))) return; // the tab's disposer already ran
@@ -3561,6 +3649,13 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 		const contribution = extensionViewContributions().find((entry) => entry.views.some((view) => view.viewId === viewId));
 		const declaredBy = contribution?.extId;
 		const owner = this.treeProviders.get(viewId) ?? this.webviewViews.get(viewId)?.extId ?? declaredBy;
+		// A webview view this page shows as a copy: the desktop window's page is the one the
+		// provider resolved and the one whose visibility the extension tracks (§22.6) — a
+		// resolve from here would reload the desktop's chat under its user.
+		if (owner && this.sharesWebviews(owner) && contribution?.views.some((view) => view.viewId === viewId && view.type === 'webview')) {
+			if (visible) void this.ensureActive(owner);
+			return;
+		}
 		if (visible && owner) void this.ensureActive(owner).then(() => {
 			if (owner === undefined) return;
 			// A webview view resolves its provider once, at the first visibility after its

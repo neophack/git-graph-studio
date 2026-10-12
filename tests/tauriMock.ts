@@ -19,6 +19,8 @@ export const backend = {
 	wireChannel: null as ((channel: Channel<unknown>) => void) | null,
 	calls: [] as { command: string; args: Record<string, unknown> }[],
 	listeners: new Map<string, ((event: { payload: unknown }) => void)[]>(),
+	/** Every `emit` the frontend made (Tauri's broadcast, recorded before delivery). */
+	emits: [] as { event: string; payload: unknown }[],
 	dialog: { openResult: null as string | null, saveResult: null as string | null },
 	opened: [] as string[],
 	revealed: [] as string[],
@@ -42,6 +44,7 @@ export const backend = {
 		this.handlers.clear();
 		this.calls.length = 0;
 		this.listeners.clear();
+		this.emits.length = 0;
 		this.dialog.openResult = null;
 		this.dialog.saveResult = null;
 		this.opened.length = 0;
@@ -141,6 +144,14 @@ export async function listen(event: string, handler: (event: { payload: unknown 
 		const index = list.indexOf(handler);
 		if (index !== -1) list.splice(index, 1);
 	};
+}
+
+/** The stand-in for Tauri's `emit`: recorded, and delivered locally to every listener of the
+ *  event — the same broadcast semantics the app's own events ride (a listener receives its
+ *  window's emits too, exactly as the real runtime delivers them). */
+export async function emit(event: string, payload?: unknown): Promise<void> {
+	backend.emits.push({ event, payload });
+	backend.emit(event, payload);
 }
 
 export const dialog = {

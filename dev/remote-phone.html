@@ -4,12 +4,15 @@
      over a scripted fake backend, without a daemon or a PC. Open it at phone size
      (`npm run dev:vite`, then /dev/remote-phone.html in a 390×844 device view);
      scripts/probes/remote-phone-shots.mjs drives it headless and saves screenshots. Layout
-     only: nothing here proves the transport. Never ships. -->
+     only for the transport — except the cross-frontend operation sync (§22.7): paired with
+     the dev harness page over dev/dev-events.js, this page is a real second frontend.
+     Never ships. -->
 <html lang="en" class="vscode-dark">
 <head>
 	<meta charset="UTF-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
 	<title>Git Graph Studio - phone preview</title>
+	<script src="/dev/dev-events.js"></script>
 	<link id="theme-css" rel="stylesheet" href="/theme/dark-modern.css" />
 	<script>
 		(function () {
@@ -97,6 +100,33 @@
 					return Promise.resolve(handler ? handler(args || {}) : null);
 				},
 				transformCallback: function () { return Math.floor(Math.random() * 1e9); }
+			};
+			// The event plugin, with emits crossing to the other dev pages (dev/dev-events.js).
+			window.__ggsDevEvents.bridge(window.__TAURI_INTERNALS__);
+			// This page is a SECOND FRONTEND: the harness page plays the PC's window, this one
+			// a phone's own workbench (frontend id `remote/1`), and the two exchange app
+			// events — the cross-frontend operation sync (§22.7) is exercised for real, in a
+			// plain browser. The stub transport serves only the commands a live page would
+			// reach it with; nothing here runs at boot.
+			window.__GGS_REMOTE__ = {
+				transport: {
+					// The Transport surface's no-op halves — nothing here runs at boot, but
+					// the shell's install asks for the listener registrations up front.
+					emit: function () { return undefined; },
+					listen: function () { return 0; },
+					unlisten: function () { return undefined; },
+					onWindows: function () { return function () { return undefined; }; },
+					onNotice: function () { return function () { return undefined; }; },
+					spawn: function () { return undefined; },
+					closeInstance: function () { return undefined; },
+					restartInstance: function () { return undefined; },
+					detach: function () { return undefined; },
+					shutdown: function () { return undefined; },
+					ping: function () { return undefined; },
+					onVisibility: function () { return undefined; }
+				},
+				attached: { instance: 'preview', version: '0.0.0', assetBase: '/', ggsBase: '/', frontendId: 'remote/1' },
+				basePath: '/'
 			};
 			document.documentElement.setAttribute('data-remote-shell', '');
 		})();

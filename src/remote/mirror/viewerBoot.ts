@@ -2,6 +2,9 @@
 // boot.ts, it shows the PC window's live copy — nothing of the workbench runs in the
 // browser. Hello on arrival and every few seconds (the PC forgets a silent viewer), bye on
 // leaving; a reload is a new hello and a new snapshot, and the PC never restarts anything.
+// When the copy cannot be this page's UI (§22.5, uiMode.ts) — a phone, and the PC user puts
+// the window on screen, or another viewer owns it in the other form factor — the page
+// switches to its own workbench; the bar's button does the same on request.
 
 import { showBanner } from '../banner';
 import { setLocale, t } from '../../i18n';
@@ -9,6 +12,7 @@ import type { Attached, Transport } from '../transport';
 import { HELLO_EVERY_MS, MIRROR_DOWN, MIRROR_UP, type DownMessage, type UpPayload } from './protocol';
 import { MirrorViewer } from './viewer';
 import { ViewerInput } from './viewerInput';
+import { isPhoneWidth, modeUrl, type ModeRequest } from './uiMode';
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
 	const node = document.createElement(tag);
@@ -23,7 +27,7 @@ function allowZoom(): void {
 	meta?.setAttribute('content', 'width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content');
 }
 
-export function bootMirrorViewer(transport: Transport, attached: Attached, basePath: string): void {
+export function bootMirrorViewer(transport: Transport, attached: Attached, basePath: string, request: ModeRequest = 'auto'): void {
 	if (/^zh/i.test(navigator.language)) setLocale('zh-cn');
 	allowZoom();
 	document.documentElement.classList.add('mirror-mode');
@@ -54,19 +58,44 @@ export function bootMirrorViewer(transport: Transport, attached: Attached, baseP
 		}
 	});
 	input = new ViewerInput(viewer, send, document);
+	let leaving = false;
+	const ownUi = () => {
+		if (leaving) return;
+		leaving = true;
+		send({ k: 'bye' });
+		location.replace(modeUrl(location.href, 'frontend'));
+	};
+	const phone = () => isPhoneWidth(stage.clientWidth || window.innerWidth);
+	// An explicit `?mirror=1` keeps the copy whatever happens on the PC.
+	if (request === 'auto') {
+		transport.onWindows((list) => {
+			if (phone() && list.find((info) => info.id === attached.instance)?.visible === true) ownUi();
+		});
+	}
 
 	const bar = el('div', 'mirror-bar');
 	const keyboard = el('button', 'mirror-bar-button', t('remote.mirror.keyboard'));
 	keyboard.type = 'button';
 	keyboard.addEventListener('click', () => input?.focusKeyboard());
+	const own = el('button', 'mirror-bar-button', t('remote.mirror.ownUi'));
+	own.type = 'button';
+	own.title = t('remote.mirror.ownUiHint');
+	own.addEventListener('click', ownUi);
 	const windows = el('a', 'mirror-bar-button', t('remote.mirror.windows'));
 	windows.href = new URL('windows', new URL(basePath, location.href)).href;
-	bar.append(keyboard, windows);
+	bar.append(keyboard, own, windows);
 	document.body.appendChild(bar);
 	const status = document.querySelector('#boot-splash .boot-status');
 	if (status) status.textContent = t('remote.mirror.waiting');
 
-	transport.listen(MIRROR_DOWN, (event) => viewer.receive(event.payload as DownMessage));
+	transport.listen(MIRROR_DOWN, (event) => {
+		const message = event.payload as DownMessage;
+		if (message?.k === 'own') {
+			if (message.to === from && request === 'auto') ownUi();
+			return;
+		}
+		viewer.receive(message);
+	});
 	hello();
 	setInterval(hello, HELLO_EVERY_MS);
 	let resizeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -78,5 +107,7 @@ export function bootMirrorViewer(transport: Transport, attached: Attached, baseP
 	document.addEventListener('visibilitychange', () => {
 		if (document.visibilityState === 'visible') hello();
 	});
-	window.addEventListener('pagehide', () => send({ k: 'bye' }));
+	window.addEventListener('pagehide', () => {
+		if (!leaving) send({ k: 'bye' });
+	});
 }

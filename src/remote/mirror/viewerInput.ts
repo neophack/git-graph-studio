@@ -6,6 +6,11 @@
 // keyboard. Touch has its own grammar: a tap is a click, a one-finger drag scrolls the
 // PC (replayed as wheel deltas), a long press opens the context menu, two fingers are the
 // browser's own pinch-zoom.
+//
+// Embedded in a remote workbench (a webview stream's fluid copy, webviewCopy.ts) the layer
+// is a guest: it takes no focus until the copy is touched, scrolling stays the copy's own
+// (wheel and drag scroll it natively), and the keys typed for the PC do not also reach the
+// workbench's keybindings.
 
 import { modsOf, type Spot, type UpPayload } from './protocol';
 import type { MirrorViewer } from './viewer';
@@ -18,6 +23,13 @@ const TOUCH_ECHO_MS = 800;
 const MOVE_EVERY_MS = 33;
 
 type Send = (message: UpPayload) => void;
+
+export interface ViewerInputOptions {
+	/** A guest inside a remote workbench (see the file comment). */
+	embedded?: boolean;
+	/** Where the keyboard proxy lives (default: the page's body). */
+	parent?: HTMLElement;
+}
 
 const EDITABLE = 'input, textarea, [contenteditable]:not([contenteditable="false"]), .cm-content, .xterm';
 
@@ -53,12 +65,15 @@ export class ViewerInput {
 	private hoverId: number | undefined;
 	private composing = false;
 	private readonly coarse: boolean;
+	private readonly embedded: boolean;
 
 	constructor(
 		private readonly viewer: MirrorViewer,
 		private readonly send: Send,
-		page: Document
+		page: Document,
+		options: ViewerInputOptions = {}
 	) {
+		this.embedded = options.embedded === true;
 		this.coarse = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
 		const proxy = page.createElement('textarea');
 		proxy.className = 'mirror-proxy';
@@ -67,10 +82,15 @@ export class ViewerInput {
 		proxy.setAttribute('autocorrect', 'off');
 		proxy.setAttribute('spellcheck', 'false');
 		proxy.setAttribute('aria-hidden', 'true');
-		page.body.appendChild(proxy);
+		(options.parent ?? page.body).appendChild(proxy);
 		this.proxy = proxy;
 		this.wireProxy();
-		if (!this.coarse) proxy.focus({ preventScroll: true });
+		if (!this.coarse && !this.embedded) proxy.focus({ preventScroll: true });
+	}
+
+	dispose(): void {
+		this.cancelTouch();
+		this.proxy.remove();
 	}
 
 	/** Raise the keyboard (the toolbar's keyboard button; a tap on an editable). */
@@ -159,6 +179,8 @@ export class ViewerInput {
 			if (id !== undefined) this.send({ k: 'sel', i: id, v: (target as HTMLSelectElement).value });
 		}, opts);
 		doc.addEventListener('wheel', (event) => {
+			// Embedded: the copy scrolls itself.
+			if (this.embedded) return;
 			event.preventDefault();
 			const spot = this.spot(event, doc);
 			if (!spot) return;
@@ -237,6 +259,8 @@ export class ViewerInput {
 		if (!touch.moved && Math.hypot(point.clientX - touch.x, point.clientY - touch.y) < TAP_SLOP) return;
 		touch.moved = true;
 		if (touch.timer !== null) clearTimeout(touch.timer);
+		// Embedded: the drag is the copy's own native scroll.
+		if (this.embedded) return;
 		event.preventDefault();
 		const dx = touch.lastX - point.clientX;
 		const dy = touch.lastY - point.clientY;
@@ -253,7 +277,7 @@ export class ViewerInput {
 		if (touch.timer !== null) clearTimeout(touch.timer);
 		this.flushWheel();
 		if (touch.moved || touch.long) {
-			event.preventDefault();
+			if (!this.embedded || touch.long) event.preventDefault();
 			return;
 		}
 		if (touch.target?.closest?.('select')) return;
@@ -283,6 +307,8 @@ export class ViewerInput {
 	private wireProxy(): void {
 		const proxy = this.proxy;
 		proxy.addEventListener('keydown', (event) => {
+			// Keys typed into the copy are the PC page's, never the workbench's shortcuts.
+			if (this.embedded) event.stopPropagation();
 			if (event.isComposing || this.composing || event.keyCode === 229) return;
 			const lower = event.key.toLowerCase();
 			const command = event.ctrlKey || event.metaKey;

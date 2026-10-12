@@ -553,36 +553,59 @@ describe('phone page stack', () => {
 	});
 });
 
-// The phone's read-only open (editLock.ts): a locked editor refuses input until its bar's
-// unlock reconfigures it in place.
+// The phone's read-only open (editLock.ts): a locked editor refuses input until the app
+// bar's lock button unlocks it, and the same button locks it again.
 describe('edit lock', () => {
 	const files = () => backend.on('read_file', ({ path }) => {
 		const text = String(path).endsWith('b.txt') ? 'the second file\n' : 'line one\nline two\n';
 		return { contents: text, binary: false, size: text.length };
 	});
 
-	it('locks a freshly opened file on the phone shell and unlocks it for good', async () => {
+	afterEach(() => resetWorkbenchWatch());
+
+	it('locks a freshly opened file on the phone shell and toggles it from the app bar', async () => {
 		document.documentElement.setAttribute('data-remote-shell', '');
 		document.documentElement.dataset['formFactor'] = 'phone';
 		try {
 			files();
+			const sidebar = document.getElementById('sidebar');
+			if (sidebar) sidebar.hidden = true;
+			const bar = createAppBar({ openDrawer: () => undefined, openEditors: () => undefined, editorActions: () => undefined });
+			document.body.prepend(bar);
+			const lock = () => bar.querySelector<HTMLButtonElement>('.ggs-appbar-btn.edit-lock')!;
+			// No editor yet: the button stays out of the bar.
+			expect(lock().hidden).toBe(true);
 			const group = new EditorGroup(document.getElementById('editorGroup')!);
 			await group.openFile('C:\\repo\\a.txt');
+			await flushMutations();
 			const view = group.activeView!;
 			expect(view.state.readOnly).toBe(true);
-			const bar = document.querySelector<HTMLElement>('.edit-lock-bar')!;
-			expect(bar).not.toBeNull();
-			expect(bar.textContent).toContain('Read-only');
-			click(bar.querySelector('button')!);
+			// No bar above the editor any more: the lock lives in the app bar.
+			expect(document.querySelector('.edit-lock-bar')).toBeNull();
+			expect(lock().hidden).toBe(false);
+			expect(lock().dataset.state).toBe('locked');
+			expect(lock().querySelector('.codicon-lock')).not.toBeNull();
+			expect(lock().getAttribute('aria-label')).toBe('Unlock to edit');
+			click(lock());
 			expect(view.state.readOnly).toBe(false);
-			expect(view.dom.closest('.editor-pane')?.querySelector('.edit-lock-bar') ?? null).toBeNull();
+			expect(lock().dataset.state).toBe('unlocked');
+			expect(lock().querySelector('.codicon-unlock')).not.toBeNull();
+			expect(lock().getAttribute('aria-label')).toBe('Lock editing');
+			click(lock());
+			expect(view.state.readOnly).toBe(true);
+			expect(lock().dataset.state).toBe('locked');
+			click(lock());
 			// A second file opens locked — every fresh open does — while the unlocked tab
-			// keeps its grant across a tab switch and back.
+			// keeps its grant across a tab switch and back, the button following the tab.
 			await group.openFile('C:\\repo\\b.txt');
+			await flushMutations();
 			expect(group.activeView!.state.readOnly).toBe(true);
+			expect(lock().dataset.state).toBe('locked');
 			await group.openFile('C:\\repo\\a.txt');
+			await flushMutations();
 			expect(group.activeView).toBe(view);
 			expect(group.activeView!.state.readOnly).toBe(false);
+			expect(lock().dataset.state).toBe('unlocked');
 		} finally {
 			delete document.documentElement.dataset['formFactor'];
 			document.documentElement.removeAttribute('data-remote-shell');
@@ -597,7 +620,7 @@ describe('edit lock', () => {
 			const group = new EditorGroup(document.getElementById('editorGroup')!);
 			await group.openFile('C:\\repo\\a.txt');
 			expect(group.activeView!.state.readOnly).toBe(false);
-			expect(document.querySelector('.edit-lock-bar')).toBeNull();
+			expect(document.querySelector('[data-edit-lock]')).toBeNull();
 		} finally {
 			delete document.documentElement.dataset['formFactor'];
 			document.documentElement.removeAttribute('data-remote-shell');

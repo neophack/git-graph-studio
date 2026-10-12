@@ -3,12 +3,13 @@
 // what you can do there. Leading: ☰, the drawer with every page and the full menus. Middle:
 // the page's title and a subtitle — the open file and its folder on the Editor, the branch
 // and the pending changes on Changes, the workspace elsewhere; on the Editor a tap opens the
-// open editors list. Trailing: the page's own actions (Go to File everywhere; the editor's,
-// the repository's or the terminal's action sheet), each a 44 px target.
+// open editors list. Trailing: the page's own actions (Go to File everywhere; the editor's
+// lock toggle and action sheet, the repository's or the terminal's), each a 44 px target.
 import { commands } from '../commands';
 import { t, tf } from '../i18n';
 import type { MenuEntry } from '../ui';
 import { showActionSheet } from './actionSheet';
+import { activeEditLock, isEditLocked, onEditLockChange, toggleEditLock } from './editLock';
 import { activeTab, BUILTIN_VIEWS, currentPage, editorPlaceholderShown, extensionContainers, launchers, onWorkbenchChange, type PageId } from './pages';
 
 export interface AppBarHooks {
@@ -159,11 +160,35 @@ export function panelSheet(): MenuEntry[] {
 	];
 }
 
+/** The editor's lock toggle (editLock.ts): a phone opens every file locked, and this one
+ *  button flips the active editor between locked and editable. Hidden while the active
+ *  editor carries no lock; `syncEditLockButton` keeps its glyph and label current. */
+function editLockButton(): HTMLButtonElement {
+	const button = barButton('lock', t('remote.editLock.unlock'), () => {
+		const host = activeEditLock();
+		if (host) toggleEditLock(host);
+	}, 'edit-lock');
+	syncEditLockButton(button);
+	return button;
+}
+
+function syncEditLockButton(button: HTMLButtonElement): void {
+	const host = activeEditLock();
+	button.hidden = !host;
+	if (!host) return;
+	const locked = isEditLocked(host);
+	const label = t(locked ? 'remote.editLock.unlock' : 'remote.editLock.lock');
+	button.dataset.state = locked ? 'locked' : 'unlocked';
+	button.title = label;
+	button.setAttribute('aria-label', label);
+	button.firstElementChild!.className = `codicon codicon-${locked ? 'lock' : 'unlock'}`;
+}
+
 /** The trailing actions of a page. */
 function trailingActions(page: PageId, hooks: AppBarHooks): HTMLElement[] {
 	const quickOpen = () => barButton('go-to-file', t('remote.appbar.quickOpen'), () => void commands.execute('workbench.quickOpen'));
 	const more = (entries: () => MenuEntry[], title: string) => barButton('kebab-vertical', t('remote.appbar.more'), () => showActionSheet(entries(), title));
-	if (page === 'editor') return [quickOpen(), barButton('kebab-vertical', t('remote.appbar.more'), () => hooks.editorActions())];
+	if (page === 'editor') return [editLockButton(), quickOpen(), barButton('kebab-vertical', t('remote.appbar.more'), () => hooks.editorActions())];
 	if (page === 'explorer') return [quickOpen(), more(filesSheet, t('remote.tabs.explorer'))];
 	if (page === 'scm') return [barButton('sync', t('remote.git.sync'), () => void commands.execute('git.sync')), more(gitSheet, t('remote.page.scm'))];
 	// The panel's own header already carries New and Kill beside its view tabs.
@@ -215,8 +240,11 @@ export function createAppBar(hooks: AppBarHooks): HTMLElement {
 			actionsFor = page;
 			actions.replaceChildren(...trailingActions(page, hooks));
 		}
+		const lock = actions.querySelector<HTMLButtonElement>('.edit-lock');
+		if (lock) syncEditLockButton(lock);
 	};
 	render();
 	onWorkbenchChange(render);
+	onEditLockChange(render);
 	return bar;
 }

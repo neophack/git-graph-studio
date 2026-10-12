@@ -3123,7 +3123,11 @@ fn hmac_and_hkdf_answer_nodes_vectors() {
     // same vectors Node's crypto answers, over the pretend runtime's prelude surfaces
     // (Claude Remote's pairing proofs and frame-key derivation ride them).
     let tmp = tempfile::tempdir().unwrap();
-    let entry = make_package(tmp.path(), &[("index.js", r#"
+    let entry = make_package(
+        tmp.path(),
+        &[(
+            "index.js",
+            r#"
 const crypto = require('crypto');
 const key = Buffer.alloc(20, 0x0b);
 const mac = crypto.createHmac('sha256', key).update('Hi There').digest('hex');
@@ -3136,9 +3140,15 @@ const stringInputs = crypto.createHmac('sha256', Buffer.from('key')).update(Buff
 let threw = '';
 try { crypto.createHmac('sha1', 'k'); } catch (e) { threw = String(e.message); }
 module.exports.dispatch = (cmd) => ({ mac, multi, okm, stringInputs, threw });
-"#)]);
+"#,
+        )],
+    );
     let answers = serve(entry, &[initialize(), run_command("x", json!(null))]);
-    let result = answers[1].as_ref().expect("the command ran").as_object().unwrap();
+    let result = answers[1]
+        .as_ref()
+        .expect("the command ran")
+        .as_object()
+        .unwrap();
     assert_eq!(
         result["mac"].as_str().unwrap(),
         "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
@@ -3155,6 +3165,15 @@ module.exports.dispatch = (cmd) => ({ mac, multi, okm, stringInputs, threw });
         "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
     );
     // The base64 rendering of HMAC-SHA256("key", "data"), Node's own encoding path.
-    assert_eq!(result["stringInputs"].as_str().unwrap(), "UDH+PZicbRU3oBP6bnOdojRj/a7DtwE32Cjjas4iG9A=");
-    assert!(result["threw"].as_str().unwrap().contains("Unknown HMAC digest"), "{result:?}");
+    assert_eq!(
+        result["stringInputs"].as_str().unwrap(),
+        "UDH+PZicbRU3oBP6bnOdojRj/a7DtwE32Cjjas4iG9A="
+    );
+    assert!(
+        result["threw"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown HMAC digest"),
+        "{result:?}"
+    );
 }

@@ -80,9 +80,13 @@
 !macro NSIS_HOOK_POSTUNINSTALL
   ${If} $UpdateMode <> 1
     StrCpy $R5 "$PROFILE\.ggs"
+    ; Every nsExec is capped: a child the uninstaller waits on must never hold the
+    ; uninstall open (the 2026-10-12 stuck uninstall: taskkill /T with two /FI filters
+    ; matched nothing and blocked forever, leaving the page parked on the last
+    ; "Delete file" line — the log text only moves on file operations).
     ; The logon task first: it restarts a daemon that exits on failure, and a killed one
     ; reads as failed. The Run value is the fallback autostart some systems are given.
-    nsExec::Exec 'schtasks /Delete /TN "GGS Remote" /F'
+    nsExec::Exec /TIMEOUT=8000 'schtasks /Delete /TN "GGS Remote" /F'
     Pop $R6
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "GGS Remote"
     ; A clean stop takes the tray icon with it; capped, since a wedged daemon's admin call
@@ -94,7 +98,10 @@
       Sleep 800
     ${EndIf}
     ReadEnvStr $R7 USERNAME
-    nsExec::Exec 'taskkill /F /T /FI "IMAGENAME eq ggs-remote.exe" /FI "USERNAME eq $R7"'
+    ; No /T: the daemon's descendants are this machine's own app windows, which the
+    ; app-is-running check already asked about — and /T beside two /FI filters hangs
+    ; taskkill forever when the pair matches nothing (reproduced 2026-10-12).
+    nsExec::Exec /TIMEOUT=8000 'taskkill /F /FI "IMAGENAME eq ggs-remote.exe" /FI "USERNAME eq $R7"'
     Pop $R6
     Sleep 500
     RMDir /r "$R5\remote\bin"

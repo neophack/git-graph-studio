@@ -803,17 +803,18 @@ page shows the integration's state (`claude_mcp_status`).
   instance's frontends answers a backend's `ggs.hostRequest` — `main`, or ONE remote
   session `remote/<n>` (the Relay's `x-ggs-frontend` header, believed only from the
   Relay's webview; through a Hub these are different people, and one user's click must
-  never land in another's page): a webview's owner, else the frontend whose call is in
-  flight, else the composition root's policy, the Relay then handing a session's
-  request to that session only; an explicit `webview.reveal` from another frontend's
-  call MOVES a one-panel extension's panel (`ext-webview-move`: the asker opens it from
-  the remembered create args and html, the old page drops its tab without a
-  `webviewDisposed`); a session that ends releases what it owned
-  (`remote_host::on_frontend_gone`); plus the compacted registration journal —
-  commands, `setContext` keys, providers, views, status bar items — that a frontend
-  attaching to a running backend replays through `ext_process_registrations`, and
-  that the `ext-host-state` event mirrors live into every frontend but the serving
-  one; and since a backend bakes its webview asset URLs from whichever frontend served
+  never land in another's page): every webview panel and view request goes to the
+  desktop window (`WEBVIEW_HOME`, 2026-10-12 — one live page per instance, which a
+  remote workbench shows as a live copy, module 19's webview streams: before, a webview
+  followed whichever frontend last resolved or messaged it, and the other side's Claude
+  chat froze), else the frontend whose call is in flight, else the composition root's
+  policy, the Relay then handing a session's request to that session only; plus the
+  compacted registration journal — commands, `setContext` keys, providers, views,
+  status bar items, and the live panels' create args — that a frontend attaching to a
+  running backend replays through `ext_process_registrations`, and that the
+  `ext-host-state` event mirrors live into every frontend but the serving one (a
+  panel's create / title / reveal / dispose among them, with the `caller` whose click
+  caused it; the desktop's own tab close crosses as a mirrored dispose); and since a backend bakes its webview asset URLs from whichever frontend served
   its activation, every frontend rewrites those roots to its own before rendering
   (`extHost.ts`'s `localizeAssetRoots`); 2026-10-11: a remote page never saw
   claude-code's activation-time `setContext`, so its Claude Code container stayed
@@ -1320,7 +1321,45 @@ database) carries the link through NAT. The whole design lives in
   defaults a synthetic event lacks (focus on press, scroll on wheel, editing keys).
   `host.ts` keeps the viewers (hello every 10 s, forgotten after 35 s silent, the recorder
   stopped with the last one) and `hostStub.ts` loads it on the first hello, so a desktop
-  nobody watches pays nothing. A reload is a new hello and a new snapshot: nothing on the
+  nobody watches pays nothing. **Webview streams** (2026-10-12, §22.6): a page that runs
+  its own workbench still shows the PC's one live page of each backend extension's
+  webviews — Claude Code's chat view or tab — as a copy: `webviewCopy.ts` mounts a fluid
+  viewer (laid out at the pane's own size, scrolled locally, following a scroller's end)
+  in the pane, its up messages carry the stream (`view:<id>` / `panel:<ext>#<id>`), and
+  `webviewShare.ts` on the PC records that one frame's document and replays the copy's
+  taps and keys into it; `webviewFrames.ts` is the lookup the desktop's extension host
+  registers (and the resolve of a view nobody showed yet) — so a question asked on
+  either side streams on both. A mirrored `webview.create` / `webview.reveal` opens the
+  copy tab in the FOREGROUND whichever side clicked (2026-10-12, the owner's direction:
+  a Claude chat or Git Graph page opened on one side must open on the other — the old
+  background-unless-asked policy hid the copy behind the other side's current page), and
+  closing an extension page closes it everywhere: the panel's tab id
+  (`webview:<extId>:<panelId>`) is the same on every frontend, so the operation sync's
+  `closeTab` message turns a copy's close on a phone into the PC panel's close (which
+  reaches the extension, the backend's dispose mirror then clearing every remaining
+  copy) — before, a closed copy left the PC's page open (the owner's report, same day).
+  **Cross-frontend operation sync** (2026-10-12, §22.7): two
+  frontends running different UIs (the PC's desktop UI, a phone's own workbench) mirror
+  each other's OPERATIONS, not pixels — every file open (with its line anchor), tab close,
+  active-tab switch (an extension page's tab too — Git Graph or Claude Code's chat focused
+  on one side comes forward on the other, a panel's own create never echoing as a switch),
+  sidebar view switch and — from a side-by-side workbench only, a phone's side-page
+  dismissal being navigation — side bar hide crosses as one `studio://workbench-sync`
+  message (paths only, well under 200 bytes; a mirror-mode page subscribes to nothing and
+  pays nothing) and lands on the other side's own workbench through
+  `src/remote/workbenchSync.ts`: the open facade and the change hooks are wrapped for local
+  operations, remote operations run raw and pre-mark an `announced` set (an echo can never
+  re-announce; a local change mid-apply still crosses), a refused close settles both sides
+  on "kept open", and the sync is silent until boot is through and local-only while a
+  session restore rebuilds that frontend's own tabs. `editorArea.ts`'s `closeFilePath` /
+  `revealFilePath` (and `EditorGroup.editorForPath`) are the path-keyed landings. A fluid copy of a page that renders its content around
+  the scroll position needs the copy's own scroll on the PC too (2026-10-12, the phone's
+  git-graph-rs showed blank below its header): the copy reports each scroller's position
+  as a fraction of its range (`k:'scroll'`, its pixels being another layout's), the
+  replayer puts the PC's same scroller there and the virtualized list renders the window
+  the viewer looks at; and the end-following pins only a scroller already at its end —
+  the old scan dragged every scrollable element (git-graph-rs's list, restored at the
+  PC's offset) into the unrendered space its spacer rows stand in for. A reload is a new hello and a new snapshot: nothing on the
   PC restarts, and a Claude turn keeps running whether any browser is open. While viewers
   watch, the window's page keeps the focus (`remote_mirror_focus` — WebView2's
   `Emulation.setFocusEmulationEnabled`), a hidden window is sized to the viewer
@@ -1335,7 +1374,15 @@ database) carries the link through NAT. The whole design lives in
   hidden window phone-sized, and below 600 px the window wears the phone shell itself
   (`phoneShell.ts` — the shell below, its stylesheet, the pointer counted as coarse), so
   the phone sees the phone app 1:1; the drawer's browser-only rows (windows, transfers,
-  Data Saver) stay out there. The viewer's stylesheets come from the desktop build through
+  Data Saver) stay out there. One window wears one UI at a time, so a page whose UI cannot be the window's
+  runs its own workbench instead (`uiMode.ts`, 2026-10-12, the owner's direction: the PC
+  keeps the PC UI while a phone uses the phone UI): a phone attaching to a window the PC
+  user has on screen (WINDOWS' `visible`), or flipping to one when the tray shows it; the
+  first viewer owning the window's fit, a viewer of the other form factor told `own` by
+  the host; the viewer bar's Own UI button and `?frontend=1` on request, the
+  `remote.liveView` command (the drawer's row) and `?mirror=1` back to the copy. The tray
+  lists every window of this PC — its Windows submenu, hidden ones marked, a click the
+  daemon's `Show` (`tray/mod.rs`'s `window_entries`). The viewer's stylesheets come from the desktop build through
   the daemon's `main/…` app-asset route (`remote_host::app_asset` — css, fonts, images
   only, never scripts or pages).
 - **The app side** (`src/remote/` + `remote.html` + `relay.html` + `vite.remote.config.ts` +
@@ -1364,9 +1411,10 @@ database) carries the link through NAT. The whole design lives in
   keyboard (`data-keyboard`) and the body follows the visual viewport, so the bars step
   aside or lift with the content. A swipe from the left edge closes a side-view page
   (`gestures.ts`'s `swipeBack`, wired in `shell.ts`), the quick input (palette, quick
-  picks) becomes a full-screen page (`remote.css`), and every file opens read-only with an
-  unlock bar above the editor — one explicit tap reconfigures that editor editable in
-  place (`editLock.ts`; the compartment leads the extension list because CodeMirror's
+  picks) becomes a full-screen page (`remote.css`), and every file opens read-only with a
+  lock button in the app bar — one tap reconfigures that editor editable in place, the
+  next locks it again (`editLock.ts`, the button in `appBar.ts`; 2026-10-12 it replaced
+  the unlock bar that took a row above the editor; the compartment leads the extension list because CodeMirror's
   `readOnly` facet combine honours the first value — `editor.ts` and `docEditView.ts`
   each reconfigure their own). Settings is the phone's own page (`settingsPage.ts`,
   2026-10-12: the desktop dialog's 720 px two panes leave a 390 px screen a 130 px strip,

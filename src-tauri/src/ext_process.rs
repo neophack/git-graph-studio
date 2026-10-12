@@ -44,16 +44,12 @@ use crate::ext_routing;
 pub const HOST_REQUEST_EVENT: &str = "ext-host-request";
 
 /// The Tauri event a state-carrying host request is mirrored on (`{extId, method, args,
-/// served}`): every frontend but the one that served it applies the registration without
-/// answering — a remote page keeps the same commands, context keys and status bar items
-/// the desktop window got from the backend (see `ext_routing`).
+/// served, caller}`): every frontend but the one that served it applies the registration
+/// without answering — a remote page keeps the same commands, context keys and status bar
+/// items the desktop window got from the backend — and a webview panel's life (create,
+/// title, reveal, dispose) reaches the pages that show its copy (see `ext_routing`).
+/// `caller` is the frontend whose call was in flight, if any: the page that asked.
 pub const HOST_STATE_EVENT: &str = "ext-host-state";
-
-/// The Tauri event a webview panel changes frontends on (`{extId, panelId, from, to,
-/// create, html}`, see `ext_routing::panel_move`): the `to` frontend opens the panel from
-/// its create arguments and html, the `from` frontend drops its tab without telling the
-/// extension — the panel lives on, in the page of the user who asked for it.
-pub const WEBVIEW_MOVE_EVENT: &str = "ext-webview-move";
 
 /// The Tauri event a backend's start settles on (`{extId, running, pid?, startCount?,
 /// error?}`): up with its pid, or failed with the reason. The Extensions view refreshes
@@ -764,45 +760,21 @@ impl ReaderState {
                                 .and_then(Value::as_str)
                                 .unwrap_or_default();
                             let args = params.get("args").cloned().unwrap_or_else(|| json!([]));
-                            // The frontend that answers: the webview's owner or the caller
-                            // in flight, when either claims it (ext_routing), else policy.
-                            if let Some(moved) =
-                                ext_routing::panel_move(&self.ext_id, host_method, &args)
-                            {
-                                // Only to a frontend that is there to take it.
-                                if host_request_frontend(app, Some(moved.to.clone())) == moved.to {
-                                    ext_routing::set_owner(
-                                        &self.ext_id,
-                                        host_method,
-                                        &args,
-                                        &moved.to,
-                                    );
-                                    let _ = app.emit(
-                                        WEBVIEW_MOVE_EVENT,
-                                        json!({
-                                            "extId": self.ext_id,
-                                            "panelId": args.get(0).cloned().unwrap_or(Value::Null),
-                                            "from": moved.from,
-                                            "to": moved.to,
-                                            "create": moved.create,
-                                            "html": moved.html,
-                                        }),
-                                    );
-                                }
-                            }
-                            let claimed = ext_routing::preferred(&self.ext_id, host_method, &args);
+                            // The frontend that answers: the desktop window for a webview,
+                            // else the caller in flight (ext_routing), else policy.
+                            let claimed = ext_routing::preferred(&self.ext_id, host_method);
                             let frontend = host_request_frontend(app, claimed);
-                            let stateful =
-                                ext_routing::routed(&self.ext_id, host_method, &args, &frontend);
-                            if stateful {
+                            if ext_routing::routed(&self.ext_id, host_method, &args) {
                                 // The other frontends mirror the registration (a context
-                                // key, a command, a status bar item) without answering it.
+                                // key, a command, a status bar item) without answering it,
+                                // and follow a webview panel's life with their copy of it.
                                 let _ = app.emit(
                                     HOST_STATE_EVENT,
                                     json!({
                                         "extId": self.ext_id,
                                         "method": host_method,
                                         "args": args,
+                                        "caller": ext_routing::caller(&self.ext_id),
                                         "served": frontend,
                                     }),
                                 );
@@ -1273,10 +1245,10 @@ pub async fn ext_process_run(
     let dir = cmd_ext::extensions_dir(&app)?;
     let state = state.inner().clone();
     let args = args.unwrap_or_else(|| json!([]));
-    // The caller claims the requests its command makes (a panel it opens opens in it).
+    // The caller claims the requests its command makes (a quick pick it opens opens in it).
     let frontend = caller(&webview, &request);
     tauri::async_runtime::spawn_blocking(move || {
-        let _call = ext_routing::call_begin(&ext_id, &frontend, "runCommand", &args);
+        let _call = ext_routing::call_begin(&ext_id, &frontend);
         state.run(&dir, &ext_id, &command, args)
     })
     .await
@@ -1323,10 +1295,10 @@ pub async fn ext_process_invoke(
     let dir = cmd_ext::extensions_dir(&app)?;
     let state = state.inner().clone();
     let args = args.unwrap_or_else(|| json!([]));
-    // The caller claims the requests the call makes — a view it resolves renders in it.
+    // The caller claims the requests the call makes (webviews excepted: see ext_routing).
     let frontend = caller(&webview, &request);
     tauri::async_runtime::spawn_blocking(move || {
-        let _call = ext_routing::call_begin(&ext_id, &frontend, &method, &args);
+        let _call = ext_routing::call_begin(&ext_id, &frontend);
         state.call(&dir, &ext_id, &method, json!({ "args": args }))
     })
     .await
@@ -1346,14 +1318,26 @@ pub fn ext_process_registrations(ext_id: String) -> Vec<Value> {
 /// watcher batches.
 #[tauri::command]
 pub fn ext_process_push_event(
+    app: tauri::AppHandle,
     webview: tauri::Webview,
     request: tauri::ipc::Request<'_>,
     state: tauri::State<'_, ProcessHostState>,
     ext_id: String,
     event: Value,
 ) -> Result<(), String> {
-    // A webview's message makes its sender the webview's owner: the replies go back to it.
-    ext_routing::note_event(&ext_id, &caller(&webview, &request), &event);
+    // The desktop window's user closed a panel's tab: the pages showing its copy drop it.
+    if let Some(panel_id) = ext_routing::panel_closed(&ext_id, &event) {
+        let _ = app.emit(
+            HOST_STATE_EVENT,
+            json!({
+                "extId": ext_id,
+                "method": "webview.dispose",
+                "args": [panel_id],
+                "caller": Value::Null,
+                "served": caller(&webview, &request),
+            }),
+        );
+    }
     let procs = state.procs.lock().unwrap();
     let line = proto::notification("ggs.hostEvent", event);
     write_line(&procs, &ext_id, &line)

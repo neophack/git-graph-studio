@@ -3653,10 +3653,18 @@ mod ext_asset_tests {
         // header the browser blocks the response as a CORS violation - a console error per
         // such package instead of the prewarm's silent skip.
         let tmp = home_with_demo_page();
-        let response =
-            serve_ext_asset_from(tmp.path(), &request_for("/acme.demo-1.0.0/webview/index.js"));
+        let response = serve_ext_asset_from(
+            tmp.path(),
+            &request_for("/acme.demo-1.0.0/webview/index.js"),
+        );
         assert_eq!(response.status(), tauri::http::StatusCode::NOT_FOUND);
-        assert_eq!(response.headers().get("access-control-allow-origin").unwrap(), "*");
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            "*"
+        );
     }
 
     /// A scratch home whose one package (`acme.demo` 2.0.0) carries a manifest, so the
@@ -4658,7 +4666,8 @@ mod crypto_derivation_tests {
         )
         .unwrap();
         zip.start_file("extension/extension.js", options).unwrap();
-        zip.write_all(b"module.exports = { activate: () => {} };").unwrap();
+        zip.write_all(b"module.exports = { activate: () => {} };")
+            .unwrap();
         zip.start_file("extension/crypto.js", options).unwrap();
         zip.write_all(
             // The qualified form, exactly as the real crypto.js spells it — an aliased
@@ -4701,7 +4710,8 @@ module.exports = { mac };",
         )
         .unwrap();
         zip.start_file("extension/extension.js", options).unwrap();
-        zip.write_all(b"const n = require('crypto'); n.createHmac('sha256', k);").unwrap();
+        zip.write_all(b"const n = require('crypto'); n.createHmac('sha256', k);")
+            .unwrap();
         zip.finish().unwrap();
 
         let info = install_from_vsix_into(&exts, &vsix, false).unwrap();
@@ -4731,7 +4741,8 @@ module.exports = { mac };",
         )
         .unwrap();
         zip.start_file("extension/extension.js", options).unwrap();
-        zip.write_all(b"module.exports = { activate: () => {} };").unwrap();
+        zip.write_all(b"module.exports = { activate: () => {} };")
+            .unwrap();
         zip.finish().unwrap();
 
         let info = install_from_vsix_into(&exts, &vsix, false).unwrap();
@@ -4767,11 +4778,7 @@ module.exports = { mac };",
 
         let info = install_from_vsix_into(&exts, &vsix, false).unwrap();
         assert!(
-            info.capabilities
-                .as_ref()
-                .unwrap()
-                .backend
-                .is_none(),
+            info.capabilities.as_ref().unwrap().backend.is_none(),
             "hashing alone never derives a backend"
         );
     }

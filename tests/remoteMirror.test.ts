@@ -3,16 +3,22 @@
 // the copy, URLs crossing as tokens, a sequence gap asking for a fresh snapshot — the
 // input replay on the PC (a tap as a full press-release-click, keys and text into the
 // focused editable, a select's value), and the host's viewer lifecycle (hello earns a
-// snapshot and a fit, a silent viewer is forgotten and the recorder stops with the last).
+// snapshot and a fit, a silent viewer is forgotten and the recorder stops with the last),
+// and which UI a page runs (§22.5): the first viewer owns the window, a viewer of the other
+// form factor — or a phone while the PC user has the window on screen — runs its own; and
+// a page that runs its own still shows the PC's one live page of an extension webview
+// (§22.6): the frame's stream copied into a fluid viewer, its input replayed into the frame.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DomRecorder } from '../src/remote/mirror/recorder';
 import { MirrorViewer } from '../src/remote/mirror/viewer';
 import { InputReplayer, keyCodeFor } from '../src/remote/mirror/replay';
 import { MirrorHost, fitFor } from '../src/remote/mirror/host';
 import { isSpecialKey } from '../src/remote/mirror/viewerInput';
+import { isPhoneWidth, modeUrl, requestedMode, wantsOwnUi } from '../src/remote/mirror/uiMode';
 import { enterPhone, leavePhone } from '../src/remote/mirror/phoneShell';
 import { coarsePointer } from '../src/remote/responsive';
-import { APP_TOKEN, GGS_TOKEN, canonicalize, canonicalizeCss, localizeTokens, type DownMessage, type MirrorOp, type UpMessage } from '../src/remote/mirror/protocol';
+import { APP_TOKEN, GGS_TOKEN, canonicalize, canonicalizeCss, localizeTokens, panelStream, viewStream, type DownMessage, type MirrorOp, type UpMessage } from '../src/remote/mirror/protocol';
+import { parseStream, setWebviewFrameSource } from '../src/remote/mirror/webviewFrames';
 
 /** A PC document of its own, so the copy and the original never share a tree. */
 function pcDocument(body: string): Document {
@@ -311,6 +317,52 @@ describe('the host', () => {
 	});
 });
 
+describe('one window, different UIs', () => {
+	it('gives a phone its own UI while the PC user has the window on screen', () => {
+		expect(isPhoneWidth(390)).toBe(true);
+		expect(isPhoneWidth(1280)).toBe(false);
+		// The PC keeps the desktop UI, the phone runs the phone app instead of a shrunken copy.
+		expect(wantsOwnUi('auto', true, true)).toBe(true);
+		// A hidden window is the phone's to lay out: the copy, 1:1.
+		expect(wantsOwnUi('auto', true, false)).toBe(false);
+		// A desktop browser watches the desktop UI as it is.
+		expect(wantsOwnUi('auto', false, true)).toBe(false);
+		// The URL forces either mode.
+		expect(wantsOwnUi('mirror', true, true)).toBe(false);
+		expect(wantsOwnUi('frontend', false, false)).toBe(true);
+	});
+
+	it('pins a switch in the URL so a reload keeps it', () => {
+		const page = 'https://pc:47615/w/abc/v/1/?frontend=1#x';
+		expect(requestedMode(new URL(page).search)).toBe('frontend');
+		const live = modeUrl(page, 'mirror');
+		expect(requestedMode(new URL(live).search)).toBe('mirror');
+		expect(new URL(live).searchParams.has('frontend')).toBe(false);
+		expect(requestedMode('')).toBe('auto');
+	});
+
+	it('fits the window to its first viewer only and sends the other form factor its own UI', () => {
+		document.body.innerHTML = '<p>pc</p>';
+		const sent: DownMessage[] = [];
+		const fit = vi.fn();
+		const host = new MirrorHost(document, { send: (message) => sent.push(message), fit, focus: () => undefined, now: () => 0 });
+		host.receive({ k: 'hello', from: 'remote/1', vw: 390, vh: 844, touch: true });
+		expect(fit).toHaveBeenLastCalledWith(390, 844);
+		// A desktop browser joining a phone-shaped window: no refit, its own workbench.
+		host.receive({ k: 'hello', from: 'remote/2', vw: 1440, vh: 900, touch: false });
+		expect(fit).toHaveBeenCalledTimes(1);
+		expect(sent).toContainEqual({ k: 'own', to: 'remote/2' });
+		// A second phone shares the copy.
+		host.receive({ k: 'hello', from: 'remote/3', vw: 400, vh: 800, touch: true });
+		expect(sent.filter((message) => message.k === 'own')).toHaveLength(1);
+		expect(fit).toHaveBeenCalledTimes(1);
+		// The owner leaves: the next viewer inherits the window.
+		host.receive({ k: 'bye', from: 'remote/1' });
+		host.receive({ k: 'bye', from: 'remote/2' });
+		expect(fit).toHaveBeenLastCalledWith(400, 800);
+	});
+});
+
 describe('the phone mode of the PC window', () => {
 	it('wears the phone shell while a phone watches, and gives the desktop back after', () => {
 		const root = document.documentElement;
@@ -330,5 +382,195 @@ describe('the phone mode of the PC window', () => {
 		expect(root.hasAttribute('data-remote-shell')).toBe(false);
 		expect(root.dataset['formFactor']).toBeUndefined();
 		expect(root.classList.contains('remote-shell')).toBe(false);
+	});
+});
+
+describe('webview streams (§22.6)', () => {
+	afterEach(() => setWebviewFrameSource(null));
+
+	it('names a view or a panel, and reads the name back', () => {
+		expect(parseStream(viewStream('claudeVSCodeSidebar'))).toEqual({ view: 'claudeVSCodeSidebar' });
+		expect(parseStream(panelStream('Anthropic.claude-code', 3))).toEqual({ extId: 'Anthropic.claude-code', panelId: 3 });
+		expect(parseStream('panel:broken')).toBeNull();
+		expect(parseStream('other:x')).toBeNull();
+	});
+
+	it('copies the PC frame into a fluid viewer live, and replays the copy’s typing into the frame', async () => {
+		// The desktop window's chat frame: the one live page of the conversation.
+		const frame = document.createElement('iframe');
+		document.body.appendChild(frame);
+		const pcDoc = frame.contentDocument!;
+		pcDoc.body.innerHTML = '<div id="log"><p>first answer</p></div><textarea id="ask"></textarea>';
+		const ensure = vi.fn();
+		const stream = viewStream('chat');
+		setWebviewFrameSource({ frameFor: (key) => (key === stream ? frame : null), ensure });
+		const sent: DownMessage[] = [];
+		const focus = vi.fn();
+		const pc = new MirrorHost(document, { send: (message) => sent.push(message), fit: () => undefined, focus, now: () => 0 });
+		// The remote page's copy, and a whole-window viewer that must ignore the stream.
+		const pane = document.createElement('div');
+		document.body.appendChild(pane);
+		const copy = new MirrorViewer(pane, 'remote/3', { appBase: 'https://p/main/', ggsBase: 'https://p/ggs/', resnap: () => undefined, stream, fluid: true });
+		const windowViewer = new MirrorViewer(document.createElement('div'), 'remote/3', { appBase: 'https://p/main/', ggsBase: 'https://p/ggs/', resnap: () => undefined });
+		pc.receive({ k: 'hello', from: 'remote/3', w: stream, vw: 390, vh: 700, touch: true });
+		await vi.waitFor(() => expect(sent.some((message) => message.k === 'snap')).toBe(true));
+		expect(ensure).toHaveBeenCalledWith(stream);
+		expect(focus).toHaveBeenCalledWith(true);
+		const deliver = () => {
+			for (const message of sent.splice(0)) {
+				copy.receive(message);
+				windowViewer.receive(message);
+			}
+		};
+		deliver();
+		expect(copy.root?.getElementById('log')?.textContent).toBe('first answer');
+		expect(windowViewer.root).toBeNull();
+		// The fluid copy fills its pane instead of scaling the PC's size.
+		const copyFrame = pane.querySelector('iframe')!;
+		expect(copyFrame.style.width).toBe('100%');
+		expect(copyFrame.getAttribute('scrolling')).toBeNull();
+		// The PC's page streams on: the copy follows.
+		pcDoc.getElementById('log')!.insertAdjacentHTML('beforeend', '<p>streaming…</p>');
+		await vi.waitFor(() => expect(sent.some((message) => message.k === 'ops')).toBe(true));
+		deliver();
+		expect(copy.root?.getElementById('log')?.textContent).toBe('first answerstreaming…');
+		// The remote user taps the ask field and types: it lands in the PC's frame.
+		const askId = copy.idOf(copy.root!.getElementById('ask')!)!;
+		pc.receive({ k: 'ptr', from: 'remote/3', w: stream, ev: 'down', b: 0, m: 0, d: 1, i: askId, fx: 0.5, fy: 0.5 });
+		pc.receive({ k: 'ptr', from: 'remote/3', w: stream, ev: 'up', b: 0, m: 0, d: 1, i: askId, fx: 0.5, fy: 0.5 });
+		pc.receive({ k: 'text', from: 'remote/3', w: stream, v: 'why?' });
+		expect((pcDoc.getElementById('ask') as HTMLTextAreaElement).value).toBe('why?');
+		// The page leaving ends the stream and, with nobody watching, the focus emulation.
+		pc.receive({ k: 'bye', from: 'remote/3', w: stream });
+		expect(focus).toHaveBeenLastCalledWith(false);
+	});
+
+	it('re-snapshots every viewer when the frame loads a new document', async () => {
+		const frame = document.createElement('iframe');
+		document.body.appendChild(frame);
+		frame.contentDocument!.body.innerHTML = '<p>old</p>';
+		let current: HTMLIFrameElement = frame;
+		const stream = panelStream('acme.chat', 1);
+		setWebviewFrameSource({ frameFor: () => current, ensure: () => undefined });
+		const sent: DownMessage[] = [];
+		const pc = new MirrorHost(document, { send: (message) => sent.push(message), fit: () => undefined, focus: () => undefined, now: () => 0 });
+		pc.receive({ k: 'hello', from: 'remote/4', w: stream, vw: 390, vh: 700, touch: true });
+		await vi.waitFor(() => expect(sent.filter((message) => message.k === 'snap')).toHaveLength(1));
+		// The tab remounted: a new frame element with a new document.
+		const next = document.createElement('iframe');
+		document.body.appendChild(next);
+		next.contentDocument!.body.innerHTML = '<p>new</p>';
+		current = next;
+		await vi.waitFor(() => expect(sent.filter((message) => message.k === 'snap')).toHaveLength(2), { timeout: 3000 });
+		const last = sent.filter((message) => message.k === 'snap').at(-1)!;
+		expect(last).toMatchObject({ to: 'remote/4', w: stream });
+		pc.receive({ k: 'bye', from: 'remote/4', w: stream });
+	});
+
+	// jsdom lays nothing out: a scroller's metrics are stubbed per element, the scrollTop
+	// setter recording what the code under test scrolled to (the yank under test, the sync).
+	function stubScroller(el: HTMLElement, metrics: { top?: number; height?: number; view?: number }): { top(): number; grow(to: number): void } {
+		let top = metrics.top ?? 0;
+		let height = metrics.height ?? 5000;
+		const view = metrics.view ?? 700;
+		Object.defineProperty(el, 'scrollTop', { configurable: true, get: () => top, set: (value: number) => { top = value; } });
+		Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => height });
+		Object.defineProperty(el, 'clientHeight', { configurable: true, get: () => view });
+		return { top: () => top, grow: (to: number) => { height = to; } };
+	}
+
+	/** A fluid copy of `body` over a host's share, with the copy's #scroller stubbed from
+	 * `copyMetrics` while its document fills (the moment the end-scan runs). */
+	async function fluidRig(body: string, copyMetrics: { top?: number; height?: number; view?: number }, pcMetrics?: { top?: number; height?: number; view?: number }) {
+		const frame = document.createElement('iframe');
+		document.body.appendChild(frame);
+		frame.contentDocument!.body.innerHTML = body;
+		const pcScroller = frame.contentDocument!.getElementById('scroller') as HTMLElement;
+		if (pcMetrics) stubScroller(pcScroller, pcMetrics);
+		const stream = viewStream('graph');
+		setWebviewFrameSource({ frameFor: () => frame, ensure: () => undefined });
+		const sent: DownMessage[] = [];
+		const pc = new MirrorHost(document, { send: (message) => sent.push(message), fit: () => undefined, focus: () => undefined, now: () => 0 });
+		const pane = document.createElement('div');
+		document.body.appendChild(pane);
+		let copyScroller: HTMLElement | null = null;
+		let grow: (to: number) => void = () => undefined;
+		const reports: Array<[number, number, boolean]> = [];
+		const copy = new MirrorViewer(pane, 'remote/5', {
+			appBase: 'https://p/main/', ggsBase: 'https://p/ggs/', resnap: () => undefined, stream, fluid: true,
+			onScroll: (id, fraction, end) => reports.push([id, fraction, end]),
+			onDocument: (doc) => {
+				const el = doc.getElementById('scroller');
+				if (el) {
+					grow = stubScroller(el, copyMetrics).grow;
+					copyScroller = el;
+				}
+			}
+		});
+		pc.receive({ k: 'hello', from: 'remote/5', w: stream, vw: 390, vh: 700, touch: true });
+		await vi.waitFor(() => expect(sent.some((message) => message.k === 'snap')).toBe(true));
+		const deliver = () => {
+			for (const message of sent.splice(0)) copy.receive(message);
+		};
+		deliver();
+		return { pc, copy, pane, frame, sent, deliver, reports, grow, scroller: () => copyScroller!, pcScroller };
+	}
+
+	it('leaves a virtualized list copy at the PC’s offset — never dragged into its unrendered end', async () => {
+		// git-graph-rs renders the viewport plus a buffer, spacers standing in for the rest:
+		// the copy must stay where the PC's page is, not be dragged to the bottom spacer.
+		const rig = await fluidRig('<div id="scroller" style="overflow-y: auto"><div id="rows">r</div></div>', { top: 0, height: 5000, view: 700 });
+		expect(rig.scroller().style.overflowY).toBe('auto');
+		expect(rig.scroller().scrollTop).toBe(0);
+		// The batch past the end-scan's window must not drag it either.
+		rig.frame.contentDocument!.getElementById('rows')!.insertAdjacentHTML('beforeend', '<p>more</p>');
+		await new Promise((resolve) => setTimeout(resolve, 1100));
+		await vi.waitFor(() => expect(rig.sent.some((message) => message.k === 'ops')).toBe(true));
+		rig.deliver();
+		expect(rig.scroller().scrollTop).toBe(0);
+		rig.copy.dispose();
+		rig.pane.remove();
+		rig.pc.receive({ k: 'bye', from: 'remote/5', w: viewStream('graph') });
+	});
+
+	it('still pins a chat scroller the copy restored at its end, following its growth', async () => {
+		const rig = await fluidRig('<div id="scroller" style="overflow-y: auto"><div id="log"><p>answer</p></div></div>', { top: 4800, height: 5000, view: 200 });
+		// The end-scan opens on the first batch past its window: a scroller that sits at its
+		// end (a chat read from its latest message) is pinned there.
+		const pcLog = rig.frame.contentDocument!.getElementById('log')!;
+		pcLog.insertAdjacentHTML('beforeend', '<p>x</p>');
+		await new Promise((resolve) => setTimeout(resolve, 1100));
+		await vi.waitFor(() => expect(rig.sent.some((message) => message.k === 'ops')).toBe(true));
+		rig.deliver();
+		expect(rig.scroller().scrollTop).toBe(5000);
+		// The content grows: the pinned scroller follows to the new end.
+		rig.grow(6000);
+		pcLog.insertAdjacentHTML('beforeend', '<p>streaming…</p>');
+		await vi.waitFor(() => expect(rig.sent.some((message) => message.k === 'ops')).toBe(true));
+		rig.deliver();
+		expect(rig.copy.root?.getElementById('log')?.textContent).toBe('answerxstreaming…');
+		expect(rig.scroller().scrollTop).toBe(6000);
+		rig.copy.dispose();
+		rig.pane.remove();
+		rig.pc.receive({ k: 'bye', from: 'remote/5', w: viewStream('graph') });
+	});
+
+	it('reports a fluid copy’s scroll, and the PC renders the window there', async () => {
+		const rig = await fluidRig('<div id="scroller" style="overflow-y: auto"><div id="rows">r</div></div>', { top: 1000, height: 5000, view: 1000 }, { height: 8000, view: 1000 });
+		// The phone scrolls its own layout of the list: the position travels as a fraction.
+		rig.scroller().dispatchEvent(new Event('scroll'));
+		await vi.waitFor(() => expect(rig.reports.length).toBe(1));
+		const [id, fraction, end] = rig.reports[0];
+		expect(fraction).toBeCloseTo(0.25);
+		expect(end).toBe(false);
+		// The PC puts its own scroller at the same fraction of its range — a virtualized list
+		// renders the rows the viewer is looking at.
+		rig.pc.receive({ k: 'scroll', from: 'remote/5', w: viewStream('graph'), i: id, f: fraction });
+		expect(rig.pcScroller.scrollTop).toBe(1750);
+		rig.pc.receive({ k: 'scroll', from: 'remote/5', w: viewStream('graph'), i: id, f: fraction, e: 1 });
+		expect(rig.pcScroller.scrollTop).toBe(7000);
+		rig.copy.dispose();
+		rig.pane.remove();
+		rig.pc.receive({ k: 'bye', from: 'remote/5', w: viewStream('graph') });
 	});
 });

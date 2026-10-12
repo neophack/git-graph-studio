@@ -244,7 +244,9 @@ pub mod dock_menu {
             std::path::PathBuf::from(root).join("settings.json")
         } else {
             let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-            std::path::Path::new(&home).join(".ggs").join("settings.json")
+            std::path::Path::new(&home)
+                .join(".ggs")
+                .join("settings.json")
         };
         let contents = std::fs::read_to_string(file).ok()?;
         serde_json::from_str::<serde_json::Value>(&contents)

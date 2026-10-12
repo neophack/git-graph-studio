@@ -112,7 +112,11 @@ pub async fn app_asset(
     // build's scripts forever (2026-10-12: a reinstalled phone shell never appeared).
     let cacheable = immutable(&path);
     let key = format!("{ver}|{path}");
-    let cached = if cacheable { daemon.cache.get(&key) } else { None };
+    let cached = if cacheable {
+        daemon.cache.get(&key)
+    } else {
+        None
+    };
     let entry = match cached {
         Some(entry) => entry,
         None => {

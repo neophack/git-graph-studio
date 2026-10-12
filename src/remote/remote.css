@@ -184,22 +184,10 @@
 .ggs-editor-empty .open-list { width: 100%; max-width: 360px; margin-top: 20px; text-align: left; }
 .ggs-editor-empty .open-list .section { padding: 0 4px 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ggs-muted); }
 
-/* The locked editor's bar (editLock.ts): a phone opens files read-only — the bar names the
-   state and carries the one tap that lifts it. */
-.edit-lock-bar {
-	display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 4px 12px;
-	padding-left: max(12px, env(safe-area-inset-left));
-	background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
-	border-bottom: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
-	color: var(--vscode-descriptionForeground); font-size: 12px;
-}
-.edit-lock-bar .codicon { color: var(--vscode-editorWarning-foreground, inherit); }
-.edit-lock-bar .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.edit-lock-bar button {
-	background: var(--vscode-button-background); color: var(--vscode-button-foreground);
-	border: 0; border-radius: 8px; min-height: 32px; padding: 2px 14px; font-size: 13px; font-weight: 500;
-}
-.edit-lock-bar button:active { background: var(--vscode-button-hoverBackground, var(--vscode-button-background)); }
+/* The editor's lock toggle in the app bar (editLock.ts): a phone opens files read-only; the
+   open lock is tinted so an editable file reads at a glance. */
+.ggs-appbar-btn.edit-lock[hidden] { display: none; }
+.ggs-appbar-btn.edit-lock[data-state="unlocked"] .codicon { color: var(--vscode-editorWarning-foreground, inherit); }
 
 /* The editing row above the keyboard (editorAccessory.ts). */
 .ggs-editor-accessory {
@@ -603,4 +591,18 @@ html.mirror-mode body {
 	.mirror-bar button.mirror-bar-button {
 		display: none;
 	}
+}
+
+/* ---- Webview copies (§22.6): the desktop window's live extension page in a pane ---- */
+.webview-copy {
+	position: relative;
+	width: 100%;
+	height: 100%;
+	overflow: hidden;
+}
+.webview-copy .webview-copy-frame {
+	position: absolute;
+	inset: 0;
+	border: 0;
+	background: transparent;
 }

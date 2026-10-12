@@ -22,6 +22,9 @@ pub enum Action {
     Disconnect(String),
     DisconnectAll,
     OpenGgs,
+    /// Put one registered instance's window on this PC's screen (the daemon's `Show`) — a
+    /// hidden one a remote browser drives, or a desktop window behind others.
+    ShowWindow(String),
     TogglePause,
     ToggleAutostart,
     Quit,
@@ -156,6 +159,19 @@ pub fn model(daemon: &Daemon) -> (Vec<Entry>, String, IconKind) {
     } else {
         format!("Signed-in devices ({})", devices.len())
     };
+    let windows = window_entries(daemon, &l);
+    let windows_label = if l.zh {
+        format!("窗口 ({})", windows.len())
+    } else {
+        format!("Windows ({})", windows.len())
+    };
+    let windows = if windows.is_empty() {
+        vec![Entry::Label(
+            l.pick("No window is open", "没有打开的窗口").into(),
+        )]
+    } else {
+        windows
+    };
     // The Hub relay's corner (§20.9): one line while it is configured, its link to copy.
     let hub = match daemon.hub.snapshot() {
         crate::hub::Status::Online { public_base, .. } => Some((
@@ -217,6 +233,7 @@ pub fn model(daemon: &Daemon) -> (Vec<Entry>, String, IconKind) {
             ),
             Entry::Sub(devices_label, device_items),
             Entry::Separator,
+            Entry::Sub(windows_label, windows),
             Entry::Item(
                 l.pick("Open Git Graph Studio", "打开 Git Graph Studio")
                     .into(),
@@ -239,6 +256,41 @@ pub fn model(daemon: &Daemon) -> (Vec<Entry>, String, IconKind) {
     // Windows caps tray tooltips at 127 characters.
     let tooltip: String = header.chars().take(120).collect();
     (menu, tooltip, kind)
+}
+
+/// Every registered instance, oldest first, as a menu item that shows its window: the
+/// window's title, marked when it runs hidden (remote browsers drive it, the PC screen does
+/// not show it) and with the remote sessions attached to it. A local window and a remote one
+/// are the same instance (§22) — showing a hidden one hands the PC user the desktop UI while
+/// a phone keeps its own (§22.5).
+fn window_entries(daemon: &Daemon, l: &Labels) -> Vec<Entry> {
+    daemon
+        .registry
+        .snapshot()
+        .into_iter()
+        .map(|info| {
+            let mut label = if info.title.trim().is_empty() {
+                info.folders
+                    .first()
+                    .and_then(|f| f.rsplit(['/', '\\']).find(|s| !s.is_empty()))
+                    .unwrap_or("Git Graph Studio")
+                    .to_owned()
+            } else {
+                info.title.clone()
+            };
+            if !info.visible {
+                label.push_str(l.pick(" (hidden)", "（后台）"));
+            }
+            if info.remote_sessions > 0 {
+                label.push_str(&if l.zh {
+                    format!(" · {} 个远程", info.remote_sessions)
+                } else {
+                    format!(" · {} remote", info.remote_sessions)
+                });
+            }
+            Entry::Item(label, Action::ShowWindow(info.id))
+        })
+        .collect()
 }
 
 /// Carry out a menu action (from the tray thread; everything here is synchronous).
@@ -308,6 +360,11 @@ pub fn perform(daemon: &Arc<Daemon>, action: Action) {
                     }
                 }
             }
+        }
+        Action::ShowWindow(id) => {
+            daemon
+                .registry
+                .send(&id, crate::control_msg::ToInstance::Show);
         }
         Action::TogglePause => {
             let paused = daemon.config().paused;
@@ -407,6 +464,70 @@ mod tests {
         assert!(!zh(&daemon));
         std::fs::write(paths.settings(), r#"{ "displayLanguage": "zh-cn" }"#).unwrap();
         assert!(zh(&daemon), "the older spelling still answers");
+    }
+
+    #[test]
+    fn the_windows_menu_lists_every_instance_and_shows_the_picked_one() {
+        use crate::control_msg::{LaunchSpec, ToInstance};
+        use crate::registry::Registration;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::at(dir.path().join("remote"), dir.path().to_path_buf());
+        paths.ensure().unwrap();
+        let daemon = Daemon::new(paths, crate::config::Config::default()).unwrap();
+        let windows = |daemon: &Daemon| {
+            let (menu, _, _) = model(daemon);
+            menu.into_iter()
+                .find_map(|entry| match entry {
+                    Entry::Sub(label, children) if label.starts_with("Windows") => {
+                        Some((label, children))
+                    }
+                    _ => None,
+                })
+                .expect("the tray carries a Windows submenu")
+        };
+        let (label, children) = windows(&daemon);
+        assert_eq!(label, "Windows (0)");
+        assert!(matches!(&children[..], [Entry::Label(_)]));
+
+        let register = |id: &str, title: &str, visible: bool| {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            daemon.registry.register(
+                Registration {
+                    instance_id: id.into(),
+                    pid: 1,
+                    version: "0".into(),
+                    title: title.into(),
+                    folders: vec![r"C:\work\repo".into()],
+                    visible,
+                    remote_host: !visible,
+                    launch: LaunchSpec::default(),
+                },
+                tx,
+            );
+            rx
+        };
+        let _desk = register("a", "repo — Git Graph Studio", true);
+        let mut hidden = register("b", "", false);
+        let (label, children) = windows(&daemon);
+        assert_eq!(label, "Windows (2)");
+        let items: Vec<(String, Action)> = children
+            .into_iter()
+            .filter_map(|entry| match entry {
+                Entry::Item(label, action) => Some((label, action)),
+                _ => None,
+            })
+            .collect();
+        let labels: Vec<&str> = items.iter().map(|(label, _)| label.as_str()).collect();
+        assert!(labels.contains(&"repo — Git Graph Studio"));
+        // A window without a title falls back to its folder's name, marked hidden.
+        assert!(labels.contains(&"repo (hidden)"));
+        let (_, show) = items
+            .iter()
+            .find(|(label, _)| label == "repo (hidden)")
+            .unwrap();
+        assert_eq!(show, &Action::ShowWindow("b".into()));
+        perform(&daemon, show.clone());
+        assert!(matches!(hidden.try_recv(), Ok(ToInstance::Show)));
     }
 
     #[test]

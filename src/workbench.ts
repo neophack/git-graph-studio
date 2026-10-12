@@ -6,6 +6,7 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
 import { startSummaryReporter } from './remote/summary';
 import { installMirrorHost, mirrorViewersActive } from './remote/mirror/hostStub';
+import { installWorkbenchSync } from './remote/workbenchSync';
 import { remoteEnv } from './remote/session';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -264,6 +265,12 @@ export class Workbench {
 		if (/Mac/i.test(navigator.userAgent)) document.body.classList.add('mac');
 		this.wire();
 		this.applyLayout();
+		// Cross-frontend operation sync (module 19, §22.7): once booted, every file this
+		// workbench opens, closes or switches to — and every view it shows — crosses to the
+		// other frontends of this instance (a phone running its own phone workbench while the
+		// PC keeps the desktop UI) as one tiny message, and theirs land here. Silent until
+		// boot() is through: the boot's own wiring is housekeeping, not a user operation.
+		this.workbenchSync = installWorkbenchSync(this);
 		// The shell is up: the boot splash (index.html) has done its job of filling the
 		// window while this module graph was still loading and parsing.
 		document.getElementById('boot-splash')?.remove();
@@ -759,6 +766,11 @@ export class Workbench {
 		}
 		const word = view.state.wordAt(selection.head);
 		if (word) this.search.seedQuery(view.state.sliceDoc(word.from, word.to));
+	}
+
+	/** Whether the primary side bar is showing (Remote Access's sync reads it after a toggle). */
+	get sidebarShown(): boolean {
+		return state.layout.sidebarVisible;
 	}
 
 	get activeSidebarView(): string {
@@ -1351,6 +1363,10 @@ export class Workbench {
 	/** The Tauri listeners' unlisten functions (they land asynchronously, maybe after dispose). */
 	private unlisteners: (() => void)[] = [];
 	private disposed = false;
+	/** The cross-frontend operation sync (module 19, §22.7): silent until boot() starts it,
+	 *  local-only while a session restore rebuilds this frontend's tabs, detached on dispose
+	 *  so a rebuilt harness workbench stops answering the others. */
+	private workbenchSync: { start(): void; localOnly(local: boolean): void; detach(): void } | null = null;
 
 	/** Keep a listener's unlisten for dispose(); one that lands after dispose() fires at once. */
 	private trackUnlisten(unlisten: () => void): void {
@@ -1363,6 +1379,8 @@ export class Workbench {
 	 *  backend event and every window focus). */
 	dispose(): void {
 		this.disposed = true;
+		this.workbenchSync?.detach();
+		this.workbenchSync = null;
 		document.removeEventListener('keydown', this.onKeyDownBound);
 		document.removeEventListener(SETTINGS_EVENT, this.onSettingsChangedBound);
 		window.removeEventListener('focus', this.onWindowFocusBound);
@@ -1504,6 +1522,9 @@ export class Workbench {
 		// hold - would tear B's layout. The stale restore does not run at all.
 		if (this.repoPath !== root) return;
 		this.restoring = true;
+		// The restore rebuilds THIS frontend's own tabs: they are its session, not
+		// operations the other frontends should mirror (module 19's sync pauses for it).
+		this.workbenchSync?.localOnly(true);
 		try {
 			const groups = snapshot.groups && snapshot.groups.length > 0
 				? snapshot.groups
@@ -1525,6 +1546,7 @@ export class Workbench {
 		} finally {
 			this.editors.restoringLayout = false;
 			this.restoring = false;
+			this.workbenchSync?.localOnly(false);
 		}
 	}
 
@@ -1960,7 +1982,18 @@ export class Workbench {
 
 	/* ---------- Boot ---------- */
 
+	/** The launch form decides what this window shows; when it has decided, the
+	 *  cross-frontend operation sync goes live (module 19: a phone's own workbench and this
+	 *  one mirror each other's opens, closes and view switches from here on). */
 	async boot(): Promise<void> {
+		try {
+			await this.bootInner();
+		} finally {
+			this.workbenchSync?.start();
+		}
+	}
+
+	private async bootInner(): Promise<void> {
 		// One round trip instead of three: the launch form (a file, comparison actions, or the
 		// folder argument) decides everything the boot does next. A plain-folder launch is
 		// opened inside this very call (the backend opens it during the splash), so when the

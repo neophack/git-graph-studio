@@ -24,7 +24,7 @@ import { icon } from './ui';
 export { EditorState, EditorView, keymap, openSearchPanel, openReplacePanel, redo, selectAll, undo, completionExtension };
 
 /** The phone's read-only open's reconfigure point (src/remote/editLock.ts): the locked
- *  configuration is editor state, lifted in place by the unlock bar's click. */
+ *  configuration is editor state, lifted and restored in place by the app bar's lock toggle. */
 export const editLockSlot = new Compartment();
 
 /** The locked configuration: user input, the touch keyboard and paste are all refused

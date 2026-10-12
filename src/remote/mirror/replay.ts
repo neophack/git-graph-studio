@@ -137,6 +137,9 @@ export class InputReplayer {
 			case 'sel':
 				this.select(message.i, message.v);
 				return undefined;
+			case 'scroll':
+				this.syncScroll(message.i, message.f, message.e === 1);
+				return undefined;
 			case 'copy':
 				return this.selectionText();
 			default:
@@ -448,6 +451,22 @@ export class InputReplayer {
 		select.value = value;
 		select.dispatchEvent(new win.Event('input', { bubbles: true }));
 		select.dispatchEvent(new win.Event('change', { bubbles: true }));
+	}
+
+	/** A fluid copy scrolled its own layout of the page (§22.6): put this page's scroller at
+	 *  the same place — the fraction of the range, since the copy's pixels belong to another
+	 *  layout — so a page that renders its content around the scroll position (a virtualized
+	 *  list: git-graph-rs) renders the window the viewer is looking at. The page's own scroll
+	 *  handlers run as they would for a real scroll, and the recorder shows the move to every
+	 *  other viewer. */
+	private syncScroll(id: number, fraction: number, end: boolean): void {
+		const node = this.recorder.nodeOf(id);
+		if (!node || node.nodeType !== 1 || !node.isConnected) return;
+		const el = node as Element;
+		const range = el.scrollHeight - el.clientHeight;
+		if (range <= 0) return;
+		const top = end ? range : Math.round(Math.min(1, Math.max(0, fraction)) * range);
+		if (Math.abs(el.scrollTop - top) >= 1) el.scrollTop = top;
 	}
 
 	private selectionText(): string {

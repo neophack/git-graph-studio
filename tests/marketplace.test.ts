@@ -203,11 +203,20 @@ describe('the uninstaller cleanup (module 15)', () => {
 
 	it('ends the remote daemon — its logon task before the process — and removes its program and cache', () => {
 		const task = body.indexOf('schtasks /Delete /TN "GGS Remote"');
-		const kill = body.indexOf('taskkill /F /T /FI "IMAGENAME eq ggs-remote.exe"');
+		const kill = body.indexOf('taskkill /F /FI "IMAGENAME eq ggs-remote.exe"');
 		expect(task).toBeGreaterThan(-1);
 		expect(kill).toBeGreaterThan(task);
 		expect(body).toContain('/FI "USERNAME eq $R7"');
 		for (const dir of ['remote\\bin', 'remote\\cache', 'cache', 'index']) expect(body).toContain(`RMDir /r "$R5\\${dir}"`);
+	});
+
+	it('caps every uninstaller child so none can hold the uninstall open (the 2026-10-12 stuck uninstall)', () => {
+		// nsExec only moves the visible log on file operations, so an uncapped child leaves
+		// the page parked on the last "Delete file" line with no hint of what is waiting.
+		for (const line of body.match(/nsExec::Exec [^\r\n]*/g) ?? []) expect(line).toMatch(/\/TIMEOUT=\d+/);
+		// taskkill /T beside two /FI filters blocks forever when the pair matches nothing
+		// (the daemon's descendants are the app windows the app-is-running check owns).
+		expect(body).not.toContain('/T /FI');
 	});
 
 	it('deletes the user data only with the uninstaller\'s own checkbox, and only the profile\'s ~/.ggs', () => {

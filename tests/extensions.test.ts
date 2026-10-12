@@ -2271,30 +2271,72 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 		expect(out).toContain('https://example.com/w/docs');
 	});
 
-	it('a panel moving to this frontend opens here; moving away drops the tab without disposing it', async () => {
-		// Git Graph keeps one panel: when another user asks for it, the backend's reveal moves
-		// it — the asker opens it from its create args and html, the old page lets go
-		// quietly (a `webviewDisposed` would kill the extension's one panel for both).
+	it('a remote page shows the desktop window\'s panels as copies — opened and focused wherever they were opened, closed without disposing', async () => {
+		// Every webview lives in the desktop window (ext_routing.rs): a remote workbench
+		// follows a panel's life over the state channel and shows a live copy of it (§22.6).
+		// One opened or revealed anywhere OPENS here in the foreground (2026-10-12, the
+		// owner's direction: a page one side opens, the other side opens too). Nothing it
+		// does may dispose the panel — the conversation is the PC's too.
 		const ENGINE: ExtInfo = {
 			...GGX2, id: 'acme.engine',
 			capabilities: { format: 'ggs/2', id: 'acme.engine', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'ggs-node', command: 'out/main.js' }, permissions: [] }
 		};
 		withExtensions(ENGINE);
-		const host = new ExtensionHost();
-		const opened: [number, string][] = [];
-		const closed: string[] = [];
-		host.onOpenWebview = (panelId, title) => void opened.push([panelId, title]);
-		host.onCloseWebviewTab = (tabId) => void closed.push(tabId);
-		backend.emit('ext-webview-move', { extId: 'acme.engine', panelId: 4, from: 'remote/2', to: 'main', create: [4, 'graph', 'Git Graph RS', 1, false], html: '<p>graph</p>' });
-		await flush();
-		expect(opened).toEqual([[4, 'Git Graph RS']]);
-		expect(host['webviews'].get(host['webviewKey']('acme.engine', 4))?.html).toBe('<p>graph</p>');
-		backend.emit('ext-webview-move', { extId: 'acme.engine', panelId: 4, from: 'main', to: 'remote/2', create: [4, 'graph', 'Git Graph RS', 1, false], html: '<p>graph</p>' });
-		await flush();
-		expect(closed).toEqual([host.webviewTabId('acme.engine', 4)]);
-		expect(host['webviews'].has(host['webviewKey']('acme.engine', 4))).toBe(false);
-		const pushes = backend.callsTo('ext_process_push_event').map((call) => (call.event as { event?: string }).event);
-		expect(pushes).not.toContain('webviewDisposed');
+		backend.on('ext_read_file', ({ relPath }) => {
+			if (relPath === 'package.json') return JSON.stringify({ main: './main.js', contributes: { viewsContainers: { activitybar: [{ id: 'engine', title: 'Engine', icon: 'i.svg' }] }, views: { engine: [{ type: 'webview', id: 'engine.chat', name: 'Chat' }] } } });
+			throw new Error('no such file');
+		});
+		backend.on('ext_process_start', () => ({ extensionId: 'acme.engine', pid: 4242, commands: [], protocolVersion: 'ggs-ext/1', startCount: 1, lastError: null }));
+		backend.on('ext_process_registrations', () => [{ method: 'webview.create', args: [3, 'chat', 'Claude Code', 1, false] }]);
+		setRemoteEnv({ transport: {} as never, attached: { frontendId: 'remote/2' } as never, basePath: '/' });
+		try {
+			const host = new ExtensionHost();
+			const opened: [number, string, boolean | undefined][] = [];
+			const closed: string[] = [];
+			const revealed: string[] = [];
+			host.onOpenWebview = (panelId, title, _extId, _placement, focus) => void opened.push([panelId, title, focus]);
+			host.onCloseWebviewTab = (tabId) => void closed.push(tabId);
+			host.onRevealWebviewTab = (tabId) => void revealed.push(tabId);
+			await host.activateInstalled();
+			await flush();
+			// The attach replay opens the live panel's copy in the foreground.
+			expect(opened).toEqual([[3, 'Claude Code', true]]);
+			// The PC opened one, this page's own click opened one: both foreground — the
+			// other side's opening is this side's opening now.
+			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.create', args: [4, 'chat', 'Claude Code', 1, false], served: 'main', caller: null });
+			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.create', args: [5, 'chat', 'Claude Code', 1, false], served: 'main', caller: 'remote/2' });
+			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.setTitle', args: [5, 'Fix the build'], served: 'main', caller: null });
+			await flush();
+			expect(opened.slice(1)).toEqual([[4, 'Claude Code', true], [5, 'Claude Code', true]]);
+			expect(host['webviews'].get(host['webviewKey']('acme.engine', 5))?.title).toBe('Fix the build');
+			// Any page's reveal reveals the copy here: whichever side focused the panel, this
+			// side's copy follows. The copy set stands in for a mounted copy (the pane's own
+			// mount adds it in a live page); without it the reveal is a reopen.
+			host['webviewCopies'].add(host['webviewKey']('acme.engine', 5));
+			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.reveal', args: [5], served: 'main', caller: 'remote/9' });
+			await flush();
+			expect(revealed).toEqual([host.webviewTabId('acme.engine', 5)]);
+			host['webviewCopies'].delete(host['webviewKey']('acme.engine', 5));
+			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.reveal', args: [5], served: 'main', caller: 'remote/2' });
+			await flush();
+			expect(opened.slice(3)).toEqual([[5, 'Fix the build', true]]);
+			// The panel goes on the PC: the copy goes here, and nothing reaches the backend.
+			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.dispose', args: [4], served: 'main', caller: null });
+			await flush();
+			expect(closed).toEqual([host.webviewTabId('acme.engine', 4)]);
+			expect(host['webviews'].has(host['webviewKey']('acme.engine', 4))).toBe(false);
+			const pushes = backend.callsTo('ext_process_push_event').map((call) => (call.event as { event?: string }).event);
+			expect(pushes).not.toContain('webviewDisposed');
+			// A webview view shown here asks the backend nothing: the desktop's page is the
+			// one its provider resolved.
+			host.noteViewVisible('engine.chat', true);
+			await flush();
+			const invoked = backend.callsTo('ext_process_invoke').map((call) => call.method);
+			expect(invoked).not.toContain('webviewView.resolve');
+			expect(invoked).not.toContain('webviewView.setVisible');
+		} finally {
+			setRemoteEnv(undefined);
+		}
 	});
 
 	it('the shim\'s Uri keeps a port\'s colon (asWebviewUri over an http base)', () => {

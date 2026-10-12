@@ -1818,7 +1818,10 @@ mod tests {
             vec!["/c/tools".to_owned(), "/d/elsewhere".to_owned()]
         );
         // A lone native entry survives whole.
-        assert_eq!(split_path_list(r"C:\Program Files"), vec![r"C:\Program Files"]);
+        assert_eq!(
+            split_path_list(r"C:\Program Files"),
+            vec![r"C:\Program Files"]
+        );
         // A rewritten list mixes the dialects across one colon join.
         assert_eq!(
             split_path_list(r"C:\Windows:/c/tools"),

@@ -28,6 +28,7 @@ import { connectionLooksSlow, dataSaverPreferred, setDataSaver } from './dataSav
 import { remoteEnv } from './session';
 import { installPhoneSettingsEntry } from './settingsPage';
 import { invoke } from '@tauri-apps/api/core';
+import { modeUrl } from './mirror/uiMode';
 
 function formatBytes(n: number): string {
 	if (n < 1024) return `${n} B`;
@@ -47,6 +48,9 @@ async function firstFolder(): Promise<string | null> {
 function registerCommands(): void {
 	if (!remoteEnv()) return;
 	commands.register({ id: 'remote.switchWindow', title: t('remote.windows'), category: 'Remote', run: () => openWindowSwitcher() });
+	// Back from this page's own workbench to the PC window's live copy (§22.5), pinned so the
+	// auto rule does not hand a phone straight back here while the PC shows the window.
+	commands.register({ id: 'remote.liveView', title: t('remote.liveView'), category: 'Remote', run: () => location.replace(modeUrl(location.href, 'mirror')) });
 	commands.register({
 		id: 'remote.uploadFiles',
 		title: t('remote.transfer.upload'),

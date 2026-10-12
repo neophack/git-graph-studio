@@ -160,7 +160,12 @@ export function openDrawer(menus: () => MenuDefinition[]): void {
 	const workspaceRows = [
 		commandRow('go-to-file', t('remote.appbar.quickOpen'), 'workbench.quickOpen'),
 		commandRow('terminal-cmd', t('remote.drawer.palette'), 'workbench.commandPalette'),
-		...(env ? [commandRow('multiple-windows', t('remote.drawer.windows'), 'remote.switchWindow', { badge: windows > 1 ? String(windows) : undefined })] : []),
+		...(env
+			? [
+					commandRow('multiple-windows', t('remote.drawer.windows'), 'remote.switchWindow', { badge: windows > 1 ? String(windows) : undefined }),
+					commandRow('device-desktop', t('remote.liveView'), 'remote.liveView')
+				]
+			: []),
 		commandRow('folder-opened', t('remote.files.openFolder'), 'workbench.openFolder')
 	];
 	const transferRows = [

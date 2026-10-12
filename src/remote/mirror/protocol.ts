@@ -74,11 +74,25 @@ export interface Viewport {
 	h: number;
 }
 
-/** PC → viewers. `to` names one viewer, or `*`. */
+/** One extension webview's frame on the PC, as its own replica stream (§22.6): a remote page
+ *  that runs its own workbench shows the PC's one live page of it — Claude Code's chat —
+ *  instead of a second instance the backend never talks to. */
+export function viewStream(viewId: string): string {
+	return `view:${viewId}`;
+}
+
+export function panelStream(extId: string, panelId: number): string {
+	return `panel:${extId}#${panelId}`;
+}
+
+/** PC → viewers. `to` names one viewer, or `*`. `own` tells a viewer the window wears
+ *  another form factor's UI (another viewer owns it, §22.5): run your own workbench. `w`
+ *  names the webview stream a message belongs to; absent, it is the whole window's. */
 export type DownMessage =
-	| { k: 'snap'; to: string; seq: number; root: number; doc: SDoc; vp: Viewport }
-	| { k: 'ops'; to: '*'; seq: number; ops: MirrorOp[] }
-	| { k: 'clip'; to: string; text: string };
+	| { k: 'snap'; to: string; w?: string; seq: number; root: number; doc: SDoc; vp: Viewport }
+	| { k: 'ops'; to: '*'; w?: string; seq: number; ops: MirrorOp[] }
+	| { k: 'clip'; to: string; w?: string; text: string }
+	| { k: 'own'; to: string };
 
 /** Keyboard modifiers as a bit set: 1 ctrl, 2 shift, 4 alt, 8 meta. */
 export type Mods = number;
@@ -95,8 +109,11 @@ export interface Spot {
 	co?: number;
 }
 
-/** Viewer → PC. `from` is the viewer's frontend id (`remote/<n>`). */
-export type UpMessage =
+/** Viewer → PC. `from` is the viewer's frontend id (`remote/<n>`); `w`, when present, the
+ *  webview stream the viewer watches (its hello subscribes, its input lands in that frame). */
+export type UpMessage = UpBody & { w?: string };
+
+type UpBody =
 	| { k: 'hello'; from: string; vw: number; vh: number; touch: boolean }
 	| { k: 'bye'; from: string }
 	| { k: 'resnap'; from: string }
@@ -105,7 +122,13 @@ export type UpMessage =
 	| { k: 'key'; from: string; key: string; code: string; m: Mods }
 	| { k: 'text'; from: string; v: string }
 	| { k: 'sel'; from: string; i: number; v: string }
-	| { k: 'copy'; from: string };
+	| { k: 'copy'; from: string }
+	/** A fluid copy scrolled itself (a webview stream's copy only): `i` the scroller, `f` its
+	 *  position as a fraction of the scroll range (the copy is laid out at another width, so
+	 *  its pixels mean nothing on the PC), `e` when it sits at its end. The PC puts its own
+	 *  scroller at the same place, so a page that renders its content around the scroll
+	 *  position (a virtualized list: git-graph-rs) renders the window the viewer looks at. */
+	| { k: 'scroll'; from: string; i: number; f: number; e?: 1 };
 
 /** An up message before the viewer stamps its `from` on it. */
 export type UpPayload = UpMessage extends infer M ? (M extends unknown ? Omit<M, 'from'> : never) : never;

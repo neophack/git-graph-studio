@@ -21,7 +21,12 @@ use tokio::sync::mpsc;
 
 /// The hidden Relay webview's label (its capability file is `capabilities/remote-relay.json`).
 pub const RELAY_LABEL: &str = "remote-relay";
-const RECONNECT_EVERY: Duration = Duration::from_secs(30);
+/// The control channel's reconnect pacing: the first retry is quick and the delay doubles up
+/// to the cap. A daemon restart (an upgrade, a reinstall, the tray's own restart) used to
+/// leave every open window out of the tray's Windows list and the remote window picker for
+/// up to 30 s; a failed connect to an absent local pipe costs next to nothing.
+const RECONNECT_FIRST: Duration = Duration::from_millis(500);
+const RECONNECT_CAP: Duration = Duration::from_secs(5);
 const MAX_MESSAGE: usize = 4 << 20;
 const CHUNK: usize = 1 << 20;
 const SUMMARY_THROTTLE: Duration = Duration::from_millis(500);
@@ -270,6 +275,7 @@ pub fn start(app: &AppHandle, remote_host_only: bool) {
     let endpoint = endpoint_name(&root);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        let mut delay = RECONNECT_FIRST;
         loop {
             if let Ok(stream) = connect(&endpoint).await {
                 if let Err(error) = session(&app, stream).await {
@@ -277,10 +283,17 @@ pub fn start(app: &AppHandle, remote_host_only: bool) {
                 }
                 link().connected.store(false, Ordering::Relaxed);
                 *link().tx.lock().unwrap() = None;
+                // The daemon was there a moment ago: it is likely restarting right now.
+                delay = RECONNECT_FIRST;
             }
-            tokio::time::sleep(RECONNECT_EVERY).await;
+            tokio::time::sleep(delay).await;
+            delay = next_reconnect_delay(delay);
         }
     });
+}
+
+fn next_reconnect_delay(delay: Duration) -> Duration {
+    (delay * 2).min(RECONNECT_CAP)
 }
 
 /// The command line that starts another instance of this app (`cmd_app::instance_argv`
@@ -916,28 +929,11 @@ pub fn remote_host_set_summary(app: AppHandle, frontend: String, summary: Summar
     flush_summary(&app, false);
 }
 
-/// Who else must hear that a frontend went away — the extension host's request routing
-/// forgets the webviews the session owned. Registered by the composition root, so this
-/// module names no extension-platform module.
-static FRONTEND_GONE_HOOKS: Mutex<Vec<fn(&str)>> = Mutex::new(Vec::new());
-
-pub fn on_frontend_gone(hook: fn(&str)) {
-    FRONTEND_GONE_HOOKS
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .push(hook);
-}
-
-/// A frontend went away (a remote session ended — the Relay reports it).
+/// A frontend went away (a remote session ended — the Relay reports it): its part of the
+/// merged summary goes. (It owns no webviews to release: every webview lives in the
+/// desktop window, `ext_routing`.)
 #[tauri::command]
 pub fn remote_host_frontend_gone(app: AppHandle, frontend: String) {
-    for hook in FRONTEND_GONE_HOOKS
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .iter()
-    {
-        hook(&frontend);
-    }
     link()
         .summaries
         .lock()
@@ -1045,6 +1041,22 @@ pub fn remote_host_status(app: AppHandle) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconnects_quickly_and_never_waits_past_the_cap() {
+        let mut delay = RECONNECT_FIRST;
+        let mut waited = Duration::ZERO;
+        for _ in 0..4 {
+            waited += delay;
+            delay = next_reconnect_delay(delay);
+        }
+        // Four tries within the first 8 s of a daemon restart, then one every 5 s at most.
+        assert!(waited <= Duration::from_secs(8), "{waited:?}");
+        for _ in 0..20 {
+            delay = next_reconnect_delay(delay);
+        }
+        assert_eq!(delay, RECONNECT_CAP);
+    }
 
     #[test]
     fn the_replica_stylesheets_name_their_fonts_relatively() {

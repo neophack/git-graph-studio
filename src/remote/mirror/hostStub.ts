@@ -5,6 +5,7 @@
 
 import { listen } from '@tauri-apps/api/event';
 import { MIRROR_UP, type UpMessage } from './protocol';
+import { PHONE_MAX_WIDTH } from './uiMode';
 
 let host: Promise<import('./host').MirrorHost> | null = null;
 
@@ -18,7 +19,7 @@ export async function mirrorViewersActive(): Promise<boolean> {
 
 /** Below this width the window can only be because a phone viewer's fit made it so (the
  *  desktop window's minimum is 800): the phone shell goes on, and off again above it. */
-export const PHONE_WIDTH = 600;
+export const PHONE_WIDTH = PHONE_MAX_WIDTH;
 
 function watchPhoneMode(): () => void {
 	let phone = false;

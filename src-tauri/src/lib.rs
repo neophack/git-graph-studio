@@ -1488,12 +1488,10 @@ mod desktop {
             std::env::set_var("GGS_APP_EXE", exe);
         }
         // The host-request seam: a backend's `ggs.hostRequest` is addressed to one frontend —
-        // the one whose call or webview claims it, else the desktop window while it exists,
-        // a remote session otherwise — so a request is never answered twice
-        // (docs/ggs-remote-plan.md §8.6 #1).
+        // the one whose call claims it (every webview: the desktop window), else the
+        // desktop window while it exists, a remote session otherwise — so a request is
+        // never answered twice (docs/ggs-remote-plan.md §8.6 #1).
         ext_process::set_host_request_frontend(remote_host::host_request_frontend);
-        // A remote session that ends releases the webviews it owned (ext_routing).
-        remote_host::on_frontend_gone(crate::ext_routing::frontend_gone);
         let _boot = boot_started();
         // `ggs --help` / `ggs -h` prints every launch form; no window is created.
         let args: Vec<String> = std::env::args().collect();

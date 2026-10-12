@@ -228,6 +228,35 @@ export class EditorArea {
 		return false;
 	}
 
+	/** Close the file tab of `path` in whichever group holds it — Remote Access's
+	 *  cross-frontend sync (module 19) closes here what the other frontend closed there.
+	 *  Answers whether a tab was found (a dirty one still asks to save, like any close). */
+	closeFilePath(path: string): boolean {
+		for (const group of this.groups()) {
+			const editor = group.editorForPath(path);
+			if (editor) {
+				void group.close(editor);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** Activate the file tab of `path`, focusing its group — the cross-frontend active-tab
+	 *  sync's landing. Answers whether a tab was found. */
+	revealFilePath(path: string): boolean {
+		for (const group of this.groups()) {
+			const editor = group.editorForPath(path);
+			if (editor) {
+				const box = this.leafBoxOf(group);
+				if (box) this.focus(box);
+				group.activateById(editor.id);
+				return true;
+			}
+		}
+		return false;
+	}
+
 	/** The active editor's whole text, when a file editor is active — module 12 pushes it to
 	 *  extension frames on active-editor changes (only when the document changed). */
 	/** An open file editor's current text (unsaved edits included), from any group. */
@@ -288,11 +317,14 @@ export class EditorArea {
 		return true;
 	}
 
-	/** Focus the tab with this input id in whichever group holds it (a webview panel's
-	 *  `reveal()`); returns whether a tab was found. */
+	/** Focus the tab with this input id in whichever group holds it, focusing its group (a
+	 *  webview panel's `reveal()`, Remote Access's cross-frontend extension-page switch);
+	 *  returns whether a tab was found. */
 	revealById(id: string): boolean {
 		for (const group of this.groups()) {
 			if (group.hasEditor(id)) {
+				const box = this.leafBoxOf(group);
+				if (box) this.focus(box);
 				group.activateById(id);
 				return true;
 			}
@@ -1091,6 +1123,13 @@ export class EditorArea {
 	/** The open file tabs of every group, in visual order (what a relaunch reopens). */
 	openFilePaths(): string[] {
 		return this.groups().flatMap((g) => g.openFilePaths());
+	}
+
+	/** The open extension-page tabs' input ids (`webview:<extId>:<panelId>` — one live page
+	 *  per panel, the PC's real tab or a remote frontend's copy): Remote Access's
+	 *  cross-frontend close sync (module 19) watches this set. */
+	openExtPageIds(): string[] {
+		return this.groups().flatMap((g) => g.openIdsOfKind('extpage'));
 	}
 
 	/** Per-group file sessions, for the workspace snapshot's group layout. Groups without

@@ -33,7 +33,7 @@ import type { MergeToolbar } from './mergeEditor';
 import { t, trText } from './i18n';
 import { SETTINGS_EVENT, settings } from './settings';
 import { basename, dirname, el, icon, joinPath, notify, quickPick, relativeTo, showContextMenu, showMenuBelow, toPosix, type MenuEntry } from './ui';
-import { editLockDefault, mountEditUnlockBar } from './remote/editLock';
+import { editLockDefault, registerEditLock } from './remote/editLock';
 import { revealEditorPage } from './remote/nav';
 import { windowedEditThreshold } from './remote/openThreshold';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
@@ -400,7 +400,7 @@ export class EditorGroup {
 	 *  wires it to `setGroupLock`, the one state-changer (the box's state class included). */
 	onToggleGroupLock: (() => void) | null = null;
 
-	onActiveChange: ((editor: { kind: EditorInput['kind']; path?: string; languageName?: string; encoding?: string; eol?: 'lf' | 'crlf'; line: number; column: number; selected?: number; selections?: number } | null) => void) | null = null;
+	onActiveChange: ((editor: { kind: EditorInput['kind']; id?: string; path?: string; languageName?: string; encoding?: string; eol?: 'lf' | 'crlf'; line: number; column: number; selected?: number; selections?: number } | null) => void) | null = null;
 	onNavigationChange: (() => void) | null = null;
 	/** The set or order of open tabs changed (an open, a close, a rename): the workbench snapshots it. */
 	onTabsChange: (() => void) | null = null;
@@ -537,6 +537,12 @@ export class EditorGroup {
 
 	openEditorIds(): string[] {
 		return this.open.map((e) => e.id);
+	}
+
+	/** The open editors' input ids of one input kind — the editor area's kind-keyed watches
+	 *  (Remote Access's cross-frontend close of an extension page, module 19). */
+	openIdsOfKind(kind: EditorInput['kind']): string[] {
+		return this.open.filter((e) => e.input.kind === kind).map((e) => e.id);
 	}
 
 	/** The open file tabs' paths, in tab order (what a relaunch reopens). */
@@ -1517,8 +1523,8 @@ export class EditorGroup {
 	private async mountTextEditor(editor: Editor, contents: string, parent: HTMLElement = editor.pane): Promise<void> {
 		const { EditorView, EditorState, baseExtensions, completionExtension, bookmarkGutter, languageSlot, blameSlot, keymap, loadLanguage, editLockSlot, editLockedExtensions } = await textEditor();
 		const [{ diagnosticsExtension }, { extensionDecorationsExtension }, { extensionProviderExtensions }] = await loadEditorExtensions();
-		// A phone's remote workbench opens files locked: the unlock bar carries the one
-		// explicit edit grant (src/remote/editLock.ts). Everywhere else this is false and
+		// A phone's remote workbench opens files locked: the app bar's lock button toggles
+		// the edit grant (src/remote/editLock.ts). Everywhere else this is false and
 		// the editor is born editable as always.
 		const editLocked = editLockDefault();
 		editor.languageName = 'Plain Text';
@@ -1565,7 +1571,7 @@ export class EditorGroup {
 		editor.savedDoc = editor.view.state.doc;
 		editor.savedEol = editor.eol;
 		editor.savedEncoding = editor.encoding;
-		if (editLocked) mountEditUnlockBar(parent, () => editor.view?.dispatch({ effects: editLockSlot.reconfigure([]) }), () => editor.view?.focus());
+		if (editLocked) registerEditLock(parent, (locked) => editor.view?.dispatch({ effects: editLockSlot.reconfigure(locked ? editLockedExtensions() : []) }), () => editor.view?.focus());
 		// The language loads asynchronously: by the time it arrives the editor may have been
 		// remounted (a reopen with encoding rebuilds the view), so reconfigure the view that
 		// was built here, and only while it is still the editor's current one.
@@ -2467,6 +2473,12 @@ export class EditorGroup {
 		return this.open.some((e) => e.id === id);
 	}
 
+	/** The open editor of a file path — a file document or a CAN log — for the area's
+	 *  path-keyed lookups (Remote Access's cross-frontend close and reveal, module 19). */
+	editorForPath(path: string): Editor | null {
+		return this.open.find((candidate) => (candidate.input.kind === 'file' || candidate.input.kind === 'canlog') && samePath(candidate.input.path, path)) ?? null;
+	}
+
 	/** The open file editor's CodeMirror view for `path`, when this group holds it — module
 	 *  12's workspace.applyEdit applies text edits through it. */
 	fileViewFor(path: string): EditorView | null {
@@ -2795,6 +2807,7 @@ export class EditorGroup {
 		}
 		this.onActiveChange({
 			kind: this.active.input.kind,
+			id: this.active.id,
 			path: this.active.input.kind === 'file' ? this.active.input.path : undefined,
 			languageName: this.active.languageName,
 			encoding: this.active.encoding,
