@@ -3,7 +3,10 @@
 // re-bucketed into local "today / 7 days / 30 days" ranges) and the chat pane's gate —
 // a bridged extension's chat pane shows the set-key page while the active third-party
 // provider has no key (instead of the provider's own login page), and the usage strip
-// once it has one. Tokens only: no money, no durations — the bridge bills nothing.
+// once it has one. While a third-party provider runs the chat, the page's own
+// "Account & usage" bar starts collapsed — its dollars are Claude's estimates, guesses
+// over a gateway's unknown models. Tokens only: no money, no durations — the bridge
+// bills nothing.
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -19,6 +22,7 @@ import {
 	type ProviderList,
 	type ProviderProfile
 } from './aiProviders';
+import { chatAccountUsageToggle, collapseChatAccountUsage } from './claudeChatInject';
 
 /* ---------- The data ---------- */
 
@@ -467,6 +471,79 @@ export function mountProviderPaneGate(extId: string, pane: HTMLElement): () => v
 	let overlay: HTMLElement | null = null;
 	let disposePanel: (() => void) | null = null;
 
+	/* The chat page's own "Account & usage" bar under a third-party provider: its
+	 * dollars are Claude's own estimates, and over a gateway's models they render as
+	 * guesses ("costs may be inaccurate due to usage of unknown models"). While such
+	 * a provider is active the bar starts collapsed — one click on its own toggle the
+	 * first time the section appears in a loaded page (the page persists the collapsed
+	 * state itself); a user's own expansion after that is never fought within the
+	 * page. Under the official provider the page is never touched. */
+	let collapseArmed = false;
+	let collapseSeen: Document | null = null;
+	let paneObserver: MutationObserver | null = null;
+	let frameObserver: MutationObserver | null = null;
+	let hookedFrame: HTMLIFrameElement | null = null;
+
+	const onFrameLoad = (): void => observeDocument();
+
+	const collapseCheck = (): void => {
+		const doc = hookedFrame?.contentDocument ?? null;
+		if (doc === null || doc === collapseSeen) return;
+		if (chatAccountUsageToggle(doc) === null) return; // not rendered (yet, or ever)
+		collapseSeen = doc; // the page's own initial state, seen once per document
+		collapseChatAccountUsage(doc);
+	};
+
+	const observeDocument = (): void => {
+		frameObserver?.disconnect();
+		frameObserver = null;
+		collapseSeen = null;
+		const frame = hookedFrame;
+		const doc = frame?.contentDocument ?? null;
+		if (!frame || !doc?.body) return;
+		// The frame realm's own observer, the module's constructor-grabbing habit.
+		const Observer = (frame.contentWindow as (Window & typeof globalThis) | null)?.MutationObserver ?? MutationObserver;
+		frameObserver = new Observer(collapseCheck);
+		frameObserver.observe(doc.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-expanded'] });
+		collapseCheck();
+	};
+
+	const unhookFrame = (): void => {
+		if (hookedFrame !== null) hookedFrame.removeEventListener('load', onFrameLoad);
+		hookedFrame = null;
+		frameObserver?.disconnect();
+		frameObserver = null;
+		collapseSeen = null;
+	};
+
+	const hookFrame = (): void => {
+		const frame = pane.querySelector('iframe');
+		if (frame === hookedFrame) return;
+		unhookFrame();
+		if (frame === null) return;
+		hookedFrame = frame;
+		// A reload's fresh document re-applies the default (a provider switch restarts
+		// the backend and reloads the page).
+		frame.addEventListener('load', onFrameLoad);
+		observeDocument();
+	};
+
+	const collapseArm = (active: boolean): void => {
+		if (active === collapseArmed) return;
+		collapseArmed = active;
+		if (active) {
+			// The chat's iframe may mount (or be replaced by a section rebuild) after
+			// the arm — the pane itself is watched for it.
+			paneObserver = new MutationObserver(hookFrame);
+			paneObserver.observe(pane, { childList: true, subtree: true });
+			hookFrame();
+		} else {
+			paneObserver?.disconnect();
+			paneObserver = null;
+			unhookFrame();
+		}
+	};
+
 	const clear = (): void => {
 		overlay?.remove();
 		overlay = null;
@@ -479,6 +556,7 @@ export function mountProviderPaneGate(extId: string, pane: HTMLElement): () => v
 
 	const apply = (list: ProviderList | null): void => {
 		if (list === null || !list.bridgedExtIds.includes(extId)) {
+			collapseArm(false);
 			if (mode !== 'none') {
 				clear();
 				mode = 'none';
@@ -486,6 +564,9 @@ export function mountProviderPaneGate(extId: string, pane: HTMLElement): () => v
 			return;
 		}
 		const profile = activeThirdParty(list);
+		// The bar's collapse rides every third-party state (key set or not): the chat
+		// runs under all of them.
+		collapseArm(profile !== null);
 		// The strip wants a key set (the usage exists then); the set-key page wants a
 		// preset that cannot run without one.
 		const next: 'none' | 'key' | 'usage' = profile === null
@@ -569,6 +650,7 @@ export function mountProviderPaneGate(extId: string, pane: HTMLElement): () => v
 	return () => {
 		document.removeEventListener(PROVIDERS_CHANGED_EVENT, onChange);
 		unlisten?.();
+		collapseArm(false);
 		clear();
 	};
 }

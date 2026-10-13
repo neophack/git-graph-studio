@@ -10,7 +10,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 
-import { click, flush, notifications, notificationButton, texts, type } from './helpers';
+import { click, flush, notifications, notificationButton, texts, type, until } from './helpers';
 import { backend } from './tauriMock';
 
 let mountProvidersPage: typeof import('../src/providersPage').mountProvidersPage;
@@ -573,6 +573,89 @@ describe('the chat pane gate (the login page it replaces)', () => {
 		expect(other.querySelector('.provider-usage-strip')).toBeNull();
 		disposeBridged();
 		disposeOther();
+	});
+});
+
+/** The claude chat page's "Account & usage" section inside a same-origin iframe of the
+ *  pane, exactly as the page renders it: the toggle carries `aria-expanded` and the
+ *  Expand/Collapse title, and flips itself (and the cost body) on a click. */
+function chatAccountPage(pane: HTMLElement, expanded: boolean): HTMLButtonElement {
+	const frame = document.createElement('iframe');
+	pane.appendChild(frame);
+	const doc = frame.contentDocument!;
+	const section = doc.createElement('div');
+	section.innerHTML = `
+		<div class="sectionHeader">
+			<button type="button" aria-expanded="${expanded}" title="${expanded ? 'Collapse' : 'Expand'} account &amp; usage">
+				<span class="sectionLabel">Account &amp; usage</span>
+			</button>
+			<button type="button">View details</button>
+		</div>
+		<div class="accountUsageBody">
+			<h4>Usage</h4>
+			<div>Session</div>
+			<div>Total cost</div>
+			<div>$0.1358 (costs may be inaccurate due to usage of unknown models)</div>
+		</div>`;
+	doc.body.appendChild(section);
+	const toggle = section.querySelector('button')!;
+	const body = section.querySelector<HTMLElement>('.accountUsageBody')!;
+	body.style.display = expanded ? '' : 'none';
+	toggle.addEventListener('click', () => {
+		const open = toggle.getAttribute('aria-expanded') === 'true';
+		toggle.setAttribute('aria-expanded', String(!open));
+		toggle.setAttribute('title', `${!open ? 'Collapse' : 'Expand'} account &amp; usage`);
+		body.style.display = !open ? '' : 'none';
+	});
+	return toggle;
+}
+
+describe('the account & usage bar under a third-party provider', () => {
+	beforeEach(async () => {
+		await modules();
+		resetProviderCacheForTests();
+		backend.on('provider_list', () => ({ ...providerListAnswer(), activeId: 'deepseek' }));
+		backend.on('provider_usage', () => []);
+	});
+
+	it('starts collapsed while a third-party provider runs the chat, and never fights a later expansion', async () => {
+		const pane = host();
+		const dispose = mountProviderPaneGate('Anthropic.claude-code', pane);
+		await flush();
+		// The page renders the section late (after its auth status lands), inside the
+		// pane's iframe — after the gate armed.
+		const toggle = chatAccountPage(pane, true);
+		await until(() => toggle.getAttribute('aria-expanded') === 'false');
+		// The user's own expansion stands: the default applied once, not policed.
+		toggle.click();
+		await flush();
+		expect(toggle.getAttribute('aria-expanded')).toBe('true');
+		dispose();
+	});
+
+	it('leaves a page whose section renders already collapsed (and its later expansion) alone', async () => {
+		const pane = host();
+		const dispose = mountProviderPaneGate('Anthropic.claude-code', pane);
+		await flush();
+		const toggle = chatAccountPage(pane, false);
+		await flush();
+		expect(toggle.getAttribute('aria-expanded')).toBe('false');
+		toggle.click();
+		await flush();
+		expect(toggle.getAttribute('aria-expanded')).toBe('true');
+		dispose();
+	});
+
+	it('never touches the bar under the official provider', async () => {
+		backend.on('provider_list', () => providerListAnswer());
+		const pane = host();
+		const dispose = mountProviderPaneGate('Anthropic.claude-code', pane);
+		await flush();
+		const toggle = chatAccountPage(pane, true);
+		await flush();
+		await flush();
+		expect(toggle.getAttribute('aria-expanded')).toBe('true');
+		dispose();
 	});
 });
 

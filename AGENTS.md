@@ -605,7 +605,13 @@ page shows the integration's state (`claude_mcp_status`).
   active third-party provider of a preset that requires a key has none, the pane
   carries the set-key page over the extension's own login one, and once the key lands
   the curve rides as a compact strip above the chat; the page and the strip share
-  `mountUsagePanel`), `src/providersPage.ts` (the Model
+  `mountUsagePanel`; and while any third-party provider runs the chat, the page's own
+  Account & usage bar starts collapsed — 2026-10-13, the owner's direction: its dollars
+  are Claude's own estimates, guesses over a gateway's unknown models ("costs may be
+  inaccurate"), so the gate watches the pane's chat iframe and clicks the section's own
+  toggle once per loaded page when it first renders expanded; the page persists the
+  collapsed state itself, the user's later expansion is never fought within a page, and
+  under the official provider the page is never touched), `src/providersPage.ts` (the Model
   Providers page — flat and compact: the usage card, the profiles as one-line rows,
   the add/edit form whose key field travels once into the
   backend's seal, activate and delete), `src/nodeHost.ts` (the real-Node
@@ -643,7 +649,8 @@ page shows the integration's state (`claude_mcp_status`).
   `extensions.openLogFile` commands),
   `src/claudeChatInject.ts` (the host's Claude Code chat driver behind
   `ggs.claudeChat.*`: the composer typed into and sent, the turn interrupted, the model
-  picker chosen, the AskUserQuestion card answered — the page's own DOM, same-origin),
+  picker chosen, the AskUserQuestion card answered, the Account & usage bar collapsed
+  through its own toggle — the page's own DOM, same-origin),
   `src/editorDiagnostics.ts` (the diagnostics store: the host's
   `languages.createDiagnosticCollection` entries land as CodeMirror squiggles in the open
   editors) + `src/editorDiagnosticsView.ts` (the CodeMirror half, loaded with the editor

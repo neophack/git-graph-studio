@@ -140,6 +140,31 @@ export async function pickChatModel(doc: Document | null | undefined, want: stri
 	return best.label;
 }
 
+/* ---------- the account & usage section ---------- */
+
+/** The chat page's "Account & usage" section toggle — the collapse control its
+ *  sessions panel carries. Structural, like every selector here: the button holds
+ *  `aria-expanded` and a title naming the section ("Expand account & usage" /
+ *  "Collapse account & usage"). */
+export function chatAccountUsageToggle(doc: Document | null | undefined): HTMLButtonElement | null {
+	if (!doc) return null;
+	for (const button of [...doc.querySelectorAll<HTMLButtonElement>('button[aria-expanded]')]) {
+		if (!button.isConnected) continue;
+		if (/account & usage$/i.test((button.getAttribute('title') ?? '').trim())) return button;
+	}
+	return null;
+}
+
+/** Collapse the section when it renders expanded — one click on its own toggle, the
+ *  way a user collapses it. Answers whether the click landed (false when the section
+ *  is absent or already collapsed: nothing to do). */
+export function collapseChatAccountUsage(doc: Document | null | undefined): boolean {
+	const toggle = chatAccountUsageToggle(doc);
+	if (toggle === null || toggle.getAttribute('aria-expanded') !== 'true') return false;
+	toggle.click();
+	return true;
+}
+
 /* ---------- the permission card and the permission mode ---------- */
 
 /** The one-word labels a permission card offers, normalized as the page shows them. A
