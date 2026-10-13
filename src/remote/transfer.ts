@@ -88,21 +88,44 @@ export function uploadFiles(dir: string, folder = false, onProgress?: (p: Upload
 	});
 }
 
+/** The surface a transfer reports through: a progress toast and the outcome notices. The
+ *  workbench's own toasts are the default; the mirror page (no workbench DOM, no
+ *  `#notifications`) installs its own before the first transfer runs. */
+export interface TransferSink {
+	progress(title: string): { update(percent: number | null, message?: string): void; done(): void };
+	info(message: string): void;
+	error(message: string): void;
+}
+
+const workbenchSink: TransferSink = {
+	progress: (title) => progressToast(title),
+	info: (message) => notify('info', message),
+	error: (message) => notify('error', message)
+};
+
+let sink: TransferSink = workbenchSink;
+
+/** Replace the progress/notice surface (the mirror page's own toast; `null` restores the
+ *  workbench's). */
+export function setTransferSink(next: TransferSink | null): void {
+	sink = next ?? workbenchSink;
+}
+
 /** Pick files (or a folder) on the device and upload them into `dir`, with a progress
  *  toast and the outcome notified. Resolves with the PC paths that landed. */
 export async function uploadInto(dir: string, folder = false): Promise<string[]> {
 	// An object property: the closure assignment must survive control-flow narrowing.
-	const progress: { toast: ReturnType<typeof progressToast> | null } = { toast: null };
+	const progress: { toast: ReturnType<TransferSink['progress']> | null } = { toast: null };
 	const outcome = await uploadFiles(dir, folder, (p, index, count) => {
 		const label = count > 1 ? `${index + 1}/${count} ${p.name}` : p.name;
-		progress.toast ??= progressToast(tf('remote.transfer.uploading', label));
+		progress.toast ??= sink.progress(tf('remote.transfer.uploading', label));
 		progress.toast.update(p.total > 0 ? Math.round(((index + p.sent / p.total) / count) * 100) : null, tf('remote.transfer.uploading', label));
 	});
 	progress.toast?.done();
 	if (outcome.failed.length > 0) {
-		notify('error', tf('remote.transfer.failed', outcome.failed.map((f) => f.name).join(', ')));
+		sink.error(tf('remote.transfer.failed', outcome.failed.map((f) => f.name).join(', ')));
 	}
-	if (outcome.uploaded.length > 0) notify('info', tf('remote.transfer.uploaded', outcome.uploaded.length));
+	if (outcome.uploaded.length > 0) sink.info(tf('remote.transfer.uploaded', outcome.uploaded.length));
 	return outcome.uploaded;
 }
 
@@ -135,7 +158,7 @@ export async function downloadTo(path: string, zip = false): Promise<boolean> {
 		await download(path, zip);
 		return true;
 	} catch (error) {
-		notify('error', tf('remote.transfer.failed', String(error)));
+		sink.error(tf('remote.transfer.failed', String(error)));
 		return false;
 	}
 }

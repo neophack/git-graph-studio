@@ -682,19 +682,45 @@ fn serve_file(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "download".into());
     // A folder (or an explicit zip) is packed into a temporary file first — the zip writer
-    // needs to seek — and then streamed like any file.
+    // needs to seek — and then streamed like any file. The headers cross before the tree
+    // is walked (2026-10-13): a big folder's zip build can outlast the daemon's
+    // first-chunk wait, and the download that dies there is retried by the browser against
+    // the same one-time URL — the spent ticket answers 404, shown as "file not found". An
+    // immediate empty first chunk starts the download; the bytes stream once the tree is
+    // packed. A failure after it crosses as an error chunk mid-stream, which the daemon
+    // turns into an aborted body — a truncated archive never lands as a complete file.
     let (mut file, name) = if target.is_dir() || zip {
-        let Ok(mut temp) = tempfile::tempfile() else {
-            return fail(500);
+        let zip_name = format!("{name}.zip");
+        let _ = out.send(FromInstance::FileReply {
+            req,
+            status: 200,
+            name: zip_name.clone(),
+            total: 0,
+            chunk: Vec::new(),
+            done: false,
+        });
+        let fail_started = || {
+            let _ = out.send(FromInstance::FileReply {
+                req,
+                status: 500,
+                name: String::new(),
+                total: 0,
+                chunk: Vec::new(),
+                done: true,
+            });
+        };
+        let mut temp = match tempfile::tempfile() {
+            Ok(temp) => temp,
+            Err(_) => return fail_started(),
         };
         if zip_tree(&target, &mut temp).is_err() {
-            return fail(500);
+            return fail_started();
         }
         use std::io::Seek;
         if temp.seek(std::io::SeekFrom::Start(0)).is_err() {
-            return fail(500);
+            return fail_started();
         }
-        (temp, format!("{name}.zip"))
+        (temp, zip_name)
     } else {
         match std::fs::File::open(&target) {
             Ok(file) => (file, name),

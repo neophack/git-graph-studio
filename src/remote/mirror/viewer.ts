@@ -15,7 +15,7 @@
 // at its end as the PC's page grows (the PC's own scroll positions mean nothing in a copy
 // laid out at another width).
 
-import { localizeTokens, type DownMessage, type MirrorOp, type SDoc, type SNode, type Viewport } from './protocol';
+import { applyDelta, localizeTokens, type DownMessage, type MirrorOp, type SDoc, type SNode, type StrDelta, type Viewport } from './protocol';
 
 const XLINK = 'http://www.w3.org/1999/xlink';
 /** The copy is a picture: no caret blinking where the PC has none, no text selection
@@ -86,6 +86,13 @@ export class MirrorViewer {
 	private nodes = new Map<number, Node>();
 	private ids = new WeakMap<Node, number>();
 	private adoptedStyles = new Map<number, HTMLStyleElement>();
+	/** The canonical (pre-`localize`) strings this copy last received, by node id — the
+	 *  bases the PC's deltas apply against. An entry dies with its node. */
+	private canonText = new Map<number, string>();
+	private canonAttr = new Map<number, Map<string, string>>();
+	private canonVal = new Map<number, string>();
+	private canonCss = new Map<number, string>();
+	private canonAdopted = new Map<number, string>();
 	private frame: HTMLIFrameElement | null = null;
 	private seq: number | null = null;
 	private viewport: Viewport = { w: 1, h: 1 };
@@ -138,6 +145,11 @@ export class MirrorViewer {
 		this.frame?.remove();
 		this.frame = null;
 		this.seq = null;
+		this.canonText.clear();
+		this.canonAttr.clear();
+		this.canonVal.clear();
+		this.canonCss.clear();
+		this.canonAdopted.clear();
 	}
 
 	receive(message: DownMessage): void {
@@ -179,6 +191,11 @@ export class MirrorViewer {
 		this.nodes.clear();
 		this.ids = new WeakMap();
 		this.adoptedStyles.clear();
+		this.canonText.clear();
+		this.canonAttr.clear();
+		this.canonVal.clear();
+		this.canonCss.clear();
+		this.canonAdopted.clear();
 		this.frame?.remove();
 		const frame = this.host.ownerDocument.createElement('iframe');
 		frame.className = this.deps.fluid ? 'mirror-frame webview-copy-frame' : 'mirror-frame';
@@ -262,6 +279,7 @@ export class MirrorViewer {
 		adopted.textContent = this.localize(sdoc.adopted);
 		(doc.head ?? doc.documentElement).append(base, adopted);
 		this.adoptedStyles.set(sdoc.d, adopted);
+		this.canonAdopted.set(sdoc.d, sdoc.adopted);
 		for (const run of later) run();
 		this.deps.onDocument?.(doc);
 	}
@@ -276,6 +294,10 @@ export class MirrorViewer {
 		if (id !== undefined) {
 			this.nodes.delete(id);
 			this.adoptedStyles.delete(id);
+			this.canonText.delete(id);
+			this.canonAttr.delete(id);
+			this.canonVal.delete(id);
+			this.canonCss.delete(id);
 		}
 		if (node.nodeName === 'IFRAME') {
 			const inner = (node as HTMLIFrameElement).contentDocument;
@@ -300,6 +322,7 @@ export class MirrorViewer {
 		if (s.t === 'x') {
 			const text = doc.createTextNode(this.localize(s.n));
 			this.register(text, s.i);
+			this.canonText.set(s.i, s.n);
 			return text;
 		}
 		if (s.t === 'c') {
@@ -314,7 +337,15 @@ export class MirrorViewer {
 			el = doc.createElement('span');
 		}
 		this.register(el, s.i);
-		for (const [name, value] of Object.entries(s.a ?? {})) this.setAttr(el, name, this.localize(value));
+		if (s.a) {
+			for (const [name, value] of Object.entries(s.a)) this.setAttr(el, name, this.localize(value));
+			let bases = this.canonAttr.get(s.i);
+			if (!bases) {
+				bases = new Map();
+				this.canonAttr.set(s.i, bases);
+			}
+			for (const [name, value] of Object.entries(s.a)) bases.set(name, value);
+		}
 		if (el.nodeName === 'IFRAME') {
 			el.setAttribute('sandbox', 'allow-same-origin');
 			el.setAttribute('scrolling', 'no');
@@ -325,9 +356,13 @@ export class MirrorViewer {
 			});
 		}
 		for (const child of s.k ?? []) el.appendChild(this.build(child, doc, later));
-		if (s.css !== undefined) el.textContent = this.localize(s.css);
+		if (s.css !== undefined) {
+			el.textContent = this.localize(s.css);
+			this.canonCss.set(s.i, s.css);
+		}
 		if (s.v !== undefined || s.ck !== undefined) {
 			const control = el as HTMLInputElement;
+			if (s.v !== undefined) this.canonVal.set(s.i, s.v);
 			later.push(() => {
 				if (s.v !== undefined) control.value = s.v;
 				if (s.ck !== undefined) control.checked = s.ck;
@@ -347,6 +382,18 @@ export class MirrorViewer {
 		const node = this.nodes.get(id);
 		if (!node) throw new Error(`mirror node ${id} is unknown`);
 		return node;
+	}
+
+	/** The full string an op carries: itself, or its delta applied to the base this copy
+	 *  holds for the target. A delta without a base cannot land — throw, and the batch's
+	 *  failure asks for a fresh snapshot (the honest recovery from divergence). */
+	private resolve(id: number, value: string, op: MirrorOp, base: string | undefined): string {
+		// Only the string-bearing ops carry a delta (`MirrorOp` unions it in); the fields are
+		// read through the delta shape rather than narrowing the union member by member.
+		const { p, s } = op as StrDelta;
+		if (p === undefined && s === undefined) return value;
+		if (base === undefined) throw new Error(`mirror delta for ${id} has no base`);
+		return applyDelta(base, { v: value, p, s });
 	}
 
 	private apply(op: MirrorOp): void {
@@ -380,16 +427,33 @@ export class MirrorViewer {
 			}
 			case 'attr': {
 				const el = this.need(op.i) as Element;
-				if (op.v === null) el.removeAttribute(op.k);
-				else this.setAttr(el, op.k, this.localize(op.v));
+				if (op.v === null) {
+					el.removeAttribute(op.k);
+					this.canonAttr.get(op.i)?.delete(op.k);
+					return;
+				}
+				const next = this.resolve(op.i, op.v, op, this.canonAttr.get(op.i)?.get(op.k));
+				let bases = this.canonAttr.get(op.i);
+				if (!bases) {
+					bases = new Map();
+					this.canonAttr.set(op.i, bases);
+				}
+				bases.set(op.k, next);
+				this.setAttr(el, op.k, this.localize(next));
 				return;
 			}
-			case 'text':
-				(this.need(op.i) as CharacterData).data = this.localize(op.v);
+			case 'text': {
+				const node = this.need(op.i) as CharacterData;
+				const next = this.resolve(op.i, op.v, op, this.canonText.get(op.i));
+				this.canonText.set(op.i, next);
+				node.data = this.localize(next);
 				return;
+			}
 			case 'val': {
 				const control = this.need(op.i) as HTMLInputElement;
-				control.value = op.v;
+				const next = this.resolve(op.i, op.v, op, this.canonVal.get(op.i));
+				this.canonVal.set(op.i, next);
+				control.value = next;
 				if (op.ck !== undefined) control.checked = op.ck;
 				return;
 			}
@@ -410,12 +474,19 @@ export class MirrorViewer {
 				el.scrollTop = op.e ? el.scrollHeight : op.t;
 				return;
 			}
-			case 'css':
-				(this.need(op.i) as Element).textContent = this.localize(op.v);
+			case 'css': {
+				const style = this.need(op.i) as Element;
+				const next = this.resolve(op.i, op.v, op, this.canonCss.get(op.i));
+				this.canonCss.set(op.i, next);
+				style.textContent = this.localize(next);
 				return;
+			}
 			case 'adopted': {
 				const style = this.adoptedStyles.get(op.d);
-				if (style) style.textContent = this.localize(op.v);
+				if (!style) return;
+				const next = this.resolve(op.d, op.v, op, this.canonAdopted.get(op.d));
+				this.canonAdopted.set(op.d, next);
+				style.textContent = this.localize(next);
 				return;
 			}
 			case 'doc': {

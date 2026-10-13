@@ -1302,7 +1302,12 @@ database) carries the link through NAT. The whole design lives in
 - **The 2026-10-13 security pass** (plan §23.6): three directed audits (daemon attack
   surface, the public Hub, app-side remote + web) and their fixes, all tested. The
   remote-session file boundary lives in the Relay (`src/remote/pathGate.ts`): path-carrying
-  invokes land inside the open folders only (`remote_paths_policy` feeds the roots),
+  invokes land inside the open folders only (`remote_paths_policy` feeds the roots); the one
+  exception is `ext_fs`, which may also reach the extension platform's own areas
+  (`remote_ext_roots`: the installed packages' files, the extensions' storage and their logs
+  — the same roots the backend's `ext_fs` contract allows, without which every activation
+  that reads its own bundled files failed from a browser session — Python's `pythonrc.py`
+  copy was the first seen),
   `open_folder` is refused, `relayEmit` is allowlisted and identity-stamped
   (`remote/<session>` over any client-claimed `by`/`from`), workbenchSync confines
   remote-originated opens, and the mirror copy drops foreign-origin URLs. The daemon
@@ -1324,7 +1329,14 @@ database) carries the link through NAT. The whole design lives in
   restart with the dirty-file check), and the Hub client (`src/hub/`: the Ed25519 device
   key whose public half *is* the link's UUID, the outbound tunnel with challenge handshake
   and reconnect backoff, and tunneled browser sessions served through the very router the
-  LAN listener uses). The recently opened folders (`src/recent.rs`, 2026-10-12): every
+  LAN listener uses). The one-time downloads (2026-10-13): a folder zip answers its
+  headers before its tree is packed — the instance sends an empty first `FileReply`
+  up front, so the browser's download bar appears at once however long the build takes
+  (the daemon's 30 s first-chunk wait once failed every big folder, and the browser's
+  retry against the spent one-time URL answered 404 — Chrome's "未发现文件"); a build
+  that dies after the headers sends a mid-stream error chunk, which the daemon turns into
+  an aborted body so a truncated archive never lands as a complete file. The recently
+  opened folders (`src/recent.rs`, 2026-10-12): every
   folder a window registers or updates with — most recent first, deduped, capped at 12 —
   persists as `recent.json` under the root and rides every WINDOWS frame
   (`recentFolders`), so the picker's "recent paths" list survives a daemon restart and a
@@ -1432,6 +1444,43 @@ database) carries the link through NAT. The whole design lives in
   for keys, IME and the phone keyboard) comes back as `studio://mirror-up` to `main`, where
   `replay.ts` dispatches it with each frame's own event constructors and performs the
   defaults a synthetic event lacks (focus on press, scroll on wheel, editing keys).
+  **The replica's wire economy** (2026-10-13, the owner's direction: 1/10 of the mirror
+  traffic — "animations the page itself draws need no syncing; sync the core data and
+  operations"; plan §22.8): the copy is a picture, not a renderer, so intermediate states
+  are not information. Four levers in `recorder.ts` (each disableable as `{ legacy: true }`
+  for the A/B tests): **string deltas** — `text`/`attr`/`val`/`css`/`adopted` ops carry the
+  edit against the value the viewers hold (`stringDelta` in `protocol.ts`; the recorder
+  keeps per-node/attr/control bases seeded by the snapshot, the viewer mirrors them, and a
+  delta without its base throws into a resnap — never a silent divergence), so a streamed
+  chat token crosses as the token; **animation sampling** — an attribute a script rewrites
+  per frame (two changes < 100 ms apart starts a run, timed in the observer callback) is
+  sampled at ~1 Hz while it runs and its settled value always lands (settle timer); a
+  change-and-change-back inside one batch crosses nothing; **storm folding** — pending
+  churn (childList nodes added+removed; one innerHTML window swap is a single record) ≥ 24
+  holds the intermediate renders up to 600 ms so a virtualized list's scroll (git-graph-rs)
+  collapses into settled batches, the rows that lived and died inside the hold never
+  serialized at all; **cadence tiers** — a quiet period's first change leaves at 50 ms,
+  continuous background traffic (previous batch non-empty) coalesces at 500 ms, and
+  replayed input still flushes immediately (`host.ts`), so interactivity keeps the fast
+  floor. The frame compression threshold dropped 1024 → 256 on both sides (`frame.ts`,
+  daemon `ws/frame.rs`). `tests/remoteTraffic.test.ts` measures the modelled wire against
+  the legacy recorder: streaming chat 11×, virtualized scroll 12.7×, JS animation 28.8×,
+  combined 19.6× — each scenario ends with the copy's DOM equal to the PC's.
+  **The replica's file transfers** (2026-10-13): the mirrored Explorer's context menu is the
+  PC's own, and the PC has no remote session to transfer with — so a right click (or long
+  press) that `explorerSpotAt` reads as an Explorer row, or the list's blank area (the
+  workspace root, derived from the top-level rows: one shared parent is the single root,
+  unrelated parents the multi-root virtual level), arms `explorerTransfer.ts`, which waits
+  for the menu the PC builds — the desktop `.context-menu`, the phone shell's action sheet —
+  and appends this page's own Download / Download as Zip / Upload Here entries to it. The
+  appended rows carry `data-ggs-local` (input never forwards them; the entries shift nothing
+  above, so the PC items' replay rects stay exact), their click closes the mirrored surface
+  (an Escape for menus, a press on the sheet's backdrop — its Escape listener sits where a
+  replayed key never lands) and rides `transfer.ts` over the page's own transport, whose
+  progress / notices report through `setTransferSink` — the replica installs
+  `mirror/transferSink.ts` (a small toast; the workbench's `#notifications` never exists
+  here), the own-UI workbench keeps ui.ts's toasts. Desktop sessions get none of this
+  (`remoteEnv()` gates the own-UI entries; the replica side is mirror-only by construction).
   `host.ts` keeps the viewers (hello every 10 s, forgotten after 35 s silent, the recorder
   stopped with the last one) and `hostStub.ts` loads it on the first hello, so a desktop
   nobody watches pays nothing. **Webview streams** (2026-10-12, §22.6): a page that runs
@@ -1622,7 +1671,8 @@ database) carries the link through NAT. The whole design lives in
   alone excepted: its job is to find and drive the daemon by name.
 - Tests: `tests/remoteMirror.test.ts` (the replica: snapshot and every mutation kind into
   the copy, URL tokens, the CSP drop, the sequence-gap resnap, the input replay, the host's
-  viewer lifecycle, the PC window's phone mode), `tests/remote.test.ts` +
+  viewer lifecycle, the PC window's phone mode, the transfer entries joining the mirrored
+  menu and sheet with locally-run clicks), `tests/remote.test.ts` +
   `tests/remoteResponsive.test.ts` (the shims, transport,
   relay engine; the phone's page model, app bar, navigation, drawer, sheets, editing row
   and settings page; the transfer layer — chunked resumable uploads with per-file failure

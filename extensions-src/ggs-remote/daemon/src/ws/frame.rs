@@ -14,8 +14,10 @@ pub const HEADER_LEN: usize = 20;
 pub const MAX_PAYLOAD: usize = 1 << 20;
 /// The largest message a reassembled fragment chain may grow to (§16 input validation).
 pub const MAX_MESSAGE: usize = 256 << 20;
-/// Payloads below this size are never compressed (§6.1).
-pub const COMPRESS_THRESHOLD: usize = 1024;
+/// Payloads below this size are never compressed (§6.1). The mirror's op batches are the
+/// plentiful small frames of a remote session, and DOM JSON collapses 4–8× — the threshold
+/// sits low enough to catch them (2026-10-13, the wire-economy pass).
+pub const COMPRESS_THRESHOLD: usize = 256;
 
 /// Re-stamp the `session` field of every frame in an encoded message (in place): the Hub
 /// tunnel link uses it between the browser side (session 0) and its own per-connection

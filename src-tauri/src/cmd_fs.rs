@@ -711,6 +711,27 @@ pub fn remote_paths_policy(state: State<'_, AppState>) -> Vec<String> {
     roots
 }
 
+/// The extension-platform roots a remote session's `ext_fs` may ALSO reach, beyond the open
+/// folders (§23.4): the installed packages' own files, the extensions' storage area and
+/// their own log directory — exactly the surfaces the desktop's `ext_fs` contract already
+/// allows (the extension host passes them as the call's roots). An extension reading its
+/// own bundled files — Python copying `pythonrc.py` out of its install — or its stored
+/// state is ordinary activation traffic, not a boundary crossing; without these roots every
+/// such activation fails from a browser session. The rest of `~/.ggs` (settings, provider
+/// keys, Claude state, the remote password) stays outside: only these three subtrees cross.
+#[tauri::command]
+pub fn remote_ext_roots() -> Vec<String> {
+    let mut roots: Vec<String> = Vec::new();
+    if let Ok(store) = crate::cmd_ext::extensions_home_dir() {
+        if let Some(home) = store.parent() {
+            for rel in ["extensions", "extension-data", "logs/extensions"] {
+                roots.push(home.join(rel).to_string_lossy().into_owned());
+            }
+        }
+    }
+    roots
+}
+
 /// Where an interrupted upload of `path` resumes: the partial file's length when it is not
 /// larger than the file being uploaded, else 0 (a different file — start over).
 fn upload_offset(path: &Path, size: u64) -> u64 {
@@ -1705,5 +1726,45 @@ mod head_info_tests {
         // A path with no final component names no repo; the frontend hides the item.
         assert_eq!(repo_folder_name("/"), "");
         assert_eq!(repo_folder_name(""), "");
+    }
+}
+
+#[cfg(test)]
+mod remote_gate_tests {
+    use super::*;
+
+    /// `remote_ext_roots` names exactly the extension platform's own areas under the one
+    /// home — the packages' files, their storage and their logs. Nothing else under `~/.ggs`
+    /// (settings, keys, Claude state) may appear: a remote session's `ext_fs` crossing is
+    /// confined to these three.
+    #[test]
+    fn ext_roots_are_the_extension_platforms_own_areas() {
+        let _isolated = crate::test_support::isolated_extension_store();
+        let roots: Vec<String> = remote_ext_roots()
+            .iter()
+            .map(|root| root.replace('\\', "/"))
+            .collect();
+        assert_eq!(roots.len(), 3, "exactly three areas: packages, storage, extension logs");
+        for root in &roots {
+            let suffix = root.trim_end_matches('/');
+            assert!(
+                suffix.ends_with("/extensions")
+                    || suffix.ends_with("/extension-data")
+                    || suffix.ends_with("/logs/extensions"),
+                "{root} is not one of the extension platform's areas"
+            );
+        }
+        // All three share the one home — the store's parent.
+        let homes: std::collections::HashSet<String> = roots
+            .iter()
+            .map(|root| {
+                root.trim_end_matches('/')
+                    .trim_end_matches("/extensions")
+                    .trim_end_matches("/extension-data")
+                    .trim_end_matches("/logs")
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(homes.len(), 1, "the areas all sit under one home: {roots:?}");
     }
 }

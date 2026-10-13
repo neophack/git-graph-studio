@@ -71,4 +71,29 @@ describe('the gate table', () => {
 			/cannot open new folders/
 		);
 	});
+
+	it("lets ext_fs reach the extension platform's own areas, and nothing else there", () => {
+		const roots = [ROOT];
+		const extRoots = [
+			isWindows ? 'C:\\Users\\me\\.ggs\\extensions' : '/home/me/.ggs/extensions',
+			isWindows ? 'C:\\Users\\me\\.ggs\\extension-data' : '/home/me/.ggs/extension-data'
+		];
+		// An activation reading its own bundled files (Python copying pythonrc.py out of its
+		// install) and its stored state is ordinary traffic — the backend's ext_fs contract
+		// allows exactly these roots.
+		const ownInstall = isWindows
+			? 'C:\\Users\\me\\.ggs\\extensions\\ms-python.python-2026.4.0\\python_files\\pythonrc.py'
+			: '/home/me/.ggs/extensions/ms-python.python-2026.4.0/python_files/pythonrc.py';
+		const ownStorage = isWindows
+			? 'C:\\Users\\me\\.ggs\\extension-data\\ms-python.python\\global\\settings.json'
+			: '/home/me/.ggs/extension-data/ms-python.python/global/settings.json';
+		expect(() => gateInvoke('ext_fs', { op: 'read', path: ownInstall, to: ownStorage }, roots, extRoots)).not.toThrow();
+		expect(() => gateInvoke('ext_fs', { op: 'read', path: INSIDE }, roots, extRoots)).not.toThrow();
+		// The rest of ~/.ggs stays outside the boundary — settings, keys, Claude state.
+		expect(() => gateInvoke('ext_fs', { op: 'read', path: OUTSIDE }, roots, extRoots)).toThrow(/outside the folders/);
+		// The extension areas widen ext_fs ONLY: every other command keeps the open folders.
+		expect(() => gateInvoke('read_file', { path: ownInstall }, roots, extRoots)).toThrow(/outside the folders/);
+		// And without the areas served (an older backend's answer), the strict rule holds.
+		expect(() => gateInvoke('ext_fs', { op: 'read', path: ownInstall }, roots)).toThrow(/outside the folders/);
+	});
 });

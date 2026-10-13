@@ -54,6 +54,11 @@ export interface ExtInfo {
 	changelog: string | null;
 	/** `bundled` (a not-yet-installed package the installer ships) or `vsix`. */
 	format: 'bundled' | 'vsix' | 'ggs';
+	/** The packer's page bundle (`webview/index.js`) is present in the install — the prewarm
+	 *  fetches it only then (otherwise the fetch is a guaranteed 404: silent under the
+	 *  desktop's `ggs://` protocol, one red console line per package in a browser session).
+	 *  Optional because older `ext_list` recordings predate it. */
+	pageBundle?: boolean;
 	/** The `ggs` key declaration, for packages installed from one. */
 	capabilities: StudioManifest | null;
 }
@@ -1099,14 +1104,17 @@ export class ExtensionHost {
 
 	/** Warm the packer's page bundle (`webview/index.js` — claude-code's is 5.4 MB) into the
 	 *  WebView's HTTP cache the moment an activation settles: a page's first open then pays
-	 *  only the parse, not fetch + parse, and the dialog shows that much earlier. The
-	 *  packer's convention names the file for every VSIX-packed page; a 404 just means this
-	 *  package ships none — silent, so the app log stays a diagnostic, not a warning wall. */
+	 *  only the parse, not fetch + parse, and the dialog shows that much earlier. Only a
+	 *  package that truly carries the bundle (`ext_list`'s `pageBundle`) is fetched — for
+	 *  every other package the fetch was a guaranteed 404, silent under the desktop's
+	 *  `ggs://` protocol but one red console line per package in a browser session, where
+	 *  the same URL is an ordinary HTTP request the devtools report. */
 	private prewarmPageAssets(extId: string): void {
 		if (this.prewarmedExts.has(extId)) return;
 		this.prewarmedExts.add(extId);
 		const ext = this.installedExts.find((candidate) => candidate.id === extId);
-		const url = `${ext ? extAssetBase(ext) : `ggs://localhost/${extId}/`}webview/index.js`;
+		if (ext?.pageBundle !== true) return;
+		const url = `${extAssetBase(ext)}webview/index.js`;
 		const started = performance.now();
 		void fetch(url)
 			.then((response) => (response.ok ? response.arrayBuffer() : null))

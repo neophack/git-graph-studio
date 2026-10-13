@@ -134,18 +134,27 @@ export class RelayEngine {
 		return out;
 	}
 
-	/** The open folders (plus a single-file launch), refreshed briefly: the roots every
-	 *  path-carrying remote invoke is confined to. Fetched locally — no session header —
-	 *  so the answer is the app's own truth (§23.4's audit fix: app commands themselves
-	 *  are unconfined by design; the boundary lives here, where remote trust ends). */
-	private rootsAt: { at: number; roots: string[] } | null = null;
+	/** The gate's policy, refreshed briefly: the open folders (plus a single-file launch)
+	 *  every path-carrying remote invoke is confined to, and the extension platform's own
+	 *  areas `ext_fs` may also reach (the same two lists the backend serves — the boundary's
+	 *  truth lives there). Fetched locally — no session header — so the answer is the app's
+	 *  own truth (§23.4's audit fix: app commands themselves are unconfined by design; the
+	 *  boundary lives here, where remote trust ends). */
+	private policyAt: { at: number; roots: string[]; extRoots: string[] } | null = null;
 
-	private async allowedRoots(): Promise<string[]> {
+	private async pathPolicy(): Promise<{ roots: string[]; extRoots: string[] }> {
 		const now = Date.now();
-		if (this.rootsAt && now - this.rootsAt.at < 3000) return this.rootsAt.roots;
-		const roots = (await this.deps.invoke('remote_paths_policy')) as string[];
-		this.rootsAt = { at: now, roots: Array.isArray(roots) ? roots : [] };
-		return this.rootsAt.roots;
+		if (this.policyAt && now - this.policyAt.at < 3000) return this.policyAt;
+		const [roots, extRoots] = await Promise.all([
+			this.deps.invoke('remote_paths_policy') as Promise<string[]>,
+			this.deps.invoke('remote_ext_roots') as Promise<string[]>,
+		]);
+		this.policyAt = {
+			at: now,
+			roots: Array.isArray(roots) ? roots : [],
+			extRoots: Array.isArray(extRoots) ? extRoots : []
+		};
+		return this.policyAt;
 	}
 
 	private async runInvoke(frame: Frame): Promise<void> {
@@ -155,12 +164,18 @@ export class RelayEngine {
 			let result: unknown;
 			if (encOf(frame) === Enc.Raw) {
 				const { c, h, body } = decodeRawInvoke(frame.payload);
-				if (isPathGated(c)) gateInvoke(c, body as unknown as Record<string, unknown> | undefined, await this.allowedRoots());
+				if (isPathGated(c)) {
+					const policy = await this.pathPolicy();
+					gateInvoke(c, body as unknown as Record<string, unknown> | undefined, policy.roots, policy.extRoots);
+				}
 				result = await this.deps.invoke(c, body, { headers: { ...(h ?? {}), 'x-ggs-frontend': frontend } });
 			} else {
 				const { c, a, h } = frameJson<{ c: string; a?: Record<string, unknown>; h?: Record<string, string> }>(frame);
 				const args = this.revive(session, a ?? {}) as Record<string, unknown>;
-				if (isPathGated(c)) gateInvoke(c, args, await this.allowedRoots());
+				if (isPathGated(c)) {
+					const policy = await this.pathPolicy();
+					gateInvoke(c, args, policy.roots, policy.extRoots);
+				}
 				result = await this.deps.invoke(c, args, { headers: { ...(h ?? {}), 'x-ggs-frontend': frontend } });
 			}
 			if (result instanceof ArrayBuffer || result instanceof Uint8Array) {

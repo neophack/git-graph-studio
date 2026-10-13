@@ -1,7 +1,12 @@
 // The remote trust boundary's path rule (docs/ggs-remote-plan.md §23.4, the 2026-10-13
 // audit's F1): a browser session drives the workbench, but its file reads and writes land
 // inside the open folders only — `~/.ggs` (settings, provider keys, Claude state) and the
-// rest of the disk are not a remote session's to touch through app commands. The desktop
+// rest of the disk are not a remote session's to touch through app commands. The one
+// exception is the extension platform's own surface: `ext_fs` may also reach the installed
+// packages' files, the extensions' storage and their logs (the same roots the backend's
+// `ext_fs` contract allows — an extension reading its own bundled files, as Python's
+// `pythonrc.py` copy does at activation, is ordinary traffic, not a boundary crossing);
+// `remote_ext_roots` names those areas. The desktop
 // window is unaffected: the gate answers "is this caller a remote session", which only the
 // Relay's stamped traffic is. Shared by the Relay (every path-carrying invoke) and the
 // workbench sync receiver (remote-originated opens), so the two can never disagree.
@@ -68,7 +73,10 @@ function towardRoot(partial: string, roots: string[]): boolean {
  *  relative path would resolve against a working directory outside the roots and is
  *  refused. `sameRootOnly` marks the commands that would WIDEN the boundary (opening a
  *  new folder or single file makes it a root); `prefixTowardRoot` marks the completion
- *  command, whose partial input may also be on the way TO a root. The table is the
+ *  command, whose partial input may also be on its way TO a root. `extensionRoots` marks
+ *  the one surface whose paths may also land inside the extension platform's own areas
+ *  (installed packages, their storage, their logs) — the same roots the backend's `ext_fs`
+ *  contract allows. The table is the
  *  extraction of every `#[tauri::command]` with String path-like parameters — a command
  *  missing here is a hole, so extend it with the command, not around it. */
 export const PATH_GATED: Record<
@@ -78,6 +86,7 @@ export const PATH_GATED: Record<
 		relativeAllowed?: boolean;
 		sameRootOnly?: boolean;
 		prefixTowardRoot?: boolean;
+		extensionRoots?: boolean;
 	}
 > = {
 	// The Explorer/editor file surface.
@@ -173,7 +182,7 @@ export const PATH_GATED: Record<
 	convert_can_log: { args: ['from', 'to'] },
 	// The extension platform's own path surfaces (the backend confines these too —
 	// this is the second lock on the same door).
-	ext_fs: { args: ['path', 'to'] },
+	ext_fs: { args: ['path', 'to'], extensionRoots: true },
 	ext_page_file_chunk: { args: ['path', 'repo'], relativeAllowed: true },
 	ext_page_revision_bytes: { args: ['path', 'repo'], relativeAllowed: true },
 	ext_install_from_vsix: { args: ['path'], sameRootOnly: true },
@@ -198,11 +207,17 @@ export function isPathGated(command: string): boolean {
 	return REFUSED_COMMANDS.has(command) || PATH_GATED[command] !== undefined;
 }
 
-/** Check one invoke's arguments against the roots; throws the message the session sees. */
+/** Check one invoke's arguments against the roots; throws the message the session sees.
+ *  `extRoots` are the extension platform's own areas (`remote_ext_roots`), applied only to
+ *  the rules that mark `extensionRoots` — the extension host passes an installed package's
+ *  own files, its storage and its log directory as `ext_fs` paths (an activation reading
+ *  its bundled files is ordinary traffic), while every other command keeps the open
+ *  folders alone. */
 export function gateInvoke(
 	command: string,
 	args: Record<string, unknown> | undefined,
-	roots: string[]
+	roots: string[],
+	extRoots: string[] = []
 ): void {
 	if (REFUSED_COMMANDS.has(command)) {
 		throw new Error(
@@ -211,6 +226,7 @@ export function gateInvoke(
 	}
 	const rule = PATH_GATED[command];
 	if (!rule) return;
+	const allowed = rule.extensionRoots ? [...roots, ...extRoots] : roots;
 	const record = args ?? {};
 	for (const name of rule.args) {
 		const value = record[name];
@@ -221,8 +237,8 @@ export function gateInvoke(
 			if (rule.relativeAllowed && name !== 'repo') continue;
 			throw new Error(`${command}: ${name} must be an absolute path inside the open folders`);
 		}
-		if (!withinRoots(value, roots)) {
-			if (rule.prefixTowardRoot && towardRoot(value, roots)) continue;
+		if (!withinRoots(value, allowed)) {
+			if (rule.prefixTowardRoot && towardRoot(value, allowed)) continue;
 			if (rule.sameRootOnly || rule.prefixTowardRoot) {
 				throw new Error(
 					'a remote session cannot open new folders on this PC — open one from the PC, or spawn a sandboxed window'

@@ -46,6 +46,41 @@ export interface SNode {
 	doc?: SDoc;
 }
 
+/** A string delta: `v` replaces the range `[p, base.length - s)` of the last value the
+ *  viewer holds for this target, where `base` is the full value it last received (the
+ *  snapshot's, or a previous full op, or a previous delta's result). Absent `p`/`s` means
+ *  `v` is the whole new value. Deltas are how the wire stays thin while content streams:
+ *  a chat token appended to a paragraph crosses as the token, not the paragraph. */
+export interface StrDelta {
+	p?: number;
+	s?: number;
+}
+
+/** The delta shape of `next` against `base` — the last value the viewers hold. A full
+ *  `{ v }` when there is no baseline or a delta would not pay; else `{ v, p, s }` where
+ *  the new string is `base.slice(0, p) + v + base.slice(base.length - s)`. */
+export function stringDelta(base: string | undefined, next: string): StrDelta & { v: string } {
+	if (base === undefined || next.length < 48 || base === next) return { v: next };
+	let p = 0;
+	const min = Math.min(base.length, next.length);
+	while (p < min && base.charCodeAt(p) === next.charCodeAt(p)) p += 1;
+	let s = 0;
+	while (s < min - p && base.charCodeAt(base.length - 1 - s) === next.charCodeAt(next.length - 1 - s)) s += 1;
+	const kept = p + s;
+	// The delta must beat the full value by more than the `p`/`s` fields' own bytes.
+	if (next.length - kept + 24 >= next.length * 0.85) return { v: next };
+	return { v: next.slice(p, next.length - s), p, s };
+}
+
+/** Apply a delta (or full value) to the base the viewer holds. Throws when the range is
+ *  out of bounds — a corrupt batch resnaps, it must not silently diverge. */
+export function applyDelta(base: string, op: StrDelta & { v: string }): string {
+	const { p, s } = op;
+	if (p === undefined || s === undefined) return op.v;
+	if (p < 0 || s < 0 || p + s > base.length) throw new Error('mirror delta is out of range');
+	return base.slice(0, p) + op.v + base.slice(base.length - s);
+}
+
 export interface SDoc {
 	/** The document's own id (the target of `adopted` ops). */
 	d: number;
@@ -58,9 +93,9 @@ export interface SDoc {
 export type MirrorOp =
 	| { o: 'add'; p: number; b: number | null; n: SNode }
 	| { o: 'rm'; i: number }
-	| { o: 'attr'; i: number; k: string; v: string | null }
-	| { o: 'text'; i: number; v: string }
-	| { o: 'val'; i: number; v: string; ck?: boolean }
+	| ({ o: 'attr'; i: number; k: string; v: string | null } & StrDelta)
+	| ({ o: 'text'; i: number; v: string } & StrDelta)
+	| ({ o: 'val'; i: number; v: string; ck?: boolean } & StrDelta)
 	/** The focused editable's caret (the phone-mirror cursor, 2026-10-13): `i` the control
 	 *  with `s`/`e` its selection, or `ci`/`co` the anchor node and offset inside a
 	 *  contenteditable — a text node at its character offset, or an element at its child
@@ -70,8 +105,8 @@ export type MirrorOp =
 	/** `e`: the scroller sits at its end — the viewer pins its own end (its fonts may make
 	 *  the content a little taller or shorter than the PC's). */
 	| { o: 'scroll'; i: number; t: number; l: number; e?: 1 }
-	| { o: 'css'; i: number; v: string }
-	| { o: 'adopted'; d: number; v: string }
+	| ({ o: 'css'; i: number; v: string } & StrDelta)
+	| ({ o: 'adopted'; d: number; v: string } & StrDelta)
 	| { o: 'doc'; i: number; doc: SDoc | null }
 	| { o: 'vp'; w: number; h: number };
 

@@ -28,7 +28,10 @@ function allowZoom(): void {
 }
 
 export function bootMirrorViewer(transport: Transport, attached: Attached, basePath: string, request: ModeRequest = 'auto'): void {
-	if (/^zh/i.test(navigator.language)) setLocale('zh-cn');
+	if (/zh/i.test(navigator.language)) setLocale('zh-cn');
+	// The replica's own transfer surface (upload progress, outcome notices): the workbench's
+	// toasts belong to a workbench this page never runs. Lazy — it drags transfer.ts.
+	void import('./transferSink').then((sink) => sink.installMirrorTransferSink());
 	allowZoom();
 	document.documentElement.classList.add('mirror-mode');
 	const stage = el('div', 'mirror-stage');

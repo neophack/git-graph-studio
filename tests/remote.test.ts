@@ -372,6 +372,7 @@ describe('relay engine', () => {
 			if (cmd === 'fail') throw 'boom';
 			if (cmd === 'raw') return new Uint8Array([1, 2]).buffer;
 			if (cmd === 'remote_paths_policy') return [isWindows ? 'C:\\work\\repo' : '/work/repo'];
+			if (cmd === 'remote_ext_roots') return [isWindows ? 'C:\\Users\\me\\.ggs\\extensions' : '/home/me/.ggs/extensions'];
 			return { cmd, args };
 		});
 		const relay = new RelayEngine({
@@ -440,6 +441,30 @@ describe('relay engine', () => {
 		await new Promise((r) => setTimeout(r, 10));
 		expect(answer()).toBeTruthy();
 		expect(invoke).not.toHaveBeenCalledWith('open_folder', expect.anything(), expect.anything());
+	});
+
+	it("forwards ext_fs into the extension platform's own areas, and refuses them everywhere else", async () => {
+		const { relay, invoke, sent } = engine();
+		const ownInstall = isWindows
+			? 'C:\\Users\\me\\.ggs\\extensions\\ms-python.python-2026.4.0\\python_files\\pythonrc.py'
+			: '/home/me/.ggs/extensions/ms-python.python-2026.4.0/python_files/pythonrc.py';
+		const answer = () => sent.find((f) => f.type === T.RESULT && f.flags & FLAG.ERROR);
+
+		// The extension host passes an installed package's own files as ext_fs paths (an
+		// activation reading its bundled files is ordinary traffic) — the backend's own
+		// contract allows the same roots, so the gate forwards it.
+		relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: 'ext_fs', a: { op: 'read', roots: [ownInstall], path: ownInstall, to: undefined } }, 1, 0, 7)));
+		await new Promise((r) => setTimeout(r, 10));
+		expect(answer()).toBeUndefined();
+		expect(invoke).toHaveBeenCalledWith('ext_fs', expect.objectContaining({ path: ownInstall }), expect.anything());
+
+		// The same path through any other command stays a boundary crossing.
+		sent.length = 0;
+		invoke.mockClear();
+		relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: 'read_file', a: { path: ownInstall } }, 1, 0, 7)));
+		await new Promise((r) => setTimeout(r, 10));
+		expect(answer()).toBeTruthy();
+		expect(invoke).not.toHaveBeenCalledWith('read_file', expect.anything(), expect.anything());
 	});
 
 	it('stamps and allowlists the events a session may emit', async () => {
@@ -719,6 +744,26 @@ describe('file transfers', () => {
 		const outcomePromise = uploadFiles('C:\\dest');
 		document.querySelector<HTMLInputElement>('input[type=file]')!.dispatchEvent(new Event('cancel'));
 		await expect(outcomePromise).resolves.toEqual({ uploaded: [], failed: [] });
+		setRemoteEnv(undefined);
+	});
+
+	it('reports through the installed sink — the mirror page has no workbench toasts', async () => {
+		env((cmd) => (cmd === 'fs_upload_offset' ? 0 : 0));
+		const events: string[] = [];
+		const { setTransferSink, uploadInto } = await import('../src/remote/transfer');
+		setTransferSink({
+			progress: (title) => {
+				events.push(`begin ${title}`);
+				return { update: (percent, message) => events.push(`update ${percent} ${message ?? ''}`), done: () => events.push('done') };
+			},
+			info: (message) => events.push(`info ${message}`),
+			error: (message) => events.push(`error ${message}`)
+		});
+		const outcome = uploadInto('C:\\dest');
+		pick(new File(['abc'], 'one.txt'));
+		await outcome;
+		expect(events.join('\n')).toBe('begin Uploading one.txt\nupdate 100 Uploading one.txt\ndone\ninfo Uploaded 1 file(s)');
+		setTransferSink(null);
 		setRemoteEnv(undefined);
 	});
 

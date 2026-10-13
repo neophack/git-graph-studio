@@ -331,6 +331,18 @@ pub async fn download(
             }
             let chunk = rx.recv().await?;
             let finished = chunk.done;
+            // A failure after the headers crossed (the zip build died mid-pack,
+            // 2026-10-13): abort the body rather than end it — a truncated archive must
+            // surface as an interrupted download, never land as a complete file.
+            if chunk.status != 200 {
+                return Some((
+                    Err(std::io::Error::other(format!(
+                        "the instance failed mid-stream ({})",
+                        chunk.status
+                    ))),
+                    (None, rx, true),
+                ));
+            }
             Some((Ok(chunk.body), (None, rx, finished)))
         });
     let mut builder = Response::builder()

@@ -7,7 +7,10 @@ import { decode as decodeMsgpack, encode as encodeMsgpack } from '@msgpack/msgpa
 
 export const HEADER_LEN = 20;
 export const MAX_PAYLOAD = 1 << 20;
-export const COMPRESS_THRESHOLD = 1024;
+/** Payloads below this size are never compressed (§6.1). The mirror's op batches are the
+ *  plentiful small frames of a remote session, and DOM JSON collapses 4–8× — the threshold
+ *  sits low enough to catch them (2026-10-13, the wire-economy pass). */
+export const COMPRESS_THRESHOLD = 256;
 
 /** Frame types (§6.2). */
 export const T = {

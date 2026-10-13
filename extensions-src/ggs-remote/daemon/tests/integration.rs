@@ -962,6 +962,239 @@ async fn session_carries_the_folder_input_switch() {
     );
 }
 
+/// §7.8's one-time download, end to end: the ticket is minted for the session that asked
+/// and the instance it names, the navigation needs no cookie (the ticket is the
+/// credential), the file streams from the instance's chunks, and the ticket dies with its
+/// first use. An instance's 404 crosses as a 404 — the browser's "file not found".
+#[tokio::test]
+async fn a_download_ticket_streams_the_file_once() {
+    let h = start().await;
+    set_password(&h).await;
+    let (cookie, _csrf) = login(&h).await;
+    let mut instance = FakeInstance::connect(&h, "ggs-38740").await;
+
+    let minted = http(
+        h.public,
+        "POST",
+        "/api/download-ticket",
+        &[("Cookie", &cookie), ("Content-Type", "application/json")],
+        Some(r#"{"instance":"ggs-38740","path":"C:/repo/笔记.txt","zip":false}"#),
+    )
+    .await;
+    assert_eq!(minted.status, 200, "{}", minted.body);
+    let url = serde_json::from_str::<serde_json::Value>(&minted.body).unwrap()["url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // The token is random; only the prefix is stable on the LAN (base `/`).
+    let (prefix, _token) = url.split_once("t=").unwrap();
+    assert_eq!(prefix, "/w/ggs-38740/download?");
+
+    let get = tokio::spawn({
+        let port = h.public;
+        let url = url.clone();
+        async move { http(port, "GET", &url, &[], None).await }
+    });
+    match instance.recv().await {
+        ToInstance::FetchFile { req, path, zip } => {
+            assert_eq!(path, "C:/repo/笔记.txt");
+            assert!(!zip);
+            instance
+                .send(&FromInstance::FileReply {
+                    req,
+                    status: 200,
+                    name: "笔记.txt".into(),
+                    total: 7,
+                    chunk: b"hello\n".to_vec(),
+                    done: false,
+                })
+                .await;
+            instance
+                .send(&FromInstance::FileReply {
+                    req,
+                    status: 200,
+                    name: "笔记.txt".into(),
+                    total: 7,
+                    chunk: Vec::new(),
+                    done: true,
+                })
+                .await;
+        }
+        other => panic!("expected FetchFile, got {other:?}"),
+    }
+    let file = get.await.unwrap();
+    assert_eq!(file.status, 200, "{}", file.body);
+    assert_eq!(file.body, "hello\n");
+    assert!(file
+        .headers
+        .contains("content-type: application/octet-stream"));
+    // RFC 5987: the ASCII fallback and the UTF-8 `filename*` for the Chinese name.
+    assert!(file.headers.contains("filename=\"__.txt\""));
+    assert!(
+        file.headers
+            .contains("filename*=UTF-8''%E7%AC%94%E8%AE%B0.txt"),
+        "{}",
+        file.headers
+    );
+
+    // The ticket is one-time: the same URL again is a plain 404, without asking the
+    // instance anything.
+    let again = http(h.public, "GET", &url, &[], None).await;
+    assert_eq!(again.status, 404);
+    assert!(instance.recv_within(200).await.is_none());
+
+    // A refused instance answer crosses as its status: the browser shows the 404 as a
+    // failed download ("file not found").
+    let minted = http(
+        h.public,
+        "POST",
+        "/api/download-ticket",
+        &[("Cookie", &cookie), ("Content-Type", "application/json")],
+        Some(r#"{"instance":"ggs-38740","path":"C:/repo/gone.md","zip":false}"#),
+    )
+    .await;
+    assert_eq!(minted.status, 200, "{}", minted.body);
+    let url = serde_json::from_str::<serde_json::Value>(&minted.body).unwrap()["url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let get = tokio::spawn({
+        let port = h.public;
+        async move { http(port, "GET", &url, &[], None).await }
+    });
+    match instance.recv().await {
+        ToInstance::FetchFile { req, path, .. } => {
+            assert_eq!(path, "C:/repo/gone.md");
+            instance
+                .send(&FromInstance::FileReply {
+                    req,
+                    status: 404,
+                    name: String::new(),
+                    total: 0,
+                    chunk: Vec::new(),
+                    done: true,
+                })
+                .await;
+        }
+        other => panic!("expected FetchFile, got {other:?}"),
+    }
+    assert_eq!(get.await.unwrap().status, 404);
+
+    // A folder zip answers its headers before the tree is packed (2026-10-13): an empty
+    // first chunk opens the download — the browser's bar appears at once, however long
+    // the build takes — and the archive's bytes follow once the instance has them.
+    let minted = http(
+        h.public,
+        "POST",
+        "/api/download-ticket",
+        &[("Cookie", &cookie), ("Content-Type", "application/json")],
+        Some(r#"{"instance":"ggs-38740","path":"C:/big/repo","zip":true}"#),
+    )
+    .await;
+    assert_eq!(minted.status, 200, "{}", minted.body);
+    let url = serde_json::from_str::<serde_json::Value>(&minted.body).unwrap()["url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let get = tokio::spawn({
+        let port = h.public;
+        async move { http(port, "GET", &url, &[], None).await }
+    });
+    match instance.recv().await {
+        ToInstance::FetchFile { req, path, zip } => {
+            assert_eq!(path, "C:/big/repo");
+            assert!(zip);
+            instance
+                .send(&FromInstance::FileReply {
+                    req,
+                    status: 200,
+                    name: "repo.zip".into(),
+                    total: 0,
+                    chunk: Vec::new(),
+                    done: false,
+                })
+                .await;
+            // The pack takes its time — the daemon must hold the stream open, not time
+            // the download out.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            instance
+                .send(&FromInstance::FileReply {
+                    req,
+                    status: 200,
+                    name: "repo.zip".into(),
+                    total: 0,
+                    chunk: b"PK\x03\x04archive".to_vec(),
+                    done: false,
+                })
+                .await;
+            instance
+                .send(&FromInstance::FileReply {
+                    req,
+                    status: 200,
+                    name: "repo.zip".into(),
+                    total: 0,
+                    chunk: Vec::new(),
+                    done: true,
+                })
+                .await;
+        }
+        other => panic!("expected FetchFile, got {other:?}"),
+    }
+    let zip = get.await.unwrap();
+    assert_eq!(zip.status, 200, "{}", zip.body);
+    assert_eq!(zip.body, "PK\x03\x04archive");
+    assert!(zip.headers.contains("content-type: application/zip"));
+    assert!(zip.headers.contains("filename=\"repo.zip\""));
+
+    // A build that dies after its headers crossed aborts the body: the browser sees an
+    // interrupted download, never a truncated archive marked complete.
+    let minted = http(
+        h.public,
+        "POST",
+        "/api/download-ticket",
+        &[("Cookie", &cookie), ("Content-Type", "application/json")],
+        Some(r#"{"instance":"ggs-38740","path":"C:/big/repo","zip":true}"#),
+    )
+    .await;
+    assert_eq!(minted.status, 200, "{}", minted.body);
+    let url = serde_json::from_str::<serde_json::Value>(&minted.body).unwrap()["url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let get = tokio::spawn({
+        let port = h.public;
+        async move { http(port, "GET", &url, &[], None).await }
+    });
+    match instance.recv().await {
+        ToInstance::FetchFile { req, .. } => {
+            instance
+                .send(&FromInstance::FileReply {
+                    req,
+                    status: 200,
+                    name: "repo.zip".into(),
+                    total: 0,
+                    chunk: Vec::new(),
+                    done: false,
+                })
+                .await;
+            instance
+                .send(&FromInstance::FileReply {
+                    req,
+                    status: 500,
+                    name: String::new(),
+                    total: 0,
+                    chunk: Vec::new(),
+                    done: true,
+                })
+                .await;
+        }
+        other => panic!("expected FetchFile, got {other:?}"),
+    }
+    let aborted = get.await.unwrap();
+    assert_eq!(aborted.status, 200);
+    assert_eq!(aborted.body, "", "the truncated archive must not land");
+}
+
 /// §17.1's pair-unlock row: the QR and the links stay behind the pair page's password
 /// unlock — a wrong password is refused and repetition locks the door (the same per-IP
 /// limiter as login), the right one unlocks, and anything but a live unlock token is

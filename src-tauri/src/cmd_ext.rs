@@ -162,6 +162,11 @@ pub struct ExtInfo {
     pub changelog: Option<String>,
     /// `builtin` or `vsix` (a legacy `ggx` still reads, from installs made while the format existed).
     pub format: String,
+    /// The packer's page bundle (`webview/index.js`) is present in the install. The host's
+    /// prewarm fetches it only when this is set: every other fetch is a guaranteed 404 —
+    /// silent under the desktop's `ggs://` protocol, but one red console line per package in
+    /// a browser session, where the same URL is an ordinary HTTP request.
+    pub page_bundle: bool,
     /// The Studio capabilities the package's `ggs` key declared, as the runtime manifest
     /// the install generated from it.
     pub capabilities: Option<StudioManifest>,
@@ -428,6 +433,7 @@ fn bundled_offer(package: &BundledPackage) -> ExtInfo {
         readme: None,
         changelog: None,
         format: BUNDLED_FORMAT.to_owned(),
+        page_bundle: false,
         capabilities: Some(package.capabilities.clone()),
     }
 }
@@ -1741,6 +1747,7 @@ pub(crate) fn list_installed(dir: &Path) -> Result<Vec<ExtInfo>, String> {
                     Some(ref read_meta) => read_meta.format.clone(),
                     None => meta.format,
                 },
+                page_bundle: path.join("webview").join("index.js").is_file(),
                 capabilities,
             }
             .with_docs(&path),
@@ -3815,6 +3822,43 @@ mod ext_asset_tests {
 mod vsix_tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn page_bundle_flag_tracks_the_packers_bundle() {
+        // The host's prewarm fetches `webview/index.js` only when the flag is set: for a
+        // package that ships none the fetch was a guaranteed 404 — silent under the
+        // desktop's ggs:// protocol, one red console line per package in a browser session.
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        let plain = make_vsix(tmp.path(), "plain", "acme", "1.0.0");
+        assert!(!install_from_vsix_into(&exts, &plain, false).unwrap().page_bundle);
+
+        let packed = tmp.path().join("acme.packed-1.0.0.vsix");
+        let file = std::fs::File::create(&packed).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file("extension/package.json", options).unwrap();
+        zip.write_all(
+            br#"{"name":"packed","publisher":"acme","version":"1.0.0","main":"./out/extension.js","description":"test"}"#,
+        )
+        .unwrap();
+        zip.start_file("extension/out/extension.js", options).unwrap();
+        zip.write_all(b"exports.activate = function() {};").unwrap();
+        zip.start_file("extension/webview/index.js", options).unwrap();
+        zip.write_all(b"/* the packer's page bundle */").unwrap();
+        zip.finish().unwrap();
+        assert!(install_from_vsix_into(&exts, &packed, false).unwrap().page_bundle);
+
+        // The listing carries the same truth.
+        let listed = list_installed(&exts).unwrap();
+        let by_flag: Vec<(bool, &str)> = listed
+            .iter()
+            .map(|info| (info.page_bundle, info.id.as_str()))
+            .collect();
+        assert_eq!(by_flag, [(true, "acme.packed"), (false, "acme.plain")]);
+    }
 
     #[test]
     fn the_real_bundled_vsix_auto_installs() {

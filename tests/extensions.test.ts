@@ -858,6 +858,31 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		expect(channels.at(-1)).toEqual([{ extId: 'acme.demo', name: 'Tests' }]);
 	});
 
+	it('prewarms the page bundle only when the package ships one', async () => {
+		const { host } = hostWithFrame();
+		const packedHandle = { frame: document.body.appendChild(document.createElement('iframe')), commandIds: new Set<string>(), pendingCalls: new Set<(error: Error) => void>(), send: () => undefined };
+		host['frames'].set('acme.packed', packedHandle);
+		const fetched: string[] = [];
+		vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+			fetched.push(String(input));
+			return { ok: true, arrayBuffer: async () => new ArrayBuffer(4) } as Response;
+		}));
+		try {
+			const packed: ExtInfo = { ...USER, id: 'acme.packed', name: 'packed', extensionDependencies: [], path: '/ext/acme.packed-1.0.0', pageBundle: true };
+			backend.on('ext_list', () => [USER, packed]);
+			await host.list();
+			// Both activations settle — only the package that truly carries the bundle
+			// (`ext_list`'s pageBundle) is fetched. Every other fetch was a guaranteed 404:
+			// silent under the desktop's ggs:// protocol, but one red console line per
+			// package in a browser session, where the URL is an ordinary HTTP request.
+			await host['serve']('commands.registerBatch', [['acme.demo.hello']], 'acme.demo', host['frames'].get('acme.demo')! as never);
+			await host['serve']('commands.registerBatch', [['acme.packed.hello']], 'acme.packed', packedHandle as never);
+			expect(fetched).toEqual(['ggs://localhost/acme.packed-1.0.0/webview/index.js']);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
 	it('webview panels open a tab, mount a sandboxed srcdoc frame, and notify the extension on close', async () => {
 		const { host, sent } = hostWithFrame();
 		const opened: [number, string, string][] = [];

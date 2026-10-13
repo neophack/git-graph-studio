@@ -11,7 +11,7 @@
 // `npm run dev:vite` when nothing answers on :5173. The remote build must exist
 // (`npm run build:remote`) for the asset check.
 import { spawn } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import net from 'node:net';
@@ -381,6 +381,52 @@ async function main() {
 
 	const asset = await fetch(`${base}/w/${instance.id}/v/${instance.version}/remote.html`, { headers: { cookie } });
 	check('remote workbench asset', asset.ok, `${asset.status} ${asset.headers.get('content-type')}`);
+
+	// §7.8's one-time download against the REAL instance: mint a ticket for a file of the
+	// open folder (the browser workbench's `download()` does exactly this), then fetch the
+	// one-time URL the way the navigation does — the ticket, not the cookie, is the
+	// credential — and the bytes must be the file's own.
+	{
+		const readme = resolve(folder, 'README.md');
+		const mint = async (path, zip) => {
+			const response = await fetch(`${base}/api/download-ticket`, {
+				method: 'POST',
+				headers: { cookie, 'content-type': 'application/json' },
+				body: JSON.stringify({ instance: instance.id, path, zip })
+			});
+			return response.ok ? (await response.json()).url : null;
+		};
+		const url = await mint(readme, false);
+		if (!url) {
+			check('download: the ticket is minted', false, 'no url');
+		} else {
+			const file = await fetch(`${base}${url}`);
+			const disk = readFileSync(readme);
+			let bytes = Buffer.alloc(0);
+			if (file.body) for await (const chunk of file.body) bytes = Buffer.concat([bytes, chunk]);
+			check('download: the one-time URL streams the file', file.status === 200 && bytes.equals(disk), `HTTP ${file.status}, ${bytes.length} of ${disk.length} bytes, disposition ${file.headers.get('content-disposition') ?? '—'}`);
+			const again = await fetch(`${base}${url}`);
+			check('download: the ticket dies with its first use', again.status === 404, `HTTP ${again.status}`);
+		}
+		// A folder as zip (2026-10-13): the headers cross before the tree is packed, so
+		// the download starts however long the build takes — the 30-s first-chunk wait
+		// once failed every big folder, and the browser's retry against the spent
+		// one-time URL answered 404 ("file not found").
+		const zipUrl = await mint(resolve(folder, 'scripts'), true);
+		if (!zipUrl) {
+			check('download: a folder zip is minted', false, 'no url');
+		} else {
+			const zip = await fetch(`${base}${zipUrl}`);
+			let head = Buffer.alloc(0);
+			if (zip.body) for await (const chunk of zip.body) {
+				head = Buffer.concat([head, chunk]);
+				if (head.length >= 4) break;
+			}
+			check('download: a folder zip starts with its headers and a real archive', zip.status === 200 && head.subarray(0, 4).equals(Buffer.from('PK\x03\x04')), `HTTP ${zip.status}, ${zip.headers.get('content-disposition') ?? '—'}`);
+			// Drain the rest so the instance's stream completes cleanly.
+			if (zip.body) for await (const _ of zip.body) { /* drain */ }
+		}
+	}
 
 	ws.send(mp(T.ATTACH, { instance: instance.id }));
 	const attached = await next((f) => f.type === T.ATTACHED || f.type === T.NOTICE, 40000).catch(() => null);

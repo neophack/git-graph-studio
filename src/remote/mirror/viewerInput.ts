@@ -13,6 +13,7 @@
 // workbench's keybindings.
 
 import { modsOf, type Spot, type UpPayload } from './protocol';
+import { armExplorerTransfer, explorerSpotAt, type MirrorTransferDeps } from './explorerTransfer';
 import type { MirrorViewer } from './viewer';
 
 const TAP_SLOP = 8;
@@ -32,6 +33,13 @@ export interface ViewerInputOptions {
 }
 
 const EDITABLE = 'input, textarea, [contenteditable]:not([contenteditable="false"]), .cm-content, .xterm';
+
+/** Elements the page itself put into the copy — the transfer entries the mirror appends to a
+ *  mirrored menu (explorerTransfer.ts). Their touches and clicks stay here, native: never
+ *  prevented, never replayed onto the PC. */
+function localTarget(target: EventTarget | null): boolean {
+	return Boolean((target as Element | null)?.closest?.('[data-ggs-local]'));
+}
 
 function editableAt(el: Element | null): boolean {
 	if (!el) return false;
@@ -146,6 +154,7 @@ export class ViewerInput {
 		const opts = { capture: true, passive: false } as const;
 		const echo = () => Date.now() - this.lastTouch < TOUCH_ECHO_MS;
 		doc.addEventListener('mousedown', (event) => {
+			if (localTarget(event.target)) return;
 			const target = event.target as Element | null;
 			if (target?.closest?.('select')) return;
 			event.preventDefault();
@@ -163,13 +172,14 @@ export class ViewerInput {
 			});
 		}, opts);
 		doc.addEventListener('mouseover', (event) => {
-			if (echo() || event.buttons !== 0) return;
+			if (localTarget(event.target) || echo() || event.buttons !== 0) return;
 			const spot = this.spot(event, doc);
 			if (!spot || spot.i === this.hoverId) return;
 			this.hoverId = spot.i;
 			this.send({ k: 'ptr', ev: 'hover', b: 0, m: modsOf(event), d: 0, ...spot });
 		}, opts);
 		doc.addEventListener('mouseup', (event) => {
+			if (localTarget(event.target)) return;
 			const target = event.target as Element | null;
 			if (target?.closest?.('select')) return;
 			event.preventDefault();
@@ -180,11 +190,17 @@ export class ViewerInput {
 		}, opts);
 		doc.addEventListener('contextmenu', (event) => {
 			event.preventDefault();
+			if (localTarget(event.target)) return;
 			if (echo() || this.touch) return;
 			const spot = this.spot(event, doc);
 			if (spot) this.send({ k: 'ptr', ev: 'ctx', b: 2, m: modsOf(event), d: 1, ...spot });
+			// The PC's menu (mirrored back) knows no transfers: this page's Explorer entries
+			// join it when it lands (explorerTransfer.ts).
+			const explorerSpot = explorerSpotAt(event.target as Element | null);
+			if (explorerSpot) armExplorerTransfer(doc, explorerSpot, this.transferDeps());
 		}, opts);
 		doc.addEventListener('click', (event) => {
+			if (localTarget(event.target)) return;
 			const target = event.target as Element | null;
 			if (!target?.closest?.('select')) event.preventDefault();
 		}, opts);
@@ -253,6 +269,7 @@ export class ViewerInput {
 
 	private touchStart(event: TouchEvent, doc: Document): void {
 		this.lastTouch = Date.now();
+		if (localTarget(event.target)) return;
 		if (event.touches.length !== 1) {
 			// Two fingers: the browser's pinch-zoom; whatever one finger began is off.
 			this.cancelTouch();
@@ -266,6 +283,10 @@ export class ViewerInput {
 			if (this.touch !== touch || touch.moved) return;
 			touch.long = true;
 			this.send({ k: 'ptr', ev: 'ctx', b: 2, m: 0, d: 1, ...spot });
+			// The long press's menu mirrors the PC's own; this page's Explorer transfers join
+			// it when it lands (explorerTransfer.ts).
+			const explorerSpot = explorerSpotAt(touch.target);
+			if (explorerSpot) armExplorerTransfer(doc, explorerSpot, this.transferDeps());
 		}, LONG_PRESS_MS);
 		this.touch = touch;
 	}
@@ -321,6 +342,24 @@ export class ViewerInput {
 
 	private sendKey(key: string, code: string, m: number): void {
 		this.send({ k: 'key', key, code, m });
+	}
+
+	/** The Explorer transfer entries' way back to the PC (explorerTransfer.ts): the key that
+	 *  closes a mirrored menu, the press that closes a mirrored sheet's backdrop. */
+	private transferDeps(): MirrorTransferDeps {
+		return {
+			key: (name) => this.sendKey(name, name, 0),
+			press: (el, fx, fy) => this.pressRemote(el, fx, fy)
+		};
+	}
+
+	/** A press replayed onto a mirrored element, in the spot grammar the PC's replayer
+	 *  reads (viewerInput's own `spot`). */
+	private pressRemote(el: Element, fx: number, fy: number): void {
+		const id = this.viewer.idOf(el);
+		if (id === undefined) return;
+		this.send({ k: 'ptr', ev: 'down', b: 0, m: 0, d: 1, i: id, fx, fy });
+		this.send({ k: 'ptr', ev: 'up', b: 0, m: 0, d: 1, i: id, fx, fy });
 	}
 
 	private wireProxy(): void {

@@ -16,6 +16,7 @@
 > 修订（2026-10-12，计划收口第三轮）：(1) §17.3 的远程垫片轮落地——`tests/remoteRound.ts` 把 tauriMock 的 invoke 引到真垫片链（tauriShim `invoke` → Transport → 帧编解码 → RelayEngine → 同一套脚本 handler），mock `Channel` 带 `toJSON` 流标记（`__GGS_CHAN__:<stream>`，relay 侧 revive，事件双向流动）；commandSweep 全命令在 tablet 标记下重跑 + phone 冒烟，uiSweep 整组在远程垫片下重跑（SCM/diff 断言改为轮询——wire 的往返让落点晚一拍；SCM 列表顺序在远程下不保证，按行名点击）；richHandlers 补 `list_dir_page`（远程资源管理器分页路径）。(2) §17.1 INSTANCE_RESTART 成功路径：`a_restart_kills_relaunches_and_waits_for_the_registration`——被注册 pid 终止、按注册的 LaunchSpec 重拉本测试二进制（`--exact restart_child_role --ignored` 的子角色，经 GGS_REMOTE_HOME 找到控制端点注册）、SPAWNED 应答新实例 id、WINDOWS 推送换人。(3) §7.10 idle_exit 单测两条（空闲计时先布防、到点才问退；有会话不问；0 分钟关闭）。(4) §17.4 三引擎矩阵：`playwright.remote.config.ts` 增加 Firefox/WebKit 项目；**发现并实测确认**——WebKit/Safari 不给 plain-HTTP localhost 豁免，`Secure` 会话 Cookie 被丢弃（登录永远回登录页）→ e2e fixture 全面改为 TLS 守护进程（`self-signed` + `ignoreHTTPSErrors`，即产品出厂形态），三引擎全绿；`visual-baseline.spec.ts` 按引擎×桌面/手机截登录页与离线页存 `target/studio/remote-e2e-shots/`（不提交像素基线——DOM 断言承载正确性，截图作肉眼比对记录）。
 > 修订（2026-10-12，远程原理改为副本，§22）：按所有者要求（“整个 GGS 都在 PC 上跑，远程网页只是一个副本显示，核心逻辑在 PC 上”）——远程页默认不再在浏览器里运行工作台，而是 PC 桌面窗口（可隐藏）的实时 DOM 副本；输入回传 PC 重放。浏览器刷新、关闭不再重启任何东西：Claude Code 的对话页面常驻 PC 窗口，关掉网页后对话继续，下次打开看到的就是正在工作的 Claude。手机观看时隐藏的 PC 窗口按手机尺寸重排并换上手机外壳，副本 1:1。旧的浏览器端工作台保留为 `?frontend=1`。
 > 修订（2026-10-12，公开端口静默）：按所有者要求（“如果不是 /u/uuid 访问，不要返回任何东西，就像没开这个端口一样”；“链接对才返回内容；判别不是 uuid 也要返回端口关闭”——同日所有者撤回了“端口扫描时也要端口关闭”的 TCP 层诉求，`listen` 保持 `0.0.0.0:8443` 默认）——§20.5 的公开表面收口为“只有链接形态对才有内容”：`/u/<合法 uuid>/…` 与 PC 自身的 `/tunnel`（仅放行 WebSocket 握手形态——守护进程的连法；对它的普通 HTTP 探测也静默）之外，任何请求**不写一个字节直接断开连接**（`hub/src/gate.rs`：tower 服务返回 `Silent` 错误，hyper 在服务应答 `Ok` 之前不写任何响应，故连接以“端口没开”的形态关闭）。uuid 的**形态判别也在门口**：`/u/` 后的段必须是 `identity::valid_uuid` 的小写带连字符 v8 形态（真实链接的固定拼写；大写、版本位错、百分号编码、`not-a-uuid` 一类都不是链接），否则同样零字节断开；形态合法但未知/离线的 uuid 照旧答同一个离线页（两态一致，PC 睡醒的自动重连 UX 保留，Hub 仍无从泄露哪些 uuid 存在）。`/healthz` 移到 `metrics_listen` 运营口（与 `/metrics` 同口，默认关闭）；`/` 的可选说明页（`landing_page` 配置）整体删除。部署面的同样收口：`deploy/Caddyfile` 只代理 `/u/*` 与 `/tunnel`，其余 `abort`（Caddy 直接关闭连接，不答 502）。物理边界如实记录：TCP 层的 SYN 应答无法隐藏（否则浏览器也连不上，SYN 扫描必见 open）；TLS 模式下 TLS 握手本身仍会完成（证书可见）；静默指 HTTP 层不产生任何响应字节——`nmap` 等探测拿不到任何服务指纹。`hub/tests/tunnel.rs` 的 `paths_outside_the_links_answer_nothing`（含畸形 uuid 各形态）与 fixture 改走 `gated()`（与 `serve` 同栈）回归，`gate.rs` 内含放行判定单测；探针 `remote-hub-multi-check.mjs` 的 healthz 检查改走 metrics 口、新增公开口静默与畸形 uuid 零字节检查。
+> 修订（2026-10-13，实测修复）：§7.8 下载的大文件夹 zip 失败链——实例先整树打包、首片 `FileReply` 迟迟不发，守护进程对首片的 30 s 等待（`FETCH_TIMEOUT`）先到点，浏览器拿到 504 后（手动重试或自动续传）对**同一个一次性 URL** 再请求，票据已随首次请求消耗 → 404，Chrome 显示“未发现文件”。修复：实例在打包**前**先发一个空的首片（携带 zip 名、`total: 0`、`done: false`），响应头立即到达浏览器（下载条即刻出现，打包多久都不受 30 s 限制——守护进程对流式后续片本就无超时）；打包在头片之后失败时发 `status: 500` 的收尾片，守护进程将其转为**中止响应体**（`Err` 项结束流，连接断开），截断的压缩包永远不会以“完整文件”的形态落地。`daemon/tests/integration.rs` 的 `a_download_ticket_streams_the_file_once`（文件流、一次性语义、实例 404 转达、心跳首片 + 延迟字节、流中 500 中止五场景）与活体探针 `remote-live-check.mjs`（文件逐字节 + 文件夹 zip 的 PK 头）回归。
 
 ## 目录
 
@@ -676,7 +677,7 @@ enum ToInstance {
 - **Relay 链路**：`/relay?t=<token>` 握手，令牌与 `EnsureRelay` 签发的一致且未用过；一个实例只接受一个 Relay 链路。链路断开 → 对该实例的所有会话发 `NOTICE{relay-restarted}`，并重新 `EnsureRelay`。
 - **实例消失**（控制通道断开且 pid 不存在）：从注册表删除，对接入它的会话发 `CLOSE 4410` → 浏览器回到窗口选择页。
 - **远程实例管理（R20）**：`INSTANCE_CLOSE` / `INSTANCE_RESTART` 的执行方在守护进程。优雅关闭经 `Quit`——实例有未保存文件回 `CloseBlocked{dirty}`，守护进程转发为 `NOTICE{kind:"close-blocked"}`，远程确认后 `force` 直接终止 pid（先决条件：控制通道仍归属该 pid，防 pid 复用误杀）。重启 = 终止 + 按注册时的 `LaunchSpec` 与 `folders` 重新拉起 + 等 `Register`（超时 30 s）+ 推 `WINDOWS`；被关闭实例上的远程会话收 `CLOSE 4410`，新实例注册后按 SPAWN 的路径自动接入。卡死实例（两级心跳超时）正是重启的主场景——控制通道在、应答不在时也能杀。
-- **下载的数据通路**：`GET /w/:inst/download` 的字节经 `FetchFile` → `FileReply` 分片回传。实例侧路径约束与 `ext_fs` 同一策略——只允许已打开的工作区文件夹、插件安装与存储目录（规范化后拒绝 `..` 与逃逸）；`zip` 在实例侧用 `zip` crate 流式打包（复用 §11.3 的 `fs_zip_stream`）。一次性下载票据（60 s）由守护进程签发，防跨站直链。
+- **下载的数据通路**：`GET /w/:inst/download` 的字节经 `FetchFile` → `FileReply` 分片回传。实例侧路径约束与 `ext_fs` 同一策略——只允许已打开的工作区文件夹、插件安装与存储目录（规范化后拒绝 `..` 与逃逸）；`zip` 在实例侧先整树打进临时文件（zip writer 需要 seek）再流式回传——**打包前先发一个空的首片**（2026-10-13：响应头即刻到达浏览器，打包时长不受守护进程首片 30 s 等待限制；打包失败发流中 `status: 500` 收尾片，守护进程转为中止响应体，截断的压缩包不会以完整文件落地）。一次性下载票据（60 s、一次性）由守护进程签发，防跨站直链。
 
 ### 7.9 托盘（`tray/`）与内存
 
@@ -1874,6 +1875,30 @@ M9 依赖 M2（认证）和 M3（多窗口），可与 M5（响应式）并行�
 **实测**（`scripts/probes/remote-sync-check.mjs`，2026-10-12）：dev harness 与 dev/remote-phone.html 作为同浏览器里的两个真实前端（`dev/dev-events.js` 用 BroadcastChannel 扮演 Relay），按钮矩阵 11 步全部双向对应——活动视图（Search / Explorer / Source Control / Extensions）、手机底部标签（Files / Changes）、两端文件树行、标签切换、标签关闭——整场同步 13 条消息共 1.2 KB（平均 96 B/条）；同会话用真实 `DomRecorder` 实测 DOM 副本方案需快照 208 KB + 变更批次 122 KB = 330 KB。操作同步是副本方案的 **1/272**，远低于所有者 1/10 的流量要求。
 
 
+### 22.8 线上经济：副本流量降到 1/10（2026-10-13）
+
+所有者的方向（"减少远程同步显示带来的流量消耗，要做到 1/10……动画是页面本身绘制的，就不需要同步，把核心重要的数据和操作做同步"）：副本是一张画片，不是渲染器——**中途状态不是信息，落定状态和核心内容才是**。四个杠杆（`recorder.ts`，均可经 `{ legacy: true }` 关闭作 A/B）：
+
+| 杠杆 | 做法 | 谁受益 |
+| ---- | ---- | ---- |
+| 字符串增量 | `text` / `attr` / `val` / `css` / `adopted` 操作携带对"观看者持有的上一值"的编辑（`stringDelta`：公共前后缀裁剪，`新值 = base.slice(0,p) + v + base.slice(base.length-s)`；不划算或短于 48 字符则发全量）。录制器为每个文本节点 / 属性 / 控件值 / 样式表维护已发基线（快照与 add 序列化时一并播种）；观看者（`viewer.ts`）镜像同一基线——增量对不上基线即抛错触发 resnap，宁可重来不可悄然分叉 | Claude 流式回复（token 追加只过 token，不是整段话再发一遍）、CodeMirror 的 style-mod 规则表、commit 输入框长文本 |
+| 动画采样 | 脚本逐帧重写的属性（observer 回调时计时：连续两次间隔 < 100 ms 记一次 rapid，rapid ≥ 2 即动画运行中）在运行期间按 ~1 Hz 采样（`ATTR_ANIM_MS = 1000`），动画停止后**落定值必定上线**（settle 定时器兜底）；属性改走又改回（同批净空）干脆不过线。页面的 CSS 关键帧动画本就不产生 DOM 变更，从来免费 | 进度条、JS 补间、拖拽预览这类逐帧 style 重写 |
+| 风暴折叠 | 一批待发记录的**节点 churn**（childList 的 added+removed 之和——整窗 innerHTML 替换只是一条记录）≥ 24 即重渲染风暴：中途渲染扣留至多 `STORM_HOLD_MS = 600 ms`，一批落定——扣留期内加了又删的行从未序列化，天然消失 | git-graph-rs 的虚拟列表滚动（快速滚动整窗替换）、CodeMirror 大文件视口翻页 |
+| 节奏分档 | 安静期第一批仍 50 ms 起发（`FLUSH_MS`）；**连续**背景流量（上一批非空）合批到 `STREAM_FLUSH_MS = 500 ms`——每消息的帧头 + 事件信封开销(~100 B)远大于一条增量的载荷，2 Hz 足够一张画片刷新。回放的输入仍每条立即冲刷（`host.ts` 在每条输入消息后 `flush()`），交互手感不降档 | 一切连续流（聊天流式、终端面板、页面自己的定时器刷新） |
+
+配套：帧压缩阈值 1024 → **256**（`frame.ts` / daemon `ws/frame.rs` 同步改，两侧同一测试向量不受影响）——DOM JSON 小到 300 B 也能压 4–8 倍，镜像批次正是这种小帧。
+
+**实测**（`tests/remoteTraffic.test.ts`，同一 recorder/viewer 对，legacy 开关 A/B，线上模型 = 每批一条 EVENT 帧、按各自时代的阈值 deflate + 帧头/信封开销）：
+
+| 场景 | legacy | economy | 倍数 |
+| ---- | ------ | ------- | ---- |
+| Claude 式流式聊天（12 s / 360 token，段落增长） | 76.7 KB | 7.0 KB | **11.0×** |
+| git-graph 式虚拟列表快速滚动（2 s / 40 次整窗替换） | 86.8 KB | 6.8 KB | **12.7×** |
+| JS 逐帧动画（4 元素 5 s，transform 重写） | 63.9 KB | 2.2 KB | **28.8×** |
+| 三者综合 | 82.8 KB | 4.2 KB | **19.6×** |
+
+每个场景结束时副本与 PC 的 DOM 逐一相等——省的是线，不是内容。已知取舍：滚动风暴期间副本按 ≤600 ms 一拍落定（快速划过本来就看不清中间帧）；动画运行中 ~1 Hz 采样、停止即落定；连续流式 2 Hz 成段出现；单次属性翻转与交互路径（输入、点击回放的落点重排）不节流、不降档。
+
 ## 23. 安全沙箱：远程会话只驱动被操作系统隔离的窗口
 
 2026-10-12（所有者的方向："remote 增加权限设置，增加安全沙箱功能，ggs 运行在沙箱里面，不能获取 ~/.ggs 的内容，所有文件在沙箱里，claude 只能访问沙箱里的文件内容，沙箱可以设置访问内网权限，访问外网权限……不要自己实现沙箱，要使用开源跨平台的沙箱方案"）。沙箱**不自研**：执行引擎是微软的开源 [mxc](https://github.com/microsoft/mxc)（Microsoft eXecution Container，MIT，GitHub Copilot 本地沙箱的 GA 引擎；Rust crate `mxc-sdk` 直接连进 daemon）——策略驱动的操作系统原生进程隔离（Windows ProcessContainer / Linux bubblewrap / macOS Seatbelt），作用于被包裹进程**及其整棵子树**。选型时对比过 Anthropic 的 sandbox-runtime（srt）：npm-only、Windows 需一次性管理员安装且以另一个用户运行、Linux 上网络命名空间整体移除 + AF_UNIX 默认封锁——无法包裹一个 GUI 工作台；mxc 在三平台上都无需每次提权。
@@ -1921,6 +1946,7 @@ M9 依赖 M2（认证）和 M3（多窗口），可与 M5（响应式）并行�
 
 **app 侧（远程会话的文件边界）**
 - **Relay invoke 门禁**（`src/remote/pathGate.ts` + `relay.ts`）：远程会话的路径类 invoke（读写、搜索、比较、viewer、file_log/repo 等）只能落在**打开的文件夹**（+ 单文件启动）内；`open_folder`/`open_workspace` 直接拒绝（打开新目录是 picker 的沙箱 SPAWN 的事）。roots 经新命令 `remote_paths_policy` 由 Relay 本地取（带 3 s 缓存，仅门禁命令才取）。修复的攻击链：伪造 workbenchSync `open` + 未设防的 `read_file` → 读取 `~/.ggs/keys/ai-providers.key` 与密封的 API key → 离线解密全部供应商密钥。
+  唯一的例外是 `ext_fs`：它还可以落在扩展平台自己的三块区域（`remote_ext_roots`：已装包的文件 `~/.ggs/extensions`、扩展存储 `~/.ggs/extension-data`、扩展日志 `~/.ggs/logs/extensions`）——与后端 `ext_fs` 契约放行的 roots 一致（扩展宿主本就把它们作为调用的 roots 传入）；扩展激活时读自己安装目录里的文件（Python 复制 `pythonrc.py` 是第一例）是正常流量而非越界，此前这类激活在浏览器会话里全部失败。`~/.ggs` 的其余部分（设置、密钥、Claude 状态）仍在边界之外，且该例外只扩 `ext_fs` 一个命令。
 - **事件桥白名单与身份盖章**：`relayEmit` 只放行 `studio://mirror-up` 与 `studio://workbench-sync`，`from`/`by` 一律盖成 relay 的 `remote/<session>`（会话不能冒充 `main` 或彼此），目标恒为 `main`。
 - **workbenchSync 接收侧**：远端来源的 `open`/`active` 限在打开文件夹内（`Workbench.openFolders()` ← `Explorer.roots()`）。
 - **镜像副本的外域 URL 丢弃**（`protocol.ts`）：副本只加载 app/ggs 令牌根与 `data:`/`blob:`——PC 页面里的外来 http(s) URL 不再是手机端的外泄/追踪通道。

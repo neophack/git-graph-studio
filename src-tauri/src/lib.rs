@@ -1826,6 +1826,7 @@ mod desktop {
                 can_log::can_log_close,
                 cmd_fs::repo_submodules,
                 cmd_fs::remote_paths_policy,
+                cmd_fs::remote_ext_roots,
                 cmd_scm::scm_status,
                 cmd_scm::file_log,
                 cmd_scm::git_init,
