@@ -13,6 +13,7 @@
 // raw JSON, with the copy verified identical to the PC at the end of every scenario.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { deflateRawSync } from 'node:zlib';
+import { decode as decodeMsgpack, encode as encodeMsgpack } from '@msgpack/msgpack';
 import { DomRecorder } from '../src/remote/mirror/recorder';
 import { MirrorViewer } from '../src/remote/mirror/viewer';
 import { applyDelta, stringDelta } from '../src/remote/mirror/protocol';
@@ -116,6 +117,45 @@ describe('string deltas', () => {
 		expect(stringDelta(undefined, long)).toEqual({ v: long });
 		expect(stringDelta(long, long)).toEqual({ v: long });
 		expect(stringDelta('short', 'shortish')).toEqual({ v: 'shortish' });
+	});
+
+	it('never splits a surrogate pair — an emoji swap keeps the fragment whole on the wire', () => {
+		// The scans match UTF-16 code units, so an emoji swapped for its neighbour (the low
+		// surrogate equal, the high not) once parked the suffix cut between the halves, and
+		// the fragment plus one kept side each carried a lone surrogate — which msgpack's
+		// UTF-8 turns into U+FFFD on the viewer: silent divergence, no resnap ever.
+		const wellFormed = (text: string): boolean => {
+			for (let i = 0; i < text.length; i += 1) {
+				const unit = text.charCodeAt(i);
+				if (unit >= 0xd800 && unit <= 0xdbff) {
+					const after = text.charCodeAt(i + 1);
+					if (!(after >= 0xdc00 && after <= 0xdfff)) return false;
+					i += 1;
+				} else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+			}
+			return true;
+		};
+		const head = '提交记录: a1b2c3 说明文字与状态 '.repeat(2);
+		const tail = ' —— 尾部足够长，让后缀扫描停在交换的位置之后。'.repeat(2);
+		// A neighbour emoji splits at the suffix scan; a same-high/different-low pair splits
+		// at the prefix scan — both cuts must back off to the pair's start.
+		for (const [was, now] of [
+			['\u{1F510}', '\u{1F910}'],
+			['\u{1F510}', '\u{1F511}']
+		] as const) {
+			const base = head + was + tail;
+			const next = head + now + tail;
+			const delta = stringDelta(base, next);
+			expect(next.length).toBeGreaterThanOrEqual(48); // the delta path, not the short-string out
+			expect(delta.p).toBeDefined();
+			expect(applyDelta(base, delta)).toBe(next);
+			expect(wellFormed(delta.v)).toBe(true);
+			expect(wellFormed(base.slice(0, delta.p!))).toBe(true);
+			expect(wellFormed(base.slice(base.length - (delta.s ?? 0)))).toBe(true);
+			// The wire's own encoding: a lone surrogate would not survive it unchanged.
+			const wire = decodeMsgpack(encodeMsgpack({ v: delta.v })) as { v: string };
+			expect(wire.v).toBe(delta.v);
+		}
 	});
 
 	it('a streamed paragraph crosses as its tokens — and the copy holds the whole text', () => {

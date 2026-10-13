@@ -56,6 +56,15 @@ export interface StrDelta {
 	s?: number;
 }
 
+/** A UTF-16 surrogate half — the delta's cuts must never land between the two. */
+function isHighSurrogate(unit: number): boolean {
+	return unit >= 0xd800 && unit <= 0xdbff;
+}
+
+function isLowSurrogate(unit: number): boolean {
+	return unit >= 0xdc00 && unit <= 0xdfff;
+}
+
 /** The delta shape of `next` against `base` — the last value the viewers hold. A full
  *  `{ v }` when there is no baseline or a delta would not pay; else `{ v, p, s }` where
  *  the new string is `base.slice(0, p) + v + base.slice(base.length - s)`. */
@@ -66,6 +75,26 @@ export function stringDelta(base: string | undefined, next: string): StrDelta & 
 	while (p < min && base.charCodeAt(p) === next.charCodeAt(p)) p += 1;
 	let s = 0;
 	while (s < min - p && base.charCodeAt(base.length - 1 - s) === next.charCodeAt(next.length - 1 - s)) s += 1;
+	// Neither cut may split a surrogate pair — in EITHER string: the scans match code
+	// units, so an emoji swapped for its neighbour (the low surrogate equal, the high not)
+	// happily parks a cut between the halves, and the fragment plus one kept side each
+	// carry a lone surrogate. A lone surrogate does not survive the wire — msgpack's UTF-8
+	// hands the viewer U+FFFD — so the copy would diverge in place with every later delta
+	// compounding the damage, and nothing resnaps (both ends' bases stay self-consistent,
+	// just no longer equal). Back a split cut off to its pair's start: `v` always carries
+	// whole characters.
+	while (
+		p > 0 &&
+		((isHighSurrogate(base.charCodeAt(p - 1)) && isLowSurrogate(base.charCodeAt(p))) ||
+			(isHighSurrogate(next.charCodeAt(p - 1)) && isLowSurrogate(next.charCodeAt(p))))
+	)
+		p -= 1;
+	while (
+		s > 0 &&
+		((isHighSurrogate(base.charCodeAt(base.length - s - 1)) && isLowSurrogate(base.charCodeAt(base.length - s))) ||
+			(isHighSurrogate(next.charCodeAt(next.length - s - 1)) && isLowSurrogate(next.charCodeAt(next.length - s))))
+	)
+		s -= 1;
 	const kept = p + s;
 	// The delta must beat the full value by more than the `p`/`s` fields' own bytes.
 	if (next.length - kept + 24 >= next.length * 0.85) return { v: next };
