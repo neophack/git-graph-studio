@@ -1,6 +1,6 @@
 [package]
 name = "ggs-remote"
-version = "0.1.1"
+version = "0.1.2"
 description = "GGS Remote: the tray daemon that serves Git Graph Studio to a phone or another computer over HTTPS + a binary WebSocket (ggs-remote/1)"
 edition = "2021"
 rust-version = "1.94"
