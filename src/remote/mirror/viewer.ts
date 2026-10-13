@@ -298,6 +298,10 @@ export class MirrorViewer {
 			this.canonAttr.delete(id);
 			this.canonVal.delete(id);
 			this.canonCss.delete(id);
+			// A document's own id keys the adopted-sheet base (fillDoc's register): a frame
+			// whose document left must take that base with it, or the entry outlives the
+			// frame until the next full snapshot.
+			this.canonAdopted.delete(id);
 		}
 		if (node.nodeName === 'IFRAME') {
 			const inner = (node as HTMLIFrameElement).contentDocument;
