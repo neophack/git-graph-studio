@@ -550,7 +550,9 @@ html.mirror-mode body {
 	background: transparent;
 }
 /* The keyboard's landing field: invisible, but a real focusable textarea, so a phone raises
-   its keyboard for it; 16px keeps iOS from zooming the page on focus. */
+   its keyboard for it; 16px keeps iOS from zooming the page on focus. While an editable
+   holds the mirrored caret it sits AT the caret (viewerInput.caretAt) — the position an
+   IME's candidate window anchors to, which this corner would otherwise decide. */
 .mirror-proxy {
 	position: fixed;
 	left: 0;

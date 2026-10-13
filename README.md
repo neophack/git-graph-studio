@@ -323,3 +323,13 @@ version; the tag is then created at that commit.
 MIT ([LICENSE](LICENSE)). The third-party components the app bundles — and the
 extension packages a build carries — remain under their own licenses; see
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+## Command line remote setup
+
+After installing, `ggs-config` (or `ggs config`) configures Remote Access from any
+command line — an SSH session on a fresh machine sets the access password and optional
+relay server and prints the phone links, without opening a window:
+
+```sh
+ggs-config                      # interactive: password, relay, links
+ggs-config --password pw --server https://hub.example.com
+```

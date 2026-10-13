@@ -1284,6 +1284,21 @@ database) carries the link through NAT. The whole design lives in
   INSTANCE_GONE. `daemon/src/sandbox.rs` is the module; the Remote page carries the
   "Security sandbox" section and the picker an "open a sandboxed window" entry; the real
   e2e is `cargo test --test integration sandbox_launch -- --ignored` on a capable host.
+- **`ggs-config`** (2026-10-13, the owner's direction): the one-command Remote Access
+  setup from a command line — an SSH session on a fresh machine runs `ggs-config` (or
+  `ggs config`, either spelling) and gets the daemon installed, the access password set,
+  an optional relay connected, and the links printed, no window ever opened.
+  `src-tauri/src/remote_config.rs` (no `desktop` feature — headless) finds the daemon
+  binary (the installed running copy in `~/.ggs/remote/bin`, an installed extension's
+  package, or the bundled `ggs-remote.vsix` beside the app, whose daemon it extracts into
+  `~/.ggs/remote/bin-incoming/` staging — never `bin/`, the running copy the daemon's own
+  install replaces), then drives the daemon CLI end to end: `install --ggs-exe`, the
+  password over the loopback admin API with the value on a stdin pipe (never an argv),
+  `hub/connect`, `print-link`. Flags `--password` / `--server` / `--join-key` answer the
+  prompts non-interactively (`--server ""` skips the relay without asking); the password
+  prompt doesn't echo (rpassword). The binary ships as the crate's own `[[bin]]` beside
+  `ggs` (the ggs-bash precedent), so it lands on the user's PATH through
+  `cmd_assoc::user_path_apply`.
 - **The 2026-10-13 security pass** (plan §23.6): three directed audits (daemon attack
   surface, the public Hub, app-side remote + web) and their fixes, all tested. The
   remote-session file boundary lives in the Relay (`src/remote/pathGate.ts`): path-carrying
@@ -1500,6 +1515,21 @@ database) carries the link through NAT. The whole design lives in
   daemon's `Show` (`tray/mod.rs`'s `window_entries`). The viewer's stylesheets come from the desktop build through
   the daemon's `main/…` app-asset route (`remote_host::app_asset` — css, fonts, images
   only, never scripts or pages).
+- **`ggs-config`** (2026-10-13, the owner's direction): Remote Access configured from a
+  command line — an SSH session on a fresh machine sets the password and the relay and
+  reads the links, no window ever opening. `src-tauri/src/remote_config.rs` (ungated — the
+  `ggs-node` sidecar pass compiles the whole lib without `desktop`, so the module is std +
+  `serde_json` + `rpassword` only, its VSIX extraction over GGS Bash's pure-Rust zip
+  layer, `archive.rs`'s `zip_entry`) drives the tray daemon's own CLI end to end: it finds
+  the binary (the installed running copy under the remote root, an installed extension's
+  package, or the daemon packed inside the bundled `ggs-remote.vsix` beside the app —
+  extracted once into the root's `bin-incoming` staging dir, never the running `bin`),
+  installs and starts it, sets the access password through the loopback admin API (the
+  value on a stdin pipe, never an argv a process listing could show), optionally connects
+  a relay, and prints the links. Reached as the `ggs-config` binary the installer carries
+  beside `ggs` (`src-tauri/src/bin/ggs_config.rs`) and as the `ggs config` subcommand
+  (lib.rs's run dispatches either spelling). This one module is the sanctioned exception
+  to the module's naming seam (below): it names the daemon it drives.
 - **The app side** (`src/remote/` + `remote.html` + `relay.html` + `vite.remote.config.ts` +
   `src-tauri/src/remote_host.rs` + `capabilities/remote-relay.json`): the same frontend with
   its `@tauri-apps/api` seam aliased onto the WebSocket shims (`tauriShim/`), the
@@ -1588,7 +1618,8 @@ database) carries the link through NAT. The whole design lives in
   it; before, the real `~/.ggs` leaked into every probe run).
   The module's seams are enforced:
   `scripts/check-seams.mjs` keeps `__TAURI_INTERNALS__` inside `src/remote/tauriShim/` and
-  the plugin id out of the app tree.
+  the plugin id out of the app tree — `remote_config.rs` (the `ggs-config` CLI above)
+  alone excepted: its job is to find and drive the daemon by name.
 - Tests: `tests/remoteMirror.test.ts` (the replica: snapshot and every mutation kind into
   the copy, URL tokens, the CSP drop, the sequence-gap resnap, the input replay, the host's
   viewer lifecycle, the PC window's phone mode), `tests/remote.test.ts` +

@@ -66,6 +66,10 @@ export interface ViewerDeps {
 	onReady?(): void;
 	/** The PC answered a copy with its selection. */
 	onClipboard?(text: string): void;
+	/** The mirrored caret moved (or left): its position in the viewer page's own viewport
+	 *  coordinates. The keyboard proxy rides it (viewerInput.ts), so an IME's candidate
+	 *  window anchors where the typing is — not at the proxy's hideout corner. */
+	onCaret?(point: { x: number; y: number; h: number } | null): void;
 	/** The webview stream this viewer copies (absent: the whole window). */
 	stream?: string;
 	/** Lay the copy out at the host's size and scroll it here (a webview stream's copy). */
@@ -211,6 +215,7 @@ export class MirrorViewer {
 			frame.style.left = '0px';
 			frame.style.top = '0px';
 			this.stick();
+			this.paintCaret();
 			return;
 		}
 		const scale = this.scale;
@@ -220,6 +225,9 @@ export class MirrorViewer {
 		frame.style.transform = `scale(${scale})`;
 		frame.style.left = `${Math.max(0, (this.host.clientWidth - w * scale) / 2)}px`;
 		frame.style.top = '0px';
+		// The bar lives in the copy's own coordinates, but the proxy rides the caret in THIS
+		// page's viewport — a re-fit re-maps it.
+		this.paintCaret();
 	}
 
 	private localize(text: string): string {
@@ -245,6 +253,9 @@ export class MirrorViewer {
 				if (atEnd(el)) this.stuck.add(el);
 				else this.stuck.delete(el);
 				this.reportScroll(el);
+				// The copy scrolled natively: the caret's bar rides the content, but the
+				// proxy rides this page's viewport — re-map it.
+				this.paintCaret();
 			}, { capture: true, passive: true });
 		}
 		const adopted = doc.createElement('style');
@@ -451,20 +462,22 @@ export class MirrorViewer {
 			color = el.ownerDocument.defaultView?.getComputedStyle(el).color ?? '';
 		} else if (this.caret?.ci !== undefined) {
 			const node = this.nodes.get(this.caret.ci);
-			if (!node || node.nodeType !== 3 || !node.isConnected) return this.clearCaret();
+			if (!node || !node.isConnected || (node.nodeType !== 3 && node.nodeType !== 1)) return this.clearCaret();
 			doc = node.ownerDocument;
 			const view = doc?.defaultView ?? null;
 			if (!doc || !view) return this.clearCaret();
-			const host =
-				node.parentElement && view.getComputedStyle(node.parentElement).display !== 'inline'
-					? node.parentElement
-					: node.parentElement?.parentElement ?? null;
-			// The range's rect is exact where engines give one; a host-box fallback
-			// (the caret before the first character) covers the engines that do not.
+			// The block the caret paints in (its line height, its colour): the element itself
+			// for an element anchor, a text node's parent — walked past inline wrappers.
+			let host: Element | null = node.nodeType === 1 ? (node as Element) : node.parentElement;
+			while (host && host !== doc.documentElement && view.getComputedStyle(host).display === 'inline' && host.parentElement) host = host.parentElement;
+			// The range's rect is exact where engines give one — a text offset or a child
+			// boundary (an empty editable anchors on itself); a host-box fallback (the caret
+			// before the first character) covers the engines that do not.
 			let rect: { left: number; top: number; height: number } | null = null;
 			try {
 				const range = doc.createRange();
-				range.setStart(node, Math.min(this.caret.co ?? 0, node.nodeValue?.length ?? 0));
+				const span = node.nodeType === 3 ? node.nodeValue?.length ?? 0 : node.childNodes.length;
+				range.setStart(node, Math.min(this.caret.co ?? 0, span));
 				range.collapse(true);
 				const box = range.getBoundingClientRect();
 				if (box && (box.width || box.height || box.left || box.top)) {
@@ -496,13 +509,41 @@ export class MirrorViewer {
 		// Viewport → document coordinates (the bar is absolutely positioned in the copy).
 		const view = doc.defaultView!;
 		bar.style.transform = `translate(${x + view.scrollX}px, ${y + view.scrollY}px)`;
-		bar.style.height = `${Math.max(h, 10)}px`;
+		const barHeight = Math.max(h, 10);
+		bar.style.height = `${barHeight}px`;
 		bar.style.background = color || 'currentColor';
+		this.reportCaret(doc, x, y, barHeight);
 	}
 
 	private clearCaret(): void {
 		this.caretEl?.remove();
 		this.caretEl = null;
+		this.deps.onCaret?.(null);
+	}
+
+	/** The caret's position told to the input layer, mapped from the copy's own document
+	 *  into the viewer page's viewport: up through every frame the copy nests in (a webview
+	 *  page inside the window copy), each hop offset by its frame's box and scaled by the
+	 *  ratio of that frame's laid-out width to its content viewport (the window copy's own
+	 *  fit scale). */
+	private reportCaret(doc: Document, x: number, y: number, h: number): void {
+		const onCaret = this.deps.onCaret;
+		if (!onCaret) return;
+		const top = this.host.ownerDocument;
+		let px = x;
+		let py = y;
+		let cur: Document | null = doc;
+		for (let hop = 0; cur && cur !== top && hop < 8; hop += 1) {
+			const win = cur.defaultView;
+			const frameEl = win?.frameElement ?? null;
+			if (!win || !frameEl) break;
+			const box = frameEl.getBoundingClientRect();
+			const ratio = win.innerWidth > 0 ? box.width / win.innerWidth : 1;
+			px = box.left + px * ratio;
+			py = box.top + py * ratio;
+			cur = frameEl.ownerDocument ?? null;
+		}
+		onCaret({ x: px, y: py, h });
 	}
 
 	private stick(): void {

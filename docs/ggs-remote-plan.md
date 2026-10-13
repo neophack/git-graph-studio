@@ -1273,7 +1273,7 @@ cargo build --manifest-path extensions-src/ggs-remote/daemon/Cargo.toml --releas
 ### 15.4 接缝检查（`scripts/check-seams.mjs`）新增规则
 
 1. `src/` 中除 `src/remote/tauriShim/` 外，不得出现 `__TAURI_INTERNALS__` 和 `window.__TAURI__`（`extHost.ts` 的两处收敛为 `src/remote/tauriShim/internals.ts` 也提供的同名帮助函数 `assetUrl()`，桌面构建里该函数直接读真 internals）。
-2. `src/`、`src-tauri/src/` 中不得出现插件 id `ggs-remote`、`ggsRemote`（应用只认协议，不认插件）。
+2. `src/`、`src-tauri/src/` 中不得出现插件 id `ggs-remote`、`ggsRemote`（应用只认协议，不认插件）。唯一例外 `src-tauri/src/remote_config.rs`：`ggs-config` 命令行（2026-10-13，应用侧的免窗口配置入口）的职责就是按名找到并驱动守护进程二进制（`ggs-remote(.exe)`、随安装包分发的 `ggs-remote.vsix`），这一处允许点名；除此之外任何源文件仍是零引用。
 
 ### 15.5 签名
 

@@ -30,8 +30,10 @@ const RULES = [
  *  is touched only by the remote shims (and the one `assetUrl` helper every caller goes
  *  through), so the remote build can stand in for it. Rule 2: the app speaks the platform
  *  protocol `ggs-remote/1` (and its e2e domains `ggs-remote-e2e/1`, `ggs-remote-uuid/1`) and
- *  names the plan, never the GGS Remote extension itself — the
- *  extension's id appears nowhere in src/ or src-tauri/src/. */
+ *  names the plan, never the GGS Remote extension itself — the extension's id appears
+ *  nowhere in src/ or src-tauri/src/, with one sanctioned exception: `remote_config.rs`,
+ *  the `ggs-config` CLI (2026-10-13), whose whole job is finding and driving the daemon
+ *  binary by name. */
 const REMOTE_RULES = [
 	{
 		pattern: /__TAURI_INTERNALS__|window\.__TAURI__\b/,
@@ -40,8 +42,8 @@ const REMOTE_RULES = [
 	},
 	{
 		pattern: /ggs-remote(?!\/1|-plan|-e2e\/1|-uuid\/1)|ggsRemote/,
-		allowed: () => false,
-		because: 'the app names the ggs-remote/1 protocol, never the GGS Remote extension'
+		allowed: (rel) => rel === 'src-tauri/src/remote_config.rs',
+		because: 'the app names the ggs-remote/1 protocol, never the GGS Remote extension (remote_config.rs — the ggs-config CLI that drives the daemon — alone excepted)'
 	}
 ];
 

@@ -13,7 +13,7 @@ import { DomRecorder } from '../src/remote/mirror/recorder';
 import { MirrorViewer } from '../src/remote/mirror/viewer';
 import { InputReplayer, keyCodeFor } from '../src/remote/mirror/replay';
 import { MirrorHost, fitFor } from '../src/remote/mirror/host';
-import { isSpecialKey } from '../src/remote/mirror/viewerInput';
+import { isSpecialKey, ViewerInput } from '../src/remote/mirror/viewerInput';
 import { isPhoneWidth, modeUrl, requestedMode, wantsOwnUi } from '../src/remote/mirror/uiMode';
 import { enterPhone, leavePhone } from '../src/remote/mirror/phoneShell';
 import { coarsePointer } from '../src/remote/responsive';
@@ -209,6 +209,83 @@ describe('the recorder and the viewer', () => {
 		Object.defineProperty(r.pc, 'getSelection', { value: () => selection, configurable: true });
 		r.recorder.flush();
 		expect(r.copy().querySelector('.mirror-caret')).not.toBeNull();
+	});
+
+	it('mirrors the caret of an EMPTY contenteditable — the Claude composer before its first character', () => {
+		// Claude Code's composer is [role="textbox"][contenteditable]; focused empty, its
+		// selection anchors on the editable itself (an element, offset 0) — the case that
+		// once crossed as "no caret", so typing into the fresh composer showed no cursor.
+		const r = rig('<div id="composer" contenteditable="true" role="textbox"></div>');
+		const composer = r.pc.getElementById('composer')!;
+		Object.defineProperty(r.pc, 'activeElement', { value: composer, configurable: true });
+		const selection = { anchorNode: composer, anchorOffset: 0 };
+		Object.defineProperty(r.pc, 'getSelection', { value: () => selection, configurable: true });
+		r.recorder.flush();
+		expect(r.copy().querySelector('.mirror-caret')).not.toBeNull();
+		// Text arrives: the anchor becomes a text node and the bar survives the change.
+		composer.textContent = 'hi';
+		selection.anchorNode = composer.firstChild as Text;
+		selection.anchorOffset = 2;
+		r.recorder.flush();
+		expect(r.copy().querySelector('.mirror-caret')).not.toBeNull();
+		// The text is deleted again: the anchor returns to the element, the bar stays.
+		composer.textContent = '';
+		selection.anchorNode = composer;
+		selection.anchorOffset = 0;
+		r.recorder.flush();
+		expect(r.copy().querySelector('.mirror-caret')).not.toBeNull();
+		// Focus leaves the editable: the bar goes away.
+		Object.defineProperty(r.pc, 'activeElement', { value: r.pc.body, configurable: true });
+		r.recorder.flush();
+		expect(r.copy().querySelector('.mirror-caret')).toBeNull();
+	});
+
+	it('tells the page where the mirrored caret is — the keyboard proxy rides it, and the IME with it', () => {
+		const points: ({ x: number; y: number; h: number } | null)[] = [];
+		const pc = pcDocument('<textarea id="composer">hi</textarea>');
+		const host = document.createElement('div');
+		document.body.appendChild(host);
+		let viewer: MirrorViewer;
+		const recorder = new DomRecorder(pc, (ops, seq) => viewer.receive({ k: 'ops', to: '*', seq, ops }));
+		viewer = new MirrorViewer(host, 'remote/1', {
+			appBase: 'https://p/main/',
+			ggsBase: 'https://p/ggs/t/',
+			resnap: () => undefined,
+			onCaret: (point) => points.push(point)
+		});
+		viewer.receive({ k: 'snap', to: 'remote/1', ...recorder.snapshot() });
+		const box = pc.getElementById('composer') as HTMLTextAreaElement;
+		Object.defineProperty(pc, 'activeElement', { value: box, configurable: true });
+		box.setSelectionRange(1, 1);
+		recorder.flush();
+		const point = points[points.length - 1];
+		expect(point).not.toBeNull();
+		expect(Number.isFinite(point!.x)).toBe(true);
+		expect(Number.isFinite(point!.y)).toBe(true);
+		expect(point!.h).toBeGreaterThanOrEqual(10);
+		// Focus leaves the editable: the position is withdrawn.
+		Object.defineProperty(pc, 'activeElement', { value: pc.body, configurable: true });
+		recorder.flush();
+		expect(points[points.length - 1]).toBeNull();
+	});
+
+	it('positions the keyboard proxy at the caret it is told', () => {
+		const page = document.implementation.createHTMLDocument('phone');
+		const input = new ViewerInput({ idOf: () => 1 } as unknown as MirrorViewer, () => undefined, page);
+		const proxy = page.querySelector('textarea.mirror-proxy') as HTMLTextAreaElement;
+		input.caretAt({ x: 40.6, y: 90.2, h: 22 });
+		expect(proxy.style.left).toBe('41px');
+		expect(proxy.style.top).toBe('90px');
+		expect(proxy.style.height).toBe('22px');
+		expect(proxy.style.bottom).toBe('auto');
+		// Below a line's height the proxy keeps a sane box for the IME to anchor to.
+		input.caretAt({ x: 0, y: 0, h: 8 });
+		expect(proxy.style.height).toBe('18px');
+		input.caretAt(null);
+		expect(proxy.style.left).toBe('');
+		expect(proxy.style.top).toBe('');
+		expect(proxy.style.height).toBe('');
+		expect(proxy.style.bottom).toBe('');
 	});
 
 	it('carries form values that no observer reports', () => {

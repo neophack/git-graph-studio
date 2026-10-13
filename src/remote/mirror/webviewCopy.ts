@@ -35,6 +35,7 @@ export function mountWebviewCopy(container: HTMLElement, stream: string): () => 
 		resnap: () => send({ k: 'resnap' }),
 		onScroll: (id, fraction, end) => send({ k: 'scroll', i: id, f: fraction, e: end ? 1 : undefined }),
 		onDocument: (doc) => input?.attach(doc),
+		onCaret: (point) => input?.caretAt(point),
 		onClipboard: (text) => {
 			if (!text) return;
 			void navigator.clipboard?.writeText(text).then(() => showBanner('remote.mirror.copied', 2000)).catch(() => undefined);

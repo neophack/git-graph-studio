@@ -513,7 +513,11 @@ export class DomRecorder {
 			if (contentEditable(el)) {
 				const selection = doc.getSelection();
 				const node = selection?.anchorNode ?? null;
-				if (!node || node.nodeType !== 3) return null; // an element boundary: no caret rather than a misplaced one
+				// The anchor is a text node at its offset, or an element at its child index —
+				// an empty editable (the Claude composer before its first character) anchors
+				// on itself, and that boundary paints as well: the bare element case once
+				// meant "no caret", and typing into the empty composer showed no cursor.
+				if (!node || (node.nodeType !== 3 && node.nodeType !== 1)) return null;
 				const ci = this.ids.get(node);
 				return ci === undefined ? null : { o: 'caret', ci, co: selection!.anchorOffset };
 			}

@@ -81,6 +81,10 @@ pub mod mcp;
 pub mod measure;
 #[cfg(feature = "desktop")]
 pub mod pty;
+/// `ggs-config` (module 19): the one-command Remote Access setup from a command line —
+/// no window, so no `desktop` feature: the `ggs-config` binary and the `ggs config`
+/// subcommand build and run headless.
+pub mod remote_config;
 /// Remote Access (module 19): this instance's registration with a local `ggs-remote/1`
 /// daemon, the remote workbench's assets and the hidden Relay webview.
 #[cfg(feature = "desktop")]
@@ -1191,6 +1195,9 @@ mod desktop {
             "  ggs --hex <file>                     open the file in the hex viewer".to_owned(),
             "  ggs --hex-compare <left> <right>     open the hex comparison of two files".to_owned(),
             "  ggs --folder-compare <left> <right>  open two folders in the Folder Compare view".to_owned(),
+            "  ggs config [--password pw] [--server url] [--join-key key]".to_owned(),
+            "                                       set up Remote Access from a command line (also".to_owned(),
+            "                                       as the ggs-config binary): password, relay, links".to_owned(),
             "  ggs --mcp [path]                     serve that repository's symbol database over MCP".to_owned(),
             "  ggs --measure <path>                 run the performance probes headless (JSON on stdout)".to_owned(),
             "  ggs --help, ggs -h                   show this help".to_owned(),
@@ -1498,6 +1505,11 @@ mod desktop {
         if wants_help(&args) {
             print!("{}", cli_help());
             std::process::exit(0);
+        }
+        // `ggs config` / `ggs-config` (either spelling, module 19): the one-command
+        // Remote Access setup — password, relay, links — from a command line, no window.
+        if args.get(1).map(String::as_str) == Some("config") {
+            std::process::exit(crate::remote_config::run(&args[2..]));
         }
         // `git-graph-studio --measure <folder>` runs the performance probes headless and prints
         // JSON (scripts/measure.mjs folds it into metrics.json); no window is created.

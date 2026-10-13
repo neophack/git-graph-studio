@@ -62,8 +62,10 @@ export type MirrorOp =
 	| { o: 'text'; i: number; v: string }
 	| { o: 'val'; i: number; v: string; ck?: boolean }
 	/** The focused editable's caret (the phone-mirror cursor, 2026-10-13): `i` the control
-	 *  with `s`/`e` its selection, or `ci`/`co` a text node and offset inside a
-	 *  contenteditable. A bare `{ o: 'caret' }` means no editable holds the caret. */
+	 *  with `s`/`e` its selection, or `ci`/`co` the anchor node and offset inside a
+	 *  contenteditable — a text node at its character offset, or an element at its child
+	 *  index (an empty editable anchors on itself). A bare `{ o: 'caret' }` means no
+	 *  editable holds the caret. */
 	| { o: 'caret'; i?: number; s?: number; e?: number; ci?: number; co?: number }
 	/** `e`: the scroller sits at its end — the viewer pins its own end (its fonts may make
 	 *  the content a little taller or shorter than the PC's). */

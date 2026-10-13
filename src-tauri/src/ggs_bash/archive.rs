@@ -321,6 +321,17 @@ fn zip_parse(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
     Ok(entries)
 }
 
+/// One entry's bytes by exact name, `None` when the archive carries no such entry —
+/// module 19's `ggs-config` pulls the daemon binary out of a bundled VSIX through here
+/// (the same local-file-stream read `unzip` takes, and the one zip reader that builds
+/// under every feature set: std only, like the rest of this shell).
+pub fn zip_entry(data: &[u8], name: &str) -> Result<Option<Vec<u8>>, String> {
+    Ok(zip_parse(data)?
+        .into_iter()
+        .find(|(entry, _)| entry == name)
+        .map(|(_, bytes)| bytes))
+}
+
 fn scan_data_descriptor(data: &[u8], from: usize, mut bytes: Vec<u8>, name_len: usize) -> Vec<u8> {
     // Best effort: find PK\x07\x08 and stop; the compressed body was already cut at
     // the local header's size (0 when the descriptor flag is set), so nothing to do

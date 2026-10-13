@@ -98,6 +98,25 @@ export class ViewerInput {
 		this.proxy.focus({ preventScroll: true });
 	}
 
+	/** The mirrored caret moved (the viewer's `onCaret`): the proxy rides its position, so
+	 *  an IME's candidate window anchors where the typing is — the hidden corner the proxy
+	 *  otherwise sits in would decide it, and the candidates would never follow the input
+	 *  (2026-10-13). `null` sends it back to its corner. */
+	caretAt(point: { x: number; y: number; h: number } | null): void {
+		const style = this.proxy.style;
+		if (!point) {
+			style.left = '';
+			style.top = '';
+			style.bottom = '';
+			style.height = '';
+			return;
+		}
+		style.left = `${Math.round(point.x)}px`;
+		style.top = `${Math.round(point.y)}px`;
+		style.bottom = 'auto';
+		style.height = `${Math.max(18, Math.round(point.h))}px`;
+	}
+
 	private spot(event: { clientX: number; clientY: number; target: EventTarget | null }, doc: Document): Spot | null {
 		let el: Node | null = event.target as Node | null;
 		while (el && (el.nodeType !== 1 || this.viewer.idOf(el) === undefined)) el = el.parentNode;

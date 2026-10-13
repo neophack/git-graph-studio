@@ -51,6 +51,7 @@ export function bootMirrorViewer(transport: Transport, attached: Attached, baseP
 		ggsBase,
 		resnap: () => send({ k: 'resnap' }),
 		onDocument: (doc) => input?.attach(doc),
+		onCaret: (point) => input?.caretAt(point),
 		onReady: () => document.getElementById('boot-splash')?.remove(),
 		onClipboard: (text) => {
 			if (!text) return;

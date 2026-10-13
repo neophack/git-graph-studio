@@ -50,6 +50,13 @@ name = "ggs-node"
 path = "src/bin/ggs_node.rs"
 required-features = ["node-runtime"]
 
+# `ggs-config` (module 19): the one-command Remote Access setup — install the tray
+# daemon, set the access password, connect a relay, print the links, all from a command
+# line (an SSH session on a fresh machine). No `desktop` feature: no window can open.
+[[bin]]
+name = "ggs-config"
+path = "src/bin/ggs_config.rs"
+
 # GGS Bash (`src/ggs_bash/`, module 18): the bundled bash-like shell. No feature gates
 # and no dependencies beyond std — pure Rust, so plain `cargo test` builds and tests it
 # everywhere, and the sidecar build (`prepare.mjs`) compiles it without the desktop
@@ -132,6 +139,7 @@ tauri-plugin-opener = { version = "2", optional = true }
 tauri-plugin-clipboard-manager = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rpassword = "7"
 portable-pty = { version = "0.9", optional = true }
 # The pretend Node runtime's JS engine (`src/node_runtime/`, the `node-runtime` feature):
 # pure Rust, so the sidecar stays free of C bindings (plan §3.1). It runs a package's own
