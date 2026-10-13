@@ -534,8 +534,8 @@ export class MirrorViewer {
 		let py = y;
 		let cur: Document | null = doc;
 		for (let hop = 0; cur && cur !== top && hop < 8; hop += 1) {
-			const win = cur.defaultView;
-			const frameEl = win?.frameElement ?? null;
+			const win: Window | null = cur.defaultView ?? null;
+			const frameEl: Element | null = win?.frameElement ?? null;
 			if (!win || !frameEl) break;
 			const box = frameEl.getBoundingClientRect();
 			const ratio = win.innerWidth > 0 ? box.width / win.innerWidth : 1;
