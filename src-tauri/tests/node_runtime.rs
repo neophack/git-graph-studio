@@ -3108,11 +3108,23 @@ module.exports.activate = function () {
         .unwrap();
 
     // The post-push read: the setting answers true and the listener fired with a
-    // section-matching event.
-    next_id += 1;
-    let after = run_probe(&requests_tx, next_id);
+    // section-matching event. The wire does not ORDER a notification against a request
+    // that follows it — `serve_plugin_on_with_responses` runs notifications on their own
+    // thread and every request on a fresh one, so this probe can overtake the still-queued
+    // push (first seen on a loaded Linux CI runner, 2026-10-13). Read until the push
+    // lands, bounded: each probe answers the frame's whole accumulated state.
+    let expected = r#"{"fired":[true],"before":false,"after":true}"#;
+    let mut after = String::new();
+    for _ in 0..100 {
+        next_id += 1;
+        after = run_probe(&requests_tx, next_id);
+        if after == expected {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     assert_eq!(
-        after, r#"{"fired":[true],"before":false,"after":true}"#,
+        after, expected,
         "the push must update the settings and fire the listener: {after}"
     );
 }
