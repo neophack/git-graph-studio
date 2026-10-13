@@ -3832,7 +3832,11 @@ mod vsix_tests {
         let exts = tmp.path().join("extensions");
         std::fs::create_dir_all(&exts).unwrap();
         let plain = make_vsix(tmp.path(), "plain", "acme", "1.0.0");
-        assert!(!install_from_vsix_into(&exts, &plain, false).unwrap().page_bundle);
+        assert!(
+            !install_from_vsix_into(&exts, &plain, false)
+                .unwrap()
+                .page_bundle
+        );
 
         let packed = tmp.path().join("acme.packed-1.0.0.vsix");
         let file = std::fs::File::create(&packed).unwrap();
@@ -3844,12 +3848,18 @@ mod vsix_tests {
             br#"{"name":"packed","publisher":"acme","version":"1.0.0","main":"./out/extension.js","description":"test"}"#,
         )
         .unwrap();
-        zip.start_file("extension/out/extension.js", options).unwrap();
+        zip.start_file("extension/out/extension.js", options)
+            .unwrap();
         zip.write_all(b"exports.activate = function() {};").unwrap();
-        zip.start_file("extension/webview/index.js", options).unwrap();
+        zip.start_file("extension/webview/index.js", options)
+            .unwrap();
         zip.write_all(b"/* the packer's page bundle */").unwrap();
         zip.finish().unwrap();
-        assert!(install_from_vsix_into(&exts, &packed, false).unwrap().page_bundle);
+        assert!(
+            install_from_vsix_into(&exts, &packed, false)
+                .unwrap()
+                .page_bundle
+        );
 
         // The listing carries the same truth.
         let listed = list_installed(&exts).unwrap();

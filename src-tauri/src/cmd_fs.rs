@@ -1744,7 +1744,11 @@ mod remote_gate_tests {
             .iter()
             .map(|root| root.replace('\\', "/"))
             .collect();
-        assert_eq!(roots.len(), 3, "exactly three areas: packages, storage, extension logs");
+        assert_eq!(
+            roots.len(),
+            3,
+            "exactly three areas: packages, storage, extension logs"
+        );
         for root in &roots {
             let suffix = root.trim_end_matches('/');
             assert!(
@@ -1765,6 +1769,10 @@ mod remote_gate_tests {
                     .to_owned()
             })
             .collect();
-        assert_eq!(homes.len(), 1, "the areas all sit under one home: {roots:?}");
+        assert_eq!(
+            homes.len(),
+            1,
+            "the areas all sit under one home: {roots:?}"
+        );
     }
 }
