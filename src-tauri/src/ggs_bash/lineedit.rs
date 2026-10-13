@@ -376,7 +376,7 @@ fn csi_key(params: &str, final_byte: char) -> Key {
 
 /* ---------- Rendering ---------- */
 
-fn char_width(c: char) -> usize {
+pub(crate) fn char_width(c: char) -> usize {
     let n = c as u32;
     let wide = (0x1100..=0x115f).contains(&n)
         || (0x2e80..=0xa4cf).contains(&n)
@@ -1041,9 +1041,16 @@ fn command_candidates(shell: &Shell, prefix: &str) -> Vec<Candidate> {
     } else {
         Vec::new()
     };
-    for dir in super::exec::split_path_list(&shell.path_var()) {
-        let dir = super::msys::from_msys(&dir);
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+    let mut search_dirs: Vec<String> = super::exec::split_path_list(&shell.path_var())
+        .into_iter()
+        .map(|dir| super::msys::from_msys(&dir))
+        .collect();
+    // The Git Bash fallback completes its command set too (`stat`, `file`, …).
+    if let Some(usr_bin) = super::exec::git_usr_bin_from(&shell.path_var()) {
+        search_dirs.push(usr_bin.display().to_string().replace('\\', "/"));
+    }
+    for dir in &search_dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
         };
         for entry in entries.flatten() {

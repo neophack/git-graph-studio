@@ -11,10 +11,15 @@ import { el, notify } from './ui';
 
 export type AutoSave = 'off' | 'afterDelay' | 'onFocusChange' | 'onWindowChange';
 export type LinuxDmabuf = 'auto' | 'disable' | 'keep';
-/** The shell a new integrated terminal opens (module 18): the bundled GGS Bash —
- *  the Rust bash-like shell that also backs Claude Code's tool calls on Windows,
- *  where no bash exists for them to find — or PowerShell. */
-export type TerminalShell = 'powershell' | 'ggsBash';
+/** The shell a new integrated terminal opens (module 18) — a Windows-only concern:
+ *  off Windows the terminal opens the system's own shell and this setting is not
+ *  even shown. On Windows: Git for Windows' own Git Bash — the default since
+ *  2026-10-13, its path found automatically (the registry, the standard install
+ *  folders, or the git.exe on the PATH), with the bundled GGS Bash standing in
+ *  wherever none is installed — GGS Bash itself (the pure-Rust bash-like shell that
+ *  also backs Claude Code's tool calls, where no bash exists for them to find), or
+ *  PowerShell. */
+export type TerminalShell = 'powershell' | 'ggsBash' | 'gitBash';
 /** What the right mouse button does inside the integrated terminal (module 11) —
  *  VS Code's `terminal.integrated.rightClickBehavior`: open the context menu, act as
  *  smart copy/paste, always paste, or nothing. */
@@ -99,7 +104,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	fileAssociations: ['blf', 'asc', 'bin', 'hex'],
 	explorerContextMenu: true,
 	linuxDmabuf: 'auto',
-	terminalShell: 'ggsBash',
+	terminalShell: 'gitBash',
 	terminalRightClickBehavior: 'menu',
 	density: 'comfortable',
 	searchSmartCase: true,
@@ -114,17 +119,27 @@ export const DEFAULT_SETTINGS: AppSettings = {
  *  treated as "never picked" and follows the current default; any other value is the
  *  user's own and stands. Sticky scroll shipped defaulting to on and now defaults to off
  *  (2026-09-17): a stored `true` is that shipped default, not a pick, and follows. The
- *  glide setting is gone — nothing eases any more — and a stored one is dropped. */
+ *  glide setting is gone — nothing eases any more — and a stored one is dropped. The
+ *  Terminal Shell default moved from GGS Bash to Git Bash (2026-10-13, the owner's
+ *  direction — GGS Bash stands in where no Git Bash is installed): a stored `ggsBash`
+ *  equal to the old shipped default follows, the same rule. */
 export function migrateStoredSettings(stored: Partial<AppSettings>): Partial<AppSettings> {
 	const { smoothScrolling: _glide, ...rest } = stored as Partial<AppSettings> & { smoothScrolling?: boolean };
 	const next: Partial<AppSettings> = { ...rest };
 	if ([1, 2, 3].includes(next.mouseWheelScrollSensitivity as number)) next.mouseWheelScrollSensitivity = DEFAULT_SETTINGS.mouseWheelScrollSensitivity;
 	if (next.fastScrollSensitivity === 5) next.fastScrollSensitivity = DEFAULT_SETTINGS.fastScrollSensitivity;
 	if (next.stickyScroll === true) next.stickyScroll = DEFAULT_SETTINGS.stickyScroll;
+	if (next.terminalShell === 'ggsBash') next.terminalShell = DEFAULT_SETTINGS.terminalShell;
 	return next;
 }
 
-export const settings: AppSettings = { ...DEFAULT_SETTINGS, ...migrateStoredSettings(load<Partial<AppSettings>>('appSettings', {})) };
+const storedSettings = load<Partial<AppSettings>>('appSettings', {});
+const migratedSettings = migrateStoredSettings(storedSettings);
+export const settings: AppSettings = { ...DEFAULT_SETTINGS, ...migratedSettings };
+// A migrated shell default must reach the backend file too: the spawn path reads
+// `~/.ggs/settings.json` (written only on setting changes), and a file still pinning
+// the old default would keep spawning the old shell. Fires once, at boot.
+if (migratedSettings.terminalShell !== storedSettings.terminalShell) persistSettingsFile();
 
 /* ---------- The setting registry (M3 3.9): one row per setting, schema-driven ---------- */
 
@@ -132,7 +147,10 @@ export type SettingCategory = 'general' | 'appearance' | 'editor' | 'search';
 
 /** How the generated Settings dialog renders one setting. `theme` and `locale` pick from
  *  THEMES / LOCALES; `enum` from its own options; a number gets bounds; a boolean a checkbox;
- *  `extensionList` renders the File Associations checkbox grid over the backend catalogue. */
+ *  `extensionList` renders the File Associations checkbox grid over the backend catalogue.
+ *  `windowsOnly` hides the row off Windows — the Terminal Shell setting names shells that
+ *  exist only there (elsewhere the terminal opens the system's own shell, and the row
+ *  would be a dead control). */
 export interface SettingDef {
 	key: keyof AppSettings;
 	category: SettingCategory;
@@ -141,6 +159,7 @@ export interface SettingDef {
 	min?: number;
 	max?: number;
 	step?: number;
+	windowsOnly?: boolean;
 }
 
 /** Every setting the workbench owns, in the order the Settings dialog lists them. The label
@@ -160,9 +179,10 @@ export const SETTING_DEFS: SettingDef[] = [
 		{ value: 'ask', label: 'settings.claudeTapAccess.ask' },
 		{ value: 'deny', label: 'settings.claudeTapAccess.deny' }
 	] },
-	{ key: 'terminalShell', category: 'general', kind: 'enum', options: [
+	{ key: 'terminalShell', category: 'general', kind: 'enum', windowsOnly: true, options: [
 		{ value: 'powershell', label: 'settings.terminalShell.powershell' },
-		{ value: 'ggsBash', label: 'settings.terminalShell.ggsBash' }
+		{ value: 'ggsBash', label: 'settings.terminalShell.ggsBash' },
+		{ value: 'gitBash', label: 'settings.terminalShell.gitBash' }
 	] },
 	{ key: 'terminalRightClickBehavior', category: 'general', kind: 'enum', options: [
 		{ value: 'menu', label: 'settings.terminalRightClickBehavior.menu' },
@@ -367,15 +387,23 @@ export function updateSetting<K extends keyof AppSettings>(key: K, value: AppSet
 	dispatch(SETTINGS_EVENT, key);
 }
 
-/** The Terminal Shell choice changed: the backend re-applies the bridged claude-code
- *  environment (the shell keys both of its sinks carry — GGS Bash points
- *  `CLAUDE_CODE_GIT_BASH_PATH` at the bundled shell's `bash`-named copy and turns
- *  Claude Code's PowerShell tool off, PowerShell turns that tool on) and restarts
- *  the running backend onto it — a backend in flight applied its environment at its
- *  own start and would keep spawning shells the old way. New terminals pick the
- *  setting up on their own; they read it at creation. */
+/** The Terminal Shell choice changed: the new choice must be on disk BEFORE the
+ *  backend re-applies the bridged claude-code environment — the restart the refresh
+ *  triggers re-reads `~/.ggs/settings.json` on its own thread to compute the spawn
+ *  environment, and a refresh racing the write would respawn the backend under the
+ *  OLD shell (the bug a PowerShell switch kept serving Git Bash, 2026-10-13). So the
+ *  write is awaited first, then the refresh fires: the shell keys land as the setting
+ *  says — Git Bash points `CLAUDE_CODE_GIT_BASH_PATH` at the found Git for Windows
+ *  bash with the bundled copy standing in where none is installed, GGS Bash at the
+ *  copy outright, and both turn Claude Code's PowerShell tool off; PowerShell turns
+ *  that tool on — and the running backend restarts onto it, a backend in flight
+ *  having applied its environment at its own start. New terminals pick the setting
+ *  up on their own; they read it at creation. */
 function applyTerminalShell(): void {
-	void invoke('providers_shell_refresh').catch(() => undefined);
+	void invoke('settings_write', { contents: JSON.stringify(settings, null, '\t') })
+		.catch(() => undefined)
+		.then(() => invoke('providers_shell_refresh'))
+		.catch(() => undefined);
 }
 
 /** Re-register the OS-level "open with" associations for the current selection. The

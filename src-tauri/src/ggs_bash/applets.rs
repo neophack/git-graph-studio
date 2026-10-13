@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use super::builtins::unescape;
 use super::exec::{anchor_program, resolve_on_path, spawn_with_io, ExecResult, Io, Shell};
 use super::glob;
-use super::localtime::{local_now, unix_to_local, Civil};
+use super::localtime::{local_now, now_unix, unix_to_local, Civil};
 use super::regexlite::Regex;
 
 pub const APPLET_NAMES: &[&str] = &[
@@ -169,19 +169,32 @@ fn parse_flags(args: &[String]) -> (String, Vec<String>) {
     (flags, rest)
 }
 
-/// Resolve paths relative to the shell's cwd; no paths means stdin (the callers test
-/// `paths.is_empty()`).
+/// Resolve paths the way the shell resolves every path: the MSYS dialect
+/// (`/d/`, `/tmp/...`) crosses to Windows, relatives land in the shell's cwd.
+/// Before this went through `resolve_working_path` the applets joined the
+/// operand text itself, and `ls -la /d/` handed Windows a literal `/d/` —
+/// root-relative on the CURRENT drive, "file not found" on a machine that owns
+/// a perfectly good D:.
 fn resolve_paths(shell: &Shell, paths: &[String]) -> Vec<PathBuf> {
     paths
         .iter()
-        .map(|p| {
-            if Path::new(p).is_absolute() {
-                PathBuf::from(p)
-            } else {
-                shell.cwd.join(p)
-            }
-        })
+        .map(|p| shell.resolve_working_path(p))
         .collect()
+}
+
+/// The POSIX wording Git Bash's coreutils print for the common IO errors. The
+/// raw Windows message (`系统找不到指定的文件。 (os error 2)`) is a locale
+/// artifact a bash session never sees.
+fn io_error_text(error: &std::io::Error) -> String {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => "No such file or directory".to_owned(),
+        std::io::ErrorKind::PermissionDenied => "Permission denied".to_owned(),
+        std::io::ErrorKind::AlreadyExists => "File exists".to_owned(),
+        std::io::ErrorKind::DirectoryNotEmpty => "Directory not empty".to_owned(),
+        std::io::ErrorKind::NotADirectory => "Not a directory".to_owned(),
+        std::io::ErrorKind::IsADirectory => "Is a directory".to_owned(),
+        _ => error.to_string(),
+    }
 }
 
 fn read_input(
@@ -193,10 +206,12 @@ fn read_input(
         return Ok(vec![(String::new(), io.read_all_stdin())]);
     }
     let mut out = Vec::new();
-    for path in resolve_paths(shell, paths) {
-        let text =
-            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        out.push((path.display().to_string(), text));
+    // GNU tools report and label with the operand as typed (`cat: /d/x: …`),
+    // never the resolved Windows path.
+    for (operand, resolved) in paths.iter().zip(resolve_paths(shell, paths)) {
+        let text = std::fs::read_to_string(&resolved)
+            .map_err(|e| format!("{operand}: {}", io_error_text(&e)))?;
+        out.push((operand.clone(), text));
     }
     Ok(out)
 }
@@ -212,48 +227,133 @@ fn lines_of(text: &str) -> Vec<&str> {
 
 /* ---------- ls ---------- */
 
+/// One listed entry: the display name (bare inside a directory listing, the
+/// operand as typed for direct operands — GNU's own rule) and its metadata.
+struct LsEntry {
+    name: String,
+    metadata: std::fs::Metadata,
+}
+
 fn ls(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
+    // `-w N` / `--width=N` sets the -C line width ahead of the flag letters.
+    let mut width_override: Option<usize> = None;
+    let mut rest: Vec<String> = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "-w" || arg == "--width" {
+            if let Some(value) = iter.next() {
+                width_override = value.parse().ok();
+                continue;
+            }
+        }
+        if let Some(value) = arg
+            .strip_prefix("--width=")
+            .or_else(|| arg.strip_prefix("-w"))
+            .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit()))
+        {
+            width_override = value.parse().ok();
+            continue;
+        }
+        rest.push(arg.clone());
+    }
+    let args: &[String] = &rest;
     let (flags, paths) = parse_flags(args);
     let all = flags.contains('a');
     let almost_all = flags.contains('A');
     let long = flags.contains('l');
     let by_time = flags.contains('t');
     let reverse = flags.contains('r');
+    let directory_itself = flags.contains('d');
+    let classify = flags.contains('F');
+    let force_columns = flags.contains('C');
+    let force_single = flags.contains('1');
+    let tty = matches!(io.stdout, super::exec::Sink::Inherit) && stdout_is_console();
     let targets: Vec<String> = if paths.is_empty() {
         vec![".".to_owned()]
     } else {
         paths
     };
-    let multiple = targets.len() > 1;
+
+    // GNU's order: the operands are sorted like directory entries (the files
+    // print first, then every directory with an `operand:` header); a miss is
+    // an error line, not a listing.
     let mut status = 0;
-    for (index, target) in targets.iter().enumerate() {
-        if multiple && index > 0 {
+    let mut file_ops: Vec<(String, std::fs::Metadata)> = Vec::new();
+    let mut dir_ops: Vec<(String, PathBuf, std::fs::Metadata)> = Vec::new();
+    for target in &targets {
+        let resolved = shell.resolve_working_path(target);
+        match std::fs::symlink_metadata(&resolved) {
+            Ok(metadata) if metadata.is_dir() && !directory_itself => {
+                dir_ops.push((target.clone(), resolved, metadata));
+            }
+            Ok(metadata) => file_ops.push((target.clone(), metadata)),
+            Err(error) => {
+                io.err_str(&format!(
+                    "ls: cannot access '{target}': {}\n",
+                    io_error_text(&error)
+                ));
+                status = 2;
+            }
+        }
+    }
+    let operand_order = |entries: &mut Vec<(String, std::fs::Metadata)>| {
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        if by_time {
+            entries.sort_by_key(|b| std::cmp::Reverse(mtime_of(&b.1)));
+        }
+        if reverse {
+            entries.reverse();
+        }
+    };
+    operand_order(&mut file_ops);
+    let mut dir_order: Vec<usize> = (0..dir_ops.len()).collect();
+    dir_order.sort_by(|&a, &b| dir_ops[a].0.cmp(&dir_ops[b].0));
+    if by_time {
+        dir_order.sort_by(|&a, &b| mtime_of(&dir_ops[b].2).cmp(&mtime_of(&dir_ops[a].2)));
+    }
+    if reverse {
+        dir_order.reverse();
+    }
+    let dir_ops: Vec<(String, PathBuf)> = dir_order
+        .into_iter()
+        .map(|index| (dir_ops[index].0.clone(), dir_ops[index].1.clone()))
+        .collect();
+
+    let columns = force_columns || (tty && !force_single && !long);
+    let had_file_ops = !file_ops.is_empty();
+    if had_file_ops {
+        let entries: Vec<LsEntry> = file_ops
+            .into_iter()
+            .map(|(name, metadata)| LsEntry { name, metadata })
+            .collect();
+        if long {
+            print_ls_rows(io, &entries, classify, tty);
+        } else if columns && dir_ops.is_empty() {
+            print_ls_columns(io, &entries, classify, tty, width_override);
+        } else {
+            print_ls_lines(io, &entries, classify, tty);
+        }
+    }
+
+    let multiple = targets.len() > 1;
+    for (index, (operand, path)) in dir_ops.iter().enumerate() {
+        if multiple && (index > 0 || had_file_ops) {
             io.out_str("\n");
         }
-        let path = resolve_paths(shell, std::slice::from_ref(target)).remove(0);
-        let metadata = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                io.err_str(&format!("ls: {target}: {error}\n"));
-                status = 2;
-                continue;
-            }
-        };
-        if !metadata.is_dir() {
-            print_ls_entry(io, &path, &metadata, long);
-            continue;
-        }
         if multiple {
-            io.out_str(&format!("{}:\n", path.display()));
+            io.out_str(&format!("{operand}:\n"));
         }
-        let mut names: Vec<String> = match std::fs::read_dir(&path) {
+        let mut names: Vec<String> = match std::fs::read_dir(path) {
             Ok(entries) => entries
                 .flatten()
                 .map(|entry| entry.file_name().to_string_lossy().into_owned())
                 .filter(|name| all || almost_all || !name.starts_with('.'))
                 .collect(),
             Err(error) => {
-                io.err_str(&format!("ls: {target}: {error}\n"));
+                io.err_str(&format!(
+                    "ls: cannot open directory '{operand}': {}\n",
+                    io_error_text(&error)
+                ));
                 status = 2;
                 continue;
             }
@@ -262,99 +362,399 @@ fn ls(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
             names.push("..".to_owned());
             names.push(".".to_owned());
         }
+        // Git Bash's C-locale order: byte-wise — a case fold would put `a.txt`
+        // before `B.txt`, which a bash listing never does.
+        names.sort();
         if by_time {
-            // Newest first (mtime, then name for the stable tie).
-            names.sort_by(|a, b| {
-                let mtime = |name: &String| {
-                    std::fs::symlink_metadata(path.join(name))
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0)
-                };
-                mtime(b)
-                    .cmp(&mtime(a))
-                    .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
-            });
-        } else {
-            names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then(a.cmp(b)));
+            // Newest first; the stable sort keeps the name order for equal times.
+            names.sort_by_key(|b| std::cmp::Reverse(mtime_secs(&path.join(b))));
         }
         if reverse {
             names.reverse();
         }
-        for name in names {
-            let entry = path.join(&name);
-            if let Ok(metadata) = std::fs::symlink_metadata(&entry) {
-                print_ls_entry(io, &entry, &metadata, long);
-            }
+        let entries: Vec<LsEntry> = names
+            .iter()
+            .filter_map(|name| {
+                std::fs::symlink_metadata(path.join(name))
+                    .ok()
+                    .map(|metadata| LsEntry {
+                        name: name.clone(),
+                        metadata,
+                    })
+            })
+            .collect();
+        if long {
+            let total: u64 = entries.iter().map(|entry| ls_blocks(&entry.metadata)).sum();
+            io.out_str(&format!("total {total}\n"));
+            print_ls_rows(io, &entries, classify, tty);
+        } else if columns {
+            print_ls_columns(io, &entries, classify, tty, width_override);
+        } else {
+            print_ls_lines(io, &entries, classify, tty);
         }
     }
     Ok(status)
 }
 
-fn print_ls_entry(io: &Io, path: &Path, metadata: &std::fs::Metadata, long: bool) {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string());
-    // Git Bash colorizes on a terminal: bold blue directories, bold green executables.
-    let colored = matches!(io.stdout, super::exec::Sink::Inherit);
-    let executable = !metadata.is_dir()
-        && name
+fn print_ls_lines(io: &Io, entries: &[LsEntry], classify: bool, tty: bool) {
+    for entry in entries {
+        let plain = ls_plain_name(entry, classify);
+        let shown = if tty { ls_color(&plain, entry) } else { plain };
+        io.out_str(&format!("{shown}\n"));
+    }
+}
+
+/// The `-l` row: `mode nlink user group size date name` with the middle columns
+/// padded to this listing's own maxima — owner and group left-aligned, the size
+/// right-aligned — exactly the shape GNU coreutils prints.
+fn print_ls_rows(io: &Io, entries: &[LsEntry], classify: bool, tty: bool) {
+    if entries.is_empty() {
+        return;
+    }
+    let user = ls_user_name();
+    let group = MSYS_GID.to_string();
+    let size_width = entries
+        .iter()
+        .map(|entry| ls_size(entry).to_string().len())
+        .max()
+        .unwrap_or(1);
+    for entry in entries {
+        let plain = ls_plain_name(entry, classify);
+        let shown = if tty { ls_color(&plain, entry) } else { plain };
+        io.out_str(&format!(
+            "{} 1 {:<uw$} {:<gw$} {:>sw$} {} {}\n",
+            ls_mode(entry),
+            user,
+            group,
+            ls_size(entry),
+            ls_time(&entry.metadata),
+            shown,
+            uw = user.len(),
+            gw = group.len(),
+            sw = size_width,
+        ));
+    }
+}
+
+/// The multi-column listing on a terminal: GNU coreutils' own column planner
+/// (`calculate_columns` in ls.c) with its tab-preferring indent, so the fill
+/// order, the widths and the exact spacing match `ls -C` byte for byte.
+/// `width` is `-w N`'s override; without it a console answers its own width and
+/// a pipe the 80-column default.
+fn print_ls_columns(io: &Io, entries: &[LsEntry], classify: bool, tty: bool, width: Option<usize>) {
+    if entries.is_empty() {
+        return;
+    }
+    let shown: Vec<(String, usize)> = entries
+        .iter()
+        .map(|entry| {
+            let plain = ls_plain_name(entry, classify);
+            let width = display_width(&plain);
+            let shown = if tty { ls_color(&plain, entry) } else { plain };
+            (shown, width)
+        })
+        .collect();
+    let widths: Vec<usize> = shown.iter().map(|(_, width)| *width).collect();
+    let line_length = width.or_else(terminal_columns).unwrap_or(80);
+    let col_arr = gnu_column_widths(&widths, line_length);
+    let cols = col_arr.len();
+    let rows = entries.len().div_ceil(cols);
+    let mut out = String::new();
+    for row in 0..rows {
+        let mut filesno = row;
+        let mut col = 0;
+        let mut pos = 0;
+        loop {
+            let (name, width) = &shown[filesno];
+            out.push_str(name);
+            let max_len = col_arr[col];
+            col += 1;
+            filesno += rows;
+            if filesno >= entries.len() {
+                break;
+            }
+            gnu_indent(&mut out, pos + width, pos + max_len);
+            pos += max_len;
+        }
+        out.push('\n');
+    }
+    io.out_str(&out);
+}
+
+/// GNU ls' column planner, verbatim semantics: every candidate column count
+/// starts pre-seeded at the 3-wide minimum (name + the 2-space gap) with its
+/// running length at `3 × columns`, the last column carries no gap, a candidate
+/// stays valid only while its running length stays under the line length, and
+/// the widest still-valid candidate wins. Returns the per-column widths.
+fn gnu_column_widths(widths: &[usize], line_length: usize) -> Vec<usize> {
+    let n = widths.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    const MIN_COLUMN_WIDTH: usize = 3;
+    let max_idx =
+        line_length / MIN_COLUMN_WIDTH + usize::from(!line_length.is_multiple_of(MIN_COLUMN_WIDTH));
+    let max_cols = max_idx.min(n).max(1);
+    let mut col_arr: Vec<Vec<usize>> = (1..=max_cols)
+        .map(|cols| vec![MIN_COLUMN_WIDTH; cols])
+        .collect();
+    let mut line_len: Vec<usize> = (1..=max_cols).map(|cols| cols * MIN_COLUMN_WIDTH).collect();
+    let mut valid: Vec<bool> = vec![true; max_cols];
+    for (filesno, &width) in widths.iter().enumerate() {
+        for ci in 0..max_cols {
+            if !valid[ci] {
+                continue;
+            }
+            // Column-major: this file lands in column `filesno / rows`; the
+            // gap is GNU's two spaces, the last column carries none.
+            let rows = (n + ci) / (ci + 1);
+            let idx = filesno / rows;
+            let real = width + if idx == ci { 0 } else { 2 };
+            if col_arr[ci][idx] < real {
+                line_len[ci] += real - col_arr[ci][idx];
+                col_arr[ci][idx] = real;
+                valid[ci] = line_len[ci] < line_length;
+            }
+        }
+    }
+    let mut cols = max_cols;
+    while cols > 1 && !valid[cols - 1] {
+        cols -= 1;
+    }
+    col_arr[cols - 1].clone()
+}
+
+/// GNU ls' `indent`: pad towards the next column start, preferring a tab while
+/// one lands within the target.
+fn gnu_indent(out: &mut String, mut from: usize, to: usize) {
+    const TABSIZE: usize = 8;
+    while from < to {
+        if to / TABSIZE > (from + 1) / TABSIZE {
+            out.push('\t');
+            from += TABSIZE - from % TABSIZE;
+        } else {
+            out.push(' ');
+            from += 1;
+        }
+    }
+}
+
+/// MSYS maps the primary group (the RID-513 "None"/"Domain Users" group) to
+/// gid `0x100000 + 513` and the user to her SID's RID plus the same offset; a
+/// listing shows the owner by NAME and the group by NUMBER (its name never
+/// resolves), the exact shape `ls -l` prints in Git Bash.
+const MSYS_GID: u32 = 0x100000 + 513;
+
+fn ls_user_name() -> String {
+    std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "user".to_owned())
+}
+
+fn ls_plain_name(entry: &LsEntry, classify: bool) -> String {
+    let mut name = entry.name.clone();
+    if classify {
+        if entry.metadata.is_dir() {
+            name.push('/');
+        } else if ls_executable(entry) {
+            name.push('*');
+        }
+    }
+    name
+}
+
+fn ls_color(plain: &str, entry: &LsEntry) -> String {
+    if entry.metadata.is_dir() {
+        format!("\x1b[01;34m{plain}\x1b[0m")
+    } else if ls_executable(entry) {
+        format!("\x1b[01;32m{plain}\x1b[0m")
+    } else {
+        plain.to_owned()
+    }
+}
+
+/// The Windows executable extensions MSYS marks with the execute bits — `.msi`
+/// is data, not a program, and Git Bash neither greens it nor sets its `x`.
+fn ls_executable(entry: &LsEntry) -> bool {
+    !entry.metadata.is_dir()
+        && entry
+            .name
             .rsplit_once('.')
             .map(|(_, extension)| {
                 matches!(
                     extension.to_ascii_lowercase().as_str(),
-                    "exe" | "cmd" | "bat" | "com" | "msi"
+                    "exe" | "com" | "bat" | "cmd"
                 )
             })
-            .unwrap_or(false);
-    let shown = if colored && metadata.is_dir() {
-        format!("\x1b[01;34m{name}\x1b[0m")
-    } else if colored && executable {
-        format!("\x1b[01;32m{name}\x1b[0m")
-    } else {
-        name.clone()
-    };
-    if !long {
-        io.out_str(&format!("{shown}\n"));
-        return;
-    }
-    let mode = if metadata.is_dir() {
-        "drwxr-xr-x"
-    } else if metadata.permissions().readonly() {
-        "-r--r--r--"
-    } else {
-        "-rw-r--r--"
-    };
-    let stamp = unix_to_local(
-        metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0),
-    );
-    let size = metadata.len();
-    io.out_str(&format!(
-        "{mode} {size:>10} {} {shown}\n",
-        format_month_day_time(&stamp)
-    ));
+            .unwrap_or(false)
 }
 
-fn format_month_day_time(civil: &Civil) -> String {
+fn ls_mode(entry: &LsEntry) -> &'static str {
+    if entry.metadata.is_dir() {
+        return "drwxr-xr-x";
+    }
+    match (
+        ls_executable(entry),
+        entry.metadata.permissions().readonly(),
+    ) {
+        (true, true) => "-r-xr-xr-x",
+        (true, false) => "-rwxr-xr-x",
+        (false, true) => "-r--r--r--",
+        (false, false) => "-rw-r--r--",
+    }
+}
+
+/// GNU's "recent" clock: a Gregorian half-year. Within it the date column
+/// shows the time, beyond it the year.
+const SIX_MONTHS: i64 = 31_556_952 / 2;
+
+fn ls_time(metadata: &std::fs::Metadata) -> String {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
-    format!(
-        "{} {:>2} {:02}:{:02}:{:02}",
-        MONTHS[(civil.month as usize - 1).min(11)],
-        civil.day,
-        civil.hour,
-        civil.minute,
-        civil.second
-    )
+    let mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let now = now_unix();
+    let civil = unix_to_local(mtime);
+    if mtime >= now - SIX_MONTHS {
+        format!(
+            "{} {:>2} {:02}:{:02}",
+            MONTHS[(civil.month as usize - 1).min(11)],
+            civil.day,
+            civil.hour,
+            civil.minute
+        )
+    } else {
+        format!(
+            "{} {:>2}  {}",
+            MONTHS[(civil.month as usize - 1).min(11)],
+            civil.day,
+            civil.year
+        )
+    }
+}
+
+/// MSYS answers `st_size == 0` for a directory — its stream's allocation shows
+/// up only in the block count.
+fn ls_size(entry: &LsEntry) -> u64 {
+    if entry.metadata.is_dir() {
+        0
+    } else {
+        entry.metadata.len()
+    }
+}
+
+/// The 1-K block count GNU's `total` line sums: a file's allocated size (a
+/// resident small file one block, a non-resident one its cluster-padded size),
+/// a directory its stream's allocation — the numbers MSYS stat reports and std
+/// can only reconstruct.
+fn ls_blocks(metadata: &std::fs::Metadata) -> u64 {
+    if metadata.is_dir() {
+        return metadata.len() / 1024;
+    }
+    let size = metadata.len();
+    if size == 0 {
+        0
+    } else if size <= 1024 {
+        1
+    } else {
+        size.div_ceil(4096) * 4
+    }
+}
+
+fn mtime_secs(path: &Path) -> u64 {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| mtime_of(&metadata))
+        .unwrap_or(0)
+}
+
+fn mtime_of(metadata: &std::fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The visible width of a listing cell — wide glyphs count two columns.
+fn display_width(text: &str) -> usize {
+    text.chars().map(super::lineedit::char_width).sum()
+}
+
+/// The console's width for the column listing; anything but a real console
+/// (a pipe, a capture) answers none and the caller falls back to 80.
+#[cfg(windows)]
+fn terminal_columns() -> Option<usize> {
+    #[repr(C)]
+    struct Coord {
+        x: i16,
+        y: i16,
+    }
+    #[repr(C)]
+    struct SmallRect {
+        left: i16,
+        top: i16,
+        right: i16,
+        bottom: i16,
+    }
+    #[repr(C)]
+    struct ScreenBufferInfo {
+        size: Coord,
+        cursor: Coord,
+        attributes: u16,
+        window: SmallRect,
+        maximum_size: Coord,
+    }
+    extern "system" {
+        fn GetStdHandle(which: i32) -> *mut core::ffi::c_void;
+        fn GetConsoleScreenBufferInfo(
+            handle: *mut core::ffi::c_void,
+            info: *mut ScreenBufferInfo,
+        ) -> i32;
+    }
+    unsafe {
+        let handle = GetStdHandle(-11); // STD_OUTPUT_HANDLE
+        let mut info = std::mem::zeroed();
+        if GetConsoleScreenBufferInfo(handle, &mut info) == 1 {
+            Some((info.window.right - info.window.left + 1).max(1) as usize)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn terminal_columns() -> Option<usize> {
+    None
+}
+
+/// Is the process's own stdout a console — the real isatty question GNU ls
+/// asks before coloring or columnating? The `Io` sink alone cannot answer it:
+/// an inherited stdout may still be a pipe (`ggs-bash -c 'ls …' | head`).
+#[cfg(windows)]
+fn stdout_is_console() -> bool {
+    extern "system" {
+        fn GetStdHandle(which: i32) -> *mut core::ffi::c_void;
+        fn GetConsoleMode(handle: *mut core::ffi::c_void, mode: *mut u32) -> i32;
+    }
+    unsafe {
+        let handle = GetStdHandle(-11); // STD_OUTPUT_HANDLE
+        let mut mode = 0u32;
+        GetConsoleMode(handle, &mut mode) == 1
+    }
+}
+
+#[cfg(not(windows))]
+fn stdout_is_console() -> bool {
+    extern "C" {
+        fn isatty(fd: i32) -> i32;
+    }
+    unsafe { isatty(1) == 1 }
 }
 
 /* ---------- cat ---------- */
@@ -2510,7 +2910,15 @@ fn which(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
         if super::builtins::is_builtin(name) || is_applet(name) {
             io.out_str(&format!("{}\n", self_exe.as_deref().unwrap_or("ggs-bash")));
         } else if let Some(path) = resolve_on_path(name, &shell.path_var()) {
-            io.out_str(&format!("{}\n", path.display()));
+            // The PATH hit prints in the MSYS dialect; a Git Bash `usr/bin` hit
+            // answers exactly what Git Bash's own `which` says.
+            if let Some(usr_bin) = super::exec::git_usr_bin_from(&shell.path_var()) {
+                if path.starts_with(&usr_bin) {
+                    io.out_str(&format!("/usr/bin/{name}\n"));
+                    continue;
+                }
+            }
+            io.out_str(&format!("{}\n", super::msys::to_msys(&path)));
         } else {
             status = 1;
         }
@@ -3525,5 +3933,41 @@ mod diff_debug_tests {
         assert!(myers(&["x"], &["x"])
             .iter()
             .all(|(e, _)| matches!(e, DiffEdit::Keep)));
+    }
+}
+
+#[cfg(test)]
+mod ls_column_tests {
+    use super::{gnu_column_widths, gnu_indent};
+
+    /// Every expected answer below was measured against a live Git Bash
+    /// (`ls -C -w N` with the same name sets): seven unit names take 3 columns
+    /// at width 8, 4 at 10 and 6 at 16 (a candidate whose names never grow past
+    /// the pre-seeded 3-wide minimum stays valid — its two trailing columns
+    /// print empty, which is why 16 LOOKS like 4), one row at 20; the uneven
+    /// set lands 2 columns at 22.
+    #[test]
+    fn gnu_column_widths_match_the_measured_answers() {
+        let seven = vec![1usize; 7];
+        assert_eq!(gnu_column_widths(&seven, 8), vec![3, 3, 3]);
+        assert_eq!(gnu_column_widths(&seven, 10), vec![3, 3, 3, 3]);
+        assert_eq!(gnu_column_widths(&seven, 16), vec![3, 3, 3, 3, 3, 3]);
+        assert_eq!(gnu_column_widths(&seven, 20), vec![3, 3, 3, 3, 3, 3, 3]);
+        assert_eq!(gnu_column_widths(&[1, 2, 3, 13, 1, 1, 1], 22), vec![15, 3]);
+    }
+
+    #[test]
+    fn gnu_indent_prefers_tabs_that_land_within_the_target() {
+        // A tab to 8, then seven spaces to 15 — the measured `a^I       e` row.
+        let mut out = String::new();
+        gnu_indent(&mut out, 1, 15);
+        assert_eq!(out, "\t       ");
+        // A tab would overshoot, so plain spaces.
+        let mut out = String::new();
+        gnu_indent(&mut out, 1, 3);
+        assert_eq!(out, "  ");
+        let mut out = String::new();
+        gnu_indent(&mut out, 7, 9);
+        assert_eq!(out, "  ");
     }
 }

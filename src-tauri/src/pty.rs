@@ -46,9 +46,9 @@ pub struct PtyState {
 }
 
 /// Spawn the shell in the open repository (the session's working directory). `shell`
-/// is the Terminal Shell setting's value (`"ggsBash"` or the default `powershell`);
-/// every new terminal re-reads it, so a Settings change reaches the next terminal
-/// without a restart.
+/// is the Terminal Shell setting's value (`"gitBash"` the default, `"ggsBash"` and
+/// `"powershell"` the alternatives); every new terminal re-reads it, so a Settings
+/// change reaches the next terminal without a restart.
 #[tauri::command]
 pub fn pty_create(
     app: TauriAppHandle,
@@ -229,10 +229,23 @@ pub fn pty_kill(app: TauriAppHandle, id: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// The shell a new terminal opens. GGS Bash (module 18) when the setting says so — the
-/// bundled sidecar beside the app binary, the same host lookup every extension backend
-/// resolves through; PowerShell is the Windows default, `$SHELL` everywhere else.
+/// The shell a new terminal opens. Windows: Git Bash — the setting's default — is
+/// Git for Windows' own bash, located by `find_git_bash` (the registry, the standard
+/// install roots, then the PATH), and where none is installed the bundled GGS Bash
+/// stands in (the owner's 2026-10-13 direction; its dialect is Git Bash's, so the
+/// stand-in is the same shell to sit in); GGS Bash by name is the sidecar beside the
+/// app binary, the same host lookup every extension backend resolves through;
+/// PowerShell is the fallback. Everywhere else neither bash of the setting exists
+/// (2026-10-13, the owner's direction): the terminal opens the system's own shell —
+/// `$SHELL`, `sh` when unset — whatever the stored setting says.
 fn shell_command(shell: Option<&str>) -> Result<(CommandBuilder, String), String> {
+    if !cfg!(windows) {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_owned());
+        let name = shell.rsplit('/').next().unwrap_or("sh").to_owned();
+        let mut command = CommandBuilder::new(&shell);
+        command.env("TERM", "xterm-256color");
+        return Ok((command, name));
+    }
     if shell == Some("ggsBash") {
         let path = crate::ext_process::resolve_engine_host("ggs-bash")
             .map_err(|error| format!("GGS Bash is not available: {error}"))?;
@@ -241,17 +254,30 @@ fn shell_command(shell: Option<&str>) -> Result<(CommandBuilder, String), String
         command.env("TERM", "xterm-256color");
         return Ok((command, "ggs-bash".to_owned()));
     }
-    if cfg!(windows) {
-        let mut command = CommandBuilder::new("powershell.exe");
-        command.arg("-NoLogo");
-        Ok((command, "powershell".to_owned()))
-    } else {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_owned());
-        let name = shell.rsplit('/').next().unwrap_or("sh").to_owned();
-        let mut command = CommandBuilder::new(shell);
+    if shell == Some("gitBash") {
+        if let Some(path) = crate::ggs_bash::pref::find_git_bash() {
+            let mut command = CommandBuilder::new(&path);
+            // Git Bash's own shortcut shape: a login shell, so its profile sets up
+            // the prompt and the PATH the way a standalone Git Bash terminal shows
+            // them.
+            command.arg("--login");
+            command.arg("-i");
+            command.env("TERM", "xterm-256color");
+            return Ok((command, "git-bash".to_owned()));
+        }
+        // No Git Bash on the machine: GGS Bash stands in rather than failing the
+        // terminal outright.
+        let path = crate::ext_process::resolve_engine_host("ggs-bash").map_err(|error| {
+            format!("Git Bash was not found on this machine and GGS Bash is not available: {error}")
+        })?;
+        let mut command = CommandBuilder::new(&path);
+        command.arg("-i");
         command.env("TERM", "xterm-256color");
-        Ok((command, name))
+        return Ok((command, "ggs-bash".to_owned()));
     }
+    let mut command = CommandBuilder::new("powershell.exe");
+    command.arg("-NoLogo");
+    Ok((command, "powershell".to_owned()))
 }
 
 fn with_session<T>(
@@ -299,37 +325,42 @@ mod tests {
     }
 
     #[test]
-    fn the_default_shell_is_the_platform_one_and_ggs_bash_needs_its_sidecar() {
-        let (.., name) = shell_command(None).unwrap();
+    fn the_default_shell_is_the_platform_one_and_the_bashes_are_windows_only() {
         if cfg!(windows) {
+            let (.., name) = shell_command(None).unwrap();
             assert_eq!(name, "powershell");
+            // GGS Bash resolves exactly where the extension backends find their
+            // hosts: `GGS_ENGINE_HOST` is the test override.
+            let host = tempfile::TempDir::new().unwrap();
+            let binary = host.path().join("ggs-bash.exe");
+            std::fs::write(&binary, b"").unwrap();
+            std::env::set_var("GGS_ENGINE_HOST", host.path());
+            let (_command, name) = shell_command(Some("ggsBash")).unwrap();
+            assert_eq!(name, "ggs-bash");
+            std::env::remove_var("GGS_ENGINE_HOST");
+            // Without the override the sidecar still resolves in a build tree (cargo
+            // test builds the bin beside the harness), and names itself.
+            let (_command, name) = shell_command(Some("ggsBash")).unwrap();
+            assert_eq!(name, "ggs-bash");
+            // Git Bash opens when one is found on the machine, and where none is the
+            // bundled GGS Bash stands in; only a machine with neither reports the
+            // miss.
+            match shell_command(Some("gitBash")) {
+                Ok((.., name)) => assert!(name == "git-bash" || name == "ggs-bash", "{name}"),
+                Err(error) => {
+                    assert!(crate::ggs_bash::pref::find_git_bash().is_none());
+                    assert!(error.contains("Git Bash was not found"), "{error}");
+                }
+            }
         } else {
-            assert_eq!(
-                name,
-                std::env::var("SHELL")
-                    .unwrap_or_else(|_| "sh".into())
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("sh")
-            );
+            // Off Windows neither bash of the setting exists (2026-10-13, the
+            // owner's direction): every choice opens the system's own shell.
+            let (.., system) = shell_command(None).unwrap();
+            for choice in ["ggsBash", "gitBash", "powershell"] {
+                let (.., name) = shell_command(Some(choice)).unwrap();
+                assert_eq!(name, system, "{choice} must open the system shell");
+            }
         }
-        // GGS Bash resolves exactly where the extension backends find their hosts:
-        // `GGS_ENGINE_HOST` is the test override.
-        let host = tempfile::TempDir::new().unwrap();
-        let binary = host.path().join(if cfg!(windows) {
-            "ggs-bash.exe"
-        } else {
-            "ggs-bash"
-        });
-        std::fs::write(&binary, b"").unwrap();
-        std::env::set_var("GGS_ENGINE_HOST", host.path());
-        let (_command, name) = shell_command(Some("ggsBash")).unwrap();
-        assert_eq!(name, "ggs-bash");
-        std::env::remove_var("GGS_ENGINE_HOST");
-        // Without the override the sidecar still resolves in a build tree (cargo test
-        // builds the bin beside the harness), and names itself.
-        let (_command, name) = shell_command(Some("ggsBash")).unwrap();
-        assert_eq!(name, "ggs-bash");
     }
 
     #[test]

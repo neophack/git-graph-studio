@@ -637,6 +637,70 @@ pub fn resolve_on_path(name: &str, path_var: &str) -> Option<PathBuf> {
             }
         }
     }
+    // The Git Bash fallback: a command the applets and the PATH both lack still
+    // answers if the local Git Bash carries it — the curated applets stay the
+    // shell's own first answer, and a machine without Git for Windows is
+    // unaffected.
+    if let Some(dir) = git_usr_bin_from(path_var) {
+        for extension in &extensions {
+            let candidate = dir.join(format!("{name}{extension}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// The local Git Bash's `usr/bin` — its whole command set — found through a
+/// `git.exe` on the PATH (walking up to its install root) or the standard
+/// install roots. Windows only: this is a Git-for-Windows artifact.
+#[cfg(windows)]
+pub fn git_usr_bin_from(path_var: &str) -> Option<PathBuf> {
+    for dir in split_path_list(path_var) {
+        let native = super::msys::from_msys(&dir);
+        if Path::new(&native).join("git.exe").is_file() {
+            if let Some(found) = usr_bin_above(Path::new(&native)) {
+                return Some(found);
+            }
+        }
+    }
+    let roots = [
+        std::env::var("ProgramFiles")
+            .ok()
+            .map(|base| PathBuf::from(base).join("Git")),
+        std::env::var("ProgramFiles(x86)")
+            .ok()
+            .map(|base| PathBuf::from(base).join("Git")),
+        std::env::var("LOCALAPPDATA")
+            .ok()
+            .map(|base| PathBuf::from(base).join("Programs").join("Git")),
+    ];
+    roots
+        .into_iter()
+        .flatten()
+        .map(|root| root.join("usr").join("bin"))
+        .find(|usr_bin| usr_bin.is_dir())
+}
+
+#[cfg(windows)]
+fn usr_bin_above(start: &Path) -> Option<PathBuf> {
+    // `cmd/git.exe` and `bin/git.exe` sit one level under the root,
+    // `mingw64/bin/git.exe` two — three up covers every layout Git ships.
+    let mut current = Some(start);
+    for _ in 0..3 {
+        let dir = current?;
+        let usr_bin = dir.join("usr").join("bin");
+        if usr_bin.is_dir() {
+            return Some(usr_bin);
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+#[cfg(not(windows))]
+pub fn git_usr_bin_from(_path_var: &str) -> Option<PathBuf> {
     None
 }
 

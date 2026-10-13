@@ -276,11 +276,7 @@ pub fn presets() -> Vec<ProviderPreset> {
             // coding entry, api.kimi.com/coding — the Anthropic-compatible path the
             // coding tier serves; api.moonshot.cn/anthropic and its international
             // .ai twin remain valid manual entries.
-            models: vec![
-                "kimi-k3",
-                "kimi-for-coding",
-                "kimi-for-coding-highspeed"
-            ],
+            models: vec!["kimi-k3", "kimi-for-coding", "kimi-for-coding-highspeed"],
             requires_key: true,
         },
         ProviderPreset {
@@ -668,21 +664,38 @@ pub fn backend_env_for(ext_id: &str, home: &Path, instance: Option<&str>) -> Vec
     env
 }
 
-/// The Terminal Shell preference's half of the bridged environment: when the user
-/// picked GGS Bash and the bundled sidecar resolves, Claude Code gets the
-/// `bash`-named copy of it (its `CLAUDE_CODE_GIT_BASH_PATH` whitelist-checks the
-/// basename — `ggs-bash` is rejected outright, 2026-10-13) and its PowerShell tool
-/// is turned off, so the Bash tool is the command tool; the PowerShell choice turns
-/// that tool on instead. Pure over the home and a materialised shell path, so the
-/// exact bytes are testable.
+/// The Terminal Shell preference's half of the bridged environment, a Windows-only
+/// concern (2026-10-13, the owner's direction: off Windows neither bash of the
+/// setting exists — the terminal is the system's own and Claude Code's POSIX picker
+/// serves itself, so nothing is injected): when the user picked GGS Bash and the
+/// bundled sidecar resolves, Claude Code gets the `bash`-named copy of it (its
+/// `CLAUDE_CODE_GIT_BASH_PATH` whitelist-checks the basename — `ggs-bash` is
+/// rejected outright, 2026-10-13) and its PowerShell tool is turned off, so the Bash
+/// tool is the command tool; the Git Bash choice — the default — points the same
+/// keys at the Git for Windows bash `find_git_bash` locates, and where none is
+/// installed the bundled copy stands in (the owner's 2026-10-13 direction: Git Bash
+/// when it is there, GGS Bash when it is not; only a machine with neither injects
+/// nothing, Claude Code's own detection standing); the PowerShell choice turns that
+/// tool on instead. Pure over the home and a resolved shell path, so the exact bytes
+/// are testable.
 fn claude_shell_env(home: &Path) -> Vec<(String, String)> {
-    let bash = crate::ext_process::resolve_engine_host("ggs-bash")
-        .ok()
-        .and_then(|sidecar| crate::ggs_bash::pref::ensure_bash_exe(home, &sidecar));
-    crate::ggs_bash::pref::claude_shell_env(
-        crate::ggs_bash::pref::preference(home),
-        bash.as_deref(),
-    )
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    let ggs_bash_copy = || {
+        crate::ext_process::resolve_engine_host("ggs-bash")
+            .ok()
+            .and_then(|sidecar| crate::ggs_bash::pref::ensure_bash_exe(home, &sidecar))
+    };
+    let preference = crate::ggs_bash::pref::preference(home);
+    let bash = match preference {
+        crate::ggs_bash::pref::ShellPreference::GgsBash => ggs_bash_copy(),
+        crate::ggs_bash::pref::ShellPreference::GitBash => {
+            crate::ggs_bash::pref::find_git_bash().or_else(ggs_bash_copy)
+        }
+        crate::ggs_bash::pref::ShellPreference::PowerShell => None,
+    };
+    crate::ggs_bash::pref::claude_shell_env(preference, bash.as_deref())
 }
 
 /* ---------- The gateway probes (NewAPI / OneAPI / any Anthropic-compatible origin) ---------- */
@@ -1124,11 +1137,7 @@ pub fn backend_env(ext_id: &str) -> Vec<(String, String)> {
 
 /// One window's active profile's provider environment, resolved through that window's
 /// choice — the lens [`provider_change`] compares under.
-fn active_env(
-    store: &ProviderStore,
-    instance: Option<&str>,
-    home: &Path,
-) -> Vec<(String, String)> {
+fn active_env(store: &ProviderStore, instance: Option<&str>, home: &Path) -> Vec<(String, String)> {
     resolve_active(store, instance)
         .map(|active| provider_env_vars(active, home))
         .unwrap_or_default()
@@ -2382,7 +2391,9 @@ mod tests {
     /// while elsewhere it contributes nothing.
     fn pinned_shell_keys() -> usize {
         if cfg!(windows) {
-            1
+            // The PowerShell choice the provider suite pins: the git bash path
+            // pinned empty plus the PowerShell tool on.
+            2
         } else {
             0
         }
@@ -2495,10 +2506,13 @@ mod tests {
         let _guard = ProviderHome::pin();
         let home = ggs_home().unwrap();
         std::fs::create_dir_all(home.join(".ggs")).unwrap();
-        // An explicit PowerShell choice names no shell and turns Claude Code's
-        // PowerShell tool on (Windows): the user asked for PowerShell, so the tool
-        // is primary rather than left to the vendor's rollout. (The default — a
-        // missing or unrecognised value — IS GGS Bash since 2026-10-10.)
+        // An explicit PowerShell choice turns Claude Code's PowerShell tool on
+        // (Windows) — the user asked for PowerShell, so the tool is primary rather
+        // than left to the vendor's rollout — and pins the git bash path EMPTY: the
+        // spawn env can only add pairs, so an inherited value (a Git Bash session
+        // that launched the app, a user-level leftover) is overridden empty rather
+        // than surviving into the backend. (The default — a missing or
+        // unrecognised value — IS Git Bash since 2026-10-13.)
         std::fs::write(
             home.join(".ggs").join("settings.json"),
             r#"{ "terminalShell": "powershell" }"#,
@@ -2506,7 +2520,11 @@ mod tests {
         .unwrap();
         let spawn = backend_env_for(CLAUDE_CODE_EXT_ID, &home, None);
         let map = env_map(&spawn);
-        assert!(!map.contains_key("CLAUDE_CODE_GIT_BASH_PATH"));
+        if cfg!(windows) {
+            assert_eq!(map.get("CLAUDE_CODE_GIT_BASH_PATH"), Some(&""));
+        } else {
+            assert!(!map.contains_key("CLAUDE_CODE_GIT_BASH_PATH"));
+        }
         assert!(!map.contains_key("MSYSTEM"));
         if cfg!(windows) {
             assert_eq!(map.get("CLAUDE_CODE_USE_POWERSHELL_TOOL"), Some(&"1"));
@@ -2540,6 +2558,77 @@ mod tests {
             assert_eq!(spawn.get("SHELL"), spawn.get("CLAUDE_CODE_GIT_BASH_PATH"));
             if cfg!(windows) {
                 assert_eq!(spawn.get("CLAUDE_CODE_USE_POWERSHELL_TOOL"), Some(&"0"));
+            }
+        }
+        // The Git Bash choice — the default since 2026-10-13 — points the same keys
+        // at the Git for Windows bash the machine carries; where none is installed
+        // the bundled copy stands in, and only a machine with neither injects
+        // nothing (Claude Code's own detection stands).
+        std::fs::write(
+            home.join(".ggs").join("settings.json"),
+            r#"{ "terminalShell": "gitBash" }"#,
+        )
+        .unwrap();
+        let spawn_env = backend_env_for(CLAUDE_CODE_EXT_ID, &home, None);
+        let spawn = env_map(&spawn_env);
+        match spawn.get("CLAUDE_CODE_GIT_BASH_PATH") {
+            Some(path) => {
+                assert!(
+                    Path::new(path).is_file(),
+                    "points at a shell that is not there: {path}"
+                );
+                if !path.replace('\\', "/").contains("/.ggs/shell/") {
+                    // The found Git for Windows bash itself.
+                    assert!(
+                        crate::ggs_bash::pref::find_git_bash().as_deref() == Some(Path::new(path)),
+                        "not the bash find_git_bash located: {path}"
+                    );
+                } else {
+                    // The stand-in copy — only legitimate where no Git Bash exists.
+                    assert!(
+                        crate::ggs_bash::pref::find_git_bash().is_none(),
+                        "a found Git Bash was passed over for the bundled copy: {path}"
+                    );
+                }
+                assert_eq!(
+                    Path::new(path).file_name().and_then(|n| n.to_str()),
+                    Some(if cfg!(windows) { "bash.exe" } else { "bash" }),
+                    "not the basename Claude Code accepts: {path}"
+                );
+                assert_eq!(spawn.get("MSYSTEM"), Some(&"MINGW64"));
+                assert_eq!(spawn.get("SHELL"), Some(path));
+                if cfg!(windows) {
+                    assert_eq!(spawn.get("CLAUDE_CODE_USE_POWERSHELL_TOOL"), Some(&"0"));
+                }
+            }
+            None => assert!(
+                crate::ggs_bash::pref::find_git_bash().is_none(),
+                "a found Git Bash injected nothing"
+            ),
+        }
+        // Off Windows none of the choices injects a shell at all (2026-10-13, the
+        // owner's direction): the system shell serves the terminal and Claude Code's
+        // own POSIX picker serves itself.
+        if !cfg!(windows) {
+            for choice in ["ggsBash", "gitBash", "powershell"] {
+                std::fs::write(
+                    home.join(".ggs").join("settings.json"),
+                    format!(r#"{{ "terminalShell": "{choice}" }}"#),
+                )
+                .unwrap();
+                let env = backend_env_for(CLAUDE_CODE_EXT_ID, &home, None);
+                let map = env_map(&env);
+                for key in [
+                    "CLAUDE_CODE_GIT_BASH_PATH",
+                    "MSYSTEM",
+                    "SHELL",
+                    "CLAUDE_CODE_USE_POWERSHELL_TOOL",
+                ] {
+                    assert!(
+                        !map.contains_key(key),
+                        "{choice} injected {key} off Windows"
+                    );
+                }
             }
         }
     }
@@ -2765,12 +2854,14 @@ mod tests {
                 .unwrap();
             assert!(!written.contains(stale), "{stale}: {written}");
             let json: serde_json::Value = serde_json::from_str(&written).unwrap();
-            assert!(json.get("env").is_none(), "the emptied env map goes: {json}");
+            assert!(
+                json.get("env").is_none(),
+                "the emptied env map goes: {json}"
+            );
         }
         // The user's own SHELL — a path this bridge never wrote — survives.
         assert_eq!(
-            withdraw_provider_settings(Some(r#"{"env": {"SHELL": "/usr/bin/fish"}}"#))
-                .unwrap(),
+            withdraw_provider_settings(Some(r#"{"env": {"SHELL": "/usr/bin/fish"}}"#)).unwrap(),
             None
         );
     }
@@ -2820,8 +2911,7 @@ mod tests {
         let before = store.clone();
         set_active(&mut store, "official").unwrap();
         assert!(
-            provider_change(&before, &store, &home, Some("deepseek"), Some("official"))
-                .env_changed
+            provider_change(&before, &store, &home, Some("deepseek"), Some("official")).env_changed
         );
 
         // A window that never chose follows the store's default (the fresh-window
@@ -2855,8 +2945,7 @@ mod tests {
         set_active(&mut store, "deepseek").unwrap();
         set_instance_choice("deepseek");
         write_store(&home, &store).unwrap();
-        if provider_change(&before, &store, &home, Some("official"), Some("deepseek")).env_changed
-        {
+        if provider_change(&before, &store, &home, Some("official"), Some("deepseek")).env_changed {
             withdraw_claude_provider_env();
         }
 
@@ -2881,7 +2970,10 @@ mod tests {
         assert!(!text.contains("sk-live-key"), "{text}");
         assert!(!text.contains("deepseek"), "{text}");
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert!(json.get("env").is_none() && json.get("model").is_none(), "{json}");
+        assert!(
+            json.get("env").is_none() && json.get("model").is_none(),
+            "{json}"
+        );
     }
 
     /// The isolation itself (2026-10-13, the owner's direction): several windows over
@@ -2911,8 +3003,7 @@ mod tests {
             let glm_env = backend_env_for(CLAUDE_CODE_EXT_ID, &home, instance);
             let glm = env_map(&glm_env);
             assert_eq!(
-                glm["ANTHROPIC_BASE_URL"],
-                "https://open.bigmodel.cn/api/anthropic",
+                glm["ANTHROPIC_BASE_URL"], "https://open.bigmodel.cn/api/anthropic",
                 "{instance:?}: {glm:?}"
             );
             assert_eq!(glm["CLAUDE_CONFIG_DIR"], shared_dir);
@@ -2920,15 +3011,11 @@ mod tests {
 
         // A choice whose profile is gone (deleted in another window) falls back to
         // the store's default — the bridge never runs provider-less.
-        let gone_env = backend_env_for(
-            CLAUDE_CODE_EXT_ID,
-            &home,
-            Some("deleted-in-another-window"),
-        );
+        let gone_env =
+            backend_env_for(CLAUDE_CODE_EXT_ID, &home, Some("deleted-in-another-window"));
         let gone = env_map(&gone_env);
         assert_eq!(
-            gone["ANTHROPIC_BASE_URL"],
-            "https://open.bigmodel.cn/api/anthropic",
+            gone["ANTHROPIC_BASE_URL"], "https://open.bigmodel.cn/api/anthropic",
             "{gone:?}"
         );
     }
@@ -3153,7 +3240,10 @@ mod tests {
         assert_eq!(kimi.small_model.as_deref(), Some("kimi-for-coding"));
         // The seeded endpoint rides the preset's coding entry (2026-10-13) — a
         // fresh install points at api.kimi.com/coding, not the moonshot origin.
-        assert_eq!(kimi.base_url.as_deref(), Some("https://api.kimi.com/coding"));
+        assert_eq!(
+            kimi.base_url.as_deref(),
+            Some("https://api.kimi.com/coding")
+        );
         // The frontend never learns a ciphertext: the list answer masks the key.
         let answer = list_answer(&store, store.active_id.as_deref());
         assert!(answer.profiles.iter().all(|p| !p.has_key));

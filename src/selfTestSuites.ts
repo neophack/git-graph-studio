@@ -607,19 +607,19 @@ export function registerSelfTestSuites(workbench: Workbench): void {
 		tests: [
 			{
 				id: 'setting',
-				name: 'the Terminal Shell setting offers PowerShell and GGS Bash',
+				name: 'the Terminal Shell setting offers PowerShell, GGS Bash and Git Bash',
 				run: async () => {
 					const def = SETTING_DEFS.find((candidate) => candidate.key === 'terminalShell');
 					if (!def) throw new Error('the terminalShell setting is not registered');
 					const values = def.options?.map((option) => option.value);
-					if (values?.join(',') !== 'powershell,ggsBash') throw new Error(`unexpected options: ${values?.join(',')}`);
+					if (values?.join(',') !== 'powershell,ggsBash,gitBash') throw new Error(`unexpected options: ${values?.join(',')}`);
 				}
 			},
 			{
 				id: 'labels',
-				name: 'both shell options label themselves in the active language',
+				name: 'every shell option labels itself in the active language',
 				run: async () => {
-					for (const key of ['settings.terminalShell', 'settings.terminalShell.powershell', 'settings.terminalShell.ggsBash'] as const) {
+					for (const key of ['settings.terminalShell', 'settings.terminalShell.powershell', 'settings.terminalShell.ggsBash', 'settings.terminalShell.gitBash'] as const) {
 						if (t(key) === key) throw new Error(`${key} has no label`);
 					}
 				}

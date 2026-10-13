@@ -2178,4 +2178,142 @@ y z w
         );
         assert_eq!(out, "clean\n");
     }
+
+    #[test]
+    fn msys_paths_resolve_across_the_shell() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "hello").unwrap();
+        // The dialect reaches every path-taking surface: the applets,
+        // redirections, and `source` — none may hand Windows the literal text.
+        let msys = super::msys::to_msys(dir.path());
+        let (out, _, status) = run_in(dir.path(), &format!("cat '{msys}/f.txt'"));
+        assert_eq!((out.as_str(), status), ("hello", 0));
+        let (out, _, _) = run_in(dir.path(), &format!("ls '{msys}'"));
+        assert_eq!(out, "f.txt\n");
+        let (out, _, _) = run_in(
+            dir.path(),
+            &format!("echo hi > '{msys}/out.txt'; cat '{msys}/out.txt'"),
+        );
+        assert_eq!(out, "hi\n");
+        // `/tmp` crosses on every platform (the user's temp dir on Windows).
+        let (out, _, _) = run_in(
+            dir.path(),
+            "echo ride > /tmp/ggs-bash-dialect.tmp; cat /tmp/ggs-bash-dialect.tmp; rm /tmp/ggs-bash-dialect.tmp",
+        );
+        assert_eq!(out, "ride\n");
+        let script = dir.path().join("env.sh");
+        std::fs::write(&script, "DIALECT=1\n").unwrap();
+        let msys_script = super::msys::to_msys(&script);
+        let (out, _, _) = run_in(dir.path(), &format!(". '{msys_script}'; echo $DIALECT"));
+        assert_eq!(out, "1\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn drive_roots_answer_in_the_dialect() {
+        // The drive root lists through its MSYS spelling; the miss reports the
+        // POSIX text with exit 2; a bare `/c` is the root and pwd answers
+        // without a trailing slash.
+        let (out, _, status) = run_in(std::path::Path::new("."), "ls /c/ | wc -l");
+        assert_eq!(status, 0);
+        assert!(out.trim().parse::<usize>().unwrap() > 0, "{out}");
+        let (_, err, status) = run_in(std::path::Path::new("."), "ls /c/definitely-not-here-xyz");
+        assert_eq!(status, 2);
+        assert!(
+            err.contains(
+                "ls: cannot access '/c/definitely-not-here-xyz': No such file or directory"
+            ),
+            "{err}"
+        );
+        let (out, _, status) = run_in(std::path::Path::new("."), "cd /c && pwd");
+        assert_eq!((out.trim(), status), ("/c", 0));
+    }
+
+    #[test]
+    fn ls_rows_and_errors_match_gnu_shapes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), &"x".repeat(2049)).unwrap();
+        std::fs::write(dir.path().join("tool.exe"), "z").unwrap();
+        let user = std::env::var("USERNAME")
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_else(|_| "user".to_owned());
+        // File operands print one row each, no total, the size right-aligned to
+        // the listing's own width and the owner/group columns GNU prints.
+        let (out, _, _) = run_in(dir.path(), "ls -l a.txt tool.exe");
+        let mut rows = out.lines();
+        let a = rows.next().unwrap_or_default();
+        assert!(
+            a.starts_with(&format!("-rw-r--r-- 1 {user} 1049089 2049 ")) && a.ends_with(" a.txt"),
+            "{out}"
+        );
+        let tool = rows.next().unwrap_or_default();
+        assert!(
+            tool.starts_with(&format!("-rwxr-xr-x 1 {user} 1049089    1 "))
+                && tool.ends_with(" tool.exe"),
+            "{out}"
+        );
+        // A dir operand answers with its header, `total` (2049 B is four 1-K
+        // blocks) and bare names; the old timestamp prints its year.
+        let a_handle = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.path().join("a.txt"))
+            .unwrap();
+        a_handle
+            .set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+            )
+            .unwrap();
+        // No dotfiles: the total is the two files' blocks alone (2049 B is four
+        // 1-K blocks), the old timestamp prints its year, and the exe carries
+        // its execute bits.
+        let (out, _, _) = run_in(dir.path(), "ls -l");
+        assert!(out.starts_with("total 5\n"), "{out}");
+        assert!(
+            out.contains(" 2023 a.txt\n") || out.contains(" 2023 a.txt\r\n"),
+            "{out}"
+        );
+        assert!(out.ends_with(" tool.exe\n"), "{out}");
+        // -a adds the dot entries, sorted ahead of the names.
+        let (out, _, _) = run_in(dir.path(), "ls -a");
+        let names: Vec<&str> = out.lines().collect();
+        assert_eq!(names.first(), Some(&"."), "{out}");
+        assert_eq!(names.get(1), Some(&".."), "{out}");
+        // The miss is GNU's own line and exit code.
+        let (_, err, status) = run_in(dir.path(), "ls missing-xyz");
+        assert_eq!(
+            (err.as_str(), status),
+            (
+                "ls: cannot access 'missing-xyz': No such file or directory\n",
+                2
+            )
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unknown_commands_fall_back_to_the_local_git_bash() {
+        let layout = tempfile::TempDir::new().unwrap();
+        let cmd = layout.path().join("cmd");
+        let usr_bin = layout.path().join("usr").join("bin");
+        std::fs::create_dir_all(&cmd).unwrap();
+        std::fs::create_dir_all(&usr_bin).unwrap();
+        std::fs::write(cmd.join("git.exe"), "").unwrap();
+        std::fs::write(usr_bin.join("stat.exe"), "").unwrap();
+        let cmd_msys = super::msys::to_msys(&cmd);
+        // A command neither an applet nor the PATH carries answers from the Git
+        // install's usr/bin, and `which` reports Git Bash's own spelling.
+        let (out, _, status) = run_in(layout.path(), &format!("PATH='{cmd_msys}' which stat"));
+        assert_eq!((out.as_str(), status), ("/usr/bin/stat\n", 0));
+        // The PATH itself still outranks the fallback.
+        std::fs::write(cmd.join("probe.exe"), "").unwrap();
+        let (out, _, status) = run_in(layout.path(), &format!("PATH='{cmd_msys}' which probe"));
+        assert_eq!(status, 0);
+        assert!(out.to_lowercase().contains("probe"), "{out}");
+        // And nothing installs from nothing.
+        let (_, _, status) = run_in(
+            layout.path(),
+            &format!("PATH='{cmd_msys}' which still-missing-xyz"),
+        );
+        assert_eq!(status, 1);
+    }
 }

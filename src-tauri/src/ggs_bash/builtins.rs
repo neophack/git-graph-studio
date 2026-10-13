@@ -4,7 +4,7 @@
 //! program. [`run_builtin`] answers `None` for names it does not own, which is how the
 //! dispatcher falls through.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::exec::{ExecError, ExecResult, Io, Shell};
 use super::parse;
@@ -1059,11 +1059,9 @@ fn source(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
         io.err_str("source: a file is required\n");
         return Ok(2);
     };
-    let resolved = if Path::new(path).is_absolute() {
-        PathBuf::from(path)
-    } else {
-        shell.cwd.join(path)
-    };
+    // The MSYS dialect crosses here too — `. /d/tools/env.sh` reads the D: drive,
+    // not a `D:`-relative path on the current one.
+    let resolved = shell.resolve_working_path(path);
     let text = match std::fs::read_to_string(&resolved) {
         Ok(text) => text,
         Err(error) => {

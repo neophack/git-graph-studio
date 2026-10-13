@@ -360,8 +360,11 @@ the extension's artifacts — `scripts/check-seams.mjs` fails the build on any r
 
 xterm.js fronting portable-pty sessions (ConPTY on Windows), with new/kill actions and the
 terminal list. The shell a new terminal opens is the Terminal Shell setting (module 18's
-`terminalShell`: PowerShell, the default, or GGS Bash — the bundled sidecar); the choice
-rides every `pty_create`, so it reaches the next terminal without a restart.
+`terminalShell`: Git Bash the default — GGS Bash standing in where none is installed —
+GGS Bash, or PowerShell; a Windows-only concern — off Windows neither bash of the
+setting exists, the terminal opens the system's own `$SHELL`, and the Settings dialog
+hides the row); the choice rides every `pty_create`, so it reaches the next terminal
+without a restart.
 
 - Frontend: `src/terminal.ts`
 - Backend: `src-tauri/src/pty.rs`
@@ -514,16 +517,29 @@ strip the `safeguards` fields those checks ride on, so the verdicts never arrive
 Claude Code holds the first checked action on an eligibility notice before falling back
 to its own billed classifier requests; asking for the fallback up front keeps auto mode
 notice-free, while the official endpoint serves the checks at no charge and keeps the
-default), and `CLAUDE_CODE_GIT_BASH_PATH` (2026-10-10, module 18; reworked 2026-10-13):
-when GGS Bash is chosen and the bundled sidecar resolves, the spawn env points Claude
-Code's shell tool at it — at a `bash`-named copy of the sidecar under `~/.ggs/shell/`
-(`ggs_bash::pref::ensure_bash_exe`), because claude-code 2.1.296 whitelist-checks the
-variable's basename (`bash.exe`/`sh.exe`/`bash`/`sh` — the sidecar's own name is
-rejected as "not a bash/sh binary" and the injection silently fell to auto-detection) —
-with `CLAUDE_CODE_USE_POWERSHELL_TOOL=0` beside it: claude-code's Windows PowerShell
-tool (a rollout makes it the model's first choice even with bash present) is off, so the
-Bash tool is the command tool; the PowerShell choice sets `=1` instead (the user asked,
-the rollout does not decide), and a change restarts through `providers_shell_refresh`,
+default), and `CLAUDE_CODE_GIT_BASH_PATH` (2026-10-10, module 18; reworked 2026-10-13, and the
+same day made three-way): when GGS Bash is chosen and the bundled sidecar resolves, the
+spawn env points Claude Code's shell tool at it — at a `bash`-named copy of the sidecar
+under `~/.ggs/shell/` (`ggs_bash::pref::ensure_bash_exe`), because claude-code 2.1.296
+whitelist-checks the variable's basename (`bash.exe`/`sh.exe`/`bash`/`sh` — the
+sidecar's own name is rejected as "not a bash/sh binary" and the injection silently fell
+to auto-detection) — with `CLAUDE_CODE_USE_POWERSHELL_TOOL=0` beside it: claude-code's
+Windows PowerShell tool (a rollout makes it the model's first choice even with bash
+present) is off, so the Bash tool is the command tool; the Git Bash choice — the
+default since 2026-10-13, the owner's direction — points the same keys at Git for
+Windows' own bash, located automatically (`ggs_bash::pref::find_git_bash`: the
+`GitForWindows\InstallPath` registry value, the standard install
+roots, then a PATH entry's `git.exe` or a non-WSL `bash.exe` — never WSL's System32
+launcher or the WindowsApps shims), and where none is installed the bundled `bash`
+copy stands in — only a machine with neither injects nothing, Claude Code's own
+detection standing; off Windows nothing is injected at all (2026-10-13, the owner's
+direction: neither bash of the setting exists there, and Claude Code's own POSIX
+picker serves itself); the PowerShell choice sets `=1` and pins
+`CLAUDE_CODE_GIT_BASH_PATH` empty instead (the user asked, and no git bash path may
+survive the choice — the spawn env only adds pairs, so an inherited value, a Git
+Bash session that launched the app or a user-level leftover, is overridden empty;
+an empty value reads as unset everywhere downstream; the rollout does not decide),
+and a change restarts through `providers_shell_refresh`,
 the provider switch's own path. The whole env set is
 inherited by the
 extension's CLI children (the same takeover `claude-code-sandbox.mjs` proves against a
@@ -1187,7 +1203,13 @@ way Git Bash does.
 
 - The dialect (`msys.rs`): `/c/...` drive paths accepted everywhere the shell resolves
   and printed everywhere it reports (`pwd` answers `/c/Users/...`, `pwd -W` the Windows
-  form); `/dev/null` (redirects hit the null device, arguments cross to `NUL`);
+  form) — and the drive ROOT is the bare letter both ways (`/d` ⇄ `D:/`,
+  `cd /d && pwd` answering `/d`, 2026-10-13: `D:` alone is drive-relative on
+  Windows, the current directory on that drive, not the root — the shape
+  behind `ls -la /d/` once failing with a localized "file not found"); the
+  dialect reaches EVERY path-taking surface (the applets' `resolve_paths`, the
+  builtins' `source`, redirections, glob patterns) through
+  `Shell::resolve_working_path`, never a raw `cwd.join`; `/dev/null` (redirects hit the null device, arguments cross to `NUL`);
   `/tmp`; a colon-separated presented `PATH` over a Windows-native stored one
   (`PATH=$PATH:/c/tools` round-trips; children spawn with the `;` form); a `HOME`
   derived from `USERPROFILE`; MSYS-shaped arguments translated for native children
@@ -1221,7 +1243,20 @@ way Git Bash does.
   constructs fail with a clear syntax error
 - The tools — Claude's high-frequency set, analysed and closed to parity (nothing
   external, no MINGW/MSYS component anywhere): the curated applet list wins over
-  `PATH` (a script's `find` is never Windows' `find.exe`) — `ls(-t/-r) cat
+  `PATH` (a script's `find` is never Windows' `find.exe`) — and whatever the list
+  and the `PATH` both lack still answers from the local Git Bash's own
+  `usr/bin` when one is installed (2026-10-13, the owner's direction "支持所有
+  git bash 命令": `stat`, `file`, `chmod`'s GNU cousins… — `exec.rs`'s
+  `git_usr_bin_from`, found through a PATH `git.exe` walking up or the standard
+  install roots; `which` reports those hits as `/usr/bin/<name>`, and the
+  Tab-completion's command list reads the same directory) — `ls(-t/-r/-l/-C/-a/
+  -A/-d/-F/-1/-w, GNU coreutils' own shapes 2026-10-13: the `-l` rows carry the
+  MSYS uid-name/gid-number columns (`0x100000`+RID) and the `total` block sum,
+  the POSIX error wording (`cannot access 'x': No such file or directory`,
+  never the Windows locale text), byte-wise C-locale sorting, and the `-C`
+  planner is coreutils' `calculate_columns` ported verbatim — pre-seeded
+  3-wide columns, the 2-space gap, tab-preferring indent — byte-diffed against
+  a live Git Bash across widths) `cat
   grep(-o/-E/-r/-A/-B/-C/--include/--exclude) sed(-i, multiple -e) find(-exec/-delete/
   -o/! / parens/-path/-mtime) head(-c) tail wc sort(-t/-k/-o/-n/-u/-r) uniq cut tr cp mv
   rm mkdir touch env which basename dirname realpath readlink(-f) date sleep seq clear
@@ -1237,19 +1272,33 @@ way Git Bash does.
   `next`/`exit`, `-F`/`-v`; no user functions, no `getline`/`system`); the archives are
   pure Rust (`compress.rs`: a real DEFLATE inflater, fixed and dynamic Huffman, plus a
   stored-block gzip writer; `archive.rs`: USTAR tar read/write and zip extraction)
-- The setting (`terminalShell`: **ggsBash is the default**, powershell the alternative):
-  it rides every `pty_create` (new terminals pick it up live), the backend reads it
-  from `~/.ggs/settings.json`, and for the bridged claude-code backend it injects
-  `CLAUDE_CODE_GIT_BASH_PATH` + `MSYSTEM=MINGW64` + `SHELL` +
-  `CLAUDE_CODE_USE_POWERSHELL_TOOL=0` (module 12's two sinks, the
-  provider switch's own restart path `providers_shell_refresh`) — the bash path naming
-  a `bash.exe` copy of the sidecar under `~/.ggs/shell/` (claude-code 2.1.296
-  whitelist-checks the basename and rejects `ggs-bash.exe` as "not a bash/sh binary",
-  2026-10-13), the PowerShell tool switch keeping the Bash tool as the command tool
-  (a claude-code rollout makes PowerShell primary on Windows even with bash present);
-  the PowerShell choice injects `CLAUDE_CODE_USE_POWERSHELL_TOOL=1` alone — so Claude
-  Code writes its commands exactly as on Git Bash, or exactly as on PowerShell when
-  the user picks it
+- The setting (`terminalShell`: **gitBash is the default** — 2026-10-13, the owner's
+  direction: Git Bash where it is installed, the bundled GGS Bash standing in where it
+  is not; ggsBash itself was the 2026-10-10 default, powershell the alternative, and
+  a stored old default follows the new one through `migrateStoredSettings`, the
+  sticky-scroll rule — and the whole setting is Windows-only: off Windows neither
+  bash exists, the terminal opens the system's own `$SHELL`, the bridged environment
+  injects no shell keys, and the Settings dialog hides the row): it rides every `pty_create` (new terminals pick it up live),
+  the backend reads it from `~/.ggs/settings.json`, and for the bridged claude-code
+  backend it injects `CLAUDE_CODE_GIT_BASH_PATH` + `MSYSTEM=MINGW64` + `SHELL` +
+  `CLAUDE_CODE_USE_POWERSHELL_TOOL=0` (module 12's two sinks, the provider switch's
+  own restart path `providers_shell_refresh`) — the bash path naming the
+  auto-located Git for Windows bash when gitBash is chosen (`pref.rs`'s
+  `find_git_bash`: the `GitForWindows\InstallPath` registry value HKCU then HKLM,
+  `%ProgramFiles%\Git`, `%ProgramFiles(x86)%\Git`, `%LocalAppData%\Programs\Git`,
+  then the PATH — a `git.exe` or a non-WSL `bash.exe` entry derives the root; WSL's
+  System32 launcher and the WindowsApps shims are never taken for Git Bash), or a
+  `bash.exe` copy of the sidecar under `~/.ggs/shell/` when ggsBash is chosen or no
+  Git Bash was found (claude-code 2.1.296 whitelist-checks the basename and rejects
+  `ggs-bash.exe` as "not a bash/sh binary", 2026-10-13 — which is why the copy's
+  name is `bash`) — the PowerShell tool switch keeping the Bash tool as the command
+  tool (a claude-code rollout makes PowerShell primary on Windows even with bash
+  present); the PowerShell choice injects `CLAUDE_CODE_USE_POWERSHELL_TOOL=1` with
+  `CLAUDE_CODE_GIT_BASH_PATH` pinned empty — a path the app itself inherited (a Git
+  Bash session launching it, a user-level leftover) is overridden empty, never
+  surviving the choice — so Claude Code writes its commands exactly as on Git Bash,
+  on whichever bash serves the choice, or exactly as on PowerShell when the user
+  picks it
 - `uname` answers `MINGW64_NT-...` (the dialect's identity, stated on purpose); the
   checksums are pure-Rust MD5/SHA-1/SHA-256 (`hashes.rs`); the regex engine
   (`regexlite.rs`) is a backtracking VM on an explicit heap stack — no pattern can
@@ -1278,9 +1327,12 @@ way Git Bash does.
   crate's own additional binary beside `ggs.exe` — never also as a staged `externalBin`
   sidecar: two components installing the same `ggs-bash.exe` fail MSI validation with
   ICE30)
-- The setting: `terminalShell` in `src/settings.ts` (switching it invokes
-  `providers_shell_refresh`), the shell choice on every `pty_create` in
-  `src/terminal.ts`, the sidecar spawn in `src-tauri/src/pty.rs` (`shell_command`)
+- The setting: `terminalShell` in `src/settings.ts` (switching it awaits the
+  `~/.ggs/settings.json` write and only then invokes `providers_shell_refresh` —
+  the restart thread re-reads that file for the spawn environment, and a refresh
+  racing the write respawned the backend under the old shell, 2026-10-13), the
+  shell choice on every `pty_create` in `src/terminal.ts`, the shell spawn in
+  `src-tauri/src/pty.rs` (`shell_command`)
 - Tests: the `#[cfg(test)]` suites through `src-tauri/src/ggs_bash/` (the language, the
   dialect round-trip, the invocation-dialect parser, and the e2e batches in
   `mod.rs` — the file operations, `ls`, the grep/find/sed/sort/head/xargs flag sets,

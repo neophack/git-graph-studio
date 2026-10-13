@@ -15,6 +15,10 @@ pub fn to_msys(path: &Path) -> String {
     let text = text.strip_prefix("\\\\?\\").unwrap_or(&text);
     if let Some((drive, tail)) = strip_drive(text) {
         let tail = tail.trim_start_matches(['/', '\\']).replace('\\', "/");
+        // The drive root is `/d`, never `/d/` — Git Bash's own `cd /d && pwd` shape.
+        if tail.is_empty() {
+            return format!("/{}", drive.to_ascii_lowercase());
+        }
         return format!("/{}/{}", drive.to_ascii_lowercase(), tail);
     }
     text.replace('\\', "/")
@@ -40,6 +44,12 @@ pub fn from_msys(text: &str) -> String {
         let after = &text[2..];
         if after.is_empty() || after.starts_with('/') {
             let drive = text[1..2].to_ascii_uppercase();
+            // A bare `/d` is the drive ROOT (`D:/`, absolute everywhere), the same
+            // answer `cygpath -w /d` gives — `D:` alone is drive-relative on
+            // Windows and means "the current directory on D", not the root.
+            if after.is_empty() {
+                return format!("{drive}:/");
+            }
             return format!("{drive}:{}", after.replace('\\', "/"));
         }
     }
@@ -105,11 +115,14 @@ mod tests {
     #[test]
     fn drive_paths_translate_both_ways() {
         assert_eq!(from_msys("/c/Users/fred"), "C:/Users/fred");
-        assert_eq!(from_msys("/d"), "D:");
+        assert_eq!(from_msys("/d"), "D:/");
+        assert_eq!(from_msys("/d/"), "D:/");
         assert_eq!(from_msys("C:/already/windows"), "C:/already/windows");
         assert_eq!(from_msys("relative/path"), "relative/path");
         assert_eq!(to_msys(Path::new("C:\\Users\\fred")), "/c/Users/fred");
         assert_eq!(to_msys(Path::new("C:/Users/fred")), "/c/Users/fred");
+        assert_eq!(to_msys(Path::new("C:\\")), "/c");
+        assert_eq!(to_msys(Path::new("C:")), "/c");
         assert_eq!(to_msys(Path::new("just/relative")), "just/relative");
     }
 

@@ -16,6 +16,12 @@ import { extLog } from './extLog';
 
 type CategoryId = 'general' | 'appearance' | 'editor' | 'search' | 'extensions';
 
+/** The same platform read `Uri`'s win32 default takes: the Terminal Shell row names
+ *  shells that exist only on Windows, and hides elsewhere — off Windows the terminal
+ *  opens the system's own shell whatever the setting says, so the row would be a
+ *  dead control. */
+const IS_WINDOWS = typeof navigator !== 'undefined' && /^win/i.test(navigator.platform ?? '');
+
 /** The single open dialog, so a second invocation just re-focuses it. */
 let openDialog: HTMLElement | null = null;
 
@@ -221,6 +227,7 @@ export function openSettingsPanel(): void {
 		// the category's rows.
 		content.appendChild(el('div', 'settings-category-title', [query === '' ? t(`settings.category.${category}` as 'settings.category.general') : t('settings.allSettings')]));
 		for (const def of SETTING_DEFS) {
+			if (def.windowsOnly && !IS_WINDOWS) continue;
 			if (query === '' && def.category !== category) continue;
 			const label = t(`settings.${def.key}` as 'settings.theme');
 			const description = t(`settings.${def.key}.description` as 'settings.theme.description');
