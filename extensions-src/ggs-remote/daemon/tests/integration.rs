@@ -1004,7 +1004,7 @@ async fn a_download_ticket_streams_the_file_once() {
                     req,
                     status: 200,
                     name: "笔记.txt".into(),
-                    total: 7,
+                    total: 6,
                     chunk: b"hello\n".to_vec(),
                     done: false,
                 })
@@ -1014,7 +1014,7 @@ async fn a_download_ticket_streams_the_file_once() {
                     req,
                     status: 200,
                     name: "笔记.txt".into(),
-                    total: 7,
+                    total: 6,
                     chunk: Vec::new(),
                     done: true,
                 })
@@ -1177,6 +1177,11 @@ async fn a_download_ticket_streams_the_file_once() {
                     done: false,
                 })
                 .await;
+            // The build dies mid-pack — seconds into it in the real flow, so the headers
+            // have long crossed (the browser's download bar is up). Back-to-back chunks
+            // would race hyper's own flush instead: the abort can land before the head ever
+            // leaves the socket, and the connection dies with zero bytes (seen on Linux).
+            tokio::time::sleep(Duration::from_millis(300)).await;
             instance
                 .send(&FromInstance::FileReply {
                     req,
