@@ -27,7 +27,7 @@ import { Workbench } from '../src/workbench';
 import { commonHandlers, type Handler } from './scenarioFixtures';
 import { backend } from './tauriMock';
 import { installRemoteRound, uninstallRemoteRound } from './remoteRound';
-import { click, flush, hover, key, rightClick, type } from './helpers';
+import { click, flush, hover, key, rightClick, type, until } from './helpers';
 
 
 const REPO = 'C:\\repo';
@@ -455,11 +455,18 @@ function uiSweepIts(): void {
 			}
 			// Outcome: the arrow keys expand a collapsed folder and step into it, as VS Code's tree does.
 			const srcRow = () => Array.from(explorer.querySelectorAll<HTMLElement>('.tree .row')).find((r) => r.querySelector('.label')?.textContent === 'src')!;
-			if (explorer.querySelector('.children[data-parent$="src"]')) { click(srcRow()); await flush(4); } // collapse first
-			click(srcRow()); await flush(4); // the click toggles it open...
-			click(srcRow()); await flush(4); // ...and closed again, leaving it selected
-			key(body, 'ArrowRight'); count(); await flush(6);
-			expect(Array.from(explorer.querySelectorAll('.tree .row .label')).map((l) => l.textContent)).toContain('main.rs');
+			const srcOpen = () => explorer.querySelector('.children[data-parent$="src"]') !== null;
+			if (srcOpen()) {
+				// collapse first — and wait for the collapse to land before toggling again
+				click(srcRow());
+				await until(() => !srcOpen());
+			}
+			click(srcRow()); await until(() => srcOpen()); // the click toggles it open...
+			click(srcRow()); await until(() => !srcOpen()); // ...and closed again, leaving it selected
+			key(body, 'ArrowRight'); count();
+			const labels = () => Array.from(explorer.querySelectorAll('.tree .row .label')).map((l) => l.textContent);
+			await until(() => labels().includes('main.rs'));
+			expect(labels()).toContain('main.rs');
 			key(body, 'ArrowRight'); count(); await flush(2);
 			expect(explorer.querySelector('.tree .row.selected .label')?.textContent).toBe('main.rs');
 			key(body, 'ArrowLeft'); count(); await flush(2);
