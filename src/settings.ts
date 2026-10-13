@@ -368,7 +368,9 @@ export function updateSetting<K extends keyof AppSettings>(key: K, value: AppSet
 }
 
 /** The Terminal Shell choice changed: the backend re-applies the bridged claude-code
- *  environment (the `CLAUDE_CODE_GIT_BASH_PATH` both of its sinks carry) and restarts
+ *  environment (the shell keys both of its sinks carry — GGS Bash points
+ *  `CLAUDE_CODE_GIT_BASH_PATH` at the bundled shell's `bash`-named copy and turns
+ *  Claude Code's PowerShell tool off, PowerShell turns that tool on) and restarts
  *  the running backend onto it — a backend in flight applied its environment at its
  *  own start and would keep spawning shells the old way. New terminals pick the
  *  setting up on their own; they read it at creation. */

@@ -484,7 +484,18 @@ composition-root-registered environment source; the spawn path is
 provider-agnostic). That spawn always carries `CLAUDE_CONFIG_DIR=<~/.ggs/claude>` (the
 extension's own state — login, history — never touches `~/.claude`; an explicit
 `CLAUDE_CONFIG_DIR` in the app's own environment wins — the sandbox probe's hermetic
-config dir rides on it), and the active
+config dir rides on it), and every window shares that one `~/.ggs/claude` (the official
+login, the chat history and the analysis MCP registration are per-machine, not
+per-provider), while the **active provider is per window** (2026-10-13, the owner's
+direction): several GGS instances run at once — one on GLM, one on the official
+service, one on Kimi — and a switch in one window never drags another. The window's
+choice lives in its own process memory (`effective_choice`: seeded from the store's
+`active_id` at the window's first resolution, moved only by its own switches; a
+profile deleted from under it falls back to the store's default), and
+`provider_activate` writes both — the window's own choice now and the store's
+`active_id` on disk, the default a NEW window boots with (`provider_list`'s
+`activeId` answers this window's provider, so the chip and the page render the
+window's own, never another's). The window's active
 third-party profile adds `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` /
 `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` / `ANTHROPIC_SMALL_FAST_MODEL` plus the tier-alias
 remap `ANTHROPIC_DEFAULT_{OPUS,FABLE,SONNET,HAIKU}_MODEL` (the flagship tiers — opus and
@@ -503,45 +514,54 @@ strip the `safeguards` fields those checks ride on, so the verdicts never arrive
 Claude Code holds the first checked action on an eligibility notice before falling back
 to its own billed classifier requests; asking for the fallback up front keeps auto mode
 notice-free, while the official endpoint serves the checks at no charge and keeps the
-default), and `CLAUDE_CODE_GIT_BASH_PATH` (2026-10-10, module 18): the Terminal Shell
-setting rides the same two sinks — when GGS Bash is chosen and the bundled sidecar
-resolves, the spawn env and the settings `env` map both point Claude Code's shell tool at
-it, because a clean Windows machine has no bash for those tool calls to find and the
-PowerShell fallback is where they fail — and a change re-applies and restarts through
-`providers_shell_refresh`, the provider switch's own path. The whole env set is
+default), and `CLAUDE_CODE_GIT_BASH_PATH` (2026-10-10, module 18; reworked 2026-10-13):
+when GGS Bash is chosen and the bundled sidecar resolves, the spawn env points Claude
+Code's shell tool at it — at a `bash`-named copy of the sidecar under `~/.ggs/shell/`
+(`ggs_bash::pref::ensure_bash_exe`), because claude-code 2.1.296 whitelist-checks the
+variable's basename (`bash.exe`/`sh.exe`/`bash`/`sh` — the sidecar's own name is
+rejected as "not a bash/sh binary" and the injection silently fell to auto-detection) —
+with `CLAUDE_CODE_USE_POWERSHELL_TOOL=0` beside it: claude-code's Windows PowerShell
+tool (a rollout makes it the model's first choice even with bash present) is off, so the
+Bash tool is the command tool; the PowerShell choice sets `=1` instead (the user asked,
+the rollout does not decide), and a change restarts through `providers_shell_refresh`,
+the provider switch's own path. The whole env set is
 inherited by the
 extension's CLI children (the same takeover `claude-code-sandbox.mjs` proves against a
 local server). The UI is the sidebar chip on the Claude view's section header
 (`aiProviders.ts` — mounted only for the ids the backend's `bridgedExtIds` names, so
 `src/` names no extension id), its quick pick, and the Model Providers page
 (`providersPage.ts`, the `ai.providers` command); switching provider (or editing the
-active profile) writes the provider environment into the redirected Claude settings
-(`apply_claude_provider_env` — the `env` map Claude Code applies at every session
-start, the mechanism cc-switch uses) **and restarts the running bridged backend**
+profile the window runs under) **restarts this window's running bridged backend**
 (`restart_bridged_backends`, 2026-09-30 — the never-restart cut shipped that morning
 and left the sidebar on the old provider's login page forever: the extension process
-applies the env map once, at its own start, so a running one keeps answering with the
-provider it booted under; the fresh process reads the rewritten settings, and the
-settled start attempt — success or failure, the old process is dead either way — is
-announced as the `ext-backend-restarted` event, on which the
+applies its environment once, at its own start, so a running one keeps answering with
+the provider it booted under; the fresh process spawns with the window's new provider
+env, and the settled start attempt — success or failure, the old process is dead either
+way — is announced as the `ext-backend-restarted` event, on which the
 extension host re-resolves the extension's webview views — the chat page reloads with
-the new provider, a conversation in flight restarting on it); the spawn environment
-carries `CLAUDE_CONFIG_DIR` plus the active provider's own pairs (2026-10-01, the
-long-login-page bug: the settings env map is applied by the CLI at its start, never by
-the extension process — a fresh backend whose `process.env` carried no
-`ANTHROPIC_AUTH_TOKEN` answered its auth status null and the chat rendered the official
-login page until the CLI's config probe, tens of seconds under ggs-node, delivered the
-third-party verdict; the extension reads `process.env` for exactly this shape, Claude
-Code's own keyless-auth form, authenticated from the first state push). Both sinks —
-the settings write and the spawn env — derive from the one store read, and the switch's
-restart keeps them in step. Writing the settings clears this bridge's keys when the official
-profile is active (a stale endpoint would shadow the login), preserves the user's own
-env keys, and lands the file at 0600 when it carries a key. The settings' top-level
-`model` pin rides the same takeover (2026-09-30, the `claude-fable-5-1[1m]` bug: a
-`/model` tier pick persists there and outranks the env map, so the pin is rewritten to
-the active profile's model while one is pinned, and a pin naming an id the official
-service cannot serve is cleared — the user's own `claude-*` / tier-alias pin survives
-verbatim). Commercial finish
+the new provider, a conversation in flight restarting on it; 2026-10-01, the
+long-login-page bug, is why the spawn env carries the provider pairs and not only the
+redirect: the extension reads `process.env` for Claude Code's own keyless-auth shape —
+a token there authenticates from the first state push, where a fresh backend without
+one answered its auth status null and rendered the official login page until a config
+probe, tens of seconds under ggs-node, said otherwise). **The spawn environment is the
+provider configuration's only sink** (2026-10-13, the owner's direction: do not save
+the Claude configuration to disk — the API key must never be plaintext at rest):
+nothing provider-shaped is written into Claude's own files, and what earlier versions
+wrote there is withdrawn (`withdraw_claude_provider_env` → `withdraw_provider_settings`,
+run at boot, on every folder change beside the MCP registration, and on every switch):
+the `env` map (endpoint, key, models, the flags, the shell keys, a bridge-written
+`SHELL`), the top-level `model` pin an earlier version rewrote onto the active
+provider's model (a pin naming an id the official service cannot serve is ours-shaped
+and goes; the user's own `claude-*` id or bare tier alias survives verbatim), and the
+empty `attribution` hide-pin the bridge once wrote on every profile — the user's own
+env keys, pins and trailers are preserved verbatim, a clean file is never touched, and
+an unparseable file is failed on rather than replaced. The honest cost is stated where
+it lives: a `/model` pick Claude Code persists into the settings' top level outranks
+the environment, and this bridge no longer rewrites it — the tier aliases still resolve
+through the per-window env remap, and a stale `claude-*` pin from an official-era
+session is the user's own to clear (the official service serves it, so the withdrawal
+never touches it). Commercial finish
 (2026-09-30): a **NewAPI gateway** preset beside
 DeepSeek / GLM / Kimi, a **Test Connection** probe (a 1-token `/v1/messages` round
 trip whose every HTTP answer is a diagnosis — key rejected, wrong base URL, throttled)
@@ -551,7 +571,8 @@ profile's decrypted one; and a **cc-switch import**: `provider_ccswitch_scan` re
 `~/.cc-switch/config.json` (both the array and id→map shapes, `claude.current` by its
 raw key) plus the live `~/.claude/settings.json` env — keys stripped from the answer,
 deduplicated by endpoint+key — and `provider_import_ccswitch` seals the named ones
-into the store and activates the one cc-switch points at. **The analysis rides into
+into the store and activates the one cc-switch points at (this window's choice and the
+new-window default together). **The analysis rides into
 Claude itself** (2026-09-30): `apply_claude_mcp` — wired at the composition root beside
 every `notify_workspace` call — keeps a `ggs` entry in the user-scope `mcpServers` of
 the redirected global config (`~/.ggs/claude/.claude.json` — the one place Claude Code
@@ -1212,9 +1233,16 @@ way Git Bash does.
 - The setting (`terminalShell`: **ggsBash is the default**, powershell the alternative):
   it rides every `pty_create` (new terminals pick it up live), the backend reads it
   from `~/.ggs/settings.json`, and for the bridged claude-code backend it injects
-  `CLAUDE_CODE_GIT_BASH_PATH` + `MSYSTEM=MINGW64` + `SHELL` (module 12's two sinks, the
-  provider switch's own restart path `providers_shell_refresh`) — so Claude Code writes
-  its commands exactly as on Git Bash
+  `CLAUDE_CODE_GIT_BASH_PATH` + `MSYSTEM=MINGW64` + `SHELL` +
+  `CLAUDE_CODE_USE_POWERSHELL_TOOL=0` (module 12's two sinks, the
+  provider switch's own restart path `providers_shell_refresh`) — the bash path naming
+  a `bash.exe` copy of the sidecar under `~/.ggs/shell/` (claude-code 2.1.296
+  whitelist-checks the basename and rejects `ggs-bash.exe` as "not a bash/sh binary",
+  2026-10-13), the PowerShell tool switch keeping the Bash tool as the command tool
+  (a claude-code rollout makes PowerShell primary on Windows even with bash present);
+  the PowerShell choice injects `CLAUDE_CODE_USE_POWERSHELL_TOOL=1` alone — so Claude
+  Code writes its commands exactly as on Git Bash, or exactly as on PowerShell when
+  the user picks it
 - `uname` answers `MINGW64_NT-...` (the dialect's identity, stated on purpose); the
   checksums are pure-Rust MD5/SHA-1/SHA-256 (`hashes.rs`); the regex engine
   (`regexlite.rs`) is a backtracking VM on an explicit heap stack — no pattern can

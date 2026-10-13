@@ -7,7 +7,10 @@
 //! clean Windows machine has no bash — this one ships with the app: the integrated
 //! terminal runs it (the Terminal Shell setting, GGS Bash by default) and the bridged
 //! claude-code backend is pointed at it through `CLAUDE_CODE_GIT_BASH_PATH` with
-//! `MSYSTEM=MINGW64`, so shell commands are written exactly as on Git Bash.
+//! `MSYSTEM=MINGW64` — at a `bash`-named copy under `~/.ggs/shell/`, because Claude
+//! Code whitelist-checks the basename and rejects the sidecar's own name — with its
+//! PowerShell tool off (`CLAUDE_CODE_USE_POWERSHELL_TOOL=0`), so shell commands are
+//! written exactly as on Git Bash.
 //!
 //! The honest subset: quotes and all the `$` forms, pipes, redirections (heredocs,
 //! here-strings), process substitution `<(cmd)`/`>(cmd)` (temp-file backed),

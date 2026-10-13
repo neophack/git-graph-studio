@@ -9,8 +9,10 @@
 //! its CLI children inherit:
 //!
 //! - `CLAUDE_CONFIG_DIR` always points at `~/.ggs/claude`, so the extension's own state
-//!   (login, session history, `settings.json`) never touches `~/.claude`;
-//! - the active third-party profile adds `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` /
+//!   (login, session history, `settings.json`) never touches `~/.claude` — and every
+//!   window shares that one dir: the official login, the chat history and the analysis
+//!   MCP registration are per-machine, not per-provider;
+//! - the window's active third-party profile adds `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` /
 //!   `ANTHROPIC_API_KEY` (the decrypted key), `ANTHROPIC_MODEL` /
 //!   `ANTHROPIC_SMALL_FAST_MODEL`, the tier-alias remap
 //!   `ANTHROPIC_DEFAULT_{OPUS,FABLE,SONNET,HAIKU}_MODEL` (the flagship tiers take the
@@ -27,25 +29,37 @@
 //!   — the same takeover the claude-code sandbox probe proves end to end against a
 //!   local stand-in server.
 //!
-//! Switching provider (or editing the active profile) rewrites the redirected Claude
-//! settings' `env` map — which Claude Code applies at every session start, the mechanism
-//! cc-switch uses — and restarts the running bridged backend. The restart is not
-//! optional (2026-09-30, the stuck-login-page bug): the extension process applies that
-//! env map once, at its own start, and a long-running one keeps answering with the
-//! provider it booted under — the chat's login state included, so without the restart
-//! the sidebar never followed a switch. The fresh process reads the rewritten settings
-//! and announces itself as [`BACKEND_RESTARTED_EVENT`], on which the extension host
-//! re-resolves the extension's settled webview views. The settings' top-level `model`
-//! pin is rewritten alongside (it would otherwise outrank that env: a `/model` tier pick
-//! persists there, and its `claude-*` id would be shown and sent on an endpoint that
-//! serves none), and so is the top-level `attribution` pin (2026-10-01, the owner's
-//! direction: Claude Code's `Co-Authored-By` commit trailer and "Generated with Claude
-//! Code" PR line stay off — an empty `commit`/`pr` is Claude Code's documented hide
-//! value, and a set `attribution.commit` outranks the deprecated `includeCoAuthoredBy`,
-//! which therefore needs no takeover of its own; unlike the endpoint env keys this is a
-//! preference, not a per-endpoint workaround, so official carries it too).
-//! [`provider_change`] is the gate every store-writing command runs to
-//! decide that rewrite (and the push the windows' switcher chips re-read on).
+//! The active provider is **per window** (2026-10-13, the owner's direction): several
+//! GGS instances may run at once — one on GLM, one on the official service, one on Kimi
+//! — and a switch in one window never drags another. The window's choice lives in its
+//! own process memory ([`effective_choice`]: seeded from the store's `active_id` at the
+//! window's first resolution, changed only by its own switches), while the store's
+//! `active_id` stays on disk as the default a NEW window boots with
+//! ([`provider_activate`] writes both — one pick sets this window now and the windows
+//! to come).
+//!
+//! The spawn environment is the provider configuration's **only** sink (2026-10-13,
+//! the owner's direction): nothing provider-shaped is ever written into Claude's own
+//! files — the `env` map earlier versions of this bridge wrote into
+//! `~/.ggs/claude/settings.json` (the cc-switch mechanism) carried the API key in
+//! plaintext at rest, which is the leak [`withdraw_claude_provider_env`] removes: the
+//! boot pass, every folder change and every switch run it over the shared settings,
+//! withdrawing each key this bridge ever wrote there. What that costs is stated
+//! honestly: a `/model` pick Claude Code persists into the settings' top level
+//! outranks the environment, and this bridge no longer rewrites it — the tier aliases
+//! still resolve through the per-window env remap, and a `claude-*` pin left by an
+//! official-era session is the user's own to clear (the withdrawal never touches a
+//! pin the official service could serve).
+//!
+//! Switching provider (or editing the active profile) restarts the running bridged
+//! backend: the extension process applied its environment at its own start and would
+//! keep answering with the provider it booted under — the chat's login state included,
+//! so without the restart the sidebar never followed a switch (2026-09-30, the
+//! stuck-login-page bug). The settled start attempt — success or failure — is
+//! announced as [`BACKEND_RESTARTED_EVENT`], on which the extension host re-resolves
+//! the extension's settled webview views. [`provider_change`] is the gate every
+//! store-writing command runs to decide that restart (and the push the windows'
+//! switcher chips re-read on).
 //!
 //! Coupling is one-directional: this module may stop and start the bridged backends,
 //! but the spawn path never names this store — [`backend_env`] is registered onto
@@ -80,6 +94,57 @@ const KEY_AAD: &[u8] = b"ggs.ai-providers";
 
 /// One store write at a time: the read-modify-write commands all cross this lock.
 static STORE_LOCK: Mutex<()> = Mutex::new(());
+
+/// This window's provider choice — the per-instance half of the bridge (2026-10-13,
+/// the owner's direction): several GGS instances may run at once, each with its own
+/// provider, and a switch in one window must never drag another. The choice lives in
+/// this process's memory only; [`effective_choice`] seeds it from the store's
+/// `active_id` at the window's first resolution (the boot-time snapshot) and only the
+/// window's own switches ([`set_instance_choice`]) change it. The store's `active_id`
+/// stays on disk as the default a new window boots with.
+static INSTANCE_ACTIVE: Mutex<Option<String>> = Mutex::new(None);
+
+/// The window's effective provider id, with the snapshot semantics that isolate one
+/// window from another's switch: the first resolution claims the store's `active_id`
+/// as this window's own, and later store changes (another window's switch, which also
+/// rewrites the on-disk default) leave it standing. A profile deleted from under the
+/// window falls back to the store's default — the bridge never runs provider-less.
+fn effective_choice(store: &ProviderStore) -> Option<String> {
+    let mut held = INSTANCE_ACTIVE.lock().unwrap();
+    if held.is_none() {
+        *held = store.active_id.clone();
+    }
+    match held.as_deref() {
+        Some(id) if store.profiles.iter().any(|profile| profile.id == id) => held.clone(),
+        _ => store.active_id.clone(),
+    }
+}
+
+/// This window switched: its own choice moves. The command that calls this also writes
+/// the store's `active_id`, so one pick sets this window now and the windows to come.
+fn set_instance_choice(id: &str) {
+    *INSTANCE_ACTIVE.lock().unwrap() = Some(id.to_owned());
+}
+
+/// The per-instance choice is process memory — every test starts with it unclaimed.
+#[cfg(test)]
+fn reset_instance_choice() {
+    *INSTANCE_ACTIVE.lock().unwrap() = None;
+}
+
+/// The profile one window runs under: its own choice when the profile still exists,
+/// else the store's default (`active_id`). `None` is the not-yet-snapshotted shape —
+/// a fresh window following the store. Pure over the store, so two windows over one
+/// shared home are testable side by side.
+fn resolve_active<'a>(
+    store: &'a ProviderStore,
+    instance: Option<&str>,
+) -> Option<&'a ProviderProfile> {
+    let id = instance
+        .filter(|id| store.profiles.iter().any(|profile| profile.id == *id))
+        .or(store.active_id.as_deref())?;
+    store.profiles.iter().find(|profile| profile.id == id)
+}
 
 /* ---------- The store ---------- */
 
@@ -201,18 +266,20 @@ pub fn presets() -> Vec<ProviderPreset> {
             id: "kimi".to_owned(),
             label: "Moonshot Kimi".to_owned(),
             official: false,
-            base_url: Some("https://api.moonshot.cn/anthropic"),
+            base_url: Some("https://api.kimi.com/coding"),
             // 2026-09-30 (against platform.kimi.com/.ai): kimi-k3 is the flagship
             // (1M context as `kimi-k3[1m]`), kimi-k2.7-code the coding tier Kimi's
             // own Claude Code guide puts in the HAIKU slot, kimi-k2.7-code-highspeed
             // its 2x-price speed variant, kimi-k2.6 the latency tier; kimi-k2 left
             // the lineup (kimi-k2.5 and every moonshot-v1 variant went 2026-08-31).
-            // The international endpoint is https://api.moonshot.ai/anthropic.
+            // 2026-10-13 (the owner's direction): the default endpoint is Kimi's own
+            // coding entry, api.kimi.com/coding — the Anthropic-compatible path the
+            // coding tier serves; api.moonshot.cn/anthropic and its international
+            // .ai twin remain valid manual entries.
             models: vec![
                 "kimi-k3",
-                "kimi-k2.7-code",
-                "kimi-k2.7-code-highspeed",
-                "kimi-k2.6",
+                "kimi-for-coding",
+                "kimi-for-coding-highspeed"
             ],
             requires_key: true,
         },
@@ -504,11 +571,11 @@ fn apply_save(home: &Path, store: &mut ProviderStore, input: &ProviderInput) -> 
 /// and the home, so the exact bytes a backend sees are testable. The decrypted key
 /// exists only inside this vector's lifetime — the command's answer never carries it.
 /// The active profile's provider environment: endpoint, decrypted key and model ids —
-/// the values `claude_provider_settings` writes into the redirected Claude settings.
-/// A key that does not open (a copied store from another install) is skipped, never
-/// fatal: the endpoint still applies and the extension's own login remains the
-/// fallback. Decryption happens here and only here; the values exist to be written
-/// into Claude's own config file and are never returned over IPC.
+/// the values that ride the spawn environment (and nothing else, 2026-10-13: they used
+/// to be written into the redirected Claude settings as well, which put the key on
+/// disk in plaintext). A key that does not open (a copied store from another install)
+/// is skipped, never fatal: the endpoint still applies and the extension's own login
+/// remains the fallback. Decryption happens here and only here.
 pub fn provider_env_vars(active: &ProviderProfile, home: &Path) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = Vec::new();
     if active.preset == "official" {
@@ -569,21 +636,22 @@ pub fn provider_env_vars(active: &ProviderProfile, home: &Path) -> Vec<(String, 
     env
 }
 
-/// The spawn environment a bridged extension's backend runs with. Pure over the home,
-/// so the exact bytes a backend sees are testable. The state redirect always rides the
-/// process environment; the active provider's endpoint and key ride it too (2026-10-01,
-/// the long-login-page bug): the redirected Claude settings' `env` map is applied by the
-/// CLI at its own start, never by the extension process — a fresh backend whose
-/// `process.env` carried no `ANTHROPIC_AUTH_TOKEN` answered its auth status null and
-/// the chat rendered the official login page until the CLI's config probe (tens of
-/// seconds under ggs-node) delivered the third-party verdict. The extension reads
-/// `process.env` for exactly this shape — a token there is Claude Code's own
-/// keyless-auth form, authenticated from the first state push. Both sinks (the settings
-/// write and this spawn env) derive from the one store read, and every switch restarts
-/// the backend, so they cannot disagree in flight. A store that cannot be read adds
-/// nothing: the backend still starts, and the extension's own login remains the
-/// fallback.
-pub fn backend_env_for(ext_id: &str, home: &Path) -> Vec<(String, String)> {
+/// The spawn environment a bridged extension's backend runs with — the provider
+/// configuration's only sink. Pure over the home and the window's choice, so the exact
+/// bytes a backend sees are testable (`instance` is the window's own provider id, or
+/// `None` for a fresh window following the store's default — the shape
+/// [`effective_choice`] snapshots at boot). The state redirect always rides the
+/// process environment; the window's active provider's endpoint and key ride it too
+/// (2026-10-01, the long-login-page bug): the extension process reads `process.env`
+/// for exactly the keyless-auth shape — a token there is Claude Code's own, and the
+/// chat authenticates from the first state push instead of rendering the official
+/// login page until a config probe says otherwise. The extension's CLI children
+/// inherit the whole set (the same takeover the claude-code sandbox probe proves end
+/// to end against a local server), which is why the environment alone carries the
+/// provider: nothing provider-shaped is ever written into Claude's own files. A store
+/// that cannot be read adds nothing: the backend still starts, and the extension's
+/// own login remains the fallback.
+pub fn backend_env_for(ext_id: &str, home: &Path, instance: Option<&str>) -> Vec<(String, String)> {
     if !BRIDGED_EXT_IDS.contains(&ext_id) {
         return Vec::new();
     }
@@ -592,23 +660,28 @@ pub fn backend_env_for(ext_id: &str, home: &Path) -> Vec<(String, String)> {
         home.join("claude").to_string_lossy().into_owned(),
     )];
     if let Ok(store) = read_store(home) {
-        env.extend(active_provider_env(&store, home));
+        if let Some(active) = resolve_active(&store, instance) {
+            env.extend(provider_env_vars(active, home));
+        }
     }
     env.extend(claude_shell_env(home));
     env
 }
 
 /// The Terminal Shell preference's half of the bridged environment: when the user
-/// picked GGS Bash and the bundled sidecar resolves, Claude Code gets its documented
-/// `CLAUDE_CODE_GIT_BASH_PATH` — on a clean Windows machine there is no bash for its
-/// tool calls to find, and the PowerShell fallback is where they start failing. Pure
-/// over the home and a resolved sidecar path, so the exact bytes are testable.
+/// picked GGS Bash and the bundled sidecar resolves, Claude Code gets the
+/// `bash`-named copy of it (its `CLAUDE_CODE_GIT_BASH_PATH` whitelist-checks the
+/// basename — `ggs-bash` is rejected outright, 2026-10-13) and its PowerShell tool
+/// is turned off, so the Bash tool is the command tool; the PowerShell choice turns
+/// that tool on instead. Pure over the home and a materialised shell path, so the
+/// exact bytes are testable.
 fn claude_shell_env(home: &Path) -> Vec<(String, String)> {
+    let bash = crate::ext_process::resolve_engine_host("ggs-bash")
+        .ok()
+        .and_then(|sidecar| crate::ggs_bash::pref::ensure_bash_exe(home, &sidecar));
     crate::ggs_bash::pref::claude_shell_env(
         crate::ggs_bash::pref::preference(home),
-        crate::ext_process::resolve_engine_host("ggs-bash")
-            .ok()
-            .as_deref(),
+        bash.as_deref(),
     )
 }
 
@@ -1020,16 +1093,22 @@ fn import_ccswitch_entries(
     Ok((imported, activate))
 }
 
-/// [`backend_env_for`] as `ext_process` calls it at spawn time. A store that cannot be
-/// read reads as "the official service": a broken provider file must never keep a
-/// backend from starting. An explicit `CLAUDE_CONFIG_DIR` in the app's own environment
-/// wins over the bridge's `~/.ggs/claude` — the escape hatch the claude-code sandbox
-/// probe's hermetic config dir (and a developer's own setup) rides on.
+/// [`backend_env_for`] as `ext_process` calls it at spawn time: the window's own
+/// provider choice ([`effective_choice`]'s snapshot) decides what the backend runs
+/// under — a switch in another window never reaches this process's spawns. A store
+/// that cannot be read reads as "the official service": a broken provider file must
+/// never keep a backend from starting. An explicit `CLAUDE_CONFIG_DIR` in the app's
+/// own environment wins over the bridge's `~/.ggs/claude` — the escape hatch the
+/// claude-code sandbox probe's hermetic config dir (and a developer's own setup)
+/// rides on.
 pub fn backend_env(ext_id: &str) -> Vec<(String, String)> {
     let Ok(home) = ggs_home() else {
         return Vec::new();
     };
-    let mut env = backend_env_for(ext_id, &home);
+    let instance = read_store(&home)
+        .ok()
+        .and_then(|store| effective_choice(&store));
+    let mut env = backend_env_for(ext_id, &home, instance.as_deref());
     if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         let dir = Path::new(&dir).to_string_lossy().into_owned();
         for (key, value) in env.iter_mut() {
@@ -1041,57 +1120,65 @@ pub fn backend_env(ext_id: &str) -> Vec<(String, String)> {
     env
 }
 
-/* ---------- The provider → Claude settings application ---------- */
+/* ---------- The provider switch's gate and Claude-settings withdrawal ---------- */
 
-/// The active profile's provider environment — the settings writer's source. The same
-/// resolution [`apply_claude_provider_env`] performs, exposed so the store-writing
-/// commands can tell a settings-reaching change (endpoint, key, model, the active id)
-/// from a cosmetic one (a label) — exactly what a switch gates on.
-fn active_provider_env(store: &ProviderStore, home: &Path) -> Vec<(String, String)> {
-    store
-        .active_id
-        .as_deref()
-        .and_then(|id| store.profiles.iter().find(|profile| profile.id == id))
+/// One window's active profile's provider environment, resolved through that window's
+/// choice — the lens [`provider_change`] compares under.
+fn active_env(
+    store: &ProviderStore,
+    instance: Option<&str>,
+    home: &Path,
+) -> Vec<(String, String)> {
+    resolve_active(store, instance)
         .map(|active| provider_env_vars(active, home))
         .unwrap_or_default()
 }
 
 /// What a store-writing command's tail must run, decided by comparing the store before
-/// and after the mutation: `env_changed` rewrites the redirected Claude settings and
-/// restarts the running bridged backend on top (the fresh process reads the rewritten
-/// settings and spawns with the new provider env — a running one keeps the provider it
-/// booted under);
+/// and after the mutation under the window's choice before and after it:
+/// `env_changed` restarts the running bridged backend on top (the fresh process spawns
+/// with the new provider environment — a running one applied its environment at its
+/// own start and keeps the provider it booted under);
 /// `store_changed` pushes the event the windows' switcher chips re-read on.
 ///
 /// The env comparison is over the *provider environment*, never the spawn environment:
 /// the spawn env derives from the same store at every spawn, so comparing it made every
-/// switch a silent no-op — the settings kept the previous provider and new chats
-/// never moved.
+/// switch a silent no-op — the backend kept the previous provider and new chats never
+/// moved. The two choices are the window's before and after the command, so a switch
+/// (the choice itself moves) and an edit of the active profile (the profile under a
+/// standing choice moves) both gate correctly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProviderChange {
-    /// The active provider's environment (endpoint, key, models) changed: rewrite
-    /// Claude's redirected settings.
+    /// The window's active provider's environment (endpoint, key, models) changed:
+    /// restart the bridged backend on the new spawn environment.
     pub env_changed: bool,
     /// The store visibly changed (the active id, a label): the windows re-read.
     pub store_changed: bool,
 }
 
-/// [`ProviderChange`] for one store mutation: the active profile's provider env decides
-/// the settings write, the whole store decides the push.
+/// [`ProviderChange`] for one store mutation under the window's choices around it: the
+/// active profile's provider env decides the restart, the whole store decides the push.
 pub fn provider_change(
     before: &ProviderStore,
     after: &ProviderStore,
     home: &Path,
+    choice_before: Option<&str>,
+    choice_after: Option<&str>,
 ) -> ProviderChange {
     ProviderChange {
-        env_changed: active_provider_env(before, home) != active_provider_env(after, home),
+        env_changed: active_env(before, choice_before, home)
+            != active_env(after, choice_after, home),
         store_changed: before != after,
     }
 }
 
-/// The provider environment keys this bridge owns in Claude's settings — everything a
-/// third-party endpoint needs, and everything that must be *absent* for the official
-/// service (a stale endpoint here would shadow the user's login).
+/// The provider environment keys this bridge once wrote into Claude's settings `env`
+/// map — endpoint, key, models, the per-endpoint flags, and the Terminal Shell
+/// preference's keys (the PowerShell tool switch included: its `1` replaced the bash
+/// keys rather than joining them). They ride the per-window spawn environment only
+/// (2026-10-13, the owner's direction), and [`withdraw_provider_settings`] removes
+/// them from the settings file: the plaintext API key at rest was the leak, and a
+/// stale endpoint there would shadow the user's official login besides.
 pub const PROVIDER_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
@@ -1104,41 +1191,41 @@ pub const PROVIDER_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     "CLAUDE_CODE_ATTRIBUTION_HEADER",
     "CLAUDE_CODE_AUTO_MODE_SERVER",
-    // The Terminal Shell preference's keys (claude_shell_env): the bridge owns them
-    // the same way, so switching back to PowerShell withdraws them.
     "CLAUDE_CODE_GIT_BASH_PATH",
     "MSYSTEM",
+    "CLAUDE_CODE_USE_POWERSHELL_TOOL",
 ];
 
-/// Claude's redirected settings with the active provider's environment applied — the
-/// composition core of a provider switch. Claude Code applies the settings' `env` map
-/// at every session start (the mechanism cc-switch uses), so writing it makes the next
-/// chat run on the new provider without restarting anything; a running conversation is
-/// never touched. The user's own env keys and every other setting are preserved
-/// verbatim; switching to the official profile removes exactly this bridge's keys (a
-/// stale endpoint here would shadow the official login). The top-level `model` pin
-/// follows the active provider under the same takeover: Claude Code's own `/model`
-/// pick persists there and outranks the env map for what a session shows and sends,
-/// so while the active profile pins a model the pin carries it (a `claude-*` tier id
-/// left there would be displayed and sent on an endpoint that serves none), and a pin
-/// naming an id the official service cannot serve is cleared — a `claude-*` id or a
-/// bare tier alias (`sonnet[1m]`, …) is the user's own and survives verbatim. An
-/// unchanged file answers None; an unparseable one fails rather than being replaced.
-/// The top-level `attribution` pin is written alongside on every profile (the owner's
-/// 2026-10-01 direction above): the empty `commit`/`pr` are Claude Code's documented
-/// hide values, the key is replaced wholesale like the bridge's env keys (a hand-set
-/// trailer text never survives), and official keeps it — a preference, not a
-/// per-endpoint workaround.
-pub fn claude_provider_settings(
-    existing: Option<&str>,
-    env: &[(String, String)],
-) -> Result<Option<String>, String> {
+/// Claude's redirected settings with everything this bridge ever wrote into them
+/// withdrawn — the composition core of the no-disk-write rule (2026-10-13, the owner's
+/// direction: the provider configuration never lands in Claude's own files — the `env`
+/// map earlier versions wrote, the cc-switch mechanism, carried the API key in
+/// plaintext at rest, which is the leak; everything rides the per-window spawn
+/// environment now). Three withdrawals:
+///
+/// - the `env` entries — [`PROVIDER_ENV_KEYS`] wholesale, plus a `SHELL` naming the
+///   ggs-bash sidecar or its `bash` copy under the ggs home's shell dir (one the user
+///   set themselves survives untouched);
+/// - the top-level `model` pin this bridge rewrote onto the active provider's model —
+///   the pin Claude Code's `/model` picker persists there outranks the environment,
+///   and earlier versions rewrote it on every switch. A pin naming an id the official
+///   service cannot serve (`glm-5.3`, `deepseek-flash`, …) is ours or ours-shaped and
+///   goes; a `claude-*` id or a bare tier alias (`sonnet[1m]`, …) is the user's own
+///   and survives verbatim;
+/// - the top-level `attribution` pin (`{"commit": "", "pr": ""}` — the empty hide
+///   value this bridge wrote on every profile; a hand-set trailer differs and stays).
+///
+/// The user's own env keys and every other setting are preserved verbatim. The answer
+/// is `None` when the file carries nothing of ours (a clean file is never touched —
+/// the pass is idempotent and free to run often); an unparseable or wrongly-shaped
+/// file fails rather than being replaced.
+pub fn withdraw_provider_settings(existing: Option<&str>) -> Result<Option<String>, String> {
     let mut settings: serde_json::Value = match existing {
         Some(text) if text.trim().is_empty() => serde_json::json!({}),
         Some(text) => serde_json::from_str(text).map_err(|e| {
             format!("the existing Claude settings are not valid JSON — not overwriting them: {e}")
         })?,
-        None => serde_json::json!({}),
+        None => return Ok(None),
     };
     if !settings.is_object() {
         return Err(
@@ -1146,127 +1233,111 @@ pub fn claude_provider_settings(
         );
     }
     let object = settings.as_object_mut().expect("checked above");
-    let map = object.entry("env").or_insert_with(|| serde_json::json!({}));
-    if !map.is_object() {
-        return Err("the existing env entry is not a JSON object — not overwriting it".to_owned());
-    }
-    let env_map = map.as_object_mut().expect("checked above");
-    // This bridge's keys are replaced wholesale — set what the active profile carries,
-    // remove the rest, so a previous provider never leaks through.
-    for key in PROVIDER_ENV_KEYS {
-        env_map.remove(*key);
-    }
-    for (key, value) in env {
-        env_map.insert(key.clone(), serde_json::Value::String(value.clone()));
-    }
-    // A SHELL the bridge once wrote names the ggs-bash sidecar; one the user set
-    // themselves survives untouched.
-    if let Some(serde_json::Value::String(existing)) = env_map.get("SHELL") {
-        if existing.to_lowercase().contains("ggs-bash")
-            && !env.iter().any(|(key, _)| key == "SHELL")
-        {
-            env_map.remove("SHELL");
+    let mut changed = false;
+
+    if let Some(env) = object.get_mut("env") {
+        let env_map = env.as_object_mut().ok_or_else(|| {
+            "the existing env entry is not a JSON object — not overwriting it".to_owned()
+        })?;
+        for key in PROVIDER_ENV_KEYS {
+            changed |= env_map.remove(*key).is_some();
         }
-    }
-    if env_map.is_empty() {
-        object.remove("env");
-    }
-    // Claude Code's commit and PR attribution is pinned off on every profile (2026-10-01,
-    // the owner's direction): the empty strings are Claude Code's documented "hide the
-    // attribution" values, and a set `attribution.commit` outranks the deprecated
-    // `includeCoAuthoredBy` — one key covers both surfaces, so the old one needs no
-    // takeover of its own. Replaced wholesale like the bridge's env keys (a hand-set
-    // trailer text never survives), but unlike them it is the owner's preference, not a
-    // per-endpoint workaround, so it is written on official too and never removed.
-    object.insert(
-        "attribution".to_owned(),
-        serde_json::json!({"commit": "", "pr": ""}),
-    );
-    // The `/model` pin takeover the doc comment promises. `split('[')` first: the
-    // tier picker pins carry a context-window suffix (`sonnet[1m]`), the alias it
-    // names is what Claude's own service actually serves.
-    let pinned_model = env
-        .iter()
-        .find(|(key, _)| key == "ANTHROPIC_MODEL")
-        .map(|(_, value)| value.clone());
-    match pinned_model {
-        Some(model) => {
-            object.insert("model".to_owned(), serde_json::Value::String(model));
-        }
-        None => {
-            if let Some(pin) = object.get("model").and_then(|value| value.as_str()) {
-                let base = pin.split('[').next().unwrap_or(pin);
-                let claude_owned = pin.starts_with("claude")
-                    || matches!(
-                        base,
-                        "default" | "opus" | "fable" | "sonnet" | "haiku" | "opusplan"
-                    );
-                if !claude_owned {
-                    object.remove("model");
-                }
+        // A SHELL the bridge once wrote names the ggs-bash sidecar or its `bash` copy
+        // under the ggs home's shell dir; one the user set themselves survives untouched.
+        let bridge_written_shell = matches!(
+            env_map.get("SHELL"),
+            Some(serde_json::Value::String(existing)) if {
+                let normalized = existing.replace('\\', "/");
+                normalized.to_lowercase().contains("ggs-bash")
+                    || normalized.contains("/.ggs/shell/")
             }
+        );
+        if bridge_written_shell {
+            env_map.remove("SHELL");
+            changed = true;
+        }
+        if env_map.is_empty() {
+            object.remove("env");
         }
     }
-    let text = serde_json::to_string_pretty(&settings)
-        .map_err(|e| format!("serialize the Claude settings: {e}"))?
-        + "\n";
-    if Some(text.as_str()) == existing {
+
+    // The attribution pin this bridge wrote: the empty commit/pr pair is the hide
+    // value it set on every profile; a hand-set trailer differs and stays.
+    let bridge_attribution = matches!(
+        object.get("attribution"),
+        Some(serde_json::Value::Object(pin))
+            if pin.len() == 2
+                && pin.get("commit").and_then(serde_json::Value::as_str) == Some("")
+                && pin.get("pr").and_then(serde_json::Value::as_str) == Some("")
+    );
+    if bridge_attribution {
+        object.remove("attribution");
+        changed = true;
+    }
+
+    // The `/model` pin this bridge rewrote onto the active provider's model.
+    // `split('[')` first: the tier picker's pins carry a context-window suffix
+    // (`sonnet[1m]`), the alias it names is what Claude's own service actually serves.
+    if let Some(pin) = object.get("model").and_then(serde_json::Value::as_str) {
+        let base = pin.split('[').next().unwrap_or(pin);
+        let claude_owned = pin.starts_with("claude")
+            || matches!(
+                base,
+                "default" | "opus" | "fable" | "sonnet" | "haiku" | "opusplan"
+            );
+        if !claude_owned {
+            object.remove("model");
+            changed = true;
+        }
+    }
+
+    if !changed {
         return Ok(None);
     }
-    Ok(Some(text))
+    Ok(Some(
+        serde_json::to_string_pretty(&settings)
+            .map_err(|e| format!("serialize the Claude settings: {e}"))?
+            + "\n",
+    ))
 }
 
-/// Apply the active provider to Claude's redirected settings — what a switch, a save
-/// of the active profile, an import or the boot pass all run through. The settings
-/// write alone (the boot pass's case — nothing is running yet, every later start reads
-/// the file) is followed by the store-writing commands with
-/// [`restart_bridged_backends`], because a backend already running applied the previous
-/// provider's env at its own start and would keep serving it. Errors are logged, never
-/// thrown into the command's answer — a failed write is diagnosable, not fatal.
-pub fn apply_claude_provider_env() {
-    let result = apply_claude_provider_env_inner();
+/// Withdraw the bridge's keys from Claude's redirected settings — what the boot pass,
+/// every folder change ([`apply_claude_integration`]) and every provider switch run.
+/// The pass is idempotent (a file carrying nothing of ours is never touched), so it is
+/// the cleanup path for every configuration an earlier version of this bridge wrote:
+/// the `env` map with the plaintext key goes, and with it the last place the key
+/// existed outside the seal. Errors are logged, never thrown into a command's answer —
+/// a failed withdrawal is diagnosable, not fatal.
+pub fn withdraw_claude_provider_env() {
+    let result = withdraw_claude_provider_env_inner();
     if let Err(error) = result {
-        eprintln!("[providers] claude provider env: {error}");
-        crate::cmd_ext::log_extensions(&format!("claude provider env: {error}"));
+        eprintln!("[providers] claude provider env withdrawal: {error}");
+        crate::cmd_ext::log_extensions(&format!("claude provider env withdrawal: {error}"));
     }
 }
 
-/// [`apply_claude_provider_env`]'s IO body. The settings file lands 0600 when it
-/// carries a key (the same at-rest posture the sealed store has — the plaintext here
-/// is Claude Code's own configuration format, exactly what cc-switch writes).
-fn apply_claude_provider_env_inner() -> Result<(), String> {
+/// [`withdraw_claude_provider_env`]'s IO body.
+fn withdraw_claude_provider_env_inner() -> Result<(), String> {
     let home = ggs_home()?;
-    let store = read_store(&home)?;
-    let mut env = active_provider_env(&store, &home);
-    env.extend(claude_shell_env(&home));
     let dir = home.join("claude");
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let path = dir.join("settings.json");
     let existing = std::fs::read_to_string(&path).ok();
-    if let Some(text) = claude_provider_settings(existing.as_deref(), &env)? {
+    if let Some(text) = withdraw_provider_settings(existing.as_deref())? {
         std::fs::write(&path, &text).map_err(|e| format!("write {}: {e}", path.display()))?;
-        // The plaintext key is Claude Code's own configuration format here (exactly
-        // what cc-switch writes); the file gets the sealed store's at-rest posture.
-        if !env.is_empty() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                    .map_err(|e| format!("restrict {}: {e}", path.display()))?;
-            }
-        }
     }
     Ok(())
 }
 
-/// The Terminal Shell setting changed (module 18): the provider env's settings write
-/// and the spawn environment both carry the shell choice, and a backend already
-/// running applied its environment at its own start — so the switch re-applies and
-/// restarts, exactly like a provider switch does (the never-restart cut of 2026-09-30
-/// left the chat on the old provider's login page for exactly this reason).
+/// The Terminal Shell setting changed (module 18): the shell choice rides the spawn
+/// environment ([`claude_shell_env`]), and a backend already running applied its
+/// environment at its own start — so the switch withdraws what an earlier version may
+/// have left in the settings and restarts, exactly like a provider switch does (the
+/// never-restart cut of 2026-09-30 left the chat on the old provider's login page for
+/// exactly this reason).
 #[tauri::command]
 pub fn providers_shell_refresh(app: tauri::AppHandle) -> Result<(), String> {
-    apply_claude_provider_env();
+    withdraw_claude_provider_env();
     restart_bridged_backends(&app);
     Ok(())
 }
@@ -1277,13 +1348,14 @@ pub fn providers_shell_refresh(app: tauri::AppHandle) -> Result<(), String> {
 /// keep showing what it rendered (the login page of the provider it booted under). The
 /// event fires on a failed restart too: the old process is dead either way, and the
 /// re-resolve it triggers is the frontend's self-healing path — the resolve crosses as a
-/// backend request, which lazy-starts the fresh process on the rewritten settings.
+/// backend request, which lazy-starts the fresh process on the new spawn environment.
 pub const BACKEND_RESTARTED_EVENT: &str = "ext-backend-restarted";
 
 /// The bridged backends a restart pass touches: the ones actually running. A backend
 /// that is not (not installed, or stopped — `pid` 0 is the remembered history of a dead
-/// one) needs nothing; its next start reads the rewritten settings on its own. Pure
-/// over the host's status answer, so the selection policy is testable.
+/// one) needs nothing; its next start spawns with the window's current provider
+/// environment on its own. Pure over the host's status answer, so the selection policy
+/// is testable.
 fn bridged_running(status: &[crate::ext_process::ProcessInfo]) -> Vec<String> {
     status
         .iter()
@@ -1292,11 +1364,11 @@ fn bridged_running(status: &[crate::ext_process::ProcessInfo]) -> Vec<String> {
         .collect()
 }
 
-/// Restart the bridged backends after the provider environment changed — the
-/// settings-writing half of a switch. The running extension process applied the
-/// redirected settings' env map at its own start, so it keeps answering with the
-/// provider it booted under (the chat's login state included); the fresh process reads
-/// the rewritten settings and comes up on the new provider. The start runs on its own
+/// Restart the bridged backends after this window's provider environment changed — the
+/// second half of a switch. The running extension process applied its environment at
+/// its own start, so it keeps answering with the provider it booted under (the chat's
+/// login state included); the fresh process spawns with the window's current choice
+/// and comes up on the new provider. The start runs on its own
 /// thread (the activation handshake takes its time; the command's answer must not wait
 /// it out) and its completion is announced as [`BACKEND_RESTARTED_EVENT`] — on failure
 /// too: the old process is dead either way, and the re-resolve the event triggers
@@ -1362,6 +1434,9 @@ impl From<&ProviderProfile> for ProviderView {
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderList {
+    /// The provider THIS window runs under (its own choice, or the store's default
+    /// before it has chosen) — the chip and the page render this window's provider,
+    /// never another window's.
     pub active_id: Option<String>,
     pub profiles: Vec<ProviderView>,
     pub presets: Vec<ProviderPreset>,
@@ -1370,9 +1445,9 @@ pub struct ProviderList {
     pub bridged_ext_ids: Vec<String>,
 }
 
-fn list_answer(store: &ProviderStore) -> ProviderList {
+fn list_answer(store: &ProviderStore, active_id: Option<&str>) -> ProviderList {
     ProviderList {
-        active_id: store.active_id.clone(),
+        active_id: active_id.map(str::to_owned),
         profiles: store.profiles.iter().map(ProviderView::from).collect(),
         presets: presets(),
         bridged_ext_ids: BRIDGED_EXT_IDS.iter().map(|id| id.to_string()).collect(),
@@ -1380,19 +1455,23 @@ fn list_answer(store: &ProviderStore) -> ProviderList {
 }
 
 /// The store for the UI: profiles (keys masked), the built-in presets, and the bridged
-/// extension ids. A missing file answers the seeded store, not an error.
+/// extension ids. `activeId` is this window's provider ([`effective_choice`] — a
+/// switch in another window changes the store it answers from, never this answer). A
+/// missing file answers the seeded store, not an error.
 #[tauri::command]
 pub fn provider_list() -> Result<ProviderList, String> {
     let _guard = STORE_LOCK.lock().unwrap();
     let home = ggs_home()?;
     let store = read_store(&home)?;
-    Ok(list_answer(&store))
+    let active = effective_choice(&store);
+    Ok(list_answer(&store, active.as_deref()))
 }
 
 /// Create or update one profile. `apiKey` absent keeps the stored key, empty clears it,
-/// a value seals it. Saving the *active* profile rewrites the redirected Claude settings
-/// and restarts the running bridged backend when the change reaches its environment
-/// (endpoint, model or key) — the fresh process applies it at its own start.
+/// a value seals it. Saving the profile THIS window runs under restarts the running
+/// bridged backend when the change reaches its environment (endpoint, model or key) —
+/// the fresh process spawns with the new provider environment. A window running
+/// another provider is not restarted: the change never reaches its environment.
 #[tauri::command]
 pub fn provider_save(
     app: tauri::AppHandle,
@@ -1402,13 +1481,21 @@ pub fn provider_save(
     let home = ggs_home()?;
     let mut store = read_store(&home)?;
     let before = store.clone();
+    let choice_before = effective_choice(&store);
     apply_save(&home, &mut store, &profile)?;
     write_store(&home, &store)?;
     drop(_guard);
-    let answer = list_answer(&store);
-    let change = provider_change(&before, &store, &home);
+    let choice = effective_choice(&store);
+    let answer = list_answer(&store, choice.as_deref());
+    let change = provider_change(
+        &before,
+        &store,
+        &home,
+        choice_before.as_deref(),
+        choice.as_deref(),
+    );
     if change.env_changed {
-        apply_claude_provider_env();
+        withdraw_claude_provider_env();
         restart_bridged_backends(&app);
     }
     if change.store_changed {
@@ -1454,13 +1541,23 @@ pub fn provider_delete(app: tauri::AppHandle, id: String) -> Result<ProviderList
     let home = ggs_home()?;
     let mut store = read_store(&home)?;
     let before = store.clone();
+    let choice_before = effective_choice(&store);
     remove_profile(&mut store, &id)?;
     write_store(&home, &store)?;
     drop(_guard);
-    let answer = list_answer(&store);
-    let change = provider_change(&before, &store, &home);
+    // A window whose own choice was deleted falls back to the store's default
+    // (official) — the environment it runs under changed, so it restarts.
+    let choice = effective_choice(&store);
+    let answer = list_answer(&store, choice.as_deref());
+    let change = provider_change(
+        &before,
+        &store,
+        &home,
+        choice_before.as_deref(),
+        choice.as_deref(),
+    );
     if change.env_changed {
-        apply_claude_provider_env();
+        withdraw_claude_provider_env();
         restart_bridged_backends(&app);
     }
     if change.store_changed {
@@ -1469,25 +1566,31 @@ pub fn provider_delete(app: tauri::AppHandle, id: String) -> Result<ProviderList
     Ok(answer)
 }
 
-/// Make one profile the provider the bridged backend runs under. The switch rewrites
-/// the redirected Claude settings' env map and restarts the running bridged backend on
-/// top: the fresh process applies the env at its own start, so the sidebar's chat
-/// follows the switch at once (the running process would keep the provider — and the
-/// login page — it booted under). The official profile is always present, so switching
-/// back is one click.
+/// Make one profile the provider THIS window's bridged backend runs under (2026-10-13,
+/// the owner's direction: the choice is per window). One pick writes two things — the
+/// window's own choice (process memory, so another window's later switch never drags
+/// it) and the store's `active_id` on disk (the default a NEW window boots with). The
+/// switch restarts this window's running bridged backend on top: the fresh process
+/// spawns with the new provider's environment, so the sidebar's chat follows the
+/// switch at once (the running process would keep the provider — and the login page —
+/// it booted under). The official profile is always present, so switching back is one
+/// click. Other windows are never touched: their backends are not this process's to
+/// restart, and their own choices stand.
 #[tauri::command]
 pub fn provider_activate(app: tauri::AppHandle, id: String) -> Result<ProviderList, String> {
     let _guard = STORE_LOCK.lock().unwrap();
     let home = ggs_home()?;
     let mut store = read_store(&home)?;
     let before = store.clone();
+    let choice_before = effective_choice(&store);
     set_active(&mut store, &id)?;
+    set_instance_choice(&id);
     write_store(&home, &store)?;
     drop(_guard);
-    let answer = list_answer(&store);
-    let change = provider_change(&before, &store, &home);
+    let answer = list_answer(&store, Some(&id));
+    let change = provider_change(&before, &store, &home, choice_before.as_deref(), Some(&id));
     if change.env_changed {
-        apply_claude_provider_env();
+        withdraw_claude_provider_env();
         restart_bridged_backends(&app);
     }
     if change.store_changed {
@@ -1567,7 +1670,8 @@ pub fn provider_ccswitch_scan() -> Result<Vec<CcSwitchCandidate>, String> {
 
 /// Import the named candidates, sealing their keys into the store. A candidate marked
 /// current (what cc-switch points at) is activated — the one deliberate opinion of the
-/// import, so the bridge takes over the configuration the machine already runs on.
+/// import, so the bridge takes over the configuration the machine already runs on:
+/// this window's choice and the new-window default move together.
 #[tauri::command]
 pub fn provider_import_ccswitch(
     app: tauri::AppHandle,
@@ -1577,19 +1681,28 @@ pub fn provider_import_ccswitch(
     let home = ggs_home()?;
     let mut store = read_store(&home)?;
     let before = store.clone();
+    let choice_before = effective_choice(&store);
     let (imported, activate) = import_ccswitch_entries(&home, &mut store, &names)?;
     if imported == 0 {
         return Err("none of the named configurations was found to import".to_owned());
     }
     if let Some(id) = activate {
         set_active(&mut store, &id)?;
+        set_instance_choice(&id);
     }
     write_store(&home, &store)?;
     drop(_guard);
-    let answer = list_answer(&store);
-    let change = provider_change(&before, &store, &home);
+    let choice = effective_choice(&store);
+    let answer = list_answer(&store, choice.as_deref());
+    let change = provider_change(
+        &before,
+        &store,
+        &home,
+        choice_before.as_deref(),
+        choice.as_deref(),
+    );
     if change.env_changed {
-        apply_claude_provider_env();
+        withdraw_claude_provider_env();
         restart_bridged_backends(&app);
     }
     if change.store_changed {
@@ -2017,15 +2130,18 @@ pub fn claude_mcp_settings(
     ))
 }
 
-/// Keep Claude's redirected configuration current with everything this bridge owns:
-/// the MCP server registration (the analysis server for the open folder, in the
-/// global config's user-scope `mcpServers` — the one place Claude Code reads
-/// user-level servers from) with its settings-side auto-allow rule, and the active
-/// provider's environment. Written at boot and on every folder open/close beside
-/// `notify_workspace` (the composition root's wiring), so every new Claude session
-/// lists `ggs` under `/mcp` and runs on the chosen provider — no setup, no restart.
-/// The global config also carries Claude's own login state: the merge moves only
-/// this app's own entries and preserves every other key verbatim.
+/// Keep Claude's redirected configuration current with everything this bridge still
+/// writes there: the MCP server registration (the analysis server for the open folder,
+/// in the global config's user-scope `mcpServers` — the one place Claude Code reads
+/// user-level servers from) with its settings-side auto-allow rule. The provider
+/// configuration is no longer part of it (2026-10-13: it rides the per-window spawn
+/// environment only) — what runs beside the registration is the withdrawal
+/// ([`withdraw_claude_provider_env_inner`]) that keeps removing what earlier versions
+/// of this bridge wrote into the settings. Written at boot and on every folder
+/// open/close beside `notify_workspace` (the composition root's wiring), so every new
+/// Claude session lists `ggs` under `/mcp` — no setup, no restart. The global config
+/// also carries Claude's own login state: the merge moves only this app's own entries
+/// and preserves every other key verbatim.
 pub fn apply_claude_integration(folders: &[String]) {
     let result = apply_claude_integration_inner(folders, std::env::current_exe().ok().as_deref());
     if let Err(error) = result {
@@ -2077,14 +2193,14 @@ fn apply_claude_mcp_inner(folders: &[String], command: Option<&Path>) -> Result<
 }
 
 /// [`apply_claude_integration`]'s injectable core (the executable path is a test seam):
-/// the MCP registration first, then the active provider's environment — two passes over
-/// one file, each a no-op when the file already agrees.
+/// the MCP registration first, then the provider-keys withdrawal — two passes over the
+/// redirected state, each a no-op when the file already agrees.
 fn apply_claude_integration_inner(
     folders: &[String],
     command: Option<&Path>,
 ) -> Result<(), String> {
     apply_claude_mcp_inner(folders, command)?;
-    apply_claude_provider_env_inner()
+    withdraw_claude_provider_env_inner()
 }
 
 /// What the MCP Server page reports about the automatic Claude integration.
@@ -2164,9 +2280,14 @@ mod tests {
             let previous = TEST_HOME.lock().unwrap().clone();
             let dir = tempfile::tempdir().unwrap();
             *TEST_HOME.lock().unwrap() = Some(dir.path().to_path_buf());
+            // Every pinned test starts with the per-instance provider choice unclaimed —
+            // it is process memory, and one test's window must never be another's.
+            reset_instance_choice();
             // The provider suite pins a PowerShell home: module 18's default (GGS
             // Bash) would otherwise leak its shell variables into every spawn-env
-            // assertion here, on machines whose build tree resolves the sidecar.
+            // assertion here, on machines whose build tree resolves the sidecar. The
+            // PowerShell choice's own contribution is one key on Windows — the count
+            // assertions carry it as `pinned_shell_keys()`.
             let _ = std::fs::create_dir_all(dir.path().join(".ggs")).and_then(|()| {
                 std::fs::write(
                     dir.path().join(".ggs").join("settings.json"),
@@ -2256,6 +2377,17 @@ mod tests {
         env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
     }
 
+    /// The shell half of a spawn env under the suite's pinned PowerShell home: on
+    /// Windows the choice turns Claude Code's PowerShell tool on — exactly one key —
+    /// while elsewhere it contributes nothing.
+    fn pinned_shell_keys() -> usize {
+        if cfg!(windows) {
+            1
+        } else {
+            0
+        }
+    }
+
     /// Sealing round-trips, seals to fresh ciphertext every time, and a blob from
     /// another install's master key does not open.
     #[test]
@@ -2303,13 +2435,19 @@ mod tests {
         let mut store = third_party_store();
         store.active_id = Some("official".to_owned());
         write_store(&home, &store).unwrap();
-        let env = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
+        let env = backend_env_for(CLAUDE_CODE_EXT_ID, &home, None);
         let map = env_map(&env);
-        assert_eq!(map.len(), 1, "official adds no endpoint vars: {env:?}");
+        // The redirect alone — plus the pinned PowerShell home's tool switch on
+        // Windows (the shell half is the user's setting, not the provider's).
+        assert_eq!(
+            map.len(),
+            1 + pinned_shell_keys(),
+            "official adds no endpoint vars: {env:?}"
+        );
         let dir = map["CLAUDE_CONFIG_DIR"];
         assert_eq!(dir, home.join("claude").to_str().unwrap());
         // And nothing at all for an extension the bridge does not serve.
-        assert!(backend_env_for("some.other.ext", &home).is_empty());
+        assert!(backend_env_for("some.other.ext", &home, None).is_empty());
     }
 
     /// The active provider's environment rides the backend's spawn environment too
@@ -2330,7 +2468,7 @@ mod tests {
         let mut store = third_party_store();
         store.profiles[1].api_key_enc = Some(seal(&home, "sk-live-key").unwrap());
         write_store(&home, &store).unwrap();
-        let spawn = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
+        let spawn = backend_env_for(CLAUDE_CODE_EXT_ID, &home, None);
         let map = env_map(&spawn);
         assert_eq!(map["ANTHROPIC_AUTH_TOKEN"], "sk-live-key");
         assert_eq!(map["ANTHROPIC_API_KEY"], "sk-live-key");
@@ -2342,12 +2480,13 @@ mod tests {
             map["CLAUDE_CONFIG_DIR"],
             home.join("claude").to_str().unwrap()
         );
-        // Switching back to official: the next spawn carries the redirect alone again.
+        // Switching back to official: the next spawn carries the redirect alone again
+        // (plus the pinned PowerShell home's tool switch on Windows).
         store.active_id = Some("official".to_owned());
         write_store(&home, &store).unwrap();
         assert_eq!(
-            env_map(&backend_env_for(CLAUDE_CODE_EXT_ID, &home)).len(),
-            1
+            env_map(&backend_env_for(CLAUDE_CODE_EXT_ID, &home, None)).len(),
+            1 + pinned_shell_keys()
         );
     }
 
@@ -2356,33 +2495,52 @@ mod tests {
         let _guard = ProviderHome::pin();
         let home = ggs_home().unwrap();
         std::fs::create_dir_all(home.join(".ggs")).unwrap();
-        // An explicit PowerShell choice names no shell: the environment carries
-        // nothing of module 18, whatever the machine resolves. (The default — a
+        // An explicit PowerShell choice names no shell and turns Claude Code's
+        // PowerShell tool on (Windows): the user asked for PowerShell, so the tool
+        // is primary rather than left to the vendor's rollout. (The default — a
         // missing or unrecognised value — IS GGS Bash since 2026-10-10.)
         std::fs::write(
             home.join(".ggs").join("settings.json"),
             r#"{ "terminalShell": "powershell" }"#,
         )
         .unwrap();
-        let spawn = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
+        let spawn = backend_env_for(CLAUDE_CODE_EXT_ID, &home, None);
         let map = env_map(&spawn);
         assert!(!map.contains_key("CLAUDE_CODE_GIT_BASH_PATH"));
         assert!(!map.contains_key("MSYSTEM"));
-        // The chosen shell names the sidecar only when one actually resolves — the
-        // pure half of that decision is pinned in ggs_bash::pref's own tests.
+        if cfg!(windows) {
+            assert_eq!(map.get("CLAUDE_CODE_USE_POWERSHELL_TOOL"), Some(&"1"));
+        } else {
+            assert!(!map.contains_key("CLAUDE_CODE_USE_POWERSHELL_TOOL"));
+        }
+        // The chosen shell lands only when one actually resolves — and under the
+        // `bash` basename Claude Code's whitelist accepts (a `ggs-bash` name is
+        // rejected as "not a bash/sh binary", 2026-10-13), with the PowerShell tool
+        // off so the Bash tool is the command tool. The pure half of that decision
+        // is pinned in ggs_bash::pref's own tests.
         std::fs::write(
             home.join(".ggs").join("settings.json"),
             r#"{ "terminalShell": "ggsBash" }"#,
         )
         .unwrap();
-        let spawn_env = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
+        let spawn_env = backend_env_for(CLAUDE_CODE_EXT_ID, &home, None);
         let spawn = env_map(&spawn_env);
         if let Some(path) = spawn.get("CLAUDE_CODE_GIT_BASH_PATH") {
             assert!(
                 Path::new(path).is_file(),
                 "points at a shell that is not there: {path}"
             );
+            assert_eq!(
+                Path::new(path).file_name().and_then(|n| n.to_str()),
+                Some(if cfg!(windows) { "bash.exe" } else { "bash" }),
+                "not the basename Claude Code accepts: {path}"
+            );
+            assert!(path.replace('\\', "/").contains("/.ggs/shell/"));
             assert_eq!(spawn.get("MSYSTEM"), Some(&"MINGW64"));
+            assert_eq!(spawn.get("SHELL"), spawn.get("CLAUDE_CODE_GIT_BASH_PATH"));
+            if cfg!(windows) {
+                assert_eq!(spawn.get("CLAUDE_CODE_USE_POWERSHELL_TOOL"), Some(&"0"));
+            }
         }
     }
 
@@ -2426,9 +2584,9 @@ mod tests {
         // provider pair, so the extension process itself (not only its CLI children)
         // sees the provider it runs under.
         write_store(&home, &store).unwrap();
-        let spawn = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
+        let spawn = backend_env_for(CLAUDE_CODE_EXT_ID, &home, None);
         let spawn_map = env_map(&spawn);
-        assert_eq!(spawn_map.len(), 12, "{spawn:?}");
+        assert_eq!(spawn_map.len(), 12 + pinned_shell_keys(), "{spawn:?}");
         assert_eq!(spawn_map["ANTHROPIC_AUTH_TOKEN"], "sk-live-key");
         assert_eq!(
             spawn_map["ANTHROPIC_BASE_URL"],
@@ -2509,208 +2667,121 @@ mod tests {
         assert!(!map.contains_key("ANTHROPIC_API_KEY"));
     }
 
-    /// The switch's write path: a third-party profile lands its env in Claude's
-    /// settings, the official one removes exactly this bridge's keys (a stale endpoint
-    /// would shadow the login), the user's own env keys survive, an unchanged file is
-    /// a no-op, and an unparseable one is failed on. The top-level `model` pin rides
-    /// the same takeover: the active profile's model while third-party, cleared back
-    /// to nothing when official — the user's own `claude-*` / tier-alias pin survives.
-    /// The `attribution` pin instead rides every write: a hand-set trailer text is
-    /// replaced with the empty hide value, and official keeps the pin (the owner's
-    /// preference, not a per-endpoint key, so it is never cleared).
+    /// The withdrawal (2026-10-13, the owner's direction: the provider configuration
+    /// never lands in Claude's own files): everything an earlier version of this
+    /// bridge wrote into the settings — the `env` map with the plaintext key (the
+    /// leak), the flags, the shell keys, the bridge-written `model` pin and the empty
+    /// `attribution` pin — leaves the file, while the user's own env keys, their own
+    /// pins (`claude-*` ids, bare tier aliases, a gateway-routed id) and a hand-set
+    /// attribution trailer survive verbatim. A file with nothing of ours is never
+    /// touched; an unparseable or wrongly-shaped one is failed on, never replaced.
     #[test]
-    fn claude_provider_settings_merges_clears_and_preserves() {
-        let third_party = vec![
-            (
-                "ANTHROPIC_BASE_URL".to_owned(),
-                "https://api.deepseek.com/anthropic".to_owned(),
-            ),
-            ("ANTHROPIC_AUTH_TOKEN".to_owned(), "sk-live".to_owned()),
-            ("ANTHROPIC_MODEL".to_owned(), "deepseek-flash".to_owned()),
-            ("CLAUDE_CODE_ATTRIBUTION_HEADER".to_owned(), "0".to_owned()),
-            ("CLAUDE_CODE_AUTO_MODE_SERVER".to_owned(), "0".to_owned()),
-        ];
-        let written = claude_provider_settings(
-            Some(r#"{"model": "claude-fable-5-1[1m]", "attribution": {"commit": "Co-Authored-By: Someone <someone@example.com>", "pr": "Made by Someone"}, "env": {"MY_VAR": "keep-me", "CLAUDE_CODE_ATTRIBUTION_HEADER": "1", "CLAUDE_CODE_AUTO_MODE_SERVER": "1", "ANTHROPIC_BASE_URL": "https://stale", "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-5", "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5-1"}}"#),
-            &third_party,
-        )
-        .unwrap()
-        .unwrap();
-        let json: serde_json::Value = serde_json::from_str(&written).unwrap();
-        // The `/model` pin a tier pick left behind is rewritten onto the active
-        // provider's model — it outranks the env for what the chat shows and sends,
-        // so `claude-fable-5-1[1m]` would have been displayed and sent on DeepSeek.
-        assert_eq!(
-            json.pointer("/model").and_then(|v| v.as_str()),
-            Some("deepseek-flash"),
-            "{json}"
-        );
-        assert_eq!(
-            json.pointer("/env/MY_VAR").and_then(|v| v.as_str()),
-            Some("keep-me")
-        );
-        // A tier key another tool left behind is replaced wholesale with this bridge's
-        // set (the hand-made env here carries none), never merged beside it.
-        assert!(
-            json.pointer("/env/ANTHROPIC_DEFAULT_SONNET_MODEL")
-                .is_none(),
-            "{json}"
-        );
-        assert!(
-            json.pointer("/env/ANTHROPIC_DEFAULT_FABLE_MODEL").is_none(),
-            "{json}"
-        );
-        assert_eq!(
-            json.pointer("/env/ANTHROPIC_BASE_URL")
-                .and_then(|v| v.as_str()),
-            Some("https://api.deepseek.com/anthropic")
-        );
-        assert_eq!(
-            json.pointer("/env/ANTHROPIC_AUTH_TOKEN")
-                .and_then(|v| v.as_str()),
-            Some("sk-live")
-        );
-        // A hand-set attribution header is replaced with the bridge's off value, never
-        // merged beside it.
-        assert_eq!(
-            json.pointer("/env/CLAUDE_CODE_ATTRIBUTION_HEADER")
-                .and_then(|v| v.as_str()),
-            Some("0"),
-            "{json}"
-        );
-        // A hand-set auto-mode server flag is replaced the same way.
-        assert_eq!(
-            json.pointer("/env/CLAUDE_CODE_AUTO_MODE_SERVER")
-                .and_then(|v| v.as_str()),
-            Some("0"),
-            "{json}"
-        );
-        // The owner's no-attribution pin: the hand-set trailer text above is replaced
-        // with the empty hide value, never merged beside — and a set
-        // `attribution.commit` outranks the deprecated `includeCoAuthoredBy`, so that
-        // key needs no takeover of its own.
-        assert_eq!(
-            json.pointer("/attribution/commit").and_then(|v| v.as_str()),
-            Some(""),
-            "{json}"
-        );
-        assert_eq!(
-            json.pointer("/attribution/pr").and_then(|v| v.as_str()),
-            Some(""),
-            "{json}"
-        );
-
-        // Applying the same env again is a no-op; switching to official clears only
-        // this bridge's keys.
-        assert_eq!(
-            claude_provider_settings(Some(&written), &third_party).unwrap(),
-            None
-        );
-        let cleared = claude_provider_settings(Some(&written), &[])
-            .unwrap()
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_str(&cleared).unwrap();
-        assert_eq!(
-            json.pointer("/env/MY_VAR").and_then(|v| v.as_str()),
-            Some("keep-me")
-        );
-        assert!(json.pointer("/env/ANTHROPIC_BASE_URL").is_none());
-        assert!(
-            json.pointer("/env/CLAUDE_CODE_ATTRIBUTION_HEADER")
-                .is_none(),
-            "official keeps Claude Code's default (header on): {json}"
-        );
-        assert!(
-            json.pointer("/env/CLAUDE_CODE_AUTO_MODE_SERVER").is_none(),
-            "official keeps Claude Code's default (server checks on): {json}"
-        );
-        // The no-attribution pin survives official — the owner's preference, not a
-        // per-endpoint workaround, so unlike the env keys it is never cleared.
-        assert_eq!(
-            json.pointer("/attribution/commit").and_then(|v| v.as_str()),
-            Some(""),
-            "{json}"
-        );
-        assert_eq!(
-            json.pointer("/attribution/pr").and_then(|v| v.as_str()),
-            Some(""),
-            "{json}"
-        );
-        // Back on the official service the pin this bridge wrote is cleared with the
-        // env keys — a stale `deepseek-flash` would shadow the login the same way.
-        assert!(json.pointer("/model").is_none(), "{json}");
-
-        // The user's own pins are never touched on official: a `claude-*` id from the
-        // tier list, and a bare tier alias with its context suffix — fable included,
-        // the newest tier, whose bare alias is only recognized as Claude's own because
-        // the takeover's alias table names it. (The answer can differ from a
-        // hand-written input's whitespace alone — compare the JSON.)
-        for pin in ["claude-fable-5-1[1m]", "fable[1m]", "sonnet[1m]"] {
-            let existing = format!(r#"{{"model": "{pin}"}}"#);
-            let answer = claude_provider_settings(Some(&existing), &[]).unwrap();
-            let text = answer.as_deref().unwrap_or(&existing);
-            let json: serde_json::Value = serde_json::from_str(text).unwrap();
-            assert_eq!(json.pointer("/model").and_then(|v| v.as_str()), Some(pin));
-        }
-        // A gateway profile that pins no model leaves the pin alone too — the id the
-        // user pinned is routing metadata for the gateway itself.
-        let gateway = vec![(
-            "ANTHROPIC_BASE_URL".to_owned(),
-            "https://gw.example.com".to_owned(),
-        )];
-        let routed = claude_provider_settings(Some(r#"{"model": "claude-sonnet-4-5"}"#), &gateway)
-            .unwrap()
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_str(&routed).unwrap();
-        assert_eq!(
-            json.pointer("/model").and_then(|v| v.as_str()),
-            Some("claude-sonnet-4-5"),
-            "{json}"
-        );
-
-        assert!(claude_provider_settings(Some("{not json"), &third_party).is_err());
-    }
-
-    /// The switch's IO: activate writes the third-party env into the redirected
-    /// settings (0600 — it carries the plaintext key, Claude Code's own configuration
-    /// format), and switching back to official clears the keys again.
-    #[test]
-    fn the_provider_switch_writes_and_clears_the_settings_env() {
-        let _guard = ProviderHome::pin();
-        let home = ggs_home().unwrap();
-        let mut store = third_party_store();
-        store.profiles[1].api_key_enc = Some(seal(&home, "sk-live-key").unwrap());
-        let path = home.join("claude").join("settings.json");
-
-        let active = store.profiles[1].clone();
-        let env = provider_env_vars(&active, &home);
-        let text = claude_provider_settings(None, &env).unwrap().unwrap();
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, &text).unwrap();
-        let json: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(
-            json.pointer("/env/ANTHROPIC_AUTH_TOKEN")
-                .and_then(|v| v.as_str()),
-            Some("sk-live-key")
-        );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-            assert_eq!(
-                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-                0o600
+    fn the_withdrawal_removes_the_bridges_keys_and_preserves_the_users_own() {
+        let legacy = r#"{
+            "model": "deepseek-flash",
+            "attribution": {"commit": "", "pr": ""},
+            "env": {
+                "MY_VAR": "keep-me",
+                "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "sk-live",
+                "ANTHROPIC_API_KEY": "sk-live",
+                "ANTHROPIC_MODEL": "deepseek-flash",
+                "ANTHROPIC_SMALL_FAST_MODEL": "deepseek-flash",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-flash",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL": "deepseek-flash",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-flash",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-flash",
+                "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+                "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
+                "CLAUDE_CODE_GIT_BASH_PATH": "C:\\apps\\bash.exe",
+                "MSYSTEM": "MINGW64",
+                "CLAUDE_CODE_USE_POWERSHELL_TOOL": "0"
+            }
+        }"#;
+        let withdrawn = withdraw_provider_settings(Some(legacy)).unwrap().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&withdrawn).unwrap();
+        // Every provider key is gone — the API key above all: nothing of the bridge's
+        // may stay at rest in Claude's own files.
+        for key in PROVIDER_ENV_KEYS {
+            assert!(
+                json.pointer(&format!("/env/{key}")).is_none(),
+                "{key} stayed: {json}"
             );
         }
+        assert!(!withdrawn.contains("sk-live"), "{withdrawn}");
+        // The user's own env key survives.
+        assert_eq!(
+            json.pointer("/env/MY_VAR").and_then(|v| v.as_str()),
+            Some("keep-me"),
+            "{json}"
+        );
+        // The bridge-written model pin and the empty hide-value attribution pin go.
+        assert!(json.pointer("/model").is_none(), "{json}");
+        assert!(json.pointer("/attribution").is_none(), "{json}");
+
+        // The withdrawal is idempotent: running it over its own answer touches
+        // nothing, so the pass is free to run at every boot and folder change.
+        assert_eq!(withdraw_provider_settings(Some(&withdrawn)).unwrap(), None);
+
+        // A file with nothing of ours is never touched — the user's own pins (a
+        // `claude-*` id, a bare tier alias with its context suffix, a gateway-routed
+        // id) and a hand-set attribution trailer (only the bridge's exact empty pair
+        // is withdrawn).
+        for untouched in [
+            r#"{"model": "claude-fable-5-1[1m]", "env": {"MY_VAR": "x"}}"#,
+            r#"{"model": "fable[1m]"}"#,
+            r#"{"model": "sonnet[1m]"}"#,
+            r#"{"model": "claude-sonnet-4-5"}"#,
+            r#"{"attribution": {"commit": "Co-Authored-By: Someone <s@example.com>", "pr": "Made by Someone"}, "model": "claude-sonnet-4-5"}"#,
+        ] {
+            assert_eq!(
+                withdraw_provider_settings(Some(untouched)).unwrap(),
+                None,
+                "{untouched}"
+            );
+        }
+
+        // An unparseable or wrongly-shaped file is failed on, never replaced; no
+        // file at all is nothing to withdraw.
+        assert!(withdraw_provider_settings(Some("{not json")).is_err());
+        assert!(withdraw_provider_settings(Some("[1,2]")).is_err());
+        assert!(withdraw_provider_settings(Some(r#"{"env": "nope"}"#)).is_err());
+        assert_eq!(withdraw_provider_settings(None).unwrap(), None);
     }
 
-    /// The switch's gate: a real switch reports the settings env changed (the tail that
-    /// rewrites Claude's redirected settings) and the store visibly changed (the push the
-    /// windows' chips re-read); a label-only edit is cosmetic; the no-op re-activate is
-    /// neither. The gate compares the active profile's provider env — never the spawn
-    /// env, which is the constant config redirect and once made every switch a silent
-    /// no-op (the settings kept the previous provider, new chats never moved).
+    /// A SHELL this bridge once wrote — the old ggs-bash sidecar spelling or the
+    /// `bash` copy under the ggs home's shell dir — is withdrawn with the rest of the
+    /// env map; a SHELL the user set themselves survives untouched.
+    #[test]
+    fn a_bridge_written_shell_is_withdrawn_but_a_user_one_survives() {
+        for stale in [
+            r"C:\apps\ggs-bash.exe",
+            r"C:\Users\u\.ggs\shell\bash.exe",
+            "/home/u/.ggs/shell/bash",
+        ] {
+            let existing = serde_json::json!({"env": {"SHELL": stale}}).to_string();
+            let written = withdraw_provider_settings(Some(&existing))
+                .unwrap()
+                .unwrap();
+            assert!(!written.contains(stale), "{stale}: {written}");
+            let json: serde_json::Value = serde_json::from_str(&written).unwrap();
+            assert!(json.get("env").is_none(), "the emptied env map goes: {json}");
+        }
+        // The user's own SHELL — a path this bridge never wrote — survives.
+        assert_eq!(
+            withdraw_provider_settings(Some(r#"{"env": {"SHELL": "/usr/bin/fish"}}"#))
+                .unwrap(),
+            None
+        );
+    }
+
+    /// The switch's gate: a real switch reports the environment the window's backend
+    /// spawns with changed (the tail that restarts the bridged backend) and the store
+    /// visibly changed (the push the windows' chips re-read); a label-only edit is
+    /// cosmetic; the no-op re-activate is neither. The gate compares the chosen
+    /// profile's provider env under the window's choice before and after — never the
+    /// spawn env, which is the constant config redirect and once made every switch a
+    /// silent no-op (the backend kept the previous provider, new chats never moved).
     #[test]
     fn the_switch_gate_fires_on_provider_env_changes_only() {
         let _guard = ProviderHome::pin();
@@ -2719,108 +2790,179 @@ mod tests {
         store.active_id = Some("official".to_owned());
         store.profiles[1].api_key_enc = Some(seal(&home, "sk-live-key").unwrap());
 
-        // official → deepseek: both the settings env and the store changed.
+        // official → deepseek (this window's choice moves; the store's default moves
+        // with it): both the environment and the store changed.
         let before = store.clone();
         set_active(&mut store, "deepseek").unwrap();
-        let change = provider_change(&before, &store, &home);
+        let change = provider_change(&before, &store, &home, Some("official"), Some("deepseek"));
         assert!(change.env_changed && change.store_changed);
 
         // The no-op re-activate: neither.
         let before = store.clone();
         set_active(&mut store, "deepseek").unwrap();
         assert_eq!(
-            provider_change(&before, &store, &home),
+            provider_change(&before, &store, &home, Some("deepseek"), Some("deepseek")),
             ProviderChange {
                 env_changed: false,
                 store_changed: false
             }
         );
 
-        // A label-only edit of the active profile: the chips' list re-reads, the
-        // settings do not.
+        // A label-only edit of the profile the window runs under: the chips' list
+        // re-reads, the backend's environment does not.
         let before = store.clone();
         store.profiles[1].label = "DeepSeek (team)".to_owned();
-        let change = provider_change(&before, &store, &home);
+        let change = provider_change(&before, &store, &home, Some("deepseek"), Some("deepseek"));
         assert!(!change.env_changed && change.store_changed);
 
-        // deepseek → official: the env changes again — this bridge's keys must leave
-        // the settings or the stale endpoint would shadow the login.
+        // deepseek → official: the environment changes again — the stale endpoint
+        // must leave the window's spawns.
         let before = store.clone();
         set_active(&mut store, "official").unwrap();
-        assert!(provider_change(&before, &store, &home).env_changed);
+        assert!(
+            provider_change(&before, &store, &home, Some("deepseek"), Some("official"))
+                .env_changed
+        );
+
+        // A window that never chose follows the store's default (the fresh-window
+        // shape): the default's move is its move.
+        let before = store.clone();
+        set_active(&mut store, "deepseek").unwrap();
+        assert!(provider_change(&before, &store, &home, None, None).env_changed);
     }
 
-    /// The tail the gate drives, end to end: switch the store, write it, run the apply
-    /// the gate asks for — and the redirected Claude settings carry the new provider for
-    /// the next session (exactly the path that was dead while the gate compared the
-    /// constant spawn env: the chip said GLM, the chat still ran where it always had).
+    /// The tail the gate drives, end to end: switch the store, write it — and the
+    /// window's next backend spawn carries the new provider while Claude's own files
+    /// stay clean. The spawn environment is the provider configuration's only sink
+    /// (2026-10-13); what an earlier version left in the settings — the plaintext key
+    /// above all — is withdrawn, never rewritten onto the new provider.
     #[test]
-    fn a_switched_store_lands_in_the_claude_settings_for_the_next_session() {
+    fn a_switched_window_lands_in_the_spawn_environment_and_claudes_files_stay_clean() {
         let _guard = ProviderHome::pin();
         let home = ggs_home().unwrap();
         let mut store = third_party_store();
         store.active_id = Some("official".to_owned());
         store.profiles[1].api_key_enc = Some(seal(&home, "sk-live-key").unwrap());
-        // A `/model` pin from an official-era session: Claude Code persists the tier
-        // pick into the settings' top level, where it outranks the env this switch is
-        // about to write — the takeover must rewrite it onto the provider's model.
         let claude_dir = home.join("claude");
         std::fs::create_dir_all(&claude_dir).unwrap();
         std::fs::write(
             claude_dir.join("settings.json"),
-            r#"{"model": "claude-fable-5-1[1m]"}"#,
+            r#"{"model": "deepseek-flash", "env": {"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic", "ANTHROPIC_AUTH_TOKEN": "sk-live-key"}}"#,
         )
         .unwrap();
+
         let before = store.clone();
         set_active(&mut store, "deepseek").unwrap();
+        set_instance_choice("deepseek");
         write_store(&home, &store).unwrap();
-        if provider_change(&before, &store, &home).env_changed {
-            apply_claude_provider_env();
+        if provider_change(&before, &store, &home, Some("official"), Some("deepseek")).env_changed
+        {
+            withdraw_claude_provider_env();
         }
-        let json: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(home.join("claude").join("settings.json")).unwrap(),
-        )
-        .unwrap();
+
+        // The window's next backend spawn carries the new provider — endpoint, key,
+        // models, flags — over the same shared config dir.
+        let spawn_env = backend_env_for(CLAUDE_CODE_EXT_ID, &home, Some("deepseek"));
+        let spawn = env_map(&spawn_env);
         assert_eq!(
-            json.pointer("/model").and_then(|v| v.as_str()),
-            Some("deepseek-flash"),
-            "{json}"
+            spawn["ANTHROPIC_BASE_URL"],
+            "https://api.deepseek.com/anthropic"
         );
+        assert_eq!(spawn["ANTHROPIC_AUTH_TOKEN"], "sk-live-key");
+        assert_eq!(spawn["ANTHROPIC_MODEL"], "deepseek-flash");
         assert_eq!(
-            json.pointer("/env/ANTHROPIC_BASE_URL")
-                .and_then(|v| v.as_str()),
-            Some("https://api.deepseek.com/anthropic")
+            spawn["CLAUDE_CONFIG_DIR"],
+            home.join("claude").to_str().unwrap()
         );
+
+        // And Claude's settings carry none of it: the key is gone from disk, the
+        // bridge-written pin with it.
+        let text = std::fs::read_to_string(claude_dir.join("settings.json")).unwrap();
+        assert!(!text.contains("sk-live-key"), "{text}");
+        assert!(!text.contains("deepseek"), "{text}");
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(json.get("env").is_none() && json.get("model").is_none(), "{json}");
+    }
+
+    /// The isolation itself (2026-10-13, the owner's direction): several windows over
+    /// one shared store — one that chose GLM, one that chose the official service,
+    /// one freshly opened — each window's spawn answers its own provider, never
+    /// another window's, and the config dir is the one shared `~/.ggs/claude` for all
+    /// of them (the login and history are per-machine).
+    #[test]
+    fn each_window_resolves_its_own_provider() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        let mut store = seeded_store();
+        store.active_id = Some("glm".to_owned());
+        write_store(&home, &store).unwrap();
+        let shared_dir = home.join("claude").to_str().unwrap().to_owned();
+
+        // The window that chose official: no provider vars — its own login, never
+        // the store's default GLM.
+        let official_env = backend_env_for(CLAUDE_CODE_EXT_ID, &home, Some("official"));
+        let official = env_map(&official_env);
+        assert!(!official.contains_key("ANTHROPIC_BASE_URL"), "{official:?}");
+        assert_eq!(official["CLAUDE_CONFIG_DIR"], shared_dir);
+
+        // The window on GLM — which is also the store's default, so the fresh-window
+        // shape (`None`, the not-yet-snapshotted resolution) agrees with it.
+        for instance in [Some("glm"), None] {
+            let glm_env = backend_env_for(CLAUDE_CODE_EXT_ID, &home, instance);
+            let glm = env_map(&glm_env);
+            assert_eq!(
+                glm["ANTHROPIC_BASE_URL"],
+                "https://open.bigmodel.cn/api/anthropic",
+                "{instance:?}: {glm:?}"
+            );
+            assert_eq!(glm["CLAUDE_CONFIG_DIR"], shared_dir);
+        }
+
+        // A choice whose profile is gone (deleted in another window) falls back to
+        // the store's default — the bridge never runs provider-less.
+        let gone_env = backend_env_for(
+            CLAUDE_CODE_EXT_ID,
+            &home,
+            Some("deleted-in-another-window"),
+        );
+        let gone = env_map(&gone_env);
         assert_eq!(
-            json.pointer("/env/ANTHROPIC_AUTH_TOKEN")
-                .and_then(|v| v.as_str()),
-            Some("sk-live-key")
+            gone["ANTHROPIC_BASE_URL"],
+            "https://open.bigmodel.cn/api/anthropic",
+            "{gone:?}"
         );
-        assert_eq!(
-            json.pointer("/env/ANTHROPIC_MODEL")
-                .and_then(|v| v.as_str()),
-            Some("deepseek-flash")
-        );
-        assert_eq!(
-            json.pointer("/env/ANTHROPIC_DEFAULT_OPUS_MODEL")
-                .and_then(|v| v.as_str()),
-            Some("deepseek-flash")
-        );
-        assert_eq!(
-            json.pointer("/env/ANTHROPIC_DEFAULT_FABLE_MODEL")
-                .and_then(|v| v.as_str()),
-            Some("deepseek-flash")
-        );
-        assert_eq!(
-            json.pointer("/env/ANTHROPIC_DEFAULT_HAIKU_MODEL")
-                .and_then(|v| v.as_str()),
-            Some("deepseek-flash")
-        );
-        assert_eq!(
-            json.pointer("/env/CLAUDE_CODE_AUTO_MODE_SERVER")
-                .and_then(|v| v.as_str()),
-            Some("0")
-        );
+    }
+
+    /// The window's choice snapshot: the first resolution claims the store's default
+    /// as the window's own, another window's switch (which rewrites the on-disk
+    /// default) never drags it, its own switch moves only its own choice, and a
+    /// profile deleted from under it falls back to the store's default.
+    #[test]
+    fn a_window_snapshots_the_default_and_keeps_its_provider_until_it_switches() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        let mut store = third_party_store();
+        store.active_id = Some("official".to_owned());
+        write_store(&home, &store).unwrap();
+
+        assert_eq!(effective_choice(&store).as_deref(), Some("official"));
+
+        // Another window switches the store's default; this window keeps its own.
+        let mut switched = store.clone();
+        switched.active_id = Some("deepseek".to_owned());
+        write_store(&home, &switched).unwrap();
+        assert_eq!(effective_choice(&switched).as_deref(), Some("official"));
+
+        // Its own switch moves only its own choice.
+        set_instance_choice("deepseek");
+        assert_eq!(effective_choice(&switched).as_deref(), Some("deepseek"));
+
+        // A profile deleted from under the window (in any window) falls back to the
+        // store's default — the bridge never runs provider-less.
+        let mut without = switched.clone();
+        without.profiles.retain(|profile| profile.id != "deepseek");
+        without.active_id = Some("official".to_owned());
+        assert_eq!(effective_choice(&without).as_deref(), Some("official"));
     }
 
     /// Saving keeps, replaces and clears the stored key as `apiKey` says, and the store
@@ -2939,7 +3081,7 @@ mod tests {
         let home = ggs_home().unwrap();
         let mut store = third_party_store();
         store.profiles[1].api_key_enc = Some(seal(&home, "sk-live-key").unwrap());
-        let answer = list_answer(&store);
+        let answer = list_answer(&store, store.active_id.as_deref());
         let json = serde_json::to_string(&answer).unwrap();
         assert!(
             !json.contains("sk-live-key"),
@@ -3008,9 +3150,12 @@ mod tests {
             .find(|p| p.id == "kimi")
             .expect("the kimi profile is seeded");
         assert_eq!(kimi.model.as_deref(), Some("kimi-k3"));
-        assert_eq!(kimi.small_model.as_deref(), Some("kimi-k2.7-code"));
+        assert_eq!(kimi.small_model.as_deref(), Some("kimi-for-coding"));
+        // The seeded endpoint rides the preset's coding entry (2026-10-13) — a
+        // fresh install points at api.kimi.com/coding, not the moonshot origin.
+        assert_eq!(kimi.base_url.as_deref(), Some("https://api.kimi.com/coding"));
         // The frontend never learns a ciphertext: the list answer masks the key.
-        let answer = list_answer(&store);
+        let answer = list_answer(&store, store.active_id.as_deref());
         assert!(answer.profiles.iter().all(|p| !p.has_key));
         assert_eq!(answer.bridged_ext_ids, vec!["Anthropic.claude-code"]);
     }
@@ -3328,7 +3473,7 @@ mod tests {
         );
         assert_eq!(map["ANTHROPIC_AUTH_TOKEN"], "sk-cc-deepseek");
         write_store(&home, &store).unwrap();
-        let spawn_env = backend_env_for(CLAUDE_CODE_EXT_ID, &home);
+        let spawn_env = backend_env_for(CLAUDE_CODE_EXT_ID, &home, None);
         let spawn = env_map(&spawn_env);
         assert_eq!(spawn["ANTHROPIC_AUTH_TOKEN"], "sk-cc-deepseek");
 

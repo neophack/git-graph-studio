@@ -3,11 +3,14 @@
 // Anthropic-compatible endpoint (DeepSeek, Zhipu GLM, Moonshot Kimi, a custom
 // gateway). Everything lives in the backend's store under `~/.ggs/` (never Claude
 // Code's own `~/.claude`), the API key sealed with AES-256-GCM and decrypted only at
-// the backend's spawn; the plaintext never crosses this seam. This half is the store
-// client (list / save / delete / activate), the sidebar switcher chip the claude view's
-// header carries (quick pick: switch provider, or open the management page), and the
-// `bridgedExtIds` knowledge — the app here names no extension id, the backend's answer
-// says whose sidebar sections get the chip.
+// the backend's spawn; the plaintext never crosses this seam. The active provider is
+// per window: `provider_list`'s `activeId` is THIS window's provider, an activate
+// sets this window now and the default new windows boot with, and the provider
+// configuration rides the spawn environment only — never a file on disk. This half
+// is the store client (list / save / delete / activate), the sidebar switcher chip
+// the claude view's header carries (quick pick: switch provider, or open the
+// management page), and the `bridgedExtIds` knowledge — the app here names no
+// extension id, the backend's answer says whose sidebar sections get the chip.
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -61,12 +64,14 @@ export interface ProviderDraft {
 }
 
 /** Dispatched on document whenever the cached list changed (a save, delete or activate
- *  landed, here or in another window through the backend event). */
+ * landed, here or in another window through the backend event). */
 export const PROVIDERS_CHANGED_EVENT = 'ggs:providers-changed';
 
 /** The backend's push of the same (`cmd_providers` emits it whenever the store visibly
- *  changed — a switch, an edit, a delete; a switch restarts the bridged backend beside
- *  it): a switch in one window updates the chip in another. */
+ * changed — a switch, an edit, a delete; a switch restarts the bridged backend beside
+ * it): every window re-reads the store — the profiles list follows, while each
+ * window's own `activeId` (its per-window choice) never moves but by its own
+ * switch. */
 const BACKEND_PROVIDERS_EVENT = 'providers-changed';
 
 /** A defaulting test layer (or a degraded backend) answers null — an empty store, not
@@ -151,10 +156,12 @@ export async function deleteProvider(id: string): Promise<ProviderList | null> {
 	}
 }
 
-/** Make one profile the provider the bridged backend runs under. The backend rewrites
- *  Claude's redirected settings and restarts the bridged extension's process — the
- *  sidebar's chat re-renders on the fresh provider (the running process would keep the
- *  provider, and the login page, it booted under). */
+/** Make one profile the provider THIS window's bridged backend runs under (per
+ * window, 2026-10-13: several GGS windows may run different providers at once). The
+ * backend moves this window's own choice and the new-window default together, and
+ * restarts this window's bridged extension's process — the sidebar's chat re-renders
+ * on the fresh provider (the running process would keep the provider, and the login
+ * page, it booted under). Other windows are never touched. */
 export async function activateProvider(id: string): Promise<ProviderList | null> {
 	try {
 		const list = await invoke<ProviderList | null>('provider_activate', { id });

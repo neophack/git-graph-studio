@@ -3,8 +3,10 @@
 // add / edit form (preset, endpoint, model ids, the API key that travels once into the
 // backend's seal), activate, delete, the token-usage curve over the redirected Claude
 // state, and the storage notes: everything lives under ~/.ggs, the key is AES-256-GCM
-// sealed at rest and decrypted only when the bridged backend spawns, and a switch
-// restarts that backend. Flat and compact by design: one hairline-bordered usage card,
+// sealed at rest and decrypted only when the bridged backend spawns — never written
+// into any file on disk — and a switch restarts this window's backend on the new
+// provider (the active provider is per window; the store's active id is the default
+// new windows boot with). Flat and compact by design: one hairline-bordered usage card,
 // one-line rows, a two-column form. Opened as an editor tab (the `ai.providers`
 // command, the sidebar chip's "Configure Providers…" entry); a lazy chunk, like the
 // self-test and analysis pages.
