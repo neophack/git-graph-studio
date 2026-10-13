@@ -200,6 +200,9 @@ export class DomRecorder {
 		doc.addEventListener('scroll', onScroll, { capture: true, passive: true });
 		doc.addEventListener('input', onInput, true);
 		doc.addEventListener('change', onInput, true);
+		// The caret moves without mutating anything — its own event rides the same
+		// schedule, so a phone typing into the mirror sees the cursor land live.
+		doc.addEventListener('selectionchange', onInput, true);
 		this.watched.set(doc, {
 			observer,
 			adoptedKey: this.adoptedKey(doc),
@@ -207,6 +210,7 @@ export class DomRecorder {
 				doc.removeEventListener('scroll', onScroll, { capture: true });
 				doc.removeEventListener('input', onInput, true);
 				doc.removeEventListener('change', onInput, true);
+				doc.removeEventListener('selectionchange', onInput, true);
 			}
 		});
 	}
@@ -476,6 +480,56 @@ export class DomRecorder {
 	}
 
 	/** What no observer reports: values, CSSOM-only styles, adopted sheets, dead frames. */
+	/** The caret state as last sent (a bare string key; `''` = no caret). */
+	private lastCaret = '';
+
+	/** Append the caret op when the focused editable's selection changed. */
+	private caretInto(ops: MirrorOp[]): void {
+		const op = this.readCaret();
+		const c = op as Extract<MirrorOp, { o: 'caret' }> | null;
+		const key = c ? `${c.i ?? ''}:${c.s ?? ''}:${c.e ?? ''}:${c.ci ?? ''}:${c.co ?? ''}` : '';
+		if (key === this.lastCaret) return;
+		this.lastCaret = key;
+		ops.push(op ?? { o: 'caret' });
+	}
+
+	/** The focused editable's caret, following the active-element chain into the focused
+	 *  same-origin frame (a webview's chat composer). `null` when nothing editable holds
+	 *  it — non-text controls (a checkbox) hold focus without a caret. */
+	private readCaret(): Extract<MirrorOp, { o: 'caret' }> | null {
+		let doc: Document | null = this.root;
+		for (let hop = 0; doc && hop < 8; hop += 1) {
+			const el = doc.activeElement as HTMLElement | null;
+			if (!el) return null;
+			const tag = el.tagName;
+			if (tag === 'TEXTAREA' || (tag === 'INPUT' && !['button', 'checkbox', 'radio', 'range', 'file', 'submit', 'reset', 'color', 'image'].includes((el as HTMLInputElement).type))) {
+				const i = this.ids.get(el);
+				if (i === undefined) return null;
+				const control = el as HTMLInputElement;
+				const s = control.selectionStart ?? control.value.length;
+				const e = control.selectionEnd ?? s;
+				return { o: 'caret', i, s, e };
+			}
+			if (contentEditable(el)) {
+				const selection = doc.getSelection();
+				const node = selection?.anchorNode ?? null;
+				if (!node || node.nodeType !== 3) return null; // an element boundary: no caret rather than a misplaced one
+				const ci = this.ids.get(node);
+				return ci === undefined ? null : { o: 'caret', ci, co: selection!.anchorOffset };
+			}
+			// Descend into the focused same-origin frame the recorder also watches.
+			if (tag === 'IFRAME') {
+				const inner = (el as HTMLIFrameElement).contentDocument;
+				if (inner && this.watched.has(inner)) {
+					doc = inner;
+					continue;
+				}
+			}
+			return null;
+		}
+		return null;
+	}
+
 	private pollInto(ops: MirrorOp[]): void {
 		for (const control of this.controls) {
 			if (!control.isConnected) {
@@ -490,6 +544,7 @@ export class DomRecorder {
 			const isInput = control instanceof (control.ownerDocument.defaultView?.HTMLInputElement ?? HTMLInputElement);
 			ops.push(isInput ? { o: 'val', i: id, v: control.value, ck: (control as HTMLInputElement).checked } : { o: 'val', i: id, v: control.value });
 		}
+		this.caretInto(ops);
 		for (const [style, count] of this.cssomStyles) {
 			if (!style.isConnected) {
 				this.cssomStyles.delete(style);
@@ -527,4 +582,17 @@ export class DomRecorder {
 		const viewport = this.readViewport();
 		if (viewport.w !== this.viewport.w || viewport.h !== this.viewport.h) this.flush();
 	}
+}
+
+/** Whether an element is content-editable, by the attribute chain: `isContentEditable`
+ *  answers undefined in some engines (jsdom), and the composer is often a nested
+ *  editable inside a host that carries the attribute. */
+function contentEditable(el: Element): boolean {
+	for (let node: Element | null = el; node; node = node.parentElement) {
+		const value = node.getAttribute('contenteditable');
+		if (value === null || value === 'inherit') continue;
+		if (value === 'false') return false;
+		return true; // '', 'true', 'plaintext-only'
+	}
+	return false;
 }

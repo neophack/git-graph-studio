@@ -89,6 +89,10 @@ export class MirrorViewer {
 	/** A fluid copy's scrollers that sit at their end: they follow the content's growth. */
 	private stuck = new Set<Element>();
 	private lastScan = 0;
+	/** The mirrored caret (the phone-mirror cursor): the last caret op's fields, painted
+	 *  into whichever document of the copy holds the editable. */
+	private caret: { i?: number; s?: number; e?: number; ci?: number; co?: number } | null = null;
+	private caretEl: HTMLElement | null = null;
 	/** A fluid copy's scroll reports waiting for their throttle (node id → fraction, end). */
 	private scrollReport = new Map<number, [number, boolean]>();
 	private scrollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -119,6 +123,9 @@ export class MirrorViewer {
 	}
 
 	dispose(): void {
+		this.caretEl?.remove();
+		this.caretEl = null;
+		this.caret = null;
 		if (this.scrollTimer !== null) clearTimeout(this.scrollTimer);
 		this.scrollTimer = null;
 		this.scrollReport.clear();
@@ -161,6 +168,7 @@ export class MirrorViewer {
 			}
 		}
 		this.stick();
+		this.paintCaret();
 	}
 
 	private snapshot(doc: SDoc, vp: Viewport, seq: number): void {
@@ -374,6 +382,11 @@ export class MirrorViewer {
 				if (op.ck !== undefined) control.checked = op.ck;
 				return;
 			}
+			case 'caret': {
+				this.caret = op.i === undefined && op.ci === undefined ? null : { ...op };
+				this.paintCaret();
+				return;
+			}
 			case 'scroll': {
 				const el = this.need(op.i) as Element;
 				if (this.deps.fluid) {
@@ -417,6 +430,81 @@ export class MirrorViewer {
 	 * already sits at its end is taken: a page's own scrolled position (a virtualized list
 	 * restored at the PC's offset, git-graph-rs among them) is left where the PC had it,
 	 * never dragged into the unrendered space its spacers stand in for. */
+	/** Paint the mirrored caret: a blinking bar inside the copy's document, at the position
+	 *  measured in the COPY's own layout (its fonts are what the viewer sees; for a fluid
+	 *  copy its width is, too — the offsets are width-independent either way). No editable
+	 *  or a lost node means no bar. */
+	private paintCaret(): void {
+		let doc: Document | null = null;
+		let x = 0;
+		let y = 0;
+		let h = 0;
+		let color = '';
+		if (this.caret?.i !== undefined) {
+			const el = this.nodes.get(this.caret.i) as HTMLInputElement | HTMLTextAreaElement | undefined;
+			if (!el || !el.isConnected || el.ownerDocument === null) return this.clearCaret();
+			doc = el.ownerDocument;
+			const measured = measureCaret(el, this.caret.s ?? el.value.length);
+			x = measured.x;
+			y = measured.y;
+			h = measured.h;
+			color = el.ownerDocument.defaultView?.getComputedStyle(el).color ?? '';
+		} else if (this.caret?.ci !== undefined) {
+			const node = this.nodes.get(this.caret.ci);
+			if (!node || node.nodeType !== 3 || !node.isConnected) return this.clearCaret();
+			doc = node.ownerDocument;
+			const view = doc?.defaultView ?? null;
+			if (!doc || !view) return this.clearCaret();
+			const host =
+				node.parentElement && view.getComputedStyle(node.parentElement).display !== 'inline'
+					? node.parentElement
+					: node.parentElement?.parentElement ?? null;
+			// The range's rect is exact where engines give one; a host-box fallback
+			// (the caret before the first character) covers the engines that do not.
+			let rect: { left: number; top: number; height: number } | null = null;
+			try {
+				const range = doc.createRange();
+				range.setStart(node, Math.min(this.caret.co ?? 0, node.nodeValue?.length ?? 0));
+				range.collapse(true);
+				const box = range.getBoundingClientRect();
+				if (box && (box.width || box.height || box.left || box.top)) {
+					rect = { left: box.left, top: box.top, height: box.height };
+				}
+			} catch {
+				rect = null;
+			}
+			if (!rect) {
+				const hostBox = host?.getBoundingClientRect();
+				if (!hostBox) return this.clearCaret();
+				rect = { left: hostBox.left, top: hostBox.top, height: 0 };
+			}
+			const line = host ? parseFloat(view.getComputedStyle(host).lineHeight) || 0 : 0;
+			x = rect.left;
+			y = rect.top;
+			h = rect.height || line || 16;
+			color = host ? view.getComputedStyle(host).color : '';
+		} else {
+			return this.clearCaret();
+		}
+		if (!doc) return this.clearCaret();
+		let bar = this.caretEl;
+		if (!bar || bar.ownerDocument !== doc) {
+			this.caretEl?.remove();
+			bar = makeCaret(doc);
+			this.caretEl = bar;
+		}
+		// Viewport → document coordinates (the bar is absolutely positioned in the copy).
+		const view = doc.defaultView!;
+		bar.style.transform = `translate(${x + view.scrollX}px, ${y + view.scrollY}px)`;
+		bar.style.height = `${Math.max(h, 10)}px`;
+		bar.style.background = color || 'currentColor';
+	}
+
+	private clearCaret(): void {
+		this.caretEl?.remove();
+		this.caretEl = null;
+	}
+
 	private stick(): void {
 		if (!this.deps.fluid) return;
 		const doc = this.root;
@@ -459,4 +547,72 @@ export class MirrorViewer {
 		for (const [id, [fraction, end]] of this.scrollReport) report(id, fraction, end);
 		this.scrollReport.clear();
 	}
+}
+
+/** The blink style + one bar element, appended to the copy's document (idempotent). */
+function makeCaret(doc: Document): HTMLElement {
+	let style = doc.getElementById('mirror-caret-style');
+	if (!style) {
+		style = doc.createElement('style');
+		style.id = 'mirror-caret-style';
+		style.textContent =
+			'.mirror-caret{position:absolute;width:2px;margin:0;padding:0;border:0;pointer-events:none;z-index:2147483647;animation:mirror-caret-blink 1.06s steps(1) infinite}@keyframes mirror-caret-blink{50%{opacity:0}}';
+		(doc.head ?? doc.documentElement).appendChild(style);
+	}
+	const bar = doc.createElement('div');
+	bar.className = 'mirror-caret';
+	(doc.body ?? doc.documentElement).appendChild(bar);
+	return bar;
+}
+
+/** Where a control's caret sits, measured in the copy's own layout: a mirror div with the
+ *  control's fonts and box, the text up to the offset, and a marker span — the classic
+ *  textarea-caret trick, run against the copy so its fonts decide. */
+function measureCaret(
+	el: HTMLInputElement | HTMLTextAreaElement,
+	at: number
+): { x: number; y: number; h: number } {
+	const doc = el.ownerDocument!;
+	const view = doc.defaultView!;
+	const cs = view.getComputedStyle(el);
+	const mirror = doc.createElement('div');
+	const styles = [
+		'font-family',
+		'font-size',
+		'font-weight',
+		'font-style',
+		'letter-spacing',
+		'line-height',
+		'padding-top',
+		'padding-right',
+		'padding-bottom',
+		'padding-left',
+		'border-top-width',
+		'border-left-width',
+		'text-indent',
+		'word-break',
+		'overflow-wrap',
+		'box-sizing'
+	]
+		.map((name) => `${name}:${cs.getPropertyValue(name)}`)
+		.join(';');
+	mirror.setAttribute(
+		'style',
+		`position:absolute;top:0;left:0;visibility:hidden;white-space:${el.tagName === 'TEXTAREA' ? 'pre-wrap' : 'pre'};width:${el.clientWidth}px;${styles}`
+	);
+	mirror.appendChild(doc.createTextNode(el.value.slice(0, at)));
+	const mark = doc.createElement('span');
+	mark.textContent = '​';
+	mirror.appendChild(mark);
+	(doc.body ?? doc.documentElement).appendChild(mirror);
+	const mirrorBox = mirror.getBoundingClientRect();
+	const markBox = mark.getBoundingClientRect();
+	mirror.remove();
+	const line = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.2 || 16;
+	const box = el.getBoundingClientRect();
+	return {
+		x: box.left + (markBox.left - mirrorBox.left) - el.scrollLeft,
+		y: box.top + (markBox.top - mirrorBox.top) - el.scrollTop,
+		h: markBox.height || line
+	};
 }

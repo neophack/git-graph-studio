@@ -167,6 +167,50 @@ describe('the recorder and the viewer', () => {
 		expect(bodyOf(r.copy())).toBe(bodyOf(r.pc));
 	});
 
+	it('mirrors the caret — a phone typing into the copy sees where it lands', () => {
+		const r = rig('<textarea id="composer" class="chat-input">hello</textarea>');
+		const pcBox = r.pc.getElementById('composer') as HTMLTextAreaElement;
+		const copyBox = r.copy().getElementById('composer') as HTMLTextAreaElement;
+		// Nothing focused yet: no caret op, no bar in the copy.
+		r.recorder.flush();
+		expect(r.copy().querySelector('.mirror-caret')).toBeNull();
+
+		// The PC's composer takes focus (the tap's replay put it there): the caret op
+		// crosses with the selection, and the copy grows a blinking bar. jsdom leaves a
+		// detached document's activeElement alone on focus() — set it as the browser would.
+		Object.defineProperty(r.pc, 'activeElement', { value: pcBox, configurable: true });
+		pcBox.setSelectionRange(2, 2);
+		r.recorder.flush();
+		expect(copyBox.value).toBe('hello');
+		expect(r.copy().querySelector('.mirror-caret')).not.toBeNull();
+
+		// Typing moves it (a later value + caret batch re-positions the same bar).
+		pcBox.value = 'hello world';
+		pcBox.setSelectionRange(11, 11);
+		r.recorder.flush();
+		const bar = r.copy().querySelector('.mirror-caret')!;
+		expect(r.copy().querySelectorAll('.mirror-caret').length).toBe(1);
+		expect(bar.style.height).toMatch(/px$/);
+
+		// Focus leaves the editable: the bar goes away.
+		Object.defineProperty(r.pc, 'activeElement', { value: r.pc.body, configurable: true });
+		r.recorder.flush();
+		expect(r.copy().querySelector('.mirror-caret')).toBeNull();
+	});
+
+	it('mirrors a contenteditable caret through its text node', () => {
+		const r = rig('<div id="editor" contenteditable="true">hi<span>there</span></div>');
+		const editor = r.pc.getElementById('editor')!;
+		Object.defineProperty(r.pc, 'activeElement', { value: editor, configurable: true });
+		const text = editor.firstChild as Text;
+		// A detached document has no window selection in jsdom — the browser's is stubbed
+		// as the recorder reads it (anchorNode/anchorOffset of the live one).
+		const selection = { anchorNode: text, anchorOffset: 1 };
+		Object.defineProperty(r.pc, 'getSelection', { value: () => selection, configurable: true });
+		r.recorder.flush();
+		expect(r.copy().querySelector('.mirror-caret')).not.toBeNull();
+	});
+
 	it('carries form values that no observer reports', () => {
 		const r = rig('<input id="q" value="a"><input id="c" type="checkbox">');
 		(r.pc.getElementById('q') as HTMLInputElement).value = 'typed';
