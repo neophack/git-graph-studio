@@ -1810,10 +1810,10 @@ M9 依赖 M2（认证）和 M3（多窗口），可与 M5（响应式）并行�
 
 | 部分 | 位置 | 职责 |
 | ---- | ---- | ---- |
-| 录制 | `src/remote/mirror/recorder.ts`（PC 窗口内） | 节点编号；快照；MutationObserver → 操作批（add/rm/attr/text）；轮询表单值、滚动、CSSOM 规则、adoptedStyleSheets、视口；同源 iframe（扩展 webview 页）递归；URL 规范化为 app/ggs 令牌；脚本内容、事件属性、CSP meta 不过线 |
+| 录制 | `src/remote/mirror/recorder.ts`（PC 窗口内） | 节点编号；快照；MutationObserver → 操作批（add/rm/attr/text）；轮询表单值、滚动、CSSOM 规则、adoptedStyleSheets、视口；同源 iframe（扩展 webview 页）递归；URL 规范化为 app/ggs 令牌；脚本内容、事件属性、CSP meta 不过线；光标与焦点是显示状态而非 DOM（2026-10-13，所有者反馈“Claude 在 PC 上选中输入框有光标和红色边沿，远程没有”）：光标经 caret 操作过线，焦点链（沿 activeElement 逐文档深入，含 `:focus-visible` 位）经 focus 操作过线，`focusin/focusout` 触发即时批；快照携带两者的当前值——它们只在变化时作为操作过线，后来挂载（或重新快照）的观看者若不随快照拿到，副本就永远停在“无光标无焦点”，直到 PC 侧下一次变化 |
 | 重放 | `replay.ts`（PC） | 按目标框架自己的构造器派发 pointer/mouse/wheel/keyboard/input 事件，补齐合成事件没有的默认动作（按下聚焦、滚轮滚动、编辑键）；合成指针 id 的 pointer capture 由补丁接管 |
 | 主机 | `host.ts` + `hostStub.ts`（PC） | 观看者表（10 s hello、35 s 遗忘）；首个 hello 才加载录制器；最后一个观看者离开即停；焦点模拟、隐藏窗口尺寸适配 |
-| 观看 | `viewer.ts` + `viewerInput.ts` + `viewerBoot.ts`（浏览器） | 无脚本沙箱 iframe 中重建副本并缩放适配；序号缺口请求重新快照；鼠标、触摸（点按、拖动滚动、长按菜单、双指缩放留给浏览器）、隐藏文本框承接键盘/IME/手机软键盘；聚焦编辑框的光标作为 caret 操作过线（控件选区，或 contenteditable 的锚点——文本节点按字符偏移、元素按子索引，空编辑框锚在自身），副本按自身布局画闪烁竖条，且键盘 proxy 骑到光标处（换算到本页视口坐标）——IME 候选框锚定 proxy，跟随输入位置而非藏匿角落（2026-10-13） |
+| 观看 | `viewer.ts` + `viewerInput.ts` + `viewerBoot.ts`（浏览器） | 无脚本沙箱 iframe 中重建副本并缩放适配；序号缺口请求重新快照；鼠标、触摸（点按、拖动滚动、长按菜单、双指缩放留给浏览器）、隐藏文本框承接键盘/IME/手机软键盘；聚焦编辑框的光标作为 caret 操作过线（控件选区，或 contenteditable 的锚点——文本节点按字符偏移、元素按子索引，空编辑框锚在自身），副本按自身布局画闪烁竖条，且键盘 proxy 骑到光标处（换算到本页视口坐标）——IME 候选框锚定 proxy，跟随输入位置而非藏匿角落（2026-10-13）；焦点链经标记类解析进副本自己的显示（2026-10-13，所有者方向：**不额外画光标和边框，镜像把状态解析对内容显示**）：焦点元素带 `mirror-focus`（PC 匹配 `:focus-visible` 再加 `mirror-focus-visible`）、其祖先带 `mirror-focus-within`，副本每个样式表里带 `:focus*` 的规则都在紧邻原位插入伪类换成标记类的同款规则（CSSOM 邻位插入，等特异性时保持表内顺序）——Claude 输入框的红边由 Claude 自己的 `:focus-within` CSS 画出来，副本不添加任何视觉；每批操作后重放标记（页面重写 class 属性不会抹掉） |
 | 手机 | `phoneShell.ts`（PC） | 窗口宽度 < 600（只可能来自手机观看者的适配）时 PC 窗口换上手机外壳（shell.ts + remote.css，指针按 coarse）；回到桌面尺寸即恢复 |
 
 通道：PC → 浏览器为应用事件 `studio://mirror-down`（Relay 转发给监听的会话，`to` 字段区分快照接收者）；浏览器 → PC 为 `studio://mirror-up`，`emitTo('main')`。

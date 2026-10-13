@@ -15,20 +15,75 @@
 // at its end as the PC's page grows (the PC's own scroll positions mean nothing in a copy
 // laid out at another width).
 
-import { applyDelta, localizeTokens, type DownMessage, type MirrorOp, type SDoc, type SNode, type StrDelta, type Viewport } from './protocol';
+import { applyDelta, localizeTokens, type CaretState, type DownMessage, type FocusEntry, type MirrorOp, type SDoc, type SNode, type StrDelta, type Viewport } from './protocol';
 
 const XLINK = 'http://www.w3.org/1999/xlink';
 /** The copy is a picture: no caret blinking where the PC has none, no text selection
  *  fighting the replayed one, pinch-zoom kept for phones — and the PC window's own
  *  minimize / maximize / close never show: a remote page has no window to drive, and a
  *  tap on them would replay into the PC's real controls. */
-const BASE_CSS = 'html{touch-action:pinch-zoom}.window-controls{display:none!important}*{caret-color:transparent!important;-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none}';
+const BASE_CSS = 'html{touch-action:pinch-zoom}.window-controls{display:none!important}*{-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none}';
 /** A fluid copy scrolls natively under the finger. */
-const FLUID_CSS = '*{caret-color:transparent!important;-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none}';
+const FLUID_CSS = '*{-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none}';
+/** No native caret in the copy — the painted bar is the PC's. Its own sheet, so the page's
+ *  own `caret-color` stays readable for that bar (caretColor lifts it for the read). */
+const HIDE_CARETS_CSS = '*{caret-color:transparent!important}';
 /** A fluid copy looks for its scrollers again at most this often while it knows none. */
 const SCROLLER_SCAN_MS = 1000;
 /** How often a fluid copy reports a scroller's position while it scrolls. */
 const SCROLL_REPORT_MS = 100;
+
+/** The marker classes the mirrored focus wears (2026-10-13, the owner's direction: 远程不
+ *  额外画光标和边框——镜像把焦点状态解析进副本自己的显示): the focused element carries
+ *  `mirror-focus` (and `mirror-focus-visible` when the PC's engine matched it so), its
+ *  ancestors `mirror-focus-within`, and every `:focus` rule of the copy's own sheets gains
+ *  a class variant right beside it (deriveFocusRules) — Claude's composer border is drawn
+ *  by Claude's own CSS, matched through the marker, never painted by the viewer. */
+const FOCUS_CLASS = 'mirror-focus';
+const FOCUS_VISIBLE_CLASS = 'mirror-focus-visible';
+const FOCUS_WITHIN_CLASS = 'mirror-focus-within';
+const FOCUS_PSEUDOS: Array<[RegExp, string]> = [
+	[/:focus-within/g, `.${FOCUS_WITHIN_CLASS}`],
+	[/:focus-visible/g, `.${FOCUS_VISIBLE_CLASS}`],
+	[/:focus(?!-)/g, `.${FOCUS_CLASS}`]
+];
+
+/** Split a selector list on its top-level commas — outside parens, brackets and strings. */
+function selectorsOf(selectorText: string): string[] {
+	const out: string[] = [];
+	let depth = 0;
+	let quote = '';
+	let start = 0;
+	for (let at = 0; at < selectorText.length; at += 1) {
+		const ch = selectorText[at];
+		if (quote) {
+			if (ch === '\\') at += 1;
+			else if (ch === quote) quote = '';
+			continue;
+		}
+		if (ch === '"' || ch === "'") quote = ch;
+		else if (ch === '(' || ch === '[') depth += 1;
+		else if (ch === ')' || ch === ']') depth = Math.max(0, depth - 1);
+		else if (ch === ',' && depth === 0) {
+			out.push(selectorText.slice(start, at));
+			start = at + 1;
+		}
+	}
+	out.push(selectorText.slice(start));
+	return out;
+}
+
+/** One selector with every `:focus` pseudo exchanged for its marker class — `null` when
+ *  the selector carries none (or is already a derived one). */
+function focusVariant(selector: string): string | null {
+	if (!selector.includes(':focus') || selector.includes('mirror-focus')) return null;
+	let out = selector;
+	for (const [pattern, cls] of FOCUS_PSEUDOS) out = out.replace(pattern, cls);
+	return out;
+}
+
+/** A sheet or grouping rule the derivation inserts into (@media, a nested style rule). */
+type RuleParent = CSSStyleSheet | CSSGroupingRule;
 
 /** An element scrolled to (within a couple of pixels of) its end. */
 function atEnd(el: Element): boolean {
@@ -102,8 +157,26 @@ export class MirrorViewer {
 	private lastScan = 0;
 	/** The mirrored caret (the phone-mirror cursor): the last caret op's fields, painted
 	 *  into whichever document of the copy holds the editable. */
-	private caret: { i?: number; s?: number; e?: number; ci?: number; co?: number } | null = null;
+	private caret: CaretState | null = null;
 	private caretEl: HTMLElement | null = null;
+	/** Each copy document's caret-hiding sheet, and the caret colour resolved per editable
+	 *  (cleared whenever a sheet of the copy changes — the read restyles the document). */
+	private caretHide = new WeakMap<Document, HTMLStyleElement>();
+	private caretColors = new WeakMap<Element, string>();
+	/** The mirrored focus chain (the last focus op / snapshot's `focus`): the elements
+	 *  currently wearing the marker classes, so a batch that rewrites a class attribute
+	 *  (React re-rendering the focused wrapper) re-receives them afterwards. */
+	private focus: FocusEntry[] = [];
+	private marked: Element[] = [];
+	/** Rules a sheet gained from the focus derivation, by sheet with the container each
+	 *  was inserted into: removed before the sheet is derived again (its text was
+	 *  replaced, or it loaded). */
+	private derived = new WeakMap<CSSStyleSheet, Array<[RuleParent, CSSRule]>>();
+	/** Each document's <link> load listener (a frame's document is reset and refilled, not
+	 *  recreated). The refill's `document.open()` erases a document's listeners in spec
+	 *  engines (Chromium measured), so every fill re-attaches it — removed first, for the
+	 *  engines that keep listeners across an open. */
+	private loadHooks = new WeakMap<Document, () => void>();
 	/** A fluid copy's scroll reports waiting for their throttle (node id → fraction, end). */
 	private scrollReport = new Map<number, [number, boolean]>();
 	private scrollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -137,6 +210,8 @@ export class MirrorViewer {
 		this.caretEl?.remove();
 		this.caretEl = null;
 		this.caret = null;
+		this.focus = [];
+		this.marked = [];
 		if (this.scrollTimer !== null) clearTimeout(this.scrollTimer);
 		this.scrollTimer = null;
 		this.scrollReport.clear();
@@ -158,6 +233,10 @@ export class MirrorViewer {
 		if (('w' in message ? message.w : undefined) !== this.deps.stream) return;
 		if (message.k === 'snap') {
 			if (message.to !== this.me) return;
+			// The snapshot carries the state the PC holds right now (caret, focus): both
+			// cross as ops only on change, so this is a fresh viewer's starting state.
+			this.caret = message.caret ?? null;
+			this.focus = message.focus ?? [];
 			this.snapshot(message.doc, message.vp, message.seq);
 			return;
 		}
@@ -185,6 +264,9 @@ export class MirrorViewer {
 		}
 		this.stick();
 		this.paintCaret();
+		// The page may have rewritten a marked element's class attribute in this batch
+		// (React re-rendering the focused wrapper): the markers go back on afterwards.
+		this.applyFocus();
 	}
 
 	private snapshot(doc: SDoc, vp: Viewport, seq: number): void {
@@ -215,6 +297,10 @@ export class MirrorViewer {
 		this.fillDoc(target, doc);
 		this.seq = seq;
 		this.stick();
+		// The rebuilt copy starts from the state the snapshot carried: the caret bar and
+		// the focus markers go on now, not when the PC's state next changes.
+		this.paintCaret();
+		this.applyFocus();
 		if (!this.ready) {
 			this.ready = true;
 			this.deps.onReady?.();
@@ -277,10 +363,27 @@ export class MirrorViewer {
 		}
 		const adopted = doc.createElement('style');
 		adopted.textContent = this.localize(sdoc.adopted);
-		(doc.head ?? doc.documentElement).append(base, adopted);
+		const hideCarets = doc.createElement('style');
+		hideCarets.textContent = HIDE_CARETS_CSS;
+		this.caretHide.set(doc, hideCarets);
+		(doc.head ?? doc.documentElement).append(base, hideCarets, adopted);
 		this.adoptedStyles.set(sdoc.d, adopted);
 		this.canonAdopted.set(sdoc.d, sdoc.adopted);
 		for (const run of later) run();
+		// The sheets are in (the <link> ones still loading — their own listener re-runs
+		// this): mirror the page's own :focus rules onto the marker classes now.
+		this.deriveFocusRules(doc);
+		let onLoad = this.loadHooks.get(doc);
+		if (!onLoad) {
+			onLoad = () => {
+				this.deriveFocusRules(doc);
+				// The sheet may restyle the editable (its caret colour, its box): repaint.
+				this.paintCaret();
+			};
+			this.loadHooks.set(doc, onLoad);
+		}
+		doc.removeEventListener('load', onLoad, true);
+		doc.addEventListener('load', onLoad, true);
 		this.deps.onDocument?.(doc);
 	}
 
@@ -451,6 +554,7 @@ export class MirrorViewer {
 				const next = this.resolve(op.i, op.v, op, this.canonText.get(op.i));
 				this.canonText.set(op.i, next);
 				node.data = this.localize(next);
+				if (node.parentNode?.nodeName === 'STYLE') this.deriveFocusRules(node.ownerDocument!);
 				return;
 			}
 			case 'val': {
@@ -464,6 +568,11 @@ export class MirrorViewer {
 			case 'caret': {
 				this.caret = op.i === undefined && op.ci === undefined ? null : { ...op };
 				this.paintCaret();
+				return;
+			}
+			case 'focus': {
+				this.focus = op.f ?? [];
+				this.applyFocus();
 				return;
 			}
 			case 'scroll': {
@@ -483,6 +592,7 @@ export class MirrorViewer {
 				const next = this.resolve(op.i, op.v, op, this.canonCss.get(op.i));
 				this.canonCss.set(op.i, next);
 				style.textContent = this.localize(next);
+				this.deriveFocusRules(style.ownerDocument!);
 				return;
 			}
 			case 'adopted': {
@@ -491,6 +601,7 @@ export class MirrorViewer {
 				const next = this.resolve(op.d, op.v, op, this.canonAdopted.get(op.d));
 				this.canonAdopted.set(op.d, next);
 				style.textContent = this.localize(next);
+				this.deriveFocusRules(style.ownerDocument!);
 				return;
 			}
 			case 'doc': {
@@ -509,13 +620,101 @@ export class MirrorViewer {
 		}
 	}
 
-	/** A fluid copy's end-following: every scroller at its end is pinned there again after
-	 * the content changed. The copy starts at the end (a chat is read from its latest
-	 * message), and while no scroller is known the copy looks for them now and then — the
-	 * page's scroller often appears only once its content renders. Only a scroller that
-	 * already sits at its end is taken: a page's own scrolled position (a virtualized list
-	 * restored at the PC's offset, git-graph-rs among them) is left where the PC had it,
-	 * never dragged into the unrendered space its spacers stand in for. */
+	/** Wear the mirrored focus (2026-10-13, the owner's direction: the copy adds no
+	 *  visuals of its own): the chain's focused element carries the marker classes, its
+	 *  ancestors the within-one, and the copy's own `:focus` rules — mirrored onto those
+	 *  classes by `deriveFocusRules` — paint exactly what the PC's engine paints (Claude's
+	 *  composer border among them). Called after every batch: a class attribute the page
+	 *  rewrote mid-batch gets its markers back here. */
+	private applyFocus(): void {
+		for (const el of this.marked) {
+			if (el.nodeType !== 1 || !el.isConnected) continue;
+			el.classList.remove(FOCUS_CLASS, FOCUS_VISIBLE_CLASS, FOCUS_WITHIN_CLASS);
+		}
+		this.marked = [];
+		for (const entry of this.focus) {
+			const el = this.nodes.get(entry.i);
+			if (!el || el.nodeType !== 1 || !el.isConnected) continue;
+			const target = el as Element;
+			target.classList.add(FOCUS_CLASS);
+			if (entry.v === 1) target.classList.add(FOCUS_VISIBLE_CLASS);
+			this.marked.push(target);
+			for (let up = target.parentElement; up; up = up.parentElement) {
+				up.classList.add(FOCUS_WITHIN_CLASS);
+				this.marked.push(up);
+			}
+		}
+	}
+
+	/** For every style rule of the copy's own sheets whose selector carries a `:focus`
+	 *  pseudo, insert the same rule with the pseudo exchanged for the marker class RIGHT
+	 *  AFTER it — adjacent, so equal-specificity ties keep the sheet's own order — into
+	 *  the same container (@media, a nesting parent). The page's own declarations then
+	 *  paint the focused state; nothing here authors any visual of its own. Re-runs drop
+	 *  the rules a previous pass inserted before deriving again. */
+	private deriveFocusRules(doc: Document): void {
+		this.caretColors = new WeakMap();
+		let sheets: CSSStyleSheet[];
+		try {
+			sheets = Array.from(doc.styleSheets) as CSSStyleSheet[];
+		} catch {
+			return;
+		}
+		for (const sheet of sheets) {
+			try {
+				const prior = this.derived.get(sheet);
+				if (prior) {
+					for (const [container, rule] of prior) {
+						const rules = container.cssRules;
+						for (let at = 0; at < rules.length; at += 1) {
+							if (rules[at] !== rule) continue;
+							try {
+								container.deleteRule(at);
+							} catch {
+								// Already gone with a text swap: nothing to remove.
+							}
+							break;
+						}
+					}
+				}
+				const inserted: Array<[RuleParent, CSSRule]> = [];
+				this.deriveInto(sheet, sheet.cssRules, inserted);
+				if (inserted.length) this.derived.set(sheet, inserted);
+				else this.derived.delete(sheet);
+			} catch {
+				// A sheet this context cannot read or write: its focus rules stay unmirrored.
+			}
+		}
+	}
+
+	private deriveInto(container: RuleParent, rules: CSSRuleList, out: Array<[RuleParent, CSSRule]>): void {
+		for (let at = 0; at < rules.length; at += 1) {
+			const rule = rules[at];
+			const style = rule as CSSStyleRule;
+			const selector = typeof style.selectorText === 'string' ? style.selectorText : '';
+			if (selector.includes(':focus')) {
+				const variants = selectorsOf(selector)
+					.map(focusVariant)
+					.filter((variant): variant is string => variant !== null);
+				if (variants.length) {
+					try {
+						container.insertRule(`${variants.join(',')}{${style.style?.cssText ?? ''}}`, at + 1);
+						out.push([container, container.cssRules[at + 1]]);
+						// The inserted rule is not itself a candidate: step past it.
+						at += 1;
+					} catch {
+						// A selector this engine rejects: that rule stays unmirrored, harmless.
+					}
+				}
+			}
+			// A rule with children of its own (@media, a nested style rule — every rule is
+			// a grouping in a nesting-aware engine, usually with an empty list) carries
+			// them into the derivation with their own container.
+			const group = rule as CSSRule & { cssRules?: CSSRuleList };
+			if (group.cssRules && group.cssRules.length > 0) this.deriveInto(group as RuleParent, group.cssRules, out);
+		}
+	}
+
 	/** Paint the mirrored caret: a blinking bar inside the copy's document, at the position
 	 *  measured in the COPY's own layout (its fonts are what the viewer sees; for a fluid
 	 *  copy its width is, too — the offsets are width-independent either way). No editable
@@ -534,7 +733,7 @@ export class MirrorViewer {
 			x = measured.x;
 			y = measured.y;
 			h = measured.h;
-			color = el.ownerDocument.defaultView?.getComputedStyle(el).color ?? '';
+			color = this.caretColor(el);
 		} else if (this.caret?.ci !== undefined) {
 			const node = this.nodes.get(this.caret.ci);
 			if (!node || !node.isConnected || (node.nodeType !== 3 && node.nodeType !== 1)) return this.clearCaret();
@@ -563,14 +762,18 @@ export class MirrorViewer {
 			}
 			if (!rect) {
 				const hostBox = host?.getBoundingClientRect();
-				if (!hostBox) return this.clearCaret();
-				rect = { left: hostBox.left, top: hostBox.top, height: 0 };
+				if (!hostBox || !host) return this.clearCaret();
+				// The caret before the first character sits at the content box's corner, past
+				// the border and the padding (Claude's empty composer: 14px in, 10px down).
+				const hs = view.getComputedStyle(host);
+				const inset = (a: string, b: string) => (parseFloat(a) || 0) + (parseFloat(b) || 0);
+				rect = { left: hostBox.left + inset(hs.borderLeftWidth, hs.paddingLeft), top: hostBox.top + inset(hs.borderTopWidth, hs.paddingTop), height: 0 };
 			}
 			const line = host ? parseFloat(view.getComputedStyle(host).lineHeight) || 0 : 0;
 			x = rect.left;
 			y = rect.top;
 			h = rect.height || line || 16;
-			color = host ? view.getComputedStyle(host).color : '';
+			color = host ? this.caretColor(host) : '';
 		} else {
 			return this.clearCaret();
 		}
@@ -588,6 +791,34 @@ export class MirrorViewer {
 		bar.style.height = `${barHeight}px`;
 		bar.style.background = color || 'currentColor';
 		this.reportCaret(doc, x, y, barHeight);
+	}
+
+	/** The colour the PC's engine paints this editable's caret in: the page's own
+	 *  `caret-color`, else its text colour — skipping transparent ones, because Claude's
+	 *  composer types in transparent text (a mirror layer draws the visible characters) and
+	 *  a bar in that colour was invisible (2026-10-13: the copy's composer showed no caret).
+	 *  The copy's caret-hiding sheet is lifted for the read; the answer is cached until a
+	 *  sheet changes, because that lift restyles the whole document. Empty: the bar's own currentColor. */
+	private caretColor(el: Element): string {
+		const known = this.caretColors.get(el);
+		if (known !== undefined) return known;
+		const view = el.ownerDocument.defaultView;
+		if (!view) return '';
+		const hide = this.caretHide.get(el.ownerDocument);
+		// Detached for the read (an engine-independent way to lift a sheet: jsdom honours
+		// neither `media` nor `disabled`), back in the same place right after.
+		const parent = hide?.parentNode ?? null;
+		const next = hide?.nextSibling ?? null;
+		hide?.remove();
+		let color = '';
+		try {
+			const style = view.getComputedStyle(el);
+			color = [style.getPropertyValue('caret-color'), style.color].find((value) => !!value && value !== 'auto' && !transparent(value)) ?? '';
+		} finally {
+			if (hide && parent) parent.insertBefore(hide, next);
+		}
+		this.caretColors.set(el, color);
+		return color;
 	}
 
 	private clearCaret(): void {
@@ -621,6 +852,13 @@ export class MirrorViewer {
 		onCaret({ x: px, y: py, h });
 	}
 
+	/** A fluid copy's end-following: every scroller at its end is pinned there again after
+	 * the content changed. The copy starts at the end (a chat is read from its latest
+	 * message), and while no scroller is known the copy looks for them now and then — the
+	 * page's scroller often appears only once its content renders. Only a scroller that
+	 * already sits at its end is taken: a page's own scrolled position (a virtualized list
+	 * restored at the PC's offset, git-graph-rs among them) is left where the PC had it,
+	 * never dragged into the unrendered space its spacers stand in for. */
 	private stick(): void {
 		if (!this.deps.fluid) return;
 		const doc = this.root;
@@ -666,6 +904,11 @@ export class MirrorViewer {
 }
 
 /** The blink style + one bar element, appended to the copy's document (idempotent). */
+/** A computed colour that paints nothing. */
+function transparent(color: string): boolean {
+	return color === 'transparent' || /^rgba\(.*,\s*0(?:\.0+)?\)$/.test(color.trim());
+}
+
 function makeCaret(doc: Document): HTMLElement {
 	let style = doc.getElementById('mirror-caret-style');
 	if (!style) {

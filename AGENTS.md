@@ -1472,6 +1472,31 @@ database) carries the link through NAT. The whole design lives in
   for keys, IME and the phone keyboard) comes back as `studio://mirror-up` to `main`, where
   `replay.ts` dispatches it with each frame's own event constructors and performs the
   defaults a synthetic event lacks (focus on press, scroll on wheel, editing keys).
+  **The replica's focus and caret state** (2026-10-13, the owner's report "Claude's input
+  shows a caret and a red border on the PC, neither in the remote copy", direction: **no
+  extra visuals — the mirror resolves the state into the copy's own display**): focus and
+  the caret are display state, not DOM — nothing mutates when the PC's composer takes
+  focus. The focused chain (one entry per document along `activeElement`, into the watched
+  frames, each carrying a `:focus-visible` bit) crosses as a `focus` op on
+  `focusin`/`focusout`; the viewer marks the focused element `mirror-focus` (+`-visible`)
+  and its ancestors `mirror-focus-within`, and derives, right beside every rule of the
+  copy's own sheets whose selector carries a `:focus*` pseudo, the same rule with the
+  pseudo exchanged for the marker class (CSSOM-adjacent insertion, order-preserving) —
+  Claude's composer border is painted by Claude's own `:focus-within` CSS matched through
+  the marker, never by the viewer; the markers go back on after every batch (a class
+  attribute the page rewrote cannot wipe them). The caret keeps its op and painted bar,
+  and **both states ride the snapshot**: they cross as ops only on change, so a viewer
+  attaching later — the page opened after the PC had already selected the input — starts
+  from the current state instead of nothing until the PC's next move (the bug as
+  reported). A `<link>` sheet derives when it loads, and every fill re-attaches that
+  load hook: the refill's `document.open()` erases a document's listeners in Chromium,
+  so a webview frame reloaded inside the window copy once lost its focus border for good.
+  The painted bar takes the page's own `caret-color` (its text colour only when that is
+  unset or transparent; the copy's caret-hiding sheet is detached for the read): Claude's
+  composer types in transparent text over a mirror layer, and a bar in the text colour
+  was invisible. A flush puts a poll's earlier reads before its own — a caret read while
+  it sat in a not-yet-serialized text node (the first character typed) once crossed last
+  as "no caret".
   **The replica's wire economy** (2026-10-13, the owner's direction: 1/10 of the mirror
   traffic — "animations the page itself draws need no syncing; sync the core data and
   operations"; plan §22.8): the copy is a picture, not a renderer, so intermediate states

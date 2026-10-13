@@ -130,7 +130,16 @@ export type MirrorOp =
 	 *  contenteditable — a text node at its character offset, or an element at its child
 	 *  index (an empty editable anchors on itself). A bare `{ o: 'caret' }` means no
 	 *  editable holds the caret. */
-	| { o: 'caret'; i?: number; s?: number; e?: number; ci?: number; co?: number }
+	| ({ o: 'caret' } & CaretState)
+	/** The focused element chain (2026-10-13, the owner's direction: 远程不额外画光标和
+	 *  边框,镜像把状态解析进内容显示): one entry per document along the way into the
+	 *  focused same-origin frame — the workbench's iframe element, then the chat page's
+	 *  composer — each carrying `v` when the PC's engine also matches it `:focus-visible`.
+	 *  An empty chain is "nothing focused". The copy marks the named elements and their
+	 *  ancestors with classes and mirrors the page's own `:focus` rules onto them, so the
+	 *  focused visuals (Claude's composer border among them) come from the page's own CSS
+	 *  — nothing is painted on top of the copy. */
+	| { o: 'focus'; f: FocusEntry[] }
 	/** `e`: the scroller sits at its end — the viewer pins its own end (its fonts may make
 	 *  the content a little taller or shorter than the PC's). */
 	| { o: 'scroll'; i: number; t: number; l: number; e?: 1 }
@@ -142,6 +151,17 @@ export type MirrorOp =
 export interface Viewport {
 	w: number;
 	h: number;
+}
+
+/** The focused editable's caret, as the `caret` op and a snapshot's `caret` field carry it. */
+export type CaretState = { i?: number; s?: number; e?: number; ci?: number; co?: number };
+
+/** One link of the focused element chain (the `focus` op). */
+export interface FocusEntry {
+	/** The focused element's node id (the deepest `activeElement` of its document). */
+	i: number;
+	/** The PC's engine matches this element `:focus-visible` (the keyboard-focus ring). */
+	v?: 1;
 }
 
 /** One extension webview's frame on the PC, as its own replica stream (§22.6): a remote page
@@ -157,9 +177,13 @@ export function panelStream(extId: string, panelId: number): string {
 
 /** PC → viewers. `to` names one viewer, or `*`. `own` tells a viewer the window wears
  *  another form factor's UI (another viewer owns it, §22.5): run your own workbench. `w`
- *  names the webview stream a message belongs to; absent, it is the whole window's. */
+ *  names the webview stream a message belongs to; absent, it is the whole window's.
+ *  A snapshot carries the current caret and focus state (2026-10-13): both cross as ops
+ *  only when they CHANGE, so a viewer attaching later — or resnapping — starts from the
+ *  state the PC holds right now, not from nothing until the PC's next move (the input the
+ *  PC had focused showed neither caret nor focus styles in a fresh copy). */
 export type DownMessage =
-	| { k: 'snap'; to: string; w?: string; seq: number; root: number; doc: SDoc; vp: Viewport }
+	| { k: 'snap'; to: string; w?: string; seq: number; root: number; doc: SDoc; vp: Viewport; caret?: CaretState; focus?: FocusEntry[] }
 	| { k: 'ops'; to: '*'; w?: string; seq: number; ops: MirrorOp[] }
 	| { k: 'clip'; to: string; w?: string; text: string }
 	| { k: 'own'; to: string };

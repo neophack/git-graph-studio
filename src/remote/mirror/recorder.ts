@@ -25,7 +25,7 @@
 //    traffic coalesces at `STREAM_FLUSH_MS`; replayed input still flushes immediately, so
 //    interactivity keeps the fast floor.
 
-import { canonicalize, canonicalizeCss, stringDelta, type MirrorOp, type SDoc, type SNode, type Viewport } from './protocol';
+import { canonicalize, canonicalizeCss, stringDelta, type CaretState, type FocusEntry, type MirrorOp, type SDoc, type SNode, type Viewport } from './protocol';
 
 const XHTML = 'http://www.w3.org/1999/xhtml';
 /** A quiet period's first change crosses this fast (the responsive floor). */
@@ -103,6 +103,27 @@ function appRootOf(doc: Document): string {
 /** An element scrolled to (within a pixel of) its end. */
 function atEnd(el: Element): boolean {
 	return el.scrollHeight > el.clientHeight + 1 && el.scrollTop + el.clientHeight >= el.scrollHeight - 2;
+}
+
+/** The caret state's dedup key (a bare string; `''` = no caret). */
+function caretKey(op: Extract<MirrorOp, { o: 'caret' }> | null): string {
+	return op ? `${op.i ?? ''}:${op.s ?? ''}:${op.e ?? ''}:${op.ci ?? ''}:${op.co ?? ''}` : '';
+}
+
+/** The focused chain's dedup key. */
+function focusKey(entries: FocusEntry[]): string {
+	return entries.map((entry) => `${entry.i}:${entry.v ?? 0}`).join('|');
+}
+
+/** A caret op's state fields without the tag (a snapshot's `caret` payload). */
+function caretState(op: Extract<MirrorOp, { o: 'caret' }> | null): CaretState | undefined {
+	if (!op) return undefined;
+	const out: CaretState = {};
+	for (const key of ['i', 's', 'e', 'ci', 'co'] as const) {
+		const value = op[key];
+		if (value !== undefined) out[key] = value;
+	}
+	return out;
 }
 
 /** One animated attribute's send bookkeeping. */
@@ -228,8 +249,12 @@ export class DomRecorder {
 	}
 
 	/** The whole tree as it stands, after the pending changes went out to the viewers
-	 *  already watching (the snapshot's `seq` is the last batch it includes). */
-	snapshot(): { seq: number; root: number; doc: SDoc; vp: Viewport } {
+	 *  already watching (the snapshot's `seq` is the last batch it includes), carrying the
+	 *  caret and focus state the PC holds right now — both cross as ops only on change, so
+	 *  a viewer attaching later starts from the current state, not from nothing until the
+	 *  PC's next move (2026-10-13: the input the PC held focused showed neither caret nor
+	 *  focus styles in a freshly attached copy). */
+	snapshot(): { seq: number; root: number; doc: SDoc; vp: Viewport; caret?: CaretState; focus?: FocusEntry[] } {
 		this.start();
 		this.flush();
 		// The serialization below re-seeds every baseline with the CURRENT values — so
@@ -241,7 +266,20 @@ export class DomRecorder {
 		this.emit(forced);
 		const doc = this.serializeDoc(this.root);
 		this.viewport = this.readViewport();
-		return { seq: this.seq, root: doc.d, doc, vp: this.viewport };
+		// The dedup bases move to what the snapshot carries: the viewers that were already
+		// watching got any change as an op above, and this state is the new viewers' start.
+		const caret = this.readCaret();
+		this.lastCaret = caretKey(caret);
+		const focus = this.readFocus();
+		this.lastFocus = focusKey(focus);
+		return {
+			seq: this.seq,
+			root: doc.d,
+			doc,
+			vp: this.viewport,
+			caret: caretState(caret),
+			focus: focus.length ? focus : undefined
+		};
 	}
 
 	private readViewport(): Viewport {
@@ -322,6 +360,11 @@ export class DomRecorder {
 		// The caret moves without mutating anything — its own event rides the same
 		// schedule, so a phone typing into the mirror sees the cursor land live.
 		doc.addEventListener('selectionchange', onInput, true);
+		// The focused element changes the same way (2026-10-13): focus is display state,
+		// not DOM — nothing mutates when the PC's composer takes focus, but the copy must
+		// show the page's own focus styles the moment they appear on the PC.
+		doc.addEventListener('focusin', onInput, true);
+		doc.addEventListener('focusout', onInput, true);
 		this.watched.set(doc, {
 			observer,
 			adoptedKey: this.adoptedKey(doc),
@@ -331,6 +374,8 @@ export class DomRecorder {
 				doc.removeEventListener('input', onInput, true);
 				doc.removeEventListener('change', onInput, true);
 				doc.removeEventListener('selectionchange', onInput, true);
+				doc.removeEventListener('focusin', onInput, true);
+				doc.removeEventListener('focusout', onInput, true);
 			}
 		});
 	}
@@ -758,8 +803,12 @@ export class DomRecorder {
 		// again: one settle flush armed for the earliest due moment.
 		const settleWait = this.settleAttrs(ops);
 		if (settleWait !== null) this.armSettle(settleWait);
-		this.pollInto(ops);
+		// The caller's earlier reads go BEFORE this flush's own: a poll read the caret while
+		// it sat in a text node not yet serialized ("no caret"), and appended last that
+		// stale op overrode the flush's fresh one — the first character typed into an
+		// empty composer hid the copy's cursor until the next move (2026-10-13).
 		for (const op of extra) ops.push(op);
+		this.pollInto(ops);
 		for (const el of this.scrolled) {
 			const id = this.ids.get(el);
 			if (id === undefined || !el.isConnected) continue;
@@ -782,11 +831,54 @@ export class DomRecorder {
 	/** Append the caret op when the focused editable's selection changed. */
 	private caretInto(ops: MirrorOp[]): void {
 		const op = this.readCaret();
-		const c = op as Extract<MirrorOp, { o: 'caret' }> | null;
-		const key = c ? `${c.i ?? ''}:${c.s ?? ''}:${c.e ?? ''}:${c.ci ?? ''}:${c.co ?? ''}` : '';
+		const key = caretKey(op);
 		if (key === this.lastCaret) return;
 		this.lastCaret = key;
 		ops.push(op ?? { o: 'caret' });
+	}
+
+	/** The focused element chain as last sent (a bare string key; `''` = nothing focused). */
+	private lastFocus = '';
+
+	/** Append the focus op when the focused chain changed. */
+	private focusInto(ops: MirrorOp[]): void {
+		const f = this.readFocus();
+		const key = focusKey(f);
+		if (key === this.lastFocus) return;
+		this.lastFocus = key;
+		ops.push({ o: 'focus', f });
+	}
+
+	/** The focused element chain, one entry per document along the way (the root document's
+	 *  iframe element when focus sits in an extension webview, then the webview page's own
+	 *  focused element), descending only into same-origin frames this recorder also watches.
+	 *  A chain that bottoms out at `body`/`html` — or never starts — is "nothing focused":
+	 *  those hold focus without being it. */
+	private readFocus(): FocusEntry[] {
+		const out: FocusEntry[] = [];
+		let doc: Document | null = this.root;
+		for (let hop = 0; doc && hop < 8; hop += 1) {
+			const el = doc.activeElement as Element | null;
+			if (!el || el === doc.body || el === doc.documentElement) break;
+			const i = this.ids.get(el);
+			if (i === undefined) break;
+			let v: 1 | undefined;
+			try {
+				if (el.matches(':focus-visible')) v = 1;
+			} catch {
+				// An engine without the pseudo (jsdom): the ring mirrors as plain focus.
+			}
+			out.push(v === 1 ? { i, v } : { i });
+			if (el.nodeName === 'IFRAME') {
+				const inner: Document | null = (el as HTMLIFrameElement).contentDocument;
+				if (inner && this.watched.has(inner)) {
+					doc = inner;
+					continue;
+				}
+			}
+			break;
+		}
+		return out;
 	}
 
 	/** The focused editable's caret, following the active-element chain into the focused
@@ -848,6 +940,7 @@ export class DomRecorder {
 			ops.push(isInput ? { o: 'val', i: id, ...delta, ck: (control as HTMLInputElement).checked } : { o: 'val', i: id, ...delta });
 		}
 		this.caretInto(ops);
+		this.focusInto(ops);
 		for (const [style, entry] of this.cssomStyles) {
 			if (!style.isConnected) {
 				this.cssomStyles.delete(style);

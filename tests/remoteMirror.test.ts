@@ -249,6 +249,42 @@ describe('the recorder and the viewer', () => {
 		expect(r.copy().querySelector('.mirror-caret')).toBeNull();
 	});
 
+	it('paints the caret in the page’s own caret-color — Claude’s composer types in transparent text, and a bar in the text colour was invisible (2026-10-13: 有橙色框但是没有光标)', () => {
+		const r = rig('<style>#composer{color:rgba(0, 0, 0, 0);caret-color:rgb(1, 2, 3)}#plain{color:rgb(4, 5, 6)}</style><div id="composer" contenteditable="true" role="textbox"></div><div id="plain" contenteditable="true"></div>');
+		const composer = r.pc.getElementById('composer')!;
+		Object.defineProperty(r.pc, 'activeElement', { value: composer, configurable: true });
+		const selection = { anchorNode: composer as Node, anchorOffset: 0 };
+		Object.defineProperty(r.pc, 'getSelection', { value: () => selection, configurable: true });
+		r.recorder.flush();
+		const bar = r.copy().querySelector('.mirror-caret') as HTMLElement;
+		expect(bar.style.background).toBe('rgb(1, 2, 3)');
+		// The copy still shows no native caret of its own: the hiding sheet is back on.
+		expect(r.copy().defaultView!.getComputedStyle(r.copy().getElementById('composer')!).getPropertyValue('caret-color')).toMatch(/^(?:transparent|rgba\(0, 0, 0, 0\))$/);
+		// No caret-color of its own: the text colour paints it, as the PC's engine does.
+		const plain = r.pc.getElementById('plain')!;
+		Object.defineProperty(r.pc, 'activeElement', { value: plain, configurable: true });
+		selection.anchorNode = plain;
+		r.recorder.flush();
+		expect((r.copy().querySelector('.mirror-caret') as HTMLElement).style.background).toBe('rgb(4, 5, 6)');
+	});
+
+	it('keeps the caret that lands in a text node the same batch adds — the poll’s earlier read (the node not yet known: “no caret”) never overrides the flush’s own', () => {
+		const r = rig('<div id="composer" contenteditable="true" role="textbox"></div>');
+		const composer = r.pc.getElementById('composer')!;
+		Object.defineProperty(r.pc, 'activeElement', { value: composer, configurable: true });
+		const selection = { anchorNode: composer as Node, anchorOffset: 0 };
+		Object.defineProperty(r.pc, 'getSelection', { value: () => selection, configurable: true });
+		r.recorder.flush();
+		// The first character typed: a fresh text node holds the caret before any flush.
+		composer.textContent = 'h';
+		selection.anchorNode = composer.firstChild!;
+		selection.anchorOffset = 1;
+		(r.recorder as unknown as { poll(): void }).poll();
+		const carets = r.sent.flatMap((message) => (message.k === 'ops' ? message.ops : [])).filter((op) => op.o === 'caret');
+		expect(carets.at(-1)).toMatchObject({ o: 'caret', ci: expect.any(Number), co: 1 });
+		expect(r.copy().querySelector('.mirror-caret')).not.toBeNull();
+	});
+
 	it('tells the page where the mirrored caret is — the keyboard proxy rides it, and the IME with it', () => {
 		const points: ({ x: number; y: number; h: number } | null)[] = [];
 		const pc = pcDocument('<textarea id="composer">hi</textarea>');
@@ -295,6 +331,95 @@ describe('the recorder and the viewer', () => {
 		expect(proxy.style.top).toBe('');
 		expect(proxy.style.height).toBe('');
 		expect(proxy.style.bottom).toBe('');
+	});
+
+	it('carries the caret and focus a snapshot finds — a viewer attaching after the PC focused the input sees both at once (2026-10-13: neither crossed again, so a fresh copy showed an input the PC held focused with no cursor and no focus styles)', () => {
+		const pc = pcDocument('<style>.box:focus-within{color:rgb(255, 0, 0)}</style><div class="box"><textarea id="composer">hello</textarea></div>');
+		const host = document.createElement('div');
+		document.body.appendChild(host);
+		const viewer = new MirrorViewer(host, 'remote/9', { appBase: 'https://p/main/', ggsBase: 'https://p/ggs/', resnap: () => undefined });
+		const recorder = new DomRecorder(pc, () => undefined);
+		const box = pc.getElementById('composer') as HTMLTextAreaElement;
+		// The PC held the input focused before any viewer attached.
+		Object.defineProperty(pc, 'activeElement', { value: box, configurable: true });
+		box.setSelectionRange(2, 2);
+		const snap = recorder.snapshot();
+		expect(snap.caret).toMatchObject({ i: expect.any(Number), s: 2, e: 2 });
+		expect(snap.focus).toEqual([{ i: expect.any(Number) }]);
+		viewer.receive({ k: 'snap', to: 'remote/9', ...snap });
+		expect(viewer.root!.querySelector('.mirror-caret')).not.toBeNull();
+		const copyBox = viewer.root!.querySelector('.box')!;
+		expect(copyBox.classList.contains('mirror-focus-within')).toBe(true);
+		expect(viewer.root!.getElementById('composer')!.classList.contains('mirror-focus')).toBe(true);
+	});
+
+	it('mirrors the focused element through the page’s own :focus CSS — the copy paints nothing on top of it (2026-10-13, the owner’s direction)', () => {
+		const r = rig('<style>.box:focus-within{color:rgb(255, 0, 0)}#go:focus{color:rgb(0, 0, 255)}</style><div class="box"><div id="go" tabindex="0">go</div></div>');
+		const go = r.pc.getElementById('go')!;
+		Object.defineProperty(r.pc, 'activeElement', { value: go, configurable: true });
+		r.recorder.flush();
+		const focusOp = r.sent.flatMap((message) => (message.k === 'ops' ? message.ops : [])).find((op) => op.o === 'focus');
+		expect(focusOp).toMatchObject({ o: 'focus', f: [{ i: expect.any(Number) }] });
+		const copy = r.copy();
+		const copyGo = copy.getElementById('go')!;
+		expect(copyGo.classList.contains('mirror-focus')).toBe(true);
+		expect(copy.querySelector('.box')!.classList.contains('mirror-focus-within')).toBe(true);
+		// The page's own rules, mirrored onto the marker classes beside themselves, paint
+		// the copy exactly as the PC's engine paints them.
+		const selectors = Array.from(copy.styleSheets).flatMap((sheet) => Array.from(sheet.cssRules, (rule) => (rule as CSSStyleRule).selectorText));
+		expect(selectors).toContain('.box.mirror-focus-within');
+		expect(selectors).toContain('#go.mirror-focus');
+		expect(copy.defaultView!.getComputedStyle(copy.querySelector('.box')!).color).toBe('rgb(255, 0, 0)');
+		expect(copy.defaultView!.getComputedStyle(copyGo).color).toBe('rgb(0, 0, 255)');
+		// The page rewrites the focused wrapper's class attribute (a React re-render): the
+		// markers are wiped by the attribute op and put back after the batch.
+		copy.querySelector('.box')!;
+		r.pc.querySelector('.box')!.setAttribute('class', 'box busy');
+		r.recorder.flush();
+		const rewritten = r.copy().querySelector('.box')!;
+		expect(rewritten.className).toBe('box busy mirror-focus-within');
+		// Focus leaves: the markers go, and the box's own colour returns.
+		Object.defineProperty(r.pc, 'activeElement', { value: r.pc.body, configurable: true });
+		r.recorder.flush();
+		const settled = r.copy().querySelector('.box')!;
+		expect(settled.classList.contains('mirror-focus-within')).toBe(false);
+		expect(r.copy().defaultView!.getComputedStyle(settled).color).not.toBe('rgb(255, 0, 0)');
+	});
+
+	it('re-derives the focus rules of a frame refilled by a doc op once its late sheet loads — the refill’s document.open() erased the load listener and the reloaded chat’s focus border never showed', () => {
+		const outer = document.createElement('iframe');
+		document.body.appendChild(outer);
+		const pc = outer.contentDocument!;
+		pc.body.innerHTML = '<iframe id="wv"></iframe>';
+		const wv = pc.getElementById('wv') as HTMLIFrameElement;
+		wv.contentDocument!.body.innerHTML = '<div class="box"><div id="composer" contenteditable="true">hi</div></div>';
+		const host = document.createElement('div');
+		document.body.appendChild(host);
+		let viewer: MirrorViewer;
+		const recorder = new DomRecorder(pc, (ops, seq) => viewer.receive({ k: 'ops', to: '*', seq, ops }));
+		viewer = new MirrorViewer(host, 'remote/1', { appBase: 'https://p/main/', ggsBase: 'https://p/ggs/', resnap: () => undefined });
+		viewer.receive({ k: 'snap', to: 'remote/1', ...recorder.snapshot() });
+		const copyDoc = viewer.root!.querySelector('iframe')!.contentDocument!;
+		// Chromium's document.open() erases the document's listeners (measured); jsdom keeps
+		// them, so the refill must be seen re-attaching its hook, not merely keeping one.
+		const hooks = vi.spyOn(copyDoc, 'addEventListener');
+		// The webview reloads: the recorder ships its document whole and the copy refills
+		// the very same frame document.
+		wv.dispatchEvent(new Event('load'));
+		expect(viewer.root!.querySelector('iframe')!.contentDocument).toBe(copyDoc);
+		expect(copyDoc.querySelector('.box')).not.toBeNull();
+		expect(hooks).toHaveBeenCalledWith('load', expect.any(Function), true);
+		// The page's stylesheet lands after the refill (a <link> finishing its load).
+		const sheet = copyDoc.createElement('style');
+		sheet.textContent = '.box:focus-within{color:rgb(255, 0, 0)}';
+		copyDoc.head.appendChild(sheet);
+		sheet.dispatchEvent(new Event('load'));
+		const selectors = Array.from(copyDoc.styleSheets).flatMap((s) => Array.from(s.cssRules, (rule) => (rule as CSSStyleRule).selectorText));
+		expect(selectors).toContain('.box.mirror-focus-within');
+		recorder.stop();
+		viewer.dispose();
+		host.remove();
+		outer.remove();
 	});
 
 	it('carries form values that no observer reports', () => {
@@ -734,6 +859,47 @@ describe('webview streams (§22.6)', () => {
 		// The page leaving ends the stream and, with nobody watching, the focus emulation.
 		pc.receive({ k: 'bye', from: 'remote/3', w: stream });
 		expect(focus).toHaveBeenLastCalledWith(false);
+	});
+
+	it('a remote tap into the frame’s composer focuses it on the PC, and the copy shows the page’s own focus styles (2026-10-13: 远程点击后 PC 有光标和红边、副本没有)', async () => {
+		// The desktop window's chat frame: Claude Code's composer shape — a contenteditable
+		// inside a wrapper whose :focus-within rule draws the border.
+		const frame = document.createElement('iframe');
+		document.body.appendChild(frame);
+		const pcDoc = frame.contentDocument!;
+		pcDoc.head.innerHTML = '<style>.box:focus-within{color:rgb(255, 0, 0)}</style>';
+		pcDoc.body.innerHTML = '<div class="box"><div id="composer" contenteditable="true" role="textbox">hi</div></div>';
+		const stream = viewStream('chat');
+		setWebviewFrameSource({ frameFor: (key) => (key === stream ? frame : null), ensure: () => undefined });
+		const sent: DownMessage[] = [];
+		const pc = new MirrorHost(document, { send: (message) => sent.push(message), fit: () => undefined, focus: () => undefined, now: () => 0 });
+		const pane = document.createElement('div');
+		document.body.appendChild(pane);
+		const copy = new MirrorViewer(pane, 'remote/3', { appBase: 'https://p/main/', ggsBase: 'https://p/ggs/', resnap: () => undefined, stream, fluid: true });
+		pc.receive({ k: 'hello', from: 'remote/3', w: stream, vw: 390, vh: 700, touch: true });
+		await vi.waitFor(() => expect(sent.some((message) => message.k === 'snap')).toBe(true));
+		const deliver = () => {
+			for (const message of sent.splice(0)) copy.receive(message);
+		};
+		deliver();
+		// The phone taps the composer: the replay focuses the PC's editable…
+		const composerId = copy.idOf(copy.root!.getElementById('composer')!)!;
+		pc.receive({ k: 'ptr', from: 'remote/3', w: stream, ev: 'down', b: 0, m: 0, d: 1, i: composerId, fx: 0.5, fy: 0.5 });
+		pc.receive({ k: 'ptr', from: 'remote/3', w: stream, ev: 'up', b: 0, m: 0, d: 1, i: composerId, fx: 0.5, fy: 0.5 });
+		expect(pcDoc.activeElement).toBe(pcDoc.getElementById('composer'));
+		// …and the focus op crosses, so the copy wears the markers and the page's own rule
+		// paints the wrapper exactly as the PC's engine paints it there.
+		await vi.waitFor(() => expect(sent.some((message) => message.k === 'ops' && message.ops.some((op) => op.o === 'focus'))).toBe(true));
+		deliver();
+		const box = copy.root!.querySelector('.box')!;
+		expect(copy.root!.getElementById('composer')!.classList.contains('mirror-focus')).toBe(true);
+		expect(box.classList.contains('mirror-focus-within')).toBe(true);
+		const selectors = Array.from(copy.root!.styleSheets).flatMap((sheet) => Array.from(sheet.cssRules, (rule) => (rule as CSSStyleRule).selectorText));
+		expect(selectors).toContain('.box.mirror-focus-within');
+		expect(copy.root!.defaultView!.getComputedStyle(box).color).toBe('rgb(255, 0, 0)');
+		copy.dispose();
+		pane.remove();
+		pc.receive({ k: 'bye', from: 'remote/3', w: stream });
 	});
 
 	it('re-snapshots every viewer when the frame loads a new document', async () => {
