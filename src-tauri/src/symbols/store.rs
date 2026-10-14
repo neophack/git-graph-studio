@@ -768,7 +768,7 @@ impl SymbolStore {
                 }
             }
         }
-        crate::atomic_write(&dir.join("symbols.bin"), &out)
+        ggs_base::fsx::atomic_write(&dir.join("symbols.bin"), &out)
     }
 
     /// Read the root's index back. `None` for anything absent or not exactly this format's

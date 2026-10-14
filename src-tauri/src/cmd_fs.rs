@@ -679,7 +679,7 @@ pub fn fs_write_chunk(
             .map(str::to_owned)
             .ok_or_else(|| format!("missing {name}"))
     };
-    let path = crate::cmd_ext::percent_decode(&header("x-ggs-path")?);
+    let path = ggs_base::fsx::percent_decode(&header("x-ggs-path")?);
     let offset: u64 = header("x-ggs-offset")?
         .parse()
         .map_err(|_| "bad x-ggs-offset")?;
@@ -723,7 +723,7 @@ pub fn remote_paths_policy(state: State<'_, AppState>) -> Vec<String> {
 #[tauri::command]
 pub fn remote_ext_roots() -> Vec<String> {
     let mut roots: Vec<String> = Vec::new();
-    if let Ok(store) = crate::cmd_ext::extensions_home_dir() {
+    if let Ok(store) = ggs_base::paths::extensions_home() {
         if let Some(home) = store.parent() {
             for rel in ["extensions", "extension-data", "logs/extensions"] {
                 roots.push(home.join(rel).to_string_lossy().into_owned());
@@ -1866,19 +1866,7 @@ pub(crate) fn cached_file_list(
 /// Where unsaved buffers are kept between a crash and the next launch: one JSON file per
 /// document under `~/.ggs/backups/`, named by the hash of its path.
 pub(crate) fn backups_dir() -> Result<PathBuf, String> {
-    // GGS_HOME first (it is what every other user-data path honours, and a sandboxed
-    // instance relocates it); the literal home only as the fallback of a hand launch.
-    let base = std::env::var_os("GGS_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .map(|home| PathBuf::from(home).join(".ggs"))
-        })
-        .ok_or_else(|| "no user home directory".to_string())?;
-    let dir = base.join("backups");
-    fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    Ok(dir)
+    ggs_base::paths::backups_home()
 }
 
 fn backup_file(dir: &Path, path: &str) -> PathBuf {
@@ -1922,7 +1910,7 @@ pub(crate) fn backup_write_into(dir: &Path, path: &str, contents: String) -> Res
     // Atomic replace, and a process-unique temp name: a crash mid-write never leaves a
     // half backup behind, and two app instances back up the same file without sharing
     // one temp path.
-    crate::atomic_write(
+    ggs_base::fsx::atomic_write(
         &target,
         &serde_json::to_vec(&backup).map_err(|e| e.to_string())?,
     )

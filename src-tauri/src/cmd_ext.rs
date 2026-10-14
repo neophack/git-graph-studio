@@ -250,12 +250,12 @@ pub fn extensions_home_dir() -> Result<PathBuf, String> {
 #[cfg(any(test, feature = "testkit"))]
 static TEST_EXTENSIONS_HOME: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
-#[cfg(any(test, feature = "testkit"))]
+#[cfg(test)]
 pub(crate) fn pin_extensions_home_for_tests(dir: PathBuf) {
     *TEST_EXTENSIONS_HOME.lock().unwrap() = Some(dir);
 }
 
-#[cfg(any(test, feature = "testkit"))]
+#[cfg(test)]
 pub(crate) fn unpin_extensions_home_for_tests() {
     *TEST_EXTENSIONS_HOME.lock().unwrap() = None;
 }
@@ -267,16 +267,8 @@ fn home_dir() -> Option<PathBuf> {
         .filter(|p| !p.as_os_str().is_empty())
 }
 
-/// `GGS_HOME` names the `.ggs` directory itself (the relocation `remote_host` and the
-/// daemon's paths honour); unset, the store lives at `~/.ggs/extensions`.
 fn extensions_store_dir() -> Result<PathBuf, String> {
-    if let Some(root) = std::env::var_os("GGS_HOME") {
-        if !root.is_empty() {
-            return Ok(PathBuf::from(root).join("extensions"));
-        }
-    }
-    let home = home_dir().ok_or_else(|| "no user home directory".to_string())?;
-    Ok(home.join(".ggs").join("extensions"))
+    ggs_base::paths::extensions_home()
 }
 
 /// One-time move from the pre-`.ggs` location (`{app_data}/extensions`) so existing installs
@@ -2400,7 +2392,7 @@ pub fn serve_ext_asset(
     // Diagnostics for the page-loading seam: every asset request and its status, so a frame
     // that never renders can be attributed (never reached the handler / 404 / served).
     let uri = request.uri().to_string();
-    let path = percent_decode(request.uri().path().trim_start_matches('/'));
+    let path = ggs_base::fsx::percent_decode(request.uri().path().trim_start_matches('/'));
     let response = if is_app_asset_path(&path) {
         serve_app_asset(assets, &path).unwrap_or_else(|| ext_not_found(&path))
     } else {
@@ -2454,7 +2446,7 @@ fn serve_ext_asset_from(
     request: &tauri::http::Request<Vec<u8>>,
 ) -> tauri::http::Response<Vec<u8>> {
     let requested = request.uri().path().trim_start_matches('/').to_owned();
-    let decoded = percent_decode(&requested);
+    let decoded = ggs_base::fsx::percent_decode(&requested);
     let mut segments = decoded.split(['/', '\\']).filter(|s| !s.is_empty());
     let Some(package) = segments.next() else {
         return ext_not_found(&requested);
@@ -2602,45 +2594,6 @@ fn compose_page(html: &str) -> String {
         return format!("{}{}{}", &html[..end], boot, &html[end..]);
     }
     format!("{}{}", boot, html)
-}
-
-/// Percent-decode a URL path (and `+` as space, the form-encoding convention); invalid
-/// escapes pass through untouched. Byte-wise on purpose: slicing the `&str` at arbitrary
-/// offsets would panic inside multi-byte characters.
-pub(crate) fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut at = 0;
-    while at < bytes.len() {
-        match bytes[at] {
-            b'%' if at + 2 < bytes.len() => {
-                let hi = (bytes[at + 1] as char).to_digit(16);
-                let lo = (bytes[at + 2] as char).to_digit(16);
-                match (hi, lo) {
-                    (Some(hi), Some(lo)) => {
-                        out.push((hi * 16 + lo) as u8);
-                        at += 3;
-                    }
-                    _ => {
-                        out.push(b'%');
-                        at += 1;
-                    }
-                }
-            }
-            // A literal plus: URI PATH semantics (the only use here — the `ggs://`
-            // request path). Plus-for-space is form/query encoding, and decoding it
-            // here 404s every asset whose name carries a `+` (`a+b.js`, `c++/`).
-            b'+' => {
-                out.push(b'+');
-                at += 1;
-            }
-            byte => {
-                out.push(byte);
-                at += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[derive(Deserialize, Debug)]
@@ -4170,15 +4123,15 @@ mod vsix_tests {
         // URI path semantics: `+` is a plus (form/query encoding is where it means a
         // space). Decoding it as a space 404'd every package asset named with a `+`.
         assert_eq!(
-            percent_decode("scripts/c++/parser.js"),
+            ggs_base::fsx::percent_decode("scripts/c++/parser.js"),
             "scripts/c++/parser.js"
         );
-        assert_eq!(percent_decode("a%2Bb.js"), "a+b.js");
-        assert_eq!(percent_decode("a%20b.js"), "a b.js");
-        assert_eq!(percent_decode("unicode%20%E4%BD%A0.js"), "unicode 你.js");
+        assert_eq!(ggs_base::fsx::percent_decode("a%2Bb.js"), "a+b.js");
+        assert_eq!(ggs_base::fsx::percent_decode("a%20b.js"), "a b.js");
+        assert_eq!(ggs_base::fsx::percent_decode("unicode%20%E4%BD%A0.js"), "unicode 你.js");
         // A dangling percent survives as itself (never a panic).
-        assert_eq!(percent_decode("trail%"), "trail%");
-        assert_eq!(percent_decode("trail%2"), "trail%2");
+        assert_eq!(ggs_base::fsx::percent_decode("trail%"), "trail%");
+        assert_eq!(ggs_base::fsx::percent_decode("trail%2"), "trail%2");
     }
 
     #[test]

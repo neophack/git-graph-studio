@@ -361,8 +361,8 @@ fn scan_stream(
         if line_no.is_multiple_of(4096) && cancelled() {
             return Some(out);
         }
-        match crate::can_log::read_line_bounded(&mut reader, &mut buf, &mut bytes) {
-            Ok(crate::can_log::LineRead::Line) => {
+        match ggs_base::fsx::read_line_bounded(&mut reader, &mut buf, &mut bytes) {
+            Ok(ggs_base::fsx::LineRead::Line) => {
                 line_no += 1;
                 let mut text: Option<String> = None;
                 for hit in matcher.find_iter(&buf) {
@@ -387,8 +387,8 @@ fn scan_stream(
                     return Some(out);
                 }
             }
-            Ok(crate::can_log::LineRead::Overlong) => line_no += 1,
-            Ok(crate::can_log::LineRead::Eof) => return Some(out),
+            Ok(ggs_base::fsx::LineRead::Overlong) => line_no += 1,
+            Ok(ggs_base::fsx::LineRead::Eof) => return Some(out),
             Err(_) => return None,
         }
     }

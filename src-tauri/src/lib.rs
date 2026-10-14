@@ -15,8 +15,6 @@
 //! git runner `git` — are always compiled; everything that needs a window is behind
 //! `desktop`.
 
-pub mod ext_protocol;
-
 /// GGS Bash (module 18): the bundled bash-like shell — the `ggs-bash` sidecar, the
 /// integrated terminal's alternative shell and the shell the bridged claude-code
 /// backend is pointed at. Pure std, so it builds under every feature set (ggs-config
@@ -108,27 +106,8 @@ pub mod viewer;
 #[cfg(feature = "desktop")]
 pub mod watcher;
 
-/// One user-data file write, safe across the app's processes: the app is multi-instance
-/// (every launch is its own process and window), so two instances can write the same
-/// `~/.ggs` file at once. The contents go to a process-unique temp sibling, then a single
-/// rename replaces the target — a concurrent reader (another instance booting, the MCP
-/// mode) sees the old or the new whole file, never a torn one, and two writers never
-/// share a temp name.
-pub(crate) fn atomic_write(path: &std::path::Path, contents: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-    }
-    let stem = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "file".to_owned());
-    let tmp = path.with_file_name(format!(".{stem}.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, contents).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("replace {}: {e}", path.display()))
-}
-
 #[cfg(feature = "desktop")]
-pub use desktop::{ensure_main_window, find_repo_root, run, AppState};
+pub use desktop::{ensure_main_window, run, AppState};
 
 #[cfg(feature = "desktop")]
 mod desktop {
@@ -137,6 +116,7 @@ mod desktop {
         cmd_scm, cmd_search, cmd_symbols, ext_child, ext_gallery, ext_process, git, mcp, measure,
         pty, remote_host, viewer, watcher,
     };
+    use ggs_base::workspace::{find_repo_root, is_repo_below};
     use std::sync::{Arc, Mutex};
 
     /// The folders the app has open. The standalone shell works with one folder at a time, but the
@@ -290,27 +270,6 @@ mod desktop {
         }
     }
 
-    /// Whether `path` is a git checkout (a `.git` directory or file) strictly inside one of
-    /// `roots`, spelled without `..` segments - the shape a submodule root takes.
-    pub fn is_repo_below(roots: &[String], path: &str) -> bool {
-        use std::path::{Component, Path};
-        let candidate = Path::new(path);
-        if candidate
-            .components()
-            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
-        {
-            return false;
-        }
-        let normalised = |p: &str| p.replace('\\', "/").trim_end_matches('/').to_lowercase();
-        let wanted = normalised(path);
-        roots.iter().any(|root| {
-            let root = normalised(root);
-            wanted.len() > root.len() + 1
-                && wanted.starts_with(&root)
-                && wanted.as_bytes()[root.len()] == b'/'
-        }) && candidate.join(".git").exists()
-    }
-
     /// What `open_folder` answers: the folder actually opened, and whether it is (or sits
     /// inside) a Git repository — the shell's "Initialize Repository" affordances key on the
     /// latter.
@@ -391,19 +350,6 @@ mod desktop {
         // analysis pages and external-change refreshes pick them up whenever they land.
         state.deferred_services.record(vec![root.clone()]);
         Ok(opened)
-    }
-
-    /// The nearest ancestor of `path` (itself included) that holds a `.git` directory or file (a
-    /// worktree / submodule checkout): what `git rev-parse --show-toplevel` answers, without git.
-    pub fn find_repo_root(path: &str) -> Option<String> {
-        let mut current = Some(std::path::Path::new(path));
-        while let Some(dir) = current {
-            if dir.join(".git").exists() {
-                return Some(dir.to_string_lossy().trim_start_matches(r"\\?\").to_owned());
-            }
-            current = dir.parent();
-        }
-        None
     }
 
     /// The event the frontend listens to for external file changes; its payload is a `FsChange`.
@@ -632,50 +578,6 @@ mod desktop {
 
     /// Strip // and /* */ comments (outside strings, so a URL inside one survives) so a
     /// commented workspace file still parses.
-    fn strip_jsonc(text: &str) -> String {
-        // Kept ranges of the original string are emitted as slices, so multibyte characters
-        // pass through untouched - only ASCII comment bytes are ever skipped.
-        let bytes = text.as_bytes();
-        let mut kept: Vec<&str> = Vec::new();
-        let mut segment = 0;
-        let mut at = 0;
-        let mut in_string = false;
-        while at < bytes.len() {
-            let byte = bytes[at];
-            if in_string {
-                if byte == b'\\' && at + 1 < bytes.len() {
-                    at += 2;
-                    continue;
-                }
-                if byte == b'"' {
-                    in_string = false;
-                }
-                at += 1;
-            } else if byte == b'"' {
-                in_string = true;
-                at += 1;
-            } else if byte == b'/' && bytes.get(at + 1) == Some(&b'/') {
-                kept.push(&text[segment..at]);
-                while at < bytes.len() && bytes[at] != b'\n' {
-                    at += 1;
-                }
-                segment = at;
-            } else if byte == b'/' && bytes.get(at + 1) == Some(&b'*') {
-                kept.push(&text[segment..at]);
-                at += 2;
-                while at + 1 < bytes.len() && !(bytes[at] == b'*' && bytes[at + 1] == b'/') {
-                    at += 1;
-                }
-                at = (at + 2).min(bytes.len());
-                segment = at;
-            } else {
-                at += 1;
-            }
-        }
-        kept.push(&text[segment..]);
-        kept.concat()
-    }
-
     /// Open a `.ggs-workspace` file (File > Open Workspace...): every `folders[].path` entry
     /// becomes an open root - relative paths resolve against the file's own folder, missing
     /// folders are skipped (VS Code's behaviour), and an empty result is an error. A root is
@@ -689,7 +591,7 @@ mod desktop {
     ) -> Result<OpenedWorkspace, String> {
         let text = std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
         let parsed: WorkspaceFile =
-            serde_json::from_str(&strip_jsonc(&text)).map_err(|e| format!("parse {path}: {e}"))?;
+            serde_json::from_str(&ggs_base::jsonc::strip(&text)).map_err(|e| format!("parse {path}: {e}"))?;
         let base = std::path::Path::new(&path)
             .parent()
             .map(std::path::Path::to_path_buf)
@@ -788,19 +690,19 @@ mod desktop {
 
         #[test]
         fn strip_jsonc_removes_line_and_block_comments() {
-            assert_eq!(strip_jsonc("a // line\nb"), "a \nb");
-            assert_eq!(strip_jsonc("a /* block */ b"), "a  b");
+            assert_eq!(ggs_base::jsonc::strip("a // line\nb"), "a \nb");
+            assert_eq!(ggs_base::jsonc::strip("a /* block */ b"), "a  b");
             // A string protects its slashes: URLs inside strings survive.
             assert_eq!(
-                strip_jsonc(r#""see https://example.com""#),
+                ggs_base::jsonc::strip(r#""see https://example.com""#),
                 r#""see https://example.com""#
             );
-            assert_eq!(strip_jsonc("no comments"), "no comments");
+            assert_eq!(ggs_base::jsonc::strip("no comments"), "no comments");
         }
 
         #[test]
         fn a_workspace_file_parses_its_folders_and_ignores_extra_keys() {
-            let parsed: WorkspaceFile = serde_json::from_str(&strip_jsonc(
+            let parsed: WorkspaceFile = serde_json::from_str(&ggs_base::jsonc::strip(
                 "{ \"settings\": {}, \"folders\": [ {\"path\": \"./a\"}, {\"path\": \"b\"}, {\"name\": \"c\", \"path\": \"/abs/c\"} ] }",
             ))
             .unwrap();
@@ -821,18 +723,9 @@ mod desktop {
     /// The user-level `settings.json` (~/.ggs/settings.json): the form writes it, and a hand
     /// edit of it wins on the next launch (M3 3.9's "edited both ways").
     fn settings_file() -> Result<std::path::PathBuf, String> {
-        // `GGS_HOME` names the `.ggs` directory itself (the hermetic-probe relocation);
-        // unset, the settings live at `~/.ggs/settings.json`.
-        if let Some(root) = std::env::var_os("GGS_HOME") {
-            if !root.is_empty() {
-                return Ok(std::path::PathBuf::from(root).join("settings.json"));
-            }
-        }
-        let home = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| "no user home directory".to_string())?;
-        Ok(home.join(".ggs").join("settings.json"))
+        // The `~/.ggs` layout — `GGS_HOME` relocation included — is computed in exactly
+        // one place: ggs_base::paths.
+        ggs_base::paths::settings_file()
     }
 
     #[tauri::command]
@@ -842,7 +735,7 @@ mod desktop {
 
     /// The user's `keybindings.json` (~/.ggs/keybindings.json), same read/write pair.
     fn keybindings_file() -> Result<std::path::PathBuf, String> {
-        settings_file().map(|path| path.with_file_name("keybindings.json"))
+        ggs_base::paths::keybindings_file()
     }
 
     #[tauri::command]
@@ -853,13 +746,13 @@ mod desktop {
     #[tauri::command]
     fn keybindings_write(contents: String) -> Result<(), String> {
         // Atomic: a second running instance may be reading or writing the same file.
-        crate::atomic_write(&keybindings_file()?, contents.as_bytes())
+        ggs_base::fsx::atomic_write(&keybindings_file()?, contents.as_bytes())
     }
 
     #[tauri::command]
     fn settings_write(contents: String) -> Result<(), String> {
         // Atomic: a second running instance may be reading or writing the same file.
-        crate::atomic_write(&settings_file()?, contents.as_bytes())
+        ggs_base::fsx::atomic_write(&settings_file()?, contents.as_bytes())
     }
 
     /// The launch form the frontend's boot decides on, in one round trip instead of three
@@ -2048,27 +1941,6 @@ mod desktop {
     }
 }
 
-#[cfg(test)]
-mod atomic_write_tests {
-    use super::atomic_write;
-
-    #[test]
-    fn replaces_the_target_whole_and_leaves_no_temp_behind() {
-        let dir = tempfile::tempdir().unwrap();
-        // The parent is created on demand, exactly like `~/.ggs` on a first write.
-        let path = dir.path().join("ggs-home").join("settings.json");
-        atomic_write(&path, b"{\"theme\":\"dark\"}").unwrap();
-        atomic_write(&path, b"{\"theme\":\"light\"}").unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), b"{\"theme\":\"light\"}");
-        // Only the target remains: the process-unique temp sibling never survives.
-        let entries: Vec<_> = std::fs::read_dir(path.parent().unwrap())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(entries, vec!["settings.json".to_owned()]);
-    }
-}
-
 #[cfg(all(test, feature = "desktop"))]
 mod launch_path_tests {
     use super::desktop::launch_path_of;
@@ -2324,7 +2196,7 @@ mod repo_root_tests {
         std::fs::create_dir_all(repo.join("src").join("deep")).unwrap();
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         let root =
-            crate::desktop::find_repo_root(&repo.join("src").join("deep").display().to_string())
+            ggs_base::workspace::find_repo_root(&repo.join("src").join("deep").display().to_string())
                 .unwrap();
         assert_eq!(std::path::Path::new(&root), repo.as_path());
         // A `.git` file (a worktree or submodule checkout) counts too; nothing above is found.
@@ -2333,15 +2205,15 @@ mod repo_root_tests {
         std::fs::write(worktree.join(".git"), "gitdir: ../repo/.git/worktrees/wt").unwrap();
         assert_eq!(
             std::path::Path::new(
-                &crate::desktop::find_repo_root(&worktree.display().to_string()).unwrap()
+                &ggs_base::workspace::find_repo_root(&worktree.display().to_string()).unwrap()
             ),
             worktree.as_path()
         );
         let plain = dir.path().join("plain");
         std::fs::create_dir_all(&plain).unwrap();
         // The temp dir itself is not inside a repository (unless the machine's temp is - skip then).
-        if crate::desktop::find_repo_root(&dir.path().display().to_string()).is_none() {
-            assert!(crate::desktop::find_repo_root(&plain.display().to_string()).is_none());
+        if ggs_base::workspace::find_repo_root(&dir.path().display().to_string()).is_none() {
+            assert!(ggs_base::workspace::find_repo_root(&plain.display().to_string()).is_none());
         }
     }
 }

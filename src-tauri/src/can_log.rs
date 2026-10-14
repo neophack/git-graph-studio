@@ -21,6 +21,8 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+use ggs_base::fsx::{read_line_bounded, LineRead};
+
 /* ---------- The frame ---------- */
 
 /// One CAN frame as either format can express it: the common ground of BLF and ASC, so a
@@ -1932,73 +1934,6 @@ fn walk_asc_line(line: &str, state: &mut AscState, sink: &mut dyn FrameSink) {
 /// streaming scan. A classic .asc line is ~60 bytes; a 64-byte FD frame with CANoe's trailing
 /// metadata is ~250 — 1 MiB is thousands of times that, and a "line" longer than this can only
 /// be a corrupt or newline-less file, whose remainder is skipped rather than loaded.
-pub(crate) const MAX_LINE_BYTES: usize = 1 << 20;
-
-pub(crate) enum LineRead {
-    /// A whole line, its `\n` (and any `\r` before it) already stripped.
-    Line,
-    /// A line past `MAX_LINE_BYTES`: consumed and discarded.
-    Overlong,
-    /// The input ended.
-    Eof,
-}
-
-/// Reads one `\n`-terminated line into `buf` (cleared first), never letting `buf` grow
-/// past `MAX_LINE_BYTES` — a gigabyte without a newline cannot become a gigabyte string.
-/// `bytes` accumulates everything consumed, including discarded overlong runs.
-pub(crate) fn read_line_bounded<R: std::io::BufRead>(
-    reader: &mut R,
-    buf: &mut Vec<u8>,
-    bytes: &mut u64,
-) -> std::io::Result<LineRead> {
-    buf.clear();
-    loop {
-        let available = match reader.fill_buf() {
-            Ok(a) => a,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        };
-        if available.is_empty() {
-            return Ok(if buf.is_empty() {
-                LineRead::Eof
-            } else {
-                LineRead::Line
-            });
-        }
-        let newline = memchr::memchr(b'\n', available);
-        match newline {
-            Some(i) => {
-                if buf.len() + i <= MAX_LINE_BYTES {
-                    buf.extend_from_slice(&available[..i]);
-                }
-                *bytes += i as u64 + 1;
-                reader.consume(i + 1);
-                if buf.len() + i > MAX_LINE_BYTES {
-                    buf.clear();
-                    return Ok(LineRead::Overlong);
-                }
-                // A Windows `\r\n` ends with the carriage return just before the newline.
-                if buf.last() == Some(&b'\r') {
-                    buf.pop();
-                }
-                return Ok(LineRead::Line);
-            }
-            None => {
-                let take = if buf.len() + available.len() <= MAX_LINE_BYTES {
-                    buf.extend_from_slice(available);
-                    available.len()
-                } else {
-                    // Past the cap: stop storing, keep scanning for the newline.
-                    buf.clear();
-                    available.len()
-                };
-                *bytes += take as u64;
-                reader.consume(take);
-            }
-        }
-    }
-}
-
 /// Walk an .asc from a reader, line by line — a multi-gigabyte trace is never held as one
 /// string, and one reusable byte buffer serves every line (no per-line allocation).
 /// `on_chunk(frames, bytes)` fires every few thousand lines for progress reports.
@@ -4470,7 +4405,7 @@ base hex timestamps relative
         // One "line" far past the cap, then a real frame after it: the run is skipped,
         // the buffer never holds it, and parsing continues after the newline.
         let mut text = String::from("base hex timestamps relative\n");
-        text.push_str(&"A".repeat(MAX_LINE_BYTES * 2));
+        text.push_str(&"A".repeat(ggs_base::fsx::MAX_LINE_BYTES * 2));
         text.push('\n');
         text.push_str("   0.000001 1  100  Rx   d 1 AA\n");
         let mut agg = Aggregator::new();
