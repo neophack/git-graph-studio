@@ -16,14 +16,13 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64};
 use std::sync::{Arc, Mutex, RwLock};
 
 use serde::Serialize;
 
-use super::doc;
-use super::find::{FindOptions, MatchLoc, Matcher};
-use super::{positioned_read, read_exact_at, LinesLanded, TailGate, HEAD_BYTES};
+use super::find::MatchLoc;
+use super::{positioned_read, read_exact_at, TailGate, HEAD_BYTES};
 
 /// The index: every line's starting byte offset into the raw file. Line 0 starts after the
 /// BOM when one exists; every later entry is the byte after a line break.
@@ -398,6 +397,7 @@ pub struct IndexedFindResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::viewer::find::{FindOptions, Matcher};
 
     fn scratch_file(name: &str, contents: &str) -> (tempfile::TempDir, String) {
         let dir = tempfile::tempdir().expect("tempdir");

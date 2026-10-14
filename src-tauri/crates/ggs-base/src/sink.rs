@@ -32,7 +32,7 @@ impl<T: serde::Serialize + Send> BatchSink<T> for VecSink<T> {
 mod tests {
     use super::*;
 
-    struct CollectingSink(Vec<(String, Value)>);
+    struct CollectingSink(#[allow(dead_code)] Vec<(String, Value)>);
     impl EventSink for CollectingSink {
         fn emit(&self, _event: &str, _payload: Value) {}
     }

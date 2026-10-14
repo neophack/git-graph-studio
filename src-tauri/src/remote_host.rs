@@ -9,7 +9,6 @@
 //! the two never share a crate, and the shared test vectors hold them together
 //! (`src-tauri/tests/remote_control_vectors.rs`).
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
