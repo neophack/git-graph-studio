@@ -515,16 +515,21 @@ pub async fn search_workspace(
     // The scan is CPU- and IO-bound rayon work: it runs on a blocking thread so the async
     // runtime (and every other command) stays responsive while a big tree is searched.
     tauri::async_runtime::spawn_blocking(move || {
+        // The batch stream crosses through the BatchSink seam (events.rs): a move of
+        // search_files into ggs-index lands on this shape unchanged.
+        let mut sink = crate::events::ChannelSink(on_event);
         let (scanned, truncated, cancelled) = search_files(
             &files,
             &root,
             &matcher,
             |batch| {
-                let _ = on_event.send(SearchEvent::Batch { files: batch });
+                use ggs_base::sink::BatchSink;
+                sink.send(SearchEvent::Batch { files: batch });
             },
             || !search.is_current(generation),
         );
-        let _ = on_event.send(SearchEvent::Done {
+        use ggs_base::sink::BatchSink as _;
+        let _ = sink.send(SearchEvent::Done {
             scanned,
             truncated,
             cancelled,

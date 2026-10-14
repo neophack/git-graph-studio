@@ -22,6 +22,10 @@ mod test_isolated_store;
 
 #[cfg(feature = "desktop")]
 pub mod analysis;
+/// The app's adapters over ggs-base's EventSink / BatchSink — the only place a domain
+/// push crosses into tauri (docs/architecture-restructure-plan.md §4.7, P3-1).
+#[cfg(feature = "desktop")]
+pub mod events;
 #[cfg(feature = "desktop")]
 pub mod can_log;
 #[cfg(feature = "desktop")]
