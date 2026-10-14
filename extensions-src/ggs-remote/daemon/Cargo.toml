@@ -32,6 +32,9 @@ axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# The control-channel messages: the ONE shared copy (the restructure's P2-10) — the
+# app tree owns the crate; the daemon links it by path and inherits nothing of the app.
+ggs-remote-proto = { path = "../../../src-tauri/crates/ggs-remote-proto" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_bytes = "0.11"

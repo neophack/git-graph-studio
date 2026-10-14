@@ -1,9 +1,13 @@
-//! The local control channel's messages (docs/ggs-remote-plan.md §7.8): every GGS instance
-//! keeps one connection to the daemon over a named pipe (Windows) or a Unix domain socket.
-//! A message is a little-endian `u32` length plus a MessagePack body (externally tagged
-//! enums, named fields). The app's copy lives in `src-tauri/src/remote_host.rs`; the two are
-//! held together by `tests/vectors/control.json`, not by a shared crate — the daemon imports
-//! nothing of the app and the app nothing of the daemon.
+//! ggs-remote-proto (L0, module 19): the local control channel's messages — the ONE
+//! copy both sides link (docs/ggs-remote-plan.md §7.8). Every GGS instance keeps one
+//! connection to the daemon over a named pipe (Windows) or a Unix domain socket; a
+//! message is a little-endian `u32` length plus a MessagePack body (externally tagged
+//! enums, named fields). The bytes stay the contract: the daemon's
+//! tests/vectors/control.json pins them (this crate's own test reads the vectors), so
+//! the app and the daemon can never drift apart again.
+//!
+//! Zero platform dependencies by design: the daemon (its own workspace) links this
+//! crate by path without inheriting anything of the app.
 
 use serde::{Deserialize, Serialize};
 
@@ -151,24 +155,6 @@ pub fn decode<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, String> 
     rmp_serde::from_slice(body).map_err(|e| format!("control message: {e}"))
 }
 
-/// Read one length-prefixed message body.
-pub async fn read_message<R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut R,
-) -> std::io::Result<Vec<u8>> {
-    use tokio::io::AsyncReadExt;
-    let mut len = [0u8; 4];
-    reader.read_exact(&mut len).await?;
-    let len = u32::from_le_bytes(len) as usize;
-    if len > MAX_CONTROL_MESSAGE {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("control message too large: {len}"),
-        ));
-    }
-    let mut body = vec![0u8; len];
-    reader.read_exact(&mut body).await?;
-    Ok(body)
-}
 
 #[cfg(test)]
 mod tests {
@@ -182,7 +168,7 @@ mod tests {
     /// message in JSON form (the serde shape) and the exact framed bytes.
     #[test]
     fn matches_the_shared_control_vectors() {
-        let raw = include_str!("../tests/vectors/control.json");
+        let raw = include_str!("../../../../extensions-src/ggs-remote/daemon/tests/vectors/control.json");
         let mut vectors: Vec<serde_json::Value> = serde_json::from_str(raw).unwrap();
         // `GGS_BLESS=1 cargo test` rewrites the expected bytes after a deliberate change.
         let bless = std::env::var_os("GGS_BLESS").is_some();

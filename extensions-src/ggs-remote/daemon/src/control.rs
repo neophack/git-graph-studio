@@ -11,7 +11,8 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
-use crate::control_msg::{decode, encode, read_message, FromInstance, ToInstance};
+use crate::control_io::read_message;
+use crate::control_msg::{decode, encode, FromInstance, ToInstance};
 use crate::registry::{Registration, ReplyChunk};
 use crate::state::Daemon;
 

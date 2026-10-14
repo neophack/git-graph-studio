@@ -99,6 +99,7 @@ ggs-proto = { path = "crates/ggs-proto" }
 ggs-codec = { path = "crates/ggs-codec" }
 ggs-git = { path = "crates/ggs-git" }
 ggs-shellenv = { path = "crates/ggs-shellenv" }
+ggs-remote-proto = { path = "crates/ggs-remote-proto" }
 
 # The pretend Node runtime's parser, carrying one upstream gap fix: Boa's class-expression
 # parser dropped a contextual-keyword name, so legal code real packages ship —
@@ -216,6 +217,8 @@ ggs-codec = { workspace = true }
 ggs-git = { workspace = true }
 # The Terminal Shell setting's outward environment (providers and pty read it).
 ggs-shellenv = { workspace = true }
+# The Remote Access control-channel messages (remote_host and the daemon share them).
+ggs-remote-proto = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rpassword = { workspace = true }

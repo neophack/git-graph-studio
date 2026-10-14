@@ -2019,6 +2019,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ggs-remote-proto"
+version = "0.0.0"
+dependencies = [
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+]
+
+[[package]]
 name = "ggs-shellenv"
 version = "0.0.0"
 dependencies = [
@@ -2084,6 +2094,7 @@ dependencies = [
  "ggs-codec",
  "ggs-git",
  "ggs-proto",
+ "ggs-remote-proto",
  "ggs-shellenv",
  "hex",
  "ignore",

@@ -13,4 +13,3 @@
 
 mod node_runtime_host;
 mod perf;
-mod remote_control_vectors;
