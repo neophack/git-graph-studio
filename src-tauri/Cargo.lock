@@ -1957,6 +1957,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ggs-base"
+version = "0.0.0"
+
+[[package]]
 name = "ghash"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

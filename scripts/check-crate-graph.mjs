@@ -60,8 +60,9 @@ function checkEngineSeam(errors) {
  *  its mission, its module-map number and its allowed globals (plan principle 5). */
 function checkDocHeaders(members, errors) {
 	for (const member of members) {
+		const crateRoot = dirname(member.manifest_path);
 		for (const target of ['src/lib.rs', 'src/main.rs']) {
-			const path = join(member.root, target);
+			const path = join(crateRoot, target);
 			if (!existsSync(path)) continue;
 			if (!readFileSync(path, 'utf8').startsWith('//!')) {
 				errors.push(`${relative(appDir, path).split(sep).join('/')}: must open with a //! doc header (mission, module number, allowed globals)`);
