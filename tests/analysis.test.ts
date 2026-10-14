@@ -9,7 +9,7 @@
 vi.mock('mermaid', () => import('./mermaidStub'));
 vi.mock('@mermaid-js/layout-elk', () => ({ default: {} }));
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { setLocale } from '../src/i18n';
+import { setLocale } from '../src/platform/i18n';
 import { flush } from './helpers';
 
 import { backend, Channel } from './tauriMock';

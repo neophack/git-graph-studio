@@ -7,7 +7,7 @@
 import { invoke } from '@tauri-apps/api/core';
 
 import { compareFileMatches, makeQuery, scoreFile, type FileEntry, type FileMatch } from './fuzzy';
-import type { QuickPickItem, QuickPickSource } from './ui';
+import type { QuickPickItem, QuickPickSource } from './platform/ui';
 
 /** Rows the picker shows at once, the budget ui.ts's quick input renders. */
 const PICK_LIMIT = 60;

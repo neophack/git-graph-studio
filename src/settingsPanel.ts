@@ -7,11 +7,11 @@
 
 import { invoke } from '@tauri-apps/api/core';
 
-import { LOCALES, t, tf } from './i18n';
-import { SETTINGS_EVENT, SETTING_DEFS, THEMES, applyEnumSetting, isSettingModified, settings, updateSetting, type SettingDef } from './settings';
+import { LOCALES, t, tf } from './platform/i18n';
+import { SETTINGS_EVENT, SETTING_DEFS, THEMES, applyEnumSetting, isSettingModified, settings, updateSetting, type SettingDef } from './platform/settings';
 import { extensionSettingDefs } from './contributions';
-import { saveExtSetting, extSettings } from './state';
-import { el, icon, notify } from './ui';
+import { saveExtSetting, extSettings } from './platform/state';
+import { el, icon, notify } from './platform/ui';
 import { extLog } from './extLog';
 
 type CategoryId = 'general' | 'appearance' | 'editor' | 'search' | 'extensions';

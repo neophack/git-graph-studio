@@ -4,7 +4,7 @@
 // one notch is the system's lines per notch. Chromium already delivers wheel events aligned
 // to the frame, so a move per event is a move per frame.
 
-import { settings } from '../settings';
+import { settings } from '../platform/settings';
 import type { ScrollModel } from './model';
 import { OngoingScroll, wheelToDelta } from './wheel';
 

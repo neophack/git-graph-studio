@@ -13,7 +13,7 @@
 
 import { commandIconContent, menuSection, resolvedMenuEntries, runMenuEntry, type ResolvedMenuEntry } from './contributions';
 import { extFileDataUrl } from './extHost';
-import { el, icon, labelWithIcons, showContextMenu, showMenuBelow } from './ui';
+import { el, icon, labelWithIcons, showContextMenu, showMenuBelow } from './platform/ui';
 
 /** One node as the extension's frame serialized it (`getTreeItem` already applied). The
  *  handle is the frame's opaque id — `fetchChildren(handle)` walks the next level. */

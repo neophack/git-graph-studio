@@ -5,9 +5,9 @@
 // and the pending changes on Changes, the workspace elsewhere; on the Editor a tap opens the
 // open editors list. Trailing: the page's own actions (Go to File everywhere; the editor's
 // lock toggle and action sheet, the repository's or the terminal's), each a 44 px target.
-import { commands } from '../commands';
-import { t, tf } from '../i18n';
-import type { MenuEntry } from '../ui';
+import { commands } from '../platform/commands';
+import { t, tf } from '../platform/i18n';
+import type { MenuEntry } from '../platform/ui';
 import { showActionSheet } from './actionSheet';
 import { activeEditLock, isEditLocked, onEditLockChange, toggleEditLock } from './editLock';
 import { activeTab, BUILTIN_VIEWS, currentPage, editorPlaceholderShown, extensionContainers, launchers, onWorkbenchChange, type PageId } from './pages';

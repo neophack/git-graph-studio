@@ -6,9 +6,9 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { Workbench } from '../src/workbench';
-import { commands } from '../src/commands';
-import { effectiveKeybinding } from '../src/keybindings';
-import { settings } from '../src/settings';
+import { commands } from '../src/platform/commands';
+import { effectiveKeybinding } from '../src/platform/keybindings';
+import { settings } from '../src/platform/settings';
 import { backend } from './tauriMock';
 import { click, flush, key, notificationButton, notifications, texts, type } from './helpers';
 

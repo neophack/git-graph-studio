@@ -8,11 +8,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { Workbench } from '../src/workbench';
-import { commands } from '../src/commands';
-import { trText } from '../src/i18n';
-import { settings, updateSetting } from '../src/settings';
-import * as state from '../src/state';
-import type { MenuEntry } from '../src/ui';
+import { commands } from '../src/platform/commands';
+import { trText } from '../src/platform/i18n';
+import { settings, updateSetting } from '../src/platform/settings';
+import * as state from '../src/platform/state';
+import type { MenuEntry } from '../src/platform/ui';
 import { backend } from './tauriMock';
 import { flush, hover, menuLabels, texts } from './helpers';
 

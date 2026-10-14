@@ -21,7 +21,7 @@ import { convertCanLog, idFilterRanges, idHex } from './canLogView';
 import { attachPageKeys, attachWheel, type Disposable } from './scroll/input';
 import { ScrollModel } from './scroll/model';
 import { Scrollbar } from './scroll/scrollbar';
-import { basename, el, icon } from './ui';
+import { basename, el, icon } from './platform/ui';
 
 interface CanOpenResult {
 	docId: number;

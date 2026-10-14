@@ -3,7 +3,7 @@
 // what the other reads next. The Search view keeps writing the whole object as before; the
 // helpers here merge, so neither side clobbers the other's keys.
 
-import { load, save } from './state';
+import { load, save } from './platform/state';
 
 export interface FindOptions {
 	caseSensitive: boolean;

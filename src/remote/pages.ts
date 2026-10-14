@@ -10,10 +10,10 @@
 // Nothing here names an extension: the containers are mirrored off the (hidden) activity bar
 // and the launchers are whatever an installed manifest places in `scm/title`'s navigation
 // group — the same entries Source Control renders as its header buttons.
-import { commands } from '../commands';
+import { commands } from '../platform/commands';
 import { codiconOf, resolvedMenuEntries, runMenuEntry, type ResolvedMenuEntry } from '../contributions';
 import { extFileDataUrl } from '../extHost';
-import { t } from '../i18n';
+import { t } from '../platform/i18n';
 import { revealEditorPage, dismissFullScreenSideView } from './nav';
 
 /** A page: a built-in side view, an extension container (`ext-container:…`), the editor,

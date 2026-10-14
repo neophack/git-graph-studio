@@ -2,7 +2,7 @@
 // context menu, listed (and jumped to) from the command palette - with gutter marks in every
 // open editor.
 
-import * as state from './state';
+import * as state from './platform/state';
 
 /** All bookmarks: file path -> 1-based lines. */
 export type BookmarkMap = Record<string, number[]>;

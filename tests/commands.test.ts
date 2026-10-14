@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { commands } from '../src/commands';
+import { commands } from '../src/platform/commands';
 import { Workbench } from '../src/workbench';
 import { backend } from './tauriMock';
 import { flush, texts } from './helpers';

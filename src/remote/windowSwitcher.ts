@@ -2,8 +2,8 @@
 // R21): every GGS window on the PC with its content summary and state badge, switch (a full
 // page load — the other window may run another version), new window, close (unsaved files
 // confirmed first) and restart. Fed by the transport's live WINDOWS pushes.
-import { quickInput, confirmDialog, type QuickPickItem } from '../ui';
-import { t, tf } from '../i18n';
+import { quickInput, confirmDialog, type QuickPickItem } from '../platform/ui';
+import { t, tf } from '../platform/i18n';
 import { remoteEnv } from './session';
 import type { InstanceInfo, Notice } from './transport';
 import { pickRemotePath } from './remoteFilePicker';

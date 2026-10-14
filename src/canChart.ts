@@ -9,7 +9,7 @@
 // payload-length distribution draws. Line strokes, bar fills and legend swatches all read
 // the same class so a channel keeps its colour across every chart that shows it.
 
-import { el } from './ui';
+import { el } from './platform/ui';
 
 /** The margins a chart's axes and labels carve out of its viewBox. */
 const PAD = { left: 56, right: 12, top: 12, bottom: 24 };

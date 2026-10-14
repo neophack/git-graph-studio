@@ -27,12 +27,12 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
-import { t, tf } from './i18n';
-import { settings } from './settings';
+import { t, tf } from './platform/i18n';
+import { settings } from './platform/settings';
 import { attachWheel, type Disposable } from './scroll/input';
 import { ScrollModel } from './scroll/model';
 import { Scrollbar } from './scroll/scrollbar';
-import { el, icon, notify, quickInput, showContextMenu, type MenuEntry } from './ui';
+import { el, icon, notify, quickInput, showContextMenu, type MenuEntry } from './platform/ui';
 
 /** Rows are requested in slabs so scrolling doesn't fire a read per row. */
 const SLAB_BYTES = 64 * 1024;

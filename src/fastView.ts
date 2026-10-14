@@ -11,11 +11,11 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import { DocFindController, type DocFindHost, type DocFindMatch } from './docFind';
-import { t } from './i18n';
+import { t } from './platform/i18n';
 import { attachPageKeys, attachWheel, type Disposable } from './scroll/input';
 import { ScrollModel } from './scroll/model';
 import { Scrollbar } from './scroll/scrollbar';
-import { el, icon, notify } from './ui';
+import { el, icon, notify } from './platform/ui';
 
 interface Symbol {
 	kind: 'function' | 'method' | 'class' | 'struct' | 'interface' | 'enum' | 'module' | 'type';

@@ -10,7 +10,7 @@
 //
 // Deliberately dependency-light (commands only): editor.ts and panel.ts import this at their
 // top level, and a heavier import here would weigh down the first-paint chunk.
-import { commands } from '../commands';
+import { commands } from '../platform/commands';
 
 /** Whether this is the remote shell on its phone form factor. */
 export function phoneShell(): boolean {

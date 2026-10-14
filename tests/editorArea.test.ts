@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EditorArea } from '../src/editorArea';
 import { tabDrag } from '../src/editor';
 import { applyContributions, removeContributions } from '../src/contributions';
-import { SETTINGS_EVENT } from '../src/settings';
+import { SETTINGS_EVENT } from '../src/platform/settings';
 import { backend } from './tauriMock';
 import { click, flush, menuItem, notificationButton, notifications, rightClick, texts } from './helpers';
 

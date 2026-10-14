@@ -6,7 +6,7 @@
 import '@vscode/codicons/dist/codicon.css';
 import './shell.css';
 import { invoke } from '@tauri-apps/api/core';
-import { initSettings, loadSettingsFile } from './settings';
+import { initSettings, loadSettingsFile } from './platform/settings';
 
 // The webview's own right-click menu is the host browser's chrome (back/refresh/save
 // as/print/inspect) - never something this desktop app wants surfaced. Views that offer

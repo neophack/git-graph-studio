@@ -11,7 +11,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { Workbench } from '../src/workbench';
-import { commands } from '../src/commands';
+import { commands } from '../src/platform/commands';
 import { SCENARIOS, handlersFor, type Scenario } from './scenarioFixtures';
 import { backend } from './tauriMock';
 import { click, flush, texts, until } from './helpers';

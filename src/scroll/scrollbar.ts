@@ -4,7 +4,7 @@
 // is the track left over divided by the rows that can scroll; a drag maps the pointer's
 // pixels back through that unit.
 
-import { el } from '../ui';
+import { el } from '../platform/ui';
 import type { ScrollModel } from './model';
 
 /** The shortest thumb (Zed's `MIN_THUMB_SIZE`): a million-row document still shows a grab. */

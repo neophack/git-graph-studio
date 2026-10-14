@@ -6,8 +6,8 @@
 
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
-import { notify, el, icon } from './ui';
-import { t } from './i18n';
+import { notify, el, icon } from './platform/ui';
+import { t } from './platform/i18n';
 import {
 	registerSelfTests,
 	reportMarkdown,

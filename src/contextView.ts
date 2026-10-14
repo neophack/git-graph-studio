@@ -3,8 +3,8 @@
 // editor's cursor changes (debounced there); this view only renders what it is handed, keeps
 // a pin that stops the auto-following, and opens the definition in the editor on click.
 
-import { t } from './i18n';
-import { actionButton, el, escapeHtml, icon } from './ui';
+import { t } from './platform/i18n';
+import { actionButton, el, escapeHtml, icon } from './platform/ui';
 
 /** What the workbench resolved the symbol under the cursor to. */
 export interface ContextDefinition {

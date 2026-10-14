@@ -5,7 +5,7 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { applyTheme, updateSetting } from '../src/settings';
+import { applyTheme, updateSetting } from '../src/platform/settings';
 import { ContextView } from '../src/contextView';
 import { EditorGroup } from '../src/editor';
 import { StatusBar } from '../src/statusbar';

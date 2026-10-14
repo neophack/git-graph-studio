@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { basename, closeContextMenu, confirmDialog, dirname, el, icon, isMenuOpen, joinPath, matchesQuery, notify, quickInput, quickPick, relativeTo, showContextMenu, showMenuBelow, toPosix, type QuickPickItem, type QuickPickSource } from '../src/ui';
+import { basename, closeContextMenu, confirmDialog, dirname, el, icon, isMenuOpen, joinPath, matchesQuery, notify, quickInput, quickPick, relativeTo, showContextMenu, showMenuBelow, toPosix, type QuickPickItem, type QuickPickSource } from '../src/platform/ui';
 import { click, flush, hover, key, menuItem, menuLabels, notificationButton, notifications, texts, type } from './helpers';
 
 describe('dom & path helpers', () => {

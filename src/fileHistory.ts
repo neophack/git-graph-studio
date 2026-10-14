@@ -6,7 +6,7 @@
 import { invoke } from '@tauri-apps/api/core';
 
 import type { DiffRequest } from './scm';
-import { basename, el, icon, toPosix } from './ui';
+import { basename, el, icon, toPosix } from './platform/ui';
 
 export interface HistoryEntry {
 	hash: string;

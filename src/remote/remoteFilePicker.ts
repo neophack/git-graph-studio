@@ -3,8 +3,8 @@
 // workbench's own quick input — folders to step into, `..` to step out, a typed absolute
 // path accepted as is, and "Upload from this device…" to put files into the folder shown.
 import { invoke } from './tauriShim/core';
-import { quickInput, type QuickPickItem } from '../ui';
-import { t } from '../i18n';
+import { quickInput, type QuickPickItem } from '../platform/ui';
+import { t } from '../platform/i18n';
 import { uploadFiles } from './transfer';
 
 interface DirEntryInfo {

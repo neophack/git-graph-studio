@@ -7,7 +7,7 @@ import { RangeSetBuilder, StateEffect, StateField, type Extension } from '@codem
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import { syntaxTree } from '@codemirror/language';
 
-import { SETTINGS_EVENT, THEME_EVENT, settings } from './settings';
+import { SETTINGS_EVENT, THEME_EVENT, settings } from './platform/settings';
 import { deltaToPixels, OngoingScroll, wheelToDelta } from './scroll/wheel';
 
 /** A coalesced redraw around a callback: the returned trigger runs the callback once per

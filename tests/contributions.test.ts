@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { commands } from '../src/commands';
+import { commands } from '../src/platform/commands';
 import { applyContributions, commandIconContent, contextUri, evaluateWhen, extensionViewContributions, menuItems, menuSection, normalizeKeybinding, registerContextProvider, removeContributions, type ManifestContributes } from '../src/contributions';
-import { saveExtSetting } from '../src/state';
+import { saveExtSetting } from '../src/platform/state';
 
 const manifest: ManifestContributes = {
 	commands: [

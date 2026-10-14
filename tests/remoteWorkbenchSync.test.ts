@@ -18,7 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { EditorArea } from '../src/editorArea';
 import { Workbench } from '../src/workbench';
-import { commands } from '../src/commands';
+import { commands } from '../src/platform/commands';
 import { attachWorkbenchSync, WORKBENCH_SYNC_EVENT, type SyncedEditorArea, type SyncedWorkbench, type WorkbenchSyncMessage } from '../src/remote/workbenchSync';
 import { setRemoteEnv } from '../src/remote/session';
 import { backend, emit as mockEmit, listen as mockListen } from './tauriMock';

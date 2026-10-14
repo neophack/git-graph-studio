@@ -4,8 +4,8 @@
 // from the bottom edge with a grabber, an optional header (a back step for submenus, a title,
 // header actions), 48 px rows and a Cancel row; a drag down on the grabber or the header, a
 // tap on the backdrop, Escape or the browser's back all dismiss it. One sheet at a time.
-import { setMenuPresenter, type MenuEntry, type MenuItem } from '../ui';
-import { t } from '../i18n';
+import { setMenuPresenter, type MenuEntry, type MenuItem } from '../platform/ui';
+import { t } from '../platform/i18n';
 import { pushBack } from './backStack';
 import { coarsePointer, formFactor } from './responsive';
 

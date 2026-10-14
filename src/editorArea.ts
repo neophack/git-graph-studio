@@ -9,8 +9,8 @@
 
 import { EditorGroup, askToSaveMany, tabDrag, type Editor, type EditorInput, type EditorPlacement } from './editor';
 import { setDecorationRanges } from './editorDecorations';
-import type { EditorGridCell } from './state';
-import { el, notify } from './ui';
+import type { EditorGridCell } from './platform/state';
+import { el, notify } from './platform/ui';
 import { readText } from '@tauri-apps/plugin-clipboard-manager';
 import type { EditorView } from '@codemirror/view';
 

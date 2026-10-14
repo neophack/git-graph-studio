@@ -18,9 +18,9 @@
 // live, so a rebuilt SVG never orphans them. mermaid loads lazily on the first
 // drawing (a chunk the reports never pay for).
 
-import { t } from './i18n';
-import { THEME_EVENT } from './settings';
-import { actionButton, el } from './ui';
+import { t } from './platform/i18n';
+import { THEME_EVENT } from './platform/settings';
+import { actionButton, el } from './platform/ui';
 
 /* ---------- The backend shapes (`analysis_module_diagram`) ---------- */
 

@@ -9,15 +9,15 @@
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 
-import type { CommandRegistry } from './commands';
+import type { CommandRegistry } from './platform/commands';
 import { commandIconContent, contextUri, resolvedMenuEntries } from './contributions';
 import { extFileDataUrl } from './extHost';
 import type { DiffSide } from './editor';
 import { fileIcon, fileIconColor } from './editor';
 import type { StatusMap } from './explorer';
-import { t, tf, trText } from './i18n';
-import * as state from './state';
-import { actionButton, basename, confirmDialog, el, icon, liveSidebarTitle, notify, quickInput, quickPick, showContextMenu, showMenuBelow, toPosix, type MenuEntry, type QuickPickItem } from './ui';
+import { t, tf, trText } from './platform/i18n';
+import * as state from './platform/state';
+import { actionButton, basename, confirmDialog, el, icon, liveSidebarTitle, notify, quickInput, quickPick, showContextMenu, showMenuBelow, toPosix, type MenuEntry, type QuickPickItem } from './platform/ui';
 
 interface ScmChange {
 	path: string;

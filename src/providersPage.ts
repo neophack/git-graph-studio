@@ -11,8 +11,8 @@
 // command, the sidebar chip's "Configure Providers…" entry); a lazy chunk, like the
 // self-test and analysis pages.
 
-import { t, tf } from './i18n';
-import { actionButton, confirmDialog, el, icon, notify, quickPick } from './ui';
+import { t, tf } from './platform/i18n';
+import { actionButton, confirmDialog, el, icon, notify, quickPick } from './platform/ui';
 import { mountUsagePanel } from './providerUsageView';
 import {
 	PROVIDERS_CHANGED_EVENT,

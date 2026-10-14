@@ -7,8 +7,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
-import type { CommandRegistry } from './commands';
-import { confirmDialog, notify, quickInput, quickPick, type QuickPickItem } from './ui';
+import type { CommandRegistry } from './platform/commands';
+import { confirmDialog, notify, quickInput, quickPick, type QuickPickItem } from './platform/ui';
 
 interface BranchInfo { name: string; remote: boolean; current: boolean; upstream: string | null }
 interface RemoteInfo { name: string; url: string }

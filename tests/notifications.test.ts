@@ -4,7 +4,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { StatusBar } from '../src/statusbar';
-import { clearAllNotifications, notify, notificationEntries } from '../src/ui';
+import { clearAllNotifications, notify, notificationEntries } from '../src/platform/ui';
 import { click, flush, texts } from './helpers';
 
 describe('the notification centre', () => {

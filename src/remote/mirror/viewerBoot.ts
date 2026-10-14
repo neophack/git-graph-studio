@@ -7,7 +7,7 @@
 // switches to its own workbench; the bar's button does the same on request.
 
 import { showBanner } from '../banner';
-import { setLocale, t } from '../../i18n';
+import { setLocale, t } from '../../platform/i18n';
 import type { Attached, Transport } from '../transport';
 import { HELLO_EVERY_MS, MIRROR_DOWN, MIRROR_UP, type DownMessage, type UpPayload } from './protocol';
 import { MirrorViewer } from './viewer';

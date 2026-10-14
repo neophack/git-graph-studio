@@ -6,7 +6,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { EditorView } from '@codemirror/view';
 
-import { el, icon, notify } from './ui';
+import { el, icon, notify } from './platform/ui';
 
 /** One conflict in the document, by line numbers: 1-based, inclusive, including the markers. */
 export interface Conflict {

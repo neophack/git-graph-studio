@@ -16,11 +16,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
-import { t, tf } from './i18n';
+import { t, tf } from './platform/i18n';
 import { attachPageKeys, attachWheel, type Disposable } from './scroll/input';
 import { ScrollModel } from './scroll/model';
 import { Scrollbar } from './scroll/scrollbar';
-import { el, icon, notify, showContextMenu, type MenuEntry } from './ui';
+import { el, icon, notify, showContextMenu, type MenuEntry } from './platform/ui';
 import {
 	COPY_FORMAT_KEYS, COPY_LIMIT, OFFSET_DIGITS, ROW_LADDER, asciiChar, bytesPerRowFor, bytesToLatin1, decodeBase64, formatBytes,
 	groupSizeFor, hexAddress, hexByte, hexHeader, offsetDigitsFor, rowGridTemplate, type CopyFormat

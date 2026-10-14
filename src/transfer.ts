@@ -10,10 +10,10 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 
-import { t, tf } from './i18n';
+import { t, tf } from './platform/i18n';
 import { remoteEnv } from './remote/session';
 import { mirrorViewersNow } from './remote/mirror/hostStub';
-import { basename, notify, progressToast, type MenuEntry } from './ui';
+import { basename, notify, progressToast, type MenuEntry } from './platform/ui';
 
 /** One progress report of a desktop transfer (`fs_export` / `fs_import`). */
 export interface TransferProgress {

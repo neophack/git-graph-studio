@@ -9,9 +9,9 @@ vi.mock('@mermaid-js/layout-elk', () => ({ default: {} }));
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Workbench } from '../src/workbench';
-import { commands } from '../src/commands';
+import { commands } from '../src/platform/commands';
 import { bookmarksFor } from '../src/bookmarks';
-import * as state from '../src/state';
+import * as state from '../src/platform/state';
 import { backend } from './tauriMock';
 import { installRemoteRound, uninstallRemoteRound } from './remoteRound';
 import { click, flush, key, menuItem, menuLabels, notifications, texts, until } from './helpers';

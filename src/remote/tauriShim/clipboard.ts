@@ -2,8 +2,8 @@
 // browser's clipboard, with the classic fallbacks where it is unavailable (an insecure
 // context — a self-signed certificate the device does not trust): `execCommand('copy')` to
 // write, a prompt to paste into.
-import { quickInput } from '../../ui';
-import { t } from '../../i18n';
+import { quickInput } from '../../platform/ui';
+import { t } from '../../platform/i18n';
 
 export async function writeText(text: string): Promise<void> {
 	try {

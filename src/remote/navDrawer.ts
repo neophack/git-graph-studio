@@ -5,8 +5,8 @@
 // transfers, the full application menus (File, Edit, View, … as sheets), Settings and the
 // Data Saver switch, and the session's traffic. A tap on the backdrop, a swipe to the left,
 // Escape or the phone's back closes it.
-import { commands } from '../commands';
-import { t, tf } from '../i18n';
+import { commands } from '../platform/commands';
+import { t, tf } from '../platform/i18n';
 import type { MenuDefinition } from '../titlebar';
 import { showActionSheet } from './actionSheet';
 import { branchName, workspaceName } from './appBar';

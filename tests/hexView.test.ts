@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { bytesPerRowFor, HexView } from '../src/hexView';
 import { EditorGroup } from '../src/editor';
-import { settings } from '../src/settings';
+import { settings } from '../src/platform/settings';
 import { backend } from './tauriMock';
 import { flush } from './helpers';
 

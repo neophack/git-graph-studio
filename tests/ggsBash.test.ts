@@ -7,8 +7,8 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { DEFAULT_SETTINGS, SETTING_DEFS, migrateStoredSettings, settings, updateSetting } from '../src/settings';
-import { setLocale, t } from '../src/i18n';
+import { DEFAULT_SETTINGS, SETTING_DEFS, migrateStoredSettings, settings, updateSetting } from '../src/platform/settings';
+import { setLocale, t } from '../src/platform/i18n';
 import { backend } from './tauriMock';
 
 beforeEach(() => {

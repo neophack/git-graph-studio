@@ -16,9 +16,9 @@
 // exception is a key in the extension's own namespace (its package name, its command-id
 // prefixes): the extension runs here and sets those itself, so unset reads false.
 
-import { extSettings } from './state';
-import { commands } from './commands';
-import { el, icon, type MenuEntry, type MenuItem } from './ui';
+import { extSettings } from './platform/state';
+import { commands } from './platform/commands';
+import { el, icon, type MenuEntry, type MenuItem } from './platform/ui';
 
 /** The menu locations Studio surfaces. `git.pullpush` is VS Code's SCM sync menu — where
  * a Gerrit `refs/for/` push goes — rendered inside the Source Control "..."

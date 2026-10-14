@@ -10,7 +10,7 @@ import { SearchQuery, openSearchPanel, setSearchQuery } from '@codemirror/search
 import { countMatches, createFindPanel } from '../src/findWidget';
 import { findOptions } from '../src/findOptions';
 import { FindHistory, HistoryRecall } from '../src/findHistory';
-import { settings } from '../src/settings';
+import { settings } from '../src/platform/settings';
 import { search } from '@codemirror/search';
 import { click, key, texts, type } from './helpers';
 

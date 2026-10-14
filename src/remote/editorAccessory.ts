@@ -5,8 +5,8 @@
 // The arrows and Tab are the editor's own key events (CodeMirror's keymap runs them, so a
 // selection, a fold or a completion list reacts exactly as to a hardware key); the rest are
 // registry commands. The row never takes the focus: a tap must not drop the keyboard.
-import { commands } from '../commands';
-import { t } from '../i18n';
+import { commands } from '../platform/commands';
+import { t } from '../platform/i18n';
 
 export interface AccessoryKey {
 	id: string;

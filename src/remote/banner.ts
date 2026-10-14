@@ -1,7 +1,7 @@
 // A thin banner across the top of the remote workbench (docs/ggs-remote-plan.md §9.2): the
 // transport's notices — the relay restored, the PC reconnecting, a new version — that the
 // user should see without a modal. One at a time; `ms = 0` keeps it until replaced.
-import { t } from '../i18n';
+import { t } from '../platform/i18n';
 
 let current: HTMLElement | null = null;
 let timer: ReturnType<typeof setTimeout> | undefined;

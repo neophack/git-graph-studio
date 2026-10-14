@@ -6,9 +6,9 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { applyContributions, removeContributions } from '../src/contributions';
-import { commands } from '../src/commands';
+import { commands } from '../src/platform/commands';
 import { ExtensionHost } from '../src/extHost';
-import * as state from '../src/state';
+import * as state from '../src/platform/state';
 import { FS_CHANGED_EVENT, OPEN_PATHS_EVENT, Workbench } from '../src/workbench';
 import { backend, windowApi } from './tauriMock';
 import { click, flush, key, notificationButton, texts } from './helpers';
@@ -354,7 +354,7 @@ describe('external changes the watcher could not list in full', () => {
 describe('chords', () => {
 	it('spells the second key like a binding, with every modifier, and Escape cancels', async () => {
 		const ran: string[] = [];
-		const { commands } = await import('../src/commands');
+		const { commands } = await import('../src/platform/commands');
 		commands.register({ id: 'test.chordArrow', title: 'Chord Arrow', keybinding: 'Ctrl+K Alt+Left', run: () => { ran.push('arrow'); } });
 		commands.register({ id: 'test.chordEnter', title: 'Chord Enter', keybinding: 'Ctrl+K Enter', run: () => { ran.push('enter'); } });
 		commands.register({ id: 'test.chordTilde', title: 'Chord Tilde', keybinding: 'Ctrl+K Ctrl+Shift+`', run: () => { ran.push('tilde'); } });
@@ -392,7 +392,7 @@ describe('chords', () => {
 
 describe('the About box', () => {
 	it('reports the version package.json carries, not a stale literal', async () => {
-		const { commands } = await import('../src/commands');
+		const { commands } = await import('../src/platform/commands');
 		const pkg = await import('../package.json');
 		await commands.execute('help.about');
 		const message = document.querySelector('#notifications .message')!.textContent!;

@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FastView } from '../src/fastView';
-import { settings, updateSetting } from '../src/settings';
+import { settings, updateSetting } from '../src/platform/settings';
 import { backend } from './tauriMock';
 import { flush } from './helpers';
 

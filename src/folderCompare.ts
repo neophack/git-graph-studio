@@ -7,10 +7,10 @@ import { invoke } from '@tauri-apps/api/core';
 import type { EditorView } from '@codemirror/view';
 import type { MergeView } from '@codemirror/merge';
 
-import { loadHexCompare, loadMerge, loadTextEditor } from './lazy';
+import { loadHexCompare, loadMerge, loadTextEditor } from './platform/lazy';
 import type { HexCompareView } from './hexCompare';
 
-import { basename, confirmDialog, dirname, el, icon, joinPath, notify, showContextMenu, type MenuEntry } from './ui';
+import { basename, confirmDialog, dirname, el, icon, joinPath, notify, showContextMenu, type MenuEntry } from './platform/ui';
 
 export interface DirDiffEntry {
 	path: string;

@@ -15,7 +15,7 @@ import { listen } from '@tauri-apps/api/event';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { commands } from './commands';
+import { commands } from './platform/commands';
 import { assetUrl } from './remote/assetUrl';
 import { addressedHere, frontendClass, frontendId, remoteEnv } from './remote/session';
 import { panelStream, viewStream } from './remote/mirror/protocol';
@@ -25,10 +25,10 @@ import { describeDetail, extLog, extLogEnabled, extLogLevel, extLogOnce, flushEx
 import { defaultNodeEnv, type NodeEnv } from './extModuleLoader';
 import type { EditorPlacement } from './editor';
 import { setFileDiagnostics, type SerializableDiagnostic } from './editorDiagnostics';
-import { settings as appSettings, syncExtensionThemes, themeById } from './settings';
-import { locale, registerZhCnText, t, tf } from './i18n';
-import * as state from './state';
-import { notify, progressToast, quickInput, type ProgressToast } from './ui';
+import { settings as appSettings, syncExtensionThemes, themeById } from './platform/settings';
+import { locale, registerZhCnText, t, tf } from './platform/i18n';
+import * as state from './platform/state';
+import { notify, progressToast, quickInput, type ProgressToast } from './platform/ui';
 import type { SerializedTreeItem } from './treeView';
 import { answerChatPermission, answerChatQuestion, chatBusy, chatControls, interruptChat, pickChatModel, pressSend, setChatInput, setChatPermissionMode, type ChatAnswer } from './claudeChatInject';
 

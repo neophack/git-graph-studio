@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { CommandRegistry } from '../src/commands';
+import { CommandRegistry } from '../src/platform/commands';
 import { applyContributions, contextUri, removeContributions } from '../src/contributions';
 import { registerGitCommands, type GitCommandHost } from '../src/gitCommands';
 import { buildChangeTree, DiffRequest, SourceControlView, sortChanges } from '../src/scm';

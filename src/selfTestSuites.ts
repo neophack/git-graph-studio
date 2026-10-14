@@ -10,11 +10,11 @@
 
 import { invoke } from '@tauri-apps/api/core';
 
-import { commands } from './commands';
-import { locale, t } from './i18n';
+import { commands } from './platform/commands';
+import { locale, t } from './platform/i18n';
 import { scoreFile, makeQuery, type FileEntry } from './fuzzy';
 import { ANALYSIS_TOOLS } from './analysisTools';
-import { SETTING_DEFS } from './settings';
+import { SETTING_DEFS } from './platform/settings';
 import { registerSelfTests, type SelfTestGroup } from './selftest';
 import type { Workbench } from './workbench';
 
@@ -114,7 +114,7 @@ export function registerSelfTestSuites(workbench: Workbench): void {
 				id: 'notifications',
 				name: 'a notification shows and dismisses',
 				run: async () => {
-					const { notify } = await import('./ui');
+					const { notify } = await import('./platform/ui');
 					notify('info', 'Self-test notification');
 					await settle();
 					if (!document.querySelector('#notifications .notification')) throw new Error('the notification did not appear');

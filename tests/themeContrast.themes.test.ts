@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { SURFACES, evaluateSurface } from '../src/themeMetrics';
-import { THEMES } from '../src/settings';
+import { THEMES } from '../src/platform/settings';
 
 const staticDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'static');
 

@@ -4,7 +4,7 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { DEFAULT_SETTINGS, SETTING_DEFS, isSettingModified, loadSettingsFile, settings, updateSetting, type AppSettings } from '../src/settings';
+import { DEFAULT_SETTINGS, SETTING_DEFS, isSettingModified, loadSettingsFile, settings, updateSetting, type AppSettings } from '../src/platform/settings';
 import { applyContributions, extensionSettingDefs, removeContributions } from '../src/contributions';
 import { openSettingsPanel } from '../src/settingsPanel';
 import { backend } from './tauriMock';

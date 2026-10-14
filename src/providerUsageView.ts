@@ -11,9 +11,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
-import { commands } from './commands';
-import { locale, t, tf } from './i18n';
-import { actionButton, el, icon, notify } from './ui';
+import { commands } from './platform/commands';
+import { locale, t, tf } from './platform/i18n';
+import { actionButton, el, icon, notify } from './platform/ui';
 import {
 	PROVIDERS_CHANGED_EVENT,
 	cachedProviders,

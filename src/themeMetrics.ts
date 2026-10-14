@@ -5,7 +5,7 @@
 // The pairs are the CSS variables the surfaces consume, so the check covers everywhere the
 // variables are used — the editor, the tabs, the side bar, the status bar, the fast viewer.
 
-import { THEMES, THEME_EVENT, applyTheme, settings } from './settings';
+import { THEMES, THEME_EVENT, applyTheme, settings } from './platform/settings';
 
 import type { MetricResult } from './uiMetrics';
 

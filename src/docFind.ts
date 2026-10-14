@@ -11,9 +11,9 @@ import { invoke } from '@tauri-apps/api/core';
 
 import { findOptions, queryHasUppercase, updateFindOption, type FindOptions } from './findOptions';
 import { FindHistory, HistoryRecall, recallKey } from './findHistory';
-import { settings } from './settings';
-import { t, tf } from './i18n';
-import { el, icon } from './ui';
+import { settings } from './platform/settings';
+import { t, tf } from './platform/i18n';
+import { el, icon } from './platform/ui';
 
 /** One single-line match: 0-based line and code-point `[start, end)` columns — the units
  *  `viewer_find` reports and `viewer_replace` addresses. */

@@ -8,9 +8,9 @@ import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { fileIcon, fileIconColor } from './editor';
 import { contextUri, menuSection, resourceContext } from './contributions';
-import { t, tf } from './i18n';
+import { t, tf } from './platform/i18n';
 import { transferMenuEntries, transferMenuShown } from './transfer';
-import { actionButton, basename, confirmDialog, el, icon, joinPath, liveSidebarTitle, notify, relativeTo, showContextMenu, toPosix, type MenuEntry } from './ui';
+import { actionButton, basename, confirmDialog, el, icon, joinPath, liveSidebarTitle, notify, relativeTo, showContextMenu, toPosix, type MenuEntry } from './platform/ui';
 
 interface DirEntryInfo {
 	name: string;

@@ -15,9 +15,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
-import { commands } from './commands';
-import { t, tf } from './i18n';
-import { el, icon, notify, quickPick, type QuickPickItem } from './ui';
+import { commands } from './platform/commands';
+import { t, tf } from './platform/i18n';
+import { el, icon, notify, quickPick, type QuickPickItem } from './platform/ui';
 
 export interface ProviderProfile {
 	id: string;

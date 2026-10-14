@@ -11,7 +11,7 @@
 // the backdrop for sheets) and ride the shared transfer layer (src/transfer.ts) over this
 // page's own transport. Entries ride the first surface only — a sheet's submenu step
 // rebuilds its rows from the PC's entries; the long press opens it again.
-import { t } from '../../i18n';
+import { t } from '../../platform/i18n';
 import { downloadTo, uploadInto } from '../../transfer';
 
 /** What the PC's Explorer menus for one click: the row under it, or the tree's root. */

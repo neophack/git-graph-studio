@@ -14,12 +14,12 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
-import { t, tf } from './i18n';
+import { t, tf } from './platform/i18n';
 import { KIND_ICONS } from './contextView';
 import { analysisTool, type AnalysisToolId } from './analysisTools';
 import { McpPage } from './mcpPage';
 import { DiagramView, moduleLabel, moduleOf, type ModuleDiagram } from './moduleDiagram';
-import { actionButton, basename, el, icon, showContextMenu, type MenuEntry } from './ui';
+import { actionButton, basename, el, icon, showContextMenu, type MenuEntry } from './platform/ui';
 
 /* ---------- The backend shapes ---------- */
 

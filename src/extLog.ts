@@ -14,7 +14,7 @@
 // last entries backs the tests and anything that wants to show recent history.
 
 import { invoke } from '@tauri-apps/api/core';
-import { settings, SETTINGS_EVENT, type ExtensionLogLevel } from './settings';
+import { settings, SETTINGS_EVENT, type ExtensionLogLevel } from './platform/settings';
 
 export type ExtLogLevel = ExtensionLogLevel;
 

@@ -5,7 +5,7 @@
 // import either. The type-only i18n import keeps the keys compile-checked without a
 // runtime edge.
 
-import type { t } from './i18n';
+import type { t } from './platform/i18n';
 
 export type AnalysisToolId = 'modules' | 'metrics' | 'deadcode' | 'security' | 'imports' | 'mcp';
 

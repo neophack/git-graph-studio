@@ -5,7 +5,7 @@
 
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
-import { closeContextMenu, el, icon, isMenuOpen, showMenuBelow, type MenuEntry } from './ui';
+import { closeContextMenu, el, icon, isMenuOpen, showMenuBelow, type MenuEntry } from './platform/ui';
 
 export interface MenuDefinition {
 	label: string;

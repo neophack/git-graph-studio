@@ -149,8 +149,8 @@ guarantees the window is never a blank dark rectangle.
 
 - Frontend: `src/main.ts` (boot entry), `src/workbench.ts` (composition root),
   `src/titlebar.ts`, `src/statusbar.ts`, `src/panel.ts` (panel chrome; its Output view is
-  the Git channel), `src/ui.ts` (shared DOM kit: codicons, notifications, context menus,
-  quick input), `src/lazy.ts` (async-chunk loaders), `src/state.ts` (localStorage
+  the Git channel), `src/platform/ui/` (shared DOM kit: codicons, notifications, context menus,
+  quick input), `src/platform/lazy.ts` (async-chunk loaders), `src/platform/state.ts` (localStorage
   persistence), `src/shell.css`
 - Backend: `src-tauri/src/lib.rs` / `main.rs` (crate inventory and app entry),
   `src-tauri/src/cmd_app.rs` (the app-instance domain: File → New Window's
@@ -175,9 +175,9 @@ Every action is a command with id, title, keybinding and enablement; the palette
 and the keyboard all resolve through one registry. Settings, keybindings and display
 language are user data under `~/.ggs/`; theme and UI quality are enforced, not hoped for.
 
-- Frontend: `src/commands.ts` (registry), `src/keybindings.ts`, `src/settings.ts` (setting
+- Frontend: `src/platform/commands.ts` (registry), `src/platform/keybindings.ts`, `src/platform/settings.ts` (setting
   registry `SETTING_DEFS`), `src/settingsPanel.ts` (generated Settings dialog),
-  `src/i18n.ts` (`t(key)`, en / zh-cn), `src/themeMetrics.ts` (WCAG contrast per theme),
+  `src/platform/i18n.ts` (`t(key)`, en / zh-cn), `src/themeMetrics.ts` (WCAG contrast per theme),
   `src/uiMetrics.ts` (layout invariants)
 - Backend: `src-tauri/src/cmd_assoc.rs` (the File Associations setting: OS-level
   "open with" registration per platform — HKCU ProgIds + RegisteredApplications on
@@ -286,7 +286,7 @@ colouring, sticky scroll, minimap, bookmarks, markdown preview.
   `src/snippetRegistry.ts`, `src/findWidget.ts`, `src/findOptions.ts` (options shared with
   Workspace Search), `src/findHistory.ts` (the find and search fields' query history — the
   Up/Down recall — shared with Workspace Search), `src/bookmarks.ts`, `src/cmTheme.ts`,
-  `src/markdown.ts` (preview; also renders extension READMEs)
+  `src/platform/markdown.ts` (preview; also renders extension READMEs)
 - Backend: the `ggs-text` crate (`src-tauri/crates/ggs-text/`: `viewer/doc.rs` ropey rope
   + syntect highlight checkpoints; `viewer/find.rs` the whole-document find/replace
   matcher, scan and replacement pass; `viewer/indexed.rs` the memory-bounded line-index
@@ -720,7 +720,7 @@ page shows the integration's state (`claude_mcp_status`).
   shapes VS Code accepts — `configuration` as object or array, `keybindings` as object or
   array, views with `type: "webview"` — normalize on read); the surfaces it
   reaches into: `src/statusbar.ts` (extension items), `src/panel.ts` (the Output view's
-  channel dropdown), `src/ui.ts` (`progressToast`)
+  channel dropdown), `src/platform/ui/` (`progressToast`)
 - Backend: the `ggs-ext` crate (`src-tauri/crates/ggs-ext/`: `store` — the install /
   upgrade / uninstall engine and the bundled-package scan over roots the app resolves;
   `vsix` — `.vsix` unpack, the JSONC manifest reader (comments and trailing commas, the
@@ -1484,7 +1484,7 @@ test-macos pass `-- --skip ggs_bash`).
   crate's own additional binary beside `ggs.exe` — never also as a staged `externalBin`
   sidecar: two components installing the same `ggs-bash.exe` fail MSI validation with
   ICE30)
-- The setting: `terminalShell` in `src/settings.ts` (switching it awaits the
+- The setting: `terminalShell` in `src/platform/settings.ts` (switching it awaits the
   `~/.ggs/settings.json` write and only then invokes `providers_shell_refresh` —
   the restart thread re-reads that file for the spawn environment, and a refresh
   racing the write respawned the backend under the old shell, 2026-10-13), the
@@ -2134,7 +2134,7 @@ Appendix B). Nothing user-specific is written into the repository or the install
 version and change together.
 
 **i18n for every user-visible string.**
-Key strings in `src/i18n.ts`, resolve with `t(key)`. Missing translations fall back to
+Key strings in `src/platform/i18n.ts`, resolve with `t(key)`. Missing translations fall back to
 English, never to an empty string.
 
 **Nothing generated in the source tree.**

@@ -20,9 +20,9 @@ import { listen } from '@tauri-apps/api/event';
 
 import type { ExtInfo, ExtProcessInfo, ExtensionHost, GalleryEntry } from './extHost';
 import { extFileDataUrl, extIconRelPath as iconRelPath, extTitle } from './extHost';
-import { renderMarkdown } from './markdown';
-import { t, tf } from './i18n';
-import { actionButton, confirmDialog, el, icon, liveSidebarTitle, notify } from './ui';
+import { renderMarkdown } from './platform/markdown';
+import { t, tf } from './platform/i18n';
+import { actionButton, confirmDialog, el, icon, liveSidebarTitle, notify } from './platform/ui';
 
 /** One featured id's marketplace half: in flight, its entry, or why there is none. */
 type MarketState = { status: 'loading' } | { status: 'ok'; entry: GalleryEntry } | { status: 'error'; error: string };

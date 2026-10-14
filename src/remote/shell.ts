@@ -8,9 +8,9 @@
 // the same shell while a phone watches it (the replica's phone mode, mirror/phoneShell.ts):
 // what only a browser session can do — the window switcher, transfers, the traffic readout,
 // Data Saver — stays with the browser.
-import { commands } from '../commands';
-import { notify } from '../ui';
-import { t, tf } from '../i18n';
+import { commands } from '../platform/commands';
+import { notify } from '../platform/ui';
+import { t, tf } from '../platform/i18n';
 import { currentWorkbench } from '../workbench';
 import { installActionSheet } from './actionSheet';
 import { createAppBar } from './appBar';

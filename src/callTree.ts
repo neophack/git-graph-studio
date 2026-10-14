@@ -6,7 +6,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 
-import { el, icon } from './ui';
+import { el, icon } from './platform/ui';
 
 export interface WsSymbol {
 	kind: string;

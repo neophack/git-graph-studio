@@ -9,9 +9,9 @@
 import { invoke } from '@tauri-apps/api/core';
 
 import { ENCODING_LABELS } from './editor';
-import { t, tf } from './i18n';
-import { SETTINGS_EVENT, settings } from './settings';
-import { clearAllNotifications, clearNotification, el, icon, labelWithIcons, notificationEntries, onNotificationsChange, tooltip, type CentreEntry } from './ui';
+import { t, tf } from './platform/i18n';
+import { SETTINGS_EVENT, settings } from './platform/settings';
+import { clearAllNotifications, clearNotification, el, icon, labelWithIcons, notificationEntries, onNotificationsChange, tooltip, type CentreEntry } from './platform/ui';
 
 /** How long ago an entry landed, in VS Code's wording ("just now", "5m ago"). */
 function ago(at: number): string {

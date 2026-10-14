@@ -1,15 +1,5 @@
 [
 	{
-		"rule": "R1",
-		"from": "src/scroll/input.ts",
-		"to": "src/settings.ts"
-	},
-	{
-		"rule": "R1",
-		"from": "src/scroll/scrollbar.ts",
-		"to": "src/ui.ts"
-	},
-	{
 		"rule": "R3",
 		"from": "src/docEditView.ts",
 		"to": "src/remote/editLock.ts"
@@ -296,7 +286,7 @@
 	},
 	{
 		"rule": "R6",
-		"from": "src/keybindings.ts",
+		"from": "src/platform/keybindings.ts",
 		"to": "@tauri-apps/api/core"
 	},
 	{
@@ -396,7 +386,7 @@
 	},
 	{
 		"rule": "R6",
-		"from": "src/settings.ts",
+		"from": "src/platform/settings.ts",
 		"to": "@tauri-apps/api/core"
 	},
 	{

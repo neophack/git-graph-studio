@@ -1,7 +1,7 @@
 // `@tauri-apps/plugin-dialog` for the remote workbench (§9.3): `open` / `save` browse the
 // PC's file system in the remote file picker; the message boxes are the workbench's own.
-import { confirmDialog, notify } from '../../ui';
-import { t } from '../../i18n';
+import { confirmDialog, notify } from '../../platform/ui';
+import { t } from '../../platform/i18n';
 import { pickRemotePath } from '../remoteFilePicker';
 
 export interface DialogFilter {

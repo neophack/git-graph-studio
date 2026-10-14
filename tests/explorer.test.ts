@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { Explorer } from '../src/explorer';
 import { setRemoteEnv } from '../src/remote/session';
-import { basename } from '../src/ui';
+import { basename } from '../src/platform/ui';
 import { backend } from './tauriMock';
 import { click, flush, key, menuItem, menuLabels, notificationButton, notifications, rightClick, texts, type } from './helpers';
 

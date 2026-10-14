@@ -5,9 +5,9 @@
 
 import { invoke, Channel } from '@tauri-apps/api/core';
 
-import { t } from './i18n';
+import { t } from './platform/i18n';
 import { KIND_ICONS } from './contextView';
-import { actionButton, el, icon } from './ui';
+import { actionButton, el, icon } from './platform/ui';
 
 export interface TreeSymbol {
 	kind: string;

@@ -6,7 +6,7 @@
 // Editor's opens the open editors list, a list page scrolls back to its top. Badges carry
 // what the hidden status and activity bars would: the open editors (a dot while one is
 // unsaved) and the pending changes. Everything else lives in the drawer (navDrawer.ts).
-import { t } from '../i18n';
+import { t } from '../platform/i18n';
 import {
 	BUILTIN_VIEWS,
 	currentPage,

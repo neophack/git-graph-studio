@@ -10,7 +10,7 @@ import { invoke } from '@tauri-apps/api/core';
 
 import { hasBookmark, toggleBookmark } from './bookmarks';
 import { samePath } from './editorDiagnostics';
-import { loadAnalysisPages, loadCanViews, loadCallTree, loadEditorExtensions, loadFastView, loadFileHistory, loadFolderCompare, loadHexCompare, loadHexView, loadMerge, loadMergeEditor, loadSnippetRegistry, loadSymbolDbView, loadTextEditor } from './lazy';
+import { loadAnalysisPages, loadCanViews, loadCallTree, loadEditorExtensions, loadFastView, loadFileHistory, loadFolderCompare, loadHexCompare, loadHexView, loadMerge, loadMergeEditor, loadSnippetRegistry, loadSymbolDbView, loadTextEditor } from './platform/lazy';
 // The hex and CAN views are async chunks (lazy.ts): a binary or a CAN trace is the exception
 // among opens, and their code would otherwise ride in the first-paint bundle. The fast
 // viewer, the folder-compare, merge-conflict, file-history and call-tree views and the
@@ -21,18 +21,18 @@ import type { HexCompareView } from './hexCompare';
 import type { CanLogView } from './canLogView';
 import type { CanRawView } from './canRawView';
 import type { EditableDocView } from './docEditView';
-import { imageMime, renderMarkdown } from './markdown';
+import { imageMime, renderMarkdown } from './platform/markdown';
 import type { BlameLine, FileHistoryView } from './fileHistory';
 import type * as TextEditor from './textEditor';
 import type { CallTreeView, WsSymbol } from './callTree';
-import { commands } from './commands';
+import { commands } from './platform/commands';
 import { commandIconContent, contextUri, declaredLanguageName, menuSection, resolvedMenuEntries, resourceContext, runMenuEntry } from './contributions';
 import { extFileDataUrl } from './extHost';
 import type { FolderCompareView } from './folderCompare';
 import type { MergeToolbar } from './mergeEditor';
-import { t, trText } from './i18n';
-import { SETTINGS_EVENT, settings } from './settings';
-import { basename, dirname, el, icon, joinPath, notify, quickPick, relativeTo, showContextMenu, showMenuBelow, toPosix, type MenuEntry } from './ui';
+import { t, trText } from './platform/i18n';
+import { SETTINGS_EVENT, settings } from './platform/settings';
+import { basename, dirname, el, icon, joinPath, notify, quickPick, relativeTo, showContextMenu, showMenuBelow, toPosix, type MenuEntry } from './platform/ui';
 import { editLockDefault, registerEditLock } from './remote/editLock';
 import { revealEditorPage } from './remote/nav';
 import { windowedEditThreshold } from './remote/openThreshold';

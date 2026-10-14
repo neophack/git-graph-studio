@@ -8,11 +8,11 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 
-import { loadXterm } from './lazy';
+import { loadXterm } from './platform/lazy';
 
-import { actionButton, el, icon, notify, showContextMenu, type MenuEntry } from './ui';
-import { THEME_EVENT, settings } from './settings';
-import { t } from './i18n';
+import { actionButton, el, icon, notify, showContextMenu, type MenuEntry } from './platform/ui';
+import { THEME_EVENT, settings } from './platform/settings';
+import { t } from './platform/i18n';
 
 interface Session {
 	id: number;

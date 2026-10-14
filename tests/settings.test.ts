@@ -4,8 +4,8 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { setLocale, t } from '../src/i18n';
-import { DEFAULT_SETTINGS, THEMES, applyTheme, loadSettingsFile, migrateStoredSettings, settings, updateSetting } from '../src/settings';
+import { setLocale, t } from '../src/platform/i18n';
+import { DEFAULT_SETTINGS, THEMES, applyTheme, loadSettingsFile, migrateStoredSettings, settings, updateSetting } from '../src/platform/settings';
 import { openSettingsPanel } from '../src/settingsPanel';
 import { EditorGroup } from '../src/editor';
 import { backend } from './tauriMock';

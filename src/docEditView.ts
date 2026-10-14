@@ -23,7 +23,7 @@ import { DocFindController, type DocFindHost, type DocFindMatch, type DocFindSpe
 import { toggleBlockComment, toggleLineComment } from './comments';
 import { editLockDefault, registerEditLock } from './remote/editLock';
 import { vscodeHighlighting } from './cmTheme';
-import { el, notify } from './ui';
+import { el, notify } from './platform/ui';
 import { Channel, invoke } from '@tauri-apps/api/core';
 
 interface OpenInfo {

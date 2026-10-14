@@ -18,8 +18,8 @@ import { hasBookmark } from './bookmarks';
 import { bracketColorsExtension, minimapExtension, stickyScrollExtension, wheelExtension } from './editorExtras';
 import { createFindPanel, openReplacePanel } from './findWidget';
 import { vscodeHighlighting } from './cmTheme';
-import { settings } from './settings';
-import { icon } from './ui';
+import { settings } from './platform/settings';
+import { icon } from './platform/ui';
 
 export { EditorState, EditorView, keymap, openSearchPanel, openReplacePanel, redo, selectAll, undo, completionExtension };
 

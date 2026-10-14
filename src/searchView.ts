@@ -7,11 +7,11 @@
 
 import { Channel, invoke } from '@tauri-apps/api/core';
 
-import * as state from './state';
+import * as state from './platform/state';
 import { queryHasUppercase } from './findOptions';
 import { FindHistory, HistoryRecall, recallKey } from './findHistory';
-import { settings } from './settings';
-import { actionButton, basename, confirmDialog, dirname, el, icon, liveSidebarTitle, notify } from './ui';
+import { settings } from './platform/settings';
+import { actionButton, basename, confirmDialog, dirname, el, icon, liveSidebarTitle, notify } from './platform/ui';
 
 export interface SearchMatch {
 	line: number;

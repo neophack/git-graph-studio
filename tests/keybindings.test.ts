@@ -4,8 +4,8 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { commandForBinding, commands, setKeybindingResolver } from '../src/commands';
-import { bindingFromEvent, commandsBoundTo, effectiveKeybinding, loadUserKeybindings, renderKeybindingsEditor, setUserKeybinding, userKeybindings } from '../src/keybindings';
+import { commandForBinding, commands, setKeybindingResolver } from '../src/platform/commands';
+import { bindingFromEvent, commandsBoundTo, effectiveKeybinding, loadUserKeybindings, renderKeybindingsEditor, setUserKeybinding, userKeybindings } from '../src/platform/keybindings';
 import { backend } from './tauriMock';
 import { click, texts, type } from './helpers';
 

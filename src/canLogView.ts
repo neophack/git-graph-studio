@@ -23,9 +23,9 @@ import { invoke, Channel } from '@tauri-apps/api/core';
 import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 
 import { cycleSeriesChart, formatAxisSeconds, histogramChart, multiLineChart, seriesStyle, stackedBars, type ChartSeries } from './canChart';
-import { t, tf } from './i18n';
-import { load as loadState, save as saveState } from './state';
-import { basename, el, icon, quickPick } from './ui';
+import { t, tf } from './platform/i18n';
+import { load as loadState, save as saveState } from './platform/state';
+import { basename, el, icon, quickPick } from './platform/ui';
 
 /** The arbitration bitrates a CAN (FD) bus commonly runs at; the load is recomputed on any change. */
 export const CAN_BITRATES = [1_000_000, 800_000, 500_000, 250_000, 125_000, 100_000, 50_000, 33_333, 20_000, 10_000, 5_000] as const;

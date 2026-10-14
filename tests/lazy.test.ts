@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { loadEditorExtensions, loadMerge, loadTextEditor, loadXterm } from '../src/lazy';
+import { loadEditorExtensions, loadMerge, loadTextEditor, loadXterm } from '../src/platform/lazy';
 
 describe('lazy chunks', () => {
 	it('loads each library once and shares the promise', async () => {
@@ -35,7 +35,7 @@ describe('lazy chunks', () => {
 		// into first paint; editor.ts loads them through loadEditorExtensions).
 		const forbidden = /^import .* from '(@codemirror\/(?!merge)|@lezer\/|@xterm\/)/m;
 		const forbiddenExtensionViews = /^import .* from '\.\/(editorDiagnosticsView|editorDecorationsView|editorProviderViews)'/m;
-		for (const file of ['workbench.ts', 'editor.ts', 'terminal.ts', 'folderCompare.ts', 'panel.ts', 'explorer.ts', 'scm.ts', 'searchView.ts', 'statusbar.ts', 'titlebar.ts', 'ui.ts', 'main.ts']) {
+		for (const file of ['workbench.ts', 'editor.ts', 'terminal.ts', 'folderCompare.ts', 'panel.ts', 'explorer.ts', 'scm.ts', 'searchView.ts', 'statusbar.ts', 'titlebar.ts', 'platform/ui/index.ts', 'main.ts']) {
 			const source = readFileSync(join(__dirname, '..', 'src', file), 'utf8');
 			const offending = source.split('\n').filter((line) => (forbidden.test(line) || forbiddenExtensionViews.test(line)) && !line.startsWith('import type'));
 			expect(offending, file).toEqual([]);
@@ -45,7 +45,7 @@ describe('lazy chunks', () => {
 
 describe('the hex and CAN chunks', () => {
 	it('load once, on demand, and stay out of the first-paint graph', async () => {
-		const { loadCanViews, loadHexCompare, loadHexView } = await import('../src/lazy');
+		const { loadCanViews, loadHexCompare, loadHexView } = await import('../src/platform/lazy');
 		expect(loadHexView()).toBe(loadHexView());
 		expect(loadHexCompare()).toBe(loadHexCompare());
 		expect(loadCanViews()).toBe(loadCanViews());
@@ -66,7 +66,7 @@ describe('the hex and CAN chunks', () => {
 
 describe('the on-demand view chunks', () => {
 	it('load once, on demand, and stay out of the first-paint graph', async () => {
-		const lazy = await import('../src/lazy');
+		const lazy = await import('../src/platform/lazy');
 		expect(lazy.loadFastView()).toBe(lazy.loadFastView());
 		expect(lazy.loadFolderCompare()).toBe(lazy.loadFolderCompare());
 		expect(lazy.loadMergeEditor()).toBe(lazy.loadMergeEditor());
@@ -81,7 +81,7 @@ describe('the on-demand view chunks', () => {
 		expect(typeof (await lazy.loadSnippetRegistry()).loadWorkspaceSnippets).toBe('function');
 		// Only `import type` may name any of them from the modules the workbench paints with.
 		const forbidden = /^import .* from '\.\/(fastView|folderCompare|mergeEditor|fileHistory|callTree|snippetRegistry)'/m;
-		for (const file of ['workbench.ts', 'editor.ts', 'editorArea.ts', 'panel.ts', 'explorer.ts', 'scm.ts', 'searchView.ts', 'statusbar.ts', 'titlebar.ts', 'ui.ts', 'main.ts']) {
+		for (const file of ['workbench.ts', 'editor.ts', 'editorArea.ts', 'panel.ts', 'explorer.ts', 'scm.ts', 'searchView.ts', 'statusbar.ts', 'titlebar.ts', 'platform/ui/index.ts', 'main.ts']) {
 			const source = readFileSync(join(__dirname, '..', 'src', file), 'utf8');
 			const offending = source.split('\n').filter((line) => forbidden.test(line) && !line.startsWith('import type'));
 			expect(offending, file).toEqual([]);

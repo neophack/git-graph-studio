@@ -9,7 +9,7 @@ import { invoke } from '@tauri-apps/api/core';
 
 import { languageOf, resolveVariables, snippetsFor } from './snippetRegistry';
 import { extensionCompletionsFor, hasExtensionCompletions, type ExtensionCompletion } from './editorCompletions';
-import { settings } from './settings';
+import { settings } from './platform/settings';
 
 /** The open file's name, so the snippet set and the path root can follow the language. */
 export const fileNameFacet = Facet.define<string, string>({ combine: (values) => values[values.length - 1] ?? '' });

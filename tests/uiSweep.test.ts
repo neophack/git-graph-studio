@@ -21,8 +21,8 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { commands } from '../src/commands';
-import { settings, updateSetting } from '../src/settings';
+import { commands } from '../src/platform/commands';
+import { settings, updateSetting } from '../src/platform/settings';
 import { Workbench } from '../src/workbench';
 import { commonHandlers, type Handler } from './scenarioFixtures';
 import { backend } from './tauriMock';

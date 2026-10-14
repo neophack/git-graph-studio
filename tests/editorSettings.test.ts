@@ -9,7 +9,7 @@ import { CompletionContext } from '@codemirror/autocomplete';
 
 import { EditorGroup } from '../src/editor';
 import { pathCompletion, snippetCompletionSource, wordCompletion, fileNameFacet } from '../src/autocomplete';
-import { applyFontSize, updateSetting } from '../src/settings';
+import { applyFontSize, updateSetting } from '../src/platform/settings';
 import { openSettingsPanel } from '../src/settingsPanel';
 import { backend } from './tauriMock';
 import { click, texts } from './helpers';

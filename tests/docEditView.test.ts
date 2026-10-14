@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 import { EditorGroup } from '../src/editor';
 import type { EditableDocView } from '../src/docEditView';
-import { settings } from '../src/settings';
+import { settings } from '../src/platform/settings';
 import { backend } from './tauriMock';
 import { flush, key, notifications, type } from './helpers';
 import { RopeDocMock } from './ropeDocMock';

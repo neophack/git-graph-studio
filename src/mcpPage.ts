@@ -8,8 +8,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
-import { t, tf } from './i18n';
-import { actionButton, el, icon } from './ui';
+import { t, tf } from './platform/i18n';
+import { actionButton, el, icon } from './platform/ui';
 import type { AnalysisPageView } from './analysisPages';
 
 interface McpToolInfo { name: string; description: string }

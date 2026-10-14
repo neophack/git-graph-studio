@@ -5,9 +5,9 @@
 
 import { invoke, Channel } from '@tauri-apps/api/core';
 
-import { onLocaleChange, t, tf } from './i18n';
+import { onLocaleChange, t, tf } from './platform/i18n';
 import { ANALYSIS_TOOLS, type AnalysisToolId } from './analysisTools';
-import { actionButton, el, icon } from './ui';
+import { actionButton, el, icon } from './platform/ui';
 
 /** The `analysis_status` answer (cmd_analysis). */
 export interface AnalysisStatus {

@@ -6,9 +6,9 @@
 // extension entries), and an empty state with the ways to open something when nothing is.
 // Every action goes through the tab's own DOM or the command registry; nothing here reaches
 // into the editor's state.
-import { commands } from '../commands';
-import { t, tf } from '../i18n';
-import type { MenuEntry } from '../ui';
+import { commands } from '../platform/commands';
+import { t, tf } from '../platform/i18n';
+import type { MenuEntry } from '../platform/ui';
 import { closeActionSheet, openSheet, sheetButton, showActionSheet } from './actionSheet';
 import { commandEntry, relativeFolder } from './appBar';
 import { activeTab, clearEditorPlaceholder, currentPage, editorPlaceholderShown, editorTabs, goTo, launcherForTab, onWorkbenchChange } from './pages';

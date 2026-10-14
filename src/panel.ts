@@ -10,9 +10,9 @@ import { listen } from '@tauri-apps/api/event';
 import { ContextView } from './contextView';
 import { TerminalView } from './terminal';
 import { dismissFullScreenSideView, fullScreenSideViewOpen } from './remote/nav';
-import { t } from './i18n';
-import { SETTINGS_EVENT } from './settings';
-import { actionButton, el, icon } from './ui';
+import { t } from './platform/i18n';
+import { SETTINGS_EVENT } from './platform/settings';
+import { actionButton, el, icon } from './platform/ui';
 
 export type PanelViewId = 'terminal' | 'output' | 'context';
 

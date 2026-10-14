@@ -514,7 +514,7 @@
 			};
 			// Zed's own defaults for the amounts the model defines - the shipped app defaults
 			// too (settings.ts), which the end of the run re-checks.
-			const { updateSetting, DEFAULT_SETTINGS } = await import('/src/settings.ts');
+			const { updateSetting, DEFAULT_SETTINGS } = await import('/src/platform/settings.ts');
 			updateSetting('mouseWheelScrollSensitivity', 1);
 			updateSetting('fastScrollSensitivity', 4);
 
@@ -977,7 +977,7 @@
 				const KIMI = 'moonshot-ai.kimi-code';
 				if (fullParams.has('kimi')) {
 					const kimiStarted = performance.now();
-					const { commands: kimiCommands } = await import('/src/commands.ts');
+					const { commands: kimiCommands } = await import('/src/platform/commands.ts');
 					try {
 					await check('kimi-code', 'the package is installed', async () => {
 						const installed = await invoke('ext_list').catch(() => []);
@@ -1033,9 +1033,9 @@
 
 				/* ---------- Phase 2: git-graph-rs ---------- */
 				const GG = 'neophack.git-graph-rs';
-				const { commands } = await import('/src/commands.ts');
+				const { commands } = await import('/src/platform/commands.ts');
 				const { resolvedMenuEntries } = await import('/src/contributions.ts');
-				const { saveExtSetting, extSettings } = await import('/src/state.ts');
+				const { saveExtSetting, extSettings } = await import('/src/platform/state.ts');
 				const { extLogEntries } = await import('/src/extLog.ts');
 				const logErrorsBefore = extLogEntries().filter((e) => e.level === 'error').length;
 				const extList = window.__harness.mocked ? [] : await invoke('ext_list').catch(() => []);

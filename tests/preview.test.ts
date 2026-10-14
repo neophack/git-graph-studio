@@ -5,7 +5,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { EditorGroup } from '../src/editor';
-import { imageMime, sanitizeMarkdown } from '../src/markdown';
+import { imageMime, sanitizeMarkdown } from '../src/platform/markdown';
 import { backend } from './tauriMock';
 import { click, flush } from './helpers';
 
@@ -140,7 +140,7 @@ describe('markdown', () => {
 			renderer: { rules: { ...rules } }
 		};
 		(window as unknown as { markdownit: unknown }).markdownit = instance;
-		const { renderMarkdown } = await import('../src/markdown');
+		const { renderMarkdown } = await import('../src/platform/markdown');
 		const article = document.createElement('article');
 		expect(await renderMarkdown('zero\none\ntwo', article)).toBe(true);
 		const paragraphs = article.querySelectorAll('p[data-line]');

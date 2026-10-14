@@ -9,18 +9,18 @@ import { EditorGroup } from '../src/editor';
 import { applyContributions, applyExtensionSettings, evaluateWhen, extensionSettingDefs, registerContextProvider, removeContributions, resolvedMenuEntries } from '../src/contributions';
 import { extLog, extLogEntries, flushExtLog, resetExtLog } from '../src/extLog';
 import { ExtensionsPanel } from '../src/extensionsPanel';
-import { commandForBinding, commands } from '../src/commands';
+import { commandForBinding, commands } from '../src/platform/commands';
 import { activationContext, createVscodeApi, applyTextEditsToText, Position, rehydrateUris, Range, readLocalDocProvider, RelativePattern, setUriPlatform, Uri, ViewColumn, watcherGlobMatches } from '../src/vscodeApi';
 import { createNodeBuiltins } from '../src/nodeShims';
 import { registerDeclaredLanguages, declaredLanguageName, registerExtensionSnippets, registerExtensionThemes, extensionThemeList, languageIdFor } from '../src/contributions';
 import { snippetsFor } from '../src/snippetRegistry';
-import { THEMES, syncExtensionThemes, updateSetting } from '../src/settings';
+import { THEMES, syncExtensionThemes, updateSetting } from '../src/platform/settings';
 // The frame half of the extension host, loaded for its window message listener: under jsdom the
 // frame's `parent` is this same window, so tests drive it with MessageEvents and read its posts.
 import '../src/extHostBoot';
 import { backend } from './tauriMock';
 import { setRemoteEnv } from '../src/remote/session';
-import { saveExtSetting } from '../src/state';
+import { saveExtSetting } from '../src/platform/state';
 import { click, flush, key, menuItem, menuLabels, notificationButton, notifications, rightClick, type } from './helpers';
 import { Explorer } from '../src/explorer';
 
@@ -4032,7 +4032,7 @@ describe('the Claude conversation tap and the remote-control bridge (Claude Remo
 	});
 
 	it('the access setting denies subscriptions outright (the revocation path)', async () => {
-		const { settings } = await import('../src/settings');
+		const { settings } = await import('../src/platform/settings');
 		const { host, subscriberHandle } = await tapHost();
 		const before = settings.claudeTapAccess;
 		settings.claudeTapAccess = 'deny';

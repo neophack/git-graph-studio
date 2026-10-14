@@ -21,9 +21,9 @@ import type { EditorView, Panel, ViewUpdate } from '@codemirror/view';
 
 import { findOptions, queryHasUppercase, updateFindOption } from './findOptions';
 import { FindHistory, HistoryRecall, recallKey } from './findHistory';
-import { settings } from './settings';
-import { t, tf } from './i18n';
-import { el, icon } from './ui';
+import { settings } from './platform/settings';
+import { t, tf } from './platform/i18n';
+import { el, icon } from './platform/ui';
 
 /** How many matches are counted before the counter gives up. One past the cap is still
  *  counted, so exactly COUNT_CAP matches show the real total instead of "10,000+". */
