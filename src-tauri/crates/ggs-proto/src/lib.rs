@@ -1,21 +1,11 @@
-//! The `ggs-ext/1` wire protocol between the process extension host (`ext_process.rs`) and a
-//! plugin's backend binary: newline-delimited JSON-RPC 2.0 over the process's stdin/stdout —
-//! the same transport shape as the MCP server's stdio mode (module 16), so any language that
-//! can write lines to stdout can be a plugin: Rust natively, TypeScript as a `deno compile`
-//! binary, Python behind a declared interpreter.
+//! ggs-proto (L0, module 12's wire seam): the `ggs-ext/1` protocol between the process
+//! extension host and a plugin's backend binary — newline-delimited JSON-RPC 2.0 over
+//! the process's stdin/stdout, so any language that can write lines to stdout can be a
+//! plugin: Rust natively, TypeScript as a `deno compile` binary, Python behind a declared
+//! interpreter.
 //!
-//! The host sends `initialize` and `runCommand` requests and a `shutdown` notification; the
-//! plugin answers requests and may send `$/log` notifications. A backend that needs the
-//! workbench's services (the real-Node extension host, `nodeHost.ts`) sends `ggs.hostRequest`
-//! requests — the app forwards them to the workbench and writes the answers back as plain
-//! response lines. Because both directions share the one channel, their id spaces must stay
-//! disjoint: the app numbers its requests from 1, so a backend's own requests number from
-//! 1 000 000 000. stderr is the plugin's own log channel, captured (capped) by the host.
-//! Requests are dispatched the moment they are read, each onto its own thread on the plugin
-//! side, so a command-style plugin and a concurrent engine (the git-graph backend's opening
-//! fan of reads) plug in through the same handshake, the same envelope and the same reader.
-//! A manifest that still names a retired protocol fails `start` with an upgrade hint rather
-//! than a hung handshake.
+//! Allowed dependencies: serde, serde_json — nothing else. No global state.
+//! Users: ggs-ext (the host side), ggs-node (the plugin side), the app.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

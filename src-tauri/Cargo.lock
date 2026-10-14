@@ -1959,6 +1959,11 @@ dependencies = [
 [[package]]
 name = "ggs-base"
 version = "0.0.0"
+dependencies = [
+ "memchr",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "ghash"
@@ -2015,6 +2020,7 @@ dependencies = [
  "fancy-regex",
  "flate2",
  "getrandom 0.2.17",
+ "ggs-base",
  "hex",
  "hmac 0.12.1",
  "if-addrs",

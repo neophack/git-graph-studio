@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 use boa_engine::{Context, JsValue};
 use serde_json::{json, Value};
 
-use crate::ext_protocol::{self as proto, Emitter};
+use ggs_proto::{self as proto, Emitter};
 
 const PRELUDE: &str = include_str!("prelude.js");
 /// How long a JS handler's returned promise may take to settle before the request fails.

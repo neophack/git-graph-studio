@@ -35,7 +35,7 @@ use serde_json::{json, Value};
 use tauri::Emitter;
 
 use crate::cmd_ext;
-use crate::ext_protocol::{self as proto, Wire};
+use ggs_proto::{self as proto, Wire};
 use crate::ext_routing;
 
 /// The Tauri event a backend's `ggs.hostRequest` crosses to the workbench on: the payload

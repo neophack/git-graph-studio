@@ -95,6 +95,7 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSMenu", "NSMen
 # The internal crates, one entry each (docs/architecture-restructure-plan.md §4.3) — a
 # crate's entry lands in the same change the crate does.
 ggs-base = { path = "crates/ggs-base" }
+ggs-proto = { path = "crates/ggs-proto" }
 
 # The pretend Node runtime's parser, carrying one upstream gap fix: Boa's class-expression
 # parser dropped a contextual-keyword name, so legal code real packages ship —
@@ -235,6 +236,10 @@ tauri = { workspace = true, optional = true }
 tauri-plugin-dialog = { workspace = true, optional = true }
 tauri-plugin-opener = { workspace = true, optional = true }
 tauri-plugin-clipboard-manager = { workspace = true, optional = true }
+# The L0 foundation every domain shares (paths, fsx, jsonc, workspace roots, cancel, sink).
+ggs-base = { workspace = true }
+# The ggs-ext/1 wire protocol (ext_process speaks it; ggs-node answers it).
+ggs-proto = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rpassword = { workspace = true }
