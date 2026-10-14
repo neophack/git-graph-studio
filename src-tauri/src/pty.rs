@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tauri::{AppHandle as TauriAppHandle, Emitter, Manager};
 
-use crate::AppState;
+
 
 struct PtySession {
     /// Distinguishes this session from an earlier one created under the same frontend id: the
@@ -58,8 +58,8 @@ pub fn pty_create(
     shell: Option<String>,
 ) -> Result<String, String> {
     let cwd = app
-        .state::<AppState>()
-        .first_repo()
+        .state::<ggs_base::workspace::WorkspaceRoots>()
+        .first()
         .or_else(|| {
             std::env::current_dir()
                 .ok()

@@ -189,7 +189,8 @@ pub async fn viewer_save(
     });
     // Match write_file: a saved (possibly new) file must show up in Quick Open and search.
     use tauri::Manager;
-    app.state::<crate::AppState>().file_list_cache.invalidate();
+    app.state::<std::sync::Arc<ggs_fs::FileListCache>>()
+            .invalidate();
     Ok(())
 }
 

@@ -200,7 +200,7 @@ fn launch_spec() -> LaunchSpec {
 }
 
 fn folders(app: &AppHandle) -> Vec<String> {
-    app.state::<crate::AppState>().repos.lock().unwrap().clone()
+    app.state::<ggs_base::workspace::WorkspaceRoots>().list()
 }
 
 fn main_visible(app: &AppHandle) -> bool {

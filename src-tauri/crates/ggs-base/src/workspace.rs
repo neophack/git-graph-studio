@@ -36,6 +36,75 @@ pub fn is_repo_below(roots: &[String], path: &str) -> bool {
     }) && candidate.join(".git").exists()
 }
 
+/// The open workspace roots — the state half of the workspace services (the plan's
+/// §4.6: `repos` leaves the app's god-state and lives here, managed by the app and
+/// injected by the commands that need it). The standalone shell works with one folder
+/// at a time, but the Git Graph view was built around a repo set, so the state stays
+/// a list.
+pub struct WorkspaceRoots {
+    repos: std::sync::Mutex<Vec<String>>,
+}
+
+impl Default for WorkspaceRoots {
+    fn default() -> Self {
+        WorkspaceRoots {
+            repos: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl WorkspaceRoots {
+    /// The open roots, cloned (a snapshot for a handshake or a status answer).
+    pub fn list(&self) -> Vec<String> {
+        self.repos.lock().unwrap().clone()
+    }
+
+    /// The first open root — the default repository of the git-backed views.
+    pub fn first(&self) -> Option<String> {
+        self.repos.lock().unwrap().first().cloned()
+    }
+
+    /// Replace the open roots (an open-folder/open-workspace pass sets them whole).
+    pub fn set(&self, roots: Vec<String>) {
+        *self.repos.lock().unwrap() = roots;
+    }
+
+    /// Drop every root (a close, or a switch into single-file mode).
+    pub fn clear(&self) {
+        self.repos.lock().unwrap().clear();
+    }
+
+    /// Whether `root` is already the first open root (a reopen keeps the warm handles).
+    pub fn first_is(&self, root: &str) -> bool {
+        self.repos
+            .lock()
+            .unwrap()
+            .first()
+            .is_some_and(|open| open == root)
+    }
+
+    /// The repository a Source Control command acts on: the open repository when the
+    /// view names none, otherwise the named one — which must be an open root or a
+    /// checkout below one (a submodule the view lists as its own section). Anything
+    /// else is refused: the frontend never gets to run git in an arbitrary folder.
+    pub fn resolve_repo(&self, repo: Option<String>) -> Result<String, String> {
+        let repos = self.repos.lock().unwrap();
+        let Some(repo) = repo else {
+            return repos
+                .first()
+                .cloned()
+                .ok_or_else(|| "No repository is open".to_string());
+        };
+        if repos.contains(&repo) {
+            return Ok(repo);
+        }
+        if is_repo_below(&repos, &repo) {
+            return Ok(repo);
+        }
+        Err(format!("{repo} is not a repository of the open folder"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

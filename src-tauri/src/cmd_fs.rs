@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ggs_git::runner::Git;
-use crate::AppState;
+use ggs_base::workspace::WorkspaceRoots;
 use tauri::ipc::Channel;
 use tauri::State;
 
@@ -132,13 +132,13 @@ pub async fn file_fingerprint(path: String) -> Result<Option<String>, String> {
 /// (the editor's own `\n` when absent).
 #[tauri::command]
 pub async fn write_file(
-    state: State<'_, AppState>,
+    cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>,
     path: String,
     contents: String,
     encoding: Option<String>,
     eol: Option<String>,
 ) -> Result<(), String> {
-    state.file_list_cache.invalidate();
+    cache.invalidate();
     let target = Path::new(&path);
     // Saving a file whose parent vanished (an external delete) would create a stray file.
     if let Some(parent) = target.parent() {
@@ -159,7 +159,7 @@ pub async fn write_file(
 /// and `:index` reads the staged copy.
 #[tauri::command]
 pub async fn read_file_at(
-    state: State<'_, AppState>,
+    roots: State<'_, WorkspaceRoots>,
     revision: String,
     path: String,
     repo: Option<String>,
@@ -168,7 +168,7 @@ pub async fn read_file_at(
     // submodule's commit reads that submodule); the shell's own reads name none and get the
     // open repository.
     let repo_path = repo
-        .or_else(|| state.first_repo())
+        .or_else(|| roots.inner().first())
         .ok_or_else(|| "No repository is open".to_string())?;
     if revision == "*" {
         return read_file(
@@ -205,13 +205,13 @@ pub async fn read_file_at(
 /// file, so the other side still has something to compare against.
 #[tauri::command]
 pub async fn materialize_revision_file(
-    state: State<'_, AppState>,
+    roots: State<'_, WorkspaceRoots>,
     revision: String,
     path: String,
     repo: Option<String>,
 ) -> Result<String, String> {
     let repo_path = repo
-        .or_else(|| state.first_repo())
+        .or_else(|| roots.inner().first())
         .ok_or_else(|| "No repository is open".to_string())?;
     if revision == "*" {
         let full = Path::new(&repo_path).join(&path);
@@ -263,7 +263,7 @@ pub fn discard_temp_blob(path: String) -> Result<(), String> {
 /// the open folders — a browser session writes nowhere else (§7.8).
 #[tauri::command]
 pub fn fs_write_chunk(
-    state: State<'_, AppState>,
+    roots: State<'_, WorkspaceRoots>,
     request: tauri::ipc::Request<'_>,
 ) -> Result<u64, String> {
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
@@ -284,14 +284,13 @@ pub fn fs_write_chunk(
     let total: u64 = header("x-ggs-total")?
         .parse()
         .map_err(|_| "bad x-ggs-total")?;
-    let roots: Vec<PathBuf> = state
-        .repos
-        .lock()
-        .unwrap()
+    let open: Vec<PathBuf> = roots
+        .inner()
+        .list()
         .iter()
         .map(PathBuf::from)
         .collect();
-    if !upload_allowed(Path::new(&path), &roots) {
+    if !upload_allowed(Path::new(&path), &open) {
         return Err(format!("{path}: uploads land inside the open folders only"));
     }
     write_upload_chunk(Path::new(&path), offset, total, bytes)
@@ -302,12 +301,12 @@ pub fn fs_write_chunk(
 /// these locally (no session header) and enforces the boundary before forwarding an
 /// invoke — the app's own commands stay unconfined for the desktop window that runs them.
 #[tauri::command]
-pub fn remote_paths_policy(state: State<'_, AppState>) -> Vec<String> {
-    let mut roots: Vec<String> = state.repos.lock().unwrap().clone();
-    if let Some(file) = state.single_file.lock().unwrap().clone() {
-        roots.push(file);
+pub fn remote_paths_policy(roots: State<'_, WorkspaceRoots>, launch: State<'_, crate::state::LaunchState>) -> Vec<String> {
+    let mut open: Vec<String> = roots.inner().list();
+    if let Some(file) = launch.inner().single_file() {
+        open.push(file);
     }
-    roots
+    open
 }
 
 /// The extension-platform roots a remote session's `ext_fs` may ALSO reach, beyond the open
@@ -335,18 +334,17 @@ pub fn remote_ext_roots() -> Vec<String> {
 /// path errors, and the write refuses too).
 #[tauri::command]
 pub fn fs_upload_offset(
-    state: State<'_, AppState>,
+    roots: State<'_, WorkspaceRoots>,
     path: String,
     size: u64,
 ) -> Result<u64, String> {
-    let roots: Vec<PathBuf> = state
-        .repos
-        .lock()
-        .unwrap()
+    let open: Vec<PathBuf> = roots
+        .inner()
+        .list()
         .iter()
         .map(PathBuf::from)
         .collect();
-    if !upload_allowed(Path::new(&path), &roots) {
+    if !upload_allowed(Path::new(&path), &open) {
         return Err(format!("{path}: uploads land inside the open folders only"));
     }
     Ok(upload_offset(Path::new(&path), size))
@@ -485,11 +483,11 @@ mod temp_blob_tests {
 
 #[tauri::command]
 pub async fn repo_head(
-    state: State<'_, AppState>,
+    roots: State<'_, WorkspaceRoots>,
     repo: Option<String>,
 ) -> Result<HeadInfo, String> {
     // `repo` names a submodule's section of the Source Control view; the open repository otherwise.
-    let repo_path = state.resolve_repo(repo)?;
+    let repo_path = roots.inner().resolve_repo(repo)?;
     let git = Git::new(&repo_path);
     // One subprocess instead of four (each git spawn costs ~50-90 ms on Windows): the
     // porcelain v2 branch header carries the branch, the oid, the upstream and the
@@ -530,8 +528,8 @@ mod session_log_tests {
 }
 
 #[tauri::command]
-pub fn create_file(state: State<'_, AppState>, path: String) -> Result<(), String> {
-    state.file_list_cache.invalidate();
+pub fn create_file(cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>, path: String) -> Result<(), String> {
+    cache.invalidate();
     let target = checked(&path)?;
     if target.exists() {
         return Err(format!("{path} already exists"));
@@ -543,8 +541,8 @@ pub fn create_file(state: State<'_, AppState>, path: String) -> Result<(), Strin
 }
 
 #[tauri::command]
-pub fn create_folder(state: State<'_, AppState>, path: String) -> Result<(), String> {
-    state.file_list_cache.invalidate();
+pub fn create_folder(cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>, path: String) -> Result<(), String> {
+    cache.invalidate();
     let target = checked(&path)?;
     if target.exists() {
         return Err(format!("{path} already exists"));
@@ -553,8 +551,8 @@ pub fn create_folder(state: State<'_, AppState>, path: String) -> Result<(), Str
 }
 
 #[tauri::command]
-pub fn rename_path(state: State<'_, AppState>, from: String, to: String) -> Result<(), String> {
-    state.file_list_cache.invalidate();
+pub fn rename_path(cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>, from: String, to: String) -> Result<(), String> {
+    cache.invalidate();
     rename(&from, &to)
 }
 
@@ -563,11 +561,11 @@ pub fn rename_path(state: State<'_, AppState>, from: String, to: String) -> Resu
 /// fallback the Explorer offers when the trash refuses) removes it outright.
 #[tauri::command]
 pub fn delete_path(
-    state: State<'_, AppState>,
+    cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>,
     path: String,
     permanent: Option<bool>,
 ) -> Result<(), String> {
-    state.file_list_cache.invalidate();
+    cache.invalidate();
     let target = checked(&path)?;
     let meta = fs::symlink_metadata(&target).map_err(|e| format!("{path}: {e}"))?;
     if !permanent.unwrap_or(false) {
@@ -590,11 +588,11 @@ pub fn delete_path(
 /// folder cannot be copied into itself. Returns the paths that landed.
 #[tauri::command]
 pub fn copy_into(
-    state: State<'_, AppState>,
+    cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>,
     sources: Vec<String>,
     dest_dir: String,
 ) -> Result<Vec<String>, String> {
-    state.file_list_cache.invalidate();
+    cache.invalidate();
     copy_into_paths(&sources, &dest_dir)
 }
 
@@ -610,8 +608,8 @@ pub fn copy_into(
 /// Stop the running transfer (the progress toast's Cancel action): the copy loop honours
 /// the generation change at the next chunk boundary and settles cancelled.
 #[tauri::command]
-pub fn fs_transfer_cancel(state: State<'_, AppState>) {
-    state.transfer.cancel();
+pub fn fs_transfer_cancel(transfer: State<'_, std::sync::Arc<ggs_fs::TransferState>>) {
+    transfer.cancel();
 }
 
 /// Upload from the PC's own disk into an open folder — the desktop half of the transfer
@@ -622,14 +620,15 @@ pub fn fs_transfer_cancel(state: State<'_, AppState>) {
 /// between chunks, leaving every landed file whole.
 #[tauri::command]
 pub async fn fs_import(
-    state: State<'_, AppState>,
+    transfer: State<'_, std::sync::Arc<ggs_fs::TransferState>>,
+    cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>,
     sources: Vec<String>,
     target_dir: String,
     on_progress: Channel<TransferProgress>,
 ) -> Result<TransferReport, String> {
-    let transfer = state.transfer.clone();
+    let transfer = std::sync::Arc::clone(transfer.inner());
     let generation = transfer.next();
-    let cache = state.file_list_cache.clone();
+    let cache = std::sync::Arc::clone(cache.inner());
     tauri::async_runtime::spawn_blocking(move || {
         let report = import_sources(
             &sources,
@@ -652,13 +651,13 @@ pub async fn fs_import(
 /// stops it and removes the partial destination.
 #[tauri::command]
 pub async fn fs_export(
-    state: State<'_, AppState>,
+    transfer: State<'_, std::sync::Arc<ggs_fs::TransferState>>,
     path: String,
     dest: String,
     zip: Option<bool>,
     on_progress: Channel<TransferProgress>,
 ) -> Result<TransferReport, String> {
-    let transfer = state.transfer.clone();
+    let transfer = std::sync::Arc::clone(transfer.inner());
     let generation = transfer.next();
     tauri::async_runtime::spawn_blocking(move || {
         export_path(
@@ -686,15 +685,16 @@ pub async fn fs_export(
 /// on the next request.
 #[tauri::command]
 pub async fn list_files(
-    state: State<'_, AppState>,
+    roots: State<'_, WorkspaceRoots>,
+    cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>,
     repo: Option<String>,
 ) -> Result<Vec<String>, String> {
     const TTL: Duration = Duration::from_secs(5);
     let root = repo
-        .or_else(|| state.first_repo())
+        .or_else(|| roots.inner().first())
         .ok_or_else(|| "No folder is open".to_string())?;
     Ok(cached_file_list(
-        &state.file_list_cache,
+        cache.inner(),
         &root,
         TTL,
         walk_files,

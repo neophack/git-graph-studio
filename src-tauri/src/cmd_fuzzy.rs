@@ -10,23 +10,25 @@ use ggs_fs::{cached_file_list, walk_files};
 
 use ggs_index::fuzzy::{fuzzy_hits, path_entries, FuzzyFileHit, PathEntry};
 
-use crate::AppState;
+use ggs_base::workspace::WorkspaceRoots;
 use tauri::State;
 
 /// Quick Open's query: the open folder's file list scored in Rust, the best `limit` rows
 /// first. An empty query returns the first files as walked, like the TS source does.
 #[tauri::command]
 pub async fn fuzzy_files(
-    state: State<'_, AppState>,
+    roots: State<'_, WorkspaceRoots>,
+    cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>,
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<FuzzyFileHit>, String> {
     const TTL: Duration = Duration::from_secs(5);
     let limit = limit.unwrap_or(60).clamp(1, 200);
-    let root = state
-        .first_repo()
+    let root = roots
+        .inner()
+        .first()
         .ok_or_else(|| "No folder is open".to_string())?;
-    let files = cached_file_list(&state.file_list_cache, &root, TTL, walk_files);
+    let files = cached_file_list(&cache, &root, TTL, walk_files);
     Ok(fuzzy_hits(&files, &query, limit))
 }
 
@@ -35,16 +37,18 @@ pub async fn fuzzy_files(
 /// `autocomplete.ts`, which stays as the frontend's fallback).
 #[tauri::command]
 pub async fn path_completions(
-    state: State<'_, AppState>,
+    roots: State<'_, WorkspaceRoots>,
+    cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>,
     prefix: String,
     limit: Option<usize>,
 ) -> Result<Vec<PathEntry>, String> {
     const TTL: Duration = Duration::from_secs(5);
     let limit = limit.unwrap_or(200).clamp(1, 500);
-    let root = state
-        .first_repo()
+    let root = roots
+        .inner()
+        .first()
         .ok_or_else(|| "No folder is open".to_string())?;
-    let files = cached_file_list(&state.file_list_cache, &root, TTL, walk_files);
+    let files = cached_file_list(&cache, &root, TTL, walk_files);
 
     let typed = prefix.replace('\\', "/");
     Ok(path_entries(&files, &typed, limit))

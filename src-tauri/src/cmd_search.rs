@@ -20,7 +20,7 @@ use ggs_index::symbols::cache::cached_symbols;
 use ggs_index::symbols::index::references_for;
 use ggs_index::symbols::WorkspaceSymbol;
 
-use crate::AppState;
+use ggs_base::workspace::WorkspaceRoots;
 
 /// Search every file of the open folder, streaming results over `on_event`. `query` is a
 /// substring or (with `isRegex`) a regular expression; batches arrive grouped by file, files
@@ -31,7 +31,9 @@ use crate::AppState;
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn search_workspace(
-    state: State<'_, AppState>,
+    roots: State<'_, WorkspaceRoots>,
+    search: State<'_, std::sync::Arc<ggs_index::search::SearchState>>,
+    cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>,
     query: String,
     is_regex: bool,
     case_sensitive: bool,
@@ -41,7 +43,7 @@ pub async fn search_workspace(
     repo: Option<String>,
     on_event: Channel<SearchEvent>,
 ) -> Result<(), String> {
-    let generation = state.search.next();
+    let generation = search.next();
     if query.is_empty() {
         let _ = on_event.send(SearchEvent::Done {
             scanned: 0,
@@ -51,15 +53,15 @@ pub async fn search_workspace(
         return Ok(());
     }
     let root = repo
-        .or_else(|| state.first_repo())
+        .or_else(|| roots.inner().first())
         .ok_or_else(|| "No folder is open".to_string())?;
     let matcher = build_matcher(&query, is_regex, case_sensitive, word_only.unwrap_or(false))?;
     let files = filter_paths(
-        cached_file_list(&state.file_list_cache, &root, FILE_LIST_TTL, walk_files),
+        cached_file_list(cache.inner(), &root, FILE_LIST_TTL, walk_files),
         include.as_deref().unwrap_or(""),
         exclude.as_deref().unwrap_or(""),
     );
-    let search = state.search.clone();
+    let search = std::sync::Arc::clone(search.inner());
     // The scan is CPU- and IO-bound rayon work: it runs on a blocking thread so the async
     // runtime (and every other command) stays responsive while a big tree is searched.
     tauri::async_runtime::spawn_blocking(move || {
@@ -88,8 +90,8 @@ pub async fn search_workspace(
 
 /// Stop the running search (the view calls this when its query is cleared or it is hidden).
 #[tauri::command]
-pub fn search_cancel(state: State<'_, AppState>) {
-    state.search.cancel();
+pub fn search_cancel(search: State<'_, std::sync::Arc<ggs_index::search::SearchState>>) {
+    search.cancel();
 }
 
 /// Replace every match in every file of the open folder. Files are rewritten whole; the file
@@ -97,7 +99,8 @@ pub fn search_cancel(state: State<'_, AppState>) {
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // the search options mirror search_workspace's
 pub async fn replace_in_files(
-    state: State<'_, AppState>,
+    roots: State<'_, WorkspaceRoots>,
+    cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>,
     query: String,
     replacement: String,
     is_regex: bool,
@@ -108,10 +111,10 @@ pub async fn replace_in_files(
     word_only: Option<bool>,
 ) -> Result<ReplaceOutcome, String> {
     let root = repo
-        .or_else(|| state.first_repo())
+        .or_else(|| roots.inner().first())
         .ok_or_else(|| "No folder is open".to_string())?;
     let files = filter_paths(
-        cached_file_list(&state.file_list_cache, &root, FILE_LIST_TTL, walk_files),
+        cached_file_list(cache.inner(), &root, FILE_LIST_TTL, walk_files),
         include.as_deref().unwrap_or(""),
         exclude.as_deref().unwrap_or(""),
     );
@@ -124,7 +127,7 @@ pub async fn replace_in_files(
         case_sensitive,
         word_only.unwrap_or(false),
     )?;
-    state.file_list_cache.invalidate();
+    cache.invalidate();
     Ok(outcome)
 }
 
@@ -150,18 +153,20 @@ pub async fn compare_dirs(
 /// fallback for the window before it does.
 #[tauri::command]
 pub async fn workspace_symbols(
-    state: State<'_, AppState>,
+    roots: State<'_, WorkspaceRoots>,
+    symbol_index: State<'_, std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>,
+    symbol_cache: State<'_, std::sync::Arc<ggs_index::symbols::cache::SymbolCache>>,
     query: String,
     limit: Option<usize>,
     repo: Option<String>,
 ) -> Result<Vec<WorkspaceSymbol>, String> {
     let root = repo
-        .or_else(|| state.first_repo())
+        .or_else(|| roots.inner().first())
         .ok_or_else(|| "No folder is open".to_string())?;
-    let all = state
-        .symbol_index
+    let all = symbol_index
+        .inner()
         .all_symbols(&root)
-        .unwrap_or_else(|| cached_symbols(&root, &state.symbol_cache));
+        .unwrap_or_else(|| cached_symbols(&root, symbol_cache.inner()));
     let needle = query.to_lowercase();
     let mut hits: Vec<WorkspaceSymbol> = all
         .into_iter()
@@ -179,13 +184,15 @@ pub async fn workspace_symbols(
 /// when one has landed.
 #[tauri::command]
 pub async fn find_references(
-    state: State<'_, AppState>,
+    roots: State<'_, WorkspaceRoots>,
+    symbol_index: State<'_, std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>,
     name: String,
 ) -> Result<Vec<FileMatches>, String> {
-    let root = state
-        .first_repo()
+    let root = roots
+        .inner()
+        .first()
         .ok_or_else(|| "No folder is open".to_string())?;
-    references_for(&state.symbol_index, &root, &name)
+    references_for(symbol_index.inner(), &root, &name)
 }
 
 /* ---------- Hex comparison ---------- */
@@ -219,14 +226,15 @@ fn bytes_at(
 /// repo-relative paths). Reports the differing 16-byte rows for the hex view.
 #[tauri::command]
 pub async fn hex_diff(
-    state: State<'_, AppState>,
+    roots: State<'_, WorkspaceRoots>,
     revision_a: String,
     revision_b: String,
     path_a: String,
     path_b: String,
 ) -> Result<HexDiff, String> {
-    let root = state
-        .first_repo()
+    let root = roots
+        .inner()
+        .first()
         .ok_or_else(|| "No folder is open".to_string())?;
     let git = ggs_git::runner::Git::new(&root);
     let a = bytes_at(&git, &root, &revision_a, &path_a)?;

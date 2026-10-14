@@ -7,7 +7,6 @@
 //! and the `studio://symbol-index` event for the background builds (both through the
 //! ggs-base push seams).
 
-use std::sync::Arc;
 
 use tauri::ipc::Channel;
 use tauri::State;
@@ -20,33 +19,35 @@ use ggs_index::symbols::index::{
 use ggs_index::symbols::WorkspaceSymbol;
 use ggs_index::scan::FileMatches;
 
-use crate::AppState;
+use ggs_base::workspace::WorkspaceRoots;
 
-fn resolve_root(state: &AppState, repo: Option<String>) -> Result<String, String> {
-    repo.or_else(|| state.first_repo())
+fn resolve_root(roots: &WorkspaceRoots, repo: Option<String>) -> Result<String, String> {
+    repo.or_else(|| roots.first())
         .ok_or_else(|| "No folder is open".to_owned())
 }
 
 /// The index state of the open folder: what the status bar shows.
 #[tauri::command]
 pub async fn symbols_status(
-    state: State<'_, AppState>,
+    roots: State<'_, WorkspaceRoots>,
+    symbol_index: State<'_, std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>,
     repo: Option<String>,
 ) -> Result<IndexStatus, String> {
-    let root = resolve_root(&state, repo)?;
-    Ok(state.symbol_index.status(&root))
+    let root = resolve_root(roots.inner(), repo)?;
+    Ok(symbol_index.status(&root))
 }
 
 /// Rebuild the symbol index from scratch (also what a first open does in the background).
 /// Streams `progress` batches over the channel, then one `done`.
 #[tauri::command]
 pub async fn symbols_rebuild(
-    state: State<'_, AppState>,
+    roots: State<'_, WorkspaceRoots>,
+    symbol_index: State<'_, std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>,
     repo: Option<String>,
     on_event: Channel<SymbolIndexEvent>,
 ) -> Result<IndexStatus, String> {
-    let root = resolve_root(&state, repo)?;
-    let index = Arc::clone(&state.symbol_index);
+    let root = resolve_root(roots.inner(), repo)?;
+    let index = std::sync::Arc::clone(symbol_index.inner());
     tauri::async_runtime::spawn_blocking(move || {
         let mut channel = crate::events::ChannelSink(on_event);
         let channel: Option<&mut dyn BatchSink<SymbolIndexEvent>> = Some(&mut channel);
@@ -60,29 +61,32 @@ pub async fn symbols_rebuild(
 /// a real answer (nothing declares it); the frontend falls back to its other heuristics.
 #[tauri::command]
 pub async fn symbol_lookup(
-    state: State<'_, AppState>,
+    roots: State<'_, WorkspaceRoots>,
+    symbol_index: State<'_, std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>,
     name: String,
     repo: Option<String>,
 ) -> Result<Vec<WorkspaceSymbol>, String> {
-    let root = resolve_root(&state, repo)?;
-    Ok(state.symbol_index.lookup(&root, &name).unwrap_or_default())
+    let root = resolve_root(roots.inner(), repo)?;
+    Ok(symbol_index.lookup(&root, &name).unwrap_or_default())
 }
 
 /// The whole index as a per-file outline — the Symbol Database page renders it as a
 /// collapsible tree (the MCP server drills per file through `file_symbols` instead).
 #[tauri::command]
 pub async fn symbol_tree(
-    state: State<'_, AppState>,
+    roots: State<'_, WorkspaceRoots>,
+    symbol_index: State<'_, std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>,
+    symbol_cache: State<'_, std::sync::Arc<ggs_index::symbols::cache::SymbolCache>>,
     repo: Option<String>,
 ) -> Result<Vec<TreeFile>, String> {
-    let root = resolve_root(&state, repo)?;
-    if let Some((symbols, counts)) = state.symbol_index.symbols_with_refs(&root) {
+    let root = resolve_root(roots.inner(), repo)?;
+    if let Some((symbols, counts)) = symbol_index.symbols_with_refs(&root) {
         return Ok(tree_from(symbols, |name| {
             counts.get(name).copied().unwrap_or(0)
         }));
     }
     // No index yet: the in-memory rebuild serves the outline without occurrence counts.
-    let all = cached_symbols(&root, &state.symbol_cache);
+    let all = cached_symbols(&root, symbol_cache.inner());
     Ok(tree_from(all, |_| 0))
 }
 
@@ -92,10 +96,11 @@ pub async fn symbol_tree(
 /// scanned. `find_references` (cmd_search) and this command are both that one implementation.
 #[tauri::command]
 pub async fn symbol_references(
-    state: State<'_, AppState>,
+    roots: State<'_, WorkspaceRoots>,
+    symbol_index: State<'_, std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>,
     name: String,
     repo: Option<String>,
 ) -> Result<Vec<FileMatches>, String> {
-    let root = resolve_root(&state, repo)?;
-    references_for(&state.symbol_index, &root, &name)
+    let root = resolve_root(roots.inner(), repo)?;
+    references_for(&symbol_index, &root, &name)
 }
