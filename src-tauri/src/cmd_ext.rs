@@ -132,7 +132,7 @@ fn bundled_packages(app: &tauri::AppHandle) -> Vec<ggs_ext::BundledPackage> {
 #[tauri::command]
 pub fn ext_install_from_vsix(
     app: tauri::AppHandle,
-    state: tauri::State<'_, crate::ext_process::ProcessHostState>,
+    state: tauri::State<'_, ggs_ext::process::ExtHost>,
     path: String,
 ) -> Result<ExtInfo, String> {
     let dir = extensions_dir(&app)?;
@@ -150,7 +150,7 @@ pub fn ext_install_from_vsix(
 #[tauri::command]
 pub fn ext_install_bundled(
     app: tauri::AppHandle,
-    state: tauri::State<'_, crate::ext_process::ProcessHostState>,
+    state: tauri::State<'_, ggs_ext::process::ExtHost>,
     ext_id: String,
 ) -> Result<ExtInfo, String> {
     let dir = extensions_dir(&app)?;
@@ -198,7 +198,7 @@ pub fn install_missing_bundled(app: &tauri::AppHandle) -> Vec<Result<String, Str
 pub fn uninstall_stopping(
     dir: &Path,
     ext_id: &str,
-    host: &crate::ext_process::ProcessHostState,
+    host: &ggs_ext::process::ExtHost,
 ) -> Result<(), String> {
     let _ = host.stop(ext_id);
     uninstall(dir, ext_id)
@@ -209,7 +209,7 @@ pub fn uninstall_stopping(
 #[tauri::command]
 pub fn ext_uninstall(
     app: tauri::AppHandle,
-    state: tauri::State<'_, crate::ext_process::ProcessHostState>,
+    state: tauri::State<'_, ggs_ext::process::ExtHost>,
     ext_id: String,
 ) -> Result<(), String> {
     let dir = extensions_dir(&app)?;

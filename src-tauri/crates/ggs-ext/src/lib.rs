@@ -5,20 +5,27 @@
 //! boot-script composition, the workspace-confined `ext_fs` and the pages' byte services,
 //! the frame's code preload, the extension logs, and the Node environment facts.
 //!
-//! Allowed dependencies: ggs-base, ggs-git (plan §4.3 of
-//! docs/architecture-restructure-plan.md; ggs-proto joins at P3-10 with the process
-//! host). No tauri — the `#[tauri::command]` adapters and the store-directory
-//! resolution (the app-data migration, the resource roots, the test pin) stay in the
-//! app's `cmd_ext.rs`. No global mutable state.
+//! Allowed dependencies: ggs-base, ggs-proto, ggs-git, ggs-testkit (dev; plan §4.3 of
+//! docs/architecture-restructure-plan.md). No tauri — the `#[tauri::command]` adapters,
+//! the store-directory resolution (the app-data migration, the resource roots, the test
+//! pin) and the `HostHooks` installation stay in the app's `cmd_ext.rs` /
+//! `ext_process.rs`. Global mutable state: `process::SPAWN_ENV_SOURCES` and
+//! `routing`'s routes/journal tables are process-unique (one extension host per
+//! process — every app instance constructs its own `ExtHost`); `child`'s registry is
+//! the one process-wide child table.
 //!
 //! Every engine function takes its store directory (or extensions home) explicitly —
 //! `ExtStore::at(dir)` is a directory argument, not a singleton (the plan's P3-9).
 
+pub mod child;
 pub mod fsapi;
+pub mod gallery;
 pub mod loadcode;
 pub mod log;
 pub mod nodeenv;
 pub mod page;
+pub mod process;
+pub mod routing;
 pub mod store;
 pub mod vsix;
 
@@ -53,6 +60,12 @@ pub use store::{
     StudioExtMeta, StudioManifest,
 };
 pub use vsix::{compare_versions, read_vsix_manifest, resolve_node_binaries, safe_join, VsixManifest};
+
+pub use process::{
+    add_spawn_env_source, find_node_host_script, find_node_runtime, instance_id,
+    resolve_engine_host, ExtHost, HostHooks, ProcessInfo, BACKEND_STATE_EVENT,
+    HOST_REQUEST_EVENT, HOST_STATE_EVENT,
+};
 
 /// The real-Node host opt-in (`GGS_REAL_NODE=1`): it decides whether a plain VSIX with
 /// the packers' engine layout derives its `.node` itself as the backend (a real Node

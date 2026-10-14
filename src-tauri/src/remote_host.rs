@@ -231,7 +231,7 @@ async fn session(
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<FromInstance>();
     out_tx
         .send(FromInstance::Register {
-            instance_id: crate::ext_process::instance_id().to_owned(),
+            instance_id: ggs_ext::process::instance_id().to_owned(),
             pid: std::process::id(),
             version: app.package_info().version.to_string(),
             title: title(app),

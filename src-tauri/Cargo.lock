@@ -2019,11 +2019,13 @@ dependencies = [
  "base64 0.22.1",
  "ggs-base",
  "ggs-git",
+ "ggs-proto",
  "ggs-testkit",
  "http",
  "serde",
  "serde_json",
  "tempfile",
+ "ureq",
  "zip",
 ]
 

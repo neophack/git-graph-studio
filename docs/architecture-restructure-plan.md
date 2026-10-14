@@ -45,6 +45,8 @@
 | P3-7 ggs-analysis（git mv analysis/* + index 模块；dump-diagram 输出逐字节一致已验） | ✅ | 本次 |
 | P3-8 ggs-mcp（mcp.rs 整文件 git mv；两命令适配；握手冒烟过） | ✅ | `e098aea` |
 | P3-9 ggs-ext（一）（store/vsix/page/fsapi/log/loadcode/nodeenv；ExtStore=显式目录参数） | ✅ | 本次 |
+| P3-10 ggs-ext（二）（process/routing/child；global()→app 侧 ExtHost；事件经 HostHooks） | ✅ | 本次 |
+| P3-11 ggs-ext（三）（gallery：Open VSX 客户端，来源约束测试随迁） | ✅ | 本次 |
 
 P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现（构建走
 `target/studio/cargo`），`incremental` 目录 17.5 GB 为多 feature 时代的历史累积，
@@ -95,6 +97,18 @@ P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现
   cmd_ext 的 63 个测试 → crate 62（Windows 可见 60）+ app 1（应用资源路由测试，
   测的是 AssetResolver 半边）；app lib 195 → 135，ggs-ext 60，workspace 总数 704
   不变。crate 依赖 53 个（normal）。
+- **P3-10/11 的落点**：ext_process 的引擎（握手、reader 线程、崩溃隔离、状态表）
+  与 ext_routing、ext_child、ext_gallery 的引擎全部落入 ggs-ext（process /
+  routing / child / gallery 四个模块；tauri 侧只剩四个适配文件）。接缝形状：
+  `ProcessHostState` 更名 `ExtHost`，crate 不再有 `global()`——app 的适配层持
+  `host()` 单例（组合根的选择，非 crate 的），`manage()` 同一实例；tauri 耦合点
+  集中为 `HostHooks`（`emit` 事件发射器、`node_host_resources` 打包资源路径、
+  `frontend_of` 前端策略），由 app 的 `attach_app` 从 AppHandle 一次性安装——
+  计划里的 EventSink 语义以最小的钩子面落了地（emit 返回 bool，reader 对未达
+  事件回带内错误）；`real_node_allowed` 收敛到 crate 根（ext_process 的副本删）。
+  ext_child 的 Channel 换成事件回调。27 个测试随文件入 crate（ext_gallery 12 +
+  ext_process 11 + ext_routing 4），app lib 135 → 108，ggs-ext 60 → 87，
+  workspace 704 不变。
 
 ### 度量（P2 后实测 vs 计划 §3.2 的预估）
 
@@ -129,6 +143,8 @@ P3-7：app lib 253 → 211（-42，恰为 analysis/ 七文件 + cmd_analysis 3�
 P3-9：app lib 195 → 135（-60，cmd_ext 的七个测试模块随引擎走；11 个资产测试中
 测 AssetResolver 半边的 1 个留 app），ggs-ext 60 = 迁移 60（源码 62，2 个
 unix-only 在 Windows 不编译）。
+P3-10/11：app lib 135 → 108（-27 = ext_gallery 12 + ext_process 11 +
+ext_routing 4），ggs-ext 60 → 87 = 60 + 27。
 
 ---
 

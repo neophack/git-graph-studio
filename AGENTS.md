@@ -386,7 +386,7 @@ the extension's artifacts — `scripts/check-seams.mjs` fails the build on any r
   `compare-bridge.js` the in-page extension hosts, `bundle.mjs` the page bundles with
   relative URLs, `config-stdin.js` the config bundle's entry, `vsix.mjs` the zip writer,
   `stubs/` the `vscode` / Node / `fs` shims the bundles build against)
-- Host side (generic): `src-tauri/src/ext_process.rs` (spawns every installed backend, the
+- Host side (generic): the `ggs-ext` crate's `process` module behind `src-tauri/src/ext_process.rs` (spawns every installed backend, the
   start handshake carries the open folders, `notify_workspace` pushes changes, a manifest
   still naming the retired `ggx-rpc/1` fails its start with an upgrade hint),
   `src-tauri/src/ext_protocol.rs` (the one wire protocol, `ggs-ext/1`: JSON-RPC 2.0 over
@@ -734,7 +734,7 @@ page shows the integration's state (`claude_mcp_status`).
   `~/.ggs/extensions` resolution and its one-time migration, the bundled-root discovery
   — git-graph-rs, `ext_install_bundled`'s id — and the `ggs://` protocol registration
   over tauri's asset resolver; P3-9 of docs/architecture-restructure-plan.md),
-  `src-tauri/src/ext_gallery.rs` (the marketplace: Open VSX search, icon fetch and
+  `src-tauri/src/ext_gallery.rs` (the marketplace commands over the `ggs-ext` crate's `gallery` engine: Open VSX search, icon fetch and
   download-and-install over ureq, origin-confined, a marketplace package installing
   through `cmd_ext`'s ordinary VSIX path),
   `src-tauri/src/cmd_providers.rs` (the AI provider bridge: the provider store under
@@ -748,7 +748,7 @@ page shows the integration's state (`claude_mcp_status`).
   registered spawn-env sources — the composition root's wiring, so the two modules do
   not name each other),
   `src-tauri/src/ext_grammar.rs` (the TextMate-grammar loader: `.tmLanguage` plists and
-  `.json` grammars converted to Sublime syntax and added to the rope viewer's syntect set), `src-tauri/src/ext_process.rs` (the process extension host: eager
+  `.json` grammars converted to Sublime syntax and added to the rope viewer's syntect set), the `ggs-ext` crate's `process` module behind `src-tauri/src/ext_process.rs` (the process extension host: eager
   start at boot and install, lazy start on first command as the fallback, `initialize`
   handshake, `runCommand`, crash isolation, remembered status (start count, last error),
   stop on uninstall and at app exit; a `node` backend runs on the bundled `ggs-node` (the
@@ -888,7 +888,7 @@ page shows the integration's state (`claude_mcp_status`).
   diet with unwinding panics, because third-party JS must degrade its own miscompiled
   closures, never abort the backend (`scripts/prepare.mjs` builds it that way),
   `src-tauri/src/ext_protocol.rs` (the `ggs-ext/1` wire
-  protocol, shared with plugin binaries), `src-tauri/src/ext_routing.rs` (which of the
+  protocol, shared with plugin binaries), the `ggs-ext` crate's `routing` module (which of the
   instance's frontends answers a backend's `ggs.hostRequest` — `main`, or ONE remote
   session `remote/<n>` (the Relay's `x-ggs-frontend` header, believed only from the
   Relay's webview; through a Hub these are different people, and one user's click must
@@ -909,7 +909,7 @@ page shows the integration's state (`claude_mcp_status`).
   claude-code's activation-time `setContext`, so its Claude Code container stayed
   hidden, and a remote "View Git Graph" opened on the desktop), `src-tauri/crates/ggs-ext/src/page_boot.js` (the
   `acquireGgsApi()` bootstrap the protocol composes into served pages),
-  `src-tauri/src/ext_child.rs` (the frame host's child processes: one `ext_child_spawn` +
+  `src-tauri/src/ext_child.rs` (the frame host's child processes, over the `ggs-ext` crate's `child` engine: one `ext_child_spawn` +
   stdin/kill follow-ups per spawned tool, stdout/stderr streamed as base64 `Channel` events,
   every handle killed at app exit and on extension reload — the real process surface a
   sandboxed frame cannot have, which `nodeShims.ts` maps onto the Node `child_process`

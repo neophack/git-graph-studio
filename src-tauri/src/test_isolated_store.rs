@@ -10,7 +10,7 @@ pub struct IsolatedExtensionStore {
 
 impl Drop for IsolatedExtensionStore {
     fn drop(&mut self) {
-        crate::ext_process::global().stop_all();
+        crate::ext_process::host().stop_all();
         crate::cmd_ext::unpin_extensions_home();
     }
 }
@@ -18,6 +18,6 @@ impl Drop for IsolatedExtensionStore {
 pub fn isolated_extension_store() -> IsolatedExtensionStore {
     let dir = tempfile::tempdir().expect("a tempdir for the isolated extension store");
     crate::cmd_ext::pin_extensions_home(dir.path().to_path_buf());
-    crate::ext_process::global().stop_all();
+    crate::ext_process::host().stop_all();
     IsolatedExtensionStore { _dir: dir }
 }

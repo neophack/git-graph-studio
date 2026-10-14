@@ -12,6 +12,8 @@ workspace = true
 
 [dependencies]
 ggs-base.workspace = true
+# The ggs-ext/1 wire protocol every backend speaks (the process host's reader).
+ggs-proto.workspace = true
 # The page byte services read a file at a revision (git cat-file blob) — ggs-git is
 # the only git surface (plan §4.3: ggs-ext → base, proto, git).
 ggs-git.workspace = true
@@ -24,6 +26,8 @@ base64.workspace = true
 # The ggs:// serving core answers plain http types (the app's protocol adapter hands
 # them to tauri unchanged — tauri::http is this same crate).
 http = { workspace = true }
+# The marketplace client (Open VSX), every URL confined to the gallery's own origin.
+ureq = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

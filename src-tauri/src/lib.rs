@@ -64,7 +64,6 @@ pub mod ext_process;
 /// Which frontend answers a backend's host request, and the registration journal a late
 /// frontend replays (docs/ggs-remote-plan.md §8.6 #1).
 #[cfg(feature = "desktop")]
-pub mod ext_routing;
 #[cfg(feature = "desktop")]
 pub mod mcp;
 #[cfg(feature = "desktop")]
@@ -302,7 +301,7 @@ mod desktop {
             repos.push(root.clone());
         }
         if !already_open {
-            ext_process::global().notify_workspace(std::slice::from_ref(&root));
+            ext_process::host().notify_workspace(std::slice::from_ref(&root));
             cmd_providers::apply_claude_integration(std::slice::from_ref(&root));
             remote_host::notify_folders(std::slice::from_ref(&root));
         }
@@ -608,7 +607,7 @@ mod desktop {
         state.analysis_index.cancel();
         state.watcher.lock().unwrap().clear();
         *state.repos.lock().unwrap() = roots.iter().map(|root| root.root.clone()).collect();
-        ext_process::global().notify_workspace(&[]);
+        ext_process::host().notify_workspace(&[]);
         cmd_providers::apply_claude_integration(&[]);
         remote_host::notify_folders(&state.repos.lock().unwrap());
 
@@ -813,7 +812,7 @@ mod desktop {
         state.repos.lock().unwrap().clear();
         state.deferred_services.clear();
         *state.single_file.lock().unwrap() = Some(path);
-        ext_process::global().notify_workspace(&[]);
+        ext_process::host().notify_workspace(&[]);
         cmd_providers::apply_claude_integration(&[]);
         remote_host::notify_folders(&state.repos.lock().unwrap());
         Ok(())
@@ -831,7 +830,7 @@ mod desktop {
         state.symbol_cache.invalidate();
         state.repos.lock().unwrap().clear();
         state.deferred_services.clear();
-        ext_process::global().notify_workspace(&[]);
+        ext_process::host().notify_workspace(&[]);
         cmd_providers::apply_claude_integration(&[]);
         remote_host::notify_folders(&state.repos.lock().unwrap());
     }
@@ -1370,12 +1369,12 @@ mod desktop {
         // config dir, the active provider's endpoint and key) rides into every backend
         // start through this registered source — ext_process itself names no provider
         // knowledge, so the two modules meet only here, in the composition root.
-        ext_process::add_spawn_env_source(cmd_providers::backend_env);
+        ggs_ext::process::add_spawn_env_source(cmd_providers::backend_env);
         // The same seam carries git: when the located Git for Windows is not on the
         // PATH (a custom-directory install), its directory rides into every backend's
         // PATH, so an extension's own git discovery finds the same install the app
         // runs — git.rs owns the answer, ext_process stays git-agnostic.
-        ext_process::add_spawn_env_source(ggs_git::runner::backend_env);
+        ggs_ext::process::add_spawn_env_source(ggs_git::runner::backend_env);
         // The app's own executable, for whatever an extension starts on the app's behalf
         // (the Remote Access daemon launches new windows with it). Set before any thread
         // exists; every backend and every frame's `process.env` inherits it.
@@ -1505,11 +1504,12 @@ mod desktop {
             .manage(ggs_text::viewer::ViewerState::default())
             .manage(ggs_text::viewer::indexed::IndexedState::default())
             .manage(ggs_can::CanLogState::default())
-            // A clone of the process-wide handle (`ext_process::global()`), not a second,
-            // independent `ProcessHostState`: `plugin_host.rs` reaches the same running
-            // backends through `global()` directly, with no `AppHandle` to fetch Tauri-managed
-            // state through, and the two must agree on what is running.
-            .manage(ext_process::global().clone())
+            // A clone of the app's one host (`ext_process::host()`), not a second,
+            // independent `ExtHost`: the folder-open paths and the provider bridge's
+            // restarts reach the same running backends through `host()` directly, with no
+            // `AppHandle` to fetch Tauri-managed state through, and the two must agree on
+            // what is running.
+            .manage(ext_process::host().clone())
             // The `ggx` protocol serves an installed package's own files to its sandboxed
             // page iframes (cmd_ext.rs confines every request to the extensions home) — the
             // extension-platform counterpart of the public dir the Git Graph page loads from.
@@ -1584,17 +1584,18 @@ mod desktop {
                                 }
                             }
                         }
-                        let host = handle.state::<ext_process::ProcessHostState>();
+                        let host = handle.state::<ggs_ext::process::ExtHost>();
                         // The reader threads forward a real-Node extension host's
-                        // `ggs.hostRequest`s through the app's event emitter.
-                        host.attach_app(handle.clone());
+                        // `ggs.hostRequest`s through the app's event emitter (the engine's
+                        // HostHooks, installed off this handle).
+                        ext_process::attach_app(&handle);
                         for started in host.start_all_installed(&dir) {
                             if let Err(reason) = started {
                                 eprintln!("[extensions] backend failed to start: {reason}");
                             }
                         }
                         let folders = handle.state::<AppState>().repos.lock().unwrap().clone();
-                        ext_process::global().notify_workspace(&folders);
+                        ext_process::host().notify_workspace(&folders);
                         cmd_providers::apply_claude_integration(&folders);
                     });
                 }
@@ -1912,8 +1913,8 @@ mod desktop {
                 }
                 if let tauri::RunEvent::Exit = event {
                     use tauri::Manager;
-                    app.state::<ext_process::ProcessHostState>().stop_all();
-                    ext_child::stop_all();
+                    app.state::<ggs_ext::process::ExtHost>().stop_all();
+                    ggs_ext::child::stop_all();
                 }
             });
     }

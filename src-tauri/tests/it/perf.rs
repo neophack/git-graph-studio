@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use git_graph_studio_lib::ext_process::ProcessHostState;
+use ggs_ext::process::ExtHost;
 use ggs_git::ops as scm_ops;
 use ggs_git::runner::Git;
 use ggs_base::workspace::find_repo_root;
@@ -26,7 +26,7 @@ const ENGINE_ID: &str = "perf.git-graph-rs";
 /// Installs a `git-graph-rs`-shaped package — a `node` backend whose command IS the real
 /// engine `.node`, loaded natively by the real-Node extension host — into its own temp
 /// extensions directory, isolated from the developer's or CI runner's real
-/// `~/.ggs/extensions` (this drives `ProcessHostState` directly).
+/// `~/.ggs/extensions` (this drives the extension host directly).
 fn install_engine_backend(exts: &Path, node: &Path) {
     std::fs::create_dir_all(exts).unwrap();
     let vsix = exts.parent().unwrap().join("git-graph-rs-perf.vsix");
@@ -74,7 +74,7 @@ ggs.onRequest((command, args) => {
 /// carried the repository separately; now every message names its own `repo`, so this fills
 /// the one the caller resolved for messages that omit it.
 fn engine_request(
-    state: &ProcessHostState,
+    state: &ExtHost,
     exts: &Path,
     repo: &str,
     message: Value,
@@ -247,7 +247,7 @@ fn opening_a_large_repository_stays_within_the_budgets() {
     // The repository root and the SCM status are the app's own reads now (the filesystem walk
     // `open_folder` runs, and one `git status --porcelain`); the graph's first page is the
     // plugin backend's, spoken to exactly as the view speaks to it (`runCommand` with the
-    // page's own message). This test drives its own isolated `ProcessHostState`, so it needs
+    // page's own message). This test drives its own isolated extension host, so it needs
     // no real `~/.ggs/extensions` install and does not pollute the developer's or CI runner's
     // real profile; the one-time spawn + `initialize` handshake cost (plan §8.2: ~99 ms on
     // the reference machine) happens on `state.start`, before any timing starts.
@@ -280,7 +280,7 @@ fn opening_a_large_repository_stays_within_the_budgets() {
     if engine_ready {
         install_engine_backend(&exts, &engine_node);
     }
-    let state = ProcessHostState::default();
+    let state = ExtHost::default();
     if engine_ready {
         state
             .start(&exts, ENGINE_ID)

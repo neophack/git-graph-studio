@@ -7,7 +7,7 @@
 
 use std::io::Write;
 
-use git_graph_studio_lib::ext_process::ProcessHostState;
+use ggs_ext::process::ExtHost;
 use serde_json::json;
 
 const ID: &str = "acme.js-demo";
@@ -59,7 +59,7 @@ ggs.onRequest((command, args) => {
     zip.finish().unwrap();
     let info = ggs_ext::install_from_vsix_into(&exts, &vsix, false).unwrap();
 
-    let state = ProcessHostState::default();
+    let state = ExtHost::default();
     let started = state.start(&exts, ID).unwrap();
     assert_eq!(started.protocol_version, "ggs-ext/1");
     // No special manifest fields any more: the backend's command list comes from the

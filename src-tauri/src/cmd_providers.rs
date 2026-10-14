@@ -683,7 +683,7 @@ fn claude_shell_env(home: &Path) -> Vec<(String, String)> {
         return Vec::new();
     }
     let ggs_bash_copy = || {
-        crate::ext_process::resolve_engine_host("ggs-bash")
+        ggs_ext::process::resolve_engine_host("ggs-bash")
             .ok()
             .and_then(|sidecar| ggs_shellenv::ensure_bash_exe(home, &sidecar))
     };
@@ -1365,7 +1365,7 @@ pub const BACKEND_RESTARTED_EVENT: &str = "ext-backend-restarted";
 /// one) needs nothing; its next start spawns with the window's current provider
 /// environment on its own. Pure over the host's status answer, so the selection policy
 /// is testable.
-fn bridged_running(status: &[crate::ext_process::ProcessInfo]) -> Vec<String> {
+fn bridged_running(status: &[ggs_ext::process::ProcessInfo]) -> Vec<String> {
     status
         .iter()
         .filter(|info| info.pid != 0 && BRIDGED_EXT_IDS.contains(&info.extension_id.as_str()))
@@ -1384,8 +1384,8 @@ fn bridged_running(status: &[crate::ext_process::ProcessInfo]) -> Vec<String> {
 /// lazy-starts the fresh one (the frontend's only recovery from a dead backend whose
 /// views are still marked resolved).
 fn restart_bridged_backends(app: &tauri::AppHandle) {
-    let host = crate::ext_process::global();
-    host.attach_app(app.clone());
+    let host = crate::ext_process::host();
+    crate::ext_process::attach_app(app);
     for ext_id in bridged_running(&host.status()) {
         // The frame host's children the extension spawned go with it — the same cleanup
         // the Extensions view's restart runs.
@@ -3301,7 +3301,7 @@ mod tests {
     /// process carries the provider it must be rid of.
     #[test]
     fn a_restart_pass_touches_only_running_bridged_backends() {
-        let info = |id: &str, pid: u32| crate::ext_process::ProcessInfo {
+        let info = |id: &str, pid: u32| ggs_ext::process::ProcessInfo {
             extension_id: id.to_owned(),
             pid,
             commands: Vec::new(),
