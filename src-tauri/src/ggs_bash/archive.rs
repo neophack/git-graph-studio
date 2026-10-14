@@ -405,7 +405,8 @@ pub fn run_gzip(shell: &mut Shell, io: &Io, name: &str, args: &[String]) -> Exec
         match result {
             Ok(bytes) => io.write_out(&bytes),
             Err(error) => {
-                io.err_str(&format!("gzip: {error}' + chr(92) + 'n"));
+                io.err_str(&format!("gzip: {error}
+"));
                 return Ok(1);
             }
         }
@@ -416,7 +417,8 @@ pub fn run_gzip(shell: &mut Shell, io: &Io, name: &str, args: &[String]) -> Exec
         let raw = match std::fs::read(&resolved) {
             Ok(raw) => raw,
             Err(error) => {
-                io.err_str(&format!("gzip: {path}: {error}' + chr(92) + 'n"));
+                io.err_str(&format!("gzip: {path}: {error}
+"));
                 return Ok(1);
             }
         };
@@ -424,7 +426,8 @@ pub fn run_gzip(shell: &mut Shell, io: &Io, name: &str, args: &[String]) -> Exec
             let plain = match gunzip(&raw) {
                 Ok(plain) => plain,
                 Err(error) => {
-                    io.err_str(&format!("gzip: {path}: {error}' + chr(92) + 'n"));
+                    io.err_str(&format!("gzip: {path}: {error}
+"));
                     return Ok(1);
                 }
             };
@@ -464,7 +467,8 @@ pub fn run_gzip(shell: &mut Shell, io: &Io, name: &str, args: &[String]) -> Exec
             }
         };
         if let Err(error) = result {
-            io.err_str(&format!("gzip: {path}: {error}' + chr(92) + 'n"));
+            io.err_str(&format!("gzip: {path}: {error}
+"));
             return Ok(1);
         }
     }
@@ -486,6 +490,19 @@ mod tests {
         // The -z path: gunzip of a created archive answers the same entries.
         let packed = gzip_wrap(&stored_deflate(&archive), &archive);
         assert_eq!(tar_parse(&gunzip(&packed).unwrap()).unwrap(), entries);
+    }
+
+    #[test]
+    fn gzip_error_messages_are_real_lines() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("plain.txt"), b"not a gzip payload").unwrap();
+        let (_, err, status) = crate::ggs_bash::tests::run_in(dir.path(), "gzip -d plain.txt");
+        assert_eq!(status, 1);
+        // Git Bash prints one clean line per failure; the escaped-newline literal
+        // "' + chr(92) + 'n" is a generation defect, never shell output.
+        assert!(!err.contains("chr(92)"), "gzip error output carries the raw literal: {err:?}");
+        assert!(err.trim_end().ends_with('n') || err.contains("
+"), "a newline-terminated line: {err:?}");
     }
 
     #[test]
