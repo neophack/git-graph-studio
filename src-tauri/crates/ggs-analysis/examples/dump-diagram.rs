@@ -2,9 +2,9 @@
 //! repository and writes the `analysis_module_diagram` / `analysis_module_graph`
 //! answers as JSON, so the browser harness can serve the real thing.
 
-use git_graph_studio_lib::analysis::diagram::module_diagram;
-use git_graph_studio_lib::analysis::modules::module_graph;
-use git_graph_studio_lib::analysis::AnalysisData;
+use ggs_analysis::diagram::module_diagram;
+use ggs_analysis::modules::module_graph;
+use ggs_analysis::AnalysisData;
 
 fn main() {
     let root = std::env::args().nth(1).unwrap_or_else(|| ".".to_owned());

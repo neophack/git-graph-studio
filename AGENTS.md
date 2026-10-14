@@ -1066,8 +1066,8 @@ in-app MCP Server page shows. stderr is logs; stdout is protocol only.
   with them)
 - Backend: `src-tauri/src/mcp.rs` (the server loop, the tool implementations, the
   handshake, the call log); the index itself is module 5's (the `ggs-index` crate's
-  `symbols::store` / `symbols::index`), the analysis tools sit on module 17's engine (`cmd_analysis.rs` /
-  `analysis/`)
+  `symbols::store` / `symbols::index`), the analysis tools sit on module 17's engine (the
+  `ggs-analysis` crate)
 - Tests: `mcp.rs`'s `#[cfg(test)]` module (scratch repository over a temp index home);
   the page's vitest lives in `tests/analysis.test.ts` (it rides the analysis suite)
 
@@ -1140,18 +1140,20 @@ viewport (pan, zoom, states) around it.
   Analysis drawing: mermaid + ELK rendering of `analysis_module_diagram`'s source,
   gitdiagram's viewport around it — pan/zoom, the zoom toolbar, the delegated
   selection states)
-- Backend: `src-tauri/src/cmd_analysis.rs` (the per-root `AnalysisIndex`, the streaming
-  tool commands), `src-tauri/src/analysis/` (`mod.rs` the engine and the per-symbol call
-  graph, `metrics.rs`, `deadcode.rs`, `security.rs`, `modules.rs` the Module Analysis
-  aggregation, `diagram.rs` the Module Analysis drawing — the architecture-only
-  curation, gitdiagram's caps, tone
+- Backend: the `ggs-analysis` crate (`src-tauri/crates/ggs-analysis/`) — `lib.rs` the
+  engine and the per-symbol call graph, `index.rs` the per-root `AnalysisIndex` and the
+  streaming report runners, `metrics.rs`, `deadcode.rs`, `security.rs`, `modules.rs` the
+  Module Analysis aggregation, `diagram.rs` the Module Analysis drawing — the
+  architecture-only curation, gitdiagram's caps, tone
   palette, group roll-up and fold, and the mermaid source (classDefs included) behind
   `analysis_module_diagram`,
   `imports.rs`, `bca.rs` the big-code-analysis
   bridge whose report-time columns — cognitive complexity, Halstead volume, logical SLOC,
-  the maintainability index — enrich the Complexity & Hotspots rows); parsing comes from
-  module 5's `ggs-index` crate (`symbols::parse`)
-- Tests: `tests/analysis.test.ts`, the `analysis/` modules' `#[cfg(test)]`
+  the maintainability index — enrich the Complexity & Hotspots rows; parsing comes from
+  module 5's `ggs-index` crate (`symbols::parse`) — behind the
+  `src-tauri/src/cmd_analysis.rs` command adapters (the `#[tauri::command]` halves;
+  progress crosses the ggs-base push seams)
+- Tests: `tests/analysis.test.ts`, the crate's `#[cfg(test)]`
 
 ### 15. Build & Release Pipeline
 

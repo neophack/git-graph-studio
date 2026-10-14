@@ -1,349 +1,25 @@
-//! The Code Analysis commands (module 17): the per-root `AnalysisIndex` the app state
-//! owns, plus the tool commands the Analysis pages and the MCP server call. The index
-//! builds in the background on a folder open (half the cores), the explicit rebuild takes
-//! them all, watcher batches update single files, and every report command streams its
-//! rows over a channel in batches with a cancellation generation — the search view's
-//! rhythm (plan §3.4): a first batch lands fast, and a newer run retires the older one.
+//! The Code Analysis command adapters (module 17): the `#[tauri::command]` half over
+//! ggs-analysis's per-root `AnalysisIndex`. The index builds in the background on a
+//! folder open, the explicit rebuild takes every core, watcher batches update single
+//! files, and every report command streams its rows over a channel through the ggs-base
+//! push seam — the search view's rhythm (plan §3.4).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::State;
 
-use rayon::prelude::*;
+use ggs_analysis::index::{
+    run_dead_code, run_metrics, run_security, AnalysisIndexEvent, AnalysisStatus,
+    DeadCodeEvent, MetricsEvent, SecurityEvent,
+};
+use ggs_analysis::imports::ImportGraph;
+use ggs_analysis::modules::{self, ModuleGraph};
+use ggs_analysis::AnalysisData;
+use ggs_analysis::diagram::ModuleDiagram;
 
-use crate::analysis::bca;
-use crate::analysis::diagram::{self, ModuleDiagram};
-use crate::analysis::imports::ImportGraph;
-use crate::analysis::metrics::MetricRow;
-use crate::analysis::modules::{self, ModuleGraph};
-use crate::analysis::security::{self, Finding};
-use crate::analysis::{deadcode, imports, metrics, AnalysisData};
 use crate::AppState;
-
-/// The event the Analysis sidebar listens to; the payload is an [`AnalysisStatus`].
-pub const ANALYSIS_INDEX_EVENT: &str = "studio://analysis-index";
-
-/// Rows per streamed batch — small enough that the first batch lands in milliseconds,
-/// large enough that the channel is not the bottleneck (the metrics report batches by
-/// file, which lands the same rhythm).
-const REPORT_BATCH: usize = 256;
-
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum AnalysisState {
-    Empty,
-    Building,
-    Ready,
-}
-
-#[derive(Serialize, Clone, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct AnalysisStatus {
-    pub state: AnalysisState,
-    pub done: usize,
-    pub total: usize,
-    pub files: usize,
-    pub symbols: usize,
-    pub calls: usize,
-}
-
-impl AnalysisStatus {
-    fn empty() -> AnalysisStatus {
-        AnalysisStatus {
-            state: AnalysisState::Empty,
-            done: 0,
-            total: 0,
-            files: 0,
-            symbols: 0,
-            calls: 0,
-        }
-    }
-}
-
-/// What a rebuild pushes over its channel: progress batches, then exactly one `done`.
-#[derive(Serialize, Clone, Debug)]
-#[serde(rename_all = "camelCase", tag = "kind")]
-pub enum AnalysisIndexEvent {
-    Progress {
-        done: usize,
-        total: usize,
-    },
-    Done {
-        files: usize,
-        symbols: usize,
-        calls: usize,
-        cancelled: bool,
-    },
-}
-
-#[derive(Serialize, Clone, Debug)]
-#[serde(rename_all = "camelCase", tag = "kind")]
-pub enum MetricsEvent {
-    Batch {
-        rows: Vec<MetricRow>,
-    },
-    Done {
-        files: usize,
-        functions: usize,
-        cancelled: bool,
-    },
-}
-
-#[derive(Serialize, Clone, Debug)]
-#[serde(rename_all = "camelCase", tag = "kind")]
-pub enum DeadCodeEvent {
-    Batch { rows: Vec<deadcode::DeadRow> },
-    Done { found: usize, cancelled: bool },
-}
-
-#[derive(Serialize, Clone, Debug)]
-#[serde(rename_all = "camelCase", tag = "kind")]
-pub enum SecurityEvent {
-    Batch {
-        findings: Vec<Finding>,
-    },
-    Done {
-        files: usize,
-        findings: usize,
-        cancelled: bool,
-    },
-}
-
-/// The per-root analyses plus their build state. The generation counter cancels a running
-/// build or report the way the symbol index's does.
-pub struct AnalysisIndex {
-    analyses: Mutex<HashMap<String, Arc<Mutex<AnalysisData>>>>,
-    progress: Mutex<HashMap<String, AnalysisStatus>>,
-    generation: AtomicU64,
-}
-
-impl Default for AnalysisIndex {
-    fn default() -> Self {
-        AnalysisIndex::new()
-    }
-}
-
-impl AnalysisIndex {
-    pub fn new() -> AnalysisIndex {
-        AnalysisIndex {
-            analyses: Mutex::new(HashMap::new()),
-            progress: Mutex::new(HashMap::new()),
-            generation: AtomicU64::new(0),
-        }
-    }
-
-    /// Stop the running build or report (a folder switch or a newer run).
-    pub fn cancel(&self) {
-        self.generation.fetch_add(1, Ordering::SeqCst);
-    }
-
-    pub fn status(&self, root: &str) -> AnalysisStatus {
-        self.progress
-            .lock()
-            .unwrap()
-            .get(root)
-            .cloned()
-            .unwrap_or_else(AnalysisStatus::empty)
-    }
-
-    fn note(&self, root: &str, status: AnalysisStatus) {
-        self.progress
-            .lock()
-            .unwrap()
-            .insert(root.to_owned(), status);
-    }
-
-    fn data(&self, root: &str) -> Option<Arc<Mutex<AnalysisData>>> {
-        self.analyses.lock().unwrap().get(root).cloned()
-    }
-
-    fn install(&self, root: &str, data: AnalysisData) {
-        let stats = ready_status(&data);
-        self.analyses
-            .lock()
-            .unwrap()
-            .insert(root.to_owned(), Arc::new(Mutex::new(data)));
-        self.note(root, stats);
-    }
-
-    /// Drop a root's analysis (the folder closed).
-    pub fn remove(&self, root: &str) {
-        self.analyses.lock().unwrap().remove(root);
-        self.progress.lock().unwrap().remove(root);
-    }
-
-    /// Kick off the background build of a root (a folder open). Fire and forget —
-    /// progress reaches the frontend through the [`ANALYSIS_INDEX_EVENT`] event.
-    pub fn start_build(self: &Arc<Self>, app: Option<tauri::AppHandle>, root: &str) {
-        let index = Arc::clone(self);
-        let root = root.to_owned();
-        std::thread::spawn(move || {
-            let _ = index.build_on_blocking(app.as_ref(), &root, None, index_threads(true));
-        });
-    }
-
-    /// An explicit rebuild (the sidebar's button, `analysis_rebuild`, the MCP start): the
-    /// user or the script is waiting, so every core is fair game.
-    pub(crate) fn build_blocking(
-        &self,
-        app: Option<&tauri::AppHandle>,
-        root: &str,
-        channel: Option<&Channel<AnalysisIndexEvent>>,
-    ) -> Result<AnalysisStatus, String> {
-        self.build_on_blocking(app, root, channel, index_threads(false))
-    }
-
-    fn build_on_blocking(
-        &self,
-        app: Option<&tauri::AppHandle>,
-        root: &str,
-        channel: Option<&Channel<AnalysisIndexEvent>>,
-        threads: usize,
-    ) -> Result<AnalysisStatus, String> {
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let is_current = || self.generation.load(Ordering::SeqCst) == generation;
-        let report = |done: usize, total: usize| {
-            self.note(
-                root,
-                AnalysisStatus {
-                    state: AnalysisState::Building,
-                    done,
-                    total,
-                    files: 0,
-                    symbols: 0,
-                    calls: 0,
-                },
-            );
-            if let Some(channel) = channel {
-                let _ = channel.send(AnalysisIndexEvent::Progress { done, total });
-            }
-            if let Some(app) = app {
-                use tauri::Emitter;
-                let _ = app.emit(ANALYSIS_INDEX_EVENT, self.status(root));
-            }
-        };
-        let built = AnalysisData::build(root, threads, &report, &|| !is_current());
-        // A cancelled build leaves the previous analysis standing, like the symbol index —
-        // and its STATUS too: the progress report left "Building N/M" on the note, and a
-        // cancelled build never clears it (a report run bumps the same generation, so
-        // "open a report while a rebuild streams" strands the stale counter forever).
-        let data = match built {
-            Some(data) => data,
-            None => {
-                if let Some(existing) = self.data(root) {
-                    // The cancelled build's generation was retired, the installed
-                    // analysis stands: restore its READY status over the stranded
-                    // "Building N/M" note.
-                    let status = existing.lock().map(|data| ready_status(&data));
-                    if let Ok(status) = status {
-                        self.note(root, status);
-                    }
-                } else {
-                    self.note(
-                        root,
-                        AnalysisStatus {
-                            state: AnalysisState::Empty,
-                            done: 0,
-                            total: 0,
-                            files: 0,
-                            symbols: 0,
-                            calls: 0,
-                        },
-                    );
-                }
-                if let Some(channel) = channel {
-                    let _ = channel.send(AnalysisIndexEvent::Done {
-                        files: 0,
-                        symbols: 0,
-                        calls: 0,
-                        cancelled: true,
-                    });
-                }
-                return Err("cancelled".to_owned());
-            }
-        };
-        let stats = ready_status(&data);
-        self.install(root, data);
-        if let Some(channel) = channel {
-            let _ = channel.send(AnalysisIndexEvent::Done {
-                files: stats.files,
-                symbols: stats.symbols,
-                calls: stats.calls,
-                cancelled: false,
-            });
-        }
-        if let Some(app) = app {
-            use tauri::Emitter;
-            let _ = app.emit(ANALYSIS_INDEX_EVENT, self.status(root));
-        }
-        Ok(stats)
-    }
-
-    /// Apply a watcher batch to the root's analysis on a background thread.
-    pub fn apply_changes(
-        self: &Arc<Self>,
-        app: Option<tauri::AppHandle>,
-        root: &str,
-        paths: Vec<String>,
-    ) {
-        let index = Arc::clone(self);
-        let root = root.to_owned();
-        std::thread::spawn(move || {
-            let Some(data) = index.data(&root) else {
-                return;
-            };
-            {
-                let mut data = data.lock().unwrap();
-                data.apply_changes(&paths);
-                index.note(&root, ready_status(&data));
-            }
-            if let Some(app) = app {
-                use tauri::Emitter;
-                let _ = app.emit(ANALYSIS_INDEX_EVENT, index.status(&root));
-            }
-        });
-    }
-
-    /// The analysis of a root, when one has landed.
-    pub fn analysis(&self, root: &str) -> Option<Arc<Mutex<AnalysisData>>> {
-        self.data(root)
-    }
-
-    /// Claim the next run generation for a streaming report: a newer report (or a build,
-    /// or a folder switch) retires the caller at its next batch.
-    fn begin_run(&self) -> u64 {
-        self.generation.fetch_add(1, Ordering::SeqCst) + 1
-    }
-
-    fn is_current_run(&self, run: u64) -> bool {
-        self.generation.load(Ordering::SeqCst) == run
-    }
-}
-
-fn index_threads(background: bool) -> usize {
-    // The same budget the symbol index uses (cmd_symbols::SymbolIndex::index_threads).
-    cmd_symbols_threads(background)
-}
-
-// The symbol index's thread budget, reached through its public helper.
-fn cmd_symbols_threads(background: bool) -> usize {
-    ggs_index::symbols::index::SymbolIndex::index_threads(background)
-}
-
-fn ready_status(data: &AnalysisData) -> AnalysisStatus {
-    AnalysisStatus {
-        state: AnalysisState::Ready,
-        done: data.file_count(),
-        total: data.file_count(),
-        files: data.file_count(),
-        symbols: data.symbol_count(),
-        calls: data.call_count(),
-    }
-}
 
 /* ---------- The commands ---------- */
 
@@ -380,14 +56,19 @@ pub async fn analysis_rebuild(
 ) -> Result<AnalysisStatus, String> {
     let root = resolve_root(&state, repo)?;
     let index = Arc::clone(&state.analysis_index);
-    tauri::async_runtime::spawn_blocking(move || index.build_blocking(None, &root, Some(&on_event)))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut channel = crate::events::ChannelSink(on_event);
+        let channel: Option<&mut dyn ggs_base::sink::BatchSink<AnalysisIndexEvent>> =
+            Some(&mut channel);
+        index.build_blocking(None, &root, channel)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// The workspace's module graph: which module (directory) depends on which, the file
 /// pairs that carry the calls and the call sites under each — the Module Analysis
-/// page's whole model, in one answer (see `analysis::modules`). `folders` scopes the
+/// page's whole model, in one answer (see `ggs_analysis::modules`). `folders` scopes the
 /// answer to a folder pick (empty or absent: the whole workspace).
 #[tauri::command]
 pub async fn analysis_module_graph(
@@ -405,7 +86,7 @@ pub async fn analysis_module_graph(
 
 /// The Module Analysis drawing (the gitdiagram-style architecture diagram): the
 /// module graph laid out in the backend — group boxes, blocks, arrows, the mermaid
-/// source and what the caps dropped — geometry ready to set (see `analysis::diagram`).
+/// source and what the caps dropped — geometry ready to set (see `ggs_analysis::diagram`).
 /// The filter and the optional focus narrow the pairs the same way the page's tree
 /// does; the page refetches on either changing. `folders` scopes the whole drawing
 /// to a folder pick (empty or absent: the whole workspace).
@@ -420,7 +101,7 @@ pub async fn analysis_module_diagram(
     let data = analysis_of(&state, repo)?;
     let data = data.lock().unwrap();
     let scope = modules::normalize_scope(&folders.unwrap_or_default());
-    Ok(diagram::module_diagram(
+    Ok(ggs_analysis::diagram::module_diagram(
         &modules::module_graph(&data, &scope),
         focus.as_deref(),
         filter.as_deref().unwrap_or(""),
@@ -444,62 +125,17 @@ pub async fn analysis_metrics(
         .analysis(&root)
         .ok_or_else(|| "The code analysis index is still building".to_owned())?;
     let index = Arc::clone(&state.analysis_index);
-    let refs = state
+    let refs: HashMap<String, usize> = state
         .symbol_index
         .symbols_with_refs(&root)
         .map(|(_, counts)| counts)
         .unwrap_or_default();
     tauri::async_runtime::spawn_blocking(move || {
-        let run = index.begin_run();
-        // Base rows under the lock (the index already measured the shape); the
-        // enrichment parses outside it, so the analysis keeps serving queries.
-        let mut files: Vec<(String, Vec<MetricRow>)> = {
-            let data = data.lock().unwrap();
-            data.files()
-                .iter()
-                .map(|file| {
-                    (
-                        file.path.clone(),
-                        metrics::rows_for_file(file, &|name| refs.get(name).copied().unwrap_or(0)),
-                    )
-                })
-                .collect()
-        };
-        let file_count = files.len();
-        let mut functions = 0usize;
-        for batch in files.chunks_mut(REPORT_BATCH) {
-            if !index.is_current_run(run) {
-                let _ = on_event.send(MetricsEvent::Done {
-                    files: 0,
-                    functions: 0,
-                    cancelled: true,
-                });
-                return Ok(());
-            }
-            batch.par_iter_mut().for_each(|(path, rows)| {
-                let ext = path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-                if let Ok(text) =
-                    std::fs::read_to_string(std::path::Path::new(&root).join(path.as_str()))
-                {
-                    bca::enrich_file(ext, &text, rows);
-                }
-            });
-            functions += batch.iter().map(|(_, rows)| rows.len()).sum::<usize>();
-            let rows: Vec<MetricRow> = batch
-                .iter()
-                .flat_map(|(_, rows)| rows.iter().cloned())
-                .collect();
-            let _ = on_event.send(MetricsEvent::Batch { rows });
-        }
-        let _ = on_event.send(MetricsEvent::Done {
-            files: file_count,
-            functions,
-            cancelled: false,
-        });
-        Ok(())
+        let mut sink = crate::events::ChannelSink(on_event);
+        run_metrics(&index, &data, &root, &refs, &mut sink);
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
 }
 
 /// Declarations no call site in the workspace spells, streamed in batches.
@@ -518,31 +154,11 @@ pub async fn analysis_dead_code(
     let index = Arc::clone(&state.analysis_index);
     let include_exported = include_exported.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {
-        let run = index.begin_run();
-        let rows = {
-            let data = data.lock().unwrap();
-            deadcode::dead_rows(&data, include_exported)
-        };
-        for batch in rows.chunks(REPORT_BATCH) {
-            if !index.is_current_run(run) {
-                let _ = on_event.send(DeadCodeEvent::Done {
-                    found: 0,
-                    cancelled: true,
-                });
-                return Ok(());
-            }
-            let _ = on_event.send(DeadCodeEvent::Batch {
-                rows: batch.to_vec(),
-            });
-        }
-        let _ = on_event.send(DeadCodeEvent::Done {
-            found: rows.len(),
-            cancelled: false,
-        });
-        Ok(())
+        let mut sink = crate::events::ChannelSink(on_event);
+        run_dead_code(&index, &data, include_exported, &mut sink);
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
 }
 
 /// The rule-based security scan (secrets, dangerous and weak-crypto APIs), streamed in
@@ -561,43 +177,11 @@ pub async fn analysis_security(
         .ok_or_else(|| "The code analysis index is still building".to_owned())?;
     let index = Arc::clone(&state.analysis_index);
     tauri::async_runtime::spawn_blocking(move || {
-        let run = index.begin_run();
-        let mut files = 0usize;
-        let mut total = 0usize;
-        {
-            let data = data.lock().unwrap();
-            for file in data.files() {
-                if !index.is_current_run(run) {
-                    let _ = on_event.send(SecurityEvent::Done {
-                        files: 0,
-                        findings: 0,
-                        cancelled: true,
-                    });
-                    return Ok(());
-                }
-                let Ok(text) =
-                    std::fs::read_to_string(std::path::Path::new(&root).join(&file.path))
-                else {
-                    continue;
-                };
-                files += 1;
-                let ext = file.path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-                let findings = security::scan_file(&file.path, ext, &text, &file.calls);
-                total += findings.len();
-                if !findings.is_empty() {
-                    let _ = on_event.send(SecurityEvent::Batch { findings });
-                }
-            }
-        }
-        let _ = on_event.send(SecurityEvent::Done {
-            files,
-            findings: total,
-            cancelled: false,
-        });
-        Ok(())
+        let mut sink = crate::events::ChannelSink(on_event);
+        run_security(&index, &data, &root, &mut sink);
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
 }
 
 /// The workspace's import graph with its cycles, in one answer.
@@ -608,98 +192,5 @@ pub async fn analysis_import_graph(
 ) -> Result<ImportGraph, String> {
     let data = analysis_of(&state, repo)?;
     let data = data.lock().unwrap();
-    Ok(imports::import_graph(&data))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::analysis::Direction;
-
-    fn write(root: &std::path::Path, path: &str, text: &str) {
-        let file = root.join(path);
-        std::fs::create_dir_all(file.parent().unwrap_or(root)).unwrap();
-        std::fs::write(file, text).unwrap();
-    }
-
-    fn seeded() -> (tempfile::TempDir, Arc<AnalysisIndex>, String) {
-        let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "a.rs", "pub fn start() -> u32 { middle() + helper() }\nfn middle() -> u32 { helper() }\nfn helper() -> u32 { 7 }\nfn orphan() -> u32 { 0 }\n");
-        let index = Arc::new(AnalysisIndex::new());
-        let root = dir.path().display().to_string();
-        index.build_blocking(None, &root, None).unwrap();
-        (dir, index, root)
-    }
-
-    #[test]
-    fn build_publishes_status_and_serves_queries() {
-        let (_dir, index, root) = seeded();
-        let status = index.status(&root);
-        assert_eq!(status.state, AnalysisState::Ready);
-        assert_eq!(status.files, 1);
-        assert_eq!(status.symbols, 4);
-        assert_eq!(status.calls, 3);
-
-        let data = index.analysis(&root).unwrap();
-        let graph = data
-            .lock()
-            .unwrap()
-            .call_graph("helper", None, Direction::Callers, 2);
-        // helper is called by middle (direct) and start (through middle, depth 2).
-        assert_eq!(graph.nodes.len(), 3);
-        let names: Vec<&str> = graph.nodes.iter().map(|n| n.name.as_str()).collect();
-        assert!(
-            names.contains(&"start") && names.contains(&"middle"),
-            "{names:?}"
-        );
-
-        // The whole seed sits in one file, so the module graph has no cross-file edge.
-        let modules = modules::module_graph(&data.lock().unwrap(), &[]);
-        assert!(modules.edges.is_empty());
-        assert_eq!(modules.modules.len(), 1);
-
-        index.remove(&root);
-        assert_eq!(index.status(&root).state, AnalysisState::Empty);
-    }
-
-    #[test]
-    fn watcher_batches_reach_the_analysis() {
-        let (dir, index, root) = seeded();
-        write(dir.path(), "b.rs", "fn extra() { helper(); }\n");
-        index.apply_changes(None, &root, vec!["b.rs".to_owned()]);
-        let mut landed = false;
-        for _ in 0..100 {
-            let data = index.analysis(&root).unwrap();
-            if data.lock().unwrap().lookup("extra").len() == 1 {
-                landed = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(landed, "the watcher batch reached the analysis");
-    }
-
-    #[test]
-    fn a_cancelled_build_keeps_the_ready_analysis() {
-        let (_dir, index, root) = seeded();
-        let big = tempfile::tempdir().unwrap();
-        for i in 0..1500 {
-            write(
-                big.path(),
-                &format!("f{i:04}.rs"),
-                "fn big() -> u32 { 0 }\n",
-            );
-        }
-        let big_root = big.path().display().to_string();
-        let builder = {
-            let index = Arc::clone(&index);
-            std::thread::spawn(move || index.build_blocking(None, &big_root, None))
-        };
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        index.cancel();
-        let _ = builder.join().unwrap();
-        // Whichever way the big build ended, the seeded root's analysis still serves.
-        let data = index.analysis(&root).unwrap();
-        assert_eq!(data.lock().unwrap().lookup("helper").len(), 1);
-    }
+    Ok(ggs_analysis::imports::import_graph(&data))
 }

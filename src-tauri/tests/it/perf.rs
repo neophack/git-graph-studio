@@ -16,7 +16,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use git_graph_studio_lib::ext_process::ProcessHostState;
-use git_graph_studio_lib::{analysis, cmd_ext};
+use git_graph_studio_lib::cmd_ext;
 use ggs_git::ops as scm_ops;
 use ggs_git::runner::Git;
 use ggs_base::workspace::find_repo_root;
@@ -230,7 +230,7 @@ fn opening_a_large_repository_stays_within_the_budgets() {
     // The Code Analysis build (module 17): the same tree-sitter parse plus the call-edge
     // derivation — budgeted like the symbol index, with room for the edge pass.
     let started = Instant::now();
-    let analysis = analysis::AnalysisData::build(
+    let analysis = ggs_analysis::AnalysisData::build(
         &root,
         std::thread::available_parallelism()
             .map(|n| n.get())

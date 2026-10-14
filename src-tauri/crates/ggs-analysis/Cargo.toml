@@ -1,0 +1,42 @@
+[package]
+name = "ggs-analysis"
+version = "0.0.0"
+description = "The Code Analysis engine — the workspace call graph, the five analysis tools' reports (metrics, dead code, security, imports, modules), the gitdiagram-style architecture drawing and the big-code-analysis bridge"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# big-code-analysis's per-language grammars, forwarded one-for-one from the app's
+# `grammar-*` features (the parser layer's own grammars live in ggs-index; a build sheds
+# a language by dropping the feature — the columns simply stay zero, bca's own honesty).
+grammar-rust = ["big-code-analysis/rust"]
+grammar-python = ["big-code-analysis/python"]
+grammar-go = ["big-code-analysis/go"]
+grammar-javascript = ["big-code-analysis/javascript"]
+grammar-typescript = ["big-code-analysis/typescript"]
+grammar-java = ["big-code-analysis/java"]
+grammar-c = ["big-code-analysis/c"]
+grammar-cpp = ["big-code-analysis/cpp"]
+grammar-c-sharp = ["big-code-analysis/csharp"]
+
+[dependencies]
+ggs-base.workspace = true
+ggs-fs.workspace = true
+ggs-index.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The parallel per-file build and the metrics report's enrichment pass.
+rayon.workspace = true
+# The Security Scan's rule patterns.
+regex.workspace = true
+# The richer Complexity & Hotspots columns (bca.rs): default-features off — no
+# 23-grammar `all-languages`, no `vcs` churn metrics; one grammar per `grammar-*` feature.
+big-code-analysis = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -64,7 +64,7 @@ pub fn run(folder: &str) -> Result<String, String> {
     let symbols_ms = ms(started);
 
     let started = Instant::now();
-    let analysis = crate::analysis::AnalysisData::build(
+    let analysis = ggs_analysis::AnalysisData::build(
         &root,
         std::thread::available_parallelism()
             .map(|n| n.get())

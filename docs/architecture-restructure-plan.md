@@ -15,7 +15,7 @@
 > 本文所有"预估"都要用 P0 的实测数字验收（AGENTS.md：数字，不是形容词）。
 
 
-## 实施状态（2026-10-14，P3-6 完成时）
+## 实施状态（2026-10-14，P3-7 完成时）
 
 > 本段由执行过程维护；每个阶段边界更新一次。度量来自 `node scripts/measure-build.mjs`
 > （`metrics.json` 的 `build.*`；本机 Windows，dev profile，warm 缓存）。
@@ -42,6 +42,7 @@
 | P3-4 ggs-fs（文件服务引擎 + 传输 + 遍历） | ✅ | `bc4cd0b` |
 | P3-5 ggs-git(三)（ops + revision；gerrit 下载留 app） | ✅ | `2034b6a` |
 | P3-6 ggs-index（scan/search/replace/compare/hexdiff/fuzzy/symbols；perf.rs 留 app，见下） | ✅ | 本次 |
+| P3-7 ggs-analysis（git mv analysis/* + index 模块；dump-diagram 输出逐字节一致已验） | ✅ | 本次 |
 
 P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现（构建走
 `target/studio/cargo`），`incremental` 目录 17.5 GB 为多 feature 时代的历史累积，
@@ -70,6 +71,12 @@ P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现
     `--all-targets` 已断）；P3-6 顺带修复（`use ggs_git::ops as scm_ops`）。
   - app 顺手清掉 P3-3 之后残留的死清单项（ropey/syntect/fancy-regex）与随本次
     迁走的 sha1/hex/encoding_rs/tree-sitter 系（app 只透传 grammar-*）。
+- **P3-7 的落点**：`AnalysisIndex` 与三个流式报告运行器（run_metrics / run_dead_code /
+  run_security）随引擎入 crate，进度走同样的 EventSink/BatchSink 缝（同一个
+  Mutex 桥）；`grammar-*` 转发链变成 app → ggs-index（解析文法）+ ggs-analysis
+  （→ big-code-analysis）。app 清单再减三员：rayon、regex、big-code-analysis
+  全部落进 crate。验收按计划做了：`dump-diagram` 在迁移前后对同一棵树
+  （crates/ggs-index）的输出 `cmp` 逐字节一致。
 
 ### 度量（P2 后实测 vs 计划 §3.2 的预估）
 
@@ -87,8 +94,8 @@ P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现
 | 场景 | P3-6 后 | 说明 |
 | ---- | ----- | ---- |
 | 改 `crates/ggs-index/src/search.rs` 一行 → `cargo build --workspace --all-features` | **15.0 s** | ggs-index + 下游的 app 两级重编 + 链接；改 app 侧适配（`cmd_search.rs`）则只有 app 一级 |
-| crate 成员 | 15（app + 14 crates/） | +ggs-index；`check-crate-graph` 15 members 全部 enforced |
-| workspace 测试 | 703 通过 / 0 失败 | clippy `-D warnings`、typecheck、vitest 1145 同绿 |
+| crate 成员 | P3-6 后 15，P3-7 后 16（app + 15 crates/） | `check-crate-graph` 16 members 全部 enforced |
+| workspace 测试 | P3-6 后 703，P3-7 后 704 通过 / 0 失败 | clippy `-D warnings`、typecheck、vitest 1145 同绿 |
 
 ### 测试守恒
 
@@ -99,6 +106,8 @@ ggs-bash 148+6 + ggs-node 17+39 + ggs-remote-proto 2 —— 每一次迁移的�
 P3-6：app lib 325 → 266（-59，恰为 cmd_search 24 + cmd_symbols 5 + cmd_fuzzy 9 +
 parse 12 + store 9），ggs-index 65 = 迁移 59 + 新增 6（sink/门面新测试 5 + 1 个
 原合并测试拆分）。
+P3-7：app lib 253 → 211（-42，恰为 analysis/ 七文件 + cmd_analysis 3），ggs-analysis
+43 = 迁移 42 + 新增 1（报告运行器过 VecSink 的测试）。
 
 ---
 

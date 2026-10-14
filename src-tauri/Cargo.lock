@@ -1957,6 +1957,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ggs-analysis"
+version = "0.0.0"
+dependencies = [
+ "big-code-analysis",
+ "ggs-base",
+ "ggs-fs",
+ "ggs-index",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "ggs-base"
 version = "0.0.0"
 dependencies = [
@@ -2178,9 +2193,9 @@ version = "0.1.11"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
- "big-code-analysis",
  "flate2",
  "getrandom 0.2.17",
+ "ggs-analysis",
  "ggs-base",
  "ggs-can",
  "ggs-codec",
@@ -2203,7 +2218,6 @@ dependencies = [
  "plist",
  "portable-pty",
  "rayon",
- "regex",
  "rmp-serde",
  "rpassword",
  "serde",

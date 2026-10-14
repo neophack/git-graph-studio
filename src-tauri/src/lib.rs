@@ -22,8 +22,6 @@ mod test_git_helpers;
 #[cfg(test)]
 mod test_isolated_store;
 
-#[cfg(feature = "desktop")]
-pub mod analysis;
 /// The app's adapters over ggs-base's EventSink / BatchSink — the only place a domain
 /// push crosses into tauri (docs/architecture-restructure-plan.md §4.7, P3-1).
 #[cfg(feature = "desktop")]
@@ -123,9 +121,9 @@ mod desktop {
         /// The persistent workspace symbol index (ggs-index's symbols): one database per
         /// open root, resumed from `~/.ggs/index/` on open and updated by the watcher.
         pub symbol_index: Arc<ggs_index::symbols::index::SymbolIndex>,
-        /// The Code Analysis index (cmd_analysis / analysis): one in-memory analysis per
-        /// open root, built in the background on open and updated by the watcher.
-        pub analysis_index: Arc<cmd_analysis::AnalysisIndex>,
+        /// The Code Analysis index (ggs-analysis): one in-memory analysis per open root,
+        /// built in the background on open and updated by the watcher.
+        pub analysis_index: Arc<ggs_analysis::index::AnalysisIndex>,
         /// The watch on the open folder; `None` when no folder is open or the OS refused it.
         /// One watcher per open root: a plain folder keeps one, a multi-root workspace one per root.
         pub watcher: Mutex<Vec<watcher::FolderWatcher>>,
@@ -213,7 +211,7 @@ mod desktop {
                 search: Arc::new(ggs_index::search::SearchState::default()),
                 transfer: Arc::new(ggs_fs::TransferState::default()),
                 symbol_index: Arc::new(ggs_index::symbols::index::SymbolIndex::new()),
-                analysis_index: Arc::new(cmd_analysis::AnalysisIndex::new()),
+                analysis_index: Arc::new(ggs_analysis::index::AnalysisIndex::new()),
                 watcher: Mutex::new(Vec::new()),
                 deferred_services: DeferredServices::default(),
                 boot_context_served: std::sync::atomic::AtomicBool::new(false),
@@ -336,7 +334,7 @@ mod desktop {
         file_list: &std::sync::Arc<ggs_fs::FileListCache>,
         symbols: &std::sync::Arc<ggs_index::symbols::cache::SymbolCache>,
         index: &std::sync::Arc<ggs_index::symbols::index::SymbolIndex>,
-        analysis: &std::sync::Arc<cmd_analysis::AnalysisIndex>,
+        analysis: &std::sync::Arc<ggs_analysis::index::AnalysisIndex>,
         root: &str,
     ) -> Result<watcher::FolderWatcher, String> {
         use tauri::Emitter;
@@ -359,7 +357,7 @@ mod desktop {
             if !change.truncated {
                 let sink = std::sync::Arc::new(crate::events::TauriEvents(app.clone()));
                 index.apply_changes(Some(sink.clone()), &watch_root, change.paths.clone());
-                analysis.apply_changes(Some(app.clone()), &watch_root, change.paths.clone());
+                analysis.apply_changes(Some(sink), &watch_root, change.paths.clone());
             }
             let _ = app.emit(FS_CHANGED_EVENT, change);
         })
@@ -488,7 +486,8 @@ mod desktop {
         {
             let analysis = Arc::clone(&state.analysis_index);
             let analysis_root = root.to_owned();
-            analysis.start_build(Some(app.clone()), &analysis_root);
+            let sink = Arc::new(crate::events::TauriEvents(app.clone()));
+            analysis.start_build(Some(sink), &analysis_root);
         }
         // External changes reach the webview through the watcher; a refused watch (an exotic
         // filesystem, too many watches) just means the command-driven refreshes carry on alone.

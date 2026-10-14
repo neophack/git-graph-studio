@@ -105,6 +105,7 @@ ggs-can = { path = "crates/ggs-can" }
 ggs-text = { path = "crates/ggs-text" }
 ggs-fs = { path = "crates/ggs-fs" }
 ggs-index = { path = "crates/ggs-index" }
+ggs-analysis = { path = "crates/ggs-analysis" }
 ggs-testkit = { path = "crates/ggs-testkit" }
 
 # The pretend Node runtime's parser, carrying one upstream gap fix: Boa's class-expression
@@ -142,8 +143,6 @@ desktop = [
     "dep:portable-pty",
     "dep:ureq",
     "dep:sha2",
-    "dep:rayon",
-    "dep:regex",
     "dep:zip",
     "dep:plist",
     "dep:base64",
@@ -153,7 +152,6 @@ desktop = [
     "dep:flate2",
     "dep:aes-gcm",
     "dep:getrandom",
-    "dep:big-code-analysis",
     "dep:interprocess",
     "dep:rmp-serde",
     "dep:serde_bytes",
@@ -172,17 +170,18 @@ desktop = [
 # the pure-Rust rule), one feature per language and all on by default through `desktop` —
 # a build can shed a language by dropping its feature, and the parser layer
 # (ggs-index's symbols/parse.rs) falls back to the outline scan for anything switched off.
-# Each feature forwards to ggs-index's own (where the grammars now live) AND to
-# big-code-analysis's same-language feature, so a shed language is shed in both engines.
-grammar-rust = ["ggs-index/grammar-rust", "big-code-analysis/rust"]
-grammar-python = ["ggs-index/grammar-python", "big-code-analysis/python"]
-grammar-go = ["ggs-index/grammar-go", "big-code-analysis/go"]
-grammar-javascript = ["ggs-index/grammar-javascript", "big-code-analysis/javascript"]
-grammar-typescript = ["ggs-index/grammar-typescript", "big-code-analysis/typescript"]
-grammar-java = ["ggs-index/grammar-java", "big-code-analysis/java"]
-grammar-c = ["ggs-index/grammar-c", "big-code-analysis/c"]
-grammar-cpp = ["ggs-index/grammar-cpp", "big-code-analysis/cpp"]
-grammar-c-sharp = ["ggs-index/grammar-c-sharp", "big-code-analysis/csharp"]
+# Each feature forwards to ggs-index's own (where the parser grammars live) AND
+# ggs-analysis's (which forwards to big-code-analysis), so a shed language is shed in
+# both engines.
+grammar-rust = ["ggs-index/grammar-rust", "ggs-analysis/grammar-rust"]
+grammar-python = ["ggs-index/grammar-python", "ggs-analysis/grammar-python"]
+grammar-go = ["ggs-index/grammar-go", "ggs-analysis/grammar-go"]
+grammar-javascript = ["ggs-index/grammar-javascript", "ggs-analysis/grammar-javascript"]
+grammar-typescript = ["ggs-index/grammar-typescript", "ggs-analysis/grammar-typescript"]
+grammar-java = ["ggs-index/grammar-java", "ggs-analysis/grammar-java"]
+grammar-c = ["ggs-index/grammar-c", "ggs-analysis/grammar-c"]
+grammar-cpp = ["ggs-index/grammar-cpp", "ggs-analysis/grammar-cpp"]
+grammar-c-sharp = ["ggs-index/grammar-c-sharp", "ggs-analysis/grammar-c-sharp"]
 
 [lints]
 workspace = true
@@ -217,6 +216,8 @@ ggs-text = { workspace = true }
 ggs-fs = { workspace = true }
 # The search / symbol index / fuzzy scoring engine (modules 4 / 5, the index of 16).
 ggs-index = { workspace = true }
+# The Code Analysis engine (module 17).
+ggs-analysis = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rpassword = { workspace = true }
@@ -232,11 +233,6 @@ getrandom = { workspace = true, optional = true }
 # The AI provider store's key sealing (cmd_providers): AES-256-GCM, pure Rust (plan §3.1) —
 # a provider's API key is encrypted at rest under a per-install master key and decrypted
 # only when the bridged backend is spawned.
-# Quick Open's file list is walked across all cores instead of one (ggs-fs's walk).
-rayon = { workspace = true, optional = true }
-# The Security Scan's rule patterns (analysis/security.rs); the search's matchers live in
-# ggs-index now.
-regex = { workspace = true, optional = true }
 # The VSIX / .ggx readers and writers (cmd_ext): every archive this code writes picks
 # Deflated, and OPC packages (VSIX) are Deflate/stored by specification, so the pure-Rust
 # flate2 backend is the only codec linked — bzip2, zstd and xz (all C) stay out of the
@@ -269,14 +265,6 @@ tokio = { workspace = true, optional = true }
 # The file-system watcher behind "external changes show up by themselves" (watcher.rs).
 notify = { workspace = true, optional = true }
 trash = { workspace = true, optional = true }
-# The richer-metrics engine behind Complexity & Hotspots (module 17, analysis/bca.rs): the
-# rust-code-analysis fork, computing cognitive complexity, Halstead, logical SLOC and the
-# maintainability index per function at report time. `default-features = false` keeps to the
-# grammar-* languages (no 23-grammar `all-languages`); `vcs` (its gitoxide churn metrics)
-# stays off — the engine's own gix version is not for churn here. Pure Rust beyond the
-# sanctioned tree-sitter grammars. Rust 2024 edition, hence the 1.94 rust-version floor.
-big-code-analysis = { workspace = true, optional = true }
-
 # The File Associations service (cmd_assoc): per-user ProgIds and the
 # RegisteredApplications entry under HKCU.
 [target.'cfg(windows)'.dependencies]

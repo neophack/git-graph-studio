@@ -29,12 +29,12 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::analysis::imports::import_graph;
-use crate::analysis::metrics::enriched_rows;
-use crate::analysis::modules::{module_graph, module_of, FileDep, ModuleEdge, ModuleGraph};
-use crate::analysis::security::{scan_file, Finding, Severity};
-use crate::analysis::{deadcode, AnalysisData, Direction};
-use crate::cmd_analysis::AnalysisIndex;
+use ggs_analysis::imports::import_graph;
+use ggs_analysis::metrics::enriched_rows;
+use ggs_analysis::modules::{module_graph, module_of, FileDep, ModuleEdge, ModuleGraph};
+use ggs_analysis::security::{scan_file, Finding, Severity};
+use ggs_analysis::{deadcode, AnalysisData, Direction};
+use ggs_analysis::index::AnalysisIndex;
 use ggs_fs::walk_files;
 use ggs_index::search::search_literal;
 use ggs_index::symbols::index::{scan_references, SymbolIndex};

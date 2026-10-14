@@ -1,7 +1,9 @@
-//! The Code Analysis engine (module 17): the in-memory workspace model the five analysis
-//! tools read. Where the symbol store (symbols/) is the persistent name-and-occurrence
-//! database, this is the parsed-tree database — every source file's declarations, call
-//! sites and imports (via `symbols::parse`), resolved into a workspace-wide call graph.
+//! ggs-analysis (L1, module 17): the Code Analysis engine — the in-memory workspace
+//! model the five analysis tools read, plus the per-root `AnalysisIndex` (module `index`)
+//! and the streaming report runners behind the app's command adapters. Where the symbol
+//! store (ggs-index's `symbols::store`) is the persistent name-and-occurrence database,
+//! this is the parsed-tree database — every source file's declarations, call sites and
+//! imports (via ggs-index's `symbols::parse`), resolved into a workspace-wide call graph.
 //! It lives only for the session (a restart rebuilds; parse speed makes persistence
 //! unnecessary), updated file-by-file from the same watcher batches the symbol index eats.
 //!
@@ -14,6 +16,7 @@
 
 pub mod bca;
 pub mod deadcode;
+pub mod index;
 pub mod diagram;
 pub mod imports;
 pub mod metrics;

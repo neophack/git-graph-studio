@@ -708,7 +708,7 @@ fn mermaid_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::modules::{CallSiteRow, ModuleGraph, ModuleInfo};
+    use crate::modules::{CallSiteRow, ModuleGraph, ModuleInfo};
 
     fn dep(from: &str, to: &str, calls: u32, sites: &[(&str, &str, usize)]) -> FileDep {
         FileDep {
