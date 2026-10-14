@@ -75,9 +75,11 @@ function checkDocHeaders(members, errors) {
  *  edges only when listed), and the app-only heavy deps appear in no other member. */
 function checkGraph(metadata, errors) {
 	const members = new Map();
+	const cratesPrefix = join(srcTauri, 'crates').split(sep).join('/');
 	for (const pkg of metadata.packages) {
-		if (pkg.manifest_path.startsWith(join(srcTauri, 'crates').split(sep).join('/')) || pkg.name === 'git-graph-studio') {
-			members.set(pkg.name, pkg);
+		const manifest = (pkg.manifest_path ?? '').split(sep).join('/');
+		if (manifest.startsWith(cratesPrefix) || pkg.name === 'git-graph-studio') {
+			members.set(pkg.name, { ...pkg, manifest_path: manifest });
 		}
 	}
 	const internal = new Set(members.keys());
@@ -91,6 +93,11 @@ function checkGraph(metadata, errors) {
 		for (const dep of pkg.dependencies) {
 			const depName = dep.name;
 			if (!internal.has(depName)) {
+				// Our namespace: a ggs-* dependency that is not a workspace member is a
+				// typo or a crate that has not landed — either way it must not compile on.
+				if (depName.startsWith('ggs-') && WHITELIST.layers[depName] === undefined) {
+					errors.push(`${name} depends on ${depName}, which is neither a workspace member nor on the crate-graph.json layer table`);
+				}
 				if (WHITELIST.appOnly.includes(depName) && name !== 'git-graph-studio') {
 					errors.push(`${name} depends on ${depName} — only the app crate may (crate-graph.json appOnly)`);
 				}
