@@ -1495,6 +1495,11 @@ mod desktop {
         // start through this registered source — ext_process itself names no provider
         // knowledge, so the two modules meet only here, in the composition root.
         ext_process::add_spawn_env_source(cmd_providers::backend_env);
+        // The same seam carries git: when the located Git for Windows is not on the
+        // PATH (a custom-directory install), its directory rides into every backend's
+        // PATH, so an extension's own git discovery finds the same install the app
+        // runs — git.rs owns the answer, ext_process stays git-agnostic.
+        ext_process::add_spawn_env_source(git::backend_env);
         // The app's own executable, for whatever an extension starts on the app's behalf
         // (the Remote Access daemon launches new windows with it). Set before any thread
         // exists; every backend and every frame's `process.env` inherits it.

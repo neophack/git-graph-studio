@@ -12,12 +12,13 @@
 //! PowerShell tool off (`CLAUDE_CODE_USE_POWERSHELL_TOOL=0`), so shell commands are
 //! written exactly as on Git Bash.
 //!
-//! The honest subset: quotes and all the `$` forms, pipes, redirections (heredocs,
+//! The language: quotes and all the `$` forms, pipes, redirections (heredocs,
 //! here-strings), process substitution `<(cmd)`/`>(cmd)` (temp-file backed),
 //! `&&`/`||`, `if`/`for`/`while`/`until`/`case`, functions, subshells,
-//! `set -e`/`-x`, aliases; not implemented: arrays,
-//! brace expansion, traps, `break N` levels. An unsupported construct fails with a
-//! clear syntax error instead of misbehaving.
+//! `set -e`/`-x`, aliases, indexed and associative arrays, brace expansion,
+//! traps, `break N`/`continue N` levels and job control; not implemented:
+//! `select`, `getopts`, nested associative values. An unsupported construct
+//! fails with a clear syntax error instead of misbehaving.
 
 pub mod applets;
 pub mod archive;
@@ -37,6 +38,7 @@ pub mod msys;
 pub mod parse;
 pub mod pref;
 pub mod regexlite;
+pub mod sysinfo;
 
 use exec::{ExecError, Io, Shell};
 
@@ -700,7 +702,7 @@ mod tests {
         // diff spots the changed line.
         let (out, _, status) = run_in(dir.path(), "diff one.txt two.txt");
         assert_eq!(status, 1);
-        assert!(out.contains("-b") && out.contains("+c"), "{out}");
+        assert!(out.contains("< b") && out.contains("> c"), "{out}");
         let (_, _, status) = run_in(dir.path(), "diff one.txt one.txt");
         assert_eq!(status, 0);
         // tee taps the pipe.
@@ -769,7 +771,7 @@ mod tests {
         assert_eq!(status, 0, "{out}");
         let (out, _, status) = run_in(dir.path(), r#"diff a.txt <(printf 'one\nTWO\n')"#);
         assert_eq!(status, 1);
-        assert!(out.contains("-two") && out.contains("+TWO"), "{out}");
+        assert!(out.contains("< two") && out.contains("> TWO"), "{out}");
         // grep over one: `grep x <(echo yx)` must see the content.
         let (out, _, _) = run_in(dir.path(), r#"grep y <(echo xy)"#);
         assert_eq!(out, "xy\n");
@@ -1009,20 +1011,13 @@ mod tests {
         assert_eq!(status, 0);
         let (_, _, status) = run_in(dir.path(), "rm gone.txt");
         assert_eq!(status, 1);
-        // ln -s: a real symlink where the OS grants it (Windows may refuse without
-        // Developer Mode — then the error still says why).
-        let (_, err, status) = run_in(dir.path(), "ln -s a/b/f.txt link.txt");
-        if status == 0 {
-            assert!(dir
-                .path()
-                .join("link.txt")
-                .symlink_metadata()
-                .unwrap()
-                .file_type()
-                .is_symlink());
-        } else {
-            assert!(!err.is_empty(), "a refused symlink still says why");
-        }
+        // ln -s: a real symlink where the OS grants it, and Git Bash's own
+        // default fallback — a COPY of the target — where it does not.
+        let (_, _, status) = run_in(dir.path(), "ln -s a/b/f.txt link.txt");
+        assert_eq!(status, 0);
+        assert!(dir.path().join("link.txt").is_file());
+        let content = std::fs::read_to_string(dir.path().join("link.txt")).unwrap();
+        assert_eq!(content, "data\n", "{content}");
         // chmod MODE FILE: the mode word is never a file (chmod +x works), a missing
         // file fails.
         let (_, _, status) = run_in(dir.path(), "chmod +x a/b/f.txt && chmod 755 a/b/f.txt");
@@ -1117,13 +1112,13 @@ mod tests {
         assert_eq!(out, "set\ncd\ngrep\n");
         let (out, _, _) = run_in(dir.path(), "command -v cd; pwd");
         assert_eq!(out, format!("cd\n{}\n", msys::to_msys(dir.path())));
-        // du -s totals the bytes, -h humanizes.
+        // du -s totals the KiB blocks, -h humanizes.
         std::fs::create_dir_all(dir.path().join("d")).unwrap();
         std::fs::write(dir.path().join("d/f.bin"), "abcd").unwrap();
         let (out, _, _) = run_in(dir.path(), "du -s d");
-        assert!(out.starts_with("4\t"), "{out}");
+        assert!(out.starts_with("1\t"), "{out}");
         let (out, _, _) = run_in(dir.path(), "du -sh d");
-        assert!(out.starts_with("4B\t"), "{out}");
+        assert!(out.starts_with("1.0K\t"), "{out}");
     }
 
     #[test]
@@ -1190,12 +1185,12 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         // The reference vectors, through stdin and through a file.
         let (out, _, _) = run_in(dir.path(), "printf '' | md5sum");
-        assert_eq!(out, "d41d8cd98f00b204e9800998ecf8427e  -\n");
+        assert_eq!(out, "d41d8cd98f00b204e9800998ecf8427e *-\n");
         let (out, _, _) = run_in(dir.path(), "printf abc | sha1sum");
-        assert_eq!(out, "a9993e364706816aba3e25717850c26c9cd0d89d  -\n");
+        assert_eq!(out, "a9993e364706816aba3e25717850c26c9cd0d89d *-\n");
         std::fs::write(dir.path().join("f.txt"), "abc").unwrap();
         let (out, _, _) = run_in(dir.path(), "md5sum f.txt");
-        assert_eq!(out, "900150983cd24fb0d6963f7d28e17f72  f.txt\n");
+        assert_eq!(out, "900150983cd24fb0d6963f7d28e17f72 *f.txt\n");
         // -c verifies, and a tampered file fails the check.
         let (_, _, status) = run_in(dir.path(), "md5sum f.txt > sums.md5");
         assert_eq!(status, 0);
@@ -2300,12 +2295,13 @@ y z w
         std::fs::create_dir_all(&cmd).unwrap();
         std::fs::create_dir_all(&usr_bin).unwrap();
         std::fs::write(cmd.join("git.exe"), "").unwrap();
-        std::fs::write(usr_bin.join("stat.exe"), "").unwrap();
+        std::fs::write(usr_bin.join("chroot.exe"), "").unwrap();
         let cmd_msys = super::msys::to_msys(&cmd);
         // A command neither an applet nor the PATH carries answers from the Git
-        // install's usr/bin, and `which` reports Git Bash's own spelling.
-        let (out, _, status) = run_in(layout.path(), &format!("PATH='{cmd_msys}' which stat"));
-        assert_eq!((out.as_str(), status), ("/usr/bin/stat\n", 0));
+        // install's usr/bin, and `which` reports Git Bash's own spelling. (`chroot`
+        // is the probe — a command the applet list never grew to cover.)
+        let (out, _, status) = run_in(layout.path(), &format!("PATH='{cmd_msys}' which chroot"));
+        assert_eq!((out.as_str(), status), ("/usr/bin/chroot\n", 0));
         // The PATH itself still outranks the fallback.
         std::fs::write(cmd.join("probe.exe"), "").unwrap();
         let (out, _, status) = run_in(layout.path(), &format!("PATH='{cmd_msys}' which probe"));
@@ -2317,5 +2313,325 @@ y z w
             &format!("PATH='{cmd_msys}' which still-missing-xyz"),
         );
         assert_eq!(status, 1);
+    }
+
+    #[test]
+    fn the_parity_batch_text_tools_match_git_bash_shapes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // nl — GNU's default: width 6, right-justified, tab, non-empty lines only;
+        // an unnumbered line carries the blank field plus one space.
+        run_in(dir.path(), "printf 'one\\n\\nfour\\n' > a.txt");
+        let (out, _, status) = run_in(dir.path(), "nl a.txt");
+        assert_eq!(status, 0);
+        assert_eq!(out, "     1\tone\n       \n     2\tfour\n");
+        let (out, _, _) = run_in(dir.path(), "nl -ba a.txt");
+        assert_eq!(out, "     1\tone\n     2\t\n     3\tfour\n");
+        let (out, _, _) = run_in(dir.path(), "nl -w3 -s' :: ' a.txt");
+        assert_eq!(out, "  1 :: one\n       \n  2 :: four\n");
+        // tac reverses the records.
+        let (out, _, _) = run_in(dir.path(), "tac a.txt");
+        assert_eq!(out, "four\n\none\n");
+        // expr answers the arithmetic and string forms.
+        let (out, _, status) = run_in(dir.path(), "expr 1 + 2 \\* 3");
+        assert_eq!((out.as_str(), status), ("7\n", 0));
+        let (out, _, _) = run_in(dir.path(), "expr abc : 'a\\(b\\)c'");
+        assert_eq!(out, "b\n");
+        assert_eq!(run_in(dir.path(), "expr length hello").0, "5\n");
+        assert_eq!(run_in(dir.path(), "expr index abcdef c").0, "3\n");
+        assert_eq!(run_in(dir.path(), "expr substr hello 2 3").0, "ell\n");
+        let (_, _, status) = run_in(dir.path(), "expr 1 / 0");
+        assert_eq!(status, 2);
+        // paste — columns joined by the delimiter list, the last one repeating.
+        run_in(dir.path(), "printf 'a b\\nc d\\n' > c1");
+        run_in(dir.path(), "printf 'a x\\nc y\\nd z\\n' > c2");
+        let (out, _, status) = run_in(dir.path(), "paste c1 c2");
+        assert_eq!(status, 0);
+        assert_eq!(out, "a b\ta x\nc d\tc y\n\td z\n");
+        let (out, _, _) = run_in(dir.path(), "paste -sd, a.txt");
+        assert_eq!(out, "one,,four\n");
+        let (out, _, _) = run_in(dir.path(), "paste -d'|\\n' c1 c2");
+        assert_eq!(out, "a b|a x\nc d|c y\n|d z\n");
+        // join — the merge walk, -a's unpaired lines, -v's pairless view.
+        run_in(dir.path(), "printf '1 one\\n2 two\\n4 four\\n' > j1");
+        run_in(dir.path(), "printf '1 first\\n2 second\\n3 third\\n' > j2");
+        let (out, _, status) = run_in(dir.path(), "join j1 j2");
+        assert_eq!(status, 0);
+        assert_eq!(out, "1 one first\n2 two second\n");
+        let (out, _, _) = run_in(dir.path(), "join -a1 j1 j2");
+        assert_eq!(out, "1 one first\n2 two second\n4 four\n");
+        let (out, _, _) = run_in(dir.path(), "join -v 2 j1 j2");
+        assert_eq!(out, "3 third\n");
+        let (out, _, _) = run_in(dir.path(), "join -t, -1 1 -2 1 <(echo 1,x) <(echo 1,y)");
+        assert_eq!(out, "1,x,y\n");
+        // comm's three columns.
+        let (out, _, _) = run_in(dir.path(), "comm c1 c2");
+        assert_eq!(out, "a b\n\ta x\nc d\n\tc y\n\td z\n");
+        run_in(dir.path(), "printf 's\n' > c3");
+        let (out, _, status) = run_in(dir.path(), "comm -12 c3 c3");
+        assert_eq!((out.as_str(), status), ("s\n", 0));
+        let (out, _, _) = run_in(dir.path(), "comm -23 c1 c2");
+        assert_eq!(out, "a b\nc d\n");
+        // fold -s keeps the blank at the line's end.
+        let (out, _, _) = run_in(dir.path(), "printf 'aaa bbb ccc\\n' | fold -w7 -s");
+        assert_eq!(out, "aaa \nbbb ccc\n");
+        // expand honours a stop list; unexpand only leads by default.
+        let (out, _, _) = run_in(dir.path(), "printf 'a\\tb\\tc\\n' | expand -t 4,8");
+        assert_eq!(out, "a   b   c\n");
+        let (out, _, _) = run_in(dir.path(), "printf 'a   b\\n' | unexpand -t 4");
+        assert_eq!(out, "a\tb\n");
+        let (out, _, _) = run_in(dir.path(), "printf 'ab        cd\\n' | unexpand -a -t 4,8");
+        assert_eq!(out, "ab\t\t  cd\n");
+        // tsort's topological order.
+        let (out, _, status) = run_in(dir.path(), "printf 'a b b c\\n' | tsort");
+        assert_eq!((out.as_str(), status), ("a\nb\nc\n", 0));
+        let (_, _, status) = run_in(dir.path(), "printf 'a b b a\\n' | tsort");
+        assert_eq!(status, 1);
+        // factor, numfmt, printenv.
+        let (out, _, _) = run_in(dir.path(), "factor 84");
+        assert_eq!(out, "84: 2 2 3 7\n");
+        let (out, _, status) = run_in(dir.path(), "numfmt --to=iec 1536");
+        assert_eq!((out.as_str(), status), ("1.5K\n", 0));
+        assert_eq!(run_in(dir.path(), "numfmt --to=iec-i 1536").0, "1.5Ki\n");
+        assert_eq!(run_in(dir.path(), "numfmt --to=si 1536").0, "1.6K\n");
+        assert_eq!(run_in(dir.path(), "numfmt --from=iec 1.5K").0, "1536\n");
+        assert_eq!(run_in(dir.path(), "numfmt --to=iec 1024").0, "1.0K\n");
+        let (out, _, status) = run_in(dir.path(), "printenv PATH");
+        assert!(!out.is_empty());
+        assert_eq!(status, 0);
+        let (_, _, status) = run_in(dir.path(), "printenv GGS_DEFINITELY_UNSET_VAR");
+        assert_eq!(status, 1);
+        // column -t aligns to the widest cell.
+        let (out, _, _) = run_in(dir.path(), "printf 'a bb\\nccc d\\n' | column -t");
+        assert_eq!(out, "a    bb\nccc  d\n");
+        // cmp — GNU's first-difference wording.
+        run_in(dir.path(), "printf 'abc' > p1");
+        run_in(dir.path(), "printf 'abd' > p2");
+        let (out, _, status) = run_in(dir.path(), "cmp p1 p2");
+        assert_eq!((out.as_str(), status), ("‘p1’ ‘p2’ differ: byte 3, line 1\n", 1));
+        assert_eq!(run_in(dir.path(), "cmp -s p1 p1").2, 0);
+        let (out, _, _) = run_in(dir.path(), "cmp -l p1 p2");
+        assert_eq!(out, "3 143 144\n");
+        // egrep/fgrep — the deprecated spellings still answer.
+        let (out, _, _) = run_in(dir.path(), "printf 'a1b\\n' | egrep 'a[0-9]b'");
+        assert_eq!(out, "a1b\n");
+        let (out, _, _) = run_in(dir.path(), "printf 'a.b\\n' | fgrep 'a.b'");
+        assert_eq!(out, "a.b\n");
+        // shuf -e/-n and yes through a pipe.
+        let (out, _, _) = run_in(dir.path(), "shuf -e a -n 1");
+        assert_eq!(out, "a\n");
+        let (out, _, _) = run_in(dir.path(), "yes hello | head -2");
+        assert_eq!(out, "hello\nhello\n");
+        // dir/vdir ride the ls planner.
+        let (out, _, _) = run_in(dir.path(), "dir a.txt");
+        assert_eq!(out, "a.txt\n");
+        let (out, _, _) = run_in(dir.path(), "vdir a.txt");
+        assert!(out.starts_with("-rw"), "{out}");
+    }
+
+    #[test]
+    fn the_parity_batch_byte_viewers_match_git_bash_shapes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        run_in(dir.path(), "printf 'ABCD' > b.bin");
+        // od — GNU's default octal words (little-endian pairs, as x86 reads them),
+        // -c's cells, -A d -t x1's hex line.
+        let (out, _, status) = run_in(dir.path(), "od b.bin");
+        assert_eq!(status, 0);
+        assert_eq!(out, "0000000 041101 042103\n0000004\n");
+        let (out, _, _) = run_in(dir.path(), "od -c b.bin");
+        assert_eq!(out, "0000000   A   B   C   D\n0000004\n");
+        let (out, _, _) = run_in(dir.path(), "od -A d -t x1 b.bin");
+        assert_eq!(out, "0000000 41 42 43 44\n0000004\n");
+        let (out, _, _) = run_in(dir.path(), "printf 'x\\ny\\n' | od -c | head -1");
+        assert_eq!(out, "0000000   x  \\n   y  \\n\n");
+        // xxd — the offset, group and ASCII column widths are GNU vim's own.
+        run_in(dir.path(), "printf 'ABCD1234' > x.bin");
+        let (out, _, status) = run_in(dir.path(), "xxd x.bin");
+        assert_eq!(status, 0);
+        assert_eq!(out, "00000000: 4142 4344 3132 3334                      ABCD1234\n");
+        let (out, _, _) = run_in(dir.path(), "xxd -p x.bin");
+        assert_eq!(out, "4142434431323334\n");
+        let (out, _, _) = run_in(dir.path(), "xxd -g1 x.bin | head -1");
+        assert_eq!(
+            out,
+            "00000000: 41 42 43 44 31 32 33 34                          ABCD1234\n"
+        );
+        let (out, _, _) = run_in(dir.path(), "printf 'hi' | xxd -p | xxd -r -p");
+        assert_eq!(out, "hi");
+        // cksum/sum — the POSIX CRC and BSD/SysV checksums, byte-checked
+        // against a live Git Bash.
+        run_in(dir.path(), "printf 'hello' > h.txt");
+        let (out, _, status) = run_in(dir.path(), "cksum h.txt");
+        assert_eq!((out.as_str(), status), ("3287646509 5 h.txt\n", 0));
+        let (out, _, _) = run_in(dir.path(), "sum h.txt");
+        assert_eq!(out, "08403     1\n");
+        let (out, _, _) = run_in(dir.path(), "sum -s h.txt");
+        assert_eq!(out, "532 1 h.txt\n");
+        // The digest family — the sums themselves are the hashes.rs vectors.
+        let (out, _, _) = run_in(dir.path(), "sha224sum h.txt");
+        assert!(
+            out.starts_with("ea09ae9cc6768c50fcee903ed054556e5bfc8347907f12598aa24193 *h.txt"),
+            "{out}"
+        );
+        let (out, _, _) = run_in(dir.path(), "b2sum h.txt");
+        assert!(
+            out.starts_with("e4cfa39a3d37be31c59609e807970799caa68a19bfaa15135f165085e01d41a6"),
+            "{out}"
+        );
+        // A Git Bash-written list (the `*` binary marker) verifies.
+        run_in(
+            dir.path(),
+            "printf 'ea09ae9cc6768c50fcee903ed054556e5bfc8347907f12598aa24193 *h.txt\\n' > list.sha",
+        );
+        let (out, _, status) = run_in(dir.path(), "sha224sum -c list.sha");
+        assert_eq!((out.as_str(), status), ("h.txt: OK\n", 0));
+        // base32.
+        let (out, _, _) = run_in(dir.path(), "printf 'hi' | base32");
+        assert_eq!(out, "NBUQ====\n");
+        let (out, _, _) = run_in(dir.path(), "printf 'NBUQ====' | base32 -d");
+        assert_eq!(out, "hi");
+        // zcat rides the gzip inflater.
+        let (out, _, status) = run_in(dir.path(), "gzip -c h.txt | zcat");
+        assert_eq!((out.as_str(), status), ("hello", 0));
+        // iconv — the UTF-16/UTF-8 crossing with BOM handling.
+        let (out, _, status) = run_in(
+            dir.path(),
+            "printf 'caf\\xc3\\xa9' | iconv -f utf-8 -t utf-16le | od -An -t x1",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out.split_whitespace().collect::<String>(), "630061006600e900");
+        let (out, _, _) = run_in(
+            dir.path(),
+            "printf '\\xff\\xfeh\\x00i\\x00' | iconv -f utf-16 -t utf-8",
+        );
+        assert_eq!(out, "hi");
+        let (_, err, status) = run_in(dir.path(), "printf 'a\\x80b' | iconv -f ascii -t utf-8");
+        assert_eq!(status, 1);
+        assert!(err.contains("illegal input sequence"), "{err}");
+        // cp936/GBK crosses through Win32's own converter now.
+        let (out, _, status) = run_in(dir.path(), "iconv -f utf-8 -t cp936 h.txt");
+        assert_eq!(status, 0);
+        assert_eq!(out, "hello");
+        // The dos2unix family.
+        run_in(dir.path(), "printf 'a\\r\\nb\\n' > crlf.txt");
+        let (_, _, status) = run_in(dir.path(), "dos2unix crlf.txt");
+        assert_eq!(status, 0);
+        assert_eq!(
+            std::fs::read(dir.path().join("crlf.txt")).unwrap(),
+            b"a\nb\n"
+        );
+        run_in(dir.path(), "printf 'a\\r\\nb\\n' > lf.txt");
+        run_in(dir.path(), "unix2dos lf.txt");
+        assert_eq!(
+            std::fs::read(dir.path().join("lf.txt")).unwrap(),
+            b"a\r\nb\r\n"
+        );
+    }
+
+    #[test]
+    fn the_parity_batch_file_tools_operate() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // stat -c's tokens and the default shape's columns.
+        run_in(dir.path(), "printf '12345678' > t.bin");
+        let (out, _, status) = run_in(dir.path(), "stat -c '%s|%F|%a|%n' t.bin");
+        assert_eq!((out.as_str(), status), ("8|regular file|644|t.bin\n", 0));
+        let (out, _, _) = run_in(dir.path(), "stat -c '%A|%h' t.bin");
+        assert!(out.starts_with("-rw-r--r--|1"), "{out}");
+        let (out, _, _) = run_in(dir.path(), "stat t.bin");
+        assert!(out.contains("  File: t.bin"), "{out}");
+        assert!(out.contains("  Size: 8"), "{out}");
+        assert!(out.contains("Access: (0644/-rw-r--r--)"), "{out}");
+        assert!(out.contains("Modify: 20"), "{out}");
+        // file's heuristics — text, scripts.
+        run_in(dir.path(), "printf '#!/bin/sh\\necho hi\\n' > s.sh");
+        let (out, _, status) = run_in(dir.path(), "file s.sh");
+        assert_eq!(
+            (out.as_str(), status),
+            ("s.sh: POSIX shell script, ASCII text executable\n", 0)
+        );
+        let (out, _, _) = run_in(dir.path(), "file t.bin");
+        assert_eq!(out, "t.bin: ASCII text, with no line terminators\n");
+        // truncate sets, grows and shrinks.
+        let (_, _, status) = run_in(dir.path(), "truncate -s 4 t.bin");
+        assert_eq!(status, 0);
+        assert_eq!(std::fs::read(dir.path().join("t.bin")).unwrap(), b"1234");
+        run_in(dir.path(), "truncate -s +4 t.bin");
+        assert_eq!(
+            std::fs::read(dir.path().join("t.bin")).unwrap(),
+            b"1234\x00\x00\x00\x00"
+        );
+        // mktemp fills its X-run and answers in the MSYS dialect.
+        let (out, _, status) = run_in(dir.path(), "mktemp");
+        assert_eq!(status, 0);
+        let made = shell_in(dir.path()).resolve_working_path(out.trim());
+        assert!(made.is_file(), "{out}");
+        assert!(!out.trim().contains('X'), "{out}");
+        let (out, _, _) = run_in(dir.path(), "mktemp -d run.XXXXXX");
+        assert!(
+            shell_in(dir.path())
+                .resolve_working_path(out.trim())
+                .is_dir()
+        );
+        // link/unlink — the hard link pair.
+        run_in(dir.path(), "printf 'data' > src.txt");
+        let (_, _, status) = run_in(dir.path(), "link src.txt hard.txt");
+        assert_eq!(status, 0);
+        assert!(dir.path().join("hard.txt").is_file());
+        let (_, _, status) = run_in(dir.path(), "unlink hard.txt");
+        assert_eq!(status, 0);
+        assert!(!dir.path().join("hard.txt").exists());
+        // install — copies and -d's directories.
+        let (_, _, status) = run_in(dir.path(), "install -d sub/inner");
+        assert_eq!(status, 0);
+        assert!(dir.path().join("sub/inner").is_dir());
+        let (_, _, status) = run_in(dir.path(), "install src.txt sub/copied.txt");
+        assert_eq!(status, 0);
+        assert_eq!(
+            std::fs::read(dir.path().join("sub/copied.txt")).unwrap(),
+            b"data"
+        );
+        // dd — the record counts and the stats line read on stderr.
+        run_in(dir.path(), "printf 'ABCDEFGH' | dd bs=2 count=3 2>dd.err");
+        let (out, _, status) = run_in(dir.path(), "cat dd.err");
+        assert_eq!(status, 0);
+        assert!(out.starts_with("3+0 records in\n3+0 records out\n"), "{out}");
+        assert!(out.contains("6 bytes copied"), "{out}");
+        // split — the GNU suffix ladder.
+        run_in(dir.path(), "seq 1 5 > nums");
+        let (_, _, status) = run_in(dir.path(), "split -l2 nums part_");
+        assert_eq!(status, 0);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("part_aa")).unwrap(),
+            "1\n2\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("part_ac")).unwrap(),
+            "5\n"
+        );
+        // shred removes with -u.
+        run_in(dir.path(), "printf 'secret' > gone.txt");
+        run_in(dir.path(), "shred -u gone.txt");
+        assert!(!dir.path().join("gone.txt").exists());
+        // dircolors emits the eval-able pair.
+        let (out, _, status) = run_in(dir.path(), "dircolors -b");
+        assert_eq!(status, 0);
+        assert!(out.starts_with("LS_COLORS='"), "{out}");
+        assert!(out.ends_with("';\nexport LS_COLORS\n"), "{out}");
+        // nohup/nice/stdbuf pass the command through.
+        let (out, _, status) = run_in(dir.path(), "nice echo nice-ok");
+        assert_eq!((out.as_str(), status), ("nice-ok\n", 0));
+        let (out, _, _) = run_in(dir.path(), "stdbuf -oL echo stdbuf-ok");
+        assert_eq!(out, "stdbuf-ok\n");
+        let (out, _, status) = run_in(dir.path(), "nohup echo nohup-ok");
+        assert_eq!((out.as_str(), status), ("nohup-ok\n", 0));
+        // tput's capabilities.
+        let (out, _, _) = run_in(dir.path(), "tput setaf 1 | od -An -c | tr -d ' '");
+        assert!(out.contains("033[31m"), "{out}");
+        let (_, err, status) = run_in(dir.path(), "tput not-a-capability");
+        assert_eq!(status, 2);
+        assert!(err.contains("unknown terminfo capability"), "{err}");
+        // chown refuses the way Git Bash does.
+        let (_, err, status) = run_in(dir.path(), "chown user src.txt");
+        assert_eq!(status, 1);
+        assert_eq!(err, "chown: invalid user: ‘user’\n");
     }
 }

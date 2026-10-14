@@ -53,6 +53,18 @@ if [ ! -d node_modules ]; then
 	npm install
 fi
 
+# The LOCAL speed diet for this script's release compiles (docs/ci-speed-plan.md): thin
+# LTO and 16 codegen units instead of the size diet's fat LTO + one unit — the main
+# binary, the ggs-node sidecar and the GGS Remote daemon (whose packer inherits this
+# environment) compile to a fraction of the time, at a slightly larger exe. CI's
+# published installers keep the size diet: these are cargo's env overrides, so
+# src-tauri/Cargo.toml is untouched and every other build (tauri dev, plain cargo, CI)
+# is unaffected. GGS_BUNDLE_GGS_REMOTE=0 skips the daemon release compile entirely.
+export CARGO_PROFILE_RELEASE_LTO=thin
+export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+export CARGO_PROFILE_GGS_NODE_LTO=thin
+export CARGO_PROFILE_GGS_NODE_CODEGEN_UNITS=16
+
 echo "[2/3] Preparing the app assets (target/studio)"
 npm run prepare:assets
 

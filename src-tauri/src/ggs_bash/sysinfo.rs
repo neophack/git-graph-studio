@@ -332,8 +332,10 @@ fn format_df_table(rows: &[DfRow], human: bool, si: bool, show_type: bool) -> St
             let width = widths[index];
             let last = index + 1 == count;
             // The filesystem, the type and the mount point read left-aligned; GNU's
-            // numbers read right-aligned.
-            if last || index == 0 || (show_type && index == 1) {
+            // numbers read right-aligned; the final column never pads.
+            if last {
+                output.push_str(cells[index]);
+            } else if index == 0 || (show_type && index == 1) {
                 output.push_str(&format!("{:<width$}", cells[index]));
             } else {
                 output.push_str(&format!("{:>width$}", cells[index]));
@@ -529,7 +531,8 @@ extern "C" {
     ) -> i32;
 }
 
-/// procps' layout: a 5-wide label column, then every value 15 wide, right-aligned.
+/// procps' layout: a 5-wide label column, the totals column 15 wide and every
+/// other value 12, right-aligned.
 fn format_free_table(mem: MemRow, swap: (u64, u64, u64), unit: char) -> String {
     let conv = |kib: u64| -> String {
         match unit {
@@ -540,11 +543,11 @@ fn format_free_table(mem: MemRow, swap: (u64, u64, u64), unit: char) -> String {
         }
     };
     let mut out = format!(
-        "{:<5}{:>15}{:>15}{:>15}{:>15}{:>15}{:>15}\n",
+        "{:<5}{:>15}{:>12}{:>12}{:>12}{:>12}{:>12}\n",
         "", "total", "used", "free", "shared", "buff/cache", "available"
     );
     out.push_str(&format!(
-        "{:<5}{:>15}{:>15}{:>15}{:>15}{:>15}{:>15}\n",
+        "{:<5}{:>15}{:>12}{:>12}{:>12}{:>12}{:>12}\n",
         "Mem:",
         conv(mem.0),
         conv(mem.1),
@@ -554,7 +557,7 @@ fn format_free_table(mem: MemRow, swap: (u64, u64, u64), unit: char) -> String {
         conv(mem.5)
     ));
     out.push_str(&format!(
-        "{:<5}{:>15}{:>15}{:>15}\n",
+        "{:<5}{:>15}{:>12}{:>12}\n",
         "Swap:",
         conv(swap.0),
         conv(swap.1),
@@ -598,15 +601,15 @@ pub fn ps(io: &Io, args: &[String]) -> super::exec::ExecResult {
     {
         let _ = args;
         io.out_str(&format!(
-            "{:>8}{:>8}{:>8}{:>10}{:>4}{:>12}{:>3}{:>11} {}\n",
-            "PID", "PPID", "PGID", "WINPID", "TTY", "UID", "ST", "TIME", "COMMAND"
+            "{:>7}{:>8}{:>8}{:>10}{:>4}{:>12}{:>8} {}\n",
+            "PID", "PPID", "PGID", "WINPID", "TTY", "UID", "STIME", "COMMAND"
         ));
         let mut rows = process_rows();
         rows.sort();
         for (pid, ppid, pgid, uid, time, command) in rows {
             io.out_str(&format!(
-                "{pid:>8}{ppid:>8}{pgid:>8}{pid:>10}{:>4}{uid:>12}{:>3}{time:>11} {command}\n",
-                "?", "S",
+                "{pid:>7}{ppid:>8}{pgid:>8}{pid:>10}{:>4}{uid:>12}{time:>8} {command}\n",
+                "?",
             ));
         }
         Ok(0)
@@ -741,7 +744,12 @@ fn process_rows() -> Vec<(u32, u32, u32, u32, String, String)> {
 /// Microseconds → `m:ss.cc`, the shape MSYS' ps and GNU time print.
 fn format_cpu_time(micros: u64) -> String {
     let centis = micros / 10_000;
-    format!("{}:{:05.2}", centis / 60, (centis % 60) as f64)
+    format!(
+        "{}:{:02}.{:02}",
+        centis / 6000,
+        (centis / 100) % 60,
+        centis % 100
+    )
 }
 
 /* ---------- mount / umount ---------- */
@@ -766,16 +774,10 @@ pub fn mount(io: &Io, args: &[String]) -> super::exec::ExecResult {
             let root = format!("{letter}:\\");
             let kind = volume_kind(&root);
             io.out_str(&format!(
-                "{letter}: on /{} type {kind} (binary,noacl,mixed)\n",
+                "{letter}: on /{} type {kind} (binary,noacl,posix=0,user,noumount,auto)\n",
                 letter.to_ascii_lowercase()
             ));
         }
-        let temp = std::env::temp_dir().display().to_string().replace('\\', "/");
-        let kind = volume_kind(&format!(
-            "{}:/",
-            temp.chars().next().unwrap_or('C').to_ascii_uppercase()
-        ));
-        io.out_str(&format!("{temp} on /tmp type {kind} (binary,noacl,mixed)\n"));
         Ok(0)
     }
     #[cfg(target_os = "linux")]
@@ -903,7 +905,8 @@ fn token_identity() -> Option<(u32, u32)> {
             );
         }
         if authority == [0, 0, 0, 0, 0, 5] && sub[0] == 21 && count >= 3 {
-            let fold = (sub[1] ^ sub[2]) & 0xFFFF;
+            // Cygwin folds EVERY machine subauthority into the high half.
+            let fold = sub[1..count - 1].iter().fold(0u32, |acc, value| acc ^ value) & 0xFFFF;
             let rid = sub[count - 1] & 0xFFFF;
             Some(((fold << 16) | rid, (fold << 16) | 513))
         } else {
@@ -926,8 +929,9 @@ pub fn id(io: &Io, args: &[String]) -> super::exec::ExecResult {
         return Ok(1);
     }
     let (uid, gid, name) = current_identity();
+    // Git Bash without mkpasswd lists the primary group by number alone.
     let group_name = if cfg!(windows) {
-        "None".to_owned()
+        String::new()
     } else {
         name.clone()
     };
@@ -953,22 +957,24 @@ pub fn id(io: &Io, args: &[String]) -> super::exec::ExecResult {
         ));
         return Ok(0);
     }
-    io.out_str(&format!(
-        "uid={uid}({name}) gid={gid}({group_name}) groups={gid}({group_name})\n"
-    ));
+    if group_name.is_empty() {
+        io.out_str(&format!("uid={uid}({name}) gid={gid} groups={gid}\n"));
+    } else {
+        io.out_str(&format!(
+            "uid={uid}({name}) gid={gid}({group_name}) groups={gid}({group_name})\n"
+        ));
+    }
     Ok(0)
 }
 
 /// `groups` — the primary group's name (Windows has no group list to walk without a
 /// token query per group; Git Bash's own answer for a local user is `None`).
 pub fn groups(io: &Io) -> super::exec::ExecResult {
-    let (_, _, name) = current_identity();
-    let group = if cfg!(windows) {
-        "None".to_owned()
-    } else {
-        name
-    };
-    io.out_str(&format!("{group}\n"));
+    let (_uid, gid, _name) = current_identity();
+    // No group database on this side of the bridge: the number, with
+    // GNU's cannot-find-name warning ahead of it.
+    io.err_str(&format!("groups: cannot find name for group ID {gid}\n"));
+    io.out_str(&format!("{gid}\n"));
     Ok(0)
 }
 
@@ -993,8 +999,48 @@ pub fn tty(io: &Io) -> super::exec::ExecResult {
     }
 }
 
+/// The terminal's (columns, rows) — `tput cols`/`stty size`'s answer. Windows reads
+/// the console buffer, elsewhere the COLUMNS/LINES convention with an 80x24 floor.
+pub fn console_dimensions() -> (u16, u16) {
+    #[cfg(windows)]
+    {
+        if let Some((columns, rows)) = super::applets::terminal_dimensions() {
+            return (columns as u16, rows as u16);
+        }
+    }
+    let columns = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(80);
+    let rows = std::env::var("LINES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(24);
+    (columns.max(1), rows.max(1))
+}
+
+/// Whether the process's own stdout is a terminal — `nohup`'s redirect question.
+pub fn stdout_is_terminal() -> bool {
+    #[cfg(windows)]
+    {
+        let mut mode = 0u32;
+        unsafe {
+            let handle = win::GetStdHandle(-11);
+            win::GetConsoleMode(handle, &mut mode) == 1
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        extern "C" {
+            #[link_name = "isatty"]
+            fn libc_isatty(fd: i32) -> i32;
+        }
+        unsafe { libc_isatty(1) == 1 }
+    }
+}
+
 #[cfg(windows)]
-fn stdin_is_terminal() -> bool {
+pub fn stdin_is_terminal() -> bool {
     let mut mode = 0u32;
     unsafe {
         let handle = win::GetStdHandle(-10);

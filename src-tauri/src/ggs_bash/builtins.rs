@@ -493,7 +493,7 @@ fn printf(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
     let Some(format) = args.first() else {
         return Ok(1);
     };
-    let mut out = String::new();
+    let mut out: Vec<u8> = Vec::new();
     let mut arg_at = 1usize;
     // A bad numeric argument reports, formats as 0 and turns the status to 1 — bash
     // keeps going; only an unsupported conversion stops the format.
@@ -504,14 +504,14 @@ fn printf(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
         let before = arg_at;
         if let Err(code) = printf_pass(format, args, &mut arg_at, &mut out, &mut status, io) {
             // What formatted before the failure still prints, as in bash.
-            io.out_str(&out);
+            io.write_out(&out);
             return Ok(code);
         }
         if arg_at >= args.len() || arg_at == before {
             break;
         }
     }
-    io.out_str(&out);
+    io.write_out(&out);
     Ok(status)
 }
 
@@ -541,7 +541,7 @@ fn printf_pass(
     format: &str,
     args: &[String],
     arg_at: &mut usize,
-    out: &mut String,
+    out: &mut Vec<u8>,
     status: &mut i32,
     io: &Io,
 ) -> Result<(), i32> {
@@ -549,20 +549,41 @@ fn printf_pass(
     while let Some(c) = chars.next() {
         if c != '%' {
             if c == '\\' {
-                // \n and friends inside the format.
+                // \n and friends inside the format — the probe collects the
+                // escape's own digits too (\xHH, \NNN).
                 let mut probe = String::from("\\");
                 if let Some(next) = chars.next() {
                     probe.push(next);
+                    let takes_digit = |c: char| -> bool {
+                        if next == 'x' {
+                            c.is_ascii_hexdigit()
+                        } else {
+                            c.is_ascii_digit()
+                        }
+                    };
+                    while probe.chars().count() < 4 {
+                        match chars.peek() {
+                            Some(c) if takes_digit(*c) => {
+                                probe.push(chars.next().unwrap());
+                            }
+                            _ => break,
+                        }
+                    }
                 }
-                out.push_str(&unescape(&probe));
+                out.extend_from_slice(&unescape_bytes(&probe));
             } else {
-                out.push(c);
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
             }
             continue;
         }
         // The conversion: flags, width, precision, then the verb.
         let mut left = false;
         let mut zero = false;
+        // The sign flags: '+' always, ' ' when unsigned, '#' the 0x/0 prefix.
+        let mut plus = false;
+        let mut space = false;
+        let mut alt = false;
         let mut width = 0usize;
         let mut precision: Option<usize> = None;
         let mut in_precision = false;
@@ -571,6 +592,9 @@ fn printf_pass(
             match chars.next() {
                 Some('-') if width == 0 && !in_precision => left = true,
                 Some('0') if width == 0 && !in_precision => zero = true,
+                Some('+') if width == 0 && !in_precision => plus = true,
+                Some(' ') if width == 0 && !in_precision => space = true,
+                Some('#') if width == 0 && !in_precision => alt = true,
                 Some(d) if d.is_ascii_digit() => {
                     if in_precision {
                         precision =
@@ -581,7 +605,7 @@ fn printf_pass(
                 }
                 Some('.') => in_precision = true,
                 Some('%') => {
-                    out.push('%');
+                    out.push(b'%');
                     verb = Some('\0');
                 }
                 Some(v) => verb = Some(v),
@@ -612,26 +636,46 @@ fn printf_pass(
             }
             'd' | 'i' | 'u' => {
                 let n = printf_number(&arg, status, io).trunc() as i64;
-                pad_number(&n.to_string(), width, left, zero)
+                let signed = format!("{n:+}");
+                let body = if plus {
+                    signed
+                } else if space && n >= 0 {
+                    format!(" {n}")
+                } else {
+                    n.to_string()
+                };
+                pad_number(&body, width, left, zero)
             }
-            'x' => pad_number(
-                &radix(printf_number(&arg, status, io).trunc() as i64, 16),
-                width,
-                left,
-                zero,
-            ),
-            'X' => pad_number(
-                &radix(printf_number(&arg, status, io).trunc() as i64, 16).to_uppercase(),
-                width,
-                left,
-                zero,
-            ),
-            'o' => pad_number(
-                &radix(printf_number(&arg, status, io).trunc() as i64, 8),
-                width,
-                left,
-                zero,
-            ),
+            'x' => {
+                let n = printf_number(&arg, status, io).trunc() as i64;
+                let digits = radix(n, 16);
+                let body = if alt && n != 0 {
+                    format!("0x{digits}")
+                } else {
+                    digits
+                };
+                pad_number(&body, width, left, zero)
+            }
+            'X' => {
+                let n = printf_number(&arg, status, io).trunc() as i64;
+                let digits = radix(n, 16).to_uppercase();
+                let body = if alt && n != 0 {
+                    format!("0X{digits}")
+                } else {
+                    digits
+                };
+                pad_number(&body, width, left, zero)
+            }
+            'o' => {
+                let n = printf_number(&arg, status, io).trunc() as i64;
+                let digits = radix(n, 8);
+                let body = if alt {
+                    format!("0{digits}")
+                } else {
+                    digits
+                };
+                pad_number(&body, width, left, zero)
+            }
             'f' => {
                 let value = printf_number(&arg, status, io);
                 let text = format!("{value:.prec$}", prec = precision.unwrap_or(6));
@@ -643,7 +687,7 @@ fn printf_pass(
                 return Err(1);
             }
         };
-        out.push_str(&piece);
+        out.extend_from_slice(piece.as_bytes());
     }
     Ok(())
 }
@@ -695,27 +739,69 @@ fn radix(value: i64, base: i64) -> String {
 }
 
 pub fn unescape(text: &str) -> String {
-    let mut out = String::new();
+    String::from_utf8_lossy(&unescape_bytes(text)).into_owned()
+}
+
+/// The byte core of [`unescape`] — printf's format accumulates raw bytes so a
+/// split UTF-8 pair (`\xc3` `\xa9`) survives as bytes.
+pub fn unescape_bytes(text: &str) -> Vec<u8> {
+    // The escapes name BYTES (`\xc3` is one byte of a UTF-8 pair, not the code
+    // point U+00C3) — the walk accumulates bytes and the string is assembled
+    // from them at the end.
+    let mut out: Vec<u8> = Vec::new();
     let mut chars = text.chars();
     while let Some(c) = chars.next() {
         if c != '\\' {
-            out.push(c);
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
             continue;
         }
         match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('r') => out.push('\r'),
-            Some('a') => out.push('\x07'),
-            Some('b') => out.push('\x08'),
-            Some('f') => out.push('\x0c'),
-            Some('v') => out.push('\x0b'),
-            Some('\\') => out.push('\\'),
-            Some(other) => {
-                out.push('\\');
-                out.push(other);
+            Some('n') => out.push(b'\n'),
+            Some('t') => out.push(b'\t'),
+            Some('r') => out.push(b'\r'),
+            Some('a') => out.push(0x07),
+            Some('b') => out.push(0x08),
+            Some('f') => out.push(0x0c),
+            Some('v') => out.push(0x0b),
+            // \xHH — GNU printf's hexadecimal byte escapes.
+            Some('x') => {
+                let mut value = String::new();
+                for hex in chars.by_ref().take(2) {
+                    if hex.is_ascii_hexdigit() {
+                        value.push(hex);
+                    } else {
+                        break;
+                    }
+                }
+                match u8::from_str_radix(&value, 16) {
+                    Ok(byte) => out.push(byte),
+                    Err(_) => out.extend_from_slice(b"\\x"),
+                }
             }
-            None => out.push('\\'),
+            // \NNN — the one-to-three-digit octal byte escape.
+            Some(first) if first.is_ascii_digit() => {
+                let mut digits = String::new();
+                digits.push(first);
+                for digit in chars.by_ref().take(2) {
+                    if digit.is_ascii_digit() {
+                        digits.push(digit);
+                    } else {
+                        break;
+                    }
+                }
+                match u8::from_str_radix(&digits, 8) {
+                    Ok(byte) => out.push(byte),
+                    Err(_) => out.extend_from_slice(digits.as_bytes()),
+                }
+            }
+            Some('\\') => out.push(b'\\'),
+            Some(other) => {
+                let mut buf = [0u8; 4];
+                out.push(b'\\');
+                out.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
+            }
+            None => out.push(b'\\'),
         }
     }
     out
@@ -1272,7 +1358,10 @@ fn unary(op: &str, operand: &str) -> Result<bool, String> {
         "-z" => Ok(operand.is_empty()),
         "-n" => Ok(!operand.is_empty()),
         _ => {
-            let path = Path::new(operand);
+            // The MSYS dialect resolves first: a /c/... operand reads the
+            // drive, not a root-relative path off the process's cwd.
+            let native = super::msys::from_msys(operand);
+            let path = Path::new(&native);
             let metadata = path.symlink_metadata();
             match op {
                 "-e" => Ok(metadata.is_ok()),

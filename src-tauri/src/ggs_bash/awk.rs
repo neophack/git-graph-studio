@@ -322,12 +322,14 @@ pub fn run_awk(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
         rules: &rules,
         exiting: None,
     };
-    for (name, value) in assignments {
-        interp.vars.insert(name, Val::str(&value));
-    }
     interp.vars.insert("FS".to_owned(), Val::str(&separator));
     interp.vars.insert("OFS".to_owned(), Val::str(" "));
     interp.vars.insert("ORS".to_owned(), Val::str("\n"));
+    // The -v assignments ride AFTER the defaults, GNU's own order —
+    // `-v OFS=:` must survive the builtin defaults.
+    for (name, value) in assignments {
+        interp.vars.insert(name, Val::str(&value));
+    }
     interp.vars.insert("NR".to_owned(), Val::num(0.0));
     interp.vars.insert("FNR".to_owned(), Val::num(0.0));
     interp.vars.insert("FILENAME".to_owned(), Val::str(""));

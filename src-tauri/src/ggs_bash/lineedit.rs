@@ -1104,7 +1104,12 @@ fn is_executable(path: &Path, _name: &str, _extensions: &[String]) -> bool {
 }
 
 fn git_refs(shell: &Shell, prefix: &str) -> Vec<Candidate> {
-    let output = std::process::Command::new("git")
+    // The shell's own `git` resolution (PATH, the Git Bash fallback, the
+    // machine-located install) — not a bare spawn, which finds nothing on a
+    // machine whose Git lives off the PATH.
+    let git = super::exec::resolve_on_path("git", &shell.path_var())
+        .unwrap_or_else(|| std::path::PathBuf::from("git"));
+    let output = std::process::Command::new(&git)
         .args([
             "for-each-ref",
             "--format=%(refname:short)",

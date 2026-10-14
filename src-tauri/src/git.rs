@@ -68,6 +68,20 @@ pub struct Git {
     pub env: Vec<(String, String)>,
 }
 
+/// The git binary every invocation runs. A `git` on the PATH stays the answer wherever
+/// one is there — nothing changes for those machines; where the machine's Git lives in
+/// a custom directory the PATH never names (Git for Windows' "use Git from Git Bash
+/// only" install), it is located through the registry `InstallPath` Git's own installer
+/// writes and the standard install roots — [`crate::ggs_bash::pref::find_git_exe`], the
+/// same discovery the Terminal Shell's Git Bash choice rides. Resolved once per run.
+fn executable() -> &'static std::ffi::OsStr {
+    static GIT: OnceLock<PathBuf> = OnceLock::new();
+    GIT.get_or_init(|| {
+        crate::ggs_bash::pref::find_git_exe().unwrap_or_else(|| PathBuf::from("git"))
+    })
+    .as_os_str()
+}
+
 impl Git {
     pub fn new(repo: impl AsRef<Path>) -> Git {
         Git {
@@ -77,7 +91,7 @@ impl Git {
     }
 
     pub fn command(&self) -> Command {
-        let mut command = Command::new("git");
+        let mut command = Command::new(executable());
         command
             .current_dir(&self.repo)
             // A credential or host-key prompt would block forever behind a windowed app.
@@ -224,6 +238,47 @@ impl Git {
     }
 }
 
+/* ---------- The extension backends' git (the spawn-env seam) ---------- */
+
+/// The environment extension backends spawn with: git's directory prepended to `PATH`
+/// when the located Git is not on it. A backend's own git discovery scans the standard
+/// install roots and then `PATH` — VS Code's Git-extension order, the Git Graph view's
+/// `findGit` among them — so a Git installed to a custom directory the PATH never names
+/// is invisible to it (the "未找到 Git，写入类操作需要安装 Git" notice); with the
+/// directory on the backend's `PATH` the extension finds and writes with the same
+/// install the app runs. Registered at the composition root onto `ext_process`'s
+/// spawn-env sources; the id is unused — git is no extension's private concern.
+pub fn backend_env(_ext_id: &str) -> Vec<(String, String)> {
+    let Some(dir) = crate::ggs_bash::pref::find_git_exe().and_then(|git| {
+        git.parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+    }) else {
+        return Vec::new();
+    };
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    match path_with(&current, &dir) {
+        Some(extended) => vec![("PATH".to_owned(), extended.to_string_lossy().into_owned())],
+        None => Vec::new(),
+    }
+}
+
+/// `current` with `dir` prepended, or `None` when `current` already names `dir`. Pure
+/// over the inputs, so the join is testable; empty entries drop out along the way.
+fn path_with(current: &std::ffi::OsStr, dir: &Path) -> Option<std::ffi::OsString> {
+    let carried = |entry: &PathBuf| !entry.as_os_str().is_empty();
+    if std::env::split_paths(current)
+        .filter(carried)
+        .any(|entry| entry == dir)
+    {
+        return None;
+    }
+    std::env::join_paths(
+        std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(current).filter(carried)),
+    )
+    .ok()
+}
+
 fn collect(output: std::process::Output) -> Result<String, String> {
     collect_bytes(output).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -293,6 +348,36 @@ pub fn fetch(git: &Git, remote: Option<&str>, prune: bool, prune_tags: bool) -> 
         args.push("--prune-tags");
     }
     git.run(&args)
+}
+
+#[cfg(test)]
+mod spawn_env_tests {
+    use super::*;
+
+    #[test]
+    fn a_path_lacking_the_git_dir_gains_it_in_front() {
+        let current = std::env::join_paths(["C:/tools", "C:/other"]).unwrap();
+        let git_dir = Path::new("D:/custom/Git/cmd");
+        let extended = path_with(&current, git_dir).expect("the directory is prepended");
+        let expected =
+            std::env::join_paths([git_dir, Path::new("C:/tools"), Path::new("C:/other")]).unwrap();
+        assert_eq!(extended, expected);
+    }
+
+    #[test]
+    fn a_path_already_carrying_the_git_dir_is_returned_untouched() {
+        let git_dir = Path::new("D:/custom/Git/cmd");
+        let current =
+            std::env::join_paths([Path::new("C:/tools"), git_dir, Path::new("C:/other")]).unwrap();
+        assert_eq!(path_with(&current, git_dir), None);
+    }
+
+    #[test]
+    fn an_empty_path_becomes_the_git_dir_alone() {
+        let git_dir = Path::new("D:/custom/Git/cmd");
+        let extended = path_with(std::ffi::OsStr::new(""), git_dir).expect("the directory alone");
+        assert_eq!(extended, std::env::join_paths([git_dir]).unwrap());
+    }
 }
 
 #[cfg(test)]

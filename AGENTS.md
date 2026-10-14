@@ -329,7 +329,13 @@ commit-msg hook, `refs/for/` push).
   Timeline's `file_log` over `git log --follow`, mutations through the git CLI),
   `src-tauri/src/scm_ops.rs` (the "..." menu operations plus the palette's branch/remote/
   stash/tag writes), `src-tauri/src/git.rs` (the one and only git-CLI runner, plus the pure
-  ref/hash validators `fetch` shares)
+  ref/hash validators `fetch` shares; 2026-10-14, a Git installed to a custom directory the
+  PATH never names still answers — the executable is located once per run through the PATH,
+  then Git for Windows' registry `InstallPath` and the standard install roots
+  (`ggs_bash::pref::find_git_exe`), and `git::backend_env` — registered at the composition
+  root onto `ext_process`'s spawn-env sources — prepends the located install's directory to
+  every extension backend's PATH, so the Git Graph view's own `findGit` (standard roots,
+  then PATH) finds the same git the app runs and its write operations work)
 
 ### 10. Git Graph Engine (the git-graph-rs plugin)
 
@@ -1166,7 +1172,12 @@ Everything that turns the source tree into installers: asset assembly into
 - Packaging: `scripts/build-studio.bat` (Windows, one command; builds `ggs-node` and
   `node-host.cjs` through `prepare.mjs` as part of that) and its shell counterpart
   `bash scripts/build-studio.sh` (macOS/Linux, the same release / dev / debug forms; not the
-  distributable deb/rpm — those need the floor containers below). **Windows ships exactly
+  distributable deb/rpm — those need the floor containers below). The LOCAL release
+  compiles ride a speed diet (2026-10-14, docs/ci-speed-plan.md): both scripts export
+  `CARGO_PROFILE_RELEASE_LTO=thin` / `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16` (and the
+  `ggs-node` profile's pair), trading a slightly larger exe for a fraction of the fat
+  LTO + one-unit compile time — CI's published installers keep the size diet, the
+  overrides living only in the scripts' environments. **Windows ships exactly
   one package format, the NSIS setup** (2026-10-14, the owner's direction):
   `tauri.conf.json`'s `bundle.targets` is the explicit list `["nsis", "deb", "rpm", "app",
   "dmg"]` — the `"all"` it replaces built a WiX MSI beside the setup exe
@@ -1416,7 +1427,12 @@ test-macos pass `-- --skip ggs_bash`).
   `find_git_bash`: the `GitForWindows\InstallPath` registry value HKCU then HKLM,
   `%ProgramFiles%\Git`, `%ProgramFiles(x86)%\Git`, `%LocalAppData%\Programs\Git`,
   then the PATH — a `git.exe` or a non-WSL `bash.exe` entry derives the root; WSL's
-  System32 launcher and the WindowsApps shims are never taken for Git Bash), or a
+  System32 launcher and the WindowsApps shims are never taken for Git Bash) — the same
+  roots `pref.rs`'s `find_git_exe` (2026-10-14) turns into the app-wide `git.exe`
+  location: the PATH first, then those roots, answering `git.rs`'s runner, the shell's
+  own `git` (`exec.rs`'s resolution tail — `usr\bin` never carries the exe) and the
+  extension backends' spawn PATH (module 9's `git::backend_env`), so a custom-directory
+  install the PATH never names is one git everywhere — or a
   `bash.exe` copy of the sidecar under `~/.ggs/shell/` when ggsBash is chosen or no
   Git Bash was found (claude-code 2.1.296 whitelist-checks the basename and rejects
   `ggs-bash.exe` as "not a bash/sh binary", 2026-10-13 — which is why the copy's
@@ -1476,6 +1492,15 @@ test-macos pass `-- --skip ggs_bash`).
   `scripts/probes/ggs-bash-parity-diff.sh` (the byte-diff harness itself: ~80
   commands run through both a real Git Bash and the built `ggs-bash`, every
   mismatch reported — the parity batch's acceptance gate);
+  `scripts/probes/ggs-bash-parity-matrix.sh` (the exhaustive matrix, 2026-10-14:
+  every applet plus the builtin-shaped commands Git Bash also ships in
+  `/usr/bin` — ~350 cases — each run through BOTH a real Git Bash and the built
+  `ggs-bash` over one shared fixture set, byte-comparing stdout, stderr, the
+  exit code AND the after-state of the working tree (both normalized: timings,
+  temp names, psub paths, pids), machine-state commands (df/ps/free/mount/…)
+  compared by structure only, interactive/OS-opening commands skipped by
+  design — the repo root and the built sidecar derived from the script's own
+  location, `bash scripts/probes/ggs-bash-parity-matrix.sh` from any checkout);
   `tests/ggsBash.test.ts` and the module self-test group
 
 ### 19. Remote Access (ggs-remote)

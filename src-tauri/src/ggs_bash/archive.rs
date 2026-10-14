@@ -16,12 +16,21 @@ pub fn run_tar(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
     let mut list = false;
     let mut gzip = false;
     let mut file: Option<String> = None;
+    let mut change_dir: Option<String> = None;
     let mut targets: Vec<String> = Vec::new();
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
         if arg == "-C" {
-            index += 2; // directory change: accepted, applied via cwd below
+            if let Some(dir) = args.get(index + 1) {
+                change_dir = Some(dir.clone());
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(dir) = arg.strip_prefix("-C").filter(|d| !d.is_empty()) {
+            change_dir = Some(dir.to_owned());
+            index += 1;
             continue;
         }
         if let Some(body) = arg
@@ -54,10 +63,19 @@ pub fn run_tar(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
         return Ok(2);
     };
     let resolved = shell.resolve_working_path(&super::msys::from_msys(&archive));
+    let change_base = change_dir
+        .as_ref()
+        .map(|dir| shell.resolve_working_path(&super::msys::from_msys(dir)));
     if create {
         let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
         for target in &targets {
-            let base = shell.resolve_working_path(&super::msys::from_msys(target));
+            // -C DIR first: the members are named as walked from DIR ("." covers
+            // the tree as "./x"), GNU's own shape.
+            let base = if let Some(change) = &change_base {
+                change.join(target)
+            } else {
+                shell.resolve_working_path(&super::msys::from_msys(target))
+            };
             collect_archive_files(&base, &base, &mut entries);
         }
         let payload = tar_create(&entries);
@@ -77,8 +95,15 @@ pub fn run_tar(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
     let raw = match std::fs::read(&resolved) {
         Ok(raw) => raw,
         Err(error) => {
-            io.err_str(&format!("tar: {archive}: {error}\n"));
-            return Ok(1);
+            let wording = match error.kind() {
+                std::io::ErrorKind::NotFound => "No such file or directory",
+                std::io::ErrorKind::PermissionDenied => "Permission denied",
+                _ => "Cannot open",
+            };
+            io.err_str(&format!(
+                "tar: {archive}: Cannot open: {wording}\ntar: Error is not recoverable: exiting now\n"
+            ));
+            return Ok(2);
         }
     };
     let data = if gzip || archive.ends_with(".tgz") || archive.ends_with(".gz") {
@@ -104,13 +129,24 @@ pub fn run_tar(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
             io.out_str(&format!("{name}\n"));
             continue;
         }
-        let out_path = shell.resolve_working_path(&super::msys::from_msys(name));
-        if let Some(parent) = out_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        let clean = name
+            .trim_start_matches("./")
+            .trim_start_matches('/')
+            .to_owned();
+        if clean.is_empty() || clean == "." {
+            continue;
         }
+        let out_path = if let Some(change) = &change_base {
+            change.join(&clean)
+        } else {
+            shell.resolve_working_path(&super::msys::from_msys(&clean))
+        };
         if name.ends_with('/') {
             let _ = std::fs::create_dir_all(&out_path);
             continue;
+        }
+        if let Some(parent) = out_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
         }
         if let Err(error) = std::fs::write(&out_path, bytes) {
             io.err_str(&format!("tar: {name}: {error}\n"));
@@ -125,20 +161,53 @@ fn collect_archive_files(
     current: &std::path::Path,
     out: &mut Vec<(String, Vec<u8>)>,
 ) {
+    let member_name = |path: &std::path::Path| -> String {
+        // `tar -C dir .` names members off the walked root itself
+        // ("./x"); `tar c sub` off the root's parent ("sub/x").
+        let dot_root = root.display().to_string().ends_with('.');
+        let anchor = if dot_root {
+            root
+        } else {
+            root.parent().unwrap_or(root)
+        };
+        let fallback = if dot_root {
+            format!("./{}", path.strip_prefix(root).map(|rest| rest.display().to_string()).unwrap_or_default())
+        } else {
+            path.display().to_string()
+        };
+        path.strip_prefix(anchor)
+            .map(|rest| {
+                let text = rest.display().to_string().replace('\\', "/");
+                if dot_root {
+                    format!("./{text}")
+                } else {
+                    text
+                }
+            })
+            .unwrap_or_else(|_| fallback)
+    };
     if current.is_file() {
         if let Ok(bytes) = std::fs::read(current) {
-            let name = current
-                .strip_prefix(root.parent().unwrap_or(root))
-                .map(|rest| rest.display().to_string().replace('\\', "/"))
-                .unwrap_or_else(|_| current.display().to_string());
-            out.push((name, bytes));
+            out.push((member_name(current), bytes));
         }
         return;
+    }
+    if !current.is_dir() {
+        return;
+    }
+    // Directories archive as their own "name/" members, GNU's listing shape.
+    let dir_name = member_name(current);
+    if dir_name == "./" || dir_name.is_empty() {
+        out.push(("./".to_owned(), Vec::new()));
+    } else {
+        out.push((format!("{dir_name}/"), Vec::new()));
     }
     let Ok(entries) = std::fs::read_dir(current) else {
         return;
     };
-    for entry in entries.flatten() {
+    let mut children: Vec<_> = entries.flatten().collect();
+    children.sort_by_key(|entry| entry.file_name());
+    for entry in children {
         collect_archive_files(root, &entry.path(), out);
     }
 }
@@ -239,9 +308,11 @@ pub fn run_unzip(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
     let resolved = shell.resolve_working_path(&super::msys::from_msys(&archive));
     let data = match std::fs::read(&resolved) {
         Ok(data) => data,
-        Err(error) => {
-            io.err_str(&format!("unzip: {archive}: {error}\n"));
-            return Ok(1);
+        Err(_) => {
+            io.err_str(&format!(
+                "unzip:  cannot find or open {archive}, {archive}.zip or {archive}.ZIP.\n"
+            ));
+            return Ok(9);
         }
     };
     let entries = match zip_parse(&data) {
@@ -252,11 +323,30 @@ pub fn run_unzip(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
         }
     };
     let base = into.map(|dir| shell.resolve_working_path(&super::msys::from_msys(&dir)));
-    for (name, bytes) in &entries {
-        if list {
-            io.out_str(&format!("{:>9}  {name}\n", bytes.len()));
-            continue;
+    if list {
+        io.out_str("Archive:  {archive}\n");
+        io.out_str("  Length      Date    Time    Name\n");
+        io.out_str("---------  ---------- -----   ----\n");
+        let mut total = 0usize;
+        let mut count = 0usize;
+        for (name, bytes) in &entries {
+            io.out_str(&format!(
+                "{:>9}  1980-01-01 00:00   {}\n",
+                bytes.len(),
+                name
+            ));
+            total += bytes.len();
+            count += 1;
         }
+        io.out_str("---------                     -------\n");
+        io.out_str(&format!(
+            "{:>9}                     {} files\n",
+            total, count
+        ));
+        return Ok(0);
+    }
+    for (name, bytes) in &entries {
+        let _ = bytes;
         let mut out_path = base.clone().unwrap_or_else(|| shell.cwd.clone());
         // Zip names may carry absolute or .. parts: confined into the target.
         let clean: PathBuf = name
@@ -345,54 +435,153 @@ fn scan_data_descriptor(data: &[u8], from: usize, mut bytes: Vec<u8>, name_len: 
 /* ---------- gzip / gunzip ---------- */
 
 pub fn run_gzip(shell: &mut Shell, io: &Io, name: &str, args: &[String]) -> ExecResult {
-    let decompress = name == "gunzip" || args.iter().any(|arg| arg == "-d");
-    let paths: Vec<String> = args
-        .iter()
-        .filter(|arg| !arg.starts_with('-'))
-        .cloned()
-        .collect();
+    let mut decompress = name == "gunzip";
+    let mut to_stdout = false;
+    let mut keep = false;
+    let mut list = false;
+    let mut test = false;
+    let mut paths: Vec<String> = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-d" | "--decompress" | "--uncompress" => decompress = true,
+            "-c" | "--stdout" | "--to-stdout" => to_stdout = true,
+            "-k" | "--keep" => keep = true,
+            "-l" | "--list" => list = true,
+            "-t" | "--test" => test = true,
+            "-f" | "--force" | "-n" | "--no-name"
+            | "-q" | "--quiet" | "-v" | "--verbose" | "-1" | "-2" | "-3" | "-4" | "-5"
+            | "-6" | "-7" | "-8" | "-9" | "--fast" | "--best" | "--" => {}
+            other if other.starts_with('-') => {}
+            other => paths.push(other.to_owned()),
+        }
+    }
+    // `-l` tabulates; `-t` decompresses to nowhere — neither touches a file.
+    if list || test {
+        let mut status = 0;
+        if list {
+            io.out_str("         compressed        uncompressed  ratio uncompressed_name\n");
+        }
+        for path in &paths {
+            let resolved = shell.resolve_working_path(&super::msys::from_msys(path));
+            let raw = match std::fs::read(&resolved) {
+                Ok(raw) => raw,
+                Err(error) => {
+                    io.err_str(&format!(
+                        "gzip: {path}: {}\n",
+                        match error.kind() {
+                            std::io::ErrorKind::NotFound => "No such file or directory".to_owned(),
+                            _ => error.to_string(),
+                        }
+                    ));
+                    status = 1;
+                    continue;
+                }
+            };
+            let plain = match gunzip(&raw) {
+                Ok(plain) => plain,
+                Err(error) => {
+                    if test {
+                        io.err_str(&format!("gzip: {path}: {error}\n"));
+                        status = 1;
+                    } else {
+                        io.err_str(&format!("gzip: {path}: not in gzip format\n"));
+                        status = 1;
+                    }
+                    continue;
+                }
+            };
+            if test {
+                continue;
+            }
+            let ratio = if plain.is_empty() {
+                0.0
+            } else {
+                (100.0 * (raw.len() as f64 - plain.len() as f64) / plain.len() as f64).max(0.0)
+            };
+            let uncompressed_name = path.strip_suffix(".gz").unwrap_or(path);
+            io.out_str(&format!(
+                "{:>19} {:>19} {:>5.1}% {}\n",
+                raw.len(),
+                plain.len(),
+                ratio,
+                uncompressed_name
+            ));
+        }
+        return Ok(status);
+    }
+    // No operand: stdin crosses to stdout — the pipe shape 
+    // (and the bare  filter) both ride it.
     if paths.is_empty() {
-        io.err_str("gzip: a file is required\n");
-        return Ok(1);
+        let mut io_mut = io.clone();
+        let raw = io_mut.read_all_stdin_bytes();
+        let result = if decompress {
+            gunzip(&raw).map_err(|e| format!("stdin: {e}"))
+        } else {
+            Ok(gzip_wrap(&stored_deflate(&raw), &raw))
+        };
+        match result {
+            Ok(bytes) => io.write_out(&bytes),
+            Err(error) => {
+                io.err_str(&format!("gzip: {error}' + chr(92) + 'n"));
+                return Ok(1);
+            }
+        }
+        return Ok(0);
     }
     for path in &paths {
         let resolved = shell.resolve_working_path(&super::msys::from_msys(path));
         let raw = match std::fs::read(&resolved) {
             Ok(raw) => raw,
             Err(error) => {
-                io.err_str(&format!("gzip: {path}: {error}\n"));
+                io.err_str(&format!("gzip: {path}: {error}' + chr(92) + 'n"));
                 return Ok(1);
             }
         };
         let result = if decompress {
-            let plain = gunzip(&raw).map_err(|e| e.to_string());
-            let plain = match plain {
+            let plain = match gunzip(&raw) {
                 Ok(plain) => plain,
                 Err(error) => {
-                    io.err_str(&format!("gzip: {path}: {error}\n"));
+                    io.err_str(&format!("gzip: {path}: {error}' + chr(92) + 'n"));
                     return Ok(1);
                 }
             };
+            if to_stdout {
+                io.write_out(&plain);
+                continue;
+            }
             let target = resolved
                 .display()
                 .to_string()
-                .trim_end_matches(".gz")
-                .to_owned();
-            match std::fs::write(&target, &plain).and_then(|()| std::fs::remove_file(&resolved)) {
-                Ok(()) => Ok(()),
+                .strip_suffix(".gz")
+                .map(str::to_owned)
+                .unwrap_or_else(|| resolved.display().to_string());
+            match std::fs::write(&target, &plain) {
+                Ok(()) => {
+                    if !keep {
+                        let _ = std::fs::remove_file(&resolved);
+                    }
+                    Ok(())
+                }
                 Err(error) => Err(error),
             }
         } else {
             let packed = gzip_wrap(&stored_deflate(&raw), &raw);
-            match std::fs::write(format!("{}.gz", resolved.display()), &packed)
-                .and_then(|()| std::fs::remove_file(&resolved))
-            {
-                Ok(()) => Ok(()),
+            if to_stdout {
+                io.write_out(&packed);
+                continue;
+            }
+            match std::fs::write(format!("{}.gz", resolved.display()), &packed) {
+                Ok(()) => {
+                    if !keep {
+                        let _ = std::fs::remove_file(&resolved);
+                    }
+                    Ok(())
+                }
                 Err(error) => Err(error),
             }
         };
         if let Err(error) = result {
-            io.err_str(&format!("gzip: {path}: {error}\n"));
+            io.err_str(&format!("gzip: {path}: {error}' + chr(92) + 'n"));
             return Ok(1);
         }
     }

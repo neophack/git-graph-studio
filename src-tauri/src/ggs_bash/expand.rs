@@ -1072,10 +1072,18 @@ fn command_substitution(
 thread_local! {
     /// The process-substitution temp files of the command in flight: `>(cmd)` entries
     /// carry the consumer script to feed once the command finishes, `<(cmd)` entries a
-    /// `None` (the producer already wrote the file — only the cleanup is owed).
-    /// Per-thread, because a pipeline stage expands in its own thread.
-    static PENDING_PSUBS: std::cell::RefCell<Vec<(String, Option<super::ast::Script>)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// `None` (the producer already wrote the file — only the cleanup is owed), each
+    /// with the pipeline depth it was registered at. Per-thread, because a pipeline
+    /// stage expands in its own thread.
+    static PENDING_PSUBS: std::cell::RefCell<Vec<PendingPsub>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The pipeline nesting depth. A `<(…)`'s own script runs as a pipeline, and its
+    /// tail flush must not carry away an OUTER command's already-pending files — the
+    /// second `<(…)` of `join <(a) <(b)` would otherwise delete the first's file
+    /// before the command ever ran.
+    static PSUB_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
+
+type PendingPsub = (String, Option<super::ast::Script>, usize);
 
 /// `<(cmd)` answers a temp file carrying the command's output; `>(cmd)` answers an
 /// empty temp file and queues the command to consume it afterwards. Both files are
@@ -1093,24 +1101,47 @@ fn process_substitution(
     if !out {
         let mut sub = shell.clone();
         let (capture, buffer) = Io::capturing();
-        sub.exec_script(script, &capture)?;
+        // The script runs as a pipeline of its own — one level deeper than the
+        // command being expanded for.
+        PSUB_DEPTH.with(|cell| cell.set(cell.get() + 1));
+        let outcome = sub.exec_script(script, &capture);
+        PSUB_DEPTH.with(|cell| cell.set(cell.get() - 1));
+        outcome?;
         let bytes = buffer.lock().unwrap().clone();
         std::fs::write(&path, bytes).map_err(|e| ExecError::Io(format!("{e}")))?;
-        PENDING_PSUBS.with(|cell| cell.borrow_mut().push((shown(), None)));
+        let depth = PSUB_DEPTH.with(|cell| cell.get());
+        PENDING_PSUBS.with(|cell| cell.borrow_mut().push((shown(), None, depth)));
         return Ok(shown());
     }
     std::fs::write(&path, b"").map_err(|e| ExecError::Io(format!("{e}")))?;
-    PENDING_PSUBS.with(|cell| cell.borrow_mut().push((shown(), Some(script.clone()))));
+    let depth = PSUB_DEPTH.with(|cell| cell.get());
+    PENDING_PSUBS.with(|cell| cell.borrow_mut().push((shown(), Some(script.clone()), depth)));
     Ok(shown())
 }
 
 /// Drain the pipeline's process substitutions: every temp file goes away; a `>(cmd)`
 /// entry additionally reads its file back and runs the consumer over that stdin.
 /// Called at an `exec_pipeline` tail, with the pipeline's own (unredirected) stdout.
+/// Only the entries registered at THIS pipeline's own level drain — a nested
+/// `<(…)` script's tail (running inside the expansion of an outer command) leaves
+/// the outer files for their own command's tail.
 pub fn flush_pending_process_subs(shell: &mut Shell, io: &Io) {
-    let pending: Vec<(String, Option<super::ast::Script>)> =
-        PENDING_PSUBS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
-    for (path, script) in pending {
+    let depth = PSUB_DEPTH.with(|cell| cell.get());
+    let pending: Vec<PendingPsub> = PENDING_PSUBS.with(|cell| {
+        let mut list = cell.borrow_mut();
+        let mut drained = Vec::new();
+        let mut kept = Vec::new();
+        for entry in list.drain(..) {
+            if entry.2 == depth {
+                drained.push(entry);
+            } else {
+                kept.push(entry);
+            }
+        }
+        *list = kept;
+        drained
+    });
+    for (path, script, _) in pending {
         let Some(script) = script else {
             let _ = std::fs::remove_file(&path);
             continue;

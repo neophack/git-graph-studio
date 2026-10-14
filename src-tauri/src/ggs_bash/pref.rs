@@ -200,9 +200,10 @@ pub fn find_git_bash() -> Option<PathBuf> {
 }
 
 /// The install roots the registry and the environment carry, deduplicated, in the
-/// order they are tried.
+/// order they are tried. Shared by the bash lookup ([`find_git_bash`]), the executable
+/// lookup ([`find_git_exe`]) and the shell's Git Bash `usr\bin` fallback (`exec.rs`).
 #[cfg(windows)]
-fn git_install_roots() -> Vec<PathBuf> {
+pub(crate) fn git_install_roots() -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     for hive in [
         winreg::enums::HKEY_CURRENT_USER,
@@ -232,6 +233,59 @@ fn git_install_roots() -> Vec<PathBuf> {
 /// No Git Bash exists to find outside Windows.
 #[cfg(not(windows))]
 pub fn find_git_bash() -> Option<PathBuf> {
+    None
+}
+
+/* ---------- The git executable: one located install for the whole app ---------- */
+
+/// A Git installation root's `git.exe`: the `cmd` shim first — the one the "Git CMD"
+/// shortcut, VS Code's Git extension and every Windows integration run, and the one
+/// that sets up its own environment — then the raw `bin` and `mingw64\bin` binaries a
+/// minimal or portable tree may carry instead. Pure filesystem logic, testable.
+#[cfg(windows)]
+pub fn git_exe_from_root(root: &Path) -> Option<PathBuf> {
+    ["cmd", "bin", "mingw64/bin"]
+        .into_iter()
+        .map(|dir| root.join(dir).join("git.exe"))
+        .find(|git| git.is_file())
+}
+
+/// The first `git.exe` a PATH names. Pure over the PATH value, so the scan is testable.
+#[cfg(windows)]
+fn git_exe_from_path(path_value: &std::ffi::OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path_value)
+        .filter(|entry| !entry.as_os_str().is_empty())
+        .map(|entry| entry.join("git.exe"))
+        .find(|git| git.is_file())
+}
+
+/// Locate a `git.exe` on this machine (2026-10-14: a Git installed to a custom
+/// directory the PATH never names — "use Git from Git Bash only" — is invisible to a
+/// bare `git` spawn and to every standard-root scan). First hit wins:
+///
+/// 1. the `PATH` — a `git.exe` entry is the machine's own answer, exactly what
+///    spawning bare `git` would have run;
+/// 2. [`git_install_roots`] — the `SOFTWARE\GitForWindows\InstallPath` value Git's
+///    own installer writes at any install location (HKCU for a per-user install,
+///    then HKLM), then the standard install roots.
+///
+/// The app's git runner (`git.rs`), the extension backends' spawn PATH and the shell's
+/// own `git` all ride this one answer, so one machine runs one git everywhere.
+/// Windows only: `None` everywhere else — a POSIX system's `git` is on the PATH or in
+/// `/usr/bin`, where the bare spawn already finds it.
+#[cfg(windows)]
+pub fn find_git_exe() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("PATH").and_then(|value| git_exe_from_path(&value)) {
+        return Some(path);
+    }
+    git_install_roots()
+        .iter()
+        .find_map(|root| git_exe_from_root(root))
+}
+
+/// No registry, no out-of-PATH install to find outside Windows.
+#[cfg(not(windows))]
+pub fn find_git_exe() -> Option<PathBuf> {
     None
 }
 
@@ -453,6 +507,62 @@ mod tests {
                 bash.display()
             );
             assert_eq!(bash.file_name().and_then(|n| n.to_str()), Some(bash_name()));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_git_root_answers_the_cmd_shim_first() {
+        let root = tempfile::TempDir::new().unwrap();
+        assert_eq!(git_exe_from_root(root.path()), None);
+        // A minimal tree carrying only the real binary still answers.
+        std::fs::create_dir_all(root.path().join("mingw64").join("bin")).unwrap();
+        std::fs::write(root.path().join("mingw64").join("bin").join("git.exe"), b"").unwrap();
+        assert_eq!(
+            git_exe_from_root(root.path()),
+            Some(root.path().join("mingw64").join("bin").join("git.exe"))
+        );
+        // The `cmd` shim every Windows integration runs wins once it exists.
+        std::fs::create_dir_all(root.path().join("cmd")).unwrap();
+        std::fs::write(root.path().join("cmd").join("git.exe"), b"").unwrap();
+        assert_eq!(
+            git_exe_from_root(root.path()),
+            Some(root.path().join("cmd").join("git.exe"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_exe_path_scan_takes_the_first_entry_that_carries_git() {
+        let bare = tempfile::TempDir::new().unwrap();
+        let with_git = tempfile::TempDir::new().unwrap();
+        std::fs::write(with_git.path().join("git.exe"), b"").unwrap();
+        let later = tempfile::TempDir::new().unwrap();
+        std::fs::write(later.path().join("git.exe"), b"").unwrap();
+        assert_eq!(
+            git_exe_from_path(
+                &std::env::join_paths([bare.path(), with_git.path(), later.path(),]).unwrap()
+            ),
+            Some(with_git.path().join("git.exe"))
+        );
+        assert_eq!(
+            git_exe_from_path(&std::env::join_paths([bare.path()]).unwrap()),
+            None
+        );
+    }
+
+    /// Whatever the machine-wide lookup found — the PATH, the registry, the standard
+    /// roots — it names a `git.exe` that is really there.
+    #[cfg(windows)]
+    #[test]
+    fn a_real_machine_exe_resolution_names_a_git_that_exists() {
+        if let Some(git) = find_git_exe() {
+            assert!(
+                git.is_file(),
+                "points at a git that is not there: {}",
+                git.display()
+            );
+            assert_eq!(git.file_name().and_then(|n| n.to_str()), Some("git.exe"));
         }
     }
 

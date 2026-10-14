@@ -175,16 +175,22 @@ impl Io {
     /// Everything stdin still holds. Channel input drains to the close; inherit reads
     /// the process stdin to its end (the `read` builtin special-cases a live line).
     pub fn read_all_stdin(&mut self) -> String {
+        String::from_utf8_lossy(&self.read_all_stdin_bytes()).into_owned()
+    }
+
+    /// The whole stdin as raw bytes — the binary applets' (`od`, `xxd`, `cksum`,
+    /// `iconv`, `dd`, `zcat`) input: a lossy UTF-8 hop would corrupt them.
+    pub fn read_all_stdin_bytes(&mut self) -> Vec<u8> {
         match &self.stdin {
             Source::Inherit => {
-                let mut text = String::new();
-                let _ = std::io::stdin().read_to_string(&mut text);
-                text
+                let mut bytes = Vec::new();
+                let _ = std::io::stdin().read_to_end(&mut bytes);
+                bytes
             }
-            Source::Null => String::new(),
+            Source::Null => Vec::new(),
             Source::Str(text) => {
                 let mut text = text.lock().unwrap();
-                std::mem::take(&mut *text)
+                std::mem::take(&mut *text).into_bytes()
             }
             Source::PipeIn(state) => {
                 let mut bytes = Vec::new();
@@ -196,12 +202,12 @@ impl Io {
                     }
                 }
                 self.stdin = Source::Null;
-                String::from_utf8_lossy(&bytes).into_owned()
+                bytes
             }
             Source::File(file) => {
                 let mut bytes = Vec::new();
                 let _ = file.lock().unwrap().read_to_end(&mut bytes);
-                String::from_utf8_lossy(&bytes).into_owned()
+                bytes
             }
         }
     }
@@ -649,12 +655,25 @@ pub fn resolve_on_path(name: &str, path_var: &str) -> Option<PathBuf> {
             }
         }
     }
+    // `git` itself never sits in `usr\bin` (Git for Windows ships it under `cmd`,
+    // `bin`, `mingw64\bin`), so where the PATH and the Git Bash fallback both lack
+    // it the machine-located install answers — the same discovery the app's own
+    // runner and the extension backends ride, so one machine runs one git
+    // everywhere (`git status` in a terminal on a PATH-less custom install).
+    if name == "git" {
+        if let Some(git) = super::pref::find_git_exe() {
+            return Some(git);
+        }
+    }
     None
 }
 
 /// The local Git Bash's `usr/bin` — its whole command set — found through a
-/// `git.exe` on the PATH (walking up to its install root) or the standard
-/// install roots. Windows only: this is a Git-for-Windows artifact.
+/// `git.exe` on the PATH (walking up to its install root), the registry
+/// `InstallPath` Git's own installer writes at any install location, or the
+/// standard install roots (both from `pref::git_install_roots`, so a
+/// custom-directory install the PATH never names serves its tools too). Windows
+/// only: this is a Git-for-Windows artifact.
 #[cfg(windows)]
 pub fn git_usr_bin_from(path_var: &str) -> Option<PathBuf> {
     for dir in split_path_list(path_var) {
@@ -665,20 +684,8 @@ pub fn git_usr_bin_from(path_var: &str) -> Option<PathBuf> {
             }
         }
     }
-    let roots = [
-        std::env::var("ProgramFiles")
-            .ok()
-            .map(|base| PathBuf::from(base).join("Git")),
-        std::env::var("ProgramFiles(x86)")
-            .ok()
-            .map(|base| PathBuf::from(base).join("Git")),
-        std::env::var("LOCALAPPDATA")
-            .ok()
-            .map(|base| PathBuf::from(base).join("Programs").join("Git")),
-    ];
-    roots
+    super::pref::git_install_roots()
         .into_iter()
-        .flatten()
         .map(|root| root.join("usr").join("bin"))
         .find(|usr_bin| usr_bin.is_dir())
 }
@@ -1891,5 +1898,24 @@ mod tests {
             split_path_list(r"C:\Windows:/c/tools"),
             vec![r"C:\Windows".to_owned(), "/c/tools".to_owned()]
         );
+    }
+
+    /// Where the shell's PATH lacks git, the machine-located install still answers —
+    /// the tail `resolve_on_path` carries for `git` (a custom-directory install the
+    /// PATH never names). A machine with no git anywhere skips: there is nothing to
+    /// find, and the resolution honestly answers `None`.
+    #[cfg(windows)]
+    #[test]
+    fn git_answers_from_the_machine_location_when_the_shell_path_lacks_it() {
+        use super::resolve_on_path;
+
+        if let Some(git) = resolve_on_path("git", "C:/nowhere-at-all") {
+            assert!(
+                git.is_file(),
+                "points at a git that is not there: {}",
+                git.display()
+            );
+            assert_eq!(git.file_name().and_then(|n| n.to_str()), Some("git.exe"));
+        }
     }
 }

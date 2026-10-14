@@ -32,6 +32,19 @@ rem this build (there is no local source for either). GGS_SKIP_MARKETPLACE_FETCH
 rem builds offline without the marketplace pair - claude-remote still packs.
 if not defined GGS_SKIP_MARKETPLACE_FETCH set GGS_REQUIRE_MARKETPLACE=1
 
+rem The LOCAL speed diet for this script's release compiles (docs/ci-speed-plan.md):
+rem thin LTO and 16 codegen units instead of the size diet's fat LTO + one unit, which
+rem cuts the main binary's, the ggs-node sidecar's and the GGS Remote daemon's release
+rem compiles to a fraction (the daemon's packer and tauri build inherit this
+rem environment) at a slightly larger exe. CI's published installers keep the size
+rem diet - these are cargo's env overrides, so src-tauri/Cargo.toml is untouched and
+rem every other build (tauri dev, plain cargo, CI) is unaffected. GGS_BUNDLE_GGS_REMOTE=0
+rem skips the daemon release compile entirely for a quicker local iteration.
+set CARGO_PROFILE_RELEASE_LTO=thin
+set CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+set CARGO_PROFILE_GGS_NODE_LTO=thin
+set CARGO_PROFILE_GGS_NODE_CODEGEN_UNITS=16
+
 echo [1/3] Installing app dependencies
 if not exist node_modules call npm install
 if errorlevel 1 goto :fail
