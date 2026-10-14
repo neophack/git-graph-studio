@@ -496,7 +496,7 @@ mod tests {
     fn gzip_error_messages_are_real_lines() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("plain.txt"), b"not a gzip payload").unwrap();
-        let (_, err, status) = crate::ggs_bash::tests::run_in(dir.path(), "gzip -d plain.txt");
+        let (_, err, status) = crate::tests::run_in(dir.path(), "gzip -d plain.txt");
         assert_eq!(status, 1);
         // Git Bash prints one clean line per failure; the escaped-newline literal
         // "' + chr(92) + 'n" is a generation defect, never shell output.

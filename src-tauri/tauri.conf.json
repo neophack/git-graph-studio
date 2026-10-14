@@ -8,10 +8,7 @@
     "beforeDevCommand": "node scripts/prepare.mjs && npm run dev:vite",
     "devUrl": "http://localhost:5173",
     "beforeBuildCommand": "node scripts/prepare.mjs --build && npm run build:vite",
-    "frontendDist": "../target/studio/dist",
-    "features": [
-      "ggs-bash"
-    ]
+    "frontendDist": "../target/studio/dist"
   },
   "app": {
     "withGlobalTauri": false,
@@ -37,7 +34,13 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "deb", "rpm", "app", "dmg"],
+    "targets": [
+      "nsis",
+      "deb",
+      "rpm",
+      "app",
+      "dmg"
+    ],
     "externalBin": [
       "../target/studio/bundled/binaries/ggs-node"
     ],

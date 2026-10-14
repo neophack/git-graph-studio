@@ -98,11 +98,14 @@ debug)
 		fi
 	else
 		# GGS Bash is a Windows-only sidecar (2026-10-14): this local Linux build
-		# clears the feature list through a merge, so the ggs-bash binary is neither
+		# (the ggs-bash sidecar is its own Windows-only package since the
+		# restructure's P2-8 — no feature list to clear on this platform; the
+		# file doubles as the --config merge, signing's own credentials ride
+		# through the same file).
 		# built nor bundled (the file doubles as the --config merge, signing's own
 		# slot — Linux needs nothing of it).
 		mkdir -p target/studio
-		printf '%s\n' '{"build":{"features":[]}}' > target/studio/signing.json
+		printf '%s\n' '{}' > target/studio/signing.json
 		npx tauri build --config target/studio/signing.json
 	fi
 	echo

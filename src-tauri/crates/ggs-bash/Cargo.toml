@@ -1,0 +1,20 @@
+[package]
+name = "ggs-bash"
+version = "0.0.0"
+description = "Git Graph Studio's bundled bash-like shell — Git Bash's dialect, pure Rust, zero dependencies"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+default-run = "ggs-bash"
+
+[lints]
+workspace = true
+
+# Pure std plus the shared codecs and the git locator — nothing else (plan §3.1).
+[dependencies]
+ggs-codec.workspace = true
+ggs-git.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

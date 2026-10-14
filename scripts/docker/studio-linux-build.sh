@@ -31,9 +31,10 @@ cd "$REPO"
 
 # GGS Bash is a Windows-only sidecar (2026-10-14, the owner's direction): the merge
 # clears tauri.conf.json's default feature list (an array merge replaces it wholesale),
-# so the ggs-bash binary is neither built nor bundled into the deb/rpm.
+# (retired with the restructure's P2-8: ggs-bash is its own Windows-only package —
+# nothing to clear on Linux, the merge stays only for the target-dir override below).
 mkdir -p "$REPO/target/studio"
-printf '%s\n' '{"build":{"features":[]}}' > "$REPO/target/studio/no-ggs-bash.json"
+printf '%s\n' '{}' > "$REPO/target/studio/no-ggs-bash.json"
 
 echo "[container] app dependencies (adds the linux esbuild/tauri-cli binaries)"
 npm install --no-audit --no-fund

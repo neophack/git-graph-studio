@@ -15,14 +15,6 @@
 //! git runner `git` — are always compiled; everything that needs a window is behind
 //! `desktop`.
 
-/// GGS Bash (module 18): the bundled bash-like shell — the `ggs-bash` sidecar, the
-/// integrated terminal's alternative shell and the shell the bridged claude-code
-/// backend is pointed at. Pure std, so it builds under every feature set (ggs-config
-/// borrows its zip reader cross-platform); the SHIPPED sidecar is Windows-only
-/// (2026-10-14, the owner's direction — Linux and macOS neither install nor package
-/// nor test it; the `ggs-bash` cargo feature and tauri.conf.json's build.features are
-/// the gate) and its tests run only in the Windows CI pass.
-pub mod ggs_bash;
 /// The pretend Node runtime (the `ggs-node` sidecar): runs a package's own JS entry —
 /// CommonJS and the builtins — speaking `ggs-ext/1` on stdio. The default host for every
 /// `node` backend; its N-API host loads a package's `.node` too. A system Node hosts the

@@ -94,3 +94,15 @@ fn a_piped_script_runs_under_the_login_flag() {
     );
     assert_eq!(stdout(&output), "pipe-ok\n");
 }
+
+#[test]
+fn timeout_expiry_kills_at_124() {
+    // The shell's own sidecar sleeps past the deadline: GNU's own expiry code.
+    // CARGO_BIN_EXE names this package's binary (an integration test's guarantee).
+    let exe = env!("CARGO_BIN_EXE_ggs-bash");
+    let output = ggs_bash(&[
+        "-c",
+        &format!("timeout 0.2 '{exe}' -c 'sleep 5'"),
+    ]);
+    assert_eq!(output.status.code(), Some(124));
+}

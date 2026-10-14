@@ -1942,7 +1942,7 @@ impl AwkParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ggs_bash::exec::{Io, Shell};
+    use crate::exec::{Io, Shell};
 
     fn run(dir: &std::path::Path, program: &str, input: &str) -> String {
         run_args(dir, &[program.to_owned()], input)
@@ -1952,21 +1952,21 @@ mod tests {
         let mut shell = Shell::new("awk");
         shell.cwd = dir.to_path_buf();
         let mut io = Io {
-            stdin: crate::ggs_bash::exec::Source::Str(std::sync::Arc::new(std::sync::Mutex::new(
+            stdin: crate::exec::Source::Str(std::sync::Arc::new(std::sync::Mutex::new(
                 input.to_owned(),
             ))),
-            stdout: crate::ggs_bash::exec::Sink::Capture(std::sync::Arc::new(
+            stdout: crate::exec::Sink::Capture(std::sync::Arc::new(
                 std::sync::Mutex::new(Vec::new()),
             )),
-            stderr: crate::ggs_bash::exec::Sink::Inherit,
+            stderr: crate::exec::Sink::Inherit,
         };
         let err_cell = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        io.stderr = crate::ggs_bash::exec::Sink::Capture(err_cell.clone());
+        io.stderr = crate::exec::Sink::Capture(err_cell.clone());
         let status = run_awk(&mut shell, &io, args);
         let err = String::from_utf8_lossy(&err_cell.lock().unwrap()).into_owned();
         assert_eq!(status.unwrap_or(1), 0, "awk run failed: {err}");
         let mut text = String::new();
-        if let crate::ggs_bash::exec::Sink::Capture(cell) = &io.stdout {
+        if let crate::exec::Sink::Capture(cell) = &io.stdout {
             text = String::from_utf8_lossy(&cell.lock().unwrap()).into_owned();
         }
         // Drain the consumed Str so repeated runs do not double-read.

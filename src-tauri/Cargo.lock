@@ -1966,6 +1966,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ggs-bash"
+version = "0.0.0"
+dependencies = [
+ "ggs-codec",
+ "ggs-git",
+ "tempfile",
+]
+
+[[package]]
 name = "ggs-codec"
 version = "0.0.0"
 

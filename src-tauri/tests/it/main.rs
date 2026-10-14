@@ -8,12 +8,9 @@
 //! The suites gate themselves on the features they need (`#![cfg]` at each module's
 //! top): `node_runtime` and `vscode_shim_boa` need the `node-runtime` feature,
 //! `remote_control_vectors` the `desktop` one; the rest compile under any feature set.
-//! ggs_bash_cli drives the Windows-only `ggs-bash` sidecar binary (2026-10-14, the
-//! owner's direction: Linux and macOS neither ship nor test it), so it needs BOTH the
-//! platform and the feature that builds the bin — `env!` would not compile otherwise.
+//! (The ggs-bash CLI suite moved to its own package at P2-8:
+//! crates/ggs-bash/tests/cli.rs — one link of the shell, not of the whole app.)
 
-#[cfg(all(windows, feature = "ggs-bash"))]
-mod ggs_bash_cli;
 mod node_runtime;
 mod perf;
 mod remote_control_vectors;

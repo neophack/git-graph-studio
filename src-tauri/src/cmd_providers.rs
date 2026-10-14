@@ -2535,7 +2535,7 @@ mod tests {
         // `bash` basename Claude Code's whitelist accepts (a `ggs-bash` name is
         // rejected as "not a bash/sh binary", 2026-10-13), with the PowerShell tool
         // off so the Bash tool is the command tool. The pure half of that decision
-        // is pinned in ggs_bash::pref's own tests.
+        // is pinned in ggs-shellenv's own tests.
         std::fs::write(
             home.join(".ggs").join("settings.json"),
             r#"{ "terminalShell": "ggsBash" }"#,

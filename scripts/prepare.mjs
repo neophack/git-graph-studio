@@ -37,6 +37,8 @@ import { spawnSync } from 'node:child_process';
 
 const appDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const out = join(appDir, 'target', 'studio');
+// The Rust workspace's root — every cargo invocation below runs here.
+const srcTauri = join(appDir, 'src-tauri');
 const publicDir = join(out, 'public');
 // The test-compile half (see the usage note): icons and nothing else.
 const iconsOnly = process.argv.includes('--icons-only');
@@ -78,10 +80,57 @@ if (!existsSync(join(appIcons, 'icon.ico')) || !existsSync(join(appIcons, '32x32
 	}
 }
 
+/* The sidecar copy Tauri bundles: externalBin wants `<name>-<target-triple>[.exe]`, which the
+ * installer drops next to the main binary (that is where ext_process's host lookup finds it). */
+const TRIPLES = {
+	'win32-x64': 'x86_64-pc-windows-msvc',
+	'win32-arm64': 'aarch64-pc-windows-msvc',
+	'linux-x64': 'x86_64-unknown-linux-gnu',
+	'linux-arm64': 'aarch64-unknown-linux-gnu',
+	'darwin-x64': 'x86_64-apple-darwin',
+	'darwin-arm64': 'aarch64-apple-darwin'
+};
+const exeSuffix = process.platform === 'win32' ? '.exe' : '';
+function stageSidecar(built, name) {
+	const triple = TRIPLES[`${process.platform}-${process.arch}`] ?? `${process.platform}-${process.arch}`;
+	const sidecarDir = join(out, 'bundled', 'binaries');
+	mkdirSync(sidecarDir, { recursive: true });
+	copyFileSync(built, join(sidecarDir, `${name}-${triple}${exeSuffix}`));
+}
+
+/* A sidecar package's own binary, built through cargo (target-dir resolved the way
+ * cargo itself resolves it — a caller's CARGO_TARGET_DIR env overrides the config). */
+function sidecarBinary(bin, profile) {
+	const exe = `${bin}${exeSuffix}`;
+	const meta = spawnSync('cargo', ['metadata', '--format-version', '1', '--no-deps'],
+		{ cwd: srcTauri, encoding: 'utf8', shell: process.platform === 'win32' });
+	let targetDir = join(out, 'cargo');
+	try {
+		const resolved = JSON.parse(meta.stdout ?? '').target_directory;
+		if (typeof resolved === 'string' && resolved !== '') targetDir = resolved;
+	} catch {
+		// unparseable metadata — the configured guess above stands
+	}
+	const built = spawnSync('cargo', ['build', '--profile', profile, '-p', bin, '--bin', bin],
+		{ cwd: srcTauri, stdio: 'inherit', shell: process.platform === 'win32' });
+	const path = join(targetDir, profile, exe);
+	if (built.status === 0 && existsSync(path)) return path;
+	console.error(`Building ${bin} failed (${built.status ?? 'spawn failed'}; looked at ${path}) — refusing to pack without it`);
+	process.exit(1);
+}
+
+
 // The test-compile half stops here: everything below serves the installer build (sidecars,
 // the real-Node host bundle, the marketplace fetch, the GGS Remote daemon), and a test
 // compile embeds none of it.
 if (iconsOnly) {
+	// Windows alone: stage the ggs-bash sidecar copy tauri.windows.conf.json's
+	// externalBin names — tauri-build verifies the path on every compile of the app,
+	// so even a test-compile pass needs it present (the restructure's P2-8).
+	if (process.platform === 'win32') {
+		const built = sidecarBinary('ggs-bash', 'release');
+		stageSidecar(built, 'ggs-bash');
+	}
 	console.log(`Prepared ${appIcons} (icons only)`);
 	process.exit(0);
 }
@@ -95,7 +144,6 @@ if (iconsOnly) {
  *    is as size-optimised as `tauri build`'s own; cargo's incremental cache keeps repeat
  *    builds (dev iteration) fast after the first. A package's own `.node` addon arrives
  *    inside its VSIX — nothing of any plugin compiles here anymore. */
-const srcTauri = join(appDir, 'src-tauri');
 function buildBackend(bin, features, profile = 'ggs-node') {
 	const exe = process.platform === 'win32' ? `${bin}.exe` : bin;
 	// Where cargo actually puts artifacts: `.cargo/config.toml` says `../target/studio/cargo`,
@@ -126,27 +174,15 @@ function buildBackend(bin, features, profile = 'ggs-node') {
 	process.exit(1);
 }
 const nodeRuntimeBin = buildBackend('ggs-node', 'node-runtime');
-// GGS Bash (module 18) needs no build here: it is a plain `[[bin]]` of the app crate
-// (no feature gates), so the bundler's own cargo pass builds it and ships it beside the
-// main binary — a staged `externalBin` copy of the same file made the MSI install it
-// twice (ICE30: two components, one target file).
+// GGS Bash (module 18, Windows-only since 2026-10-14) is its own package now (the
+// restructure's P2-8): built here and staged as an externalBin copy like ggs-node —
+// the app crate no longer compiles the shell at all.
+const ggsBashBin = process.platform === 'win32' ? sidecarBinary('ggs-bash', 'release') : null;
 
-/* The sidecar copy Tauri bundles: externalBin wants `<name>-<target-triple>[.exe]`, which the
- * installer drops next to the main binary (that is where ext_process's host lookup finds it). */
+/* The sidecar copies Tauri bundles (staged below). */
 {
-	const TRIPLES = {
-		'win32-x64': 'x86_64-pc-windows-msvc',
-		'win32-arm64': 'aarch64-pc-windows-msvc',
-		'linux-x64': 'x86_64-unknown-linux-gnu',
-		'linux-arm64': 'aarch64-unknown-linux-gnu',
-		'darwin-x64': 'x86_64-apple-darwin',
-		'darwin-arm64': 'aarch64-apple-darwin'
-	};
-	const triple = TRIPLES[`${process.platform}-${process.arch}`] ?? `${process.platform}-${process.arch}`;
-	const sidecarDir = join(out, 'bundled', 'binaries');
-	mkdirSync(sidecarDir, { recursive: true });
-	const exeSuffix = process.platform === 'win32' ? '.exe' : '';
-	copyFileSync(nodeRuntimeBin, join(sidecarDir, `ggs-node-${triple}${exeSuffix}`));
+	stageSidecar(nodeRuntimeBin, 'ggs-node');
+	if (ggsBashBin) stageSidecar(ggsBashBin, 'ggs-bash');
 }
 
 /* 3½. The real-Node extension host bundle (`node-host.cjs`): the entry a system Node runs

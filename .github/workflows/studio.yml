@@ -244,8 +244,8 @@ jobs:
           GGS_PERF_FILES: '20000'
           RUSTFLAGS: -Clinker=rust-lld
         run: |
-          cargo clippy --all-targets --all-features -- -D warnings
-          cargo test --all-features --timings
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features --timings
 
       - name: Upload the cargo build timings
         if: always()
@@ -316,10 +316,10 @@ jobs:
         env:
           GGS_PERF_FILES: '20000'
         run: |
-          cargo clippy --all-targets --all-features -- -D warnings
-          # --skip ggs_bash: the shell is a Windows-only sidecar (2026-10-14, the owner's
-          # direction) — its suite runs in the Windows job alone.
-          cargo test --all-features --timings -- --skip ggs_bash
+          cargo clippy --workspace --all-targets --all-features --exclude ggs-bash -- -D warnings
+          # ggs-bash is a Windows-only sidecar (2026-10-14, the owner's direction):
+          # its package's suite runs in the Windows job alone.
+          cargo test --workspace --all-features --exclude ggs-bash --timings
 
       - name: Upload the cargo build timings
         if: always()
@@ -388,10 +388,10 @@ jobs:
         env:
           GGS_PERF_FILES: '20000'
         run: |
-          cargo clippy --all-targets --all-features -- -D warnings
-          # --skip ggs_bash: the shell is a Windows-only sidecar (2026-10-14, the owner's
-          # direction) — its suite runs in the Windows job alone.
-          cargo test --all-features --timings -- --skip ggs_bash
+          cargo clippy --workspace --all-targets --all-features --exclude ggs-bash -- -D warnings
+          # ggs-bash is a Windows-only sidecar (2026-10-14, the owner's direction):
+          # its package's suite runs in the Windows job alone.
+          cargo test --workspace --all-features --exclude ggs-bash --timings
 
       - name: Upload the cargo build timings
         if: always()

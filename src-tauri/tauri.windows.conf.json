@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "externalBin": [
+      "../target/studio/bundled/binaries/ggs-node",
+      "../target/studio/bundled/binaries/ggs-bash"
+    ]
+  }
+}

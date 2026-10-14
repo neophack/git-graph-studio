@@ -1210,11 +1210,8 @@ mod tests {
         assert_eq!(status, 127);
         // Expiry is 124 (GNU's own code): the shell's own sidecar sleeps past the
         // deadline. The binary sits beside the test harness when cargo built it.
-        if let Ok(shell) = crate::ext_process::resolve_engine_host("ggs-bash") {
-            let shown = shell.display().to_string().replace('\\', "/");
-            let (_, _, status) = run_in(dir.path(), &format!("timeout 0.2 '{shown}' -c 'sleep 5'"));
-            assert_eq!(status, 124);
-        }
+        // The sidecar-expiry case (timeout 0.2 <this-binary> -c "sleep 5" -> 124)
+        // lives in tests/cli.rs, where CARGO_BIN_EXE_ggs-bash is defined.
     }
 
     #[test]

@@ -142,25 +142,8 @@ required-features = ["node-runtime"]
 name = "ggs-config"
 path = "src/bin/ggs_config.rs"
 
-# GGS Bash (`src/ggs_bash/`, module 18): the bundled bash-like shell — a Windows-only
-# SHIPPED sidecar (2026-10-14, the owner's direction: Linux and macOS neither install
-# it, nor package it, nor test it there). tauri.conf.json's `build.features` turns the
-# feature on for the builds that ship it (Windows, and every `tauri dev`), while the
-# macOS and Linux builds clear the feature list through their `--config` merges — cargo
-# skips a bin whose required features are off, and so does the bundler. The LIBRARY
-# module stays cross-platform (ggs-config borrows its pure-std zip reader, and the code
-# compiles under every feature set); only the packaged sidecar is Windows-only.
-[[bin]]
-name = "ggs-bash"
-path = "src/bin/ggs_bash.rs"
-required-features = ["ggs-bash"]
-
 [features]
 default = ["desktop"]
-# Ships the `ggs-bash` sidecar binary (see the [[bin]] note above). On by default for
-# tauri builds through tauri.conf.json's build.features; the macOS and Linux --config
-# merges replace that list with [] so the bin is neither built nor bundled there.
-ggs-bash = []
 # The pretend Node runtime's JS engine (`src/node_runtime/`): Boa is pure Rust (plan §3.1 —
 # no C bindings at all). The runtime is the default host for `node` backends (`GGS_REAL_NODE=1`
 # opts a system Node in); a package's `.node` loads right here through the N-API host.

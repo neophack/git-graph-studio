@@ -4,5 +4,5 @@
 //! does, so it never drags the window stack in.
 
 fn main() {
-    std::process::exit(git_graph_studio_lib::ggs_bash::run_main());
+    std::process::exit(ggs_bash::run_main());
 }
