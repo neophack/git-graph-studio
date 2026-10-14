@@ -1,0 +1,32 @@
+[package]
+name = "ggs-ext"
+version = "0.0.0"
+description = "The extension store's engine — .vsix install/uninstall/upgrade over an explicit store directory, the runtime manifest and backend derivation, the ggs:// page-serving core with the boot composition, the workspace-confined ext_fs and page byte services, the frame code preload, the extension logs and the Node environment facts"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ggs-base.workspace = true
+# The page byte services read a file at a revision (git cat-file blob) — ggs-git is
+# the only git surface (plan §4.3: ggs-ext → base, proto, git).
+ggs-git.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# .vsix packages are zips.
+zip = { workspace = true }
+# The code preload's .wasm blobs and the byte services' answers.
+base64.workspace = true
+# The ggs:// serving core answers plain http types (the app's protocol adapter hands
+# them to tauri unchanged — tauri::http is this same crate).
+http = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+# The page byte services' tests build scratch git repositories (the same shape
+# ggs-git's own testkit_ext carries; testkit itself stays dep-free).
+ggs-testkit.workspace = true

@@ -1321,7 +1321,7 @@ pub fn withdraw_claude_provider_env() {
     let result = withdraw_claude_provider_env_inner();
     if let Err(error) = result {
         eprintln!("[providers] claude provider env withdrawal: {error}");
-        crate::cmd_ext::log_extensions(&format!("claude provider env withdrawal: {error}"));
+        ggs_ext::log_extensions(&format!("claude provider env withdrawal: {error}"));
     }
 }
 
@@ -1399,7 +1399,7 @@ fn restart_bridged_backends(app: &tauri::AppHandle) {
         let app = app.clone();
         std::thread::spawn(move || {
             if let Err(error) = host.start(&dir, &ext_id) {
-                crate::cmd_ext::log_extensions(&format!(
+                ggs_ext::log_extensions(&format!(
                     "provider switch: {ext_id} backend did not come back: {error}"
                 ));
             }
@@ -2157,7 +2157,7 @@ pub fn apply_claude_integration(folders: &[String]) {
         // The bridge must never keep a folder open or close from succeeding; the
         // extension host log is where a missing registration is diagnosable.
         eprintln!("[providers] claude integration: {error}");
-        crate::cmd_ext::log_extensions(&format!("claude integration: {error}"));
+        ggs_ext::log_extensions(&format!("claude integration: {error}"));
     }
 }
 

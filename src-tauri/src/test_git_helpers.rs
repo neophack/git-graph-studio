@@ -69,10 +69,6 @@ pub fn head(git: &Git) -> String {
 }
 
 
-pub fn rev(git: &Git, spec: &str) -> String {
-    git.output(&["rev-parse", spec]).unwrap().trim().to_owned()
-}
-
 
 pub fn subject(git: &Git, spec: &str) -> String {
     git.output(&["log", "-1", "--format=%s", spec])

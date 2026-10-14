@@ -721,18 +721,19 @@ page shows the integration's state (`claude_mcp_status`).
   array, views with `type: "webview"` — normalize on read); the surfaces it
   reaches into: `src/statusbar.ts` (extension items), `src/panel.ts` (the Output view's
   channel dropdown), `src/ui.ts` (`progressToast`)
-- Backend: `src-tauri/src/cmd_ext.rs` (install / upgrade / uninstall, `.vsix` unpack, the
-  bundled-package registry — git-graph-rs, `ext_install_bundled`'s id — the `ggs://`
-  protocol that serves an installed package's files — composing the page bootstrap into
-  every HTML page, `ext_fs` — the workspace-confined file services behind
-  `vscode.workspace.fs`, `findFiles` and `workspaceContains` activations, confined to
-  the open folders plus the extension's own install and storage directories —
-  `ext_log_append` / `ext_log_path` (the extension host log file, rotated) and
-  `ext_storage_paths` (an extension's `~/.ggs/extension-data/<id>` storage) — `ext_load_code`
-  (the package's bounded loadable-code map the frame's CommonJS loader resolves against)
-  and `ext_node_env` (the Node environment facts the frame's `os`/`process` shims carry)),
-  manifests read as JSONC — comments and trailing commas, the tolerance VS Code's own
-  reader applies,
+- Backend: the `ggs-ext` crate (`src-tauri/crates/ggs-ext/`: `store` — the install /
+  upgrade / uninstall engine and the bundled-package scan over roots the app resolves;
+  `vsix` — `.vsix` unpack, the JSONC manifest reader (comments and trailing commas, the
+  tolerance VS Code's own reader applies) and `resolve_node_binaries`, the backend
+  derivation; `page` — the `ggs://` serving core, composing the page bootstrap into
+  every HTML page (`page_boot.js`); `fsapi` — `ext_fs`'s workspace-confined core and the
+  pages' revision/window byte services; `log`; `loadcode` — the package's bounded
+  loadable-code map the frame's CommonJS loader resolves against; `nodeenv` — the Node
+  environment facts the frame's `os`/`process` shims carry), behind the
+  `src-tauri/src/cmd_ext.rs` adapters (the `#[tauri::command]` halves, the
+  `~/.ggs/extensions` resolution and its one-time migration, the bundled-root discovery
+  — git-graph-rs, `ext_install_bundled`'s id — and the `ggs://` protocol registration
+  over tauri's asset resolver; P3-9 of docs/architecture-restructure-plan.md),
   `src-tauri/src/ext_gallery.rs` (the marketplace: Open VSX search, icon fetch and
   download-and-install over ureq, origin-confined, a marketplace package installing
   through `cmd_ext`'s ordinary VSIX path),
@@ -906,7 +907,7 @@ page shows the integration's state (`claude_mcp_status`).
   its activation, every frontend rewrites those roots to its own before rendering
   (`extHost.ts`'s `localizeAssetRoots`); 2026-10-11: a remote page never saw
   claude-code's activation-time `setContext`, so its Claude Code container stayed
-  hidden, and a remote "View Git Graph" opened on the desktop), `src-tauri/src/ext_page_boot.js` (the
+  hidden, and a remote "View Git Graph" opened on the desktop), `src-tauri/crates/ggs-ext/src/page_boot.js` (the
   `acquireGgsApi()` bootstrap the protocol composes into served pages),
   `src-tauri/src/ext_child.rs` (the frame host's child processes: one `ext_child_spawn` +
   stdin/kill follow-ups per spawned tool, stdout/stderr streamed as base64 `Channel` events,

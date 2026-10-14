@@ -54,6 +54,8 @@ ropey = "1.6"
 rayon = "1"
 regex = "1"
 zip = { version = "2", default-features = false, features = ["deflate", "deflate64"] }
+# The ggs:// page-serving core's response types (tauri::http re-exports this crate).
+http = "1"
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 plist = { version = "1", default-features = false, features = ["serde"] }
 fancy-regex = "0.16"
@@ -107,6 +109,7 @@ ggs-fs = { path = "crates/ggs-fs" }
 ggs-index = { path = "crates/ggs-index" }
 ggs-analysis = { path = "crates/ggs-analysis" }
 ggs-mcp = { path = "crates/ggs-mcp" }
+ggs-ext = { path = "crates/ggs-ext" }
 ggs-testkit = { path = "crates/ggs-testkit" }
 
 # The pretend Node runtime's parser, carrying one upstream gap fix: Boa's class-expression
@@ -221,6 +224,9 @@ ggs-index = { workspace = true }
 ggs-analysis = { workspace = true }
 # The headless MCP server behind `ggs --mcp` (module 16).
 ggs-mcp = { workspace = true }
+# The extension store's engine (module 12): .vsix installs, backend derivation, the
+# ggs:// page-serving core, ext_fs, the code preload.
+ggs-ext = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rpassword = { workspace = true }

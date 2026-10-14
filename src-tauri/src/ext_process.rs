@@ -268,16 +268,16 @@ impl ProcessHostState {
         if let Some(handle) = procs.get(ext_id) {
             return Ok(handle.info(ext_id, self.history.lock().unwrap().get(ext_id)));
         }
-        let ext_dir = cmd_ext::installed_dir(exts_dir, ext_id)?;
+        let ext_dir = ggs_ext::installed_dir(exts_dir, ext_id)?;
         // An install unpacked before the extractor kept the archive's exec bits carries a
         // native CLI nobody can spawn (claude-code's `claude` at 0644); the start path is
         // the one hook every installed backend crosses at every boot — repair it here.
-        cmd_ext::repair_exec_bits(&ext_dir);
+        ggs_ext::repair_exec_bits(&ext_dir);
         // The runtime manifest exists only for packages installed with the `ggs` key; a
         // plain VS Code extension (a marketplace `main` package) has none — its whole
         // contract is package.json. Both are startable here when a real Node runtime can
         // host them; a manifest that is present but unreadable is still an error.
-        let manifest: Option<cmd_ext::StudioManifest> =
+        let manifest: Option<ggs_ext::StudioManifest> =
             match std::fs::read_to_string(ext_dir.join("manifest.json")) {
                 Ok(text) => Some(
                     serde_json::from_str(&text)
@@ -319,7 +319,7 @@ impl ProcessHostState {
         // C-ABI engine hosts; it reads as `ggs-node` now.)
         let (program, extra_args, pretend_entry) = if backend.kind == "node" {
             let entry =
-                resolve_command(&ext_dir, backend.command_for(&cmd_ext::host_platform_key()))?;
+                resolve_command(&ext_dir, backend.command_for(&ggs_ext::host_platform_key()))?;
             match if real_node_allowed() {
                 (find_node_runtime(), find_node_host_script())
             } else {
@@ -333,7 +333,7 @@ impl ProcessHostState {
             }
         } else {
             (
-                resolve_command(&ext_dir, backend.command_for(&cmd_ext::host_platform_key()))?,
+                resolve_command(&ext_dir, backend.command_for(&ggs_ext::host_platform_key()))?,
                 Vec::new(),
                 false,
             )
@@ -618,7 +618,7 @@ impl ProcessHostState {
     /// workbench listening, and its activation belongs to the workbench's policy (the
     /// eager pass in the frontend starts it the moment the window is up).
     pub fn start_all_installed(&self, exts_dir: &Path) -> Vec<Result<ProcessInfo, String>> {
-        cmd_ext::list_installed(exts_dir)
+        ggs_ext::list_installed(exts_dir)
             .unwrap_or_default()
             .into_iter()
             .filter(|ext| {
@@ -1050,7 +1050,7 @@ pub fn find_node_host_script() -> Option<PathBuf> {
 /// workbench's policy — so the boot pass leaves it to the frontend's eager pass, which
 /// starts it the moment the window is up. `process` backends (no vscode program) start at
 /// boot as always.
-fn deferred_to_the_workbench(backend: &cmd_ext::BackendDecl) -> bool {
+fn deferred_to_the_workbench(backend: &ggs_ext::BackendDecl) -> bool {
     backend.kind == "node"
 }
 
@@ -1059,7 +1059,7 @@ fn deferred_to_the_workbench(backend: &cmd_ext::BackendDecl) -> bool {
 /// as a `node` entry — one extension-host process per package, exactly VS Code's shape.
 /// Under the default (ggs-node everywhere) a main-only package gets no backend at all:
 /// the sandboxed frame host owns it, as it always did before a system Node existed.
-fn synthesize_extension_host_backend(ext_dir: &Path) -> Result<cmd_ext::BackendDecl, String> {
+fn synthesize_extension_host_backend(ext_dir: &Path) -> Result<ggs_ext::BackendDecl, String> {
     let allowed = real_node_allowed();
     synthesize_extension_host_backend_with(
         ext_dir,
@@ -1073,7 +1073,7 @@ fn synthesize_extension_host_backend_with(
     ext_dir: &Path,
     node: bool,
     script: bool,
-) -> Result<cmd_ext::BackendDecl, String> {
+) -> Result<ggs_ext::BackendDecl, String> {
     if !node || !script {
         return Err("declares no backend".to_owned());
     }
@@ -1086,7 +1086,7 @@ fn synthesize_extension_host_backend_with(
         .get("main")
         .and_then(Value::as_str)
         .unwrap_or("index.js");
-    Ok(cmd_ext::BackendDecl {
+    Ok(ggs_ext::BackendDecl {
         kind: "node".to_owned(),
         command: main.to_owned(),
         args: Vec::new(),
@@ -1153,7 +1153,7 @@ mod engine_host_tests {
     use super::{
         deferred_to_the_workbench, resolve_engine_host, synthesize_extension_host_backend_with,
     };
-    use crate::cmd_ext::BackendDecl;
+    use ggs_ext::BackendDecl;
 
     fn node_backend() -> BackendDecl {
         BackendDecl {

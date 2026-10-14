@@ -3354,7 +3354,7 @@ describe('the compatibility surface this round: digests, watchers, provider-back
 
 // The served page bootstrap (src-tauri composes it into every ggs:// page), driven here in its
 // own browsing context so the document.open scenario cannot touch this file's document.
-const PAGE_BOOT_SOURCE = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src-tauri', 'src', 'ext_page_boot.js'), 'utf8');
+const PAGE_BOOT_SOURCE = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src-tauri', 'crates', 'ggs-ext', 'src', 'page_boot.js'), 'utf8');
 
 describe('the theme as pages wear it (--vscode-* inline, the VS Code webview contract)', () => {
 	it('extracts the --vscode-* declarations from a theme stylesheet, the last one winning', () => {

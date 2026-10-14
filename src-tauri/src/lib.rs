@@ -1566,8 +1566,8 @@ mod desktop {
                         // existing install is only brought current by the refresh below.
                         for installed in cmd_ext::install_missing_bundled(&handle) {
                             match installed {
-                                Ok(line) => cmd_ext::log_extensions(&line),
-                                Err(reason) => cmd_ext::log_extensions(&format!(
+                                Ok(line) => ggs_ext::log_extensions(&line),
+                                Err(reason) => ggs_ext::log_extensions(&format!(
                                     "bundled install failed: {reason}"
                                 )),
                             }
@@ -1578,9 +1578,9 @@ mod desktop {
                         // build stamp.
                         for refreshed in cmd_ext::refresh_bundled_installs(&handle) {
                             match refreshed {
-                                Ok(line) => cmd_ext::log_extensions(&line),
+                                Ok(line) => ggs_ext::log_extensions(&line),
                                 Err(reason) => {
-                                    cmd_ext::log_extensions(&format!("refresh failed: {reason}"))
+                                    ggs_ext::log_extensions(&format!("refresh failed: {reason}"))
                                 }
                             }
                         }

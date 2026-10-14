@@ -57,7 +57,7 @@ ggs.onRequest((command, args) => {
     zip.start_file("extension/web/view.html", options).unwrap();
     zip.write_all(b"<html><body></body></html>").unwrap();
     zip.finish().unwrap();
-    let info = git_graph_studio_lib::cmd_ext::install_from_vsix_into(&exts, &vsix, false).unwrap();
+    let info = ggs_ext::install_from_vsix_into(&exts, &vsix, false).unwrap();
 
     let state = ProcessHostState::default();
     let started = state.start(&exts, ID).unwrap();

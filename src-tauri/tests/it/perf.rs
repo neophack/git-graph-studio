@@ -16,7 +16,6 @@ use std::process::Command;
 use std::time::Instant;
 
 use git_graph_studio_lib::ext_process::ProcessHostState;
-use git_graph_studio_lib::cmd_ext;
 use ggs_git::ops as scm_ops;
 use ggs_git::runner::Git;
 use ggs_base::workspace::find_repo_root;
@@ -67,7 +66,7 @@ ggs.onRequest((command, args) => {
     .unwrap();
     zip.write_all(&std::fs::read(node).unwrap()).unwrap();
     zip.finish().unwrap();
-    cmd_ext::install_from_vsix_into(exts, &vsix, false).unwrap();
+    ggs_ext::install_from_vsix_into(exts, &vsix, false).unwrap();
 }
 
 /// One view-protocol message against the isolated engine backend, exactly the way a page's
@@ -262,7 +261,7 @@ fn opening_a_large_repository_stays_within_the_budgets() {
         .join("..")
         .join("vscode-git-graph-rs")
         .join("native")
-        .join(match cmd_ext::host_platform_key().as_str() {
+        .join(match ggs_ext::host_platform_key().as_str() {
             "win32-x64" => "win32-x64-msvc",
             "win32-arm64" => "win32-arm64-msvc",
             "linux-x64" => "linux-x64-gnu",

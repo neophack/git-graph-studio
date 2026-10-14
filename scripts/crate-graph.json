@@ -63,7 +63,8 @@
 		"ggs-ext": [
 			"ggs-base",
 			"ggs-proto",
-			"ggs-git"
+			"ggs-git",
+			"ggs-testkit"
 		],
 		"ggs-providers": [
 			"ggs-base",

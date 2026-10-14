@@ -2013,6 +2013,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ggs-ext"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "ggs-base",
+ "ggs-git",
+ "ggs-testkit",
+ "http",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "zip",
+]
+
+[[package]]
 name = "ggs-fs"
 version = "0.0.0"
 dependencies = [
@@ -2213,6 +2228,7 @@ dependencies = [
  "ggs-can",
  "ggs-codec",
  "ggs-config",
+ "ggs-ext",
  "ggs-fs",
  "ggs-git",
  "ggs-index",

@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::cmd_ext::ExtInfo;
+use ggs_ext::ExtInfo;
 
 /// The default marketplace: the public Open VSX registry.
 pub const DEFAULT_GALLERY: &str = "https://open-vsx.org";
@@ -426,7 +426,7 @@ pub async fn ext_gallery_install(
     let (package, ext_id) =
         tauri::async_runtime::spawn_blocking(move || -> Result<(PathBuf, String), String> {
             let package = download_vsix(&base, &download_url)?;
-            let manifest = crate::cmd_ext::read_vsix_manifest(&package).inspect_err(|_| {
+            let manifest = ggs_ext::read_vsix_manifest(&package).inspect_err(|_| {
                 let _ = std::fs::remove_file(&package); // an unreadable package leaves no temp copy
             })?;
             Ok((package, manifest.extension_id()))
@@ -437,7 +437,7 @@ pub async fn ext_gallery_install(
     let _ = state.stop(&ext_id);
     let dir = crate::cmd_ext::extensions_dir(&app)?;
     let installed = tauri::async_runtime::spawn_blocking(move || {
-        let result = crate::cmd_ext::install_from_vsix_into(&dir, &package, false);
+        let result = ggs_ext::install_from_vsix_into(&dir, &package, false);
         let _ = std::fs::remove_file(&package); // the temp copy never outlives the install
         result
     })

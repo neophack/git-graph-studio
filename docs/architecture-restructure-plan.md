@@ -43,7 +43,8 @@
 | P3-5 ggs-git(三)（ops + revision；gerrit 下载留 app） | ✅ | `2034b6a` |
 | P3-6 ggs-index（scan/search/replace/compare/hexdiff/fuzzy/symbols；perf.rs 留 app，见下） | ✅ | 本次 |
 | P3-7 ggs-analysis（git mv analysis/* + index 模块；dump-diagram 输出逐字节一致已验） | ✅ | 本次 |
-| P3-8 ggs-mcp（mcp.rs 整文件 git mv；两命令适配；握手冒烟过） | ✅ | 本次 |
+| P3-8 ggs-mcp（mcp.rs 整文件 git mv；两命令适配；握手冒烟过） | ✅ | `e098aea` |
+| P3-9 ggs-ext（一）（store/vsix/page/fsapi/log/loadcode/nodeenv；ExtStore=显式目录参数） | ✅ | 本次 |
 
 P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现（构建走
 `target/studio/cargo`），`incremental` 目录 17.5 GB 为多 feature 时代的历史累积，
@@ -82,6 +83,18 @@ P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现
   即成 crate；`catalogue_infos` 转公开给 app 适配层。验收：`cargo run --bin
   git-graph-studio -- --mcp .` 对 initialize / tools/list 的真实握手回答正常
   （17 个工具）。16 个 mcp 测试随文件入 crate，app lib 211 → 195。
+- **P3-9 的落点**：cmd_ext.rs 的引擎（4779 行中的约 4000）落入 `ggs-ext` 的七个
+  模块（store/vsix/page/fsapi/log/loadcode/nodeenv），`#[tauri::command]` 适配、
+  `~/.ggs/extensions` 解析（含一次性迁移与测试 pin）、bundled 根发现、`ggs://`
+  协议注册（AssetResolver + 应用内嵌资源）留在 app 的 cmd_ext.rs（4779 → 466 行）。
+  三个形状决定：`real_node_allowed`（纯环境变量读）随引擎入 crate——
+  `install_from_vsix_into` 等保持原签名，约 50 个测试调用点零改动，app 的
+  ext_process 转发同一函数保单一出处；page 服务核心答 `http` crate 类型
+  （tauri::http 即其重导出，workspace 依赖表加 http = "1"），app 适配层原样转交；
+  `ext_page_boot.js` 随引擎 `git mv` 为 crate 的 `page_boot.js`。测试随迁：
+  cmd_ext 的 63 个测试 → crate 62（Windows 可见 60）+ app 1（应用资源路由测试，
+  测的是 AssetResolver 半边）；app lib 195 → 135，ggs-ext 60，workspace 总数 704
+  不变。crate 依赖 53 个（normal）。
 
 ### 度量（P2 后实测 vs 计划 §3.2 的预估）
 
@@ -99,8 +112,8 @@ P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现
 | 场景 | P3-6 后 | 说明 |
 | ---- | ----- | ---- |
 | 改 `crates/ggs-index/src/search.rs` 一行 → `cargo build --workspace --all-features` | **15.0 s** | ggs-index + 下游的 app 两级重编 + 链接；改 app 侧适配（`cmd_search.rs`）则只有 app 一级 |
-| crate 成员 | P3-6 后 15，P3-7 后 16，P3-8 后 17（app + 16 crates/） | `check-crate-graph` 17 members 全部 enforced |
-| workspace 测试 | P3-6 后 703，P3-7 后 704 通过 / 0 失败 | clippy `-D warnings`、typecheck、vitest 1145 同绿 |
+| crate 成员 | P3-6 后 15，P3-7 后 16，P3-8 后 17，P3-9 后 18（app + 17 crates/） | `check-crate-graph` 18 members 全部 enforced |
+| workspace 测试 | P3-6 后 703，P3-7 起 704 通过 / 0 失败 | clippy `-D warnings`、typecheck、vitest 1145 同绿 |
 
 ### 测试守恒
 
@@ -113,6 +126,9 @@ parse 12 + store 9），ggs-index 65 = 迁移 59 + 新增 6（sink/门面新测�
 原合并测试拆分）。
 P3-7：app lib 253 → 211（-42，恰为 analysis/ 七文件 + cmd_analysis 3），ggs-analysis
 43 = 迁移 42 + 新增 1（报告运行器过 VecSink 的测试）。
+P3-9：app lib 195 → 135（-60，cmd_ext 的七个测试模块随引擎走；11 个资产测试中
+测 AssetResolver 半边的 1 个留 app），ggs-ext 60 = 迁移 60（源码 62，2 个
+unix-only 在 Windows 不编译）。
 
 ---
 
