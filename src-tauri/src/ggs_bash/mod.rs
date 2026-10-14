@@ -2232,7 +2232,7 @@ y z w
     #[test]
     fn ls_rows_and_errors_match_gnu_shapes() {
         let dir = tempfile::TempDir::new().unwrap();
-        std::fs::write(dir.path().join("a.txt"), &"x".repeat(2049)).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "x".repeat(2049)).unwrap();
         std::fs::write(dir.path().join("tool.exe"), "z").unwrap();
         let user = std::env::var("USERNAME")
             .or_else(|_| std::env::var("USER"))
