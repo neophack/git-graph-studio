@@ -15,7 +15,7 @@
 > 本文所有"预估"都要用 P0 的实测数字验收（AGENTS.md：数字，不是形容词）。
 
 
-## 实施状态（2026-10-14，P3-7 完成时）
+## 实施状态（2026-10-14，P3-8 完成时）
 
 > 本段由执行过程维护；每个阶段边界更新一次。度量来自 `node scripts/measure-build.mjs`
 > （`metrics.json` 的 `build.*`；本机 Windows，dev profile，warm 缓存）。
@@ -43,6 +43,7 @@
 | P3-5 ggs-git(三)（ops + revision；gerrit 下载留 app） | ✅ | `2034b6a` |
 | P3-6 ggs-index（scan/search/replace/compare/hexdiff/fuzzy/symbols；perf.rs 留 app，见下） | ✅ | 本次 |
 | P3-7 ggs-analysis（git mv analysis/* + index 模块；dump-diagram 输出逐字节一致已验） | ✅ | 本次 |
+| P3-8 ggs-mcp（mcp.rs 整文件 git mv；两命令适配；握手冒烟过） | ✅ | 本次 |
 
 P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现（构建走
 `target/studio/cargo`），`incremental` 目录 17.5 GB 为多 feature 时代的历史累积，
@@ -77,6 +78,10 @@ P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现
   （→ big-code-analysis）。app 清单再减三员：rayon、regex、big-code-analysis
   全部落进 crate。验收按计划做了：`dump-diagram` 在迁移前后对同一棵树
   （crates/ggs-index）的输出 `cmp` 逐字节一致。
+- **P3-8 的落点**：mcp.rs 本就近乎无 tauri（两个命令无 State），整文件 `git mv`
+  即成 crate；`catalogue_infos` 转公开给 app 适配层。验收：`cargo run --bin
+  git-graph-studio -- --mcp .` 对 initialize / tools/list 的真实握手回答正常
+  （17 个工具）。16 个 mcp 测试随文件入 crate，app lib 211 → 195。
 
 ### 度量（P2 后实测 vs 计划 §3.2 的预估）
 
@@ -94,7 +99,7 @@ P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现
 | 场景 | P3-6 后 | 说明 |
 | ---- | ----- | ---- |
 | 改 `crates/ggs-index/src/search.rs` 一行 → `cargo build --workspace --all-features` | **15.0 s** | ggs-index + 下游的 app 两级重编 + 链接；改 app 侧适配（`cmd_search.rs`）则只有 app 一级 |
-| crate 成员 | P3-6 后 15，P3-7 后 16（app + 15 crates/） | `check-crate-graph` 16 members 全部 enforced |
+| crate 成员 | P3-6 后 15，P3-7 后 16，P3-8 后 17（app + 16 crates/） | `check-crate-graph` 17 members 全部 enforced |
 | workspace 测试 | P3-6 后 703，P3-7 后 704 通过 / 0 失败 | clippy `-D warnings`、typecheck、vitest 1145 同绿 |
 
 ### 测试守恒

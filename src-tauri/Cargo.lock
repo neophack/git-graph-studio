@@ -2069,6 +2069,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ggs-mcp"
+version = "0.0.0"
+dependencies = [
+ "ggs-analysis",
+ "ggs-base",
+ "ggs-fs",
+ "ggs-index",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "ggs-node"
 version = "0.0.0"
 dependencies = [
@@ -2203,6 +2216,7 @@ dependencies = [
  "ggs-fs",
  "ggs-git",
  "ggs-index",
+ "ggs-mcp",
  "ggs-proto",
  "ggs-remote-proto",
  "ggs-shellenv",

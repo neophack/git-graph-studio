@@ -1,0 +1,22 @@
+[package]
+name = "ggs-mcp"
+version = "0.0.0"
+description = "The ggs --mcp headless server: the persistent symbol index and the Code Analysis engine served to AI assistants over stdio (newline-delimited JSON-RPC 2.0)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ggs-base.workspace = true
+ggs-fs.workspace = true
+ggs-index.workspace = true
+ggs-analysis.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

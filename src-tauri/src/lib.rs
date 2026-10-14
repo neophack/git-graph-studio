@@ -1419,7 +1419,7 @@ mod desktop {
         // directory). No window is created; stderr carries the one startup line.
         if args.get(1).map(String::as_str) == Some("--mcp") {
             let folder = args.get(2).cloned().unwrap_or_else(|| ".".to_owned());
-            match mcp::run(&folder) {
+            match ggs_mcp::run(&folder) {
                 Ok(code) => std::process::exit(code),
                 Err(error) => {
                     eprintln!("{error}");

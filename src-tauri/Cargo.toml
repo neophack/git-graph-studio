@@ -106,6 +106,7 @@ ggs-text = { path = "crates/ggs-text" }
 ggs-fs = { path = "crates/ggs-fs" }
 ggs-index = { path = "crates/ggs-index" }
 ggs-analysis = { path = "crates/ggs-analysis" }
+ggs-mcp = { path = "crates/ggs-mcp" }
 ggs-testkit = { path = "crates/ggs-testkit" }
 
 # The pretend Node runtime's parser, carrying one upstream gap fix: Boa's class-expression
@@ -218,6 +219,8 @@ ggs-fs = { workspace = true }
 ggs-index = { workspace = true }
 # The Code Analysis engine (module 17).
 ggs-analysis = { workspace = true }
+# The headless MCP server behind `ggs --mcp` (module 16).
+ggs-mcp = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rpassword = { workspace = true }

@@ -1064,10 +1064,12 @@ in-app MCP Server page shows. stderr is logs; stdout is protocol only.
   buttons, the tool catalogue, the recent-call log; listed by module 17's tool registry
   as the Analysis sidebar's sixth entry and hosted in its editor pages, loading lazily
   with them)
-- Backend: `src-tauri/src/mcp.rs` (the server loop, the tool implementations, the
-  handshake, the call log); the index itself is module 5's (the `ggs-index` crate's
-  `symbols::store` / `symbols::index`), the analysis tools sit on module 17's engine (the
-  `ggs-analysis` crate)
+- Backend: the `ggs-mcp` crate (`src-tauri/crates/ggs-mcp/`: the server loop, the tool
+  implementations, the handshake, the call log — headless, no tauri; `ggs --mcp` dispatches
+  to `ggs_mcp::run` from the composition root, and the MCP Server page's two commands are
+  the `src-tauri/src/mcp.rs` adapters); the index itself is module 5's (the `ggs-index`
+  crate's `symbols::store` / `symbols::index`), the analysis tools sit on module 17's
+  engine (the `ggs-analysis` crate)
 - Tests: `mcp.rs`'s `#[cfg(test)]` module (scratch repository over a temp index home);
   the page's vitest lives in `tests/analysis.test.ts` (it rides the analysis suite)
 
