@@ -116,7 +116,7 @@ contact on the landing page).
 ```sh
 cargo build --release            # a single static-friendly binary
 docker build -t ggs-remote-hub . # rust:alpine → FROM scratch
-deploy/build-deb.sh              # the deb + the musl tarball (musl-tools + the musl target)
+bash deploy/build-deb.sh         # the deb + the musl tarball (musl-tools + the musl target)
 ```
 
 ```bat

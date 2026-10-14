@@ -3,9 +3,13 @@
 # musl binary — zero glibc dependency, runs on any x86_64 distro — wrapped as a deb
 # (binary + systemd unit + example config) and as a plain tarball for everywhere else.
 #
-#   deploy/build-deb.sh                 build (musl target) then package
-#   PREBUILT=./ggs-remote-hub deploy/build-deb.sh   package a binary built elsewhere
-#   VERSION=0.1.0 deploy/build-deb.sh   override the version (CI passes the tag's)
+#   bash deploy/build-deb.sh                 build (musl target) then package
+#   PREBUILT=./ggs-remote-hub bash deploy/build-deb.sh   package a binary built elsewhere
+#   VERSION=0.1.0 bash deploy/build-deb.sh   override the version (CI passes the tag's)
+#
+# Always invoked as `bash <script>` (the repo's convention, 2026-10-14): a .sh committed
+# from Windows carries no executable bit, and a direct invocation dies with Permission
+# denied (exit 126).
 #
 # Needs cargo + the x86_64-unknown-linux-musl target (rustup target add …) + musl-gcc
 # (musl-tools on Debian/Ubuntu) for the build path, and dpkg-deb for the deb itself.

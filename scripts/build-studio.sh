@@ -14,11 +14,12 @@
 # scripts/build-studio-linux.bat + scripts/docker/ (the container pass re-checks the
 # floor; see scripts/docker/studio-linux-build.sh).
 #
-# Usage:
-#   scripts/build-studio.sh          release build, installers in target/studio/cargo/release/bundle
-#                                    packages in target/studio/bundled/app-resources/extensions/ (git-graph-rs.vsix, claude-remote.vsix)
-#   scripts/build-studio.sh dev      run the app in dev mode
-#   scripts/build-studio.sh debug    cargo debug build of the Tauri backend
+# Usage (always `bash <script>` — a .sh committed from Windows carries no
+# executable bit, so direct invocation is never relied on):
+#   bash scripts/build-studio.sh          release build, installers in target/studio/cargo/release/bundle
+#                                         packages in target/studio/bundled/app-resources/extensions/ (git-graph-rs.vsix, claude-remote.vsix)
+#   bash scripts/build-studio.sh dev      run the app in dev mode
+#   bash scripts/build-studio.sh debug    cargo debug build of the Tauri backend
 set -euo pipefail
 trap 'echo "[error] Build failed." >&2' ERR
 

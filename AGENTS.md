@@ -1165,7 +1165,7 @@ Everything that turns the source tree into installers: asset assembly into
 - Seam checks: `scripts/check-seams.mjs` (TypeScript / CSS) and `src-tauri/build.rs` (Rust)
 - Packaging: `scripts/build-studio.bat` (Windows, one command; builds `ggs-node` and
   `node-host.cjs` through `prepare.mjs` as part of that) and its shell counterpart
-  `scripts/build-studio.sh` (macOS/Linux, the same release / dev / debug forms; not the
+  `bash scripts/build-studio.sh` (macOS/Linux, the same release / dev / debug forms; not the
   distributable deb/rpm — those need the floor containers below). The macOS build carries the
   DMG safety net `scripts/recover-dmg.mjs`: tauri's bundle_dmg.sh loses the occasional
   Finder/Spotlight detach race (`资源忙`/EBUSY on the scratch volume, exit 16, the
@@ -1219,7 +1219,10 @@ Everything that turns the source tree into installers: asset assembly into
   gate the installer build, and each Linux package format compiles in its own floor
   container);
   `.github/workflows/release.yml` (a pushed `v*` tag publishes installers with `SHA256SUMS`
-  and its GPG signature)
+  and its GPG signature). Every `.sh` is invoked as `bash <script>.sh`, never directly —
+  in CI, in docs and in the scripts' own usage notes (2026-10-14, the owner's direction:
+  a `.sh` committed from Windows carries no executable bit, and release.yml's
+  `deploy/build-deb.sh` call died on the ubuntu runner with Permission denied, exit 126)
 - Tests: `tests/marketplace.test.ts` (the marketplace fetch's cache contract — the dev
   iteration's TTL serves offline, the build pass's forced registry re-check, the newer-build
   download, the stale-cache fallback — and the `--build` wiring in `tauri.conf.json`)
@@ -1489,7 +1492,7 @@ database) carries the link through NAT. The whole design lives in
   against a real daemon — login, a WebSocket session and a password change's kick, all
   through `/u/<uuid>/`.
 - **The Hub** (`extensions-src/ggs-remote/hub/`, another crate of its own — never inside the
-  VSIX): standalone packaging beside the container image — `deploy/build-deb.sh` wraps the
+  VSIX): standalone packaging beside the container image — `bash deploy/build-deb.sh` wraps the
   static musl binary into a deb (hardened systemd unit + the example config as a conffile
   at `/etc/ggs-hub/hub.toml`, so dpkg -i plus systemctl runs out of the box) and a plain
   tarball; `deploy/build-zip.bat` builds the Windows zip locally in the release page's

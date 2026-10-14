@@ -13,10 +13,11 @@
 # exist (scripts/gen-signing-secrets.mjs) the dmg opens directly and this
 # script becomes unnecessary.
 #
-# Usage:
+# Usage (a checked-out copy runs as `bash <script>` — a .sh committed from
+# Windows carries no executable bit, so direct invocation is never relied on):
 #   curl -fsSL <raw repo url>/main/scripts/install-macos.sh | sh
-#   scripts/install-macos.sh [version]     # explicit version, default: latest
-#   GGS_INSTALL_DIR=/tmp/test scripts/install-macos.sh   # override the target
+#   bash scripts/install-macos.sh [version]     # explicit version, default: latest
+#   GGS_INSTALL_DIR=/tmp/test bash scripts/install-macos.sh   # override the target
 #
 # The dmg's SHA256 is verified against the release's SHA256SUMS before anything
 # is copied. A running instance aborts the install (replacing a live bundle can

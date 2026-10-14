@@ -172,7 +172,10 @@ jobs:
 
       - name: Build the deb and the tarball
         if: runner.os == 'Linux'
-        run: VERSION=${{ needs.resolve-tag.outputs.version }} deploy/build-deb.sh
+        # bash *.sh, never the bare script — the repo's convention (2026-10-14, the
+        # owner's direction): a .sh committed from Windows carries no executable bit,
+        # and a direct invocation dies with Permission denied (exit 126).
+        run: VERSION=${{ needs.resolve-tag.outputs.version }} bash deploy/build-deb.sh
 
       - name: Build the windows zip
         if: runner.os == 'Windows'
