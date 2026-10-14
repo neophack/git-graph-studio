@@ -101,6 +101,7 @@ ggs-git = { path = "crates/ggs-git" }
 ggs-shellenv = { path = "crates/ggs-shellenv" }
 ggs-remote-proto = { path = "crates/ggs-remote-proto" }
 ggs-config = { path = "crates/ggs-config" }
+ggs-testkit = { path = "crates/ggs-testkit" }
 
 # The pretend Node runtime's parser, carrying one upstream gap fix: Boa's class-expression
 # parser dropped a contextual-keyword name, so legal code real packages ship —
@@ -129,11 +130,6 @@ required-features = ["desktop"]
 
 [features]
 default = ["desktop"]
-# Test-only surfaces: the `test_support` module and the `*_for_tests` hooks stay out of every
-# shipped binary (docs/architecture-restructure-plan.md P1-4) — this crate's own tests get
-# them through `cfg(test)`; an external test harness linking the lib turns this feature on.
-# tempfile joins as an optional regular dependency so such a harness can build it.
-testkit = ["dep:tempfile"]
 desktop = [
     "dep:tauri",
     "dep:tauri-plugin-dialog",
@@ -278,10 +274,6 @@ tokio = { workspace = true, optional = true }
 # The file-system watcher behind "external changes show up by themselves" (watcher.rs).
 notify = { workspace = true, optional = true }
 trash = { workspace = true, optional = true }
-# The testkit feature's scratch directories (test_support): optional as a regular
-# dependency so an external test harness enabling `testkit` can build it; this crate's
-# own tests get it through [dev-dependencies] below.
-tempfile = { workspace = true, optional = true }
 # The tree-sitter parser layer (plan M4.1, symbols/parse.rs): the core runtime plus one
 # grammar crate per language, each behind its `grammar-*` feature. On the 0.26 line because
 # big-code-analysis (below) is compiled against it — one core for both engines. The grammar
@@ -326,6 +318,8 @@ objc2 = { workspace = true }
 objc2-app-kit = { workspace = true }
 
 [dev-dependencies]
+# The scratch-repository kit (docs/architecture-restructure-plan.md P2-12).
+ggs-testkit = { workspace = true }
 # The performance test's raw parallel read baseline (rayon is optional for the app itself).
 rayon = { workspace = true }
 # The test suites' scratch directories (can_log, cmd_search, cmd_analysis, measure's own

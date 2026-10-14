@@ -1,0 +1,15 @@
+[package]
+name = "ggs-testkit"
+version = "0.0.0"
+description = "Scratch repositories for the tests — a dev-dependency, never in a shipped binary"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ggs-git.workspace = true
+tempfile.workspace = true

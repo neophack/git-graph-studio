@@ -718,7 +718,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::test_support::{
+    use ggs_testkit::{
         commit, current_branch as branch_of, head, rev, subject, write, Scratch,
     };
 

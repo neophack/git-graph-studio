@@ -1,9 +1,9 @@
-//! Scratch repositories for the tests: a temporary directory with a scratch global git config
-//! (so "global" writes never touch the developer's own ~/.gitconfig), plus the small helpers the
-//! tests build histories with. Compiled into the app's tests and the plugin binaries' tests
-//! alike (the engine-feature backend links this crate, and its write-path tests use the
-//! same helpers); `tempfile` is a regular dependency, so nothing here needs a dev-only
-//! crate.
+//! ggs-testkit (dev-only, beneath every crate's tests): scratch repositories — a
+//! temporary directory with a scratch global git config (so "global" writes never touch
+//! a developer's own ~/.gitconfig) and the small helpers tests build histories with.
+//! A dev-dependency only: nothing here reaches any shipped binary.
+//!
+//! Allowed dependencies: ggs-git (the runner the scratch repos drive), tempfile.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -126,28 +126,3 @@ pub fn current_branch(git: &Git) -> Option<String> {
         .filter(|b| !b.is_empty())
 }
 
-/// Pin the extension store to an isolated empty directory for the guard's lifetime, and stop
-/// any backend the developer's real store left warm: "nothing installed" assertions (the
-/// engine-version sentinel, the measure report's degraded phases) must hold on any machine,
-#[cfg(all(test, feature = "desktop"))]
-/// not just one whose `~/.ggs` happens to be empty.
-#[cfg(all(test, feature = "desktop"))]
-pub struct IsolatedExtensionStore {
-    _dir: tempfile::TempDir,
-}
-
-#[cfg(all(test, feature = "desktop"))]
-impl Drop for IsolatedExtensionStore {
-    fn drop(&mut self) {
-        crate::ext_process::global().stop_all();
-        crate::cmd_ext::unpin_extensions_home_for_tests();
-    }
-}
-
-#[cfg(all(test, feature = "desktop"))]
-pub fn isolated_extension_store() -> IsolatedExtensionStore {
-    let dir = tempfile::tempdir().expect("a tempdir for the isolated extension store");
-    crate::cmd_ext::pin_extensions_home_for_tests(dir.path().to_path_buf());
-    crate::ext_process::global().stop_all();
-    IsolatedExtensionStore { _dir: dir }
-}

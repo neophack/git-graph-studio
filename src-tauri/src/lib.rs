@@ -15,12 +15,10 @@
 //! git runner `git` — are always compiled; everything that needs a window is behind
 //! `desktop`.
 
-// Test-only: scratch repositories and the isolated extension store — never compiled into
-// a shipped binary. `cfg(test)` serves this crate's own tests; the `testkit` feature
-// serves an external test harness linking the lib. P2-12 moves it to the ggs-testkit
-// dev-dependency crate (docs/architecture-restructure-plan.md P1-4).
-#[cfg(any(test, feature = "testkit"))]
-pub mod test_support;
+// The app's own test-only helper (the isolated extension store); the scratch-repo kit
+// lives in the ggs-testkit dev-dependency (crates/ggs-testkit).
+#[cfg(test)]
+mod test_isolated_store;
 
 #[cfg(feature = "desktop")]
 pub mod analysis;
@@ -377,7 +375,7 @@ mod desktop {
         /// services for (a service started against the subfolder would watch the wrong tree).
         #[test]
         fn opening_a_repo_subfolder_resolves_and_records_the_repo_root() {
-            let scratch = crate::test_support::Scratch::new("open-folder-subdir");
+            let scratch = ggs_testkit::Scratch::new("open-folder-subdir");
             let git = scratch.repo("repo");
             let sub = git.repo.join("src");
             std::fs::create_dir_all(&sub).unwrap();
@@ -400,7 +398,7 @@ mod desktop {
         /// for its background services (Quick Open and the symbol index work without git).
         #[test]
         fn opening_a_plain_folder_reports_no_repository_and_still_defers_its_services() {
-            let scratch = crate::test_support::Scratch::new("open-folder-plain");
+            let scratch = ggs_testkit::Scratch::new("open-folder-plain");
             let plain = scratch.path("plain");
             std::fs::create_dir_all(&plain).unwrap();
             let state = AppState::new();
@@ -421,7 +419,7 @@ mod desktop {
         /// the app's state changes - a failed open must not clear the folder that is still open.
         #[test]
         fn opening_a_path_that_is_not_a_folder_leaves_the_open_state_untouched() {
-            let scratch = crate::test_support::Scratch::new("open-folder-missing");
+            let scratch = ggs_testkit::Scratch::new("open-folder-missing");
             let state = AppState::new();
             state
                 .repos
@@ -452,7 +450,7 @@ mod desktop {
         /// build never start against a root the app has already moved on from.
         #[test]
         fn reopening_a_different_folder_replaces_the_previous_one_everywhere() {
-            let scratch = crate::test_support::Scratch::new("open-folder-reopen");
+            let scratch = ggs_testkit::Scratch::new("open-folder-reopen");
             let first = scratch.repo("first");
             let second = scratch.repo("second");
             let state = AppState::new();

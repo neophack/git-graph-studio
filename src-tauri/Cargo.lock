@@ -2047,6 +2047,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ggs-testkit"
+version = "0.0.0"
+dependencies = [
+ "ggs-git",
+ "tempfile",
+]
+
+[[package]]
 name = "ghash"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2106,6 +2114,7 @@ dependencies = [
  "ggs-proto",
  "ggs-remote-proto",
  "ggs-shellenv",
+ "ggs-testkit",
  "hex",
  "ignore",
  "interprocess",

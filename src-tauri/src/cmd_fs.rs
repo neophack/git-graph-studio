@@ -2587,7 +2587,7 @@ mod remote_gate_tests {
     /// confined to these three.
     #[test]
     fn ext_roots_are_the_extension_platforms_own_areas() {
-        let _isolated = crate::test_support::isolated_extension_store();
+        let _isolated = crate::test_isolated_store::isolated_extension_store();
         let roots: Vec<String> = remote_ext_roots()
             .iter()
             .map(|root| root.replace('\\', "/"))

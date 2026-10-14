@@ -563,7 +563,7 @@ pub fn git_output_clear() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{commit, subject, write, Scratch};
+    use ggs_testkit::{commit, subject, write, Scratch};
 
     #[test]
     fn amend_without_a_message_keeps_the_original_one() {

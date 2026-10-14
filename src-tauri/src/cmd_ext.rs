@@ -235,7 +235,7 @@ pub fn extensions_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 /// `~/.ggs/extensions`, created if missing — the store itself, without the one-time
 /// migration only the app performs (the headless `--measure` run uses this).
 pub fn extensions_home_dir() -> Result<PathBuf, String> {
-    // Tests pin the store to an isolated empty directory (`test_support::isolated_extension_store`):
+    // Tests pin the store to an isolated empty directory (test_isolated_store::isolated_extension_store):
     // the developer's real `~/.ggs/extensions` may well hold a backend-carrying package (any run
     // of the app installs one), and "no backend reachable" assertions must not depend on that.
     #[cfg(any(test, feature = "testkit"))]
@@ -251,12 +251,12 @@ pub fn extensions_home_dir() -> Result<PathBuf, String> {
 static TEST_EXTENSIONS_HOME: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
 #[cfg(test)]
-pub(crate) fn pin_extensions_home_for_tests(dir: PathBuf) {
+pub(crate) fn pin_extensions_home(dir: PathBuf) {
     *TEST_EXTENSIONS_HOME.lock().unwrap() = Some(dir);
 }
 
 #[cfg(test)]
-pub(crate) fn unpin_extensions_home_for_tests() {
+pub(crate) fn unpin_extensions_home() {
     *TEST_EXTENSIONS_HOME.lock().unwrap() = None;
 }
 
@@ -4511,7 +4511,7 @@ mod backend_derivation_tests {
 
 #[cfg(test)]
 mod page_bytes_tests {
-    use crate::test_support::Scratch;
+    use ggs_testkit::Scratch;
     use base64::Engine as _;
 
     use super::*;
@@ -4529,7 +4529,7 @@ mod page_bytes_tests {
         std::fs::write(repo_path.join("logo.bin"), binary).unwrap();
         git.output(&["add", "logo.bin"]).unwrap();
         git.output(&["commit", "-m", "binary"]).unwrap();
-        let hash = crate::test_support::rev(&git, "HEAD");
+        let hash = ggs_testkit::rev(&git, "HEAD");
 
         let root = repo_path.to_string_lossy().into_owned();
         let roots = [root.clone()];

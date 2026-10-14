@@ -186,9 +186,9 @@ mod tests {
 
         // A repository is measured for real now that the status read is the app's own: the
         // root resolves and the status phase reports a timing and a (clean-tree) count.
-        let scratch = crate::test_support::Scratch::new("measure");
+        let scratch = ggs_testkit::Scratch::new("measure");
         let git = scratch.repo("repo");
-        crate::test_support::commit(&git, "b.rs", "fn beta() {} // TODO\n", "second");
+        ggs_testkit::commit(&git, "b.rs", "fn beta() {} // TODO\n", "second");
         let report: serde_json::Value =
             serde_json::from_str(&run(&git.repo.display().to_string()).unwrap()).unwrap();
         assert_eq!(report["isRepository"], true);
