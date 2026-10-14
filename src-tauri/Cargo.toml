@@ -96,6 +96,7 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSMenu", "NSMen
 # crate's entry lands in the same change the crate does.
 ggs-base = { path = "crates/ggs-base" }
 ggs-proto = { path = "crates/ggs-proto" }
+ggs-codec = { path = "crates/ggs-codec" }
 
 # The pretend Node runtime's parser, carrying one upstream gap fix: Boa's class-expression
 # parser dropped a contextual-keyword name, so legal code real packages ship —
@@ -240,6 +241,8 @@ tauri-plugin-clipboard-manager = { workspace = true, optional = true }
 ggs-base = { workspace = true }
 # The ggs-ext/1 wire protocol (ext_process speaks it; ggs-node answers it).
 ggs-proto = { workspace = true }
+# The pure-Rust digests and archive codecs (GGS Bash's applets, ggs-config's zip reader).
+ggs-codec = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rpassword = { workspace = true }

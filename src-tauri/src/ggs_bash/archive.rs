@@ -1,10 +1,12 @@
-//! `tar`, `unzip`, `gzip`/`gunzip` — the archive tools Git Bash ships, pure Rust
-//! (module 18): USTAR/GNU tar reading and writing (with `-z` through [`compress`]),
-//! zip extraction (the central directory over a stored-or-deflated entry stream).
+//! `tar`, `unzip`, `gzip`/`gunzip` — the archive tools Git Bash ships (module 18).
+//! The byte formats themselves live in ggs-codec (`tar`, `zip`, `compress`); this is
+//! the applet layer over them: flags, paths and the shell's I/O.
 
 use std::path::PathBuf;
 
-use super::compress::{gunzip, gzip_wrap, stored_deflate};
+use ggs_codec::compress::{gunzip, gzip_wrap, stored_deflate};
+use ggs_codec::tar::{tar_create, tar_parse};
+use ggs_codec::zip::zip_parse;
 use super::exec::{ExecResult, Io, Shell};
 
 /* ---------- tar ---------- */
@@ -212,66 +214,6 @@ fn collect_archive_files(
     }
 }
 
-fn tar_create(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for (name, bytes) in entries {
-        let mut header = [0u8; 512];
-        let name_bytes = name.as_bytes();
-        header[..name_bytes.len().min(100)]
-            .copy_from_slice(&name_bytes[..name_bytes.len().min(100)]);
-        header[100..108].copy_from_slice(b"0000644\0"); // mode
-        header[108..116].copy_from_slice(b"0000000\0"); // uid
-        header[116..124].copy_from_slice(b"0000000\0"); // gid
-        header[124..136].copy_from_slice(format!("{:011o}\0", bytes.len()).as_bytes());
-        header[136..148].copy_from_slice(format!("{:011o}\0", 0).as_bytes()); // mtime
-        header[148..156].copy_from_slice(b"        "); // checksum placeholder
-        header[156] = b'0'; // regular file
-        header[257..263].copy_from_slice(b"ustar\0");
-        header[263..265].copy_from_slice(b"00");
-        let checksum: u32 = header.iter().map(|byte| *byte as u32).sum();
-        header[148..156].copy_from_slice(format!("{:06o}\0 ", checksum).as_bytes());
-        out.extend_from_slice(&header);
-        out.extend_from_slice(bytes);
-        let pad = (512 - bytes.len() % 512) % 512;
-        out.extend(std::iter::repeat_n(0u8, pad));
-    }
-    out.extend(std::iter::repeat_n(0u8, 1024));
-    out
-}
-
-fn tar_parse(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let mut entries = Vec::new();
-    let mut at = 0usize;
-    loop {
-        if at + 512 > data.len() {
-            break;
-        }
-        let header = &data[at..at + 512];
-        if header.iter().all(|byte| *byte == 0) {
-            break;
-        }
-        let name = trim_field(&header[..100]);
-        let size_text = trim_field(&header[124..136]);
-        let size =
-            usize::from_str_radix(&size_text, 8).map_err(|_| format!("bad size for {name}"))?;
-        at += 512;
-        if at + size > data.len() {
-            return Err(format!("truncated entry {name}"));
-        }
-        entries.push((name, data[at..at + size].to_vec()));
-        at += size + ((512 - size % 512) % 512);
-    }
-    Ok(entries)
-}
-
-fn trim_field(field: &[u8]) -> String {
-    let end = field
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(field.len());
-    String::from_utf8_lossy(&field[..end]).into_owned()
-}
-
 /* ---------- unzip ---------- */
 
 /// `unzip -o a.zip -d dir` / `unzip -l a.zip`: the local-file stream (a zip's most
@@ -371,65 +313,6 @@ pub fn run_unzip(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
         }
     }
     Ok(0)
-}
-
-fn zip_parse(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let mut entries = Vec::new();
-    let mut at = 0usize;
-    while at + 30 <= data.len() {
-        if &data[at..at + 4] != b"PK\x03\x04" {
-            break;
-        }
-        let flags = u16::from_le_bytes([data[at + 6], data[at + 7]]);
-        let method = u16::from_le_bytes([data[at + 8], data[at + 9]]);
-        let compressed_size =
-            u32::from_le_bytes([data[at + 18], data[at + 19], data[at + 20], data[at + 21]])
-                as usize;
-        let name_len = u16::from_le_bytes([data[at + 26], data[at + 27]]) as usize;
-        let extra_len = u16::from_le_bytes([data[at + 28], data[at + 29]]) as usize;
-        let header_end = at + 30 + name_len + extra_len;
-        if header_end + compressed_size > data.len() {
-            return Err("truncated zip entry".into());
-        }
-        let name = String::from_utf8_lossy(&data[at + 30..at + 30 + name_len]).into_owned();
-        let body = &data[header_end..header_end + compressed_size];
-        let bytes = match method {
-            0 => body.to_vec(),
-            8 => super::compress::inflate(body)?,
-            other => return Err(format!("unsupported zip method {other}")),
-        };
-        // Bit 3: sizes live in the trailing data descriptor instead — the central
-        // directory has them, so scan ahead for the next signature as the boundary.
-        let bytes = if flags & 0x08 != 0 {
-            scan_data_descriptor(data, header_end, bytes, name_len)
-        } else {
-            bytes
-        };
-        entries.push((name, bytes));
-        at = header_end + compressed_size;
-    }
-    Ok(entries)
-}
-
-/// One entry's bytes by exact name, `None` when the archive carries no such entry —
-/// module 19's `ggs-config` pulls the daemon binary out of a bundled VSIX through here
-/// (the same local-file-stream read `unzip` takes, and the one zip reader that builds
-/// under every feature set: std only, like the rest of this shell).
-pub fn zip_entry(data: &[u8], name: &str) -> Result<Option<Vec<u8>>, String> {
-    Ok(zip_parse(data)?
-        .into_iter()
-        .find(|(entry, _)| entry == name)
-        .map(|(_, bytes)| bytes))
-}
-
-fn scan_data_descriptor(data: &[u8], from: usize, mut bytes: Vec<u8>, name_len: usize) -> Vec<u8> {
-    // Best effort: find PK\x07\x08 and stop; the compressed body was already cut at
-    // the local header's size (0 when the descriptor flag is set), so nothing to do
-    // beyond returning what we have — the descriptor case with size 0 is rare in
-    // tool-written zips.
-    let _ = (data, from, name_len);
-    bytes.drain(..0);
-    bytes
 }
 
 /* ---------- gzip / gunzip ---------- */

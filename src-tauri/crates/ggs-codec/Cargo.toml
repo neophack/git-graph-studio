@@ -1,0 +1,14 @@
+[package]
+name = "ggs-codec"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Pure std by design (plan §3.1): the digests and codecs are hand-written so no C
+# backend and no dependency joins any binary that links this crate.
+[dependencies]

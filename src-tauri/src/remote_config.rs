@@ -158,7 +158,7 @@ fn extract_daemon_from_vsix(vsix: &Path) -> Result<PathBuf, String> {
     let target = dir.join(DAEMON_EXE);
     let wanted = format!("extension/bin/{}/{DAEMON_EXE}", platform_dir());
     let data = std::fs::read(vsix).map_err(|e| format!("open {}: {e}", vsix.display()))?;
-    let bytes = crate::ggs_bash::archive::zip_entry(&data, &wanted)
+    let bytes = ggs_codec::zip::zip_entry(&data, &wanted)
         .map_err(|e| format!("read VSIX: {e}"))?
         .ok_or_else(|| format!("the VSIX carries no {wanted}"))?;
     // A same-size binary already staged is the same build — nothing to write.

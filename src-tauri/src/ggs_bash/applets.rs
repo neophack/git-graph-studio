@@ -4536,14 +4536,14 @@ fn readlink(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
 fn checksum(shell: &mut Shell, io: &Io, name: &str, args: &[String]) -> ExecResult {
     let digest = |data: &[u8]| -> String {
         match name {
-            "md5sum" => super::hashes::md5(data),
-            "sha1sum" => super::hashes::sha1(data),
-            "sha224sum" => super::hashes::sha224(data),
-            "sha256sum" => super::hashes::sha256(data),
-            "sha384sum" => super::hashes::sha384(data),
-            "sha512sum" => super::hashes::sha512(data),
-            "b2sum" => super::hashes::blake2b512(data),
-            _ => super::hashes::sha256(data),
+            "md5sum" => ggs_codec::hash::md5(data),
+            "sha1sum" => ggs_codec::hash::sha1(data),
+            "sha224sum" => ggs_codec::hash::sha224(data),
+            "sha256sum" => ggs_codec::hash::sha256(data),
+            "sha384sum" => ggs_codec::hash::sha384(data),
+            "sha512sum" => ggs_codec::hash::sha512(data),
+            "b2sum" => ggs_codec::hash::blake2b512(data),
+            _ => ggs_codec::hash::sha256(data),
         }
     };
     if args.iter().any(|arg| arg == "-c" || arg == "--check") {
@@ -5123,7 +5123,7 @@ fn printenv(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
 fn cksum_applet(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
     let (inputs, status) = read_byte_inputs(shell, io, args, "cksum");
     for (name, data) in &inputs {
-        let crc = super::hashes::cksum_crc(data);
+        let crc = ggs_codec::hash::cksum_crc(data);
         if name.is_empty() {
             io.out_str(&format!("{crc} {}\n", data.len()));
         } else {
@@ -5139,7 +5139,7 @@ fn sum_applet(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
     let multiple = inputs.len() > 1;
     for (name, data) in &inputs {
         if sysv {
-            let checksum = super::hashes::sysv_sum(data);
+            let checksum = ggs_codec::hash::sysv_sum(data);
             let blocks = data.len().div_ceil(512);
             if name.is_empty() {
                 io.out_str(&format!("{checksum} {blocks}\n"));
@@ -5147,7 +5147,7 @@ fn sum_applet(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
                 io.out_str(&format!("{checksum} {blocks} {name}\n"));
             }
         } else {
-            let checksum = super::hashes::bsd_sum(data);
+            let checksum = ggs_codec::hash::bsd_sum(data);
             let blocks = data.len().div_ceil(1024);
             // BSD shape: the checksum zero-padded to 5, blocks right in 6; the name
             // only once several operands asked for it.
@@ -5265,7 +5265,7 @@ fn zcat(shell: &mut Shell, io: &Io, name: &str, args: &[String]) -> ExecResult {
     let (inputs, status) = read_byte_inputs(shell, io, args, "gzip");
     let mut out_status = status;
     for (_, data) in &inputs {
-        match super::compress::gunzip(data) {
+        match ggs_codec::compress::gunzip(data) {
             Ok(plain) => io.write_out(&plain),
             Err(error) => {
                 io.err_str(&format!("gzip: stdin: {error}\n"));

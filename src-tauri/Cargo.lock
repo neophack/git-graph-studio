@@ -1966,6 +1966,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ggs-codec"
+version = "0.0.0"
+
+[[package]]
+name = "ggs-proto"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ghash"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2021,6 +2033,8 @@ dependencies = [
  "flate2",
  "getrandom 0.2.17",
  "ggs-base",
+ "ggs-codec",
+ "ggs-proto",
  "hex",
  "hmac 0.12.1",
  "if-addrs",

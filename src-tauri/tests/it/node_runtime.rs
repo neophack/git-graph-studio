@@ -124,7 +124,7 @@ fn serve_with_logs(
         .map(|(id, request)| {
             format!(
                 "{}\n",
-                git_graph_studio_lib::ext_protocol::request(
+                ggs_proto::request(
                     id as u64 + 1,
                     request["method"].as_str().unwrap(),
                     request["params"].clone(),
@@ -158,7 +158,7 @@ fn serve_with_logs(
             let _ = writeln!(
                 output,
                 "{}",
-                git_graph_studio_lib::ext_protocol::response(host_id, Ok(Value::Null))
+                ggs_proto::response(host_id, Ok(Value::Null))
             );
             continue;
         }
@@ -252,7 +252,7 @@ module.exports.activate = function () {
 
     let mut next_id = 1u64;
     requests_tx
-        .send(git_graph_studio_lib::ext_protocol::request(
+        .send(ggs_proto::request(
             next_id,
             "initialize",
             json!({
@@ -281,7 +281,7 @@ module.exports.activate = function () {
                 Value::Null
             };
             requests_tx
-                .send(git_graph_studio_lib::ext_protocol::response(id, Ok(answer)))
+                .send(ggs_proto::response(id, Ok(answer)))
                 .unwrap();
             continue;
         }
@@ -297,7 +297,7 @@ module.exports.activate = function () {
     // the bare main took the frame-program route (the vscode shim came up).
     next_id += 1;
     requests_tx
-        .send(git_graph_studio_lib::ext_protocol::request(
+        .send(ggs_proto::request(
             next_id,
             "runCommand",
             json!({ "command": "bare.probe", "args": [] }),
@@ -312,7 +312,7 @@ module.exports.activate = function () {
         if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
             let id = wire["id"].as_u64().unwrap_or_default();
             requests_tx
-                .send(git_graph_studio_lib::ext_protocol::response(
+                .send(ggs_proto::response(
                     id,
                     Ok(Value::Null),
                 ))
@@ -397,7 +397,7 @@ module.exports.activate = function () {
 
     let mut next_id = 1u64;
     requests_tx
-        .send(git_graph_studio_lib::ext_protocol::request(
+        .send(ggs_proto::request(
             next_id,
             "initialize",
             json!({
@@ -426,7 +426,7 @@ module.exports.activate = function () {
                 Value::Null
             };
             requests_tx
-                .send(git_graph_studio_lib::ext_protocol::response(id, Ok(answer)))
+                .send(ggs_proto::response(id, Ok(answer)))
                 .unwrap();
             continue;
         }
@@ -439,7 +439,7 @@ module.exports.activate = function () {
 
     next_id += 1;
     requests_tx
-        .send(git_graph_studio_lib::ext_protocol::request(
+        .send(ggs_proto::request(
             next_id,
             "runCommand",
             json!({ "command": "args.probe", "args": ["s1", null, { "x": null }] }),
@@ -454,7 +454,7 @@ module.exports.activate = function () {
         if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
             let id = wire["id"].as_u64().unwrap_or_default();
             requests_tx
-                .send(git_graph_studio_lib::ext_protocol::response(
+                .send(ggs_proto::response(
                     id,
                     Ok(Value::Null),
                 ))
@@ -576,7 +576,7 @@ vscode.workspace.registerTextDocumentContentProvider('ggsfix', {
 
     let mut next_id = 1u64;
     requests_tx
-        .send(git_graph_studio_lib::ext_protocol::request(
+        .send(ggs_proto::request(
             next_id,
             "initialize",
             json!({
@@ -621,7 +621,7 @@ vscode.workspace.registerTextDocumentContentProvider('ggsfix', {
             let id = wire["id"].as_u64().unwrap_or_default();
             let inner = wire["params"]["method"].as_str().unwrap_or_default();
             requests_tx
-                .send(git_graph_studio_lib::ext_protocol::response(
+                .send(ggs_proto::response(
                     id,
                     Ok(answer_host_request(inner)),
                 ))
@@ -642,7 +642,7 @@ vscode.workspace.registerTextDocumentContentProvider('ggsfix', {
     next_id += 1;
     let requested = next_id;
     requests_tx
-        .send(git_graph_studio_lib::ext_protocol::request(
+        .send(ggs_proto::request(
             requested,
             "docProvider.provide",
             json!({ "args": [{ "scheme": "ggsfix", "path": "x", "fsPath": "x" }] }),
@@ -657,7 +657,7 @@ vscode.workspace.registerTextDocumentContentProvider('ggsfix', {
         if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
             let id = wire["id"].as_u64().unwrap_or_default();
             requests_tx
-                .send(git_graph_studio_lib::ext_protocol::response(
+                .send(ggs_proto::response(
                     id,
                     Ok(Value::Null),
                 ))
@@ -739,7 +739,7 @@ vscode.commands.registerCommand('chat.openOutput', async () => {
 
     let mut next_id = 1u64;
     requests_tx
-        .send(git_graph_studio_lib::ext_protocol::request(
+        .send(ggs_proto::request(
             next_id,
             "initialize",
             json!({
@@ -798,7 +798,7 @@ vscode.commands.registerCommand('chat.openOutput', async () => {
             let id = wire["id"].as_u64().unwrap_or_default();
             let answer = answer_host_request(&wire, &mut opened_tab);
             requests_tx
-                .send(git_graph_studio_lib::ext_protocol::response(id, answer))
+                .send(ggs_proto::response(id, answer))
                 .unwrap();
             continue;
         }
@@ -814,7 +814,7 @@ vscode.commands.registerCommand('chat.openOutput', async () => {
     next_id += 1;
     let clicked = next_id;
     requests_tx
-        .send(git_graph_studio_lib::ext_protocol::request(
+        .send(ggs_proto::request(
             clicked,
             "runCommand",
             json!({ "command": "chat.openOutput", "args": [] }),
@@ -829,7 +829,7 @@ vscode.commands.registerCommand('chat.openOutput', async () => {
             let id = wire["id"].as_u64().unwrap_or_default();
             let answer = answer_host_request(&wire, &mut opened_tab);
             requests_tx
-                .send(git_graph_studio_lib::ext_protocol::response(id, answer))
+                .send(ggs_proto::response(id, answer))
                 .unwrap();
             continue;
         }
@@ -915,7 +915,7 @@ module.exports.activate = function () {
 
     let mut next_id = 1u64;
     requests_tx
-        .send(git_graph_studio_lib::ext_protocol::request(
+        .send(ggs_proto::request(
             next_id,
             "initialize",
             json!({
@@ -954,7 +954,7 @@ module.exports.activate = function () {
                 _ => Value::Null,
             };
             requests_tx
-                .send(git_graph_studio_lib::ext_protocol::response(id, Ok(answer)))
+                .send(ggs_proto::response(id, Ok(answer)))
                 .unwrap();
             continue;
         }
@@ -986,7 +986,7 @@ module.exports.activate = function () {
                 break;
             }
             requests_tx
-                .send(git_graph_studio_lib::ext_protocol::response(
+                .send(ggs_proto::response(
                     id,
                     Ok(Value::Null),
                 ))
@@ -1000,7 +1000,7 @@ module.exports.activate = function () {
     next_id += 1;
     let ready_id = next_id;
     requests_tx
-        .send(git_graph_studio_lib::ext_protocol::request(
+        .send(ggs_proto::request(
             ready_id,
             "runCommand",
             json!({ "command": "probe.ready", "args": [] }),
@@ -1020,7 +1020,7 @@ module.exports.activate = function () {
     // The release: the activation settles, registers probe.ready, and the queued command
     // answers through it.
     requests_tx
-        .send(git_graph_studio_lib::ext_protocol::response(
+        .send(ggs_proto::response(
             held,
             Ok(Value::Null),
         ))
@@ -1034,7 +1034,7 @@ module.exports.activate = function () {
         if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
             let id = wire["id"].as_u64().unwrap_or_default();
             requests_tx
-                .send(git_graph_studio_lib::ext_protocol::response(
+                .send(ggs_proto::response(
                     id,
                     Ok(Value::Null),
                 ))
@@ -1530,7 +1530,7 @@ fn the_installed_git_graph_extension_activates_under_ggs_node() {
 
     let mut next_id = 1u64;
     requests_tx
-        .send(git_graph_studio_lib::ext_protocol::request(
+        .send(ggs_proto::request(
             next_id,
             "initialize",
             json!({
@@ -1580,7 +1580,7 @@ fn the_installed_git_graph_extension_activates_under_ggs_node() {
             let id = wire["id"].as_u64().unwrap_or_default();
             let inner = wire["params"]["method"].as_str().unwrap_or_default();
             requests_tx
-                .send(git_graph_studio_lib::ext_protocol::response(
+                .send(ggs_proto::response(
                     id,
                     Ok(answer_host_request(inner)),
                 ))
@@ -1602,7 +1602,7 @@ fn the_installed_git_graph_extension_activates_under_ggs_node() {
     next_id += 1;
     let requested = next_id;
     requests_tx
-        .send(git_graph_studio_lib::ext_protocol::request(
+        .send(ggs_proto::request(
             requested,
             "runCommand",
             json!({ "command": "git-graph-rs.version", "args": [] }),
@@ -1632,7 +1632,7 @@ fn the_installed_git_graph_extension_activates_under_ggs_node() {
                 }
             }
             requests_tx
-                .send(git_graph_studio_lib::ext_protocol::response(
+                .send(ggs_proto::response(
                     id,
                     Ok(answer_host_request(inner)),
                 ))
@@ -2783,7 +2783,7 @@ module.exports.activate = function () {
                     Value::Null
                 };
                 requests_tx
-                    .send(git_graph_studio_lib::ext_protocol::response(
+                    .send(ggs_proto::response(
                         host_id,
                         Ok(answer),
                     ))
@@ -2797,7 +2797,7 @@ module.exports.activate = function () {
     };
 
     requests_tx
-        .send(git_graph_studio_lib::ext_protocol::request(
+        .send(ggs_proto::request(
             1,
             "initialize",
             json!({
@@ -2812,7 +2812,7 @@ module.exports.activate = function () {
 
     let asked = std::time::Instant::now();
     requests_tx
-        .send(git_graph_studio_lib::ext_protocol::request(
+        .send(ggs_proto::request(
             2,
             "runCommand",
             json!({ "command": "pending.early", "args": [] }),
@@ -3014,7 +3014,7 @@ module.exports.activate = function () {
 
     let mut next_id = 1u64;
     requests_tx
-        .send(git_graph_studio_lib::ext_protocol::request(
+        .send(ggs_proto::request(
             next_id,
             "initialize",
             json!({
@@ -3042,7 +3042,7 @@ module.exports.activate = function () {
                 Value::Null
             };
             requests_tx
-                .send(git_graph_studio_lib::ext_protocol::response(id, Ok(answer)))
+                .send(ggs_proto::response(id, Ok(answer)))
                 .unwrap();
             continue;
         }
@@ -3057,7 +3057,7 @@ module.exports.activate = function () {
     // activation-time read.
     let run_probe = |requests_tx: &std::sync::mpsc::Sender<String>, next_id: u64| -> String {
         requests_tx
-            .send(git_graph_studio_lib::ext_protocol::request(
+            .send(ggs_proto::request(
                 next_id,
                 "runCommand",
                 json!({ "command": "cfg.probe", "args": [] }),
@@ -3071,7 +3071,7 @@ module.exports.activate = function () {
             if wire.get("method").and_then(Value::as_str) == Some("ggs.hostRequest") {
                 let id = wire["id"].as_u64().unwrap_or_default();
                 requests_tx
-                    .send(git_graph_studio_lib::ext_protocol::response(
+                    .send(ggs_proto::response(
                         id,
                         Ok(Value::Null),
                     ))
