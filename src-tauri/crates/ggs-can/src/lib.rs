@@ -1,16 +1,12 @@
-//! CAN log parsing, statistics and conversion (CANoe's Statistics window and "Save As"):
-//! parses Vector `.blf` (binary logging format) and `.asc` (text logging format) traces,
-//! aggregates them — per-channel frame and error counts, bus load from the arbitration-
-//! and data-phase bits each frame puts on the wire, per-identifier counts and cycle
-//! times — and converts between the two
-//! formats without losing a frame. Everything performance-critical (the container
-//! decompression, the per-frame walk, the median/percentile math, the writing) runs here;
-//! the statistics view only renders results.
+//! ggs-can (L1, module 13): the CAN Trace Analyzer's engine — Vector `.blf` (binary)
+//! and `.asc` (text) trace parsing, the statistics aggregation (per-channel counts, bus
+//! load, per-identifier cycle times), the interval analysis, blf<->asc conversion and the
+//! raw-view document (the windowed frame store a session reads through the app's
+//! commands). Everything performance-critical runs here; the view only renders results.
 //!
-//! The parse is one streaming path: a reader walks the source and hands every frame to a
-//! `FrameSink` — the statistics aggregator, the cycle-analysis collector or the format
-//! converter — so each consumer sees the whole log without one shared intermediate
-//! representation on the heap.
+//! Allowed dependencies: ggs-base (the bounded line reader), flate2 (BLF's zlib
+//! containers), serde. No tauri — progress crosses through `ProgressReporter`'s
+//! callback, and the app's `can_commands.rs` is the only place that names a Channel.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -2153,19 +2149,21 @@ pub struct CanProgress {
 
 /// Sends `CanProgress` over the IPC channel, throttled to one report per interval so a
 /// multi-gigabyte walk does not flood the bridge.
-struct ProgressReporter {
-    channel: Option<tauri::ipc::Channel<CanProgress>>,
+pub struct ProgressReporter {
+    report: Option<Box<dyn FnMut(CanProgress) + Send>>,
     total_bytes: u64,
     /// A raw-view document the walk's byte position is mirrored into, so its poll can show
-    /// a percentage without an IPC report per chunk. `None` on the IPC-reporting flows.
+    /// a percentage without an IPC report per chunk. `None` on the reporting flows.
     doc: Option<Arc<CanLogDoc>>,
     last: std::time::Instant,
 }
 
 impl ProgressReporter {
-    fn new(channel: tauri::ipc::Channel<CanProgress>, total_bytes: u64) -> Self {
+    /// Reports through a callback — the app's command adapter closes over the IPC
+    /// channel; a test counts into a counter. The crate names no frontend.
+    pub fn reporting<F: FnMut(CanProgress) + Send + 'static>(total_bytes: u64, report: F) -> Self {
         ProgressReporter {
-            channel: Some(channel),
+            report: Some(Box::new(report)),
             total_bytes,
             doc: None,
             last: std::time::Instant::now() - std::time::Duration::from_secs(1),
@@ -2174,9 +2172,9 @@ impl ProgressReporter {
 
     /// A reporter that publishes each tick's byte position straight into a raw-view document
     /// — no IPC: the view's poll reads it back together with the frame count.
-    fn into_doc(total_bytes: u64, doc: Arc<CanLogDoc>) -> Self {
+    pub fn into_doc(total_bytes: u64, doc: Arc<CanLogDoc>) -> Self {
         ProgressReporter {
-            channel: None,
+            report: None,
             total_bytes,
             doc: Some(doc),
             last: std::time::Instant::now(),
@@ -2187,12 +2185,12 @@ impl ProgressReporter {
         if let Some(doc) = &self.doc {
             doc.bytes.store(bytes, Ordering::Relaxed);
         }
-        let Some(channel) = &self.channel else { return };
+        let Some(report) = self.report.as_mut() else { return };
         if !force && self.last.elapsed() < std::time::Duration::from_millis(200) {
             return;
         }
         self.last = std::time::Instant::now();
-        let _ = channel.send(CanProgress {
+        report(CanProgress {
             frames,
             bytes,
             total_bytes: self.total_bytes,
@@ -2201,7 +2199,7 @@ impl ProgressReporter {
 }
 
 /// The file's size, so a progress report can say how far along the walk is.
-fn total_bytes_of(path: &Path) -> u64 {
+pub fn total_bytes_of(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
@@ -2245,61 +2243,6 @@ fn walk_source(
     }
 }
 
-/// The statistics of a `.blf` or `.asc` CAN log on disk. The walk runs on the blocking
-/// pool (it is pure IO and can run for minutes on a giant log) and reports progress over
-/// `onProgress`; the view paints immediately and fills in when this resolves.
-#[tauri::command]
-pub async fn can_log_stats(
-    path: String,
-    on_progress: tauri::ipc::Channel<CanProgress>,
-) -> Result<CanLogStats, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut reporter = ProgressReporter::new(on_progress, total_bytes_of(Path::new(&path)));
-        let mut agg = Aggregator::new();
-        let (start, format) = walk_source(Path::new(&path), &mut agg, &mut reporter)?;
-        Ok(agg.finish(format, start))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// The periodic-message analysis of one identifier on one channel: cycle statistics
-/// (median/avg/min/max, the standard deviation as the jitter figure), the missing-frame
-/// check over every interval, and the chart series downsampled to ≤ 4096 points. The whole
-/// file is walked in Rust on the blocking pool; only the series and the numbers cross
-/// the bridge.
-#[tauri::command]
-pub async fn can_intervals(
-    path: String,
-    channel: u16,
-    id: u32,
-    extended: bool,
-    on_progress: tauri::ipc::Channel<CanProgress>,
-) -> Result<CanIntervals, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut reporter = ProgressReporter::new(on_progress, total_bytes_of(Path::new(&path)));
-        let mut collector = IntervalCollector {
-            channel,
-            id,
-            times: Vec::new(),
-            extended,
-            fd: false,
-            overflow: 0,
-        };
-        walk_source(Path::new(&path), &mut collector, &mut reporter)?;
-        Ok(analyse_intervals(
-            std::mem::take(&mut collector.times),
-            channel,
-            id,
-            collector.extended,
-            collector.fd,
-            collector.overflow,
-        ))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
 /// The measurement start a BLF's LOGG header states, without walking the file.
 fn blf_start_epoch(path: &Path) -> Option<f64> {
     let mut header = [0u8; 144];
@@ -2312,75 +2255,6 @@ fn blf_start_epoch(path: &Path) -> Option<f64> {
         .map(|i| u16_at(&header, 40 + i * 2))
         .collect::<Vec<_>>();
     systemtime_to_epoch(&st)
-}
-
-/// Convert a CAN log between BLF and ASC (or into its own format), frame for frame: every
-/// CAN, CAN FD, remote and error frame of the source is written to the target in the
-/// target's exact CANoe layout. Runs on the blocking pool with progress reports; returns
-/// the frames written.
-#[tauri::command]
-pub async fn convert_can_log(
-    from: String,
-    to: String,
-    format: String,
-    on_progress: tauri::ipc::Channel<CanProgress>,
-) -> Result<u64, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let from_path = Path::new(&from);
-        // The source's measurement start is preserved into the target's header: a BLF's
-        // comes straight from its LOGG header, an .asc's from its date line.
-        let is_blf = File::open(from_path)
-            .and_then(|mut f| {
-                let mut sig = [0u8; 4];
-                f.read_exact(&mut sig)?;
-                Ok(sig)
-            })
-            .map(|sig| sig == *b"LOGG")
-            .map_err(|e| e.to_string())?;
-        if !is_blf
-            && from_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_ascii_lowercase())
-                .as_deref()
-                == Some("blf")
-        {
-            return Err("not a BLF file (missing LOGG signature)".to_string());
-        }
-        let start_epoch = if is_blf {
-            blf_start_epoch(from_path).unwrap_or(0.0)
-        } else {
-            asc_start_epoch(from_path).unwrap_or(0.0)
-        };
-        // The save dialog can hand back the source's own path (the same-format choice even
-        // defaults to it): refuse before File::create truncates the log the walk reads. A
-        // target that does not exist yet cannot be the source, so only an existing one is
-        // compared, canonicalised on both sides.
-        let from_canonical = std::fs::canonicalize(from_path).map_err(|e| e.to_string())?;
-        if std::fs::canonicalize(Path::new(&to)).is_ok_and(|to| to == from_canonical) {
-            return Err("the target is the source file itself — pick a different name".to_string());
-        }
-        let out = File::create(Path::new(&to)).map_err(|e| e.to_string())?;
-        let mut out = BufWriter::with_capacity(1 << 20, out);
-        // The target writer is chosen up front (one mutable borrow of the output); the walk
-        // below then hands every source frame to it, whichever pair of formats converts.
-        let mut converter = if format.eq_ignore_ascii_case("blf") {
-            Converter {
-                writer: WriterTarget::Blf(BlfWriter::new(&mut out, start_epoch)),
-            }
-        } else {
-            Converter {
-                writer: WriterTarget::Asc(AscWriter::new(&mut out, start_epoch)),
-            }
-        };
-        let mut reporter = ProgressReporter::new(on_progress, total_bytes_of(from_path));
-        walk_source(from_path, &mut converter, &mut reporter)?;
-        let frames = converter.finish().map_err(|e| e.to_string())?;
-        out.flush().map_err(|e| e.to_string())?;
-        Ok(frames)
-    })
-    .await
-    .map_err(|e| e.to_string())?
 }
 
 /// The measurement start an .asc's `date …` header line states, without walking the file.
@@ -2693,7 +2567,7 @@ pub struct CanLogDoc {
 }
 
 impl CanLogDoc {
-    fn new(total_bytes: u64) -> Self {
+    pub fn new(total_bytes: u64) -> Self {
         CanLogDoc {
             frames: Mutex::new(FrameStore {
                 t_ns: Vec::new(),
@@ -2722,13 +2596,18 @@ pub struct CanLogState {
 }
 
 impl CanLogState {
-    fn register(&self, doc: Arc<CanLogDoc>) -> u32 {
+    pub fn register(&self, doc: Arc<CanLogDoc>) -> u32 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         self.docs.lock().unwrap().insert(id, doc);
         id
     }
 
-    fn get(&self, id: u32) -> Option<Arc<CanLogDoc>> {
+    /// Releases a raw-log document's frames when its tab closes.
+    pub fn release(&self, doc_id: u32) {
+        self.docs.lock().unwrap().remove(&doc_id);
+    }
+
+    pub fn get(&self, id: u32) -> Option<Arc<CanLogDoc>> {
         self.docs.lock().unwrap().get(&id).cloned()
     }
 }
@@ -2783,68 +2662,6 @@ pub struct CanOpenResult {
     pub total_bytes: u64,
 }
 
-/// Opens a CAN log for raw browsing. The parse itself is a detached background walk — this
-/// returns as soon as the document exists, and the view polls `can_log_count` while the
-/// frames accumulate, so the first rows are on screen long before a giant log finishes.
-#[tauri::command]
-pub async fn can_log_open(
-    path: String,
-    state: tauri::State<'_, CanLogState>,
-) -> Result<CanOpenResult, String> {
-    let total_bytes = total_bytes_of(Path::new(&path));
-    let doc = Arc::new(CanLogDoc::new(total_bytes));
-    let doc_id = state.register(Arc::clone(&doc));
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut sink = VecSink {
-            doc: Arc::clone(&doc),
-            staging: Vec::with_capacity(RAW_SINK_BATCH),
-        };
-        let mut reporter = ProgressReporter::into_doc(total_bytes, Arc::clone(&doc));
-        let result = walk_source(Path::new(&path), &mut sink, &mut reporter);
-        // The last staged batch lands before `done` flips, so the final poll's count is
-        // the whole walk's.
-        sink.flush();
-        if let Err(e) = result {
-            *doc.error.lock().unwrap() = Some(e);
-        }
-        doc.done.store(true, Ordering::Release);
-    });
-    Ok(CanOpenResult {
-        doc_id,
-        total_bytes,
-    })
-}
-
-/// A window of the document's frames, in log order — only what the viewport shows ever
-/// crosses the bridge. A range past the parsed prefix comes back short (or empty). With a
-/// filter, the window is of the frames that pass it and each line still numbers its frame
-/// in the whole log; the first application of a filter walks the parsed prefix once, so
-/// this runs on the blocking pool like every other heavy walk in this module.
-#[tauri::command]
-pub async fn can_log_frames(
-    state: tauri::State<'_, CanLogState>,
-    doc_id: u32,
-    start: usize,
-    end: usize,
-    filter: Option<CanFrameFilter>,
-) -> Result<Vec<CanFrameLine>, String> {
-    let doc = state
-        .get(doc_id)
-        .ok_or_else(|| "this log view was closed".to_string())?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut frames = doc.frames.lock().unwrap();
-        Ok(match &filter {
-            None => {
-                let end = end.min(frames.len());
-                (start.min(end)..end).map(|i| frames.line(i)).collect()
-            }
-            Some(spec) => frames.filtered_window(spec, start, end),
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CanLogCount {
@@ -2859,47 +2676,6 @@ pub struct CanLogCount {
     pub total_bytes: u64,
     /// The channels the frames have named so far, ascending — the filter bar's channel list.
     pub channels: Vec<u16>,
-}
-
-/// How far the background walk has come — what the raw view polls to extend its scroll
-/// range, and where a parse failure surfaces once the walk ends. The optional filter makes
-/// the same poll report the filtered row count (`matched`) and refresh the cached match
-/// index as the walk lands more batches.
-#[tauri::command]
-pub async fn can_log_count(
-    state: tauri::State<'_, CanLogState>,
-    doc_id: u32,
-    filter: Option<CanFrameFilter>,
-) -> Result<CanLogCount, String> {
-    let doc = state
-        .get(doc_id)
-        .ok_or_else(|| "this log view was closed".to_string())?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let error = doc.error.lock().unwrap().clone();
-        let parsed = doc.parsed.load(Ordering::Relaxed) as u64;
-        let mut frames = doc.frames.lock().unwrap();
-        // An unfiltered poll touches no index — the whole point of `Option`.
-        let matched = match &filter {
-            Some(spec) => {
-                frames.refresh_filter(spec);
-                frames.filter.as_ref().map_or(0, |f| f.matches.len()) as u64
-            }
-            None => parsed,
-        };
-        let channels = frames.channels.clone();
-        drop(frames);
-        Ok(CanLogCount {
-            parsed,
-            matched,
-            done: doc.done.load(Ordering::Acquire),
-            error,
-            bytes: doc.bytes.load(Ordering::Relaxed),
-            total_bytes: doc.total_bytes,
-            channels,
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
 }
 
 /// A find query normalised for the frame columns: the bytes to look for inside payloads
@@ -3009,56 +2785,189 @@ impl FrameStore {
     }
 }
 
-/// Find in the raw log — the raw view's search bar (Ctrl+F): every frame whose id or
-/// payload matches the hex query, in log order, as positions of the current row space (a
-/// filter on means only its frames are searched, and the positions address the filtered
-/// rows the view scrolls). One bounded pass over the columns on the blocking pool.
-#[tauri::command]
-pub async fn can_log_find(
-    state: tauri::State<'_, CanLogState>,
-    doc_id: u32,
-    query: String,
-    filter: Option<CanFrameFilter>,
-) -> Result<CanFindResult, String> {
-    let doc = state
-        .get(doc_id)
-        .ok_or_else(|| "this log view was closed".to_string())?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let needle = parse_can_query(&query)?;
-        let mut frames = doc.frames.lock().unwrap();
-        Ok(match &filter {
-            None => find_positions(
-                &frames,
-                (0..frames.len()).map(|index| (index, index as u32)),
-                &needle,
-            ),
-            Some(spec) => {
-                frames.refresh_filter(spec);
-                let filter = frames.filter.as_ref().unwrap();
-                find_positions(
-                    &frames,
-                    filter
-                        .matches
-                        .iter()
-                        .enumerate()
-                        .map(|(position, &frame)| (frame as usize, position as u32)),
-                    &needle,
-                )
-            }
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
+
+/* ---------- The pure cores behind the commands (the app's adapters spawn these) ---------- */
+
+/// The statistics command's core: one walk of the log into the aggregator.
+pub fn stats_of(path: &Path, reporter: &mut ProgressReporter) -> Result<CanLogStats, String> {
+    let mut agg = Aggregator::new();
+    let (start, format) = walk_source(path, &mut agg, reporter)?;
+    Ok(agg.finish(format, start))
 }
 
-/// Releases a raw-log document's frames when its tab closes.
-#[tauri::command]
-pub fn can_log_close(state: tauri::State<'_, CanLogState>, doc_id: u32) -> Result<(), String> {
-    state.docs.lock().unwrap().remove(&doc_id);
-    Ok(())
+/// The interval analysis command's core.
+pub fn intervals_of(
+    path: &Path,
+    channel: u16,
+    id: u32,
+    extended: bool,
+    reporter: &mut ProgressReporter,
+) -> Result<CanIntervals, String> {
+    let mut collector = IntervalCollector {
+        channel,
+        id,
+        times: Vec::new(),
+        extended,
+        fd: false,
+        overflow: 0,
+    };
+    walk_source(path, &mut collector, reporter)?;
+    Ok(analyse_intervals(
+        std::mem::take(&mut collector.times),
+        channel,
+        id,
+        collector.extended,
+        collector.fd,
+        collector.overflow,
+    ))
+}
+
+/// The conversion command's core: either format to either format, preserving the
+/// source's measurement start, refusing to convert a log onto itself before any file
+/// is created.
+pub fn convert_log(
+    from_path: &Path,
+    to: &Path,
+    format: &str,
+    reporter: &mut ProgressReporter,
+) -> Result<u64, String> {
+    let is_blf = File::open(from_path)
+        .and_then(|mut f| {
+            let mut sig = [0u8; 4];
+            f.read_exact(&mut sig)?;
+            Ok(sig)
+        })
+        .map(|sig| sig == *b"LOGG")
+        .map_err(|e| e.to_string())?;
+    if !is_blf
+        && from_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref()
+            == Some("blf")
+    {
+        return Err("not a BLF file (missing LOGG signature)".to_string());
+    }
+    let start_epoch = if is_blf {
+        blf_start_epoch(from_path).unwrap_or(0.0)
+    } else {
+        asc_start_epoch(from_path).unwrap_or(0.0)
+    };
+    let from_canonical = std::fs::canonicalize(from_path).map_err(|e| e.to_string())?;
+    if std::fs::canonicalize(to).is_ok_and(|to| to == from_canonical) {
+        return Err("the target is the source file itself — pick a different name".to_string());
+    }
+    let out = File::create(to).map_err(|e| e.to_string())?;
+    let mut out = BufWriter::with_capacity(1 << 20, out);
+    let mut converter = if format.eq_ignore_ascii_case("blf") {
+        Converter {
+            writer: WriterTarget::Blf(BlfWriter::new(&mut out, start_epoch)),
+        }
+    } else {
+        Converter {
+            writer: WriterTarget::Asc(AscWriter::new(&mut out, start_epoch)),
+        }
+    };
+    walk_source(from_path, &mut converter, reporter)?;
+    let frames = converter.finish().map_err(|e| e.to_string())?;
+    out.flush().map_err(|e| e.to_string())?;
+    Ok(frames)
+}
+
+/// The open command's walk: fills the raw-view document, flips `done`, records any
+/// failure — the walk itself owns no state beyond the document.
+pub fn open_into_doc(path: &Path, doc: &Arc<CanLogDoc>) {
+    let mut sink = VecSink {
+        doc: Arc::clone(doc),
+        staging: Vec::with_capacity(RAW_SINK_BATCH),
+    };
+    let mut reporter = ProgressReporter::into_doc(doc.total_bytes, Arc::clone(doc));
+    let result = walk_source(path, &mut sink, &mut reporter);
+    // The last staged batch lands before `done` flips, so the final poll's count is
+    // the whole walk's.
+    sink.flush();
+    if let Err(e) = result {
+        *doc.error.lock().unwrap() = Some(e);
+    }
+    doc.done.store(true, Ordering::Release);
+}
+
+/// The count command's core: the raw view's poll snapshot.
+pub fn count_of(doc: &Arc<CanLogDoc>, filter: Option<&CanFrameFilter>) -> CanLogCount {
+    let error = doc.error.lock().unwrap().clone();
+    let parsed = doc.parsed.load(Ordering::Relaxed) as u64;
+    let mut frames = doc.frames.lock().unwrap();
+    // An unfiltered poll touches no index — the whole point of `Option`.
+    let matched = match filter {
+        Some(spec) => {
+            frames.refresh_filter(spec);
+            frames.filter.as_ref().map_or(0, |f| f.matches.len()) as u64
+        }
+        None => parsed,
+    };
+    let channels = frames.channels.clone();
+    drop(frames);
+    CanLogCount {
+        parsed,
+        matched,
+        done: doc.done.load(Ordering::Acquire),
+        error,
+        bytes: doc.bytes.load(Ordering::Relaxed),
+        total_bytes: doc.total_bytes,
+        channels,
+    }
+}
+
+/// The find command's core.
+pub fn find_of(
+    doc: &Arc<CanLogDoc>,
+    query: &str,
+    filter: Option<&CanFrameFilter>,
+) -> Result<CanFindResult, String> {
+    let needle = parse_can_query(query)?;
+    let mut frames = doc.frames.lock().unwrap();
+    Ok(match filter {
+        None => find_positions(
+            &frames,
+            (0..frames.len()).map(|index| (index, index as u32)),
+            &needle,
+        ),
+        Some(spec) => {
+            frames.refresh_filter(spec);
+            let filter = frames.filter.as_ref().unwrap();
+            find_positions(
+                &frames,
+                filter
+                    .matches
+                    .iter()
+                    .enumerate()
+                    .map(|(position, &frame)| (frame as usize, position as u32)),
+                &needle,
+            )
+        }
+    })
+}
+
+/// The frames command's core: the raw view's window.
+pub fn frames_of(
+    doc: &Arc<CanLogDoc>,
+    start: usize,
+    end: usize,
+    filter: Option<&CanFrameFilter>,
+) -> Vec<CanFrameLine> {
+    let mut frames = doc.frames.lock().unwrap();
+    match filter {
+        None => {
+            let end = end.min(frames.len());
+            (start.min(end)..end).map(|i| frames.line(i)).collect()
+        }
+        Some(spec) => frames.filtered_window(spec, start, end),
+    }
 }
 
 /* ---------- Tests ---------- */
+
 
 #[cfg(test)]
 mod tests {
@@ -4363,11 +4272,10 @@ base hex timestamps relative
         let counter = Arc::clone(&hits);
         // The channel's receive side is untyped (InvokeResponseBody); CanProgress is only
         // what our reporter sends over it.
-        let channel: tauri::ipc::Channel<CanProgress> = tauri::ipc::Channel::new(move |_| {
-            counter.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        });
-        let mut reporter = ProgressReporter::new(channel, total_bytes_of(&path));
+        let mut reporter =
+            ProgressReporter::reporting(total_bytes_of(&path), move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            });
         let mut agg = Aggregator::new();
         walk_source(&path, &mut agg, &mut reporter).unwrap();
         assert!(hits.load(Ordering::SeqCst) >= 1);
@@ -4474,7 +4382,7 @@ base hex timestamps relative
             frames: 0,
             other: 0,
         };
-        let mut reporter = ProgressReporter::new(tauri::ipc::Channel::new(|_| Ok(())), total);
+        let mut reporter = ProgressReporter::reporting(total, |_| ());
         let started = std::time::Instant::now();
         walk_source(std::path::Path::new(&path), &mut sink, &mut reporter).unwrap();
         let elapsed = started.elapsed();
@@ -4896,13 +4804,7 @@ base hex timestamps relative
         )
         .unwrap();
         let original = std::fs::read(&path).unwrap();
-        let quiet = || tauri::ipc::Channel::new(|_| Ok(()));
-        let result = tauri::async_runtime::block_on(convert_can_log(
-            path.to_string_lossy().into_owned(),
-            path.to_string_lossy().into_owned(),
-            "blf".to_string(),
-            quiet(),
-        ));
+        let result = convert_log(&path, &path, "blf", &mut ProgressReporter::reporting(0, |_| ()));
         assert!(
             result.is_err(),
             "converting a log onto itself must fail, not truncate it"
@@ -4914,12 +4816,12 @@ base hex timestamps relative
         );
         // A different target in the same folder still converts.
         let target = dir.path().join("log.blf");
-        let frames = tauri::async_runtime::block_on(convert_can_log(
-            path.to_string_lossy().into_owned(),
-            target.to_string_lossy().into_owned(),
-            "blf".to_string(),
-            quiet(),
-        ))
+        let frames = convert_log(
+            &path,
+            &target,
+            "blf",
+            &mut ProgressReporter::reporting(0, |_| ()),
+        )
         .unwrap();
         assert_eq!(frames, 1);
         assert_eq!(&std::fs::read(&target).unwrap()[..4], b"LOGG");

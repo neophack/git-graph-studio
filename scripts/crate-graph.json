@@ -1,5 +1,5 @@
 {
-	"$comment": "The crate dependency whitelist of docs/architecture-restructure-plan.md §4.3. `layers` fixes the L0/L1/sidecar/app numbering (a dependency's layer must be below the dependent's; same-layer edges must be listed in `allowed`). `allowed` is every internal dependency a workspace member may carry — a new edge means editing this file and saying why in the PR. `appOnly` deps may appear in no member's manifest but git-graph-studio's. Members not created yet (P2 adds them one PR at a time) are simply not checked until they exist.",
+	"$comment": "The crate dependency whitelist of docs/architecture-restructure-plan.md \u00a74.3. `layers` fixes the L0/L1/sidecar/app numbering (a dependency's layer must be below the dependent's; same-layer edges must be listed in `allowed`). `allowed` is every internal dependency a workspace member may carry \u2014 a new edge means editing this file and saying why in the PR. `appOnly` deps may appear in no member's manifest but git-graph-studio's. Members not created yet (P2 adds them one PR at a time) are simply not checked until they exist.",
 	"layers": {
 		"ggs-base": 0,
 		"ggs-proto": 0,
@@ -26,20 +26,65 @@
 		"ggs-proto": [],
 		"ggs-remote-proto": [],
 		"ggs-codec": [],
-		"ggs-git": ["ggs-base"],
-		"ggs-shellenv": ["ggs-base", "ggs-git"],
-		"ggs-text": ["ggs-base"],
-		"ggs-fs": ["ggs-base", "ggs-text"],
-		"ggs-can": ["ggs-base"],
-		"ggs-index": ["ggs-base", "ggs-fs", "ggs-text"],
-		"ggs-analysis": ["ggs-base", "ggs-fs", "ggs-index"],
-		"ggs-mcp": ["ggs-base", "ggs-fs", "ggs-index", "ggs-analysis"],
-		"ggs-ext": ["ggs-base", "ggs-proto", "ggs-git"],
-		"ggs-providers": ["ggs-base", "ggs-shellenv"],
-		"ggs-testkit": ["ggs-base", "ggs-git"],
-		"ggs-bash": ["ggs-codec", "ggs-git"],
-		"ggs-node": ["ggs-proto", "ggs-codec"],
-		"ggs-config": ["ggs-base", "ggs-codec", "ggs-remote-proto"],
+		"ggs-git": [
+			"ggs-base"
+		],
+		"ggs-shellenv": [
+			"ggs-base",
+			"ggs-git"
+		],
+		"ggs-text": [
+			"ggs-base"
+		],
+		"ggs-fs": [
+			"ggs-base",
+			"ggs-text"
+		],
+		"ggs-can": [
+			"ggs-base"
+		],
+		"ggs-index": [
+			"ggs-base",
+			"ggs-fs",
+			"ggs-text"
+		],
+		"ggs-analysis": [
+			"ggs-base",
+			"ggs-fs",
+			"ggs-index"
+		],
+		"ggs-mcp": [
+			"ggs-base",
+			"ggs-fs",
+			"ggs-index",
+			"ggs-analysis"
+		],
+		"ggs-ext": [
+			"ggs-base",
+			"ggs-proto",
+			"ggs-git"
+		],
+		"ggs-providers": [
+			"ggs-base",
+			"ggs-shellenv"
+		],
+		"ggs-testkit": [
+			"ggs-base",
+			"ggs-git"
+		],
+		"ggs-bash": [
+			"ggs-codec",
+			"ggs-git"
+		],
+		"ggs-node": [
+			"ggs-proto",
+			"ggs-codec"
+		],
+		"ggs-config": [
+			"ggs-base",
+			"ggs-codec",
+			"ggs-remote-proto"
+		],
 		"git-graph-studio": [
 			"ggs-base",
 			"ggs-proto",
@@ -55,7 +100,8 @@
 			"ggs-mcp",
 			"ggs-ext",
 			"ggs-providers",
-			"ggs-config"
+			"ggs-config",
+			"ggs-testkit"
 		]
 	},
 	"appOnly": [

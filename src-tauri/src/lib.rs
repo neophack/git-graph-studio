@@ -27,7 +27,7 @@ pub mod analysis;
 #[cfg(feature = "desktop")]
 pub mod events;
 #[cfg(feature = "desktop")]
-pub mod can_log;
+pub mod can_commands;
 #[cfg(feature = "desktop")]
 pub mod cmd_analysis;
 /// The app-instance domain: "New Window" spawns another GGS — the multi-open entry every
@@ -94,7 +94,7 @@ pub use desktop::{ensure_main_window, run, AppState};
 #[cfg(feature = "desktop")]
 mod desktop {
     use crate::{
-        can_log, cmd_analysis, cmd_app, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_providers,
+        can_commands, cmd_analysis, cmd_app, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_providers,
         cmd_scm, cmd_search, cmd_symbols, ext_child, ext_gallery, ext_process, mcp, measure,
         pty, remote_host, viewer, watcher,
     };
@@ -1508,7 +1508,7 @@ mod desktop {
             .manage(Mutex::new(pty::PtyState::default()))
             .manage(viewer::ViewerState::default())
             .manage(viewer::indexed::IndexedState::default())
-            .manage(can_log::CanLogState::default())
+            .manage(ggs_can::CanLogState::default())
             // A clone of the process-wide handle (`ext_process::global()`), not a second,
             // independent `ProcessHostState`: `plugin_host.rs` reaches the same running
             // backends through `global()` directly, with no `AppHandle` to fetch Tauri-managed
@@ -1712,14 +1712,14 @@ mod desktop {
                 cmd_fs::backup_clear,
                 cmd_fs::backup_list,
                 cmd_fs::backup_read,
-                can_log::can_log_stats,
-                can_log::can_intervals,
-                can_log::convert_can_log,
-                can_log::can_log_open,
-                can_log::can_log_frames,
-                can_log::can_log_count,
-                can_log::can_log_find,
-                can_log::can_log_close,
+                can_commands::can_log_stats,
+                can_commands::can_intervals,
+                can_commands::convert_can_log,
+                can_commands::can_log_open,
+                can_commands::can_log_frames,
+                can_commands::can_log_count,
+                can_commands::can_log_find,
+                can_commands::can_log_close,
                 cmd_fs::repo_submodules,
                 cmd_fs::remote_paths_policy,
                 cmd_fs::remote_ext_roots,

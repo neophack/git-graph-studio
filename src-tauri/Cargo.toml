@@ -101,6 +101,7 @@ ggs-git = { path = "crates/ggs-git" }
 ggs-shellenv = { path = "crates/ggs-shellenv" }
 ggs-remote-proto = { path = "crates/ggs-remote-proto" }
 ggs-config = { path = "crates/ggs-config" }
+ggs-can = { path = "crates/ggs-can" }
 ggs-testkit = { path = "crates/ggs-testkit" }
 
 # The pretend Node runtime's parser, carrying one upstream gap fix: Boa's class-expression
@@ -211,6 +212,8 @@ ggs-shellenv = { workspace = true }
 ggs-remote-proto = { workspace = true }
 # The one-command Remote Access setup CLI (the `ggs config` dispatch reaches it).
 ggs-config = { workspace = true }
+# The CAN Trace Analyzer engine (module 13).
+ggs-can = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rpassword = { workspace = true }

@@ -1,0 +1,20 @@
+[package]
+name = "ggs-can"
+version = "0.0.0"
+description = "The CAN Trace Analyzer's engine — .blf/.asc parsing, statistics, interval analysis, conversion and the raw-view document"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ggs-base.workspace = true
+serde.workspace = true
+# BLF log containers are zlib-compressed.
+flate2 = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true
