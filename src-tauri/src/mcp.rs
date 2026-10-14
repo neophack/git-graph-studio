@@ -35,7 +35,7 @@ use crate::analysis::modules::{module_graph, module_of, FileDep, ModuleEdge, Mod
 use crate::analysis::security::{scan_file, Finding, Severity};
 use crate::analysis::{deadcode, AnalysisData, Direction};
 use crate::cmd_analysis::AnalysisIndex;
-use crate::cmd_fs::walk_files;
+use ggs_fs::walk_files;
 use crate::cmd_search::{search_literal, WorkspaceSymbol};
 use crate::cmd_symbols::{scan_references, SymbolIndex};
 

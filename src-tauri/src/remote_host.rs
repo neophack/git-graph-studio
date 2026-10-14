@@ -18,7 +18,7 @@ use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
-use crate::cmd_fs::zip_tree;
+use ggs_fs::zip_tree;
 
 /// The hidden Relay webview's label (its capability file is `capabilities/remote-relay.json`).
 pub const RELAY_LABEL: &str = "remote-relay";

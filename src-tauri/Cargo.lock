@@ -1998,6 +1998,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ggs-fs"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "ggs-base",
+ "ggs-text",
+ "ignore",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "trash",
+ "zip",
+]
+
+[[package]]
 name = "ggs-git"
 version = "0.0.0"
 dependencies = [
@@ -2140,6 +2156,7 @@ dependencies = [
  "ggs-can",
  "ggs-codec",
  "ggs-config",
+ "ggs-fs",
  "ggs-git",
  "ggs-proto",
  "ggs-remote-proto",

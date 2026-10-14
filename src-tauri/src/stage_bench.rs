@@ -7,7 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::cmd_fs::{cached_file_list, walk_files, FileListCache};
+use ggs_fs::{cached_file_list, walk_files, FileListCache};
 use ggs_git::runner::Git;
 
 fn ms(started: Instant) -> f64 {

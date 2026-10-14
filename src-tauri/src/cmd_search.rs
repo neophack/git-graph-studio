@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::cmd_fs::cached_file_list;
-use crate::cmd_fs::walk_files;
+use ggs_fs::cached_file_list;
+use ggs_fs::walk_files;
 use crate::AppState;
 use rayon::prelude::*;
 use tauri::ipc::Channel;

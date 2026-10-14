@@ -103,6 +103,7 @@ ggs-remote-proto = { path = "crates/ggs-remote-proto" }
 ggs-config = { path = "crates/ggs-config" }
 ggs-can = { path = "crates/ggs-can" }
 ggs-text = { path = "crates/ggs-text" }
+ggs-fs = { path = "crates/ggs-fs" }
 ggs-testkit = { path = "crates/ggs-testkit" }
 
 # The pretend Node runtime's parser, carrying one upstream gap fix: Boa's class-expression
@@ -217,6 +218,8 @@ ggs-config = { workspace = true }
 ggs-can = { workspace = true }
 # The text engine: encodings, rope viewer, find/replace, probe, backups (modules 6/7).
 ggs-text = { workspace = true }
+# The workspace file services (module 3's backend).
+ggs-fs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rpassword = { workspace = true }

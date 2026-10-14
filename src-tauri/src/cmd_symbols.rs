@@ -469,7 +469,7 @@ pub(crate) fn scan_references(
                 (relative, path)
             })
             .collect(),
-        None => crate::cmd_fs::walk_files(root)
+        None => ggs_fs::walk_files(root)
             .into_iter()
             .filter(|file| crate::cmd_search::is_symbol_source(file))
             .map(|relative| {

@@ -8,7 +8,7 @@
 use serde::Serialize;
 use std::time::Duration;
 
-use crate::cmd_fs::{cached_file_list, walk_files};
+use ggs_fs::{cached_file_list, walk_files};
 use crate::AppState;
 use tauri::State;
 

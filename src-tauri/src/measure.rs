@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use serde_json::json;
 
-use crate::{cmd_fs, cmd_search, scm_ops};
+use crate::{cmd_search, scm_ops};
 
 fn ms(started: Instant) -> f64 {
     (started.elapsed().as_secs_f64() * 1000.0 * 10.0).round() / 10.0
@@ -46,7 +46,7 @@ pub fn run(folder: &str) -> Result<String, String> {
     let root = root.unwrap_or(absolute);
 
     let started = Instant::now();
-    let files = cmd_fs::walk_files(&root);
+    let files = ggs_fs::walk_files(&root);
     let walk_ms = ms(started);
 
     let (scm_ms, scm_changes) = if is_repo {

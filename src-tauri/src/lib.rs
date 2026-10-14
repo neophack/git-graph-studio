@@ -113,7 +113,7 @@ mod desktop {
         pub startup_workspace: Mutex<Option<String>>,
         /// Quick Open's file list, cached so repeat opens skip the tree walk (cmd_fs). The Arc
         /// lets the open-folder prefetch thread fill it without borrowing the Tauri state.
-        pub file_list_cache: std::sync::Arc<cmd_fs::FileListCache>,
+        pub file_list_cache: std::sync::Arc<ggs_fs::FileListCache>,
         /// The workspace symbol index, cached per folder (cmd_search). Shared with the watcher
         /// thread, which drops it when a source file changes.
         pub symbol_cache: Arc<cmd_search::SymbolCache>,
@@ -121,7 +121,7 @@ mod desktop {
         pub search: Arc<cmd_search::SearchState>,
         /// The running file transfer's generation, for cancellation (cmd_fs's fs_import /
         /// fs_export — the progress toast's Cancel action).
-        pub transfer: Arc<cmd_fs::TransferState>,
+        pub transfer: Arc<ggs_fs::TransferState>,
         /// The persistent workspace symbol index (cmd_symbols / symbols): one database per
         /// open root, resumed from `~/.ggs/index/` on open and updated by the watcher.
         pub symbol_index: Arc<cmd_symbols::SymbolIndex>,
@@ -210,10 +210,10 @@ mod desktop {
                 single_file: Mutex::new(None),
                 startup_actions: Mutex::new(Vec::new()),
                 startup_workspace: Mutex::new(None),
-                file_list_cache: Arc::new(cmd_fs::FileListCache::default()),
+                file_list_cache: Arc::new(ggs_fs::FileListCache::default()),
                 symbol_cache: Arc::new(cmd_search::SymbolCache::default()),
                 search: Arc::new(cmd_search::SearchState::default()),
-                transfer: Arc::new(cmd_fs::TransferState::default()),
+                transfer: Arc::new(ggs_fs::TransferState::default()),
                 symbol_index: Arc::new(cmd_symbols::SymbolIndex::new()),
                 analysis_index: Arc::new(cmd_analysis::AnalysisIndex::new()),
                 watcher: Mutex::new(Vec::new()),
@@ -317,7 +317,7 @@ mod desktop {
         let prefetch_root = root.clone();
         let cache = state.file_list_cache.clone();
         std::thread::spawn(move || {
-            let files = cmd_fs::walk_files(&prefetch_root);
+            let files = ggs_fs::walk_files(&prefetch_root);
             cache.store(&prefetch_root, files);
         });
         // The heavy background services (the symbol/analysis index builds and the file
@@ -335,7 +335,7 @@ mod desktop {
 
     fn start_watcher(
         app: &tauri::AppHandle,
-        file_list: &std::sync::Arc<cmd_fs::FileListCache>,
+        file_list: &std::sync::Arc<ggs_fs::FileListCache>,
         symbols: &std::sync::Arc<cmd_search::SymbolCache>,
         index: &std::sync::Arc<cmd_symbols::SymbolIndex>,
         analysis: &std::sync::Arc<cmd_analysis::AnalysisIndex>,
@@ -619,7 +619,7 @@ mod desktop {
             let prefetch_root = root.root.clone();
             let cache = state.file_list_cache.clone();
             std::thread::spawn(move || {
-                let files = cmd_fs::walk_files(&prefetch_root);
+                let files = ggs_fs::walk_files(&prefetch_root);
                 cache.store(&prefetch_root, files);
             });
         }

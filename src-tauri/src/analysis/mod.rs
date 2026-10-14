@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use rayon::prelude::*;
 
-use crate::cmd_fs::walk_files;
+use ggs_fs::walk_files;
 use crate::cmd_search::is_symbol_source;
 use crate::symbols::parse::{self, CallSite, ParsedFile, ParsedSymbol};
 

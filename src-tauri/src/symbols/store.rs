@@ -18,7 +18,7 @@ use std::time::UNIX_EPOCH;
 
 use rayon::prelude::*;
 
-use crate::cmd_fs::walk_files;
+use ggs_fs::walk_files;
 use crate::cmd_search::{is_symbol_source, WorkspaceSymbol};
 
 /// The symbol kinds the parser layer produces, as ids on disk. The order is the format:
