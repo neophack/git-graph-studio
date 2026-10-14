@@ -8,12 +8,10 @@
 //! vscode-git-graph-rs submodule), and the extension store
 //! serves the VSIX extensions installed from the Extensions view.
 
-//! The crate is a library plus the binaries `Cargo.toml` declares: `git-graph-studio` (the
-//! Tauri app, the `desktop` feature) and `ggs-node` (the `node-runtime` feature, the
-//! pretend Node runtime that hosts a package's JS entry — and, over its N-API host, the
-//! package's `.node` addon). The modules that need no window — the wire protocols and the
-//! git runner `git` — are always compiled; everything that needs a window is behind
-//! `desktop`.
+//! The crate is a library plus the binary `Cargo.toml` declares: `git-graph-studio` (the
+//! Tauri app). The sidecars (`ggs-node`, `ggs-bash`, `ggs-config`) are their own crates
+//! since the restructure's P2; nothing here is feature-gated any more — the app crate
+//! always carries tauri.
 
 // The app's own test-only helper (the isolated extension store); the scratch-repo kit
 // lives in the ggs-testkit dev-dependency (crates/ggs-testkit).
@@ -24,518 +22,55 @@ mod test_isolated_store;
 
 /// The app's adapters over ggs-base's EventSink / BatchSink — the only place a domain
 /// push crosses into tauri (docs/architecture-restructure-plan.md §4.7, P3-1).
-#[cfg(feature = "desktop")]
 pub mod events;
-#[cfg(feature = "desktop")]
 pub mod can_commands;
-#[cfg(feature = "desktop")]
 pub mod viewer_commands;
-#[cfg(feature = "desktop")]
 pub mod cmd_analysis;
 /// The app-instance domain: "New Window" spawns another GGS — the multi-open entry every
 /// platform shares (macOS needs it most: activating a bundled app's icon only focuses the
 /// running instance, so the new one goes through `open -n`).
-#[cfg(feature = "desktop")]
 pub mod cmd_app;
-#[cfg(feature = "desktop")]
 pub mod cmd_assoc;
-#[cfg(feature = "desktop")]
 pub mod cmd_ext;
-#[cfg(feature = "desktop")]
 pub mod cmd_fs;
-#[cfg(feature = "desktop")]
 pub mod cmd_fuzzy;
-#[cfg(feature = "desktop")]
 pub mod cmd_providers;
-#[cfg(feature = "desktop")]
 pub mod cmd_scm;
-#[cfg(feature = "desktop")]
 pub mod cmd_search;
-#[cfg(feature = "desktop")]
 pub mod cmd_symbols;
 /// The frame host's child processes (`nodeShims.ts` maps them onto the Node API): one real
 /// process surface a sandboxed frame cannot have on its own.
-#[cfg(feature = "desktop")]
 pub mod ext_child;
-#[cfg(feature = "desktop")]
 pub mod ext_gallery;
-#[cfg(feature = "desktop")]
 pub mod ext_process;
 /// Which frontend answers a backend's host request, and the registration journal a late
 /// frontend replays (docs/ggs-remote-plan.md §8.6 #1).
-#[cfg(feature = "desktop")]
-#[cfg(feature = "desktop")]
 pub mod mcp;
-#[cfg(feature = "desktop")]
 pub mod measure;
-#[cfg(feature = "desktop")]
 pub mod pty;
 /// Remote Access (module 19): this instance's registration with a local `ggs-remote/1`
 /// daemon, the remote workbench's assets and the hidden Relay webview.
-#[cfg(feature = "desktop")]
 pub mod remote_host;
-#[cfg(all(test, feature = "desktop"))]
+#[cfg(test)]
 mod stage_bench;
-#[cfg(feature = "desktop")]
 pub mod watcher;
 
-#[cfg(feature = "desktop")]
 pub use desktop::{ensure_main_window, run};
 pub mod state;
+pub mod boot;
+pub mod cli;
+pub mod window;
 
-#[cfg(feature = "desktop")]
 mod desktop {
     use crate::{
         can_commands, viewer_commands, cmd_analysis, cmd_app, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_providers,
         cmd_scm, cmd_search, cmd_symbols, ext_child, ext_gallery, ext_process, mcp, measure,
-        pty, remote_host, watcher,
+        pty, remote_host,
     };
-    use ggs_base::workspace::{find_repo_root, WorkspaceRoots};
-    #[cfg(test)]
-    use ggs_base::workspace::is_repo_below;
-    #[cfg(test)]
-    use crate::state::StateSet;
-    use crate::state::{FolderSwitch, LaunchState, StartupAction};
-    use std::sync::{Arc, Mutex};
-
-    /// What `open_folder` answers: the folder actually opened, and whether it is (or sits
-    /// inside) a Git repository — the shell's "Initialize Repository" affordances key on the
-    /// latter.
-    #[derive(serde::Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct OpenedFolder {
-        root: String,
-        is_repo: bool,
-    }
-
-    /// Open a folder. A git repository resolves to its root (the graph, the SCM view and the
-    /// terminal all key off it); any other folder still opens — the explorer and the editor work
-    /// without git, and the git-backed views offer to initialise a repository instead.
-    #[tauri::command]
-    async fn open_folder(app: tauri::AppHandle, path: String) -> Result<OpenedFolder, String> {
-        open_folder_impl(&FolderSwitch::from_app(&app), &path).await
-    }
-
-    async fn open_folder_impl(folders: &FolderSwitch<'_>, path: &str) -> Result<OpenedFolder, String> {
-        if !std::path::Path::new(path).is_dir() {
-            return Err(format!("{path} is not a folder"));
-        }
-        // The repository root is found on the file system here (the nearest ancestor holding a
-        // `.git`), not asked of the engine: opening a folder must never wait for the engine's
-        // warm-up, which may still be running on a fresh launch.
-        let found_root = find_repo_root(path);
-        let root = found_root.clone().unwrap_or_else(|| path.to_owned());
-        let opened = OpenedFolder {
-            is_repo: found_root.is_some(),
-            root: root.clone(),
-        };
-        // Reopening the repository that is already open (the launch argument being re-opened by
-        // the frontend's boot) keeps the engine's warm handle and the backend's caches: closing
-        // them here would throw away exactly the work the boot-time warm-up did.
-        let already_open = folders.roots.first_is(&root);
-        folders.reset();
-        folders.roots.set(vec![root.clone()]);
-        if !already_open {
-            ext_process::host().notify_workspace(std::slice::from_ref(&root));
-            cmd_providers::apply_claude_integration(std::slice::from_ref(&root));
-            remote_host::notify_folders(std::slice::from_ref(&root));
-        }
-        // Warm Quick Open's file list in the background: by the time the user hits Ctrl+P the
-        // walk has usually finished and the picker opens on a cache hit. This walk is the one
-        // background service that stays on the open path - it is cheap, and Quick Open's first
-        // keystroke can come at any moment.
-        let prefetch_root = root.clone();
-        let cache = folders.file_list_cache.clone();
-        std::thread::spawn(move || {
-            let files = ggs_fs::walk_files(&prefetch_root);
-            cache.store(&prefetch_root, files);
-        });
-        // The heavy background services (the symbol/analysis index builds and the file
-        // watcher) record themselves here but start only with `post_first_paint`, once the
-        // shell has painted its first frame with this folder: the index resume and the
-        // watcher's recursive scan used to share the CPU with that frame and the graph
-        // view's boot. They are not needed for the frame itself - Go-to-Definition, the
-        // analysis pages and external-change refreshes pick them up whenever they land.
-        folders.deferred.record(vec![root.clone()]);
-        Ok(opened)
-    }
-
-    /// The event the frontend listens to for external file changes; its payload is a `FsChange`.
-    const FS_CHANGED_EVENT: &str = "studio://fs-changed";
-
-    fn start_watcher(
-        app: &tauri::AppHandle,
-        file_list: &std::sync::Arc<ggs_fs::FileListCache>,
-        symbols: &std::sync::Arc<ggs_index::symbols::cache::SymbolCache>,
-        index: &std::sync::Arc<ggs_index::symbols::index::SymbolIndex>,
-        analysis: &std::sync::Arc<ggs_analysis::index::AnalysisIndex>,
-        root: &str,
-    ) -> Result<watcher::FolderWatcher, String> {
-        use tauri::Emitter;
-        let app = app.clone();
-        let file_list = file_list.clone();
-        let symbols = symbols.clone();
-        let index = std::sync::Arc::clone(index);
-        let analysis = std::sync::Arc::clone(analysis);
-        let watch_root = root.to_owned();
-        watcher::FolderWatcher::new(root, move |change| {
-            // The caches are stale the moment anything changed; the next Quick Open / search /
-            // Go to Definition re-walks. The webview decides what to refresh from the batch.
-            file_list.invalidate();
-            if change.paths.iter().any(|p| ggs_index::scan::is_symbol_source(p)) || change.truncated {
-                symbols.invalidate();
-            }
-            // The persistent index and the Code Analysis update file by file (a truncated
-            // batch only drops the legacy cache above; the next open's resume repairs the
-            // index in full).
-            if !change.truncated {
-                let sink = std::sync::Arc::new(crate::events::TauriEvents(app.clone()));
-                index.apply_changes(Some(sink.clone()), &watch_root, change.paths.clone());
-                analysis.apply_changes(Some(sink), &watch_root, change.paths.clone());
-            }
-            let _ = app.emit(FS_CHANGED_EVENT, change);
-        })
-    }
-
-    #[cfg(test)]
-    mod open_folder_impl_tests {
-    use crate::test_git_helpers::ScratchGit;
-        use super::*;
-
-        /// Opening a subfolder of a repository resolves to the repository root - both in the
-        /// answer the frontend applies and in the root `post_first_paint` will later start
-        /// services for (a service started against the subfolder would watch the wrong tree).
-        #[test]
-        fn opening_a_repo_subfolder_resolves_and_records_the_repo_root() {
-            let scratch = ggs_testkit::Scratch::new("open-folder-subdir");
-            let git = scratch.repo("repo");
-            let sub = git.repo.join("src");
-            std::fs::create_dir_all(&sub).unwrap();
-            let state = StateSet::default();
-            let opened = tauri::async_runtime::block_on(open_folder_impl(
-                &state.switch(),
-                &sub.display().to_string(),
-            ))
-            .unwrap();
-            let root = git.repo.display().to_string();
-            assert!(opened.is_repo);
-            assert_eq!(opened.root, root);
-            assert_eq!(state.roots.list(), vec![root.clone()]);
-            // The subfolder never reaches DeferredServices: the resolved root does, so
-            // `post_first_paint` starts the watcher and the index builds on the right tree.
-            assert_eq!(state.deferred.take(), vec![root]);
-        }
-
-        /// A folder with no `.git` ancestor opens in place - no root resolution, still recorded
-        /// for its background services (Quick Open and the symbol index work without git).
-        #[test]
-        fn opening_a_plain_folder_reports_no_repository_and_still_defers_its_services() {
-            let scratch = ggs_testkit::Scratch::new("open-folder-plain");
-            let plain = scratch.path("plain");
-            std::fs::create_dir_all(&plain).unwrap();
-            let state = StateSet::default();
-            let opened = tauri::async_runtime::block_on(open_folder_impl(
-                &state.switch(),
-                &plain.display().to_string(),
-            ))
-            .unwrap();
-            assert!(!opened.is_repo);
-            assert_eq!(opened.root, plain.display().to_string());
-            assert_eq!(
-                state.deferred.take(),
-                vec![plain.display().to_string()]
-            );
-        }
-
-        /// A path that is not a folder at all (missing, or a file) is refused before anything in
-        /// the app's state changes - a failed open must not clear the folder that is still open.
-        #[test]
-        fn opening_a_path_that_is_not_a_folder_leaves_the_open_state_untouched() {
-            let scratch = ggs_testkit::Scratch::new("open-folder-missing");
-            let state = StateSet::default();
-            state.roots.set(vec!["C:\\already\\open".to_owned()]);
-            state
-                .deferred
-                .record(vec!["C:\\already\\open".to_owned()]);
-            let missing = scratch.path("does-not-exist");
-            let result = tauri::async_runtime::block_on(open_folder_impl(
-                &state.switch(),
-                &missing.display().to_string(),
-            ));
-            assert!(result.is_err());
-            assert_eq!(
-                state.roots.list(),
-                vec!["C:\\already\\open".to_owned()]
-            );
-            assert_eq!(
-                state.deferred.take(),
-                vec!["C:\\already\\open".to_owned()]
-            );
-        }
-
-        /// A rapid reopen of a different folder replaces the previous one - both in `repos` and
-        /// in the pending deferred-services record, so a superseded folder's watcher and index
-        /// build never start against a root the app has already moved on from.
-        #[test]
-        fn reopening_a_different_folder_replaces_the_previous_one_everywhere() {
-            let scratch = ggs_testkit::Scratch::new("open-folder-reopen");
-            let first = scratch.repo("first");
-            let second = scratch.repo("second");
-            let state = StateSet::default();
-            tauri::async_runtime::block_on(open_folder_impl(
-                &state.switch(),
-                &first.repo.display().to_string(),
-            ))
-            .unwrap();
-            tauri::async_runtime::block_on(open_folder_impl(
-                &state.switch(),
-                &second.repo.display().to_string(),
-            ))
-            .unwrap();
-            let second_root = second.repo.display().to_string();
-            assert_eq!(state.roots.list(), vec![second_root.clone()]);
-            assert_eq!(state.deferred.take(), vec![second_root]);
-        }
-    }
-
-    /// One open root's background services: the symbol index build, the analysis index build
-    /// and the file watcher, all off the calling thread. Shared by `post_first_paint` so the
-    /// folder and workspace open paths start identical services.
-    fn start_root_services(app: &tauri::AppHandle, root: &str) {
-        use tauri::Manager;
-        let symbol_index = app
-            .state::<std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>()
-            .inner()
-            .clone();
-        let analysis_index = app
-            .state::<std::sync::Arc<ggs_analysis::index::AnalysisIndex>>()
-            .inner()
-            .clone();
-        // The symbol database resumes from ~/.ggs/index/ and repairs against the disk
-        // (ggs-index); Go-to-Definition and Find References pick it up when it lands,
-        // falling back to the in-memory index until then.
-        {
-            let index_root = root.to_owned();
-            let sink = Arc::new(crate::events::TauriEvents(app.clone()));
-            symbol_index.start_build(Some(sink), &index_root);
-        }
-        // The Code Analysis index builds the same way, behind the symbol index (its parse
-        // is the heavier half; the analysis pages pick it up when it lands).
-        {
-            let analysis_root = root.to_owned();
-            let sink = Arc::new(crate::events::TauriEvents(app.clone()));
-            analysis_index.start_build(Some(sink), &analysis_root);
-        }
-        // External changes reach the webview through the watcher; a refused watch (an exotic
-        // filesystem, too many watches) just means the command-driven refreshes carry on alone.
-        let app = app.clone();
-        let file_list = app
-            .state::<std::sync::Arc<ggs_fs::FileListCache>>()
-            .inner()
-            .clone();
-        let symbols = app
-            .state::<std::sync::Arc<ggs_index::symbols::cache::SymbolCache>>()
-            .inner()
-            .clone();
-        let index = symbol_index;
-        let analysis = analysis_index;
-        let watch_root = root.to_owned();
-        std::thread::spawn(move || {
-            match start_watcher(&app, &file_list, &symbols, &index, &analysis, &watch_root) {
-                Ok(watch) => {
-                    // Only the watcher of a root that is still open survives a rapid reopen;
-                    // installing it drops the previous root's watchers (their handles close).
-                    let switch = FolderSwitch::from_app(&app);
-                    if switch.roots.list().contains(&watch_root) {
-                        switch.watchers.push(watch);
-                    }
-                }
-                Err(error) => eprintln!("[watcher] {error}"),
-            }
-        });
-    }
-
-    /// The shell's first frame with the newly opened folder has painted: start the background
-    /// services `open_folder` / `open_workspace` recorded, so their index resumes and watch
-    /// scans never shared the CPU with that frame and the graph view's boot. Idempotent - a
-    /// no-op when nothing waits (every folder open is followed by one call, later ones only
-    /// after a reopen, when a fresh set was recorded).
-    #[tauri::command]
-    fn post_first_paint(app: tauri::AppHandle) {
-        let roots = FolderSwitch::from_app(&app).deferred.take();
-        for root in roots {
-            start_root_services(&app, &root);
-        }
-    }
-
-    /// One root of an opened `.ggs-workspace`: the folder's path, and whether it sits inside
-    /// (or is) a git repository - the graph and the SCM view key off that per root.
-    #[derive(serde::Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct WorkspaceRoot {
-        root: String,
-        is_repo: bool,
-    }
-
-    /// The result of opening a workspace file: its roots in file order.
-    #[derive(serde::Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct OpenedWorkspace {
-        roots: Vec<WorkspaceRoot>,
-    }
-
-    /// A `.ggs-workspace` file, VS Code's `.code-workspace` shape: `{ "folders": [{ "path":
-    /// "./relative/or/absolute" }, ...] }` (extra keys ignored; JSON with comments allowed).
-    #[derive(serde::Deserialize)]
-    struct WorkspaceFile {
-        #[serde(default)]
-        folders: Vec<WorkspaceFolderEntry>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct WorkspaceFolderEntry {
-        path: String,
-    }
-
-    /// Strip // and /* */ comments (outside strings, so a URL inside one survives) so a
-    /// commented workspace file still parses.
-    /// Open a `.ggs-workspace` file (File > Open Workspace...): every `folders[].path` entry
-    /// becomes an open root - relative paths resolve against the file's own folder, missing
-    /// folders are skipped (VS Code's behaviour), and an empty result is an error. A root is
-    /// NOT collapsed to its repository root, matching VS Code: a workspace folder can be a
-    /// subfolder of one repository, or sit beside one.
-    #[tauri::command]
-    async fn open_workspace(
-        app: tauri::AppHandle,
-        path: String,
-    ) -> Result<OpenedWorkspace, String> {
-        let folders = FolderSwitch::from_app(&app);
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
-        let parsed: WorkspaceFile =
-            serde_json::from_str(&ggs_base::jsonc::strip(&text)).map_err(|e| format!("parse {path}: {e}"))?;
-        let base = std::path::Path::new(&path)
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_default();
-        let mut roots: Vec<WorkspaceRoot> = Vec::new();
-        for entry in &parsed.folders {
-            let raw = std::path::Path::new(&entry.path);
-            let folder = if raw.is_absolute() {
-                raw.to_path_buf()
-            } else {
-                base.join(raw)
-            };
-            if !folder.is_dir() {
-                continue; // skipped, as VS Code skips a missing workspace folder
-            }
-            let root = folder
-                .to_string_lossy()
-                .trim_start_matches(r"\\?\")
-                .to_owned();
-            if roots.iter().any(|existing| existing.root == root) {
-                continue;
-            }
-            roots.push(WorkspaceRoot {
-                is_repo: find_repo_root(&root).is_some(),
-                root,
-            });
-        }
-        if roots.is_empty() {
-            return Err(format!("{path} names no folder that exists"));
-        }
-
-        folders.reset();
-        let root_paths: Vec<String> = roots.iter().map(|root| root.root.clone()).collect();
-        folders.roots.set(root_paths.clone());
-        ext_process::host().notify_workspace(&[]);
-        cmd_providers::apply_claude_integration(&[]);
-        remote_host::notify_folders(&root_paths);
-
-        // The Quick Open prefetch stays on the open path (cheap, and the first Ctrl+P can come
-        // at any moment); the index builds and the watchers wait for the first painted frame,
-        // exactly as in `open_folder` - see `post_first_paint`.
-        for root in &roots {
-            let prefetch_root = root.root.clone();
-            let cache = folders.file_list_cache.clone();
-            std::thread::spawn(move || {
-                let files = ggs_fs::walk_files(&prefetch_root);
-                cache.store(&prefetch_root, files);
-            });
-        }
-        folders
-            .deferred
-            .record(roots.iter().map(|root| root.root.clone()).collect());
-        Ok(OpenedWorkspace { roots })
-    }
-
-    #[cfg(test)]
-    mod workspace_tests {
-        use super::*;
-
-        #[test]
-        fn a_command_may_name_an_open_root_or_a_checkout_below_it_only() {
-            let dir = tempfile::tempdir().unwrap();
-            let root = dir.path().join("repo");
-            let sub = root.join("vendor").join("dep");
-            let plain = root.join("plain");
-            std::fs::create_dir_all(sub.join(".git")).unwrap();
-            std::fs::create_dir_all(&plain).unwrap();
-            let roots = vec![root.to_string_lossy().into_owned()];
-            let path = |p: &std::path::Path| p.to_string_lossy().into_owned();
-            assert!(
-                is_repo_below(&roots, &path(&sub)),
-                "an initialised submodule"
-            );
-            assert!(
-                !is_repo_below(&roots, &path(&plain)),
-                "a plain folder inside the root"
-            );
-            assert!(
-                !is_repo_below(&roots, &path(&root)),
-                "the root itself is not below itself"
-            );
-            assert!(
-                !is_repo_below(&roots, &path(&dir.path().join("elsewhere"))),
-                "outside the root"
-            );
-            let dotted = root.join("vendor").join("..").join("vendor").join("dep");
-            assert!(!is_repo_below(&roots, &path(&dotted)), "no .. segments");
-            // Windows spells the root with backslashes; the same checkout named with forward
-            // slashes (as the view may pass it back) still qualifies.
-            assert!(is_repo_below(&roots, &path(&sub).replace('\\', "/")));
-        }
-
-        #[test]
-        fn strip_jsonc_removes_line_and_block_comments() {
-            assert_eq!(ggs_base::jsonc::strip("a // line\nb"), "a \nb");
-            assert_eq!(ggs_base::jsonc::strip("a /* block */ b"), "a  b");
-            // A string protects its slashes: URLs inside strings survive.
-            assert_eq!(
-                ggs_base::jsonc::strip(r#""see https://example.com""#),
-                r#""see https://example.com""#
-            );
-            assert_eq!(ggs_base::jsonc::strip("no comments"), "no comments");
-        }
-
-        #[test]
-        fn a_workspace_file_parses_its_folders_and_ignores_extra_keys() {
-            let parsed: WorkspaceFile = serde_json::from_str(&ggs_base::jsonc::strip(
-                "{ \"settings\": {}, \"folders\": [ {\"path\": \"./a\"}, {\"path\": \"b\"}, {\"name\": \"c\", \"path\": \"/abs/c\"} ] }",
-            ))
-            .unwrap();
-            assert_eq!(
-                parsed
-                    .folders
-                    .iter()
-                    .map(|f| f.path.as_str())
-                    .collect::<Vec<_>>(),
-                ["./a", "b", "/abs/c"]
-            );
-            // A file without folders opens nothing (the command rejects that separately).
-            let empty: WorkspaceFile = serde_json::from_str("{}").unwrap();
-            assert!(empty.folders.is_empty());
-        }
-    }
+    use ggs_base::workspace::WorkspaceRoots;
+    use crate::cli::{cli_help, launch_path_of, parse_startup_actions, wants_help};
+    use crate::window::{apply_webkit_compat, boot_started, revalidate_assets, stamp};
+    use std::sync::Mutex;
 
     /// The user-level `settings.json` (~/.ggs/settings.json): the form writes it, and a hand
     /// edit of it wins on the next launch (M3 3.9's "edited both ways").
@@ -570,576 +105,6 @@ mod desktop {
     fn settings_write(contents: String) -> Result<(), String> {
         // Atomic: a second running instance may be reading or writing the same file.
         ggs_base::fsx::atomic_write(&settings_file()?, contents.as_bytes())
-    }
-
-    /// The launch form the frontend's boot decides on, in one round trip instead of three
-    /// serial `initial_*` asks: a `ggs <file>` launch's file, a comparison launch's actions,
-    /// or the folder argument's repository. At most one of the three is set (a file launch
-    /// and a comparison launch record no folder).
-    ///
-    /// `opened` / `openedFor`: when the launch form can only open a folder (`ggs <folder>`,
-    /// no file, no comparison), the folder is opened right here - one IPC round trip fewer
-    /// on the boot's critical path, and the open happens during the splash instead of after
-    /// it. The frontend's own folder choice can differ (a launch of a `.ggs-workspace` file
-    /// opens it as a workspace through `workspace` below), so it applies this only when
-    /// `openedFor` matches the folder it picked, and re-opens the plain way otherwise.
-    ///
-    /// `reloaded`: this window's page asked before - a webview reload, not a launch. The
-    /// state above is then what the window holds NOW (a multi-root workspace's first root
-    /// as `repo`), so the frontend lets the remembered folder win and nothing is opened
-    /// eagerly: opening that first root would collapse the workspace before the frontend
-    /// re-opens it.
-    #[derive(serde::Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct BootContext {
-        file: Option<String>,
-        actions: Vec<StartupAction>,
-        repo: Option<String>,
-        workspace: Option<String>,
-        reloaded: bool,
-        opened: Option<OpenedFolder>,
-        opened_for: Option<String>,
-    }
-
-    #[tauri::command]
-    async fn boot_context(app: tauri::AppHandle) -> Result<BootContext, String> {
-        use tauri::Manager;
-        // First thing, before the awaits: from here on the frontend has its launch context,
-        // so a Finder "Open With" handoff must cross as the open-paths event instead of
-        // seeding a context that was just read (see `handle_opened`).
-        let launch = app.state::<LaunchState>();
-        let reloaded = !launch.mark_boot_context_read();
-        let file = launch.single_file();
-        let actions = launch.startup_actions();
-        let workspace = launch.startup_workspace();
-        let repo = app.state::<WorkspaceRoots>().first();
-        let (opened, opened_for) =
-            if !reloaded && file.is_none() && actions.is_empty() && workspace.is_none() {
-                match repo.clone() {
-                    Some(folder) => (
-                        open_folder_impl(&FolderSwitch::from_app(&app), &folder)
-                            .await
-                            .ok(),
-                        Some(folder),
-                    ),
-                    None => (None, None),
-                }
-            } else {
-                (None, None)
-            };
-        Ok(BootContext {
-            file,
-            actions,
-            repo,
-            workspace,
-            reloaded,
-            opened,
-            opened_for,
-        })
-    }
-
-    /// Single-file mode (File > Open File...): show exactly this file - no folder, no
-    /// watcher, no repository views. The frontend hides the side bar and the terminal.
-    #[tauri::command]
-    fn open_single_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
-        use tauri::Manager;
-        if !std::path::Path::new(&path).is_file() {
-            return Err(format!("{path} is not a file"));
-        }
-        let folders = FolderSwitch::from_app(&app);
-        folders.reset();
-        folders.roots.clear();
-        app.state::<LaunchState>().set_single_file(Some(path));
-        ext_process::host().notify_workspace(&[]);
-        cmd_providers::apply_claude_integration(&[]);
-        remote_host::notify_folders(&[]);
-        Ok(())
-    }
-
-    /// Close the open folder (File > Close Folder).
-    #[tauri::command]
-    fn close_folder(app: tauri::AppHandle) {
-        use tauri::Manager;
-        let folders = FolderSwitch::from_app(&app);
-        app.state::<LaunchState>().set_single_file(None);
-        folders.reset();
-        folders.roots.clear();
-        ext_process::host().notify_workspace(&[]);
-        cmd_providers::apply_claude_integration(&[]);
-        remote_host::notify_folders(&[]);
-    }
-
-    /// The path a launch should open: the last argument that is neither a flag nor a flag's
-    /// value, canonicalised when it exists (flags and the `--mcp` / `--measure` folder
-    /// arguments never read as paths). The app is multi-instance — every launch is its own
-    /// process and window — so this decides only what the window it started opens.
-    pub fn launch_path_of(args: &[String]) -> Option<String> {
-        let mut path = None;
-        let mut skip_next = false;
-        for arg in args.iter().skip(1) {
-            if skip_next {
-                skip_next = false;
-                continue;
-            }
-            if arg == "--measure" || arg == "--mcp" {
-                // These modes take a folder argument of their own and never reach the window.
-                skip_next = true;
-                continue;
-            }
-            if arg.starts_with("--") || arg.starts_with('-') {
-                continue;
-            }
-            path = Some(arg.clone());
-        }
-        path.filter(|arg| std::path::Path::new(arg).exists())
-            .map(|arg| {
-                std::fs::canonicalize(&arg)
-                    .map(|p| {
-                        p.display()
-                            .to_string()
-                            .trim_start_matches(r"\\?\")
-                            .to_owned()
-                    })
-                    .unwrap_or(arg)
-            })
-    }
-
-    /// What a macOS Finder "Open With" handoff ([`tauri::RunEvent::Opened`]) carries,
-    /// classified: the file URLs split into folders and files, everything else (other
-    /// schemes, paths that no longer exist) ignored. Compiled on every platform so the
-    /// classification is tested where CI runs it.
-    #[cfg(any(target_os = "macos", test))]
-    pub fn opened_paths(urls: &[tauri::Url]) -> (Vec<String>, Vec<String>) {
-        let mut folders = Vec::new();
-        let mut files = Vec::new();
-        for url in urls {
-            if url.scheme() != "file" {
-                continue;
-            }
-            let Ok(path) = url.to_file_path() else {
-                continue;
-            };
-            // display(): the handoff's call site is macOS, where paths are UTF-8.
-            if path.is_dir() {
-                folders.push(path.display().to_string());
-            } else if path.is_file() {
-                files.push(path.display().to_string());
-            }
-        }
-        (folders, files)
-    }
-
-    /// The cold-start half of the Finder "Open With" handoff: record the opened path the
-    /// way the argv launch records it (`ggs <folder>` / `ggs <file>` — run()'s branch,
-    /// a `.ggs-workspace` file seeding the workspace launch, not single-file mode), so
-    /// the `boot_context` the frontend has not asked for yet opens it as this window's
-    /// launch form, remembered-folder precedence and all. Answers whether the path was
-    /// taken: a window whose argv already carried a launch form is left alone, and the
-    /// handoff crosses as the `studio://open-paths` event instead.
-    #[cfg(any(target_os = "macos", test))]
-    pub fn seed_launch_paths(
-        roots: &WorkspaceRoots,
-        launch: &LaunchState,
-        folders: &[String],
-        files: &[String],
-    ) -> bool {
-        if !roots.list().is_empty()
-            || launch.single_file().is_some()
-            || launch.startup_workspace().is_some()
-        {
-            return false;
-        }
-        if let Some(folder) = folders.first() {
-            roots.set(vec![folder.clone()]);
-            // The same warm-up the argv launch runs: the first file's outline wants the
-            // syntax set, best paid on a spare core now rather than on that first open.
-            std::thread::spawn(|| {
-                ggs_text::viewer::doc::syntax_set();
-                stamp("syntax set ready");
-            });
-        } else if let Some(file) = files.first() {
-            if file.to_ascii_lowercase().ends_with(".ggs-workspace") {
-                // Run()'s branch verbatim: a workspace FILE opens the multi-root workspace,
-                // never `single_file`, whose viewer would show the JSON.
-                launch.set_startup_workspace(Some(file.clone()));
-            } else {
-                ggs_text::viewer::prewarm(file.clone());
-                launch.set_single_file(Some(file.clone()));
-            }
-        } else {
-            return false;
-        }
-        true
-    }
-
-    /// The `studio://open-paths` payload: a Finder handoff crossing to a frontend that
-    /// has already booted.
-    #[cfg(target_os = "macos")]
-    #[derive(serde::Serialize, Clone)]
-    #[serde(rename_all = "camelCase")]
-    struct OpenedPaths {
-        folders: Vec<String>,
-        files: Vec<String>,
-    }
-
-    /// A Finder "Open With" handoff: macOS asked the running app to open folders or files
-    /// (the bundle's `public.folder` declaration, the file associations). A frontend that
-    /// has not read its boot context yet — Finder launched the app on this very path —
-    /// takes the argv-launch seeding; a booted one is told over the event, and the
-    /// workbench routes it: a folder takes over an empty window and wins a new instance
-    /// otherwise, a file opens like a drop would.
-    #[cfg(target_os = "macos")]
-    fn handle_opened(app: &tauri::AppHandle, urls: &[tauri::Url]) {
-        use tauri::{Emitter, Manager};
-        let (folders, files) = opened_paths(urls);
-        if folders.is_empty() && files.is_empty() {
-            return;
-        }
-        let launch = app.state::<LaunchState>();
-        if !launch.boot_context_read()
-            && seed_launch_paths(
-                app.state::<WorkspaceRoots>().inner(),
-                launch.inner(),
-                &folders,
-                &files,
-            )
-        {
-            return;
-        }
-        let _ = app.emit("studio://open-paths", OpenedPaths { folders, files });
-    }
-
-    /// The launch flags that open a comparison: `ggs --compare <a> <b>`,
-    /// `ggs --hex <file>`, `ggs --hex-compare <a> <b>`, `ggs --folder-compare <dirA> <dirB>`.
-    /// They are flagged (`--`) the way `--mcp` / `--measure` are, so they can never be read
-    /// as the path a plain `ggs <path>` launch opens; the flag is the first argument and each
-    /// takes exactly the paths of its kind, canonicalised as `launch_path_of` canonicalises.
-    /// A wrong count, a missing path or the wrong kind is a usage error the caller reports
-    /// before any window exists. `Ok(vec![])` for a launch without such a flag - the plain
-    /// `<path>` forms apply.
-    pub fn parse_startup_actions(args: &[String]) -> Result<Vec<StartupAction>, String> {
-        let Some(sub) = args.get(1).map(String::as_str) else {
-            return Ok(Vec::new());
-        };
-        // Missing paths are reported as missing; only an existing path of the wrong kind is
-        // "not a file" / "not a directory". The canonical form is the same `launch_path_of`
-        // produces (a `\\?\` device path reads as one outside the API it came from).
-        let canonical = |raw: &str, want_dir: bool| -> Result<String, String> {
-            let path = std::path::Path::new(raw);
-            if !path.exists() {
-                return Err(format!("ggs {sub}: {raw}: no such file or directory"));
-            }
-            if want_dir && !path.is_dir() {
-                return Err(format!("ggs {sub}: {raw}: not a directory"));
-            }
-            if !want_dir && !path.is_file() {
-                return Err(format!("ggs {sub}: {raw}: not a file"));
-            }
-            std::fs::canonicalize(path)
-                .map(|p| {
-                    p.display()
-                        .to_string()
-                        .trim_start_matches(r"\\?\")
-                        .to_owned()
-                })
-                .map_err(|_| format!("ggs {sub}: {raw}: could not be resolved"))
-        };
-        let usage = |takes: &str| format!("usage: ggs {sub} {takes}");
-        let path_at = |index: usize, takes: &str| -> Result<&String, String> {
-            args.get(index).ok_or_else(|| usage(takes))
-        };
-        let pair = |want_dir: bool| -> Result<(String, String), String> {
-            let (left, right) = (path_at(2, "<left> <right>")?, path_at(3, "<left> <right>")?);
-            if args.len() > 4 {
-                return Err(usage("<left> <right>"));
-            }
-            Ok((canonical(left, want_dir)?, canonical(right, want_dir)?))
-        };
-        match sub {
-            "--compare" => {
-                let (left, right) = pair(false)?;
-                Ok(vec![StartupAction::CompareFiles { left, right }])
-            }
-            "--hex-compare" => {
-                let (left, right) = pair(false)?;
-                Ok(vec![StartupAction::HexCompare { left, right }])
-            }
-            "--hex" => {
-                let raw = path_at(2, "<file>")?;
-                if args.len() > 3 {
-                    return Err(usage("<file>"));
-                }
-                Ok(vec![StartupAction::HexView {
-                    path: canonical(raw, false)?,
-                }])
-            }
-            "--folder-compare" => {
-                let (left, right) = pair(true)?;
-                Ok(vec![StartupAction::FolderCompare { left, right }])
-            }
-            _ => Ok(Vec::new()),
-        }
-    }
-
-    /// `ggs --help` / `ggs -h`: print every launch form and exit before any window exists.
-    pub fn wants_help(args: &[String]) -> bool {
-        matches!(args.get(1).map(String::as_str), Some("--help") | Some("-h"))
-    }
-
-    /// The `--help` text: every launch form, the flagged commands indented like the plain
-    /// ones (the README's command-line section carries the same list).
-    pub fn cli_help() -> String {
-        [
-            format!("Git Graph Studio {}", env!("CARGO_PKG_VERSION")),
-            String::new(),
-            "Usage: ggs [flag] [paths]".to_owned(),
-            String::new(),
-            "  ggs                                  open the app (the last folder, as at a normal launch)".to_owned(),
-            "  ggs <path>                           open that folder (a file opens in single-file".to_owned(),
-            "                                       mode; a .ggs-workspace file opens as the".to_owned(),
-            "                                       workspace)".to_owned(),
-            "  ggs --compare <left> <right>         open a text diff of two files (a binary pair opens".to_owned(),
-            "                                       the hex comparison)".to_owned(),
-            "  ggs --hex <file>                     open the file in the hex viewer".to_owned(),
-            "  ggs --hex-compare <left> <right>     open the hex comparison of two files".to_owned(),
-            "  ggs --folder-compare <left> <right>  open two folders in the Folder Compare view".to_owned(),
-            "  ggs config [--password pw] [--server url] [--join-key key]".to_owned(),
-            "                                       set up Remote Access from a command line (also".to_owned(),
-            "                                       as the ggs-config binary): password, relay, links".to_owned(),
-            "  ggs --mcp [path]                     serve that repository's symbol database over MCP".to_owned(),
-            "  ggs --measure <path>                 run the performance probes headless (JSON on stdout)".to_owned(),
-            "  ggs --help, ggs -h                   show this help".to_owned(),
-        ]
-        .join("\n")
-            + "\n"
-    }
-
-    /// Process-start stamp, so boot timings from the frontend are printed against the same clock.
-    static BOOT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-
-    fn boot_started() -> std::time::Instant {
-        *BOOT.get_or_init(std::time::Instant::now)
-    }
-
-    /// One backend boot stamp, in the line format `scripts/boot-bench.mjs` parses:
-    /// `[boot] <stage>: +<ms> ms since process start`.
-    fn stamp(stage: &str) {
-        println!(
-            "[boot] {stage}: +{:.0} ms since process start",
-            boot_started().elapsed().as_secs_f64() * 1000.0
-        );
-    }
-
-    /// The automated harness runs' App Nap guard (macOS): an occluded or napping WKWebView
-    /// stops firing page timers, so the dev harness's bounded waits — and their timeouts —
-    /// stall for wall-clock minutes (the sandbox probe froze exactly there, at 0% CPU).
-    /// An NSProcessInfo activity assertion plus an always-on-top window keeps the run
-    /// alive to completion. Debug builds only, and only when a probe asked for the harness.
-    #[cfg(all(debug_assertions, target_os = "macos"))]
-    fn keep_awake_for_probe_runs(window: &tauri::WebviewWindow) {
-        use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
-        let reason = NSString::from_str("ggs dev-harness probe run (GGS_DEV_HARNESS)");
-        let activity = NSProcessInfo::processInfo()
-            .beginActivityWithOptions_reason(NSActivityOptions::UserInitiated, &reason);
-        std::mem::forget(activity); // held for the process lifetime — endActivity never comes
-        let _ = window.set_always_on_top(true);
-    }
-
-    /// The Help menu's "Open Developer Tools" entry: the webview's own context menu is
-    /// suppressed (it otherwise shows the host browser's chrome - back/refresh/save as/print),
-    /// so this is the only way left to reach devtools once installed.
-    #[tauri::command]
-    fn open_devtools(window: tauri::WebviewWindow) {
-        window.open_devtools();
-    }
-
-    #[tauri::command]
-    fn boot_stage(stage: String, page_ms: f64) {
-        let line = format!(
-            "[boot] {stage}: +{:.0} ms since process start (page: {:.0} ms)\n",
-            boot_started().elapsed().as_secs_f64() * 1000.0,
-            page_ms
-        );
-        print!("{line}");
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(std::env::temp_dir().join("git-graph-studio-boot.log"))
-            .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()));
-    }
-
-    /// Lets the webview keep the app's assets between launches. Tauri serves every asset
-    /// from the binary with no caching headers, so each launch fetches, parses and compiles
-    /// the workbench, CodeMirror and the graph view's bundle afresh. With `no-cache` plus a
-    /// content ETag, every request still reaches this handler (an in-process round trip),
-    /// but an unchanged asset is answered 304 without its body: the browser reuses its
-    /// copy and, for a script, the bytecode it compiled from it on an earlier launch. An
-    /// upgraded asset changes its ETag and is fetched whole, so nothing stale ever runs.
-    fn revalidate_assets(
-        request: tauri::http::Request<Vec<u8>>,
-        response: &mut tauri::http::Response<std::borrow::Cow<'static, [u8]>>,
-    ) {
-        use std::hash::{Hash, Hasher};
-        use tauri::http::{header, StatusCode};
-        if response.status() != StatusCode::OK {
-            return;
-        }
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        response.body().hash(&mut hasher);
-        let etag = format!("\"{:016x}\"", hasher.finish());
-        let unchanged = request
-            .headers()
-            .get(header::IF_NONE_MATCH)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.split(',').any(|tag| tag.trim() == etag));
-        let headers = response.headers_mut();
-        headers.insert(
-            header::CACHE_CONTROL,
-            header::HeaderValue::from_static("no-cache"),
-        );
-        if let Ok(value) = header::HeaderValue::from_str(&etag) {
-            headers.insert(header::ETAG, value);
-        }
-        if unchanged {
-            *response.status_mut() = StatusCode::NOT_MODIFIED;
-            *response.body_mut() = std::borrow::Cow::Borrowed(&[]);
-        }
-    }
-
-    #[cfg(test)]
-    mod asset_cache_tests {
-        use super::*;
-        use std::borrow::Cow;
-        use tauri::http::{header, Request, Response, StatusCode};
-
-        fn asset(body: &'static [u8]) -> Response<Cow<'static, [u8]>> {
-            Response::builder()
-                .status(200)
-                .body(Cow::Borrowed(body))
-                .unwrap()
-        }
-
-        #[test]
-        fn an_unchanged_asset_is_answered_304_and_a_changed_one_whole() {
-            let body: &[u8] = b"console.log('workbench')";
-            let mut first = asset(body);
-            revalidate_assets(Request::builder().body(Vec::new()).unwrap(), &mut first);
-            assert_eq!(first.status(), StatusCode::OK);
-            assert_eq!(first.headers()[header::CACHE_CONTROL], "no-cache");
-            let etag = first.headers()[header::ETAG].to_str().unwrap().to_owned();
-            assert!(etag.starts_with('"') && etag.ends_with('"'));
-
-            let revalidate = || {
-                Request::builder()
-                    .header(header::IF_NONE_MATCH, &etag)
-                    .body(Vec::new())
-                    .unwrap()
-            };
-            let mut same = asset(body);
-            revalidate_assets(revalidate(), &mut same);
-            assert_eq!(same.status(), StatusCode::NOT_MODIFIED);
-            assert!(same.body().is_empty());
-
-            let mut changed = asset(b"console.log('workbench v2')");
-            revalidate_assets(revalidate(), &mut changed);
-            assert_eq!(changed.status(), StatusCode::OK);
-            assert_ne!(changed.headers()[header::ETAG], etag.as_str());
-            assert!(!changed.body().is_empty());
-
-            // An error response is left alone.
-            let mut missing = Response::builder()
-                .status(404)
-                .body(Cow::Borrowed(&b""[..]))
-                .unwrap();
-            revalidate_assets(revalidate(), &mut missing);
-            assert!(missing.headers().get(header::ETAG).is_none());
-        }
-    }
-
-    /// WebKitGTK's DMABUF renderer fails on machines whose X server runs on the
-    /// NVIDIA proprietary driver: GBM falls back from the broken EGL-GBM image
-    /// allocation to KMS dumb buffers, which a render node cannot create
-    /// (EACCES), leaving the window black. Disable DMABUF there — but only
-    /// there, and only when the user has not chosen a renderer themselves via
-    /// `WEBKIT_DISABLE_DMABUF_RENDERER` or an EGL vendor override.
-    /// WebKitGTK's DMABUF renderer fails on machines whose X server runs on the
-    /// NVIDIA proprietary driver: GBM falls back from the broken EGL-GBM image
-    /// allocation to KMS dumb buffers, which a render node cannot create
-    /// (EACCES), leaving the window black. Like RustDesk's
-    /// `allow-always-software-render` option, the behaviour is driven by a user
-    /// setting (`linuxDmabuf` in `~/.ggs/settings.json`, taking effect on the
-    /// next launch): `auto` disables DMABUF only when the NVIDIA driver is
-    /// detected, `disable` always disables it, `keep` never touches it. An
-    /// environment variable set by the user always wins over everything.
-    #[cfg(target_os = "linux")]
-    fn apply_webkit_compat() {
-        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some()
-            || std::env::var_os("EGL_VENDOR_LIBRARY_FILENAMES").is_some()
-        {
-            return;
-        }
-        let settings_text = std::fs::read_to_string(settings_file().unwrap_or_default()).ok();
-        let mode = linux_dmabuf_mode(settings_text.as_deref());
-        let nvidia = std::path::Path::new("/proc/driver/nvidia/version").exists();
-        if should_disable_dmabuf(&mode, nvidia) {
-            // Must run before the webview picks its renderer; we are first in
-            // `run`, so no threads have spawned yet.
-            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn apply_webkit_compat() {}
-
-    /// The `linuxDmabuf` setting as written by the Settings form; anything the
-    /// form does not produce (missing file, bad JSON, unknown value) is `auto`.
-    #[cfg(target_os = "linux")]
-    fn linux_dmabuf_mode(settings: Option<&str>) -> String {
-        settings
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
-            .and_then(|value| {
-                value
-                    .get("linuxDmabuf")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| "auto".to_owned())
-    }
-
-    /// `auto` disables DMABUF only on NVIDIA-driver machines; `disable` always;
-    /// `keep` (and any unknown value) never.
-    #[cfg(target_os = "linux")]
-    fn should_disable_dmabuf(mode: &str, nvidia_driver: bool) -> bool {
-        match mode {
-            "disable" => true,
-            "auto" => nvidia_driver,
-            _ => false,
-        }
-    }
-
-    #[cfg(all(test, target_os = "linux"))]
-    mod webkit_compat_tests {
-        use super::{linux_dmabuf_mode, should_disable_dmabuf};
-
-        #[test]
-        fn mode_falls_back_to_auto() {
-            assert_eq!(linux_dmabuf_mode(None), "auto");
-            assert_eq!(linux_dmabuf_mode(Some("not json")), "auto");
-            assert_eq!(linux_dmabuf_mode(Some("{}")), "auto");
-            assert_eq!(
-                linux_dmabuf_mode(Some(r#"{"linuxDmabuf":"disable"}"#)),
-                "disable"
-            );
-            assert_eq!(linux_dmabuf_mode(Some(r#"{"linuxDmabuf":42}"#)), "auto");
-        }
-
-        #[test]
-        fn auto_disables_only_on_nvidia() {
-            assert!(should_disable_dmabuf("auto", true));
-            assert!(!should_disable_dmabuf("auto", false));
-            assert!(should_disable_dmabuf("disable", false));
-            assert!(!should_disable_dmabuf("keep", true));
-        }
     }
 
     /// Whether this launch is a `--remote-host` one (§8.2): no desktop window at boot.
@@ -1510,10 +475,10 @@ mod desktop {
                 }
             })
             .invoke_handler(tauri::generate_handler![
-                open_folder,
-                close_folder,
-                boot_stage,
-                open_devtools,
+                super::boot::open_folder,
+                super::boot::close_folder,
+                super::window::boot_stage,
+                super::window::open_devtools,
                 cmd_app::app_new_instance,
                 cmd_fs::list_dir,
                 cmd_fs::list_dir_page,
@@ -1599,11 +564,11 @@ mod desktop {
                 cmd_scm::git_output_clear,
                 cmd_fs::list_files,
                 cmd_fuzzy::fuzzy_files,
-                open_workspace,
+                super::boot::open_workspace,
                 settings_read,
-                boot_context,
-                post_first_paint,
-                open_single_file,
+                super::boot::boot_context,
+                super::boot::post_first_paint,
+                super::boot::open_single_file,
                 settings_write,
                 keybindings_read,
                 keybindings_write,
@@ -1756,9 +721,9 @@ mod desktop {
     }
 }
 
-#[cfg(all(test, feature = "desktop"))]
+#[cfg(test)]
 mod launch_path_tests {
-    use super::desktop::launch_path_of;
+    use crate::cli::launch_path_of;
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|arg| (*arg).to_owned()).collect()
@@ -1786,9 +751,9 @@ mod launch_path_tests {
 
 /// The Finder "Open With" handoff's two halves: the URL classification, and the cold-start
 /// seeding that turns a handoff into this window's launch form.
-#[cfg(all(test, feature = "desktop"))]
+#[cfg(test)]
 mod opened_paths_tests {
-    use super::desktop::{opened_paths, seed_launch_paths};
+    use crate::cli::{opened_paths, seed_launch_paths};
     use crate::state::StateSet;
 
     #[test]
@@ -1876,9 +841,9 @@ mod opened_paths_tests {
     }
 }
 
-#[cfg(all(test, feature = "desktop"))]
+#[cfg(test)]
 mod startup_action_tests {
-    use super::desktop::parse_startup_actions;
+    use crate::cli::parse_startup_actions;
     use crate::state::StartupAction;
 
     fn args(list: &[&str]) -> Vec<String> {
@@ -1985,7 +950,7 @@ mod startup_action_tests {
 
     #[test]
     fn help_is_a_flag_and_bare_names_are_paths_not_subcommands() {
-        use super::desktop::{cli_help, wants_help};
+        use crate::cli::{cli_help, wants_help};
         assert!(wants_help(&args(&["ggs", "--help"])));
         assert!(wants_help(&args(&["ggs", "-h"])));
         assert!(!wants_help(&args(&["ggs", "help"])));
@@ -2014,7 +979,7 @@ mod startup_action_tests {
     }
 }
 
-#[cfg(all(test, feature = "desktop"))]
+#[cfg(test)]
 mod repo_root_tests {
     #[test]
     fn finds_the_nearest_ancestor_with_a_git_entry() {

@@ -3,7 +3,6 @@
 //! handshake and a command round trip. The runtime's own protocol tests live in the
 //! ggs-node package (crates/ggs-node/tests/it); this is the app's half of the seam.
 
-#![cfg(feature = "desktop")]
 
 use std::io::Write;
 

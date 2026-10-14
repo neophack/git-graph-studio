@@ -132,35 +132,15 @@ boa_gc = { path = "vendor/boa-gc" }
 name = "git_graph_studio_lib"
 path = "src/lib.rs"
 
-# The desktop app: needs the `desktop` feature (Tauri and everything that touches a window).
+# The desktop app binary.
 [[bin]]
 name = "git-graph-studio"
 path = "src/main.rs"
-required-features = ["desktop"]
 
 [features]
-default = ["desktop"]
-desktop = [
-    "dep:tauri",
-    "dep:tauri-plugin-dialog",
-    "dep:tauri-plugin-opener",
-    "dep:tauri-plugin-clipboard-manager",
-    "dep:portable-pty",
-    "dep:ureq",
-    "dep:sha2",
-    "dep:zip",
-    "dep:plist",
-    "dep:base64",
-    "dep:ignore",
-    "dep:notify",
-    "dep:trash",
-    "dep:flate2",
-    "dep:aes-gcm",
-    "dep:getrandom",
-    "dep:interprocess",
-    "dep:rmp-serde",
-    "dep:serde_bytes",
-    "dep:tokio",
+# Every grammar is on by default (the desktop app always carried them); a build sheds a
+# language by dropping its feature.
+default = [
     "grammar-rust",
     "grammar-python",
     "grammar-go",
@@ -195,10 +175,10 @@ workspace = true
 tauri-build = { workspace = true }
 
 [dependencies]
-tauri = { workspace = true, optional = true }
-tauri-plugin-dialog = { workspace = true, optional = true }
-tauri-plugin-opener = { workspace = true, optional = true }
-tauri-plugin-clipboard-manager = { workspace = true, optional = true }
+tauri = { workspace = true }
+tauri-plugin-dialog = { workspace = true }
+tauri-plugin-opener = { workspace = true }
+tauri-plugin-clipboard-manager = { workspace = true }
 # The L0 foundation every domain shares (paths, fsx, jsonc, workspace roots, cancel, sink).
 ggs-base = { workspace = true }
 # The ggs-ext/1 wire protocol (ext_process speaks it; ggs-node answers it).
@@ -233,15 +213,15 @@ ggs-providers = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rpassword = { workspace = true }
-portable-pty = { workspace = true, optional = true }
-ureq = { workspace = true, optional = true }
-sha2 = { workspace = true, optional = true }
+portable-pty = { workspace = true }
+ureq = { workspace = true }
+sha2 = { workspace = true }
 # The ggs-node `crypto` builtin's cipher and KDF (aes-256-gcm seal/open, PBKDF2-HMAC-SHA256):
 # pure Rust (RustCrypto), so the pretend-Node plan's no-C-bindings rule holds. Backs the
 # natives `__ggsAesGcmSeal` / `__ggsAesGcmOpen` / `__ggsPbkdf2Sha256` that the prelude's
 # `createCipheriv` / `createDecipheriv` / `pbkdf2Sync` wrap.
-aes-gcm = { workspace = true, optional = true }
-getrandom = { workspace = true, optional = true }
+aes-gcm = { workspace = true }
+getrandom = { workspace = true }
 # The AI provider store's key sealing (cmd_providers): AES-256-GCM, pure Rust (plan §3.1) —
 # a provider's API key is encrypted at rest under a per-install master key and decrypted
 # only when the bridged backend is spawned.
@@ -253,30 +233,30 @@ getrandom = { workspace = true, optional = true }
 # `deflate-flate2` does not activate zip's own optional flate2 dependency (only the
 # `deflate` umbrella's `flate2/rust_backend` does), so the leaner feature set does not
 # compile. The 2→3 (or 4) upgrade is its own change.
-zip = { workspace = true, optional = true }
+zip = { workspace = true }
 # The extension-grammar loader (ggs-text's grammar module): reading a `.tmLanguage` plist
 # (the JSON grammars go through serde_json directly).
-plist = { workspace = true, optional = true }
+plist = { workspace = true }
 # Extension icons and README images cross the IPC bridge as base64 data URLs (cmd_ext).
-base64 = { workspace = true, optional = true }
+base64 = { workspace = true }
 # The `.gitignore`-aware parallel tree walk (ripgrep's) behind Quick Open, the Search view
 # and the symbol index (ggs-fs's walk) - uncapped, all cores.
-ignore = { workspace = true, optional = true }
+ignore = { workspace = true }
 # BLF log containers are zlib-compressed (ggs-can).
-flate2 = { workspace = true, optional = true }
+flate2 = { workspace = true }
 # The .asc walker's newline scan (can_log.rs): SIMD-accelerated where std's byte-by-byte
 # `position` is not; already in the tree via the `ignore` crate, so it costs nothing.
 memchr = { workspace = true }
 # Remote Access (module 19, remote_host.rs): the local control channel to the GGS Remote
 # daemon — a named pipe (Windows) or a Unix socket, over Tauri's own tokio runtime — and its
 # MessagePack messages (the daemon keeps its own copy; shared test vectors align the two).
-interprocess = { workspace = true, optional = true }
-rmp-serde = { workspace = true, optional = true }
-serde_bytes = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
+interprocess = { workspace = true }
+rmp-serde = { workspace = true }
+serde_bytes = { workspace = true }
+tokio = { workspace = true }
 # The file-system watcher behind "external changes show up by themselves" (watcher.rs).
-notify = { workspace = true, optional = true }
-trash = { workspace = true, optional = true }
+notify = { workspace = true }
+trash = { workspace = true }
 # The File Associations service (cmd_assoc): per-user ProgIds and the
 # RegisteredApplications entry under HKCU.
 [target.'cfg(windows)'.dependencies]
