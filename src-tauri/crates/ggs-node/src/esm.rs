@@ -28,7 +28,7 @@ use boa_engine::{
     Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, Script, Source,
 };
 
-use crate::node_runtime::{key, require, settle, text, with_state};
+use crate::{key, require, settle, text, with_state};
 
 /// The conditions an `import` resolves `exports` under, in Node's own set.
 pub(crate) const IMPORT_CONDITIONS: &[&str] = &["node", "import", "default"];
@@ -115,7 +115,7 @@ fn nearest_package_type(path: &Path) -> Option<String> {
 
 /// One import: a builtin, else a resolved file as the module kind its path decides.
 fn load(base: &Path, specifier: &str, context: &mut Context) -> JsResult<Module> {
-    if let Some(value) = crate::node_runtime::builtins::builtin_module(specifier, context)? {
+    if let Some(value) = crate::builtins::builtin_module(specifier, context)? {
         let name = specifier.strip_prefix("node:").unwrap_or(specifier);
         let cache_key = PathBuf::from(format!("ggs-builtin:{name}"));
         if let Some(cached) = with_state(|state| state.esm_cache.get(&cache_key).cloned()) {

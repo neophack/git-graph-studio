@@ -8,7 +8,7 @@ use boa_engine::{Context, JsArgs, JsError, JsNativeError, JsResult, JsValue};
 use serde_json::{json, Value};
 
 use super::support::*;
-use crate::node_runtime::{key, text, with_state};
+use crate::{key, text, with_state};
 
 /// the codec lives here instead of in byte-shuffling JavaScript (multi-byte text survives).
 pub(super) fn utf8_encode(
@@ -17,7 +17,7 @@ pub(super) fn utf8_encode(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let text = string_arg(args, 0, context);
-    JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(text.into_bytes()), context)
+    JsArrayBuffer::from_byte_block(crate::byte_block(text.into_bytes()), context)
         .map(JsValue::from)
 }
 
@@ -48,7 +48,7 @@ pub(super) fn random_bytes(
     }
     let mut bytes = vec![0u8; count as usize];
     getrandom::getrandom(&mut bytes).map_err(|e| error(format!("random bytes: {e}")))?;
-    JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(bytes), context)
+    JsArrayBuffer::from_byte_block(crate::byte_block(bytes), context)
         .map(JsValue::from)
 }
 
@@ -86,7 +86,7 @@ pub(super) fn pbkdf2(
 }
 
 fn array_buffer(bytes: Vec<u8>, context: &mut Context) -> JsResult<JsValue> {
-    JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(bytes), context)
+    JsArrayBuffer::from_byte_block(crate::byte_block(bytes), context)
         .map(JsValue::from)
 }
 
@@ -492,7 +492,7 @@ pub(super) fn ggs_host_request(
         ));
     };
     let parsed: Value = serde_json::from_str(&args_json).unwrap_or(Value::Null);
-    match crate::node_runtime::host_request(&emitter, &method, parsed) {
+    match crate::host_request(&emitter, &method, parsed) {
         // The answer crosses as a JSON STRING — the shim's bridge parses it, exactly like
         // the wire it mirrors (an object here would String()-ify into "[object Object]").
         Ok(value) => Ok(text(
@@ -545,7 +545,7 @@ pub(super) fn set_env(
     let target = existing
         .as_object()
         .ok_or_else(|| error("ggs.env is not an object"))?;
-    if let Some(entries) = crate::node_runtime::json_of(context, &env)
+    if let Some(entries) = crate::json_of(context, &env)
         .ok()
         .as_ref()
         .and_then(Value::as_object)

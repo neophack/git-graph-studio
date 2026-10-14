@@ -1,8 +1,6 @@
 //! Pins the Boa 0.20 environment bugs the pretend Node runtime's module loader works
 //! around, and how far the vscode shim gets inside Boa: bundle eval, installer call,
 //! and a minimal extension require + activate. The panic boundary is the deliverable.
-#![cfg(feature = "node-runtime")]
-
 use boa_engine::{Context, Source};
 
 /// The claude-code bundle's grammar Boa 0.21.1 must swallow (the extension's own code
@@ -535,7 +533,6 @@ fn a_module_sized_wrapper_runs_with_every_binding_escaping() {
 /// handler/IC tables. `Function.prototype.toString` must also survive, since error
 /// positions and stack frames read the cached source text.
 #[test]
-#[cfg(feature = "node-runtime")]
 fn the_module_bytecode_cache_roundtrips_and_runs_identically() {
     use boa_engine::{JsValue, Script, Source};
 
@@ -709,7 +706,6 @@ fn the_module_bytecode_cache_roundtrips_and_runs_identically() {
 /// guards ggs-node's `require` uses (see the next test): the register count stays under
 /// the loader's limit and no binding was used before its declaration point.
 #[test]
-#[cfg(feature = "node-runtime")]
 fn register_locals_run_clean_modules_identically() {
     use boa_engine::{Context, JsValue, Script, Source};
 
@@ -802,7 +798,6 @@ fn register_locals_run_clean_modules_identically() {
 /// module recompiled with every binding escaping evaluates correctly — the dead branch
 /// never executes, so nothing throws.
 #[test]
-#[cfg(feature = "node-runtime")]
 fn a_use_before_declaration_trips_the_register_guard_and_the_fallback_runs() {
     use boa_engine::{Context, JsValue, Script, Source};
 

@@ -1987,6 +1987,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "ggs-node"
+version = "0.0.0"
+dependencies = [
+ "aes-gcm",
+ "base64 0.22.1",
+ "bincode",
+ "boa_engine",
+ "getrandom 0.2.17",
+ "ggs-proto",
+ "hex",
+ "hmac 0.12.1",
+ "if-addrs",
+ "libloading 0.8.9",
+ "md-5",
+ "pbkdf2",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2 0.10.9",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
 name = "ggs-proto"
 version = "0.0.0"
 dependencies = [
@@ -2052,8 +2076,6 @@ dependencies = [
  "aes-gcm",
  "base64 0.22.1",
  "big-code-analysis",
- "bincode",
- "boa_engine",
  "encoding_rs",
  "fancy-regex",
  "flate2",
@@ -2064,18 +2086,13 @@ dependencies = [
  "ggs-proto",
  "ggs-shellenv",
  "hex",
- "hmac 0.12.1",
- "if-addrs",
  "ignore",
  "interprocess",
- "libloading 0.8.9",
- "md-5",
  "memchr",
  "notify",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
- "pbkdf2",
  "plist",
  "portable-pty",
  "rayon",

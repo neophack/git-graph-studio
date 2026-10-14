@@ -7,25 +7,11 @@
 //! host exactly as the app does: install → spawn the bundled `ggs-node` sidecar →
 //! handshake → command → stop.
 
-#![cfg(feature = "node-runtime")]
-
-// The N-API host's exported surface must be in this image for the /EXPORT directives
-// to resolve; this suite never loads an addon itself, so this test holds the reference
-// the linker needs (a const cannot — it folds away). One reference for the whole `it`
-// binary (tests/it/main.rs links every suite into one image — the former per-file
-// copies were removed as redundant 2026-10-14); if the suites ever split back into
-// separate binaries, each needs its own copy again.
-#[test]
-#[cfg(feature = "node-runtime")]
-fn the_napi_surface_links() {
-    git_graph_studio_lib::node_runtime::link_napi_host();
-}
 
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use git_graph_studio_lib::ext_process::ProcessHostState;
 use serde_json::{json, Value};
 
 const ID: &str = "acme.js-demo";
@@ -138,7 +124,7 @@ fn serve_with_logs(
         next: 0,
         output: output.clone(),
     };
-    git_graph_studio_lib::node_runtime::serve_on(entry, reader, output.clone());
+    ggs_node::serve_on(entry, reader, output.clone());
     let text = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
     // Requests are answered on their own threads, so responses cross in any order: index
     // them by id.
@@ -237,7 +223,7 @@ module.exports.activate = function () {
     let (requests_tx, requests_rx) = std::sync::mpsc::channel::<String>();
     let (output_tx, output_rx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
-        git_graph_studio_lib::node_runtime::serve_on(
+        ggs_node::serve_on(
             entry,
             ChannelReader::from(requests_rx),
             ChannelWriter(output_tx),
@@ -382,7 +368,7 @@ module.exports.activate = function () {
     let (requests_tx, requests_rx) = std::sync::mpsc::channel::<String>();
     let (output_tx, output_rx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
-        git_graph_studio_lib::node_runtime::serve_on(
+        ggs_node::serve_on(
             entry,
             ChannelReader::from(requests_rx),
             ChannelWriter(output_tx),
@@ -567,7 +553,7 @@ vscode.workspace.registerTextDocumentContentProvider('ggsfix', {
     let (requests_tx, requests_rx) = std::sync::mpsc::channel::<String>();
     let (output_tx, output_rx) = std::sync::mpsc::channel::<String>();
     let serve = std::thread::spawn(move || {
-        git_graph_studio_lib::node_runtime::serve_on(
+        ggs_node::serve_on(
             entry,
             ChannelReader::from(requests_rx),
             ChannelWriter(output_tx),
@@ -730,7 +716,7 @@ vscode.commands.registerCommand('chat.openOutput', async () => {
     let (requests_tx, requests_rx) = std::sync::mpsc::channel::<String>();
     let (output_tx, output_rx) = std::sync::mpsc::channel::<String>();
     let serve = std::thread::spawn(move || {
-        git_graph_studio_lib::node_runtime::serve_on(
+        ggs_node::serve_on(
             entry,
             ChannelReader::from(requests_rx),
             ChannelWriter(output_tx),
@@ -906,7 +892,7 @@ module.exports.activate = function () {
     let (requests_tx, requests_rx) = std::sync::mpsc::channel::<String>();
     let (output_tx, output_rx) = std::sync::mpsc::channel::<String>();
     let serve = std::thread::spawn(move || {
-        git_graph_studio_lib::node_runtime::serve_on(
+        ggs_node::serve_on(
             entry,
             ChannelReader::from(requests_rx),
             ChannelWriter(output_tx),
@@ -1235,66 +1221,6 @@ fn a_manifest_launcher_answers_open_page_through_the_runtime() {
     );
 }
 
-/// The whole chain as the app drives it: install a VSIX whose JS entry and native binary
-/// derive a backend, let the process host spawn the bundled sidecar, shake hands, run a command, stop.
-#[test]
-fn the_process_host_runs_a_ggs_node_backend_end_to_end() {
-    // The host the `node` backend resolves beside the app's binary: cargo built this test
-    // binary alongside the sidecar (`required-features` are satisfied under --all-features).
-    let sidecar = PathBuf::from(env!("CARGO_BIN_EXE_ggs-node"));
-    std::env::set_var("GGS_ENGINE_HOST", sidecar.parent().unwrap());
-
-    let tmp = tempfile::tempdir().unwrap();
-    let exts = tmp.path().join("extensions");
-    std::fs::create_dir_all(&exts).unwrap();
-    let vsix = tmp.path().join("js-demo.vsix");
-    let file = std::fs::File::create(&vsix).unwrap();
-    let mut zip = zip::ZipWriter::new(file);
-    let options = zip::write::SimpleFileOptions::default();
-    zip.start_file("extension/package.json", options).unwrap();
-    zip.write_all(br#"{"name":"js-demo","publisher":"acme","version":"1.0.0","main":"out/main.js","native":{"win32-x64-msvc":"engine.node"},"contributes":{"commands":[{"command":"acme.js-demo.view","title":"View"}]}}"#).unwrap();
-    zip.start_file("extension/engine.node", options).unwrap();
-    zip.write_all(b"engine-node-fixture").unwrap();
-    zip.start_file("extension/out/main.js", options).unwrap();
-    zip.write_all(
-        br#"
-const fs = require('fs');
-const path = require('path');
-ggs.onRequest((command, args) => {
-    if (command === 'acme.js-demo.view') return { opened: true, params: args[0] };
-    if (command === 'readSelf') {
-        return { text: fs.readFileSync(path.join(__dirname, 'note.txt'), 'utf8') };
-    }
-    return { unknown: command };
-});
-"#,
-    )
-    .unwrap();
-    zip.start_file("extension/out/note.txt", options).unwrap();
-    zip.write_all(b"served by the pretend runtime").unwrap();
-    zip.start_file("extension/web/view.html", options).unwrap();
-    zip.write_all(b"<html><body></body></html>").unwrap();
-    zip.finish().unwrap();
-    let info = git_graph_studio_lib::cmd_ext::install_from_vsix_into(&exts, &vsix, false).unwrap();
-
-    let state = ProcessHostState::default();
-    let started = state.start(&exts, ID).unwrap();
-    assert_eq!(started.protocol_version, "ggs-ext/1");
-    // No special manifest fields any more: the backend's command list comes from the
-    // package's standard `contributes.commands`.
-    assert_eq!(
-        started.commands,
-        vec!["acme.js-demo.view".to_owned()],
-        "{started:?}"
-    );
-    let _ = info;
-
-    // The package's own handler answers its declared commands.
-    let read = state.run(&exts, ID, "readSelf", json!([])).unwrap();
-    assert_eq!(read["text"], json!("served by the pretend runtime"));
-
-    state.stop(ID).unwrap();
-}
 
 /// The engine `.node` of the git-graph-rs layout: the submodule's own prebuilt first, then
 /// an installed package's. `None` when neither is on the machine (the test skips).
@@ -1521,7 +1447,7 @@ fn the_installed_git_graph_extension_activates_under_ggs_node() {
     let (output_tx, output_rx) = std::sync::mpsc::channel::<String>();
     let entry = package.join("out/extension.js");
     let serve = std::thread::spawn(move || {
-        git_graph_studio_lib::node_runtime::serve_on(
+        ggs_node::serve_on(
             entry,
             ChannelReader::from(requests_rx),
             ChannelWriter(output_tx),
@@ -2748,7 +2674,7 @@ module.exports.activate = function () {
     let (requests_tx, requests_rx) = std::sync::mpsc::channel::<String>();
     let (output_tx, output_rx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
-        git_graph_studio_lib::node_runtime::serve_on(
+        ggs_node::serve_on(
             entry,
             ChannelReader::from(requests_rx),
             ChannelWriter(output_tx),
@@ -2999,7 +2925,7 @@ module.exports.activate = function () {
     let (requests_tx, requests_rx) = std::sync::mpsc::channel::<String>();
     let (output_tx, output_rx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
-        git_graph_studio_lib::node_runtime::serve_on(
+        ggs_node::serve_on(
             entry,
             ChannelReader::from(requests_rx),
             ChannelWriter(output_tx),

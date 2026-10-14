@@ -135,45 +135,12 @@ if (iconsOnly) {
 	process.exit(0);
 }
 
-/* 3. The plugin binaries. The pretend Node runtime (`ggs-node`, the `node-runtime`
- *    feature) is the one bundled sidecar: it runs a package's own JS entry (CommonJS and
- *    the builtins) as its backend, so a VSIX can ship an `out/main.js`. It is the default
- *    `node`-backend host and needs no Node on the machine — a package's `.node` loads
- *    inside it (the N-API host); a real Node runtime hosts the entries only under
- *    `GGS_REAL_NODE=1` (node-host.cjs, built in step 3½). Release, so the shipped binary
- *    is as size-optimised as `tauri build`'s own; cargo's incremental cache keeps repeat
- *    builds (dev iteration) fast after the first. A package's own `.node` addon arrives
- *    inside its VSIX — nothing of any plugin compiles here anymore. */
-function buildBackend(bin, features, profile = 'ggs-node') {
-	const exe = process.platform === 'win32' ? `${bin}.exe` : bin;
-	// Where cargo actually puts artifacts: `.cargo/config.toml` says `../target/studio/cargo`,
-	// but a caller's CARGO_TARGET_DIR env overrides the config — the Linux container pass
-	// exports one onto its cache volume, and the sidecar was once looked for where it never
-	// landed (build exit 0, binary missing, "refusing to pack"). `cargo metadata` resolves
-	// the same precedence cargo itself builds with.
-	const meta = spawnSync('cargo', ['metadata', '--format-version', '1', '--no-deps'],
-		{ cwd: srcTauri, encoding: 'utf8', shell: process.platform === 'win32' });
-	let targetDir = join(out, 'cargo');
-	try {
-		const resolved = JSON.parse(meta.stdout ?? '').target_directory;
-		if (typeof resolved === 'string' && resolved !== '') targetDir = resolved;
-	} catch {
-		// unparseable metadata — the configured guess above stands
-	}
-	const built = spawnSync(
-		'cargo',
-		['build', '--profile', profile, '--bin', bin, ...(features ? ['--no-default-features', '--features', features] : ['--no-default-features'])],
-		{ cwd: srcTauri, stdio: 'inherit', shell: process.platform === 'win32' }
-	);
-	// The sidecars an installer serves are part of the product, not optional extras: a
-	// build without them is broken, so it fails with the reason instead of shipping an
-	// app whose extension packages cannot start.
-	const path = join(targetDir, profile, exe);
-	if (built.status === 0 && existsSync(path)) return path;
-	console.error(`Building ${bin} failed (${built.status ?? 'spawn failed'}; looked at ${path}) — refusing to pack without it`);
-	process.exit(1);
-}
-const nodeRuntimeBin = buildBackend('ggs-node', 'node-runtime');
+/* 3. The sidecar binaries — both are their own packages now (the restructure's
+ *    P2-8/P2-9): ggs-node (the pretend Node runtime, the default `node`-backend host,
+ *    whose N-API host loads a package's `.node`) builds on its own ggs-node profile,
+ *    ggs-bash (Windows-only) on release. A package's own `.node` addon arrives inside
+ *    its VSIX — nothing of any plugin compiles here anymore. */
+const nodeRuntimeBin = sidecarBinary('ggs-node', 'ggs-node');
 // GGS Bash (module 18, Windows-only since 2026-10-14) is its own package now (the
 // restructure's P2-8): built here and staged as an externalBin copy like ggs-node —
 // the app crate no longer compiles the shell at all.

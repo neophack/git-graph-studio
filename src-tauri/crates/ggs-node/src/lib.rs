@@ -2,7 +2,7 @@
 //! package's own JavaScript entry as its backend, so a VSIX that declares
 //! `backend: { "kind": "node", "command": "out/main.js" }` runs — CommonJS `require`
 //! ([`require`]) and the file/os/process builtins ([`builtins`]) layered by the JS prelude,
-//! speaking `ggs-ext/1` on stdio like every other backend (`ext_protocol.rs`), so the
+//! speaking `ggs-ext/1` on stdio like every other backend (the ggs-proto crate), so the
 //! process host cannot tell it apart.
 //!
 //! This runtime needs nothing from the machine: the app never depends on, or spawns, a
@@ -1697,7 +1697,7 @@ fn builtins_buffer(context: &mut Context, bytes: Vec<u8>) -> Result<JsValue, ()>
         .map_err(|_| ())?;
     let from = from.as_object().ok_or(())?;
     let bytes = boa_engine::object::builtins::JsArrayBuffer::from_byte_block(
-        crate::node_runtime::byte_block(bytes),
+        crate::byte_block(bytes),
         context,
     )
     .map_err(|_| ())?;

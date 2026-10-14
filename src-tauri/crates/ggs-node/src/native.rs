@@ -112,7 +112,7 @@ mod tests {
             load(&engine, &mut context).expect("the engine registers over N-API");
         // The sync export answers the engine's version.
         let version = exports
-            .get(crate::node_runtime::key("engineVersion"), &mut context)
+            .get(crate::key("engineVersion"), &mut context)
             .expect("engineVersion is exported")
             .as_object()
             .and_then(|function| {
@@ -134,7 +134,7 @@ mod tests {
         // call queues, the drain delivers it, the deferred resolves, run_jobs settles the
         // promise chain.
         let request = exports
-            .get(crate::node_runtime::key("request"), &mut context)
+            .get(crate::key("request"), &mut context)
             .expect("request is exported");
         let promise = request
             .as_object()
@@ -143,8 +143,8 @@ mod tests {
                     .call(
                         &JsObject::with_object_proto(context.intrinsics()).into(),
                         &[
-                            crate::node_runtime::text(""),
-                            crate::node_runtime::text(
+                            crate::text(""),
+                            crate::text(
                                 "{\"method\":\"engineVersion\",\"params\":{}}",
                             ),
                         ],
@@ -160,7 +160,7 @@ mod tests {
             .as_object()
             .and_then(|object| {
                 object
-                    .get(crate::node_runtime::key("then"), &mut context)
+                    .get(crate::key("then"), &mut context)
                     .ok()
                     .and_then(|then| then.as_object())
             })
@@ -206,7 +206,7 @@ mod tests {
                     let answer = args.get_or_undefined(0).clone();
                     let global = context.global_object().clone();
                     global.set(
-                        crate::node_runtime::key("__ggsAnswer"),
+                        crate::key("__ggsAnswer"),
                         answer,
                         false,
                         context,

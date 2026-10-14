@@ -4,7 +4,7 @@
 use boa_engine::{Context, JsObject, JsResult, JsValue, NativeFunction};
 
 use super::support::*;
-use crate::node_runtime::{key, native_callable, text};
+use crate::{key, native_callable, text};
 
 pub(super) fn path_module(context: &mut Context) -> JsResult<JsObject> {
     let module = JsObject::with_object_proto(context.intrinsics());

@@ -125,16 +125,6 @@ name = "git-graph-studio"
 path = "src/main.rs"
 required-features = ["desktop"]
 
-# The pretend Node runtime (`src/node_runtime/`, the `node-runtime` feature): the
-# app-bundled sidecar that runs a `ggs/2` package's own JS entry — CommonJS `require` and
-# the file/os/process builtins — speaking `ggs-ext/1` on stdio like every backend. The
-# default `node`-backend host; its N-API host loads a package's `.node` too. Read-only: no
-# `desktop` feature, no window.
-[[bin]]
-name = "ggs-node"
-path = "src/bin/ggs_node.rs"
-required-features = ["node-runtime"]
-
 # `ggs-config` (module 19): the one-command Remote Access setup — install the tray
 # daemon, set the access password, connect a relay, print the links, all from a command
 # line (an SSH session on a fresh machine). No `desktop` feature: no window can open.
@@ -144,12 +134,6 @@ path = "src/bin/ggs_config.rs"
 
 [features]
 default = ["desktop"]
-# The pretend Node runtime's JS engine (`src/node_runtime/`): Boa is pure Rust (plan §3.1 —
-# no C bindings at all). The runtime is the default host for `node` backends (`GGS_REAL_NODE=1`
-# opts a system Node in); a package's `.node` loads right here through the N-API host.
-# base64/hex are the fs module's own encodings (`readFileSync(path, 'base64' | 'hex')`).
-# ureq is the HTTP(S) client under `fetch` and `http(s).request` (rustls, the app's own client).
-node-runtime = ["dep:boa_engine", "dep:base64", "dep:hex", "dep:libloading", "dep:sha1", "dep:md-5", "dep:sha2", "dep:getrandom", "dep:ureq", "dep:bincode", "dep:aes-gcm", "dep:pbkdf2", "dep:hmac", "dep:if-addrs"]
 # Test-only surfaces: the `test_support` module and the `*_for_tests` hooks stay out of every
 # shipped binary (docs/architecture-restructure-plan.md P1-4) — this crate's own tests get
 # them through `cfg(test)`; an external test harness linking the lib turns this feature on.
@@ -236,35 +220,14 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 rpassword = { workspace = true }
 portable-pty = { workspace = true, optional = true }
-# The pretend Node runtime's JS engine (`src/node_runtime/`, the `node-runtime` feature):
-# pure Rust, so the sidecar stays free of C bindings (plan §3.1). It runs a package's own
-# `main` as its backend: CommonJS `require` and the file/os/process builtins. A package's
-# engine-layout `.node` loads over its C-ABI JSON channel (`native.rs`); a NAPI-only
-# addon needs a real Node runtime (nodeHost.ts, the `GGS_REAL_NODE` opt-in).
-boa_engine = { workspace = true, optional = true }
-# The `.node` loader (`node_runtime/native.rs`): dlopen and the `git_graph_capi_*`
-# symbols of an engine-layout addon — the sanctioned C-ABI seam, not a N-API runtime.
-libloading = { workspace = true, optional = true }
 ureq = { workspace = true, optional = true }
 sha1 = { workspace = true, optional = true }
-# The `crypto` builtin's digests (md5 / sha256; sha1 above serves the desktop features too).
-md-5 = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 # The ggs-node `crypto` builtin's cipher and KDF (aes-256-gcm seal/open, PBKDF2-HMAC-SHA256):
 # pure Rust (RustCrypto), so the pretend-Node plan's no-C-bindings rule holds. Backs the
 # natives `__ggsAesGcmSeal` / `__ggsAesGcmOpen` / `__ggsPbkdf2Sha256` that the prelude's
 # `createCipheriv` / `createDecipheriv` / `pbkdf2Sync` wrap.
 aes-gcm = { workspace = true, optional = true }
-pbkdf2 = { workspace = true, optional = true }
-hmac = { workspace = true, optional = true }
-# The module bytecode cache (ggs-node's require): the compiled tree crosses as bincode.
-bincode = { workspace = true, optional = true }
-# The `os` builtin's `networkInterfaces()` (ggs-node): the interface list over the OS
-# APIs (getifaddrs / GetAdaptersAddresses — system bindings like the pty, no C source
-# compiled). Claude Remote's pairing QR needs the LAN addresses; the engine itself stays
-# pure Rust.
-if-addrs = { workspace = true, optional = true }
-# The `crypto` builtin's randomBytes / randomUUID / getRandomValues: the OS generator.
 getrandom = { workspace = true, optional = true }
 # The AI provider store's key sealing (cmd_providers): AES-256-GCM, pure Rust (plan §3.1) —
 # a provider's API key is encrypted at rest under a per-install master key and decrypted

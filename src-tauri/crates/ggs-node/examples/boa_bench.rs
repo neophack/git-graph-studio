@@ -4,13 +4,13 @@ use boa_engine::{Context, Script, Source};
 use std::time::Instant;
 
 #[global_allocator]
-static ALLOC: git_graph_studio_lib::node_runtime::alloc::GgsAlloc =
-    git_graph_studio_lib::node_runtime::alloc::GgsAlloc;
+static ALLOC: ggs_node::alloc::GgsAlloc =
+    ggs_node::alloc::GgsAlloc;
 
 fn main() {
     // Link the library (build.rs exports its napi_* symbols from every binary).
     if std::env::var_os("BOA_BENCH_NEVER").is_some() {
-        git_graph_studio_lib::node_runtime::run();
+        ggs_node::run();
     }
     if std::env::var_os("BOA_SIZES").is_some() {
         use boa_engine::ast::*;
@@ -176,7 +176,7 @@ fn main() {
         return;
     }
     if std::env::var_os("BENCH_NO_CACHE").is_none() {
-        git_graph_studio_lib::node_runtime::alloc::enable_thread_cache();
+        ggs_node::alloc::enable_thread_cache();
     }
     let mut args = std::env::args().skip(1);
     let path = args.next().expect("a JS file");

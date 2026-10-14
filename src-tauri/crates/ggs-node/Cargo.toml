@@ -1,0 +1,46 @@
+[package]
+name = "ggs-node"
+version = "0.0.0"
+description = "The pretend Node runtime sidecar — Boa on one JS thread, the ggs-ext/1 wire protocol on stdio, a package's .node through the N-API host"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+default-run = "ggs-node"
+build = "build.rs"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "ggs-node"
+path = "src/main.rs"
+
+[dependencies]
+ggs-proto.workspace = true
+# The JS engine, through the root [patch.crates-io] table's vendored 0.21.1 (the GGS
+# patches: scope-index maps, source reserve, the bytecode cache, the crash-proofing).
+boa_engine = { workspace = true }
+# The .node loader (native.rs): dlopen of an engine-layout addon.
+libloading = { workspace = true }
+# The HTTP(S) client under fetch and http(s).request (rustls).
+ureq = { workspace = true }
+# The os builtin's networkInterfaces().
+if-addrs = { workspace = true }
+# The crypto builtin's digests, cipher and KDF.
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+md-5 = { workspace = true }
+aes-gcm = { workspace = true }
+pbkdf2 = { workspace = true }
+hmac = { workspace = true }
+getrandom = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+# The module bytecode cache (require): the compiled tree crosses as bincode.
+bincode = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

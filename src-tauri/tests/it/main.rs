@@ -6,12 +6,11 @@
 //! `cargo test --release --test it perf -- --nocapture`.
 //!
 //! The suites gate themselves on the features they need (`#![cfg]` at each module's
-//! top): `node_runtime` and `vscode_shim_boa` need the `node-runtime` feature,
-//! `remote_control_vectors` the `desktop` one; the rest compile under any feature set.
-//! (The ggs-bash CLI suite moved to its own package at P2-8:
-//! crates/ggs-bash/tests/cli.rs — one link of the shell, not of the whole app.)
+//! top): `remote_control_vectors` needs the `desktop` one; the rest compile under any
+//! feature set. (The ggs-bash CLI suite moved to its own package at P2-8
+//! (crates/ggs-bash/tests/cli.rs), the node-runtime and vscode-shim-boa suites at
+//! P2-9 (crates/ggs-node/tests/) — one link each of the sidecar, not of the whole app.)
 
-mod node_runtime;
+mod node_runtime_host;
 mod perf;
 mod remote_control_vectors;
-mod vscode_shim_boa;

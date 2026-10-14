@@ -9,7 +9,7 @@ use boa_engine::{Context, JsArgs, JsObject, JsResult, JsValue, NativeFunction};
 use serde_json::{json, Value};
 
 use super::support::*;
-use crate::node_runtime::{children, key, native_callable, with_state, Job, ProcEntry};
+use crate::{children, key, native_callable, with_state, Job, ProcEntry};
 
 /// The next child handle, unique across every runtime in the process.
 static NEXT_PROC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -38,7 +38,7 @@ fn spawn_request(args: &[JsValue], context: &mut Context) -> JsResult<SpawnReque
                 .map(|s| s.to_std_string_escaped());
             let env = match options.get(key("env"), context)? {
                 env if env.is_undefined() || env.is_null() => None,
-                env => match crate::node_runtime::json_of(context, &env)
+                env => match crate::json_of(context, &env)
                     .ok()
                     .and_then(|json| json.as_object().cloned())
                 {
@@ -191,7 +191,7 @@ pub(super) fn proc_spawn(
         stream: u8,
         source: S,
         handle: u64,
-        pump: crate::node_runtime::Pump,
+        pump: crate::Pump,
     ) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             let mut reader = source;

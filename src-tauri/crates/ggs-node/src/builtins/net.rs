@@ -19,7 +19,7 @@ use boa_engine::{Context, JsArgs, JsResult, JsValue};
 use serde_json::{json, Value};
 
 use super::support::*;
-use crate::node_runtime::{with_state, Job, Pump};
+use crate::{with_state, Job, Pump};
 
 /// One queued operation for a socket's writer thread.
 enum WriteOp {
@@ -480,7 +480,7 @@ pub(super) fn http_request(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let spec = crate::node_runtime::json_of(context, args.get_or_undefined(0))
+    let spec = crate::json_of(context, args.get_or_undefined(0))
         .map_err(|e| error(format!("http request options: {e}")))?;
     let body = bytes_arg(args.get_or_undefined(1), context);
     let id = next_id();

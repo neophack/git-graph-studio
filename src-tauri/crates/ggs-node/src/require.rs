@@ -16,7 +16,7 @@ use boa_engine::{
     Context, JsError, JsNativeError, JsObject, JsResult, JsValue, NativeFunction, Script, Source,
 };
 
-use crate::node_runtime::{key, text, with_state};
+use crate::{key, text, with_state};
 use boa_engine::JsArgs;
 
 /// The deepest single-frame register file a module may compile to before its wrapper is

@@ -39,7 +39,7 @@ function checkEngineSeam(errors) {
 	const cratesDir = join(srcTauri, 'crates');
 	if (existsSync(cratesDir)) {
 		for (const entry of readdirSync(cratesDir, { withFileTypes: true })) {
-			if (entry.isDirectory()) roots.push(join(cratesDir, entry.name, 'src'), join(cratesDir, entry.name, 'build.rs'));
+			if (entry.isDirectory()) roots.push(join(cratesDir, entry.name, 'src'));
 		}
 	}
 	for (const root of roots) {
@@ -47,6 +47,13 @@ function checkEngineSeam(errors) {
 			if (codeForm.test(readFileSync(file, 'utf8'))) {
 				errors.push(`${relative(appDir, file).split(sep).join('/')}: names git-graph-core — the engine is a plugin, nothing in this tree links it`);
 			}
+		}
+	}
+	// The crates' build scripts only (the app's own build.rs IMPLEMENTS the legacy
+	// engine-seam scan, so it necessarily carries the literal it searches for).
+	for (const buildScript of listFiles(cratesDir, 'build.rs')) {
+		if (existsSync(buildScript) && codeForm.test(readFileSync(buildScript, 'utf8'))) {
+			errors.push(`${relative(appDir, buildScript).split(sep).join('/')}: names git-graph-core — the engine is a plugin, nothing in this tree links it`);
 		}
 	}
 	for (const manifest of [join(srcTauri, 'Cargo.toml'), ...listFiles(cratesDir, 'Cargo.toml')]) {

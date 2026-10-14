@@ -15,13 +15,6 @@
 //! git runner `git` — are always compiled; everything that needs a window is behind
 //! `desktop`.
 
-/// The pretend Node runtime (the `ggs-node` sidecar): runs a package's own JS entry —
-/// CommonJS and the builtins — speaking `ggs-ext/1` on stdio. The default host for every
-/// `node` backend; its N-API host loads a package's `.node` too. A system Node hosts the
-/// entries only under the `GGS_REAL_NODE=1` opt-in (nodeHost.ts). Behind the
-/// `node-runtime` feature, like every sidecar.
-#[cfg(feature = "node-runtime")]
-pub mod node_runtime;
 // Test-only: scratch repositories and the isolated extension store — never compiled into
 // a shipped binary. `cfg(test)` serves this crate's own tests; the `testkit` feature
 // serves an external test harness linking the lib. P2-12 moves it to the ggs-testkit

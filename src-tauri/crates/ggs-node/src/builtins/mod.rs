@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use boa_engine::{Context, JsObject, JsResult, JsValue, NativeFunction};
 
-use crate::node_runtime::{key, with_state};
+use crate::{key, with_state};
 use support::error;
 
 /* ---------- the registry: what `require` answers for a core name ---------- */
@@ -278,7 +278,7 @@ pub fn register_natives(context: &mut Context) -> JsResult<()> {
     context
         .global_object()
         .set(key("__ggsFs"), fs::fs_module(context)?, false, context)?;
-    crate::node_runtime::require::register_natives(context)?;
+    crate::require::register_natives(context)?;
     Ok(())
 }
 

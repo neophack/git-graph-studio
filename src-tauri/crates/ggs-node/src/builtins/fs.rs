@@ -8,7 +8,7 @@ use boa_engine::{Context, JsArgs, JsObject, JsResult, JsValue, NativeFunction};
 use serde_json::{json, Value};
 
 use super::support::*;
-use crate::node_runtime::{key, native_callable, text};
+use crate::{key, native_callable, text};
 
 /// An fs failure in Node's message shape, `CODE: subject: OS message`. The code comes from
 /// the error kind, never the message text — OS messages are localized — and the prelude
@@ -182,7 +182,7 @@ fn fs_read_file_bytes(
 ) -> JsResult<JsValue> {
     let path = string_arg(args, 0, context);
     let bytes = std::fs::read(&path).map_err(|e| io_error(&path, &e))?;
-    JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(bytes), context)
+    JsArrayBuffer::from_byte_block(crate::byte_block(bytes), context)
         .map(JsValue::from)
 }
 
@@ -205,7 +205,7 @@ fn fs_read_range_bytes(
     file.take(length)
         .read_to_end(&mut bytes)
         .map_err(|e| io_error(&path, &e))?;
-    JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(bytes), context)
+    JsArrayBuffer::from_byte_block(crate::byte_block(bytes), context)
         .map(JsValue::from)
 }
 

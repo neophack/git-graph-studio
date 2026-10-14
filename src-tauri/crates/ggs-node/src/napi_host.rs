@@ -535,7 +535,7 @@ macro_rules! napi_fn {
                     eprintln!(
                         "[ggs-node] {} panicked: {}; the call fails instead of the backend",
                         stringify!($name),
-                        crate::node_runtime::panic_message(payload.as_ref()),
+                        crate::panic_message(payload.as_ref()),
                     );
                     NAPI_GENERIC_FAILURE
                 }
@@ -629,7 +629,7 @@ napi_fn!(napi_create_array_with_length(env: *mut c_void, length: usize, result: 
     if result.is_null() { return NAPI_INVALID_ARG; }
     let array = boa_engine::object::builtins::JsArray::new(context());
     array
-        .set(crate::node_runtime::key("length"), JsValue::from(length as u32), false, context())
+        .set(crate::key("length"), JsValue::from(length as u32), false, context())
         .ok();
     *result = any_env().handle(array.into());
     NAPI_OK
@@ -667,7 +667,7 @@ napi_fn!(napi_create_string_utf8(env: *mut c_void, text: *const c_char, length: 
     let Some(_) = env_mut(env) else { return NAPI_INVALID_ARG };
     if result.is_null() { return NAPI_INVALID_ARG; }
     let Some(text) = utf8_or_latin1(text, length) else { return NAPI_INVALID_ARG };
-    *result = any_env().handle(crate::node_runtime::text(text));
+    *result = any_env().handle(crate::text(text));
     NAPI_OK
 });
 
@@ -675,7 +675,7 @@ napi_fn!(napi_create_string_latin1(env: *mut c_void, text: *const c_char, length
     let Some(_) = env_mut(env) else { return NAPI_INVALID_ARG };
     if result.is_null() { return NAPI_INVALID_ARG; }
     let Some(text) = utf8_or_latin1(text, length) else { return NAPI_INVALID_ARG };
-    *result = any_env().handle(crate::node_runtime::text(text));
+    *result = any_env().handle(crate::text(text));
     NAPI_OK
 });
 
@@ -695,7 +695,7 @@ napi_fn!(napi_create_string_utf16(env: *mut c_void, text: *const u16, length: is
     };
     let units = unsafe { std::slice::from_raw_parts(text, length) };
     let text = String::from_utf16_lossy(units);
-    *result = any_env().handle(crate::node_runtime::text(text));
+    *result = any_env().handle(crate::text(text));
     NAPI_OK
 });
 
@@ -887,7 +887,7 @@ napi_fn!(napi_set_named_property(env: *mut c_void, object: *mut c_void, name: *c
     let Some(target) = object_of(object) else { return NAPI_INVALID_ARG };
     let Some(value) = value_of(value) else { return NAPI_INVALID_ARG };
     ok_or_pending!(env, {
-        target.set(crate::node_runtime::key(&name), value, false, context())?;
+        target.set(crate::key(&name), value, false, context())?;
         NAPI_OK
     })
 });
@@ -898,7 +898,7 @@ napi_fn!(napi_get_named_property(env: *mut c_void, object: *mut c_void, name: *c
     let Some(target) = object_of(object) else { return NAPI_INVALID_ARG };
     if result.is_null() { return NAPI_INVALID_ARG };
     ok_or_pending!(env, {
-        let value = target.get(crate::node_runtime::key(&name), context())?;
+        let value = target.get(crate::key(&name), context())?;
         *result = any_env().handle(value);
         NAPI_OK
     })
@@ -909,7 +909,7 @@ napi_fn!(napi_has_named_property(env: *mut c_void, object: *mut c_void, name: *c
     let Some(name) = utf8_or_latin1(name, -1) else { return NAPI_INVALID_ARG };
     let Some(target) = object_of(object) else { return NAPI_INVALID_ARG };
     ok_or_pending!(env, {
-        let present = target.has_property(crate::node_runtime::key(&name), context())?;
+        let present = target.has_property(crate::key(&name), context())?;
         if !result.is_null() { *result = present; }
         NAPI_OK
     })
@@ -996,7 +996,7 @@ napi_fn!(napi_get_array_length(env: *mut c_void, array: *mut c_void, result: *mu
     let Some(_) = env_mut(env) else { return NAPI_INVALID_ARG };
     let Some(target) = object_of(array) else { return NAPI_INVALID_ARG };
     ok_or_pending!(env, {
-        let length = target.get(crate::node_runtime::key("length"), context())?;
+        let length = target.get(crate::key("length"), context())?;
         if !result.is_null() { *result = length.as_number().unwrap_or(0.0) as u32; }
         NAPI_OK
     })
@@ -1136,7 +1136,7 @@ napi_fn!(napi_define_properties(env: *mut c_void, object: *mut c_void, count: us
         for property in properties {
             let (key, name) = if !property.utf8name.is_null() {
                 let name = utf8_or_latin1(property.utf8name, -1).unwrap_or_default();
-                (crate::node_runtime::key(&name), name)
+                (crate::key(&name), name)
             } else {
                 let Some(key) = value_of(property.name) else { return Ok(NAPI_INVALID_ARG) };
                 let name = key.to_string(context())?.to_std_string_escaped();
@@ -1323,7 +1323,7 @@ napi_fn!(napi_is_error(_env: *mut c_void, value: *mut c_void, result: *mut bool)
     let truthy = value
         .as_object()
         .and_then(|object| {
-            let name = object.get(crate::node_runtime::key("name"), context()).ok()?;
+            let name = object.get(crate::key("name"), context()).ok()?;
             name.as_string().map(|text| text.to_std_string_escaped())
         })
         .is_some_and(|name| name.ends_with("Error"));
@@ -1407,10 +1407,10 @@ napi_fn!(napi_is_promise(env: *mut c_void, value: *mut c_void, result: *mut bool
     let truthy = value
         .as_object()
         .and_then(|object| {
-            let constructor = object.get(crate::node_runtime::key("constructor"), context()).ok()?;
+            let constructor = object.get(crate::key("constructor"), context()).ok()?;
             constructor
                 .as_object()
-                .and_then(|named| named.get(crate::node_runtime::key("name"), context()).ok())
+                .and_then(|named| named.get(crate::key("name"), context()).ok())
                 .and_then(|name| name.as_string().map(|text| text.to_std_string_escaped()))
                 .map(|name| name == "Promise")
         })

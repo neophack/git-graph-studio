@@ -4,7 +4,7 @@
 use boa_engine::object::builtins::{JsArrayBuffer, JsTypedArray};
 use boa_engine::{Context, JsArgs, JsError, JsNativeError, JsResult, JsValue};
 
-use crate::node_runtime::key;
+use crate::key;
 
 pub(crate) fn error(message: impl Into<String>) -> JsError {
     JsError::from_native(JsNativeError::error().with_message(message.into()))
@@ -79,7 +79,7 @@ pub(super) fn bytes_arg(value: &JsValue, context: &mut Context) -> Option<Vec<u8
 /// A Buffer for bytes crossing back into JS, built through the prelude's `Buffer.from`.
 pub(super) fn buffer_value(bytes: Vec<u8>, context: &mut Context) -> JsResult<JsValue> {
     let array_buffer =
-        JsArrayBuffer::from_byte_block(crate::node_runtime::byte_block(bytes), context)?;
+        JsArrayBuffer::from_byte_block(crate::byte_block(bytes), context)?;
     let global = context.global_object();
     let buffer = global.get(key("Buffer"), context)?;
     let from = buffer
