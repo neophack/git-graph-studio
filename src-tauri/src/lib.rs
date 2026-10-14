@@ -71,10 +71,6 @@ pub mod mcp;
 pub mod measure;
 #[cfg(feature = "desktop")]
 pub mod pty;
-/// `ggs-config` (module 19): the one-command Remote Access setup from a command line —
-/// no window, so no `desktop` feature: the `ggs-config` binary and the `ggs config`
-/// subcommand build and run headless.
-pub mod remote_config;
 /// Remote Access (module 19): this instance's registration with a local `ggs-remote/1`
 /// daemon, the remote workbench's assets and the hidden Relay webview.
 #[cfg(feature = "desktop")]
@@ -1403,7 +1399,7 @@ mod desktop {
         // `ggs config` / `ggs-config` (either spelling, module 19): the one-command
         // Remote Access setup — password, relay, links — from a command line, no window.
         if args.get(1).map(String::as_str) == Some("config") {
-            std::process::exit(crate::remote_config::run(&args[2..]));
+            std::process::exit(ggs_config::run(&args[2..]));
         }
         // `git-graph-studio --measure <folder>` runs the performance probes headless and prints
         // JSON (scripts/measure.mjs folds it into metrics.json); no window is created.

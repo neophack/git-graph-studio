@@ -48,8 +48,8 @@ const REMOTE_RULES = [
 		because: 'Tauri internals are reached only through src/remote/assetUrl.ts (and the remote shims)'
 	},
 	{
-		pattern: /ggs-remote(?!\/1|-plan|-e2e\/1|-uuid\/1)|ggsRemote/,
-		allowed: (rel) => rel === 'src-tauri/src/remote_config.rs',
+		pattern: /ggs-remote(?!\/1|-plan|-e2e\/1|-uuid\/1|-proto)|ggsRemote/,
+		allowed: (rel) => rel === 'src-tauri/crates/ggs-config/src/lib.rs',
 		because: 'the app names the ggs-remote/1 protocol, never the GGS Remote extension (remote_config.rs — the ggs-config CLI that drives the daemon — alone excepted)'
 	}
 ];

@@ -100,6 +100,7 @@ ggs-codec = { path = "crates/ggs-codec" }
 ggs-git = { path = "crates/ggs-git" }
 ggs-shellenv = { path = "crates/ggs-shellenv" }
 ggs-remote-proto = { path = "crates/ggs-remote-proto" }
+ggs-config = { path = "crates/ggs-config" }
 
 # The pretend Node runtime's parser, carrying one upstream gap fix: Boa's class-expression
 # parser dropped a contextual-keyword name, so legal code real packages ship —
@@ -125,13 +126,6 @@ path = "src/lib.rs"
 name = "git-graph-studio"
 path = "src/main.rs"
 required-features = ["desktop"]
-
-# `ggs-config` (module 19): the one-command Remote Access setup — install the tray
-# daemon, set the access password, connect a relay, print the links, all from a command
-# line (an SSH session on a fresh machine). No `desktop` feature: no window can open.
-[[bin]]
-name = "ggs-config"
-path = "src/bin/ggs_config.rs"
 
 [features]
 default = ["desktop"]
@@ -219,6 +213,8 @@ ggs-git = { workspace = true }
 ggs-shellenv = { workspace = true }
 # The Remote Access control-channel messages (remote_host and the daemon share them).
 ggs-remote-proto = { workspace = true }
+# The one-command Remote Access setup CLI (the `ggs config` dispatch reaches it).
+ggs-config = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rpassword = { workspace = true }

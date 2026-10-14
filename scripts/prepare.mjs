@@ -124,12 +124,13 @@ function sidecarBinary(bin, profile) {
 // the real-Node host bundle, the marketplace fetch, the GGS Remote daemon), and a test
 // compile embeds none of it.
 if (iconsOnly) {
-	// Windows alone: stage the ggs-bash sidecar copy tauri.windows.conf.json's
-	// externalBin names — tauri-build verifies the path on every compile of the app,
-	// so even a test-compile pass needs it present (the restructure's P2-8).
+	// Stage every sidecar copy the platform's externalBin names — tauri-build
+	// verifies the paths on every compile of the app, so even a test-compile pass
+	// needs them present (the restructure's P2-8/P2-9/P2-11).
+	stageSidecar(sidecarBinary('ggs-node', 'ggs-node'), 'ggs-node');
+	stageSidecar(sidecarBinary('ggs-config', 'release'), 'ggs-config');
 	if (process.platform === 'win32') {
-		const built = sidecarBinary('ggs-bash', 'release');
-		stageSidecar(built, 'ggs-bash');
+		stageSidecar(sidecarBinary('ggs-bash', 'release'), 'ggs-bash');
 	}
 	console.log(`Prepared ${appIcons} (icons only)`);
 	process.exit(0);
@@ -141,6 +142,9 @@ if (iconsOnly) {
  *    ggs-bash (Windows-only) on release. A package's own `.node` addon arrives inside
  *    its VSIX — nothing of any plugin compiles here anymore. */
 const nodeRuntimeBin = sidecarBinary('ggs-node', 'ggs-node');
+// ggs-config (module 19): the one-command Remote Access setup, shipped on every
+// platform (the restructure's P2-11) — release like ggs-bash.
+const ggsConfigBin = sidecarBinary('ggs-config', 'release');
 // GGS Bash (module 18, Windows-only since 2026-10-14) is its own package now (the
 // restructure's P2-8): built here and staged as an externalBin copy like ggs-node —
 // the app crate no longer compiles the shell at all.
@@ -150,6 +154,7 @@ const ggsBashBin = process.platform === 'win32' ? sidecarBinary('ggs-bash', 'rel
 {
 	stageSidecar(nodeRuntimeBin, 'ggs-node');
 	if (ggsBashBin) stageSidecar(ggsBashBin, 'ggs-bash');
+	stageSidecar(ggsConfigBin, 'ggs-config');
 }
 
 /* 3½. The real-Node extension host bundle (`node-host.cjs`): the entry a system Node runs

@@ -1979,6 +1979,15 @@ name = "ggs-codec"
 version = "0.0.0"
 
 [[package]]
+name = "ggs-config"
+version = "0.0.0"
+dependencies = [
+ "ggs-codec",
+ "rpassword",
+ "serde_json",
+]
+
+[[package]]
 name = "ggs-git"
 version = "0.0.0"
 dependencies = [
@@ -2092,6 +2101,7 @@ dependencies = [
  "getrandom 0.2.17",
  "ggs-base",
  "ggs-codec",
+ "ggs-config",
  "ggs-git",
  "ggs-proto",
  "ggs-remote-proto",

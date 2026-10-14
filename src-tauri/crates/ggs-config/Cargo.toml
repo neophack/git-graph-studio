@@ -1,0 +1,21 @@
+[package]
+name = "ggs-config"
+version = "0.0.0"
+description = "The one-command Remote Access setup — install the tray daemon, set the password, connect a relay"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+default-run = "ggs-config"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "ggs-config"
+path = "src/main.rs"
+
+[dependencies]
+ggs-codec.workspace = true
+serde_json.workspace = true
+rpassword.workspace = true
