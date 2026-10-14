@@ -160,6 +160,19 @@ async fn run(hub: Arc<Hub>, socket: WebSocket, peer: SocketAddr, host: Option<St
         return;
     }
 
+    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let tunnel = Arc::new(hub.new_tunnel(uuid.clone(), tx));
+    // The tunnel joins the table BEFORE T_READY leaves: the daemon reports Online the
+    // instant it hears T_READY, and a request landing in the gap between the send and
+    // the registration found the uuid "not online" — the first login after `wait_online`
+    // raced it and drew a 503 under CI load.
+    if let Some(displaced) = hub.register(uuid.clone(), tunnel.clone()) {
+        // The same device key connected again: the newcomer wins (§20.1). The old tunnel's
+        // run loop sees T_REPLACED on its own writer, tells its browsers, and unwinds.
+        let _ = displaced.send(&Frame::raw(ty::T_REPLACED, 0, Vec::new()));
+        displaced.close_all(1001, "link-changed");
+        crate::info!("tunnel {uuid}: replaced by a newer connection");
+    }
     let public_origin = hub.config.public_origin(host.as_deref());
     let base_path = format!("/u/{uuid}/");
     let ready = Frame::msgpack(
@@ -179,17 +192,9 @@ async fn run(hub: Arc<Hub>, socket: WebSocket, peer: SocketAddr, host: Option<St
         .await
         .is_err()
     {
+        hub.unregister(&uuid, tunnel.id);
+        tunnel.close_all(4503, "pc-offline");
         return;
-    }
-
-    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let tunnel = Arc::new(hub.new_tunnel(uuid.clone(), tx));
-    if let Some(displaced) = hub.register(uuid.clone(), tunnel.clone()) {
-        // The same device key connected again: the newcomer wins (§20.1). The old tunnel's
-        // run loop sees T_REPLACED on its own writer, tells its browsers, and unwinds.
-        let _ = displaced.send(&Frame::raw(ty::T_REPLACED, 0, Vec::new()));
-        displaced.close_all(1001, "link-changed");
-        crate::info!("tunnel {uuid}: replaced by a newer connection");
     }
     crate::info!("tunnel {uuid} online from {}", peer.ip());
     hub.audit.log(
