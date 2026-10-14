@@ -238,7 +238,7 @@ pub fn extensions_home_dir() -> Result<PathBuf, String> {
     // Tests pin the store to an isolated empty directory (`test_support::isolated_extension_store`):
     // the developer's real `~/.ggs/extensions` may well hold a backend-carrying package (any run
     // of the app installs one), and "no backend reachable" assertions must not depend on that.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testkit"))]
     if let Some(dir) = TEST_EXTENSIONS_HOME.lock().unwrap().clone() {
         return Ok(dir);
     }
@@ -247,15 +247,15 @@ pub fn extensions_home_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testkit"))]
 static TEST_EXTENSIONS_HOME: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testkit"))]
 pub(crate) fn pin_extensions_home_for_tests(dir: PathBuf) {
     *TEST_EXTENSIONS_HOME.lock().unwrap() = Some(dir);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testkit"))]
 pub(crate) fn unpin_extensions_home_for_tests() {
     *TEST_EXTENSIONS_HOME.lock().unwrap() = None;
 }

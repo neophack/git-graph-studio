@@ -82,6 +82,11 @@ ggs-bash = []
 # base64/hex are the fs module's own encodings (`readFileSync(path, 'base64' | 'hex')`).
 # ureq is the HTTP(S) client under `fetch` and `http(s).request` (rustls, the app's own client).
 node-runtime = ["dep:boa_engine", "dep:base64", "dep:hex", "dep:libloading", "dep:sha1", "dep:md-5", "dep:sha2", "dep:getrandom", "dep:ureq", "dep:bincode", "dep:aes-gcm", "dep:pbkdf2", "dep:hmac", "dep:if-addrs"]
+# Test-only surfaces: the `test_support` module and the `*_for_tests` hooks stay out of every
+# shipped binary (docs/architecture-restructure-plan.md P1-4) — this crate's own tests get
+# them through `cfg(test)`; an external test harness linking the lib turns this feature on.
+# tempfile joins as an optional regular dependency so such a harness can build it.
+testkit = ["dep:tempfile"]
 desktop = [
     "dep:tauri",
     "dep:tauri-plugin-dialog",
@@ -230,6 +235,10 @@ tokio = { version = "1", features = ["io-util", "sync", "time", "rt"], optional 
 # The file-system watcher behind "external changes show up by themselves" (watcher.rs).
 notify = { version = "8", default-features = false, features = ["macos_fsevent"], optional = true }
 trash = { version = "5", optional = true }
+# The testkit feature's scratch directories (test_support): optional as a regular
+# dependency so an external test harness enabling `testkit` can build it; this crate's
+# own tests get it through [dev-dependencies] below.
+tempfile = { version = "3", optional = true }
 # The tree-sitter parser layer (plan M4.1, symbols/parse.rs): the core runtime plus one
 # grammar crate per language, each behind its `grammar-*` feature. On the 0.26 line because
 # big-code-analysis (below) is compiled against it — one core for both engines. The grammar

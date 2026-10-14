@@ -33,6 +33,11 @@ pub mod git;
 /// `node-runtime` feature, like every sidecar.
 #[cfg(feature = "node-runtime")]
 pub mod node_runtime;
+// Test-only: scratch repositories and the isolated extension store — never compiled into
+// a shipped binary. `cfg(test)` serves this crate's own tests; the `testkit` feature
+// serves an external test harness linking the lib. P2-12 moves it to the ggs-testkit
+// dev-dependency crate (docs/architecture-restructure-plan.md P1-4).
+#[cfg(any(test, feature = "testkit"))]
 pub mod test_support;
 
 #[cfg(feature = "desktop")]

@@ -7,9 +7,16 @@
 // Wired into every path that compiles the frontend: scripts/prepare.mjs runs it first, the
 // Vite plugin (vite.config.ts) runs it on every dev-server start and production build, and
 // vitest runs it as its global setup. A violation fails the build with the file list below.
+//
+// The seam rules proper live in ./ts-import-graph.mjs (the layer/import-graph rules of
+// docs/architecture-restructure-plan.md §5.2) and, once the Rust workspace lands,
+// ./check-crate-graph.mjs and ./check-ipc.mjs — all invoked from checkSeams().
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkImportGraph } from './ts-import-graph.mjs';
+import { checkIpc } from './check-ipc.mjs';
+import { checkCrateGraph } from './check-crate-graph.mjs';
 
 const appDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -85,6 +92,9 @@ export function checkSeams() {
 	if (violations.length > 0) {
 		throw new Error(`Git Graph seam violations (docs/ggs-development-plan.md §3.7):\n  ${violations.join('\n  ')}`);
 	}
+	checkImportGraph();
+	checkIpc();
+	checkCrateGraph();
 	return scanned.length;
 }
 
