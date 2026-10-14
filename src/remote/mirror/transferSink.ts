@@ -2,7 +2,7 @@
 // is the workbench's own toasts — DOM this page never builds (`#notifications` belongs to
 // the workbench the PC runs). The mirror's sink is one small card over the copy: a progress
 // toast while an upload streams, the outcome notices after.
-import { setTransferSink, type TransferSink } from '../transfer';
+import { setTransferSink, type TransferSink } from '../../transfer';
 
 function card(message: string, kind: 'info' | 'error' | 'progress' = 'info'): HTMLElement {
 	const card = document.createElement('div');
@@ -17,6 +17,8 @@ function card(message: string, kind: 'info' | 'error' | 'progress' = 'info'): HT
 }
 
 export const mirrorTransferSink: TransferSink = {
+	// The mirror rides the remote wire, whose transport carries no cancel — the button the
+	// desktop's own toasts would offer never shows here.
 	progress(title) {
 		const toast = card(title, 'progress');
 		const fill = document.createElement('i');

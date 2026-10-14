@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { Explorer } from '../src/explorer';
 import { setRemoteEnv } from '../src/remote/session';
@@ -7,6 +7,22 @@ import { backend } from './tauriMock';
 import { click, flush, key, menuItem, menuLabels, notificationButton, notifications, rightClick, texts, type } from './helpers';
 
 const ROOT = 'C:\\repo';
+
+// The Explorer's transfer rows hide while a mirror viewer watches this window: the cached
+// answer the real hostStub serves is module state nothing in this file drives, so the mock
+// hands the test the switch.
+const { mirrorRig } = vi.hoisted(() => ({ mirrorRig: { watching: false } }));
+vi.mock('../src/remote/mirror/hostStub', async (importOriginal) => {
+	const original = await importOriginal<typeof import('../src/remote/mirror/hostStub')>();
+	return {
+		...original,
+		mirrorViewersNow: () => mirrorRig.watching,
+		mirrorViewersActive: async () => mirrorRig.watching
+	};
+});
+function setMirrorViewers(watching: boolean): void {
+	mirrorRig.watching = watching;
+}
 
 function fileSystem(tree: Record<string, string[]>): void {
 	backend.on('list_dir', ({ path }) => {
@@ -114,7 +130,7 @@ describe('explorer', () => {
 
 		// Rename through the context menu.
 		rightClick(document.querySelector('.tree .row'));
-		expect(menuLabels()).toEqual(['Open to the Right', 'Open to the Left', 'Open Below', 'Open Above', 'Open in Hex Viewer', 'New File...', 'New Folder...', 'Reveal in File Explorer', 'Copy Path', 'Copy Relative Path', 'Rename...', 'Delete']);
+		expect(menuLabels()).toEqual(['Open to the Right', 'Open to the Left', 'Open Below', 'Open Above', 'Open in Hex Viewer', 'New File...', 'New Folder...', 'Reveal in File Explorer', 'Download', 'Copy Path', 'Copy Relative Path', 'Rename...', 'Delete']);
 		// "Open in Hex Viewer" hands the clicked file's path to the hex tab.
 		const hexed: string[] = [];
 		explorer.onOpenHex = (p) => hexed.push(p);
@@ -184,26 +200,38 @@ describe('explorer', () => {
 		}
 	});
 
-	it('offers downloads and uploads on the remote shell menu', async () => {
+	it('offers downloads and uploads in every environment, hiding them while mirrored', async () => {
 		fileSystem({ [ROOT]: ['src/', 'README.md'], [`${ROOT}\\src`]: [] });
 		const explorer = new Explorer(document.getElementById('sidebar')!);
 		explorer.setRoot(ROOT);
 		await flush();
 		const rows = () => document.querySelectorAll('.tree .row');
-		// The desktop has no transfers: its file manager does the job.
+		// The desktop has the transfers too now (2026-10-13's rewrite): the native pickers
+		// drive them, and a file downloads straight; a folder downloads zipped and receives
+		// uploads.
 		rightClick(rows()[1]);
-		expect(menuLabels()).not.toContain('Download');
-		// A real browser session (the env marks it) transfers with the PC: a file downloads
-		// straight; a folder downloads zipped and receives uploads.
+		expect(menuLabels()).toContain('Download');
+		expect(menuLabels()).not.toContain('Download as Zip');
+		rightClick(rows()[0]);
+		expect(menuLabels()).toContain('Download as Zip');
+		expect(menuLabels()).toContain('Upload Files Here…');
+		expect(menuLabels()).toContain('Upload Folder Here…');
+		// While a mirror viewer watches this window the rows hide: the viewer's own
+		// device-run entries own the vocabulary then.
+		setMirrorViewers(true);
+		try {
+			rightClick(rows()[1]);
+			expect(menuLabels()).not.toContain('Download');
+			rightClick(rows()[0]);
+			expect(menuLabels()).not.toContain('Download as Zip');
+		} finally {
+			setMirrorViewers(false);
+		}
+		// A browser session's own UI keeps them (its transport is the remote wire).
 		setRemoteEnv({ transport: {} as never, attached: { frontendId: 'remote/1' } as never, basePath: '/' });
 		try {
 			rightClick(rows()[1]);
 			expect(menuLabels()).toContain('Download');
-			expect(menuLabels()).not.toContain('Download as Zip');
-			rightClick(rows()[0]);
-			expect(menuLabels()).toContain('Download as Zip');
-			expect(menuLabels()).toContain('Upload Files Here…');
-			expect(menuLabels()).toContain('Upload Folder Here…');
 		} finally {
 			setRemoteEnv(undefined);
 		}
@@ -437,5 +465,111 @@ describe('explorer renames and refreshes', () => {
 		expect(backend.callsTo('list_dir_page')).toHaveLength(0);
 		expect(document.querySelectorAll('.tree .row')).toHaveLength(1200);
 		expect(document.querySelector('.tree .row.load-more')).toBeNull();
+	});
+});
+
+describe('explorer external drops', () => {
+	// jsdom lays nothing out, so the hit test reads a stubbed elementFromPoint — the
+	// element each scenario drops on, what Tauri would answer at that point.
+	const hitTest = (element: Element | null): void => {
+		(document as Document & { elementFromPoint?: (x: number, y: number) => Element | null }).elementFromPoint = () => element;
+	};
+	afterEach(() => {
+		delete (document as Document & { elementFromPoint?: unknown }).elementFromPoint;
+	});
+
+	/** A recording copy_into that lands every source in the destination (the tree gains it,
+	 *  so the post-drop refresh and reveal see it). */
+	function copyInto(tree: Record<string, string[]>): { copies: { sources: string[]; destDir: string }[] } {
+		const copies: { sources: string[]; destDir: string }[] = [];
+		backend.on('copy_into', ({ sources, destDir }) => {
+			const dir = String(destDir);
+			const landed = (sources as string[]).map((source) => {
+				tree[dir] = [...(tree[dir] ?? []), basename(source)];
+				return `${dir}\\${basename(source)}`;
+			});
+			copies.push({ sources: [...(sources as string[])], destDir: dir });
+			return landed;
+		});
+		return { copies };
+	}
+
+	it('copies dropped files into the folder under the cursor, a file row\'s parent, or the root', async () => {
+		const tree: Record<string, string[]> = { [ROOT]: ['src/', 'README.md'], [`${ROOT}\\src`]: ['a.ts'] };
+		fileSystem(tree);
+		const { copies } = copyInto(tree);
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoot(ROOT);
+		await flush();
+		click(document.querySelector('.tree .row')); // expand src
+		await flush();
+		const rows = () => document.querySelectorAll<HTMLElement>('.tree .row');
+
+		// Over the src folder row: it rings and owns the drop; the copy lands inside it,
+		// the ring goes, and the landed file is revealed and selected.
+		hitTest(rows()[0]);
+		expect(explorer.noteExternalDrag(10, 10)).toBe(true);
+		expect(rows()[0].classList.contains('drop-into')).toBe(true);
+		expect(await explorer.dropExternalFiles(10, 10, ['C:\\elsewhere\\dropped.txt'])).toBe(true);
+		expect(copies).toEqual([{ sources: ['C:\\elsewhere\\dropped.txt'], destDir: `${ROOT}\\src` }]);
+		expect(rows()[0].classList.contains('drop-into')).toBe(false);
+		expect(texts('.tree .row.selected .label')).toEqual(['dropped.txt']);
+
+		// Over a file row: its containing folder takes the drop.
+		hitTest(rows()[1]); // a.ts
+		expect(await explorer.dropExternalFiles(10, 10, ['C:\\elsewhere\\b.md'])).toBe(true);
+		expect(copies.at(-1)).toEqual({ sources: ['C:\\elsewhere\\b.md'], destDir: `${ROOT}\\src` });
+
+		// Over the tree's own background: the single root, ringed as the whole tree.
+		hitTest(document.querySelector('.pane-body')!);
+		expect(explorer.noteExternalDrag(10, 10)).toBe(true);
+		expect(document.querySelector<HTMLElement>('.pane-body')!.classList.contains('drop-root')).toBe(true);
+		expect(await explorer.dropExternalFiles(10, 10, ['C:\\elsewhere\\c.txt'])).toBe(true);
+		expect(copies.at(-1)).toEqual({ sources: ['C:\\elsewhere\\c.txt'], destDir: ROOT });
+	});
+
+	it('a drop off the Explorer is not consumed — the workbench opens the files', async () => {
+		fileSystem({ [ROOT]: ['README.md'] });
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoot(ROOT);
+		await flush();
+		hitTest(document.body); // the editor area
+		expect(explorer.noteExternalDrag(5, 5)).toBe(false);
+		expect(document.querySelector('.drop-into')).toBeNull();
+		expect(await explorer.dropExternalFiles(5, 5, ['C:\\elsewhere\\x.txt'])).toBe(false);
+		expect(backend.callsTo('copy_into')).toHaveLength(0);
+	});
+
+	it('a multi-root workspace has no background target, but each root row owns its drop', async () => {
+		const tree: Record<string, string[]> = { [`${ROOT}\\one`]: ['a.txt'], [`${ROOT}\\two`]: ['b.txt'] };
+		fileSystem(tree);
+		const { copies } = copyInto(tree);
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoots([`${ROOT}\\one`, `${ROOT}\\two`]);
+		await flush();
+		// The virtual top level's background: no one folder owns the drop.
+		hitTest(document.querySelector('.pane-body')!);
+		expect(explorer.noteExternalDrag(5, 5)).toBe(false);
+		expect(await explorer.dropExternalFiles(5, 5, ['C:\\elsewhere\\x.txt'])).toBe(false);
+		// The second root's row: the drop copies into that root alone.
+		const twoRow = Array.from(document.querySelectorAll<HTMLElement>('.tree .row')).find((row) => row.dataset['path'] === `${ROOT}\\two`)!;
+		hitTest(twoRow);
+		expect(explorer.noteExternalDrag(5, 5)).toBe(true);
+		expect(twoRow.classList.contains('drop-into')).toBe(true);
+		expect(await explorer.dropExternalFiles(5, 5, ['C:\\elsewhere\\x.txt'])).toBe(true);
+		expect(copies).toEqual([{ sources: ['C:\\elsewhere\\x.txt'], destDir: `${ROOT}\\two` }]);
+	});
+
+	it('a failed copy reports and still consumes the drop', async () => {
+		fileSystem({ [ROOT]: ['README.md'] });
+		backend.on('copy_into', () => {
+			throw new Error('disk full');
+		});
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoot(ROOT);
+		await flush();
+		hitTest(document.querySelector('.tree .row')); // the README row: its parent (the root) takes it
+		expect(await explorer.dropExternalFiles(5, 5, ['C:\\elsewhere\\big.bin'])).toBe(true);
+		expect(notifications().at(-1)).toContain('disk full');
 	});
 });

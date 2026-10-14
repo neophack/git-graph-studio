@@ -197,14 +197,45 @@ language are user data under `~/.ggs/`; theme and UI quality are enforced, not h
 
 ### 3. File Explorer
 
-The workspace folder tree — lazy, with git status colouring, inline new/rename inputs and
-the full context menu — over filesystem services that also serve the editors.
+The workspace folder tree — lazy, with git status colouring, inline new/rename inputs, the
+full context menu, and external file drops (a drag from the OS over the tree copies into
+the folder under the cursor — the row itself, a file row's parent, or the root; elsewhere
+the drop keeps opening the files, `workbench.ts` routes Tauri's window-level drag events)
+— over filesystem services that also serve the editors — and the workbench's **file
+transfers** (rewritten 2026-10-13): one vocabulary, every environment. `src/transfer.ts`
+is the layer the Explorer's context menu, the remote shell's commands and the mirror's
+appended rows all ride — `uploadInto` / `downloadTo` dispatch on the environment: a
+browser session's own UI runs the remote wire transport (module 19's chunked uploads and
+ticket downloads, `src/remote/transfer.ts`), and the desktop app drives the native pickers
+plus the backend's own copies — `fs_import` (picked sources land inside the target folder
+beside whatever exists, the ` (copy)` rule the drop copy uses) and `fs_export` (a file
+copies to the save dialog's destination; a folder zips into it), both streaming progress
+over a `Channel` with a Cancel action (`fs_transfer_cancel`, the generation-counter shape
+search cancellation uses). The wire's upload confinement is unchanged; the desktop pair is
+refused to remote sessions outright (`pathGate.ts`'s `REFUSED_COMMANDS` — their paths name
+anywhere on the machine, the native picker's business). While a mirror viewer watches the
+window the desktop rows hide (`transferMenuShown` over the hostStub's cached viewer
+answer): the viewer's own device-run entries are the vocabulary then, and a PC-run row
+would open a dialog the phone cannot see.
 
 - Frontend: `src/explorer.ts` (the context menu adapts to the remote shell: the
-  desktop-only Reveal hides, a browser session gains the transfer entries — module 19)
+  desktop-only Reveal hides; the transfer rows show in every environment, mirrored
+  windows excepted), `src/transfer.ts` (the transfer layer, the `TransferSink` progress
+  surface the mirror page re-installs)
 - Backend: `src-tauri/src/cmd_fs.rs` (tree, file contents of the working tree / index / any
-  revision, new-rename-delete, the confined chunked upload writes), `src-tauri/src/watcher.rs` (one recursive `notify` watch,
+  revision, new-rename-delete, the external-drop copy-in `copy_into` — a dragged entry
+  never clobbers what exists: it lands beside it as a " (copy)" sibling; the desktop
+  transfer pair `fs_import` / `fs_export` over the same no-clobber engine with streamed
+  progress and cancellation; the shared `zip_tree` the remote download path and the export
+  both pack through; the confined chunked upload writes), `src-tauri/src/watcher.rs` (one recursive `notify` watch,
   debounced `FsChange` batches — external changes appear by themselves)
+- Tests: `tests/explorer.test.ts` (the tree, the menus, the drops, the transfer rows'
+  environments), `tests/transfer.test.ts` (the desktop half over the tauriMock recording —
+  the picker-to-command flows, the streamed progress, the Cancel action, the remote
+  delegation), `cmd_fs.rs`'s `transfer_tests` (the engine: no-clobber copies, per-entry
+  failures, whole-job cancellation with no partial left behind, the zip export without
+  `.git`), the dev harness's real-IPC transfer check (`?full=1`, the Channel's events
+  over the real bridge)
 
 ### 4. Quick Open
 
@@ -1579,7 +1610,10 @@ database) carries the link through NAT. The whole design lives in
   the legacy recorder: streaming chat 11×, virtualized scroll 12.7×, JS animation 28.8×,
   combined 19.6× — each scenario ends with the copy's DOM equal to the PC's.
   **The replica's file transfers** (2026-10-13): the mirrored Explorer's context menu is the
-  PC's own, and the PC has no remote session to transfer with — so a right click (or long
+  PC's own — and since the desktop gained its own transfer rows (module 3's rewrite), the
+  PC hides them while a viewer watches (`transferMenuShown` over the hostStub's cached
+  viewer answer: a PC-run row would open a native dialog the phone cannot see), so the
+  device's transfers are the viewer's to serve. A right click (or long
   press) that `explorerSpotAt` reads as an Explorer row, or the list's blank area (the
   workspace root, derived from the top-level rows: one shared parent is the single root,
   unrelated parents the multi-root virtual level), arms `explorerTransfer.ts`, which waits
@@ -1588,11 +1622,11 @@ database) carries the link through NAT. The whole design lives in
   appended rows carry `data-ggs-local` (input never forwards them; the entries shift nothing
   above, so the PC items' replay rects stay exact), their click closes the mirrored surface
   (an Escape for menus, a press on the sheet's backdrop — its Escape listener sits where a
-  replayed key never lands) and rides `transfer.ts` over the page's own transport, whose
+  replayed key never lands) and rides `src/transfer.ts` (the shared layer) over this page's
+  own transport, whose
   progress / notices report through `setTransferSink` — the replica installs
   `mirror/transferSink.ts` (a small toast; the workbench's `#notifications` never exists
-  here), the own-UI workbench keeps ui.ts's toasts. Desktop sessions get none of this
-  (`remoteEnv()` gates the own-UI entries; the replica side is mirror-only by construction).
+  here), the own-UI workbench keeps ui.ts's toasts.
   `host.ts` keeps the viewers (hello every 10 s, forgotten after 35 s silent, the recorder
   stopped with the last one) and `hostStub.ts` loads it on the first hello, so a desktop
   nobody watches pays nothing. **Webview streams** (2026-10-12, §22.6): a page that runs
@@ -1712,7 +1746,12 @@ database) carries the link through NAT. The whole design lives in
   as sheets, an empty state that is never a dead end), the editing row above the
   keyboard (`editorAccessory.ts`: Tab, arrows, undo/redo, comment, find, save — the
   arrows and Tab are the editor's own key events), the sheets every touch menu shares
-  (`actionSheet.ts`: grabber, header, back step, drag to dismiss) and the phone's back
+  (`actionSheet.ts`: grabber, header, back step, drag to dismiss) — installed as `ui.ts`'s
+  menu presenter, which answers before BOTH menu entry points (`showContextMenu` and
+  `showMenuBelow`, 2026-10-13: the SCM pane's "More Actions…", a tree view's "…" overflow
+  and the tab strip's overflow dropped desktop floating panels whose submenus cascaded
+  left and right of them on a phone; on the phone every menu is the sheet, its submenus
+  drilling in with a back step) — and the phone's back
   button closing the overlay on screen (`backStack.ts`); `responsive.ts` marks a raised
   keyboard (`data-keyboard`) and the body follows the visual viewport, so the bars step
   aside or lift with the content. A swipe from the left edge closes a side-view page
@@ -1761,11 +1800,12 @@ database) carries the link through NAT. The whole design lives in
   frontend died moves it to the asker, `webviewView.setHtml` joins the replay journal —
   before this a page reload left every extension panel unopenable and the sidebar's
   webview views blank), and the explorer's context menu hides the desktop-only
-  "Reveal in File Explorer" on the remote shell — and gains the transfer entries on a real
-  browser session (2026-10-12: a file's Download, a folder's Download as Zip and
-  Upload Files / Folder Here, riding `transfer.ts`'s `downloadTo` / `uploadInto` — progress
-  toast, per-file failures collected and notified, never a silent hang; the module loads on
-  first click, so the desktop bundle never carries it). Uploads stay confined to the open
+  "Reveal in File Explorer" on the remote shell — its transfer entries (2026-10-12; since
+  2026-10-13's rewrite one vocabulary in every environment, module 3's `src/transfer.ts`:
+  a file's Download, a folder's Download as Zip and Upload Files / Folder Here, riding
+  `downloadTo` / `uploadInto` — progress toast, per-file failures collected and notified,
+  never a silent hang; the wire transport loads on first use, so the desktop bundle never
+  carries it). Uploads stay confined to the open
   folders server-side (`cmd_fs`'s `fs_write_chunk` / `fs_upload_offset` canonicalize the
   target, missing tail included, and refuse outside them — the download side's §7.8 rule;
   one process lock serializes chunks), and a download's Content-Disposition carries the

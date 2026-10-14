@@ -1,11 +1,9 @@
-// Uploads and downloads for the remote workbench (docs/ggs-remote-plan.md §11.3 File
-// Explorer): an upload crosses as 256 KB raw INVOKE chunks to `fs_write_chunk` (resumable —
-// the backend answers the size it has); a download is a one-time ticket URL the browser
-// navigates to, so the bytes stream straight from the instance to the device's disk. The
-// `uploadInto` / `downloadTo` wrappers carry the UI (a progress toast, the failure notice);
-// the commands (remote/shell.ts) and the Explorer's context menu both ride them.
-import { notify, progressToast } from '../ui';
-import { tf } from '../i18n';
+// The remote wire transport of the workbench's file transfers (docs/ggs-remote-plan.md
+// §11.3 File Explorer) — the half `src/transfer.ts` drives when this workbench runs in a
+// browser: an upload crosses as 256 KB raw INVOKE chunks to `fs_write_chunk` (resumable —
+// the backend answers the size it has), and a download is a one-time ticket URL the
+// browser navigates to, so the bytes stream straight from the instance to the device's
+// disk. The UI (the progress toast, the outcome notices) lives in the shared layer.
 import { invoke } from './tauriShim/core';
 import { remoteEnv } from './session';
 
@@ -88,48 +86,8 @@ export function uploadFiles(dir: string, folder = false, onProgress?: (p: Upload
 	});
 }
 
-/** The surface a transfer reports through: a progress toast and the outcome notices. The
- *  workbench's own toasts are the default; the mirror page (no workbench DOM, no
- *  `#notifications`) installs its own before the first transfer runs. */
-export interface TransferSink {
-	progress(title: string): { update(percent: number | null, message?: string): void; done(): void };
-	info(message: string): void;
-	error(message: string): void;
-}
-
-const workbenchSink: TransferSink = {
-	progress: (title) => progressToast(title),
-	info: (message) => notify('info', message),
-	error: (message) => notify('error', message)
-};
-
-let sink: TransferSink = workbenchSink;
-
-/** Replace the progress/notice surface (the mirror page's own toast; `null` restores the
- *  workbench's). */
-export function setTransferSink(next: TransferSink | null): void {
-	sink = next ?? workbenchSink;
-}
-
-/** Pick files (or a folder) on the device and upload them into `dir`, with a progress
- *  toast and the outcome notified. Resolves with the PC paths that landed. */
-export async function uploadInto(dir: string, folder = false): Promise<string[]> {
-	// An object property: the closure assignment must survive control-flow narrowing.
-	const progress: { toast: ReturnType<TransferSink['progress']> | null } = { toast: null };
-	const outcome = await uploadFiles(dir, folder, (p, index, count) => {
-		const label = count > 1 ? `${index + 1}/${count} ${p.name}` : p.name;
-		progress.toast ??= sink.progress(tf('remote.transfer.uploading', label));
-		progress.toast.update(p.total > 0 ? Math.round(((index + p.sent / p.total) / count) * 100) : null, tf('remote.transfer.uploading', label));
-	});
-	progress.toast?.done();
-	if (outcome.failed.length > 0) {
-		sink.error(tf('remote.transfer.failed', outcome.failed.map((f) => f.name).join(', ')));
-	}
-	if (outcome.uploaded.length > 0) sink.info(tf('remote.transfer.uploaded', outcome.uploaded.length));
-	return outcome.uploaded;
-}
-
-/** Download a file or a folder (zipped by the instance) to this device. */
+/** Download a file or a folder (zipped by the instance) to this device: the one-time
+ *  ticket the browser then navigates to. */
 export async function download(path: string, zip = false): Promise<void> {
 	const env = remoteEnv();
 	if (!env) throw new Error('downloads need a remote session');
@@ -149,16 +107,4 @@ export async function download(path: string, zip = false): Promise<void> {
 	document.body.appendChild(link);
 	link.click();
 	link.remove();
-}
-
-/** `download` with its failure notified (the ticket refusal, a dead session). Resolves
- *  whether the download started. */
-export async function downloadTo(path: string, zip = false): Promise<boolean> {
-	try {
-		await download(path, zip);
-		return true;
-	} catch (error) {
-		sink.error(tf('remote.transfer.failed', String(error)));
-		return false;
-	}
 }

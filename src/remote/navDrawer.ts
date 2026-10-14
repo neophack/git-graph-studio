@@ -169,8 +169,8 @@ export function openDrawer(menus: () => MenuDefinition[]): void {
 		commandRow('folder-opened', t('remote.files.openFolder'), 'workbench.openFolder')
 	];
 	const transferRows = [
-		commandRow('cloud-upload', t('remote.transfer.upload'), 'remote.uploadFiles'),
-		commandRow('file-directory-create', t('remote.transfer.uploadFolder'), 'remote.uploadFolder'),
+		commandRow('cloud-upload', t('transfer.upload'), 'remote.uploadFiles'),
+		commandRow('file-directory-create', t('transfer.uploadFolder'), 'remote.uploadFolder'),
 		commandRow('cloud-download', t('remote.editor.download'), 'remote.download')
 	];
 	const menuRows = menus().map((menu) =>

@@ -15,7 +15,7 @@ import { InputReplayer, keyCodeFor } from '../src/remote/mirror/replay';
 import { MirrorHost, fitFor } from '../src/remote/mirror/host';
 import { isSpecialKey, ViewerInput } from '../src/remote/mirror/viewerInput';
 import { armExplorerTransfer, explorerSpotAt, type ExplorerSpot, type MirrorTransferDeps } from '../src/remote/mirror/explorerTransfer';
-import { downloadTo, uploadInto } from '../src/remote/transfer';
+import { downloadTo, uploadInto } from '../src/transfer';
 import { isPhoneWidth, modeUrl, requestedMode, wantsOwnUi } from '../src/remote/mirror/uiMode';
 import { enterPhone, leavePhone } from '../src/remote/mirror/phoneShell';
 import { coarsePointer } from '../src/remote/responsive';
@@ -24,7 +24,7 @@ import { parseStream, setWebviewFrameSource } from '../src/remote/mirror/webview
 
 // The replica's transfer entries run this page's own transfers; the real module talks to a
 // transport the mirror tests never install, so its two entry points stand mocked.
-vi.mock('../src/remote/transfer', () => ({
+vi.mock('../src/transfer', () => ({
 	downloadTo: vi.fn(async () => true),
 	uploadInto: vi.fn(async () => [])
 }));

@@ -17,6 +17,21 @@ export async function mirrorViewersActive(): Promise<boolean> {
 	return ready.viewerCount > 0;
 }
 
+/** The last answer `mirrorViewersActive` gave, without the await: refreshed on every up
+ *  message and on a slow interval, so a synchronous decision (the Explorer building its
+ *  context menu) never waits on the host. A viewer that just said hello lands here within
+ *  one message; the menu follows the last settled state. */
+let viewersWatching = false;
+
+function refreshViewers(): void {
+	void mirrorViewersActive().then((active) => (viewersWatching = active));
+}
+
+/** Whether a mirror viewer watches this window (the cached, synchronous form). */
+export function mirrorViewersNow(): boolean {
+	return viewersWatching;
+}
+
 /** Below this width the window can only be because a phone viewer's fit made it so (the
  *  desktop window's minimum is 800): the phone shell goes on, and off again above it. */
 export const PHONE_WIDTH = PHONE_MAX_WIDTH;
@@ -38,10 +53,14 @@ export function installMirrorHost(): () => void {
 	let unlisten: (() => void) | null = null;
 	let stopped = false;
 	const stopPhone = watchPhoneMode();
+	// The cached viewer answer stays fresh: every up message refreshes it, and a slow poll
+	// catches a viewer going silent between messages (the host prunes at 5 s).
+	const poll = setInterval(refreshViewers, 5000);
 	void listen<UpMessage>(MIRROR_UP, (event) => {
 		const message = event.payload;
 		host ??= import('./host').then(({ createAppMirrorHost }) => createAppMirrorHost());
 		void host.then((ready) => ready.receive(message));
+		refreshViewers();
 	})
 		.then((stop) => {
 			if (stopped) stop();
@@ -50,6 +69,7 @@ export function installMirrorHost(): () => void {
 		.catch(() => undefined);
 	return () => {
 		stopped = true;
+		clearInterval(poll);
 		unlisten?.();
 		stopPhone();
 	};

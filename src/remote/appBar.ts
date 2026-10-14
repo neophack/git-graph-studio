@@ -141,8 +141,8 @@ export function gitSheet(): MenuEntry[] {
 export function filesSheet(): MenuEntry[] {
 	return [
 		commandEntry('workbench.newFile', t('remote.files.newFile')),
-		commandEntry('remote.uploadFiles', t('remote.transfer.upload')),
-		commandEntry('remote.uploadFolder', t('remote.transfer.uploadFolder')),
+		commandEntry('remote.uploadFiles', t('transfer.upload')),
+		commandEntry('remote.uploadFolder', t('transfer.uploadFolder')),
 		'separator',
 		commandEntry('workbench.quickOpen', t('remote.appbar.quickOpen')),
 		commandEntry('workbench.openFolder', t('remote.files.openFolder'))

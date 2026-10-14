@@ -22,7 +22,7 @@ import { closeDrawer, openDrawer } from './navDrawer';
 import { backToEditor, currentPage, onWorkbenchChange } from './pages';
 import { formFactor, onFormFactorChange } from './responsive';
 import { createTerminalKeys } from './terminalKeys';
-import { downloadTo, uploadInto } from './transfer';
+import { downloadTo, uploadInto } from '../transfer';
 import { openWindowSwitcher, watchLifecycle } from './windowSwitcher';
 import { connectionLooksSlow, dataSaverPreferred, setDataSaver } from './dataSaver';
 import { remoteEnv } from './session';
@@ -53,7 +53,7 @@ function registerCommands(): void {
 	commands.register({ id: 'remote.liveView', title: t('remote.liveView'), category: 'Remote', run: () => location.replace(modeUrl(location.href, 'mirror')) });
 	commands.register({
 		id: 'remote.uploadFiles',
-		title: t('remote.transfer.upload'),
+		title: t('transfer.upload'),
 		category: 'Remote',
 		run: async () => {
 			const dir = await firstFolder();
@@ -63,7 +63,7 @@ function registerCommands(): void {
 	});
 	commands.register({
 		id: 'remote.uploadFolder',
-		title: t('remote.transfer.uploadFolder'),
+		title: t('transfer.uploadFolder'),
 		category: 'Remote',
 		run: async () => {
 			const dir = await firstFolder();
@@ -73,7 +73,7 @@ function registerCommands(): void {
 	});
 	commands.register({
 		id: 'remote.download',
-		title: t('remote.transfer.download'),
+		title: t('transfer.download'),
 		category: 'Remote',
 		run: async () => {
 			const active = document.querySelector('.tab.active')?.getAttribute('title') ?? (await firstFolder());

@@ -27,7 +27,7 @@ export const backend = {
 	clipboard: [] as string[],
 	clipboardText: '',
 	window: { minimized: 0, toggled: 0, closed: 0, maximized: false, resizeHandlers: [] as (() => void)[] },
-	dropHandlers: [] as ((event: { payload: { type: string; paths?: string[] } }) => void)[],
+	dropHandlers: [] as ((event: { payload: { type: string; paths?: string[]; position?: { x: number; y: number } } }) => void)[],
 
 	on(command: string, handler: Handler): void {
 		this.handlers.set(command, handler);
@@ -180,10 +180,10 @@ export const windowApi = {
 	})
 };
 
-/** The registered drag-drop handlers; a test emits `drop` payloads through `dropFiles`. */
+/** The registered drag-drop handlers; a test emits `drop` payloads through `dropHandlers`. */
 export const webviewApi = {
 	getCurrentWebview: () => ({
-		onDragDropEvent: async (handler: (event: { payload: { type: string; paths?: string[] } }) => void) => {
+		onDragDropEvent: async (handler: (event: { payload: { type: string; paths?: string[]; position?: { x: number; y: number } } }) => void) => {
 			backend.dropHandlers.push(handler);
 			return () => undefined;
 		}

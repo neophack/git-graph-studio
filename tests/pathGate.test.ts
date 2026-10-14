@@ -61,6 +61,20 @@ describe('the gate table', () => {
 		}
 	});
 
+	it('refuses the desktop transfer pair outright — their paths name the whole machine', () => {
+		const roots = [ROOT];
+		// fs_import reads ANY disk path into the workspace (the native picker's choice is
+		// the desktop user's own); a remote session could import a file and download it
+		// straight back out. fs_export writes anywhere. Both are the desktop's alone, and
+		// even workspace-rooted arguments change nothing: the refusal is the command's.
+		expect(() => gateInvoke('fs_import', { sources: [INSIDE], targetDir: ROOT }, roots)).toThrow(
+			/the desktop's own/
+		);
+		expect(() => gateInvoke('fs_export', { path: INSIDE, dest: INSIDE, zip: false }, roots)).toThrow(
+			/the desktop's own/
+		);
+	});
+
 	it('lets a completion type its way toward a root, and nowhere else', () => {
 		const roots = [ROOT];
 		const toward = isWindows ? 'C:\\r' : '/work/r';

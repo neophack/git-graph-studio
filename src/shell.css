@@ -155,6 +155,11 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 	background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground);
 	outline: 1px solid var(--vscode-list-focusOutline); outline-offset: -1px;
 }
+/* An external file drag over the Explorer: the folder under the cursor rings — the drop
+   copies into it. The whole tree rings when the single root itself is the target (it has
+   no row of its own). */
+.row.drop-into { background: var(--vscode-list-hoverBackground); outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+.pane-body.list.drop-root { outline: 1px dashed var(--vscode-focusBorder); outline-offset: -2px; }
 .row .twistie { width: 16px; height: var(--row-height); display: flex; align-items: center; justify-content: center; font-size: 16px; flex: none; }
 .row .icon { width: 16px; height: 16px; font-size: 16px; margin-right: 6px; flex: none; display: inline-flex; align-items: center; justify-content: center; }
 .row .icon img { width: 16px; height: 16px; }

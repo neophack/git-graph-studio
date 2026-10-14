@@ -1,16 +1,18 @@
 // The replica's transfer entries (docs/ggs-remote-plan.md §11.3): in mirror mode the
-// Explorer's context menu is the PC's own, rendered there and mirrored here — and the PC has
-// no remote session to transfer with: the device's file picker and the download navigation
-// belong to THIS browser. So the viewer reads the Explorer row under the click (or the
-// list's blank area, which menus the workspace root), and once the PC's menu surface lands
-// in the copy — the desktop `.context-menu` in #overlays, the phone shell's action sheet —
-// appends viewer-run entries to it. The appended rows carry `data-ggs-local`, which the
-// input layer (viewerInput.ts) never forwards: their clicks close the mirrored surface (an
-// Escape for menus, a press on the backdrop for sheets) and ride src/remote/transfer.ts over
-// this page's own transport. Entries ride the first surface only — a sheet's submenu step
+// Explorer's context menu is the PC's own, rendered there and mirrored here — and the PC's
+// rows run on the PC (the desktop transport's native dialogs), where this browser's own
+// pickers and downloads cannot reach. The PC hides its rows while a viewer watches
+// (transfer.ts's `transferMenuShown`), so the device's transfers are this page's to serve:
+// the viewer reads the Explorer row under the click (or the list's blank area, which menus
+// the workspace root), and once the PC's menu surface lands in the copy — the desktop
+// `.context-menu` in #overlays, the phone shell's action sheet — appends viewer-run entries
+// to it. The appended rows carry `data-ggs-local`, which the input layer (viewerInput.ts)
+// never forwards: their clicks close the mirrored surface (an Escape for menus, a press on
+// the backdrop for sheets) and ride the shared transfer layer (src/transfer.ts) over this
+// page's own transport. Entries ride the first surface only — a sheet's submenu step
 // rebuilds its rows from the PC's entries; the long press opens it again.
 import { t } from '../../i18n';
-import { downloadTo, uploadInto } from '../transfer';
+import { downloadTo, uploadInto } from '../../transfer';
 
 /** What the PC's Explorer menus for one click: the row under it, or the tree's root. */
 export interface ExplorerSpot {
@@ -100,13 +102,13 @@ export function armExplorerTransfer(doc: Document, spot: ExplorerSpot, deps: Mir
 	armed = { observer, timer: setTimeout(disarmExplorerTransfer, ARM_MS) };
 }
 
-/** The entries the own-UI Explorer's menu shows (explorer.ts), run on this device instead. */
+/** The entries the own-UI Explorer's menu shows (transfer.ts), run on this device instead. */
 function transferEntries(spot: ExplorerSpot): { label: string; run: () => Promise<unknown> }[] {
-	if (!spot.isDir) return [{ label: t('remote.transfer.download'), run: () => downloadTo(spot.path) }];
+	if (!spot.isDir) return [{ label: t('transfer.download'), run: () => downloadTo(spot.path) }];
 	return [
-		{ label: t('remote.transfer.downloadZip'), run: () => downloadTo(spot.path, true) },
-		{ label: t('remote.transfer.uploadHere'), run: () => uploadInto(spot.path, false) },
-		{ label: t('remote.transfer.uploadFolderHere'), run: () => uploadInto(spot.path, true) }
+		{ label: t('transfer.downloadZip'), run: () => downloadTo(spot.path, true) },
+		{ label: t('transfer.uploadHere'), run: () => uploadInto(spot.path, false) },
+		{ label: t('transfer.uploadFolderHere'), run: () => uploadInto(spot.path, true) }
 	];
 }
 

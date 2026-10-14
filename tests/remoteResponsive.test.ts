@@ -17,7 +17,7 @@ import { installLongPress, LONG_PRESS_MS } from '../src/remote/gestures';
 import { createTerminalKeys } from '../src/remote/terminalKeys';
 import { TERMINAL_SEND_EVENT } from '../src/terminal';
 import { Panel } from '../src/panel';
-import { showContextMenu, setMenuPresenter, type MenuEntry, type MenuItem } from '../src/ui';
+import { showContextMenu, showMenuBelow, setMenuPresenter, type MenuEntry, type MenuItem } from '../src/ui';
 import { commands } from '../src/commands';
 import { EditorGroup } from '../src/editor';
 import { closeSettingsPage, installPhoneSettingsEntry, openSettingsPage, settingsPageOpen } from '../src/remote/settingsPage';
@@ -88,6 +88,39 @@ describe('action sheet', () => {
 		showContextMenu(10, 10, [{ label: 'Rename', run }]);
 		expect(document.querySelector('.ggs-action-sheet')).toBeNull();
 		expect(document.querySelector('.context-menu')).not.toBeNull();
+		stop();
+	});
+
+	it('carries the "..." anchor menus onto the sheet too — no floating cascade on a touch phone', () => {
+		document.body.innerHTML = '<div id="overlays"></div><button id="more">…</button>';
+		setCoarse(true);
+		setWidth(390);
+		const stop = initResponsive();
+		installActionSheet();
+		const ran = vi.fn();
+		showMenuBelow(document.getElementById('more')!, [
+			{ label: 'Commit', run: ran },
+			{ label: 'Branches', submenu: [{ label: 'main', run: ran }] }
+		]);
+		// The sheet replaced the dropped panel — and its submenu drills in with a back step,
+		// it never opens beside anything.
+		const sheet = document.querySelector('.ggs-action-sheet')!;
+		expect(sheet).not.toBeNull();
+		expect(document.querySelector('.context-menu')).toBeNull();
+		const rows = [...sheet.querySelectorAll<HTMLButtonElement>('.row')];
+		expect(rows.map((row) => row.textContent)).toEqual(['Commit', 'Branches', 'Cancel']);
+		rows[1]!.click();
+		const inner = document.querySelector('.ggs-action-sheet')!;
+		expect([...inner.querySelectorAll<HTMLButtonElement>('.row')].map((row) => row.textContent)).toEqual(['main', 'Cancel']);
+		(inner.querySelector('.row') as HTMLButtonElement).click();
+		expect(ran).toHaveBeenCalledTimes(1);
+		expect(document.querySelector('.ggs-action-sheet')).toBeNull();
+
+		// Off the phone the anchor menu drops as the floating panel it always was.
+		setWidth(1300);
+		showMenuBelow(document.getElementById('more')!, [{ label: 'Commit', run: ran }]);
+		expect(document.querySelector('.context-menu')).not.toBeNull();
+		expect(document.querySelector('.ggs-action-sheet')).toBeNull();
 		stop();
 	});
 });

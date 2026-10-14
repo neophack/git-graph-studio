@@ -3,7 +3,7 @@
 // lost or a global listener leaks, exercised against the scripted backend like
 // uiHarness.test.ts does.
 
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { applyContributions, removeContributions } from '../src/contributions';
 import { commands } from '../src/commands';
@@ -420,19 +420,56 @@ describe('the integrated terminal\'s cd', () => {
 });
 
 describe('files dragged onto the window', () => {
+	// jsdom lays nothing out, so the Explorer's hit test reads a stubbed
+	// elementFromPoint — the element each scenario drops on.
+	const hitTest = (element: Element | null): void => {
+		(document as Document & { elementFromPoint?: (x: number, y: number) => Element | null }).elementFromPoint = () => element;
+	};
+	afterEach(() => {
+		delete (document as Document & { elementFromPoint?: unknown }).elementFromPoint;
+	});
+
 	it('opens each dropped file like "Open File..." would', async () => {
 		expect(backend.dropHandlers).toHaveLength(1);
+		// Dropped away from the Explorer (the editor area): the files open, as they always have.
+		hitTest(document.body);
 		backend.dropHandlers[0]!({ payload: { type: 'over', position: { x: 10, y: 10 } } });
-		backend.dropHandlers[0]!({ payload: { type: 'drop', paths: [`${REPO_A}\\a.txt`, 'C:\\outside\\readme.md'] } });
+		backend.dropHandlers[0]!({ payload: { type: 'drop', paths: [`${REPO_A}\\a.txt`, 'C:\\outside\\readme.md'], position: { x: 10, y: 10 } } });
 		await flush(8);
 		expect(workbench.editors.openFilePaths()).toEqual([`${REPO_A}\\a.txt`, 'C:\\outside\\readme.md']);
 	});
 
 	it('ignores the hover and leave phases', async () => {
-		backend.dropHandlers[0]!({ payload: { type: 'enter', paths: [`${REPO_A}\\a.txt`] } });
+		hitTest(document.body);
+		backend.dropHandlers[0]!({ payload: { type: 'enter', paths: [`${REPO_A}\\a.txt`], position: { x: 10, y: 10 } } });
 		backend.dropHandlers[0]!({ payload: { type: 'leave' } });
 		await flush(4);
 		expect(workbench.editors.openFilePaths()).toEqual([]);
+	});
+
+	it('copies into the Explorer folder under the cursor instead of opening', async () => {
+		// A folder row in the open repo's tree (the boot's empty listing re-read).
+		backend.handlers.set('list_dir', ({ path }) => String(path) === REPO_A
+			? [{ name: 'src', path: `${REPO_A}\\src`, isDir: true, size: 0 }]
+			: []);
+		const copies: { sources: string[]; destDir: string }[] = [];
+		backend.handlers.set('copy_into', ({ sources, destDir }) => {
+			copies.push({ sources: sources.map(String), destDir: String(destDir) });
+			return (sources as string[]).map((source) => `${destDir}\\${String(source).split('\\').pop()}`);
+		});
+		await workbench.explorer.refresh();
+		const row = document.querySelector<HTMLElement>('#sidebar .tree .row[data-dir="1"]')!;
+		hitTest(row);
+
+		// The drag rings the folder under the cursor, and the drop copies into it — the
+		// files never open as editor tabs.
+		backend.dropHandlers[0]!({ payload: { type: 'enter', paths: ['C:\\elsewhere\\dropped.txt'], position: { x: 5, y: 5 } } });
+		expect(row.classList.contains('drop-into')).toBe(true);
+		backend.dropHandlers[0]!({ payload: { type: 'drop', paths: ['C:\\elsewhere\\dropped.txt'], position: { x: 5, y: 5 } } });
+		await flush(10);
+		expect(copies).toEqual([{ sources: ['C:\\elsewhere\\dropped.txt'], destDir: `${REPO_A}\\src` }]);
+		expect(workbench.editors.openFilePaths()).toEqual([]);
+		expect(row.classList.contains('drop-into')).toBe(false);
 	});
 });
 

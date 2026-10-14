@@ -9,7 +9,7 @@ import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { fileIcon, fileIconColor } from './editor';
 import { contextUri, menuSection, resourceContext } from './contributions';
 import { t, tf } from './i18n';
-import { remoteEnv } from './remote/session';
+import { transferMenuEntries, transferMenuShown } from './transfer';
 import { actionButton, basename, confirmDialog, el, icon, joinPath, liveSidebarTitle, notify, relativeTo, showContextMenu, toPosix, type MenuEntry } from './ui';
 
 interface DirEntryInfo {
@@ -626,6 +626,81 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		return this.selected.slice(0, this.selected.length - basename(this.selected).length - 1) || this.rootPath!;
 	}
 
+	/* ---------- External drops: a drag from the OS over the tree copies in ---------- */
+
+	/** The row wearing the drop ring (`noteExternalDrag` moves it with the cursor). */
+	private dropRow: HTMLElement | null = null;
+	/** The folder an external file drop at this viewport point (CSS pixels) copies into:
+	 *  the folder row under the cursor, a file row's parent, or the tree's own root —
+	 *  over the Explorer's chrome (the header, the background below the rows). Null when
+	 *  the point is off the Explorer, or over a multi-root workspace's virtual top level,
+	 *  where no one folder owns the drop. */
+	private dropFolderAt(x: number, y: number): string | null {
+		const hit = document.elementFromPoint(x, y);
+		if (!hit) return null;
+		const inside = hit === this.body || this.body.contains(hit) || hit === this.header || this.header.contains(hit);
+		if (!inside) return null;
+		const row = (hit as HTMLElement).closest<HTMLElement>('.row[data-path]');
+		if (row) {
+			if (row.dataset['dir'] === '1') return row.dataset['path']!;
+			// A file row: the drop lands beside it, in its containing folder.
+			return (row.parentElement as HTMLElement | null)?.dataset['parent'] ?? this.rootPath;
+		}
+		return this.rootPaths.length > 1 ? null : this.rootPath;
+	}
+
+	/** The folder an external drag currently points at (the drop ring's owner). */
+	private dropFolder: string | null = null;
+
+	/** An OS file drag moved over the window (the workbench routes Tauri's window-level
+	 *  drag events here, the physical position already divided into CSS pixels): the
+	 *  folder under the cursor takes the drop ring. Returns whether the Explorer owns
+	 *  the drop — false and the workbench keeps its own, opening the files. */
+	noteExternalDrag(x: number, y: number): boolean {
+		this.dropFolder = this.dropFolderAt(x, y);
+		this.paintDropTarget(this.dropFolder);
+		return this.dropFolder !== null;
+	}
+
+	/** The drag left the window or settled: the ring goes. */
+	endExternalDrag(): void {
+		this.dropFolder = null;
+		this.paintDropTarget(null);
+	}
+
+	private paintDropTarget(folder: string | null): void {
+		this.dropRow?.classList.remove('drop-into');
+		this.dropRow = null;
+		// The single root has no row of its own: the whole tree rings instead.
+		this.body.classList.toggle('drop-root', folder !== null && folder === this.rootPath && this.rootPaths.length <= 1);
+		if (folder !== null) this.dropRow = this.rowFor(folder);
+		this.dropRow?.classList.add('drop-into');
+	}
+
+	/** Files dropped over the Explorer at this viewport point: copied into the folder
+	 *  under it (each beside whatever already exists there — the backend's " (copy)"
+	 *  naming), the last landed entry revealed and selected. Returns whether the drop
+	 *  was consumed here — false and the workbench opens the files, as a drop anywhere
+	 *  else always has. */
+	async dropExternalFiles(x: number, y: number, paths: string[]): Promise<boolean> {
+		const folder = this.dropFolderAt(x, y);
+		this.endExternalDrag();
+		if (folder === null) return false;
+		if (paths.length === 0) return true;
+		let landed: string[] = [];
+		try {
+			landed = await invoke<string[]>('copy_into', { sources: paths, destDir: folder });
+		} catch (error) {
+			notify('error', String(error));
+			return true;
+		}
+		if (landed.length > 0) {
+			await this.refresh();
+			await this.reveal(landed[landed.length - 1]!);
+		}
+		return true;
+	}
+
 	private onKey(event: KeyboardEvent): void {
 		const rows = Array.from(this.tree.querySelectorAll<HTMLElement>('.row[data-path]'));
 		if (rows.length === 0) return;
@@ -700,17 +775,13 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 			// has no such place. Hidden on the remote shell (the opener shim's
 			// remote-picker fallback stays for anything else that reveals).
 			...(remoteShell() ? [] : [{ label: 'Reveal in File Explorer', run: () => void revealItemInDir(path).catch((e) => notify('error', String(e))) }] as MenuEntry[]),
-			// Remote Access (module 19): a real browser session transfers files with the PC —
-			// a file downloads straight to the device, a folder downloads zipped by the
-			// instance and receives uploads. The transfer module loads on first click, so the
-			// desktop bundle never carries it.
-			...(remoteEnv() ? (isDir ? [
-				{ label: t('remote.transfer.downloadZip'), run: () => void import('./remote/transfer').then((transfer) => transfer.downloadTo(path, true)) },
-				{ label: t('remote.transfer.uploadHere'), run: () => void import('./remote/transfer').then((transfer) => transfer.uploadInto(path, false)) },
-				{ label: t('remote.transfer.uploadFolderHere'), run: () => void import('./remote/transfer').then((transfer) => transfer.uploadInto(path, true)) }
-			] : [
-				{ label: t('remote.transfer.download'), run: () => void import('./remote/transfer').then((transfer) => transfer.downloadTo(path)) }
-			] as MenuEntry[]) : []),
+			// File transfers (src/transfer.ts): one vocabulary, every environment — a file
+			// downloads (the native save dialog on the desktop, the device on a browser
+			// session), a folder downloads zipped and receives uploads. While a mirror
+			// viewer watches this window the rows hide: the viewer's own device-run entries
+			// own the vocabulary then (a PC-run row would open a dialog the phone cannot
+			// see).
+			...(transferMenuShown() ? transferMenuEntries(path, isDir) : []),
 			...(isDir ? [
 				{ label: 'Module Analysis', run: () => this.onModuleAnalysis?.(this.selectedFolders(path)) },
 				{ label: 'Open in Integrated Terminal', run: () => this.onOpenInTerminal?.(path) }

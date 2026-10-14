@@ -1712,6 +1712,95 @@
 				}
 
 				/* ---------- Phase 4: the workbench itself ---------- */
+				// An external file drop over the Explorer (the real hit test a layout-less jsdom
+				// cannot run): the folder row under the cursor rings, and the drop copies into
+				// that folder — never opening the files as editor tabs.
+				if (window.__harness.mocked) {
+					skip('explorer', 'an external drop over a folder row copies into it', 'the scripted backend has no filesystem');
+				} else {
+					await check('explorer', 'an external drop over a folder row copies into it', async () => {
+						const wb = (await import('/src/workbench.ts')).currentWorkbench;
+						const roots = wb.explorer.roots();
+						if (roots.length === 0) throw new Error('no folder is open');
+						await wb.showView('explorer');
+						const root = roots[0].replace(/[\\/]+$/, '');
+						// The dragged file: written at the workspace root, outside the folder it lands in.
+						const source = root + '/-harness-drop-source.tmp';
+						await invoke('write_file', { path: source, contents: 'dropped by the harness' });
+						// A folder row to drop on — the tree's first, made when the open folder has none.
+						let folderRow = await waitFor(() => document.querySelector('#sidebar .tree .row[data-dir="1"]'), 5000).catch(() => null);
+						let madeFolder = null;
+						if (!folderRow) {
+							madeFolder = root + '/-harness-drop-target';
+							await invoke('create_folder', { path: madeFolder });
+							await wb.explorer.refresh();
+							folderRow = await waitFor(() => document.querySelector('#sidebar .tree .row[data-dir="1"]'), 5000);
+						}
+						const target = folderRow.dataset.path.replace(/[\\/]+$/, '');
+						const box = folderRow.getBoundingClientRect();
+						const x = box.left + box.width / 2, y = box.top + box.height / 2;
+						try {
+							if (!wb.explorer.noteExternalDrag(x, y)) {
+								const hit = document.elementFromPoint(x, y);
+								throw new Error('the Explorer does not own a drop over its own folder row at ' + Math.round(x) + ',' + Math.round(y) + ' (hit ' + (hit ? hit.className || hit.tagName : 'nothing') + ')');
+							}
+							if (!folderRow.classList.contains('drop-into')) throw new Error('the folder row under the cursor carries no drop ring');
+							const consumed = await wb.explorer.dropExternalFiles(x, y, [source]);
+							if (!consumed) throw new Error('the drop was not consumed by the Explorer');
+							const read = await invoke('read_file', { path: target + '/-harness-drop-source.tmp' });
+							if (String(read.contents) !== 'dropped by the harness') throw new Error('the landed file reads wrong: ' + JSON.stringify(read.contents));
+							if (folderRow.classList.contains('drop-into')) throw new Error('the drop ring survived the drop');
+							return 'copied into ' + target + ' from a real hit test';
+						} finally {
+							await invoke('delete_path', { path: source, permanent: true }).catch(() => undefined);
+							await invoke('delete_path', { path: target + '/-harness-drop-source.tmp', permanent: true }).catch(() => undefined);
+							if (madeFolder) await invoke('delete_path', { path: madeFolder, permanent: true }).catch(() => undefined);
+						}
+					});
+				}
+				// The transfer commands' real IPC round trip (module 3's transfer layer): the
+				// Channel's progress events crossing the real bridge is what neither jsdom
+				// (scripted) nor the Rust suite (no window) can prove. The native pickers stay
+				// interactive-only — the commands are driven directly.
+				if (window.__harness.mocked) {
+					skip('explorer', 'the transfer commands copy in and zip out through the real IPC', 'the scripted backend has no filesystem');
+				} else {
+					await check('explorer', 'the transfer commands copy in and zip out through the real IPC', async () => {
+						const core = await import('@tauri-apps/api/core');
+						const wb = (await import('/src/workbench.ts')).currentWorkbench;
+						const roots = wb.explorer.roots();
+						if (roots.length === 0) throw new Error('no folder is open');
+						const root = roots[0].replace(/[\\/]+$/, '');
+						const target = root + '/-harness-transfer-target';
+						await invoke('create_folder', { path: target });
+						const source = root + '/-harness-transfer-source.tmp';
+						await invoke('write_file', { path: source, contents: 'harness transfer' });
+						let ticks = 0;
+						try {
+							const onProgress = new core.Channel();
+							onProgress.onmessage = () => ticks++;
+							const report = await invoke('fs_import', { sources: [source], targetDir: target, onProgress });
+							if (!report.landed || report.landed.length !== 1) throw new Error('fs_import landed nothing: ' + JSON.stringify(report));
+							const read = await invoke('read_file', { path: report.landed[0] });
+							if (String(read.contents) !== 'harness transfer') throw new Error('the imported file reads wrong: ' + JSON.stringify(read.contents));
+							const zip = root + '/-harness-transfer-export.zip';
+							const exportProgress = new core.Channel();
+							exportProgress.onmessage = () => ticks++;
+							const exported = await invoke('fs_export', { path: target, dest: zip, zip: true, onProgress: exportProgress });
+							if (!exported.landed || exported.landed.length !== 1) throw new Error('fs_export landed nothing: ' + JSON.stringify(exported));
+							const b64 = await invoke('read_file_base64', { path: zip });
+							if (!String(b64).startsWith('UEs')) throw new Error('the export is not a zip archive');
+							// The progress toast's stop button command: a registered no-op between jobs.
+							await invoke('fs_transfer_cancel');
+							if (ticks < 2) throw new Error('no progress events crossed the Channel');
+							return 'imported and zipped ' + target + ' (' + ticks + ' progress ticks over the real bridge)';
+						} finally {
+							await invoke('delete_path', { path: source, permanent: true }).catch(() => undefined);
+							await invoke('delete_path', { path: target, permanent: true }).catch(() => undefined);
+							await invoke('delete_path', { path: root + '/-harness-transfer-export.zip', permanent: true }).catch(() => undefined);
+						}
+					});
+				}
 				await check('workbench', 'no page errors during the run', async () => {
 					// In the sandbox the logout button's error is by design (there is no OAuth
 					// session to end — the fake login is env-key based) and its log line lands

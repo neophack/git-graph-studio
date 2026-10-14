@@ -195,11 +195,18 @@ export const PATH_GATED: Record<
 };
 
 /** The commands a remote session may not run at all: they widen the very boundary this
- *  gate enforces (a remote open of an arbitrary folder would make everything under it
- *  "the open workspace"). Opening NEW folders is what the picker's sandboxed SPAWN is
- *  for; the idempotent reopen of a folder already inside the open roots — the boot's own
- *  first call — stays allowed (`sameRootOnly` in PATH_GATED). */
-export const REFUSED_COMMANDS = new Set<string>();
+ * gate enforces (a remote open of an arbitrary folder would make everything under it
+ * "the open workspace"). Opening NEW folders is what the picker's sandboxed SPAWN is
+ * for; the idempotent reopen of a folder already inside the open roots — the boot's own
+ * first call — stays allowed (`sameRootOnly` in PATH_GATED). The desktop transfer pair
+ * (`fs_import` / `fs_export`) is refused for the same reason from both directions: their
+ * paths name ANYWHERE on the machine — the native picker's choices are the desktop
+ * user's own — so a browser session must never read a file into the workspace through
+ * `fs_import` (it could then download it back out) or write one out through `fs_export`.
+ * A remote session's transfers ride the confined wire commands instead: the chunked
+ * `fs_write_chunk` uploads (root-canonicalized server-side) and the daemon's
+ * `download_allowed` ticket downloads. */
+export const REFUSED_COMMANDS = new Set<string>(['fs_import', 'fs_export']);
 
 /** Whether the command needs the roots fetched at all — the cheap pre-check that keeps
  *  the untimed majority of invokes free of the policy round trip. */
@@ -221,8 +228,8 @@ export function gateInvoke(
 ): void {
 	if (REFUSED_COMMANDS.has(command)) {
 		throw new Error(
-			'a remote session cannot open folders on this PC — open one from the PC, or spawn a sandboxed window'
-		);
+            `${command} is the desktop's own — a remote session's transfers ride the confined upload and download paths`
+        );
 	}
 	const rule = PATH_GATED[command];
 	if (!rule) return;

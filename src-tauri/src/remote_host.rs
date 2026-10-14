@@ -19,6 +19,8 @@ use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
+use crate::cmd_fs::zip_tree;
+
 /// The hidden Relay webview's label (its capability file is `capabilities/remote-relay.json`).
 pub const RELAY_LABEL: &str = "remote-relay";
 /// The control channel's reconnect pacing: the first retry is quick and the delay doubles up
@@ -763,43 +765,9 @@ fn serve_file(
     }
 }
 
-/// Zip a file or a folder tree, skipping `.git` and whatever cannot be read.
-fn zip_tree<W: std::io::Write + std::io::Seek>(root: &Path, sink: W) -> zip::result::ZipResult<W> {
-    use std::io::Write;
-    let mut writer = zip::ZipWriter::new(sink);
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
-    let base = if root.is_dir() {
-        root.to_path_buf()
-    } else {
-        root.parent().map(Path::to_path_buf).unwrap_or_default()
-    };
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(path) = stack.pop() {
-        if path.is_dir() {
-            if path.file_name().is_some_and(|n| n == ".git") {
-                continue;
-            }
-            if let Ok(entries) = std::fs::read_dir(&path) {
-                let mut children: Vec<PathBuf> =
-                    entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-                children.sort();
-                stack.extend(children.into_iter().rev());
-            }
-            continue;
-        }
-        let Ok(rel) = path.strip_prefix(&base) else {
-            continue;
-        };
-        let name = rel.to_string_lossy().replace('\\', "/");
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
-        };
-        writer.start_file(name, options)?;
-        writer.write_all(&bytes)?;
-    }
-    writer.finish()
-}
+// The zip walk lives in cmd_fs (`zip_tree`) — the desktop export (fs_export) and this
+// download path share the one tree-walking writer, `.git` skipped, unreadable entries
+// skipped.
 
 // ---- the Relay webview ----
 

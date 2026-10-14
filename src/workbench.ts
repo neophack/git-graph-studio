@@ -1246,10 +1246,31 @@ export class Workbench {
 			}
 		}).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
 		// Tauri captures webview drag-and-drop itself (the DOM never sees the drop), so files
-		// dragged onto the window arrive here; each one opens like "Open File..." would.
+		// dragged onto the window arrive here. Over the Explorer they copy into the folder
+		// under the cursor (VS Code's own explorer drop); anywhere else each one opens like
+		// "Open File..." would. The remote shim synthesizes these events from a browser
+		// DragEvent after uploading into the open folder (already CSS pixels, no Explorer
+		// routing of its own), so there a drop only opens, as it always has.
 		void getCurrentWebview().onDragDropEvent((event) => {
-			if (event.payload.type === 'drop') {
-				for (const path of event.payload.paths) void this.editors.openFile(path);
+			const payload = event.payload;
+			if (remoteEnv()) {
+				if (payload.type === 'drop') for (const path of payload.paths) void this.editors.openFile(path);
+				return;
+			}
+			if (payload.type === 'leave') {
+				this.explorer.endExternalDrag();
+				return;
+			}
+			// Tauri reports the position in physical pixels; the tree hit-tests CSS pixels.
+			const x = payload.position.x / window.devicePixelRatio;
+			const y = payload.position.y / window.devicePixelRatio;
+			if (payload.type === 'drop') {
+				void this.explorer.dropExternalFiles(x, y, payload.paths).then((consumed) => {
+					if (!consumed) for (const path of payload.paths) void this.editors.openFile(path);
+				});
+			} else {
+				// 'enter' and 'over': the drop ring follows the cursor.
+				this.explorer.noteExternalDrag(x, y);
 			}
 		}).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
 		// macOS Finder's "Open With" handoff, once the backend knows this window has booted.

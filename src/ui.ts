@@ -242,14 +242,28 @@ export interface ProgressToast {
 
 /** Show a toast with a progress bar that lives until `done` — the UI behind
  *  `vscode.window.withProgress`. The bar starts indeterminate (the null pulse) until the
- *  first report with a value arrives. */
-export function progressToast(title: string): ProgressToast {
+ *  first report with a value arrives. `onCancel`, when given, renders the Cancel action a
+ *  cancellable long task offers (a file transfer's stop button). */
+export function progressToast(title: string, onCancel?: () => void): ProgressToast {
 	const container = document.getElementById('notifications')!;
 	const fill = el('i');
 	const track = el('div', 'progress-track', [fill]);
 	fill.classList.add('indeterminate');
 	const label = el('div', 'message', [title]);
-	const toast = el('div', 'notification', [icon('sync', 'codicon-modifier-spin'), el('div', 'body', [label, track])]);
+	const body = el('div', 'body', [label, track]);
+	const toast = el('div', 'notification', [icon('sync', 'codicon-modifier-spin'), body]);
+	let cancelled = false;
+	if (onCancel) {
+		const buttons = el('div', 'buttons');
+		const button = el('button', 'button', [t('transfer.cancel')]);
+		button.addEventListener('click', () => {
+			cancelled = true;
+			toast.remove();
+			onCancel();
+		});
+		buttons.appendChild(button);
+		body.appendChild(buttons);
+	}
 	container.appendChild(toast);
 	return {
 		update(percent, message): void {
@@ -263,6 +277,8 @@ export function progressToast(title: string): ProgressToast {
 			}
 		},
 		done(): void {
+			// A cancel already removed the toast; the report that follows only closes it.
+			if (cancelled) return;
 			toast.remove();
 		}
 	};
@@ -367,9 +383,12 @@ export function showContextMenu(x: number, y: number, entries: MenuEntry[]): voi
 	renderMenu(x, y, entries, 0, 180);
 }
 
-/** A menu dropped below an element (a title-bar menu, a "..." button). */
+/** A menu dropped below an element (a title-bar menu, a "..." button). The presenter answers
+ *  first here too: a touch phone shows every menu as the action sheet, never a floating panel
+ *  whose submenus cascade left and right of it. */
 export function showMenuBelow(anchor: HTMLElement, entries: MenuEntry[], minWidth = 200): void {
 	closeContextMenu();
+	if (menuPresenter?.(entries)) return;
 	const rect = anchor.getBoundingClientRect();
 	renderMenu(rect.left, rect.bottom, entries, 0, minWidth);
 }

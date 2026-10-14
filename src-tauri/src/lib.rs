@@ -153,6 +153,9 @@ mod desktop {
         pub symbol_cache: Arc<cmd_search::SymbolCache>,
         /// The running search's generation, for cancellation (cmd_search).
         pub search: Arc<cmd_search::SearchState>,
+        /// The running file transfer's generation, for cancellation (cmd_fs's fs_import /
+        /// fs_export — the progress toast's Cancel action).
+        pub transfer: Arc<cmd_fs::TransferState>,
         /// The persistent workspace symbol index (cmd_symbols / symbols): one database per
         /// open root, resumed from `~/.ggs/index/` on open and updated by the watcher.
         pub symbol_index: Arc<cmd_symbols::SymbolIndex>,
@@ -244,6 +247,7 @@ mod desktop {
                 file_list_cache: Arc::new(cmd_fs::FileListCache::default()),
                 symbol_cache: Arc::new(cmd_search::SymbolCache::default()),
                 search: Arc::new(cmd_search::SearchState::default()),
+                transfer: Arc::new(cmd_fs::TransferState::default()),
                 symbol_index: Arc::new(cmd_symbols::SymbolIndex::new()),
                 analysis_index: Arc::new(cmd_analysis::AnalysisIndex::new()),
                 watcher: Mutex::new(Vec::new()),
@@ -1811,6 +1815,10 @@ mod desktop {
                 cmd_fs::create_folder,
                 cmd_fs::rename_path,
                 cmd_fs::delete_path,
+                cmd_fs::copy_into,
+                cmd_fs::fs_import,
+                cmd_fs::fs_export,
+                cmd_fs::fs_transfer_cancel,
                 cmd_fs::session_log_file,
                 cmd_fs::backup_write,
                 cmd_fs::backup_clear,

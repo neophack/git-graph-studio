@@ -1094,7 +1094,7 @@ type FormFactor = 'phone' | 'tablet' | 'desktop';
 | 悬停提示 | hover | 长按 | 长按 |
 | 快捷键 | 全部 | 外接键盘全部 | 命令面板代替；常用操作有显式按钮 |
 
-实现约束：手写 DOM + `ui.ts` 原语（原则 3）。`ui.ts` 的 `contextMenu()` 增加一个分支：`data-pointer=coarse` 且为手机档时渲染为动作表，调用方不用改。触控目标 ≥ 44 × 44 px。所有新增文字走 `t(key)`（`src/i18n.ts`，en / zh-cn）。
+实现约束：手写 DOM + `ui.ts` 原语（原则 3）。`ui.ts` 的菜单渲染走一个可替换的 presenter（`setMenuPresenter`，`actionSheet.ts` 安装）：`contextMenu()` 与 `showMenuBelow()` 两个入口都先问它，`data-pointer=coarse` 且为手机档时渲染为动作表（2026-10-13 补齐 `showMenuBelow()`——此前 "More Actions…" 一类锚点菜单仍落桌面浮动面板，子菜单在手机上左右级联），调用方不用改。触控目标 ≥ 44 × 44 px。所有新增文字走 `t(key)`（`src/i18n.ts`，en / zh-cn）。
 
 ### 11.3 逐功能适配（R14）
 

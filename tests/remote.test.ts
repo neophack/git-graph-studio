@@ -750,7 +750,7 @@ describe('file transfers', () => {
 	it('reports through the installed sink — the mirror page has no workbench toasts', async () => {
 		env((cmd) => (cmd === 'fs_upload_offset' ? 0 : 0));
 		const events: string[] = [];
-		const { setTransferSink, uploadInto } = await import('../src/remote/transfer');
+		const { setTransferSink, uploadInto } = await import('../src/transfer');
 		setTransferSink({
 			progress: (title) => {
 				events.push(`begin ${title}`);
@@ -759,12 +759,19 @@ describe('file transfers', () => {
 			info: (message) => events.push(`info ${message}`),
 			error: (message) => events.push(`error ${message}`)
 		});
-		const outcome = uploadInto('C:\\dest');
-		pick(new File(['abc'], 'one.txt'));
-		await outcome;
-		expect(events.join('\n')).toBe('begin Uploading one.txt\nupdate 100 Uploading one.txt\ndone\ninfo Uploaded 1 file(s)');
-		setTransferSink(null);
-		setRemoteEnv(undefined);
+		try {
+			const outcome = uploadInto('C:\\dest');
+			// The wrapper awaits the transport module before it opens the picker — the input
+			// is one hop behind the call.
+			await flush();
+			pick(new File(['abc'], 'one.txt'));
+			await outcome;
+			expect(events.join('\n')).toBe('begin Uploading one.txt\nupdate 100 Uploading one.txt\ndone\ninfo Uploaded 1 file(s)');
+		} finally {
+			// A leftover sink would swallow every later test's notices.
+			setTransferSink(null);
+			setRemoteEnv(undefined);
+		}
 	});
 
 	it('a download mints a ticket and navigates to its one-time URL', async () => {
@@ -791,7 +798,7 @@ describe('file transfers', () => {
 		env(() => 0);
 		document.body.appendChild(Object.assign(document.createElement('div'), { id: 'notifications' }));
 		vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 403 }) as Response));
-		const { downloadTo } = await import('../src/remote/transfer');
+		const { downloadTo } = await import('../src/transfer');
 		await expect(downloadTo('C:\\x\\a.txt')).resolves.toBe(false);
 		expect(document.getElementById('notifications')!.textContent).toContain('403');
 		vi.unstubAllGlobals();
@@ -805,8 +812,10 @@ describe('file transfers', () => {
 			return 0;
 		});
 		document.body.appendChild(Object.assign(document.createElement('div'), { id: 'notifications' }));
-		const { uploadInto } = await import('../src/remote/transfer');
+		const { uploadInto } = await import('../src/transfer');
 		const promise = uploadInto('C:\\dest');
+		// The wrapper awaits the transport module before it opens the picker.
+		await flush();
 		pick(new File(['a'], 'good.txt'), new File(['b'], 'bad.txt'));
 		await expect(promise).resolves.toEqual(['C:\\dest\\good.txt']);
 		const notifications = document.getElementById('notifications')!;
