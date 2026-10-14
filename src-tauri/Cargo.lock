@@ -2017,6 +2017,11 @@ dependencies = [
 name = "ggs-git"
 version = "0.0.0"
 dependencies = [
+ "ggs-testkit",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha1",
  "tempfile",
  "winreg 0.52.0",
 ]
@@ -2076,7 +2081,6 @@ dependencies = [
 name = "ggs-testkit"
 version = "0.0.0"
 dependencies = [
- "ggs-git",
  "tempfile",
 ]
 

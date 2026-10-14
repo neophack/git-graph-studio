@@ -7,8 +7,9 @@
 
 use std::path::Path;
 
+use ggs_git::ops;
 use ggs_git::runner::Git;
-use crate::{scm_ops, AppState};
+use crate::AppState;
 use tauri::State;
 
 /// The repository a command acts on: the one the view names (`repo`, a submodule's section
@@ -23,9 +24,9 @@ fn open_repo(state: &State<AppState>, repo: Option<String>) -> Result<String, St
 pub async fn scm_status(
     state: State<'_, AppState>,
     repo: Option<String>,
-) -> Result<Vec<scm_ops::ScmStatusChange>, String> {
+) -> Result<Vec<ops::ScmStatusChange>, String> {
     let git = git(&state, repo)?;
-    tauri::async_runtime::spawn_blocking(move || scm_ops::status(&git))
+    tauri::async_runtime::spawn_blocking(move || ops::status(&git))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -38,10 +39,10 @@ pub async fn file_log(
     path: String,
     limit: Option<usize>,
     repo: Option<String>,
-) -> Result<Vec<scm_ops::FileLogEntry>, String> {
+) -> Result<Vec<ops::FileLogEntry>, String> {
     let git = git(&state, repo)?;
     tauri::async_runtime::spawn_blocking(move || {
-        scm_ops::file_log(&git, &path, limit.unwrap_or(300).clamp(1, 1000))
+        ops::file_log(&git, &path, limit.unwrap_or(300).clamp(1, 1000))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -56,7 +57,7 @@ pub async fn scm_rename_branch(
     new_name: String,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::rename_branch(&git(&state, repo)?, &old_name, &new_name)
+    ops::rename_branch(&git(&state, repo)?, &old_name, &new_name)
 }
 
 #[tauri::command]
@@ -66,7 +67,7 @@ pub async fn scm_delete_branch(
     force: bool,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::delete_branch(&git(&state, repo)?, &branch_name, force)
+    ops::delete_branch(&git(&state, repo)?, &branch_name, force)
 }
 
 #[tauri::command]
@@ -75,7 +76,7 @@ pub async fn scm_merge(
     name: String,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::merge(&git(&state, repo)?, &name)
+    ops::merge(&git(&state, repo)?, &name)
 }
 
 #[tauri::command]
@@ -84,7 +85,7 @@ pub async fn scm_rebase(
     name: String,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::rebase(&git(&state, repo)?, &name)
+    ops::rebase(&git(&state, repo)?, &name)
 }
 
 #[tauri::command]
@@ -95,7 +96,7 @@ pub async fn scm_add_remote(
     fetch: bool,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::add_remote(&git(&state, repo)?, &name, &url, fetch)
+    ops::add_remote(&git(&state, repo)?, &name, &url, fetch)
 }
 
 #[tauri::command]
@@ -104,7 +105,7 @@ pub async fn scm_delete_remote(
     name: String,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::delete_remote(&git(&state, repo)?, &name)
+    ops::delete_remote(&git(&state, repo)?, &name)
 }
 
 #[tauri::command]
@@ -114,7 +115,7 @@ pub async fn scm_push_stash(
     include_untracked: bool,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::push_stash(&git(&state, repo)?, &message, include_untracked)
+    ops::push_stash(&git(&state, repo)?, &message, include_untracked)
 }
 
 #[tauri::command]
@@ -124,7 +125,7 @@ pub async fn scm_apply_stash(
     reinstate_index: bool,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::apply_stash(&git(&state, repo)?, &selector, reinstate_index)
+    ops::apply_stash(&git(&state, repo)?, &selector, reinstate_index)
 }
 
 #[tauri::command]
@@ -134,7 +135,7 @@ pub async fn scm_pop_stash(
     reinstate_index: bool,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::pop_stash(&git(&state, repo)?, &selector, reinstate_index)
+    ops::pop_stash(&git(&state, repo)?, &selector, reinstate_index)
 }
 
 #[tauri::command]
@@ -143,7 +144,7 @@ pub async fn scm_drop_stash(
     selector: String,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::drop_stash(&git(&state, repo)?, &selector)
+    ops::drop_stash(&git(&state, repo)?, &selector)
 }
 
 #[tauri::command]
@@ -155,7 +156,7 @@ pub async fn scm_add_tag(
     force: bool,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::add_tag(
+    ops::add_tag(
         &git(&state, repo)?,
         &tag_name,
         &commit_hash,
@@ -170,7 +171,7 @@ pub async fn scm_delete_tag(
     tag_name: String,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::delete_tag(&git(&state, repo)?, &tag_name)
+    ops::delete_tag(&git(&state, repo)?, &tag_name)
 }
 
 #[tauri::command]
@@ -178,7 +179,7 @@ pub async fn scm_undo_last_commit(
     state: State<'_, AppState>,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::undo_last_commit(&git(&state, repo)?)
+    ops::undo_last_commit(&git(&state, repo)?)
 }
 
 fn git(state: &State<AppState>, repo: Option<String>) -> Result<Git, String> {
@@ -339,24 +340,24 @@ pub(crate) fn discard_paths(git: &Git, restore: &[String], clean: &[String]) -> 
 pub async fn scm_branches(
     state: State<'_, AppState>,
     repo: Option<String>,
-) -> Result<Vec<scm_ops::BranchInfo>, String> {
-    scm_ops::branches(&git(&state, repo)?)
+) -> Result<Vec<ops::BranchInfo>, String> {
+    ops::branches(&git(&state, repo)?)
 }
 
 #[tauri::command]
 pub async fn scm_remotes(
     state: State<'_, AppState>,
     repo: Option<String>,
-) -> Result<Vec<scm_ops::RemoteInfo>, String> {
-    scm_ops::remotes(&git(&state, repo)?)
+) -> Result<Vec<ops::RemoteInfo>, String> {
+    ops::remotes(&git(&state, repo)?)
 }
 
 #[tauri::command]
 pub async fn scm_stashes(
     state: State<'_, AppState>,
     repo: Option<String>,
-) -> Result<Vec<scm_ops::StashInfo>, String> {
-    scm_ops::stashes(&git(&state, repo)?)
+) -> Result<Vec<ops::StashInfo>, String> {
+    ops::stashes(&git(&state, repo)?)
 }
 
 #[tauri::command]
@@ -364,7 +365,7 @@ pub async fn scm_tags(
     state: State<'_, AppState>,
     repo: Option<String>,
 ) -> Result<Vec<String>, String> {
-    scm_ops::tags(&git(&state, repo)?)
+    ops::tags(&git(&state, repo)?)
 }
 
 #[tauri::command]
@@ -375,7 +376,7 @@ pub async fn scm_pull(
     rebase: bool,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::pull(
+    ops::pull(
         &git(&state, repo)?,
         remote.as_deref(),
         branch.as_deref(),
@@ -391,7 +392,7 @@ pub async fn scm_push(
     force: bool,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::push(&git(&state, repo)?, remote.as_deref(), set_upstream, force)
+    ops::push(&git(&state, repo)?, remote.as_deref(), set_upstream, force)
 }
 
 #[tauri::command]
@@ -400,7 +401,7 @@ pub async fn scm_sync(
     rebase: bool,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::sync(&git(&state, repo)?, rebase)
+    ops::sync(&git(&state, repo)?, rebase)
 }
 
 #[tauri::command]
@@ -410,7 +411,7 @@ pub async fn scm_fetch(
     prune: bool,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::fetch(&git(&state, repo)?, remote.as_deref(), prune)
+    ops::fetch(&git(&state, repo)?, remote.as_deref(), prune)
 }
 
 #[tauri::command]
@@ -419,7 +420,7 @@ pub async fn scm_checkout(
     name: String,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::checkout(&git(&state, repo)?, &name)
+    ops::checkout(&git(&state, repo)?, &name)
 }
 
 #[tauri::command]
@@ -429,7 +430,7 @@ pub async fn scm_create_branch(
     from: Option<String>,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::create_branch(&git(&state, repo)?, &name, from.as_deref())
+    ops::create_branch(&git(&state, repo)?, &name, from.as_deref())
 }
 
 #[tauri::command]
@@ -437,7 +438,7 @@ pub async fn scm_amend_last_commit(
     state: State<'_, AppState>,
     repo: Option<String>,
 ) -> Result<(), String> {
-    scm_ops::amend_last_commit(&git(&state, repo)?)
+    ops::amend_last_commit(&git(&state, repo)?)
 }
 
 #[tauri::command]
@@ -445,13 +446,13 @@ pub async fn scm_reset_to_remote(
     state: State<'_, AppState>,
     repo: Option<String>,
 ) -> Result<String, String> {
-    scm_ops::reset_to_remote(&git(&state, repo)?)
+    ops::reset_to_remote(&git(&state, repo)?)
 }
 
 /// Clone into `parent`; the new repository's path is returned for the app to open.
 #[tauri::command]
 pub fn scm_clone(url: String, parent: String, name: Option<String>) -> Result<String, String> {
-    scm_ops::clone(&url, Path::new(&parent), name.as_deref(), &[]).map(|p| p.display().to_string())
+    ops::clone(&url, Path::new(&parent), name.as_deref(), &[]).map(|p| p.display().to_string())
 }
 
 #[tauri::command]
@@ -460,7 +461,13 @@ pub async fn gerrit_install_hook(
     remote: String,
     repo: Option<String>,
 ) -> Result<bool, String> {
-    scm_ops::gerrit_install_hook(&git(&state, repo)?, &remote, "commit-msg")
+    let git = git(&state, repo)?;
+    let url = ops::gerrit_hook_url(&git, &remote, "commit-msg")?;
+    let content = ureq::get(&url)
+        .call()
+        .and_then(|mut response| response.body_mut().read_to_string())
+        .map_err(|e| format!("Unable to download the commit-msg hook from {url}: {e}"))?;
+    ops::gerrit_install_hook_with(&git, "commit-msg", &content)
 }
 
 #[tauri::command]
@@ -469,7 +476,7 @@ pub async fn gerrit_push_ref(
     remote: String,
     repo: Option<String>,
 ) -> Result<Option<String>, String> {
-    scm_ops::gerrit_push_ref(&git(&state, repo)?, &remote)
+    ops::gerrit_push_ref(&git(&state, repo)?, &remote)
 }
 
 /// The "Git" output channel: everything git printed so far.
@@ -563,7 +570,8 @@ pub fn git_output_clear() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ggs_testkit::{commit, subject, write, Scratch};
+    use crate::test_git_helpers::*;
+    use ggs_testkit::Scratch;
 
     #[test]
     fn amend_without_a_message_keeps_the_original_one() {

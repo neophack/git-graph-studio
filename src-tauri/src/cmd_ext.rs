@@ -1599,7 +1599,7 @@ fn ext_page_revision_bytes_core(
         .to_string_lossy()
         .replace('\\', "/");
     let git = ggs_git::runner::Git::new(root.to_string_lossy().into_owned());
-    match crate::cmd_fs::revision_file_bytes(&git, revision, &relative)? {
+    match ggs_git::revision::revision_file_bytes(&git, revision, &relative)? {
         Some(bytes) => Ok(ExtPageBytes {
             error: None,
             bytes: Some(encode(&bytes)),
@@ -4511,6 +4511,7 @@ mod backend_derivation_tests {
 
 #[cfg(test)]
 mod page_bytes_tests {
+    use crate::test_git_helpers::*;
     use ggs_testkit::Scratch;
     use base64::Engine as _;
 
@@ -4529,7 +4530,7 @@ mod page_bytes_tests {
         std::fs::write(repo_path.join("logo.bin"), binary).unwrap();
         git.output(&["add", "logo.bin"]).unwrap();
         git.output(&["commit", "-m", "binary"]).unwrap();
-        let hash = ggs_testkit::rev(&git, "HEAD");
+        let hash = crate::test_git_helpers::rev(&git, "HEAD");
 
         let root = repo_path.to_string_lossy().into_owned();
         let roots = [root.clone()];

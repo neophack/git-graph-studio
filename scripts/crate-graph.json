@@ -27,7 +27,8 @@
 		"ggs-remote-proto": [],
 		"ggs-codec": [],
 		"ggs-git": [
-			"ggs-base"
+			"ggs-base",
+			"ggs-testkit"
 		],
 		"ggs-shellenv": [
 			"ggs-base",

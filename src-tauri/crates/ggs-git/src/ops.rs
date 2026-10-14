@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use ggs_git::runner::is_safe_ref_name;
-use ggs_git::runner::Git;
+use crate::runner::is_safe_ref_name;
+use crate::runner::Git;
 
 type Status = Result<(), String>;
 
@@ -437,7 +437,7 @@ pub fn sync(git: &Git, rebase: bool) -> Status {
 }
 
 pub fn fetch(git: &Git, remote: Option<&str>, prune: bool) -> Status {
-    ggs_git::runner::fetch(git, remote, prune, false)
+    crate::runner::fetch(git, remote, prune, false)
 }
 
 /// `git clone <url>` into `parent/<name>` (the name derived from the URL when not given);
@@ -570,9 +570,10 @@ pub fn gerrit_server_url(remote_url: &str) -> Option<String> {
     None
 }
 
-/// Download and install a hook (`commit-msg`) from the Gerrit server of `remote`. Returns
-/// whether a hook was written (false when the identical hook was already installed).
-pub fn gerrit_install_hook(git: &Git, remote: &str, hook: &str) -> Result<bool, String> {
+/// The Gerrit hook download's URL — the DOWNLOAD itself stays app-side (ggs-git is
+/// network-free by design); the app fetches and hands the bytes to
+/// [`gerrit_install_hook_with`].
+pub fn gerrit_hook_url(git: &Git, remote: &str, hook: &str) -> Result<String, String> {
     check_ref("remote", remote)?;
     if hook != "commit-msg" {
         return Err(format!(
@@ -583,24 +584,23 @@ pub fn gerrit_install_hook(git: &Git, remote: &str, hook: &str) -> Result<bool, 
     let origin = gerrit_server_url(&remote_url).ok_or_else(|| {
         format!("Unable to derive the Gerrit server URL from the remote \"{remote}\" (only http(s) and ssh remotes are supported).")
     })?;
-    let hook_url = format!("{origin}/tools/hooks/{hook}");
-    let content = ureq::get(&hook_url)
-        .call()
-        .and_then(|mut response| response.body_mut().read_to_string())
-        .map_err(|e| format!("Unable to download the {hook} hook from {hook_url}: {e}"))?;
+    Ok(format!("{origin}/tools/hooks/{hook}"))
+}
+
+/// Install a downloaded hook's content. Returns whether a hook was written (false when
+/// the identical hook was already installed).
+pub fn gerrit_install_hook_with(git: &Git, hook: &str, content: &str) -> Result<bool, String> {
     if !content.trim_start().starts_with("#!") {
-        return Err(format!(
-            "The file downloaded from {hook_url} is not a valid hook script."
-        ));
+        return Err("the downloaded file is not a valid hook script.".to_string());
     }
     let hooks_dir = git.git_dir()?.join("hooks");
     let hook_path = hooks_dir.join(hook);
-    if std::fs::read_to_string(&hook_path).ok().as_deref() == Some(content.as_str()) {
+    if std::fs::read_to_string(&hook_path).ok().as_deref() == Some(content) {
         return Ok(false);
     }
     std::fs::create_dir_all(&hooks_dir)
         .map_err(|e| format!("Unable to create {}: {e}", hooks_dir.display()))?;
-    std::fs::write(&hook_path, &content).map_err(|e| {
+    std::fs::write(&hook_path, content).map_err(|e| {
         format!(
             "Unable to write the {hook} hook to {}: {e}",
             hook_path.display()
@@ -718,9 +718,8 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use ggs_testkit::{
-        commit, current_branch as branch_of, head, rev, subject, write, Scratch,
-    };
+    use crate::testkit_ext::*;
+    use ggs_testkit::Scratch;
 
     #[test]
     fn lists_branches_remotes_stashes_and_tags() {
@@ -852,14 +851,14 @@ mod tests {
         git.run(&["push", "-q", "-u", "origin", "main"]).unwrap();
 
         create_branch(&git, "feature", None).unwrap();
-        assert_eq!(branch_of(&git).as_deref(), Some("feature"));
+        assert_eq!(scratch_current_branch(&git).as_deref(), Some("feature"));
         checkout(&git, "main").unwrap();
-        assert_eq!(branch_of(&git).as_deref(), Some("main"));
+        assert_eq!(scratch_current_branch(&git).as_deref(), Some("main"));
         // A remote-tracking branch becomes a tracking local branch.
         git.run(&["push", "-q", "origin", "feature"]).unwrap();
         git.run(&["branch", "-D", "feature"]).unwrap();
         checkout(&git, "origin/feature").unwrap();
-        assert_eq!(branch_of(&git).as_deref(), Some("feature"));
+        assert_eq!(scratch_current_branch(&git).as_deref(), Some("feature"));
         assert_eq!(upstream(&git).as_deref(), Some("origin/feature"));
 
         checkout(&git, "main").unwrap();
@@ -947,12 +946,12 @@ mod tests {
         );
 
         // A hook cannot come from a file remote; the error names the remote.
-        let error = gerrit_install_hook(&git, "origin", "commit-msg").unwrap_err();
+        let error = gerrit_hook_url(&git, "origin", "commit-msg").unwrap_err();
         assert!(
             error.contains("Unable to derive the Gerrit server URL"),
             "{error}"
         );
-        assert!(gerrit_install_hook(&git, "origin", "pre-commit").is_err());
+        assert!(gerrit_hook_url(&git, "origin", "pre-commit").is_err());
         assert!(
             !fs::exists(git.git_dir().unwrap().join("hooks").join("commit-msg")).unwrap_or(false)
         );

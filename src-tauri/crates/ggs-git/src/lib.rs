@@ -10,4 +10,8 @@
 //! listed here: `locate::find_git_exe` memoises nothing today — each caller resolves).
 
 pub mod locate;
+#[cfg(test)]
+mod testkit_ext;
+pub mod ops;
+pub mod revision;
 pub mod runner;

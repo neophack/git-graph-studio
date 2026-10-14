@@ -16,7 +16,8 @@ use std::time::Instant;
 
 use serde_json::json;
 
-use crate::{cmd_search, scm_ops};
+use crate::cmd_search;
+use ggs_git::ops as scm_ops;
 
 fn ms(started: Instant) -> f64 {
     (started.elapsed().as_secs_f64() * 1000.0 * 10.0).round() / 10.0
@@ -164,6 +165,7 @@ fn large_file_probe() -> (u64, f64, f64, f64, usize) {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_git_helpers::ScratchGit;
     use super::*;
 
     #[test]
@@ -188,7 +190,7 @@ mod tests {
         // root resolves and the status phase reports a timing and a (clean-tree) count.
         let scratch = ggs_testkit::Scratch::new("measure");
         let git = scratch.repo("repo");
-        ggs_testkit::commit(&git, "b.rs", "fn beta() {} // TODO\n", "second");
+        crate::test_git_helpers::commit(&git, "b.rs", "fn beta() {} // TODO\n", "second");
         let report: serde_json::Value =
             serde_json::from_str(&run(&git.repo.display().to_string()).unwrap()).unwrap();
         assert_eq!(report["isRepository"], true);

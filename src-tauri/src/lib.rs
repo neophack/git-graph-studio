@@ -18,6 +18,8 @@
 // The app's own test-only helper (the isolated extension store); the scratch-repo kit
 // lives in the ggs-testkit dev-dependency (crates/ggs-testkit).
 #[cfg(test)]
+mod test_git_helpers;
+#[cfg(test)]
 mod test_isolated_store;
 
 #[cfg(feature = "desktop")]
@@ -75,8 +77,6 @@ pub mod pty;
 /// daemon, the remote workbench's assets and the hidden Relay webview.
 #[cfg(feature = "desktop")]
 pub mod remote_host;
-#[cfg(feature = "desktop")]
-pub mod scm_ops;
 #[cfg(all(test, feature = "desktop"))]
 mod stage_bench;
 #[cfg(feature = "desktop")]
@@ -368,6 +368,7 @@ mod desktop {
 
     #[cfg(test)]
     mod open_folder_impl_tests {
+    use crate::test_git_helpers::ScratchGit;
         use super::*;
 
         /// Opening a subfolder of a repository resolves to the repository root - both in the

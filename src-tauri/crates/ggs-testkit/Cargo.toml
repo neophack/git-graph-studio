@@ -11,5 +11,4 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-ggs-git.workspace = true
 tempfile.workspace = true
