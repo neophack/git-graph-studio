@@ -1,14 +1,12 @@
-//! The Terminal Shell preference (module 18's half of the setting): which shell the
-//! integrated terminal opens and the bridged claude-code backend drives — Git for
-//! Windows' own Git Bash (the default since 2026-10-13, the owner's direction: found,
-//! never shipped — its path is located at read time, and GGS Bash stands in wherever
-//! none is installed), GGS Bash (the bundled shell, always there), or PowerShell. A
-//! Windows-only concern (2026-10-13, the owner's direction): off Windows neither bash
-//! of the setting exists — the terminal opens the system's own shell and Claude Code's
-//! POSIX picker serves itself, so the consumers inject nothing. The backend side reads
-//! the choice from `~/.ggs/settings.json` the way `cmd_app::stored_locale` does (a
-//! raw, tolerant parse — a missing or broken file is the default, never an error),
-//! because the spawn path has no app handle.
+//! ggs-shellenv (L1, module 18's app-side half): the Terminal Shell setting and its
+//! outward environment — which shell the integrated terminal opens and the bridged
+//! claude-code backend drives (Git for Windows' own Git Bash found-never-typed, GGS
+//! Bash standing in, PowerShell), the `~/.ggs/shell/bash[.exe]` copy Claude Code's
+//! basename whitelist accepts, and the exact `CLAUDE_CODE_*` pairs the spawn env
+//! carries. A Windows-shaped concern that reads harmlessly everywhere else.
+//!
+//! Allowed dependencies: ggs-git (locate's bash_name and Git-Bash discovery),
+//! serde_json (the settings read). No global state.
 
 use std::path::{Path, PathBuf};
 
@@ -172,3 +170,133 @@ pub fn claude_shell_env(preference: ShellPreference, bash: Option<&Path>) -> Vec
         .collect()
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_or_broken_settings_file_is_the_default() {
+        let home = tempfile::TempDir::new().unwrap();
+        assert_eq!(preference(home.path()), ShellPreference::GitBash);
+        std::fs::create_dir_all(home.path().join(".ggs")).unwrap();
+        std::fs::write(home.path().join(".ggs").join("settings.json"), "{ not json").unwrap();
+        assert_eq!(preference(home.path()), ShellPreference::GitBash);
+    }
+    #[test]
+    fn the_persisted_choice_is_read_verbatim() {
+        let home = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(home.path().join(".ggs")).unwrap();
+        std::fs::write(
+            home.path().join(".ggs").join("settings.json"),
+            r#"{ "theme": "nord", "terminalShell": "powershell" }"#,
+        )
+        .unwrap();
+        assert_eq!(preference(home.path()), ShellPreference::PowerShell);
+        // The explicit GGS Bash choice is read the same way.
+        std::fs::write(
+            home.path().join(".ggs").join("settings.json"),
+            r#"{ "terminalShell": "ggsBash" }"#,
+        )
+        .unwrap();
+        assert_eq!(preference(home.path()), ShellPreference::GgsBash);
+        // An unknown value falls back to the default — Git Bash since 2026-10-13 —
+        // never errors.
+        std::fs::write(
+            home.path().join(".ggs").join("settings.json"),
+            r#"{ "terminalShell": "cmd" }"#,
+        )
+        .unwrap();
+        assert_eq!(preference(home.path()), ShellPreference::GitBash);
+    }
+    #[test]
+    fn the_claude_env_names_the_shell_only_when_it_exists() {
+        let bash = Path::new("/apps/bash.exe");
+        let env = claude_shell_env(ShellPreference::GgsBash, Some(bash));
+        let mut expected = vec![
+            (
+                "CLAUDE_CODE_GIT_BASH_PATH".to_owned(),
+                "/apps/bash.exe".to_owned(),
+            ),
+            ("MSYSTEM".to_owned(), "MINGW64".to_owned()),
+            ("SHELL".to_owned(), "/apps/bash.exe".to_owned()),
+        ];
+        if cfg!(windows) {
+            expected.push(("CLAUDE_CODE_USE_POWERSHELL_TOOL".to_owned(), "0".to_owned()));
+        }
+        assert_eq!(env, expected);
+        // The Git Bash choice names the located Git for Windows bash with exactly the
+        // same pairs — one bash environment shape, whichever bash was picked.
+        assert_eq!(
+            claude_shell_env(ShellPreference::GitBash, Some(bash)),
+            expected
+        );
+        // The PowerShell choice pins the git bash path EMPTY — not merely absent
+        // from the pairs, but overridden against whatever the app's own environment
+        // carried — and turns the PowerShell tool on (Windows): the user asked for
+        // PowerShell, so the tool is primary and no bash path may survive.
+        let powershell = claude_shell_env(ShellPreference::PowerShell, Some(bash));
+        if cfg!(windows) {
+            assert_eq!(
+                powershell,
+                vec![
+                    ("CLAUDE_CODE_GIT_BASH_PATH".to_owned(), "".to_owned()),
+                    ("CLAUDE_CODE_USE_POWERSHELL_TOOL".to_owned(), "1".to_owned()),
+                ]
+            );
+        } else {
+            assert!(powershell.is_empty());
+        }
+        // A shell that did not resolve adds nothing for either bash choice — never
+        // point at a shell that is not there; the PowerShell choice needs no resolved
+        // shell (PowerShell itself is the thing being chosen).
+        assert!(claude_shell_env(ShellPreference::GgsBash, None).is_empty());
+        assert!(claude_shell_env(ShellPreference::GitBash, None).is_empty());
+        if !cfg!(windows) {
+            assert!(claude_shell_env(ShellPreference::PowerShell, None).is_empty());
+        }
+    }
+    /// The injected path must carry the basename Claude Code's whitelist accepts —
+    /// the sidecar's own `ggs-bash` name is rejected as "not a bash/sh binary", which
+    /// is the bug this copy exists to fix.
+    #[test]
+    fn the_bash_copy_lands_under_the_ggs_home_and_keeps_the_sidecars_bytes() {
+        let home = tempfile::TempDir::new().unwrap();
+        let sidecar_dir = tempfile::TempDir::new().unwrap();
+        let sidecar = sidecar_dir.path().join("ggs-bash.exe");
+        std::fs::write(&sidecar, b"#!/ggs-bash\n").unwrap();
+
+        let bash = ensure_bash_exe(home.path(), &sidecar).expect("the copy materialises");
+        assert_eq!(bash.file_name().unwrap(), bash_name());
+        assert!(bash.starts_with(home.path().join(".ggs").join("shell")));
+        assert_eq!(
+            std::fs::read(&bash).unwrap(),
+            std::fs::read(&sidecar).unwrap()
+        );
+        // No staging leftovers, and a second pass is an idempotent no-op.
+        let shell_dir = home.path().join(".ggs").join("shell");
+        let entries: Vec<_> = std::fs::read_dir(&shell_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from(bash_name())]);
+        assert_eq!(
+            ensure_bash_exe(home.path(), &sidecar).as_deref(),
+            Some(bash.as_path())
+        );
+
+        // A replaced build (different bytes) refreshes the copy.
+        std::fs::write(&sidecar, b"#!/ggs-bash v2, longer\n").unwrap();
+        let refreshed = ensure_bash_exe(home.path(), &sidecar).expect("the copy refreshes");
+        assert_eq!(refreshed, bash);
+        assert_eq!(std::fs::read(&bash).unwrap(), b"#!/ggs-bash v2, longer\n");
+    }
+    /// A sidecar that is not there leaves nothing behind to point at.
+    #[test]
+    fn a_missing_sidecar_materialises_nothing() {
+        let home = tempfile::TempDir::new().unwrap();
+        let sidecar = home.path().join("nowhere").join("ggs-bash.exe");
+        assert!(ensure_bash_exe(home.path(), &sidecar).is_none());
+        assert!(!home.path().join(".ggs").join("shell").exists());
+    }
+}

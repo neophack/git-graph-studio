@@ -98,6 +98,7 @@ ggs-base = { path = "crates/ggs-base" }
 ggs-proto = { path = "crates/ggs-proto" }
 ggs-codec = { path = "crates/ggs-codec" }
 ggs-git = { path = "crates/ggs-git" }
+ggs-shellenv = { path = "crates/ggs-shellenv" }
 
 # The pretend Node runtime's parser, carrying one upstream gap fix: Boa's class-expression
 # parser dropped a contextual-keyword name, so legal code real packages ship —
@@ -246,6 +247,8 @@ ggs-proto = { workspace = true }
 ggs-codec = { workspace = true }
 # The one git-CLI surface (locate today; the runner lands with P2-6).
 ggs-git = { workspace = true }
+# The Terminal Shell setting's outward environment (providers and pty read it).
+ggs-shellenv = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rpassword = { workspace = true }

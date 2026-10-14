@@ -16,7 +16,8 @@ use std::process::Command;
 use std::time::Instant;
 
 use git_graph_studio_lib::ext_process::ProcessHostState;
-use git_graph_studio_lib::{cmd_ext, cmd_fs, cmd_search, git::Git, scm_ops};
+use git_graph_studio_lib::{cmd_ext, cmd_fs, cmd_search, scm_ops};
+use ggs_git::runner::Git;
 use ggs_base::workspace::find_repo_root;
 use serde_json::{json, Value};
 

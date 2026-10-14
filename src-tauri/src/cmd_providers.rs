@@ -685,17 +685,17 @@ fn claude_shell_env(home: &Path) -> Vec<(String, String)> {
     let ggs_bash_copy = || {
         crate::ext_process::resolve_engine_host("ggs-bash")
             .ok()
-            .and_then(|sidecar| crate::ggs_bash::pref::ensure_bash_exe(home, &sidecar))
+            .and_then(|sidecar| ggs_shellenv::ensure_bash_exe(home, &sidecar))
     };
-    let preference = crate::ggs_bash::pref::preference(home);
+    let preference = ggs_shellenv::preference(home);
     let bash = match preference {
-        crate::ggs_bash::pref::ShellPreference::GgsBash => ggs_bash_copy(),
-        crate::ggs_bash::pref::ShellPreference::GitBash => {
+        ggs_shellenv::ShellPreference::GgsBash => ggs_bash_copy(),
+        ggs_shellenv::ShellPreference::GitBash => {
             ggs_git::locate::find_git_bash().or_else(ggs_bash_copy)
         }
-        crate::ggs_bash::pref::ShellPreference::PowerShell => None,
+        ggs_shellenv::ShellPreference::PowerShell => None,
     };
-    crate::ggs_bash::pref::claude_shell_env(preference, bash.as_deref())
+    ggs_shellenv::claude_shell_env(preference, bash.as_deref())
 }
 
 /* ---------- The gateway probes (NewAPI / OneAPI / any Anthropic-compatible origin) ---------- */

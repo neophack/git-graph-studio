@@ -34,7 +34,6 @@ pub mod lineedit;
 pub mod localtime;
 pub mod msys;
 pub mod parse;
-pub mod pref;
 pub mod regexlite;
 pub mod sysinfo;
 
