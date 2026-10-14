@@ -1,9 +1,9 @@
-//! Running the `git` executable: the write path of the app.
+//! Running the `git` executable: the app's whole git surface (module 9).
 //!
-//! The engine (`git-graph-core`) is read-only by design; everything that mutates a repository
-//! shells out to `git`, exactly as the extension's own CLI backend does. This is the one place
-//! git is spawned from, so the process setup (working directory, no console window on Windows,
-//! no interactive credential prompts that would hang a GUI app) is shared by every caller.
+//! Everything that reads or mutates a repository shells out to `git` — exactly as the
+//! extension's own CLI backend does. This is the one place git is spawned from, so the
+//! process setup (working directory, no console window on Windows, no interactive
+//! credential prompts that would hang a GUI app) is shared by every caller.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -72,12 +72,12 @@ pub struct Git {
 /// one is there — nothing changes for those machines; where the machine's Git lives in
 /// a custom directory the PATH never names (Git for Windows' "use Git from Git Bash
 /// only" install), it is located through the registry `InstallPath` Git's own installer
-/// writes and the standard install roots — [`ggs_git::locate::find_git_exe`], the
+/// writes and the standard install roots — [`locate::find_git_exe`], the
 /// same discovery the Terminal Shell's Git Bash choice rides. Resolved once per run.
 fn executable() -> &'static std::ffi::OsStr {
     static GIT: OnceLock<PathBuf> = OnceLock::new();
     GIT.get_or_init(|| {
-        ggs_git::locate::find_git_exe().unwrap_or_else(|| PathBuf::from("git"))
+        crate::locate::find_git_exe().unwrap_or_else(|| PathBuf::from("git"))
     })
     .as_os_str()
 }
@@ -249,7 +249,7 @@ impl Git {
 /// install the app runs. Registered at the composition root onto `ext_process`'s
 /// spawn-env sources; the id is unused — git is no extension's private concern.
 pub fn backend_env(_ext_id: &str) -> Vec<(String, String)> {
-    let Some(dir) = ggs_git::locate::find_git_exe().and_then(|git| {
+    let Some(dir) = crate::locate::find_git_exe().and_then(|git| {
         git.parent()
             .filter(|dir| !dir.as_os_str().is_empty())
             .map(Path::to_path_buf)

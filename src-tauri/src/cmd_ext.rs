@@ -1598,7 +1598,7 @@ fn ext_page_revision_bytes_core(
         .map_err(|_| format!("{} is not under {}", target.display(), root.display()))?
         .to_string_lossy()
         .replace('\\', "/");
-    let git = crate::git::Git::new(root.to_string_lossy().into_owned());
+    let git = ggs_git::runner::Git::new(root.to_string_lossy().into_owned());
     match crate::cmd_fs::revision_file_bytes(&git, revision, &relative)? {
         Some(bytes) => Ok(ExtPageBytes {
             error: None,

@@ -23,7 +23,6 @@
 /// nor test it; the `ggs-bash` cargo feature and tauri.conf.json's build.features are
 /// the gate) and its tests run only in the Windows CI pass.
 pub mod ggs_bash;
-pub mod git;
 /// The pretend Node runtime (the `ggs-node` sidecar): runs a package's own JS entry —
 /// CommonJS and the builtins — speaking `ggs-ext/1` on stdio. The default host for every
 /// `node` backend; its N-API host loads a package's `.node` too. A system Node hosts the
@@ -113,7 +112,7 @@ pub use desktop::{ensure_main_window, run, AppState};
 mod desktop {
     use crate::{
         can_log, cmd_analysis, cmd_app, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_providers,
-        cmd_scm, cmd_search, cmd_symbols, ext_child, ext_gallery, ext_process, git, mcp, measure,
+        cmd_scm, cmd_search, cmd_symbols, ext_child, ext_gallery, ext_process, mcp, measure,
         pty, remote_host, viewer, watcher,
     };
     use ggs_base::workspace::{find_repo_root, is_repo_below};
@@ -1397,7 +1396,7 @@ mod desktop {
         // PATH (a custom-directory install), its directory rides into every backend's
         // PATH, so an extension's own git discovery finds the same install the app
         // runs — git.rs owns the answer, ext_process stays git-agnostic.
-        ext_process::add_spawn_env_source(git::backend_env);
+        ext_process::add_spawn_env_source(ggs_git::runner::backend_env);
         // The app's own executable, for whatever an extension starts on the app's behalf
         // (the Remote Access daemon launches new windows with it). Set before any thread
         // exists; every backend and every frame's `process.env` inherits it.
@@ -1542,7 +1541,7 @@ mod desktop {
                 // Git's output reaches the panel's "Git" channel as it happens.
                 use tauri::Emitter;
                 let handle = app.handle().clone();
-                git::set_log_emitter(move |line| {
+                ggs_git::runner::set_log_emitter(move |line| {
                     let _ = handle.emit("studio://git-output", line);
                 });
                 stamp("setup entered");

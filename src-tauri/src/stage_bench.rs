@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::cmd_fs::{cached_file_list, walk_files, FileListCache};
-use crate::git::Git;
+use ggs_git::runner::Git;
 
 fn ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.0

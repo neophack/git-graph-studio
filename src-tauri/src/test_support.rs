@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::git::Git;
+use ggs_git::runner::Git;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 

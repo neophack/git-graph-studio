@@ -51,7 +51,7 @@ pub fn run(folder: &str) -> Result<String, String> {
 
     let (scm_ms, scm_changes) = if is_repo {
         let started = Instant::now();
-        let changes = scm_ops::status(&crate::git::Git::new(&root))
+        let changes = scm_ops::status(&ggs_git::runner::Git::new(&root))
             .ok()
             .map(|c| c.len());
         (Some(ms(started)), changes)

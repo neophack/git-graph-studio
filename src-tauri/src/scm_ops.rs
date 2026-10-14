@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::git::is_safe_ref_name;
-use crate::git::Git;
+use ggs_git::runner::is_safe_ref_name;
+use ggs_git::runner::Git;
 
 type Status = Result<(), String>;
 
@@ -437,7 +437,7 @@ pub fn sync(git: &Git, rebase: bool) -> Status {
 }
 
 pub fn fetch(git: &Git, remote: Option<&str>, prune: bool) -> Status {
-    crate::git::fetch(git, remote, prune, false)
+    ggs_git::runner::fetch(git, remote, prune, false)
 }
 
 /// `git clone <url>` into `parent/<name>` (the name derived from the URL when not given);

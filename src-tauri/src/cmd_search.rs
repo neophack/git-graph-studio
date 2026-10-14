@@ -1012,7 +1012,7 @@ fn hex_of(a: Vec<u8>, b: Vec<u8>) -> HexDiff {
 }
 
 fn bytes_at(
-    git: &crate::git::Git,
+    git: &ggs_git::runner::Git,
     root: &str,
     revision: &str,
     path: &str,
@@ -1049,7 +1049,7 @@ pub async fn hex_diff(
     let root = state
         .first_repo()
         .ok_or_else(|| "No folder is open".to_string())?;
-    let git = crate::git::Git::new(&root);
+    let git = ggs_git::runner::Git::new(&root);
     let a = bytes_at(&git, &root, &revision_a, &path_a)?;
     let b = bytes_at(&git, &root, &revision_b, &path_b)?;
     Ok(hex_of(a, b))

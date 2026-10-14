@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use crate::git::Git;
+use ggs_git::runner::Git;
 use crate::{scm_ops, AppState};
 use tauri::State;
 
@@ -210,7 +210,7 @@ pub async fn git_stage_all(state: State<'_, AppState>, repo: Option<String>) -> 
     git(&state, repo)?.run(&["add", "--all"])
 }
 
-pub(crate) fn unstage_paths(git: &crate::git::Git, paths: &[String]) -> Result<(), String> {
+pub(crate) fn unstage_paths(git: &ggs_git::runner::Git, paths: &[String]) -> Result<(), String> {
     let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
     // On an unborn HEAD `git reset HEAD` fails: the first commit does not exist yet, so the
     // staged blob can only be removed from the index directly.
@@ -246,7 +246,7 @@ pub async fn git_unstage_all(
 /// Commit the index (`amend` re-does the last commit). An empty message aborts with git's own
 /// complaint, shown by the view.
 pub(crate) fn commit_index(
-    git: &crate::git::Git,
+    git: &ggs_git::runner::Git,
     message: &str,
     amend: bool,
 ) -> Result<(), String> {
@@ -552,12 +552,12 @@ pub async fn scm_blame(
 
 #[tauri::command]
 pub fn git_output_log() -> Vec<String> {
-    crate::git::log_lines()
+    ggs_git::runner::log_lines()
 }
 
 #[tauri::command]
 pub fn git_output_clear() {
-    crate::git::clear_log();
+    ggs_git::runner::clear_log();
 }
 
 #[cfg(test)]
@@ -609,7 +609,7 @@ mod tests {
         );
     }
 
-    use crate::git::is_valid_commit_hash;
+    use ggs_git::runner::is_valid_commit_hash;
 
     #[test]
     fn discard_paths_leaves_unmerged_and_unlisted_paths_alone() {

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::git::Git;
+use ggs_git::runner::Git;
 use crate::AppState;
 use tauri::ipc::Channel;
 use tauri::State;
