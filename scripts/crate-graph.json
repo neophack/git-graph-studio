@@ -68,7 +68,8 @@
 		],
 		"ggs-providers": [
 			"ggs-base",
-			"ggs-shellenv"
+			"ggs-shellenv",
+			"ggs-git"
 		],
 		"ggs-testkit": [
 			"ggs-base",

@@ -1,0 +1,31 @@
+[package]
+name = "ggs-providers"
+version = "0.0.0"
+description = "The AI provider bridge's engine — the sealed provider store (~/.ggs/ai-providers.json, AES-256-GCM under ~/.ggs/keys/), the presets, the per-window choice, the spawn environment the bridged backend inherits, the gateway probes, the cc-switch import, the usage aggregation and the Claude MCP integration writes"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ggs-base.workspace = true
+# The Terminal Shell preference's half of the bridged environment.
+ggs-shellenv.workspace = true
+# The Git Bash choice resolves Git for Windows' bash through the same locator the
+# terminal uses (plan §4.3: a same-layer edge, listed for this reason).
+ggs-git.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The API-key sealing (AES-256-GCM under a per-install master key).
+aes-gcm.workspace = true
+getrandom.workspace = true
+base64.workspace = true
+hex.workspace = true
+# The gateway probes (Test Connection, Fetch Models) and their bounded timeouts.
+ureq = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true

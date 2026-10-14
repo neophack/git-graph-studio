@@ -110,6 +110,7 @@ ggs-index = { path = "crates/ggs-index" }
 ggs-analysis = { path = "crates/ggs-analysis" }
 ggs-mcp = { path = "crates/ggs-mcp" }
 ggs-ext = { path = "crates/ggs-ext" }
+ggs-providers = { path = "crates/ggs-providers" }
 ggs-testkit = { path = "crates/ggs-testkit" }
 
 # The pretend Node runtime's parser, carrying one upstream gap fix: Boa's class-expression
@@ -227,6 +228,8 @@ ggs-mcp = { workspace = true }
 # The extension store's engine (module 12): .vsix installs, backend derivation, the
 # ggs:// page-serving core, ext_fs, the code preload.
 ggs-ext = { workspace = true }
+# The AI provider bridge's engine (module 12's provider half).
+ggs-providers = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rpassword = { workspace = true }

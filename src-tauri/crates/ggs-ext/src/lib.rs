@@ -62,9 +62,8 @@ pub use store::{
 pub use vsix::{compare_versions, read_vsix_manifest, resolve_node_binaries, safe_join, VsixManifest};
 
 pub use process::{
-    add_spawn_env_source, find_node_host_script, find_node_runtime, instance_id,
-    resolve_engine_host, ExtHost, HostHooks, ProcessInfo, BACKEND_STATE_EVENT,
-    HOST_REQUEST_EVENT, HOST_STATE_EVENT,
+    add_spawn_env_source, find_node_host_script, find_node_runtime, instance_id, ExtHost,
+    HostHooks, ProcessInfo, BACKEND_STATE_EVENT, HOST_REQUEST_EVENT, HOST_STATE_EVENT,
 };
 
 /// The real-Node host opt-in (`GGS_REAL_NODE=1`): it decides whether a plain VSIX with

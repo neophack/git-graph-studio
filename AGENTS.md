@@ -737,7 +737,7 @@ page shows the integration's state (`claude_mcp_status`).
   `src-tauri/src/ext_gallery.rs` (the marketplace commands over the `ggs-ext` crate's `gallery` engine: Open VSX search, icon fetch and
   download-and-install over ureq, origin-confined, a marketplace package installing
   through `cmd_ext`'s ordinary VSIX path),
-  `src-tauri/src/cmd_providers.rs` (the AI provider bridge: the provider store under
+  the `ggs-providers` crate behind `src-tauri/src/cmd_providers.rs` (the AI provider bridge: the provider store under
   `~/.ggs/ai-providers.json`, the AES-256-GCM key sealing under `~/.ggs/keys/`, the
   built-in presets — official / DeepSeek / Zhipu GLM / Moonshot Kimi / custom, each
   flagging whether it can run keyless — `provider_usage` (the usage curve's data: the

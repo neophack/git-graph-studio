@@ -325,7 +325,7 @@ impl ExtHost {
                 // overrides its `main` — a derived backend whose command IS the engine
                 // `.node` hosts that one binary instead of the manifest's main.
                 (Some(node), Some(script)) => (node, vec![script, ext_dir.clone(), entry], false),
-                (_, _) => (resolve_engine_host("ggs-node")?, vec![entry], true),
+                (_, _) => (ggs_base::sidecar::resolve_host("ggs-node")?, vec![entry], true),
             }
         } else {
             (
@@ -1103,63 +1103,9 @@ fn synthesize_extension_host_backend_with(
     })
 }
 
-/// The app-bundled `node`-backend host (`ggs-node`): beside the app's
-/// own binary first (the installer resources place the two together, and cargo's output
-/// directory holds both during a build), one profile up second (a dev run executes from
-/// `debug/` while `prepare.mjs` builds the host into `release/`), and exactly where
-/// `GGS_ENGINE_HOST` says last — the dev and test override. Only a host that ships with the
-/// app can ever run: the manifest names one, it never brings its own, so a package cannot
-/// smuggle an executable through a `node` backend.
-pub fn resolve_engine_host(name: &str) -> Result<PathBuf, String> {
-    if name
-        .split(['/', '\\'])
-        .any(|segment| segment == ".." || segment.is_empty())
-    {
-        return Err(format!("engine host name may not be a path: {name}"));
-    }
-    let file_name = if cfg!(windows) {
-        format!("{name}.exe")
-    } else {
-        name.to_owned()
-    };
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(dir) = std::env::var("GGS_ENGINE_HOST") {
-        candidates.push(PathBuf::from(dir).join(&file_name));
-    }
-    if let Ok(exe_dir) = std::env::current_exe()
-        .map_err(|e| format!("could not locate the app binary: {e}"))
-        .and_then(|exe| {
-            exe.parent()
-                .map(Path::to_owned)
-                .ok_or_else(|| "no parent".to_owned())
-        })
-    {
-        candidates.push(exe_dir.join(&file_name));
-        candidates.push(exe_dir.join("..").join("release").join(&file_name));
-        // The cargo test layout: `debug/deps/` — the built sidecar sits one level up.
-        candidates.push(exe_dir.join("..").join(&file_name));
-    }
-    candidates
-        .iter()
-        .find(|candidate| candidate.is_file())
-        .cloned()
-        .ok_or_else(|| {
-            format!(
-                "engine host {name} not found (looked at {})",
-                candidates
-                    .iter()
-                    .map(|c| c.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })
-}
-
 #[cfg(test)]
 mod engine_host_tests {
-    use super::{
-        deferred_to_the_workbench, resolve_engine_host, synthesize_extension_host_backend_with,
-    };
+    use super::{deferred_to_the_workbench, synthesize_extension_host_backend_with};
     use crate::store::BackendDecl;
 
     fn node_backend() -> BackendDecl {
@@ -1170,14 +1116,6 @@ mod engine_host_tests {
             protocol: None,
             binaries: None,
         }
-    }
-
-    /// A host name that is a path is refused outright — the field names an app-bundled
-    /// binary, never a location.
-    #[test]
-    fn an_engine_host_name_may_not_be_a_path() {
-        assert!(resolve_engine_host("../evil").is_err());
-        assert!(resolve_engine_host("some/dir").is_err());
     }
 
     /// A `node` backend is an extension program, so it starts with the workbench — on

@@ -14,5 +14,6 @@ pub mod cancel;
 pub mod fsx;
 pub mod jsonc;
 pub mod paths;
+pub mod sidecar;
 pub mod sink;
 pub mod workspace;

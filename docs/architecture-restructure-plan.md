@@ -47,6 +47,7 @@
 | P3-9 ggs-ext（一）（store/vsix/page/fsapi/log/loadcode/nodeenv；ExtStore=显式目录参数） | ✅ | 本次 |
 | P3-10 ggs-ext（二）（process/routing/child；global()→app 侧 ExtHost；事件经 HostHooks） | ✅ | 本次 |
 | P3-11 ggs-ext（三）（gallery：Open VSX 客户端，来源约束测试随迁） | ✅ | 本次 |
+| P3-12 ggs-providers（cmd_providers 引擎入 crate；重启桥接后端留 app 适配层；resolve_engine_host 下沉 ggs-base） | ✅ | 本次 |
 
 P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现（构建走
 `target/studio/cargo`），`incremental` 目录 17.5 GB 为多 feature 时代的历史累积，
@@ -109,6 +110,16 @@ P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现
   ext_child 的 Channel 换成事件回调。27 个测试随文件入 crate（ext_gallery 12 +
   ext_process 11 + ext_routing 4），app lib 135 → 108，ggs-ext 60 → 87，
   workspace 704 不变。
+- **P3-12 的落点**：cmd_providers 的引擎（封装存储、预设、每窗口 choice、spawn
+  环境、网关探测、cc-switch 导入、用量曲线、Claude MCP 集成写入——4046 行中的
+  约 3300）落入 ggs-providers（单 lib.rs；deps: ggs-base, ggs-shellenv, ggs-git,
+  aes-gcm, getrandom, ureq, base64, hex）。app 的 cmd_providers.rs 只剩 11 个命令、
+  `backend_env` spawn-env 源与"重启桥接后端"接线（bridged_running + 其测试留 app
+  ——它按 ggs-ext 的 ProcessInfo 筛选，providers 不依赖 ggs-ext）。计划外的一步：
+  `resolve_engine_host` 从 ggs-ext::process 下沉 ggs-base::sidecar（pty、providers、
+  ggs-ext 三方共用的"定位随 App 打包的 sidecar"工具，下沉后 providers 无需依赖
+  ggs-ext）。39 个测试随迁（原 40 减留在 app 的 1 个），app lib 108 → 69，
+  ggs-providers 39，workspace 704 不变。
 
 ### 度量（P2 后实测 vs 计划 §3.2 的预估）
 
@@ -145,6 +156,8 @@ P3-9：app lib 195 → 135（-60，cmd_ext 的七个测试模块随引擎走；1
 unix-only 在 Windows 不编译）。
 P3-10/11：app lib 135 → 108（-27 = ext_gallery 12 + ext_process 11 +
 ext_routing 4），ggs-ext 60 → 87 = 60 + 27。
+P3-12：app lib 108 → 69（-39，cmd_providers 的测试模块随引擎走；重启选择策略的
+1 个测试留 app），ggs-providers 39。
 
 ---
 

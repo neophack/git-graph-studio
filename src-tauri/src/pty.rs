@@ -247,7 +247,7 @@ fn shell_command(shell: Option<&str>) -> Result<(CommandBuilder, String), String
         return Ok((command, name));
     }
     if shell == Some("ggsBash") {
-        let path = ggs_ext::process::resolve_engine_host("ggs-bash")
+        let path = ggs_base::sidecar::resolve_host("ggs-bash")
             .map_err(|error| format!("GGS Bash is not available: {error}"))?;
         let mut command = CommandBuilder::new(&path);
         command.arg("-i");
@@ -267,7 +267,7 @@ fn shell_command(shell: Option<&str>) -> Result<(CommandBuilder, String), String
         }
         // No Git Bash on the machine: GGS Bash stands in rather than failing the
         // terminal outright.
-        let path = ggs_ext::process::resolve_engine_host("ggs-bash").map_err(|error| {
+        let path = ggs_base::sidecar::resolve_host("ggs-bash").map_err(|error| {
             format!("Git Bash was not found on this machine and GGS Bash is not available: {error}")
         })?;
         let mut command = CommandBuilder::new(&path);
