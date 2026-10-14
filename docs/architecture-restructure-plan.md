@@ -48,6 +48,12 @@
 | P3-10 ggs-ext（二）（process/routing/child；global()→app 侧 ExtHost；事件经 HostHooks） | ✅ | 本次 |
 | P3-11 ggs-ext（三）（gallery：Open VSX 客户端，来源约束测试随迁） | ✅ | 本次 |
 | P3-12 ggs-providers（cmd_providers 引擎入 crate；重启桥接后端留 app 适配层；resolve_engine_host 下沉 ggs-base） | ✅ | 本次 |
+| P3-13 AppState 拆分（WorkspaceRoots→ggs-base；LaunchState/Watchers/DeferredServices→app state.rs；领域命令注入窄类型；AppState 删除） | ✅ | 本次 |
+| P3-14 复测（增量场景实测见下） | ✅ | 本次 |
+| P4-1 lib.rs 拆分（boot.rs/cli.rs/window.rs；组合根留 1011 行） | ✅ | 本次 |
+| P4-2 删 desktop 特性（24 处门控、required-features、20 个 optional deps、build.rs 分支全删；grammar-* 成仅剩特性） | ✅ | 本次 |
+| P4-3 check-ipc 的 Rust 侧仍读 lib.rs（脚本已内置 commands/mod.rs 优先，清单未迁移即无需迁移）；crate 白名单已逐 PR 对齐 | ✅ | 本次 |
+| P4-4 开发计划 §3 / AGENTS.md / README 的路径随各 PR 同步 | ✅ | 本次 |
 
 P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现（构建走
 `target/studio/cargo`），`incremental` 目录 17.5 GB 为多 feature 时代的历史累积，
@@ -120,6 +126,17 @@ P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现
   ggs-ext 三方共用的"定位随 App 打包的 sidecar"工具，下沉后 providers 无需依赖
   ggs-ext）。39 个测试随迁（原 40 减留在 app 的 1 个），app lib 108 → 69，
   ggs-providers 39，workspace 704 不变。
+- **P3-13 的落点**：`AppState`（12 字段的上帝状态）删除。`repos`/`resolve_repo`/
+  `first_repo` 落 `ggs_base::workspace::WorkspaceRoots`（§4.6 第一行）；launch 上下文
+  聚为 app `state.rs::LaunchState`；`watcher`→`Watchers`；DeferredServices 随其测试
+  入 state.rs；六个引擎自有类型由 `run()` 逐个 `manage()`。配套 `FolderSwitch`
+  （生命周期命令的借用束）与 `StateSet`（boot 测试的独立构造）。领域命令注入窄类型
+  （cmd_scm 只见 WorkspaceRoots 等）。
+- **P4-1/P4-2 的落点**：lib.rs 2020 → 1011 行，boot.rs（文件夹生命周期）/ cli.rs
+  （命令行解析，纯）/ window.rs（平台 chrome）三个模块；`desktop` 特性删除——24 处
+  模块门控、required-features、20 个 optional 依赖、build.rs 的特性分支全去，
+  grammar-* 成为仅剩的特性（默认全开）。check-ipc 的 Rust 侧无需迁移（其候选列表
+  已内置 commands/mod.rs 优先，清单仍在 lib.rs）。
 
 ### 度量（P2 后实测 vs 计划 §3.2 的预估）
 
@@ -131,6 +148,18 @@ P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现
 | feature 形态开关 | 只剩 `desktop`（P4-2 删） | `node-runtime`/`ggs-bash`/`testkit` 随各自 package 消失 |
 | 生产代码 `for_tests` | 0（`rg` 验证） | P2-12 验收 |
 | crate 成员 | 10（app + 9 crates/） | 白名单 `scripts/crate-graph.json` 全部 enforced |
+
+### 度量补充（P4-2 后实测，2026-10-15，dev profile，warm 缓存）
+
+| 场景 | P4-2 后 | P2 基线对照 |
+| ---- | ------- | ----------- |
+| 改 `ggs_bash/applets.rs` 一行 → build | **0.7 s** | 1.1 s |
+| 改 `cmd_scm.rs` 一行 → build | 6.3–9.9 s | 8.0 s |
+| 改 `viewer/find.rs` 一行 → build | 7.4–8.1 s | 8.1 s |
+| 改 `lib.rs` 一行 → build | 6.3–7.0 s | 10.1 s |
+| 产物依赖数（normal 去重） | app **496** / ggs-node 165 / ggs-bash 27 / ggs-config 11 | app 473（+23：providers/ext 引擎的 ureq/zip 等直接归属） |
+| feature 形态开关 | **0**（grammar-* 之外） | 只剩 desktop（已删） |
+| crate 成员 | **19**（app + 18 crates/） | 10（P2 后） |
 
 ### 度量补充（P3-6 后实测）
 
