@@ -691,7 +691,7 @@ fn claude_shell_env(home: &Path) -> Vec<(String, String)> {
     let bash = match preference {
         crate::ggs_bash::pref::ShellPreference::GgsBash => ggs_bash_copy(),
         crate::ggs_bash::pref::ShellPreference::GitBash => {
-            crate::ggs_bash::pref::find_git_bash().or_else(ggs_bash_copy)
+            ggs_git::locate::find_git_bash().or_else(ggs_bash_copy)
         }
         crate::ggs_bash::pref::ShellPreference::PowerShell => None,
     };
@@ -2580,13 +2580,13 @@ mod tests {
                 if !path.replace('\\', "/").contains("/.ggs/shell/") {
                     // The found Git for Windows bash itself.
                     assert!(
-                        crate::ggs_bash::pref::find_git_bash().as_deref() == Some(Path::new(path)),
+                        ggs_git::locate::find_git_bash().as_deref() == Some(Path::new(path)),
                         "not the bash find_git_bash located: {path}"
                     );
                 } else {
                     // The stand-in copy — only legitimate where no Git Bash exists.
                     assert!(
-                        crate::ggs_bash::pref::find_git_bash().is_none(),
+                        ggs_git::locate::find_git_bash().is_none(),
                         "a found Git Bash was passed over for the bundled copy: {path}"
                     );
                 }
@@ -2602,7 +2602,7 @@ mod tests {
                 }
             }
             None => assert!(
-                crate::ggs_bash::pref::find_git_bash().is_none(),
+                ggs_git::locate::find_git_bash().is_none(),
                 "a found Git Bash injected nothing"
             ),
         }

@@ -72,12 +72,12 @@ pub struct Git {
 /// one is there — nothing changes for those machines; where the machine's Git lives in
 /// a custom directory the PATH never names (Git for Windows' "use Git from Git Bash
 /// only" install), it is located through the registry `InstallPath` Git's own installer
-/// writes and the standard install roots — [`crate::ggs_bash::pref::find_git_exe`], the
+/// writes and the standard install roots — [`ggs_git::locate::find_git_exe`], the
 /// same discovery the Terminal Shell's Git Bash choice rides. Resolved once per run.
 fn executable() -> &'static std::ffi::OsStr {
     static GIT: OnceLock<PathBuf> = OnceLock::new();
     GIT.get_or_init(|| {
-        crate::ggs_bash::pref::find_git_exe().unwrap_or_else(|| PathBuf::from("git"))
+        ggs_git::locate::find_git_exe().unwrap_or_else(|| PathBuf::from("git"))
     })
     .as_os_str()
 }
@@ -249,7 +249,7 @@ impl Git {
 /// install the app runs. Registered at the composition root onto `ext_process`'s
 /// spawn-env sources; the id is unused — git is no extension's private concern.
 pub fn backend_env(_ext_id: &str) -> Vec<(String, String)> {
-    let Some(dir) = crate::ggs_bash::pref::find_git_exe().and_then(|git| {
+    let Some(dir) = ggs_git::locate::find_git_exe().and_then(|git| {
         git.parent()
             .filter(|dir| !dir.as_os_str().is_empty())
             .map(Path::to_path_buf)

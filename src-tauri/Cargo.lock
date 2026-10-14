@@ -1970,6 +1970,14 @@ name = "ggs-codec"
 version = "0.0.0"
 
 [[package]]
+name = "ggs-git"
+version = "0.0.0"
+dependencies = [
+ "tempfile",
+ "winreg 0.52.0",
+]
+
+[[package]]
 name = "ggs-proto"
 version = "0.0.0"
 dependencies = [
@@ -2034,6 +2042,7 @@ dependencies = [
  "getrandom 0.2.17",
  "ggs-base",
  "ggs-codec",
+ "ggs-git",
  "ggs-proto",
  "hex",
  "hmac 0.12.1",

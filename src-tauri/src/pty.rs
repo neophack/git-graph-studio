@@ -255,7 +255,7 @@ fn shell_command(shell: Option<&str>) -> Result<(CommandBuilder, String), String
         return Ok((command, "ggs-bash".to_owned()));
     }
     if shell == Some("gitBash") {
-        if let Some(path) = crate::ggs_bash::pref::find_git_bash() {
+        if let Some(path) = ggs_git::locate::find_git_bash() {
             let mut command = CommandBuilder::new(&path);
             // Git Bash's own shortcut shape: a login shell, so its profile sets up
             // the prompt and the PATH the way a standalone Git Bash terminal shows
@@ -348,7 +348,7 @@ mod tests {
             match shell_command(Some("gitBash")) {
                 Ok((.., name)) => assert!(name == "git-bash" || name == "ggs-bash", "{name}"),
                 Err(error) => {
-                    assert!(crate::ggs_bash::pref::find_git_bash().is_none());
+                    assert!(ggs_git::locate::find_git_bash().is_none());
                     assert!(error.contains("Git Bash was not found"), "{error}");
                 }
             }

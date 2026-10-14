@@ -661,7 +661,7 @@ pub fn resolve_on_path(name: &str, path_var: &str) -> Option<PathBuf> {
     // runner and the extension backends ride, so one machine runs one git
     // everywhere (`git status` in a terminal on a PATH-less custom install).
     if name == "git" {
-        if let Some(git) = super::pref::find_git_exe() {
+        if let Some(git) = ggs_git::locate::find_git_exe() {
             return Some(git);
         }
     }
@@ -684,7 +684,7 @@ pub fn git_usr_bin_from(path_var: &str) -> Option<PathBuf> {
             }
         }
     }
-    super::pref::git_install_roots()
+    ggs_git::locate::git_install_roots()
         .into_iter()
         .map(|root| root.join("usr").join("bin"))
         .find(|usr_bin| usr_bin.is_dir())
