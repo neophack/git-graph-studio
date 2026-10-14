@@ -36,10 +36,27 @@
 | P2-10 ggs-remote-proto | ✅ | `596791f` |
 | P2-11 ggs-config 独立 package | ✅ | `8466fb6` |
 | P2-12 ggs-testkit | ✅ | `0c6db4c` |
+| P3-1 EventSink/BatchSink + events.rs + search 样板 | ✅ | `e583703` |
+| P3-2 ggs-can | ✅ | `537871d` |
+| P3-3 ggs-text（viewer/encoding/grammar/probe/backup） | ✅ | `e5e640c` |
+| P3-4 ggs-fs（文件服务引擎 + 传输 + 遍历） | ✅ | `bc4cd0b` |
+| P3-5 ggs-git(三)（ops + revision；gerrit 下载留 app） | ✅ | `2034b6a` |
 
 P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现（构建走
 `target/studio/cargo`），`incremental` 目录 17.5 GB 为多 feature 时代的历史累积，
 一次 `cargo clean` 或 `cargo sweep` 即回收——留待与 P6-4 一并处理。
+
+### P3 进行中的要点
+
+- **适配层模式定型**（can → text → fs → git 一致）：`#[tauri::command]` 留在 app 的
+  `*_commands.rs`，引擎下沉 crate；进度经回调 / `EventSink`，状态类型
+  （CanLogState/ViewerState/TransferState）由 crate 拥有、app `manage()`。
+- **ggs-testkit 的环**（P3-5 发现）：dev-dependency 环会让 cargo 造出两份 ggs-git、
+  类型分裂 —— testkit 砍掉 ggs-git 依赖只留 Scratch 路径/配置；git 构造器落在
+  ggs-git 自己的 `cfg(test)` 扩展（`testkit_ext`），app 测试侧持同样的小镜像
+  （`src/test_git_helpers.rs`）。后续 crate 的测试按此办理。
+- cmd_ext ⇄ cmd_fs / cmd_fs ⇄ cmd_ext / cmd_search ⇄ can_log / viewer ⇄ cmd_fs
+  四条计划点名的横向边已全部消解（P3-2/3/4/5）。
 
 ### 度量（P2 后实测 vs 计划 §3.2 的预估）
 
