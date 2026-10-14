@@ -14,6 +14,53 @@
 >
 > 本文所有"预估"都要用 P0 的实测数字验收（AGENTS.md：数字，不是形容词）。
 
+
+## 实施状态（2026-10-14，P2 完成时）
+
+> 本段由执行过程维护；每个阶段边界更新一次。度量来自 `node scripts/measure-build.mjs`
+> （`metrics.json` 的 `build.*`；本机 Windows，dev profile，warm 缓存）。
+
+### 已落地
+
+| 阶段 | 状态 | 提交 |
+| ---- | ---- | ---- |
+| P0-1 measure-build.mjs | ✅ | `72ba3d7` |
+| P1 护栏（TS 图 R1–R10 + allowlist、check-ipc、check-crate-graph、test_support 门控） | ✅ | `560f8b6` |
+| P2-1 workspace 骨架 | ✅ | `bf8f2dd` |
+| P2-2 ggs-base | ✅ | `617e9c4` |
+| P2-3 ggs-proto | ✅ | `a82bb37` |
+| P2-4 ggs-codec | ✅ | `309026a` |
+| P2-5/6/7 ggs-git(locate+runner)、ggs-shellenv | ✅ | `454b510`–`4eccf12` |
+| P2-8 ggs-bash 独立 package | ✅ | `4458dd5` |
+| P2-9 ggs-node 独立 package | ✅ | `b073817` |
+| P2-10 ggs-remote-proto | ✅ | `596791f` |
+| P2-11 ggs-config 独立 package | ✅ | `8466fb6` |
+| P2-12 ggs-testkit | ✅ | `0c6db4c` |
+
+P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现（构建走
+`target/studio/cargo`），`incremental` 目录 17.5 GB 为多 feature 时代的历史累积，
+一次 `cargo clean` 或 `cargo sweep` 即回收——留待与 P6-4 一并处理。
+
+### 度量（P2 后实测 vs 计划 §3.2 的预估）
+
+| 场景 | P2 后 | 说明 |
+| ---- | ----- | ---- |
+| 改 `ggs_bash/applets.rs` 一行 → `cargo build` | **1.1 s** | 计划目标"只有 ggs-bash crate 和它的二进制"达成：桌面 lib 不再编译那 28k 行 |
+| 改 `cmd_scm.rs` / `viewer/find.rs` / `lib.rs` 一行 → build | 8.0 / 8.1 / 10.1 s | 仍在 app crate（P3/P4 的对象）；`cargo test --no-run` 各 +1–2 s（链接） |
+| 产物依赖数（`cargo tree -e normal` 去重） | app 473 / ggs-node 208 / **ggs-bash 8** / ggs-config 12 | ggs-bash 曾以 feature 形态编整个 lib（计划基线 36 crate；codec 下沉后更小） |
+| feature 形态开关 | 只剩 `desktop`（P4-2 删） | `node-runtime`/`ggs-bash`/`testkit` 随各自 package 消失 |
+| 生产代码 `for_tests` | 0（`rg` 验证） | P2-12 验收 |
+| crate 成员 | 10（app + 9 crates/） | 白名单 `scripts/crate-graph.json` 全部 enforced |
+
+### 测试守恒
+
+P2 前全绿基线 = 639（app lib）+ 48（it）。P2 后 = app lib 443 + it 3 +
+ggs-base 9 + ggs-proto 6 + ggs-codec 8 + ggs-git 10 + ggs-shellenv 5 +
+ggs-bash 148+6 + ggs-node 17+39 + ggs-remote-proto 2 —— 每一次迁移的差额都
+对应随文件走的测试（P2-5 一次误删 5 个 shellenv 测试被计数对账抓住并当场恢复）。
+
+---
+
 ## 目录
 
 0. [一句话](#0-一句话)

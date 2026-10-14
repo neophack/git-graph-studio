@@ -158,8 +158,10 @@ function main() {
 			console.error(`measure-build: scenario ${scenario.name} has no existing file — update SCENARIOS`);
 			continue;
 		}
-		const dirty = gitStatusPorcelain(file);
-		if (dirty) throw new Error(`${file} has uncommitted changes — refusing to touch it`);
+		// Scenario files are src-tauri-relative; git runs from the repository root.
+		const gitPath = `src-tauri/${file.split(sep).join('/')}`;
+		const dirty = gitStatusPorcelain(gitPath);
+		if (dirty) throw new Error(`${gitPath} has uncommitted changes — refusing to touch it`);
 		const abs = join(srcTauri, file);
 		const original = readFileSync(abs, 'utf8');
 		const marker = original.endsWith('\n') ? '' : '\n';
@@ -177,12 +179,14 @@ function main() {
 				testNoRunMs: fmtMs(testNoRun.wall)
 			};
 			console.error(`measure-build: ${scenario.name} build ${Math.round(buildWall)} ms, test --no-run ${Math.round(testNoRun.wall)} ms`);
-		} finally {
-			const restore = run('git', ['checkout', '--', file], { cwd: appDir });
-			if (restore.status !== 0) throw new Error(`git checkout -- ${file} failed`);
-			if (readFileSync(abs, 'utf8') !== original) throw new Error(`${file} was not restored`);
-			cargoBuild(); // back to a clean state; untimed
-		}
+			} finally {
+				const restore = run('git', ['checkout', '--', gitPath], { cwd: appDir });
+				if (restore.status !== 0) throw new Error(`git checkout -- ${gitPath} failed`);
+				// git status decides restoration, not byte equality: autocrlf may
+				// normalise line endings on the way back out of the index.
+				if (gitStatusPorcelain(gitPath)) throw new Error(`${gitPath} was not restored`);
+				cargoBuild(); // back to a clean state; untimed
+			}
 	}
 
 	// 3. The frontend walls.
@@ -203,9 +207,9 @@ function main() {
 	// 5. Dependency counts, one per product form, and the duplicate-version count.
 	build.crates = {
 		app: uniqueCrates(''),
-		ggsNode: uniqueCrates('--no-default-features --features node-runtime'),
-		ggsBash: uniqueCrates('--no-default-features --features ggs-bash'),
-		ggsConfig: uniqueCrates('--no-default-features')
+		ggsNode: uniqueCrates('-p ggs-node'),
+		ggsBash: uniqueCrates('-p ggs-bash'),
+		ggsConfig: uniqueCrates('-p ggs-config')
 	};
 	build.duplicates = duplicateVersions();
 
