@@ -153,7 +153,11 @@ function main() {
 		sizes,
 		perf
 	};
-	writeFileSync(join(studio, 'metrics.json'), JSON.stringify(metrics, null, '\t') + '\n');
+	// scripts/measure-build.mjs owns the `build` key (the compile-cost baseline of
+	// docs/architecture-restructure-plan.md P0); this pass never overwrites it.
+	const metricsPath = join(studio, 'metrics.json');
+	if (existsSync(metricsPath)) metrics.build = JSON.parse(readFileSync(metricsPath, 'utf8')).build;
+	writeFileSync(metricsPath, JSON.stringify(metrics, null, '\t') + '\n');
 
 	console.log('Git Graph Studio - size baseline');
 	console.log(`  exe            ${mb(sizes.exe).padStart(10)}`);
