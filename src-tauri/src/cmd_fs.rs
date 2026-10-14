@@ -109,7 +109,7 @@ fn decode(bytes: Vec<u8>, forced: Option<&str>) -> FileContents {
     let size = bytes.len() as u64;
     // A file reopened as UTF-16 by hand has NULs in every other byte without a BOM to say so.
     let forced_utf16 = matches!(forced, Some("utf-16le" | "utf-16be"));
-    if crate::encoding::looks_binary(&bytes) && !forced_utf16 {
+    if ggs_text::encoding::looks_binary(&bytes) && !forced_utf16 {
         return FileContents {
             contents: None,
             binary: true,
@@ -118,7 +118,7 @@ fn decode(bytes: Vec<u8>, forced: Option<&str>) -> FileContents {
             eol: "lf".into(),
         };
     }
-    let decoded = crate::encoding::decode(&bytes, forced);
+    let decoded = ggs_text::encoding::decode(&bytes, forced);
     FileContents {
         contents: Some(decoded.text),
         binary: false,
@@ -166,7 +166,7 @@ pub async fn read_file_raw(
 fn raw_payload(bytes: &[u8], forced: Option<&str>) -> Vec<u8> {
     let size = bytes.len() as u64;
     let forced_utf16 = matches!(forced, Some("utf-16le" | "utf-16be"));
-    let (meta, text) = if crate::encoding::looks_binary(bytes) && !forced_utf16 {
+    let (meta, text) = if ggs_text::encoding::looks_binary(bytes) && !forced_utf16 {
         (
             RawFileMeta {
                 binary: true,
@@ -177,7 +177,7 @@ fn raw_payload(bytes: &[u8], forced: Option<&str>) -> Vec<u8> {
             Vec::new(),
         )
     } else {
-        let decoded = crate::encoding::decode(bytes, forced);
+        let decoded = ggs_text::encoding::decode(bytes, forced);
         (
             RawFileMeta {
                 binary: false,
@@ -196,64 +196,9 @@ fn raw_payload(bytes: &[u8], forced: Option<&str>) -> Vec<u8> {
     payload
 }
 
-/// What the editor learns about a file before reading its body: the size, and whether the
-/// first bytes look binary. One small read routes the open - a binary file straight to the
-/// hex viewer, a very large text file to the windowed viewer, the rest to the editor -
-/// so no path ever reads a large file only to find out it should not have.
-#[derive(Serialize, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct FileProbe {
-    pub size: u64,
-    pub binary: bool,
-    /// The head shows no line breaks within multi-kilobyte runs: a minified single-line
-    /// file, whose few enormous lines defeat a line-windowed editor (its window would be
-    /// the whole file). Those open in the full editor instead.
-    pub long_lines: bool,
-}
-
-/// The probe behind `file_probe`, reading at most the sniff window.
-pub fn probe(path: &str) -> Result<FileProbe, String> {
-    use std::io::Read;
-    let mut file = fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
-    let size = file.metadata().map_err(|e| format!("{path}: {e}"))?.len();
-    let mut head = Vec::with_capacity(crate::encoding::SNIFF_BYTES);
-    file.by_ref()
-        .take(crate::encoding::SNIFF_BYTES as u64)
-        .read_to_end(&mut head)
-        .map_err(|e| format!("{path}: {e}"))?;
-    Ok(FileProbe {
-        size,
-        binary: crate::encoding::looks_binary(&head),
-        long_lines: head_has_long_lines(&head, size),
-    })
-}
-
-/// A sniffed head with any run of 4 KiB without a line break — or no break at all in a file
-/// over 1 MiB — marks the file as minified-style. (The sniff window is 8000 bytes, so the
-/// threshold has to sit inside it; the frontend only consults this for files it would
-/// otherwise window, where even a 4 KiB line is a sign the file has few, huge lines.)
-fn head_has_long_lines(head: &[u8], size: u64) -> bool {
-    const LONG_LINE: usize = 4 * 1024;
-    let mut run = 0usize;
-    let mut saw_break = false;
-    for &byte in head {
-        if byte == b'\n' {
-            saw_break = true;
-            run = 0;
-        } else {
-            run += 1;
-            if run >= LONG_LINE {
-                return true;
-            }
-        }
-    }
-    // No break anywhere in the sniff window: a file this size is one huge (minified) line.
-    !saw_break && size > 1024 * 1024
-}
-
 #[tauri::command]
-pub async fn file_probe(path: String) -> Result<FileProbe, String> {
-    probe(&path)
+pub async fn file_probe(path: String) -> Result<ggs_text::probe::FileProbe, String> {
+    ggs_text::probe::probe(&path)
 }
 
 /// A file's bytes as base64 (the image preview, a Markdown preview's relative images). Capped:
@@ -350,7 +295,7 @@ fn patch_bytes(path: &str, edits: &[BytePatch]) -> Result<(), String> {
 /// The encodings the status bar's picker offers, as `[id, label]` pairs.
 #[tauri::command]
 pub fn encodings() -> Vec<[&'static str; 2]> {
-    crate::encoding::ENCODINGS
+    ggs_text::encoding::ENCODINGS
         .iter()
         .map(|(id, label)| [*id, *label])
         .collect()
@@ -391,7 +336,7 @@ pub async fn write_file(
             return Err(format!("{path}: the containing folder no longer exists"));
         }
     }
-    let bytes = crate::encoding::encode(
+    let bytes = ggs_text::encoding::encode(
         &contents,
         encoding.as_deref().unwrap_or("utf8"),
         eol.as_deref().unwrap_or("lf"),
@@ -476,7 +421,7 @@ pub async fn read_file_at(
         size: contents.as_ref().map(|c| c.len() as u64).unwrap_or(0),
         eol: contents
             .as_deref()
-            .map(crate::encoding::detect_eol)
+            .map(ggs_text::encoding::detect_eol)
             .unwrap_or("lf")
             .into(),
         contents,
@@ -1865,17 +1810,6 @@ pub(crate) fn cached_file_list(
 
 /// Where unsaved buffers are kept between a crash and the next launch: one JSON file per
 /// document under `~/.ggs/backups/`, named by the hash of its path.
-pub(crate) fn backups_dir() -> Result<PathBuf, String> {
-    ggs_base::paths::backups_home()
-}
-
-fn backup_file(dir: &Path, path: &str) -> PathBuf {
-    use sha1::{Digest, Sha1};
-    dir.join(format!(
-        "{}.json",
-        hex::encode(Sha1::digest(path.as_bytes()))
-    ))
-}
 
 #[derive(Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -1893,80 +1827,28 @@ pub struct BackupInfo {
     pub saved_at: u64,
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-pub(crate) fn backup_write_into(dir: &Path, path: &str, contents: String) -> Result<(), String> {
-    let backup = Backup {
-        path: path.to_owned(),
-        saved_at: now(),
-        contents,
-    };
-    let target = backup_file(dir, path);
-    // Atomic replace, and a process-unique temp name: a crash mid-write never leaves a
-    // half backup behind, and two app instances back up the same file without sharing
-    // one temp path.
-    ggs_base::fsx::atomic_write(
-        &target,
-        &serde_json::to_vec(&backup).map_err(|e| e.to_string())?,
-    )
-}
-
-pub(crate) fn backup_clear_in(dir: &Path, path: &str) {
-    let _ = fs::remove_file(backup_file(dir, path));
-}
-
-pub(crate) fn backup_list_in(dir: &Path) -> Vec<BackupInfo> {
-    let mut out: Vec<BackupInfo> = fs::read_dir(dir)
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("json"))
-        .filter_map(|entry| serde_json::from_slice::<Backup>(&fs::read(entry.path()).ok()?).ok())
-        .map(|b| BackupInfo {
-            path: b.path,
-            saved_at: b.saved_at,
-        })
-        .collect();
-    out.sort_by(|a, b| a.path.cmp(&b.path));
-    out
-}
-
-pub(crate) fn backup_read_in(dir: &Path, path: &str) -> Result<String, String> {
-    let bytes =
-        fs::read(backup_file(dir, path)).map_err(|e| format!("no backup of {path}: {e}"))?;
-    serde_json::from_slice::<Backup>(&bytes)
-        .map(|b| b.contents)
-        .map_err(|e| e.to_string())
-}
-
 /// Keep an unsaved buffer's contents (called a moment after every edit).
 #[tauri::command]
 pub async fn backup_write(path: String, contents: String) -> Result<(), String> {
-    backup_write_into(&backups_dir()?, &path, contents)
+    ggs_text::backup::write_into(&ggs_text::backup::backups_dir()?, &path, contents)
 }
 
 /// The buffer was saved or its changes discarded: nothing to recover any more.
 #[tauri::command]
 pub async fn backup_clear(path: String) -> Result<(), String> {
-    backup_clear_in(&backups_dir()?, &path);
+    ggs_text::backup::clear_in(&ggs_text::backup::backups_dir()?, &path);
     Ok(())
 }
 
 /// Every backup on disk (the ones of a previous session that did not end cleanly).
 #[tauri::command]
-pub async fn backup_list() -> Result<Vec<BackupInfo>, String> {
-    Ok(backup_list_in(&backups_dir()?))
+pub async fn backup_list() -> Result<Vec<ggs_text::backup::BackupInfo>, String> {
+    Ok(ggs_text::backup::list_in(&ggs_text::backup::backups_dir()?))
 }
 
 #[tauri::command]
 pub async fn backup_read(path: String) -> Result<String, String> {
-    backup_read_in(&backups_dir()?, &path)
+    ggs_text::backup::read_in(&ggs_text::backup::backups_dir()?, &path)
 }
 
 /// The roots of the repository's initialised submodules (absolute paths), as the repository
@@ -2098,8 +1980,8 @@ mod file_list_tests {
             fs::write(&path, &bytes).unwrap();
             let path = path.to_string_lossy().into_owned();
             assert_eq!(
-                probe(&path).unwrap(),
-                FileProbe {
+                ggs_text::probe::probe(&path).unwrap(),
+                ggs_text::probe::FileProbe {
                     size: bytes.len() as u64,
                     binary,
                     long_lines
@@ -2108,7 +1990,7 @@ mod file_list_tests {
             );
             assert_eq!(decode(bytes, None).binary, binary, "{name}");
         }
-        assert!(probe(&dir.path().join("missing").to_string_lossy()).is_err());
+        assert!(ggs_text::probe::probe(&dir.path().join("missing").to_string_lossy()).is_err());
     }
 
     #[test]
@@ -2117,16 +1999,16 @@ mod file_list_tests {
         // A 32 KiB unbroken run inside the sniff window flags the file.
         let minified = dir.path().join("min.js");
         fs::write(&minified, vec![b'x'; 33 * 1024]).unwrap();
-        assert!(probe(&minified.to_string_lossy()).unwrap().long_lines);
+        assert!(ggs_text::probe::probe(&minified.to_string_lossy()).unwrap().long_lines);
         // A head with no break at all flags only when the file is large: a 2 MB single-line
         // JSON dump is exactly the case to keep away from a line-windowed editor.
         let one_line = dir.path().join("one.json");
         fs::write(&one_line, vec![b'x'; 2 * 1024 * 1024]).unwrap();
-        assert!(probe(&one_line.to_string_lossy()).unwrap().long_lines);
+        assert!(ggs_text::probe::probe(&one_line.to_string_lossy()).unwrap().long_lines);
         // Ordinary multi-line files of any size do not.
         let lines = dir.path().join("lines.log");
         fs::write(&lines, "short\nlines\nonly\n".repeat(100_000)).unwrap();
-        let probed = probe(&lines.to_string_lossy()).unwrap();
+        let probed = ggs_text::probe::probe(&lines.to_string_lossy()).unwrap();
         assert!(!probed.long_lines && probed.size > 1024 * 1024);
     }
 
@@ -2498,22 +2380,22 @@ mod backup_tests {
     #[test]
     fn backups_round_trip_list_and_clear() {
         let dir = tempfile::tempdir().unwrap();
-        backup_write_into(dir.path(), "C:\\repo\\a.txt", "draft one".into()).unwrap();
-        backup_write_into(dir.path(), "C:\\repo\\b.txt", "draft two".into()).unwrap();
-        backup_write_into(dir.path(), "C:\\repo\\a.txt", "draft one, newer".into()).unwrap();
-        let listed = backup_list_in(dir.path());
+        ggs_text::backup::write_into(dir.path(), "C:\\repo\\a.txt", "draft one".into()).unwrap();
+        ggs_text::backup::write_into(dir.path(), "C:\\repo\\b.txt", "draft two".into()).unwrap();
+        ggs_text::backup::write_into(dir.path(), "C:\\repo\\a.txt", "draft one, newer".into()).unwrap();
+        let listed = ggs_text::backup::list_in(dir.path());
         assert_eq!(
             listed.iter().map(|b| b.path.as_str()).collect::<Vec<_>>(),
             ["C:\\repo\\a.txt", "C:\\repo\\b.txt"]
         );
         assert!(listed[0].saved_at > 0);
         assert_eq!(
-            backup_read_in(dir.path(), "C:\\repo\\a.txt").unwrap(),
+            ggs_text::backup::read_in(dir.path(), "C:\\repo\\a.txt").unwrap(),
             "draft one, newer"
         );
-        backup_clear_in(dir.path(), "C:\\repo\\a.txt");
-        assert!(backup_read_in(dir.path(), "C:\\repo\\a.txt").is_err());
-        assert_eq!(backup_list_in(dir.path()).len(), 1);
+        ggs_text::backup::clear_in(dir.path(), "C:\\repo\\a.txt");
+        assert!(ggs_text::backup::read_in(dir.path(), "C:\\repo\\a.txt").is_err());
+        assert_eq!(ggs_text::backup::list_in(dir.path()).len(), 1);
         // No stray temp files remain from the atomic writes.
         assert!(fs::read_dir(dir.path()).unwrap().flatten().all(|e| e
             .path()

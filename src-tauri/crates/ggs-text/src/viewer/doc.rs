@@ -81,7 +81,7 @@ pub fn syntax_set() -> &'static SyntaxSet {
         // The defaults, then every grammar an installed extension contributes (module 12's
         // TextMate loader — a grammar that fails to load was skipped there, never here).
         let mut builder = SyntaxSet::load_defaults_newlines().into_builder();
-        crate::ext_grammar::add_extension_grammars(&mut builder);
+        crate::grammar::add_extension_grammars(&mut builder);
         builder.build()
     })
 }

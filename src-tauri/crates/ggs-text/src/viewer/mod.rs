@@ -9,9 +9,9 @@
 //! the landing corrects over the `studio://viewer-lines` event.
 
 pub mod doc;
-pub(crate) mod find;
+pub mod find;
 pub mod indexed;
-mod outline;
+pub mod outline;
 
 use serde::Serialize;
 use std::collections::HashMap;
@@ -55,32 +55,32 @@ const WARM_SLICE: usize = 256;
 /// One open document: the rope behind a lock, plus the find-scan generation. The
 /// generation lives outside the lock so a new `viewer_find` can supersede a scan that is
 /// still running (and still holding the lock) without waiting for it to finish.
-struct DocHandle {
-    doc: Mutex<ViewerDoc>,
-    find_gen: AtomicU64,
+pub struct DocHandle {
+    pub doc: Mutex<ViewerDoc>,
+    pub find_gen: AtomicU64,
     /// Bumped by every `viewer_lines` / `viewer_highlight` request: the catch-up walk of an
     /// older request checks it between slices and aborts, so a fast drag cancels the parse
     /// of windows nobody is looking at anymore.
-    lines_gen: AtomicU64,
+    pub lines_gen: AtomicU64,
     /// Bumped by every mutation (edit, undo, redo, replace, reload, close): checkpoints may
     /// have been invalidated, so the background warmer stops and respawns on fresh demand.
-    warm_gen: AtomicU64,
+    pub warm_gen: AtomicU64,
     /// Guards one warmer thread per document (`try_spawn_warmer`).
-    warmer_running: AtomicBool,
+    pub warmer_running: AtomicBool,
     /// The tail build's completion gate, `Some` while the background thread owes a landing.
     /// Readers of lines beyond the rope wait on it; a reload replaces it with the new
     /// build's gate.
-    tail: Mutex<Option<Arc<TailGate>>>,
+    pub tail: Mutex<Option<Arc<TailGate>>>,
 }
 
 /// What a reader of beyond-the-head lines blocks on until the tail lands: a one-shot gate
 /// the build thread opens exactly once, however it ends (append, failure, supersede).
-pub(crate) struct TailGate {
+pub struct TailGate {
     pending: (Mutex<bool>, Condvar),
 }
 
 impl TailGate {
-    pub(crate) fn pending() -> Arc<TailGate> {
+    pub fn pending() -> Arc<TailGate> {
         Arc::new(TailGate {
             pending: (Mutex::new(true), Condvar::new()),
         })
@@ -88,7 +88,7 @@ impl TailGate {
 
     /// Open the gate from the build thread: whatever waited proceeds against the doc's
     /// now-truthful fields.
-    pub(crate) fn land(&self) {
+    pub fn land(&self) {
         let (lock, signal) = &self.pending;
         *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
         signal.notify_all();
@@ -107,17 +107,17 @@ impl TailGate {
 
 #[derive(Default)]
 pub struct ViewerState {
-    next_id: AtomicU64,
+    pub next_id: AtomicU64,
     /// Documents behind per-doc handles: a window read clones the `Arc` and locks the one
     /// document it needs, so `spawn_blocking` can highlight off the main thread (a cold
     /// window deep in a huge file parses back to its last checkpoint — hundreds of
     /// thousands of lines — and doing that on the main thread froze the whole window).
-    docs: Mutex<HashMap<u64, Arc<DocHandle>>>,
+    pub docs: Mutex<HashMap<u64, Arc<DocHandle>>>,
 }
 
 impl ViewerState {
     /// The document's own handle, cloned out of the map for a blocking task to lock.
-    fn doc_handle(&self, doc_id: u64) -> Option<Arc<DocHandle>> {
+    pub fn doc_handle(&self, doc_id: u64) -> Option<Arc<DocHandle>> {
         self.docs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -125,7 +125,7 @@ impl ViewerState {
             .cloned()
     }
 
-    fn insert_doc(
+    pub fn insert_doc(
         &self,
         doc_id: u64,
         doc: ViewerDoc,
@@ -146,7 +146,7 @@ impl ViewerState {
         handle
     }
 
-    fn with_doc<T>(&self, doc_id: u64, f: impl FnOnce(&mut ViewerDoc) -> T) -> Result<T, String> {
+    pub fn with_doc<T>(&self, doc_id: u64, f: impl FnOnce(&mut ViewerDoc) -> T) -> Result<T, String> {
         let handle = self
             .doc_handle(doc_id)
             .ok_or_else(|| format!("No open document {doc_id}"))?;
@@ -160,7 +160,7 @@ impl ViewerState {
     /// Invalidate a document's checkpoints from the warmer's point of view: the next slice
     /// it would parse may resume from a state the mutation dropped, so it must stop and let
     /// fresh demand (a window fetch, a highlight) respawn it against the new frontier.
-    fn stop_warming(&self, doc_id: u64) {
+    pub fn stop_warming(&self, doc_id: u64) {
         if let Some(handle) = self
             .docs
             .lock()
@@ -174,7 +174,7 @@ impl ViewerState {
 
 /// The window range check every line/text read shares: a bug in the frontend must not be
 /// able to ask for the whole file in one call.
-fn check_window(start: usize, end: usize) -> Result<(), String> {
+pub fn check_window(start: usize, end: usize) -> Result<(), String> {
     if end.saturating_sub(start) + 1 > MAX_WINDOW {
         return Err(format!(
             "window too large: {start}..{end} (max {MAX_WINDOW} lines)"
@@ -256,7 +256,7 @@ pub struct ReloadResult {
 }
 
 /// A file's `size:mtime` stamp, the same shape `cmd_fs::file_fingerprint` reports.
-fn fingerprint(path: &std::path::Path) -> String {
+pub fn fingerprint(path: &std::path::Path) -> String {
     match std::fs::metadata(path) {
         Ok(meta) => {
             let mtime = meta
@@ -320,7 +320,7 @@ fn open_doc(path: &str) -> Result<ViewerDoc, String> {
 }
 
 /// What `open_staged` can hand the frontend immediately.
-enum Staged {
+pub enum Staged {
     /// The whole document: a file the head already covers, or one the fast path cannot
     /// chunk (a legacy multi-byte encoding — splitting those mid-character is not a
     /// one-byte check the way UTF-8's is).
@@ -331,14 +331,13 @@ enum Staged {
         doc: ViewerDoc,
         from_byte: u64,
         total_bytes: u64,
-    },
-}
+    },}
 
 /// Open a file in two stages: read `HEAD_BYTES` (extended to the next newline so the head
 /// ends on a whole line), decode and rope it, and — when the file runs past that — hand
 /// back the head with the tail owed. UTF-8 files only stage; anything else takes the
 /// sequential whole-file open, where gigabytes are rare and correctness is cheap.
-fn open_staged(path: &str) -> Result<Staged, String> {
+pub fn open_staged(path: &str) -> Result<Staged, String> {
     let total = std::fs::metadata(path)
         .map_err(|e| format!("{path}: {e}"))?
         .len();
@@ -510,9 +509,9 @@ static TAIL_BUILDS: AtomicU64 = AtomicU64::new(1);
 /// readers of beyond-the-head lines waiting; the landing checks `tail_id`, so a document
 /// replaced by a reload meanwhile never receives a stale tail. Edits made while the tail
 /// built survive: the tail appends after whatever the head now holds.
-fn spawn_tail(
+pub fn spawn_tail(
     handle: &Arc<DocHandle>,
-    app: Option<tauri::AppHandle>,
+    events: Option<Arc<dyn ggs_base::sink::EventSink>>,
     doc_id: u64,
     path: String,
     from: u64,
@@ -575,15 +574,13 @@ fn spawn_tail(
             // reader of a reloaded document would wait forever.
             landing_gate.land();
             if let Some(count) = landed {
-                if let Some(app) = app {
-                    use tauri::Emitter;
-                    let _ = app.emit(
-                        "studio://viewer-lines",
-                        LinesLanded {
-                            doc_id,
-                            line_count: count,
-                        },
-                    );
+                if let Some(sink) = &events {
+                    let payload = serde_json::to_value(LinesLanded {
+                        doc_id,
+                        line_count: count,
+                    })
+                    .unwrap_or_default();
+                    sink.emit("studio://viewer-lines", payload);
                 }
             }
         });
@@ -604,7 +601,7 @@ fn spawn_tail(
 }
 
 /// Block until the document's tail has landed — its gate, then the doc's own verdict.
-fn wait_tail(handle: &DocHandle) -> Result<(), String> {
+pub fn wait_tail(handle: &DocHandle) -> Result<(), String> {
     let gate = handle
         .tail
         .lock()
@@ -627,7 +624,7 @@ fn wait_tail(handle: &DocHandle) -> Result<(), String> {
 
 /// Serve lines up to `start` without waiting when the rope already covers them (the head,
 /// and everything once the tail has landed); wait for the tail only past it.
-fn ensure_lines(handle: &DocHandle, start: usize) -> Result<(), String> {
+pub fn ensure_lines(handle: &DocHandle, start: usize) -> Result<(), String> {
     {
         let doc = handle
             .doc
@@ -672,7 +669,7 @@ static PREWARMED: Mutex<Option<Prewarmed>> = Mutex::new(None);
 /// the staged open builds the rope in parallel chunks and the document edits however big
 /// the file is.
 pub fn prewarm(path: String) {
-    if !matches!(crate::cmd_fs::probe(&path), Ok(probe) if !probe.binary && !probe.long_lines) {
+    if !matches!(crate::probe::probe(&path), Ok(probe) if !probe.binary && !probe.long_lines) {
         return;
     }
     let slot: PrewarmSlot = Arc::new((Mutex::new(None), Condvar::new()));
@@ -700,7 +697,7 @@ pub fn prewarm(path: String) {
 
 /// The prewarmed open for `path`, waiting only for its head; `None` when nothing was
 /// prewarmed for this path (the slot serves one open, then clears).
-fn take_prewarmed(path: &str) -> Option<Result<Staged, String>> {
+pub fn take_prewarmed(path: &str) -> Option<Result<Staged, String>> {
     let slot = {
         let mut guard = PREWARMED
             .lock()
@@ -732,7 +729,7 @@ fn guard_take(slot: &PrewarmSlot) -> Option<Result<Staged, String>> {
     }
 }
 
-fn open_result(doc_id: u64, doc: &ViewerDoc) -> OpenResult {
+pub fn open_result(doc_id: u64, doc: &ViewerDoc) -> OpenResult {
     OpenResult {
         doc_id,
         line_count: doc.line_count(),
@@ -776,7 +773,7 @@ fn plain_line(doc: &ViewerDoc, line: usize) -> String {
 /// so the rows reach the screen at rope-read speed, whatever syntect still owes them.
 /// The rope's own bounds do the clamping — while a tail is building, the line count the
 /// frontend sees is the estimate, which may name lines the rope does not hold yet.
-fn lines_fast(doc: &mut ViewerDoc, start: usize, end: usize) -> LinesResult {
+pub fn lines_fast(doc: &mut ViewerDoc, start: usize, end: usize) -> LinesResult {
     let total = doc.rope_lines();
     let reported = doc.line_count();
     if total == 0 {
@@ -853,7 +850,7 @@ fn catch_up(
 
 /// The full window after its catch-up: tokens for `start..=end`, checkpointing every block
 /// crossed on the way (the walk leaves them behind, so the region stays warm).
-fn highlight_doc(
+pub fn highlight_doc(
     handle: &DocHandle,
     start: usize,
     end: usize,
@@ -903,7 +900,7 @@ fn warm_with(handle: &DocHandle, through: usize, generation: u64) -> Result<(), 
 /// checkpoints ahead of the viewer so a scrollbar jump into unvisited territory lands on a
 /// warm resume instead of a long catch-up. Only token consumers trigger it (`viewer_lines`,
 /// `viewer_highlight`): the editable windowed editor never highlights, so it never warms.
-fn try_spawn_warmer(handle: &Arc<DocHandle>) {
+pub fn try_spawn_warmer(handle: &Arc<DocHandle>) {
     if handle.warmer_running.swap(true, Ordering::Relaxed) {
         return;
     }
@@ -990,7 +987,7 @@ fn symbols_impl(state: &ViewerState, doc_id: u64) -> Result<Vec<Symbol>, String>
     Ok(outline::outline_rope(&rope, &language))
 }
 
-fn edit_impl(
+pub fn edit_impl(
     state: &ViewerState,
     doc_id: u64,
     start_line: usize,
@@ -1028,7 +1025,7 @@ fn text_impl(
 }
 
 /// The plain-text window over an already-locked document.
-fn text_of(doc: &mut ViewerDoc, start: usize, end: usize) -> TextResult {
+pub fn text_of(doc: &mut ViewerDoc, start: usize, end: usize) -> TextResult {
     // The rope's own bounds clamp (the reported count may still be the staged estimate).
     let total = doc.rope_lines();
     let reported = doc.line_count();
@@ -1048,108 +1045,6 @@ fn text_of(doc: &mut ViewerDoc, start: usize, end: usize) -> TextResult {
         line_count: reported,
         lines,
     }
-}
-
-/// Open a file in the viewer. The head — read, decoded and roped synchronously — is what
-/// this returns, tens of milliseconds whatever the file's size; the rest of a huge file
-/// appends on a background thread, and the `studio://viewer-lines` event delivers the exact
-/// line count when it lands. Highlighting stays lazy (per window via `viewer_lines`), and
-/// so does the outline (`viewer_symbols` on demand).
-#[tauri::command]
-pub async fn viewer_open(
-    state: tauri::State<'_, ViewerState>,
-    app: tauri::AppHandle,
-    path: String,
-) -> Result<OpenResult, String> {
-    let doc_id = state.next_id.fetch_add(1, Ordering::Relaxed);
-    let load = path.clone();
-    let staged = tauri::async_runtime::spawn_blocking(move || {
-        take_prewarmed(&load).unwrap_or_else(|| open_staged(&load))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    let (doc, tail) = match staged {
-        Staged::Full(doc) => (doc, None),
-        Staged::Head {
-            doc,
-            from_byte,
-            total_bytes,
-        } => (doc, Some((from_byte, total_bytes))),
-    };
-    let result = open_result(doc_id, &doc);
-    let handle = state.insert_doc(doc_id, doc, None);
-    if let Some((from, total)) = tail {
-        spawn_tail(&handle, Some(app), doc_id, path, from, total);
-    }
-    Ok(result)
-}
-
-/// Highlight a window of lines (0-based, inclusive) for the virtual scroller. The work runs
-/// on the blocking pool: a window that lands far beyond every checkpoint parses back to the
-/// last one, and that catch-up must not run on (nor freeze) the main thread. A cold window
-/// answers at rope-read speed with plain text (`tokens_pending`); the colors come from
-/// `viewer_highlight`.
-#[tauri::command]
-pub async fn viewer_lines(
-    state: tauri::State<'_, ViewerState>,
-    doc_id: u64,
-    start: usize,
-    end: usize,
-) -> Result<LinesResult, String> {
-    check_window(start, end)?;
-    let handle = state
-        .doc_handle(doc_id)
-        .ok_or_else(|| format!("No open document {doc_id}"))?;
-    // The bump cancels any catch-up still walking toward a window nobody is looking at.
-    handle.lines_gen.fetch_add(1, Ordering::Relaxed);
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        ensure_lines(&handle, start)?;
-        let mut doc = handle
-            .doc
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        Ok::<LinesResult, String>(lines_fast(&mut doc, start, end))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    // The first screen and every cold window are where warming pays: the background walk
-    // starts there and keeps every later jump cheap. Warm mid-file scrolls spawn nothing.
-    if result.tokens_pending || start == 0 {
-        let handle = state.doc_handle(doc_id);
-        if let Some(handle) = handle {
-            try_spawn_warmer(&handle);
-        }
-    }
-    Ok(result)
-}
-
-/// The tokens for a window `viewer_lines` served as plain text: parse forward from the last
-/// checkpoint — sliced, generation-guarded, cancellable — then highlight the window and
-/// return it colored. The frontend paints the rows as they were and swaps the colored text
-/// in when this lands, so content and color arrive as two deliveries, never one wait.
-#[tauri::command]
-pub async fn viewer_highlight(
-    state: tauri::State<'_, ViewerState>,
-    doc_id: u64,
-    start: usize,
-    end: usize,
-) -> Result<LinesResult, String> {
-    check_window(start, end)?;
-    let handle = state
-        .doc_handle(doc_id)
-        .ok_or_else(|| format!("No open document {doc_id}"))?;
-    let generation = handle.lines_gen.fetch_add(1, Ordering::Relaxed) + 1;
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        highlight_doc(&handle, start, end, generation)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    // The catch-up left the region warm up to this window; keep warming what is beyond it.
-    let handle = state.doc_handle(doc_id);
-    if let Some(handle) = handle {
-        try_spawn_warmer(&handle);
-    }
-    Ok(result)
 }
 
 /// The result types of the find/replace commands over a whole document — the windowed
@@ -1173,24 +1068,6 @@ pub struct ReplaceResult {
     /// Whether the buffer is back at the text the file holds on disk (see
     /// [`EditResult::clean`] — a replace-all landing on the saved content is clean).
     pub clean: bool,
-}
-
-/// Apply one replacement to the document's rope. Positions are 0-based line + code-point
-/// columns (the frontend converts its UTF-16 offsets before sending).
-#[tauri::command]
-pub fn viewer_edit(
-    state: tauri::State<ViewerState>,
-    doc_id: u64,
-    start_line: usize,
-    start_col: usize,
-    end_line: usize,
-    end_col: usize,
-    text: String,
-) -> Result<EditResult, String> {
-    state.stop_warming(doc_id);
-    edit_impl(
-        &state, doc_id, start_line, start_col, end_line, end_col, &text,
-    )
 }
 
 /// One chunk's CRLF normalisation: the same `"\r\n" → "\n" → "\r\n"` double replace
@@ -1290,7 +1167,7 @@ const PROGRESS_STEP: u64 = 8 << 20;
 /// encodings keep the whole-text path: they are rare at this size and `encode` is their one
 /// implementation. `progress` receives `(written, total)` in input bytes — the read side of
 /// the stream, so BOM and CRLF expansion never push the ratio past 1.
-fn write_doc(
+pub fn write_doc(
     path: &std::path::Path,
     rope: &ropey::Rope,
     encoding: &str,
@@ -1342,245 +1219,8 @@ pub struct SaveProgress {
     pub total: u64,
 }
 
-/// Write a viewer document back to disk, reporting progress over `on_progress` as the rope
-/// streams out — a multi-hundred-megabyte Ctrl+S takes seconds, and the status bar's bar is
-/// how the user knows it is moving. The encode and write run on the blocking pool — the UI
-/// must not freeze the way it did when the whole document crossed the IPC as one JSON string.
-#[tauri::command]
-pub async fn viewer_save(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, ViewerState>,
-    doc_id: u64,
-    on_progress: tauri::ipc::Channel<SaveProgress>,
-) -> Result<(), String> {
-    // Saving a document whose tail has not landed would write the head alone — the file
-    // truncated to a fraction of itself. Wait the tail out first.
-    let wait = state
-        .doc_handle(doc_id)
-        .ok_or_else(|| format!("No open document {doc_id}"))?;
-    tauri::async_runtime::spawn_blocking(move || wait_tail(&wait))
-        .await
-        .map_err(|e| e.to_string())??;
-    // The rope clones cheap (ropey chunks share under an Arc — the `viewer_symbols` pattern),
-    // so the blocking writer below never queues the document lock behind a whole-file pass.
-    // The second clone is the saved-state baseline: exactly the text this write puts on
-    // disk, so an edit landing while the write runs still reads dirty against it.
-    let (path, encoding, eol, rope, saved_rope) = state.with_doc(doc_id, |doc| {
-        (
-            doc.path.clone(),
-            doc.encoding.clone(),
-            doc.eol.clone(),
-            doc.rope.clone(),
-            doc.rope.clone(),
-        )
-    })?;
-    let stamp = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        let progress = move |written: u64, total: u64| {
-            let _ = on_progress.send(SaveProgress { written, total });
-        };
-        write_doc(&path, &rope, &encoding, &eol, &progress)?;
-        // The stamp the file now carries, so the save's own watcher echo reads as "unchanged".
-        Ok(fingerprint(&path))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    let _ = state.with_doc(doc_id, |doc| {
-        doc.fingerprint = stamp.clone();
-        doc.saved_rope = saved_rope;
-    });
-    // Match write_file: a saved (possibly new) file must show up in Quick Open and search.
-    use tauri::Manager;
-    app.state::<crate::AppState>().file_list_cache.invalidate();
-    Ok(())
-}
-
-/// Reload the document when its file changed on disk; a save's own watcher echo (the stamp
-/// matches what was written) reports `changed: false` and leaves the document untouched —
-/// cursor, undo stack and all.
-#[tauri::command]
-pub async fn viewer_reload(
-    state: tauri::State<'_, ViewerState>,
-    app: tauri::AppHandle,
-    doc_id: u64,
-) -> Result<ReloadResult, String> {
-    let (path, stamp) =
-        state.with_doc(doc_id, |doc| (doc.path.clone(), doc.fingerprint.clone()))?;
-    if fingerprint(&path) == stamp {
-        return Ok(ReloadResult {
-            changed: false,
-            line_count: 0,
-        });
-    }
-    let load = path.display().to_string();
-    let staged = tauri::async_runtime::spawn_blocking(move || open_staged(&load))
-        .await
-        .map_err(|e| e.to_string())??;
-    let (doc, tail) = match staged {
-        Staged::Full(doc) => (doc, None),
-        Staged::Head {
-            doc,
-            from_byte,
-            total_bytes,
-        } => (doc, Some((from_byte, total_bytes))),
-    };
-    let line_count = doc.line_count();
-    // The tab may have closed while the file was being read: a closed id must not come
-    // back as a document nobody will ever close again.
-    let mut docs = state
-        .docs
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match docs.get_mut(&doc_id) {
-        Some(slot) => {
-            // The reloaded document replaces the old one's checkpoints wholesale; the old
-            // handle's warmer (it holds its own Arc) must not parse on against them.
-            slot.warm_gen.fetch_add(1, Ordering::Relaxed);
-            *slot = Arc::new(DocHandle {
-                doc: Mutex::new(doc),
-                find_gen: AtomicU64::new(0),
-                lines_gen: AtomicU64::new(0),
-                warm_gen: AtomicU64::new(0),
-                warmer_running: AtomicBool::new(false),
-                tail: Mutex::new(None),
-            });
-            if let Some((from, total)) = tail {
-                spawn_tail(
-                    slot,
-                    Some(app),
-                    doc_id,
-                    path.display().to_string(),
-                    from,
-                    total,
-                );
-            }
-        }
-        None => return Err(format!("No open document {doc_id}")),
-    }
-    Ok(ReloadResult {
-        changed: true,
-        line_count,
-    })
-}
-
-/// A window of lines as plain text (0-based, inclusive), for the editable windowed editor.
-/// Off the main thread like `viewer_lines`: the same rope reads, the same latency spikes.
-/// Lines the rope does not hold yet (a huge file's tail still building) wait for the
-/// landing — the head's window never does.
-#[tauri::command]
-pub async fn viewer_text(
-    state: tauri::State<'_, ViewerState>,
-    doc_id: u64,
-    start: usize,
-    end: usize,
-) -> Result<TextResult, String> {
-    check_window(start, end)?;
-    let doc = state
-        .doc_handle(doc_id)
-        .ok_or_else(|| format!("No open document {doc_id}"))?;
-    tauri::async_runtime::spawn_blocking(move || {
-        ensure_lines(&doc, start)?;
-        let mut doc = doc
-            .doc
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        Ok(text_of(&mut doc, start, end))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Find every (single-line) match of a query over a whole document. The scan runs on the
-/// blocking pool — a 200 MB rope takes a moment — and aborts as soon as a newer find on
-/// the same document supersedes it, so typing in the widget never queues stale scans.
-#[tauri::command]
-pub async fn viewer_find(
-    state: tauri::State<'_, ViewerState>,
-    doc_id: u64,
-    query: String,
-    case_sensitive: bool,
-    whole_word: bool,
-    regexp: bool,
-) -> Result<FindResult, String> {
-    let handle = state
-        .doc_handle(doc_id)
-        .ok_or_else(|| format!("No open document {doc_id}"))?;
-    // The bump is what cancels an in-flight scan, and it must not need the lock that scan
-    // still holds.
-    let generation = handle.find_gen.fetch_add(1, Ordering::Relaxed) + 1;
-    tauri::async_runtime::spawn_blocking(move || {
-        // A whole-document scan must see the whole document: wait out a still-building tail.
-        wait_tail(&handle)?;
-        let doc = handle
-            .doc
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let options = find::FindOptions {
-            case_sensitive,
-            whole_word,
-            regexp,
-        };
-        let matcher = find::Matcher::compile(&query, &options)?;
-        let (matches, capped) = find::scan_rope(
-            &doc.rope,
-            &matcher,
-            whole_word,
-            find::MAX_FIND_MATCHES,
-            || handle.find_gen.load(Ordering::Relaxed) == generation,
-        )?;
-        Ok(FindResult {
-            matches,
-            capped,
-            line_count: doc.line_count(),
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Replace the next `max` matches of a query from a 0-based line/column position — `1` is
-/// the widget's Replace (the position is its current match), `usize::MAX` its Replace All.
-/// Every replacement lands in the rope as one undo step, so a Replace All is a single Ctrl+Z.
-#[tauri::command]
-#[allow(clippy::too_many_arguments)] // the find options mirror viewer_find's, plus the replace spec
-pub async fn viewer_replace(
-    state: tauri::State<'_, ViewerState>,
-    doc_id: u64,
-    query: String,
-    replacement: String,
-    case_sensitive: bool,
-    whole_word: bool,
-    regexp: bool,
-    from_line: usize,
-    from_col: usize,
-    max: usize,
-) -> Result<ReplaceResult, String> {
-    // A Replace All walks the whole document: wait out a still-building tail off the
-    // command's thread first (the rope work below is the same synchronous pass as ever).
-    let handle = state
-        .doc_handle(doc_id)
-        .ok_or_else(|| format!("No open document {doc_id}"))?;
-    tauri::async_runtime::spawn_blocking(move || wait_tail(&handle))
-        .await
-        .map_err(|e| e.to_string())??;
-    let options = find::FindOptions {
-        case_sensitive,
-        whole_word,
-        regexp,
-    };
-    replace_impl(
-        &state,
-        doc_id,
-        &query,
-        &replacement,
-        &options,
-        from_line,
-        from_col,
-        max,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
-fn replace_impl(
+pub fn replace_impl(
     state: &ViewerState,
     doc_id: u64,
     query: &str,
@@ -1616,7 +1256,7 @@ fn replace_impl(
 /// The test-side entry for `viewer_find`: the command itself locks through
 /// `spawn_blocking`.
 #[cfg(test)]
-fn find_impl(
+pub fn find_impl(
     state: &ViewerState,
     doc_id: u64,
     query: &str,
@@ -1639,109 +1279,6 @@ fn find_impl(
             })
         })
         .and_then(|inner| inner)
-}
-
-/// Keep a windowed editor's unsaved buffer for hot exit. The backend writes the backup
-/// itself, so a hundred-megabyte draft never crosses the IPC — the JSON path the full
-/// editor takes would freeze the webview on documents this large.
-#[tauri::command]
-pub async fn viewer_backup(
-    state: tauri::State<'_, ViewerState>,
-    doc_id: u64,
-) -> Result<(), String> {
-    // The backup writes the document whole: a still-building tail must land first, or the
-    // hot-exit restore would resurrect a truncated file.
-    let wait = state
-        .doc_handle(doc_id)
-        .ok_or_else(|| format!("No open document {doc_id}"))?;
-    tauri::async_runtime::spawn_blocking(move || wait_tail(&wait))
-        .await
-        .map_err(|e| e.to_string())??;
-    let (path, text) = state.with_doc(doc_id, |doc| {
-        (doc.path.display().to_string(), doc.full_text())
-    })?;
-    let dir = crate::cmd_fs::backups_dir()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::cmd_fs::backup_write_into(&dir, &path, text)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// The document's outline, computed on demand (the open path no longer pays for it). The
-/// scan runs on the blocking pool over a snapshot clone of the rope — ropey clones share
-/// chunks — so the document lock is held only for the clone and a window fetch never queues
-/// behind a whole-file outline pass.
-#[tauri::command]
-pub async fn viewer_symbols(
-    state: tauri::State<'_, ViewerState>,
-    doc_id: u64,
-) -> Result<Vec<Symbol>, String> {
-    let handle = state
-        .doc_handle(doc_id)
-        .ok_or_else(|| format!("No open document {doc_id}"))?;
-    // The outline is a whole-document scan: it must see the whole document.
-    let wait = Arc::clone(&handle);
-    tauri::async_runtime::spawn_blocking(move || wait_tail(&wait))
-        .await
-        .map_err(|e| e.to_string())??;
-    let (rope, language) = {
-        let doc = handle
-            .doc
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        (doc.rope.clone(), doc.language.clone())
-    };
-    tauri::async_runtime::spawn_blocking(move || outline::outline_rope(&rope, &language))
-        .await
-        .map_err(|e| e.to_string())
-}
-
-/// Undo the most recent edit. `None` when there is nothing to undo.
-#[tauri::command]
-pub fn viewer_undo(
-    state: tauri::State<ViewerState>,
-    doc_id: u64,
-) -> Result<Option<UndoResult>, String> {
-    state.stop_warming(doc_id);
-    state.with_doc(doc_id, |doc| {
-        let (first_line, line_count) = doc.undo()?;
-        Some(UndoResult {
-            first_line,
-            line_count,
-            clean: doc.at_saved_state(),
-        })
-    })
-}
-
-/// Redo the most recently undone edit. `None` when there is nothing to redo.
-#[tauri::command]
-pub fn viewer_redo(
-    state: tauri::State<ViewerState>,
-    doc_id: u64,
-) -> Result<Option<UndoResult>, String> {
-    state.stop_warming(doc_id);
-    state.with_doc(doc_id, |doc| {
-        let (first_line, line_count) = doc.redo()?;
-        Some(UndoResult {
-            first_line,
-            line_count,
-            clean: doc.at_saved_state(),
-        })
-    })
-}
-
-/// Drop a document (its tab closed). The warmer holds its own `Arc` to the handle, so the
-/// generation bump is what tells it to stop parsing against a document nobody reads.
-#[tauri::command]
-pub fn viewer_close(state: tauri::State<ViewerState>, doc_id: u64) {
-    let mut docs = state
-        .docs
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(handle) = docs.remove(&doc_id) {
-        handle.warm_gen.fetch_add(1, Ordering::Relaxed);
-    }
 }
 
 #[cfg(test)]
@@ -1959,7 +1496,7 @@ mod tests {
     }
 
     #[test]
-    fn text_windows_read_plain_lines_and_cap() {
+    pub fn text_windows_read_plain_lines_and_cap() {
         let s = scratch();
         let path = s.file("plain.txt", "a\nbb\nccc\n");
         let state = ViewerState::default();

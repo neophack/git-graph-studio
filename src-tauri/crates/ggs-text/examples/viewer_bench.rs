@@ -16,7 +16,7 @@ fn main() {
     println!("file: {mb} MB, {} lines", text.lines().count());
 
     let started = Instant::now();
-    let set = git_graph_studio_lib::viewer::doc::syntax_set();
+    let set = ggs_text::viewer::doc::syntax_set();
     let elapsed = started.elapsed();
     println!("syntax_set (cold OnceLock build): {elapsed:?}");
 
@@ -33,7 +33,7 @@ fn main() {
     );
 
     let started = Instant::now();
-    let mut doc = git_graph_studio_lib::viewer::doc::ViewerDoc::new("bench.rs".into(), &text, "rs");
+    let mut doc = ggs_text::viewer::doc::ViewerDoc::new("bench.rs".into(), &text, "rs");
     println!("ViewerDoc::new (syntax set warm): {:?}", started.elapsed());
 
     let started = Instant::now();

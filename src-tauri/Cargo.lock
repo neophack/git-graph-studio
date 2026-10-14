@@ -2065,6 +2065,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ggs-text"
+version = "0.0.0"
+dependencies = [
+ "encoding_rs",
+ "fancy-regex",
+ "ggs-base",
+ "hex",
+ "memchr",
+ "plist",
+ "rayon",
+ "ropey",
+ "serde",
+ "serde_json",
+ "sha1",
+ "syntect",
+ "tempfile",
+]
+
+[[package]]
 name = "ghash"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2126,6 +2145,7 @@ dependencies = [
  "ggs-remote-proto",
  "ggs-shellenv",
  "ggs-testkit",
+ "ggs-text",
  "hex",
  "ignore",
  "interprocess",

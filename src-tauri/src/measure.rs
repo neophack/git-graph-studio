@@ -148,13 +148,13 @@ fn large_file_probe() -> (u64, f64, f64, f64, usize) {
     let read_ms = ms(started);
 
     let started = Instant::now();
-    let decoded = crate::encoding::decode(&bytes, None);
+    let decoded = ggs_text::encoding::decode(&bytes, None);
     let text = decoded.text;
     let decode_ms = ms(started);
 
     // The viewer document the fast view / outline path builds (syntax set-up included).
     let started = Instant::now();
-    let mut doc = crate::viewer::doc::ViewerDoc::new(path, &text, "rs");
+    let mut doc = ggs_text::viewer::doc::ViewerDoc::new(path, &text, "rs");
     let lines = doc.line_count();
     let _highlighted = doc.highlight_lines(0, 100usize.min(lines.saturating_sub(1)));
     let viewer_ms = ms(started);

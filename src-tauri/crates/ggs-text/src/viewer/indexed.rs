@@ -51,7 +51,7 @@ impl LineIndex {
 /// How the index counts a document whose encoding stores one character in two bytes:
 /// `None` is the single-byte family (UTF-8 and every legacy multibyte whose trail bytes
 /// never collide with `\n`), `Some(true)` UTF-16LE, `Some(false)` UTF-16BE.
-fn utf16_of(encoding: &str) -> Option<bool> {
+pub fn utf16_of(encoding: &str) -> Option<bool> {
     match encoding {
         "utf-16le" => Some(true),
         "utf-16be" => Some(false),
@@ -62,7 +62,7 @@ fn utf16_of(encoding: &str) -> Option<bool> {
 /// The parallel index build: positioned reads in chunks, `memchr` for `\n` on each core,
 /// offsets concatenated in order. UTF-16 checks the pairing (`0A 00` / `00 0A`) and the
 /// code-unit parity, reading two bytes past its chunk end so a pair never straddles unseen.
-fn build_index(
+pub fn build_index(
     path: &str,
     from: u64,
     total: u64,
@@ -136,26 +136,25 @@ fn build_index(
 
 /// One open indexed document. The decoded head serves until the index lands; then windows
 /// read their byte ranges straight from the file.
-struct IndexedDoc {
-    path: String,
-    total: u64,
+pub struct IndexedDoc {
+    pub path: String,
+    pub total: u64,
     /// The encoding id (`crate::encoding`) windows decode with.
-    encoding: String,
-    head_text: String,
+    pub encoding: String,
+    pub head_text: String,
     /// The handle window reads share — a fetch must not pay a file open per window.
-    file: Mutex<Option<File>>,
+    pub file: Mutex<Option<File>>,
     /// The extrapolated line count the scrollbar starts with.
-    estimate: usize,
+    pub estimate: usize,
     /// The exact index once the background scan lands. `None` while building.
-    index: RwLock<Option<Arc<LineIndex>>>,
+    pub index: RwLock<Option<Arc<LineIndex>>>,
     /// Set when the build failed: the head still serves, whole-file scans report this.
-    error: Mutex<Option<String>>,
-    gate: Arc<TailGate>,
-    find_gen: AtomicU64,
-}
+    pub error: Mutex<Option<String>>,
+    pub gate: Arc<TailGate>,
+    pub find_gen: AtomicU64,}
 
 impl IndexedDoc {
-    fn line_count(&self) -> usize {
+    pub fn line_count(&self) -> usize {
         match self
             .index
             .read()
@@ -168,7 +167,7 @@ impl IndexedDoc {
     }
 
     /// Wait for the index to land (or fail), then report the verdict.
-    fn wait_index(&self) -> Result<(), String> {
+    pub fn wait_index(&self) -> Result<(), String> {
         self.gate.wait();
         match self
             .error
@@ -183,7 +182,7 @@ impl IndexedDoc {
 
     /// The decoded text of lines `start..=end`. The head serves before the index lands;
     /// after that, byte ranges come off the disk and decode per window.
-    fn window(&self, start: usize, end: usize) -> Result<Vec<String>, String> {
+    pub fn window(&self, start: usize, end: usize) -> Result<Vec<String>, String> {
         let total = self.line_count().max(1);
         let start = start.min(total - 1);
         let end = end.min(total - 1);
@@ -285,12 +284,12 @@ impl IndexedDoc {
 
 #[derive(Default)]
 pub struct IndexedState {
-    next_id: AtomicU64,
-    docs: Mutex<HashMap<u64, Arc<IndexedDoc>>>,
+    pub next_id: AtomicU64,
+    pub docs: Mutex<HashMap<u64, Arc<IndexedDoc>>>,
 }
 
 impl IndexedState {
-    fn get(&self, doc_id: u64) -> Result<Arc<IndexedDoc>, String> {
+    pub fn get(&self, doc_id: u64) -> Result<Arc<IndexedDoc>, String> {
         self.docs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -329,135 +328,18 @@ pub struct IndexedLinesResult {
     pub tokens_pending: bool,
 }
 
-/// Open a file for indexed viewing: read and decode the head (the first screens, served
-/// immediately), extrapolate the scrollbar's line count, and build the exact index in the
-/// background. The landing emits `studio://viewer-lines` with the exact count.
-#[tauri::command]
-pub async fn indexed_open(
-    state: tauri::State<'_, IndexedState>,
-    app: tauri::AppHandle,
-    path: String,
-) -> Result<IndexedOpenResult, String> {
-    let doc_id = state.next_id.fetch_add(1, Ordering::Relaxed);
-    let load = path.clone();
-    let opened = tauri::async_runtime::spawn_blocking(move || open_indexed(&load))
-        .await
-        .map_err(|e| e.to_string())??;
-    let IndexedHead {
-        total,
-        encoding,
-        eol,
-        head_bytes,
-        head_text,
-        bom,
-    } = opened;
-    let language = std::path::Path::new(&path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
-        .unwrap_or_default();
-    let syntax_name = doc::syntax_name_for(&language);
-    let head_lines = head_text.split('\n').count().max(1);
-    let per_line = (head_bytes / head_lines as u64).max(1);
-    let estimate = head_lines + ((total - head_bytes) / per_line) as usize;
-    let gate = TailGate::pending();
-    let document = Arc::new(IndexedDoc {
-        path: path.clone(),
-        total,
-        encoding: encoding.clone(),
-        head_text,
-        file: Mutex::new(None),
-        estimate: estimate.max(head_lines),
-        index: RwLock::new(None),
-        error: Mutex::new(None),
-        gate: Arc::clone(&gate),
-        find_gen: AtomicU64::new(0),
-    });
-    state
-        .docs
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(doc_id, Arc::clone(&document));
-    let result = IndexedOpenResult {
-        doc_id,
-        line_count: document.line_count(),
-        language,
-        syntax_name,
-        encoding,
-        eol,
-    };
-    // The exact index builds in the background; the head serves meanwhile.
-    let scan_path = path.clone();
-    let scan_from = bom;
-    let utf16 = utf16_of(&document.encoding);
-    let scan_doc = Arc::clone(&document);
-    let scan_gate = Arc::clone(&gate);
-    let spawned = std::thread::Builder::new()
-        .name("indexed-scan".to_owned())
-        .spawn(move || {
-            let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                build_index(&scan_path, scan_from, scan_doc.total, utf16, scan_from)
-            }));
-            let mut landed = None;
-            match built {
-                Ok(Ok(index)) => {
-                    let count = index.line_count();
-                    *scan_doc
-                        .index
-                        .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(index));
-                    landed = Some(count);
-                }
-                Ok(Err(error)) => {
-                    *scan_doc
-                        .error
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error);
-                }
-                Err(_) => {
-                    *scan_doc
-                        .error
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                        Some("the index build panicked".to_owned());
-                }
-            }
-            scan_gate.land();
-            if let Some(count) = landed {
-                use tauri::Emitter;
-                let _ = app.emit(
-                    "studio://viewer-lines",
-                    LinesLanded {
-                        doc_id,
-                        line_count: count,
-                    },
-                );
-            }
-        });
-    if spawned.is_err() {
-        *document
-            .error
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            Some("the index build could not start".to_owned());
-        gate.land();
-    }
-    Ok(result)
-}
-
-struct IndexedHead {
-    total: u64,
-    encoding: String,
-    eol: String,
-    head_bytes: u64,
-    head_text: String,
+pub struct IndexedHead {
+    pub total: u64,
+    pub encoding: String,
+    pub eol: String,
+    pub head_bytes: u64,
+    pub head_text: String,
     /// The byte offset line 0 starts at (past a BOM).
-    bom: u64,
-}
+    pub bom: u64,}
 
 /// Read and decode the head: `HEAD_BYTES` extended to the next line break, the encoding
 /// sniffed the way every reader of the app sniffs it.
-fn open_indexed(path: &str) -> Result<IndexedHead, String> {
+pub fn open_indexed(path: &str) -> Result<IndexedHead, String> {
     let total = std::fs::metadata(path)
         .map_err(|e| format!("{path}: {e}"))?
         .len();
@@ -504,29 +386,6 @@ fn open_indexed(path: &str) -> Result<IndexedHead, String> {
     })
 }
 
-/// The lines a window asked for — the fast viewer's fetch. `end` is inclusive.
-#[tauri::command]
-pub async fn indexed_lines(
-    state: tauri::State<'_, IndexedState>,
-    doc_id: u64,
-    start: usize,
-    end: usize,
-) -> Result<IndexedLinesResult, String> {
-    let doc = state.get(doc_id)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let line_count = doc.line_count();
-        let lines = doc.window(start, end)?;
-        Ok(IndexedLinesResult {
-            start_line: start.min(line_count.max(1) - 1),
-            line_count,
-            lines: lines.into_iter().map(|text| (text, Vec::new())).collect(),
-            tokens_pending: false,
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
 /// The find result mirrors `viewer_find`'s.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -534,111 +393,6 @@ pub struct IndexedFindResult {
     pub matches: Vec<MatchLoc>,
     pub capped: bool,
     pub line_count: usize,
-}
-
-/// Find over the whole file by streaming it: chunks read off the disk, whole lines fed to
-/// the same matcher the rope viewer uses. A newer find on the same document supersedes the
-/// walk between chunks. A line past the cap is skipped rather than buffered whole.
-#[tauri::command]
-pub async fn indexed_find(
-    state: tauri::State<'_, IndexedState>,
-    doc_id: u64,
-    query: String,
-    case_sensitive: bool,
-    whole_word: bool,
-    regexp: bool,
-) -> Result<IndexedFindResult, String> {
-    let doc = state.get(doc_id)?;
-    let generation = doc.find_gen.fetch_add(1, Ordering::Relaxed) + 1;
-    tauri::async_runtime::spawn_blocking(move || {
-        doc.wait_index()?;
-        let matcher = Matcher::compile(
-            &query,
-            &FindOptions {
-                case_sensitive,
-                whole_word,
-                regexp,
-            },
-        )?;
-        const CHUNK: usize = 4 << 20;
-        const LINE_CAP: usize = 4 << 20;
-        let mut file = File::open(&doc.path).map_err(|e| format!("{}: {e}", doc.path))?;
-        let mut matches: Vec<MatchLoc> = Vec::new();
-        let mut capped = false;
-        let mut carried: Vec<u8> = Vec::new();
-        let mut line_no = 0usize;
-        let mut chunk = vec![0u8; CHUNK];
-        loop {
-            let read = file
-                .read(&mut chunk)
-                .map_err(|e| format!("{}: {e}", doc.path))?;
-            if read == 0 {
-                break;
-            }
-            if doc.find_gen.load(Ordering::Relaxed) != generation {
-                return Err("superseded".to_owned());
-            }
-            carried.extend_from_slice(&chunk[..read]);
-            let mut from = 0usize;
-            while let Some(hit) = memchr::memchr(b'\n', &carried[from..]) {
-                let line_end = from + hit;
-                let text = String::from_utf8_lossy(&carried[from..line_end]);
-                for (start, end) in matcher.matches_in(&text, whole_word) {
-                    if matches.len() >= super::find::MAX_FIND_MATCHES {
-                        capped = true;
-                        break;
-                    }
-                    matches.push(MatchLoc {
-                        line: line_no,
-                        start_col: start,
-                        end_col: end,
-                    });
-                }
-                line_no += 1;
-                from = line_end + 1;
-            }
-            carried.drain(..from);
-            if carried.len() > LINE_CAP {
-                // A monster line: drop the buffer, its matches are not worth the memory.
-                carried.clear();
-                line_no += 1;
-            }
-        }
-        if !carried.is_empty() {
-            let text = String::from_utf8_lossy(&carried);
-            for (start, end) in matcher.matches_in(&text, whole_word) {
-                if matches.len() >= super::find::MAX_FIND_MATCHES {
-                    capped = true;
-                    break;
-                }
-                matches.push(MatchLoc {
-                    line: line_no,
-                    start_col: start,
-                    end_col: end,
-                });
-            }
-        }
-        Ok(IndexedFindResult {
-            matches,
-            capped,
-            line_count: doc.line_count(),
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Drop an indexed document (its tab closed).
-#[tauri::command]
-pub fn indexed_close(state: tauri::State<IndexedState>, doc_id: u64) {
-    let mut docs = state
-        .docs
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(doc) = docs.get(&doc_id) {
-        doc.find_gen.fetch_add(1, Ordering::Relaxed);
-    }
-    docs.remove(&doc_id);
 }
 
 #[cfg(test)]

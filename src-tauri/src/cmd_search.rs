@@ -228,7 +228,7 @@ pub(crate) fn build_matcher(
 }
 
 /// Read a file as bytes for the search: `None` for binary files (the shared
-/// [`crate::encoding::looks_binary`] rule, so a BOM-marked UTF-16 file is not mistaken for
+/// [`ggs_text::encoding::looks_binary`] rule, so a BOM-marked UTF-16 file is not mistaken for
 /// one), oversized files, and read errors (a vanished file is simply not searchable). A
 /// UTF-16 file arrives decoded to UTF-8 with its encoding id remembered, so its matches are
 /// found at all and a replace can write it back the way it was; anything else stays the raw
@@ -238,7 +238,7 @@ pub(crate) fn read_searchable(path: &Path) -> Option<(Vec<u8>, &'static str)> {
         return None;
     }
     let bytes = fs::read(path).ok()?;
-    if crate::encoding::looks_binary(&bytes) {
+    if ggs_text::encoding::looks_binary(&bytes) {
         return None;
     }
     if let Some((encoding, bom_len)) = encoding_rs::Encoding::for_bom(&bytes) {
@@ -263,7 +263,7 @@ pub(crate) fn read_searchable(path: &Path) -> Option<(Vec<u8>, &'static str)> {
 fn encode_searchable(text: Vec<u8>, encoding: &str) -> Vec<u8> {
     match encoding {
         "utf-16le" | "utf-16be" => {
-            crate::encoding::encode(&String::from_utf8_lossy(&text), encoding, "lf")
+            ggs_text::encoding::encode(&String::from_utf8_lossy(&text), encoding, "lf")
         }
         _ => text,
     }
@@ -346,7 +346,7 @@ fn scan_stream(
     let mut reader = std::io::BufReader::new(file);
     // The peek through fill_buf does not consume: the sniff decides, then the walk starts at 0.
     let head = reader.fill_buf().ok()?;
-    if crate::encoding::looks_binary(head) {
+    if ggs_text::encoding::looks_binary(head) {
         return None;
     }
     if matches!(encoding_rs::Encoding::for_bom(head), Some((e, _)) if e == encoding_rs::UTF_16LE || e == encoding_rs::UTF_16BE)
@@ -1502,7 +1502,7 @@ mod tests {
             replace_root(walk_files(&root), &root, "bar", "qux", false, false, false).unwrap();
         assert_eq!(outcome.replacements, 1);
         let written = std::fs::read(&file).unwrap();
-        let decoded = crate::encoding::decode(&written, None);
+        let decoded = ggs_text::encoding::decode(&written, None);
         assert_eq!(
             (decoded.text.as_str(), decoded.encoding),
             ("foo qux\nbaz\n", "utf-16le")

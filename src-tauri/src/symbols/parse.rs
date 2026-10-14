@@ -429,7 +429,7 @@ pub fn parse_file(text: &str, ext: &str) -> ParsedFile {
 /// The outline scan dressed as parsed symbols — the fallback for a language whose grammar
 /// feature is off.
 fn outline_fallback(text: &str, ext: &str) -> Vec<ParsedSymbol> {
-    crate::viewer::outline_symbols_for(text, ext)
+    ggs_text::viewer::outline_symbols_for(text, ext)
         .into_iter()
         .map(|s| ParsedSymbol {
             kind: match s.kind.as_str() {

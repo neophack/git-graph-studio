@@ -29,6 +29,8 @@ pub mod events;
 #[cfg(feature = "desktop")]
 pub mod can_commands;
 #[cfg(feature = "desktop")]
+pub mod viewer_commands;
+#[cfg(feature = "desktop")]
 pub mod cmd_analysis;
 /// The app-instance domain: "New Window" spawns another GGS — the multi-open entry every
 /// platform shares (macOS needs it most: activating a bundled app's icon only focuses the
@@ -51,16 +53,12 @@ pub mod cmd_scm;
 pub mod cmd_search;
 #[cfg(feature = "desktop")]
 pub mod cmd_symbols;
-#[cfg(feature = "desktop")]
-pub mod encoding;
 /// The frame host's child processes (`nodeShims.ts` maps them onto the Node API): one real
 /// process surface a sandboxed frame cannot have on its own.
 #[cfg(feature = "desktop")]
 pub mod ext_child;
 #[cfg(feature = "desktop")]
 pub mod ext_gallery;
-#[cfg(feature = "desktop")]
-pub mod ext_grammar;
 #[cfg(feature = "desktop")]
 pub mod ext_process;
 /// Which frontend answers a backend's host request, and the registration journal a late
@@ -84,8 +82,6 @@ mod stage_bench;
 #[cfg(feature = "desktop")]
 pub mod symbols;
 #[cfg(feature = "desktop")]
-pub mod viewer;
-#[cfg(feature = "desktop")]
 pub mod watcher;
 
 #[cfg(feature = "desktop")]
@@ -94,9 +90,9 @@ pub use desktop::{ensure_main_window, run, AppState};
 #[cfg(feature = "desktop")]
 mod desktop {
     use crate::{
-        can_commands, cmd_analysis, cmd_app, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_providers,
+        can_commands, viewer_commands, cmd_analysis, cmd_app, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_providers,
         cmd_scm, cmd_search, cmd_symbols, ext_child, ext_gallery, ext_process, mcp, measure,
-        pty, remote_host, viewer, watcher,
+        pty, remote_host, watcher,
     };
     use ggs_base::workspace::{find_repo_root, is_repo_below};
     use std::sync::{Arc, Mutex};
@@ -920,7 +916,7 @@ mod desktop {
             // The same warm-up the argv launch runs: the first file's outline wants the
             // syntax set, best paid on a spare core now rather than on that first open.
             std::thread::spawn(|| {
-                viewer::doc::syntax_set();
+                ggs_text::viewer::doc::syntax_set();
                 stamp("syntax set ready");
             });
         } else if let Some(file) = files.first() {
@@ -929,7 +925,7 @@ mod desktop {
                 // never `single_file`, whose viewer would show the JSON.
                 *workspace = Some(file.clone());
             } else {
-                viewer::prewarm(file.clone());
+                ggs_text::viewer::prewarm(file.clone());
                 *single = Some(file.clone());
             }
         } else {
@@ -1460,9 +1456,9 @@ mod desktop {
                     } else {
                         // The file's document (read, decode, rope, outline, the syntax set) builds
                         // now, while the window and the webview come up: the page's `viewer_open`
-                        // then takes it ready-made. A small file never reaches the viewer, so its
+                        // then takes it ready-made. A small file never reaches the so its
                         // prewarm is wasted but cheap; a binary file is skipped by the probe.
-                        viewer::prewarm(arg.clone());
+                        ggs_text::viewer::prewarm(arg.clone());
                         *state.single_file.lock().unwrap() = Some(arg.clone());
                     }
                 }
@@ -1489,7 +1485,7 @@ mod desktop {
         // the launch folder, right after the backends come up.)
         if !state.repos.lock().unwrap().is_empty() {
             std::thread::spawn(|| {
-                viewer::doc::syntax_set();
+                ggs_text::viewer::doc::syntax_set();
                 stamp("syntax set ready");
             });
         }
@@ -1506,8 +1502,8 @@ mod desktop {
             .plugin(tauri_plugin_clipboard_manager::init())
             .manage(state)
             .manage(Mutex::new(pty::PtyState::default()))
-            .manage(viewer::ViewerState::default())
-            .manage(viewer::indexed::IndexedState::default())
+            .manage(ggs_text::viewer::ViewerState::default())
+            .manage(ggs_text::viewer::indexed::IndexedState::default())
             .manage(ggs_can::CanLogState::default())
             // A clone of the process-wide handle (`ext_process::global()`), not a second,
             // independent `ProcessHostState`: `plugin_host.rs` reaches the same running
@@ -1782,24 +1778,24 @@ mod desktop {
                 pty::pty_write,
                 pty::pty_resize,
                 pty::pty_kill,
-                viewer::viewer_open,
-                viewer::viewer_lines,
-                viewer::viewer_highlight,
-                viewer::viewer_text,
-                viewer::viewer_edit,
-                viewer::viewer_find,
-                viewer::viewer_replace,
-                viewer::viewer_save,
-                viewer::viewer_reload,
-                viewer::viewer_undo,
-                viewer::viewer_redo,
-                viewer::viewer_backup,
-                viewer::viewer_symbols,
-                viewer::viewer_close,
-                viewer::indexed::indexed_open,
-                viewer::indexed::indexed_lines,
-                viewer::indexed::indexed_find,
-                viewer::indexed::indexed_close,
+                viewer_commands::viewer_open,
+                viewer_commands::viewer_lines,
+                viewer_commands::viewer_highlight,
+                viewer_commands::viewer_text,
+                viewer_commands::viewer_edit,
+                viewer_commands::viewer_find,
+                viewer_commands::viewer_replace,
+                viewer_commands::viewer_save,
+                viewer_commands::viewer_reload,
+                viewer_commands::viewer_undo,
+                viewer_commands::viewer_redo,
+                viewer_commands::viewer_backup,
+                viewer_commands::viewer_symbols,
+                viewer_commands::viewer_close,
+                viewer_commands::indexed_open,
+                viewer_commands::indexed_lines,
+                viewer_commands::indexed_find,
+                viewer_commands::indexed_close,
                 cmd_ext::ext_list,
                 cmd_ext::ext_uninstall,
                 cmd_ext::ext_read_file,

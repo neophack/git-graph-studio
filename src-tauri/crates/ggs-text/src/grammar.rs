@@ -291,7 +291,7 @@ pub fn add_grammars_from(dir: &Path, builder: &mut syntect::parsing::SyntaxSetBu
 /// The loader over the whole extensions home — what the rope viewer's syntax set builds
 /// with (each installed package's grammars join syntect's defaults).
 pub fn add_extension_grammars(builder: &mut syntect::parsing::SyntaxSetBuilder) {
-    let Ok(home) = crate::cmd_ext::extensions_home_dir() else {
+    let Ok(home) = ggs_base::paths::extensions_home() else {
         return;
     };
     let Ok(entries) = std::fs::read_dir(&home) else {
