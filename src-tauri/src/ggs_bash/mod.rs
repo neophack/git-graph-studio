@@ -467,13 +467,15 @@ fn print_help() {
 #[cfg(unix)]
 fn is_stdin_tty() -> bool {
     // The REPL only engages for a real terminal; piped stdin is a script.
-    unsafe { libc_isatty() == 1 }
+    unsafe { libc_isatty(0) == 1 }
 }
 
 #[cfg(unix)]
 extern "C" {
+    // The same signature applets.rs declares — `clashing_extern_declarations`
+    // (a -D warnings error on Linux) fires the moment the two disagree.
     #[link_name = "isatty"]
-    fn libc_isatty() -> i32;
+    fn libc_isatty(fd: i32) -> i32;
 }
 
 #[cfg(windows)]
