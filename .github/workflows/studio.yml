@@ -1,20 +1,33 @@
-# Git Graph Studio's CI: the frontend test suite plus the per-platform installer builds.
+# Git Graph Studio's CI: the frontend test suite, the per-platform backend test jobs, and
+# the per-platform installer builds — tests and packaging run as PARALLEL jobs
+# (docs/ci-speed-plan.md P2, 2026-10-14): the wall clock is the max of the two, not the
+# sum. The tests still gate every release: release.yml calls this workflow and its publish
+# step waits for the whole call to pass, and a direct run fails when a test job fails —
+# only the (never published) build artifacts of the failed run exist.
 #
 # The app is self-contained: every marketplace extension package an installer carries
 # arrives as the per-architecture VSIX (Open VSX, fetched by scripts/
 # fetch-marketplace-extensions.mjs inside prepare.mjs). No job checks anything beyond
 # this repository out.
 #
-# Tests gate the installers: every installer job runs clippy and the backend test suite
-# first, and `tauri build` only starts after the last test passed. The dependency graph is
-# compiled twice per platform - dev for the tests, release for the installers - because
-# `panic = "abort"` in the size-diet [profile.release] (src-tauri/Cargo.toml) can never be
-# shared with test targets, which always unwind; dropping it to share one compile was
-# rejected (verified experimentally, 2026-09-15). What IS shared: rust-cache keeps the
-# target dir and the crates.io registry warm across runs (fewer downloads, near-incremental
-# rebuilds); npm downloads are cached the same way through setup-node's cache. The two
-# Linux package formats are back to one compile each - each in its own floor container -
-# because one binary cannot carry two glibc floors.
+# The test jobs compile the dev/test profile only (prepare.mjs --icons-only supplies the
+# one compile-time input, the window icons `generate_context!()` embeds); the installer
+# jobs compile release only (tauri build's beforeBuildCommand runs the full prepare: the
+# ggs-node sidecar, the GGS Remote daemon, the marketplace fetch). One backend test pass
+# per platform (the owner's direction, 2026-10-14): test-windows, test-linux (the native
+# deb-side runner — rpm and deb are both Linux, the rpm container leg only packages, the
+# suite is not run twice) and test-macos (the suite had never run on macOS before it).
+# The dependency graph
+# is still compiled twice per platform - dev for the tests, release for the installers -
+# because `panic = "abort"` in the size-diet [profile.release] (src-tauri/Cargo.toml) can
+# never be shared with test targets, which always unwind; dropping it to share one
+# compile was rejected (verified experimentally, 2026-09-15). The two halves keep
+# separate rust-cache keys so neither restores the other's dead weight. What IS shared:
+# rust-cache keeps the target dirs and the crates.io registry warm across runs (fewer
+# downloads, near-incremental rebuilds; cache-workspace-crates keeps the vendored boa
+# artifacts too); npm downloads are cached the same way through setup-node's cache. The
+# two Linux package formats are back to one compile each - each in its own floor
+# container - because one binary cannot carry two glibc floors.
 #
 # The Linux installers are built in Docker containers whose base image IS the compatibility
 # floor - the oldest distro that still has WebKitGTK 4.1, which Tauri 2 hard-requires
@@ -98,12 +111,22 @@ permissions:
 
 # Incremental compilation only pays off within a single job and the caches below discard it
 # anyway; turning it off speeds the clippy pass and shrinks the saved caches.
+#
+# Line-tables-only debuginfo for the dev/test compile (docs/ci-speed-plan.md P1 #4): MSVC
+# PDB generation is a large share of the Windows test compile, and the full debuginfo the
+# profile wrote was the bulk of the 12 GB that kept evicting every cache above GitHub's
+# 10 GB line. Backtraces keep line numbers; dependencies carry no debuginfo at all
+# ([profile.dev.package."*"] in src-tauri/Cargo.toml).
 env:
   CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 concurrency:
   group: studio-${{ github.ref }}
-  cancel-in-progress: true
+  # Only PRs cancel their predecessor (docs/ci-speed-plan.md P1 #7): a cancelled run's
+  # post steps never execute, so it saves no rust-cache — consecutive pushes to main each
+  # paid a cold recompile where one of them completing would have landed the warm cache.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # The app's frontend: typecheck plus the vitest suite from tests/, which runs against a
@@ -135,6 +158,249 @@ jobs:
       - name: Build the remote workbench
         run: npx vite build -c vite.remote.config.ts
 
+  # The Windows backend test gate (docs/ci-speed-plan.md P2: tests and packaging are split
+  # into parallel jobs — the wall clock is the max of the two, not the sum). This job owns
+  # the dev/test compile; the installer job below never waits for it, and a calling
+  # workflow (release.yml) still fails unless both sides passed. prepare runs --icons-only:
+  # `generate_context!()` embeds the window icons at compile time, and that is ALL the test
+  # compile needs — the ggs-node sidecar, the GGS Remote daemon and the marketplace fetch
+  # are the installer build's business.
+  test-windows:
+    name: Studio backend tests (windows-x64)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    if: github.event_name != 'pull_request'
+    env:
+      # As in the installer job below (see its comment): the tests' tempdirs on the D:
+      # scratch, out of Defender's profile-temp scanning path.
+      TMP: ${{ runner.temp }}
+      TEMP: ${{ runner.temp }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # As in the installer job below (see its comment).
+      - name: Exclude the build paths from Defender scanning
+        shell: pwsh
+        run: |
+          $paths = @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup")
+          foreach ($path in $paths) {
+            try { Add-MpPreference -ExclusionPath $path } catch { Write-Host "skipped ${path}: $($_.Exception.Message)" }
+          }
+
+      # The pinned toolchain (rust-toolchain.toml); keep ref and file in sync on a bump.
+      - uses: dtolnay/rust-toolchain@1.97.1
+      # The dev/test half of the split cache: this job compiles only the dev profile, the
+      # installer job below only release — one key each, so neither restores the other's
+      # dead weight (the old shared key carried both halves and could not shed either).
+      # cache-workspace-crates keeps the vendored boa path-dependency artifacts cached —
+      # the default cleans local crates, which is why boa_engine recompiled in full on
+      # every "full match" run (docs/ci-speed-plan.md P2).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> ../target/studio/cargo
+          key: studio-windows-x64-test
+          cache-on-failure: true
+          cache-workspace-crates: true
+          save-if: github.ref == 'refs/heads/main'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install app dependencies
+        run: npm ci || npm install
+
+      # Sync the release version, as the installer jobs do: a release's tests compile the
+      # same version string its installers stamp.
+      - name: Stamp the release version
+        if: inputs.studio-version != ''
+        shell: bash
+        env:
+          STUDIO_VERSION: ${{ inputs.studio-version }}
+        run: |
+          VERSION="${STUDIO_VERSION#v}"
+          npm pkg set version="$VERSION"
+          node -e "
+            const fs = require('fs');
+            const conf = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+            conf.version = process.argv[1];
+            fs.writeFileSync('src-tauri/tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
+            const cargo = 'src-tauri/Cargo.toml';
+            fs.writeFileSync(cargo, fs.readFileSync(cargo, 'utf8').replace(/^version = \"[^\"]*\"/m, 'version = \"' + process.argv[1] + '\"'));
+          " "$VERSION"
+
+      # The icons generate_context!() embeds — the compile-time input of the test pass.
+      - name: Prepare the compile-time icons
+        run: node scripts/prepare.mjs --icons-only
+
+      # rust-lld links the integration-test binary (it links the whole lib) markedly faster
+      # than MSVC's link.exe; scoped to this job, the installer build keeps its linker.
+      # --timings feeds the P0 baseline (uploaded below).
+      - name: Test and lint the app backend
+        working-directory: src-tauri
+        env:
+          GGS_PERF_FILES: '20000'
+          RUSTFLAGS: -Clinker=rust-lld
+        run: |
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all-features --timings
+
+      - name: Upload the cargo build timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: studio-windows-test-timings
+          path: src-tauri/cargo-timings/**/*.html
+          if-no-files-found: warn
+
+  # The Linux backend test gate, native on the runner (the Windows job's sibling; the
+  # container legs below only compile release for packaging — docs/ci-speed-plan.md P2).
+  test-linux:
+    name: Studio backend tests (linux-x64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+
+      # The pinned toolchain (rust-toolchain.toml); keep ref and file in sync on a bump.
+      - uses: dtolnay/rust-toolchain@1.97.1
+      # A fresh key of its own (the old studio-linux-native lineage mixed the dev and
+      # release halves this split separates; one cold run retires it). cache-workspace-crates
+      # as in the Windows test job: the vendored boa stays cached.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> ../target/studio/cargo
+          key: studio-linux-native-test
+          cache-on-failure: true
+          cache-workspace-crates: true
+          save-if: github.ref == 'refs/heads/main'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install app dependencies
+        run: npm ci || npm install
+
+      - name: Stamp the release version
+        if: inputs.studio-version != ''
+        env:
+          STUDIO_VERSION: ${{ inputs.studio-version }}
+        run: |
+          VERSION="${STUDIO_VERSION#v}"
+          npm pkg set version="$VERSION"
+          node -e "
+            const fs = require('fs');
+            const conf = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+            conf.version = process.argv[1];
+            fs.writeFileSync('src-tauri/tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
+            const cargo = 'src-tauri/Cargo.toml';
+            fs.writeFileSync(cargo, fs.readFileSync(cargo, 'utf8').replace(/^version = \"[^\"]*\"/m, 'version = \"' + process.argv[1] + '\"'));
+          " "$VERSION"
+
+      - name: Prepare the compile-time icons
+        run: node scripts/prepare.mjs --icons-only
+
+      - name: Test and lint the app backend
+        working-directory: src-tauri
+        env:
+          GGS_PERF_FILES: '20000'
+        run: |
+          cargo clippy --all-targets --all-features -- -D warnings
+          # --skip ggs_bash: the shell is a Windows-only sidecar (2026-10-14, the owner's
+          # direction) — its suite runs in the Windows job alone.
+          cargo test --all-features --timings -- --skip ggs_bash
+
+      - name: Upload the cargo build timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: studio-linux-native-test-timings
+          path: src-tauri/cargo-timings/**/*.html
+          if-no-files-found: warn
+
+  # The macOS backend test gate (the owner's direction, 2026-10-14: macOS tests too — the
+  # suite had never run there, only Windows and Linux). One runner covers the platform:
+  # the pty/watcher/tray surfaces differ per OS, not per arch. The ggs_bash suite's
+  # Windows-specific tests are cfg(windows)-gated and the Unix half already passes on
+  # Linux, so this is the same pass Linux runs; latent macOS-only failures surfacing
+  # here is the job doing its work.
+  test-macos:
+    name: Studio backend tests (darwin-arm64)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      # The pinned toolchain (rust-toolchain.toml); keep ref and file in sync on a bump.
+      - uses: dtolnay/rust-toolchain@1.97.1
+      # The dev/test half of the split cache, as on the other platforms (see the Windows
+      # test job's comment); cache-workspace-crates keeps the vendored boa warm.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> ../target/studio/cargo
+          key: studio-darwin-arm64-test
+          cache-on-failure: true
+          cache-workspace-crates: true
+          save-if: github.ref == 'refs/heads/main'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install app dependencies
+        run: npm ci || npm install
+
+      - name: Stamp the release version
+        if: inputs.studio-version != ''
+        env:
+          STUDIO_VERSION: ${{ inputs.studio-version }}
+        run: |
+          VERSION="${STUDIO_VERSION#v}"
+          npm pkg set version="$VERSION"
+          node -e "
+            const fs = require('fs');
+            const conf = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+            conf.version = process.argv[1];
+            fs.writeFileSync('src-tauri/tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
+            const cargo = 'src-tauri/Cargo.toml';
+            fs.writeFileSync(cargo, fs.readFileSync(cargo, 'utf8').replace(/^version = \"[^\"]*\"/m, 'version = \"' + process.argv[1] + '\"'));
+          " "$VERSION"
+
+      - name: Prepare the compile-time icons
+        run: node scripts/prepare.mjs --icons-only
+
+      - name: Test and lint the app backend
+        working-directory: src-tauri
+        env:
+          GGS_PERF_FILES: '20000'
+        run: |
+          cargo clippy --all-targets --all-features -- -D warnings
+          # --skip ggs_bash: the shell is a Windows-only sidecar (2026-10-14, the owner's
+          # direction) — its suite runs in the Windows job alone.
+          cargo test --all-features --timings -- --skip ggs_bash
+
+      - name: Upload the cargo build timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: studio-darwin-test-timings
+          path: src-tauri/cargo-timings/**/*.html
+          if-no-files-found: warn
+
   # GGS Remote's daemon (extensions-src/ggs-remote/daemon, a crate of its own the app never
   # links): format, lint, and the unit + integration suites on all three platforms
   # (docs/ggs-remote-plan.md §15.6) — the tray backends differ per OS.
@@ -150,13 +416,19 @@ jobs:
         working-directory: extensions-src/ggs-remote/daemon
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # The pinned toolchain (rust-toolchain.toml, docs/ci-speed-plan.md P1 #6); keep the
+      # ref and the file in sync when bumping — a mismatch makes rustup install both.
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: extensions-src/ggs-remote/daemon -> ../../../target/studio/ggs-remote
           key: ggs-remote-daemon
+          # Caches are saved from main only (docs/ci-speed-plan.md P1 #5): PR-branch saves
+          # are what pushed the repo past the 10 GB eviction line; a PR still restores
+          # main's cache, which is all it needs for a dependency-unchanged check run.
+          save-if: github.ref == 'refs/heads/main'
       - name: Format
         run: cargo fmt --check
       - name: Lint
@@ -175,13 +447,15 @@ jobs:
         working-directory: extensions-src/ggs-remote/hub
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # The pinned toolchain (rust-toolchain.toml), as in every Rust job here.
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: extensions-src/ggs-remote/hub -> ../../../target/studio/ggs-remote-hub
           key: ggs-remote-hub
+          save-if: github.ref == 'refs/heads/main'
       - name: Format
         run: cargo fmt --check
       - name: Lint
@@ -189,7 +463,8 @@ jobs:
       - name: Test
         run: cargo test --target-dir ../../../target/studio/ggs-remote-hub
 
-  # The Windows installers (NSIS setup exe + MSI), built natively.
+  # The Windows installer (NSIS setup exe), built natively (the one Windows format:
+  # tauri.conf.json's targets list carries no msi — 2026-10-14, the owner's direction).
   studio-windows:
     name: Studio installers (windows-x64)
     runs-on: windows-latest
@@ -202,19 +477,42 @@ jobs:
       # this package packed into the installers" for every prepare.mjs run below.
       GGS_BUNDLE_GIT_GRAPH: ${{ inputs.bundle-git-graph == false && '0' || '1' }}
       GGS_BUNDLE_CLAUDE_CODE: ${{ inputs.bundle-claude-code == true && '1' || '0' }}
+      # The build's scratch on the runner's D: drive, out of Defender's profile-temp
+      # scanning path (see the test job's note for the original diagnosis).
+      TMP: ${{ runner.temp }}
+      TEMP: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-      # src-tauri redirects cargo's target dir to ../target/studio/cargo (its
-      # .cargo/config.toml); rust-cache caches <workspace>/target unless the mapping is
-      # explicit. Mapping it keeps the release artifacts (shared by the test pass and the
-      # installer build below) and the registry cache warm across runs.
+      # Defender's real-time scanning taxes every rustc/link write (docs/ci-speed-plan.md
+      # P1 #3): exclude the workspace, the runner scratch and the cargo/rustup homes.
+      # Best effort — a locked-down runner keeps scanning and merely runs slower; never
+      # fail the build over it.
+      - name: Exclude the build paths from Defender scanning
+        shell: pwsh
+        run: |
+          $paths = @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup")
+          foreach ($path in $paths) {
+            try { Add-MpPreference -ExclusionPath $path } catch { Write-Host "skipped ${path}: $($_.Exception.Message)" }
+          }
+
+      # The pinned toolchain (rust-toolchain.toml); keep ref and file in sync on a bump.
+      - uses: dtolnay/rust-toolchain@1.97.1
+      # The release half of the split cache (the test job's comment tells the story);
+      # -build is a fresh key because the old shared lineage mixed the dev and release
+      # halves this split separates. The GGS Remote daemon's target rides along
+      # (docs/ci-speed-plan.md P2): prepare.mjs compiles it release into
+      # target/studio/ggs-remote — 4+ min cold on this runner. cache-workspace-crates
+      # keeps the vendored boa artifacts cached (the default cleans local crates).
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri -> ../target/studio/cargo
-          key: studio-windows-x64
+          workspaces: |
+            src-tauri -> ../target/studio/cargo
+            extensions-src/ggs-remote/daemon -> ../../../target/studio/ggs-remote
+          key: studio-windows-x64-build
           cache-on-failure: true
+          cache-workspace-crates: true
+          save-if: github.ref == 'refs/heads/main'
 
       - uses: actions/setup-node@v4
         with:
@@ -245,24 +543,10 @@ jobs:
             fs.writeFileSync(cargo, fs.readFileSync(cargo, 'utf8').replace(/^version = \"[^\"]*\"/m, 'version = \"' + process.argv[1] + '\"'));
           " "$VERSION"
 
-      # `tauri::generate_context!()` embeds the window icons from tauri.conf.json at compile
-      # time, and prepare.mjs is what derives them into target/studio/icons/ - `tauri build`
-      # runs it as its beforeBuildCommand, but the test step below compiles first. --build:
-      # this is a build pipeline run - the marketplace fetch re-checks open-vsx.org for the
-      # latest extension builds instead of riding the dev-iteration cache TTL.
-      - name: Prepare the app assets
-        run: node scripts/prepare.mjs --build
-
-      # The app crate is its own workspace (see src-tauri/Cargo.toml), so its tests, the
-      # backend binary's protocol test against the real executable, and clippy run here -
-      # before the installer build, which only starts if every test passed.
-      - name: Test and lint the app backend
-        working-directory: src-tauri
-        run: |
-          cargo clippy --all-targets --all-features -- -D warnings
-          cargo test --all-features
-        env:
-          GGS_PERF_FILES: '20000'
+      # The tests run in their own parallel job (test-windows above): the dev/test
+      # compile is not this job's to repeat, and a calling workflow fails unless that job
+      # passed — the tests still gate every release. prepare.mjs itself runs as tauri
+      # build's beforeBuildCommand below (full: sidecars, daemon, marketplace, --build).
 
       # Code signing from secrets, as in the macOS job: with WINDOWS_CERTIFICATE (base64
       # PFX) + its password the certificate is imported into the runner's user store and
@@ -292,15 +576,36 @@ jobs:
           New-Item -ItemType Directory -Force -Path target/studio | Out-Null
           [IO.File]::WriteAllText((Join-Path (Get-Location) 'target/studio/signing.json'), ($merge | ConvertTo-Json -Depth 5))
 
-      - name: Build the installers (NSIS + MSI)
+      # The release dependency graph's per-crate timings (docs/ci-speed-plan.md P0): a
+      # plain release build with the same profile and features `tauri build` uses, so the
+      # installer build reuses everything this compiled — near-free on a warm cache, real
+      # cold-start numbers otherwise, uploaded below either way.
+      - name: Record the release build timings
+        working-directory: src-tauri
+        run: cargo build --release --timings
+
+      - name: Build the installer (NSIS)
         run: npx tauri build --config target/studio/signing.json
 
       # Size and performance measurement (docs/ggs-development-plan.md M1.7; the budgets
       # were removed 2026-09-15 — sizes are recorded, not gated): the artefact sizes plus
       # the backend's headless probes on this repository itself. The metrics land in
-      # target/studio/metrics.json and are published with the bundles.
+      # target/studio/metrics.json and are published with the bundles. Continue-on-error
+      # (docs/ci-speed-plan.md P1 #1): a wedged probe or boot-bench is recorded as absent
+      # and never fails the installer build — sizes and installers still upload.
       - name: Measure sizes and performance
+        continue-on-error: true
         run: node scripts/measure.mjs --repo .
+
+      # The P0 baseline's build timings, uploaded even when a later step failed — that is
+      # exactly when the numbers are wanted.
+      - name: Upload the cargo build timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: studio-windows-timings
+          path: src-tauri/cargo-timings/**/*.html
+          if-no-files-found: warn
 
       # Only the installers themselves are artefacts: bundle/ also keeps each bundler's
       # work files, which must never reach the release page.
@@ -309,7 +614,6 @@ jobs:
           name: studio-windows-x64
           path: |
             target/studio/cargo/release/bundle/nsis/*.exe
-            target/studio/cargo/release/bundle/msi/*.msi
             target/studio/metrics.json
           if-no-files-found: error
 
@@ -372,37 +676,10 @@ jobs:
             fs.writeFileSync(cargo, fs.readFileSync(cargo, 'utf8').replace(/^version = \"[^\"]*\"/m, 'version = \"' + process.argv[1] + '\"'));
           " "$VERSION"
 
-      # Native tests of the app crate on Linux too (the Windows job runs them on Windows):
-      # on the runner, with its system WebKitGTK, and rust-cache acceleration. Deb leg only.
-      - name: Install the Linux build dependencies
-        if: matrix.bundles == 'deb'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
-      - uses: dtolnay/rust-toolchain@stable
-        if: matrix.bundles == 'deb'
-      # Same target-dir mapping as the Windows job (see its comment).
-      - uses: Swatinem/rust-cache@v2
-        if: matrix.bundles == 'deb'
-        with:
-          workspaces: src-tauri -> ../target/studio/cargo
-          key: studio-linux-native
-          cache-on-failure: true
-
-      # The window icons generate_context!() embeds, as in the Windows job. --build as in
-      # the Windows job: a build pipeline run re-checks open-vsx.org for the latest builds.
-      - name: Prepare the app assets
-        if: matrix.bundles == 'deb'
-        run: node scripts/prepare.mjs --build
-
-      - name: Test and lint the app backend
-        if: matrix.bundles == 'deb'
-        working-directory: src-tauri
-        run: |
-          cargo clippy --all-targets --all-features -- -D warnings
-          cargo test --all-features
-        env:
-          GGS_PERF_FILES: '20000'
+      # The Linux backend tests moved to their own parallel job (test-linux above): the
+      # deb leg no longer compiles natively on the host — every compile this job pays is
+      # the container's own release build, and a calling workflow still fails unless the
+      # test job passed.
 
       # The container's cargo target and registries, cached across runs via the /cache
       # volume scripts/docker/studio-linux-build.sh redirects everything into.
@@ -440,9 +717,11 @@ jobs:
       # Size measurement + backend probes (deb pass only - the rpm carries the same
       # binaries). measure.mjs expects the bundles under
       # target/studio/cargo/release/bundle/, so the deb pass's output is mirrored there
-      # first; the probes run the container-built ggs binary itself.
+      # first; the probes run the container-built ggs binary itself. Continue-on-error as
+      # in the Windows job: a wedged probe never fails the build.
       - name: Measure sizes and performance
         if: matrix.bundles == 'deb'
+        continue-on-error: true
         run: |
           mkdir -p target/studio/cargo/release
           cp -r target/studio/bundle-linux target/studio/cargo/release/bundle
@@ -469,7 +748,9 @@ jobs:
         with:
           name: studio-linux-metrics
           path: target/studio/metrics.json
-          if-no-files-found: error
+          # The measure step is continue-on-error; a metrics.json it never wrote must not
+          # fail the build either.
+          if-no-files-found: warn
 
   # The macOS installers (dmg), built natively; macOS x64 joins on a `full` run.
   studio-macos:
@@ -488,13 +769,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-      # Same target-dir mapping as the Windows job (see its comment).
+      # The pinned toolchain (rust-toolchain.toml); keep ref and file in sync on a bump.
+      - uses: dtolnay/rust-toolchain@1.97.1
+      # Same target-dir mapping as the Windows build job, daemon target included (see its
+      # comment) — prepare.mjs cold-compiles the daemon release here too (~2.5 min).
+      # cache-workspace-crates keeps the vendored boa artifacts cached (the default
+      # cleans local crates — see the test jobs' note).
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri -> ../target/studio/cargo
+          workspaces: |
+            src-tauri -> ../target/studio/cargo
+            extensions-src/ggs-remote/daemon -> ../../../target/studio/ggs-remote
           key: studio-${{ matrix.artifact }}
           cache-on-failure: true
+          cache-workspace-crates: true
+          save-if: github.ref == 'refs/heads/main'
 
       - uses: actions/setup-node@v4
         with:
@@ -542,7 +831,10 @@ jobs:
       - name: Build the installers (dmg)
         run: npx tauri build --config target/studio/signing.json
 
+      # Continue-on-error as in the Windows job (docs/ci-speed-plan.md P1 #1): the macOS
+      # boot-bench once paid its whole 3-minute-per-run quiet-machine waits too.
       - name: Measure sizes and performance
+        continue-on-error: true
         run: node scripts/measure.mjs --repo .
 
       # Only the dmg is an artefact: bundle/dmg/ also keeps the create-dmg staging

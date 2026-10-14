@@ -85,7 +85,13 @@ debug)
 			node scripts/recover-dmg.mjs --since "$BUILD_START"
 		fi
 	else
-		npx tauri build
+		# GGS Bash is a Windows-only sidecar (2026-10-14): this local Linux build
+		# clears the feature list through a merge, so the ggs-bash binary is neither
+		# built nor bundled (the file doubles as the --config merge, signing's own
+		# slot — Linux needs nothing of it).
+		mkdir -p target/studio
+		printf '%s\n' '{"build":{"features":[]}}' > target/studio/signing.json
+		npx tauri build --config target/studio/signing.json
 	fi
 	echo
 	echo "Done. Installers are in target/studio/cargo/release/bundle/"

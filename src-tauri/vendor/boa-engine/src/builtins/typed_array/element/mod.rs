@@ -164,9 +164,17 @@ where
 }
 
 /// An `u8` that clamps instead of overflowing when converting from a `JsValue`.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, AnyBitPattern, NoUninit)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
 pub(crate) struct ClampedU8(pub(crate) u8);
+
+// GGS-patch: bytemuck's `AnyBitPattern`/`NoUninit` derives written out by hand, so the
+// `derive` feature — and with it bytemuck_derive plus its standalone syn 3.x — stays out
+// of the build (docs/ci-speed-plan.md P3). A #[repr(transparent)] wrapper over `u8`
+// satisfies every bound trivially.
+unsafe impl bytemuck::Zeroable for ClampedU8 {}
+unsafe impl bytemuck::NoUninit for ClampedU8 {}
+unsafe impl bytemuck::AnyBitPattern for ClampedU8 {}
 
 impl ClampedU8 {
     /// Converts this `ClampedU8` to its big endian representation.

@@ -177,9 +177,11 @@ version = "~0.21.1"
 [dependencies.boa_string]
 version = "~0.21.1"
 
+# GGS-patch: no `derive` feature — the vendored source hand-writes the unsafe trait impls
+# it needs (typed_array/element/mod.rs), keeping bytemuck_derive and its syn 3.x out of
+# the build (docs/ci-speed-plan.md P3).
 [dependencies.bytemuck]
 version = "1.24.0"
-features = ["derive"]
 default-features = false
 
 [dependencies.cfg-if]
@@ -333,8 +335,9 @@ version = "0.1.46"
 [dependencies.num-traits]
 version = "0.2.19"
 
-[dependencies.num_enum]
-version = "0.7.4"
+# GGS-patch: num_enum dropped — symbol.rs hand-writes the u8 conversions the derives
+# generated (docs/ci-speed-plan.md P3), keeping num_enum, num_enum_derive,
+# proc-macro-crate and their toml_edit stack out of the build.
 
 [dependencies.paste]
 version = "1.0"
@@ -395,6 +398,9 @@ version = "0.2.14"
 version = "2.0.17"
 default-features = false
 
+# GGS-patch: no `macros` feature — builtins/date/utils.rs parses its (literal, known-
+# valid) description strings once at runtime instead of through the compile-time macro,
+# keeping the time-macros proc-macro crate out of the build (docs/ci-speed-plan.md P3).
 [dependencies.time]
 version = "0.3.44"
 features = [
@@ -402,7 +408,6 @@ features = [
     "large-dates",
     "parsing",
     "formatting",
-    "macros",
 ]
 default-features = false
 

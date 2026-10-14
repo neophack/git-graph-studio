@@ -5,19 +5,10 @@
 //! process, over the git CLI), and the
 //! graph's first page through the plugin backend process - and checked against budgets that
 //! scale with the file count. Debug builds get an 8× allowance (this runs in `cargo test`);
-//! `cargo test --release --test perf -- --nocapture` measures the shipped speed. The numbers
+//! `cargo test --release --test it perf -- --nocapture` measures the shipped speed. The numbers
 //! are printed as JSON and written to target/studio/perf.json.
 //!
 //! Run the plan's full-size line with `GGS_PERF_FILES=100000` (a few minutes, mostly git).
-
-// The N-API host's exported surface must be in this image for the /EXPORT directives
-// to resolve; this suite never loads an addon itself, so this test holds the reference
-// the linker needs (a const cannot — it folds away).
-#[test]
-#[cfg(feature = "node-runtime")]
-fn the_napi_surface_links() {
-    git_graph_studio_lib::node_runtime::link_napi_host();
-}
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

@@ -21,8 +21,19 @@ set -euo pipefail
 export CARGO_HOME=/cache/cargo
 export CARGO_TARGET_DIR=/cache/target
 export npm_config_cache=/cache/npm
+# The repository pins its toolchain in rust-toolchain.toml, but this container's RUSTUP_HOME
+# (/opt/rustup, an image layer) is not on the cache volume: honoring the pin would download
+# it fresh on every run. Build with the image's own stable instead — the floor guard at the
+# end is the guarantee this pass actually makes.
+export RUSTUP_TOOLCHAIN=stable
 
 cd "$REPO"
+
+# GGS Bash is a Windows-only sidecar (2026-10-14, the owner's direction): the merge
+# clears tauri.conf.json's default feature list (an array merge replaces it wholesale),
+# so the ggs-bash binary is neither built nor bundled into the deb/rpm.
+mkdir -p "$REPO/target/studio"
+printf '%s\n' '{"build":{"features":[]}}' > "$REPO/target/studio/no-ggs-bash.json"
 
 echo "[container] app dependencies (adds the linux esbuild/tauri-cli binaries)"
 npm install --no-audit --no-fund
@@ -31,7 +42,7 @@ echo "[container] building the installers ($BUNDLES; Rust release build + bundli
 # tauri build runs prepare.mjs and the Vite build itself (beforeBuildCommand); the
 # marketplace extension packages it packs are fetched right here, from the registry or
 # the target/studio/marketplace-cache on the repository mount.
-npx tauri build --bundles "$BUNDLES"
+npx tauri build --bundles "$BUNDLES" --config "$REPO/target/studio/no-ggs-bash.json"
 
 echo "[container] copying the bundles and binaries into the repository"
 rm -rf "$REPO/target/studio/$OUT_DIR"

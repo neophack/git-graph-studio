@@ -108,7 +108,7 @@ The principles below are the plan's §3, condensed. They apply to every change.
 6. **Sizes are measured, not gated.** Artefact sizes and probe timings are recorded to
    `target/studio/metrics.json`. The size budgets and their CI gate were removed on
    2026-09-15 at the owner's request ("不要限制大小了"); backend performance budgets remain
-   enforced by `src-tauri/tests/perf.rs`.
+   enforced by `src-tauri/tests/it/perf.rs`.
 7. **The engine is consumed through exactly two seams**, both build-enforced — see
    [Invariants](#invariants).
 
@@ -138,7 +138,7 @@ Extensions view would call it), a mission line, and a test file.
 | 15 | Build & Release Pipeline | Asset preparation, packaging, installers, CI |
 | 16 | Symbol MCP Server | The `ggs --mcp` AI bridge over the symbol index |
 | 17 | Code Analysis | tree-sitter parsing and the five analysis tools |
-| 18 | GGS Bash | The bundled bash-like shell and the Terminal Shell setting |
+| 18 | GGS Bash | The Windows-only bundled bash-like shell and the Terminal Shell setting |
 | 19 | Remote Access | The tray daemon, the Hub relay and the browser workbench (ggs-remote) |
 
 ### 1. Workbench Shell
@@ -804,8 +804,8 @@ page shows the integration's state (`claude_mcp_status`).
   locator pair — a short-circuit `x ??= v` stranded its pushed locator and the next
   locator write hit the wrong binding — and degrades a poisoned `PutLexicalValue`
   (the known `Function`-constructor miscompile) instead of killing the JS thread; the
-  grammar and semantics are pinned in `tests/vscode_shim_boa.rs`, the compile semantics
-  end-to-end in `tests/node_runtime.rs`; retire the fork when upstream carries the
+  grammar and semantics are pinned in `tests/it/vscode_shim_boa.rs`, the compile semantics
+  end-to-end in `tests/it/node_runtime.rs`; retire the fork when upstream carries the
   fixes. Crash-proofing patches (2026-10-04, same marking): `boa-parser`'s
   `stack_guard.rs` is the native stack guard — the embedder arms it at the top of its
   JS thread with that thread's stack size, the parser's recursion hubs
@@ -921,10 +921,10 @@ page shows the integration's state (`claude_mcp_status`).
   `tests/editor.test.ts` (the extpage tab),
   `tests/editorServices.test.ts` (the diagnostics store and the document-formatting
   registry, booted through the frame bootstrap),
-  `src-tauri/tests/node_runtime.rs` (the pretend Node runtime: a package's JS entry served
+  `src-tauri/tests/it/node_runtime.rs` (the pretend Node runtime: a package's JS entry served
   over `ggs-ext/1`, the process-host chain over the bundled `ggs-node` sidecar, a NAPI
   addon answering under ggs-node, the installed extension's whole activation),
-  `src-tauri/tests/vscode_shim_boa.rs` (the Boa define-op repro bed
+  `src-tauri/tests/it/vscode_shim_boa.rs` (the Boa define-op repro bed
   for the ggs-node `vscode` shim),
   `scripts/probes/claude-code-live-check.mjs` (the live claude-code check: the backend on
   ggs-node (or `--host real-node`), its commands, the chat webview mounted, the IDE MCP
@@ -974,7 +974,7 @@ times, frame-loss blame, raw frame browsing and SVG charts.
 
 Measurement is a feature. Sizes, boot stages, open-folder phases and theme contrast are
 measured and written to `metrics.json`. Size budgets are gone (removed 2026-09-15); the
-performance gate lives in `src-tauri/tests/perf.rs`.
+performance gate lives in `src-tauri/tests/it/perf.rs`.
 
 The **Module Self-Tests** are the in-app half of the test story: one click (Help → Run
 Module Self-Tests, or the `help.selfTest` command) opens a report page that runs every
@@ -993,7 +993,7 @@ the identical checks.
   lazy chunk), `src/selfTestPage.ts` (the report page: streaming rows, per-module re-run,
   copy report)
 - Backend: `src-tauri/src/measure.rs` (headless `--measure` probes),
-  `src-tauri/src/stage_bench.rs` (launch-stage timing), `src-tauri/tests/perf.rs`
+  `src-tauri/src/stage_bench.rs` (launch-stage timing), `src-tauri/tests/it/perf.rs`
   (synthetic repository benchmark; `GGS_PERF_FILES` sets the size, CI runs 20 000)
 - Tooling: `scripts/measure.mjs` (sizes + probes + the boot-bench cold-start stages,
   folded into `metrics.json`'s `perf.boot` key), `scripts/probes/boot-bench.mjs`
@@ -1166,7 +1166,12 @@ Everything that turns the source tree into installers: asset assembly into
 - Packaging: `scripts/build-studio.bat` (Windows, one command; builds `ggs-node` and
   `node-host.cjs` through `prepare.mjs` as part of that) and its shell counterpart
   `bash scripts/build-studio.sh` (macOS/Linux, the same release / dev / debug forms; not the
-  distributable deb/rpm — those need the floor containers below). The macOS build carries the
+  distributable deb/rpm — those need the floor containers below). **Windows ships exactly
+  one package format, the NSIS setup** (2026-10-14, the owner's direction):
+  `tauri.conf.json`'s `bundle.targets` is the explicit list `["nsis", "deb", "rpm", "app",
+  "dmg"]` — the `"all"` it replaces built a WiX MSI beside the setup exe
+  (`Git Graph Studio_0.1.11_x64_en-US.msi`), and no artifact path, checksum filter or
+  measurement names the MSI anymore. The macOS build carries the
   DMG safety net `scripts/recover-dmg.mjs`: tauri's bundle_dmg.sh loses the occasional
   Finder/Spotlight detach race (`资源忙`/EBUSY on the scratch volume, exit 16, the
   `error running bundle_dmg.sh` failure) and leaks the mounted scratch — `--clean-only`
@@ -1214,10 +1219,34 @@ Everything that turns the source tree into installers: asset assembly into
   packages carry no signature of their own; `release.yml` GPG-signs `SHA256SUMS`
   (`GPG_PRIVATE_KEY` / `GPG_PASSPHRASE`) as the check every download verifies against,
   and its `secrets: inherit` is what carries the signing secrets into studio.yml.
-- CI: `.github/workflows/studio.yml` (PRs: typecheck + vitest; `main`: also `cargo clippy
-  -D warnings`, `cargo test`, installers for Windows and Linux, the perf gate — the tests
-  gate the installer build, and each Linux package format compiles in its own floor
-  container);
+- CI: `.github/workflows/studio.yml` (PRs: typecheck + vitest; `main` and releases: the
+  backend test jobs `test-windows` / `test-linux` / `test-macos` run clippy + `cargo
+  test` in PARALLEL
+  with the installer jobs — tests and packaging were split 2026-10-14, docs/ci-speed-plan.md
+  P2, the wall clock being the max of the two rather than the sum; the tests still gate
+  every release (a calling workflow fails unless they passed), and each Linux package
+  format compiles in its own floor container; one backend test pass per platform (the
+  owner's direction, 2026-10-14: rpm and deb are both Linux — the native test-linux job
+  covers the platform once, the rpm container leg only packages; macOS joined the same
+  day, its suite having never run there before; the Linux and macOS jobs pass
+  `-- --skip ggs_bash` — the shell is a Windows-only sidecar, its suite runs in the
+  Windows job alone). The test jobs' prepare runs
+  `--icons-only` — the window icons are the test compile's only prepare-made input, the
+  sidecars/daemon/marketplace belong to the installer builds). The Rust toolchain
+  is pinned by the root `rust-toolchain.toml`
+  (docs/ci-speed-plan.md P1 #6, 2026-10-14): the `dtolnay/rust-toolchain@<version>` refs
+  in both workflows install exactly the ref — keep them and the file in sync on a bump
+  (the action does not read toolchain files, and a mismatch means every job downloads a
+  second toolchain at run time); the Linux build containers deliberately override back to
+  their image's own stable (`RUSTUP_TOOLCHAIN` in `studio-linux-build.sh` — their
+  RUSTUP_HOME is not on the cache volume). rust-caches save from `main` only
+  (`save-if`; `cache-workspace-crates` keeps the vendored boa warm), the test and
+  installer jobs carry separate cache keys (dev half vs release half), PRs cancel their
+  predecessor and never cancel a `main` run, the Windows jobs exclude their build paths
+  from Defender and redirect `TMP`/`TEMP` to the runner scratch, and CI narrows dev
+  debuginfo (`CARGO_PROFILE_DEV_DEBUG=line-tables-only` plus
+  `[profile.dev.package."*"] debug = false` in `src-tauri/Cargo.toml`) — all
+  docs/ci-speed-plan.md, measured against that plan's baselines;
   `.github/workflows/release.yml` (a pushed `v*` tag publishes installers with `SHA256SUMS`
   and its GPG signature). Every `.sh` is invoked as `bash <script>.sh`, never directly —
   in CI, in docs and in the scripts' own usage notes (2026-10-14, the owner's direction:
@@ -1234,6 +1263,17 @@ owner's direction): a pure-Rust `ggs-bash` sidecar (no dependencies beyond std) 
 speaks **Git Bash's dialect end to end** — a clean Windows machine has no bash, and
 both the interactive terminal and Claude Code's shell tool need one that answers the
 way Git Bash does.
+
+The SHIPPED sidecar is Windows-only (2026-10-14, the owner's direction: Linux and macOS
+neither install it, nor package it, nor test it there): the `ggs-bash` cargo feature and
+the bin's `required-features` gate the binary — tauri.conf.json's `build.features` turns
+it on (so every Windows build and every `tauri dev` carries it), while the macOS
+signing merge (scripts/signing.mjs) and the Linux builds (the container pass and
+build-studio.sh's local path) clear the feature list through their `--config` merges, a
+list-replacing JSON merge — cargo and the bundler both skip a bin whose required
+features are off. The LIBRARY module stays cross-platform (ggs-config borrows its
+pure-std zip reader); in CI its tests run only in the Windows job (test-linux and
+test-macos pass `-- --skip ggs_bash`).
 
 - The dialect (`msys.rs`): `/c/...` drive paths accepted everywhere the shell resolves
   and printed everywhere it reports (`pwd` answers `/c/Users/...`, `pwd -W` the Windows
@@ -1296,7 +1336,8 @@ way Git Bash does.
   rm mkdir touch env which basename dirname realpath readlink(-f) date sleep seq clear
   diff(Myers, unified) tee xargs(-n/-0/-I/-r, GNU empty-input semantics) uname whoami
   hostname cygpath md5sum sha1sum sha256sum(-c) base64(-d) du(-s/-h) ln(-s) chmod
-  timeout(124 on expiry) tar(-c/-x/-t/-z) unzip(-l/-o/-d) gzip/gunzip less/more` (the pager
+  timeout(124 on expiry) tar(-c/-x/-t/-z) unzip(-l/-o/-d) gzip/gunzip(-c/-k, stdin
+  filters) less/more` (the pager
   prints whole inputs, `-N` numbers; the terminal has its own scrollback) plus **`bash`/`sh`
   as builtins** (`bash script.sh`, `bash -c '…' a b`, `sh -c`, a script on stdin: a fresh
   nested shell over the parent's exported environment and cwd, `run_nested` in `mod.rs`) and a working
@@ -1306,6 +1347,60 @@ way Git Bash does.
   `next`/`exit`, `-F`/`-v`; no user functions, no `getline`/`system`); the archives are
   pure Rust (`compress.rs`: a real DEFLATE inflater, fixed and dynamic Huffman, plus a
   stored-block gzip writer; `archive.rs`: USTAR tar read/write and zip extraction)
+- **The 2026-10-14 parity batch** (the owner's direction: "ggs bash 相对 git bash
+  缺失很多命令" — the curated list still left a Git Bash install carrying far more
+  than the sidecar answered, and the usr/bin fallback only helps machines that
+  already have Git Bash, which a clean one does not). Two halves landed:
+  - *The OS-facing half finally compiled* — `sysinfo.rs` (written 2026-10-13)
+    had never been declared in `mod.rs`: dead, uncompiled, every one of its
+    commands answering nothing. Wired in and fixed where its never-run tests
+    disagreed: `df -h/-H/-T` (Windows drives as `C:` rows on `/c`), `free`
+    (procps' table, the totals column 15 wide and the rest 12), `ps` (MSYS'
+    PID/PPID/PGID/WINPID/TTY/UID/ST/TIME/COMMAND listing over the Toolhelp
+    snapshot), `mount`/`umount` (the listing and the honest refusal), `id`/
+    `groups`/`logname` (the Cygwin-folded SID identity), `tty`, `nproc`,
+    `arch`, `start` (ShellExecuteW)
+  - *The pure-Rust text/file half* — ~45 new applets in `applets.rs`: the text
+    tools (`nl` — GNU's blank label on unnumbered lines, `tac`, `paste` —
+    the delimiter list with the last one repeating, `join` — the merge walk
+    with `-a`/`-v`/`-o`/`-t`, `comm` — a suppressed column takes its tab
+    with it, `fold -s`, `expand`/`unexpand` — GNU's per-span tab rule where
+    any stop a run of ≥2 blanks spans converts, `tsort`, `expr` — the full
+    precedence chain with `:` matching through the BRE engine, `factor`,
+    `numfmt` — iec/iec-i/si both ways, `shuf -e/-i/-n/-r`, `yes`, `printenv`
+    — PATH printed in the MSYS dialect, `column -t/-s`, `cmp -l/-s`,
+    `egrep`/`fgrep`, `dir`/`vdir`), the byte inspectors (`od` — GNU's
+    little-endian 2-byte words, `-c`'s 3-wide cells, `*` dedup, `-A d/o/x/n`;
+    `xxd` — the offset/group/ASCII column widths byte-checked against vim's
+    own, `-p`/`-r`), the digests (`sha224sum`/`sha384sum`/`sha512sum`/`b2sum`
+    — BLAKE2b in pure Rust — `cksum` — POSIX's CRC with the final complement —
+    `sum` BSD and SysV, `base32`), the file tools (`stat` — GNU's default
+    column shape and `-c`'s token set over path-derived device/inode
+    stand-ins, `file` — shebangs, PE32/PE32+ headers with OS version and
+    subsystem, ELF, the archive magics, text/charset/CRLF census, the
+    >2-operand name alignment, `truncate -s +N/-N/K/M/G`, `mktemp` — the
+    X-run filled, the name printed in the dialect, `shred -n/-u/-z`,
+    `install -d/-t/-D`, `link`/`unlink`, `dd` — bs/ibs/obs/skip/seek/count
+    with GNU's records-and-bytes stats line, `split -l/-b/-d/-a`, `sync`),
+    the converters (`iconv` — UTF-8/16/32 both ends with BOM handling,
+    latin1/cp1252, GNU's error wording for the rest; the `dos2unix` family —
+    CRLF/LF/CR each way, `-n in out`; `zcat`/`uncompress` over the inflater;
+    `dircolors`), the wrappers (`nohup` — nohup.out on a terminal stdout,
+    `nice`, `stdbuf`) and the terminal probes (`tput` — clear/cup/cols/lines/
+    setaf/bold/sgr0…, `stty size` off the console buffer, `reset`/`tset`,
+    `chown`/`chgrp` refusing the way Git Bash does)
+  - *The pre-existing bugs the batch's own tests surfaced*: `tr -d` deleted
+    EVERY character (the delete arm mapped all of them to nothing — only
+    SET1's members go); `gzip -c` wrote `file.gz` and removed the source
+    instead of streaming to stdout (and `gzip` with no operand now filters
+    stdin, `-k` keeps); a command with TWO process substitutions lost the
+    first's temp file (the nested script's pipeline-tail flush drained the
+    outer command's pending files — the flush now drains only its own
+    depth's entries); `printf '\xHH'`/`'\NNN'` didn't decode (GNU printf's
+    byte escapes, and printf's format now accumulates raw bytes so a split
+    UTF-8 pair survives); `wc < file` padded its columns (GNU reads a
+    redirected stdin bare); `od -A d` printed space-padded decimal offsets
+    (GNU zero-pads)
 - The setting (`terminalShell`: **gitBash is the default** — 2026-10-13, the owner's
   direction: Git Bash where it is installed, the bundled GGS Bash standing in where it
   is not; ggsBash itself was the 2026-10-10 default, powershell the alternative, and
@@ -1352,6 +1447,7 @@ way Git Bash does.
 - The shell: `src-tauri/src/ggs_bash/` (`lex.rs` the tokenizer, `parse.rs` the parser,
   `expand.rs` word expansion, `exec.rs` the interpreter over in-process pipes and the
   PATH/HOME plumbing, `builtins.rs` the shell builtins, `applets.rs` the line tools,
+  `sysinfo.rs` the OS-facing applets (df/free/ps/id/…, direct Win32 declarations),
   `awk.rs` the awk interpreter, `arith.rs` shell arithmetic, `lineedit.rs` the line editor,
   `regexlite.rs`, `glob.rs`, `hashes.rs`, `localtime.rs`,
   `msys.rs` the path dialect, `compress.rs`/`archive.rs` the pure-Rust archives,
@@ -1371,10 +1467,15 @@ way Git Bash does.
   dialect round-trip, the invocation-dialect parser, and the e2e batches in
   `mod.rs` — the file operations, `ls`, the grep/find/sed/sort/head/xargs flag sets,
   the checksums and archives, `timeout`, the builtins, the `>`/`<` process
-  substitutions, the parameter forms) and `pty.rs`'s `shell_command`;
-  `cmd_providers.rs`'s spawn-env guard; `src-tauri/tests/ggs_bash_cli.rs` (the built
+  substitutions, the parameter forms, and the 2026-10-14 parity batches' three
+  e2e groups — text tools, byte viewers, file tools — each shape pinned against
+  a live Git Bash's own output) and `pty.rs`'s `shell_command`;
+  `cmd_providers.rs`'s spawn-env guard; `src-tauri/tests/it/ggs_bash_cli.rs` (the built
   binary's CLI contract — the `-l`/`-i` flags riding around `-c` in any order,
   `--login`, the positional words after the command string);
+  `scripts/probes/ggs-bash-parity-diff.sh` (the byte-diff harness itself: ~80
+  commands run through both a real Git Bash and the built `ggs-bash`, every
+  mismatch reported — the parity batch's acceptance gate);
   `tests/ggsBash.test.ts` and the module self-test group
 
 ### 19. Remote Access (ggs-remote)
@@ -2015,7 +2116,7 @@ Tests mirror the modules.
 | Frontend scenario | `tests/scenarioHarness.test.ts`, `tests/scenarioFixtures.ts`, `tests/helpers.ts` | Multi-view flows over the same mock |
 | Frontend sweeps | `tests/commandSweep.test.ts`, `tests/uiSweep.test.ts`, `tests/themeContrast.themes.test.ts` | Every command executes; layout and WCAG invariants hold for every theme |
 | Backend unit | `#[cfg(test)]` beside each command; `src-tauri/src/test_support.rs` | Scratch repositories with an isolated git config |
-| Backend integration / perf | `src-tauri/tests/perf.rs` | Synthetic repository, `GGS_PERF_FILES` |
+| Backend integration / perf | `src-tauri/tests/it/perf.rs` | Synthetic repository, `GGS_PERF_FILES` |
 | Manual / visual | `dev/dev-harness.html`, `dev/hex-probe.html` | Real Tauri IPC or the scripted fake backend |
 
 Conventions:

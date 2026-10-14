@@ -57,16 +57,25 @@ required-features = ["node-runtime"]
 name = "ggs-config"
 path = "src/bin/ggs_config.rs"
 
-# GGS Bash (`src/ggs_bash/`, module 18): the bundled bash-like shell. No feature gates
-# and no dependencies beyond std — pure Rust, so plain `cargo test` builds and tests it
-# everywhere, and the sidecar build (`prepare.mjs`) compiles it without the desktop
-# stack exactly like ggs-node.
+# GGS Bash (`src/ggs_bash/`, module 18): the bundled bash-like shell — a Windows-only
+# SHIPPED sidecar (2026-10-14, the owner's direction: Linux and macOS neither install
+# it, nor package it, nor test it there). tauri.conf.json's `build.features` turns the
+# feature on for the builds that ship it (Windows, and every `tauri dev`), while the
+# macOS and Linux builds clear the feature list through their `--config` merges — cargo
+# skips a bin whose required features are off, and so does the bundler. The LIBRARY
+# module stays cross-platform (ggs-config borrows its pure-std zip reader, and the code
+# compiles under every feature set); only the packaged sidecar is Windows-only.
 [[bin]]
 name = "ggs-bash"
 path = "src/bin/ggs_bash.rs"
+required-features = ["ggs-bash"]
 
 [features]
 default = ["desktop"]
+# Ships the `ggs-bash` sidecar binary (see the [[bin]] note above). On by default for
+# tauri builds through tauri.conf.json's build.features; the macOS and Linux --config
+# merges replace that list with [] so the bin is neither built nor bundled there.
+ggs-bash = []
 # The pretend Node runtime's JS engine (`src/node_runtime/`): Boa is pure Rust (plan §3.1 —
 # no C bindings at all). The runtime is the default host for `node` backends (`GGS_REAL_NODE=1`
 # opts a system Node in); a package's `.node` loads right here through the N-API host.
@@ -184,6 +193,10 @@ regex = { version = "1", optional = true }
 # Deflated, and OPC packages (VSIX) are Deflate/stored by specification, so the pure-Rust
 # flate2 backend is the only codec linked — bzip2, zstd and xz (all C) stay out of the
 # tree (plan §3.1). Nothing sets entry timestamps, so the `time` feature is off too.
+# NOTE (docs/ci-speed-plan.md P3): dropping zopfli needs zip ≥ 3.0.0 — on the 2.x line
+# `deflate-flate2` does not activate zip's own optional flate2 dependency (only the
+# `deflate` umbrella's `flate2/rust_backend` does), so the leaner feature set does not
+# compile. The 2→3 (or 4) upgrade is its own change.
 zip = { version = "2", default-features = false, features = ["deflate", "deflate64"], optional = true }
 # `default-fancy` swaps syntect's default Oniguruma (C) engine for the pure-Rust fancy-regex
 # engine — the whole viewer stack stays free of C bindings.
@@ -216,8 +229,6 @@ serde_bytes = { version = "0.11", optional = true }
 tokio = { version = "1", features = ["io-util", "sync", "time", "rt"], optional = true }
 # The file-system watcher behind "external changes show up by themselves" (watcher.rs).
 notify = { version = "8", default-features = false, features = ["macos_fsevent"], optional = true }
-# measure.rs's large-file probe writes its synthetic file into a temp dir.
-tempfile = "3"
 trash = { version = "5", optional = true }
 # The tree-sitter parser layer (plan M4.1, symbols/parse.rs): the core runtime plus one
 # grammar crate per language, each behind its `grammar-*` feature. On the 0.26 line because
@@ -265,12 +276,26 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSMenu", "NSMen
 [dev-dependencies]
 # The performance test's raw parallel read baseline (rayon is optional for the app itself).
 rayon = "1"
+# The test suites' scratch directories (can_log, cmd_search, cmd_analysis, measure's own
+# tests). The runtime code builds its own tiny scratch dir instead (measure.rs's
+# ScratchDir) — tempfile is test-only, so no binary linking the lib carries it
+# (docs/ci-speed-plan.md P3: one less crate, its fastrand/getrandom included).
+tempfile = "3"
 
 # `tauri dev` builds here, and the CAN log walker crunches hundreds of MB/s of text:
 # opt-level 1 keeps incremental builds quick while making the parse loops an order of
 # magnitude faster than the unoptimised default (release stays the size-diet profile below).
 [profile.dev]
 opt-level = 1
+
+# Dependencies carry no debuginfo in dev/test builds (docs/ci-speed-plan.md P1 #4): MSVC
+# PDB generation is a large share of the CI test compile, and the full dependency
+# debuginfo was the bulk of what pushed the rust-caches past GitHub's 10 GB eviction
+# line. The workspace's own crates keep their debuginfo locally (CI narrows them to
+# line-tables-only through CARGO_PROFILE_DEV_DEBUG there) — stepping into dependency
+# frames was never a supported workflow.
+[profile.dev.package."*"]
+debug = false
 
 # The size diet (docs/ggs-development-plan.md M1.2): the app is its own workspace, so it does
 # not inherit the plugin workspace's release profile. Size-optimised, fat LTO, one codegen

@@ -11,7 +11,10 @@
 
 // The N-API host's exported surface must be in this image for the /EXPORT directives
 // to resolve; this suite never loads an addon itself, so this test holds the reference
-// the linker needs (a const cannot — it folds away).
+// the linker needs (a const cannot — it folds away). One reference for the whole `it`
+// binary (tests/it/main.rs links every suite into one image — the former per-file
+// copies were removed as redundant 2026-10-14); if the suites ever split back into
+// separate binaries, each needs its own copy again.
 #[test]
 #[cfg(feature = "node-runtime")]
 fn the_napi_surface_links() {

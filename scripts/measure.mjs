@@ -65,17 +65,15 @@ export function collectSizes() {
 	// ggs: the release artifact is named by tauri.conf.json's mainBinaryName.
 	const exe = join(release, process.platform === 'win32' ? 'ggs.exe' : 'ggs');
 	const nsis = firstMatching(join(release, 'bundle', 'nsis'), (f) => f.endsWith('.exe'));
-	const msi = firstMatching(join(release, 'bundle', 'msi'), (f) => f.endsWith('.msi'));
 	const dmg = firstMatching(join(release, 'bundle', 'dmg'), (f) => f.endsWith('.dmg'));
 	const appImage = firstMatching(join(release, 'bundle', 'appimage'), (f) => f.endsWith('.AppImage'));
 	const deb = firstMatching(join(release, 'bundle', 'deb'), (f) => f.endsWith('.deb'));
-	const installer = nsis ?? dmg ?? appImage ?? msi ?? deb;
+	const installer = nsis ?? dmg ?? appImage ?? deb;
 	const dist = treeSize(join(studio, 'dist'));
 	return {
 		exe: sizeOf(exe),
 		installer: installer ? sizeOf(installer) : null,
 		installerPath: installer ? relative(root, installer).split('\\').join('/') : null,
-		msi: msi ? sizeOf(msi) : null,
 		dist: dist.total,
 		distLargest: dist.largest,
 		firstPaintJs: firstPaintChunk(join(studio, 'dist'))
@@ -88,7 +86,14 @@ export function collectSizes() {
  *  pipes, the step never ended). A probe that hits its ceiling is recorded as absent and
  *  named in the log — the sizes, the artefacts and the build are never hostage to it. */
 const PROBE_TIMEOUT_MS = 10 * 60 * 1000;
-const BOOT_TIMEOUT_MS = 15 * 60 * 1000;
+// The boot-bench ceiling is 3 min, not 15 (docs/ci-speed-plan.md P1 #1): each launch is
+// already hard-bounded at 30 s by the probe itself, but its wait-for-a-quiet-machine pass
+// can idle for up to 30 min between runs — which is exactly how a Windows CI runner once
+// burned the whole 15 min budget without a single stage landing. Three minutes covers a
+// healthy 5-run pass (macOS completes it in ~170 s); anything past that is recorded as
+// absent and the CI measure step is continue-on-error, so a wedged boot never holds the
+// build hostage. The Windows "graph first page" stall itself is a separate investigation.
+const BOOT_TIMEOUT_MS = 3 * 60 * 1000;
 
 /** Run the backend's `--measure` against a repository; `null` when the exe is not built. */
 export function runProbes(repo) {

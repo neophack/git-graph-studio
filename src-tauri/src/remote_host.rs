@@ -658,6 +658,37 @@ fn download_roots(app: &AppHandle) -> Vec<PathBuf> {
     roots
 }
 
+/// A scratch FILE with tempfile's remove-on-drop shape, without the crate: the runtime
+/// tree carries no tempfile dependency (tests keep theirs in [dev-dependencies];
+/// docs/ci-speed-plan.md P3), and this is the one runtime user of an unnamed temp file.
+/// The guard deletes the named file when it drops — after the File handle into it has
+/// closed (declare guards before handles: locals drop in reverse). A crashed process
+/// may leave the file behind in the OS temp dir — that is the temp dir's own cleanup
+/// story.
+struct ScratchFileGuard(PathBuf);
+
+impl Drop for ScratchFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn scratch_file() -> std::io::Result<(std::fs::File, ScratchFileGuard)> {
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = format!(
+        "ggs-scratch-{}-{}",
+        std::process::id(),
+        COUNT.fetch_add(1, Ordering::Relaxed)
+    );
+    let path = std::env::temp_dir().join(unique);
+    let file = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    Ok((file, ScratchFileGuard(path)))
+}
+
 fn serve_file(
     app: &AppHandle,
     out: &mpsc::UnboundedSender<FromInstance>,
@@ -711,8 +742,14 @@ fn serve_file(
                 done: true,
             });
         };
-        let mut temp = match tempfile::tempfile() {
-            Ok(temp) => temp,
+        // Declared before `temp` so it drops after it: the file handle closes first,
+        // then the guard's delete can succeed on Windows too.
+        let mut _scratch: Option<ScratchFileGuard> = None;
+        let mut temp = match scratch_file() {
+            Ok((file, guard)) => {
+                _scratch = Some(guard);
+                file
+            }
             Err(_) => return fail_started(),
         };
         if zip_tree(&target, &mut temp).is_err() {

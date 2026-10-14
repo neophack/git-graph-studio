@@ -1,0 +1,12 @@
+# The pinned toolchain (docs/ci-speed-plan.md P1 #6): a stable release every six weeks
+# once invalidated five rust-caches at once and turned new lints into hard -D warnings
+# failures (7c4227d, clippy 1.97). Bump deliberately, on a quiet day.
+#
+# Keep the dtolnay/rust-toolchain refs in .github/workflows/studio.yml and release.yml in
+# sync with this channel — the action installs exactly the ref it is given, while rustup's
+# proxies resolve the toolchain from this file, and a mismatch means every CI job downloads
+# a second toolchain at run time. The Linux build containers deliberately override back to
+# the image's own stable (scripts/docker/studio-linux-build.sh) — their RUSTUP_HOME is not
+# on the cache volume, so the pinned channel would be re-downloaded on every run.
+[toolchain]
+channel = "1.97.1"

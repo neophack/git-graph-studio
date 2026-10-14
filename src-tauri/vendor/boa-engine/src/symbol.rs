@@ -29,7 +29,6 @@ use boa_gc::{Finalize, Trace};
 use tag_ptr::{Tagged, UnwrappedTagged};
 
 use boa_macros::{JsData, js_str};
-use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use std::{
     hash::{Hash, Hasher},
@@ -60,7 +59,7 @@ fn get_id() -> Option<u64> {
 }
 
 /// List of well known symbols.
-#[derive(Debug, Clone, Copy, TryFromPrimitive, IntoPrimitive)]
+#[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 enum WellKnown {
     AsyncIterator,
@@ -76,6 +75,38 @@ enum WellKnown {
     ToPrimitive,
     ToStringTag,
     Unscopables,
+}
+
+// GGS-patch: num_enum's `TryFromPrimitive`/`IntoPrimitive` derives written out by hand,
+// so num_enum, num_enum_derive and their proc-macro stack stay out of the build
+// (docs/ci-speed-plan.md P3). The discriminants come from `#[repr(u8)]` field order.
+impl TryFrom<u8> for WellKnown {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Ok(match value {
+            0 => Self::AsyncIterator,
+            1 => Self::HasInstance,
+            2 => Self::IsConcatSpreadable,
+            3 => Self::Iterator,
+            4 => Self::Match,
+            5 => Self::MatchAll,
+            6 => Self::Replace,
+            7 => Self::Search,
+            8 => Self::Species,
+            9 => Self::Split,
+            10 => Self::ToPrimitive,
+            11 => Self::ToStringTag,
+            12 => Self::Unscopables,
+            _ => return Err(()),
+        })
+    }
+}
+
+impl From<WellKnown> for u8 {
+    fn from(value: WellKnown) -> Self {
+        value as u8
+    }
 }
 
 impl WellKnown {
@@ -120,7 +151,7 @@ impl WellKnown {
     }
 
     fn from_tag(tag: usize) -> Option<Self> {
-        Self::try_from_primitive(u8::try_from(tag).ok()?).ok()
+        Self::try_from(u8::try_from(tag).ok()?).ok()
     }
 }
 

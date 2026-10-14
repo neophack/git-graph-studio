@@ -41,7 +41,13 @@ if (mode !== 'macos') {
 
 const identity = (env.APPLE_SIGNING_IDENTITY || '').trim();
 const fullSigning = Boolean(env.APPLE_CERTIFICATE && env.APPLE_CERTIFICATE_PASSWORD && identity);
-const merge = { bundle: { macOS: { signingIdentity: fullSigning ? identity : '-' } } };
+// build.features: [] clears tauri.conf.json's default feature list — GGS Bash is a
+// Windows-only sidecar (2026-10-14, the owner's direction), and a merge replaces the
+// array wholesale, so the macOS build neither builds nor bundles the ggs-bash binary.
+const merge = {
+	build: { features: [] },
+	bundle: { macOS: { signingIdentity: fullSigning ? identity : '-' } },
+};
 mkdirSync('target/studio', { recursive: true });
 writeFileSync(mergePath, `${JSON.stringify(merge, null, 2)}\n`);
 

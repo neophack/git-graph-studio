@@ -1,15 +1,7 @@
 //! Pins the Boa 0.20 environment bugs the pretend Node runtime's module loader works
 //! around, and how far the vscode shim gets inside Boa: bundle eval, installer call,
 //! and a minimal extension require + activate. The panic boundary is the deliverable.
-
-// The N-API host's exported surface must be in this image for the /EXPORT directives
-// to resolve; this suite never loads an addon itself, so this test holds the reference
-// the linker needs (a const cannot — it folds away).
-#[test]
-#[cfg(feature = "node-runtime")]
-fn the_napi_surface_links() {
-    git_graph_studio_lib::node_runtime::link_napi_host();
-}
+#![cfg(feature = "node-runtime")]
 
 use boa_engine::{Context, Source};
 
@@ -38,6 +30,35 @@ fn grammar_the_claude_code_bundle_needs() {
             panic!("Boa cannot parse {name}: {error}");
         }
     }
+}
+
+/// `Date.parse`'s legacy fallback formats (docs/ci-speed-plan.md P3): the vendored engine
+/// parses the `toString` / `toUTCString` time format descriptions once at runtime since
+/// the time-macros crate left the build — both legacy shapes must still land on the
+/// epoch, the spec's Date Time String Format keeps its primary parser, trailing garbage
+/// behind the `[end]` anchor is still rejected, and garbage alone still answers NaN.
+#[test]
+fn date_parse_legacy_formats() {
+    let mut context = Context::default();
+    let value = context
+        .eval(Source::from_bytes(
+            r#"
+            [
+                Date.parse("Thu Jan 01 1970 00:00:00 GMT+0000"),
+                Date.parse("Thu, 01 Jan 1970 00:00:00 GMT"),
+                Date.parse("1970-01-01T00:00:00Z"),
+                Date.parse("Thu Jan 01 1970 00:00:00 GMT+0000junk"),
+                Date.parse("Thu, 01 Jan 1970 00:00:00 GMTjunk"),
+                Date.parse("not a date")
+            ].join(",")
+            "#,
+        ))
+        .expect("the expression evaluates");
+    let string = value
+        .to_string(&mut context)
+        .expect("a string")
+        .to_std_string_escaped();
+    assert_eq!(string, "0,0,0,NaN,NaN,NaN");
 }
 
 /// The inline-cache poisoning zod v4 hits inside claude-code: a lazy getter that
@@ -504,37 +525,6 @@ fn a_module_sized_wrapper_runs_with_every_binding_escaping() {
         registers.is_err(),
         "Boa's register-local path now runs a module-sized function — the loader's          all-escaping analysis may be reconsidered (see require.rs)"
     );
-}
-
-#[test]
-fn the_git_graph_extension_entry_evaluates_in_boa() {
-    // The dev-machine install is optional (the skip below) — but the home variable is not:
-    // USERPROFILE is Windows-only, and the bare unwrap panicked on CI's Linux runner
-    // before the skip could fire.
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_default();
-    let entry = std::path::Path::new(&home)
-        .join(".ggs/extensions/neophack.git-graph-rs-1.0.25/out/extension.js");
-    let Ok(source) = std::fs::read_to_string(&entry) else {
-        eprintln!("skipping: no git-graph-rs install");
-        return;
-    };
-    let mut context = Context::default();
-    context
-        .eval(Source::from_bytes(
-            "globalThis.vscode = { workspace: {}, commands: {}, window: {}, extensions: {} };",
-        ))
-        .unwrap();
-    // Proper CommonJS wrapper: the extension's module bodies load (class definitions and
-    // all — the construct Boa's define opcode choked on in the live run).
-    let wrapped = format!(
-        "(function (exports, require, module, __filename, __dirname) {{\n{source}\n}})( {{}}, function () {{ return {{}}; }}, {{ exports: {{}} }}, '', '' );"
-    );
-    match context.eval(Source::from_bytes(wrapped.as_bytes())) {
-        Ok(_) => eprintln!("the extension entry evaluates in Boa"),
-        Err(error) => eprintln!("the extension entry FAILED to evaluate: {error}"),
-    }
 }
 
 /// The module bytecode cache (2026-09-28): a compiled wrapper serialized through

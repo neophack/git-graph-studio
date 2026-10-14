@@ -8,6 +8,13 @@
 //   target/studio/cargo/    the Cargo target dir (src-tauri/.cargo/config.toml)
 //   target/studio/dist/     the Vite build output (vite.config.ts)
 //
+//   node scripts/prepare.mjs --icons-only   the test-compile half alone: the seam check and
+//                                           the window icons `generate_context!()` embeds —
+//                                           nothing else (docs/ci-speed-plan.md P2: the CI
+//                                           test jobs need no sidecars, no daemon, no
+//                                           marketplace fetch; the icons are their only
+//                                           compile-time input)
+//
 // The bundled VSIX packages the installer carries are the marketplace's per-architecture
 // builds (Open VSX — fetched by scripts/fetch-marketplace-extensions.mjs; no package has a
 // local source, so a fetch that cannot be served from cache leaves the package unpacked —
@@ -31,6 +38,8 @@ import { spawnSync } from 'node:child_process';
 const appDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const out = join(appDir, 'target', 'studio');
 const publicDir = join(out, 'public');
+// The test-compile half (see the usage note): icons and nothing else.
+const iconsOnly = process.argv.includes('--icons-only');
 
 function requireArtifact(path, hint) {
 	if (!existsSync(path)) {
@@ -41,11 +50,13 @@ function requireArtifact(path, hint) {
 }
 
 /* 1. The public dir: the app's static sources and the README renderer's markdown-it. */
-// Windows keeps handles on the public dir for a moment after a dev server or Explorer
-// touched it; retrying makes the build resilient to that instead of failing with EPERM.
-rmSync(publicDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-mkdirSync(publicDir, { recursive: true });
-cpSync(join(appDir, 'static'), publicDir, { recursive: true });
+if (!iconsOnly) {
+	// Windows keeps handles on the public dir for a moment after a dev server or Explorer
+	// touched it; retrying makes the build resilient to that instead of failing with EPERM.
+	rmSync(publicDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+	mkdirSync(publicDir, { recursive: true });
+	cpSync(join(appDir, 'static'), publicDir, { recursive: true });
+}
 
 // The app's own chrome icon (the title bar's logo, served at /icons/icon.png) doubles as
 // the source every installer icon derives from below — an app asset since the extension
@@ -65,6 +76,14 @@ if (!existsSync(join(appIcons, 'icon.ico')) || !existsSync(join(appIcons, '32x32
 		console.error('Generating the app icons failed');
 		process.exit(1);
 	}
+}
+
+// The test-compile half stops here: everything below serves the installer build (sidecars,
+// the real-Node host bundle, the marketplace fetch, the GGS Remote daemon), and a test
+// compile embeds none of it.
+if (iconsOnly) {
+	console.log(`Prepared ${appIcons} (icons only)`);
+	process.exit(0);
 }
 
 /* 3. The plugin binaries. The pretend Node runtime (`ggs-node`, the `node-runtime`

@@ -520,7 +520,7 @@ Goal: common VSIX beyond git-graph-rs (themes, snippets, grammars, light languag
 |---|---|---|
 | 8.1 | App self-update: `tauri-plugin-updater` (signed, GitHub Releases as the source), silent download, applied on next launch; +0.8 MB already in the budget | 0.1.0 upgrades to 0.2.0 |
 | 8.2 | Crashes and logs: a Rust panic hook writes `~/.ggs/logs/crash-*.txt`, frontend `window.onerror` persisted, Help > Open Logs; no telemetry | — |
-| 8.3 | Installers: Windows NSIS (per-user default, plus a portable zip), MSI; macOS dmg + notarisation; Linux AppImage / deb / rpm; `winget` / `brew cask` manifests | Artefacts for all three platforms in CI |
+| 8.3 | Installers: Windows NSIS (per-user default, plus a portable zip; the MSI was dropped 2026-10-14, one Windows format); macOS dmg + notarisation; Linux deb / rpm; `winget` / `brew cask` manifests | Artefacts for all three platforms in CI |
 | 8.4 | Documentation: `app/README.md` becomes a user manual, keybinding table, extension compatibility list, performance and size numbers written into the README from `metrics.json` | — |
 | 8.5 | Single source of truth for the version: `app/package.json`, propagated by `prepare.mjs` to `tauri.conf.json` / `Cargo.toml` | — |
 

@@ -3,8 +3,10 @@ use boa_macros::js_str;
 use boa_string::JsStrVariant;
 use std::slice::Iter;
 use std::str;
+use std::sync::OnceLock;
 use std::{borrow::Cow, iter::Peekable};
-use time::{OffsetDateTime, PrimitiveDateTime, macros::format_description};
+use time::format_description::{BorrowedFormatItem, parse};
+use time::{OffsetDateTime, PrimitiveDateTime};
 
 // Time-related Constants
 //
@@ -751,6 +753,26 @@ pub(super) fn pad_six(t: u32, output: &mut [u8; 6]) -> JsStr<'_> {
 ///
 /// [spec]: https://tc39.es/ecma262/#sec-date.parse
 /// [spec-format]: https://tc39.es/ecma262/#sec-date-time-string-format
+// GGS-patch: time's `format_description!` macros are replaced by one-time runtime parses
+// of the very same description strings (docs/ci-speed-plan.md P3), so the time-macros
+// proc-macro crate stays out of the build and the accepted grammar cannot drift — the
+// macro was only a compile-time run of this same parser.
+fn to_string_format() -> &'static [BorrowedFormatItem<'static>] {
+    static FORMAT: OnceLock<Vec<BorrowedFormatItem<'static>>> = OnceLock::new();
+    FORMAT.get_or_init(|| {
+        parse("[weekday repr:short] [month repr:short] [day] [year] [hour]:[minute]:[second] GMT[offset_hour sign:mandatory][offset_minute][end]")
+            .expect("the literal format description is valid")
+    })
+}
+
+fn to_utc_string_format() -> &'static [BorrowedFormatItem<'static>] {
+    static FORMAT: OnceLock<Vec<BorrowedFormatItem<'static>>> = OnceLock::new();
+    FORMAT.get_or_init(|| {
+        parse("[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] GMT[end]")
+            .expect("the literal format description is valid")
+    })
+}
+
 pub(super) fn parse_date(date: &JsString, hooks: &dyn HostHooks) -> Option<i64> {
     // All characters must be ASCII so we can return early if we find a non-ASCII character.
     let owned_js_str = date.as_str();
@@ -777,22 +799,12 @@ pub(super) fn parse_date(date: &JsString, hooks: &dyn HostHooks) -> Option<i64> 
     }
 
     // `toString` format: `Thu Jan 01 1970 00:00:00 GMT+0000`
-    if let Ok(t) = OffsetDateTime::parse(
-        &date,
-        &format_description!(
-            "[weekday repr:short] [month repr:short] [day] [year] [hour]:[minute]:[second] GMT[offset_hour sign:mandatory][offset_minute][end]"
-        ),
-    ) {
+    if let Ok(t) = OffsetDateTime::parse(&date, to_string_format()) {
         return Some(t.unix_timestamp() * 1000 + i64::from(t.millisecond()));
     }
 
     // `toUTCString` format: `Thu, 01 Jan 1970 00:00:00 GMT`
-    if let Ok(t) = PrimitiveDateTime::parse(
-        &date,
-        &format_description!(
-            "[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] GMT[end]"
-        ),
-    ) {
+    if let Ok(t) = PrimitiveDateTime::parse(&date, to_utc_string_format()) {
         let t = t.assume_utc();
         return Some(t.unix_timestamp() * 1000 + i64::from(t.millisecond()));
     }

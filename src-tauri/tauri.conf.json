@@ -8,7 +8,10 @@
     "beforeDevCommand": "node scripts/prepare.mjs && npm run dev:vite",
     "devUrl": "http://localhost:5173",
     "beforeBuildCommand": "node scripts/prepare.mjs --build && npm run build:vite",
-    "frontendDist": "../target/studio/dist"
+    "frontendDist": "../target/studio/dist",
+    "features": [
+      "ggs-bash"
+    ]
   },
   "app": {
     "withGlobalTauri": false,
@@ -34,7 +37,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis", "deb", "rpm", "app", "dmg"],
     "externalBin": [
       "../target/studio/bundled/binaries/ggs-node"
     ],
@@ -60,6 +63,14 @@
       "nsis": {
         "compression": "lzma",
         "installerHooks": "nsis-hooks.nsh"
+      }
+    },
+    "linux": {
+      "rpm": {
+        "compression": {
+          "type": "zstd",
+          "level": 10
+        }
       }
     },
     "macOS": {

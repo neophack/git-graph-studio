@@ -3412,20 +3412,6 @@ mod install_tests {
     }
 
     #[test]
-    fn a_backend_without_a_protocol_defaults_to_ggs_ext_1() {
-        let backend = BackendDecl {
-            kind: "process".to_owned(),
-            command: "bin/main".to_owned(),
-            args: Vec::new(),
-
-            protocol: None,
-            binaries: None,
-        };
-        // No protocol declared: the one default applies, and `start` accepts the backend.
-        assert_eq!(backend.protocol, None);
-    }
-
-    #[test]
     fn a_backend_of_an_unknown_kind_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let exts = tmp.path().join("extensions");

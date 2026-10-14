@@ -7,16 +7,6 @@
 
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
-
-// The N-API host's exported surface must be in this image for the /EXPORT directives
-// to resolve; this suite never loads an addon itself, so this test holds the reference
-// the linker needs (a const cannot — it folds away).
-#[test]
-#[cfg(feature = "node-runtime")]
-fn the_napi_surface_links() {
-    git_graph_studio_lib::node_runtime::link_napi_host();
-}
-
 fn ggs_bash(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_ggs-bash"))
         .args(args)

@@ -120,6 +120,38 @@ pub fn run(folder: &str) -> Result<String, String> {
     serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
 }
 
+/// A self-made scratch directory with tempfile's remove-on-drop shape: measure.rs is the
+/// only runtime (non-test) consumer of a temp dir in the crate, and with tempfile living
+/// in [dev-dependencies] for the test suites, this keeps the headless probe — and every
+/// binary linking the lib, the ggs-node sidecar included — free of the crate
+/// (docs/ci-speed-plan.md P3).
+struct ScratchDir(std::path::PathBuf);
+
+impl ScratchDir {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "ggs-measure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&path).expect("scratch dir");
+        Self(path)
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// The single-file open probe: write a synthetic text file (repeated code-ish lines, so the
 /// syntax highlighter has real work), then time the open path's three phases. Returns
 /// `(mb, read_ms, decode_ms, viewer_ms, line_count)`.
@@ -129,7 +161,7 @@ fn large_file_probe() -> (u64, f64, f64, f64, usize) {
         .and_then(|v| v.parse().ok())
         .unwrap_or(32)
         .clamp(1, 2048);
-    let dir = tempfile::tempdir().expect("temp dir");
+    let dir = ScratchDir::new();
     let path = dir.path().join("large.rs");
     {
         use std::io::Write;
