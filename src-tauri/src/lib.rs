@@ -80,8 +80,6 @@ pub mod remote_host;
 #[cfg(all(test, feature = "desktop"))]
 mod stage_bench;
 #[cfg(feature = "desktop")]
-pub mod symbols;
-#[cfg(feature = "desktop")]
 pub mod watcher;
 
 #[cfg(feature = "desktop")]
@@ -114,17 +112,17 @@ mod desktop {
         /// Quick Open's file list, cached so repeat opens skip the tree walk (cmd_fs). The Arc
         /// lets the open-folder prefetch thread fill it without borrowing the Tauri state.
         pub file_list_cache: std::sync::Arc<ggs_fs::FileListCache>,
-        /// The workspace symbol index, cached per folder (cmd_search). Shared with the watcher
-        /// thread, which drops it when a source file changes.
-        pub symbol_cache: Arc<cmd_search::SymbolCache>,
-        /// The running search's generation, for cancellation (cmd_search).
-        pub search: Arc<cmd_search::SearchState>,
+        /// The workspace symbol index, cached per folder (ggs-index's cache). Shared with the
+        /// watcher thread, which drops it when a source file changes.
+        pub symbol_cache: Arc<ggs_index::symbols::cache::SymbolCache>,
+        /// The running search's generation, for cancellation (ggs-index's search).
+        pub search: Arc<ggs_index::search::SearchState>,
         /// The running file transfer's generation, for cancellation (cmd_fs's fs_import /
         /// fs_export — the progress toast's Cancel action).
         pub transfer: Arc<ggs_fs::TransferState>,
-        /// The persistent workspace symbol index (cmd_symbols / symbols): one database per
+        /// The persistent workspace symbol index (ggs-index's symbols): one database per
         /// open root, resumed from `~/.ggs/index/` on open and updated by the watcher.
-        pub symbol_index: Arc<cmd_symbols::SymbolIndex>,
+        pub symbol_index: Arc<ggs_index::symbols::index::SymbolIndex>,
         /// The Code Analysis index (cmd_analysis / analysis): one in-memory analysis per
         /// open root, built in the background on open and updated by the watcher.
         pub analysis_index: Arc<cmd_analysis::AnalysisIndex>,
@@ -211,10 +209,10 @@ mod desktop {
                 startup_actions: Mutex::new(Vec::new()),
                 startup_workspace: Mutex::new(None),
                 file_list_cache: Arc::new(ggs_fs::FileListCache::default()),
-                symbol_cache: Arc::new(cmd_search::SymbolCache::default()),
-                search: Arc::new(cmd_search::SearchState::default()),
+                symbol_cache: Arc::new(ggs_index::symbols::cache::SymbolCache::default()),
+                search: Arc::new(ggs_index::search::SearchState::default()),
                 transfer: Arc::new(ggs_fs::TransferState::default()),
-                symbol_index: Arc::new(cmd_symbols::SymbolIndex::new()),
+                symbol_index: Arc::new(ggs_index::symbols::index::SymbolIndex::new()),
                 analysis_index: Arc::new(cmd_analysis::AnalysisIndex::new()),
                 watcher: Mutex::new(Vec::new()),
                 deferred_services: DeferredServices::default(),
@@ -336,8 +334,8 @@ mod desktop {
     fn start_watcher(
         app: &tauri::AppHandle,
         file_list: &std::sync::Arc<ggs_fs::FileListCache>,
-        symbols: &std::sync::Arc<cmd_search::SymbolCache>,
-        index: &std::sync::Arc<cmd_symbols::SymbolIndex>,
+        symbols: &std::sync::Arc<ggs_index::symbols::cache::SymbolCache>,
+        index: &std::sync::Arc<ggs_index::symbols::index::SymbolIndex>,
         analysis: &std::sync::Arc<cmd_analysis::AnalysisIndex>,
         root: &str,
     ) -> Result<watcher::FolderWatcher, String> {
@@ -352,14 +350,15 @@ mod desktop {
             // The caches are stale the moment anything changed; the next Quick Open / search /
             // Go to Definition re-walks. The webview decides what to refresh from the batch.
             file_list.invalidate();
-            if change.paths.iter().any(|p| cmd_search::is_symbol_source(p)) || change.truncated {
+            if change.paths.iter().any(|p| ggs_index::scan::is_symbol_source(p)) || change.truncated {
                 symbols.invalidate();
             }
             // The persistent index and the Code Analysis update file by file (a truncated
             // batch only drops the legacy cache above; the next open's resume repairs the
             // index in full).
             if !change.truncated {
-                index.apply_changes(Some(app.clone()), &watch_root, change.paths.clone());
+                let sink = std::sync::Arc::new(crate::events::TauriEvents(app.clone()));
+                index.apply_changes(Some(sink.clone()), &watch_root, change.paths.clone());
                 analysis.apply_changes(Some(app.clone()), &watch_root, change.paths.clone());
             }
             let _ = app.emit(FS_CHANGED_EVENT, change);
@@ -476,12 +475,13 @@ mod desktop {
     /// folder and workspace open paths start identical services.
     fn start_root_services(app: &tauri::AppHandle, state: &AppState, root: &str) {
         // The symbol database resumes from ~/.ggs/index/ and repairs against the disk
-        // (cmd_symbols); Go-to-Definition and Find References pick it up when it lands,
+        // (ggs-index); Go-to-Definition and Find References pick it up when it lands,
         // falling back to the in-memory index until then.
         {
             let index = Arc::clone(&state.symbol_index);
             let index_root = root.to_owned();
-            index.start_build(Some(app.clone()), &index_root);
+            let sink = Arc::new(crate::events::TauriEvents(app.clone()));
+            index.start_build(Some(sink), &index_root);
         }
         // The Code Analysis index builds the same way, behind the symbol index (its parse
         // is the heavier half; the analysis pages pick it up when it lands).

@@ -15,7 +15,7 @@
 > 本文所有"预估"都要用 P0 的实测数字验收（AGENTS.md：数字，不是形容词）。
 
 
-## 实施状态（2026-10-14，P2 完成时）
+## 实施状态（2026-10-14，P3-6 完成时）
 
 > 本段由执行过程维护；每个阶段边界更新一次。度量来自 `node scripts/measure-build.mjs`
 > （`metrics.json` 的 `build.*`；本机 Windows，dev profile，warm 缓存）。
@@ -41,6 +41,7 @@
 | P3-3 ggs-text（viewer/encoding/grammar/probe/backup） | ✅ | `e5e640c` |
 | P3-4 ggs-fs（文件服务引擎 + 传输 + 遍历） | ✅ | `bc4cd0b` |
 | P3-5 ggs-git(三)（ops + revision；gerrit 下载留 app） | ✅ | `2034b6a` |
+| P3-6 ggs-index（scan/search/replace/compare/hexdiff/fuzzy/symbols；perf.rs 留 app，见下） | ✅ | 本次 |
 
 P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现（构建走
 `target/studio/cargo`），`incremental` 目录 17.5 GB 为多 feature 时代的历史累积，
@@ -57,6 +58,18 @@ P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现
   （`src/test_git_helpers.rs`）。后续 crate 的测试按此办理。
 - cmd_ext ⇄ cmd_fs / cmd_fs ⇄ cmd_ext / cmd_search ⇄ can_log / viewer ⇄ cmd_fs
   四条计划点名的横向边已全部消解（P3-2/3/4/5）。
+- **P3-6 的两处计划偏差**：
+  - `tests/it/perf.rs` **留在 app**（计划原写"迁入 ggs-index"）：它不只是
+    遍历/搜索/索引的基准——还驱动引擎后端进程（ext_process/cmd_ext）、分析构建
+    （analysis）与 SCM 状态（ggs-git），搬进 crate 会要求 crate 反向依赖 app。
+    它的 walk/search/index 三相现在直接调 ggs-index；P3-14 复测时整个门禁不动。
+  - `SymbolIndex` 的进度回调是 `&(dyn Fn + Sync)`（穿过 rayon worker），而
+    `BatchSink::send` 是 `&mut self`——桥是一个 `Mutex<&mut dyn BatchSink>`
+    （RefCell 不行：!Sync）。
+  - P3-5 漏改了 `tests/it/perf.rs` 的 `git_graph_studio_lib::scm_ops` 导入（HEAD 上
+    `--all-targets` 已断）；P3-6 顺带修复（`use ggs_git::ops as scm_ops`）。
+  - app 顺手清掉 P3-3 之后残留的死清单项（ropey/syntect/fancy-regex）与随本次
+    迁走的 sha1/hex/encoding_rs/tree-sitter 系（app 只透传 grammar-*）。
 
 ### 度量（P2 后实测 vs 计划 §3.2 的预估）
 
@@ -69,12 +82,23 @@ P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现
 | 生产代码 `for_tests` | 0（`rg` 验证） | P2-12 验收 |
 | crate 成员 | 10（app + 9 crates/） | 白名单 `scripts/crate-graph.json` 全部 enforced |
 
+### 度量补充（P3-6 后实测）
+
+| 场景 | P3-6 后 | 说明 |
+| ---- | ----- | ---- |
+| 改 `crates/ggs-index/src/search.rs` 一行 → `cargo build --workspace --all-features` | **15.0 s** | ggs-index + 下游的 app 两级重编 + 链接；改 app 侧适配（`cmd_search.rs`）则只有 app 一级 |
+| crate 成员 | 15（app + 14 crates/） | +ggs-index；`check-crate-graph` 15 members 全部 enforced |
+| workspace 测试 | 703 通过 / 0 失败 | clippy `-D warnings`、typecheck、vitest 1145 同绿 |
+
 ### 测试守恒
 
 P2 前全绿基线 = 639（app lib）+ 48（it）。P2 后 = app lib 443 + it 3 +
 ggs-base 9 + ggs-proto 6 + ggs-codec 8 + ggs-git 10 + ggs-shellenv 5 +
 ggs-bash 148+6 + ggs-node 17+39 + ggs-remote-proto 2 —— 每一次迁移的差额都
 对应随文件走的测试（P2-5 一次误删 5 个 shellenv 测试被计数对账抓住并当场恢复）。
+P3-6：app lib 325 → 266（-59，恰为 cmd_search 24 + cmd_symbols 5 + cmd_fuzzy 9 +
+parse 12 + store 9），ggs-index 65 = 迁移 59 + 新增 6（sink/门面新测试 5 + 1 个
+原合并测试拆分）。
 
 ---
 

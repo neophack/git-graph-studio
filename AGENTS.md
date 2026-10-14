@@ -243,8 +243,8 @@ VS Code's anythingQuickAccess model: the walked file list pre-lowered once, quer
 in event-loop-yielding chunks.
 
 - Frontend: `src/filePicker.ts`, `src/fuzzy.ts` (the fuzzyScorer port)
-- Backend: `src-tauri/src/cmd_fuzzy.rs` (server-side scoring — a keystroke ships rows, not
-  the tree)
+- Backend: the `ggs-index` crate's `fuzzy` module (server-side scoring — a keystroke ships
+  rows, not the tree) behind the `src-tauri/src/cmd_fuzzy.rs` command adapters
 
 ### 5. Workspace Search
 
@@ -258,13 +258,18 @@ updated file-by-file by the watcher.
   Window panel page - the definition of the symbol under the cursor),
   `src/symbolDbView.ts` (the Symbol Database page - the index as a collapsible
   folder / file / symbol tree with reference counts, filter and rebuild)
-- Backend: `src-tauri/src/cmd_symbols.rs` (the index state, the build / resume / rebuild
-  commands, `symbol_lookup` / `symbol_references`), `src-tauri/src/symbols/parse.rs` (the
-  tree-sitter parser layer, plan M4.1: one embedded `.scm` query per language over defs,
-  call sites and imports, each grammar behind a `grammar-*` Cargo feature, the outline scan
-  as the fallback), `src-tauri/src/symbols/store.rs` (the compact on-disk store), `src-tauri/src/cmd_search.rs` (rayon-parallelised text search, the
-  in-memory index fallback, the folder-comparison and byte-comparison services; reuses the
-  Quick Open walk so the exclusion policy is one list)
+- Backend: the `ggs-index` crate (`src-tauri/crates/ggs-index/`) — `scan` (the shared
+  matcher / glob / searchable-read vocabulary), `search` (the rayon-parallelised streaming
+  text search), `replace`, `compare` (the folder comparison), `hexdiff` (the byte
+  comparison), `symbols::parse` (the tree-sitter parser layer, plan M4.1: one embedded
+  `.scm` query per language over defs, call sites and imports, each grammar behind a
+  `grammar-*` Cargo feature, the outline scan as the fallback), `symbols::store` (the
+  compact on-disk store), `symbols::index` (the per-root databases, the build / resume /
+  rebuild, the reference scan) and `symbols::cache` (the in-memory fallback) — behind the
+  `src-tauri/src/cmd_search.rs` / `cmd_symbols.rs` command adapters (the
+  `#[tauri::command]` halves; progress crosses the ggs-base push seams, cancellation is
+  the generation counter). Every walk reuses the Quick Open walk so the exclusion policy
+  is one list.
 
 ### 6. Editor Suite
 
@@ -282,11 +287,12 @@ colouring, sticky scroll, minimap, bookmarks, markdown preview.
   Workspace Search), `src/findHistory.ts` (the find and search fields' query history — the
   Up/Down recall — shared with Workspace Search), `src/bookmarks.ts`, `src/cmTheme.ts`,
   `src/markdown.ts` (preview; also renders extension READMEs)
-- Backend: `src-tauri/src/viewer/` (`doc.rs`: ropey rope + syntect highlight checkpoints;
-  `find.rs`: the whole-document find/replace matcher, scan and replacement pass;
-  `indexed.rs`: the memory-bounded line-index viewer for enormous files (index + on-demand
-  windows + streaming find); `outline.rs`: symbol outline), `src-tauri/src/encoding.rs`
-  (encoding detection and line endings)
+- Backend: the `ggs-text` crate (`src-tauri/crates/ggs-text/`: `viewer/doc.rs` ropey rope
+  + syntect highlight checkpoints; `viewer/find.rs` the whole-document find/replace
+  matcher, scan and replacement pass; `viewer/indexed.rs` the memory-bounded line-index
+  viewer for enormous files (index + on-demand windows + streaming find);
+  `viewer/outline.rs` symbol outline; `encoding.rs` encoding detection and line endings),
+  behind the `src-tauri/src/viewer_commands.rs` adapters
 
 ### 7. Large-File Viewers
 
@@ -301,8 +307,8 @@ paged, never loaded whole.
   no document is too tall for the layout engine), `src/fastView.ts` (Fast Viewer —
   backend-rope document, the visible rows only), `src/hexView.ts` (offset / hex / ASCII),
   `src/hexCompare.ts` (byte-aligned two-pane compare)
-- Backend: `src-tauri/src/viewer/`, byte comparison in `cmd_search.rs`, chunked reads via
-  `cmd_fs.rs`
+- Backend: `src-tauri/crates/ggs-text/` (the viewer engine), byte comparison in the
+  `ggs-index` crate's `hexdiff`, chunked reads via `ggs-fs` (the `cmd_fs.rs` adapters)
 - Bench: `src-tauri/examples/viewer_bench.rs` (the open path's phases — syntax set, rope,
   `ViewerDoc::new`, the first highlight window — `viewer_bench [mb]`)
 - Dev probe: `dev/hex-probe.html` (the hex view in isolation, against any theme)
@@ -314,8 +320,8 @@ in place, and side-by-side diffs of any two revisions.
 
 - Frontend: `src/folderCompare.ts`, `src/mergeEditor.ts` (walk conflicts, keep
   ours/theirs/both, Mark Resolved), diff editors in `src/editor.ts` / `src/textEditor.ts`
-- Backend: folder comparison in `cmd_search.rs`, revision contents via `cmd_fs.rs` /
-  `cmd_scm.rs`
+- Backend: folder comparison in the `ggs-index` crate's `compare`, revision contents via
+  the `ggs-git` crate's `revision` (the `cmd_fs.rs` / `cmd_scm.rs` adapters)
 
 ### 9. Source Control
 
@@ -1059,8 +1065,8 @@ in-app MCP Server page shows. stderr is logs; stdout is protocol only.
   as the Analysis sidebar's sixth entry and hosted in its editor pages, loading lazily
   with them)
 - Backend: `src-tauri/src/mcp.rs` (the server loop, the tool implementations, the
-  handshake, the call log); the index itself is module 5's (`cmd_symbols.rs` /
-  `symbols/store.rs`), the analysis tools sit on module 17's engine (`cmd_analysis.rs` /
+  handshake, the call log); the index itself is module 5's (the `ggs-index` crate's
+  `symbols::store` / `symbols::index`), the analysis tools sit on module 17's engine (`cmd_analysis.rs` /
   `analysis/`)
 - Tests: `mcp.rs`'s `#[cfg(test)]` module (scratch repository over a temp index home);
   the page's vitest lives in `tests/analysis.test.ts` (it rides the analysis suite)
@@ -1144,7 +1150,7 @@ viewport (pan, zoom, states) around it.
   `imports.rs`, `bca.rs` the big-code-analysis
   bridge whose report-time columns — cognitive complexity, Halstead volume, logical SLOC,
   the maintainability index — enrich the Complexity & Hotspots rows); parsing comes from
-  module 5's `symbols/parse.rs`
+  module 5's `ggs-index` crate (`symbols::parse`)
 - Tests: `tests/analysis.test.ts`, the `analysis/` modules' `#[cfg(test)]`
 
 ### 15. Build & Release Pipeline
@@ -2003,7 +2009,8 @@ database) carries the link through NAT. The whole design lives in
 - New user-visible behaviour needs a command (with title and enablement), an i18n key for
   every string, and — if configurable — a `SETTING_DEFS` entry so it appears in Settings.
 - Streaming backend work must be cancellable and deliver a first batch quickly; check how
-  `cmd_search.rs` does it before inventing a new pattern.
+  the search does it (the `ggs-index` crate's `search`, behind `cmd_search.rs`) before
+  inventing a new pattern.
 
 ### The per-change method (the open-source skill packs)
 
@@ -2171,7 +2178,7 @@ Conventions:
   colour. No inline styles for theme-dependent colours.
 - **Backend idiom**: one `cmd_<domain>.rs` per domain; commands return `Result<T, String>`
   with user-readable errors; long operations stream over a `Channel` and stop on a
-  cancellation generation (the `cmd_search.rs` pattern).
+  cancellation generation (the `ggs-index` search pattern, `cmd_search.rs` the adapter).
 - **Naming**: camelCase TypeScript, snake_case Rust, kebab-case files under `scripts/` and
   `dev/`, `cmd_<domain>.rs` for backend command modules.
 

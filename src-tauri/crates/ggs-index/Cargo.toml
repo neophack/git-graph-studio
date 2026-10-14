@@ -1,0 +1,70 @@
+[package]
+name = "ggs-index"
+version = "0.0.0"
+description = "Workspace search & replace, the persistent symbol index (tree-sitter parsing, the compact on-disk store), the folder/byte comparison services and Quick Open's server-side fuzzy scoring"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# The tree-sitter grammars (plan §3.1: compiled with cc, the single sanctioned exception to
+# the pure-Rust rule), one feature per language. All on by default so the crate's own tests
+# exercise the real parser layer; the app forwards its `grammar-*` features here, and a
+# build sheds a language by dropping the feature — the parser layer (symbols/parse.rs)
+# falls back to the outline scan for anything switched off.
+default = ["all-grammars"]
+all-grammars = [
+    "grammar-rust",
+    "grammar-python",
+    "grammar-go",
+    "grammar-javascript",
+    "grammar-typescript",
+    "grammar-java",
+    "grammar-c",
+    "grammar-cpp",
+    "grammar-c-sharp",
+]
+grammar-rust = ["dep:tree-sitter-rust"]
+grammar-python = ["dep:tree-sitter-python"]
+grammar-go = ["dep:tree-sitter-go"]
+grammar-javascript = ["dep:tree-sitter-javascript"]
+grammar-typescript = ["dep:tree-sitter-typescript"]
+grammar-java = ["dep:tree-sitter-java"]
+grammar-c = ["dep:tree-sitter-c"]
+grammar-cpp = ["dep:tree-sitter-cpp"]
+grammar-c-sharp = ["dep:tree-sitter-c-sharp"]
+
+[dependencies]
+ggs-base.workspace = true
+ggs-fs.workspace = true
+ggs-text.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# build_matcher and the folder-comparison filename patterns.
+regex.workspace = true
+# The parallel scan / index / reference passes.
+rayon.workspace = true
+# read_searchable's BOM sniff and UTF-16 decode.
+encoding_rs.workspace = true
+# The per-root index directory hash and the folder-comparison content hash.
+sha1.workspace = true
+hex.workspace = true
+# The tree-sitter parser layer (plan M4.1, symbols/parse.rs): the core runtime plus one
+# grammar crate per language, each behind its `grammar-*` feature.
+tree-sitter.workspace = true
+tree-sitter-rust = { workspace = true, optional = true }
+tree-sitter-python = { workspace = true, optional = true }
+tree-sitter-go = { workspace = true, optional = true }
+tree-sitter-javascript = { workspace = true, optional = true }
+tree-sitter-typescript = { workspace = true, optional = true }
+tree-sitter-java = { workspace = true, optional = true }
+tree-sitter-c = { workspace = true, optional = true }
+tree-sitter-cpp = { workspace = true, optional = true }
+tree-sitter-c-sharp = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true

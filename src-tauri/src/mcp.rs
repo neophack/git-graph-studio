@@ -36,8 +36,9 @@ use crate::analysis::security::{scan_file, Finding, Severity};
 use crate::analysis::{deadcode, AnalysisData, Direction};
 use crate::cmd_analysis::AnalysisIndex;
 use ggs_fs::walk_files;
-use crate::cmd_search::{search_literal, WorkspaceSymbol};
-use crate::cmd_symbols::{scan_references, SymbolIndex};
+use ggs_index::search::search_literal;
+use ggs_index::symbols::index::{scan_references, SymbolIndex};
+use ggs_index::symbols::WorkspaceSymbol;
 
 /// The protocol revision we speak; a client asking for another is echoed its own (the
 /// tool surface here is stable across the revisions clients ship today).
@@ -1359,7 +1360,7 @@ pub struct McpToolInfo {
 
 /// The MCP call log's path under the GGS user home (plan Appendix B: logs live there).
 pub fn mcp_log_path() -> std::path::PathBuf {
-    crate::cmd_symbols::ggs_home().join("logs").join("mcp.log")
+    ggs_base::paths::ggs_home().join("logs").join("mcp.log")
 }
 
 fn now_millis() -> u64 {

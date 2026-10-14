@@ -16,7 +16,6 @@ use std::time::Instant;
 
 use serde_json::json;
 
-use crate::cmd_search;
 use ggs_git::ops as scm_ops;
 
 fn ms(started: Instant) -> f64 {
@@ -61,7 +60,7 @@ pub fn run(folder: &str) -> Result<String, String> {
     };
 
     let started = Instant::now();
-    let symbols = cmd_search::index_symbols_of(&root).len();
+    let symbols = ggs_index::symbols::cache::index_symbols_of(&root).len();
     let symbols_ms = ms(started);
 
     let started = Instant::now();
@@ -80,12 +79,12 @@ pub fn run(folder: &str) -> Result<String, String> {
         .unwrap_or((0, 0));
 
     let started = Instant::now();
-    let search = cmd_search::search_literal(&files, &root, "TODO")?;
+    let search = ggs_index::search::search_literal(&files, &root, "TODO")?;
     let search_ms = ms(started);
 
     // Plan §3.4's streaming promise, as a number: the first batch's latency (the scan
     // stops right after it, so this is one batch's work, not the tree's).
-    let first_batch_ms = cmd_search::search_first_batch_ms(&files, &root, "TODO")?;
+    let first_batch_ms = ggs_index::search::search_first_batch_ms(&files, &root, "TODO")?;
 
     // The single-file open path: a synthetic large file through the exact steps the editor's
     // open takes - raw read, encoding-decoding to text, the viewer document build (with its

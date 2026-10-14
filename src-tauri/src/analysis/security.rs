@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde::Serialize;
 
-use crate::symbols::parse::CallSite;
+use ggs_index::symbols::parse::CallSite;
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -430,7 +430,7 @@ mod tests {
     use super::*;
 
     fn scan(path: &str, ext: &str, text: &str) -> Vec<Finding> {
-        let parsed = crate::symbols::parse::parse_file(text, ext);
+        let parsed = ggs_index::symbols::parse::parse_file(text, ext);
         scan_file(path, ext, text, &parsed.calls)
     }
 

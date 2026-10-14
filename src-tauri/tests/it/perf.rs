@@ -16,7 +16,8 @@ use std::process::Command;
 use std::time::Instant;
 
 use git_graph_studio_lib::ext_process::ProcessHostState;
-use git_graph_studio_lib::{cmd_ext, cmd_fs, cmd_search, scm_ops};
+use git_graph_studio_lib::{analysis, cmd_ext};
+use ggs_git::ops as scm_ops;
 use ggs_git::runner::Git;
 use ggs_base::workspace::find_repo_root;
 use serde_json::{json, Value};
@@ -180,7 +181,7 @@ fn opening_a_large_repository_stays_within_the_budgets() {
     let per_file = files as f64 / 100_000.0;
 
     let started = Instant::now();
-    let list = cmd_fs::walk_files(&root);
+    let list = ggs_fs::walk_files(&root);
     let walk_ms = ms(started);
     assert_eq!(list.len(), files, "the walk lists every file");
 
@@ -203,7 +204,7 @@ fn opening_a_large_repository_stays_within_the_budgets() {
     assert!(bytes > 0);
 
     let started = Instant::now();
-    let search = cmd_search::search_literal(&list, &root, "TODO").unwrap();
+    let search = ggs_index::search::search_literal(&list, &root, "TODO").unwrap();
     let search_ms = ms(started);
     let hits: usize = search.files.iter().map(|f| f.matches.len()).sum();
     // Every 10th file carries a TODO, minus the few the extra commits rewrote.
@@ -215,10 +216,10 @@ fn opening_a_large_repository_stays_within_the_budgets() {
     // Plan §3.4's streaming promise, recorded like every other size — measured, never
     // gated (2026-10-03, the owner's direction: the 200 ms assert left the same day it
     // landed). The probe stops after that batch, so it costs one BATCH_FILES slice.
-    let first_batch_ms = cmd_search::search_first_batch_ms(&list, &root, "TODO").unwrap();
+    let first_batch_ms = ggs_index::search::search_first_batch_ms(&list, &root, "TODO").unwrap();
 
     let started = Instant::now();
-    let symbols = cmd_search::index_symbols_of(&root);
+    let symbols = ggs_index::symbols::cache::index_symbols_of(&root);
     let index_ms = ms(started);
     assert!(
         symbols.len() >= files,
@@ -229,7 +230,7 @@ fn opening_a_large_repository_stays_within_the_budgets() {
     // The Code Analysis build (module 17): the same tree-sitter parse plus the call-edge
     // derivation — budgeted like the symbol index, with room for the edge pass.
     let started = Instant::now();
-    let analysis = git_graph_studio_lib::analysis::AnalysisData::build(
+    let analysis = analysis::AnalysisData::build(
         &root,
         std::thread::available_parallelism()
             .map(|n| n.get())

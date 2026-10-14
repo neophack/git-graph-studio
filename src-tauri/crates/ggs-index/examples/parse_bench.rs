@@ -23,7 +23,7 @@ fn main() {
             let text = std::fs::read_to_string(&path).unwrap();
             let bytes = text.len() as u64;
             let started = Instant::now();
-            let parsed = git_graph_studio_lib::symbols::parse::parse_file(&text, "rs");
+            let parsed = ggs_index::symbols::parse::parse_file(&text, "rs");
             let micros = started.elapsed().as_micros();
             rows.push((
                 path.file_name().unwrap().to_string_lossy().to_string(),

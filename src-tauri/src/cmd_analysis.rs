@@ -331,7 +331,7 @@ fn index_threads(background: bool) -> usize {
 
 // The symbol index's thread budget, reached through its public helper.
 fn cmd_symbols_threads(background: bool) -> usize {
-    crate::cmd_symbols::SymbolIndex::index_threads(background)
+    ggs_index::symbols::index::SymbolIndex::index_threads(background)
 }
 
 fn ready_status(data: &AnalysisData) -> AnalysisStatus {

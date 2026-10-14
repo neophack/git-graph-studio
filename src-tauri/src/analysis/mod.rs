@@ -27,8 +27,8 @@ use serde::{Deserialize, Serialize};
 use rayon::prelude::*;
 
 use ggs_fs::walk_files;
-use crate::cmd_search::is_symbol_source;
-use crate::symbols::parse::{self, CallSite, ParsedFile, ParsedSymbol};
+use ggs_index::scan::is_symbol_source;
+use ggs_index::symbols::parse::{self, CallSite, ParsedFile, ParsedSymbol};
 
 /// Files per progress batch; also the cancellation checkpoint (the symbol store's rhythm).
 pub const BUILD_BATCH: usize = 256;

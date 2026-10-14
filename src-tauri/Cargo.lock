@@ -2027,6 +2027,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "ggs-index"
+version = "0.0.0"
+dependencies = [
+ "encoding_rs",
+ "ggs-base",
+ "ggs-fs",
+ "ggs-text",
+ "hex",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha1",
+ "tempfile",
+ "tree-sitter",
+ "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cpp",
+ "tree-sitter-go",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+]
+
+[[package]]
 name = "ggs-node"
 version = "0.0.0"
 dependencies = [
@@ -2152,8 +2179,6 @@ dependencies = [
  "aes-gcm",
  "base64 0.22.1",
  "big-code-analysis",
- "encoding_rs",
- "fancy-regex",
  "flate2",
  "getrandom 0.2.17",
  "ggs-base",
@@ -2162,12 +2187,12 @@ dependencies = [
  "ggs-config",
  "ggs-fs",
  "ggs-git",
+ "ggs-index",
  "ggs-proto",
  "ggs-remote-proto",
  "ggs-shellenv",
  "ggs-testkit",
  "ggs-text",
- "hex",
  "ignore",
  "interprocess",
  "memchr",
@@ -2180,14 +2205,11 @@ dependencies = [
  "rayon",
  "regex",
  "rmp-serde",
- "ropey",
  "rpassword",
  "serde",
  "serde_bytes",
  "serde_json",
- "sha1",
  "sha2 0.10.9",
- "syntect",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",
@@ -2196,16 +2218,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "trash",
- "tree-sitter",
- "tree-sitter-c",
- "tree-sitter-c-sharp",
- "tree-sitter-cpp",
- "tree-sitter-go",
- "tree-sitter-java",
- "tree-sitter-javascript",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-typescript",
  "ureq",
  "webview2-com",
  "windows-core 0.61.2",
