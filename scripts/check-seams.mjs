@@ -18,6 +18,7 @@ import { checkImportGraph } from './ts-import-graph.mjs';
 import { checkIpc } from './check-ipc.mjs';
 import { checkCrateGraph } from './check-crate-graph.mjs';
 import { checkModules } from './check-modules.mjs';
+import { checkDocPaths } from './check-doc-paths.mjs';
 
 const appDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -97,6 +98,7 @@ export function checkSeams() {
 	checkIpc();
 	checkCrateGraph();
 	checkModules();
+	checkDocPaths();
 	return scanned.length;
 }
 

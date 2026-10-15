@@ -93,7 +93,7 @@ The principles below are the plan's §3, condensed. They apply to every change.
    syntect runs on `default-fancy`, git access is gix.
 2. **The app works without any plugin.** Its own git reads (status, file-at-revision, file
    history, submodules) and writes (stage, commit, fetch, push, …) run the `git` CLI, and
-   only through `src-tauri/src/git.rs`. A plugin that declares a process backend is a warm
+   only through `src-tauri/crates/ggs-git/src/runner.rs`. A plugin that declares a process backend is a warm
    sibling reached over the one wire protocol, `ggs-ext/1` — the Git Graph view's engine
    backend speaks; the app binary never links
    `git-graph-core` and names no plugin id anywhere under `src/`.
@@ -103,7 +103,7 @@ The principles below are the plan's §3, condensed. They apply to every change.
    diff push batches through `tauri::ipc::Channel`; the first batch reaches the UI within
    200 ms; every long task is cancellable.
 5. **Three artefacts per feature.** A `#[tauri::command]` with a Rust test (scratch
-   repository via `test_support.rs`), a vitest over the `tauriMock` recording, and a
+   repository via `src-tauri/src/test_git_helpers.rs`), a vitest over the `tauriMock` recording, and a
    `dev/dev-harness.html` scenario for behaviour jsdom cannot express.
 6. **Sizes are measured, not gated.** Artefact sizes and probe timings are recorded to
    `target/studio/metrics.json`. The size budgets and their CI gate were removed on
@@ -295,12 +295,12 @@ completion (document words, snippets, paths), the find/replace widget, bracket-p
 colouring, sticky scroll, minimap, bookmarks, markdown preview.
 
 - Frontend: `src/features/editor/group.ts` (the EditorGroup class shell — fields, constructor, the group-lifetime methods, the rest declared and assigned onto the prototype by the module facade), `src/features/editor/open.ts` (the open orchestration: files, diffs, revisions, previews, history, analysis/ext pages), `src/features/editor/mount.ts` (the viewer mounts and fast-view swaps), `src/features/editor/tabs.ts` (tabs + back/forward navigation), `src/features/editor/breadcrumbs.ts`, `src/features/editor/navigate.ts` (go-to-definition, references, goto symbol/line), `src/features/editor/dirty.ts` (save/close lifecycle, autosave, backups, encodings), `src/features/editor/inputs.ts` (the input vocabulary: EditorInput, Editor, inputId), `src/features/editor/{shared,editorState}.ts` (leaf helpers/state, R5), `src/features/editor/editorArea.ts` (split grid),
-  `src/features/editor/textEditor.ts` (CodeMirror host), `src/comments.ts` (VS Code's comment toggles),
+  `src/features/editor/textEditor.ts` (CodeMirror host), `src/features/editor/comments.ts` (VS Code's comment toggles),
   `src/features/editor/docEditView.ts` (windowed large-file editor, scrolling on module 7's `src/scroll/`),
   `src/features/editor/docFind.ts` (the whole-file find/replace bar the windowed editor and the Fast Viewer
   serve, over `viewer_find` / `viewer_replace`), `src/features/editor/editorExtras.ts`, `src/features/editor/autocomplete.ts`,
-  `src/features/editor/snippetRegistry.ts`, `src/features/editor/findWidget.ts`, `src/findOptions.ts` (options shared with
-  Workspace Search), `src/findHistory.ts` (the find and search fields' query history — the
+  `src/features/editor/snippetRegistry.ts`, `src/features/editor/findWidget.ts`, `src/platform/find/findOptions.ts` (options shared with
+  Workspace Search), `src/platform/find/findHistory.ts` (the find and search fields' query history — the
   Up/Down recall — shared with Workspace Search), `src/features/editor/bookmarks.ts`, `src/features/editor/cmTheme.ts`,
   `src/platform/markdown.ts` (preview; also renders extension READMEs)
 - Backend: the `ggs-text` crate (`src-tauri/crates/ggs-text/`: `viewer/doc.rs` ropey rope
@@ -325,7 +325,7 @@ paged, never loaded whole.
   `src/features/viewers/hexCompare.ts` (byte-aligned two-pane compare)
 - Backend: `src-tauri/crates/ggs-text/` (the viewer engine), byte comparison in the
   `ggs-index` crate's `hexdiff`, chunked reads via `ggs-fs` (the `cmd_fs.rs` adapters)
-- Bench: `src-tauri/examples/viewer_bench.rs` (the open path's phases — syntax set, rope,
+- Bench: `src-tauri/crates/ggs-text/examples/viewer_bench.rs` (the open path's phases — syntax set, rope,
   `ViewerDoc::new`, the first highlight window — `viewer_bench [mb]`)
 - Dev probe: `dev/hex-probe.html` (the hex view in isolation, against any theme)
 
@@ -335,7 +335,7 @@ The Beyond Compare workflow: folder comparison with sync actions, git-conflict r
 in place, and side-by-side diffs of any two revisions.
 
 - Frontend: `src/features/compare/folderCompare.ts`, `src/features/compare/mergeEditor.ts` (walk conflicts, keep
-  ours/theirs/both, Mark Resolved), diff editors in `src/features/editor/editor.ts` / `src/features/editor/textEditor.ts`
+  ours/theirs/both, Mark Resolved), diff editors in `src/features/editor/textEditor.ts`
 - Backend: folder comparison in the `ggs-index` crate's `compare`, revision contents via
   the `ggs-git` crate's `revision` (the `cmd_fs.rs` / `cmd_scm.rs` adapters)
 
@@ -349,8 +349,8 @@ commit-msg hook, `refs/for/` push).
 - Frontend: `src/features/scm/view.ts` (the SourceControlView class shell — fields, constructor, the refresh/selection/rendering lifetime and the sub-repo plumbing; the commit input, change groups, row actions and menus live in their concern files, assigned onto the prototype by the module facade), `src/features/scm/commitInput.ts`, `src/features/scm/groups.ts`, `src/features/scm/rowActions.ts`, `src/features/scm/menus.ts`, `src/features/scm/gitCommands.ts`, `src/features/scm/fileHistory.ts`
 - Backend: `src-tauri/src/cmd_scm.rs` (status over one parsed `git status --porcelain`, the
   Timeline's `file_log` over `git log --follow`, mutations through the git CLI),
-  `src-tauri/src/scm_ops.rs` (the "..." menu operations plus the palette's branch/remote/
-  stash/tag writes), `src-tauri/src/git.rs` (the one and only git-CLI runner, plus the pure
+  `src-tauri/crates/ggs-git/src/ops.rs` (the "..." menu operations plus the palette's branch/remote/
+  stash/tag writes), `src-tauri/crates/ggs-git/src/runner.rs` (the one and only git-CLI runner, plus the pure
   ref/hash validators `fetch` shares; 2026-10-14, a Git installed to a custom directory the
   PATH never names still answers — the executable is located once per run through the PATH,
   then Git for Windows' registry `InstallPath` and the standard install roots
@@ -405,9 +405,9 @@ the extension's artifacts — `scripts/check-seams.mjs` fails the build on any r
 - Host side (generic): the `ggs-ext` crate's `process` module behind `src-tauri/src/ext_process.rs` (spawns every installed backend, the
   start handshake carries the open folders, `notify_workspace` pushes changes, a manifest
   still naming the retired `ggx-rpc/1` fails its start with an upgrade hint),
-  `src-tauri/src/ext_protocol.rs` (the one wire protocol, `ggs-ext/1`: JSON-RPC 2.0 over
+  `src-tauri/crates/ggs-proto/src/lib.rs` (the one wire protocol, `ggs-ext/1`: JSON-RPC 2.0 over
   stdio, `serve_plugin` dispatching every request onto its own thread — the view's opening
-  burst of reads never serializes), `src/features/extensions/extHost.ts` (the page services:
+  burst of reads never serializes), `src/features/extensions/host/extensionHost.ts` (the page services:
   `theme.stylesheet`, `backend.run`, `workbench.*`, singleton pages, theme/workspace pushes;
   plus the change pushes that keep a page off polling — the watcher's every batch rides the
   page channel as `kind: 'fs'` (root/paths/`gitChanged`/`truncated`, so a stage or commit's
@@ -742,7 +742,7 @@ page shows the integration's state (`claude_mcp_status`).
   through its own toggle — the page's own DOM, same-origin),
   `src/features/editor/editorDiagnosticsView.ts (the rendering half) + the store in src/features/extensions/editorDiagnostics.ts` (the diagnostics store: the host's
   `languages.createDiagnosticCollection` entries land as CodeMirror squiggles in the open
-  editors) + `src/editorDiagnosticsView.ts` (the CodeMirror half, loaded with the editor
+  editors) + `src/features/editor/editorDiagnosticsView.ts` (the CodeMirror half, loaded with the editor
   suite so the lint library stays off the first-paint bundle),
   `src/features/extensions/treeView.ts` (the generic tree view host — the sidebar
   surface `contributes.views` declares and `createTreeView` feeds),
@@ -777,7 +777,7 @@ page shows the integration's state (`claude_mcp_status`).
   spawn-time environment `ext_process` injects into the bridged backend through its
   registered spawn-env sources — the composition root's wiring, so the two modules do
   not name each other),
-  `src-tauri/src/ext_grammar.rs` (the TextMate-grammar loader: `.tmLanguage` plists and
+  `src-tauri/crates/ggs-text/src/grammar.rs` (the TextMate-grammar loader: `.tmLanguage` plists and
   `.json` grammars converted to Sublime syntax and added to the rope viewer's syntect set), the `ggs-ext` crate's `process` module behind `src-tauri/src/ext_process.rs` (the process extension host: eager
   start at boot and install, lazy start on first command as the fallback, `initialize`
   handshake, `runCommand`, crash isolation, remembered status (start count, last error),
@@ -795,7 +795,7 @@ page shows the integration's state (`claude_mcp_status`).
   shim refuses joined the rule — Claude Remote 2.0 dropped its LAN server and crossed no
   route until `crypto.createHmac` derived its backend, while `createHash` and the randoms
   stay off the list because a frame serves them)),
-  `src-tauri/src/node_runtime/` (`ggs-node`, the `node-runtime` feature's
+  `src-tauri/crates/ggs-node/src/` (`ggs-node`, the `node-runtime` feature's
   pretend Node runtime sidecar — the default `node`-backend host: Boa on one JS thread fed
   by a job queue — protocol requests, timers, child-process events, the activation — a CommonJS `require`
   confined to the package root (`require.rs`), real `fs`/`path`/`os`/`child_process`
@@ -847,8 +847,8 @@ page shows the integration's state (`claude_mcp_status`).
   locator pair — a short-circuit `x ??= v` stranded its pushed locator and the next
   locator write hit the wrong binding — and degrades a poisoned `PutLexicalValue`
   (the known `Function`-constructor miscompile) instead of killing the JS thread; the
-  grammar and semantics are pinned in `tests/it/vscode_shim_boa.rs`, the compile semantics
-  end-to-end in `tests/it/node_runtime.rs`; retire the fork when upstream carries the
+  grammar and semantics are pinned in `src-tauri/crates/ggs-node/tests/it/vscode_shim_boa.rs`, the compile semantics
+  end-to-end in `src-tauri/crates/ggs-node/tests/it/node_runtime.rs`; retire the fork when upstream carries the
   fixes. Crash-proofing patches (2026-10-04, same marking): `boa-parser`'s
   `stack_guard.rs` is the native stack guard — the embedder arms it at the top of its
   JS thread with that thread's stack size, the parser's recursion hubs
@@ -917,7 +917,7 @@ page shows the integration's state (`claude_mcp_status`).
   if any binding-creating path changes), and the sidecar builds through its own `[profile.ggs-node]` — the release size
   diet with unwinding panics, because third-party JS must degrade its own miscompiled
   closures, never abort the backend (`scripts/prepare.mjs` builds it that way),
-  `src-tauri/src/ext_protocol.rs` (the `ggs-ext/1` wire
+  `src-tauri/crates/ggs-proto/src/lib.rs` (the `ggs-ext/1` wire
   protocol, shared with plugin binaries), the `ggs-ext` crate's `routing` module (which of the
   instance's frontends answers a backend's `ggs.hostRequest` — `main`, or ONE remote
   session `remote/<n>` (the Relay's `x-ggs-frontend` header, believed only from the
@@ -964,10 +964,10 @@ page shows the integration's state (`claude_mcp_status`).
   `tests/editor.test.ts` (the extpage tab),
   `tests/editorServices.test.ts` (the diagnostics store and the document-formatting
   registry, booted through the frame bootstrap),
-  `src-tauri/tests/it/node_runtime.rs` (the pretend Node runtime: a package's JS entry served
+  `src-tauri/crates/ggs-node/tests/it/node_runtime.rs` (the pretend Node runtime: a package's JS entry served
   over `ggs-ext/1`, the process-host chain over the bundled `ggs-node` sidecar, a NAPI
   addon answering under ggs-node, the installed extension's whole activation),
-  `src-tauri/tests/it/vscode_shim_boa.rs` (the Boa define-op repro bed
+  `src-tauri/crates/ggs-node/tests/it/vscode_shim_boa.rs` (the Boa define-op repro bed
   for the ggs-node `vscode` shim),
   `scripts/probes/claude-code-live-check.mjs` (the live claude-code check: the backend on
   ggs-node (or `--host real-node`), its commands, the chat webview mounted, the IDE MCP
@@ -1011,7 +1011,7 @@ the backend, rendered asynchronously — per-channel counts, bus load, per-ident
 times, frame-loss blame, raw frame browsing and SVG charts.
 
 - Frontend: `src/features/can/canLogView.ts`, `src/features/can/canRawView.ts`, `src/features/can/canChart.ts`
-- Backend: `src-tauri/src/can_log.rs` (parsing, statistics, blf↔asc conversion)
+- Backend: `src-tauri/crates/ggs-can/src/lib.rs` (parsing, statistics, blf↔asc conversion)
 
 ### 14. Performance Lab
 
@@ -1517,7 +1517,7 @@ test-macos pass `-- --skip ggs_bash`).
   `$VARIABLES`, git subcommands and — after `checkout`/`switch`/`merge`/… — branch,
   remote and tag names; a unique match is inserted, an ambiguous one extends to the common
   prefix and then lists in columns
-- The shell: `src-tauri/src/ggs_bash/` (`lex.rs` the tokenizer, `parse.rs` the parser,
+- The shell: `src-tauri/crates/ggs-bash/src/` (`lex.rs` the tokenizer, `parse.rs` the parser,
   `expand.rs` word expansion, `exec.rs` the interpreter over in-process pipes and the
   PATH/HOME plumbing, `builtins.rs` the shell builtins, `applets.rs` the line tools,
   `sysinfo.rs` the OS-facing applets (df/free/ps/id/…, direct Win32 declarations),
@@ -1525,7 +1525,7 @@ test-macos pass `-- --skip ggs_bash`).
   `regexlite.rs`, `glob.rs`, `hashes.rs`, `localtime.rs`,
   `msys.rs` the path dialect, `compress.rs`/`archive.rs` the pure-Rust archives,
   `mod.rs` the CLI entry and REPL, `pref.rs` the setting
-  read + the claude env), the binary `src-tauri/src/bin/ggs_bash.rs` (no feature gates:
+  read + the claude env), the binary `src-tauri/crates/ggs-bash/src/main.rs` (no feature gates:
   `cargo test` builds and runs its suite everywhere, and the bundler ships it as the
   crate's own additional binary beside `ggs.exe` — never also as a staged `externalBin`
   sidecar: two components installing the same `ggs-bash.exe` fail MSI validation with
@@ -1536,14 +1536,14 @@ test-macos pass `-- --skip ggs_bash`).
   racing the write respawned the backend under the old shell, 2026-10-13), the
   shell choice on every `pty_create` in `src/features/terminal/terminal.ts`, the shell spawn in
   `src-tauri/src/pty.rs` (`shell_command`)
-- Tests: the `#[cfg(test)]` suites through `src-tauri/src/ggs_bash/` (the language, the
+- Tests: the `#[cfg(test)]` suites through `src-tauri/crates/ggs-bash/src/` (the language, the
   dialect round-trip, the invocation-dialect parser, and the e2e batches in
   `mod.rs` — the file operations, `ls`, the grep/find/sed/sort/head/xargs flag sets,
   the checksums and archives, `timeout`, the builtins, the `>`/`<` process
   substitutions, the parameter forms, and the 2026-10-14 parity batches' three
   e2e groups — text tools, byte viewers, file tools — each shape pinned against
   a live Git Bash's own output) and `pty.rs`'s `shell_command`;
-  `cmd_providers.rs`'s spawn-env guard; `src-tauri/tests/it/ggs_bash_cli.rs` (the built
+  `cmd_providers.rs`'s spawn-env guard; `src-tauri/crates/ggs-bash/tests/cli.rs` (the built
   binary's CLI contract — the `-l`/`-i` flags riding around `-c` in any order,
   `--login`, the positional words after the command string);
   `scripts/probes/ggs-bash-parity-diff.sh` (the byte-diff harness itself: ~80
@@ -1588,21 +1588,6 @@ database) carries the link through NAT. The whole design lives in
   INSTANCE_GONE. `daemon/src/sandbox.rs` is the module; the Remote page carries the
   "Security sandbox" section and the picker an "open a sandboxed window" entry; the real
   e2e is `cargo test --test integration sandbox_launch -- --ignored` on a capable host.
-- **`ggs-config`** (2026-10-13, the owner's direction): the one-command Remote Access
-  setup from a command line — an SSH session on a fresh machine runs `ggs-config` (or
-  `ggs config`, either spelling) and gets the daemon installed, the access password set,
-  an optional relay connected, and the links printed, no window ever opened.
-  `src-tauri/src/remote_config.rs` (no `desktop` feature — headless) finds the daemon
-  binary (the installed running copy in `~/.ggs/remote/bin`, an installed extension's
-  package, or the bundled `ggs-remote.vsix` beside the app, whose daemon it extracts into
-  `~/.ggs/remote/bin-incoming/` staging — never `bin/`, the running copy the daemon's own
-  install replaces), then drives the daemon CLI end to end: `install --ggs-exe`, the
-  password over the loopback admin API with the value on a stdin pipe (never an argv),
-  `hub/connect`, `print-link`. Flags `--password` / `--server` / `--join-key` answer the
-  prompts non-interactively (`--server ""` skips the relay without asking); the password
-  prompt doesn't echo (rpassword). The binary ships as the crate's own `[[bin]]` beside
-  `ggs` (the ggs-bash precedent), so it lands on the user's PATH through
-  `cmd_assoc::user_path_apply`.
 - **The 2026-10-13 security pass** (plan §23.6): three directed audits (daemon attack
   surface, the public Hub, app-side remote + web) and their fixes, all tested. The
   remote-session file boundary lives in the Relay (`src/remote/pathGate.ts`): path-carrying
@@ -1630,7 +1615,7 @@ database) carries the link through NAT. The whole design lives in
   (a password change closes every socket with 4401 within a second), the window registry
   over the local control channel, frame routing to each window's hidden Relay webview,
   credit-window flow control, the 120 s resume ring, instance lifecycle (SPAWN / close /
-  restart with the dirty-file check), and the Hub client (`src/hub/`: the Ed25519 device
+  restart with the dirty-file check), and the Hub client (`extensions-src/ggs-remote/hub/src/`: the Ed25519 device
   key whose public half *is* the link's UUID, the outbound tunnel with challenge handshake
   and reconnect backoff, and tunneled browser sessions served through the very router the
   LAN listener uses). The one-time downloads (2026-10-13): a folder zip answers its
@@ -1640,7 +1625,7 @@ database) carries the link through NAT. The whole design lives in
   retry against the spent one-time URL answered 404 — Chrome's "未发现文件"); a build
   that dies after the headers sends a mid-stream error chunk, which the daemon turns into
   an aborted body so a truncated archive never lands as a complete file. The recently
-  opened folders (`src/recent.rs`, 2026-10-12): every
+  opened folders (`extensions-src/ggs-remote/daemon/src/recent.rs`, 2026-10-12): every
   folder a window registers or updates with — most recent first, deduped, capped at 12 —
   persists as `recent.json` under the root and rides every WINDOWS frame
   (`recentFolders`), so the picker's "recent paths" list survives a daemon restart and a
@@ -1671,7 +1656,7 @@ database) carries the link through NAT. The whole design lives in
   host frame's document is an app asset whose build spells its hashed scripts
   root-absolute, and unrewritten they fell out of the token route and 404'd at the
   daemon's root (no frame extension ever activated remotely). Its
-  `tests/integration.rs` covers the LAN paths; `tests/hub_link.rs` runs a real Hub
+  `extensions-src/ggs-remote/daemon/tests/integration.rs` covers the LAN paths; `extensions-src/ggs-remote/daemon/tests/hub_link.rs` runs a real Hub
   against a real daemon — login, a WebSocket session and a password change's kick, all
   through `/u/<uuid>/`.
 - **The Hub** (`extensions-src/ggs-remote/hub/`, another crate of its own — never inside the
@@ -1898,17 +1883,20 @@ database) carries the link through NAT. The whole design lives in
   only, never scripts or pages).
 - **`ggs-config`** (2026-10-13, the owner's direction): Remote Access configured from a
   command line — an SSH session on a fresh machine sets the password and the relay and
-  reads the links, no window ever opening. `src-tauri/src/remote_config.rs` (ungated — the
+  reads the links, no window ever opening. `src-tauri/crates/ggs-config/src/lib.rs` (ungated — the
   `ggs-node` sidecar pass compiles the whole lib without `desktop`, so the module is std +
   `serde_json` + `rpassword` only, its VSIX extraction over GGS Bash's pure-Rust zip
   layer, `archive.rs`'s `zip_entry`) drives the tray daemon's own CLI end to end: it finds
   the binary (the installed running copy under the remote root, an installed extension's
   package, or the daemon packed inside the bundled `ggs-remote.vsix` beside the app —
   extracted once into the root's `bin-incoming` staging dir, never the running `bin`),
-  installs and starts it, sets the access password through the loopback admin API (the
-  value on a stdin pipe, never an argv a process listing could show), optionally connects
-  a relay, and prints the links. Reached as the `ggs-config` binary the installer carries
-  beside `ggs` (`src-tauri/src/bin/ggs_config.rs`) and as the `ggs config` subcommand
+  installs and starts it (`install --ggs-exe`), sets the access password through the
+  loopback admin API (the value on a stdin pipe, never an argv a process listing could
+  show; the prompt does not echo), optionally connects
+  a relay (`hub/connect`), and prints the links (`print-link`; flags `--password` /
+  `--server` / `--join-key` answer the prompts non-interactively, `--server ""` skipping
+  the relay without asking). Reached as the `ggs-config` binary the installer carries
+  beside `ggs` (`src-tauri/crates/ggs-config/src/main.rs`) and as the `ggs config` subcommand
   (lib.rs's run dispatches either spelling). This one module is the sanctioned exception
   to the module's naming seam (below): it names the daemon it drives.
 - **The app side** (`src/remote/` + `remote.html` + `relay.html` + `vite.remote.config.ts` +
@@ -2159,7 +2147,7 @@ Reads still never
 spawn a process per call — the backend is a long-lived, warm sibling process
 (`ext_process.rs` keeps every declared backend running; `ext_protocol.rs`'s `ggs-ext/1`,
 thread-per-request), reached over a pipe, not launched fresh each time. Writes still never
-spawn `git` anywhere except `src-tauri/src/git.rs`; the panel's Git channel is fed from that
+spawn `git` anywhere except `src-tauri/crates/ggs-git/src/runner.rs`; the panel's Git channel is fed from that
 single runner, and the write path stays entirely in the app process.
 
 **One module, one responsibility.**
@@ -2198,7 +2186,7 @@ Tests mirror the modules.
 | Frontend unit / view | `tests/<module>.test.ts` (e.g. `scm.test.ts`, `explorer.test.ts`, `canLog.test.ts`) | vitest + jsdom; `tests/tauriMock.ts` scripts every Tauri `invoke`, records calls, and replays backend events; most files share the `vmThreads` pool, whose snapshot environment is named explicitly in `tests/vmSnapshotEnvironment.ts` — vitest's default resolution is a bare dynamic `import()` inside the vm context that dies with `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING` on the Node 20 line |
 | Frontend scenario | `tests/scenarioHarness.test.ts`, `tests/scenarioFixtures.ts`, `tests/helpers.ts` | Multi-view flows over the same mock |
 | Frontend sweeps | `tests/commandSweep.test.ts`, `tests/uiSweep.test.ts`, `tests/themeContrast.themes.test.ts` | Every command executes; layout and WCAG invariants hold for every theme |
-| Backend unit | `#[cfg(test)]` beside each command; `src-tauri/src/test_support.rs` | Scratch repositories with an isolated git config |
+| Backend unit | `#[cfg(test)]` beside each command; `src-tauri/src/test_git_helpers.rs` | Scratch repositories with an isolated git config |
 | Backend integration / perf | `src-tauri/tests/it/perf.rs` | Synthetic repository, `GGS_PERF_FILES` |
 | Manual / visual | `dev/dev-harness.html`, `dev/hex-probe.html` | Real Tauri IPC or the scripted fake backend |
 
@@ -2208,8 +2196,8 @@ Conventions:
 - The extension's page-bundle stubs (`vscode` / Node / `fs` shims) live with its packer,
   in the extension repository's `studio/stubs/`.
 - Backend tests must not depend on the developer's global git configuration or on network
-  access; use `test_support.rs`.
-- Do not weaken a sweep or budget test to make a change pass. If a `tests/perf.rs` budget
+  access; use `src-tauri/src/test_git_helpers.rs`.
+- Do not weaken a sweep or budget test to make a change pass. If a `src-tauri/tests/it/perf.rs` budget
   must move, change it deliberately there and say why in the commit.
 
 ## Code style
