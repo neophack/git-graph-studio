@@ -15,7 +15,7 @@
 // analysis as its own tab (the caller owns that flow), "Convert" exports the log to the
 // other format. Neither blocks browsing — both run on the backend's blocking pool.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 
 import { convertCanLog, idFilterRanges, idHex } from './canLogView';
 import { attachPageKeys, attachWheel, type Disposable } from './scroll/input';

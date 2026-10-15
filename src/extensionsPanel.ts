@@ -16,7 +16,7 @@
 // offline offer is what a featured row falls back to when the marketplace is unreachable.
 
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
-import { listen } from '@tauri-apps/api/event';
+import { listen } from './platform/ipc/core';
 
 import type { ExtInfo, ExtProcessInfo, ExtensionHost, GalleryEntry } from './extHost';
 import { extFileDataUrl } from './platform/extAssets';

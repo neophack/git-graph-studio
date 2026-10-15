@@ -8,8 +8,8 @@
 // over a gateway's unknown models. Tokens only: no money, no durations — the bridge
 // bills nothing.
 
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { invoke } from './platform/ipc/core';
+import { listen } from './platform/ipc/core';
 
 import { commands } from './platform/commands';
 import { locale, t, tf } from './platform/i18n';

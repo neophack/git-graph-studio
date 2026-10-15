@@ -3,8 +3,8 @@
 // forwards the results over the loopback ggs-remote/1 link. One per instance; the header's
 // `session` field tells the sessions apart. Because it runs the same IPC the desktop
 // window does, every command, channel and event works remotely with no per-command code.
-import { Channel, invoke } from '@tauri-apps/api/core';
-import { emit, emitTo, listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { Channel, invoke } from '../platform/ipc/core';
+import { emit, emitTo, listen, type UnlistenFn } from '../platform/ipc/core';
 import { gateInvoke, isPathGated } from './pathGate';
 import {
 	CHANNEL_PREFIX,

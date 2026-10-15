@@ -11,7 +11,7 @@
 // workspace size can stall the page. Loaded lazily behind the Analysis sidebar; nothing
 // here belongs to the first-paint bundle.
 
-import { invoke, Channel } from '@tauri-apps/api/core';
+import { invoke, Channel } from './platform/ipc/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { t, tf } from './platform/i18n';

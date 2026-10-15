@@ -5,7 +5,7 @@
 
 import { autocompletion, closeBrackets, snippetCompletion, type Completion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete';
 import { Facet, type Extension } from '@codemirror/state';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 
 import { languageOf, resolveVariables, snippetsFor } from './snippetRegistry';
 import { extensionCompletionsFor, hasExtensionCompletions, type ExtensionCompletion } from './editorCompletions';

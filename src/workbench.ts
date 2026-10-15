@@ -3,8 +3,8 @@
 // (terminal, output) and the status bar, wired together through the command registry - and
 // the folder lifecycle (open / reopen last / close) that feeds them all.
 
-import { invoke, Channel } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { invoke, Channel } from './platform/ipc/core';
+import { listen } from './platform/ipc/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';

@@ -4,7 +4,7 @@
 // scan runs, and a newer keystroke aborts the superseded scan at the next chunk boundary. The
 // top rows fill in progressively, ranked by the fuzzy scorer.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 
 import { compareFileMatches, makeQuery, scoreFile, type FileEntry, type FileMatch } from './fuzzy';
 import type { QuickPickItem, QuickPickSource } from './platform/ui';

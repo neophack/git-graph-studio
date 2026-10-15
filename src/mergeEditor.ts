@@ -3,7 +3,7 @@
 // Resolved" saves the file and stages it - the workflow of a three-way merge view without a
 // language server or a separate merge tool.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 import type { EditorView } from '@codemirror/view';
 
 import { el, icon, notify } from './platform/ui';

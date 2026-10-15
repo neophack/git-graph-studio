@@ -4,8 +4,8 @@
 // logs them) plus the channels installed extensions created (`createOutputChannel`), picked
 // from a dropdown in the view's actions.
 
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { invoke } from './platform/ipc/core';
+import { listen } from './platform/ipc/core';
 
 import { ContextView } from './contextView';
 import { TerminalView } from './terminal';

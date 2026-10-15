@@ -5,7 +5,7 @@
 // sidebar lists it beside the five analysis tools and opens it as one of the editor
 // pages, so it loads lazily with them.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { t, tf } from './platform/i18n';

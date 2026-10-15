@@ -7,8 +7,8 @@
 // its lines arrive and colored by `viewer_highlight` a beat later; the outline pane fills
 // from `viewer_symbols` once the rows are up, so neither ever blocks the first paint.
 
-import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { invoke } from './platform/ipc/core';
+import { listen, type UnlistenFn } from './platform/ipc/core';
 
 import { DocFindController, type DocFindHost, type DocFindMatch } from './docFind';
 import { t } from './platform/i18n';

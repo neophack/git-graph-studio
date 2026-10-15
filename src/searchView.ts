@@ -5,7 +5,7 @@
 // tree is a plain DOM tree, like VS Code's search tree: one group per file (its header row
 // followed by its match rows) in normal document flow - every row in the DOM, no windowing.
 
-import { Channel, invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from './platform/ipc/core';
 
 import * as state from './platform/state';
 import { queryHasUppercase } from './findOptions';

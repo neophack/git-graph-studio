@@ -7,7 +7,7 @@
 // those commands — the Relay refuses them, src/remote/pathGate.ts, because their paths
 // name anywhere on the machine). A desktop upload lands beside what already exists
 // (the ` (copy)` naming the Explorer's own drop copy uses — it never clobbers).
-import { invoke, Channel } from '@tauri-apps/api/core';
+import { invoke, Channel } from './platform/ipc/core';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 
 import { t, tf } from './platform/i18n';

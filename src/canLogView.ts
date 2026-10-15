@@ -19,7 +19,7 @@
 // every load figure (table, peak, charts) recomputes live on a change. A filter bar
 // narrows the tables and charts to chosen identifiers and channels.
 
-import { invoke, Channel } from '@tauri-apps/api/core';
+import { invoke, Channel } from './platform/ipc/core';
 import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 
 import { cycleSeriesChart, formatAxisSeconds, histogramChart, multiLineChart, seriesStyle, stackedBars, type ChartSeries } from './canChart';

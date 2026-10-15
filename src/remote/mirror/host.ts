@@ -15,8 +15,8 @@
 // copies of their frames (§22.6): its up messages carry the stream (`w`) and land in that
 // stream's share (webviewShare.ts), loaded with the first one.
 
-import { invoke } from '@tauri-apps/api/core';
-import { emit } from '@tauri-apps/api/event';
+import { invoke } from '../../platform/ipc/core';
+import { emit } from '../../platform/ipc/core';
 import { DomRecorder } from './recorder';
 import { InputReplayer } from './replay';
 import { VIEWER_TTL_MS, MIRROR_DOWN, type DownMessage, type UpMessage } from './protocol';

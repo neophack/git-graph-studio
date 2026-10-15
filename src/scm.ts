@@ -6,7 +6,7 @@
 // files flatten to fixed-height rows and only the visible window is in the DOM, so a
 // working tree with thousands of changes renders as fast as one with ten.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 
 import type { CommandRegistry } from './platform/commands';

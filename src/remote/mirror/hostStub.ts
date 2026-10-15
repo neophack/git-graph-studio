@@ -3,7 +3,7 @@
 // hello, so the desktop's first paint carries none of it. The phone shell (phoneShell.ts)
 // likewise loads only when a phone viewer has made the window phone-sized.
 
-import { listen } from '@tauri-apps/api/event';
+import { listen } from '../../platform/ipc/core';
 import { MIRROR_UP, type UpMessage } from './protocol';
 import { PHONE_MAX_WIDTH } from './uiMode';
 

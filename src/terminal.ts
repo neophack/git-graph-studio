@@ -4,8 +4,8 @@
 
 import type { Terminal } from '@xterm/xterm';
 import type { FitAddon } from '@xterm/addon-fit';
-import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { invoke } from './platform/ipc/core';
+import { listen, type UnlistenFn } from './platform/ipc/core';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { loadXterm } from './platform/lazy';

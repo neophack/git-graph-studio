@@ -3,7 +3,7 @@
 // stylesheet and re-apply the vscode-* body classes; every change dispatches an event so the
 // parts that cache derived values (menus, terminals, the viewer's colors) can refresh.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../platform/ipc/core';
 
 import { load, save } from './state';
 import { setLocale, t } from './i18n';

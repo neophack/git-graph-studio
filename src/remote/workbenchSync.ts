@@ -23,7 +23,7 @@
 // housekeeping, and a reloaded phone page must not pull the PC's sidebar around), and goes
 // local-only while a session restore rebuilds this frontend's own tabs.
 
-import { emit as tauriEmit, listen as tauriListen } from '@tauri-apps/api/event';
+import { emit as tauriEmit, listen as tauriListen } from '../platform/ipc/core';
 import { inputId, type EditorInput } from '../editor';
 import type { EditorPlacement } from '../features/editor/types';
 import type { ActiveEditorInfo, EditorArea } from '../editorArea';

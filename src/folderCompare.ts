@@ -3,7 +3,7 @@
 // versions, and the sync actions (copy to the other side, delete) that flow through the same
 // filesystem commands the Explorer uses.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 import type { EditorView } from '@codemirror/view';
 import type { MergeView } from '@codemirror/merge';
 

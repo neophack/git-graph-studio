@@ -8,7 +8,7 @@
 // and pure helpers. Anything that writes, spawns or dialogs is verified structurally only, and
 // the scan names it so the report shows what a button does without doing it.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 
 import { commands } from './platform/commands';
 import { locale, t } from './platform/i18n';

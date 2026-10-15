@@ -5,7 +5,7 @@
 
 import '@vscode/codicons/dist/codicon.css';
 import './shell.css';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 import { initSettings, loadSettingsFile } from './platform/settings';
 import { installDesktopRemoteHooks } from './remote/desktopHooks';
 

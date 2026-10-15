@@ -25,7 +25,7 @@
 // end. A data inspector line under the rows reads the caret byte as u8..u64, floats
 // and text.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { t, tf } from './platform/i18n';
 import { settings } from './platform/settings';

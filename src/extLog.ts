@@ -13,7 +13,7 @@
 // `localStorage['ggs-ext-debug']` switch still forces `trace`. An in-memory ring of the
 // last entries backs the tests and anything that wants to show recent history.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 import { settings, SETTINGS_EVENT, type ExtensionLogLevel } from './platform/settings';
 
 export type ExtLogLevel = ExtensionLogLevel;

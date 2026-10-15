@@ -4,7 +4,7 @@
 // and refs/for push) are the plugin's own manifest commands, run by its backend. Each asks with a quick pick / input where VS Code does,
 // runs through the backend, and reports through notifications.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
 import type { CommandRegistry } from './platform/commands';

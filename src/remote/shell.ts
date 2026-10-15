@@ -27,7 +27,7 @@ import { openWindowSwitcher, watchLifecycle } from './windowSwitcher';
 import { connectionLooksSlow, dataSaverPreferred, setDataSaver } from './dataSaver';
 import { remoteEnv } from './session';
 import { installPhoneSettingsEntry } from './settingsPage';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../platform/ipc/core';
 import { modeUrl } from './mirror/uiMode';
 
 function formatBytes(n: number): string {

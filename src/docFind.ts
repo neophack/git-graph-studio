@@ -7,7 +7,7 @@
 // toggles shared with the Search view — minus find-in-selection, which has no meaning on a
 // surface whose selection only exists inside the loaded window.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 
 import { findOptions, queryHasUppercase, updateFindOption, type FindOptions } from './findOptions';
 import { FindHistory, HistoryRecall, recallKey } from './findHistory';

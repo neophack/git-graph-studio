@@ -2,7 +2,7 @@
 // R21): open files with their dirty / active state and the pending SCM changes, which the
 // Remote Access window picker shows per window. Polled cheaply and sent only on change; an
 // instance without the command (or no daemon at all) costs one failed call, then silence.
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../platform/ipc/core';
 import { frontendId } from './session';
 
 export interface SummarySource {

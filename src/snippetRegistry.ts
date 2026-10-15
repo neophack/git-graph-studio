@@ -2,7 +2,7 @@
 // workspace's `.vscode/` folder) plus a built-in base set per language. The registry is
 // queried live by the completion source, so a loaded file needs no reload round-trip.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 
 import { contributionRegistryVersion, declaredLanguageId, extensionSnippetFiles } from './contributions';
 

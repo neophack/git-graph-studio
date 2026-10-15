@@ -6,7 +6,7 @@
 // endings, the language, and the notification bell (which opens the notification centre -
 // every toast ever shown stays listed there until cleared).
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 
 import { ENCODING_LABELS } from './editor';
 import { t, tf } from './platform/i18n';

@@ -5,7 +5,7 @@
 // Changes apply immediately, persist to localStorage and write ~/.ggs/settings.json (which a
 // hand edit of overrides on the next launch); the labels re-render on a language switch.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 
 import { LOCALES, t, tf } from './platform/i18n';
 import { SETTINGS_EVENT, SETTING_DEFS, THEMES, applyEnumSetting, isSettingModified, settings, updateSetting, type SettingDef } from './platform/settings';

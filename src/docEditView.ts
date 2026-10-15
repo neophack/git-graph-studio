@@ -18,13 +18,13 @@ import { attachWheel, type Disposable } from './scroll/input';
 import { type AutoscrollStrategy, ScrollModel, VERTICAL_SCROLL_MARGIN } from './scroll/model';
 import { Scrollbar } from './scroll/scrollbar';
 import { defaultKeymap } from '@codemirror/commands';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { listen, type UnlistenFn } from './platform/ipc/core';
 
 import { DocFindController, type DocFindHost, type DocFindMatch, type DocFindSpec } from './docFind';
 import { toggleBlockComment, toggleLineComment } from './comments';
 import { vscodeHighlighting } from './cmTheme';
 import { el, notify } from './platform/ui';
-import { Channel, invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from './platform/ipc/core';
 
 interface OpenInfo {
 	docId: number;

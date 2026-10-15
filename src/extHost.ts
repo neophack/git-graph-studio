@@ -10,8 +10,8 @@
 // its commands dispatch to its own frame (a VSIX) or its own backend process (a `ggs/2`
 // package), and its pages mount as sandboxed frames over the `ggs://` protocol.
 
-import { invoke, Channel } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { invoke, Channel } from './platform/ipc/core';
+import { listen } from './platform/ipc/core';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';

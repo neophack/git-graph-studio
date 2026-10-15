@@ -3,7 +3,7 @@
 // against its parent's. The commits come from the backend's own `git log --follow` over the
 // path, so the list survives without any engine: it is the Source Control module's read.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 
 import type { DiffRequest } from './features/editor/types';
 import type { BlameLine } from './features/scm/types';

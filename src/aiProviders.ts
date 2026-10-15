@@ -12,8 +12,8 @@
 // management page), and the `bridgedExtIds` knowledge — the app here names no
 // extension id, the backend's answer says whose sidebar sections get the chip.
 
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { invoke } from './platform/ipc/core';
+import { listen } from './platform/ipc/core';
 
 import { commands } from './platform/commands';
 import { t, tf } from './platform/i18n';

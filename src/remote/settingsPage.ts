@@ -17,7 +17,7 @@ import { SETTINGS_EVENT, SETTING_DEFS, THEMES, applyEnumSetting, isSettingModifi
 import { extSettings, saveExtSetting } from '../platform/state';
 import { notify } from '../platform/ui';
 import { extLog } from '../extLog';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../platform/ipc/core';
 import { closeActionSheet, openSheet, showActionSheet, sheetOpen } from './actionSheet';
 import { pushBack } from './backStack';
 import { setDataSaver } from './dataSaver';

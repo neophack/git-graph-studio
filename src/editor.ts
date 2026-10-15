@@ -6,7 +6,7 @@
 import type { Extension, Text } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
 import type { MergeView } from '@codemirror/merge';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 
 import { hasBookmark, toggleBookmark } from './bookmarks';
 import { samePath } from './editorDiagnostics';

@@ -4,7 +4,7 @@
 // detected (the same chord bound to more than one command), and the editor in the Keyboard
 // Shortcuts view (Ctrl+K Ctrl+S) records a new key straight from the keyboard.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../platform/ipc/core';
 
 import { commands, UNSHIFTED_GLYPHS } from './commands';
 import { el, icon } from './ui';

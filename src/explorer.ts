@@ -2,7 +2,7 @@
 // codicon file/folder icons), git status decorations, the title actions (new file / new
 // folder / refresh / collapse all), inline new/rename inputs, and the context menu.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 

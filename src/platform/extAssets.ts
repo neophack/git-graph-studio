@@ -3,7 +3,7 @@
 // can resolve extension icons without importing the extension host (plan §5.4 — three of the
 // 6-file cycle's edges were exactly this one function).
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../platform/ipc/core';
 
 /** The data-URL MIME type of an image file inside an extension (icons, README images). */
 export function imageMime(path: string): string {

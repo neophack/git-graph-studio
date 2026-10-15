@@ -3,7 +3,7 @@
 // action. The same backend shape (`symbol_tree`) serves the MCP server's `symbol_tree`
 // tool, so what the page shows is exactly what an AI assistant is told.
 
-import { invoke, Channel } from '@tauri-apps/api/core';
+import { invoke, Channel } from './platform/ipc/core';
 
 import { t } from './platform/i18n';
 import { KIND_ICONS } from './contextView';

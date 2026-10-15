@@ -4,7 +4,7 @@
 // body. That heuristic covers the direct-call reading the tree is for; the definitions come
 // from the same outline extraction the viewer uses.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 
 import { el, icon } from './platform/ui';
 

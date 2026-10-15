@@ -13,7 +13,7 @@
 // viewer's own formats (hex, text, C array, Base64) from whichever pane the click landed
 // on - the two sides can differ, so Copy always names its source file.
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './platform/ipc/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { t, tf } from './platform/i18n';
