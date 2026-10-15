@@ -19,9 +19,10 @@
 // surface every host imports (a directory import resolves here).
 
 import type { HostBridge, HostContext, HostEvent } from './bridge';
+import { readLocalDocProvider } from './bridge';
 
 import { LOG_RANK, resetShimLoggedOnce, setShimLogSink, setShimLogThreshold, shimLog } from './shimLog';
-import { setUriPlatform } from './types/uri';
+import { rehydrateUris, setUriPlatform } from './types/uri';
 import { CancellationTokenCancelled, CancellationTokenNone, silentEvent } from './types/events';
 import { createShimState } from './state';
 import { installFlushHook } from './registrations';
@@ -409,6 +410,50 @@ export function serveHostCall(api: VscodeApi | null, method: string, args: unkno
 		default:
 			return UNSERVED_HOST_CALL;
 	}
+}
+
+/** The registration tables a host's own prelude serves its calls from: the command
+ *  handlers the extension's shim parked in its host, the two provider registries, and
+ *  the loaded package's deactivate. */
+export interface HostCallTables {
+	commands: Map<string, (...args: unknown[]) => unknown>;
+	docProviders: Map<string, { provideTextDocumentContent?: (uri: unknown) => unknown }>;
+	fsProviders: Map<string, { readFile?: (uri: unknown) => unknown }>;
+	deactivate(): void;
+	api: VscodeApi | null;
+}
+
+/** The host → extension calls every host answers ahead of `serveHostCall` (running a
+ *  registered command handler, the two provider reads, deactivate) and the fallback into
+ *  the shared table — the whole of extHostBoot's and nodeHost's `handleCall`, one
+ *  definition so the frame and the real-Node host cannot drift. */
+export function serveExtensionHostCall(tables: HostCallTables, method: string, args: unknown[]): unknown {
+	if (method === 'runCommand') {
+		const handler = tables.commands.get(String(args[0]));
+		if (!handler) throw new Error(`command ${String(args[0])} is no longer registered`);
+		// A menu's context crosses the wire as Uri-shaped data (the methods cannot cross the
+		// clone); the handler receives them as full Uris, as VS Code delivers.
+		return handler(...(rehydrateUris((args[1] as unknown[] | undefined) ?? []) as unknown[]));
+	}
+	if (method === 'docProvider.provide') {
+		const provider = tables.docProviders.get(String((args[0] as { scheme?: unknown } | undefined)?.scheme ?? ''));
+		if (!provider) throw new Error('no content provider registered for the scheme');
+		return provider.provideTextDocumentContent?.(args[0]);
+	}
+	if (method === 'fsProvider.read') {
+		const uri = rehydrateUris(args[0]) as Uri;
+		const text = readLocalDocProvider(new Map(), uri, tables.fsProviders);
+		if (text === null) throw new Error('no file-system provider registered for the scheme');
+		return text;
+	}
+	if (method === 'deactivate') {
+		tables.deactivate();
+		return undefined;
+	}
+	// Tree views, the formatter run and webview views: the shared host-call table.
+	const served = serveHostCall(tables.api, method, args);
+	if (served !== UNSERVED_HOST_CALL) return served;
+	throw new Error(`unknown extension host call: ${method}`);
 }
 
 

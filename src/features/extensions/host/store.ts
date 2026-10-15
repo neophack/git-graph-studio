@@ -14,7 +14,7 @@ import { removeContributions } from '../contributions';
 import { extLog } from '../extLog';
 import { tf } from '../../../platform/i18n';
 import { notify } from '../../../platform/ui/index';
-import { imageMime } from '../../../platform/extAssets';
+import { extImageMime } from '../../../platform/extAssets';
 
 
 export function extIconRelPath(ext: ExtInfo): string {
@@ -65,7 +65,7 @@ export const storeMethods: ThisType<ExtensionHost> = {
 		let pending = galleryIconCache.get(url);
 		if (!pending) {
 			pending = extGalleryAsset(MARKETPLACE_URL, url)
-				.then((base64) => `data:${imageMime(url)};base64,${base64}`)
+				.then((base64) => `data:${extImageMime(url)};base64,${base64}`)
 				.catch(() => null);
 			galleryIconCache.set(url, pending);
 		}

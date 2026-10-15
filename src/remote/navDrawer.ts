@@ -17,6 +17,7 @@ import { setDataSaver } from './dataSaver';
 import { BUILTIN_VIEWS, currentPage, extensionContainers, goTo, launchers, pageIcon, type PageId } from './pages';
 import { remoteEnv } from './session';
 import { openSettingsPage } from './settingsPage';
+import { codicon, toggleSwitch } from './widgets';
 
 let open: { root: HTMLElement; release: () => void } | null = null;
 
@@ -77,13 +78,6 @@ function row(iconNode: HTMLElement, label: string, run: () => void, options: { a
 	return button;
 }
 
-function codicon(name: string): HTMLElement {
-	const span = document.createElement('span');
-	span.className = `codicon codicon-${name}`;
-	span.setAttribute('aria-hidden', 'true');
-	return span;
-}
-
 function section(label: string, rows: HTMLElement[]): HTMLElement {
 	const group = document.createElement('div');
 	group.className = 'ggs-drawer-section';
@@ -100,16 +94,6 @@ function commandRow(iconName: string, label: string, id: string, extra: { badge?
 		closeDrawer();
 		void commands.execute(id);
 	}, { ...extra, disabled: !commands.isEnabled(id) });
-}
-
-/** The on/off switch a settings row carries (settingsPage's shape too — .ggs-switch draws it). */
-function toggleSwitch(on: boolean): HTMLElement {
-	const track = document.createElement('span');
-	track.className = 'switch ggs-switch' + (on ? ' on' : '');
-	track.setAttribute('role', 'switch');
-	track.setAttribute('aria-checked', on ? 'true' : 'false');
-	track.appendChild(document.createElement('i'));
-	return track;
 }
 
 /** Open the drawer. `menus` reads the workbench's menus at open time, so every entry's

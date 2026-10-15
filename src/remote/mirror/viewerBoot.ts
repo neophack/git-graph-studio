@@ -14,6 +14,9 @@ import { MirrorViewer } from './viewer';
 import { ViewerInput } from './viewerInput';
 import { isPhoneWidth, modeUrl, type ModeRequest } from './uiMode';
 
+// Deliberately not platform/ui/dom's `el`: this page runs no workbench (the comment
+// above), and its call shape is the page's own — a text third argument, not a children
+// array. One 6-line helper, kept local on purpose.
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
 	const node = document.createElement(tag);
 	node.className = className;

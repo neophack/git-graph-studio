@@ -13,7 +13,7 @@
 //   Call (host -> frame): running a command handler the extension registered, deactivate,
 //                         tree view walks, webview view resolutions.
 
-import { activationContext, createVscodeApi, readLocalDocProvider, rehydrateUris, serveHostCall, setUriPlatform, shimLog, UNSERVED_HOST_CALL, Uri, type HostContext, type VscodeApi } from './vscodeApi';
+import { activationContext, createVscodeApi, readLocalDocProvider, serveExtensionHostCall, setUriPlatform, shimLog, Uri, type HostContext, type VscodeApi } from './vscodeApi';
 import { probeVscodeNamespace } from './vscodeNamespaceProbe';
 import { setShimFailureReporter } from './nodeShims/shared';
 import { createNodeRequire, defaultNodeEnv, type NodeEnv } from './extModuleLoader';
@@ -96,33 +96,16 @@ const docProviders = new Map<string, { provideTextDocumentContent?: (uri: unknow
  *  through `fsProvider.read`. */
 const fsProviders = new Map<string, { readFile?: (uri: unknown) => unknown }>();
 
+/** The host → extension calls this frame answers (vscodeApi's shared prelude: the
+ *  commands, providers and deactivate this frame parked, then the shared table). */
 function handleCall(method: string, args: unknown[]): unknown {
-	if (method === 'runCommand') {
-		const handler = registered.get(args[0] as string);
-		if (!handler) throw new Error(`command ${args[0]} is no longer registered`);
-		// The workbench dispatches a menu's context as Uri-shaped data (the methods cannot
-		// cross the clone); the handler receives them as full Uris, as VS Code delivers.
-		return handler(...(rehydrateUris((args[1] as unknown[] | undefined) ?? []) as unknown[]));
-	}
-	if (method === 'docProvider.provide') {
-		const provider = docProviders.get(String((args[0] as { scheme?: unknown } | undefined)?.scheme ?? ''));
-		if (!provider) throw new Error('no content provider registered for the scheme');
-		return provider.provideTextDocumentContent?.(args[0]);
-	}
-	if (method === 'fsProvider.read') {
-		const uri = rehydrateUris(args[0]) as Uri;
-	const text = readLocalDocProvider(new Map(), uri, fsProviders);
-		if (text === null) throw new Error('no file-system provider registered for the scheme');
-		return text;
-	}
-	if (method === 'deactivate') {
-		module_?.exports.deactivate?.();
-		return undefined;
-	}
-	// Tree views, the formatter run and webview views: the shared host-call table.
-	const served = serveHostCall(api_, method, args);
-	if (served !== UNSERVED_HOST_CALL) return served;
-	throw new Error(`unknown extension host call: ${method}`);
+	return serveExtensionHostCall({
+		commands: registered,
+		docProviders,
+		fsProviders,
+		deactivate: () => module_?.exports.deactivate?.(),
+		api: api_
+	}, method, args);
 }
 
 let module_: { exports: { activate?: (context: unknown) => unknown; deactivate?: () => unknown } } | null = null;

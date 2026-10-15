@@ -4,13 +4,12 @@
 // 6-file cycle's edges were exactly this one function).
 
 import { extReadFileBase64 } from './ipc/ext';
+import { imageMime } from './markdown';
 
-/** The data-URL MIME type of an image file inside an extension (icons, README images). */
-export function imageMime(path: string): string {
-	const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase();
-	return ext === 'svg' ? 'image/svg+xml' : ext === 'png' ? 'image/png'
-		: ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp'
-		: ext === 'bmp' ? 'image/bmp' : 'image/jpeg';
+/** An extension package file's image MIME type: the shared table (markdown.ts), with the
+ *  jpeg fallback an extension's odd-named icon file still needs to embed as a data URL. */
+export function extImageMime(path: string): string {
+	return imageMime(path) ?? 'image/jpeg';
 }
 
 /** Cached base64 reads of a file inside an installed extension, as a data URL. */
@@ -23,7 +22,7 @@ export function extFileDataUrl(extId: string, relPath: string): Promise<string |
 	let pending = dataUrlCache.get(key);
 	if (!pending) {
 		pending = extReadFileBase64(extId, relPath)
-			.then((base64) => `data:${imageMime(relPath)};base64,${base64}`)
+			.then((base64) => `data:${extImageMime(relPath)};base64,${base64}`)
 			.catch(() => null);
 		dataUrlCache.set(key, pending);
 	}

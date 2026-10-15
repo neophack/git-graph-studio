@@ -1974,7 +1974,9 @@ database) carries the link through NAT. The whole design lives in
   enum writes unified in `applyEnumSetting`); `installPhoneSettingsEntry` routes the
   drawer's row and the `workbench.openSettings` command (the palette, an extension's
   `workbench.action.openSettings`) to the page on the phone and restores the desktop
-  command verbatim off it. The pages are page-stack navigation (`nav.ts`): an editor
+  command verbatim off it. The shell's own small widgets — the aria-hidden codicon glyph
+  and the `.ggs-switch` toggle both the drawer and the settings page draw — live in one
+  place (`widgets.ts`, on platform/ui's icon). The pages are page-stack navigation (`nav.ts`): an editor
   activating (`editor.ts`'s activate) closes the side view and the Terminal page above
   it, the panel showing (`panel.ts`'s show; a covered panel's toggle reveals it instead
   of hiding it unseen) closes the side view — over the `workbench.toggleSidebar` /

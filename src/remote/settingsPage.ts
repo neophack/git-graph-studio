@@ -21,6 +21,7 @@ import { assocListDefaults } from '../platform/ipc/assoc';
 import { closeActionSheet, openSheet, showActionSheet, sheetOpen } from './actionSheet';
 import { pushBack } from './backStack';
 import { setDataSaver } from './dataSaver';
+import { codicon, toggleSwitch } from './widgets';
 
 /** The page's categories: the phone's own Remote section, the registry's four, extensions. */
 type CategoryId = 'remote' | 'general' | 'appearance' | 'editor' | 'search' | 'extensions';
@@ -46,23 +47,6 @@ let query = '';
 
 export function settingsPageOpen(): boolean {
 	return page !== null;
-}
-
-function codicon(name: string): HTMLElement {
-	const span = document.createElement('span');
-	span.className = `codicon codicon-${name}`;
-	span.setAttribute('aria-hidden', 'true');
-	return span;
-}
-
-/** The on/off switch a row carries (navDrawer's shape, drawn by the shared .ggs-switch rules). */
-function toggleSwitch(on: boolean): HTMLElement {
-	const track = document.createElement('span');
-	track.className = 'switch ggs-switch' + (on ? ' on' : '');
-	track.setAttribute('role', 'switch');
-	track.setAttribute('aria-checked', on ? 'true' : 'false');
-	track.appendChild(document.createElement('i'));
-	return track;
 }
 
 /** Option labels that are i18n keys resolve; plain labels (theme names, "14 px") pass through. */
