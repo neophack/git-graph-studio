@@ -24,7 +24,7 @@ pub fn stamp(stage: &str) {
 /// An NSProcessInfo activity assertion plus an always-on-top window keeps the run
 /// alive to completion. Debug builds only, and only when a probe asked for the harness.
 #[cfg(all(debug_assertions, target_os = "macos"))]
-fn keep_awake_for_probe_runs(window: &tauri::WebviewWindow) {
+pub fn keep_awake_for_probe_runs(window: &tauri::WebviewWindow) {
     use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
     let reason = NSString::from_str("ggs dev-harness probe run (GGS_DEV_HARNESS)");
     let activity = NSProcessInfo::processInfo()

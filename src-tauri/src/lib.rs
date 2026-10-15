@@ -421,7 +421,7 @@ mod desktop {
                     // The automated harness run needs its timers firing: keep this window awake.
                     #[cfg(all(debug_assertions, target_os = "macos"))]
                     if std::env::var_os("GGS_DEV_HARNESS").is_some() {
-                        keep_awake_for_probe_runs(&window);
+                        crate::window::keep_awake_for_probe_runs(&window);
                     }
                     stamp("window + webview created");
                 }
@@ -683,7 +683,7 @@ mod desktop {
                 // and the routing decides between this window and a new instance.
                 #[cfg(target_os = "macos")]
                 if let tauri::RunEvent::Opened { urls } = &event {
-                    handle_opened(app, urls);
+                    crate::cli::handle_opened(app, urls);
                 }
                 // No backend outlives its window: on exit every process this instance spawned
                 // is stopped (another instance's backends are not ours to stop) — the warm

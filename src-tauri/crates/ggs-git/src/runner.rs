@@ -315,27 +315,30 @@ pub fn fetch(git: &Git, remote: Option<&str>, prune: bool, prune_tags: bool) -> 
 mod spawn_env_tests {
     use super::*;
 
+    // The fixtures carry no drive letters: `join_paths` rejects an entry containing the
+    // platform's PATH separator, and a `C:` drive's colon is Unix's — a Windows-shaped
+    // fixture fails the join before the behaviour under test is reached.
     #[test]
     fn a_path_lacking_the_git_dir_gains_it_in_front() {
-        let current = std::env::join_paths(["C:/tools", "C:/other"]).unwrap();
-        let git_dir = Path::new("D:/custom/Git/cmd");
+        let current = std::env::join_paths(["/tools", "/other"]).unwrap();
+        let git_dir = Path::new("/custom/Git/cmd");
         let extended = path_with(&current, git_dir).expect("the directory is prepended");
         let expected =
-            std::env::join_paths([git_dir, Path::new("C:/tools"), Path::new("C:/other")]).unwrap();
+            std::env::join_paths([git_dir, Path::new("/tools"), Path::new("/other")]).unwrap();
         assert_eq!(extended, expected);
     }
 
     #[test]
     fn a_path_already_carrying_the_git_dir_is_returned_untouched() {
-        let git_dir = Path::new("D:/custom/Git/cmd");
+        let git_dir = Path::new("/custom/Git/cmd");
         let current =
-            std::env::join_paths([Path::new("C:/tools"), git_dir, Path::new("C:/other")]).unwrap();
+            std::env::join_paths([Path::new("/tools"), git_dir, Path::new("/other")]).unwrap();
         assert_eq!(path_with(&current, git_dir), None);
     }
 
     #[test]
     fn an_empty_path_becomes_the_git_dir_alone() {
-        let git_dir = Path::new("D:/custom/Git/cmd");
+        let git_dir = Path::new("/custom/Git/cmd");
         let extended = path_with(std::ffi::OsStr::new(""), git_dir).expect("the directory alone");
         assert_eq!(extended, std::env::join_paths([git_dir]).unwrap());
     }

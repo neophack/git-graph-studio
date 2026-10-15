@@ -298,20 +298,23 @@ mod tests {
         std::fs::write(dir.path().join("src").join("main.rs"), b"fn main() {}").unwrap();
         std::fs::write(dir.path().join("README.md"), b"#").unwrap();
 
-        let batch = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("a change batch within 5 s");
-        assert!(
-            batch.paths.iter().any(|p| p == "src/main.rs"),
-            "got {:?}",
-            batch.paths
-        );
-        assert!(
-            batch.paths.iter().any(|p| p == "README.md"),
-            "got {:?}",
-            batch.paths
-        );
-        assert!(!batch.git_changed);
+        // The two writes usually coalesce into one debounced batch, but the OS's event
+        // stream decides the boundaries — FSEvents most often splits the directory-level
+        // event for `src` into an earlier batch of its own. The platform-independent
+        // contract is that both files are reported, repo-relative, and never flagged as
+        // git changes; collect batches until both have been seen, under the same 5 s
+        // budget the one-batch form allowed.
+        let mut seen: Vec<String> = Vec::new();
+        let mut git_changed = false;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !(seen.iter().any(|p| p == "src/main.rs") && seen.iter().any(|p| p == "README.md")) {
+            let batch = rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|_| panic!("the written files are reported within 5 s, got {seen:?}"));
+            seen.extend(batch.paths);
+            git_changed |= batch.git_changed;
+        }
+        assert!(!git_changed);
         drop(watcher);
     }
 

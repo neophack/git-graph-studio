@@ -124,16 +124,16 @@ struct OpenedPaths {
 /// workbench routes it: a folder takes over an empty window and wins a new instance
 /// otherwise, a file opens like a drop would.
 #[cfg(target_os = "macos")]
-fn handle_opened(app: &tauri::AppHandle, urls: &[tauri::Url]) {
+pub fn handle_opened(app: &tauri::AppHandle, urls: &[tauri::Url]) {
     use tauri::{Emitter, Manager};
     let (folders, files) = opened_paths(urls);
     if folders.is_empty() && files.is_empty() {
         return;
     }
-    let launch = app.state::<LaunchState>();
+    let launch = app.state::<crate::state::LaunchState>();
     if !launch.boot_context_read()
         && seed_launch_paths(
-            app.state::<WorkspaceRoots>().inner(),
+            app.state::<ggs_base::workspace::WorkspaceRoots>().inner(),
             launch.inner(),
             &folders,
             &files,

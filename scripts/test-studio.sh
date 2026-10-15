@@ -40,7 +40,10 @@ fi
 
 if [ "$BACKEND_ONLY" -eq 0 ]; then
 	echo "[1/4] Frontend: typecheck, vitest, the remote workbench build"
-	[ -d node_modules ] || npm install
+	# Always reconcile — like CI's `npm ci || npm install`, never skipped: a node_modules
+	# left stale by a dependency change made the old `[ -d node_modules ]` guard skip the
+	# install and fail typecheck on packages the lockfile already carried.
+	npm install
 	npm run typecheck
 	npx vitest run
 	npx vite build -c vite.remote.config.ts

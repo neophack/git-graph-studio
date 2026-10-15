@@ -47,7 +47,10 @@ if errorlevel 1 (
 )
 
 echo [1/5] Frontend: typecheck, vitest, the remote workbench build
-if not exist node_modules call npm install
+rem Always reconcile — like CI's `npm ci || npm install`, never skipped: a node_modules
+rem left stale by a dependency change made the old `if not exist node_modules` guard
+rem skip the install and fail typecheck on packages the lockfile already carried.
+call npm install
 if errorlevel 1 exit /b 1
 call npm run typecheck
 if errorlevel 1 exit /b 1
