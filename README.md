@@ -234,6 +234,7 @@ only; pushes to main and release runs build everything:
 | --- | --- | --- |
 | `*_x64-setup.exe` (NSIS) | windows-latest | Windows 10/11 x64 |
 | `*_amd64.deb` | `ubuntu:22.04` container | Ubuntu 22.04–26.04, Debian 12/13, Mint 21+, Pop!_OS 22.04+ |
+| `*_arm64.deb` | `ubuntu:22.04` container (arm64) | Ubuntu 22.04–26.04, Debian 12/13 (arm64) |
 | `*.x86_64.rpm` | `fedora:38` container | Fedora 38+, openSUSE Leap 15.6+/Tumbleweed |
 | `*_aarch64.dmg` | macos-latest (arm64) | macOS 14+ arm64 (`full` adds the x64 dmg) |
 
@@ -242,10 +243,14 @@ build, and each package format compiles in the oldest base that still has WebKit
 **Tauri 2's hard requirement, which Ubuntu 20.04 (WebKitGTK 4.0 only) can never satisfy**:
 the deb in `ubuntu:22.04` (glibc 2.35), the rpm in `fedora:38` (glibc 2.37), so every
 distro from Ubuntu 22.04 / Debian 12 / Fedora 38 upward loads them — and the build itself
-fails if the binary's glibc requirements ever exceed its container's floor. The same
-containers build locally from Windows: `scripts\build-studio-linux.bat` (deb) or
-`scripts\build-studio-linux.bat rpm` through Docker Desktop. Linux arm64 is not built (no
-arm64 WebKitGTK on the hosted runners).
+fails if the binary's glibc requirements ever exceed its container's floor. The arm64
+deb is the same `ubuntu:22.04` floor container's arm64 image, built natively on GitHub's
+arm64 runner (`ubuntu-22.04-arm`). The same containers build locally from Windows:
+`scripts\build-studio-linux.bat` (deb) or `scripts\build-studio-linux.bat rpm` through
+Docker Desktop (the local pass builds x64 only; a QEMU-emulated arm64 compile is hours).
+Ubuntu older than 22.04 is out of reach whatever the libc — a musl/static main binary
+would still load the host's `libwebkit2gtk-4.1` at runtime, and no older distro ships
+it, so the floor is the webview's, not glibc's.
 
 ### Installing a macOS release
 

@@ -1232,7 +1232,11 @@ Everything that turns the source tree into installers: asset assembly into
   argv, falling back to `--skip-jenkins`, tauri's Finder-less form, which cannot race.
   Linux installers are built
   in floor containers — the base image IS the compatibility floor: `ubuntu:22.04`
-  (glibc 2.35) for the deb, `fedora:38` (glibc 2.37) for the rpm. CI (`studio.yml`) runs
+  (glibc 2.35) for the deb (both architectures: the arm64 deb is the same base's arm64
+  image, built on GitHub's `ubuntu-22.04-arm` runner, 2026-10-15; nothing older than
+  Ubuntu 22.04 is reachable whatever the libc — the app dlopens the host's
+  libwebkit2gtk-4.1 at runtime, which no older distro ships), `fedora:38` (glibc 2.37)
+  for the rpm. CI (`studio.yml`) runs
   the same containers `scripts/build-studio-linux.bat` +
   `scripts/docker/Dockerfile.studio-linux` + `scripts/docker/studio-linux-build.sh` drive
   locally, and the in-container pass fails the build if the binary's glibc requirements

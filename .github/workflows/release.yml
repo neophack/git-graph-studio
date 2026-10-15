@@ -17,12 +17,14 @@
 # A pushed tag takes the same defaults.
 #
 # Artifacts per release: windows NSIS setup exe (the one Windows format; the MSI was
-# dropped 2026-10-14 at the owner's direction), deb (Ubuntu 22.04-26.04 / Debian
-# 12/13), rpm (Fedora 38+ / openSUSE Leap 15.6+), macOS arm64 dmg (+ x64 on `full`), each
-# with its SHA256 in SHA256SUMS, plus the build's metrics.json - nothing else (no
+# dropped 2026-10-14 at the owner's direction), deb x64 and arm64 (Ubuntu 22.04-26.04 /
+# Debian 12/13; the arm64 deb is the same ubuntu:22.04 floor container on an arm64
+# runner), rpm (Fedora 38+ / openSUSE Leap 15.6+), macOS arm64 dmg (+ x64 on `full`),
+# each with its SHA256 in SHA256SUMS, plus the build's metrics.json - nothing else (no
 # bundler work files). The Linux compatibility floor is each installer's build container
-# (ubuntu:22.04 for the deb, fedora:38 for the rpm - see studio.yml); the same containers
-# serve local builds through scripts/build-studio-linux.bat.
+# (ubuntu:22.04 for the deb, fedora:38 for the rpm - see studio.yml; nothing older than
+# Ubuntu 22.04 is reachable: the app hard-requires the host's libwebkit2gtk-4.1 at
+# runtime); the same containers serve local builds through scripts/build-studio-linux.bat.
 
 name: Release
 

@@ -26,8 +26,8 @@
 # rust-cache keeps the target dirs and the crates.io registry warm across runs (fewer
 # downloads, near-incremental rebuilds; cache-workspace-crates keeps the vendored boa
 # artifacts too); npm downloads are cached the same way through setup-node's cache. The
-# two Linux package formats are back to one compile each - each in its own floor
-# container - because one binary cannot carry two glibc floors.
+# three Linux legs are one compile each - each in its own floor container - because one
+# binary cannot carry two glibc floors (and the arm64 deb is its own binary).
 #
 # The Linux installers are built in Docker containers whose base image IS the compatibility
 # floor - the oldest distro that still has WebKitGTK 4.1, which Tauri 2 hard-requires
@@ -45,6 +45,18 @@
 # floor comes from the base image, not the runner, so a `latest` flip cannot move it (and
 # the ubuntu-22.04 runner image retired 2026-09-17 anyway). The in-container pass fails
 # the build if the binary ever asks for a newer glibc than its container's floor.
+#
+# The arm64 deb (2026-10-15, the owner's ask) is the same ubuntu:22.04 floor container's
+# arm64 image, built on ubuntu-22.04-arm — GitHub's arm64 hosted runner, free for public
+# repositories: native compile speed, where QEMU emulation on an x64 runner pays hours
+# for the Rust release build and a cross toolchain cannot link webkit2gtk. The runner
+# still does not move the floor, so an arm-image retirement is a one-word label flip.
+# A lower floor than Ubuntu 22.04 was asked for (musl, down to 16.04) and is not
+# reachable in the deb format whatever the libc: the app hard-requires the host's
+# libwebkit2gtk-4.1 at runtime, and no distro older than Ubuntu 22.04 / Debian 12 ever
+# shipped it — a musl/static main binary would still dlopen the host's glibc-built
+# webview, so 16.04 (or even 20.04) cannot run the app at all. The floor is the
+# webview's, not glibc's.
 #
 # Pull requests run the tests only; the installers build on push to main, on dispatch, and
 # when release.yml calls this workflow with `studio-version` to stamp the version being
@@ -618,15 +630,15 @@ jobs:
           if-no-files-found: error
 
   # The Linux installers, built in floor containers (see the header note): one pass per
-  # package format, each on the oldest base that keeps the binary loadable on
-  # still-supported distros of that family. The container fetches the marketplace
-  # extension packages itself (through the repository mount's prepare.mjs run). The deb
-  # leg also runs the backend test gate natively (the Windows job runs the same suite on
-  # Windows); the rpm leg compiles the same sources inside its container, and a failed
-  # workflow run never reaches release.yml.
+  # binary - deb x64, deb arm64 (the arm64 image on the ubuntu-22.04-arm runner), rpm -
+  # each on the oldest base that keeps the binary loadable on still-supported distros of
+  # that family. The container fetches the marketplace extension packages itself (through
+  # the repository mount's prepare.mjs run; the arm64 leg's node is arm64, so it packs
+  # the linux-arm64 VSIX). The backend tests run in their own parallel job (test-linux);
+  # a failed workflow run never reaches release.yml.
   studio-linux:
     name: Studio installers (${{ matrix.artifact }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     if: github.event_name != 'pull_request'
     env:
@@ -643,11 +655,25 @@ jobs:
             out: bundle-linux
             cache: linux-deb
             artifact: studio-linux-x64
+            runner: ubuntu-latest
+            # The one leg that records sizes and probes: one metrics.json per build,
+            # from the x64 deb's binaries (the arm64 leg would collide on the
+            # studio-linux-metrics artifact name).
+            measure: true
+          # The arm64 deb: the same ubuntu:22.04 floor, its arm64 image, on the arm64
+          # runner — every cache and buildx scope of its own (the layers are arch-born).
+          - base: ubuntu:22.04
+            bundles: deb
+            out: bundle-linux
+            cache: linux-deb-arm64
+            artifact: studio-linux-arm64
+            runner: ubuntu-22.04-arm
           - base: fedora:38
             bundles: rpm
             out: bundle-rpm
             cache: linux-rpm
             artifact: studio-linux-rpm
+            runner: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -714,13 +740,14 @@ jobs:
             ggs-linux-builder-${{ matrix.cache }} \
             bash /repo/scripts/docker/studio-linux-build.sh
 
-      # Size measurement + backend probes (deb pass only - the rpm carries the same
-      # binaries). measure.mjs expects the bundles under
+      # Size measurement + backend probes (the x64 deb leg only, matrix.measure: the rpm
+      # and the arm64 deb carry the same sources, and a second metrics.json would collide
+      # on the studio-linux-metrics artifact name). measure.mjs expects the bundles under
       # target/studio/cargo/release/bundle/, so the deb pass's output is mirrored there
       # first; the probes run the container-built ggs binary itself. Continue-on-error as
       # in the Windows job: a wedged probe never fails the build.
       - name: Measure sizes and performance
-        if: matrix.bundles == 'deb'
+        if: matrix.measure == true
         continue-on-error: true
         run: |
           mkdir -p target/studio/cargo/release
@@ -744,7 +771,7 @@ jobs:
           path: target/studio/bundle-rpm/rpm/*.rpm
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
-        if: matrix.bundles == 'deb'
+        if: matrix.measure == true
         with:
           name: studio-linux-metrics
           path: target/studio/metrics.json

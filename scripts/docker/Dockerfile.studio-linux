@@ -14,8 +14,16 @@
 # never work):
 #
 #   ubuntu:22.04  deb: glibc 2.35 -> runs on Ubuntu 22.04/24.04/25.x/26.04,
-#                 Debian 12/13, Mint 21+, Pop!_OS 22.04+
+#                 Debian 12/13, Mint 21+, Pop!_OS 22.04+ — both architectures: CI
+#                 builds the arm64 image of the same base on its ubuntu-22.04-arm
+#                 runner (native speed; QEMU emulation on an x64 host is hours for a
+#                 Rust release build, and a cross toolchain cannot link webkit2gtk)
 #   fedora:38     rpm: glibc 2.37 -> runs on Fedora 38+, openSUSE Leap 15.6+/Tumbleweed
+#
+# The floor cannot go below ubuntu:22.04 no matter the libc: the app hard-requires the
+# host's libwebkit2gtk-4.1 at runtime (Tauri 2), and no still-supported distro older
+# than 22.04 ships it — a musl/static main binary would still dlopen the host's
+# glibc-built webview, so Ubuntu 20.04 and older are out of reach in the deb format.
 #
 # The build context is this directory (the image needs nothing else from the repository),
 # which keeps node_modules and target/ out of the context transfer:
@@ -42,8 +50,17 @@ RUN if command -v apt-get >/dev/null 2>&1; then \
         && dnf clean all; \
     fi
 
-# Node 20 from the official tarball (CI's setup-node version), no external distro repo needed.
-RUN curl -fsSL https://nodejs.org/dist/v20.18.1/node-v20.18.1-linux-x64.tar.xz \
+# Node 20 from the official tarball (CI's setup-node version), no external distro repo
+# needed. The tarball follows the image's architecture (uname -m): the marketplace VSIX
+# the build packs is picked by node's own process.arch, so the arch must be right here,
+# not just at link time.
+RUN arch="$(uname -m)" \
+    && case "$arch" in \
+           x86_64) node_arch=x64 ;; \
+           aarch64) node_arch=arm64 ;; \
+           *) echo "unsupported build arch: $arch" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL "https://nodejs.org/dist/v20.18.1/node-v20.18.1-linux-${node_arch}.tar.xz" \
         | tar -xJ -C /usr/local --strip-components=1
 
 # Rust stable, minimal profile. RUSTUP_HOME/CARGO_HOME are split so a build can redirect
