@@ -3,17 +3,11 @@
 
 import { invoke } from '../../platform/ipc/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import type { CommandRegistry } from '../../platform/commands';
-import { commandIconContent, contextUri, resolvedMenuEntries } from '../extensions';
-import { extFileDataUrl } from '../../platform/extAssets';
-import type { DiffRequest, DiffSide } from '../editor/types';
-import { fileIcon, fileIconColor } from '../../platform/fileIcons';
-import type { BlameLine, BranchInfo, RemoteInfo, ScmChange, StashInfo, StatusMap } from '../../platform/ipc/scm';
-import { gerritInstallHook, gerritPushRef, gitCommit, gitStageAll, scmAmendLastCommit, scmBranches, scmCheckout, scmCreateBranch, scmFetch, scmPull, scmPush, scmRemotes, scmResetToRemote, scmStashes, scmStatus, scmSync, scmTags } from '../../platform/ipc/scm';
-import { repoHead, repoSubmodules } from '../../platform/ipc/revision';
-import { t, tf, trText } from '../../platform/i18n';
+import { resolvedMenuEntries } from '../extensions';
+import { gerritInstallHook, gerritPushRef, scmAmendLastCommit, scmBranches, scmCheckout, scmCreateBranch, scmFetch, scmPull, scmPush, scmRemotes, scmResetToRemote, scmSync, scmTags } from '../../platform/ipc/scm';
+import { repoHead } from '../../platform/ipc/revision';
 import * as state from '../../platform/state';
-import { actionButton, basename, confirmDialog, el, icon, liveSidebarTitle, notify, quickInput, quickPick, showContextMenu, showMenuBelow, toPosix, type MenuEntry, type QuickPickItem } from '../../platform/ui/index';
+import { confirmDialog, notify, quickInput, quickPick, type MenuEntry, type QuickPickItem } from '../../platform/ui/index';
 import { SubRepoState, pickBranchIn, pickRemoteIn, pickStashIn, validateSubRef } from './view';
 import type { ScmSort, ScmViewMode, SourceControlView } from './view';
 

@@ -1,19 +1,9 @@
 // The change groups: row building, the Merge / Staged / Changes headers with their group actions, and the sub-repo sections.
 
 
-import { invoke } from '../../platform/ipc/core';
-import { openUrl } from '@tauri-apps/plugin-opener';
-import type { CommandRegistry } from '../../platform/commands';
-import { commandIconContent, contextUri, resolvedMenuEntries } from '../extensions';
-import { extFileDataUrl } from '../../platform/extAssets';
-import type { DiffRequest, DiffSide } from '../editor/types';
-import { fileIcon, fileIconColor } from '../../platform/fileIcons';
-import type { BlameLine, BranchInfo, RemoteInfo, ScmChange, StashInfo, StatusMap } from '../../platform/ipc/scm';
-import { gerritInstallHook, gerritPushRef, gitCommit, gitStageAll, scmAmendLastCommit, scmBranches, scmCheckout, scmCreateBranch, scmFetch, scmPull, scmPush, scmRemotes, scmResetToRemote, scmStashes, scmStatus, scmSync, scmTags } from '../../platform/ipc/scm';
-import { repoHead, repoSubmodules } from '../../platform/ipc/revision';
-import { t, tf, trText } from '../../platform/i18n';
-import * as state from '../../platform/state';
-import { actionButton, basename, confirmDialog, el, icon, liveSidebarTitle, notify, quickInput, quickPick, showContextMenu, showMenuBelow, toPosix, type MenuEntry, type QuickPickItem } from '../../platform/ui/index';
+import type { ScmChange } from '../../platform/ipc/scm';
+import { t, trText } from '../../platform/i18n';
+import { actionButton, basename, el, icon, showMenuBelow } from '../../platform/ui/index';
 import { ScmRow, SubRepoState, buildChangeTree, sortChanges } from './view';
 import type { ScmGroup, SourceControlView, TreeNode } from './view';
 
