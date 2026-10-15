@@ -56,20 +56,6 @@ export function parseConflicts(text: string): Conflict[] {
 
 export type ConflictChoice = 'ours' | 'theirs' | 'both';
 
-/** The line range that remains of a conflict for a choice, as 1-based inclusive bounds. In a
- *  diff3 conflict ours sits between `<<<<<<<` and `|||||||` (not between the base section and
- *  the separator); without a base section it is everything above `=======`. */
-export function resolutionRange(conflict: Conflict, choice: ConflictChoice): { start: number; end: number } | null {
-	// Ours: between the start marker and the base separator (or the "=======").
-	const oursFrom = conflict.start + 1;
-	const oursTo = (conflict.baseSeparator ?? conflict.separator) - 1;
-	// Theirs: between "=======" and the end marker.
-	const theirsFrom = conflict.separator + 1;
-	const theirsTo = conflict.end - 1;
-	if (choice === 'ours') return { start: oursFrom, end: oursTo };
-	if (choice === 'theirs') return { start: theirsFrom, end: theirsTo };
-	return { start: oursFrom, end: theirsTo };
-}
 
 /** The line the CodeMirror document range of a conflict maps to. */
 function lineRange(view: EditorView, conflict: Conflict): { from: number; to: number } {

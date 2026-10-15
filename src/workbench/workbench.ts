@@ -978,12 +978,6 @@ export function quoteShellPath(path: string): string {
 	return `'${windows ? path.replaceAll("'", "''") : path.replaceAll("'", "'\\''")}'`;
 }
 
-/** The tab title of a Commit Comparison ("Commit <hash>" for the Open Changes presentation). */
-function compareTitle(fromHash: string, toHash: string, singleCommit: boolean): string {
-	const abbrev = (hash: string) => (hash === '' || hash === '*' ? 'Present' : hash.length > 8 ? hash.slice(0, 8) : hash);
-	return singleCommit ? `Commit ${abbrev(toHash)}` : `Compare ${abbrev(fromHash)} ↔ ${abbrev(toHash)}`;
-}
-
 /** The booted instance — the dev harness reaches the self-test suites through it
  *  (`registerSelfTestSuites` wants the live workbench; a second boot is not one). */
 export let currentWorkbench: Workbench | null = null;

@@ -76,7 +76,7 @@ export class TreeViewRegistration {
 	readonly collapsed = new EventEmitter<{ element: unknown }>();
 	readonly checkboxChanged = new EventEmitter<{ items: [unknown, number][] }>();
 
-	constructor(readonly viewId: string, private readonly provider: TreeDataProvider<unknown>, private readonly bridge: HostBridge) {
+	constructor(readonly viewId: string, private readonly provider: TreeDataProvider<unknown>, bridge: HostBridge) {
 		void Promise.resolve(bridge.request('treeView.register', [viewId])).catch((error) => shimLog('warn', `tree view ${viewId}: register failed: ${String(error)}`));
 		provider.onDidChangeTreeData?.(() => void Promise.resolve(bridge.request('treeView.changed', [viewId])).catch(() => undefined));
 	}

@@ -140,14 +140,6 @@ export function inputId(input: EditorInput): string {
 }
 
 
-/** The reuse key of a Binary Compare tab: the same file between the same two revisions
- *  reveals the existing tab — the extension's own openViews key. */
-function binCompareId(input: { repo?: string; fromHash: string; toHash: string; file: { oldFilePath: string; newFilePath: string } }): string {
-	const filePath = input.file.newFilePath !== '' ? input.file.newFilePath : input.file.oldFilePath;
-	return `${input.repo ?? ''}:${input.fromHash}:${input.toHash}:${filePath}`;
-}
-
-
 export interface NavEntry {
 	input: EditorInput;
 	line: number;

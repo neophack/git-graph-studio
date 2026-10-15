@@ -45,7 +45,7 @@ export function buildTree(files: TreeFile[]): FolderNode {
 	};
 	for (const file of files) {
 		const segments = file.path.split('/');
-		const name = segments.pop()!;
+		segments.pop();
 		const folder = folderAt(segments, true)!;
 		folder.files.push({ ...file, path: file.path });
 		folder.files.sort((a, b) => a.path.localeCompare(b.path));

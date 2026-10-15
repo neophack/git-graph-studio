@@ -261,7 +261,6 @@ class MetricsPage extends ReportPage<MetricRow> {
 
 class DeadCodePage extends ReportPage<DeadRow> {
 	private includeExported = false;
-	private readonly checkbox: HTMLInputElement;
 
 	constructor(container: HTMLElement) {
 		const checkbox = el('input') as HTMLInputElement;
@@ -273,7 +272,6 @@ class DeadCodePage extends ReportPage<DeadRow> {
 		});
 		const label = el('label', 'an-option', [checkbox, t('analysis.deadcode.includeExported')]);
 		super(container, 'deadcode', [label]);
-		this.checkbox = checkbox;
 	}
 
 	protected async fetch(run: number): Promise<void> {

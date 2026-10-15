@@ -109,7 +109,6 @@ export class FastView {
 	/** The outline's virtual list: its spacer, and the items currently materialised by index. */
 	private outlineList: HTMLElement | null = null;
 	private outlineItems = new Map<number, HTMLElement>();
-	private lineHeight = LINE_HEIGHT;
 	/** The visible window the last refresh computed — what a landing fetch checks itself
 	 *  against before placing rows. */
 	private windowFirst = 0;

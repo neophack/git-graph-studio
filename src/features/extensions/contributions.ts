@@ -778,10 +778,3 @@ export function resourceContext(path: string): Record<string, unknown> {
 		editorLangId: languageIdFor(name)
 	};
 }
-
-export function hasMenuItems(location: MenuLocation): boolean {
-	for (const [extId, contribution] of byExtension) {
-		if ((contribution.menus[location] ?? []).some((item) => evaluateWhen(extId, whenText(item.when)))) return true;
-	}
-	return false;
-}

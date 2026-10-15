@@ -223,7 +223,3 @@ function absolute(relative: string): string {
 	const separator = root.includes('\\') ? '\\' : '/';
 	return root.replace(/[\\/]+$/, '') + separator + relative.replaceAll('/', separator);
 }
-
-function basename(path: string): string {
-	return path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? path;
-}

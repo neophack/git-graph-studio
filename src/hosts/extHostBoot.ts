@@ -54,13 +54,6 @@ interface RpcRequest {
 	args: unknown[];
 }
 
-interface RpcResponse {
-	type: '__studioExtRpcResult';
-	id: number;
-	ok: boolean;
-	result: unknown;
-}
-
 interface CallRequest {
 	type: '__studioExtCall';
 	id: number;
@@ -239,7 +232,6 @@ function boot(message: InitMessage): void {
 	// bare entry code standing in for it), the builtin shims over it, and the globals
 	// extension code assumes (`process`, `Buffer`, `global`, `setImmediate`).
 	const files = message.files ?? (message.code !== undefined ? { 'extension.js': message.code } : {});
-	const binaries = message.binaries ?? [];
 	const nodeEnv: NodeEnv = message.nodeEnv ?? fallbackEnv;
 	const shimHost = {
 		nodeEnv, extensionPath: context.extensionPath, files, binaries: message.binaries ?? [],

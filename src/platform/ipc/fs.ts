@@ -81,10 +81,6 @@ export const backupList = () => invoke<BackupEntry[]>('backup_list');
 export const backupRead = (path: string) => invoke<string>('backup_read', { path });
 export const backupClear = (path: string) => invoke<void>('backup_clear', { path });
 export const fsTransferCancel = () => invoke<void>('fs_transfer_cancel');
-/** The remote wire's confined chunked upload: the resume offset the backend reports for
- *  a partial upload, and one raw chunk with its confinement headers. */
-export const fsUploadOffset = (path: string, size: number) => invoke<number>('fs_upload_offset', { path, size });
-export const fsWriteChunk = (bytes: Uint8Array, headers: Record<string, string>) => invoke<void>('fs_write_chunk', bytes, { headers });
 
 /** One progress report of a desktop transfer (`fs_export` / `fs_import`). */
 export interface TransferProgress {

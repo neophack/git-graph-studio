@@ -78,7 +78,7 @@ class ProvidersPage {
 		this.render();
 	};
 
-	constructor(private readonly container: HTMLElement) {
+	constructor(container: HTMLElement) {
 		container.classList.add('an-page', 'providers-page');
 		const add = el('button', 'button primary prov-add', [t('providers.add')]);
 		add.type = 'button';

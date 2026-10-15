@@ -315,7 +315,7 @@ export const hostRequestsMethods: ThisType<ExtensionHost> = {
 			case 'diagnostics.set': {
 				// A frame pushed its diagnostic collection changes: they land in the editor
 				// diagnostics store, which re-renders every open editor for that file.
-				const [diagExtId, diagPath, diagList] = args as [string, string, SerializableDiagnostic[]];
+				const [, diagPath, diagList] = args as [string, string, SerializableDiagnostic[]];
 				setFileDiagnostics(diagPath, diagList ?? []);
 				return Promise.resolve(undefined);
 			}
