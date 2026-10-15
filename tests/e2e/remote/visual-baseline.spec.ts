@@ -4,7 +4,7 @@
 // target/studio/remote-e2e-shots/<engine>-<shape>-<page>.png so a later change can be
 // eyeballed against them; they assert nothing (no committed pixel baselines to rot — the
 // DOM assertions in the other specs carry the correctness).
-import { test, expect, startDaemon, homeFor, hubExe, freePort, PASSWORD } from './daemon.fixture';
+import { test, expect, startDaemon, homeFor, hubExe, freePort } from './daemon.fixture';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';

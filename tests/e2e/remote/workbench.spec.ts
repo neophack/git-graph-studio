@@ -4,7 +4,7 @@
 // needs the built app binary and the Vite dev server (the debug app loads relay.html from
 // it), exactly what scripts/probes/remote-live-check.mjs boots — this is that flow as a spec.
 import type { Page } from '@playwright/test';
-import { test, expect, startDaemon, homeFor, appExe, freePort, PASSWORD, root } from './daemon.fixture';
+import { test, expect, startDaemon, homeFor, appExe, PASSWORD, root } from './daemon.fixture';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import net from 'node:net';

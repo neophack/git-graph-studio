@@ -1,7 +1,6 @@
 // gates.spec.ts (docs/ggs-remote-plan.md §17.4): the public listener's two gates — no
 // password set yet, and paused — plus the paths that must stay public through both.
 import { test, expect, startDaemon, homeFor } from './daemon.fixture';
-import net from 'node:net';
 
 test('without a password the public port only says to set one on the PC', async ({ page }) => {
 	const daemon = await startDaemon(homeFor('no-password'), { password: null });

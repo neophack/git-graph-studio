@@ -6,9 +6,9 @@
 // exactly like workbench.spec.ts (the built app, the built remote bundle, the Vite dev
 // server for the Relay webview).
 import type { Page } from '@playwright/test';
-import { test, expect, startDaemon, homeFor, appExe, freePort, PASSWORD, root } from './daemon.fixture';
+import { test, expect, startDaemon, homeFor, appExe, PASSWORD, root } from './daemon.fixture';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync } from 'node:fs';
 import net from 'node:net';
 import { resolve } from 'node:path';
 

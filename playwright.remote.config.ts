@@ -6,7 +6,7 @@
 // specs that care. The daemon-only specs need just the daemon binary; the workbench spec is
 // gated behind GGS_REMOTE_E2E_FULL (it boots a real GGS instance). Nothing here runs on
 // pull requests — `npm run test:e2e-remote` is explicit.
-import { defineConfig, devices, chromium, firefox, webkit } from '@playwright/test';
+import { defineConfig, devices, firefox, webkit } from '@playwright/test';
 import { existsSync } from 'node:fs';
 
 const projects = [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }];
